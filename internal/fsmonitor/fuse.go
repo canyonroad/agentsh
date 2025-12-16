@@ -147,6 +147,98 @@ func (n *node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedd
 	return n.LoopbackNode.Rename(ctx, name, newParent, newName, flags)
 }
 
+func (n *node) OpendirHandle(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	virt := n.virtualPath()
+	dec := n.check(ctx, virt, "list")
+	dec = n.maybeApprove(ctx, dec, "file", virt, "list")
+	if dec.EffectiveDecision == types.DecisionDeny {
+		n.emitFileEvent(ctx, "dir_list", virt, "list", 0, dec, true, nil)
+		return nil, 0, syscall.EACCES
+	}
+	n.emitFileEvent(ctx, "dir_list", virt, "list", 0, dec, false, nil)
+	return n.LoopbackNode.OpendirHandle(ctx, flags)
+}
+
+func (n *node) Opendir(ctx context.Context) syscall.Errno {
+	virt := n.virtualPath()
+	dec := n.check(ctx, virt, "list")
+	dec = n.maybeApprove(ctx, dec, "file", virt, "list")
+	if dec.EffectiveDecision == types.DecisionDeny {
+		n.emitFileEvent(ctx, "dir_list", virt, "list", 0, dec, true, nil)
+		return syscall.EACCES
+	}
+	n.emitFileEvent(ctx, "dir_list", virt, "list", 0, dec, false, nil)
+	// LoopbackNode's default Opendir is OK; directory reads flow through Readdir.
+	return 0
+}
+
+func (n *node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	virt := n.virtualPath()
+	dec := n.check(ctx, virt, "list")
+	dec = n.maybeApprove(ctx, dec, "file", virt, "list")
+	if dec.EffectiveDecision == types.DecisionDeny {
+		n.emitFileEvent(ctx, "dir_list", virt, "list", 0, dec, true, nil)
+		return nil, syscall.EACCES
+	}
+	n.emitFileEvent(ctx, "dir_list", virt, "list", 0, dec, false, nil)
+	return n.LoopbackNode.Readdir(ctx)
+}
+
+func (n *node) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	virt := n.virtualPath()
+	dec := n.check(ctx, virt, "stat")
+	dec = n.maybeApprove(ctx, dec, "file", virt, "stat")
+	if dec.EffectiveDecision == types.DecisionDeny {
+		n.emitFileEvent(ctx, "file_stat", virt, "stat", 0, dec, true, nil)
+		return syscall.EACCES
+	}
+	n.emitFileEvent(ctx, "file_stat", virt, "stat", 0, dec, false, nil)
+	return n.LoopbackNode.Getattr(ctx, f, out)
+}
+
+func (n *node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	virt := n.virtualPath()
+	// Most common for agents: chmod.
+	if in.Valid&fuse.FATTR_MODE != 0 {
+		dec := n.check(ctx, virt, "chmod")
+		dec = n.maybeApprove(ctx, dec, "file", virt, "chmod")
+		extra := map[string]any{"mode": fmt.Sprintf("0%o", in.Mode)}
+		if dec.EffectiveDecision == types.DecisionDeny {
+			n.emitFileEvent(ctx, "file_chmod", virt, "chmod", 0, dec, true, extra)
+			return syscall.EACCES
+		}
+		n.emitFileEvent(ctx, "file_chmod", virt, "chmod", 0, dec, false, extra)
+		return n.LoopbackNode.Setattr(ctx, f, in, out)
+	}
+
+	return n.LoopbackNode.Setattr(ctx, f, in, out)
+}
+
+func (n *node) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (node *fs.Inode, errno syscall.Errno) {
+	virt := n.virtualChildPath(name)
+	dec := n.checkWithExist(ctx, virt, "create", false)
+	dec = n.maybeApprove(ctx, dec, "file", virt, "create")
+	extra := map[string]any{"target": target}
+	if dec.EffectiveDecision == types.DecisionDeny {
+		n.emitFileEvent(ctx, "symlink_create", virt, "create", 0, dec, true, extra)
+		return nil, syscall.EACCES
+	}
+	n.emitFileEvent(ctx, "symlink_create", virt, "create", 0, dec, false, extra)
+	return n.LoopbackNode.Symlink(ctx, target, name, out)
+}
+
+func (n *node) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+	virt := n.virtualPath()
+	dec := n.check(ctx, virt, "readlink")
+	dec = n.maybeApprove(ctx, dec, "file", virt, "readlink")
+	if dec.EffectiveDecision == types.DecisionDeny {
+		n.emitFileEvent(ctx, "symlink_read", virt, "readlink", 0, dec, true, nil)
+		return nil, syscall.EACCES
+	}
+	n.emitFileEvent(ctx, "symlink_read", virt, "readlink", 0, dec, false, nil)
+	return n.LoopbackNode.Readlink(ctx)
+}
+
 type fileHandle struct {
 	inner    fs.FileHandle
 	n        *node
