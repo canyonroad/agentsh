@@ -128,6 +128,7 @@ Deliverables:
 Acceptance criteria:
 - Create session → run `pwd`/`cd`/`env` builtins → state persists
 - `exec` returns JSON response matching the spec’s intent (command_id, stdout/stderr, duration, events arrays present but empty for now)
+  - Includes basic `resources` from OS rusage (cpu user/system ms, peak RSS) for external commands
 
 ### M2 — Policy engine + audit log plumbing (enforce “command_rules” now)
 
