@@ -76,7 +76,15 @@ type SessionsConfig struct {
 	BaseDir string `yaml:"base_dir"`
 }
 
-type SandboxConfig struct{}
+type SandboxConfig struct {
+	FUSE SandboxFUSEConfig `yaml:"fuse"`
+}
+
+type SandboxFUSEConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Optional base dir for mounts; defaults to sessions.base_dir.
+	MountBaseDir string `yaml:"mount_base_dir"`
+}
 
 type PoliciesConfig struct {
 	Dir     string `yaml:"dir"`
@@ -129,6 +137,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Sessions.BaseDir == "" {
 		cfg.Sessions.BaseDir = "/var/lib/agentsh/sessions"
 	}
+	if cfg.Sandbox.FUSE.MountBaseDir == "" {
+		cfg.Sandbox.FUSE.MountBaseDir = cfg.Sessions.BaseDir
+	}
 	if cfg.Policies.Default == "" {
 		cfg.Policies.Default = "default"
 	}
@@ -152,4 +163,3 @@ func applyDefaults(cfg *Config) {
 		cfg.Audit.Rotation.MaxBackups = 10
 	}
 }
-

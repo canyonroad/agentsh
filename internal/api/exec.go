@@ -157,12 +157,13 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 	}
 	rel := strings.TrimPrefix(virtual, "/workspace")
 	rel = strings.TrimPrefix(rel, "/")
-	real := filepath.Join(s.Workspace, filepath.FromSlash(rel))
+	root := s.WorkspaceMountPath()
+	real := filepath.Join(root, filepath.FromSlash(rel))
 	real = filepath.Clean(real)
 
-	workspaceClean := filepath.Clean(s.Workspace)
-	if real != workspaceClean && !strings.HasPrefix(real, workspaceClean+string(os.PathSeparator)) {
-		return "", fmt.Errorf("working_dir escapes workspace")
+	rootClean := filepath.Clean(root)
+	if real != rootClean && !strings.HasPrefix(real, rootClean+string(os.PathSeparator)) {
+		return "", fmt.Errorf("working_dir escapes workspace mount")
 	}
 	return real, nil
 }

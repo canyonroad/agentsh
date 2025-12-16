@@ -145,6 +145,33 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 	return e.wrapDecision(string(types.DecisionAllow), "", "")
 }
 
+func (e *Engine) CheckFile(p string, operation string) Decision {
+	operation = strings.ToLower(operation)
+	for _, r := range e.compiledFileRules {
+		if !matchOp(r.ops, operation) {
+			continue
+		}
+		for _, g := range r.globs {
+			if g.Match(p) {
+				return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message)
+			}
+		}
+	}
+	// Default deny (policy files typically include an explicit default deny, but we enforce it here too).
+	return e.wrapDecision(string(types.DecisionDeny), "default-deny-files", "")
+}
+
+func matchOp(ops map[string]struct{}, op string) bool {
+	if len(ops) == 0 {
+		return true
+	}
+	if _, ok := ops["*"]; ok {
+		return true
+	}
+	_, ok := ops[op]
+	return ok
+}
+
 func (e *Engine) wrapDecision(decision string, rule string, msg string) Decision {
 	pd := types.Decision(strings.ToLower(decision))
 	switch pd {
@@ -174,4 +201,3 @@ func (e *Engine) wrapDecision(decision string, rule string, msg string) Decision
 		return Decision{PolicyDecision: types.DecisionDeny, EffectiveDecision: types.DecisionDeny, Rule: "invalid-policy-decision", Message: "invalid decision in policy"}
 	}
 }
-

@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/agentsh/agentsh/internal/auth"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/internal/fsmonitor"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
@@ -115,6 +118,50 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
 	_ = a.store.AppendEvent(r.Context(), ev)
 	a.broker.Publish(ev)
 
+	// Optional: mount FUSE loopback so we can monitor file operations.
+	if a.cfg.Sandbox.FUSE.Enabled {
+		mountBase := a.cfg.Sandbox.FUSE.MountBaseDir
+		if mountBase == "" {
+			mountBase = a.cfg.Sessions.BaseDir
+		}
+		mountPoint := filepath.Join(mountBase, s.ID, "workspace-mnt")
+		em := storeEmitter{store: a.store, broker: a.broker}
+		m, err := fsmonitor.MountWorkspace(s.Workspace, mountPoint, &fsmonitor.Hooks{
+			SessionID: s.ID,
+			Session:   s,
+			Policy:    a.policy,
+			Emit:      em,
+		})
+		if err != nil {
+			fail := types.Event{
+				ID:        uuid.NewString(),
+				Timestamp: time.Now().UTC(),
+				Type:      "fuse_mount_failed",
+				SessionID: s.ID,
+				Fields: map[string]any{
+					"mount_point": mountPoint,
+					"error":       err.Error(),
+				},
+			}
+			_ = a.store.AppendEvent(r.Context(), fail)
+			a.broker.Publish(fail)
+		} else {
+			s.SetWorkspaceMount(mountPoint)
+			s.SetWorkspaceUnmount(m.Unmount)
+			okEv := types.Event{
+				ID:        uuid.NewString(),
+				Timestamp: time.Now().UTC(),
+				Type:      "fuse_mounted",
+				SessionID: s.ID,
+				Fields: map[string]any{
+					"mount_point": mountPoint,
+				},
+			}
+			_ = a.store.AppendEvent(r.Context(), okEv)
+			a.broker.Publish(okEv)
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, s.Snapshot())
 }
 
@@ -139,10 +186,13 @@ func (a *App) getSession(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) destroySession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if !a.sessions.Destroy(id) {
+	s, ok := a.sessions.Get(id)
+	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
 		return
 	}
+	_ = s.UnmountWorkspace()
+	_ = a.sessions.Destroy(id)
 
 	ev := types.Event{
 		ID:        uuid.NewString(),
@@ -155,6 +205,14 @@ func (a *App) destroySession(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 }
+
+type storeEmitter struct {
+	store  *composite.Store
+	broker *events.Broker
+}
+
+func (e storeEmitter) AppendEvent(ctx context.Context, ev types.Event) error { return e.store.AppendEvent(ctx, ev) }
+func (e storeEmitter) Publish(ev types.Event)                                 { e.broker.Publish(ev) }
 
 func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -176,6 +234,9 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 
 	cmdID := "cmd-" + uuid.NewString()
 	start := time.Now().UTC()
+	unlock := s.LockExec()
+	defer unlock()
+	s.SetCurrentCommandID(cmdID)
 
 	pre := a.policy.CheckCommand(req.Command, req.Args)
 	preEv := types.Event{
@@ -261,6 +322,35 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	_ = a.store.AppendEvent(r.Context(), endEv)
 	a.broker.Publish(endEv)
 
+	// Collect events for this command (including file events emitted by FUSE).
+	collected, _ := a.store.QueryEvents(r.Context(), types.EventQuery{
+		CommandID: cmdID,
+		Limit:     5000,
+		Asc:       true,
+	})
+	var fileOps, netOps, blockedOps, otherOps []types.Event
+	for _, ev := range collected {
+		isBlocked := false
+		if ev.Policy != nil && ev.Policy.EffectiveDecision == types.DecisionDeny {
+			isBlocked = true
+		}
+		if b, ok := ev.Fields["blocked"].(bool); ok && b {
+			isBlocked = true
+		}
+		if isBlocked {
+			blockedOps = append(blockedOps, ev)
+		}
+
+		switch {
+		case strings.HasPrefix(ev.Type, "file_") || strings.HasPrefix(ev.Type, "dir_") || strings.HasPrefix(ev.Type, "symlink_"):
+			fileOps = append(fileOps, ev)
+		case strings.HasPrefix(ev.Type, "net_") || ev.Type == "dns_query":
+			netOps = append(netOps, ev)
+		default:
+			otherOps = append(otherOps, ev)
+		}
+	}
+
 	res := types.ExecResult{
 		ExitCode:          exitCode,
 		Stdout:            string(stdoutB),
@@ -293,10 +383,10 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 		Request:   req,
 		Result:    res,
 		Events: types.ExecEvents{
-			FileOperations:    []types.Event{},
-			NetworkOperations: []types.Event{},
-			BlockedOperations: []types.Event{},
-			Other:             []types.Event{preEv, startEv, endEv},
+			FileOperations:    fileOps,
+			NetworkOperations: netOps,
+			BlockedOperations: blockedOps,
+			Other:             otherOps,
 		},
 	}
 	writeJSON(w, http.StatusOK, resp)

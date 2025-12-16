@@ -15,20 +15,16 @@ func newExecCmd() *cobra.Command {
 		Short: "Execute a command in a session",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sep := -1
-			for i, a := range args {
-				if a == "--" {
-					sep = i
-					break
-				}
+			sessionID := args[0]
+			start := 1
+			if args[1] == "--" {
+				start = 2
 			}
-			if sep == -1 || sep == len(args)-1 {
+			if start >= len(args) {
 				return cmd.Help()
 			}
-
-			sessionID := args[0]
-			command := args[sep+1]
-			cmdArgs := args[sep+2:]
+			command := args[start]
+			cmdArgs := args[start+1:]
 
 			cfg := getClientConfig(cmd)
 			c := client.New(cfg.serverAddr, cfg.apiKey)

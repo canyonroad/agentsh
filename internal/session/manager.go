@@ -19,11 +19,17 @@ type Session struct {
 	State     types.SessionState
 	CreatedAt time.Time
 	Workspace string
+	WorkspaceMount string
 	Policy    string
 
 	Cwd     string
 	Env     map[string]string
 	History []string
+
+	currentCommandID string
+	execMu           sync.Mutex
+
+	workspaceUnmount func() error
 }
 
 type Manager struct {
@@ -71,6 +77,7 @@ func (m *Manager) Create(workspace, policy string) (*Session, error) {
 		State:     types.SessionStateReady,
 		CreatedAt: time.Now().UTC(),
 		Workspace: abs,
+		WorkspaceMount: abs,
 		Policy:    policy,
 		Cwd:       "/workspace",
 		Env:       map[string]string{},
@@ -117,6 +124,66 @@ func (s *Session) Snapshot() types.Session {
 		Policy:    s.Policy,
 		Cwd:       s.Cwd,
 	}
+}
+
+func (s *Session) LockExec() func() {
+	s.execMu.Lock()
+	s.mu.Lock()
+	s.State = types.SessionStateBusy
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		s.State = types.SessionStateReady
+		s.currentCommandID = ""
+		s.mu.Unlock()
+		s.execMu.Unlock()
+	}
+}
+
+func (s *Session) SetCurrentCommandID(commandID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.currentCommandID = commandID
+}
+
+func (s *Session) CurrentCommandID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.currentCommandID
+}
+
+func (s *Session) SetWorkspaceMount(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if path != "" {
+		s.WorkspaceMount = path
+	}
+}
+
+func (s *Session) WorkspaceMountPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.WorkspaceMount != "" {
+		return s.WorkspaceMount
+	}
+	return s.Workspace
+}
+
+func (s *Session) SetWorkspaceUnmount(fn func() error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workspaceUnmount = fn
+}
+
+func (s *Session) UnmountWorkspace() error {
+	s.mu.Lock()
+	fn := s.workspaceUnmount
+	s.workspaceUnmount = nil
+	s.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
 }
 
 func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, stdout, stderr []byte) {

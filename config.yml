@@ -145,6 +145,8 @@ sessions:
 sandbox:
   # FUSE filesystem settings
   fuse:
+    enabled: true
+    mount_base_dir: "./data/sessions"
     # Kernel cache timeouts (higher = better perf, less fresh)
     entry_timeout: "1s"
     attr_timeout: "1s"

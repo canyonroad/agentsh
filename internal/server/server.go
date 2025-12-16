@@ -25,6 +25,7 @@ import (
 type Server struct {
 	httpServer *http.Server
 	store      *composite.Store
+	sessions   *session.Manager
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -91,7 +92,7 @@ func New(cfg *config.Config) (*Server, error) {
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 
-	return &Server{httpServer: s, store: store}, nil
+	return &Server{httpServer: s, store: store, sessions: sessions}, nil
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -116,6 +117,11 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) Close() error {
+	if s.sessions != nil {
+		for _, sess := range s.sessions.List() {
+			_ = sess.UnmountWorkspace()
+		}
+	}
 	if s.store != nil {
 		_ = s.store.Close()
 	}
