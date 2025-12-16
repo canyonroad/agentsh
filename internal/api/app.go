@@ -170,15 +170,13 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Optional: start an explicit HTTP(S) proxy for outbound network monitoring.
-	if a.cfg.Sandbox.Network.Enabled {
-		em := storeEmitter{store: a.store, broker: a.broker}
-		pr, proxyURL, err := netmonitor.StartProxy(a.cfg.Sandbox.Network.ProxyListenAddr, s.ID, s, a.policy, a.approvals, em)
-		if err != nil {
+	// Optional: start transparent network interception; fall back to explicit proxy on failure.
+	if a.cfg.Sandbox.Network.Transparent.Enabled {
+		if err := a.tryStartTransparentNetwork(r.Context(), s); err != nil {
 			fail := types.Event{
 				ID:        uuid.NewString(),
 				Timestamp: time.Now().UTC(),
-				Type:      "net_proxy_failed",
+				Type:      "transparent_net_failed",
 				SessionID: s.ID,
 				Fields: map[string]any{
 					"error": err.Error(),
@@ -186,23 +184,109 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = a.store.AppendEvent(r.Context(), fail)
 			a.broker.Publish(fail)
+			// Fall back to explicit proxy if configured.
+			if a.cfg.Sandbox.Network.Enabled {
+				a.startExplicitProxy(r.Context(), s)
+			}
 		} else {
-			s.SetProxy(proxyURL, pr.Close)
 			okEv := types.Event{
 				ID:        uuid.NewString(),
 				Timestamp: time.Now().UTC(),
-				Type:      "net_proxy_started",
+				Type:      "transparent_net_ready",
 				SessionID: s.ID,
-				Fields: map[string]any{
-					"proxy_url": proxyURL,
-				},
 			}
 			_ = a.store.AppendEvent(r.Context(), okEv)
 			a.broker.Publish(okEv)
 		}
+	} else if a.cfg.Sandbox.Network.Enabled {
+		a.startExplicitProxy(r.Context(), s)
 	}
 
 	writeJSON(w, http.StatusCreated, s.Snapshot())
+}
+
+func (a *App) startExplicitProxy(ctx context.Context, s *session.Session) {
+	em := storeEmitter{store: a.store, broker: a.broker}
+	pr, proxyURL, err := netmonitor.StartProxy(a.cfg.Sandbox.Network.ProxyListenAddr, s.ID, s, a.policy, a.approvals, em)
+	if err != nil {
+		fail := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now().UTC(),
+			Type:      "net_proxy_failed",
+			SessionID: s.ID,
+			Fields: map[string]any{
+				"error": err.Error(),
+			},
+		}
+		_ = a.store.AppendEvent(ctx, fail)
+		a.broker.Publish(fail)
+		return
+	}
+
+	s.SetProxy(proxyURL, pr.Close)
+	okEv := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "net_proxy_started",
+		SessionID: s.ID,
+		Fields: map[string]any{
+			"proxy_url": proxyURL,
+		},
+	}
+	_ = a.store.AppendEvent(ctx, okEv)
+	a.broker.Publish(okEv)
+}
+
+func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session) error {
+	// Implementation uses root-only Linux network namespaces. If it fails, we leave the session in proxy-env mode.
+	em := storeEmitter{store: a.store, broker: a.broker}
+
+	// Start interceptors on host; netns will DNAT to host veth IP.
+	tcp, tcpPort, err := netmonitor.StartTransparentTCP("0.0.0.0:0", s.ID, s, a.policy, a.approvals, em)
+	if err != nil {
+		return err
+	}
+	dns, dnsPort, err := netmonitor.StartDNS("0.0.0.0:0", "8.8.8.8:53", s.ID, s, em)
+	if err != nil {
+		_ = tcp.Close()
+		return err
+	}
+
+	nsName := "agentsh-" + strings.TrimPrefix(s.ID, "session-")
+	subnetCIDR, hostIPCIDR, nsIPCIDR, hostIf, nsIf := netmonitor.AllocateSubnet(a.cfg.Sandbox.Network.Transparent.SubnetBase, nsName)
+	ns, err := netmonitor.SetupNetNS(ctx, nsName, subnetCIDR, hostIf, nsIf, hostIPCIDR, nsIPCIDR, tcpPort, dnsPort)
+	if err != nil {
+		_ = tcp.Close()
+		_ = dns.Close()
+		return err
+	}
+
+	s.SetNetNS(nsName, func() error {
+		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = ns.Close(cctx)
+		_ = tcp.Close()
+		_ = dns.Close()
+		return nil
+	})
+
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "transparent_net_setup",
+		SessionID: s.ID,
+		Fields: map[string]any{
+			"netns":       ns.Name,
+			"subnet":      ns.SubnetCIDR,
+			"host_ip":     ns.HostIP,
+			"ns_ip":       ns.NSIP,
+			"proxy_port":  tcpPort,
+			"dns_port":    dnsPort,
+		},
+	}
+	_ = a.store.AppendEvent(ctx, ev)
+	a.broker.Publish(ev)
+	return nil
 }
 
 func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -231,6 +315,7 @@ func (a *App) destroySession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
 		return
 	}
+	_ = s.CloseNetNS()
 	_ = s.CloseProxy()
 	_ = s.UnmountWorkspace()
 	_ = a.sessions.Destroy(id)
@@ -423,6 +508,18 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 		default:
 			otherOps = append(otherOps, ev)
 		}
+	}
+	if fileOps == nil {
+		fileOps = []types.Event{}
+	}
+	if netOps == nil {
+		netOps = []types.Event{}
+	}
+	if blockedOps == nil {
+		blockedOps = []types.Event{}
+	}
+	if otherOps == nil {
+		otherOps = []types.Event{}
 	}
 
 	res := types.ExecResult{

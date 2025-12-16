@@ -33,6 +33,9 @@ type Session struct {
 
 	proxyURL   string
 	proxyClose func() error
+
+	netnsName  string
+	netnsClose func() error
 }
 
 type Manager struct {
@@ -207,6 +210,31 @@ func (s *Session) CloseProxy() error {
 	fn := s.proxyClose
 	s.proxyClose = nil
 	s.proxyURL = ""
+	s.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (s *Session) SetNetNS(name string, closeFn func() error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.netnsName = name
+	s.netnsClose = closeFn
+}
+
+func (s *Session) NetNSName() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.netnsName
+}
+
+func (s *Session) CloseNetNS() error {
+	s.mu.Lock()
+	fn := s.netnsClose
+	s.netnsClose = nil
+	s.netnsName = ""
 	s.mu.Unlock()
 	if fn != nil {
 		return fn()

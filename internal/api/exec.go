@@ -45,6 +45,11 @@ func runCommand(ctx context.Context, s *session.Session, cmdID string, req types
 	}
 
 	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
+	if ns := s.NetNSName(); ns != "" {
+		// Run inside the session network namespace (Linux only; requires iproute2).
+		allArgs := append([]string{"netns", "exec", ns, req.Command}, req.Args...)
+		cmd = exec.CommandContext(ctx, "ip", allArgs...)
+	}
 	cmd.Dir = workdir
 
 	env := mergeEnv(os.Environ(), s, req.Env)

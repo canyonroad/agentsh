@@ -137,6 +137,7 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) Close() error {
 	if s.sessions != nil {
 		for _, sess := range s.sessions.List() {
+			_ = sess.CloseNetNS()
 			_ = sess.CloseProxy()
 			_ = sess.UnmountWorkspace()
 		}
