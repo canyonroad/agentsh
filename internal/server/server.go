@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -37,6 +39,9 @@ type Server struct {
 	sessionTimeout time.Duration
 	idleTimeout    time.Duration
 	reapInterval   time.Duration
+
+	pprofLn     net.Listener
+	pprofServer *http.Server
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -172,7 +177,7 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 	}
 
-	return &Server{
+	srv := &Server{
 		httpServer:     s,
 		store:          store,
 		broker:         broker,
@@ -180,7 +185,29 @@ func New(cfg *config.Config) (*Server, error) {
 		sessionTimeout: sessionTimeout,
 		idleTimeout:    idleTimeout,
 		reapInterval:   reapInterval,
-	}, nil
+	}
+
+	if cfg.Development.PProf.Enabled {
+		addr := cfg.Development.PProf.Addr
+		if addr == "" {
+			addr = "localhost:6060"
+		}
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("pprof listen: %w", err)
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		srv.pprofLn = ln
+		srv.pprofServer = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	}
+
+	return srv, nil
 }
 
 type serverEmitter struct {
@@ -196,6 +223,10 @@ func (e serverEmitter) Publish(ev types.Event) { e.broker.Publish(ev) }
 func (s *Server) Run(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if s.pprofLn != nil && s.pprofServer != nil {
+		go func() { _ = s.pprofServer.Serve(s.pprofLn) }()
+	}
 
 	if s.sessionTimeout > 0 || s.idleTimeout > 0 {
 		ticker := time.NewTicker(s.reapInterval)
@@ -223,13 +254,25 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if s.pprofServer != nil {
+			_ = s.pprofServer.Shutdown(shutdownCtx)
+		}
 		return s.httpServer.Shutdown(shutdownCtx)
 	case err := <-errCh:
+		if s.pprofServer != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = s.pprofServer.Shutdown(shutdownCtx)
+		}
 		return fmt.Errorf("http server: %w", err)
 	}
 }
 
 func (s *Server) Close() error {
+	if s.pprofLn != nil {
+		_ = s.pprofLn.Close()
+		s.pprofLn = nil
+	}
 	if s.sessions != nil {
 		for _, sess := range s.sessions.List() {
 			_ = sess.CloseNetNS()
@@ -241,6 +284,13 @@ func (s *Server) Close() error {
 		_ = s.store.Close()
 	}
 	return nil
+}
+
+func (s *Server) PProfAddr() string {
+	if s == nil || s.pprofLn == nil {
+		return ""
+	}
+	return s.pprofLn.Addr().String()
 }
 
 func (s *Server) reapOnce(now time.Time) {

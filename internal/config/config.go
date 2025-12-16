@@ -140,6 +140,13 @@ type DevelopmentConfig struct {
 	Debug         bool `yaml:"debug"`
 	DisableAuth   bool `yaml:"disable_auth"`
 	DisablePolicy bool `yaml:"disable_policy"`
+
+	PProf DevelopmentPProfConfig `yaml:"pprof"`
+}
+
+type DevelopmentPProfConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Addr    string `yaml:"addr"`
 }
 
 func Load(path string) (*Config, error) {
@@ -221,5 +228,8 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Approvals.Mode == "" {
 		cfg.Approvals.Mode = "local_tty"
+	}
+	if cfg.Development.PProf.Addr == "" {
+		cfg.Development.PProf.Addr = "localhost:6060"
 	}
 }
