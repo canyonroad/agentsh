@@ -9,7 +9,7 @@
 - ✅ M3 implemented: per-session FUSE loopback mount for workspace monitoring + file policy enforcement (shadow-approve by default)
 - ✅ M4 implemented:
   - Explicit per-session HTTP(S) proxy (works unprivileged) + network policy enforcement
-  - Transparent interception (Linux/root-only) via netns + DNAT + SO_ORIGINAL_DST TCP proxy + UDP DNS logger (DNS is monitor-only for now)
+  - Transparent interception (Linux/root-only) via netns + DNAT + SO_ORIGINAL_DST TCP proxy + UDP DNS interceptor (policy-enforced; denied returns REFUSED)
 - ✅ M5 implemented: approvals manager + local TTY mode + API mode; `approve` decisions block only when approvals are enabled (otherwise shadow-approve)
 
 ## Goal
