@@ -31,28 +31,28 @@ agentsh is a purpose-built shell environment that provides AI agents with secure
 
 ## Quick Start
 
-### Installation
+### Build + Run (local)
 
 ```bash
-# Download latest release
-curl -LO https://github.com/agentsh/agentsh/releases/latest/download/agentsh-linux-amd64
-chmod +x agentsh-linux-amd64
-sudo mv agentsh-linux-amd64 /usr/local/bin/agentsh
-
-# Start server
-agentsh server
+make build
+./bin/agentsh server --config config.yml
 ```
 
 ### Basic Usage
 
 ```bash
+# API auth uses X-API-Key (see configs/api_keys.yaml)
+API_KEY=sk-dev-local
+
 # Create a session
 curl -X POST http://localhost:8080/api/v1/sessions \
+  -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"workspace": "/home/user/project", "policy": "default"}'
 
 # Execute a command
 curl -X POST http://localhost:8080/api/v1/sessions/SESSION_ID/exec \
+  -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"command": "ls", "args": ["-la"]}'
 ```
@@ -61,14 +61,14 @@ curl -X POST http://localhost:8080/api/v1/sessions/SESSION_ID/exec \
 
 ```bash
 # Create session
-agentsh session create --workspace /home/user/project
+agentsh --api-key sk-dev-local session create --workspace /home/user/project
 
 # Execute commands
 agentsh exec SESSION_ID -- npm install
 agentsh exec SESSION_ID -- python script.py
 
 # Watch events in real-time
-agentsh events SESSION_ID
+agentsh events tail SESSION_ID
 ```
 
 ## How It Works
@@ -155,10 +155,10 @@ network_rules:
 
 ## Documentation
 
-- **[Full Specification](SPEC.md)** - Complete technical specification
-- **[API Reference](docs/api.md)** - REST and gRPC API documentation
-- **[Policy Guide](docs/policies.md)** - How to write policies
-- **[Deployment Guide](docs/deployment.md)** - Production deployment
+- `docs/spec.md` — Full specification
+- `docs/project-structure.md` — Repository structure and conventions
+- `docs/approval-auth.md` — Approval/auth model
+- `docs/cross-platform.md` — Cross-platform notes (Linux-first)
 
 ## Requirements
 
@@ -191,13 +191,12 @@ Session persistence amortizes setup costs—creating a sandbox once instead of p
 
 agentsh implements defense in depth:
 
-- **Linux namespaces** for process isolation
-- **FUSE** for filesystem interception
-- **seccomp-bpf** for syscall filtering
-- **cgroups v2** for resource limits
+- **FUSE** loopback mount for filesystem interception in the workspace view
+- **Network monitoring/enforcement** via per-session proxy (unprivileged) and optional netns-based interception (Linux/root-only)
 - **Policy engine** for operation-level control
+- **Approvals** for `approve` decisions (optional; shadow-approve by default)
 
-See the [Security Model](SPEC.md#13-security-model) in the specification for details.
+See `docs/spec.md` for details.
 
 ## Use Cases
 

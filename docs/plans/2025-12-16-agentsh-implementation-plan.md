@@ -6,7 +6,11 @@
 ## Status (this branch)
 
 - ✅ M0–M2 implemented: Go module + server + CLI + policy command pre-check + `sqlite+jsonl` event storage + query APIs/CLI
-- ⏭️ M3–M5 (FUSE, network namespace/proxy, approvals) not implemented yet
+- ✅ M3 implemented: per-session FUSE loopback mount for workspace monitoring + file policy enforcement (shadow-approve by default)
+- ✅ M4 implemented:
+  - Explicit per-session HTTP(S) proxy (works unprivileged) + network policy enforcement
+  - Transparent interception (Linux/root-only) via netns + DNAT + SO_ORIGINAL_DST TCP proxy + UDP DNS logger (DNS is monitor-only for now)
+- ✅ M5 implemented: approvals manager + local TTY mode + API mode; `approve` decisions block only when approvals are enabled (otherwise shadow-approve)
 
 ## Goal
 
@@ -197,7 +201,7 @@ Acceptance criteria:
 
 ## Open questions (to resolve before coding)
 
-1. **Response/event compatibility:** do we want to extend event schema with `effective_decision`/`approval.mode`, or add a parallel `shadow_approvals` array in the exec response?
+1. **Response/event compatibility:** resolved by extending the event schema (`types.PolicyInfo`) with `effective_decision` and `approval` metadata, rather than adding a parallel structure.
 2. **Config naming/location:** should we standardize to `configs/` now (and update Dockerfile/compose/docs), or keep current names and reconcile later?
 3. **gRPC timing:** implement gRPC in parallel with REST (slower) or after REST stabilizes (faster)?
 4. **Local event storage default:** use `sqlite+jsonl` (decided).

@@ -89,9 +89,14 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 	}
 	remote := net.JoinHostPort(dstIP.String(), fmt.Sprintf("%d", dstPort))
 
+	commandID := ""
+	if t.sess != nil {
+		commandID = t.sess.CurrentCommandID()
+	}
+
 	dec := t.policyDecision(dstIP.String(), dstPort)
-	dec = t.maybeApprove(context.Background(), dec, "network", remote)
-	connectEv := t.netEvent("net_connect", dstIP.String(), remote, dstPort, dec, nil)
+	dec = t.maybeApprove(context.Background(), commandID, dec, "network", remote)
+	connectEv := t.netEvent("net_connect", commandID, dstIP.String(), remote, dstPort, dec, nil)
 	_ = t.emit.AppendEvent(context.Background(), connectEv)
 	t.emit.Publish(connectEv)
 
@@ -120,7 +125,7 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 	<-errCh
 	<-errCh
 
-	closeEv := t.netEvent("net_close", dstIP.String(), remote, dstPort, dec, map[string]any{"bytes_sent": upBytes, "bytes_received": downBytes})
+	closeEv := t.netEvent("net_close", commandID, dstIP.String(), remote, dstPort, dec, map[string]any{"bytes_sent": upBytes, "bytes_received": downBytes})
 	_ = t.emit.AppendEvent(context.Background(), closeEv)
 	t.emit.Publish(closeEv)
 	return nil
@@ -133,7 +138,7 @@ func (t *TransparentTCP) policyDecision(host string, port int) policy.Decision {
 	return t.policy.CheckNetwork(host, port)
 }
 
-func (t *TransparentTCP) maybeApprove(ctx context.Context, dec policy.Decision, kind string, target string) policy.Decision {
+func (t *TransparentTCP) maybeApprove(ctx context.Context, commandID string, dec policy.Decision, kind string, target string) policy.Decision {
 	if dec.PolicyDecision != types.DecisionApprove || dec.EffectiveDecision != types.DecisionApprove {
 		return dec
 	}
@@ -143,14 +148,11 @@ func (t *TransparentTCP) maybeApprove(ctx context.Context, dec policy.Decision, 
 	req := approvals.Request{
 		ID:        "approval-" + uuid.NewString(),
 		SessionID: t.sessionID,
-		CommandID: "",
+		CommandID: commandID,
 		Kind:      kind,
 		Target:    target,
 		Rule:      dec.Rule,
 		Message:   dec.Message,
-	}
-	if t.sess != nil {
-		req.CommandID = t.sess.CurrentCommandID()
 	}
 	res, err := t.approvals.RequestApproval(ctx, req)
 	if dec.Approval != nil {
@@ -164,11 +166,7 @@ func (t *TransparentTCP) maybeApprove(ctx context.Context, dec policy.Decision, 
 	return dec
 }
 
-func (t *TransparentTCP) netEvent(evType string, domain string, remote string, port int, dec policy.Decision, fields map[string]any) types.Event {
-	commandID := ""
-	if t.sess != nil {
-		commandID = t.sess.CurrentCommandID()
-	}
+func (t *TransparentTCP) netEvent(evType string, commandID string, domain string, remote string, port int, dec policy.Decision, fields map[string]any) types.Event {
 	ev := types.Event{
 		ID:        uuid.NewString(),
 		Timestamp: time.Now().UTC(),
@@ -208,4 +206,3 @@ func originalDst(c *net.TCPConn) (net.IP, int, error) {
 	port := int(binary.BigEndian.Uint16((*[2]byte)(unsafe.Pointer(&addr.Port))[:]))
 	return ip, port, nil
 }
-
