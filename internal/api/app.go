@@ -43,6 +43,10 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 	return &App{cfg: cfg, sessions: sessions, store: store, policy: engine, broker: broker, apiKeyAuth: apiKeyAuth, approvals: approvalsMgr, metrics: metricsCollector}
 }
 
+type ctxKey string
+
+const ctxKeyRole ctxKey = "role"
+
 func (a *App) Router() http.Handler {
 	r := chi.NewRouter()
 
@@ -70,8 +74,11 @@ func (a *App) Router() http.Handler {
 
 		r.Get("/events/search", a.searchEvents)
 
-		r.Get("/approvals", a.listApprovals)
-		r.Post("/approvals/{id}", a.resolveApproval)
+		r.Group(func(r chi.Router) {
+			r.Use(a.requireRoles("approver", "admin"))
+			r.Get("/approvals", a.listApprovals)
+			r.Post("/approvals/{id}", a.resolveApproval)
+		})
 	})
 
 	return r
@@ -95,12 +102,40 @@ func (a *App) authMiddleware(next http.Handler) http.Handler {
 				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 				return
 			}
+			role := a.apiKeyAuth.RoleForKey(key)
+			ctx := context.WithValue(r.Context(), ctxKeyRole, role)
+			r = r.WithContext(ctx)
 			next.ServeHTTP(w, r)
 		})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unsupported auth type"})
 	})
+}
+
+func (a *App) requireRoles(roles ...string) func(http.Handler) http.Handler {
+	allowed := make(map[string]struct{}, len(roles))
+	for _, r := range roles {
+		allowed[strings.ToLower(strings.TrimSpace(r))] = struct{}{}
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if a.cfg.Development.DisableAuth || strings.EqualFold(a.cfg.Auth.Type, "none") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			role, _ := r.Context().Value(ctxKeyRole).(string)
+			if role == "" {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+				return
+			}
+			if _, ok := allowed[strings.ToLower(role)]; !ok {
+				writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
