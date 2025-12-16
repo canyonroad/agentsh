@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -40,13 +41,13 @@ func chooseCommandTimeout(req types.ExecRequest, policyLimit time.Duration) time
 	return d
 }
 
-func runCommand(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, err error) {
+func runCommandWithResources(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
 	timeout := chooseCommandTimeout(req, policyLimit)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	if handled, code, out, errOut := s.Builtin(req); handled {
-		return code, out, errOut, int64(len(out)), int64(len(errOut)), false, false, nil
+		return code, out, errOut, int64(len(out)), int64(len(errOut)), false, false, types.ExecResources{}, nil
 	}
 
 	s.RecordHistory(strings.TrimSpace(req.Command + " " + strings.Join(req.Args, " ")))
@@ -54,7 +55,7 @@ func runCommand(ctx context.Context, s *session.Session, cmdID string, req types
 	workdir, err := resolveWorkingDir(s, req.WorkingDir)
 	if err != nil {
 		msg := []byte(err.Error() + "\n")
-		return 2, []byte{}, msg, 0, int64(len(msg)), false, false, nil
+		return 2, []byte{}, msg, 0, int64(len(msg)), false, false, types.ExecResources{}, nil
 	}
 
 	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
@@ -74,15 +75,15 @@ func runCommand(ctx context.Context, s *session.Session, cmdID string, req types
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return 127, nil, nil, 0, 0, false, false, fmt.Errorf("stdout pipe: %w", err)
+		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stdout pipe: %w", err)
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return 127, nil, nil, 0, 0, false, false, fmt.Errorf("stderr pipe: %w", err)
+		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		return 127, nil, nil, 0, 0, false, false, fmt.Errorf("start: %w", err)
+		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
 	}
 
 	type capRes struct {
@@ -116,16 +117,38 @@ func runCommand(ctx context.Context, s *session.Session, cmdID string, req types
 		err = fmt.Errorf("read stderr: %w", errRes.err)
 	}
 
+	resources = resourcesFromProcessState(cmd.ProcessState)
+
 	if waitErr == nil {
-		return 0, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, err
+		return 0, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, err
 	}
 	if ee := (*exec.ExitError)(nil); errors.As(waitErr, &ee) {
-		return ee.ExitCode(), stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, err
+		return ee.ExitCode(), stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, err
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, ctx.Err()
+		return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
 	}
-	return 127, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, waitErr
+	return 127, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, waitErr
+}
+
+func runCommand(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, err error) {
+	exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, _, err = runCommandWithResources(ctx, s, cmdID, req, cfg, policyLimit)
+	return
+}
+
+func resourcesFromProcessState(ps *os.ProcessState) types.ExecResources {
+	if ps == nil {
+		return types.ExecResources{}
+	}
+	ru, ok := ps.SysUsage().(*syscall.Rusage)
+	if !ok || ru == nil {
+		return types.ExecResources{}
+	}
+	return types.ExecResources{
+		CPUUserMs:    int64(ru.Utime.Sec)*1000 + int64(ru.Utime.Usec)/1000,
+		CPUSystemMs:  int64(ru.Stime.Sec)*1000 + int64(ru.Stime.Usec)/1000,
+		MemoryPeakKB: int64(ru.Maxrss),
+	}
 }
 
 func captureLimited(r io.Reader, max int64) ([]byte, int64, bool, error) {

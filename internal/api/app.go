@@ -507,7 +507,7 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	a.broker.Publish(startEv)
 
 	limits := a.policy.Limits()
-	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, execErr := runCommand(r.Context(), s, cmdID, req, a.cfg, limits.CommandTimeout)
+	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(r.Context(), s, cmdID, req, a.cfg, limits.CommandTimeout)
 
 	_ = a.store.SaveOutput(r.Context(), id, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 
@@ -519,8 +519,11 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 		SessionID: id,
 		CommandID: cmdID,
 		Fields: map[string]any{
-			"exit_code":   exitCode,
-			"duration_ms": int64(end.Sub(start).Milliseconds()),
+			"exit_code":      exitCode,
+			"duration_ms":    int64(end.Sub(start).Milliseconds()),
+			"cpu_user_ms":    resources.CPUUserMs,
+			"cpu_system_ms":  resources.CPUSystemMs,
+			"memory_peak_kb": resources.MemoryPeakKB,
 		},
 	}
 	if execErr != nil {
@@ -607,6 +610,7 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 			BlockedOperations: blockedOps,
 			Other:             otherOps,
 		},
+		Resources: &resources,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

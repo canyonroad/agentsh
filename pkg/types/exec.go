@@ -21,6 +21,8 @@ type ExecResponse struct {
 	Result  ExecResult  `json:"result"`
 
 	Events ExecEvents `json:"events"`
+
+	Resources *ExecResources `json:"resources,omitempty"`
 }
 
 type ExecResult struct {
@@ -28,8 +30,8 @@ type ExecResult struct {
 	Stdout   string `json:"stdout,omitempty"`
 	Stderr   string `json:"stderr,omitempty"`
 
-	StdoutTruncated bool  `json:"stdout_truncated,omitempty"`
-	StderrTruncated bool  `json:"stderr_truncated,omitempty"`
+	StdoutTruncated  bool  `json:"stdout_truncated,omitempty"`
+	StderrTruncated  bool  `json:"stderr_truncated,omitempty"`
 	StdoutTotalBytes int64 `json:"stdout_total_bytes,omitempty"`
 	StderrTotalBytes int64 `json:"stderr_total_bytes,omitempty"`
 
@@ -49,12 +51,12 @@ type ExecError struct {
 	Code        string         `json:"code"`
 	Message     string         `json:"message"`
 	PolicyRule  string         `json:"policy_rule,omitempty"`
-	Suggestions []Suggestion    `json:"suggestions,omitempty"`
+	Suggestions []Suggestion   `json:"suggestions,omitempty"`
 	Context     map[string]any `json:"context,omitempty"`
 }
 
 type Suggestion struct {
-	Action string `json:"action"`
+	Action  string `json:"action"`
 	Command string `json:"command"`
 	Reason  string `json:"reason"`
 }
@@ -66,3 +68,8 @@ type ExecEvents struct {
 	Other             []Event `json:"other,omitempty"`
 }
 
+type ExecResources struct {
+	CPUUserMs    int64 `json:"cpu_user_ms,omitempty"`
+	CPUSystemMs  int64 `json:"cpu_system_ms,omitempty"`
+	MemoryPeakKB int64 `json:"memory_peak_kb,omitempty"`
+}
