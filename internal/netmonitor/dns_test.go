@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,12 +28,18 @@ func TestDNSInterceptor_DenyDoesNotForwardAndRefuses(t *testing.T) {
 
 	clientPC, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("udp listen not permitted in this environment: %v", err)
+		}
 		t.Fatal(err)
 	}
 	defer clientPC.Close()
 
 	serverPC, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("udp listen not permitted in this environment: %v", err)
+		}
 		t.Fatal(err)
 	}
 	defer serverPC.Close()
@@ -120,6 +127,9 @@ func startUDPUpstream(t *testing.T) net.PacketConn {
 	t.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("udp listen not permitted in this environment: %v", err)
+		}
 		t.Fatal(err)
 	}
 	// If anything forwards to the upstream, respond with a minimal "NOERROR" reply so tests can detect the difference.

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -22,17 +23,36 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	HTTP ServerHTTPConfig `yaml:"http"`
-	GRPC ServerGRPCConfig `yaml:"grpc"`
+	HTTP       ServerHTTPConfig       `yaml:"http"`
+	GRPC       ServerGRPCConfig       `yaml:"grpc"`
+	UnixSocket ServerUnixSocketConfig `yaml:"unix_socket"`
+	TLS        ServerTLSConfig        `yaml:"tls"`
 }
 
 type ServerHTTPConfig struct {
 	Addr string `yaml:"addr"`
+
+	ReadTimeout    string `yaml:"read_timeout"`
+	WriteTimeout   string `yaml:"write_timeout"`
+	MaxRequestSize string `yaml:"max_request_size"`
 }
 
 type ServerGRPCConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Addr    string `yaml:"addr"`
+}
+
+type ServerUnixSocketConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	Path        string `yaml:"path"`
+	Permissions string `yaml:"permissions"` // e.g. "0660"
+}
+
+type ServerTLSConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+	CAFile   string `yaml:"ca_file"`
 }
 
 type AuthConfig struct {
@@ -161,12 +181,22 @@ func Load(path string) (*Config, error) {
 	}
 
 	applyDefaults(&cfg)
+	applyEnvOverrides(&cfg)
 	return &cfg, nil
 }
 
 func applyDefaults(cfg *Config) {
 	if cfg.Server.HTTP.Addr == "" {
 		cfg.Server.HTTP.Addr = "0.0.0.0:8080"
+	}
+	if cfg.Server.HTTP.ReadTimeout == "" {
+		cfg.Server.HTTP.ReadTimeout = "30s"
+	}
+	if cfg.Server.HTTP.WriteTimeout == "" {
+		cfg.Server.HTTP.WriteTimeout = "5m"
+	}
+	if cfg.Server.HTTP.MaxRequestSize == "" {
+		cfg.Server.HTTP.MaxRequestSize = "10MB"
 	}
 	if cfg.Auth.Type == "" {
 		cfg.Auth.Type = "none"
@@ -231,5 +261,21 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Development.PProf.Addr == "" {
 		cfg.Development.PProf.Addr = "localhost:6060"
+	}
+}
+
+func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("AGENTSH_HTTP_ADDR"); v != "" {
+		cfg.Server.HTTP.Addr = v
+	}
+	if v := os.Getenv("AGENTSH_GRPC_ADDR"); v != "" {
+		cfg.Server.GRPC.Addr = v
+	}
+	if v := os.Getenv("AGENTSH_LOG_LEVEL"); v != "" {
+		cfg.Logging.Level = v
+	}
+	if v := os.Getenv("AGENTSH_DATA_DIR"); v != "" {
+		cfg.Sessions.BaseDir = filepath.Join(v, "sessions")
+		cfg.Audit.Storage.SQLitePath = filepath.Join(v, "events.db")
 	}
 }

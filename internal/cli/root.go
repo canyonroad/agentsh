@@ -28,6 +28,8 @@ func NewRoot(version string) *cobra.Command {
 	cmd.AddCommand(newEventsCmd())
 	cmd.AddCommand(newOutputCmd())
 	cmd.AddCommand(newApproveCmd())
+	cmd.AddCommand(newPolicyCmd())
+	cmd.AddCommand(newConfigCmd())
 
 	return cmd
 }

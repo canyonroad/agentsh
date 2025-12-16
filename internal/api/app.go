@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -70,6 +71,7 @@ func (a *App) Router() http.Handler {
 		r.Delete("/sessions/{id}", a.destroySession)
 
 		r.Post("/sessions/{id}/exec", a.execInSession)
+		r.Post("/sessions/{id}/exec/stream", a.execInSessionStream)
 		r.Get("/sessions/{id}/events", a.streamEvents)
 		r.Get("/sessions/{id}/history", a.sessionHistory)
 		r.Get("/sessions/{id}/output/{cmdID}", a.getOutputChunk)
@@ -142,20 +144,26 @@ func (a *App) requireRoles(roles ...string) func(http.Handler) http.Handler {
 }
 
 func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Workspace string `json:"workspace"`
-		Policy    string `json:"policy"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+	var req types.CreateSessionRequest
+	if ok := decodeJSON(w, r, &req, "invalid json"); !ok {
 		return
 	}
 	if req.Policy == "" {
 		req.Policy = a.cfg.Policies.Default
 	}
-	s, err := a.sessions.Create(req.Workspace, req.Policy)
+	var s *session.Session
+	var err error
+	if req.ID != "" {
+		s, err = a.sessions.CreateWithID(req.ID, req.Workspace, req.Policy)
+	} else {
+		s, err = a.sessions.Create(req.Workspace, req.Policy)
+	}
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		code := http.StatusBadRequest
+		if errors.Is(err, session.ErrSessionExists) {
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, map[string]any{"error": err.Error()})
 		return
 	}
 
@@ -365,8 +373,7 @@ func (a *App) patchSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req types.SessionPatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+	if ok := decodeJSON(w, r, &req, "invalid json"); !ok {
 		return
 	}
 	if err := s.ApplyPatch(req); err != nil {
@@ -477,8 +484,7 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req types.ExecRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+	if ok := decodeJSON(w, r, &req, "invalid json"); !ok {
 		return
 	}
 	if req.Command == "" {
@@ -819,8 +825,7 @@ func (a *App) resolveApproval(w http.ResponseWriter, r *http.Request) {
 		Decision string `json:"decision"` // "approve" or "deny"
 		Reason   string `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+	if ok := decodeJSON(w, r, &req, "invalid json"); !ok {
 		return
 	}
 	approved := strings.EqualFold(req.Decision, "approve") || strings.EqualFold(req.Decision, "allow")

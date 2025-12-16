@@ -1245,6 +1245,7 @@ PATCH  /api/v1/sessions/{id}         Update session config
 
 ```
 POST   /api/v1/sessions/{id}/exec    Execute command
+POST   /api/v1/sessions/{id}/exec/stream Execute command (SSE output)
 GET    /api/v1/sessions/{id}/output/{cmd_id}  Get command output (pagination)
 POST   /api/v1/sessions/{id}/kill/{cmd_id}    Kill running command
 ```
@@ -1272,6 +1273,7 @@ POST /api/v1/sessions HTTP/1.1
 Content-Type: application/json
 
 {
+  "id": "session-abc123",
   "workspace": "/home/user/project",
   "policy": "default",
   "idle_timeout": "30m",
@@ -1491,6 +1493,8 @@ agentsh
 │   ├── show    Show policy details
 │   └── validate Validate policy file
 └── config      Manage configuration
+    ├── show    Show resolved config
+    └── validate Validate config file
 ```
 
 ### 12.2 CLI Examples
@@ -1990,6 +1994,7 @@ See [Section 9.2](#92-policy-configuration) for policy file format.
 | `AGENTSH_HTTP_ADDR` | HTTP listen address | `0.0.0.0:8080` |
 | `AGENTSH_GRPC_ADDR` | gRPC listen address | `0.0.0.0:9090` |
 | `AGENTSH_DATA_DIR` | Data directory | `/var/lib/agentsh` |
+| `AGENTSH_NO_AUTO` | Disable CLI auto-start/auto-create behaviors | unset |
 
 ---
 
@@ -2252,4 +2257,3 @@ Commits: 2
 ---
 
 *This specification is a living document and will be updated as agentsh evolves.*
-

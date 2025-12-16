@@ -16,3 +16,6 @@ tmp-server.out
 *.db-wal
 
 coverage.out
+
+.gocache/
+.gomodcache/

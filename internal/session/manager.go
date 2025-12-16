@@ -2,10 +2,12 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +15,13 @@ import (
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
+
+var (
+	ErrSessionExists    = errors.New("session already exists")
+	ErrInvalidSessionID = errors.New("invalid session id")
+)
+
+var sessionIDRe = regexp.MustCompile(`^session-[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
 
 type Session struct {
 	mu sync.Mutex
@@ -60,6 +69,10 @@ func NewManager(maxSessions int) *Manager {
 }
 
 func (m *Manager) Create(workspace, policy string) (*Session, error) {
+	return m.CreateWithID("", workspace, policy)
+}
+
+func (m *Manager) CreateWithID(id, workspace, policy string) (*Session, error) {
 	if workspace == "" {
 		return nil, fmt.Errorf("workspace is required")
 	}
@@ -81,7 +94,14 @@ func (m *Manager) Create(workspace, policy string) (*Session, error) {
 		return nil, fmt.Errorf("max sessions reached")
 	}
 
-	id := "session-" + uuid.NewString()
+	if id == "" {
+		id = "session-" + uuid.NewString()
+	} else if !sessionIDRe.MatchString(id) {
+		return nil, ErrInvalidSessionID
+	}
+	if _, ok := m.sessions[id]; ok {
+		return nil, ErrSessionExists
+	}
 	now := time.Now().UTC()
 	s := &Session{
 		ID:             id,

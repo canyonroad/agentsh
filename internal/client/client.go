@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -20,20 +21,62 @@ type Client struct {
 	httpClient *http.Client
 }
 
+type HTTPError struct {
+	Method     string
+	Path       string
+	Status     string
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPError) Error() string {
+	msg := strings.TrimSpace(e.Body)
+	if msg == "" {
+		return fmt.Sprintf("%s %s: %s", e.Method, e.Path, e.Status)
+	}
+	return fmt.Sprintf("%s %s: %s: %s", e.Method, e.Path, e.Status, msg)
+}
+
 func New(baseURL string, apiKey string) *Client {
 	baseURL = strings.TrimRight(baseURL, "/")
+	hc := &http.Client{Timeout: 30 * time.Second}
+	if u, err := url.Parse(baseURL); err == nil && strings.EqualFold(u.Scheme, "unix") {
+		sock := u.Path
+		if sock == "" {
+			sock = u.Host
+		} else if u.Host != "" {
+			sock = u.Host + u.Path
+		}
+		sock = strings.TrimSpace(sock)
+		if sock != "" {
+			dialer := &net.Dialer{}
+			hc.Transport = &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return dialer.DialContext(ctx, "unix", sock)
+				},
+			}
+			baseURL = "http://unix"
+		}
+	}
 	return &Client{
-		baseURL: baseURL,
-		apiKey:  apiKey,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		baseURL:    baseURL,
+		apiKey:     apiKey,
+		httpClient: hc,
 	}
 }
 
 func (c *Client) CreateSession(ctx context.Context, workspace, policy string) (types.Session, error) {
 	var out types.Session
-	reqBody := map[string]any{"workspace": workspace, "policy": policy}
+	reqBody := types.CreateSessionRequest{Workspace: workspace, Policy: policy}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/sessions", nil, reqBody, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func (c *Client) CreateSessionWithID(ctx context.Context, id, workspace, policy string) (types.Session, error) {
+	var out types.Session
+	reqBody := types.CreateSessionRequest{ID: id, Workspace: workspace, Policy: policy}
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/sessions", nil, reqBody, &out); err != nil {
 		return out, err
 	}
@@ -181,7 +224,13 @@ func (c *Client) doJSON(ctx context.Context, method, path string, q url.Values, 
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(b)))
+		return &HTTPError{
+			Method:     method,
+			Path:       path,
+			Status:     resp.Status,
+			StatusCode: resp.StatusCode,
+			Body:       string(b),
+		}
 	}
 
 	if out == nil {

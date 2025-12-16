@@ -119,6 +119,10 @@ agentsh --api-key sk-dev-local session create --workspace /home/user/project
 agentsh exec SESSION_ID -- npm install
 agentsh exec SESSION_ID -- python script.py
 
+# Convenience: if the server isn't running, `agentsh exec` will auto-start a local server (using `AGENTSH_CONFIG` or `config.yml`).
+# If SESSION_ID doesn't exist yet, it will be created using the current working directory as the workspace.
+# Set `AGENTSH_NO_AUTO=1` to disable both behaviors.
+
 # Watch events in real-time
 agentsh events tail SESSION_ID
 ```

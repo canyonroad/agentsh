@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -32,6 +34,11 @@ import (
 
 type Server struct {
 	httpServer *http.Server
+	httpLn     net.Listener
+
+	unixServer *http.Server
+	unixLn     net.Listener
+	unixPath   string
 	store      *composite.Store
 	broker     *events.Broker
 	sessions   *session.Manager
@@ -137,10 +144,41 @@ func New(cfg *config.Config) (*Server, error) {
 	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, approvalsMgr, metricsCollector)
 	router := app.Router()
 
+	readTimeoutStr := cfg.Server.HTTP.ReadTimeout
+	if readTimeoutStr == "" {
+		readTimeoutStr = "30s"
+	}
+	readTimeout, err := time.ParseDuration(readTimeoutStr)
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("parse server.http.read_timeout: %w", err)
+	}
+	writeTimeoutStr := cfg.Server.HTTP.WriteTimeout
+	if writeTimeoutStr == "" {
+		writeTimeoutStr = "5m"
+	}
+	writeTimeout, err := time.ParseDuration(writeTimeoutStr)
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("parse server.http.write_timeout: %w", err)
+	}
+	maxReqSizeStr := cfg.Server.HTTP.MaxRequestSize
+	if maxReqSizeStr == "" {
+		maxReqSizeStr = "10MB"
+	}
+	maxReqBytes, err := config.ParseByteSize(maxReqSizeStr)
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("parse server.http.max_request_size: %w", err)
+	}
+	handler := withRequestBodyLimit(router, maxReqBytes)
+
 	s := &http.Server{
 		Addr:              cfg.Server.HTTP.Addr,
-		Handler:           router,
+		Handler:           handler,
 		ReadHeaderTimeout: 15 * time.Second,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
 	}
 
 	sessionTimeout := limits.SessionTimeout
@@ -187,6 +225,50 @@ func New(cfg *config.Config) (*Server, error) {
 		reapInterval:   reapInterval,
 	}
 
+	ln, err := listenHTTP(cfg)
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	srv.httpLn = ln
+
+	if cfg.Server.UnixSocket.Enabled && cfg.Server.UnixSocket.Path != "" {
+		unixPath := cfg.Server.UnixSocket.Path
+		if err := os.MkdirAll(filepath.Dir(unixPath), 0o755); err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("unix socket mkdir: %w", err)
+		}
+		_ = os.Remove(unixPath)
+		unixLn, err := net.Listen("unix", unixPath)
+		if err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("unix socket listen: %w", err)
+		}
+		perms := os.FileMode(0o660)
+		if p := cfg.Server.UnixSocket.Permissions; p != "" {
+			u, perr := strconv.ParseUint(p, 0, 32)
+			if perr != nil {
+				_ = unixLn.Close()
+				_ = store.Close()
+				return nil, fmt.Errorf("unix socket permissions %q: %w", p, perr)
+			}
+			perms = os.FileMode(u)
+		}
+		if err := os.Chmod(unixPath, perms); err != nil {
+			_ = unixLn.Close()
+			_ = store.Close()
+			return nil, fmt.Errorf("unix socket chmod: %w", err)
+		}
+		srv.unixLn = unixLn
+		srv.unixPath = unixPath
+		srv.unixServer = &http.Server{
+			Handler:           handler,
+			ReadHeaderTimeout: 15 * time.Second,
+			ReadTimeout:       readTimeout,
+			WriteTimeout:      writeTimeout,
+		}
+	}
+
 	if cfg.Development.PProf.Enabled {
 		addr := cfg.Development.PProf.Addr
 		if addr == "" {
@@ -208,6 +290,46 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	return srv, nil
+}
+
+func withRequestBodyLimit(next http.Handler, maxBytes int64) http.Handler {
+	if maxBytes <= 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func listenHTTP(cfg *config.Config) (net.Listener, error) {
+	addr := cfg.Server.HTTP.Addr
+	if !cfg.Server.TLS.Enabled {
+		return net.Listen("tcp", addr)
+	}
+	if cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "" {
+		return nil, fmt.Errorf("server.tls enabled but cert_file/key_file missing")
+	}
+	cert, err := tlsLoad(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
+	if err != nil {
+		return nil, err
+	}
+	return tlsListen(addr, cert)
+}
+
+func tlsLoad(certFile, keyFile string) (tls.Certificate, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("load tls keypair: %w", err)
+	}
+	return cert, nil
+}
+
+func tlsListen(addr string, cert tls.Certificate) (net.Listener, error) {
+	cfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	return tls.Listen("tcp", addr, cfg)
 }
 
 type serverEmitter struct {
@@ -243,12 +365,19 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
-		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := s.httpServer.Serve(s.httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
+	if s.unixServer != nil && s.unixLn != nil {
+		go func() {
+			if err := s.unixServer.Serve(s.unixLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
@@ -257,6 +386,9 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.pprofServer != nil {
 			_ = s.pprofServer.Shutdown(shutdownCtx)
 		}
+		if s.unixServer != nil {
+			_ = s.unixServer.Shutdown(shutdownCtx)
+		}
 		return s.httpServer.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		if s.pprofServer != nil {
@@ -264,11 +396,28 @@ func (s *Server) Run(ctx context.Context) error {
 			defer cancel()
 			_ = s.pprofServer.Shutdown(shutdownCtx)
 		}
+		if s.unixServer != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = s.unixServer.Shutdown(shutdownCtx)
+		}
 		return fmt.Errorf("http server: %w", err)
 	}
 }
 
 func (s *Server) Close() error {
+	if s.httpLn != nil {
+		_ = s.httpLn.Close()
+		s.httpLn = nil
+	}
+	if s.unixLn != nil {
+		_ = s.unixLn.Close()
+		s.unixLn = nil
+	}
+	if s.unixPath != "" {
+		_ = os.Remove(s.unixPath)
+		s.unixPath = ""
+	}
 	if s.pprofLn != nil {
 		_ = s.pprofLn.Close()
 		s.pprofLn = nil
