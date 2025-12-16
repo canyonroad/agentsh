@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/approvals"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
@@ -182,6 +182,23 @@ func (f *fileHandle) Release(ctx context.Context) syscall.Errno {
 }
 
 func (n *node) check(_ context.Context, virtPath string, op string) policy.Decision {
+	// Prevent symlink/.. traversal outside the session workspace root.
+	realRoot := ""
+	if n.RootData != nil {
+		realRoot = n.RootData.Path
+	}
+	mustExist := op != "create" && op != "mkdir"
+	if realRoot != "" {
+		if _, err := resolveRealPathUnderRoot(realRoot, virtPath, mustExist); err != nil {
+			return policy.Decision{
+				PolicyDecision:    types.DecisionDeny,
+				EffectiveDecision: types.DecisionDeny,
+				Rule:              "workspace-escape",
+				Message:           err.Error(),
+			}
+		}
+	}
+
 	if n.hooks == nil || n.hooks.Policy == nil {
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
@@ -244,7 +261,7 @@ func (n *node) emitFileEvent(ctx context.Context, evType string, virtPath string
 		Path:      virtPath,
 		Operation: op,
 		Fields: map[string]any{
-			"bytes":  bytes,
+			"bytes":   bytes,
 			"blocked": blocked,
 		},
 		Policy: &types.PolicyInfo{
