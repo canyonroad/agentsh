@@ -29,6 +29,58 @@ agentsh is a purpose-built shell environment that provides AI agents with secure
 | Error: "Permission denied" | Error with context, suggestions, and alternatives |
 | No visibility into what happened | Complete audit trail of all operations |
 
+## How agentsh compares (and why it protects better)
+
+Codex CLI and Claude Code are excellent *agent developer tools*: they help an LLM plan, edit files, and run commands with varying degrees of sandboxing and user approvals. **agentsh is different**: it’s a dedicated execution gateway that sits *under* the agent and makes the *runtime* observable and enforceable at the operation level.
+
+That matters because the risky stuff often happens **inside** “one safe-looking command” (`python script.py`, `npm install`, `make test`): subprocesses, file I/O, and network calls that are invisible at the wrapper/tool boundary. agentsh is built to surface and control those operations, then store and stream them for auditing.
+
+In practice, you can use them together: keep your favorite coding agent UI, but route execution through agentsh so you get **consistent policies + auditability** across scripts, subprocesses, and long-running sessions.
+
+### Protection model: tool boundary vs runtime boundary
+
+| Dimension | Claude Code | Codex CLI | agentsh |
+|----------|-------------|-----------|---------|
+| Primary purpose | Interactive coding agent | Interactive coding agent | **Runtime execution gateway + audit** |
+| Enforcement point | Tool / workflow boundary | Tool + OS sandbox boundary | **Per-operation policy at runtime (file + net + command)** |
+| Visibility into subprocess file I/O | Limited (not per-open/write) | Limited (not per-open/write) | **Full workspace view interception via FUSE** |
+| Visibility into DNS + outbound connects | Limited | Often blockable/configurable | **DNS + connect events (proxy + optional transparent mode)** |
+| Approval semantics | Tool-level approvals | Tool-level approvals | **Policy decision preserved; shadow-approve or enforced approvals** |
+| Audit storage | Local session logs | Local history/telemetry (varies) | **Pluggable sinks: SQLite + JSONL (default), optional webhook** |
+| Query/search | Ad-hoc | Ad-hoc | **API + CLI queries over SQLite (filters by time/type/path/domain/decision)** |
+| Event streaming | N/A / limited | N/A / limited | **SSE stream per session + metrics endpoint** |
+
+> Note: The Claude Code / Codex CLI columns are a *high-level practitioner summary*. Exact behavior varies by version, platform, and configuration.
+
+### Practitioner snapshot: Claude Code vs Codex CLI (context)
+
+| Aspect | Claude Code | OpenAI Codex CLI |
+|--------|-------------|------------------|
+| Language/runtime | Node.js (bundled) | Native binary (Rust) |
+| Open source | Bundled/obfuscated | Apache 2.0 open source |
+| Sandbox | Process isolation | OS-level sandboxing (platform-specific) |
+| File editing | String replacement (`Edit`) | Diff-like patches (`apply_patch`) |
+| Project docs | `CLAUDE.md` | `AGENTS.md` |
+| Observability | Session JSONL logs | Telemetry/history (varies) |
+
+### Sandbox & security (context)
+
+| Feature | Claude Code | Codex CLI |
+|---------|-------------|----------|
+| OS-level sandbox enforcement | No (process isolation) | Yes (platform-specific) |
+| Network blocking | Typically not enforced | Often blockable/configurable |
+| Filesystem restrictions | Approval/workflow based | Kernel-enforced sandbox (mode-dependent) |
+| Audit trail focus | Session logs | Tool history/telemetry (varies) |
+
+### File editing approach (context)
+
+| Aspect | Claude Code `Edit` | Codex `apply_patch` |
+|--------|---------------------|---------------------|
+| Mechanism | Exact string replacement | Diff-like patch with context |
+| Multi-file changes | Multiple edits | Single patch can touch many files |
+| Rename/move | Separate steps | Supported in patch format |
+| Learning curve | Lower | Higher |
+
 ## Quick Start
 
 ### Build + Run (local)
