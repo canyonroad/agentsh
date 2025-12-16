@@ -60,12 +60,25 @@ func (c *Client) DestroySession(ctx context.Context, id string) error {
 	return c.doJSON(ctx, http.MethodDelete, "/api/v1/sessions/"+url.PathEscape(id), nil, nil, nil)
 }
 
+func (c *Client) PatchSession(ctx context.Context, id string, req types.SessionPatchRequest) (types.Session, error) {
+	var out types.Session
+	if err := c.doJSON(ctx, http.MethodPatch, "/api/v1/sessions/"+url.PathEscape(id), nil, req, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
 func (c *Client) Exec(ctx context.Context, sessionID string, req types.ExecRequest) (types.ExecResponse, error) {
 	var out types.ExecResponse
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/sessions/"+url.PathEscape(sessionID)+"/exec", nil, req, &out); err != nil {
 		return out, err
 	}
 	return out, nil
+}
+
+func (c *Client) KillCommand(ctx context.Context, sessionID string, commandID string) error {
+	path := "/api/v1/sessions/" + url.PathEscape(sessionID) + "/kill/" + url.PathEscape(commandID)
+	return c.doJSON(ctx, http.MethodPost, path, nil, map[string]any{}, nil)
 }
 
 func (c *Client) QuerySessionEvents(ctx context.Context, sessionID string, q url.Values) ([]types.Event, error) {

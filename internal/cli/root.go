@@ -24,6 +24,7 @@ func NewRoot(version string) *cobra.Command {
 	cmd.AddCommand(newServerCmd())
 	cmd.AddCommand(newSessionCmd())
 	cmd.AddCommand(newExecCmd())
+	cmd.AddCommand(newKillCmd())
 	cmd.AddCommand(newEventsCmd())
 	cmd.AddCommand(newOutputCmd())
 	cmd.AddCommand(newApproveCmd())

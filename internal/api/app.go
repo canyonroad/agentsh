@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
@@ -65,12 +66,14 @@ func (a *App) Router() http.Handler {
 		r.Post("/sessions", a.createSession)
 		r.Get("/sessions", a.listSessions)
 		r.Get("/sessions/{id}", a.getSession)
+		r.Patch("/sessions/{id}", a.patchSession)
 		r.Delete("/sessions/{id}", a.destroySession)
 
 		r.Post("/sessions/{id}/exec", a.execInSession)
 		r.Get("/sessions/{id}/events", a.streamEvents)
 		r.Get("/sessions/{id}/history", a.sessionHistory)
 		r.Get("/sessions/{id}/output/{cmdID}", a.getOutputChunk)
+		r.Post("/sessions/{id}/kill/{cmdID}", a.killCommand)
 
 		r.Get("/events/search", a.searchEvents)
 
@@ -353,6 +356,41 @@ func (a *App) getSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.Snapshot())
 }
 
+func (a *App) patchSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	s, ok := a.sessions.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+
+	var req types.SessionPatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	if err := s.ApplyPatch(req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "session_updated",
+		SessionID: id,
+		Fields: map[string]any{
+			"cwd":   req.Cwd,
+			"env":   req.Env,
+			"unset": req.Unset,
+		},
+	}
+	_ = a.store.AppendEvent(r.Context(), ev)
+	a.broker.Publish(ev)
+
+	writeJSON(w, http.StatusOK, s.Snapshot())
+}
+
 func (a *App) destroySession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	s, ok := a.sessions.Get(id)
@@ -375,6 +413,49 @@ func (a *App) destroySession(w http.ResponseWriter, r *http.Request) {
 	a.broker.Publish(ev)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) killCommand(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+	s, ok := a.sessions.Get(sessionID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+	cmdID := chi.URLParam(r, "cmdID")
+	current := s.CurrentCommandID()
+	if current == "" || current != cmdID {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "command not running"})
+		return
+	}
+	pid := s.CurrentProcessPID()
+	if pid <= 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "command pid not available"})
+		return
+	}
+
+	// Send to process group (negative pid); SIGTERM first, then SIGKILL shortly after.
+	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	go func() {
+		time.Sleep(2 * time.Second)
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	}()
+
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "command_killed",
+		SessionID: sessionID,
+		CommandID: cmdID,
+		Fields: map[string]any{
+			"pid":    pid,
+			"signal": "TERM",
+		},
+	}
+	_ = a.store.AppendEvent(r.Context(), ev)
+	a.broker.Publish(ev)
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 type storeEmitter struct {

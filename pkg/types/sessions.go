@@ -21,3 +21,8 @@ type Session struct {
 	Cwd string `json:"cwd"`
 }
 
+type SessionPatchRequest struct {
+	Cwd   string            `json:"cwd,omitempty"`
+	Env   map[string]string `json:"env,omitempty"`
+	Unset []string          `json:"unset,omitempty"`
+}

@@ -30,6 +30,7 @@ type Session struct {
 	History []string
 
 	currentCommandID string
+	currentProcPID   int
 	execMu           sync.Mutex
 
 	workspaceUnmount func() error
@@ -153,6 +154,7 @@ func (s *Session) LockExec() func() {
 		s.mu.Lock()
 		s.State = types.SessionStateReady
 		s.currentCommandID = ""
+		s.currentProcPID = 0
 		s.LastActivity = time.Now().UTC()
 		s.mu.Unlock()
 		s.execMu.Unlock()
@@ -169,6 +171,18 @@ func (s *Session) CurrentCommandID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.currentCommandID
+}
+
+func (s *Session) SetCurrentProcessPID(pid int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.currentProcPID = pid
+}
+
+func (s *Session) CurrentProcessPID() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.currentProcPID
 }
 
 func (s *Session) TouchAt(t time.Time) {
@@ -459,6 +473,41 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 	default:
 		return false, 0, nil, nil
 	}
+}
+
+func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
+	s.Touch()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if patch.Cwd != "" {
+		cwd := patch.Cwd
+		if !strings.HasPrefix(cwd, "/") {
+			cwd = filepath.ToSlash(filepath.Join(s.Cwd, cwd))
+		}
+		cwd = filepath.ToSlash(filepath.Clean(cwd))
+		if cwd == "." || cwd == "" {
+			cwd = "/workspace"
+		}
+		if !strings.HasPrefix(cwd, "/workspace") {
+			return fmt.Errorf("cwd must be under /workspace")
+		}
+		s.Cwd = cwd
+	}
+
+	if s.Env == nil {
+		s.Env = map[string]string{}
+	}
+	for k, v := range patch.Env {
+		if strings.TrimSpace(k) == "" {
+			continue
+		}
+		s.Env[k] = v
+	}
+	for _, k := range patch.Unset {
+		delete(s.Env, k)
+	}
+	return nil
 }
 
 func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, err error) {

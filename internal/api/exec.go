@@ -65,6 +65,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		cmd = exec.CommandContext(ctx, "ip", allArgs...)
 	}
 	cmd.Dir = workdir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	env := mergeEnv(os.Environ(), s, req.Env)
 	cmd.Env = env
@@ -84,6 +85,9 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 
 	if err := cmd.Start(); err != nil {
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
+	}
+	if cmd.Process != nil {
+		s.SetCurrentProcessPID(cmd.Process.Pid)
 	}
 
 	type capRes struct {
