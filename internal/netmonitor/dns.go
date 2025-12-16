@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 type DNSInterceptor struct {
 	sessionID string
 	sess      *session.Session
+	dnsCache  *DNSCache
 	policy    *policy.Engine
 	approvals *approvals.Manager
 	emit      Emitter
@@ -29,7 +31,7 @@ type DNSInterceptor struct {
 	upstream string
 }
 
-func StartDNS(listenAddr string, upstream string, sessionID string, sess *session.Session, engine *policy.Engine, approvalsMgr *approvals.Manager, emit Emitter) (*DNSInterceptor, int, error) {
+func StartDNS(listenAddr string, upstream string, sessionID string, sess *session.Session, dnsCache *DNSCache, engine *policy.Engine, approvalsMgr *approvals.Manager, emit Emitter) (*DNSInterceptor, int, error) {
 	if upstream == "" {
 		upstream = "8.8.8.8:53"
 	}
@@ -40,6 +42,7 @@ func StartDNS(listenAddr string, upstream string, sessionID string, sess *sessio
 	d := &DNSInterceptor{
 		sessionID: sessionID,
 		sess:      sess,
+		dnsCache:  dnsCache,
 		policy:    engine,
 		approvals: approvalsMgr,
 		emit:      emit,
@@ -91,6 +94,11 @@ func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 	}
 
 	dec := d.policyDecision(domain, 53)
+	// Default deny policies are typically intended for outbound TCP/UDP connects, not DNS lookups.
+	// If the only match is default-deny, treat DNS as monitor-only unless the policy explicitly matches port 53.
+	if dec.PolicyDecision == types.DecisionDeny && dec.Rule == "default-deny-network" {
+		dec = policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow, Rule: "dns-monitor-only"}
+	}
 	dec = d.maybeApprove(context.Background(), commandID, dec, "dns", domain)
 
 	ev := types.Event{
@@ -136,6 +144,12 @@ func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 	n, err := upConn.Read(resp)
 	if err != nil {
 		return err
+	}
+	if d.dnsCache != nil && domain != "" {
+		ips := parseDNSAnswerIPs(resp[:n])
+		if len(ips) > 0 {
+			d.dnsCache.Record(strings.ToLower(domain), ips, time.Now().UTC())
+		}
 	}
 	_, _ = d.pc.WriteTo(resp[:n], clientAddr)
 	return nil

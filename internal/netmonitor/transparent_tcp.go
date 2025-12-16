@@ -21,6 +21,7 @@ import (
 type TransparentTCP struct {
 	sessionID string
 	sess      *session.Session
+	dnsCache  *DNSCache
 	policy    *policy.Engine
 	approvals *approvals.Manager
 	emit      Emitter
@@ -30,7 +31,7 @@ type TransparentTCP struct {
 	done chan struct{}
 }
 
-func StartTransparentTCP(listenAddr string, sessionID string, sess *session.Session, engine *policy.Engine, approvalsMgr *approvals.Manager, emit Emitter) (*TransparentTCP, int, error) {
+func StartTransparentTCP(listenAddr string, sessionID string, sess *session.Session, dnsCache *DNSCache, engine *policy.Engine, approvalsMgr *approvals.Manager, emit Emitter) (*TransparentTCP, int, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, 0, err
@@ -38,6 +39,7 @@ func StartTransparentTCP(listenAddr string, sessionID string, sess *session.Sess
 	t := &TransparentTCP{
 		sessionID: sessionID,
 		sess:      sess,
+		dnsCache:  dnsCache,
 		policy:    engine,
 		approvals: approvalsMgr,
 		emit:      emit,
@@ -94,9 +96,15 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 		commandID = t.sess.CurrentCommandID()
 	}
 
-	dec := t.policyDecision(dstIP.String(), dstPort)
+	domain := dstIP.String()
+	if t.dnsCache != nil {
+		if d, ok := t.dnsCache.LookupByIP(dstIP, time.Now().UTC()); ok && d != "" {
+			domain = d
+		}
+	}
+	dec := t.policyDecision(domain, dstIP, dstPort)
 	dec = t.maybeApprove(context.Background(), commandID, dec, "network", remote)
-	connectEv := t.netEvent("net_connect", commandID, dstIP.String(), remote, dstPort, dec, nil)
+	connectEv := t.netEvent("net_connect", commandID, domain, remote, dstPort, dec, nil)
 	_ = t.emit.AppendEvent(context.Background(), connectEv)
 	t.emit.Publish(connectEv)
 
@@ -125,17 +133,17 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 	<-errCh
 	<-errCh
 
-	closeEv := t.netEvent("net_close", commandID, dstIP.String(), remote, dstPort, dec, map[string]any{"bytes_sent": upBytes, "bytes_received": downBytes})
+	closeEv := t.netEvent("net_close", commandID, domain, remote, dstPort, dec, map[string]any{"bytes_sent": upBytes, "bytes_received": downBytes})
 	_ = t.emit.AppendEvent(context.Background(), closeEv)
 	t.emit.Publish(closeEv)
 	return nil
 }
 
-func (t *TransparentTCP) policyDecision(host string, port int) policy.Decision {
+func (t *TransparentTCP) policyDecision(domain string, ip net.IP, port int) policy.Decision {
 	if t.policy == nil {
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
-	return t.policy.CheckNetwork(host, port)
+	return t.policy.CheckNetworkIP(domain, ip, port)
 }
 
 func (t *TransparentTCP) maybeApprove(ctx context.Context, commandID string, dec policy.Decision, kind string, target string) policy.Decision {

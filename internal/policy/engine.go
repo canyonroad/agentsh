@@ -134,6 +134,65 @@ func (e *Engine) Limits() Limits {
 	}
 }
 
+// CheckNetworkIP evaluates network_rules using a known destination IP (no DNS resolution).
+// If domain is empty, only CIDR/port-based rules can match.
+func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
+	if e.policy == nil {
+		return Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
+	}
+	domain = strings.ToLower(strings.TrimSpace(domain))
+
+	var ips []net.IP
+	if ip != nil {
+		ips = []net.IP{ip}
+	} else if parsed := net.ParseIP(domain); parsed != nil {
+		ips = []net.IP{parsed}
+	}
+
+	for _, r := range e.compiledNetworkRules {
+		if len(r.ports) > 0 {
+			if _, ok := r.ports[port]; !ok {
+				continue
+			}
+		}
+
+		if len(r.domainGlobs) > 0 {
+			matched := false
+			for _, g := range r.domainGlobs {
+				if domain != "" && g.Match(domain) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		if len(r.cidrs) > 0 {
+			matched := false
+			for _, cand := range ips {
+				for _, cidr := range r.cidrs {
+					if cidr.Contains(cand) {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message)
+	}
+
+	return e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "")
+}
+
 func (e *Engine) CheckCommand(command string, args []string) Decision {
 	cmd := strings.ToLower(filepath.Base(command))
 	for _, r := range e.compiledCommandRules {

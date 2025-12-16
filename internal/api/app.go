@@ -242,11 +242,12 @@ func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session
 	em := storeEmitter{store: a.store, broker: a.broker}
 
 	// Start interceptors on host; netns will DNAT to host veth IP.
-	tcp, tcpPort, err := netmonitor.StartTransparentTCP("0.0.0.0:0", s.ID, s, a.policy, a.approvals, em)
+	dnsCache := netmonitor.NewDNSCache(5 * time.Minute)
+	tcp, tcpPort, err := netmonitor.StartTransparentTCP("0.0.0.0:0", s.ID, s, dnsCache, a.policy, a.approvals, em)
 	if err != nil {
 		return err
 	}
-	dns, dnsPort, err := netmonitor.StartDNS("0.0.0.0:0", "8.8.8.8:53", s.ID, s, a.policy, a.approvals, em)
+	dns, dnsPort, err := netmonitor.StartDNS("0.0.0.0:0", "8.8.8.8:53", s.ID, s, dnsCache, a.policy, a.approvals, em)
 	if err != nil {
 		_ = tcp.Close()
 		return err
