@@ -14,6 +14,7 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/fsmonitor"
+	"github.com/agentsh/agentsh/internal/netmonitor"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
@@ -162,6 +163,38 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Optional: start an explicit HTTP(S) proxy for outbound network monitoring.
+	if a.cfg.Sandbox.Network.Enabled {
+		em := storeEmitter{store: a.store, broker: a.broker}
+		pr, proxyURL, err := netmonitor.StartProxy(a.cfg.Sandbox.Network.ProxyListenAddr, s.ID, s, a.policy, em)
+		if err != nil {
+			fail := types.Event{
+				ID:        uuid.NewString(),
+				Timestamp: time.Now().UTC(),
+				Type:      "net_proxy_failed",
+				SessionID: s.ID,
+				Fields: map[string]any{
+					"error": err.Error(),
+				},
+			}
+			_ = a.store.AppendEvent(r.Context(), fail)
+			a.broker.Publish(fail)
+		} else {
+			s.SetProxy(proxyURL, pr.Close)
+			okEv := types.Event{
+				ID:        uuid.NewString(),
+				Timestamp: time.Now().UTC(),
+				Type:      "net_proxy_started",
+				SessionID: s.ID,
+				Fields: map[string]any{
+					"proxy_url": proxyURL,
+				},
+			}
+			_ = a.store.AppendEvent(r.Context(), okEv)
+			a.broker.Publish(okEv)
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, s.Snapshot())
 }
 
@@ -191,6 +224,7 @@ func (a *App) destroySession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
 		return
 	}
+	_ = s.CloseProxy()
 	_ = s.UnmountWorkspace()
 	_ = a.sessions.Destroy(id)
 

@@ -176,6 +176,28 @@ func mergeEnv(base []string, s *session.Session, overrides map[string]string) []
 		}
 	}
 
+	if proxy := s.ProxyURL(); proxy != "" {
+		envMap["HTTP_PROXY"] = proxy
+		envMap["HTTPS_PROXY"] = proxy
+		envMap["ALL_PROXY"] = proxy
+		envMap["http_proxy"] = proxy
+		envMap["https_proxy"] = proxy
+		envMap["all_proxy"] = proxy
+
+		noProxy := envMap["NO_PROXY"]
+		if noProxy == "" {
+			noProxy = envMap["no_proxy"]
+		}
+		if !strings.Contains(noProxy, "localhost") {
+			if noProxy != "" && !strings.HasSuffix(noProxy, ",") {
+				noProxy += ","
+			}
+			noProxy += "localhost,127.0.0.1"
+		}
+		envMap["NO_PROXY"] = noProxy
+		envMap["no_proxy"] = noProxy
+	}
+
 	_, sessEnv, _ := s.GetCwdEnvHistory()
 	for k, v := range sessEnv {
 		envMap[k] = v

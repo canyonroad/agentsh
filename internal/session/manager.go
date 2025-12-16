@@ -30,6 +30,9 @@ type Session struct {
 	execMu           sync.Mutex
 
 	workspaceUnmount func() error
+
+	proxyURL   string
+	proxyClose func() error
 }
 
 type Manager struct {
@@ -179,6 +182,31 @@ func (s *Session) UnmountWorkspace() error {
 	s.mu.Lock()
 	fn := s.workspaceUnmount
 	s.workspaceUnmount = nil
+	s.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (s *Session) SetProxy(url string, closeFn func() error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.proxyURL = url
+	s.proxyClose = closeFn
+}
+
+func (s *Session) ProxyURL() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.proxyURL
+}
+
+func (s *Session) CloseProxy() error {
+	s.mu.Lock()
+	fn := s.proxyClose
+	s.proxyClose = nil
+	s.proxyURL = ""
 	s.mu.Unlock()
 	if fn != nil {
 		return fn()

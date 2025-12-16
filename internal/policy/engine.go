@@ -1,10 +1,12 @@
 package policy
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/gobwas/glob"
@@ -159,6 +161,70 @@ func (e *Engine) CheckFile(p string, operation string) Decision {
 	}
 	// Default deny (policy files typically include an explicit default deny, but we enforce it here too).
 	return e.wrapDecision(string(types.DecisionDeny), "default-deny-files", "")
+}
+
+func (e *Engine) CheckNetwork(domain string, port int) Decision {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	var ips []net.IP
+	if ip := net.ParseIP(domain); ip != nil {
+		ips = []net.IP{ip}
+	} else if domain != "" {
+		// Best-effort resolution for CIDR rules (e.g., block-private-networks).
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, domain)
+		if err == nil {
+			for _, a := range addrs {
+				ips = append(ips, a.IP)
+			}
+		}
+	}
+
+	for _, r := range e.compiledNetworkRules {
+		if len(r.ports) > 0 {
+			if _, ok := r.ports[port]; !ok {
+				continue
+			}
+		}
+
+		// Match domains if present.
+		if len(r.domainGlobs) > 0 {
+			matched := false
+			for _, g := range r.domainGlobs {
+				if domain != "" && g.Match(domain) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		// Match CIDRs if present.
+		if len(r.cidrs) > 0 {
+			matched := false
+			for _, ip := range ips {
+				for _, cidr := range r.cidrs {
+					if cidr.Contains(ip) {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		// If rule has no selectors, it matches (e.g., approve unknown https by port only).
+		return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message)
+	}
+
+	return e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "")
 }
 
 func matchOp(ops map[string]struct{}, op string) bool {

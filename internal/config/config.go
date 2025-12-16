@@ -78,12 +78,18 @@ type SessionsConfig struct {
 
 type SandboxConfig struct {
 	FUSE SandboxFUSEConfig `yaml:"fuse"`
+	Network SandboxNetworkConfig `yaml:"network"`
 }
 
 type SandboxFUSEConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// Optional base dir for mounts; defaults to sessions.base_dir.
 	MountBaseDir string `yaml:"mount_base_dir"`
+}
+
+type SandboxNetworkConfig struct {
+	Enabled bool `yaml:"enabled"`
+	ProxyListenAddr string `yaml:"proxy_listen_addr"`
 }
 
 type PoliciesConfig struct {
@@ -139,6 +145,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Sandbox.FUSE.MountBaseDir == "" {
 		cfg.Sandbox.FUSE.MountBaseDir = cfg.Sessions.BaseDir
+	}
+	if cfg.Sandbox.Network.ProxyListenAddr == "" {
+		cfg.Sandbox.Network.ProxyListenAddr = "127.0.0.1:0"
 	}
 	if cfg.Policies.Default == "" {
 		cfg.Policies.Default = "default"
