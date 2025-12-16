@@ -25,11 +25,11 @@ import (
 )
 
 type App struct {
-	cfg    *config.Config
+	cfg      *config.Config
 	sessions *session.Manager
-	store  *composite.Store
-	policy *policy.Engine
-	broker *events.Broker
+	store    *composite.Store
+	policy   *policy.Engine
+	broker   *events.Broker
 
 	apiKeyAuth *auth.APIKeyAuth
 
@@ -246,7 +246,7 @@ func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session
 	if err != nil {
 		return err
 	}
-	dns, dnsPort, err := netmonitor.StartDNS("0.0.0.0:0", "8.8.8.8:53", s.ID, s, em)
+	dns, dnsPort, err := netmonitor.StartDNS("0.0.0.0:0", "8.8.8.8:53", s.ID, s, a.policy, a.approvals, em)
 	if err != nil {
 		_ = tcp.Close()
 		return err
@@ -276,12 +276,12 @@ func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session
 		Type:      "transparent_net_setup",
 		SessionID: s.ID,
 		Fields: map[string]any{
-			"netns":       ns.Name,
-			"subnet":      ns.SubnetCIDR,
-			"host_ip":     ns.HostIP,
-			"ns_ip":       ns.NSIP,
-			"proxy_port":  tcpPort,
-			"dns_port":    dnsPort,
+			"netns":      ns.Name,
+			"subnet":     ns.SubnetCIDR,
+			"host_ip":    ns.HostIP,
+			"ns_ip":      ns.NSIP,
+			"proxy_port": tcpPort,
+			"dns_port":   dnsPort,
 		},
 	}
 	_ = a.store.AppendEvent(ctx, ev)
@@ -337,8 +337,10 @@ type storeEmitter struct {
 	broker *events.Broker
 }
 
-func (e storeEmitter) AppendEvent(ctx context.Context, ev types.Event) error { return e.store.AppendEvent(ctx, ev) }
-func (e storeEmitter) Publish(ev types.Event)                                 { e.broker.Publish(ev) }
+func (e storeEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
+	return e.store.AppendEvent(ctx, ev)
+}
+func (e storeEmitter) Publish(ev types.Event) { e.broker.Publish(ev) }
 
 func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -427,7 +429,7 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 			Timestamp: start,
 			Request:   req,
 			Result: types.ExecResult{
-				ExitCode: 126,
+				ExitCode:   126,
 				DurationMs: int64(time.Since(start).Milliseconds()),
 				Error: &types.ExecError{
 					Code:       code,
@@ -471,7 +473,7 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 		SessionID: id,
 		CommandID: cmdID,
 		Fields: map[string]any{
-			"exit_code": exitCode,
+			"exit_code":   exitCode,
 			"duration_ms": int64(end.Sub(start).Milliseconds()),
 		},
 	}
@@ -523,14 +525,14 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := types.ExecResult{
-		ExitCode:          exitCode,
-		Stdout:            string(stdoutB),
-		Stderr:            string(stderrB),
-		StdoutTruncated:   stdoutTrunc,
-		StderrTruncated:   stderrTrunc,
-		StdoutTotalBytes:  stdoutTotal,
-		StderrTotalBytes:  stderrTotal,
-		DurationMs:        int64(end.Sub(start).Milliseconds()),
+		ExitCode:         exitCode,
+		Stdout:           string(stdoutB),
+		Stderr:           string(stderrB),
+		StdoutTruncated:  stdoutTrunc,
+		StderrTruncated:  stderrTrunc,
+		StdoutTotalBytes: stdoutTotal,
+		StderrTotalBytes: stderrTotal,
+		DurationMs:       int64(end.Sub(start).Milliseconds()),
 	}
 	if execErr != nil {
 		res.Error = &types.ExecError{
@@ -657,14 +659,14 @@ func (a *App) getOutputChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"command_id":    cmdID,
-		"stream":        stream,
-		"offset":        offset,
-		"limit":         limit,
-		"total_bytes":   total,
-		"truncated":     truncated,
-		"data":          string(chunk),
-		"has_more":      offset+int64(len(chunk)) < total,
+		"command_id":  cmdID,
+		"stream":      stream,
+		"offset":      offset,
+		"limit":       limit,
+		"total_bytes": total,
+		"truncated":   truncated,
+		"data":        string(chunk),
+		"has_more":    offset+int64(len(chunk)) < total,
 	})
 }
 

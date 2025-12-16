@@ -13,8 +13,8 @@ import (
 )
 
 type Engine struct {
-	policy            *Policy
-	enforceApprovals  bool
+	policy           *Policy
+	enforceApprovals bool
 
 	compiledFileRules    []compiledFileRule
 	compiledNetworkRules []compiledNetworkRule
@@ -35,9 +35,9 @@ type compiledNetworkRule struct {
 }
 
 type compiledCommandRule struct {
-	rule        CommandRule
-	commands    map[string]struct{}
-	argsGlobs   []glob.Glob
+	rule      CommandRule
+	commands  map[string]struct{}
+	argsGlobs []glob.Glob
 }
 
 type Decision struct {
@@ -165,18 +165,28 @@ func (e *Engine) CheckFile(p string, operation string) Decision {
 
 func (e *Engine) CheckNetwork(domain string, port int) Decision {
 	domain = strings.ToLower(strings.TrimSpace(domain))
-	var ips []net.IP
+	var (
+		ips      []net.IP
+		resolved bool
+	)
 	if ip := net.ParseIP(domain); ip != nil {
 		ips = []net.IP{ip}
-	} else if domain != "" {
-		// Best-effort resolution for CIDR rules (e.g., block-private-networks).
+		resolved = true
+	}
+
+	resolveIPs := func() {
+		if resolved || domain == "" {
+			return
+		}
+		resolved = true
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, domain)
-		if err == nil {
-			for _, a := range addrs {
-				ips = append(ips, a.IP)
-			}
+		if err != nil {
+			return
+		}
+		for _, a := range addrs {
+			ips = append(ips, a.IP)
 		}
 	}
 
@@ -203,6 +213,7 @@ func (e *Engine) CheckNetwork(domain string, port int) Decision {
 
 		// Match CIDRs if present.
 		if len(r.cidrs) > 0 {
+			resolveIPs()
 			matched := false
 			for _, ip := range ips {
 				for _, cidr := range r.cidrs {

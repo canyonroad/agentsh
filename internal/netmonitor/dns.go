@@ -2,11 +2,14 @@ package netmonitor
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/approvals"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
@@ -15,6 +18,8 @@ import (
 type DNSInterceptor struct {
 	sessionID string
 	sess      *session.Session
+	policy    *policy.Engine
+	approvals *approvals.Manager
 	emit      Emitter
 
 	pc   net.PacketConn
@@ -24,7 +29,7 @@ type DNSInterceptor struct {
 	upstream string
 }
 
-func StartDNS(listenAddr string, upstream string, sessionID string, sess *session.Session, emit Emitter) (*DNSInterceptor, int, error) {
+func StartDNS(listenAddr string, upstream string, sessionID string, sess *session.Session, engine *policy.Engine, approvalsMgr *approvals.Manager, emit Emitter) (*DNSInterceptor, int, error) {
 	if upstream == "" {
 		upstream = "8.8.8.8:53"
 	}
@@ -35,6 +40,8 @@ func StartDNS(listenAddr string, upstream string, sessionID string, sess *sessio
 	d := &DNSInterceptor{
 		sessionID: sessionID,
 		sess:      sess,
+		policy:    engine,
+		approvals: approvalsMgr,
 		emit:      emit,
 		pc:        pc,
 		done:      make(chan struct{}),
@@ -78,28 +85,42 @@ func (d *DNSInterceptor) loop() {
 
 func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 	domain := parseDNSDomain(query)
+	commandID := ""
+	if d.sess != nil {
+		commandID = d.sess.CurrentCommandID()
+	}
+
+	dec := d.policyDecision(domain, 53)
+	dec = d.maybeApprove(context.Background(), commandID, dec, "dns", domain)
+
 	ev := types.Event{
 		ID:        uuid.NewString(),
 		Timestamp: time.Now().UTC(),
 		Type:      "dns_query",
 		SessionID: d.sessionID,
-		CommandID: "",
+		CommandID: commandID,
 		Domain:    domain,
 		Fields: map[string]any{
 			"upstream": d.upstream,
 		},
 		Policy: &types.PolicyInfo{
-			Decision:          types.DecisionAllow,
-			EffectiveDecision: types.DecisionAllow,
-			Rule:              "dns-monitor-only",
+			Decision:          dec.PolicyDecision,
+			EffectiveDecision: dec.EffectiveDecision,
+			Rule:              dec.Rule,
+			Message:           dec.Message,
+			Approval:          dec.Approval,
 		},
-	}
-	if d.sess != nil {
-		ev.CommandID = d.sess.CurrentCommandID()
 	}
 	if d.emit != nil {
 		_ = d.emit.AppendEvent(context.Background(), ev)
 		d.emit.Publish(ev)
+	}
+
+	if dec.EffectiveDecision == types.DecisionDeny {
+		if resp := dnsRefusedResponse(query); resp != nil {
+			_, _ = d.pc.WriteTo(resp, clientAddr)
+		}
+		return nil
 	}
 
 	upConn, err := net.Dial("udp", d.upstream)
@@ -118,6 +139,61 @@ func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 	}
 	_, _ = d.pc.WriteTo(resp[:n], clientAddr)
 	return nil
+}
+
+func (d *DNSInterceptor) policyDecision(domain string, port int) policy.Decision {
+	if d.policy == nil {
+		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
+	}
+	return d.policy.CheckNetwork(domain, port)
+}
+
+func (d *DNSInterceptor) maybeApprove(ctx context.Context, commandID string, dec policy.Decision, kind string, target string) policy.Decision {
+	if dec.PolicyDecision != types.DecisionApprove || dec.EffectiveDecision != types.DecisionApprove {
+		return dec
+	}
+	if d.approvals == nil {
+		return dec
+	}
+	req := approvals.Request{
+		ID:        "approval-" + uuid.NewString(),
+		SessionID: d.sessionID,
+		CommandID: commandID,
+		Kind:      kind,
+		Target:    target,
+		Rule:      dec.Rule,
+		Message:   dec.Message,
+	}
+	res, err := d.approvals.RequestApproval(ctx, req)
+	if dec.Approval != nil {
+		dec.Approval.ID = req.ID
+	}
+	if err != nil || !res.Approved {
+		dec.EffectiveDecision = types.DecisionDeny
+	} else {
+		dec.EffectiveDecision = types.DecisionAllow
+	}
+	return dec
+}
+
+func dnsRefusedResponse(query []byte) []byte {
+	if len(query) < 12 {
+		return nil
+	}
+	resp := make([]byte, len(query))
+	copy(resp, query)
+
+	flags := binary.BigEndian.Uint16(resp[2:4])
+	flags |= 1 << 15 // QR=1
+	flags &^= 0x000F // clear rcode
+	flags |= 5       // REFUSED
+	binary.BigEndian.PutUint16(resp[2:4], flags)
+
+	// ANCOUNT/NSCOUNT/ARCOUNT = 0, keep QDCOUNT + question section intact.
+	binary.BigEndian.PutUint16(resp[6:8], 0)
+	binary.BigEndian.PutUint16(resp[8:10], 0)
+	binary.BigEndian.PutUint16(resp[10:12], 0)
+	return resp
 }
 
 func parseDNSDomain(msg []byte) string {
@@ -158,4 +234,3 @@ func parseDNSDomain(msg []byte) string {
 func (d *DNSInterceptor) String() string {
 	return fmt.Sprintf("dns(%s)", d.pc.LocalAddr().String())
 }
-
