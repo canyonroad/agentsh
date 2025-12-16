@@ -18,9 +18,11 @@ import (
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	storepkg "github.com/agentsh/agentsh/internal/store"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/internal/store/jsonl"
 	"github.com/agentsh/agentsh/internal/store/sqlite"
+	"github.com/agentsh/agentsh/internal/store/webhook"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
@@ -73,12 +75,34 @@ func New(cfg *config.Config) (*Server, error) {
 			return nil, err
 		}
 	}
-	var store *composite.Store
-	if jsonlStore != nil {
-		store = composite.New(db, db, jsonlStore)
-	} else {
-		store = composite.New(db, db)
+
+	var webhookStore *webhook.Store
+	if cfg.Audit.Webhook.URL != "" {
+		flushEvery, err := time.ParseDuration(cfg.Audit.Webhook.FlushInterval)
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("parse audit.webhook.flush_interval: %w", err)
+		}
+		timeout, err := time.ParseDuration(cfg.Audit.Webhook.Timeout)
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("parse audit.webhook.timeout: %w", err)
+		}
+		webhookStore, err = webhook.New(cfg.Audit.Webhook.URL, cfg.Audit.Webhook.BatchSize, flushEvery, timeout, cfg.Audit.Webhook.Headers)
+		if err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
+
+	var eventStores []storepkg.EventStore
+	if jsonlStore != nil {
+		eventStores = append(eventStores, jsonlStore)
+	}
+	if webhookStore != nil {
+		eventStores = append(eventStores, webhookStore)
+	}
+	store := composite.New(db, db, eventStores...)
 
 	sessions := session.NewManager(cfg.Sessions.MaxSessions)
 	broker := events.NewBroker()

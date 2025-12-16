@@ -59,10 +59,21 @@ type AuditConfig struct {
 
 	// Storage is agentsh-specific (not in spec config yet): local DB path.
 	Storage AuditStorageConfig `yaml:"storage"`
+
+	// Optional: ship events to an HTTP webhook.
+	Webhook AuditWebhookConfig `yaml:"webhook"`
 }
 
 type AuditStorageConfig struct {
 	SQLitePath string `yaml:"sqlite_path"`
+}
+
+type AuditWebhookConfig struct {
+	URL           string            `yaml:"url"`
+	BatchSize     int               `yaml:"batch_size"`
+	FlushInterval string            `yaml:"flush_interval"`
+	Timeout       string            `yaml:"timeout"`
+	Headers       map[string]string `yaml:"headers"`
 }
 
 type RotationConfig struct {
@@ -195,6 +206,15 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Audit.Rotation.MaxBackups == 0 {
 		cfg.Audit.Rotation.MaxBackups = 10
+	}
+	if cfg.Audit.Webhook.BatchSize == 0 {
+		cfg.Audit.Webhook.BatchSize = 100
+	}
+	if cfg.Audit.Webhook.FlushInterval == "" {
+		cfg.Audit.Webhook.FlushInterval = "10s"
+	}
+	if cfg.Audit.Webhook.Timeout == "" {
+		cfg.Audit.Webhook.Timeout = "5s"
 	}
 	if cfg.Approvals.Timeout == "" {
 		cfg.Approvals.Timeout = "5m"
