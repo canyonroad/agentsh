@@ -73,11 +73,17 @@ type RotationConfig struct {
 }
 
 type SessionsConfig struct {
-	BaseDir string `yaml:"base_dir"`
+	BaseDir     string `yaml:"base_dir"`
+	MaxSessions int    `yaml:"max_sessions"`
+
+	// Optional defaults (duration strings). If set, these act as additional caps on top of policy resource_limits.
+	DefaultTimeout     string `yaml:"default_timeout"`
+	DefaultIdleTimeout string `yaml:"default_idle_timeout"`
+	CleanupInterval    string `yaml:"cleanup_interval"`
 }
 
 type SandboxConfig struct {
-	FUSE SandboxFUSEConfig `yaml:"fuse"`
+	FUSE    SandboxFUSEConfig    `yaml:"fuse"`
 	Network SandboxNetworkConfig `yaml:"network"`
 }
 
@@ -88,13 +94,13 @@ type SandboxFUSEConfig struct {
 }
 
 type SandboxNetworkConfig struct {
-	Enabled bool `yaml:"enabled"`
-	ProxyListenAddr string `yaml:"proxy_listen_addr"`
-	Transparent SandboxTransparentNetworkConfig `yaml:"transparent"`
+	Enabled         bool                            `yaml:"enabled"`
+	ProxyListenAddr string                          `yaml:"proxy_listen_addr"`
+	Transparent     SandboxTransparentNetworkConfig `yaml:"transparent"`
 }
 
 type SandboxTransparentNetworkConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled    bool   `yaml:"enabled"`
 	SubnetBase string `yaml:"subnet_base"` // e.g. "10.250.0.0/16"
 }
 
@@ -120,8 +126,8 @@ type HealthConfig struct {
 }
 
 type DevelopmentConfig struct {
-	Debug        bool `yaml:"debug"`
-	DisableAuth  bool `yaml:"disable_auth"`
+	Debug         bool `yaml:"debug"`
+	DisableAuth   bool `yaml:"disable_auth"`
 	DisablePolicy bool `yaml:"disable_policy"`
 }
 
@@ -152,6 +158,12 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Sessions.BaseDir == "" {
 		cfg.Sessions.BaseDir = "/var/lib/agentsh/sessions"
+	}
+	if cfg.Sessions.MaxSessions <= 0 {
+		cfg.Sessions.MaxSessions = 100
+	}
+	if cfg.Sessions.CleanupInterval == "" {
+		cfg.Sessions.CleanupInterval = "1m"
 	}
 	if cfg.Sandbox.FUSE.MountBaseDir == "" {
 		cfg.Sandbox.FUSE.MountBaseDir = cfg.Sessions.BaseDir

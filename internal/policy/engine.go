@@ -21,6 +21,12 @@ type Engine struct {
 	compiledCommandRules []compiledCommandRule
 }
 
+type Limits struct {
+	CommandTimeout time.Duration
+	SessionTimeout time.Duration
+	IdleTimeout    time.Duration
+}
+
 type compiledFileRule struct {
 	rule  FileRule
 	globs []glob.Glob
@@ -115,6 +121,17 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 	}
 
 	return e, nil
+}
+
+func (e *Engine) Limits() Limits {
+	if e == nil || e.policy == nil {
+		return Limits{}
+	}
+	return Limits{
+		CommandTimeout: e.policy.ResourceLimits.CommandTimeout.Duration,
+		SessionTimeout: e.policy.ResourceLimits.SessionTimeout.Duration,
+		IdleTimeout:    e.policy.ResourceLimits.IdleTimeout.Duration,
+	}
 }
 
 func (e *Engine) CheckCommand(command string, args []string) Decision {

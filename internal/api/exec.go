@@ -22,13 +22,26 @@ const (
 	defaultMaxOutputBytes = 1 * 1024 * 1024 // 1MB per stream in response + sqlite
 )
 
-func runCommand(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, err error) {
+func chooseCommandTimeout(req types.ExecRequest, policyLimit time.Duration) time.Duration {
 	timeout := defaultCommandTimeout
-	if req.Timeout != "" {
-		if d, e := time.ParseDuration(req.Timeout); e == nil && d > 0 {
-			timeout = d
-		}
+	if policyLimit > 0 {
+		timeout = policyLimit
 	}
+	if req.Timeout == "" {
+		return timeout
+	}
+	d, err := time.ParseDuration(req.Timeout)
+	if err != nil || d <= 0 {
+		return timeout
+	}
+	if policyLimit > 0 && d > policyLimit {
+		return policyLimit
+	}
+	return d
+}
+
+func runCommand(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, err error) {
+	timeout := chooseCommandTimeout(req, policyLimit)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -73,10 +86,10 @@ func runCommand(ctx context.Context, s *session.Session, cmdID string, req types
 	}
 
 	type capRes struct {
-		b    []byte
-		n    int64
-		tr   bool
-		err  error
+		b   []byte
+		n   int64
+		tr  bool
+		err error
 	}
 	outCh := make(chan capRes, 1)
 	errCh := make(chan capRes, 1)

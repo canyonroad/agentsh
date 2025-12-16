@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
-	"strings"
 
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
@@ -15,12 +15,13 @@ import (
 type Session struct {
 	mu sync.Mutex
 
-	ID        string
-	State     types.SessionState
-	CreatedAt time.Time
-	Workspace string
+	ID             string
+	State          types.SessionState
+	CreatedAt      time.Time
+	LastActivity   time.Time
+	Workspace      string
 	WorkspaceMount string
-	Policy    string
+	Policy         string
 
 	Cwd     string
 	Env     map[string]string
@@ -78,15 +79,17 @@ func (m *Manager) Create(workspace, policy string) (*Session, error) {
 	}
 
 	id := "session-" + uuid.NewString()
+	now := time.Now().UTC()
 	s := &Session{
-		ID:        id,
-		State:     types.SessionStateReady,
-		CreatedAt: time.Now().UTC(),
-		Workspace: abs,
+		ID:             id,
+		State:          types.SessionStateReady,
+		CreatedAt:      now,
+		LastActivity:   now,
+		Workspace:      abs,
 		WorkspaceMount: abs,
-		Policy:    policy,
-		Cwd:       "/workspace",
-		Env:       map[string]string{},
+		Policy:         policy,
+		Cwd:            "/workspace",
+		Env:            map[string]string{},
 	}
 	m.sessions[id] = s
 	return s, nil
@@ -136,11 +139,13 @@ func (s *Session) LockExec() func() {
 	s.execMu.Lock()
 	s.mu.Lock()
 	s.State = types.SessionStateBusy
+	s.LastActivity = time.Now().UTC()
 	s.mu.Unlock()
 	return func() {
 		s.mu.Lock()
 		s.State = types.SessionStateReady
 		s.currentCommandID = ""
+		s.LastActivity = time.Now().UTC()
 		s.mu.Unlock()
 		s.execMu.Unlock()
 	}
@@ -156,6 +161,23 @@ func (s *Session) CurrentCommandID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.currentCommandID
+}
+
+func (s *Session) TouchAt(t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t.IsZero() {
+		t = time.Now().UTC()
+	}
+	s.LastActivity = t.UTC()
+}
+
+func (s *Session) Touch() { s.TouchAt(time.Now().UTC()) }
+
+func (s *Session) Timestamps() (createdAt, lastActivity time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.CreatedAt, s.LastActivity
 }
 
 func (s *Session) SetWorkspaceMount(path string) {
@@ -245,6 +267,7 @@ func (s *Session) CloseNetNS() error {
 func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, stdout, stderr []byte) {
 	switch req.Command {
 	case "cd":
+		s.Touch()
 		target := "/workspace"
 		if len(req.Args) > 0 && req.Args[0] != "" {
 			target = req.Args[0]
@@ -255,6 +278,7 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 		s.mu.Unlock()
 		return true, 0, []byte{}, []byte{}
 	case "pwd":
+		s.Touch()
 		s.mu.Lock()
 		out := s.Cwd
 		s.History = append(s.History, "pwd")
@@ -262,6 +286,7 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 		b := []byte(out + "\n")
 		return true, 0, b, []byte{}
 	case "export":
+		s.Touch()
 		if len(req.Args) < 1 || !strings.Contains(req.Args[0], "=") {
 			msg := []byte("usage: export KEY=value\n")
 			return true, 2, []byte{}, msg
@@ -276,6 +301,7 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 		s.mu.Unlock()
 		return true, 0, []byte{}, []byte{}
 	case "unset":
+		s.Touch()
 		if len(req.Args) < 1 {
 			msg := []byte("usage: unset KEY\n")
 			return true, 2, []byte{}, msg
@@ -286,6 +312,7 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 		s.mu.Unlock()
 		return true, 0, []byte{}, []byte{}
 	case "env":
+		s.Touch()
 		s.mu.Lock()
 		var b strings.Builder
 		for k, v := range s.Env {
@@ -299,6 +326,7 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 		out := []byte(b.String())
 		return true, 0, out, []byte{}
 	case "history":
+		s.Touch()
 		s.mu.Lock()
 		out := strings.Join(s.History, "\n") + "\n"
 		s.History = append(s.History, "history")
@@ -323,7 +351,41 @@ func (s *Session) GetCwdEnvHistory() (cwd string, env map[string]string, history
 }
 
 func (s *Session) RecordHistory(line string) {
+	s.Touch()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.History = append(s.History, line)
+}
+
+func (m *Manager) ReapExpired(now time.Time, sessionTimeout, idleTimeout time.Duration) []*Session {
+	if sessionTimeout <= 0 && idleTimeout <= 0 {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var reaped []*Session
+	for id, s := range m.sessions {
+		s.mu.Lock()
+		createdAt := s.CreatedAt
+		last := s.LastActivity
+		s.mu.Unlock()
+
+		expired := false
+		if sessionTimeout > 0 && now.Sub(createdAt) > sessionTimeout {
+			expired = true
+		}
+		if !expired && idleTimeout > 0 && now.Sub(last) > idleTimeout {
+			expired = true
+		}
+		if expired {
+			delete(m.sessions, id)
+			reaped = append(reaped, s)
+		}
+	}
+	return reaped
 }

@@ -461,7 +461,8 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	_ = a.store.AppendEvent(r.Context(), startEv)
 	a.broker.Publish(startEv)
 
-	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, execErr := runCommand(r.Context(), s, cmdID, req, a.cfg)
+	limits := a.policy.Limits()
+	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, execErr := runCommand(r.Context(), s, cmdID, req, a.cfg, limits.CommandTimeout)
 
 	_ = a.store.SaveOutput(r.Context(), id, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 
