@@ -1,7 +1,9 @@
 package session
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -339,9 +341,152 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 		s.mu.Unlock()
 		b := []byte(out)
 		return true, 0, b, []byte{}
+	case "aenv":
+		s.Touch()
+		_, env, _ := s.GetCwdEnvHistory()
+		b, err := json.Marshal(env)
+		if err != nil {
+			return true, 1, nil, []byte(err.Error() + "\n")
+		}
+		return true, 0, b, nil
+	case "als":
+		s.Touch()
+		target := ""
+		if len(req.Args) > 0 {
+			target = req.Args[0]
+		}
+		virt, real, err := s.resolvePathForBuiltin(target)
+		if err != nil {
+			return true, 2, nil, []byte(err.Error() + "\n")
+		}
+		entries, err := os.ReadDir(real)
+		if err != nil {
+			return true, 2, nil, []byte(err.Error() + "\n")
+		}
+		type item struct {
+			Name      string `json:"name"`
+			Path      string `json:"path"`
+			IsDir     bool   `json:"is_dir"`
+			SizeBytes int64  `json:"size_bytes,omitempty"`
+			Mode      string `json:"mode,omitempty"`
+			MTime     string `json:"mtime,omitempty"`
+		}
+		out := make([]item, 0, len(entries))
+		for _, e := range entries {
+			info, _ := e.Info()
+			it := item{
+				Name:  e.Name(),
+				Path:  filepath.ToSlash(filepath.Join(virt, e.Name())),
+				IsDir: e.IsDir(),
+			}
+			if info != nil {
+				it.SizeBytes = info.Size()
+				it.Mode = info.Mode().String()
+				it.MTime = info.ModTime().UTC().Format(time.RFC3339Nano)
+			}
+			out = append(out, it)
+		}
+		b, err := json.Marshal(out)
+		if err != nil {
+			return true, 1, nil, []byte(err.Error() + "\n")
+		}
+		return true, 0, b, nil
+	case "astat":
+		s.Touch()
+		target := ""
+		if len(req.Args) > 0 {
+			target = req.Args[0]
+		}
+		virt, real, err := s.resolvePathForBuiltin(target)
+		if err != nil {
+			return true, 2, nil, []byte(err.Error() + "\n")
+		}
+		info, err := os.Stat(real)
+		if err != nil {
+			return true, 2, nil, []byte(err.Error() + "\n")
+		}
+		out := map[string]any{
+			"path":       virt,
+			"size_bytes": info.Size(),
+			"is_dir":     info.IsDir(),
+			"mode":       info.Mode().String(),
+			"mtime":      info.ModTime().UTC().Format(time.RFC3339Nano),
+		}
+		b, err := json.Marshal(out)
+		if err != nil {
+			return true, 1, nil, []byte(err.Error() + "\n")
+		}
+		return true, 0, b, nil
+	case "acat":
+		s.Touch()
+		if len(req.Args) < 1 {
+			return true, 2, nil, []byte("usage: acat /workspace/path\n")
+		}
+		virt, real, err := s.resolvePathForBuiltin(req.Args[0])
+		if err != nil {
+			return true, 2, nil, []byte(err.Error() + "\n")
+		}
+		f, err := os.Open(real)
+		if err != nil {
+			return true, 2, nil, []byte(err.Error() + "\n")
+		}
+		defer f.Close()
+		const max = 1 * 1024 * 1024
+		buf, err := io.ReadAll(io.LimitReader(f, max+1))
+		if err != nil {
+			return true, 2, nil, []byte(err.Error() + "\n")
+		}
+		truncated := false
+		if len(buf) > max {
+			truncated = true
+			buf = buf[:max]
+		}
+		info, _ := f.Stat()
+		out := map[string]any{
+			"path":      virt,
+			"content":   string(buf),
+			"truncated": truncated,
+		}
+		if info != nil {
+			out["size_bytes"] = info.Size()
+			out["mtime"] = info.ModTime().UTC().Format(time.RFC3339Nano)
+		}
+		b, err := json.Marshal(out)
+		if err != nil {
+			return true, 1, nil, []byte(err.Error() + "\n")
+		}
+		return true, 0, b, nil
 	default:
 		return false, 0, nil, nil
 	}
+}
+
+func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, err error) {
+	cwd, _, _ := s.GetCwdEnvHistory()
+	virt = cwd
+	if strings.TrimSpace(arg) != "" {
+		if strings.HasPrefix(arg, "/") {
+			virt = arg
+		} else {
+			virt = filepath.ToSlash(filepath.Join(cwd, arg))
+		}
+	}
+	virt = filepath.ToSlash(filepath.Clean(virt))
+	if virt == "." || virt == "" {
+		virt = "/workspace"
+	}
+	if !strings.HasPrefix(virt, "/workspace") {
+		return "", "", fmt.Errorf("path must be under /workspace")
+	}
+	rel := strings.TrimPrefix(virt, "/workspace")
+	rel = strings.TrimPrefix(rel, "/")
+	root := s.WorkspaceMountPath()
+	real = filepath.Clean(filepath.Join(root, filepath.FromSlash(rel)))
+	rootClean := filepath.Clean(root)
+	if real != rootClean && !strings.HasPrefix(real, rootClean+string(os.PathSeparator)) {
+		return "", "", fmt.Errorf("path escapes workspace mount")
+	}
+	return virt, real, nil
 }
 
 func (s *Session) GetCwdEnvHistory() (cwd string, env map[string]string, history []string) {
