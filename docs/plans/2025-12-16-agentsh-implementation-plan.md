@@ -10,7 +10,8 @@
   - Emits: `file_open`, `file_read`, `file_write`, `file_create`, `file_delete`, `file_rename`, `dir_create`, `dir_delete`, `dir_list`, `file_stat`, `file_chmod`, `symlink_create`, `symlink_read`
 - ✅ M4 implemented:
   - Explicit per-session HTTP(S) proxy (works unprivileged) + network policy enforcement
-  - Transparent interception (Linux/root-only) via netns + DNAT + SO_ORIGINAL_DST TCP proxy + UDP DNS interceptor (policy-enforced; denied returns REFUSED)
+  - Transparent interception (Linux/root-only) via netns + DNAT + SO_ORIGINAL_DST TCP proxy + UDP DNS interceptor
+    - DNS answers populate a small in-memory cache so `net_connect` events can include the most recent domain (and domain rules can apply without extra DNS lookups)
 - ✅ M5 implemented: approvals manager + local TTY mode + API mode; `approve` decisions block only when approvals are enabled (otherwise shadow-approve)
 - ✅ P1 (partial) implemented: resource time limits enforced
   - `resource_limits.command_timeout` caps per-command runtime (request timeout is honored but capped)
