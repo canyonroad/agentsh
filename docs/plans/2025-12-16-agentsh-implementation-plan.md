@@ -7,6 +7,7 @@
 
 - ✅ M0–M2 implemented: Go module + server + CLI + policy command pre-check + `sqlite+jsonl` event storage + query APIs/CLI
 - ✅ M3 implemented: per-session FUSE loopback mount for workspace monitoring + file policy enforcement (shadow-approve by default)
+  - Emits: `file_open`, `file_read`, `file_write`, `file_create`, `file_delete`, `file_rename`, `dir_create`, `dir_delete`, `dir_list`, `file_stat`, `file_chmod`, `symlink_create`, `symlink_read`
 - ✅ M4 implemented:
   - Explicit per-session HTTP(S) proxy (works unprivileged) + network policy enforcement
   - Transparent interception (Linux/root-only) via netns + DNAT + SO_ORIGINAL_DST TCP proxy + UDP DNS interceptor (policy-enforced; denied returns REFUSED)
