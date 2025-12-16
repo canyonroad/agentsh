@@ -16,6 +16,7 @@ import (
 	"github.com/agentsh/agentsh/internal/auth"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	storepkg "github.com/agentsh/agentsh/internal/store"
@@ -57,6 +58,8 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, err
 	}
 	limits := engine.Limits()
+
+	metricsCollector := metrics.New()
 
 	sqlitePath := cfg.Audit.Storage.SQLitePath
 	if sqlitePath == "" {
@@ -102,7 +105,9 @@ func New(cfg *config.Config) (*Server, error) {
 	if webhookStore != nil {
 		eventStores = append(eventStores, webhookStore)
 	}
-	store := composite.New(db, db, eventStores...)
+	// Wrap primary event store so metrics count each event exactly once.
+	primary := metrics.WrapEventStore(db, metricsCollector)
+	store := composite.New(primary, db, eventStores...)
 
 	sessions := session.NewManager(cfg.Sessions.MaxSessions)
 	broker := events.NewBroker()
@@ -124,7 +129,7 @@ func New(cfg *config.Config) (*Server, error) {
 		apiKeyAuth = loaded
 	}
 
-	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, approvalsMgr)
+	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, approvalsMgr, metricsCollector)
 	router := app.Router()
 
 	s := &http.Server{

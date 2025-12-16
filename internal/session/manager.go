@@ -112,6 +112,12 @@ func (m *Manager) List() []*Session {
 	return out
 }
 
+func (m *Manager) Count() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.sessions)
+}
+
 func (m *Manager) Destroy(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

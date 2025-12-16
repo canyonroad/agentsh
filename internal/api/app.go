@@ -15,6 +15,7 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/fsmonitor"
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/netmonitor"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
@@ -34,16 +35,24 @@ type App struct {
 	apiKeyAuth *auth.APIKeyAuth
 
 	approvals *approvals.Manager
+
+	metrics *metrics.Collector
 }
 
-func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, approvalsMgr *approvals.Manager) *App {
-	return &App{cfg: cfg, sessions: sessions, store: store, policy: engine, broker: broker, apiKeyAuth: apiKeyAuth, approvals: approvalsMgr}
+func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector) *App {
+	return &App{cfg: cfg, sessions: sessions, store: store, policy: engine, broker: broker, apiKeyAuth: apiKeyAuth, approvals: approvalsMgr, metrics: metricsCollector}
 }
 
 func (a *App) Router() http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(a.authMiddleware)
+
+	if a.cfg.Metrics.Enabled && a.cfg.Metrics.Path != "" && a.metrics != nil {
+		r.Get(a.cfg.Metrics.Path, func(w http.ResponseWriter, r *http.Request) {
+			a.metrics.Handler(metrics.HandlerOptions{SessionCount: a.sessions.Count}).ServeHTTP(w, r)
+		})
+	}
 
 	r.Get(a.cfg.Health.Path, func(w http.ResponseWriter, r *http.Request) { writeText(w, http.StatusOK, "ok\n") })
 	r.Get(a.cfg.Health.ReadinessPath, func(w http.ResponseWriter, r *http.Request) { writeText(w, http.StatusOK, "ready\n") })
