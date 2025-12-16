@@ -2,6 +2,7 @@ package fsmonitor
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"path/filepath"
 	"strings"
@@ -63,11 +64,11 @@ func (n *node) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFl
 	dec := n.check(ctx, virt, "open")
 	dec = n.maybeApprove(ctx, dec, "file", virt, "open")
 	if dec.EffectiveDecision == types.DecisionDeny {
-		n.emitFileEvent(ctx, "file_open", virt, "open", 0, dec, true)
+		n.emitFileEvent(ctx, "file_open", virt, "open", 0, dec, true, nil)
 		return nil, 0, syscall.EACCES
 	}
 
-	n.emitFileEvent(ctx, "file_open", virt, "open", 0, dec, false)
+	n.emitFileEvent(ctx, "file_open", virt, "open", 0, dec, false, nil)
 	fh, fuseFlags, errno = n.LoopbackNode.Open(ctx, flags)
 	if errno != 0 {
 		return fh, fuseFlags, errno
@@ -80,11 +81,11 @@ func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint3
 	dec := n.check(ctx, virt, "create")
 	dec = n.maybeApprove(ctx, dec, "file", virt, "create")
 	if dec.EffectiveDecision == types.DecisionDeny {
-		n.emitFileEvent(ctx, "file_create", virt, "create", 0, dec, true)
+		n.emitFileEvent(ctx, "file_create", virt, "create", 0, dec, true, nil)
 		return nil, nil, 0, syscall.EACCES
 	}
 
-	n.emitFileEvent(ctx, "file_create", virt, "create", 0, dec, false)
+	n.emitFileEvent(ctx, "file_create", virt, "create", 0, dec, false, nil)
 	inode, fh, fuseFlags, errno = n.LoopbackNode.Create(ctx, name, flags, mode, out)
 	if errno != 0 {
 		return inode, fh, fuseFlags, errno
@@ -97,10 +98,10 @@ func (n *node) Unlink(ctx context.Context, name string) syscall.Errno {
 	dec := n.check(ctx, virt, "delete")
 	dec = n.maybeApprove(ctx, dec, "file", virt, "delete")
 	if dec.EffectiveDecision == types.DecisionDeny {
-		n.emitFileEvent(ctx, "file_delete", virt, "delete", 0, dec, true)
+		n.emitFileEvent(ctx, "file_delete", virt, "delete", 0, dec, true, nil)
 		return syscall.EACCES
 	}
-	n.emitFileEvent(ctx, "file_delete", virt, "delete", 0, dec, false)
+	n.emitFileEvent(ctx, "file_delete", virt, "delete", 0, dec, false, nil)
 	return n.LoopbackNode.Unlink(ctx, name)
 }
 
@@ -109,10 +110,10 @@ func (n *node) Rmdir(ctx context.Context, name string) syscall.Errno {
 	dec := n.check(ctx, virt, "rmdir")
 	dec = n.maybeApprove(ctx, dec, "file", virt, "rmdir")
 	if dec.EffectiveDecision == types.DecisionDeny {
-		n.emitFileEvent(ctx, "dir_delete", virt, "rmdir", 0, dec, true)
+		n.emitFileEvent(ctx, "dir_delete", virt, "rmdir", 0, dec, true, nil)
 		return syscall.EACCES
 	}
-	n.emitFileEvent(ctx, "dir_delete", virt, "rmdir", 0, dec, false)
+	n.emitFileEvent(ctx, "dir_delete", virt, "rmdir", 0, dec, false, nil)
 	return n.LoopbackNode.Rmdir(ctx, name)
 }
 
@@ -121,22 +122,28 @@ func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 	dec := n.check(ctx, virt, "mkdir")
 	dec = n.maybeApprove(ctx, dec, "file", virt, "mkdir")
 	if dec.EffectiveDecision == types.DecisionDeny {
-		n.emitFileEvent(ctx, "dir_create", virt, "mkdir", 0, dec, true)
+		n.emitFileEvent(ctx, "dir_create", virt, "mkdir", 0, dec, true, nil)
 		return nil, syscall.EACCES
 	}
-	n.emitFileEvent(ctx, "dir_create", virt, "mkdir", 0, dec, false)
+	n.emitFileEvent(ctx, "dir_create", virt, "mkdir", 0, dec, false, nil)
 	return n.LoopbackNode.Mkdir(ctx, name, mode, out)
 }
 
 func (n *node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	virtFrom := n.virtualChildPath(name)
-	dec := n.check(ctx, virtFrom, "rename")
-	dec = n.maybeApprove(ctx, dec, "file", virtFrom, "rename")
+	virtTo := path.Clean("/workspace/" + sanitizeName(newName))
+	if np, ok := newParent.(*node); ok {
+		virtTo = np.virtualChildPath(newName)
+	}
+	decFrom := n.checkWithExist(ctx, virtFrom, "rename", true)
+	decTo := n.checkWithExist(ctx, virtTo, "rename", false)
+	dec := combinePathDecisionsForRename(decFrom, decTo)
+	dec = n.maybeApprove(ctx, dec, "file", fmt.Sprintf("%s -> %s", virtFrom, virtTo), "rename")
 	if dec.EffectiveDecision == types.DecisionDeny {
-		n.emitFileEvent(ctx, "file_rename", virtFrom, "rename", 0, dec, true)
+		n.emitFileEvent(ctx, "file_rename", virtFrom, "rename", 0, dec, true, map[string]any{"to_path": virtTo})
 		return syscall.EACCES
 	}
-	n.emitFileEvent(ctx, "file_rename", virtFrom, "rename", 0, dec, false)
+	n.emitFileEvent(ctx, "file_rename", virtFrom, "rename", 0, dec, false, map[string]any{"to_path": virtTo})
 	return n.LoopbackNode.Rename(ctx, name, newParent, newName, flags)
 }
 
@@ -150,10 +157,10 @@ func (f *fileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 	dec := f.n.check(ctx, f.virtPath, "read")
 	dec = f.n.maybeApprove(ctx, dec, "file", f.virtPath, "read")
 	if dec.EffectiveDecision == types.DecisionDeny {
-		f.n.emitFileEvent(ctx, "file_read", f.virtPath, "read", int64(len(dest)), dec, true)
+		f.n.emitFileEvent(ctx, "file_read", f.virtPath, "read", int64(len(dest)), dec, true, nil)
 		return nil, syscall.EACCES
 	}
-	f.n.emitFileEvent(ctx, "file_read", f.virtPath, "read", int64(len(dest)), dec, false)
+	f.n.emitFileEvent(ctx, "file_read", f.virtPath, "read", int64(len(dest)), dec, false, nil)
 	if r, ok := f.inner.(fs.FileReader); ok {
 		return r.Read(ctx, dest, off)
 	}
@@ -164,10 +171,10 @@ func (f *fileHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 	dec := f.n.check(ctx, f.virtPath, "write")
 	dec = f.n.maybeApprove(ctx, dec, "file", f.virtPath, "write")
 	if dec.EffectiveDecision == types.DecisionDeny {
-		f.n.emitFileEvent(ctx, "file_write", f.virtPath, "write", int64(len(data)), dec, true)
+		f.n.emitFileEvent(ctx, "file_write", f.virtPath, "write", int64(len(data)), dec, true, nil)
 		return 0, syscall.EACCES
 	}
-	f.n.emitFileEvent(ctx, "file_write", f.virtPath, "write", int64(len(data)), dec, false)
+	f.n.emitFileEvent(ctx, "file_write", f.virtPath, "write", int64(len(data)), dec, false, nil)
 	if w, ok := f.inner.(fs.FileWriter); ok {
 		return w.Write(ctx, data, off)
 	}
@@ -181,13 +188,16 @@ func (f *fileHandle) Release(ctx context.Context) syscall.Errno {
 	return 0
 }
 
-func (n *node) check(_ context.Context, virtPath string, op string) policy.Decision {
-	// Prevent symlink/.. traversal outside the session workspace root.
+func (n *node) check(ctx context.Context, virtPath string, op string) policy.Decision {
+	mustExist := op != "create" && op != "mkdir"
+	return n.checkWithExist(ctx, virtPath, op, mustExist)
+}
+
+func (n *node) checkWithExist(_ context.Context, virtPath string, op string, mustExist bool) policy.Decision {
 	realRoot := ""
 	if n.RootData != nil {
 		realRoot = n.RootData.Path
 	}
-	mustExist := op != "create" && op != "mkdir"
 	if realRoot != "" {
 		if _, err := resolveRealPathUnderRoot(realRoot, virtPath, mustExist); err != nil {
 			return policy.Decision{
@@ -203,6 +213,37 @@ func (n *node) check(_ context.Context, virtPath string, op string) policy.Decis
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
 	return n.hooks.Policy.CheckFile(virtPath, op)
+}
+
+func combinePathDecisionsForRename(a, b policy.Decision) policy.Decision {
+	if a.EffectiveDecision == types.DecisionDeny {
+		return a
+	}
+	if b.EffectiveDecision == types.DecisionDeny {
+		return b
+	}
+
+	if a.PolicyDecision == types.DecisionApprove || b.PolicyDecision == types.DecisionApprove {
+		out := a
+		if a.PolicyDecision != types.DecisionApprove {
+			out = b
+		}
+		out.PolicyDecision = types.DecisionApprove
+		out.EffectiveDecision = types.DecisionAllow
+		if a.EffectiveDecision == types.DecisionApprove || b.EffectiveDecision == types.DecisionApprove {
+			out.EffectiveDecision = types.DecisionApprove
+		}
+		if out.Approval == nil {
+			if a.Approval != nil {
+				out.Approval = a.Approval
+			} else if b.Approval != nil {
+				out.Approval = b.Approval
+			}
+		}
+		return out
+	}
+
+	return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 }
 
 func (n *node) maybeApprove(ctx context.Context, dec policy.Decision, kind, target, op string) policy.Decision {
@@ -239,7 +280,7 @@ func (n *node) maybeApprove(ctx context.Context, dec policy.Decision, kind, targ
 	return dec
 }
 
-func (n *node) emitFileEvent(ctx context.Context, evType string, virtPath string, op string, bytes int64, dec policy.Decision, blocked bool) {
+func (n *node) emitFileEvent(ctx context.Context, evType string, virtPath string, op string, bytes int64, dec policy.Decision, blocked bool, extra map[string]any) {
 	if n.hooks == nil || n.hooks.Emit == nil {
 		return
 	}
@@ -260,10 +301,7 @@ func (n *node) emitFileEvent(ctx context.Context, evType string, virtPath string
 		PID:       pid,
 		Path:      virtPath,
 		Operation: op,
-		Fields: map[string]any{
-			"bytes":   bytes,
-			"blocked": blocked,
-		},
+		Fields:    map[string]any{},
 		Policy: &types.PolicyInfo{
 			Decision:          dec.PolicyDecision,
 			EffectiveDecision: dec.EffectiveDecision,
@@ -271,6 +309,11 @@ func (n *node) emitFileEvent(ctx context.Context, evType string, virtPath string
 			Message:           dec.Message,
 			Approval:          dec.Approval,
 		},
+	}
+	ev.Fields["bytes"] = bytes
+	ev.Fields["blocked"] = blocked
+	for k, v := range extra {
+		ev.Fields[k] = v
 	}
 	_ = n.hooks.Emit.AppendEvent(ctx, ev)
 	n.hooks.Emit.Publish(ev)
