@@ -155,6 +155,15 @@ Acceptance criteria:
 - Policy denies for `rm -rf` style commands take effect
 - Command-rule `approve` decisions are visible in response and audit logs but do not block
 
+### P1 — Basic observability (metrics)
+
+Deliverables:
+- Prometheus text-format endpoint (configurable via `metrics.enabled`/`metrics.path`)
+- Minimal gauges/counters:
+  - `agentsh_up`
+  - `agentsh_sessions_active`
+  - `agentsh_events_total` + `agentsh_events_by_type_total`
+
 ### M3 — FUSE I/O interception (enforce file allow/deny; shadow-approve)
 
 Deliverables:
