@@ -235,12 +235,20 @@ func New(cfg *config.Config) (*Server, error) {
 	if cfg.Server.UnixSocket.Enabled && cfg.Server.UnixSocket.Path != "" {
 		unixPath := cfg.Server.UnixSocket.Path
 		if err := os.MkdirAll(filepath.Dir(unixPath), 0o755); err != nil {
+			if isPermissionErr(err) {
+				fmt.Fprintf(os.Stderr, "agentsh: unix socket disabled (mkdir): %v\n", err)
+				goto unixDone
+			}
 			_ = store.Close()
 			return nil, fmt.Errorf("unix socket mkdir: %w", err)
 		}
 		_ = os.Remove(unixPath)
 		unixLn, err := net.Listen("unix", unixPath)
 		if err != nil {
+			if isPermissionErr(err) {
+				fmt.Fprintf(os.Stderr, "agentsh: unix socket disabled (listen): %v\n", err)
+				goto unixDone
+			}
 			_ = store.Close()
 			return nil, fmt.Errorf("unix socket listen: %w", err)
 		}
@@ -255,6 +263,11 @@ func New(cfg *config.Config) (*Server, error) {
 			perms = os.FileMode(u)
 		}
 		if err := os.Chmod(unixPath, perms); err != nil {
+			if isPermissionErr(err) {
+				fmt.Fprintf(os.Stderr, "agentsh: unix socket disabled (chmod): %v\n", err)
+				_ = unixLn.Close()
+				goto unixDone
+			}
 			_ = unixLn.Close()
 			_ = store.Close()
 			return nil, fmt.Errorf("unix socket chmod: %w", err)
@@ -268,6 +281,7 @@ func New(cfg *config.Config) (*Server, error) {
 			WriteTimeout:      writeTimeout,
 		}
 	}
+unixDone:
 
 	if cfg.Development.PProf.Enabled {
 		addr := cfg.Development.PProf.Addr
@@ -290,6 +304,10 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	return srv, nil
+}
+
+func isPermissionErr(err error) bool {
+	return os.IsPermission(err) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM)
 }
 
 func withRequestBodyLimit(next http.Handler, maxBytes int64) http.Handler {

@@ -21,7 +21,7 @@ var (
 	ErrInvalidSessionID = errors.New("invalid session id")
 )
 
-var sessionIDRe = regexp.MustCompile(`^session-[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
+var sessionIDRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
 
 type Session struct {
 	mu sync.Mutex
