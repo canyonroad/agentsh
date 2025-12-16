@@ -1,0 +1,4 @@
+- id: "local-dev"
+  key: "sk-dev-local"
+  description: "Local development key"
+

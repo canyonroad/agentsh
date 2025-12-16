@@ -1,0 +1,103 @@
+# agentsh Docker Compose Configuration
+#
+# Usage:
+#   docker-compose up -d          # Start agentsh
+#   docker-compose logs -f        # View logs
+#   docker-compose down           # Stop agentsh
+#
+# Access:
+#   HTTP API: http://localhost:8080
+#   gRPC API: localhost:9090
+
+version: '3.8'
+
+services:
+  agentsh:
+    image: ghcr.io/agentsh/agentsh:latest
+    # Or build locally:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    
+    container_name: agentsh
+    hostname: agentsh
+    
+    # Required capabilities for full functionality
+    cap_add:
+      - SYS_ADMIN      # Required for FUSE, namespaces
+      - NET_ADMIN      # Required for network namespace, iptables
+    
+    # Required devices
+    devices:
+      - /dev/fuse      # Required for FUSE filesystem
+    
+    # Security options
+    security_opt:
+      - apparmor=unconfined    # Required for namespace operations
+      # For SELinux systems, also add:
+      # - label=disable
+    
+    # Port mappings
+    ports:
+      - "8080:8080"    # HTTP API
+      - "9090:9090"    # gRPC API
+    
+    # Volume mounts
+    volumes:
+      # Workspace directory - where agent code runs
+      - ./workspaces:/workspaces
+      
+      # Custom configuration (optional)
+      - ./config:/etc/agentsh:ro
+      
+      # Persistent data (session history, logs)
+      - agentsh-data:/var/lib/agentsh
+      
+      # Logs
+      - agentsh-logs:/var/log/agentsh
+    
+    # Environment variables
+    environment:
+      - AGENTSH_LOG_LEVEL=info
+      # - AGENTSH_HTTP_ADDR=0.0.0.0:8080
+      # - AGENTSH_GRPC_ADDR=0.0.0.0:9090
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 512M
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+# Named volumes for persistence
+volumes:
+  agentsh-data:
+    driver: local
+  agentsh-logs:
+    driver: local
+
+# Optional: custom network
+networks:
+  default:
+    name: agentsh-network

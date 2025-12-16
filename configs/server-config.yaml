@@ -1,0 +1,52 @@
+# agentsh Server Configuration (container/production defaults)
+
+server:
+  http:
+    addr: "0.0.0.0:8080"
+  grpc:
+    enabled: false
+    addr: "0.0.0.0:9090"
+
+auth:
+  type: "api_key"
+  api_key:
+    keys_file: "/etc/agentsh/api_keys.yaml"
+    header_name: "X-API-Key"
+
+logging:
+  level: "info"
+  format: "json"
+  output: "/var/log/agentsh/server.log"
+  rotation:
+    max_size_mb: 100
+    max_age_days: 7
+    max_backups: 5
+    compress: true
+
+audit:
+  enabled: true
+  output: "/var/log/agentsh/audit.jsonl"
+  rotation:
+    max_size_mb: 500
+    max_age_days: 90
+    max_backups: 10
+    compress: true
+  storage:
+    sqlite_path: "/var/lib/agentsh/events.db"
+
+sessions:
+  base_dir: "/var/lib/agentsh/sessions"
+
+policies:
+  dir: "/etc/agentsh/policies"
+  default: "default"
+
+health:
+  path: "/health"
+  readiness_path: "/ready"
+
+development:
+  debug: false
+  disable_auth: false
+  disable_policy: false
+

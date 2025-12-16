@@ -1,0 +1,470 @@
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/agentsh/agentsh/internal/auth"
+	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/store/composite"
+	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+)
+
+type App struct {
+	cfg    *config.Config
+	sessions *session.Manager
+	store  *composite.Store
+	policy *policy.Engine
+	broker *events.Broker
+
+	apiKeyAuth *auth.APIKeyAuth
+}
+
+func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth) *App {
+	return &App{cfg: cfg, sessions: sessions, store: store, policy: engine, broker: broker, apiKeyAuth: apiKeyAuth}
+}
+
+func (a *App) Router() http.Handler {
+	r := chi.NewRouter()
+
+	r.Use(a.authMiddleware)
+
+	r.Get(a.cfg.Health.Path, func(w http.ResponseWriter, r *http.Request) { writeText(w, http.StatusOK, "ok\n") })
+	r.Get(a.cfg.Health.ReadinessPath, func(w http.ResponseWriter, r *http.Request) { writeText(w, http.StatusOK, "ready\n") })
+
+	r.Route("/api/v1", func(r chi.Router) {
+		r.Post("/sessions", a.createSession)
+		r.Get("/sessions", a.listSessions)
+		r.Get("/sessions/{id}", a.getSession)
+		r.Delete("/sessions/{id}", a.destroySession)
+
+		r.Post("/sessions/{id}/exec", a.execInSession)
+		r.Get("/sessions/{id}/events", a.streamEvents)
+		r.Get("/sessions/{id}/history", a.sessionHistory)
+		r.Get("/sessions/{id}/output/{cmdID}", a.getOutputChunk)
+
+		r.Get("/events/search", a.searchEvents)
+	})
+
+	return r
+}
+
+func (a *App) authMiddleware(next http.Handler) http.Handler {
+	if a.cfg.Development.DisableAuth || strings.EqualFold(a.cfg.Auth.Type, "none") {
+		return next
+	}
+	if strings.EqualFold(a.cfg.Auth.Type, "api_key") {
+		if a.apiKeyAuth == nil {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+					"error": "api key auth enabled but keys not loaded",
+				})
+			})
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			key := r.Header.Get(a.apiKeyAuth.HeaderName())
+			if key == "" || !a.apiKeyAuth.IsAllowed(key) {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unsupported auth type"})
+	})
+}
+
+func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Workspace string `json:"workspace"`
+		Policy    string `json:"policy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	if req.Policy == "" {
+		req.Policy = a.cfg.Policies.Default
+	}
+	s, err := a.sessions.Create(req.Workspace, req.Policy)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "session_created",
+		SessionID: s.ID,
+		Fields: map[string]any{
+			"workspace": s.Workspace,
+			"policy":    s.Policy,
+		},
+	}
+	_ = a.store.AppendEvent(r.Context(), ev)
+	a.broker.Publish(ev)
+
+	writeJSON(w, http.StatusCreated, s.Snapshot())
+}
+
+func (a *App) listSessions(w http.ResponseWriter, r *http.Request) {
+	all := a.sessions.List()
+	out := make([]types.Session, 0, len(all))
+	for _, s := range all {
+		out = append(out, s.Snapshot())
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *App) getSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	s, ok := a.sessions.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Snapshot())
+}
+
+func (a *App) destroySession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if !a.sessions.Destroy(id) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "session_destroyed",
+		SessionID: id,
+	}
+	_ = a.store.AppendEvent(r.Context(), ev)
+	a.broker.Publish(ev)
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	s, ok := a.sessions.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+
+	var req types.ExecRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	if req.Command == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "command is required"})
+		return
+	}
+
+	cmdID := "cmd-" + uuid.NewString()
+	start := time.Now().UTC()
+
+	pre := a.policy.CheckCommand(req.Command, req.Args)
+	preEv := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: start,
+		Type:      "command_policy",
+		SessionID: id,
+		CommandID: cmdID,
+		Operation: "command_precheck",
+		Policy: &types.PolicyInfo{
+			Decision:          pre.PolicyDecision,
+			EffectiveDecision: pre.EffectiveDecision,
+			Rule:              pre.Rule,
+			Message:           pre.Message,
+			Approval:          pre.Approval,
+		},
+		Fields: map[string]any{
+			"command": req.Command,
+			"args":    req.Args,
+		},
+	}
+	_ = a.store.AppendEvent(r.Context(), preEv)
+	a.broker.Publish(preEv)
+
+	if pre.EffectiveDecision == types.DecisionDeny {
+		resp := types.ExecResponse{
+			CommandID: cmdID,
+			SessionID: id,
+			Timestamp: start,
+			Request:   req,
+			Result: types.ExecResult{
+				ExitCode: 126,
+				DurationMs: int64(time.Since(start).Milliseconds()),
+				Error: &types.ExecError{
+					Code:       "E_POLICY_DENIED",
+					Message:    "command denied by policy",
+					PolicyRule: pre.Rule,
+				},
+			},
+			Events: types.ExecEvents{
+				FileOperations:    []types.Event{},
+				NetworkOperations: []types.Event{},
+				BlockedOperations: []types.Event{preEv},
+			},
+		}
+		writeJSON(w, http.StatusForbidden, resp)
+		return
+	}
+
+	startEv := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: start,
+		Type:      "command_started",
+		SessionID: id,
+		CommandID: cmdID,
+		Fields: map[string]any{
+			"command": req.Command,
+			"args":    req.Args,
+		},
+	}
+	_ = a.store.AppendEvent(r.Context(), startEv)
+	a.broker.Publish(startEv)
+
+	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, execErr := runCommand(r.Context(), s, cmdID, req, a.cfg)
+
+	_ = a.store.SaveOutput(r.Context(), id, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
+
+	end := time.Now().UTC()
+	endEv := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: end,
+		Type:      "command_finished",
+		SessionID: id,
+		CommandID: cmdID,
+		Fields: map[string]any{
+			"exit_code": exitCode,
+			"duration_ms": int64(end.Sub(start).Milliseconds()),
+		},
+	}
+	if execErr != nil {
+		endEv.Fields["error"] = execErr.Error()
+	}
+	_ = a.store.AppendEvent(r.Context(), endEv)
+	a.broker.Publish(endEv)
+
+	res := types.ExecResult{
+		ExitCode:          exitCode,
+		Stdout:            string(stdoutB),
+		Stderr:            string(stderrB),
+		StdoutTruncated:   stdoutTrunc,
+		StderrTruncated:   stderrTrunc,
+		StdoutTotalBytes:  stdoutTotal,
+		StderrTotalBytes:  stderrTotal,
+		DurationMs:        int64(end.Sub(start).Milliseconds()),
+	}
+	if execErr != nil {
+		res.Error = &types.ExecError{
+			Code:    "E_COMMAND_FAILED",
+			Message: execErr.Error(),
+		}
+	}
+	if stdoutTrunc && stdoutTotal > int64(len(stdoutB)) {
+		res.Pagination = &types.Pagination{
+			CurrentOffset: 0,
+			CurrentLimit:  int64(len(stdoutB)),
+			HasMore:       true,
+			NextCommand:   fmt.Sprintf("agentsh output %s %s --stream stdout --offset %d --limit %d", id, cmdID, len(stdoutB), len(stdoutB)),
+		}
+	}
+
+	resp := types.ExecResponse{
+		CommandID: cmdID,
+		SessionID: id,
+		Timestamp: start,
+		Request:   req,
+		Result:    res,
+		Events: types.ExecEvents{
+			FileOperations:    []types.Event{},
+			NetworkOperations: []types.Event{},
+			BlockedOperations: []types.Event{},
+			Other:             []types.Event{preEv, startEv, endEv},
+		},
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (a *App) streamEvents(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if _, ok := a.sessions.Get(id); !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "stream unsupported"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ch := a.broker.Subscribe(id, 200)
+	defer a.broker.Unsubscribe(id, ch)
+
+	_, _ = w.Write([]byte("event: ready\ndata: {}\n\n"))
+	flusher.Flush()
+
+	enc := json.NewEncoder(w)
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev := <-ch:
+			_, _ = w.Write([]byte("data: "))
+			if err := enc.Encode(ev); err != nil {
+				return
+			}
+			_, _ = w.Write([]byte("\n"))
+			flusher.Flush()
+		}
+	}
+}
+
+func (a *App) sessionHistory(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if _, ok := a.sessions.Get(id); !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+	q, err := parseEventQuery(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	q.SessionID = id
+	evs, err := a.store.QueryEvents(r.Context(), q)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, evs)
+}
+
+func (a *App) searchEvents(w http.ResponseWriter, r *http.Request) {
+	q, err := parseEventQuery(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if sid := r.URL.Query().Get("session_id"); sid != "" {
+		q.SessionID = sid
+	}
+	evs, err := a.store.QueryEvents(r.Context(), q)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, evs)
+}
+
+func (a *App) getOutputChunk(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "id")
+	if _, ok := a.sessions.Get(sessionID); !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+
+	cmdID := chi.URLParam(r, "cmdID")
+	stream := r.URL.Query().Get("stream")
+	offset, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
+	limit, _ := strconv.ParseInt(r.URL.Query().Get("limit"), 10, 64)
+
+	chunk, total, truncated, err := a.store.ReadOutputChunk(r.Context(), cmdID, stream, offset, limit)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"command_id":    cmdID,
+		"stream":        stream,
+		"offset":        offset,
+		"limit":         limit,
+		"total_bytes":   total,
+		"truncated":     truncated,
+		"data":          string(chunk),
+		"has_more":      offset+int64(len(chunk)) < total,
+	})
+}
+
+func parseEventQuery(r *http.Request) (types.EventQuery, error) {
+	v := r.URL.Query()
+	var q types.EventQuery
+	q.CommandID = v.Get("command_id")
+	if t := v.Get("type"); t != "" {
+		q.Types = strings.Split(t, ",")
+	}
+	if decision := v.Get("decision"); decision != "" {
+		d := types.Decision(decision)
+		q.Decision = &d
+	}
+	q.PathLike = v.Get("path_like")
+	q.DomainLike = v.Get("domain_like")
+	q.TextLike = v.Get("text_like")
+	q.Limit, _ = strconv.Atoi(v.Get("limit"))
+	q.Offset, _ = strconv.Atoi(v.Get("offset"))
+	q.Asc = v.Get("order") == "asc"
+
+	if since := v.Get("since"); since != "" {
+		t, err := parseTimeOrAgo(since)
+		if err != nil {
+			return q, fmt.Errorf("since: %w", err)
+		}
+		q.Since = &t
+	}
+	if until := v.Get("until"); until != "" {
+		t, err := parseTimeOrAgo(until)
+		if err != nil {
+			return q, fmt.Errorf("until: %w", err)
+		}
+		q.Until = &t
+	}
+	return q, nil
+}
+
+func parseTimeOrAgo(s string) (time.Time, error) {
+	if strings.ContainsAny(s, "smhdw") && !strings.Contains(s, "T") {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return time.Now().UTC().Add(-d), nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return t.UTC(), nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeText(w http.ResponseWriter, status int, s string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(s))
+}

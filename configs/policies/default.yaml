@@ -1,0 +1,544 @@
+# Default Policy for agentsh
+# This policy provides a balanced security posture for typical AI agent workloads
+
+version: 1
+name: default
+description: |
+  Standard policy for AI agent execution. Allows workspace operations,
+  common package registries, and blocks sensitive system paths.
+
+# =============================================================================
+# FILE OPERATION RULES
+# =============================================================================
+# Rules are evaluated in order. First match wins.
+
+file_rules:
+  # ---------------------------------------------------------------------------
+  # Workspace - where agents do their work
+  # ---------------------------------------------------------------------------
+  
+  - name: allow-workspace-read
+    description: Allow reading any file in workspace
+    paths:
+      - "/workspace/**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+      - readlink
+    decision: allow
+    
+  - name: allow-workspace-write
+    description: Allow writing/creating files in workspace
+    paths:
+      - "/workspace/**"
+    operations:
+      - write
+      - create
+      - mkdir
+      - chmod
+      - rename
+    decision: allow
+    
+  - name: approve-workspace-delete
+    description: Require approval for deleting files in workspace
+    paths:
+      - "/workspace/**"
+    operations:
+      - delete
+      - rmdir
+    decision: approve
+    message: "Agent wants to delete: {{.Path}}"
+    timeout: 5m
+
+  # ---------------------------------------------------------------------------
+  # Temporary directories
+  # ---------------------------------------------------------------------------
+  
+  - name: allow-tmp
+    description: Full access to temp directories
+    paths:
+      - "/tmp/**"
+      - "/var/tmp/**"
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # System paths - mostly read-only
+  # ---------------------------------------------------------------------------
+  
+  - name: allow-system-read
+    description: Read access to standard system paths
+    paths:
+      - "/usr/**"
+      - "/lib/**"
+      - "/lib64/**"
+      - "/bin/**"
+      - "/sbin/**"
+      - "/opt/**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+      - readlink
+    decision: allow
+
+  - name: allow-etc-read-safe
+    description: Read common safe config files
+    paths:
+      - "/etc/hosts"
+      - "/etc/resolv.conf"
+      - "/etc/ssl/**"
+      - "/etc/ca-certificates/**"
+      - "/etc/localtime"
+      - "/etc/timezone"
+      - "/etc/mime.types"
+      - "/etc/protocols"
+      - "/etc/services"
+    operations:
+      - read
+      - open
+      - stat
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Package manager caches
+  # ---------------------------------------------------------------------------
+  
+  - name: allow-npm-cache
+    description: npm cache access
+    paths:
+      - "/home/**/.npm/**"
+      - "/root/.npm/**"
+    operations:
+      - "*"
+    decision: allow
+    
+  - name: allow-pip-cache
+    description: pip cache access
+    paths:
+      - "/home/**/.cache/pip/**"
+      - "/root/.cache/pip/**"
+    operations:
+      - "*"
+    decision: allow
+    
+  - name: allow-cargo-cache
+    description: Cargo cache access
+    paths:
+      - "/home/**/.cargo/**"
+      - "/root/.cargo/**"
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Blocked - sensitive paths
+  # ---------------------------------------------------------------------------
+  
+  - name: deny-ssh-keys
+    description: Block access to SSH keys
+    paths:
+      - "/home/**/.ssh/**"
+      - "/root/.ssh/**"
+    operations:
+      - "*"
+    decision: deny
+    
+  - name: deny-aws-credentials
+    description: Block AWS credentials
+    paths:
+      - "/home/**/.aws/**"
+      - "/root/.aws/**"
+    operations:
+      - "*"
+    decision: deny
+    
+  - name: deny-cloud-credentials
+    description: Block cloud provider credentials
+    paths:
+      - "/home/**/.gcloud/**"
+      - "/home/**/.azure/**"
+      - "/home/**/.config/gcloud/**"
+    operations:
+      - "*"
+    decision: deny
+    
+  - name: deny-env-files
+    description: Block .env files which often contain secrets
+    paths:
+      - "**/.env"
+      - "**/.env.*"
+      - "**/secrets/**"
+      - "**/credentials/**"
+    operations:
+      - "*"
+    decision: deny
+    
+  - name: deny-git-credentials
+    description: Block git credentials
+    paths:
+      - "/home/**/.git-credentials"
+      - "/home/**/.gitconfig"
+      - "**/.git/config"
+    operations:
+      - read
+      - write
+    decision: deny
+
+  - name: deny-passwd-shadow
+    description: Block password files
+    paths:
+      - "/etc/passwd"
+      - "/etc/shadow"
+      - "/etc/group"
+      - "/etc/gshadow"
+    operations:
+      - "*"
+    decision: deny
+    
+  - name: deny-system-sensitive
+    description: Block sensitive system files
+    paths:
+      - "/etc/sudoers"
+      - "/etc/sudoers.d/**"
+      - "/etc/security/**"
+      - "/proc/**"
+      - "/sys/**"
+    operations:
+      - "*"
+    decision: deny
+
+  # ---------------------------------------------------------------------------
+  # Default deny
+  # ---------------------------------------------------------------------------
+  
+  - name: default-deny-files
+    description: Deny all other file operations
+    paths:
+      - "**"
+    operations:
+      - "*"
+    decision: deny
+
+# =============================================================================
+# NETWORK OPERATION RULES
+# =============================================================================
+
+network_rules:
+  # ---------------------------------------------------------------------------
+  # Package registries
+  # ---------------------------------------------------------------------------
+  
+  - name: allow-npm
+    description: npm registry access
+    domains:
+      - "registry.npmjs.org"
+      - "*.npmjs.org"
+      - "*.npmjs.com"
+    ports: [443, 80]
+    decision: allow
+    
+  - name: allow-pypi
+    description: PyPI access
+    domains:
+      - "pypi.org"
+      - "files.pythonhosted.org"
+      - "*.pypi.org"
+    ports: [443, 80]
+    decision: allow
+    
+  - name: allow-cargo
+    description: Cargo registry access
+    domains:
+      - "crates.io"
+      - "*.crates.io"
+      - "static.crates.io"
+    ports: [443, 80]
+    decision: allow
+    
+  - name: allow-rubygems
+    description: RubyGems access
+    domains:
+      - "rubygems.org"
+      - "*.rubygems.org"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-maven
+    description: Maven Central access
+    domains:
+      - "repo1.maven.org"
+      - "central.maven.org"
+      - "*.maven.org"
+    ports: [443, 80]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Code hosting
+  # ---------------------------------------------------------------------------
+  
+  - name: allow-github
+    description: GitHub access
+    domains:
+      - "github.com"
+      - "*.github.com"
+      - "raw.githubusercontent.com"
+      - "*.githubusercontent.com"
+      - "api.github.com"
+    ports: [443, 80, 22]
+    decision: allow
+    
+  - name: allow-gitlab
+    description: GitLab access
+    domains:
+      - "gitlab.com"
+      - "*.gitlab.com"
+    ports: [443, 80, 22]
+    decision: allow
+    
+  - name: allow-bitbucket
+    description: Bitbucket access
+    domains:
+      - "bitbucket.org"
+      - "*.bitbucket.org"
+    ports: [443, 80, 22]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # CDNs commonly used by packages
+  # ---------------------------------------------------------------------------
+  
+  - name: allow-cdns
+    description: Common CDNs
+    domains:
+      - "*.cloudflare.com"
+      - "*.cloudfront.net"
+      - "*.akamaized.net"
+      - "*.fastly.net"
+      - "cdn.jsdelivr.net"
+      - "unpkg.com"
+    ports: [443, 80]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Documentation and search
+  # ---------------------------------------------------------------------------
+  
+  - name: allow-docs
+    description: Documentation sites
+    domains:
+      - "docs.python.org"
+      - "docs.rs"
+      - "doc.rust-lang.org"
+      - "nodejs.org"
+      - "developer.mozilla.org"
+      - "stackoverflow.com"
+      - "*.stackoverflow.com"
+    ports: [443, 80]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Blocked networks
+  # ---------------------------------------------------------------------------
+  
+  - name: block-private-networks
+    description: Block internal/private networks
+    cidrs:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+      - "127.0.0.0/8"
+      - "169.254.0.0/16"   # Link-local
+      - "fc00::/7"          # IPv6 private
+      - "fe80::/10"         # IPv6 link-local
+    decision: deny
+    
+  - name: block-metadata-services
+    description: Block cloud metadata services
+    cidrs:
+      - "169.254.169.254/32"  # AWS, GCP, Azure metadata
+      - "100.100.100.200/32"  # Alibaba metadata
+    decision: deny
+
+  # ---------------------------------------------------------------------------
+  # Require approval for unknown destinations
+  # ---------------------------------------------------------------------------
+  
+  - name: approve-unknown-https
+    description: Require approval for unknown HTTPS destinations
+    ports: [443]
+    decision: approve
+    message: "Agent wants to connect to: {{.RemoteAddr}}:{{.RemotePort}}"
+    timeout: 2m
+
+  # ---------------------------------------------------------------------------
+  # Default deny
+  # ---------------------------------------------------------------------------
+  
+  - name: default-deny-network
+    description: Deny all other network connections
+    domains:
+      - "*"
+    decision: deny
+
+# =============================================================================
+# COMMAND RULES (Optional pre-execution checks)
+# =============================================================================
+
+command_rules:
+  # ---------------------------------------------------------------------------
+  # Safe commands - no additional checks
+  # ---------------------------------------------------------------------------
+  
+  - name: allow-safe-commands
+    description: Standard safe commands
+    commands:
+      - ls
+      - cat
+      - head
+      - tail
+      - grep
+      - find
+      - wc
+      - sort
+      - uniq
+      - diff
+      - pwd
+      - echo
+      - date
+      - which
+      - whoami
+      - id
+      - uname
+      - env
+      - printenv
+    decision: allow
+    
+  - name: allow-dev-tools
+    description: Development tools
+    commands:
+      - git
+      - node
+      - npm
+      - npx
+      - python
+      - python3
+      - pip
+      - pip3
+      - cargo
+      - rustc
+      - go
+      - make
+      - cmake
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Approve risky commands
+  # ---------------------------------------------------------------------------
+  
+  - name: approve-package-install
+    description: Require approval for package installation
+    commands:
+      - npm
+      - pip
+      - pip3
+      - cargo
+      - apt
+      - apt-get
+      - yum
+    args_patterns:
+      - "install*"
+      - "add*"
+      - "update*"
+      - "upgrade*"
+    decision: approve
+    message: "Agent wants to install packages: {{.Args}}"
+    
+  - name: approve-curl-wget
+    description: Require approval for downloads
+    commands:
+      - curl
+      - wget
+    decision: approve
+    message: "Agent wants to download: {{.Args}}"
+
+  # ---------------------------------------------------------------------------
+  # Block dangerous commands
+  # ---------------------------------------------------------------------------
+  
+  - name: block-dangerous-rm
+    description: Block recursive force delete
+    commands:
+      - rm
+    args_patterns:
+      - "*-rf*"
+      - "*-fr*"
+      - "*--force*--recursive*"
+    decision: deny
+    
+  - name: block-system-commands
+    description: Block system administration commands
+    commands:
+      - shutdown
+      - reboot
+      - init
+      - systemctl
+      - service
+      - mount
+      - umount
+      - fdisk
+      - mkfs
+      - dd
+      - kill
+      - killall
+      - pkill
+    decision: deny
+
+# =============================================================================
+# RESOURCE LIMITS
+# =============================================================================
+
+resource_limits:
+  # Memory
+  max_memory_mb: 2048
+  memory_swap_max_mb: 0           # Disable swap
+  
+  # CPU
+  cpu_quota_percent: 80           # Max 80% of one CPU core
+  
+  # Disk I/O
+  disk_read_bps_max: 104857600    # 100 MB/s
+  disk_write_bps_max: 52428800    # 50 MB/s
+  
+  # Network
+  net_bandwidth_mbps: 100
+  
+  # Process limits
+  pids_max: 100                   # Max 100 processes
+  
+  # Time limits
+  command_timeout: 5m             # Max 5 minutes per command
+  session_timeout: 4h             # Max 4 hours per session
+  idle_timeout: 30m               # Kill after 30 min inactivity
+
+# =============================================================================
+# AUDIT SETTINGS
+# =============================================================================
+
+audit:
+  # What to log
+  log_allowed: true               # Log allowed operations
+  log_denied: true                # Log denied operations
+  log_approved: true              # Log approved operations
+  
+  # Detail level
+  include_stdout: false           # Don't log stdout (can be large)
+  include_stderr: true            # Log stderr (errors are important)
+  include_file_content: false     # Don't log file contents
+  
+  # Retention
+  retention_days: 30

@@ -1,0 +1,301 @@
+# agentsh Server Configuration
+# Copy this to /etc/agentsh/config.yaml and customize
+
+# =============================================================================
+# SERVER SETTINGS
+# =============================================================================
+
+server:
+  # HTTP API server
+  http:
+    addr: "127.0.0.1:8080"
+    read_timeout: 30s
+    write_timeout: 5m
+    max_request_size: 10MB
+    
+  # gRPC server (optional, for high-performance clients)
+  grpc:
+    enabled: true
+    addr: "0.0.0.0:9090"
+    max_recv_msg_size: 10MB
+    max_send_msg_size: 100MB
+    
+  # Unix socket (for local clients, lower latency)
+  unix_socket:
+    enabled: true
+    path: "/var/run/agentsh/agentsh.sock"
+    permissions: "0660"
+    
+  # TLS configuration
+  tls:
+    enabled: false
+    cert_file: "/etc/agentsh/tls/server.crt"
+    key_file: "/etc/agentsh/tls/server.key"
+    ca_file: "/etc/agentsh/tls/ca.crt"        # For mTLS
+    client_auth: false                         # Require client certs
+
+# =============================================================================
+# AUTHENTICATION
+# =============================================================================
+
+auth:
+  # Authentication type: "none", "api_key", "jwt", "mtls"
+  type: "api_key"
+  
+  # API key authentication
+  api_key:
+    # Keys file format:
+    # - id: "agent-1"
+    #   key: "sk-xxxxxxxxxxxx"
+    #   description: "Production agent"
+    #   allowed_sessions: 10
+    keys_file: "./configs/api_keys.yaml"
+    header_name: "X-API-Key"
+    
+  # JWT authentication (alternative)
+  jwt:
+    secret: ""                    # Or use jwks_url for public key
+    jwks_url: ""
+    issuer: ""
+    audience: ""
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+
+logging:
+  # Log level: debug, info, warn, error
+  level: "info"
+  
+  # Format: json, text
+  format: "json"
+  
+  # Output: stdout, stderr, or file path
+  output: "./data/server.log"
+  
+  # Log rotation
+  rotation:
+    max_size_mb: 100
+    max_age_days: 7
+    max_backups: 5
+    compress: true
+
+# =============================================================================
+# AUDIT LOGGING
+# =============================================================================
+
+audit:
+  enabled: true
+  
+  # Separate audit log
+  output: "./data/audit.jsonl"
+
+  # Local queryable event storage (agentsh extension)
+  storage:
+    sqlite_path: "./data/events.db"
+  
+  # What to include
+  include:
+    allowed_operations: true
+    denied_operations: true
+    approved_operations: true
+    session_lifecycle: true
+    command_stdout: false         # Can be very large
+    command_stderr: true
+    file_content: false
+    
+  # Rotation
+  rotation:
+    max_size_mb: 500
+    max_age_days: 90
+    max_backups: 10
+    compress: true
+    
+  # Optional: send to external system
+  # webhook:
+  #   url: "https://siem.example.com/agentsh"
+  #   batch_size: 100
+  #   flush_interval: 10s
+
+# =============================================================================
+# SESSION MANAGEMENT
+# =============================================================================
+
+sessions:
+  # Where session data is stored
+  base_dir: "./data/sessions"
+  
+  # Maximum concurrent sessions
+  max_sessions: 100
+  
+  # Default timeouts (can be overridden per-session)
+  default_timeout: "4h"
+  default_idle_timeout: "30m"
+  
+  # Cleanup interval
+  cleanup_interval: "1m"
+  
+  # Session metadata retention after termination
+  metadata_retention: "24h"
+
+# =============================================================================
+# SANDBOX CONFIGURATION
+# =============================================================================
+
+sandbox:
+  # FUSE filesystem settings
+  fuse:
+    # Kernel cache timeouts (higher = better perf, less fresh)
+    entry_timeout: "1s"
+    attr_timeout: "1s"
+    negative_timeout: "0s"
+    
+    # Read performance
+    max_readahead: 131072          # 128KB
+    async_read: true
+    
+    # Write performance (keep false for audit accuracy)
+    writeback_cache: false
+    
+    # Event batching
+    event_batch_size: 100
+    event_batch_delay: "10ms"
+    
+  # Network proxy settings
+  network:
+    # Port range for proxy listeners
+    proxy_port_range: "10000-20000"
+    
+    # DNS settings
+    dns_upstream: "8.8.8.8:53"     # Or your internal DNS
+    dns_cache_ttl: "5m"
+    
+    # Connection limits
+    max_connections_per_session: 100
+    connection_timeout: "30s"
+    
+  # Linux namespace settings
+  namespaces:
+    mount: true
+    network: true
+    pid: true
+    uts: true
+    user: false                    # Requires careful UID mapping
+    
+  # seccomp settings
+  seccomp:
+    enabled: true
+    profile: "default"             # or path to custom profile
+    
+  # cgroups settings (v2)
+  cgroups:
+    enabled: true
+    base_path: "/sys/fs/cgroup/agentsh"
+
+# =============================================================================
+# RESOURCE LIMITS (defaults, can override per-session)
+# =============================================================================
+
+resource_limits:
+  # Memory
+  max_memory_mb: 2048
+  max_swap_mb: 0
+  
+  # CPU (percentage of one core)
+  max_cpu_percent: 80
+  
+  # Disk I/O (bytes per second)
+  max_disk_read_bps: 104857600     # 100 MB/s
+  max_disk_write_bps: 52428800     # 50 MB/s
+  
+  # Network (bits per second)
+  max_network_bps: 104857600       # 100 Mbps
+  
+  # Process limits
+  max_pids: 100
+  max_open_files: 1024
+  
+  # Time limits
+  command_timeout: "5m"
+
+# =============================================================================
+# POLICIES
+# =============================================================================
+
+policies:
+  # Directory containing policy files
+  dir: "./configs/policies"
+  
+  # Default policy to use if not specified
+  default: "default"
+  
+  # Policy reload interval (0 to disable hot reload)
+  reload_interval: "30s"
+
+# =============================================================================
+# APPROVALS
+# =============================================================================
+
+approvals:
+  # How long to wait for approval
+  timeout: "5m"
+  
+  # Notification method: "none", "webhook", "slack", "email"
+  notification:
+    type: "webhook"
+    webhook:
+      url: "https://example.com/agentsh/approvals"
+      secret: ""                   # For webhook signature
+      
+    # Slack notification
+    # slack:
+    #   webhook_url: "https://hooks.slack.com/..."
+    #   channel: "#agentsh-approvals"
+    
+  # Store pending approvals for UI
+  storage:
+    type: "memory"                 # or "redis"
+    # redis:
+    #   addr: "localhost:6379"
+    #   db: 0
+
+# =============================================================================
+# METRICS AND MONITORING
+# =============================================================================
+
+metrics:
+  # Prometheus metrics endpoint
+  enabled: true
+  path: "/metrics"
+  
+  # Include session metrics
+  include_session_metrics: true
+  
+  # Include per-command metrics (can be high cardinality)
+  include_command_metrics: false
+
+health:
+  # Health check endpoint
+  path: "/health"
+  
+  # Readiness check (dependencies ready)
+  readiness_path: "/ready"
+
+# =============================================================================
+# DEVELOPMENT SETTINGS (disable in production)
+# =============================================================================
+
+development:
+  # Verbose logging
+  debug: false
+  
+  # Disable auth (for testing only!)
+  disable_auth: false
+  
+  # Allow any policy (bypass policy checks)
+  disable_policy: false
+  
+  # PProf endpoints
+  pprof:
+    enabled: false
+    addr: "localhost:6060"
