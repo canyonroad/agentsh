@@ -51,6 +51,7 @@ Implement a pluggable **event sink** abstraction from the start:
 - **JSONL sink**: append-only files (server log + audit log) with rotation. Lowest friction, great for “tail -f”, and easy to ship later.
 - **SQLite sink**: local DB for queryable history (session/command/time/type/path/domain/decision filters). Enables search/UI without external dependencies.
 - **Composite sink**: fan-out to multiple sinks (e.g., `sqlite + jsonl`).
+- Optional: **Webhook sink**: POST batched JSON events to an HTTP endpoint for early-stage “ship to central” workflows.
 
 Search is implemented via SQLite (primary), with JSONL treated as an archival/streaming format. Later, we can add a “shipper” sink that forwards to a central store (SIEM, OpenSearch, Splunk, etc.) without changing the core event model.
 
