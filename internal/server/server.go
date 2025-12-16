@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/api"
+	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/auth"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
@@ -20,6 +21,7 @@ import (
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/internal/store/jsonl"
 	"github.com/agentsh/agentsh/internal/store/sqlite"
+	"github.com/agentsh/agentsh/pkg/types"
 )
 
 type Server struct {
@@ -41,7 +43,8 @@ func New(cfg *config.Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, err := policy.NewEngine(p, false /* enforceApprovals */)
+	enforceApprovals := cfg.Approvals.Enabled
+	engine, err := policy.NewEngine(p, enforceApprovals)
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +75,13 @@ func New(cfg *config.Config) (*Server, error) {
 
 	sessions := session.NewManager(100)
 	broker := events.NewBroker()
+	emitter := serverEmitter{store: store, broker: broker}
+
+	var approvalsMgr *approvals.Manager
+	if cfg.Approvals.Enabled {
+		timeout, _ := time.ParseDuration(cfg.Approvals.Timeout)
+		approvalsMgr = approvals.New(cfg.Approvals.Mode, timeout, emitter)
+	}
 
 	var apiKeyAuth *auth.APIKeyAuth
 	if !cfg.Development.DisableAuth && cfg.Auth.Type == "api_key" {
@@ -83,7 +93,7 @@ func New(cfg *config.Config) (*Server, error) {
 		apiKeyAuth = loaded
 	}
 
-	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth)
+	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, approvalsMgr)
 	router := app.Router()
 
 	s := &http.Server{
@@ -94,6 +104,14 @@ func New(cfg *config.Config) (*Server, error) {
 
 	return &Server{httpServer: s, store: store, sessions: sessions}, nil
 }
+
+type serverEmitter struct {
+	store  *composite.Store
+	broker *events.Broker
+}
+
+func (e serverEmitter) AppendEvent(ctx context.Context, ev types.Event) error { return e.store.AppendEvent(ctx, ev) }
+func (e serverEmitter) Publish(ev types.Event)                                 { e.broker.Publish(ev) }
 
 func (s *Server) Run(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

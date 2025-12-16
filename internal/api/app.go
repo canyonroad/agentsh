@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/auth"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
@@ -31,10 +32,12 @@ type App struct {
 	broker *events.Broker
 
 	apiKeyAuth *auth.APIKeyAuth
+
+	approvals *approvals.Manager
 }
 
-func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth) *App {
-	return &App{cfg: cfg, sessions: sessions, store: store, policy: engine, broker: broker, apiKeyAuth: apiKeyAuth}
+func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, approvalsMgr *approvals.Manager) *App {
+	return &App{cfg: cfg, sessions: sessions, store: store, policy: engine, broker: broker, apiKeyAuth: apiKeyAuth, approvals: approvalsMgr}
 }
 
 func (a *App) Router() http.Handler {
@@ -57,6 +60,9 @@ func (a *App) Router() http.Handler {
 		r.Get("/sessions/{id}/output/{cmdID}", a.getOutputChunk)
 
 		r.Get("/events/search", a.searchEvents)
+
+		r.Get("/approvals", a.listApprovals)
+		r.Post("/approvals/{id}", a.resolveApproval)
 	})
 
 	return r
@@ -131,6 +137,7 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
 			SessionID: s.ID,
 			Session:   s,
 			Policy:    a.policy,
+			Approvals: a.approvals,
 			Emit:      em,
 		})
 		if err != nil {
@@ -166,7 +173,7 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
 	// Optional: start an explicit HTTP(S) proxy for outbound network monitoring.
 	if a.cfg.Sandbox.Network.Enabled {
 		em := storeEmitter{store: a.store, broker: a.broker}
-		pr, proxyURL, err := netmonitor.StartProxy(a.cfg.Sandbox.Network.ProxyListenAddr, s.ID, s, a.policy, em)
+		pr, proxyURL, err := netmonitor.StartProxy(a.cfg.Sandbox.Network.ProxyListenAddr, s.ID, s, a.policy, a.approvals, em)
 		if err != nil {
 			fail := types.Event{
 				ID:        uuid.NewString(),
@@ -273,6 +280,32 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	s.SetCurrentCommandID(cmdID)
 
 	pre := a.policy.CheckCommand(req.Command, req.Args)
+	approvalErr := error(nil)
+	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && a.approvals != nil {
+		apr := approvals.Request{
+			ID:        "approval-" + uuid.NewString(),
+			SessionID: id,
+			CommandID: cmdID,
+			Kind:      "command",
+			Target:    req.Command,
+			Rule:      pre.Rule,
+			Message:   pre.Message,
+			Fields: map[string]any{
+				"command": req.Command,
+				"args":    req.Args,
+			},
+		}
+		res, err := a.approvals.RequestApproval(r.Context(), apr)
+		approvalErr = err
+		if pre.Approval != nil {
+			pre.Approval.ID = apr.ID
+		}
+		if err != nil || !res.Approved {
+			pre.EffectiveDecision = types.DecisionDeny
+		} else {
+			pre.EffectiveDecision = types.DecisionAllow
+		}
+	}
 	preEv := types.Event{
 		ID:        uuid.NewString(),
 		Timestamp: start,
@@ -296,6 +329,13 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	a.broker.Publish(preEv)
 
 	if pre.EffectiveDecision == types.DecisionDeny {
+		code := "E_POLICY_DENIED"
+		if pre.PolicyDecision == types.DecisionApprove {
+			code = "E_APPROVAL_DENIED"
+			if approvalErr != nil && strings.Contains(strings.ToLower(approvalErr.Error()), "timeout") {
+				code = "E_APPROVAL_TIMEOUT"
+			}
+		}
 		resp := types.ExecResponse{
 			CommandID: cmdID,
 			SessionID: id,
@@ -305,7 +345,7 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 				ExitCode: 126,
 				DurationMs: int64(time.Since(start).Milliseconds()),
 				Error: &types.ExecError{
-					Code:       "E_POLICY_DENIED",
+					Code:       code,
 					Message:    "command denied by policy",
 					PolicyRule: pre.Rule,
 				},
@@ -529,6 +569,36 @@ func (a *App) getOutputChunk(w http.ResponseWriter, r *http.Request) {
 		"data":          string(chunk),
 		"has_more":      offset+int64(len(chunk)) < total,
 	})
+}
+
+func (a *App) listApprovals(w http.ResponseWriter, r *http.Request) {
+	if a.approvals == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	writeJSON(w, http.StatusOK, a.approvals.ListPending())
+}
+
+func (a *App) resolveApproval(w http.ResponseWriter, r *http.Request) {
+	if a.approvals == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "approvals not enabled"})
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Decision string `json:"decision"` // "approve" or "deny"
+		Reason   string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	approved := strings.EqualFold(req.Decision, "approve") || strings.EqualFold(req.Decision, "allow")
+	if ok := a.approvals.Resolve(id, approved, req.Reason); !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "approval not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func parseEventQuery(r *http.Request) (types.EventQuery, error) {

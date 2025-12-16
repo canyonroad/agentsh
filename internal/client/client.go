@@ -98,6 +98,19 @@ func (c *Client) OutputChunk(ctx context.Context, sessionID, commandID string, s
 	return out, nil
 }
 
+func (c *Client) ListApprovals(ctx context.Context) ([]map[string]any, error) {
+	var out []map[string]any
+	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/approvals", nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) ResolveApproval(ctx context.Context, id string, decision string, reason string) error {
+	body := map[string]any{"decision": decision, "reason": reason}
+	return c.doJSON(ctx, http.MethodPost, "/api/v1/approvals/"+url.PathEscape(id), nil, body, nil)
+}
+
 func (c *Client) StreamSessionEvents(ctx context.Context, sessionID string) (io.ReadCloser, error) {
 	u := c.baseURL + "/api/v1/sessions/" + url.PathEscape(sessionID) + "/events"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -170,4 +183,3 @@ func (c *Client) addAuth(req *http.Request) {
 		req.Header.Set("X-API-Key", c.apiKey)
 	}
 }
-

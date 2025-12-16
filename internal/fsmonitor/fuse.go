@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
@@ -25,6 +26,7 @@ type Hooks struct {
 	SessionID string
 	Session   *session.Session
 	Policy    *policy.Engine
+	Approvals *approvals.Manager
 	Emit      Emitter
 }
 
@@ -59,6 +61,7 @@ type node struct {
 func (n *node) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	virt := n.virtualPath()
 	dec := n.check(ctx, virt, "open")
+	dec = n.maybeApprove(ctx, dec, "file", virt, "open")
 	if dec.EffectiveDecision == types.DecisionDeny {
 		n.emitFileEvent(ctx, "file_open", virt, "open", 0, dec, true)
 		return nil, 0, syscall.EACCES
@@ -75,6 +78,7 @@ func (n *node) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFl
 func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	virt := n.virtualChildPath(name)
 	dec := n.check(ctx, virt, "create")
+	dec = n.maybeApprove(ctx, dec, "file", virt, "create")
 	if dec.EffectiveDecision == types.DecisionDeny {
 		n.emitFileEvent(ctx, "file_create", virt, "create", 0, dec, true)
 		return nil, nil, 0, syscall.EACCES
@@ -91,6 +95,7 @@ func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint3
 func (n *node) Unlink(ctx context.Context, name string) syscall.Errno {
 	virt := n.virtualChildPath(name)
 	dec := n.check(ctx, virt, "delete")
+	dec = n.maybeApprove(ctx, dec, "file", virt, "delete")
 	if dec.EffectiveDecision == types.DecisionDeny {
 		n.emitFileEvent(ctx, "file_delete", virt, "delete", 0, dec, true)
 		return syscall.EACCES
@@ -102,6 +107,7 @@ func (n *node) Unlink(ctx context.Context, name string) syscall.Errno {
 func (n *node) Rmdir(ctx context.Context, name string) syscall.Errno {
 	virt := n.virtualChildPath(name)
 	dec := n.check(ctx, virt, "rmdir")
+	dec = n.maybeApprove(ctx, dec, "file", virt, "rmdir")
 	if dec.EffectiveDecision == types.DecisionDeny {
 		n.emitFileEvent(ctx, "dir_delete", virt, "rmdir", 0, dec, true)
 		return syscall.EACCES
@@ -113,6 +119,7 @@ func (n *node) Rmdir(ctx context.Context, name string) syscall.Errno {
 func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	virt := n.virtualChildPath(name)
 	dec := n.check(ctx, virt, "mkdir")
+	dec = n.maybeApprove(ctx, dec, "file", virt, "mkdir")
 	if dec.EffectiveDecision == types.DecisionDeny {
 		n.emitFileEvent(ctx, "dir_create", virt, "mkdir", 0, dec, true)
 		return nil, syscall.EACCES
@@ -124,6 +131,7 @@ func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 func (n *node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	virtFrom := n.virtualChildPath(name)
 	dec := n.check(ctx, virtFrom, "rename")
+	dec = n.maybeApprove(ctx, dec, "file", virtFrom, "rename")
 	if dec.EffectiveDecision == types.DecisionDeny {
 		n.emitFileEvent(ctx, "file_rename", virtFrom, "rename", 0, dec, true)
 		return syscall.EACCES
@@ -140,6 +148,7 @@ type fileHandle struct {
 
 func (f *fileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	dec := f.n.check(ctx, f.virtPath, "read")
+	dec = f.n.maybeApprove(ctx, dec, "file", f.virtPath, "read")
 	if dec.EffectiveDecision == types.DecisionDeny {
 		f.n.emitFileEvent(ctx, "file_read", f.virtPath, "read", int64(len(dest)), dec, true)
 		return nil, syscall.EACCES
@@ -153,6 +162,7 @@ func (f *fileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 
 func (f *fileHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
 	dec := f.n.check(ctx, f.virtPath, "write")
+	dec = f.n.maybeApprove(ctx, dec, "file", f.virtPath, "write")
 	if dec.EffectiveDecision == types.DecisionDeny {
 		f.n.emitFileEvent(ctx, "file_write", f.virtPath, "write", int64(len(data)), dec, true)
 		return 0, syscall.EACCES
@@ -176,6 +186,40 @@ func (n *node) check(_ context.Context, virtPath string, op string) policy.Decis
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
 	return n.hooks.Policy.CheckFile(virtPath, op)
+}
+
+func (n *node) maybeApprove(ctx context.Context, dec policy.Decision, kind, target, op string) policy.Decision {
+	if dec.PolicyDecision != types.DecisionApprove || dec.EffectiveDecision != types.DecisionApprove {
+		return dec
+	}
+	if n.hooks == nil || n.hooks.Approvals == nil {
+		return dec
+	}
+	req := approvals.Request{
+		ID:        "approval-" + uuid.NewString(),
+		SessionID: n.hooks.SessionID,
+		CommandID: "",
+		Kind:      kind,
+		Target:    target,
+		Rule:      dec.Rule,
+		Message:   dec.Message,
+		Fields: map[string]any{
+			"operation": op,
+		},
+	}
+	if n.hooks.Session != nil {
+		req.CommandID = n.hooks.Session.CurrentCommandID()
+	}
+	res, err := n.hooks.Approvals.RequestApproval(ctx, req)
+	if dec.Approval != nil {
+		dec.Approval.ID = req.ID
+	}
+	if err != nil || !res.Approved {
+		dec.EffectiveDecision = types.DecisionDeny
+	} else {
+		dec.EffectiveDecision = types.DecisionAllow
+	}
+	return dec
 }
 
 func (n *node) emitFileEvent(ctx context.Context, evType string, virtPath string, op string, bytes int64, dec policy.Decision, blocked bool) {

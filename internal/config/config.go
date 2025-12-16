@@ -97,7 +97,11 @@ type PoliciesConfig struct {
 	Default string `yaml:"default"`
 }
 
-type ApprovalsConfig struct{}
+type ApprovalsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Mode    string `yaml:"mode"`    // "local_tty" or "api"
+	Timeout string `yaml:"timeout"` // duration string, e.g. "5m"
+}
 
 type MetricsConfig struct {
 	Enabled bool   `yaml:"enabled"`
@@ -170,5 +174,11 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Audit.Rotation.MaxBackups == 0 {
 		cfg.Audit.Rotation.MaxBackups = 10
+	}
+	if cfg.Approvals.Timeout == "" {
+		cfg.Approvals.Timeout = "5m"
+	}
+	if cfg.Approvals.Mode == "" {
+		cfg.Approvals.Mode = "local_tty"
 	}
 }

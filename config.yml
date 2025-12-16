@@ -241,6 +241,8 @@ policies:
 # =============================================================================
 
 approvals:
+  enabled: false
+  mode: "local_tty"
   # How long to wait for approval
   timeout: "5m"
   

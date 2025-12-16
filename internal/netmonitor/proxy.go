@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -26,6 +27,7 @@ type Proxy struct {
 	sessionID string
 	sess      *session.Session
 	policy    *policy.Engine
+	approvals *approvals.Manager
 	emit      Emitter
 
 	ln   net.Listener
@@ -33,7 +35,7 @@ type Proxy struct {
 	done chan struct{}
 }
 
-func StartProxy(listenAddr string, sessionID string, sess *session.Session, engine *policy.Engine, emit Emitter) (*Proxy, string, error) {
+func StartProxy(listenAddr string, sessionID string, sess *session.Session, engine *policy.Engine, approvalsMgr *approvals.Manager, emit Emitter) (*Proxy, string, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, "", err
@@ -43,6 +45,7 @@ func StartProxy(listenAddr string, sessionID string, sess *session.Session, engi
 		sessionID: sessionID,
 		sess:      sess,
 		policy:    engine,
+		approvals: approvalsMgr,
 		emit:      emit,
 		ln:        ln,
 		done:      make(chan struct{}),
@@ -107,6 +110,7 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 	port := mustAtoi(portStr, 443)
 
 	dec := p.checkNetwork(host, port)
+	dec = p.maybeApprove(context.Background(), dec, "network", hostPort)
 	connectEv := p.emitNetEvent(context.Background(), "net_connect", host, hostPort, port, dec, map[string]any{"method": "CONNECT"})
 	if dec.EffectiveDecision == types.DecisionDeny {
 		_, _ = io.WriteString(client, "HTTP/1.1 403 Forbidden\r\n\r\n")
@@ -164,6 +168,7 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 	}
 
 	dec := p.checkNetwork(host, port)
+	dec = p.maybeApprove(context.Background(), dec, "network", host)
 	connectEv := p.emitNetEvent(context.Background(), "net_connect", host, host, port, dec, map[string]any{"method": req.Method})
 	if dec.EffectiveDecision == types.DecisionDeny {
 		resp := "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nblocked by policy\n"
@@ -203,6 +208,37 @@ func (p *Proxy) checkNetwork(domain string, port int) policy.Decision {
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
 	return p.policy.CheckNetwork(domain, port)
+}
+
+func (p *Proxy) maybeApprove(ctx context.Context, dec policy.Decision, kind string, target string) policy.Decision {
+	if dec.PolicyDecision != types.DecisionApprove || dec.EffectiveDecision != types.DecisionApprove {
+		return dec
+	}
+	if p.approvals == nil {
+		return dec
+	}
+	req := approvals.Request{
+		ID:        "approval-" + uuid.NewString(),
+		SessionID: p.sessionID,
+		CommandID: "",
+		Kind:      kind,
+		Target:    target,
+		Rule:      dec.Rule,
+		Message:   dec.Message,
+	}
+	if p.sess != nil {
+		req.CommandID = p.sess.CurrentCommandID()
+	}
+	res, err := p.approvals.RequestApproval(ctx, req)
+	if dec.Approval != nil {
+		dec.Approval.ID = req.ID
+	}
+	if err != nil || !res.Approved {
+		dec.EffectiveDecision = types.DecisionDeny
+	} else {
+		dec.EffectiveDecision = types.DecisionAllow
+	}
+	return dec
 }
 
 func (p *Proxy) emitNetEvent(ctx context.Context, evType string, domain string, remote string, port int, dec policy.Decision, fields map[string]any) types.Event {
