@@ -22,6 +22,7 @@ func newExecCmd() *cobra.Command {
 	var timeout string
 	var jsonStr string
 	var stream bool
+	var argv0 string
 	var output string
 	var events string
 	c := &cobra.Command{
@@ -32,6 +33,9 @@ func newExecCmd() *cobra.Command {
 			sessionID, req, err := parseExecInput(args, jsonStr, timeout, stream)
 			if err != nil {
 				return err
+			}
+			if strings.TrimSpace(argv0) != "" {
+				req.Argv0 = argv0
 			}
 
 			outMode := strings.ToLower(strings.TrimSpace(output))
@@ -129,6 +133,7 @@ func newExecCmd() *cobra.Command {
 	c.Flags().StringVar(&timeout, "timeout", "", "Command timeout (e.g. 30s, 5m)")
 	c.Flags().StringVar(&jsonStr, "json", "", "Exec request as JSON (e.g. '{\"command\":\"ls\",\"args\":[\"-la\"]}')")
 	c.Flags().BoolVar(&stream, "stream", false, "Stream output (requires server support)")
+	c.Flags().StringVar(&argv0, "argv0", "", "Override argv[0] for the executed process")
 	c.Flags().StringVar(&output, "output", getenvDefault("AGENTSH_OUTPUT", "shell"), "Output format: shell|json")
 	c.Flags().StringVar(&events, "events", getenvDefault("AGENTSH_EVENTS", ""), "Events to include in response: all|summary|blocked|none (default depends on --output)")
 	return c
