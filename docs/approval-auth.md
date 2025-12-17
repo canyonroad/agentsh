@@ -25,6 +25,7 @@ When agentsh requires human approval for dangerous operations, we must ensure th
 - To use approvals over the API, enable `auth.type=api_key` and use **separate keys**:
   - agent key: `role: agent` (can exec, cannot approve)
   - approver key: `role: approver` or `admin` (can approve)
+- If `approvals.mode=api` is configured while auth is disabled, the server refuses to start.
 
 ---
 

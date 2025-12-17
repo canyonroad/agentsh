@@ -99,3 +99,27 @@ func TestApprovalsEndpointsForbiddenWhenAuthDisabled(t *testing.T) {
 		t.Fatalf("expected 403 when auth disabled, got %d", rr2.Code)
 	}
 }
+
+func TestApprovalsEndpointsForbiddenWhenDevelopmentDisableAuth(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Development.DisableAuth = true
+	cfg.Auth.Type = "api_key"
+	cfg.Health.Path = "/health"
+	cfg.Health.ReadinessPath = "/ready"
+	cfg.Metrics.Enabled = false
+
+	sessions := session.NewManager(10)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, sessions, composite.New(nil, nil), engine, events.NewBroker(), nil, nil, metrics.New())
+	h := app.Router()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/approvals", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when development.disable_auth=true, got %d", rr.Code)
+	}
+}

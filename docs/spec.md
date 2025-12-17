@@ -959,15 +959,16 @@ To ensure approvals come from actual humans (not agents or bots), agentsh requir
 | **Interactive Challenge** | Medium | Math problem, type filename, or timed delay |
 | **Local TTY** | High | Terminal prompt (cannot be accessed by agent) |
 
-**See [APPROVAL_AUTH.md](APPROVAL_AUTH.md) for complete approval authentication specification.**
+**See `docs/approval-auth.md` for complete approval authentication specification.**
 
 #### Key Security Properties
 
 1. **Credential Separation**: Agent API keys cannot access approval endpoints
-2. **Network Isolation**: Approval service runs on separate port, blocked from agent's network namespace
-3. **Signed Tokens**: Approvals are cryptographically signed and bound to specific requests
-4. **Replay Prevention**: Tokens include nonces, timestamps, and are marked as used
-5. **Verification Required**: Every approval requires human verification (WebAuthn, TOTP, or challenge)
+2. **No Self-Approval When Auth Is Off**: When `auth.type=none` (or `development.disable_auth=true`), the approvals API is disabled
+3. **Network Isolation**: Approval service runs on separate port, blocked from agent's network namespace
+4. **Signed Tokens**: Approvals are cryptographically signed and bound to specific requests
+5. **Replay Prevention**: Tokens include nonces, timestamps, and are marked as used
+6. **Verification Required**: Every approval requires human verification (WebAuthn, TOTP, or challenge)
 
 ```json
 // Approval request (sent to human)
@@ -1258,6 +1259,10 @@ GET    /api/v1/sessions/{id}/history Get event history
 GET    /api/v1/approvals             List pending approvals
 POST   /api/v1/approvals/{id}        Approve/deny request
 ```
+
+Notes:
+- These endpoints require `auth.type=api_key` and an `approver`/`admin` role.
+- When auth is disabled (`auth.type=none` or `development.disable_auth=true`), the approvals API is disabled to prevent agent self-approval.
 
 ### 11.3 REST API Examples
 
