@@ -9,14 +9,14 @@
 
 ## Overview
 
-agentsh is a purpose-built shell environment that provides AI agents with secure, monitored, and policy-controlled command execution. Unlike traditional shells designed for humans, agentsh treats every operation as an auditable event with structured output.
+agentsh is a purpose-built shell environment that provides AI agents with secure, monitored, and policy-controlled command execution. Unlike traditional shells designed for humans, agentsh treats every operation as an auditable event with structured, queryable logs.
 
 ### Key Features
 
 - **🔒 Complete I/O Visibility**: Intercepts all file reads, writes, and deletes—even within scripts
 - **🌐 Network Monitoring**: Captures all network connections and DNS queries
 - **📋 Policy Enforcement**: Fine-grained control over what agents can do
-- **📊 Structured Output**: JSON responses that agents can actually parse
+- **📊 Dual Output Modes**: Shell-like output by default; JSON mode for tools/agents
 - **⚡ Session Persistence**: Keep sandboxes alive across commands for efficiency
 - **✅ Approval Workflows**: Human-in-the-loop for sensitive operations
 
@@ -140,6 +140,19 @@ agentsh exec SESSION_ID -- python script.py
 
 # Watch events in real-time
 agentsh events tail SESSION_ID
+```
+
+### Using with Claude Code / Codex CLI
+
+Claude Code reads project instructions from `CLAUDE.md` (recommended). OpenAI Codex CLI reads `AGENTS.md`.
+
+Example `CLAUDE.md` (or `AGENTS.md`) snippet to route execution through agentsh:
+
+```md
+## Shell access
+- Do not run commands directly in bash/zsh.
+- Execute commands via agentsh: `agentsh exec -- <command ...>`.
+- If you need structured output for a tool decision, use: `agentsh exec --output json --events summary -- <command ...>`.
 ```
 
 ## How It Works

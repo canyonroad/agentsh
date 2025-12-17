@@ -1017,7 +1017,12 @@ To ensure approvals come from actual humans (not agents or bots), agentsh requir
 
 ### 10.1 Design Philosophy
 
-Traditional shells output human-readable text. agentsh outputs structured JSON that agents can parse reliably.
+Traditional shells output human-readable text.
+
+agentsh always produces a structured **ExecResponse** at the API layer (JSON). The CLI can present that response in two ways:
+
+- **Shell mode (default):** print `stdout`/`stderr` like a normal shell and exit with the command’s exit code.
+- **JSON mode:** print the full ExecResponse (including `events` and `guidance`) for tools/agents.
 
 ```
 Traditional shell:
@@ -1026,28 +1031,20 @@ Traditional shell:
   drwxr-xr-x  12 user staff   384 Dec 15 10:00 .
   drwxr-xr-x   5 user staff   160 Dec 14 09:00 ..
   -rw-r--r--   1 user staff  1420 Dec 15 09:55 README.md
-  
-agentsh:
-  $ ls -la
-  {
-    "cwd": "/workspace",
-    "entries": [
-      {
-        "name": "README.md",
-        "type": "file",
-        "size": 1420,
-        "mode": "644",
-        "owner": "user",
-        "group": "staff",
-        "mtime": "2024-12-15T09:55:00Z"
-      }
-    ],
-    "summary": {
-      "files": 1,
-      "directories": 0,
-      "total_size": 1420
-    }
-  }
+
+agentsh (shell mode):
+  $ agentsh exec session-abc123 -- ls -la
+  total 48
+  drwxr-xr-x  12 user staff   384 Dec 15 10:00 .
+  ...
+
+agentsh (JSON mode):
+  $ agentsh exec --output json --events summary session-abc123 -- ls -la
+  { "command_id": "cmd-...", "result": { "exit_code": 0, "stdout": "..." }, "events": { ... } }
+
+agentsh (structured builtin example):
+  $ agentsh exec session-abc123 -- als
+  { "entries": [ ... ] }
 ```
 
 ### 10.2 Command Response Schema
@@ -1177,7 +1174,7 @@ Large outputs are automatically truncated with pagination:
       "current_offset": 0,
       "current_limit": 10000,
       "has_more": true,
-      "next_command": "agentsh output cmd-xyz789 --offset=10000 --limit=10000"
+      "next_command": "agentsh output session-abc123 cmd-xyz789 --offset=10000 --limit=10000"
     }
   }
 }
@@ -1185,18 +1182,16 @@ Large outputs are automatically truncated with pagination:
 
 ### 10.5 Builtin Structured Commands
 
-agentsh provides structured alternatives to common commands:
+agentsh provides a few structured “a*” builtins that return JSON on stdout:
 
 | Command | Structured Version | Output |
 |---------|-------------------|--------|
 | `ls` | `als` | JSON directory listing |
 | `cat` | `acat` | JSON with content + metadata |
-| `find` | `afind` | JSON array of matches |
 | `stat` | `astat` | JSON file attributes |
-| `ps` | `aps` | JSON process list |
 | `env` | `aenv` | JSON environment map |
-| `df` | `adf` | JSON disk usage |
-| `du` | `adu` | JSON directory sizes |
+
+Additional structured builtins may be added over time (the full ExecResponse JSON mode is the stable interface for tools/agents).
 
 ---
 
@@ -1579,7 +1574,7 @@ added 200 packages...
 
 # Interactive mode (attach to session)
 $ agentsh session attach session-abc123
-agentsh:session-abc123:/workspace$ ls -la
+agentsh:session-abc123:/workspace$ als
 {
   "entries": [...]
 }
@@ -1687,7 +1682,9 @@ Each session runs in isolated Linux namespaces:
 
 ### 13.3 seccomp-bpf Profile
 
-Block dangerous syscalls:
+**Status:** Not implemented in the current codebase (future work). This section describes an intended hardening layer.
+
+Example (future) syscall blocklist:
 
 ```go
 var blockedSyscalls = []int{
@@ -1716,41 +1713,31 @@ agentsh enforces per-command limits via **cgroups v2** when enabled in server co
 sandbox:
   cgroups:
     enabled: true
-    # Rootless/dev: prefer a relative path under the current process cgroup
+    # Base path under the cgroup v2 filesystem where per-command cgroups are created.
+    # Rootless/dev: prefer a relative path under the current process cgroup.
     base_path: "agentsh"
 ```
 
-Limits are sourced from the active policy `resource_limits` (e.g. `max_memory_mb`, `cpu_quota_percent`, `pids_max`).
+Limits are sourced from the active policy `resource_limits`.
+
+Currently enforced (when cgroups are enabled): `max_memory_mb`, `cpu_quota_percent`, `pids_max`.
 
 ```yaml
 resource_limits:
-  # Memory
-  max_memory_mb: 2048
-  memory_swap_max_mb: 0      # Disable swap
-  
-  # CPU
-  cpu_quota_percent: 80      # Max 80% of one CPU
-  
-  # I/O
-  io_read_bps_max: 104857600   # 100 MB/s
-  io_write_bps_max: 52428800   # 50 MB/s
-  
-  # PIDs
-  pids_max: 100              # Max 100 processes
-  
-  # Network (via tc)
-  net_bandwidth_mbps: 100
+  max_memory_mb: 2048        # Memory max (MB)
+  cpu_quota_percent: 80      # CPU quota (% of one CPU)
+  pids_max: 100              # Max processes
 ```
 
 ### 13.5 Threat Model
 
 | Threat | Mitigation |
 |--------|------------|
-| Agent escapes sandbox | Namespaces + seccomp + FUSE root |
+| Agent accesses/edits unexpected files | Policy enforcement + workspace view (FUSE) |
 | Agent accesses sensitive files | Policy enforcement + path restrictions |
 | Agent exfiltrates data | Network policy + egress monitoring |
 | Agent DoS via resources | cgroups resource limits |
-| Agent exploits kernel | seccomp blocks dangerous syscalls |
+| Agent exploits kernel | (Future) hardening layers like seccomp/eBPF |
 | Agent escapes via symlinks | FUSE resolves and validates symlinks |
 | Agent uses covert channels | Network proxy inspects all traffic |
 

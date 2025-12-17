@@ -15,7 +15,8 @@ server:
     
   # gRPC server (optional, for high-performance clients)
   grpc:
-    enabled: true
+    # Reserved for future gRPC support (not implemented yet).
+    enabled: false
     addr: "0.0.0.0:9090"
     max_recv_msg_size: 10MB
     max_send_msg_size: 100MB
@@ -184,15 +185,17 @@ sandbox:
     
   # Linux namespace settings
   namespaces:
-    mount: true
-    network: true
-    pid: true
-    uts: true
+    # Reserved for future isolation features (not implemented yet).
+    mount: false
+    network: false
+    pid: false
+    uts: false
     user: false                    # Requires careful UID mapping
     
   # seccomp settings
   seccomp:
-    enabled: true
+    # Reserved for future hardening (not implemented yet).
+    enabled: false
     profile: "default"             # or path to custom profile
     
   # cgroups settings (v2)

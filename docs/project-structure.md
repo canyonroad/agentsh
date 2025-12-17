@@ -1,203 +1,41 @@
 # agentsh Project Structure
 
-This document outlines the recommended project structure for implementing agentsh.
+This document describes the *current* repository layout (not an aspirational structure).
 
-## Directory Layout
+## High-level layout
 
 ```
 agentsh/
-├── cmd/
-│   └── agentsh/
-│       └── main.go                 # CLI entrypoint
-│
-├── internal/
-│   ├── api/
-│   │   ├── server.go               # HTTP/gRPC server setup
-│   │   ├── handlers.go             # Request handlers
-│   │   ├── middleware.go           # Auth, logging middleware
-│   │   └── sse.go                  # Server-sent events for streaming
-│   │
-│   ├── session/
-│   │   ├── manager.go              # Session lifecycle management
-│   │   ├── session.go              # Session state and operations
-│   │   └── cleanup.go              # Idle timeout, resource cleanup
-│   │
-│   ├── sandbox/
-│   │   ├── sandbox.go              # Sandbox orchestration
-│   │   ├── namespace.go            # Linux namespace setup
-│   │   ├── cgroups.go              # Resource limits via cgroups v2
-│   │   ├── seccomp.go              # Syscall filtering
-│   │   ├── executor.go             # Command execution
-│   │   └── shell.go                # Builtin commands (cd, export, etc.)
-│   │
-│   ├── fsmonitor/
-│   │   ├── fuse.go                 # FUSE filesystem implementation
-│   │   ├── dir.go                  # Directory operations
-│   │   ├── file.go                 # File operations
-│   │   ├── handle.go               # File handle management
-│   │   └── symlink.go              # Symlink handling
-│   │
-│   ├── netmonitor/
-│   │   ├── proxy.go                # Transparent TCP proxy
-│   │   ├── dns.go                  # DNS interception
-│   │   ├── iptables.go             # iptables rule management
-│   │   └── tls.go                  # TLS inspection (optional)
-│   │
-│   ├── policy/
-│   │   ├── engine.go               # Policy evaluation engine
-│   │   ├── rules.go                # Rule types and matching
-│   │   ├── parser.go               # YAML policy parsing
-│   │   ├── cache.go                # Decision caching
-│   │   └── approval.go             # Approval workflow handling
-│   │
-│   ├── audit/
-│   │   ├── logger.go               # Audit log writer
-│   │   ├── events.go               # Event formatting
-│   │   └── storage.go              # Log storage backends
-│   │
-│   └── config/
-│       ├── config.go               # Configuration loading
-│       ├── defaults.go             # Default values
-│       └── validate.go             # Config validation
-│
-├── pkg/
-│   ├── types/
-│   │   ├── session.go              # Session types
-│   │   ├── events.go               # Event types
-│   │   ├── policy.go               # Policy types
-│   │   └── api.go                  # API request/response types
-│   │
-│   └── client/
-│       ├── client.go               # Go client library
-│       ├── session.go              # Session operations
-│       └── exec.go                 # Command execution
-│
-├── api/
-│   └── proto/
-│       └── agentsh.proto           # gRPC service definitions
-│
-├── configs/
-│   ├── config.yaml                 # Default server config
-│   └── policies/
-│       ├── default.yaml            # Default policy
-│       ├── strict.yaml             # Strict security policy
-│       └── permissive.yaml         # Permissive policy
-│
-├── scripts/
-│   ├── install.sh                  # Installation script
-│   ├── setup-dev.sh                # Development environment setup
-│   └── benchmark.sh                # Performance benchmarking
-│
-├── docs/
-│   ├── api.md                      # API documentation
-│   ├── policies.md                 # Policy writing guide
-│   ├── deployment.md               # Deployment guide
-│   └── security.md                 # Security considerations
-│
-├── test/
-│   ├── integration/                # Integration tests
-│   ├── e2e/                        # End-to-end tests
-│   └── fixtures/                   # Test fixtures
-│
-├── Makefile
-├── go.mod
-├── go.sum
-├── README.md
-├── SPEC.md                         # Full specification
-├── LICENSE
-└── CONTRIBUTING.md
+├── cmd/agentsh/                 # main() for the agentsh binary
+├── internal/                    # implementation (not exported)
+├── pkg/types/                   # API/CLI types shared across packages
+├── configs/                     # example configs (api keys, etc.)
+├── docs/                        # design docs and notes
+├── config.yml                   # example server config (repo-local)
+└── default-policy.yml           # example policy (repo-local)
 ```
 
-## Package Dependencies
+## `internal/` packages (where to change what)
 
-### Core Dependencies
+- `internal/server/` — Wires configuration into HTTP + unix-socket servers and session lifecycle.
+- `internal/api/` — HTTP routing + handlers (`/sessions`, `/exec`, `/events`, `/metrics`), exec responses (`include_events`, `guidance`).
+- `internal/cli/` — Cobra CLI commands (`agentsh exec`, `agentsh session …`, `agentsh events …`).
+- `internal/client/` — HTTP client used by the CLI (and tests) to call the server API.
+- `internal/config/` — Config structs, load/validate helpers.
+- `internal/policy/` — Policy parsing + evaluation and derived limits/timeouts.
+- `internal/session/` — Session manager and built-in commands (`cd`, `export`, `aenv`, `als`, `acat`, `astat`).
+- `internal/fsmonitor/` — FUSE workspace view + file operation capture.
+- `internal/netmonitor/` — Network proxy + DNS cache/resolver and optional netns/transparent plumbing.
+- `internal/limits/` — Optional cgroups v2 enforcement (Linux-only; wired from exec hooks).
+- `internal/events/` — In-memory event broker for SSE.
+- `internal/store/` — Event sinks (SQLite, JSONL, webhook) and composition.
+- `internal/auth/` — API key auth implementation.
+- `internal/approvals/` — Approval manager (shadow/enforced modes).
 
-```go
-// go.mod
-module github.com/agentsh/agentsh
+## Notes
 
-go 1.25
-
-require (
-    // FUSE
-    github.com/hanwen/go-fuse/v2 v2.4.0
-    
-    // gRPC
-    google.golang.org/grpc v1.59.0
-    google.golang.org/protobuf v1.31.0
-    
-    // HTTP
-    github.com/go-chi/chi/v5 v5.0.10
-    
-    // Configuration
-    gopkg.in/yaml.v3 v3.0.1
-    
-    // Logging
-    go.uber.org/zap v1.26.0
-    
-    // seccomp
-    github.com/seccomp/libseccomp-golang v0.10.0
-    
-    // Glob matching
-    github.com/gobwas/glob v0.2.3
-    
-    // CLI
-    github.com/spf13/cobra v1.8.0
-    
-    // Testing
-    github.com/stretchr/testify v1.8.4
-)
-```
-
-## Component Responsibilities
-
-### cmd/agentsh/main.go
-
-Entry point that sets up:
-- CLI command parsing (cobra)
-- Configuration loading
-- Server initialization
-- Signal handling for graceful shutdown
-
-### internal/api/
-
-HTTP and gRPC server implementation:
-- RESTful endpoints for sessions, exec, events
-- gRPC service for high-performance clients
-- Server-sent events for real-time streaming
-- Authentication middleware
-
-### internal/session/
-
-Session lifecycle management:
-- Create/destroy sessions
-- Track session state and metrics
-- Handle idle timeout and cleanup
-- Maintain session registry
-
-### internal/sandbox/
-
-Isolated execution environment:
-- Linux namespace creation (mount, net, PID, UTS)
-- cgroups v2 resource limits
-- seccomp-bpf syscall filtering
-- Command execution with I/O capture
-- Shell builtin handling
-
-### internal/fsmonitor/
-
-FUSE filesystem implementation:
-- Intercept all file operations
-- Policy check on each operation
-- Event emission for audit
-- Passthrough to real filesystem
-
-### internal/netmonitor/
-
-Network interception:
-- Transparent TCP proxy
-- DNS query interception
-- iptables rule management
+- `pkg/types/` is the “schema” layer: keep it stable and versioned when changing API responses.
+- Tests live next to code (`*_test.go`) in `internal/*`.
 - Connection tracking
 
 ### internal/policy/
