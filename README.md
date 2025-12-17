@@ -124,6 +124,10 @@ agentsh exec --output json SESSION_ID -- python script.py
 # Or set a default:
 AGENTSH_OUTPUT=json agentsh exec SESSION_ID -- python script.py
 
+# Control how many events are included in the ExecResponse JSON (smaller responses for agents)
+agentsh exec --output json --events summary SESSION_ID -- curl -sS https://ifconfig.me
+agentsh exec --output json --events all SESSION_ID -- curl -sS https://ifconfig.me
+
 # Execute commands
 agentsh exec SESSION_ID -- npm install
 agentsh exec SESSION_ID -- python script.py

@@ -518,6 +518,11 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	defer unlock()
 	s.SetCurrentCommandID(cmdID)
 
+	includeEvents := strings.ToLower(strings.TrimSpace(req.IncludeEvents))
+	if includeEvents == "" {
+		includeEvents = "all"
+	}
+
 	pre := a.policy.CheckCommand(req.Command, req.Args)
 	approvalErr := error(nil)
 	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && a.approvals != nil {
@@ -575,6 +580,7 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 				code = "E_APPROVAL_TIMEOUT"
 			}
 		}
+		g := guidanceForPolicyDenied(req, pre, preEv, approvalErr)
 		resp := types.ExecResponse{
 			CommandID: cmdID,
 			SessionID: id,
@@ -587,14 +593,26 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 					Code:       code,
 					Message:    "command denied by policy",
 					PolicyRule: pre.Rule,
+					Suggestions: func() []types.Suggestion {
+						if g == nil {
+							return nil
+						}
+						return g.Suggestions
+					}(),
 				},
 			},
 			Events: types.ExecEvents{
-				FileOperations:    []types.Event{},
-				NetworkOperations: []types.Event{},
-				BlockedOperations: []types.Event{preEv},
+				FileOperations:         []types.Event{},
+				NetworkOperations:      []types.Event{},
+				BlockedOperations:      []types.Event{preEv},
+				FileOperationsCount:    0,
+				NetworkOperationsCount: 0,
+				BlockedOperationsCount: 1,
+				OtherCount:             0,
 			},
+			Guidance: g,
 		}
+		applyIncludeEvents(&resp, includeEvents)
 		writeJSON(w, http.StatusForbidden, resp)
 		return
 	}
@@ -712,14 +730,179 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 		Request:   req,
 		Result:    res,
 		Events: types.ExecEvents{
-			FileOperations:    fileOps,
-			NetworkOperations: netOps,
-			BlockedOperations: blockedOps,
-			Other:             otherOps,
+			FileOperations:         fileOps,
+			NetworkOperations:      netOps,
+			BlockedOperations:      blockedOps,
+			Other:                  otherOps,
+			FileOperationsCount:    len(fileOps),
+			NetworkOperationsCount: len(netOps),
+			BlockedOperationsCount: len(blockedOps),
+			OtherCount:             len(otherOps),
 		},
 		Resources: &resources,
+		Guidance:  guidanceForResponse(req, res, blockedOps),
 	}
+	applyIncludeEvents(&resp, includeEvents)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func applyIncludeEvents(resp *types.ExecResponse, include string) {
+	if resp == nil {
+		return
+	}
+	switch include {
+	case "all":
+		return
+	case "none":
+		resp.Events.Truncated = true
+		resp.Events.FileOperations = []types.Event{}
+		resp.Events.NetworkOperations = []types.Event{}
+		resp.Events.BlockedOperations = []types.Event{}
+		resp.Events.Other = []types.Event{}
+		return
+	case "blocked":
+		resp.Events.Truncated = true
+		resp.Events.FileOperations = []types.Event{}
+		resp.Events.NetworkOperations = []types.Event{}
+		resp.Events.Other = []types.Event{}
+		return
+	case "summary":
+		const maxBlocked = 25
+		resp.Events.Truncated = true
+		resp.Events.FileOperations = []types.Event{}
+		resp.Events.NetworkOperations = []types.Event{}
+		resp.Events.Other = []types.Event{}
+		if len(resp.Events.BlockedOperations) > maxBlocked {
+			resp.Events.BlockedOperations = resp.Events.BlockedOperations[:maxBlocked]
+		}
+		return
+	default:
+		// Unknown value: keep backward compatible behavior.
+		return
+	}
+}
+
+func guidanceForPolicyDenied(req types.ExecRequest, pre policy.Decision, preEv types.Event, approvalErr error) *types.ExecGuidance {
+	g := &types.ExecGuidance{
+		Status:    "blocked",
+		Blocked:   true,
+		Retryable: pre.PolicyDecision == types.DecisionApprove,
+		Reason:    "command denied by policy",
+		PolicyRule: func() string {
+			if pre.Rule != "" {
+				return pre.Rule
+			}
+			if preEv.Policy != nil {
+				return preEv.Policy.Rule
+			}
+			return ""
+		}(),
+		BlockedOperation: preEv.Operation,
+		BlockedTarget:    req.Command,
+	}
+
+	if approvalErr != nil && strings.Contains(strings.ToLower(approvalErr.Error()), "timeout") {
+		g.Reason = "approval timed out"
+		g.Retryable = true
+	}
+	if pre.PolicyDecision == types.DecisionApprove {
+		g.Suggestions = append(g.Suggestions, types.Suggestion{
+			Action: "request_approval",
+			Reason: "operation requires approval per policy",
+		})
+	} else {
+		g.Suggestions = append(g.Suggestions, types.Suggestion{
+			Action: "adjust_policy",
+			Reason: "operation denied by policy; adjust policy or change command",
+		})
+	}
+	return g
+}
+
+func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps []types.Event) *types.ExecGuidance {
+	g := &types.ExecGuidance{}
+
+	if len(blockedOps) > 0 {
+		ev := blockedOps[0]
+		rule := ""
+		dec := ""
+		if ev.Policy != nil {
+			rule = ev.Policy.Rule
+			dec = string(ev.Policy.Decision)
+		}
+		target := ev.Path
+		if target == "" {
+			if ev.Remote != "" {
+				target = ev.Remote
+			} else if ev.Domain != "" {
+				target = ev.Domain
+			} else {
+				target = ev.Type
+			}
+		}
+		g.Status = "blocked"
+		g.Blocked = true
+		g.PolicyRule = rule
+		g.BlockedOperation = ev.Operation
+		if g.BlockedOperation == "" {
+			g.BlockedOperation = ev.Type
+		}
+		g.BlockedTarget = target
+		if rule != "" {
+			g.Reason = fmt.Sprintf("blocked by policy (rule=%s)", rule)
+		} else if dec != "" {
+			g.Reason = fmt.Sprintf("blocked by policy (decision=%s)", dec)
+		} else {
+			g.Reason = "blocked by policy"
+		}
+
+		// Heuristics: provide substitutions for common tooling.
+		base := strings.ToLower(filepath.Base(req.Command))
+		if base == "curl" {
+			urlArg := ""
+			for _, a := range req.Args {
+				if strings.HasPrefix(a, "http://") || strings.HasPrefix(a, "https://") {
+					urlArg = a
+					break
+				}
+			}
+			if urlArg != "" {
+				g.Substitutions = append(g.Substitutions, types.Suggestion{
+					Action:  "substitute",
+					Command: fmt.Sprintf("wget -qO- %s", urlArg),
+					Reason:  "try an alternative downloader",
+				})
+				if strings.HasPrefix(urlArg, "http://") {
+					g.Substitutions = append(g.Substitutions, types.Suggestion{
+						Action:  "substitute",
+						Command: fmt.Sprintf("curl -sS %s", strings.Replace(urlArg, "http://", "https://", 1)),
+						Reason:  "HTTPS may be allowed where HTTP is denied",
+					})
+				}
+			}
+		}
+
+		// Generic remediation.
+		g.Suggestions = append(g.Suggestions, types.Suggestion{
+			Action: "inspect_events",
+			Reason: "query the event log for full details (blocked operations, rule, and target)",
+		})
+		g.Suggestions = append(g.Suggestions, types.Suggestion{
+			Action: "adjust_policy",
+			Reason: "allow the required operation or enable approvals",
+		})
+		g.Retryable = len(g.Substitutions) > 0 || strings.HasPrefix(strings.ToLower(rule), "approve-")
+		return g
+	}
+
+	if res.ExitCode == 0 {
+		g.Status = "ok"
+		return g
+	}
+	g.Status = "failed"
+	g.Blocked = false
+	g.Reason = "command failed"
+	return g
 }
 
 func (a *App) streamEvents(w http.ResponseWriter, r *http.Request) {

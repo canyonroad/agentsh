@@ -21,6 +21,7 @@ func newExecCmd() *cobra.Command {
 	var jsonStr string
 	var stream bool
 	var output string
+	var events string
 	c := &cobra.Command{
 		Use:   "exec SESSION_ID -- COMMAND [ARGS...]",
 		Short: "Execute a command in a session",
@@ -40,6 +41,21 @@ func newExecCmd() *cobra.Command {
 			default:
 				return fmt.Errorf("invalid --output %q (expected shell|json)", output)
 			}
+
+			evMode := strings.ToLower(strings.TrimSpace(events))
+			if evMode == "" {
+				if outMode == "shell" {
+					evMode = "none"
+				} else {
+					evMode = "summary"
+				}
+			}
+			switch evMode {
+			case "all", "summary", "blocked", "none":
+			default:
+				return fmt.Errorf("invalid --events %q (expected all|summary|blocked|none)", events)
+			}
+			req.IncludeEvents = evMode
 
 			cfg := getClientConfig(cmd)
 			cl := client.New(cfg.serverAddr, cfg.apiKey)
@@ -100,6 +116,7 @@ func newExecCmd() *cobra.Command {
 	c.Flags().StringVar(&jsonStr, "json", "", "Exec request as JSON (e.g. '{\"command\":\"ls\",\"args\":[\"-la\"]}')")
 	c.Flags().BoolVar(&stream, "stream", false, "Stream output (requires server support)")
 	c.Flags().StringVar(&output, "output", getenvDefault("AGENTSH_OUTPUT", "shell"), "Output format: shell|json")
+	c.Flags().StringVar(&events, "events", getenvDefault("AGENTSH_EVENTS", ""), "Events to include in response: all|summary|blocked|none (default depends on --output)")
 	return c
 }
 
@@ -214,7 +231,20 @@ func printShellExec(cmd *cobra.Command, resp types.ExecResponse) error {
 		_, _ = io.WriteString(cmd.ErrOrStderr(), resp.Result.Stderr)
 	}
 
-	if msg := shellBlockSummary(resp); msg != "" {
+	if resp.Guidance != nil {
+		if msg := strings.TrimSpace(resp.Guidance.Reason); msg != "" && (resp.Guidance.Blocked || resp.Result.ExitCode != 0) {
+			if resp.Guidance.PolicyRule != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "agentsh: %s (rule=%s)\n", msg, resp.Guidance.PolicyRule)
+			} else {
+				fmt.Fprintln(cmd.ErrOrStderr(), "agentsh: "+msg)
+			}
+			for _, s := range resp.Guidance.Substitutions {
+				if strings.TrimSpace(s.Command) != "" {
+					fmt.Fprintln(cmd.ErrOrStderr(), "agentsh: try: "+s.Command)
+				}
+			}
+		}
+	} else if msg := shellBlockSummary(resp); msg != "" {
 		fmt.Fprintln(cmd.ErrOrStderr(), msg)
 		for _, s := range shellSubstitutions(resp) {
 			fmt.Fprintln(cmd.ErrOrStderr(), "agentsh: try: "+s)
