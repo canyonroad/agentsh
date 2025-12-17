@@ -14,6 +14,11 @@ When agentsh requires human approval for dangerous operations, we must ensure th
 3. The approval cannot be replayed or forged
 4. The human understands what they're approving
 
+### Current implementation note (auth transport)
+
+- HTTP uses `X-API-Key` by default (configurable via `auth.api_key.header_name`).
+- gRPC uses metadata: send the same key under `x-api-key` (and agentsh also accepts the configured header name lowercased).
+
 ---
 
 ## 1. Threat Model

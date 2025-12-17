@@ -11,6 +11,7 @@ If you’re on Windows or macOS, the recommended approach is to run agentsh insi
 - **Linux (native):** primary supported platform.
 - **Windows:** run in **WSL2** (recommended) or a Linux container.
 - **macOS:** run in a Linux VM/container (e.g. Docker Desktop’s Linux VM, Lima, etc.).
+- **gRPC (optional):** if enabled, clients connect to `server.grpc.addr` (default `127.0.0.1:9090`). The CLI can prefer gRPC via `AGENTSH_TRANSPORT=grpc`.
 
 ## Feature availability (current implementation)
 
@@ -53,3 +54,4 @@ docker run --rm -it \
 - **FUSE mount fails:** ensure FUSE3 is installed (host/VM) and, in Docker, `/dev/fuse` is present and `SYS_ADMIN` is allowed.
 - **Transparent network mode fails:** run as root / with NET_ADMIN capabilities; otherwise rely on proxy mode.
 - **cgroups errors:** keep `sandbox.cgroups.enabled: false` unless you have a writable cgroup v2 base path configured.
+- **gRPC connection fails:** confirm `server.grpc.enabled: true`, the address/port are reachable, and (if auth is enabled) send the API key via gRPC metadata `x-api-key`.

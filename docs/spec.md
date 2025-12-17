@@ -1826,71 +1826,16 @@ Expected overhead by workload type:
 
 ### 15.1 Server Configuration
 
-```yaml
-# /etc/agentsh/config.yaml
+The current implementation’s example config is `config.yml` in the repository root.
 
-server:
-  http_addr: "0.0.0.0:8080"
-  grpc_addr: "0.0.0.0:9090"
-  unix_socket: "/var/run/agentsh/agentsh.sock"
-  
-  tls:
-    enabled: true
-    cert_file: "/etc/agentsh/tls/server.crt"
-    key_file: "/etc/agentsh/tls/server.key"
-  
-  auth:
-    type: "api_key"  # or "jwt", "mtls"
-    api_keys_file: "/etc/agentsh/api_keys.yaml"
-
-logging:
-  level: "info"      # debug, info, warn, error
-  format: "json"     # json, text
-  output: "/var/log/agentsh/server.log"
-  
-  # Separate audit log
-  audit:
-    enabled: true
-    output: "/var/log/agentsh/audit.log"
-    include_stdout: false  # Include command stdout in audit
-
-sessions:
-  base_dir: "/var/lib/agentsh/sessions"
-  max_sessions: 100
-  default_timeout: "4h"
-  default_idle_timeout: "30m"
-  cleanup_interval: "1m"
-
-sandbox:
-  # FUSE settings
-  fuse:
-    entry_timeout: "1s"
-    attr_timeout: "1s"
-    max_readahead: 131072
-    async_read: true
-    
-  # Network proxy settings
-  network:
-    proxy_port_range: "10000-20000"
-    dns_upstream: "8.8.8.8:53"
-    
-  # Resource limits defaults
-  resource_limits:
-    max_memory_mb: 2048
-    max_cpu_percent: 80
-    command_timeout: "5m"
-    pids_max: 100
-
-policies:
-  dir: "/etc/agentsh/policies"
-  default: "default"
-  
-approvals:
-  timeout: "5m"
-  notification:
-    type: "webhook"
-    url: "https://example.com/agentsh/approvals"
-```
+Key fields:
+- `server.http.addr`
+- `server.grpc.enabled` / `server.grpc.addr` (CreateSession, Exec, ExecStream, EventsTail)
+- `server.unix_socket.*`
+- `auth.type` and `auth.api_key.*` (HTTP header + gRPC metadata)
+- `sandbox.*` (FUSE/network/cgroups)
+- `policies.*`
+- `approvals.*`
 
 ### 15.2 Policy Configuration
 
@@ -1900,12 +1845,13 @@ See [Section 9.2](#92-policy-configuration) for policy file format.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AGENTSH_CONFIG` | Config file path | `/etc/agentsh/config.yaml` |
-| `AGENTSH_LOG_LEVEL` | Log level | `info` |
-| `AGENTSH_HTTP_ADDR` | HTTP listen address | `0.0.0.0:8080` |
-| `AGENTSH_GRPC_ADDR` | gRPC listen address | `0.0.0.0:9090` |
-| `AGENTSH_DATA_DIR` | Data directory | `/var/lib/agentsh` |
+| `AGENTSH_CONFIG` | CLI auto-start config path | `config.yml` |
+| `AGENTSH_LOG_LEVEL` | Override config `logging.level` | `info` |
+| `AGENTSH_HTTP_ADDR` | Override config `server.http.addr` | `127.0.0.1:8080` |
+| `AGENTSH_GRPC_ADDR` | gRPC listen address | `127.0.0.1:9090` |
+| `AGENTSH_DATA_DIR` | Override data dir (sessions + SQLite DB) | unset |
 | `AGENTSH_NO_AUTO` | Disable CLI auto-start/auto-create behaviors | unset |
+| `AGENTSH_TRANSPORT` | CLI transport preference (`http` or `grpc`) | `http` |
 
 ---
 
@@ -1922,7 +1868,7 @@ agentsh provides full security features on Linux. For Windows and macOS, we supp
 | **macOS** | Tiered (FUSE → sandbox → Lima/Docker) | ⚠️ Varies by tier |
 | **Container Dev** | Linux container with agentsh | ✅ Full |
 
-**See [CROSS_PLATFORM.md](CROSS_PLATFORM.md) for detailed platform-specific setup instructions.**
+**See `docs/cross-platform.md` for platform-specific notes.**
 
 ### 16.1 System Requirements (Linux Native)
 
