@@ -142,6 +142,26 @@ agentsh exec SESSION_ID -- python script.py
 agentsh events tail SESSION_ID
 ```
 
+### gRPC API (optional)
+
+Enable `server.grpc.enabled` and use `proto/agentsh/v1/agentsh.proto`. The gRPC service uses `google.protobuf.Struct` so the payloads match the HTTP JSON shapes.
+
+Example with `grpcurl`:
+
+```bash
+# Create session
+grpcurl -plaintext \
+  -import-path proto -proto proto/agentsh/v1/agentsh.proto \
+  -d '{"workspace":"/home/user/project","policy":"default"}' \
+  127.0.0.1:9090 agentsh.v1.Agentsh/CreateSession
+
+# Exec (note session_id is part of the request)
+grpcurl -plaintext \
+  -import-path proto -proto proto/agentsh/v1/agentsh.proto \
+  -d '{"session_id":"session-...","command":"ls","args":["-la"],"include_events":"summary"}' \
+  127.0.0.1:9090 agentsh.v1.Agentsh/Exec
+```
+
 ### Using with Claude Code / Codex CLI
 
 Claude Code reads project instructions from `CLAUDE.md` (recommended). OpenAI Codex CLI reads `AGENTS.md`.

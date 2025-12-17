@@ -15,11 +15,8 @@ server:
     
   # gRPC server (optional, for high-performance clients)
   grpc:
-    # Reserved for future gRPC support (not implemented yet).
     enabled: false
-    addr: "0.0.0.0:9090"
-    max_recv_msg_size: 10MB
-    max_send_msg_size: 100MB
+    addr: "127.0.0.1:9090"
     
   # Unix socket (for local clients, lower latency)
   unix_socket:

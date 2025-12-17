@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -16,7 +15,6 @@ import (
 	"github.com/agentsh/agentsh/internal/auth"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
-	"github.com/agentsh/agentsh/internal/fsmonitor"
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/netmonitor"
 	"github.com/agentsh/agentsh/internal/policy"
@@ -168,116 +166,12 @@ func (a *App) createSession(w http.ResponseWriter, r *http.Request) {
 	if ok := decodeJSON(w, r, &req, "invalid json"); !ok {
 		return
 	}
-	if req.Policy == "" {
-		req.Policy = a.cfg.Policies.Default
-	}
-	var s *session.Session
-	var err error
-	if req.ID != "" {
-		s, err = a.sessions.CreateWithID(req.ID, req.Workspace, req.Policy)
-	} else {
-		s, err = a.sessions.Create(req.Workspace, req.Policy)
-	}
+	snap, code, err := a.createSessionCore(r.Context(), req)
 	if err != nil {
-		code := http.StatusBadRequest
-		if errors.Is(err, session.ErrSessionExists) {
-			code = http.StatusConflict
-		}
 		writeJSON(w, code, map[string]any{"error": err.Error()})
 		return
 	}
-
-	ev := types.Event{
-		ID:        uuid.NewString(),
-		Timestamp: time.Now().UTC(),
-		Type:      "session_created",
-		SessionID: s.ID,
-		Fields: map[string]any{
-			"workspace": s.Workspace,
-			"policy":    s.Policy,
-		},
-	}
-	_ = a.store.AppendEvent(r.Context(), ev)
-	a.broker.Publish(ev)
-
-	// Optional: mount FUSE loopback so we can monitor file operations.
-	if a.cfg.Sandbox.FUSE.Enabled {
-		mountBase := a.cfg.Sandbox.FUSE.MountBaseDir
-		if mountBase == "" {
-			mountBase = a.cfg.Sessions.BaseDir
-		}
-		mountPoint := filepath.Join(mountBase, s.ID, "workspace-mnt")
-		em := storeEmitter{store: a.store, broker: a.broker}
-		m, err := fsmonitor.MountWorkspace(s.Workspace, mountPoint, &fsmonitor.Hooks{
-			SessionID: s.ID,
-			Session:   s,
-			Policy:    a.policy,
-			Approvals: a.approvals,
-			Emit:      em,
-		})
-		if err != nil {
-			fail := types.Event{
-				ID:        uuid.NewString(),
-				Timestamp: time.Now().UTC(),
-				Type:      "fuse_mount_failed",
-				SessionID: s.ID,
-				Fields: map[string]any{
-					"mount_point": mountPoint,
-					"error":       err.Error(),
-				},
-			}
-			_ = a.store.AppendEvent(r.Context(), fail)
-			a.broker.Publish(fail)
-		} else {
-			s.SetWorkspaceMount(mountPoint)
-			s.SetWorkspaceUnmount(m.Unmount)
-			okEv := types.Event{
-				ID:        uuid.NewString(),
-				Timestamp: time.Now().UTC(),
-				Type:      "fuse_mounted",
-				SessionID: s.ID,
-				Fields: map[string]any{
-					"mount_point": mountPoint,
-				},
-			}
-			_ = a.store.AppendEvent(r.Context(), okEv)
-			a.broker.Publish(okEv)
-		}
-	}
-
-	// Optional: start transparent network interception; fall back to explicit proxy on failure.
-	if a.cfg.Sandbox.Network.Transparent.Enabled {
-		if err := a.tryStartTransparentNetwork(r.Context(), s); err != nil {
-			fail := types.Event{
-				ID:        uuid.NewString(),
-				Timestamp: time.Now().UTC(),
-				Type:      "transparent_net_failed",
-				SessionID: s.ID,
-				Fields: map[string]any{
-					"error": err.Error(),
-				},
-			}
-			_ = a.store.AppendEvent(r.Context(), fail)
-			a.broker.Publish(fail)
-			// Fall back to explicit proxy if configured.
-			if a.cfg.Sandbox.Network.Enabled {
-				a.startExplicitProxy(r.Context(), s)
-			}
-		} else {
-			okEv := types.Event{
-				ID:        uuid.NewString(),
-				Timestamp: time.Now().UTC(),
-				Type:      "transparent_net_ready",
-				SessionID: s.ID,
-			}
-			_ = a.store.AppendEvent(r.Context(), okEv)
-			a.broker.Publish(okEv)
-		}
-	} else if a.cfg.Sandbox.Network.Enabled {
-		a.startExplicitProxy(r.Context(), s)
-	}
-
-	writeJSON(w, http.StatusCreated, s.Snapshot())
+	writeJSON(w, code, snap)
 }
 
 func (a *App) startExplicitProxy(ctx context.Context, s *session.Session) {
@@ -497,253 +391,16 @@ func (e storeEmitter) Publish(ev types.Event) { e.broker.Publish(ev) }
 
 func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	s, ok := a.sessions.Get(id)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
-		return
-	}
-
 	var req types.ExecRequest
 	if ok := decodeJSON(w, r, &req, "invalid json"); !ok {
 		return
 	}
-	if req.Command == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "command is required"})
+	resp, code, err := a.execInSessionCore(r.Context(), id, req)
+	if err != nil {
+		writeJSON(w, code, map[string]any{"error": err.Error()})
 		return
 	}
-
-	cmdID := "cmd-" + uuid.NewString()
-	start := time.Now().UTC()
-	unlock := s.LockExec()
-	defer unlock()
-	s.SetCurrentCommandID(cmdID)
-
-	includeEvents := strings.ToLower(strings.TrimSpace(req.IncludeEvents))
-	if includeEvents == "" {
-		includeEvents = "all"
-	}
-
-	pre := a.policy.CheckCommand(req.Command, req.Args)
-	approvalErr := error(nil)
-	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && a.approvals != nil {
-		apr := approvals.Request{
-			ID:        "approval-" + uuid.NewString(),
-			SessionID: id,
-			CommandID: cmdID,
-			Kind:      "command",
-			Target:    req.Command,
-			Rule:      pre.Rule,
-			Message:   pre.Message,
-			Fields: map[string]any{
-				"command": req.Command,
-				"args":    req.Args,
-			},
-		}
-		res, err := a.approvals.RequestApproval(r.Context(), apr)
-		approvalErr = err
-		if pre.Approval != nil {
-			pre.Approval.ID = apr.ID
-		}
-		if err != nil || !res.Approved {
-			pre.EffectiveDecision = types.DecisionDeny
-		} else {
-			pre.EffectiveDecision = types.DecisionAllow
-		}
-	}
-	preEv := types.Event{
-		ID:        uuid.NewString(),
-		Timestamp: start,
-		Type:      "command_policy",
-		SessionID: id,
-		CommandID: cmdID,
-		Operation: "command_precheck",
-		Policy: &types.PolicyInfo{
-			Decision:          pre.PolicyDecision,
-			EffectiveDecision: pre.EffectiveDecision,
-			Rule:              pre.Rule,
-			Message:           pre.Message,
-			Approval:          pre.Approval,
-		},
-		Fields: map[string]any{
-			"command": req.Command,
-			"args":    req.Args,
-		},
-	}
-	_ = a.store.AppendEvent(r.Context(), preEv)
-	a.broker.Publish(preEv)
-
-	if pre.EffectiveDecision == types.DecisionDeny {
-		code := "E_POLICY_DENIED"
-		if pre.PolicyDecision == types.DecisionApprove {
-			code = "E_APPROVAL_DENIED"
-			if approvalErr != nil && strings.Contains(strings.ToLower(approvalErr.Error()), "timeout") {
-				code = "E_APPROVAL_TIMEOUT"
-			}
-		}
-		g := guidanceForPolicyDenied(req, pre, preEv, approvalErr)
-		resp := types.ExecResponse{
-			CommandID: cmdID,
-			SessionID: id,
-			Timestamp: start,
-			Request:   req,
-			Result: types.ExecResult{
-				ExitCode:   126,
-				DurationMs: int64(time.Since(start).Milliseconds()),
-				Error: &types.ExecError{
-					Code:       code,
-					Message:    "command denied by policy",
-					PolicyRule: pre.Rule,
-					Suggestions: func() []types.Suggestion {
-						if g == nil {
-							return nil
-						}
-						return g.Suggestions
-					}(),
-				},
-			},
-			Events: types.ExecEvents{
-				FileOperations:         []types.Event{},
-				NetworkOperations:      []types.Event{},
-				BlockedOperations:      []types.Event{preEv},
-				FileOperationsCount:    0,
-				NetworkOperationsCount: 0,
-				BlockedOperationsCount: 1,
-				OtherCount:             0,
-			},
-			Guidance: g,
-		}
-		applyIncludeEvents(&resp, includeEvents)
-		writeJSON(w, http.StatusForbidden, resp)
-		return
-	}
-
-	startEv := types.Event{
-		ID:        uuid.NewString(),
-		Timestamp: start,
-		Type:      "command_started",
-		SessionID: id,
-		CommandID: cmdID,
-		Fields: map[string]any{
-			"command": req.Command,
-			"args":    req.Args,
-		},
-	}
-	_ = a.store.AppendEvent(r.Context(), startEv)
-	a.broker.Publish(startEv)
-
-	limits := a.policy.Limits()
-	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(r.Context(), s, cmdID, req, a.cfg, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits))
-
-	_ = a.store.SaveOutput(r.Context(), id, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
-
-	end := time.Now().UTC()
-	endEv := types.Event{
-		ID:        uuid.NewString(),
-		Timestamp: end,
-		Type:      "command_finished",
-		SessionID: id,
-		CommandID: cmdID,
-		Fields: map[string]any{
-			"exit_code":      exitCode,
-			"duration_ms":    int64(end.Sub(start).Milliseconds()),
-			"cpu_user_ms":    resources.CPUUserMs,
-			"cpu_system_ms":  resources.CPUSystemMs,
-			"memory_peak_kb": resources.MemoryPeakKB,
-		},
-	}
-	if execErr != nil {
-		endEv.Fields["error"] = execErr.Error()
-	}
-	_ = a.store.AppendEvent(r.Context(), endEv)
-	a.broker.Publish(endEv)
-
-	// Collect events for this command (including file events emitted by FUSE).
-	collected, _ := a.store.QueryEvents(r.Context(), types.EventQuery{
-		CommandID: cmdID,
-		Limit:     5000,
-		Asc:       true,
-	})
-	var fileOps, netOps, blockedOps, otherOps []types.Event
-	for _, ev := range collected {
-		isBlocked := false
-		if ev.Policy != nil && ev.Policy.EffectiveDecision == types.DecisionDeny {
-			isBlocked = true
-		}
-		if b, ok := ev.Fields["blocked"].(bool); ok && b {
-			isBlocked = true
-		}
-		if isBlocked {
-			blockedOps = append(blockedOps, ev)
-		}
-
-		switch {
-		case strings.HasPrefix(ev.Type, "file_") || strings.HasPrefix(ev.Type, "dir_") || strings.HasPrefix(ev.Type, "symlink_"):
-			fileOps = append(fileOps, ev)
-		case strings.HasPrefix(ev.Type, "net_") || ev.Type == "dns_query":
-			netOps = append(netOps, ev)
-		default:
-			otherOps = append(otherOps, ev)
-		}
-	}
-	if fileOps == nil {
-		fileOps = []types.Event{}
-	}
-	if netOps == nil {
-		netOps = []types.Event{}
-	}
-	if blockedOps == nil {
-		blockedOps = []types.Event{}
-	}
-	if otherOps == nil {
-		otherOps = []types.Event{}
-	}
-
-	res := types.ExecResult{
-		ExitCode:         exitCode,
-		Stdout:           string(stdoutB),
-		Stderr:           string(stderrB),
-		StdoutTruncated:  stdoutTrunc,
-		StderrTruncated:  stderrTrunc,
-		StdoutTotalBytes: stdoutTotal,
-		StderrTotalBytes: stderrTotal,
-		DurationMs:       int64(end.Sub(start).Milliseconds()),
-	}
-	if execErr != nil {
-		res.Error = &types.ExecError{
-			Code:    "E_COMMAND_FAILED",
-			Message: execErr.Error(),
-		}
-	}
-	if stdoutTrunc && stdoutTotal > int64(len(stdoutB)) {
-		res.Pagination = &types.Pagination{
-			CurrentOffset: 0,
-			CurrentLimit:  int64(len(stdoutB)),
-			HasMore:       true,
-			NextCommand:   fmt.Sprintf("agentsh output %s %s --stream stdout --offset %d --limit %d", id, cmdID, len(stdoutB), len(stdoutB)),
-		}
-	}
-
-	resp := types.ExecResponse{
-		CommandID: cmdID,
-		SessionID: id,
-		Timestamp: start,
-		Request:   req,
-		Result:    res,
-		Events: types.ExecEvents{
-			FileOperations:         fileOps,
-			NetworkOperations:      netOps,
-			BlockedOperations:      blockedOps,
-			Other:                  otherOps,
-			FileOperationsCount:    len(fileOps),
-			NetworkOperationsCount: len(netOps),
-			BlockedOperationsCount: len(blockedOps),
-			OtherCount:             len(otherOps),
-		},
-		Resources: &resources,
-		Guidance:  guidanceForResponse(req, res, blockedOps),
-	}
-	applyIncludeEvents(&resp, includeEvents)
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, code, resp)
 }
 
 func (a *App) cgroupHook(sessionID string, cmdID string, limits policy.Limits) postStartHook {

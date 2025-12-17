@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package agentsh.v1;
+
+import "google/protobuf/struct.proto";
+
+// NOTE: This service intentionally uses google.protobuf.Struct to avoid requiring
+// code generation in the agentsh server while still providing standard gRPC.
+//
+// Requests and responses use the same JSON shapes as the HTTP API:
+// - CreateSession: {"id": "...", "workspace": "...", "policy": "..."}
+// - Exec: {"session_id":"...", "command":"...", "args":[...], "working_dir":"...", "timeout":"...", "stdin":"...", "env":{...}, "include_events":"summary|all|blocked|none"}
+service Agentsh {
+  rpc CreateSession(google.protobuf.Struct) returns (google.protobuf.Struct);
+  rpc Exec(google.protobuf.Struct) returns (google.protobuf.Struct);
+}
+

@@ -9,6 +9,7 @@ agentsh/
 ├── cmd/agentsh/                 # main() for the agentsh binary
 ├── internal/                    # implementation (not exported)
 ├── pkg/types/                   # API/CLI types shared across packages
+├── proto/                       # gRPC proto definitions (Struct-based)
 ├── configs/                     # example configs (api keys, etc.)
 ├── docs/                        # design docs and notes
 ├── config.yml                   # example server config (repo-local)

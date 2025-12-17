@@ -1351,117 +1351,21 @@ data: {"type":"file_write","path":"/workspace/node_modules/.package-lock.json","
 
 ### 11.4 gRPC API
 
-```protobuf
-syntax = "proto3";
+gRPC is optional. The current implementation uses `google.protobuf.Struct` so gRPC payloads match the HTTP JSON shapes.
 
-package agentsh.v1;
+Proto: `proto/agentsh/v1/agentsh.proto`
 
-service AgentShell {
-  // Session management
-  rpc CreateSession(CreateSessionRequest) returns (Session);
-  rpc GetSession(GetSessionRequest) returns (Session);
-  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
-  rpc DestroySession(DestroySessionRequest) returns (Empty);
-  
-  // Command execution
-  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
-  rpc ExecuteStream(ExecuteRequest) returns (stream ExecuteEvent);
-  
-  // Event streaming
-  rpc StreamEvents(StreamEventsRequest) returns (stream IOEvent);
-  
-  // Approvals
-  rpc ListApprovals(ListApprovalsRequest) returns (ListApprovalsResponse);
-  rpc HandleApproval(HandleApprovalRequest) returns (Empty);
-}
-
-message ExecuteRequest {
-  string session_id = 1;
-  string command = 2;
-  repeated string args = 3;
-  map<string, string> env = 4;
-  string working_dir = 5;
-  google.protobuf.Duration timeout = 6;
-  string stdin = 7;
-  bool stream_output = 8;
-}
-
-message ExecuteResponse {
-  string command_id = 1;
-  int32 exit_code = 2;
-  string stdout = 3;
-  string stderr = 4;
-  google.protobuf.Duration duration = 5;
-  repeated IOEvent file_operations = 6;
-  repeated IOEvent network_operations = 7;
-  repeated IOEvent blocked_operations = 8;
-  ResourceUsage resources = 9;
-}
-```
+Example requests:
+- CreateSession: `{"workspace":"/home/user/project","policy":"default"}`
+- Exec: `{"session_id":"session-...","command":"ls","args":["-la"],"include_events":"summary"}`
 
 ### 11.5 Client Libraries
 
-Official client libraries for common languages:
+Client libraries are future work. Today you can:
 
-```go
-// Go client
-import "github.com/agentsh/agentsh-go"
-
-client := agentsh.NewClient("localhost:8080")
-
-session, err := client.CreateSession(ctx, agentsh.SessionConfig{
-    Workspace: "/home/user/project",
-    Policy:    "default",
-})
-
-result, err := client.Execute(ctx, session.ID, agentsh.ExecRequest{
-    Command: "npm",
-    Args:    []string{"install"},
-})
-
-fmt.Printf("Exit code: %d\n", result.ExitCode)
-fmt.Printf("Files written: %d\n", len(result.Events.FileOperations))
-```
-
-```python
-# Python client
-from agentsh import Client, SessionConfig, ExecRequest
-
-client = Client("localhost:8080")
-
-session = client.create_session(SessionConfig(
-    workspace="/home/user/project",
-    policy="default"
-))
-
-result = client.execute(session.id, ExecRequest(
-    command="python",
-    args=["script.py"]
-))
-
-print(f"Exit code: {result.exit_code}")
-print(f"Network calls: {len(result.events.network_operations)}")
-```
-
-```typescript
-// TypeScript client
-import { AgentShClient, SessionConfig } from '@agentsh/client';
-
-const client = new AgentShClient('localhost:8080');
-
-const session = await client.createSession({
-  workspace: '/home/user/project',
-  policy: 'default'
-});
-
-const result = await client.execute(session.id, {
-  command: 'node',
-  args: ['script.js']
-});
-
-console.log(`Exit code: ${result.exitCode}`);
-console.log(`Blocked ops: ${result.events.blockedOperations.length}`);
-```
+- Use the HTTP API directly (curl/any HTTP client).
+- Use the gRPC API with `grpcurl` or generate a client from `proto/agentsh/v1/agentsh.proto`.
+- When API key auth is enabled, pass the key via gRPC metadata `x-api-key` (or the configured header name, lowercased).
 
 ---
 

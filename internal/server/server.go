@@ -31,6 +31,10 @@ import (
 	"github.com/agentsh/agentsh/internal/store/webhook"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 type Server struct {
@@ -40,6 +44,10 @@ type Server struct {
 	unixServer *http.Server
 	unixLn     net.Listener
 	unixPath   string
+
+	grpcServer *grpc.Server
+	grpcLn     net.Listener
+
 	store      *composite.Store
 	broker     *events.Broker
 	sessions   *session.Manager
@@ -233,6 +241,43 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 	srv.httpLn = ln
 
+	if cfg.Server.GRPC.Enabled {
+		grpcLn, grpcErr := listenGRPC(cfg)
+		if grpcErr != nil {
+			_ = store.Close()
+			return nil, grpcErr
+		}
+
+		var opts []grpc.ServerOption
+		opts = append(opts,
+			grpc.UnaryInterceptor(api.GRPCUnaryAuthInterceptor(app)),
+			grpc.StreamInterceptor(api.GRPCStreamAuthInterceptor(app)),
+		)
+		if cfg.Server.TLS.Enabled {
+			if cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "" {
+				_ = grpcLn.Close()
+				_ = store.Close()
+				return nil, fmt.Errorf("server.tls enabled but cert_file/key_file missing")
+			}
+			creds, err := credentials.NewServerTLSFromFile(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
+			if err != nil {
+				_ = grpcLn.Close()
+				_ = store.Close()
+				return nil, fmt.Errorf("load grpc tls keypair: %w", err)
+			}
+			opts = append(opts, grpc.Creds(creds))
+		}
+
+		gs := grpc.NewServer(opts...)
+		api.RegisterGRPC(gs, app)
+		hs := health.NewServer()
+		hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+		healthpb.RegisterHealthServer(gs, hs)
+
+		srv.grpcLn = grpcLn
+		srv.grpcServer = gs
+	}
+
 	if cfg.Server.UnixSocket.Enabled && cfg.Server.UnixSocket.Path != "" {
 		unixPath := cfg.Server.UnixSocket.Path
 		if err := os.MkdirAll(filepath.Dir(unixPath), 0o755); err != nil {
@@ -343,6 +388,19 @@ func listenHTTP(cfg *config.Config) (net.Listener, error) {
 	return tlsListen(addr, cert)
 }
 
+func listenGRPC(cfg *config.Config) (net.Listener, error) {
+	addr := cfg.Server.GRPC.Addr
+	if addr == "" {
+		addr = "127.0.0.1:9090"
+	}
+	if cfg.Development.DisableAuth || strings.EqualFold(strings.TrimSpace(cfg.Auth.Type), "none") {
+		if !isLoopbackListenAddr(addr) {
+			return nil, fmt.Errorf("refusing to listen on %q with auth.type=none (use 127.0.0.1/localhost or enable auth)", addr)
+		}
+	}
+	return net.Listen("tcp", addr)
+}
+
 func isLoopbackListenAddr(addr string) bool {
 	a := strings.TrimSpace(addr)
 	if a == "" {
@@ -417,7 +475,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	go func() {
 		if err := s.httpServer.Serve(s.httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
@@ -426,6 +484,13 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.unixServer != nil && s.unixLn != nil {
 		go func() {
 			if err := s.unixServer.Serve(s.unixLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
+	if s.grpcServer != nil && s.grpcLn != nil {
+		go func() {
+			if err := s.grpcServer.Serve(s.grpcLn); err != nil {
 				errCh <- err
 			}
 		}()
@@ -441,6 +506,9 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.unixServer != nil {
 			_ = s.unixServer.Shutdown(shutdownCtx)
 		}
+		if s.grpcServer != nil {
+			s.grpcServer.GracefulStop()
+		}
 		return s.httpServer.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		if s.pprofServer != nil {
@@ -453,7 +521,10 @@ func (s *Server) Run(ctx context.Context) error {
 			defer cancel()
 			_ = s.unixServer.Shutdown(shutdownCtx)
 		}
-		return fmt.Errorf("http server: %w", err)
+		if s.grpcServer != nil {
+			s.grpcServer.Stop()
+		}
+		return fmt.Errorf("server: %w", err)
 	}
 }
 
@@ -465,6 +536,14 @@ func (s *Server) Close() error {
 	if s.unixLn != nil {
 		_ = s.unixLn.Close()
 		s.unixLn = nil
+	}
+	if s.grpcLn != nil {
+		_ = s.grpcLn.Close()
+		s.grpcLn = nil
+	}
+	if s.grpcServer != nil {
+		s.grpcServer.Stop()
+		s.grpcServer = nil
 	}
 	if s.unixPath != "" {
 		_ = os.Remove(s.unixPath)
@@ -492,6 +571,13 @@ func (s *Server) PProfAddr() string {
 		return ""
 	}
 	return s.pprofLn.Addr().String()
+}
+
+func (s *Server) GRPCAddr() string {
+	if s == nil || s.grpcLn == nil {
+		return ""
+	}
+	return s.grpcLn.Addr().String()
 }
 
 func (s *Server) reapOnce(now time.Time) {
