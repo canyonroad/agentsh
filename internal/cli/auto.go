@@ -13,6 +13,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func autoDisabled() bool {
@@ -51,6 +54,12 @@ func shouldAutoStartServer(serverAddr string) bool {
 func isConnectionError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if st, ok := status.FromError(err); ok {
+		switch st.Code() {
+		case codes.Unavailable, codes.DeadlineExceeded:
+			return true
+		}
 	}
 	var ue *url.Error
 	if errors.As(err, &ue) {

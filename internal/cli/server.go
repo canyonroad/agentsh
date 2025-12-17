@@ -40,4 +40,3 @@ func newServerCmd() *cobra.Command {
 	cmd.Flags().StringVar(&configPath, "config", "config.yml", "Path to server config YAML")
 	return cmd
 }
-

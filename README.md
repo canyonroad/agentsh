@@ -146,6 +146,14 @@ agentsh events tail SESSION_ID
 
 Enable `server.grpc.enabled` and use `proto/agentsh/v1/agentsh.proto`. The gRPC service uses `google.protobuf.Struct` so the payloads match the HTTP JSON shapes.
 
+The CLI can prefer gRPC for `exec`, `exec --stream`, and `events tail`:
+
+```bash
+AGENTSH_TRANSPORT=grpc agentsh exec SESSION_ID -- ls -la
+AGENTSH_TRANSPORT=grpc agentsh exec SESSION_ID --stream -- npm install
+AGENTSH_TRANSPORT=grpc agentsh events tail SESSION_ID
+```
+
 Example with `grpcurl`:
 
 ```bash
@@ -160,6 +168,18 @@ grpcurl -plaintext \
   -import-path proto -proto proto/agentsh/v1/agentsh.proto \
   -d '{"session_id":"session-...","command":"ls","args":["-la"],"include_events":"summary"}' \
   127.0.0.1:9090 agentsh.v1.Agentsh/Exec
+
+# ExecStream (server-streaming stdout/stderr + done)
+grpcurl -plaintext \
+  -import-path proto -proto proto/agentsh/v1/agentsh.proto \
+  -d '{"session_id":"session-...","command":"sh","args":["-c","echo hi"]}' \
+  127.0.0.1:9090 agentsh.v1.Agentsh/ExecStream
+
+# EventsTail (server-streaming session events)
+grpcurl -plaintext \
+  -import-path proto -proto proto/agentsh/v1/agentsh.proto \
+  -d '{"session_id":"session-..."}' \
+  127.0.0.1:9090 agentsh.v1.Agentsh/EventsTail
 ```
 
 ### Using with Claude Code / Codex CLI

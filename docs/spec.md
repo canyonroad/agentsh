@@ -1358,6 +1358,8 @@ Proto: `proto/agentsh/v1/agentsh.proto`
 Example requests:
 - CreateSession: `{"workspace":"/home/user/project","policy":"default"}`
 - Exec: `{"session_id":"session-...","command":"ls","args":["-la"],"include_events":"summary"}`
+- ExecStream: `{"session_id":"session-...","command":"sh","args":["-c","echo hi"]}`
+- EventsTail: `{"session_id":"session-..."}`
 
 ### 11.5 Client Libraries
 

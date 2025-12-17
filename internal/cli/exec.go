@@ -14,6 +14,8 @@ import (
 	"github.com/agentsh/agentsh/internal/client"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func newExecCmd() *cobra.Command {
@@ -58,7 +60,15 @@ func newExecCmd() *cobra.Command {
 			req.IncludeEvents = evMode
 
 			cfg := getClientConfig(cmd)
-			cl := client.New(cfg.serverAddr, cfg.apiKey)
+			cl, err := client.NewForCLI(client.CLIOptions{
+				HTTPBaseURL: cfg.serverAddr,
+				GRPCAddr:    cfg.grpcAddr,
+				APIKey:      cfg.apiKey,
+				Transport:   cfg.transport,
+			})
+			if err != nil {
+				return err
+			}
 
 			if req.StreamOutput {
 				return execStream(cmd, cl, cfg.serverAddr, sessionID, req, outMode)
@@ -74,7 +84,11 @@ func newExecCmd() *cobra.Command {
 			}
 			if err != nil && !autoDisabled() {
 				var he *client.HTTPError
-				if errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found") {
+				grpcNotFound := func(e error) bool {
+					st, ok := status.FromError(e)
+					return ok && st.Code() == codes.NotFound
+				}
+				if (errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found")) || grpcNotFound(err) {
 					wd, wdErr := os.Getwd()
 					if wdErr == nil {
 						if _, createErr := cl.CreateSessionWithID(cmd.Context(), sessionID, wd, ""); createErr == nil {
@@ -120,7 +134,7 @@ func newExecCmd() *cobra.Command {
 	return c
 }
 
-func execStream(cmd *cobra.Command, cl *client.Client, serverAddr, sessionID string, req types.ExecRequest, output string) error {
+func execStream(cmd *cobra.Command, cl client.CLIClient, serverAddr, sessionID string, req types.ExecRequest, output string) error {
 	body, err := cl.ExecStream(cmd.Context(), sessionID, req)
 	if err != nil && !autoDisabled() && isConnectionError(err) {
 		if startErr := ensureServerRunning(cmd.Context(), serverAddr, cmd.ErrOrStderr()); startErr == nil {
@@ -131,7 +145,11 @@ func execStream(cmd *cobra.Command, cl *client.Client, serverAddr, sessionID str
 	}
 	if err != nil && !autoDisabled() {
 		var he *client.HTTPError
-		if errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found") {
+		grpcNotFound := func(e error) bool {
+			st, ok := status.FromError(e)
+			return ok && st.Code() == codes.NotFound
+		}
+		if (errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found")) || grpcNotFound(err) {
 			wd, wdErr := os.Getwd()
 			if wdErr == nil {
 				if _, createErr := cl.CreateSessionWithID(cmd.Context(), sessionID, wd, ""); createErr == nil {

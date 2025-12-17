@@ -18,7 +18,10 @@ func newApproveCmd() *cobra.Command {
 		Short: "List pending approvals",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := getClientConfig(cmd)
-			c := client.New(cfg.serverAddr, cfg.apiKey)
+			c, err := client.NewForCLI(client.CLIOptions{HTTPBaseURL: cfg.serverAddr, GRPCAddr: cfg.grpcAddr, APIKey: cfg.apiKey, Transport: cfg.transport})
+			if err != nil {
+				return err
+			}
 			approvals, err := c.ListApprovals(cmd.Context())
 			if err != nil {
 				return err
@@ -43,7 +46,10 @@ func newApproveCmd() *cobra.Command {
 				decision = "approve"
 			}
 			cfg := getClientConfig(cmd)
-			c := client.New(cfg.serverAddr, cfg.apiKey)
+			c, err := client.NewForCLI(client.CLIOptions{HTTPBaseURL: cfg.serverAddr, GRPCAddr: cfg.grpcAddr, APIKey: cfg.apiKey, Transport: cfg.transport})
+			if err != nil {
+				return err
+			}
 			if err := c.ResolveApproval(cmd.Context(), args[0], decision, reason); err != nil {
 				return err
 			}

@@ -33,7 +33,10 @@ func newEventsTailCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := getClientConfig(cmd)
-			c := client.New(cfg.serverAddr, cfg.apiKey)
+			c, err := client.NewForCLI(client.CLIOptions{HTTPBaseURL: cfg.serverAddr, GRPCAddr: cfg.grpcAddr, APIKey: cfg.apiKey, Transport: cfg.transport})
+			if err != nil {
+				return err
+			}
 			body, err := c.StreamSessionEvents(cmd.Context(), args[0])
 			if err != nil {
 				return err
@@ -97,7 +100,10 @@ func newEventsQueryCmd() *cobra.Command {
 			}
 
 			cfg := getClientConfig(cmd)
-			c := client.New(cfg.serverAddr, cfg.apiKey)
+			c, err := client.NewForCLI(client.CLIOptions{HTTPBaseURL: cfg.serverAddr, GRPCAddr: cfg.grpcAddr, APIKey: cfg.apiKey, Transport: cfg.transport})
+			if err != nil {
+				return err
+			}
 			params := url.Values{}
 			if typesCSV != "" {
 				params.Set("type", typesCSV)
@@ -131,7 +137,6 @@ func newEventsQueryCmd() *cobra.Command {
 			}
 
 			var evs []types.Event
-			var err error
 			if sessionID != "" {
 				evs, err = c.QuerySessionEvents(cmd.Context(), sessionID, params)
 			} else {

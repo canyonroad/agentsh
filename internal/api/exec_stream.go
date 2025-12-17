@@ -153,7 +153,10 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	limits := a.policy.Limits()
-	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResourcesStreaming(r.Context(), s, cmdID, req, a.cfg, limits.CommandTimeout, w, flusher, a.cgroupHook(id, cmdID, limits))
+	emit := func(event string, payload map[string]any) error {
+		return writeSSE(w, flusher, event, payload)
+	}
+	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResourcesStreamingEmit(r.Context(), s, cmdID, req, a.cfg, limits.CommandTimeout, emit, a.cgroupHook(id, cmdID, limits))
 	_ = a.store.SaveOutput(r.Context(), id, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 
 	end := time.Now().UTC()
@@ -187,17 +190,19 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func runCommandWithResourcesStreaming(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration, w io.Writer, flusher http.Flusher, hook postStartHook) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
+type emitFunc func(event string, payload map[string]any) error
+
+func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration, emit emitFunc, hook postStartHook) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
 	timeout := chooseCommandTimeout(req, policyLimit)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	if handled, code, out, errOut := s.Builtin(req); handled {
 		if len(out) > 0 {
-			_ = writeSSE(w, flusher, "stdout", map[string]any{"command_id": cmdID, "stream": "stdout", "data": string(out)})
+			_ = emit("stdout", map[string]any{"command_id": cmdID, "stream": "stdout", "data": string(out)})
 		}
 		if len(errOut) > 0 {
-			_ = writeSSE(w, flusher, "stderr", map[string]any{"command_id": cmdID, "stream": "stderr", "data": string(errOut)})
+			_ = emit("stderr", map[string]any{"command_id": cmdID, "stream": "stderr", "data": string(errOut)})
 		}
 		return code, out, errOut, int64(len(out)), int64(len(errOut)), false, false, types.ExecResources{}, nil
 	}
@@ -207,7 +212,7 @@ func runCommandWithResourcesStreaming(ctx context.Context, s *session.Session, c
 	workdir, err := resolveWorkingDir(s, req.WorkingDir)
 	if err != nil {
 		msg := []byte(err.Error() + "\n")
-		_ = writeSSE(w, flusher, "stderr", map[string]any{"command_id": cmdID, "stream": "stderr", "data": string(msg)})
+		_ = emit("stderr", map[string]any{"command_id": cmdID, "stream": "stderr", "data": string(msg)})
 		return 2, []byte{}, msg, 0, int64(len(msg)), false, false, types.ExecResources{}, nil
 	}
 
@@ -260,7 +265,7 @@ func runCommandWithResourcesStreaming(ctx context.Context, s *session.Session, c
 		b, n, tr, e := captureAndStream(stdoutPipe, defaultMaxOutputBytes, func(chunk []byte) error {
 			writeMu.Lock()
 			defer writeMu.Unlock()
-			return writeSSE(w, flusher, "stdout", map[string]any{"command_id": cmdID, "stream": "stdout", "data": string(chunk)})
+			return emit("stdout", map[string]any{"command_id": cmdID, "stream": "stdout", "data": string(chunk)})
 		})
 		outCh <- capRes{b: b, n: n, tr: tr, err: e}
 	}()
@@ -268,7 +273,7 @@ func runCommandWithResourcesStreaming(ctx context.Context, s *session.Session, c
 		b, n, tr, e := captureAndStream(stderrPipe, defaultMaxOutputBytes, func(chunk []byte) error {
 			writeMu.Lock()
 			defer writeMu.Unlock()
-			return writeSSE(w, flusher, "stderr", map[string]any{"command_id": cmdID, "stream": "stderr", "data": string(chunk)})
+			return emit("stderr", map[string]any{"command_id": cmdID, "stream": "stderr", "data": string(chunk)})
 		})
 		errCh <- capRes{b: b, n: n, tr: tr, err: e}
 	}()

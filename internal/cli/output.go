@@ -20,7 +20,10 @@ func newOutputCmd() *cobra.Command {
 			sessionID := args[0]
 			commandID := args[1]
 			cfg := getClientConfig(cmd)
-			c := client.New(cfg.serverAddr, cfg.apiKey)
+			c, err := client.NewForCLI(client.CLIOptions{HTTPBaseURL: cfg.serverAddr, GRPCAddr: cfg.grpcAddr, APIKey: cfg.apiKey, Transport: cfg.transport})
+			if err != nil {
+				return err
+			}
 			out, err := c.OutputChunk(cmd.Context(), sessionID, commandID, stream, offset, limit)
 			if err != nil {
 				return err
@@ -44,4 +47,3 @@ func newOutputCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&limit, "limit", 64*1024, "Max bytes to return")
 	return cmd
 }
-

@@ -14,7 +14,10 @@ func newKillCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := getClientConfig(cmd)
-			c := client.New(cfg.serverAddr, cfg.apiKey)
+			c, err := client.NewForCLI(client.CLIOptions{HTTPBaseURL: cfg.serverAddr, GRPCAddr: cfg.grpcAddr, APIKey: cfg.apiKey, Transport: cfg.transport})
+			if err != nil {
+				return err
+			}
 			if err := c.KillCommand(cmd.Context(), args[0], args[1]); err != nil {
 				return err
 			}

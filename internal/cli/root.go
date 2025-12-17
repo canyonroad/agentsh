@@ -19,6 +19,8 @@ func NewRoot(version string) *cobra.Command {
 	cmd.SetVersionTemplate("agentsh {{.Version}}\n")
 
 	cmd.PersistentFlags().StringVar(&cfg.serverAddr, "server", getenvDefault("AGENTSH_SERVER", "http://127.0.0.1:8080"), "agentsh server base URL")
+	cmd.PersistentFlags().StringVar(&cfg.transport, "transport", getenvDefault("AGENTSH_TRANSPORT", "http"), "Client transport: http|grpc (grpc uses HTTP for non-gRPC endpoints)")
+	cmd.PersistentFlags().StringVar(&cfg.grpcAddr, "grpc-addr", getenvDefault("AGENTSH_GRPC_ADDR", "127.0.0.1:9090"), "agentsh gRPC address (host:port)")
 	cmd.PersistentFlags().StringVar(&cfg.apiKey, "api-key", getenvDefault("AGENTSH_API_KEY", ""), "API key (sent as X-API-Key)")
 
 	cmd.AddCommand(newServerCmd())
@@ -36,16 +38,20 @@ func NewRoot(version string) *cobra.Command {
 
 type clientConfig struct {
 	serverAddr string
+	transport  string
+	grpcAddr   string
 	apiKey     string
 }
 
 func getClientConfig(cmd *cobra.Command) *clientConfig {
 	serverAddr, _ := cmd.Root().PersistentFlags().GetString("server")
+	transport, _ := cmd.Root().PersistentFlags().GetString("transport")
+	grpcAddr, _ := cmd.Root().PersistentFlags().GetString("grpc-addr")
 	apiKey, _ := cmd.Root().PersistentFlags().GetString("api-key")
 	if serverAddr == "" {
 		serverAddr = "http://127.0.0.1:8080"
 	}
-	return &clientConfig{serverAddr: serverAddr, apiKey: apiKey}
+	return &clientConfig{serverAddr: serverAddr, transport: transport, grpcAddr: grpcAddr, apiKey: apiKey}
 }
 
 func getenvDefault(k, def string) string {

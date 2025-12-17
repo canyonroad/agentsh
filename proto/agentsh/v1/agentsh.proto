@@ -13,5 +13,6 @@ import "google/protobuf/struct.proto";
 service Agentsh {
   rpc CreateSession(google.protobuf.Struct) returns (google.protobuf.Struct);
   rpc Exec(google.protobuf.Struct) returns (google.protobuf.Struct);
+  rpc ExecStream(google.protobuf.Struct) returns (stream google.protobuf.Struct);
+  rpc EventsTail(google.protobuf.Struct) returns (stream google.protobuf.Struct);
 }
-
