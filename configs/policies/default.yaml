@@ -20,6 +20,7 @@ file_rules:
   - name: allow-workspace-read
     description: Allow reading any file in workspace
     paths:
+      - "/workspace"
       - "/workspace/**"
     operations:
       - read
@@ -32,6 +33,7 @@ file_rules:
   - name: allow-workspace-write
     description: Allow writing/creating files in workspace
     paths:
+      - "/workspace"
       - "/workspace/**"
     operations:
       - write
@@ -44,6 +46,7 @@ file_rules:
   - name: approve-workspace-delete
     description: Require approval for deleting files in workspace
     paths:
+      - "/workspace"
       - "/workspace/**"
     operations:
       - delete

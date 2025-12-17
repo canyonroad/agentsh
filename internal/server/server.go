@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -324,6 +325,11 @@ func withRequestBodyLimit(next http.Handler, maxBytes int64) http.Handler {
 
 func listenHTTP(cfg *config.Config) (net.Listener, error) {
 	addr := cfg.Server.HTTP.Addr
+	if cfg.Development.DisableAuth || strings.EqualFold(strings.TrimSpace(cfg.Auth.Type), "none") {
+		if !isLoopbackListenAddr(addr) {
+			return nil, fmt.Errorf("refusing to listen on %q with auth.type=none (use 127.0.0.1/localhost or enable auth)", addr)
+		}
+	}
 	if !cfg.Server.TLS.Enabled {
 		return net.Listen("tcp", addr)
 	}
@@ -335,6 +341,34 @@ func listenHTTP(cfg *config.Config) (net.Listener, error) {
 		return nil, err
 	}
 	return tlsListen(addr, cert)
+}
+
+func isLoopbackListenAddr(addr string) bool {
+	a := strings.TrimSpace(addr)
+	if a == "" {
+		return false
+	}
+	// ":8080" binds on all interfaces.
+	if strings.HasPrefix(a, ":") {
+		return false
+	}
+	host, _, err := net.SplitHostPort(a)
+	if err != nil {
+		// If it's missing a port, treat as a hostname/IP.
+		host = a
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	// Conservative: unknown hostnames could resolve non-loopback.
+	return false
 }
 
 func tlsLoad(certFile, keyFile string) (tls.Certificate, error) {

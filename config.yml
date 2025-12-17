@@ -23,7 +23,7 @@ server:
   # Unix socket (for local clients, lower latency)
   unix_socket:
     enabled: true
-    path: "/var/run/agentsh/agentsh.sock"
+    path: "./data/agentsh.sock"
     permissions: "0660"
     
   # TLS configuration
@@ -40,7 +40,8 @@ server:
 
 auth:
   # Authentication type: "none", "api_key", "jwt", "mtls"
-  type: "api_key"
+  # NOTE: local dev default is unauthenticated; server will refuse to bind to non-loopback addresses.
+  type: "none"
   
   # API key authentication
   api_key:

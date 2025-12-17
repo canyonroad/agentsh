@@ -39,6 +39,8 @@ func newExecCmd() *cobra.Command {
 			if err != nil && !autoDisabled() && isConnectionError(err) {
 				if startErr := ensureServerRunning(cmd.Context(), cfg.serverAddr, cmd.ErrOrStderr()); startErr == nil {
 					resp, err = cl.Exec(cmd.Context(), sessionID, req)
+				} else {
+					return fmt.Errorf("server unreachable (%v); auto-start failed: %w", err, startErr)
 				}
 			}
 			if err != nil && !autoDisabled() {
@@ -70,6 +72,8 @@ func execStream(cmd *cobra.Command, cl *client.Client, serverAddr, sessionID str
 	if err != nil && !autoDisabled() && isConnectionError(err) {
 		if startErr := ensureServerRunning(cmd.Context(), serverAddr, cmd.ErrOrStderr()); startErr == nil {
 			body, err = cl.ExecStream(cmd.Context(), sessionID, req)
+		} else {
+			return fmt.Errorf("server unreachable (%v); auto-start failed: %w", err, startErr)
 		}
 	}
 	if err != nil && !autoDisabled() {

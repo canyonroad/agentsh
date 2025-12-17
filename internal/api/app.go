@@ -93,6 +93,26 @@ func (a *App) authMiddleware(next http.Handler) http.Handler {
 	if a.cfg.Development.DisableAuth || strings.EqualFold(a.cfg.Auth.Type, "none") {
 		return next
 	}
+	// Always allow health/readiness probes without auth so local tooling (including CLI auto-start)
+	// can reliably detect server availability.
+	if a.cfg.Health.Path != "" || a.cfg.Health.ReadinessPath != "" {
+		healthPath := a.cfg.Health.Path
+		readyPath := a.cfg.Health.ReadinessPath
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL != nil {
+				switch r.URL.Path {
+				case healthPath, readyPath:
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			a.authMiddlewareProtected(next).ServeHTTP(w, r)
+		})
+	}
+	return a.authMiddlewareProtected(next)
+}
+
+func (a *App) authMiddlewareProtected(next http.Handler) http.Handler {
 	if strings.EqualFold(a.cfg.Auth.Type, "api_key") {
 		if a.apiKeyAuth == nil {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
