@@ -65,6 +65,8 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		// Run inside the session network namespace (Linux only; requires iproute2).
 		allArgs := append([]string{"netns", "exec", ns, req.Command}, req.Args...)
 		cmd = exec.CommandContext(ctx, "ip", allArgs...)
+	} else if strings.TrimSpace(req.Argv0) != "" && len(cmd.Args) > 0 {
+		cmd.Args[0] = req.Argv0
 	}
 	cmd.Dir = workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

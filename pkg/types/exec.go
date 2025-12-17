@@ -4,6 +4,7 @@ import "time"
 
 type ExecRequest struct {
 	Command      string            `json:"command"`
+	Argv0        string            `json:"argv0,omitempty"`
 	Args         []string          `json:"args,omitempty"`
 	Timeout      string            `json:"timeout,omitempty"`
 	WorkingDir   string            `json:"working_dir,omitempty"`
