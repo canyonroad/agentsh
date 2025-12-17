@@ -197,8 +197,12 @@ sandbox:
     
   # cgroups settings (v2)
   cgroups:
-    enabled: true
-    base_path: "/sys/fs/cgroup/agentsh"
+    enabled: false
+    # Base path under cgroup v2 filesystem where per-command cgroups are created.
+    # - Rootless/dev recommended: a relative path (created under the current process cgroup)
+    # base_path: "agentsh"
+    # - Systemd/service recommended (root): a dedicated absolute cgroupfs path
+    # base_path: "/sys/fs/cgroup/agentsh"
 
 # =============================================================================
 # RESOURCE LIMITS (defaults, can override per-session)

@@ -153,7 +153,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	limits := a.policy.Limits()
-	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResourcesStreaming(r.Context(), s, cmdID, req, a.cfg, limits.CommandTimeout, w, flusher)
+	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResourcesStreaming(r.Context(), s, cmdID, req, a.cfg, limits.CommandTimeout, w, flusher, a.cgroupHook(id, cmdID, limits))
 	_ = a.store.SaveOutput(r.Context(), id, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 
 	end := time.Now().UTC()
@@ -187,7 +187,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func runCommandWithResourcesStreaming(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration, w io.Writer, flusher http.Flusher) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
+func runCommandWithResourcesStreaming(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration, w io.Writer, flusher http.Flusher, hook postStartHook) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
 	timeout := chooseCommandTimeout(req, policyLimit)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -240,6 +240,11 @@ func runCommandWithResourcesStreaming(ctx context.Context, s *session.Session, c
 	}
 	if cmd.Process != nil {
 		s.SetCurrentProcessPID(cmd.Process.Pid)
+		if hook != nil {
+			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
+				defer func() { _ = cleanup() }()
+			}
+		}
 	}
 
 	type capRes struct {

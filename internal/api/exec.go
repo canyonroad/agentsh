@@ -23,6 +23,8 @@ const (
 	defaultMaxOutputBytes = 1 * 1024 * 1024 // 1MB per stream in response + sqlite
 )
 
+type postStartHook func(pid int) (cleanup func() error, err error)
+
 func chooseCommandTimeout(req types.ExecRequest, policyLimit time.Duration) time.Duration {
 	timeout := defaultCommandTimeout
 	if policyLimit > 0 {
@@ -41,7 +43,7 @@ func chooseCommandTimeout(req types.ExecRequest, policyLimit time.Duration) time
 	return d
 }
 
-func runCommandWithResources(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
+func runCommandWithResources(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration, hook postStartHook) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
 	timeout := chooseCommandTimeout(req, policyLimit)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -88,6 +90,11 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	}
 	if cmd.Process != nil {
 		s.SetCurrentProcessPID(cmd.Process.Pid)
+		if hook != nil {
+			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
+				defer func() { _ = cleanup() }()
+			}
+		}
 	}
 
 	type capRes struct {
@@ -136,7 +143,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 }
 
 func runCommand(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, err error) {
-	exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, _, err = runCommandWithResources(ctx, s, cmdID, req, cfg, policyLimit)
+	exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, _, err = runCommandWithResources(ctx, s, cmdID, req, cfg, policyLimit, nil)
 	return
 }
 

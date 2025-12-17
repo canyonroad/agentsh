@@ -25,6 +25,10 @@ type Limits struct {
 	CommandTimeout time.Duration
 	SessionTimeout time.Duration
 	IdleTimeout    time.Duration
+
+	MaxMemoryMB     int
+	CPUQuotaPercent int
+	PidsMax         int
 }
 
 type compiledFileRule struct {
@@ -128,9 +132,12 @@ func (e *Engine) Limits() Limits {
 		return Limits{}
 	}
 	return Limits{
-		CommandTimeout: e.policy.ResourceLimits.CommandTimeout.Duration,
-		SessionTimeout: e.policy.ResourceLimits.SessionTimeout.Duration,
-		IdleTimeout:    e.policy.ResourceLimits.IdleTimeout.Duration,
+		CommandTimeout:  e.policy.ResourceLimits.CommandTimeout.Duration,
+		SessionTimeout:  e.policy.ResourceLimits.SessionTimeout.Duration,
+		IdleTimeout:     e.policy.ResourceLimits.IdleTimeout.Duration,
+		MaxMemoryMB:     e.policy.ResourceLimits.MaxMemoryMB,
+		CPUQuotaPercent: e.policy.ResourceLimits.CPUQuotaPercent,
+		PidsMax:         e.policy.ResourceLimits.PidsMax,
 	}
 }
 

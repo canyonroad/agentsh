@@ -24,6 +24,10 @@ server:
     enabled: true
     cert_file: "/tmp/server.crt"
     key_file: "/tmp/server.key"
+sandbox:
+  cgroups:
+    enabled: true
+    base_path: "`+filepath.Join(dir, "cgroups")+`"
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +56,12 @@ server:
 	}
 	if cfg.Server.TLS.CertFile != "/tmp/server.crt" || cfg.Server.TLS.KeyFile != "/tmp/server.key" {
 		t.Fatalf("tls files: got cert=%q key=%q", cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
+	}
+	if !cfg.Sandbox.Cgroups.Enabled {
+		t.Fatalf("sandbox.cgroups.enabled: expected true")
+	}
+	if cfg.Sandbox.Cgroups.BasePath != filepath.Join(dir, "cgroups") {
+		t.Fatalf("sandbox.cgroups.base_path: got %q", cfg.Sandbox.Cgroups.BasePath)
 	}
 }
 

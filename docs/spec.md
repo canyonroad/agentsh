@@ -1710,15 +1710,26 @@ var blockedSyscalls = []int{
 
 ### 13.4 Resource Limits (cgroups v2)
 
+agentsh enforces per-command limits via **cgroups v2** when enabled in server config:
+
+```yaml
+sandbox:
+  cgroups:
+    enabled: true
+    # Rootless/dev: prefer a relative path under the current process cgroup
+    base_path: "agentsh"
+```
+
+Limits are sourced from the active policy `resource_limits` (e.g. `max_memory_mb`, `cpu_quota_percent`, `pids_max`).
+
 ```yaml
 resource_limits:
   # Memory
-  memory_max_mb: 2048
+  max_memory_mb: 2048
   memory_swap_max_mb: 0      # Disable swap
   
   # CPU
   cpu_quota_percent: 80      # Max 80% of one CPU
-  cpu_period_us: 100000
   
   # I/O
   io_read_bps_max: 104857600   # 100 MB/s

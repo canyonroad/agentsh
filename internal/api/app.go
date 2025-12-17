@@ -632,7 +632,7 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	a.broker.Publish(startEv)
 
 	limits := a.policy.Limits()
-	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(r.Context(), s, cmdID, req, a.cfg, limits.CommandTimeout)
+	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(r.Context(), s, cmdID, req, a.cfg, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits))
 
 	_ = a.store.SaveOutput(r.Context(), id, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 
@@ -744,6 +744,16 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	}
 	applyIncludeEvents(&resp, includeEvents)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (a *App) cgroupHook(sessionID string, cmdID string, limits policy.Limits) postStartHook {
+	return func(pid int) (func() error, error) {
+		if a == nil || a.cfg == nil || !a.cfg.Sandbox.Cgroups.Enabled {
+			return nil, nil
+		}
+		em := storeEmitter{store: a.store, broker: a.broker}
+		return applyCgroupV2(context.Background(), em, a.cfg, sessionID, cmdID, pid, limits)
+	}
 }
 
 func applyIncludeEvents(resp *types.ExecResponse, include string) {

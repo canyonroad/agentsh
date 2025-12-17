@@ -116,6 +116,7 @@ type SessionsConfig struct {
 type SandboxConfig struct {
 	FUSE    SandboxFUSEConfig    `yaml:"fuse"`
 	Network SandboxNetworkConfig `yaml:"network"`
+	Cgroups SandboxCgroupsConfig `yaml:"cgroups"`
 }
 
 type SandboxFUSEConfig struct {
@@ -133,6 +134,14 @@ type SandboxNetworkConfig struct {
 type SandboxTransparentNetworkConfig struct {
 	Enabled    bool   `yaml:"enabled"`
 	SubnetBase string `yaml:"subnet_base"` // e.g. "10.250.0.0/16"
+}
+
+type SandboxCgroupsConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// BasePath is a cgroupfs directory under which per-command cgroups will be created.
+	// If empty, agentsh will default to the current process cgroup.
+	// Note: this should be a path under /sys/fs/cgroup (or relative to the current process cgroup dir).
+	BasePath string `yaml:"base_path"`
 }
 
 type PoliciesConfig struct {
@@ -221,6 +230,10 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Sandbox.Network.Transparent.SubnetBase == "" {
 		cfg.Sandbox.Network.Transparent.SubnetBase = "10.250.0.0/16"
+	}
+	// cgroups defaults to disabled unless explicitly enabled.
+	if cfg.Sandbox.Cgroups.BasePath == "" {
+		cfg.Sandbox.Cgroups.BasePath = ""
 	}
 	if cfg.Policies.Default == "" {
 		cfg.Policies.Default = "default"
