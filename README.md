@@ -93,8 +93,10 @@ make build
 ### Basic Usage
 
 ```bash
-# API auth uses X-API-Key (see configs/api_keys.yaml)
-API_KEY=sk-dev-local
+# Auth
+# - Local dev config may run with auth disabled (auth.type=none).
+# - To enable API key auth, set auth.type=api_key and configure configs/api_keys.yaml.
+API_KEY=sk-dev-local  # only needed when API key auth is enabled
 
 # Create a session
 curl -X POST http://localhost:8080/api/v1/sessions \
@@ -113,7 +115,14 @@ curl -X POST http://localhost:8080/api/v1/sessions/SESSION_ID/exec \
 
 ```bash
 # Create session
-agentsh --api-key sk-dev-local session create --workspace /home/user/project
+agentsh session create --workspace /home/user/project
+
+# Output formats
+# - Default: shell-like output (stdout/stderr) + process exit code
+# - JSON: structured response for agents/tools
+agentsh exec --output json SESSION_ID -- python script.py
+# Or set a default:
+AGENTSH_OUTPUT=json agentsh exec SESSION_ID -- python script.py
 
 # Execute commands
 agentsh exec SESSION_ID -- npm install
@@ -156,26 +165,20 @@ agentsh events tail SESSION_ID
 
 ## Example Output
 
-When an agent runs `python process_data.py`:
+When an agent runs `python process_data.py` in JSON mode (`agentsh exec --output json ...`):
 
 ```json
 {
-  "exit_code": 0,
-  "stdout": "Processed 1000 records",
-  "duration_ms": 2341,
+  "command_id": "cmd-...",
+  "session_id": "session-...",
+  "request": {"command": "python", "args": ["process_data.py"]},
+  "result": {"exit_code": 0, "stdout": "Processed 1000 records\n", "duration_ms": 2341},
   "events": {
-    "file_operations": [
-      {"type": "file_read", "path": "/workspace/input.csv", "bytes": 45000},
-      {"type": "file_write", "path": "/workspace/output.json", "bytes": 62000}
-    ],
-    "network_operations": [
-      {"type": "dns_query", "domain": "api.example.com"},
-      {"type": "net_connect", "remote": "93.184.216.34:443", "bytes_sent": 1024}
-    ],
-    "blocked_operations": [
-      {"type": "file_read", "path": "/etc/passwd", "decision": "deny"}
-    ]
-  }
+    "file_operations": [{"type": "file_read", "path": "/workspace/input.csv"}],
+    "network_operations": [{"type": "dns_query", "domain": "api.example.com"}, {"type": "net_connect", "remote": "api.example.com:443"}],
+    "blocked_operations": []
+  },
+  "resources": {"memory_peak_kb": 12345}
 }
 ```
 

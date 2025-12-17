@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/agentsh/agentsh/internal/client"
@@ -18,6 +20,7 @@ func newExecCmd() *cobra.Command {
 	var timeout string
 	var jsonStr string
 	var stream bool
+	var output string
 	c := &cobra.Command{
 		Use:   "exec SESSION_ID -- COMMAND [ARGS...]",
 		Short: "Execute a command in a session",
@@ -28,11 +31,21 @@ func newExecCmd() *cobra.Command {
 				return err
 			}
 
+			outMode := strings.ToLower(strings.TrimSpace(output))
+			if outMode == "" {
+				outMode = "shell"
+			}
+			switch outMode {
+			case "shell", "json":
+			default:
+				return fmt.Errorf("invalid --output %q (expected shell|json)", output)
+			}
+
 			cfg := getClientConfig(cmd)
 			cl := client.New(cfg.serverAddr, cfg.apiKey)
 
 			if req.StreamOutput {
-				return execStream(cmd, cl, cfg.serverAddr, sessionID, req)
+				return execStream(cmd, cl, cfg.serverAddr, sessionID, req, outMode)
 			}
 
 			resp, err := cl.Exec(cmd.Context(), sessionID, req)
@@ -54,20 +67,43 @@ func newExecCmd() *cobra.Command {
 					}
 				}
 			}
+			// Server returns a structured ExecResponse body for certain non-2xx statuses (e.g. policy denies).
+			// Decode it so CLI can still render output and exit with the intended command exit code.
+			if err != nil {
+				if decoded, ok := decodeExecResponseFromHTTPError(err); ok {
+					resp = decoded
+					err = nil
+				}
+			}
 			if err != nil {
 				return err
 			}
-			return printJSON(cmd, resp)
+
+			switch outMode {
+			case "json":
+				if err := printJSON(cmd, resp); err != nil {
+					return err
+				}
+				if resp.Result.ExitCode != 0 {
+					return &ExitError{code: resp.Result.ExitCode}
+				}
+				return nil
+			case "shell":
+				return printShellExec(cmd, resp)
+			default:
+				return fmt.Errorf("invalid output mode %q", outMode)
+			}
 		},
 		DisableFlagsInUseLine: true,
 	}
 	c.Flags().StringVar(&timeout, "timeout", "", "Command timeout (e.g. 30s, 5m)")
 	c.Flags().StringVar(&jsonStr, "json", "", "Exec request as JSON (e.g. '{\"command\":\"ls\",\"args\":[\"-la\"]}')")
 	c.Flags().BoolVar(&stream, "stream", false, "Stream output (requires server support)")
+	c.Flags().StringVar(&output, "output", getenvDefault("AGENTSH_OUTPUT", "shell"), "Output format: shell|json")
 	return c
 }
 
-func execStream(cmd *cobra.Command, cl *client.Client, serverAddr, sessionID string, req types.ExecRequest) error {
+func execStream(cmd *cobra.Command, cl *client.Client, serverAddr, sessionID string, req types.ExecRequest, output string) error {
 	body, err := cl.ExecStream(cmd.Context(), sessionID, req)
 	if err != nil && !autoDisabled() && isConnectionError(err) {
 		if startErr := ensureServerRunning(cmd.Context(), serverAddr, cmd.ErrOrStderr()); startErr == nil {
@@ -119,19 +155,29 @@ func execStream(cmd *cobra.Command, cl *client.Client, serverAddr, sessionID str
 		_ = json.Unmarshal([]byte(data), &p)
 		switch event {
 		case "stdout":
-			fmt.Fprint(cmd.OutOrStdout(), "[stdout] "+p.Data)
-			if !strings.HasSuffix(p.Data, "\n") {
-				fmt.Fprintln(cmd.OutOrStdout())
+			if strings.EqualFold(output, "shell") {
+				_, _ = io.WriteString(cmd.OutOrStdout(), p.Data)
+			} else {
+				fmt.Fprint(cmd.OutOrStdout(), "[stdout] "+p.Data)
+				if !strings.HasSuffix(p.Data, "\n") {
+					fmt.Fprintln(cmd.OutOrStdout())
+				}
 			}
 		case "stderr":
-			fmt.Fprint(cmd.ErrOrStderr(), "[stderr] "+p.Data)
-			if !strings.HasSuffix(p.Data, "\n") {
-				fmt.Fprintln(cmd.ErrOrStderr())
+			if strings.EqualFold(output, "shell") {
+				_, _ = io.WriteString(cmd.ErrOrStderr(), p.Data)
+			} else {
+				fmt.Fprint(cmd.ErrOrStderr(), "[stderr] "+p.Data)
+				if !strings.HasSuffix(p.Data, "\n") {
+					fmt.Fprintln(cmd.ErrOrStderr())
+				}
 			}
 		case "done":
 			if p.ExitCode != 0 {
-				fmt.Fprintf(cmd.ErrOrStderr(), "exit_code=%d duration_ms=%d\n", p.ExitCode, p.DurationMs)
-				return fmt.Errorf("command exited with %d", p.ExitCode)
+				if !strings.EqualFold(output, "shell") {
+					fmt.Fprintf(cmd.ErrOrStderr(), "exit_code=%d duration_ms=%d\n", p.ExitCode, p.DurationMs)
+				}
+				return &ExitError{code: p.ExitCode}
 			}
 			return nil
 		default:
@@ -139,4 +185,94 @@ func execStream(cmd *cobra.Command, cl *client.Client, serverAddr, sessionID str
 		}
 	}
 	return sc.Err()
+}
+
+func decodeExecResponseFromHTTPError(err error) (types.ExecResponse, bool) {
+	var he *client.HTTPError
+	if !errors.As(err, &he) {
+		return types.ExecResponse{}, false
+	}
+	// Only attempt decode for small error bodies; doJSON caps at 64KB.
+	if strings.TrimSpace(he.Body) == "" {
+		return types.ExecResponse{}, false
+	}
+	var out types.ExecResponse
+	if json.Unmarshal([]byte(he.Body), &out) != nil {
+		return types.ExecResponse{}, false
+	}
+	if out.CommandID == "" || out.SessionID == "" {
+		return types.ExecResponse{}, false
+	}
+	return out, true
+}
+
+func printShellExec(cmd *cobra.Command, resp types.ExecResponse) error {
+	if resp.Result.Stdout != "" {
+		_, _ = io.WriteString(cmd.OutOrStdout(), resp.Result.Stdout)
+	}
+	if resp.Result.Stderr != "" {
+		_, _ = io.WriteString(cmd.ErrOrStderr(), resp.Result.Stderr)
+	}
+
+	if msg := shellBlockSummary(resp); msg != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), msg)
+		for _, s := range shellSubstitutions(resp) {
+			fmt.Fprintln(cmd.ErrOrStderr(), "agentsh: try: "+s)
+		}
+	}
+
+	if resp.Result.ExitCode != 0 {
+		return &ExitError{code: resp.Result.ExitCode}
+	}
+	return nil
+}
+
+func shellBlockSummary(resp types.ExecResponse) string {
+	// Prefer explicit policy error when present.
+	if resp.Result.Error != nil && resp.Result.Error.PolicyRule != "" {
+		return fmt.Sprintf("agentsh: blocked by policy (rule=%s): %s", resp.Result.Error.PolicyRule, resp.Result.Error.Message)
+	}
+	// Otherwise, summarize first blocked operation if present.
+	if len(resp.Events.BlockedOperations) == 0 {
+		return ""
+	}
+	ev := resp.Events.BlockedOperations[0]
+	rule := ""
+	if ev.Policy != nil {
+		rule = ev.Policy.Rule
+	}
+	target := ev.Path
+	if target == "" {
+		if ev.Remote != "" {
+			target = ev.Remote
+		} else if ev.Domain != "" {
+			target = ev.Domain
+		} else if ev.Operation != "" {
+			target = ev.Operation
+		} else {
+			target = ev.Type
+		}
+	}
+	if rule != "" {
+		return fmt.Sprintf("agentsh: blocked by policy (rule=%s): %s", rule, target)
+	}
+	return fmt.Sprintf("agentsh: blocked by policy: %s", target)
+}
+
+func shellSubstitutions(resp types.ExecResponse) []string {
+	// Very small set of pragmatic substitutions for agents.
+	cmd := filepath.Base(resp.Request.Command)
+	if strings.EqualFold(cmd, "curl") {
+		urlArg := ""
+		for _, a := range resp.Request.Args {
+			if strings.HasPrefix(a, "http://") || strings.HasPrefix(a, "https://") {
+				urlArg = a
+			}
+		}
+		if urlArg != "" {
+			return []string{fmt.Sprintf("wget -qO- %s", urlArg)}
+		}
+		return []string{"wget -qO- <URL>"}
+	}
+	return nil
 }

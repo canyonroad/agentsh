@@ -1509,7 +1509,7 @@ $ agentsh server
 $ agentsh server --config /etc/agentsh/config.yaml
 
 # Start with debug logging
-$ agentsh server --log-level debug
+$ AGENTSH_LOG_LEVEL=debug agentsh server
 ```
 
 #### Session Management
@@ -1549,12 +1549,7 @@ Session destroyed: session-abc123
 ```bash
 # Execute single command
 $ agentsh exec session-abc123 -- npm install
-{
-  "exit_code": 0,
-  "stdout": "added 847 packages in 12.3s\n",
-  "duration_ms": 12345,
-  ...
-}
+added 847 packages in 12.3s
 
 # Execute with timeout
 $ agentsh exec session-abc123 --timeout 1m -- npm run build
@@ -1562,13 +1557,19 @@ $ agentsh exec session-abc123 --timeout 1m -- npm run build
 # Execute with JSON input
 $ agentsh exec session-abc123 --json '{"command":"ls","args":["-la"]}'
 
+# Execute with JSON output (structured response)
+$ agentsh exec --output json session-abc123 -- npm install
+{
+  "command_id": "cmd-...",
+  "session_id": "session-abc123",
+  "result": { "exit_code": 0, "duration_ms": 12345, "stdout": "..." },
+  "events": { "file_operations": [...], "network_operations": [...], "blocked_operations": [...] }
+}
+
 # Stream output
 $ agentsh exec session-abc123 --stream -- npm install
-[stdout] added 100 packages...
-[stdout] added 200 packages...
-[file] write: /workspace/node_modules/.package-lock.json (4096 bytes)
-[net] connect: registry.npmjs.org:443
-...
+added 100 packages...
+added 200 packages...
 
 # Interactive mode (attach to session)
 $ agentsh session attach session-abc123
@@ -1583,16 +1584,16 @@ agentsh:session-abc123:/workspace/src$
 #### Event Streaming
 
 ```bash
-# Stream all events
-$ agentsh events session-abc123
+# Stream live events (SSE)
+$ agentsh events tail session-abc123
 {"type":"file_open","path":"/workspace/src/main.py",...}
 {"type":"net_connect","remote":"api.github.com:443",...}
 
-# Stream with filter
-$ agentsh events session-abc123 --type file_write,file_delete
+# Query events
+$ agentsh events query --session session-abc123 --type file_write,file_delete
 
 # Stream to file
-$ agentsh events session-abc123 > events.jsonl
+$ agentsh events tail session-abc123 > events.jsonl
 ```
 
 #### Approval Handling
