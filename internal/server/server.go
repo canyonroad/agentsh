@@ -65,6 +65,14 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("config is nil")
 	}
 
+	// Safety: approvals via API require authentication. Otherwise an agent could self-approve
+	// by calling the approvals endpoints on localhost.
+	if cfg.Approvals.Enabled && strings.EqualFold(strings.TrimSpace(cfg.Approvals.Mode), "api") {
+		if cfg.Development.DisableAuth || strings.EqualFold(strings.TrimSpace(cfg.Auth.Type), "none") {
+			return nil, fmt.Errorf("approvals.mode=api requires auth.type=api_key (auth is disabled)")
+		}
+	}
+
 	policyPath, err := resolvePolicyPath(cfg)
 	if err != nil {
 		return nil, err

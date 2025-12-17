@@ -96,6 +96,7 @@ make build
 # Auth
 # - Local dev config may run with auth disabled (auth.type=none).
 # - To enable API key auth, set auth.type=api_key and configure configs/api_keys.yaml.
+# - IMPORTANT: approval endpoints require auth; with auth disabled, approvals can only be handled via local_tty (no self-approval via API).
 API_KEY=sk-dev-local  # only needed when API key auth is enabled
 
 # Create a session

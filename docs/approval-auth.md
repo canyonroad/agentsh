@@ -19,6 +19,13 @@ When agentsh requires human approval for dangerous operations, we must ensure th
 - HTTP uses `X-API-Key` by default (configurable via `auth.api_key.header_name`).
 - gRPC uses metadata: send the same key under `x-api-key` (and agentsh also accepts the configured header name lowercased).
 
+### Current implementation note (preventing agent self-approval)
+
+- The HTTP approvals API (`/api/v1/approvals/*`) is **disabled when auth is disabled** (`auth.type=none` or `development.disable_auth=true`).
+- To use approvals over the API, enable `auth.type=api_key` and use **separate keys**:
+  - agent key: `role: agent` (can exec, cannot approve)
+  - approver key: `role: approver` or `admin` (can approve)
+
 ---
 
 ## 1. Threat Model

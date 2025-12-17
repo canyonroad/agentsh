@@ -144,7 +144,11 @@ func (a *App) requireRoles(roles ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if a.cfg.Development.DisableAuth || strings.EqualFold(a.cfg.Auth.Type, "none") {
-				next.ServeHTTP(w, r)
+				// Safety: if auth is disabled, do not allow access to approval endpoints.
+				// Otherwise an agent could self-approve by calling the approvals API.
+				writeJSON(w, http.StatusForbidden, map[string]any{
+					"error": "approvals endpoints require auth (set auth.type=api_key and use separate agent/approver keys)",
+				})
 				return
 			}
 			role, _ := r.Context().Value(ctxKeyRole).(string)

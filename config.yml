@@ -255,6 +255,9 @@ policies:
 
 approvals:
   enabled: false
+  # Approval mode:
+  # - local_tty: prompt on server /dev/tty (safe for local dev)
+  # - api: approvals resolved via /api/v1/approvals/* (requires auth.type=api_key to prevent self-approval)
   mode: "local_tty"
   # How long to wait for approval
   timeout: "5m"
