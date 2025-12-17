@@ -1570,6 +1570,8 @@ $ agentsh exec --output json session-abc123 -- npm install
 $ agentsh exec --output json --events summary session-abc123 -- npm install
 $ agentsh exec --output json --events none session-abc123 -- npm install
 
+# Responses may also include `guidance` for agents (blocked vs failed, retryability, substitutions).
+
 # Stream output
 $ agentsh exec session-abc123 --stream -- npm install
 added 100 packages...

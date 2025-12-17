@@ -243,6 +243,15 @@ func printShellExec(cmd *cobra.Command, resp types.ExecResponse) error {
 					fmt.Fprintln(cmd.ErrOrStderr(), "agentsh: try: "+s.Command)
 				}
 			}
+			for _, s := range resp.Guidance.Suggestions {
+				if strings.TrimSpace(s.Command) != "" {
+					fmt.Fprintln(cmd.ErrOrStderr(), "agentsh: try: "+s.Command)
+					continue
+				}
+				if strings.TrimSpace(s.Reason) != "" {
+					fmt.Fprintln(cmd.ErrOrStderr(), "agentsh: hint: "+s.Reason)
+				}
+			}
 		}
 	} else if msg := shellBlockSummary(resp); msg != "" {
 		fmt.Fprintln(cmd.ErrOrStderr(), msg)

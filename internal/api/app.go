@@ -808,7 +808,7 @@ func guidanceForPolicyDenied(req types.ExecRequest, pre policy.Decision, preEv t
 	if pre.PolicyDecision == types.DecisionApprove {
 		g.Suggestions = append(g.Suggestions, types.Suggestion{
 			Action: "request_approval",
-			Reason: "operation requires approval per policy",
+			Reason: "operation requires approval per policy (enable approvals or approve via API)",
 		})
 	} else {
 		g.Suggestions = append(g.Suggestions, types.Suggestion{
@@ -826,9 +826,15 @@ func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps
 		ev := blockedOps[0]
 		rule := ""
 		dec := ""
+		decEff := ""
+		approvalMode := ""
 		if ev.Policy != nil {
 			rule = ev.Policy.Rule
 			dec = string(ev.Policy.Decision)
+			decEff = string(ev.Policy.EffectiveDecision)
+			if ev.Policy.Approval != nil {
+				approvalMode = string(ev.Policy.Approval.Mode)
+			}
 		}
 		target := ev.Path
 		if target == "" {
@@ -856,6 +862,21 @@ func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps
 			g.Reason = "blocked by policy"
 		}
 
+		// If the policy decision was "approve", this is usually retryable via approvals.
+		if strings.EqualFold(dec, string(types.DecisionApprove)) || strings.HasPrefix(strings.ToLower(rule), "approve-") {
+			g.Retryable = true
+			g.Suggestions = append(g.Suggestions, types.Suggestion{
+				Action: "request_approval",
+				Reason: "operation requires approval per policy",
+			})
+			if approvalMode != "" {
+				g.Suggestions = append(g.Suggestions, types.Suggestion{
+					Action: "enable_approvals",
+					Reason: fmt.Sprintf("approvals are in %s mode; enable or respond to approvals to proceed", approvalMode),
+				})
+			}
+		}
+
 		// Heuristics: provide substitutions for common tooling.
 		base := strings.ToLower(filepath.Base(req.Command))
 		if base == "curl" {
@@ -881,17 +902,44 @@ func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps
 				}
 			}
 		}
+		if strings.HasPrefix(target, "http://") && (strings.Contains(rule, "deny") || strings.Contains(rule, "default-deny")) {
+			g.Substitutions = append(g.Substitutions, types.Suggestion{
+				Action:  "substitute",
+				Command: strings.Replace(target, "http://", "https://", 1),
+				Reason:  "try HTTPS instead of HTTP",
+			})
+		}
+		// Common pattern: unknown HTTP (port 80) blocked by default deny.
+		if strings.HasSuffix(target, ":80") && rule == "default-deny-network" {
+			g.Substitutions = append(g.Substitutions, types.Suggestion{
+				Action:  "substitute",
+				Command: "https://" + strings.TrimSuffix(target, ":80"),
+				Reason:  "try HTTPS (port 443) instead of HTTP (port 80)",
+			})
+		}
+
+		// File policy recourse.
+		if strings.HasPrefix(ev.Type, "file_") || strings.HasPrefix(ev.Type, "dir_") || strings.HasPrefix(ev.Type, "symlink_") {
+			if ev.Path != "" && !strings.HasPrefix(ev.Path, "/workspace") {
+				g.Suggestions = append(g.Suggestions, types.Suggestion{
+					Action: "move_to_workspace",
+					Reason: "copy/move required inputs under /workspace so the policy can allow access",
+				})
+			}
+		}
 
 		// Generic remediation.
 		g.Suggestions = append(g.Suggestions, types.Suggestion{
 			Action: "inspect_events",
-			Reason: "query the event log for full details (blocked operations, rule, and target)",
+			Reason: "query the event log for full details (rule, operation, and target)",
 		})
 		g.Suggestions = append(g.Suggestions, types.Suggestion{
 			Action: "adjust_policy",
-			Reason: "allow the required operation or enable approvals",
+			Reason: "allow the required operation (or enable approvals where appropriate)",
 		})
-		g.Retryable = len(g.Substitutions) > 0 || strings.HasPrefix(strings.ToLower(rule), "approve-")
+		if !g.Retryable {
+			g.Retryable = len(g.Substitutions) > 0 || strings.HasPrefix(strings.ToLower(rule), "approve-") || strings.EqualFold(decEff, string(types.DecisionApprove))
+		}
 		return g
 	}
 
@@ -902,6 +950,43 @@ func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps
 	g.Status = "failed"
 	g.Blocked = false
 	g.Reason = "command failed"
+
+	// Failure heuristics for better recourse.
+	msg := ""
+	if res.Error != nil {
+		msg = strings.ToLower(res.Error.Message)
+	}
+	if strings.Contains(msg, "timed out") || strings.Contains(msg, "deadline exceeded") {
+		g.Retryable = true
+		g.Reason = "command timed out"
+		g.Suggestions = append(g.Suggestions, types.Suggestion{
+			Action:  "increase_timeout",
+			Command: "agentsh exec --timeout 2m ...",
+			Reason:  "increase --timeout for slow commands",
+		})
+	}
+	if strings.Contains(msg, "executable file not found") || strings.Contains(msg, "no such file or directory") {
+		g.Suggestions = append(g.Suggestions, types.Suggestion{
+			Action: "use_absolute_exe",
+			Reason: "use an absolute executable path (or install the missing tool if allowed)",
+		})
+	}
+	if strings.Contains(msg, "permission denied") {
+		g.Suggestions = append(g.Suggestions, types.Suggestion{
+			Action: "fix_permissions",
+			Reason: "ensure the executable is allowed and has execute permission",
+		})
+		base := strings.ToLower(filepath.Base(req.Command))
+		if base == "python" || base == "python3" {
+			if strings.Contains(msg, ".pyenv/shims/") || strings.Contains(msg, "asdf/shims/") {
+				g.Substitutions = append(g.Substitutions, types.Suggestion{
+					Action:  "substitute",
+					Command: "/usr/bin/python3",
+					Reason:  "avoid user-managed shims that may be blocked by policy",
+				})
+			}
+		}
+	}
 	return g
 }
 

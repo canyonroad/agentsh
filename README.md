@@ -128,6 +128,8 @@ AGENTSH_OUTPUT=json agentsh exec SESSION_ID -- python script.py
 agentsh exec --output json --events summary SESSION_ID -- curl -sS https://ifconfig.me
 agentsh exec --output json --events all SESSION_ID -- curl -sS https://ifconfig.me
 
+# When a command is blocked or fails, the JSON response includes `guidance` with retryability and optional substitutions.
+
 # Execute commands
 agentsh exec SESSION_ID -- npm install
 agentsh exec SESSION_ID -- python script.py
