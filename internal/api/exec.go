@@ -260,6 +260,9 @@ func mergeEnv(base []string, s *session.Session, overrides map[string]string) []
 		envMap[k] = v
 	}
 
+	// Mark processes executed by agentsh so sh/bash shims can avoid recursively re-entering agentsh.
+	envMap["AGENTSH_IN_SESSION"] = "1"
+
 	out := make([]string, 0, len(envMap))
 	for k, v := range envMap {
 		out = append(out, k+"="+v)
