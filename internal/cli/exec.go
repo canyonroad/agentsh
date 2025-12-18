@@ -22,6 +22,7 @@ func newExecCmd() *cobra.Command {
 	var timeout string
 	var jsonStr string
 	var stream bool
+	var pty bool
 	var argv0 string
 	var output string
 	var events string
@@ -62,6 +63,24 @@ func newExecCmd() *cobra.Command {
 				return fmt.Errorf("invalid --events %q (expected all|summary|blocked|none)", events)
 			}
 			req.IncludeEvents = evMode
+
+			if pty {
+				if req.StreamOutput {
+					return fmt.Errorf("--pty and --stream are mutually exclusive")
+				}
+				if outMode != "shell" {
+					return fmt.Errorf("--pty requires --output=shell")
+				}
+				return execPTYRunner(cmd.Context(), getClientConfig(cmd), sessionID, execPTYRequest{
+					Command:    req.Command,
+					Args:       req.Args,
+					Argv0:      req.Argv0,
+					WorkingDir: req.WorkingDir,
+					Env:        req.Env,
+					Timeout:    timeout,
+					Stdin:      req.Stdin,
+				})
+			}
 
 			cfg := getClientConfig(cmd)
 			cl, err := client.NewForCLI(client.CLIOptions{
@@ -133,6 +152,7 @@ func newExecCmd() *cobra.Command {
 	c.Flags().StringVar(&timeout, "timeout", "", "Command timeout (e.g. 30s, 5m)")
 	c.Flags().StringVar(&jsonStr, "json", "", "Exec request as JSON (e.g. '{\"command\":\"ls\",\"args\":[\"-la\"]}')")
 	c.Flags().BoolVar(&stream, "stream", false, "Stream output (requires server support)")
+	c.Flags().BoolVar(&pty, "pty", false, "Execute in an interactive PTY (stdin/stdout streaming, resize, signals)")
 	c.Flags().StringVar(&argv0, "argv0", "", "Override argv[0] for the executed process")
 	c.Flags().StringVar(&output, "output", getenvDefault("AGENTSH_OUTPUT", "shell"), "Output format: shell|json")
 	c.Flags().StringVar(&events, "events", getenvDefault("AGENTSH_EVENTS", ""), "Events to include in response: all|summary|blocked|none (default depends on --output)")
