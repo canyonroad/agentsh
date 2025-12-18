@@ -220,8 +220,12 @@ For your own image, the pattern is:
 ```dockerfile
 COPY agentsh /usr/local/bin/agentsh
 COPY agentsh-shell-shim /usr/local/bin/agentsh-shell-shim
-RUN mv /bin/sh /bin/sh.real && install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/sh
-RUN mv /bin/bash /bin/bash.real && install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/bash
+RUN set -eux; \
+  mv /bin/sh /bin/sh.real; \
+  install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/sh
+RUN set -eux; \
+  if [ -e /bin/bash ]; then mv /bin/bash /bin/bash.real; fi; \
+  if [ -e /bin/bash.real ]; then install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/bash; fi
 ```
 
 ### Environment variables (shim + CLI)
