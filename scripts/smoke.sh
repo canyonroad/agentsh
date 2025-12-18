@@ -64,6 +64,19 @@ export GOPATH="${GOPATH:-$repo_root/.gopath}"
 
 make build >/dev/null
 
+set +e
+host_guard_out="$(./bin/agentsh shim install-shell --root / --shim "$repo_root/bin/agentsh-shell-shim" 2>&1)"
+host_guard_rc=$?
+set -e
+if [[ "$host_guard_rc" == "0" ]]; then
+  echo "smoke: expected shim host-root guard to fail, but it succeeded" >&2
+  exit 1
+fi
+if [[ "$host_guard_out" != *"refusing to modify host rootfs"* ]]; then
+  echo "smoke: expected shim host-root guard message, got: $host_guard_out" >&2
+  exit 1
+fi
+
 port="$(free_port)"
 base_url="http://127.0.0.1:${port}"
 export AGENTSH_SERVER="$base_url"

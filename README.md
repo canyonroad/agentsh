@@ -225,8 +225,19 @@ RUN set -eux; \
   install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/sh
 RUN set -eux; \
   if [ -e /bin/bash ]; then mv /bin/bash /bin/bash.real; fi; \
-  if [ -e /bin/bash.real ]; then install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/bash; fi
+	if [ -e /bin/bash.real ]; then install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/bash; fi
 ```
+
+### Rootfs installer (CLI)
+
+For custom image build tooling, you can also install the shim into an arbitrary rootfs directory:
+
+```bash
+agentsh shim install-shell --root /path/to/rootfs --shim /path/to/agentsh-shell-shim --bash
+agentsh shim uninstall-shell --root /path/to/rootfs --bash
+```
+
+Safety: `agentsh shim install-shell` and `agentsh shim uninstall-shell` refuse `--root=/` unless you pass `--i-understand-this-modifies-the-host`.
 
 ### Environment variables (shim + CLI)
 
@@ -250,7 +261,8 @@ RUN set -eux; \
 make build
 ./bin/agentsh server --config config.yml
 
-SID=$(./bin/agentsh session create --workspace . | python -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+PY=python; command -v python >/dev/null 2>&1 || PY=python3
+SID=$(./bin/agentsh session create --workspace . | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 ./bin/agentsh exec "$SID" -- sh -lc 'echo hi'
 ./bin/agentsh exec --pty "$SID" -- sh
 ```
