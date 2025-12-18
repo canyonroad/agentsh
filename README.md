@@ -278,6 +278,37 @@ For container scenarios, agentsh provides a tiny shim binary (`agentsh-shell-shi
 
 Recommended: install the shim using `agentsh shim install-shell` so it consistently preserves the original shells as `*.real` and avoids subtle edge cases.
 
+#### Debian-based image (install from `.deb`)
+
+This pattern installs agentsh from a release `.deb` (copied into the build context), then opt-in installs the shim for `/bin/sh` and `/bin/bash`.
+
+```dockerfile
+FROM debian:bookworm-slim
+
+# Optional but common: install bash so we can also shim /bin/bash.
+RUN set -eux; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends bash ca-certificates; \
+  rm -rf /var/lib/apt/lists/*
+
+# Download from a GitHub Release and put it next to this Dockerfile as:
+#   agentsh_<VERSION>_linux_amd64.deb
+COPY agentsh_<VERSION>_linux_amd64.deb /tmp/agentsh.deb
+
+RUN set -eux; \
+  dpkg -i /tmp/agentsh.deb; \
+  rm -f /tmp/agentsh.deb; \
+  agentsh --version; \
+  agentsh shim install-shell \
+    --root / \
+    --shim /usr/bin/agentsh-shell-shim \
+    --bash \
+    --i-understand-this-modifies-the-host
+
+# From here on, anything that runs /bin/sh or /bin/bash routes through agentsh.
+CMD ["/bin/sh", "-lc", "echo hello from agentsh shim; true"]
+```
+
 ```dockerfile
 COPY agentsh /usr/local/bin/agentsh
 COPY agentsh-shell-shim /usr/local/bin/agentsh-shell-shim
