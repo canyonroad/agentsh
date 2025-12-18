@@ -3,6 +3,7 @@ package pty
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,6 +22,10 @@ func TestEngine_RunPTY(t *testing.T) {
 		},
 	})
 	if err != nil {
+		low := strings.ToLower(err.Error())
+		if strings.Contains(low, "operation not permitted") || strings.Contains(low, "permission denied") {
+			t.Skipf("pty not permitted in this environment: %v", err)
+		}
 		t.Fatal(err)
 	}
 
@@ -46,4 +51,3 @@ func TestEngine_RunPTY(t *testing.T) {
 		t.Fatalf("expected output hi, got %q", got)
 	}
 }
-

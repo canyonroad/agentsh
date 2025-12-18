@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,8 +31,7 @@ func TestExecStream_EmitsStdoutAndDone(t *testing.T) {
 	}
 
 	app := newTestApp(t, sessions, store)
-	srv := httptest.NewServer(app.Router())
-	defer srv.Close()
+	srv := newHTTPTestServerOrSkip(t, app.Router())
 
 	body, _ := json.Marshal(map[string]any{"command": "sh", "args": []string{"-c", "echo hello"}})
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/sessions/"+sess.ID+"/exec/stream", bytes.NewReader(body))

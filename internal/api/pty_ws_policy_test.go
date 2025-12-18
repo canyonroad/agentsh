@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,8 +55,7 @@ func TestPTYWebSocket_RespectsCommandPolicyDeny(t *testing.T) {
 	}
 	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New())
 
-	srv := httptest.NewServer(app.Router())
-	defer srv.Close()
+	srv := newHTTPTestServerOrSkip(t, app.Router())
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/v1/sessions/" + sess.ID + "/pty"
 	d := websocket.Dialer{HandshakeTimeout: 2 * time.Second}
@@ -95,4 +93,3 @@ func TestPTYWebSocket_RespectsCommandPolicyDeny(t *testing.T) {
 		t.Fatalf("expected type=error, got %v (%q)", m["type"], string(msg))
 	}
 }
-

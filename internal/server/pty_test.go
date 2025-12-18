@@ -52,6 +52,9 @@ func TestServer_HTTP_PTYWebSocket(t *testing.T) {
 
 	s, err := New(cfg)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("listening not permitted in this environment: %v", err)
+		}
 		t.Fatal(err)
 	}
 	defer s.Close()
@@ -163,6 +166,9 @@ func TestServer_GRPC_PTYExec(t *testing.T) {
 
 	s, err := New(cfg)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("listening not permitted in this environment: %v", err)
+		}
 		t.Fatal(err)
 	}
 	defer s.Close()
@@ -237,4 +243,3 @@ func TestServer_GRPC_PTYExec(t *testing.T) {
 		}
 	}
 }
-

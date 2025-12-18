@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -97,7 +96,7 @@ func TestExecPTY_RawModeOnlyWhenTTY(t *testing.T) {
 
 func TestExecPTYWS_ContextCancelCloses(t *testing.T) {
 	closed := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newHTTPTestServerOrSkip(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 		c, err := up.Upgrade(w, r, nil)
 		if err != nil {
@@ -114,7 +113,6 @@ func TestExecPTYWS_ContextCancelCloses(t *testing.T) {
 			}
 		}
 	}))
-	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
