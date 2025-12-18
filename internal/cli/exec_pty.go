@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -240,6 +241,14 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 		Cols:       uint32(cols),
 	}
 	if err := stream.Send(&ptygrpc.ExecPTYClientMsg{Msg: &ptygrpc.ExecPTYClientMsg_Start{Start: start}}); err != nil {
+		// In bidi streams the "real" RPC status is often only surfaced on Recv.
+		// If the server rejects immediately (before reading Start), Send can return EOF.
+		if errors.Is(err, io.EOF) {
+			_, recvErr := stream.Recv()
+			if recvErr != nil {
+				return maybeMapDeny(recvErr)
+			}
+		}
 		return maybeMapDeny(err)
 	}
 
