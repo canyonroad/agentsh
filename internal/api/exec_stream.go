@@ -334,6 +334,12 @@ func captureAndStream(r io.Reader, max int64, onChunk func([]byte) error) ([]byt
 		if err == io.EOF {
 			break
 		}
+		// Similar to captureLimited: StdoutPipe/StderrPipe readers can occasionally observe a close
+		// initiated by cmd.Wait() as os.ErrClosed instead of EOF. Treat it as EOF to avoid flaky
+		// streaming tests and SSE ordering issues.
+		if errors.Is(err, os.ErrClosed) {
+			break
+		}
 		if err != nil {
 			return buf.Bytes(), total, truncated, err
 		}
