@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -64,26 +65,69 @@ func (a *App) execInSessionPTYWS(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 	conn.SetReadLimit(10 * 1024 * 1024)
 
+	const (
+		wsWriteWait = 10 * time.Second
+		wsPongWait  = 60 * time.Second
+		wsPingEvery = (wsPongWait * 9) / 10
+	)
+
+	conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		return nil
+	})
+
+	var writeMu sync.Mutex
+	wsWriteMessage := func(messageType int, data []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+		return conn.WriteMessage(messageType, data)
+	}
+	wsWriteControl := func(messageType int, data []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return conn.WriteControl(messageType, data, time.Now().Add(wsWriteWait))
+	}
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		t := time.NewTicker(wsPingEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				if err := wsWriteControl(websocket.PingMessage, nil); err != nil {
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
 	// First message must be a JSON start frame (text).
 	mt, data, err := conn.ReadMessage()
 	if err != nil {
 		return
 	}
+	conn.SetReadDeadline(time.Now().Add(wsPongWait))
 	if mt != websocket.TextMessage {
-		_ = conn.WriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": "first message must be text start"}))
+		_ = wsWriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": "first message must be text start"}))
 		return
 	}
 	var start ptyWSStart
 	if err := json.Unmarshal(data, &start); err != nil {
-		_ = conn.WriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": "invalid start json"}))
+		_ = wsWriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": "invalid start json"}))
 		return
 	}
 	if start.Type != "" && start.Type != "start" {
-		_ = conn.WriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": "expected type=start"}))
+		_ = wsWriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": "expected type=start"}))
 		return
 	}
 	if strings.TrimSpace(start.Command) == "" {
-		_ = conn.WriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": "command is required"}))
+		_ = wsWriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": "command is required"}))
 		return
 	}
 
@@ -97,22 +141,20 @@ func (a *App) execInSessionPTYWS(w http.ResponseWriter, r *http.Request) {
 		Cols:       start.Cols,
 	})
 	if err != nil {
-		_ = httpCode
-		_ = conn.WriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": err.Error()}))
+		_ = wsWriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "code": httpCode, "message": err.Error()}))
 		return
 	}
 	defer run.unlock()
 
 	// Reader loop: stdin bytes (binary) + control (text).
-	readDone := make(chan struct{})
 	go func() {
-		defer close(readDone)
 		for {
 			mt, msg, err := conn.ReadMessage()
 			if err != nil {
 				_ = run.ps.Signal(syscall.SIGKILL)
 				return
 			}
+			conn.SetReadDeadline(time.Now().Add(wsPongWait))
 			switch mt {
 			case websocket.BinaryMessage:
 				_, _ = run.ps.Write(msg)
@@ -168,7 +210,7 @@ func (a *App) execInSessionPTYWS(w http.ResponseWriter, r *http.Request) {
 	for b := range run.ps.Output() {
 		appendOut(b)
 		if writeErr == nil {
-			if werr := conn.WriteMessage(websocket.BinaryMessage, b); werr != nil {
+			if werr := wsWriteMessage(websocket.BinaryMessage, b); werr != nil {
 				writeErr = werr
 				_ = run.ps.Signal(syscall.SIGKILL)
 			}
@@ -178,16 +220,16 @@ func (a *App) execInSessionPTYWS(w http.ResponseWriter, r *http.Request) {
 	exitCode, waitErr := run.ps.Wait()
 	a.finishPTY(r.Context(), run, exitCode, run.started, waitErr, out.Bytes(), outTotal, outTrunc)
 	if waitErr != nil {
-		_ = conn.WriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": waitErr.Error()}))
+		_ = wsWriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": waitErr.Error()}))
 		return
 	}
 
-	_ = conn.WriteMessage(websocket.TextMessage, mustJSON(ptyWSExit{
+	_ = wsWriteMessage(websocket.TextMessage, mustJSON(ptyWSExit{
 		Type:       "exit",
 		ExitCode:   exitCode,
 		DurationMs: time.Since(run.started).Milliseconds(),
 	}))
-	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(500*time.Millisecond))
+	_ = wsWriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 }
 
 func mustJSON(v any) []byte {

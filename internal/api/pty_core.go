@@ -53,9 +53,6 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 	unlock := sess.LockExec()
 	sess.SetCurrentCommandID(cmdID)
 
-	// Record history like non-PTY exec.
-	sess.RecordHistory(strings.TrimSpace(req.Command + " " + strings.Join(req.Args, " ")))
-
 	pre := a.policy.CheckCommand(req.Command, req.Args)
 	approvalErr := error(nil)
 	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && a.approvals != nil {
@@ -118,12 +115,24 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 		return nil, http.StatusForbidden, fmt.Errorf("%s", msg)
 	}
 
+	// Record history like non-PTY exec (only for allowed commands).
+	sess.RecordHistory(strings.TrimSpace(req.Command + " " + strings.Join(req.Args, " ")))
+
 	workdir, err := resolveWorkingDir(sess, strings.TrimSpace(req.WorkingDir))
 	if err != nil {
 		defer unlock()
 		return nil, http.StatusBadRequest, err
 	}
 	env := mergeEnv(os.Environ(), sess, req.Env)
+
+	rows := req.Rows
+	cols := req.Cols
+	if rows == 0 {
+		rows = 24
+	}
+	if cols == 0 {
+		cols = 80
+	}
 
 	ps, err := pty.New().Start(ctx, pty.StartRequest{
 		Command: req.Command,
@@ -132,8 +141,8 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 		Dir:     workdir,
 		Env:     env,
 		InitialSize: pty.Winsize{
-			Rows: req.Rows,
-			Cols: req.Cols,
+			Rows: rows,
+			Cols: cols,
 		},
 	})
 	if err != nil {
