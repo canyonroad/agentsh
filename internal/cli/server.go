@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/server"
 	"github.com/spf13/cobra"
 )
@@ -21,7 +20,7 @@ func newServerCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 
-			cfg, err := config.Load(configPath)
+			cfg, err := loadLocalConfig(configPath)
 			if err != nil {
 				return err
 			}
@@ -37,6 +36,6 @@ func newServerCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&configPath, "config", "config.yml", "Path to server config YAML")
+	cmd.Flags().StringVar(&configPath, "config", "", "Path to server config YAML (default: ./config.yml, ./config.yaml, or /etc/agentsh/config.yaml)")
 	return cmd
 }

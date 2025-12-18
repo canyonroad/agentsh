@@ -632,6 +632,10 @@ func resolvePolicyPath(cfg *config.Config) (string, error) {
 		"default-policy.yaml",
 		filepath.Join("configs", "default-policy.yaml"),
 		filepath.Join("configs", "default-policy.yml"),
+		filepath.Join("/etc/agentsh", "default-policy.yaml"),
+		filepath.Join("/etc/agentsh", "default-policy.yml"),
+		filepath.Join("/etc/agentsh", "policies", cfg.Policies.Default+".yaml"),
+		filepath.Join("/etc/agentsh", "policies", cfg.Policies.Default+".yml"),
 	}
 	for _, p := range localCandidates {
 		if _, err := os.Stat(p); err == nil {

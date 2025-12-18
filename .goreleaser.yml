@@ -103,7 +103,7 @@ nfpms:
     license: Apache-2.0
     contents:
       - src: config.yml
-        dst: /etc/agentsh/config.yml
+        dst: /etc/agentsh/config.yaml
         type: config
       - src: default-policy.yml
         dst: /etc/agentsh/default-policy.yml

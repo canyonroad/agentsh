@@ -16,6 +16,12 @@ func defaultConfigPath() string {
 	if _, err := os.Stat("config.yaml"); err == nil {
 		return "config.yaml"
 	}
+	if _, err := os.Stat("/etc/agentsh/config.yaml"); err == nil {
+		return "/etc/agentsh/config.yaml"
+	}
+	if _, err := os.Stat("/etc/agentsh/config.yml"); err == nil {
+		return "/etc/agentsh/config.yml"
+	}
 	return "/etc/agentsh/config.yaml"
 }
 
