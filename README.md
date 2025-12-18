@@ -81,6 +81,68 @@ In practice, you can use them together: keep your favorite coding agent UI, but 
 | Rename/move | Separate steps | Supported in patch format |
 | Learning curve | Lower | Higher |
 
+## Installation
+
+### Packages (`.deb` / `.rpm` / `.apk`)
+
+From a GitHub Release, download the package matching your platform and install it:
+
+```bash
+# Debian/Ubuntu (amd64 example)
+sudo dpkg -i ./agentsh_<VERSION>_linux_amd64.deb
+
+# RHEL/Fedora (amd64 example)
+sudo rpm -Uvh ./agentsh_<VERSION>_linux_amd64.rpm
+
+# Alpine (amd64 example)
+sudo apk add --allow-untrusted ./agentsh_<VERSION>_linux_amd64.apk
+```
+
+The packages install:
+- Binaries: `/usr/bin/agentsh`, `/usr/bin/agentsh-shell-shim`
+- Config: `/etc/agentsh/config.yaml`
+- Default policy: `/etc/agentsh/default-policy.yml`
+
+### Archives (`.tar.gz`)
+
+If you prefer a portable install, download the `.tar.gz` archive from a GitHub Release and extract it:
+
+```bash
+tar -xzf agentsh_<VERSION>_linux_amd64.tar.gz
+sudo install -m 0755 agentsh /usr/local/bin/agentsh
+sudo install -m 0755 agentsh-shell-shim /usr/local/bin/agentsh-shell-shim
+
+sudo install -d /etc/agentsh
+sudo install -m 0644 config.yml /etc/agentsh/config.yaml
+sudo install -m 0644 default-policy.yml /etc/agentsh/default-policy.yml
+```
+
+## Shell Shim activation (opt-in)
+
+To enforce that anything invoking `/bin/sh -c ...` or `/bin/bash -lc ...` routes through agentsh, install the shim explicitly.
+
+```bash
+# Inspect current state
+sudo agentsh shim status --root / --bash
+
+# Install shim at /bin/sh and /bin/bash (if bash exists)
+sudo agentsh shim install-shell \
+  --root / \
+  --shim /usr/bin/agentsh-shell-shim \
+  --bash \
+  --i-understand-this-modifies-the-host
+
+# Revert back to the original shells
+sudo agentsh shim uninstall-shell \
+  --root / \
+  --bash \
+  --i-understand-this-modifies-the-host
+```
+
+Note: if you installed from a `.tar.gz` archive into `/usr/local/bin`, use `--shim /usr/local/bin/agentsh-shell-shim`.
+
+Safety: the installer refuses `--root=/` unless you pass `--i-understand-this-modifies-the-host`.
+
 ## Quick Start
 
 ### Build + Run (local)
@@ -214,21 +276,16 @@ For container scenarios, agentsh provides a tiny shim binary (`agentsh-shell-shi
 
 ### Dockerfile integration
 
-This repo’s `Dockerfile` installs the shim so `/bin/sh` and `/bin/bash` route through agentsh:
-- Preserves real shells as `/bin/sh.real` and `/bin/bash.real`
-- Installs the shim at `/bin/sh` and `/bin/bash` (when bash exists)
-
-For your own image, the pattern is:
+Recommended: install the shim using `agentsh shim install-shell` so it consistently preserves the original shells as `*.real` and avoids subtle edge cases.
 
 ```dockerfile
 COPY agentsh /usr/local/bin/agentsh
 COPY agentsh-shell-shim /usr/local/bin/agentsh-shell-shim
-RUN set -eux; \
-  mv /bin/sh /bin/sh.real; \
-  install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/sh
-RUN set -eux; \
-  if [ -e /bin/bash ]; then mv /bin/bash /bin/bash.real; fi; \
-  if [ -e /bin/bash.real ]; then install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/bash; fi
+RUN /usr/local/bin/agentsh shim install-shell \
+  --root / \
+  --shim /usr/local/bin/agentsh-shell-shim \
+  --bash \
+  --i-understand-this-modifies-the-host
 ```
 
 ### Rootfs installer (CLI)
