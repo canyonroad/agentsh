@@ -112,8 +112,5 @@ nfpms:
     #   agentsh shim install-shell --root / --shim /usr/bin/agentsh-shell-shim --i-understand-this-modifies-the-host
 
 release:
-  github:
-    owner: agentsh
-    name: agentsh
   draft: false
   prerelease: auto
