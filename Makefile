@@ -1,10 +1,19 @@
-.PHONY: build test lint clean proto
+.PHONY: build build-shim test lint clean proto
 
 VERSION := $(shell git describe --tags --always 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 
+GOCACHE ?= $(CURDIR)/.gocache
+GOMODCACHE ?= $(CURDIR)/.gomodcache
+
 build:
-	go build $(LDFLAGS) -o bin/agentsh ./cmd/agentsh
+	mkdir -p bin $(GOCACHE) $(GOMODCACHE)
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go build $(LDFLAGS) -o bin/agentsh ./cmd/agentsh
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go build $(LDFLAGS) -o bin/agentsh-shell-shim ./cmd/agentsh-shell-shim
+
+build-shim:
+	mkdir -p bin $(GOCACHE) $(GOMODCACHE)
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go build $(LDFLAGS) -o bin/agentsh-shell-shim ./cmd/agentsh-shell-shim
 
 proto:
 	protoc -I proto \
@@ -13,7 +22,8 @@ proto:
 	  proto/agentsh/v1/pty.proto
 
 test:
-	go test ./...
+	mkdir -p $(GOCACHE) $(GOMODCACHE)
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./...
 
 lint:
 	@echo "No linter configured"

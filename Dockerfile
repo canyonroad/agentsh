@@ -23,6 +23,7 @@ RUN go mod download
 # Build
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /agentsh ./cmd/agentsh
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /agentsh-shell-shim ./cmd/agentsh-shell-shim
 
 # =============================================================================
 # Runtime stage
@@ -52,6 +53,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy binary from builder
 COPY --from=builder /agentsh /usr/local/bin/agentsh
+COPY --from=builder /agentsh-shell-shim /usr/local/bin/agentsh-shell-shim
+
+# Install sh/bash shims for container compatibility.
+# Preserve real shells at /bin/sh.real and /bin/bash.real (when present).
+RUN set -eux; \
+    if [ -e /bin/sh ] && [ ! -e /bin/sh.real ]; then mv /bin/sh /bin/sh.real; fi; \
+    if [ -e /bin/bash ] && [ ! -e /bin/bash.real ]; then mv /bin/bash /bin/bash.real; fi; \
+    install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/sh; \
+    if [ -e /bin/bash.real ]; then install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/bash; fi
 
 # Create directories
 RUN mkdir -p /etc/agentsh/policies \

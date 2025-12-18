@@ -141,6 +141,10 @@ agentsh exec SESSION_ID -- python script.py
 
 # Watch events in real-time
 agentsh events tail SESSION_ID
+
+# Interactive PTY (stdin/stdout streaming, resize, signals)
+# Note: PTY mode merges stdout/stderr (like a real terminal).
+agentsh exec --pty SESSION_ID -- sh
 ```
 
 ### gRPC API (optional)
@@ -153,6 +157,10 @@ The CLI can prefer gRPC for `exec`, `exec --stream`, and `events tail`:
 AGENTSH_TRANSPORT=grpc agentsh exec SESSION_ID -- ls -la
 AGENTSH_TRANSPORT=grpc agentsh exec SESSION_ID --stream -- npm install
 AGENTSH_TRANSPORT=grpc agentsh events tail SESSION_ID
+
+# PTY exec also supports both transports:
+AGENTSH_TRANSPORT=http agentsh exec --pty SESSION_ID -- sh
+AGENTSH_TRANSPORT=grpc agentsh exec --pty SESSION_ID -- sh
 ```
 
 Example with `grpcurl`:
@@ -194,6 +202,52 @@ Example `CLAUDE.md` (or `AGENTS.md`) snippet to route execution through agentsh:
 - Do not run commands directly in bash/zsh.
 - Execute commands via agentsh: `agentsh exec -- <command ...>`.
 - If you need structured output for a tool decision, use: `agentsh exec --output json --events summary -- <command ...>`.
+```
+
+## Shell Shim (Container Compatibility)
+
+When an agent/harness runs commands via `/bin/sh -c ...` or `/bin/bash -lc ...`, it can bypass higher-level “please use agentsh” instructions.
+For container scenarios, agentsh provides a tiny shim binary (`agentsh-shell-shim`) intended to replace `/bin/sh` and `/bin/bash` and route execution through `agentsh exec`.
+
+### Dockerfile integration
+
+This repo’s `Dockerfile` installs the shim so `/bin/sh` and `/bin/bash` route through agentsh:
+- Preserves real shells as `/bin/sh.real` and `/bin/bash.real`
+- Installs the shim at `/bin/sh` and `/bin/bash` (when bash exists)
+
+For your own image, the pattern is:
+
+```dockerfile
+COPY agentsh /usr/local/bin/agentsh
+COPY agentsh-shell-shim /usr/local/bin/agentsh-shell-shim
+RUN mv /bin/sh /bin/sh.real && install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/sh
+RUN mv /bin/bash /bin/bash.real && install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/bash
+```
+
+### Environment variables (shim + CLI)
+
+- `AGENTSH_BIN`: override the `agentsh` executable path used by the shim (otherwise resolved via `PATH`)
+- `AGENTSH_SESSION_ID`: explicit session id (best option; harness sets it)
+- `AGENTSH_SESSION_FILE`: file path containing a 1-line session id (shim reads/creates)
+- `AGENTSH_SESSION_SCOPE`: `workspace` (default) or `global` for file-backed fallback ids
+- `AGENTSH_WORKSPACE`: optional workspace root override (used for workspace-scoped fallback)
+- `AGENTSH_IN_SESSION`: reserved/internal recursion guard (set by server; shim will exec `*.real`)
+- `AGENTSH_TRANSPORT`: `http` or `grpc` (affects `agentsh exec --pty` and other CLI calls)
+
+### PTY endpoints (server)
+
+- HTTP WebSocket: `GET /api/v1/sessions/{id}/pty`
+- gRPC: `proto/agentsh/v1/pty.proto` (`agentsh.v1.AgentshPTY/ExecPTY`)
+
+## Smoke Test (Manual)
+
+```bash
+make build
+./bin/agentsh server --config config.yml
+
+SID=$(./bin/agentsh session create --workspace . | sed -n 's/.*\"id\":\"\\([^\"]*\\)\".*/\\1/p')
+./bin/agentsh exec "$SID" -- sh -lc 'echo hi'
+./bin/agentsh exec --pty "$SID" -- sh
 ```
 
 ## How It Works
