@@ -11,6 +11,13 @@ type ShellShimTargetStatus struct {
 	TargetPath string `json:"target_path"`
 	RealPath   string `json:"real_path"`
 
+	// State is a convenience summary derived from the other fields:
+	// - "missing": target doesn't exist
+	// - "installed": target matches shim and .real exists
+	// - "partial_missing_real": target matches shim but .real is missing
+	// - "not_installed": target exists but does not match shim (or shim not provided)
+	State string `json:"state"`
+
 	TargetExists bool   `json:"target_exists"`
 	TargetMode   uint32 `json:"target_mode,omitempty"`
 	TargetType   string `json:"target_type,omitempty"` // "file" | "symlink" | "other"
@@ -117,6 +124,20 @@ func getTargetStatus(root, name string, shimBytes []byte) (ShellShimTargetStatus
 		}
 	} else if !os.IsNotExist(err) {
 		return ShellShimTargetStatus{}, fmt.Errorf("stat %s: %w", real, err)
+	}
+
+	// Compute State last.
+	switch {
+	case !out.TargetExists:
+		out.State = "missing"
+	case len(shimBytes) == 0:
+		out.State = "not_installed"
+	case out.ShimMatches && out.RealExists:
+		out.State = "installed"
+	case out.ShimMatches && !out.RealExists:
+		out.State = "partial_missing_real"
+	default:
+		out.State = "not_installed"
 	}
 
 	return out, nil

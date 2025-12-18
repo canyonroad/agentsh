@@ -142,6 +142,95 @@ func TestShellShim_RecursionGuardExecsRealShell(t *testing.T) {
 	}
 }
 
+func TestShellShim_RespectsCustomArgv0(t *testing.T) {
+	repoRoot := repoRootOrSkip(t)
+	tmp := t.TempDir()
+
+	shimBin := filepath.Join(tmp, "agentsh-shell-shim")
+	buildOrSkip(t, repoRoot, "./cmd/agentsh-shell-shim", shimBin)
+
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	shimPath := filepath.Join(binDir, "sh")
+	copyFile(t, shimBin, shimPath, 0o755)
+	realPath := filepath.Join(binDir, "sh.real")
+	if err := os.WriteFile(realPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write sh.real: %v", err)
+	}
+
+	fakeAgentsh := filepath.Join(tmp, "fake-agentsh")
+	logPath := filepath.Join(tmp, "agentsh.log")
+	writeFakeAgentsh(t, fakeAgentsh, logPath)
+
+	cmd := exec.Command(shimPath, "-lc", "echo hi")
+	// Override argv0 to simulate a harness exec'ing /bin/sh but pointing to our shim.
+	cmd.Args[0] = "/bin/sh"
+	cmd.Env = append(os.Environ(),
+		"AGENTSH_BIN="+fakeAgentsh,
+		"AGENTSH_SESSION_ID=session-test",
+		"FAKE_AGENTSH_LOG="+logPath,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shim failed: %v (out=%s)", err, string(out))
+	}
+
+	lines := mustReadLines(t, logPath)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "ARG2=/bin/sh") {
+		t.Fatalf("expected argv0=/bin/sh to be forwarded; got %q", joined)
+	}
+}
+
+func TestShellShim_LoginArgv0SelectsBash(t *testing.T) {
+	repoRoot := repoRootOrSkip(t)
+	tmp := t.TempDir()
+
+	shimBin := filepath.Join(tmp, "agentsh-shell-shim")
+	buildOrSkip(t, repoRoot, "./cmd/agentsh-shell-shim", shimBin)
+
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Install shim at "bash" and provide bash.real next to it so resolveRealShell can find it.
+	shimPath := filepath.Join(binDir, "bash")
+	copyFile(t, shimBin, shimPath, 0o755)
+	realPath := filepath.Join(binDir, "bash.real")
+	if err := os.WriteFile(realPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write bash.real: %v", err)
+	}
+
+	fakeAgentsh := filepath.Join(tmp, "fake-agentsh")
+	logPath := filepath.Join(tmp, "agentsh.log")
+	writeFakeAgentsh(t, fakeAgentsh, logPath)
+
+	cmd := exec.Command(shimPath, "-lc", "echo hi")
+	// Simulate login shell argv0 ("-bash").
+	cmd.Args[0] = "-bash"
+	cmd.Env = append(os.Environ(),
+		"AGENTSH_BIN="+fakeAgentsh,
+		"AGENTSH_SESSION_ID=session-test",
+		"FAKE_AGENTSH_LOG="+logPath,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shim failed: %v (out=%s)", err, string(out))
+	}
+
+	lines := mustReadLines(t, logPath)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "ARG2=-bash") {
+		t.Fatalf("expected argv0=-bash to be forwarded; got %q", joined)
+	}
+	if !strings.Contains(joined, "ARG5="+realPath) {
+		t.Fatalf("expected real shell bash.real; got %q", joined)
+	}
+}
+
 func repoRootOrSkip(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
