@@ -4,8 +4,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestShellShim_UsesAgentshBinAndForwardsArgs(t *testing.T) {
@@ -231,6 +235,56 @@ func TestShellShim_LoginArgv0SelectsBash(t *testing.T) {
 	}
 }
 
+func TestShellShim_AddsPTYWhenTTY(t *testing.T) {
+	repoRoot := repoRootOrSkip(t)
+	tmp := t.TempDir()
+
+	shimBin := filepath.Join(tmp, "agentsh-shell-shim")
+	buildOrSkip(t, repoRoot, "./cmd/agentsh-shell-shim", shimBin)
+
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	shimPath := filepath.Join(binDir, "sh")
+	copyFile(t, shimBin, shimPath, 0o755)
+	if err := os.WriteFile(filepath.Join(binDir, "sh.real"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write sh.real: %v", err)
+	}
+
+	fakeAgentsh := filepath.Join(tmp, "fake-agentsh")
+	logPath := filepath.Join(tmp, "agentsh.log")
+	writeFakeAgentsh(t, fakeAgentsh, logPath)
+
+	pty, tty, err := openPTY()
+	if err != nil {
+		t.Skipf("pty not available: %v", err)
+	}
+	defer func() { _ = pty.Close() }()
+	defer func() { _ = tty.Close() }()
+
+	cmd := exec.Command(shimPath, "-lc", "echo hi")
+	cmd.Env = append(os.Environ(),
+		"AGENTSH_BIN="+fakeAgentsh,
+		"AGENTSH_SESSION_ID=session-test",
+		"FAKE_AGENTSH_LOG="+logPath,
+	)
+	cmd.Stdin = tty
+	cmd.Stdout = tty
+	cmd.Stderr = tty
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	_ = cmd.Wait()
+
+	lines := mustReadLines(t, logPath)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "ARG1=--pty") {
+		t.Fatalf("expected --pty when stdin/stdout are TTY; got %q", joined)
+	}
+}
+
 func repoRootOrSkip(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
@@ -302,4 +356,34 @@ func mustReadLines(t *testing.T, path string) []string {
 		return nil
 	}
 	return strings.Split(s, "\n")
+}
+
+// openPTY returns (master, slave) as *os.File.
+// This mirrors the Linux logic used by internal/pty.
+func openPTY() (*os.File, *os.File, error) {
+	if runtime.GOOS != "linux" {
+		return nil, nil, exec.ErrNotFound
+	}
+
+	mfd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Unlock PTY.
+	if err := unix.IoctlSetPointerInt(mfd, unix.TIOCSPTLCK, 0); err != nil {
+		_ = unix.Close(mfd)
+		return nil, nil, err
+	}
+	n, err := unix.IoctlGetInt(mfd, unix.TIOCGPTN)
+	if err != nil {
+		_ = unix.Close(mfd)
+		return nil, nil, err
+	}
+	slavePath := filepath.Join("/dev/pts", strconv.Itoa(n))
+	sfd, err := unix.Open(slavePath, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
+	if err != nil {
+		_ = unix.Close(mfd)
+		return nil, nil, err
+	}
+	return os.NewFile(uintptr(mfd), "pty-master"), os.NewFile(uintptr(sfd), "pty-slave"), nil
 }

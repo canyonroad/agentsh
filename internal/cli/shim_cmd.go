@@ -126,8 +126,8 @@ func newShimStatusCmd() *cobra.Command {
 			case "", "shell":
 				printTarget := func(ts shim.ShellShimTargetStatus) {
 					fmt.Fprintf(cmd.OutOrStdout(),
-						"%s: target=%s exists=%v type=%s real_exists=%v shim_matches=%v\n",
-						ts.Name, ts.TargetPath, ts.TargetExists, ts.TargetType, ts.RealExists, ts.ShimMatches,
+						"%s: state=%s target=%s exists=%v type=%s real_exists=%v shim_matches=%v\n",
+						ts.Name, ts.State, ts.TargetPath, ts.TargetExists, ts.TargetType, ts.RealExists, ts.ShimMatches,
 					)
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "root=%s\n", st.Root)
