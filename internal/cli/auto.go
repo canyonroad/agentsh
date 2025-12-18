@@ -91,7 +91,7 @@ func ensureServerRunning(ctx context.Context, serverAddr string, log io.Writer) 
 
 	configPath := strings.TrimSpace(os.Getenv("AGENTSH_CONFIG"))
 	if configPath == "" {
-		configPath = "config.yml"
+		configPath = defaultConfigPath()
 	}
 	fmt.Fprintf(log, "agentsh: auto-starting server (config %s)\n", configPath)
 

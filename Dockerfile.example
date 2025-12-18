@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Example: Debian-based image that installs agentsh from a GitHub Release .deb
 # and opt-in activates the /bin/sh + /bin/bash shim.
 #
@@ -6,11 +7,15 @@
 #     --build-arg AGENTSH_REPO=erans/agentsh \
 #     --build-arg AGENTSH_TAG=v0.1.0-test2 \
 #     --build-arg DEB_ARCH=amd64 \
+#     --secret id=github_token,env=GITHUB_TOKEN \
 #     -t agentsh-example:latest .
 #
 # Notes:
 # - The release tag is "v..." but the artifact filenames use the version without the "v" prefix.
 # - DEB_ARCH must match the artifact name (typically: amd64 or arm64).
+# - For private repos, the build needs a token with repo access:
+#     export GITHUB_TOKEN="$(gh auth token)"
+#     DOCKER_BUILDKIT=1 docker build ... --secret id=github_token,env=GITHUB_TOKEN
 
 FROM debian:bookworm-slim
 
@@ -20,15 +25,25 @@ ARG DEB_ARCH=amd64
 
 RUN set -eux; \
   apt-get update; \
-  apt-get install -y --no-install-recommends ca-certificates curl bash; \
+  apt-get install -y --no-install-recommends ca-certificates curl bash jq; \
   rm -rf /var/lib/apt/lists/*
 
-RUN set -eux; \
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN --mount=type=secret,id=github_token,required=false set -eux; \
+  token=""; \
+  if [ -f /run/secrets/github_token ]; then token="$(cat /run/secrets/github_token)"; fi; \
   version="${AGENTSH_TAG#v}"; \
   deb="agentsh_${version}_linux_${DEB_ARCH}.deb"; \
-  url="https://github.com/${AGENTSH_REPO}/releases/download/${AGENTSH_TAG}/${deb}"; \
-  echo "Downloading: ${url}"; \
-  curl -fsSL "${url}" -o /tmp/agentsh.deb; \
+  api="https://api.github.com/repos/${AGENTSH_REPO}/releases/tags/${AGENTSH_TAG}"; \
+  headers=(-H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28'); \
+  if [ -n "$token" ]; then headers+=(-H "Authorization: token $token"); fi; \
+  release_json="$(curl -fsSL "${headers[@]}" "$api")"; \
+  asset_id="$(printf '%s' "$release_json" | jq -r --arg name "$deb" '.assets[] | select(.name==$name) | .id' | head -n 1)"; \
+  if [ -z "$asset_id" ] || [ "$asset_id" = "null" ]; then echo "asset not found: $deb" >&2; exit 1; fi; \
+  dl_headers=(-H 'Accept: application/octet-stream' -H 'X-GitHub-Api-Version: 2022-11-28'); \
+  if [ -n "$token" ]; then dl_headers+=(-H "Authorization: token $token"); fi; \
+  curl -fsSL "${dl_headers[@]}" "https://api.github.com/repos/${AGENTSH_REPO}/releases/assets/${asset_id}" -o /tmp/agentsh.deb; \
   dpkg -i /tmp/agentsh.deb; \
   rm -f /tmp/agentsh.deb; \
   agentsh --version; \
@@ -39,4 +54,3 @@ RUN set -eux; \
     --i-understand-this-modifies-the-host
 
 CMD ["/bin/sh", "-lc", "echo hello from agentsh shim; true"]
-
