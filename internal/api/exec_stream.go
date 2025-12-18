@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -220,6 +219,8 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	if ns := s.NetNSName(); ns != "" {
 		allArgs := append([]string{"netns", "exec", ns, req.Command}, req.Args...)
 		cmd = exec.CommandContext(ctx, "ip", allArgs...)
+	} else if strings.TrimSpace(req.Argv0) != "" && len(cmd.Args) > 0 {
+		cmd.Args[0] = req.Argv0
 	}
 	cmd.Dir = workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -231,14 +232,25 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		cmd.Stdin = strings.NewReader(req.Stdin)
 	}
 
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stderr pipe: %w", err)
-	}
+	var writeMu sync.Mutex
+	stdoutW := newCaptureWriter(defaultMaxOutputBytes, func(chunk []byte) error {
+		if emit == nil || len(chunk) == 0 {
+			return nil
+		}
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return emit("stdout", map[string]any{"command_id": cmdID, "stream": "stdout", "data": string(chunk)})
+	})
+	stderrW := newCaptureWriter(defaultMaxOutputBytes, func(chunk []byte) error {
+		if emit == nil || len(chunk) == 0 {
+			return nil
+		}
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return emit("stderr", map[string]any{"command_id": cmdID, "stream": "stderr", "data": string(chunk)})
+	})
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
 
 	if err := cmd.Start(); err != nil {
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
@@ -252,45 +264,10 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		}
 	}
 
-	type capRes struct {
-		b   []byte
-		n   int64
-		tr  bool
-		err error
-	}
-	var writeMu sync.Mutex
-	outCh := make(chan capRes, 1)
-	errCh := make(chan capRes, 1)
-	go func() {
-		b, n, tr, e := captureAndStream(stdoutPipe, defaultMaxOutputBytes, func(chunk []byte) error {
-			writeMu.Lock()
-			defer writeMu.Unlock()
-			return emit("stdout", map[string]any{"command_id": cmdID, "stream": "stdout", "data": string(chunk)})
-		})
-		outCh <- capRes{b: b, n: n, tr: tr, err: e}
-	}()
-	go func() {
-		b, n, tr, e := captureAndStream(stderrPipe, defaultMaxOutputBytes, func(chunk []byte) error {
-			writeMu.Lock()
-			defer writeMu.Unlock()
-			return emit("stderr", map[string]any{"command_id": cmdID, "stream": "stderr", "data": string(chunk)})
-		})
-		errCh <- capRes{b: b, n: n, tr: tr, err: e}
-	}()
-
 	waitErr := cmd.Wait()
-	outRes := <-outCh
-	errRes := <-errCh
-
-	stdout, stderr = outRes.b, errRes.b
-	stdoutTotal, stderrTotal = outRes.n, errRes.n
-	stdoutTrunc, stderrTrunc = outRes.tr, errRes.tr
-	if outRes.err != nil {
-		err = fmt.Errorf("read stdout: %w", outRes.err)
-	}
-	if errRes.err != nil && err == nil {
-		err = fmt.Errorf("read stderr: %w", errRes.err)
-	}
+	stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
+	stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
+	stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
 
 	resources = resourcesFromProcessState(cmd.ProcessState)
 
@@ -304,47 +281,6 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
 	}
 	return 127, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, waitErr
-}
-
-func captureAndStream(r io.Reader, max int64, onChunk func([]byte) error) ([]byte, int64, bool, error) {
-	var total int64
-	truncated := false
-	var buf bytes.Buffer
-	tmp := make([]byte, 32*1024)
-	for {
-		n, err := r.Read(tmp)
-		if n > 0 {
-			chunk := tmp[:n]
-			total += int64(n)
-			if onChunk != nil {
-				_ = onChunk(chunk)
-			}
-			if int64(buf.Len()) < max {
-				remain := max - int64(buf.Len())
-				if int64(n) <= remain {
-					_, _ = buf.Write(chunk)
-				} else {
-					_, _ = buf.Write(chunk[:remain])
-					truncated = true
-				}
-			} else {
-				truncated = true
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		// Similar to captureLimited: StdoutPipe/StderrPipe readers can occasionally observe a close
-		// initiated by cmd.Wait() as os.ErrClosed instead of EOF. Treat it as EOF to avoid flaky
-		// streaming tests and SSE ordering issues.
-		if errors.Is(err, os.ErrClosed) {
-			break
-		}
-		if err != nil {
-			return buf.Bytes(), total, truncated, err
-		}
-	}
-	return buf.Bytes(), total, truncated, nil
 }
 
 func writeSSE(w io.Writer, flusher http.Flusher, event string, v any) error {

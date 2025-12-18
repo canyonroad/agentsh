@@ -1,11 +1,9 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,14 +76,10 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		cmd.Stdin = strings.NewReader(req.Stdin)
 	}
 
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stderr pipe: %w", err)
-	}
+	stdoutW := newCaptureWriter(defaultMaxOutputBytes, nil)
+	stderrW := newCaptureWriter(defaultMaxOutputBytes, nil)
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
 
 	if err := cmd.Start(); err != nil {
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
@@ -99,36 +93,10 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		}
 	}
 
-	type capRes struct {
-		b   []byte
-		n   int64
-		tr  bool
-		err error
-	}
-	outCh := make(chan capRes, 1)
-	errCh := make(chan capRes, 1)
-	go func() {
-		b, n, tr, e := captureLimited(stdoutPipe, defaultMaxOutputBytes)
-		outCh <- capRes{b: b, n: n, tr: tr, err: e}
-	}()
-	go func() {
-		b, n, tr, e := captureLimited(stderrPipe, defaultMaxOutputBytes)
-		errCh <- capRes{b: b, n: n, tr: tr, err: e}
-	}()
-
 	waitErr := cmd.Wait()
-	outRes := <-outCh
-	errRes := <-errCh
-
-	stdout, stderr = outRes.b, errRes.b
-	stdoutTotal, stderrTotal = outRes.n, errRes.n
-	stdoutTrunc, stderrTrunc = outRes.tr, errRes.tr
-	if outRes.err != nil {
-		err = fmt.Errorf("read stdout: %w", outRes.err)
-	}
-	if errRes.err != nil && err == nil {
-		err = fmt.Errorf("read stderr: %w", errRes.err)
-	}
+	stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
+	stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
+	stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
 
 	resources = resourcesFromProcessState(cmd.ProcessState)
 
@@ -162,43 +130,6 @@ func resourcesFromProcessState(ps *os.ProcessState) types.ExecResources {
 		CPUSystemMs:  int64(ru.Stime.Sec)*1000 + int64(ru.Stime.Usec)/1000,
 		MemoryPeakKB: int64(ru.Maxrss),
 	}
-}
-
-func captureLimited(r io.Reader, max int64) ([]byte, int64, bool, error) {
-	var total int64
-	truncated := false
-	var buf bytes.Buffer
-	tmp := make([]byte, 32*1024)
-	for {
-		n, err := r.Read(tmp)
-		if n > 0 {
-			total += int64(n)
-			if int64(buf.Len()) < max {
-				remain := max - int64(buf.Len())
-				if int64(n) <= remain {
-					_, _ = buf.Write(tmp[:n])
-				} else {
-					_, _ = buf.Write(tmp[:remain])
-					truncated = true
-				}
-			} else {
-				truncated = true
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		// StdoutPipe/StderrPipe readers can occasionally observe a close initiated by cmd.Wait()
-		// as "file already closed" (fs.ErrClosed) instead of EOF. Treat it as EOF to avoid
-		// flaky failures while still capturing all available output.
-		if errors.Is(err, os.ErrClosed) {
-			break
-		}
-		if err != nil {
-			return buf.Bytes(), total, truncated, err
-		}
-	}
-	return buf.Bytes(), total, truncated, nil
 }
 
 func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error) {
