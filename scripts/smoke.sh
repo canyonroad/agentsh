@@ -171,6 +171,38 @@ if [[ "$shim_out" != "shim_hi" ]]; then
   exit 1
 fi
 
+# Rootfs install/uninstall simulation (doesn't touch the real host).
+rootfs="$tmp/rootfs"
+mkdir -p "$rootfs/bin"
+ln -sf "$(command -v sh)" "$rootfs/bin/sh"
+if command -v bash >/dev/null 2>&1; then
+  ln -sf "$(command -v bash)" "$rootfs/bin/bash"
+  rootfs_bash=1
+else
+  rootfs_bash=0
+fi
+
+install_args=(./bin/agentsh shim install-shell --root "$rootfs" --shim "$repo_root/bin/agentsh-shell-shim")
+uninstall_args=(./bin/agentsh shim uninstall-shell --root "$rootfs")
+if [[ "$rootfs_bash" == "1" ]]; then
+  install_args+=(--bash)
+  uninstall_args+=(--bash)
+fi
+
+"${install_args[@]}"
+rootfs_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$rootfs/bin/sh" -lc 'echo rootfs_hi' | tr -d '\r' | tail -n 1)"
+if [[ "$rootfs_out" != "rootfs_hi" ]]; then
+  echo "smoke: rootfs shim output mismatch: got=$rootfs_out" >&2
+  exit 1
+fi
+
+"${uninstall_args[@]}"
+restored_out="$("$rootfs/bin/sh" -lc 'echo restored_hi' | tr -d '\r' | tail -n 1)"
+if [[ "$restored_out" != "restored_hi" ]]; then
+  echo "smoke: rootfs uninstall output mismatch: got=$restored_out" >&2
+  exit 1
+fi
+
 # Shim delegation via PATH (no AGENTSH_BIN).
 shim_out_path="$(PATH="$repo_root/bin:$PATH" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$shim_dir/sh" -lc 'echo shim_path_hi' | tr -d '\r' | tail -n 1)"
 if [[ "$shim_out_path" != "shim_path_hi" ]]; then
