@@ -1,14 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
-	"os"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/agentsh/agentsh/internal/pty"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 )
@@ -54,12 +53,6 @@ func (a *App) execInSessionPTYWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess, ok := a.sessions.Get(sessionID)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
-		return
-	}
-
 	up := websocket.Upgrader{
 		// Auth middleware already applied; for typical agent harnesses, allow any origin.
 		CheckOrigin: func(*http.Request) bool { return true },
@@ -69,6 +62,7 @@ func (a *App) execInSessionPTYWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(10 * 1024 * 1024)
 
 	// First message must be a JSON start frame (text).
 	mt, data, err := conn.ReadMessage()
@@ -93,34 +87,21 @@ func (a *App) execInSessionPTYWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	unlock := sess.LockExec()
-	defer unlock()
-
-	workdir, werr := resolveWorkingDir(sess, strings.TrimSpace(start.WorkingDir))
-	if werr != nil {
-		_ = conn.WriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": werr.Error()}))
-		return
-	}
-	env := mergeEnv(os.Environ(), sess, start.Env)
-
-	eng := pty.New()
-	ps, perr := eng.Start(r.Context(), pty.StartRequest{
-		Command: start.Command,
-		Args:    start.Args,
-		Argv0:   strings.TrimSpace(start.Argv0),
-		Dir:     workdir,
-		Env:     env,
-		InitialSize: pty.Winsize{
-			Rows: start.Rows,
-			Cols: start.Cols,
-		},
+	run, httpCode, err := a.startPTY(r.Context(), sessionID, ptyStartParams{
+		Command:    start.Command,
+		Args:       start.Args,
+		Argv0:      start.Argv0,
+		WorkingDir: start.WorkingDir,
+		Env:        start.Env,
+		Rows:       start.Rows,
+		Cols:       start.Cols,
 	})
-	if perr != nil {
-		_ = conn.WriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": perr.Error()}))
+	if err != nil {
+		_ = httpCode
+		_ = conn.WriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": err.Error()}))
 		return
 	}
-
-	started := time.Now()
+	defer run.unlock()
 
 	// Reader loop: stdin bytes (binary) + control (text).
 	readDone := make(chan struct{})
@@ -129,12 +110,12 @@ func (a *App) execInSessionPTYWS(w http.ResponseWriter, r *http.Request) {
 		for {
 			mt, msg, err := conn.ReadMessage()
 			if err != nil {
-				_ = ps.Signal(syscall.SIGKILL)
+				_ = run.ps.Signal(syscall.SIGKILL)
 				return
 			}
 			switch mt {
 			case websocket.BinaryMessage:
-				_, _ = ps.Write(msg)
+				_, _ = run.ps.Write(msg)
 			case websocket.TextMessage:
 				var ctl ptyWSControl
 				if err := json.Unmarshal(msg, &ctl); err != nil {
@@ -142,17 +123,17 @@ func (a *App) execInSessionPTYWS(w http.ResponseWriter, r *http.Request) {
 				}
 				switch ctl.Type {
 				case "resize":
-					_ = ps.Resize(ctl.Rows, ctl.Cols)
+					_ = run.ps.Resize(ctl.Rows, ctl.Cols)
 				case "signal":
 					switch strings.ToUpper(strings.TrimSpace(ctl.Name)) {
 					case "SIGINT":
-						_ = ps.Signal(syscall.SIGINT)
+						_ = run.ps.Signal(syscall.SIGINT)
 					case "SIGTERM":
-						_ = ps.Signal(syscall.SIGTERM)
+						_ = run.ps.Signal(syscall.SIGTERM)
 					case "SIGHUP":
-						_ = ps.Signal(syscall.SIGHUP)
+						_ = run.ps.Signal(syscall.SIGHUP)
 					case "SIGQUIT":
-						_ = ps.Signal(syscall.SIGQUIT)
+						_ = run.ps.Signal(syscall.SIGQUIT)
 					}
 				}
 			default:
@@ -162,14 +143,40 @@ func (a *App) execInSessionPTYWS(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Writer loop: PTY output bytes as binary frames.
-	for b := range ps.Output() {
-		if err := conn.WriteMessage(websocket.BinaryMessage, b); err != nil {
-			_ = ps.Signal(syscall.SIGKILL)
-			break
+	var out bytes.Buffer
+	var outTotal int64
+	outTrunc := false
+	appendOut := func(b []byte) {
+		if len(b) == 0 {
+			return
+		}
+		outTotal += int64(len(b))
+		if int64(out.Len()) >= defaultMaxOutputBytes {
+			outTrunc = true
+			return
+		}
+		remain := defaultMaxOutputBytes - int64(out.Len())
+		if int64(len(b)) <= remain {
+			_, _ = out.Write(b)
+		} else {
+			_, _ = out.Write(b[:remain])
+			outTrunc = true
 		}
 	}
 
-	exitCode, waitErr := ps.Wait()
+	var writeErr error
+	for b := range run.ps.Output() {
+		appendOut(b)
+		if writeErr == nil {
+			if werr := conn.WriteMessage(websocket.BinaryMessage, b); werr != nil {
+				writeErr = werr
+				_ = run.ps.Signal(syscall.SIGKILL)
+			}
+		}
+	}
+
+	exitCode, waitErr := run.ps.Wait()
+	a.finishPTY(r.Context(), run, exitCode, run.started, waitErr, out.Bytes(), outTotal, outTrunc)
 	if waitErr != nil {
 		_ = conn.WriteMessage(websocket.TextMessage, mustJSON(map[string]any{"type": "error", "message": waitErr.Error()}))
 		return
@@ -178,7 +185,7 @@ func (a *App) execInSessionPTYWS(w http.ResponseWriter, r *http.Request) {
 	_ = conn.WriteMessage(websocket.TextMessage, mustJSON(ptyWSExit{
 		Type:       "exit",
 		ExitCode:   exitCode,
-		DurationMs: time.Since(started).Milliseconds(),
+		DurationMs: time.Since(run.started).Milliseconds(),
 	}))
 	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(500*time.Millisecond))
 }

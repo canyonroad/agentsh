@@ -1,12 +1,12 @@
 package api
 
 import (
-	"os"
+	"bytes"
+	"io"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/agentsh/agentsh/internal/pty"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -38,38 +38,28 @@ func (s *ptyGRPCServer) ExecPTY(stream ptygrpc.AgentshPTY_ExecPTYServer) error {
 		return status.Error(codes.InvalidArgument, "command is required")
 	}
 
-	sess, ok := s.app.sessions.Get(start.SessionId)
-	if !ok {
-		return status.Error(codes.NotFound, "session not found")
-	}
-
-	unlock := sess.LockExec()
-	defer unlock()
-
-	workdir, err := resolveWorkingDir(sess, strings.TrimSpace(start.WorkingDir))
-	if err != nil {
-		return status.Error(codes.InvalidArgument, err.Error())
-	}
-
-	env := mergeEnv(os.Environ(), sess, start.Env)
-
-	eng := pty.New()
-	ps, err := eng.Start(stream.Context(), pty.StartRequest{
-		Command: start.Command,
-		Args:    start.Args,
-		Argv0:   strings.TrimSpace(start.Argv0),
-		Dir:     workdir,
-		Env:     env,
-		InitialSize: pty.Winsize{
-			Rows: uint16(start.Rows),
-			Cols: uint16(start.Cols),
-		},
+	run, httpCode, err := s.app.startPTY(stream.Context(), start.SessionId, ptyStartParams{
+		Command:    start.Command,
+		Args:       start.Args,
+		Argv0:      start.Argv0,
+		WorkingDir: start.WorkingDir,
+		Env:        start.Env,
+		Rows:       uint16(start.Rows),
+		Cols:       uint16(start.Cols),
 	})
 	if err != nil {
-		return status.Error(codes.Internal, err.Error())
+		switch httpCode {
+		case 400:
+			return status.Error(codes.InvalidArgument, err.Error())
+		case 403:
+			return status.Error(codes.PermissionDenied, err.Error())
+		case 404:
+			return status.Error(codes.NotFound, err.Error())
+		default:
+			return status.Error(codes.Internal, err.Error())
+		}
 	}
-
-	started := time.Now()
+	defer run.unlock()
 
 	type waitRes struct {
 		code int
@@ -77,7 +67,7 @@ func (s *ptyGRPCServer) ExecPTY(stream ptygrpc.AgentshPTY_ExecPTYServer) error {
 	}
 	waitCh := make(chan waitRes, 1)
 	go func() {
-		code, werr := ps.Wait()
+		code, werr := run.ps.Wait()
 		waitCh <- waitRes{code: code, err: werr}
 	}()
 
@@ -86,25 +76,30 @@ func (s *ptyGRPCServer) ExecPTY(stream ptygrpc.AgentshPTY_ExecPTYServer) error {
 		for {
 			msg, rerr := stream.Recv()
 			if rerr != nil {
+				// Client closed send-side (stdin) is normal; don't kill the process.
+				if rerr == io.EOF {
+					return
+				}
+				_ = run.ps.Signal(syscall.SIGKILL)
 				return
 			}
 			switch {
 			case msg.GetStdin() != nil:
-				_, _ = ps.Write(msg.GetStdin().Data)
+				_, _ = run.ps.Write(msg.GetStdin().Data)
 			case msg.GetResize() != nil:
 				r := msg.GetResize()
-				_ = ps.Resize(uint16(r.Rows), uint16(r.Cols))
+				_ = run.ps.Resize(uint16(r.Rows), uint16(r.Cols))
 			case msg.GetSignal() != nil:
 				sigName := strings.TrimSpace(strings.ToUpper(msg.GetSignal().Name))
 				switch sigName {
 				case "SIGINT":
-					_ = ps.Signal(syscall.SIGINT)
+					_ = run.ps.Signal(syscall.SIGINT)
 				case "SIGTERM":
-					_ = ps.Signal(syscall.SIGTERM)
+					_ = run.ps.Signal(syscall.SIGTERM)
 				case "SIGHUP":
-					_ = ps.Signal(syscall.SIGHUP)
+					_ = run.ps.Signal(syscall.SIGHUP)
 				case "SIGQUIT":
-					_ = ps.Signal(syscall.SIGQUIT)
+					_ = run.ps.Signal(syscall.SIGQUIT)
 				}
 			default:
 				// Ignore unknown/empty messages (including repeated start).
@@ -112,21 +107,50 @@ func (s *ptyGRPCServer) ExecPTY(stream ptygrpc.AgentshPTY_ExecPTYServer) error {
 		}
 	}()
 
-	for b := range ps.Output() {
-		if err := stream.Send(&ptygrpc.ExecPTYServerMsg{
-			Msg: &ptygrpc.ExecPTYServerMsg_Output{
-				Output: &ptygrpc.ExecPTYOutput{Data: b},
-			},
-		}); err != nil {
-			// Client hung up; stop the process and propagate the send error.
-			_ = ps.Signal(syscall.SIGKILL)
-			return err
+	var out bytes.Buffer
+	var outTotal int64
+	outTrunc := false
+	appendOut := func(b []byte) {
+		if len(b) == 0 {
+			return
+		}
+		outTotal += int64(len(b))
+		if int64(out.Len()) >= defaultMaxOutputBytes {
+			outTrunc = true
+			return
+		}
+		remain := defaultMaxOutputBytes - int64(out.Len())
+		if int64(len(b)) <= remain {
+			_, _ = out.Write(b)
+		} else {
+			_, _ = out.Write(b[:remain])
+			outTrunc = true
+		}
+	}
+
+	var sendErr error
+	for b := range run.ps.Output() {
+		appendOut(b)
+		if sendErr == nil {
+			if err := stream.Send(&ptygrpc.ExecPTYServerMsg{
+				Msg: &ptygrpc.ExecPTYServerMsg_Output{
+					Output: &ptygrpc.ExecPTYOutput{Data: b},
+				},
+			}); err != nil {
+				// Client hung up; stop the process and keep draining output so Wait can complete.
+				sendErr = err
+				_ = run.ps.Signal(syscall.SIGKILL)
+			}
 		}
 	}
 
 	res := <-waitCh
+	s.app.finishPTY(stream.Context(), run, res.code, run.started, res.err, out.Bytes(), outTotal, outTrunc)
 	if res.err != nil {
 		return status.Error(codes.Internal, res.err.Error())
+	}
+	if sendErr != nil {
+		return sendErr
 	}
 
 	// Best-effort: send exit.
@@ -134,7 +158,7 @@ func (s *ptyGRPCServer) ExecPTY(stream ptygrpc.AgentshPTY_ExecPTYServer) error {
 		Msg: &ptygrpc.ExecPTYServerMsg_Exit{
 			Exit: &ptygrpc.ExecPTYExit{
 				ExitCode:   int32(res.code),
-				DurationMs: time.Since(started).Milliseconds(),
+				DurationMs: time.Since(run.started).Milliseconds(),
 			},
 		},
 	}); err != nil {

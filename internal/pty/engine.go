@@ -36,9 +36,18 @@ type Session struct {
 
 	outCh   chan []byte
 	outDone chan struct{}
+
+	pid int
 }
 
 func (s *Session) Output() <-chan []byte { return s.outCh }
+
+func (s *Session) PID() int {
+	if s == nil {
+		return 0
+	}
+	return s.pid
+}
 
 func (s *Session) Write(p []byte) (int, error) {
 	if s == nil || s.master == nil {
@@ -137,6 +146,9 @@ func (e *Engine) Start(ctx context.Context, req StartRequest) (*Session, error) 
 		close(outCh)
 		close(outDone)
 		return nil, err
+	}
+	if cmd.Process != nil {
+		sess.pid = cmd.Process.Pid
 	}
 
 	// Parent no longer needs the slave FD.
