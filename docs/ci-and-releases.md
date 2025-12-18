@@ -38,6 +38,10 @@ Workflow shape:
 2) Build matrix for `linux/amd64`, `linux/arm64` (and optionally `darwin/amd64`, `darwin/arm64`)
 3) Upload artifacts to the GitHub Release
 
+Current files:
+- `.github/workflows/release.yml`
+- `.goreleaser.yml`
+
 Open decisions before implementing packages:
 - Install locations:
   - likely `/usr/bin/agentsh` and `/usr/bin/agentsh-shell-shim`
@@ -47,4 +51,3 @@ Open decisions before implementing packages:
   - whether to ship a systemd unit (probably later)
 - Shim activation:
   - do *not* auto-replace `/bin/sh` in packages; provide `agentsh shim install-shell --root /` with explicit `--i-understand-this-modifies-the-host`
-

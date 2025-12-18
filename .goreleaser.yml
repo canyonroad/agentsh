@@ -1,0 +1,119 @@
+project_name: agentsh
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: agentsh-linux
+    main: ./cmd/agentsh
+    binary: agentsh
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+  - id: agentsh-darwin
+    main: ./cmd/agentsh
+    binary: agentsh
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+  - id: shim-linux
+    main: ./cmd/agentsh-shell-shim
+    binary: agentsh-shell-shim
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+  - id: shim-darwin
+    main: ./cmd/agentsh-shell-shim
+    binary: agentsh-shell-shim
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: agentsh-linux
+    builds:
+      - agentsh-linux
+      - shim-linux
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_linux_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - config.yml
+      - default-policy.yml
+
+  - id: agentsh-darwin
+    builds:
+      - agentsh-darwin
+      - shim-darwin
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_darwin_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - config.yml
+      - default-policy.yml
+
+checksum:
+  name_template: "checksums.txt"
+
+nfpms:
+  - id: agentsh
+    package_name: agentsh
+    builds:
+      - agentsh-linux
+      - shim-linux
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+    homepage: https://github.com/agentsh/agentsh
+    maintainer: agentsh maintainers <maintainers@example.com>
+    description: Secure agent shell (agentsh) and a shell shim for container compatibility.
+    license: Apache-2.0
+    contents:
+      - src: config.yml
+        dst: /etc/agentsh/config.yml
+        type: config
+      - src: default-policy.yml
+        dst: /etc/agentsh/default-policy.yml
+        type: config
+    # Important: packages do NOT replace /bin/sh automatically. Use the explicit shim installer:
+    #   agentsh shim install-shell --root / --shim /usr/bin/agentsh-shell-shim --i-understand-this-modifies-the-host
+
+release:
+  github:
+    owner: agentsh
+    name: agentsh
+  draft: false
+  prerelease: auto
+
