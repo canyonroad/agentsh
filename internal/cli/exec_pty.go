@@ -20,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/term"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -186,8 +187,11 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 		ctx = metadata.AppendToOutgoingContext(ctx, "x-api-key", strings.TrimSpace(cfg.apiKey))
 	}
 
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
 	c := ptygrpc.NewAgentshPTYClient(conn)
-	stream, err := c.ExecPTY(ctx)
+	stream, err := c.ExecPTY(runCtx)
 	if err != nil {
 		return err
 	}
@@ -206,9 +210,6 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 		return err
 	}
 
-	ctx, cancelRun := context.WithCancel(ctx)
-	defer cancelRun()
-
 	var sendMu sync.Mutex
 	send := func(m *ptygrpc.ExecPTYClientMsg) error {
 		sendMu.Lock()
@@ -222,15 +223,15 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 	defer signal.Stop(sigCh)
 
 	go func() {
-		if !isTTY {
-			return
-		}
 		for {
 			select {
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			case sig := <-sigCh:
 				if sig == syscall.SIGWINCH {
+					if !isTTY {
+						continue
+					}
 					colsI, rowsI, _ := deps.getSize(int(os.Stdout.Fd()))
 					_ = send(&ptygrpc.ExecPTYClientMsg{Msg: &ptygrpc.ExecPTYClientMsg_Resize{Resize: &ptygrpc.ExecPTYResize{Rows: uint32(rowsI), Cols: uint32(colsI)}}})
 					continue
@@ -277,7 +278,7 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
-			if st, ok := status.FromError(err); ok && st.Code() == 5 && strings.Contains(strings.ToLower(st.Message()), "session") {
+			if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
 				return errPTYSessionNotFound
 			}
 			return err
