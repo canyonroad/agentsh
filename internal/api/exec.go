@@ -188,6 +188,12 @@ func captureLimited(r io.Reader, max int64) ([]byte, int64, bool, error) {
 		if err == io.EOF {
 			break
 		}
+		// StdoutPipe/StderrPipe readers can occasionally observe a close initiated by cmd.Wait()
+		// as "file already closed" (fs.ErrClosed) instead of EOF. Treat it as EOF to avoid
+		// flaky failures while still capturing all available output.
+		if errors.Is(err, os.ErrClosed) {
+			break
+		}
 		if err != nil {
 			return buf.Bytes(), total, truncated, err
 		}
