@@ -245,7 +245,7 @@ RUN mv /bin/bash /bin/bash.real && install -m 0755 /usr/local/bin/agentsh-shell-
 make build
 ./bin/agentsh server --config config.yml
 
-SID=$(./bin/agentsh session create --workspace . | sed -n 's/.*\"id\":\"\\([^\"]*\\)\".*/\\1/p')
+SID=$(./bin/agentsh session create --workspace . | python -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 ./bin/agentsh exec "$SID" -- sh -lc 'echo hi'
 ./bin/agentsh exec --pty "$SID" -- sh
 ```
