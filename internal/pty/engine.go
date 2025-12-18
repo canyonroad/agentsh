@@ -3,14 +3,12 @@ package pty
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
 	"syscall"
 
+	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )
 
@@ -106,12 +104,10 @@ func (e *Engine) Start(ctx context.Context, req StartRequest) (*Session, error) 
 		return nil, errors.New("command is required")
 	}
 
-	masterFD, slaveFD, err := openPTY(req.InitialSize)
+	master, slave, err := openPTY(req.InitialSize)
 	if err != nil {
 		return nil, err
 	}
-	master := os.NewFile(uintptr(masterFD), "pty-master")
-	slave := os.NewFile(uintptr(slaveFD), "pty-slave")
 
 	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
 	if req.Dir != "" {
@@ -175,39 +171,13 @@ func (e *Engine) Start(ctx context.Context, req StartRequest) (*Session, error) 
 	return sess, nil
 }
 
-func openPTY(size Winsize) (masterFD, slaveFD int, err error) {
-	masterFD, err = unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
+func openPTY(size Winsize) (master, slave *os.File, err error) {
+	master, slave, err = pty.Open()
 	if err != nil {
-		return -1, -1, err
+		return nil, nil, err
 	}
-	defer func() {
-		if err != nil && masterFD >= 0 {
-			_ = unix.Close(masterFD)
-		}
-	}()
-
-	// Unlock PTY.
-	if err := unix.IoctlSetPointerInt(masterFD, unix.TIOCSPTLCK, 0); err != nil {
-		return -1, -1, fmt.Errorf("unlockpt (TIOCSPTLCK): %w", err)
-	}
-	n, err := unix.IoctlGetInt(masterFD, unix.TIOCGPTN)
-	if err != nil {
-		return -1, -1, fmt.Errorf("get pty number (TIOCGPTN): %w", err)
-	}
-
-	slavePath := filepath.Join("/dev/pts", strconv.Itoa(n))
-	slaveFD, err = unix.Open(slavePath, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
-	if err != nil {
-		return -1, -1, err
-	}
-	defer func() {
-		if err != nil && slaveFD >= 0 {
-			_ = unix.Close(slaveFD)
-		}
-	}()
-
 	if size.Rows > 0 && size.Cols > 0 {
-		_ = unix.IoctlSetWinsize(slaveFD, unix.TIOCSWINSZ, &unix.Winsize{Row: size.Rows, Col: size.Cols})
+		_ = unix.IoctlSetWinsize(int(slave.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Row: size.Rows, Col: size.Cols})
 	}
-	return masterFD, slaveFD, nil
+	return master, slave, nil
 }
