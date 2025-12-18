@@ -3,11 +3,18 @@ package cli
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/agentsh/agentsh/pkg/ptygrpc"
 )
 
 func TestExecPTYFlag_SelectsPTYPath(t *testing.T) {
@@ -143,5 +150,125 @@ func TestExecPTYWS_ContextCancelCloses(t *testing.T) {
 	case <-closed:
 	case <-time.After(250 * time.Millisecond):
 		t.Fatalf("expected server to observe client close")
+	}
+}
+
+func TestExecPTYWS_PolicyDenied_DefaultsToExit126(t *testing.T) {
+	srv := newHTTPTestServerOrSkip(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+
+		// Start frame.
+		_, _, _ = c.ReadMessage()
+		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","code":403,"message":"command denied (approval required)"}`))
+	}))
+
+	cfg := &clientConfig{serverAddr: srv.URL, transport: "http"}
+	deps := ptyDeps{
+		isTTY:   func(fd int) bool { return false },
+		makeRaw: func(fd int) (*ptyTermState, error) { return nil, errors.New("unexpected raw") },
+		restore: func(fd int, st *ptyTermState) error { return nil },
+		getSize: func(fd int) (cols int, rows int, err error) { return 80, 24, nil },
+	}
+
+	err := execPTYWS(context.Background(), cfg, "sess-1", execPTYRequest{Command: "sh"}, deps)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var ee *ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected ExitError, got %T: %v", err, err)
+	}
+	if ee.Code() != 126 {
+		t.Fatalf("expected exit 126, got %d", ee.Code())
+	}
+	if ee.Message() == "" {
+		t.Fatalf("expected message to be set")
+	}
+}
+
+func TestExecPTYWS_PolicyDenied_ModeErrorPreservesError(t *testing.T) {
+	t.Setenv("AGENTSH_PTY_DENY_MODE", "error")
+
+	srv := newHTTPTestServerOrSkip(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		_, _, _ = c.ReadMessage()
+		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","code":403,"message":"command denied by policy"}`))
+	}))
+
+	cfg := &clientConfig{serverAddr: srv.URL, transport: "http"}
+	deps := ptyDeps{
+		isTTY:   func(fd int) bool { return false },
+		makeRaw: func(fd int) (*ptyTermState, error) { return nil, errors.New("unexpected raw") },
+		restore: func(fd int, st *ptyTermState) error { return nil },
+		getSize: func(fd int) (cols int, rows int, err error) { return 80, 24, nil },
+	}
+
+	err := execPTYWS(context.Background(), cfg, "sess-1", execPTYRequest{Command: "sh"}, deps)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var ee *ExitError
+	if errors.As(err, &ee) {
+		t.Fatalf("expected non-ExitError, got %T: %v", err, err)
+	}
+	if err.Error() != "command denied by policy" {
+		t.Fatalf("expected policy message, got %q", err.Error())
+	}
+}
+
+type denyPTYServer struct {
+	ptygrpc.UnimplementedAgentshPTYServer
+}
+
+func (s *denyPTYServer) ExecPTY(stream ptygrpc.AgentshPTY_ExecPTYServer) error {
+	_, _ = stream.Recv()
+	return status.Error(codes.PermissionDenied, "command denied by policy")
+}
+
+func TestExecPTYGRPC_PolicyDenied_DefaultsToExit126(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("grpc listen not permitted in this environment: %v", err)
+		}
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	g := grpc.NewServer()
+	t.Cleanup(g.Stop)
+	ptygrpc.RegisterAgentshPTYServer(g, &denyPTYServer{})
+	go func() { _ = g.Serve(ln) }()
+
+	cfg := &clientConfig{grpcAddr: ln.Addr().String(), transport: "grpc"}
+	deps := ptyDeps{
+		isTTY:   func(fd int) bool { return false },
+		makeRaw: func(fd int) (*ptyTermState, error) { return nil, errors.New("unexpected raw") },
+		restore: func(fd int, st *ptyTermState) error { return nil },
+		getSize: func(fd int) (cols int, rows int, err error) { return 80, 24, nil },
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = execPTYGRPC(ctx, cfg, "sess-1", execPTYRequest{Command: "sh"}, deps)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var ee *ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected ExitError, got %T: %v", err, err)
+	}
+	if ee.Code() != 126 {
+		t.Fatalf("expected exit 126, got %d", ee.Code())
 	}
 }

@@ -71,6 +71,27 @@ var execPTYRunner = execPTY
 var execPTYGRPCRunner = execPTYGRPC
 var execPTYWSRunner = execPTYWS
 
+func ptyDenyMode() string {
+	return strings.ToLower(strings.TrimSpace(os.Getenv("AGENTSH_PTY_DENY_MODE")))
+}
+
+func isPolicyDenyMessage(msg string) bool {
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	return strings.Contains(msg, "command denied")
+}
+
+func ptyDeniedExitError(sessionID string, req execPTYRequest, msg string) error {
+	if strings.EqualFold(ptyDenyMode(), "error") {
+		return nil
+	}
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		msg = "command denied by policy"
+	}
+	hint := fmt.Sprintf("Tip: re-run without --pty to see policy details:\nagentsh exec --output json --events=blocked %s -- %s ...", sessionID, strings.TrimSpace(req.Command))
+	return &ExitError{code: 126, message: msg + "\n" + hint}
+}
+
 func execPTY(ctx context.Context, cfg *clientConfig, sessionID string, req execPTYRequest) error {
 	return execPTYWithDeps(ctx, cfg, sessionID, req, defaultPTYDeps())
 }
@@ -197,14 +218,14 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 	}
 
 	start := &ptygrpc.ExecPTYStart{
-		SessionId:   sessionID,
-		Command:     req.Command,
-		Args:        req.Args,
-		Argv0:       req.Argv0,
-		WorkingDir:  req.WorkingDir,
-		Env:         req.Env,
-		Rows:        uint32(rows),
-		Cols:        uint32(cols),
+		SessionId:  sessionID,
+		Command:    req.Command,
+		Args:       req.Args,
+		Argv0:      req.Argv0,
+		WorkingDir: req.WorkingDir,
+		Env:        req.Env,
+		Rows:       uint32(rows),
+		Cols:       uint32(cols),
 	}
 	if err := stream.Send(&ptygrpc.ExecPTYClientMsg{Msg: &ptygrpc.ExecPTYClientMsg_Start{Start: start}}); err != nil {
 		return err
@@ -278,8 +299,15 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
-			if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-				return errPTYSessionNotFound
+			if st, ok := status.FromError(err); ok {
+				if st.Code() == codes.NotFound {
+					return errPTYSessionNotFound
+				}
+				if st.Code() == codes.PermissionDenied && isPolicyDenyMessage(st.Message()) {
+					if ee := ptyDeniedExitError(sessionID, req, st.Message()); ee != nil {
+						return ee
+					}
+				}
 			}
 			return err
 		}
@@ -489,6 +517,11 @@ func execPTYWS(ctx context.Context, cfg *clientConfig, sessionID string, req exe
 				cancelRun()
 				if ee.Code == http.StatusNotFound && strings.Contains(strings.ToLower(ee.Message), "session") {
 					return errPTYSessionNotFound
+				}
+				if ee.Code == http.StatusForbidden && isPolicyDenyMessage(ee.Message) {
+					if ex := ptyDeniedExitError(sessionID, req, ee.Message); ex != nil {
+						return ex
+					}
 				}
 				return fmt.Errorf("%s", strings.TrimSpace(ee.Message))
 			default:
