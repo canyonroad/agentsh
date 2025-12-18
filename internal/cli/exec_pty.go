@@ -185,6 +185,18 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 	}
 	defer restore()
 
+	maybeMapDeny := func(err error) error {
+		if err == nil {
+			return nil
+		}
+		if st, ok := status.FromError(err); ok && st.Code() == codes.PermissionDenied && isPolicyDenyMessage(st.Message()) {
+			if ee := ptyDeniedExitError(sessionID, req, st.Message()); ee != nil {
+				return ee
+			}
+		}
+		return err
+	}
+
 	addr := strings.TrimSpace(cfg.grpcAddr)
 	if addr == "" {
 		addr = "127.0.0.1:9090"
@@ -214,7 +226,7 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 	c := ptygrpc.NewAgentshPTYClient(conn)
 	stream, err := c.ExecPTY(runCtx)
 	if err != nil {
-		return err
+		return maybeMapDeny(err)
 	}
 
 	start := &ptygrpc.ExecPTYStart{
@@ -228,7 +240,7 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 		Cols:       uint32(cols),
 	}
 	if err := stream.Send(&ptygrpc.ExecPTYClientMsg{Msg: &ptygrpc.ExecPTYClientMsg_Start{Start: start}}); err != nil {
-		return err
+		return maybeMapDeny(err)
 	}
 
 	var sendMu sync.Mutex

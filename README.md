@@ -237,6 +237,7 @@ RUN set -eux; \
 - `AGENTSH_WORKSPACE`: optional workspace root override (used for workspace-scoped fallback)
 - `AGENTSH_IN_SESSION`: reserved/internal recursion guard (set by server; shim will exec `*.real`)
 - `AGENTSH_TRANSPORT`: `http` or `grpc` (affects `agentsh exec --pty` and other CLI calls)
+- `AGENTSH_PTY_DENY_MODE`: if set to `error`, preserve raw errors for PTY policy/approval denies (default behavior exits `126` like non-PTY)
 
 ### PTY endpoints (server)
 

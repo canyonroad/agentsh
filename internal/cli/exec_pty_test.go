@@ -235,6 +235,14 @@ func (s *denyPTYServer) ExecPTY(stream ptygrpc.AgentshPTY_ExecPTYServer) error {
 	return status.Error(codes.PermissionDenied, "command denied by policy")
 }
 
+type denyPTYServerImmediate struct {
+	ptygrpc.UnimplementedAgentshPTYServer
+}
+
+func (s *denyPTYServerImmediate) ExecPTY(stream ptygrpc.AgentshPTY_ExecPTYServer) error {
+	return status.Error(codes.PermissionDenied, "command denied by policy")
+}
+
 func TestExecPTYGRPC_PolicyDenied_DefaultsToExit126(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -248,6 +256,44 @@ func TestExecPTYGRPC_PolicyDenied_DefaultsToExit126(t *testing.T) {
 	g := grpc.NewServer()
 	t.Cleanup(g.Stop)
 	ptygrpc.RegisterAgentshPTYServer(g, &denyPTYServer{})
+	go func() { _ = g.Serve(ln) }()
+
+	cfg := &clientConfig{grpcAddr: ln.Addr().String(), transport: "grpc"}
+	deps := ptyDeps{
+		isTTY:   func(fd int) bool { return false },
+		makeRaw: func(fd int) (*ptyTermState, error) { return nil, errors.New("unexpected raw") },
+		restore: func(fd int, st *ptyTermState) error { return nil },
+		getSize: func(fd int) (cols int, rows int, err error) { return 80, 24, nil },
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = execPTYGRPC(ctx, cfg, "sess-1", execPTYRequest{Command: "sh"}, deps)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var ee *ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected ExitError, got %T: %v", err, err)
+	}
+	if ee.Code() != 126 {
+		t.Fatalf("expected exit 126, got %d", ee.Code())
+	}
+}
+
+func TestExecPTYGRPC_PolicyDeniedOnStart_DefaultsToExit126(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("grpc listen not permitted in this environment: %v", err)
+		}
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	g := grpc.NewServer()
+	t.Cleanup(g.Stop)
+	ptygrpc.RegisterAgentshPTYServer(g, &denyPTYServerImmediate{})
 	go func() { _ = g.Serve(ln) }()
 
 	cfg := &clientConfig{grpcAddr: ln.Addr().String(), transport: "grpc"}
