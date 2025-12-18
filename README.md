@@ -261,6 +261,19 @@ Safety: `agentsh shim install-shell` and `agentsh shim uninstall-shell` refuse `
 - `AGENTSH_IN_SESSION`: reserved/internal recursion guard (set by server; shim will exec `*.real`)
 - `AGENTSH_TRANSPORT`: `http` or `grpc` (affects `agentsh exec --pty` and other CLI calls)
 - `AGENTSH_PTY_DENY_MODE`: if set to `error`, preserve raw errors for PTY policy/approval denies (default behavior exits `126` like non-PTY)
+- `AGENTSH_SHIM_DEBUG`: if set to `1`, the shell shim prints extra debug info on fatal errors
+
+### Session ID resolution (shim)
+
+The shim needs a session id to call `agentsh exec`. Resolution order:
+
+1) `AGENTSH_SESSION_ID` (exact id; no files)
+2) `AGENTSH_SESSION_FILE` (read/create a 1-line file and reuse it)
+3) File-backed fallback using `AGENTSH_SESSION_SCOPE`:
+   - `workspace` (default): uses `AGENTSH_WORKSPACE` if set, otherwise walks up from `$PWD` to find a `.git` directory and uses that as the workspace root
+   - `global`: one shared id for the whole machine/container
+
+If all fallback directories are unwritable, the shim uses `session-default` as a last resort.
 
 ### PTY endpoints (server)
 

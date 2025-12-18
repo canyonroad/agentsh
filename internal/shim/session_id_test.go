@@ -20,7 +20,7 @@ func TestResolveSessionID_UsesEnvSessionID(t *testing.T) {
 	}
 
 	id, path, err := ResolveSessionID(ResolveSessionIDOptions{
-		Getenv:   envGet(env),
+		Getenv:  envGet(env),
 		WorkDir: dir,
 		BaseDirs: []string{
 			filepath.Join(dir, "run"),
@@ -38,6 +38,35 @@ func TestResolveSessionID_UsesEnvSessionID(t *testing.T) {
 	}
 }
 
+func TestResolveSessionID_EnvSessionIDWinsOverSessionFile(t *testing.T) {
+	dir := t.TempDir()
+	sessFile := filepath.Join(dir, "sid.txt")
+	env := map[string]string{
+		"AGENTSH_SESSION_ID":   "sess-env-123",
+		"AGENTSH_SESSION_FILE": sessFile,
+	}
+
+	id, path, err := ResolveSessionID(ResolveSessionIDOptions{
+		Getenv:  envGet(env),
+		WorkDir: dir,
+		BaseDirs: []string{
+			filepath.Join(dir, "run"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("ResolveSessionID failed: %v", err)
+	}
+	if id != "sess-env-123" {
+		t.Fatalf("expected env session id, got %q", id)
+	}
+	if path != "" {
+		t.Fatalf("expected empty path when env session id is set, got %q", path)
+	}
+	if _, err := os.Stat(sessFile); err == nil {
+		t.Fatalf("expected session file not to be created when env session id is set")
+	}
+}
+
 func TestResolveSessionID_UsesSessionFile(t *testing.T) {
 	dir := t.TempDir()
 	sessFile := filepath.Join(dir, "sid.txt")
@@ -47,7 +76,7 @@ func TestResolveSessionID_UsesSessionFile(t *testing.T) {
 
 	id1, path1, err := ResolveSessionID(ResolveSessionIDOptions{
 		Getenv:   envGet(env),
-		WorkDir: dir,
+		WorkDir:  dir,
 		BaseDirs: []string{filepath.Join(dir, "run")},
 	})
 	if err != nil {
@@ -69,7 +98,7 @@ func TestResolveSessionID_UsesSessionFile(t *testing.T) {
 
 	id2, path2, err := ResolveSessionID(ResolveSessionIDOptions{
 		Getenv:   envGet(env),
-		WorkDir: dir,
+		WorkDir:  dir,
 		BaseDirs: []string{filepath.Join(dir, "run")},
 	})
 	if err != nil {
@@ -101,7 +130,7 @@ func TestResolveSessionID_WorkspaceScope_UsesGitRoot(t *testing.T) {
 	}
 
 	id1, path1, err := ResolveSessionID(ResolveSessionIDOptions{
-		Getenv:   envGet(env),
+		Getenv:  envGet(env),
 		WorkDir: sub1,
 		BaseDirs: []string{
 			base,
@@ -118,7 +147,7 @@ func TestResolveSessionID_WorkspaceScope_UsesGitRoot(t *testing.T) {
 	}
 
 	id2, path2, err := ResolveSessionID(ResolveSessionIDOptions{
-		Getenv:   envGet(env),
+		Getenv:  envGet(env),
 		WorkDir: sub2,
 		BaseDirs: []string{
 			base,
@@ -140,7 +169,7 @@ func TestResolveSessionID_GlobalScope(t *testing.T) {
 	}
 
 	id1, path1, err := ResolveSessionID(ResolveSessionIDOptions{
-		Getenv:   envGet(env),
+		Getenv:  envGet(env),
 		WorkDir: filepath.Join(dir, "w1"),
 		BaseDirs: []string{
 			base,
@@ -150,7 +179,7 @@ func TestResolveSessionID_GlobalScope(t *testing.T) {
 		t.Fatalf("ResolveSessionID failed: %v", err)
 	}
 	id2, path2, err := ResolveSessionID(ResolveSessionIDOptions{
-		Getenv:   envGet(env),
+		Getenv:  envGet(env),
 		WorkDir: filepath.Join(dir, "w2"),
 		BaseDirs: []string{
 			base,
@@ -161,5 +190,32 @@ func TestResolveSessionID_GlobalScope(t *testing.T) {
 	}
 	if id2 != id1 || path2 != path1 {
 		t.Fatalf("expected stable global session, got id=%q path=%q vs id=%q path=%q", id1, path1, id2, path2)
+	}
+}
+
+func TestResolveSessionID_FallbacksToSessionDefaultWhenAllBaseDirsFail(t *testing.T) {
+	dir := t.TempDir()
+	// Create a file so MkdirAll(baseDir) fails with "not a directory".
+	badBase := filepath.Join(dir, "notadir")
+	if err := os.WriteFile(badBase, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{
+		"AGENTSH_SESSION_SCOPE": "global",
+	}
+
+	id, path, err := ResolveSessionID(ResolveSessionIDOptions{
+		Getenv:   envGet(env),
+		WorkDir:  dir,
+		BaseDirs: []string{badBase},
+	})
+	if err != nil {
+		t.Fatalf("ResolveSessionID failed: %v", err)
+	}
+	if id != "session-default" {
+		t.Fatalf("expected session-default, got %q", id)
+	}
+	if path != "" {
+		t.Fatalf("expected empty path, got %q", path)
 	}
 }

@@ -24,7 +24,10 @@ func main() {
 
 	realShell, err := resolveRealShell(shellName)
 	if err != nil {
-		fatalf(127, "agentsh-shell-shim: resolve real shell: %v", err)
+		fatalWithHint(127,
+			fmt.Sprintf("agentsh-shell-shim: resolve real shell: %v", err),
+			fmt.Sprintf("Expected %s.real to exist next to the shim (or in /bin or /usr/bin).", shellName),
+		)
 	}
 
 	// Recursion guard: when agentsh executes a process, it sets AGENTSH_IN_SESSION=1.
@@ -36,7 +39,11 @@ func main() {
 
 	agentshBin, err := resolveAgentshBin()
 	if err != nil {
-		fatalf(127, "agentsh-shell-shim: resolve agentsh: %v", err)
+		hint := "Set AGENTSH_BIN=/path/to/agentsh or ensure `agentsh` is available on PATH."
+		if v := strings.TrimSpace(os.Getenv("AGENTSH_BIN")); v != "" {
+			hint = fmt.Sprintf("AGENTSH_BIN is set to %q but wasn't executable; fix it or unset it to use PATH.", v)
+		}
+		fatalWithHint(127, fmt.Sprintf("agentsh-shell-shim: resolve agentsh: %v", err), hint)
 	}
 
 	wd, _ := os.Getwd()
@@ -44,7 +51,10 @@ func main() {
 		WorkDir: wd,
 	})
 	if err != nil {
-		fatalf(127, "agentsh-shell-shim: resolve session id: %v", err)
+		fatalWithHint(127,
+			fmt.Sprintf("agentsh-shell-shim: resolve session id: %v", err),
+			"Set AGENTSH_SESSION_ID (best), or set AGENTSH_SESSION_FILE to a writable file path for a stable ID.",
+		)
 	}
 
 	tty := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
@@ -101,11 +111,23 @@ func resolveRealShell(shellName string) (string, error) {
 
 func execOrExit(path string, argv []string, env []string) {
 	if err := syscall.Exec(path, argv, env); err != nil {
-		fatalf(127, "agentsh-shell-shim: exec %s: %v", path, err)
+		fatalWithHint(127,
+			fmt.Sprintf("agentsh-shell-shim: exec %s: %v", path, err),
+			"If you see 'permission denied' in a container, check that the shim and agentsh binaries are executable.",
+		)
 	}
 }
 
-func fatalf(code int, format string, args ...any) {
-	_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
+func fatalWithHint(code int, msg string, hint string) {
+	_, _ = fmt.Fprintf(os.Stderr, "%s\n", strings.TrimSpace(msg))
+	if strings.TrimSpace(hint) != "" {
+		_, _ = fmt.Fprintf(os.Stderr, "Hint: %s\n", strings.TrimSpace(hint))
+	}
+	if strings.TrimSpace(os.Getenv("AGENTSH_SHIM_DEBUG")) == "1" {
+		_, _ = fmt.Fprintf(os.Stderr, "Debug: argv0=%q args=%q\n", os.Args[0], os.Args[1:])
+		if p := strings.TrimSpace(os.Getenv("PATH")); p != "" {
+			_, _ = fmt.Fprintf(os.Stderr, "Debug: PATH=%s\n", p)
+		}
+	}
 	os.Exit(code)
 }
