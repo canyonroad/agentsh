@@ -29,6 +29,8 @@ type ExecPTYStart struct {
 	Argv0         string                 `protobuf:"bytes,4,opt,name=argv0,proto3" json:"argv0,omitempty"`
 	WorkingDir    string                 `protobuf:"bytes,5,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
 	Env           map[string]string      `protobuf:"bytes,6,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Rows          uint32                 `protobuf:"varint,7,opt,name=rows,proto3" json:"rows,omitempty"`
+	Cols          uint32                 `protobuf:"varint,8,opt,name=cols,proto3" json:"cols,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -103,6 +105,20 @@ func (x *ExecPTYStart) GetEnv() map[string]string {
 		return x.Env
 	}
 	return nil
+}
+
+func (x *ExecPTYStart) GetRows() uint32 {
+	if x != nil {
+		return x.Rows
+	}
+	return 0
+}
+
+func (x *ExecPTYStart) GetCols() uint32 {
+	if x != nil {
+		return x.Cols
+	}
+	return 0
 }
 
 type ExecPTYStdin struct {
@@ -610,7 +626,7 @@ var File_agentsh_v1_pty_proto protoreflect.FileDescriptor
 const file_agentsh_v1_pty_proto_rawDesc = "" +
 	"\n" +
 	"\x14agentsh/v1/pty.proto\x12\n" +
-	"agentsh.v1\"\xff\x01\n" +
+	"agentsh.v1\"\xa7\x02\n" +
 	"\fExecPTYStart\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x18\n" +
@@ -619,7 +635,9 @@ const file_agentsh_v1_pty_proto_rawDesc = "" +
 	"\x05argv0\x18\x04 \x01(\tR\x05argv0\x12\x1f\n" +
 	"\vworking_dir\x18\x05 \x01(\tR\n" +
 	"workingDir\x123\n" +
-	"\x03env\x18\x06 \x03(\v2!.agentsh.v1.ExecPTYStart.EnvEntryR\x03env\x1a6\n" +
+	"\x03env\x18\x06 \x03(\v2!.agentsh.v1.ExecPTYStart.EnvEntryR\x03env\x12\x12\n" +
+	"\x04rows\x18\a \x01(\rR\x04rows\x12\x12\n" +
+	"\x04cols\x18\b \x01(\rR\x04cols\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\"\n" +

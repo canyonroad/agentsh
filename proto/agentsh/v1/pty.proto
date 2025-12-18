@@ -16,6 +16,8 @@ message ExecPTYStart {
   string argv0 = 4;
   string working_dir = 5;
   map<string, string> env = 6;
+  uint32 rows = 7;
+  uint32 cols = 8;
 }
 
 message ExecPTYStdin {
@@ -61,4 +63,3 @@ message ExecPTYServerMsg {
     ExecPTYError error = 3;
   }
 }
-
