@@ -1,19 +1,21 @@
 .PHONY: build build-shim test lint clean proto
+.PHONY: smoke
 
 VERSION := $(shell git describe --tags --always 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 GOCACHE ?= $(CURDIR)/.gocache
 GOMODCACHE ?= $(CURDIR)/.gomodcache
+GOPATH ?= $(CURDIR)/.gopath
 
 build:
-	mkdir -p bin $(GOCACHE) $(GOMODCACHE)
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go build $(LDFLAGS) -o bin/agentsh ./cmd/agentsh
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go build $(LDFLAGS) -o bin/agentsh-shell-shim ./cmd/agentsh-shell-shim
+	mkdir -p bin $(GOCACHE) $(GOMODCACHE) $(GOPATH)
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOPATH=$(GOPATH) go build $(LDFLAGS) -o bin/agentsh ./cmd/agentsh
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOPATH=$(GOPATH) go build $(LDFLAGS) -o bin/agentsh-shell-shim ./cmd/agentsh-shell-shim
 
 build-shim:
-	mkdir -p bin $(GOCACHE) $(GOMODCACHE)
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go build $(LDFLAGS) -o bin/agentsh-shell-shim ./cmd/agentsh-shell-shim
+	mkdir -p bin $(GOCACHE) $(GOMODCACHE) $(GOPATH)
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOPATH=$(GOPATH) go build $(LDFLAGS) -o bin/agentsh-shell-shim ./cmd/agentsh-shell-shim
 
 proto:
 	protoc -I proto \
@@ -22,8 +24,11 @@ proto:
 	  proto/agentsh/v1/pty.proto
 
 test:
-	mkdir -p $(GOCACHE) $(GOMODCACHE)
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./...
+	mkdir -p $(GOCACHE) $(GOMODCACHE) $(GOPATH)
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOPATH=$(GOPATH) go test ./...
+
+smoke:
+	bash scripts/smoke.sh
 
 lint:
 	@echo "No linter configured"
