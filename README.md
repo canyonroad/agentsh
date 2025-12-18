@@ -145,6 +145,9 @@ agentsh events tail SESSION_ID
 # Interactive PTY (stdin/stdout streaming, resize, signals)
 # Note: PTY mode merges stdout/stderr (like a real terminal).
 agentsh exec --pty SESSION_ID -- sh
+
+# Advanced: override argv[0] for the executed process (useful for shell shims and login-shell behavior)
+agentsh exec --argv0 /bin/sh SESSION_ID -- /bin/sh -lc 'echo hi'
 ```
 
 ### gRPC API (optional)
@@ -225,7 +228,7 @@ RUN set -eux; \
   install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/sh
 RUN set -eux; \
   if [ -e /bin/bash ]; then mv /bin/bash /bin/bash.real; fi; \
-	if [ -e /bin/bash.real ]; then install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/bash; fi
+  if [ -e /bin/bash.real ]; then install -m 0755 /usr/local/bin/agentsh-shell-shim /bin/bash; fi
 ```
 
 ### Rootfs installer (CLI)
@@ -237,11 +240,20 @@ agentsh shim install-shell --root /path/to/rootfs --shim /path/to/agentsh-shell-
 agentsh shim uninstall-shell --root /path/to/rootfs --bash
 ```
 
+Dry run / inspection:
+
+```bash
+agentsh shim install-shell --dry-run --output json --root /path/to/rootfs --shim /path/to/agentsh-shell-shim --bash
+agentsh shim status --output json --root /path/to/rootfs --shim /path/to/agentsh-shell-shim --bash
+```
+
 Safety: `agentsh shim install-shell` and `agentsh shim uninstall-shell` refuse `--root=/` unless you pass `--i-understand-this-modifies-the-host`.
 
 ### Environment variables (shim + CLI)
 
+- `AGENTSH_SERVER`: agentsh server base URL (default `http://127.0.0.1:8080`)
 - `AGENTSH_BIN`: override the `agentsh` executable path used by the shim (otherwise resolved via `PATH`)
+- `AGENTSH_GRPC_ADDR`: agentsh gRPC address (default `127.0.0.1:9090`)
 - `AGENTSH_SESSION_ID`: explicit session id (best option; harness sets it)
 - `AGENTSH_SESSION_FILE`: file path containing a 1-line session id (shim reads/creates)
 - `AGENTSH_SESSION_SCOPE`: `workspace` (default) or `global` for file-backed fallback ids

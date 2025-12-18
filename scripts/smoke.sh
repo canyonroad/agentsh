@@ -197,10 +197,15 @@ fi
 
 install_args=(./bin/agentsh shim install-shell --root "$rootfs" --shim "$repo_root/bin/agentsh-shell-shim")
 uninstall_args=(./bin/agentsh shim uninstall-shell --root "$rootfs")
+status_args=(./bin/agentsh shim status --output json --root "$rootfs" --shim "$repo_root/bin/agentsh-shell-shim")
 if [[ "$rootfs_bash" == "1" ]]; then
   install_args+=(--bash)
   uninstall_args+=(--bash)
+  status_args+=(--bash)
 fi
+
+"${install_args[@]}" --dry-run --output json >/dev/null
+"${status_args[@]}" >/dev/null
 
 "${install_args[@]}"
 rootfs_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$rootfs/bin/sh" -lc 'echo rootfs_hi' | tr -d '\r' | tail -n 1)"
