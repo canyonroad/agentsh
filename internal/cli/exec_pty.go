@@ -360,6 +360,9 @@ func execPTYWS(ctx context.Context, cfg *clientConfig, sessionID string, req exe
 	}
 	defer conn.Close()
 
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
 	var writeMu sync.Mutex
 	writeBin := func(b []byte) error {
 		writeMu.Lock()
@@ -372,6 +375,14 @@ func execPTYWS(ctx context.Context, cfg *clientConfig, sessionID string, req exe
 		b, _ := json.Marshal(v)
 		return conn.WriteMessage(websocket.TextMessage, b)
 	}
+
+	go func() {
+		<-runCtx.Done()
+		writeMu.Lock()
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(250*time.Millisecond))
+		writeMu.Unlock()
+		_ = conn.Close()
+	}()
 
 	if err := writeText(ptyWSStart{
 		Type:       "start",
@@ -386,9 +397,6 @@ func execPTYWS(ctx context.Context, cfg *clientConfig, sessionID string, req exe
 		return err
 	}
 
-	ctx, cancelRun := context.WithCancel(ctx)
-	defer cancelRun()
-
 	// Forward signals.
 	sigCh := make(chan os.Signal, 16)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGWINCH)
@@ -399,7 +407,7 @@ func execPTYWS(ctx context.Context, cfg *clientConfig, sessionID string, req exe
 		}
 		for {
 			select {
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			case sig := <-sigCh:
 				if sig == syscall.SIGWINCH {
@@ -449,6 +457,9 @@ func execPTYWS(ctx context.Context, cfg *clientConfig, sessionID string, req exe
 	for {
 		mt, data, err := conn.ReadMessage()
 		if err != nil {
+			if runCtx.Err() != nil {
+				return runCtx.Err()
+			}
 			return err
 		}
 		switch mt {
@@ -528,7 +539,14 @@ func ptyWSURLAndDialer(baseURL, path string) (string, *websocket.Dialer, error) 
 		if host == "" {
 			return "", nil, fmt.Errorf("server host is empty")
 		}
-		return wsScheme + "://" + host + path, websocket.DefaultDialer, nil
+		prefix := ""
+		if u.Host != "" {
+			prefix = strings.TrimRight(u.Path, "/")
+			if prefix == "/" {
+				prefix = ""
+			}
+		}
+		return wsScheme + "://" + host + prefix + path, websocket.DefaultDialer, nil
 	default:
 		return "", nil, fmt.Errorf("unsupported server scheme %q", u.Scheme)
 	}

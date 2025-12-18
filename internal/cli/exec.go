@@ -77,7 +77,7 @@ func newExecCmd() *cobra.Command {
 					Argv0:      req.Argv0,
 					WorkingDir: req.WorkingDir,
 					Env:        req.Env,
-					Timeout:    timeout,
+					Timeout:    req.Timeout,
 					Stdin:      req.Stdin,
 				})
 			}
