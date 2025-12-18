@@ -70,6 +70,7 @@ func (a *App) Router() http.Handler {
 
 		r.Post("/sessions/{id}/exec", a.execInSession)
 		r.Post("/sessions/{id}/exec/stream", a.execInSessionStream)
+		r.Get("/sessions/{id}/pty", a.execInSessionPTYWS)
 		r.Get("/sessions/{id}/events", a.streamEvents)
 		r.Get("/sessions/{id}/history", a.sessionHistory)
 		r.Get("/sessions/{id}/output/{cmdID}", a.getOutputChunk)
