@@ -17,7 +17,7 @@ services:
     # Or build locally:
     # build:
     #   context: .
-    #   dockerfile: Dockerfile
+    #   dockerfile: Dockerfile.example
     
     container_name: agentsh
     hostname: agentsh

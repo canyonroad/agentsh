@@ -1,0 +1,42 @@
+# Example: Debian-based image that installs agentsh from a GitHub Release .deb
+# and opt-in activates the /bin/sh + /bin/bash shim.
+#
+# Build:
+#   docker build -f Dockerfile.example \
+#     --build-arg AGENTSH_REPO=erans/agentsh \
+#     --build-arg AGENTSH_TAG=v0.1.0-test2 \
+#     --build-arg DEB_ARCH=amd64 \
+#     -t agentsh-example:latest .
+#
+# Notes:
+# - The release tag is "v..." but the artifact filenames use the version without the "v" prefix.
+# - DEB_ARCH must match the artifact name (typically: amd64 or arm64).
+
+FROM debian:bookworm-slim
+
+ARG AGENTSH_REPO=erans/agentsh
+ARG AGENTSH_TAG=v0.1.0-test2
+ARG DEB_ARCH=amd64
+
+RUN set -eux; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends ca-certificates curl bash; \
+  rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+  version="${AGENTSH_TAG#v}"; \
+  deb="agentsh_${version}_linux_${DEB_ARCH}.deb"; \
+  url="https://github.com/${AGENTSH_REPO}/releases/download/${AGENTSH_TAG}/${deb}"; \
+  echo "Downloading: ${url}"; \
+  curl -fsSL "${url}" -o /tmp/agentsh.deb; \
+  dpkg -i /tmp/agentsh.deb; \
+  rm -f /tmp/agentsh.deb; \
+  agentsh --version; \
+  agentsh shim install-shell \
+    --root / \
+    --shim /usr/bin/agentsh-shell-shim \
+    --bash \
+    --i-understand-this-modifies-the-host
+
+CMD ["/bin/sh", "-lc", "echo hello from agentsh shim; true"]
+
