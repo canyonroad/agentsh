@@ -274,10 +274,10 @@ network_rules:
 
 ## Documentation
 
-- `docs/spec.md` — Full specification
-- `docs/project-structure.md` — Repository structure and conventions
-- `docs/approval-auth.md` — Approval/auth model
-- `docs/cross-platform.md` — Cross-platform notes (Linux-first)
+- [`docs/spec.md`](docs/specs.md) — Full specification
+- [`docs/project-structure.md`](docs/project-structure.md) — Repository structure and conventions
+- [`docs/approval-auth.md`](docs/approval-auth.md) — Approval/auth model
+- [`docs/cross-platform.md`](docs/cross-platform.md) — Cross-platform notes (Linux-first)
 
 ## Requirements
 
@@ -315,7 +315,7 @@ agentsh implements defense in depth:
 - **Policy engine** for operation-level control
 - **Approvals** for `approve` decisions (optional; shadow-approve by default)
 
-See `docs/spec.md` for details.
+See [`docs/spec.md`](docs/spec.md) for details.
 
 ## Use Cases
 
