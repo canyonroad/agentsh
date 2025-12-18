@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
+	"github.com/agentsh/agentsh/pkg/ptygrpc"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
@@ -66,6 +67,8 @@ func RegisterGRPC(s *grpc.Server, app *App) {
 		},
 		Metadata: "proto/agentsh/v1/agentsh.proto",
 	}, &grpcServer{app: app})
+
+	ptygrpc.RegisterAgentshPTYServer(s, &ptyGRPCServer{app: app})
 }
 
 func grpcHandleCreateSession(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {

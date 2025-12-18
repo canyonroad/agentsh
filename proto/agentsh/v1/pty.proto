@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package agentsh.v1;
+
+option go_package = "github.com/agentsh/agentsh/pkg/ptygrpc;ptygrpc";
+
+// AgentshPTY provides interactive PTY execution (stdin/stdout bytes, resize, signals).
+service AgentshPTY {
+  rpc ExecPTY(stream ExecPTYClientMsg) returns (stream ExecPTYServerMsg);
+}
+
+message ExecPTYStart {
+  string session_id = 1;
+  string command = 2;
+  repeated string args = 3;
+  string argv0 = 4;
+  string working_dir = 5;
+  map<string, string> env = 6;
+}
+
+message ExecPTYStdin {
+  bytes data = 1;
+}
+
+message ExecPTYResize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+message ExecPTYSignal {
+  string name = 1; // e.g. "SIGINT"
+}
+
+message ExecPTYClientMsg {
+  oneof msg {
+    ExecPTYStart start = 1;
+    ExecPTYStdin stdin = 2;
+    ExecPTYResize resize = 3;
+    ExecPTYSignal signal = 4;
+  }
+}
+
+message ExecPTYOutput {
+  bytes data = 1;
+}
+
+message ExecPTYExit {
+  int32 exit_code = 1;
+  int64 duration_ms = 2;
+}
+
+message ExecPTYError {
+  string code = 1;
+  string message = 2;
+}
+
+message ExecPTYServerMsg {
+  oneof msg {
+    ExecPTYOutput output = 1;
+    ExecPTYExit exit = 2;
+    ExecPTYError error = 3;
+  }
+}
+
