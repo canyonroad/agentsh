@@ -16,7 +16,7 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
 
   - id: agentsh-darwin
     main: ./cmd/agentsh
@@ -29,7 +29,7 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
 
   - id: shim-linux
     main: ./cmd/agentsh-shell-shim
@@ -116,4 +116,3 @@ release:
     name: agentsh
   draft: false
   prerelease: auto
-

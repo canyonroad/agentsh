@@ -1,8 +1,9 @@
 .PHONY: build build-shim test lint clean proto
 .PHONY: smoke
 
-VERSION := $(shell git describe --tags --always 2>/dev/null || echo dev)
-LDFLAGS := -ldflags "-X main.version=$(VERSION)"
+VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
+COMMIT := $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
+LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT)"
 
 GOCACHE ?= $(CURDIR)/.gocache
 GOMODCACHE ?= $(CURDIR)/.gomodcache
