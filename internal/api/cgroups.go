@@ -2,21 +2,27 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/limits"
+	"github.com/agentsh/agentsh/internal/metrics"
+	ebpftrace "github.com/agentsh/agentsh/internal/netmonitor/ebpf"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
 
-func applyCgroupV2(ctx context.Context, emit storeEmitter, cfg *config.Config, sessionID, cmdID string, pid int, lim policy.Limits) (func() error, error) {
+func applyCgroupV2(ctx context.Context, emit storeEmitter, cfg *config.Config, sessionID, cmdID string, pid int, lim policy.Limits, m *metrics.Collector) (func() error, error) {
 	if cfg == nil || !cfg.Sandbox.Cgroups.Enabled {
 		return nil, nil
 	}
+
+	ebpfEnabled := cfg.Sandbox.Network.EBPF.Enabled
+	ebpfRequired := cfg.Sandbox.Network.EBPF.Required
 
 	parent := strings.TrimSpace(cfg.Sandbox.Cgroups.BasePath)
 	if parent != "" && !filepath.IsAbs(parent) {
@@ -67,7 +73,102 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, cfg *config.Config, s
 	_ = emit.AppendEvent(ctx, ev)
 	emit.Publish(ev)
 
+	var ebpfDetach func() error
+	var ebpfCollector *ebpftrace.Collector
+	if ebpfEnabled {
+		status := ebpftrace.CheckSupport()
+		if !status.Supported {
+			ev := types.Event{
+				ID:        uuid.NewString(),
+				Timestamp: time.Now().UTC(),
+				Type:      "ebpf_unavailable",
+				SessionID: sessionID,
+				CommandID: cmdID,
+				Fields: map[string]any{
+					"reason": status.Reason,
+				},
+			}
+			_ = emit.AppendEvent(ctx, ev)
+			emit.Publish(ev)
+			if m != nil {
+				m.IncEBPFUnavailable()
+			}
+			if ebpfRequired {
+				return nil, fmt.Errorf("ebpf required but unsupported: %s", status.Reason)
+			}
+		} else {
+			if coll, detach, err := ebpftrace.AttachConnectToCgroup(cg.Path); err != nil {
+				ev := types.Event{
+					ID:        uuid.NewString(),
+					Timestamp: time.Now().UTC(),
+					Type:      "ebpf_attach_failed",
+					SessionID: sessionID,
+					CommandID: cmdID,
+					Fields: map[string]any{
+						"error": err.Error(),
+						"path":  cg.Path,
+					},
+				}
+				_ = emit.AppendEvent(ctx, ev)
+				emit.Publish(ev)
+				if m != nil {
+					m.IncEBPFAttachFail()
+				}
+				if ebpfRequired {
+					return nil, fmt.Errorf("ebpf attach failed and required: %w", err)
+				}
+			} else {
+				ebpfDetach = detach
+				collector, cerr := ebpftrace.StartCollector(coll, 4096)
+				if cerr != nil {
+					ev := types.Event{
+						ID:        uuid.NewString(),
+						Timestamp: time.Now().UTC(),
+						Type:      "ebpf_collector_failed",
+						SessionID: sessionID,
+						CommandID: cmdID,
+						Fields: map[string]any{
+							"error": cerr.Error(),
+						},
+					}
+					_ = emit.AppendEvent(ctx, ev)
+					emit.Publish(ev)
+					if ebpfRequired {
+						return nil, fmt.Errorf("ebpf collector failed and required: %w", cerr)
+					}
+					_ = detach()
+				} else {
+					collector.SetOnDrop(func() {
+						if m != nil {
+							m.IncEBPFDropped()
+						}
+					})
+					ebpfCollector = collector
+					go forwardConnectEvents(ctx, collector.Events(), emit, sessionID, cmdID, m)
+				}
+				ev := types.Event{
+					ID:        uuid.NewString(),
+					Timestamp: time.Now().UTC(),
+					Type:      "ebpf_attached",
+					SessionID: sessionID,
+					CommandID: cmdID,
+					Fields: map[string]any{
+						"path": cg.Path,
+					},
+				}
+				_ = emit.AppendEvent(ctx, ev)
+				emit.Publish(ev)
+			}
+		}
+	}
+
 	return func() error {
+		if ebpfCollector != nil {
+			_ = ebpfCollector.Close()
+		}
+		if ebpfDetach != nil {
+			_ = ebpfDetach()
+		}
 		cctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err := cg.Close(cctx); err != nil {

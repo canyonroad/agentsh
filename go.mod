@@ -5,6 +5,7 @@ go 1.25
 toolchain go1.25.5
 
 require (
+	github.com/cilium/ebpf v0.20.0
 	github.com/creack/pty v1.1.18
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/gobwas/glob v0.2.3

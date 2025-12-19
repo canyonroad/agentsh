@@ -28,6 +28,10 @@ sandbox:
   cgroups:
     enabled: true
     base_path: "`+filepath.Join(dir, "cgroups")+`"
+  network:
+    ebpf:
+      enabled: true
+      required: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +66,33 @@ sandbox:
 	}
 	if cfg.Sandbox.Cgroups.BasePath != filepath.Join(dir, "cgroups") {
 		t.Fatalf("sandbox.cgroups.base_path: got %q", cfg.Sandbox.Cgroups.BasePath)
+	}
+	if !cfg.Sandbox.Network.EBPF.Enabled {
+		t.Fatalf("sandbox.network.ebpf.enabled: expected true")
+	}
+	if !cfg.Sandbox.Network.EBPF.Required {
+		t.Fatalf("sandbox.network.ebpf.required: expected true")
+	}
+}
+
+func TestLoad_EBPFRequiredImpliesEnabled(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  network:
+    ebpf:
+      required: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Sandbox.Network.EBPF.Enabled {
+		t.Fatalf("required=true should force enabled=true")
 	}
 }
 

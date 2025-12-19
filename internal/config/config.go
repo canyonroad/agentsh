@@ -129,11 +129,17 @@ type SandboxNetworkConfig struct {
 	Enabled         bool                            `yaml:"enabled"`
 	ProxyListenAddr string                          `yaml:"proxy_listen_addr"`
 	Transparent     SandboxTransparentNetworkConfig `yaml:"transparent"`
+	EBPF            SandboxEBPFConfig               `yaml:"ebpf"`
 }
 
 type SandboxTransparentNetworkConfig struct {
 	Enabled    bool   `yaml:"enabled"`
 	SubnetBase string `yaml:"subnet_base"` // e.g. "10.250.0.0/16"
+}
+
+type SandboxEBPFConfig struct {
+	Enabled  bool `yaml:"enabled"`
+	Required bool `yaml:"required"`
 }
 
 type SandboxCgroupsConfig struct {
@@ -233,6 +239,12 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Sandbox.Network.Transparent.SubnetBase == "" {
 		cfg.Sandbox.Network.Transparent.SubnetBase = "10.250.0.0/16"
+	}
+	// eBPF tracing defaults to disabled unless explicitly enabled.
+	if cfg.Sandbox.Network.EBPF.Required && !cfg.Sandbox.Network.EBPF.Enabled {
+		// If a user set required=true but forgot enabled, force enable to avoid silent misconfig.
+		// This coupling is also documented in config.yml.
+		cfg.Sandbox.Network.EBPF.Enabled = true
 	}
 	// cgroups defaults to disabled unless explicitly enabled.
 	if cfg.Sandbox.Cgroups.BasePath == "" {

@@ -414,7 +414,7 @@ func (a *App) cgroupHook(sessionID string, cmdID string, limits policy.Limits) p
 			return nil, nil
 		}
 		em := storeEmitter{store: a.store, broker: a.broker}
-		return applyCgroupV2(context.Background(), em, a.cfg, sessionID, cmdID, pid, limits)
+		return applyCgroupV2(context.Background(), em, a.cfg, sessionID, cmdID, pid, limits, a.metrics)
 	}
 }
 

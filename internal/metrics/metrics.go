@@ -15,8 +15,11 @@ type Collector struct {
 	startedAt time.Time
 
 	eventsTotal atomic.Uint64
+	byType      sync.Map // string -> *atomic.Uint64
 
-	byType sync.Map // string -> *atomic.Uint64
+	ebpfDropped     atomic.Uint64
+	ebpfAttachFail  atomic.Uint64
+	ebpfUnavailable atomic.Uint64
 }
 
 func New() *Collector {
@@ -35,6 +38,27 @@ func (c *Collector) IncEvent(eventType string) {
 	ptr.(*atomic.Uint64).Add(1)
 }
 
+func (c *Collector) IncEBPFDropped() {
+	if c == nil {
+		return
+	}
+	c.ebpfDropped.Add(1)
+}
+
+func (c *Collector) IncEBPFAttachFail() {
+	if c == nil {
+		return
+	}
+	c.ebpfAttachFail.Add(1)
+}
+
+func (c *Collector) IncEBPFUnavailable() {
+	if c == nil {
+		return
+	}
+	c.ebpfUnavailable.Add(1)
+}
+
 type HandlerOptions struct {
 	SessionCount func() int
 }
@@ -49,6 +73,18 @@ func (c *Collector) Handler(opts HandlerOptions) http.Handler {
 		fmt.Fprint(w, "# HELP agentsh_events_total Total number of events appended.\n")
 		fmt.Fprint(w, "# TYPE agentsh_events_total counter\n")
 		fmt.Fprintf(w, "agentsh_events_total %d\n", c.eventsTotal.Load())
+
+		fmt.Fprint(w, "# HELP agentsh_net_ebpf_dropped_events_total eBPF connect events dropped due to backpressure.\n")
+		fmt.Fprint(w, "# TYPE agentsh_net_ebpf_dropped_events_total counter\n")
+		fmt.Fprintf(w, "agentsh_net_ebpf_dropped_events_total %d\n", c.ebpfDropped.Load())
+
+		fmt.Fprint(w, "# HELP agentsh_net_ebpf_attach_fail_total eBPF attach failures.\n")
+		fmt.Fprint(w, "# TYPE agentsh_net_ebpf_attach_fail_total counter\n")
+		fmt.Fprintf(w, "agentsh_net_ebpf_attach_fail_total %d\n", c.ebpfAttachFail.Load())
+
+		fmt.Fprint(w, "# HELP agentsh_net_ebpf_unavailable_total Times eBPF was unavailable on host.\n")
+		fmt.Fprint(w, "# TYPE agentsh_net_ebpf_unavailable_total counter\n")
+		fmt.Fprintf(w, "agentsh_net_ebpf_unavailable_total %d\n", c.ebpfUnavailable.Load())
 
 		types := snapshotKeys(&c.byType)
 		if len(types) > 0 {
