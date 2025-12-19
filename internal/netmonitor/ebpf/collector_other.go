@@ -4,6 +4,9 @@ package ebpf
 
 import "errors"
 
+// ConnectEvent stub for non-Linux platforms.
+type ConnectEvent struct{}
+
 // Collector stub for non-Linux platforms.
 type Collector struct{}
 
@@ -12,3 +15,4 @@ func StartCollector(_ any, _ int) (*Collector, error) {
 }
 func (c *Collector) Events() <-chan ConnectEvent { return nil }
 func (c *Collector) Close() error                { return nil }
+func (c *Collector) SetOnDrop(_ func())          {}

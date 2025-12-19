@@ -2,7 +2,11 @@
 
 package ebpf
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/cilium/ebpf"
+)
 
 // AttachConnectToCgroup is not supported on non-Linux platforms.
 func AttachConnectToCgroup(_ string) (*ebpf.Collection, func() error, error) {
