@@ -21,16 +21,16 @@ type Emitter interface {
 }
 
 type Request struct {
-	ID        string            `json:"id"`
-	CreatedAt time.Time         `json:"created_at"`
-	ExpiresAt time.Time         `json:"expires_at"`
-	SessionID string            `json:"session_id"`
-	CommandID string            `json:"command_id,omitempty"`
-	Kind      string            `json:"kind"` // "command" | "file" | "network"
-	Target    string            `json:"target,omitempty"`
-	Rule      string            `json:"rule,omitempty"`
-	Message   string            `json:"message,omitempty"`
-	Fields    map[string]any    `json:"fields,omitempty"`
+	ID        string         `json:"id"`
+	CreatedAt time.Time      `json:"created_at"`
+	ExpiresAt time.Time      `json:"expires_at"`
+	SessionID string         `json:"session_id"`
+	CommandID string         `json:"command_id,omitempty"`
+	Kind      string         `json:"kind"` // "command" | "file" | "network"
+	Target    string         `json:"target,omitempty"`
+	Rule      string         `json:"rule,omitempty"`
+	Message   string         `json:"message,omitempty"`
+	Fields    map[string]any `json:"fields,omitempty"`
 }
 
 type Resolution struct {
@@ -43,6 +43,9 @@ type Manager struct {
 	mode    string
 	timeout time.Duration
 	emit    Emitter
+
+	// prompt is factored for testability; defaults to promptTTY.
+	prompt func(ctx context.Context, req Request) (Resolution, error)
 
 	mu      sync.Mutex
 	pending map[string]*pending
@@ -62,12 +65,14 @@ func New(mode string, timeout time.Duration, emit Emitter) *Manager {
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
-	return &Manager{
+	m := &Manager{
 		mode:    mode,
 		timeout: timeout,
 		emit:    emit,
 		pending: make(map[string]*pending),
 	}
+	m.prompt = m.promptTTY
+	return m
 }
 
 func (m *Manager) ListPending() []Request {
@@ -118,13 +123,22 @@ func (m *Manager) RequestApproval(ctx context.Context, req Request) (Resolution,
 
 	m.emitEvent(ctx, "approval_requested", req, nil)
 
+	var cancelPrompt context.CancelFunc
+	promptCtx := ctx
 	if m.mode == "local_tty" {
-		res, err := m.promptTTY(ctx, req)
-		if err != nil {
-			_ = m.Resolve(req.ID, false, err.Error())
-		} else {
+		promptCtx, cancelPrompt = context.WithCancel(ctx)
+		go func() {
+			res, err := m.prompt(promptCtx, req)
+			if err != nil {
+				_ = m.Resolve(req.ID, false, err.Error())
+				return
+			}
 			_ = m.Resolve(req.ID, res.Approved, res.Reason)
-		}
+		}()
+	}
+
+	if m.mode == "local_tty" {
+		// Fall through to select; prompt resolution will deliver on p.ch.
 	}
 
 	timeout := time.Until(req.ExpiresAt)
@@ -136,13 +150,22 @@ func (m *Manager) RequestApproval(ctx context.Context, req Request) (Resolution,
 
 	select {
 	case res := <-p.ch:
+		if cancelPrompt != nil {
+			cancelPrompt()
+		}
 		m.emitEvent(ctx, "approval_resolved", req, &res)
 		return res, nil
 	case <-ctx.Done():
+		if cancelPrompt != nil {
+			cancelPrompt()
+		}
 		m.Resolve(req.ID, false, "context canceled")
 		m.emitEvent(ctx, "approval_resolved", req, &Resolution{Approved: false, Reason: "context canceled", At: time.Now().UTC()})
 		return Resolution{Approved: false, Reason: "context canceled", At: time.Now().UTC()}, ctx.Err()
 	case <-timer.C:
+		if cancelPrompt != nil {
+			cancelPrompt()
+		}
 		m.Resolve(req.ID, false, "approval timeout")
 		m.emitEvent(ctx, "approval_resolved", req, &Resolution{Approved: false, Reason: "approval timeout", At: time.Now().UTC()})
 		return Resolution{Approved: false, Reason: "approval timeout", At: time.Now().UTC()}, fmt.Errorf("approval timeout")
@@ -190,22 +213,62 @@ func (m *Manager) promptTTY(ctx context.Context, req Request) (Resolution, error
 	}
 	defer f.Close()
 
+	// Close the tty if the context is cancelled to unblock reads.
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
+
+	reader := bufio.NewReader(f)
+	readLineCtx := func(prompt string) (string, error) {
+		if _, err := fmt.Fprint(f, prompt); err != nil {
+			return "", err
+		}
+		lineCh := make(chan struct {
+			line string
+			err  error
+		}, 1)
+		go func() {
+			line, err := reader.ReadString('\n')
+			lineCh <- struct {
+				line string
+				err  error
+			}{line: line, err: err}
+		}()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case res := <-lineCh:
+			if res.err != nil {
+				return "", res.err
+			}
+			return strings.TrimSpace(res.line), nil
+		}
+	}
+
 	a, b := challenge()
 	fmt.Fprintf(f, "\n=== APPROVAL REQUIRED ===\n")
 	fmt.Fprintf(f, "ID: %s\nSession: %s\nCommand: %s\nKind: %s\nTarget: %s\nRule: %s\nMessage: %s\n",
 		req.ID, req.SessionID, req.CommandID, req.Kind, req.Target, req.Rule, req.Message)
-	fmt.Fprintf(f, "To approve, solve: %d + %d = ?\n> ", a, b)
 
-	reader := bufio.NewReader(f)
-	answerLine, _ := reader.ReadString('\n')
-	answerLine = strings.TrimSpace(answerLine)
-	if answerLine != fmt.Sprintf("%d", a+b) {
+	answer, err := readLineCtx(fmt.Sprintf("To approve, solve: %d + %d = ?\n> ", a, b))
+	if err != nil {
+		return Resolution{}, err
+	}
+	if answer != fmt.Sprintf("%d", a+b) {
 		return Resolution{Approved: false, Reason: "challenge failed", At: time.Now().UTC()}, nil
 	}
 
-	fmt.Fprintf(f, "Approve? type 'yes' to approve: ")
-	choice, _ := reader.ReadString('\n')
-	choice = strings.TrimSpace(strings.ToLower(choice))
+	choice, err := readLineCtx("Approve? type 'yes' to approve: ")
+	if err != nil {
+		return Resolution{}, err
+	}
+	choice = strings.ToLower(strings.TrimSpace(choice))
 	if choice == "yes" || choice == "y" {
 		return Resolution{Approved: true, Reason: "local tty", At: time.Now().UTC()}, nil
 	}
@@ -220,4 +283,3 @@ func challenge() (int, int) {
 	bb := int((n/50)%50) + 10
 	return a, bb
 }
-

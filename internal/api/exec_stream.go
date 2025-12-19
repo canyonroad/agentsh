@@ -255,8 +255,13 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	if err := cmd.Start(); err != nil {
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
 	}
+
+	pgid := 0
 	if cmd.Process != nil {
 		s.SetCurrentProcessPID(cmd.Process.Pid)
+		if gp, gpErr := syscall.Getpgid(cmd.Process.Pid); gpErr == nil {
+			pgid = gp
+		}
 		if hook != nil {
 			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
 				defer func() { _ = cleanup() }()
@@ -271,14 +276,18 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 
 	resources = resourcesFromProcessState(cmd.ProcessState)
 
+	if ctx.Err() != nil {
+		_ = killProcessGroup(pgid)
+	}
+
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
+	}
 	if waitErr == nil {
 		return 0, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, err
 	}
 	if ee := (*exec.ExitError)(nil); errors.As(waitErr, &ee) {
 		return ee.ExitCode(), stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, err
-	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
 	}
 	return 127, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, waitErr
 }

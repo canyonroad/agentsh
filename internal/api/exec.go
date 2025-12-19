@@ -84,8 +84,13 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	if err := cmd.Start(); err != nil {
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
 	}
+
+	pgid := 0
 	if cmd.Process != nil {
 		s.SetCurrentProcessPID(cmd.Process.Pid)
+		if gp, gpErr := syscall.Getpgid(cmd.Process.Pid); gpErr == nil {
+			pgid = gp
+		}
 		if hook != nil {
 			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
 				defer func() { _ = cleanup() }()
@@ -100,14 +105,18 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 
 	resources = resourcesFromProcessState(cmd.ProcessState)
 
+	if ctx.Err() != nil {
+		_ = killProcessGroup(pgid)
+	}
+
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
+	}
 	if waitErr == nil {
 		return 0, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, err
 	}
 	if ee := (*exec.ExitError)(nil); errors.As(waitErr, &ee) {
 		return ee.ExitCode(), stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, err
-	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
 	}
 	return 127, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, waitErr
 }
@@ -161,10 +170,23 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 
 func mergeEnv(base []string, s *session.Session, overrides map[string]string) []string {
 	envMap := map[string]string{}
+
+	baseMap := map[string]string{}
 	for _, kv := range base {
 		if k, v, ok := strings.Cut(kv, "="); ok {
+			baseMap[k] = v
+		}
+	}
+
+	// Keep only a minimal, non-secret subset from the host.
+	allow := []string{"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "HOME"}
+	for _, k := range allow {
+		if v, ok := baseMap[k]; ok {
 			envMap[k] = v
 		}
+	}
+	if _, ok := envMap["PATH"]; !ok {
+		envMap["PATH"] = "/usr/bin:/bin"
 	}
 
 	if proxy := s.ProxyURL(); proxy != "" {
@@ -200,9 +222,42 @@ func mergeEnv(base []string, s *session.Session, overrides map[string]string) []
 	// Mark processes executed by agentsh so sh/bash shims can avoid recursively re-entering agentsh.
 	envMap["AGENTSH_IN_SESSION"] = "1"
 
+	// Strip secrets that may have leaked in via overrides or session env.
+	for k := range envMap {
+		if isSensitiveEnvKey(k) {
+			delete(envMap, k)
+		}
+	}
+
 	out := make([]string, 0, len(envMap))
 	for k, v := range envMap {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+func killProcessGroup(pgid int) error {
+	if pgid <= 0 {
+		return nil
+	}
+	// Negative pid targets the process group.
+	return syscall.Kill(-pgid, syscall.SIGKILL)
+}
+
+func isSensitiveEnvKey(k string) bool {
+	l := strings.ToLower(strings.TrimSpace(k))
+	switch l {
+	case "aws_secret_access_key", "aws_access_key_id", "aws_session_token", "aws_profile", "aws_shared_credentials_file",
+		"google_application_credentials", "gcp_service_account",
+		"azure_client_secret", "azure_client_id", "azure_tenant_id", "azure_subscription_id",
+		"ssh_auth_sock", "ssh_agent_pid",
+		"docker_host", "docker_tls_verify",
+		"kubeconfig", "gcloud_project",
+		"github_token", "gh_token":
+		return true
+	}
+	if strings.HasSuffix(l, "_secret") || strings.HasSuffix(l, "_token") || strings.HasSuffix(l, "_password") || strings.HasSuffix(l, "_key") {
+		return true
+	}
+	return false
 }

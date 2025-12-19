@@ -35,3 +35,72 @@ func TestMergeEnv_MarksInSession(t *testing.T) {
 	}
 }
 
+func TestMergeEnv_StripsHostSecrets(t *testing.T) {
+	sessions := session.NewManager(10)
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := sessions.Create(ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base := []string{
+		"PATH=/usr/bin",
+		"AWS_SECRET_ACCESS_KEY=sekret",
+		"DOCKER_HOST=unix:///var/run/docker.sock",
+		"TERM=xterm-256color",
+	}
+
+	gotMap := envSliceToMap(mergeEnv(base, sess, nil))
+
+	if _, ok := gotMap["AWS_SECRET_ACCESS_KEY"]; ok {
+		t.Fatalf("expected AWS_SECRET_ACCESS_KEY to be stripped")
+	}
+	if _, ok := gotMap["DOCKER_HOST"]; ok {
+		t.Fatalf("expected DOCKER_HOST to be stripped")
+	}
+	if gotMap["PATH"] == "" {
+		t.Fatalf("expected PATH to be preserved")
+	}
+}
+
+func TestMergeEnv_OverridesSecretStripped(t *testing.T) {
+	sessions := session.NewManager(10)
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := sessions.Create(ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	overrides := map[string]string{
+		"MY_SECRET": "topsecret",
+		"SAFE":      "ok",
+	}
+
+	gotMap := envSliceToMap(mergeEnv(nil, sess, overrides))
+
+	if _, ok := gotMap["MY_SECRET"]; ok {
+		t.Fatalf("expected MY_SECRET to be stripped from overrides")
+	}
+	if gotMap["SAFE"] != "ok" {
+		t.Fatalf("expected SAFE to survive overrides")
+	}
+}
+
+func envSliceToMap(env []string) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, kv := range env {
+		for i := 0; i < len(kv); i++ {
+			if kv[i] == '=' {
+				out[kv[:i]] = kv[i+1:]
+				break
+			}
+		}
+	}
+	return out
+}
