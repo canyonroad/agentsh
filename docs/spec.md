@@ -1411,6 +1411,10 @@ agentsh
 │   ├── list    List policies
 │   ├── show    Show policy details
 │   └── validate Validate policy file
+├── trash       Inspect/restore/purge soft-deleted files
+│   ├── list    Show diverted files (supports --session, --json)
+│   ├── restore Restore by token (optional --dest, --force-overwrite)
+│   └── purge   Enforce TTL/quota or purge by session
 └── config      Manage configuration
     ├── show    Show resolved config
     └── validate Validate config file
@@ -1461,6 +1465,17 @@ Working Dir:   /workspace/src
 # Destroy session
 $ agentsh session destroy session-abc123
 Session destroyed: session-abc123
+
+# Soft-delete lifecycle (when FUSE audit mode = soft_delete)
+$ agentsh trash list --session session-abc123
+TOKEN       PATH                  SIZE  MODE         WHEN
+tok-abc123  /workspace/a.txt      4 B   soft_delete  2025-12-19T10:02:00Z
+
+# Restore to original path (default) or a custom destination
+$ agentsh trash restore tok-abc123 --dest /workspace/a-restored.txt
+
+# Purge after a session ends or to reclaim space/quotas
+$ agentsh trash purge --session session-abc123 --ttl 7d --quota 5GB
 ```
 
 #### Command Execution
@@ -1852,6 +1867,14 @@ Key fields:
 - `server.unix_socket.*`
 - `auth.type` and `auth.api_key.*` (HTTP header + gRPC metadata)
 - `sandbox.*` (FUSE/network/cgroups)
+  - `sandbox.fuse.audit.*` (delete safety):
+    - `enabled` (bool, default true)
+    - `mode`: `monitor` | `soft_block` | `soft_delete` | `strict` (strict wraps chosen mode; fails ops if sink unhealthy)
+    - `trash_path` (default `.agentsh_trash`, relative to workspace when not absolute)
+    - `ttl` / `quota` (optional retention and size caps enforced by purge)
+    - `strict_on_audit_failure` (bool, fail operation when audit sink errors)
+    - `max_event_queue` (bounded async logger depth; drop-oldest unless strict)
+    - `hash_small_files_under` (size threshold to hash diverted files for integrity on restore)
 - `policies.*`
 - `approvals.*`
 

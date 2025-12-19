@@ -21,3 +21,5 @@ coverage.out
 .gomodcache/
 .gopath/
 internal/netmonitor/ebpf/vmlinux.h
+
+.worktrees/

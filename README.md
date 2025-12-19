@@ -19,6 +19,7 @@ agentsh is a purpose-built shell environment that provides AI agents with secure
 - **📊 Dual Output Modes**: Shell-like output by default; JSON mode for tools/agents
 - **⚡ Session Persistence**: Keep sandboxes alive across commands for efficiency
 - **✅ Approval Workflows**: Human-in-the-loop for sensitive operations
+- **🗑️ Delete Safety (FUSE audit)**: Audit, soft-block, or soft-delete destructive ops; restore/purge via `agentsh trash`
 
 ### Why agentsh?
 
@@ -196,6 +197,11 @@ agentsh exec --output json --events all SESSION_ID -- curl -sS https://ifconfig.
 # Execute commands
 agentsh exec SESSION_ID -- npm install
 agentsh exec SESSION_ID -- python script.py
+
+# Soft-delete lifecycle (when sandbox.fuse.audit.mode=soft_delete)
+agentsh trash list --session SESSION_ID
+agentsh trash restore TOKEN --dest /workspace/restored.txt
+agentsh trash purge --session SESSION_ID --ttl 7d --quota 5GB
 
 # Convenience: if the server isn't running, `agentsh exec` will auto-start a local server (using `AGENTSH_CONFIG` or `config.yml`).
 # If SESSION_ID doesn't exist yet, it will be created using the current working directory as the workspace.

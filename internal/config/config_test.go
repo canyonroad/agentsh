@@ -178,6 +178,117 @@ audit:
 	}
 }
 
+func TestLoad_FUSEAuditDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  fuse:
+    enabled: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Sandbox.FUSE.Audit.Mode != "monitor" {
+		t.Fatalf("audit.mode default: got %q", cfg.Sandbox.FUSE.Audit.Mode)
+	}
+	if cfg.Sandbox.FUSE.Audit.TrashPath != ".agentsh_trash" {
+		t.Fatalf("audit.trash_path default: got %q", cfg.Sandbox.FUSE.Audit.TrashPath)
+	}
+	if cfg.Sandbox.FUSE.Audit.TTL != "7d" {
+		t.Fatalf("audit.ttl default: got %q", cfg.Sandbox.FUSE.Audit.TTL)
+	}
+	if cfg.Sandbox.FUSE.Audit.Quota != "5GB" {
+		t.Fatalf("audit.quota default: got %q", cfg.Sandbox.FUSE.Audit.Quota)
+	}
+	if cfg.Sandbox.FUSE.Audit.MaxEventQueue != 1024 {
+		t.Fatalf("audit.max_event_queue default: got %d", cfg.Sandbox.FUSE.Audit.MaxEventQueue)
+	}
+	if cfg.Sandbox.FUSE.Audit.HashSmallFilesUnder != "1MB" {
+		t.Fatalf("audit.hash_small_files_under default: got %q", cfg.Sandbox.FUSE.Audit.HashSmallFilesUnder)
+	}
+	if cfg.Sandbox.FUSE.Audit.Enabled == nil || !*cfg.Sandbox.FUSE.Audit.Enabled {
+		t.Fatalf("audit.enabled default: expected true")
+	}
+	if cfg.Sandbox.FUSE.Audit.StrictOnAuditFailure != false {
+		t.Fatalf("audit.strict_on_audit_failure default: expected false, got %v", cfg.Sandbox.FUSE.Audit.StrictOnAuditFailure)
+	}
+}
+
+func TestLoad_FUSEAuditCustomValues(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  fuse:
+    enabled: true
+    audit:
+      enabled: false
+      mode: soft_delete
+      trash_path: "/tmp/trash"
+      ttl: "3d"
+      quota: "10GB"
+      strict_on_audit_failure: true
+      max_event_queue: 2048
+      hash_small_files_under: "2MB"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := cfg.Sandbox.FUSE.Audit
+	if a.Enabled == nil || *a.Enabled != false {
+		t.Fatalf("audit.enabled: expected false, got %v", a.Enabled)
+	}
+	if a.Mode != "soft_delete" {
+		t.Fatalf("audit.mode: expected soft_delete, got %q", a.Mode)
+	}
+	if a.TrashPath != "/tmp/trash" {
+		t.Fatalf("audit.trash_path: expected /tmp/trash, got %q", a.TrashPath)
+	}
+	if a.TTL != "3d" {
+		t.Fatalf("audit.ttl: expected 3d, got %q", a.TTL)
+	}
+	if a.Quota != "10GB" {
+		t.Fatalf("audit.quota: expected 10GB, got %q", a.Quota)
+	}
+	if !a.StrictOnAuditFailure {
+		t.Fatalf("audit.strict_on_audit_failure: expected true")
+	}
+	if a.MaxEventQueue != 2048 {
+		t.Fatalf("audit.max_event_queue: expected 2048, got %d", a.MaxEventQueue)
+	}
+	if a.HashSmallFilesUnder != "2MB" {
+		t.Fatalf("audit.hash_small_files_under: expected 2MB, got %q", a.HashSmallFilesUnder)
+	}
+}
+
+func TestLoad_FUSEAuditInvalidMode(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  fuse:
+    audit:
+      mode: nope
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(cfgPath); err == nil {
+		t.Fatalf("expected error for invalid audit.mode")
+	}
+}
+
 func TestParseByteSize(t *testing.T) {
 	cases := []struct {
 		in   string
