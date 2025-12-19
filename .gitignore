@@ -20,3 +20,4 @@ coverage.out
 .gocache/
 .gomodcache/
 .gopath/
+internal/netmonitor/ebpf/vmlinux.h
