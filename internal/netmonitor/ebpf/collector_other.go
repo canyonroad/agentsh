@@ -4,8 +4,20 @@ package ebpf
 
 import "errors"
 
-// ConnectEvent stub for non-Linux platforms.
-type ConnectEvent struct{}
+// ConnectEvent stub for non-Linux platforms, keeping the same fields for build compatibility.
+type ConnectEvent struct {
+	TsNs     uint64
+	Cookie   uint64
+	PID      uint32
+	TGID     uint32
+	Sport    uint16
+	Dport    uint16
+	Family   uint8
+	Protocol uint8
+	_        [6]byte
+	DstIPv4  uint32
+	DstIPv6  [16]byte
+}
 
 // Collector stub for non-Linux platforms.
 type Collector struct{}
