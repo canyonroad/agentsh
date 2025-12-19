@@ -33,6 +33,7 @@ func NewRoot(version string) *cobra.Command {
 	cmd.AddCommand(newPolicyCmd())
 	cmd.AddCommand(newConfigCmd())
 	cmd.AddCommand(newShimCmd())
+	cmd.AddCommand(newTrashCmd())
 
 	return cmd
 }

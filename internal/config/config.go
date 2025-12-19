@@ -120,9 +120,21 @@ type SandboxConfig struct {
 }
 
 type SandboxFUSEConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled bool            `yaml:"enabled"`
+	Audit   FUSEAuditConfig `yaml:"audit"`
 	// Optional base dir for mounts; defaults to sessions.base_dir.
 	MountBaseDir string `yaml:"mount_base_dir"`
+}
+
+type FUSEAuditConfig struct {
+	Enabled              *bool  `yaml:"enabled"`
+	Mode                 string `yaml:"mode"` // monitor, soft_block, soft_delete, strict
+	TrashPath            string `yaml:"trash_path"`
+	TTL                  string `yaml:"ttl"`
+	Quota                string `yaml:"quota"`
+	StrictOnAuditFailure bool   `yaml:"strict_on_audit_failure"`
+	MaxEventQueue        int    `yaml:"max_event_queue"`
+	HashSmallFilesUnder  string `yaml:"hash_small_files_under"`
 }
 
 type SandboxNetworkConfig struct {
@@ -207,6 +219,9 @@ func Load(path string) (*Config, error) {
 
 	applyDefaults(&cfg)
 	applyEnvOverrides(&cfg)
+	if err := validateConfig(&cfg); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
@@ -243,6 +258,29 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Sandbox.FUSE.MountBaseDir == "" {
 		cfg.Sandbox.FUSE.MountBaseDir = cfg.Sessions.BaseDir
+	}
+	if cfg.Sandbox.FUSE.Audit.Mode == "" {
+		cfg.Sandbox.FUSE.Audit.Mode = "monitor"
+	}
+	if cfg.Sandbox.FUSE.Audit.TrashPath == "" {
+		cfg.Sandbox.FUSE.Audit.TrashPath = ".agentsh_trash"
+	}
+	if cfg.Sandbox.FUSE.Audit.TTL == "" {
+		cfg.Sandbox.FUSE.Audit.TTL = "7d"
+	}
+	if cfg.Sandbox.FUSE.Audit.Quota == "" {
+		cfg.Sandbox.FUSE.Audit.Quota = "5GB"
+	}
+	if cfg.Sandbox.FUSE.Audit.MaxEventQueue <= 0 {
+		cfg.Sandbox.FUSE.Audit.MaxEventQueue = 1024
+	}
+	if cfg.Sandbox.FUSE.Audit.HashSmallFilesUnder == "" {
+		cfg.Sandbox.FUSE.Audit.HashSmallFilesUnder = "1MB"
+	}
+	// default audit enabled unless explicitly disabled
+	if cfg.Sandbox.FUSE.Audit.Enabled == nil {
+		t := true
+		cfg.Sandbox.FUSE.Audit.Enabled = &t
 	}
 	if cfg.Sandbox.Network.ProxyListenAddr == "" {
 		cfg.Sandbox.Network.ProxyListenAddr = "127.0.0.1:0"
@@ -333,4 +371,16 @@ func applyEnvOverrides(cfg *Config) {
 		cfg.Sessions.BaseDir = filepath.Join(v, "sessions")
 		cfg.Audit.Storage.SQLitePath = filepath.Join(v, "events.db")
 	}
+}
+
+func validateConfig(cfg *Config) error {
+	switch cfg.Sandbox.FUSE.Audit.Mode {
+	case "monitor", "soft_block", "soft_delete", "strict":
+	default:
+		return fmt.Errorf("invalid sandbox.fuse.audit.mode %q", cfg.Sandbox.FUSE.Audit.Mode)
+	}
+	if cfg.Sandbox.FUSE.Audit.MaxEventQueue < 0 {
+		return fmt.Errorf("sandbox.fuse.audit.max_event_queue must be >= 0")
+	}
+	return nil
 }

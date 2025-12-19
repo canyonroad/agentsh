@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
+	"github.com/agentsh/agentsh/internal/trash"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -356,6 +358,7 @@ func (a *App) destroySession(w http.ResponseWriter, r *http.Request) {
 	_ = s.CloseNetNS()
 	_ = s.CloseProxy()
 	_ = s.UnmountWorkspace()
+	a.purgeTrashForSession(s)
 	_ = a.sessions.Destroy(id)
 
 	ev := types.Event{
@@ -368,6 +371,44 @@ func (a *App) destroySession(w http.ResponseWriter, r *http.Request) {
 	a.broker.Publish(ev)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) purgeTrashForSession(s *session.Session) {
+	if a == nil || a.cfg == nil {
+		return
+	}
+	cfg := a.cfg.Sandbox.FUSE.Audit
+	if cfg.Enabled != nil && !*cfg.Enabled {
+		return
+	}
+	trashPath := cfg.TrashPath
+	if trashPath == "" {
+		trashPath = ".agentsh_trash"
+	}
+	if !filepath.IsAbs(trashPath) {
+		trashPath = filepath.Join(s.Workspace, trashPath)
+	}
+	var ttl time.Duration
+	if cfg.TTL != "" {
+		if d, err := time.ParseDuration(cfg.TTL); err == nil {
+			ttl = d
+		} else {
+			fmt.Fprintf(os.Stderr, "trash purge: invalid ttl %q: %v\n", cfg.TTL, err)
+		}
+	}
+	var quota int64
+	if cfg.Quota != "" {
+		if q, err := config.ParseByteSize(cfg.Quota); err == nil {
+			quota = q
+		} else {
+			fmt.Fprintf(os.Stderr, "trash purge: invalid quota %q: %v\n", cfg.Quota, err)
+		}
+	}
+	_, _ = trash.Purge(trashPath, trash.PurgeOptions{
+		TTL:        ttl,
+		QuotaBytes: quota,
+		Session:    s.ID,
+	})
 }
 
 func (a *App) killCommand(w http.ResponseWriter, r *http.Request) {
@@ -481,6 +522,28 @@ func applyIncludeEvents(resp *types.ExecResponse, include string) {
 		// Unknown value: keep backward compatible behavior.
 		return
 	}
+}
+
+// addSoftDeleteHints appends restore hints to stderr and returns suggestions for guidance.
+func addSoftDeleteHints(fileOps []types.Event, stderrB []byte, stderrTotal int64) ([]byte, int64, []types.Suggestion) {
+	var softSuggestions []types.Suggestion
+	for _, ev := range fileOps {
+		if ev.Type != "file_soft_deleted" {
+			continue
+		}
+		token := fmt.Sprint(ev.Fields["trash_token"])
+		path := ev.Path
+		cmd := fmt.Sprintf("agentsh trash restore %s", token)
+		softSuggestions = append(softSuggestions, types.Suggestion{
+			Action:  "restore file",
+			Command: cmd,
+			Reason:  fmt.Sprintf("soft-deleted: %s (token=%s)", path, token),
+		})
+		hint := fmt.Sprintf("soft-delete: %s -> trash token %s; restore with: %s\n", path, token, cmd)
+		stderrB = append(stderrB, []byte(hint)...)
+		stderrTotal += int64(len(hint))
+	}
+	return stderrB, stderrTotal, softSuggestions
 }
 
 func guidanceForPolicyDenied(req types.ExecRequest, pre policy.Decision, preEv types.Event, approvalErr error) *types.ExecGuidance {

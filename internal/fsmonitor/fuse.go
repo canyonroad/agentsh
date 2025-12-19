@@ -3,6 +3,7 @@ package fsmonitor
 import (
 	"context"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/trash"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -29,6 +31,7 @@ type Hooks struct {
 	Policy    *policy.Engine
 	Approvals *approvals.Manager
 	Emit      Emitter
+	FUSEAudit *FUSEAuditHooks
 }
 
 func NewMonitoredLoopbackRoot(realRoot string, hooks *Hooks) (fs.InodeEmbedder, error) {
@@ -69,6 +72,19 @@ func (n *node) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFl
 	}
 
 	n.emitFileEvent(ctx, "file_open", virt, "open", 0, dec, false, nil)
+	if flags&uint32(syscall.O_TRUNC) != 0 {
+		var inner fs.FileHandle
+		var fFlags uint32
+		errno = applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), "truncate_open", virt, "", "", nil, func() syscall.Errno {
+			inner, fFlags, errno = n.LoopbackNode.Open(ctx, flags)
+			return errno
+		})
+		if errno != 0 {
+			return nil, 0, errno
+		}
+		return &fileHandle{inner: inner, n: n, virtPath: virt}, fFlags, errno
+	}
+
 	fh, fuseFlags, errno = n.LoopbackNode.Open(ctx, flags)
 	if errno != 0 {
 		return fh, fuseFlags, errno
@@ -85,11 +101,22 @@ func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint3
 		return nil, nil, 0, syscall.EACCES
 	}
 
-	n.emitFileEvent(ctx, "file_create", virt, "create", 0, dec, false, nil)
 	inode, fh, fuseFlags, errno = n.LoopbackNode.Create(ctx, name, flags, mode, out)
 	if errno != 0 {
 		return inode, fh, fuseFlags, errno
 	}
+
+	extra := map[string]any{}
+	if rp, err := n.realPath(virt, true); err == nil {
+		if st, err := os.Stat(rp); err == nil {
+			extra["size"] = st.Size()
+			if stat, ok := st.Sys().(*syscall.Stat_t); ok {
+				extra["nlink"] = stat.Nlink
+			}
+		}
+	}
+	n.emitFileEvent(ctx, "file_create", virt, "create", 0, dec, false, extra)
+
 	return inode, &fileHandle{inner: fh, n: n, virtPath: virt}, fuseFlags, errno
 }
 
@@ -102,7 +129,10 @@ func (n *node) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.EACCES
 	}
 	n.emitFileEvent(ctx, "file_delete", virt, "delete", 0, dec, false, nil)
-	return n.LoopbackNode.Unlink(ctx, name)
+	realPath, _ := n.realPath(virt, false)
+	return applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), "unlink", virt, "", realPath, n.makeDivertFunc(realPath), func() syscall.Errno {
+		return n.LoopbackNode.Unlink(ctx, name)
+	})
 }
 
 func (n *node) Rmdir(ctx context.Context, name string) syscall.Errno {
@@ -114,7 +144,10 @@ func (n *node) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.EACCES
 	}
 	n.emitFileEvent(ctx, "dir_delete", virt, "rmdir", 0, dec, false, nil)
-	return n.LoopbackNode.Rmdir(ctx, name)
+	realPath, _ := n.realPath(virt, false)
+	return applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), "rmdir", virt, "", realPath, n.makeDivertFunc(realPath), func() syscall.Errno {
+		return n.LoopbackNode.Rmdir(ctx, name)
+	})
 }
 
 func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -132,9 +165,17 @@ func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 func (n *node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	virtFrom := n.virtualChildPath(name)
 	virtTo := path.Clean("/workspace/" + sanitizeName(newName))
-	if np, ok := newParent.(*node); ok {
-		virtTo = np.virtualChildPath(newName)
+	newParentNode, ok := newParent.(*node)
+	if ok {
+		virtTo = newParentNode.virtualChildPath(newName)
 	}
+	crossMount := !ok || newParentNode.RootData != n.RootData
+	realPath, errReal := n.realPath(virtFrom, false)
+	if errReal != nil {
+		crossMount = true
+	}
+	intoMount := crossMount && ok && newParentNode.RootData == n.RootData
+
 	decFrom := n.checkWithExist(ctx, virtFrom, "rename", true)
 	decTo := n.checkWithExist(ctx, virtTo, "rename", false)
 	dec := combinePathDecisionsForRename(decFrom, decTo)
@@ -143,8 +184,37 @@ func (n *node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedd
 		n.emitFileEvent(ctx, "file_rename", virtFrom, "rename", 0, dec, true, map[string]any{"to_path": virtTo})
 		return syscall.EACCES
 	}
-	n.emitFileEvent(ctx, "file_rename", virtFrom, "rename", 0, dec, false, map[string]any{"to_path": virtTo})
-	return n.LoopbackNode.Rename(ctx, name, newParent, newName, flags)
+	n.emitFileEvent(ctx, "file_rename", virtFrom, "rename", 0, dec, false, map[string]any{"to_path": virtTo, "cross_mount": crossMount})
+
+	// Cross-mount inside -> outside: treat as a delete.
+	if crossMount && !intoMount {
+		return applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), "unlink", virtFrom, "", realPath, n.makeDivertFunc(realPath), func() syscall.Errno {
+			return n.LoopbackNode.Rename(ctx, name, newParent, newName, flags)
+		})
+	}
+
+	errno := applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), "rename", virtFrom, virtTo, realPath, n.makeDivertFunc(realPath), func() syscall.Errno {
+		return n.LoopbackNode.Rename(ctx, name, newParent, newName, flags)
+	})
+	if errno != 0 {
+		return errno
+	}
+
+	// Cross-mount outside -> inside: emit a create event with metadata after the move completes.
+	if intoMount {
+		extra := map[string]any{"from_path": virtFrom, "cross_mount": true}
+		if rp, err := newParentNode.realPath(virtTo, true); err == nil {
+			if st, err := os.Stat(rp); err == nil {
+				extra["size"] = st.Size()
+				if stat, ok := st.Sys().(*syscall.Stat_t); ok {
+					extra["nlink"] = stat.Nlink
+				}
+			}
+		}
+		n.emitFileEvent(ctx, "file_create", virtTo, "create", 0, dec, false, extra)
+	}
+
+	return errno
 }
 
 func (n *node) OpendirHandle(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
@@ -211,6 +281,12 @@ func (n *node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 		return n.LoopbackNode.Setattr(ctx, f, in, out)
 	}
 
+	if in.Valid&fuse.FATTR_SIZE != 0 {
+		return applyAuditPolicy(ctx, n.auditHooks(), n.hooksSessionID(), "truncate", virt, "", "", nil, func() syscall.Errno {
+			return n.LoopbackNode.Setattr(ctx, f, in, out)
+		})
+	}
+
 	return n.LoopbackNode.Setattr(ctx, f, in, out)
 }
 
@@ -266,11 +342,23 @@ func (f *fileHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 		f.n.emitFileEvent(ctx, "file_write", f.virtPath, "write", int64(len(data)), dec, true, nil)
 		return 0, syscall.EACCES
 	}
-	f.n.emitFileEvent(ctx, "file_write", f.virtPath, "write", int64(len(data)), dec, false, nil)
+	nwritten := uint32(0)
+	var errno syscall.Errno
 	if w, ok := f.inner.(fs.FileWriter); ok {
-		return w.Write(ctx, data, off)
+		nwritten, errno = w.Write(ctx, data, off)
+	} else {
+		errno = syscall.ENOSYS
 	}
-	return 0, syscall.ENOSYS
+	extra := map[string]any{}
+	if errno == 0 {
+		if real, err := f.n.realPath(f.virtPath, true); err == nil {
+			if st, err := os.Stat(real); err == nil {
+				extra["size"] = st.Size()
+			}
+		}
+	}
+	f.n.emitFileEvent(ctx, "file_write", f.virtPath, "write", int64(nwritten), dec, errno != 0, extra)
+	return nwritten, errno
 }
 
 func (f *fileHandle) Release(ctx context.Context) syscall.Errno {
@@ -436,4 +524,49 @@ func sanitizeName(name string) string {
 	name = strings.ReplaceAll(name, "\\", "/")
 	name = path.Clean("/" + name)
 	return strings.TrimPrefix(name, "/")
+}
+
+func (n *node) auditHooks() *FUSEAuditHooks {
+	if n == nil || n.hooks == nil {
+		return nil
+	}
+	return n.hooks.FUSEAudit
+}
+
+func (n *node) hooksSessionID() string {
+	if n == nil || n.hooks == nil {
+		return ""
+	}
+	return n.hooks.SessionID
+}
+
+func (n *node) realPath(virt string, mustExist bool) (string, error) {
+	root := ""
+	if n.RootData != nil {
+		root = n.RootData.Path
+	}
+	return resolveRealPathUnderRoot(root, virt, mustExist)
+}
+
+func (n *node) makeDivertFunc(realPath string) func() (*trash.Entry, error) {
+	h := n.auditHooks()
+	if h == nil || realPath == "" {
+		return nil
+	}
+	trashPath := h.Config.TrashPath
+	if trashPath == "" {
+		trashPath = ".agentsh_trash"
+	}
+	if !filepath.IsAbs(trashPath) && n.RootData != nil {
+		trashPath = filepath.Join(n.RootData.Path, trashPath)
+	}
+	sessionID := n.hooksSessionID()
+	hashLimit := h.HashLimitBytes
+	return func() (*trash.Entry, error) {
+		return trash.Divert(realPath, trash.Config{
+			TrashDir:       trashPath,
+			Session:        sessionID,
+			HashLimitBytes: hashLimit,
+		})
+	}
 }

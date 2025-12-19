@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
+	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/fsmonitor"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -57,12 +58,34 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		}
 		mountPoint := filepath.Join(mountBase, s.ID, "workspace-mnt")
 		em := storeEmitter{store: a.store, broker: a.broker}
+		hashLimit, _ := config.ParseByteSize(a.cfg.Sandbox.FUSE.Audit.HashSmallFilesUnder)
+		auditHooks := &fsmonitor.FUSEAuditHooks{
+			Config:         a.cfg.Sandbox.FUSE.Audit,
+			HashLimitBytes: hashLimit,
+			NotifySoftDelete: func(path, token string) {
+				ev := types.Event{
+					ID:        uuid.NewString(),
+					Timestamp: time.Now().UTC(),
+					Type:      "file_soft_deleted",
+					SessionID: s.ID,
+					CommandID: s.CurrentCommandID(),
+					Path:      path,
+					Fields: map[string]any{
+						"trash_token":  token,
+						"restore_hint": fmt.Sprintf("agentsh trash restore %s", token),
+					},
+				}
+				_ = a.store.AppendEvent(ctx, ev)
+				a.broker.Publish(ev)
+			},
+		}
 		m, err := fsmonitor.MountWorkspace(s.Workspace, mountPoint, &fsmonitor.Hooks{
 			SessionID: s.ID,
 			Session:   s,
 			Policy:    a.policy,
 			Approvals: a.approvals,
 			Emit:      em,
+			FUSEAudit: auditHooks,
 		})
 		if err != nil {
 			fail := types.Event{
@@ -259,8 +282,6 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	limits := a.policy.Limits()
 	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(ctx, s, cmdID, req, a.cfg, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits))
 
-	_ = a.store.SaveOutput(ctx, id, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
-
 	end := time.Now().UTC()
 	endEv := types.Event{
 		ID:        uuid.NewString(),
@@ -322,6 +343,8 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 		otherOps = []types.Event{}
 	}
 
+	stderrB, stderrTotal, softSuggestions := addSoftDeleteHints(fileOps, stderrB, stderrTotal)
+
 	res := types.ExecResult{
 		ExitCode:         exitCode,
 		Stdout:           string(stdoutB),
@@ -366,6 +389,13 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 		Resources: &resources,
 		Guidance:  guidanceForResponse(req, res, blockedOps),
 	}
+	if len(softSuggestions) > 0 {
+		if resp.Guidance == nil {
+			resp.Guidance = &types.ExecGuidance{Status: "ok"}
+		}
+		resp.Guidance.Suggestions = append(resp.Guidance.Suggestions, softSuggestions...)
+	}
+	_ = a.store.SaveOutput(ctx, id, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 	applyIncludeEvents(resp, includeEvents)
 	return resp, http.StatusOK, nil
 }
