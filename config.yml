@@ -177,6 +177,7 @@ sandbox:
     ebpf:
       enabled: false          # Linux only; set true to capture connects without proxy
       required: false         # If true and unsupported, agentsh fails to start; setting required=true implies enabled
+      resolve_rdns: false     # Best-effort reverse DNS for ebpf net_connect events (adds latency if true)
     # Port range for proxy listeners
     proxy_port_range: "10000-20000"
     

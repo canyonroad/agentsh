@@ -138,8 +138,9 @@ type SandboxTransparentNetworkConfig struct {
 }
 
 type SandboxEBPFConfig struct {
-	Enabled  bool `yaml:"enabled"`
-	Required bool `yaml:"required"`
+	Enabled     bool `yaml:"enabled"`
+	Required    bool `yaml:"required"`
+	ResolveRDNS bool `yaml:"resolve_rdns"` // optional reverse DNS on ebpf net events
 }
 
 type SandboxCgroupsConfig struct {
@@ -246,6 +247,7 @@ func applyDefaults(cfg *Config) {
 		// This coupling is also documented in config.yml.
 		cfg.Sandbox.Network.EBPF.Enabled = true
 	}
+	// Reverse DNS is off by default to avoid latency; no defaults needed otherwise.
 	// cgroups defaults to disabled unless explicitly enabled.
 	if cfg.Sandbox.Cgroups.BasePath == "" {
 		cfg.Sandbox.Cgroups.BasePath = ""

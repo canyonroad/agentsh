@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/metrics"
@@ -31,12 +32,20 @@ func forwardConnectEvents(ctx context.Context, in <-chan ebpf.ConnectEvent, emit
 				"proto":  ev.Protocol,
 			}
 			var remote string
+			var ipStr string
 			if ev.Family == 2 { // AF_INET
 				ip := net.IPv4(byte(ev.DstIPv4>>24), byte(ev.DstIPv4>>16), byte(ev.DstIPv4>>8), byte(ev.DstIPv4))
-				remote = net.JoinHostPort(ip.String(), itoa(ev.Dport))
+				ipStr = ip.String()
+				remote = net.JoinHostPort(ipStr, itoa(ev.Dport))
 			} else {
 				ip := net.IP(ev.DstIPv6[:])
-				remote = net.JoinHostPort(ip.String(), itoa(ev.Dport))
+				ipStr = ip.String()
+				remote = net.JoinHostPort(ipStr, itoa(ev.Dport))
+			}
+			if ipStr != "" && metrics != nil {
+				if rdns := reverseLookup(ipStr); rdns != "" {
+					fields["rdns"] = rdns
+				}
 			}
 
 			out := types.Event{
@@ -68,4 +77,16 @@ func itoa(v uint16) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// reverseLookup performs a best-effort reverse DNS lookup with a short timeout.
+// Returns empty string on failure/timeout.
+func reverseLookup(ip string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	names, err := net.DefaultResolver.LookupAddr(ctx, ip)
+	if err != nil || len(names) == 0 {
+		return ""
+	}
+	return strings.TrimSuffix(names[0], ".")
 }
