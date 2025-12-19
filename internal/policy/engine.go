@@ -127,6 +127,14 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 	return e, nil
 }
 
+// NetworkRules returns the raw network rules for read-only inspection (e.g., ebpf allowlist).
+func (e *Engine) NetworkRules() []NetworkRule {
+	if e == nil || e.policy == nil {
+		return nil
+	}
+	return e.policy.NetworkRules
+}
+
 func (e *Engine) Limits() Limits {
 	if e == nil || e.policy == nil {
 		return Limits{}

@@ -178,6 +178,15 @@ sandbox:
       enabled: false          # Linux only; set true to capture connects without proxy
       required: false         # If true and unsupported, agentsh fails to start; setting required=true implies enabled
       resolve_rdns: false     # Best-effort reverse DNS for ebpf net_connect events (adds latency if true)
+      enforce: false          # If true, deny connects in BPF unless allowed (only precise allow rules activate default-deny)
+      enforce_without_dns: false # If true, default-deny even when DNS resolution fails
+      map_allow_entries: 1024     # Optional override for allowlist map size (0 = default)
+      map_deny_entries: 1024      # Optional override for denylist map size (0 = default)
+      map_lpm_entries: 1024       # Optional override for LPM (CIDR) map size (0 = default)
+      map_lpm_deny_entries: 1024  # Optional override for deny LPM (CIDR) map size (0 = default)
+      map_default_entries: 1024   # Optional override for default_deny map size (0 = default)
+      dns_refresh_seconds: 60     # Interval to refresh DNS-derived allowlist (0 disables refresh)
+      dns_max_ttl_seconds: 60     # Cap for cached TTLs (used for refresh cadence)
     # Port range for proxy listeners
     proxy_port_range: "10000-20000"
     

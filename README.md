@@ -212,6 +212,48 @@ agentsh exec --pty SESSION_ID -- sh
 agentsh exec --argv0 /bin/sh SESSION_ID -- /bin/sh -lc 'echo hi'
 ```
 
+## Network monitoring & eBPF
+
+agentsh can observe outbound connects and optionally enforce per-session network allowlists in the kernel (cgroup eBPF), alongside proxy/transparent modes.
+
+Highlights
+- Events: all TCP connects emit `net_connect`; blocked ones emit `net_connect_blocked`. Optional rDNS adds `rdns`.
+-, when enabled, default-denies and allows only policy-derived destinations (domains → IPs, CIDRs, loopback). Wildcards stay non-strict (no default-deny).
+- Map sizing at runtime: `map_*_entries` config overrides are applied once at startup—no rebuild needed.
+- DNS refresh: domain allowlists refresh on a jittered interval capped by `dns_max_ttl_seconds`; cache is bounded and exposed via `/debug/ebpf`.
+
+Config snippet:
+```yaml
+sandbox:
+  network:
+    ebpf:
+      enabled: true
+      enforce: true
+      enforce_without_dns: false
+      resolve_rdns: false
+      dns_refresh_seconds: 60       # 0 disables refresh
+      dns_max_ttl_seconds: 60       # cap for cached TTLs
+      map_allow_entries: 2048       # allowlist map size (0 = embedded default)
+      map_deny_entries: 2048        # denylist map size
+      map_lpm_entries: 2048         # CIDR LPM map size
+      map_lpm_deny_entries: 2048    # deny LPM map size
+      map_default_entries: 1024     # default_deny map size
+      # Map overrides are applied at startup (process-wide); restart to change.
+```
+
+Policy example (allow outbound to a host):
+```yaml
+network_rules:
+  - name: allow-api
+    domains: ["api.example.com"]
+    ports: [443]
+    decision: allow
+```
+
+Debugging:
+- `GET /debug/ebpf` returns map overrides/defaults, last-populated map counts (not live occupancy), and DNS cache stats (read-only).
+- Integration (Linux, root, cgroup v2): `go test -tags=integration ./internal/netmonitor/ebpf`.
+
 ### gRPC API (optional)
 
 Enable `server.grpc.enabled` and use `proto/agentsh/v1/agentsh.proto`. The gRPC service uses `google.protobuf.Struct` so the payloads match the HTTP JSON shapes.
@@ -421,6 +463,7 @@ network_rules:
 - [`docs/project-structure.md`](docs/project-structure.md) — Repository structure and conventions
 - [`docs/approval-auth.md`](docs/approval-auth.md) — Approval/auth model
 - [`docs/cross-platform.md`](docs/cross-platform.md) — Cross-platform notes (Linux-first)
+- [`docs/ebpf.md`](docs/ebpf.md) — eBPF tracing/enforcement details and configuration
 
 ## Requirements
 

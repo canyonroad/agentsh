@@ -17,6 +17,8 @@ type ConnectEvent struct {
 	_        [6]byte
 	DstIPv4  uint32
 	DstIPv6  [16]byte
+	Blocked  uint8
+	_pad     [7]byte
 }
 
 // Collector stub for non-Linux platforms.

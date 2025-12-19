@@ -17,6 +17,7 @@ import (
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/netmonitor"
+	ebpftrace "github.com/agentsh/agentsh/internal/netmonitor/ebpf"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
@@ -40,6 +41,14 @@ type App struct {
 }
 
 func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector) *App {
+	// Apply EBPF map size overrides once per process (global maps); no-op if zero values.
+	ebpftrace.SetMapSizeOverrides(
+		uint32(cfg.Sandbox.Network.EBPF.MapAllowEntries),
+		uint32(cfg.Sandbox.Network.EBPF.MapDenyEntries),
+		uint32(cfg.Sandbox.Network.EBPF.MapLPMEntries),
+		uint32(cfg.Sandbox.Network.EBPF.MapLPMDenyEntries),
+		uint32(cfg.Sandbox.Network.EBPF.MapDefaultEntries),
+	)
 	return &App{cfg: cfg, sessions: sessions, store: store, policy: engine, broker: broker, apiKeyAuth: apiKeyAuth, approvals: approvalsMgr, metrics: metricsCollector}
 }
 
@@ -57,7 +66,27 @@ func (a *App) Router() http.Handler {
 			a.metrics.Handler(metrics.HandlerOptions{SessionCount: a.sessions.Count}).ServeHTTP(w, r)
 		})
 	}
-
+	// Lightweight EBPF debug endpoint (read-only) for map overrides and DNS cache size.
+	r.Get("/debug/ebpf", func(w http.ResponseWriter, r *http.Request) {
+		ov := ebpftrace.GetMapOverrides()
+		def, _ := ebpftrace.EmbeddedMapDefaults()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"map_allow_override":    ov.Allow,
+			"map_lpm_override":      ov.LPM,
+			"map_deny_override":     ov.Deny,
+			"map_lpm_deny_override": ov.LPMDeny,
+			"map_default_override":  ov.Default,
+			"map_allow_default":     def.Allow,
+			"map_deny_default":      def.Deny,
+			"map_lpm_default":       def.LPM,
+			"map_lpm_deny_default":  def.LPMDeny,
+			"map_default_default":   def.Default,
+			"map_counts_last":       ebpftrace.GetLastMapCounts(),
+			"map_counts_note":       "map_counts_last reflects the most recent PopulateAllowlist, not live occupancy",
+			"dns_cache_entries":     DNSCacheLen(),
+			"dns_cache_metrics":     DNSMetrics(),
+		})
+	})
 	r.Get(a.cfg.Health.Path, func(w http.ResponseWriter, r *http.Request) { writeText(w, http.StatusOK, "ok\n") })
 	r.Get(a.cfg.Health.ReadinessPath, func(w http.ResponseWriter, r *http.Request) { writeText(w, http.StatusOK, "ready\n") })
 
@@ -414,7 +443,7 @@ func (a *App) cgroupHook(sessionID string, cmdID string, limits policy.Limits) p
 			return nil, nil
 		}
 		em := storeEmitter{store: a.store, broker: a.broker}
-		return applyCgroupV2(context.Background(), em, a.cfg, sessionID, cmdID, pid, limits, a.metrics)
+		return applyCgroupV2(context.Background(), em, a.cfg, sessionID, cmdID, pid, limits, a.metrics, a.policy)
 	}
 }
 

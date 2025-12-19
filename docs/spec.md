@@ -700,6 +700,19 @@ func (d *DNSInterceptor) handleQuery(query []byte, clientAddr *net.UDPAddr) {
 }
 ```
 
+### 8.4 eBPF Connect Tracing & Enforcement (Linux)
+
+- Optional cgroup eBPF programs (`cgroup/connect4/6`) attach per session when enabled.
+- Emits `net_connect` / `net_connect_blocked` events with pid/tgid, ports, family, dst IP, optional rDNS.
+- Enforcement (default-deny) activates when `sandbox.network.ebpf.enforce=true`; allowlist is built from policy:
+  - Exact domains resolved to IPs (periodic refresh; bounded cache; TTL capped by config).
+  - CIDRs (port-aware via LPM trie).
+  - Explicit denies are supported via deny maps (exact + CIDR); checked before allow/default-deny.
+- Loopback always allowed.
+- Wildcard domains keep enforcement non-strict (default-deny disabled); event `ebpf_enforce_non_strict` emitted.
+- Map sizing is configurable at startup (`map_allow_entries`, `map_lpm_entries`, `map_default_entries`); overrides are process-wide.
+- Debug: `/debug/ebpf` reports map overrides/defaults and DNS cache stats.
+
 ### 8.4 Network Event Schema
 
 ```json

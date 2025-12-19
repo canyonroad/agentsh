@@ -280,6 +280,14 @@ network_rules:
     ports: [443, 80]
     decision: allow
 
+  # Explicit deny example (still logged; enforced in eBPF deny maps when enabled)
+  - name: deny-badhost
+    description: Block known-bad host
+    domains:
+      - "badhost.example.com"
+    ports: [0]   # 0 = any port
+    decision: deny
+
   # ---------------------------------------------------------------------------
   # Code hosting
   # ---------------------------------------------------------------------------

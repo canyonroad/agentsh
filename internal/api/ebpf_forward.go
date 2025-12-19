@@ -51,7 +51,12 @@ func forwardConnectEvents(ctx context.Context, in <-chan ebpf.ConnectEvent, emit
 			out := types.Event{
 				ID:        uuid.NewString(),
 				Timestamp: time.Unix(0, int64(ev.TsNs)).UTC(),
-				Type:      "net_connect",
+				Type: func() string {
+					if ev.Blocked != 0 {
+						return "net_connect_blocked"
+					}
+					return "net_connect"
+				}(),
 				SessionID: sessionID,
 				CommandID: commandID,
 				Remote:    remote,

@@ -32,6 +32,16 @@ sandbox:
     ebpf:
       enabled: true
       required: true
+      resolve_rdns: true
+      enforce: true
+      enforce_without_dns: true
+      map_allow_entries: 2048
+      map_deny_entries: 1024
+      map_lpm_entries: 2048
+      map_lpm_deny_entries: 512
+      map_default_entries: 512
+      dns_refresh_seconds: 45
+      dns_max_ttl_seconds: 30
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +82,36 @@ sandbox:
 	}
 	if !cfg.Sandbox.Network.EBPF.Required {
 		t.Fatalf("sandbox.network.ebpf.required: expected true")
+	}
+	if !cfg.Sandbox.Network.EBPF.ResolveRDNS {
+		t.Fatalf("sandbox.network.ebpf.resolve_rdns: expected true")
+	}
+	if !cfg.Sandbox.Network.EBPF.Enforce {
+		t.Fatalf("sandbox.network.ebpf.enforce: expected true")
+	}
+	if !cfg.Sandbox.Network.EBPF.EnforceWithoutDNS {
+		t.Fatalf("sandbox.network.ebpf.enforce_without_dns: expected true")
+	}
+	if cfg.Sandbox.Network.EBPF.MapAllowEntries != 2048 {
+		t.Fatalf("sandbox.network.ebpf.map_allow_entries: expected 2048")
+	}
+	if cfg.Sandbox.Network.EBPF.MapDenyEntries != 1024 {
+		t.Fatalf("sandbox.network.ebpf.map_deny_entries: expected 1024")
+	}
+	if cfg.Sandbox.Network.EBPF.MapLPMEntries != 2048 {
+		t.Fatalf("sandbox.network.ebpf.map_lpm_entries: expected 2048")
+	}
+	if cfg.Sandbox.Network.EBPF.MapLPMDenyEntries != 512 {
+		t.Fatalf("sandbox.network.ebpf.map_lpm_deny_entries: expected 512")
+	}
+	if cfg.Sandbox.Network.EBPF.MapDefaultEntries != 512 {
+		t.Fatalf("sandbox.network.ebpf.map_default_entries: expected 512")
+	}
+	if cfg.Sandbox.Network.EBPF.DNSRefreshSeconds != 45 {
+		t.Fatalf("sandbox.network.ebpf.dns_refresh_seconds: expected 45")
+	}
+	if cfg.Sandbox.Network.EBPF.DNSMaxTTLSeconds != 30 {
+		t.Fatalf("sandbox.network.ebpf.dns_max_ttl_seconds: expected 30")
 	}
 }
 

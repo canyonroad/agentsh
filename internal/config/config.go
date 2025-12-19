@@ -138,9 +138,18 @@ type SandboxTransparentNetworkConfig struct {
 }
 
 type SandboxEBPFConfig struct {
-	Enabled     bool `yaml:"enabled"`
-	Required    bool `yaml:"required"`
-	ResolveRDNS bool `yaml:"resolve_rdns"` // optional reverse DNS on ebpf net events
+	Enabled           bool `yaml:"enabled"`
+	Required          bool `yaml:"required"`
+	ResolveRDNS       bool `yaml:"resolve_rdns"`         // optional reverse DNS on ebpf net events
+	Enforce           bool `yaml:"enforce"`              // deny in BPF if not allowed
+	EnforceWithoutDNS bool `yaml:"enforce_without_dns"`  // when true, default deny even if DNS resolution failed
+	MapAllowEntries   int  `yaml:"map_allow_entries"`    // optional override for allowlist map size
+	MapDenyEntries    int  `yaml:"map_deny_entries"`     // optional override for denylist map size
+	MapLPMEntries     int  `yaml:"map_lpm_entries"`      // optional override for LPM map size
+	MapLPMDenyEntries int  `yaml:"map_lpm_deny_entries"` // optional override for deny LPM map size
+	MapDefaultEntries int  `yaml:"map_default_entries"`  // optional override for default_deny map size
+	DNSRefreshSeconds int  `yaml:"dns_refresh_seconds"`  // interval to refresh DNS-derived allowlist (0 disables)
+	DNSMaxTTLSeconds  int  `yaml:"dns_max_ttl_seconds"`  // cap TTL used for caching/refresh (0 uses default 60s)
 }
 
 type SandboxCgroupsConfig struct {
@@ -246,6 +255,22 @@ func applyDefaults(cfg *Config) {
 		// If a user set required=true but forgot enabled, force enable to avoid silent misconfig.
 		// This coupling is also documented in config.yml.
 		cfg.Sandbox.Network.EBPF.Enabled = true
+	}
+	// If enforce is set, ebpf must be enabled.
+	if cfg.Sandbox.Network.EBPF.Enforce && !cfg.Sandbox.Network.EBPF.Enabled {
+		cfg.Sandbox.Network.EBPF.Enabled = true
+	}
+	if cfg.Sandbox.Network.EBPF.DNSRefreshSeconds < 0 {
+		cfg.Sandbox.Network.EBPF.DNSRefreshSeconds = 0
+	}
+	if cfg.Sandbox.Network.EBPF.DNSMaxTTLSeconds <= 0 {
+		cfg.Sandbox.Network.EBPF.DNSMaxTTLSeconds = 60
+	}
+	if cfg.Sandbox.Network.EBPF.MapDenyEntries < 0 {
+		cfg.Sandbox.Network.EBPF.MapDenyEntries = 0
+	}
+	if cfg.Sandbox.Network.EBPF.MapLPMDenyEntries < 0 {
+		cfg.Sandbox.Network.EBPF.MapLPMDenyEntries = 0
 	}
 	// Reverse DNS is off by default to avoid latency; no defaults needed otherwise.
 	// cgroups defaults to disabled unless explicitly enabled.

@@ -24,6 +24,8 @@ type ConnectEvent struct {
 	_        [6]byte
 	DstIPv4  uint32
 	DstIPv6  [16]byte
+	Blocked  uint8
+	_pad     [7]byte
 }
 
 // Collector reads events from the BPF ring buffer.
@@ -79,7 +81,7 @@ func (c *Collector) loop() {
 			continue
 		}
 		var ev ConnectEvent
-		if len(record.RawSample) >= 40 { // basic size guard
+		if len(record.RawSample) >= 49 { // 49 bytes needed for blocked flag
 			copyToEvent(&ev, record.RawSample)
 			select {
 			case c.events <- ev:
@@ -102,10 +104,14 @@ func copyToEvent(ev *ConnectEvent, data []byte) {
 	ev.Dport = le16(data[26:])
 	ev.Family = data[28]
 	ev.Protocol = data[29]
-	if ev.Family == 2 { // AF_INET
-		ev.DstIPv4 = le32(data[36:])
-	} else {
-		copy(ev.DstIPv6[:], data[32:48])
+	if len(data) >= 48 {
+		copy(ev.DstIPv6[:], data[32:48]) // always copy 16 bytes
+		if len(data) >= 40 {
+			ev.DstIPv4 = le32(data[36:]) // overlap ok for v4
+		}
+	}
+	if len(data) > 48 {
+		ev.Blocked = data[48]
 	}
 }
 
