@@ -16,6 +16,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/client"
 	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -125,6 +126,17 @@ func startServerContainer(t *testing.T, ctx context.Context, bin, configPath, po
 		ExposedPorts: []string{"8080/tcp"},
 		Cmd:          []string{"/usr/local/bin/agentsh", "server", "--config", "/config.yaml"},
 		Mounts:       binds,
+		Privileged:   true,
+		CapAdd:       []string{"SYS_ADMIN"},
+		HostConfigModifier: func(hc *container.HostConfig) {
+			if _, err := os.Stat("/dev/fuse"); err == nil {
+				hc.Devices = append(hc.Devices, container.DeviceMapping{
+					PathOnHost:        "/dev/fuse",
+					PathInContainer:   "/dev/fuse",
+					CgroupPermissions: "rwm",
+				})
+			}
+		},
 		WaitingFor: wait.ForHTTP("/health").
 			WithPort("8080/tcp").
 			WithStartupTimeout(60 * time.Second).
