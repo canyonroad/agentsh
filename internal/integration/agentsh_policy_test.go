@@ -79,12 +79,15 @@ func buildAgentshBinary(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	// Module root is two levels up from internal/integration.
-	repoRoot := filepath.Dir(filepath.Dir(wd))
+	repoRoot := wd
+	if _, err := os.Stat(filepath.Join(repoRoot, "go.mod")); err != nil {
+		// Fallback: if running with package cwd, climb up to module root.
+		repoRoot = filepath.Dir(repoRoot)
+	}
 
 	cmd := exec.Command("go", "build", "-o", out, "./cmd/agentsh")
 	cmd.Dir = repoRoot
-	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64")
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
 	if outEnv := os.Getenv("GOEXPERIMENT"); outEnv != "" {
 		cmd.Env = append(cmd.Env, "GOEXPERIMENT="+outEnv)
 	}
