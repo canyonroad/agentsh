@@ -91,20 +91,22 @@ func buildAgentshBinary(t *testing.T) string {
 func startServerContainer(t *testing.T, ctx context.Context, bin, configPath, policiesDir, workspace string) (string, func()) {
 	t.Helper()
 
+	binds := []testcontainers.ContainerMount{
+		testcontainers.BindMount(bin, "/usr/local/bin/agentsh"),
+		testcontainers.BindMount(configPath, "/config.yaml"),
+		testcontainers.BindMount(policiesDir, "/policies"),
+		testcontainers.BindMount(workspace, "/workspace"),
+	}
+
 	req := testcontainers.ContainerRequest{
 		Image:        "debian:bookworm-slim",
 		ExposedPorts: []string{"8080/tcp"},
 		Cmd:          []string{"/usr/local/bin/agentsh", "server", "--config", "/config.yaml"},
+		Mounts:       binds,
 		WaitingFor: wait.ForHTTP("/health").
 			WithPort("8080/tcp").
 			WithStartupTimeout(60 * time.Second).
 			WithStatusCodeMatcher(func(code int) bool { return code == http.StatusOK || code == http.StatusNotFound }),
-		BindMounts: map[string]string{
-			bin:         "/usr/local/bin/agentsh",
-			configPath:  "/config.yaml",
-			policiesDir: "/policies",
-			workspace:   "/workspace",
-		},
 	}
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
