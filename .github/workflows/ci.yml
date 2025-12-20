@@ -64,7 +64,7 @@ jobs:
         run: go build ./...
 
   integration:
-    needs: [test, build-matrix]
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
