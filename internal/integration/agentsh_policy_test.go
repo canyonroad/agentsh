@@ -79,10 +79,17 @@ func buildAgentshBinary(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
+
 	repoRoot := wd
-	if _, err := os.Stat(filepath.Join(repoRoot, "go.mod")); err != nil {
-		// Fallback: if running with package cwd, climb up to module root.
-		repoRoot = filepath.Dir(repoRoot)
+	for {
+		if _, err := os.Stat(filepath.Join(repoRoot, "go.mod")); err == nil {
+			break
+		}
+		next := filepath.Dir(repoRoot)
+		if next == repoRoot {
+			t.Fatalf("go.mod not found when walking up from %s", wd)
+		}
+		repoRoot = next
 	}
 
 	cmd := exec.Command("go", "build", "-o", out, "./cmd/agentsh")
