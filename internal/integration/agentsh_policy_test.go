@@ -4,7 +4,9 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -28,8 +30,11 @@ func TestPolicyAllowAndDenyCommands(t *testing.T) {
 	mustMkdir(t, policiesDir)
 	writeFile(t, filepath.Join(policiesDir, "default.yaml"), testPolicyYAML)
 
+	keysPath := filepath.Join(temp, "keys.yaml")
+	writeFile(t, keysPath, testAPIKeysYAML)
+
 	configPath := filepath.Join(temp, "config.yaml")
-	writeFile(t, configPath, fmt.Sprintf(testConfigTemplate, policiesDir))
+	writeFile(t, configPath, testConfigTemplate)
 
 	workspace := filepath.Join(temp, "workspace")
 	mustMkdir(t, workspace)
@@ -38,7 +43,7 @@ func TestPolicyAllowAndDenyCommands(t *testing.T) {
 	endpoint, cleanup := startServerContainer(t, ctx, bin, configPath, policiesDir, workspace)
 	t.Cleanup(func() { cleanup() })
 
-	cli := client.New(endpoint, "")
+	cli := client.New(endpoint, "test-key")
 
 	sess, err := cli.CreateSession(ctx, "/workspace", "default")
 	if err != nil {
@@ -56,15 +61,13 @@ func TestPolicyAllowAndDenyCommands(t *testing.T) {
 		t.Fatalf("allow command unexpected result: %+v", allowResp.Result)
 	}
 
-	blockResp, err := cli.Exec(ctx, sess.ID, types.ExecRequest{
+	_, err = cli.Exec(ctx, sess.ID, types.ExecRequest{
 		Command: "cat",
 		Args:    []string{"/workspace/file.txt"},
 	})
-	if err != nil {
-		t.Fatalf("Exec block returned error: %v", err)
-	}
-	if blockResp.Result.Error == nil && blockResp.Result.ExitCode == 0 {
-		t.Fatalf("expected policy block, got %+v", blockResp.Result)
+	var httpErr *client.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected policy deny 403, got %v", err)
 	}
 
 	if err := cli.DestroySession(ctx, sess.ID); err != nil {
@@ -112,6 +115,7 @@ func startServerContainer(t *testing.T, ctx context.Context, bin, configPath, po
 	binds := []testcontainers.ContainerMount{
 		testcontainers.BindMount(bin, "/usr/local/bin/agentsh"),
 		testcontainers.BindMount(configPath, "/config.yaml"),
+		testcontainers.BindMount(filepath.Join(filepath.Dir(configPath), "keys.yaml"), "/keys.yaml"),
 		testcontainers.BindMount(policiesDir, "/policies"),
 		testcontainers.BindMount(workspace, "/workspace"),
 	}
@@ -132,6 +136,15 @@ func startServerContainer(t *testing.T, ctx context.Context, bin, configPath, po
 		Started:          true,
 	})
 	if err != nil {
+		if container != nil {
+			if logs, logErr := container.Logs(ctx); logErr == nil {
+				defer logs.Close()
+				b, _ := io.ReadAll(logs)
+				t.Logf("container logs:\n%s", string(b))
+			} else {
+				t.Logf("container logs unavailable: %v", logErr)
+			}
+		}
 		t.Fatalf("start container: %v", err)
 	}
 
@@ -189,12 +202,22 @@ resource_limits:
   idle_timeout: 30m
 `
 
+const testAPIKeysYAML = `
+- id: test
+  key: test-key
+  description: integration test key
+  role: admin
+`
+
 const testConfigTemplate = `
 server:
   http:
     addr: "0.0.0.0:8080"
 auth:
-  type: "none"
+  type: "api_key"
+  api_key:
+    keys_file: "/keys.yaml"
+    header_name: "X-API-Key"
 logging:
   level: "info"
   format: "text"
@@ -211,7 +234,7 @@ sandbox:
   network:
     enabled: false
 policies:
-  dir: "%s"
+  dir: "/policies"
   default: "default"
 approvals:
   enabled: false
