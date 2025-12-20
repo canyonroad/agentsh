@@ -54,6 +54,7 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 	sess.SetCurrentCommandID(cmdID)
 
 	pre := a.policy.CheckCommand(req.Command, req.Args)
+	redirected, originalCmd, originalArgs := applyCommandRedirect(&req.Command, &req.Args, pre)
 	approvalErr := error(nil)
 	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && a.approvals != nil {
 		apr := approvals.Request{
@@ -94,14 +95,40 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 			Rule:              pre.Rule,
 			Message:           pre.Message,
 			Approval:          pre.Approval,
+			Redirect:          pre.Redirect,
 		},
 		Fields: map[string]any{
-			"command": req.Command,
-			"args":    req.Args,
+			"command": originalCmd,
+			"args":    originalArgs,
 		},
 	}
 	_ = a.store.AppendEvent(ctx, preEv)
 	a.broker.Publish(preEv)
+
+	if redirected && pre.Redirect != nil {
+		redirEv := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: start,
+			Type:      "command_redirected",
+			SessionID: sessionID,
+			CommandID: cmdID,
+			Policy: &types.PolicyInfo{
+				Decision:          types.DecisionRedirect,
+				EffectiveDecision: types.DecisionAllow,
+				Rule:              pre.Rule,
+				Message:           pre.Message,
+				Redirect:          pre.Redirect,
+			},
+			Fields: map[string]any{
+				"from_command": originalCmd,
+				"from_args":    originalArgs,
+				"to_command":   req.Command,
+				"to_args":      req.Args,
+			},
+		}
+		_ = a.store.AppendEvent(ctx, redirEv)
+		a.broker.Publish(redirEv)
+	}
 
 	if pre.EffectiveDecision == types.DecisionDeny {
 		defer unlock()
@@ -116,7 +143,7 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 	}
 
 	// Record history like non-PTY exec (only for allowed commands).
-	sess.RecordHistory(strings.TrimSpace(req.Command + " " + strings.Join(req.Args, " ")))
+	sess.RecordHistory(strings.TrimSpace(originalCmd + " " + strings.Join(originalArgs, " ")))
 
 	workdir, err := resolveWorkingDir(sess, strings.TrimSpace(req.WorkingDir))
 	if err != nil {

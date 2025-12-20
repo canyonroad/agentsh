@@ -41,25 +41,31 @@ type NetworkRule struct {
 }
 
 type CommandRule struct {
-	Name        string   `yaml:"name"`
-	Description string   `yaml:"description"`
-	Commands     []string `yaml:"commands"`
-	ArgsPatterns []string `yaml:"args_patterns"`
-	Decision     string   `yaml:"decision"`
-	Message      string   `yaml:"message"`
+	Name         string           `yaml:"name"`
+	Description  string           `yaml:"description"`
+	Commands     []string         `yaml:"commands"`
+	ArgsPatterns []string         `yaml:"args_patterns"`
+	Decision     string           `yaml:"decision"`
+	Message      string           `yaml:"message"`
+	RedirectTo   *CommandRedirect `yaml:"redirect_to,omitempty"`
+}
+
+type CommandRedirect struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args,omitempty"`
 }
 
 type ResourceLimits struct {
-	MaxMemoryMB       int      `yaml:"max_memory_mb"`
-	MemorySwapMaxMB   int      `yaml:"memory_swap_max_mb"`
-	CPUQuotaPercent   int      `yaml:"cpu_quota_percent"`
-	DiskReadBpsMax    int64    `yaml:"disk_read_bps_max"`
-	DiskWriteBpsMax   int64    `yaml:"disk_write_bps_max"`
-	NetBandwidthMbps  int      `yaml:"net_bandwidth_mbps"`
-	PidsMax           int      `yaml:"pids_max"`
-	CommandTimeout    duration `yaml:"command_timeout"`
-	SessionTimeout    duration `yaml:"session_timeout"`
-	IdleTimeout       duration `yaml:"idle_timeout"`
+	MaxMemoryMB      int      `yaml:"max_memory_mb"`
+	MemorySwapMaxMB  int      `yaml:"memory_swap_max_mb"`
+	CPUQuotaPercent  int      `yaml:"cpu_quota_percent"`
+	DiskReadBpsMax   int64    `yaml:"disk_read_bps_max"`
+	DiskWriteBpsMax  int64    `yaml:"disk_write_bps_max"`
+	NetBandwidthMbps int      `yaml:"net_bandwidth_mbps"`
+	PidsMax          int      `yaml:"pids_max"`
+	CommandTimeout   duration `yaml:"command_timeout"`
+	SessionTimeout   duration `yaml:"session_timeout"`
+	IdleTimeout      duration `yaml:"idle_timeout"`
 }
 
 type duration struct{ time.Duration }

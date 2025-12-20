@@ -56,6 +56,7 @@ type Decision struct {
 	Rule              string
 	Message           string
 	Approval          *types.ApprovalInfo
+	Redirect          *types.RedirectInfo
 }
 
 func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
@@ -202,10 +203,10 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 			}
 		}
 
-		return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message)
+		return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
 	}
 
-	return e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "")
+	return e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "", nil)
 }
 
 func (e *Engine) CheckCommand(command string, args []string) Decision {
@@ -233,9 +234,9 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 				continue
 			}
 		}
-		return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message)
+		return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, r.rule.RedirectTo)
 	}
-	return e.wrapDecision(string(types.DecisionAllow), "", "")
+	return e.wrapDecision(string(types.DecisionAllow), "", "", nil)
 }
 
 func (e *Engine) CheckFile(p string, operation string) Decision {
@@ -246,12 +247,12 @@ func (e *Engine) CheckFile(p string, operation string) Decision {
 		}
 		for _, g := range r.globs {
 			if g.Match(p) {
-				return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message)
+				return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
 			}
 		}
 	}
 	// Default deny (policy files typically include an explicit default deny, but we enforce it here too).
-	return e.wrapDecision(string(types.DecisionDeny), "default-deny-files", "")
+	return e.wrapDecision(string(types.DecisionDeny), "default-deny-files", "", nil)
 }
 
 func (e *Engine) CheckNetwork(domain string, port int) Decision {
@@ -323,10 +324,10 @@ func (e *Engine) CheckNetwork(domain string, port int) Decision {
 		}
 
 		// If rule has no selectors, it matches (e.g., approve unknown https by port only).
-		return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message)
+		return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
 	}
 
-	return e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "")
+	return e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "", nil)
 }
 
 func matchOp(ops map[string]struct{}, op string) bool {
@@ -340,7 +341,7 @@ func matchOp(ops map[string]struct{}, op string) bool {
 	return ok
 }
 
-func (e *Engine) wrapDecision(decision string, rule string, msg string) Decision {
+func (e *Engine) wrapDecision(decision string, rule string, msg string, redirect *CommandRedirect) Decision {
 	pd := types.Decision(strings.ToLower(decision))
 	switch pd {
 	case types.DecisionAllow:
@@ -364,8 +365,27 @@ func (e *Engine) wrapDecision(decision string, rule string, msg string) Decision
 			Message:           msg,
 			Approval:          &types.ApprovalInfo{Required: true, Mode: types.ApprovalModeShadow},
 		}
+	case types.DecisionRedirect:
+		return Decision{
+			PolicyDecision:    pd,
+			EffectiveDecision: types.DecisionAllow,
+			Rule:              rule,
+			Message:           msg,
+			Redirect:          toRedirectInfo(redirect, msg),
+		}
 	default:
 		// Safe fallback.
 		return Decision{PolicyDecision: types.DecisionDeny, EffectiveDecision: types.DecisionDeny, Rule: "invalid-policy-decision", Message: "invalid decision in policy"}
+	}
+}
+
+func toRedirectInfo(r *CommandRedirect, msg string) *types.RedirectInfo {
+	if r == nil || strings.TrimSpace(r.Command) == "" {
+		return nil
+	}
+	return &types.RedirectInfo{
+		Command: r.Command,
+		Args:    append([]string{}, r.Args...),
+		Reason:  msg,
 	}
 }

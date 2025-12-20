@@ -46,6 +46,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 	s.SetCurrentCommandID(cmdID)
 
 	pre := a.policy.CheckCommand(req.Command, req.Args)
+	redirected, originalCmd, originalArgs := applyCommandRedirect(&req.Command, &req.Args, pre)
 	approvalErr := error(nil)
 	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && a.approvals != nil {
 		apr := approvals.Request{
@@ -85,14 +86,40 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 			Rule:              pre.Rule,
 			Message:           pre.Message,
 			Approval:          pre.Approval,
+			Redirect:          pre.Redirect,
 		},
 		Fields: map[string]any{
-			"command": req.Command,
-			"args":    req.Args,
+			"command": originalCmd,
+			"args":    originalArgs,
 		},
 	}
 	_ = a.store.AppendEvent(r.Context(), preEv)
 	a.broker.Publish(preEv)
+
+	if redirected && pre.Redirect != nil {
+		redirEv := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: start,
+			Type:      "command_redirected",
+			SessionID: id,
+			CommandID: cmdID,
+			Policy: &types.PolicyInfo{
+				Decision:          types.DecisionRedirect,
+				EffectiveDecision: types.DecisionAllow,
+				Rule:              pre.Rule,
+				Message:           pre.Message,
+				Redirect:          pre.Redirect,
+			},
+			Fields: map[string]any{
+				"from_command": originalCmd,
+				"from_args":    originalArgs,
+				"to_command":   req.Command,
+				"to_args":      req.Args,
+			},
+		}
+		_ = a.store.AppendEvent(r.Context(), redirEv)
+		a.broker.Publish(redirEv)
+	}
 
 	if pre.EffectiveDecision == types.DecisionDeny {
 		code := "E_POLICY_DENIED"

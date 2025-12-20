@@ -175,6 +175,7 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 	sess.SetCurrentCommandID(cmdID)
 
 	pre := s.app.policy.CheckCommand(execReq.Command, execReq.Args)
+	redirected, originalCmd, originalArgs := applyCommandRedirect(&execReq.Command, &execReq.Args, pre)
 	approvalErr := error(nil)
 	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && s.app.approvals != nil {
 		apr := approvals.Request{
@@ -214,14 +215,40 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 			Rule:              pre.Rule,
 			Message:           pre.Message,
 			Approval:          pre.Approval,
+			Redirect:          pre.Redirect,
 		},
 		Fields: map[string]any{
-			"command": execReq.Command,
-			"args":    execReq.Args,
+			"command": originalCmd,
+			"args":    originalArgs,
 		},
 	}
 	_ = s.app.store.AppendEvent(stream.Context(), preEv)
 	s.app.broker.Publish(preEv)
+
+	if redirected && pre.Redirect != nil {
+		redirEv := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: start,
+			Type:      "command_redirected",
+			SessionID: req.SessionID,
+			CommandID: cmdID,
+			Policy: &types.PolicyInfo{
+				Decision:          types.DecisionRedirect,
+				EffectiveDecision: types.DecisionAllow,
+				Rule:              pre.Rule,
+				Message:           pre.Message,
+				Redirect:          pre.Redirect,
+			},
+			Fields: map[string]any{
+				"from_command": originalCmd,
+				"from_args":    originalArgs,
+				"to_command":   execReq.Command,
+				"to_args":      execReq.Args,
+			},
+		}
+		_ = s.app.store.AppendEvent(stream.Context(), redirEv)
+		s.app.broker.Publish(redirEv)
+	}
 
 	if pre.EffectiveDecision == types.DecisionDeny {
 		code := "E_POLICY_DENIED"

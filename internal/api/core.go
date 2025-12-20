@@ -173,6 +173,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	}
 
 	pre := a.policy.CheckCommand(req.Command, req.Args)
+	redirected, originalCmd, originalArgs := applyCommandRedirect(&req.Command, &req.Args, pre)
 	approvalErr := error(nil)
 	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && a.approvals != nil {
 		apr := approvals.Request{
@@ -212,14 +213,40 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 			Rule:              pre.Rule,
 			Message:           pre.Message,
 			Approval:          pre.Approval,
+			Redirect:          pre.Redirect,
 		},
 		Fields: map[string]any{
-			"command": req.Command,
-			"args":    req.Args,
+			"command": originalCmd,
+			"args":    originalArgs,
 		},
 	}
 	_ = a.store.AppendEvent(ctx, preEv)
 	a.broker.Publish(preEv)
+
+	if redirected && pre.Redirect != nil {
+		redirEv := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: start,
+			Type:      "command_redirected",
+			SessionID: id,
+			CommandID: cmdID,
+			Policy: &types.PolicyInfo{
+				Decision:          types.DecisionRedirect,
+				EffectiveDecision: types.DecisionAllow,
+				Rule:              pre.Rule,
+				Message:           pre.Message,
+				Redirect:          pre.Redirect,
+			},
+			Fields: map[string]any{
+				"from_command": originalCmd,
+				"from_args":    originalArgs,
+				"to_command":   req.Command,
+				"to_args":      req.Args,
+			},
+		}
+		_ = a.store.AppendEvent(ctx, redirEv)
+		a.broker.Publish(redirEv)
+	}
 
 	if pre.EffectiveDecision == types.DecisionDeny {
 		code := "E_POLICY_DENIED"
@@ -389,6 +416,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 		Resources: &resources,
 		Guidance:  guidanceForResponse(req, res, blockedOps),
 	}
+	addRedirectGuidance(resp, pre, originalCmd, originalArgs)
 	if len(softSuggestions) > 0 {
 		if resp.Guidance == nil {
 			resp.Guidance = &types.ExecGuidance{Status: "ok"}

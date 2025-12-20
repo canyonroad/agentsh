@@ -754,6 +754,46 @@ func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps
 	return g
 }
 
+// applyCommandRedirect mutates the command/args if the policy requested a redirect.
+// It returns whether a redirect was applied along with the original command/args.
+func applyCommandRedirect(command *string, args *[]string, pre policy.Decision) (redirected bool, originalCmd string, originalArgs []string) {
+	originalCmd = *command
+	originalArgs = append([]string{}, (*args)...)
+
+	if pre.PolicyDecision == types.DecisionRedirect && pre.Redirect != nil && strings.TrimSpace(pre.Redirect.Command) != "" {
+		*command = pre.Redirect.Command
+		*args = append([]string{}, pre.Redirect.Args...)
+		return true, originalCmd, originalArgs
+	}
+	return false, originalCmd, originalArgs
+}
+
+// addRedirectGuidance ensures the response carries a substitution hint when a redirect occurred.
+func addRedirectGuidance(resp *types.ExecResponse, pre policy.Decision, originalCmd string, originalArgs []string) {
+	if resp == nil || pre.PolicyDecision != types.DecisionRedirect || pre.Redirect == nil {
+		return
+	}
+	if resp.Guidance == nil {
+		resp.Guidance = &types.ExecGuidance{Status: "ok"}
+	}
+	cmdStr := pre.Redirect.Command
+	if len(pre.Redirect.Args) > 0 {
+		cmdStr = fmt.Sprintf("%s %s", pre.Redirect.Command, strings.Join(pre.Redirect.Args, " "))
+	}
+	reason := pre.Message
+	if reason == "" && resp.Guidance.Reason != "" {
+		reason = resp.Guidance.Reason
+	}
+	resp.Guidance.Substitutions = append([]types.Suggestion{{
+		Action:  "redirected",
+		Command: cmdStr,
+		Reason:  reason,
+	}}, resp.Guidance.Substitutions...)
+	if resp.Guidance.PolicyRule == "" {
+		resp.Guidance.PolicyRule = pre.Rule
+	}
+}
+
 func (a *App) streamEvents(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if _, ok := a.sessions.Get(id); !ok {
