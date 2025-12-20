@@ -75,7 +75,15 @@ func TestPolicyAllowAndDenyCommands(t *testing.T) {
 func buildAgentshBinary(t *testing.T) string {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "agentsh")
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	// Module root is two levels up from internal/integration.
+	repoRoot := filepath.Dir(filepath.Dir(wd))
+
 	cmd := exec.Command("go", "build", "-o", out, "./cmd/agentsh")
+	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64")
 	if outEnv := os.Getenv("GOEXPERIMENT"); outEnv != "" {
 		cmd.Env = append(cmd.Env, "GOEXPERIMENT="+outEnv)
