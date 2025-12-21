@@ -13,6 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev pkg-config
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -56,12 +59,22 @@ jobs:
             .gopath
           key: ${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}
 
+      - name: Install build deps (linux only)
+        if: matrix.goos == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev pkg-config
+
       - name: Cross-compile (build only)
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: go build ./...
+        run: |
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            if [ "${{ matrix.goarch }}" = "arm64" ]; then
+              export CGO_ENABLED=0
+            else
+              export CGO_ENABLED=1
+            fi
+          else
+            export CGO_ENABLED=0
+          fi
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=$CGO_ENABLED go build ./...
 
   integration:
     needs: test
@@ -69,6 +82,9 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev pkg-config
 
       - uses: actions/setup-go@v5
         with:

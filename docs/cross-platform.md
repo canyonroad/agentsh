@@ -4,7 +4,7 @@
 
 agentsh is **Linux-first**. The current implementation relies on Linux features (notably FUSE) for full workspace visibility.
 
-If you’re on Windows or macOS, the recommended approach is to run agentsh inside a Linux environment and connect to it over HTTP or the unix socket exposed inside that environment.
+If you’re on Windows or macOS, the recommended approach is to run agentsh inside a Linux environment and connect to it over HTTP or the unix socket exposed inside that environment. Unix socket monitoring (seccomp user-notify) is Linux-only and currently audit-only.
 
 ## What works today
 

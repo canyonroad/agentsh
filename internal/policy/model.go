@@ -12,9 +12,10 @@ type Policy struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
 
-	FileRules    []FileRule    `yaml:"file_rules"`
-	NetworkRules []NetworkRule `yaml:"network_rules"`
-	CommandRules []CommandRule `yaml:"command_rules"`
+	FileRules    []FileRule       `yaml:"file_rules"`
+	NetworkRules []NetworkRule    `yaml:"network_rules"`
+	CommandRules []CommandRule    `yaml:"command_rules"`
+	UnixRules    []UnixSocketRule `yaml:"unix_socket_rules"`
 
 	ResourceLimits ResourceLimits `yaml:"resource_limits"`
 }
@@ -53,6 +54,18 @@ type CommandRule struct {
 type CommandRedirect struct {
 	Command string   `yaml:"command"`
 	Args    []string `yaml:"args,omitempty"`
+}
+
+// UnixSocketRule controls AF_UNIX socket operations such as connect/bind/listen.
+// Paths refer to filesystem socket paths; abstract namespace sockets use "@name" (no leading slash).
+type UnixSocketRule struct {
+	Name        string   `yaml:"name"`
+	Description string   `yaml:"description"`
+	Paths       []string `yaml:"paths"`
+	Operations  []string `yaml:"operations"` // connect|bind|listen|sendto; empty = all
+	Decision    string   `yaml:"decision"`   // allow|deny|approve
+	Message     string   `yaml:"message"`
+	Timeout     duration `yaml:"timeout"`
 }
 
 type ResourceLimits struct {
