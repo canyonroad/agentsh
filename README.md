@@ -30,7 +30,7 @@ Agent workflows eventually run arbitrary code (`pip install`, `make test`, `pyth
 ### Run locally
 ```bash
 # Start the server
-./bin/agentsh server --config configs/server-config.yaml
+./bin/agentsh server --config [configs/server-config.yaml](configs/server-config.yaml)
 
 # Create a session and run a command (shell output)
 SID=$(./bin/agentsh session create --workspace . | jq -r .id)
@@ -49,12 +49,12 @@ SID=$(./bin/agentsh session create --workspace . | jq -r .id)
 ```
 
 ### Autostart (no manual daemon step)
-- You do **not** need to start `agentsh server` yourself. The first `agentsh exec` (or any shimmed `/bin/sh`/`/bin/bash`) will automatically launch a local server using `configs/server-config.yaml` (or `AGENTSH_CONFIG` if set).
+- You do **not** need to start `agentsh server` yourself. The first `agentsh exec` (or any shimmed `/bin/sh`/`/bin/bash`) will automatically launch a local server using [`configs/server-config.yaml`](configs/server-config.yaml) (or `AGENTSH_CONFIG` if set).
 - That server process keeps the FUSE layer and policy engine alive for the session lifetime; subsequent commands reuse it.
 - Set `AGENTSH_NO_AUTO=1` if you want to manage the server lifecycle manually.
 
 ### Use in Docker (with the shell shim)
-- See `Dockerfile.example` for a minimal Debian-based image.
+- See [Dockerfile.example](Dockerfile.example) for a minimal Debian-based image.
 - Inside the image, install a release package (or copy your build), then activate the shim:
   ```bash
   agentsh shim install-shell --root / --shim /usr/bin/agentsh-shell-shim --bash --i-understand-this-modifies-the-host
@@ -71,9 +71,9 @@ SID=$(./bin/agentsh session create --workspace . | jq -r .id)
 - **Decisions:** `allow`, `deny`, `approve` (human OK), `redirect` (swap a command), `audit` (allow + log), `soft_delete` (quarantine deletes with restore).
 - **Scopes:** file operations, commands, environment vars, network (DNS/connect), PTY/session settings.
 - **Evaluation:** first matching rule wins. Rules live in a named policy; sessions choose a policy.
-- **Defaults:** sample config at `configs/server-config.yaml`; default policy at `configs/policies/default.yaml`.
+- **Defaults:** sample config at [`configs/server-config.yaml`](configs/server-config.yaml); default policy at [`configs/policies/default.yaml`](configs/policies/default.yaml).
 
-### Example rules (trimmed from `configs/policies/default.yaml`)
+### Example rules (trimmed from [`configs/policies/default.yaml`](configs/policies/default.yaml))
 ```yaml
 version: 1
 name: default
@@ -111,7 +111,7 @@ command_rules:
 ### Using a policy
 ```bash
 # Start the server with your policy
-./bin/agentsh server --config configs/server-config.yaml
+./bin/agentsh server --config [configs/server-config.yaml](configs/server-config.yaml)
 
 # Create a session pinned to a policy
 SID=$(./bin/agentsh session create --workspace /workspace --policy default | jq -r .id)
@@ -123,11 +123,11 @@ SID=$(./bin/agentsh session create --workspace /workspace --policy default | jq 
 ---
 
 ## References
-- Config template: `configs/server-config.yaml`
-- Default policy: `configs/policies/default.yaml`
-- Example Dockerfile (with shim): `Dockerfile.example`
-- Environment variables (all `AGENTSH_*` overrides, auto-start toggles, transport selection): `docs/spec.md` §15.3 “Environment Variables” (markdown anchor: `#153-environment-variables`).
-- Architecture & data flow (FUSE + policy engine + API): see inline comments in `configs/server-config.yaml` and `internal/netmonitor` sources.
+- Config template: [`configs/server-config.yaml`](configs/server-config.yaml)
+- Default policy: [`configs/policies/default.yaml`](configs/policies/default.yaml)
+- Example Dockerfile (with shim): [Dockerfile.example](Dockerfile.example)
+- Environment variables (all `AGENTSH_*` overrides, auto-start toggles, transport selection): [`docs/spec.md` §15.3 “Environment Variables”](docs/spec.md#153-environment-variables).
+- Architecture & data flow (FUSE + policy engine + API): see inline comments in [`configs/server-config.yaml`](configs/server-config.yaml) and [`internal/netmonitor`](internal/netmonitor).
 - API/CLI examples are embedded in the CLI help: `agentsh --help`, `agentsh exec --help`, `agentsh shim --help`
 
 ---
