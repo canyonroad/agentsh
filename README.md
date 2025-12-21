@@ -4,6 +4,8 @@ Secure, policy‑enforced execution gateway for AI agents. agentsh sits under yo
 
 ---
 
+**Platform note:** agentsh targets Linux today (native hosts or inside Linux containers). Other platforms should run it inside a Linux container/VM.
+
 ## What is agentsh?
 - A drop‑in shell/exec endpoint that turns every command (and its subprocesses) into auditable events.
 - Per‑operation policy engine: allow, deny, require human approval, soft‑delete, or redirect commands.
