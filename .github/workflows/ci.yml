@@ -65,7 +65,10 @@ jobs:
 
       - name: Install cross toolchain (linux/arm64)
         if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
-        run: sudo apt-get install -y gcc-aarch64-linux-gnu
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libseccomp-dev:arm64 pkg-config
 
       - name: Cross-compile (build only)
         run: |
@@ -73,6 +76,10 @@ jobs:
             export CGO_ENABLED=1
             if [ "${{ matrix.goarch }}" = "arm64" ]; then
               export CC=aarch64-linux-gnu-gcc
+              export CC_FOR_TARGET=$CC
+              export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+              export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+              export CGO_LDFLAGS="-L/usr/lib/aarch64-linux-gnu"
             fi
           else
             export CGO_ENABLED=0
