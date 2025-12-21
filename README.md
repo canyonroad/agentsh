@@ -15,11 +15,12 @@ Secure, policy‑enforced execution gateway for AI agents. agentsh sits under yo
 ## Why agentsh?
 Agent workflows eventually run arbitrary code (`pip install`, `make test`, `python script.py`). Traditional “ask for approval before running a command” controls stop at the tool boundary and can’t see what happens inside that command. agentsh enforces policy at runtime, so hidden work done by subprocesses is still governed, logged, and (when required) approved.
 
-## Why containers alone are not enough
-- A container boundary isolates the host but does **not** explain *what* happened inside. You still need visibility and policy inside the container.
-- Package managers/downloads inside the container can exfiltrate data or pull unvetted code; the container won’t tell you which files or hosts were touched.
-- Long‑lived shells and subprocess trees bypass wrapper‑level approvals; agentsh keeps enforcing for the entire session.
-- Mounted volumes (workspace, caches, creds) still need path‑level rules—containers don’t give you those by default.
+## Containers + agentsh: better together
+- Containers isolate the host surface; agentsh adds **in-container runtime visibility and policy**.
+- Per-operation audit (files, net, commands) shows what happened during installs/builds/tests.
+- Approvals and rules persist across long-lived shells and subprocess trees—not just the first command.
+- Path-level controls on mounted workspaces/caches/creds; containers don’t natively give that granularity.
+- Same behavior on host and in containers, so CI and local dev see the same policy outcomes.
 
 ---
 
@@ -66,6 +67,7 @@ SID=$(./bin/agentsh session create --workspace . | jq -r .id)
   ENV AGENTSH_SERVER=http://127.0.0.1:8080
   ```
 - Any `/bin/sh -c ...` or `/bin/bash -lc ...` in the container will now route through agentsh.
+- Recommended pattern: run agentsh as a sidecar (or PID 1) in the same pod/service and share a workspace volume; the shim ensures every shell hop stays under policy.
 
 ---
 
