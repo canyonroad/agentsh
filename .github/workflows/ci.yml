@@ -63,10 +63,17 @@ jobs:
         if: matrix.goos == 'linux'
         run: sudo apt-get update && sudo apt-get install -y libseccomp-dev pkg-config
 
+      - name: Install cross toolchain (linux/arm64)
+        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
+        run: sudo apt-get install -y gcc-aarch64-linux-gnu
+
       - name: Cross-compile (build only)
         run: |
           if [ "${{ matrix.goos }}" = "linux" ]; then
             export CGO_ENABLED=1
+            if [ "${{ matrix.goarch }}" = "arm64" ]; then
+              export CC=aarch64-linux-gnu-gcc
+            fi
           else
             export CGO_ENABLED=0
           fi

@@ -1,3 +1,6 @@
+//go:build linux && cgo
+// +build linux,cgo
+
 // agentsh-unixwrap: installs seccomp user-notify for AF_UNIX sockets, sends notify fd
 // to the server over an inherited socketpair (SCM_RIGHTS), then execs the target command.
 // Usage: agentsh-unixwrap -- <command> [args...]
