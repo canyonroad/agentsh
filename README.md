@@ -24,7 +24,7 @@ Agent workflows eventually run arbitrary code (`pip install`, `make test`, `pyth
 ## Quick start
 
 ### Install
-- From a GitHub Release: download the `.deb`, `.rpm`, or `.apk` matching your platform and install (example: `sudo dpkg -i agentsh_<VERSION>_linux_amd64.deb`).
+- From a GitHub Release: download the `.deb`, `.rpm`, or `.apk` matching your platform and install (example: `sudo dpkg -i agentsh_<VERSION>_linux_amd64.deb`). Releases: [github.com/erans/agentsh/releases](https://github.com/erans/agentsh/releases).
 - From source: `make build` (binaries land in `./bin/`), then `sudo install -m 0755 bin/agentsh bin/agentsh-shell-shim /usr/local/bin`.
 
 ### Run locally
