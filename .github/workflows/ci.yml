@@ -67,6 +67,9 @@ jobs:
         if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
         run: |
           sudo dpkg --add-architecture arm64
+          # Restrict existing sources to amd64 to avoid hitting security.ubuntu.com for arm64
+          sudo sed -i 's|^deb |deb [arch=amd64] |g' /etc/apt/sources.list
+          # Add ports.ubuntu.com entries for arm64
           sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null <<'EOF'
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
