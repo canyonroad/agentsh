@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 )
 
 func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequest) (types.Session, int, error) {
@@ -292,6 +295,38 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 		return resp, http.StatusForbidden, nil
 	}
 
+	origCommand := req.Command
+	origArgs := append([]string{}, req.Args...)
+
+	wrappedReq := req
+	unixEnabled := a.cfg.Sandbox.UnixSockets.Enabled
+	wrapperBin := strings.TrimSpace(a.cfg.Sandbox.UnixSockets.WrapperBin)
+	var extraCfg *extraProcConfig
+	if unixEnabled {
+		if wrapperBin == "" {
+			wrapperBin = "agentsh-unixwrap"
+		}
+		sp, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET, 0)
+		if err == nil {
+			parent := os.NewFile(uintptr(sp[0]), "notify-parent")
+			child := os.NewFile(uintptr(sp[1]), "notify-child")
+			if wrappedReq.Env == nil {
+				wrappedReq.Env = map[string]string{}
+			}
+			envFD := 3 // first ExtraFile
+			wrappedReq.Env["AGENTSH_NOTIFY_SOCK_FD"] = strconv.Itoa(envFD)
+			wrappedReq.Command = wrapperBin
+			wrappedReq.Args = append([]string{"--", origCommand}, origArgs...)
+			extraCfg = &extraProcConfig{
+				extraFiles: []*os.File{child},
+				env:        map[string]string{"AGENTSH_NOTIFY_SOCK_FD": strconv.Itoa(envFD)},
+			}
+			// TODO: receive notify fd from parent (notify-parent) and start ServeNotify; monitor-only for now.
+			// Currently we close the parent side and ignore notifications until enforcement is wired.
+			_ = parent.Close()
+		}
+	}
+
 	startEv := types.Event{
 		ID:        uuid.NewString(),
 		Timestamp: start,
@@ -299,15 +334,15 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 		SessionID: id,
 		CommandID: cmdID,
 		Fields: map[string]any{
-			"command": req.Command,
-			"args":    req.Args,
+			"command": origCommand,
+			"args":    origArgs,
 		},
 	}
 	_ = a.store.AppendEvent(ctx, startEv)
 	a.broker.Publish(startEv)
 
 	limits := a.policy.Limits()
-	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(ctx, s, cmdID, req, a.cfg, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits))
+	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(ctx, s, cmdID, wrappedReq, a.cfg, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits), extraCfg)
 
 	end := time.Now().UTC()
 	endEv := types.Event{

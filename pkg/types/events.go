@@ -28,9 +28,11 @@ type Event struct {
 
 	// Common convenience fields for indexing/search.
 	Path      string `json:"path,omitempty"`
+	Abstract  bool   `json:"abstract,omitempty"`
 	Domain    string `json:"domain,omitempty"`
 	Remote    string `json:"remote,omitempty"`
 	Operation string `json:"operation,omitempty"`
+	// Unix socket remote or peer may reuse Remote field; kept for compatibility.
 
 	Fields map[string]any `json:"fields,omitempty"`
 }

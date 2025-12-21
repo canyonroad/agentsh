@@ -39,7 +39,7 @@ func TestRunCommandTimeoutKillsProcessGroup(t *testing.T) {
 		Timeout: "100ms",
 	}
 
-	exitCode, _, _, _, _, _, _, _, err := runCommandWithResources(context.Background(), s, "cmd-timeout", req, cfg, 0, nil)
+	exitCode, _, _, _, _, _, _, _, err := runCommandWithResources(context.Background(), s, "cmd-timeout", req, cfg, 0, nil, nil)
 	if exitCode != 124 {
 		t.Fatalf("expected exit code 124 on timeout, got %d (err=%v)", exitCode, err)
 	}

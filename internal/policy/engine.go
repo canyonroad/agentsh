@@ -19,6 +19,7 @@ type Engine struct {
 	compiledFileRules    []compiledFileRule
 	compiledNetworkRules []compiledNetworkRule
 	compiledCommandRules []compiledCommandRule
+	compiledUnixRules    []compiledUnixRule
 }
 
 type Limits struct {
@@ -48,6 +49,12 @@ type compiledCommandRule struct {
 	rule      CommandRule
 	commands  map[string]struct{}
 	argsGlobs []glob.Glob
+}
+
+type compiledUnixRule struct {
+	rule  UnixSocketRule
+	paths []glob.Glob
+	ops   map[string]struct{}
 }
 
 type Decision struct {
@@ -123,6 +130,24 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 			cr.argsGlobs = append(cr.argsGlobs, g)
 		}
 		e.compiledCommandRules = append(e.compiledCommandRules, cr)
+	}
+
+	for _, r := range p.UnixRules {
+		cr := compiledUnixRule{rule: r, ops: map[string]struct{}{}}
+		for _, op := range r.Operations {
+			cr.ops[strings.ToLower(op)] = struct{}{}
+		}
+		for _, pat := range r.Paths {
+			g, err := glob.Compile(pat, '/')
+			if err != nil {
+				g, err = glob.Compile(pat)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("compile unix rule %q glob %q: %w", r.Name, pat, err)
+			}
+			cr.paths = append(cr.paths, g)
+		}
+		e.compiledUnixRules = append(e.compiledUnixRules, cr)
 	}
 
 	return e, nil
@@ -253,6 +278,23 @@ func (e *Engine) CheckFile(p string, operation string) Decision {
 	}
 	// Default deny (policy files typically include an explicit default deny, but we enforce it here too).
 	return e.wrapDecision(string(types.DecisionDeny), "default-deny-files", "", nil)
+}
+
+// CheckUnixSocket evaluates unix_socket_rules against a path and operation (connect|bind|listen|sendto).
+// Paths for abstract sockets should be passed as "@name".
+func (e *Engine) CheckUnixSocket(path string, operation string) Decision {
+	operation = strings.ToLower(strings.TrimSpace(operation))
+	for _, r := range e.compiledUnixRules {
+		if !matchOp(r.ops, operation) {
+			continue
+		}
+		for _, g := range r.paths {
+			if g.Match(path) {
+				return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
+			}
+		}
+	}
+	return e.wrapDecision(string(types.DecisionDeny), "default-deny-unix", "", nil)
 }
 
 func (e *Engine) CheckNetwork(domain string, port int) Decision {

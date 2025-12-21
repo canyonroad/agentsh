@@ -117,6 +117,7 @@ type SandboxConfig struct {
 	FUSE    SandboxFUSEConfig    `yaml:"fuse"`
 	Network SandboxNetworkConfig `yaml:"network"`
 	Cgroups SandboxCgroupsConfig `yaml:"cgroups"`
+	UnixSockets SandboxUnixSocketsConfig `yaml:"unix_sockets"`
 }
 
 type SandboxFUSEConfig struct {
@@ -170,6 +171,11 @@ type SandboxCgroupsConfig struct {
 	// If empty, agentsh will default to the current process cgroup.
 	// Note: this should be a path under /sys/fs/cgroup (or relative to the current process cgroup dir).
 	BasePath string `yaml:"base_path"`
+}
+
+type SandboxUnixSocketsConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	WrapperBin string `yaml:"wrapper_bin"` // optional override; defaults to "agentsh-unixwrap" in PATH
 }
 
 type PoliciesConfig struct {

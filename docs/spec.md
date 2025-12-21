@@ -614,6 +614,13 @@ filesystem:
 ### 8.2 Transparent TCP Proxy
 
 The proxy intercepts all outbound TCP connections:
+### 8.3 Unix Domain Socket Monitoring (audit-only)
+
+- Instrumentation: `agentsh-unixwrap` sets a seccomp user-notify filter around Unix domain socket syscalls and passes a notify fd back to the server.
+- Current behavior: audit-only. Events are emitted for socket creation/connect attempts, but decisions are *not yet enforced*; policy includes unix socket rules but runtime enforcement is pending ServeNotify wiring.
+- Configuration: `sandbox.unixSockets.enabled` (bool) and `sandbox.unixSockets.wrapper_bin` (optional override of `agentsh-unixwrap`).
+- Limitations: does not yet block or redirect traffic; parent notify fd is closed until enforcement lands. Works on Linux only.
+
 
 ```go
 type TCPProxy struct {
@@ -1875,6 +1882,9 @@ Key fields:
     - `strict_on_audit_failure` (bool, fail operation when audit sink errors)
     - `max_event_queue` (bounded async logger depth; drop-oldest unless strict)
     - `hash_small_files_under` (size threshold to hash diverted files for integrity on restore)
+  - `sandbox.unixSockets.*` (audit-only unix domain socket monitoring):
+    - `enabled` (bool, default false)
+    - `wrapper_bin` (path override, default `agentsh-unixwrap` in `$PATH`)
 - `policies.*`
 - `approvals.*`
 
