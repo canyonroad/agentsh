@@ -80,7 +80,8 @@ jobs:
 
       - name: Install cross toolchain (linux/arm64)
         if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
-        run: sudo apt-get install -y gcc-aarch64-linux-gnu libseccomp-dev:arm64 pkg-config
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu:amd64 libc6-dev:arm64 linux-libc-dev:arm64 libseccomp-dev:arm64 pkg-config
 
       - name: Cross-compile (build only)
         run: |
