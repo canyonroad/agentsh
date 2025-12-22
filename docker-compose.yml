@@ -59,6 +59,8 @@ services:
     # Environment variables
     environment:
       - AGENTSH_LOG_LEVEL=info
+      # Policy selection (name without .yml suffix). Must be in policies.allowed or defaults to policies.default.
+      # - AGENTSH_POLICY_NAME=default
       # - AGENTSH_HTTP_ADDR=0.0.0.0:8080
       # - AGENTSH_GRPC_ADDR=0.0.0.0:9090
     

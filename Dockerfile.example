@@ -11,6 +11,7 @@
 # Notes:
 # - The release tag is "v..." but the artifact filenames use the version without the "v" prefix.
 # - DEB_ARCH must match the artifact name (typically: amd64 or arm64).
+# - To select a non-default policy at runtime, set env var AGENTSH_POLICY_NAME to an allowed policy name.
 
 FROM debian:bookworm-slim
 
