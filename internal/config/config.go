@@ -179,10 +179,20 @@ type SandboxUnixSocketsConfig struct {
 }
 
 type PoliciesConfig struct {
-	Dir          string   `yaml:"dir"`
-	Default      string   `yaml:"default"`
-	Allowed      []string `yaml:"allowed"`
-	ManifestPath string   `yaml:"manifest_path"`
+	Dir          string          `yaml:"dir"`
+	Default      string          `yaml:"default"`
+	Allowed      []string        `yaml:"allowed"`
+	ManifestPath string          `yaml:"manifest_path"`
+	EnvPolicy    EnvPolicyConfig `yaml:"env_policy"`
+	EnvShimPath  string          `yaml:"env_shim_path"`
+}
+
+type EnvPolicyConfig struct {
+	Allow          []string `yaml:"allow"`
+	Deny           []string `yaml:"deny"`
+	MaxBytes       int      `yaml:"max_bytes"`
+	MaxKeys        int      `yaml:"max_keys"`
+	BlockIteration bool     `yaml:"block_iteration"`
 }
 
 type ApprovalsConfig struct {

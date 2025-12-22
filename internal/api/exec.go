@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,6 +83,14 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	}
 	if envPol.BlockIteration {
 		env = append(env, "AGENTSH_ENV_BLOCK_ITERATION=1")
+		shimPath := strings.TrimSpace(cfg.Policies.EnvShimPath)
+		if shimPath != "" {
+			if _, err := os.Stat(shimPath); err == nil {
+				env = append(env, fmt.Sprintf("LD_PRELOAD=%s", shimPath))
+			} else {
+				slog.Warn("env block_iteration requested but shim missing", "path", shimPath, "err", err)
+			}
+		}
 	}
 	if extra != nil && len(extra.env) > 0 {
 		for k, v := range extra.env {
