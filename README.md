@@ -1,11 +1,10 @@
 # agentsh
 
-**Runtime policy + audit + steering for AI agent execution.**
+**Secure, policy-enforced execution gateway for AI agents.**
 
-agentsh is a secure, policy-enforced execution gateway that sits *under* your agent/tooling. It intercepts **file**, **network**, and **process** activity (including subprocess trees), enforces the policy you define, and emits **structured audit events**.
+agentsh sits *under* your agent/tooling—intercepting **file**, **network**, and **process** activity (including subprocess trees), enforcing the policy you define, and emitting **structured audit events**.
 
-> **Platform note**
-> agentsh targets **Linux** today (native hosts or inside Linux containers). **macOS and Windows builds are planned**; until then, run agentsh inside a Linux container/VM on those platforms.
+> **Platform note:** Linux today (native or containers). macOS and Windows builds are planned; until then, run agentsh inside a Linux container/VM on those platforms.
 
 ---
 
@@ -83,14 +82,13 @@ Containers isolate the host surface; agentsh adds **in-container runtime visibil
 ### Install
 
 **From a GitHub Release**
-Download the `.deb`, `.rpm`, or `.apk` for your platform and install.
 
-Example:
+Download the `.deb`, `.rpm`, or `.apk` for your platform from the [releases page](https://github.com/erans/agentsh/releases).
+
 ```bash
-sudo dpkg -i agentsh_*_linux_amd64.deb
+# Example for Debian/Ubuntu
+sudo dpkg -i agentsh_<VERSION>_linux_amd64.deb
 ```
-
-Releases: [https://github.com/erans/agentsh/releases](https://github.com/erans/agentsh/releases)
 
 **From source**
 
