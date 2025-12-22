@@ -75,11 +75,14 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	cmd.Dir = workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	env, err := buildPolicyEnv(envPol, os.Environ(), s, req.Env)
-	if err != nil {
-		msg := []byte(err.Error() + "\n")
-		return 2, []byte{}, msg, 0, int64(len(msg)), false, false, types.ExecResources{}, nil
-	}
+    env, err := buildPolicyEnv(envPol, os.Environ(), s, req.Env)
+    if err != nil {
+        msg := []byte(err.Error() + "\n")
+        return 2, []byte{}, msg, 0, int64(len(msg)), false, false, types.ExecResources{}, nil
+    }
+    if envPol.BlockIteration {
+        env = append(env, "AGENTSH_ENV_BLOCK_ITERATION=1")
+    }
 	if extra != nil && len(extra.env) > 0 {
 		for k, v := range extra.env {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
