@@ -14,9 +14,8 @@ static int (*real_setenv)(const char *, const char *, int) = NULL;
 static int (*real_unsetenv)(const char *) = NULL;
 static char *(*real_getenv)(const char *) = NULL;
 
-// Exported symbols that many programs read directly.
-char **environ = NULL;
-char **__environ = NULL;
+// Refer to libc's environ (do not define it ourselves).
+extern char **environ;
 
 static void init(void) __attribute__((constructor));
 
@@ -28,6 +27,8 @@ static void init(void) {
     real_environ_sym = (char ***)dlsym(RTLD_DEFAULT, "environ");
     if (real_environ_sym && *real_environ_sym) {
         real_environ = *real_environ_sym;
+    } else if (environ) {
+        real_environ = environ;
     }
 
     const char *flag = real_getenv ? real_getenv("AGENTSH_ENV_BLOCK_ITERATION") : getenv("AGENTSH_ENV_BLOCK_ITERATION");
@@ -38,7 +39,6 @@ static void init(void) {
         *real_environ_sym = target;
     }
     environ = target;
-    __environ = target;
 }
 
 int putenv(char *string) {
