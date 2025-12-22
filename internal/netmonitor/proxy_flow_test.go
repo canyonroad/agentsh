@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,10 +85,15 @@ func TestHandleHTTPAllowsAndEmitsEvents(t *testing.T) {
 func newHTTPServer(t *testing.T, handler http.Handler) *httptest.Server {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		t.Skipf("skipping: listen tcp4 disallowed (%v)", err)
+		httpListenSkip.Do(func() {
+			t.Logf("skipping HTTP proxy tests: listen tcp4 disallowed (%v)", err)
+		})
+		t.Skipf("skipping HTTP proxy tests: listen tcp4 disallowed (%v)", err)
 	}
 	srv := &httptest.Server{Listener: listener, Config: &http.Server{Handler: handler}}
 	srv.Start()
 	t.Cleanup(srv.Close)
 	return srv
 }
+
+var httpListenSkip sync.Once

@@ -7,10 +7,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/agentsh/agentsh/pkg/types"
+)
+
+var (
+	httpListenSkip sync.Once
+	unixListenSkip sync.Once
 )
 
 func TestDoJSONSuccessAndAuthHeader(t *testing.T) {
@@ -78,7 +84,10 @@ func TestUnixSchemeUsesUnixDialer(t *testing.T) {
 	sock := filepath.Join(tmp, "srv.sock")
 	l, err := net.Listen("unix", sock)
 	if err != nil {
-		t.Skipf("skipping: listen unix disallowed (%v)", err)
+		unixListenSkip.Do(func() {
+			t.Logf("skipping unix socket tests: listen disallowed (%v)", err)
+		})
+		t.Skipf("skipping unix socket tests: listen disallowed (%v)", err)
 	}
 	if l == nil {
 		return
@@ -147,7 +156,10 @@ func TestStreamSessionEventsSuccess(t *testing.T) {
 func newHTTPServer(t *testing.T, handler http.Handler) *httptest.Server {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		t.Skipf("skipping: listen tcp4 disallowed (%v)", err)
+		httpListenSkip.Do(func() {
+			t.Logf("skipping HTTP server tests: listen tcp4 disallowed (%v)", err)
+		})
+		t.Skipf("skipping HTTP server tests: listen tcp4 disallowed (%v)", err)
 	}
 	srv := &httptest.Server{Listener: listener, Config: &http.Server{Handler: handler}}
 	srv.Start()
