@@ -48,4 +48,3 @@ func AllocateSubnet(subnetBase string, nsName string) (string, string, string, s
 	nsIf = strings.ReplaceAll(nsIf, "-", "")
 	return subnetCIDR, hostIPCIDR, nsIPCIDR, hostIf, nsIf
 }
-

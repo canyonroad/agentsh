@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -93,13 +94,17 @@ func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 		commandID = d.sess.CurrentCommandID()
 	}
 
-	dec := d.policyDecision(domain, 53)
+	// Use timeout context for DNS handling
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dec := d.policyDecision(ctx, domain, 53)
 	// Default deny policies are typically intended for outbound TCP/UDP connects, not DNS lookups.
 	// If the only match is default-deny, treat DNS as monitor-only unless the policy explicitly matches port 53.
 	if dec.PolicyDecision == types.DecisionDeny && dec.Rule == "default-deny-network" {
 		dec = policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow, Rule: "dns-monitor-only"}
 	}
-	dec = d.maybeApprove(context.Background(), commandID, dec, "dns", domain)
+	dec = d.maybeApprove(ctx, commandID, dec, "dns", domain)
 
 	ev := types.Event{
 		ID:        uuid.NewString(),
@@ -155,11 +160,11 @@ func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 	return nil
 }
 
-func (d *DNSInterceptor) policyDecision(domain string, port int) policy.Decision {
+func (d *DNSInterceptor) policyDecision(ctx context.Context, domain string, port int) policy.Decision {
 	if d.policy == nil {
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
-	return d.policy.CheckNetwork(domain, port)
+	return d.policy.CheckNetworkCtx(ctx, domain, port)
 }
 
 func (d *DNSInterceptor) maybeApprove(ctx context.Context, commandID string, dec policy.Decision, kind string, target string) policy.Decision {
@@ -211,14 +216,16 @@ func dnsRefusedResponse(query []byte) []byte {
 }
 
 func parseDNSDomain(msg []byte) string {
-	// Minimal DNS QNAME parser. Best-effort, returns "" on failure.
+	// Minimal DNS QNAME parser. Best-effort, logs on failure.
 	if len(msg) < 12 {
+		fmt.Fprintf(os.Stderr, "dns: parse failed, message too short (%d bytes)\n", len(msg))
 		return ""
 	}
 	i := 12
 	var out string
 	for {
 		if i >= len(msg) {
+			fmt.Fprintf(os.Stderr, "dns: parse failed, unexpected end at offset %d\n", i)
 			return ""
 		}
 		l := int(msg[i])
@@ -228,9 +235,11 @@ func parseDNSDomain(msg []byte) string {
 		}
 		// compression not handled
 		if l&0xC0 != 0 {
+			fmt.Fprintf(os.Stderr, "dns: parse failed, compression pointer at offset %d not supported\n", i-1)
 			return ""
 		}
 		if i+l > len(msg) {
+			fmt.Fprintf(os.Stderr, "dns: parse failed, label extends beyond message at offset %d\n", i)
 			return ""
 		}
 		if out != "" {

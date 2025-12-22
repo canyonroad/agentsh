@@ -110,4 +110,3 @@ func (s *Store) rotateIfNeededLocked() error {
 	s.file = f
 	return nil
 }
-

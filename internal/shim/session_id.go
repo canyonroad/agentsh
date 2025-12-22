@@ -28,9 +28,9 @@ type ResolveSessionIDOptions struct {
 // ResolveSessionID resolves the current agentsh session ID using environment and file-based fallbacks.
 //
 // Priority:
-//  1) AGENTSH_SESSION_ID (return directly; no file path)
-//  2) AGENTSH_SESSION_FILE (read/create; returns that file path)
-//  3) File-backed fallback (scope controlled by AGENTSH_SESSION_SCOPE=global|workspace)
+//  1. AGENTSH_SESSION_ID (return directly; no file path)
+//  2. AGENTSH_SESSION_FILE (read/create; returns that file path)
+//  3. File-backed fallback (scope controlled by AGENTSH_SESSION_SCOPE=global|workspace)
 //
 // It returns (sessionID, backingFilePathOrEmpty, error).
 func ResolveSessionID(opts ResolveSessionIDOptions) (string, string, error) {

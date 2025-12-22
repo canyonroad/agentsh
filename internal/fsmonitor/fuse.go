@@ -495,7 +495,9 @@ func (n *node) emitFileEvent(ctx context.Context, evType string, virtPath string
 	for k, v := range extra {
 		ev.Fields[k] = v
 	}
-	_ = n.hooks.Emit.AppendEvent(ctx, ev)
+	if err := n.hooks.Emit.AppendEvent(ctx, ev); err != nil {
+		fmt.Fprintf(os.Stderr, "fuse: failed to append event (type=%s path=%s): %v\n", evType, virtPath, err)
+	}
 	n.hooks.Emit.Publish(ev)
 }
 

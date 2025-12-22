@@ -170,8 +170,15 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 	}
 	rel := strings.TrimPrefix(virtual, "/workspace")
 	rel = strings.TrimPrefix(rel, "/")
+
+	// Security: Ensure rel is not an absolute path (could escape on Windows)
+	relPath := filepath.FromSlash(rel)
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("working_dir contains absolute path component")
+	}
+
 	root := s.WorkspaceMountPath()
-	real := filepath.Join(root, filepath.FromSlash(rel))
+	real := filepath.Join(root, relPath)
 	real = filepath.Clean(real)
 
 	rootClean := filepath.Clean(root)
@@ -251,10 +258,15 @@ func mergeEnv(base []string, s *session.Session, overrides map[string]string) []
 
 func killProcessGroup(pgid int) error {
 	if pgid <= 0 {
+		// No valid process group - this is expected for some process states
 		return nil
 	}
 	// Negative pid targets the process group.
-	return syscall.Kill(-pgid, syscall.SIGKILL)
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		fmt.Fprintf(os.Stderr, "exec: failed to kill process group %d: %v\n", pgid, err)
+		return err
+	}
+	return nil
 }
 
 func isSensitiveEnvKey(k string) bool {

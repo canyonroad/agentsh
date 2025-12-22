@@ -114,9 +114,9 @@ type SessionsConfig struct {
 }
 
 type SandboxConfig struct {
-	FUSE    SandboxFUSEConfig    `yaml:"fuse"`
-	Network SandboxNetworkConfig `yaml:"network"`
-	Cgroups SandboxCgroupsConfig `yaml:"cgroups"`
+	FUSE        SandboxFUSEConfig        `yaml:"fuse"`
+	Network     SandboxNetworkConfig     `yaml:"network"`
+	Cgroups     SandboxCgroupsConfig     `yaml:"cgroups"`
 	UnixSockets SandboxUnixSocketsConfig `yaml:"unix_sockets"`
 }
 
@@ -174,7 +174,7 @@ type SandboxCgroupsConfig struct {
 }
 
 type SandboxUnixSocketsConfig struct {
-	Enabled   bool   `yaml:"enabled"`
+	Enabled    bool   `yaml:"enabled"`
 	WrapperBin string `yaml:"wrapper_bin"` // optional override; defaults to "agentsh-unixwrap" in PATH
 }
 

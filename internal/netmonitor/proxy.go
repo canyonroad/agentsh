@@ -116,8 +116,9 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 
 	resolvedIP := p.resolveAndEmitDNS(context.Background(), commandID, host)
 
-	dec := p.checkNetwork(host, port)
-	dec = p.maybeApprove(context.Background(), commandID, dec, "network", hostPort)
+	ctx := req.Context()
+	dec := p.checkNetwork(ctx, host, port)
+	dec = p.maybeApprove(ctx, commandID, dec, "network", hostPort)
 	connectEv := p.emitNetEvent(context.Background(), "net_connect", commandID, host, hostPort, port, dec, map[string]any{
 		"method":      "CONNECT",
 		"resolved_ip": resolvedIP,
@@ -146,14 +147,25 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 
 	var upBytes, downBytes int64
 	errCh := make(chan error, 2)
+	// Use sync.Once to ensure we only close connections once
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			// Close both sides to unblock any pending io.Copy
+			_ = client.Close()
+			_ = up.Close()
+		})
+	}
 	go func() {
 		n, e := io.Copy(up, client)
 		upBytes = n
+		closeBoth() // Signal other copy to stop
 		errCh <- e
 	}()
 	go func() {
 		n, e := io.Copy(client, up)
 		downBytes = n
+		closeBoth() // Signal other copy to stop
 		errCh <- e
 	}()
 	<-errCh
@@ -212,8 +224,9 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 		p.emit.Publish(ev)
 	}
 
-	dec := p.checkNetwork(host, port)
-	dec = p.maybeApprove(context.Background(), commandID, dec, "network", host)
+	ctx := req.Context()
+	dec := p.checkNetwork(ctx, host, port)
+	dec = p.maybeApprove(ctx, commandID, dec, "network", host)
 	connectEv := p.emitNetEvent(context.Background(), "net_connect", commandID, host, host, port, dec, map[string]any{
 		"method":      req.Method,
 		"resolved_ip": resolvedIP,
@@ -238,6 +251,21 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 		req.URL.Host = req.Host
 	}
 
+	// Strip hop-by-hop headers per RFC 2616 Section 13.5.1
+	hopByHopHeaders := []string{
+		"Connection",
+		"Keep-Alive",
+		"Proxy-Authenticate",
+		"Proxy-Authorization",
+		"TE",
+		"Trailers",
+		"Transfer-Encoding",
+		"Upgrade",
+	}
+	for _, h := range hopByHopHeaders {
+		req.Header.Del(h)
+	}
+
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
 		_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
@@ -251,11 +279,11 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 	return nil
 }
 
-func (p *Proxy) checkNetwork(domain string, port int) policy.Decision {
+func (p *Proxy) checkNetwork(ctx context.Context, domain string, port int) policy.Decision {
 	if p.policy == nil {
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
-	return p.policy.CheckNetwork(domain, port)
+	return p.policy.CheckNetworkCtx(ctx, domain, port)
 }
 
 func (p *Proxy) maybeApprove(ctx context.Context, commandID string, dec policy.Decision, kind string, target string) policy.Decision {
@@ -329,12 +357,12 @@ func (p *Proxy) resolveAndEmitDNS(ctx context.Context, commandID string, host st
 		ips = append(ips, a.IP.String())
 	}
 
-	dec := p.checkNetwork(host, 53)
+	dec := p.checkNetwork(ctx, host, 53)
 	// Mirror dns.go behavior: treat default deny as monitor-only unless explicitly matching DNS.
 	if dec.PolicyDecision == types.DecisionDeny && dec.Rule == "default-deny-network" {
 		dec = policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow, Rule: "dns-monitor-only"}
 	}
-	dec = p.maybeApprove(context.Background(), commandID, dec, "dns", host)
+	dec = p.maybeApprove(ctx, commandID, dec, "dns", host)
 
 	if p.emit != nil {
 		ev := types.Event{

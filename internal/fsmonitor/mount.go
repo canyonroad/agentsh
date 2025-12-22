@@ -41,8 +41,8 @@ func MountWorkspace(backingDir string, mountPoint string, hooks *Hooks) (*Mount,
 
 	opts := &fs.Options{
 		MountOptions: fuse.MountOptions{
-			FsName:      "agentsh-workspace",
-			Name:        "agentsh",
+			FsName:        "agentsh-workspace",
+			Name:          "agentsh",
 			DisableXAttrs: false,
 		},
 	}
@@ -64,4 +64,3 @@ func (m *Mount) Unmount() error {
 	}
 	return m.Server.Unmount()
 }
-

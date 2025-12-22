@@ -28,7 +28,7 @@ func TestCreateSession_AllowsCustomID(t *testing.T) {
 	app := newTestApp(t, sessions, store)
 	h := app.Router()
 
-	body := fmt.Sprintf(`{"id":"session-custom","workspace":%q,"policy":"default"}`, ws)
+	body := fmt.Sprintf(`{"id":"session_custom","workspace":%q,"policy":"default"}`, ws)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", strings.NewReader(body))
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -40,8 +40,8 @@ func TestCreateSession_AllowsCustomID(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if out.ID != "session-custom" {
-		t.Fatalf("expected id session-custom, got %q", out.ID)
+	if out.ID != "session_custom" {
+		t.Fatalf("expected id session_custom, got %q", out.ID)
 	}
 
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", strings.NewReader(body))

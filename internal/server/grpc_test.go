@@ -99,9 +99,9 @@ func TestServer_GRPC_CreateSessionAndExec(t *testing.T) {
 	}
 
 	execReq, err := structpb.NewStruct(map[string]any{
-		"session_id": snap.ID,
-		"command":    "sh",
-		"args":       []any{"-c", "echo hi"},
+		"session_id":     snap.ID,
+		"command":        "sh",
+		"args":           []any{"-c", "echo hi"},
 		"include_events": "none",
 	})
 	if err != nil {

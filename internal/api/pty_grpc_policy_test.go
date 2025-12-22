@@ -111,4 +111,3 @@ func TestGRPC_PTY_RespectsCommandPolicyDeny(t *testing.T) {
 		t.Fatalf("expected PermissionDenied, got %v: %v", st.Code(), st.Message())
 	}
 }
-

@@ -1,14 +1,18 @@
 package events
 
 import (
+	"fmt"
+	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
 type Broker struct {
-	mu    sync.RWMutex
-	subs  map[string]map[chan types.Event]struct{} // sessionID -> subscribers
+	mu      sync.RWMutex
+	subs    map[string]map[chan types.Event]struct{} // sessionID -> subscribers
+	dropped atomic.Int64
 }
 
 func NewBroker() *Broker {
@@ -50,8 +54,17 @@ func (b *Broker) Publish(ev types.Event) {
 		select {
 		case ch <- ev:
 		default:
-			// Drop on slow subscriber.
+			// Drop on slow subscriber, log and count.
+			count := b.dropped.Add(1)
+			if count == 1 || count%100 == 0 {
+				fmt.Fprintf(os.Stderr, "events: dropped event (session=%s type=%s, total dropped=%d)\n",
+					ev.SessionID, ev.Type, count)
+			}
 		}
 	}
 }
 
+// DroppedCount returns the total number of events dropped due to slow subscribers.
+func (b *Broker) DroppedCount() int64 {
+	return b.dropped.Load()
+}
