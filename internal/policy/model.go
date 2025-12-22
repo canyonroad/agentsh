@@ -18,6 +18,7 @@ type Policy struct {
 	UnixRules    []UnixSocketRule `yaml:"unix_socket_rules"`
 
 	ResourceLimits ResourceLimits `yaml:"resource_limits"`
+	Audit          AuditSettings  `yaml:"audit"`
 }
 
 type FileRule struct {
@@ -79,6 +80,16 @@ type ResourceLimits struct {
 	CommandTimeout   duration `yaml:"command_timeout"`
 	SessionTimeout   duration `yaml:"session_timeout"`
 	IdleTimeout      duration `yaml:"idle_timeout"`
+}
+
+type AuditSettings struct {
+	LogAllowed         bool `yaml:"log_allowed"`
+	LogDenied          bool `yaml:"log_denied"`
+	LogApproved        bool `yaml:"log_approved"`
+	IncludeStdout      bool `yaml:"include_stdout"`
+	IncludeStderr      bool `yaml:"include_stderr"`
+	IncludeFileContent bool `yaml:"include_file_content"`
+	RetentionDays      int  `yaml:"retention_days"`
 }
 
 type duration struct{ time.Duration }
