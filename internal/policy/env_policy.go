@@ -3,7 +3,6 @@ package policy
 import (
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 )
@@ -43,46 +42,47 @@ func MergeEnvPolicy(global EnvPolicy, rule CommandRule) ResolvedEnvPolicy {
 		out.BlockIteration = *rule.EnvBlockIteration
 	}
 
-	// Normalize: de-duplicate
 	out.Allow = uniqStrings(out.Allow)
 	out.Deny = uniqStrings(out.Deny)
 	return out
 }
 
 // BuildEnv constructs the child environment per policy.
-// baseEnv is the parent env; addKeys are additional key/values (k=v format) already vetted.
+// baseEnv should already be minimal; addKeys are merged after allow/deny filtering.
 func BuildEnv(pol ResolvedEnvPolicy, baseEnv []string, addKeys map[string]string) ([]string, error) {
-	// Minimal base
-	minimal := map[string]string{
-		"PATH": os.Getenv("PATH"),
-		"LANG": os.Getenv("LANG"),
-		"TERM": os.Getenv("TERM"),
-		"HOME": os.Getenv("HOME"),
-	}
-
-	// Apply allow/deny from baseEnv
-	allowed := map[string]string{}
 	allowSet := toSet(pol.Allow)
 	denySet := toSet(pol.Deny)
-	for _, kv := range baseEnv {
-		k, v, ok := splitKV(kv)
-		if !ok {
-			continue
+	if len(allowSet) == 0 {
+		for _, k := range defaultSecretDeny {
+			denySet[k] = true
 		}
-		if len(allowSet) > 0 {
+	}
+
+	allowed := map[string]string{}
+
+	// base env (only if allow set defined; otherwise baseEnv expected minimal and added below)
+	if len(allowSet) > 0 {
+		for _, kv := range baseEnv {
+			k, v, ok := splitKV(kv)
+			if !ok {
+				continue
+			}
 			if _, ok := allowSet[k]; !ok {
 				continue
 			}
+			if _, denied := denySet[k]; denied {
+				continue
+			}
+			if v != "" {
+				allowed[k] = v
+			}
 		}
-		if _, denied := denySet[k]; denied {
-			continue
-		}
-		allowed[k] = v
 	}
 
-	// Merge minimal defaults
-	for k, v := range minimal {
-		if v == "" {
+	// minimal/defaults (baseEnv entries) always considered when not denied
+	for _, kv := range baseEnv {
+		k, v, ok := splitKV(kv)
+		if !ok || v == "" {
 			continue
 		}
 		if _, denied := denySet[k]; denied {
@@ -106,7 +106,6 @@ func BuildEnv(pol ResolvedEnvPolicy, baseEnv []string, addKeys map[string]string
 		allowed[k] = v
 	}
 
-	// Build list and enforce limits
 	pairs := make([]string, 0, len(allowed))
 	for k, v := range allowed {
 		pairs = append(pairs, fmt.Sprintf("%s=%s", k, v))
@@ -118,7 +117,7 @@ func BuildEnv(pol ResolvedEnvPolicy, baseEnv []string, addKeys map[string]string
 	}
 	total := 0
 	for _, p := range pairs {
-		total += len(p) + 1 // include null
+		total += len(p) + 1
 	}
 	if pol.MaxBytes > 0 && total > pol.MaxBytes {
 		return nil, fmt.Errorf("env exceeds max_bytes (%d)", pol.MaxBytes)
@@ -164,4 +163,12 @@ func ValidateEnvPolicy(p EnvPolicy) error {
 		return errors.New("max_bytes/max_keys must be non-negative")
 	}
 	return nil
+}
+
+var defaultSecretDeny = []string{
+	"AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN", "AWS_PROFILE",
+	"GOOGLE_APPLICATION_CREDENTIALS", "GCP_SERVICE_ACCOUNT",
+	"AZURE_CLIENT_SECRET", "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID",
+	"SSH_AUTH_SOCK", "SSH_AGENT_PID", "DOCKER_HOST", "DOCKER_TLS_VERIFY",
+	"KUBECONFIG", "GITHUB_TOKEN", "GH_TOKEN",
 }

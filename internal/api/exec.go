@@ -75,14 +75,14 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	cmd.Dir = workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-    env, err := buildPolicyEnv(envPol, os.Environ(), s, req.Env)
-    if err != nil {
-        msg := []byte(err.Error() + "\n")
-        return 2, []byte{}, msg, 0, int64(len(msg)), false, false, types.ExecResources{}, nil
-    }
-    if envPol.BlockIteration {
-        env = append(env, "AGENTSH_ENV_BLOCK_ITERATION=1")
-    }
+	env, err := buildPolicyEnv(envPol, os.Environ(), s, req.Env)
+	if err != nil {
+		msg := []byte(err.Error() + "\n")
+		return 2, []byte{}, msg, 0, int64(len(msg)), false, false, types.ExecResources{}, nil
+	}
+	if envPol.BlockIteration {
+		env = append(env, "AGENTSH_ENV_BLOCK_ITERATION=1")
+	}
 	if extra != nil && len(extra.env) > 0 {
 		for k, v := range extra.env {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
@@ -192,21 +192,58 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 }
 
 func buildPolicyEnv(pol policy.ResolvedEnvPolicy, hostEnv []string, s *session.Session, overrides map[string]string) ([]string, error) {
-	merged := map[string]string{}
+	minimal := map[string]string{}
+	hostMap := map[string]string{}
 	for _, kv := range hostEnv {
 		if k, v, ok := strings.Cut(kv, "="); ok {
-			merged[k] = v
+			hostMap[k] = v
 		}
 	}
+	copyKeys := []string{"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "HOME"}
+	for _, k := range copyKeys {
+		if v, ok := hostMap[k]; ok && v != "" {
+			minimal[k] = v
+		}
+	}
+	if _, ok := minimal["PATH"]; !ok {
+		minimal["PATH"] = "/usr/bin:/bin"
+	}
+
+	// Session proxies
+	if proxy := s.ProxyURL(); proxy != "" {
+		minimal["HTTP_PROXY"] = proxy
+		minimal["HTTPS_PROXY"] = proxy
+		minimal["ALL_PROXY"] = proxy
+		minimal["http_proxy"] = proxy
+		minimal["https_proxy"] = proxy
+		minimal["all_proxy"] = proxy
+		noProxy := minimal["NO_PROXY"]
+		if noProxy == "" {
+			noProxy = minimal["no_proxy"]
+		}
+		if !strings.Contains(noProxy, "localhost") {
+			if noProxy != "" && !strings.HasSuffix(noProxy, ",") {
+				noProxy += ","
+			}
+			noProxy += "localhost,127.0.0.1"
+		}
+		minimal["NO_PROXY"] = noProxy
+		minimal["no_proxy"] = noProxy
+	}
+
+	add := map[string]string{}
 	_, sessEnv, _ := s.GetCwdEnvHistory()
 	for k, v := range sessEnv {
-		merged[k] = v
+		add[k] = v
 	}
 	for k, v := range overrides {
-		merged[k] = v
+		add[k] = v
 	}
-	merged["AGENTSH_IN_SESSION"] = "1"
-	return policy.BuildEnv(pol, mapToEnvSlice(merged), nil)
+
+	add["AGENTSH_IN_SESSION"] = "1"
+
+	baseSlice := mapToEnvSlice(minimal)
+	return policy.BuildEnv(pol, baseSlice, add)
 }
 
 func mapToEnvSlice(m map[string]string) []string {
