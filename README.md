@@ -194,7 +194,7 @@ Defaults:
 * sample config: `configs/server-config.yaml`
 * default policy: `configs/policies/default.yaml`
 * env override: set `AGENTSH_POLICY_NAME` to an **allowed** policy name (no suffix). If unset/invalid/disallowed, the default is used.
-* env policy: configure `policies.env_policy` (allow/deny, max_bytes, max_keys, block_iteration) and per-command `env_*` overrides in policy files to control what env vars a command sees.
+* env policy: configure `policies.env_policy` (allow/deny, max_bytes, max_keys, block_iteration) and per-command `env_*` overrides in policy files. Empty allowlist defaults to minimal PATH/LANG/TERM/HOME with built-in secret deny list; set `block_iteration` to hide env iteration (requires env shim).
 * allowlist: configure `policies.allowed` in `config.yml`; empty means only the default is permitted.
 * optional integrity: set `policies.manifest_path` to a SHA256 manifest to verify policy files at load time.
 

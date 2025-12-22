@@ -793,6 +793,7 @@ Policies define what operations are allowed, denied, or require approval.
 - `policies.allowed`: list of policy names (without `.yml`/`.yaml`) the server may load. If empty, only `policies.default` is permitted.
 - `AGENTSH_POLICY_NAME`: optional env var to select an allowed policy at startup; invalid or disallowed values fall back to `policies.default`.
 - `policies.manifest_path`: optional SHA256 manifest file used to integrity-check policy files on load.
+- `policies.env_policy`: global environment policy for commands (allow/deny, max_bytes, max_keys, block_iteration); per-command `env_*` fields override. Default behavior with empty allow list is minimal PATH/LANG/TERM/HOME plus built-in secret deny list.
 
 Selection order:
 1. If `AGENTSH_POLICY_NAME` is set, matches `^[A-Za-z0-9_-]+$`, and is in `policies.allowed`, use it.
