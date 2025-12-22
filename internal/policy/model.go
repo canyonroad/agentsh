@@ -18,6 +18,7 @@ type Policy struct {
 	UnixRules    []UnixSocketRule `yaml:"unix_socket_rules"`
 
 	ResourceLimits ResourceLimits `yaml:"resource_limits"`
+	EnvPolicy      EnvPolicy      `yaml:"env_policy"`
 	Audit          AuditSettings  `yaml:"audit"`
 }
 
@@ -50,6 +51,12 @@ type CommandRule struct {
 	Decision     string           `yaml:"decision"`
 	Message      string           `yaml:"message"`
 	RedirectTo   *CommandRedirect `yaml:"redirect_to,omitempty"`
+
+	EnvAllow          []string `yaml:"env_allow"`
+	EnvDeny           []string `yaml:"env_deny"`
+	EnvMaxBytes       int      `yaml:"env_max_bytes"`
+	EnvMaxKeys        int      `yaml:"env_max_keys"`
+	EnvBlockIteration *bool    `yaml:"env_block_iteration,omitempty"`
 }
 
 type CommandRedirect struct {
@@ -80,6 +87,14 @@ type ResourceLimits struct {
 	CommandTimeout   duration `yaml:"command_timeout"`
 	SessionTimeout   duration `yaml:"session_timeout"`
 	IdleTimeout      duration `yaml:"idle_timeout"`
+}
+
+type EnvPolicy struct {
+	Allow          []string `yaml:"allow"`
+	Deny           []string `yaml:"deny"`
+	MaxBytes       int      `yaml:"max_bytes"`
+	MaxKeys        int      `yaml:"max_keys"`
+	BlockIteration bool     `yaml:"block_iteration"`
 }
 
 type AuditSettings struct {

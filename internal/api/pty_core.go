@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/agentsh/agentsh/internal/policy"
 	"net/http"
 	"os"
 	"strings"
@@ -150,7 +151,7 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 		defer unlock()
 		return nil, http.StatusBadRequest, err
 	}
-	env := mergeEnv(os.Environ(), sess, req.Env)
+	env, _ := buildPolicyEnv(policy.ResolvedEnvPolicy{}, os.Environ(), sess, req.Env)
 
 	rows := req.Rows
 	cols := req.Cols

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"github.com/agentsh/agentsh/internal/policy"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,7 +20,7 @@ func TestMergeEnv_MarksInSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := mergeEnv(nil, sess, nil)
+	out, _ := buildPolicyEnv(policy.ResolvedEnvPolicy{}, nil, sess, nil)
 	got := map[string]string{}
 	for _, kv := range out {
 		for i := 0; i < len(kv); i++ {
@@ -53,7 +54,8 @@ func TestMergeEnv_StripsHostSecrets(t *testing.T) {
 		"TERM=xterm-256color",
 	}
 
-	gotMap := envSliceToMap(mergeEnv(base, sess, nil))
+	pol := policy.ResolvedEnvPolicy{Deny: []string{"AWS_SECRET_ACCESS_KEY", "DOCKER_HOST"}, Allow: []string{"PATH", "TERM"}}
+	gotMap := envSliceToMapMust(buildPolicyEnv(pol, base, sess, nil))
 
 	if _, ok := gotMap["AWS_SECRET_ACCESS_KEY"]; ok {
 		t.Fatalf("expected AWS_SECRET_ACCESS_KEY to be stripped")
@@ -82,7 +84,8 @@ func TestMergeEnv_OverridesSecretStripped(t *testing.T) {
 		"SAFE":      "ok",
 	}
 
-	gotMap := envSliceToMap(mergeEnv(nil, sess, overrides))
+	pol := policy.ResolvedEnvPolicy{Deny: []string{"MY_SECRET"}}
+	gotMap := envSliceToMapMust(buildPolicyEnv(pol, nil, sess, overrides))
 
 	if _, ok := gotMap["MY_SECRET"]; ok {
 		t.Fatalf("expected MY_SECRET to be stripped from overrides")
@@ -103,4 +106,11 @@ func envSliceToMap(env []string) map[string]string {
 		}
 	}
 	return out
+}
+
+func envSliceToMapMust(env []string, err error) map[string]string {
+	if err != nil {
+		panic(err)
+	}
+	return envSliceToMap(env)
 }
