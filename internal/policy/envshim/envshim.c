@@ -1,15 +1,22 @@
+//go:build ignore
+
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static char **blocked_environ = (char *[]){ NULL };
+static char **blocked_environ = (char *[]) { NULL };
 static char **real_environ = NULL;
+static char ***real_environ_sym = NULL;
 static int (*real_putenv)(char *) = NULL;
 static int (*real_setenv)(const char *, const char *, int) = NULL;
 static int (*real_unsetenv)(const char *) = NULL;
 static char *(*real_getenv)(const char *) = NULL;
+
+// Exported symbols that many programs read directly.
+char **environ = NULL;
+char **__environ = NULL;
 
 static void init(void) __attribute__((constructor));
 
@@ -18,19 +25,20 @@ static void init(void) {
     real_setenv = dlsym(RTLD_NEXT, "setenv");
     real_unsetenv = dlsym(RTLD_NEXT, "unsetenv");
     real_getenv = dlsym(RTLD_NEXT, "getenv");
-    real_environ = (char **)dlsym(RTLD_DEFAULT, "environ");
-}
+    real_environ_sym = (char ***)dlsym(RTLD_DEFAULT, "environ");
+    if (real_environ_sym && *real_environ_sym) {
+        real_environ = *real_environ_sym;
+    }
 
-// When AGENTSH_ENV_BLOCK_ITERATION=1, hide environ iteration by returning an empty list.
-char **__environ_hook(void) {
     const char *flag = real_getenv ? real_getenv("AGENTSH_ENV_BLOCK_ITERATION") : getenv("AGENTSH_ENV_BLOCK_ITERATION");
-    if (flag && strcmp(flag, "1") == 0) {
-        return blocked_environ;
+    int block = (flag && strcmp(flag, "1") == 0);
+    char **target = block ? blocked_environ : (real_environ ? real_environ : blocked_environ);
+
+    if (real_environ_sym) {
+        *real_environ_sym = target;
     }
-    if (real_environ) {
-        return real_environ;
-    }
-    return blocked_environ;
+    environ = target;
+    __environ = target;
 }
 
 int putenv(char *string) {
