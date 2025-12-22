@@ -82,15 +82,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		return 2, []byte{}, msg, 0, int64(len(msg)), false, false, types.ExecResources{}, nil
 	}
 	if envPol.BlockIteration {
-		env = append(env, "AGENTSH_ENV_BLOCK_ITERATION=1")
-		shimPath := strings.TrimSpace(cfg.Policies.EnvShimPath)
-		if shimPath != "" {
-			if _, err := os.Stat(shimPath); err == nil {
-				env = append(env, fmt.Sprintf("LD_PRELOAD=%s", shimPath))
-			} else {
-				slog.Warn("env block_iteration requested but shim missing", "path", shimPath, "err", err)
-			}
-		}
+		env = maybeAddShimEnv(env, envPol, cfg)
 	}
 	if extra != nil && len(extra.env) > 0 {
 		for k, v := range extra.env {
@@ -260,6 +252,47 @@ func mapToEnvSlice(m map[string]string) []string {
 	for k, v := range m {
 		out = append(out, fmt.Sprintf("%s=%s", k, v))
 	}
+	return out
+}
+
+// maybeAddShimEnv injects the env-iteration blocking shim (LD_PRELOAD) and flag
+// when block_iteration is enabled. It tolerates missing/invalid shim path to
+// avoid breaking command execution, but emits a warning.
+func maybeAddShimEnv(env []string, pol policy.ResolvedEnvPolicy, cfg *config.Config) []string {
+	_ = pol
+	out := append([]string{}, env...)
+	out = append(out, "AGENTSH_ENV_BLOCK_ITERATION=1")
+
+	shim := strings.TrimSpace(cfg.Policies.EnvShimPath)
+	if shim == "" {
+		slog.Warn("block_iteration enabled but policies.env_shim_path is not set")
+		return out
+	}
+	info, err := os.Stat(shim)
+	if err != nil || info.IsDir() {
+		slog.Warn("block_iteration enabled but env shim missing", "path", shim, "err", err)
+		return out
+	}
+
+	const ldPreload = "LD_PRELOAD"
+	found := -1
+	for i, kv := range out {
+		if strings.HasPrefix(kv, ldPreload+"=") {
+			found = i
+			break
+		}
+	}
+	if found >= 0 {
+		existing := strings.TrimPrefix(out[found], ldPreload+"=")
+		if existing == "" {
+			out[found] = fmt.Sprintf("%s=%s", ldPreload, shim)
+		} else {
+			out[found] = fmt.Sprintf("%s=%s:%s", ldPreload, shim, existing)
+		}
+	} else {
+		out = append(out, fmt.Sprintf("%s=%s", ldPreload, shim))
+	}
+
 	return out
 }
 

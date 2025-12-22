@@ -1,11 +1,12 @@
 package api
 
 import (
-	"github.com/agentsh/agentsh/internal/policy"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 )
 
@@ -92,6 +93,46 @@ func TestMergeEnv_OverridesSecretStripped(t *testing.T) {
 	}
 	if gotMap["SAFE"] != "ok" {
 		t.Fatalf("expected SAFE to survive overrides")
+	}
+}
+
+func TestMaybeAddShimEnv_AddsShimAndFlag(t *testing.T) {
+	tmp := t.TempDir()
+	shimPath := filepath.Join(tmp, "libenvshim.so")
+	if err := os.WriteFile(shimPath, []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Policies.EnvShimPath = shimPath
+	in := []string{"PATH=/usr/bin"}
+	out := maybeAddShimEnv(in, policy.ResolvedEnvPolicy{BlockIteration: true}, cfg)
+	m := envSliceToMap(out)
+
+	if m["AGENTSH_ENV_BLOCK_ITERATION"] != "1" {
+		t.Fatalf("expected AGENTSH_ENV_BLOCK_ITERATION=1, got %q", m["AGENTSH_ENV_BLOCK_ITERATION"])
+	}
+	if got := m["LD_PRELOAD"]; got != shimPath {
+		t.Fatalf("expected LD_PRELOAD to be shim path, got %q", got)
+	}
+}
+
+func TestMaybeAddShimEnv_PrependsExistingLDPreload(t *testing.T) {
+	tmp := t.TempDir()
+	shimPath := filepath.Join(tmp, "libenvshim.so")
+	if err := os.WriteFile(shimPath, []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Policies.EnvShimPath = shimPath
+	in := []string{"LD_PRELOAD=/other.so", "TERM=xterm"}
+	out := maybeAddShimEnv(in, policy.ResolvedEnvPolicy{BlockIteration: true}, cfg)
+	m := envSliceToMap(out)
+
+	expected := shimPath + ":/other.so"
+	if got := m["LD_PRELOAD"]; got != expected {
+		t.Fatalf("expected LD_PRELOAD=%s, got %q", expected, got)
 	}
 }
 
