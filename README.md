@@ -38,6 +38,33 @@ Most systems can *deny* an action. agentsh can also **redirect** it.
 
 That means when an agent tries the wrong approach (or brute-force workarounds), policy can steer it to the right path by swapping the command and returning guidance—keeping the agent on the paved road and reducing wasted retries.
 
+**Example: redirect curl to an audited wrapper**
+
+```yaml
+command_rules:
+  - name: redirect-curl
+    commands: [curl, wget]
+    decision: redirect
+    message: "Downloads routed through audited fetch"
+    redirect_to:
+      command: agentsh-fetch
+      args: ["--audit"]
+```
+
+**Example: redirect writes outside workspace back inside**
+
+```yaml
+file_rules:
+  - name: redirect-outside-writes
+    paths: ["/home/**", "/tmp/**"]
+    operations: [write, create]
+    decision: redirect
+    redirect_to: "/workspace/.scratch"
+    message: "Writes outside workspace redirected to /workspace/.scratch"
+```
+
+The agent sees a successful operation (not an error), but you control where things actually land.
+
 ---
 
 ## Containers + agentsh: better together
@@ -96,8 +123,9 @@ SID=$(./bin/agentsh session create --workspace . | jq -r .id)
 ## Shell access
 
 - Run commands via agentsh, not directly in bash/zsh.
-- Use: `agentsh exec -- <command>`
-- If you need structured output: `agentsh exec --output json --events summary -- <command>`
+- Use: `agentsh exec $SID -- <your-command-here>`
+- For structured output: `agentsh exec --output json --events summary $SID -- <your-command-here>`
+- Get session ID first: `SID=$(agentsh session create --workspace . | jq -r .id)`
 ```
 
 ---
@@ -231,15 +259,28 @@ The fastest way to "get it" is to run something that spawns subprocesses and tou
 # 1) Create a session in your repo/workspace
 SID=$(agentsh session create --workspace . | jq -r .id)
 
-# 2) Run something simple (human output)
+# 2) Run something simple (human-friendly output)
 agentsh exec "$SID" -- uname -a
+# → prints system info, just like normal
 
 # 3) Run something that hits the network (JSON output + event summary)
-agentsh exec --output json --events summary "$SID" -- curl https://example.com
+agentsh exec --output json --events summary "$SID" -- curl -s https://example.com
+# → JSON response includes: exit_code, stdout, and events[] showing dns_query + net_connect
 
-# 4) Try a sensitive action to see policy outcomes
+# 4) Trigger a policy decision - try to delete something
 agentsh exec "$SID" -- rm -rf ./tmp
+# → With default policy: prompts for approval or denies based on your rules
+
+# 5) See what happened (structured audit trail)
+agentsh exec --output json --events full "$SID" -- ls
+# → events[] shows every file operation, even from subprocesses
 ```
+
+**What you'll see in the JSON output:**
+- `exit_code`: the command's exit status
+- `stdout` / `stderr`: captured output
+- `events[]`: every file/network/process operation with policy decisions
+- `policy.decision`: `allow`, `deny`, `approve`, or `redirect`
 
 Tip: keep a terminal with `--output json` open when testing policies—it makes it obvious what's being touched.
 
@@ -266,18 +307,6 @@ You already have a default policy (`configs/policies/default.yaml`). These opini
   * approve any credential/path access
   * redirect network tool usage to internal proxies/mirrors
   * soft-delete destructive operations for easy recovery
-
----
-
-## "Meaningful blocks" examples (redirect patterns)
-
-Here are a few redirects that tend to pay off immediately:
-
-* If the agent tries `curl`/`wget`, **redirect** to an internal artifact mirror command.
-* If the agent tries to write outside the workspace, **redirect** it to write under `/workspace/...`.
-* If the agent tries to delete recursively, require `approve` (or `soft_delete`) and return a message with the safe alternative.
-
-(Keep redirects small and explicit; treat them as the paved road.)
 
 ---
 
