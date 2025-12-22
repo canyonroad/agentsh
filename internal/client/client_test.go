@@ -7,15 +7,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
+var (
+	httpListenSkip sync.Once
+	unixListenSkip sync.Once
+)
+
 func TestDoJSONSuccessAndAuthHeader(t *testing.T) {
 	var gotKey string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotKey = r.Header.Get("X-API-Key")
 		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sessions" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -42,7 +48,7 @@ func TestDoJSONSuccessAndAuthHeader(t *testing.T) {
 }
 
 func TestDoJSONHandlesErrorStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -62,7 +68,7 @@ func TestDoJSONHandlesErrorStatus(t *testing.T) {
 }
 
 func TestDoJSONNoContent(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
@@ -78,7 +84,13 @@ func TestUnixSchemeUsesUnixDialer(t *testing.T) {
 	sock := filepath.Join(tmp, "srv.sock")
 	l, err := net.Listen("unix", sock)
 	if err != nil {
-		t.Fatalf("listen unix: %v", err)
+		unixListenSkip.Do(func() {
+			t.Logf("skipping unix socket tests: listen disallowed (%v)", err)
+		})
+		t.Skipf("skipping unix socket tests: listen disallowed (%v)", err)
+	}
+	if l == nil {
+		return
 	}
 	defer l.Close()
 
@@ -103,7 +115,7 @@ func TestUnixSchemeUsesUnixDialer(t *testing.T) {
 }
 
 func TestStreamSessionEventsNonOK(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusBadRequest)
 	}))
 	defer srv.Close()
@@ -117,7 +129,7 @@ func TestStreamSessionEventsNonOK(t *testing.T) {
 }
 
 func TestStreamSessionEventsSuccess(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: hello\n\n"))
@@ -138,4 +150,19 @@ func TestStreamSessionEventsSuccess(t *testing.T) {
 	if n == 0 {
 		t.Fatalf("expected to read some data from stream")
 	}
+}
+
+// newHTTPServer forces IPv4 localhost to avoid environments that disallow IPv6 loopback binds.
+func newHTTPServer(t *testing.T, handler http.Handler) *httptest.Server {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		httpListenSkip.Do(func() {
+			t.Logf("skipping HTTP server tests: listen tcp4 disallowed (%v)", err)
+		})
+		t.Skipf("skipping HTTP server tests: listen tcp4 disallowed (%v)", err)
+	}
+	srv := &httptest.Server{Listener: listener, Config: &http.Server{Handler: handler}}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
 }

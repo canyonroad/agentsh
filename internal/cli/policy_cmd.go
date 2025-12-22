@@ -114,22 +114,23 @@ func resolvePolicyDir(configPath, override string) (string, error) {
 }
 
 func resolvePolicyPath(dir, nameOrPath string) (string, error) {
-	if nameOrPath == "" {
-		return "", fmt.Errorf("policy name/path is required")
-	}
-	if strings.ContainsRune(nameOrPath, os.PathSeparator) || strings.HasSuffix(nameOrPath, ".yml") || strings.HasSuffix(nameOrPath, ".yaml") {
-		p := nameOrPath
-		if !filepath.IsAbs(p) {
-			p = filepath.Clean(p)
-		}
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-		// If it's a relative path inside dir, try that.
-		p2 := filepath.Join(dir, nameOrPath)
-		if _, err := os.Stat(p2); err == nil {
-			return p2, nil
-		}
-	}
-	return policy.ResolvePolicyPath(dir, nameOrPath)
+    if nameOrPath == "" {
+        return "", fmt.Errorf("policy name/path is required")
+    }
+    if strings.ContainsRune(nameOrPath, os.PathSeparator) || strings.HasSuffix(nameOrPath, ".yml") || strings.HasSuffix(nameOrPath, ".yaml") {
+        p := nameOrPath
+        if !filepath.IsAbs(p) {
+            p = filepath.Clean(p)
+        }
+        if _, err := os.Stat(p); err == nil {
+            return p, nil
+        }
+        // If it's a relative path inside dir, try that.
+        p2 := filepath.Join(dir, nameOrPath)
+        if _, err := os.Stat(p2); err == nil {
+            return p2, nil
+        }
+    }
+    // CLI resolution remains permissive for direct paths; allowlist enforcement is server-side.
+    return policy.ResolvePolicyPath(dir, nameOrPath)
 }

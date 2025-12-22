@@ -73,11 +73,14 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 	}
 
-	policyPath, err := resolvePolicyPath(cfg)
-	if err != nil {
-		return nil, err
-	}
-	p, err := policy.LoadFromFile(policyPath)
+	pm := policy.NewManager(
+		cfg.Policies.Dir,
+		cfg.Policies.Default,
+		cfg.Policies.Allowed,
+		cfg.Policies.ManifestPath,
+		os.Getenv("AGENTSH_POLICY_NAME"),
+	)
+	p, err := pm.Get()
 	if err != nil {
 		return nil, err
 	}
@@ -621,26 +624,4 @@ func (s *Server) reapOnce(now time.Time) {
 	}
 }
 
-func resolvePolicyPath(cfg *config.Config) (string, error) {
-	if cfg.Policies.Dir != "" {
-		if p, err := policy.ResolvePolicyPath(cfg.Policies.Dir, cfg.Policies.Default); err == nil {
-			return p, nil
-		}
-	}
-	localCandidates := []string{
-		"default-policy.yml",
-		"default-policy.yaml",
-		filepath.Join("configs", "default-policy.yaml"),
-		filepath.Join("configs", "default-policy.yml"),
-		filepath.Join("/etc/agentsh", "default-policy.yaml"),
-		filepath.Join("/etc/agentsh", "default-policy.yml"),
-		filepath.Join("/etc/agentsh", "policies", cfg.Policies.Default+".yaml"),
-		filepath.Join("/etc/agentsh", "policies", cfg.Policies.Default+".yml"),
-	}
-	for _, p := range localCandidates {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("could not find default policy (set policies.dir or add default-policy.yml)")
-}
+// resolvePolicyPath superseded by policy.Manager

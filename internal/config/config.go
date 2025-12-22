@@ -179,8 +179,10 @@ type SandboxUnixSocketsConfig struct {
 }
 
 type PoliciesConfig struct {
-	Dir     string `yaml:"dir"`
-	Default string `yaml:"default"`
+	Dir          string   `yaml:"dir"`
+	Default      string   `yaml:"default"`
+	Allowed      []string `yaml:"allowed"`
+	ManifestPath string   `yaml:"manifest_path"`
 }
 
 type ApprovalsConfig struct {

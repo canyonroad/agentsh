@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,9 +15,14 @@ func LoadFromFile(path string) (*Policy, error) {
 		return nil, fmt.Errorf("read policy: %w", err)
 	}
 
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
 	var p Policy
-	if err := yaml.Unmarshal(b, &p); err != nil {
+	if err := dec.Decode(&p); err != nil {
 		return nil, fmt.Errorf("parse policy: %w", err)
+	}
+	if err := p.Validate(); err != nil {
+		return nil, fmt.Errorf("validate policy: %w", err)
 	}
 	return &p, nil
 }
@@ -24,6 +30,9 @@ func LoadFromFile(path string) (*Policy, error) {
 func ResolvePolicyPath(dir, name string) (string, error) {
 	if dir == "" {
 		return "", fmt.Errorf("policy dir is empty")
+	}
+	if !nameRe.MatchString(name) {
+		return "", fmt.Errorf("invalid policy name")
 	}
 	try := []string{
 		filepath.Join(dir, name+".yaml"),

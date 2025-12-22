@@ -18,6 +18,7 @@ type Policy struct {
 	UnixRules    []UnixSocketRule `yaml:"unix_socket_rules"`
 
 	ResourceLimits ResourceLimits `yaml:"resource_limits"`
+	Audit          AuditSettings  `yaml:"audit"`
 }
 
 type FileRule struct {
@@ -81,6 +82,16 @@ type ResourceLimits struct {
 	IdleTimeout      duration `yaml:"idle_timeout"`
 }
 
+type AuditSettings struct {
+	LogAllowed         bool `yaml:"log_allowed"`
+	LogDenied          bool `yaml:"log_denied"`
+	LogApproved        bool `yaml:"log_approved"`
+	IncludeStdout      bool `yaml:"include_stdout"`
+	IncludeStderr      bool `yaml:"include_stderr"`
+	IncludeFileContent bool `yaml:"include_file_content"`
+	RetentionDays      int  `yaml:"retention_days"`
+}
+
 type duration struct{ time.Duration }
 
 func (d *duration) UnmarshalYAML(value *yaml.Node) error {
@@ -92,5 +103,16 @@ func (d *duration) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	d.Duration = dd
+	return nil
+}
+
+// Validate performs minimal semantic validation of a policy.
+func (p Policy) Validate() error {
+	if p.Version <= 0 {
+		return fmt.Errorf("version must be > 0")
+	}
+	if p.Name == "" {
+		return fmt.Errorf("name is required")
+	}
 	return nil
 }

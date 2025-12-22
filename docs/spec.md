@@ -790,6 +790,15 @@ Policies define what operations are allowed, denied, or require approval.
 
 ### 9.2 Policy Configuration
 
+- `policies.allowed`: list of policy names (without `.yml`/`.yaml`) the server may load. If empty, only `policies.default` is permitted.
+- `AGENTSH_POLICY_NAME`: optional env var to select an allowed policy at startup; invalid or disallowed values fall back to `policies.default`.
+- `policies.manifest_path`: optional SHA256 manifest file used to integrity-check policy files on load.
+
+Selection order:
+1. If `AGENTSH_POLICY_NAME` is set, matches `^[A-Za-z0-9_-]+$`, and is in `policies.allowed`, use it.
+2. Else use `policies.default`.
+3. The selected policy is loaded once on first use; failures do not trigger loading another policy.
+
 ```yaml
 # /etc/agentsh/policies/default.yaml
 version: 1
