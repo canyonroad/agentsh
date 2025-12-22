@@ -21,7 +21,7 @@ var (
 	ErrInvalidSessionID = errors.New("invalid session id")
 )
 
-var sessionIDRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
+var sessionIDRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_]{0,127}$`)
 
 type Session struct {
 	mu sync.Mutex
@@ -574,7 +574,13 @@ func (s *Session) RecordHistory(line string) {
 	s.Touch()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	const maxHistory = 1000
 	s.History = append(s.History, line)
+	// Trim history if it exceeds the limit
+	if len(s.History) > maxHistory {
+		// Keep the most recent entries
+		s.History = s.History[len(s.History)-maxHistory:]
+	}
 }
 
 func (m *Manager) ReapExpired(now time.Time, sessionTimeout, idleTimeout time.Duration) []*Session {
@@ -585,14 +591,21 @@ func (m *Manager) ReapExpired(now time.Time, sessionTimeout, idleTimeout time.Du
 		now = time.Now().UTC()
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// First pass: collect candidates without holding both locks simultaneously
+	m.mu.RLock()
+	candidates := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		candidates = append(candidates, s)
+	}
+	m.mu.RUnlock()
 
-	var reaped []*Session
-	for id, s := range m.sessions {
+	// Check each session's timestamps (only holding session lock)
+	var expiredIDs []string
+	for _, s := range candidates {
 		s.mu.Lock()
 		createdAt := s.CreatedAt
 		last := s.LastActivity
+		id := s.ID
 		s.mu.Unlock()
 
 		expired := false
@@ -603,6 +616,21 @@ func (m *Manager) ReapExpired(now time.Time, sessionTimeout, idleTimeout time.Du
 			expired = true
 		}
 		if expired {
+			expiredIDs = append(expiredIDs, id)
+		}
+	}
+
+	if len(expiredIDs) == 0 {
+		return nil
+	}
+
+	// Second pass: delete expired sessions (only holding manager lock)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var reaped []*Session
+	for _, id := range expiredIDs {
+		if s, ok := m.sessions[id]; ok {
 			delete(m.sessions, id)
 			reaped = append(reaped, s)
 		}

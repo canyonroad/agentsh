@@ -51,6 +51,11 @@ type Manager struct {
 	pending map[string]*pending
 
 	promptMu sync.Mutex
+
+	// Rate limiting: track requests per session
+	rateMu        sync.Mutex
+	sessionCounts map[string]int // session -> active approval count
+	maxPerSession int            // max concurrent approvals per session (0 = unlimited)
 }
 
 type pending struct {
@@ -66,10 +71,12 @@ func New(mode string, timeout time.Duration, emit Emitter) *Manager {
 		timeout = 5 * time.Minute
 	}
 	m := &Manager{
-		mode:    mode,
-		timeout: timeout,
-		emit:    emit,
-		pending: make(map[string]*pending),
+		mode:          mode,
+		timeout:       timeout,
+		emit:          emit,
+		pending:       make(map[string]*pending),
+		sessionCounts: make(map[string]int),
+		maxPerSession: 10, // Default: max 10 concurrent approvals per session
 	}
 	m.prompt = m.promptTTY
 	return m
@@ -108,6 +115,31 @@ func (m *Manager) Resolve(id string, approved bool, reason string) bool {
 }
 
 func (m *Manager) RequestApproval(ctx context.Context, req Request) (Resolution, error) {
+	// Rate limiting: check concurrent approval count per session
+	if m.maxPerSession > 0 {
+		m.rateMu.Lock()
+		count := m.sessionCounts[req.SessionID]
+		if count >= m.maxPerSession {
+			m.rateMu.Unlock()
+			return Resolution{Approved: false, Reason: "rate limit exceeded", At: time.Now().UTC()},
+				fmt.Errorf("too many pending approvals for session %s (max %d)", req.SessionID, m.maxPerSession)
+		}
+		m.sessionCounts[req.SessionID] = count + 1
+		m.rateMu.Unlock()
+	}
+
+	// Decrement rate limit counter when done
+	decrementRate := func() {
+		if m.maxPerSession > 0 {
+			m.rateMu.Lock()
+			m.sessionCounts[req.SessionID]--
+			if m.sessionCounts[req.SessionID] <= 0 {
+				delete(m.sessionCounts, req.SessionID)
+			}
+			m.rateMu.Unlock()
+		}
+	}
+
 	now := time.Now().UTC()
 	if req.ID == "" {
 		req.ID = "approval-" + uuid.NewString()
@@ -147,6 +179,7 @@ func (m *Manager) RequestApproval(ctx context.Context, req Request) (Resolution,
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	defer decrementRate() // Always decrement on exit
 
 	select {
 	case res := <-p.ch:
@@ -211,14 +244,18 @@ func (m *Manager) promptTTY(ctx context.Context, req Request) (Resolution, error
 	if err != nil {
 		return Resolution{}, fmt.Errorf("open /dev/tty: %w", err)
 	}
-	defer f.Close()
+
+	// Use sync.Once to ensure we only close the file once
+	var closeOnce sync.Once
+	closeFile := func() { closeOnce.Do(func() { _ = f.Close() }) }
+	defer closeFile()
 
 	// Close the tty if the context is cancelled to unblock reads.
 	done := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = f.Close()
+			closeFile()
 		case <-done:
 		}
 	}()

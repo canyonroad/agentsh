@@ -40,4 +40,3 @@ func TestCombinePathDecisionsForRename_ApproveWinsOverAllow(t *testing.T) {
 		t.Fatalf("expected approval metadata, got %+v", out.Approval)
 	}
 }
-

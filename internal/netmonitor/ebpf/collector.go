@@ -96,6 +96,10 @@ func (c *Collector) loop() {
 
 func copyToEvent(ev *ConnectEvent, data []byte) {
 	// Layout matches struct in connect.bpf.c
+	// Minimum 30 bytes required for base fields (up to Protocol at offset 29)
+	if len(data) < 30 {
+		return
+	}
 	ev.TsNs = le64(data[0:])
 	ev.Cookie = le64(data[8:])
 	ev.PID = le32(data[16:])

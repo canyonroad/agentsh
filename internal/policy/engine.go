@@ -297,7 +297,16 @@ func (e *Engine) CheckUnixSocket(path string, operation string) Decision {
 	return e.wrapDecision(string(types.DecisionDeny), "default-deny-unix", "", nil)
 }
 
+// CheckNetwork evaluates network_rules against a domain and port.
+// Deprecated: Use CheckNetworkCtx for proper cancellation support.
 func (e *Engine) CheckNetwork(domain string, port int) Decision {
+	return e.CheckNetworkCtx(context.Background(), domain, port)
+}
+
+// CheckNetworkCtx evaluates network_rules against a domain and port with context support.
+// If a rule requires CIDR matching and the domain is not an IP literal, DNS resolution
+// will be performed using the provided context for cancellation.
+func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) Decision {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	var (
 		ips      []net.IP
@@ -313,9 +322,10 @@ func (e *Engine) CheckNetwork(domain string, port int) Decision {
 			return
 		}
 		resolved = true
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		// Use caller's context with a reasonable upper bound timeout
+		resolveCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, domain)
+		addrs, err := net.DefaultResolver.LookupIPAddr(resolveCtx, domain)
 		if err != nil {
 			return
 		}

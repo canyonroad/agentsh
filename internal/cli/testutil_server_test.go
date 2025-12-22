@@ -23,4 +23,3 @@ func newHTTPTestServerOrSkip(t *testing.T, h http.Handler) *httptest.Server {
 	t.Cleanup(srv.Close)
 	return srv
 }
-

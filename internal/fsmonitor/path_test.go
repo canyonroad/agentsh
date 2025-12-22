@@ -49,4 +49,3 @@ func TestResolveRealPathUnderRoot_UsesParentForCreate(t *testing.T) {
 		t.Fatalf("expected escape error")
 	}
 }
-

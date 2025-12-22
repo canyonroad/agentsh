@@ -18,4 +18,3 @@ func StartTransparentTCP(listenAddr string, sessionID string, sess *session.Sess
 }
 
 func (t *TransparentTCP) Close() error { return nil }
-

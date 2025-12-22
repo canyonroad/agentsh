@@ -38,4 +38,3 @@ func TestChooseCommandTimeout_DefaultWhenNoPolicy(t *testing.T) {
 		t.Fatalf("expected default %s, got %s", defaultCommandTimeout, got)
 	}
 }
-

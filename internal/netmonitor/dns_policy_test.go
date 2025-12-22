@@ -34,7 +34,7 @@ func TestDNSInterceptorPolicyAdjustments(t *testing.T) {
 		dnsCache:  NewDNSCache(5 * time.Minute),
 	}
 
-	dec := d.policyDecision("example.com", 53)
+	dec := d.policyDecision(context.Background(), "example.com", 53)
 	if dec.PolicyDecision != types.DecisionApprove {
 		t.Fatalf("expected approve decision for example.com, got %v", dec.PolicyDecision)
 	}
@@ -43,7 +43,7 @@ func TestDNSInterceptorPolicyAdjustments(t *testing.T) {
 		t.Fatalf("approval should time out -> deny, got %v", dec.EffectiveDecision)
 	}
 
-	defaultDeny := d.policyDecision("foo.com", 53)
+	defaultDeny := d.policyDecision(context.Background(), "foo.com", 53)
 	if defaultDeny.PolicyDecision != types.DecisionDeny || defaultDeny.Rule != "default-deny-network" {
 		t.Fatalf("unexpected default decision: %+v", defaultDeny)
 	}

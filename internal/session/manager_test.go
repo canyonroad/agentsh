@@ -70,4 +70,3 @@ func TestManager_ReapExpired_SessionTimeoutWins(t *testing.T) {
 		t.Fatalf("expected to reap session by session_timeout, got %+v", got)
 	}
 }
-

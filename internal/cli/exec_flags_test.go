@@ -8,4 +8,3 @@ func TestExecCmd_HasArgv0Flag(t *testing.T) {
 		t.Fatalf("expected exec command to define --argv0 flag")
 	}
 }
-

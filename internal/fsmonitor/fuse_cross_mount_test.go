@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -71,7 +72,7 @@ func TestFUSE_CrossMountIntoWorkspaceEmitsCreate(t *testing.T) {
 	}
 
 	found := false
-	for _, ev := range em.events {
+	for _, ev := range em.Events() {
 		if ev.Type == "file_create" && ev.Path == "/workspace/a.txt" {
 			found = true
 			if _, ok := ev.Fields["size"]; !ok {
@@ -86,11 +87,24 @@ func TestFUSE_CrossMountIntoWorkspaceEmitsCreate(t *testing.T) {
 }
 
 type captureEmitter struct {
+	mu     sync.Mutex
 	events []types.Event
 }
 
 func (c *captureEmitter) AppendEvent(_ context.Context, ev types.Event) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.events = append(c.events, ev)
 	return nil
 }
-func (c *captureEmitter) Publish(ev types.Event) { c.events = append(c.events, ev) }
+func (c *captureEmitter) Publish(ev types.Event) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, ev)
+}
+
+func (c *captureEmitter) Events() []types.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]types.Event(nil), c.events...)
+}

@@ -44,4 +44,3 @@ resource_limits:
 		t.Fatalf("idle_timeout: expected 56m, got %s", lim.IdleTimeout)
 	}
 }
-

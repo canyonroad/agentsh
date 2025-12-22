@@ -48,9 +48,9 @@ type Server struct {
 	grpcServer *grpc.Server
 	grpcLn     net.Listener
 
-	store      *composite.Store
-	broker     *events.Broker
-	sessions   *session.Manager
+	store    *composite.Store
+	broker   *events.Broker
+	sessions *session.Manager
 
 	sessionTimeout time.Duration
 	idleTimeout    time.Duration

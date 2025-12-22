@@ -44,4 +44,3 @@ func TestServer_RejectsAPIApprovalsWithoutAuth(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-

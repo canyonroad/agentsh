@@ -37,4 +37,3 @@ func ResolvePolicyPath(dir, name string) (string, error) {
 	}
 	return "", fmt.Errorf("policy %q not found in %q", name, dir)
 }
-
