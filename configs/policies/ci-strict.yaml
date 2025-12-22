@@ -1,0 +1,346 @@
+# CI Strict Policy for agentsh
+# Locked-down policy for CI runners - deny anything outside workspace
+
+version: 1
+name: ci-strict
+description: |
+  Strict policy for CI runners. Denies anything outside workspace,
+  blocks outbound network except artifact registries, denies interactive
+  shells, and audits everything.
+
+# =============================================================================
+# FILE OPERATION RULES
+# =============================================================================
+
+file_rules:
+  # ---------------------------------------------------------------------------
+  # Workspace ONLY - full access
+  # ---------------------------------------------------------------------------
+
+  - name: allow-workspace
+    description: Full access within workspace
+    paths:
+      - "/workspace"
+      - "/workspace/**"
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Temp directories for build artifacts
+  # ---------------------------------------------------------------------------
+
+  - name: allow-tmp
+    description: Full access to temp directories
+    paths:
+      - "/tmp/**"
+      - "/var/tmp/**"
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # System paths - read-only (required for toolchains)
+  # ---------------------------------------------------------------------------
+
+  - name: allow-system-read
+    description: Read-only access to system paths
+    paths:
+      - "/usr/**"
+      - "/lib/**"
+      - "/lib64/**"
+      - "/bin/**"
+      - "/sbin/**"
+      - "/opt/**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+      - readlink
+    decision: allow
+
+  - name: allow-etc-read
+    description: Read minimal config files
+    paths:
+      - "/etc/hosts"
+      - "/etc/resolv.conf"
+      - "/etc/ssl/**"
+      - "/etc/ca-certificates/**"
+      - "/etc/localtime"
+      - "/etc/timezone"
+      - "/etc/passwd"  # Required by some tools for uid lookup
+    operations:
+      - read
+      - open
+      - stat
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Package caches - only if mounted read-only
+  # ---------------------------------------------------------------------------
+
+  - name: allow-npm-cache-read
+    description: npm cache read access
+    paths:
+      - "/home/**/.npm/**"
+      - "/root/.npm/**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+    decision: allow
+
+  - name: allow-pip-cache-read
+    description: pip cache read access
+    paths:
+      - "/home/**/.cache/pip/**"
+      - "/root/.cache/pip/**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # DENY EVERYTHING ELSE
+  # ---------------------------------------------------------------------------
+
+  - name: deny-home
+    description: Block access to home directories
+    paths:
+      - "/home/**"
+      - "/root/**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: default-deny-files
+    description: Deny all other file operations
+    paths:
+      - "**"
+    operations:
+      - "*"
+    decision: deny
+
+# =============================================================================
+# NETWORK OPERATION RULES
+# =============================================================================
+
+network_rules:
+  # ---------------------------------------------------------------------------
+  # Artifact registries ONLY
+  # ---------------------------------------------------------------------------
+
+  - name: allow-npm
+    description: npm registry
+    domains:
+      - "registry.npmjs.org"
+      - "*.npmjs.org"
+    ports: [443]
+    decision: allow
+
+  - name: allow-pypi
+    description: PyPI
+    domains:
+      - "pypi.org"
+      - "files.pythonhosted.org"
+    ports: [443]
+    decision: allow
+
+  - name: allow-cargo
+    description: Cargo registry
+    domains:
+      - "crates.io"
+      - "static.crates.io"
+    ports: [443]
+    decision: allow
+
+  - name: allow-go-proxy
+    description: Go module proxy
+    domains:
+      - "proxy.golang.org"
+      - "sum.golang.org"
+    ports: [443]
+    decision: allow
+
+  - name: allow-maven
+    description: Maven Central
+    domains:
+      - "repo1.maven.org"
+      - "central.maven.org"
+    ports: [443]
+    decision: allow
+
+  - name: allow-docker
+    description: Docker registries
+    domains:
+      - "registry-1.docker.io"
+      - "auth.docker.io"
+      - "production.cloudflare.docker.com"
+      - "*.gcr.io"
+      - "ghcr.io"
+    ports: [443]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Code hosting for git clone
+  # ---------------------------------------------------------------------------
+
+  - name: allow-github
+    description: GitHub (HTTPS only, no SSH)
+    domains:
+      - "github.com"
+      - "*.github.com"
+      - "raw.githubusercontent.com"
+      - "*.githubusercontent.com"
+    ports: [443]
+    decision: allow
+
+  - name: allow-gitlab
+    description: GitLab
+    domains:
+      - "gitlab.com"
+      - "*.gitlab.com"
+    ports: [443]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Block everything else
+  # ---------------------------------------------------------------------------
+
+  - name: block-private-networks
+    description: Block internal/private networks
+    cidrs:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+      - "169.254.0.0/16"
+    decision: deny
+
+  - name: block-metadata-services
+    description: Block cloud metadata services
+    cidrs:
+      - "169.254.169.254/32"
+      - "100.100.100.200/32"
+    decision: deny
+
+  - name: default-deny-network
+    description: Deny all other network connections
+    domains:
+      - "*"
+    decision: deny
+
+# =============================================================================
+# COMMAND RULES
+# =============================================================================
+
+command_rules:
+  # ---------------------------------------------------------------------------
+  # Deny interactive shells
+  # ---------------------------------------------------------------------------
+
+  - name: deny-interactive-shells
+    description: Block interactive shell invocations
+    commands:
+      - bash
+      - sh
+      - zsh
+    args_patterns:
+      - "-i*"
+      - "--login*"
+    decision: deny
+
+  # ---------------------------------------------------------------------------
+  # Allow build tools
+  # ---------------------------------------------------------------------------
+
+  - name: allow-build-commands
+    description: Standard build commands
+    commands:
+      - make
+      - cmake
+      - ninja
+      - gradle
+      - mvn
+      - ant
+    decision: allow
+
+  - name: allow-test-commands
+    description: Test runners
+    commands:
+      - pytest
+      - jest
+      - mocha
+      - cargo
+      - go
+      - npm
+      - yarn
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Block dangerous commands
+  # ---------------------------------------------------------------------------
+
+  - name: block-dangerous-rm
+    description: Block recursive force delete
+    commands:
+      - rm
+    args_patterns:
+      - "*-rf*"
+      - "*-fr*"
+    decision: deny
+
+  - name: block-network-tools
+    description: Block raw network tools
+    commands:
+      - nc
+      - netcat
+      - ncat
+      - socat
+      - telnet
+      - ssh
+      - scp
+    decision: deny
+
+  - name: block-system-commands
+    description: Block system administration commands
+    commands:
+      - shutdown
+      - reboot
+      - systemctl
+      - service
+      - mount
+      - umount
+      - dd
+      - fdisk
+      - mkfs
+    decision: deny
+
+# =============================================================================
+# RESOURCE LIMITS
+# =============================================================================
+
+resource_limits:
+  max_memory_mb: 4096
+  memory_swap_max_mb: 0
+  cpu_quota_percent: 100
+  pids_max: 500
+  command_timeout: 30m
+  session_timeout: 2h
+  idle_timeout: 10m
+
+# =============================================================================
+# AUDIT SETTINGS - LOG EVERYTHING
+# =============================================================================
+
+audit:
+  log_allowed: true
+  log_denied: true
+  log_approved: true
+  include_stdout: false
+  include_stderr: true
+  include_file_content: false
+  retention_days: 90

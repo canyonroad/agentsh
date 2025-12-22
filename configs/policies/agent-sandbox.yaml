@@ -1,0 +1,474 @@
+# Agent Sandbox Policy for agentsh
+# Maximum containment for running unknown/untrusted agent code
+
+version: 1
+name: agent-sandbox
+description: |
+  High-security sandbox for AI agents running unknown code.
+  Default deny with explicit allowlist, approval for any credential access,
+  redirect network tools to internal proxies, soft-delete for recovery.
+
+# =============================================================================
+# FILE OPERATION RULES
+# =============================================================================
+
+file_rules:
+  # ---------------------------------------------------------------------------
+  # Workspace - read/write allowed, deletes are soft (recoverable)
+  # ---------------------------------------------------------------------------
+
+  - name: allow-workspace-read
+    description: Allow reading files in workspace
+    paths:
+      - "/workspace"
+      - "/workspace/**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+      - readlink
+    decision: allow
+
+  - name: allow-workspace-write
+    description: Allow writing files in workspace
+    paths:
+      - "/workspace"
+      - "/workspace/**"
+    operations:
+      - write
+      - create
+      - mkdir
+      - chmod
+      - rename
+    decision: allow
+
+  - name: soft-delete-workspace
+    description: Soft-delete files in workspace (recoverable)
+    paths:
+      - "/workspace"
+      - "/workspace/**"
+    operations:
+      - delete
+      - rmdir
+    decision: soft_delete
+    message: "File quarantined (recoverable): {{.Path}}"
+
+  # ---------------------------------------------------------------------------
+  # Temp directories - sandboxed
+  # ---------------------------------------------------------------------------
+
+  - name: allow-tmp
+    description: Full access to temp directories
+    paths:
+      - "/tmp/**"
+      - "/var/tmp/**"
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # System paths - minimal read-only
+  # ---------------------------------------------------------------------------
+
+  - name: allow-system-read
+    description: Read access to system paths
+    paths:
+      - "/usr/**"
+      - "/lib/**"
+      - "/lib64/**"
+      - "/bin/**"
+      - "/sbin/**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+      - readlink
+    decision: allow
+
+  - name: allow-etc-minimal
+    description: Read minimal config files
+    paths:
+      - "/etc/hosts"
+      - "/etc/resolv.conf"
+      - "/etc/ssl/certs/**"
+      - "/etc/ca-certificates/**"
+      - "/etc/localtime"
+    operations:
+      - read
+      - stat
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # APPROVE credential/secret access (not deny - visible decision)
+  # ---------------------------------------------------------------------------
+
+  - name: approve-ssh-access
+    description: Require approval for SSH key access
+    paths:
+      - "/home/**/.ssh/**"
+      - "/root/.ssh/**"
+    operations:
+      - "*"
+    decision: approve
+    message: "Agent wants to access SSH keys: {{.Path}}"
+    timeout: 5m
+
+  - name: approve-aws-credentials
+    description: Require approval for AWS credentials
+    paths:
+      - "/home/**/.aws/**"
+      - "/root/.aws/**"
+    operations:
+      - "*"
+    decision: approve
+    message: "Agent wants to access AWS credentials: {{.Path}}"
+    timeout: 5m
+
+  - name: approve-cloud-credentials
+    description: Require approval for cloud credentials
+    paths:
+      - "/home/**/.gcloud/**"
+      - "/home/**/.azure/**"
+      - "/home/**/.config/gcloud/**"
+      - "/home/**/.kube/**"
+    operations:
+      - "*"
+    decision: approve
+    message: "Agent wants to access cloud credentials: {{.Path}}"
+    timeout: 5m
+
+  - name: approve-env-files
+    description: Require approval for .env files
+    paths:
+      - "**/.env"
+      - "**/.env.*"
+    operations:
+      - "*"
+    decision: approve
+    message: "Agent wants to access environment file: {{.Path}}"
+    timeout: 5m
+
+  - name: approve-git-credentials
+    description: Require approval for git credentials
+    paths:
+      - "/home/**/.git-credentials"
+      - "**/.netrc"
+    operations:
+      - "*"
+    decision: approve
+    message: "Agent wants to access git credentials: {{.Path}}"
+    timeout: 5m
+
+  # ---------------------------------------------------------------------------
+  # Package caches - read-only
+  # ---------------------------------------------------------------------------
+
+  - name: allow-cache-read
+    description: Read-only cache access
+    paths:
+      - "/home/**/.npm/**"
+      - "/home/**/.cache/**"
+      - "/home/**/.cargo/**"
+      - "/root/.npm/**"
+      - "/root/.cache/**"
+      - "/root/.cargo/**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # DENY everything else
+  # ---------------------------------------------------------------------------
+
+  - name: deny-proc-sys
+    description: Block /proc and /sys
+    paths:
+      - "/proc/**"
+      - "/sys/**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: default-deny-files
+    description: Deny all other file operations
+    paths:
+      - "**"
+    operations:
+      - "*"
+    decision: deny
+
+# =============================================================================
+# NETWORK OPERATION RULES
+# =============================================================================
+
+network_rules:
+  # ---------------------------------------------------------------------------
+  # Localhost only by default
+  # ---------------------------------------------------------------------------
+
+  - name: allow-localhost
+    description: Allow localhost connections
+    cidrs:
+      - "127.0.0.1/32"
+      - "::1/128"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Package registries - redirect to internal mirrors if available
+  # ---------------------------------------------------------------------------
+
+  - name: allow-npm
+    description: npm registry
+    domains:
+      - "registry.npmjs.org"
+    ports: [443]
+    decision: allow
+
+  - name: allow-pypi
+    description: PyPI
+    domains:
+      - "pypi.org"
+      - "files.pythonhosted.org"
+    ports: [443]
+    decision: allow
+
+  - name: allow-cargo
+    description: Cargo registry
+    domains:
+      - "crates.io"
+      - "static.crates.io"
+    ports: [443]
+    decision: allow
+
+  - name: allow-go-proxy
+    description: Go module proxy
+    domains:
+      - "proxy.golang.org"
+      - "sum.golang.org"
+    ports: [443]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Block private/internal networks
+  # ---------------------------------------------------------------------------
+
+  - name: block-private-networks
+    description: Block internal/private networks
+    cidrs:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+      - "169.254.0.0/16"
+    decision: deny
+
+  - name: block-metadata-services
+    description: Block cloud metadata services
+    cidrs:
+      - "169.254.169.254/32"
+      - "100.100.100.200/32"
+    decision: deny
+
+  # ---------------------------------------------------------------------------
+  # Require approval for all other destinations
+  # ---------------------------------------------------------------------------
+
+  - name: approve-unknown-https
+    description: Require approval for unknown HTTPS
+    ports: [443]
+    decision: approve
+    message: "Agent wants to connect to: {{.RemoteAddr}}"
+    timeout: 2m
+
+  - name: approve-unknown-http
+    description: Require approval for HTTP (insecure)
+    ports: [80]
+    decision: approve
+    message: "Agent wants HTTP (insecure) to: {{.RemoteAddr}}"
+    timeout: 2m
+
+  - name: default-deny-network
+    description: Deny all other network connections
+    domains:
+      - "*"
+    decision: deny
+
+# =============================================================================
+# COMMAND RULES
+# =============================================================================
+
+command_rules:
+  # ---------------------------------------------------------------------------
+  # Redirect dangerous download tools
+  # ---------------------------------------------------------------------------
+
+  - name: redirect-curl
+    description: Redirect curl to audited wrapper
+    commands:
+      - curl
+    decision: redirect
+    message: "curl redirected through agentsh-fetch for auditing"
+    redirect_to:
+      command: agentsh-fetch
+      args: ["--source", "curl"]
+
+  - name: redirect-wget
+    description: Redirect wget to audited wrapper
+    commands:
+      - wget
+    decision: redirect
+    message: "wget redirected through agentsh-fetch for auditing"
+    redirect_to:
+      command: agentsh-fetch
+      args: ["--source", "wget"]
+
+  # ---------------------------------------------------------------------------
+  # Allow safe commands
+  # ---------------------------------------------------------------------------
+
+  - name: allow-safe-commands
+    description: Standard safe commands
+    commands:
+      - ls
+      - cat
+      - head
+      - tail
+      - grep
+      - find
+      - wc
+      - sort
+      - uniq
+      - diff
+      - pwd
+      - echo
+      - date
+      - which
+    decision: allow
+
+  - name: allow-dev-tools
+    description: Development tools
+    commands:
+      - git
+      - node
+      - npm
+      - python
+      - python3
+      - pip
+      - pip3
+      - cargo
+      - go
+      - make
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Approve package installation
+  # ---------------------------------------------------------------------------
+
+  - name: approve-package-install
+    description: Require approval for package installation
+    commands:
+      - npm
+      - pip
+      - pip3
+      - cargo
+    args_patterns:
+      - "install*"
+      - "add*"
+    decision: approve
+    message: "Agent wants to install packages: {{.Args}}"
+
+  # ---------------------------------------------------------------------------
+  # Block dangerous commands
+  # ---------------------------------------------------------------------------
+
+  - name: block-rm-recursive
+    description: Block recursive delete
+    commands:
+      - rm
+    args_patterns:
+      - "*-r*"
+      - "*--recursive*"
+    decision: deny
+    message: "Recursive delete blocked. Files can be removed individually."
+
+  - name: block-network-tools
+    description: Block raw network tools
+    commands:
+      - nc
+      - netcat
+      - ncat
+      - socat
+      - telnet
+      - ssh
+      - scp
+      - rsync
+    decision: deny
+
+  - name: block-system-commands
+    description: Block system administration commands
+    commands:
+      - shutdown
+      - reboot
+      - systemctl
+      - service
+      - mount
+      - umount
+      - dd
+      - fdisk
+      - mkfs
+      - kill
+      - killall
+      - pkill
+    decision: deny
+
+  - name: block-shell-escape
+    description: Block potential shell escapes
+    commands:
+      - sudo
+      - su
+      - chroot
+      - nsenter
+      - unshare
+    decision: deny
+
+# =============================================================================
+# RESOURCE LIMITS - Conservative
+# =============================================================================
+
+resource_limits:
+  max_memory_mb: 2048
+  memory_swap_max_mb: 0
+  cpu_quota_percent: 50
+  pids_max: 100
+  disk_read_bps_max: 52428800   # 50 MB/s
+  disk_write_bps_max: 26214400  # 25 MB/s
+  command_timeout: 5m
+  session_timeout: 1h
+  idle_timeout: 15m
+
+# =============================================================================
+# AUDIT SETTINGS - FULL LOGGING
+# =============================================================================
+
+audit:
+  log_allowed: true
+  log_denied: true
+  log_approved: true
+  include_stdout: true
+  include_stderr: true
+  include_file_content: false
+  retention_days: 90
+
+# =============================================================================
+# SOFT DELETE SETTINGS
+# =============================================================================
+
+soft_delete:
+  enabled: true
+  quarantine_path: "/var/lib/agentsh/quarantine"
+  retention_days: 7
+  max_file_size_mb: 100

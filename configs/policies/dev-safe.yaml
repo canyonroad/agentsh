@@ -1,0 +1,396 @@
+# Development Safe Policy for agentsh
+# Optimized for local development workflows with sensible guardrails
+
+version: 1
+name: dev-safe
+description: |
+  Safe policy for local development. Allows workspace read/write,
+  approves destructive operations, and blocks credential access.
+
+# =============================================================================
+# FILE OPERATION RULES
+# =============================================================================
+
+file_rules:
+  # ---------------------------------------------------------------------------
+  # Workspace - full access except deletes require approval
+  # ---------------------------------------------------------------------------
+
+  - name: allow-workspace-read
+    description: Allow reading any file in workspace
+    paths:
+      - "/workspace"
+      - "/workspace/**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+      - readlink
+    decision: allow
+
+  - name: allow-workspace-write
+    description: Allow writing/creating files in workspace
+    paths:
+      - "/workspace"
+      - "/workspace/**"
+    operations:
+      - write
+      - create
+      - mkdir
+      - chmod
+      - rename
+    decision: allow
+
+  - name: approve-workspace-delete
+    description: Require approval for deleting files in workspace
+    paths:
+      - "/workspace"
+      - "/workspace/**"
+    operations:
+      - delete
+      - rmdir
+    decision: approve
+    message: "Delete {{.Path}}?"
+    timeout: 5m
+
+  # ---------------------------------------------------------------------------
+  # Temporary directories - full access
+  # ---------------------------------------------------------------------------
+
+  - name: allow-tmp
+    description: Full access to temp directories
+    paths:
+      - "/tmp/**"
+      - "/var/tmp/**"
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # System paths - read-only for development tools
+  # ---------------------------------------------------------------------------
+
+  - name: allow-system-read
+    description: Read access to standard system paths
+    paths:
+      - "/usr/**"
+      - "/lib/**"
+      - "/lib64/**"
+      - "/bin/**"
+      - "/sbin/**"
+      - "/opt/**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+      - readlink
+    decision: allow
+
+  - name: allow-etc-read
+    description: Read common config files
+    paths:
+      - "/etc/hosts"
+      - "/etc/resolv.conf"
+      - "/etc/ssl/**"
+      - "/etc/ca-certificates/**"
+      - "/etc/localtime"
+      - "/etc/timezone"
+      - "/etc/mime.types"
+      - "/etc/protocols"
+      - "/etc/services"
+    operations:
+      - read
+      - open
+      - stat
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Package manager caches - full access for dev workflows
+  # ---------------------------------------------------------------------------
+
+  - name: allow-npm-cache
+    description: npm cache access
+    paths:
+      - "/home/**/.npm/**"
+      - "/root/.npm/**"
+    operations:
+      - "*"
+    decision: allow
+
+  - name: allow-pip-cache
+    description: pip cache access
+    paths:
+      - "/home/**/.cache/pip/**"
+      - "/root/.cache/pip/**"
+    operations:
+      - "*"
+    decision: allow
+
+  - name: allow-cargo-cache
+    description: Cargo cache access
+    paths:
+      - "/home/**/.cargo/**"
+      - "/root/.cargo/**"
+    operations:
+      - "*"
+    decision: allow
+
+  - name: allow-go-cache
+    description: Go module cache access
+    paths:
+      - "/home/**/go/**"
+      - "/root/go/**"
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # BLOCKED - credentials and secrets
+  # ---------------------------------------------------------------------------
+
+  - name: deny-ssh-keys
+    description: Block access to SSH keys
+    paths:
+      - "/home/**/.ssh/**"
+      - "/root/.ssh/**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-aws-credentials
+    description: Block AWS credentials
+    paths:
+      - "/home/**/.aws/**"
+      - "/root/.aws/**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-cloud-credentials
+    description: Block cloud provider credentials
+    paths:
+      - "/home/**/.gcloud/**"
+      - "/home/**/.azure/**"
+      - "/home/**/.config/gcloud/**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-git-credentials
+    description: Block git credentials
+    paths:
+      - "/home/**/.git-credentials"
+      - "**/.netrc"
+    operations:
+      - "*"
+    decision: deny
+
+  # ---------------------------------------------------------------------------
+  # Default deny
+  # ---------------------------------------------------------------------------
+
+  - name: default-deny-files
+    description: Deny all other file operations
+    paths:
+      - "**"
+    operations:
+      - "*"
+    decision: deny
+
+# =============================================================================
+# NETWORK OPERATION RULES
+# =============================================================================
+
+network_rules:
+  # ---------------------------------------------------------------------------
+  # Package registries - allowed
+  # ---------------------------------------------------------------------------
+
+  - name: allow-npm
+    description: npm registry access
+    domains:
+      - "registry.npmjs.org"
+      - "*.npmjs.org"
+      - "*.npmjs.com"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-pypi
+    description: PyPI access
+    domains:
+      - "pypi.org"
+      - "files.pythonhosted.org"
+      - "*.pypi.org"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-cargo
+    description: Cargo registry access
+    domains:
+      - "crates.io"
+      - "*.crates.io"
+      - "static.crates.io"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-go-proxy
+    description: Go module proxy
+    domains:
+      - "proxy.golang.org"
+      - "sum.golang.org"
+      - "*.golang.org"
+    ports: [443, 80]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Code hosting
+  # ---------------------------------------------------------------------------
+
+  - name: allow-github
+    description: GitHub access
+    domains:
+      - "github.com"
+      - "*.github.com"
+      - "raw.githubusercontent.com"
+      - "*.githubusercontent.com"
+      - "api.github.com"
+    ports: [443, 80, 22]
+    decision: allow
+
+  - name: allow-gitlab
+    description: GitLab access
+    domains:
+      - "gitlab.com"
+      - "*.gitlab.com"
+    ports: [443, 80, 22]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # CDNs
+  # ---------------------------------------------------------------------------
+
+  - name: allow-cdns
+    description: Common CDNs
+    domains:
+      - "*.cloudflare.com"
+      - "*.cloudfront.net"
+      - "cdn.jsdelivr.net"
+      - "unpkg.com"
+    ports: [443, 80]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Blocked networks
+  # ---------------------------------------------------------------------------
+
+  - name: block-metadata-services
+    description: Block cloud metadata services
+    cidrs:
+      - "169.254.169.254/32"
+    decision: deny
+
+  # ---------------------------------------------------------------------------
+  # Require approval for other destinations
+  # ---------------------------------------------------------------------------
+
+  - name: approve-unknown-https
+    description: Require approval for unknown HTTPS destinations
+    ports: [443]
+    decision: approve
+    message: "Connect to {{.RemoteAddr}}:{{.RemotePort}}?"
+    timeout: 2m
+
+  - name: default-deny-network
+    description: Deny all other network connections
+    domains:
+      - "*"
+    decision: deny
+
+# =============================================================================
+# COMMAND RULES
+# =============================================================================
+
+command_rules:
+  - name: allow-safe-commands
+    description: Standard safe commands
+    commands:
+      - ls
+      - cat
+      - head
+      - tail
+      - grep
+      - find
+      - wc
+      - sort
+      - uniq
+      - diff
+      - pwd
+      - echo
+      - date
+      - which
+      - whoami
+      - id
+      - uname
+    decision: allow
+
+  - name: allow-dev-tools
+    description: Development tools
+    commands:
+      - git
+      - node
+      - npm
+      - npx
+      - python
+      - python3
+      - pip
+      - pip3
+      - cargo
+      - rustc
+      - go
+      - make
+    decision: allow
+
+  - name: block-dangerous-rm
+    description: Block recursive force delete
+    commands:
+      - rm
+    args_patterns:
+      - "*-rf*"
+      - "*-fr*"
+    decision: deny
+
+  - name: block-system-commands
+    description: Block system administration commands
+    commands:
+      - shutdown
+      - reboot
+      - systemctl
+      - service
+      - mount
+      - umount
+    decision: deny
+
+# =============================================================================
+# RESOURCE LIMITS
+# =============================================================================
+
+resource_limits:
+  max_memory_mb: 4096
+  cpu_quota_percent: 100
+  pids_max: 200
+  command_timeout: 10m
+  session_timeout: 8h
+  idle_timeout: 1h
+
+# =============================================================================
+# AUDIT SETTINGS
+# =============================================================================
+
+audit:
+  log_allowed: false
+  log_denied: true
+  log_approved: true
+  include_stdout: false
+  include_stderr: true
