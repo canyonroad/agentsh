@@ -50,7 +50,7 @@ func TestHandleConnectDeniedWrites403(t *testing.T) {
 }
 
 func TestHandleHTTPAllowsAndEmitsEvents(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	}))
 	defer srv.Close()
@@ -78,4 +78,16 @@ func TestHandleHTTPAllowsAndEmitsEvents(t *testing.T) {
 	if len(em.events) < 2 {
 		t.Fatalf("expected events recorded, got %+v", em.events)
 	}
+}
+
+// newHTTPServer forces IPv4 localhost to avoid environments that disallow IPv6 loopback binds.
+func newHTTPServer(t *testing.T, handler http.Handler) *httptest.Server {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("skipping: listen tcp4 disallowed (%v)", err)
+	}
+	srv := &httptest.Server{Listener: listener, Config: &http.Server{Handler: handler}}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
 }

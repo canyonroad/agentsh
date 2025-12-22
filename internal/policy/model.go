@@ -94,3 +94,14 @@ func (d *duration) UnmarshalYAML(value *yaml.Node) error {
 	d.Duration = dd
 	return nil
 }
+
+// Validate performs minimal semantic validation of a policy.
+func (p Policy) Validate() error {
+	if p.Version <= 0 {
+		return fmt.Errorf("version must be > 0")
+	}
+	if p.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	return nil
+}

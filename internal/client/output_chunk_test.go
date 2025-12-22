@@ -4,12 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
 func TestOutputChunkSuccess(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("stream") != "stdout" || r.URL.Query().Get("offset") != "5" || r.URL.Query().Get("limit") != "3" {
 			t.Fatalf("unexpected query: %v", r.URL.RawQuery)
 		}
@@ -28,7 +27,7 @@ func TestOutputChunkSuccess(t *testing.T) {
 }
 
 func TestOutputChunkNonOK(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "fail", http.StatusTeapot)
 	}))
 	defer srv.Close()
