@@ -61,10 +61,10 @@ builds:
 
 archives:
   - id: agentsh-linux
-    builds:
+    ids:
       - agentsh-linux
       - shim-linux
-    format: tar.gz
+    formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_linux_{{ .Arch }}"
     files:
       - README.md
@@ -74,10 +74,10 @@ archives:
       - build/envshim/linux_{{ .Arch }}/libenvshim.so
 
   - id: agentsh-darwin
-    builds:
+    ids:
       - agentsh-darwin
       - shim-darwin
-    format: tar.gz
+    formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_darwin_{{ .Arch }}"
     files:
       - README.md
@@ -91,7 +91,7 @@ checksum:
 nfpms:
   - id: agentsh
     package_name: agentsh
-    builds:
+    ids:
       - agentsh-linux
       - shim-linux
     formats:
