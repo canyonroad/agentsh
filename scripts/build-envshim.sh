@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$ROOT/dist/envshim"
+OUT="$ROOT/build/envshim"
 SRC="$ROOT/internal/policy/envshim"
 
 build_one() {

@@ -21,6 +21,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install build deps (envshim)
+        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev pkg-config gcc-aarch64-linux-gnu make
+
       - name: Test
         run: go test ./...
 
@@ -34,4 +37,3 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

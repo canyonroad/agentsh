@@ -71,7 +71,7 @@ archives:
       - LICENSE
       - config.yml
       - default-policy.yml
-      - dist/envshim/linux_{{ .Arch }}/libenvshim.so
+      - build/envshim/linux_{{ .Arch }}/libenvshim.so
 
   - id: agentsh-darwin
     builds:
@@ -110,11 +110,7 @@ nfpms:
       - src: default-policy.yml
         dst: /etc/agentsh/default-policy.yml
         type: config
-      - src: dist/envshim/linux_amd64/libenvshim.so
-        dst: /usr/lib/agentsh/libenvshim.so
-        file_info:
-          mode: 0644
-      - src: dist/envshim/linux_arm64/libenvshim.so
+      - src: build/envshim/linux_amd64/libenvshim.so
         dst: /usr/lib/agentsh/libenvshim.so
         file_info:
           mode: 0644
