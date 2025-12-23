@@ -1,6 +1,6 @@
 CC?=gcc
 CFLAGS?=-fPIC -shared -O2 -Wall
-TARGET=libenvshim.so
+TARGET?=libenvshim.so
 
 all: $(TARGET)
 

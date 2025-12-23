@@ -4,6 +4,7 @@ project_name: agentsh
 before:
   hooks:
     - go mod download
+    - ./scripts/build-envshim.sh
 
 builds:
   - id: agentsh-linux
@@ -70,6 +71,7 @@ archives:
       - LICENSE
       - config.yml
       - default-policy.yml
+      - dist/envshim/linux_{{ .Arch }}/libenvshim.so
 
   - id: agentsh-darwin
     builds:
@@ -101,13 +103,21 @@ nfpms:
     maintainer: agentsh maintainers <maintainers@example.com>
     description: Secure agent shell (agentsh) and a shell shim for container compatibility.
     license: Apache-2.0
-    contents:
+  contents:
       - src: config.yml
         dst: /etc/agentsh/config.yaml
         type: config
       - src: default-policy.yml
         dst: /etc/agentsh/default-policy.yml
         type: config
+      - src: dist/envshim/linux_amd64/libenvshim.so
+        dst: /usr/lib/agentsh/libenvshim.so
+        file_info:
+          mode: 0644
+      - src: dist/envshim/linux_arm64/libenvshim.so
+        dst: /usr/lib/agentsh/libenvshim.so
+        file_info:
+          mode: 0644
     # Important: packages do NOT replace /bin/sh automatically. Use the explicit shim installer:
     #   agentsh shim install-shell --root / --shim /usr/bin/agentsh-shell-shim --i-understand-this-modifies-the-host
 
