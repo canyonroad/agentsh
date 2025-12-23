@@ -103,7 +103,7 @@ nfpms:
     maintainer: agentsh maintainers <maintainers@example.com>
     description: Secure agent shell (agentsh) and a shell shim for container compatibility.
     license: Apache-2.0
-  contents:
+    contents:
       - src: config.yml
         dst: /etc/agentsh/config.yaml
         type: config
