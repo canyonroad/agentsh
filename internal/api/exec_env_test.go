@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 )
 
@@ -19,7 +21,7 @@ func TestMergeEnv_MarksInSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := mergeEnv(nil, sess, nil)
+	out, _ := buildPolicyEnv(policy.ResolvedEnvPolicy{}, nil, sess, nil)
 	got := map[string]string{}
 	for _, kv := range out {
 		for i := 0; i < len(kv); i++ {
@@ -53,7 +55,8 @@ func TestMergeEnv_StripsHostSecrets(t *testing.T) {
 		"TERM=xterm-256color",
 	}
 
-	gotMap := envSliceToMap(mergeEnv(base, sess, nil))
+	pol := policy.ResolvedEnvPolicy{Deny: []string{"AWS_SECRET_ACCESS_KEY", "DOCKER_HOST"}, Allow: []string{"PATH", "TERM"}}
+	gotMap := envSliceToMapMust(buildPolicyEnv(pol, base, sess, nil))
 
 	if _, ok := gotMap["AWS_SECRET_ACCESS_KEY"]; ok {
 		t.Fatalf("expected AWS_SECRET_ACCESS_KEY to be stripped")
@@ -82,13 +85,54 @@ func TestMergeEnv_OverridesSecretStripped(t *testing.T) {
 		"SAFE":      "ok",
 	}
 
-	gotMap := envSliceToMap(mergeEnv(nil, sess, overrides))
+	pol := policy.ResolvedEnvPolicy{Deny: []string{"MY_SECRET"}}
+	gotMap := envSliceToMapMust(buildPolicyEnv(pol, nil, sess, overrides))
 
 	if _, ok := gotMap["MY_SECRET"]; ok {
 		t.Fatalf("expected MY_SECRET to be stripped from overrides")
 	}
 	if gotMap["SAFE"] != "ok" {
 		t.Fatalf("expected SAFE to survive overrides")
+	}
+}
+
+func TestMaybeAddShimEnv_AddsShimAndFlag(t *testing.T) {
+	tmp := t.TempDir()
+	shimPath := filepath.Join(tmp, "libenvshim.so")
+	if err := os.WriteFile(shimPath, []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Policies.EnvShimPath = shimPath
+	in := []string{"PATH=/usr/bin"}
+	out := maybeAddShimEnv(in, policy.ResolvedEnvPolicy{BlockIteration: true}, cfg)
+	m := envSliceToMap(out)
+
+	if m["AGENTSH_ENV_BLOCK_ITERATION"] != "1" {
+		t.Fatalf("expected AGENTSH_ENV_BLOCK_ITERATION=1, got %q", m["AGENTSH_ENV_BLOCK_ITERATION"])
+	}
+	if got := m["LD_PRELOAD"]; got != shimPath {
+		t.Fatalf("expected LD_PRELOAD to be shim path, got %q", got)
+	}
+}
+
+func TestMaybeAddShimEnv_PrependsExistingLDPreload(t *testing.T) {
+	tmp := t.TempDir()
+	shimPath := filepath.Join(tmp, "libenvshim.so")
+	if err := os.WriteFile(shimPath, []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Policies.EnvShimPath = shimPath
+	in := []string{"LD_PRELOAD=/other.so", "TERM=xterm"}
+	out := maybeAddShimEnv(in, policy.ResolvedEnvPolicy{BlockIteration: true}, cfg)
+	m := envSliceToMap(out)
+
+	expected := shimPath + ":/other.so"
+	if got := m["LD_PRELOAD"]; got != expected {
+		t.Fatalf("expected LD_PRELOAD=%s, got %q", expected, got)
 	}
 }
 
@@ -103,4 +147,11 @@ func envSliceToMap(env []string) map[string]string {
 		}
 	}
 	return out
+}
+
+func envSliceToMapMust(env []string, err error) map[string]string {
+	if err != nil {
+		panic(err)
+	}
+	return envSliceToMap(env)
 }

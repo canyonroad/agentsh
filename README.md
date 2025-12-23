@@ -194,8 +194,17 @@ Defaults:
 * sample config: `configs/server-config.yaml`
 * default policy: `configs/policies/default.yaml`
 * env override: set `AGENTSH_POLICY_NAME` to an **allowed** policy name (no suffix). If unset/invalid/disallowed, the default is used.
+* env policy: configure `policies.env_policy` (allow/deny, max_bytes, max_keys, block_iteration) and per-command `env_*` overrides in policy files. Empty allowlist defaults to minimal PATH/LANG/TERM/HOME with built-in secret deny list; set `block_iteration` to hide env iteration (requires env shim).
 * allowlist: configure `policies.allowed` in `config.yml`; empty means only the default is permitted.
 * optional integrity: set `policies.manifest_path` to a SHA256 manifest to verify policy files at load time.
+
+### Environment policy quick reference
+
+- **Defaults:** With no `env_allow`, agentsh builds a minimal env (PATH/LANG/TERM/HOME) and strips built-in secret keys.
+- **Overrides:** Per-command `env_allow`/`env_deny` plus `env_max_keys`/`env_max_bytes` cap and filter the child env at exec time.
+- **Block iteration:** `env_block_iteration: true` (global or per rule) hides env enumeration; set `policies.env_shim_path` to `libenvshim.so` so agentsh injects `LD_PRELOAD` + `AGENTSH_ENV_BLOCK_ITERATION=1`.
+- **Limits:** Errors if limits are exceeded; env builder is applied before exec for every command.
+- **Examples:** See `config.yml` and policy samples under `configs/`.
 
 ---
 

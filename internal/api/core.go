@@ -342,7 +342,8 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	a.broker.Publish(startEv)
 
 	limits := a.policy.Limits()
-	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(ctx, s, cmdID, wrappedReq, a.cfg, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits), extraCfg)
+	cmdDecision := a.policy.CheckCommand(wrappedReq.Command, wrappedReq.Args)
+	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(ctx, s, cmdID, wrappedReq, a.cfg, cmdDecision.EnvPolicy, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits), extraCfg)
 
 	end := time.Now().UTC()
 	endEv := types.Event{

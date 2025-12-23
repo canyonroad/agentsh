@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/agentsh/agentsh/internal/policy"
 	"io"
 	"net/http"
 	"os"
@@ -252,7 +253,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	cmd.Dir = workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	env := mergeEnv(os.Environ(), s, req.Env)
+	env, _ := buildPolicyEnv(policy.ResolvedEnvPolicy{}, os.Environ(), s, req.Env)
 	cmd.Env = env
 
 	if req.Stdin != "" {

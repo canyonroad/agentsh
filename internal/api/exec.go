@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 )
@@ -46,7 +48,7 @@ func chooseCommandTimeout(req types.ExecRequest, policyLimit time.Duration) time
 	return d
 }
 
-func runCommandWithResources(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration, hook postStartHook, extra *extraProcConfig) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
+func runCommandWithResources(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, envPol policy.ResolvedEnvPolicy, policyLimit time.Duration, hook postStartHook, extra *extraProcConfig) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
 	timeout := chooseCommandTimeout(req, policyLimit)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -74,7 +76,14 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	cmd.Dir = workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	env := mergeEnv(os.Environ(), s, req.Env)
+	env, err := buildPolicyEnv(envPol, os.Environ(), s, req.Env)
+	if err != nil {
+		msg := []byte(err.Error() + "\n")
+		return 2, []byte{}, msg, 0, int64(len(msg)), false, false, types.ExecResources{}, nil
+	}
+	if envPol.BlockIteration {
+		env = maybeAddShimEnv(env, envPol, cfg)
+	}
 	if extra != nil && len(extra.env) > 0 {
 		for k, v := range extra.env {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
@@ -134,11 +143,6 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	return 127, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, waitErr
 }
 
-func runCommand(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, err error) {
-	exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, _, err = runCommandWithResources(ctx, s, cmdID, req, cfg, policyLimit, nil, nil)
-	return
-}
-
 func resourcesFromProcessState(ps *os.ProcessState) types.ExecResources {
 	if ps == nil {
 		return types.ExecResources{}
@@ -188,38 +192,35 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 	return real, nil
 }
 
-func mergeEnv(base []string, s *session.Session, overrides map[string]string) []string {
-	envMap := map[string]string{}
-
-	baseMap := map[string]string{}
-	for _, kv := range base {
+func buildPolicyEnv(pol policy.ResolvedEnvPolicy, hostEnv []string, s *session.Session, overrides map[string]string) ([]string, error) {
+	minimal := map[string]string{}
+	hostMap := map[string]string{}
+	for _, kv := range hostEnv {
 		if k, v, ok := strings.Cut(kv, "="); ok {
-			baseMap[k] = v
+			hostMap[k] = v
 		}
 	}
-
-	// Keep only a minimal, non-secret subset from the host.
-	allow := []string{"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "HOME"}
-	for _, k := range allow {
-		if v, ok := baseMap[k]; ok {
-			envMap[k] = v
+	copyKeys := []string{"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "HOME"}
+	for _, k := range copyKeys {
+		if v, ok := hostMap[k]; ok && v != "" {
+			minimal[k] = v
 		}
 	}
-	if _, ok := envMap["PATH"]; !ok {
-		envMap["PATH"] = "/usr/bin:/bin"
+	if _, ok := minimal["PATH"]; !ok {
+		minimal["PATH"] = "/usr/bin:/bin"
 	}
 
+	// Session proxies
 	if proxy := s.ProxyURL(); proxy != "" {
-		envMap["HTTP_PROXY"] = proxy
-		envMap["HTTPS_PROXY"] = proxy
-		envMap["ALL_PROXY"] = proxy
-		envMap["http_proxy"] = proxy
-		envMap["https_proxy"] = proxy
-		envMap["all_proxy"] = proxy
-
-		noProxy := envMap["NO_PROXY"]
+		minimal["HTTP_PROXY"] = proxy
+		minimal["HTTPS_PROXY"] = proxy
+		minimal["ALL_PROXY"] = proxy
+		minimal["http_proxy"] = proxy
+		minimal["https_proxy"] = proxy
+		minimal["all_proxy"] = proxy
+		noProxy := minimal["NO_PROXY"]
 		if noProxy == "" {
-			noProxy = envMap["no_proxy"]
+			noProxy = minimal["no_proxy"]
 		}
 		if !strings.Contains(noProxy, "localhost") {
 			if noProxy != "" && !strings.HasSuffix(noProxy, ",") {
@@ -227,41 +228,78 @@ func mergeEnv(base []string, s *session.Session, overrides map[string]string) []
 			}
 			noProxy += "localhost,127.0.0.1"
 		}
-		envMap["NO_PROXY"] = noProxy
-		envMap["no_proxy"] = noProxy
+		minimal["NO_PROXY"] = noProxy
+		minimal["no_proxy"] = noProxy
 	}
 
+	add := map[string]string{}
 	_, sessEnv, _ := s.GetCwdEnvHistory()
 	for k, v := range sessEnv {
-		envMap[k] = v
+		add[k] = v
 	}
 	for k, v := range overrides {
-		envMap[k] = v
+		add[k] = v
 	}
 
-	// Mark processes executed by agentsh so sh/bash shims can avoid recursively re-entering agentsh.
-	envMap["AGENTSH_IN_SESSION"] = "1"
+	add["AGENTSH_IN_SESSION"] = "1"
 
-	// Strip secrets that may have leaked in via overrides or session env.
-	for k := range envMap {
-		if isSensitiveEnvKey(k) {
-			delete(envMap, k)
+	baseSlice := mapToEnvSlice(minimal)
+	return policy.BuildEnv(pol, baseSlice, add)
+}
+
+func mapToEnvSlice(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k, v := range m {
+		out = append(out, fmt.Sprintf("%s=%s", k, v))
+	}
+	return out
+}
+
+// maybeAddShimEnv injects the env-iteration blocking shim (LD_PRELOAD) and flag
+// when block_iteration is enabled. It tolerates missing/invalid shim path to
+// avoid breaking command execution, but emits a warning.
+func maybeAddShimEnv(env []string, pol policy.ResolvedEnvPolicy, cfg *config.Config) []string {
+	_ = pol
+	out := append([]string{}, env...)
+	out = append(out, "AGENTSH_ENV_BLOCK_ITERATION=1")
+
+	shim := strings.TrimSpace(cfg.Policies.EnvShimPath)
+	if shim == "" {
+		slog.Warn("block_iteration enabled but policies.env_shim_path is not set")
+		return out
+	}
+	info, err := os.Stat(shim)
+	if err != nil || info.IsDir() {
+		slog.Warn("block_iteration enabled but env shim missing", "path", shim, "err", err)
+		return out
+	}
+
+	const ldPreload = "LD_PRELOAD"
+	found := -1
+	for i, kv := range out {
+		if strings.HasPrefix(kv, ldPreload+"=") {
+			found = i
+			break
 		}
 	}
-
-	out := make([]string, 0, len(envMap))
-	for k, v := range envMap {
-		out = append(out, k+"="+v)
+	if found >= 0 {
+		existing := strings.TrimPrefix(out[found], ldPreload+"=")
+		if existing == "" {
+			out[found] = fmt.Sprintf("%s=%s", ldPreload, shim)
+		} else {
+			out[found] = fmt.Sprintf("%s=%s:%s", ldPreload, shim, existing)
+		}
+	} else {
+		out = append(out, fmt.Sprintf("%s=%s", ldPreload, shim))
 	}
+
 	return out
 }
 
 func killProcessGroup(pgid int) error {
 	if pgid <= 0 {
-		// No valid process group - this is expected for some process states
 		return nil
 	}
-	// Negative pid targets the process group.
 	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
 		fmt.Fprintf(os.Stderr, "exec: failed to kill process group %d: %v\n", pgid, err)
 		return err
@@ -269,20 +307,10 @@ func killProcessGroup(pgid int) error {
 	return nil
 }
 
-func isSensitiveEnvKey(k string) bool {
-	l := strings.ToLower(strings.TrimSpace(k))
-	switch l {
-	case "aws_secret_access_key", "aws_access_key_id", "aws_session_token", "aws_profile", "aws_shared_credentials_file",
-		"google_application_credentials", "gcp_service_account",
-		"azure_client_secret", "azure_client_id", "azure_tenant_id", "azure_subscription_id",
-		"ssh_auth_sock", "ssh_agent_pid",
-		"docker_host", "docker_tls_verify",
-		"kubeconfig", "gcloud_project",
-		"github_token", "gh_token":
-		return true
+func mergeEnv(base []string, s *session.Session, overrides map[string]string) []string {
+	env, err := buildPolicyEnv(policy.ResolvedEnvPolicy{}, base, s, overrides)
+	if err != nil {
+		return []string{}
 	}
-	if strings.HasSuffix(l, "_secret") || strings.HasSuffix(l, "_token") || strings.HasSuffix(l, "_password") || strings.HasSuffix(l, "_key") {
-		return true
-	}
-	return false
+	return env
 }

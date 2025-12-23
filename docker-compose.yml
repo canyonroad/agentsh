@@ -61,6 +61,8 @@ services:
       - AGENTSH_LOG_LEVEL=info
       # Policy selection (name without .yml suffix). Must be in policies.allowed or defaults to policies.default.
       # - AGENTSH_POLICY_NAME=default
+      # Optional env iteration block via shim for commands with env_policy.block_iteration=true
+      # - AGENTSH_ENV_BLOCK_ITERATION=0
       # - AGENTSH_HTTP_ADDR=0.0.0.0:8080
       # - AGENTSH_GRPC_ADDR=0.0.0.0:9090
     

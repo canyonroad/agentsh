@@ -64,6 +64,7 @@ type Decision struct {
 	Message           string
 	Approval          *types.ApprovalInfo
 	Redirect          *types.RedirectInfo
+	EnvPolicy         ResolvedEnvPolicy
 }
 
 func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
@@ -259,9 +260,13 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 				continue
 			}
 		}
-		return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, r.rule.RedirectTo)
+		dec := e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, r.rule.RedirectTo)
+		dec.EnvPolicy = MergeEnvPolicy(e.policy.EnvPolicy, r.rule)
+		return dec
 	}
-	return e.wrapDecision(string(types.DecisionAllow), "", "", nil)
+	dec := e.wrapDecision(string(types.DecisionAllow), "", "", nil)
+	dec.EnvPolicy = MergeEnvPolicy(e.policy.EnvPolicy, CommandRule{})
+	return dec
 }
 
 func (e *Engine) CheckFile(p string, operation string) Decision {
