@@ -144,10 +144,28 @@ type SessionsConfig struct {
 }
 
 type SandboxConfig struct {
+	// Enabled enables the sandbox subsystem
+	Enabled bool `yaml:"enabled"`
+
+	// AllowDegraded permits running with reduced isolation if full isolation unavailable
+	AllowDegraded bool `yaml:"allow_degraded"`
+
+	// Limits configures resource limits for sandboxed processes
+	Limits SandboxLimitsConfig `yaml:"limits"`
+
 	FUSE        SandboxFUSEConfig        `yaml:"fuse"`
 	Network     SandboxNetworkConfig     `yaml:"network"`
 	Cgroups     SandboxCgroupsConfig     `yaml:"cgroups"`
 	UnixSockets SandboxUnixSocketsConfig `yaml:"unix_sockets"`
+}
+
+// SandboxLimitsConfig configures resource limits.
+type SandboxLimitsConfig struct {
+	MaxMemoryMB    int `yaml:"max_memory_mb"`
+	MaxCPUPercent  int `yaml:"max_cpu_percent"`
+	MaxProcesses   int `yaml:"max_processes"`
+	MaxDiskIOMbps  int `yaml:"max_disk_io_mbps"`
+	MaxNetworkMbps int `yaml:"max_network_mbps"`
 }
 
 type SandboxFUSEConfig struct {
@@ -170,9 +188,20 @@ type FUSEAuditConfig struct {
 
 type SandboxNetworkConfig struct {
 	Enabled         bool                            `yaml:"enabled"`
+	ProxyPort       int                             `yaml:"proxy_port"`
+	DNSPort         int                             `yaml:"dns_port"`
+	InterceptMode   string                          `yaml:"intercept_mode"` // all, tcp_only, monitor
 	ProxyListenAddr string                          `yaml:"proxy_listen_addr"`
+	TLSInspection   TLSInspectionConfig             `yaml:"tls_inspection"`
 	Transparent     SandboxTransparentNetworkConfig `yaml:"transparent"`
 	EBPF            SandboxEBPFConfig               `yaml:"ebpf"`
+}
+
+// TLSInspectionConfig configures TLS interception (requires CA cert).
+type TLSInspectionConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	CACert  string `yaml:"ca_cert"`
+	CAKey   string `yaml:"ca_key"`
 }
 
 type SandboxTransparentNetworkConfig struct {
@@ -347,8 +376,33 @@ func applyDefaults(cfg *Config) {
 		t := true
 		cfg.Sandbox.FUSE.Audit.Enabled = &t
 	}
+	if cfg.Sandbox.Network.ProxyPort == 0 {
+		cfg.Sandbox.Network.ProxyPort = 9080
+	}
+	if cfg.Sandbox.Network.DNSPort == 0 {
+		cfg.Sandbox.Network.DNSPort = 9053
+	}
+	if cfg.Sandbox.Network.InterceptMode == "" {
+		cfg.Sandbox.Network.InterceptMode = "all"
+	}
 	if cfg.Sandbox.Network.ProxyListenAddr == "" {
 		cfg.Sandbox.Network.ProxyListenAddr = "127.0.0.1:0"
+	}
+	// Resource limits defaults
+	if cfg.Sandbox.Limits.MaxMemoryMB == 0 {
+		cfg.Sandbox.Limits.MaxMemoryMB = 2048
+	}
+	if cfg.Sandbox.Limits.MaxCPUPercent == 0 {
+		cfg.Sandbox.Limits.MaxCPUPercent = 50
+	}
+	if cfg.Sandbox.Limits.MaxProcesses == 0 {
+		cfg.Sandbox.Limits.MaxProcesses = 100
+	}
+	if cfg.Sandbox.Limits.MaxDiskIOMbps == 0 {
+		cfg.Sandbox.Limits.MaxDiskIOMbps = 100
+	}
+	if cfg.Sandbox.Limits.MaxNetworkMbps == 0 {
+		cfg.Sandbox.Limits.MaxNetworkMbps = 50
 	}
 	if cfg.Sandbox.Network.Transparent.SubnetBase == "" {
 		cfg.Sandbox.Network.Transparent.SubnetBase = "10.250.0.0/16"
@@ -449,6 +503,17 @@ func validateConfig(cfg *Config) error {
 	}
 	if cfg.Sandbox.FUSE.Audit.MaxEventQueue < 0 {
 		return fmt.Errorf("sandbox.fuse.audit.max_event_queue must be >= 0")
+	}
+	switch cfg.Sandbox.Network.InterceptMode {
+	case "", "all", "tcp_only", "monitor":
+	default:
+		return fmt.Errorf("invalid sandbox.network.intercept_mode %q", cfg.Sandbox.Network.InterceptMode)
+	}
+	// Validate platform mode
+	switch cfg.Platform.Mode {
+	case "", "auto", "linux", "darwin", "darwin-lima", "windows", "windows-wsl2":
+	default:
+		return fmt.Errorf("invalid platform.mode %q", cfg.Platform.Mode)
 	}
 	return nil
 }
