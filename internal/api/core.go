@@ -64,6 +64,12 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 			mountPoint := filepath.Join(mountBase, s.ID, "workspace-mnt")
 			hashLimit, _ := config.ParseByteSize(a.cfg.Sandbox.FUSE.Audit.HashSmallFilesUnder)
 
+			// Create event channel for filesystem events
+			eventChan := make(chan platform.IOEvent, 1000)
+
+			// Start goroutine to process events from the channel
+			go a.processIOEvents(ctx, eventChan)
+
 			// Build platform FSConfig
 			fsCfg := platform.FSConfig{
 				SourcePath: s.Workspace,
@@ -73,6 +79,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 					return s.CurrentCommandID()
 				},
 				PolicyEngine: platform.NewPolicyAdapter(a.policy),
+				EventChannel: eventChan,
 			}
 
 			// Configure soft-delete/trash if enabled
@@ -116,7 +123,11 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 				a.broker.Publish(fail)
 			} else {
 				s.SetWorkspaceMount(mountPoint)
-				s.SetWorkspaceUnmount(m.Close)
+				// Wrap unmount to also close the event channel
+				s.SetWorkspaceUnmount(func() error {
+					close(eventChan)
+					return m.Close()
+				})
 				okEv := types.Event{
 					ID:        uuid.NewString(),
 					Timestamp: time.Now().UTC(),
@@ -475,4 +486,18 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	_ = a.store.SaveOutput(ctx, id, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 	applyIncludeEvents(resp, includeEvents)
 	return resp, http.StatusOK, nil
+}
+
+// processIOEvents reads events from the platform event channel and forwards
+// them to the event store and broker. It runs until the channel is closed.
+func (a *App) processIOEvents(ctx context.Context, eventChan <-chan platform.IOEvent) {
+	for ioEvent := range eventChan {
+		// Convert platform.IOEvent to types.Event
+		ev := ioEvent.ToEvent()
+		ev.ID = uuid.NewString()
+
+		// Store and publish the event
+		_ = a.store.AppendEvent(ctx, ev)
+		a.broker.Publish(ev)
+	}
 }
