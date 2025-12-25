@@ -1,13 +1,16 @@
 //go:build darwin
 
 // Package darwin provides the macOS platform implementation for agentsh.
-// Currently this is a stub implementation that reports capabilities as unavailable.
-// Full implementation requires FUSE-T for filesystem and pf for network interception.
+// It uses FUSE-T for filesystem interception and pf for network redirection.
+// Note: macOS lacks namespace isolation and cgroups, so those features are unavailable.
 package darwin
 
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 
 	"github.com/agentsh/agentsh/internal/platform"
 )
@@ -20,6 +23,10 @@ func init() {
 // Platform implements platform.Platform for macOS.
 type Platform struct {
 	config      platform.Config
+	fs          *Filesystem
+	net         *Network
+	sandbox     *SandboxManager
+	resources   *ResourceLimiter
 	caps        platform.Capabilities
 	initialized bool
 }
@@ -37,57 +44,152 @@ func (p *Platform) Name() string {
 }
 
 // Capabilities returns what this platform supports.
-// Currently returns minimal capabilities as this is a stub.
 func (p *Platform) Capabilities() platform.Capabilities {
 	return p.caps
 }
 
 // detectCapabilities checks what's available on this macOS system.
 func (p *Platform) detectCapabilities() platform.Capabilities {
-	// Stub implementation - report everything as unavailable
-	// TODO: Implement detection for FUSE-T, pf, Endpoint Security, etc.
-	return platform.Capabilities{
-		HasFUSE:               false,
-		FUSEImplementation:    "",
-		HasNetworkIntercept:   false,
-		NetworkImplementation: "",
-		CanRedirectTraffic:    false,
-		CanInspectTLS:         false,
-		HasMountNamespace:     false,
-		HasNetworkNamespace:   false,
-		HasPIDNamespace:       false,
-		HasUserNamespace:      false,
-		IsolationLevel:        platform.IsolationNone,
-		HasSeccomp:            false,
-		HasCgroups:            false,
-		CanLimitCPU:           false,
-		CanLimitMemory:        false,
-		CanLimitDiskIO:        false,
-		CanLimitNetworkBW:     false,
-		CanLimitProcessCount:  false,
-		HasEndpointSecurity:   false,
-		HasNetworkExtension:   false,
+	caps := platform.Capabilities{
+		// Filesystem - check for FUSE-T
+		HasFUSE:            p.checkFuseT(),
+		FUSEImplementation: p.detectFuseImplementation(),
+
+		// Network - pf is always available on macOS
+		HasNetworkIntercept:   p.checkPf(),
+		NetworkImplementation: "pf",
+		CanRedirectTraffic:    true,
+		CanInspectTLS:         true,
+
+		// Isolation - macOS lacks Linux namespaces
+		HasMountNamespace:   false,
+		HasNetworkNamespace: false,
+		HasPIDNamespace:     false,
+		HasUserNamespace:    false,
+		IsolationLevel:      platform.IsolationNone,
+
+		// Syscall filtering - no seccomp on macOS
+		HasSeccomp: false,
+
+		// Resource control - no cgroups on macOS
+		HasCgroups:           false,
+		CanLimitCPU:          false,
+		CanLimitMemory:       false,
+		CanLimitDiskIO:       false,
+		CanLimitNetworkBW:    false,
+		CanLimitProcessCount: false,
+
+		// macOS-specific frameworks (require entitlements)
+		HasEndpointSecurity: p.checkEndpointSecurity(),
+		HasNetworkExtension: p.checkNetworkExtension(),
 	}
+
+	return caps
+}
+
+// checkFuseT checks if FUSE-T is installed.
+func (p *Platform) checkFuseT() bool {
+	// FUSE-T installation paths
+	paths := []string{
+		"/usr/local/lib/libfuse-t.dylib",
+		"/opt/homebrew/lib/libfuse-t.dylib",
+		"/Library/Frameworks/FUSE-T.framework",
+	}
+
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// detectFuseImplementation returns the FUSE implementation name.
+func (p *Platform) detectFuseImplementation() string {
+	// Check for FUSE-T first (preferred)
+	fuseTpaths := []string{
+		"/usr/local/lib/libfuse-t.dylib",
+		"/opt/homebrew/lib/libfuse-t.dylib",
+		"/Library/Frameworks/FUSE-T.framework",
+	}
+	for _, path := range fuseTpaths {
+		if _, err := os.Stat(path); err == nil {
+			return "fuse-t"
+		}
+	}
+
+	// Check for macFUSE (deprecated but may be present)
+	macFUSEpaths := []string{
+		"/Library/Filesystems/macfuse.fs",
+		"/Library/Frameworks/macFUSE.framework",
+	}
+	for _, path := range macFUSEpaths {
+		if _, err := os.Stat(path); err == nil {
+			return "macfuse"
+		}
+	}
+
+	return ""
+}
+
+// checkPf checks if pf (packet filter) is available.
+func (p *Platform) checkPf() bool {
+	// pf is always available on macOS, but we need root to use it
+	// Check if pfctl exists
+	_, err := exec.LookPath("pfctl")
+	return err == nil
+}
+
+// checkEndpointSecurity checks if Endpoint Security framework is usable.
+// Note: Actually using it requires entitlements signed by Apple.
+func (p *Platform) checkEndpointSecurity() bool {
+	// Check if the framework exists
+	if _, err := os.Stat("/System/Library/Frameworks/EndpointSecurity.framework"); err == nil {
+		return true
+	}
+	return false
+}
+
+// checkNetworkExtension checks if Network Extension framework is usable.
+// Note: Actually using it requires entitlements signed by Apple.
+func (p *Platform) checkNetworkExtension() bool {
+	// Check if the framework exists
+	if _, err := os.Stat("/System/Library/Frameworks/NetworkExtension.framework"); err == nil {
+		return true
+	}
+	return false
 }
 
 // Filesystem returns the filesystem interceptor.
 func (p *Platform) Filesystem() platform.FilesystemInterceptor {
-	return &stubFilesystem{}
+	if p.fs == nil {
+		p.fs = NewFilesystem()
+	}
+	return p.fs
 }
 
 // Network returns the network interceptor.
 func (p *Platform) Network() platform.NetworkInterceptor {
-	return nil
+	if p.net == nil {
+		p.net = NewNetwork()
+	}
+	return p.net
 }
 
 // Sandbox returns the sandbox manager.
 func (p *Platform) Sandbox() platform.SandboxManager {
-	return nil
+	if p.sandbox == nil {
+		p.sandbox = NewSandboxManager()
+	}
+	return p.sandbox
 }
 
 // Resources returns the resource limiter.
 func (p *Platform) Resources() platform.ResourceLimiter {
-	return nil
+	if p.resources == nil {
+		p.resources = NewResourceLimiter()
+	}
+	return p.resources
 }
 
 // Initialize sets up the platform.
@@ -106,27 +208,14 @@ func (p *Platform) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// stubFilesystem is a stub FilesystemInterceptor that reports as unavailable.
-type stubFilesystem struct{}
-
-func (f *stubFilesystem) Mount(config platform.FSConfig) (platform.FSMount, error) {
-	return nil, fmt.Errorf("filesystem interception not yet implemented on macOS; install FUSE-T and rebuild")
+// getMacOSVersion returns the macOS version string.
+func getMacOSVersion() string {
+	out, err := exec.Command("sw_vers", "-productVersion").Output()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(out))
 }
 
-func (f *stubFilesystem) Unmount(mount platform.FSMount) error {
-	return fmt.Errorf("filesystem interception not available on macOS")
-}
-
-func (f *stubFilesystem) Available() bool {
-	return false
-}
-
-func (f *stubFilesystem) Implementation() string {
-	return "none"
-}
-
-// Compile-time interface checks
-var (
-	_ platform.Platform              = (*Platform)(nil)
-	_ platform.FilesystemInterceptor = (*stubFilesystem)(nil)
-)
+// Compile-time interface check
+var _ platform.Platform = (*Platform)(nil)
