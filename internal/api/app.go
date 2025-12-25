@@ -19,6 +19,8 @@ import (
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/netmonitor"
 	ebpftrace "github.com/agentsh/agentsh/internal/netmonitor/ebpf"
+	"github.com/agentsh/agentsh/internal/platform"
+	_ "github.com/agentsh/agentsh/internal/platform/linux" // Register Linux platform
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
@@ -40,6 +42,9 @@ type App struct {
 	approvals *approvals.Manager
 
 	metrics *metrics.Collector
+
+	// platform provides cross-platform filesystem, network, and sandbox abstractions
+	platform platform.Platform
 }
 
 func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector) *App {
@@ -51,7 +56,25 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		uint32(cfg.Sandbox.Network.EBPF.MapLPMDenyEntries),
 		uint32(cfg.Sandbox.Network.EBPF.MapDefaultEntries),
 	)
-	return &App{cfg: cfg, sessions: sessions, store: store, policy: engine, broker: broker, apiKeyAuth: apiKeyAuth, approvals: approvalsMgr, metrics: metricsCollector}
+
+	// Initialize platform abstraction
+	plat, err := platform.New()
+	if err != nil {
+		// Log but don't fail - platform features will be unavailable
+		fmt.Fprintf(os.Stderr, "platform init: %v\n", err)
+	}
+
+	return &App{
+		cfg:        cfg,
+		sessions:   sessions,
+		store:      store,
+		policy:     engine,
+		broker:     broker,
+		apiKeyAuth: apiKeyAuth,
+		approvals:  approvalsMgr,
+		metrics:    metricsCollector,
+		platform:   plat,
+	}
 }
 
 type ctxKey string

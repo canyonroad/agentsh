@@ -13,7 +13,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/config"
-	"github.com/agentsh/agentsh/internal/fsmonitor"
+	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
@@ -54,69 +54,83 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	a.broker.Publish(ev)
 
 	// Optional: mount FUSE loopback so we can monitor file operations.
-	if a.cfg.Sandbox.FUSE.Enabled {
-		mountBase := a.cfg.Sandbox.FUSE.MountBaseDir
-		if mountBase == "" {
-			mountBase = a.cfg.Sessions.BaseDir
-		}
-		mountPoint := filepath.Join(mountBase, s.ID, "workspace-mnt")
-		em := storeEmitter{store: a.store, broker: a.broker}
-		hashLimit, _ := config.ParseByteSize(a.cfg.Sandbox.FUSE.Audit.HashSmallFilesUnder)
-		auditHooks := &fsmonitor.FUSEAuditHooks{
-			Config:         a.cfg.Sandbox.FUSE.Audit,
-			HashLimitBytes: hashLimit,
-			NotifySoftDelete: func(path, token string) {
-				ev := types.Event{
+	if a.cfg.Sandbox.FUSE.Enabled && a.platform != nil {
+		fs := a.platform.Filesystem()
+		if fs != nil && fs.Available() {
+			mountBase := a.cfg.Sandbox.FUSE.MountBaseDir
+			if mountBase == "" {
+				mountBase = a.cfg.Sessions.BaseDir
+			}
+			mountPoint := filepath.Join(mountBase, s.ID, "workspace-mnt")
+			hashLimit, _ := config.ParseByteSize(a.cfg.Sandbox.FUSE.Audit.HashSmallFilesUnder)
+
+			// Build platform FSConfig
+			fsCfg := platform.FSConfig{
+				SourcePath: s.Workspace,
+				MountPoint: mountPoint,
+				SessionID:  s.ID,
+				CommandIDFunc: func() string {
+					return s.CurrentCommandID()
+				},
+				// PolicyEngine bridging is TODO - for now, nil means allow all
+				// The existing fsmonitor still applies policy internally when available
+			}
+
+			// Configure soft-delete/trash if enabled
+			if a.cfg.Sandbox.FUSE.Audit.Mode == "soft_delete" {
+				fsCfg.TrashConfig = &platform.TrashConfig{
+					Enabled:        true,
+					HashLimitBytes: hashLimit,
+				}
+				fsCfg.NotifySoftDelete = func(path, token string) {
+					ev := types.Event{
+						ID:        uuid.NewString(),
+						Timestamp: time.Now().UTC(),
+						Type:      "file_soft_deleted",
+						SessionID: s.ID,
+						CommandID: s.CurrentCommandID(),
+						Path:      path,
+						Fields: map[string]any{
+							"trash_token":  token,
+							"restore_hint": fmt.Sprintf("agentsh trash restore %s", token),
+						},
+					}
+					_ = a.store.AppendEvent(ctx, ev)
+					a.broker.Publish(ev)
+				}
+			}
+
+			m, err := fs.Mount(fsCfg)
+			if err != nil {
+				fail := types.Event{
 					ID:        uuid.NewString(),
 					Timestamp: time.Now().UTC(),
-					Type:      "file_soft_deleted",
+					Type:      "fuse_mount_failed",
 					SessionID: s.ID,
-					CommandID: s.CurrentCommandID(),
-					Path:      path,
 					Fields: map[string]any{
-						"trash_token":  token,
-						"restore_hint": fmt.Sprintf("agentsh trash restore %s", token),
+						"mount_point":    mountPoint,
+						"error":          err.Error(),
+						"implementation": fs.Implementation(),
 					},
 				}
-				_ = a.store.AppendEvent(ctx, ev)
-				a.broker.Publish(ev)
-			},
-		}
-		m, err := fsmonitor.MountWorkspace(s.Workspace, mountPoint, &fsmonitor.Hooks{
-			SessionID: s.ID,
-			Session:   s,
-			Policy:    a.policy,
-			Approvals: a.approvals,
-			Emit:      em,
-			FUSEAudit: auditHooks,
-		})
-		if err != nil {
-			fail := types.Event{
-				ID:        uuid.NewString(),
-				Timestamp: time.Now().UTC(),
-				Type:      "fuse_mount_failed",
-				SessionID: s.ID,
-				Fields: map[string]any{
-					"mount_point": mountPoint,
-					"error":       err.Error(),
-				},
+				_ = a.store.AppendEvent(ctx, fail)
+				a.broker.Publish(fail)
+			} else {
+				s.SetWorkspaceMount(mountPoint)
+				s.SetWorkspaceUnmount(m.Close)
+				okEv := types.Event{
+					ID:        uuid.NewString(),
+					Timestamp: time.Now().UTC(),
+					Type:      "fuse_mounted",
+					SessionID: s.ID,
+					Fields: map[string]any{
+						"mount_point":    mountPoint,
+						"implementation": fs.Implementation(),
+					},
+				}
+				_ = a.store.AppendEvent(ctx, okEv)
+				a.broker.Publish(okEv)
 			}
-			_ = a.store.AppendEvent(ctx, fail)
-			a.broker.Publish(fail)
-		} else {
-			s.SetWorkspaceMount(mountPoint)
-			s.SetWorkspaceUnmount(m.Unmount)
-			okEv := types.Event{
-				ID:        uuid.NewString(),
-				Timestamp: time.Now().UTC(),
-				Type:      "fuse_mounted",
-				SessionID: s.ID,
-				Fields: map[string]any{
-					"mount_point": mountPoint,
-				},
-			}
-			_ = a.store.AppendEvent(ctx, okEv)
-			a.broker.Publish(okEv)
 		}
 	}
 

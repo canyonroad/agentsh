@@ -66,6 +66,12 @@ type FSConfig struct {
 	// MountPoint is where to mount the intercepted filesystem
 	MountPoint string
 
+	// SessionID identifies the session this mount belongs to
+	SessionID string
+
+	// CommandIDFunc returns the current command ID (called per-operation)
+	CommandIDFunc func() string
+
 	// PolicyEngine evaluates access decisions
 	PolicyEngine PolicyEngine
 
@@ -77,6 +83,9 @@ type FSConfig struct {
 
 	// TrashConfig configures soft-delete behavior (optional)
 	TrashConfig *TrashConfig
+
+	// NotifySoftDelete is called when a file is soft-deleted (optional)
+	NotifySoftDelete func(path, token string)
 
 	// Options contains platform-specific mount options
 	Options map[string]string

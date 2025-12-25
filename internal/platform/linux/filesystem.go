@@ -84,11 +84,14 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 	// Create the fsmonitor hooks
 	// This bridges the new platform.FSConfig to the existing fsmonitor.Hooks
 	hooks := &fsmonitor.Hooks{
+		SessionID: cfg.SessionID,
 		// Policy will be wrapped from cfg.PolicyEngine
 		Policy: wrapPolicyEngine(cfg.PolicyEngine),
 		// Event emission bridged to cfg.EventChannel
 		Emit: &eventEmitter{
-			eventChan: cfg.EventChannel,
+			eventChan:     cfg.EventChannel,
+			sessionID:     cfg.SessionID,
+			commandIDFunc: cfg.CommandIDFunc,
 		},
 	}
 
@@ -98,7 +101,8 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 			Config: config.FUSEAuditConfig{
 				Mode: "soft_delete",
 			},
-			HashLimitBytes: cfg.TrashConfig.HashLimitBytes,
+			HashLimitBytes:   cfg.TrashConfig.HashLimitBytes,
+			NotifySoftDelete: cfg.NotifySoftDelete,
 		}
 	}
 
@@ -188,7 +192,9 @@ func (m *Mount) Close() error {
 
 // eventEmitter bridges platform.EventChannel to fsmonitor.Emitter.
 type eventEmitter struct {
-	eventChan chan<- platform.IOEvent
+	eventChan     chan<- platform.IOEvent
+	sessionID     string
+	commandIDFunc func() string
 }
 
 // AppendEvent implements fsmonitor.Emitter.
@@ -197,18 +203,28 @@ func (e *eventEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
 		return nil
 	}
 
+	// Use session/command from config if not in event
+	sessionID := ev.SessionID
+	if sessionID == "" {
+		sessionID = e.sessionID
+	}
+	commandID := ev.CommandID
+	if commandID == "" && e.commandIDFunc != nil {
+		commandID = e.commandIDFunc()
+	}
+
 	// Convert types.Event to platform.IOEvent
 	ioEvent := platform.IOEvent{
-		Timestamp: ev.Timestamp,
-		SessionID: ev.SessionID,
-		CommandID: ev.CommandID,
-		Type:      platform.EventType(ev.Type),
-		Path:      ev.Path,
-		Domain:    ev.Domain,
+		Timestamp:  ev.Timestamp,
+		SessionID:  sessionID,
+		CommandID:  commandID,
+		Type:       platform.EventType(ev.Type),
+		Path:       ev.Path,
+		Domain:     ev.Domain,
 		RemoteAddr: ev.Remote,
-		Operation: platform.FileOperation(ev.Operation),
-		ProcessID: ev.PID,
-		Platform:  "linux-fuse3",
+		Operation:  platform.FileOperation(ev.Operation),
+		ProcessID:  ev.PID,
+		Platform:   "linux-fuse3",
 	}
 
 	// Extract decision from policy info
