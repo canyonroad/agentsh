@@ -117,3 +117,91 @@ func TestPlatformMode_String(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePlatformMode(t *testing.T) {
+	tests := []struct {
+		input string
+		want  platform.PlatformMode
+	}{
+		// Auto/default
+		{"auto", platform.ModeAuto},
+		{"", platform.ModeAuto},
+		{"  auto  ", platform.ModeAuto},
+
+		// Linux
+		{"linux", platform.ModeLinuxNative},
+		{"linux-native", platform.ModeLinuxNative},
+		{"LINUX", platform.ModeLinuxNative},
+
+		// Darwin
+		{"darwin", platform.ModeDarwinNative},
+		{"darwin-native", platform.ModeDarwinNative},
+		{"macos", platform.ModeDarwinNative},
+
+		// Darwin Lima
+		{"darwin-lima", platform.ModeDarwinLima},
+		{"lima", platform.ModeDarwinLima},
+
+		// Windows
+		{"windows", platform.ModeWindowsNative},
+		{"windows-native", platform.ModeWindowsNative},
+
+		// Windows WSL2
+		{"windows-wsl2", platform.ModeWindowsWSL2},
+		{"wsl2", platform.ModeWindowsWSL2},
+		{"wsl", platform.ModeWindowsWSL2},
+
+		// Unknown defaults to auto
+		{"unknown", platform.ModeAuto},
+		{"foobar", platform.ModeAuto},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := platform.ParsePlatformMode(tt.input)
+			if got != tt.want {
+				t.Errorf("ParsePlatformMode(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewWithOptions_LinuxMode(t *testing.T) {
+	opts := platform.PlatformOptions{
+		Mode: "linux",
+	}
+	p, err := platform.NewWithOptions(opts)
+	if err != nil {
+		t.Fatalf("NewWithOptions() failed: %v", err)
+	}
+	if p.Name() != "linux" {
+		t.Errorf("expected platform name 'linux', got %q", p.Name())
+	}
+}
+
+func TestNewWithOptions_AutoMode(t *testing.T) {
+	opts := platform.PlatformOptions{
+		Mode: "auto",
+	}
+	p, err := platform.NewWithOptions(opts)
+	if err != nil {
+		t.Fatalf("NewWithOptions() failed: %v", err)
+	}
+	// On Linux test system, should get linux platform
+	if p.Name() != "linux" {
+		t.Errorf("expected platform name 'linux', got %q", p.Name())
+	}
+}
+
+func TestNewWithOptions_EmptyMode(t *testing.T) {
+	opts := platform.PlatformOptions{
+		Mode: "",
+	}
+	p, err := platform.NewWithOptions(opts)
+	if err != nil {
+		t.Fatalf("NewWithOptions() with empty mode failed: %v", err)
+	}
+	if p.Name() != "linux" {
+		t.Errorf("expected platform name 'linux', got %q", p.Name())
+	}
+}

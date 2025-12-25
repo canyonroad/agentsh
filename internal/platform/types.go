@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"strings"
 	"time"
 
 	"github.com/agentsh/agentsh/pkg/types"
@@ -383,5 +384,26 @@ func (m PlatformMode) String() string {
 		return "windows-wsl2"
 	default:
 		return "unknown"
+	}
+}
+
+// ParsePlatformMode parses a platform mode string.
+// Accepts variations like "linux", "linux-native", "darwin", "windows-wsl2", etc.
+func ParsePlatformMode(s string) PlatformMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "auto", "":
+		return ModeAuto
+	case "linux", "linux-native":
+		return ModeLinuxNative
+	case "darwin", "darwin-native", "macos":
+		return ModeDarwinNative
+	case "darwin-lima", "lima":
+		return ModeDarwinLima
+	case "windows", "windows-native":
+		return ModeWindowsNative
+	case "windows-wsl2", "wsl2", "wsl":
+		return ModeWindowsWSL2
+	default:
+		return ModeAuto
 	}
 }
