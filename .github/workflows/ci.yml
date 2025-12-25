@@ -41,12 +41,10 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        goos: [linux, darwin, windows]
+        goos: [linux, darwin]
         goarch: [amd64, arm64]
-        exclude:
-          # Windows ARM64 is less common, exclude for now
-          - goos: windows
-            goarch: arm64
+        # Note: Windows excluded - project has Unix-only deps (go-fuse, pty, shim)
+        # Windows platform package exists in internal/platform/windows/ for future use
     steps:
       - uses: actions/checkout@v4
 
