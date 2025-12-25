@@ -8,7 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // DarwinLimiter implements ResourceLimiter using setrlimit and process control.
@@ -42,7 +43,7 @@ func (l *DarwinLimiter) Apply(pid int, limits ResourceLimits) error {
 	}
 
 	// For external processes, we can only apply limited controls
-	if pid != 0 && pid != syscall.Getpid() {
+	if pid != 0 && pid != unix.Getpid() {
 		return l.applyExternal(pid, limits)
 	}
 
@@ -53,40 +54,40 @@ func (l *DarwinLimiter) Apply(pid int, limits ResourceLimits) error {
 func (l *DarwinLimiter) applySelf(limits ResourceLimits) error {
 	// Memory limit (RLIMIT_AS - address space)
 	if limits.MaxMemoryMB > 0 {
-		var rLimit syscall.Rlimit
+		var rLimit unix.Rlimit
 		rLimit.Cur = uint64(limits.MaxMemoryMB) * 1024 * 1024
 		rLimit.Max = rLimit.Cur
-		if err := syscall.Setrlimit(syscall.RLIMIT_AS, &rLimit); err != nil {
+		if err := unix.Setrlimit(unix.RLIMIT_AS, &rLimit); err != nil {
 			return fmt.Errorf("setrlimit AS: %w", err)
 		}
 	}
 
 	// CPU time limit (RLIMIT_CPU) - in seconds
 	if limits.CommandTimeout > 0 {
-		var rLimit syscall.Rlimit
+		var rLimit unix.Rlimit
 		rLimit.Cur = uint64(limits.CommandTimeout.Seconds())
 		rLimit.Max = rLimit.Cur + 60 // Grace period
-		if err := syscall.Setrlimit(syscall.RLIMIT_CPU, &rLimit); err != nil {
+		if err := unix.Setrlimit(unix.RLIMIT_CPU, &rLimit); err != nil {
 			return fmt.Errorf("setrlimit CPU: %w", err)
 		}
 	}
 
 	// File size limit (RLIMIT_FSIZE)
 	if limits.MaxDiskMB > 0 {
-		var rLimit syscall.Rlimit
+		var rLimit unix.Rlimit
 		rLimit.Cur = uint64(limits.MaxDiskMB) * 1024 * 1024
 		rLimit.Max = rLimit.Cur
-		if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &rLimit); err != nil {
+		if err := unix.Setrlimit(unix.RLIMIT_FSIZE, &rLimit); err != nil {
 			return fmt.Errorf("setrlimit FSIZE: %w", err)
 		}
 	}
 
 	// Process limit (RLIMIT_NPROC)
 	if limits.MaxProcesses > 0 {
-		var rLimit syscall.Rlimit
+		var rLimit unix.Rlimit
 		rLimit.Cur = uint64(limits.MaxProcesses)
 		rLimit.Max = rLimit.Cur
-		if err := syscall.Setrlimit(syscall.RLIMIT_NPROC, &rLimit); err != nil {
+		if err := unix.Setrlimit(unix.RLIMIT_NPROC, &rLimit); err != nil {
 			return fmt.Errorf("setrlimit NPROC: %w", err)
 		}
 	}
