@@ -126,3 +126,148 @@ func TestPurgeByTTL(t *testing.T) {
 		t.Fatalf("expected empty trash after purge, got %d", len(entries))
 	}
 }
+
+func TestPurgeWithResultDryRun(t *testing.T) {
+	dir := t.TempDir()
+	trashDir := filepath.Join(dir, ".trash")
+	src := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(src, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entry, err := Divert(src, Config{TrashDir: trashDir, Session: "s1"})
+	if err != nil {
+		t.Fatalf("divert: %v", err)
+	}
+
+	// DryRun should report but not remove
+	now := time.Now().Add(48 * time.Hour)
+	result, err := PurgeWithResult(trashDir, PurgeOptions{
+		TTL:    24 * time.Hour,
+		Now:    now,
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if result.EntriesRemoved != 1 {
+		t.Fatalf("expected 1 entry in result, got %d", result.EntriesRemoved)
+	}
+	if result.BytesReclaimed != entry.Size {
+		t.Fatalf("expected %d bytes reclaimed, got %d", entry.Size, result.BytesReclaimed)
+	}
+	if len(result.Entries) != 1 {
+		t.Fatalf("expected 1 entry in Entries list, got %d", len(result.Entries))
+	}
+
+	// Entry should still exist after DryRun
+	entries, _ := List(trashDir)
+	if len(entries) != 1 {
+		t.Fatalf("expected entry to still exist after DryRun, got %d", len(entries))
+	}
+}
+
+func TestPurgeByQuotaCount(t *testing.T) {
+	dir := t.TempDir()
+	trashDir := filepath.Join(dir, ".trash")
+
+	makeFile := func(name string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// Create 3 files
+	f1 := makeFile("a.txt")
+	_, _ = Divert(f1, Config{TrashDir: trashDir, Session: "s1"})
+	time.Sleep(5 * time.Millisecond)
+	f2 := makeFile("b.txt")
+	_, _ = Divert(f2, Config{TrashDir: trashDir, Session: "s1"})
+	time.Sleep(5 * time.Millisecond)
+	f3 := makeFile("c.txt")
+	e3, _ := Divert(f3, Config{TrashDir: trashDir, Session: "s1"})
+
+	// Keep only 1 entry
+	result, err := PurgeWithResult(trashDir, PurgeOptions{QuotaCount: 1})
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if result.EntriesRemoved != 2 {
+		t.Fatalf("expected 2 removed, got %d", result.EntriesRemoved)
+	}
+
+	entries, _ := List(trashDir)
+	if len(entries) != 1 || entries[0].Token != e3.Token {
+		t.Fatalf("expected newest entry to remain, got %+v", entries)
+	}
+}
+
+func TestEntryHasPlatform(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entry, err := Divert(src, Config{TrashDir: filepath.Join(dir, ".trash"), Session: "s1"})
+	if err != nil {
+		t.Fatalf("divert: %v", err)
+	}
+
+	if entry.Platform == "" {
+		t.Error("expected Platform to be set")
+	}
+	if entry.Platform != runtime.GOOS {
+		t.Errorf("expected Platform=%s, got %s", runtime.GOOS, entry.Platform)
+	}
+}
+
+func TestDivertWithXattrs(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("xattr test only runs on Linux and macOS")
+	}
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set an xattr (this may fail if xattrs not supported)
+	// We use user. prefix on Linux
+	xattrName := "user.testattr"
+	if runtime.GOOS == "darwin" {
+		xattrName = "com.test.attr"
+	}
+	if err := setXattr(src, xattrName, []byte("testvalue")); err != nil {
+		t.Skipf("xattrs not supported: %v", err)
+	}
+
+	entry, err := Divert(src, Config{
+		TrashDir:       filepath.Join(dir, ".trash"),
+		Session:        "s1",
+		PreserveXattrs: true,
+	})
+	if err != nil {
+		t.Fatalf("divert: %v", err)
+	}
+
+	if len(entry.Xattrs) == 0 {
+		t.Error("expected xattrs to be captured")
+	}
+
+	found := false
+	for _, x := range entry.Xattrs {
+		if x.Name == xattrName {
+			found = true
+			if string(x.Value) != "testvalue" {
+				t.Errorf("xattr value mismatch: got %q", string(x.Value))
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected xattr %s to be captured, got %v", xattrName, entry.Xattrs)
+	}
+}
