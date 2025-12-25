@@ -37,9 +37,11 @@ type Limits struct {
 }
 
 type compiledFileRule struct {
-	rule  FileRule
-	globs []glob.Glob
-	ops   map[string]struct{}
+	rule         FileRule
+	globs        []glob.Glob
+	ops          map[string]struct{}
+	redirectTo   string // Expanded redirect target
+	preserveTree bool
 }
 
 type compiledNetworkRule struct {
@@ -68,6 +70,7 @@ type Decision struct {
 	Message           string
 	Approval          *types.ApprovalInfo
 	Redirect          *types.RedirectInfo
+	FileRedirect      *types.FileRedirectInfo
 	EnvPolicy         ResolvedEnvPolicy
 }
 
@@ -78,7 +81,12 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 	}
 
 	for _, r := range p.FileRules {
-		cr := compiledFileRule{rule: r, ops: map[string]struct{}{}}
+		cr := compiledFileRule{
+			rule:         r,
+			ops:          map[string]struct{}{},
+			redirectTo:   r.RedirectTo,
+			preserveTree: r.PreserveTree,
+		}
 		for _, op := range r.Operations {
 			cr.ops[strings.ToLower(op)] = struct{}{}
 		}
@@ -297,12 +305,38 @@ func (e *Engine) CheckFile(p string, operation string) Decision {
 		}
 		for _, g := range r.globs {
 			if g.Match(p) {
-				return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
+				dec := e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
+
+				// Handle file redirect if configured
+				if r.redirectTo != "" && dec.PolicyDecision == types.DecisionRedirect {
+					dec.FileRedirect = computeFileRedirect(p, operation, r.redirectTo, r.preserveTree, r.rule.Message)
+				}
+
+				return dec
 			}
 		}
 	}
 	// Default deny (policy files typically include an explicit default deny, but we enforce it here too).
 	return e.wrapDecision(string(types.DecisionDeny), "default-deny-files", "", nil)
+}
+
+// computeFileRedirect calculates the redirected path for a file operation.
+func computeFileRedirect(originalPath, operation, targetBase string, preserveTree bool, msg string) *types.FileRedirectInfo {
+	var newPath string
+	if preserveTree {
+		// /home/user/file.txt -> /workspace/.scratch/home/user/file.txt
+		newPath = filepath.Join(targetBase, originalPath)
+	} else {
+		// /home/user/file.txt -> /workspace/.scratch/file.txt
+		newPath = filepath.Join(targetBase, filepath.Base(originalPath))
+	}
+
+	return &types.FileRedirectInfo{
+		OriginalPath: originalPath,
+		RedirectPath: newPath,
+		Operation:    operation,
+		Reason:       msg,
+	}
 }
 
 // CheckUnixSocket evaluates unix_socket_rules against a path and operation (connect|bind|listen|sendto).
@@ -512,6 +546,22 @@ func (e *Engine) wrapDecision(decision string, rule string, msg string, redirect
 			Message:           msg,
 			Redirect:          toRedirectInfo(redirect, msg),
 		}
+	case types.DecisionAudit:
+		// Audit is allow + enhanced logging (caller should emit audit event)
+		return Decision{
+			PolicyDecision:    pd,
+			EffectiveDecision: types.DecisionAllow,
+			Rule:              rule,
+			Message:           msg,
+		}
+	case types.DecisionSoftDelete:
+		// Soft delete means redirect destructive operations to trash
+		return Decision{
+			PolicyDecision:    pd,
+			EffectiveDecision: types.DecisionAllow,
+			Rule:              rule,
+			Message:           msg,
+		}
 	default:
 		// Safe fallback.
 		return Decision{PolicyDecision: types.DecisionDeny, EffectiveDecision: types.DecisionDeny, Rule: "invalid-policy-decision", Message: "invalid decision in policy"}
@@ -523,8 +573,21 @@ func toRedirectInfo(r *CommandRedirect, msg string) *types.RedirectInfo {
 		return nil
 	}
 	return &types.RedirectInfo{
-		Command: r.Command,
-		Args:    append([]string{}, r.Args...),
-		Reason:  msg,
+		Command:     r.Command,
+		Args:        append([]string{}, r.Args...),
+		ArgsAppend:  append([]string{}, r.ArgsAppend...),
+		Environment: copyMap(r.Environment),
+		Reason:      msg,
 	}
+}
+
+func copyMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	result := make(map[string]string, len(m))
+	for k, v := range m {
+		result[k] = v
+	}
+	return result
 }
