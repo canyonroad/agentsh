@@ -20,6 +20,10 @@ type Engine struct {
 	compiledNetworkRules []compiledNetworkRule
 	compiledCommandRules []compiledCommandRule
 	compiledUnixRules    []compiledUnixRule
+
+	// Compiled env policy patterns for glob matching
+	compiledEnvAllow []glob.Glob
+	compiledEnvDeny  []glob.Glob
 }
 
 type Limits struct {
@@ -149,6 +153,22 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 			cr.paths = append(cr.paths, g)
 		}
 		e.compiledUnixRules = append(e.compiledUnixRules, cr)
+	}
+
+	// Compile env policy patterns
+	for _, pat := range p.EnvPolicy.Allow {
+		g, err := glob.Compile(pat)
+		if err != nil {
+			return nil, fmt.Errorf("compile env allow pattern %q: %w", pat, err)
+		}
+		e.compiledEnvAllow = append(e.compiledEnvAllow, g)
+	}
+	for _, pat := range p.EnvPolicy.Deny {
+		g, err := glob.Compile(pat)
+		if err != nil {
+			return nil, fmt.Errorf("compile env deny pattern %q: %w", pat, err)
+		}
+		e.compiledEnvDeny = append(e.compiledEnvDeny, g)
 	}
 
 	return e, nil
@@ -300,6 +320,68 @@ func (e *Engine) CheckUnixSocket(path string, operation string) Decision {
 		}
 	}
 	return e.wrapDecision(string(types.DecisionDeny), "default-deny-unix", "", nil)
+}
+
+// EnvDecision represents the result of CheckEnv with additional metadata.
+type EnvDecision struct {
+	Allowed   bool
+	MatchedBy string // "allow", "deny", "default-allow", "default-deny"
+	Pattern   string // The pattern that matched, if any
+}
+
+// CheckEnv evaluates the env policy against an environment variable name.
+// Returns whether the variable is allowed and what matched.
+// Logic: deny patterns are checked first (deny wins), then allow patterns.
+// If no allow patterns defined, default is allow (unless denied).
+// If allow patterns defined, default is deny (unless allowed).
+func (e *Engine) CheckEnv(name string) EnvDecision {
+	if e == nil || e.policy == nil {
+		return EnvDecision{Allowed: true, MatchedBy: "default-allow"}
+	}
+
+	// Check deny patterns first (deny always wins)
+	for i, g := range e.compiledEnvDeny {
+		if g.Match(name) {
+			pattern := ""
+			if i < len(e.policy.EnvPolicy.Deny) {
+				pattern = e.policy.EnvPolicy.Deny[i]
+			}
+			return EnvDecision{Allowed: false, MatchedBy: "deny", Pattern: pattern}
+		}
+	}
+
+	// Check defaultSecretDeny patterns when no allow patterns defined
+	if len(e.compiledEnvAllow) == 0 {
+		for _, secret := range defaultSecretDeny {
+			if name == secret {
+				return EnvDecision{Allowed: false, MatchedBy: "default-secret-deny", Pattern: secret}
+			}
+		}
+		// No allow patterns and not denied = allow
+		return EnvDecision{Allowed: true, MatchedBy: "default-allow"}
+	}
+
+	// Check allow patterns
+	for i, g := range e.compiledEnvAllow {
+		if g.Match(name) {
+			pattern := ""
+			if i < len(e.policy.EnvPolicy.Allow) {
+				pattern = e.policy.EnvPolicy.Allow[i]
+			}
+			return EnvDecision{Allowed: true, MatchedBy: "allow", Pattern: pattern}
+		}
+	}
+
+	// Allow patterns defined but none matched = deny
+	return EnvDecision{Allowed: false, MatchedBy: "default-deny"}
+}
+
+// EnvPolicy returns the raw env policy for configuration inspection.
+func (e *Engine) EnvPolicy() EnvPolicy {
+	if e == nil || e.policy == nil {
+		return EnvPolicy{}
+	}
+	return e.policy.EnvPolicy
 }
 
 // CheckNetwork evaluates network_rules against a domain and port.

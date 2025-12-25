@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/gobwas/glob"
 )
 
 // ResolvedEnvPolicy is the merged env policy (global + rule override).
@@ -49,61 +51,59 @@ func MergeEnvPolicy(global EnvPolicy, rule CommandRule) ResolvedEnvPolicy {
 
 // BuildEnv constructs the child environment per policy.
 // baseEnv should already be minimal; addKeys are merged after allow/deny filtering.
+// Supports glob patterns in allow/deny lists (e.g., "AWS_*", "*_TOKEN").
 func BuildEnv(pol ResolvedEnvPolicy, baseEnv []string, addKeys map[string]string) ([]string, error) {
-	allowSet := toSet(pol.Allow)
-	denySet := toSet(pol.Deny)
-	if len(allowSet) == 0 {
-		for _, k := range defaultSecretDeny {
-			denySet[k] = true
+	// Compile patterns once for this call
+	allowGlobs := compilePatterns(pol.Allow)
+	denyGlobs := compilePatterns(pol.Deny)
+
+	hasAllowPatterns := len(pol.Allow) > 0
+
+	// Helper to check if var is denied
+	isDenied := func(name string) bool {
+		if matchesAnyPattern(name, pol.Deny, denyGlobs) {
+			return true
 		}
+		// Check default secrets when no explicit allow patterns
+		if !hasAllowPatterns {
+			for _, secret := range defaultSecretDeny {
+				if name == secret {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// Helper to check if var is allowed
+	isAllowed := func(name string) bool {
+		if isDenied(name) {
+			return false
+		}
+		if !hasAllowPatterns {
+			return true // No allowlist = allow all (except denied)
+		}
+		return matchesAnyPattern(name, pol.Allow, allowGlobs)
 	}
 
 	allowed := map[string]string{}
 
-	// base env (only if allow set defined; otherwise baseEnv expected minimal and added below)
-	if len(allowSet) > 0 {
-		for _, kv := range baseEnv {
-			k, v, ok := splitKV(kv)
-			if !ok {
-				continue
-			}
-			if _, ok := allowSet[k]; !ok {
-				continue
-			}
-			if _, denied := denySet[k]; denied {
-				continue
-			}
-			if v != "" {
-				allowed[k] = v
-			}
-		}
-	}
-
-	// minimal/defaults (baseEnv entries) always considered when not denied
+	// Process base env
 	for _, kv := range baseEnv {
 		k, v, ok := splitKV(kv)
 		if !ok || v == "" {
 			continue
 		}
-		if _, denied := denySet[k]; denied {
-			continue
-		}
-		if len(allowSet) == 0 || allowSet[k] {
+		if isAllowed(k) {
 			allowed[k] = v
 		}
 	}
 
 	// Additional explicit keys
 	for k, v := range addKeys {
-		if len(allowSet) > 0 {
-			if _, ok := allowSet[k]; !ok {
-				continue
-			}
+		if isAllowed(k) {
+			allowed[k] = v
 		}
-		if _, denied := denySet[k]; denied {
-			continue
-		}
-		allowed[k] = v
 	}
 
 	pairs := make([]string, 0, len(allowed))
@@ -155,6 +155,37 @@ func toSet(in []string) map[string]bool {
 		m[s] = true
 	}
 	return m
+}
+
+// compilePatterns compiles a list of glob patterns, returning nil on error.
+func compilePatterns(patterns []string) []glob.Glob {
+	var compiled []glob.Glob
+	for _, p := range patterns {
+		g, err := glob.Compile(p)
+		if err != nil {
+			continue // Skip invalid patterns
+		}
+		compiled = append(compiled, g)
+	}
+	return compiled
+}
+
+// matchesAnyPattern checks if name matches any of the patterns.
+// Supports both exact match (via set) and glob patterns.
+func matchesAnyPattern(name string, patterns []string, compiledGlobs []glob.Glob) bool {
+	// Fast path: exact match
+	for _, p := range patterns {
+		if p == name {
+			return true
+		}
+	}
+	// Glob match
+	for _, g := range compiledGlobs {
+		if g.Match(name) {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateEnvPolicy performs simple sanity checks.
