@@ -76,6 +76,21 @@ jobs:
           fi
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=$CGO_ENABLED go build ./...
 
+  # Verify Windows platform package compiles (full project has Unix-only deps)
+  build-windows-platform:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build Windows platform package
+        run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./internal/platform/...
+
   integration:
     needs: test
     runs-on: ubuntu-latest

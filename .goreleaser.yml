@@ -33,6 +33,9 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
 
+  # Windows build disabled - project has Unix-only deps (go-fuse, pty, shim)
+  # Platform package exists in internal/platform/windows/ for future use
+
   - id: shim-linux
     main: ./cmd/agentsh-shell-shim
     binary: agentsh-shell-shim
