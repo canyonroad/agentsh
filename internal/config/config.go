@@ -9,6 +9,7 @@ import (
 )
 
 type Config struct {
+	Platform    PlatformConfig    `yaml:"platform"`
 	Server      ServerConfig      `yaml:"server"`
 	Auth        AuthConfig        `yaml:"auth"`
 	Logging     LoggingConfig     `yaml:"logging"`
@@ -20,6 +21,35 @@ type Config struct {
 	Metrics     MetricsConfig     `yaml:"metrics"`
 	Health      HealthConfig      `yaml:"health"`
 	Development DevelopmentConfig `yaml:"development"`
+}
+
+// PlatformConfig configures cross-platform selection and fallback behavior.
+type PlatformConfig struct {
+	// Mode selects the platform: auto, linux, darwin, darwin-lima, windows, windows-wsl2
+	Mode string `yaml:"mode"`
+
+	// Fallback configures fallback behavior when preferred mode is unavailable
+	Fallback PlatformFallbackConfig `yaml:"fallback"`
+
+	// MountPoints configures platform-specific mount points
+	MountPoints PlatformMountPointsConfig `yaml:"mount_points"`
+}
+
+// PlatformFallbackConfig configures platform fallback behavior.
+type PlatformFallbackConfig struct {
+	// Enabled allows falling back to alternative platforms
+	Enabled bool `yaml:"enabled"`
+
+	// Order specifies fallback priority (first available is used)
+	Order []string `yaml:"order"`
+}
+
+// PlatformMountPointsConfig specifies platform-specific mount points.
+type PlatformMountPointsConfig struct {
+	Linux       string `yaml:"linux"`
+	Darwin      string `yaml:"darwin"`
+	Windows     string `yaml:"windows"`
+	WindowsWSL2 string `yaml:"windows_wsl2"`
 }
 
 type ServerConfig struct {
@@ -244,6 +274,23 @@ func Load(path string) (*Config, error) {
 }
 
 func applyDefaults(cfg *Config) {
+	// Platform defaults
+	if cfg.Platform.Mode == "" {
+		cfg.Platform.Mode = "auto"
+	}
+	if cfg.Platform.MountPoints.Linux == "" {
+		cfg.Platform.MountPoints.Linux = "/tmp/agentsh/workspace"
+	}
+	if cfg.Platform.MountPoints.Darwin == "" {
+		cfg.Platform.MountPoints.Darwin = "/tmp/agentsh/workspace"
+	}
+	if cfg.Platform.MountPoints.Windows == "" {
+		cfg.Platform.MountPoints.Windows = "X:"
+	}
+	if cfg.Platform.MountPoints.WindowsWSL2 == "" {
+		cfg.Platform.MountPoints.WindowsWSL2 = "/tmp/agentsh/workspace"
+	}
+
 	if cfg.Server.HTTP.Addr == "" {
 		cfg.Server.HTTP.Addr = "0.0.0.0:8080"
 	}
@@ -376,6 +423,9 @@ func applyDefaults(cfg *Config) {
 }
 
 func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("AGENTSH_PLATFORM_MODE"); v != "" {
+		cfg.Platform.Mode = v
+	}
 	if v := os.Getenv("AGENTSH_HTTP_ADDR"); v != "" {
 		cfg.Server.HTTP.Addr = v
 	}

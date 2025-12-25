@@ -7,10 +7,59 @@ import (
 	"strings"
 )
 
+// PlatformOptions configures platform selection and fallback.
+type PlatformOptions struct {
+	// Mode is the preferred platform mode (use "auto" for automatic detection)
+	Mode string
+
+	// FallbackEnabled allows falling back to alternative platforms
+	FallbackEnabled bool
+
+	// FallbackOrder specifies fallback priority (first available is used)
+	FallbackOrder []string
+}
+
 // New creates the appropriate platform implementation for the current OS.
 // It automatically detects the best platform mode.
 func New() (Platform, error) {
 	return NewWithMode(ModeAuto)
+}
+
+// NewWithOptions creates a platform using the provided options.
+// This supports mode selection and fallback behavior from config.
+func NewWithOptions(opts PlatformOptions) (Platform, error) {
+	mode := ParsePlatformMode(opts.Mode)
+
+	if mode == ModeAuto {
+		mode = detectPlatformMode()
+	}
+
+	// Try the preferred mode first
+	plat, err := NewWithMode(mode)
+	if err == nil {
+		return plat, nil
+	}
+
+	// If fallback is disabled, return the error
+	if !opts.FallbackEnabled || len(opts.FallbackOrder) == 0 {
+		return nil, err
+	}
+
+	// Try fallback modes in order
+	for _, fallbackName := range opts.FallbackOrder {
+		fallbackMode := ParsePlatformMode(fallbackName)
+		if fallbackMode == ModeAuto || fallbackMode == mode {
+			continue // Skip auto and the already-tried mode
+		}
+
+		plat, fallbackErr := NewWithMode(fallbackMode)
+		if fallbackErr == nil {
+			return plat, nil
+		}
+	}
+
+	// All fallbacks failed, return original error
+	return nil, fmt.Errorf("platform %s failed: %w (no fallbacks available)", mode, err)
 }
 
 // NewWithMode creates a platform with a specific mode.
