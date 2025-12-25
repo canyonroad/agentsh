@@ -9,10 +9,17 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 )
+
+// Xattr represents an extended attribute (Linux/macOS).
+type Xattr struct {
+	Name  string `json:"name"`
+	Value []byte `json:"value"`
+}
 
 // Entry describes one diverted item.
 type Entry struct {
@@ -29,20 +36,46 @@ type Entry struct {
 	Session      string      `json:"session"`
 	Command      string      `json:"command"`
 	Created      time.Time   `json:"created"`
+
+	// Platform identifies which OS created this entry
+	Platform string `json:"platform,omitempty"`
+
+	// Windows-specific metadata
+	WinAttrs    uint32 `json:"win_attrs,omitempty"`    // FILE_ATTRIBUTE_*
+	WinSecurity []byte `json:"win_security,omitempty"` // Security descriptor
+
+	// macOS-specific metadata
+	MacFlags uint32 `json:"mac_flags,omitempty"` // chflags
+
+	// Extended attributes (Linux/macOS)
+	Xattrs []Xattr `json:"xattrs,omitempty"`
 }
 
+// Config configures trash operations.
 type Config struct {
-	TrashDir       string
-	Session        string
-	Command        string
-	HashLimitBytes int64
+	TrashDir         string
+	Session          string
+	Command          string
+	HashLimitBytes   int64
+	PreserveXattrs   bool // Preserve extended attributes (macOS/Linux)
+	PreserveSecurity bool // Preserve security descriptors (Windows)
 }
 
+// PurgeOptions controls trash cleanup.
 type PurgeOptions struct {
-	TTL        time.Duration
-	QuotaBytes int64
-	Session    string
-	Now        time.Time
+	TTL        time.Duration // Remove entries older than this
+	QuotaBytes int64         // Max total trash size
+	QuotaCount int           // Max number of entries
+	Session    string        // Only purge entries from this session (empty = all)
+	DryRun     bool          // Don't actually delete, just report
+	Now        time.Time     // Current time (for testing)
+}
+
+// PurgeResult reports what was cleaned up.
+type PurgeResult struct {
+	EntriesRemoved int
+	BytesReclaimed int64
+	Entries        []Entry // If DryRun, what would be removed
 }
 
 var (
@@ -50,6 +83,7 @@ var (
 	manifestDirName = "manifest"
 )
 
+// Divert moves a file/directory to trash instead of deleting it.
 func Divert(path string, cfg Config) (*Entry, error) {
 	if cfg.TrashDir == "" {
 		return nil, errors.New("trash dir required")
@@ -81,6 +115,13 @@ func Divert(path string, cfg Config) (*Entry, error) {
 		Session:      cfg.Session,
 		Command:      cfg.Command,
 		Created:      time.Now().UTC(),
+		Platform:     runtime.GOOS,
+	}
+
+	// Capture platform-specific metadata
+	if err := capturePlatformMetadata(path, info, entry, cfg); err != nil {
+		// Log but don't fail - metadata is nice-to-have
+		// In production, you'd use a logger here
 	}
 
 	if err := os.MkdirAll(filepath.Dir(entry.TrashPath), 0o755); err != nil {
@@ -102,6 +143,7 @@ func Divert(path string, cfg Config) (*Entry, error) {
 	return entry, nil
 }
 
+// List returns all entries in the trash, sorted by creation time (oldest first).
 func List(trashDir string) ([]Entry, error) {
 	manDir := filepath.Join(trashDir, manifestDirName)
 	files, err := os.ReadDir(manDir)
@@ -119,10 +161,10 @@ func List(trashDir string) ([]Entry, error) {
 		var e Entry
 		b, err := os.ReadFile(filepath.Join(manDir, f.Name()))
 		if err != nil {
-			return nil, err
+			continue // Skip unreadable manifests
 		}
 		if err := json.Unmarshal(b, &e); err != nil {
-			return nil, err
+			continue // Skip corrupt manifests
 		}
 		entries = append(entries, e)
 	}
@@ -132,6 +174,7 @@ func List(trashDir string) ([]Entry, error) {
 	return entries, nil
 }
 
+// Restore recovers a file from trash.
 func Restore(trashDir, token, dest string, force bool) (string, error) {
 	entry, manPath, err := readManifest(trashDir, token)
 	if err != nil {
@@ -145,7 +188,7 @@ func Restore(trashDir, token, dest string, force bool) (string, error) {
 
 	if !force {
 		if _, err := os.Lstat(target); err == nil {
-			return "", fmt.Errorf("destination exists: %s", target)
+			return "", fmt.Errorf("destination exists: %s (use force=true to overwrite)", target)
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -187,66 +230,120 @@ func Restore(trashDir, token, dest string, force bool) (string, error) {
 		}
 	}
 
+	// Restore platform-specific metadata
+	if err := restorePlatformMetadata(target, entry); err != nil {
+		// Log but don't fail
+	}
+
 	_ = os.Remove(manPath)
 	return target, nil
 }
 
+// Purge removes old entries from trash based on options.
+// Deprecated: Use PurgeWithResult for more detailed results.
 func Purge(trashDir string, opts PurgeOptions) (int, error) {
+	result, err := PurgeWithResult(trashDir, opts)
+	if err != nil {
+		return 0, err
+	}
+	return result.EntriesRemoved, nil
+}
+
+// PurgeWithResult removes old entries from trash and returns detailed results.
+func PurgeWithResult(trashDir string, opts PurgeOptions) (*PurgeResult, error) {
 	now := opts.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+
 	entries, err := List(trashDir)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	removed := 0
 
-	if opts.Session != "" && opts.TTL == 0 && opts.QuotaBytes == 0 {
+	result := &PurgeResult{}
+	var toRemove []Entry
+
+	// Filter by session if specified
+	if opts.Session != "" {
+		filtered := make([]Entry, 0, len(entries))
 		for _, e := range entries {
 			if e.Session == opts.Session {
-				if err := removeEntry(trashDir, &e); err != nil {
-					return removed, err
+				filtered = append(filtered, e)
+			}
+		}
+		entries = filtered
+	}
+
+	// Special case: if Session is set but no TTL or quota constraints,
+	// purge all entries for that session
+	if opts.Session != "" && opts.TTL == 0 && opts.QuotaBytes == 0 && opts.QuotaCount == 0 {
+		toRemove = entries
+	} else {
+		// Apply TTL filter
+		if opts.TTL > 0 {
+			for _, e := range entries {
+				if e.Created.Add(opts.TTL).Before(now) {
+					toRemove = append(toRemove, e)
 				}
-				removed++
 			}
 		}
-		return removed, nil
 	}
 
+	// Build remaining list (entries not in toRemove)
+	remaining := make([]Entry, 0)
 	for _, e := range entries {
-		if opts.Session != "" && e.Session != opts.Session {
-			continue
-		}
-		if opts.TTL > 0 && e.Created.Add(opts.TTL).Before(now) {
-			if err := removeEntry(trashDir, &e); err != nil {
-				return removed, err
+		found := false
+		for _, r := range toRemove {
+			if r.Token == e.Token {
+				found = true
+				break
 			}
-			removed++
+		}
+		if !found {
+			remaining = append(remaining, e)
 		}
 	}
 
+	// Apply count quota (remove oldest first)
+	if opts.QuotaCount > 0 && len(remaining) > opts.QuotaCount {
+		excess := remaining[:len(remaining)-opts.QuotaCount]
+		toRemove = append(toRemove, excess...)
+		remaining = remaining[len(remaining)-opts.QuotaCount:]
+	}
+
+	// Apply bytes quota
 	if opts.QuotaBytes > 0 {
-		entries, err = List(trashDir)
-		if err != nil {
-			return removed, err
-		}
 		var total int64
-		for _, e := range entries {
+		for _, e := range remaining {
 			total += e.Size
 		}
-		for total > opts.QuotaBytes && len(entries) > 0 {
-			e := entries[0]
-			if err := removeEntry(trashDir, &e); err != nil {
-				return removed, err
-			}
-			total -= e.Size
-			entries = entries[1:]
-			removed++
+		for total > opts.QuotaBytes && len(remaining) > 0 {
+			oldest := remaining[0]
+			toRemove = append(toRemove, oldest)
+			total -= oldest.Size
+			remaining = remaining[1:]
 		}
 	}
 
-	return removed, nil
+	// Perform removal (or just report if DryRun)
+	if opts.DryRun {
+		result.Entries = toRemove
+		for _, e := range toRemove {
+			result.EntriesRemoved++
+			result.BytesReclaimed += e.Size
+		}
+	} else {
+		for _, e := range toRemove {
+			if err := removeEntry(trashDir, &e); err != nil {
+				return result, fmt.Errorf("remove entry %s: %w", e.Token, err)
+			}
+			result.EntriesRemoved++
+			result.BytesReclaimed += e.Size
+		}
+	}
+
+	return result, nil
 }
 
 func writeManifest(trashDir string, e *Entry) error {
