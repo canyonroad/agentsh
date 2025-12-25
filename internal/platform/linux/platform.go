@@ -27,6 +27,7 @@ type Platform struct {
 	fs          *Filesystem
 	net         *Network
 	sandbox     *SandboxManager
+	resources   *ResourceLimiter
 	caps        platform.Capabilities
 	initialized bool
 }
@@ -177,8 +178,10 @@ func (p *Platform) Sandbox() platform.SandboxManager {
 
 // Resources returns the resource limiter.
 func (p *Platform) Resources() platform.ResourceLimiter {
-	// TODO: Implement in phase 2
-	return nil
+	if p.resources == nil {
+		p.resources = NewResourceLimiter()
+	}
+	return p.resources
 }
 
 // Initialize sets up the platform with the given configuration.
