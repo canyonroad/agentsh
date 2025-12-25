@@ -25,6 +25,7 @@ func init() {
 type Platform struct {
 	config      platform.Config
 	fs          *Filesystem
+	net         *Network
 	caps        platform.Capabilities
 	initialized bool
 }
@@ -159,8 +160,10 @@ func (p *Platform) Filesystem() platform.FilesystemInterceptor {
 
 // Network returns the network interceptor.
 func (p *Platform) Network() platform.NetworkInterceptor {
-	// TODO: Implement in phase 2
-	return nil
+	if p.net == nil {
+		p.net = NewNetwork()
+	}
+	return p.net
 }
 
 // Sandbox returns the sandbox manager.
