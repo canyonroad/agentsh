@@ -26,6 +26,7 @@ type Platform struct {
 	config      platform.Config
 	fs          *Filesystem
 	net         *Network
+	sandbox     *SandboxManager
 	caps        platform.Capabilities
 	initialized bool
 }
@@ -168,8 +169,10 @@ func (p *Platform) Network() platform.NetworkInterceptor {
 
 // Sandbox returns the sandbox manager.
 func (p *Platform) Sandbox() platform.SandboxManager {
-	// TODO: Implement in phase 2
-	return nil
+	if p.sandbox == nil {
+		p.sandbox = NewSandboxManager()
+	}
+	return p.sandbox
 }
 
 // Resources returns the resource limiter.
