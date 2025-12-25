@@ -248,22 +248,19 @@ func (e *eventEmitter) Publish(ev types.Event) {
 	_ = e.AppendEvent(context.Background(), ev)
 }
 
-// policyWrapper wraps platform.PolicyEngine to implement policy.Engine interface
-// that fsmonitor expects.
-type policyWrapper struct {
-	engine platform.PolicyEngine
-}
-
-// wrapPolicyEngine creates a policy.Engine wrapper around platform.PolicyEngine.
+// wrapPolicyEngine extracts *policy.Engine from platform.PolicyEngine.
+// If the PolicyEngine is a *PolicyAdapter, it returns the underlying engine.
+// Otherwise returns nil (allowing all operations).
 func wrapPolicyEngine(pe platform.PolicyEngine) *policy.Engine {
 	if pe == nil {
 		return nil
 	}
-	// For now, we need to handle this differently since policy.Engine has a complex interface.
-	// The existing fsmonitor code expects *policy.Engine, so we'll need to:
-	// 1. Accept nil and let fsmonitor handle it (allow all)
-	// 2. Or create a proper adapter
-	// For the initial implementation, we'll return nil and add proper bridging later.
+	// Check if it's a PolicyAdapter wrapping *policy.Engine
+	if adapter, ok := pe.(*platform.PolicyAdapter); ok {
+		return adapter.Engine()
+	}
+	// For other implementations, we can't extract the engine
+	// The platform interface will be used directly in the future
 	return nil
 }
 
