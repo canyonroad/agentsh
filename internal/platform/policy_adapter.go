@@ -52,11 +52,11 @@ func (a *PolicyAdapter) CheckEnv(name string, op EnvOperation) Decision {
 	if a == nil || a.engine == nil {
 		return DecisionAllow
 	}
-	// The policy engine doesn't have a direct CheckEnv method.
-	// Environment policies are handled differently (via EnvPolicy in Decision).
-	// For now, allow all env access at this level.
-	// TODO: Implement proper env policy checking when needed.
-	return DecisionAllow
+	decision := a.engine.CheckEnv(name)
+	if decision.Allowed {
+		return DecisionAllow
+	}
+	return DecisionDeny
 }
 
 // CheckCommand evaluates command execution policy.
