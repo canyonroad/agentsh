@@ -72,8 +72,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 				CommandIDFunc: func() string {
 					return s.CurrentCommandID()
 				},
-				// PolicyEngine bridging is TODO - for now, nil means allow all
-				// The existing fsmonitor still applies policy internally when available
+				PolicyEngine: platform.NewPolicyAdapter(a.policy),
 			}
 
 			// Configure soft-delete/trash if enabled
