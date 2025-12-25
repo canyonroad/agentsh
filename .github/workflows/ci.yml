@@ -41,8 +41,12 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        goos: [linux, darwin]
+        goos: [linux, darwin, windows]
         goarch: [amd64, arm64]
+        exclude:
+          # Windows ARM64 is less common, exclude for now
+          - goos: windows
+            goarch: arm64
     steps:
       - uses: actions/checkout@v4
 
