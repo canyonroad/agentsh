@@ -30,6 +30,10 @@ type FileRule struct {
 	Decision    string   `yaml:"decision"`
 	Message     string   `yaml:"message"`
 	Timeout     duration `yaml:"timeout"`
+
+	// Redirect configuration for file operations
+	RedirectTo   string `yaml:"redirect_to,omitempty"`   // Target directory for redirected files
+	PreserveTree bool   `yaml:"preserve_tree,omitempty"` // Preserve directory structure under target
 }
 
 type NetworkRule struct {
@@ -60,8 +64,10 @@ type CommandRule struct {
 }
 
 type CommandRedirect struct {
-	Command string   `yaml:"command"`
-	Args    []string `yaml:"args,omitempty"`
+	Command     string            `yaml:"command"`
+	Args        []string          `yaml:"args,omitempty"`        // Prepended args
+	ArgsAppend  []string          `yaml:"args_append,omitempty"` // Appended args
+	Environment map[string]string `yaml:"environment,omitempty"` // Environment overrides
 }
 
 // UnixSocketRule controls AF_UNIX socket operations such as connect/bind/listen.
