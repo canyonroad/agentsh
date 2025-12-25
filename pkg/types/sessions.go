@@ -5,11 +5,40 @@ import "time"
 type SessionState string
 
 const (
-	SessionStateCreating SessionState = "creating"
-	SessionStateReady    SessionState = "ready"
-	SessionStateBusy     SessionState = "busy"
-	SessionStateStopping SessionState = "stopping"
+	SessionStatePending     SessionState = "pending"     // Created, not started
+	SessionStateCreating    SessionState = "creating"    // Legacy: alias for starting
+	SessionStateStarting    SessionState = "starting"    // Initializing sandbox
+	SessionStateReady       SessionState = "ready"       // Legacy: alias for running
+	SessionStateRunning     SessionState = "running"     // Agent is executing
+	SessionStateBusy        SessionState = "busy"        // Command in progress
+	SessionStatePaused      SessionState = "paused"      // Awaiting approval
+	SessionStateStopping    SessionState = "stopping"    // Legacy: alias for terminating
+	SessionStateTerminating SessionState = "terminating" // Graceful shutdown
+	SessionStateCompleted   SessionState = "completed"   // Normal exit
+	SessionStateFailed      SessionState = "failed"      // Error/crash
+	SessionStateTimedOut    SessionState = "timed_out"   // Exceeded timeout
+	SessionStateKilled      SessionState = "killed"      // Force terminated
 )
+
+// IsTerminal returns true if the session state is final.
+func (s SessionState) IsTerminal() bool {
+	switch s {
+	case SessionStateCompleted, SessionStateFailed, SessionStateTimedOut, SessionStateKilled:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsActive returns true if the session is currently active.
+func (s SessionState) IsActive() bool {
+	switch s {
+	case SessionStateStarting, SessionStateCreating, SessionStateRunning, SessionStateReady, SessionStateBusy:
+		return true
+	default:
+		return false
+	}
+}
 
 type Session struct {
 	ID        string       `json:"id"`
@@ -19,6 +48,46 @@ type Session struct {
 	Policy    string       `json:"policy"`
 
 	Cwd string `json:"cwd"`
+}
+
+// SessionStats tracks metrics for a session.
+type SessionStats struct {
+	// File operations
+	FileReads    int64 `json:"file_reads"`
+	FileWrites   int64 `json:"file_writes"`
+	BytesRead    int64 `json:"bytes_read"`
+	BytesWritten int64 `json:"bytes_written"`
+
+	// Network operations
+	NetworkConns   int64 `json:"network_conns"`
+	NetworkBytesTx int64 `json:"network_bytes_tx"`
+	NetworkBytesRx int64 `json:"network_bytes_rx"`
+	DNSQueries     int64 `json:"dns_queries"`
+
+	// Environment operations
+	EnvReads int64 `json:"env_reads"`
+
+	// Policy enforcement
+	BlockedOps       int64 `json:"blocked_ops"`
+	ApprovalsPending int   `json:"approvals_pending"`
+	ApprovalsGranted int   `json:"approvals_granted"`
+	ApprovalsDenied  int   `json:"approvals_denied"`
+
+	// Resource usage
+	CPUTimeMs    int64 `json:"cpu_time_ms"`
+	PeakMemoryMB int64 `json:"peak_memory_mb"`
+
+	// Commands
+	CommandsExecuted int64 `json:"commands_executed"`
+	CommandsFailed   int64 `json:"commands_failed"`
+}
+
+// SessionResult contains the final result of a session.
+type SessionResult struct {
+	ExitCode int           `json:"exit_code"`
+	Duration time.Duration `json:"duration"`
+	Stats    SessionStats  `json:"stats"`
+	Error    string        `json:"error,omitempty"`
 }
 
 type CreateSessionRequest struct {

@@ -38,6 +38,10 @@ type Session struct {
 	Env     map[string]string
 	History []string
 
+	// Lifecycle fields
+	stats   types.SessionStats
+	endedAt *time.Time
+
 	currentCommandID string
 	currentProcPID   int
 	execMu           sync.Mutex
@@ -636,4 +640,81 @@ func (m *Manager) ReapExpired(now time.Time, sessionTimeout, idleTimeout time.Du
 		}
 	}
 	return reaped
+}
+
+// Stats returns a copy of the session statistics.
+func (s *Session) Stats() types.SessionStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stats
+}
+
+// UpdateStats updates the session statistics using the provided function.
+func (s *Session) UpdateStats(fn func(*types.SessionStats)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn(&s.stats)
+}
+
+// IncrementFileReads increments the file read counter.
+func (s *Session) IncrementFileReads(bytes int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stats.FileReads++
+	s.stats.BytesRead += bytes
+}
+
+// IncrementFileWrites increments the file write counter.
+func (s *Session) IncrementFileWrites(bytes int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stats.FileWrites++
+	s.stats.BytesWritten += bytes
+}
+
+// IncrementNetworkConns increments the network connection counter.
+func (s *Session) IncrementNetworkConns() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stats.NetworkConns++
+}
+
+// IncrementBlockedOps increments the blocked operations counter.
+func (s *Session) IncrementBlockedOps() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stats.BlockedOps++
+}
+
+// IncrementCommandsExecuted increments the commands executed counter.
+func (s *Session) IncrementCommandsExecuted() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stats.CommandsExecuted++
+}
+
+// IncrementCommandsFailed increments the failed commands counter.
+func (s *Session) IncrementCommandsFailed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stats.CommandsFailed++
+}
+
+// EndedAt returns when the session ended, or nil if still running.
+func (s *Session) EndedAt() *time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.endedAt
+}
+
+// cleanup releases all resources associated with the session.
+func (s *Session) cleanup() {
+	// Close network namespace
+	s.CloseNetNS()
+
+	// Close proxy
+	s.CloseProxy()
+
+	// Unmount workspace
+	s.UnmountWorkspace()
 }
