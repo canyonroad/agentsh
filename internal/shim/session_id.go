@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"golang.org/x/sys/unix"
 )
 
 type ResolveSessionIDOptions struct {
@@ -67,11 +66,7 @@ func ResolveSessionID(opts ResolveSessionIDOptions) (string, string, error) {
 
 	baseDirs := opts.BaseDirs
 	if len(baseDirs) == 0 {
-		baseDirs = []string{
-			"/run/agentsh",
-			"/tmp/agentsh",
-			filepath.Join(workspaceRoot, ".agentsh"),
-		}
+		baseDirs = defaultSessionBaseDirs(workspaceRoot)
 	}
 
 	key := "global"
@@ -178,10 +173,10 @@ func readOrCreateSessionIDFile(path string) (string, error) {
 	}
 	defer f.Close()
 
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+	if err := lockFileExclusive(f); err != nil {
 		return "", err
 	}
-	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
+	defer func() { _ = unlockFile(f) }()
 
 	b, _ := os.ReadFile(path)
 	if id := strings.TrimSpace(string(b)); id != "" {
