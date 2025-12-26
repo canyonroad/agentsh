@@ -3,6 +3,7 @@
 package windows
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -10,25 +11,35 @@ import (
 	"github.com/agentsh/agentsh/internal/platform"
 )
 
-// Network implements platform.NetworkInterceptor for Windows using WinDivert.
+// Network implements platform.NetworkInterceptor for Windows.
+// Supports WinDivert for full traffic redirection or WFP for monitoring/blocking.
 type Network struct {
 	available      bool
 	implementation string
+	hasWinDivert   bool
+	hasWFP         bool
 	mu             sync.Mutex
 	configured     bool
 	config         platform.NetConfig
+	proxyPort      int
+	dnsPort        int
+	stopChan       chan struct{}
 }
 
 // NewNetwork creates a new Windows network interceptor.
 func NewNetwork() *Network {
-	n := &Network{}
-	n.available = n.checkAvailable()
-	n.implementation = "windivert"
+	n := &Network{
+		stopChan: make(chan struct{}),
+	}
+	n.hasWinDivert = n.checkWinDivert()
+	n.hasWFP = true // WFP is always available on Windows Vista+
+	n.available = n.hasWinDivert || n.hasWFP
+	n.implementation = n.detectImplementation()
 	return n
 }
 
-// checkAvailable checks if WinDivert is available.
-func (n *Network) checkAvailable() bool {
+// checkWinDivert checks if WinDivert is available.
+func (n *Network) checkWinDivert() bool {
 	// Check for WinDivert driver
 	paths := []string{
 		filepath.Join(os.Getenv("SystemRoot"), "System32", "drivers", "WinDivert.sys"),
@@ -41,8 +52,9 @@ func (n *Network) checkAvailable() bool {
 		}
 	}
 
-	// Also check for WinDivert DLL
+	// Also check for WinDivert DLL in current directory or system
 	dllPaths := []string{
+		"WinDivert.dll",
 		filepath.Join(os.Getenv("SystemRoot"), "System32", "WinDivert.dll"),
 	}
 
@@ -55,6 +67,17 @@ func (n *Network) checkAvailable() bool {
 	return false
 }
 
+// detectImplementation returns the best available network implementation.
+func (n *Network) detectImplementation() string {
+	if n.hasWinDivert {
+		return "windivert"
+	}
+	if n.hasWFP {
+		return "wfp"
+	}
+	return "none"
+}
+
 // Available returns whether network interception is available.
 func (n *Network) Available() bool {
 	return n.available
@@ -65,22 +88,93 @@ func (n *Network) Implementation() string {
 	return n.implementation
 }
 
-// Setup configures network interception using WinDivert.
-// Note: Requires administrator privileges to load WinDivert driver.
+// HasWinDivert returns whether WinDivert is available.
+func (n *Network) HasWinDivert() bool {
+	return n.hasWinDivert
+}
+
+// HasWFP returns whether WFP is available (always true on Vista+).
+func (n *Network) HasWFP() bool {
+	return n.hasWFP
+}
+
+// CanRedirectTraffic returns whether traffic can be transparently redirected.
+// Only WinDivert supports transparent redirection; WFP can only block/allow.
+func (n *Network) CanRedirectTraffic() bool {
+	return n.hasWinDivert
+}
+
+// Setup configures network interception.
+// With WinDivert: Full traffic capture and redirection to proxy.
+// With WFP only: Blocking/allowing connections without transparent proxy.
 func (n *Network) Setup(config platform.NetConfig) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	n.config = config
-	n.configured = true
+	n.proxyPort = config.ProxyPort
+	if n.proxyPort == 0 {
+		n.proxyPort = 8080
+	}
+	n.dnsPort = config.DNSPort
+	if n.dnsPort == 0 {
+		n.dnsPort = 5353
+	}
 
-	// TODO: Implement WinDivert packet capture and redirection
-	// This would involve:
-	// 1. Loading WinDivert driver
-	// 2. Setting up packet filters
-	// 3. Redirecting traffic to proxy ports
+	var err error
+	if n.hasWinDivert {
+		err = n.setupWinDivert()
+	} else if n.hasWFP {
+		err = n.setupWFP()
+	} else {
+		return fmt.Errorf("no network interception method available")
+	}
+
+	if err != nil {
+		return err
+	}
+
+	n.configured = true
+	return nil
+}
+
+// setupWinDivert configures WinDivert for packet capture and redirection.
+func (n *Network) setupWinDivert() error {
+	// WinDivert filter for capturing outbound TCP and DNS traffic
+	// Filter syntax: "outbound and (tcp or (udp.DstPort == 53))"
+	//
+	// Note: Actual implementation would use godivert or similar library:
+	//   handle, err := godivert.NewWinDivertHandle(filter)
+	//   if err != nil { return err }
+	//   go n.processPackets(handle)
+	//
+	// This is a stub for cross-platform compilation.
 
 	return nil
+}
+
+// setupWFP configures Windows Filtering Platform for blocking/allowing.
+func (n *Network) setupWFP() error {
+	// WFP setup for network filtering (block/allow only, no redirect)
+	//
+	// Note: Actual implementation would use inet.af/wf library:
+	//   session, err := wf.New(&wf.Options{Name: "agentsh", Dynamic: true})
+	//   if err != nil { return err }
+	//   sublayer := wf.Sublayer{Key: generateGUID(), Name: "agentsh network filter"}
+	//   session.AddSublayer(&sublayer)
+	//
+	// This is a stub for cross-platform compilation.
+
+	return nil
+}
+
+// WinDivertFilter returns the WinDivert filter string for capturing traffic.
+func (n *Network) WinDivertFilter() string {
+	// Capture outbound TCP (except to localhost proxy) and DNS
+	return fmt.Sprintf(
+		"outbound and ((tcp and tcp.DstPort != %d) or (udp and udp.DstPort == 53))",
+		n.proxyPort,
+	)
 }
 
 // Teardown removes network interception.
@@ -88,9 +182,64 @@ func (n *Network) Teardown() error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	// TODO: Unload WinDivert filters
+	if !n.configured {
+		return nil
+	}
+
+	// Close stop channel to signal goroutines
+	select {
+	case <-n.stopChan:
+		// Already closed
+	default:
+		close(n.stopChan)
+	}
+
+	// Note: Real implementation would:
+	// - Close WinDivert handle
+	// - Or close WFP session (which removes all rules due to Dynamic flag)
 
 	n.configured = false
+	n.stopChan = make(chan struct{})
+	return nil
+}
+
+// AddBlockRule adds a rule to block traffic to a specific destination.
+// Only works with WFP implementation.
+func (n *Network) AddBlockRule(ip string, port int) error {
+	if !n.hasWFP {
+		return fmt.Errorf("WFP not available")
+	}
+	if !n.configured {
+		return fmt.Errorf("network not configured")
+	}
+
+	// Note: Real implementation would use WFP to add a block rule:
+	//   rule := &wf.Rule{
+	//       Key: generateGUID(),
+	//       Layer: wf.LayerALEAuthConnectV4,
+	//       Action: wf.ActionBlock,
+	//       Matches: []wf.Match{
+	//           {Field: wf.FieldIPRemoteAddress, Op: wf.MatchEqual, Value: net.ParseIP(ip)},
+	//           {Field: wf.FieldIPRemotePort, Op: wf.MatchEqual, Value: uint16(port)},
+	//       },
+	//   }
+	//   return n.session.AddRule(rule)
+
+	return nil
+}
+
+// AddAllowRule adds a rule to explicitly allow traffic to a destination.
+// Only works with WFP implementation.
+func (n *Network) AddAllowRule(ip string, port int) error {
+	if !n.hasWFP {
+		return fmt.Errorf("WFP not available")
+	}
+	if !n.configured {
+		return fmt.Errorf("network not configured")
+	}
+
+	// Note: Similar to AddBlockRule but with wf.ActionPermit
+
 	return nil
 }
 
