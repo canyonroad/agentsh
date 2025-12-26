@@ -23,6 +23,7 @@ func init() {
 // Platform implements platform.Platform for macOS.
 type Platform struct {
 	config      platform.Config
+	permissions *Permissions
 	fs          *Filesystem
 	net         *Network
 	sandbox     *SandboxManager
@@ -34,13 +35,14 @@ type Platform struct {
 // NewPlatform creates a new macOS platform.
 func NewPlatform() (platform.Platform, error) {
 	p := &Platform{}
+	p.permissions = DetectPermissions()
 	p.caps = p.detectCapabilities()
 	return p, nil
 }
 
-// Name returns the platform identifier.
+// Name returns the platform identifier including tier.
 func (p *Platform) Name() string {
-	return "darwin"
+	return fmt.Sprintf("darwin-%s", p.permissions.Tier.String())
 }
 
 // Capabilities returns what this platform supports.
@@ -48,19 +50,16 @@ func (p *Platform) Capabilities() platform.Capabilities {
 	return p.caps
 }
 
+// Permissions returns the detected permission state.
+func (p *Platform) Permissions() *Permissions {
+	return p.permissions
+}
+
 // detectCapabilities checks what's available on this macOS system.
 func (p *Platform) detectCapabilities() platform.Capabilities {
+	tier := p.permissions.Tier
+
 	caps := platform.Capabilities{
-		// Filesystem - check for FUSE-T
-		HasFUSE:            p.checkFuseT(),
-		FUSEImplementation: p.detectFuseImplementation(),
-
-		// Network - pf is always available on macOS
-		HasNetworkIntercept:   p.checkPf(),
-		NetworkImplementation: "pf",
-		CanRedirectTraffic:    true,
-		CanInspectTLS:         true,
-
 		// Isolation - macOS lacks Linux namespaces
 		HasMountNamespace:   false,
 		HasNetworkNamespace: false,
@@ -79,85 +78,51 @@ func (p *Platform) detectCapabilities() platform.Capabilities {
 		CanLimitNetworkBW:    false,
 		CanLimitProcessCount: false,
 
-		// macOS-specific frameworks (require entitlements)
-		HasEndpointSecurity: p.checkEndpointSecurity(),
-		HasNetworkExtension: p.checkNetworkExtension(),
+		// macOS-specific frameworks
+		HasEndpointSecurity: p.permissions.HasEndpointSecurity,
+		HasNetworkExtension: p.permissions.HasNetworkExtension,
+	}
+
+	// Set capabilities based on tier
+	switch tier {
+	case TierEnterprise:
+		caps.HasFUSE = true
+		caps.FUSEImplementation = "endpoint-security"
+		caps.HasNetworkIntercept = true
+		caps.NetworkImplementation = "network-extension"
+		caps.CanRedirectTraffic = true
+		caps.CanInspectTLS = true
+
+	case TierFull:
+		caps.HasFUSE = true
+		caps.FUSEImplementation = "fuse-t"
+		caps.HasNetworkIntercept = true
+		caps.NetworkImplementation = "pf"
+		caps.CanRedirectTraffic = true
+		caps.CanInspectTLS = true
+
+	case TierNetworkOnly:
+		caps.HasFUSE = false
+		caps.FUSEImplementation = "fsevents-observe"
+		caps.HasNetworkIntercept = true
+		caps.NetworkImplementation = "pf"
+		caps.CanRedirectTraffic = true
+		caps.CanInspectTLS = true
+
+	case TierMonitorOnly:
+		caps.HasFUSE = false
+		caps.FUSEImplementation = "fsevents-observe"
+		caps.HasNetworkIntercept = false
+		caps.NetworkImplementation = "pcap-observe"
+		caps.CanRedirectTraffic = false
+		caps.CanInspectTLS = false
+
+	case TierMinimal:
+		caps.HasFUSE = false
+		caps.HasNetworkIntercept = false
 	}
 
 	return caps
-}
-
-// checkFuseT checks if FUSE-T is installed.
-func (p *Platform) checkFuseT() bool {
-	// FUSE-T installation paths
-	paths := []string{
-		"/usr/local/lib/libfuse-t.dylib",
-		"/opt/homebrew/lib/libfuse-t.dylib",
-		"/Library/Frameworks/FUSE-T.framework",
-	}
-
-	for _, path := range paths {
-		if _, err := os.Stat(path); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
-// detectFuseImplementation returns the FUSE implementation name.
-func (p *Platform) detectFuseImplementation() string {
-	// Check for FUSE-T first (preferred)
-	fuseTpaths := []string{
-		"/usr/local/lib/libfuse-t.dylib",
-		"/opt/homebrew/lib/libfuse-t.dylib",
-		"/Library/Frameworks/FUSE-T.framework",
-	}
-	for _, path := range fuseTpaths {
-		if _, err := os.Stat(path); err == nil {
-			return "fuse-t"
-		}
-	}
-
-	// Check for macFUSE (deprecated but may be present)
-	macFUSEpaths := []string{
-		"/Library/Filesystems/macfuse.fs",
-		"/Library/Frameworks/macFUSE.framework",
-	}
-	for _, path := range macFUSEpaths {
-		if _, err := os.Stat(path); err == nil {
-			return "macfuse"
-		}
-	}
-
-	return ""
-}
-
-// checkPf checks if pf (packet filter) is available.
-func (p *Platform) checkPf() bool {
-	// pf is always available on macOS, but we need root to use it
-	// Check if pfctl exists
-	_, err := exec.LookPath("pfctl")
-	return err == nil
-}
-
-// checkEndpointSecurity checks if Endpoint Security framework is usable.
-// Note: Actually using it requires entitlements signed by Apple.
-func (p *Platform) checkEndpointSecurity() bool {
-	// Check if the framework exists
-	if _, err := os.Stat("/System/Library/Frameworks/EndpointSecurity.framework"); err == nil {
-		return true
-	}
-	return false
-}
-
-// checkNetworkExtension checks if Network Extension framework is usable.
-// Note: Actually using it requires entitlements signed by Apple.
-func (p *Platform) checkNetworkExtension() bool {
-	// Check if the framework exists
-	if _, err := os.Stat("/System/Library/Frameworks/NetworkExtension.framework"); err == nil {
-		return true
-	}
-	return false
 }
 
 // Filesystem returns the filesystem interceptor.
@@ -199,11 +164,22 @@ func (p *Platform) Initialize(ctx context.Context, config platform.Config) error
 	}
 	p.config = config
 	p.initialized = true
+
+	// Log permission status
+	fmt.Fprintln(os.Stderr, p.permissions.LogStatus())
+
 	return nil
 }
 
 // Shutdown cleans up platform resources.
 func (p *Platform) Shutdown(ctx context.Context) error {
+	// Teardown network if configured
+	if p.net != nil && p.net.configured {
+		if err := p.net.Teardown(); err != nil {
+			return fmt.Errorf("network teardown: %w", err)
+		}
+	}
+
 	p.initialized = false
 	return nil
 }
