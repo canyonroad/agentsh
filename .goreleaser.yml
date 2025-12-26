@@ -74,7 +74,9 @@ archives:
       - LICENSE
       - config.yml
       - default-policy.yml
-      - build/envshim/linux_{{ .Arch }}/libenvshim.so
+      - src: build/envshim/linux_{{ .Arch }}/*
+        dst: .
+        strip_parent: true
 
   - id: agentsh-darwin
     ids:
@@ -140,11 +142,9 @@ nfpms:
         dst: /usr/share/doc/agentsh/LICENSE
         file_info:
           mode: 0644
-      # Envshim library (Linux only)
-      - src: build/envshim/linux_{{ .Arch }}/libenvshim.so
-        dst: /usr/lib/agentsh/libenvshim.so
-        file_info:
-          mode: 0644
+      # Envshim library (Linux only) - uses glob to skip if not built
+      - src: build/envshim/linux_{{ .Arch }}/*.so
+        dst: /usr/lib/agentsh/
       # Create directories
       - dst: /etc/agentsh
         type: dir
