@@ -67,9 +67,9 @@ func (m *FSEventsMonitor) RemoveWatch(path string) error {
 		return nil // Not watching
 	}
 
-	if err := m.watcher.Remove(path); err != nil {
-		return fmt.Errorf("failed to remove watch for %s: %w", path, err)
-	}
+	// Try to remove from fsnotify, but don't fail if it errors
+	// (the watch may not have been properly registered due to macOS quirks)
+	_ = m.watcher.Remove(path)
 
 	delete(m.watchPaths, path)
 	return nil
