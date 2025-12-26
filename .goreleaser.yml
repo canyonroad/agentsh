@@ -162,3 +162,64 @@ nfpms:
 release:
   draft: false
   prerelease: auto
+
+brews:
+  - name: agentsh
+    ids:
+      - agentsh-darwin
+      - shim-darwin
+    # Repository to push the formula to
+    # Change this to your homebrew-tap repo
+    repository:
+      owner: agentsh
+      name: homebrew-tap
+      branch: main
+      # Set to true to push (requires HOMEBREW_TAP_GITHUB_TOKEN)
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    # Skip if no token (allows local builds without pushing)
+    skip_upload: auto
+    # Formula metadata
+    homepage: "https://github.com/agentsh/agentsh"
+    description: "Secure sandboxed shell for AI agents"
+    license: "MIT"
+    # Installation
+    install: |
+      bin.install "agentsh"
+      bin.install "agentsh-shell-shim"
+
+      # Install completions
+      generate_completions_from_executable(bin/"agentsh", "completion")
+
+      # Install default config
+      (etc/"agentsh").mkpath
+      (etc/"agentsh/config.yaml").write <<~EOS
+        # AgentSH Configuration
+        # See: https://github.com/agentsh/agentsh
+
+        server:
+          http:
+            addr: "127.0.0.1:8080"
+          grpc:
+            enabled: true
+            addr: "127.0.0.1:9090"
+
+        auth:
+          type: "none"
+
+        logging:
+          level: "info"
+          format: "json"
+
+        sandbox:
+          enabled: true
+          allow_degraded: true
+      EOS
+    # Caveats shown after installation
+    caveats: |
+      To start using agentsh:
+        agentsh server &
+        agentsh session create --workspace .
+
+      Configuration file: #{etc}/agentsh/config.yaml
+    test: |
+      system "#{bin}/agentsh", "--version"
