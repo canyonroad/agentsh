@@ -54,13 +54,10 @@ func restorePlatformMetadata(path string, entry *Entry) error {
 
 // getSecurityDescriptor retrieves the security descriptor for a file.
 func getSecurityDescriptor(path string) ([]byte, error) {
-	var sd *windows.SECURITY_DESCRIPTOR
-	err := windows.GetNamedSecurityInfo(
+	sd, err := windows.GetNamedSecurityInfo(
 		path,
 		windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION,
-		nil, nil, nil, nil,
-		&sd,
 	)
 	if err != nil {
 		return nil, err

@@ -34,9 +34,52 @@ type jobObjectCpuRateControlInformationStruct struct {
 	CpuRate      uint32
 }
 
+// JOBOBJECT_BASIC_ACCOUNTING_INFORMATION is not in x/sys/windows
+type jobobjectBasicAccountingInformation struct {
+	TotalUserTime             int64
+	TotalKernelTime           int64
+	ThisPeriodTotalUserTime   int64
+	ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount       uint32
+	TotalProcesses            uint32
+	ActiveProcesses           uint32
+	TotalTerminatedProcesses  uint32
+}
+
 type jobObjectBasicAndIoAccountingInformationStruct struct {
-	BasicInfo windows.JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
+	BasicInfo jobobjectBasicAccountingInformation
 	IoInfo    windows.IO_COUNTERS
+}
+
+// PROCESS_MEMORY_COUNTERS is not in x/sys/windows
+type processMemoryCounters struct {
+	CB                         uint32
+	PageFaultCount             uint32
+	PeakWorkingSetSize         uintptr
+	WorkingSetSize             uintptr
+	QuotaPeakPagedPoolUsage    uintptr
+	QuotaPagedPoolUsage        uintptr
+	QuotaPeakNonPagedPoolUsage uintptr
+	QuotaNonPagedPoolUsage     uintptr
+	PagefileUsage              uintptr
+	PeakPagefileUsage          uintptr
+}
+
+var (
+	modpsapi                = windows.NewLazySystemDLL("psapi.dll")
+	procGetProcessMemoryInfo = modpsapi.NewProc("GetProcessMemoryInfo")
+)
+
+func getProcessMemoryInfo(process windows.Handle, memCounters *processMemoryCounters, cb uint32) error {
+	ret, _, err := procGetProcessMemoryInfo.Call(
+		uintptr(process),
+		uintptr(unsafe.Pointer(memCounters)),
+		uintptr(cb),
+	)
+	if ret == 0 {
+		return err
+	}
+	return nil
 }
 
 // NewWindowsLimiter creates a new Windows resource limiter.
@@ -83,7 +126,7 @@ func (l *WindowsLimiter) Apply(pid int, limits ResourceLimits) error {
 	}
 
 	// Set the limits
-	err = windows.SetInformationJobObject(
+	_, err = windows.SetInformationJobObject(
 		job,
 		jobObjectExtendedLimitInformation,
 		uintptr(unsafe.Pointer(&extendedInfo)),
@@ -100,7 +143,7 @@ func (l *WindowsLimiter) Apply(pid int, limits ResourceLimits) error {
 		cpuRateInfo.ControlFlags = jobObjectCpuRateControlEnable | jobObjectCpuRateControlHardCap
 		cpuRateInfo.CpuRate = uint32(limits.CPUQuotaPercent * 100) // In hundredths of percent
 
-		_ = windows.SetInformationJobObject(
+		_, _ = windows.SetInformationJobObject(
 			job,
 			jobObjectCpuRateControlInformation,
 			uintptr(unsafe.Pointer(&cpuRateInfo)),
@@ -165,8 +208,9 @@ func (l *WindowsLimiter) Usage(pid int) (*ResourceUsage, error) {
 	process, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION, false, uint32(pid))
 	if err == nil {
 		defer windows.CloseHandle(process)
-		var memCounters windows.PROCESS_MEMORY_COUNTERS
-		if err := windows.GetProcessMemoryInfo(process, &memCounters, uint32(unsafe.Sizeof(memCounters))); err == nil {
+		var memCounters processMemoryCounters
+		memCounters.CB = uint32(unsafe.Sizeof(memCounters))
+		if err := getProcessMemoryInfo(process, &memCounters, memCounters.CB); err == nil {
 			usage.MemoryMB = int64(memCounters.WorkingSetSize) / 1024 / 1024
 		}
 	}
