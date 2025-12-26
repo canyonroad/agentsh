@@ -167,6 +167,21 @@ func (c *Client) ResolveApproval(ctx context.Context, id string, decision string
 	return c.doJSON(ctx, http.MethodPost, "/api/v1/approvals/"+url.PathEscape(id), nil, body, nil)
 }
 
+func (c *Client) PolicyTest(ctx context.Context, sessionID, operation, path string) (map[string]any, error) {
+	body := map[string]any{
+		"operation": operation,
+		"path":      path,
+	}
+	if sessionID != "" {
+		body["session_id"] = sessionID
+	}
+	var out map[string]any
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/policy/test", nil, body, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *Client) StreamSessionEvents(ctx context.Context, sessionID string) (io.ReadCloser, error) {
 	u := c.baseURL + "/api/v1/sessions/" + url.PathEscape(sessionID) + "/events"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)

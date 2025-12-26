@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -147,6 +148,9 @@ func (a *App) Router() http.Handler {
 			r.Delete("/policies/{policyId}", a.deletePolicy)
 			r.Post("/policies/validate", a.validatePolicy)
 		})
+
+		// Policy test endpoint (for debugging)
+		r.Post("/policy/test", a.policyTest)
 	})
 
 	return r
@@ -1021,4 +1025,84 @@ func writeText(w http.ResponseWriter, status int, s string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(s))
+}
+
+// policyTest evaluates a hypothetical operation against the policy engine.
+func (a *App) policyTest(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"session_id"`
+		Operation string `json:"operation"`
+		Path      string `json:"path"`
+	}
+	if ok := decodeJSON(w, r, &req, "invalid json"); !ok {
+		return
+	}
+
+	if req.Operation == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "operation is required"})
+		return
+	}
+	if req.Path == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "path is required"})
+		return
+	}
+
+	// Use session's policy if session_id provided, otherwise use default
+	// Note: Currently all sessions use the same policy engine from the app
+	engine := a.policy
+
+	if engine == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "policy engine not available"})
+		return
+	}
+
+	var decision policy.Decision
+	op := strings.ToLower(req.Operation)
+
+	switch {
+	case strings.HasPrefix(op, "file_") || op == "read" || op == "write" || op == "delete" || op == "create":
+		// Map common operation names
+		opName := op
+		if strings.HasPrefix(op, "file_") {
+			opName = strings.TrimPrefix(op, "file_")
+		}
+		decision = engine.CheckFile(req.Path, opName)
+
+	case strings.HasPrefix(op, "net_") || op == "connect":
+		// Parse host:port from path
+		host, portStr, err := net.SplitHostPort(req.Path)
+		if err != nil {
+			host = req.Path
+			portStr = "443" // default to HTTPS
+		}
+		port := 443
+		if p, err := strconv.Atoi(portStr); err == nil {
+			port = p
+		}
+		decision = engine.CheckNetwork(host, port)
+
+	case op == "exec" || op == "command":
+		// Path is the command, no args for testing
+		decision = engine.CheckCommand(req.Path, nil)
+
+	default:
+		// Try as file operation by default
+		decision = engine.CheckFile(req.Path, op)
+	}
+
+	result := map[string]any{
+		"decision":           string(decision.EffectiveDecision),
+		"policy_decision":    string(decision.PolicyDecision),
+		"rule":               decision.Rule,
+		"reason":             decision.Message,
+	}
+
+	if decision.Redirect != nil {
+		result["redirect"] = map[string]any{
+			"command": decision.Redirect.Command,
+			"args":    decision.Redirect.Args,
+		}
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }

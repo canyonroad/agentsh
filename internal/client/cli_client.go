@@ -30,6 +30,8 @@ type CLIClient interface {
 
 	ListApprovals(ctx context.Context) ([]map[string]any, error)
 	ResolveApproval(ctx context.Context, id string, decision string, reason string) error
+
+	PolicyTest(ctx context.Context, sessionID, operation, path string) (map[string]any, error)
 }
 
 type CLIOptions struct {
