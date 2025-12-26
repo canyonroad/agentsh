@@ -136,6 +136,17 @@ func (a *App) Router() http.Handler {
 			r.Get("/approvals", a.listApprovals)
 			r.Post("/approvals/{id}", a.resolveApproval)
 		})
+
+		// Policy management (admin only)
+		r.Group(func(r chi.Router) {
+			r.Use(a.requireRoles("admin"))
+			r.Get("/policies", a.listPolicies)
+			r.Post("/policies", a.createPolicy)
+			r.Get("/policies/{policyId}", a.getPolicy)
+			r.Put("/policies/{policyId}", a.updatePolicy)
+			r.Delete("/policies/{policyId}", a.deletePolicy)
+			r.Post("/policies/validate", a.validatePolicy)
+		})
 	})
 
 	return r
