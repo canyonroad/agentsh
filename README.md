@@ -4,7 +4,7 @@
 
 agentsh sits *under* your agent/tooling—intercepting **file**, **network**, and **process** activity (including subprocess trees), enforcing the policy you define, and emitting **structured audit events**.
 
-> **Platform note:** Linux today (native or containers). macOS and Windows builds are planned; until then, run agentsh inside a Linux container/VM on those platforms.
+> **Platform note:** Linux today (native or containers). macOS and Windows support available with varying capability levels - see the [Platform Comparison Matrix](docs/platform-comparison.md) for details.
 
 ---
 
@@ -325,6 +325,7 @@ You already have a default policy (`configs/policies/default.yaml`). These opini
 * Config template: [`configs/server-config.yaml`](configs/server-config.yaml)
 * Default policy: [`configs/policies/default.yaml`](configs/policies/default.yaml)
 * Example Dockerfile (with shim): [`Dockerfile.example`](Dockerfile.example)
+* **Platform comparison:** [`docs/platform-comparison.md`](docs/platform-comparison.md) - feature support, security scores, performance by platform
 * Environment variables (all `AGENTSH_*` overrides, auto-start toggles, transport selection): [`docs/spec.md` §15.3 "Environment Variables"](docs/spec.md#153-environment-variables)
 * Architecture & data flow (FUSE + policy engine + API): inline comments in [`configs/server-config.yaml`](configs/server-config.yaml) and [`internal/netmonitor`](internal/netmonitor)
 * CLI help: `agentsh --help`, `agentsh exec --help`, `agentsh shim --help`
