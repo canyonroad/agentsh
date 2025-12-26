@@ -100,25 +100,64 @@ nfpms:
     formats:
       - deb
       - rpm
-      - apk
+      - archlinux
     bindir: /usr/bin
+    vendor: AgentSH
     homepage: https://github.com/agentsh/agentsh
-    maintainer: agentsh maintainers <maintainers@example.com>
-    description: Secure agent shell (agentsh) and a shell shim for container compatibility.
-    license: Apache-2.0
+    maintainer: AgentSH Team <team@agentsh.dev>
+    description: |
+      Secure sandboxed shell for AI agents.
+      Provides policy-based access control for file, network, and command operations.
+    license: MIT
+    section: utils
+    priority: optional
     contents:
-      - src: config.yml
+      # Configuration
+      - src: packaging/config.yaml
         dst: /etc/agentsh/config.yaml
-        type: config
-      - src: default-policy.yml
-        dst: /etc/agentsh/default-policy.yml
-        type: config
-      - src: build/envshim/linux_amd64/libenvshim.so
+        type: config|noreplace
+        file_info:
+          mode: 0644
+      # Shell completions
+      - src: packaging/completions/agentsh.bash
+        dst: /usr/share/bash-completion/completions/agentsh
+        file_info:
+          mode: 0644
+      - src: packaging/completions/agentsh.zsh
+        dst: /usr/share/zsh/site-functions/_agentsh
+        file_info:
+          mode: 0644
+      - src: packaging/completions/agentsh.fish
+        dst: /usr/share/fish/vendor_completions.d/agentsh.fish
+        file_info:
+          mode: 0644
+      # Documentation
+      - src: README.md
+        dst: /usr/share/doc/agentsh/README.md
+        file_info:
+          mode: 0644
+      - src: LICENSE
+        dst: /usr/share/doc/agentsh/LICENSE
+        file_info:
+          mode: 0644
+      # Envshim library (Linux only)
+      - src: build/envshim/linux_{{ .Arch }}/libenvshim.so
         dst: /usr/lib/agentsh/libenvshim.so
         file_info:
           mode: 0644
-    # Important: packages do NOT replace /bin/sh automatically. Use the explicit shim installer:
-    #   agentsh shim install-shell --root / --shim /usr/bin/agentsh-shell-shim --i-understand-this-modifies-the-host
+      # Create directories
+      - dst: /etc/agentsh
+        type: dir
+        file_info:
+          mode: 0755
+      - dst: /usr/lib/agentsh
+        type: dir
+        file_info:
+          mode: 0755
+    rpm:
+      group: Applications/System
+    archlinux:
+      pkgbase: agentsh
 
 release:
   draft: false

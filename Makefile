@@ -1,5 +1,6 @@
 .PHONY: build build-shim test lint clean proto
 .PHONY: smoke
+.PHONY: completions package-snapshot package-release
 
 VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
 COMMIT := $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
@@ -35,4 +36,19 @@ lint:
 	@echo "No linter configured"
 
 clean:
-	rm -rf bin coverage.out
+	rm -rf bin coverage.out dist
+
+# Generate shell completions
+completions: build
+	mkdir -p packaging/completions
+	bin/agentsh completion bash > packaging/completions/agentsh.bash
+	bin/agentsh completion zsh > packaging/completions/agentsh.zsh
+	bin/agentsh completion fish > packaging/completions/agentsh.fish
+
+# Build packages locally using goreleaser (snapshot mode, no publish)
+package-snapshot: completions
+	goreleaser release --snapshot --clean --skip=publish
+
+# Build release packages (requires GITHUB_TOKEN, usually run by CI)
+package-release:
+	goreleaser release --clean
