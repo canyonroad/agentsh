@@ -176,7 +176,7 @@ homebrew_casks:
       # Use index to safely get env var (empty string if not set)
       token: '{{ index .Env "HOMEBREW_TAP_GITHUB_TOKEN" }}'
     # Skip if no token (allows local builds without pushing)
-    skip_upload: auto
+    skip_upload: true  # Temporarily disabled - no homebrew tap set up yet
     # Cask metadata
     homepage: "https://github.com/agentsh/agentsh"
     description: "Secure sandboxed shell for AI agents"
