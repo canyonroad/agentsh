@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -74,7 +73,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		cmd.Args[0] = req.Argv0
 	}
 	cmd.Dir = workdir
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = getSysProcAttr()
 
 	env, err := buildPolicyEnv(envPol, os.Environ(), s, req.Env)
 	if err != nil {
@@ -110,9 +109,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	pgid := 0
 	if cmd.Process != nil {
 		s.SetCurrentProcessPID(cmd.Process.Pid)
-		if gp, gpErr := syscall.Getpgid(cmd.Process.Pid); gpErr == nil {
-			pgid = gp
-		}
+		pgid = getProcessGroupID(cmd.Process.Pid)
 		if hook != nil {
 			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
 				defer func() { _ = cleanup() }()
@@ -141,21 +138,6 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		return ee.ExitCode(), stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, err
 	}
 	return 127, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, waitErr
-}
-
-func resourcesFromProcessState(ps *os.ProcessState) types.ExecResources {
-	if ps == nil {
-		return types.ExecResources{}
-	}
-	ru, ok := ps.SysUsage().(*syscall.Rusage)
-	if !ok || ru == nil {
-		return types.ExecResources{}
-	}
-	return types.ExecResources{
-		CPUUserMs:    int64(ru.Utime.Sec)*1000 + int64(ru.Utime.Usec)/1000,
-		CPUSystemMs:  int64(ru.Stime.Sec)*1000 + int64(ru.Stime.Usec)/1000,
-		MemoryPeakKB: int64(ru.Maxrss),
-	}
 }
 
 func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error) {
@@ -294,17 +276,6 @@ func maybeAddShimEnv(env []string, pol policy.ResolvedEnvPolicy, cfg *config.Con
 	}
 
 	return out
-}
-
-func killProcessGroup(pgid int) error {
-	if pgid <= 0 {
-		return nil
-	}
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-		fmt.Fprintf(os.Stderr, "exec: failed to kill process group %d: %v\n", pgid, err)
-		return err
-	}
-	return nil
 }
 
 func mergeEnv(base []string, s *session.Session, overrides map[string]string) []string {

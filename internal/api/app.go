@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
@@ -467,11 +466,11 @@ func (a *App) killCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send to process group (negative pid); SIGTERM first, then SIGKILL shortly after.
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	// Send to process group; terminate gracefully first, then forcefully.
+	_ = killProcess(pid)
 	go func() {
 		time.Sleep(2 * time.Second)
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = killProcessHard(pid)
 	}()
 
 	ev := types.Event{

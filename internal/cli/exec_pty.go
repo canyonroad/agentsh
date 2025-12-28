@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/client"
@@ -261,7 +260,7 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 
 	// Forward signals.
 	sigCh := make(chan os.Signal, 16)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGWINCH)
+	signal.Notify(sigCh, signalsToNotify()...)
 	defer signal.Stop(sigCh)
 
 	go func() {
@@ -270,7 +269,7 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 			case <-runCtx.Done():
 				return
 			case sig := <-sigCh:
-				if sig == syscall.SIGWINCH {
+				if isWinchSignal(sig) {
 					if !isTTY {
 						continue
 					}
@@ -278,17 +277,7 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 					_ = send(&ptygrpc.ExecPTYClientMsg{Msg: &ptygrpc.ExecPTYClientMsg_Resize{Resize: &ptygrpc.ExecPTYResize{Rows: uint32(rowsI), Cols: uint32(colsI)}}})
 					continue
 				}
-				name := ""
-				switch sig {
-				case os.Interrupt:
-					name = "SIGINT"
-				case syscall.SIGTERM:
-					name = "SIGTERM"
-				case syscall.SIGHUP:
-					name = "SIGHUP"
-				case syscall.SIGQUIT:
-					name = "SIGQUIT"
-				}
+				name := signalName(sig)
 				if name != "" {
 					_ = send(&ptygrpc.ExecPTYClientMsg{Msg: &ptygrpc.ExecPTYClientMsg_Signal{Signal: &ptygrpc.ExecPTYSignal{Name: name}}})
 				}
@@ -448,7 +437,7 @@ func execPTYWS(ctx context.Context, cfg *clientConfig, sessionID string, req exe
 
 	// Forward signals.
 	sigCh := make(chan os.Signal, 16)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGWINCH)
+	signal.Notify(sigCh, signalsToNotify()...)
 	defer signal.Stop(sigCh)
 	go func() {
 		if !isTTY {
@@ -459,22 +448,12 @@ func execPTYWS(ctx context.Context, cfg *clientConfig, sessionID string, req exe
 			case <-runCtx.Done():
 				return
 			case sig := <-sigCh:
-				if sig == syscall.SIGWINCH {
+				if isWinchSignal(sig) {
 					colsI, rowsI, _ := deps.getSize(int(os.Stdout.Fd()))
 					_ = writeText(ptyWSControl{Type: "resize", Rows: uint16(rowsI), Cols: uint16(colsI)})
 					continue
 				}
-				name := ""
-				switch sig {
-				case os.Interrupt:
-					name = "SIGINT"
-				case syscall.SIGTERM:
-					name = "SIGTERM"
-				case syscall.SIGHUP:
-					name = "SIGHUP"
-				case syscall.SIGQUIT:
-					name = "SIGQUIT"
-				}
+				name := signalName(sig)
 				if name != "" {
 					_ = writeText(ptyWSControl{Type: "signal", Name: name})
 				}

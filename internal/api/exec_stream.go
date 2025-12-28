@@ -5,18 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/agentsh/agentsh/internal/policy"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/go-chi/chi/v5"
@@ -251,7 +250,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		cmd.Args[0] = req.Argv0
 	}
 	cmd.Dir = workdir
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = getSysProcAttr()
 
 	env, _ := buildPolicyEnv(policy.ResolvedEnvPolicy{}, os.Environ(), s, req.Env)
 	cmd.Env = env
@@ -287,9 +286,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	pgid := 0
 	if cmd.Process != nil {
 		s.SetCurrentProcessPID(cmd.Process.Pid)
-		if gp, gpErr := syscall.Getpgid(cmd.Process.Pid); gpErr == nil {
-			pgid = gp
-		}
+		pgid = getProcessGroupID(cmd.Process.Pid)
 		if hook != nil {
 			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
 				defer func() { _ = cleanup() }()

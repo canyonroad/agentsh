@@ -17,7 +17,6 @@ import (
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
-	"golang.org/x/sys/unix"
 )
 
 func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequest) (types.Session, int, error) {
@@ -330,10 +329,8 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 		if wrapperBin == "" {
 			wrapperBin = "agentsh-unixwrap"
 		}
-		sp, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET, 0)
-		if err == nil {
-			parent := os.NewFile(uintptr(sp[0]), "notify-parent")
-			child := os.NewFile(uintptr(sp[1]), "notify-child")
+		sp := createUnixSocketPair()
+		if sp != nil {
 			if wrappedReq.Env == nil {
 				wrappedReq.Env = map[string]string{}
 			}
@@ -342,12 +339,12 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 			wrappedReq.Command = wrapperBin
 			wrappedReq.Args = append([]string{"--", origCommand}, origArgs...)
 			extraCfg = &extraProcConfig{
-				extraFiles: []*os.File{child},
+				extraFiles: []*os.File{sp.child},
 				env:        map[string]string{"AGENTSH_NOTIFY_SOCK_FD": strconv.Itoa(envFD)},
 			}
 			// TODO: receive notify fd from parent (notify-parent) and start ServeNotify; monitor-only for now.
 			// Currently we close the parent side and ignore notifications until enforcement is wired.
-			_ = parent.Close()
+			_ = sp.parent.Close()
 		}
 	}
 
