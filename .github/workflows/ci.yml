@@ -60,8 +60,33 @@ jobs:
       - name: go test (platform packages)
         run: go test ./internal/platform/... ./pkg/...
 
+  test-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Cache Go build dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            .gocache
+            .gomodcache
+            .gopath
+          key: ${{ runner.os }}-go-${{ hashFiles('go.sum') }}
+
+      - name: go build (Windows packages)
+        run: go build ./internal/platform/windows/... ./internal/platform/wsl2/... ./internal/limits/... ./internal/trash/... ./internal/session/... ./internal/pty/... ./internal/process/... ./internal/ipc/... ./internal/shim/...
+
+      - name: go test (Windows platform)
+        run: go test ./internal/platform/windows/... ./internal/limits/... ./internal/trash/... ./internal/session/... ./internal/pty/... ./internal/process/... ./internal/ipc/... ./internal/shim/...
+
   build-matrix:
-    needs: [test-linux, test-macos]
+    needs: [test-linux, test-macos, test-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -100,26 +125,6 @@ jobs:
             export CGO_ENABLED=0
           fi
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=$CGO_ENABLED go build ./...
-
-  # Verify Windows platform package compiles (full project has Unix-only deps)
-  build-windows-platform:
-    needs: [test-linux]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Build Windows platform packages
-        run: |
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./internal/platform/...
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./internal/limits/...
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./internal/trash/...
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./internal/session/...
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./internal/pty/...
 
   integration:
     needs: [test-linux]
