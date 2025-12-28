@@ -33,8 +33,18 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
 
-  # Windows build disabled - project has Unix-only deps (go-fuse, pty, shim)
-  # Platform package exists in internal/platform/windows/ for future use
+  - id: agentsh-windows
+    main: ./cmd/agentsh
+    binary: agentsh
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
 
   - id: shim-linux
     main: ./cmd/agentsh-shell-shim
@@ -84,6 +94,17 @@ archives:
       - shim-darwin
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_darwin_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - config.yml
+      - default-policy.yml
+
+  - id: agentsh-windows
+    ids:
+      - agentsh-windows
+    formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_windows_{{ .Arch }}"
     files:
       - README.md
       - LICENSE
