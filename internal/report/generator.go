@@ -116,9 +116,17 @@ func buildActivitySummary(events []types.Event) ActivitySummary {
 			if ev.Domain != "" {
 				hostCounts[ev.Domain]++
 			}
-		case ev.Type == "command_intercept" || ev.Type == "process_start":
+		case ev.Type == "command_intercept" || ev.Type == "process_start" ||
+			ev.Type == "command_started" || ev.Type == "command_policy":
 			summary.Commands++
-			if cmd, ok := ev.Fields["command"].(string); ok {
+			// Try to extract command from Fields
+			cmd := ""
+			if c, ok := ev.Fields["command"].(string); ok {
+				cmd = c
+			} else if c, ok := ev.Fields["cmd"].(string); ok {
+				cmd = c
+			}
+			if cmd != "" {
 				// Extract base command name
 				parts := strings.Fields(cmd)
 				if len(parts) > 0 {
@@ -221,11 +229,15 @@ func extractRedirects(events []types.Event) []RedirectDetail {
 func extractCommands(events []types.Event) []CommandDetail {
 	var cmds []CommandDetail
 	for _, ev := range events {
-		if ev.Type != "command_intercept" && ev.Type != "process_start" {
+		// Match both old-style and new-style event types
+		if ev.Type != "command_intercept" && ev.Type != "process_start" &&
+			ev.Type != "command_started" && ev.Type != "command_policy" {
 			continue
 		}
 		cmd := ""
 		if c, ok := ev.Fields["command"].(string); ok {
+			cmd = c
+		} else if c, ok := ev.Fields["cmd"].(string); ok {
 			cmd = c
 		}
 		cmds = append(cmds, CommandDetail{
