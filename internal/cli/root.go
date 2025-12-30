@@ -35,6 +35,7 @@ func NewRoot(version string) *cobra.Command {
 	cmd.AddCommand(newShimCmd())
 	cmd.AddCommand(newTrashCmd())
 	cmd.AddCommand(newDebugCmd())
+	cmd.AddCommand(newReportCmd())
 
 	return cmd
 }

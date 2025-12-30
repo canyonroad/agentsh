@@ -296,6 +296,28 @@ Tip: keep a terminal with `--output json` open when testing policies—it makes 
 
 ---
 
+### Session Reports
+
+Generate markdown reports summarizing session activity:
+
+```bash
+# Quick summary
+agentsh report latest --level=summary
+
+# Detailed investigation
+agentsh report <session-id> --level=detailed --output=report.md
+```
+
+Reports include:
+- Decision summary (allowed, blocked, redirected)
+- Automatic findings detection (violations, anomalies)
+- Activity breakdown by category
+- Full event timeline (detailed mode)
+
+See [CI/CD Integration Guide](docs/cicd-integration.md) for pipeline examples.
+
+---
+
 ## Starter policy packs
 
 You already have a default policy (`configs/policies/default.yaml`). These opinionated packs are available as separate files so teams can pick one:

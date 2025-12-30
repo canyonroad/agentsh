@@ -1424,6 +1424,7 @@ agentsh
 │   └── attach  Attach to session (interactive)
 ├── exec        Execute command in session
 ├── events      Stream session events
+├── report      Generate session activity report
 ├── approve     Handle pending approvals
 ├── policy      Manage policies
 │   ├── list    List policies
@@ -1574,8 +1575,86 @@ $ agentsh approve watch
 [approval-3] session-abc wants to delete /workspace/config.json
   Context: rm config.json
   Recent commands: ls, cat config.json
-  Allow? [y/n/d(etails)]: 
+  Allow? [y/n/d(etails)]:
 ```
+
+#### Session Reporting
+
+## agentsh report
+
+Generate a markdown report summarizing session activity.
+
+### Synopsis
+
+```
+agentsh report <session-id|latest> --level=<summary|detailed> [--output=<path>]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `session-id` | Session UUID to report on |
+| `latest` | Use the most recent session |
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--level` | Report detail level: `summary` (1 page) or `detailed` (full investigation) |
+| `--output` | Write report to file instead of stdout |
+| `--direct-db` | Query local database directly (offline mode) |
+| `--db-path` | Path to events database (default: /var/lib/agentsh/events.db) |
+
+### Examples
+
+```bash
+# Quick summary of latest session
+agentsh report latest --level=summary
+
+# Detailed investigation, save to file
+agentsh report abc123-def4-5678 --level=detailed --output=report.md
+
+# Pipe to pager
+agentsh report latest --level=summary | less
+
+# Offline mode (no server required)
+agentsh report latest --level=summary --direct-db
+```
+
+### Report Levels
+
+**Summary** (~1 page):
+- Session overview (duration, policy, status)
+- Decision counts (allowed, blocked, redirected, etc.)
+- Key findings with severity indicators
+- Top activity by category (files, network, commands)
+
+**Detailed** (full investigation):
+- Everything in summary
+- Full event timeline
+- Blocked operations table with rules and messages
+- Redirect history
+- Complete command history
+- All file paths accessed
+- All network hosts contacted
+
+### Findings Detection
+
+Reports automatically detect and highlight:
+
+| Finding | Severity | Description |
+|---------|----------|-------------|
+| Blocked operations | Critical | Operations denied by policy |
+| Denied approvals | Critical | Requests rejected by operator |
+| Soft-deleted files | Warning | Files moved to trash |
+| Sensitive path access | Warning | Access to credentials, SSH keys, etc. |
+| Direct IP connections | Warning | Network to IPs instead of domains |
+| Unusual ports | Warning | Connections to non-80/443 ports |
+| High host diversity | Warning | >10 unique network destinations |
+| Redirected operations | Info | Commands/paths substituted by policy |
+| Granted approvals | Info | Operations approved by operator |
+| Failed commands | Info | Non-zero exit codes |
 
 ---
 
