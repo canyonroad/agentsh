@@ -258,29 +258,36 @@ const policyGenTestConfigYAML = `
 server:
   http:
     addr: "0.0.0.0:8080"
-  unix_socket:
-    enabled: false
-  tls:
-    enabled: false
-
-policies:
-  dir: "/app/policies"
-  default: "permissive"
-
 auth:
-  api_keys:
-    enabled: true
-    keys_file: "/app/keys.yaml"
-
+  type: "api_key"
+  api_key:
+    keys_file: "/keys.yaml"
+    header_name: "X-API-Key"
+logging:
+  level: "debug"
+  format: "text"
+  output: "stdout"
+audit:
+  enabled: true
+  storage:
+    sqlite_path: "/tmp/events.db"
+sessions:
+  base_dir: "/sessions"
 sandbox:
   fuse:
     enabled: true
     audit:
       enabled: true
       mode: "monitor"
-
-storage:
-  type: "sqlite"
-  sqlite:
-    path: "/app/data/events.db"
+  network:
+    enabled: false
+policies:
+  dir: "/policies"
+  default: "permissive"
+approvals:
+  enabled: false
+metrics:
+  enabled: false
+health:
+  path: "/health"
 `
