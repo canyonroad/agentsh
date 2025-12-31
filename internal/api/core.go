@@ -14,12 +14,214 @@ import (
 	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/platform"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
 
+// resolveProfile looks up a mount profile and validates it.
+func (a *App) resolveProfile(profileName string) (*config.MountProfile, error) {
+	if a.cfg.MountProfiles == nil {
+		return nil, fmt.Errorf("no mount profiles configured")
+	}
+	profile, ok := a.cfg.MountProfiles[profileName]
+	if !ok {
+		return nil, fmt.Errorf("profile %q not found", profileName)
+	}
+	if len(profile.Mounts) == 0 {
+		return nil, fmt.Errorf("profile %q has no mounts", profileName)
+	}
+	return &profile, nil
+}
+
+// setupProfileMounts creates FUSE mounts for all paths in a profile.
+func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profile *config.MountProfile) ([]session.ResolvedMount, error) {
+	var mounts []session.ResolvedMount
+
+	mountBase := a.cfg.Sandbox.FUSE.MountBaseDir
+	if mountBase == "" {
+		mountBase = a.cfg.Sessions.BaseDir
+	}
+
+	for i, spec := range profile.Mounts {
+		// Validate path exists
+		if _, err := os.Stat(spec.Path); err != nil {
+			// Cleanup already-created mounts
+			for _, m := range mounts {
+				if m.Unmount != nil {
+					_ = m.Unmount()
+				}
+			}
+			return nil, fmt.Errorf("mount path %q: %w", spec.Path, err)
+		}
+
+		// Load per-mount policy if specified
+		var policyEngine *policy.Engine
+		if spec.Policy != "" && a.policyLoader != nil {
+			var err error
+			policyEngine, err = a.policyLoader.Load(spec.Policy)
+			if err != nil {
+				// Cleanup already-created mounts
+				for _, m := range mounts {
+					if m.Unmount != nil {
+						_ = m.Unmount()
+					}
+				}
+				return nil, fmt.Errorf("load policy %q for mount %q: %w", spec.Policy, spec.Path, err)
+			}
+		} else {
+			// Fall back to global policy if no per-mount policy specified
+			policyEngine = a.policy
+		}
+
+		// Create mount point path
+		mountPoint := filepath.Join(mountBase, s.ID, fmt.Sprintf("mount-%d", i))
+
+		// Create FUSE mount if enabled
+		if a.cfg.Sandbox.FUSE.Enabled && a.platform != nil {
+			fs := a.platform.Filesystem()
+			if fs != nil && fs.Available() {
+				eventChan := make(chan platform.IOEvent, 1000)
+				go a.processIOEvents(ctx, eventChan)
+
+				fsCfg := platform.FSConfig{
+					SourcePath: spec.Path,
+					MountPoint: mountPoint,
+					SessionID:  s.ID,
+					CommandIDFunc: func() string {
+						return s.CurrentCommandID()
+					},
+					PolicyEngine: platform.NewPolicyAdapter(policyEngine),
+					EventChannel: eventChan,
+				}
+
+				m, err := fs.Mount(fsCfg)
+				if err != nil {
+					close(eventChan)
+					// Log but continue - mount failure shouldn't block session
+					a.logMountFailure(ctx, s.ID, spec.Path, mountPoint, err)
+					continue
+				}
+
+				mounts = append(mounts, session.ResolvedMount{
+					Path:         spec.Path,
+					Policy:       spec.Policy,
+					MountPoint:   mountPoint,
+					PolicyEngine: policyEngine,
+					Unmount: func() error {
+						close(eventChan)
+						return m.Close()
+					},
+				})
+			}
+		} else {
+			// No FUSE, just track the mount without actual mounting
+			mounts = append(mounts, session.ResolvedMount{
+				Path:         spec.Path,
+				Policy:       spec.Policy,
+				MountPoint:   spec.Path, // Direct path when not using FUSE
+				PolicyEngine: policyEngine,
+			})
+		}
+	}
+
+	return mounts, nil
+}
+
+func (a *App) logMountFailure(ctx context.Context, sessionID, path, mountPoint string, err error) {
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "fuse_mount_failed",
+		SessionID: sessionID,
+		Fields: map[string]any{
+			"mount_point": mountPoint,
+			"source_path": path,
+			"error":       err.Error(),
+		},
+	}
+	_ = a.store.AppendEvent(ctx, ev)
+	a.broker.Publish(ev)
+}
+
+// createSessionWithProfile creates a session using a mount profile.
+func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSessionRequest) (types.Session, int, error) {
+	profile, err := a.resolveProfile(req.Profile)
+	if err != nil {
+		return types.Session{}, http.StatusBadRequest, err
+	}
+
+	basePolicy := profile.BasePolicy
+	if basePolicy == "" {
+		basePolicy = a.cfg.Policies.Default
+	}
+
+	// Build initial mounts from profile specs (without FUSE yet)
+	var initialMounts []session.ResolvedMount
+	for _, spec := range profile.Mounts {
+		// Validate path exists
+		if _, err := os.Stat(spec.Path); err != nil {
+			return types.Session{}, http.StatusBadRequest, fmt.Errorf("mount path %q: %w", spec.Path, err)
+		}
+		initialMounts = append(initialMounts, session.ResolvedMount{
+			Path:       spec.Path,
+			Policy:     spec.Policy,
+			MountPoint: spec.Path,
+		})
+	}
+
+	// Create session with profile
+	var s *session.Session
+	if req.ID != "" {
+		s, err = a.sessions.CreateWithProfile(req.ID, req.Profile, basePolicy, initialMounts)
+	} else {
+		s, err = a.sessions.CreateWithProfile("", req.Profile, basePolicy, initialMounts)
+	}
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, session.ErrSessionExists) {
+			code = http.StatusConflict
+		}
+		return types.Session{}, code, err
+	}
+
+	// Emit session_created event
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "session_created",
+		SessionID: s.ID,
+		Fields: map[string]any{
+			"profile":     req.Profile,
+			"base_policy": basePolicy,
+			"mounts":      len(profile.Mounts),
+		},
+	}
+	_ = a.store.AppendEvent(ctx, ev)
+	a.broker.Publish(ev)
+
+	// Setup FUSE mounts if enabled
+	if a.cfg.Sandbox.FUSE.Enabled && a.platform != nil {
+		mounts, err := a.setupProfileMounts(ctx, s, profile)
+		if err != nil {
+			// Cleanup session on mount failure
+			_ = a.sessions.Destroy(s.ID)
+			return types.Session{}, http.StatusInternalServerError, err
+		}
+		// Update session with resolved mounts
+		s.Mounts = mounts
+	}
+
+	return s.Snapshot(), http.StatusCreated, nil
+}
+
 func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequest) (types.Session, int, error) {
+	// Handle profile-based session creation
+	if req.Profile != "" {
+		return a.createSessionWithProfile(ctx, req)
+	}
+
 	if req.Policy == "" {
 		req.Policy = a.cfg.Policies.Default
 	}

@@ -29,6 +29,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// PolicyLoader loads a policy by name and returns a policy engine.
+type PolicyLoader interface {
+	Load(name string) (*policy.Engine, error)
+}
+
 type App struct {
 	cfg      *config.Config
 	sessions *session.Manager
@@ -44,9 +49,12 @@ type App struct {
 
 	// platform provides cross-platform filesystem, network, and sandbox abstractions
 	platform platform.Platform
+
+	// policyLoader loads policies by name for per-mount policy support
+	policyLoader PolicyLoader
 }
 
-func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector) *App {
+func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader) *App {
 	// Apply EBPF map size overrides once per process (global maps); no-op if zero values.
 	ebpftrace.SetMapSizeOverrides(
 		uint32(cfg.Sandbox.Network.EBPF.MapAllowEntries),
@@ -64,15 +72,16 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 	}
 
 	return &App{
-		cfg:        cfg,
-		sessions:   sessions,
-		store:      store,
-		policy:     engine,
-		broker:     broker,
-		apiKeyAuth: apiKeyAuth,
-		approvals:  approvalsMgr,
-		metrics:    metricsCollector,
-		platform:   plat,
+		cfg:          cfg,
+		sessions:     sessions,
+		store:        store,
+		policy:       engine,
+		broker:       broker,
+		apiKeyAuth:   apiKeyAuth,
+		approvals:    approvalsMgr,
+		metrics:      metricsCollector,
+		platform:     plat,
+		policyLoader: policyLoader,
 	}
 }
 
@@ -1104,4 +1113,38 @@ func (a *App) policyTest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// DefaultPolicyLoader loads policies from the configured policy directory.
+type DefaultPolicyLoader struct {
+	policyDir        string
+	enforceApprovals bool
+}
+
+// NewDefaultPolicyLoader creates a policy loader that loads from the given directory.
+func NewDefaultPolicyLoader(policyDir string, enforceApprovals bool) *DefaultPolicyLoader {
+	return &DefaultPolicyLoader{
+		policyDir:        policyDir,
+		enforceApprovals: enforceApprovals,
+	}
+}
+
+// Load loads a policy by name and returns a policy engine.
+func (l *DefaultPolicyLoader) Load(name string) (*policy.Engine, error) {
+	if name == "" {
+		return nil, fmt.Errorf("policy name is empty")
+	}
+	path, err := policy.ResolvePolicyPath(l.policyDir, name)
+	if err != nil {
+		return nil, fmt.Errorf("resolve policy %q: %w", name, err)
+	}
+	p, err := policy.LoadFromFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("load policy %q: %w", name, err)
+	}
+	engine, err := policy.NewEngine(p, l.enforceApprovals)
+	if err != nil {
+		return nil, fmt.Errorf("create policy engine for %q: %w", name, err)
+	}
+	return engine, nil
 }
