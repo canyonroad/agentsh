@@ -315,21 +315,72 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// LoadFromBytes loads configuration from bytes without applying environment
-// overrides. This is intended for testing where env vars should not interfere.
-func LoadFromBytes(data []byte) (*Config, error) {
+// LoadWithSource loads config from path and returns the config along with its source.
+// The source parameter indicates where this config path came from.
+func LoadWithSource(path string, source ConfigSource) (*Config, ConfigSource, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, source, fmt.Errorf("read config: %w", err)
+	}
+
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		return nil, source, fmt.Errorf("parse config: %w", err)
 	}
-	applyDefaults(&cfg)
+
+	applyDefaultsWithSource(&cfg, source, path)
+	applyEnvOverrides(&cfg)
 	if err := validateConfig(&cfg); err != nil {
-		return nil, err
+		return nil, source, err
 	}
-	return &cfg, nil
+	return &cfg, source, nil
 }
 
-func applyDefaults(cfg *Config) {
+// getDefaultDataDir returns the appropriate data directory based on config source.
+func getDefaultDataDir(source ConfigSource, configPath string) string {
+	switch source {
+	case ConfigSourceEnv:
+		// Use the directory containing the config file
+		if configPath != "" {
+			return filepath.Dir(configPath)
+		}
+		return GetUserDataDir()
+	case ConfigSourceUser:
+		return GetUserDataDir()
+	case ConfigSourceSystem:
+		return GetDataDir()
+	default:
+		return GetDataDir()
+	}
+}
+
+// getDefaultPoliciesDir returns the appropriate policies directory based on config source.
+func getDefaultPoliciesDir(source ConfigSource, configPath string) string {
+	switch source {
+	case ConfigSourceEnv:
+		// Use policies subdir of config file location
+		if configPath != "" {
+			return filepath.Join(filepath.Dir(configPath), "policies")
+		}
+		return GetUserConfigDir() + "/policies"
+	case ConfigSourceUser:
+		return GetUserConfigDir() + "/policies"
+	case ConfigSourceSystem:
+		return GetPoliciesDir()
+	default:
+		return GetPoliciesDir()
+	}
+}
+
+// applyDefaultsWithSource applies default values based on the config source.
+// This enables source-aware default path resolution:
+// - User config: defaults use ~/.local/share/agentsh/ and ~/.config/agentsh/
+// - System config: defaults use /var/lib/agentsh/ and /etc/agentsh/
+// - Env config: defaults use the directory containing the config file
+func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string) {
+	dataDir := getDefaultDataDir(source, configPath)
+	policiesDir := getDefaultPoliciesDir(source, configPath)
+
 	// Platform defaults
 	if cfg.Platform.Mode == "" {
 		cfg.Platform.Mode = "auto"
@@ -368,8 +419,10 @@ func applyDefaults(cfg *Config) {
 	if cfg.Auth.APIKey.HeaderName == "" {
 		cfg.Auth.APIKey.HeaderName = "X-API-Key"
 	}
+
+	// Use source-aware data directory for sessions
 	if cfg.Sessions.BaseDir == "" {
-		cfg.Sessions.BaseDir = "/var/lib/agentsh/sessions"
+		cfg.Sessions.BaseDir = filepath.Join(dataDir, "sessions")
 	}
 	if cfg.Sessions.MaxSessions <= 0 {
 		cfg.Sessions.MaxSessions = 100
@@ -461,6 +514,11 @@ func applyDefaults(cfg *Config) {
 	if cfg.Sandbox.Cgroups.BasePath == "" {
 		cfg.Sandbox.Cgroups.BasePath = ""
 	}
+
+	// Use source-aware policies directory
+	if cfg.Policies.Dir == "" {
+		cfg.Policies.Dir = policiesDir
+	}
 	if cfg.Policies.Default == "" {
 		cfg.Policies.Default = "default"
 	}
@@ -473,9 +531,10 @@ func applyDefaults(cfg *Config) {
 	if cfg.Health.ReadinessPath == "" {
 		cfg.Health.ReadinessPath = "/ready"
 	}
+
+	// Use source-aware data directory for SQLite
 	if cfg.Audit.Storage.SQLitePath == "" {
-		// Default DB path adjacent to sessions base dir (e.g., /var/lib/agentsh/events.db).
-		cfg.Audit.Storage.SQLitePath = "/var/lib/agentsh/events.db"
+		cfg.Audit.Storage.SQLitePath = filepath.Join(dataDir, "events.db")
 	}
 	if cfg.Audit.Rotation.MaxSizeMB == 0 {
 		cfg.Audit.Rotation.MaxSizeMB = 500
@@ -501,6 +560,11 @@ func applyDefaults(cfg *Config) {
 	if cfg.Development.PProf.Addr == "" {
 		cfg.Development.PProf.Addr = "localhost:6060"
 	}
+}
+
+// applyDefaults wraps applyDefaultsWithSource for backward compatibility.
+func applyDefaults(cfg *Config) {
+	applyDefaultsWithSource(cfg, ConfigSourceSystem, "")
 }
 
 func applyEnvOverrides(cfg *Config) {

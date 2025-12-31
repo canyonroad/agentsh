@@ -316,35 +316,144 @@ func TestParseByteSize(t *testing.T) {
 	}
 }
 
-func TestMountProfileParsing(t *testing.T) {
-	yaml := `
-mount_profiles:
-  agent-profile:
-    base_policy: "default"
-    mounts:
-      - path: "/home/user/workspace"
-        policy: "workspace-rw"
-      - path: "/home/user/.config"
-        policy: "config-readonly"
-`
-	cfg, err := LoadFromBytes([]byte(yaml))
+func TestLoadWithSource(t *testing.T) {
+	// Create a temp config file
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := []byte("platform:\n  mode: auto\n")
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, source, err := LoadWithSource(configPath, ConfigSourceUser)
 	if err != nil {
-		t.Fatalf("LoadFromBytes: %v", err)
+		t.Fatalf("LoadWithSource() error = %v", err)
 	}
-	if len(cfg.MountProfiles) != 1 {
-		t.Fatalf("expected 1 profile, got %d", len(cfg.MountProfiles))
+	if source != ConfigSourceUser {
+		t.Errorf("LoadWithSource() source = %v, want %v", source, ConfigSourceUser)
 	}
-	p := cfg.MountProfiles["agent-profile"]
-	if p.BasePolicy != "default" {
-		t.Errorf("expected base_policy=default, got %s", p.BasePolicy)
+	if cfg.Platform.Mode != "auto" {
+		t.Errorf("LoadWithSource() cfg.Platform.Mode = %q, want %q", cfg.Platform.Mode, "auto")
 	}
-	if len(p.Mounts) != 2 {
-		t.Errorf("expected 2 mounts, got %d", len(p.Mounts))
+}
+
+func TestApplyDefaultsWithSource_UserSource(t *testing.T) {
+	cfg := &Config{}
+	applyDefaultsWithSource(cfg, ConfigSourceUser, "")
+
+	// Sessions.BaseDir should use user data dir
+	userDataDir := GetUserDataDir()
+	wantSessionsDir := userDataDir + "/sessions"
+	if cfg.Sessions.BaseDir != wantSessionsDir {
+		t.Errorf("Sessions.BaseDir = %q, want %q", cfg.Sessions.BaseDir, wantSessionsDir)
 	}
-	if p.Mounts[0].Path != "/home/user/workspace" {
-		t.Errorf("expected first mount path=/home/user/workspace, got %s", p.Mounts[0].Path)
+
+	// Audit.Storage.SQLitePath should use user data dir
+	wantSQLitePath := userDataDir + "/events.db"
+	if cfg.Audit.Storage.SQLitePath != wantSQLitePath {
+		t.Errorf("Audit.Storage.SQLitePath = %q, want %q", cfg.Audit.Storage.SQLitePath, wantSQLitePath)
 	}
-	if p.Mounts[0].Policy != "workspace-rw" {
-		t.Errorf("expected first mount policy=workspace-rw, got %s", p.Mounts[0].Policy)
+}
+
+func TestApplyDefaultsWithSource_SystemSource(t *testing.T) {
+	cfg := &Config{}
+	applyDefaultsWithSource(cfg, ConfigSourceSystem, "")
+
+	// Sessions.BaseDir should use system data dir
+	systemDataDir := GetDataDir()
+	wantSessionsDir := systemDataDir + "/sessions"
+	if cfg.Sessions.BaseDir != wantSessionsDir {
+		t.Errorf("Sessions.BaseDir = %q, want %q", cfg.Sessions.BaseDir, wantSessionsDir)
+	}
+
+	// Audit.Storage.SQLitePath should use system data dir
+	wantSQLitePath := systemDataDir + "/events.db"
+	if cfg.Audit.Storage.SQLitePath != wantSQLitePath {
+		t.Errorf("Audit.Storage.SQLitePath = %q, want %q", cfg.Audit.Storage.SQLitePath, wantSQLitePath)
+	}
+}
+
+func TestApplyDefaultsWithSource_EnvSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "custom", "config.yaml")
+	os.MkdirAll(filepath.Dir(configPath), 0755)
+
+	cfg := &Config{}
+	applyDefaultsWithSource(cfg, ConfigSourceEnv, configPath)
+
+	// Should derive data dir from config path location
+	wantDataDir := filepath.Join(tmpDir, "custom")
+	wantSessionsDir := wantDataDir + "/sessions"
+	if cfg.Sessions.BaseDir != wantSessionsDir {
+		t.Errorf("Sessions.BaseDir = %q, want %q", cfg.Sessions.BaseDir, wantSessionsDir)
+	}
+}
+
+func TestApplyDefaultsWithSource_PoliciesDir(t *testing.T) {
+	cfg := &Config{}
+	applyDefaultsWithSource(cfg, ConfigSourceUser, "")
+
+	// Policies.Dir should use user config dir
+	userConfigDir := GetUserConfigDir()
+	wantPoliciesDir := userConfigDir + "/policies"
+	if cfg.Policies.Dir != wantPoliciesDir {
+		t.Errorf("Policies.Dir = %q, want %q", cfg.Policies.Dir, wantPoliciesDir)
+	}
+}
+
+func TestLoadWithSource_FileNotFound(t *testing.T) {
+	_, source, err := LoadWithSource("/nonexistent/path/config.yaml", ConfigSourceUser)
+	if err == nil {
+		t.Fatal("LoadWithSource() expected error for nonexistent file")
+	}
+	// Source should still be returned even on error
+	if source != ConfigSourceUser {
+		t.Errorf("LoadWithSource() source = %v on error, want %v", source, ConfigSourceUser)
+	}
+}
+
+func TestLoadWithSource_InvalidYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	// Write invalid YAML
+	if err := os.WriteFile(configPath, []byte("invalid: yaml: content: [unclosed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, source, err := LoadWithSource(configPath, ConfigSourceEnv)
+	if err == nil {
+		t.Fatal("LoadWithSource() expected error for invalid YAML")
+	}
+	if source != ConfigSourceEnv {
+		t.Errorf("LoadWithSource() source = %v on error, want %v", source, ConfigSourceEnv)
+	}
+}
+
+func TestApplyDefaultsWithSource_EnvSource_AllPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "custom", "config.yaml")
+	os.MkdirAll(filepath.Dir(configPath), 0755)
+
+	cfg := &Config{}
+	applyDefaultsWithSource(cfg, ConfigSourceEnv, configPath)
+
+	configDir := filepath.Dir(configPath)
+
+	// Verify Sessions.BaseDir
+	wantSessionsDir := filepath.Join(configDir, "sessions")
+	if cfg.Sessions.BaseDir != wantSessionsDir {
+		t.Errorf("Sessions.BaseDir = %q, want %q", cfg.Sessions.BaseDir, wantSessionsDir)
+	}
+
+	// Verify Audit.Storage.SQLitePath
+	wantSQLitePath := filepath.Join(configDir, "events.db")
+	if cfg.Audit.Storage.SQLitePath != wantSQLitePath {
+		t.Errorf("Audit.Storage.SQLitePath = %q, want %q", cfg.Audit.Storage.SQLitePath, wantSQLitePath)
+	}
+
+	// Verify Policies.Dir
+	wantPoliciesDir := filepath.Join(configDir, "policies")
+	if cfg.Policies.Dir != wantPoliciesDir {
+		t.Errorf("Policies.Dir = %q, want %q", cfg.Policies.Dir, wantPoliciesDir)
 	}
 }

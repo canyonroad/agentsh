@@ -109,6 +109,70 @@ func TestGetUserConfigDir(t *testing.T) {
 	}
 }
 
+func TestConfigSourceString(t *testing.T) {
+	tests := []struct {
+		source ConfigSource
+		want   string
+	}{
+		{ConfigSourceEnv, "env"},
+		{ConfigSourceUser, "user"},
+		{ConfigSourceSystem, "system"},
+	}
+	for _, tt := range tests {
+		if got := tt.source.String(); got != tt.want {
+			t.Errorf("ConfigSource(%d).String() = %q, want %q", tt.source, got, tt.want)
+		}
+	}
+}
+
+func TestConfigSourceString_Unknown(t *testing.T) {
+	// Test that invalid ConfigSource values return "unknown"
+	invalid := ConfigSource(99)
+	if got := invalid.String(); got != "unknown" {
+		t.Errorf("ConfigSource(99).String() = %q, want %q", got, "unknown")
+	}
+}
+
+func TestGetUserDataDir(t *testing.T) {
+	home, _ := os.UserHomeDir()
+
+	// Test with XDG_DATA_HOME set (Linux only meaningful but function should work)
+	if runtime.GOOS == "linux" {
+		orig := os.Getenv("XDG_DATA_HOME")
+		os.Setenv("XDG_DATA_HOME", "/custom/data")
+		defer os.Setenv("XDG_DATA_HOME", orig)
+
+		got := GetUserDataDir()
+		if got != "/custom/data/agentsh" {
+			t.Errorf("GetUserDataDir() with XDG_DATA_HOME = %q, want %q", got, "/custom/data/agentsh")
+		}
+		os.Setenv("XDG_DATA_HOME", orig)
+	}
+
+	// Test default behavior
+	got := GetUserDataDir()
+	switch runtime.GOOS {
+	case "windows":
+		// Should use APPDATA or fallback
+		if got == "" {
+			t.Error("GetUserDataDir() returned empty on Windows")
+		}
+	case "darwin":
+		want := home + "/Library/Application Support/agentsh"
+		if got != want {
+			t.Errorf("GetUserDataDir() = %q, want %q", got, want)
+		}
+	default:
+		// Linux default without XDG_DATA_HOME
+		os.Unsetenv("XDG_DATA_HOME")
+		got = GetUserDataDir()
+		want := home + "/.local/share/agentsh"
+		if got != want {
+			t.Errorf("GetUserDataDir() = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestLoad_SandboxLimits(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yml")
