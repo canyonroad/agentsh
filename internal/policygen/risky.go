@@ -68,6 +68,7 @@ func NewRiskyDetector() *RiskyDetector {
 // MarkNetworkCapable marks a command as risky because it made network calls.
 func (d *RiskyDetector) MarkNetworkCapable(cmd string) {
 	base := filepath.Base(cmd)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
 	if _, exists := d.observed[base]; !exists {
 		d.observed[base] = "network-observed"
 	}
@@ -76,6 +77,7 @@ func (d *RiskyDetector) MarkNetworkCapable(cmd string) {
 // MarkDestructive marks a command as risky because it deleted files.
 func (d *RiskyDetector) MarkDestructive(cmd string) {
 	base := filepath.Base(cmd)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
 	if _, exists := d.observed[base]; !exists {
 		d.observed[base] = "destructive-observed"
 	}
@@ -84,6 +86,7 @@ func (d *RiskyDetector) MarkDestructive(cmd string) {
 // MarkPrivileged marks a command as risky because it changed UID.
 func (d *RiskyDetector) MarkPrivileged(cmd string) {
 	base := filepath.Base(cmd)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
 	if _, exists := d.observed[base]; !exists {
 		d.observed[base] = "privilege-observed"
 	}
@@ -92,6 +95,7 @@ func (d *RiskyDetector) MarkPrivileged(cmd string) {
 // IsRisky checks if a command is risky (builtin or observed).
 func (d *RiskyDetector) IsRisky(cmd string) bool {
 	base := filepath.Base(cmd)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
 	if _, ok := builtinRisky[base]; ok {
 		return true
 	}
@@ -102,6 +106,7 @@ func (d *RiskyDetector) IsRisky(cmd string) bool {
 // Reason returns why a command is risky.
 func (d *RiskyDetector) Reason(cmd string) string {
 	base := filepath.Base(cmd)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
 	if reason, ok := builtinRisky[base]; ok {
 		return reason
 	}

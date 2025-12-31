@@ -54,3 +54,16 @@ func TestRiskyDetector_MarkDestructive(t *testing.T) {
 		t.Error("expected cleanup-script to be risky after marking")
 	}
 }
+
+func TestRiskyDetector_MarkPrivileged(t *testing.T) {
+	d := NewRiskyDetector()
+	d.MarkPrivileged("admin-tool")
+
+	if !d.IsRisky("admin-tool") {
+		t.Error("expected admin-tool to be risky after marking")
+	}
+	reason := d.Reason("admin-tool")
+	if reason != "privilege-observed" {
+		t.Errorf("expected reason 'privilege-observed', got %q", reason)
+	}
+}
