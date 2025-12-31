@@ -98,3 +98,73 @@ func TestCreateWithProfile(t *testing.T) {
 		t.Errorf("Workspace = %q, want %q", s.Workspace, "/workspace")
 	}
 }
+
+func TestCreateWithProfile_EmptyMounts(t *testing.T) {
+	m := NewManager(10)
+
+	_, err := m.CreateWithProfile("test_id", "my-profile", "default", []ResolvedMount{})
+	if err == nil {
+		t.Error("CreateWithProfile with empty mounts should return error")
+	}
+}
+
+func TestCreateWithProfile_DuplicateSessionID(t *testing.T) {
+	m := NewManager(10)
+
+	mounts := []ResolvedMount{
+		{Path: "/workspace", Policy: "workspace-rw"},
+	}
+
+	_, err := m.CreateWithProfile("duplicate_id", "profile1", "default", mounts)
+	if err != nil {
+		t.Fatalf("first CreateWithProfile: %v", err)
+	}
+
+	_, err = m.CreateWithProfile("duplicate_id", "profile2", "default", mounts)
+	if err != ErrSessionExists {
+		t.Errorf("second CreateWithProfile: got %v, want ErrSessionExists", err)
+	}
+}
+
+func TestCreateWithProfile_MaxSessionsLimit(t *testing.T) {
+	m := NewManager(2) // max 2 sessions
+
+	mounts := []ResolvedMount{
+		{Path: "/workspace", Policy: "workspace-rw"},
+	}
+
+	_, err := m.CreateWithProfile("session1", "profile", "default", mounts)
+	if err != nil {
+		t.Fatalf("first CreateWithProfile: %v", err)
+	}
+
+	_, err = m.CreateWithProfile("session2", "profile", "default", mounts)
+	if err != nil {
+		t.Fatalf("second CreateWithProfile: %v", err)
+	}
+
+	_, err = m.CreateWithProfile("session3", "profile", "default", mounts)
+	if err == nil {
+		t.Error("third CreateWithProfile should return error (max sessions reached)")
+	}
+}
+
+func TestCreateWithProfile_InvalidSessionID(t *testing.T) {
+	m := NewManager(10)
+
+	mounts := []ResolvedMount{
+		{Path: "/workspace", Policy: "workspace-rw"},
+	}
+
+	// Invalid: starts with underscore
+	_, err := m.CreateWithProfile("_invalid", "profile", "default", mounts)
+	if err != ErrInvalidSessionID {
+		t.Errorf("CreateWithProfile with invalid ID: got %v, want ErrInvalidSessionID", err)
+	}
+
+	// Invalid: contains special characters
+	_, err = m.CreateWithProfile("invalid@id", "profile", "default", mounts)
+	if err != ErrInvalidSessionID {
+		t.Errorf("CreateWithProfile with invalid ID: got %v, want ErrInvalidSessionID", err)
+	}
+}

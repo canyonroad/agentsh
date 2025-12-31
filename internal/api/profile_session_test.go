@@ -117,6 +117,59 @@ func TestCreateSessionWithProfile_ProfileNotFound(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
 	}
+
+	// Verify error message is descriptive
+	respBody := rr.Body.String()
+	if !strings.Contains(respBody, "profile") {
+		t.Errorf("error message should mention profile, got: %s", respBody)
+	}
+}
+
+func TestCreateSessionWithProfile_MissingMountPath(t *testing.T) {
+	st := newSQLiteStore(t)
+	store := composite.New(st, st)
+	sessions := session.NewManager(10)
+
+	// Create config with profile referencing non-existent path
+	cfg := &config.Config{}
+	cfg.Development.DisableAuth = true
+	cfg.Metrics.Enabled = false
+	cfg.Health.Path = "/health"
+	cfg.Health.ReadinessPath = "/ready"
+	cfg.Sandbox.FUSE.Enabled = false
+	cfg.Sandbox.Network.Enabled = false
+	cfg.Sandbox.Network.Transparent.Enabled = false
+	cfg.Policies.Default = "default"
+	cfg.MountProfiles = map[string]config.MountProfile{
+		"bad-path-profile": {
+			BasePolicy: "default",
+			Mounts: []config.MountSpec{
+				{Path: "/nonexistent/path/that/does/not/exist", Policy: "default"},
+			},
+		},
+	}
+
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
+	h := app.Router()
+
+	body := `{"profile":"bad-path-profile"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify error mentions the path
+	respBody := rr.Body.String()
+	if !strings.Contains(respBody, "mount path") {
+		t.Errorf("error message should mention mount path, got: %s", respBody)
+	}
 }
 
 func TestResolveProfile(t *testing.T) {

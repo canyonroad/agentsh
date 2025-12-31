@@ -45,3 +45,30 @@ func TestFindMount(t *testing.T) {
 		}
 	}
 }
+
+func TestFindMountOverlapping(t *testing.T) {
+	mounts := []ResolvedMount{
+		{Path: "/home/user", Policy: "base"},
+		{Path: "/home/user/workspace", Policy: "workspace"},
+		{Path: "/home/user/workspace/src", Policy: "src"},
+	}
+
+	tests := []struct {
+		path     string
+		wantPath string
+	}{
+		{"/home/user/file.txt", "/home/user"},
+		{"/home/user/workspace/file.txt", "/home/user/workspace"},
+		{"/home/user/workspace/src/main.go", "/home/user/workspace/src"},
+		{"/home/user/workspace/src", "/home/user/workspace/src"}, // exact match
+	}
+
+	for _, tt := range tests {
+		m := FindMount(mounts, tt.path)
+		if m == nil {
+			t.Errorf("FindMount(%q) = nil, want %q", tt.path, tt.wantPath)
+		} else if m.Path != tt.wantPath {
+			t.Errorf("FindMount(%q) = %q, want %q", tt.path, m.Path, tt.wantPath)
+		}
+	}
+}
