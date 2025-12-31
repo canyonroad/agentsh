@@ -125,6 +125,14 @@ func TestConfigSourceString(t *testing.T) {
 	}
 }
 
+func TestConfigSourceString_Unknown(t *testing.T) {
+	// Test that invalid ConfigSource values return "unknown"
+	invalid := ConfigSource(99)
+	if got := invalid.String(); got != "unknown" {
+		t.Errorf("ConfigSource(99).String() = %q, want %q", got, "unknown")
+	}
+}
+
 func TestGetUserDataDir(t *testing.T) {
 	home, _ := os.UserHomeDir()
 

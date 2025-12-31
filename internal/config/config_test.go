@@ -400,3 +400,60 @@ func TestApplyDefaultsWithSource_PoliciesDir(t *testing.T) {
 		t.Errorf("Policies.Dir = %q, want %q", cfg.Policies.Dir, wantPoliciesDir)
 	}
 }
+
+func TestLoadWithSource_FileNotFound(t *testing.T) {
+	_, source, err := LoadWithSource("/nonexistent/path/config.yaml", ConfigSourceUser)
+	if err == nil {
+		t.Fatal("LoadWithSource() expected error for nonexistent file")
+	}
+	// Source should still be returned even on error
+	if source != ConfigSourceUser {
+		t.Errorf("LoadWithSource() source = %v on error, want %v", source, ConfigSourceUser)
+	}
+}
+
+func TestLoadWithSource_InvalidYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	// Write invalid YAML
+	if err := os.WriteFile(configPath, []byte("invalid: yaml: content: [unclosed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, source, err := LoadWithSource(configPath, ConfigSourceEnv)
+	if err == nil {
+		t.Fatal("LoadWithSource() expected error for invalid YAML")
+	}
+	if source != ConfigSourceEnv {
+		t.Errorf("LoadWithSource() source = %v on error, want %v", source, ConfigSourceEnv)
+	}
+}
+
+func TestApplyDefaultsWithSource_EnvSource_AllPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "custom", "config.yaml")
+	os.MkdirAll(filepath.Dir(configPath), 0755)
+
+	cfg := &Config{}
+	applyDefaultsWithSource(cfg, ConfigSourceEnv, configPath)
+
+	configDir := filepath.Dir(configPath)
+
+	// Verify Sessions.BaseDir
+	wantSessionsDir := filepath.Join(configDir, "sessions")
+	if cfg.Sessions.BaseDir != wantSessionsDir {
+		t.Errorf("Sessions.BaseDir = %q, want %q", cfg.Sessions.BaseDir, wantSessionsDir)
+	}
+
+	// Verify Audit.Storage.SQLitePath
+	wantSQLitePath := filepath.Join(configDir, "events.db")
+	if cfg.Audit.Storage.SQLitePath != wantSQLitePath {
+		t.Errorf("Audit.Storage.SQLitePath = %q, want %q", cfg.Audit.Storage.SQLitePath, wantSQLitePath)
+	}
+
+	// Verify Policies.Dir
+	wantPoliciesDir := filepath.Join(configDir, "policies")
+	if cfg.Policies.Dir != wantPoliciesDir {
+		t.Errorf("Policies.Dir = %q, want %q", cfg.Policies.Dir, wantPoliciesDir)
+	}
+}
