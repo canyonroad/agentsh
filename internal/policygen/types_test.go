@@ -2,6 +2,7 @@
 package policygen
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,8 +18,23 @@ func TestProvenance_String(t *testing.T) {
 	if s == "" {
 		t.Error("expected non-empty string")
 	}
-	if !contains(s, "47 events") {
+	if !strings.Contains(s, "47 events") {
 		t.Errorf("expected '47 events' in %q", s)
+	}
+}
+
+func TestProvenance_String_ZeroTimes(t *testing.T) {
+	p := Provenance{
+		EventCount:  3,
+		// FirstSeen and LastSeen are zero values
+	}
+	s := p.String()
+	if s != "3 events" {
+		t.Errorf("expected '3 events', got %q", s)
+	}
+	// Should not contain time range parentheses
+	if strings.Contains(s, "(") || strings.Contains(s, ")") {
+		t.Errorf("expected no time range for zero times, got %q", s)
 	}
 }
 
@@ -33,17 +49,4 @@ func TestOptions_Defaults(t *testing.T) {
 	if !opts.ArgPatterns {
 		t.Error("expected ArgPatterns true")
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
