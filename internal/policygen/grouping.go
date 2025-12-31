@@ -68,22 +68,15 @@ func GroupPaths(paths []string, threshold int) []PathGroup {
 
 	// Process remaining directories not collapsed
 	for dir, dirPaths := range byDir {
+		// Skip if this directory was already processed as part of a collapsed parent
+		// (paths were already added during parent collapse above)
+		parent := filepath.Dir(dir)
+		if collapsedParents[parent] {
+			continue
+		}
+
 		// Skip if any ancestor was collapsed
 		if isUnderCollapsedParent(dir, collapsedParents) {
-			// Add paths to the collapsed parent group
-			for collapsedParent := range collapsedParents {
-				if strings.HasPrefix(dir, collapsedParent+"/") {
-					// Find the group and add paths
-					for i := range groups {
-						if groups[i].Pattern == collapsedParent+"/**" {
-							groups[i].Paths = append(groups[i].Paths, dirPaths...)
-							groups[i].Count += len(dirPaths)
-							break
-						}
-					}
-					break
-				}
-			}
 			continue
 		}
 
