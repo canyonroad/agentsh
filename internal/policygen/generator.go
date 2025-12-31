@@ -14,6 +14,12 @@ import (
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
+// Package-level compiled regexes for sanitizeName
+var (
+	sanitizeNameRe    = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+	sanitizeCollapseRe = regexp.MustCompile(`_+`)
+)
+
 // Generator creates policies from session events.
 type Generator struct {
 	store store.EventStore
@@ -42,10 +48,7 @@ func (g *Generator) Generate(ctx context.Context, sess types.Session, opts Optio
 		SessionID:   sess.ID,
 		GeneratedAt: time.Now().UTC(),
 		EventCount:  len(events),
-	}
-
-	if len(events) > 0 {
-		policy.Duration = events[len(events)-1].Timestamp.Sub(events[0].Timestamp)
+		Duration:    events[len(events)-1].Timestamp.Sub(events[0].Timestamp),
 	}
 
 	// Initialize detector to track risky commands
@@ -135,7 +138,7 @@ func (g *Generator) Generate(ctx context.Context, sess types.Session, opts Optio
 	policy.BlockedCommands = g.generateCommandRules(blockedCmdEvents, detector, opts, true)
 
 	// Generate unix socket rules
-	policy.UnixRules = g.generateUnixRules(allowedUnixEvents, opts, false)
+	policy.UnixRules = g.generateUnixRules(allowedUnixEvents, false)
 
 	return policy, nil
 }
@@ -324,7 +327,7 @@ func (g *Generator) generateCommandRules(events []types.Event, detector *RiskyDe
 }
 
 // generateUnixRules creates unix socket rules from events.
-func (g *Generator) generateUnixRules(events []types.Event, opts Options, blocked bool) []UnixRuleGen {
+func (g *Generator) generateUnixRules(events []types.Event, blocked bool) []UnixRuleGen {
 	if len(events) == 0 {
 		return nil
 	}
@@ -496,15 +499,13 @@ func getCommandArgs(ev types.Event) []string {
 // sanitizeName converts a path/domain to a valid rule name.
 func sanitizeName(s string) string {
 	// Replace special chars with underscores
-	re := regexp.MustCompile(`[^a-zA-Z0-9_-]`)
-	name := re.ReplaceAllString(s, "_")
+	name := sanitizeNameRe.ReplaceAllString(s, "_")
 
 	// Remove leading/trailing underscores
 	name = strings.Trim(name, "_")
 
 	// Collapse multiple underscores
-	re2 := regexp.MustCompile(`_+`)
-	name = re2.ReplaceAllString(name, "_")
+	name = sanitizeCollapseRe.ReplaceAllString(name, "_")
 
 	// Limit length
 	if len(name) > 50 {

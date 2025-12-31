@@ -104,3 +104,67 @@ func TestGenerator_NetworkEvents(t *testing.T) {
 		t.Errorf("expected '*.github.com', got %q", policy.NetworkRules[0].Domains[0])
 	}
 }
+
+func TestGenerator_CommandRulesWithRiskyDetection(t *testing.T) {
+	now := time.Now()
+	events := []types.Event{
+		{
+			ID:        "cmd-1",
+			Type:      "exec",
+			Path:      "/usr/bin/curl",
+			Timestamp: now,
+			Fields:    map[string]interface{}{"command": "curl"},
+			Policy:    &types.PolicyInfo{Decision: types.DecisionAllow},
+		},
+		{
+			ID:        "cmd-2",
+			Type:      "exec",
+			Path:      "/usr/bin/ls",
+			Timestamp: now.Add(time.Second),
+			Fields:    map[string]interface{}{"command": "ls"},
+			Policy:    &types.PolicyInfo{Decision: types.DecisionAllow},
+		},
+	}
+
+	store := &mockEventStore{events: events}
+	gen := NewGenerator(store)
+
+	sess := types.Session{ID: "test-session"}
+	policy, err := gen.Generate(context.Background(), sess, DefaultOptions())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(policy.CommandRules) == 0 {
+		t.Fatal("expected command rules to be generated")
+	}
+
+	// Find curl rule - should be marked as risky
+	var curlRule *CommandRuleGen
+	var lsRule *CommandRuleGen
+	for i := range policy.CommandRules {
+		if policy.CommandRules[i].Name == "curl" {
+			curlRule = &policy.CommandRules[i]
+		}
+		if policy.CommandRules[i].Name == "ls" {
+			lsRule = &policy.CommandRules[i]
+		}
+	}
+
+	if curlRule == nil {
+		t.Fatal("expected curl command rule")
+	}
+	if !curlRule.Risky {
+		t.Error("expected curl to be marked as risky")
+	}
+	if curlRule.RiskyReason != "network" {
+		t.Errorf("expected curl risky reason 'network', got %q", curlRule.RiskyReason)
+	}
+
+	if lsRule == nil {
+		t.Fatal("expected ls command rule")
+	}
+	if lsRule.Risky {
+		t.Error("expected ls to NOT be marked as risky")
+	}
+}
