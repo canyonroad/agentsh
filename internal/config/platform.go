@@ -8,6 +8,32 @@ import (
 	"github.com/agentsh/agentsh/internal/platform"
 )
 
+// ConfigSource indicates where the configuration was loaded from.
+type ConfigSource int
+
+const (
+	// ConfigSourceEnv means config path was specified via AGENTSH_CONFIG env var.
+	ConfigSourceEnv ConfigSource = iota
+	// ConfigSourceUser means config was loaded from user-local directory.
+	ConfigSourceUser
+	// ConfigSourceSystem means config was loaded from system-wide directory.
+	ConfigSourceSystem
+)
+
+// String returns a human-readable name for the config source.
+func (s ConfigSource) String() string {
+	switch s {
+	case ConfigSourceEnv:
+		return "env"
+	case ConfigSourceUser:
+		return "user"
+	case ConfigSourceSystem:
+		return "system"
+	default:
+		return "unknown"
+	}
+}
+
 // InitializePlatform creates and configures a platform based on the config.
 func InitializePlatform(cfg *Config) (platform.Platform, error) {
 	opts := platform.PlatformOptions{
@@ -114,5 +140,24 @@ func GetUserConfigDir() string {
 			return xdg + "/agentsh"
 		}
 		return home + "/.config/agentsh"
+	}
+}
+
+// GetUserDataDir returns the user-specific data directory.
+func GetUserDataDir() string {
+	home, _ := os.UserHomeDir()
+	switch runtime.GOOS {
+	case "windows":
+		if appdata := os.Getenv("APPDATA"); appdata != "" {
+			return appdata + `\agentsh`
+		}
+		return home + `\AppData\Roaming\agentsh`
+	case "darwin":
+		return home + "/Library/Application Support/agentsh"
+	default:
+		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+			return xdg + "/agentsh"
+		}
+		return home + "/.local/share/agentsh"
 	}
 }
