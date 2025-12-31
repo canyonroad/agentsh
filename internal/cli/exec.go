@@ -26,6 +26,7 @@ func newExecCmd() *cobra.Command {
 	var argv0 string
 	var output string
 	var events string
+	var root string
 	c := &cobra.Command{
 		Use:   "exec SESSION_ID -- COMMAND [ARGS...]",
 		Short: "Execute a command in a session",
@@ -64,6 +65,12 @@ func newExecCmd() *cobra.Command {
 			}
 			req.IncludeEvents = evMode
 
+			// Resolve root for auto-create: use --root if provided, else $PWD
+			autoCreateRoot := strings.TrimSpace(root)
+			if autoCreateRoot == "" {
+				autoCreateRoot, _ = os.Getwd()
+			}
+
 			if pty {
 				if req.StreamOutput {
 					return fmt.Errorf("--pty and --stream are mutually exclusive")
@@ -72,13 +79,14 @@ func newExecCmd() *cobra.Command {
 					return fmt.Errorf("--pty requires --output=shell")
 				}
 				return execPTYRunner(cmd.Context(), getClientConfig(cmd), sessionID, execPTYRequest{
-					Command:    req.Command,
-					Args:       req.Args,
-					Argv0:      req.Argv0,
-					WorkingDir: req.WorkingDir,
-					Env:        req.Env,
-					Timeout:    req.Timeout,
-					Stdin:      req.Stdin,
+					Command:        req.Command,
+					Args:           req.Args,
+					Argv0:          req.Argv0,
+					WorkingDir:     req.WorkingDir,
+					Env:            req.Env,
+					Timeout:        req.Timeout,
+					Stdin:          req.Stdin,
+					AutoCreateRoot: autoCreateRoot,
 				})
 			}
 
@@ -94,7 +102,7 @@ func newExecCmd() *cobra.Command {
 			}
 
 			if req.StreamOutput {
-				return execStream(cmd, cl, cfg.serverAddr, sessionID, req, outMode)
+				return execStream(cmd, cl, cfg.serverAddr, sessionID, req, outMode, autoCreateRoot)
 			}
 
 			resp, err := cl.Exec(cmd.Context(), sessionID, req)
@@ -112,9 +120,8 @@ func newExecCmd() *cobra.Command {
 					return ok && st.Code() == codes.NotFound
 				}
 				if (errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found")) || grpcNotFound(err) {
-					wd, wdErr := os.Getwd()
-					if wdErr == nil {
-						if _, createErr := cl.CreateSessionWithID(cmd.Context(), sessionID, wd, ""); createErr == nil {
+					if autoCreateRoot != "" {
+						if _, createErr := cl.CreateSessionWithID(cmd.Context(), sessionID, autoCreateRoot, ""); createErr == nil {
 							resp, err = cl.Exec(cmd.Context(), sessionID, req)
 						}
 					}
@@ -156,10 +163,11 @@ func newExecCmd() *cobra.Command {
 	c.Flags().StringVar(&argv0, "argv0", "", "Override argv[0] for the executed process")
 	c.Flags().StringVar(&output, "output", getenvDefault("AGENTSH_OUTPUT", "shell"), "Output format: shell|json")
 	c.Flags().StringVar(&events, "events", getenvDefault("AGENTSH_EVENTS", ""), "Events to include in response: all|summary|blocked|none (default depends on --output)")
+	c.Flags().StringVar(&root, "root", "", "Root directory for auto-creating session if it doesn't exist (defaults to $PWD)")
 	return c
 }
 
-func execStream(cmd *cobra.Command, cl client.CLIClient, serverAddr, sessionID string, req types.ExecRequest, output string) error {
+func execStream(cmd *cobra.Command, cl client.CLIClient, serverAddr, sessionID string, req types.ExecRequest, output string, autoCreateRoot string) error {
 	body, err := cl.ExecStream(cmd.Context(), sessionID, req)
 	if err != nil && !autoDisabled() && isConnectionError(err) {
 		if startErr := ensureServerRunning(cmd.Context(), serverAddr, cmd.ErrOrStderr()); startErr == nil {
@@ -175,9 +183,8 @@ func execStream(cmd *cobra.Command, cl client.CLIClient, serverAddr, sessionID s
 			return ok && st.Code() == codes.NotFound
 		}
 		if (errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found")) || grpcNotFound(err) {
-			wd, wdErr := os.Getwd()
-			if wdErr == nil {
-				if _, createErr := cl.CreateSessionWithID(cmd.Context(), sessionID, wd, ""); createErr == nil {
+			if autoCreateRoot != "" {
+				if _, createErr := cl.CreateSessionWithID(cmd.Context(), sessionID, autoCreateRoot, ""); createErr == nil {
 					body, err = cl.ExecStream(cmd.Context(), sessionID, req)
 				}
 			}

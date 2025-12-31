@@ -27,13 +27,14 @@ import (
 )
 
 type execPTYRequest struct {
-	Command    string
-	Args       []string
-	Argv0      string
-	WorkingDir string
-	Env        map[string]string
-	Timeout    string
-	Stdin      string
+	Command        string
+	Args           []string
+	Argv0          string
+	WorkingDir     string
+	Env            map[string]string
+	Timeout        string
+	Stdin          string
+	AutoCreateRoot string
 }
 
 type ptyTermState struct {
@@ -142,16 +143,19 @@ func execPTYWithDeps(ctx context.Context, cfg *clientConfig, sessionID string, r
 		return nil
 	}
 	if !autoDisabled() && errors.Is(err, errPTYSessionNotFound) {
-		cl, clErr := client.NewForCLI(client.CLIOptions{
-			HTTPBaseURL: cfg.serverAddr,
-			GRPCAddr:    cfg.grpcAddr,
-			APIKey:      cfg.apiKey,
-			Transport:   cfg.transport,
-		})
-		if clErr == nil {
-			wd, wdErr := os.Getwd()
-			if wdErr == nil {
-				if _, createErr := cl.CreateSessionWithID(ctx, sessionID, wd, ""); createErr == nil {
+		autoCreateRoot := strings.TrimSpace(req.AutoCreateRoot)
+		if autoCreateRoot == "" {
+			autoCreateRoot, _ = os.Getwd()
+		}
+		if autoCreateRoot != "" {
+			cl, clErr := client.NewForCLI(client.CLIOptions{
+				HTTPBaseURL: cfg.serverAddr,
+				GRPCAddr:    cfg.grpcAddr,
+				APIKey:      cfg.apiKey,
+				Transport:   cfg.transport,
+			})
+			if clErr == nil {
+				if _, createErr := cl.CreateSessionWithID(ctx, sessionID, autoCreateRoot, ""); createErr == nil {
 					err = try()
 				}
 			}
