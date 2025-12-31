@@ -124,7 +124,7 @@ func startServerContainer(t *testing.T, ctx context.Context, bin, configPath, po
 	req := testcontainers.ContainerRequest{
 		Image:        "debian:bookworm-slim",
 		ExposedPorts: []string{"8080/tcp"},
-		Cmd:          []string{"sh", "-c", "apt-get update && apt-get install -y -qq fuse3 >/dev/null 2>&1 && /usr/local/bin/agentsh server --config /config.yaml"},
+		Cmd:          []string{"sh", "-c", "apt-get update && apt-get install -y fuse3 && which fusermount3 && /usr/local/bin/agentsh server --config /config.yaml"},
 		Mounts:       binds,
 		Privileged:   true,
 		CapAdd:       []string{"SYS_ADMIN"},
