@@ -124,6 +124,8 @@ func (a *App) Router() http.Handler {
 	r.Get(a.cfg.Health.ReadinessPath, func(w http.ResponseWriter, r *http.Request) { writeText(w, http.StatusOK, "ready\n") })
 
 	r.Route("/api/v1", func(r chi.Router) {
+		r.Get("/profiles", a.handleListProfiles)
+
 		r.Post("/sessions", a.createSession)
 		r.Get("/sessions", a.listSessions)
 		r.Get("/sessions/{id}", a.getSession)
