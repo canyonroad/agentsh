@@ -53,6 +53,10 @@ type Session struct {
 
 	netnsName  string
 	netnsClose func() error
+
+	// Multi-mount support
+	Profile string          // Profile name if using multi-mount
+	Mounts  []ResolvedMount // Active mounts (empty if legacy single-mount)
 }
 
 type Manager struct {
@@ -158,12 +162,24 @@ func (m *Manager) Destroy(id string) bool {
 func (s *Session) Snapshot() types.Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	var mounts []types.MountInfo
+	for _, m := range s.Mounts {
+		mounts = append(mounts, types.MountInfo{
+			Path:       m.Path,
+			Policy:     m.Policy,
+			MountPoint: m.MountPoint,
+		})
+	}
+
 	return types.Session{
 		ID:        s.ID,
 		State:     s.State,
 		CreatedAt: s.CreatedAt,
 		Workspace: s.Workspace,
 		Policy:    s.Policy,
+		Profile:   s.Profile,
+		Mounts:    mounts,
 		Cwd:       s.Cwd,
 	}
 }
@@ -715,6 +731,13 @@ func (s *Session) cleanup() {
 	// Close proxy
 	s.CloseProxy()
 
-	// Unmount workspace
+	// Unmount all mounts (multi-mount)
+	for i := range s.Mounts {
+		if s.Mounts[i].Unmount != nil {
+			_ = s.Mounts[i].Unmount()
+		}
+	}
+
+	// Unmount workspace (legacy single-mount)
 	s.UnmountWorkspace()
 }
