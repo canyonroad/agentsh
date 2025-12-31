@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/client"
 	"github.com/agentsh/agentsh/internal/report"
@@ -185,9 +186,9 @@ func loadReportFromDB(ctx context.Context, dbPath, sessionArg string) (types.Ses
 			}
 		}
 		var latestID string
-		var latestTime = events[0].Timestamp
+		var latestTime time.Time
 		for sid, ev := range sessions {
-			if ev.Timestamp.After(latestTime) {
+			if latestID == "" || ev.Timestamp.After(latestTime) {
 				latestTime = ev.Timestamp
 				latestID = sid
 			}
