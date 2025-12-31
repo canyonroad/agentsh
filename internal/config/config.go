@@ -323,12 +323,51 @@ func LoadWithSource(path string, source ConfigSource) (*Config, ConfigSource, er
 	return &cfg, source, nil
 }
 
-// applyDefaultsWithSource is a temporary stub until Task 3 implements the full version.
-func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string) {
-	applyDefaults(cfg)
+// getDefaultDataDir returns the appropriate data directory based on config source.
+func getDefaultDataDir(source ConfigSource, configPath string) string {
+	switch source {
+	case ConfigSourceEnv:
+		// Use the directory containing the config file
+		if configPath != "" {
+			return filepath.Dir(configPath)
+		}
+		return GetUserDataDir()
+	case ConfigSourceUser:
+		return GetUserDataDir()
+	case ConfigSourceSystem:
+		return GetDataDir()
+	default:
+		return GetDataDir()
+	}
 }
 
-func applyDefaults(cfg *Config) {
+// getDefaultPoliciesDir returns the appropriate policies directory based on config source.
+func getDefaultPoliciesDir(source ConfigSource, configPath string) string {
+	switch source {
+	case ConfigSourceEnv:
+		// Use policies subdir of config file location
+		if configPath != "" {
+			return filepath.Join(filepath.Dir(configPath), "policies")
+		}
+		return GetUserConfigDir() + "/policies"
+	case ConfigSourceUser:
+		return GetUserConfigDir() + "/policies"
+	case ConfigSourceSystem:
+		return GetPoliciesDir()
+	default:
+		return GetPoliciesDir()
+	}
+}
+
+// applyDefaultsWithSource applies default values based on the config source.
+// This enables source-aware default path resolution:
+// - User config: defaults use ~/.local/share/agentsh/ and ~/.config/agentsh/
+// - System config: defaults use /var/lib/agentsh/ and /etc/agentsh/
+// - Env config: defaults use the directory containing the config file
+func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string) {
+	dataDir := getDefaultDataDir(source, configPath)
+	policiesDir := getDefaultPoliciesDir(source, configPath)
+
 	// Platform defaults
 	if cfg.Platform.Mode == "" {
 		cfg.Platform.Mode = "auto"
@@ -367,8 +406,10 @@ func applyDefaults(cfg *Config) {
 	if cfg.Auth.APIKey.HeaderName == "" {
 		cfg.Auth.APIKey.HeaderName = "X-API-Key"
 	}
+
+	// Use source-aware data directory for sessions
 	if cfg.Sessions.BaseDir == "" {
-		cfg.Sessions.BaseDir = "/var/lib/agentsh/sessions"
+		cfg.Sessions.BaseDir = filepath.Join(dataDir, "sessions")
 	}
 	if cfg.Sessions.MaxSessions <= 0 {
 		cfg.Sessions.MaxSessions = 100
@@ -460,6 +501,11 @@ func applyDefaults(cfg *Config) {
 	if cfg.Sandbox.Cgroups.BasePath == "" {
 		cfg.Sandbox.Cgroups.BasePath = ""
 	}
+
+	// Use source-aware policies directory
+	if cfg.Policies.Dir == "" {
+		cfg.Policies.Dir = policiesDir
+	}
 	if cfg.Policies.Default == "" {
 		cfg.Policies.Default = "default"
 	}
@@ -472,9 +518,10 @@ func applyDefaults(cfg *Config) {
 	if cfg.Health.ReadinessPath == "" {
 		cfg.Health.ReadinessPath = "/ready"
 	}
+
+	// Use source-aware data directory for SQLite
 	if cfg.Audit.Storage.SQLitePath == "" {
-		// Default DB path adjacent to sessions base dir (e.g., /var/lib/agentsh/events.db).
-		cfg.Audit.Storage.SQLitePath = "/var/lib/agentsh/events.db"
+		cfg.Audit.Storage.SQLitePath = filepath.Join(dataDir, "events.db")
 	}
 	if cfg.Audit.Rotation.MaxSizeMB == 0 {
 		cfg.Audit.Rotation.MaxSizeMB = 500
@@ -500,6 +547,11 @@ func applyDefaults(cfg *Config) {
 	if cfg.Development.PProf.Addr == "" {
 		cfg.Development.PProf.Addr = "localhost:6060"
 	}
+}
+
+// applyDefaults wraps applyDefaultsWithSource for backward compatibility.
+func applyDefaults(cfg *Config) {
+	applyDefaultsWithSource(cfg, ConfigSourceSystem, "")
 }
 
 func applyEnvOverrides(cfg *Config) {

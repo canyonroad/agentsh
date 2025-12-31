@@ -336,3 +336,67 @@ func TestLoadWithSource(t *testing.T) {
 		t.Errorf("LoadWithSource() cfg.Platform.Mode = %q, want %q", cfg.Platform.Mode, "auto")
 	}
 }
+
+func TestApplyDefaultsWithSource_UserSource(t *testing.T) {
+	cfg := &Config{}
+	applyDefaultsWithSource(cfg, ConfigSourceUser, "")
+
+	// Sessions.BaseDir should use user data dir
+	userDataDir := GetUserDataDir()
+	wantSessionsDir := userDataDir + "/sessions"
+	if cfg.Sessions.BaseDir != wantSessionsDir {
+		t.Errorf("Sessions.BaseDir = %q, want %q", cfg.Sessions.BaseDir, wantSessionsDir)
+	}
+
+	// Audit.Storage.SQLitePath should use user data dir
+	wantSQLitePath := userDataDir + "/events.db"
+	if cfg.Audit.Storage.SQLitePath != wantSQLitePath {
+		t.Errorf("Audit.Storage.SQLitePath = %q, want %q", cfg.Audit.Storage.SQLitePath, wantSQLitePath)
+	}
+}
+
+func TestApplyDefaultsWithSource_SystemSource(t *testing.T) {
+	cfg := &Config{}
+	applyDefaultsWithSource(cfg, ConfigSourceSystem, "")
+
+	// Sessions.BaseDir should use system data dir
+	systemDataDir := GetDataDir()
+	wantSessionsDir := systemDataDir + "/sessions"
+	if cfg.Sessions.BaseDir != wantSessionsDir {
+		t.Errorf("Sessions.BaseDir = %q, want %q", cfg.Sessions.BaseDir, wantSessionsDir)
+	}
+
+	// Audit.Storage.SQLitePath should use system data dir
+	wantSQLitePath := systemDataDir + "/events.db"
+	if cfg.Audit.Storage.SQLitePath != wantSQLitePath {
+		t.Errorf("Audit.Storage.SQLitePath = %q, want %q", cfg.Audit.Storage.SQLitePath, wantSQLitePath)
+	}
+}
+
+func TestApplyDefaultsWithSource_EnvSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "custom", "config.yaml")
+	os.MkdirAll(filepath.Dir(configPath), 0755)
+
+	cfg := &Config{}
+	applyDefaultsWithSource(cfg, ConfigSourceEnv, configPath)
+
+	// Should derive data dir from config path location
+	wantDataDir := filepath.Join(tmpDir, "custom")
+	wantSessionsDir := wantDataDir + "/sessions"
+	if cfg.Sessions.BaseDir != wantSessionsDir {
+		t.Errorf("Sessions.BaseDir = %q, want %q", cfg.Sessions.BaseDir, wantSessionsDir)
+	}
+}
+
+func TestApplyDefaultsWithSource_PoliciesDir(t *testing.T) {
+	cfg := &Config{}
+	applyDefaultsWithSource(cfg, ConfigSourceUser, "")
+
+	// Policies.Dir should use user config dir
+	userConfigDir := GetUserConfigDir()
+	wantPoliciesDir := userConfigDir + "/policies"
+	if cfg.Policies.Dir != wantPoliciesDir {
+		t.Errorf("Policies.Dir = %q, want %q", cfg.Policies.Dir, wantPoliciesDir)
+	}
+}
