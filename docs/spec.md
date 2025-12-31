@@ -1427,9 +1427,10 @@ agentsh
 ├── report      Generate session activity report
 ├── approve     Handle pending approvals
 ├── policy      Manage policies
-│   ├── list    List policies
-│   ├── show    Show policy details
-│   └── validate Validate policy file
+│   ├── list     List policies
+│   ├── show     Show policy details
+│   ├── validate Validate policy file
+│   └── generate Generate policy from session activity
 ├── trash       Inspect/restore/purge soft-deleted files
 │   ├── list    Show diverted files (supports --session, --json)
 │   ├── restore Restore by token (optional --dest, --force-overwrite)
@@ -1655,6 +1656,76 @@ Reports automatically detect and highlight:
 | Redirected operations | Info | Commands/paths substituted by policy |
 | Granted approvals | Info | Operations approved by operator |
 | Failed commands | Info | Non-zero exit codes |
+
+## agentsh policy generate
+
+Generate restrictive policies from observed session behavior ("profile-then-lock" workflow).
+
+### Synopsis
+
+```
+agentsh policy generate <session-id|latest> [flags]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `session-id` | Session UUID to analyze |
+| `latest` | Use the most recent session |
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--output` | Write policy to file instead of stdout |
+| `--name` | Policy name (default: generated-<session-id>) |
+| `--threshold` | Files in same dir before collapsing to glob (default: 5) |
+| `--include-blocked` | Include blocked ops as comments (default: true) |
+| `--arg-patterns` | Generate arg patterns for risky commands (default: true) |
+| `--direct-db` | Query local database directly (offline mode) |
+| `--db-path` | Path to events database |
+
+### Examples
+
+```bash
+# Generate policy from latest session
+agentsh policy generate latest --output=ci-policy.yaml
+
+# Generate with custom name and threshold
+agentsh policy generate abc123 --name=production-build --threshold=10
+
+# Quick preview to stdout
+agentsh policy generate latest
+```
+
+### Generated Policy Features
+
+**Path Grouping:**
+- When multiple files in the same directory exceed threshold, collapses to glob pattern
+- Example: 10 files in `/workspace/src/` becomes `/workspace/src/**`
+- Common parent directories are also collapsed when subdirectories exceed threshold
+
+**Domain Grouping:**
+- Multiple subdomains of the same base domain collapse to wildcard
+- Example: `api.github.com`, `raw.github.com` becomes `*.github.com`
+
+**Risky Command Detection:**
+- Built-in list: curl, wget, ssh, rm, sudo, docker, pip, etc.
+- Commands observed making network calls marked as risky
+- Commands observed deleting files marked as risky
+- Risky commands get arg patterns to restrict allowed arguments
+
+**Provenance Comments:**
+- Each rule includes comment with event count and time range
+- Sample paths/domains shown for reference
+- Blocked operations included as commented-out rules
+
+### Use Cases
+
+- **CI/CD lockdown**: Profile a build/test run, lock future runs to that behavior
+- **Agent sandboxing**: Let an AI agent run a task, generate policy for future runs
+- **Container profiling**: Profile a workload, generate minimal policy for production
 
 ---
 

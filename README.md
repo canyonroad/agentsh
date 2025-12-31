@@ -318,6 +318,35 @@ See [CI/CD Integration Guide](docs/cicd-integration.md) for pipeline examples.
 
 ---
 
+### Policy Generation
+
+Generate restrictive policies from observed session behavior ("profile-then-lock" workflow):
+
+```bash
+# Generate policy from latest session
+agentsh policy generate latest --output=ci-policy.yaml
+
+# Generate with custom name and threshold
+agentsh policy generate abc123 --name=production-build --threshold=10
+
+# Quick preview to stdout
+agentsh policy generate latest
+```
+
+The generated policy:
+- Allows only operations observed during the session
+- Groups paths into globs when many files in same directory
+- Collapses subdomains into wildcards (e.g., `*.github.com`)
+- Flags risky commands (curl, wget, rm) with arg patterns
+- Includes blocked operations as commented-out rules for review
+
+**Use cases:**
+- **CI/CD lockdown**: Profile a build/test run, lock future runs to that behavior
+- **Agent sandboxing**: Let an AI agent run a task, generate policy for future runs
+- **Container profiling**: Profile a workload, generate minimal policy for production
+
+---
+
 ## Starter policy packs
 
 You already have a default policy (`configs/policies/default.yaml`). These opinionated packs are available as separate files so teams can pick one:
