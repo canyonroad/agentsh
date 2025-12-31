@@ -302,6 +302,32 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// LoadWithSource loads config from path and returns the config along with its source.
+// The source parameter indicates where this config path came from.
+func LoadWithSource(path string, source ConfigSource) (*Config, ConfigSource, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, source, fmt.Errorf("read config: %w", err)
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		return nil, source, fmt.Errorf("parse config: %w", err)
+	}
+
+	applyDefaultsWithSource(&cfg, source, path)
+	applyEnvOverrides(&cfg)
+	if err := validateConfig(&cfg); err != nil {
+		return nil, source, err
+	}
+	return &cfg, source, nil
+}
+
+// applyDefaultsWithSource is a temporary stub until Task 3 implements the full version.
+func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string) {
+	applyDefaults(cfg)
+}
+
 func applyDefaults(cfg *Config) {
 	// Platform defaults
 	if cfg.Platform.Mode == "" {

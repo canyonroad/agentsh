@@ -315,3 +315,24 @@ func TestParseByteSize(t *testing.T) {
 		t.Fatalf("expected error for invalid size")
 	}
 }
+
+func TestLoadWithSource(t *testing.T) {
+	// Create a temp config file
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := []byte("platform:\n  mode: auto\n")
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, source, err := LoadWithSource(configPath, ConfigSourceUser)
+	if err != nil {
+		t.Fatalf("LoadWithSource() error = %v", err)
+	}
+	if source != ConfigSourceUser {
+		t.Errorf("LoadWithSource() source = %v, want %v", source, ConfigSourceUser)
+	}
+	if cfg.Platform.Mode != "auto" {
+		t.Errorf("LoadWithSource() cfg.Platform.Mode = %q, want %q", cfg.Platform.Mode, "auto")
+	}
+}
