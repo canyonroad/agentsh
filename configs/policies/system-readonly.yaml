@@ -1,0 +1,15 @@
+version: 1
+name: system-readonly
+description: Built-in read-only policy for system paths
+
+file_rules:
+  - name: allow-readonly
+    paths: ["/**"]
+    operations: [read, stat, list, open, readlink]
+    decision: allow
+
+  - name: deny-write
+    paths: ["/**"]
+    operations: [write, create, delete, mkdir, rmdir, chmod, rename]
+    decision: deny
+    message: "system paths are read-only"
