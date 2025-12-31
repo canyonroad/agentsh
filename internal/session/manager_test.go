@@ -70,3 +70,31 @@ func TestManager_ReapExpired_SessionTimeoutWins(t *testing.T) {
 		t.Fatalf("expected to reap session by session_timeout, got %+v", got)
 	}
 }
+
+func TestCreateWithProfile(t *testing.T) {
+	m := NewManager(10)
+
+	mounts := []ResolvedMount{
+		{Path: "/workspace", Policy: "workspace-rw"},
+		{Path: "/config", Policy: "config-readonly"},
+	}
+
+	s, err := m.CreateWithProfile("test_id", "my-profile", "default", mounts)
+	if err != nil {
+		t.Fatalf("CreateWithProfile: %v", err)
+	}
+
+	if s.Profile != "my-profile" {
+		t.Errorf("Profile = %q, want %q", s.Profile, "my-profile")
+	}
+	if len(s.Mounts) != 2 {
+		t.Errorf("len(Mounts) = %d, want 2", len(s.Mounts))
+	}
+	if s.Policy != "default" {
+		t.Errorf("Policy = %q, want %q", s.Policy, "default")
+	}
+	// First mount path should be used as workspace
+	if s.Workspace != "/workspace" {
+		t.Errorf("Workspace = %q, want %q", s.Workspace, "/workspace")
+	}
+}

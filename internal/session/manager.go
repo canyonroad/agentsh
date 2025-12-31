@@ -80,6 +80,47 @@ func (m *Manager) Create(workspace, policy string) (*Session, error) {
 	return m.CreateWithID("", workspace, policy)
 }
 
+// CreateWithProfile creates a session with multiple mounts from a profile.
+func (m *Manager) CreateWithProfile(id, profile, basePolicy string, mounts []ResolvedMount) (*Session, error) {
+	if len(mounts) == 0 {
+		return nil, fmt.Errorf("at least one mount is required")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.sessions) >= m.maxSessions {
+		return nil, fmt.Errorf("max sessions reached")
+	}
+
+	if id == "" {
+		id = "session-" + uuid.NewString()
+	} else if !sessionIDRe.MatchString(id) {
+		return nil, ErrInvalidSessionID
+	}
+	if _, ok := m.sessions[id]; ok {
+		return nil, ErrSessionExists
+	}
+
+	// Use first mount as the "primary" workspace for legacy compatibility
+	primaryWorkspace := mounts[0].Path
+
+	now := time.Now().UTC()
+	s := &Session{
+		ID:           id,
+		State:        types.SessionStateReady,
+		CreatedAt:    now,
+		LastActivity: now,
+		Workspace:    primaryWorkspace,
+		Policy:       basePolicy,
+		Profile:      profile,
+		Mounts:       mounts,
+		Cwd:          "/workspace",
+		Env:          map[string]string{},
+	}
+	m.sessions[id] = s
+	return s, nil
+}
+
 func (m *Manager) CreateWithID(id, workspace, policy string) (*Session, error) {
 	if workspace == "" {
 		return nil, fmt.Errorf("workspace is required")
