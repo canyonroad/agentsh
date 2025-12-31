@@ -131,11 +131,14 @@ func startServerContainer(t *testing.T, ctx context.Context, bin, configPath, po
 		HostConfigModifier: func(hc *container.HostConfig) {
 			hc.SecurityOpt = []string{"apparmor:unconfined", "seccomp:unconfined"}
 			if _, err := os.Stat("/dev/fuse"); err == nil {
+				t.Log("DEBUG: /dev/fuse exists on host, adding device mapping")
 				hc.Devices = append(hc.Devices, container.DeviceMapping{
 					PathOnHost:        "/dev/fuse",
 					PathInContainer:   "/dev/fuse",
 					CgroupPermissions: "rwm",
 				})
+			} else {
+				t.Logf("DEBUG: /dev/fuse NOT found on host: %v", err)
 			}
 		},
 		WaitingFor: wait.ForHTTP("/health").
