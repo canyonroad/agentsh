@@ -28,11 +28,17 @@ func newExecCmd() *cobra.Command {
 	var events string
 	var root string
 	c := &cobra.Command{
-		Use:   "exec SESSION_ID -- COMMAND [ARGS...]",
+		Use:   "exec [SESSION_ID] -- COMMAND [ARGS...]",
 		Short: "Execute a command in a session",
-		Args:  cobra.MinimumNArgs(1),
+		Long: `Execute a command in a session.
+
+Session ID can be provided as argument or via AGENTSH_SESSION_ID env var.
+Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_ROOT env var.`,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessionID, req, err := parseExecInput(args, jsonStr, timeout, stream)
+			// Get session ID from env var if not in args
+			envSessionID := strings.TrimSpace(os.Getenv("AGENTSH_SESSION_ID"))
+			sessionID, req, err := parseExecInputWithEnv(args, jsonStr, timeout, stream, envSessionID)
 			if err != nil {
 				return err
 			}
@@ -65,8 +71,11 @@ func newExecCmd() *cobra.Command {
 			}
 			req.IncludeEvents = evMode
 
-			// Resolve root for auto-create: use --root if provided, else $PWD
+			// Resolve root for auto-create: use --root if provided, else env var, else $PWD
 			autoCreateRoot := strings.TrimSpace(root)
+			if autoCreateRoot == "" {
+				autoCreateRoot = strings.TrimSpace(os.Getenv("AGENTSH_SESSION_ROOT"))
+			}
 			if autoCreateRoot == "" {
 				autoCreateRoot, _ = os.Getwd()
 			}
