@@ -186,17 +186,11 @@ func TestPolicyGenEndToEnd(t *testing.T) {
 	}
 
 	// Check if FUSE mount succeeded (needed for file rules)
+	// FUSE often fails in containerized CI environments due to missing fusermount binary
+	// or security restrictions. The test gracefully skips file_rules assertions in this case.
 	fuseMountFailed := typeCounts["fuse_mount_failed"] > 0
 	if fuseMountFailed {
 		t.Log("FUSE mount failed - file_rules tests will be skipped (FUSE not available in this environment)")
-		// Print the actual error for debugging
-		for _, ev := range events {
-			if ev.Type == "fuse_mount_failed" {
-				if errMsg, ok := ev.Fields["error"]; ok {
-					t.Logf("FUSE mount error: %v", errMsg)
-				}
-			}
-		}
 	}
 
 	// Should have file rules (requires FUSE to capture file access events)

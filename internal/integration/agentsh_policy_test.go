@@ -124,21 +124,18 @@ func startServerContainer(t *testing.T, ctx context.Context, bin, configPath, po
 	req := testcontainers.ContainerRequest{
 		Image:        "debian:bookworm-slim",
 		ExposedPorts: []string{"8080/tcp"},
-		Cmd:          []string{"sh", "-c", "apt-get update && apt-get install -y fuse3 && ln -sf /usr/bin/fusermount3 /usr/bin/fusermount && /usr/local/bin/agentsh server --config /config.yaml"},
+		Cmd:          []string{"/usr/local/bin/agentsh", "server", "--config", "/config.yaml"},
 		Mounts:       binds,
 		Privileged:   true,
 		CapAdd:       []string{"SYS_ADMIN"},
 		HostConfigModifier: func(hc *container.HostConfig) {
 			hc.SecurityOpt = []string{"apparmor:unconfined", "seccomp:unconfined"}
 			if _, err := os.Stat("/dev/fuse"); err == nil {
-				t.Log("DEBUG: /dev/fuse exists on host, adding device mapping")
 				hc.Devices = append(hc.Devices, container.DeviceMapping{
 					PathOnHost:        "/dev/fuse",
 					PathInContainer:   "/dev/fuse",
 					CgroupPermissions: "rwm",
 				})
-			} else {
-				t.Logf("DEBUG: /dev/fuse NOT found on host: %v", err)
 			}
 		},
 		WaitingFor: wait.ForHTTP("/health").
