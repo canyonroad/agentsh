@@ -53,7 +53,7 @@ func TestPTYWebSocket_RespectsCommandPolicyDeny(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New())
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
 
 	srv := newHTTPTestServerOrSkip(t, app.Router())
 

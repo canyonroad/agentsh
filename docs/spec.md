@@ -257,6 +257,23 @@ session:
     LANG: "en_US.UTF-8"
 ```
 
+#### Mount Profiles
+
+Mount profiles define reusable configurations for sessions that need access to multiple directories with different policies:
+
+```yaml
+mount_profiles:
+  claude-agent:
+    base_policy: "default"
+    mounts:
+      - path: "/home/user/workspace"
+        policy: "workspace-rw"
+      - path: "/home/user/.config"
+        policy: "config-readonly"
+```
+
+When a session is created with a profile, each mount path gets its own FUSE mount with the specified policy. The base_policy applies to all mounts as a second layer of enforcement.
+
 #### 5.1.3 Session Data Model
 
 ```go
@@ -1268,6 +1285,12 @@ DELETE /api/v1/sessions/{id}         Destroy session
 PATCH  /api/v1/sessions/{id}         Update session config
 ```
 
+#### Profiles
+
+```
+GET    /api/v1/profiles              List available mount profiles
+```
+
 #### Command Execution
 
 ```
@@ -1305,8 +1328,9 @@ Content-Type: application/json
 
 {
   "id": "session-abc123",
-  "workspace": "/home/user/project",
-  "policy": "default",
+  "workspace": "/home/user/project",    // Optional if profile is set
+  "policy": "default",                  // Optional if profile is set
+  "profile": "claude-agent",            // Use mount profile instead of workspace/policy
   "idle_timeout": "30m",
   "resource_limits": {
     "max_memory_mb": 2048,
@@ -1318,6 +1342,8 @@ Content-Type: application/json
 }
 ```
 
+**Note:** If `profile` is set, it takes precedence over `workspace` and `policy`. Profiles define multiple mounts with per-mount policies (see [Mount Profiles](#mount-profiles)).
+
 ```http
 HTTP/1.1 201 Created
 Content-Type: application/json
@@ -1327,10 +1353,39 @@ Content-Type: application/json
   "state": "ready",
   "created": "2024-12-15T10:30:00Z",
   "workspace": "/home/user/project",
+  "profile": "claude-agent",
+  "mounts": [
+    {"path": "/home/user/project", "policy": "workspace-rw", "mount_point": "/sessions/abc123/mount-0"},
+    {"path": "/home/user/.config", "policy": "config-readonly", "mount_point": "/sessions/abc123/mount-1"}
+  ],
   "endpoints": {
     "exec": "/api/v1/sessions/session-abc123/exec",
     "events": "/api/v1/sessions/session-abc123/events"
   }
+}
+```
+
+#### List Profiles
+
+```http
+GET /api/v1/profiles HTTP/1.1
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "profiles": [
+    {
+      "name": "claude-agent",
+      "base_policy": "default",
+      "mounts": [
+        {"path": "/home/user/workspace", "policy": "workspace-rw"},
+        {"path": "/home/user/.config", "policy": "config-readonly"}
+      ]
+    }
+  ]
 }
 ```
 

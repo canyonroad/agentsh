@@ -272,6 +272,51 @@ policies:
   reload_interval: "30s"
 
 # =============================================================================
+# MOUNT PROFILES (for multi-mount sessions)
+# =============================================================================
+
+# Mount profiles allow you to define reusable configurations for sessions
+# that need access to multiple directories with different security policies.
+# Each profile specifies a base policy and a list of mount points, where
+# each mount can have its own policy for fine-grained access control.
+
+mount_profiles:
+  # Example: Claude Code agent with protected config directories
+  # Use this profile when running AI coding assistants that need workspace
+  # access but should have read-only access to configuration files.
+  claude-agent:
+    base_policy: "default"           # Base security policy for the session
+    mounts:
+      - path: "/home/user/workspace"
+        policy: "workspace-rw"       # Full read-write access to workspace
+      - path: "/home/user/.claude"
+        policy: "config-readonly"    # Read-only access to Claude config
+      - path: "/home/user/.config/claude-code"
+        policy: "config-readonly"    # Read-only access to Claude Code settings
+
+  # Example: Restricted agent with minimal access
+  # Use this profile for untrusted agents that should only access
+  # a specific project directory with limited permissions.
+  restricted:
+    base_policy: "minimal"           # Strict base policy
+    mounts:
+      - path: "/project"
+        policy: "project-only"       # Limited access to project directory
+
+  # Example: Development environment with multiple project directories
+  # Use this profile for agents that need to work across multiple
+  # related repositories with different access levels.
+  dev-multi-repo:
+    base_policy: "dev-safe"
+    mounts:
+      - path: "/home/user/projects/frontend"
+        policy: "workspace-rw"
+      - path: "/home/user/projects/backend"
+        policy: "workspace-rw"
+      - path: "/home/user/projects/shared-libs"
+        policy: "config-readonly"    # Read-only for shared libraries
+
+# =============================================================================
 # APPROVALS
 # =============================================================================
 

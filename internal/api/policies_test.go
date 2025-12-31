@@ -30,7 +30,7 @@ func newTestAppForPolicies(t *testing.T) *App {
 	mgr := session.NewManager(5)
 	store := composite.New(mockEventStore{}, nil)
 	broker := events.NewBroker()
-	return NewApp(cfg, mgr, store, nil, broker, nil, nil, nil)
+	return NewApp(cfg, mgr, store, nil, broker, nil, nil, nil, nil)
 }
 
 func TestValidatePolicyRules(t *testing.T) {
