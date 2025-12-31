@@ -404,7 +404,8 @@ func isNetworkEvent(t string) bool {
 // isCommandEvent checks if the event type is command-related.
 func isCommandEvent(t string) bool {
 	switch t {
-	case "exec", "exec_start", "exec_end", "command", "spawn":
+	case "command_started", "command_finished", "command_policy",
+		"exec", "exec_start", "exec_end", "command", "spawn":
 		return true
 	}
 	return false
