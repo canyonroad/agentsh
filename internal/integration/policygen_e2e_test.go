@@ -185,9 +185,15 @@ func TestPolicyGenEndToEnd(t *testing.T) {
 		}
 	}
 
-	// Note: file_rules require FUSE which isn't available in CI Docker containers.
-	// File rules generation is covered by unit tests. This e2e test focuses on
-	// command rules which are generated from command events.
+	// Should have file rules (requires FUSE to capture file access events)
+	if len(policy.FileRules) == 0 {
+		t.Error("Expected file_rules to be generated")
+	} else {
+		t.Logf("Generated %d file rules", len(policy.FileRules))
+		for _, r := range policy.FileRules {
+			t.Logf("  - %s: %v (%v)", r.Name, r.Paths, r.Operations)
+		}
+	}
 
 	// --- Generate YAML and validate structure ---
 	t.Log("Generating YAML output")
@@ -205,8 +211,10 @@ func TestPolicyGenEndToEnd(t *testing.T) {
 		{"version", "version: 1"},
 		{"name", "name: generated-from-e2e"},
 		{"command_rules section", "command_rules:"},
+		{"file_rules section", "file_rules:"},
 		{"ls command", `commands: ["ls"]`},
 		{"cat command", `commands: ["cat"]`},
+		{"workspace path", "/workspace"},
 	}
 
 	for _, check := range checks {
@@ -267,7 +275,10 @@ sessions:
   base_dir: "/sessions"
 sandbox:
   fuse:
-    enabled: false
+    enabled: true
+    audit:
+      enabled: true
+      mode: "monitor"
   network:
     enabled: false
 policies:

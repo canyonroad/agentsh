@@ -134,7 +134,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev pkg-config fuse3
 
       - uses: actions/setup-go@v5
         with:

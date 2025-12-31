@@ -129,6 +129,7 @@ func startServerContainer(t *testing.T, ctx context.Context, bin, configPath, po
 		Privileged:   true,
 		CapAdd:       []string{"SYS_ADMIN"},
 		HostConfigModifier: func(hc *container.HostConfig) {
+			hc.SecurityOpt = []string{"apparmor:unconfined"}
 			if _, err := os.Stat("/dev/fuse"); err == nil {
 				hc.Devices = append(hc.Devices, container.DeviceMapping{
 					PathOnHost:        "/dev/fuse",
