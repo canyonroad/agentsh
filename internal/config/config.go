@@ -9,18 +9,19 @@ import (
 )
 
 type Config struct {
-	Platform    PlatformConfig    `yaml:"platform"`
-	Server      ServerConfig      `yaml:"server"`
-	Auth        AuthConfig        `yaml:"auth"`
-	Logging     LoggingConfig     `yaml:"logging"`
-	Audit       AuditConfig       `yaml:"audit"`
-	Sessions    SessionsConfig    `yaml:"sessions"`
-	Sandbox     SandboxConfig     `yaml:"sandbox"`
-	Policies    PoliciesConfig    `yaml:"policies"`
-	Approvals   ApprovalsConfig   `yaml:"approvals"`
-	Metrics     MetricsConfig     `yaml:"metrics"`
-	Health      HealthConfig      `yaml:"health"`
-	Development DevelopmentConfig `yaml:"development"`
+	Platform      PlatformConfig             `yaml:"platform"`
+	Server        ServerConfig               `yaml:"server"`
+	Auth          AuthConfig                 `yaml:"auth"`
+	Logging       LoggingConfig              `yaml:"logging"`
+	Audit         AuditConfig                `yaml:"audit"`
+	Sessions      SessionsConfig             `yaml:"sessions"`
+	Sandbox       SandboxConfig              `yaml:"sandbox"`
+	Policies      PoliciesConfig             `yaml:"policies"`
+	MountProfiles map[string]MountProfile    `yaml:"mount_profiles"`
+	Approvals     ApprovalsConfig            `yaml:"approvals"`
+	Metrics       MetricsConfig              `yaml:"metrics"`
+	Health        HealthConfig               `yaml:"health"`
+	Development   DevelopmentConfig          `yaml:"development"`
 }
 
 // PlatformConfig configures cross-platform selection and fallback behavior.
@@ -246,6 +247,18 @@ type PoliciesConfig struct {
 	EnvShimPath  string          `yaml:"env_shim_path"`
 }
 
+// MountProfile defines a collection of mounts with policies.
+type MountProfile struct {
+	BasePolicy string      `yaml:"base_policy"`
+	Mounts     []MountSpec `yaml:"mounts"`
+}
+
+// MountSpec defines a single mount point with its policy.
+type MountSpec struct {
+	Path   string `yaml:"path"`
+	Policy string `yaml:"policy"`
+}
+
 type EnvPolicyConfig struct {
 	Allow          []string `yaml:"allow"`
 	Deny           []string `yaml:"deny"`
@@ -296,6 +309,20 @@ func Load(path string) (*Config, error) {
 
 	applyDefaults(&cfg)
 	applyEnvOverrides(&cfg)
+	if err := validateConfig(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// LoadFromBytes loads configuration from bytes without applying environment
+// overrides. This is intended for testing where env vars should not interfere.
+func LoadFromBytes(data []byte) (*Config, error) {
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	applyDefaults(&cfg)
 	if err := validateConfig(&cfg); err != nil {
 		return nil, err
 	}

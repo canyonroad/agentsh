@@ -315,3 +315,36 @@ func TestParseByteSize(t *testing.T) {
 		t.Fatalf("expected error for invalid size")
 	}
 }
+
+func TestMountProfileParsing(t *testing.T) {
+	yaml := `
+mount_profiles:
+  agent-profile:
+    base_policy: "default"
+    mounts:
+      - path: "/home/user/workspace"
+        policy: "workspace-rw"
+      - path: "/home/user/.config"
+        policy: "config-readonly"
+`
+	cfg, err := LoadFromBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	if len(cfg.MountProfiles) != 1 {
+		t.Fatalf("expected 1 profile, got %d", len(cfg.MountProfiles))
+	}
+	p := cfg.MountProfiles["agent-profile"]
+	if p.BasePolicy != "default" {
+		t.Errorf("expected base_policy=default, got %s", p.BasePolicy)
+	}
+	if len(p.Mounts) != 2 {
+		t.Errorf("expected 2 mounts, got %d", len(p.Mounts))
+	}
+	if p.Mounts[0].Path != "/home/user/workspace" {
+		t.Errorf("expected first mount path=/home/user/workspace, got %s", p.Mounts[0].Path)
+	}
+	if p.Mounts[0].Policy != "workspace-rw" {
+		t.Errorf("expected first mount policy=workspace-rw, got %s", p.Mounts[0].Policy)
+	}
+}

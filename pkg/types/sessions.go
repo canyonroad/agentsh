@@ -46,8 +46,16 @@ type Session struct {
 	CreatedAt time.Time    `json:"created_at"`
 	Workspace string       `json:"workspace"`
 	Policy    string       `json:"policy"`
+	Profile   string       `json:"profile,omitempty"`
+	Mounts    []MountInfo  `json:"mounts,omitempty"`
+	Cwd       string       `json:"cwd"`
+}
 
-	Cwd string `json:"cwd"`
+// MountInfo describes an active mount in a session.
+type MountInfo struct {
+	Path       string `json:"path"`
+	Policy     string `json:"policy"`
+	MountPoint string `json:"mount_point"`
 }
 
 // SessionStats tracks metrics for a session.
@@ -92,8 +100,9 @@ type SessionResult struct {
 
 type CreateSessionRequest struct {
 	ID        string `json:"id,omitempty"`
-	Workspace string `json:"workspace"`
+	Workspace string `json:"workspace,omitempty"`
 	Policy    string `json:"policy,omitempty"`
+	Profile   string `json:"profile,omitempty"`
 }
 
 type SessionPatchRequest struct {

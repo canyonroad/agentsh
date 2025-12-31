@@ -48,7 +48,7 @@ func TestApprovalsEndpointsRequireApproverRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, composite.New(nil, nil), engine, events.NewBroker(), apiKeyAuth, nil, metrics.New())
+	app := NewApp(cfg, sessions, composite.New(nil, nil), engine, events.NewBroker(), apiKeyAuth, nil, metrics.New(), nil)
 	h := app.Router()
 
 	// Agent key: forbidden.
@@ -82,7 +82,7 @@ func TestApprovalsEndpointsForbiddenWhenAuthDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, composite.New(nil, nil), engine, events.NewBroker(), nil, nil, metrics.New())
+	app := NewApp(cfg, sessions, composite.New(nil, nil), engine, events.NewBroker(), nil, nil, metrics.New(), nil)
 	h := app.Router()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/approvals", nil)
@@ -113,7 +113,7 @@ func TestApprovalsEndpointsForbiddenWhenDevelopmentDisableAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, composite.New(nil, nil), engine, events.NewBroker(), nil, nil, metrics.New())
+	app := NewApp(cfg, sessions, composite.New(nil, nil), engine, events.NewBroker(), nil, nil, metrics.New(), nil)
 	h := app.Router()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/approvals", nil)

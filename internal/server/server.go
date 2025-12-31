@@ -161,7 +161,8 @@ func New(cfg *config.Config) (*Server, error) {
 		apiKeyAuth = loaded
 	}
 
-	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, approvalsMgr, metricsCollector)
+	policyLoader := api.NewDefaultPolicyLoader(cfg.Policies.Dir, enforceApprovals)
+	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, approvalsMgr, metricsCollector, policyLoader)
 	router := app.Router()
 
 	readTimeoutStr := cfg.Server.HTTP.ReadTimeout

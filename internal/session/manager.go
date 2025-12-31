@@ -53,6 +53,10 @@ type Session struct {
 
 	netnsName  string
 	netnsClose func() error
+
+	// Multi-mount support
+	Profile string          // Profile name if using multi-mount
+	Mounts  []ResolvedMount // Active mounts (empty if legacy single-mount)
 }
 
 type Manager struct {
@@ -74,6 +78,47 @@ func NewManager(maxSessions int) *Manager {
 
 func (m *Manager) Create(workspace, policy string) (*Session, error) {
 	return m.CreateWithID("", workspace, policy)
+}
+
+// CreateWithProfile creates a session with multiple mounts from a profile.
+func (m *Manager) CreateWithProfile(id, profile, basePolicy string, mounts []ResolvedMount) (*Session, error) {
+	if len(mounts) == 0 {
+		return nil, fmt.Errorf("at least one mount is required")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.sessions) >= m.maxSessions {
+		return nil, fmt.Errorf("max sessions reached")
+	}
+
+	if id == "" {
+		id = "session-" + uuid.NewString()
+	} else if !sessionIDRe.MatchString(id) {
+		return nil, ErrInvalidSessionID
+	}
+	if _, ok := m.sessions[id]; ok {
+		return nil, ErrSessionExists
+	}
+
+	// Use first mount as the "primary" workspace for legacy compatibility
+	primaryWorkspace := mounts[0].Path
+
+	now := time.Now().UTC()
+	s := &Session{
+		ID:           id,
+		State:        types.SessionStateReady,
+		CreatedAt:    now,
+		LastActivity: now,
+		Workspace:    primaryWorkspace,
+		Policy:       basePolicy,
+		Profile:      profile,
+		Mounts:       mounts,
+		Cwd:          "/workspace",
+		Env:          map[string]string{},
+	}
+	m.sessions[id] = s
+	return s, nil
 }
 
 func (m *Manager) CreateWithID(id, workspace, policy string) (*Session, error) {
@@ -158,12 +203,24 @@ func (m *Manager) Destroy(id string) bool {
 func (s *Session) Snapshot() types.Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	var mounts []types.MountInfo
+	for _, m := range s.Mounts {
+		mounts = append(mounts, types.MountInfo{
+			Path:       m.Path,
+			Policy:     m.Policy,
+			MountPoint: m.MountPoint,
+		})
+	}
+
 	return types.Session{
 		ID:        s.ID,
 		State:     s.State,
 		CreatedAt: s.CreatedAt,
 		Workspace: s.Workspace,
 		Policy:    s.Policy,
+		Profile:   s.Profile,
+		Mounts:    mounts,
 		Cwd:       s.Cwd,
 	}
 }
@@ -715,6 +772,13 @@ func (s *Session) cleanup() {
 	// Close proxy
 	s.CloseProxy()
 
-	// Unmount workspace
+	// Unmount all mounts (multi-mount)
+	for i := range s.Mounts {
+		if s.Mounts[i].Unmount != nil {
+			_ = s.Mounts[i].Unmount()
+		}
+	}
+
+	// Unmount workspace (legacy single-mount)
 	s.UnmountWorkspace()
 }
