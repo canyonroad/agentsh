@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/policygen"
+	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/spf13/cobra"
 )
 
@@ -95,6 +97,102 @@ func newPolicyCmd() *cobra.Command {
 		},
 	})
 
+	// Generate subcommand
+	var (
+		genOutput       string
+		genName         string
+		genThreshold    int
+		genIncludeBlock bool
+		genArgPatterns  bool
+		genDirectDB     bool
+		genDBPath       string
+	)
+
+	generateCmd := &cobra.Command{
+		Use:   "generate <session-id|latest>",
+		Short: "Generate a policy from session activity",
+		Long: `Generate a restrictive policy based on observed session behavior.
+
+This command analyzes events from a session and creates a policy that
+would allow only the operations that were performed during that session.
+
+Examples:
+  # Generate policy from latest session
+  agentsh policy generate latest --output=ci-policy.yaml
+
+  # Generate with custom name and threshold
+  agentsh policy generate abc123 --name=production-build --threshold=10
+
+  # Quick preview to stdout
+  agentsh policy generate latest`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sessionArg := args[0]
+			ctx := cmd.Context()
+
+			var sess types.Session
+			var events []types.Event
+			var err error
+
+			if genDirectDB {
+				if genDBPath == "" {
+					genDBPath = getenvDefault("AGENTSH_DB_PATH", "./data/events.db")
+				}
+				sess, events, err = loadReportFromDB(ctx, genDBPath, sessionArg)
+			} else {
+				cfg := getClientConfig(cmd)
+				sess, events, err = loadReportFromAPI(ctx, cfg, sessionArg)
+			}
+
+			if err != nil {
+				return err
+			}
+
+			// Create generator with mock store
+			store := &memoryEventStore{events: events}
+			gen := policygen.NewGenerator(store)
+
+			opts := policygen.Options{
+				Name:           genName,
+				Threshold:      genThreshold,
+				IncludeBlocked: genIncludeBlock,
+				ArgPatterns:    genArgPatterns,
+			}
+
+			if opts.Name == "" {
+				opts.Name = fmt.Sprintf("generated-%s", truncateSessionID(sess.ID))
+			}
+
+			policy, err := gen.Generate(ctx, sess, opts)
+			if err != nil {
+				return fmt.Errorf("generate policy: %w", err)
+			}
+
+			yaml := policygen.FormatYAML(policy, opts.Name)
+
+			if genOutput != "" {
+				if err := os.WriteFile(genOutput, []byte(yaml), 0644); err != nil {
+					return fmt.Errorf("write output file: %w", err)
+				}
+				fmt.Fprintf(cmd.ErrOrStderr(), "Policy written to %s\n", genOutput)
+			} else {
+				fmt.Fprint(cmd.OutOrStdout(), yaml)
+			}
+
+			return nil
+		},
+	}
+
+	generateCmd.Flags().StringVar(&genOutput, "output", "", "Output file path (default: stdout)")
+	generateCmd.Flags().StringVar(&genName, "name", "", "Policy name (default: generated-<session-id>)")
+	generateCmd.Flags().IntVar(&genThreshold, "threshold", 5, "Files in same dir before collapsing to glob")
+	generateCmd.Flags().BoolVar(&genIncludeBlock, "include-blocked", true, "Include blocked ops as comments")
+	generateCmd.Flags().BoolVar(&genArgPatterns, "arg-patterns", true, "Generate arg patterns for risky commands")
+	generateCmd.Flags().BoolVar(&genDirectDB, "direct-db", false, "Query local database directly (offline mode)")
+	generateCmd.Flags().StringVar(&genDBPath, "db-path", "", "Path to events database")
+
+	cmd.AddCommand(generateCmd)
+
 	return cmd
 }
 
@@ -133,4 +231,11 @@ func resolvePolicyPath(dir, nameOrPath string) (string, error) {
     }
     // CLI resolution remains permissive for direct paths; allowlist enforcement is server-side.
     return policy.ResolvePolicyPath(dir, nameOrPath)
+}
+
+func truncateSessionID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
