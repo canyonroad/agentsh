@@ -18,7 +18,7 @@ func newConfigCmd() *cobra.Command {
 		Use:   "show",
 		Short: "Show resolved config (after defaults and env overrides)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadLocalConfig(path)
+			cfg, _, err := loadLocalConfig(path)
 			if err != nil {
 				return err
 			}
@@ -30,7 +30,7 @@ func newConfigCmd() *cobra.Command {
 		Use:   "validate",
 		Short: "Validate config file",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if _, err := loadLocalConfig(path); err != nil {
+			if _, _, err := loadLocalConfig(path); err != nil {
 				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "ok")

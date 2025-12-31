@@ -200,7 +200,7 @@ func resolvePolicyDir(configPath, override string) (string, error) {
 	if strings.TrimSpace(override) != "" {
 		return override, nil
 	}
-	cfg, err := loadLocalConfig(configPath)
+	cfg, _, err := loadLocalConfig(configPath)
 	if err == nil && strings.TrimSpace(cfg.Policies.Dir) != "" {
 		return cfg.Policies.Dir, nil
 	}

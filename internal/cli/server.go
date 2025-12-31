@@ -20,7 +20,7 @@ func newServerCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 
-			cfg, err := loadLocalConfig(configPath)
+			cfg, _, err := loadLocalConfig(configPath)
 			if err != nil {
 				return err
 			}
