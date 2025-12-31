@@ -457,3 +457,62 @@ func TestApplyDefaultsWithSource_EnvSource_AllPaths(t *testing.T) {
 		t.Errorf("Policies.Dir = %q, want %q", cfg.Policies.Dir, wantPoliciesDir)
 	}
 }
+
+func TestLoad_ExpandsEnvVars(t *testing.T) {
+	// Set a test env var
+	t.Setenv("TEST_AGENTSH_DIR", "/custom/test/path")
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := []byte(`
+sessions:
+  base_dir: "${TEST_AGENTSH_DIR}/sessions"
+policies:
+  dir: "$TEST_AGENTSH_DIR/policies"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	// Verify env vars were expanded
+	wantSessionsDir := "/custom/test/path/sessions"
+	if cfg.Sessions.BaseDir != wantSessionsDir {
+		t.Errorf("Sessions.BaseDir = %q, want %q", cfg.Sessions.BaseDir, wantSessionsDir)
+	}
+
+	wantPoliciesDir := "/custom/test/path/policies"
+	if cfg.Policies.Dir != wantPoliciesDir {
+		t.Errorf("Policies.Dir = %q, want %q", cfg.Policies.Dir, wantPoliciesDir)
+	}
+}
+
+func TestLoadWithSource_ExpandsEnvVars(t *testing.T) {
+	// Set a test env var
+	t.Setenv("TEST_HOME", "/home/testuser")
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := []byte(`
+audit:
+  storage:
+    sqlite_path: "${TEST_HOME}/.local/share/agentsh/events.db"
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := LoadWithSource(configPath, ConfigSourceUser)
+	if err != nil {
+		t.Fatalf("LoadWithSource() error = %v", err)
+	}
+
+	wantPath := "/home/testuser/.local/share/agentsh/events.db"
+	if cfg.Audit.Storage.SQLitePath != wantPath {
+		t.Errorf("Audit.Storage.SQLitePath = %q, want %q", cfg.Audit.Storage.SQLitePath, wantPath)
+	}
+}

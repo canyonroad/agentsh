@@ -302,8 +302,11 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
+	// Expand environment variables in config content (e.g., $HOME, ${HOME})
+	expanded := os.ExpandEnv(string(b))
+
 	var cfg Config
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
+	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
@@ -323,8 +326,11 @@ func LoadWithSource(path string, source ConfigSource) (*Config, ConfigSource, er
 		return nil, source, fmt.Errorf("read config: %w", err)
 	}
 
+	// Expand environment variables in config content (e.g., $HOME, ${HOME})
+	expanded := os.ExpandEnv(string(b))
+
 	var cfg Config
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
+	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, source, fmt.Errorf("parse config: %w", err)
 	}
 
