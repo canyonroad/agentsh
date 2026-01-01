@@ -13,8 +13,11 @@ func parseExecInput(args []string, jsonStr string, timeoutFlag string, stream bo
 }
 
 // parseExecInputWithEnv parses exec command input, using envSessionID as fallback if no session ID in args.
-// Format: [SESSION_ID] -- COMMAND [ARGS...]
-// If envSessionID is set and no explicit session ID before "--", all args are treated as the command.
+// Formats supported:
+//   - SESSION_ID -- COMMAND [ARGS...]
+//   - SESSION_ID COMMAND [ARGS...]       (no -- separator)
+//   - -- COMMAND [ARGS...]               (with AGENTSH_SESSION_ID env var)
+//   - COMMAND [ARGS...]                  (with AGENTSH_SESSION_ID env var, no --)
 func parseExecInputWithEnv(args []string, jsonStr string, timeoutFlag string, stream bool, envSessionID string) (sessionID string, req types.ExecRequest, err error) {
 	timeoutFlag = strings.TrimSpace(timeoutFlag)
 
@@ -44,20 +47,50 @@ func parseExecInputWithEnv(args []string, jsonStr string, timeoutFlag string, st
 		return sessionID, req, nil
 	}
 
-	// If env session ID is set, all args are the command
-	// If not set, first arg is session ID, rest is command
+	// Find "--" separator if present
+	dashDashIdx := -1
+	for i, arg := range args {
+		if arg == "--" {
+			dashDashIdx = i
+			break
+		}
+	}
+
 	cmdStart := 0
-	if envSessionID != "" {
-		// Use env session ID, all args are the command
-		sessionID = envSessionID
-		cmdStart = 0
-	} else if len(args) > 0 {
-		// First arg is session ID
-		sessionID = args[0]
-		cmdStart = 1
-		// Skip "--" if present after session ID
-		if len(args) > 1 && args[1] == "--" {
-			cmdStart = 2
+	if dashDashIdx >= 0 {
+		// "--" found: format is [SESSION_ID] -- COMMAND [ARGS...]
+		// Everything before "--" is potential session ID, after is command
+		if dashDashIdx == 0 {
+			// "-- COMMAND" - no session ID in args, use env
+			sessionID = envSessionID
+		} else {
+			// "SESSION_ID -- COMMAND" - session ID is in args
+			// Prefer env if set, otherwise use arg
+			if envSessionID != "" {
+				sessionID = envSessionID
+			} else {
+				sessionID = args[0]
+			}
+		}
+		cmdStart = dashDashIdx + 1
+	} else {
+		// No "--" separator (note: Cobra strips "--" before passing args)
+		if envSessionID != "" {
+			sessionID = envSessionID
+			// Check if first arg looks like a duplicate session ID
+			// This happens when shim passes session ID in both env and args,
+			// and Cobra strips the "--" separator
+			if len(args) > 0 && args[0] == envSessionID {
+				// First arg is the session ID (duplicate), skip it
+				cmdStart = 1
+			} else {
+				// All args are the command
+				cmdStart = 0
+			}
+		} else if len(args) > 0 {
+			// First arg is session ID, rest is command
+			sessionID = args[0]
+			cmdStart = 1
 		}
 	}
 
