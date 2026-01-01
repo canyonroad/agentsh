@@ -48,6 +48,19 @@ func getSysProcAttr() *syscall.SysProcAttr {
 	}
 }
 
+// getSysProcAttrStopped returns SysProcAttr for starting a process in stopped state.
+// On Windows, ptrace is not available, so this returns the same as getSysProcAttr.
+// The race condition mitigation is not available on Windows.
+func getSysProcAttrStopped() *syscall.SysProcAttr {
+	return getSysProcAttr()
+}
+
+// resumeTracedProcess resumes a process started with ptrace.
+// On Windows, ptrace is not available, so this is a no-op.
+func resumeTracedProcess(pid int) error {
+	return nil
+}
+
 // getProcessGroupID returns the process ID on Windows.
 // Windows doesn't have process groups like Unix, so we return the PID itself.
 func getProcessGroupID(pid int) int {

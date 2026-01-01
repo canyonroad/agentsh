@@ -250,7 +250,16 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		cmd.Args[0] = req.Argv0
 	}
 	cmd.Dir = workdir
-	cmd.SysProcAttr = getSysProcAttr()
+
+	// If we have a post-start hook (e.g., eBPF/cgroup), start the process in a
+	// stopped state using ptrace. This closes the race condition window where
+	// the process could make network connections before eBPF is attached.
+	startStopped := hook != nil
+	if startStopped {
+		cmd.SysProcAttr = getSysProcAttrStopped()
+	} else {
+		cmd.SysProcAttr = getSysProcAttr()
+	}
 
 	env, _ := buildPolicyEnv(policy.ResolvedEnvPolicy{}, os.Environ(), s, req.Env)
 	cmd.Env = env
@@ -287,7 +296,21 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	if cmd.Process != nil {
 		s.SetCurrentProcessPID(cmd.Process.Pid)
 		pgid = getProcessGroupID(cmd.Process.Pid)
-		if hook != nil {
+
+		// If we started with ptrace (stopped), run the hook BEFORE resuming.
+		// This ensures eBPF/cgroups are attached before the process executes.
+		if startStopped && hook != nil {
+			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
+				defer func() { _ = cleanup() }()
+			}
+			// Resume the traced process - it was stopped at first instruction
+			if resumeErr := resumeTracedProcess(cmd.Process.Pid); resumeErr != nil {
+				// Failed to resume - kill the process and return error
+				_ = killProcess(cmd.Process.Pid)
+				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("resume traced process: %w", resumeErr)
+			}
+		} else if hook != nil {
+			// Non-stopped mode (fallback) - just run the hook
 			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
 				defer func() { _ = cleanup() }()
 			}
