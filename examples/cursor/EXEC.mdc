@@ -1,0 +1,55 @@
+---
+alwaysApply: true
+---
+
+# agentsh Command Execution
+
+When executing shell commands in this codebase, use `agentsh` to run commands within a sandboxed session.
+
+## Syntax for Single Command Execution
+
+### Basic Form
+```bash
+agentsh exec SESSION_ID -- COMMAND [ARGS...]
+
+The -- separator is required between the session ID and the command.
+
+Examples
+
+agentsh exec my-session -- ls -la
+agentsh exec my-session -- npm install
+agentsh exec my-session -- go build ./...
+
+With Environment Variable (Preferred for Agents)
+
+When AGENTSH_SESSION_ID is set, all arguments after exec become the command:
+export AGENTSH_SESSION_ID=my-session
+agentsh exec -- ls -la
+agentsh exec -- npm install
+
+Auto-Create Session on First Exec
+
+If the session doesn't exist, use --root to auto-create it:
+agentsh exec my-session --root /path/to/workspace -- ls -la
+
+Or set AGENTSH_SESSION_ROOT:
+export AGENTSH_SESSION_ROOT=/path/to/workspace
+agentsh exec my-session -- ls -la
+
+Common Flags
+
+| Flag          | Description                                    |
+|---------------|------------------------------------------------|
+| --timeout 30s | Command timeout (e.g., 30s, 5m)                |
+| --output json | JSON structured output instead of shell output |
+| --stream      | Stream output as it's produced                 |
+| --pty         | Interactive PTY mode                           |
+
+Environment Variables
+
+| Variable             | Description                                    |
+|----------------------|------------------------------------------------|
+| AGENTSH_SESSION_ID   | Session ID to use (avoids passing as argument) |
+| AGENTSH_SESSION_ROOT | Root directory for auto-creating sessions      |
+| AGENTSH_SERVER       | Server URL (default: http://127.0.0.1:8080)    |
+| ```                  |                                                |
