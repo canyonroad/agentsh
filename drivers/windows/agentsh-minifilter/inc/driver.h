@@ -7,6 +7,8 @@
 #include <suppress.h>
 #include "protocol.h"
 #include "process.h"
+#include "cache.h"
+#include "filesystem.h"
 
 // Driver version
 #define AGENTSH_DRIVER_VERSION 0x00010000  // 1.0.0.0
@@ -41,14 +43,6 @@ AgentshShutdownCommunication(
 NTSTATUS
 AgentshSendPing(
     VOID
-    );
-
-// Filter callbacks
-FLT_PREOP_CALLBACK_STATUS
-AgentshPreCreate(
-    _Inout_ PFLT_CALLBACK_DATA Data,
-    _In_ PCFLT_RELATED_OBJECTS FltObjects,
-    _Flt_CompletionContext_Outptr_ PVOID *CompletionContext
     );
 
 NTSTATUS

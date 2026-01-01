@@ -4,9 +4,11 @@
 // Global data
 AGENTSH_GLOBAL_DATA AgentshData = {0};
 
-// Filter callbacks - minimal for Phase 1
+// Filter callbacks
 CONST FLT_OPERATION_REGISTRATION FilterCallbacks[] = {
     { IRP_MJ_CREATE, 0, AgentshPreCreate, NULL },
+    { IRP_MJ_WRITE, 0, AgentshPreWrite, NULL },
+    { IRP_MJ_SET_INFORMATION, 0, AgentshPreSetInfo, NULL },
     { IRP_MJ_OPERATION_END }
 };
 
@@ -26,22 +28,6 @@ CONST FLT_REGISTRATION FilterRegistration = {
     NULL,                               // NormalizeNameComponent
     NULL                                // NormalizeContextCleanup
 };
-
-// Minimal pre-create callback (just pass through for Phase 1)
-FLT_PREOP_CALLBACK_STATUS
-AgentshPreCreate(
-    _Inout_ PFLT_CALLBACK_DATA Data,
-    _In_ PCFLT_RELATED_OBJECTS FltObjects,
-    _Flt_CompletionContext_Outptr_ PVOID *CompletionContext
-    )
-{
-    UNREFERENCED_PARAMETER(Data);
-    UNREFERENCED_PARAMETER(FltObjects);
-    UNREFERENCED_PARAMETER(CompletionContext);
-
-    // Phase 1: Just pass through everything
-    return FLT_PREOP_SUCCESS_NO_CALLBACK;
-}
 
 // Instance setup - attach to all NTFS volumes
 NTSTATUS
@@ -84,6 +70,9 @@ AgentshFilterUnload(
     )
 {
     UNREFERENCED_PARAMETER(Flags);
+
+    // Shutdown policy cache
+    AgentshShutdownCache();
 
     // Shutdown process tracking
     AgentshShutdownProcessTracking();
@@ -140,9 +129,19 @@ DriverEntry(
         return status;
     }
 
+    // Initialize policy cache
+    status = AgentshInitializeCache();
+    if (!NT_SUCCESS(status)) {
+        AgentshShutdownProcessTracking();
+        AgentshShutdownCommunication();
+        FltUnregisterFilter(AgentshData.FilterHandle);
+        return status;
+    }
+
     // Start filtering
     status = FltStartFiltering(AgentshData.FilterHandle);
     if (!NT_SUCCESS(status)) {
+        AgentshShutdownCache();
         AgentshShutdownProcessTracking();
         AgentshShutdownCommunication();
         FltUnregisterFilter(AgentshData.FilterHandle);
