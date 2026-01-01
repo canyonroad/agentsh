@@ -61,8 +61,48 @@ func (c *DriverClient) UnregisterSession(sessionToken uint64) error {
 // ProcessEventHandler is called when the driver notifies about process events
 type ProcessEventHandler func(sessionToken uint64, processId, parentId uint32, createTime uint64, isCreation bool)
 
+// FileOperation represents the type of file operation
+type FileOperation uint32
+
+const (
+	FileOpCreate FileOperation = 1
+	FileOpRead   FileOperation = 2
+	FileOpWrite  FileOperation = 3
+	FileOpDelete FileOperation = 4
+	FileOpRename FileOperation = 5
+)
+
+// FileRequest represents a file policy check request from the driver
+type FileRequest struct {
+	SessionToken      uint64
+	ProcessId         uint32
+	ThreadId          uint32
+	Operation         FileOperation
+	CreateDisposition uint32
+	DesiredAccess     uint32
+	Path              string
+	RenameDest        string
+}
+
+// PolicyDecision represents a policy decision
+type PolicyDecision uint32
+
+const (
+	DecisionAllow   PolicyDecision = 0
+	DecisionDeny    PolicyDecision = 1
+	DecisionPending PolicyDecision = 2
+)
+
+// FilePolicyHandler is called when the driver requests a file policy decision
+type FilePolicyHandler func(req *FileRequest) (PolicyDecision, uint32)
+
 // SetProcessEventHandler stub for non-Windows
 func (c *DriverClient) SetProcessEventHandler(handler ProcessEventHandler) {
+	// No-op on non-Windows
+}
+
+// SetFilePolicyHandler stub for non-Windows
+func (c *DriverClient) SetFilePolicyHandler(handler FilePolicyHandler) {
 	// No-op on non-Windows
 }
 

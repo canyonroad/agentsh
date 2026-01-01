@@ -33,15 +33,51 @@ const DriverClientVersion = 0x00010000
 // ProcessEventHandler is called when the driver notifies about process events
 type ProcessEventHandler func(sessionToken uint64, processId, parentId uint32, createTime uint64, isCreation bool)
 
+// FileOperation represents the type of file operation
+type FileOperation uint32
+
+const (
+	FileOpCreate FileOperation = 1
+	FileOpRead   FileOperation = 2
+	FileOpWrite  FileOperation = 3
+	FileOpDelete FileOperation = 4
+	FileOpRename FileOperation = 5
+)
+
+// FileRequest represents a file policy check request from the driver
+type FileRequest struct {
+	SessionToken      uint64
+	ProcessId         uint32
+	ThreadId          uint32
+	Operation         FileOperation
+	CreateDisposition uint32
+	DesiredAccess     uint32
+	Path              string
+	RenameDest        string
+}
+
+// PolicyDecision represents a policy decision
+type PolicyDecision uint32
+
+const (
+	DecisionAllow   PolicyDecision = 0
+	DecisionDeny    PolicyDecision = 1
+	DecisionPending PolicyDecision = 2
+)
+
+// FilePolicyHandler is called when the driver requests a file policy decision
+type FilePolicyHandler func(req *FileRequest) (PolicyDecision, uint32)
+
 // DriverClient communicates with the agentsh.sys mini filter
 type DriverClient struct {
-	port           windows.Handle
-	connected      atomic.Bool
-	stopChan       chan struct{}
-	wg             sync.WaitGroup
-	mu             sync.Mutex
-	msgCounter     atomic.Uint64
-	processHandler ProcessEventHandler
+	port              windows.Handle
+	connected         atomic.Bool
+	stopChan          chan struct{}
+	wg                sync.WaitGroup
+	mu                sync.Mutex
+	msgCounter        atomic.Uint64
+	processHandler    ProcessEventHandler
+	filePolicyHandler FilePolicyHandler
 }
 
 // NewDriverClient creates a new driver client
@@ -132,6 +168,13 @@ func (c *DriverClient) SetProcessEventHandler(handler ProcessEventHandler) {
 	c.processHandler = handler
 }
 
+// SetFilePolicyHandler sets the callback for file policy requests
+func (c *DriverClient) SetFilePolicyHandler(handler FilePolicyHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.filePolicyHandler = handler
+}
+
 // messageLoop handles incoming messages from the driver
 func (c *DriverClient) messageLoop() {
 	defer c.wg.Done()
@@ -180,6 +223,8 @@ func (c *DriverClient) handleMessage(msg []byte, reply []byte) int {
 	switch msgType {
 	case MsgPing:
 		return c.handlePing(msg, reply, requestId)
+	case MsgPolicyCheckFile:
+		return c.handleFilePolicyCheck(msg, reply)
 	case MsgProcessCreated:
 		return c.handleProcessEvent(msg, true)
 	case MsgProcessTerminated:
@@ -223,6 +268,56 @@ func (c *DriverClient) handleProcessEvent(msg []byte, isCreation bool) int {
 	}
 
 	return 0 // No reply needed for notifications
+}
+
+// handleFilePolicyCheck handles file policy check requests from driver
+func (c *DriverClient) handleFilePolicyCheck(msg []byte, reply []byte) int {
+	// Minimum size: header(16) + token(8) + pid(4) + tid(4) + op(4) + disp(4) + access(4)
+	const minSize = 16 + 8 + 4 + 4 + 4 + 4 + 4
+	if len(msg) < minSize {
+		return 0
+	}
+
+	req := &FileRequest{
+		SessionToken:      binary.LittleEndian.Uint64(msg[16:24]),
+		ProcessId:         binary.LittleEndian.Uint32(msg[24:28]),
+		ThreadId:          binary.LittleEndian.Uint32(msg[28:32]),
+		Operation:         FileOperation(binary.LittleEndian.Uint32(msg[32:36])),
+		CreateDisposition: binary.LittleEndian.Uint32(msg[36:40]),
+		DesiredAccess:     binary.LittleEndian.Uint32(msg[40:44]),
+	}
+
+	// Decode path (UTF-16LE)
+	const maxPath = 520
+	if len(msg) >= 44+maxPath*2 {
+		req.Path = utf16Decode(msg[44 : 44+maxPath*2])
+	}
+	if len(msg) >= 44+maxPath*4 {
+		req.RenameDest = utf16Decode(msg[44+maxPath*2 : 44+maxPath*4])
+	}
+
+	// Get handler
+	c.mu.Lock()
+	handler := c.filePolicyHandler
+	c.mu.Unlock()
+
+	// Default to allow
+	decision := DecisionAllow
+	cacheTTL := uint32(5000)
+
+	if handler != nil {
+		decision, cacheTTL = handler(req)
+	}
+
+	// Build response: header(16) + decision(4) + cacheTTL(4)
+	requestId := binary.LittleEndian.Uint64(msg[8:16])
+	binary.LittleEndian.PutUint32(reply[0:4], MsgPolicyCheckFile)
+	binary.LittleEndian.PutUint32(reply[4:8], 24)
+	binary.LittleEndian.PutUint64(reply[8:16], requestId)
+	binary.LittleEndian.PutUint32(reply[16:20], uint32(decision))
+	binary.LittleEndian.PutUint32(reply[20:24], cacheTTL)
+
+	return 24
 }
 
 // SendPong sends a pong message to the driver (for testing)
@@ -308,6 +403,24 @@ func utf16Encode(s string) []byte {
 	// Null terminator already zero from make()
 
 	return result
+}
+
+// utf16Decode decodes UTF-16LE bytes to a Go string (stops at null terminator)
+func utf16Decode(b []byte) string {
+	if len(b) < 2 {
+		return ""
+	}
+
+	// Find null terminator
+	var runes []rune
+	for i := 0; i+1 < len(b); i += 2 {
+		r := rune(binary.LittleEndian.Uint16(b[i : i+2]))
+		if r == 0 {
+			break
+		}
+		runes = append(runes, r)
+	}
+	return string(runes)
 }
 
 // Ensure unused imports don't cause build errors
