@@ -352,7 +352,8 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 		dec.EnvPolicy = MergeEnvPolicy(e.policy.EnvPolicy, r.rule)
 		return dec
 	}
-	dec := e.wrapDecision(string(types.DecisionAllow), "", "", nil)
+	// Default deny (consistent with file_rules, network_rules, and unix_socket_rules).
+	dec := e.wrapDecision(string(types.DecisionDeny), "default-deny-commands", "", nil)
 	dec.EnvPolicy = MergeEnvPolicy(e.policy.EnvPolicy, CommandRule{})
 	return dec
 }

@@ -391,12 +391,76 @@ network_rules:
 # =============================================================================
 # COMMAND RULES (Optional pre-execution checks)
 # =============================================================================
+# Rules are evaluated in order. First match wins.
+# Order: Block dangerous -> Approve risky -> Allow safe
 
 command_rules:
   # ---------------------------------------------------------------------------
+  # Block dangerous commands (checked first!)
+  # ---------------------------------------------------------------------------
+
+  - name: block-dangerous-rm
+    description: Block recursive force delete
+    commands:
+      - rm
+    args_patterns:
+      - "*-rf*"
+      - "*-fr*"
+      - "*--force*--recursive*"
+    decision: deny
+
+  - name: block-system-commands
+    description: Block system administration commands
+    commands:
+      - shutdown
+      - reboot
+      - init
+      - systemctl
+      - service
+      - mount
+      - umount
+      - fdisk
+      - mkfs
+      - dd
+      - kill
+      - killall
+      - pkill
+    decision: deny
+
+  # ---------------------------------------------------------------------------
+  # Approve risky commands
+  # ---------------------------------------------------------------------------
+
+  - name: approve-package-install
+    description: Require approval for package installation
+    commands:
+      - npm
+      - pip
+      - pip3
+      - cargo
+      - apt
+      - apt-get
+      - yum
+    args_patterns:
+      - "install*"
+      - "add*"
+      - "update*"
+      - "upgrade*"
+    decision: approve
+    message: "Agent wants to install packages: {{.Args}}"
+
+  - name: approve-curl-wget
+    description: Require approval for downloads
+    commands:
+      - curl
+      - wget
+    decision: approve
+    message: "Agent wants to download: {{.Args}}"
+
+  # ---------------------------------------------------------------------------
   # Safe commands - no additional checks
   # ---------------------------------------------------------------------------
-  
+
   - name: allow-safe-commands
     description: Standard safe commands
     commands:
@@ -412,6 +476,7 @@ command_rules:
       - diff
       - pwd
       - echo
+      - printf
       - date
       - which
       - whoami
@@ -419,6 +484,15 @@ command_rules:
       - uname
       - env
       - printenv
+      - true
+      - false
+      - test
+      - "["
+      - sh
+      - bash
+      - zsh
+      - sh.real      # For agentsh shell shim integration
+      - bash.real    # For agentsh shell shim integration
     decision: allow
     
   - name: allow-dev-tools
@@ -439,67 +513,30 @@ command_rules:
       - cmake
     decision: allow
 
-  # ---------------------------------------------------------------------------
-  # Approve risky commands
-  # ---------------------------------------------------------------------------
-  
-  - name: approve-package-install
-    description: Require approval for package installation
+  - name: allow-file-operations
+    description: Common file operation commands
     commands:
-      - npm
-      - pip
-      - pip3
-      - cargo
-      - apt
-      - apt-get
-      - yum
-    args_patterns:
-      - "install*"
-      - "add*"
-      - "update*"
-      - "upgrade*"
-    decision: approve
-    message: "Agent wants to install packages: {{.Args}}"
-    
-  - name: approve-curl-wget
-    description: Require approval for downloads
-    commands:
-      - curl
-      - wget
-    decision: approve
-    message: "Agent wants to download: {{.Args}}"
-
-  # ---------------------------------------------------------------------------
-  # Block dangerous commands
-  # ---------------------------------------------------------------------------
-  
-  - name: block-dangerous-rm
-    description: Block recursive force delete
-    commands:
+      - cp
+      - mv
       - rm
-    args_patterns:
-      - "*-rf*"
-      - "*-fr*"
-      - "*--force*--recursive*"
-    decision: deny
-    
-  - name: block-system-commands
-    description: Block system administration commands
-    commands:
-      - shutdown
-      - reboot
-      - init
-      - systemctl
-      - service
-      - mount
-      - umount
-      - fdisk
-      - mkfs
-      - dd
-      - kill
-      - killall
-      - pkill
-    decision: deny
+      - mkdir
+      - rmdir
+      - touch
+      - chmod
+      - ln
+      - stat
+      - file
+      - basename
+      - dirname
+      - realpath
+      - readlink
+      - tee
+      - tr
+      - cut
+      - sed
+      - awk
+      - xargs
+    decision: allow
 
 # =============================================================================
 # RESOURCE LIMITS
