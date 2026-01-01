@@ -53,7 +53,9 @@ type compiledNetworkRule struct {
 
 type compiledCommandRule struct {
 	rule      CommandRule
-	commands  map[string]struct{}
+	basenames map[string]struct{} // Commands without paths (e.g., "sh") - match by basename
+	fullPaths map[string]struct{} // Commands with paths (e.g., "/bin/sh") - match exact path
+	pathGlobs []glob.Glob         // Glob patterns for paths (e.g., "/usr/*/sh")
 	argsGlobs []glob.Glob
 }
 
@@ -131,9 +133,34 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 	}
 
 	for _, r := range p.CommandRules {
-		cr := compiledCommandRule{rule: r, commands: map[string]struct{}{}}
+		cr := compiledCommandRule{
+			rule:      r,
+			basenames: map[string]struct{}{},
+			fullPaths: map[string]struct{}{},
+		}
 		for _, c := range r.Commands {
-			cr.commands[strings.ToLower(filepath.Base(c))] = struct{}{}
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			// Check if command contains a path separator
+			if strings.Contains(c, "/") {
+				// Check if it's a glob pattern (contains * or ?)
+				if strings.ContainsAny(c, "*?[") {
+					// Use '/' separator so * matches single path component only
+					g, err := glob.Compile(c, '/')
+					if err != nil {
+						return nil, fmt.Errorf("compile command rule %q path pattern %q: %w", r.Name, c, err)
+					}
+					cr.pathGlobs = append(cr.pathGlobs, g)
+				} else {
+					// Exact path match (case-sensitive on Unix, but we lowercase for consistency)
+					cr.fullPaths[strings.ToLower(c)] = struct{}{}
+				}
+			} else {
+				// Basename only match (case-insensitive)
+				cr.basenames[strings.ToLower(c)] = struct{}{}
+			}
 		}
 		for _, pat := range r.ArgsPatterns {
 			g, err := glob.Compile(pat)
@@ -264,13 +291,45 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 }
 
 func (e *Engine) CheckCommand(command string, args []string) Decision {
-	cmd := strings.ToLower(filepath.Base(command))
+	cmdLower := strings.ToLower(command)
+	cmdBase := strings.ToLower(filepath.Base(command))
+
 	for _, r := range e.compiledCommandRules {
-		if len(r.commands) > 0 {
-			if _, ok := r.commands[cmd]; !ok {
-				continue
+		// Check if command matches any of the rule's patterns
+		commandMatched := false
+
+		// If no commands specified, rule applies to all commands
+		if len(r.basenames) == 0 && len(r.fullPaths) == 0 && len(r.pathGlobs) == 0 {
+			commandMatched = true
+		} else {
+			// Check full path matches first (more specific)
+			if _, ok := r.fullPaths[cmdLower]; ok {
+				commandMatched = true
+			}
+
+			// Check path glob patterns
+			if !commandMatched {
+				for _, g := range r.pathGlobs {
+					if g.Match(cmdLower) || g.Match(command) {
+						commandMatched = true
+						break
+					}
+				}
+			}
+
+			// Check basename matches (less specific, legacy behavior)
+			if !commandMatched {
+				if _, ok := r.basenames[cmdBase]; ok {
+					commandMatched = true
+				}
 			}
 		}
+
+		if !commandMatched {
+			continue
+		}
+
+		// Check argument patterns if specified
 		if len(r.argsGlobs) > 0 && len(args) > 0 {
 			matched := false
 			for _, arg := range args {
@@ -288,6 +347,7 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 				continue
 			}
 		}
+
 		dec := e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, r.rule.RedirectTo)
 		dec.EnvPolicy = MergeEnvPolicy(e.policy.EnvPolicy, r.rule)
 		return dec
