@@ -145,6 +145,56 @@ If an approval request times out, the operation is denied. However, a patient at
 
 **Mitigation:** Audit logging; approval fatigue is a human factors problem.
 
+## Platform-Specific Limitations
+
+### macOS (darwin)
+
+macOS has significantly reduced security enforcement compared to Linux due to platform limitations:
+
+| Component | Linux | macOS | Impact |
+|-----------|-------|-------|--------|
+| File blocking | FUSE (enforced) | FSEvents (observe-only) | **File policies not enforced** |
+| Network blocking | eBPF/iptables | pf (loopback only) | **Network policies incomplete** |
+| Process isolation | Namespaces | None | No isolation between agent and host |
+| Resource limits | cgroups v2 | None | Memory/CPU limits not enforced |
+| Syscall filtering | seccomp | None | Cannot restrict syscalls |
+| Process tracking | ptrace/wait | Polling (100ms) | Processes may escape detection |
+
+**Security tiers on macOS:**
+
+| Tier | Score | Requirements | Capabilities |
+|------|-------|--------------|--------------|
+| Enterprise | 95% | ESF + Network Extension entitlements | Full enforcement (requires Apple approval) |
+| Full | 75% | FUSE-T + root | File + network blocking |
+| Network Only | 50% | pf + root | Network only, file observation |
+| Monitor Only | 25% | None | Observation only |
+| Minimal | 10% | None | Command logging only |
+
+**Current implementation status:**
+- FUSE-T mounting: **Not implemented** (detection only)
+- FSEvents fallback: **Observation only** (cannot block)
+- pf network rules: **Loopback only** (real interfaces not intercepted)
+- Endpoint Security Framework: **Not implemented** (requires entitlements)
+
+**Recommendations for macOS deployments:**
+- Use containers (Docker/Podman) with Linux for enforcement
+- Treat macOS as audit/observation mode only
+- Do not rely on file or network policy enforcement
+- Consider the security score when evaluating risk
+
+### Windows
+
+Windows support is available with different capabilities:
+
+| Component | Implementation | Status |
+|-----------|---------------|--------|
+| File monitoring | Projected FS / minifilter | Partial |
+| Network | WFP (Windows Filtering Platform) | Planned |
+| Process isolation | Job Objects + AppContainer | Available |
+| Resource limits | Job Objects | Available |
+
+See [Platform Comparison Matrix](docs/platform-comparison.md) for detailed feature support.
+
 ## Security Defaults
 
 | Component | Default |
