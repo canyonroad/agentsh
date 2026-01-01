@@ -57,3 +57,17 @@ func (c *DriverClient) RegisterSession(sessionToken uint64, rootPid uint32, work
 func (c *DriverClient) UnregisterSession(sessionToken uint64) error {
 	return fmt.Errorf("driver client only available on Windows")
 }
+
+// utf16Encode converts a Go string to UTF-16LE bytes
+func utf16Encode(s string) []byte {
+	runes := []rune(s)
+	result := make([]byte, len(runes)*2+2) // +2 for null terminator
+
+	for i, r := range runes {
+		result[i*2] = byte(r)
+		result[i*2+1] = byte(r >> 8)
+	}
+	// Null terminator already zero from make()
+
+	return result
+}
