@@ -61,8 +61,8 @@ func TestServer_HandleFileRequest(t *testing.T) {
 
 	go srv.Run(ctx)
 
-	// Wait for server to start with retry dial
-	conn := waitForServer(t, sockPath, 2*time.Second)
+	// Wait for server to start with retry dial (longer timeout for CI)
+	conn := waitForServer(t, sockPath, 5*time.Second)
 	defer conn.Close()
 
 	req := PolicyRequest{
@@ -98,8 +98,8 @@ func TestServer_HandleSessionRequest(t *testing.T) {
 
 	go srv.Run(ctx)
 
-	// Wait for server to start with retry dial
-	conn := waitForServer(t, sockPath, 2*time.Second)
+	// Wait for server to start with retry dial (longer timeout for CI)
+	conn := waitForServer(t, sockPath, 5*time.Second)
 	defer conn.Close()
 
 	req := PolicyRequest{
