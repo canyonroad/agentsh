@@ -379,6 +379,8 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 * **[Cursor](examples/cursor/)** - Cursor rules for agentsh integration
 * **[AGENTS.md](examples/agents/)** - Generic AGENTS.md snippet (works with multiple AI tools)
 
+> **Note:** These examples are for local development scenarios where running the AI agent inside a container isn't practical. For production or CI/CD environments, prefer running agents in containers with the shell shim installed—see [Use in Docker](#use-in-docker-with-the-shell-shim).
+
 ---
 
 ## References
