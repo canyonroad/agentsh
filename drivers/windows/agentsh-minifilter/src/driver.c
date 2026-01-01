@@ -85,6 +85,9 @@ AgentshFilterUnload(
 {
     UNREFERENCED_PARAMETER(Flags);
 
+    // Shutdown process tracking
+    AgentshShutdownProcessTracking();
+
     // Shutdown communication
     AgentshShutdownCommunication();
 
@@ -125,6 +128,14 @@ DriverEntry(
     // Initialize communication port
     status = AgentshInitializeCommunication(AgentshData.FilterHandle);
     if (!NT_SUCCESS(status)) {
+        FltUnregisterFilter(AgentshData.FilterHandle);
+        return status;
+    }
+
+    // Initialize process tracking
+    status = AgentshInitializeProcessTracking();
+    if (!NT_SUCCESS(status)) {
+        AgentshShutdownCommunication();
         FltUnregisterFilter(AgentshData.FilterHandle);
         return status;
     }

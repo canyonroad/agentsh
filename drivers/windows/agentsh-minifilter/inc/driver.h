@@ -6,6 +6,7 @@
 #include <dontuse.h>
 #include <suppress.h>
 #include "protocol.h"
+#include "process.h"
 
 // Driver version
 #define AGENTSH_DRIVER_VERSION 0x00010000  // 1.0.0.0
