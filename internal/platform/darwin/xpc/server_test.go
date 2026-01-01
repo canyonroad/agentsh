@@ -64,57 +64,48 @@ func TestServer_HandleFileRequest(t *testing.T) {
 	conn := waitForServer(t, srv, sockPath, 5*time.Second)
 	defer conn.Close()
 
-	req := PolicyRequest{
-		Type:      RequestTypeFile,
-		Path:      "/test/file.txt",
-		Operation: "read",
-		PID:       1234,
-	}
-	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
+	// Test file request
+	t.Run("file", func(t *testing.T) {
+		req := PolicyRequest{
+			Type:      RequestTypeFile,
+			Path:      "/test/file.txt",
+			Operation: "read",
+			PID:       1234,
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
 
-	var resp PolicyResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
 
-	if !resp.Allow {
-		t.Error("expected allow=true")
-	}
-	if resp.Rule != "test-allow" {
-		t.Errorf("rule: got %q, want %q", resp.Rule, "test-allow")
-	}
-}
+		if !resp.Allow {
+			t.Error("expected allow=true")
+		}
+		if resp.Rule != "test-allow" {
+			t.Errorf("rule: got %q, want %q", resp.Rule, "test-allow")
+		}
+	})
 
-func TestServer_HandleSessionRequest(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	// Test session request (reuse same connection)
+	t.Run("session", func(t *testing.T) {
+		req := PolicyRequest{
+			Type: RequestTypeSession,
+			PID:  1234,
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
 
-	srv := NewServer(sockPath, &mockPolicyEngine{})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
 
-	go srv.Run(ctx)
-
-	// Wait for server to be ready
-	conn := waitForServer(t, srv, sockPath, 5*time.Second)
-	defer conn.Close()
-
-	req := PolicyRequest{
-		Type: RequestTypeSession,
-		PID:  1234,
-	}
-	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-
-	var resp PolicyResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	if resp.SessionID != "session-test" {
-		t.Errorf("session_id: got %q, want %q", resp.SessionID, "session-test")
-	}
+		if resp.SessionID != "session-test" {
+			t.Errorf("session_id: got %q, want %q", resp.SessionID, "session-test")
+		}
+	})
 }
