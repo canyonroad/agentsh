@@ -1374,16 +1374,16 @@ git log --oneline -15
 
 ## Phase 3 Complete Checklist
 
-- [ ] File operation protocol messages added to protocol.h
-- [ ] Policy cache header (cache.h) created
-- [ ] Policy cache implementation (cache.c) with LRU eviction
-- [ ] Filesystem header (filesystem.h) created
-- [ ] Filesystem implementation (filesystem.c) with IRP callbacks
-- [ ] Driver updated with new callbacks and cache lifecycle
-- [ ] Visual Studio project updated with new files
-- [ ] Go client file policy handling
-- [ ] Unit tests for file request/response encoding
-- [ ] All tests pass
+- [x] File operation protocol messages added to protocol.h
+- [x] Policy cache header (cache.h) created
+- [x] Policy cache implementation (cache.c) with LRU eviction
+- [x] Filesystem header (filesystem.h) created
+- [x] Filesystem implementation (filesystem.c) with IRP callbacks
+- [x] Driver updated with new callbacks and cache lifecycle
+- [x] Visual Studio project updated with new files
+- [x] Go client file policy handling
+- [x] Unit tests for file request/response encoding
+- [x] All tests pass
 
 ## Next Steps (Phase 4)
 

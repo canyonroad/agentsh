@@ -7,7 +7,7 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | Feature | Linux | macOS ESF+NE | macOS FUSE-T | macOS Lima | Win Native | Win WSL2 |
 |---------|:-----:|:------------:|:------------:|:----------:|:----------:|:--------:|
 | **Filesystem Interception** |
-| Implementation | FUSE3 | Endpoint Security | FUSE-T (NFS) | FUSE3 | WinFsp | FUSE3 |
+| Implementation | FUSE3 | Endpoint Security | FUSE-T (NFS) | FUSE3 | Mini Filter | FUSE3 |
 | File read monitoring | Block | Block | Block | Block | Block | Block |
 | File write monitoring | Block | Block | Block | Block | Block | Block |
 | File create/delete | Block | Block | Block | Block | Block | Block |
@@ -98,8 +98,8 @@ macOS FUSE-T + pf     ███████████████████�
                       (No isolation, no syscall filter, no resource limits)
 
 Windows Native        ████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░   55%
-                      File✓   Net✓    Iso⚠      Sys✗     Res⚠
-                      (AppContainer partial, Job Objects partial)
+                      File✓   Net⚠    Iso⚠      Sys✗     Res⚠
+                      (Mini Filter driver, AppContainer partial, Job Objects partial)
 
 Legend: ✓ = Full support  ⚠ = Partial support  ✗ = Not supported
 ```
@@ -113,7 +113,7 @@ Legend: ✓ = Full support  ⚠ = Partial support  ✗ = Not supported
 | FUSE3 (Linux) | Low | 5-20µs | 3-8% | Kernel-userspace context switch |
 | FUSE-T (macOS) | Medium | 50-200µs | 10-25% | NFS protocol overhead |
 | ESF (macOS) | Very Low | 1-5µs | <2% | In-kernel, no context switch for observe |
-| WinFsp (Windows) | Low | 10-30µs | 5-10% | Similar to FUSE3 |
+| Mini Filter (Windows) | Very Low | 1-5µs | <3% | In-kernel, no userspace IPC for cached |
 | Lima VM | Medium | 20-100µs | 15-30% | VM boundary + 9p/virtiofs |
 
 ```
@@ -124,7 +124,7 @@ Native          █████████████████████�
 FUSE3           ████████████████████████████████████░░░░   92%
 ESF             ████████████████████████████████████████   98%
 FUSE-T          ████████████████████████████████░░░░░░░░   80%
-WinFsp          ████████████████████████████████████░░░░   90%
+MiniFilter       ████████████████████████████████████████   98%
 Lima/virtiofs   ████████████████████████████░░░░░░░░░░░░   70%
 
 Random I/O (many small files):
@@ -132,7 +132,7 @@ Native          █████████████████████�
 FUSE3           ████████████████████████████████░░░░░░░░   85%
 ESF             ████████████████████████████████████████   99%
 FUSE-T          ████████████████████████████░░░░░░░░░░░░   75%
-WinFsp          ████████████████████████████████░░░░░░░░   82%
+MiniFilter       ████████████████████████████████████████   97%
 Lima/virtiofs   ██████████████████████████░░░░░░░░░░░░░░   65%
 ```
 
@@ -300,8 +300,10 @@ Lima/virtiofs   █████████████████████�
 - **No syscall filtering** - no seccomp equivalent
 - **No disk I/O limits** - Job Objects don't support this
 - **No network bandwidth limits** - Job Objects don't support this
-- **WinDivert requires admin** - Administrator privileges needed
-- **Registry blocking requires driver** - Monitoring works without driver, blocking needs signed kernel driver
+- **WinDivert requires admin** - Administrator privileges needed for network interception
+- **Driver requires signing** - Mini filter driver requires test signing (dev) or EV signing (production)
+- Uses kernel-mode mini filter driver for filesystem interception (Phase 3 complete)
+- Registry blocking via CmRegisterCallbackEx planned (Phase 4)
 
 ### Windows WSL2
 - Slight overhead from VM layer
@@ -318,7 +320,7 @@ Lima/virtiofs   █████████████████████�
 | macOS ESF+NE | `make build-macos-enterprise` | Xcode 15+, Apple entitlements, code signing |
 | macOS FUSE-T | `brew install fuse-t && brew install agentsh` | root for pf network |
 | macOS Lima | `brew install lima && limactl start agentsh` | Lima VM |
-| Windows Native | `winget install agentsh` | Admin, WinFsp, WinDivert |
+| Windows Native | `sc create agentsh type=filesys` | Admin, test signing (dev) or EV cert (prod) |
 | Windows WSL2 | `wsl --install -d Ubuntu && ...` | WSL2 enabled |
 
 See [macOS Build Guide](macos-build.md) for detailed macOS build instructions.
