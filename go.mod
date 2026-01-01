@@ -23,6 +23,7 @@ require (
 	github.com/seccomp/libseccomp-golang v0.10.0
 	github.com/spf13/cobra v1.10.1
 	github.com/testcontainers/testcontainers-go v0.40.0
+	github.com/winfsp/cgofuse v1.6.0
 	go.opentelemetry.io/otel v1.39.0
 	go.opentelemetry.io/otel/trace v1.39.0
 	golang.org/x/sys v0.39.0
