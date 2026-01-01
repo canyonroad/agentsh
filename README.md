@@ -4,7 +4,7 @@
 
 agentsh sits *under* your agent/tooling—intercepting **file**, **network**, and **process** activity (including subprocess trees), enforcing the policy you define, and emitting **structured audit events**.
 
-> **Platform note:** Linux today (native or containers). macOS and Windows support available with varying capability levels - see the [Platform Comparison Matrix](docs/platform-comparison.md) for details.
+> **Platform note:** Linux provides full enforcement (100% security score). macOS supports two tiers: **ESF+NE** (90% score, requires Apple entitlements) for enterprise deployments, and **FUSE-T** (70% score) as a fallback. See the [Platform Comparison Matrix](docs/platform-comparison.md) for details.
 
 ---
 
@@ -90,12 +90,24 @@ Download the `.deb`, `.rpm`, or `.apk` for your platform from the [releases page
 sudo dpkg -i agentsh_<VERSION>_linux_amd64.deb
 ```
 
-**From source**
+**From source (Linux)**
 
 ```bash
 make build
 sudo install -m 0755 bin/agentsh bin/agentsh-shell-shim /usr/local/bin
 ```
+
+**From source (macOS)**
+
+```bash
+# FUSE-T mode (standard, requires brew install fuse-t)
+CGO_ENABLED=1 go build -o bin/agentsh ./cmd/agentsh
+
+# ESF+NE enterprise mode (requires Xcode 15+, Apple entitlements)
+make build-macos-enterprise
+```
+
+See [macOS Build Guide](docs/macos-build.md) for detailed macOS build instructions.
 
 ---
 
@@ -390,6 +402,8 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 * Default policy: [`configs/policies/default.yaml`](configs/policies/default.yaml)
 * Example Dockerfile (with shim): [`Dockerfile.example`](Dockerfile.example)
 * **Platform comparison:** [`docs/platform-comparison.md`](docs/platform-comparison.md) - feature support, security scores, performance by platform
+* **macOS build guide:** [`docs/macos-build.md`](docs/macos-build.md) - FUSE-T and ESF+NE build instructions
+* **macOS ESF+NE architecture:** [`docs/macos-esf-ne-architecture.md`](docs/macos-esf-ne-architecture.md) - System Extension, XPC, and deployment details
 * Environment variables (all `AGENTSH_*` overrides, auto-start toggles, transport selection): [`docs/spec.md` §15.3 "Environment Variables"](docs/spec.md#153-environment-variables)
 * Architecture & data flow (FUSE + policy engine + API): inline comments in [`configs/server-config.yaml`](configs/server-config.yaml) and [`internal/netmonitor`](internal/netmonitor)
 * CLI help: `agentsh --help`, `agentsh exec --help`, `agentsh shim --help`
