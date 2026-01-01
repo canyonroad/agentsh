@@ -47,3 +47,13 @@ func (c *DriverClient) Connected() bool {
 func (c *DriverClient) SendPong() error {
 	return fmt.Errorf("driver client only available on Windows")
 }
+
+// RegisterSession stub for non-Windows
+func (c *DriverClient) RegisterSession(sessionToken uint64, rootPid uint32, workspacePath string) error {
+	return fmt.Errorf("driver client only available on Windows")
+}
+
+// UnregisterSession stub for non-Windows
+func (c *DriverClient) UnregisterSession(sessionToken uint64) error {
+	return fmt.Errorf("driver client only available on Windows")
+}

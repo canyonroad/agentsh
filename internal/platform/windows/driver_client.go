@@ -203,5 +203,74 @@ func (c *DriverClient) SendPong() error {
 	return filterSendMessage(c.port, msg, nil)
 }
 
+// RegisterSession registers a session with the driver
+func (c *DriverClient) RegisterSession(sessionToken uint64, rootPid uint32, workspacePath string) error {
+	if !c.connected.Load() {
+		return fmt.Errorf("not connected")
+	}
+
+	// Build message: header (16) + token (8) + pid (4) + path (520*2)
+	const maxPath = 520
+	msgSize := 16 + 8 + 4 + (maxPath * 2)
+	msg := make([]byte, msgSize)
+
+	// Header
+	binary.LittleEndian.PutUint32(msg[0:4], MsgRegisterSession)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], c.msgCounter.Add(1))
+
+	// Session token
+	binary.LittleEndian.PutUint64(msg[16:24], sessionToken)
+
+	// Root process ID
+	binary.LittleEndian.PutUint32(msg[24:28], rootPid)
+
+	// Workspace path (UTF-16LE, null-terminated)
+	if workspacePath != "" {
+		pathBytes := utf16Encode(workspacePath)
+		maxBytes := maxPath * 2
+		if len(pathBytes) > maxBytes {
+			pathBytes = pathBytes[:maxBytes-2] // Leave room for null terminator
+		}
+		copy(msg[28:], pathBytes)
+	}
+
+	return filterSendMessage(c.port, msg, nil)
+}
+
+// UnregisterSession unregisters a session from the driver
+func (c *DriverClient) UnregisterSession(sessionToken uint64) error {
+	if !c.connected.Load() {
+		return fmt.Errorf("not connected")
+	}
+
+	// Build message: header (16) + token (8)
+	msgSize := 24
+	msg := make([]byte, msgSize)
+
+	// Header
+	binary.LittleEndian.PutUint32(msg[0:4], MsgUnregisterSession)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], c.msgCounter.Add(1))
+
+	// Session token
+	binary.LittleEndian.PutUint64(msg[16:24], sessionToken)
+
+	return filterSendMessage(c.port, msg, nil)
+}
+
+// utf16Encode converts a Go string to UTF-16LE bytes
+func utf16Encode(s string) []byte {
+	runes := []rune(s)
+	result := make([]byte, len(runes)*2+2) // +2 for null terminator
+
+	for i, r := range runes {
+		binary.LittleEndian.PutUint16(result[i*2:], uint16(r))
+	}
+	// Null terminator already zero from make()
+
+	return result
+}
+
 // Ensure unused imports don't cause build errors
 var _ = context.Background
