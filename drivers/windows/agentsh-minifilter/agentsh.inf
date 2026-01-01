@@ -1,0 +1,65 @@
+;
+; agentsh.inf - AgentSH Mini Filter Driver
+;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = "ActivityMonitor"
+ClassGuid   = {b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider    = %Provider%
+DriverVer   = 01/01/2026,1.0.0.0
+CatalogFile = agentsh.cat
+PnpLockdown = 1
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+agentsh.sys = 1
+
+[DestinationDirs]
+DefaultDestDir      = 12
+AgentSH.DriverFiles = 12
+
+[DefaultInstall.NTamd64]
+OptionDesc = %ServiceDescription%
+CopyFiles  = AgentSH.DriverFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService = %ServiceName%,,AgentSH.Service
+
+[DefaultUninstall.NTamd64]
+LegacyUninstall = 1
+DelFiles        = AgentSH.DriverFiles
+
+[DefaultUninstall.NTamd64.Services]
+DelService = %ServiceName%,0x200
+
+[AgentSH.Service]
+DisplayName      = %ServiceName%
+Description      = %ServiceDescription%
+ServiceBinary    = %12%\agentsh.sys
+Dependencies     = FltMgr
+ServiceType      = 2    ; SERVICE_FILE_SYSTEM_DRIVER
+StartType        = 3    ; SERVICE_DEMAND_START
+ErrorControl     = 1    ; SERVICE_ERROR_NORMAL
+LoadOrderGroup   = "FSFilter Activity Monitor"
+AddReg           = AgentSH.AddRegistry
+
+[AgentSH.AddRegistry]
+HKR,"Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Instances\"%Instance.Name%,"Altitude",0x00000000,%Instance.Altitude%
+HKR,"Instances\"%Instance.Name%,"Flags",0x00010001,%Instance.Flags%
+
+[AgentSH.DriverFiles]
+agentsh.sys
+
+[Strings]
+Provider           = "AgentSH"
+ServiceName        = "AgentSH"
+ServiceDescription = "AgentSH Security Monitor Mini-Filter"
+DiskName           = "AgentSH Installation Disk"
+DefaultInstance    = "AgentSH Instance"
+Instance.Name      = "AgentSH Instance"
+Instance.Altitude  = "385200"
+Instance.Flags     = 0x0
