@@ -70,10 +70,12 @@
   <ItemGroup>
     <ClCompile Include="src\driver.c" />
     <ClCompile Include="src\communication.c" />
+    <ClCompile Include="src\process.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="inc\driver.h" />
     <ClInclude Include="inc\protocol.h" />
+    <ClInclude Include="inc\process.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
