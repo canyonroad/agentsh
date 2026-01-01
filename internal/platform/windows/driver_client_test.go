@@ -187,3 +187,111 @@ func TestUtf16Encode(t *testing.T) {
 		}
 	}
 }
+
+func TestFileRequestDecoding(t *testing.T) {
+	// Build a mock file request message
+	const maxPath = 520
+	msgSize := 16 + 8 + 4 + 4 + 4 + 4 + 4 + (maxPath * 2) + (maxPath * 2)
+	msg := make([]byte, msgSize)
+
+	// Header
+	binary.LittleEndian.PutUint32(msg[0:4], MsgPolicyCheckFile)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], 12345) // Request ID
+
+	// Request fields
+	binary.LittleEndian.PutUint64(msg[16:24], 0xABCD1234) // Session token
+	binary.LittleEndian.PutUint32(msg[24:28], 5678)       // Process ID
+	binary.LittleEndian.PutUint32(msg[28:32], 9012)       // Thread ID
+	binary.LittleEndian.PutUint32(msg[32:36], uint32(FileOpWrite))
+	binary.LittleEndian.PutUint32(msg[36:40], 0)   // Create disposition
+	binary.LittleEndian.PutUint32(msg[40:44], 0x2) // Desired access
+
+	// Path: "C:\test.txt" in UTF-16LE
+	path := "C:\\test.txt"
+	pathBytes := utf16Encode(path)
+	copy(msg[44:], pathBytes)
+
+	// Decode and verify
+	sessionToken := binary.LittleEndian.Uint64(msg[16:24])
+	processId := binary.LittleEndian.Uint32(msg[24:28])
+	operation := FileOperation(binary.LittleEndian.Uint32(msg[32:36]))
+	decodedPath := utf16Decode(msg[44 : 44+maxPath*2])
+
+	if sessionToken != 0xABCD1234 {
+		t.Errorf("expected session token 0xABCD1234, got 0x%X", sessionToken)
+	}
+	if processId != 5678 {
+		t.Errorf("expected process ID 5678, got %d", processId)
+	}
+	if operation != FileOpWrite {
+		t.Errorf("expected FileOpWrite, got %d", operation)
+	}
+	if decodedPath != path {
+		t.Errorf("expected path %q, got %q", path, decodedPath)
+	}
+}
+
+func TestPolicyResponseEncoding(t *testing.T) {
+	reply := make([]byte, 24)
+
+	// Build response
+	binary.LittleEndian.PutUint32(reply[0:4], MsgPolicyCheckFile)
+	binary.LittleEndian.PutUint32(reply[4:8], 24)
+	binary.LittleEndian.PutUint64(reply[8:16], 12345) // Request ID
+	binary.LittleEndian.PutUint32(reply[16:20], uint32(DecisionDeny))
+	binary.LittleEndian.PutUint32(reply[20:24], 60000) // Cache TTL
+
+	// Decode and verify
+	decision := PolicyDecision(binary.LittleEndian.Uint32(reply[16:20]))
+	cacheTTL := binary.LittleEndian.Uint32(reply[20:24])
+
+	if decision != DecisionDeny {
+		t.Errorf("expected DecisionDeny, got %d", decision)
+	}
+	if cacheTTL != 60000 {
+		t.Errorf("expected cache TTL 60000, got %d", cacheTTL)
+	}
+}
+
+func TestUtf16Decode(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []byte
+		expected string
+	}{
+		{"simple", []byte{'A', 0, 'B', 0, 'C', 0, 0, 0}, "ABC"},
+		{"empty", []byte{0, 0}, ""},
+		{"path", []byte{'C', 0, ':', 0, '\\', 0, 0, 0}, "C:\\"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := utf16Decode(tc.input)
+			if result != tc.expected {
+				t.Errorf("utf16Decode: expected %q, got %q", tc.expected, result)
+			}
+		})
+	}
+}
+
+func TestFileOperationConstants(t *testing.T) {
+	// Verify constants match protocol.h
+	tests := []struct {
+		name     string
+		got      FileOperation
+		expected FileOperation
+	}{
+		{"FileOpCreate", FileOpCreate, 1},
+		{"FileOpRead", FileOpRead, 2},
+		{"FileOpWrite", FileOpWrite, 3},
+		{"FileOpDelete", FileOpDelete, 4},
+		{"FileOpRename", FileOpRename, 5},
+	}
+
+	for _, tc := range tests {
+		if tc.got != tc.expected {
+			t.Errorf("%s: expected %d, got %d", tc.name, tc.expected, tc.got)
+		}
+	}
+}

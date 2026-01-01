@@ -119,3 +119,21 @@ func utf16Encode(s string) []byte {
 
 	return result
 }
+
+// utf16Decode decodes UTF-16LE bytes to a Go string (stops at null terminator)
+func utf16Decode(b []byte) string {
+	if len(b) < 2 {
+		return ""
+	}
+
+	// Find null terminator
+	var runes []rune
+	for i := 0; i+1 < len(b); i += 2 {
+		r := rune(uint16(b[i]) | uint16(b[i+1])<<8)
+		if r == 0 {
+			break
+		}
+		runes = append(runes, r)
+	}
+	return string(runes)
+}
