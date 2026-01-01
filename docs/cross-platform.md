@@ -1,21 +1,21 @@
 # agentsh Cross-Platform Notes
 
-**Last updated:** December 2025
+**Last updated:** January 2026
 
-agentsh is **Linux-first**. The current implementation relies on Linux features (notably FUSE) for full workspace visibility.
+agentsh supports **Linux** and **macOS** natively. Linux provides the most complete feature set, while macOS uses FUSE-T for file policy enforcement.
 
-If you’re on Windows or macOS, the recommended approach is to run agentsh inside a Linux environment and connect to it over HTTP or the unix socket exposed inside that environment. Unix socket monitoring (seccomp user-notify) is Linux-only and currently audit-only.
+If you're on Windows, the recommended approach is to run agentsh inside WSL2 or a Linux container. Unix socket monitoring (seccomp user-notify) is Linux-only and currently audit-only.
 
 ## What works today
 
-- **Linux (native):** primary supported platform.
+- **Linux (native):** primary supported platform with full feature set.
+- **macOS (native):** FUSE-T support for file policy enforcement (requires `brew install fuse-t` and CGO).
 - **Windows:** run in **WSL2** (recommended) or a Linux container.
-- **macOS:** run in a Linux VM/container (e.g. Docker Desktop’s Linux VM, Lima, etc.).
 - **gRPC (optional):** if enabled, clients connect to `server.grpc.addr` (default `127.0.0.1:9090`). The CLI can prefer gRPC via `AGENTSH_TRANSPORT=grpc`.
 
 ## Feature availability (current implementation)
 
-- **FUSE workspace view:** Linux-only (requires FUSE3; in containers requires `/dev/fuse` + `SYS_ADMIN`).
+- **FUSE workspace view:** Linux (FUSE3) and macOS (FUSE-T). In containers requires `/dev/fuse` + `SYS_ADMIN`.
 - **Network visibility + policy enforcement:** works via the per-session proxy (DNS/connect/HTTP events).
 - **Transparent netns interception:** optional, Linux/root-only (requires privileges; proxy mode works without it).
 - **cgroups v2 limits:** optional, Linux-only; disabled by default (requires a writable cgroup base path).
@@ -28,6 +28,21 @@ If you’re on Windows or macOS, the recommended approach is to run agentsh insi
 ```bash
 agentsh server
 ```
+
+### macOS
+
+```bash
+# Install FUSE-T (required for file policy enforcement)
+brew install fuse-t
+
+# Build with CGO enabled (default on macOS)
+CGO_ENABLED=1 go build -o agentsh ./cmd/agentsh
+
+# Run the server
+agentsh server
+```
+
+**Note:** Without FUSE-T or CGO, agentsh falls back to observation-only mode using FSEvents.
 
 ### Windows (WSL2)
 
@@ -51,7 +66,8 @@ docker run --rm -it \
 
 ## Troubleshooting
 
-- **FUSE mount fails:** ensure FUSE3 is installed (host/VM) and, in Docker, `/dev/fuse` is present and `SYS_ADMIN` is allowed.
+- **FUSE mount fails (Linux):** ensure FUSE3 is installed (host/VM) and, in Docker, `/dev/fuse` is present and `SYS_ADMIN` is allowed.
+- **FUSE-T mount fails (macOS):** ensure FUSE-T is installed (`brew install fuse-t`) and the binary was built with CGO enabled.
 - **Transparent network mode fails:** run as root / with NET_ADMIN capabilities; otherwise rely on proxy mode.
 - **cgroups errors:** keep `sandbox.cgroups.enabled: false` unless you have a writable cgroup v2 base path configured.
 - **gRPC connection fails:** confirm `server.grpc.enabled: true`, the address/port are reachable, and (if auth is enabled) send the API key via gRPC metadata `x-api-key`.
