@@ -30,14 +30,18 @@ const (
 // Driver client version
 const DriverClientVersion = 0x00010000
 
+// ProcessEventHandler is called when the driver notifies about process events
+type ProcessEventHandler func(sessionToken uint64, processId, parentId uint32, createTime uint64, isCreation bool)
+
 // DriverClient communicates with the agentsh.sys mini filter
 type DriverClient struct {
-	port       windows.Handle
-	connected  atomic.Bool
-	stopChan   chan struct{}
-	wg         sync.WaitGroup
-	mu         sync.Mutex
-	msgCounter atomic.Uint64
+	port           windows.Handle
+	connected      atomic.Bool
+	stopChan       chan struct{}
+	wg             sync.WaitGroup
+	mu             sync.Mutex
+	msgCounter     atomic.Uint64
+	processHandler ProcessEventHandler
 }
 
 // NewDriverClient creates a new driver client
@@ -121,6 +125,13 @@ func (c *DriverClient) Connected() bool {
 	return c.connected.Load()
 }
 
+// SetProcessEventHandler sets the callback for process events
+func (c *DriverClient) SetProcessEventHandler(handler ProcessEventHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.processHandler = handler
+}
+
 // messageLoop handles incoming messages from the driver
 func (c *DriverClient) messageLoop() {
 	defer c.wg.Done()
@@ -169,6 +180,10 @@ func (c *DriverClient) handleMessage(msg []byte, reply []byte) int {
 	switch msgType {
 	case MsgPing:
 		return c.handlePing(msg, reply, requestId)
+	case MsgProcessCreated:
+		return c.handleProcessEvent(msg, true)
+	case MsgProcessTerminated:
+		return c.handleProcessEvent(msg, false)
 	default:
 		// Unknown message type
 		return 0
@@ -185,6 +200,29 @@ func (c *DriverClient) handlePing(msg []byte, reply []byte, requestId uint64) in
 	binary.LittleEndian.PutUint64(reply[20:28], uint64(time.Now().UnixNano()))
 
 	return 28
+}
+
+// handleProcessEvent processes process creation/termination notifications
+func (c *DriverClient) handleProcessEvent(msg []byte, isCreation bool) int {
+	// Message format: header (16) + token (8) + pid (4) + ppid (4) + createTime (8)
+	if len(msg) < 40 {
+		return 0
+	}
+
+	sessionToken := binary.LittleEndian.Uint64(msg[16:24])
+	processId := binary.LittleEndian.Uint32(msg[24:28])
+	parentId := binary.LittleEndian.Uint32(msg[28:32])
+	createTime := binary.LittleEndian.Uint64(msg[32:40])
+
+	c.mu.Lock()
+	handler := c.processHandler
+	c.mu.Unlock()
+
+	if handler != nil {
+		handler(sessionToken, processId, parentId, createTime, isCreation)
+	}
+
+	return 0 // No reply needed for notifications
 }
 
 // SendPong sends a pong message to the driver (for testing)
