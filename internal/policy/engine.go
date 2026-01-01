@@ -151,9 +151,12 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 					// Use '/' separator so * matches single path component only
 					g, err := glob.Compile(c, '/')
 					if err != nil {
-						return nil, fmt.Errorf("compile command rule %q path pattern %q: %w", r.Name, c, err)
+						// Failed to compile as glob (e.g., incomplete pattern like "[")
+						// Fall back to exact match
+						cr.fullPaths[strings.ToLower(c)] = struct{}{}
+					} else {
+						cr.pathGlobs = append(cr.pathGlobs, g)
 					}
-					cr.pathGlobs = append(cr.pathGlobs, g)
 				} else {
 					// Exact path match (case-sensitive on Unix, but we lowercase for consistency)
 					cr.fullPaths[strings.ToLower(c)] = struct{}{}
@@ -163,9 +166,12 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 				if strings.ContainsAny(c, "*?[") {
 					g, err := glob.Compile(c)
 					if err != nil {
-						return nil, fmt.Errorf("compile command rule %q basename pattern %q: %w", r.Name, c, err)
+						// Failed to compile as glob (e.g., incomplete pattern like "[")
+						// Fall back to literal match
+						cr.basenames[strings.ToLower(c)] = struct{}{}
+					} else {
+						cr.basenameGlobs = append(cr.basenameGlobs, g)
 					}
-					cr.basenameGlobs = append(cr.basenameGlobs, g)
 				} else {
 					// Literal basename match (case-insensitive)
 					cr.basenames[strings.ToLower(c)] = struct{}{}
