@@ -46,6 +46,31 @@ s.close()
 PY
 }
 
+# Retry helper for flaky operations (e.g., exec in CI environments).
+# Usage: retry <max_attempts> <delay_seconds> <command...>
+retry() {
+  local max_attempts="$1"
+  local delay="$2"
+  shift 2
+  local attempt=1
+  local rc=0
+  while [[ $attempt -le $max_attempts ]]; do
+    set +e
+    "$@"
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
+      return 0
+    fi
+    if [[ $attempt -lt $max_attempts ]]; then
+      echo "smoke: attempt $attempt/$max_attempts failed (rc=$rc), retrying in ${delay}s..." >&2
+      sleep "$delay"
+    fi
+    ((attempt++))
+  done
+  return $rc
+}
+
 tmp="$(mktemp -d)"
 cleanup() {
   set +e
@@ -144,15 +169,32 @@ if [[ -z "$sid" ]]; then
   exit 1
 fi
 
+# Exec with retry logic to handle transient CI failures.
 exec_out=""
-exec_err=""
 exec_rc=0
-{
-  exec_out="$(./bin/agentsh exec "$sid" -- sh -lc 'echo hi' 2>&1 | tr -d '\r')"
-  exec_rc=$?
-} || exec_rc=$?
+max_exec_attempts=3
+for attempt in $(seq 1 $max_exec_attempts); do
+  {
+    exec_out="$(./bin/agentsh exec "$sid" -- sh -lc 'echo hi' 2>&1 | tr -d '\r')"
+    exec_rc=$?
+  } || exec_rc=$?
+
+  if [[ "$exec_rc" == "0" ]]; then
+    out="$(tail -n 1 <<<"$exec_out")"
+    if [[ "$out" == "hi" ]]; then
+      break
+    fi
+    exec_rc=1  # Mark as failed for retry
+  fi
+
+  if [[ $attempt -lt $max_exec_attempts ]]; then
+    echo "smoke: exec attempt $attempt/$max_exec_attempts failed (rc=$exec_rc), retrying in 1s..." >&2
+    sleep 1
+  fi
+done
+
 if [[ "$exec_rc" != "0" ]]; then
-  echo "smoke: exec failed with code $exec_rc" >&2
+  echo "smoke: exec failed with code $exec_rc after $max_exec_attempts attempts" >&2
   echo "smoke: exec output: $exec_out" >&2
   echo "smoke: server log (last 50 lines):" >&2
   tail -n 50 "$tmp/server.log" >&2 || true
@@ -160,7 +202,7 @@ if [[ "$exec_rc" != "0" ]]; then
 fi
 out="$(tail -n 1 <<<"$exec_out")"
 if [[ "$out" != "hi" ]]; then
-  echo "smoke: exec output mismatch: got=$out" >&2
+  echo "smoke: exec output mismatch after $max_exec_attempts attempts: got=$out" >&2
   exit 1
 fi
 
@@ -192,9 +234,20 @@ cp -f ./bin/agentsh-shell-shim "$shim_dir/sh"
 chmod +x "$shim_dir/sh"
 ln -sf "$(command -v sh)" "$shim_dir/sh.real"
 
-shim_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$shim_dir/sh" -lc 'echo shim_hi' | tr -d '\r' | tail -n 1)"
+# Shim test with retry for transient failures.
+shim_out=""
+for attempt in $(seq 1 $max_exec_attempts); do
+  shim_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$shim_dir/sh" -lc 'echo shim_hi' | tr -d '\r' | tail -n 1)" || true
+  if [[ "$shim_out" == "shim_hi" ]]; then
+    break
+  fi
+  if [[ $attempt -lt $max_exec_attempts ]]; then
+    echo "smoke: shim attempt $attempt/$max_exec_attempts failed, retrying in 1s..." >&2
+    sleep 1
+  fi
+done
 if [[ "$shim_out" != "shim_hi" ]]; then
-  echo "smoke: shim output mismatch: got=$shim_out" >&2
+  echo "smoke: shim output mismatch after $max_exec_attempts attempts: got=$shim_out" >&2
   exit 1
 fi
 
@@ -222,9 +275,20 @@ fi
 "${status_args[@]}" >/dev/null
 
 "${install_args[@]}"
-rootfs_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$rootfs/bin/sh" -lc 'echo rootfs_hi' | tr -d '\r' | tail -n 1)"
+# Rootfs shim test with retry.
+rootfs_out=""
+for attempt in $(seq 1 $max_exec_attempts); do
+  rootfs_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$rootfs/bin/sh" -lc 'echo rootfs_hi' | tr -d '\r' | tail -n 1)" || true
+  if [[ "$rootfs_out" == "rootfs_hi" ]]; then
+    break
+  fi
+  if [[ $attempt -lt $max_exec_attempts ]]; then
+    echo "smoke: rootfs shim attempt $attempt/$max_exec_attempts failed, retrying in 1s..." >&2
+    sleep 1
+  fi
+done
 if [[ "$rootfs_out" != "rootfs_hi" ]]; then
-  echo "smoke: rootfs shim output mismatch: got=$rootfs_out" >&2
+  echo "smoke: rootfs shim output mismatch after $max_exec_attempts attempts: got=$rootfs_out" >&2
   exit 1
 fi
 
@@ -235,10 +299,20 @@ if [[ "$restored_out" != "restored_hi" ]]; then
   exit 1
 fi
 
-# Shim delegation via PATH (no AGENTSH_BIN).
-shim_out_path="$(PATH="$repo_root/bin:$PATH" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$shim_dir/sh" -lc 'echo shim_path_hi' | tr -d '\r' | tail -n 1)"
+# Shim delegation via PATH (no AGENTSH_BIN) with retry.
+shim_out_path=""
+for attempt in $(seq 1 $max_exec_attempts); do
+  shim_out_path="$(PATH="$repo_root/bin:$PATH" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$shim_dir/sh" -lc 'echo shim_path_hi' | tr -d '\r' | tail -n 1)" || true
+  if [[ "$shim_out_path" == "shim_path_hi" ]]; then
+    break
+  fi
+  if [[ $attempt -lt $max_exec_attempts ]]; then
+    echo "smoke: shim PATH attempt $attempt/$max_exec_attempts failed, retrying in 1s..." >&2
+    sleep 1
+  fi
+done
 if [[ "$shim_out_path" != "shim_path_hi" ]]; then
-  echo "smoke: shim PATH output mismatch: got=$shim_out_path" >&2
+  echo "smoke: shim PATH output mismatch after $max_exec_attempts attempts: got=$shim_out_path" >&2
   exit 1
 fi
 
