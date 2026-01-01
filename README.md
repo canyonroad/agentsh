@@ -385,6 +385,7 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 
 ## References
 
+* **Security & threat model:** [`SECURITY.md`](SECURITY.md) - what agentsh protects against, known limitations, operator checklist
 * Config template: [`configs/server-config.yaml`](configs/server-config.yaml)
 * Default policy: [`configs/policies/default.yaml`](configs/policies/default.yaml)
 * Example Dockerfile (with shim): [`Dockerfile.example`](Dockerfile.example)
