@@ -184,14 +184,39 @@ macOS has significantly reduced security enforcement compared to Linux due to pl
 
 ### Windows
 
-Windows support is available with different capabilities:
+Windows has partial security enforcement with significant gaps in filesystem and network interception:
 
-| Component | Implementation | Status |
-|-----------|---------------|--------|
-| File monitoring | Projected FS / minifilter | Partial |
-| Network | WFP (Windows Filtering Platform) | Planned |
-| Process isolation | Job Objects + AppContainer | Available |
-| Resource limits | Job Objects | Available |
+| Component | Linux | Windows | Impact |
+|-----------|-------|---------|--------|
+| File blocking | FUSE (enforced) | WinFsp (stub) | **File policies not enforced** |
+| Network blocking | eBPF/iptables | WFP/WinDivert (stub) | **Network policies not enforced** |
+| Process isolation | Namespaces | AppContainer (stub) | **Sandbox not enforced** |
+| Resource limits | cgroups v2 | Job Objects | ✅ **Working** |
+| Process tracking | ptrace/wait | Job Objects + polling | ✅ **Working** |
+| PTY/terminal | pty (enforced) | ConPTY | **Not supported** |
+| Registry monitoring | N/A | RegNotify | Observation only |
+
+**What works on Windows:**
+- **Job Objects** for resource limits (memory, CPU, process count) ✅
+- **Process tracking** via Job Objects with automatic child tracking ✅
+- **Named pipe monitoring** via polling (observation only, no blocking)
+- **Registry path risk detection** with MITRE ATT&CK mappings (observation only)
+- **Shell shimming** via PowerShell profile hooks and batch wrappers ✅
+
+**Current implementation status:**
+- WinFsp filesystem: **Detection only** (`Mount()` returns "not yet implemented")
+- WinDivert network: **Detection only** (`setupWinDivert()` is a stub)
+- WFP network: **Detection only** (`setupWFP()` and `AddBlockRule()` are stubs)
+- AppContainer sandbox: **Detection only** (`Execute()` runs without sandboxing)
+- PTY engine: **Returns ErrNotSupported** for all operations
+- Registry blocking: **Not implemented** (requires kernel driver/minifilter)
+
+**Recommendations for Windows deployments:**
+- Use WSL2 with Linux for full enforcement
+- Treat Windows native as audit/observation mode only (except resource limits)
+- Do not rely on file, network, or sandbox policy enforcement
+- Job Objects provide effective resource limiting for CPU/memory/processes
+- Consider containerized deployments (Docker with WSL2 backend)
 
 See [Platform Comparison Matrix](docs/platform-comparison.md) for detailed feature support.
 
