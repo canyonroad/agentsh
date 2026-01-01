@@ -371,6 +371,16 @@ You already have a default policy (`configs/policies/default.yaml`). These opini
 
 ---
 
+## AI Assistant Integration Examples
+
+Ready-to-use snippets for configuring AI coding assistants to use agentsh:
+
+* **[Claude Code](examples/claude/)** - CLAUDE.md snippet for Claude Code integration
+* **[Cursor](examples/cursor/)** - Cursor rules for agentsh integration
+* **[AGENTS.md](examples/agents/)** - Generic AGENTS.md snippet (works with multiple AI tools)
+
+---
+
 ## References
 
 * Config template: [`configs/server-config.yaml`](configs/server-config.yaml)
