@@ -56,4 +56,27 @@ typedef struct _AGENTSH_CONNECTION_CONTEXT {
     ULONG ClientPid;
 } AGENTSH_CONNECTION_CONTEXT, *PAGENTSH_CONNECTION_CONTEXT;
 
+// Session registration (user-mode -> driver)
+typedef struct _AGENTSH_SESSION_REGISTER {
+    AGENTSH_MESSAGE_HEADER Header;
+    ULONG64 SessionToken;           // Unique session identifier
+    ULONG RootProcessId;            // Initial session process PID
+    WCHAR WorkspacePath[AGENTSH_MAX_PATH]; // Session workspace root
+} AGENTSH_SESSION_REGISTER, *PAGENTSH_SESSION_REGISTER;
+
+// Session unregistration (user-mode -> driver)
+typedef struct _AGENTSH_SESSION_UNREGISTER {
+    AGENTSH_MESSAGE_HEADER Header;
+    ULONG64 SessionToken;
+} AGENTSH_SESSION_UNREGISTER, *PAGENTSH_SESSION_UNREGISTER;
+
+// Process event (driver -> user-mode, notification only)
+typedef struct _AGENTSH_PROCESS_EVENT {
+    AGENTSH_MESSAGE_HEADER Header;
+    ULONG64 SessionToken;
+    ULONG ProcessId;
+    ULONG ParentProcessId;
+    ULONG64 CreateTime;             // FILETIME
+} AGENTSH_PROCESS_EVENT, *PAGENTSH_PROCESS_EVENT;
+
 #endif // _AGENTSH_PROTOCOL_H_
