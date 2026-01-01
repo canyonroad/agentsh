@@ -32,7 +32,20 @@ func newTestApp(t *testing.T, sessions *session.Manager, store *composite.Store)
 	cfg.Sandbox.Network.Transparent.Enabled = false
 	cfg.Policies.Default = "default"
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	// Create an allow-all policy for tests
+	engine, err := policy.NewEngine(&policy.Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []policy.CommandRule{
+			{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
+		},
+		FileRules: []policy.FileRule{
+			{Name: "allow-all", Paths: []string{"/**"}, Operations: []string{"*"}, Decision: "allow"},
+		},
+		NetworkRules: []policy.NetworkRule{
+			{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
+		},
+	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

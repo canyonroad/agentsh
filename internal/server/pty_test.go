@@ -26,7 +26,20 @@ func TestServer_HTTP_PTYWebSocket(t *testing.T) {
 	if err := os.MkdirAll(policyDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(policyDir, "default.yaml"), []byte("version: 1\nname: default\n"), 0o644); err != nil {
+	// Create allow-all policy for tests
+	policyContent := `version: 1
+name: default
+command_rules:
+  - name: allow-all
+    commands: ["*"]
+    decision: allow
+file_rules:
+  - name: allow-all
+    paths: ["/**"]
+    operations: ["*"]
+    decision: allow
+`
+	if err := os.WriteFile(filepath.Join(policyDir, "default.yaml"), []byte(policyContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	workspace := filepath.Join(dir, "ws")
@@ -141,7 +154,20 @@ func TestServer_GRPC_PTYExec(t *testing.T) {
 	if err := os.MkdirAll(policyDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(policyDir, "default.yaml"), []byte("version: 1\nname: default\n"), 0o644); err != nil {
+	// Create allow-all policy for tests
+	policyContent := `version: 1
+name: default
+command_rules:
+  - name: allow-all
+    commands: ["*"]
+    decision: allow
+file_rules:
+  - name: allow-all
+    paths: ["/**"]
+    operations: ["*"]
+    decision: allow
+`
+	if err := os.WriteFile(filepath.Join(policyDir, "default.yaml"), []byte(policyContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	workspace := filepath.Join(dir, "ws")
