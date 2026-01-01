@@ -79,4 +79,33 @@ typedef struct _AGENTSH_PROCESS_EVENT {
     ULONG64 CreateTime;             // FILETIME
 } AGENTSH_PROCESS_EVENT, *PAGENTSH_PROCESS_EVENT;
 
+// File operation types
+typedef enum _AGENTSH_FILE_OP {
+    FILE_OP_CREATE = 1,
+    FILE_OP_READ = 2,
+    FILE_OP_WRITE = 3,
+    FILE_OP_DELETE = 4,
+    FILE_OP_RENAME = 5
+} AGENTSH_FILE_OP;
+
+// File policy check request (driver -> user-mode)
+typedef struct _AGENTSH_FILE_REQUEST {
+    AGENTSH_MESSAGE_HEADER Header;
+    ULONG64 SessionToken;
+    ULONG ProcessId;
+    ULONG ThreadId;
+    AGENTSH_FILE_OP Operation;
+    ULONG CreateDisposition;        // For creates: CREATE_NEW, OPEN_EXISTING, etc.
+    ULONG DesiredAccess;            // FILE_READ_DATA, FILE_WRITE_DATA, DELETE, etc.
+    WCHAR Path[AGENTSH_MAX_PATH];
+    WCHAR RenameDest[AGENTSH_MAX_PATH]; // Only for FILE_OP_RENAME
+} AGENTSH_FILE_REQUEST, *PAGENTSH_FILE_REQUEST;
+
+// Policy response (user-mode -> driver)
+typedef struct _AGENTSH_POLICY_RESPONSE {
+    AGENTSH_MESSAGE_HEADER Header;
+    AGENTSH_DECISION Decision;
+    ULONG CacheTTLMs;               // How long to cache this decision
+} AGENTSH_POLICY_RESPONSE, *PAGENTSH_POLICY_RESPONSE;
+
 #endif // _AGENTSH_PROTOCOL_H_
