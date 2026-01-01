@@ -24,6 +24,7 @@ type Server struct {
 	listener net.Listener
 	mu       sync.Mutex
 	wg       sync.WaitGroup
+	ready    chan struct{} // closed when server is listening
 }
 
 // NewServer creates a new policy socket server.
@@ -34,7 +35,13 @@ func NewServer(sockPath string, handler PolicyHandler) *Server {
 	return &Server{
 		sockPath: sockPath,
 		handler:  handler,
+		ready:    make(chan struct{}),
 	}
+}
+
+// Ready returns a channel that is closed when the server is listening.
+func (s *Server) Ready() <-chan struct{} {
+	return s.ready
 }
 
 // Run starts the server and blocks until context is cancelled.
@@ -56,6 +63,9 @@ func (s *Server) Run(ctx context.Context) error {
 	s.mu.Lock()
 	s.listener = ln
 	s.mu.Unlock()
+
+	// Signal that the server is ready
+	close(s.ready)
 
 	// Start cleanup goroutine only after all setup is complete
 	go func() {
