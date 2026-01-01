@@ -145,6 +145,7 @@ AgentshMessageNotify(
     _Out_ PULONG ReturnOutputBufferLength
     )
 {
+    NTSTATUS status = STATUS_SUCCESS;
     PAGENTSH_MESSAGE_HEADER header;
 
     UNREFERENCED_PARAMETER(PortCookie);
@@ -165,11 +166,31 @@ AgentshMessageNotify(
             break;
 
         case MSG_REGISTER_SESSION:
-            DbgPrint("AgentSH: Session registration (Phase 2)\n");
+            if (InputBufferLength >= sizeof(AGENTSH_SESSION_REGISTER)) {
+                PAGENTSH_SESSION_REGISTER reg = (PAGENTSH_SESSION_REGISTER)InputBuffer;
+                status = AgentshRegisterSession(
+                    reg->SessionToken,
+                    ULongToHandle(reg->RootProcessId),
+                    reg->WorkspacePath[0] != L'\0' ? reg->WorkspacePath : NULL
+                    );
+                if (!NT_SUCCESS(status)) {
+                    DbgPrint("AgentSH: Session registration failed: 0x%08X\n", status);
+                }
+            } else {
+                status = STATUS_BUFFER_TOO_SMALL;
+            }
             break;
 
         case MSG_UNREGISTER_SESSION:
-            DbgPrint("AgentSH: Session unregistration (Phase 2)\n");
+            if (InputBufferLength >= sizeof(AGENTSH_SESSION_UNREGISTER)) {
+                PAGENTSH_SESSION_UNREGISTER unreg = (PAGENTSH_SESSION_UNREGISTER)InputBuffer;
+                status = AgentshUnregisterSession(unreg->SessionToken);
+                if (!NT_SUCCESS(status)) {
+                    DbgPrint("AgentSH: Session unregistration failed: 0x%08X\n", status);
+                }
+            } else {
+                status = STATUS_BUFFER_TOO_SMALL;
+            }
             break;
 
         default:
@@ -177,7 +198,7 @@ AgentshMessageNotify(
             break;
     }
 
-    return STATUS_SUCCESS;
+    return status;
 }
 
 // Send ping to user-mode client
