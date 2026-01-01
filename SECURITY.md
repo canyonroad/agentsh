@@ -174,14 +174,27 @@ macOS has significantly reduced security enforcement compared to Linux due to pl
 - FUSE-T mounting: **Implemented** (requires CGO + FUSE-T: `brew install fuse-t`)
 - FSEvents fallback: **Observation only** (cannot block, used when CGO unavailable)
 - pf network rules: **Loopback only** (real interfaces not intercepted)
-- Endpoint Security Framework: **Not implemented** (requires entitlements)
+- Endpoint Security Framework: **Implemented** (requires Apple entitlements + System Extension)
+- Network Extension: **Implemented** (requires Apple entitlements + System Extension)
+
+**ESF+NE Enterprise Mode:**
+
+When running with Apple entitlements and an approved System Extension, agentsh provides near-Linux-level enforcement:
+- ESF (Endpoint Security Framework) intercepts file and process events with AUTH mode blocking
+- Network Extension (FilterDataProvider + DNSProxyProvider) enforces network and DNS policies
+- XPC bridge connects the System Extension to the Go policy engine
+- Session tracking maps processes to agentsh sessions for policy scoping
+
+See [macOS ESF+NE Architecture](docs/macos-esf-ne-architecture.md) for deployment details.
 
 **Recommendations for macOS deployments:**
-- Install FUSE-T (`brew install fuse-t`) for file policy enforcement
+- **Enterprise:** Use ESF+NE mode for full enforcement (requires Apple Developer Program membership)
+- **Standard:** Install FUSE-T (`brew install fuse-t`) for file policy enforcement
 - Build with CGO enabled for FUSE-T support: `CGO_ENABLED=1 go build`
-- Use containers (Docker/Podman) with Linux for full enforcement including network
-- Without FUSE-T, treat macOS as audit/observation mode only
-- Do not rely on network policy enforcement without pf configuration
+- ESF+NE mode automatically falls back to FUSE-T if entitlements are unavailable
+- Use containers (Docker/Podman) with Linux for full enforcement if entitlements unavailable
+- Without FUSE-T or ESF, treat macOS as audit/observation mode only
+- Do not rely on network policy enforcement without ESF+NE or pf configuration
 - Consider the security score when evaluating risk
 
 ### Windows
@@ -264,6 +277,9 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2026-01-01 | Implemented macOS ESF+NE for enterprise-tier enforcement (90% security score) |
+| 2026-01-01 | Added XPC bridge for System Extension ↔ Go policy engine communication |
+| 2026-01-01 | Added session tracking for process-to-session mapping on macOS |
 | 2025-12-31 | Implemented FUSE-T mounting for macOS file policy enforcement |
 | 2025-01-01 | Added LD_PRELOAD and code injection env vars to deny list |
 | 2025-01-01 | Fixed eBPF race condition with ptrace-stopped start |

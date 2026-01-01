@@ -12,6 +12,7 @@ agentsh/
 ├── proto/                       # gRPC proto definitions (Struct-based)
 ├── configs/                     # example configs (api keys, etc.)
 ├── docs/                        # design docs and notes
+├── macos/                       # macOS System Extension (ESF+NE) Swift code
 ├── config.yml                   # example server config (repo-local)
 └── default-policy.yml           # example policy (repo-local)
 ```
@@ -42,3 +43,31 @@ For gRPC:
 - `proto/agentsh/v1/agentsh.proto` defines the service (Struct-based, no codegen required).
 - `internal/api/grpc.go` implements the gRPC server (including `ExecStream` and `EventsTail`).
 - `internal/client/grpc_client.go` provides a small gRPC client used by the CLI when `AGENTSH_TRANSPORT=grpc`.
+
+## `macos/` directory (ESF+NE enterprise mode)
+
+The `macos/` directory contains Swift code for the macOS System Extension that provides ESF+NE enforcement:
+
+```
+macos/
+├── SysExt/                      # System Extension bundle
+│   ├── main.swift               # System Extension entry point
+│   ├── ESFClient.swift          # Endpoint Security Framework client
+│   ├── FilterDataProvider.swift # Network Extension flow filter
+│   ├── DNSProxyProvider.swift   # Network Extension DNS proxy
+│   ├── Info.plist               # Bundle configuration
+│   └── SysExt.entitlements      # ESF + NE entitlements
+├── XPCService/                  # XPC service bridging Swift ↔ Go
+│   ├── main.swift               # XPC service entry point
+│   ├── XPCServiceDelegate.swift # XPC connection handling
+│   └── PolicyBridge.swift       # Unix socket bridge to Go policy server
+├── Shared/                      # Shared Swift types
+│   └── XPCProtocol.swift        # XPC protocol definition
+└── AgentSH.xcodeproj/           # Xcode project (build with Xcode 15+)
+```
+
+Related Go packages:
+- `internal/platform/darwin/xpc/` — XPC protocol types and Unix socket server
+- `internal/platform/darwin/sysext.go` — System Extension manager
+
+**Build:** `make build-macos-enterprise` (requires Xcode 15+, Apple entitlements)

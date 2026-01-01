@@ -315,10 +315,13 @@ Lima/virtiofs   █████████████████████�
 | Platform | Command | Requirements |
 |----------|---------|--------------|
 | Linux | `curl -fsSL https://get.agentsh.dev \| bash` | root for full features |
+| macOS ESF+NE | `make build-macos-enterprise` | Xcode 15+, Apple entitlements, code signing |
 | macOS FUSE-T | `brew install fuse-t && brew install agentsh` | root for pf network |
 | macOS Lima | `brew install lima && limactl start agentsh` | Lima VM |
 | Windows Native | `winget install agentsh` | Admin, WinFsp, WinDivert |
 | Windows WSL2 | `wsl --install -d Ubuntu && ...` | WSL2 enabled |
+
+See [macOS Build Guide](macos-build.md) for detailed macOS build instructions.
 
 ## Optimization Configuration
 
