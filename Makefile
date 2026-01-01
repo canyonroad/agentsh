@@ -2,6 +2,7 @@
 .PHONY: smoke
 .PHONY: completions package-snapshot package-release
 .PHONY: build-macos-enterprise build-macos-go build-swift assemble-bundle sign-bundle
+.PHONY: build-driver build-driver-debug install-driver uninstall-driver build-windows-full
 
 VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
 COMMIT := $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
@@ -90,3 +91,32 @@ sign-bundle:
 # Full enterprise build
 build-macos-enterprise: assemble-bundle sign-bundle
 	@echo "Enterprise build complete: build/AgentSH.app"
+
+# =============================================================================
+# Windows Driver Build (Minifilter)
+# NOTE: These targets require Windows with WDK installed
+# =============================================================================
+
+# Build Windows driver (Release)
+build-driver:
+	@echo "Building Windows driver (Release)..."
+	cd drivers/windows/agentsh-minifilter && scripts/build.cmd Release x64
+
+# Build Windows driver (Debug)
+build-driver-debug:
+	@echo "Building Windows driver (Debug)..."
+	cd drivers/windows/agentsh-minifilter && scripts/build.cmd Debug x64
+
+# Install Windows driver
+install-driver:
+	@echo "Installing Windows driver..."
+	cd drivers/windows/agentsh-minifilter && scripts/install.cmd
+
+# Uninstall Windows driver
+uninstall-driver:
+	@echo "Uninstalling Windows driver..."
+	cd drivers/windows/agentsh-minifilter && scripts/uninstall.cmd
+
+# Full Windows build (Go + driver)
+build-windows-full: build-driver
+	GOOS=windows GOARCH=amd64 go build -o bin/agentsh.exe ./cmd/agentsh
