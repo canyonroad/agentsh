@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -34,12 +36,20 @@ func (m *mockPolicyEngine) ResolveSession(pid int32) string {
 // waitForServer retries dialing the socket with exponential backoff.
 func waitForServer(t *testing.T, sockPath string, timeout time.Duration) net.Conn {
 	t.Helper()
+
+	// Give the server goroutine a chance to start
+	runtime.Gosched()
+
 	deadline := time.Now().Add(timeout)
 	backoff := 5 * time.Millisecond
 	for time.Now().Before(deadline) {
-		conn, err := net.Dial("unix", sockPath)
-		if err == nil {
-			return conn
+		// First check if socket file exists (server has started listening)
+		if _, err := os.Stat(sockPath); err == nil {
+			// Socket exists, try to connect
+			conn, err := net.Dial("unix", sockPath)
+			if err == nil {
+				return conn
+			}
 		}
 		time.Sleep(backoff)
 		backoff *= 2
@@ -60,6 +70,9 @@ func TestServer_HandleFileRequest(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
+
+	// Give the server goroutine a chance to start
+	runtime.Gosched()
 
 	// Wait for server to start with retry dial (longer timeout for CI)
 	conn := waitForServer(t, sockPath, 5*time.Second)
@@ -97,6 +110,9 @@ func TestServer_HandleSessionRequest(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
+
+	// Give the server goroutine a chance to start
+	runtime.Gosched()
 
 	// Wait for server to start with retry dial (longer timeout for CI)
 	conn := waitForServer(t, sockPath, 5*time.Second)
