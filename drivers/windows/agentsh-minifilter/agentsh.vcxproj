@@ -71,11 +71,15 @@
     <ClCompile Include="src\driver.c" />
     <ClCompile Include="src\communication.c" />
     <ClCompile Include="src\process.c" />
+    <ClCompile Include="src\cache.c" />
+    <ClCompile Include="src\filesystem.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="inc\driver.h" />
     <ClInclude Include="inc\protocol.h" />
     <ClInclude Include="inc\process.h" />
+    <ClInclude Include="inc\cache.h" />
+    <ClInclude Include="inc\filesystem.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
