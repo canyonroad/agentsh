@@ -5,6 +5,21 @@ package windows
 
 import "fmt"
 
+// Message types (must match protocol.h)
+const (
+	MsgPing                = 0
+	MsgPolicyCheckFile     = 1
+	MsgPolicyCheckRegistry = 2
+	MsgProcessCreated      = 3
+	MsgProcessTerminated   = 4
+	MsgPong                = 50
+	MsgRegisterSession     = 100
+	MsgUnregisterSession   = 101
+)
+
+// Driver client version
+const DriverClientVersion = 0x00010000
+
 // DriverClient stub for non-Windows builds
 type DriverClient struct{}
 
