@@ -58,6 +58,14 @@ func (c *DriverClient) UnregisterSession(sessionToken uint64) error {
 	return fmt.Errorf("driver client only available on Windows")
 }
 
+// ProcessEventHandler is called when the driver notifies about process events
+type ProcessEventHandler func(sessionToken uint64, processId, parentId uint32, createTime uint64, isCreation bool)
+
+// SetProcessEventHandler stub for non-Windows
+func (c *DriverClient) SetProcessEventHandler(handler ProcessEventHandler) {
+	// No-op on non-Windows
+}
+
 // utf16Encode converts a Go string to UTF-16LE bytes
 func utf16Encode(s string) []byte {
 	runes := []rune(s)

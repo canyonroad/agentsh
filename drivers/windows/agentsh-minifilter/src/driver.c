@@ -143,6 +143,7 @@ DriverEntry(
     // Start filtering
     status = FltStartFiltering(AgentshData.FilterHandle);
     if (!NT_SUCCESS(status)) {
+        AgentshShutdownProcessTracking();
         AgentshShutdownCommunication();
         FltUnregisterFilter(AgentshData.FilterHandle);
         return status;
