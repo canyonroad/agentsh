@@ -153,7 +153,7 @@ macOS has significantly reduced security enforcement compared to Linux due to pl
 
 | Component | Linux | macOS | Impact |
 |-----------|-------|-------|--------|
-| File blocking | FUSE (enforced) | FSEvents (observe-only) | **File policies not enforced** |
+| File blocking | FUSE (enforced) | FUSE-T (enforced with CGO) | **Enforced when built with CGO** |
 | Network blocking | eBPF/iptables | pf (loopback only) | **Network policies incomplete** |
 | Process isolation | Namespaces | None | No isolation between agent and host |
 | Resource limits | cgroups v2 | None | Memory/CPU limits not enforced |
@@ -171,15 +171,17 @@ macOS has significantly reduced security enforcement compared to Linux due to pl
 | Minimal | 10% | None | Command logging only |
 
 **Current implementation status:**
-- FUSE-T mounting: **Not implemented** (detection only)
-- FSEvents fallback: **Observation only** (cannot block)
+- FUSE-T mounting: **Implemented** (requires CGO + FUSE-T: `brew install fuse-t`)
+- FSEvents fallback: **Observation only** (cannot block, used when CGO unavailable)
 - pf network rules: **Loopback only** (real interfaces not intercepted)
 - Endpoint Security Framework: **Not implemented** (requires entitlements)
 
 **Recommendations for macOS deployments:**
-- Use containers (Docker/Podman) with Linux for enforcement
-- Treat macOS as audit/observation mode only
-- Do not rely on file or network policy enforcement
+- Install FUSE-T (`brew install fuse-t`) for file policy enforcement
+- Build with CGO enabled for FUSE-T support: `CGO_ENABLED=1 go build`
+- Use containers (Docker/Podman) with Linux for full enforcement including network
+- Without FUSE-T, treat macOS as audit/observation mode only
+- Do not rely on network policy enforcement without pf configuration
 - Consider the security score when evaluating risk
 
 ### Windows
@@ -262,6 +264,7 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2025-12-31 | Implemented FUSE-T mounting for macOS file policy enforcement |
 | 2025-01-01 | Added LD_PRELOAD and code injection env vars to deny list |
 | 2025-01-01 | Fixed eBPF race condition with ptrace-stopped start |
 | 2025-01-01 | Added full-path and glob matching for commands |

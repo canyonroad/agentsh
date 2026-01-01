@@ -52,11 +52,12 @@ type compiledNetworkRule struct {
 }
 
 type compiledCommandRule struct {
-	rule      CommandRule
-	basenames map[string]struct{} // Commands without paths (e.g., "sh") - match by basename
-	fullPaths map[string]struct{} // Commands with paths (e.g., "/bin/sh") - match exact path
-	pathGlobs []glob.Glob         // Glob patterns for paths (e.g., "/usr/*/sh")
-	argsGlobs []glob.Glob
+	rule          CommandRule
+	basenames     map[string]struct{} // Commands without paths (e.g., "sh") - match by basename
+	basenameGlobs []glob.Glob         // Glob patterns for basenames (e.g., "go*", "*")
+	fullPaths     map[string]struct{} // Commands with paths (e.g., "/bin/sh") - match exact path
+	pathGlobs     []glob.Glob         // Glob patterns for paths (e.g., "/usr/*/sh")
+	argsGlobs     []glob.Glob
 }
 
 type compiledUnixRule struct {
@@ -158,8 +159,17 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 					cr.fullPaths[strings.ToLower(c)] = struct{}{}
 				}
 			} else {
-				// Basename only match (case-insensitive)
-				cr.basenames[strings.ToLower(c)] = struct{}{}
+				// Basename only - check if it's a glob pattern
+				if strings.ContainsAny(c, "*?[") {
+					g, err := glob.Compile(c)
+					if err != nil {
+						return nil, fmt.Errorf("compile command rule %q basename pattern %q: %w", r.Name, c, err)
+					}
+					cr.basenameGlobs = append(cr.basenameGlobs, g)
+				} else {
+					// Literal basename match (case-insensitive)
+					cr.basenames[strings.ToLower(c)] = struct{}{}
+				}
 			}
 		}
 		for _, pat := range r.ArgsPatterns {
@@ -299,7 +309,7 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 		commandMatched := false
 
 		// If no commands specified, rule applies to all commands
-		if len(r.basenames) == 0 && len(r.fullPaths) == 0 && len(r.pathGlobs) == 0 {
+		if len(r.basenames) == 0 && len(r.basenameGlobs) == 0 && len(r.fullPaths) == 0 && len(r.pathGlobs) == 0 {
 			commandMatched = true
 		} else {
 			// Check full path matches first (more specific)
@@ -321,6 +331,16 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 			if !commandMatched {
 				if _, ok := r.basenames[cmdBase]; ok {
 					commandMatched = true
+				}
+			}
+
+			// Check basename glob patterns
+			if !commandMatched {
+				for _, g := range r.basenameGlobs {
+					if g.Match(cmdBase) || g.Match(filepath.Base(command)) {
+						commandMatched = true
+						break
+					}
 				}
 			}
 		}
