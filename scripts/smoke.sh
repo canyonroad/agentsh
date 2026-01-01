@@ -144,7 +144,21 @@ if [[ -z "$sid" ]]; then
   exit 1
 fi
 
-out="$(./bin/agentsh exec "$sid" -- sh -lc 'echo hi' | tr -d '\r' | tail -n 1)"
+exec_out=""
+exec_err=""
+exec_rc=0
+{
+  exec_out="$(./bin/agentsh exec "$sid" -- sh -lc 'echo hi' 2>&1 | tr -d '\r')"
+  exec_rc=$?
+} || exec_rc=$?
+if [[ "$exec_rc" != "0" ]]; then
+  echo "smoke: exec failed with code $exec_rc" >&2
+  echo "smoke: exec output: $exec_out" >&2
+  echo "smoke: server log (last 50 lines):" >&2
+  tail -n 50 "$tmp/server.log" >&2 || true
+  exit 1
+fi
+out="$(tail -n 1 <<<"$exec_out")"
 if [[ "$out" != "hi" ]]; then
   echo "smoke: exec output mismatch: got=$out" >&2
   exit 1
