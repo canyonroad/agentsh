@@ -14,14 +14,14 @@ func parseExecInput(args []string, jsonStr string, timeoutFlag string, stream bo
 
 // parseExecInputWithEnv parses exec command input, using envSessionID as fallback if no session ID in args.
 // Format: [SESSION_ID] -- COMMAND [ARGS...]
-// If args starts with "--", session ID comes from envSessionID.
+// If envSessionID is set and no explicit session ID before "--", all args are treated as the command.
 func parseExecInputWithEnv(args []string, jsonStr string, timeoutFlag string, stream bool, envSessionID string) (sessionID string, req types.ExecRequest, err error) {
 	timeoutFlag = strings.TrimSpace(timeoutFlag)
 
 	// Handle --json mode
 	if strings.TrimSpace(jsonStr) != "" {
 		// In JSON mode, first arg (if any) is session ID, or use env
-		if len(args) > 0 && args[0] != "--" {
+		if len(args) > 0 && envSessionID == "" {
 			sessionID = args[0]
 		} else {
 			sessionID = envSessionID
@@ -44,24 +44,21 @@ func parseExecInputWithEnv(args []string, jsonStr string, timeoutFlag string, st
 		return sessionID, req, nil
 	}
 
-	// Determine if first arg is session ID or "--"
-	// Format: [SESSION_ID] -- COMMAND [ARGS...]
+	// If env session ID is set, all args are the command
+	// If not set, first arg is session ID, rest is command
 	cmdStart := 0
-	if len(args) > 0 && args[0] == "--" {
-		// No session ID in args, use env
+	if envSessionID != "" {
+		// Use env session ID, all args are the command
 		sessionID = envSessionID
-		cmdStart = 1
+		cmdStart = 0
 	} else if len(args) > 0 {
 		// First arg is session ID
 		sessionID = args[0]
 		cmdStart = 1
-		// Skip "--" if present
+		// Skip "--" if present after session ID
 		if len(args) > 1 && args[1] == "--" {
 			cmdStart = 2
 		}
-	} else {
-		// No args at all, use env for session ID
-		sessionID = envSessionID
 	}
 
 	if sessionID == "" {
