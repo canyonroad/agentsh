@@ -196,10 +196,74 @@ func ValidateEnvPolicy(p EnvPolicy) error {
 	return nil
 }
 
+// defaultSecretDeny contains environment variables that are blocked by default
+// when no explicit allow patterns are defined. This includes:
+// - Cloud provider credentials
+// - Dynamic linker variables (code injection vectors)
+// - Language-specific code loading paths
+// - Shell behavior modifiers
 var defaultSecretDeny = []string{
+	// Cloud credentials
 	"AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN", "AWS_PROFILE",
 	"GOOGLE_APPLICATION_CREDENTIALS", "GCP_SERVICE_ACCOUNT",
 	"AZURE_CLIENT_SECRET", "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID",
 	"SSH_AUTH_SOCK", "SSH_AGENT_PID", "DOCKER_HOST", "DOCKER_TLS_VERIFY",
 	"KUBECONFIG", "GITHUB_TOKEN", "GH_TOKEN",
+
+	// Linux dynamic linker - code injection vectors
+	"LD_PRELOAD",           // Force load shared libraries
+	"LD_LIBRARY_PATH",      // Override library search path
+	"LD_AUDIT",             // Load auditing libraries
+	"LD_DEBUG",             // Debug output (info leak)
+	"LD_DEBUG_OUTPUT",      // Redirect debug to file
+	"LD_DYNAMIC_WEAK",      // Weak symbol override
+	"LD_HWCAP_MASK",        // Hardware capability mask
+	"LD_ORIGIN_PATH",       // Override $ORIGIN
+	"LD_PROFILE",           // Enable profiling
+	"LD_PROFILE_OUTPUT",    // Profile output path
+	"LD_SHOW_AUXV",         // Show auxiliary vector
+	"LD_TRACE_LOADED_OBJECTS", // Trace library loading
+
+	// macOS dynamic linker (dyld) - code injection vectors
+	"DYLD_INSERT_LIBRARIES",      // macOS equivalent of LD_PRELOAD
+	"DYLD_LIBRARY_PATH",          // Library search path
+	"DYLD_FRAMEWORK_PATH",        // Framework search path
+	"DYLD_FALLBACK_LIBRARY_PATH", // Fallback library path
+	"DYLD_FALLBACK_FRAMEWORK_PATH",
+	"DYLD_IMAGE_SUFFIX",
+	"DYLD_PRINT_LIBRARIES", // Debug output
+
+	// Python - code injection
+	"PYTHONPATH",    // Module search path
+	"PYTHONSTARTUP", // Startup script
+	"PYTHONHOME",    // Installation directory
+	"PYTHONUSERBASE",
+
+	// Ruby - code injection
+	"RUBYLIB", // Library path
+	"RUBYOPT", // Options (can load code via -r)
+
+	// Perl - code injection
+	"PERL5LIB", // Library path
+	"PERL5OPT", // Options (can load code)
+	"PERLLIB",
+
+	// Node.js - code injection
+	"NODE_PATH",    // Module path
+	"NODE_OPTIONS", // Can enable inspector, load modules
+
+	// Shell behavior modifiers - injection vectors
+	"BASH_ENV",    // Startup file for non-interactive bash
+	"ENV",         // Startup file for sh
+	"SHELLOPTS",   // Shell options
+	"BASHOPTS",    // Bash-specific options
+	"CDPATH",      // cd search path (confusion attacks)
+	"GLOBIGNORE",  // Glob patterns to ignore
+	"MAILPATH",    // Can trigger code on mail check
+	"PROMPT_COMMAND", // Executed before each prompt
+
+	// Git - credential exposure
+	"GIT_ASKPASS",
+	"SSH_ASKPASS",
+	"GIT_SSH_COMMAND",
 }

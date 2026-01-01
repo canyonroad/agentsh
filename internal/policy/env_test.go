@@ -233,3 +233,103 @@ func TestBuildEnv_MaxBytes(t *testing.T) {
 		t.Error("expected error for exceeding max_bytes")
 	}
 }
+
+func TestEngine_CheckEnv_DangerousLinkerVars(t *testing.T) {
+	// No explicit allow/deny patterns - should block dangerous linker variables
+	p := &Policy{
+		Version:   1,
+		Name:      "test",
+		EnvPolicy: EnvPolicy{},
+	}
+	e, err := NewEngine(p, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// All of these should be blocked by default
+	dangerousVars := []string{
+		// Linux dynamic linker
+		"LD_PRELOAD",
+		"LD_LIBRARY_PATH",
+		"LD_AUDIT",
+		"LD_DEBUG",
+		// macOS dynamic linker
+		"DYLD_INSERT_LIBRARIES",
+		"DYLD_LIBRARY_PATH",
+		// Language code injection
+		"PYTHONPATH",
+		"PYTHONSTARTUP",
+		"RUBYLIB",
+		"RUBYOPT",
+		"PERL5LIB",
+		"PERL5OPT",
+		"NODE_PATH",
+		"NODE_OPTIONS",
+		// Shell modifiers
+		"BASH_ENV",
+		"ENV",
+		"PROMPT_COMMAND",
+	}
+
+	for _, name := range dangerousVars {
+		t.Run(name, func(t *testing.T) {
+			dec := e.CheckEnv(name)
+			if dec.Allowed {
+				t.Errorf("%s should be denied by default, got Allowed=true (MatchedBy=%s)", name, dec.MatchedBy)
+			}
+			if dec.MatchedBy != "default-secret-deny" {
+				t.Errorf("%s: expected MatchedBy=default-secret-deny, got %q", name, dec.MatchedBy)
+			}
+		})
+	}
+}
+
+func TestBuildEnv_BlocksDangerousLinkerVars(t *testing.T) {
+	// No allow patterns, should block dangerous vars via default deny
+	pol := ResolvedEnvPolicy{}
+	baseEnv := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/user",
+		"LD_PRELOAD=/tmp/evil.so",
+		"LD_LIBRARY_PATH=/tmp/libs",
+		"PYTHONPATH=/tmp/pycode",
+		"NODE_OPTIONS=--require=/tmp/evil.js",
+		"MY_SAFE_VAR=value",
+	}
+
+	result, err := BuildEnv(pol, baseEnv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a map for easier checking
+	resultMap := make(map[string]bool)
+	for _, kv := range result {
+		resultMap[kv] = true
+	}
+
+	// Dangerous vars should be filtered out
+	dangerousKVs := []string{
+		"LD_PRELOAD=/tmp/evil.so",
+		"LD_LIBRARY_PATH=/tmp/libs",
+		"PYTHONPATH=/tmp/pycode",
+		"NODE_OPTIONS=--require=/tmp/evil.js",
+	}
+	for _, kv := range dangerousKVs {
+		if resultMap[kv] {
+			t.Errorf("dangerous var should have been filtered: %s", kv)
+		}
+	}
+
+	// Safe vars should remain
+	safeKVs := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/user",
+		"MY_SAFE_VAR=value",
+	}
+	for _, kv := range safeKVs {
+		if !resultMap[kv] {
+			t.Errorf("safe var should be in result: %s", kv)
+		}
+	}
+}
