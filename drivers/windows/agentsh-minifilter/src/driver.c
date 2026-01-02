@@ -106,6 +106,12 @@ DriverEntry(
     // Initialize global data
     RtlZeroMemory(&AgentshData, sizeof(AgentshData));
 
+    // Initialize configuration
+    AgentshInitializeConfig();
+
+    // Initialize metrics
+    AgentshInitializeMetrics();
+
     // Register with filter manager
     status = FltRegisterFilter(
         DriverObject,
