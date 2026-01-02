@@ -87,11 +87,14 @@ agentsh server
 - Administrator privileges for driver installation
 - Test signing enabled for development, or EV-signed driver for production
 
-**Current Implementation Status (Phase 3 complete):**
+**Current Implementation Status (All 5 Phases Complete):**
 - ✅ Driver skeleton and filter port communication
 - ✅ Process tracking (session processes and child inheritance)
 - ✅ Filesystem interception (create, write, delete, rename)
-- ⏳ Registry interception (Phase 4 - planned)
+- ✅ Registry interception (create/set/delete keys, high-risk path detection)
+- ✅ Production readiness (configurable fail modes, metrics, caching)
+
+See [Windows Driver Deployment Guide](windows-driver-deployment.md) for installation and configuration.
 
 ### Windows (WSL2)
 

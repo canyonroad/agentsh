@@ -24,12 +24,12 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | Network operations hold | Yes | Yes | Yes | Yes | Yes | Yes |
 | DNS hold | Yes | Yes | Yes | Yes | Yes | Yes |
 | Env var hold | Yes | Spawn | Partial | Yes | Partial | Yes |
-| Registry hold | N/A | N/A | N/A | N/A | Driver | N/A |
+| Registry hold | N/A | N/A | N/A | N/A | Yes | N/A |
 | File redirect | Yes | Yes | Yes | Yes | Yes | Yes |
 | Network redirect | Yes | Yes | Yes | Yes | Yes | Yes |
 | DNS redirect | Yes | Yes | Yes | Yes | Yes | Yes |
 | Env var redirect | Yes | Spawn | Partial | Yes | Partial | Yes |
-| Registry redirect | N/A | N/A | N/A | N/A | Driver | N/A |
+| Registry redirect | N/A | N/A | N/A | N/A | Yes | N/A |
 | Manual approval | Yes | Yes | Yes | Yes | Yes | Yes |
 | **Environment Variable Protection** |
 | Spawn-time filtering | Yes | Yes | Yes | Yes | Yes | Yes |
@@ -56,7 +56,7 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | Process count | Yes | No | No | Yes | Job | Yes |
 | **Platform-Specific** |
 | Registry monitoring | N/A | N/A | N/A | N/A | Yes | N/A |
-| Registry blocking | N/A | N/A | N/A | N/A | Driver | N/A |
+| Registry blocking | N/A | N/A | N/A | N/A | Yes | N/A |
 | Kernel events | eBPF | ESF | No | eBPF | No | eBPF |
 | **Requirements** |
 | Special permissions | root | Apple entitlements | root + brew | Lima VM | Admin | WSL2 |
@@ -71,7 +71,7 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | **macOS ESF+NE** | 90% | Yes | Yes | None | Exec only | None |
 | **macOS + Lima** | 85% | Yes | Yes | Full | Yes | Full |
 | **macOS FUSE-T** | 70% | Yes | Yes | None | No | None |
-| **Windows Native** | 55% | Yes | Yes | Partial | No | Partial |
+| **Windows Native** | 65% | Yes | Yes | Partial | No | Partial |
 
 ## Security Feature Coverage
 
@@ -97,9 +97,9 @@ macOS FUSE-T + pf     ███████████████████�
                       File✓   Net✓    Iso✗      Sys✗     Res✗
                       (No isolation, no syscall filter, no resource limits)
 
-Windows Native        ████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░   55%
+Windows Native        ██████████████████████████████░░░░░░░░░░░░░░░░░░   65%
                       File✓   Net⚠    Iso⚠      Sys✗     Res⚠
-                      (Mini Filter driver, AppContainer partial, Job Objects partial)
+                      (Mini Filter + Registry blocking, AppContainer partial)
 
 Legend: ✓ = Full support  ⚠ = Partial support  ✗ = Not supported
 ```
@@ -242,7 +242,7 @@ Lima/virtiofs   █████████████████████�
 | Write monitoring | Yes | N/A | Via RegNotifyChangeKeyValue |
 | Create key monitoring | Yes | N/A | Via RegNotifyChangeKeyValue |
 | Delete key monitoring | Yes | N/A | Via RegNotifyChangeKeyValue |
-| Registry blocking | Partial | N/A | Requires signed kernel driver |
+| Registry blocking | Yes | N/A | Via CmRegisterCallbackEx in mini filter driver |
 | **High-Risk Path Alerts** |
 | Run keys (persistence) | Yes | N/A | HKLM/HKCU Run, RunOnce |
 | Services | Yes | N/A | HKLM\SYSTEM\Services |
@@ -302,8 +302,9 @@ Lima/virtiofs   █████████████████████�
 - **No network bandwidth limits** - Job Objects don't support this
 - **WinDivert requires admin** - Administrator privileges needed for network interception
 - **Driver requires signing** - Mini filter driver requires test signing (dev) or EV signing (production)
-- Uses kernel-mode mini filter driver for filesystem interception (Phase 3 complete)
-- Registry blocking via CmRegisterCallbackEx planned (Phase 4)
+- Uses kernel-mode mini filter driver for filesystem and registry interception
+- Configurable fail modes (fail-open/fail-closed) for production reliability
+- See [Windows Driver Deployment Guide](windows-driver-deployment.md) for details
 
 ### Windows WSL2
 - Slight overhead from VM layer
