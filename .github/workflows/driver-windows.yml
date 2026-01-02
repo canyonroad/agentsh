@@ -42,17 +42,99 @@ jobs:
       - name: Install Windows Driver Kit
         shell: powershell
         run: |
-          # Download and install WDK for Windows 11 (works for Windows 10 too)
-          $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2249371"
+          # WDK requires the matching Windows SDK to be installed first
+          # GitHub runners have Windows SDK but we need WDK extension
+
+          # Download WDK 10.0.26100 (Windows 11 24H2, compatible with Win10+)
+          $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2272234"
           $wdkInstaller = "$env:TEMP\wdksetup.exe"
 
           Write-Host "Downloading WDK..."
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
 
-          Write-Host "Installing WDK (this may take several minutes)..."
-          Start-Process -FilePath $wdkInstaller -ArgumentList "/quiet", "/norestart" -Wait -NoNewWindow
+          Write-Host "Installing WDK (this may take 5-10 minutes)..."
+          $process = Start-Process -FilePath $wdkInstaller -ArgumentList "/quiet", "/norestart", "/features", "+" -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode -ne 0) {
+            Write-Host "::warning::WDK installer returned exit code $($process.ExitCode)"
+          }
+
+          # Verify WDK installation by checking for fltKernel.h
+          $wdkPaths = @(
+            "C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\km\fltKernel.h",
+            "C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km\fltKernel.h",
+            "C:\Program Files (x86)\Windows Kits\10\Include\10.0.22000.0\km\fltKernel.h"
+          )
+
+          $found = $false
+          foreach ($path in $wdkPaths) {
+            if (Test-Path $path) {
+              Write-Host "WDK verified: $path"
+              $found = $true
+              break
+            }
+          }
+
+          if (-not $found) {
+            Write-Host "Checking available WDK versions..."
+            $kmPath = "C:\Program Files (x86)\Windows Kits\10\Include"
+            if (Test-Path $kmPath) {
+              Get-ChildItem $kmPath | ForEach-Object { Write-Host "  $_" }
+            }
+            Write-Host "::error::WDK headers not found after installation"
+            exit 1
+          }
 
           Write-Host "WDK installation complete"
+
+      - name: Install WDK Visual Studio Extension
+        shell: powershell
+        run: |
+          # Find and install the WDK VSIX for MSBuild integration
+          $vsixPaths = @(
+            "C:\Program Files (x86)\Windows Kits\10\Vsix\VS2022\10.0.26100.0\WDK.vsix",
+            "C:\Program Files (x86)\Windows Kits\10\Vsix\VS2022\WDK.vsix",
+            "C:\Program Files (x86)\Windows Kits\10\Vsix\WDK.vsix"
+          )
+
+          $vsixPath = $null
+          foreach ($path in $vsixPaths) {
+            if (Test-Path $path) {
+              $vsixPath = $path
+              break
+            }
+          }
+
+          # Find available VSIX files
+          if (-not $vsixPath) {
+            Write-Host "Looking for WDK VSIX..."
+            $vsixDir = "C:\Program Files (x86)\Windows Kits\10\Vsix"
+            if (Test-Path $vsixDir) {
+              Get-ChildItem -Path $vsixDir -Recurse -Filter "*.vsix" | ForEach-Object {
+                Write-Host "  Found: $($_.FullName)"
+                if (-not $vsixPath) { $vsixPath = $_.FullName }
+              }
+            }
+          }
+
+          if ($vsixPath) {
+            Write-Host "Installing WDK VSIX: $vsixPath"
+
+            # Find VSIXInstaller
+            $vsixInstaller = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\VSIXInstaller.exe"
+            if (-not (Test-Path $vsixInstaller)) {
+              $vsixInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\resources\app\ServiceHub\Services\Microsoft.VisualStudio.Setup.Service\VSIXInstaller.exe"
+            }
+
+            if (Test-Path $vsixInstaller) {
+              $process = Start-Process -FilePath $vsixInstaller -ArgumentList "/quiet", "/admin", $vsixPath -Wait -PassThru -NoNewWindow
+              Write-Host "VSIX installation completed with exit code: $($process.ExitCode)"
+            } else {
+              Write-Host "::warning::VSIXInstaller not found, skipping VSIX installation"
+            }
+          } else {
+            Write-Host "::warning::WDK VSIX not found, MSBuild may not recognize WDK targets"
+          }
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
