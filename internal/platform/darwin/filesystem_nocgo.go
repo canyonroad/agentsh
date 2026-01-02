@@ -3,18 +3,13 @@
 package darwin
 
 import (
-	"fmt"
-
 	"github.com/agentsh/agentsh/internal/platform"
+	"github.com/agentsh/agentsh/internal/platform/fuse"
 )
 
-// Mount creates a FUSE mount. Without CGO, this returns an error
-// directing the user to use observation-only mode (FSEvents).
+// Mount delegates to the shared fuse package, which returns an error when CGO is disabled.
 func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
-	return nil, fmt.Errorf(
-		"FUSE mounting requires CGO; build with CGO_ENABLED=1 or use observation-only mode (FSEvents). "+
-			"FUSE-T detected: %s", fs.implementation)
+	return fuse.Mount(fuse.Config{FSConfig: cfg})
 }
 
-// cgoEnabled reports whether CGO is available.
 const cgoEnabled = false
