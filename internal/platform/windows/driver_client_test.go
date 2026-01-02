@@ -295,3 +295,97 @@ func TestFileOperationConstants(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistryRequestDecoding(t *testing.T) {
+	const maxPath = 520
+	const maxValueName = 256
+	msgSize := 16 + 8 + 4 + 4 + 4 + 4 + 4 + (maxPath * 2) + (maxValueName * 2)
+	msg := make([]byte, msgSize)
+
+	// Header
+	binary.LittleEndian.PutUint32(msg[0:4], MsgPolicyCheckRegistry)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], 54321)
+
+	// Request fields
+	binary.LittleEndian.PutUint64(msg[16:24], 0xDEADBEEF)
+	binary.LittleEndian.PutUint32(msg[24:28], 1234)
+	binary.LittleEndian.PutUint32(msg[28:32], 5678)
+	binary.LittleEndian.PutUint32(msg[32:36], uint32(RegOpSetValue))
+	binary.LittleEndian.PutUint32(msg[36:40], 1)
+	binary.LittleEndian.PutUint32(msg[40:44], 100)
+
+	// Key path in UTF-16LE
+	keyPath := "\\REGISTRY\\MACHINE\\SOFTWARE\\Test"
+	keyPathBytes := utf16Encode(keyPath)
+	copy(msg[44:], keyPathBytes)
+
+	// Value name in UTF-16LE
+	valueName := "TestValue"
+	valueNameBytes := utf16Encode(valueName)
+	copy(msg[44+maxPath*2:], valueNameBytes)
+
+	// Decode and verify
+	sessionToken := binary.LittleEndian.Uint64(msg[16:24])
+	processId := binary.LittleEndian.Uint32(msg[24:28])
+	operation := RegistryOperation(binary.LittleEndian.Uint32(msg[32:36]))
+	decodedPath := utf16Decode(msg[44 : 44+maxPath*2])
+	decodedValue := utf16Decode(msg[44+maxPath*2 : 44+maxPath*2+maxValueName*2])
+
+	if sessionToken != 0xDEADBEEF {
+		t.Errorf("expected session token 0xDEADBEEF, got 0x%X", sessionToken)
+	}
+	if processId != 1234 {
+		t.Errorf("expected process ID 1234, got %d", processId)
+	}
+	if operation != RegOpSetValue {
+		t.Errorf("expected RegOpSetValue, got %d", operation)
+	}
+	if decodedPath != keyPath {
+		t.Errorf("expected key path %q, got %q", keyPath, decodedPath)
+	}
+	if decodedValue != valueName {
+		t.Errorf("expected value name %q, got %q", valueName, decodedValue)
+	}
+}
+
+func TestRegistryOperationConstants(t *testing.T) {
+	tests := []struct {
+		name     string
+		got      RegistryOperation
+		expected RegistryOperation
+	}{
+		{"RegOpCreateKey", RegOpCreateKey, 1},
+		{"RegOpSetValue", RegOpSetValue, 2},
+		{"RegOpDeleteKey", RegOpDeleteKey, 3},
+		{"RegOpDeleteValue", RegOpDeleteValue, 4},
+		{"RegOpRenameKey", RegOpRenameKey, 5},
+		{"RegOpQueryValue", RegOpQueryValue, 6},
+	}
+
+	for _, tc := range tests {
+		if tc.got != tc.expected {
+			t.Errorf("%s: expected %d, got %d", tc.name, tc.expected, tc.got)
+		}
+	}
+}
+
+func TestRegistryPolicyResponse(t *testing.T) {
+	reply := make([]byte, 24)
+
+	binary.LittleEndian.PutUint32(reply[0:4], MsgPolicyCheckRegistry)
+	binary.LittleEndian.PutUint32(reply[4:8], 24)
+	binary.LittleEndian.PutUint64(reply[8:16], 54321)
+	binary.LittleEndian.PutUint32(reply[16:20], uint32(DecisionDeny))
+	binary.LittleEndian.PutUint32(reply[20:24], 30000)
+
+	decision := PolicyDecision(binary.LittleEndian.Uint32(reply[16:20]))
+	cacheTTL := binary.LittleEndian.Uint32(reply[20:24])
+
+	if decision != DecisionDeny {
+		t.Errorf("expected DecisionDeny, got %d", decision)
+	}
+	if cacheTTL != 30000 {
+		t.Errorf("expected cache TTL 30000, got %d", cacheTTL)
+	}
+}
