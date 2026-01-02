@@ -71,7 +71,7 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | **macOS ESF+NE** | 90% | Yes | Yes | None | Exec only | None |
 | **macOS + Lima** | 85% | Yes | Yes | Full | Yes | Full |
 | **macOS FUSE-T** | 70% | Yes | Yes | None | No | None |
-| **Windows Native** | 65% | Yes | Yes | Partial | No | Partial |
+| **Windows Native** | 75% | Yes | Yes | Partial | No | Partial |
 
 ## Security Feature Coverage
 
@@ -97,9 +97,9 @@ macOS FUSE-T + pf     ███████████████████�
                       File✓   Net✓    Iso✗      Sys✗     Res✗
                       (No isolation, no syscall filter, no resource limits)
 
-Windows Native        ██████████████████████████████░░░░░░░░░░░░░░░░░░   65%
-                      File✓   Net⚠    Iso⚠      Sys✗     Res⚠
-                      (Mini Filter + Registry blocking, AppContainer partial)
+Windows Native        ████████████████████████████████████░░░░░░░░░░░░   75%
+                      File✓   Net✓    Iso⚠      Sys✗     Res⚠
+                      (Mini Filter + WinDivert + Registry blocking, AppContainer partial)
 
 Legend: ✓ = Full support  ⚠ = Partial support  ✗ = Not supported
 ```
@@ -198,8 +198,8 @@ Lima/virtiofs   █████████████████████�
                                   ▼                          ▼
                     ┌─────────────────────┐    ┌─────────────────────┐
                     │    macOS + Lima     │    │   Windows Native    │
-                    │    85% - Full       │    │   55% + Registry    │
-                    │    isolation        │    │   monitoring        │
+                    │    85% - Full       │    │   75% + Registry    │
+                    │    isolation        │    │   + WinDivert       │
                     └─────────────────────┘    └─────────────────────┘
                                   │
                                   │ If Lima not acceptable
@@ -229,7 +229,7 @@ Lima/virtiofs   █████████████████████�
 | Production - macOS | macOS + Lima | 85% | Full isolation via VM |
 | Enterprise Security Product | macOS ESF+NE | 90% | Requires Apple approval |
 | Development - macOS | macOS FUSE-T | 70% | Easy setup, good monitoring |
-| Development - Windows | Windows Native | 55% | Registry monitoring included |
+| Development - Windows | Windows Native | 75% | Registry monitoring + WinDivert network |
 | CI/CD Pipeline | Linux Native | 100% | Containers supported |
 | Air-gapped/Offline | Linux Native | 100% | No external dependencies |
 

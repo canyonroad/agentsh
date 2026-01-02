@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/platform"
 )
@@ -24,6 +25,9 @@ type Network struct {
 	proxyPort      int
 	dnsPort        int
 	stopChan       chan struct{}
+	windivert      *WinDivertHandle
+	natTable       *NATTable
+	driverClient   *DriverClient
 }
 
 // NewNetwork creates a new Windows network interceptor.
@@ -105,6 +109,7 @@ func (n *Network) CanRedirectTraffic() bool {
 }
 
 // Setup configures network interception.
+// Call SetDriverClient() before Setup() if process-aware filtering is needed.
 // With WinDivert: Full traffic capture and redirection to proxy.
 // With WFP only: Blocking/allowing connections without transparent proxy.
 func (n *Network) Setup(config platform.NetConfig) error {
@@ -140,15 +145,34 @@ func (n *Network) Setup(config platform.NetConfig) error {
 
 // setupWinDivert configures WinDivert for packet capture and redirection.
 func (n *Network) setupWinDivert() error {
-	// WinDivert filter for capturing outbound TCP and DNS traffic
-	// Filter syntax: "outbound and (tcp or (udp.DstPort == 53))"
-	//
-	// Note: Actual implementation would use godivert or similar library:
-	//   handle, err := godivert.NewWinDivertHandle(filter)
-	//   if err != nil { return err }
-	//   go n.processPackets(handle)
-	//
-	// This is a stub for cross-platform compilation.
+	n.natTable = NewNATTable(5 * time.Minute)
+
+	var err error
+	n.windivert, err = NewWinDivertHandle(n.natTable, n.config, n.driverClient)
+	if err != nil {
+		return fmt.Errorf("failed to create WinDivert handle: %w", err)
+	}
+
+	// Start WinDivert first
+	if err := n.windivert.Start(); err != nil {
+		n.windivert = nil
+		n.natTable = nil
+		return fmt.Errorf("failed to start WinDivert: %w", err)
+	}
+
+	// Only start cleanup goroutine after successful start
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-n.stopChan:
+				return
+			case <-ticker.C:
+				n.natTable.Cleanup()
+			}
+		}
+	}()
 
 	return nil
 }
@@ -198,6 +222,13 @@ func (n *Network) Teardown() error {
 	// - Close WinDivert handle
 	// - Or close WFP session (which removes all rules due to Dynamic flag)
 
+	if n.windivert != nil {
+		if err := n.windivert.Stop(); err != nil {
+			return err
+		}
+		n.windivert = nil
+	}
+
 	n.configured = false
 	n.stopChan = make(chan struct{})
 	return nil
@@ -241,6 +272,25 @@ func (n *Network) AddAllowRule(ip string, port int) error {
 	// Note: Similar to AddBlockRule but with wf.ActionPermit
 
 	return nil
+}
+
+// NATTable returns the NAT table for proxy lookup.
+func (n *Network) NATTable() *NATTable {
+	return n.natTable
+}
+
+// WinDivert returns the WinDivert handle for session PID management.
+func (n *Network) WinDivert() *WinDivertHandle {
+	return n.windivert
+}
+
+// SetDriverClient sets the driver client for process event notifications.
+// This must be called BEFORE Setup() if process-aware filtering is needed.
+// If not set, WinDivert will still work but won't track session PIDs.
+func (n *Network) SetDriverClient(client *DriverClient) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.driverClient = client
 }
 
 // Compile-time interface check
