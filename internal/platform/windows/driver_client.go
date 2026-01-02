@@ -68,16 +68,44 @@ const (
 // FilePolicyHandler is called when the driver requests a file policy decision
 type FilePolicyHandler func(req *FileRequest) (PolicyDecision, uint32)
 
+// RegistryOperation represents the type of registry operation from driver
+type RegistryOperation uint32
+
+const (
+	RegOpCreateKey   RegistryOperation = 1
+	RegOpSetValue    RegistryOperation = 2
+	RegOpDeleteKey   RegistryOperation = 3
+	RegOpDeleteValue RegistryOperation = 4
+	RegOpRenameKey   RegistryOperation = 5
+	RegOpQueryValue  RegistryOperation = 6
+)
+
+// RegistryRequest represents a registry policy check request from the driver
+type RegistryRequest struct {
+	SessionToken uint64
+	ProcessId    uint32
+	ThreadId     uint32
+	Operation    RegistryOperation
+	ValueType    uint32
+	DataSize     uint32
+	KeyPath      string
+	ValueName    string
+}
+
+// RegistryPolicyHandler is called when the driver requests a registry policy decision
+type RegistryPolicyHandler func(req *RegistryRequest) (PolicyDecision, uint32)
+
 // DriverClient communicates with the agentsh.sys mini filter
 type DriverClient struct {
-	port              windows.Handle
-	connected         atomic.Bool
-	stopChan          chan struct{}
-	wg                sync.WaitGroup
-	mu                sync.Mutex
-	msgCounter        atomic.Uint64
-	processHandler    ProcessEventHandler
-	filePolicyHandler FilePolicyHandler
+	port                  windows.Handle
+	connected             atomic.Bool
+	stopChan              chan struct{}
+	wg                    sync.WaitGroup
+	mu                    sync.Mutex
+	msgCounter            atomic.Uint64
+	processHandler        ProcessEventHandler
+	filePolicyHandler     FilePolicyHandler
+	registryPolicyHandler RegistryPolicyHandler
 }
 
 // NewDriverClient creates a new driver client
@@ -175,6 +203,13 @@ func (c *DriverClient) SetFilePolicyHandler(handler FilePolicyHandler) {
 	c.filePolicyHandler = handler
 }
 
+// SetRegistryPolicyHandler sets the callback for registry policy requests
+func (c *DriverClient) SetRegistryPolicyHandler(handler RegistryPolicyHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.registryPolicyHandler = handler
+}
+
 // messageLoop handles incoming messages from the driver
 func (c *DriverClient) messageLoop() {
 	defer c.wg.Done()
@@ -225,6 +260,8 @@ func (c *DriverClient) handleMessage(msg []byte, reply []byte) int {
 		return c.handlePing(msg, reply, requestId)
 	case MsgPolicyCheckFile:
 		return c.handleFilePolicyCheck(msg, reply)
+	case MsgPolicyCheckRegistry:
+		return c.handleRegistryPolicyCheck(msg, reply)
 	case MsgProcessCreated:
 		return c.handleProcessEvent(msg, true)
 	case MsgProcessTerminated:
@@ -312,6 +349,56 @@ func (c *DriverClient) handleFilePolicyCheck(msg []byte, reply []byte) int {
 	// Build response: header(16) + decision(4) + cacheTTL(4)
 	requestId := binary.LittleEndian.Uint64(msg[8:16])
 	binary.LittleEndian.PutUint32(reply[0:4], MsgPolicyCheckFile)
+	binary.LittleEndian.PutUint32(reply[4:8], 24)
+	binary.LittleEndian.PutUint64(reply[8:16], requestId)
+	binary.LittleEndian.PutUint32(reply[16:20], uint32(decision))
+	binary.LittleEndian.PutUint32(reply[20:24], cacheTTL)
+
+	return 24
+}
+
+// handleRegistryPolicyCheck handles registry policy check requests from driver
+func (c *DriverClient) handleRegistryPolicyCheck(msg []byte, reply []byte) int {
+	const minSize = 16 + 8 + 4 + 4 + 4 + 4 + 4
+	if len(msg) < minSize {
+		return 0
+	}
+
+	const maxPath = 520
+	const maxValueName = 256
+
+	req := &RegistryRequest{
+		SessionToken: binary.LittleEndian.Uint64(msg[16:24]),
+		ProcessId:    binary.LittleEndian.Uint32(msg[24:28]),
+		ThreadId:     binary.LittleEndian.Uint32(msg[28:32]),
+		Operation:    RegistryOperation(binary.LittleEndian.Uint32(msg[32:36])),
+		ValueType:    binary.LittleEndian.Uint32(msg[36:40]),
+		DataSize:     binary.LittleEndian.Uint32(msg[40:44]),
+	}
+
+	keyPathStart := 44
+	if len(msg) >= keyPathStart+maxPath*2 {
+		req.KeyPath = utf16Decode(msg[keyPathStart : keyPathStart+maxPath*2])
+	}
+
+	valueNameStart := keyPathStart + maxPath*2
+	if len(msg) >= valueNameStart+maxValueName*2 {
+		req.ValueName = utf16Decode(msg[valueNameStart : valueNameStart+maxValueName*2])
+	}
+
+	c.mu.Lock()
+	handler := c.registryPolicyHandler
+	c.mu.Unlock()
+
+	decision := DecisionAllow
+	cacheTTL := uint32(5000)
+
+	if handler != nil {
+		decision, cacheTTL = handler(req)
+	}
+
+	requestId := binary.LittleEndian.Uint64(msg[8:16])
+	binary.LittleEndian.PutUint32(reply[0:4], MsgPolicyCheckRegistry)
 	binary.LittleEndian.PutUint32(reply[4:8], 24)
 	binary.LittleEndian.PutUint64(reply[8:16], requestId)
 	binary.LittleEndian.PutUint32(reply[16:20], uint32(decision))

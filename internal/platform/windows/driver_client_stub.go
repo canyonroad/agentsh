@@ -96,6 +96,33 @@ const (
 // FilePolicyHandler is called when the driver requests a file policy decision
 type FilePolicyHandler func(req *FileRequest) (PolicyDecision, uint32)
 
+// RegistryOperation represents the type of registry operation from driver
+type RegistryOperation uint32
+
+const (
+	RegOpCreateKey   RegistryOperation = 1
+	RegOpSetValue    RegistryOperation = 2
+	RegOpDeleteKey   RegistryOperation = 3
+	RegOpDeleteValue RegistryOperation = 4
+	RegOpRenameKey   RegistryOperation = 5
+	RegOpQueryValue  RegistryOperation = 6
+)
+
+// RegistryRequest represents a registry policy check request from the driver
+type RegistryRequest struct {
+	SessionToken uint64
+	ProcessId    uint32
+	ThreadId     uint32
+	Operation    RegistryOperation
+	ValueType    uint32
+	DataSize     uint32
+	KeyPath      string
+	ValueName    string
+}
+
+// RegistryPolicyHandler is called when the driver requests a registry policy decision
+type RegistryPolicyHandler func(req *RegistryRequest) (PolicyDecision, uint32)
+
 // SetProcessEventHandler stub for non-Windows
 func (c *DriverClient) SetProcessEventHandler(handler ProcessEventHandler) {
 	// No-op on non-Windows
@@ -103,6 +130,11 @@ func (c *DriverClient) SetProcessEventHandler(handler ProcessEventHandler) {
 
 // SetFilePolicyHandler stub for non-Windows
 func (c *DriverClient) SetFilePolicyHandler(handler FilePolicyHandler) {
+	// No-op on non-Windows
+}
+
+// SetRegistryPolicyHandler stub for non-Windows
+func (c *DriverClient) SetRegistryPolicyHandler(handler RegistryPolicyHandler) {
 	// No-op on non-Windows
 }
 
