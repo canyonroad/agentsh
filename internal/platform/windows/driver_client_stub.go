@@ -15,6 +15,9 @@ const (
 	MsgPong                = 50
 	MsgRegisterSession     = 100
 	MsgUnregisterSession   = 101
+	MsgSetConfig           = 104
+	MsgGetMetrics          = 105
+	MsgMetricsReply        = 106
 )
 
 // Driver client version
@@ -136,6 +139,51 @@ func (c *DriverClient) SetFilePolicyHandler(handler FilePolicyHandler) {
 // SetRegistryPolicyHandler stub for non-Windows
 func (c *DriverClient) SetRegistryPolicyHandler(handler RegistryPolicyHandler) {
 	// No-op on non-Windows
+}
+
+// FailMode represents the driver fail mode
+type FailMode uint32
+
+const (
+	FailModeOpen   FailMode = 0
+	FailModeClosed FailMode = 1
+)
+
+// DriverConfig represents driver configuration
+type DriverConfig struct {
+	FailMode               FailMode
+	PolicyQueryTimeoutMs   uint32
+	MaxConsecutiveFailures uint32
+	CacheMaxEntries        uint32
+	CacheDefaultTTLMs      uint32
+}
+
+// DriverMetrics represents driver metrics
+type DriverMetrics struct {
+	CacheHitCount         uint32
+	CacheMissCount        uint32
+	CacheEntryCount       uint32
+	CacheEvictionCount    uint32
+	FilePolicyQueries     uint32
+	RegistryPolicyQueries uint32
+	PolicyQueryTimeouts   uint32
+	PolicyQueryFailures   uint32
+	AllowDecisions        uint32
+	DenyDecisions         uint32
+	ActiveSessions        uint32
+	TrackedProcesses      uint32
+	FailOpenMode          bool
+	ConsecutiveFailures   uint32
+}
+
+// SetConfig stub for non-Windows
+func (c *DriverClient) SetConfig(cfg *DriverConfig) error {
+	return fmt.Errorf("driver client only available on Windows")
+}
+
+// GetMetrics stub for non-Windows
+func (c *DriverClient) GetMetrics() (*DriverMetrics, error) {
+	return nil, fmt.Errorf("driver client only available on Windows")
 }
 
 // utf16Encode converts a Go string to UTF-16LE bytes

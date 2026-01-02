@@ -25,6 +25,9 @@ const (
 	MsgPong                = 50
 	MsgRegisterSession     = 100
 	MsgUnregisterSession   = 101
+	MsgSetConfig           = 104
+	MsgGetMetrics          = 105
+	MsgMetricsReply        = 106
 )
 
 // Driver client version
@@ -94,6 +97,41 @@ type RegistryRequest struct {
 
 // RegistryPolicyHandler is called when the driver requests a registry policy decision
 type RegistryPolicyHandler func(req *RegistryRequest) (PolicyDecision, uint32)
+
+// FailMode represents the driver fail mode
+type FailMode uint32
+
+const (
+	FailModeOpen   FailMode = 0
+	FailModeClosed FailMode = 1
+)
+
+// DriverConfig represents driver configuration
+type DriverConfig struct {
+	FailMode               FailMode
+	PolicyQueryTimeoutMs   uint32
+	MaxConsecutiveFailures uint32
+	CacheMaxEntries        uint32
+	CacheDefaultTTLMs      uint32
+}
+
+// DriverMetrics represents driver metrics
+type DriverMetrics struct {
+	CacheHitCount         uint32
+	CacheMissCount        uint32
+	CacheEntryCount       uint32
+	CacheEvictionCount    uint32
+	FilePolicyQueries     uint32
+	RegistryPolicyQueries uint32
+	PolicyQueryTimeouts   uint32
+	PolicyQueryFailures   uint32
+	AllowDecisions        uint32
+	DenyDecisions         uint32
+	ActiveSessions        uint32
+	TrackedProcesses      uint32
+	FailOpenMode          bool
+	ConsecutiveFailures   uint32
+}
 
 // DriverClient communicates with the agentsh.sys mini filter
 type DriverClient struct {
@@ -477,6 +515,72 @@ func (c *DriverClient) UnregisterSession(sessionToken uint64) error {
 	binary.LittleEndian.PutUint64(msg[16:24], sessionToken)
 
 	return filterSendMessage(c.port, msg, nil)
+}
+
+// SetConfig sends configuration to the driver
+func (c *DriverClient) SetConfig(cfg *DriverConfig) error {
+	if !c.connected.Load() {
+		return fmt.Errorf("not connected")
+	}
+
+	// Build message: header(16) + failMode(4) + timeout(4) + maxFail(4) + cacheMax(4) + cacheTTL(4)
+	msgSize := 16 + 4 + 4 + 4 + 4 + 4
+	msg := make([]byte, msgSize)
+
+	binary.LittleEndian.PutUint32(msg[0:4], MsgSetConfig)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], c.msgCounter.Add(1))
+	binary.LittleEndian.PutUint32(msg[16:20], uint32(cfg.FailMode))
+	binary.LittleEndian.PutUint32(msg[20:24], cfg.PolicyQueryTimeoutMs)
+	binary.LittleEndian.PutUint32(msg[24:28], cfg.MaxConsecutiveFailures)
+	binary.LittleEndian.PutUint32(msg[28:32], cfg.CacheMaxEntries)
+	binary.LittleEndian.PutUint32(msg[32:36], cfg.CacheDefaultTTLMs)
+
+	return filterSendMessage(c.port, msg, nil)
+}
+
+// GetMetrics retrieves current metrics from the driver
+func (c *DriverClient) GetMetrics() (*DriverMetrics, error) {
+	if !c.connected.Load() {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	// Build request
+	msgSize := 16
+	msg := make([]byte, msgSize)
+	binary.LittleEndian.PutUint32(msg[0:4], MsgGetMetrics)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], c.msgCounter.Add(1))
+
+	// Response buffer
+	reply := make([]byte, 128)
+
+	err := filterSendMessage(c.port, msg, reply)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse response (header(16) + metrics fields)
+	if len(reply) < 72 {
+		return nil, fmt.Errorf("response too short")
+	}
+
+	return &DriverMetrics{
+		CacheHitCount:         binary.LittleEndian.Uint32(reply[16:20]),
+		CacheMissCount:        binary.LittleEndian.Uint32(reply[20:24]),
+		CacheEntryCount:       binary.LittleEndian.Uint32(reply[24:28]),
+		CacheEvictionCount:    binary.LittleEndian.Uint32(reply[28:32]),
+		FilePolicyQueries:     binary.LittleEndian.Uint32(reply[32:36]),
+		RegistryPolicyQueries: binary.LittleEndian.Uint32(reply[36:40]),
+		PolicyQueryTimeouts:   binary.LittleEndian.Uint32(reply[40:44]),
+		PolicyQueryFailures:   binary.LittleEndian.Uint32(reply[44:48]),
+		AllowDecisions:        binary.LittleEndian.Uint32(reply[48:52]),
+		DenyDecisions:         binary.LittleEndian.Uint32(reply[52:56]),
+		ActiveSessions:        binary.LittleEndian.Uint32(reply[56:60]),
+		TrackedProcesses:      binary.LittleEndian.Uint32(reply[60:64]),
+		FailOpenMode:          reply[64] != 0,
+		ConsecutiveFailures:   binary.LittleEndian.Uint32(reply[68:72]),
+	}, nil
 }
 
 // utf16Encode converts a Go string to UTF-16LE bytes
