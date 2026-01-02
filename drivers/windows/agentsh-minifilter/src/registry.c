@@ -3,17 +3,15 @@
 #include "registry.h"
 #include "process.h"
 #include "cache.h"
+#include "config.h"
+#include "metrics.h"
 
 // Registry callback cookie
 static LARGE_INTEGER gRegistryCookie = {0};
 
-// Fail-open tracking
+// Fail-open tracking (local state, also reported via metrics)
 static volatile LONG gConsecutiveFailures = 0;
 static volatile BOOLEAN gFailOpenMode = FALSE;
-#define MAX_CONSECUTIVE_FAILURES 10
-
-// Query timeout (5 seconds)
-#define REGISTRY_QUERY_TIMEOUT_MS 5000
 
 // Registry operations use offset 100+ in the cache to distinguish from file operations
 #define REG_OP_CACHE_OFFSET 100
@@ -138,10 +136,21 @@ AgentshQueryRegistryPolicy(
     SIZE_T pathLen;
     SIZE_T valueLen;
 
+    AgentshMetricsIncrementRegistryPolicyQuery();
+
     *Decision = DECISION_ALLOW;
 
-    // Check fail-open mode
+    // Check fail mode
+    AGENTSH_FAIL_MODE failMode = AgentshGetFailMode();
     if (gFailOpenMode) {
+        // In fail-open mode, apply configured policy
+        if (failMode == FAIL_MODE_OPEN) {
+            AgentshMetricsIncrementAllowDecision();
+            return TRUE;
+        }
+        // In fail-closed mode, deny all
+        *Decision = DECISION_DENY;
+        AgentshMetricsIncrementDenyDecision();
         return TRUE;
     }
 
@@ -175,7 +184,8 @@ AgentshQueryRegistryPolicy(
         request.ValueName[valueLen] = L'\0';
     }
 
-    timeout.QuadPart = -((LONGLONG)REGISTRY_QUERY_TIMEOUT_MS * 10000);
+    ULONG timeoutMs = AgentshGetPolicyTimeoutMs();
+    timeout.QuadPart = -((LONGLONG)timeoutMs * 10000);
 
     status = FltSendMessage(
         AgentshData.FilterHandle,
@@ -190,13 +200,23 @@ AgentshQueryRegistryPolicy(
     if (NT_SUCCESS(status) && replyLength >= sizeof(response)) {
         *Decision = response.Decision;
         InterlockedExchange(&gConsecutiveFailures, 0);
+        AgentshMetricsSetConsecutiveFailures(0);
+        AgentshMetricsSetFailOpenMode(FALSE);
 
+        if (response.Decision == DECISION_ALLOW) {
+            AgentshMetricsIncrementAllowDecision();
+        } else {
+            AgentshMetricsIncrementDenyDecision();
+        }
+
+        // Update cache with config TTL
+        ULONG ttl = response.CacheTTLMs > 0 ? response.CacheTTLMs : AgentshGetCacheDefaultTTLMs();
         AgentshCacheInsert(
             SessionToken,
             (AGENTSH_FILE_OP)(Operation + REG_OP_CACHE_OFFSET),
             KeyPath,
             response.Decision,
-            response.CacheTTLMs > 0 ? response.CacheTTLMs : CACHE_DEFAULT_TTL_MS
+            ttl
             );
 
         return TRUE;
@@ -204,9 +224,22 @@ AgentshQueryRegistryPolicy(
 
     // Handle failure
     LONG failures = InterlockedIncrement(&gConsecutiveFailures);
-    if (failures >= MAX_CONSECUTIVE_FAILURES && !gFailOpenMode) {
+    AgentshMetricsSetConsecutiveFailures(failures);
+    AgentshMetricsIncrementPolicyFailure();
+
+    ULONG maxFail = AgentshGetMaxConsecutiveFailures();
+    if (failures >= (LONG)maxFail && !gFailOpenMode) {
         gFailOpenMode = TRUE;
-        DbgPrint("AgentSH: Registry entering fail-open mode after %ld failures\n", failures);
+        AgentshMetricsSetFailOpenMode(TRUE);
+        DbgPrint("AgentSH: Registry entering fail mode after %ld failures\n", failures);
+    }
+
+    // Apply fail mode policy (reuse failMode from start of function for consistency)
+    if (failMode == FAIL_MODE_CLOSED) {
+        *Decision = DECISION_DENY;
+        AgentshMetricsIncrementDenyDecision();
+    } else {
+        AgentshMetricsIncrementAllowDecision();
     }
 
     return FALSE;
