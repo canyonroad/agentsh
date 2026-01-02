@@ -149,8 +149,6 @@ AgentshMessageNotify(
     PAGENTSH_MESSAGE_HEADER header;
 
     UNREFERENCED_PARAMETER(PortCookie);
-    UNREFERENCED_PARAMETER(OutputBuffer);
-    UNREFERENCED_PARAMETER(OutputBufferLength);
 
     *ReturnOutputBufferLength = 0;
 
@@ -188,6 +186,31 @@ AgentshMessageNotify(
                 if (!NT_SUCCESS(status)) {
                     DbgPrint("AgentSH: Session unregistration failed: 0x%08X\n", status);
                 }
+            } else {
+                status = STATUS_BUFFER_TOO_SMALL;
+            }
+            break;
+
+        case MSG_SET_CONFIG:
+            if (InputBufferLength >= sizeof(AGENTSH_CONFIG)) {
+                PAGENTSH_CONFIG config = (PAGENTSH_CONFIG)InputBuffer;
+                status = AgentshSetConfig(config);
+                if (!NT_SUCCESS(status)) {
+                    DbgPrint("AgentSH: Config update failed: 0x%08X\n", status);
+                }
+            } else {
+                status = STATUS_BUFFER_TOO_SMALL;
+            }
+            break;
+
+        case MSG_GET_METRICS:
+            if (OutputBufferLength >= sizeof(AGENTSH_METRICS)) {
+                PAGENTSH_METRICS metrics = (PAGENTSH_METRICS)OutputBuffer;
+                RtlZeroMemory(metrics, sizeof(AGENTSH_METRICS));
+                metrics->Header.Type = MSG_METRICS_REPLY;
+                metrics->Header.Size = sizeof(AGENTSH_METRICS);
+                AgentshMetricsGet(metrics);
+                *ReturnOutputBufferLength = sizeof(AGENTSH_METRICS);
             } else {
                 status = STATUS_BUFFER_TOO_SMALL;
             }
