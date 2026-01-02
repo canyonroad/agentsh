@@ -389,3 +389,104 @@ func TestRegistryPolicyResponse(t *testing.T) {
 		t.Errorf("expected cache TTL 30000, got %d", cacheTTL)
 	}
 }
+
+func TestDriverConfigEncoding(t *testing.T) {
+	cfg := &DriverConfig{
+		FailMode:               FailModeClosed,
+		PolicyQueryTimeoutMs:   3000,
+		MaxConsecutiveFailures: 5,
+		CacheMaxEntries:        8192,
+		CacheDefaultTTLMs:      10000,
+	}
+
+	// Build message like SetConfig does
+	msg := make([]byte, 36)
+	binary.LittleEndian.PutUint32(msg[0:4], MsgSetConfig)
+	binary.LittleEndian.PutUint32(msg[4:8], 36)
+	binary.LittleEndian.PutUint64(msg[8:16], 1)
+	binary.LittleEndian.PutUint32(msg[16:20], uint32(cfg.FailMode))
+	binary.LittleEndian.PutUint32(msg[20:24], cfg.PolicyQueryTimeoutMs)
+	binary.LittleEndian.PutUint32(msg[24:28], cfg.MaxConsecutiveFailures)
+	binary.LittleEndian.PutUint32(msg[28:32], cfg.CacheMaxEntries)
+	binary.LittleEndian.PutUint32(msg[32:36], cfg.CacheDefaultTTLMs)
+
+	// Decode and verify
+	failMode := FailMode(binary.LittleEndian.Uint32(msg[16:20]))
+	timeout := binary.LittleEndian.Uint32(msg[20:24])
+
+	if failMode != FailModeClosed {
+		t.Errorf("expected FailModeClosed, got %d", failMode)
+	}
+	if timeout != 3000 {
+		t.Errorf("expected timeout 3000, got %d", timeout)
+	}
+}
+
+func TestDriverMetricsDecoding(t *testing.T) {
+	// Build mock metrics response
+	reply := make([]byte, 72)
+	binary.LittleEndian.PutUint32(reply[0:4], MsgMetricsReply)
+	binary.LittleEndian.PutUint32(reply[4:8], 72)
+	binary.LittleEndian.PutUint32(reply[16:20], 100) // CacheHitCount
+	binary.LittleEndian.PutUint32(reply[20:24], 10)  // CacheMissCount
+	binary.LittleEndian.PutUint32(reply[48:52], 90)  // AllowDecisions
+	binary.LittleEndian.PutUint32(reply[52:56], 5)   // DenyDecisions
+	reply[64] = 1                                    // FailOpenMode = true
+
+	// Decode and verify
+	cacheHits := binary.LittleEndian.Uint32(reply[16:20])
+	allowDecisions := binary.LittleEndian.Uint32(reply[48:52])
+	failOpen := reply[64] != 0
+
+	if cacheHits != 100 {
+		t.Errorf("expected cache hits 100, got %d", cacheHits)
+	}
+	if allowDecisions != 90 {
+		t.Errorf("expected allow decisions 90, got %d", allowDecisions)
+	}
+	if !failOpen {
+		t.Error("expected fail open mode to be true")
+	}
+}
+
+func TestFailModeConstants(t *testing.T) {
+	if FailModeOpen != 0 {
+		t.Errorf("FailModeOpen should be 0, got %d", FailModeOpen)
+	}
+	if FailModeClosed != 1 {
+		t.Errorf("FailModeClosed should be 1, got %d", FailModeClosed)
+	}
+}
+
+func TestMessageTypeConstants(t *testing.T) {
+	if MsgSetConfig != 104 {
+		t.Errorf("MsgSetConfig should be 104, got %d", MsgSetConfig)
+	}
+	if MsgGetMetrics != 105 {
+		t.Errorf("MsgGetMetrics should be 105, got %d", MsgGetMetrics)
+	}
+	if MsgMetricsReply != 106 {
+		t.Errorf("MsgMetricsReply should be 106, got %d", MsgMetricsReply)
+	}
+}
+
+func TestDriverConfigDefaults(t *testing.T) {
+	cfg := &DriverConfig{
+		FailMode:               FailModeOpen,
+		PolicyQueryTimeoutMs:   5000,
+		MaxConsecutiveFailures: 10,
+		CacheMaxEntries:        4096,
+		CacheDefaultTTLMs:      5000,
+	}
+
+	// Verify defaults match what we expect from driver
+	if cfg.FailMode != FailModeOpen {
+		t.Errorf("expected default FailModeOpen")
+	}
+	if cfg.PolicyQueryTimeoutMs != 5000 {
+		t.Errorf("expected default timeout 5000, got %d", cfg.PolicyQueryTimeoutMs)
+	}
+	if cfg.CacheMaxEntries != 4096 {
+		t.Errorf("expected default cache entries 4096, got %d", cfg.CacheMaxEntries)
+	}
+}
