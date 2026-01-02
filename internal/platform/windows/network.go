@@ -283,5 +283,12 @@ func (n *Network) WinDivert() *WinDivertHandle {
 	return n.windivert
 }
 
+// SetDriverClient sets the driver client for process event notifications.
+func (n *Network) SetDriverClient(client *DriverClient) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.driverClient = client
+}
+
 // Compile-time interface check
 var _ platform.NetworkInterceptor = (*Network)(nil)

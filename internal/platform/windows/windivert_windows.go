@@ -70,6 +70,21 @@ func (w *WinDivertHandle) baseFilter() string {
 	return "outbound and (tcp or (udp and udp.DstPort == 53))"
 }
 
+// SubscribeToProcessEvents registers callbacks with the driver client.
+func (w *WinDivertHandle) SubscribeToProcessEvents() {
+	if w.driver == nil {
+		return
+	}
+
+	w.driver.SetProcessEventHandler(func(sessionToken uint64, processId, parentId uint32, createTime uint64, isCreation bool) {
+		if isCreation {
+			w.AddSessionPID(processId)
+		} else {
+			w.RemoveSessionPID(processId)
+		}
+	})
+}
+
 // Start begins packet capture and redirection.
 func (w *WinDivertHandle) Start() error {
 	w.mu.Lock()
@@ -78,6 +93,9 @@ func (w *WinDivertHandle) Start() error {
 	if atomic.LoadInt32(&w.running) == 1 {
 		return fmt.Errorf("WinDivert already running")
 	}
+
+	// Subscribe to process events for PID tracking
+	w.SubscribeToProcessEvents()
 
 	var err error
 	w.handle, err = godivert.NewWinDivertHandle(w.baseFilter())
