@@ -108,4 +108,38 @@ typedef struct _AGENTSH_POLICY_RESPONSE {
     ULONG CacheTTLMs;               // How long to cache this decision
 } AGENTSH_POLICY_RESPONSE, *PAGENTSH_POLICY_RESPONSE;
 
+// Registry operation types
+typedef enum _AGENTSH_REGISTRY_OP {
+    REG_OP_CREATE_KEY = 1,
+    REG_OP_SET_VALUE = 2,
+    REG_OP_DELETE_KEY = 3,
+    REG_OP_DELETE_VALUE = 4,
+    REG_OP_RENAME_KEY = 5,
+    REG_OP_QUERY_VALUE = 6
+} AGENTSH_REGISTRY_OP;
+
+// Registry value types (subset of REG_* constants)
+#define AGENTSH_REG_NONE      0
+#define AGENTSH_REG_SZ        1
+#define AGENTSH_REG_DWORD     4
+#define AGENTSH_REG_BINARY    3
+#define AGENTSH_REG_MULTI_SZ  7
+#define AGENTSH_REG_QWORD     11
+
+// Maximum value name length
+#define AGENTSH_MAX_VALUE_NAME 256
+
+// Registry policy check request (driver -> user-mode)
+typedef struct _AGENTSH_REGISTRY_REQUEST {
+    AGENTSH_MESSAGE_HEADER Header;
+    ULONG64 SessionToken;
+    ULONG ProcessId;
+    ULONG ThreadId;
+    AGENTSH_REGISTRY_OP Operation;
+    ULONG ValueType;                // REG_SZ, REG_DWORD, etc.
+    ULONG DataSize;                 // Size of value data
+    WCHAR KeyPath[AGENTSH_MAX_PATH];
+    WCHAR ValueName[AGENTSH_MAX_VALUE_NAME];
+} AGENTSH_REGISTRY_REQUEST, *PAGENTSH_REGISTRY_REQUEST;
+
 #endif // _AGENTSH_PROTOCOL_H_
