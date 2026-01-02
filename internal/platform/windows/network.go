@@ -109,6 +109,7 @@ func (n *Network) CanRedirectTraffic() bool {
 }
 
 // Setup configures network interception.
+// Call SetDriverClient() before Setup() if process-aware filtering is needed.
 // With WinDivert: Full traffic capture and redirection to proxy.
 // With WFP only: Blocking/allowing connections without transparent proxy.
 func (n *Network) Setup(config platform.NetConfig) error {
@@ -284,6 +285,8 @@ func (n *Network) WinDivert() *WinDivertHandle {
 }
 
 // SetDriverClient sets the driver client for process event notifications.
+// This must be called BEFORE Setup() if process-aware filtering is needed.
+// If not set, WinDivert will still work but won't track session PIDs.
 func (n *Network) SetDriverClient(client *DriverClient) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
