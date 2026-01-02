@@ -20,6 +20,7 @@ If you're on Windows, the recommended approach is to run agentsh inside WSL2 or 
 - **Network visibility + policy enforcement:** works via the per-session proxy (DNS/connect/HTTP events).
 - **Transparent netns interception:** optional, Linux/root-only (requires privileges; proxy mode works without it).
 - **cgroups v2 limits:** optional, Linux-only; disabled by default (requires a writable cgroup base path).
+- **Registry monitoring + policy enforcement:** Windows-only, requires mini filter driver (see below).
 - **seccomp / full namespace isolation / eBPF:** planned/future work (not implemented).
 
 ## Quick start
@@ -98,6 +99,28 @@ agentsh server
 - ✅ Registry interception (create/set/delete keys, high-risk path detection)
 - ✅ Network interception (WinDivert TCP/DNS proxy with WFP fallback)
 - ✅ Production readiness (configurable fail modes, metrics, caching)
+
+**Registry Policy Configuration:**
+
+Registry rules in your policy file control Windows registry access:
+
+```yaml
+registry_rules:
+  - name: allow-app-settings
+    paths: ['HKCU\SOFTWARE\MyApp\*']
+    operations: ["*"]
+    decision: allow
+
+  - name: block-persistence-keys
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+      - 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+    operations: [write, create, delete]
+    decision: deny
+    priority: 100
+```
+
+Built-in high-risk path detection automatically blocks write operations to critical registry locations (Run keys, services, Windows Defender settings, LSA) with MITRE ATT&CK technique mappings for audit logging.
 
 See [Windows Driver Deployment Guide](windows-driver-deployment.md) for installation and configuration.
 

@@ -320,6 +320,35 @@ command_rules:
     decision: deny
 
 # =============================================================================
+# WINDOWS REGISTRY RULES (CI: Block all writes)
+# =============================================================================
+
+registry_rules:
+  # ---------------------------------------------------------------------------
+  # CI runners should NEVER modify registry
+  # ---------------------------------------------------------------------------
+
+  - name: allow-registry-read-only
+    description: Allow reading registry for build tools
+    paths:
+      - "*"
+    operations:
+      - read
+    decision: allow
+
+  - name: deny-all-registry-writes
+    description: Block all registry modifications in CI
+    paths:
+      - "*"
+    operations:
+      - write
+      - create
+      - delete
+      - rename
+    decision: deny
+    notify: true
+
+# =============================================================================
 # RESOURCE LIMITS
 # =============================================================================
 

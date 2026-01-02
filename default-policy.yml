@@ -510,6 +510,172 @@ command_rules:
     decision: deny
 
 # =============================================================================
+# WINDOWS REGISTRY RULES (Windows-only, requires mini filter driver)
+# =============================================================================
+
+registry_rules:
+  # ---------------------------------------------------------------------------
+  # Allow application-specific settings
+  # ---------------------------------------------------------------------------
+
+  - name: allow-workspace-app-settings
+    description: Allow registry access for workspace applications
+    paths:
+      - 'HKCU\SOFTWARE\agentsh\*'
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Block high-risk persistence locations
+  # ---------------------------------------------------------------------------
+
+  - name: block-run-keys
+    description: Block modifications to startup Run keys (persistence technique T1547.001)
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+      - 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+      - 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce*'
+      - 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+    priority: 100
+    notify: true
+
+  - name: block-winlogon
+    description: Block Winlogon modifications (T1547.004)
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+    priority: 100
+
+  # ---------------------------------------------------------------------------
+  # Block security setting modifications
+  # ---------------------------------------------------------------------------
+
+  - name: block-defender-settings
+    description: Block Windows Defender policy changes (T1562.001)
+    paths:
+      - 'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+    priority: 200
+    notify: true
+
+  - name: block-lsa-settings
+    description: Block LSA credential settings (T1003)
+    paths:
+      - 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa*'
+      - 'HKLM\SECURITY\Policy\Secrets*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+    priority: 200
+
+  - name: block-firewall-settings
+    description: Block Windows Firewall modifications (T1562.004)
+    paths:
+      - 'HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+    priority: 150
+
+  # ---------------------------------------------------------------------------
+  # Approve service modifications
+  # ---------------------------------------------------------------------------
+
+  - name: approve-service-changes
+    description: Require approval for service registry changes (T1543.003)
+    paths:
+      - 'HKLM\SYSTEM\CurrentControlSet\Services\*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: approve
+    message: "Agent wants to modify Windows service: {{.Path}}"
+    timeout: 2m
+
+  # ---------------------------------------------------------------------------
+  # Block other high-risk locations
+  # ---------------------------------------------------------------------------
+
+  - name: block-image-file-execution
+    description: Block IFEO debugger redirects (T1546.012)
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+    priority: 100
+
+  - name: block-appinit-dlls
+    description: Block AppInit_DLLs modifications (T1546.010)
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+    priority: 100
+
+  - name: block-known-dlls
+    description: Block KnownDLLs modifications (T1574.001)
+    paths:
+      - 'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+    priority: 100
+
+  # ---------------------------------------------------------------------------
+  # Allow read operations
+  # ---------------------------------------------------------------------------
+
+  - name: allow-registry-read
+    description: Allow reading registry values
+    paths:
+      - "*"
+    operations:
+      - read
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Default deny for write operations
+  # ---------------------------------------------------------------------------
+
+  - name: default-deny-registry
+    description: Deny all other registry modifications
+    paths:
+      - "*"
+    operations:
+      - write
+      - create
+      - delete
+      - rename
+    decision: deny
+
+# =============================================================================
 # RESOURCE LIMITS
 # =============================================================================
 
