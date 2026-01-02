@@ -68,5 +68,14 @@ func (a *PolicyAdapter) CheckCommand(cmd string, args []string) Decision {
 	return decision.EffectiveDecision
 }
 
+// CheckRegistry evaluates registry access policy.
+func (a *PolicyAdapter) CheckRegistry(path string, op string) Decision {
+	if a == nil || a.engine == nil {
+		return DecisionAllow
+	}
+	decision := a.engine.CheckRegistry(path, op)
+	return decision.EffectiveDecision
+}
+
 // Compile-time interface check
 var _ PolicyEngine = (*PolicyAdapter)(nil)
