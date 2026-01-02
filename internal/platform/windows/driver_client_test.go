@@ -311,7 +311,7 @@ func TestRegistryRequestDecoding(t *testing.T) {
 	binary.LittleEndian.PutUint64(msg[16:24], 0xDEADBEEF)
 	binary.LittleEndian.PutUint32(msg[24:28], 1234)
 	binary.LittleEndian.PutUint32(msg[28:32], 5678)
-	binary.LittleEndian.PutUint32(msg[32:36], uint32(RegOpSetValue))
+	binary.LittleEndian.PutUint32(msg[32:36], uint32(DriverRegOpSetValue))
 	binary.LittleEndian.PutUint32(msg[36:40], 1)
 	binary.LittleEndian.PutUint32(msg[40:44], 100)
 
@@ -328,7 +328,7 @@ func TestRegistryRequestDecoding(t *testing.T) {
 	// Decode and verify
 	sessionToken := binary.LittleEndian.Uint64(msg[16:24])
 	processId := binary.LittleEndian.Uint32(msg[24:28])
-	operation := RegistryOperation(binary.LittleEndian.Uint32(msg[32:36]))
+	operation := DriverRegistryOp(binary.LittleEndian.Uint32(msg[32:36]))
 	decodedPath := utf16Decode(msg[44 : 44+maxPath*2])
 	decodedValue := utf16Decode(msg[44+maxPath*2 : 44+maxPath*2+maxValueName*2])
 
@@ -338,8 +338,8 @@ func TestRegistryRequestDecoding(t *testing.T) {
 	if processId != 1234 {
 		t.Errorf("expected process ID 1234, got %d", processId)
 	}
-	if operation != RegOpSetValue {
-		t.Errorf("expected RegOpSetValue, got %d", operation)
+	if operation != DriverRegOpSetValue {
+		t.Errorf("expected DriverRegOpSetValue, got %d", operation)
 	}
 	if decodedPath != keyPath {
 		t.Errorf("expected key path %q, got %q", keyPath, decodedPath)
@@ -352,15 +352,15 @@ func TestRegistryRequestDecoding(t *testing.T) {
 func TestRegistryOperationConstants(t *testing.T) {
 	tests := []struct {
 		name     string
-		got      RegistryOperation
-		expected RegistryOperation
+		got      DriverRegistryOp
+		expected DriverRegistryOp
 	}{
-		{"RegOpCreateKey", RegOpCreateKey, 1},
-		{"RegOpSetValue", RegOpSetValue, 2},
-		{"RegOpDeleteKey", RegOpDeleteKey, 3},
-		{"RegOpDeleteValue", RegOpDeleteValue, 4},
-		{"RegOpRenameKey", RegOpRenameKey, 5},
-		{"RegOpQueryValue", RegOpQueryValue, 6},
+		{"DriverRegOpCreateKey", DriverRegOpCreateKey, 1},
+		{"DriverRegOpSetValue", DriverRegOpSetValue, 2},
+		{"DriverRegOpDeleteKey", DriverRegOpDeleteKey, 3},
+		{"DriverRegOpDeleteValue", DriverRegOpDeleteValue, 4},
+		{"DriverRegOpRenameKey", DriverRegOpRenameKey, 5},
+		{"DriverRegOpQueryValue", DriverRegOpQueryValue, 6},
 	}
 
 	for _, tc := range tests {
