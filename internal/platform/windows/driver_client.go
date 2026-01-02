@@ -71,16 +71,16 @@ const (
 // FilePolicyHandler is called when the driver requests a file policy decision
 type FilePolicyHandler func(req *FileRequest) (PolicyDecision, uint32)
 
-// RegistryOperation represents the type of registry operation from driver
-type RegistryOperation uint32
+// DriverRegistryOp represents the type of registry operation from driver protocol
+type DriverRegistryOp uint32
 
 const (
-	RegOpCreateKey   RegistryOperation = 1
-	RegOpSetValue    RegistryOperation = 2
-	RegOpDeleteKey   RegistryOperation = 3
-	RegOpDeleteValue RegistryOperation = 4
-	RegOpRenameKey   RegistryOperation = 5
-	RegOpQueryValue  RegistryOperation = 6
+	DriverRegOpCreateKey   DriverRegistryOp = 1
+	DriverRegOpSetValue    DriverRegistryOp = 2
+	DriverRegOpDeleteKey   DriverRegistryOp = 3
+	DriverRegOpDeleteValue DriverRegistryOp = 4
+	DriverRegOpRenameKey   DriverRegistryOp = 5
+	DriverRegOpQueryValue  DriverRegistryOp = 6
 )
 
 // RegistryRequest represents a registry policy check request from the driver
@@ -88,7 +88,7 @@ type RegistryRequest struct {
 	SessionToken uint64
 	ProcessId    uint32
 	ThreadId     uint32
-	Operation    RegistryOperation
+	Operation    DriverRegistryOp
 	ValueType    uint32
 	DataSize     uint32
 	KeyPath      string
@@ -409,7 +409,7 @@ func (c *DriverClient) handleRegistryPolicyCheck(msg []byte, reply []byte) int {
 		SessionToken: binary.LittleEndian.Uint64(msg[16:24]),
 		ProcessId:    binary.LittleEndian.Uint32(msg[24:28]),
 		ThreadId:     binary.LittleEndian.Uint32(msg[28:32]),
-		Operation:    RegistryOperation(binary.LittleEndian.Uint32(msg[32:36])),
+		Operation:    DriverRegistryOp(binary.LittleEndian.Uint32(msg[32:36])),
 		ValueType:    binary.LittleEndian.Uint32(msg[36:40]),
 		DataSize:     binary.LittleEndian.Uint32(msg[40:44]),
 	}

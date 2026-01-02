@@ -99,16 +99,16 @@ const (
 // FilePolicyHandler is called when the driver requests a file policy decision
 type FilePolicyHandler func(req *FileRequest) (PolicyDecision, uint32)
 
-// RegistryOperation represents the type of registry operation from driver
-type RegistryOperation uint32
+// DriverRegistryOp represents the type of registry operation from driver protocol
+type DriverRegistryOp uint32
 
 const (
-	RegOpCreateKey   RegistryOperation = 1
-	RegOpSetValue    RegistryOperation = 2
-	RegOpDeleteKey   RegistryOperation = 3
-	RegOpDeleteValue RegistryOperation = 4
-	RegOpRenameKey   RegistryOperation = 5
-	RegOpQueryValue  RegistryOperation = 6
+	DriverRegOpCreateKey   DriverRegistryOp = 1
+	DriverRegOpSetValue    DriverRegistryOp = 2
+	DriverRegOpDeleteKey   DriverRegistryOp = 3
+	DriverRegOpDeleteValue DriverRegistryOp = 4
+	DriverRegOpRenameKey   DriverRegistryOp = 5
+	DriverRegOpQueryValue  DriverRegistryOp = 6
 )
 
 // RegistryRequest represents a registry policy check request from the driver
@@ -116,7 +116,7 @@ type RegistryRequest struct {
 	SessionToken uint64
 	ProcessId    uint32
 	ThreadId     uint32
-	Operation    RegistryOperation
+	Operation    DriverRegistryOp
 	ValueType    uint32
 	DataSize     uint32
 	KeyPath      string
