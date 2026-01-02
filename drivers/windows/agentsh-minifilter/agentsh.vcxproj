@@ -74,6 +74,8 @@
     <ClCompile Include="src\cache.c" />
     <ClCompile Include="src\filesystem.c" />
     <ClCompile Include="src\registry.c" />
+    <ClCompile Include="src\config.c" />
+    <ClCompile Include="src\metrics.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="inc\driver.h" />
@@ -82,6 +84,8 @@
     <ClInclude Include="inc\cache.h" />
     <ClInclude Include="inc\filesystem.h" />
     <ClInclude Include="inc\registry.h" />
+    <ClInclude Include="inc\config.h" />
+    <ClInclude Include="inc\metrics.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
