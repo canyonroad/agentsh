@@ -73,6 +73,7 @@
     <ClCompile Include="src\process.c" />
     <ClCompile Include="src\cache.c" />
     <ClCompile Include="src\filesystem.c" />
+    <ClCompile Include="src\registry.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="inc\driver.h" />
@@ -80,6 +81,7 @@
     <ClInclude Include="inc\process.h" />
     <ClInclude Include="inc\cache.h" />
     <ClInclude Include="inc\filesystem.h" />
+    <ClInclude Include="inc\registry.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
