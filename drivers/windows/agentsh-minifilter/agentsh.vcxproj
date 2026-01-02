@@ -56,6 +56,9 @@
     <Link>
       <AdditionalDependencies>$(DDK_LIB_PATH)\fltMgr.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <DriverSign>
+      <SignMode>Off</SignMode>
+    </DriverSign>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -66,6 +69,9 @@
     <Link>
       <AdditionalDependencies>$(DDK_LIB_PATH)\fltMgr.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <DriverSign>
+      <SignMode>Off</SignMode>
+    </DriverSign>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\driver.c" />
