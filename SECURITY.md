@@ -199,41 +199,78 @@ See [macOS ESF+NE Architecture](docs/macos-esf-ne-architecture.md) for deploymen
 
 ### Windows
 
-Windows has partial security enforcement with significant gaps in filesystem and network interception:
+Windows now has **kernel-level enforcement** via a mini filter driver, providing near-Linux-level security:
 
 | Component | Linux | Windows | Impact |
 |-----------|-------|---------|--------|
-| File blocking | FUSE (enforced) | WinFsp (stub) | **File policies not enforced** |
-| Network blocking | eBPF/iptables | WFP/WinDivert (stub) | **Network policies not enforced** |
-| Process isolation | Namespaces | AppContainer (stub) | **Sandbox not enforced** |
+| File blocking | FUSE (enforced) | Mini filter driver | ✅ **Enforced** |
+| Network blocking | eBPF/iptables | WinDivert + WFP fallback | ✅ **Enforced** |
+| Registry blocking | N/A | CmRegisterCallbackEx | ✅ **Enforced** |
+| Process isolation | Namespaces | Driver session tracking | ✅ **Working** |
 | Resource limits | cgroups v2 | Job Objects | ✅ **Working** |
-| Process tracking | ptrace/wait | Job Objects + polling | ✅ **Working** |
-| PTY/terminal | pty (enforced) | ConPTY | **Not supported** |
-| Registry monitoring | N/A | RegNotify | Observation only |
+| Process tracking | ptrace/wait | Driver + Job Objects | ✅ **Working** |
 
-**What works on Windows:**
-- **Job Objects** for resource limits (memory, CPU, process count) ✅
-- **Process tracking** via Job Objects with automatic child tracking ✅
-- **Named pipe monitoring** via polling (observation only, no blocking)
-- **Registry path risk detection** with MITRE ATT&CK mappings (observation only)
-- **Shell shimming** via PowerShell profile hooks and batch wrappers ✅
+**Driver Components:**
+
+| Component | Technology | Status |
+|-----------|------------|--------|
+| Filesystem | FltRegisterFilter (Mini Filter) | ✅ **Enforced** - Create, write, delete, rename |
+| Network | WinDivert (transparent proxy) | ✅ **Enforced** - TCP/DNS interception |
+| Network fallback | WFP (Windows Filtering Platform) | ✅ **Block-only mode** |
+| Registry | CmRegisterCallbackEx | ✅ **Enforced** - All operations |
+| Process | PsSetCreateProcessNotifyRoutineEx | ✅ **Tracking** - Session association |
+
+**Registry Security Features:**
+
+The driver provides comprehensive registry protection:
+
+- **Operation interception:** Query, set, delete, create, rename keys and values
+- **Policy enforcement:** Allow, deny, or require approval based on registry rules
+- **High-risk path detection:** Automatic detection and blocking of persistence/security paths
+- **MITRE ATT&CK mapping:** Events include technique IDs for security monitoring
+
+| High-Risk Path | Risk | MITRE Technique | Default |
+|----------------|------|-----------------|---------|
+| `HKLM\...\CurrentVersion\Run*` | Critical | T1547.001 - Registry Run Keys | **Deny** |
+| `HKLM\...\Winlogon*` | Critical | T1547.004 - Winlogon Helper DLL | **Deny** |
+| `HKLM\SYSTEM\...\Services\*` | High | T1543.003 - Windows Service | **Approve** |
+| `HKLM\...\Windows Defender\*` | Critical | T1562.001 - Disable Security Tools | **Deny** |
+| `HKLM\...\Control\Lsa\*` | Critical | T1003 - Credential Dumping | **Deny** |
+| `HKLM\...\Image File Execution Options\*` | Critical | T1546.012 - IFEO Injection | **Deny** |
+| `HKLM\...\KnownDLLs\*` | Critical | T1574.001 - DLL Search Order Hijacking | **Deny** |
+
+**Driver Fail Modes:**
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `FAIL_MODE_OPEN` | Allow on service unavailable | Development, availability-first |
+| `FAIL_MODE_CLOSED` | Deny on service unavailable | Production, security-first |
+
+**Deployment Requirements:**
+
+| Environment | Signing Requirement |
+|-------------|---------------------|
+| Development | Test signing (`bcdedit /set testsigning on`) |
+| Production | EV code signing + Microsoft attestation |
+| Enterprise | WHQL certification (optional, recommended) |
 
 **Current implementation status:**
-- WinFsp filesystem: **Detection only** (`Mount()` returns "not yet implemented")
-- WinDivert network: **Detection only** (`setupWinDivert()` is a stub)
-- WFP network: **Detection only** (`setupWFP()` and `AddBlockRule()` are stubs)
-- AppContainer sandbox: **Detection only** (`Execute()` runs without sandboxing)
-- PTY engine: **Returns ErrNotSupported** for all operations
-- Registry blocking: **Not implemented** (requires kernel driver/minifilter)
+- Mini filter driver: ✅ **Enforced** (file create, write, delete, rename)
+- WinDivert network: ✅ **Enforced** (TCP proxy, DNS interception)
+- WFP fallback: ✅ **Block-only** (when WinDivert unavailable)
+- Registry blocking: ✅ **Enforced** (all operations with high-risk protection)
+- Process tracking: ✅ **Working** (driver-based session association)
+- Policy caching: ✅ **Working** (configurable TTL, per-rule override)
 
 **Recommendations for Windows deployments:**
-- Use WSL2 with Linux for full enforcement
-- Treat Windows native as audit/observation mode only (except resource limits)
-- Do not rely on file, network, or sandbox policy enforcement
-- Job Objects provide effective resource limiting for CPU/memory/processes
-- Consider containerized deployments (Docker with WSL2 backend)
+- Use the mini filter driver for production deployments
+- Enable `FAIL_MODE_CLOSED` for high-security environments
+- Review registry policy rules - high-risk paths are blocked by default
+- Monitor fail mode transitions in SIEM
+- EV code signing required for production (no test signing)
+- Consider WHQL certification for enterprise deployment
 
-See [Platform Comparison Matrix](docs/platform-comparison.md) for detailed feature support.
+See [Windows Driver Deployment Guide](docs/windows-driver-deployment.md) for installation and configuration.
 
 ## Security Defaults
 

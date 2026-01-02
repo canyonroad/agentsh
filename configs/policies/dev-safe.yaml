@@ -373,6 +373,91 @@ command_rules:
     decision: deny
 
 # =============================================================================
+# WINDOWS REGISTRY RULES (Dev: Permissive with safety guards)
+# =============================================================================
+
+registry_rules:
+  # ---------------------------------------------------------------------------
+  # Allow most application settings
+  # ---------------------------------------------------------------------------
+
+  - name: allow-hkcu-software
+    description: Allow user software settings
+    paths:
+      - 'HKCU\SOFTWARE\*'
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Block critical persistence/security (always)
+  # ---------------------------------------------------------------------------
+
+  - name: block-run-keys
+    description: Block startup Run key modifications
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+      - 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+    priority: 100
+
+  - name: block-security-settings
+    description: Block security-related registry
+    paths:
+      - 'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender*'
+      - 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa*'
+    operations:
+      - "*"
+    decision: deny
+    priority: 200
+
+  # ---------------------------------------------------------------------------
+  # Approve service modifications with timeout
+  # ---------------------------------------------------------------------------
+
+  - name: approve-service-changes
+    description: Require approval for service changes
+    paths:
+      - 'HKLM\SYSTEM\CurrentControlSet\Services\*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: approve
+    message: "Agent wants to modify service: {{.Path}}"
+    timeout: 5m
+
+  # ---------------------------------------------------------------------------
+  # Allow read everywhere
+  # ---------------------------------------------------------------------------
+
+  - name: allow-registry-read
+    description: Allow reading registry
+    paths:
+      - "*"
+    operations:
+      - read
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Default deny for HKLM writes
+  # ---------------------------------------------------------------------------
+
+  - name: default-deny-hklm-write
+    description: Deny HKLM modifications by default
+    paths:
+      - 'HKLM\*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+
+# =============================================================================
 # RESOURCE LIMITS
 # =============================================================================
 

@@ -915,20 +915,57 @@ command_rules:
     commands: [rm, dd, mkfs, fdisk]
     args_pattern: ["-rf*", "-r *"]
     decision: deny
+
+# Registry rules (Windows-only)
+registry_rules:
+  - name: allow-app-settings
+    paths: ['HKCU\SOFTWARE\MyApp\*']
+    operations: ["*"]
+    decision: allow
+
+  - name: block-run-keys
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+      - 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+    operations: [write, create, delete]
+    decision: deny
+    priority: 100
+    notify: true
+
+  - name: approve-service-changes
+    paths: ['HKLM\SYSTEM\CurrentControlSet\Services\*']
+    operations: [write, create, delete]
+    decision: approve
+    message: "Agent wants to modify Windows service: {path}"
+    timeout: 60s
+
+  - name: block-security-settings
+    paths:
+      - 'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\*'
+      - 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa\*'
+    operations: [write, create, delete]
+    decision: deny
+    priority: 200
+
+  - name: default-deny-registry
+    paths: ["*"]
+    operations: ["*"]
+    decision: deny
 ```
 
 ### 9.3 Policy Engine Implementation
 
 ```go
 type PolicyEngine struct {
-    fileRules    []FileRule
-    networkRules []NetworkRule
-    commandRules []CommandRule
-    
+    fileRules     []FileRule
+    networkRules  []NetworkRule
+    commandRules  []CommandRule
+    registryRules []RegistryRule  // Windows-only
+
     // Caching
     decisionCache sync.Map
     cacheTTL      time.Duration
-    
+
     // Approval handling
     approvalChan chan ApprovalRequest
     approvals    map[string]chan bool
@@ -940,6 +977,18 @@ type FileRule struct {
     Operations []string
     Decision   Decision
     Message    string
+}
+
+// RegistryRule controls Windows registry access (Windows-only)
+type RegistryRule struct {
+    Name       string
+    Paths      []glob.Glob  // e.g., "HKLM\SOFTWARE\..."
+    Operations []string     // read, write, delete, create, rename
+    Decision   Decision
+    Message    string
+    Priority   int          // Higher = evaluated first
+    CacheTTL   time.Duration
+    Notify     bool
 }
 
 func (p *PolicyEngine) CheckFileOp(event FileEvent) Decision {

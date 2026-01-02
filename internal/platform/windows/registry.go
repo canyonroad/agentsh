@@ -413,3 +413,81 @@ func IsHighRiskPath(path string) (bool, *RegistryPathPolicy) {
 	}
 	return false, nil
 }
+
+// RegistryEventEmitter emits registry events to the event channel.
+type RegistryEventEmitter struct {
+	eventChan chan<- types.Event
+	sessionID string
+}
+
+// NewRegistryEventEmitter creates a new event emitter.
+func NewRegistryEventEmitter(eventChan chan<- types.Event, sessionID string) *RegistryEventEmitter {
+	return &RegistryEventEmitter{
+		eventChan: eventChan,
+		sessionID: sessionID,
+	}
+}
+
+// EmitRegistryEvent emits a registry operation event.
+func (e *RegistryEventEmitter) EmitRegistryEvent(
+	req *RegistryRequest,
+	resp *RegistryPolicyResponse,
+	processName string,
+) {
+	if e.eventChan == nil {
+		return
+	}
+
+	eventType := "registry_write"
+	switch req.Operation {
+	case DriverRegOpQueryValue:
+		eventType = "registry_read"
+	case DriverRegOpCreateKey:
+		eventType = "registry_create"
+	case DriverRegOpDeleteKey, DriverRegOpDeleteValue:
+		eventType = "registry_delete"
+	case DriverRegOpRenameKey:
+		eventType = "registry_rename"
+	}
+
+	if resp.Decision == DecisionDeny {
+		eventType = "registry_blocked"
+	}
+
+	decision := types.DecisionAllow
+	if resp.Decision == DecisionDeny {
+		decision = types.DecisionDeny
+	} else if resp.Decision == DecisionPending {
+		decision = types.DecisionApprove
+	}
+
+	ev := types.Event{
+		Timestamp: time.Now().UTC(),
+		Type:      eventType,
+		SessionID: e.sessionID,
+		Path:      req.KeyPath,
+		Operation: driverOpToString(req.Operation),
+		PID:       int(req.ProcessId),
+		Policy: &types.PolicyInfo{
+			Decision:          decision,
+			EffectiveDecision: decision,
+			Rule:              resp.RuleName,
+		},
+		Fields: map[string]any{
+			"source":       "registry_policy",
+			"platform":     "windows",
+			"hive":         parseHive(req.KeyPath),
+			"value_name":   req.ValueName,
+			"process_name": processName,
+		},
+	}
+
+	// Add risk info if present
+	if resp.RiskInfo != nil {
+		ev.Fields["risk_level"] = resp.RiskInfo.Risk.String()
+		ev.Fields["description"] = resp.RiskInfo.Description
+		ev.Fields["mitre_technique"] = resp.RiskInfo.Technique
+	}
+
+	e.eventChan <- ev
+}

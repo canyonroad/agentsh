@@ -12,10 +12,11 @@ type Policy struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
 
-	FileRules    []FileRule       `yaml:"file_rules"`
-	NetworkRules []NetworkRule    `yaml:"network_rules"`
-	CommandRules []CommandRule    `yaml:"command_rules"`
-	UnixRules    []UnixSocketRule `yaml:"unix_socket_rules"`
+	FileRules     []FileRule       `yaml:"file_rules"`
+	NetworkRules  []NetworkRule    `yaml:"network_rules"`
+	CommandRules  []CommandRule    `yaml:"command_rules"`
+	UnixRules     []UnixSocketRule `yaml:"unix_socket_rules"`
+	RegistryRules []RegistryRule   `yaml:"registry_rules"`
 
 	ResourceLimits ResourceLimits `yaml:"resource_limits"`
 	EnvPolicy      EnvPolicy      `yaml:"env_policy"`
@@ -80,6 +81,20 @@ type UnixSocketRule struct {
 	Decision    string   `yaml:"decision"`   // allow|deny|approve
 	Message     string   `yaml:"message"`
 	Timeout     duration `yaml:"timeout"`
+}
+
+// RegistryRule controls Windows registry access (Windows-only).
+type RegistryRule struct {
+	Name        string   `yaml:"name"`
+	Description string   `yaml:"description"`
+	Paths       []string `yaml:"paths"`      // e.g., "HKLM\\SOFTWARE\\..."
+	Operations  []string `yaml:"operations"` // read, write, delete, create, rename
+	Decision    string   `yaml:"decision"`   // allow, deny, approve
+	Message     string   `yaml:"message"`
+	Timeout     duration `yaml:"timeout"`
+	Priority    int      `yaml:"priority"`  // Higher = evaluated first
+	CacheTTL    duration `yaml:"cache_ttl"` // Per-rule cache TTL override
+	Notify      bool     `yaml:"notify"`    // Always notify on this rule
 }
 
 type ResourceLimits struct {

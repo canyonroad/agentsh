@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ type Engine struct {
 	compiledNetworkRules []compiledNetworkRule
 	compiledCommandRules []compiledCommandRule
 	compiledUnixRules    []compiledUnixRule
+	compiledRegistryRules []compiledRegistryRule
 
 	// Compiled env policy patterns for glob matching
 	compiledEnvAllow []glob.Glob
@@ -64,6 +66,13 @@ type compiledUnixRule struct {
 	rule  UnixSocketRule
 	paths []glob.Glob
 	ops   map[string]struct{}
+}
+
+type compiledRegistryRule struct {
+	rule     RegistryRule
+	globs    []glob.Glob
+	ops      map[string]struct{}
+	priority int
 }
 
 type Decision struct {
@@ -205,6 +214,33 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 		}
 		e.compiledUnixRules = append(e.compiledUnixRules, cr)
 	}
+
+	// Compile registry rules
+	for _, r := range p.RegistryRules {
+		cr := compiledRegistryRule{
+			rule:     r,
+			ops:      map[string]struct{}{},
+			priority: r.Priority,
+		}
+		for _, op := range r.Operations {
+			cr.ops[strings.ToLower(op)] = struct{}{}
+		}
+		for _, pat := range r.Paths {
+			// Escape backslashes for glob (backslash is the escape character in gobwas/glob)
+			// Compile without separator so * matches across path segments
+			escapedPat := strings.ReplaceAll(pat, `\`, `\\`)
+			g, err := glob.Compile(escapedPat)
+			if err != nil {
+				return nil, fmt.Errorf("compile registry rule %q glob %q: %w", r.Name, pat, err)
+			}
+			cr.globs = append(cr.globs, g)
+		}
+		e.compiledRegistryRules = append(e.compiledRegistryRules, cr)
+	}
+	// Sort by priority (higher first)
+	sort.Slice(e.compiledRegistryRules, func(i, j int) bool {
+		return e.compiledRegistryRules[i].priority > e.compiledRegistryRules[j].priority
+	})
 
 	// Compile env policy patterns
 	for _, pat := range p.EnvPolicy.Allow {
@@ -441,6 +477,27 @@ func (e *Engine) CheckUnixSocket(path string, operation string) Decision {
 		}
 	}
 	return e.wrapDecision(string(types.DecisionDeny), "default-deny-unix", "", nil)
+}
+
+// CheckRegistry evaluates registry_rules against a path and operation.
+func (e *Engine) CheckRegistry(path string, operation string) Decision {
+	if e.policy == nil {
+		return Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
+	}
+	operation = strings.ToLower(operation)
+	pathUpper := strings.ToUpper(path)
+
+	for _, r := range e.compiledRegistryRules {
+		if !matchOp(r.ops, operation) {
+			continue
+		}
+		for _, g := range r.globs {
+			if g.Match(path) || g.Match(pathUpper) {
+				return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
+			}
+		}
+	}
+	return e.wrapDecision(string(types.DecisionDeny), "default-deny-registry", "", nil)
 }
 
 // EnvDecision represents the result of CheckEnv with additional metadata.

@@ -436,6 +436,107 @@ command_rules:
     decision: deny
 
 # =============================================================================
+# WINDOWS REGISTRY RULES (Maximum containment for untrusted code)
+# =============================================================================
+
+registry_rules:
+  # ---------------------------------------------------------------------------
+  # Allow only application-specific settings
+  # ---------------------------------------------------------------------------
+
+  - name: allow-agentsh-settings
+    description: Allow agentsh registry settings only
+    paths:
+      - 'HKCU\SOFTWARE\agentsh\*'
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Block ALL high-risk locations (no approval, just deny)
+  # ---------------------------------------------------------------------------
+
+  - name: block-all-persistence
+    description: Block all persistence registry locations
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+      - 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+      - 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce*'
+      - 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon*'
+      - 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\*'
+      - 'HKLM\SYSTEM\CurrentControlSet\Services\*'
+    operations:
+      - write
+      - create
+      - delete
+      - rename
+    decision: deny
+    priority: 200
+    notify: true
+
+  - name: block-all-security
+    description: Block all security-related registry
+    paths:
+      - 'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender*'
+      - 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa*'
+      - 'HKLM\SECURITY\*'
+      - 'HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\*'
+    operations:
+      - "*"
+    decision: deny
+    priority: 300
+
+  - name: block-dll-hijack
+    description: Block DLL hijacking locations
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows*'
+      - 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options*'
+      - 'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs*'
+    operations:
+      - "*"
+    decision: deny
+    priority: 300
+
+  - name: block-com-hijack
+    description: Block COM object hijacking
+    paths:
+      - 'HKLM\SOFTWARE\Classes\CLSID\*'
+      - 'HKCU\SOFTWARE\Classes\CLSID\*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+    priority: 200
+
+  # ---------------------------------------------------------------------------
+  # Allow reading only
+  # ---------------------------------------------------------------------------
+
+  - name: allow-registry-read
+    description: Allow reading registry values
+    paths:
+      - "*"
+    operations:
+      - read
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Default deny ALL write operations
+  # ---------------------------------------------------------------------------
+
+  - name: default-deny-registry
+    description: Deny all other registry modifications
+    paths:
+      - "*"
+    operations:
+      - write
+      - create
+      - delete
+      - rename
+    decision: deny
+
+# =============================================================================
 # RESOURCE LIMITS - Conservative
 # =============================================================================
 

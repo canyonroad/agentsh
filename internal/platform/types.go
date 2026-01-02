@@ -241,6 +241,18 @@ const (
 	EnvOpDelete EnvOperation = "delete"
 )
 
+// RegistryOperation identifies registry operation types (Windows-only).
+type RegistryOperation string
+
+const (
+	RegOpQuery  RegistryOperation = "query"
+	RegOpSet    RegistryOperation = "set"
+	RegOpDelete RegistryOperation = "delete"
+	RegOpCreate RegistryOperation = "create"
+	RegOpRename RegistryOperation = "rename"
+	RegOpEnum   RegistryOperation = "enum"
+)
+
 // IOEvent represents an I/O operation event from platform interceptors.
 // This extends pkg/types.Event with platform-specific fields.
 type IOEvent struct {

@@ -29,6 +29,9 @@ func TestPolicyAdapter_NilEngine(t *testing.T) {
 	if got := adapter.CheckCommand("ls", nil); got != DecisionAllow {
 		t.Errorf("CheckCommand on nil adapter = %v, want %v", got, DecisionAllow)
 	}
+	if got := adapter.CheckRegistry(`HKLM\SOFTWARE\Test`, "query"); got != DecisionAllow {
+		t.Errorf("CheckRegistry on nil adapter = %v, want %v", got, DecisionAllow)
+	}
 	if got := adapter.Engine(); got != nil {
 		t.Error("Engine() on nil adapter should return nil")
 	}
@@ -115,6 +118,46 @@ func TestPolicyAdapter_DenyPolicy(t *testing.T) {
 	// Check that deny decision works
 	if got := adapter.CheckFile("/test.txt", FileOpWrite); got != DecisionDeny {
 		t.Errorf("CheckFile with deny policy = %v, want %v", got, DecisionDeny)
+	}
+}
+
+func TestPolicyAdapter_CheckRegistry(t *testing.T) {
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "test",
+		RegistryRules: []policy.RegistryRule{
+			{
+				Name:       "allow-app",
+				Paths:      []string{`HKCU\SOFTWARE\TestApp\*`},
+				Operations: []string{"*"},
+				Decision:   "allow",
+			},
+		},
+	}
+
+	engine, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	adapter := NewPolicyAdapter(engine)
+
+	tests := []struct {
+		path string
+		op   string
+		want Decision
+	}{
+		{`HKCU\SOFTWARE\TestApp\Config`, "set", DecisionAllow},
+		{`HKLM\SOFTWARE\Other`, "set", DecisionDeny},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := adapter.CheckRegistry(tt.path, tt.op)
+			if got != tt.want {
+				t.Errorf("CheckRegistry(%q, %q) = %v, want %v", tt.path, tt.op, got, tt.want)
+			}
+		})
 	}
 }
 

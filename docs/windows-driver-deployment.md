@@ -109,6 +109,70 @@ client.SetConfig(&DriverConfig{
 
 ## Monitoring
 
+### Registry Monitoring
+
+The driver intercepts Windows registry operations via `CmRegisterCallbackEx`. This provides:
+
+- **Operation interception:** Create, set, delete, rename keys and values
+- **Policy enforcement:** Allow, deny, or require approval based on registry rules
+- **High-risk path detection:** Automatic detection of persistence and security-sensitive paths
+- **MITRE ATT&CK mapping:** Events include technique IDs for security monitoring
+
+#### Registry Policy Configuration
+
+In your policy file (`agentsh.yaml`):
+
+```yaml
+registry_rules:
+  # Allow application settings
+  - name: allow-app-settings
+    paths: ['HKCU\SOFTWARE\MyApp\*']
+    operations: ["*"]
+    decision: allow
+
+  # Block persistence locations
+  - name: block-run-keys
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+      - 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+    operations: [write, create, delete]
+    decision: deny
+    priority: 100
+    notify: true
+
+  # Require approval for service modifications
+  - name: approve-service-changes
+    paths: ['HKLM\SYSTEM\CurrentControlSet\Services\*']
+    operations: [write, create, delete]
+    decision: approve
+    message: "Agent wants to modify service: {{.Path}}"
+    timeout: 2m
+```
+
+#### Registry Operations
+
+| Operation | Description |
+|-----------|-------------|
+| `read` | Query key/value (QueryValue) |
+| `write` | Set key/value (SetValue) |
+| `create` | Create key (CreateKey) |
+| `delete` | Delete key/value (DeleteKey, DeleteValue) |
+| `rename` | Rename key (RenameKey) |
+
+#### High-Risk Registry Paths
+
+The driver includes built-in detection for high-risk paths commonly used in attacks:
+
+| Path | Risk | MITRE Technique |
+|------|------|-----------------|
+| `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*` | Critical | T1547.001 - Registry Run Keys |
+| `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon*` | Critical | T1547.004 - Winlogon Helper DLL |
+| `HKLM\SYSTEM\CurrentControlSet\Services\*` | High | T1543.003 - Windows Service |
+| `HKLM\SOFTWARE\Policies\Microsoft\Windows Defender*` | Critical | T1562.001 - Disable Security Tools |
+| `HKLM\SYSTEM\CurrentControlSet\Control\Lsa*` | Critical | T1003 - Credential Dumping |
+
+Write operations to these paths are blocked by default even if `default_action: allow` is set.
+
 ### Metrics
 
 Retrieve via Go client:
