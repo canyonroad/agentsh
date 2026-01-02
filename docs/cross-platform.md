@@ -68,6 +68,31 @@ SIGNING_IDENTITY="Developer ID Application" make sign-bundle
 
 **Note:** ESF+NE mode automatically falls back to FUSE-T if entitlements are unavailable. See [macOS Build Guide](macos-build.md) for detailed instructions.
 
+### Windows (Native - Mini Filter Driver)
+
+For native Windows support with kernel-level enforcement:
+
+```bash
+# Install the driver (requires Administrator)
+# Driver must be test-signed for development or production-signed for release
+sc create agentsh type=filesys binPath="C:\path\to\agentsh.sys"
+sc start agentsh
+
+# Run the agentsh server
+agentsh server
+```
+
+**Requirements:**
+- Windows 10/11 (64-bit)
+- Administrator privileges for driver installation
+- Test signing enabled for development, or EV-signed driver for production
+
+**Current Implementation Status (Phase 3 complete):**
+- ✅ Driver skeleton and filter port communication
+- ✅ Process tracking (session processes and child inheritance)
+- ✅ Filesystem interception (create, write, delete, rename)
+- ⏳ Registry interception (Phase 4 - planned)
+
 ### Windows (WSL2)
 
 - Install WSL2 + a distro (e.g. Ubuntu).
