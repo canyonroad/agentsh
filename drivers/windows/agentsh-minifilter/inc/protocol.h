@@ -20,6 +20,9 @@ typedef enum _AGENTSH_MSG_TYPE {
     MSG_UNREGISTER_SESSION = 101,
     MSG_UPDATE_CACHE = 102,
     MSG_SHUTDOWN = 103,
+    MSG_SET_CONFIG = 104,
+    MSG_GET_METRICS = 105,
+    MSG_METRICS_REPLY = 106,
 } AGENTSH_MSG_TYPE;
 
 // Policy decisions
@@ -141,5 +144,45 @@ typedef struct _AGENTSH_REGISTRY_REQUEST {
     WCHAR KeyPath[AGENTSH_MAX_PATH];
     WCHAR ValueName[AGENTSH_MAX_VALUE_NAME];
 } AGENTSH_REGISTRY_REQUEST, *PAGENTSH_REGISTRY_REQUEST;
+
+// Fail mode configuration
+typedef enum _AGENTSH_FAIL_MODE {
+    FAIL_MODE_OPEN = 0,     // Allow operations on failure (default)
+    FAIL_MODE_CLOSED = 1,   // Deny operations on failure
+} AGENTSH_FAIL_MODE;
+
+// Driver configuration (user-mode -> driver)
+typedef struct _AGENTSH_CONFIG {
+    AGENTSH_MESSAGE_HEADER Header;
+    AGENTSH_FAIL_MODE FailMode;
+    ULONG PolicyQueryTimeoutMs;     // Default: 5000
+    ULONG MaxConsecutiveFailures;   // Default: 10
+    ULONG CacheMaxEntries;          // Default: 4096
+    ULONG CacheDefaultTTLMs;        // Default: 5000
+} AGENTSH_CONFIG, *PAGENTSH_CONFIG;
+
+// Driver metrics (driver -> user-mode)
+typedef struct _AGENTSH_METRICS {
+    AGENTSH_MESSAGE_HEADER Header;
+    // Cache metrics
+    ULONG CacheHitCount;
+    ULONG CacheMissCount;
+    ULONG CacheEntryCount;
+    ULONG CacheEvictionCount;
+    // Query metrics
+    ULONG FilePolicyQueries;
+    ULONG RegistryPolicyQueries;
+    ULONG PolicyQueryTimeouts;
+    ULONG PolicyQueryFailures;
+    // Decision metrics
+    ULONG AllowDecisions;
+    ULONG DenyDecisions;
+    // Session metrics
+    ULONG ActiveSessions;
+    ULONG TrackedProcesses;
+    // Status
+    BOOLEAN FailOpenMode;
+    ULONG ConsecutiveFailures;
+} AGENTSH_METRICS, *PAGENTSH_METRICS;
 
 #endif // _AGENTSH_PROTOCOL_H_
