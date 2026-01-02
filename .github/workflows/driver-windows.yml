@@ -144,7 +144,7 @@ jobs:
         shell: cmd
         run: |
           echo Building ${{ matrix.configuration }}/${{ matrix.platform }}
-          msbuild agentsh.sln /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /t:Build /v:minimal
+          msbuild agentsh.sln /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /p:SignMode=Off /t:Build /v:minimal
           if errorlevel 1 exit /b 1
           echo Build successful
 
