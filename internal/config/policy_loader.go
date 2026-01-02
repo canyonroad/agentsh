@@ -95,18 +95,23 @@ type DNSRedirectConfig struct {
 
 // RegistryPolicyConfig configures Windows registry access policy.
 type RegistryPolicyConfig struct {
-	DefaultAction string               `yaml:"default_action"`
-	LogAll        bool                 `yaml:"log_all"`
-	Rules         []RegistryPolicyRule `yaml:"rules"`
+	DefaultAction   string               `yaml:"default_action"`
+	LogAll          bool                 `yaml:"log_all"`
+	DefaultCacheTTL int                  `yaml:"default_cache_ttl"` // seconds
+	NotifyOnDeny    bool                 `yaml:"notify_on_deny"`
+	Rules           []RegistryPolicyRule `yaml:"rules"`
 }
 
 // RegistryPolicyRule defines a Windows registry access rule.
 type RegistryPolicyRule struct {
-	Name           string   `yaml:"name"`
-	Paths          []string `yaml:"paths"` // e.g., "HKLM\\SOFTWARE\\..."
-	Operations     []string `yaml:"operations"` // read, write, create, delete
-	Action         string   `yaml:"action"` // allow, deny, approve, redirect
-	TimeoutSeconds int      `yaml:"timeout_seconds,omitempty"`
+	Name           string                  `yaml:"name"`
+	Paths          []string                `yaml:"paths"` // e.g., "HKLM\\SOFTWARE\\..."
+	Operations     []string                `yaml:"operations"` // read, write, create, delete
+	Action         string                  `yaml:"action"` // allow, deny, approve, redirect
+	Priority       int                     `yaml:"priority"`
+	CacheTTL       int                     `yaml:"cache_ttl"` // seconds, 0 = use default
+	TimeoutSeconds int                     `yaml:"timeout_seconds,omitempty"`
+	Notify         bool                    `yaml:"notify"`
 	Redirect       *RegistryRedirectConfig `yaml:"redirect,omitempty"`
 }
 
