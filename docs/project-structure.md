@@ -33,6 +33,8 @@ agentsh/
 - `internal/store/` — Event sinks (SQLite, JSONL, webhook) and composition.
 - `internal/auth/` — API key auth implementation.
 - `internal/approvals/` — Approval manager (shadow/enforced modes).
+- `internal/platform/` — Platform abstraction layer for cross-platform support.
+- `internal/platform/fuse/` — Shared FUSE package for macOS (FUSE-T) and Windows (WinFsp) filesystem mounting.
 
 ## Notes
 
@@ -71,3 +73,28 @@ Related Go packages:
 - `internal/platform/darwin/sysext.go` — System Extension manager
 
 **Build:** `make build-macos-enterprise` (requires Xcode 15+, Apple entitlements)
+
+## `drivers/` directory (Windows kernel components)
+
+The `drivers/` directory contains Windows kernel-mode driver code:
+
+```
+drivers/
+└── windows/
+    └── agentsh-minifilter/       # Windows Mini Filter driver
+        ├── inc/                   # Header files
+        │   ├── protocol.h         # User-mode ↔ kernel protocol
+        │   └── ...
+        └── src/                   # Driver implementation
+            ├── driver.c           # Driver entry point
+            ├── filesystem.c       # File operation interception
+            ├── communication.c    # Filter port communication
+            ├── registry.c         # Registry operation interception
+            └── ...
+```
+
+Related Go packages:
+- `internal/platform/windows/driver_client.go` — Driver communication client
+- `internal/platform/windows/filesystem.go` — Filesystem interceptor (WinFsp + minifilter)
+
+**Build:** Requires Visual Studio 2022 + WDK (Windows Driver Kit)

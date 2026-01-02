@@ -215,6 +215,7 @@ Windows now has **kernel-level enforcement** via a mini filter driver, providing
 | Component | Technology | Status |
 |-----------|------------|--------|
 | Filesystem | FltRegisterFilter (Mini Filter) | ✅ **Enforced** - Create, write, delete, rename |
+| Filesystem (alt) | WinFsp (cgofuse) | ✅ **Enforced** - FUSE-style mounting with soft-delete |
 | Network | WinDivert (transparent proxy) | ✅ **Enforced** - TCP/DNS interception |
 | Network fallback | WFP (Windows Filtering Platform) | ✅ **Block-only mode** |
 | Registry | CmRegisterCallbackEx | ✅ **Enforced** - All operations |
@@ -256,6 +257,7 @@ The driver provides comprehensive registry protection:
 
 **Current implementation status:**
 - Mini filter driver: ✅ **Enforced** (file create, write, delete, rename)
+- WinFsp filesystem: ✅ **Enforced** (FUSE-style mounting via cgofuse, soft-delete support)
 - WinDivert network: ✅ **Enforced** (TCP proxy, DNS interception)
 - WFP fallback: ✅ **Block-only** (when WinDivert unavailable)
 - Registry blocking: ✅ **Enforced** (all operations with high-risk protection)
@@ -269,6 +271,24 @@ The driver provides comprehensive registry protection:
 - Monitor fail mode transitions in SIEM
 - EV code signing required for production (no test signing)
 - Consider WHQL certification for enterprise deployment
+- WinFsp provides an alternative FUSE-style filesystem with soft-delete capabilities
+
+**WinFsp Filesystem Mounting:**
+
+WinFsp provides FUSE-style filesystem mounting on Windows using the shared `internal/platform/fuse/` package (cgofuse). This offers:
+
+| Feature | Description |
+|---------|-------------|
+| Cross-platform code | Same FUSE implementation works on macOS (FUSE-T) and Windows (WinFsp) |
+| Soft-delete | Files moved to trash instead of permanent deletion |
+| Policy enforcement | Same policy engine as minifilter with file operation checks |
+| Minifilter coexistence | Process exclusion prevents double-interception when both are active |
+
+**Requirements:**
+- WinFsp installed: `winget install WinFsp.WinFsp`
+- CGO enabled build: `CGO_ENABLED=1 go build`
+
+**Double-interception prevention:** When both minifilter and WinFsp are active, the Go client calls `ExcludeSelf()` before mounting to tell the minifilter to skip file operations from the agentsh process, preventing duplicate event capture.
 
 See [Windows Driver Deployment Guide](docs/windows-driver-deployment.md) for installation and configuration.
 
@@ -314,6 +334,8 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2026-01-02 | Added WinFsp filesystem mounting with shared fuse package for Windows |
+| 2026-01-02 | Added minifilter process exclusion for WinFsp coexistence |
 | 2026-01-01 | Implemented macOS ESF+NE for enterprise-tier enforcement (90% security score) |
 | 2026-01-01 | Added XPC bridge for System Extension ↔ Go policy engine communication |
 | 2026-01-01 | Added session tracking for process-to-session mapping on macOS |

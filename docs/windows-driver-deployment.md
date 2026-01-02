@@ -225,3 +225,39 @@ In development, view DbgPrint output with DebugView (Sysinternals).
 3. **Use FAIL_MODE_CLOSED for high-security environments**
 4. **Monitor fail mode transitions in SIEM**
 5. **Rotate session tokens regularly**
+
+## WinFsp Coexistence
+
+When using both the minifilter driver and WinFsp filesystem mounting, the agentsh process is automatically excluded from minifilter interception to prevent double-capture of file events.
+
+### How It Works
+
+1. Before mounting WinFsp, the Go client calls `ExcludeSelf()` on the driver client
+2. The driver stores the agentsh process ID in `gExcludedProcessId`
+3. All minifilter pre-callbacks (PreCreate, PreWrite, PreSetInfo) check for the excluded PID
+4. If the current process matches, the operation is allowed without policy check
+
+### Configuration
+
+The exclusion is automatic when both systems are active. No additional configuration is required.
+
+```go
+// This happens automatically in Filesystem.Mount()
+if fs.driverClient != nil && fs.driverClient.Connected() {
+    fs.driverClient.ExcludeSelf()
+}
+```
+
+### Troubleshooting
+
+If you see duplicate file events:
+1. Verify the driver client is connected before mounting WinFsp
+2. Check that `ExcludeSelf()` completes without error
+3. Ensure the minifilter driver is running (version with MSG_EXCLUDE_PROCESS support)
+
+To verify exclusion is working:
+```go
+// Check metrics - file events should not double-count
+metrics, _ := client.GetMetrics()
+fmt.Printf("File queries: %d\n", metrics.FilePolicyQueries)
+```
