@@ -3,6 +3,8 @@
 package windows
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -96,7 +98,7 @@ func NewRegistryPolicyEvaluator(cfg *config.RegistryPolicyConfig) (*RegistryPoli
 			escapedPat := strings.ReplaceAll(pat, `\`, `\\`)
 			g, err := glob.Compile(escapedPat)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("compile registry rule %q pattern %q: %w", r.Name, pat, err)
 			}
 			cr.globs = append(cr.globs, g)
 		}
@@ -105,13 +107,9 @@ func NewRegistryPolicyEvaluator(cfg *config.RegistryPolicyConfig) (*RegistryPoli
 	}
 
 	// Sort by priority (higher first)
-	for i := 0; i < len(e.rules)-1; i++ {
-		for j := i + 1; j < len(e.rules); j++ {
-			if e.rules[j].priority > e.rules[i].priority {
-				e.rules[i], e.rules[j] = e.rules[j], e.rules[i]
-			}
-		}
-	}
+	sort.Slice(e.rules, func(i, j int) bool {
+		return e.rules[i].priority > e.rules[j].priority
+	})
 
 	return e, nil
 }

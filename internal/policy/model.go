@@ -88,7 +88,7 @@ type RegistryRule struct {
 	Name        string   `yaml:"name"`
 	Description string   `yaml:"description"`
 	Paths       []string `yaml:"paths"`      // e.g., "HKLM\\SOFTWARE\\..."
-	Operations  []string `yaml:"operations"` // query, set, delete, create, rename
+	Operations  []string `yaml:"operations"` // read, write, delete, create, rename
 	Decision    string   `yaml:"decision"`   // allow, deny, approve
 	Message     string   `yaml:"message"`
 	Timeout     duration `yaml:"timeout"`
