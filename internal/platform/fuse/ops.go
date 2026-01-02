@@ -234,15 +234,21 @@ func (f *fuseFS) Release(path string, fh uint64) int {
 
 func (f *fuseFS) Unlink(path string) int {
 	virtPath := f.virtPath(path)
+	realPath := f.realPath(path)
 
 	decision := f.checkPolicy(virtPath, platform.FileOpDelete)
+
+	// Handle soft-delete
+	if decision == platform.DecisionSoftDelete {
+		return f.softDelete(realPath, virtPath)
+	}
+
 	if decision == platform.DecisionDeny {
 		f.emitEvent("file_delete", virtPath, platform.FileOpDelete, decision, true)
 		return -fuse.EACCES
 	}
 	f.emitEvent("file_delete", virtPath, platform.FileOpDelete, decision, false)
 
-	realPath := f.realPath(path)
 	if err := os.Remove(realPath); err != nil {
 		return toErrno(err)
 	}
