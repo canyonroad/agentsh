@@ -23,6 +23,7 @@ typedef enum _AGENTSH_MSG_TYPE {
     MSG_SET_CONFIG = 104,
     MSG_GET_METRICS = 105,
     MSG_METRICS_REPLY = 106,
+    MSG_EXCLUDE_PROCESS = 107,
 } AGENTSH_MSG_TYPE;
 
 // Policy decisions
@@ -184,5 +185,11 @@ typedef struct _AGENTSH_METRICS {
     BOOLEAN FailOpenMode;
     ULONG ConsecutiveFailures;
 } AGENTSH_METRICS, *PAGENTSH_METRICS;
+
+// Process exclusion (user-mode -> driver)
+typedef struct _AGENTSH_EXCLUDE_PROCESS {
+    AGENTSH_MESSAGE_HEADER Header;
+    ULONG ProcessId;
+} AGENTSH_EXCLUDE_PROCESS, *PAGENTSH_EXCLUDE_PROCESS;
 
 #endif // _AGENTSH_PROTOCOL_H_
