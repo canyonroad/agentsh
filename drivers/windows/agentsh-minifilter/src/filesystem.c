@@ -11,14 +11,14 @@ static volatile LONG gConsecutiveFailures = 0;
 static volatile BOOLEAN gFailOpenMode = FALSE;
 
 // Excluded process ID (agentsh itself when using WinFsp)
-static volatile ULONG gExcludedProcessId = 0;
+static volatile LONG gExcludedProcessId = 0;
 
 BOOLEAN AgentshIsExcludedProcess(ULONG ProcessId) {
-    return ProcessId != 0 && ProcessId == gExcludedProcessId;
+    return ProcessId != 0 && ProcessId == (ULONG)gExcludedProcessId;
 }
 
 void AgentshSetExcludedProcess(ULONG ProcessId) {
-    InterlockedExchange(&gExcludedProcessId, ProcessId);
+    InterlockedExchange(&gExcludedProcessId, (LONG)ProcessId);
 }
 
 // Get file path from callback data
