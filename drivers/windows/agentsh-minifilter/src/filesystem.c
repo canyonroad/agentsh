@@ -3,14 +3,12 @@
 #include "filesystem.h"
 #include "process.h"
 #include "cache.h"
+#include "config.h"
+#include "metrics.h"
 
-// Query timeout (5 seconds)
-#define POLICY_QUERY_TIMEOUT_MS 5000
-
-// Fail-open tracking
+// Fail-open tracking (local state, also reported via metrics)
 static volatile LONG gConsecutiveFailures = 0;
 static volatile BOOLEAN gFailOpenMode = FALSE;
-#define MAX_CONSECUTIVE_FAILURES 10
 
 // Get file path from callback data
 static NTSTATUS
@@ -73,11 +71,22 @@ AgentshQueryFilePolicy(
     LARGE_INTEGER timeout;
     SIZE_T pathLen;
 
+    AgentshMetricsIncrementFilePolicyQuery();
+
     // Default to allow on failure
     *Decision = DECISION_ALLOW;
 
-    // Check fail-open mode
+    // Check fail mode
+    AGENTSH_FAIL_MODE failMode = AgentshGetFailMode();
     if (gFailOpenMode) {
+        // In fail-open mode, apply configured policy
+        if (failMode == FAIL_MODE_OPEN) {
+            AgentshMetricsIncrementAllowDecision();
+            return TRUE;
+        }
+        // In fail-closed mode, deny all
+        *Decision = DECISION_DENY;
+        AgentshMetricsIncrementDenyDecision();
         return TRUE;
     }
 
@@ -116,7 +125,8 @@ AgentshQueryFilePolicy(
     }
 
     // Set timeout (negative = relative)
-    timeout.QuadPart = -((LONGLONG)POLICY_QUERY_TIMEOUT_MS * 10000);
+    ULONG timeoutMs = AgentshGetPolicyTimeoutMs();
+    timeout.QuadPart = -((LONGLONG)timeoutMs * 10000);
 
     // Send message to user-mode
     status = FltSendMessage(
@@ -132,24 +142,40 @@ AgentshQueryFilePolicy(
     if (NT_SUCCESS(status) && replyLength >= sizeof(response)) {
         *Decision = response.Decision;
         InterlockedExchange(&gConsecutiveFailures, 0);
+        AgentshMetricsSetConsecutiveFailures(0);
+        AgentshMetricsSetFailOpenMode(FALSE);
 
-        // Update cache
-        AgentshCacheInsert(
-            SessionToken,
-            Operation,
-            Path,
-            response.Decision,
-            response.CacheTTLMs > 0 ? response.CacheTTLMs : CACHE_DEFAULT_TTL_MS
-            );
+        if (response.Decision == DECISION_ALLOW) {
+            AgentshMetricsIncrementAllowDecision();
+        } else {
+            AgentshMetricsIncrementDenyDecision();
+        }
+
+        // Update cache with config TTL
+        ULONG ttl = response.CacheTTLMs > 0 ? response.CacheTTLMs : AgentshGetCacheDefaultTTLMs();
+        AgentshCacheInsert(SessionToken, Operation, Path, response.Decision, ttl);
 
         return TRUE;
     }
 
     // Handle failure
     LONG failures = InterlockedIncrement(&gConsecutiveFailures);
-    if (failures >= MAX_CONSECUTIVE_FAILURES && !gFailOpenMode) {
+    AgentshMetricsSetConsecutiveFailures(failures);
+    AgentshMetricsIncrementPolicyFailure();
+
+    ULONG maxFail = AgentshGetMaxConsecutiveFailures();
+    if (failures >= (LONG)maxFail && !gFailOpenMode) {
         gFailOpenMode = TRUE;
-        DbgPrint("AgentSH: Entering fail-open mode after %ld failures\n", failures);
+        AgentshMetricsSetFailOpenMode(TRUE);
+        DbgPrint("AgentSH: Entering fail mode after %ld failures\n", failures);
+    }
+
+    // Apply fail mode policy (reuse failMode from start of function for consistency)
+    if (failMode == FAIL_MODE_CLOSED) {
+        *Decision = DECISION_DENY;
+        AgentshMetricsIncrementDenyDecision();
+    } else {
+        AgentshMetricsIncrementAllowDecision();
     }
 
     return FALSE;
