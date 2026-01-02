@@ -30,7 +30,7 @@ typedef enum _AGENTSH_DECISION {
     DECISION_ALLOW = 0,
     DECISION_DENY = 1,
     DECISION_PENDING = 2,
-} AGENTSH_DECISION;
+} AGENTSH_DECISION, *PAGENTSH_DECISION;
 
 // Message header (all messages start with this)
 typedef struct _AGENTSH_MESSAGE_HEADER {
