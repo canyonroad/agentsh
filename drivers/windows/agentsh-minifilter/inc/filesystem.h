@@ -5,6 +5,10 @@
 #include <fltKernel.h>
 #include "protocol.h"
 
+// Process exclusion (for WinFsp coexistence)
+BOOLEAN AgentshIsExcludedProcess(ULONG ProcessId);
+void AgentshSetExcludedProcess(ULONG ProcessId);
+
 // Query policy from user-mode
 BOOLEAN
 AgentshQueryFilePolicy(

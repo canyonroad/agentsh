@@ -216,6 +216,19 @@ AgentshMessageNotify(
             }
             break;
 
+        case MSG_EXCLUDE_PROCESS:
+            {
+                PAGENTSH_EXCLUDE_PROCESS excludeMsg = (PAGENTSH_EXCLUDE_PROCESS)InputBuffer;
+                if (InputBufferLength >= sizeof(AGENTSH_EXCLUDE_PROCESS)) {
+                    AgentshSetExcludedProcess(excludeMsg->ProcessId);
+                    DbgPrint("AgentSH: Set excluded process: %u\n", excludeMsg->ProcessId);
+                    status = STATUS_SUCCESS;
+                } else {
+                    status = STATUS_BUFFER_TOO_SMALL;
+                }
+            }
+            break;
+
         default:
             DbgPrint("AgentSH: Unknown message type: %d\n", header->Type);
             break;

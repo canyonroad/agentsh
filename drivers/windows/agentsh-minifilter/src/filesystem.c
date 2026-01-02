@@ -10,6 +10,17 @@
 static volatile LONG gConsecutiveFailures = 0;
 static volatile BOOLEAN gFailOpenMode = FALSE;
 
+// Excluded process ID (agentsh itself when using WinFsp)
+static volatile ULONG gExcludedProcessId = 0;
+
+BOOLEAN AgentshIsExcludedProcess(ULONG ProcessId) {
+    return ProcessId != 0 && ProcessId == gExcludedProcessId;
+}
+
+void AgentshSetExcludedProcess(ULONG ProcessId) {
+    InterlockedExchange(&gExcludedProcessId, ProcessId);
+}
+
 // Get file path from callback data
 static NTSTATUS
 GetFilePath(
@@ -198,8 +209,14 @@ AgentshPreCreate(
     ULONG createDisposition;
     ULONG desiredAccess;
     AGENTSH_FILE_OP operation;
+    ULONG processId = HandleToULong(PsGetCurrentProcessId());
 
     UNREFERENCED_PARAMETER(CompletionContext);
+
+    // Skip if this is the excluded process (agentsh using WinFsp)
+    if (AgentshIsExcludedProcess(processId)) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
 
     // Fast path: not a session process
     if (!AgentshIsSessionProcess(PsGetCurrentProcessId(), &sessionToken)) {
@@ -273,8 +290,14 @@ AgentshPreWrite(
     ULONG64 sessionToken;
     AGENTSH_DECISION decision;
     WCHAR pathBuffer[AGENTSH_MAX_PATH];
+    ULONG processId = HandleToULong(PsGetCurrentProcessId());
 
     UNREFERENCED_PARAMETER(CompletionContext);
+
+    // Skip if this is the excluded process (agentsh using WinFsp)
+    if (AgentshIsExcludedProcess(processId)) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
 
     // Fast path: not a session process
     if (!AgentshIsSessionProcess(PsGetCurrentProcessId(), &sessionToken)) {
@@ -332,8 +355,14 @@ AgentshPreSetInfo(
     WCHAR pathBuffer[AGENTSH_MAX_PATH];
     FILE_INFORMATION_CLASS infoClass;
     AGENTSH_FILE_OP operation;
+    ULONG processId = HandleToULong(PsGetCurrentProcessId());
 
     UNREFERENCED_PARAMETER(CompletionContext);
+
+    // Skip if this is the excluded process (agentsh using WinFsp)
+    if (AgentshIsExcludedProcess(processId)) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
 
     // Fast path: not a session process
     if (!AgentshIsSessionProcess(PsGetCurrentProcessId(), &sessionToken)) {
