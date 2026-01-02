@@ -57,8 +57,8 @@ agentsh requires five core security components:
 │  ████████████████████████████░░░░░░░░░░░░  macOS FUSE-T + pf (70%)      │
 │                                            (no isolation/resources)      │
 │                                                                          │
-│  ██████████████████████░░░░░░░░░░░░░░░░░░  Windows Native (55%)         │
-│                                            (partial isolation)           │
+│  ██████████████████████████████░░░░░░░░░░  Windows Native (75%)         │
+│                                            (Mini Filter + WinDivert)     │
 │                                                                          │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -13402,7 +13402,7 @@ jobs:
 | **macOS ESF+NE** | 90% | ✅ | ✅ | ❌ None | ⚠️ Exec only | ❌ None |
 | **macOS + Lima** | 85% | ✅ | ✅ | ✅ Full | ✅ | ✅ Full |
 | **macOS FUSE-T** | 70% | ✅ | ✅ | ❌ None | ❌ | ❌ None |
-| **Windows Native** | 55% | ✅ | ✅ | ⚠️ Partial | ❌ | ⚠️ Partial |
+| **Windows Native** | 75% | ✅ | ✅ | ⚠️ Partial | ❌ | ⚠️ Partial |
 
 ### 17.3 Detailed Security Breakdown
 
@@ -13432,9 +13432,9 @@ jobs:
 │                       File✓   Net✓    Iso✗      Sys✗     Res✗               │
 │                       (No isolation, no syscall filter, no resource limits)  │
 │                                                                               │
-│ Windows Native        ████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░   55% │
+│ Windows Native        ██████████████████████████████░░░░░░░░░░░░░░░░░░   75% │
 │                       File✓   Net✓    Iso⚠      Sys✗     Res⚠               │
-│                       (AppContainer partial, Job Objects partial)            │
+│                       (Mini Filter + WinDivert, AppContainer partial)       │
 │                                                                               │
 └──────────────────────────────────────────────────────────────────────────────┘
 
@@ -13661,7 +13661,7 @@ performance:
 | **Production - macOS** | macOS + Lima | 85% | Full isolation via VM |
 | **Enterprise Security Product** | macOS ESF+NE | 90% | Requires Apple approval |
 | **Development - macOS** | macOS FUSE-T | 70% | Easy setup, good monitoring |
-| **Development - Windows** | Windows Native | 55% | Registry monitoring included |
+| **Development - Windows** | Windows Native | 75% | Mini Filter + WinDivert |
 | **CI/CD Pipeline** | Linux Native | 100% | Containers supported |
 | **Air-gapped/Offline** | Linux Native | 100% | No external dependencies |
 
@@ -15422,6 +15422,6 @@ This specification provides a comprehensive framework for running agentsh across
 1. **Linux** and **Windows WSL2** provide full security with all features
 2. **macOS + Lima** provides near-full security (85%) with a VM layer
 3. **macOS FUSE-T** provides good security (70%) with native feel
-4. **Windows Native** provides partial security (55%) suitable for development
+4. **Windows Native** provides good security (75%) with Mini Filter + WinDivert
 
 The cross-platform abstraction layer ensures API compatibility while allowing each platform to leverage its native capabilities. Users can make informed decisions about which deployment mode to use based on their security requirements.
