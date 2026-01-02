@@ -1,0 +1,189 @@
+name: Windows Driver Build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'drivers/windows/**'
+      - '.github/workflows/driver-windows.yml'
+  pull_request:
+    paths:
+      - 'drivers/windows/**'
+      - '.github/workflows/driver-windows.yml'
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Debug
+          - Release
+      sign_driver:
+        description: 'Test-sign the driver'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build-driver:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+        platform: [x64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Windows Driver Kit
+        shell: powershell
+        run: |
+          # Download and install WDK for Windows 11 (works for Windows 10 too)
+          $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2249371"
+          $wdkInstaller = "$env:TEMP\wdksetup.exe"
+
+          Write-Host "Downloading WDK..."
+          Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
+
+          Write-Host "Installing WDK (this may take several minutes)..."
+          Start-Process -FilePath $wdkInstaller -ArgumentList "/quiet", "/norestart" -Wait -NoNewWindow
+
+          Write-Host "WDK installation complete"
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Driver
+        working-directory: drivers/windows/agentsh-minifilter
+        shell: cmd
+        run: |
+          echo Building ${{ matrix.configuration }}/${{ matrix.platform }}
+          msbuild agentsh.sln /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /t:Build /v:minimal
+          if errorlevel 1 exit /b 1
+          echo Build successful
+
+      - name: Create test certificate
+        if: matrix.configuration == 'Release'
+        working-directory: drivers/windows/agentsh-minifilter
+        shell: powershell
+        run: |
+          # Create a self-signed test certificate for test signing
+          $cert = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject "CN=AgentSH Test Driver" `
+            -KeySpec Signature `
+            -KeyUsage DigitalSignature `
+            -KeyLength 2048 `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -NotAfter (Get-Date).AddYears(1)
+
+          Write-Host "Created test certificate: $($cert.Thumbprint)"
+          echo "CERT_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
+
+      - name: Test-sign driver
+        if: matrix.configuration == 'Release'
+        working-directory: drivers/windows/agentsh-minifilter
+        shell: powershell
+        run: |
+          $driverPath = "bin\${{ matrix.platform }}\${{ matrix.configuration }}\agentsh.sys"
+
+          if (Test-Path $driverPath) {
+            # Find signtool
+            $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" |
+                        Where-Object { $_.FullName -match "x64" } |
+                        Select-Object -First 1 -ExpandProperty FullName
+
+            if ($signtool) {
+              Write-Host "Using signtool: $signtool"
+              Write-Host "Signing driver: $driverPath"
+
+              & $signtool sign /v /s My /n "AgentSH Test Driver" /t http://timestamp.digicert.com $driverPath
+
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "Driver signed successfully"
+              } else {
+                Write-Host "::warning::Driver signing failed (non-fatal for test builds)"
+              }
+            } else {
+              Write-Host "::warning::signtool.exe not found, skipping signing"
+            }
+          } else {
+            Write-Host "::error::Driver file not found: $driverPath"
+            exit 1
+          }
+
+      - name: Generate driver catalog
+        if: matrix.configuration == 'Release'
+        working-directory: drivers/windows/agentsh-minifilter
+        shell: powershell
+        run: |
+          # Find inf2cat
+          $inf2cat = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "inf2cat.exe" |
+                     Select-Object -First 1 -ExpandProperty FullName
+
+          if ($inf2cat) {
+            $binDir = "bin\${{ matrix.platform }}\${{ matrix.configuration }}"
+
+            # Copy INF to output directory
+            Copy-Item "agentsh.inf" -Destination $binDir -Force
+
+            Write-Host "Generating driver catalog..."
+            & $inf2cat /driver:$binDir /os:10_x64
+
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::warning::Catalog generation failed (non-fatal)"
+            }
+          } else {
+            Write-Host "::warning::inf2cat.exe not found, skipping catalog generation"
+          }
+
+      - name: Upload driver artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentsh-driver-${{ matrix.platform }}-${{ matrix.configuration }}
+          path: |
+            drivers/windows/agentsh-minifilter/bin/${{ matrix.platform }}/${{ matrix.configuration }}/agentsh.sys
+            drivers/windows/agentsh-minifilter/bin/${{ matrix.platform }}/${{ matrix.configuration }}/agentsh.pdb
+            drivers/windows/agentsh-minifilter/bin/${{ matrix.platform }}/${{ matrix.configuration }}/agentsh.inf
+            drivers/windows/agentsh-minifilter/bin/${{ matrix.platform }}/${{ matrix.configuration }}/agentsh.cat
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload installation scripts
+        if: matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentsh-driver-scripts
+          path: |
+            drivers/windows/agentsh-minifilter/scripts/install.cmd
+            drivers/windows/agentsh-minifilter/scripts/uninstall.cmd
+          if-no-files-found: warn
+          retention-days: 30
+
+  # Summary job that runs after all builds complete
+  build-summary:
+    needs: build-driver
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check build results
+        run: |
+          if [ "${{ needs.build-driver.result }}" == "success" ]; then
+            echo "✅ All driver builds completed successfully"
+            echo ""
+            echo "Artifacts available:"
+            echo "  - agentsh-driver-x64-Debug"
+            echo "  - agentsh-driver-x64-Release (test-signed)"
+            echo "  - agentsh-driver-scripts"
+            echo ""
+            echo "Note: For production deployment, the Release driver must be"
+            echo "signed with an EV code signing certificate and submitted to"
+            echo "Microsoft for attestation signing."
+          else
+            echo "❌ Driver build failed"
+            exit 1
+          fi
