@@ -9,6 +9,7 @@
 #include "process.h"
 #include "cache.h"
 #include "filesystem.h"
+#include "registry.h"
 
 // Driver version
 #define AGENTSH_DRIVER_VERSION 0x00010000  // 1.0.0.0

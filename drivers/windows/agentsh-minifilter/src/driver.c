@@ -71,6 +71,9 @@ AgentshFilterUnload(
 {
     UNREFERENCED_PARAMETER(Flags);
 
+    // Shutdown registry filter
+    AgentshShutdownRegistryFilter();
+
     // Shutdown policy cache
     AgentshShutdownCache();
 
@@ -138,9 +141,20 @@ DriverEntry(
         return status;
     }
 
+    // Initialize registry filter
+    status = AgentshInitializeRegistryFilter(DriverObject);
+    if (!NT_SUCCESS(status)) {
+        AgentshShutdownCache();
+        AgentshShutdownProcessTracking();
+        AgentshShutdownCommunication();
+        FltUnregisterFilter(AgentshData.FilterHandle);
+        return status;
+    }
+
     // Start filtering
     status = FltStartFiltering(AgentshData.FilterHandle);
     if (!NT_SUCCESS(status)) {
+        AgentshShutdownRegistryFilter();
         AgentshShutdownCache();
         AgentshShutdownProcessTracking();
         AgentshShutdownCommunication();
