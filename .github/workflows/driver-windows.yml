@@ -183,7 +183,7 @@ jobs:
               Write-Host "Using signtool: $signtool"
               Write-Host "Signing driver: $driverPath"
 
-              & $signtool sign /v /s My /n "AgentSH Test Driver" /t http://timestamp.digicert.com $driverPath
+              & $signtool sign /v /fd SHA256 /s My /n "AgentSH Test Driver" /t http://timestamp.digicert.com $driverPath
 
               if ($LASTEXITCODE -eq 0) {
                 Write-Host "Driver signed successfully"
