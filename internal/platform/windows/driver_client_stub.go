@@ -186,6 +186,11 @@ func (c *DriverClient) GetMetrics() (*DriverMetrics, error) {
 	return nil, fmt.Errorf("driver client only available on Windows")
 }
 
+// ExcludeSelf stub for non-Windows
+func (c *DriverClient) ExcludeSelf() error {
+	return fmt.Errorf("driver client only available on Windows")
+}
+
 // utf16Encode converts a Go string to UTF-16LE bytes
 func utf16Encode(s string) []byte {
 	runes := []rune(s)

@@ -16,7 +16,7 @@ If you're on Windows, the recommended approach is to run agentsh inside WSL2 or 
 
 ## Feature availability (current implementation)
 
-- **FUSE workspace view:** Linux (FUSE3) and macOS (FUSE-T). In containers requires `/dev/fuse` + `SYS_ADMIN`.
+- **FUSE workspace view:** Linux (FUSE3), macOS (FUSE-T), and Windows (WinFsp). In containers requires `/dev/fuse` + `SYS_ADMIN`.
 - **Network visibility + policy enforcement:** works via the per-session proxy (DNS/connect/HTTP events).
 - **Transparent netns interception:** optional, Linux/root-only (requires privileges; proxy mode works without it).
 - **cgroups v2 limits:** optional, Linux-only; disabled by default (requires a writable cgroup base path).
@@ -99,6 +99,7 @@ agentsh server
 - ✅ Registry interception (create/set/delete keys, high-risk path detection)
 - ✅ Network interception (WinDivert TCP/DNS proxy with WFP fallback)
 - ✅ Production readiness (configurable fail modes, metrics, caching)
+- ✅ WinFsp filesystem mounting (FUSE-style with soft-delete support)
 
 **Registry Policy Configuration:**
 
@@ -121,6 +122,26 @@ registry_rules:
 ```
 
 Built-in high-risk path detection automatically blocks write operations to critical registry locations (Run keys, services, Windows Defender settings, LSA) with MITRE ATT&CK technique mappings for audit logging.
+
+**WinFsp Filesystem Mounting:**
+
+For FUSE-style filesystem mounting with soft-delete support:
+
+```bash
+# Install WinFsp (required for FUSE-style mounting)
+winget install WinFsp.WinFsp
+
+# Build with CGO enabled
+CGO_ENABLED=1 go build -o agentsh.exe ./cmd/agentsh
+
+# Run the server (WinFsp mount is automatic)
+agentsh server
+```
+
+WinFsp provides the same FUSE-style mounting as macOS FUSE-T, using a shared `internal/platform/fuse/` package. Features include:
+- Policy-enforced file operations (read, write, create, delete)
+- Soft-delete (files moved to trash instead of permanent deletion)
+- Automatic minifilter process exclusion to prevent double-interception
 
 See [Windows Driver Deployment Guide](windows-driver-deployment.md) for installation and configuration.
 

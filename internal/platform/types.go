@@ -85,10 +85,11 @@ type Decision = types.Decision
 
 // Decision constants re-exported for convenience.
 const (
-	DecisionAllow    = types.DecisionAllow
-	DecisionDeny     = types.DecisionDeny
-	DecisionApprove  = types.DecisionApprove
-	DecisionRedirect = types.DecisionRedirect
+	DecisionAllow      = types.DecisionAllow
+	DecisionDeny       = types.DecisionDeny
+	DecisionApprove    = types.DecisionApprove
+	DecisionRedirect   = types.DecisionRedirect
+	DecisionSoftDelete = types.DecisionSoftDelete
 )
 
 // DecisionResponse is returned by InterceptionManager.Intercept().

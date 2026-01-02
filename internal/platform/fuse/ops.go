@@ -1,12 +1,11 @@
-//go:build darwin && cgo
+// internal/platform/fuse/ops.go
+//go:build cgo
 
-package darwin
+package fuse
 
 import (
 	"os"
 	"path/filepath"
-	"syscall"
-	"time"
 
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/winfsp/cgofuse/fuse"
@@ -14,8 +13,6 @@ import (
 
 // virtPath converts a FUSE path to the virtual path seen by the agent.
 func (f *fuseFS) virtPath(path string) string {
-	// FUSE paths are relative to mount point, starting with /
-	// Virtual paths should be absolute starting with /workspace or similar
 	if path == "/" {
 		return f.cfg.MountPoint
 	}
@@ -46,11 +43,6 @@ func (f *fuseFS) emitEvent(eventType, virtPath string, operation platform.FileOp
 	} else {
 		f.allowedOps.Add(1)
 	}
-
-	if f.cfg.EventChannel == nil {
-		return
-	}
-
 	// TODO: Emit actual event to channel
 }
 
@@ -68,18 +60,12 @@ func toErrno(err error) int {
 	if os.IsExist(err) {
 		return -fuse.EEXIST
 	}
-	// Check for syscall.Errno
-	if errno, ok := err.(syscall.Errno); ok {
-		return -int(errno)
-	}
 	return -fuse.EIO
 }
 
 // --- FUSE Operations ---
 
-// Statfs returns filesystem statistics.
 func (f *fuseFS) Statfs(path string, stat *fuse.Statfs_t) int {
-	// Return reasonable defaults
 	stat.Bsize = 4096
 	stat.Frsize = 4096
 	stat.Blocks = 1000000
@@ -92,7 +78,6 @@ func (f *fuseFS) Statfs(path string, stat *fuse.Statfs_t) int {
 	return 0
 }
 
-// Getattr gets file attributes.
 func (f *fuseFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	realPath := f.realPath(path)
 	info, err := os.Lstat(realPath)
@@ -103,39 +88,6 @@ func (f *fuseFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	return 0
 }
 
-// fillStat fills a fuse.Stat_t from os.FileInfo.
-func fillStat(stat *fuse.Stat_t, info os.FileInfo) {
-	stat.Size = info.Size()
-	stat.Mtim = fuse.NewTimespec(info.ModTime())
-	stat.Atim = stat.Mtim
-	stat.Ctim = stat.Mtim
-
-	mode := uint32(info.Mode().Perm())
-	if info.IsDir() {
-		mode |= fuse.S_IFDIR
-	} else if info.Mode()&os.ModeSymlink != 0 {
-		mode |= fuse.S_IFLNK
-	} else {
-		mode |= fuse.S_IFREG
-	}
-	stat.Mode = mode
-	stat.Nlink = 1
-
-	// Get UID/GID from syscall stat if available
-	if sys := info.Sys(); sys != nil {
-		if s, ok := sys.(*syscall.Stat_t); ok {
-			stat.Uid = s.Uid
-			stat.Gid = s.Gid
-			stat.Nlink = uint32(s.Nlink)
-			stat.Ino = s.Ino
-			stat.Dev = uint64(s.Dev)
-			stat.Atim = fuse.NewTimespec(time.Unix(s.Atimespec.Sec, s.Atimespec.Nsec))
-			stat.Ctim = fuse.NewTimespec(time.Unix(s.Ctimespec.Sec, s.Ctimespec.Nsec))
-		}
-	}
-}
-
-// Opendir opens a directory.
 func (f *fuseFS) Opendir(path string) (int, uint64) {
 	virtPath := f.virtPath(path)
 	decision := f.checkPolicy(virtPath, platform.FileOpList)
@@ -152,7 +104,6 @@ func (f *fuseFS) Opendir(path string) (int, uint64) {
 	return 0, 0
 }
 
-// Readdir reads directory contents.
 func (f *fuseFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst int64) bool, ofst int64, fh uint64) int {
 	realPath := f.realPath(path)
 	entries, err := os.ReadDir(realPath)
@@ -177,11 +128,9 @@ func (f *fuseFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, 
 	return 0
 }
 
-// Open opens a file.
 func (f *fuseFS) Open(path string, flags int) (int, uint64) {
 	virtPath := f.virtPath(path)
 
-	// Determine operation based on flags
 	operation := platform.FileOpRead
 	if flags&(os.O_WRONLY|os.O_RDWR|os.O_APPEND|os.O_TRUNC) != 0 {
 		operation = platform.FileOpWrite
@@ -211,7 +160,6 @@ func (f *fuseFS) Open(path string, flags int) (int, uint64) {
 	return 0, fh
 }
 
-// Create creates and opens a file.
 func (f *fuseFS) Create(path string, flags int, mode uint32) (int, uint64) {
 	virtPath := f.virtPath(path)
 
@@ -239,7 +187,6 @@ func (f *fuseFS) Create(path string, flags int, mode uint32) (int, uint64) {
 	return 0, fh
 }
 
-// Read reads from a file.
 func (f *fuseFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	of, ok := f.openFiles.Load(fh)
 	if !ok {
@@ -254,7 +201,6 @@ func (f *fuseFS) Read(path string, buff []byte, ofst int64, fh uint64) int {
 	return n
 }
 
-// Write writes to a file.
 func (f *fuseFS) Write(path string, buff []byte, ofst int64, fh uint64) int {
 	of, ok := f.openFiles.Load(fh)
 	if !ok {
@@ -262,12 +208,12 @@ func (f *fuseFS) Write(path string, buff []byte, ofst int64, fh uint64) int {
 	}
 	openFile := of.(*openFile)
 
-	// Check write policy
 	decision := f.checkPolicy(openFile.virtPath, platform.FileOpWrite)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("file_write", openFile.virtPath, platform.FileOpWrite, decision, true)
 		return -fuse.EACCES
 	}
+	f.emitEvent("file_write", openFile.virtPath, platform.FileOpWrite, decision, false)
 
 	n, err := openFile.file.WriteAt(buff, ofst)
 	if err != nil {
@@ -276,7 +222,6 @@ func (f *fuseFS) Write(path string, buff []byte, ofst int64, fh uint64) int {
 	return n
 }
 
-// Release closes a file handle.
 func (f *fuseFS) Release(path string, fh uint64) int {
 	of, ok := f.openFiles.LoadAndDelete(fh)
 	if !ok {
@@ -287,25 +232,29 @@ func (f *fuseFS) Release(path string, fh uint64) int {
 	return 0
 }
 
-// Unlink removes a file.
 func (f *fuseFS) Unlink(path string) int {
 	virtPath := f.virtPath(path)
+	realPath := f.realPath(path)
 
 	decision := f.checkPolicy(virtPath, platform.FileOpDelete)
+
+	// Handle soft-delete
+	if decision == platform.DecisionSoftDelete {
+		return f.softDelete(realPath, virtPath)
+	}
+
 	if decision == platform.DecisionDeny {
 		f.emitEvent("file_delete", virtPath, platform.FileOpDelete, decision, true)
 		return -fuse.EACCES
 	}
 	f.emitEvent("file_delete", virtPath, platform.FileOpDelete, decision, false)
 
-	realPath := f.realPath(path)
 	if err := os.Remove(realPath); err != nil {
 		return toErrno(err)
 	}
 	return 0
 }
 
-// Mkdir creates a directory.
 func (f *fuseFS) Mkdir(path string, mode uint32) int {
 	virtPath := f.virtPath(path)
 
@@ -323,7 +272,6 @@ func (f *fuseFS) Mkdir(path string, mode uint32) int {
 	return 0
 }
 
-// Rmdir removes a directory.
 func (f *fuseFS) Rmdir(path string) int {
 	virtPath := f.virtPath(path)
 
@@ -341,12 +289,10 @@ func (f *fuseFS) Rmdir(path string) int {
 	return 0
 }
 
-// Rename renames a file or directory.
 func (f *fuseFS) Rename(oldpath string, newpath string) int {
 	virtOldPath := f.virtPath(oldpath)
 	virtNewPath := f.virtPath(newpath)
 
-	// Check both paths
 	decision := f.checkPolicy(virtOldPath, platform.FileOpRename)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("file_rename", virtOldPath, platform.FileOpRename, decision, true)
@@ -367,7 +313,6 @@ func (f *fuseFS) Rename(oldpath string, newpath string) int {
 	return 0
 }
 
-// Chmod changes file permissions.
 func (f *fuseFS) Chmod(path string, mode uint32) int {
 	virtPath := f.virtPath(path)
 
@@ -385,7 +330,6 @@ func (f *fuseFS) Chmod(path string, mode uint32) int {
 	return 0
 }
 
-// Symlink creates a symbolic link.
 func (f *fuseFS) Symlink(target string, newpath string) int {
 	virtPath := f.virtPath(newpath)
 
@@ -403,7 +347,6 @@ func (f *fuseFS) Symlink(target string, newpath string) int {
 	return 0
 }
 
-// Readlink reads a symbolic link.
 func (f *fuseFS) Readlink(path string) (int, string) {
 	virtPath := f.virtPath(path)
 
@@ -422,7 +365,6 @@ func (f *fuseFS) Readlink(path string) (int, string) {
 	return 0, target
 }
 
-// Link creates a hard link.
 func (f *fuseFS) Link(oldpath string, newpath string) int {
 	virtPath := f.virtPath(newpath)
 
@@ -441,7 +383,6 @@ func (f *fuseFS) Link(oldpath string, newpath string) int {
 	return 0
 }
 
-// Truncate truncates a file.
 func (f *fuseFS) Truncate(path string, size int64, fh uint64) int {
 	virtPath := f.virtPath(path)
 
@@ -459,15 +400,14 @@ func (f *fuseFS) Truncate(path string, size int64, fh uint64) int {
 	return 0
 }
 
-// Utimens sets file access and modification times.
 func (f *fuseFS) Utimens(path string, tmsp []fuse.Timespec) int {
 	realPath := f.realPath(path)
 	if len(tmsp) < 2 {
 		return -fuse.EINVAL
 	}
 
-	atime := time.Unix(tmsp[0].Sec, tmsp[0].Nsec)
-	mtime := time.Unix(tmsp[1].Sec, tmsp[1].Nsec)
+	atime := timespecToTime(tmsp[0])
+	mtime := timespecToTime(tmsp[1])
 
 	if err := os.Chtimes(realPath, atime, mtime); err != nil {
 		return toErrno(err)
@@ -475,7 +415,6 @@ func (f *fuseFS) Utimens(path string, tmsp []fuse.Timespec) int {
 	return 0
 }
 
-// Access checks file access permissions.
 func (f *fuseFS) Access(path string, mask uint32) int {
 	realPath := f.realPath(path)
 	if _, err := os.Stat(realPath); err != nil {
@@ -484,16 +423,6 @@ func (f *fuseFS) Access(path string, mask uint32) int {
 	return 0
 }
 
-// Chown changes file ownership.
-func (f *fuseFS) Chown(path string, uid uint32, gid uint32) int {
-	realPath := f.realPath(path)
-	if err := os.Chown(realPath, int(uid), int(gid)); err != nil {
-		return toErrno(err)
-	}
-	return 0
-}
-
-// Flush flushes cached data.
 func (f *fuseFS) Flush(path string, fh uint64) int {
 	of, ok := f.openFiles.Load(fh)
 	if !ok {
@@ -506,7 +435,6 @@ func (f *fuseFS) Flush(path string, fh uint64) int {
 	return 0
 }
 
-// Fsync synchronizes file contents.
 func (f *fuseFS) Fsync(path string, datasync bool, fh uint64) int {
 	of, ok := f.openFiles.Load(fh)
 	if !ok {

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,7 @@ const (
 	MsgSetConfig           = 104
 	MsgGetMetrics          = 105
 	MsgMetricsReply        = 106
+	MsgExcludeProcess      = 107
 )
 
 // Driver client version
@@ -581,6 +583,30 @@ func (c *DriverClient) GetMetrics() (*DriverMetrics, error) {
 		FailOpenMode:          reply[64] != 0,
 		ConsecutiveFailures:   binary.LittleEndian.Uint32(reply[68:72]),
 	}, nil
+}
+
+// ExcludeSelf tells the minifilter to skip file operations from this process.
+// Call this before mounting WinFsp to avoid double-interception.
+func (c *DriverClient) ExcludeSelf() error {
+	if !c.connected.Load() {
+		return fmt.Errorf("not connected")
+	}
+
+	pid := uint32(os.Getpid())
+
+	// Build message: header (16) + processId (4)
+	msgSize := 20
+	msg := make([]byte, msgSize)
+
+	// Header
+	binary.LittleEndian.PutUint32(msg[0:4], MsgExcludeProcess)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], c.msgCounter.Add(1))
+
+	// ProcessId
+	binary.LittleEndian.PutUint32(msg[16:20], pid)
+
+	return filterSendMessage(c.port, msg, nil)
 }
 
 // utf16Encode converts a Go string to UTF-16LE bytes
