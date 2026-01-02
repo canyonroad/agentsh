@@ -49,9 +49,7 @@ func applyAuditPolicy(ctx context.Context, hooks *FUSEAuditHooks, sessionID stri
 	if realPath != "" {
 		if st, err := os.Lstat(realPath); err == nil {
 			size = st.Size()
-			if stat, ok := st.Sys().(*syscall.Stat_t); ok {
-				nlink = int(stat.Nlink)
-			}
+			nlink = getNlink(st)
 		}
 	}
 
