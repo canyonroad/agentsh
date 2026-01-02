@@ -87,11 +87,16 @@ agentsh server
 - Administrator privileges for driver installation
 - Test signing enabled for development, or EV-signed driver for production
 
+**Network Interception:**
+- WinDivert for transparent TCP/DNS proxy (requires Administrator)
+- Falls back to WFP for block-only mode if WinDivert unavailable
+
 **Current Implementation Status (All 5 Phases Complete):**
 - ✅ Driver skeleton and filter port communication
 - ✅ Process tracking (session processes and child inheritance)
 - ✅ Filesystem interception (create, write, delete, rename)
 - ✅ Registry interception (create/set/delete keys, high-risk path detection)
+- ✅ Network interception (WinDivert TCP/DNS proxy with WFP fallback)
 - ✅ Production readiness (configurable fail modes, metrics, caching)
 
 See [Windows Driver Deployment Guide](windows-driver-deployment.md) for installation and configuration.
