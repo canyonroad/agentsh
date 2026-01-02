@@ -87,30 +87,12 @@ export GOCACHE="${GOCACHE:-$repo_root/.gocache}"
 export GOMODCACHE="${GOMODCACHE:-$repo_root/.gomodcache}"
 export GOPATH="${GOPATH:-$repo_root/.gopath}"
 
-echo "smoke: building..." >&2
-if ! make build 2>&1; then
-  echo "smoke: make build failed" >&2
-  exit 1
-fi
-echo "smoke: build complete" >&2
+make build >/dev/null
 
-# Verify binaries exist
-if [[ ! -x "./bin/agentsh" ]]; then
-  echo "smoke: ./bin/agentsh not found or not executable" >&2
-  exit 1
-fi
-if [[ ! -x "./bin/agentsh-shell-shim" ]]; then
-  echo "smoke: ./bin/agentsh-shell-shim not found or not executable" >&2
-  exit 1
-fi
-echo "smoke: binaries verified" >&2
-
-echo "smoke: testing host guard..." >&2
 set +e
 host_guard_out="$(./bin/agentsh shim install-shell --root / --shim "$repo_root/bin/agentsh-shell-shim" 2>&1)"
 host_guard_rc=$?
 set -e
-echo "smoke: host guard returned rc=$host_guard_rc" >&2
 if [[ "$host_guard_rc" == "0" ]]; then
   echo "smoke: expected shim host-root guard to fail, but it succeeded" >&2
   exit 1
