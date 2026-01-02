@@ -22,6 +22,8 @@ GetFilePath(
     NTSTATUS status;
     PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
 
+    UNREFERENCED_PARAMETER(FltObjects);
+
     status = FltGetFileNameInformation(
         Data,
         FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,
