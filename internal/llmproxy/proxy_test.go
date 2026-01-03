@@ -84,7 +84,7 @@ func TestProxy_AnthropicPassthrough(t *testing.T) {
 		Proxy: config.ProxyConfig{
 			Mode: "embedded",
 			Port: 0, // Auto-select port
-			Upstreams: config.ProxyUpstreamsConfig{
+			Providers: config.ProxyProvidersConfig{
 				Anthropic: upstream.URL,
 			},
 		},
@@ -227,7 +227,7 @@ func TestProxy_DLPRedaction(t *testing.T) {
 		Proxy: config.ProxyConfig{
 			Mode: "embedded",
 			Port: 0,
-			Upstreams: config.ProxyUpstreamsConfig{
+			Providers: config.ProxyProvidersConfig{
 				Anthropic: upstream.URL,
 			},
 		},
@@ -403,7 +403,7 @@ func TestProxy_New(t *testing.T) {
 				Proxy: config.ProxyConfig{
 					Mode: "embedded",
 					Port: 0,
-					Upstreams: config.ProxyUpstreamsConfig{
+					Providers: config.ProxyProvidersConfig{
 						Anthropic: "https://custom.anthropic.example.com",
 						OpenAI:    "https://custom.openai.example.com",
 					},
@@ -528,7 +528,7 @@ func TestProxy_StorageLogging(t *testing.T) {
 		Proxy: config.ProxyConfig{
 			Mode: "embedded",
 			Port: 0,
-			Upstreams: config.ProxyUpstreamsConfig{
+			Providers: config.ProxyProvidersConfig{
 				Anthropic: upstream.URL,
 			},
 		},
@@ -628,5 +628,89 @@ func TestProxy_StorageLogging(t *testing.T) {
 	}
 	if respEntry.DurationMs < 0 {
 		t.Errorf("expected non-negative duration, got %d", respEntry.DurationMs)
+	}
+}
+
+// TestProxy_CustomOpenAIProvider tests that a custom OpenAI URL routes all traffic there.
+func TestProxy_CustomOpenAIProvider(t *testing.T) {
+	var receivedPath string
+	var receivedAuth string
+
+	// Create a mock custom provider server
+	customProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedAuth = r.Header.Get("Authorization")
+
+		resp := map[string]interface{}{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"choices": []map[string]interface{}{},
+			"usage": map[string]int{
+				"prompt_tokens":     10,
+				"completion_tokens": 20,
+				"total_tokens":      30,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer customProvider.Close()
+
+	storageDir := t.TempDir()
+
+	// Custom OpenAI provider URL
+	cfg := Config{
+		SessionID: "test-custom-provider",
+		Proxy: config.ProxyConfig{
+			Mode: "embedded",
+			Port: 0,
+			Providers: config.ProxyProvidersConfig{
+				OpenAI: customProvider.URL, // Custom URL
+			},
+		},
+		DLP: config.DLPConfig{Mode: "disabled"},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy, err := New(cfg, storageDir, logger)
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("failed to start proxy: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(shutdownCtx)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Test with OAuth token (would normally go to ChatGPT, but custom URL overrides)
+	proxyURL := "http://" + proxy.Addr().String() + "/v1/chat/completions"
+	req, _ := http.NewRequest(http.MethodPost, proxyURL, strings.NewReader(`{"test": true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer eyJhbGciOiJIUzI1NiJ9.oauth-token") // OAuth token
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+
+	// Verify request went to custom provider (not ChatGPT)
+	if receivedPath != "/v1/chat/completions" {
+		t.Errorf("unexpected path at custom provider: %s", receivedPath)
+	}
+	if receivedAuth != "Bearer eyJhbGciOiJIUzI1NiJ9.oauth-token" {
+		t.Errorf("auth header not passed: %s", receivedAuth)
 	}
 }

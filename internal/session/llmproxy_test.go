@@ -41,7 +41,7 @@ func TestStartLLMProxy(t *testing.T) {
 	proxyCfg := config.ProxyConfig{
 		Mode: "embedded",
 		Port: 0, // Auto-select port
-		Upstreams: config.ProxyUpstreamsConfig{
+		Providers: config.ProxyProvidersConfig{
 			Anthropic: upstream.URL,
 			OpenAI:    upstream.URL,
 		},
@@ -203,7 +203,7 @@ func TestSession_LLMProxyEnvVars_Integration(t *testing.T) {
 	proxyCfg := config.ProxyConfig{
 		Mode: "embedded",
 		Port: 0,
-		Upstreams: config.ProxyUpstreamsConfig{
+		Providers: config.ProxyProvidersConfig{
 			Anthropic: upstream.URL,
 		},
 	}
@@ -272,7 +272,7 @@ func TestSession_CloseProxy(t *testing.T) {
 	proxyCfg := config.ProxyConfig{
 		Mode: "embedded",
 		Port: 0,
-		Upstreams: config.ProxyUpstreamsConfig{
+		Providers: config.ProxyProvidersConfig{
 			Anthropic: upstream.URL,
 		},
 	}
@@ -345,7 +345,7 @@ func TestStartLLMProxy_WithDLP(t *testing.T) {
 	proxyCfg := config.ProxyConfig{
 		Mode: "embedded",
 		Port: 0,
-		Upstreams: config.ProxyUpstreamsConfig{
+		Providers: config.ProxyProvidersConfig{
 			Anthropic: upstream.URL,
 		},
 	}
@@ -413,7 +413,7 @@ func TestStartLLMProxy_SessionIDInEnvVars(t *testing.T) {
 	proxyCfg := config.ProxyConfig{
 		Mode: "embedded",
 		Port: 0,
-		Upstreams: config.ProxyUpstreamsConfig{
+		Providers: config.ProxyProvidersConfig{
 			Anthropic: upstream.URL,
 		},
 	}

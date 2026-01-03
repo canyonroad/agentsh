@@ -574,14 +574,11 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.Proxy.Mode == "" {
 		cfg.Proxy.Mode = "embedded"
 	}
-	if cfg.Proxy.Upstreams.Anthropic == "" {
-		cfg.Proxy.Upstreams.Anthropic = "https://api.anthropic.com"
+	if cfg.Proxy.Providers.Anthropic == "" {
+		cfg.Proxy.Providers.Anthropic = "https://api.anthropic.com"
 	}
-	if cfg.Proxy.Upstreams.OpenAI == "" {
-		cfg.Proxy.Upstreams.OpenAI = "https://api.openai.com"
-	}
-	if cfg.Proxy.Upstreams.ChatGPT == "" {
-		cfg.Proxy.Upstreams.ChatGPT = "https://chatgpt.com/backend-api"
+	if cfg.Proxy.Providers.OpenAI == "" {
+		cfg.Proxy.Providers.OpenAI = "https://api.openai.com"
 	}
 	// Port 0 is valid (means random), so don't override it
 

@@ -45,13 +45,13 @@ func TestExtractUsage_OpenAI(t *testing.T) {
 }
 
 func TestExtractUsage_ChatGPT(t *testing.T) {
-	// ChatGPT uses same format as OpenAI
+	// ChatGPT uses same format as OpenAI (and same dialect now)
 	body := []byte(`{
 		"id": "chatcmpl-123",
 		"usage": {"prompt_tokens": 200, "completion_tokens": 500, "total_tokens": 700}
 	}`)
 
-	usage := ExtractUsage(body, DialectChatGPT)
+	usage := ExtractUsage(body, DialectOpenAI)
 
 	if usage.InputTokens != 200 {
 		t.Errorf("expected InputTokens=200, got %d", usage.InputTokens)
