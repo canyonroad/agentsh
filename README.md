@@ -17,6 +17,7 @@ agentsh sits *under* your agent/tooling—intercepting **file**, **network**, an
   - network connect + DNS
   - process start/exit
   - PTY activity
+  - LLM API requests with DLP and usage tracking
 - **Two output modes**:
   - human-friendly shell output
   - compact JSON responses for agents/tools
@@ -330,6 +331,43 @@ See [CI/CD Integration Guide](docs/cicd-integration.md) for pipeline examples.
 
 ---
 
+### LLM Proxy and DLP
+
+agentsh includes an embedded proxy that intercepts all LLM API requests from agents:
+
+```bash
+# Check proxy status for a session
+agentsh proxy status <session-id>
+
+# View LLM-specific events
+agentsh session logs <session-id> --type=llm
+```
+
+**Features:**
+- **Automatic routing**: Sets `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` so agent SDKs route through the proxy
+- **DLP redaction**: PII (emails, phone numbers, API keys, etc.) is redacted before reaching LLM providers
+- **Custom patterns**: Define organization-specific patterns for sensitive data
+- **Usage tracking**: Token counts extracted and logged for cost attribution
+- **Audit trail**: All requests/responses logged to session storage
+
+**Configuration example:**
+
+```yaml
+dlp:
+  mode: redact
+  patterns:
+    email: true
+    api_keys: true
+  custom_patterns:
+    - name: customer_id
+      display: identifier
+      regex: "CUST-[0-9]{8}"
+```
+
+See [LLM Proxy Documentation](docs/llm-proxy.md) for full configuration options.
+
+---
+
 ### Policy Generation
 
 Generate restrictive policies from observed session behavior ("profile-then-lock" workflow):
@@ -402,9 +440,10 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 * Default policy: [`configs/policies/default.yaml`](configs/policies/default.yaml)
 * Example Dockerfile (with shim): [`Dockerfile.example`](Dockerfile.example)
 * **Platform comparison:** [`docs/platform-comparison.md`](docs/platform-comparison.md) - feature support, security scores, performance by platform
+* **LLM Proxy & DLP:** [`docs/llm-proxy.md`](docs/llm-proxy.md) - embedded proxy configuration, DLP patterns, usage tracking
 * **macOS build guide:** [`docs/macos-build.md`](docs/macos-build.md) - FUSE-T and ESF+NE build instructions
 * **macOS ESF+NE architecture:** [`docs/macos-esf-ne-architecture.md`](docs/macos-esf-ne-architecture.md) - System Extension, XPC, and deployment details
-* Environment variables (all `AGENTSH_*` overrides, auto-start toggles, transport selection): [`docs/spec.md` §15.3 "Environment Variables"](docs/spec.md#153-environment-variables)
+* Environment variables (all `AGENTSH_*` overrides, auto-start toggles, transport selection): [`docs/spec.md` &sect;15.3 "Environment Variables"](docs/spec.md#153-environment-variables)
 * Architecture & data flow (FUSE + policy engine + API): inline comments in [`configs/server-config.yaml`](configs/server-config.yaml) and [`internal/netmonitor`](internal/netmonitor)
 * CLI help: `agentsh --help`, `agentsh exec --help`, `agentsh shim --help`
 

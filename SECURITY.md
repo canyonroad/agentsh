@@ -21,6 +21,8 @@ agentsh is designed to mitigate risks from **semi-trusted AI agents** operating 
 | Dangerous command execution | Command allowlists with args pattern matching |
 | Resource exhaustion | cgroup limits (memory, CPU, PIDs) |
 | Destructive operations | Approval workflows, soft-delete to trash |
+| PII leakage to LLMs | Embedded proxy with DLP redaction before requests reach provider |
+| Untracked LLM usage | Request/response logging with token usage for cost attribution |
 
 ### What agentsh Does NOT Protect Against
 
@@ -116,6 +118,38 @@ agentsh is **not** a full security sandbox like a VM or container with seccomp. 
 - Risky operations can require human approval
 - Configurable timeout (default: deny on timeout)
 - Audit logging of approval decisions
+
+### LLM Proxy and Data Loss Prevention (DLP)
+
+agentsh includes an embedded HTTP proxy that intercepts all LLM API requests from agents:
+
+**Architecture:**
+- Proxy starts automatically with each session on a random port
+- Agent environment is configured to route through proxy (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`)
+- Requests are intercepted, processed, and forwarded to upstream LLM providers
+
+**DLP Redaction:**
+- Request bodies are scanned for PII using regex patterns
+- Matches are replaced with `[REDACTED:pattern_type]` before forwarding
+- Built-in patterns: email, phone, credit card, SSN, API keys
+- Custom patterns can be defined for organization-specific data
+
+**Audit Logging:**
+- All requests and responses logged to session storage (JSONL format)
+- Token usage extracted and normalized across providers
+- Redaction events tracked with field paths and pattern types
+
+**Dialect Detection:**
+- Anthropic: `x-api-key` or `anthropic-version` headers
+- OpenAI API: `Authorization: Bearer sk-*` tokens
+- ChatGPT: OAuth tokens (non-sk- Bearer tokens)
+
+**Limitations:**
+- Only scans text content (not images or encoded data)
+- Regex patterns may miss obfuscated PII
+- Agent could theoretically bypass proxy (combine with network rules for defense in depth)
+
+See [LLM Proxy Documentation](docs/llm-proxy.md) for configuration and usage details.
 
 ## Known Limitations
 
@@ -373,11 +407,15 @@ Before deploying agentsh in production:
 - [ ] Test approval workflows to ensure timeouts result in deny
 - [ ] Run agentsh as a non-root user
 - [ ] Keep agentsh updated for security fixes
+- [ ] Configure DLP patterns for organization-specific sensitive data
+- [ ] Enable network rules to force LLM traffic through the proxy
+- [ ] Review LLM usage reports for unexpected token consumption
 
 ## Changelog
 
 | Date | Change |
 |------|--------|
+| 2026-01-02 | Added embedded LLM proxy with DLP redaction and usage tracking |
 | 2026-01-02 | Added WinFsp filesystem mounting with shared fuse package for Windows |
 | 2026-01-02 | Added minifilter process exclusion for WinFsp coexistence |
 | 2026-01-01 | Implemented macOS ESF+NE for enterprise-tier enforcement (90% security score) |
