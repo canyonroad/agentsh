@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -241,7 +240,7 @@ func (p *Proxy) logRequest(requestID, sessionID string, dialect Dialect, r *http
 			Path:     r.URL.Path,
 			Headers:  sanitizeHeaders(r.Header),
 			BodySize: len(body),
-			BodyHash: hashBody(body),
+			BodyHash: HashBody(body),
 		},
 	}
 
@@ -276,47 +275,6 @@ func (p *Proxy) logResponse(requestID, sessionID string, dialect Dialect, resp *
 	}
 }
 
-// RequestLogEntry represents a logged request.
-type RequestLogEntry struct {
-	ID        string       `json:"id"`
-	SessionID string       `json:"session_id"`
-	Timestamp time.Time    `json:"timestamp"`
-	Dialect   Dialect      `json:"dialect"`
-	Request   RequestInfo  `json:"request"`
-	DLP       *DLPInfo     `json:"dlp,omitempty"`
-}
-
-// RequestInfo contains request details.
-type RequestInfo struct {
-	Method   string              `json:"method"`
-	Path     string              `json:"path"`
-	Headers  map[string][]string `json:"headers"`
-	BodySize int                 `json:"body_size"`
-	BodyHash string              `json:"body_hash"`
-}
-
-// ResponseLogEntry represents a logged response.
-type ResponseLogEntry struct {
-	RequestID  string       `json:"request_id"`
-	SessionID  string       `json:"session_id"`
-	Timestamp  time.Time    `json:"timestamp"`
-	DurationMs int64        `json:"duration_ms"`
-	Response   ResponseInfo `json:"response"`
-}
-
-// ResponseInfo contains response details.
-type ResponseInfo struct {
-	Status   int                 `json:"status"`
-	Headers  map[string][]string `json:"headers"`
-	BodySize int                 `json:"body_size,omitempty"`
-	BodyHash string              `json:"body_hash,omitempty"`
-}
-
-// DLPInfo contains DLP processing information.
-type DLPInfo struct {
-	Redactions []Redaction `json:"redactions"`
-}
-
 // sanitizeHeaders removes sensitive headers from logging.
 func sanitizeHeaders(h http.Header) map[string][]string {
 	result := make(map[string][]string)
@@ -332,15 +290,6 @@ func sanitizeHeaders(h http.Header) map[string][]string {
 	return result
 }
 
-// hashBody computes a SHA256 hash of the body for integrity verification.
-func hashBody(body []byte) string {
-	if len(body) == 0 {
-		return ""
-	}
-	// TODO: implement proper hashing
-	return fmt.Sprintf("sha256:%x...", body[:min(8, len(body))])
-}
-
 func generateRequestID() string {
 	b := make([]byte, 8)
 	rand.Read(b)
@@ -349,14 +298,6 @@ func generateRequestID() string {
 
 func parseURL(s string) (*url.URL, error) {
 	return url.Parse(s)
-}
-
-// min returns the minimum of two ints.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // EnvVars returns the environment variables to set for the agent process.
@@ -374,55 +315,4 @@ func (p *Proxy) EnvVars() map[string]string {
 		// for correlation when using external proxy
 		"AGENTSH_SESSION_ID": p.cfg.SessionID,
 	}
-}
-
-// Storage handles request/response logging to disk.
-type Storage struct {
-	path      string
-	sessionID string
-	file      io.WriteCloser
-	mu        sync.Mutex
-}
-
-// NewStorage creates a new storage instance.
-func NewStorage(path, sessionID string) (*Storage, error) {
-	// TODO: implement proper file storage
-	// For now, use a no-op storage
-	return &Storage{
-		path:      path,
-		sessionID: sessionID,
-	}, nil
-}
-
-// LogRequest logs a request entry.
-func (s *Storage) LogRequest(entry *RequestLogEntry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// TODO: write to file
-	data, _ := json.Marshal(entry)
-	_ = data // suppress unused warning for now
-	return nil
-}
-
-// LogResponse logs a response entry.
-func (s *Storage) LogResponse(entry *ResponseLogEntry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// TODO: write to file
-	data, _ := json.Marshal(entry)
-	_ = data // suppress unused warning for now
-	return nil
-}
-
-// Close closes the storage.
-func (s *Storage) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.file != nil {
-		return s.file.Close()
-	}
-	return nil
 }
