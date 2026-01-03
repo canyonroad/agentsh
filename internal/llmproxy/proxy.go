@@ -15,6 +15,8 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/agentsh/agentsh/internal/config"
 )
 
 // Config holds the proxy configuration.
@@ -29,7 +31,7 @@ type Config struct {
 	Upstreams map[Dialect]string
 
 	// DLP is the DLP configuration.
-	DLP DLPConfig
+	DLP config.DLPConfig
 
 	// SessionID is the current session ID (set by agentsh).
 	SessionID string

@@ -5,55 +5,23 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"regexp"
+	"strconv"
 	"sync"
+
+	"github.com/agentsh/agentsh/internal/config"
 )
-
-// DLPMode specifies the DLP processing mode.
-type DLPMode string
-
-const (
-	DLPModeDisabled  DLPMode = "disabled"
-	DLPModeRedact    DLPMode = "redact"
-	DLPModeTokenize  DLPMode = "tokenize"
-)
-
-// DLPConfig holds DLP configuration.
-type DLPConfig struct {
-	// Mode is the DLP mode: disabled, redact, or tokenize.
-	Mode DLPMode
-
-	// Patterns enables/disables built-in patterns.
-	Patterns DLPPatterns
-
-	// CustomPatterns are user-defined regex patterns.
-	CustomPatterns []CustomPattern
-}
-
-// DLPPatterns controls which built-in patterns are enabled.
-type DLPPatterns struct {
-	Email      bool
-	Phone      bool
-	CreditCard bool
-	SSN        bool
-	APIKeys    bool
-}
-
-// CustomPattern is a user-defined DLP pattern.
-type CustomPattern struct {
-	Name  string
-	Regex string
-}
 
 // DLPProcessor processes data for PII detection and redaction/tokenization.
 type DLPProcessor struct {
-	cfg      DLPConfig
+	cfg      config.DLPConfig
 	patterns []*compiledPattern
 	tokens   *tokenStore
 }
 
 type compiledPattern struct {
-	name  string
-	regex *regexp.Regexp
+	name    string         // Internal name for logs/tracking
+	display string         // Display name for LLM (shown in [REDACTED:display])
+	regex   *regexp.Regexp
 }
 
 // tokenStore manages tokenization mappings.
@@ -80,7 +48,11 @@ func (ts *tokenStore) getOrCreateToken(original string) string {
 
 	// Generate new token
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to a counter-based token if crypto/rand fails
+		// This should never happen in practice
+		b = []byte{0, 0, 0, 0, 0, 0, 0, byte(len(ts.forward))}
+	}
 	token := "TOK_" + hex.EncodeToString(b)
 
 	ts.forward[original] = token
@@ -110,55 +82,63 @@ var builtinPatterns = map[string]string{
 
 	// API keys: high-entropy strings that look like secrets
 	// Matches common patterns: sk-xxx, api-xxx, key_xxx, etc.
-	"api_key": `(?i)(?:sk|api|key|secret|token|password|credential)[-_]?[a-zA-Z0-9]{20,}`,
+	"api_key": `(?i)(?:sk|api|key|secret|token)[-_]?[a-zA-Z0-9]{20,}`,
 }
 
-// NewDLPProcessor creates a new DLP processor.
-func NewDLPProcessor(cfg DLPConfig) *DLPProcessor {
+// NewDLPProcessor creates a new DLP processor using config.DLPConfig.
+func NewDLPProcessor(cfg config.DLPConfig) *DLPProcessor {
 	dp := &DLPProcessor{
 		cfg:      cfg,
 		patterns: make([]*compiledPattern, 0),
 		tokens:   newTokenStore(),
 	}
 
-	if cfg.Mode == DLPModeDisabled {
+	if cfg.Mode == "disabled" {
 		return dp
 	}
 
 	// Compile enabled built-in patterns
+	// For built-in patterns, name and display are the same
 	if cfg.Patterns.Email {
-		dp.addPattern("email", builtinPatterns["email"])
+		dp.addPattern("email", "email", builtinPatterns["email"])
 	}
 	if cfg.Patterns.Phone {
-		dp.addPattern("phone", builtinPatterns["phone"])
+		dp.addPattern("phone", "phone", builtinPatterns["phone"])
 	}
 	if cfg.Patterns.CreditCard {
-		dp.addPattern("credit_card", builtinPatterns["credit_card"])
+		dp.addPattern("credit_card", "credit_card", builtinPatterns["credit_card"])
 	}
 	if cfg.Patterns.SSN {
-		dp.addPattern("ssn", builtinPatterns["ssn"])
+		dp.addPattern("ssn", "ssn", builtinPatterns["ssn"])
 	}
 	if cfg.Patterns.APIKeys {
-		dp.addPattern("api_key", builtinPatterns["api_key"])
+		dp.addPattern("api_key", "api_key", builtinPatterns["api_key"])
 	}
 
 	// Compile custom patterns
+	// Custom patterns have separate name (internal) and display (for LLM)
 	for _, cp := range cfg.CustomPatterns {
-		dp.addPattern(cp.Name, cp.Regex)
+		display := cp.Display
+		if display == "" {
+			// Fall back to name if display is not set
+			display = cp.Name
+		}
+		dp.addPattern(cp.Name, display, cp.Regex)
 	}
 
 	return dp
 }
 
-func (dp *DLPProcessor) addPattern(name, pattern string) {
+func (dp *DLPProcessor) addPattern(name, display, pattern string) {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		// Skip invalid patterns
 		return
 	}
 	dp.patterns = append(dp.patterns, &compiledPattern{
-		name:  name,
-		regex: re,
+		name:    name,
+		display: display,
+		regex:   re,
 	})
 }
 
@@ -179,10 +159,10 @@ type Redaction struct {
 	// Field is the JSON path where the redaction occurred (if applicable).
 	Field string `json:"field,omitempty"`
 
-	// Type is the type of PII that was detected.
+	// Type is the internal type name of PII that was detected (for logs).
 	Type string `json:"type"`
 
-	// Count is the number of instances redacted.
+	// Count is the number of unique instances redacted.
 	Count int `json:"count"`
 }
 
@@ -194,7 +174,7 @@ func (dp *DLPProcessor) Process(data []byte, dialect Dialect) *DLPResult {
 		Modified:      false,
 	}
 
-	if dp.cfg.Mode == DLPModeDisabled || len(dp.patterns) == 0 {
+	if dp.cfg.Mode == "disabled" || len(dp.patterns) == 0 {
 		return result
 	}
 
@@ -245,7 +225,7 @@ func (dp *DLPProcessor) processJSON(v interface{}, path string, result *DLPResul
 		}
 	case []interface{}:
 		for i, vv := range val {
-			fieldPath := path + "[" + itoa(i) + "]"
+			fieldPath := path + "[" + strconv.Itoa(i) + "]"
 			if s, ok := vv.(string); ok {
 				processed := dp.processText([]byte(s), fieldPath, result)
 				if string(processed) != s {
@@ -279,17 +259,19 @@ func (dp *DLPProcessor) processText(data []byte, path string, result *DLPResult)
 			uniqueMatches[m] = true
 		}
 
+		// Use internal name for logging/tracking in Redaction result
 		result.Redactions = append(result.Redactions, Redaction{
 			Field: path,
-			Type:  pattern.name,
+			Type:  pattern.name, // Internal name for logs
 			Count: len(uniqueMatches),
 		})
 
 		// Apply redaction or tokenization
+		// Use display name in the redacted output
 		switch dp.cfg.Mode {
-		case DLPModeRedact:
-			text = pattern.regex.ReplaceAllString(text, "[REDACTED:"+pattern.name+"]")
-		case DLPModeTokenize:
+		case "redact":
+			text = pattern.regex.ReplaceAllString(text, "[REDACTED:"+pattern.display+"]")
+		case "tokenize":
 			text = pattern.regex.ReplaceAllStringFunc(text, func(match string) string {
 				return dp.tokens.getOrCreateToken(match)
 			})
@@ -301,7 +283,7 @@ func (dp *DLPProcessor) processText(data []byte, path string, result *DLPResult)
 
 // Detokenize reverses tokenization for a given text.
 func (dp *DLPProcessor) Detokenize(text string) string {
-	if dp.cfg.Mode != DLPModeTokenize {
+	if dp.cfg.Mode != "tokenize" {
 		return text
 	}
 
@@ -336,8 +318,4 @@ func (dp *DLPProcessor) ImportTokenMap(m map[string]string) {
 		dp.tokens.forward[original] = token
 		dp.tokens.backward[token] = original
 	}
-}
-
-func itoa(i int) string {
-	return string(rune('0' + i%10)) // Simple for small indices
 }
