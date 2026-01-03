@@ -4,6 +4,8 @@ package lima
 
 import (
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/platform"
 )
@@ -14,12 +16,15 @@ type Filesystem struct {
 	platform       *Platform
 	available      bool
 	implementation string
+	mu             sync.Mutex
+	mounts         map[string]*Mount
 }
 
 // NewFilesystem creates a new Lima filesystem interceptor.
 func NewFilesystem(p *Platform) *Filesystem {
 	fs := &Filesystem{
 		platform: p,
+		mounts:   make(map[string]*Mount),
 	}
 	fs.available = fs.checkAvailable()
 	fs.implementation = "fuse3"
@@ -44,35 +49,89 @@ func (fs *Filesystem) Implementation() string {
 
 // Mount creates a FUSE mount inside the Lima VM.
 // The macOS path is translated to Lima VM path before mounting.
+// This uses bindfs for a passthrough mount that makes the source directory
+// accessible at the mount point inside the VM.
 func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 	if !fs.available {
 		return nil, fmt.Errorf("FUSE not available in Lima VM; install fuse3: sudo apt install fuse3")
 	}
 
-	// Lima mounts /Users by default, so paths should work directly
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// Lima mounts /Users by default via virtiofs, so paths should work directly
 	limaSource := MacOSToLimaPath(cfg.SourcePath)
 	limaMount := MacOSToLimaPath(cfg.MountPoint)
 
-	// TODO: Execute agentsh mount command inside Lima VM
-	// This would coordinate with the Linux FUSE implementation
-	return nil, fmt.Errorf("Lima FUSE mounting not yet implemented; source=%s mount=%s", limaSource, limaMount)
+	// Check if already mounted
+	if _, exists := fs.mounts[limaMount]; exists {
+		return nil, fmt.Errorf("mount point %q already in use", cfg.MountPoint)
+	}
+
+	// Create mount point directory inside Lima VM
+	_, err := fs.platform.RunInLima("mkdir", "-p", limaMount)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create mount point in Lima VM: %w", err)
+	}
+
+	// Check if bindfs is available, if not try to install it
+	_, err = fs.platform.RunInLima("which", "bindfs")
+	if err != nil {
+		// Try to install bindfs
+		_, installErr := fs.platform.RunInLima("sudo", "apt-get", "install", "-y", "bindfs")
+		if installErr != nil {
+			// Try with apt instead
+			_, installErr = fs.platform.RunInLima("sudo", "apt", "install", "-y", "bindfs")
+			if installErr != nil {
+				return nil, fmt.Errorf("bindfs not available and could not be installed in Lima VM; install manually: sudo apt install bindfs")
+			}
+		}
+	}
+
+	// Mount using bindfs (FUSE-based bind mount)
+	// bindfs allows mounting a directory to another location with optional permission changes
+	_, err = fs.platform.RunInLima("bindfs", limaSource, limaMount)
+	if err != nil {
+		return nil, fmt.Errorf("failed to mount bindfs in Lima VM: %w", err)
+	}
+
+	mount := &Mount{
+		filesystem: fs,
+		sourcePath: limaSource,
+		mountPoint: limaMount,
+		macSource:  cfg.SourcePath,
+		macMount:   cfg.MountPoint,
+		mountedAt:  time.Now(),
+	}
+
+	fs.mounts[limaMount] = mount
+
+	return mount, nil
 }
 
 // Unmount removes a FUSE mount.
 func (fs *Filesystem) Unmount(mount platform.FSMount) error {
 	m, ok := mount.(*Mount)
 	if !ok {
-		return fmt.Errorf("invalid mount type")
+		return fmt.Errorf("invalid mount type: expected *lima.Mount")
 	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	delete(fs.mounts, m.mountPoint)
+
 	return m.Close()
 }
 
 // Mount represents a FUSE mount in the Lima VM.
 type Mount struct {
-	sourcePath string // Lima VM path
-	mountPoint string // Lima VM path
-	macSource  string // Original macOS path
-	macMount   string // Original macOS path
+	filesystem *Filesystem
+	sourcePath string    // Lima VM path
+	mountPoint string    // Lima VM path
+	macSource  string    // Original macOS path
+	macMount   string    // Original macOS path
+	mountedAt  time.Time // When the mount was created
 }
 
 // Path returns the mount point path (macOS format).
@@ -97,12 +156,27 @@ func (m *Mount) LimaSourcePath() string {
 
 // Stats returns current mount statistics.
 func (m *Mount) Stats() platform.FSStats {
-	return platform.FSStats{}
+	return platform.FSStats{
+		MountedAt: m.mountedAt,
+	}
 }
 
 // Close unmounts the filesystem.
 func (m *Mount) Close() error {
-	// TODO: Execute unmount inside Lima VM
+	if m.filesystem == nil || m.filesystem.platform == nil {
+		return nil
+	}
+
+	// Use fusermount to unmount the bindfs mount
+	_, err := m.filesystem.platform.RunInLima("fusermount", "-u", m.mountPoint)
+	if err != nil {
+		// Try sudo umount as fallback
+		_, err = m.filesystem.platform.RunInLima("sudo", "umount", m.mountPoint)
+		if err != nil {
+			return fmt.Errorf("failed to unmount %s in Lima VM: %w", m.mountPoint, err)
+		}
+	}
+
 	return nil
 }
 

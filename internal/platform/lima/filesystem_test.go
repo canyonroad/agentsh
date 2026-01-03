@@ -1,6 +1,6 @@
-//go:build windows
+//go:build darwin
 
-package wsl2
+package lima
 
 import (
 	"testing"
@@ -10,7 +10,7 @@ import (
 )
 
 func TestNewFilesystem(t *testing.T) {
-	p := &Platform{distro: "Ubuntu"}
+	p := &Platform{vmName: "default"}
 	fs := NewFilesystem(p)
 
 	if fs == nil {
@@ -31,7 +31,7 @@ func TestNewFilesystem(t *testing.T) {
 }
 
 func TestFilesystem_Implementation(t *testing.T) {
-	p := &Platform{distro: "Ubuntu"}
+	p := &Platform{vmName: "default"}
 	fs := NewFilesystem(p)
 
 	if got := fs.Implementation(); got != "fuse3" {
@@ -40,7 +40,7 @@ func TestFilesystem_Implementation(t *testing.T) {
 }
 
 func TestFilesystem_Available(t *testing.T) {
-	p := &Platform{distro: "Ubuntu"}
+	p := &Platform{vmName: "default"}
 	fs := &Filesystem{
 		platform:  p,
 		available: true,
@@ -58,7 +58,7 @@ func TestFilesystem_Available(t *testing.T) {
 }
 
 func TestFilesystem_Mount_NotAvailable(t *testing.T) {
-	p := &Platform{distro: "Ubuntu"}
+	p := &Platform{vmName: "default"}
 	fs := &Filesystem{
 		platform:  p,
 		available: false,
@@ -66,8 +66,8 @@ func TestFilesystem_Mount_NotAvailable(t *testing.T) {
 	}
 
 	cfg := platform.FSConfig{
-		SourcePath: `C:\Users\test`,
-		MountPoint: `C:\mnt\test`,
+		SourcePath: "/Users/test/source",
+		MountPoint: "/Users/test/mount",
 	}
 
 	_, err := fs.Mount(cfg)
@@ -77,17 +77,17 @@ func TestFilesystem_Mount_NotAvailable(t *testing.T) {
 }
 
 func TestFilesystem_Mount_AlreadyMounted(t *testing.T) {
-	// This test can only run when WSL2 is actually available
-	t.Skip("Requires real WSL2 environment")
+	// This test can only run when Lima is actually available
+	t.Skip("Requires real Lima environment")
 }
 
 func TestFilesystem_Mount_Success(t *testing.T) {
-	// This test can only run when WSL2 is actually available
-	t.Skip("Requires real WSL2 environment")
+	// This test can only run when Lima is actually available
+	t.Skip("Requires real Lima environment")
 }
 
 func TestFilesystem_Unmount_InvalidType(t *testing.T) {
-	p := &Platform{distro: "Ubuntu"}
+	p := &Platform{vmName: "default"}
 	fs := NewFilesystem(p)
 
 	// Create a fake mount that's not the right type
@@ -106,43 +106,43 @@ func (f *fakeMount) Close() error            { return nil }
 
 func TestMount_Path(t *testing.T) {
 	m := &Mount{
-		winMount:   `C:\mnt\test`,
-		mountPoint: "/mnt/c/mnt/test",
+		macMount:   "/Users/test/mount",
+		mountPoint: "/Users/test/mount",
 	}
 
-	if got := m.Path(); got != `C:\mnt\test` {
-		t.Errorf("Path() = %q, want C:\\mnt\\test", got)
+	if got := m.Path(); got != "/Users/test/mount" {
+		t.Errorf("Path() = %q, want /Users/test/mount", got)
 	}
 }
 
 func TestMount_SourcePath(t *testing.T) {
 	m := &Mount{
-		winSource:  `C:\Users\test`,
-		sourcePath: "/mnt/c/Users/test",
+		macSource:  "/Users/test/source",
+		sourcePath: "/Users/test/source",
 	}
 
-	if got := m.SourcePath(); got != `C:\Users\test` {
-		t.Errorf("SourcePath() = %q, want C:\\Users\\test", got)
-	}
-}
-
-func TestMount_WSLPath(t *testing.T) {
-	m := &Mount{
-		mountPoint: "/mnt/c/mnt/test",
-	}
-
-	if got := m.WSLPath(); got != "/mnt/c/mnt/test" {
-		t.Errorf("WSLPath() = %q, want /mnt/c/mnt/test", got)
+	if got := m.SourcePath(); got != "/Users/test/source" {
+		t.Errorf("SourcePath() = %q, want /Users/test/source", got)
 	}
 }
 
-func TestMount_WSLSourcePath(t *testing.T) {
+func TestMount_LimaPath(t *testing.T) {
 	m := &Mount{
-		sourcePath: "/mnt/c/Users/test",
+		mountPoint: "/Users/test/mount",
 	}
 
-	if got := m.WSLSourcePath(); got != "/mnt/c/Users/test" {
-		t.Errorf("WSLSourcePath() = %q, want /mnt/c/Users/test", got)
+	if got := m.LimaPath(); got != "/Users/test/mount" {
+		t.Errorf("LimaPath() = %q, want /Users/test/mount", got)
+	}
+}
+
+func TestMount_LimaSourcePath(t *testing.T) {
+	m := &Mount{
+		sourcePath: "/Users/test/source",
+	}
+
+	if got := m.LimaSourcePath(); got != "/Users/test/source" {
+		t.Errorf("LimaSourcePath() = %q, want /Users/test/source", got)
 	}
 }
 
@@ -179,8 +179,8 @@ func TestMount_Close_NilPlatform(t *testing.T) {
 }
 
 func TestMount_Close_WithPlatform(t *testing.T) {
-	// This test can only run when WSL2 is actually available
-	t.Skip("Requires real WSL2 environment")
+	// This test can only run when Lima is actually available
+	t.Skip("Requires real Lima environment")
 }
 
 func TestFilesystem_InterfaceCompliance(t *testing.T) {
