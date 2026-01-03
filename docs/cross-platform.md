@@ -99,6 +99,16 @@ agentsh server  # Will use darwin-lima mode
 - FUSE3 filesystem interception
 - iptables network interception
 
+**Resource Limits (cgroups v2):** Lima uses cgroups v2 inside the VM for resource enforcement:
+- Cgroup path: `/sys/fs/cgroup/agentsh/<session-name>`
+- Supported limits: CPU (quota/period), memory, process count, disk I/O (read/write bandwidth)
+- Stats available: memory usage, CPU time, process count, disk I/O bytes
+
+**Network Interception (iptables):** Lima uses iptables DNAT rules for traffic redirection:
+- Custom chain: `AGENTSH` in the nat table
+- TCP traffic redirected to proxy port (localhost excluded)
+- DNS (UDP port 53) redirected to DNS proxy port
+
 **Manual Mode Selection:** You can force Lima mode in your config:
 
 ```yaml
