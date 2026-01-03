@@ -22,6 +22,9 @@ type Config struct {
 	Metrics       MetricsConfig              `yaml:"metrics"`
 	Health        HealthConfig               `yaml:"health"`
 	Development   DevelopmentConfig          `yaml:"development"`
+	Proxy         ProxyConfig                `yaml:"proxy"`
+	DLP           DLPConfig                  `yaml:"dlp"`
+	LLMStorage    LLMStorageConfig           `yaml:"llm_storage"`
 }
 
 // PlatformConfig configures cross-platform selection and fallback behavior.
@@ -566,6 +569,47 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.Development.PProf.Addr == "" {
 		cfg.Development.PProf.Addr = "localhost:6060"
 	}
+
+	// Apply proxy defaults field by field
+	if cfg.Proxy.Mode == "" {
+		cfg.Proxy.Mode = "embedded"
+	}
+	if cfg.Proxy.Upstreams.Anthropic == "" {
+		cfg.Proxy.Upstreams.Anthropic = "https://api.anthropic.com"
+	}
+	if cfg.Proxy.Upstreams.OpenAI == "" {
+		cfg.Proxy.Upstreams.OpenAI = "https://api.openai.com"
+	}
+	if cfg.Proxy.Upstreams.ChatGPT == "" {
+		cfg.Proxy.Upstreams.ChatGPT = "https://chatgpt.com/backend-api"
+	}
+	// Port 0 is valid (means random), so don't override it
+
+	// Apply DLP defaults field by field
+	if cfg.DLP.Mode == "" {
+		cfg.DLP.Mode = "redact"
+	}
+	// Note: For DLPPatternsConfig booleans, we can't distinguish between
+	// "not set" and "explicitly set to false", so we should only apply
+	// defaults if the entire patterns section appears empty
+	if !cfg.DLP.Patterns.Email && !cfg.DLP.Patterns.Phone &&
+		!cfg.DLP.Patterns.CreditCard && !cfg.DLP.Patterns.SSN &&
+		!cfg.DLP.Patterns.APIKeys {
+		defaults := DefaultDLPConfig()
+		cfg.DLP.Patterns = defaults.Patterns
+	}
+
+	// Apply LLM storage defaults field by field
+	if cfg.LLMStorage.Retention.MaxAgeDays == 0 {
+		cfg.LLMStorage.Retention.MaxAgeDays = 30
+	}
+	if cfg.LLMStorage.Retention.MaxSizeMB == 0 {
+		cfg.LLMStorage.Retention.MaxSizeMB = 500
+	}
+	if cfg.LLMStorage.Retention.Eviction == "" {
+		cfg.LLMStorage.Retention.Eviction = "oldest_first"
+	}
+	// StoreBodies default is false, which is the zero value, so no need to set
 }
 
 // applyDefaults wraps applyDefaultsWithSource for backward compatibility.
