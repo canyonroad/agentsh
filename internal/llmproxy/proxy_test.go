@@ -84,7 +84,7 @@ func TestProxy_AnthropicPassthrough(t *testing.T) {
 		Proxy: config.ProxyConfig{
 			Mode: "embedded",
 			Port: 0, // Auto-select port
-			Upstreams: config.ProxyUpstreamsConfig{
+			Providers: config.ProxyProvidersConfig{
 				Anthropic: upstream.URL,
 			},
 		},
@@ -227,7 +227,7 @@ func TestProxy_DLPRedaction(t *testing.T) {
 		Proxy: config.ProxyConfig{
 			Mode: "embedded",
 			Port: 0,
-			Upstreams: config.ProxyUpstreamsConfig{
+			Providers: config.ProxyProvidersConfig{
 				Anthropic: upstream.URL,
 			},
 		},
@@ -403,7 +403,7 @@ func TestProxy_New(t *testing.T) {
 				Proxy: config.ProxyConfig{
 					Mode: "embedded",
 					Port: 0,
-					Upstreams: config.ProxyUpstreamsConfig{
+					Providers: config.ProxyProvidersConfig{
 						Anthropic: "https://custom.anthropic.example.com",
 						OpenAI:    "https://custom.openai.example.com",
 					},
@@ -528,7 +528,7 @@ func TestProxy_StorageLogging(t *testing.T) {
 		Proxy: config.ProxyConfig{
 			Mode: "embedded",
 			Port: 0,
-			Upstreams: config.ProxyUpstreamsConfig{
+			Providers: config.ProxyProvidersConfig{
 				Anthropic: upstream.URL,
 			},
 		},
