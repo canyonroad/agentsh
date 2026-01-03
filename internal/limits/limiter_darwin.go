@@ -9,13 +9,15 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/agentsh/agentsh/internal/platform/darwin"
 	"golang.org/x/sys/unix"
 )
 
 // DarwinLimiter implements ResourceLimiter using setrlimit and process control.
 type DarwinLimiter struct {
-	sessions map[int]*darwinSession
-	mu       sync.Mutex
+	sessions    map[int]*darwinSession
+	machMonitor *darwin.MachMonitor
+	mu          sync.Mutex
 }
 
 type darwinSession struct {
@@ -26,7 +28,8 @@ type darwinSession struct {
 // NewDarwinLimiter creates a new macOS resource limiter.
 func NewDarwinLimiter() *DarwinLimiter {
 	return &DarwinLimiter{
-		sessions: make(map[int]*darwinSession),
+		sessions:    make(map[int]*darwinSession),
+		machMonitor: darwin.NewMachMonitor(),
 	}
 }
 
@@ -127,32 +130,24 @@ func (l *DarwinLimiter) Usage(pid int) (*ResourceUsage, error) {
 
 	usage := &ResourceUsage{}
 
-	// Use ps to get process info
-	out, err := exec.Command("ps", "-o", "rss=,pcpu=,nlwp=", "-p", strconv.Itoa(pid)).Output()
+	// Use MachMonitor for process info (faster than spawning ps)
+	info, err := l.machMonitor.GetProcessInfo(pid)
 	if err != nil {
 		// Process may have exited
 		return usage, nil
 	}
 
-	fields := strings.Fields(strings.TrimSpace(string(out)))
-	if len(fields) >= 2 {
-		// RSS is in KB
-		if rss, err := strconv.ParseInt(fields[0], 10, 64); err == nil {
-			usage.MemoryMB = rss / 1024
-		}
-		// CPU percentage
-		if cpu, err := strconv.ParseFloat(fields[1], 64); err == nil {
-			usage.CPUPercent = cpu
-		}
-	}
-	if len(fields) >= 3 {
-		// Thread count (nlwp = number of lightweight processes)
-		if threads, err := strconv.Atoi(fields[2]); err == nil {
-			usage.ThreadCount = threads
-		}
+	// Convert bytes to MB
+	usage.MemoryMB = int64(info.ResidentSize / (1024 * 1024))
+	usage.ThreadCount = info.NumThreads
+
+	// Get CPU percentage (requires two samples over time)
+	cpuPct, err := l.machMonitor.GetCPUPercent(pid)
+	if err == nil {
+		usage.CPUPercent = cpuPct
 	}
 
-	// Count child processes
+	// Count child processes (still need pgrep for this)
 	childOut, err := exec.Command("pgrep", "-P", strconv.Itoa(pid)).Output()
 	if err == nil {
 		lines := strings.Split(strings.TrimSpace(string(childOut)), "\n")
@@ -211,6 +206,10 @@ func (l *DarwinLimiter) Cleanup(pid int) error {
 	l.mu.Lock()
 	delete(l.sessions, pid)
 	l.mu.Unlock()
+
+	// Clean up Mach monitor samples for this process
+	l.machMonitor.Cleanup(pid)
+
 	return nil
 }
 

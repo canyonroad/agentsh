@@ -24,6 +24,7 @@ If you're on Windows, the recommended approach is to run agentsh inside WSL2 or 
 - **Network visibility + policy enforcement:** works via the per-session proxy (DNS/connect/HTTP events).
 - **Transparent netns interception:** optional, Linux/root-only (requires privileges; proxy mode works without it).
 - **cgroups v2 limits:** optional, Linux-only; disabled by default (requires a writable cgroup base path).
+- **macOS resource monitoring:** native Mach API monitoring for memory, CPU, and thread count (monitoring only, no enforcement).
 - **Registry monitoring + policy enforcement:** Windows-only, requires mini filter driver (see below).
 - **seccomp / full namespace isolation / eBPF:** planned/future work (not implemented).
 

@@ -308,13 +308,15 @@ sandbox:
 - **ESF requires Apple approval** - must apply for ESF entitlement with business justification
 - **Network Extension is standard** - enable in Xcode, no approval needed (since Nov 2016)
 - **No process isolation** - macOS has no namespace equivalent
-- **No resource limits** - no cgroups equivalent
+- **No resource limits** - no cgroups equivalent (cannot enforce limits)
+- **Resource monitoring available** - native Mach API monitoring for memory, CPU, and thread count
 - **No syscall filtering** - except exec blocking via ESF
 - Best option for commercial security products
 
 ### macOS FUSE-T + pf
 - **No process isolation** - agents can see all processes
 - **No resource limits** - cannot enforce CPU/memory limits
+- **Resource monitoring available** - native Mach API monitoring for memory, CPU, and thread count
 - **No syscall filtering** - cannot block dangerous syscalls
 - **Requires root for pf** - network interception needs sudo
 - Best option for development and personal use
