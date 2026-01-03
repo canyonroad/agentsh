@@ -53,7 +53,7 @@ func ExtractUsage(body []byte, dialect Dialect) Usage {
 	switch dialect {
 	case DialectAnthropic:
 		return extractAnthropicUsage(body)
-	case DialectOpenAI, DialectChatGPT:
+	case DialectOpenAI:
 		return extractOpenAIUsage(body)
 	default:
 		return Usage{}

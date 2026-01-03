@@ -124,8 +124,10 @@ func NewRequestRewriter(detector *DialectDetector) *RequestRewriter {
 
 // Rewrite modifies the request for forwarding to the upstream provider.
 // It updates the URL scheme/host and adjusts headers as needed.
-func (rw *RequestRewriter) Rewrite(r *http.Request, dialect Dialect) (*http.Request, error) {
-	upstream := rw.detector.GetUpstream(dialect)
+func (rw *RequestRewriter) Rewrite(r *http.Request, dialect Dialect, upstream *url.URL) (*http.Request, error) {
+	if upstream == nil {
+		upstream = rw.detector.GetUpstream(dialect)
+	}
 	if upstream == nil {
 		return r, nil // passthrough unchanged
 	}
@@ -136,6 +138,15 @@ func (rw *RequestRewriter) Rewrite(r *http.Request, dialect Dialect) (*http.Requ
 	// Update URL to point to upstream
 	outReq.URL.Scheme = upstream.Scheme
 	outReq.URL.Host = upstream.Host
+
+	// For ChatGPT backend-api, the path structure is different
+	if upstream.Host == "chatgpt.com" {
+		// Requests come in as /backend-api/..., upstream expects the same
+		// but we need to ensure the base path is correct
+		if !strings.HasPrefix(outReq.URL.Path, "/backend-api") {
+			outReq.URL.Path = "/backend-api" + outReq.URL.Path
+		}
+	}
 
 	// Set Host header to upstream
 	outReq.Host = upstream.Host

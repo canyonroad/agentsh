@@ -91,6 +91,16 @@ func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 	}, nil
 }
 
+// getUpstreamForRequest returns the appropriate upstream URL for the request.
+// For OpenAI dialect with default URL, it checks if this is a ChatGPT OAuth
+// token and routes to ChatGPT backend if so.
+func (p *Proxy) getUpstreamForRequest(r *http.Request, dialect Dialect) *url.URL {
+	if dialect == DialectOpenAI && !p.isCustomOpenAI && IsChatGPTToken(r) {
+		return p.chatGPTUpstream
+	}
+	return p.detector.GetUpstream(dialect)
+}
+
 // Start starts the proxy server.
 func (p *Proxy) Start(ctx context.Context) error {
 	p.mu.Lock()
@@ -198,8 +208,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.ContentLength = int64(len(reqBody))
 	}
 
+	// Get upstream URL (may route to ChatGPT for OAuth tokens)
+	upstream := p.getUpstreamForRequest(r, dialect)
+
 	// Rewrite request for upstream
-	outReq, err := p.rewriter.Rewrite(r, dialect)
+	outReq, err := p.rewriter.Rewrite(r, dialect, upstream)
 	if err != nil {
 		p.logger.Error("rewrite request", "error", err, "request_id", requestID)
 		http.Error(w, "failed to rewrite request", http.StatusInternalServerError)
@@ -207,7 +220,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create reverse proxy for this request
-	upstream := p.detector.GetUpstream(dialect)
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = upstream.Scheme
