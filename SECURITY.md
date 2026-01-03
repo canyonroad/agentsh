@@ -235,6 +235,39 @@ See [macOS ESF+NE Architecture](docs/macos-esf-ne-architecture.md) for deploymen
 - Do not rely on network policy enforcement without ESF+NE or pf configuration
 - Consider the security score when evaluating risk
 
+### macOS + Lima VM
+
+For production macOS deployments requiring full Linux-level security, agentsh supports Lima VM mode. When Lima is detected (running VM via `limactl`), agentsh automatically delegates operations to the Linux environment inside the VM:
+
+| Component | macOS Native | macOS + Lima | Impact |
+|-----------|--------------|--------------|--------|
+| File blocking | FUSE-T | FUSE3 in VM | ✅ **Full enforcement** |
+| Network blocking | pf (limited) | iptables DNAT | ✅ **Full enforcement** |
+| Process isolation | None | Linux namespaces | ✅ **Full isolation** |
+| Resource limits | None | cgroups v2 | ✅ **Full enforcement** |
+| Syscall filtering | None | seccomp-bpf | ✅ **Available** |
+
+**Lima Implementation Details:**
+
+| Feature | Implementation |
+|---------|----------------|
+| Resource limits | cgroups v2 at `/sys/fs/cgroup/agentsh/<session>` |
+| CPU limits | `cpu.max` (quota/period in microseconds) |
+| Memory limits | `memory.max` (bytes) |
+| Process limits | `pids.max` |
+| Disk I/O limits | `io.max` (rbps/wbps per device) |
+| Network interception | iptables DNAT via `AGENTSH` chain |
+| TCP redirect | All outbound TCP (except localhost) to proxy port |
+| DNS redirect | UDP port 53 to DNS proxy port |
+
+**Security Score:** 85% (Full Linux capabilities with slight VM overhead)
+
+**Recommendations for Lima deployments:**
+- Use Lima for production macOS environments requiring isolation
+- Lima automatically detected when `limactl` is installed with running VM
+- Force Lima mode via config: `platform.mode: darwin-lima`
+- VM overhead is ~200-500MB RAM with slightly slower file I/O via virtiofs
+
 ### Windows
 
 Windows now has **kernel-level enforcement** via a mini filter driver, providing near-Linux-level security:
@@ -418,6 +451,7 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2026-01-03 | Implemented Lima VM cgroups v2 resource limits and iptables network interception |
 | 2026-01-02 | Added embedded LLM proxy with DLP redaction and usage tracking |
 | 2026-01-02 | Implemented AppContainer sandbox execution with stdout/stderr capture |
 | 2026-01-02 | Added ACL cleanup on AppContainer sandbox close |
