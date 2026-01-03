@@ -345,12 +345,28 @@ agentsh session logs <session-id> --type=llm
 
 **Features:**
 - **Automatic routing**: Sets `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` so agent SDKs route through the proxy
+- **Custom providers**: Route to LiteLLM, Azure OpenAI, vLLM, or corporate gateways
 - **DLP redaction**: PII (emails, phone numbers, API keys, etc.) is redacted before reaching LLM providers
 - **Custom patterns**: Define organization-specific patterns for sensitive data
 - **Usage tracking**: Token counts extracted and logged for cost attribution
 - **Audit trail**: All requests/responses logged to session storage
 
-**Configuration example:**
+**Provider configuration:**
+
+```yaml
+proxy:
+  mode: embedded
+  providers:
+    anthropic: https://api.anthropic.com    # Default Anthropic API
+    openai: https://api.openai.com          # Default OpenAI API
+
+    # Or use alternative providers:
+    # openai: http://localhost:8000         # LiteLLM / vLLM
+    # openai: https://your-resource.openai.azure.com  # Azure OpenAI
+    # anthropic: https://llm.corp.example.com         # Corporate gateway
+```
+
+**DLP configuration:**
 
 ```yaml
 dlp:

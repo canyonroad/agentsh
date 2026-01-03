@@ -258,6 +258,71 @@ resource_limits:
   command_timeout: "5m"
 
 # =============================================================================
+# LLM PROXY
+# =============================================================================
+# The embedded LLM proxy intercepts all AI agent API requests, providing
+# DLP (Data Loss Prevention), usage tracking, and audit logging.
+
+proxy:
+  # Proxy mode: embedded (automatic) or disabled
+  mode: "embedded"
+
+  # Port: 0 = random available port (recommended)
+  port: 0
+
+  # Provider base URLs
+  # Customize to route traffic to alternative LLM endpoints
+  providers:
+    anthropic: "https://api.anthropic.com"
+    openai: "https://api.openai.com"
+
+  # Examples for alternative providers:
+  # providers:
+  #   # LiteLLM / vLLM (OpenAI-compatible)
+  #   openai: "http://localhost:8000"
+  #
+  #   # Azure OpenAI
+  #   openai: "https://your-resource.openai.azure.com"
+  #
+  #   # Corporate gateway
+  #   anthropic: "https://llm-gateway.corp.example.com/anthropic"
+
+# =============================================================================
+# DLP (DATA LOSS PREVENTION)
+# =============================================================================
+# Redacts sensitive data from LLM requests before forwarding to providers.
+
+dlp:
+  # Mode: redact (scan and replace PII) or disabled
+  mode: "redact"
+
+  # Built-in patterns (all enabled by default)
+  patterns:
+    email: true                # user@example.com
+    phone: true                # 555-123-4567, (555) 123-4567
+    credit_card: true          # 4111-1111-1111-1111
+    ssn: true                  # 123-45-6789
+    api_keys: true             # sk-xxx, api-xxx, key_xxx
+
+  # Custom patterns for organization-specific data
+  # custom_patterns:
+  #   - name: customer_id
+  #     display: identifier
+  #     regex: "CUST-[0-9]{8}"
+  #
+  #   - name: internal_project
+  #     display: project_code
+  #     regex: "PROJ-[A-Z]{3}-[0-9]{4}"
+
+# LLM request storage
+llm_storage:
+  store_bodies: false          # Store full request/response bodies
+  retention:
+    max_age_days: 30
+    max_size_mb: 500
+    eviction: "oldest_first"   # oldest_first | largest_first
+
+# =============================================================================
 # POLICIES
 # =============================================================================
 

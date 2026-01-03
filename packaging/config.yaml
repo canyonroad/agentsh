@@ -74,6 +74,30 @@ sandbox:
   cgroups:
     enabled: true
 
+# LLM Proxy configuration
+proxy:
+  mode: "embedded"         # embedded | disabled
+  port: 0                  # 0 = random available port
+
+  # Provider base URLs
+  # Customize these to route LLM traffic to alternative endpoints
+  providers:
+    anthropic: "https://api.anthropic.com"
+    openai: "https://api.openai.com"
+    # Examples:
+    # openai: "http://localhost:8000"     # LiteLLM / vLLM
+    # anthropic: "https://llm.corp.com"   # Corporate gateway
+
+# DLP (Data Loss Prevention) configuration
+dlp:
+  mode: "redact"           # redact | disabled
+  patterns:
+    email: true
+    phone: true
+    credit_card: true
+    ssn: true
+    api_keys: true
+
 # Policy configuration
 policies:
   dir: "/etc/agentsh/policies"

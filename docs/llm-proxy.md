@@ -42,11 +42,34 @@ proxy:
   mode: embedded           # embedded | disabled
   port: 0                  # 0 = random available port
 
-  upstreams:
+  # Provider base URLs (customize for alternative endpoints)
+  providers:
     anthropic: https://api.anthropic.com
     openai: https://api.openai.com
-    chatgpt: https://chatgpt.com/backend-api
 ```
+
+### Custom Provider URLs
+
+You can configure custom base URLs to route traffic to alternative LLM endpoints:
+
+```yaml
+proxy:
+  mode: embedded
+  providers:
+    # Use LiteLLM as an OpenAI-compatible proxy
+    openai: http://localhost:8000
+
+    # Use a corporate Anthropic gateway
+    anthropic: https://llm-gateway.corp.example.com/anthropic
+```
+
+**Use cases:**
+- **LiteLLM/vLLM**: Route to self-hosted OpenAI-compatible endpoints
+- **Azure OpenAI**: Point to Azure OpenAI Service endpoints
+- **Corporate gateways**: Route through internal proxies for compliance
+- **Local development**: Test against mock LLM servers
+
+**ChatGPT login flow:** When `providers.openai` is set to the default URL (`https://api.openai.com`), OAuth tokens (non `sk-*` Bearer tokens) are automatically routed to the ChatGPT backend. Custom URLs route all traffic to the configured endpoint.
 
 ### DLP Configuration
 
@@ -91,8 +114,9 @@ The proxy automatically detects the LLM provider from request headers:
 | Provider | Detection Method |
 |----------|------------------|
 | Anthropic | `x-api-key` header present, or `anthropic-version` header |
-| OpenAI API | `Authorization: Bearer sk-*` (token starts with `sk-`) |
-| ChatGPT | `Authorization: Bearer <other>` (OAuth token) |
+| OpenAI | `Authorization: Bearer *` header present |
+
+**Note:** ChatGPT OAuth tokens (Bearer tokens without `sk-` prefix) are automatically routed to the ChatGPT backend when using the default OpenAI URL. When a custom `providers.openai` URL is configured, all OpenAI-dialect traffic routes to that endpoint.
 
 Requests without recognized auth headers receive a `400 Bad Request` response.
 
