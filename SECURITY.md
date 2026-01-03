@@ -511,6 +511,7 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2026-01-03 | Wired up unix socket enforcement via seccomp user-notify (Linux only) |
 | 2026-01-03 | Implemented macOS sandbox-exec wrapper with SBPL profiles |
 | 2026-01-03 | Implemented FUSE event emission for file operation monitoring |
 | 2026-01-03 | Implemented Lima and WSL2 Linux namespace isolation via unshare |

@@ -94,7 +94,8 @@
 2) Commit with message "Add unix socket policy enforcement via seccomp notify".
 3) Push branch.
 
-## Current Status (Dec 2025)
+## Current Status (Jan 2026)
 - Seccomp user-notify wrapper (`agentsh-unixwrap`) is in place and ships the notify fd back to the server.
-- Runtime handling is audit-only for now; parent notify fd is closed and no enforcement occurs yet.
-- Policy model includes unix socket rules; enforcement wiring to ServeNotify remains TODO.
+- Enforcement is now fully wired: parent socket is passed to `runCommandWithResources`, which starts `ServeNotify` after process start.
+- Policy model includes unix socket rules; `ServeNotify` checks policy via `CheckUnixSocket` and emits `unix_socket_op` events.
+- Requires `sandbox.unix_sockets.enabled: true` in config to activate.

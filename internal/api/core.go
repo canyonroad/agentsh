@@ -541,12 +541,14 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 			wrappedReq.Command = wrapperBin
 			wrappedReq.Args = append([]string{"--", origCommand}, origArgs...)
 			extraCfg = &extraProcConfig{
-				extraFiles: []*os.File{sp.child},
-				env:        map[string]string{"AGENTSH_NOTIFY_SOCK_FD": strconv.Itoa(envFD)},
+				extraFiles:       []*os.File{sp.child},
+				env:              map[string]string{"AGENTSH_NOTIFY_SOCK_FD": strconv.Itoa(envFD)},
+				notifyParentSock: sp.parent,
+				notifySessionID:  id,
+				notifyPolicy:     a.policy,
+				notifyStore:      a.store,
+				notifyBroker:     a.broker,
 			}
-			// TODO: receive notify fd from parent (notify-parent) and start ServeNotify; monitor-only for now.
-			// Currently we close the parent side and ignore notifications until enforcement is wired.
-			_ = sp.parent.Close()
 		}
 	}
 

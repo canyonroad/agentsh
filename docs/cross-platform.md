@@ -8,7 +8,7 @@ agentsh supports **Linux** and **macOS** natively. Linux provides the most compl
 - **ESF (Endpoint Security):** Requires Apple approval - submit business justification
 - **Network Extension:** Standard capability since November 2016 - enable in Xcode, no approval needed
 
-If you're on Windows, the recommended approach is to run agentsh inside WSL2 or a Linux container. Unix socket monitoring (seccomp user-notify) is Linux-only and currently audit-only.
+If you're on Windows, the recommended approach is to run agentsh inside WSL2 or a Linux container. Unix socket enforcement (seccomp user-notify) is Linux-only.
 
 ## What works today
 

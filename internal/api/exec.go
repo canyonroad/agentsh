@@ -23,8 +23,23 @@ const (
 )
 
 type extraProcConfig struct {
-	extraFiles []*os.File
-	env        map[string]string
+	extraFiles       []*os.File
+	env              map[string]string
+	notifyParentSock *os.File      // Parent socket to receive seccomp notify fd (Linux only)
+	notifySessionID  string        // Session ID for notify handler
+	notifyStore      eventStore    // Event store for notify handler
+	notifyBroker     eventBroker   // Event broker for notify handler
+	notifyPolicy     *policy.Engine // Policy engine for notify handler
+}
+
+// eventStore is the interface for storing events.
+type eventStore interface {
+	AppendEvent(ctx context.Context, ev types.Event) error
+}
+
+// eventBroker is the interface for publishing events.
+type eventBroker interface {
+	Publish(ev types.Event)
 }
 
 type postStartHook func(pid int) (cleanup func() error, err error)
@@ -137,6 +152,12 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
 				defer func() { _ = cleanup() }()
 			}
+		}
+
+		// Start unix socket notify handler if configured (Linux only).
+		// The handler receives the notify fd from the wrapper and runs until ctx is cancelled.
+		if extra != nil && extra.notifyParentSock != nil {
+			startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker)
 		}
 	}
 
