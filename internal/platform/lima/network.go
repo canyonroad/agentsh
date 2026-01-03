@@ -3,7 +3,15 @@
 package lima
 
 import (
+	"fmt"
+	"strconv"
+
 	"github.com/agentsh/agentsh/internal/platform"
+)
+
+const (
+	// iptablesChain is the custom chain name for agentsh rules
+	iptablesChain = "AGENTSH"
 )
 
 // Network implements platform.NetworkInterceptor for Lima.
@@ -43,19 +51,65 @@ func (n *Network) Implementation() string {
 }
 
 // Setup configures network interception using iptables inside the Lima VM.
+// It creates DNAT rules to redirect TCP and DNS traffic to the proxy ports.
 func (n *Network) Setup(config platform.NetConfig) error {
+	if !n.available {
+		return fmt.Errorf("iptables not available in Lima VM")
+	}
+
 	n.config = config
+
+	// Create custom chain for agentsh rules
+	_, _ = n.platform.RunInLima("sudo", "iptables", "-t", "nat", "-N", iptablesChain)
+
+	// Flush existing rules in our chain
+	_, _ = n.platform.RunInLima("sudo", "iptables", "-t", "nat", "-F", iptablesChain)
+
+	// Add jump to our chain from OUTPUT
+	// First remove any existing jump, then add fresh
+	_, _ = n.platform.RunInLima("sudo", "iptables", "-t", "nat", "-D", "OUTPUT", "-j", iptablesChain)
+	if _, err := n.platform.RunInLima("sudo", "iptables", "-t", "nat", "-A", "OUTPUT", "-j", iptablesChain); err != nil {
+		return fmt.Errorf("add OUTPUT jump: %w", err)
+	}
+
+	// Redirect TCP traffic to proxy port
+	if config.ProxyPort > 0 {
+		proxyDest := "127.0.0.1:" + strconv.Itoa(config.ProxyPort)
+		// Redirect all outbound TCP (except to localhost) to proxy
+		if _, err := n.platform.RunInLima("sudo", "iptables", "-t", "nat", "-A", iptablesChain,
+			"-p", "tcp",
+			"!", "-d", "127.0.0.0/8",
+			"-j", "DNAT", "--to-destination", proxyDest); err != nil {
+			return fmt.Errorf("add TCP DNAT rule: %w", err)
+		}
+	}
+
+	// Redirect DNS traffic (UDP port 53) to DNS proxy port
+	if config.DNSPort > 0 {
+		dnsDest := "127.0.0.1:" + strconv.Itoa(config.DNSPort)
+		if _, err := n.platform.RunInLima("sudo", "iptables", "-t", "nat", "-A", iptablesChain,
+			"-p", "udp", "--dport", "53",
+			"-j", "DNAT", "--to-destination", dnsDest); err != nil {
+			return fmt.Errorf("add DNS DNAT rule: %w", err)
+		}
+	}
+
 	n.configured = true
-
-	// TODO: Execute iptables rules inside Lima VM
-	// This would set up traffic redirection to the proxy ports
-
 	return nil
 }
 
 // Teardown removes network interception.
 func (n *Network) Teardown() error {
-	// TODO: Remove iptables rules inside Lima VM
+	if !n.configured {
+		return nil
+	}
+
+	// Remove jump from OUTPUT chain
+	_, _ = n.platform.RunInLima("sudo", "iptables", "-t", "nat", "-D", "OUTPUT", "-j", iptablesChain)
+
+	// Flush and delete our chain
+	_, _ = n.platform.RunInLima("sudo", "iptables", "-t", "nat", "-F", iptablesChain)
+	_, _ = n.platform.RunInLima("sudo", "iptables", "-t", "nat", "-X", iptablesChain)
 
 	n.configured = false
 	return nil
