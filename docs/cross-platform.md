@@ -26,6 +26,7 @@ If you're on Windows, the recommended approach is to run agentsh inside WSL2 or 
 - **cgroups v2 limits:** optional, Linux-only; disabled by default (requires a writable cgroup base path).
 - **macOS resource monitoring:** native Mach API monitoring for memory, CPU, and thread count (monitoring only, no enforcement).
 - **Windows resource monitoring:** Job Objects for memory, CPU, disk I/O, process count; Toolhelp32 for thread count (both monitoring and enforcement via Job Objects).
+- **Process execution stats:** CPU user/system time returned in exec results on all platforms. Peak memory available on Unix (Linux/macOS) but not Windows.
 - **Registry monitoring + policy enforcement:** Windows-only, requires mini filter driver (see below).
 - **seccomp / full namespace isolation / eBPF:** planned/future work (not implemented).
 

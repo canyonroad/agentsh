@@ -54,6 +54,10 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | Disk I/O limit | Yes | No | No | Yes | No | Yes |
 | Network BW limit | Yes | No | No | Yes | No | Yes |
 | Process count | Yes | No | No | Yes | Job | Yes |
+| **Process Execution Stats** |
+| CPU user time | Yes | Yes | Yes | Yes | Yes | Yes |
+| CPU system time | Yes | Yes | Yes | Yes | Yes | Yes |
+| Peak memory | Yes | Yes | Yes | Yes | No | Yes |
 | **Platform-Specific** |
 | Registry monitoring | N/A | N/A | N/A | N/A | Yes | N/A |
 | Registry blocking | N/A | N/A | N/A | N/A | Yes | N/A |
@@ -334,6 +338,7 @@ sandbox:
 - **No disk I/O limits** - Job Objects don't support this
 - **No network bandwidth limits** - Job Objects don't support this
 - **Resource monitoring available** - memory, CPU, disk I/O, process count, and thread count via Job Objects and Toolhelp32
+- **No peak memory in exec results** - Windows Rusage doesn't include Maxrss; would require GetProcessMemoryInfo before process exits
 - **WinDivert requires admin** - Administrator privileges needed for network interception
 - **Driver requires signing** - Mini filter driver requires test signing (dev) or EV signing (production)
 - Uses kernel-mode mini filter driver for filesystem and registry interception
