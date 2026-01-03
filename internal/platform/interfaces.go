@@ -218,6 +218,21 @@ const (
 	NetworkFull
 )
 
+func (n NetworkAccessLevel) String() string {
+	switch n {
+	case NetworkNone:
+		return "none"
+	case NetworkOutbound:
+		return "outbound"
+	case NetworkLocal:
+		return "local"
+	case NetworkFull:
+		return "full"
+	default:
+		return "unknown"
+	}
+}
+
 // WindowsSandboxOptions contains Windows-specific sandbox configuration.
 // These options are ignored on other platforms.
 type WindowsSandboxOptions struct {

@@ -23,3 +23,23 @@ func TestDefaultWindowsOptions(t *testing.T) {
 		t.Errorf("NetworkAccess should default to NetworkNone, got %v", opts.NetworkAccess)
 	}
 }
+
+// TestNetworkAccessLevelString verifies NetworkAccessLevel.String() returns
+// correct string representations for debugging/logging.
+func TestNetworkAccessLevelString(t *testing.T) {
+	tests := []struct {
+		level    NetworkAccessLevel
+		expected string
+	}{
+		{NetworkNone, "none"},
+		{NetworkOutbound, "outbound"},
+		{NetworkLocal, "local"},
+		{NetworkFull, "full"},
+		{NetworkAccessLevel(99), "unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.level.String(); got != tt.expected {
+			t.Errorf("NetworkAccessLevel(%d).String() = %q, want %q", tt.level, got, tt.expected)
+		}
+	}
+}
