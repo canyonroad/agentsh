@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/platform"
 	"golang.org/x/sys/windows"
 )
 
@@ -85,4 +86,23 @@ func isAdmin() bool {
 	}
 	defer token.Close()
 	return token.IsElevated()
+}
+
+func TestNetworkCapabilityWKSIDs(t *testing.T) {
+	tests := []struct {
+		level    platform.NetworkAccessLevel
+		expected int // number of capability SIDs
+	}{
+		{platform.NetworkNone, 0},
+		{platform.NetworkOutbound, 1}, // internetClient
+		{platform.NetworkLocal, 1},    // privateNetworkClientServer
+		{platform.NetworkFull, 2},     // internetClient + privateNetworkClientServer
+	}
+
+	for _, tc := range tests {
+		sids := networkCapabilitySIDs(tc.level)
+		if len(sids) != tc.expected {
+			t.Errorf("NetworkAccessLevel %d: expected %d SIDs, got %d", tc.level, tc.expected, len(sids))
+		}
+	}
 }

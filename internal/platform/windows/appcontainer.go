@@ -9,14 +9,16 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/agentsh/agentsh/internal/platform"
 	"golang.org/x/sys/windows"
 )
 
 // appContainer wraps Windows AppContainer APIs for process isolation.
 type appContainer struct {
-	name        string       // Container profile name
-	sid         *windows.SID // Container security identifier
-	grantedACLs []string     // Paths we modified (for cleanup)
+	name        string         // Container profile name
+	sid         *windows.SID   // Container security identifier
+	grantedACLs []string       // Paths we modified (for cleanup)
+	networkSIDs []*windows.SID // Network capability SIDs
 	mu          sync.Mutex
 	created     bool
 }
@@ -323,5 +325,50 @@ func (c *appContainer) grantPathAccess(path string, mode AccessMode) error {
 	}
 
 	c.grantedACLs = append(c.grantedACLs, path)
+	return nil
+}
+
+// Well-known capability SIDs for network access.
+// These are derived from Microsoft documentation.
+var (
+	// S-1-15-3-1 - internetClient capability
+	sidInternetClient = mustParseSID("S-1-15-3-1")
+	// S-1-15-3-3 - privateNetworkClientServer capability
+	sidPrivateNetwork = mustParseSID("S-1-15-3-3")
+)
+
+func mustParseSID(s string) *windows.SID {
+	sid, err := windows.StringToSid(s)
+	if err != nil {
+		// These are well-known SIDs that should always parse
+		panic(fmt.Sprintf("failed to parse well-known SID %s: %v", s, err))
+	}
+	return sid
+}
+
+// networkCapabilitySIDs returns the capability SIDs for the given network access level.
+func networkCapabilitySIDs(level platform.NetworkAccessLevel) []*windows.SID {
+	switch level {
+	case platform.NetworkNone:
+		return nil
+	case platform.NetworkOutbound:
+		return []*windows.SID{sidInternetClient}
+	case platform.NetworkLocal:
+		return []*windows.SID{sidPrivateNetwork}
+	case platform.NetworkFull:
+		return []*windows.SID{sidInternetClient, sidPrivateNetwork}
+	default:
+		return nil
+	}
+}
+
+// setNetworkCapabilities configures network access for the container.
+// Must be called before createProcess.
+func (c *appContainer) setNetworkCapabilities(level platform.NetworkAccessLevel) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Store for use in createProcess
+	c.networkSIDs = networkCapabilitySIDs(level)
 	return nil
 }
