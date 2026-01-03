@@ -213,12 +213,16 @@ jobs:
 
       # Notarize app bundle (optional)
       - name: Notarize app bundle
-        if: ${{ github.event.inputs.notarize != 'false' && secrets.MACOS_NOTARIZATION_APPLE_ID != '' }}
+        if: github.event.inputs.notarize != 'false'
         env:
           APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
           TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
         run: |
+          if [ -z "$APPLE_ID" ]; then
+            echo "Skipping notarization: MACOS_NOTARIZATION_APPLE_ID not set"
+            exit 0
+          fi
           echo "Creating ZIP for notarization..."
           ditto -c -k --keepParent build/AgentSH.app build/AgentSH.zip
 
@@ -400,12 +404,16 @@ jobs:
           codesign --verify --deep --strict --verbose=2 build/AgentSH.app
 
       - name: Notarize app bundle
-        if: ${{ github.event.inputs.notarize != 'false' && secrets.MACOS_NOTARIZATION_APPLE_ID != '' }}
+        if: github.event.inputs.notarize != 'false'
         env:
           APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
           TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
         run: |
+          if [ -z "$APPLE_ID" ]; then
+            echo "Skipping notarization: MACOS_NOTARIZATION_APPLE_ID not set"
+            exit 0
+          fi
           ditto -c -k --keepParent build/AgentSH.app build/AgentSH.zip
           xcrun notarytool submit build/AgentSH.zip \
             --apple-id "$APPLE_ID" \
