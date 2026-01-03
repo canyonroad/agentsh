@@ -97,8 +97,10 @@ func detectPlatformMode() PlatformMode {
 		return ModeLinuxNative
 
 	case "darwin":
-		// macOS - use native implementation
-		// TODO: Check for Lima and prefer it if available
+		// macOS - check for Lima first, then fall back to native
+		if isLimaAvailable() {
+			return ModeDarwinLima
+		}
 		return ModeDarwinNative
 
 	case "windows":

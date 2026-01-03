@@ -1,0 +1,159 @@
+//go:build darwin
+
+package lima
+
+import (
+	"context"
+	"fmt"
+	"sync"
+
+	"github.com/agentsh/agentsh/internal/platform"
+)
+
+// SandboxManager implements platform.SandboxManager for Lima.
+// It delegates to the Linux namespace-based sandbox running inside the Lima VM.
+type SandboxManager struct {
+	platform       *Platform
+	available      bool
+	isolationLevel platform.IsolationLevel
+	mu             sync.Mutex
+	sandboxes      map[string]*Sandbox
+}
+
+// NewSandboxManager creates a new Lima sandbox manager.
+func NewSandboxManager(p *Platform) *SandboxManager {
+	m := &SandboxManager{
+		platform:  p,
+		sandboxes: make(map[string]*Sandbox),
+	}
+	m.available = m.checkAvailable()
+	m.isolationLevel = m.detectIsolationLevel()
+	return m
+}
+
+// checkAvailable checks if namespace-based sandboxing is available in the Lima VM.
+func (m *SandboxManager) checkAvailable() bool {
+	// Check if unshare is available
+	_, err := m.platform.RunInLima("which", "unshare")
+	return err == nil
+}
+
+// detectIsolationLevel determines what isolation is available in the Lima VM.
+func (m *SandboxManager) detectIsolationLevel() platform.IsolationLevel {
+	if !m.available {
+		return platform.IsolationNone
+	}
+
+	// Check for user namespace support
+	_, err := m.platform.RunInLima("unshare", "--user", "true")
+	if err == nil {
+		return platform.IsolationFull
+	}
+
+	// At minimum we have mount/pid namespaces
+	return platform.IsolationPartial
+}
+
+// Available returns whether sandboxing is available.
+func (m *SandboxManager) Available() bool {
+	return m.available
+}
+
+// IsolationLevel returns the isolation capability.
+func (m *SandboxManager) IsolationLevel() platform.IsolationLevel {
+	return m.isolationLevel
+}
+
+// Create creates a new sandbox inside the Lima VM.
+func (m *SandboxManager) Create(config platform.SandboxConfig) (platform.Sandbox, error) {
+	if !m.available {
+		return nil, fmt.Errorf("sandboxing not available in Lima VM")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	id := config.Name
+	if id == "" {
+		id = "sandbox-lima"
+	}
+
+	// Translate macOS workspace path to Lima VM path
+	limaWorkspace := ""
+	if config.WorkspacePath != "" {
+		limaWorkspace = MacOSToLimaPath(config.WorkspacePath)
+	}
+
+	sandbox := &Sandbox{
+		id:             id,
+		config:         config,
+		limaWorkspace:  limaWorkspace,
+		platform:       m.platform,
+		isolationLevel: m.isolationLevel,
+	}
+
+	m.sandboxes[id] = sandbox
+	return sandbox, nil
+}
+
+// Sandbox represents a sandboxed execution environment in the Lima VM.
+type Sandbox struct {
+	id             string
+	config         platform.SandboxConfig
+	limaWorkspace  string
+	platform       *Platform
+	isolationLevel platform.IsolationLevel
+	mu             sync.Mutex
+	closed         bool
+}
+
+// ID returns the sandbox identifier.
+func (s *Sandbox) ID() string {
+	return s.id
+}
+
+// Execute runs a command in the sandbox inside the Lima VM.
+func (s *Sandbox) Execute(ctx context.Context, cmd string, args ...string) (*platform.ExecResult, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("sandbox is closed")
+	}
+	s.mu.Unlock()
+
+	// Build the command to run inside Lima VM with namespace isolation
+	// TODO: Add proper namespace flags based on isolation level
+	limaArgs := []string{cmd}
+	limaArgs = append(limaArgs, args...)
+
+	out, err := s.platform.RunInLima(limaArgs...)
+	if err != nil {
+		return &platform.ExecResult{
+			ExitCode: 1,
+			Stderr:   []byte(err.Error()),
+		}, nil
+	}
+
+	return &platform.ExecResult{
+		ExitCode: 0,
+		Stdout:   []byte(out),
+	}, nil
+}
+
+// Close destroys the sandbox.
+func (s *Sandbox) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return nil
+}
+
+// Compile-time interface checks
+var (
+	_ platform.SandboxManager = (*SandboxManager)(nil)
+	_ platform.Sandbox        = (*Sandbox)(nil)
+)

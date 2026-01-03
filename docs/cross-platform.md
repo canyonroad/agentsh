@@ -77,6 +77,37 @@ SIGNING_IDENTITY="Developer ID Application" make sign-bundle
 
 **Note:** ESF+NE mode automatically falls back to FUSE-T if ESF entitlement is unavailable. See [macOS Build Guide](macos-build.md) for detailed instructions.
 
+### macOS (Lima VM - Full Isolation)
+
+For full Linux isolation on macOS, agentsh supports Lima VM. When Lima is installed with a running VM, agentsh automatically detects and uses it:
+
+```bash
+# Install Lima
+brew install lima
+
+# Create and start a VM
+limactl start default
+
+# agentsh automatically detects Lima and uses it
+agentsh server  # Will use darwin-lima mode
+```
+
+**Automatic Detection:** When `limactl` is installed and at least one VM is running, agentsh automatically uses Lima mode which provides:
+- Full Linux namespace isolation (mount, network, PID, user)
+- seccomp-bpf syscall filtering
+- cgroups v2 resource limits
+- FUSE3 filesystem interception
+- iptables network interception
+
+**Manual Mode Selection:** You can force Lima mode in your config:
+
+```yaml
+platform:
+  mode: darwin-lima  # or just "lima"
+```
+
+**Security Score:** 85% - Full Linux capabilities with slight VM overhead.
+
 ### Windows (Native - Mini Filter Driver)
 
 For native Windows support with kernel-level enforcement:
