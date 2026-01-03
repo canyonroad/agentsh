@@ -526,10 +526,13 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) cgroupHook(sessionID string, cmdID string, limits policy.Limits) postStartHook {
+	// Return nil (not a no-op function) when cgroups are disabled.
+	// This prevents exec.go from activating ptrace-stopped mode unnecessarily,
+	// which can cause issues in environments where ptrace isn't fully supported.
+	if a == nil || a.cfg == nil || !a.cfg.Sandbox.Cgroups.Enabled {
+		return nil
+	}
 	return func(pid int) (func() error, error) {
-		if a == nil || a.cfg == nil || !a.cfg.Sandbox.Cgroups.Enabled {
-			return nil, nil
-		}
 		em := storeEmitter{store: a.store, broker: a.broker}
 		return applyCgroupV2(context.Background(), em, a.cfg, sessionID, cmdID, pid, limits, a.metrics, a.policy)
 	}
