@@ -261,3 +261,36 @@ To verify exclusion is working:
 metrics, _ := client.GetMetrics()
 fmt.Printf("File queries: %d\n", metrics.FilePolicyQueries)
 ```
+
+## Sandbox Integration
+
+The Windows sandbox uses two complementary isolation layers:
+
+### AppContainer (Primary)
+
+- Kernel-enforced capability isolation
+- Automatic registry isolation
+- Configurable network access
+- Requires Windows 8+
+
+### Minifilter (Secondary)
+
+- Policy-based file/registry rules
+- Works with AppContainer for defense-in-depth
+- Can operate standalone for legacy systems
+
+### Configuration
+
+```go
+config := platform.SandboxConfig{
+    Name: "my-sandbox",
+    WorkspacePath: "/path/to/workspace",
+    AllowedPaths: []string{"/path/to/tools"},
+    WindowsOptions: &platform.WindowsSandboxOptions{
+        UseAppContainer: true,
+        UseMinifilter: true,
+        NetworkAccess: platform.NetworkOutbound,
+        FailOnAppContainerError: true,
+    },
+}
+```

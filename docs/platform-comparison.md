@@ -71,7 +71,7 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | **macOS ESF+NE** | 90% | Yes | Yes | None | Exec only | None |
 | **macOS + Lima** | 85% | Yes | Yes | Full | Yes | Full |
 | **macOS FUSE-T** | 70% | Yes | Yes | None | No | None |
-| **Windows Native** | 75% | Yes | Yes | Partial | No | Partial |
+| **Windows Native** | 85% | Yes | Yes | Partial | No | Partial |
 
 ## Security Feature Coverage
 
@@ -97,9 +97,9 @@ macOS FUSE-T + pf     ███████████████████�
                       File✓   Net✓    Iso✗      Sys✗     Res✗
                       (No isolation, no syscall filter, no resource limits)
 
-Windows Native        ████████████████████████████████████░░░░░░░░░░░░   75%
+Windows Native        ██████████████████████████████████████░░░░░░░░░░   85%
                       File✓   Net✓    Iso⚠      Sys✗     Res⚠
-                      (Mini Filter + WinDivert + Registry blocking, AppContainer partial)
+                      (Mini Filter + WinDivert + Registry blocking + AppContainer sandbox)
 
 Legend: ✓ = Full support  ⚠ = Partial support  ✗ = Not supported
 ```
@@ -254,6 +254,26 @@ Lima/virtiofs   █████████████████████�
 | COM objects | Yes | N/A | CLSID hijacking |
 | Windows Defender | Yes | N/A | Policy modifications |
 | LSA settings | Yes | N/A | Credential access |
+
+## Windows Sandbox Configuration
+
+| Configuration | Security | Performance | Use Case |
+|--------------|----------|-------------|----------|
+| AppContainer + Minifilter | Maximum | ~5-10ms startup | AI agent execution |
+| AppContainer only | High | ~3-5ms startup | Isolated dev environment |
+| Minifilter only | Medium | <1ms startup | Policy enforcement only |
+| Neither | None | Baseline | Legacy/unsandboxed |
+
+### Configuration Example
+
+```yaml
+sandbox:
+  windows:
+    use_app_container: true   # Default: true
+    use_minifilter: true      # Default: true
+    network_access: none      # none, outbound, local, full
+    fail_on_error: true       # Default: true
+```
 
 ## macOS Configuration Options
 
