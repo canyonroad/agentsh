@@ -67,18 +67,33 @@ func getProcessGroupID(pid int) int {
 	return pid
 }
 
+// filetimeToMs converts a Windows FILETIME (100-nanosecond intervals) to milliseconds.
+func filetimeToMs(ft syscall.Filetime) int64 {
+	// Combine high and low parts into a single 64-bit value
+	ns100 := int64(ft.HighDateTime)<<32 | int64(ft.LowDateTime)
+	// Convert 100-nanosecond intervals to milliseconds (divide by 10,000)
+	return ns100 / 10000
+}
+
 // resourcesFromProcessState extracts resource usage from process state.
-// On Windows, we use GetProcessTimes for CPU time. Peak memory requires
-// additional API calls that aren't available through ProcessState.
+// On Windows, Rusage contains UserTime and KernelTime as FILETIME values.
+// Peak memory is not available through ProcessState - it would require
+// calling GetProcessMemoryInfo before the process exits.
 func resourcesFromProcessState(ps *os.ProcessState) types.ExecResources {
 	if ps == nil {
 		return types.ExecResources{}
 	}
 
-	// On Windows, SysUsage returns *syscall.Rusage but fields differ from Unix.
-	// We need to use GetProcessTimes for accurate data.
-	// For now, return empty - the Windows ProcessState doesn't expose Rusage properly.
-	// TODO: Use GetProcessTimes and GetProcessMemoryInfo for accurate Windows stats.
+	// On Windows, SysUsage returns *syscall.Rusage with UserTime/KernelTime as Filetime
+	ru, ok := ps.SysUsage().(*syscall.Rusage)
+	if !ok || ru == nil {
+		return types.ExecResources{}
+	}
 
-	return types.ExecResources{}
+	return types.ExecResources{
+		CPUUserMs:   filetimeToMs(ru.UserTime),
+		CPUSystemMs: filetimeToMs(ru.KernelTime),
+		// MemoryPeakKB not available - Windows Rusage doesn't include Maxrss.
+		// Would require GetProcessMemoryInfo call before process exits.
+	}
 }
