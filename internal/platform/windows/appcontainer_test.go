@@ -3,6 +3,7 @@
 package windows
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -104,5 +105,37 @@ func TestNetworkCapabilityWKSIDs(t *testing.T) {
 		if len(sids) != tc.expected {
 			t.Errorf("NetworkAccessLevel %d: expected %d SIDs, got %d", tc.level, tc.expected, len(sids))
 		}
+	}
+}
+
+func TestAppContainerCreateProcess(t *testing.T) {
+	if !isAdmin() {
+		t.Skip("requires admin privileges")
+	}
+
+	ac := newAppContainer("test-create-process")
+	if err := ac.create(); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	defer ac.cleanup()
+
+	// Grant access to Windows directory for cmd.exe
+	if err := ac.grantPathAccess("C:\\Windows\\System32", AccessReadExecute); err != nil {
+		t.Fatalf("grant path failed: %v", err)
+	}
+
+	ctx := context.Background()
+	proc, err := ac.createProcess(ctx, "cmd.exe", []string{"/c", "echo", "hello"}, nil, "")
+	if err != nil {
+		t.Fatalf("createProcess failed: %v", err)
+	}
+	defer proc.Kill()
+
+	state, err := proc.Wait()
+	if err != nil {
+		t.Fatalf("Wait failed: %v", err)
+	}
+	if state.ExitCode() != 0 {
+		t.Errorf("expected exit code 0, got %d", state.ExitCode())
 	}
 }

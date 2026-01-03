@@ -3,8 +3,11 @@
 package windows
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -27,8 +30,9 @@ type appContainer struct {
 var invalidChars = regexp.MustCompile(`[/\\:*?"<>|]`)
 
 var (
-	modUserenv   = windows.NewLazySystemDLL("userenv.dll")
-	modAdvapi32  = windows.NewLazySystemDLL("advapi32.dll")
+	modUserenv  = windows.NewLazySystemDLL("userenv.dll")
+	modAdvapi32 = windows.NewLazySystemDLL("advapi32.dll")
+	modKernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
 	procCreateAppContainerProfile                 = modUserenv.NewProc("CreateAppContainerProfile")
 	procDeleteAppContainerProfile                 = modUserenv.NewProc("DeleteAppContainerProfile")
@@ -37,6 +41,11 @@ var (
 	procSetNamedSecurityInfoW = modAdvapi32.NewProc("SetNamedSecurityInfoW")
 	procGetNamedSecurityInfoW = modAdvapi32.NewProc("GetNamedSecurityInfoW")
 	procSetEntriesInAclW      = modAdvapi32.NewProc("SetEntriesInAclW")
+
+	procCreateProcessW                    = modKernel32.NewProc("CreateProcessW")
+	procInitializeProcThreadAttributeList = modKernel32.NewProc("InitializeProcThreadAttributeList")
+	procUpdateProcThreadAttribute         = modKernel32.NewProc("UpdateProcThreadAttribute")
+	procDeleteProcThreadAttributeList     = modKernel32.NewProc("DeleteProcThreadAttributeList")
 )
 
 // uintptrToSID converts a uintptr (from Windows API) to *windows.SID.
@@ -371,4 +380,137 @@ func (c *appContainer) setNetworkCapabilities(level platform.NetworkAccessLevel)
 	// Store for use in createProcess
 	c.networkSIDs = networkCapabilitySIDs(level)
 	return nil
+}
+
+// Process creation constants
+const (
+	extendedStartupInfoPresent              = 0x00080000
+	procThreadAttributeSecurityCapabilities = 0x00020009
+)
+
+// securityCapabilities is the SECURITY_CAPABILITIES structure
+type securityCapabilities struct {
+	AppContainerSid uintptr
+	Capabilities    uintptr
+	CapabilityCount uint32
+	Reserved        uint32
+}
+
+// sidAndAttributes is the SID_AND_ATTRIBUTES structure
+type sidAndAttributes struct {
+	Sid        uintptr
+	Attributes uint32
+	_          uint32 // padding for 64-bit alignment
+}
+
+// startupInfoEx is the STARTUPINFOEXW structure
+type startupInfoEx struct {
+	StartupInfo   windows.StartupInfo
+	AttributeList uintptr
+}
+
+// createProcess spawns a process inside the AppContainer.
+func (c *appContainer) createProcess(ctx context.Context, cmd string, args []string, env []string, workDir string) (*os.Process, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.sid == nil {
+		return nil, fmt.Errorf("container not created")
+	}
+
+	// Build command line with proper escaping
+	var cmdParts []string
+	cmdParts = append(cmdParts, cmd)
+	for _, arg := range args {
+		cmdParts = append(cmdParts, syscall.EscapeArg(arg))
+	}
+	cmdLine := strings.Join(cmdParts, " ")
+	cmdLinePtr, err := syscall.UTF16PtrFromString(cmdLine)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build capability array for network SIDs
+	var capArray []sidAndAttributes
+	for _, sid := range c.networkSIDs {
+		capArray = append(capArray, sidAndAttributes{
+			Sid:        uintptr(unsafe.Pointer(sid)),
+			Attributes: 0x4, // SE_GROUP_ENABLED
+		})
+	}
+
+	// Build security capabilities
+	var caps securityCapabilities
+	caps.AppContainerSid = uintptr(unsafe.Pointer(c.sid))
+	if len(capArray) > 0 {
+		caps.Capabilities = uintptr(unsafe.Pointer(&capArray[0]))
+		caps.CapabilityCount = uint32(len(capArray))
+	}
+
+	// Initialize thread attribute list
+	// First call to get required size
+	var size uintptr
+	procInitializeProcThreadAttributeList.Call(0, 1, 0, uintptr(unsafe.Pointer(&size)))
+
+	attrList := make([]byte, size)
+	r1, _, err := procInitializeProcThreadAttributeList.Call(
+		uintptr(unsafe.Pointer(&attrList[0])),
+		1, 0,
+		uintptr(unsafe.Pointer(&size)),
+	)
+	if r1 == 0 {
+		return nil, fmt.Errorf("InitializeProcThreadAttributeList failed: %w", err)
+	}
+	defer procDeleteProcThreadAttributeList.Call(uintptr(unsafe.Pointer(&attrList[0])))
+
+	// Add security capabilities attribute
+	r1, _, err = procUpdateProcThreadAttribute.Call(
+		uintptr(unsafe.Pointer(&attrList[0])),
+		0,
+		procThreadAttributeSecurityCapabilities,
+		uintptr(unsafe.Pointer(&caps)),
+		unsafe.Sizeof(caps),
+		0, 0,
+	)
+	if r1 == 0 {
+		return nil, fmt.Errorf("UpdateProcThreadAttribute failed: %w", err)
+	}
+
+	// Setup STARTUPINFOEX
+	var siEx startupInfoEx
+	siEx.StartupInfo.Cb = uint32(unsafe.Sizeof(siEx))
+	siEx.AttributeList = uintptr(unsafe.Pointer(&attrList[0]))
+
+	var pi windows.ProcessInformation
+
+	// Work directory
+	var workDirPtr *uint16
+	if workDir != "" {
+		workDirPtr, _ = syscall.UTF16PtrFromString(workDir)
+	}
+
+	// CreateProcess with extended startup info
+	r1, _, err = procCreateProcessW.Call(
+		0, // lpApplicationName
+		uintptr(unsafe.Pointer(cmdLinePtr)),
+		0, 0, // security attributes
+		0, // inherit handles
+		extendedStartupInfoPresent,
+		0, // environment (inherit)
+		uintptr(unsafe.Pointer(workDirPtr)),
+		uintptr(unsafe.Pointer(&siEx)),
+		uintptr(unsafe.Pointer(&pi)),
+	)
+	if r1 == 0 {
+		return nil, fmt.Errorf("CreateProcess failed: %w", err)
+	}
+
+	// Close thread handle
+	windows.CloseHandle(pi.Thread)
+
+	// Close the process handle from CreateProcess (FindProcess will open a new one)
+	windows.CloseHandle(pi.Process)
+
+	// Return os.Process wrapping the process ID
+	return os.FindProcess(int(pi.ProcessId))
 }
