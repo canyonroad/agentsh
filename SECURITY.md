@@ -492,6 +492,7 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2026-01-03 | Implemented FUSE event emission for file operation monitoring |
 | 2026-01-03 | Implemented Lima and WSL2 Linux namespace isolation via unshare |
 | 2026-01-03 | Implemented Lima and WSL2 bindfs-based filesystem mounting inside VMs |
 | 2026-01-03 | Implemented WSL2 cgroups v2 resource limits and iptables network interception |

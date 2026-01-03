@@ -12,6 +12,7 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | File write monitoring | Block | Block | Block | Block | Block | Block |
 | File create/delete | Block | Block | Block | Block | Block | Block |
 | File policy enforcement | Yes | Yes | Yes | Yes | Yes | Yes |
+| File event emission | Yes | Yes | Yes | Yes | Yes | Yes |
 | **Network Interception** |
 | Implementation | iptables | Network Extension | pf | iptables | WinDivert | iptables |
 | TCP interception | Block | Block | Block | Block | Block | Block |
