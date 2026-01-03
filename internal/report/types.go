@@ -109,4 +109,47 @@ type Report struct {
 
 	// Resources
 	Resources types.SessionStats `json:"resources"`
+
+	// LLM Usage (only populated when llm-requests.jsonl is available)
+	LLMUsage *LLMUsageStats `json:"llm_usage,omitempty"`
+
+	// DLP Events (only populated when llm-requests.jsonl has DLP data)
+	DLPEvents *DLPEventStats `json:"dlp_events,omitempty"`
+}
+
+// LLMUsageStats contains aggregated LLM usage statistics.
+type LLMUsageStats struct {
+	Providers []ProviderUsage `json:"providers"`
+	Total     UsageTotals     `json:"total"`
+}
+
+// ProviderUsage contains usage statistics for a single LLM provider.
+type ProviderUsage struct {
+	Provider   string `json:"provider"`
+	Requests   int    `json:"requests"`
+	TokensIn   int    `json:"tokens_in"`
+	TokensOut  int    `json:"tokens_out"`
+	Errors     int    `json:"errors"`
+	DurationMs int64  `json:"duration_ms"`
+}
+
+// UsageTotals contains aggregated totals across all providers.
+type UsageTotals struct {
+	Requests   int   `json:"requests"`
+	TokensIn   int   `json:"tokens_in"`
+	TokensOut  int   `json:"tokens_out"`
+	Errors     int   `json:"errors"`
+	DurationMs int64 `json:"duration_ms"`
+}
+
+// DLPEventStats contains aggregated DLP redaction statistics.
+type DLPEventStats struct {
+	Redactions []RedactionCount `json:"redactions"`
+	Total      int              `json:"total"`
+}
+
+// RedactionCount represents the count of a specific redaction type.
+type RedactionCount struct {
+	Type  string `json:"type"`
+	Count int    `json:"count"`
 }

@@ -75,6 +75,45 @@ func FormatMarkdown(r *Report) string {
 	}
 	sb.WriteString("\n")
 
+	// LLM Usage section (for both summary and detailed reports)
+	if r.LLMUsage != nil && len(r.LLMUsage.Providers) > 0 {
+		sb.WriteString("## LLM Usage\n")
+		sb.WriteString("| Provider | Requests | Tokens In | Tokens Out | Errors |\n")
+		sb.WriteString("|----------|----------|-----------|------------|--------|\n")
+		for _, p := range r.LLMUsage.Providers {
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %d |\n",
+				p.Provider,
+				formatNumber(p.Requests),
+				formatNumber(p.TokensIn),
+				formatNumber(p.TokensOut),
+				p.Errors))
+		}
+		// Add totals row if multiple providers
+		if len(r.LLMUsage.Providers) > 1 {
+			sb.WriteString(fmt.Sprintf("| **Total** | **%s** | **%s** | **%s** | **%d** |\n",
+				formatNumber(r.LLMUsage.Total.Requests),
+				formatNumber(r.LLMUsage.Total.TokensIn),
+				formatNumber(r.LLMUsage.Total.TokensOut),
+				r.LLMUsage.Total.Errors))
+		}
+		sb.WriteString("\n")
+	}
+
+	// DLP Events section (for both summary and detailed reports)
+	if r.DLPEvents != nil && len(r.DLPEvents.Redactions) > 0 {
+		sb.WriteString("## DLP Events\n")
+		sb.WriteString("| Type | Redactions |\n")
+		sb.WriteString("|------|------------|\n")
+		for _, rd := range r.DLPEvents.Redactions {
+			sb.WriteString(fmt.Sprintf("| %s | %d |\n", rd.Type, rd.Count))
+		}
+		// Add total if multiple types
+		if len(r.DLPEvents.Redactions) > 1 {
+			sb.WriteString(fmt.Sprintf("| **Total** | **%d** |\n", r.DLPEvents.Total))
+		}
+		sb.WriteString("\n")
+	}
+
 	// Detailed sections
 	if r.Level == LevelDetailed {
 		// Blocked Operations
@@ -192,4 +231,31 @@ func sortedKeys(m map[string]int) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// formatNumber formats a number with comma separators for readability.
+// e.g., 12450 -> "12,450"
+func formatNumber(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+
+	// Convert to string and add commas
+	s := fmt.Sprintf("%d", n)
+	result := make([]byte, 0, len(s)+len(s)/3)
+
+	// Work backwards, adding commas every 3 digits
+	for i := len(s) - 1; i >= 0; i-- {
+		if (len(s)-1-i) > 0 && (len(s)-1-i)%3 == 0 {
+			result = append(result, ',')
+		}
+		result = append(result, s[i])
+	}
+
+	// Reverse the result
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+
+	return string(result)
 }

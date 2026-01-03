@@ -12,12 +12,21 @@ import (
 
 // Generator creates reports from session data.
 type Generator struct {
-	store store.EventStore
+	store      store.EventStore
+	llmLogPath string
 }
 
 // NewGenerator creates a new report generator.
 func NewGenerator(s store.EventStore) *Generator {
 	return &Generator{store: s}
+}
+
+// WithLLMLogPath sets the path to the llm-requests.jsonl file for LLM stats.
+// The path should point to the llm-requests.jsonl file for the session.
+// If not set or the file doesn't exist, LLM stats will be omitted from the report.
+func (g *Generator) WithLLMLogPath(path string) *Generator {
+	g.llmLogPath = path
+	return g
 }
 
 // Generate creates a report for the given session.
@@ -58,6 +67,18 @@ func (g *Generator) Generate(ctx context.Context, sess types.Session, level Leve
 		report.CommandHistory = extractCommands(events)
 		report.AllFilePaths = buildFullPathMap(events)
 		report.AllNetworkHosts = buildFullHostMap(events)
+	}
+
+	// Parse LLM stats if llm-requests.jsonl path is configured
+	if g.llmLogPath != "" {
+		llmStats, dlpStats, err := ParseLLMRequestsFile(g.llmLogPath)
+		if err != nil {
+			// Log warning but don't fail the report generation
+			// (the file might not exist for older sessions)
+		} else {
+			report.LLMUsage = llmStats
+			report.DLPEvents = dlpStats
+		}
 	}
 
 	return report, nil
