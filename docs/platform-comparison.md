@@ -345,7 +345,10 @@ sandbox:
   - Source directory bound to mount point via bindfs
   - Automatic bindfs installation if not present
   - Unmount via fusermount -u with umount fallback
-- **Process isolation**: Linux namespaces (mount, network, PID, user)
+- **Process isolation**: Linux namespaces via `unshare`
+  - Full: user, mount, UTS, IPC, network, PID namespaces
+  - Partial: mount, UTS, IPC, PID (when user namespace unavailable)
+  - Flags: `--fork`, `--mount-proc`, `--map-root-user`
 - **Syscall filtering**: seccomp-bpf available in VM
 
 ### Windows Native
@@ -382,7 +385,10 @@ sandbox:
   - Source directory bound to mount point via bindfs
   - Automatic bindfs installation if not present
   - Unmount via fusermount -u with umount fallback
-- **Process isolation**: Linux namespaces (mount, network, PID, user)
+- **Process isolation**: Linux namespaces via `unshare`
+  - Full: user, mount, UTS, IPC, network, PID namespaces
+  - Partial: mount, UTS, IPC, PID (when user namespace unavailable)
+  - Flags: `--fork`, `--mount-proc`, `--map-root-user`
 - **Syscall filtering**: seccomp-bpf available in VM
 
 ## Installation Quick Reference

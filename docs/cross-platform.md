@@ -115,6 +115,12 @@ agentsh server  # Will use darwin-lima mode
 - Unmount via `fusermount -u` with `sudo umount` fallback
 - Mount tracking prevents duplicate mounts to same location
 
+**Process Isolation (namespaces):** Lima uses Linux namespaces via `unshare` for process isolation:
+- Full isolation: user, mount, UTS, IPC, network, and PID namespaces
+- Partial isolation: mount, UTS, IPC, PID namespaces (when user namespace unavailable)
+- Automatic detection of available isolation level
+- Working directory support for sandboxed commands
+
 **Manual Mode Selection:** You can force Lima mode in your config:
 
 ```yaml
@@ -272,6 +278,12 @@ See [Windows Driver Deployment Guide](windows-driver-deployment.md) for installa
 - Automatic bindfs installation if not present (`sudo apt install bindfs`)
 - Unmount via `fusermount -u` with `sudo umount` fallback
 - Mount tracking prevents duplicate mounts to same location
+
+**Process Isolation (namespaces):** WSL2 uses Linux namespaces via `unshare` for process isolation:
+- Full isolation: user, mount, UTS, IPC, network, and PID namespaces
+- Partial isolation: mount, UTS, IPC, PID namespaces (when user namespace unavailable)
+- Automatic detection of available isolation level
+- Working directory support for sandboxed commands
 
 ### Docker (any host)
 
