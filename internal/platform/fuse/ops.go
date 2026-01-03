@@ -6,6 +6,7 @@ package fuse
 import (
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/winfsp/cgofuse/fuse"
@@ -43,7 +44,34 @@ func (f *fuseFS) emitEvent(eventType, virtPath string, operation platform.FileOp
 	} else {
 		f.allowedOps.Add(1)
 	}
-	// TODO: Emit actual event to channel
+
+	// Skip if no event channel configured
+	if f.cfg.EventChannel == nil {
+		return
+	}
+
+	// Build the event
+	event := platform.IOEvent{
+		Timestamp: time.Now(),
+		SessionID: f.cfg.SessionID,
+		Type:      platform.EventType(eventType),
+		Path:      virtPath,
+		Operation: operation,
+		Decision:  decision,
+		Platform:  "fuse",
+	}
+
+	// Get command ID if function is available
+	if f.cfg.CommandIDFunc != nil {
+		event.CommandID = f.cfg.CommandIDFunc()
+	}
+
+	// Non-blocking send to avoid slowing down FUSE operations
+	select {
+	case f.cfg.EventChannel <- event:
+	default:
+		// Channel full or closed, drop the event
+	}
 }
 
 // toErrno converts an os error to a FUSE errno.
