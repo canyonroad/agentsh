@@ -250,6 +250,16 @@ See [Windows Driver Deployment Guide](windows-driver-deployment.md) for installa
 - Inside WSL, install `fuse3` and run `agentsh server`.
 - Keep workspaces on the Linux filesystem (e.g. `/home/...`), not `/mnt/c/...`, for performance.
 
+**Resource Limits (cgroups v2):** WSL2 uses cgroups v2 inside the Linux VM for resource enforcement:
+- Cgroup path: `/sys/fs/cgroup/agentsh/<session-name>`
+- Supported limits: CPU (quota/period), memory, process count, disk I/O (read/write bandwidth)
+- Stats available: memory usage, CPU time, process count, disk I/O bytes
+
+**Network Interception (iptables):** WSL2 uses iptables DNAT rules for traffic redirection:
+- Custom chain: `AGENTSH` in the nat table
+- TCP traffic redirected to proxy port (localhost excluded)
+- DNS (UDP port 53) redirected to DNS proxy port
+
 ### Docker (any host)
 
 FUSE requires extra privileges inside containers:

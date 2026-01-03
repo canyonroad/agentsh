@@ -364,6 +364,18 @@ sandbox:
 - Some Windows integration edge cases
 - **No registry monitoring** - WSL2 runs Linux, Windows registry not accessible
 
+**WSL2 Implementation Details:**
+- **Resource limits**: cgroups v2 at `/sys/fs/cgroup/agentsh/<name>`
+  - CPU: `cpu.max` (quota/period in microseconds)
+  - Memory: `memory.max` (bytes)
+  - Processes: `pids.max`
+  - Disk I/O: `io.max` (rbps/wbps per device)
+- **Network interception**: iptables DNAT via `AGENTSH` chain
+  - TCP redirect to proxy (excludes localhost)
+  - UDP port 53 redirect to DNS proxy
+- **Process isolation**: Linux namespaces (mount, network, PID, user)
+- **Syscall filtering**: seccomp-bpf available in VM
+
 ## Installation Quick Reference
 
 | Platform | Command | Requirements |

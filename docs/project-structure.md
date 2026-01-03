@@ -36,6 +36,7 @@ agentsh/
 - `internal/platform/` — Platform abstraction layer for cross-platform support.
 - `internal/platform/fuse/` — Shared FUSE package for macOS (FUSE-T) and Windows (WinFsp) filesystem mounting.
 - `internal/platform/lima/` — Lima VM platform for macOS with full Linux isolation (cgroups v2, iptables, namespaces).
+- `internal/platform/wsl2/` — WSL2 platform for Windows with full Linux isolation (cgroups v2, iptables, namespaces).
 
 ## Notes
 
