@@ -49,7 +49,7 @@ static int get_proc_taskinfo(
     *virtual_size = info.pti_virtual_size;
     *user_time_ns = mach_time_to_nanos(info.pti_total_user);
     *system_time_ns = mach_time_to_nanos(info.pti_total_system);
-    *num_threads = info.pti_numthreads;
+    *num_threads = info.pti_threadnum;
     *priority = info.pti_priority;
 
     return 0;
