@@ -18,25 +18,19 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 )
 
-// Config holds the proxy configuration.
+// Config holds the proxy configuration using config package types.
 type Config struct {
-	// Mode is the proxy mode: embedded, external, or disabled.
-	Mode string
+	// SessionID is the current session ID (set by agentsh).
+	SessionID string
 
-	// Port is the port to listen on. 0 means auto-select.
-	Port int
-
-	// Upstreams overrides the default upstream URLs per dialect.
-	Upstreams map[Dialect]string
+	// Proxy contains proxy mode and upstream settings.
+	Proxy config.ProxyConfig
 
 	// DLP is the DLP configuration.
 	DLP config.DLPConfig
 
-	// SessionID is the current session ID (set by agentsh).
-	SessionID string
-
-	// StoragePath is the path to store request/response logs.
-	StoragePath string
+	// Storage is the storage configuration.
+	Storage config.LLMStorageConfig
 }
 
 // Proxy is an HTTP proxy that intercepts LLM API requests.
@@ -54,25 +48,33 @@ type Proxy struct {
 }
 
 // New creates a new LLM proxy.
-func New(cfg Config, logger *slog.Logger) (*Proxy, error) {
+func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	// Build dialect configs with any overrides
+	// Build dialect configs with any overrides from ProxyConfig.Upstreams
 	configs := DefaultDialectConfigs()
-	for dialect, urlStr := range cfg.Upstreams {
-		if cfg, ok := configs[dialect]; ok {
-			if u, err := parseURL(urlStr); err == nil {
-				cfg.Upstream = u
-			}
+	if cfg.Proxy.Upstreams.Anthropic != "" {
+		if u, err := parseURL(cfg.Proxy.Upstreams.Anthropic); err == nil {
+			configs[DialectAnthropic].Upstream = u
+		}
+	}
+	if cfg.Proxy.Upstreams.OpenAI != "" {
+		if u, err := parseURL(cfg.Proxy.Upstreams.OpenAI); err == nil {
+			configs[DialectOpenAI].Upstream = u
+		}
+	}
+	if cfg.Proxy.Upstreams.ChatGPT != "" {
+		if u, err := parseURL(cfg.Proxy.Upstreams.ChatGPT); err == nil {
+			configs[DialectChatGPT].Upstream = u
 		}
 	}
 
 	detector := NewDialectDetector(configs)
 	rewriter := NewRequestRewriter(detector)
 	dlp := NewDLPProcessor(cfg.DLP)
-	storage, err := NewStorage(cfg.StoragePath, cfg.SessionID)
+	storage, err := NewStorage(storagePath, cfg.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("create storage: %w", err)
 	}
@@ -92,7 +94,7 @@ func (p *Proxy) Start(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	addr := fmt.Sprintf("127.0.0.1:%d", p.cfg.Port)
+	addr := fmt.Sprintf("127.0.0.1:%d", p.cfg.Proxy.Port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
@@ -257,17 +259,44 @@ func (p *Proxy) logRequest(requestID, sessionID string, dialect Dialect, r *http
 
 // logResponse logs the response to storage.
 func (p *Proxy) logResponse(requestID, sessionID string, dialect Dialect, resp *http.Response, startTime time.Time, dlpResult *DLPResult) {
-	// Read response body for logging (we need to buffer it for streaming)
-	// For now, just log metadata - full body logging is a Phase 2 feature
+	// Read response body for usage extraction
+	// We must buffer it to put it back for the client
+	var respBody []byte
+	if resp.Body != nil {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			p.logger.Error("read response body", "error", err, "request_id", requestID)
+		} else {
+			respBody = body
+			// Put the body back for the client
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+		}
+	}
+
+	// Extract token usage from the response
+	usage := ExtractUsage(respBody, dialect)
+
 	entry := &ResponseLogEntry{
 		RequestID:  requestID,
 		SessionID:  sessionID,
 		Timestamp:  time.Now().UTC(),
 		DurationMs: time.Since(startTime).Milliseconds(),
 		Response: ResponseInfo{
-			Status:  resp.StatusCode,
-			Headers: sanitizeHeaders(resp.Header),
+			Status:   resp.StatusCode,
+			Headers:  sanitizeHeaders(resp.Header),
+			BodySize: len(respBody),
+			BodyHash: HashBody(respBody),
 		},
+		Usage: usage,
+	}
+
+	// Log usage to structured logger for observability
+	if usage.InputTokens > 0 || usage.OutputTokens > 0 {
+		p.logger.Debug("response with usage",
+			"request_id", requestID,
+			"input_tokens", usage.InputTokens,
+			"output_tokens", usage.OutputTokens,
+		)
 	}
 
 	if err := p.storage.LogResponse(entry); err != nil {
