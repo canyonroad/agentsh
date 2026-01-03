@@ -4,13 +4,17 @@ package config
 type ProxyConfig struct {
 	Mode      string               `yaml:"mode"`
 	Port      int                  `yaml:"port"`
-	Upstreams ProxyUpstreamsConfig `yaml:"upstreams"`
+	Providers ProxyProvidersConfig `yaml:"providers"`
 }
 
-type ProxyUpstreamsConfig struct {
+type ProxyProvidersConfig struct {
 	Anthropic string `yaml:"anthropic"`
 	OpenAI    string `yaml:"openai"`
-	ChatGPT   string `yaml:"chatgpt"`
+}
+
+// IsCustomOpenAI returns true if a non-default OpenAI URL is configured.
+func (c ProxyProvidersConfig) IsCustomOpenAI() bool {
+	return c.OpenAI != "" && c.OpenAI != "https://api.openai.com"
 }
 
 type DLPConfig struct {
@@ -48,10 +52,9 @@ func DefaultProxyConfig() ProxyConfig {
 	return ProxyConfig{
 		Mode: "embedded",
 		Port: 0,
-		Upstreams: ProxyUpstreamsConfig{
+		Providers: ProxyProvidersConfig{
 			Anthropic: "https://api.anthropic.com",
 			OpenAI:    "https://api.openai.com",
-			ChatGPT:   "https://chatgpt.com/backend-api",
 		},
 	}
 }
