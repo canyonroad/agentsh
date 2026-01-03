@@ -72,68 +72,41 @@ func NewDialectDetector(configs map[Dialect]*DialectConfig) *DialectDetector {
 
 // Detect determines the dialect from the request.
 // Detection order:
-// 1. X-LLM-Dialect header (explicit override)
-// 2. Request path matching
-// 3. Host header hints
-// 4. Auth header inspection
+// 1. x-api-key header -> Anthropic
+// 2. anthropic-version header -> Anthropic
+// 3. Authorization: Bearer sk-* -> OpenAI API
+// 4. Authorization: Bearer <other> -> ChatGPT login (OAuth)
+// 5. No auth -> Unknown
 func (d *DialectDetector) Detect(r *http.Request) Dialect {
-	// 1. Explicit header override
-	if dialect := r.Header.Get("X-LLM-Dialect"); dialect != "" {
-		switch strings.ToLower(dialect) {
-		case "anthropic":
-			return DialectAnthropic
-		case "openai":
-			return DialectOpenAI
-		case "chatgpt":
-			return DialectChatGPT
-		}
-	}
-
-	// 2. Path-based detection
-	path := r.URL.Path
-
-	// ChatGPT backend-api is distinctive
-	if strings.HasPrefix(path, "/backend-api/") {
-		return DialectChatGPT
-	}
-
-	// Anthropic uses /v1/messages primarily
-	if strings.HasPrefix(path, "/v1/messages") || strings.HasPrefix(path, "/v1/complete") {
-		// Could be either, check for Anthropic-specific headers
-		if r.Header.Get("x-api-key") != "" || r.Header.Get("anthropic-version") != "" {
-			return DialectAnthropic
-		}
-	}
-
-	// OpenAI uses /v1/chat/completions, /v1/responses
-	if strings.HasPrefix(path, "/v1/chat/completions") || strings.HasPrefix(path, "/v1/responses") {
-		return DialectOpenAI
-	}
-
-	// 3. Host header hints (for proxied requests that include original host)
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
-	}
-	if strings.Contains(host, "anthropic.com") {
-		return DialectAnthropic
-	}
-	if strings.Contains(host, "openai.com") {
-		return DialectOpenAI
-	}
-	if strings.Contains(host, "chatgpt.com") {
-		return DialectChatGPT
-	}
-
-	// 4. Auth header inspection
+	// 1. Anthropic x-api-key header
 	if r.Header.Get("x-api-key") != "" {
 		return DialectAnthropic
 	}
+
+	// 2. Anthropic version header
 	if r.Header.Get("anthropic-version") != "" {
 		return DialectAnthropic
 	}
 
-	return DialectUnknown
+	// 3. Check Authorization header
+	auth := r.Header.Get("Authorization")
+	if auth == "" {
+		return DialectUnknown
+	}
+
+	// Parse Bearer token
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return DialectUnknown
+	}
+	token := strings.TrimPrefix(auth, "Bearer ")
+
+	// 4. Token starts with sk- -> OpenAI API
+	if strings.HasPrefix(token, "sk-") {
+		return DialectOpenAI
+	}
+
+	// 5. Other Bearer token -> ChatGPT login (OAuth)
+	return DialectChatGPT
 }
 
 // GetUpstream returns the upstream URL for the given dialect.
