@@ -17,13 +17,14 @@ on:
   # push:
   #   tags:
   #     - "v*"
-  workflow_dispatch:
-    inputs:
-      notarize:
-        description: 'Notarize the app bundle'
-        required: false
-        default: 'true'
-        type: boolean
+  # workflow_dispatch:
+  #   inputs:
+  #     notarize:
+  #       description: 'Notarize the app bundle'
+  #       required: false
+  #       default: 'true'
+  #       type: boolean
+  workflow_dispatch: # Keep minimal trigger for GitHub to parse the file
 
 permissions:
   contents: write
