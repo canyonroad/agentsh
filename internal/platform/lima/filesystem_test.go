@@ -10,7 +10,7 @@ import (
 )
 
 func TestNewFilesystem(t *testing.T) {
-	p := &Platform{vmName: "default"}
+	p := &Platform{instance: "default"}
 	fs := NewFilesystem(p)
 
 	if fs == nil {
@@ -31,7 +31,7 @@ func TestNewFilesystem(t *testing.T) {
 }
 
 func TestFilesystem_Implementation(t *testing.T) {
-	p := &Platform{vmName: "default"}
+	p := &Platform{instance: "default"}
 	fs := NewFilesystem(p)
 
 	if got := fs.Implementation(); got != "fuse3" {
@@ -40,7 +40,7 @@ func TestFilesystem_Implementation(t *testing.T) {
 }
 
 func TestFilesystem_Available(t *testing.T) {
-	p := &Platform{vmName: "default"}
+	p := &Platform{instance: "default"}
 	fs := &Filesystem{
 		platform:  p,
 		available: true,
@@ -58,7 +58,7 @@ func TestFilesystem_Available(t *testing.T) {
 }
 
 func TestFilesystem_Mount_NotAvailable(t *testing.T) {
-	p := &Platform{vmName: "default"}
+	p := &Platform{instance: "default"}
 	fs := &Filesystem{
 		platform:  p,
 		available: false,
@@ -87,7 +87,7 @@ func TestFilesystem_Mount_Success(t *testing.T) {
 }
 
 func TestFilesystem_Unmount_InvalidType(t *testing.T) {
-	p := &Platform{vmName: "default"}
+	p := &Platform{instance: "default"}
 	fs := NewFilesystem(p)
 
 	// Create a fake mount that's not the right type
