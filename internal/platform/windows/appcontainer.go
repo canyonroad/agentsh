@@ -25,11 +25,16 @@ type appContainer struct {
 var invalidChars = regexp.MustCompile(`[/\\:*?"<>|]`)
 
 var (
-	modUserenv = windows.NewLazySystemDLL("userenv.dll")
+	modUserenv   = windows.NewLazySystemDLL("userenv.dll")
+	modAdvapi32  = windows.NewLazySystemDLL("advapi32.dll")
 
 	procCreateAppContainerProfile                 = modUserenv.NewProc("CreateAppContainerProfile")
 	procDeleteAppContainerProfile                 = modUserenv.NewProc("DeleteAppContainerProfile")
 	procDeriveAppContainerSidFromAppContainerName = modUserenv.NewProc("DeriveAppContainerSidFromAppContainerName")
+
+	procSetNamedSecurityInfoW = modAdvapi32.NewProc("SetNamedSecurityInfoW")
+	procGetNamedSecurityInfoW = modAdvapi32.NewProc("GetNamedSecurityInfoW")
+	procSetEntriesInAclW      = modAdvapi32.NewProc("SetEntriesInAclW")
 )
 
 // uintptrToSID converts a uintptr (from Windows API) to *windows.SID.
@@ -179,5 +184,144 @@ func (c *appContainer) cleanup() error {
 // Caller must hold c.mu.
 func (c *appContainer) revokePathAccessLocked(path string) error {
 	// TODO: Implement ACL removal
+	return nil
+}
+
+// AccessMode specifies the type of access to grant.
+type AccessMode int
+
+const (
+	AccessRead AccessMode = iota
+	AccessReadWrite
+	AccessReadExecute
+	AccessFull
+)
+
+// SE_OBJECT_TYPE for files
+const seFileObject = 1
+
+// Access rights
+const (
+	genericRead    = 0x80000000
+	genericWrite   = 0x40000000
+	genericExecute = 0x20000000
+	genericAll     = 0x10000000
+)
+
+// ACL flags
+const (
+	objectInheritAce        = 0x1
+	containerInheritAce     = 0x2
+	daclSecurityInformation = 0x4
+)
+
+// explicitAccess is the EXPLICIT_ACCESS_W structure
+type explicitAccess struct {
+	grfAccessPermissions uint32
+	grfAccessMode        uint32 // SET_ACCESS = 2
+	grfInheritance       uint32
+	trustee              trustee
+}
+
+type trustee struct {
+	pMultipleTrustee         uintptr
+	MultipleTrusteeOperation uint32
+	TrusteeForm              uint32 // TRUSTEE_IS_SID = 0
+	TrusteeType              uint32 // TRUSTEE_IS_WELL_KNOWN_GROUP = 5
+	ptstrName                uintptr
+}
+
+func buildExplicitAccess(sid *windows.SID, accessMask uint32) explicitAccess {
+	return explicitAccess{
+		grfAccessPermissions: accessMask,
+		grfAccessMode:        2, // SET_ACCESS
+		grfInheritance:       objectInheritAce | containerInheritAce,
+		trustee: trustee{
+			TrusteeForm: 0, // TRUSTEE_IS_SID
+			ptstrName:   uintptr(unsafe.Pointer(sid)),
+		},
+	}
+}
+
+func setEntriesInAcl(count uint32, entries *explicitAccess, oldAcl uintptr, newAcl *uintptr) uint32 {
+	r1, _, _ := procSetEntriesInAclW.Call(
+		uintptr(count),
+		uintptr(unsafe.Pointer(entries)),
+		oldAcl,
+		uintptr(unsafe.Pointer(newAcl)),
+	)
+	return uint32(r1)
+}
+
+// grantPathAccess adds the container SID to the path's ACL.
+func (c *appContainer) grantPathAccess(path string, mode AccessMode) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.sid == nil {
+		return fmt.Errorf("container not created")
+	}
+
+	// Determine access mask based on mode
+	var accessMask uint32
+	switch mode {
+	case AccessRead:
+		accessMask = genericRead
+	case AccessReadWrite:
+		accessMask = genericRead | genericWrite
+	case AccessReadExecute:
+		accessMask = genericRead | genericExecute
+	case AccessFull:
+		accessMask = genericAll
+	}
+
+	// Get current security descriptor
+	pathPtr, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+
+	var pSecDesc uintptr
+	var pDacl uintptr
+
+	r1, _, _ := procGetNamedSecurityInfoW.Call(
+		uintptr(unsafe.Pointer(pathPtr)),
+		seFileObject,
+		daclSecurityInformation,
+		0, 0, // owner, group SID (not needed)
+		uintptr(unsafe.Pointer(&pDacl)),
+		0, // SACL
+		uintptr(unsafe.Pointer(&pSecDesc)),
+	)
+	if r1 != 0 {
+		return fmt.Errorf("GetNamedSecurityInfoW failed: %d", r1)
+	}
+	defer windows.LocalFree(windows.Handle(pSecDesc))
+
+	// Build explicit access entry for container SID
+	ea := buildExplicitAccess(c.sid, accessMask)
+
+	// Create new ACL with container entry
+	var pNewDacl uintptr
+	r1 = uintptr(setEntriesInAcl(1, &ea, pDacl, &pNewDacl))
+	if r1 != 0 {
+		return fmt.Errorf("SetEntriesInAcl failed: %d", r1)
+	}
+	defer windows.LocalFree(windows.Handle(pNewDacl))
+
+	// Apply new ACL
+	r1, _, _ = procSetNamedSecurityInfoW.Call(
+		uintptr(unsafe.Pointer(pathPtr)),
+		seFileObject,
+		daclSecurityInformation,
+		0, 0, // owner, group
+		pNewDacl,
+		0, // SACL
+	)
+	if r1 != 0 {
+		return fmt.Errorf("SetNamedSecurityInfoW failed: %d", r1)
+	}
+
+	c.grantedACLs = append(c.grantedACLs, path)
 	return nil
 }

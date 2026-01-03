@@ -53,6 +53,31 @@ func TestAppContainerCreateDelete(t *testing.T) {
 	}
 }
 
+func TestAppContainerGrantPath(t *testing.T) {
+	if !isAdmin() {
+		t.Skip("requires admin privileges")
+	}
+
+	// Create a temp directory to test ACL modification
+	tempDir := t.TempDir()
+
+	ac := newAppContainer("test-grant-path")
+	if err := ac.create(); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	defer ac.cleanup()
+
+	// Grant access should succeed
+	if err := ac.grantPathAccess(tempDir, AccessReadWrite); err != nil {
+		t.Fatalf("grantPathAccess failed: %v", err)
+	}
+
+	// Should be tracked for cleanup
+	if len(ac.grantedACLs) != 1 {
+		t.Errorf("expected 1 granted ACL, got %d", len(ac.grantedACLs))
+	}
+}
+
 func isAdmin() bool {
 	token, err := windows.OpenCurrentProcessToken()
 	if err != nil {
