@@ -255,6 +255,26 @@ Lima/virtiofs   █████████████████████�
 | Windows Defender | Yes | N/A | Policy modifications |
 | LSA settings | Yes | N/A | Credential access |
 
+## Windows Sandbox Configuration
+
+| Configuration | Security | Performance | Use Case |
+|--------------|----------|-------------|----------|
+| AppContainer + Minifilter | Maximum | ~5-10ms startup | AI agent execution |
+| AppContainer only | High | ~3-5ms startup | Isolated dev environment |
+| Minifilter only | Medium | <1ms startup | Policy enforcement only |
+| Neither | None | Baseline | Legacy/unsandboxed |
+
+### Configuration Example
+
+```yaml
+sandbox:
+  windows:
+    use_app_container: true   # Default: true
+    use_minifilter: true      # Default: true
+    network_access: none      # none, outbound, local, full
+    fail_on_error: true       # Default: true
+```
+
 ## macOS Configuration Options
 
 | Configuration | File Interception | Network | Isolation | Ease of Setup | Security |
