@@ -22,6 +22,7 @@ If you're on Windows, the recommended approach is to run agentsh inside WSL2 or 
 
 - **FUSE workspace view:** Linux (FUSE3), macOS (FUSE-T), and Windows (WinFsp). In containers requires `/dev/fuse` + `SYS_ADMIN`.
 - **FUSE event emission:** File operation events (open, read, write, create, delete, rename) are emitted to the configured EventChannel for audit logging and monitoring.
+- **Process sandboxing:** Linux (namespaces via unshare), macOS (sandbox-exec with SBPL profiles), Windows (AppContainer).
 - **Network visibility + policy enforcement:** works via the per-session proxy (DNS/connect/HTTP events).
 - **Transparent netns interception:** optional, Linux/root-only (requires privileges; proxy mode works without it).
 - **cgroups v2 limits:** optional, Linux-only; disabled by default (requires a writable cgroup base path).

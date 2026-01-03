@@ -45,6 +45,7 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | PID namespace | Yes | No | No | Yes | No | Yes |
 | User namespace | Yes | No | No | Yes | No | Yes |
 | AppContainer | N/A | N/A | N/A | N/A | Partial | N/A |
+| sandbox-exec (SBPL) | N/A | Yes | Yes | N/A | N/A | N/A |
 | **Syscall Filtering** |
 | seccomp-bpf | Yes | No | No | Yes | No | Yes |
 | Process exec blocking | Yes | Yes | No | Yes | No | Yes |
@@ -73,9 +74,9 @@ This document provides a comprehensive comparison of agentsh capabilities across
 |----------|:-----:|:----------:|:---------:|:---------:|:--------------:|:---------:|
 | **Linux Native** | 100% | Yes | Yes | Full | Yes | Full |
 | **Windows WSL2** | 100% | Yes | Yes | Full | Yes | Full |
-| **macOS ESF+NE** | 90% | Yes | Yes | None | Exec only | None |
+| **macOS ESF+NE** | 90% | Yes | Yes | Minimal | Exec only | None |
 | **macOS + Lima** | 85% | Yes | Yes | Full | Yes | Full |
-| **macOS FUSE-T** | 70% | Yes | Yes | None | No | None |
+| **macOS FUSE-T** | 70% | Yes | Yes | Minimal | No | None |
 | **Windows Native** | 85% | Yes | Yes | Partial | No | Partial |
 
 ## Security Feature Coverage
@@ -91,7 +92,7 @@ Windows WSL2          ███████████████████�
                       File✓   Net✓    Iso✓      Sys✓     Res✓
 
 macOS ESF+NE          ████████████████████████████████████████░░░░░░░░   90%
-                      File✓   Net✓    Iso✗      Sys⚠     Res✗
+                      File✓   Net✓    Iso⚠      Sys⚠     Res✗
                       (ESF requires Apple approval; NE is standard capability)
 
 macOS + Lima          ██████████████████████████████████████░░░░░░░░░░   85%
@@ -99,8 +100,8 @@ macOS + Lima          ███████████████████�
                       (VM overhead, file I/O slightly slower)
 
 macOS FUSE-T + pf     ██████████████████████████████░░░░░░░░░░░░░░░░░░   70%
-                      File✓   Net✓    Iso✗      Sys✗     Res✗
-                      (No isolation, no syscall filter, no resource limits)
+                      File✓   Net✓    Iso⚠      Sys✗     Res✗
+                      (Minimal isolation via sandbox-exec, no syscall filter)
 
 Windows Native        ██████████████████████████████████████░░░░░░░░░░   85%
                       File✓   Net✓    Iso⚠      Sys✗     Res⚠
@@ -291,8 +292,8 @@ sandbox:
 
 | Configuration | File Interception | Network | Isolation | Ease of Setup | Security |
 |---------------|:-----------------:|:-------:|:---------:|:-------------:|:--------:|
-| ESF + NE | Endpoint Security | Network Extension | None | Medium (ESF needs approval) | 90% |
-| FUSE-T + pf | FUSE-T (NFS) | pf packet filter | None | Easy (`brew install`) | 70% |
+| ESF + NE | Endpoint Security | Network Extension | Minimal (sandbox-exec) | Medium (ESF needs approval) | 90% |
+| FUSE-T + pf | FUSE-T (NFS) | pf packet filter | Minimal (sandbox-exec) | Easy (`brew install`) | 70% |
 | Lima VM | FUSE3 in VM | iptables in VM | Full | Medium | 85% |
 | Degraded | FSEvents (observe) | pcap (observe) | None | None required | 25% |
 
@@ -319,7 +320,8 @@ sandbox:
 - Best option for commercial security products
 
 ### macOS FUSE-T + pf
-- **No process isolation** - agents can see all processes
+- **Minimal process isolation** - sandbox-exec with SBPL profiles provides file/network restrictions
+- **No namespace isolation** - macOS has no namespace equivalent; agents can see all processes
 - **No resource limits** - cannot enforce CPU/memory limits
 - **Resource monitoring available** - native Mach API monitoring for memory, CPU, and thread count
 - **No syscall filtering** - cannot block dangerous syscalls

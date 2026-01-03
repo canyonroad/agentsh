@@ -189,7 +189,7 @@ macOS has significantly reduced security enforcement compared to Linux due to pl
 |-----------|-------|-------|--------|
 | File blocking | FUSE (enforced) | FUSE-T (enforced with CGO) | **Enforced when built with CGO** |
 | Network blocking | eBPF/iptables | pf (loopback only) | **Network policies incomplete** |
-| Process isolation | Namespaces | None | No isolation between agent and host |
+| Process isolation | Namespaces | sandbox-exec (minimal) | **Minimal isolation via SBPL profiles** |
 | Resource limits | cgroups v2 | None | Memory/CPU limits not enforced |
 | Syscall filtering | seccomp | None | Cannot restrict syscalls |
 | Process tracking | ptrace/wait | Polling (100ms) | Processes may escape detection |
@@ -214,6 +214,7 @@ macOS has significantly reduced security enforcement compared to Linux due to pl
 - pf network rules: **Loopback only** (real interfaces not intercepted)
 - Endpoint Security Framework: **Implemented** (requires Apple approval for ESF entitlement)
 - Network Extension: **Implemented** (standard capability - no Apple approval needed)
+- sandbox-exec: **Implemented** (SBPL-based process sandboxing, deprecated but functional)
 
 **ESF+NE Enterprise Mode:**
 
@@ -224,6 +225,24 @@ When running with ESF entitlements (requires Apple approval) and Network Extensi
 - Session tracking maps processes to agentsh sessions for policy scoping
 
 See [macOS ESF+NE Architecture](docs/macos-esf-ne-architecture.md) for deployment details.
+
+**sandbox-exec Process Sandboxing:**
+
+For non-enterprise deployments, agentsh uses macOS's `sandbox-exec` command with SBPL (Sandbox Profile Language) profiles to provide minimal process isolation:
+
+| Feature | Description |
+|---------|-------------|
+| File access | Restricted to workspace and explicitly allowed paths |
+| Network access | Denied by default, enabled via `capabilities: ["network"]` |
+| System access | Read-only access to system libraries and frameworks |
+| Temporary files | Access to `/tmp` and `/var/folders` |
+
+**sandbox-exec limitations:**
+- `sandbox-exec` is deprecated by Apple but still functional on all macOS versions
+- Provides file and network restrictions only (no process namespace isolation)
+- Cannot enforce resource limits (CPU, memory)
+- Cannot filter syscalls
+- Profile is passed inline via `-p` flag
 
 **Recommendations for macOS deployments:**
 - **Enterprise:** Use ESF+NE mode for full enforcement (ESF requires Apple approval; NE is standard capability)
@@ -492,6 +511,7 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2026-01-03 | Implemented macOS sandbox-exec wrapper with SBPL profiles |
 | 2026-01-03 | Implemented FUSE event emission for file operation monitoring |
 | 2026-01-03 | Implemented Lima and WSL2 Linux namespace isolation via unshare |
 | 2026-01-03 | Implemented Lima and WSL2 bindfs-based filesystem mounting inside VMs |
