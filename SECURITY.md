@@ -406,6 +406,47 @@ WindowsSandboxOptions{
 
 See [Windows Driver Deployment Guide](docs/windows-driver-deployment.md) for installation and configuration.
 
+### Windows WSL2
+
+For Windows deployments requiring full Linux-level security, agentsh supports WSL2 mode. WSL2 runs a real Linux kernel, providing full Linux capabilities:
+
+| Component | Windows Native | Windows WSL2 | Impact |
+|-----------|----------------|--------------|--------|
+| File blocking | Mini Filter | FUSE3 in VM | ✅ **Full enforcement** |
+| Network blocking | WinDivert | iptables DNAT | ✅ **Full enforcement** |
+| Process isolation | AppContainer | Linux namespaces | ✅ **Full isolation** |
+| Resource limits | Job Objects | cgroups v2 | ✅ **Full enforcement** |
+| Syscall filtering | None | seccomp-bpf | ✅ **Available** |
+| Registry monitoring | Mini Filter | N/A | ❌ Not available |
+
+**WSL2 Implementation Details:**
+
+| Feature | Implementation |
+|---------|----------------|
+| Resource limits | cgroups v2 at `/sys/fs/cgroup/agentsh/<session>` |
+| CPU limits | `cpu.max` (quota/period in microseconds) |
+| Memory limits | `memory.max` (bytes) |
+| Process limits | `pids.max` |
+| Disk I/O limits | `io.max` (rbps/wbps per device) |
+| Network interception | iptables DNAT via `AGENTSH` chain |
+| TCP redirect | All outbound TCP (except localhost) to proxy port |
+| DNS redirect | UDP port 53 to DNS proxy port |
+
+**Security Score:** 100% (Full Linux capabilities inside VM)
+
+**Trade-offs vs Windows Native:**
+- ✅ Full Linux security features (namespaces, seccomp, cgroups)
+- ✅ Better isolation than AppContainer
+- ❌ No Windows registry monitoring
+- ❌ Slight VM overhead
+- ❌ File I/O to Windows drives (`/mnt/c/`) slower than native
+
+**Recommendations for WSL2 deployments:**
+- Use WSL2 for maximum security on Windows
+- Keep workspaces on Linux filesystem (`/home/...`) for best performance
+- Install WSL2 with: `wsl --install -d Ubuntu`
+- agentsh auto-detects WSL2 when running inside the VM
+
 ## Security Defaults
 
 | Component | Default |
@@ -451,6 +492,7 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2026-01-03 | Implemented WSL2 cgroups v2 resource limits and iptables network interception |
 | 2026-01-03 | Implemented Lima VM cgroups v2 resource limits and iptables network interception |
 | 2026-01-02 | Added embedded LLM proxy with DLP redaction and usage tracking |
 | 2026-01-02 | Implemented AppContainer sandbox execution with stdout/stderr capture |
