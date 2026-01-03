@@ -16,8 +16,11 @@ const (
 	DialectUnknown   Dialect = "unknown"
 	DialectAnthropic Dialect = "anthropic"
 	DialectOpenAI    Dialect = "openai"
-	DialectChatGPT   Dialect = "chatgpt" // OpenAI via ChatGPT account login
 )
+
+// chatGPTUpstream is the hardcoded ChatGPT backend URL, used only when
+// OpenAI provider is set to the default URL and an OAuth token is detected.
+const chatGPTUpstream = "https://chatgpt.com/backend-api"
 
 // DialectConfig holds configuration for a specific LLM provider dialect.
 type DialectConfig struct {
@@ -36,7 +39,6 @@ type DialectConfig struct {
 func DefaultDialectConfigs() map[Dialect]*DialectConfig {
 	anthropicURL, _ := url.Parse("https://api.anthropic.com")
 	openaiURL, _ := url.Parse("https://api.openai.com")
-	chatgptURL, _ := url.Parse("https://chatgpt.com/backend-api")
 
 	return map[Dialect]*DialectConfig{
 		DialectAnthropic: {
@@ -47,12 +49,7 @@ func DefaultDialectConfigs() map[Dialect]*DialectConfig {
 		DialectOpenAI: {
 			Upstream:     openaiURL,
 			AuthHeader:   "Authorization",
-			PathPrefixes: []string{"/v1/chat/completions", "/v1/responses", "/v1/embeddings"},
-		},
-		DialectChatGPT: {
-			Upstream:     chatgptURL,
-			AuthHeader:   "Authorization",
-			PathPrefixes: []string{"/backend-api/"},
+			PathPrefixes: []string{"/v1/chat/completions", "/v1/responses", "/v1/embeddings", "/backend-api/"},
 		},
 	}
 }
@@ -74,9 +71,8 @@ func NewDialectDetector(configs map[Dialect]*DialectConfig) *DialectDetector {
 // Detection order:
 // 1. x-api-key header -> Anthropic
 // 2. anthropic-version header -> Anthropic
-// 3. Authorization: Bearer sk-* -> OpenAI API
-// 4. Authorization: Bearer <other> -> ChatGPT login (OAuth)
-// 5. No auth -> Unknown
+// 3. Authorization header present -> OpenAI
+// 4. No auth -> Unknown
 func (d *DialectDetector) Detect(r *http.Request) Dialect {
 	// 1. Anthropic x-api-key header
 	if r.Header.Get("x-api-key") != "" {
@@ -88,25 +84,24 @@ func (d *DialectDetector) Detect(r *http.Request) Dialect {
 		return DialectAnthropic
 	}
 
-	// 3. Check Authorization header
-	auth := r.Header.Get("Authorization")
-	if auth == "" {
-		return DialectUnknown
-	}
-
-	// Parse Bearer token
-	if !strings.HasPrefix(auth, "Bearer ") {
-		return DialectUnknown
-	}
-	token := strings.TrimPrefix(auth, "Bearer ")
-
-	// 4. Token starts with sk- -> OpenAI API
-	if strings.HasPrefix(token, "sk-") {
+	// 3. Any Authorization header -> OpenAI dialect
+	if r.Header.Get("Authorization") != "" {
 		return DialectOpenAI
 	}
 
-	// 5. Other Bearer token -> ChatGPT login (OAuth)
-	return DialectChatGPT
+	return DialectUnknown
+}
+
+// IsChatGPTToken returns true if the Authorization header contains an OAuth token
+// (non-sk-* Bearer token), indicating ChatGPT login flow.
+func IsChatGPTToken(r *http.Request) bool {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return false
+	}
+	token := strings.TrimPrefix(auth, "Bearer ")
+	// OpenAI API keys start with sk-, ChatGPT OAuth tokens don't
+	return !strings.HasPrefix(token, "sk-")
 }
 
 // GetUpstream returns the upstream URL for the given dialect.
@@ -141,15 +136,6 @@ func (rw *RequestRewriter) Rewrite(r *http.Request, dialect Dialect) (*http.Requ
 	// Update URL to point to upstream
 	outReq.URL.Scheme = upstream.Scheme
 	outReq.URL.Host = upstream.Host
-
-	// For ChatGPT backend-api, the path structure is different
-	if dialect == DialectChatGPT {
-		// Requests come in as /backend-api/..., upstream expects the same
-		// but we need to ensure the base path is correct
-		if !strings.HasPrefix(outReq.URL.Path, "/backend-api") {
-			outReq.URL.Path = "/backend-api" + outReq.URL.Path
-		}
-	}
 
 	// Set Host header to upstream
 	outReq.Host = upstream.Host
