@@ -182,8 +182,11 @@ sandbox:
 - No resource limits (CPU, memory) - use Lima for that
 - No syscall filtering (unlike Linux seccomp)
 - Child processes inherit the sandbox (escape not possible via fork)
+- No PID namespace isolation (sandboxed processes can see all system processes)
 
 **Security Score:** Contributes to the "Minimal" process isolation tier on macOS.
+
+**Implementation:** See `internal/platform/darwin/sandbox.go` for the SBPL profile generation logic.
 
 ### Windows (Native - Mini Filter Driver)
 

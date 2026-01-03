@@ -285,10 +285,10 @@ The generated profile follows this structure:
 - `sandbox-exec` is deprecated by Apple but still functional on all macOS versions
 - Provides file and network restrictions only (no process namespace isolation)
 - Cannot enforce resource limits (CPU, memory)
-- Cannot filter syscalls
+- Cannot filter syscalls (unlike Linux seccomp-bpf)
 - Profile is passed inline via `-p` flag
 - No cgroup equivalent for resource accounting
-- Process tree escapes possible (child processes inherit sandbox)
+- Child processes inherit the sandbox (escape via fork not possible, but no PID namespace isolation)
 
 **Recommendations for macOS deployments:**
 - **Enterprise:** Use ESF+NE mode for full enforcement (ESF requires Apple approval; NE is standard capability)
