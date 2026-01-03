@@ -1,6 +1,6 @@
-//go:build windows
+//go:build darwin
 
-package wsl2
+package lima
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 )
 
 func TestNewSandboxManager(t *testing.T) {
-	p := &Platform{distro: "Ubuntu"}
+	p := &Platform{instance: "default"}
 	m := NewSandboxManager(p)
 
 	if m == nil {
@@ -27,7 +27,7 @@ func TestNewSandboxManager(t *testing.T) {
 }
 
 func TestSandboxManager_Available(t *testing.T) {
-	p := &Platform{distro: "Ubuntu"}
+	p := &Platform{instance: "default"}
 	m := &SandboxManager{
 		platform:  p,
 		available: true,
@@ -57,7 +57,7 @@ func TestSandboxManager_IsolationLevel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := &Platform{distro: "Ubuntu"}
+			p := &Platform{instance: "default"}
 			m := &SandboxManager{
 				platform:       p,
 				available:      true,
@@ -73,7 +73,7 @@ func TestSandboxManager_IsolationLevel(t *testing.T) {
 }
 
 func TestSandboxManager_Create_NotAvailable(t *testing.T) {
-	p := &Platform{distro: "Ubuntu"}
+	p := &Platform{instance: "default"}
 	m := &SandboxManager{
 		platform:  p,
 		available: false,
@@ -87,7 +87,7 @@ func TestSandboxManager_Create_NotAvailable(t *testing.T) {
 }
 
 func TestSandboxManager_Create_Success(t *testing.T) {
-	p := &Platform{distro: "Ubuntu"}
+	p := &Platform{instance: "default"}
 	m := &SandboxManager{
 		platform:       p,
 		available:      true,
@@ -97,7 +97,7 @@ func TestSandboxManager_Create_Success(t *testing.T) {
 
 	cfg := platform.SandboxConfig{
 		Name:          "test-sandbox",
-		WorkspacePath: `C:\Users\test\workspace`,
+		WorkspacePath: "/Users/test/workspace",
 	}
 
 	sandbox, err := m.Create(cfg)
@@ -115,9 +115,8 @@ func TestSandboxManager_Create_Success(t *testing.T) {
 
 	// Check internal state
 	s := sandbox.(*Sandbox)
-	expectedWSLPath := "/mnt/c/Users/test/workspace"
-	if s.wslWorkspace != expectedWSLPath {
-		t.Errorf("wslWorkspace = %q, want %q", s.wslWorkspace, expectedWSLPath)
+	if s.limaWorkspace != "/Users/test/workspace" {
+		t.Errorf("limaWorkspace = %q, want /Users/test/workspace", s.limaWorkspace)
 	}
 
 	if s.isolationLevel != platform.IsolationFull {
@@ -126,7 +125,7 @@ func TestSandboxManager_Create_Success(t *testing.T) {
 }
 
 func TestSandboxManager_Create_DefaultName(t *testing.T) {
-	p := &Platform{distro: "Ubuntu"}
+	p := &Platform{instance: "default"}
 	m := &SandboxManager{
 		platform:  p,
 		available: true,
@@ -138,8 +137,8 @@ func TestSandboxManager_Create_DefaultName(t *testing.T) {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	if sandbox.ID() != "sandbox-wsl2" {
-		t.Errorf("ID() = %q, want sandbox-wsl2", sandbox.ID())
+	if sandbox.ID() != "sandbox-lima" {
+		t.Errorf("ID() = %q, want sandbox-lima", sandbox.ID())
 	}
 }
 
@@ -162,9 +161,9 @@ func TestSandbox_Execute_Closed(t *testing.T) {
 	}
 }
 
-func TestSandbox_Execute_RequiresRealWSL2(t *testing.T) {
-	// This test can only run when WSL2 is actually available
-	t.Skip("Requires real WSL2 environment")
+func TestSandbox_Execute_RequiresRealLima(t *testing.T) {
+	// This test can only run when Lima is actually available
+	t.Skip("Requires real Lima environment")
 }
 
 func TestSandbox_Close(t *testing.T) {

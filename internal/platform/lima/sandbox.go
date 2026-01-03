@@ -122,9 +122,66 @@ func (s *Sandbox) Execute(ctx context.Context, cmd string, args ...string) (*pla
 	s.mu.Unlock()
 
 	// Build the command to run inside Lima VM with namespace isolation
-	// TODO: Add proper namespace flags based on isolation level
-	limaArgs := []string{cmd}
-	limaArgs = append(limaArgs, args...)
+	var limaArgs []string
+
+	switch s.isolationLevel {
+	case platform.IsolationFull:
+		// Full isolation: all namespaces including user namespace
+		// --fork: fork before executing command (required for PID namespace)
+		// --map-root-user: map current user to root in user namespace
+		// --mount-proc: mount new /proc for the new PID namespace
+		limaArgs = []string{
+			"unshare",
+			"--user",
+			"--map-root-user",
+			"--mount",
+			"--uts",
+			"--ipc",
+			"--net",
+			"--pid",
+			"--fork",
+			"--mount-proc",
+		}
+		// Add working directory if specified
+		if s.limaWorkspace != "" {
+			limaArgs = append(limaArgs, "--wd="+s.limaWorkspace)
+		}
+		limaArgs = append(limaArgs, "--", cmd)
+		limaArgs = append(limaArgs, args...)
+
+	case platform.IsolationPartial:
+		// Partial isolation: mount, UTS, IPC, PID namespaces (no user namespace)
+		// Requires root/sudo for some operations
+		limaArgs = []string{
+			"unshare",
+			"--mount",
+			"--uts",
+			"--ipc",
+			"--pid",
+			"--fork",
+			"--mount-proc",
+		}
+		// Add working directory if specified
+		if s.limaWorkspace != "" {
+			limaArgs = append(limaArgs, "--wd="+s.limaWorkspace)
+		}
+		limaArgs = append(limaArgs, "--", cmd)
+		limaArgs = append(limaArgs, args...)
+
+	default:
+		// No isolation or minimal - run command directly
+		if s.limaWorkspace != "" {
+			// Use sh -c to handle cd and command
+			shellCmd := fmt.Sprintf("cd %s && %s", s.limaWorkspace, cmd)
+			for _, arg := range args {
+				shellCmd += " " + arg
+			}
+			limaArgs = []string{"sh", "-c", shellCmd}
+		} else {
+			limaArgs = []string{cmd}
+			limaArgs = append(limaArgs, args...)
+		}
+	}
 
 	out, err := s.platform.RunInLima(limaArgs...)
 	if err != nil {

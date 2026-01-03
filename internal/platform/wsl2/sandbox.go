@@ -122,9 +122,66 @@ func (s *Sandbox) Execute(ctx context.Context, cmd string, args ...string) (*pla
 	s.mu.Unlock()
 
 	// Build the command to run inside WSL2 with namespace isolation
-	// TODO: Add proper namespace flags based on isolation level
-	wslArgs := []string{cmd}
-	wslArgs = append(wslArgs, args...)
+	var wslArgs []string
+
+	switch s.isolationLevel {
+	case platform.IsolationFull:
+		// Full isolation: all namespaces including user namespace
+		// --fork: fork before executing command (required for PID namespace)
+		// --map-root-user: map current user to root in user namespace
+		// --mount-proc: mount new /proc for the new PID namespace
+		wslArgs = []string{
+			"unshare",
+			"--user",
+			"--map-root-user",
+			"--mount",
+			"--uts",
+			"--ipc",
+			"--net",
+			"--pid",
+			"--fork",
+			"--mount-proc",
+		}
+		// Add working directory if specified
+		if s.wslWorkspace != "" {
+			wslArgs = append(wslArgs, "--wd="+s.wslWorkspace)
+		}
+		wslArgs = append(wslArgs, "--", cmd)
+		wslArgs = append(wslArgs, args...)
+
+	case platform.IsolationPartial:
+		// Partial isolation: mount, UTS, IPC, PID namespaces (no user namespace)
+		// Requires root/sudo for some operations
+		wslArgs = []string{
+			"unshare",
+			"--mount",
+			"--uts",
+			"--ipc",
+			"--pid",
+			"--fork",
+			"--mount-proc",
+		}
+		// Add working directory if specified
+		if s.wslWorkspace != "" {
+			wslArgs = append(wslArgs, "--wd="+s.wslWorkspace)
+		}
+		wslArgs = append(wslArgs, "--", cmd)
+		wslArgs = append(wslArgs, args...)
+
+	default:
+		// No isolation or minimal - run command directly
+		if s.wslWorkspace != "" {
+			// Use sh -c to handle cd and command
+			shellCmd := fmt.Sprintf("cd %s && %s", s.wslWorkspace, cmd)
+			for _, arg := range args {
+				shellCmd += " " + arg
+			}
+			wslArgs = []string{"sh", "-c", shellCmd}
+		} else {
+			wslArgs = []string{cmd}
+			wslArgs = append(wslArgs, args...)
+		}
+	}
 
 	out, err := s.platform.RunInWSL(wslArgs...)
 	if err != nil {
