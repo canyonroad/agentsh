@@ -109,6 +109,12 @@ agentsh server  # Will use darwin-lima mode
 - TCP traffic redirected to proxy port (localhost excluded)
 - DNS (UDP port 53) redirected to DNS proxy port
 
+**Filesystem Mounting (bindfs):** Lima uses bindfs for FUSE-based filesystem mounting inside the VM:
+- Source directory mounted to mount point using bindfs (passthrough mount)
+- Automatic bindfs installation if not present (`sudo apt install bindfs`)
+- Unmount via `fusermount -u` with `sudo umount` fallback
+- Mount tracking prevents duplicate mounts to same location
+
 **Manual Mode Selection:** You can force Lima mode in your config:
 
 ```yaml
@@ -260,6 +266,13 @@ See [Windows Driver Deployment Guide](windows-driver-deployment.md) for installa
 - TCP traffic redirected to proxy port (localhost excluded)
 - DNS (UDP port 53) redirected to DNS proxy port
 
+**Filesystem Mounting (bindfs):** WSL2 uses bindfs for FUSE-based filesystem mounting inside the VM:
+- Windows paths translated to WSL paths (e.g., `C:\Users\test` → `/mnt/c/Users/test`)
+- Source directory mounted to mount point using bindfs (passthrough mount)
+- Automatic bindfs installation if not present (`sudo apt install bindfs`)
+- Unmount via `fusermount -u` with `sudo umount` fallback
+- Mount tracking prevents duplicate mounts to same location
+
 ### Docker (any host)
 
 FUSE requires extra privileges inside containers:
@@ -278,6 +291,7 @@ docker run --rm -it \
 
 - **FUSE mount fails (Linux):** ensure FUSE3 is installed (host/VM) and, in Docker, `/dev/fuse` is present and `SYS_ADMIN` is allowed.
 - **FUSE-T mount fails (macOS):** ensure FUSE-T is installed (`brew install fuse-t`) and the binary was built with CGO enabled.
+- **bindfs mount fails (Lima/WSL2):** ensure bindfs is installed in the VM (`sudo apt install bindfs`) and `/dev/fuse` is available.
 - **System Extension not loading (macOS ESF+NE):** check System Settings > General > Login Items & Extensions. User must approve the System Extension.
 - **XPC connection fails (macOS ESF+NE):** verify the System Extension is approved and running. Check Console.app for XPC errors.
 - **ESF client initialization fails:** ensure the app is signed with valid ESF entitlement from Apple (requires approval).

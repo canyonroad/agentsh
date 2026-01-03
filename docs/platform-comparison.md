@@ -341,6 +341,10 @@ sandbox:
 - **Network interception**: iptables DNAT via `AGENTSH` chain
   - TCP redirect to proxy (excludes localhost)
   - UDP port 53 redirect to DNS proxy
+- **Filesystem mounting**: bindfs passthrough mount inside VM
+  - Source directory bound to mount point via bindfs
+  - Automatic bindfs installation if not present
+  - Unmount via fusermount -u with umount fallback
 - **Process isolation**: Linux namespaces (mount, network, PID, user)
 - **Syscall filtering**: seccomp-bpf available in VM
 
@@ -373,6 +377,11 @@ sandbox:
 - **Network interception**: iptables DNAT via `AGENTSH` chain
   - TCP redirect to proxy (excludes localhost)
   - UDP port 53 redirect to DNS proxy
+- **Filesystem mounting**: bindfs passthrough mount inside VM
+  - Windows paths translated to WSL paths (`C:\...` → `/mnt/c/...`)
+  - Source directory bound to mount point via bindfs
+  - Automatic bindfs installation if not present
+  - Unmount via fusermount -u with umount fallback
 - **Process isolation**: Linux namespaces (mount, network, PID, user)
 - **Syscall filtering**: seccomp-bpf available in VM
 
