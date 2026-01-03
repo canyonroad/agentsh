@@ -267,6 +267,7 @@ The driver provides comprehensive registry protection:
 - Registry blocking: ✅ **Enforced** (all operations with high-risk protection)
 - Process tracking: ✅ **Working** (driver-based session association)
 - Policy caching: ✅ **Working** (configurable TTL, per-rule override)
+- AppContainer sandbox: ✅ **Enforced** (process isolation with output capture)
 
 **Recommendations for Windows deployments:**
 - Use the mini filter driver for production deployments
@@ -311,6 +312,8 @@ Windows 8+ supports AppContainer, a kernel-enforced capability isolation mechani
 | Registry isolation | Automatic isolation of registry access |
 | Network control | Configurable network access levels |
 | ACL granting | Explicit path access required for file system access |
+| Output capture | Full stdout/stderr capture from sandboxed processes |
+| ACL cleanup | Automatic removal of granted ACLs on sandbox close |
 
 **Network Access Levels:**
 
@@ -378,6 +381,8 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2026-01-02 | Implemented AppContainer sandbox execution with stdout/stderr capture |
+| 2026-01-02 | Added ACL cleanup on AppContainer sandbox close |
 | 2026-01-02 | Added WinFsp filesystem mounting with shared fuse package for Windows |
 | 2026-01-02 | Added minifilter process exclusion for WinFsp coexistence |
 | 2026-01-01 | Implemented macOS ESF+NE for enterprise-tier enforcement (90% security score) |

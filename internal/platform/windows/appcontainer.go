@@ -194,7 +194,65 @@ func (c *appContainer) cleanup() error {
 // revokePathAccessLocked removes container SID from path ACL.
 // Caller must hold c.mu.
 func (c *appContainer) revokePathAccessLocked(path string) error {
-	// TODO: Implement ACL removal
+	if c.sid == nil {
+		return nil // Nothing to revoke
+	}
+
+	pathPtr, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+
+	// Get current security descriptor
+	var pSecDesc uintptr
+	var pDacl uintptr
+
+	r1, _, _ := procGetNamedSecurityInfoW.Call(
+		uintptr(unsafe.Pointer(pathPtr)),
+		seFileObject,
+		daclSecurityInformation,
+		0, 0, // owner, group SID (not needed)
+		uintptr(unsafe.Pointer(&pDacl)),
+		0, // SACL
+		uintptr(unsafe.Pointer(&pSecDesc)),
+	)
+	if r1 != 0 {
+		return fmt.Errorf("GetNamedSecurityInfoW failed: %d", r1)
+	}
+	defer windows.LocalFree(windows.Handle(pSecDesc))
+
+	// Build explicit access entry with REVOKE_ACCESS mode
+	ea := explicitAccess{
+		grfAccessPermissions: 0,
+		grfAccessMode:        4, // REVOKE_ACCESS
+		grfInheritance:       0,
+		trustee: trustee{
+			TrusteeForm: 0, // TRUSTEE_IS_SID
+			ptstrName:   uintptr(unsafe.Pointer(c.sid)),
+		},
+	}
+
+	// Create new ACL without container entry
+	var pNewDacl uintptr
+	r1 = uintptr(setEntriesInAcl(1, &ea, pDacl, &pNewDacl))
+	if r1 != 0 {
+		return fmt.Errorf("SetEntriesInAcl (revoke) failed: %d", r1)
+	}
+	defer windows.LocalFree(windows.Handle(pNewDacl))
+
+	// Apply new ACL
+	r1, _, _ = procSetNamedSecurityInfoW.Call(
+		uintptr(unsafe.Pointer(pathPtr)),
+		seFileObject,
+		daclSecurityInformation,
+		0, 0, // owner, group
+		pNewDacl,
+		0, // SACL
+	)
+	if r1 != 0 {
+		return fmt.Errorf("SetNamedSecurityInfoW (revoke) failed: %d", r1)
+	}
+
 	return nil
 }
 
@@ -409,8 +467,79 @@ type startupInfoEx struct {
 	AttributeList uintptr
 }
 
+// ContainerProcess wraps a process running in an AppContainer with its I/O handles.
+type ContainerProcess struct {
+	Process      *os.Process
+	Stdout       *os.File // Read end of stdout pipe (nil if not captured)
+	Stderr       *os.File // Read end of stderr pipe (nil if not captured)
+	stdoutWriter *os.File // Write end (closed after process starts)
+	stderrWriter *os.File // Write end (closed after process starts)
+}
+
+// Wait waits for the process to exit and returns its state.
+func (cp *ContainerProcess) Wait() (*os.ProcessState, error) {
+	return cp.Process.Wait()
+}
+
+// Close closes all handles associated with the process.
+func (cp *ContainerProcess) Close() {
+	if cp.Stdout != nil {
+		cp.Stdout.Close()
+	}
+	if cp.Stderr != nil {
+		cp.Stderr.Close()
+	}
+	if cp.stdoutWriter != nil {
+		cp.stdoutWriter.Close()
+	}
+	if cp.stderrWriter != nil {
+		cp.stderrWriter.Close()
+	}
+}
+
+// createInheritablePipe creates a pipe where the write end is inheritable.
+func createInheritablePipe() (r, w *os.File, err error) {
+	var readHandle, writeHandle windows.Handle
+
+	// Create pipe
+	err = windows.CreatePipe(&readHandle, &writeHandle, nil, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Make write handle inheritable
+	err = windows.SetHandleInformation(writeHandle, windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT)
+	if err != nil {
+		windows.CloseHandle(readHandle)
+		windows.CloseHandle(writeHandle)
+		return nil, nil, err
+	}
+
+	// Make read handle non-inheritable (default, but be explicit)
+	err = windows.SetHandleInformation(readHandle, windows.HANDLE_FLAG_INHERIT, 0)
+	if err != nil {
+		windows.CloseHandle(readHandle)
+		windows.CloseHandle(writeHandle)
+		return nil, nil, err
+	}
+
+	r = os.NewFile(uintptr(readHandle), "|0")
+	w = os.NewFile(uintptr(writeHandle), "|1")
+	return r, w, nil
+}
+
 // createProcess spawns a process inside the AppContainer.
+// Deprecated: Use createProcessWithCapture for output capture support.
 func (c *appContainer) createProcess(ctx context.Context, cmd string, args []string, env []string, workDir string) (*os.Process, error) {
+	cp, err := c.createProcessWithCapture(ctx, cmd, args, env, workDir, false)
+	if err != nil {
+		return nil, err
+	}
+	return cp.Process, nil
+}
+
+// createProcessWithCapture spawns a process inside the AppContainer with optional output capture.
+func (c *appContainer) createProcessWithCapture(ctx context.Context, cmd string, args []string, env []string, workDir string, captureOutput bool) (*ContainerProcess, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -481,6 +610,34 @@ func (c *appContainer) createProcess(ctx context.Context, cmd string, args []str
 	siEx.StartupInfo.Cb = uint32(unsafe.Sizeof(siEx))
 	siEx.AttributeList = uintptr(unsafe.Pointer(&attrList[0]))
 
+	// Result struct to hold process and I/O handles
+	result := &ContainerProcess{}
+
+	// Create pipes for stdout/stderr if capturing output
+	if captureOutput {
+		stdoutR, stdoutW, err := createInheritablePipe()
+		if err != nil {
+			return nil, fmt.Errorf("create stdout pipe: %w", err)
+		}
+		result.Stdout = stdoutR
+		result.stdoutWriter = stdoutW
+
+		stderrR, stderrW, err := createInheritablePipe()
+		if err != nil {
+			stdoutR.Close()
+			stdoutW.Close()
+			return nil, fmt.Errorf("create stderr pipe: %w", err)
+		}
+		result.Stderr = stderrR
+		result.stderrWriter = stderrW
+
+		// Configure startup info to use pipes
+		siEx.StartupInfo.Flags = windows.STARTF_USESTDHANDLES
+		siEx.StartupInfo.StdOutput = windows.Handle(stdoutW.Fd())
+		siEx.StartupInfo.StdErr = windows.Handle(stderrW.Fd())
+		// StdInput left as 0 (null) - process cannot read from stdin
+	}
+
 	var pi windows.ProcessInformation
 
 	// Work directory
@@ -490,11 +647,17 @@ func (c *appContainer) createProcess(ctx context.Context, cmd string, args []str
 	}
 
 	// CreateProcess with extended startup info
+	// bInheritHandles must be TRUE (1) for pipe handles to be inherited
+	inheritHandles := uintptr(0)
+	if captureOutput {
+		inheritHandles = 1
+	}
+
 	r1, _, err = procCreateProcessW.Call(
 		0, // lpApplicationName
 		uintptr(unsafe.Pointer(cmdLinePtr)),
 		0, 0, // security attributes
-		0, // inherit handles
+		inheritHandles,
 		extendedStartupInfoPresent,
 		0, // environment (inherit)
 		uintptr(unsafe.Pointer(workDirPtr)),
@@ -502,7 +665,19 @@ func (c *appContainer) createProcess(ctx context.Context, cmd string, args []str
 		uintptr(unsafe.Pointer(&pi)),
 	)
 	if r1 == 0 {
+		result.Close() // Clean up pipes on failure
 		return nil, fmt.Errorf("CreateProcess failed: %w", err)
+	}
+
+	// Close write ends of pipes in parent process
+	// The child process has copies of these handles
+	if result.stdoutWriter != nil {
+		result.stdoutWriter.Close()
+		result.stdoutWriter = nil
+	}
+	if result.stderrWriter != nil {
+		result.stderrWriter.Close()
+		result.stderrWriter = nil
 	}
 
 	// Close thread handle
@@ -511,6 +686,13 @@ func (c *appContainer) createProcess(ctx context.Context, cmd string, args []str
 	// Close the process handle from CreateProcess (FindProcess will open a new one)
 	windows.CloseHandle(pi.Process)
 
-	// Return os.Process wrapping the process ID
-	return os.FindProcess(int(pi.ProcessId))
+	// Get os.Process wrapping the process ID
+	proc, err := os.FindProcess(int(pi.ProcessId))
+	if err != nil {
+		result.Close()
+		return nil, fmt.Errorf("FindProcess failed: %w", err)
+	}
+	result.Process = proc
+
+	return result, nil
 }

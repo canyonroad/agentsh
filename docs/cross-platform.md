@@ -157,6 +157,12 @@ Windows 8+ supports AppContainer for kernel-enforced process isolation. agentsh 
 | Primary | AppContainer | Kernel-enforced capability isolation |
 | Secondary | Minifilter driver | Policy-based file/registry rules |
 
+**AppContainer Features:**
+- Full process isolation with kernel-enforced capability restrictions
+- Stdout/stderr capture from sandboxed processes
+- Automatic ACL cleanup on sandbox close
+- Configurable network access levels (none, outbound, local, full)
+
 **Sandbox Configuration:**
 
 ```yaml

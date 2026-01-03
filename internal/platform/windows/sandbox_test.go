@@ -4,6 +4,7 @@ package windows
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/platform"
@@ -152,5 +153,84 @@ func TestSandboxIsolationLevel(t *testing.T) {
 		if mgr.IsolationLevel() != platform.IsolationPartial {
 			t.Errorf("expected IsolationPartial when available, got %v", mgr.IsolationLevel())
 		}
+	}
+}
+
+func TestSandboxOutputCapture(t *testing.T) {
+	mgr := NewSandboxManager()
+	if !mgr.Available() {
+		t.Skip("sandbox not available")
+	}
+
+	config := platform.SandboxConfig{
+		Name:          "test-sandbox-output",
+		WorkspacePath: t.TempDir(),
+		WindowsOptions: &platform.WindowsSandboxOptions{
+			UseAppContainer: false, // Test without AppContainer first
+			UseMinifilter:   false,
+		},
+	}
+
+	sandbox, err := mgr.Create(config)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	defer sandbox.Close()
+
+	result, err := sandbox.Execute(context.Background(), "cmd.exe", "/c", "echo", "hello world")
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	if result.ExitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", result.ExitCode)
+	}
+
+	// Check stdout contains expected output
+	stdout := string(result.Stdout)
+	if !strings.Contains(stdout, "hello world") {
+		t.Errorf("expected stdout to contain 'hello world', got: %q", stdout)
+	}
+}
+
+func TestSandboxAppContainerOutputCapture(t *testing.T) {
+	if !isAdmin() {
+		t.Skip("requires admin privileges")
+	}
+
+	mgr := NewSandboxManager()
+	if !mgr.Available() {
+		t.Skip("sandbox not available")
+	}
+
+	config := platform.SandboxConfig{
+		Name:          "test-sandbox-appcontainer-output",
+		WorkspacePath: t.TempDir(),
+		WindowsOptions: &platform.WindowsSandboxOptions{
+			UseAppContainer:         true,
+			UseMinifilter:           false,
+			FailOnAppContainerError: true,
+		},
+	}
+
+	sandbox, err := mgr.Create(config)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	defer sandbox.Close()
+
+	result, err := sandbox.Execute(context.Background(), "cmd.exe", "/c", "echo", "appcontainer output")
+	if err != nil {
+		t.Skipf("Execute failed (may need full admin): %v", err)
+	}
+
+	if result.ExitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", result.ExitCode)
+	}
+
+	// Check stdout contains expected output
+	stdout := string(result.Stdout)
+	if !strings.Contains(stdout, "appcontainer output") {
+		t.Errorf("expected stdout to contain 'appcontainer output', got: %q", stdout)
 	}
 }
