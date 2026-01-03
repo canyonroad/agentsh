@@ -333,6 +333,7 @@ sandbox:
 - **No syscall filtering** - no seccomp equivalent
 - **No disk I/O limits** - Job Objects don't support this
 - **No network bandwidth limits** - Job Objects don't support this
+- **Resource monitoring available** - memory, CPU, disk I/O, process count, and thread count via Job Objects and Toolhelp32
 - **WinDivert requires admin** - Administrator privileges needed for network interception
 - **Driver requires signing** - Mini filter driver requires test signing (dev) or EV signing (production)
 - Uses kernel-mode mini filter driver for filesystem and registry interception
