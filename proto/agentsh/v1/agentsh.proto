@@ -11,8 +11,30 @@ import "google/protobuf/struct.proto";
 // - CreateSession: {"id": "...", "workspace": "...", "policy": "..."}
 // - Exec: {"session_id":"...", "command":"...", "args":[...], "working_dir":"...", "timeout":"...", "stdin":"...", "env":{...}, "include_events":"summary|all|blocked|none"}
 service Agentsh {
+  // Session management
   rpc CreateSession(google.protobuf.Struct) returns (google.protobuf.Struct);
+  rpc ListSessions(google.protobuf.Struct) returns (google.protobuf.Struct);
+  rpc GetSession(google.protobuf.Struct) returns (google.protobuf.Struct);
+  rpc DestroySession(google.protobuf.Struct) returns (google.protobuf.Struct);
+  rpc PatchSession(google.protobuf.Struct) returns (google.protobuf.Struct);
+
+  // Command execution
   rpc Exec(google.protobuf.Struct) returns (google.protobuf.Struct);
   rpc ExecStream(google.protobuf.Struct) returns (stream google.protobuf.Struct);
+  rpc KillCommand(google.protobuf.Struct) returns (google.protobuf.Struct);
+
+  // Events
   rpc EventsTail(google.protobuf.Struct) returns (stream google.protobuf.Struct);
+  rpc QueryEvents(google.protobuf.Struct) returns (google.protobuf.Struct);
+  rpc SearchEvents(google.protobuf.Struct) returns (google.protobuf.Struct);
+
+  // Output retrieval
+  rpc OutputChunk(google.protobuf.Struct) returns (google.protobuf.Struct);
+
+  // Approvals
+  rpc ListApprovals(google.protobuf.Struct) returns (google.protobuf.Struct);
+  rpc ResolveApproval(google.protobuf.Struct) returns (google.protobuf.Struct);
+
+  // Policy
+  rpc PolicyTest(google.protobuf.Struct) returns (google.protobuf.Struct);
 }

@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/ptygrpc"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
@@ -20,12 +23,23 @@ import (
 )
 
 const (
-	grpcServiceName           = "agentsh.v1.Agentsh"
-	grpcMethodCreateSession   = "/agentsh.v1.Agentsh/CreateSession"
-	grpcMethodExec            = "/agentsh.v1.Agentsh/Exec"
-	grpcMethodExecStream      = "/agentsh.v1.Agentsh/ExecStream"
-	grpcMethodEventsTail      = "/agentsh.v1.Agentsh/EventsTail"
-	defaultGRPCAPIKeyMetadata = "x-api-key"
+	grpcServiceName             = "agentsh.v1.Agentsh"
+	grpcMethodCreateSession     = "/agentsh.v1.Agentsh/CreateSession"
+	grpcMethodListSessions      = "/agentsh.v1.Agentsh/ListSessions"
+	grpcMethodGetSession        = "/agentsh.v1.Agentsh/GetSession"
+	grpcMethodDestroySession    = "/agentsh.v1.Agentsh/DestroySession"
+	grpcMethodPatchSession      = "/agentsh.v1.Agentsh/PatchSession"
+	grpcMethodExec              = "/agentsh.v1.Agentsh/Exec"
+	grpcMethodExecStream        = "/agentsh.v1.Agentsh/ExecStream"
+	grpcMethodKillCommand       = "/agentsh.v1.Agentsh/KillCommand"
+	grpcMethodEventsTail        = "/agentsh.v1.Agentsh/EventsTail"
+	grpcMethodQueryEvents       = "/agentsh.v1.Agentsh/QueryEvents"
+	grpcMethodSearchEvents      = "/agentsh.v1.Agentsh/SearchEvents"
+	grpcMethodOutputChunk       = "/agentsh.v1.Agentsh/OutputChunk"
+	grpcMethodListApprovals     = "/agentsh.v1.Agentsh/ListApprovals"
+	grpcMethodResolveApproval   = "/agentsh.v1.Agentsh/ResolveApproval"
+	grpcMethodPolicyTest        = "/agentsh.v1.Agentsh/PolicyTest"
+	defaultGRPCAPIKeyMetadata   = "x-api-key"
 )
 
 type grpcServer struct {
@@ -33,10 +47,32 @@ type grpcServer struct {
 }
 
 type AgentshGRPCServer interface {
+	// Session management
 	CreateSession(context.Context, *structpb.Struct) (*structpb.Struct, error)
+	ListSessions(context.Context, *structpb.Struct) (*structpb.Struct, error)
+	GetSession(context.Context, *structpb.Struct) (*structpb.Struct, error)
+	DestroySession(context.Context, *structpb.Struct) (*structpb.Struct, error)
+	PatchSession(context.Context, *structpb.Struct) (*structpb.Struct, error)
+
+	// Command execution
 	Exec(context.Context, *structpb.Struct) (*structpb.Struct, error)
 	ExecStream(*structpb.Struct, grpc.ServerStream) error
+	KillCommand(context.Context, *structpb.Struct) (*structpb.Struct, error)
+
+	// Events
 	EventsTail(*structpb.Struct, grpc.ServerStream) error
+	QueryEvents(context.Context, *structpb.Struct) (*structpb.Struct, error)
+	SearchEvents(context.Context, *structpb.Struct) (*structpb.Struct, error)
+
+	// Output
+	OutputChunk(context.Context, *structpb.Struct) (*structpb.Struct, error)
+
+	// Approvals
+	ListApprovals(context.Context, *structpb.Struct) (*structpb.Struct, error)
+	ResolveApproval(context.Context, *structpb.Struct) (*structpb.Struct, error)
+
+	// Policy
+	PolicyTest(context.Context, *structpb.Struct) (*structpb.Struct, error)
 }
 
 func RegisterGRPC(s *grpc.Server, app *App) {
@@ -44,14 +80,19 @@ func RegisterGRPC(s *grpc.Server, app *App) {
 		ServiceName: grpcServiceName,
 		HandlerType: (*AgentshGRPCServer)(nil),
 		Methods: []grpc.MethodDesc{
-			{
-				MethodName: "CreateSession",
-				Handler:    grpcHandleCreateSession,
-			},
-			{
-				MethodName: "Exec",
-				Handler:    grpcHandleExec,
-			},
+			{MethodName: "CreateSession", Handler: grpcHandleCreateSession},
+			{MethodName: "ListSessions", Handler: grpcHandleListSessions},
+			{MethodName: "GetSession", Handler: grpcHandleGetSession},
+			{MethodName: "DestroySession", Handler: grpcHandleDestroySession},
+			{MethodName: "PatchSession", Handler: grpcHandlePatchSession},
+			{MethodName: "Exec", Handler: grpcHandleExec},
+			{MethodName: "KillCommand", Handler: grpcHandleKillCommand},
+			{MethodName: "QueryEvents", Handler: grpcHandleQueryEvents},
+			{MethodName: "SearchEvents", Handler: grpcHandleSearchEvents},
+			{MethodName: "OutputChunk", Handler: grpcHandleOutputChunk},
+			{MethodName: "ListApprovals", Handler: grpcHandleListApprovals},
+			{MethodName: "ResolveApproval", Handler: grpcHandleResolveApproval},
+			{MethodName: "PolicyTest", Handler: grpcHandlePolicyTest},
 		},
 		Streams: []grpc.StreamDesc{
 			{
@@ -115,6 +156,68 @@ func grpcHandleEventsTail(srv any, stream grpc.ServerStream) error {
 		return err
 	}
 	return srv.(*grpcServer).EventsTail(in, stream)
+}
+
+// grpcUnaryHandler creates a standard unary handler for a given method.
+func grpcUnaryHandler(method string, fn func(*grpcServer, context.Context, *structpb.Struct) (*structpb.Struct, error)) func(any, context.Context, func(any) error, grpc.UnaryServerInterceptor) (any, error) {
+	return func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+		in := &structpb.Struct{}
+		if err := dec(in); err != nil {
+			return nil, err
+		}
+		base := func(ctx context.Context, req any) (any, error) {
+			return fn(srv.(*grpcServer), ctx, req.(*structpb.Struct))
+		}
+		if interceptor == nil {
+			return base(ctx, in)
+		}
+		info := &grpc.UnaryServerInfo{Server: srv, FullMethod: method}
+		return interceptor(ctx, in, info, base)
+	}
+}
+
+func grpcHandleListSessions(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return grpcUnaryHandler(grpcMethodListSessions, (*grpcServer).ListSessions)(srv, ctx, dec, interceptor)
+}
+
+func grpcHandleGetSession(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return grpcUnaryHandler(grpcMethodGetSession, (*grpcServer).GetSession)(srv, ctx, dec, interceptor)
+}
+
+func grpcHandleDestroySession(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return grpcUnaryHandler(grpcMethodDestroySession, (*grpcServer).DestroySession)(srv, ctx, dec, interceptor)
+}
+
+func grpcHandlePatchSession(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return grpcUnaryHandler(grpcMethodPatchSession, (*grpcServer).PatchSession)(srv, ctx, dec, interceptor)
+}
+
+func grpcHandleKillCommand(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return grpcUnaryHandler(grpcMethodKillCommand, (*grpcServer).KillCommand)(srv, ctx, dec, interceptor)
+}
+
+func grpcHandleQueryEvents(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return grpcUnaryHandler(grpcMethodQueryEvents, (*grpcServer).QueryEvents)(srv, ctx, dec, interceptor)
+}
+
+func grpcHandleSearchEvents(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return grpcUnaryHandler(grpcMethodSearchEvents, (*grpcServer).SearchEvents)(srv, ctx, dec, interceptor)
+}
+
+func grpcHandleOutputChunk(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return grpcUnaryHandler(grpcMethodOutputChunk, (*grpcServer).OutputChunk)(srv, ctx, dec, interceptor)
+}
+
+func grpcHandleListApprovals(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return grpcUnaryHandler(grpcMethodListApprovals, (*grpcServer).ListApprovals)(srv, ctx, dec, interceptor)
+}
+
+func grpcHandleResolveApproval(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return grpcUnaryHandler(grpcMethodResolveApproval, (*grpcServer).ResolveApproval)(srv, ctx, dec, interceptor)
+}
+
+func grpcHandlePolicyTest(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return grpcUnaryHandler(grpcMethodPolicyTest, (*grpcServer).PolicyTest)(srv, ctx, dec, interceptor)
 }
 
 func (s *grpcServer) CreateSession(ctx context.Context, in *structpb.Struct) (*structpb.Struct, error) {
@@ -371,6 +474,391 @@ func (s *grpcServer) EventsTail(in *structpb.Struct, stream grpc.ServerStream) e
 			}
 		}
 	}
+}
+
+func (s *grpcServer) ListSessions(ctx context.Context, in *structpb.Struct) (*structpb.Struct, error) {
+	if s == nil || s.app == nil {
+		return nil, status.Error(codes.Internal, "server not initialized")
+	}
+	all := s.app.sessions.List()
+	out := make([]types.Session, 0, len(all))
+	for _, sess := range all {
+		out = append(out, sess.Snapshot())
+	}
+	return jsonToProto(out)
+}
+
+func (s *grpcServer) GetSession(ctx context.Context, in *structpb.Struct) (*structpb.Struct, error) {
+	if s == nil || s.app == nil {
+		return nil, status.Error(codes.Internal, "server not initialized")
+	}
+	var reqMap map[string]any
+	if err := json.Unmarshal(mustProtoJSON(in), &reqMap); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid request")
+	}
+	id, _ := reqMap["id"].(string)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	sess, ok := s.app.sessions.Get(id)
+	if !ok {
+		return nil, status.Error(codes.NotFound, "session not found")
+	}
+	return jsonToProto(sess.Snapshot())
+}
+
+func (s *grpcServer) DestroySession(ctx context.Context, in *structpb.Struct) (*structpb.Struct, error) {
+	if s == nil || s.app == nil {
+		return nil, status.Error(codes.Internal, "server not initialized")
+	}
+	var reqMap map[string]any
+	if err := json.Unmarshal(mustProtoJSON(in), &reqMap); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid request")
+	}
+	id, _ := reqMap["id"].(string)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	sess, ok := s.app.sessions.Get(id)
+	if !ok {
+		return nil, status.Error(codes.NotFound, "session not found")
+	}
+	_ = sess.CloseNetNS()
+	_ = sess.CloseProxy()
+	_ = sess.UnmountWorkspace()
+	s.app.purgeTrashForSession(sess)
+	_ = s.app.sessions.Destroy(id)
+	return jsonToProto(map[string]any{"ok": true})
+}
+
+func (s *grpcServer) PatchSession(ctx context.Context, in *structpb.Struct) (*structpb.Struct, error) {
+	if s == nil || s.app == nil {
+		return nil, status.Error(codes.Internal, "server not initialized")
+	}
+	var reqMap map[string]any
+	if err := json.Unmarshal(mustProtoJSON(in), &reqMap); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid request")
+	}
+	id, _ := reqMap["id"].(string)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	sess, ok := s.app.sessions.Get(id)
+	if !ok {
+		return nil, status.Error(codes.NotFound, "session not found")
+	}
+
+	// Parse patch request fields
+	var req types.SessionPatchRequest
+	if cwd, ok := reqMap["cwd"].(string); ok {
+		req.Cwd = cwd
+	}
+	if env, ok := reqMap["env"].(map[string]any); ok {
+		req.Env = make(map[string]string)
+		for k, v := range env {
+			if vs, ok := v.(string); ok {
+				req.Env[k] = vs
+			}
+		}
+	}
+	if unset, ok := reqMap["unset"].([]any); ok {
+		for _, u := range unset {
+			if us, ok := u.(string); ok {
+				req.Unset = append(req.Unset, us)
+			}
+		}
+	}
+
+	if err := sess.ApplyPatch(req); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	return jsonToProto(sess.Snapshot())
+}
+
+func (s *grpcServer) KillCommand(ctx context.Context, in *structpb.Struct) (*structpb.Struct, error) {
+	if s == nil || s.app == nil {
+		return nil, status.Error(codes.Internal, "server not initialized")
+	}
+	var reqMap map[string]any
+	if err := json.Unmarshal(mustProtoJSON(in), &reqMap); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid request")
+	}
+	sessionID, _ := reqMap["session_id"].(string)
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, status.Error(codes.InvalidArgument, "session_id is required")
+	}
+	sess, ok := s.app.sessions.Get(sessionID)
+	if !ok {
+		return nil, status.Error(codes.NotFound, "session not found")
+	}
+	cmdID, _ := reqMap["command_id"].(string)
+	cmdID = strings.TrimSpace(cmdID)
+	if cmdID == "" {
+		return nil, status.Error(codes.InvalidArgument, "command_id is required")
+	}
+	current := sess.CurrentCommandID()
+	if current == "" || current != cmdID {
+		return nil, status.Error(codes.NotFound, "command not running")
+	}
+	pid := sess.CurrentProcessPID()
+	if pid <= 0 {
+		return nil, status.Error(codes.FailedPrecondition, "command pid not available")
+	}
+
+	_ = killProcess(pid)
+	go func() {
+		time.Sleep(2 * time.Second)
+		_ = killProcessHard(pid)
+	}()
+	return jsonToProto(map[string]any{"ok": true})
+}
+
+func (s *grpcServer) QueryEvents(ctx context.Context, in *structpb.Struct) (*structpb.Struct, error) {
+	if s == nil || s.app == nil {
+		return nil, status.Error(codes.Internal, "server not initialized")
+	}
+	var reqMap map[string]any
+	if err := json.Unmarshal(mustProtoJSON(in), &reqMap); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid request")
+	}
+	sessionID, _ := reqMap["session_id"].(string)
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, status.Error(codes.InvalidArgument, "session_id is required")
+	}
+	if _, ok := s.app.sessions.Get(sessionID); !ok {
+		return nil, status.Error(codes.NotFound, "session not found")
+	}
+
+	q := eventQueryFromMap(reqMap)
+	q.SessionID = sessionID
+	evs, err := s.app.store.QueryEvents(ctx, q)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return jsonToProto(evs)
+}
+
+func (s *grpcServer) SearchEvents(ctx context.Context, in *structpb.Struct) (*structpb.Struct, error) {
+	if s == nil || s.app == nil {
+		return nil, status.Error(codes.Internal, "server not initialized")
+	}
+	var reqMap map[string]any
+	if err := json.Unmarshal(mustProtoJSON(in), &reqMap); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid request")
+	}
+
+	q := eventQueryFromMap(reqMap)
+	if sid, ok := reqMap["session_id"].(string); ok {
+		q.SessionID = strings.TrimSpace(sid)
+	}
+	evs, err := s.app.store.QueryEvents(ctx, q)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return jsonToProto(evs)
+}
+
+func (s *grpcServer) OutputChunk(ctx context.Context, in *structpb.Struct) (*structpb.Struct, error) {
+	if s == nil || s.app == nil {
+		return nil, status.Error(codes.Internal, "server not initialized")
+	}
+	var reqMap map[string]any
+	if err := json.Unmarshal(mustProtoJSON(in), &reqMap); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid request")
+	}
+	sessionID, _ := reqMap["session_id"].(string)
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, status.Error(codes.InvalidArgument, "session_id is required")
+	}
+	if _, ok := s.app.sessions.Get(sessionID); !ok {
+		return nil, status.Error(codes.NotFound, "session not found")
+	}
+	cmdID, _ := reqMap["command_id"].(string)
+	cmdID = strings.TrimSpace(cmdID)
+	if cmdID == "" {
+		return nil, status.Error(codes.InvalidArgument, "command_id is required")
+	}
+	stream, _ := reqMap["stream"].(string)
+	offset := int64(0)
+	if o, ok := reqMap["offset"].(float64); ok {
+		offset = int64(o)
+	}
+	limit := int64(0)
+	if l, ok := reqMap["limit"].(float64); ok {
+		limit = int64(l)
+	}
+
+	chunk, total, truncated, err := s.app.store.ReadOutputChunk(ctx, cmdID, stream, offset, limit)
+	if err != nil {
+		return nil, status.Error(codes.NotFound, err.Error())
+	}
+	return jsonToProto(map[string]any{
+		"command_id":  cmdID,
+		"stream":      stream,
+		"offset":      offset,
+		"limit":       limit,
+		"total_bytes": total,
+		"truncated":   truncated,
+		"data":        string(chunk),
+		"has_more":    offset+int64(len(chunk)) < total,
+	})
+}
+
+func (s *grpcServer) ListApprovals(ctx context.Context, in *structpb.Struct) (*structpb.Struct, error) {
+	if s == nil || s.app == nil {
+		return nil, status.Error(codes.Internal, "server not initialized")
+	}
+	if s.app.approvals == nil {
+		return jsonToProto([]any{})
+	}
+	return jsonToProto(s.app.approvals.ListPending())
+}
+
+func (s *grpcServer) ResolveApproval(ctx context.Context, in *structpb.Struct) (*structpb.Struct, error) {
+	if s == nil || s.app == nil {
+		return nil, status.Error(codes.Internal, "server not initialized")
+	}
+	if s.app.approvals == nil {
+		return nil, status.Error(codes.NotFound, "approvals not enabled")
+	}
+	var reqMap map[string]any
+	if err := json.Unmarshal(mustProtoJSON(in), &reqMap); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid request")
+	}
+	id, _ := reqMap["id"].(string)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	decision, _ := reqMap["decision"].(string)
+	reason, _ := reqMap["reason"].(string)
+	approved := strings.EqualFold(decision, "approve") || strings.EqualFold(decision, "allow")
+	if ok := s.app.approvals.Resolve(id, approved, reason); !ok {
+		return nil, status.Error(codes.NotFound, "approval not found")
+	}
+	return jsonToProto(map[string]any{"ok": true})
+}
+
+func (s *grpcServer) PolicyTest(ctx context.Context, in *structpb.Struct) (*structpb.Struct, error) {
+	if s == nil || s.app == nil {
+		return nil, status.Error(codes.Internal, "server not initialized")
+	}
+	var reqMap map[string]any
+	if err := json.Unmarshal(mustProtoJSON(in), &reqMap); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid request")
+	}
+	operation, _ := reqMap["operation"].(string)
+	operation = strings.TrimSpace(operation)
+	if operation == "" {
+		return nil, status.Error(codes.InvalidArgument, "operation is required")
+	}
+	path, _ := reqMap["path"].(string)
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, status.Error(codes.InvalidArgument, "path is required")
+	}
+
+	engine := s.app.policy
+	if engine == nil {
+		return nil, status.Error(codes.Unavailable, "policy engine not available")
+	}
+
+	var decision policy.Decision
+	op := strings.ToLower(operation)
+
+	switch {
+	case strings.HasPrefix(op, "file_") || op == "read" || op == "write" || op == "delete" || op == "create":
+		opName := op
+		if strings.HasPrefix(op, "file_") {
+			opName = strings.TrimPrefix(op, "file_")
+		}
+		decision = engine.CheckFile(path, opName)
+
+	case strings.HasPrefix(op, "net_") || op == "connect":
+		host, portStr, err := net.SplitHostPort(path)
+		if err != nil {
+			host = path
+			portStr = "443"
+		}
+		port := 443
+		if p, err := strconv.Atoi(portStr); err == nil {
+			port = p
+		}
+		decision = engine.CheckNetwork(host, port)
+
+	case op == "exec" || op == "command":
+		decision = engine.CheckCommand(path, nil)
+
+	default:
+		decision = engine.CheckFile(path, op)
+	}
+
+	result := map[string]any{
+		"decision":        string(decision.EffectiveDecision),
+		"policy_decision": string(decision.PolicyDecision),
+		"rule":            decision.Rule,
+		"reason":          decision.Message,
+	}
+	if decision.Redirect != nil {
+		result["redirect"] = map[string]any{
+			"command": decision.Redirect.Command,
+			"args":    decision.Redirect.Args,
+		}
+	}
+	return jsonToProto(result)
+}
+
+// jsonToProto converts any JSON-serializable value to structpb.Struct.
+func jsonToProto(v any) (*structpb.Struct, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "marshal response")
+	}
+	out := &structpb.Struct{}
+	if err := protojson.Unmarshal(b, out); err != nil {
+		return nil, status.Error(codes.Internal, "marshal response")
+	}
+	return out, nil
+}
+
+// eventQueryFromMap parses event query parameters from a map.
+func eventQueryFromMap(m map[string]any) types.EventQuery {
+	var q types.EventQuery
+	if cmdID, ok := m["command_id"].(string); ok {
+		q.CommandID = cmdID
+	}
+	if t, ok := m["type"].(string); ok && t != "" {
+		q.Types = strings.Split(t, ",")
+	}
+	if decision, ok := m["decision"].(string); ok && decision != "" {
+		d := types.Decision(decision)
+		q.Decision = &d
+	}
+	if pathLike, ok := m["path_like"].(string); ok {
+		q.PathLike = pathLike
+	}
+	if domainLike, ok := m["domain_like"].(string); ok {
+		q.DomainLike = domainLike
+	}
+	if textLike, ok := m["text_like"].(string); ok {
+		q.TextLike = textLike
+	}
+	if limit, ok := m["limit"].(float64); ok {
+		q.Limit = int(limit)
+	}
+	if offset, ok := m["offset"].(float64); ok {
+		q.Offset = int(offset)
+	}
+	if order, ok := m["order"].(string); ok {
+		q.Asc = order == "asc"
+	}
+	return q
 }
 
 func mustProtoJSON(in *structpb.Struct) []byte {

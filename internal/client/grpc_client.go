@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +69,67 @@ func (c *GRPCClient) createSession(ctx context.Context, id, workspace, policy st
 	}
 	resp := &structpb.Struct{}
 	if err := c.invokeUnary(ctx, "/agentsh.v1.Agentsh/CreateSession", in, resp); err != nil {
+		return out, err
+	}
+	b, _ := protojson.Marshal(resp)
+	_ = json.Unmarshal(b, &out)
+	return out, nil
+}
+
+func (c *GRPCClient) ListSessions(ctx context.Context) ([]types.Session, error) {
+	in, _ := jsonToStruct(map[string]any{})
+	resp := &structpb.Struct{}
+	if err := c.invokeUnary(ctx, "/agentsh.v1.Agentsh/ListSessions", in, resp); err != nil {
+		return nil, err
+	}
+	b, _ := protojson.Marshal(resp)
+	var out []types.Session
+	_ = json.Unmarshal(b, &out)
+	return out, nil
+}
+
+func (c *GRPCClient) GetSession(ctx context.Context, id string) (types.Session, error) {
+	var out types.Session
+	in, err := jsonToStruct(map[string]any{"id": id})
+	if err != nil {
+		return out, err
+	}
+	resp := &structpb.Struct{}
+	if err := c.invokeUnary(ctx, "/agentsh.v1.Agentsh/GetSession", in, resp); err != nil {
+		return out, err
+	}
+	b, _ := protojson.Marshal(resp)
+	_ = json.Unmarshal(b, &out)
+	return out, nil
+}
+
+func (c *GRPCClient) DestroySession(ctx context.Context, id string) error {
+	in, err := jsonToStruct(map[string]any{"id": id})
+	if err != nil {
+		return err
+	}
+	resp := &structpb.Struct{}
+	return c.invokeUnary(ctx, "/agentsh.v1.Agentsh/DestroySession", in, resp)
+}
+
+func (c *GRPCClient) PatchSession(ctx context.Context, id string, req types.SessionPatchRequest) (types.Session, error) {
+	var out types.Session
+	body := map[string]any{"id": id}
+	if req.Cwd != "" {
+		body["cwd"] = req.Cwd
+	}
+	if len(req.Env) > 0 {
+		body["env"] = req.Env
+	}
+	if len(req.Unset) > 0 {
+		body["unset"] = req.Unset
+	}
+	in, err := jsonToStruct(body)
+	if err != nil {
+		return out, err
+	}
+	resp := &structpb.Struct{}
+	if err := c.invokeUnary(ctx, "/agentsh.v1.Agentsh/PatchSession", in, resp); err != nil {
 		return out, err
 	}
 	b, _ := protojson.Marshal(resp)
@@ -193,6 +255,183 @@ func (c *GRPCClient) StreamSessionEvents(ctx context.Context, sessionID string) 
 		}
 	}()
 	return pr, nil
+}
+
+func (c *GRPCClient) KillCommand(ctx context.Context, sessionID, commandID string) error {
+	in, err := jsonToStruct(map[string]any{
+		"session_id": sessionID,
+		"command_id": commandID,
+	})
+	if err != nil {
+		return err
+	}
+	resp := &structpb.Struct{}
+	return c.invokeUnary(ctx, "/agentsh.v1.Agentsh/KillCommand", in, resp)
+}
+
+func (c *GRPCClient) QuerySessionEvents(ctx context.Context, sessionID string, q url.Values) ([]types.Event, error) {
+	body := map[string]any{"session_id": sessionID}
+	if cmdID := q.Get("command_id"); cmdID != "" {
+		body["command_id"] = cmdID
+	}
+	if t := q.Get("type"); t != "" {
+		body["type"] = t
+	}
+	if decision := q.Get("decision"); decision != "" {
+		body["decision"] = decision
+	}
+	if pathLike := q.Get("path_like"); pathLike != "" {
+		body["path_like"] = pathLike
+	}
+	if domainLike := q.Get("domain_like"); domainLike != "" {
+		body["domain_like"] = domainLike
+	}
+	if textLike := q.Get("text_like"); textLike != "" {
+		body["text_like"] = textLike
+	}
+	if limit := q.Get("limit"); limit != "" {
+		if v, err := strconv.Atoi(limit); err == nil {
+			body["limit"] = v
+		}
+	}
+	if offset := q.Get("offset"); offset != "" {
+		if v, err := strconv.Atoi(offset); err == nil {
+			body["offset"] = v
+		}
+	}
+	if order := q.Get("order"); order != "" {
+		body["order"] = order
+	}
+	in, err := jsonToStruct(body)
+	if err != nil {
+		return nil, err
+	}
+	resp := &structpb.Struct{}
+	if err := c.invokeUnary(ctx, "/agentsh.v1.Agentsh/QueryEvents", in, resp); err != nil {
+		return nil, err
+	}
+	b, _ := protojson.Marshal(resp)
+	var out []types.Event
+	_ = json.Unmarshal(b, &out)
+	return out, nil
+}
+
+func (c *GRPCClient) SearchEvents(ctx context.Context, q url.Values) ([]types.Event, error) {
+	body := map[string]any{}
+	if sessionID := q.Get("session_id"); sessionID != "" {
+		body["session_id"] = sessionID
+	}
+	if cmdID := q.Get("command_id"); cmdID != "" {
+		body["command_id"] = cmdID
+	}
+	if t := q.Get("type"); t != "" {
+		body["type"] = t
+	}
+	if decision := q.Get("decision"); decision != "" {
+		body["decision"] = decision
+	}
+	if pathLike := q.Get("path_like"); pathLike != "" {
+		body["path_like"] = pathLike
+	}
+	if domainLike := q.Get("domain_like"); domainLike != "" {
+		body["domain_like"] = domainLike
+	}
+	if textLike := q.Get("text_like"); textLike != "" {
+		body["text_like"] = textLike
+	}
+	if limit := q.Get("limit"); limit != "" {
+		if v, err := strconv.Atoi(limit); err == nil {
+			body["limit"] = v
+		}
+	}
+	if offset := q.Get("offset"); offset != "" {
+		if v, err := strconv.Atoi(offset); err == nil {
+			body["offset"] = v
+		}
+	}
+	if order := q.Get("order"); order != "" {
+		body["order"] = order
+	}
+	in, err := jsonToStruct(body)
+	if err != nil {
+		return nil, err
+	}
+	resp := &structpb.Struct{}
+	if err := c.invokeUnary(ctx, "/agentsh.v1.Agentsh/SearchEvents", in, resp); err != nil {
+		return nil, err
+	}
+	b, _ := protojson.Marshal(resp)
+	var out []types.Event
+	_ = json.Unmarshal(b, &out)
+	return out, nil
+}
+
+func (c *GRPCClient) OutputChunk(ctx context.Context, sessionID, commandID, stream string, offset, limit int64) (map[string]any, error) {
+	in, err := jsonToStruct(map[string]any{
+		"session_id": sessionID,
+		"command_id": commandID,
+		"stream":     stream,
+		"offset":     offset,
+		"limit":      limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	resp := &structpb.Struct{}
+	if err := c.invokeUnary(ctx, "/agentsh.v1.Agentsh/OutputChunk", in, resp); err != nil {
+		return nil, err
+	}
+	b, _ := protojson.Marshal(resp)
+	var out map[string]any
+	_ = json.Unmarshal(b, &out)
+	return out, nil
+}
+
+func (c *GRPCClient) ListApprovals(ctx context.Context) ([]map[string]any, error) {
+	in, _ := jsonToStruct(map[string]any{})
+	resp := &structpb.Struct{}
+	if err := c.invokeUnary(ctx, "/agentsh.v1.Agentsh/ListApprovals", in, resp); err != nil {
+		return nil, err
+	}
+	b, _ := protojson.Marshal(resp)
+	var out []map[string]any
+	_ = json.Unmarshal(b, &out)
+	return out, nil
+}
+
+func (c *GRPCClient) ResolveApproval(ctx context.Context, id, decision, reason string) error {
+	in, err := jsonToStruct(map[string]any{
+		"id":       id,
+		"decision": decision,
+		"reason":   reason,
+	})
+	if err != nil {
+		return err
+	}
+	resp := &structpb.Struct{}
+	return c.invokeUnary(ctx, "/agentsh.v1.Agentsh/ResolveApproval", in, resp)
+}
+
+func (c *GRPCClient) PolicyTest(ctx context.Context, sessionID, operation, path string) (map[string]any, error) {
+	body := map[string]any{
+		"operation": operation,
+		"path":      path,
+	}
+	if sessionID != "" {
+		body["session_id"] = sessionID
+	}
+	in, err := jsonToStruct(body)
+	if err != nil {
+		return nil, err
+	}
+	resp := &structpb.Struct{}
+	if err := c.invokeUnary(ctx, "/agentsh.v1.Agentsh/PolicyTest", in, resp); err != nil {
+		return nil, err
+	}
+	b, _ := protojson.Marshal(resp)
+	var out map[string]any
+	_ = json.Unmarshal(b, &out)
+	return out, nil
 }
 
 func (c *GRPCClient) invokeUnary(ctx context.Context, method string, in *structpb.Struct, out *structpb.Struct) error {
