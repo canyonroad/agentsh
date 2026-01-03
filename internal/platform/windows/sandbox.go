@@ -58,8 +58,8 @@ func (m *SandboxManager) detectIsolationLevel() platform.IsolationLevel {
 	if !m.available {
 		return platform.IsolationNone
 	}
-	// AppContainer provides minimal isolation compared to Linux namespaces
-	return platform.IsolationMinimal
+	// AppContainer provides partial isolation (capability-based, not namespace-based)
+	return platform.IsolationPartial
 }
 
 // Available returns whether sandboxing is available.

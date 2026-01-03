@@ -143,3 +143,14 @@ func TestSandboxAppContainerCleanup(t *testing.T) {
 		t.Errorf("Double close failed: %v", err)
 	}
 }
+
+func TestSandboxIsolationLevel(t *testing.T) {
+	mgr := NewSandboxManager()
+
+	// When AppContainer is available, isolation should be Partial
+	if mgr.Available() {
+		if mgr.IsolationLevel() != platform.IsolationPartial {
+			t.Errorf("expected IsolationPartial when available, got %v", mgr.IsolationLevel())
+		}
+	}
+}
