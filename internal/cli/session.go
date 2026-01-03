@@ -22,6 +22,7 @@ func newSessionCmd() *cobra.Command {
 	cmd.AddCommand(newSessionUpdateCmd())
 	cmd.AddCommand(newSessionDestroyCmd())
 	cmd.AddCommand(newSessionAttachCmd())
+	cmd.AddCommand(newSessionLogsCmd())
 
 	return cmd
 }
@@ -149,6 +150,105 @@ func newSessionUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cwd, "cwd", "", "Set session cwd (virtual path under /workspace)")
 	cmd.Flags().StringArrayVar(&setEnv, "set-env", nil, "Set env var KEY=VALUE (repeatable)")
 	cmd.Flags().StringArrayVar(&unsetEnv, "unset-env", nil, "Unset env var KEY (repeatable)")
+	return cmd
+}
+
+// LogType represents supported log types for session logs command.
+type LogType string
+
+const (
+	LogTypeAll  LogType = ""    // Show all log types
+	LogTypeLLM  LogType = "llm" // LLM request/response logs
+	LogTypeFS   LogType = "fs"  // Filesystem access logs
+	LogTypeNet  LogType = "net" // Network access logs
+	LogTypeExec LogType = "exec" // Command execution logs
+)
+
+// ValidLogTypes returns the list of valid log type values.
+func ValidLogTypes() []string {
+	return []string{"llm", "fs", "net", "exec"}
+}
+
+func newSessionLogsCmd() *cobra.Command {
+	var logType string
+
+	cmd := &cobra.Command{
+		Use:   "logs SESSION_ID",
+		Short: "View session logs",
+		Long: `View session logs with optional filtering by type.
+
+Supported log types:
+  llm   - LLM request/response logs (from embedded proxy)
+  fs    - Filesystem access logs
+  net   - Network access logs
+  exec  - Command execution logs
+
+When no type is specified, all log types are shown.`,
+		Example: `  # View all logs for a session
+  agentsh session logs abc123
+
+  # View only LLM request/response logs
+  agentsh session logs abc123 --type=llm
+
+  # View only filesystem logs
+  agentsh session logs abc123 --type=fs`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sessionID := args[0]
+
+			// Validate log type if specified
+			if logType != "" {
+				valid := false
+				for _, t := range ValidLogTypes() {
+					if logType == t {
+						valid = true
+						break
+					}
+				}
+				if !valid {
+					return fmt.Errorf("invalid log type %q: must be one of %v", logType, ValidLogTypes())
+				}
+			}
+
+			cfg := getClientConfig(cmd)
+			c, err := client.NewForCLI(client.CLIOptions{HTTPBaseURL: cfg.serverAddr, GRPCAddr: cfg.grpcAddr, APIKey: cfg.apiKey, Transport: cfg.transport})
+			if err != nil {
+				return err
+			}
+
+			// Handle LLM logs specially - they come from llm-requests.jsonl
+			if logType == string(LogTypeLLM) {
+				// For now, return a message indicating LLM log reading is not yet implemented
+				// Full implementation will read from ~/.agentsh/sessions/<session-id>/llm-requests.jsonl
+				fmt.Fprintln(cmd.OutOrStdout(), "# LLM log reading not yet implemented")
+				fmt.Fprintln(cmd.OutOrStdout(), "# Logs are stored in: ~/.agentsh/sessions/<session-id>/llm-requests.jsonl")
+				return nil
+			}
+
+			// For other log types (or all), query session events via API
+			// Query events from the session
+			evs, err := c.QuerySessionEvents(cmd.Context(), sessionID, nil)
+			if err != nil {
+				return err
+			}
+
+			// Filter by type if specified
+			if logType != "" {
+				var filtered []types.Event
+				for _, ev := range evs {
+					if ev.Type == logType {
+						filtered = append(filtered, ev)
+					}
+				}
+				evs = filtered
+			}
+
+			return printJSON(cmd, evs)
+		},
+	}
+
+	cmd.Flags().StringVar(&logType, "type", "", "Filter logs by type (llm, fs, net, exec)")
+
 	return cmd
 }
 
