@@ -82,6 +82,28 @@ func getProcessMemoryInfo(process windows.Handle, memCounters *processMemoryCoun
 	return nil
 }
 
+// getProcessThreadCount returns the number of threads for a process using Toolhelp32.
+func getProcessThreadCount(pid int) int {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return 0
+	}
+	defer windows.CloseHandle(snapshot)
+
+	var te windows.ThreadEntry32
+	te.Size = uint32(unsafe.Sizeof(te))
+
+	count := 0
+	err = windows.Thread32First(snapshot, &te)
+	for err == nil {
+		if te.OwnerProcessID == uint32(pid) {
+			count++
+		}
+		err = windows.Thread32Next(snapshot, &te)
+	}
+	return count
+}
+
 // NewWindowsLimiter creates a new Windows resource limiter.
 func NewWindowsLimiter() *WindowsLimiter {
 	return &WindowsLimiter{
@@ -214,6 +236,9 @@ func (l *WindowsLimiter) Usage(pid int) (*ResourceUsage, error) {
 			usage.MemoryMB = int64(memCounters.WorkingSetSize) / 1024 / 1024
 		}
 	}
+
+	// Get thread count via Toolhelp32
+	usage.ThreadCount = getProcessThreadCount(pid)
 
 	return usage, nil
 }
