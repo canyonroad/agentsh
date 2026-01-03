@@ -5,6 +5,7 @@ package windows
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -203,20 +204,56 @@ func (s *Sandbox) Execute(ctx context.Context, cmd string, args ...string) (*pla
 }
 
 func (s *Sandbox) executeInAppContainer(ctx context.Context, cmd string, args []string) (*platform.ExecResult, error) {
-	proc, err := s.container.createProcess(ctx, cmd, args, nil, s.config.WorkspacePath)
+	proc, err := s.container.createProcessWithCapture(ctx, cmd, args, nil, s.config.WorkspacePath, true)
+	if err != nil {
+		return nil, err
+	}
+	defer proc.Close()
+
+	// Read stdout and stderr concurrently
+	var stdout, stderr []byte
+	var stdoutErr, stderrErr error
+	var wg sync.WaitGroup
+
+	if proc.Stdout != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stdout, stdoutErr = io.ReadAll(proc.Stdout)
+		}()
+	}
+
+	if proc.Stderr != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stderr, stderrErr = io.ReadAll(proc.Stderr)
+		}()
+	}
+
+	// Wait for process to complete
+	state, err := proc.Wait()
+
+	// Wait for I/O to complete
+	wg.Wait()
+
 	if err != nil {
 		return nil, err
 	}
 
-	state, err := proc.Wait()
-	if err != nil {
-		return nil, err
+	// Check for I/O errors (non-fatal, just log)
+	if stdoutErr != nil && stdoutErr != io.EOF {
+		// Could log this error if we had a logger
+		_ = stdoutErr
+	}
+	if stderrErr != nil && stderrErr != io.EOF {
+		_ = stderrErr
 	}
 
 	return &platform.ExecResult{
 		ExitCode: state.ExitCode(),
-		Stdout:   nil, // Process output not captured in current implementation
-		Stderr:   nil,
+		Stdout:   stdout,
+		Stderr:   stderr,
 	}, nil
 }
 

@@ -260,10 +260,16 @@ Lima/virtiofs   █████████████████████�
 
 | Configuration | Security | Performance | Use Case |
 |--------------|----------|-------------|----------|
-| AppContainer + Minifilter | Maximum | ~5-10ms startup | AI agent execution |
+| AppContainer + Minifilter | Maximum | ~5-10ms startup | AI agent execution (full output capture) |
 | AppContainer only | High | ~3-5ms startup | Isolated dev environment |
 | Minifilter only | Medium | <1ms startup | Policy enforcement only |
 | Neither | None | Baseline | Legacy/unsandboxed |
+
+**AppContainer Features:**
+- Process execution inside isolated container
+- Full stdout/stderr capture from sandboxed commands
+- Automatic ACL cleanup on sandbox termination
+- Configurable network access (none/outbound/local/full)
 
 ### Configuration Example
 

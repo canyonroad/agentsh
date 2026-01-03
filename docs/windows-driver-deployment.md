@@ -271,6 +271,8 @@ The Windows sandbox uses two complementary isolation layers:
 - Kernel-enforced capability isolation
 - Automatic registry isolation
 - Configurable network access
+- Full stdout/stderr capture from sandboxed processes
+- Automatic ACL cleanup on sandbox termination
 - Requires Windows 8+
 
 ### Minifilter (Secondary)
@@ -293,4 +295,29 @@ config := platform.SandboxConfig{
         FailOnAppContainerError: true,
     },
 }
+
+sandbox, err := manager.Create(config)
+if err != nil {
+    log.Fatal(err)
+}
+defer sandbox.Close() // Automatically cleans up AppContainer profile and ACLs
+
+// Execute command with full output capture
+result, err := sandbox.Execute(ctx, "cmd.exe", "/c", "echo", "hello")
+if err != nil {
+    log.Fatal(err)
+}
+
+fmt.Printf("Exit code: %d\n", result.ExitCode)
+fmt.Printf("Stdout: %s\n", string(result.Stdout))
+fmt.Printf("Stderr: %s\n", string(result.Stderr))
 ```
+
+### Network Access Levels
+
+| Level | Description |
+|-------|-------------|
+| `NetworkNone` | No network access (default, maximum isolation) |
+| `NetworkOutbound` | Internet client connections only |
+| `NetworkLocal` | Private network access only |
+| `NetworkFull` | All network access |

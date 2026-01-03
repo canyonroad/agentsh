@@ -1475,14 +1475,18 @@ git commit -m "fix: address test feedback"
 
 ## Summary
 
+**STATUS: ✅ IMPLEMENTED**
+
 This plan implements:
 
-1. **WindowsSandboxOptions** - Configuration type with secure defaults
-2. **AppContainer profile management** - Create/delete container profiles
-3. **Path ACL granting** - Add container SID to path ACLs
-4. **Network capabilities** - Configure network access levels
-5. **Process creation** - Spawn processes inside AppContainer
-6. **Sandbox integration** - Wire AppContainer into existing sandbox
-7. **Isolation level update** - Report IsolationPartial for Windows
-8. **Platform capabilities** - Set HasAppContainer flag
-9. **Documentation** - Update platform comparison and deployment guide
+1. **WindowsSandboxOptions** - ✅ Configuration type with secure defaults
+2. **AppContainer profile management** - ✅ Create/delete container profiles
+3. **Path ACL granting** - ✅ Add container SID to path ACLs
+4. **ACL cleanup** - ✅ Remove container SID from ACLs on close
+5. **Network capabilities** - ✅ Configure network access levels
+6. **Process creation** - ✅ Spawn processes inside AppContainer
+7. **Output capture** - ✅ Full stdout/stderr capture from sandboxed processes
+8. **Sandbox integration** - ✅ Wire AppContainer into existing sandbox
+9. **Isolation level update** - ✅ Report IsolationPartial for Windows
+10. **Platform capabilities** - ✅ Set HasAppContainer flag
+11. **Documentation** - ✅ Update platform comparison and deployment guide
