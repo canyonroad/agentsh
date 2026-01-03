@@ -132,6 +132,59 @@ platform:
 
 **Security Score:** 85% - Full Linux capabilities with slight VM overhead.
 
+### macOS (sandbox-exec - Process Sandboxing)
+
+For all macOS deployments (ESF+NE, FUSE-T, or Lima), agentsh uses `sandbox-exec` with SBPL (Sandbox Profile Language) profiles to provide process-level file and network restrictions:
+
+```bash
+# sandbox-exec is used automatically when executing commands
+# No additional installation required - it's a built-in macOS tool
+```
+
+**How It Works:**
+
+When agentsh executes a command in a session, it wraps the command with `sandbox-exec -p '<SBPL profile>' <command>`. The SBPL profile is dynamically generated based on the session's workspace and configuration.
+
+**Default Profile Behavior:**
+
+| Component | Policy |
+|-----------|--------|
+| Default | Deny-all (`(deny default)`) |
+| Process ops | Allow fork, exec, self-signal |
+| System paths | Read-only access to `/usr/lib`, `/System/Library`, `/bin`, `/usr/bin`, etc. |
+| Homebrew | Read-only access to `/opt/homebrew/bin`, `/opt/homebrew/Cellar` |
+| Temp files | Full access to `/tmp`, `/private/tmp`, `/var/folders` |
+| TTY/PTY | Full access for interactive terminal |
+| Workspace | Full access (from session config) |
+| Network | Denied by default, requires `network` capability |
+| IPC | Mach messaging and POSIX IPC allowed |
+
+**Enabling Network Access:**
+
+```yaml
+sandbox:
+  capabilities:
+    - network    # Adds (allow network*) to SBPL profile
+```
+
+**Adding Extra Paths:**
+
+```yaml
+sandbox:
+  workspace: /path/to/workspace
+  allowed_paths:
+    - /home/user/.config/myapp    # Additional full access
+    - /usr/local/share/data
+```
+
+**Limitations:**
+- `sandbox-exec` is deprecated by Apple but functional on all macOS versions
+- No resource limits (CPU, memory) - use Lima for that
+- No syscall filtering (unlike Linux seccomp)
+- Child processes inherit the sandbox (escape not possible via fork)
+
+**Security Score:** Contributes to the "Minimal" process isolation tier on macOS.
+
 ### Windows (Native - Mini Filter Driver)
 
 For native Windows support with kernel-level enforcement:

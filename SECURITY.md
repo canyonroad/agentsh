@@ -232,17 +232,63 @@ For non-enterprise deployments, agentsh uses macOS's `sandbox-exec` command with
 
 | Feature | Description |
 |---------|-------------|
+| Default policy | Deny-all (`(deny default)`) with explicit allows |
 | File access | Restricted to workspace and explicitly allowed paths |
 | Network access | Denied by default, enabled via `capabilities: ["network"]` |
 | System access | Read-only access to system libraries and frameworks |
-| Temporary files | Access to `/tmp` and `/var/folders` |
+| Temporary files | Full access to `/tmp`, `/private/tmp`, `/var/folders` |
+| TTY/PTY access | Interactive terminal support for commands |
+| IPC operations | Mach messaging and POSIX IPC allowed |
 
-**sandbox-exec limitations:**
+**Default Readable Paths (Always Allowed):**
+
+| Category | Paths |
+|----------|-------|
+| System libraries | `/usr/lib`, `/System/Library`, `/Library/Frameworks`, `/private/var/db/dyld` |
+| System tools | `/usr/bin`, `/usr/sbin`, `/bin`, `/sbin`, `/usr/local/bin` |
+| Homebrew | `/opt/homebrew/bin`, `/opt/homebrew/Cellar` |
+| Shared resources | `/usr/share` |
+| Device nodes | `/dev/null`, `/dev/random`, `/dev/urandom`, `/dev/zero` |
+
+**Configuration Options:**
+
+```yaml
+sandbox:
+  # Primary workspace - full read/write access
+  workspace: /path/to/workspace
+
+  # Additional paths to allow (full access)
+  allowed_paths:
+    - /home/user/.config/myapp
+    - /usr/local/share/data
+
+  # Capabilities to enable
+  capabilities:
+    - network    # Enables network access (network*)
+```
+
+**SBPL Profile Structure:**
+
+The generated profile follows this structure:
+1. `(deny default)` - Start with deny-all
+2. Allow process operations (fork, exec, self-signal)
+3. Allow sysctl reads for system info
+4. Allow reading system paths (libraries, frameworks, tools)
+5. Allow TTY/PTY access for interactive commands
+6. Allow temp file operations
+7. Allow workspace full access (from config)
+8. Allow additional paths (from config)
+9. Conditionally allow network (if `network` capability set)
+10. Allow Mach and POSIX IPC for inter-process communication
+
+**sandbox-exec Limitations:**
 - `sandbox-exec` is deprecated by Apple but still functional on all macOS versions
 - Provides file and network restrictions only (no process namespace isolation)
 - Cannot enforce resource limits (CPU, memory)
 - Cannot filter syscalls
 - Profile is passed inline via `-p` flag
+- No cgroup equivalent for resource accounting
+- Process tree escapes possible (child processes inherit sandbox)
 
 **Recommendations for macOS deployments:**
 - **Enterprise:** Use ESF+NE mode for full enforcement (ESF requires Apple approval; NE is standard capability)
