@@ -71,7 +71,7 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | **macOS ESF+NE** | 90% | Yes | Yes | None | Exec only | None |
 | **macOS + Lima** | 85% | Yes | Yes | Full | Yes | Full |
 | **macOS FUSE-T** | 70% | Yes | Yes | None | No | None |
-| **Windows Native** | 75% | Yes | Yes | Partial | No | Partial |
+| **Windows Native** | 85% | Yes | Yes | Partial | No | Partial |
 
 ## Security Feature Coverage
 
@@ -97,9 +97,9 @@ macOS FUSE-T + pf     ███████████████████�
                       File✓   Net✓    Iso✗      Sys✗     Res✗
                       (No isolation, no syscall filter, no resource limits)
 
-Windows Native        ████████████████████████████████████░░░░░░░░░░░░   75%
+Windows Native        ██████████████████████████████████████░░░░░░░░░░   85%
                       File✓   Net✓    Iso⚠      Sys✗     Res⚠
-                      (Mini Filter + WinDivert + Registry blocking, AppContainer partial)
+                      (Mini Filter + WinDivert + Registry blocking + AppContainer sandbox)
 
 Legend: ✓ = Full support  ⚠ = Partial support  ✗ = Not supported
 ```

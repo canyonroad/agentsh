@@ -143,6 +143,50 @@ WinFsp provides the same FUSE-style mounting as macOS FUSE-T, using a shared `in
 - Soft-delete (files moved to trash instead of permanent deletion)
 - Automatic minifilter process exclusion to prevent double-interception
 
+**AppContainer Sandbox Isolation:**
+
+Windows 8+ supports AppContainer for kernel-enforced process isolation. agentsh uses a two-layer security model:
+
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| Primary | AppContainer | Kernel-enforced capability isolation |
+| Secondary | Minifilter driver | Policy-based file/registry rules |
+
+**Sandbox Configuration:**
+
+```yaml
+sandbox:
+  windows:
+    use_app_container: true    # Default: true (Windows 8+ required)
+    use_minifilter: true       # Default: true
+    network_access: none       # none, outbound, local, full
+    fail_on_error: true        # Default: true
+```
+
+**Network Access Levels:**
+
+| Level | Description |
+|-------|-------------|
+| `none` | No network access (default, maximum isolation) |
+| `outbound` | Internet client connections only |
+| `local` | Private network access only |
+| `full` | All network access |
+
+**Configuration Example (Go API):**
+
+```go
+config := platform.SandboxConfig{
+    Name: "my-sandbox",
+    WorkspacePath: "/path/to/workspace",
+    WindowsOptions: &platform.WindowsSandboxOptions{
+        UseAppContainer:         true,
+        UseMinifilter:           true,
+        NetworkAccess:           platform.NetworkNone,
+        FailOnAppContainerError: true,
+    },
+}
+```
+
 See [Windows Driver Deployment Guide](windows-driver-deployment.md) for installation and configuration.
 
 ### Windows (WSL2)
