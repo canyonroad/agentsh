@@ -5,6 +5,8 @@ package windows
 import (
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestAppContainerName(t *testing.T) {
@@ -23,4 +25,39 @@ func TestAppContainerNameSanitization(t *testing.T) {
 	if strings.ContainsAny(name, `/\:*?"<>|`) {
 		t.Errorf("name should not contain special chars: %s", name)
 	}
+}
+
+func TestAppContainerCreateDelete(t *testing.T) {
+	if !isAdmin() {
+		t.Skip("requires admin privileges")
+	}
+
+	ac := newAppContainer("test-create-delete")
+
+	// Create should succeed
+	if err := ac.create(); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	defer ac.cleanup()
+
+	if !ac.created {
+		t.Error("created flag should be true")
+	}
+	if ac.sid == nil {
+		t.Error("SID should be set after create")
+	}
+
+	// Cleanup should succeed
+	if err := ac.cleanup(); err != nil {
+		t.Errorf("cleanup failed: %v", err)
+	}
+}
+
+func isAdmin() bool {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return false
+	}
+	defer token.Close()
+	return token.IsElevated()
 }
