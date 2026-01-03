@@ -59,8 +59,8 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | Registry blocking | N/A | N/A | N/A | N/A | Yes | N/A |
 | Kernel events | eBPF | ESF | No | eBPF | No | eBPF |
 | **Requirements** |
-| Special permissions | root | Apple entitlements | root + brew | Lima VM | Admin | WSL2 |
-| Installation complexity | Low | High (Apple approval) | Low | Medium | Medium | Low |
+| Special permissions | root | ESF approval + NE entitlements | root + brew | Lima VM | Admin | WSL2 |
+| Installation complexity | Low | Medium (ESF needs Apple approval) | Low | Medium | Medium | Low |
 
 ## Security Score Comparison
 
@@ -87,7 +87,7 @@ Windows WSL2          ███████████████████�
 
 macOS ESF+NE          ████████████████████████████████████████░░░░░░░░   90%
                       File✓   Net✓    Iso✗      Sys⚠     Res✗
-                      (Apple entitlements required)
+                      (ESF requires Apple approval; NE is standard capability)
 
 macOS + Lima          ██████████████████████████████████████░░░░░░░░░░   85%
                       File✓   Net✓    Iso✓      Sys✓     Res✓
@@ -218,8 +218,9 @@ Lima/virtiofs   █████████████████████�
 ┌─────────────────────┐           ┌─────────────────────┐
 │   macOS ESF+NE      │           │   macOS FUSE-T      │
 │   90% - Best native │           │   70% - Easy setup  │
-│   (requires Apple   │           │   brew install      │
-│    approval)        │           │   fuse-t            │
+│   (ESF needs Apple  │           │   brew install      │
+│    approval; NE     │           │   fuse-t            │
+│    is standard)     │           │                     │
 └─────────────────────┘           └─────────────────────┘
 ```
 
@@ -230,7 +231,7 @@ Lima/virtiofs   █████████████████████�
 | Production - Maximum Security | Linux Native | 100% | Full isolation, all features |
 | Production - Windows Server | Windows WSL2 | 100% | Full Linux security in VM |
 | Production - macOS | macOS + Lima | 85% | Full isolation via VM |
-| Enterprise Security Product | macOS ESF+NE | 90% | Requires Apple approval |
+| Enterprise Security Product | macOS ESF+NE | 90% | ESF requires Apple approval; NE is standard |
 | Development - macOS | macOS FUSE-T | 70% | Easy setup, good monitoring |
 | Development - Windows | Windows Native | 75% | Registry monitoring + WinDivert network |
 | CI/CD Pipeline | Linux Native | 100% | Containers supported |
@@ -279,7 +280,7 @@ sandbox:
 
 | Configuration | File Interception | Network | Isolation | Ease of Setup | Security |
 |---------------|:-----------------:|:-------:|:---------:|:-------------:|:--------:|
-| ESF + NE | Endpoint Security | Network Extension | None | Hard (Apple approval) | 90% |
+| ESF + NE | Endpoint Security | Network Extension | None | Medium (ESF needs approval) | 90% |
 | FUSE-T + pf | FUSE-T (NFS) | pf packet filter | None | Easy (`brew install`) | 70% |
 | Lima VM | FUSE3 in VM | iptables in VM | Full | Medium | 85% |
 | Degraded | FSEvents (observe) | pcap (observe) | None | None required | 25% |
@@ -298,7 +299,8 @@ sandbox:
 - eBPF requires kernel 5.x+ for full features
 
 ### macOS ESF+NE
-- **Requires Apple approval** - must apply for entitlements with business justification
+- **ESF requires Apple approval** - must apply for ESF entitlement with business justification
+- **Network Extension is standard** - enable in Xcode, no approval needed (since Nov 2016)
 - **No process isolation** - macOS has no namespace equivalent
 - **No resource limits** - no cgroups equivalent
 - **No syscall filtering** - except exec blocking via ESF
@@ -341,7 +343,7 @@ sandbox:
 | Platform | Command | Requirements |
 |----------|---------|--------------|
 | Linux | `curl -fsSL https://get.agentsh.dev \| bash` | root for full features |
-| macOS ESF+NE | `make build-macos-enterprise` | Xcode 15+, Apple entitlements, code signing |
+| macOS ESF+NE | `make build-macos-enterprise` | Xcode 15+, ESF entitlement (Apple approval), code signing |
 | macOS FUSE-T | `brew install fuse-t && brew install agentsh` | root for pf network |
 | macOS Lima | `brew install lima && limactl start agentsh` | Lima VM |
 | Windows Native | `sc create agentsh type=filesys` | Admin, test signing (dev) or EV cert (prod) |

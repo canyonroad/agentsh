@@ -1,0 +1,444 @@
+name: macOS Enterprise Build (Disabled)
+
+# DISABLED: Requires Apple Developer Program membership ($99/year)
+# To enable:
+# 1. Join Apple Developer Program at developer.apple.com
+# 2. Create Developer ID Application certificate
+# 3. Apply for ESF entitlement (business justification required)
+# 4. Add secrets: MACOS_SIGNING_CERT_P12, MACOS_SIGNING_CERT_PASSWORD, MACOS_SIGNING_IDENTITY
+# 5. Uncomment the triggers below
+#
+# Entitlement notes:
+#   - ESF (Endpoint Security): Requires Apple approval
+#   - Network Extension: Standard capability since Nov 2016 - no approval needed
+
+on:
+  # Disabled - uncomment to enable
+  # push:
+  #   tags:
+  #     - "v*"
+  workflow_dispatch:
+    inputs:
+      notarize:
+        description: 'Notarize the app bundle'
+        required: false
+        default: 'true'
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  XCODE_VERSION: '15.4'
+
+jobs:
+  build-macos-enterprise:
+    runs-on: macos-14  # Apple Silicon runner
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode version
+        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
+
+      - name: Verify Xcode
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Cache Go build dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            .gocache
+            .gomodcache
+            .gopath
+          key: ${{ runner.os }}-go-enterprise-${{ hashFiles('go.sum') }}
+
+      # Import signing certificate to macOS Keychain
+      - name: Import signing certificate
+        env:
+          MACOS_SIGNING_CERT_P12: ${{ secrets.MACOS_SIGNING_CERT_P12 }}
+          MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate
+          echo "$MACOS_SIGNING_CERT_P12" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 \
+            -P "$MACOS_SIGNING_CERT_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          # Set keychain to be used
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain
+
+          # Allow codesign to access the key without prompting
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Clean up
+          rm -f $RUNNER_TEMP/certificate.p12
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+
+      # Verify signing identity is available
+      - name: Verify signing identity
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          echo "Available signing identities:"
+          security find-identity -v -p codesigning
+
+          if ! security find-identity -v -p codesigning | grep -q "$SIGNING_IDENTITY"; then
+            echo "Error: Signing identity '$SIGNING_IDENTITY' not found"
+            exit 1
+          fi
+          echo "Signing identity verified"
+
+      # Build Go binary for macOS (arm64 + amd64)
+      - name: Build Go binary
+        run: |
+          echo "Building Go binary for arm64..."
+          mkdir -p build/AgentSH.app/Contents/MacOS
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build \
+            -ldflags "-X main.version=${{ github.ref_name }} -X main.commit=$(git rev-parse --short=7 HEAD)" \
+            -o build/AgentSH.app/Contents/MacOS/agentsh \
+            ./cmd/agentsh
+
+          echo "Building Go binary for amd64..."
+          mkdir -p build/AgentSH-amd64.app/Contents/MacOS
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build \
+            -ldflags "-X main.version=${{ github.ref_name }} -X main.commit=$(git rev-parse --short=7 HEAD)" \
+            -o build/AgentSH-amd64.app/Contents/MacOS/agentsh \
+            ./cmd/agentsh
+
+      # Build Swift System Extension and XPC Service
+      - name: Build Swift components
+        run: |
+          echo "Building System Extension..."
+          xcodebuild \
+            -project macos/AgentSH.xcodeproj \
+            -scheme SysExt \
+            -configuration Release \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+          echo "Building XPC Service..."
+          xcodebuild \
+            -project macos/AgentSH.xcodeproj \
+            -scheme XPCService \
+            -configuration Release \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      # Assemble app bundle
+      - name: Assemble app bundle
+        run: |
+          echo "Assembling app bundle..."
+
+          # Create bundle structure
+          mkdir -p build/AgentSH.app/Contents/{Library/SystemExtensions,XPCServices,Resources}
+
+          # Copy Info.plist
+          cp macos/AgentSH/Info.plist build/AgentSH.app/Contents/
+
+          # Copy System Extension
+          cp -r build/DerivedData/Build/Products/Release/com.agentsh.sysext.systemextension \
+            build/AgentSH.app/Contents/Library/SystemExtensions/
+
+          # Copy XPC Service
+          cp -r build/DerivedData/Build/Products/Release/com.agentsh.xpc.xpc \
+            build/AgentSH.app/Contents/XPCServices/
+
+          echo "App bundle structure:"
+          find build/AgentSH.app -type f | head -20
+
+      # Sign app bundle with entitlements
+      - name: Sign app bundle
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          echo "Signing System Extension with entitlements..."
+          codesign --force --deep --sign "$SIGNING_IDENTITY" \
+            --entitlements macos/SysExt/SysExt.entitlements \
+            --options runtime \
+            --timestamp \
+            build/AgentSH.app/Contents/Library/SystemExtensions/com.agentsh.sysext.systemextension
+
+          echo "Signing XPC Service..."
+          codesign --force --deep --sign "$SIGNING_IDENTITY" \
+            --options runtime \
+            --timestamp \
+            build/AgentSH.app/Contents/XPCServices/com.agentsh.xpc.xpc
+
+          echo "Signing main binary..."
+          codesign --force --sign "$SIGNING_IDENTITY" \
+            --options runtime \
+            --timestamp \
+            build/AgentSH.app/Contents/MacOS/agentsh
+
+          echo "Signing app bundle..."
+          codesign --force --deep --sign "$SIGNING_IDENTITY" \
+            --options runtime \
+            --timestamp \
+            build/AgentSH.app
+
+          echo "Verifying signature..."
+          codesign --verify --deep --strict --verbose=2 build/AgentSH.app
+
+          echo "Displaying entitlements..."
+          codesign -d --entitlements - build/AgentSH.app/Contents/Library/SystemExtensions/com.agentsh.sysext.systemextension
+
+      # Notarize app bundle (optional)
+      - name: Notarize app bundle
+        if: ${{ github.event.inputs.notarize != 'false' && secrets.MACOS_NOTARIZATION_APPLE_ID != '' }}
+        env:
+          APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
+          TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+        run: |
+          echo "Creating ZIP for notarization..."
+          ditto -c -k --keepParent build/AgentSH.app build/AgentSH.zip
+
+          echo "Submitting for notarization..."
+          xcrun notarytool submit build/AgentSH.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID" \
+            --wait \
+            --timeout 30m
+
+          echo "Stapling notarization ticket..."
+          xcrun stapler staple build/AgentSH.app
+
+          echo "Verifying notarization..."
+          spctl --assess --verbose --type execute build/AgentSH.app
+
+      # Create DMG installer
+      - name: Create DMG
+        run: |
+          echo "Creating DMG..."
+          hdiutil create -volname "AgentSH" \
+            -srcfolder build/AgentSH.app \
+            -ov -format UDZO \
+            build/AgentSH-${{ github.ref_name }}-arm64.dmg
+
+          echo "DMG created: build/AgentSH-${{ github.ref_name }}-arm64.dmg"
+
+      # Upload artifacts
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentSH-${{ github.ref_name }}-arm64
+          path: build/AgentSH.app
+          if-no-files-found: error
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentSH-${{ github.ref_name }}-arm64-dmg
+          path: build/AgentSH-${{ github.ref_name }}-arm64.dmg
+          if-no-files-found: error
+
+      # Upload to GitHub Release (only on tag push)
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/AgentSH-${{ github.ref_name }}-arm64.dmg
+          fail_on_unmatched_files: true
+
+      # Cleanup keychain
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -n "$KEYCHAIN_PATH" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
+
+  # Build amd64 variant (Intel Macs)
+  build-macos-enterprise-amd64:
+    runs-on: macos-13  # Intel runner for native amd64 build
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode version
+        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app || sudo xcode-select -s /Applications/Xcode_15.2.app
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Cache Go build dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            .gocache
+            .gomodcache
+            .gopath
+          key: ${{ runner.os }}-go-enterprise-amd64-${{ hashFiles('go.sum') }}
+
+      - name: Import signing certificate
+        env:
+          MACOS_SIGNING_CERT_P12: ${{ secrets.MACOS_SIGNING_CERT_P12 }}
+          MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$MACOS_SIGNING_CERT_P12" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 \
+            -P "$MACOS_SIGNING_CERT_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          rm -f $RUNNER_TEMP/certificate.p12
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+
+      - name: Build Go binary (amd64)
+        run: |
+          mkdir -p build/AgentSH.app/Contents/MacOS
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build \
+            -ldflags "-X main.version=${{ github.ref_name }} -X main.commit=$(git rev-parse --short=7 HEAD)" \
+            -o build/AgentSH.app/Contents/MacOS/agentsh \
+            ./cmd/agentsh
+
+      - name: Build Swift components (amd64)
+        run: |
+          xcodebuild \
+            -project macos/AgentSH.xcodeproj \
+            -scheme SysExt \
+            -configuration Release \
+            -arch x86_64 \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+          xcodebuild \
+            -project macos/AgentSH.xcodeproj \
+            -scheme XPCService \
+            -configuration Release \
+            -arch x86_64 \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Assemble app bundle
+        run: |
+          mkdir -p build/AgentSH.app/Contents/{Library/SystemExtensions,XPCServices,Resources}
+          cp macos/AgentSH/Info.plist build/AgentSH.app/Contents/
+          cp -r build/DerivedData/Build/Products/Release/com.agentsh.sysext.systemextension \
+            build/AgentSH.app/Contents/Library/SystemExtensions/
+          cp -r build/DerivedData/Build/Products/Release/com.agentsh.xpc.xpc \
+            build/AgentSH.app/Contents/XPCServices/
+
+      - name: Sign app bundle
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          codesign --force --deep --sign "$SIGNING_IDENTITY" \
+            --entitlements macos/SysExt/SysExt.entitlements \
+            --options runtime \
+            --timestamp \
+            build/AgentSH.app/Contents/Library/SystemExtensions/com.agentsh.sysext.systemextension
+
+          codesign --force --deep --sign "$SIGNING_IDENTITY" \
+            --options runtime \
+            --timestamp \
+            build/AgentSH.app/Contents/XPCServices/com.agentsh.xpc.xpc
+
+          codesign --force --sign "$SIGNING_IDENTITY" \
+            --options runtime \
+            --timestamp \
+            build/AgentSH.app/Contents/MacOS/agentsh
+
+          codesign --force --deep --sign "$SIGNING_IDENTITY" \
+            --options runtime \
+            --timestamp \
+            build/AgentSH.app
+
+          codesign --verify --deep --strict --verbose=2 build/AgentSH.app
+
+      - name: Notarize app bundle
+        if: ${{ github.event.inputs.notarize != 'false' && secrets.MACOS_NOTARIZATION_APPLE_ID != '' }}
+        env:
+          APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
+          TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent build/AgentSH.app build/AgentSH.zip
+          xcrun notarytool submit build/AgentSH.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID" \
+            --wait \
+            --timeout 30m
+          xcrun stapler staple build/AgentSH.app
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "AgentSH" \
+            -srcfolder build/AgentSH.app \
+            -ov -format UDZO \
+            build/AgentSH-${{ github.ref_name }}-amd64.dmg
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentSH-${{ github.ref_name }}-amd64-dmg
+          path: build/AgentSH-${{ github.ref_name }}-amd64.dmg
+          if-no-files-found: error
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/AgentSH-${{ github.ref_name }}-amd64.dmg
+          fail_on_unmatched_files: true
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -n "$KEYCHAIN_PATH" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi

@@ -1107,12 +1107,15 @@ mkdir -p macos/XPCService
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- ESF requires Apple approval - submit business justification -->
     <key>com.apple.developer.endpoint-security.client</key>
     <true/>
+    <!-- Network Extension is a standard capability since Nov 2016 - enable in Xcode -->
+    <!-- Use -systemextension suffix for Developer ID distribution -->
     <key>com.apple.developer.networking.networkextension</key>
     <array>
-        <string>content-filter-provider</string>
-        <string>dns-proxy</string>
+        <string>content-filter-provider-systemextension</string>
+        <string>dns-proxy-systemextension</string>
     </array>
 </dict>
 </plist>
@@ -2047,7 +2050,8 @@ git commit -m "test(darwin): add XPC integration test scaffolding"
 12. Add integration test scaffolding
 
 ### Post-Implementation:
-- Apply for Apple entitlements
+- Apply for ESF entitlement from Apple (requires business justification)
+- Enable Network Extension capability in Xcode (standard capability - no approval needed)
 - Set up signing certificates
 - Configure notarization
 - Add CI pipeline for entitled builds

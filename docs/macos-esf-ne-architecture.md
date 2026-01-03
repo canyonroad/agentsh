@@ -265,24 +265,26 @@ queue.sync {
 <true/>
 ```
 
-### Endpoint Security Entitlement
+### Endpoint Security Entitlement (Requires Apple Approval)
 
 ```xml
 <key>com.apple.developer.endpoint-security.client</key>
 <true/>
 ```
 
-### Network Extension Entitlement
+**Note:** ESF requires Apple approval. Submit a business justification via the Apple Developer Portal.
+
+### Network Extension Entitlement (Standard Capability)
 
 ```xml
 <key>com.apple.developer.networking.networkextension</key>
 <array>
-    <string>content-filter-provider</string>
-    <string>dns-proxy</string>
+    <string>content-filter-provider-systemextension</string>
+    <string>dns-proxy-systemextension</string>
 </array>
 ```
 
-These entitlements must be provisioned by Apple for your Developer ID.
+**Note:** Network Extension is a standard capability since November 2016. Enable in Xcode Signing & Capabilities - no Apple approval needed. Use the `-systemextension` suffix values for Developer ID distribution.
 
 ## Performance Characteristics
 
@@ -317,12 +319,13 @@ if sysext.IsAvailable() && sysext.IsApproved() {
 ## Deployment Checklist
 
 1. [ ] Apple Developer Program membership active
-2. [ ] ESF + NE entitlements provisioned
-3. [ ] Code signing identity configured
-4. [ ] App bundle built and signed
-5. [ ] System Extension approved by user
-6. [ ] Network Extension activated
-7. [ ] Go server running and accepting XPC connections
+2. [ ] ESF entitlement approved by Apple (submit business justification)
+3. [ ] Network Extension capability enabled in Xcode (standard, no approval needed)
+4. [ ] Code signing identity configured
+5. [ ] App bundle built and signed
+6. [ ] System Extension approved by user
+7. [ ] Network Extension activated
+8. [ ] Go server running and accepting XPC connections
 
 ## See Also
 
