@@ -17,12 +17,14 @@ This document describes the architecture for implementing Apple's Endpoint Secur
 
 ## Requirements
 
-### Apple Entitlements (requires Apple Developer Program approval)
+### Entitlements
 
-| Entitlement | Purpose |
-|-------------|---------|
-| `com.apple.developer.endpoint-security.client` | ESF client for file/process monitoring |
-| `com.apple.developer.networking.networkextension` | Network Extension for traffic filtering |
+| Entitlement | Purpose | Apple Approval |
+|-------------|---------|----------------|
+| `com.apple.developer.endpoint-security.client` | ESF client for file/process monitoring | **Required** - submit business justification |
+| `com.apple.developer.networking.networkextension` | Network Extension for traffic filtering | **Not required** - standard capability since Nov 2016 |
+
+**Note:** For Developer ID distribution, use the `-systemextension` suffix values for Network Extension entitlements (e.g., `content-filter-provider-systemextension`).
 
 ### Runtime Requirements
 

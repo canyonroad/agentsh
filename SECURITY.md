@@ -164,22 +164,26 @@ macOS has significantly reduced security enforcement compared to Linux due to pl
 
 | Tier | Score | Requirements | Capabilities |
 |------|-------|--------------|--------------|
-| Enterprise | 95% | ESF + Network Extension entitlements | Full enforcement (requires Apple approval) |
+| Enterprise | 95% | ESF (Apple approval) + Network Extension | Full enforcement |
 | Full | 75% | FUSE-T + root | File + network blocking |
 | Network Only | 50% | pf + root | Network only, file observation |
 | Monitor Only | 25% | None | Observation only |
 | Minimal | 10% | None | Command logging only |
 
+**Entitlement requirements:**
+- **ESF (Endpoint Security):** Requires Apple approval - submit business justification via Developer Portal
+- **Network Extension:** Standard capability since November 2016 - enable in Xcode, no Apple approval needed
+
 **Current implementation status:**
 - FUSE-T mounting: **Implemented** (requires CGO + FUSE-T: `brew install fuse-t`)
 - FSEvents fallback: **Observation only** (cannot block, used when CGO unavailable)
 - pf network rules: **Loopback only** (real interfaces not intercepted)
-- Endpoint Security Framework: **Implemented** (requires Apple entitlements + System Extension)
-- Network Extension: **Implemented** (requires Apple entitlements + System Extension)
+- Endpoint Security Framework: **Implemented** (requires Apple approval for ESF entitlement)
+- Network Extension: **Implemented** (standard capability - no Apple approval needed)
 
 **ESF+NE Enterprise Mode:**
 
-When running with Apple entitlements and an approved System Extension, agentsh provides near-Linux-level enforcement:
+When running with ESF entitlements (requires Apple approval) and Network Extension (standard capability), agentsh provides near-Linux-level enforcement:
 - ESF (Endpoint Security Framework) intercepts file and process events with AUTH mode blocking
 - Network Extension (FilterDataProvider + DNSProxyProvider) enforces network and DNS policies
 - XPC bridge connects the System Extension to the Go policy engine
@@ -188,7 +192,7 @@ When running with Apple entitlements and an approved System Extension, agentsh p
 See [macOS ESF+NE Architecture](docs/macos-esf-ne-architecture.md) for deployment details.
 
 **Recommendations for macOS deployments:**
-- **Enterprise:** Use ESF+NE mode for full enforcement (requires Apple Developer Program membership)
+- **Enterprise:** Use ESF+NE mode for full enforcement (ESF requires Apple approval; NE is standard capability)
 - **Standard:** Install FUSE-T (`brew install fuse-t`) for file policy enforcement
 - Build with CGO enabled for FUSE-T support: `CGO_ENABLED=1 go build`
 - ESF+NE mode automatically falls back to FUSE-T if entitlements are unavailable

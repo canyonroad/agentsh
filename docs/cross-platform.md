@@ -2,14 +2,18 @@
 
 **Last updated:** January 2026
 
-agentsh supports **Linux** and **macOS** natively. Linux provides the most complete feature set. macOS supports two enforcement tiers: **ESF+NE** (90% security score, requires Apple entitlements) and **FUSE-T** (70% score, easy setup).
+agentsh supports **Linux** and **macOS** natively. Linux provides the most complete feature set. macOS supports two enforcement tiers: **ESF+NE** (90% security score) and **FUSE-T** (70% score, easy setup).
+
+**Entitlement requirements for macOS ESF+NE:**
+- **ESF (Endpoint Security):** Requires Apple approval - submit business justification
+- **Network Extension:** Standard capability since November 2016 - enable in Xcode, no approval needed
 
 If you're on Windows, the recommended approach is to run agentsh inside WSL2 or a Linux container. Unix socket monitoring (seccomp user-notify) is Linux-only and currently audit-only.
 
 ## What works today
 
 - **Linux (native):** primary supported platform with full feature set.
-- **macOS ESF+NE (enterprise):** Endpoint Security Framework + Network Extension for near-Linux enforcement (requires Apple entitlements).
+- **macOS ESF+NE (enterprise):** Endpoint Security Framework + Network Extension for near-Linux enforcement (ESF needs Apple approval; NE is standard).
 - **macOS FUSE-T (standard):** FUSE-T support for file policy enforcement (requires `brew install fuse-t` and CGO).
 - **Windows:** run in **WSL2** (recommended) or a Linux container.
 - **gRPC (optional):** if enabled, clients connect to `server.grpc.addr` (default `127.0.0.1:9090`). The CLI can prefer gRPC via `AGENTSH_TRANSPORT=grpc`.
@@ -48,7 +52,7 @@ agentsh server
 
 ### macOS (ESF+NE - Enterprise)
 
-For enterprise deployments with Apple entitlements:
+For enterprise deployments:
 
 ```bash
 # Build the enterprise bundle (requires Xcode 15+)
@@ -63,11 +67,12 @@ SIGNING_IDENTITY="Developer ID Application" make sign-bundle
 
 **Requirements:**
 - Apple Developer Program membership
-- ESF + Network Extension entitlements from Apple
+- ESF entitlement from Apple (requires approval with business justification)
+- Network Extension entitlement (standard capability - enable in Xcode)
 - Xcode 15+ and Swift 5.9+
 - Code signing identity
 
-**Note:** ESF+NE mode automatically falls back to FUSE-T if entitlements are unavailable. See [macOS Build Guide](macos-build.md) for detailed instructions.
+**Note:** ESF+NE mode automatically falls back to FUSE-T if ESF entitlement is unavailable. See [macOS Build Guide](macos-build.md) for detailed instructions.
 
 ### Windows (Native - Mini Filter Driver)
 
@@ -215,7 +220,7 @@ docker run --rm -it \
 - **FUSE-T mount fails (macOS):** ensure FUSE-T is installed (`brew install fuse-t`) and the binary was built with CGO enabled.
 - **System Extension not loading (macOS ESF+NE):** check System Settings > General > Login Items & Extensions. User must approve the System Extension.
 - **XPC connection fails (macOS ESF+NE):** verify the System Extension is approved and running. Check Console.app for XPC errors.
-- **ESF client initialization fails:** ensure the app is signed with valid ESF entitlements from Apple.
+- **ESF client initialization fails:** ensure the app is signed with valid ESF entitlement from Apple (requires approval).
 - **Transparent network mode fails:** run as root / with NET_ADMIN capabilities; otherwise rely on proxy mode.
 - **cgroups errors:** keep `sandbox.cgroups.enabled: false` unless you have a writable cgroup v2 base path configured.
 - **gRPC connection fails:** confirm `server.grpc.enabled: true`, the address/port are reachable, and (if auth is enabled) send the API key via gRPC metadata `x-api-key`.
