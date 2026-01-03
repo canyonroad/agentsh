@@ -5,7 +5,9 @@ package windows
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -56,8 +58,8 @@ func (m *SandboxManager) detectIsolationLevel() platform.IsolationLevel {
 	if !m.available {
 		return platform.IsolationNone
 	}
-	// AppContainer provides minimal isolation compared to Linux namespaces
-	return platform.IsolationMinimal
+	// AppContainer provides partial isolation (capability-based, not namespace-based)
+	return platform.IsolationPartial
 }
 
 // Available returns whether sandboxing is available.
@@ -71,7 +73,7 @@ func (m *SandboxManager) IsolationLevel() platform.IsolationLevel {
 }
 
 // Create creates a new sandbox.
-// Note: Full implementation would use AppContainer or Windows Sandbox.
+// Uses AppContainer for process isolation on Windows 8+.
 func (m *SandboxManager) Create(config platform.SandboxConfig) (platform.Sandbox, error) {
 	if !m.available {
 		return nil, fmt.Errorf("sandboxing not available on this Windows system")
@@ -86,8 +88,74 @@ func (m *SandboxManager) Create(config platform.SandboxConfig) (platform.Sandbox
 	}
 
 	sandbox := &Sandbox{
-		id:     id,
-		config: config,
+		id:      id,
+		config:  config,
+		manager: m,
+	}
+
+	// Get options with defaults
+	opts := config.WindowsOptions
+	if opts == nil {
+		opts = platform.DefaultWindowsSandboxOptions()
+	}
+
+	// Setup AppContainer if enabled
+	if opts.UseAppContainer {
+		container := newAppContainer(id)
+		if err := container.create(); err != nil {
+			if opts.FailOnAppContainerError {
+				return nil, fmt.Errorf("AppContainer setup failed: %w", err)
+			}
+			// AppContainer setup failed, continuing without container isolation
+			// TODO: Add structured logging when logger is available
+		} else {
+			sandbox.container = container
+
+			// Configure network
+			if err := container.setNetworkCapabilities(opts.NetworkAccess); err != nil {
+				container.cleanup()
+				return nil, fmt.Errorf("network capability setup failed: %w", err)
+			}
+
+			// Grant access to workspace
+			if config.WorkspacePath != "" {
+				if err := container.grantPathAccess(config.WorkspacePath, AccessReadWrite); err != nil {
+					container.cleanup()
+					return nil, fmt.Errorf("grant workspace access failed: %w", err)
+				}
+			}
+
+			// Grant access to allowed paths
+			for _, path := range config.AllowedPaths {
+				if err := container.grantPathAccess(path, AccessRead); err != nil {
+					container.cleanup()
+					return nil, fmt.Errorf("grant allowed path %s failed: %w", path, err)
+				}
+			}
+
+			// Grant access to system directories for basic operation
+			systemRoot := os.Getenv("SystemRoot")
+			if systemRoot == "" {
+				systemRoot = "C:\\Windows"
+			}
+			systemPaths := []string{
+				filepath.Join(systemRoot, "System32"),
+				filepath.Join(systemRoot, "SysWOW64"),
+			}
+			for _, path := range systemPaths {
+				_ = container.grantPathAccess(path, AccessReadExecute) // Best effort
+			}
+		}
+	}
+
+	// Setup minifilter if enabled
+	if opts.UseMinifilter {
+		client := NewDriverClient()
+		if err := client.Connect(); err == nil {
+			sandbox.driverClient = client
+		}
+		// Minifilter connection failed, continuing without policy enforcement
+		// TODO: Add structured logging when logger is available
 	}
 
 	m.sandboxes[id] = sandbox
@@ -96,10 +164,13 @@ func (m *SandboxManager) Create(config platform.SandboxConfig) (platform.Sandbox
 
 // Sandbox represents a sandboxed execution environment on Windows.
 type Sandbox struct {
-	id     string
-	config platform.SandboxConfig
-	mu     sync.Mutex
-	closed bool
+	id           string
+	config       platform.SandboxConfig
+	mu           sync.Mutex
+	closed       bool
+	container    *appContainer  // nil if UseAppContainer=false
+	driverClient *DriverClient  // For minifilter integration
+	manager      *SandboxManager // Reference to parent manager for cleanup
 }
 
 // ID returns the sandbox identifier.
@@ -108,7 +179,7 @@ func (s *Sandbox) ID() string {
 }
 
 // Execute runs a command in the sandbox.
-// Note: Would use AppContainer or restricted token for actual isolation.
+// Uses AppContainer if configured, otherwise falls back to unsandboxed execution.
 func (s *Sandbox) Execute(ctx context.Context, cmd string, args ...string) (*platform.ExecResult, error) {
 	s.mu.Lock()
 	if s.closed {
@@ -117,8 +188,39 @@ func (s *Sandbox) Execute(ctx context.Context, cmd string, args ...string) (*pla
 	}
 	s.mu.Unlock()
 
-	// TODO: Implement AppContainer or restricted token execution
-	// For now, run without sandbox
+	opts := s.config.WindowsOptions
+	if opts == nil {
+		opts = platform.DefaultWindowsSandboxOptions()
+	}
+
+	// Try AppContainer execution if enabled and container is available
+	if opts.UseAppContainer && s.container != nil {
+		return s.executeInAppContainer(ctx, cmd, args)
+	}
+
+	// Fallback to unsandboxed execution
+	return s.executeUnsandboxed(ctx, cmd, args)
+}
+
+func (s *Sandbox) executeInAppContainer(ctx context.Context, cmd string, args []string) (*platform.ExecResult, error) {
+	proc, err := s.container.createProcess(ctx, cmd, args, nil, s.config.WorkspacePath)
+	if err != nil {
+		return nil, err
+	}
+
+	state, err := proc.Wait()
+	if err != nil {
+		return nil, err
+	}
+
+	return &platform.ExecResult{
+		ExitCode: state.ExitCode(),
+		Stdout:   nil, // Process output not captured in current implementation
+		Stderr:   nil,
+	}, nil
+}
+
+func (s *Sandbox) executeUnsandboxed(ctx context.Context, cmd string, args []string) (*platform.ExecResult, error) {
 	execCmd := exec.CommandContext(ctx, cmd, args...)
 	if s.config.WorkspacePath != "" {
 		execCmd.Dir = s.config.WorkspacePath
@@ -143,7 +245,7 @@ func (s *Sandbox) Execute(ctx context.Context, cmd string, args ...string) (*pla
 	}, nil
 }
 
-// Close destroys the sandbox.
+// Close destroys the sandbox and releases all resources.
 func (s *Sandbox) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -152,6 +254,33 @@ func (s *Sandbox) Close() error {
 		return nil
 	}
 	s.closed = true
+
+	var errs []error
+
+	// Cleanup AppContainer
+	if s.container != nil {
+		if err := s.container.cleanup(); err != nil {
+			errs = append(errs, err)
+		}
+		s.container = nil
+	}
+
+	// Disconnect minifilter
+	if s.driverClient != nil {
+		s.driverClient.Disconnect()
+		s.driverClient = nil
+	}
+
+	// Remove from manager's map
+	if s.manager != nil {
+		s.manager.mu.Lock()
+		delete(s.manager.sandboxes, s.id)
+		s.manager.mu.Unlock()
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("close errors: %v", errs)
+	}
 	return nil
 }
 

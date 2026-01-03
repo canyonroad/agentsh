@@ -176,7 +176,7 @@ func (p *Platform) checkAppContainer() bool {
 // detectIsolationLevel determines what isolation is available.
 func (p *Platform) detectIsolationLevel() platform.IsolationLevel {
 	if p.checkAppContainer() {
-		return platform.IsolationMinimal // AppContainer provides some isolation
+		return platform.IsolationPartial // AppContainer provides partial isolation (capability-based)
 	}
 	return platform.IsolationNone
 }

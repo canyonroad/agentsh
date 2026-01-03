@@ -187,6 +187,19 @@ func TestPlatform_Resources(t *testing.T) {
 	}
 }
 
+func TestPlatformCapabilities(t *testing.T) {
+	p, err := NewPlatform()
+	if err != nil {
+		t.Fatalf("NewPlatform() error = %v", err)
+	}
+
+	caps := p.Capabilities()
+
+	if !caps.HasAppContainer {
+		t.Error("HasAppContainer should be true on Windows 8+")
+	}
+}
+
 func TestPlatform_InterfaceCompliance(t *testing.T) {
 	var _ platform.Platform = (*Platform)(nil)
 }

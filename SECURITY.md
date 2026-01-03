@@ -290,6 +290,46 @@ WinFsp provides FUSE-style filesystem mounting on Windows using the shared `inte
 
 **Double-interception prevention:** When both minifilter and WinFsp are active, the Go client calls `ExcludeSelf()` before mounting to tell the minifilter to skip file operations from the agentsh process, preventing duplicate event capture.
 
+**AppContainer Sandbox Isolation:**
+
+Windows 8+ supports AppContainer, a kernel-enforced capability isolation mechanism. agentsh uses AppContainer as the primary process isolation layer, with the minifilter driver providing defense-in-depth:
+
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| Primary | AppContainer | Kernel-enforced capability isolation |
+| Secondary | Minifilter driver | Policy-based file/registry rules |
+
+**AppContainer Features:**
+
+| Feature | Description |
+|---------|-------------|
+| Capability isolation | Kernel-level enforcement of allowed capabilities |
+| Registry isolation | Automatic isolation of registry access |
+| Network control | Configurable network access levels |
+| ACL granting | Explicit path access required for file system access |
+
+**Network Access Levels:**
+
+| Level | Capability SIDs | Use Case |
+|-------|-----------------|----------|
+| `NetworkNone` | None | Maximum isolation (default) |
+| `NetworkOutbound` | S-1-15-3-1 (internetClient) | Outbound connections only |
+| `NetworkLocal` | S-1-15-3-3 (privateNetwork) | Private network only |
+| `NetworkFull` | Both SIDs | Full network access |
+
+**Configuration Options:**
+
+```go
+WindowsSandboxOptions{
+    UseAppContainer:         true,  // Enable AppContainer (default)
+    UseMinifilter:           true,  // Enable minifilter policy (default)
+    NetworkAccess:           NetworkNone,  // Network level (default: none)
+    FailOnAppContainerError: true,  // Fail hard on setup error (default)
+}
+```
+
+**Isolation Level:** Windows reports `IsolationPartial` when AppContainer is available (capability-based, not namespace-based like Linux).
+
 See [Windows Driver Deployment Guide](docs/windows-driver-deployment.md) for installation and configuration.
 
 ## Security Defaults
