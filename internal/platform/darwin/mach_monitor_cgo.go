@@ -61,8 +61,6 @@ import (
 	"fmt"
 )
 
-const cgoEnabled = true
-
 // getProcessTaskInfo retrieves task information for a process using Mach APIs.
 // This is the CGO implementation using proc_pidinfo().
 func getProcessTaskInfo(pid int) (*ProcessTaskInfo, error) {

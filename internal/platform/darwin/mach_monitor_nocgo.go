@@ -9,8 +9,6 @@ import (
 	"strings"
 )
 
-const cgoEnabled = false
-
 // getProcessTaskInfo retrieves task information for a process.
 // This is the fallback implementation using ps when CGO is disabled.
 // It's slower than the CGO version but doesn't require CGO support.
