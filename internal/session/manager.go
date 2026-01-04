@@ -223,6 +223,7 @@ func (s *Session) Snapshot() types.Session {
 		Profile:   s.Profile,
 		Mounts:    mounts,
 		Cwd:       s.Cwd,
+		ProxyURL:  s.proxyURL,
 	}
 }
 

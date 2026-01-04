@@ -49,6 +49,7 @@ type Session struct {
 	Profile   string       `json:"profile,omitempty"`
 	Mounts    []MountInfo  `json:"mounts,omitempty"`
 	Cwd       string       `json:"cwd"`
+	ProxyURL  string       `json:"proxy_url,omitempty"`
 }
 
 // MountInfo describes an active mount in a session.
