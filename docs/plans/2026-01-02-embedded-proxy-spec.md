@@ -1,7 +1,7 @@
 # Embedded LLM Proxy Specification
 
 **Date:** 2026-01-02
-**Status:** Approved
+**Status:** Implemented
 
 ## 1. Purpose and Scope
 
