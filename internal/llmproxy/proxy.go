@@ -88,7 +88,7 @@ func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 	detector := NewDialectDetector(configs)
 	rewriter := NewRequestRewriter(detector)
 	dlp := NewDLPProcessor(cfg.DLP)
-	storage, err := NewStorage(storagePath, cfg.SessionID)
+	storage, err := NewStorage(storagePath, cfg.SessionID, cfg.Storage.StoreBodies)
 	if err != nil {
 		return nil, fmt.Errorf("create storage: %w", err)
 	}
@@ -283,6 +283,11 @@ func (p *Proxy) logRequest(requestID, sessionID string, dialect Dialect, r *http
 	if err := p.storage.LogRequest(entry); err != nil {
 		p.logger.Error("log request", "error", err, "request_id", requestID)
 	}
+
+	// Store full body if enabled
+	if err := p.storage.StoreRequestBody(requestID, body); err != nil {
+		p.logger.Error("store request body", "error", err, "request_id", requestID)
+	}
 }
 
 // logResponse logs the response to storage.
@@ -329,6 +334,11 @@ func (p *Proxy) logResponse(requestID, sessionID string, dialect Dialect, resp *
 
 	if err := p.storage.LogResponse(entry); err != nil {
 		p.logger.Error("log response", "error", err, "request_id", requestID)
+	}
+
+	// Store full body if enabled
+	if err := p.storage.StoreResponseBody(requestID, respBody); err != nil {
+		p.logger.Error("store response body", "error", err, "request_id", requestID)
 	}
 }
 

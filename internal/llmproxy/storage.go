@@ -56,21 +56,24 @@ type DLPInfo struct {
 
 // Storage handles request/response logging to disk.
 type Storage struct {
-	basePath  string
-	sessionID string
-	file      *os.File
-	mu        sync.Mutex
+	basePath    string
+	sessionID   string
+	storeBodies bool
+	file        *os.File
+	mu          sync.Mutex
 }
 
 // NewStorage creates a new storage instance.
 // basePath is the base storage directory (e.g., ~/.agentsh/sessions).
 // sessionID is the current session ID.
-func NewStorage(basePath, sessionID string) (*Storage, error) {
+// storeBodies enables storing full request/response bodies to disk.
+func NewStorage(basePath, sessionID string, storeBodies bool) (*Storage, error) {
 	if basePath == "" || sessionID == "" {
 		// Return a no-op storage if not configured
 		return &Storage{
-			basePath:  basePath,
-			sessionID: sessionID,
+			basePath:    basePath,
+			sessionID:   sessionID,
+			storeBodies: storeBodies,
 		}, nil
 	}
 
@@ -80,7 +83,7 @@ func NewStorage(basePath, sessionID string) (*Storage, error) {
 		return nil, fmt.Errorf("create session directory: %w", err)
 	}
 
-	// Create llm-bodies directory for full body storage (Phase 2 feature)
+	// Create llm-bodies directory for full body storage
 	bodiesDir := filepath.Join(sessionDir, "llm-bodies")
 	if err := os.MkdirAll(bodiesDir, 0700); err != nil {
 		return nil, fmt.Errorf("create bodies directory: %w", err)
@@ -94,9 +97,10 @@ func NewStorage(basePath, sessionID string) (*Storage, error) {
 	}
 
 	return &Storage{
-		basePath:  basePath,
-		sessionID: sessionID,
-		file:      file,
+		basePath:    basePath,
+		sessionID:   sessionID,
+		storeBodies: storeBodies,
+		file:        file,
 	}, nil
 }
 
@@ -171,6 +175,93 @@ func (s *Storage) BodiesPath() string {
 		return ""
 	}
 	return filepath.Join(s.basePath, s.sessionID, "llm-bodies")
+}
+
+// StoreBodiesEnabled returns whether body storage is enabled.
+func (s *Storage) StoreBodiesEnabled() bool {
+	return s.storeBodies
+}
+
+// StoreRequestBody stores the request body to disk.
+// The body is stored as JSON in llm-bodies/<request_id>.json
+// Returns nil if body storage is disabled or body is empty.
+func (s *Storage) StoreRequestBody(requestID string, body []byte) error {
+	if !s.storeBodies || len(body) == 0 {
+		return nil
+	}
+
+	bodiesPath := s.BodiesPath()
+	if bodiesPath == "" {
+		return nil
+	}
+
+	path := filepath.Join(bodiesPath, requestID+".json")
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		return fmt.Errorf("write request body: %w", err)
+	}
+
+	return nil
+}
+
+// StoreResponseBody stores the response body to disk.
+// The body is stored as JSON in llm-bodies/<request_id>.resp.json
+// Returns nil if body storage is disabled or body is empty.
+func (s *Storage) StoreResponseBody(requestID string, body []byte) error {
+	if !s.storeBodies || len(body) == 0 {
+		return nil
+	}
+
+	bodiesPath := s.BodiesPath()
+	if bodiesPath == "" {
+		return nil
+	}
+
+	path := filepath.Join(bodiesPath, requestID+".resp.json")
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		return fmt.Errorf("write response body: %w", err)
+	}
+
+	return nil
+}
+
+// ReadRequestBody reads a stored request body from disk.
+// Returns nil if the file doesn't exist.
+func (s *Storage) ReadRequestBody(requestID string) ([]byte, error) {
+	bodiesPath := s.BodiesPath()
+	if bodiesPath == "" {
+		return nil, nil
+	}
+
+	path := filepath.Join(bodiesPath, requestID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read request body: %w", err)
+	}
+
+	return data, nil
+}
+
+// ReadResponseBody reads a stored response body from disk.
+// Returns nil if the file doesn't exist.
+func (s *Storage) ReadResponseBody(requestID string) ([]byte, error) {
+	bodiesPath := s.BodiesPath()
+	if bodiesPath == "" {
+		return nil, nil
+	}
+
+	path := filepath.Join(bodiesPath, requestID+".resp.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+
+	return data, nil
 }
 
 // HashBody computes a SHA256 hash of the body for integrity verification.

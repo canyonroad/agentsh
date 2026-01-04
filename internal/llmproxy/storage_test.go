@@ -14,7 +14,7 @@ func TestNewStorage(t *testing.T) {
 		tmpDir := t.TempDir()
 		sessionID := "test-session-123"
 
-		storage, err := NewStorage(tmpDir, sessionID)
+		storage, err := NewStorage(tmpDir, sessionID, false)
 		if err != nil {
 			t.Fatalf("NewStorage failed: %v", err)
 		}
@@ -48,7 +48,7 @@ func TestNewStorage(t *testing.T) {
 	})
 
 	t.Run("no-op mode with empty path", func(t *testing.T) {
-		storage, err := NewStorage("", "")
+		storage, err := NewStorage("", "", false)
 		if err != nil {
 			t.Fatalf("NewStorage failed: %v", err)
 		}
@@ -79,7 +79,7 @@ func TestStorage_LogRequest(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionID := "test-session"
 
-	storage, err := NewStorage(tmpDir, sessionID)
+	storage, err := NewStorage(tmpDir, sessionID, false)
 	if err != nil {
 		t.Fatalf("NewStorage failed: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestStorage_LogResponse(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionID := "test-session"
 
-	storage, err := NewStorage(tmpDir, sessionID)
+	storage, err := NewStorage(tmpDir, sessionID, false)
 	if err != nil {
 		t.Fatalf("NewStorage failed: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestStorage_ReadLogEntries(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionID := "test-session"
 
-	storage, err := NewStorage(tmpDir, sessionID)
+	storage, err := NewStorage(tmpDir, sessionID, false)
 	if err != nil {
 		t.Fatalf("NewStorage failed: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestStorage_ReadLogEntries(t *testing.T) {
 	storage.Close()
 
 	// Create new storage instance to read
-	storage2, err := NewStorage(tmpDir, sessionID)
+	storage2, err := NewStorage(tmpDir, sessionID, false)
 	if err != nil {
 		t.Fatalf("NewStorage failed: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestStorage_ConcurrentWrites(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionID := "test-session"
 
-	storage, err := NewStorage(tmpDir, sessionID)
+	storage, err := NewStorage(tmpDir, sessionID, false)
 	if err != nil {
 		t.Fatalf("NewStorage failed: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestStorage_ConcurrentWrites(t *testing.T) {
 	// Close and reopen to read
 	storage.Close()
 
-	storage2, _ := NewStorage(tmpDir, sessionID)
+	storage2, _ := NewStorage(tmpDir, sessionID, false)
 	defer storage2.Close()
 
 	entries, err := storage2.ReadLogEntries()
@@ -437,7 +437,7 @@ func TestStorage_CloseMultipleTimes(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionID := "test-session"
 
-	storage, err := NewStorage(tmpDir, sessionID)
+	storage, err := NewStorage(tmpDir, sessionID, false)
 	if err != nil {
 		t.Fatalf("NewStorage failed: %v", err)
 	}
@@ -450,4 +450,145 @@ func TestStorage_CloseMultipleTimes(t *testing.T) {
 	if err := storage.Close(); err != nil {
 		t.Errorf("second Close() failed: %v", err)
 	}
+}
+
+func TestStorage_StoreBodies(t *testing.T) {
+	t.Run("stores request and response bodies when enabled", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		sessionID := "test-session"
+
+		// Create storage with storeBodies enabled
+		storage, err := NewStorage(tmpDir, sessionID, true)
+		if err != nil {
+			t.Fatalf("NewStorage failed: %v", err)
+		}
+		defer storage.Close()
+
+		if !storage.StoreBodiesEnabled() {
+			t.Error("StoreBodiesEnabled() should return true")
+		}
+
+		requestID := "req_test123"
+		reqBody := []byte(`{"model":"claude-3","messages":[{"role":"user","content":"Hello"}]}`)
+		respBody := []byte(`{"id":"msg_123","content":[{"type":"text","text":"Hi there!"}]}`)
+
+		// Store request body
+		if err := storage.StoreRequestBody(requestID, reqBody); err != nil {
+			t.Fatalf("StoreRequestBody failed: %v", err)
+		}
+
+		// Store response body
+		if err := storage.StoreResponseBody(requestID, respBody); err != nil {
+			t.Fatalf("StoreResponseBody failed: %v", err)
+		}
+
+		// Check files exist
+		reqPath := filepath.Join(tmpDir, sessionID, "llm-bodies", requestID+".json")
+		if _, err := os.Stat(reqPath); os.IsNotExist(err) {
+			t.Errorf("request body file not created: %s", reqPath)
+		}
+
+		respPath := filepath.Join(tmpDir, sessionID, "llm-bodies", requestID+".resp.json")
+		if _, err := os.Stat(respPath); os.IsNotExist(err) {
+			t.Errorf("response body file not created: %s", respPath)
+		}
+
+		// Read back and verify
+		readReq, err := storage.ReadRequestBody(requestID)
+		if err != nil {
+			t.Fatalf("ReadRequestBody failed: %v", err)
+		}
+		if string(readReq) != string(reqBody) {
+			t.Errorf("request body mismatch: got %q, want %q", readReq, reqBody)
+		}
+
+		readResp, err := storage.ReadResponseBody(requestID)
+		if err != nil {
+			t.Fatalf("ReadResponseBody failed: %v", err)
+		}
+		if string(readResp) != string(respBody) {
+			t.Errorf("response body mismatch: got %q, want %q", readResp, respBody)
+		}
+	})
+
+	t.Run("skips storage when disabled", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		sessionID := "test-session"
+
+		// Create storage with storeBodies disabled
+		storage, err := NewStorage(tmpDir, sessionID, false)
+		if err != nil {
+			t.Fatalf("NewStorage failed: %v", err)
+		}
+		defer storage.Close()
+
+		if storage.StoreBodiesEnabled() {
+			t.Error("StoreBodiesEnabled() should return false")
+		}
+
+		requestID := "req_test456"
+		reqBody := []byte(`{"model":"claude-3","messages":[]}`)
+
+		// Should succeed but not create file
+		if err := storage.StoreRequestBody(requestID, reqBody); err != nil {
+			t.Fatalf("StoreRequestBody failed: %v", err)
+		}
+
+		// File should not exist
+		reqPath := filepath.Join(tmpDir, sessionID, "llm-bodies", requestID+".json")
+		if _, err := os.Stat(reqPath); !os.IsNotExist(err) {
+			t.Errorf("request body file should not exist when disabled: %s", reqPath)
+		}
+	})
+
+	t.Run("skips empty bodies", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		sessionID := "test-session"
+
+		storage, err := NewStorage(tmpDir, sessionID, true)
+		if err != nil {
+			t.Fatalf("NewStorage failed: %v", err)
+		}
+		defer storage.Close()
+
+		requestID := "req_empty"
+
+		// Should succeed but not create file for empty body
+		if err := storage.StoreRequestBody(requestID, []byte{}); err != nil {
+			t.Fatalf("StoreRequestBody failed: %v", err)
+		}
+
+		// File should not exist
+		reqPath := filepath.Join(tmpDir, sessionID, "llm-bodies", requestID+".json")
+		if _, err := os.Stat(reqPath); !os.IsNotExist(err) {
+			t.Errorf("request body file should not exist for empty body: %s", reqPath)
+		}
+	})
+
+	t.Run("returns nil for nonexistent body", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		sessionID := "test-session"
+
+		storage, err := NewStorage(tmpDir, sessionID, true)
+		if err != nil {
+			t.Fatalf("NewStorage failed: %v", err)
+		}
+		defer storage.Close()
+
+		data, err := storage.ReadRequestBody("nonexistent")
+		if err != nil {
+			t.Errorf("ReadRequestBody should not error for missing file: %v", err)
+		}
+		if data != nil {
+			t.Errorf("expected nil for nonexistent body, got %v", data)
+		}
+
+		data, err = storage.ReadResponseBody("nonexistent")
+		if err != nil {
+			t.Errorf("ReadResponseBody should not error for missing file: %v", err)
+		}
+		if data != nil {
+			t.Errorf("expected nil for nonexistent body, got %v", data)
+		}
+	})
 }
