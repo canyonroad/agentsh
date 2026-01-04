@@ -9,7 +9,7 @@ This document examines:
 - **LLM proxy limitations**: Proxies monitor conversations but have no visibility into what agents actually do
 - **The gap between them**: Neither controls the critical moment when an LLM response becomes an executed action
 
-We analyze 15+ attack vectors that these traditional approaches cannot address and explain how agentsh's multi-layer architecture provides **semantic security**—understanding and controlling agent operations at the meaning level, not just the process or API level.
+We analyze 15+ attack vectors that these traditional approaches cannot address and explain how agentsh's multi-layer architecture provides **semantic security**—understanding and controlling agent operations at the meaning level, not just the process or API level. This includes an embedded LLM proxy with Data Loss Prevention (DLP) that can redact or tokenize sensitive data before it reaches LLM providers, deployable locally per-session or as a centralized enterprise service.
 
 ---
 
@@ -142,10 +142,14 @@ Docker, gVisor, Firecracker, and Kubernetes sandboxes provide execution boundari
 - Allowed outbound connections can exfiltrate anything
 
 **How agentsh Protects**:
-- **Embedded LLM proxy with DLP**: All LLM API requests inspected for sensitive data
-- **PII detection and redaction**: Emails, phone numbers, SSNs, credit cards detected and redacted
-- **Custom pattern support**: Organization-specific sensitive data patterns
-- **Network-level content policies**: Sensitive data blocked at connection level
+- **Embedded LLM proxy with DLP**: All LLM API requests intercepted and inspected before reaching providers (Anthropic, OpenAI, ChatGPT). Can be deployed locally per-session or as a centralized remote proxy for enterprise deployments.
+- **Two DLP modes**:
+  - **Redaction**: Sensitive data replaced with `[REDACTED:pattern_type]` before forwarding—data never reaches the LLM provider
+  - **Tokenization**: Sensitive data replaced with reversible tokens, enabling correlation analysis without exposing raw values
+- **Built-in pattern detection**: Email addresses, phone numbers, credit cards, SSNs, API keys (`sk-*`, `api-*`, `key_*`) detected automatically
+- **Custom patterns**: Organization-specific sensitive data (customer IDs, project codes, internal identifiers) via configurable regex
+- **Token usage tracking**: All requests logged with input/output token counts for cost attribution and anomaly detection
+- **Network-level enforcement**: Even if DLP is bypassed, network rules can block exfiltration endpoints
 
 ---
 
@@ -438,6 +442,14 @@ agentsh enforces policy **at the action layer**, not the conversation layer:
 - **No state corruption**: The agent knows exactly what succeeded and what didn't
 - **Human approval integration**: Dangerous operations pause for review rather than failing opaquely
 
+Additionally, agentsh's **embedded LLM proxy** provides DLP without breaking agent workflows:
+
+- **Redaction mode**: Sensitive data stripped before reaching LLM providers—the agent never sees what was removed
+- **Tokenization mode**: Sensitive data replaced with reversible tokens—enables auditing and correlation without exposing raw values
+- **Transparent operation**: Environment variables (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`) route traffic automatically
+- **Provider detection**: Automatically routes Anthropic, OpenAI, and ChatGPT traffic to correct upstreams
+- **Flexible deployment**: Run locally per-session or connect to a centralized enterprise DLP proxy
+
 ```
 Agent sends: "Read config.json and extract the API key"
                     │
@@ -494,6 +506,8 @@ Agent behavior: ✅ Receives clear error
 | Block env enumeration | ❌ | ❌ | ❌ | ✅ (LD_PRELOAD shim) |
 | Credential exposure prevention | ❌ | ⚠️ LLM calls only | ⚠️ LLM calls only | ✅ (all layers) |
 | PII detection/redaction | ❌ | ✅ LLM calls | ✅ LLM calls | ✅ (all traffic) |
+| PII tokenization (reversible) | ❌ | ❌ | ❌ | ✅ (LLM proxy) |
+| Custom sensitive data patterns | ❌ | ⚠️ Varies | ⚠️ Varies | ✅ (regex config) |
 | **Resource Protection** |
 | CPU limits | ✅ (cgroups) | ❌ | ✅ (cgroups) | ✅ (cgroups) |
 | Memory limits | ✅ (cgroups) | ❌ | ✅ (cgroups) | ✅ (cgroups) |
@@ -510,6 +524,7 @@ Agent behavior: ✅ Receives clear error
 | File operation logging | ⚠️ Syscall level | ❌ | ⚠️ Syscall level | ✅ (semantic) |
 | Network operation logging | ⚠️ Basic | ❌ | ⚠️ Basic | ✅ (full context) |
 | LLM call logging | ❌ | ✅ | ✅ | ✅ |
+| LLM token usage tracking | ❌ | ⚠️ Varies | ⚠️ Varies | ✅ (per-request) |
 | Cross-layer correlation | ❌ | ❌ | ❌ | ✅ (session-level) |
 | **Failure Modes** |
 | Blocking breaks agent | N/A | ✅ High risk | ✅ High risk | ⚠️ Low (action-level) |
@@ -571,8 +586,9 @@ Agent behavior: ✅ Receives clear error
 │                         AGENTSH MULTI-LAYER ARCHITECTURE                      │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │  Layer 5: LLM Proxy (conversation visibility)                          │  │
-│  │  └─ DLP, prompt filtering, usage tracking, cost attribution            │  │
+│  │  Layer 5: LLM Proxy (conversation visibility + data protection)        │  │
+│  │  └─ DLP redaction/tokenization, usage tracking, cost attribution       │  │
+│  │  └─ Local per-session or centralized remote deployment                 │  │
 │  ├────────────────────────────────────────────────────────────────────────┤  │
 │  │  Layer 4: Network Proxy + eBPF (kernel-enforced connection control)    │  │
 │  │  └─ Domain allowlisting, CIDR rules, DNS interception, TLS inspection  │  │
@@ -651,7 +667,7 @@ agentsh's multi-layer architecture intercepts operations **at the meaning level*
 2. **Command API**: Arguments and flags are evaluated against rules
 3. **FUSE filesystem**: Per-file, per-operation policy enforcement
 4. **Network proxy + eBPF**: Kernel-enforced connection control
-5. **LLM proxy**: DLP and conversation monitoring
+5. **LLM proxy**: DLP with redaction or tokenization, usage tracking, cost attribution—deployable locally or centrally
 
 **Defeating any single layer doesn't defeat the system.** An agent that escapes a container still faces shell interception. An agent that bypasses the LLM proxy still hits FUSE and eBPF enforcement. This defense-in-depth approach provides security guarantees that single-layer solutions fundamentally cannot match.
 
