@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -233,6 +234,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Log request before proxying
+	p.logRequest(requestID, sessionID, dialect, outReq, reqBody, dlpResult)
+
+	// Create SSE-aware transport that handles streaming responses
+	sseTransport := newSSEProxyTransport(
+		http.DefaultTransport,
+		w,
+		func(resp *http.Response, body []byte) {
+			// This callback is called when SSE stream completes
+			p.logResponseDirect(requestID, sessionID, dialect, resp, body, startTime)
+		},
+	)
+
 	// Create reverse proxy for this request
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
@@ -240,19 +254,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			req.URL.Host = upstream.Host
 			req.Host = upstream.Host
 		},
+		Transport: sseTransport,
 		ModifyResponse: func(resp *http.Response) error {
-			// Log response
+			// Log non-SSE responses (SSE responses are logged via transport callback)
 			p.logResponse(requestID, sessionID, dialect, resp, startTime, dlpResult)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			// Don't log errSSEHandled - it's expected when SSE was handled directly
+			if errors.Is(err, errSSEHandled) {
+				return
+			}
 			p.logger.Error("proxy error", "error", err, "request_id", requestID)
 			http.Error(w, "proxy error", http.StatusBadGateway)
 		},
 	}
-
-	// Log request before proxying
-	p.logRequest(requestID, sessionID, dialect, outReq, reqBody, dlpResult)
 
 	// Proxy the request
 	proxy.ServeHTTP(w, outReq)
@@ -306,6 +322,11 @@ func (p *Proxy) logResponse(requestID, sessionID string, dialect Dialect, resp *
 		}
 	}
 
+	p.logResponseDirect(requestID, sessionID, dialect, resp, respBody, startTime)
+}
+
+// logResponseDirect logs a response with a pre-read body (used for SSE streams).
+func (p *Proxy) logResponseDirect(requestID, sessionID string, dialect Dialect, resp *http.Response, respBody []byte, startTime time.Time) {
 	// Extract token usage from the response
 	usage := ExtractUsage(respBody, dialect)
 

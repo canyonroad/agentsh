@@ -714,3 +714,195 @@ func TestProxy_CustomOpenAIProvider(t *testing.T) {
 		t.Errorf("auth header not passed: %s", receivedAuth)
 	}
 }
+
+// TestProxy_SSEStreaming tests that SSE streaming responses are handled correctly.
+func TestProxy_SSEStreaming(t *testing.T) {
+	// Create a mock upstream server that returns an SSE stream
+	sseEvents := []string{
+		"event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_01\", \"type\": \"message\", \"role\": \"assistant\"}}\n\n",
+		"event: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Hello\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \" World\"}}\n\n",
+		"event: content_block_stop\ndata: {\"type\": \"content_block_stop\", \"index\": 0}\n\n",
+		"event: message_delta\ndata: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"end_turn\"}, \"usage\": {\"output_tokens\": 10}}\n\n",
+		"event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n",
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+
+		flusher := w.(http.Flusher)
+		for _, event := range sseEvents {
+			w.Write([]byte(event))
+			flusher.Flush()
+			time.Sleep(5 * time.Millisecond) // Simulate streaming
+		}
+	}))
+	defer upstream.Close()
+
+	storageDir := t.TempDir()
+	sessionID := "test-sse-streaming"
+
+	cfg := Config{
+		SessionID: sessionID,
+		Proxy: config.ProxyConfig{
+			Mode: "embedded",
+			Port: 0,
+			Providers: config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+			},
+		},
+		DLP: config.DLPConfig{Mode: "disabled"},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy, err := New(cfg, storageDir, logger)
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("failed to start proxy: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(shutdownCtx)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Make an SSE streaming request
+	proxyURL := "http://" + proxy.Addr().String() + "/v1/messages"
+	reqBody := `{"model": "claude-sonnet-4-20250514", "stream": true, "messages": [{"role": "user", "content": "Hello"}]}`
+	req, _ := http.NewRequest(http.MethodPost, proxyURL, strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-ant-test")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Verify response headers indicate SSE
+	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Errorf("expected text/event-stream content-type, got %s", resp.Header.Get("Content-Type"))
+	}
+
+	// Read the entire response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+
+	// Verify all events were received
+	expectedBody := strings.Join(sseEvents, "")
+	if string(body) != expectedBody {
+		t.Errorf("response body mismatch:\ngot: %q\nwant: %q", string(body), expectedBody)
+	}
+
+	// Wait for logging to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify storage logged the request and response
+	entries, err := proxy.storage.ReadLogEntries()
+	if err != nil {
+		t.Fatalf("failed to read log entries: %v", err)
+	}
+
+	if len(entries) < 2 {
+		t.Fatalf("expected at least 2 log entries (request + response), got %d", len(entries))
+	}
+
+	// Verify the response was logged with the full streamed body
+	var responseEntry ResponseLogEntry
+	if err := json.Unmarshal(entries[1], &responseEntry); err != nil {
+		t.Fatalf("failed to parse response entry: %v", err)
+	}
+
+	// Body size should match the total streamed content
+	if responseEntry.Response.BodySize != len(expectedBody) {
+		t.Errorf("expected body size %d, got %d", len(expectedBody), responseEntry.Response.BodySize)
+	}
+}
+
+// TestProxy_SSEStreamingWithDLP tests that DLP is applied to SSE streaming requests.
+func TestProxy_SSEStreamingWithDLP(t *testing.T) {
+	var receivedBody []byte
+
+	// Create a mock upstream that captures the request and returns SSE
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = body
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("event: message_start\ndata: {\"type\": \"message_start\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	storageDir := t.TempDir()
+
+	cfg := Config{
+		SessionID: "test-sse-dlp",
+		Proxy: config.ProxyConfig{
+			Mode: "embedded",
+			Port: 0,
+			Providers: config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+			},
+		},
+		DLP: config.DLPConfig{
+			Mode: "redact",
+			Patterns: config.DLPPatternsConfig{
+				Email: true,
+			},
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy, err := New(cfg, storageDir, logger)
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("failed to start proxy: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(shutdownCtx)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Make request with PII
+	proxyURL := "http://" + proxy.Addr().String() + "/v1/messages"
+	reqBody := `{"model": "claude-sonnet-4-20250514", "stream": true, "messages": [{"role": "user", "content": "Email me at test@example.com"}]}`
+	req, _ := http.NewRequest(http.MethodPost, proxyURL, strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-ant-test")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Verify email was redacted in the request sent to upstream
+	if strings.Contains(string(receivedBody), "test@example.com") {
+		t.Error("email was NOT redacted in request to upstream")
+	}
+	if !strings.Contains(string(receivedBody), "[REDACTED:email]") {
+		t.Error("email redaction marker not found in request to upstream")
+	}
+}
