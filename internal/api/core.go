@@ -377,6 +377,11 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		a.startExplicitProxy(ctx, s)
 	}
 
+	// Start embedded LLM proxy if configured
+	if a.cfg.Proxy.Mode == "embedded" {
+		a.startLLMProxy(ctx, s)
+	}
+
 	return s.Snapshot(), http.StatusCreated, nil
 }
 

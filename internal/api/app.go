@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -282,6 +283,48 @@ func (a *App) startExplicitProxy(ctx context.Context, s *session.Session) {
 		ID:        uuid.NewString(),
 		Timestamp: time.Now().UTC(),
 		Type:      "net_proxy_started",
+		SessionID: s.ID,
+		Fields: map[string]any{
+			"proxy_url": proxyURL,
+		},
+	}
+	_ = a.store.AppendEvent(ctx, okEv)
+	a.broker.Publish(okEv)
+}
+
+func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
+	storagePath := filepath.Join(a.cfg.Sessions.BaseDir, s.ID, "llm-logs")
+
+	proxyURL, closeFn, err := session.StartLLMProxy(
+		s,
+		a.cfg.Proxy,
+		a.cfg.DLP,
+		a.cfg.LLMStorage,
+		storagePath,
+		slog.Default(),
+	)
+	if err != nil {
+		fail := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now().UTC(),
+			Type:      "llm_proxy_failed",
+			SessionID: s.ID,
+			Fields: map[string]any{
+				"error": err.Error(),
+			},
+		}
+		_ = a.store.AppendEvent(ctx, fail)
+		a.broker.Publish(fail)
+		return
+	}
+
+	// Store cleanup function (the proxy URL is already set by StartLLMProxy)
+	_ = closeFn // closeFn is stored by StartLLMProxy via sess.SetProxy
+
+	okEv := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "llm_proxy_started",
 		SessionID: s.ID,
 		Fields: map[string]any{
 			"proxy_url": proxyURL,
