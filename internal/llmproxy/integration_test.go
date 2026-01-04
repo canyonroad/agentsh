@@ -60,7 +60,7 @@ func TestIntegration_FullFlowAnthropic(t *testing.T) {
 		Storage:   config.DefaultLLMStorageConfig(),
 	}
 	cfg.Proxy.Port = 0 // Let OS assign port
-	cfg.Proxy.Upstreams.Anthropic = upstream.URL
+	cfg.Proxy.Providers.Anthropic = upstream.URL
 
 	p, err := New(cfg, storageDir, nil)
 	if err != nil {
@@ -203,7 +203,7 @@ func TestIntegration_FullFlowOpenAI(t *testing.T) {
 		Storage:   config.DefaultLLMStorageConfig(),
 	}
 	cfg.Proxy.Port = 0
-	cfg.Proxy.Upstreams.OpenAI = upstream.URL
+	cfg.Proxy.Providers.OpenAI = upstream.URL
 
 	p, err := New(cfg, storageDir, nil)
 	if err != nil {
@@ -297,7 +297,7 @@ func TestIntegration_MultiplePIITypes(t *testing.T) {
 		Storage:   config.DefaultLLMStorageConfig(),
 	}
 	cfg.Proxy.Port = 0
-	cfg.Proxy.Upstreams.Anthropic = upstream.URL
+	cfg.Proxy.Providers.Anthropic = upstream.URL
 
 	p, err := New(cfg, storageDir, nil)
 	if err != nil {
@@ -412,7 +412,7 @@ func TestIntegration_DLPDisabled(t *testing.T) {
 	}
 	cfg.DLP.Mode = "disabled" // Disable DLP
 	cfg.Proxy.Port = 0
-	cfg.Proxy.Upstreams.Anthropic = upstream.URL
+	cfg.Proxy.Providers.Anthropic = upstream.URL
 
 	p, err := New(cfg, storageDir, nil)
 	if err != nil {
@@ -473,7 +473,7 @@ func TestIntegration_HeaderRedaction(t *testing.T) {
 		Storage:   config.DefaultLLMStorageConfig(),
 	}
 	cfg.Proxy.Port = 0
-	cfg.Proxy.Upstreams.Anthropic = upstream.URL
+	cfg.Proxy.Providers.Anthropic = upstream.URL
 
 	p, err := New(cfg, storageDir, nil)
 	if err != nil {
@@ -536,7 +536,7 @@ func TestIntegration_UnknownDialect(t *testing.T) {
 		Storage:   config.DefaultLLMStorageConfig(),
 	}
 	cfg.Proxy.Port = 0
-	cfg.Proxy.Upstreams.Anthropic = upstream.URL
+	cfg.Proxy.Providers.Anthropic = upstream.URL
 
 	p, err := New(cfg, storageDir, nil)
 	if err != nil {
@@ -584,7 +584,7 @@ func TestIntegration_UpstreamError(t *testing.T) {
 		Storage:   config.DefaultLLMStorageConfig(),
 	}
 	cfg.Proxy.Port = 0
-	cfg.Proxy.Upstreams.Anthropic = upstream.URL
+	cfg.Proxy.Providers.Anthropic = upstream.URL
 
 	p, err := New(cfg, storageDir, nil)
 	if err != nil {
@@ -687,7 +687,7 @@ func TestIntegration_SessionIDHeader(t *testing.T) {
 		Storage:   config.DefaultLLMStorageConfig(),
 	}
 	cfg.Proxy.Port = 0
-	cfg.Proxy.Upstreams.Anthropic = upstream.URL
+	cfg.Proxy.Providers.Anthropic = upstream.URL
 
 	p, err := New(cfg, storageDir, nil)
 	if err != nil {
