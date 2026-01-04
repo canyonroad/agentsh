@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -53,6 +54,19 @@ type Proxy struct {
 func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 	if logger == nil {
 		logger = slog.Default()
+	}
+
+	// Run retention cleanup asynchronously if configured
+	// storagePath is like ~/.agentsh/sessions/<session-id>/llm-logs
+	// sessionsDir is ~/.agentsh/sessions
+	if storagePath != "" && (cfg.Storage.Retention.MaxAgeDays > 0 || cfg.Storage.Retention.MaxSizeMB > 0) {
+		sessionsDir := filepath.Dir(filepath.Dir(storagePath))
+		retentionCfg := RetentionConfig{
+			MaxAgeDays: cfg.Storage.Retention.MaxAgeDays,
+			MaxSizeMB:  cfg.Storage.Retention.MaxSizeMB,
+			Eviction:   cfg.Storage.Retention.Eviction,
+		}
+		go RunRetention(sessionsDir, retentionCfg, cfg.SessionID, logger)
 	}
 
 	// Build dialect configs with any overrides from ProxyConfig.Providers
