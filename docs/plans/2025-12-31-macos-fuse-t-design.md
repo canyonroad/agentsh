@@ -1,7 +1,7 @@
 # macOS FUSE-T Implementation Design
 
 **Date:** 2025-12-31
-**Status:** Approved
+**Status:** Implemented
 
 ## Summary
 

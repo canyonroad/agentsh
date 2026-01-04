@@ -1,7 +1,7 @@
 # Windows Registry Monitoring and Blocking Design
 
 **Date:** 2026-01-02
-**Status:** Approved
+**Status:** Implemented
 
 ## Overview
 
