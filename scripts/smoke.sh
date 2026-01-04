@@ -161,7 +161,7 @@ if ! curl -fsS "${base_url}/health" >/dev/null 2>&1; then
   exit 1
 fi
 
-sid_json="$(./bin/agentsh session create --workspace .)"
+sid_json="$(./bin/agentsh session create --workspace . --json)"
 sid="$("$PYTHON" -c 'import json,sys; print(json.loads(sys.stdin.read())["id"])' <<<"$sid_json")"
 if [[ -z "$sid" ]]; then
   echo "smoke: failed to parse session id" >&2
