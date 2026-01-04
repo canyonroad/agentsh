@@ -1,7 +1,7 @@
 # Windows WinFsp Filesystem Implementation Design
 
 **Date:** 2026-01-02
-**Status:** Approved
+**Status:** Implemented
 
 ## Summary
 
