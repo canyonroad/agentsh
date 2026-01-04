@@ -30,7 +30,9 @@ If you're on Windows, the recommended approach is to run agentsh inside WSL2 or 
 - **Windows resource monitoring:** Job Objects for memory, CPU, disk I/O, process count; Toolhelp32 for thread count (both monitoring and enforcement via Job Objects).
 - **Process execution stats:** CPU user/system time returned in exec results on all platforms. Peak memory available on Unix (Linux/macOS) but not Windows.
 - **Registry monitoring + policy enforcement:** Windows-only, requires mini filter driver (see below).
-- **seccomp / full namespace isolation / eBPF:** planned/future work (not implemented).
+- **seccomp syscall filtering:** Linux-only via seccomp user-notify for unix socket enforcement.
+- **Full namespace isolation:** Linux, Lima VM, and WSL2 via `unshare` (user, mount, PID, network namespaces).
+- **eBPF network enforcement:** Linux-only, requires cgroups v2 and root/CAP_BPF.
 
 ## Quick start
 
