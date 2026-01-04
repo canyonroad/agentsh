@@ -208,6 +208,17 @@ network_rules:
     decision: allow
 
   # ---------------------------------------------------------------------------
+  # Embedded LLM Proxy
+  # ---------------------------------------------------------------------------
+  # Allow connections to the embedded LLM proxy running on localhost.
+
+  - name: allow-llm-proxy
+    description: Allow connections to embedded LLM proxy on localhost
+    cidrs:
+      - "127.0.0.1/32"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
   # Block everything else
   # ---------------------------------------------------------------------------
 
