@@ -169,3 +169,6 @@ jobs:
           DOCKER_HOST: unix:///var/run/docker.sock
           TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED: true
         run: go test -v -tags=integration ./internal/integration/...
+
+      - name: Run API integration tests
+        run: go test -v -tags=integration ./internal/api/... ./internal/llmproxy/...
