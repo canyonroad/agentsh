@@ -16,6 +16,7 @@ import (
 	"github.com/agentsh/agentsh/internal/auth"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/internal/llmproxy"
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/netmonitor"
 	ebpftrace "github.com/agentsh/agentsh/internal/netmonitor/ebpf"
@@ -137,6 +138,7 @@ func (a *App) Router() http.Handler {
 		r.Get("/sessions/{id}/pty", a.execInSessionPTYWS)
 		r.Get("/sessions/{id}/events", a.streamEvents)
 		r.Get("/sessions/{id}/history", a.sessionHistory)
+		r.Get("/sessions/{id}/proxy", a.getProxyStatus)
 		r.Get("/sessions/{id}/output/{cmdID}", a.getOutputChunk)
 		r.Post("/sessions/{id}/kill/{cmdID}", a.killCommand)
 
@@ -901,6 +903,43 @@ func (a *App) sessionHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, evs)
+}
+
+func (a *App) getProxyStatus(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	s, ok := a.sessions.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+
+	proxyURL := s.ProxyURL()
+	proxyInst := s.ProxyInstance()
+
+	// Default response when no proxy is configured
+	status := llmproxy.ProxyStatus{
+		State:   "not configured",
+		Address: "",
+		Mode:    "embedded",
+		DLPMode: "disabled",
+	}
+
+	if proxyURL != "" {
+		status.Address = strings.TrimPrefix(proxyURL, "http://")
+		status.State = "running"
+	}
+
+	// If we have the proxy instance, get detailed stats
+	if proxy, ok := proxyInst.(*llmproxy.Proxy); ok && proxy != nil {
+		var err error
+		status, err = proxy.Stats()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (a *App) searchEvents(w http.ResponseWriter, r *http.Request) {

@@ -32,6 +32,7 @@ type CLIClient interface {
 	ResolveApproval(ctx context.Context, id string, decision string, reason string) error
 
 	PolicyTest(ctx context.Context, sessionID, operation, path string) (map[string]any, error)
+	GetProxyStatus(ctx context.Context, sessionID string) (map[string]any, error)
 }
 
 type CLIOptions struct {
@@ -191,4 +192,12 @@ func (h *HybridClient) PolicyTest(ctx context.Context, sessionID, operation, pat
 		return h.grpc.PolicyTest(ctx, sessionID, operation, path)
 	}
 	return h.Client.PolicyTest(ctx, sessionID, operation, path)
+}
+
+// GetProxyStatus gets the proxy status for a session. Uses gRPC if available.
+func (h *HybridClient) GetProxyStatus(ctx context.Context, sessionID string) (map[string]any, error) {
+	if h != nil && h.grpc != nil {
+		return h.grpc.GetProxyStatus(ctx, sessionID)
+	}
+	return h.Client.GetProxyStatus(ctx, sessionID)
 }

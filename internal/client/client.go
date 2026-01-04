@@ -191,6 +191,15 @@ func (c *Client) PolicyTest(ctx context.Context, sessionID, operation, path stri
 	return out, nil
 }
 
+func (c *Client) GetProxyStatus(ctx context.Context, sessionID string) (map[string]any, error) {
+	var out map[string]any
+	path := "/api/v1/sessions/" + url.PathEscape(sessionID) + "/proxy"
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *Client) StreamSessionEvents(ctx context.Context, sessionID string) (io.ReadCloser, error) {
 	u := c.baseURL + "/api/v1/sessions/" + url.PathEscape(sessionID) + "/events"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)

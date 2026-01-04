@@ -319,3 +319,19 @@ func (dp *DLPProcessor) ImportTokenMap(m map[string]string) {
 		dp.tokens.backward[token] = original
 	}
 }
+
+// PatternCount returns the number of active DLP patterns.
+func (dp *DLPProcessor) PatternCount() int {
+	if dp == nil {
+		return 0
+	}
+	return len(dp.patterns)
+}
+
+// Mode returns the DLP mode (redact, tokenize, or disabled).
+func (dp *DLPProcessor) Mode() string {
+	if dp == nil {
+		return "disabled"
+	}
+	return dp.cfg.Mode
+}

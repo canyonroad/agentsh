@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 
+	"github.com/agentsh/agentsh/internal/client"
 	"github.com/spf13/cobra"
 )
 
@@ -14,19 +15,6 @@ func newProxyCmd() *cobra.Command {
 
 	cmd.AddCommand(newProxyStatusCmd())
 	return cmd
-}
-
-// ProxyStatus represents the status of the embedded LLM proxy for a session.
-type ProxyStatus struct {
-	State                  string `json:"state"`
-	Address                string `json:"address"`
-	Mode                   string `json:"mode"`
-	DLPMode                string `json:"dlp_mode"`
-	ActivePatterns         int    `json:"active_patterns"`
-	TotalRequests          int    `json:"total_requests"`
-	RequestsWithRedactions int    `json:"requests_with_redactions"`
-	TotalInputTokens       int    `json:"total_input_tokens"`
-	TotalOutputTokens      int    `json:"total_output_tokens"`
 }
 
 func newProxyStatusCmd() *cobra.Command {
@@ -48,54 +36,80 @@ Examples:
   agentsh proxy status --json`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sessionID := "latest"
+			sessionID := ""
 			if len(args) > 0 {
 				sessionID = args[0]
 			}
 
-			// TODO: Integrate with API client once GetProxyStatus is implemented
-			// For now, return a placeholder indicating the session
-			// This structure is ready for full integration:
-			//
-			// cfg := getClientConfig(cmd)
-			// c, err := client.NewForCLI(client.CLIOptions{
-			//     HTTPBaseURL: cfg.serverAddr,
-			//     GRPCAddr:    cfg.grpcAddr,
-			//     APIKey:      cfg.apiKey,
-			//     Transport:   cfg.transport,
-			// })
-			// if err != nil {
-			//     return err
-			// }
-			// status, err := c.GetProxyStatus(cmd.Context(), sessionID)
-			// if err != nil {
-			//     return err
-			// }
+			cfg := getClientConfig(cmd)
+			c, err := client.NewForCLI(client.CLIOptions{
+				HTTPBaseURL: cfg.serverAddr,
+				GRPCAddr:    cfg.grpcAddr,
+				APIKey:      cfg.apiKey,
+				Transport:   cfg.transport,
+			})
+			if err != nil {
+				return err
+			}
 
-			// Placeholder status until API integration
-			status := ProxyStatus{
-				State:                  "not available",
-				Address:                "-",
-				Mode:                   "embedded",
-				DLPMode:                "redact",
-				ActivePatterns:         0,
-				TotalRequests:          0,
-				RequestsWithRedactions: 0,
-				TotalInputTokens:       0,
-				TotalOutputTokens:      0,
+			// Resolve empty or "latest" to actual session ID
+			if sessionID == "" || sessionID == "latest" {
+				sessions, err := c.ListSessions(cmd.Context())
+				if err != nil {
+					return fmt.Errorf("list sessions: %w", err)
+				}
+				if len(sessions) == 0 {
+					return fmt.Errorf("no sessions found")
+				}
+				// Find most recent by CreatedAt
+				latest := sessions[0]
+				for _, s := range sessions[1:] {
+					if s.CreatedAt.After(latest.CreatedAt) {
+						latest = s
+					}
+				}
+				sessionID = latest.ID
+			}
+
+			status, err := c.GetProxyStatus(cmd.Context(), sessionID)
+			if err != nil {
+				return fmt.Errorf("get proxy status: %w", err)
 			}
 
 			if outputJSON {
 				return printJSON(cmd, status)
 			}
 
+			// Extract fields with defaults
+			state, _ := status["state"].(string)
+			if state == "" {
+				state = "unknown"
+			}
+			address, _ := status["address"].(string)
+			if address == "" {
+				address = "-"
+			}
+			mode, _ := status["mode"].(string)
+			if mode == "" {
+				mode = "embedded"
+			}
+			dlpMode, _ := status["dlp_mode"].(string)
+			if dlpMode == "" {
+				dlpMode = "disabled"
+			}
+			activePatterns := int(getFloat(status, "active_patterns"))
+			totalRequests := int(getFloat(status, "total_requests"))
+			requestsWithRedactions := int(getFloat(status, "requests_with_redactions"))
+			totalInputTokens := int(getFloat(status, "total_input_tokens"))
+			totalOutputTokens := int(getFloat(status, "total_output_tokens"))
+
 			// Human-readable output matching spec format
 			fmt.Fprintf(cmd.OutOrStdout(), "Session: %s\n", sessionID)
-			fmt.Fprintf(cmd.OutOrStdout(), "Proxy: %s on %s\n", status.State, status.Address)
-			fmt.Fprintf(cmd.OutOrStdout(), "Mode: %s\n", status.Mode)
-			fmt.Fprintf(cmd.OutOrStdout(), "DLP: %s (%d patterns active)\n", status.DLPMode, status.ActivePatterns)
-			fmt.Fprintf(cmd.OutOrStdout(), "Requests: %d (%d with redactions)\n", status.TotalRequests, status.RequestsWithRedactions)
-			fmt.Fprintf(cmd.OutOrStdout(), "Tokens: %d in / %d out\n", status.TotalInputTokens, status.TotalOutputTokens)
+			fmt.Fprintf(cmd.OutOrStdout(), "Proxy: %s on %s\n", state, address)
+			fmt.Fprintf(cmd.OutOrStdout(), "Mode: %s\n", mode)
+			fmt.Fprintf(cmd.OutOrStdout(), "DLP: %s (%d patterns active)\n", dlpMode, activePatterns)
+			fmt.Fprintf(cmd.OutOrStdout(), "Requests: %d (%d with redactions)\n", totalRequests, requestsWithRedactions)
+			fmt.Fprintf(cmd.OutOrStdout(), "Tokens: %d in / %d out\n", totalInputTokens, totalOutputTokens)
 
 			return nil
 		},
@@ -104,4 +118,18 @@ Examples:
 	cmd.Flags().BoolVar(&outputJSON, "json", false, "Output in JSON format")
 
 	return cmd
+}
+
+// getFloat extracts a float64 from a map, handling JSON number types.
+func getFloat(m map[string]any, key string) float64 {
+	if m == nil {
+		return 0
+	}
+	if v, ok := m[key].(float64); ok {
+		return v
+	}
+	if v, ok := m[key].(int); ok {
+		return float64(v)
+	}
+	return 0
 }

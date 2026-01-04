@@ -359,3 +359,48 @@ func (p *Proxy) EnvVars() map[string]string {
 		"AGENTSH_SESSION_ID": p.cfg.SessionID,
 	}
 }
+
+// ProxyStatus contains the complete status of the proxy.
+type ProxyStatus struct {
+	State                  string `json:"state"`
+	Address                string `json:"address"`
+	Mode                   string `json:"mode"`
+	DLPMode                string `json:"dlp_mode"`
+	ActivePatterns         int    `json:"active_patterns"`
+	TotalRequests          int    `json:"total_requests"`
+	RequestsWithRedactions int    `json:"requests_with_redactions"`
+	TotalInputTokens       int    `json:"total_input_tokens"`
+	TotalOutputTokens      int    `json:"total_output_tokens"`
+}
+
+// Stats returns the current proxy status including usage statistics.
+func (p *Proxy) Stats() (ProxyStatus, error) {
+	status := ProxyStatus{
+		Mode:           "embedded",
+		DLPMode:        p.dlp.Mode(),
+		ActivePatterns: p.dlp.PatternCount(),
+	}
+
+	p.mu.Lock()
+	if p.listener != nil {
+		status.State = "running"
+		status.Address = p.listener.Addr().String()
+	} else {
+		status.State = "stopped"
+		status.Address = ""
+	}
+	p.mu.Unlock()
+
+	// Get stats from storage
+	stats, err := p.storage.GetStats()
+	if err != nil {
+		return status, err
+	}
+
+	status.TotalRequests = stats.TotalRequests
+	status.RequestsWithRedactions = stats.RequestsWithRedactions
+	status.TotalInputTokens = stats.TotalInputTokens
+	status.TotalOutputTokens = stats.TotalOutputTokens
+
+	return status, nil
+}

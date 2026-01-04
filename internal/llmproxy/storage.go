@@ -184,6 +184,75 @@ func HashBody(body []byte) string {
 	return "sha256:" + hex.EncodeToString(hash[:])
 }
 
+// ProxyStats contains aggregated statistics from the proxy log.
+type ProxyStats struct {
+	TotalRequests          int   `json:"total_requests"`
+	RequestsWithRedactions int   `json:"requests_with_redactions"`
+	TotalInputTokens       int   `json:"total_input_tokens"`
+	TotalOutputTokens      int   `json:"total_output_tokens"`
+	TotalRedactions        int   `json:"total_redactions"`
+}
+
+// GetStats reads the log file and computes aggregated statistics.
+func (s *Storage) GetStats() (ProxyStats, error) {
+	var stats ProxyStats
+	logPath := s.LogPath()
+	if logPath == "" {
+		return stats, nil
+	}
+
+	file, err := os.Open(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return stats, nil
+		}
+		return stats, fmt.Errorf("open log file: %w", err)
+	}
+	defer file.Close()
+
+	decoder := json.NewDecoder(file)
+	for {
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return stats, fmt.Errorf("decode entry: %w", err)
+		}
+
+		// Try to determine if this is a request or response entry
+		var probe struct {
+			ID        string `json:"id"`         // Present in request entries
+			RequestID string `json:"request_id"` // Present in response entries
+			DLP       *struct {
+				Redactions []json.RawMessage `json:"redactions"`
+			} `json:"dlp"`
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal(raw, &probe); err != nil {
+			continue
+		}
+
+		if probe.ID != "" && probe.RequestID == "" {
+			// This is a request entry
+			stats.TotalRequests++
+			if probe.DLP != nil && len(probe.DLP.Redactions) > 0 {
+				stats.RequestsWithRedactions++
+				stats.TotalRedactions += len(probe.DLP.Redactions)
+			}
+		} else if probe.RequestID != "" {
+			// This is a response entry
+			stats.TotalInputTokens += probe.Usage.InputTokens
+			stats.TotalOutputTokens += probe.Usage.OutputTokens
+		}
+	}
+
+	return stats, nil
+}
+
 // ReadLogEntries reads all log entries from storage.
 // This is useful for testing and debugging.
 func (s *Storage) ReadLogEntries() ([]json.RawMessage, error) {

@@ -66,6 +66,7 @@ func StartLLMProxy(
 
 	// Store in session
 	sess.SetProxy(proxyURL, closeFn)
+	sess.SetProxyInstance(proxy)
 
 	return proxyURL, closeFn, nil
 }

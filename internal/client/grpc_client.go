@@ -434,6 +434,21 @@ func (c *GRPCClient) PolicyTest(ctx context.Context, sessionID, operation, path 
 	return out, nil
 }
 
+func (c *GRPCClient) GetProxyStatus(ctx context.Context, sessionID string) (map[string]any, error) {
+	in, err := jsonToStruct(map[string]any{"session_id": sessionID})
+	if err != nil {
+		return nil, err
+	}
+	resp := &structpb.Struct{}
+	if err := c.invokeUnary(ctx, "/agentsh.v1.Agentsh/GetProxyStatus", in, resp); err != nil {
+		return nil, err
+	}
+	b, _ := protojson.Marshal(resp)
+	var out map[string]any
+	_ = json.Unmarshal(b, &out)
+	return out, nil
+}
+
 func (c *GRPCClient) invokeUnary(ctx context.Context, method string, in *structpb.Struct, out *structpb.Struct) error {
 	if c == nil || c.conn == nil {
 		return fmt.Errorf("grpc client not initialized")

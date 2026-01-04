@@ -50,6 +50,7 @@ type Session struct {
 
 	proxyURL   string
 	proxyClose func() error
+	proxy      interface{} // *llmproxy.Proxy - stored as interface to avoid import cycle
 
 	netnsName  string
 	netnsClose func() error
@@ -324,6 +325,20 @@ func (s *Session) SetProxy(url string, closeFn func() error) {
 	s.proxyClose = closeFn
 }
 
+// SetProxyInstance stores the proxy instance for stats access.
+func (s *Session) SetProxyInstance(proxy interface{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.proxy = proxy
+}
+
+// ProxyInstance returns the proxy instance, if any.
+func (s *Session) ProxyInstance() interface{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.proxy
+}
+
 func (s *Session) ProxyURL() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -335,6 +350,7 @@ func (s *Session) CloseProxy() error {
 	fn := s.proxyClose
 	s.proxyClose = nil
 	s.proxyURL = ""
+	s.proxy = nil
 	s.mu.Unlock()
 	if fn != nil {
 		return fn()
