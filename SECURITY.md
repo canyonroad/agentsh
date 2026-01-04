@@ -436,6 +436,17 @@ Windows 8+ supports AppContainer, a kernel-enforced capability isolation mechani
 | Primary | AppContainer | Kernel-enforced capability isolation |
 | Secondary | Minifilter driver | Policy-based file/registry rules |
 
+**How It Works:**
+
+When agentsh executes a command in a sandboxed session, it:
+1. Creates an AppContainer profile with a unique SID via `CreateAppContainerProfile`
+2. Grants the container SID access to the workspace (read/write) via ACL modification
+3. Grants the container SID access to system directories (read/execute)
+4. Optionally adds network capability SIDs (internetClient, privateNetwork)
+5. Spawns the process inside the container with extended startup info
+6. Captures stdout/stderr via inheritable pipes
+7. Cleans up ACLs (using `REVOKE_ACCESS` mode) and deletes the profile when done
+
 **AppContainer Features:**
 
 | Feature | Description |
@@ -468,6 +479,23 @@ WindowsSandboxOptions{
 ```
 
 **Isolation Level:** Windows reports `IsolationPartial` when AppContainer is available (capability-based, not namespace-based like Linux).
+
+**AppContainer Limitations:**
+- Requires Windows 8+ (version 6.2+)
+- Capability-based, not namespace-based (sandboxed processes see all system processes)
+- Cannot enforce resource limits (use Job Objects via minifilter for that)
+- Cannot filter syscalls (no equivalent to Linux seccomp)
+- Requires modifying filesystem ACLs for path access
+- Profile names must not contain special characters (sanitized automatically)
+
+**Recommendations for Windows sandboxed execution:**
+- Enable AppContainer for process isolation (`UseAppContainer: true`)
+- Combine with minifilter for comprehensive policy enforcement
+- Use `NetworkNone` for commands that don't need network access
+- Set `FailOnAppContainerError: true` in high-security environments
+- Consider WSL2 mode for full Linux-level isolation
+
+**Implementation:** See `internal/platform/windows/sandbox.go` and `internal/platform/windows/appcontainer.go`.
 
 See [Windows Driver Deployment Guide](docs/windows-driver-deployment.md) for installation and configuration.
 
