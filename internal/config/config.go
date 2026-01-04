@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 )
@@ -630,6 +631,18 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("AGENTSH_DATA_DIR"); v != "" {
 		cfg.Sessions.BaseDir = filepath.Join(v, "sessions")
 		cfg.Audit.Storage.SQLitePath = filepath.Join(v, "events.db")
+	}
+	// Proxy-specific overrides
+	if v := os.Getenv("AGENTSH_PROXY_MODE"); v != "" {
+		cfg.Proxy.Mode = v
+	}
+	if v := os.Getenv("AGENTSH_DLP_MODE"); v != "" {
+		cfg.DLP.Mode = v
+	}
+	if v := os.Getenv("AGENTSH_PROXY_PORT"); v != "" {
+		if port, err := strconv.Atoi(v); err == nil {
+			cfg.Proxy.Port = port
+		}
 	}
 }
 

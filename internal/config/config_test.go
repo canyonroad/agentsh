@@ -516,3 +516,65 @@ audit:
 		t.Errorf("Audit.Storage.SQLitePath = %q, want %q", cfg.Audit.Storage.SQLitePath, wantPath)
 	}
 }
+
+func TestLoad_ProxyEnvOverrides(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+
+	// Create config with default proxy settings
+	if err := os.WriteFile(cfgPath, []byte(`
+proxy:
+  mode: embedded
+  port: 0
+dlp:
+  mode: redact
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set environment overrides
+	t.Setenv("AGENTSH_PROXY_MODE", "disabled")
+	t.Setenv("AGENTSH_DLP_MODE", "disabled")
+	t.Setenv("AGENTSH_PROXY_PORT", "12345")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Proxy.Mode != "disabled" {
+		t.Errorf("Proxy.Mode = %q, want %q", cfg.Proxy.Mode, "disabled")
+	}
+	if cfg.DLP.Mode != "disabled" {
+		t.Errorf("DLP.Mode = %q, want %q", cfg.DLP.Mode, "disabled")
+	}
+	if cfg.Proxy.Port != 12345 {
+		t.Errorf("Proxy.Port = %d, want %d", cfg.Proxy.Port, 12345)
+	}
+}
+
+func TestLoad_ProxyEnvOverrides_InvalidPort(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+
+	// Create config with a specific port
+	if err := os.WriteFile(cfgPath, []byte(`
+proxy:
+  port: 8080
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set invalid port value - should be silently ignored
+	t.Setenv("AGENTSH_PROXY_PORT", "not-a-number")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Port should remain at the config value since env override was invalid
+	if cfg.Proxy.Port != 8080 {
+		t.Errorf("Proxy.Port = %d, want %d (invalid env should be ignored)", cfg.Proxy.Port, 8080)
+	}
+}
