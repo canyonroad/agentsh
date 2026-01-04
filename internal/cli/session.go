@@ -218,11 +218,7 @@ When no type is specified, all log types are shown.`,
 
 			// Handle LLM logs specially - they come from llm-requests.jsonl
 			if logType == string(LogTypeLLM) {
-				// For now, return a message indicating LLM log reading is not yet implemented
-				// Full implementation will read from ~/.agentsh/sessions/<session-id>/llm-requests.jsonl
-				fmt.Fprintln(cmd.OutOrStdout(), "# LLM log reading not yet implemented")
-				fmt.Fprintln(cmd.OutOrStdout(), "# Logs are stored in: ~/.agentsh/sessions/<session-id>/llm-requests.jsonl")
-				return nil
+				return DisplayLLMLogs(cmd.OutOrStdout(), sessionID, false)
 			}
 
 			// For other log types (or all), query session events via API
