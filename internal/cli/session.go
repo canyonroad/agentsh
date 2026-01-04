@@ -30,6 +30,7 @@ func newSessionCmd() *cobra.Command {
 func newSessionCreateCmd() *cobra.Command {
 	var workspace string
 	var policy string
+	var outputJSON bool
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a new session",
@@ -43,11 +44,18 @@ func newSessionCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printJSON(cmd, s)
+
+			if outputJSON {
+				return printJSON(cmd, s)
+			}
+
+			// Human-readable output
+			return printSessionCreated(cmd, c, s)
 		},
 	}
 	cmd.Flags().StringVar(&workspace, "workspace", ".", "Workspace directory")
 	cmd.Flags().StringVar(&policy, "policy", "default", "Policy name")
+	cmd.Flags().BoolVar(&outputJSON, "json", false, "Output in JSON format")
 	return cmd
 }
 
@@ -246,6 +254,90 @@ When no type is specified, all log types are shown.`,
 	cmd.Flags().StringVar(&logType, "type", "", "Filter logs by type (llm, fs, net, exec)")
 
 	return cmd
+}
+
+// printSessionCreated prints human-readable session creation output.
+// Format matches the spec:
+//
+//	Session abc123 started
+//	  Proxy: http://127.0.0.1:52341
+//	  DLP: redact (email, phone, credit_card, ssn, api_key)
+//
+//	Export for agent:
+//	  export ANTHROPIC_BASE_URL=http://127.0.0.1:52341
+//	  export OPENAI_BASE_URL=http://127.0.0.1:52341
+func printSessionCreated(cmd *cobra.Command, c client.CLIClient, s types.Session) error {
+	w := cmd.OutOrStdout()
+
+	fmt.Fprintf(w, "Session %s started\n", s.ID)
+
+	// Try to get proxy status for DLP info
+	proxyStatus, err := c.GetProxyStatus(cmd.Context(), s.ID)
+	if err == nil && proxyStatus != nil {
+		// Show proxy URL
+		if addr, _ := proxyStatus["address"].(string); addr != "" {
+			fmt.Fprintf(w, "  Proxy: http://%s\n", addr)
+		} else if s.ProxyURL != "" {
+			fmt.Fprintf(w, "  Proxy: %s\n", s.ProxyURL)
+		}
+
+		// Show DLP info
+		dlpMode, _ := proxyStatus["dlp_mode"].(string)
+		if dlpMode != "" && dlpMode != "disabled" {
+			// Get pattern names
+			var patternNames []string
+			if pn, ok := proxyStatus["pattern_names"].([]any); ok {
+				for _, p := range pn {
+					if name, ok := p.(string); ok {
+						patternNames = append(patternNames, name)
+					}
+				}
+			}
+
+			if len(patternNames) > 0 {
+				fmt.Fprintf(w, "  DLP: %s (%s)\n", dlpMode, strings.Join(patternNames, ", "))
+			} else {
+				activePatterns := int(getFloatVal(proxyStatus, "active_patterns"))
+				if activePatterns > 0 {
+					fmt.Fprintf(w, "  DLP: %s (%d patterns active)\n", dlpMode, activePatterns)
+				} else {
+					fmt.Fprintf(w, "  DLP: %s\n", dlpMode)
+				}
+			}
+		}
+
+		// Show export instructions if proxy is running
+		if addr, _ := proxyStatus["address"].(string); addr != "" {
+			proxyURL := "http://" + addr
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "Export for agent:")
+			fmt.Fprintf(w, "  export ANTHROPIC_BASE_URL=%s\n", proxyURL)
+			fmt.Fprintf(w, "  export OPENAI_BASE_URL=%s\n", proxyURL)
+		}
+	} else if s.ProxyURL != "" {
+		// Fallback to session info if proxy status unavailable
+		fmt.Fprintf(w, "  Proxy: %s\n", s.ProxyURL)
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Export for agent:")
+		fmt.Fprintf(w, "  export ANTHROPIC_BASE_URL=%s\n", s.ProxyURL)
+		fmt.Fprintf(w, "  export OPENAI_BASE_URL=%s\n", s.ProxyURL)
+	}
+
+	return nil
+}
+
+// getFloatVal extracts a float64 from a map, handling JSON number types.
+func getFloatVal(m map[string]any, key string) float64 {
+	if m == nil {
+		return 0
+	}
+	if v, ok := m[key].(float64); ok {
+		return v
+	}
+	if v, ok := m[key].(int); ok {
+		return float64(v)
+	}
+	return 0
 }
 
 func printJSON(cmd *cobra.Command, v any) error {

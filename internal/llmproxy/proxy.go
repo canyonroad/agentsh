@@ -407,15 +407,16 @@ func (p *Proxy) EnvVars() map[string]string {
 
 // ProxyStatus contains the complete status of the proxy.
 type ProxyStatus struct {
-	State                  string `json:"state"`
-	Address                string `json:"address"`
-	Mode                   string `json:"mode"`
-	DLPMode                string `json:"dlp_mode"`
-	ActivePatterns         int    `json:"active_patterns"`
-	TotalRequests          int    `json:"total_requests"`
-	RequestsWithRedactions int    `json:"requests_with_redactions"`
-	TotalInputTokens       int    `json:"total_input_tokens"`
-	TotalOutputTokens      int    `json:"total_output_tokens"`
+	State                  string   `json:"state"`
+	Address                string   `json:"address"`
+	Mode                   string   `json:"mode"`
+	DLPMode                string   `json:"dlp_mode"`
+	ActivePatterns         int      `json:"active_patterns"`
+	PatternNames           []string `json:"pattern_names,omitempty"`
+	TotalRequests          int      `json:"total_requests"`
+	RequestsWithRedactions int      `json:"requests_with_redactions"`
+	TotalInputTokens       int      `json:"total_input_tokens"`
+	TotalOutputTokens      int      `json:"total_output_tokens"`
 }
 
 // Stats returns the current proxy status including usage statistics.
@@ -424,6 +425,7 @@ func (p *Proxy) Stats() (ProxyStatus, error) {
 		Mode:           "embedded",
 		DLPMode:        p.dlp.Mode(),
 		ActivePatterns: p.dlp.PatternCount(),
+		PatternNames:   p.dlp.PatternNames(),
 	}
 
 	p.mu.Lock()

@@ -335,3 +335,15 @@ func (dp *DLPProcessor) Mode() string {
 	}
 	return dp.cfg.Mode
 }
+
+// PatternNames returns the names of active DLP patterns.
+func (dp *DLPProcessor) PatternNames() []string {
+	if dp == nil || len(dp.patterns) == 0 {
+		return nil
+	}
+	names := make([]string, len(dp.patterns))
+	for i, p := range dp.patterns {
+		names[i] = p.name
+	}
+	return names
+}
