@@ -293,7 +293,8 @@ func (a *App) startExplicitProxy(ctx context.Context, s *session.Session) {
 }
 
 func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
-	storagePath := filepath.Join(a.cfg.Sessions.BaseDir, s.ID, "llm-logs")
+	// Pass the sessions base directory - NewStorage will create <base>/<session-id>/llm-requests.jsonl
+	storagePath := a.cfg.Sessions.BaseDir
 
 	proxyURL, closeFn, err := session.StartLLMProxy(
 		s,
