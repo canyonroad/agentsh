@@ -1,5 +1,39 @@
 # Why Traditional Isolation Isn't Enough to Secure AI Agents
 
+## Table of Contents
+
+- [Executive Summary](#executive-summary)
+- [Part 1: Why Containers Alone Cannot Secure AI Agents](#part-1-why-containers-alone-cannot-secure-ai-agents)
+  - [Container Attack Vector #1: All-or-Nothing File Access](#container-attack-vector-1-all-or-nothing-file-access)
+  - [Container Attack Vector #2: No Command-Level Discrimination](#container-attack-vector-2-no-command-level-discrimination)
+  - [Container Attack Vector #3: Container Escape Vulnerabilities](#container-attack-vector-3-container-escape-vulnerabilities)
+  - [Container Attack Vector #4: No Human Approval Workflows](#container-attack-vector-4-no-human-approval-workflows)
+  - [Container Attack Vector #5: Credential and Secret Exposure](#container-attack-vector-5-credential-and-secret-exposure)
+  - [Container Attack Vector #6: No Data Loss Prevention](#container-attack-vector-6-no-data-loss-prevention)
+  - [Container Attack Vector #7: Opaque Execution with No Structured Visibility](#container-attack-vector-7-opaque-execution-with-no-structured-visibility)
+- [Part 2: Why Containers + Proxy Still Isn't Enough](#part-2-why-containers--proxy-still-isnt-enough)
+  - [Gap #1: No Correlation Between Intent and Action](#gap-1-no-correlation-between-intent-and-action)
+  - [Gap #2: Cached Instructions and Delayed Execution](#gap-2-cached-instructions-and-delayed-execution)
+  - [Gap #3: Tool Protocols That Bypass Both Layers](#gap-3-tool-protocols-that-bypass-both-layers)
+  - [Gap #4: No Unified Policy Language](#gap-4-no-unified-policy-language)
+  - [Gap #5: The "Autonomous Chaining" Blind Spot](#gap-5-the-autonomous-chaining-blind-spot)
+  - [Gap #6: Recovery and Rollback](#gap-6-recovery-and-rollback)
+- [Part 3: Why LLM Proxies Alone Cannot Secure AI Agents](#part-3-why-llm-proxies-alone-cannot-secure-ai-agents)
+  - [Proxy Attack Vectors Summary](#proxy-attack-vectors-summary)
+  - [Deep Dive: The Most Critical Proxy Gaps](#deep-dive-the-most-critical-proxy-gaps)
+  - [The Interception Paradox: Blocking Breaks the Agent](#the-interception-paradox-blocking-breaks-the-agent)
+- [Comparison Matrix](#comparison-matrix)
+  - [Security Controls by Approach](#security-controls-by-approach)
+  - [Attack Vector Coverage](#attack-vector-coverage)
+  - [Architecture: Defense in Depth](#architecture-defense-in-depth)
+  - [When to Use What](#when-to-use-what)
+- [Conclusion](#conclusion)
+  - [The Semantic Security Gap](#the-semantic-security-gap)
+  - [The Bottom Line](#the-bottom-line)
+- [References](#references)
+
+---
+
 ## Executive Summary
 
 Organizations deploying AI agents typically reach for familiar security tools: containers for execution isolation and LLM proxies for API monitoring. While both provide valuable capabilities, they address **different layers** of the security problem—and critical attack vectors fall through the gaps between them.
