@@ -258,6 +258,13 @@ func buildPolicyEnv(pol policy.ResolvedEnvPolicy, hostEnv []string, s *session.S
 		minimal["no_proxy"] = noProxy
 	}
 
+	// LLM proxy base URLs (for SDK clients like Anthropic, OpenAI)
+	if llmEnv := s.LLMProxyEnvVars(); llmEnv != nil {
+		for k, v := range llmEnv {
+			minimal[k] = v
+		}
+	}
+
 	add := map[string]string{}
 	_, sessEnv, _ := s.GetCwdEnvHistory()
 	for k, v := range sessEnv {
