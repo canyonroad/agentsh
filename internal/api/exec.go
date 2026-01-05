@@ -44,6 +44,34 @@ type eventBroker interface {
 
 type postStartHook func(pid int) (cleanup func() error, err error)
 
+// emitSeccompBlockedIfSIGSYS checks if the error indicates a SIGSYS (seccomp kill)
+// and emits a seccomp_blocked event if so.
+func emitSeccompBlockedIfSIGSYS(ctx context.Context, store eventStore, broker eventBroker, sessionID, cmdID string, err error) {
+	info := checkSIGSYS(err)
+	if info == nil {
+		return
+	}
+	ev := types.Event{
+		ID:        "seccomp-" + cmdID,
+		Timestamp: time.Now().UTC(),
+		Type:      "seccomp_blocked",
+		SessionID: sessionID,
+		CommandID: cmdID,
+		PID:       info.PID,
+		Fields: map[string]any{
+			"comm":   info.Comm,
+			"reason": "blocked_by_policy",
+			"action": "killed",
+		},
+	}
+	if store != nil {
+		_ = store.AppendEvent(ctx, ev)
+	}
+	if broker != nil {
+		broker.Publish(ev)
+	}
+}
+
 func chooseCommandTimeout(req types.ExecRequest, policyLimit time.Duration) time.Duration {
 	timeout := defaultCommandTimeout
 	if policyLimit > 0 {

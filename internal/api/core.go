@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,6 +20,13 @@ import (
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
+
+// seccompWrapperConfig is passed to the agentsh-unixwrap wrapper via
+// AGENTSH_SECCOMP_CONFIG environment variable to configure seccomp-bpf filtering.
+type seccompWrapperConfig struct {
+	UnixSocketEnabled bool     `json:"unix_socket_enabled"`
+	BlockedSyscalls   []string `json:"blocked_syscalls"`
+}
 
 // resolveProfile looks up a mount profile and validates it.
 func (a *App) resolveProfile(profileName string) (*config.MountProfile, error) {
@@ -543,11 +551,25 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 			}
 			envFD := 3 // first ExtraFile
 			wrappedReq.Env["AGENTSH_NOTIFY_SOCK_FD"] = strconv.Itoa(envFD)
+
+			// Pass seccomp configuration to the wrapper
+			seccompCfg := seccompWrapperConfig{
+				UnixSocketEnabled: a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
+				BlockedSyscalls:   a.cfg.Sandbox.Seccomp.Syscalls.Block,
+			}
+			if cfgJSON, err := json.Marshal(seccompCfg); err == nil {
+				wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"] = string(cfgJSON)
+			}
+
 			wrappedReq.Command = wrapperBin
 			wrappedReq.Args = append([]string{"--", origCommand}, origArgs...)
+			extraEnv := map[string]string{"AGENTSH_NOTIFY_SOCK_FD": strconv.Itoa(envFD)}
+			if seccompJSON, ok := wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"]; ok {
+				extraEnv["AGENTSH_SECCOMP_CONFIG"] = seccompJSON
+			}
 			extraCfg = &extraProcConfig{
 				extraFiles:       []*os.File{sp.child},
-				env:              map[string]string{"AGENTSH_NOTIFY_SOCK_FD": strconv.Itoa(envFD)},
+				env:              extraEnv,
 				notifyParentSock: sp.parent,
 				notifySessionID:  id,
 				notifyPolicy:     a.policy,
@@ -574,6 +596,9 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	limits := a.policy.Limits()
 	cmdDecision := a.policy.CheckCommand(wrappedReq.Command, wrappedReq.Args)
 	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(ctx, s, cmdID, wrappedReq, a.cfg, cmdDecision.EnvPolicy, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits), extraCfg)
+
+	// Check if process was killed by seccomp (SIGSYS) and emit event
+	emitSeccompBlockedIfSIGSYS(ctx, a.store, a.broker, id, cmdID, execErr)
 
 	end := time.Now().UTC()
 	endEv := types.Event{

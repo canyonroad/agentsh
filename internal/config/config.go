@@ -162,6 +162,7 @@ type SandboxConfig struct {
 	Network     SandboxNetworkConfig     `yaml:"network"`
 	Cgroups     SandboxCgroupsConfig     `yaml:"cgroups"`
 	UnixSockets SandboxUnixSocketsConfig `yaml:"unix_sockets"`
+	Seccomp     SandboxSeccompConfig     `yaml:"seccomp"`
 }
 
 // SandboxLimitsConfig configures resource limits.
@@ -240,6 +241,28 @@ type SandboxCgroupsConfig struct {
 type SandboxUnixSocketsConfig struct {
 	Enabled    bool   `yaml:"enabled"`
 	WrapperBin string `yaml:"wrapper_bin"` // optional override; defaults to "agentsh-unixwrap" in PATH
+}
+
+// SandboxSeccompConfig configures seccomp-bpf filtering.
+type SandboxSeccompConfig struct {
+	Enabled    bool                        `yaml:"enabled"`
+	Mode       string                      `yaml:"mode"` // enforce, audit, disabled
+	UnixSocket SandboxSeccompUnixConfig    `yaml:"unix_socket"`
+	Syscalls   SandboxSeccompSyscallConfig `yaml:"syscalls"`
+}
+
+// SandboxSeccompUnixConfig configures unix socket monitoring via seccomp.
+type SandboxSeccompUnixConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Action  string `yaml:"action"` // enforce, audit
+}
+
+// SandboxSeccompSyscallConfig configures syscall blocking.
+type SandboxSeccompSyscallConfig struct {
+	DefaultAction string   `yaml:"default_action"` // allow, block
+	Block         []string `yaml:"block"`
+	Allow         []string `yaml:"allow"`
+	OnBlock       string   `yaml:"on_block"` // kill, log_and_kill
 }
 
 type PoliciesConfig struct {
@@ -523,6 +546,41 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	// cgroups defaults to disabled unless explicitly enabled.
 	if cfg.Sandbox.Cgroups.BasePath == "" {
 		cfg.Sandbox.Cgroups.BasePath = ""
+	}
+
+	// Seccomp defaults
+	if cfg.Sandbox.Seccomp.Mode == "" {
+		cfg.Sandbox.Seccomp.Mode = "enforce"
+	}
+	if cfg.Sandbox.Seccomp.Enabled && !cfg.Sandbox.Seccomp.UnixSocket.Enabled {
+		// Enable unix socket monitoring by default if seccomp is enabled
+		cfg.Sandbox.Seccomp.UnixSocket.Enabled = true
+	}
+	if cfg.Sandbox.Seccomp.UnixSocket.Action == "" {
+		cfg.Sandbox.Seccomp.UnixSocket.Action = "enforce"
+	}
+	if cfg.Sandbox.Seccomp.Syscalls.DefaultAction == "" {
+		cfg.Sandbox.Seccomp.Syscalls.DefaultAction = "allow"
+	}
+	if cfg.Sandbox.Seccomp.Syscalls.OnBlock == "" {
+		cfg.Sandbox.Seccomp.Syscalls.OnBlock = "kill"
+	}
+	// Default blocked syscalls (dangerous operations)
+	if len(cfg.Sandbox.Seccomp.Syscalls.Block) == 0 && cfg.Sandbox.Seccomp.Enabled {
+		cfg.Sandbox.Seccomp.Syscalls.Block = []string{
+			"ptrace",
+			"process_vm_readv",
+			"process_vm_writev",
+			"personality",
+			"mount",
+			"umount2",
+			"pivot_root",
+			"reboot",
+			"kexec_load",
+			"init_module",
+			"finit_module",
+			"delete_module",
+		}
 	}
 
 	// Use source-aware policies directory

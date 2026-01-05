@@ -4,7 +4,11 @@ package api
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // getSysProcAttrStopped returns SysProcAttr that starts the process in a stopped
@@ -35,4 +39,62 @@ func resumeTracedProcess(pid int) error {
 		return fmt.Errorf("ptrace detach: %w", err)
 	}
 	return nil
+}
+
+// SIGSYSInfo contains information about a process killed by SIGSYS (seccomp).
+type SIGSYSInfo struct {
+	PID    int
+	Signal syscall.Signal
+	Comm   string
+}
+
+// checkSIGSYS checks if an exec.ExitError indicates the process was killed by SIGSYS.
+// SIGSYS is sent when seccomp kills a process for making a blocked syscall.
+// Returns SIGSYSInfo if the process was killed by SIGSYS, nil otherwise.
+func checkSIGSYS(err error) *SIGSYSInfo {
+	if err == nil {
+		return nil
+	}
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		return nil
+	}
+	ps := ee.ProcessState
+	if ps == nil {
+		return nil
+	}
+	ws, ok := ps.Sys().(syscall.WaitStatus)
+	if !ok {
+		return nil
+	}
+	if !ws.Signaled() {
+		return nil
+	}
+	sig := ws.Signal()
+	if sig != unix.SIGSYS {
+		return nil
+	}
+	return &SIGSYSInfo{
+		PID:    ps.Pid(),
+		Signal: sig,
+		Comm:   getProcessComm(ps.Pid()),
+	}
+}
+
+// getProcessComm attempts to get the command name for a process.
+// Returns empty string if not available (process may have already exited).
+func getProcessComm(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return ""
+	}
+	// comm file includes trailing newline
+	comm := string(data)
+	if len(comm) > 0 && comm[len(comm)-1] == '\n' {
+		comm = comm[:len(comm)-1]
+	}
+	return comm
 }

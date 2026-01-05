@@ -97,3 +97,17 @@ func resourcesFromProcessState(ps *os.ProcessState) types.ExecResources {
 		// Would require GetProcessMemoryInfo call before process exits.
 	}
 }
+
+// SIGSYSInfo contains information about a process killed by SIGSYS (seccomp).
+// On Windows, seccomp is not available, so this struct is never used.
+type SIGSYSInfo struct {
+	PID    int
+	Signal int // Not syscall.Signal on Windows
+	Comm   string
+}
+
+// checkSIGSYS checks if an error indicates the process was killed by SIGSYS.
+// On Windows, seccomp is not available, so this always returns nil.
+func checkSIGSYS(err error) *SIGSYSInfo {
+	return nil
+}
