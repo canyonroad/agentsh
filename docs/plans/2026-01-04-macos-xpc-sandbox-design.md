@@ -1,6 +1,6 @@
 # macOS XPC Sandbox Design
 
-**Status:** Approved
+**Status:** Implemented
 **Created:** 2026-01-04
 **Author:** Claude + Eran
 
