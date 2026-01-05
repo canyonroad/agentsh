@@ -1,5 +1,9 @@
 # Seccomp-BPF Enforcement Design
 
+**Status:** Implemented
+**Created:** 2026-01-04
+**Author:** Claude + Eran
+
 ## Overview
 
 This design extends agentsh's existing Unix socket monitoring infrastructure to provide general syscall blocking with seccomp-bpf. The implementation uses `SECCOMP_RET_USER_NOTIF` for socket monitoring (allowing policy decisions) and `SECCOMP_RET_KILL_PROCESS` for blocked syscalls (immediate termination with logging).
