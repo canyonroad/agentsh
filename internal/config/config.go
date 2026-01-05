@@ -607,6 +607,14 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		}
 	}
 
+	// macOS XPC defaults
+	if cfg.Sandbox.XPC.Mode == "" {
+		cfg.Sandbox.XPC.Mode = "enforce"
+	}
+	if cfg.Sandbox.XPC.MachServices.DefaultAction == "" {
+		cfg.Sandbox.XPC.MachServices.DefaultAction = "deny"
+	}
+
 	// Use source-aware policies directory
 	if cfg.Policies.Dir == "" {
 		cfg.Policies.Dir = policiesDir
@@ -747,6 +755,18 @@ func validateConfig(cfg *Config) error {
 	case "", "auto", "linux", "darwin", "darwin-lima", "windows", "windows-wsl2":
 	default:
 		return fmt.Errorf("invalid platform.mode %q", cfg.Platform.Mode)
+	}
+	// Validate XPC mode
+	switch cfg.Sandbox.XPC.Mode {
+	case "", "enforce", "audit", "disabled":
+	default:
+		return fmt.Errorf("invalid sandbox.xpc.mode %q", cfg.Sandbox.XPC.Mode)
+	}
+	// Validate XPC default_action
+	switch cfg.Sandbox.XPC.MachServices.DefaultAction {
+	case "", "allow", "deny":
+	default:
+		return fmt.Errorf("invalid sandbox.xpc.mach_services.default_action %q", cfg.Sandbox.XPC.MachServices.DefaultAction)
 	}
 	return nil
 }

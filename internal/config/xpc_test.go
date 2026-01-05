@@ -1,5 +1,3 @@
-//go:build darwin
-
 package config
 
 import (
@@ -7,6 +5,46 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+func TestSandboxXPCConfig_Defaults(t *testing.T) {
+	yamlData := `
+sandbox:
+  xpc:
+    enabled: true
+`
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(yamlData), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	applyDefaults(&cfg)
+
+	if cfg.Sandbox.XPC.Mode != "enforce" {
+		t.Errorf("mode should default to enforce, got %q", cfg.Sandbox.XPC.Mode)
+	}
+	if cfg.Sandbox.XPC.MachServices.DefaultAction != "deny" {
+		t.Errorf("default_action should default to deny, got %q", cfg.Sandbox.XPC.MachServices.DefaultAction)
+	}
+}
+
+func TestSandboxXPCConfig_Validation(t *testing.T) {
+	yamlData := `
+sandbox:
+  xpc:
+    enabled: true
+    mode: invalid_mode
+`
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(yamlData), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	applyDefaults(&cfg)
+	err := validateConfig(&cfg)
+	if err == nil {
+		t.Error("expected validation error for invalid mode")
+	}
+}
 
 func TestSandboxXPCConfig_Parse(t *testing.T) {
 	yamlData := `
