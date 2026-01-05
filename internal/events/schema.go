@@ -271,3 +271,15 @@ type IPCObservedEvent struct {
 	Limitation string        `json:"limitation"` // "no_seccomp", "no_root", "audit_only"
 	Endpoints  []IPCEndpoint `json:"endpoints,omitempty"`
 }
+
+// SeccompBlockedEvent - Seccomp killed process for blocked syscall.
+type SeccompBlockedEvent struct {
+	BaseEvent
+
+	PID       int    `json:"pid"`
+	Comm      string `json:"comm"`
+	Syscall   string `json:"syscall"`
+	SyscallNr int    `json:"syscall_nr"`
+	Reason    string `json:"reason"` // "blocked_by_policy"
+	Action    string `json:"action"` // "killed"
+}

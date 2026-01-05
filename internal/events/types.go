@@ -83,6 +83,11 @@ const (
 	EventIPCObserved       EventType = "ipc_observed"
 )
 
+// Seccomp events.
+const (
+	EventSeccompBlocked EventType = "seccomp_blocked"
+)
+
 // EventCategory maps event types to their categories.
 var EventCategory = map[EventType]string{
 	// File
@@ -146,6 +151,9 @@ var EventCategory = map[EventType]string{
 	EventNamedPipeOpen:     "ipc",
 	EventNamedPipeBlocked:  "ipc",
 	EventIPCObserved:       "ipc",
+
+	// Seccomp
+	EventSeccompBlocked: "seccomp",
 }
 
 // AllEventTypes lists all event types.
@@ -171,4 +179,6 @@ var AllEventTypes = []EventType{
 	// IPC
 	EventUnixSocketConnect, EventUnixSocketBind, EventUnixSocketBlocked,
 	EventNamedPipeOpen, EventNamedPipeBlocked, EventIPCObserved,
+	// Seccomp
+	EventSeccompBlocked,
 }
