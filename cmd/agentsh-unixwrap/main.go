@@ -10,6 +10,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"syscall"
 
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
+	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
 	"golang.org/x/sys/unix"
 )
 
@@ -31,9 +33,27 @@ func main() {
 		log.Fatalf("notify fd: %v", err)
 	}
 
+	// Load config from environment.
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
+
+	// Resolve syscall names to numbers.
+	blockedNrs, skipped := seccompkg.ResolveSyscalls(cfg.BlockedSyscalls)
+	if len(skipped) > 0 {
+		log.Printf("warning: skipped unknown syscalls: %v", skipped)
+	}
+
+	// Build filter config.
+	filterCfg := unixmon.FilterConfig{
+		UnixSocketEnabled: cfg.UnixSocketEnabled,
+		BlockedSyscalls:   blockedNrs,
+	}
+
 	// Install seccomp filter.
-	filt, err := unixmon.InstallOrWarn()
-	if err == unixmon.ErrUnsupported {
+	filt, err := unixmon.InstallFilterWithConfig(filterCfg)
+	if errors.Is(err, unixmon.ErrUnsupported) {
 		log.Printf("seccomp user-notify unsupported; exiting 0 for monitor-only")
 		os.Exit(0)
 	}
@@ -44,9 +64,11 @@ func main() {
 
 	notifFD := filt.NotifFD()
 
-	// Send notify fd to server over socketpair.
-	if err := sendFD(sockFD, notifFD); err != nil {
-		log.Fatalf("send fd: %v", err)
+	// Send notify fd to server over socketpair (only if we have one).
+	if notifFD >= 0 {
+		if err := sendFD(sockFD, notifFD); err != nil {
+			log.Fatalf("send fd: %v", err)
+		}
 	}
 	_ = unix.Close(sockFD)
 
