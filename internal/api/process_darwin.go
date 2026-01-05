@@ -19,3 +19,17 @@ func resumeTracedProcess(pid int) error {
 	// No-op on macOS - process is not started in stopped state
 	return nil
 }
+
+// SIGSYSInfo contains information about a process killed by SIGSYS (seccomp).
+// On macOS, seccomp is not available, so this struct is never used.
+type SIGSYSInfo struct {
+	PID    int
+	Signal syscall.Signal
+	Comm   string
+}
+
+// checkSIGSYS checks if an error indicates the process was killed by SIGSYS.
+// On macOS, seccomp is not available, so this always returns nil.
+func checkSIGSYS(err error) *SIGSYSInfo {
+	return nil
+}

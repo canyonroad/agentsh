@@ -597,6 +597,9 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	cmdDecision := a.policy.CheckCommand(wrappedReq.Command, wrappedReq.Args)
 	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(ctx, s, cmdID, wrappedReq, a.cfg, cmdDecision.EnvPolicy, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits), extraCfg)
 
+	// Check if process was killed by seccomp (SIGSYS) and emit event
+	emitSeccompBlockedIfSIGSYS(ctx, a.store, a.broker, id, cmdID, execErr)
+
 	end := time.Now().UTC()
 	endEv := types.Event{
 		ID:        uuid.NewString(),

@@ -185,6 +185,9 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResourcesStreamingEmit(r.Context(), s, cmdID, req, a.cfg, limits.CommandTimeout, emit, a.cgroupHook(id, cmdID, limits))
 	_ = a.store.SaveOutput(r.Context(), id, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 
+	// Check if process was killed by seccomp (SIGSYS) and emit event
+	emitSeccompBlockedIfSIGSYS(r.Context(), a.store, a.broker, id, cmdID, execErr)
+
 	end := time.Now().UTC()
 	endEv := types.Event{
 		ID:        uuid.NewString(),

@@ -403,6 +403,9 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 	)
 	_ = s.app.store.SaveOutput(stream.Context(), req.SessionID, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 
+	// Check if process was killed by seccomp (SIGSYS) and emit event
+	emitSeccompBlockedIfSIGSYS(stream.Context(), s.app.store, s.app.broker, req.SessionID, cmdID, execErr)
+
 	end := time.Now().UTC()
 	endEv := types.Event{
 		ID:        uuid.NewString(),
