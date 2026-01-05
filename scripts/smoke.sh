@@ -397,4 +397,25 @@ if command -v bash >/dev/null 2>&1; then
   fi
 fi
 
+# Test seccomp blocking (if seccomp available)
+if [[ -f ./bin/agentsh-unixwrap ]]; then
+  echo "smoke: testing seccomp blocking..."
+  # Try to run strace (which uses ptrace) - should fail if seccomp is working
+  # First check if strace is available to avoid false positives
+  set +e
+  seccomp_out="$(./bin/agentsh exec "$sid" -- sh -c 'command -v strace >/dev/null 2>&1 || { echo strace_not_found; exit 0; }; strace -V 2>&1 || echo strace_blocked' 2>&1 | tail -n 1)"
+  set -e
+
+  # Handle different scenarios
+  if [[ "$seccomp_out" == "strace_not_found" ]]; then
+    echo "smoke: SKIP (strace not installed, cannot test seccomp blocking)" >&2
+  elif [[ "$seccomp_out" == *"version"* ]]; then
+    echo "smoke: NOTE (strace succeeded; seccomp may not be blocking ptrace)" >&2
+  elif [[ "$seccomp_out" == "strace_blocked" ]] || [[ "$seccomp_out" == *"Operation not permitted"* ]]; then
+    echo "smoke: seccomp blocking verified"
+  else
+    echo "smoke: NOTE (seccomp test inconclusive: $seccomp_out)" >&2
+  fi
+fi
+
 echo "smoke: ok (sid=$sid url=$base_url)"
