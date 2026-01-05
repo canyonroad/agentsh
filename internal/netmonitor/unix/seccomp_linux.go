@@ -29,7 +29,7 @@ type Filter struct {
 }
 
 func (f *Filter) Close() error {
-	if f == nil {
+	if f == nil || f.fd < 0 {
 		return nil
 	}
 	return unix.Close(int(f.fd))
@@ -166,4 +166,69 @@ func InstallOrWarn() (*Filter, error) {
 		return nil, ErrUnsupported
 	}
 	return InstallFilter()
+}
+
+// FilterConfig configures the seccomp filter to install.
+type FilterConfig struct {
+	UnixSocketEnabled bool
+	BlockedSyscalls   []int // syscall numbers to block with KILL
+}
+
+// DefaultFilterConfig returns config for unix socket monitoring only.
+func DefaultFilterConfig() FilterConfig {
+	return FilterConfig{
+		UnixSocketEnabled: true,
+		BlockedSyscalls:   nil,
+	}
+}
+
+// InstallFilterWithConfig installs a seccomp filter based on config.
+// Unix socket syscalls get user-notify, blocked syscalls get kill.
+func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
+	if err := DetectSupport(); err != nil {
+		return nil, err
+	}
+
+	filt, err := seccomp.NewFilter(seccomp.ActAllow)
+	if err != nil {
+		return nil, err
+	}
+
+	// Unix socket monitoring via user-notify
+	if cfg.UnixSocketEnabled {
+		trap := seccomp.ActNotify
+		rules := []seccomp.ScmpSyscall{
+			seccomp.ScmpSyscall(unix.SYS_SOCKET),
+			seccomp.ScmpSyscall(unix.SYS_CONNECT),
+			seccomp.ScmpSyscall(unix.SYS_BIND),
+			seccomp.ScmpSyscall(unix.SYS_LISTEN),
+			seccomp.ScmpSyscall(unix.SYS_SENDTO),
+		}
+		for _, sc := range rules {
+			if err := filt.AddRule(sc, trap); err != nil {
+				return nil, fmt.Errorf("add notify rule %v: %w", sc, err)
+			}
+		}
+	}
+
+	// Blocked syscalls via kill
+	for _, nr := range cfg.BlockedSyscalls {
+		sc := seccomp.ScmpSyscall(nr)
+		if err := filt.AddRule(sc, seccomp.ActKillProcess); err != nil {
+			return nil, fmt.Errorf("add kill rule %v: %w", sc, err)
+		}
+	}
+
+	if err := filt.Load(); err != nil {
+		return nil, err
+	}
+	fd, err := filt.GetNotifFd()
+	if err != nil {
+		// If no notify rules, fd will be -1, which is fine
+		if !cfg.UnixSocketEnabled {
+			return &Filter{fd: -1}, nil
+		}
+		return nil, err
+	}
+	return &Filter{fd: fd}, nil
 }
