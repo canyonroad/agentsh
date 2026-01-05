@@ -1893,28 +1893,44 @@ Each session runs in isolated Linux namespaces:
 
 ### 13.3 seccomp-bpf Profile
 
-**Status:** Not implemented in the current codebase (future work). This section describes an intended hardening layer.
+**Status:** Implemented. See [docs/seccomp.md](seccomp.md) for detailed configuration.
 
-Example (future) syscall blocklist:
+agentsh uses seccomp-bpf to block dangerous syscalls that could allow an agent to escape isolation or compromise the host system. The filter is installed by `agentsh-unixwrap` before exec'ing the target command.
 
-```go
-var blockedSyscalls = []int{
-    syscall.SYS_PTRACE,       // No debugging/tracing
-    syscall.SYS_MOUNT,        // No mounting filesystems
-    syscall.SYS_UMOUNT2,      // No unmounting
-    syscall.SYS_PIVOT_ROOT,   // No changing root
-    syscall.SYS_SWAPON,       // No swap manipulation
-    syscall.SYS_SWAPOFF,
-    syscall.SYS_REBOOT,       // No system reboot
-    syscall.SYS_KEXEC_LOAD,   // No kernel loading
-    syscall.SYS_INIT_MODULE,  // No kernel modules
-    syscall.SYS_DELETE_MODULE,
-    syscall.SYS_ACCT,         // No process accounting
-    syscall.SYS_SETTIMEOFDAY, // No time manipulation
-    syscall.SYS_STIME,
-    syscall.SYS_CLOCK_SETTIME,
-}
+**Configuration:**
+
+```yaml
+sandbox:
+  seccomp:
+    enabled: true
+    mode: enforce  # enforce | audit | disabled
+    unix_socket:
+      enabled: true
+      action: enforce
+    syscalls:
+      default_action: allow
+      block:
+        - ptrace
+        - process_vm_readv
+        - process_vm_writev
+        - mount
+        - umount2
+        # ... see docs/seccomp.md for full default list
+      on_block: kill  # kill | log_and_kill
 ```
+
+**Default blocked syscalls** (when seccomp is enabled):
+
+| Syscall | Reason |
+|---------|--------|
+| ptrace | Process debugging/injection |
+| process_vm_readv/writev | Cross-process memory access |
+| mount, umount2, pivot_root | Filesystem manipulation |
+| reboot, kexec_load | System control |
+| init_module, finit_module, delete_module | Kernel module loading |
+| personality | Execution domain changes |
+
+When a process attempts a blocked syscall, seccomp immediately kills it with SIGSYS and emits a `seccomp_blocked` audit event.
 
 ### 13.4 Resource Limits (cgroups v2)
 
@@ -1948,7 +1964,7 @@ resource_limits:
 | Agent accesses sensitive files | Policy enforcement + path restrictions |
 | Agent exfiltrates data | Network policy + egress monitoring |
 | Agent DoS via resources | cgroups resource limits |
-| Agent exploits kernel | (Future) hardening layers like seccomp/eBPF |
+| Agent exploits kernel | seccomp-bpf syscall filtering + eBPF monitoring |
 | Agent escapes via symlinks | FUSE resolves and validates symlinks |
 | Agent uses covert channels | Network proxy inspects all traffic |
 
