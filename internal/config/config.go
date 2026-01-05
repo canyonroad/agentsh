@@ -163,6 +163,7 @@ type SandboxConfig struct {
 	Cgroups     SandboxCgroupsConfig     `yaml:"cgroups"`
 	UnixSockets SandboxUnixSocketsConfig `yaml:"unix_sockets"`
 	Seccomp     SandboxSeccompConfig     `yaml:"seccomp"`
+	XPC         SandboxXPCConfig         `yaml:"xpc"`
 }
 
 // SandboxLimitsConfig configures resource limits.
@@ -263,6 +264,29 @@ type SandboxSeccompSyscallConfig struct {
 	Block         []string `yaml:"block"`
 	Allow         []string `yaml:"allow"`
 	OnBlock       string   `yaml:"on_block"` // kill, log_and_kill
+}
+
+// SandboxXPCConfig configures macOS XPC/Mach IPC control.
+type SandboxXPCConfig struct {
+	Enabled       bool                 `yaml:"enabled"`
+	Mode          string               `yaml:"mode"` // enforce, audit, disabled
+	WrapperBin    string               `yaml:"wrapper_bin"`
+	MachServices  SandboxXPCMachConfig `yaml:"mach_services"`
+	ESFMonitoring SandboxXPCESFConfig  `yaml:"esf_monitoring"`
+}
+
+// SandboxXPCMachConfig configures mach-lookup restrictions.
+type SandboxXPCMachConfig struct {
+	DefaultAction string   `yaml:"default_action"` // allow, deny
+	Allow         []string `yaml:"allow"`
+	Block         []string `yaml:"block"`
+	AllowPrefixes []string `yaml:"allow_prefixes"`
+	BlockPrefixes []string `yaml:"block_prefixes"`
+}
+
+// SandboxXPCESFConfig configures ESF-based XPC monitoring.
+type SandboxXPCESFConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type PoliciesConfig struct {
