@@ -72,6 +72,21 @@ builds:
     ldflags:
       - -s -w
 
+  # macwrap: XPC sandbox wrapper for macOS (requires CGO)
+  # NOTE: This build requires macOS with Xcode to compile
+  - id: macwrap-darwin
+    main: ./cmd/agentsh-macwrap
+    binary: agentsh-macwrap
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+
 archives:
   - id: agentsh-linux
     ids:
@@ -92,6 +107,7 @@ archives:
     ids:
       - agentsh-darwin
       - shim-darwin
+      - macwrap-darwin
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_darwin_{{ .Arch }}"
     files:
@@ -189,6 +205,7 @@ homebrew_casks:
     ids:
       - agentsh-darwin
       - shim-darwin
+      - macwrap-darwin
     # Repository to push the cask to
     repository:
       owner: agentsh
@@ -205,6 +222,7 @@ homebrew_casks:
     binaries:
       - agentsh
       - agentsh-shell-shim
+      - agentsh-macwrap
     # Post-install hook to remove quarantine (unsigned binary)
     hooks:
       post:
