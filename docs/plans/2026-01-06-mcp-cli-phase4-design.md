@@ -1,5 +1,7 @@
 # MCP Tool Inspection Phase 4: CLI Commands Design
 
+**Status:** Implemented
+
 ## Overview
 
 Add CLI commands for viewing MCP tool registry and querying MCP-related events.
