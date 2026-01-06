@@ -238,7 +238,7 @@ For non-enterprise deployments, agentsh uses macOS's `sandbox-exec` command with
 | System access | Read-only access to system libraries and frameworks |
 | Temporary files | Full access to `/tmp`, `/private/tmp`, `/var/folders` |
 | TTY/PTY access | Interactive terminal support for commands |
-| IPC operations | Mach messaging and POSIX IPC allowed |
+| IPC operations | POSIX IPC allowed; Mach/XPC configurable via `sandbox.xpc` |
 
 **Default Readable Paths (Always Allowed):**
 
@@ -280,6 +280,7 @@ The generated profile follows this structure:
 8. Allow additional paths (from config)
 9. Conditionally allow network (if `network` capability set)
 10. Allow Mach and POSIX IPC for inter-process communication
+11. Apply mach-lookup restrictions (if `sandbox.xpc.enabled`)
 
 **sandbox-exec Limitations:**
 - `sandbox-exec` is deprecated by Apple but still functional on all macOS versions
@@ -289,6 +290,32 @@ The generated profile follows this structure:
 - Profile is passed inline via `-p` flag
 - No cgroup equivalent for resource accounting
 - Child processes inherit the sandbox (escape via fork not possible, but no PID namespace isolation)
+
+**XPC/Mach IPC Control:**
+
+When `sandbox.xpc.enabled: true`, agentsh restricts which XPC/Mach services sandboxed processes can connect to. This prevents:
+- Data exfiltration via clipboard (`com.apple.pasteboard.1`)
+- Privilege escalation via auth dialogs (`com.apple.security.authhost`)
+- TCC bypass attempts (`com.apple.tccd.*`)
+- AppleScript execution (`com.apple.coreservices.appleevents`)
+- Accessibility API abuse (`com.apple.accessibility.*`)
+
+Configuration:
+```yaml
+sandbox:
+  xpc:
+    enabled: true
+    mode: enforce  # enforce | audit | disabled
+    mach_services:
+      default_action: deny  # deny (allowlist) | allow (blocklist)
+      allow:
+        - "com.apple.system.logger"
+        - "com.apple.CoreServices.coreservicesd"
+      block_prefixes:
+        - "com.apple.accessibility."
+```
+
+Default allow list includes essential services: system logger, CoreServices, launch services, SecurityServer, and cfprefsd. See [macOS XPC Sandbox](docs/macos-xpc-sandbox.md) for full documentation.
 
 **Recommendations for macOS deployments:**
 - **Enterprise:** Use ESF+NE mode for full enforcement (ESF requires Apple approval; NE is standard capability)

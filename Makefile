@@ -3,6 +3,7 @@
 .PHONY: completions package-snapshot package-release
 .PHONY: build-macos-enterprise build-macos-go build-swift assemble-bundle sign-bundle
 .PHONY: build-driver build-driver-debug install-driver uninstall-driver build-windows-full
+.PHONY: build-macwrap
 
 VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
 COMMIT := $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
@@ -20,6 +21,11 @@ build:
 build-shim:
 	mkdir -p bin $(GOCACHE) $(GOMODCACHE) $(GOPATH)
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOPATH=$(GOPATH) go build $(LDFLAGS) -o bin/agentsh-shell-shim ./cmd/agentsh-shell-shim
+
+# Build macwrap (requires macOS with Xcode - uses cgo for darwin-specific code)
+build-macwrap:
+	mkdir -p bin $(GOCACHE) $(GOMODCACHE) $(GOPATH)
+	GOOS=darwin CGO_ENABLED=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOPATH=$(GOPATH) go build $(LDFLAGS) -o bin/agentsh-macwrap ./cmd/agentsh-macwrap
 
 proto:
 	protoc -I proto \

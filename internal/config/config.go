@@ -163,6 +163,7 @@ type SandboxConfig struct {
 	Cgroups     SandboxCgroupsConfig     `yaml:"cgroups"`
 	UnixSockets SandboxUnixSocketsConfig `yaml:"unix_sockets"`
 	Seccomp     SandboxSeccompConfig     `yaml:"seccomp"`
+	XPC         SandboxXPCConfig         `yaml:"xpc"`
 }
 
 // SandboxLimitsConfig configures resource limits.
@@ -263,6 +264,29 @@ type SandboxSeccompSyscallConfig struct {
 	Block         []string `yaml:"block"`
 	Allow         []string `yaml:"allow"`
 	OnBlock       string   `yaml:"on_block"` // kill, log_and_kill
+}
+
+// SandboxXPCConfig configures macOS XPC/Mach IPC control.
+type SandboxXPCConfig struct {
+	Enabled       bool                 `yaml:"enabled"`
+	Mode          string               `yaml:"mode"` // enforce, audit, disabled
+	WrapperBin    string               `yaml:"wrapper_bin"`
+	MachServices  SandboxXPCMachConfig `yaml:"mach_services"`
+	ESFMonitoring SandboxXPCESFConfig  `yaml:"esf_monitoring"`
+}
+
+// SandboxXPCMachConfig configures mach-lookup restrictions.
+type SandboxXPCMachConfig struct {
+	DefaultAction string   `yaml:"default_action"` // allow, deny
+	Allow         []string `yaml:"allow"`
+	Block         []string `yaml:"block"`
+	AllowPrefixes []string `yaml:"allow_prefixes"`
+	BlockPrefixes []string `yaml:"block_prefixes"`
+}
+
+// SandboxXPCESFConfig configures ESF-based XPC monitoring.
+type SandboxXPCESFConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type PoliciesConfig struct {
@@ -583,6 +607,14 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		}
 	}
 
+	// macOS XPC defaults
+	if cfg.Sandbox.XPC.Mode == "" {
+		cfg.Sandbox.XPC.Mode = "enforce"
+	}
+	if cfg.Sandbox.XPC.MachServices.DefaultAction == "" {
+		cfg.Sandbox.XPC.MachServices.DefaultAction = "deny"
+	}
+
 	// Use source-aware policies directory
 	if cfg.Policies.Dir == "" {
 		cfg.Policies.Dir = policiesDir
@@ -723,6 +755,18 @@ func validateConfig(cfg *Config) error {
 	case "", "auto", "linux", "darwin", "darwin-lima", "windows", "windows-wsl2":
 	default:
 		return fmt.Errorf("invalid platform.mode %q", cfg.Platform.Mode)
+	}
+	// Validate XPC mode
+	switch cfg.Sandbox.XPC.Mode {
+	case "", "enforce", "audit", "disabled":
+	default:
+		return fmt.Errorf("invalid sandbox.xpc.mode %q", cfg.Sandbox.XPC.Mode)
+	}
+	// Validate XPC default_action
+	switch cfg.Sandbox.XPC.MachServices.DefaultAction {
+	case "", "allow", "deny":
+	default:
+		return fmt.Errorf("invalid sandbox.xpc.mach_services.default_action %q", cfg.Sandbox.XPC.MachServices.DefaultAction)
 	}
 	return nil
 }

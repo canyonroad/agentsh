@@ -31,6 +31,7 @@ If you're on Windows, the recommended approach is to run agentsh inside WSL2 or 
 - **Process execution stats:** CPU user/system time returned in exec results on all platforms. Peak memory available on Unix (Linux/macOS) but not Windows.
 - **Registry monitoring + policy enforcement:** Windows-only, requires mini filter driver (see below).
 - **seccomp syscall filtering:** Linux-only via seccomp user-notify for unix socket enforcement.
+- **XPC/Mach IPC control:** macOS-only via sandbox profiles with mach-lookup restrictions. See [macOS XPC Sandbox](macos-xpc-sandbox.md).
 - **Full namespace isolation:** Linux, Lima VM, and WSL2 via `unshare` (user, mount, PID, network namespaces).
 - **eBPF network enforcement:** Linux-only, requires cgroups v2 and root/CAP_BPF.
 

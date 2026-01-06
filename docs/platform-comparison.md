@@ -61,6 +61,7 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | CPU system time | Yes | Yes | Yes | Yes | Yes | Yes |
 | Peak memory | Yes | Yes | Yes | Yes | No | Yes |
 | **Platform-Specific** |
+| XPC/Mach IPC control | N/A | Yes | Yes | N/A | N/A | N/A |
 | Registry monitoring | N/A | N/A | N/A | N/A | Yes | N/A |
 | Registry blocking | N/A | N/A | N/A | N/A | Yes | N/A |
 | Kernel events | eBPF | ESF | No | eBPF | No | eBPF |

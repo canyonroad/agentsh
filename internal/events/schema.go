@@ -283,3 +283,41 @@ type SeccompBlockedEvent struct {
 	Reason    string `json:"reason"` // "blocked_by_policy"
 	Action    string `json:"action"` // "killed"
 }
+
+// XPCConnectEvent - XPC/Mach service connection attempt (macOS).
+// Captured via ES_EVENT_TYPE_NOTIFY_XPC_CONNECT (macOS 14+) or sandbox violation logs.
+type XPCConnectEvent struct {
+	BaseEvent
+
+	// Process info
+	PID       int    `json:"pid"`
+	PPID      int    `json:"ppid"`
+	Comm      string `json:"comm"`
+	Exe       string `json:"exe"`
+	SigningID string `json:"signing_id,omitempty"`
+
+	// XPC connection details
+	ServiceName   string `json:"service_name"`
+	ServiceDomain string `json:"service_domain,omitempty"` // system, user, per-pid
+
+	// Decision
+	Allowed bool   `json:"allowed"`
+	Reason  string `json:"reason"` // allowlist, blocklist, default_allow, default_deny
+
+	// For blocked connections
+	BlockedBy string `json:"blocked_by,omitempty"` // sandbox_profile, esf_policy
+
+	// Source of detection
+	Source string `json:"source"` // esf, sandbox_log
+}
+
+// XPCSandboxViolationEvent - Sandbox denied mach-lookup (from system.log).
+type XPCSandboxViolationEvent struct {
+	BaseEvent
+
+	PID         int    `json:"pid"`
+	Comm        string `json:"comm"`
+	ServiceName string `json:"service_name"`
+	Operation   string `json:"operation"` // mach-lookup, mach-register
+	Profile     string `json:"profile,omitempty"`
+}

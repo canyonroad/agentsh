@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +28,23 @@ import (
 type seccompWrapperConfig struct {
 	UnixSocketEnabled bool     `json:"unix_socket_enabled"`
 	BlockedSyscalls   []string `json:"blocked_syscalls"`
+}
+
+// macSandboxWrapperConfig is passed to agentsh-macwrap via
+// AGENTSH_SANDBOX_CONFIG environment variable.
+type macSandboxWrapperConfig struct {
+	WorkspacePath string                       `json:"workspace_path"`
+	AllowedPaths  []string                     `json:"allowed_paths"`
+	AllowNetwork  bool                         `json:"allow_network"`
+	MachServices  macSandboxMachServicesConfig `json:"mach_services"`
+}
+
+type macSandboxMachServicesConfig struct {
+	DefaultAction string   `json:"default_action"`
+	Allow         []string `json:"allow"`
+	Block         []string `json:"block"`
+	AllowPrefixes []string `json:"allow_prefixes"`
+	BlockPrefixes []string `json:"block_prefixes"`
 }
 
 // resolveProfile looks up a mount profile and validates it.
@@ -579,6 +598,11 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 		}
 	}
 
+	// macOS: sandbox wrapper with XPC control
+	if runtime.GOOS == "darwin" && a.cfg.Sandbox.XPC.Enabled && a.cfg.Sandbox.XPC.Mode == "enforce" {
+		a.wrapWithMacSandbox(&wrappedReq, origCommand, origArgs, s)
+	}
+
 	startEv := types.Event{
 		ID:        uuid.NewString(),
 		Timestamp: start,
@@ -731,4 +755,63 @@ func (a *App) processIOEvents(ctx context.Context, eventChan <-chan platform.IOE
 		_ = a.store.AppendEvent(ctx, ev)
 		a.broker.Publish(ev)
 	}
+}
+
+// wrapWithMacSandbox wraps command with agentsh-macwrap for XPC control.
+func (a *App) wrapWithMacSandbox(
+	req *types.ExecRequest,
+	origCommand string,
+	origArgs []string,
+	sess *session.Session,
+) {
+	wrapperBin := strings.TrimSpace(a.cfg.Sandbox.XPC.WrapperBin)
+	if wrapperBin == "" {
+		wrapperBin = "agentsh-macwrap"
+	}
+
+	// Check if wrapper exists
+	if _, err := exec.LookPath(wrapperBin); err != nil {
+		// Wrapper not found, skip sandbox
+		return
+	}
+
+	// Build mach services config with defaults
+	machCfg := macSandboxMachServicesConfig{
+		DefaultAction: a.cfg.Sandbox.XPC.MachServices.DefaultAction,
+		Allow:         a.cfg.Sandbox.XPC.MachServices.Allow,
+		Block:         a.cfg.Sandbox.XPC.MachServices.Block,
+		AllowPrefixes: a.cfg.Sandbox.XPC.MachServices.AllowPrefixes,
+		BlockPrefixes: a.cfg.Sandbox.XPC.MachServices.BlockPrefixes,
+	}
+
+	// Apply defaults if not configured
+	if machCfg.DefaultAction == "" {
+		machCfg.DefaultAction = "deny"
+	}
+	if len(machCfg.Allow) == 0 && machCfg.DefaultAction == "deny" {
+		machCfg.Allow = DefaultXPCAllowList
+	}
+	if len(machCfg.BlockPrefixes) == 0 && machCfg.DefaultAction == "allow" {
+		machCfg.BlockPrefixes = DefaultXPCBlockPrefixes
+	}
+
+	cfg := macSandboxWrapperConfig{
+		WorkspacePath: sess.Workspace,
+		AllowedPaths:  []string{os.Getenv("HOME")},
+		AllowNetwork:  true, // Default allow, can be policy-controlled
+		MachServices:  machCfg,
+	}
+
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		// Failed to marshal config, skip sandbox
+		return
+	}
+
+	if req.Env == nil {
+		req.Env = map[string]string{}
+	}
+	req.Env["AGENTSH_SANDBOX_CONFIG"] = string(cfgJSON)
+	req.Command = wrapperBin
+	req.Args = append([]string{"--", origCommand}, origArgs...)
 }

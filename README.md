@@ -459,6 +459,7 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 * **LLM Proxy & DLP:** [`docs/llm-proxy.md`](docs/llm-proxy.md) - embedded proxy configuration, DLP patterns, usage tracking
 * **macOS build guide:** [`docs/macos-build.md`](docs/macos-build.md) - FUSE-T and ESF+NE build instructions
 * **macOS ESF+NE architecture:** [`docs/macos-esf-ne-architecture.md`](docs/macos-esf-ne-architecture.md) - System Extension, XPC, and deployment details
+* **macOS XPC sandbox:** [`docs/macos-xpc-sandbox.md`](docs/macos-xpc-sandbox.md) - XPC/Mach IPC control for sandboxed processes
 * Environment variables (all `AGENTSH_*` overrides, auto-start toggles, transport selection): [`docs/spec.md` &sect;15.3 "Environment Variables"](docs/spec.md#153-environment-variables)
 * Architecture & data flow (FUSE + policy engine + API): inline comments in [`configs/server-config.yaml`](configs/server-config.yaml) and [`internal/netmonitor`](internal/netmonitor)
 * CLI help: `agentsh --help`, `agentsh exec --help`, `agentsh shim --help`
