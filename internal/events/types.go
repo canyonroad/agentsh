@@ -88,6 +88,13 @@ const (
 	EventSeccompBlocked EventType = "seccomp_blocked"
 )
 
+// MCP inspection events.
+const (
+	EventMCPToolSeen    EventType = "mcp_tool_seen"
+	EventMCPToolChanged EventType = "mcp_tool_changed"
+	EventMCPDetection   EventType = "mcp_detection"
+)
+
 // EventCategory maps event types to their categories.
 var EventCategory = map[EventType]string{
 	// File
@@ -154,6 +161,11 @@ var EventCategory = map[EventType]string{
 
 	// Seccomp
 	EventSeccompBlocked: "seccomp",
+
+	// MCP
+	EventMCPToolSeen:    "mcp",
+	EventMCPToolChanged: "mcp",
+	EventMCPDetection:   "mcp",
 }
 
 // AllEventTypes lists all event types.
@@ -181,4 +193,6 @@ var AllEventTypes = []EventType{
 	EventNamedPipeOpen, EventNamedPipeBlocked, EventIPCObserved,
 	// Seccomp
 	EventSeccompBlocked,
+	// MCP
+	EventMCPToolSeen, EventMCPToolChanged, EventMCPDetection,
 }
