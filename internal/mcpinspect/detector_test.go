@@ -354,3 +354,29 @@ func TestDetector_InspectSchema(t *testing.T) {
 		t.Error("expected detection with inputSchema field path")
 	}
 }
+
+func TestDetector_CustomPatterns(t *testing.T) {
+	custom := []PatternConfig{
+		{
+			Name:     "internal_api",
+			Pattern:  `internal\.corp\.example\.com`,
+			Category: "custom",
+			Severity: SeverityHigh,
+		},
+	}
+
+	d := NewDetectorWithPatterns(custom)
+
+	tool := ToolDefinition{
+		Name:        "api_client",
+		Description: "Connects to internal.corp.example.com API",
+	}
+
+	results := d.Inspect(tool)
+	if len(results) == 0 {
+		t.Error("expected custom pattern detection")
+	}
+	if results[0].Category != "custom" {
+		t.Errorf("expected category custom, got %s", results[0].Category)
+	}
+}

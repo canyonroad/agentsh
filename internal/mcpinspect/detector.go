@@ -16,6 +16,15 @@ type CompiledPattern struct {
 	Description string
 }
 
+// PatternConfig defines a custom detection pattern.
+type PatternConfig struct {
+	Name        string
+	Pattern     string
+	Category    string
+	Severity    Severity
+	Description string
+}
+
 // Detector scans tool definitions for suspicious patterns.
 type Detector struct {
 	patterns []CompiledPattern
@@ -26,6 +35,30 @@ func NewDetector() *Detector {
 	return &Detector{
 		patterns: compileBuiltinPatterns(),
 	}
+}
+
+// NewDetectorWithPatterns creates a detector with built-in plus custom patterns.
+func NewDetectorWithPatterns(custom []PatternConfig) *Detector {
+	patterns := compileBuiltinPatterns()
+
+	// Add custom patterns
+	for _, p := range custom {
+		if re, err := regexp.Compile(p.Pattern); err == nil {
+			desc := p.Description
+			if desc == "" {
+				desc = "Custom detection pattern"
+			}
+			patterns = append(patterns, CompiledPattern{
+				Name:        p.Name,
+				Category:    p.Category,
+				Severity:    p.Severity,
+				Regex:       re,
+				Description: desc,
+			})
+		}
+	}
+
+	return &Detector{patterns: patterns}
 }
 
 // Inspect scans a tool definition and returns any detections.
