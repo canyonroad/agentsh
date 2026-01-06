@@ -180,3 +180,68 @@ func TestListMCPServers(t *testing.T) {
 		t.Errorf("fs tool count = %d, want 2", fs.ToolCount)
 	}
 }
+
+func TestMCPToolFromEventIntegration(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer st.Close()
+
+	// Simulate what composite.UpsertMCPToolFromEvent does
+	tool := MCPTool{
+		ServerID:       "test-server",
+		ToolName:       "read_file",
+		ToolHash:       "hash123",
+		Description:    "Reads a file",
+		DetectionCount: 2,
+		MaxSeverity:    "high",
+	}
+
+	err = st.UpsertMCPTool(context.Background(), tool)
+	if err != nil {
+		t.Fatalf("UpsertMCPTool failed: %v", err)
+	}
+
+	// Verify the tool was inserted
+	tools, err := st.ListMCPTools(context.Background(), MCPToolFilter{})
+	if err != nil {
+		t.Fatalf("ListMCPTools failed: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+
+	if tools[0].ServerID != "test-server" {
+		t.Errorf("ServerID = %q, want test-server", tools[0].ServerID)
+	}
+	if tools[0].ToolName != "read_file" {
+		t.Errorf("ToolName = %q, want read_file", tools[0].ToolName)
+	}
+	if tools[0].DetectionCount != 2 {
+		t.Errorf("DetectionCount = %d, want 2", tools[0].DetectionCount)
+	}
+	if tools[0].MaxSeverity != "high" {
+		t.Errorf("MaxSeverity = %q, want high", tools[0].MaxSeverity)
+	}
+
+	// Test upsert updates existing tool
+	tool.ToolHash = "newhash456"
+	tool.DetectionCount = 5
+	err = st.UpsertMCPTool(context.Background(), tool)
+	if err != nil {
+		t.Fatalf("UpsertMCPTool (update) failed: %v", err)
+	}
+
+	tools, _ = st.ListMCPTools(context.Background(), MCPToolFilter{})
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool after upsert, got %d", len(tools))
+	}
+	if tools[0].ToolHash != "newhash456" {
+		t.Errorf("ToolHash = %q, want newhash456", tools[0].ToolHash)
+	}
+	if tools[0].DetectionCount != 5 {
+		t.Errorf("DetectionCount = %d, want 5", tools[0].DetectionCount)
+	}
+}

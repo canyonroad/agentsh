@@ -460,7 +460,12 @@ type serverEmitter struct {
 }
 
 func (e serverEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
-	return e.store.AppendEvent(ctx, ev)
+	if err := e.store.AppendEvent(ctx, ev); err != nil {
+		return err
+	}
+	// Also upsert to mcp_tools table for mcp_tool_seen events
+	_ = e.store.UpsertMCPToolFromEvent(ctx, ev)
+	return nil
 }
 func (e serverEmitter) Publish(ev types.Event) { e.broker.Publish(ev) }
 

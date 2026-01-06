@@ -81,3 +81,37 @@ func TestClosePropagates(t *testing.T) {
 		t.Fatalf("expected stores closed")
 	}
 }
+
+func TestUpsertMCPToolFromEvent_SkipsNonMCPEvents(t *testing.T) {
+	primary := &fakeEventStore{}
+	s := New(primary, nil)
+
+	// Non-MCP event should be silently skipped
+	ev := types.Event{
+		Type:   "file_open",
+		Fields: map[string]any{"path": "/tmp/test"},
+	}
+	err := s.UpsertMCPToolFromEvent(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("expected nil error for non-MCP event, got %v", err)
+	}
+}
+
+func TestUpsertMCPToolFromEvent_SkipsNonSQLiteStore(t *testing.T) {
+	primary := &fakeEventStore{}
+	s := New(primary, nil)
+
+	// MCP event with fake store should be silently skipped
+	ev := types.Event{
+		Type: "mcp_tool_seen",
+		Fields: map[string]any{
+			"server_id": "test-server",
+			"tool_name": "test-tool",
+			"tool_hash": "abc123",
+		},
+	}
+	err := s.UpsertMCPToolFromEvent(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("expected nil error for non-SQLite store, got %v", err)
+	}
+}

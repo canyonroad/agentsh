@@ -3,8 +3,10 @@ package composite
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/store"
+	"github.com/agentsh/agentsh/internal/store/sqlite"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -60,4 +62,65 @@ func (s *Store) Close() error {
 		}
 	}
 	return firstErr
+}
+
+// UpsertMCPToolFromEvent extracts MCP tool info from an mcp_tool_seen event
+// and upserts it to the mcp_tools table.
+func (s *Store) UpsertMCPToolFromEvent(ctx context.Context, ev types.Event) error {
+	if ev.Type != "mcp_tool_seen" {
+		return nil
+	}
+
+	// Type assert primary to sqlite.Store which has UpsertMCPTool
+	sqliteStore, ok := s.primary.(*sqlite.Store)
+	if !ok {
+		// Primary store doesn't support MCP tool upsert, skip silently
+		return nil
+	}
+
+	// Extract tool info from event Fields
+	fields := ev.Fields
+	if fields == nil {
+		return nil
+	}
+
+	tool := sqlite.MCPTool{
+		ServerID:    stringField(fields, "server_id"),
+		ToolName:    stringField(fields, "tool_name"),
+		ToolHash:    stringField(fields, "tool_hash"),
+		Description: stringField(fields, "description"),
+		MaxSeverity: stringField(fields, "max_severity"),
+		LastSeen:    ev.Timestamp,
+	}
+
+	// Count detections if present
+	if detections, ok := fields["detections"].([]any); ok {
+		tool.DetectionCount = len(detections)
+	}
+
+	if tool.ServerID == "" || tool.ToolName == "" {
+		return nil // Missing required fields
+	}
+
+	return sqliteStore.UpsertMCPTool(ctx, tool)
+}
+
+// stringField extracts a string field from a map, returning empty string if not found.
+func stringField(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// timeField extracts a time field from a map, returning zero time if not found.
+func timeField(m map[string]any, key string) time.Time {
+	switch v := m[key].(type) {
+	case time.Time:
+		return v
+	case string:
+		t, _ := time.Parse(time.RFC3339Nano, v)
+		return t
+	}
+	return time.Time{}
 }
