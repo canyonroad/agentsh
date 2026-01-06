@@ -31,21 +31,23 @@ func (s RegistrationStatus) String() string {
 
 // RegisteredTool tracks a tool definition in the registry.
 type RegisteredTool struct {
-	Name      string    `json:"name"`
-	ServerID  string    `json:"server_id"`
-	Hash      string    `json:"hash"`
-	FirstSeen time.Time `json:"first_seen"`
-	LastSeen  time.Time `json:"last_seen"`
-	Pinned    bool      `json:"pinned"`
+	Name       string         `json:"name"`
+	ServerID   string         `json:"server_id"`
+	Hash       string         `json:"hash"`
+	FirstSeen  time.Time      `json:"first_seen"`
+	LastSeen   time.Time      `json:"last_seen"`
+	Pinned     bool           `json:"pinned"`
+	Definition ToolDefinition `json:"-"` // Current definition for change detection
 }
 
 // RegistrationResult is returned when registering a tool.
 type RegistrationResult struct {
-	Status       RegistrationStatus
-	Tool         *RegisteredTool
-	Definition   ToolDefinition
-	PreviousHash string // Only set when Status == StatusChanged
-	NewHash      string // Only set when Status == StatusChanged
+	Status             RegistrationStatus
+	Tool               *RegisteredTool
+	Definition         ToolDefinition
+	PreviousHash       string         // Only set when Status == StatusChanged
+	NewHash            string         // Only set when Status == StatusChanged
+	PreviousDefinition ToolDefinition // Only set when Status == StatusChanged
 }
 
 // Registry tracks tool definitions for change detection.
@@ -76,12 +78,13 @@ func (r *Registry) Register(serverID string, tool ToolDefinition) *RegistrationR
 	if !exists {
 		// First time seeing this tool
 		registered := &RegisteredTool{
-			Name:      tool.Name,
-			ServerID:  serverID,
-			Hash:      hash,
-			FirstSeen: now,
-			LastSeen:  now,
-			Pinned:    r.pinOnFirstUse,
+			Name:       tool.Name,
+			ServerID:   serverID,
+			Hash:       hash,
+			FirstSeen:  now,
+			LastSeen:   now,
+			Pinned:     r.pinOnFirstUse,
+			Definition: tool,
 		}
 		r.tools[key] = registered
 
@@ -98,14 +101,17 @@ func (r *Registry) Register(serverID string, tool ToolDefinition) *RegistrationR
 	// Check for changes
 	if existing.Hash != hash {
 		previousHash := existing.Hash
+		previousDef := existing.Definition
 		existing.Hash = hash // Update to new hash
+		existing.Definition = tool
 
 		return &RegistrationResult{
-			Status:       StatusChanged,
-			Tool:         existing,
-			Definition:   tool,
-			PreviousHash: previousHash,
-			NewHash:      hash,
+			Status:             StatusChanged,
+			Tool:               existing,
+			Definition:         tool,
+			PreviousHash:       previousHash,
+			NewHash:            hash,
+			PreviousDefinition: previousDef,
 		}
 	}
 
