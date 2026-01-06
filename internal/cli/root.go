@@ -37,6 +37,7 @@ func NewRoot(version string) *cobra.Command {
 	cmd.AddCommand(newDebugCmd())
 	cmd.AddCommand(newReportCmd())
 	cmd.AddCommand(newProxyCmd())
+	cmd.AddCommand(newMCPCmd())
 
 	return cmd
 }
