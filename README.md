@@ -456,6 +456,7 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 * Default policy: [`configs/policies/default.yaml`](configs/policies/default.yaml)
 * Example Dockerfile (with shim): [`Dockerfile.example`](Dockerfile.example)
 * **Platform comparison:** [`docs/platform-comparison.md`](docs/platform-comparison.md) - feature support, security scores, performance by platform
+* **Bubblewrap vs agentsh:** [`docs/bubblewrap-vs-agentsh-comparison.md`](docs/bubblewrap-vs-agentsh-comparison.md) - comparison with Bubblewrap for Linux container sandboxing
 * **LLM Proxy & DLP:** [`docs/llm-proxy.md`](docs/llm-proxy.md) - embedded proxy configuration, DLP patterns, usage tracking
 * **macOS build guide:** [`docs/macos-build.md`](docs/macos-build.md) - FUSE-T and ESF+NE build instructions
 * **macOS ESF+NE architecture:** [`docs/macos-esf-ne-architecture.md`](docs/macos-esf-ne-architecture.md) - System Extension, XPC, and deployment details
