@@ -1,0 +1,121 @@
+// internal/mcpinspect/events.go
+package mcpinspect
+
+import "time"
+
+// MCPToolSeenEvent is logged when a tool definition is observed.
+type MCPToolSeenEvent struct {
+	Type      string    `json:"type"` // "mcp_tool_seen"
+	Timestamp time.Time `json:"timestamp"`
+	SessionID string    `json:"session_id"`
+
+	// Server identity
+	ServerID   string `json:"server_id"`
+	ServerType string `json:"server_type"` // "stdio" | "http"
+
+	// Tool info
+	ToolName    string `json:"tool_name"`
+	ToolHash    string `json:"tool_hash"`
+	Description string `json:"description,omitempty"`
+
+	// Registration status
+	Status string `json:"status"` // "new" | "unchanged" | "changed"
+
+	// Detection results (if any)
+	Detections []DetectionResult `json:"detections,omitempty"`
+
+	// Severity (highest from detections)
+	MaxSeverity string `json:"max_severity,omitempty"`
+}
+
+// MCPToolChangedEvent is logged when a tool definition changes (rug pull).
+type MCPToolChangedEvent struct {
+	Type      string    `json:"type"` // "mcp_tool_changed"
+	Timestamp time.Time `json:"timestamp"`
+	SessionID string    `json:"session_id"`
+
+	// Server identity
+	ServerID string `json:"server_id"`
+
+	// Tool info
+	ToolName     string `json:"tool_name"`
+	PreviousHash string `json:"previous_hash"`
+	NewHash      string `json:"new_hash"`
+
+	// What changed
+	Changes []FieldChange `json:"changes"`
+
+	// New detection results
+	Detections []DetectionResult `json:"detections,omitempty"`
+}
+
+// MCPDetectionEvent is logged when suspicious patterns are detected.
+type MCPDetectionEvent struct {
+	Type      string    `json:"type"` // "mcp_detection"
+	Timestamp time.Time `json:"timestamp"`
+	SessionID string    `json:"session_id"`
+
+	// Server and tool
+	ServerID string `json:"server_id"`
+	ToolName string `json:"tool_name"`
+
+	// Detection details
+	Detection DetectionResult `json:"detection"`
+
+	// Action taken
+	Action string `json:"action"` // "alert" | "warn" | "block"
+}
+
+// FieldChange describes what changed in a tool definition.
+type FieldChange struct {
+	Field    string `json:"field"`
+	Previous string `json:"previous"`
+	New      string `json:"new"`
+}
+
+// DetectionResult holds the result of pattern matching.
+type DetectionResult struct {
+	Pattern  string   `json:"pattern"`
+	Category string   `json:"category"`
+	Severity Severity `json:"severity"`
+	Matches  []Match  `json:"matches"`
+	Field    string   `json:"field"` // "description", "inputSchema", etc.
+}
+
+// Match represents a single pattern match location.
+type Match struct {
+	Text     string `json:"text"`
+	Position int    `json:"position"`
+	Context  string `json:"context"` // Surrounding text
+}
+
+// Severity levels for detections.
+type Severity int
+
+const (
+	SeverityLow Severity = iota
+	SeverityMedium
+	SeverityHigh
+	SeverityCritical
+)
+
+// String returns the string representation of Severity.
+func (s Severity) String() string {
+	switch s {
+	case SeverityLow:
+		return "low"
+	case SeverityMedium:
+		return "medium"
+	case SeverityHigh:
+		return "high"
+	case SeverityCritical:
+		return "critical"
+	default:
+		return "unknown"
+	}
+}
+
+// MarshalJSON implements json.Marshaler for Severity.
+func (s Severity) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + s.String() + `"`), nil
+}
