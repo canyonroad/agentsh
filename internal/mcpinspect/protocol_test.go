@@ -31,3 +31,49 @@ func TestParseToolsListResponse(t *testing.T) {
 		t.Errorf("expected tool name 'read_file', got %q", resp.Result.Tools[0].Name)
 	}
 }
+
+func TestDetectMessageType(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected MessageType
+	}{
+		{
+			name:     "tools/list request",
+			input:    `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+			expected: MessageToolsList,
+		},
+		{
+			name:     "tools/list response",
+			input:    `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"test"}]}}`,
+			expected: MessageToolsListResponse,
+		},
+		{
+			name:     "tools/call request",
+			input:    `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file"}}`,
+			expected: MessageToolsCall,
+		},
+		{
+			name:     "sampling request",
+			input:    `{"jsonrpc":"2.0","id":3,"method":"sampling/createMessage"}`,
+			expected: MessageSamplingRequest,
+		},
+		{
+			name:     "unknown message",
+			input:    `{"jsonrpc":"2.0","id":4,"method":"resources/list"}`,
+			expected: MessageUnknown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := DetectMessageType([]byte(tt.input))
+			if err != nil {
+				t.Fatalf("DetectMessageType failed: %v", err)
+			}
+			if got != tt.expected {
+				t.Errorf("DetectMessageType() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
