@@ -1,5 +1,7 @@
 # Custom Provider Base URLs
 
+**Status:** Implemented
+
 ## Overview
 
 Allow configuring custom base URLs for LLM providers so the proxy can route traffic to alternative endpoints (self-hosted servers, corporate gateways, provider alternatives) that speak Anthropic or OpenAI dialects.

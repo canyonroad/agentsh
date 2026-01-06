@@ -1,5 +1,7 @@
 # CLI Debug Commands Design
 
+**Status:** Implemented
+
 ## Overview
 
 Add one-shot debug commands for operational visibility into agentsh sessions.

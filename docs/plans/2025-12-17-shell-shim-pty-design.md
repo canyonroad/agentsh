@@ -1,5 +1,7 @@
 # Shell Shim + Interactive PTY Exec (Design)
 
+**Status:** Implemented
+
 ## Goal
 
 Provide a container-friendly way to force execution through `agentsh` even when a harness/LLM/tooling would otherwise invoke `/bin/bash` or `/bin/sh` directly, while preserving shell compatibility as closely as possible (arguments, `$0`/`argv[0]` identity, interactive job control).

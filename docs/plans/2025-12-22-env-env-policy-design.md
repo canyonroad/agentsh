@@ -1,5 +1,7 @@
 # Env Env-Policy Design
 
+**Status:** Implemented
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Harden environment variable handling for agent-executed commands by combining a global env policy with per-rule overrides, limiting exposed keys, blocking enumeration, and auditing access—all without kernel modules and with minimal perf impact.

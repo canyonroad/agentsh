@@ -1,5 +1,7 @@
 # User-Local Configuration Design
 
+**Status:** Implemented
+
 ## Overview
 
 Enable agentsh to search for configuration in user-local directories before falling back to system-wide locations. This allows non-root users to run agentsh with their own configuration, policies, and data storage.

@@ -1,5 +1,7 @@
 # Linux Package Managers Design
 
+**Status:** Implemented
+
 ## Overview
 
 Add Linux packaging for deb (Debian/Ubuntu), rpm (Fedora/RHEL), and Arch Linux using nFPM for simplified cross-format builds. CI builds packages on release tags.

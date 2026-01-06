@@ -1,5 +1,7 @@
 # eBPF Connect Enforcement Implementation Plan
 
+**Status:** Implemented
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Add optional eBPF-based enforcement for outbound TCP connects using a per-session allowlist populated by the existing policy engine; deny in BPF on connect if not allowed, with graceful fallback to user-space policy.

@@ -1,5 +1,7 @@
 # eBPF Network Tracing Implementation Plan
 
+**Status:** Implemented
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Add optional cgroup-based eBPF network tracing for agentsh sessions to observe outbound connects (and optionally UDP) without requiring a proxy, with clear fallback when unsupported.
