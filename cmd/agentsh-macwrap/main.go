@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin && cgo
 
 // agentsh-macwrap: applies macOS sandbox profile with XPC restrictions,
 // then execs the target command.
