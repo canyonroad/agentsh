@@ -86,3 +86,60 @@ func TestMCPToolsTableExists(t *testing.T) {
 		t.Errorf("mcp_tools table should exist: %v", err)
 	}
 }
+
+func TestUpsertMCPTool(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer st.Close()
+
+	tool := MCPTool{
+		ServerID:    "filesystem",
+		ToolName:    "read_file",
+		ToolHash:    "abc123",
+		Description: "Reads a file",
+	}
+
+	// Insert
+	err = st.UpsertMCPTool(context.Background(), tool)
+	if err != nil {
+		t.Fatalf("UpsertMCPTool failed: %v", err)
+	}
+
+	// Verify
+	tools, err := st.ListMCPTools(context.Background(), MCPToolFilter{})
+	if err != nil {
+		t.Fatalf("ListMCPTools failed: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+	if tools[0].ToolName != "read_file" {
+		t.Errorf("expected read_file, got %s", tools[0].ToolName)
+	}
+}
+
+func TestListMCPTools_FilterByServer(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer st.Close()
+
+	// Insert tools for different servers
+	st.UpsertMCPTool(context.Background(), MCPTool{ServerID: "fs", ToolName: "read", ToolHash: "a"})
+	st.UpsertMCPTool(context.Background(), MCPTool{ServerID: "fs", ToolName: "write", ToolHash: "b"})
+	st.UpsertMCPTool(context.Background(), MCPTool{ServerID: "db", ToolName: "query", ToolHash: "c"})
+
+	// Filter by server
+	tools, err := st.ListMCPTools(context.Background(), MCPToolFilter{ServerID: "fs"})
+	if err != nil {
+		t.Fatalf("ListMCPTools failed: %v", err)
+	}
+	if len(tools) != 2 {
+		t.Errorf("expected 2 tools for fs, got %d", len(tools))
+	}
+}

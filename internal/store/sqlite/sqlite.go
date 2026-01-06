@@ -18,6 +18,25 @@ type Store struct {
 	db *sql.DB
 }
 
+// MCPTool represents a registered MCP tool.
+type MCPTool struct {
+	ServerID       string
+	ToolName       string
+	ToolHash       string
+	Description    string
+	FirstSeen      time.Time
+	LastSeen       time.Time
+	Pinned         bool
+	DetectionCount int
+	MaxSeverity    string
+}
+
+// MCPToolFilter for querying tools.
+type MCPToolFilter struct {
+	ServerID      string
+	HasDetections bool
+}
+
 func Open(path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("sqlite path is empty")
@@ -290,6 +309,85 @@ func (s *Store) ReadOutputChunk(ctx context.Context, commandID string, stream st
 		end = int64(len(data))
 	}
 	return data[offset:end], total, truncatedInt != 0, nil
+}
+
+// UpsertMCPTool inserts or updates an MCP tool.
+func (s *Store) UpsertMCPTool(ctx context.Context, tool MCPTool) error {
+	if tool.FirstSeen.IsZero() {
+		tool.FirstSeen = time.Now().UTC()
+	}
+	if tool.LastSeen.IsZero() {
+		tool.LastSeen = time.Now().UTC()
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO mcp_tools (server_id, tool_name, tool_hash, description, first_seen_ns, last_seen_ns, pinned, detection_count, max_severity)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(server_id, tool_name) DO UPDATE SET
+			tool_hash = excluded.tool_hash,
+			description = excluded.description,
+			last_seen_ns = excluded.last_seen_ns,
+			detection_count = excluded.detection_count,
+			max_severity = excluded.max_severity
+	`,
+		tool.ServerID,
+		tool.ToolName,
+		tool.ToolHash,
+		nullable(tool.Description),
+		tool.FirstSeen.UnixNano(),
+		tool.LastSeen.UnixNano(),
+		boolToInt(tool.Pinned),
+		tool.DetectionCount,
+		nullable(tool.MaxSeverity),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert mcp tool: %w", err)
+	}
+	return nil
+}
+
+// ListMCPTools returns tools matching the filter.
+func (s *Store) ListMCPTools(ctx context.Context, filter MCPToolFilter) ([]MCPTool, error) {
+	where := []string{"1=1"}
+	var args []any
+
+	if filter.ServerID != "" {
+		where = append(where, "server_id = ?")
+		args = append(args, filter.ServerID)
+	}
+	if filter.HasDetections {
+		where = append(where, "detection_count > 0")
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT server_id, tool_name, tool_hash, description, first_seen_ns, last_seen_ns, pinned, detection_count, max_severity
+		 FROM mcp_tools WHERE `+strings.Join(where, " AND ")+` ORDER BY server_id, tool_name`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query mcp tools: %w", err)
+	}
+	defer rows.Close()
+
+	var tools []MCPTool
+	for rows.Next() {
+		var t MCPTool
+		var desc sql.NullString
+		var severity sql.NullString
+		var firstNs, lastNs int64
+		var pinned int
+
+		if err := rows.Scan(&t.ServerID, &t.ToolName, &t.ToolHash, &desc, &firstNs, &lastNs, &pinned, &t.DetectionCount, &severity); err != nil {
+			return nil, fmt.Errorf("scan mcp tool: %w", err)
+		}
+		t.Description = desc.String
+		t.MaxSeverity = severity.String
+		t.FirstSeen = time.Unix(0, firstNs)
+		t.LastSeen = time.Unix(0, lastNs)
+		t.Pinned = pinned != 0
+		tools = append(tools, t)
+	}
+	return tools, rows.Err()
 }
 
 func nullable(s string) any {
