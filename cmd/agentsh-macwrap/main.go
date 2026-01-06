@@ -11,6 +11,12 @@ package main
 #cgo LDFLAGS: -framework Foundation
 #include <sandbox.h>
 #include <stdlib.h>
+#include <stdint.h>
+
+// sandbox_init_with_parameters is a private API not declared in public headers.
+// It applies a custom SBPL profile string to the current process.
+extern int sandbox_init_with_parameters(const char *profile, uint64_t flags,
+    const char *const parameters[], char **errorbuf);
 
 int apply_sandbox(const char *profile, char **errorbuf) {
     return sandbox_init_with_parameters(profile, 0, NULL, errorbuf);
