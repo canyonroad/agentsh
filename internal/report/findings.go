@@ -34,10 +34,29 @@ func detectFindings(events []types.Event) []Finding {
 	var failedCmdEvents []string
 	var directIPEvents []string
 	var unusualPortEvents []string
+	var mcpHighRiskEvents []string
+	var mcpChangedEvents []string
+	var mcpDetectionEvents []string
 
 	uniqueHosts := make(map[string]bool)
 
 	for _, ev := range events {
+		// MCP tool security events (don't require Policy)
+		switch ev.Type {
+		case "mcp_tool_seen":
+			maxSeverity := stringField(ev.Fields, "max_severity")
+			if maxSeverity == "critical" || maxSeverity == "high" {
+				mcpHighRiskEvents = append(mcpHighRiskEvents, ev.ID)
+			}
+			if detections, ok := ev.Fields["detections"].([]any); ok && len(detections) > 0 {
+				mcpDetectionEvents = append(mcpDetectionEvents, ev.ID)
+			}
+		case "mcp_tool_changed":
+			mcpChangedEvents = append(mcpChangedEvents, ev.ID)
+		case "mcp_detection":
+			mcpDetectionEvents = append(mcpDetectionEvents, ev.ID)
+		}
+
 		if ev.Policy == nil {
 			continue
 		}
@@ -210,5 +229,50 @@ func detectFindings(events []types.Event) []Finding {
 		})
 	}
 
+	// MCP tool security findings
+	if len(mcpChangedEvents) > 0 {
+		findings = append(findings, Finding{
+			Severity:    SeverityCritical,
+			Category:    "mcp_rug_pull",
+			Title:       "MCP tool changes detected",
+			Description: "MCP tool definitions changed after initial registration (potential rug pull attack)",
+			Count:       len(mcpChangedEvents),
+			Events:      mcpChangedEvents,
+		})
+	}
+
+	if len(mcpHighRiskEvents) > 0 {
+		findings = append(findings, Finding{
+			Severity:    SeverityCritical,
+			Category:    "mcp_high_risk",
+			Title:       "High-risk MCP tools",
+			Description: "MCP tools with critical or high severity security detections",
+			Count:       len(mcpHighRiskEvents),
+			Events:      mcpHighRiskEvents,
+		})
+	}
+
+	if len(mcpDetectionEvents) > 0 {
+		findings = append(findings, Finding{
+			Severity:    SeverityWarning,
+			Category:    "mcp_detection",
+			Title:       "MCP security detections",
+			Description: "Security patterns detected in MCP tool definitions",
+			Count:       len(mcpDetectionEvents),
+			Events:      mcpDetectionEvents,
+		})
+	}
+
 	return findings
+}
+
+// stringField extracts a string value from event Fields.
+func stringField(fields map[string]any, key string) string {
+	if fields == nil {
+		return ""
+	}
+	if v, ok := fields[key].(string); ok {
+		return v
+	}
+	return ""
 }

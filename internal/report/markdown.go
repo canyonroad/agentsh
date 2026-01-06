@@ -114,6 +114,47 @@ func FormatMarkdown(r *Report) string {
 		sb.WriteString("\n")
 	}
 
+	// MCP Tools section (for both summary and detailed reports)
+	if r.MCPSummary != nil && r.MCPSummary.ToolsSeen > 0 {
+		sb.WriteString("## MCP Tools\n")
+		sb.WriteString("| Metric | Value |\n")
+		sb.WriteString("|--------|-------|\n")
+		sb.WriteString(fmt.Sprintf("| Tools Seen | %d |\n", r.MCPSummary.ToolsSeen))
+		sb.WriteString(fmt.Sprintf("| Servers | %d |\n", r.MCPSummary.ServersCount))
+		if r.MCPSummary.DetectionsTotal > 0 {
+			sb.WriteString(fmt.Sprintf("| Security Detections | %d |\n", r.MCPSummary.DetectionsTotal))
+		}
+		if r.MCPSummary.ChangedTools > 0 {
+			sb.WriteString(fmt.Sprintf("| Changed Tools (Rug Pull) | %d |\n", r.MCPSummary.ChangedTools))
+		}
+		sb.WriteString("\n")
+
+		// High risk tools
+		if len(r.MCPSummary.HighRiskTools) > 0 {
+			sb.WriteString("### High Risk Tools\n")
+			sb.WriteString("| Server | Tool | Severity | Detections |\n")
+			sb.WriteString("|--------|------|----------|------------|\n")
+			for _, tool := range r.MCPSummary.HighRiskTools {
+				sb.WriteString(fmt.Sprintf("| %s | %s | %s | %d |\n",
+					tool.ServerID, tool.ToolName, tool.MaxSeverity, tool.Detections))
+			}
+			sb.WriteString("\n")
+		}
+
+		// Severity breakdown
+		if len(r.MCPSummary.BySeverity) > 0 {
+			sb.WriteString("### Detection Severity\n")
+			sb.WriteString("| Severity | Count |\n")
+			sb.WriteString("|----------|-------|\n")
+			for _, sev := range []string{"critical", "high", "medium", "low"} {
+				if count, ok := r.MCPSummary.BySeverity[sev]; ok && count > 0 {
+					sb.WriteString(fmt.Sprintf("| %s | %d |\n", sev, count))
+				}
+			}
+			sb.WriteString("\n")
+		}
+	}
+
 	// Detailed sections
 	if r.Level == LevelDetailed {
 		// Blocked Operations

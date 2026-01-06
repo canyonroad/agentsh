@@ -81,6 +81,9 @@ func (g *Generator) Generate(ctx context.Context, sess types.Session, level Leve
 		}
 	}
 
+	// Extract MCP tool summary from events
+	report.MCPSummary = extractMCPSummary(events)
+
 	return report, nil
 }
 
@@ -287,4 +290,86 @@ func buildFullHostMap(events []types.Event) map[string]int {
 		}
 	}
 	return m
+}
+
+// extractMCPSummary extracts MCP tool inspection statistics from events.
+func extractMCPSummary(events []types.Event) *MCPToolSummary {
+	toolsByServer := make(map[string]int)
+	bySeverity := make(map[string]int)
+	seenTools := make(map[string]bool) // key: server_id:tool_name
+	var highRiskTools []MCPToolRisk
+	var changedTools int
+	var totalDetections int
+
+	for _, ev := range events {
+		switch ev.Type {
+		case "mcp_tool_seen":
+			serverID := stringFromFields(ev.Fields, "server_id")
+			toolName := stringFromFields(ev.Fields, "tool_name")
+			if serverID != "" && toolName != "" {
+				key := serverID + ":" + toolName
+				if !seenTools[key] {
+					seenTools[key] = true
+					toolsByServer[serverID]++
+				}
+			}
+
+			// Count detections
+			if detections, ok := ev.Fields["detections"].([]any); ok && len(detections) > 0 {
+				totalDetections += len(detections)
+				maxSeverity := stringFromFields(ev.Fields, "max_severity")
+				if maxSeverity != "" {
+					bySeverity[maxSeverity]++
+				}
+				// Track high risk tools
+				if maxSeverity == "critical" || maxSeverity == "high" {
+					highRiskTools = append(highRiskTools, MCPToolRisk{
+						ServerID:    serverID,
+						ToolName:    toolName,
+						MaxSeverity: maxSeverity,
+						Detections:  len(detections),
+					})
+				}
+			}
+
+		case "mcp_tool_changed":
+			changedTools++
+			// Also count as detection since it's a potential rug pull
+			totalDetections++
+			bySeverity["high"]++
+
+		case "mcp_detection":
+			totalDetections++
+			severity := stringFromFields(ev.Fields, "severity")
+			if severity != "" {
+				bySeverity[severity]++
+			}
+		}
+	}
+
+	// Return nil if no MCP events found
+	if len(seenTools) == 0 && totalDetections == 0 {
+		return nil
+	}
+
+	return &MCPToolSummary{
+		ToolsSeen:       len(seenTools),
+		ServersCount:    len(toolsByServer),
+		DetectionsTotal: totalDetections,
+		ChangedTools:    changedTools,
+		ToolsByServer:   toolsByServer,
+		BySeverity:      bySeverity,
+		HighRiskTools:   highRiskTools,
+	}
+}
+
+// stringFromFields extracts a string value from event Fields.
+func stringFromFields(fields map[string]any, key string) string {
+	if fields == nil {
+		return ""
+	}
+	if v, ok := fields[key].(string); ok {
+		return v
+	}
+	return ""
 }

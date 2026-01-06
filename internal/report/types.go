@@ -115,6 +115,9 @@ type Report struct {
 
 	// DLP Events (only populated when llm-requests.jsonl has DLP data)
 	DLPEvents *DLPEventStats `json:"dlp_events,omitempty"`
+
+	// MCP Tools (only populated when MCP events exist)
+	MCPSummary *MCPToolSummary `json:"mcp_summary,omitempty"`
 }
 
 // LLMUsageStats contains aggregated LLM usage statistics.
@@ -152,4 +155,23 @@ type DLPEventStats struct {
 type RedactionCount struct {
 	Type  string `json:"type"`
 	Count int    `json:"count"`
+}
+
+// MCPToolSummary contains aggregated MCP tool inspection statistics.
+type MCPToolSummary struct {
+	ToolsSeen        int            `json:"tools_seen"`
+	ServersCount     int            `json:"servers_count"`
+	DetectionsTotal  int            `json:"detections_total"`
+	ChangedTools     int            `json:"changed_tools"` // Rug pull detections
+	ToolsByServer    map[string]int `json:"tools_by_server,omitempty"`
+	BySeverity       map[string]int `json:"by_severity,omitempty"` // critical, high, medium, low
+	HighRiskTools    []MCPToolRisk  `json:"high_risk_tools,omitempty"`
+}
+
+// MCPToolRisk represents a tool with security detections.
+type MCPToolRisk struct {
+	ServerID    string `json:"server_id"`
+	ToolName    string `json:"tool_name"`
+	MaxSeverity string `json:"max_severity"`
+	Detections  int    `json:"detections"`
 }
