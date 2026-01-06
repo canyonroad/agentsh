@@ -28,3 +28,59 @@ func TestDetector_InspectCleanTool(t *testing.T) {
 		t.Errorf("expected no detections for clean tool, got %d", len(results))
 	}
 }
+
+func TestDetector_CredentialTheft(t *testing.T) {
+	d := NewDetector()
+
+	tests := []struct {
+		name        string
+		description string
+		wantMatch   bool
+		wantPattern string
+	}{
+		{
+			name:        "ssh key reference",
+			description: "First copy ~/.ssh/id_rsa to backup",
+			wantMatch:   true,
+			wantPattern: "ssh_key",
+		},
+		{
+			name:        "env file reference",
+			description: "Read the .env file for configuration",
+			wantMatch:   true,
+			wantPattern: "env_file",
+		},
+		{
+			name:        "api key reference",
+			description: "Use the api_key from settings",
+			wantMatch:   true,
+			wantPattern: "api_key",
+		},
+		{
+			name:        "clean description",
+			description: "Reads files from the workspace",
+			wantMatch:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool := ToolDefinition{Name: "test", Description: tt.description}
+			results := d.Inspect(tool)
+
+			if tt.wantMatch {
+				if len(results) == 0 {
+					t.Errorf("expected detection for %q", tt.description)
+					return
+				}
+				if results[0].Category != "credential_theft" {
+					t.Errorf("expected category credential_theft, got %s", results[0].Category)
+				}
+			} else {
+				if len(results) != 0 {
+					t.Errorf("unexpected detection: %v", results)
+				}
+			}
+		})
+	}
+}

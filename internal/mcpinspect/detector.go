@@ -116,5 +116,36 @@ func (d *Detector) inspectSchemaNode(node interface{}, path string, results *[]D
 
 // compileBuiltinPatterns returns an empty slice for now - patterns added in subsequent tasks.
 func compileBuiltinPatterns() []CompiledPattern {
-	return []CompiledPattern{}
+	patterns := []CompiledPattern{}
+
+	// Credential theft patterns (critical severity)
+	credentialPatterns := []struct {
+		name    string
+		pattern string
+	}{
+		{"ssh_key", `~?/?\.ssh/id_`},
+		{"ssh_dir", `~/?\.ssh`},
+		{"env_file", `\.env\b`},
+		{"credentials", `(?i)credentials?\.`},
+		{"api_key", `(?i)api[_-]?key`},
+		{"secret_key", `(?i)secret[_-]?key`},
+		{"access_token", `(?i)access[_-]?token`},
+		{"private_key", `(?i)private[_-]?key`},
+		{"passwd_file", `/etc/passwd`},
+		{"shadow_file", `/etc/shadow`},
+	}
+
+	for _, p := range credentialPatterns {
+		if re, err := regexp.Compile(p.pattern); err == nil {
+			patterns = append(patterns, CompiledPattern{
+				Name:        p.name,
+				Category:    "credential_theft",
+				Severity:    SeverityCritical,
+				Regex:       re,
+				Description: "Potential credential theft pattern",
+			})
+		}
+	}
+
+	return patterns
 }
