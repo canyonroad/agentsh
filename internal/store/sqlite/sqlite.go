@@ -37,6 +37,14 @@ type MCPToolFilter struct {
 	HasDetections bool
 }
 
+// MCPServerSummary aggregates tool info per server.
+type MCPServerSummary struct {
+	ServerID       string
+	ToolCount      int
+	LastSeen       time.Time
+	DetectionCount int
+}
+
 func Open(path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("sqlite path is empty")
@@ -388,6 +396,32 @@ func (s *Store) ListMCPTools(ctx context.Context, filter MCPToolFilter) ([]MCPTo
 		tools = append(tools, t)
 	}
 	return tools, rows.Err()
+}
+
+// ListMCPServers returns summary of all MCP servers.
+func (s *Store) ListMCPServers(ctx context.Context) ([]MCPServerSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT server_id, COUNT(*) as tool_count, MAX(last_seen_ns) as last_seen, SUM(detection_count) as detections
+		FROM mcp_tools
+		GROUP BY server_id
+		ORDER BY server_id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query mcp servers: %w", err)
+	}
+	defer rows.Close()
+
+	var servers []MCPServerSummary
+	for rows.Next() {
+		var srv MCPServerSummary
+		var lastNs int64
+		if err := rows.Scan(&srv.ServerID, &srv.ToolCount, &lastNs, &srv.DetectionCount); err != nil {
+			return nil, fmt.Errorf("scan mcp server: %w", err)
+		}
+		srv.LastSeen = time.Unix(0, lastNs)
+		servers = append(servers, srv)
+	}
+	return servers, rows.Err()
 }
 
 func nullable(s string) any {

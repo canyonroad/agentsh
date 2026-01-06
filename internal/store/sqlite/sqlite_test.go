@@ -143,3 +143,40 @@ func TestListMCPTools_FilterByServer(t *testing.T) {
 		t.Errorf("expected 2 tools for fs, got %d", len(tools))
 	}
 }
+
+func TestListMCPServers(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer st.Close()
+
+	// Insert tools
+	st.UpsertMCPTool(context.Background(), MCPTool{ServerID: "fs", ToolName: "read", ToolHash: "a"})
+	st.UpsertMCPTool(context.Background(), MCPTool{ServerID: "fs", ToolName: "write", ToolHash: "b"})
+	st.UpsertMCPTool(context.Background(), MCPTool{ServerID: "db", ToolName: "query", ToolHash: "c", DetectionCount: 2, MaxSeverity: "high"})
+
+	servers, err := st.ListMCPServers(context.Background())
+	if err != nil {
+		t.Fatalf("ListMCPServers failed: %v", err)
+	}
+	if len(servers) != 2 {
+		t.Fatalf("expected 2 servers, got %d", len(servers))
+	}
+
+	// Find fs server
+	var fs *MCPServerSummary
+	for i := range servers {
+		if servers[i].ServerID == "fs" {
+			fs = &servers[i]
+			break
+		}
+	}
+	if fs == nil {
+		t.Fatal("fs server not found")
+	}
+	if fs.ToolCount != 2 {
+		t.Errorf("fs tool count = %d, want 2", fs.ToolCount)
+	}
+}
