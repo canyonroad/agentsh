@@ -172,5 +172,31 @@ func compileBuiltinPatterns() []CompiledPattern {
 		}
 	}
 
+	// Hidden instructions patterns (high severity)
+	hiddenPatterns := []struct {
+		name    string
+		pattern string
+	}{
+		// Match IMPORTANT: followed by action verbs that suggest command injection
+		{"important_suspicious", `(?i)IMPORTANT:\s*(before|first|always|never|must|do|copy|send|upload|download|execute|run|delete|remove)`},
+		{"hidden_directive", `(?i)HIDDEN:`},
+		{"secret_directive", `(?i)SECRET:`},
+		{"do_not_show", `(?i)DO\s+NOT\s+SHOW`},
+		{"ignore_previous", `(?i)IGNORE\s+PREVIOUS`},
+		{"system_override", `(?i)SYSTEM\s+OVERRIDE`},
+	}
+
+	for _, p := range hiddenPatterns {
+		if re, err := regexp.Compile(p.pattern); err == nil {
+			patterns = append(patterns, CompiledPattern{
+				Name:        p.name,
+				Category:    "hidden_instructions",
+				Severity:    SeverityHigh,
+				Regex:       re,
+				Description: "Potential hidden instruction injection",
+			})
+		}
+	}
+
 	return patterns
 }
