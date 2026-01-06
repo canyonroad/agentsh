@@ -47,6 +47,9 @@ type Manager struct {
 	// prompt is factored for testability; defaults to promptTTY.
 	prompt func(ctx context.Context, req Request) (Resolution, error)
 
+	// totpSecretLookup retrieves the TOTP secret for a session (TOTP mode only)
+	totpSecretLookup func(sessionID string) string
+
 	mu      sync.Mutex
 	pending map[string]*pending
 
@@ -78,8 +81,19 @@ func New(mode string, timeout time.Duration, emit Emitter) *Manager {
 		sessionCounts: make(map[string]int),
 		maxPerSession: 10, // Default: max 10 concurrent approvals per session
 	}
-	m.prompt = m.promptTTY
+	switch mode {
+	case "totp":
+		m.prompt = m.promptTOTP
+	default:
+		m.prompt = m.promptTTY
+	}
 	return m
+}
+
+// SetTOTPSecretLookup sets the callback for retrieving TOTP secrets by session ID.
+// Required when using TOTP approval mode.
+func (m *Manager) SetTOTPSecretLookup(lookup func(sessionID string) string) {
+	m.totpSecretLookup = lookup
 }
 
 func (m *Manager) ListPending() []Request {
