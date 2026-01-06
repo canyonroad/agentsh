@@ -21,6 +21,7 @@ type Inspector struct {
 	sessionID string
 	serverID  string
 	registry  *Registry
+	detector  *Detector
 	emitEvent EventEmitter
 }
 
@@ -30,6 +31,18 @@ func NewInspector(sessionID, serverID string, emitter EventEmitter) *Inspector {
 		sessionID: sessionID,
 		serverID:  serverID,
 		registry:  NewRegistry(true), // pin on first use
+		detector:  nil,
+		emitEvent: emitter,
+	}
+}
+
+// NewInspectorWithDetection creates a new MCP inspector with pattern detection enabled.
+func NewInspectorWithDetection(sessionID, serverID string, emitter EventEmitter) *Inspector {
+	return &Inspector{
+		sessionID: sessionID,
+		serverID:  serverID,
+		registry:  NewRegistry(true),
+		detector:  NewDetector(),
 		emitEvent: emitter,
 	}
 }
@@ -60,6 +73,16 @@ func (i *Inspector) handleToolsListResponse(data []byte) error {
 	for _, tool := range resp.Result.Tools {
 		result := i.registry.Register(i.serverID, tool)
 
+		// Run detection if detector is configured
+		var detections []DetectionResult
+		var maxSeverity string
+		if i.detector != nil {
+			detections = i.detector.Inspect(tool)
+			if len(detections) > 0 {
+				maxSeverity = detections[0].Severity.String()
+			}
+		}
+
 		switch result.Status {
 		case StatusNew:
 			event := MCPToolSeenEvent{
@@ -72,12 +95,13 @@ func (i *Inspector) handleToolsListResponse(data []byte) error {
 				ToolHash:    result.Tool.Hash,
 				Description: tool.Description,
 				Status:      result.Status.String(),
+				Detections:  detections,
+				MaxSeverity: maxSeverity,
 			}
 			i.emitEvent(event)
 
 		case StatusChanged:
 			changes := computeChanges(result.PreviousDefinition, tool)
-
 			event := MCPToolChangedEvent{
 				Type:         "mcp_tool_changed",
 				Timestamp:    now,
@@ -87,6 +111,7 @@ func (i *Inspector) handleToolsListResponse(data []byte) error {
 				PreviousHash: result.PreviousHash,
 				NewHash:      result.NewHash,
 				Changes:      changes,
+				Detections:   detections,
 			}
 			i.emitEvent(event)
 		}
