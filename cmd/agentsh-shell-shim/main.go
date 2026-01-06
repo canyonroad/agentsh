@@ -68,6 +68,21 @@ func main() {
 	execOrExit(agentshBin, args, os.Environ())
 }
 
+// isMCPCommand checks if the command being executed is an MCP server.
+func isMCPCommand(argv0 string, args []string) bool {
+	// Extract command from shell -c "command"
+	if len(args) >= 2 && args[0] == "-c" {
+		// Parse the command string
+		cmdParts := strings.Fields(args[1])
+		if len(cmdParts) > 0 {
+			return shim.IsMCPServer(cmdParts[0], cmdParts[1:], nil)
+		}
+	}
+
+	// Direct command execution
+	return shim.IsMCPServer(argv0, args, nil)
+}
+
 func resolveAgentshBin() (string, error) {
 	if v := strings.TrimSpace(os.Getenv("AGENTSH_BIN")); v != "" {
 		return exec.LookPath(v)
