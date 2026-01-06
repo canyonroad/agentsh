@@ -198,5 +198,52 @@ func compileBuiltinPatterns() []CompiledPattern {
 		}
 	}
 
+	// Shell injection patterns (medium severity)
+	shellPatterns := []struct {
+		name    string
+		pattern string
+	}{
+		{"semicolon_cmd", `;\s*[a-zA-Z]`},
+		{"pipe_cmd", `\|\s*[a-zA-Z]`},
+		{"and_cmd", `&&\s*[a-zA-Z]`},
+		{"cmd_substitution", `\$\(`},
+		{"backtick_exec", "`[^`]+`"},
+	}
+
+	for _, p := range shellPatterns {
+		if re, err := regexp.Compile(p.pattern); err == nil {
+			patterns = append(patterns, CompiledPattern{
+				Name:        p.name,
+				Category:    "shell_injection",
+				Severity:    SeverityMedium,
+				Regex:       re,
+				Description: "Potential shell injection pattern",
+			})
+		}
+	}
+
+	// Path traversal patterns (medium severity)
+	pathPatterns := []struct {
+		name    string
+		pattern string
+	}{
+		{"dot_dot_traversal", `\.\.\/\.\.`},
+		{"etc_dir", `/etc/`},
+		{"root_dir", `/root/`},
+		{"home_hidden", `/home/[^/]+/\.`},
+	}
+
+	for _, p := range pathPatterns {
+		if re, err := regexp.Compile(p.pattern); err == nil {
+			patterns = append(patterns, CompiledPattern{
+				Name:        p.name,
+				Category:    "path_traversal",
+				Severity:    SeverityMedium,
+				Regex:       re,
+				Description: "Potential path traversal pattern",
+			})
+		}
+	}
+
 	return patterns
 }

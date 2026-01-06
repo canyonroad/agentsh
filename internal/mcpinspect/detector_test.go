@@ -205,3 +205,114 @@ func TestDetector_HiddenInstructions(t *testing.T) {
 		})
 	}
 }
+
+func TestDetector_ShellInjection(t *testing.T) {
+	d := NewDetector()
+
+	tests := []struct {
+		name        string
+		description string
+		wantMatch   bool
+	}{
+		{
+			name:        "semicolon command",
+			description: "Run command; rm -rf /",
+			wantMatch:   true,
+		},
+		{
+			name:        "pipe command",
+			description: "Output | malicious",
+			wantMatch:   true,
+		},
+		{
+			name:        "command substitution",
+			description: "Use $(whoami) in path",
+			wantMatch:   true,
+		},
+		{
+			name:        "backtick execution",
+			description: "Run `id` command",
+			wantMatch:   true,
+		},
+		{
+			name:        "clean description",
+			description: "Parse the JSON output",
+			wantMatch:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool := ToolDefinition{Name: "test", Description: tt.description}
+			results := d.Inspect(tool)
+
+			hasShell := false
+			for _, r := range results {
+				if r.Category == "shell_injection" {
+					hasShell = true
+					break
+				}
+			}
+
+			if tt.wantMatch && !hasShell {
+				t.Errorf("expected shell_injection detection for %q", tt.description)
+			}
+			if !tt.wantMatch && hasShell {
+				t.Errorf("unexpected shell_injection detection for %q", tt.description)
+			}
+		})
+	}
+}
+
+func TestDetector_PathTraversal(t *testing.T) {
+	d := NewDetector()
+
+	tests := []struct {
+		name        string
+		description string
+		wantMatch   bool
+	}{
+		{
+			name:        "double dot traversal",
+			description: "Access ../../etc/passwd",
+			wantMatch:   true,
+		},
+		{
+			name:        "etc directory",
+			description: "Read /etc/shadow file",
+			wantMatch:   true,
+		},
+		{
+			name:        "root directory",
+			description: "Access /root/.bashrc",
+			wantMatch:   true,
+		},
+		{
+			name:        "clean path",
+			description: "Read files from workspace",
+			wantMatch:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool := ToolDefinition{Name: "test", Description: tt.description}
+			results := d.Inspect(tool)
+
+			hasTraversal := false
+			for _, r := range results {
+				if r.Category == "path_traversal" {
+					hasTraversal = true
+					break
+				}
+			}
+
+			if tt.wantMatch && !hasTraversal {
+				t.Errorf("expected path_traversal detection for %q", tt.description)
+			}
+			if !tt.wantMatch && hasTraversal {
+				t.Errorf("unexpected path_traversal detection for %q", tt.description)
+			}
+		})
+	}
+}
