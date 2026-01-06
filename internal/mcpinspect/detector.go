@@ -147,5 +147,30 @@ func compileBuiltinPatterns() []CompiledPattern {
 		}
 	}
 
+	// Exfiltration patterns (high severity)
+	exfilPatterns := []struct {
+		name    string
+		pattern string
+	}{
+		{"curl_upload", `curl\s+.*https?://`},
+		{"wget", `wget\s+`},
+		{"netcat", `\bnc\s+-`},
+		{"netcat_full", `netcat`},
+		{"base64_curl", `base64.*\|.*curl`},
+		{"pipe_curl", `\|\s*curl`},
+	}
+
+	for _, p := range exfilPatterns {
+		if re, err := regexp.Compile(p.pattern); err == nil {
+			patterns = append(patterns, CompiledPattern{
+				Name:        p.name,
+				Category:    "exfiltration",
+				Severity:    SeverityHigh,
+				Regex:       re,
+				Description: "Potential data exfiltration pattern",
+			})
+		}
+	}
+
 	return patterns
 }

