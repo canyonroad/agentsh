@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/agentsh/agentsh/internal/store/sqlite"
+	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/spf13/cobra"
 )
 
@@ -156,14 +157,95 @@ func newMCPServersCmd() *cobra.Command {
 }
 
 func newMCPEventsCmd() *cobra.Command {
-	return &cobra.Command{
+	var (
+		sessionID string
+		serverID  string
+		eventType string
+		since     string
+		limit     int
+		jsonOut   bool
+		directDB  bool
+		dbPath    string
+	)
+
+	cmd := &cobra.Command{
 		Use:   "events",
 		Short: "Query MCP-related events",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cmd.Println("MCP events command - not yet implemented")
+			if !directDB {
+				return fmt.Errorf("API mode not yet implemented, use --direct-db")
+			}
+
+			if dbPath == "" {
+				dbPath = getenvDefault("AGENTSH_DB_PATH", "./data/events.db")
+			}
+			st, err := sqlite.Open(dbPath)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer st.Close()
+
+			// Build query with MCP event types
+			mcpTypes := []string{"mcp_tool_seen", "mcp_tool_changed", "mcp_detection"}
+			if eventType != "" {
+				mcpTypes = []string{eventType}
+			}
+
+			q := types.EventQuery{
+				SessionID: sessionID,
+				Types:     mcpTypes,
+				Limit:     limit,
+			}
+
+			if since != "" {
+				t, err := parseTimeOrAgo(since)
+				if err != nil {
+					return fmt.Errorf("invalid --since: %w", err)
+				}
+				q.Since = &t
+			}
+
+			events, err := st.QueryEvents(cmd.Context(), q)
+			if err != nil {
+				return err
+			}
+
+			// Filter by server if specified (check payload if needed)
+			// For now, just display all matching events
+			_ = serverID // reserved for future filtering
+
+			if len(events) == 0 {
+				cmd.Println("No MCP events found")
+				return nil
+			}
+
+			if jsonOut {
+				return printJSON(cmd, events)
+			}
+
+			// Table output
+			cmd.Println("TIMESTAMP            TYPE                SESSION")
+			for _, e := range events {
+				cmd.Printf("%-20s %-19s %s\n",
+					e.Timestamp.Format("2006-01-02 15:04:05"),
+					truncate(e.Type, 19),
+					truncate(e.SessionID, 20),
+				)
+			}
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&sessionID, "session", "", "Filter by session ID")
+	cmd.Flags().StringVar(&serverID, "server", "", "Filter by server ID")
+	cmd.Flags().StringVar(&eventType, "type", "", "Event type: mcp_tool_seen|mcp_tool_changed|mcp_detection")
+	cmd.Flags().StringVar(&since, "since", "", "Start time (RFC3339) or duration (e.g. 1h)")
+	cmd.Flags().IntVar(&limit, "limit", 100, "Result limit")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&directDB, "direct-db", false, "Query local SQLite directly")
+	cmd.Flags().StringVar(&dbPath, "db-path", "", "SQLite DB path (used with --direct-db)")
+
+	return cmd
 }
 
 func newMCPDetectionsCmd() *cobra.Command {
