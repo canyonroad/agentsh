@@ -249,12 +249,86 @@ func newMCPEventsCmd() *cobra.Command {
 }
 
 func newMCPDetectionsCmd() *cobra.Command {
-	return &cobra.Command{
+	var (
+		severity string
+		serverID string
+		jsonOut  bool
+		directDB bool
+		dbPath   string
+	)
+
+	cmd := &cobra.Command{
 		Use:   "detections",
 		Short: "Show tools with security detections",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cmd.Println("MCP detections command - not yet implemented")
+			if !directDB {
+				return fmt.Errorf("API mode not yet implemented, use --direct-db")
+			}
+
+			if dbPath == "" {
+				dbPath = getenvDefault("AGENTSH_DB_PATH", "./data/events.db")
+			}
+			st, err := sqlite.Open(dbPath)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer st.Close()
+
+			filter := sqlite.MCPToolFilter{
+				ServerID:      serverID,
+				HasDetections: true,
+			}
+			tools, err := st.ListMCPTools(cmd.Context(), filter)
+			if err != nil {
+				return err
+			}
+
+			// Filter by severity if specified
+			if severity != "" {
+				var filtered []sqlite.MCPTool
+				for _, t := range tools {
+					if matchesSeverity(t.MaxSeverity, severity) {
+						filtered = append(filtered, t)
+					}
+				}
+				tools = filtered
+			}
+
+			if len(tools) == 0 {
+				cmd.Println("No tools with detections found")
+				return nil
+			}
+
+			if jsonOut {
+				return printJSON(cmd, tools)
+			}
+
+			cmd.Println("SERVER              TOOL                SEVERITY   DETECTIONS")
+			for _, t := range tools {
+				cmd.Printf("%-19s %-19s %-10s %d\n",
+					truncate(t.ServerID, 19),
+					truncate(t.ToolName, 19),
+					t.MaxSeverity,
+					t.DetectionCount,
+				)
+			}
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&severity, "severity", "", "Minimum severity: low|medium|high|critical")
+	cmd.Flags().StringVar(&serverID, "server", "", "Filter by server ID")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&directDB, "direct-db", false, "Query local SQLite directly")
+	cmd.Flags().StringVar(&dbPath, "db-path", "", "SQLite DB path (used with --direct-db)")
+
+	return cmd
+}
+
+// matchesSeverity returns true if toolSeverity >= minSeverity
+func matchesSeverity(toolSeverity, minSeverity string) bool {
+	levels := map[string]int{"low": 1, "medium": 2, "high": 3, "critical": 4}
+	toolLevel := levels[toolSeverity]
+	minLevel := levels[minSeverity]
+	return toolLevel >= minLevel
 }

@@ -112,3 +112,46 @@ func TestMCPEventsCmd_QueriesMCPEvents(t *testing.T) {
 		t.Errorf("expected output to contain mcp_tool_seen, got: %s", output)
 	}
 }
+
+func TestMCPDetectionsCmd_ShowsDetections(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Setup test data
+	st, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	st.UpsertMCPTool(context.Background(), sqlite.MCPTool{
+		ServerID:       "malicious-server",
+		ToolName:       "steal_data",
+		ToolHash:       "bad123",
+		DetectionCount: 3,
+		MaxSeverity:    "critical",
+	})
+	st.UpsertMCPTool(context.Background(), sqlite.MCPTool{
+		ServerID:       "good-server",
+		ToolName:       "read_file",
+		ToolHash:       "good456",
+		DetectionCount: 0,
+	})
+	st.Close()
+
+	cmd := NewRoot("test")
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"mcp", "detections", "--direct-db", "--db-path", dbPath})
+
+	err = cmd.Execute()
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	output := buf.String()
+	if !bytes.Contains([]byte(output), []byte("steal_data")) {
+		t.Errorf("expected output to contain steal_data, got: %s", output)
+	}
+	if bytes.Contains([]byte(output), []byte("read_file")) {
+		t.Errorf("expected output to NOT contain read_file (no detections), got: %s", output)
+	}
+}
