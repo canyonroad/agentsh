@@ -78,6 +78,21 @@ func (s *Store) migrate(ctx context.Context) error {
 			stderr_truncated INTEGER NOT NULL,
 			created_ts_unix_ns INTEGER NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS mcp_tools (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			server_id TEXT NOT NULL,
+			tool_name TEXT NOT NULL,
+			tool_hash TEXT NOT NULL,
+			description TEXT,
+			first_seen_ns INTEGER NOT NULL,
+			last_seen_ns INTEGER NOT NULL,
+			pinned INTEGER DEFAULT 1,
+			detection_count INTEGER DEFAULT 0,
+			max_severity TEXT,
+			UNIQUE(server_id, tool_name)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_tools_server ON mcp_tools(server_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_tools_severity ON mcp_tools(max_severity);`,
 	}
 
 	for _, stmt := range stmts {

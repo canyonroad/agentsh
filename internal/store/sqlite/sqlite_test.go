@@ -69,3 +69,20 @@ func TestSaveAndReadOutputChunk(t *testing.T) {
 		t.Fatal("expected error for missing output")
 	}
 }
+
+func TestMCPToolsTableExists(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer st.Close()
+
+	// Verify table exists by querying it
+	_, err = st.db.Exec("SELECT server_id, tool_name, tool_hash FROM mcp_tools LIMIT 1")
+	if err != nil {
+		t.Errorf("mcp_tools table should exist: %v", err)
+	}
+}
