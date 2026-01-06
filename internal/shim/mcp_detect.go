@@ -2,6 +2,8 @@
 package shim
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 )
@@ -78,4 +80,42 @@ func matchGlob(pattern, s string) bool {
 
 	// Check suffix
 	return strings.HasSuffix(s, parts[len(parts)-1])
+}
+
+// DeriveServerID extracts a meaningful server identifier from command and args.
+func DeriveServerID(cmd string, args []string) string {
+	cmdBase := filepath.Base(cmd)
+
+	// Check if command itself is an MCP server
+	if strings.HasPrefix(cmdBase, "mcp-server-") || strings.HasPrefix(cmdBase, "mcp_server_") {
+		return cmdBase
+	}
+	if strings.HasSuffix(cmdBase, "-mcp-server") || strings.HasSuffix(cmdBase, "_mcp_server") {
+		return cmdBase
+	}
+
+	// Check arguments for MCP package/module names
+	for i, arg := range args {
+		// @modelcontextprotocol/server-X -> server-X
+		if strings.HasPrefix(arg, "@modelcontextprotocol/") {
+			return strings.TrimPrefix(arg, "@modelcontextprotocol/")
+		}
+
+		// mcp-server-X or mcp_server_X in args
+		if strings.HasPrefix(arg, "mcp-server-") || strings.HasPrefix(arg, "mcp_server_") {
+			return arg
+		}
+
+		// python -m mcp_server_X
+		if (cmdBase == "python" || cmdBase == "python3") && i > 0 && args[i-1] == "-m" {
+			if strings.HasPrefix(arg, "mcp_server_") || strings.HasPrefix(arg, "mcp-server-") {
+				return arg
+			}
+		}
+	}
+
+	// Fallback: hash of full command
+	full := cmd + " " + strings.Join(args, " ")
+	hash := sha256.Sum256([]byte(full))
+	return "mcp-" + hex.EncodeToString(hash[:])[:8]
 }
