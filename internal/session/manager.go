@@ -58,6 +58,9 @@ type Session struct {
 	// Multi-mount support
 	Profile string          // Profile name if using multi-mount
 	Mounts  []ResolvedMount // Active mounts (empty if legacy single-mount)
+
+	// TOTP approval support
+	TOTPSecret string // Secret for TOTP-based approval
 }
 
 type Manager struct {
@@ -215,15 +218,16 @@ func (s *Session) Snapshot() types.Session {
 	}
 
 	return types.Session{
-		ID:        s.ID,
-		State:     s.State,
-		CreatedAt: s.CreatedAt,
-		Workspace: s.Workspace,
-		Policy:    s.Policy,
-		Profile:   s.Profile,
-		Mounts:    mounts,
-		Cwd:       s.Cwd,
-		ProxyURL:  s.proxyURL,
+		ID:         s.ID,
+		State:      s.State,
+		CreatedAt:  s.CreatedAt,
+		Workspace:  s.Workspace,
+		Policy:     s.Policy,
+		Profile:    s.Profile,
+		Mounts:     mounts,
+		Cwd:        s.Cwd,
+		ProxyURL:   s.proxyURL,
+		TOTPSecret: s.TOTPSecret,
 	}
 }
 
