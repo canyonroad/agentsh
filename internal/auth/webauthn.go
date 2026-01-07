@@ -4,10 +4,20 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
+
+// Default session TTL for WebAuthn ceremonies
+const defaultSessionTTL = 5 * time.Minute
+
+// sessionEntry wraps session data with expiration time
+type sessionEntry struct {
+	data      *webauthn.SessionData
+	expiresAt time.Time
+}
 
 // WebAuthnUser implements the webauthn.User interface.
 type WebAuthnUser struct {
@@ -49,10 +59,11 @@ func (u *WebAuthnUser) WebAuthnCredentials() []webauthn.Credential {
 
 // WebAuthnService handles WebAuthn registration and authentication ceremonies.
 type WebAuthnService struct {
-	wa       *webauthn.WebAuthn
-	store    *WebAuthnStore
-	mu       sync.RWMutex
-	sessions map[string]*webauthn.SessionData
+	wa         *webauthn.WebAuthn
+	store      *WebAuthnStore
+	mu         sync.RWMutex
+	sessions   map[string]*sessionEntry
+	sessionTTL time.Duration
 }
 
 // NewWebAuthnService creates a new WebAuthn service.
@@ -65,6 +76,9 @@ func NewWebAuthnService(rpID, rpName string, rpOrigins []string, userVerificatio
 	}
 	if len(rpOrigins) == 0 {
 		return nil, fmt.Errorf("at least one rpOrigin is required")
+	}
+	if store == nil {
+		return nil, fmt.Errorf("store is required")
 	}
 
 	// Map user verification string to protocol constant
@@ -95,9 +109,10 @@ func NewWebAuthnService(rpID, rpName string, rpOrigins []string, userVerificatio
 	}
 
 	return &WebAuthnService{
-		wa:       wa,
-		store:    store,
-		sessions: make(map[string]*webauthn.SessionData),
+		wa:         wa,
+		store:      store,
+		sessions:   make(map[string]*sessionEntry),
+		sessionTTL: defaultSessionTTL,
 	}, nil
 }
 
@@ -128,7 +143,11 @@ func (s *WebAuthnService) BeginRegistration(ctx context.Context, userID, userNam
 
 	// Store session data for verification
 	s.mu.Lock()
-	s.sessions[userID] = session
+	s.cleanupExpiredSessionsLocked()
+	s.sessions[userID] = &sessionEntry{
+		data:      session,
+		expiresAt: time.Now().Add(s.sessionTTL),
+	}
 	s.mu.Unlock()
 
 	return options, nil
@@ -145,7 +164,7 @@ func (s *WebAuthnService) FinishRegistration(ctx context.Context, userID, userNa
 
 	// Retrieve session data
 	s.mu.Lock()
-	session, ok := s.sessions[userID]
+	entry, ok := s.sessions[userID]
 	if ok {
 		delete(s.sessions, userID)
 	}
@@ -154,6 +173,13 @@ func (s *WebAuthnService) FinishRegistration(ctx context.Context, userID, userNa
 	if !ok {
 		return fmt.Errorf("no registration session found for user")
 	}
+
+	// Check if session has expired
+	if time.Now().After(entry.expiresAt) {
+		return fmt.Errorf("registration session has expired")
+	}
+
+	session := entry.data
 
 	// Get existing credentials
 	existingCreds, err := s.store.GetCredentials(ctx, userID)
@@ -201,7 +227,11 @@ func (s *WebAuthnService) BeginAuthentication(ctx context.Context, userID string
 
 	// Store session data for verification
 	s.mu.Lock()
-	s.sessions[userID] = session
+	s.cleanupExpiredSessionsLocked()
+	s.sessions[userID] = &sessionEntry{
+		data:      session,
+		expiresAt: time.Now().Add(s.sessionTTL),
+	}
 	s.mu.Unlock()
 
 	return options, nil
@@ -218,7 +248,7 @@ func (s *WebAuthnService) FinishAuthentication(ctx context.Context, userID strin
 
 	// Retrieve session data
 	s.mu.Lock()
-	session, ok := s.sessions[userID]
+	entry, ok := s.sessions[userID]
 	if ok {
 		delete(s.sessions, userID)
 	}
@@ -227,6 +257,13 @@ func (s *WebAuthnService) FinishAuthentication(ctx context.Context, userID strin
 	if !ok {
 		return fmt.Errorf("no authentication session found for user")
 	}
+
+	// Check if session has expired
+	if time.Now().After(entry.expiresAt) {
+		return fmt.Errorf("authentication session has expired")
+	}
+
+	session := entry.data
 
 	// Get user's credentials
 	credentials, err := s.store.GetCredentials(ctx, userID)
@@ -261,4 +298,15 @@ func (s *WebAuthnService) HasCredentials(ctx context.Context, userID string) (bo
 	}
 
 	return len(credentials) > 0, nil
+}
+
+// cleanupExpiredSessionsLocked removes expired sessions from the map.
+// Must be called with s.mu already held.
+func (s *WebAuthnService) cleanupExpiredSessionsLocked() {
+	now := time.Now()
+	for userID, entry := range s.sessions {
+		if now.After(entry.expiresAt) {
+			delete(s.sessions, userID)
+		}
+	}
 }
