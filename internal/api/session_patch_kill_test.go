@@ -49,7 +49,7 @@ func newTestApp(t *testing.T, sessions *session.Manager, store *composite.Store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
+	return NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
 }
 
 func newSQLiteStore(t *testing.T) *sqlite.Store {

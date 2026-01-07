@@ -1,7 +1,8 @@
 # agentsh Approval Authentication
 
-**Version:** 0.1.0-draft  
-**Date:** December 2024
+**Version:** 0.2.0
+**Date:** January 2025
+**Status:** Implemented (WebAuthn, TOTP, API, local_tty modes)
 
 ---
 

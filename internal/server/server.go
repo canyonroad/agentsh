@@ -163,7 +163,7 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	var apiKeyAuth *auth.APIKeyAuth
-	if !cfg.Development.DisableAuth && cfg.Auth.Type == "api_key" {
+	if !cfg.Development.DisableAuth && (cfg.Auth.Type == "api_key" || cfg.Auth.Type == "hybrid") {
 		loaded, err := auth.LoadAPIKeys(cfg.Auth.APIKey.KeysFile, cfg.Auth.APIKey.HeaderName)
 		if err != nil {
 			_ = store.Close()
@@ -172,8 +172,27 @@ func New(cfg *config.Config) (*Server, error) {
 		apiKeyAuth = loaded
 	}
 
+	var oidcAuth *auth.OIDCAuth
+	if !cfg.Development.DisableAuth && (cfg.Auth.Type == "oidc" || cfg.Auth.Type == "hybrid") {
+		ctx := context.Background()
+		var err error
+		oidcAuth, err = auth.NewOIDCAuth(
+			ctx,
+			cfg.Auth.OIDC.Issuer,
+			cfg.Auth.OIDC.ClientID,
+			cfg.Auth.OIDC.Audience,
+			cfg.Auth.OIDC.ClaimMappings,
+			cfg.Auth.OIDC.AllowedGroups,
+			cfg.Auth.OIDC.GroupPolicyMap,
+		)
+		if err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("initialize OIDC auth: %w", err)
+		}
+	}
+
 	policyLoader := api.NewDefaultPolicyLoader(cfg.Policies.Dir, enforceApprovals)
-	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, approvalsMgr, metricsCollector, policyLoader)
+	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, oidcAuth, approvalsMgr, metricsCollector, policyLoader)
 	router := app.Router()
 
 	readTimeoutStr := cfg.Server.HTTP.ReadTimeout

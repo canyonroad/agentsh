@@ -67,7 +67,7 @@ func TestIntegration_LLMProxyStartedOnSessionCreate(t *testing.T) {
 	}
 
 	broker := events.NewBroker()
-	app := NewApp(cfg, sessions, store, engine, broker, nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, broker, nil, nil, nil, metrics.New(), nil)
 
 	// Create a session - this should start the LLM proxy
 	ctx := context.Background()
@@ -183,7 +183,7 @@ func TestIntegration_LLMProxyEnvVarsInSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
 
 	ctx := context.Background()
 	req := types.CreateSessionRequest{Workspace: ws}
@@ -244,7 +244,7 @@ func TestIntegration_LLMProxyNotStartedWhenDisabled(t *testing.T) {
 	}
 
 	broker := events.NewBroker()
-	app := NewApp(cfg, sessions, store, engine, broker, nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, broker, nil, nil, nil, metrics.New(), nil)
 
 	ctx := context.Background()
 	req := types.CreateSessionRequest{Workspace: ws}
@@ -320,7 +320,7 @@ func TestIntegration_LLMProxyBothDialects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
 
 	ctx := context.Background()
 	snap, _, err := app.createSessionCore(ctx, types.CreateSessionRequest{Workspace: t.TempDir()})

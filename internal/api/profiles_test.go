@@ -33,7 +33,7 @@ func TestListProfiles_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
 	h := app.Router()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/profiles", nil)
@@ -94,7 +94,7 @@ func TestListProfiles_MultipleProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
 	h := app.Router()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/profiles", nil)
@@ -172,7 +172,7 @@ func TestListProfiles_ContentType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
 	h := app.Router()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/profiles", nil)

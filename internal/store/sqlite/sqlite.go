@@ -120,6 +120,19 @@ func (s *Store) migrate(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_mcp_tools_server ON mcp_tools(server_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_mcp_tools_severity ON mcp_tools(max_severity);`,
+		`CREATE TABLE IF NOT EXISTS webauthn_credentials (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id TEXT NOT NULL,
+			credential_id BLOB NOT NULL UNIQUE,
+			public_key BLOB NOT NULL,
+			attestation_type TEXT,
+			transport TEXT,
+			sign_count INTEGER NOT NULL DEFAULT 0,
+			created_at_ns INTEGER NOT NULL,
+			last_used_ns INTEGER,
+			name TEXT
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id);`,
 	}
 
 	for _, stmt := range stmts {

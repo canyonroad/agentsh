@@ -272,6 +272,24 @@ SID=$(./bin/agentsh session create --workspace /workspace --policy default | jq 
 ./bin/agentsh exec "$SID" -- rm -rf /workspace/tmp
 ```
 
+### Authentication
+
+agentsh supports multiple authentication methods:
+
+| Type | Use Case |
+|------|----------|
+| `api_key` | Simple deployments with static keys |
+| `oidc` | Enterprise SSO (Okta, Azure AD, etc.) |
+| `hybrid` | Both methods accepted |
+
+**Approval modes** for human-in-the-loop verification:
+- `local_tty` - Terminal prompt (default)
+- `totp` - Authenticator app codes
+- `webauthn` - Hardware security keys (YubiKey)
+- `api` - Remote approval via REST
+
+See [SECURITY.md](SECURITY.md) for configuration details.
+
 ---
 
 ## 60-second demo

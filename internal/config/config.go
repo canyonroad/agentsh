@@ -91,13 +91,31 @@ type ServerTLSConfig struct {
 }
 
 type AuthConfig struct {
-	Type   string           `yaml:"type"`
+	Type   string           `yaml:"type"` // "api_key", "oidc", "hybrid"
 	APIKey AuthAPIKeyConfig `yaml:"api_key"`
+	OIDC   OIDCConfig       `yaml:"oidc"`
 }
 
 type AuthAPIKeyConfig struct {
 	KeysFile   string `yaml:"keys_file"`
 	HeaderName string `yaml:"header_name"`
+}
+
+// OIDCConfig configures OpenID Connect authentication.
+type OIDCConfig struct {
+	Issuer         string            `yaml:"issuer"`           // e.g., "https://corp.okta.com"
+	ClientID       string            `yaml:"client_id"`        // e.g., "agentsh-server"
+	Audience       string            `yaml:"audience"`         // Expected audience claim
+	JWKSCacheTTL   string            `yaml:"jwks_cache_ttl"`   // e.g., "1h"
+	ClaimMappings  OIDCClaimMappings `yaml:"claim_mappings"`
+	AllowedGroups  []string          `yaml:"allowed_groups"`   // Groups allowed to access
+	GroupPolicyMap map[string]string `yaml:"group_policy_map"` // group -> policy name
+}
+
+// OIDCClaimMappings maps OIDC claims to agentsh fields.
+type OIDCClaimMappings struct {
+	OperatorID string `yaml:"operator_id"` // Claim for operator ID (default: "sub")
+	Groups     string `yaml:"groups"`      // Claim for groups (default: "groups")
 }
 
 type LoggingConfig struct {
@@ -340,10 +358,19 @@ type EnvPolicyConfig struct {
 	BlockIteration bool     `yaml:"block_iteration"`
 }
 
+// WebAuthnConfig configures WebAuthn/FIDO2 authentication.
+type WebAuthnConfig struct {
+	RPID             string   `yaml:"rp_id"`             // e.g., "agentsh.local"
+	RPName           string   `yaml:"rp_name"`           // e.g., "agentsh"
+	RPOrigins        []string `yaml:"rp_origins"`        // e.g., ["http://localhost:18080"]
+	UserVerification string   `yaml:"user_verification"` // preferred, required, discouraged
+}
+
 type ApprovalsConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Mode    string `yaml:"mode"`    // "local_tty", "api", or "totp"
-	Timeout string `yaml:"timeout"` // duration string, e.g. "5m"
+	Enabled  bool           `yaml:"enabled"`
+	Mode     string         `yaml:"mode"`    // "local_tty", "api", "totp", or "webauthn"
+	Timeout  string         `yaml:"timeout"` // duration string, e.g. "5m"
+	WebAuthn WebAuthnConfig `yaml:"webauthn"`
 }
 
 type MetricsConfig struct {

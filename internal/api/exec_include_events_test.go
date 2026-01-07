@@ -100,7 +100,7 @@ func TestExec_IncludeEventsSummary_CapsBlockedOps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
 	h := app.Router()
 
 	// Trigger a command policy deny (rm -rf) which returns blocked_operations in response.
