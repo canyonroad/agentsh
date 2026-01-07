@@ -28,7 +28,10 @@ func LoadPolicyFilesWithVersion(dir string) (*PolicyState, error) {
 	}
 
 	// Compute version from policy content
-	content, _ := yaml.Marshal(policies)
+	content, err := yaml.Marshal(policies)
+	if err != nil {
+		return nil, fmt.Errorf("marshal policies for version: %w", err)
+	}
 	version := PolicyVersion(content)
 
 	return &PolicyState{
