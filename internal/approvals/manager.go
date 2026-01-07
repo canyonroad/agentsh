@@ -50,6 +50,9 @@ type Manager struct {
 	// totpSecretLookup retrieves the TOTP secret for a session (TOTP mode only)
 	totpSecretLookup func(sessionID string) string
 
+	// webauthnApprover handles WebAuthn approval challenges (webauthn mode only)
+	webauthnApprover *WebAuthnApprover
+
 	mu      sync.Mutex
 	pending map[string]*pending
 
@@ -94,6 +97,46 @@ func New(mode string, timeout time.Duration, emit Emitter) *Manager {
 // Required when using TOTP approval mode.
 func (m *Manager) SetTOTPSecretLookup(lookup func(sessionID string) string) {
 	m.totpSecretLookup = lookup
+}
+
+// SetWebAuthnApprover sets the WebAuthn approver (required for webauthn mode).
+func (m *Manager) SetWebAuthnApprover(approver *WebAuthnApprover) {
+	m.webauthnApprover = approver
+}
+
+// GetWebAuthnChallenge returns a WebAuthn challenge for an approval request.
+func (m *Manager) GetWebAuthnChallenge(ctx context.Context, approvalID, userID string) (*WebAuthnChallenge, error) {
+	if m.mode != "webauthn" {
+		return nil, fmt.Errorf("webauthn mode not enabled")
+	}
+	if m.webauthnApprover == nil {
+		return nil, fmt.Errorf("webauthn approver not configured")
+	}
+
+	m.mu.Lock()
+	p, ok := m.pending[approvalID]
+	m.mu.Unlock()
+
+	if !ok {
+		return nil, fmt.Errorf("approval not found: %s", approvalID)
+	}
+
+	return m.webauthnApprover.CreateChallenge(ctx, p.req, userID)
+}
+
+// ResolveWithWebAuthn resolves an approval using WebAuthn assertion.
+func (m *Manager) ResolveWithWebAuthn(ctx context.Context, approvalID, userID string, responseJSON []byte) error {
+	if m.webauthnApprover == nil {
+		return fmt.Errorf("webauthn approver not configured")
+	}
+
+	if err := m.webauthnApprover.VerifyResponse(ctx, userID, responseJSON); err != nil {
+		m.Resolve(approvalID, false, "webauthn verification failed: "+err.Error())
+		return err
+	}
+
+	m.Resolve(approvalID, true, "webauthn verified")
+	return nil
 }
 
 func (m *Manager) ListPending() []Request {
