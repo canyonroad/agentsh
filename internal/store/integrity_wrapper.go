@@ -7,6 +7,8 @@ import (
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
+var _ EventStore = (*IntegrityStore)(nil)
+
 // IntegrityStore wraps an EventStore and adds integrity metadata to events.
 type IntegrityStore struct {
 	inner EventStore
@@ -18,11 +20,8 @@ func NewIntegrityStore(inner EventStore, chain *audit.IntegrityChain) *Integrity
 	return &IntegrityStore{inner: inner, chain: chain}
 }
 
-// AppendEvent wraps event with integrity metadata before writing.
+// AppendEvent delegates to the inner store. Integrity wrapping is handled at the serialization layer.
 func (s *IntegrityStore) AppendEvent(ctx context.Context, ev types.Event) error {
-	// The actual wrapping happens at JSON serialization time.
-	// We need to intercept at the JSON level, not the typed level.
-	// This will be integrated into the broker or serialization layer.
 	return s.inner.AppendEvent(ctx, ev)
 }
 

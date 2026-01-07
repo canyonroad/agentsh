@@ -6,7 +6,7 @@ import (
 	"github.com/agentsh/agentsh/internal/audit"
 )
 
-func TestIntegrityStore_Wrap(t *testing.T) {
+func TestIntegrityChain_StateAdvances(t *testing.T) {
 	key := []byte("test-key-32-bytes-for-hmac-sha!!")
 	chain, err := audit.NewIntegrityChain(key)
 	if err != nil {
