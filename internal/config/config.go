@@ -318,10 +318,19 @@ type EnvPolicyConfig struct {
 	BlockIteration bool     `yaml:"block_iteration"`
 }
 
+// WebAuthnConfig configures WebAuthn/FIDO2 authentication.
+type WebAuthnConfig struct {
+	RPID             string   `yaml:"rp_id"`             // e.g., "agentsh.local"
+	RPName           string   `yaml:"rp_name"`           // e.g., "agentsh"
+	RPOrigins        []string `yaml:"rp_origins"`        // e.g., ["http://localhost:18080"]
+	UserVerification string   `yaml:"user_verification"` // preferred, required, discouraged
+}
+
 type ApprovalsConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Mode    string `yaml:"mode"`    // "local_tty", "api", or "totp"
-	Timeout string `yaml:"timeout"` // duration string, e.g. "5m"
+	Enabled  bool           `yaml:"enabled"`
+	Mode     string         `yaml:"mode"`    // "local_tty", "api", "totp", or "webauthn"
+	Timeout  string         `yaml:"timeout"` // duration string, e.g. "5m"
+	WebAuthn WebAuthnConfig `yaml:"webauthn"`
 }
 
 type MetricsConfig struct {
