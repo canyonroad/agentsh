@@ -116,11 +116,18 @@ func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
 		return nil, fmt.Errorf("parse payload: %w", err)
 	}
 
+	// Use canonical JSON (re-marshaled) for HMAC to ensure verifiability.
+	// Go's json.Marshal produces deterministic output with sorted keys.
+	canonicalPayload, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("canonical marshal: %w", err)
+	}
+
 	// Increment sequence
 	c.sequence++
 
-	// Compute HMAC of: sequence || prev_hash || payload
-	entryHash := c.computeHash(c.sequence, c.prevHash, payload)
+	// Compute HMAC of: sequence || prev_hash || canonical_payload
+	entryHash := c.computeHash(c.sequence, c.prevHash, canonicalPayload)
 
 	// Create integrity metadata
 	meta := IntegrityMetadata{
