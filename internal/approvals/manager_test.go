@@ -75,3 +75,48 @@ func TestRequestApproval_PromptResultWins(t *testing.T) {
 		t.Fatalf("expected approval to pass through")
 	}
 }
+
+func TestManagerTOTPMode(t *testing.T) {
+	mgr := New("totp", 5*time.Second, nil)
+
+	if mgr.mode != "totp" {
+		t.Errorf("mode = %q, want totp", mgr.mode)
+	}
+
+	// Verify promptTOTP is set
+	if mgr.prompt == nil {
+		t.Error("prompt function not set")
+	}
+}
+
+func TestManagerSetTOTPSecretLookup(t *testing.T) {
+	mgr := New("totp", 5*time.Second, nil)
+
+	called := false
+	mgr.SetTOTPSecretLookup(func(sessionID string) string {
+		called = true
+		return "TESTSECRET"
+	})
+
+	// Verify the lookup was set
+	if mgr.totpSecretLookup == nil {
+		t.Error("totpSecretLookup not set")
+	}
+
+	// Call it to verify it works
+	secret := mgr.totpSecretLookup("test-session")
+	if !called {
+		t.Error("lookup function not called")
+	}
+	if secret != "TESTSECRET" {
+		t.Errorf("secret = %q, want TESTSECRET", secret)
+	}
+}
+
+func TestManagerDefaultMode(t *testing.T) {
+	mgr := New("", 5*time.Second, nil)
+
+	if mgr.mode != "local_tty" {
+		t.Errorf("default mode = %q, want local_tty", mgr.mode)
+	}
+}
