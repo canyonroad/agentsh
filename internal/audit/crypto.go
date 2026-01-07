@@ -38,10 +38,15 @@ func NewEncryptor(key []byte) (*Encryptor, error) {
 // If keyEnv is non-empty, it reads the key from that environment variable.
 // Otherwise if keyFile is non-empty, it reads the key from that file.
 // Returns an error if neither source provides a key or if the key is too short.
+// Keys longer than 32 bytes are truncated to exactly 32 bytes for AES-256.
 func LoadEncryptionKey(keyFile, keyEnv string) ([]byte, error) {
 	if keyEnv != "" {
 		if key := os.Getenv(keyEnv); key != "" {
-			return []byte(key), nil
+			keyBytes := []byte(key)
+			if len(keyBytes) < 32 {
+				return nil, fmt.Errorf("key from env %s too short: need 32 bytes, got %d", keyEnv, len(keyBytes))
+			}
+			return keyBytes[:32], nil // Truncate to 32 bytes for consistency
 		}
 	}
 	if keyFile != "" {

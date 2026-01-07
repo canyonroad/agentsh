@@ -379,3 +379,41 @@ func TestLoadEncryptionKey_EmptyEnvVar(t *testing.T) {
 		t.Error("expected error when env var is empty")
 	}
 }
+
+func TestLoadEncryptionKey_EnvTooShort(t *testing.T) {
+	envKeyName := "TEST_AGENTSH_ENCRYPTION_KEY_SHORT"
+	// Set a key that's too short (16 bytes instead of 32)
+	shortKey := string(bytes.Repeat([]byte("s"), 16))
+	os.Setenv(envKeyName, shortKey)
+	defer os.Unsetenv(envKeyName)
+
+	_, err := LoadEncryptionKey("", envKeyName)
+	if err == nil {
+		t.Error("expected error for env key that's too short")
+	}
+	// Verify error message mentions the env var name
+	if err != nil && !bytes.Contains([]byte(err.Error()), []byte(envKeyName)) {
+		t.Errorf("error should mention env var name, got: %v", err)
+	}
+}
+
+func TestLoadEncryptionKey_FromEnvTruncates(t *testing.T) {
+	envKeyName := "TEST_AGENTSH_ENCRYPTION_KEY_LONG"
+	// Set a key that's longer than 32 bytes (64 bytes)
+	longKey := bytes.Repeat([]byte("l"), 64)
+	os.Setenv(envKeyName, string(longKey))
+	defer os.Unsetenv(envKeyName)
+
+	key, err := LoadEncryptionKey("", envKeyName)
+	if err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+
+	// Should truncate to 32 bytes
+	if len(key) != 32 {
+		t.Errorf("key should be truncated to 32 bytes, got %d", len(key))
+	}
+	if !bytes.Equal(key, longKey[:32]) {
+		t.Error("key content mismatch after truncation")
+	}
+}
