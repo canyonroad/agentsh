@@ -95,6 +95,29 @@ const (
 	EventMCPDetection   EventType = "mcp_detection"
 )
 
+// Policy events.
+const (
+	EventPolicyLoaded  EventType = "policy_loaded"
+	EventPolicyChanged EventType = "policy_changed"
+)
+
+// PolicyLoadedEvent is emitted when a policy is loaded.
+type PolicyLoadedEvent struct {
+	PolicyName    string `json:"policy_name"`
+	PolicyVersion string `json:"policy_version"` // SHA256 of content
+	PolicyPath    string `json:"policy_path"`
+	LoadedBy      string `json:"loaded_by"` // startup, reload, api
+}
+
+// PolicyChangedEvent is emitted when a policy changes.
+type PolicyChangedEvent struct {
+	PolicyName  string `json:"policy_name"`
+	OldVersion  string `json:"old_version"`
+	NewVersion  string `json:"new_version"`
+	DiffSummary string `json:"diff_summary"` // e.g., "+2 rules, -1 rule"
+	ChangedBy   string `json:"changed_by"`
+}
+
 // EventCategory maps event types to their categories.
 var EventCategory = map[EventType]string{
 	// File
@@ -166,6 +189,10 @@ var EventCategory = map[EventType]string{
 	EventMCPToolSeen:    "mcp",
 	EventMCPToolChanged: "mcp",
 	EventMCPDetection:   "mcp",
+
+	// Policy
+	EventPolicyLoaded:  "policy",
+	EventPolicyChanged: "policy",
 }
 
 // AllEventTypes lists all event types.
@@ -195,4 +222,6 @@ var AllEventTypes = []EventType{
 	EventSeccompBlocked,
 	// MCP
 	EventMCPToolSeen, EventMCPToolChanged, EventMCPDetection,
+	// Policy
+	EventPolicyLoaded, EventPolicyChanged,
 }
