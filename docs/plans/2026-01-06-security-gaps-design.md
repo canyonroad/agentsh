@@ -329,6 +329,8 @@ sandbox:
 - `internal/ratelimit/registry.go` - Per-domain/server limiter registry
 - Integration in `internal/netmonitor/proxy.go` and `internal/mcpinspect/registry.go`
 
+> **Status:** Phase 3 implemented (2026-01-07). See `internal/mcpinspect/policy.go`, `internal/mcpinspect/pins.go`, `internal/ratelimit/`, and CLI commands in `internal/cli/mcp_pins.go`.
+
 ---
 
 ## Summary

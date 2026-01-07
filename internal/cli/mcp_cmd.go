@@ -27,6 +27,7 @@ func newMCPCmd() *cobra.Command {
 	cmd.AddCommand(newMCPServersCmd())
 	cmd.AddCommand(newMCPEventsCmd())
 	cmd.AddCommand(newMCPDetectionsCmd())
+	cmd.AddCommand(newMCPPinsCmd())
 
 	return cmd
 }

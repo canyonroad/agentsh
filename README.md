@@ -290,6 +290,14 @@ agentsh supports multiple authentication methods:
 
 See [SECURITY.md](SECURITY.md) for configuration details.
 
+### MCP Security
+
+- **Tool Whitelisting**: Control which MCP tools can be invoked via allowlist/denylist policies
+- **Version Pinning**: Detect tool definition changes (rug pull protection) with configurable responses
+- **Rate Limiting**: Token bucket rate limiting for MCP servers and network domains
+
+See [SECURITY.md](SECURITY.md) for full configuration options.
+
 ---
 
 ## 60-second demo

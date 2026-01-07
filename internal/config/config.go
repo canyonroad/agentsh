@@ -204,6 +204,7 @@ type SandboxConfig struct {
 	UnixSockets SandboxUnixSocketsConfig `yaml:"unix_sockets"`
 	Seccomp     SandboxSeccompConfig     `yaml:"seccomp"`
 	XPC         SandboxXPCConfig         `yaml:"xpc"`
+	MCP         SandboxMCPConfig         `yaml:"mcp"`
 }
 
 // SandboxLimitsConfig configures resource limits.
@@ -242,6 +243,21 @@ type SandboxNetworkConfig struct {
 	TLSInspection   TLSInspectionConfig             `yaml:"tls_inspection"`
 	Transparent     SandboxTransparentNetworkConfig `yaml:"transparent"`
 	EBPF            SandboxEBPFConfig               `yaml:"ebpf"`
+	RateLimits      NetworkRateLimitsConfig         `yaml:"rate_limits"`
+}
+
+// NetworkRateLimitsConfig configures network rate limiting.
+type NetworkRateLimitsConfig struct {
+	Enabled     bool                       `yaml:"enabled"`
+	GlobalRPM   int                        `yaml:"global_rpm"`
+	GlobalBurst int                        `yaml:"global_burst"`
+	PerDomain   map[string]DomainRateLimit `yaml:"per_domain"`
+}
+
+// DomainRateLimit defines rate limits for a domain.
+type DomainRateLimit struct {
+	RequestsPerMinute int `yaml:"requests_per_minute"`
+	Burst             int `yaml:"burst"`
 }
 
 // TLSInspectionConfig configures TLS interception (requires CA cert).
@@ -327,6 +343,45 @@ type SandboxXPCMachConfig struct {
 // SandboxXPCESFConfig configures ESF-based XPC monitoring.
 type SandboxXPCESFConfig struct {
 	Enabled bool `yaml:"enabled"`
+}
+
+// SandboxMCPConfig configures MCP security policies.
+type SandboxMCPConfig struct {
+	EnforcePolicy  bool                    `yaml:"enforce_policy"`
+	FailClosed     bool                    `yaml:"fail_closed"` // Block unknown tools if true
+	ToolPolicy     string                  `yaml:"tool_policy"` // allowlist, denylist, none
+	AllowedTools   []MCPToolRule           `yaml:"allowed_tools"`
+	DeniedTools    []MCPToolRule           `yaml:"denied_tools"`
+	VersionPinning MCPVersionPinningConfig `yaml:"version_pinning"`
+	RateLimits     MCPRateLimitsConfig     `yaml:"rate_limits"`
+}
+
+// MCPToolRule defines a tool matching rule.
+type MCPToolRule struct {
+	Server      string `yaml:"server"`       // Server ID or "*" for any
+	Tool        string `yaml:"tool"`         // Tool name or "*" for any
+	ContentHash string `yaml:"content_hash"` // Optional SHA-256 hash
+}
+
+// MCPVersionPinningConfig configures version pinning behavior.
+type MCPVersionPinningConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	OnChange       string `yaml:"on_change"`        // block, alert, allow
+	AutoTrustFirst bool   `yaml:"auto_trust_first"` // Pin on first use
+}
+
+// MCPRateLimitsConfig configures MCP rate limiting.
+type MCPRateLimitsConfig struct {
+	Enabled      bool                    `yaml:"enabled"`
+	DefaultRPM   int                     `yaml:"default_rpm"`   // Default calls per minute
+	DefaultBurst int                     `yaml:"default_burst"`
+	PerServer    map[string]MCPRateLimit `yaml:"per_server"`
+}
+
+// MCPRateLimit defines rate limit for a server.
+type MCPRateLimit struct {
+	CallsPerMinute int `yaml:"calls_per_minute"`
+	Burst          int `yaml:"burst"`
 }
 
 type PoliciesConfig struct {
