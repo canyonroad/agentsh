@@ -221,6 +221,12 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("generate TOTP secret: %w", err)
 		}
 		s.TOTPSecret = secret
+
+		// Display TOTP setup on TTY for local mode
+		if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+			_ = approvals.DisplayTOTPSetup(tty, s.ID, s.TOTPSecret)
+			tty.Close()
+		}
 	}
 
 	// Emit session_created event
@@ -286,6 +292,12 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("generate TOTP secret: %w", err)
 		}
 		s.TOTPSecret = secret
+
+		// Display TOTP setup on TTY for local mode
+		if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+			_ = approvals.DisplayTOTPSetup(tty, s.ID, s.TOTPSecret)
+			tty.Close()
+		}
 	}
 
 	ev := types.Event{
