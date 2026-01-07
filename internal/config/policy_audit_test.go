@@ -181,12 +181,9 @@ func TestPolicyDiffNoChanges(t *testing.T) {
 
 	diff := PolicyDiff(old, new)
 
-	// Same number of rules means modified count but no added/removed
-	if strings.Contains(diff, "no changes") {
-		t.Errorf("same rule count should show checked count, got: %s", diff)
-	}
-	if !strings.Contains(diff, "~1") {
-		t.Errorf("expected ~1 checked in diff, got: %s", diff)
+	// Same number of rules means no changes detected
+	if diff != "no changes detected" {
+		t.Errorf("expected 'no changes detected', got: %s", diff)
 	}
 }
 
@@ -292,5 +289,59 @@ func TestPolicyDiffNilSubPolicies(t *testing.T) {
 	diff := PolicyDiff(old, new)
 	if diff != "no changes detected" {
 		t.Errorf("expected 'no changes detected' when sub-policies don't match, got: %s", diff)
+	}
+}
+
+func TestPolicyDiffEnvPolicy(t *testing.T) {
+	old := &PolicyFiles{
+		Env: &EnvProtectionPolicy{
+			Allowlist:         []string{"PATH", "HOME"},
+			Blocklist:         []string{"SECRET"},
+			SensitivePatterns: []string{"*_KEY"},
+		},
+	}
+
+	new := &PolicyFiles{
+		Env: &EnvProtectionPolicy{
+			Allowlist:         []string{"PATH", "HOME", "USER"},
+			Blocklist:         []string{"SECRET", "PASSWORD"},
+			SensitivePatterns: []string{"*_KEY", "*_TOKEN"},
+		},
+	}
+
+	diff := PolicyDiff(old, new)
+
+	// Old: 2 + 1 + 1 = 4 items
+	// New: 3 + 2 + 2 = 7 items
+	// Added: 3
+	if !strings.Contains(diff, "+3") {
+		t.Errorf("expected +3 in diff for added env items, got: %s", diff)
+	}
+}
+
+func TestPolicyDiffEnvPolicyRemoved(t *testing.T) {
+	old := &PolicyFiles{
+		Env: &EnvProtectionPolicy{
+			Allowlist:         []string{"PATH", "HOME", "USER"},
+			Blocklist:         []string{"SECRET", "PASSWORD"},
+			SensitivePatterns: []string{"*_KEY", "*_TOKEN"},
+		},
+	}
+
+	new := &PolicyFiles{
+		Env: &EnvProtectionPolicy{
+			Allowlist:         []string{"PATH"},
+			Blocklist:         []string{},
+			SensitivePatterns: []string{"*_KEY"},
+		},
+	}
+
+	diff := PolicyDiff(old, new)
+
+	// Old: 3 + 2 + 2 = 7 items
+	// New: 1 + 0 + 1 = 2 items
+	// Removed: 5
+	if !strings.Contains(diff, "-5") {
+		t.Errorf("expected -5 in diff for removed env items, got: %s", diff)
 	}
 }

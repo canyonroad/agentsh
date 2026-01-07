@@ -14,7 +14,7 @@ func PolicyVersion(content []byte) string {
 
 // PolicyDiff computes a summary of changes between policies.
 func PolicyDiff(oldPolicy, newPolicy *PolicyFiles) string {
-	var added, removed, modified int
+	var added, removed int
 
 	// Compare file policy rules
 	if oldPolicy != nil && newPolicy != nil {
@@ -26,7 +26,6 @@ func PolicyDiff(oldPolicy, newPolicy *PolicyFiles) string {
 			} else if oldRules > newRules {
 				removed += oldRules - newRules
 			}
-			modified = min(oldRules, newRules)
 		}
 
 		// Similar for network rules
@@ -61,11 +60,22 @@ func PolicyDiff(oldPolicy, newPolicy *PolicyFiles) string {
 				removed += oldRules - newRules
 			}
 		}
+
+		// Env policy
+		if oldPolicy.Env != nil && newPolicy.Env != nil {
+			oldItems := len(oldPolicy.Env.Allowlist) + len(oldPolicy.Env.Blocklist) + len(oldPolicy.Env.SensitivePatterns)
+			newItems := len(newPolicy.Env.Allowlist) + len(newPolicy.Env.Blocklist) + len(newPolicy.Env.SensitivePatterns)
+			if newItems > oldItems {
+				added += newItems - oldItems
+			} else if oldItems > newItems {
+				removed += oldItems - newItems
+			}
+		}
 	}
 
-	if added == 0 && removed == 0 && modified == 0 {
+	if added == 0 && removed == 0 {
 		return "no changes detected"
 	}
 
-	return fmt.Sprintf("+%d rules, -%d rules, ~%d checked", added, removed, modified)
+	return fmt.Sprintf("+%d rules, -%d rules", added, removed)
 }
