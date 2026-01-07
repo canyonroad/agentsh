@@ -243,6 +243,21 @@ type SandboxNetworkConfig struct {
 	TLSInspection   TLSInspectionConfig             `yaml:"tls_inspection"`
 	Transparent     SandboxTransparentNetworkConfig `yaml:"transparent"`
 	EBPF            SandboxEBPFConfig               `yaml:"ebpf"`
+	RateLimits      NetworkRateLimitsConfig         `yaml:"rate_limits"`
+}
+
+// NetworkRateLimitsConfig configures network rate limiting.
+type NetworkRateLimitsConfig struct {
+	Enabled     bool                       `yaml:"enabled"`
+	GlobalRPM   int                        `yaml:"global_rpm"`
+	GlobalBurst int                        `yaml:"global_burst"`
+	PerDomain   map[string]DomainRateLimit `yaml:"per_domain"`
+}
+
+// DomainRateLimit defines rate limits for a domain.
+type DomainRateLimit struct {
+	RequestsPerMinute int `yaml:"requests_per_minute"`
+	Burst             int `yaml:"burst"`
 }
 
 // TLSInspectionConfig configures TLS interception (requires CA cert).
