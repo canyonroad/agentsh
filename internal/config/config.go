@@ -120,6 +120,9 @@ type AuditConfig struct {
 
 	// Integrity configures tamper-proof audit logging with HMAC chains.
 	Integrity AuditIntegrityConfig `yaml:"integrity"`
+
+	// Encryption configures AES-256-GCM encryption at rest.
+	Encryption AuditEncryptionConfig `yaml:"encryption"`
 }
 
 type AuditStorageConfig struct {
@@ -140,6 +143,14 @@ type AuditIntegrityConfig struct {
 	KeyFile   string `yaml:"key_file"`  // Path to HMAC key file
 	KeyEnv    string `yaml:"key_env"`   // Or env var name containing key
 	Algorithm string `yaml:"algorithm"` // hmac-sha256 (default), hmac-sha512
+}
+
+// AuditEncryptionConfig configures encryption at rest.
+type AuditEncryptionConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	KeySource string `yaml:"key_source"` // file, env
+	KeyFile   string `yaml:"key_file"`
+	KeyEnv    string `yaml:"key_env"`
 }
 
 type RotationConfig struct {
