@@ -7,10 +7,26 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 )
+
+// sanitizeTarPath validates that a tar entry path doesn't escape the restore directory.
+func sanitizeTarPath(name string) (string, error) {
+	// Clean the path
+	clean := filepath.Clean(name)
+	// Reject absolute paths
+	if filepath.IsAbs(clean) {
+		return "", fmt.Errorf("absolute path not allowed: %s", name)
+	}
+	// Reject paths that escape via ..
+	if strings.HasPrefix(clean, "..") {
+		return "", fmt.Errorf("path traversal not allowed: %s", name)
+	}
+	return clean, nil
+}
 
 func newBackupCmd() *cobra.Command {
 	var output string
@@ -60,17 +76,23 @@ func newRestoreCmd() *cobra.Command {
 }
 
 func createBackup(cmd *cobra.Command, output, configPath string, verify bool) error {
-	f, err := os.Create(output)
+	// Write to temp file first, rename on success to avoid partial backups
+	tempFile := output + ".tmp"
+	f, err := os.Create(tempFile)
 	if err != nil {
 		return fmt.Errorf("create output: %w", err)
 	}
-	defer f.Close()
+
+	// Track whether we succeeded for cleanup
+	success := false
+	defer func() {
+		if !success {
+			os.Remove(tempFile)
+		}
+	}()
 
 	gw := gzip.NewWriter(f)
-	defer gw.Close()
-
 	tw := tar.NewWriter(gw)
-	defer tw.Close()
 
 	// Backup config file
 	if err := addFileToTar(tw, configPath, "config.yaml"); err != nil {
@@ -90,6 +112,25 @@ func createBackup(cmd *cobra.Command, output, configPath string, verify bool) er
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not backup policies: %v\n", err)
 	}
 
+	// Explicit close with error checking (instead of defer)
+	if err := tw.Close(); err != nil {
+		f.Close()
+		return fmt.Errorf("close tar writer: %w", err)
+	}
+	if err := gw.Close(); err != nil {
+		f.Close()
+		return fmt.Errorf("close gzip writer: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close file: %w", err)
+	}
+
+	// Rename temp file to final output
+	if err := os.Rename(tempFile, output); err != nil {
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+
+	success = true
 	fmt.Fprintf(cmd.OutOrStdout(), "Backup created: %s\n", output)
 
 	if verify {
@@ -124,13 +165,19 @@ func restoreBackup(cmd *cobra.Command, input string, verify, dryRun bool) error 
 			return fmt.Errorf("read tar: %w", err)
 		}
 
+		// Sanitize path to prevent path traversal attacks
+		safeName, err := sanitizeTarPath(header.Name)
+		if err != nil {
+			return fmt.Errorf("invalid tar entry: %w", err)
+		}
+
 		if dryRun {
-			fmt.Fprintf(cmd.OutOrStdout(), "Would restore: %s (%d bytes)\n", header.Name, header.Size)
+			fmt.Fprintf(cmd.OutOrStdout(), "Would restore: %s (%d bytes)\n", safeName, header.Size)
 			continue
 		}
 
 		// TODO: Implement actual restore logic with proper paths
-		fmt.Fprintf(cmd.OutOrStdout(), "Restoring: %s\n", header.Name)
+		fmt.Fprintf(cmd.OutOrStdout(), "Restoring: %s\n", safeName)
 	}
 
 	if verify && !dryRun {
