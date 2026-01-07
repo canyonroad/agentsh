@@ -117,6 +117,9 @@ type AuditConfig struct {
 
 	// Optional: ship events to an HTTP webhook.
 	Webhook AuditWebhookConfig `yaml:"webhook"`
+
+	// Integrity configures tamper-proof audit logging with HMAC chains.
+	Integrity AuditIntegrityConfig `yaml:"integrity"`
 }
 
 type AuditStorageConfig struct {
@@ -129,6 +132,14 @@ type AuditWebhookConfig struct {
 	FlushInterval string            `yaml:"flush_interval"`
 	Timeout       string            `yaml:"timeout"`
 	Headers       map[string]string `yaml:"headers"`
+}
+
+// AuditIntegrityConfig configures tamper-proof audit logging.
+type AuditIntegrityConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	KeyFile   string `yaml:"key_file"`  // Path to HMAC key file
+	KeyEnv    string `yaml:"key_env"`   // Or env var name containing key
+	Algorithm string `yaml:"algorithm"` // hmac-sha256 (default), hmac-sha512
 }
 
 type RotationConfig struct {

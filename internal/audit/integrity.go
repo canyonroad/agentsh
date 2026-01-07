@@ -1,0 +1,171 @@
+// Package audit provides tamper-proof audit logging with HMAC-based integrity chains.
+package audit
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"hash"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+// IntegrityMetadata contains the tamper-proof chain fields for an audit entry.
+type IntegrityMetadata struct {
+	Sequence  int64  `json:"sequence"`
+	PrevHash  string `json:"prev_hash"`
+	EntryHash string `json:"entry_hash"`
+}
+
+// IntegrityChain maintains HMAC chain state for tamper-proof audit logging.
+// Each entry's hash depends on the previous entry, forming a verifiable chain.
+type IntegrityChain struct {
+	mu        sync.Mutex
+	key       []byte
+	algorithm string
+	sequence  int64
+	prevHash  string
+}
+
+// ChainState represents the current state of the integrity chain for persistence.
+type ChainState struct {
+	Sequence int64  `json:"sequence"`
+	PrevHash string `json:"prev_hash"`
+}
+
+// NewIntegrityChain creates a new integrity chain with the given HMAC key.
+// The algorithm defaults to "hmac-sha256" if not specified.
+func NewIntegrityChain(key []byte) *IntegrityChain {
+	return NewIntegrityChainWithAlgorithm(key, "hmac-sha256")
+}
+
+// NewIntegrityChainWithAlgorithm creates an integrity chain with a specific algorithm.
+// Supported algorithms: "hmac-sha256", "hmac-sha512".
+func NewIntegrityChainWithAlgorithm(key []byte, algorithm string) *IntegrityChain {
+	if algorithm == "" {
+		algorithm = "hmac-sha256"
+	}
+	return &IntegrityChain{
+		key:       key,
+		algorithm: algorithm,
+		sequence:  0,
+		prevHash:  "",
+	}
+}
+
+// LoadKey loads an HMAC key from either a file path or an environment variable.
+// If keyFile is non-empty, it reads the key from that file.
+// Otherwise if keyEnv is non-empty, it reads the key from that environment variable.
+// Returns an error if neither source provides a key or if reading fails.
+func LoadKey(keyFile, keyEnv string) ([]byte, error) {
+	if keyFile != "" {
+		data, err := os.ReadFile(keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("read key file %q: %w", keyFile, err)
+		}
+		key := strings.TrimSpace(string(data))
+		if key == "" {
+			return nil, fmt.Errorf("key file %q is empty", keyFile)
+		}
+		return []byte(key), nil
+	}
+
+	if keyEnv != "" {
+		key := os.Getenv(keyEnv)
+		if key == "" {
+			return nil, fmt.Errorf("environment variable %q is empty or not set", keyEnv)
+		}
+		return []byte(key), nil
+	}
+
+	return nil, errors.New("no key source specified: provide key_file or key_env")
+}
+
+// Wrap adds integrity metadata to an event payload.
+// The payload must be valid JSON. Returns a new JSON payload with an "integrity" field.
+func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Parse existing payload
+	var data map[string]any
+	if err := json.Unmarshal(payload, &data); err != nil {
+		return nil, fmt.Errorf("parse payload: %w", err)
+	}
+
+	// Increment sequence
+	c.sequence++
+
+	// Compute HMAC of: sequence || prev_hash || payload
+	entryHash := c.computeHash(c.sequence, c.prevHash, payload)
+
+	// Create integrity metadata
+	meta := IntegrityMetadata{
+		Sequence:  c.sequence,
+		PrevHash:  c.prevHash,
+		EntryHash: entryHash,
+	}
+
+	// Add integrity field to payload
+	data["integrity"] = meta
+
+	// Marshal the result
+	result, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("marshal wrapped payload: %w", err)
+	}
+
+	// Update prevHash for next entry
+	c.prevHash = entryHash
+
+	return result, nil
+}
+
+// State returns the current chain state for persistence.
+func (c *IntegrityChain) State() ChainState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return ChainState{
+		Sequence: c.sequence,
+		PrevHash: c.prevHash,
+	}
+}
+
+// Restore restores the chain state after a restart.
+// This should be called before processing new events to continue the chain.
+func (c *IntegrityChain) Restore(sequence int64, prevHash string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sequence = sequence
+	c.prevHash = prevHash
+}
+
+// computeHash computes the HMAC of: sequence || prev_hash || payload
+func (c *IntegrityChain) computeHash(sequence int64, prevHash string, payload []byte) string {
+	var h hash.Hash
+	switch c.algorithm {
+	case "hmac-sha512":
+		h = hmac.New(sha512.New, c.key)
+	default: // hmac-sha256
+		h = hmac.New(sha256.New, c.key)
+	}
+
+	// Write sequence as string
+	h.Write([]byte(strconv.FormatInt(sequence, 10)))
+	// Write separator
+	h.Write([]byte("|"))
+	// Write prevHash
+	h.Write([]byte(prevHash))
+	// Write separator
+	h.Write([]byte("|"))
+	// Write payload
+	h.Write(payload)
+
+	return hex.EncodeToString(h.Sum(nil))
+}
