@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -27,8 +30,9 @@ func newAuditCmd() *cobra.Command {
 
 func newAuditVerifyCmd() *cobra.Command {
 	var (
-		keyFile string
-		keyEnv  string
+		keyFile   string
+		keyEnv    string
+		algorithm string
 	)
 
 	cmd := &cobra.Command{
@@ -46,7 +50,10 @@ Examples:
 
   # Verify using an environment variable
   export AUDIT_KEY="my-secret-key-32-bytes-long!!!"
-  agentsh audit verify audit.jsonl --key-env=AUDIT_KEY`,
+  agentsh audit verify audit.jsonl --key-env=AUDIT_KEY
+
+  # Verify using SHA-512 algorithm
+  agentsh audit verify audit.jsonl --key-file=/etc/agentsh/hmac.key --algorithm=hmac-sha512`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logPath := args[0]
@@ -54,6 +61,14 @@ Examples:
 			// Validate that one of key-file or key-env is provided
 			if keyFile == "" && keyEnv == "" {
 				return fmt.Errorf("either --key-file or --key-env is required")
+			}
+
+			// Validate algorithm
+			switch algorithm {
+			case "hmac-sha256", "hmac-sha512":
+				// valid
+			default:
+				return fmt.Errorf("unsupported algorithm %q: use hmac-sha256 or hmac-sha512", algorithm)
 			}
 
 			// Load the HMAC key
@@ -70,7 +85,7 @@ Examples:
 			defer f.Close()
 
 			// Verify the chain
-			result, err := verifyIntegrityChain(f, key)
+			result, err := verifyIntegrityChain(f, key, algorithm)
 			if err != nil {
 				return err
 			}
@@ -93,6 +108,7 @@ Examples:
 
 	cmd.Flags().StringVar(&keyFile, "key-file", "", "Path to HMAC key file")
 	cmd.Flags().StringVar(&keyEnv, "key-env", "", "Environment variable containing HMAC key")
+	cmd.Flags().StringVar(&algorithm, "algorithm", "hmac-sha256", "HMAC algorithm (hmac-sha256 or hmac-sha512)")
 
 	return cmd
 }
@@ -116,7 +132,7 @@ type integrityEntry struct {
 }
 
 // verifyIntegrityChain reads a JSONL file and verifies the integrity chain.
-func verifyIntegrityChain(r *os.File, key []byte) (*verifyResult, error) {
+func verifyIntegrityChain(r io.Reader, key []byte, algorithm string) (*verifyResult, error) {
 	result := &verifyResult{
 		chainIntact: true,
 	}
@@ -170,7 +186,7 @@ func verifyIntegrityChain(r *os.File, key []byte) (*verifyResult, error) {
 			return result, nil
 		}
 
-		computedHash := computeEntryHash(key, entry.Integrity.Sequence, entry.Integrity.PrevHash, originalPayload)
+		computedHash := computeEntryHash(key, algorithm, entry.Integrity.Sequence, entry.Integrity.PrevHash, originalPayload)
 		if computedHash != entry.Integrity.EntryHash {
 			result.chainIntact = false
 			result.brokenAt = lineNum
@@ -206,9 +222,16 @@ func extractOriginalPayload(line []byte) ([]byte, error) {
 	return json.Marshal(data)
 }
 
-// computeEntryHash computes the HMAC-SHA256 of: sequence|prev_hash|payload
-func computeEntryHash(key []byte, sequence int64, prevHash string, payload []byte) string {
-	h := hmac.New(sha256.New, key)
+// computeEntryHash computes the HMAC of: sequence|prev_hash|payload
+// Supports hmac-sha256 and hmac-sha512 algorithms.
+func computeEntryHash(key []byte, algorithm string, sequence int64, prevHash string, payload []byte) string {
+	var h hash.Hash
+	switch algorithm {
+	case "hmac-sha512":
+		h = hmac.New(sha512.New, key)
+	default: // hmac-sha256
+		h = hmac.New(sha256.New, key)
+	}
 
 	// Write sequence as string
 	h.Write([]byte(strconv.FormatInt(sequence, 10)))

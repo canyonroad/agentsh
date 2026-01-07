@@ -50,6 +50,9 @@ func TestAuditVerifyCmd_Help(t *testing.T) {
 	if !bytes.Contains([]byte(output), []byte("--key-env")) {
 		t.Error("help should mention --key-env flag")
 	}
+	if !bytes.Contains([]byte(output), []byte("--algorithm")) {
+		t.Error("help should mention --algorithm flag")
+	}
 }
 
 func TestAuditVerifyCmd_RequiresKeyFlag(t *testing.T) {
