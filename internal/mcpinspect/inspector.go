@@ -3,6 +3,8 @@ package mcpinspect
 
 import (
 	"time"
+
+	"github.com/agentsh/agentsh/internal/config"
 )
 
 // Direction indicates whether a message is a request or response.
@@ -18,11 +20,13 @@ type EventEmitter func(event interface{})
 
 // Inspector processes MCP messages and emits audit events.
 type Inspector struct {
-	sessionID string
-	serverID  string
-	registry  *Registry
-	detector  *Detector
-	emitEvent EventEmitter
+	sessionID   string
+	serverID    string
+	registry    *Registry
+	detector    *Detector
+	policyEval  *PolicyEvaluator
+	rateLimiter *RateLimiterRegistry
+	emitEvent   EventEmitter
 }
 
 // NewInspector creates a new MCP inspector for a server connection.
@@ -44,6 +48,19 @@ func NewInspectorWithDetection(sessionID, serverID string, emitter EventEmitter)
 		registry:  NewRegistry(true),
 		detector:  NewDetector(),
 		emitEvent: emitter,
+	}
+}
+
+// NewInspectorWithPolicy creates an inspector with policy enforcement.
+func NewInspectorWithPolicy(sessionID, serverID string, emitter EventEmitter, cfg config.SandboxMCPConfig) *Inspector {
+	return &Inspector{
+		sessionID:   sessionID,
+		serverID:    serverID,
+		registry:    NewRegistry(cfg.VersionPinning.AutoTrustFirst),
+		detector:    NewDetector(),
+		policyEval:  NewPolicyEvaluator(cfg),
+		rateLimiter: NewRateLimiterRegistry(cfg.RateLimits),
+		emitEvent:   emitter,
 	}
 }
 
@@ -144,4 +161,22 @@ func computeChanges(old, new ToolDefinition) []FieldChange {
 	}
 
 	return changes
+}
+
+// CheckPolicy checks if a tool invocation is allowed by policy.
+func (i *Inspector) CheckPolicy(toolName, hash string) (allowed bool, reason string) {
+	if i.policyEval == nil {
+		return true, "no policy configured"
+	}
+
+	decision := i.policyEval.Evaluate(i.serverID, toolName, hash)
+	return decision.Allowed, decision.Reason
+}
+
+// CheckRateLimit checks if a tool call is within rate limits.
+func (i *Inspector) CheckRateLimit(toolName string) bool {
+	if i.rateLimiter == nil {
+		return true
+	}
+	return i.rateLimiter.Allow(i.serverID, toolName)
 }

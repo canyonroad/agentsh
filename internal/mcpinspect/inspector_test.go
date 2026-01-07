@@ -3,6 +3,8 @@ package mcpinspect
 
 import (
 	"testing"
+
+	"github.com/agentsh/agentsh/internal/config"
 )
 
 func TestInspector_ProcessToolsListResponse(t *testing.T) {
@@ -115,5 +117,60 @@ func TestInspector_DetectionEvents(t *testing.T) {
 
 	if event.MaxSeverity == "" {
 		t.Error("expected MaxSeverity to be set")
+	}
+}
+
+func TestInspector_PolicyEnforcement(t *testing.T) {
+	cfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "allowlist",
+		AllowedTools: []config.MCPToolRule{
+			{Server: "github", Tool: "*"},
+		},
+	}
+
+	events := make([]interface{}, 0)
+	emitter := func(e interface{}) { events = append(events, e) }
+
+	inspector := NewInspectorWithPolicy("session1", "github", emitter, cfg)
+
+	// Allowed tool should pass
+	allowed, reason := inspector.CheckPolicy("create_issue", "sha256:abc")
+	if !allowed {
+		t.Errorf("Expected github:create_issue to be allowed, got denied: %s", reason)
+	}
+
+	// Create inspector for disallowed server
+	inspector2 := NewInspectorWithPolicy("session1", "blocked", emitter, cfg)
+	allowed, reason = inspector2.CheckPolicy("any_tool", "sha256:def")
+	if allowed {
+		t.Error("Expected blocked:any_tool to be denied")
+	}
+}
+
+func TestInspector_RateLimiting(t *testing.T) {
+	cfg := config.SandboxMCPConfig{
+		RateLimits: config.MCPRateLimitsConfig{
+			Enabled:      true,
+			DefaultRPM:   60,
+			DefaultBurst: 3,
+		},
+	}
+
+	events := make([]interface{}, 0)
+	emitter := func(e interface{}) { events = append(events, e) }
+
+	inspector := NewInspectorWithPolicy("session1", "server1", emitter, cfg)
+
+	// First 3 calls should succeed (burst)
+	for i := 0; i < 3; i++ {
+		if !inspector.CheckRateLimit("tool1") {
+			t.Errorf("Call %d should be allowed within burst", i+1)
+		}
+	}
+
+	// 4th call should be blocked
+	if inspector.CheckRateLimit("tool1") {
+		t.Error("Call 4 should be rate limited")
 	}
 }
