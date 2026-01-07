@@ -115,9 +115,54 @@ agentsh is **not** a full security sandbox like a VM or container with seccomp. 
 
 ### Approval Workflows
 
-- Risky operations can require human approval
+Risky operations can require human approval before execution. agentsh supports multiple approval modes:
+
+**Approval Modes:**
+- `local_tty`: Interactive terminal prompt with math challenge (default)
+- `api`: Remote approval via REST API (for headless/remote deployments)
+- `totp`: Time-based One-Time Password via authenticator app (Google Authenticator, Authy, etc.)
+- `webauthn`: Hardware security key verification (YubiKey, platform authenticators) - highest security
+
+**Key Features:**
 - Configurable timeout (default: deny on timeout)
-- Audit logging of approval decisions
+- Audit logging of all approval decisions
+- Credential separation prevents agents from self-approving
+- WebAuthn provides cryptographic proof of human presence
+
+See [Approval Authentication](docs/approval-auth.md) for detailed configuration.
+
+### Authentication and Authorization
+
+agentsh supports multiple authentication methods for API access:
+
+**Authentication Types:**
+- `api_key`: Static API keys with role-based access (agent, approver, admin)
+- `oidc`: OpenID Connect/OAuth 2.0 for enterprise SSO integration (Okta, Azure AD, etc.)
+- `hybrid`: Both API key and OIDC accepted (API key takes precedence)
+
+**OIDC Features:**
+- JWT validation with JWKS auto-discovery
+- Group-based role mapping (groups containing "admin" or "approver" keywords)
+- Allowed groups filtering for access control
+- Token caching with secure hashing
+
+**Role Separation:**
+- `agent` role: Can execute commands, cannot approve
+- `approver` role: Can view and resolve approval requests
+- `admin` role: Full access including policy management
+
+```yaml
+# Example hybrid auth configuration
+auth:
+  type: hybrid
+  api_key:
+    keys_file: /etc/agentsh/api-keys.yaml
+  oidc:
+    issuer: "https://corp.okta.com"
+    client_id: "agentsh"
+    audience: "agentsh"
+    allowed_groups: ["agentsh-operators"]
+```
 
 ### LLM Proxy and Data Loss Prevention (DLP)
 
