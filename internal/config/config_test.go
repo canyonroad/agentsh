@@ -578,3 +578,174 @@ proxy:
 		t.Errorf("Proxy.Port = %d, want %d (invalid env should be ignored)", cfg.Proxy.Port, 8080)
 	}
 }
+
+func TestLoad_MCPSecurityConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  mcp:
+    enforce_policy: true
+    fail_closed: true
+    tool_policy: allowlist
+    allowed_tools:
+      - server: "filesystem"
+        tool: "read_file"
+        content_hash: "sha256:abc123"
+      - server: "*"
+        tool: "get_weather"
+    denied_tools:
+      - server: "dangerous-server"
+        tool: "*"
+    version_pinning:
+      enabled: true
+      on_change: block
+      auto_trust_first: true
+    rate_limits:
+      enabled: true
+      default_rpm: 60
+      default_burst: 10
+      per_server:
+        "filesystem":
+          calls_per_minute: 120
+          burst: 20
+        "slow-server":
+          calls_per_minute: 10
+          burst: 2
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mcp := cfg.Sandbox.MCP
+
+	// Test top-level settings
+	if !mcp.EnforcePolicy {
+		t.Errorf("MCP.EnforcePolicy = false, want true")
+	}
+	if !mcp.FailClosed {
+		t.Errorf("MCP.FailClosed = false, want true")
+	}
+	if mcp.ToolPolicy != "allowlist" {
+		t.Errorf("MCP.ToolPolicy = %q, want %q", mcp.ToolPolicy, "allowlist")
+	}
+
+	// Test allowed_tools
+	if len(mcp.AllowedTools) != 2 {
+		t.Fatalf("MCP.AllowedTools len = %d, want 2", len(mcp.AllowedTools))
+	}
+	if mcp.AllowedTools[0].Server != "filesystem" {
+		t.Errorf("AllowedTools[0].Server = %q, want %q", mcp.AllowedTools[0].Server, "filesystem")
+	}
+	if mcp.AllowedTools[0].Tool != "read_file" {
+		t.Errorf("AllowedTools[0].Tool = %q, want %q", mcp.AllowedTools[0].Tool, "read_file")
+	}
+	if mcp.AllowedTools[0].ContentHash != "sha256:abc123" {
+		t.Errorf("AllowedTools[0].ContentHash = %q, want %q", mcp.AllowedTools[0].ContentHash, "sha256:abc123")
+	}
+	if mcp.AllowedTools[1].Server != "*" {
+		t.Errorf("AllowedTools[1].Server = %q, want %q", mcp.AllowedTools[1].Server, "*")
+	}
+
+	// Test denied_tools
+	if len(mcp.DeniedTools) != 1 {
+		t.Fatalf("MCP.DeniedTools len = %d, want 1", len(mcp.DeniedTools))
+	}
+	if mcp.DeniedTools[0].Server != "dangerous-server" {
+		t.Errorf("DeniedTools[0].Server = %q, want %q", mcp.DeniedTools[0].Server, "dangerous-server")
+	}
+	if mcp.DeniedTools[0].Tool != "*" {
+		t.Errorf("DeniedTools[0].Tool = %q, want %q", mcp.DeniedTools[0].Tool, "*")
+	}
+
+	// Test version_pinning
+	if !mcp.VersionPinning.Enabled {
+		t.Errorf("MCP.VersionPinning.Enabled = false, want true")
+	}
+	if mcp.VersionPinning.OnChange != "block" {
+		t.Errorf("MCP.VersionPinning.OnChange = %q, want %q", mcp.VersionPinning.OnChange, "block")
+	}
+	if !mcp.VersionPinning.AutoTrustFirst {
+		t.Errorf("MCP.VersionPinning.AutoTrustFirst = false, want true")
+	}
+
+	// Test rate_limits
+	if !mcp.RateLimits.Enabled {
+		t.Errorf("MCP.RateLimits.Enabled = false, want true")
+	}
+	if mcp.RateLimits.DefaultRPM != 60 {
+		t.Errorf("MCP.RateLimits.DefaultRPM = %d, want %d", mcp.RateLimits.DefaultRPM, 60)
+	}
+	if mcp.RateLimits.DefaultBurst != 10 {
+		t.Errorf("MCP.RateLimits.DefaultBurst = %d, want %d", mcp.RateLimits.DefaultBurst, 10)
+	}
+	if len(mcp.RateLimits.PerServer) != 2 {
+		t.Fatalf("MCP.RateLimits.PerServer len = %d, want 2", len(mcp.RateLimits.PerServer))
+	}
+	if fsLimit, ok := mcp.RateLimits.PerServer["filesystem"]; !ok {
+		t.Errorf("MCP.RateLimits.PerServer missing 'filesystem'")
+	} else {
+		if fsLimit.CallsPerMinute != 120 {
+			t.Errorf("filesystem.CallsPerMinute = %d, want %d", fsLimit.CallsPerMinute, 120)
+		}
+		if fsLimit.Burst != 20 {
+			t.Errorf("filesystem.Burst = %d, want %d", fsLimit.Burst, 20)
+		}
+	}
+	if slowLimit, ok := mcp.RateLimits.PerServer["slow-server"]; !ok {
+		t.Errorf("MCP.RateLimits.PerServer missing 'slow-server'")
+	} else {
+		if slowLimit.CallsPerMinute != 10 {
+			t.Errorf("slow-server.CallsPerMinute = %d, want %d", slowLimit.CallsPerMinute, 10)
+		}
+		if slowLimit.Burst != 2 {
+			t.Errorf("slow-server.Burst = %d, want %d", slowLimit.Burst, 2)
+		}
+	}
+}
+
+func TestLoad_MCPSecurityConfig_Defaults(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	// Empty config - MCP should have zero values
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  enabled: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mcp := cfg.Sandbox.MCP
+
+	// Verify all defaults are zero values
+	if mcp.EnforcePolicy {
+		t.Errorf("MCP.EnforcePolicy default should be false")
+	}
+	if mcp.FailClosed {
+		t.Errorf("MCP.FailClosed default should be false")
+	}
+	if mcp.ToolPolicy != "" {
+		t.Errorf("MCP.ToolPolicy default should be empty, got %q", mcp.ToolPolicy)
+	}
+	if len(mcp.AllowedTools) != 0 {
+		t.Errorf("MCP.AllowedTools default should be empty")
+	}
+	if len(mcp.DeniedTools) != 0 {
+		t.Errorf("MCP.DeniedTools default should be empty")
+	}
+	if mcp.VersionPinning.Enabled {
+		t.Errorf("MCP.VersionPinning.Enabled default should be false")
+	}
+	if mcp.RateLimits.Enabled {
+		t.Errorf("MCP.RateLimits.Enabled default should be false")
+	}
+}
