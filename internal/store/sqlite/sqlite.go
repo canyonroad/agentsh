@@ -127,6 +127,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("sqlite migrate: %w", err)
 		}
 	}
+
+	// Add integrity_json column to events table.
+	// Ignore "duplicate column" error for idempotent migrations.
+	_, err := s.db.ExecContext(ctx, `ALTER TABLE events ADD COLUMN integrity_json TEXT;`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("sqlite migrate add integrity_json: %w", err)
+	}
+
 	return nil
 }
 
