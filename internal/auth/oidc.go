@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"sync"
@@ -10,6 +11,13 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/coreos/go-oidc/v3/oidc"
 )
+
+// tokenCacheKey returns a hash of the token for use as a cache key.
+// This avoids storing the full token in memory.
+func tokenCacheKey(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return string(h[:]) // Use raw bytes for efficiency
+}
 
 // OIDCClaims contains the validated claims from an OIDC token.
 type OIDCClaims struct {
@@ -91,7 +99,7 @@ func NewOIDCAuth(ctx context.Context, issuer, clientID, audience string, mapping
 func (a *OIDCAuth) ValidateToken(ctx context.Context, token string) (*OIDCClaims, error) {
 	// Check cache first
 	a.mu.RLock()
-	if cached, ok := a.cache[token]; ok {
+	if cached, ok := a.cache[tokenCacheKey(token)]; ok {
 		if time.Now().Before(cached.expiresAt) {
 			a.mu.RUnlock()
 			return cached.claims, nil
@@ -166,7 +174,7 @@ func (a *OIDCAuth) ValidateToken(ctx context.Context, token string) (*OIDCClaims
 
 	// Cache the validated token
 	a.mu.Lock()
-	a.cache[token] = &cachedToken{
+	a.cache[tokenCacheKey(token)] = &cachedToken{
 		claims:    claims,
 		expiresAt: idToken.Expiry,
 	}
