@@ -463,3 +463,193 @@ env_protection:
 		t.Errorf("env_protection.mode = %q, want blocklist", policies.Env.Mode)
 	}
 }
+
+func TestLoadPolicyFilesWithVersion(t *testing.T) {
+	dir := t.TempDir()
+
+	filePolicy := `
+file_policy:
+  default_action: deny
+  rules:
+    - name: test-rule
+      paths:
+        - "/tmp/**"
+      operations:
+        - read
+      action: allow
+`
+	if err := os.WriteFile(filepath.Join(dir, "files.yaml"), []byte(filePolicy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := LoadPolicyFilesWithVersion(dir)
+	if err != nil {
+		t.Fatalf("LoadPolicyFilesWithVersion: %v", err)
+	}
+
+	if state == nil {
+		t.Fatal("state should not be nil")
+	}
+
+	if state.Files == nil {
+		t.Fatal("state.Files should not be nil")
+	}
+
+	if state.Files.File == nil {
+		t.Fatal("file policy should not be nil")
+	}
+
+	if state.Path != dir {
+		t.Errorf("state.Path = %q, want %q", state.Path, dir)
+	}
+
+	if state.Version == "" {
+		t.Error("state.Version should not be empty")
+	}
+
+	// Version should have sha256: prefix
+	if len(state.Version) < 7 || state.Version[:7] != "sha256:" {
+		t.Errorf("state.Version should start with 'sha256:', got %q", state.Version)
+	}
+}
+
+func TestLoadPolicyFilesWithVersion_EmptyDir(t *testing.T) {
+	dir := t.TempDir()
+
+	state, err := LoadPolicyFilesWithVersion(dir)
+	if err != nil {
+		t.Fatalf("LoadPolicyFilesWithVersion: %v", err)
+	}
+
+	if state == nil {
+		t.Fatal("state should not be nil")
+	}
+
+	// All sub-policies should be nil but version should still be computed
+	if state.Files.Env != nil {
+		t.Error("env policy should be nil")
+	}
+	if state.Files.File != nil {
+		t.Error("file policy should be nil")
+	}
+
+	if state.Version == "" {
+		t.Error("state.Version should not be empty even for empty policies")
+	}
+}
+
+func TestLoadPolicyFilesWithVersion_Consistency(t *testing.T) {
+	dir := t.TempDir()
+
+	filePolicy := `
+file_policy:
+  default_action: allow
+  rules:
+    - name: simple
+      paths: ["/var/**"]
+      action: deny
+`
+	if err := os.WriteFile(filepath.Join(dir, "files.yaml"), []byte(filePolicy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state1, err := LoadPolicyFilesWithVersion(dir)
+	if err != nil {
+		t.Fatalf("LoadPolicyFilesWithVersion (1): %v", err)
+	}
+
+	state2, err := LoadPolicyFilesWithVersion(dir)
+	if err != nil {
+		t.Fatalf("LoadPolicyFilesWithVersion (2): %v", err)
+	}
+
+	// Same content should produce same version
+	if state1.Version != state2.Version {
+		t.Errorf("same content should produce same version: %q != %q", state1.Version, state2.Version)
+	}
+}
+
+func TestLoadPolicyFilesWithVersion_DifferentVersions(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	policy1 := `
+file_policy:
+  default_action: deny
+`
+	policy2 := `
+file_policy:
+  default_action: allow
+`
+	if err := os.WriteFile(filepath.Join(dir1, "files.yaml"), []byte(policy1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir2, "files.yaml"), []byte(policy2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state1, err := LoadPolicyFilesWithVersion(dir1)
+	if err != nil {
+		t.Fatalf("LoadPolicyFilesWithVersion (dir1): %v", err)
+	}
+
+	state2, err := LoadPolicyFilesWithVersion(dir2)
+	if err != nil {
+		t.Fatalf("LoadPolicyFilesWithVersion (dir2): %v", err)
+	}
+
+	// Different content should produce different versions
+	if state1.Version == state2.Version {
+		t.Error("different content should produce different versions")
+	}
+}
+
+func TestLoadPolicyFilesWithVersion_Error(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create an invalid policy file
+	invalidPolicy := `
+file_policy:
+  this is not valid yaml: [
+`
+	if err := os.WriteFile(filepath.Join(dir, "files.yaml"), []byte(invalidPolicy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadPolicyFilesWithVersion(dir)
+	if err == nil {
+		t.Error("expected error for invalid policy file")
+	}
+}
+
+func TestPolicyChangeCallback_Type(t *testing.T) {
+	// Test that PolicyChangeCallback can be used as expected
+	var callbackCalled bool
+	var oldState, newState *PolicyState
+	var actor string
+
+	callback := PolicyChangeCallback(func(old, new *PolicyState, changedBy string) {
+		callbackCalled = true
+		oldState = old
+		newState = new
+		actor = changedBy
+	})
+
+	old := &PolicyState{Version: "sha256:abc", Path: "/old"}
+	new := &PolicyState{Version: "sha256:def", Path: "/new"}
+
+	callback(old, new, "admin")
+
+	if !callbackCalled {
+		t.Error("callback should have been called")
+	}
+	if oldState != old {
+		t.Error("old state mismatch")
+	}
+	if newState != new {
+		t.Error("new state mismatch")
+	}
+	if actor != "admin" {
+		t.Errorf("actor = %q, want admin", actor)
+	}
+}

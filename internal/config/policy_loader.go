@@ -9,6 +9,38 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// PolicyState holds loaded policies with version tracking.
+type PolicyState struct {
+	Files   *PolicyFiles
+	Version string
+	Path    string
+}
+
+// PolicyChangeCallback is called when policy changes are detected.
+// Parameters are the old policy state, new policy state, and who made the change.
+type PolicyChangeCallback func(old, new *PolicyState, changedBy string)
+
+// LoadPolicyFilesWithVersion loads policies and computes version.
+func LoadPolicyFilesWithVersion(dir string) (*PolicyState, error) {
+	policies, err := LoadPolicyFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Compute version from policy content
+	content, err := yaml.Marshal(policies)
+	if err != nil {
+		return nil, fmt.Errorf("marshal policies for version: %w", err)
+	}
+	version := PolicyVersion(content)
+
+	return &PolicyState{
+		Files:   policies,
+		Version: version,
+		Path:    dir,
+	}, nil
+}
+
 // PolicyFiles represents policy configuration loaded from separate files.
 type PolicyFiles struct {
 	Env      *EnvProtectionPolicy `yaml:"env_protection"`
