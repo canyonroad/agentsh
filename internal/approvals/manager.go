@@ -105,6 +105,12 @@ func (m *Manager) SetWebAuthnApprover(approver *WebAuthnApprover) {
 }
 
 // GetWebAuthnChallenge returns a WebAuthn challenge for an approval request.
+//
+// Authorization note: The userID parameter represents the operator making the approval decision.
+// Session ownership validation (ensuring the operator is authorized to approve requests for this
+// session) is performed at a higher layer (e.g., API authentication middleware). This design
+// separates concerns: the approval manager handles approval logic, while access control is
+// handled by the transport layer.
 func (m *Manager) GetWebAuthnChallenge(ctx context.Context, approvalID, userID string) (*WebAuthnChallenge, error) {
 	if m.mode != "webauthn" {
 		return nil, fmt.Errorf("webauthn mode not enabled")
@@ -125,9 +131,26 @@ func (m *Manager) GetWebAuthnChallenge(ctx context.Context, approvalID, userID s
 }
 
 // ResolveWithWebAuthn resolves an approval using WebAuthn assertion.
+//
+// Authorization note: The userID parameter represents the operator making the approval decision.
+// Session ownership validation (ensuring the operator is authorized to approve requests for this
+// session) is performed at a higher layer (e.g., API authentication middleware). This design
+// separates concerns: the approval manager handles approval logic, while access control is
+// handled by the transport layer.
 func (m *Manager) ResolveWithWebAuthn(ctx context.Context, approvalID, userID string, responseJSON []byte) error {
+	if m.mode != "webauthn" {
+		return fmt.Errorf("webauthn mode not enabled")
+	}
 	if m.webauthnApprover == nil {
 		return fmt.Errorf("webauthn approver not configured")
+	}
+
+	// Verify approval exists before attempting verification
+	m.mu.Lock()
+	_, ok := m.pending[approvalID]
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("approval not found: %s", approvalID)
 	}
 
 	if err := m.webauthnApprover.VerifyResponse(ctx, userID, responseJSON); err != nil {
