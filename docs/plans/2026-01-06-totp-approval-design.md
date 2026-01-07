@@ -1,5 +1,7 @@
 # TOTP Approval Mode Design
 
+**Status:** Implemented (2026-01-06)
+
 ## Overview
 
 Add TOTP (Time-based One-Time Password) as a third approval mode for human-in-the-loop verification. This provides cryptographic proof that a human with access to an authenticator app approved the operation, stronger than the current math challenge approach.
