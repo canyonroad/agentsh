@@ -140,13 +140,40 @@ func TestOIDCAuth_RoleForClaims(t *testing.T) {
 			want: "admin",
 		},
 		{
-			name: "approvers group returns agent (no approver role)",
+			name: "approvers group returns approver role",
 			claims: &OIDCClaims{
 				Subject:   "user123",
 				Groups:    []string{"approvers"},
 				ExpiresAt: time.Now().Add(time.Hour),
 			},
-			want: "agent",
+			want: "approver",
+		},
+		{
+			name: "group with Approver (case-insensitive) returns approver role",
+			claims: &OIDCClaims{
+				Subject:   "user123",
+				Groups:    []string{"SuperApprovers"},
+				ExpiresAt: time.Now().Add(time.Hour),
+			},
+			want: "approver",
+		},
+		{
+			name: "group with APPROVER (uppercase) returns approver role",
+			claims: &OIDCClaims{
+				Subject:   "user123",
+				Groups:    []string{"APPROVER-TEAM"},
+				ExpiresAt: time.Now().Add(time.Hour),
+			},
+			want: "approver",
+		},
+		{
+			name: "admin takes precedence over approver",
+			claims: &OIDCClaims{
+				Subject:   "user123",
+				Groups:    []string{"approvers", "admins"},
+				ExpiresAt: time.Now().Add(time.Hour),
+			},
+			want: "admin",
 		},
 	}
 

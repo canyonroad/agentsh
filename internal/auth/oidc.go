@@ -107,7 +107,10 @@ func (a *OIDCAuth) ValidateToken(ctx context.Context, token string) (*OIDCClaims
 	}
 	a.mu.RUnlock()
 
-	// Verify the token
+	// Verify the token (verifier may be nil in test mode)
+	if a.verifier == nil {
+		return nil, fmt.Errorf("verify token: no verifier configured")
+	}
 	idToken, err := a.verifier.Verify(ctx, token)
 	if err != nil {
 		return nil, fmt.Errorf("verify token: %w", err)
@@ -217,6 +220,12 @@ func (o *OIDCAuth) RoleForClaims(claims *OIDCClaims) string {
 			return "admin"
 		}
 	}
+	// Check for approver groups
+	for _, g := range claims.Groups {
+		if strings.Contains(strings.ToLower(g), "approver") {
+			return "approver"
+		}
+	}
 	return "agent"
 }
 
@@ -230,4 +239,24 @@ func (a *OIDCAuth) ClearCache() {
 	a.mu.Lock()
 	a.cache = make(map[string]*cachedToken)
 	a.mu.Unlock()
+}
+
+// InjectTokenForTesting adds a token to the cache for testing purposes.
+// This allows testing the middleware without a real OIDC provider.
+func (a *OIDCAuth) InjectTokenForTesting(token string, claims *OIDCClaims) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cache[tokenCacheKey(token)] = &cachedToken{
+		claims:    claims,
+		expiresAt: claims.ExpiresAt,
+	}
+}
+
+// NewOIDCAuthForTesting creates an OIDCAuth suitable for testing without
+// connecting to an actual OIDC provider.
+func NewOIDCAuthForTesting() *OIDCAuth {
+	return &OIDCAuth{
+		issuer: "https://test.example.com",
+		cache:  make(map[string]*cachedToken),
+	}
 }
