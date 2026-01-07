@@ -33,6 +33,9 @@ type IntegrityChain struct {
 	prevHash  string
 }
 
+// MinKeyLength is the minimum recommended key length for HMAC-SHA256.
+const MinKeyLength = 32
+
 // ChainState represents the current state of the integrity chain for persistence.
 type ChainState struct {
 	Sequence int64  `json:"sequence"`
@@ -41,22 +44,36 @@ type ChainState struct {
 
 // NewIntegrityChain creates a new integrity chain with the given HMAC key.
 // The algorithm defaults to "hmac-sha256" if not specified.
-func NewIntegrityChain(key []byte) *IntegrityChain {
+// Returns an error if the key is shorter than MinKeyLength bytes.
+func NewIntegrityChain(key []byte) (*IntegrityChain, error) {
+	if len(key) < MinKeyLength {
+		return nil, fmt.Errorf("key too short: got %d bytes, need at least %d", len(key), MinKeyLength)
+	}
 	return NewIntegrityChainWithAlgorithm(key, "hmac-sha256")
 }
 
 // NewIntegrityChainWithAlgorithm creates an integrity chain with a specific algorithm.
 // Supported algorithms: "hmac-sha256", "hmac-sha512".
-func NewIntegrityChainWithAlgorithm(key []byte, algorithm string) *IntegrityChain {
+// Returns an error if the key is shorter than MinKeyLength bytes or algorithm is unsupported.
+func NewIntegrityChainWithAlgorithm(key []byte, algorithm string) (*IntegrityChain, error) {
+	if len(key) < MinKeyLength {
+		return nil, fmt.Errorf("key too short: got %d bytes, need at least %d", len(key), MinKeyLength)
+	}
 	if algorithm == "" {
 		algorithm = "hmac-sha256"
+	}
+	switch algorithm {
+	case "hmac-sha256", "hmac-sha512":
+		// valid
+	default:
+		return nil, fmt.Errorf("unsupported algorithm %q: use hmac-sha256 or hmac-sha512", algorithm)
 	}
 	return &IntegrityChain{
 		key:       key,
 		algorithm: algorithm,
 		sequence:  0,
 		prevHash:  "",
-	}
+	}, nil
 }
 
 // LoadKey loads an HMAC key from either a file path or an environment variable.

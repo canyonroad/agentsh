@@ -4,12 +4,18 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
+// testKey is a valid 32-byte key for tests that require a valid key.
+var testKey = []byte("test-secret-key-32-bytes-long!!!")
+
 func TestIntegrityChain_Wrap(t *testing.T) {
-	key := []byte("test-secret-key")
-	chain := NewIntegrityChain(key)
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
 
 	payload := []byte(`{"event":"command_executed","command":"ls -la"}`)
 	wrapped, err := chain.Wrap(payload)
@@ -57,8 +63,10 @@ func TestIntegrityChain_Wrap(t *testing.T) {
 }
 
 func TestIntegrityChain_ChainContinuity(t *testing.T) {
-	key := []byte("test-secret-key")
-	chain := NewIntegrityChain(key)
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
 
 	// Wrap multiple payloads
 	payloads := []string{
@@ -100,8 +108,10 @@ func TestIntegrityChain_ChainContinuity(t *testing.T) {
 }
 
 func TestIntegrityChain_Restore(t *testing.T) {
-	key := []byte("test-secret-key")
-	chain := NewIntegrityChain(key)
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
 
 	// Wrap a few entries
 	for i := 0; i < 3; i++ {
@@ -118,7 +128,10 @@ func TestIntegrityChain_Restore(t *testing.T) {
 	}
 
 	// Create new chain and restore state
-	newChain := NewIntegrityChain(key)
+	newChain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
 	newChain.Restore(state.Sequence, state.PrevHash)
 
 	// Wrap a new entry
@@ -262,8 +275,10 @@ func TestLoadKey_NonexistentFile(t *testing.T) {
 }
 
 func TestIntegrityChain_SHA512Algorithm(t *testing.T) {
-	key := []byte("test-secret-key")
-	chain := NewIntegrityChainWithAlgorithm(key, "hmac-sha512")
+	chain, err := NewIntegrityChainWithAlgorithm(testKey, "hmac-sha512")
+	if err != nil {
+		t.Fatalf("NewIntegrityChainWithAlgorithm() error = %v", err)
+	}
 
 	payload := []byte(`{"event":"test"}`)
 	wrapped, err := chain.Wrap(payload)
@@ -286,8 +301,10 @@ func TestIntegrityChain_SHA512Algorithm(t *testing.T) {
 }
 
 func TestIntegrityChain_SHA256Algorithm(t *testing.T) {
-	key := []byte("test-secret-key")
-	chain := NewIntegrityChain(key) // default is SHA-256
+	chain, err := NewIntegrityChain(testKey) // default is SHA-256
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
 
 	payload := []byte(`{"event":"test"}`)
 	wrapped, err := chain.Wrap(payload)
@@ -310,11 +327,13 @@ func TestIntegrityChain_SHA256Algorithm(t *testing.T) {
 }
 
 func TestIntegrityChain_InvalidPayload(t *testing.T) {
-	key := []byte("test-secret-key")
-	chain := NewIntegrityChain(key)
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
 
 	// Invalid JSON
-	_, err := chain.Wrap([]byte("not valid json"))
+	_, err = chain.Wrap([]byte("not valid json"))
 	if err == nil {
 		t.Fatal("Wrap() expected error for invalid JSON")
 	}
@@ -323,8 +342,15 @@ func TestIntegrityChain_InvalidPayload(t *testing.T) {
 func TestIntegrityChain_DifferentKeysProduceDifferentHashes(t *testing.T) {
 	payload := []byte(`{"event":"test"}`)
 
-	chain1 := NewIntegrityChain([]byte("key-one"))
-	chain2 := NewIntegrityChain([]byte("key-two"))
+	// Use 32-byte keys that meet minimum length
+	chain1, err := NewIntegrityChain([]byte("key-one-that-is-32-bytes-long!!!"))
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() chain1 error = %v", err)
+	}
+	chain2, err := NewIntegrityChain([]byte("key-two-that-is-32-bytes-long!!!"))
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() chain2 error = %v", err)
+	}
 
 	wrapped1, err := chain1.Wrap(payload)
 	if err != nil {
@@ -345,5 +371,65 @@ func TestIntegrityChain_DifferentKeysProduceDifferentHashes(t *testing.T) {
 
 	if hash1 == hash2 {
 		t.Error("different keys should produce different hashes")
+	}
+}
+
+func TestNewIntegrityChain_KeyTooShort(t *testing.T) {
+	shortKey := []byte("short") // less than MinKeyLength
+
+	_, err := NewIntegrityChain(shortKey)
+	if err == nil {
+		t.Fatal("NewIntegrityChain() expected error for short key")
+	}
+	if !strings.Contains(err.Error(), "key too short") {
+		t.Errorf("error = %q, want to contain 'key too short'", err.Error())
+	}
+}
+
+func TestNewIntegrityChainWithAlgorithm_KeyTooShort(t *testing.T) {
+	shortKey := []byte("short") // less than MinKeyLength
+
+	_, err := NewIntegrityChainWithAlgorithm(shortKey, "hmac-sha256")
+	if err == nil {
+		t.Fatal("NewIntegrityChainWithAlgorithm() expected error for short key")
+	}
+	if !strings.Contains(err.Error(), "key too short") {
+		t.Errorf("error = %q, want to contain 'key too short'", err.Error())
+	}
+}
+
+func TestNewIntegrityChainWithAlgorithm_InvalidAlgorithm(t *testing.T) {
+	_, err := NewIntegrityChainWithAlgorithm(testKey, "invalid-algo")
+	if err == nil {
+		t.Fatal("NewIntegrityChainWithAlgorithm() expected error for invalid algorithm")
+	}
+	if !strings.Contains(err.Error(), "unsupported algorithm") {
+		t.Errorf("error = %q, want to contain 'unsupported algorithm'", err.Error())
+	}
+}
+
+func TestNewIntegrityChainWithAlgorithm_EmptyAlgorithmDefaultsToSHA256(t *testing.T) {
+	chain, err := NewIntegrityChainWithAlgorithm(testKey, "")
+	if err != nil {
+		t.Fatalf("NewIntegrityChainWithAlgorithm() error = %v", err)
+	}
+
+	payload := []byte(`{"event":"test"}`)
+	wrapped, err := chain.Wrap(payload)
+	if err != nil {
+		t.Fatalf("Wrap() error = %v", err)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(wrapped, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	integrity := result["integrity"].(map[string]any)
+	entryHash := integrity["entry_hash"].(string)
+
+	// SHA-256 produces 64 hex characters (32 bytes)
+	if len(entryHash) != 64 {
+		t.Errorf("entry_hash length = %d, want 64 for SHA-256 (default)", len(entryHash))
 	}
 }
