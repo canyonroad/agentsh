@@ -91,13 +91,31 @@ type ServerTLSConfig struct {
 }
 
 type AuthConfig struct {
-	Type   string           `yaml:"type"`
+	Type   string           `yaml:"type"` // "api_key", "oidc", "hybrid"
 	APIKey AuthAPIKeyConfig `yaml:"api_key"`
+	OIDC   OIDCConfig       `yaml:"oidc"`
 }
 
 type AuthAPIKeyConfig struct {
 	KeysFile   string `yaml:"keys_file"`
 	HeaderName string `yaml:"header_name"`
+}
+
+// OIDCConfig configures OpenID Connect authentication.
+type OIDCConfig struct {
+	Issuer         string            `yaml:"issuer"`           // e.g., "https://corp.okta.com"
+	ClientID       string            `yaml:"client_id"`        // e.g., "agentsh-server"
+	Audience       string            `yaml:"audience"`         // Expected audience claim
+	JWKSCacheTTL   string            `yaml:"jwks_cache_ttl"`   // e.g., "1h"
+	ClaimMappings  OIDCClaimMappings `yaml:"claim_mappings"`
+	AllowedGroups  []string          `yaml:"allowed_groups"`   // Groups allowed to access
+	GroupPolicyMap map[string]string `yaml:"group_policy_map"` // group -> policy name
+}
+
+// OIDCClaimMappings maps OIDC claims to agentsh fields.
+type OIDCClaimMappings struct {
+	OperatorID string `yaml:"operator_id"` // Claim for operator ID (default: "sub")
+	Groups     string `yaml:"groups"`      // Claim for groups (default: "groups")
 }
 
 type LoggingConfig struct {
