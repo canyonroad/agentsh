@@ -213,6 +213,22 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 		return types.Session{}, code, err
 	}
 
+	// Generate TOTP secret if TOTP approval mode is enabled
+	if a.cfg.Approvals.Mode == "totp" {
+		secret, err := approvals.GenerateTOTPSecret()
+		if err != nil {
+			_ = a.sessions.Destroy(s.ID)
+			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("generate TOTP secret: %w", err)
+		}
+		s.TOTPSecret = secret
+
+		// Display TOTP setup on TTY for local mode
+		if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+			_ = approvals.DisplayTOTPSetup(tty, s.ID, s.TOTPSecret)
+			tty.Close()
+		}
+	}
+
 	// Emit session_created event
 	ev := types.Event{
 		ID:        uuid.NewString(),
@@ -266,6 +282,22 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 			code = http.StatusConflict
 		}
 		return types.Session{}, code, err
+	}
+
+	// Generate TOTP secret if TOTP approval mode is enabled
+	if a.cfg.Approvals.Mode == "totp" {
+		secret, err := approvals.GenerateTOTPSecret()
+		if err != nil {
+			_ = a.sessions.Destroy(s.ID)
+			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("generate TOTP secret: %w", err)
+		}
+		s.TOTPSecret = secret
+
+		// Display TOTP setup on TTY for local mode
+		if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+			_ = approvals.DisplayTOTPSetup(tty, s.ID, s.TOTPSecret)
+			tty.Close()
+		}
 	}
 
 	ev := types.Event{

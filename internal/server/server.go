@@ -149,6 +149,17 @@ func New(cfg *config.Config) (*Server, error) {
 	if cfg.Approvals.Enabled {
 		timeout, _ := time.ParseDuration(cfg.Approvals.Timeout)
 		approvalsMgr = approvals.New(cfg.Approvals.Mode, timeout, emitter)
+
+		// Wire up TOTP secret lookup for TOTP approval mode
+		if cfg.Approvals.Mode == "totp" {
+			approvalsMgr.SetTOTPSecretLookup(func(sessionID string) string {
+				sess, ok := sessions.Get(sessionID)
+				if !ok {
+					return ""
+				}
+				return sess.TOTPSecret
+			})
+		}
 	}
 
 	var apiKeyAuth *auth.APIKeyAuth

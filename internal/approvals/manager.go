@@ -47,6 +47,9 @@ type Manager struct {
 	// prompt is factored for testability; defaults to promptTTY.
 	prompt func(ctx context.Context, req Request) (Resolution, error)
 
+	// totpSecretLookup retrieves the TOTP secret for a session (TOTP mode only)
+	totpSecretLookup func(sessionID string) string
+
 	mu      sync.Mutex
 	pending map[string]*pending
 
@@ -78,8 +81,19 @@ func New(mode string, timeout time.Duration, emit Emitter) *Manager {
 		sessionCounts: make(map[string]int),
 		maxPerSession: 10, // Default: max 10 concurrent approvals per session
 	}
-	m.prompt = m.promptTTY
+	switch mode {
+	case "totp":
+		m.prompt = m.promptTOTP
+	default:
+		m.prompt = m.promptTTY
+	}
 	return m
+}
+
+// SetTOTPSecretLookup sets the callback for retrieving TOTP secrets by session ID.
+// Required when using TOTP approval mode.
+func (m *Manager) SetTOTPSecretLookup(lookup func(sessionID string) string) {
+	m.totpSecretLookup = lookup
 }
 
 func (m *Manager) ListPending() []Request {
@@ -310,6 +324,86 @@ func (m *Manager) promptTTY(ctx context.Context, req Request) (Resolution, error
 		return Resolution{Approved: true, Reason: "local tty", At: time.Now().UTC()}, nil
 	}
 	return Resolution{Approved: false, Reason: "denied", At: time.Now().UTC()}, nil
+}
+
+func (m *Manager) promptTOTP(ctx context.Context, req Request) (Resolution, error) {
+	m.promptMu.Lock()
+	defer m.promptMu.Unlock()
+
+	// Get the TOTP secret for this session
+	if m.totpSecretLookup == nil {
+		return Resolution{Approved: false, Reason: "TOTP not configured", At: time.Now().UTC()},
+			fmt.Errorf("TOTP secret lookup not configured")
+	}
+	secret := m.totpSecretLookup(req.SessionID)
+	if secret == "" {
+		return Resolution{Approved: false, Reason: "no TOTP secret", At: time.Now().UTC()},
+			fmt.Errorf("no TOTP secret for session %s", req.SessionID)
+	}
+
+	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return Resolution{}, fmt.Errorf("open /dev/tty: %w", err)
+	}
+
+	var closeOnce sync.Once
+	closeFile := func() { closeOnce.Do(func() { _ = f.Close() }) }
+	defer closeFile()
+
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			closeFile()
+		case <-done:
+		}
+	}()
+	defer close(done)
+
+	reader := bufio.NewReader(f)
+	readLineCtx := func(prompt string) (string, error) {
+		if _, err := fmt.Fprint(f, prompt); err != nil {
+			return "", err
+		}
+		lineCh := make(chan struct {
+			line string
+			err  error
+		}, 1)
+		go func() {
+			line, err := reader.ReadString('\n')
+			lineCh <- struct {
+				line string
+				err  error
+			}{line: line, err: err}
+		}()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case res := <-lineCh:
+			if res.err != nil {
+				return "", res.err
+			}
+			return strings.TrimSpace(res.line), nil
+		}
+	}
+
+	// Display approval request
+	fmt.Fprintf(f, "\n=== APPROVAL REQUIRED (TOTP) ===\n")
+	fmt.Fprintf(f, "Session: %s\nCommand: %s\nKind: %s\nTarget: %s\nRule: %s\nMessage: %s\n\n",
+		req.SessionID, req.CommandID, req.Kind, req.Target, req.Rule, req.Message)
+
+	// Prompt for TOTP code
+	code, err := readLineCtx("Enter 6-digit TOTP code: ")
+	if err != nil {
+		return Resolution{}, err
+	}
+
+	// Validate the code
+	if ValidateTOTPCode(code, secret) {
+		return Resolution{Approved: true, Reason: "totp verified", At: time.Now().UTC()}, nil
+	}
+
+	return Resolution{Approved: false, Reason: "invalid code", At: time.Now().UTC()}, nil
 }
 
 func challenge() (int, int) {

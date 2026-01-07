@@ -320,7 +320,7 @@ type EnvPolicyConfig struct {
 
 type ApprovalsConfig struct {
 	Enabled bool   `yaml:"enabled"`
-	Mode    string `yaml:"mode"`    // "local_tty" or "api"
+	Mode    string `yaml:"mode"`    // "local_tty", "api", or "totp"
 	Timeout string `yaml:"timeout"` // duration string, e.g. "5m"
 }
 
