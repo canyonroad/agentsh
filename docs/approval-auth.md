@@ -579,6 +579,109 @@ func (a *LocalApprover) RequestApproval(req ApprovalRequest) (*ApprovalResponse,
 }
 ```
 
+### 4.3 TOTP Approval Mode
+
+For environments where math challenges are insufficient but WebAuthn isn't available, agentsh supports TOTP (Time-based One-Time Password) as a standalone approval mode. This requires the approver to enter a 6-digit code from their authenticator app.
+
+**Key difference from Section 3.2:** Section 3.2 describes TOTP as a *verification method* within remote approval flows (web UI, Slack). This section describes TOTP as a *standalone approval mode* (`approvals.mode: totp`) for terminal-based workflows.
+
+#### Setup Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    TOTP Mode Session Creation                            │
+│                                                                         │
+│  1. User creates session with TOTP approval mode enabled                │
+│     └─▶ agentsh generates per-session 20-byte secret                   │
+│                                                                         │
+│  2. ASCII QR code displayed on terminal                                 │
+│     ┌──────────────────────────────────────────────────────────────┐   │
+│     │ ╔══════════════════════════════════════════════════════════╗ │   │
+│     │ ║              TOTP Setup for Session                      ║ │   │
+│     │ ╠══════════════════════════════════════════════════════════╣ │   │
+│     │ ║  Scan this QR code with your authenticator app:          ║ │   │
+│     │ ║                                                          ║ │   │
+│     │ ║  ▄▄▄▄▄▄▄ ▄▄▄▄▄ ▄▄▄▄▄▄▄                                  ║ │   │
+│     │ ║  █ ▄▄▄ █ ▀ ▄▀█ █ ▄▄▄ █                                  ║ │   │
+│     │ ║  █ ███ █ █▀▀▄▀ █ ███ █  (QR code)                       ║ │   │
+│     │ ║  █▄▄▄▄▄█ ▄ █ ▄ █▄▄▄▄▄█                                  ║ │   │
+│     │ ║  ...                                                     ║ │   │
+│     │ ║                                                          ║ │   │
+│     │ ║  Or enter manually:                                      ║ │   │
+│     │ ║  Secret: JBSWY3DPEHPK3PXP...                            ║ │   │
+│     │ ╚══════════════════════════════════════════════════════════╝ │   │
+│     └──────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  3. User scans QR with Google Authenticator, Authy, 1Password, etc.    │
+│     └─▶ Secret is now in authenticator app                             │
+│                                                                         │
+│  4. Session ready - secret stored in session metadata                   │
+│     └─▶ Secret never exposed via API (json:"-" tag)                    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Approval Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    TOTP Approval Request                                 │
+│                                                                         │
+│  $ agentsh exec $SID -- rm important-file.txt                           │
+│                                                                         │
+│  === APPROVAL REQUIRED (TOTP) ===                                       │
+│  Session: abc12345                                                       │
+│  Command: cmd-67890                                                      │
+│  Kind: file                                                             │
+│  Target: /workspace/important-file.txt                                  │
+│  Rule: approve-workspace-delete                                         │
+│  Message: Delete /workspace/important-file.txt?                         │
+│                                                                         │
+│  Enter 6-digit TOTP code: 847293                                        │
+│                                                                         │
+│  ✓ Approved (totp verified)                                             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Configuration
+
+```yaml
+# /etc/agentsh/config.yaml or ~/.config/agentsh/config.yaml
+approvals:
+  enabled: true
+  mode: totp       # Options: "local_tty" | "api" | "totp"
+  timeout: 5m      # How long to wait for TOTP code entry
+```
+
+#### Security Properties
+
+| Property | Value | Notes |
+|----------|-------|-------|
+| Secret size | 20 bytes (160-bit) | Per RFC 4226 recommendation |
+| Encoding | Base32 | Standard for TOTP URIs |
+| Algorithm | SHA1 | Maximum authenticator app compatibility |
+| Digits | 6 | Standard TOTP |
+| Period | 30 seconds | Standard TOTP |
+| Skew tolerance | ±1 period | Allows 30 seconds clock drift |
+| Secret lifetime | Per-session | Destroyed when session ends |
+| Secret storage | Session metadata | Hidden from API responses |
+
+#### Implementation Details
+
+- **Secret generation:** Uses `crypto/rand` for cryptographic randomness
+- **QR code:** Uses `github.com/skip2/go-qrcode` for ASCII art generation
+- **Validation:** Uses `github.com/pquerna/otp/totp` (RFC 6238 compliant)
+- **URI format:** `otpauth://totp/agentsh:{session_id_prefix}?secret={base32}&issuer=agentsh`
+
+#### When to Use TOTP Mode
+
+| Scenario | Recommended Mode |
+|----------|-----------------|
+| Local development, quick iteration | `local_tty` (math challenge) |
+| Security-conscious local work | `totp` |
+| Remote/headless with dedicated UI | `api` + WebAuthn |
+| Air-gapped or no-network | `totp` (works offline) |
+
 ---
 
 ## 5. Remote Approval
@@ -859,10 +962,16 @@ func (a *agentsh) verifyApprovalToken(token *ApprovalToken, request *ApprovalReq
 # /etc/agentsh/config.yaml
 
 approvals:
+  # Approval mode: how approvals are handled
+  # - "local_tty": Math challenge on terminal (default)
+  # - "api": Remote approval via API (requires separate approver credentials)
+  # - "totp": TOTP code from authenticator app (per-session secret)
+  mode: local_tty
+
   # How long approvals are valid
   timeout: 5m
-  
-  # Verification methods (in order of preference)
+
+  # Verification methods (in order of preference) - for "api" mode
   verification:
     # WebAuthn/FIDO2 - highest security
     webauthn:
@@ -938,6 +1047,15 @@ approvals:
 - [ ] Network isolation prevents agent from reaching approval service
 - [ ] All approvals are audit logged
 - [ ] Challenge/response prevents automated approval
+
+### TOTP Mode Specific
+
+- [ ] TOTP secrets are generated with cryptographic randomness (20 bytes)
+- [ ] Secrets are hidden from API responses (`json:"-"` tag)
+- [ ] Secrets are never logged (check log output)
+- [ ] Each session gets a unique secret (not shared across sessions)
+- [ ] Authenticator app enrollment happens at session creation
+- [ ] Old sessions/secrets are properly cleaned up
 
 ### Regular Security Review
 
