@@ -49,7 +49,7 @@ func TestEBPFConnectEventFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
 
 	// Create command cgroup and attach ebpf via hook.
 	hook := app.cgroupHook(sess.ID, "cmd-test", policy.Limits{})

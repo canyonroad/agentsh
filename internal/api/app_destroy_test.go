@@ -53,7 +53,7 @@ func TestDestroySessionPurgesTrash(t *testing.T) {
 		t.Fatalf("expected trash entry before destroy")
 	}
 
-	app := NewApp(cfg, mgr, composite.New(memEventStore{}, nil), nil, events.NewBroker(), nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, composite.New(memEventStore{}, nil), nil, events.NewBroker(), nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest("DELETE", "/api/v1/sessions/sess1", nil)
 	rctx := chi.NewRouteContext()

@@ -59,7 +59,7 @@ func TestCreateSessionWithProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
 	h := app.Router()
 
 	body := `{"profile":"test-profile"}`
@@ -106,7 +106,7 @@ func TestCreateSessionWithProfile_ProfileNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
 	h := app.Router()
 
 	body := `{"profile":"nonexistent-profile"}`
@@ -153,7 +153,7 @@ func TestCreateSessionWithProfile_MissingMountPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
 	h := app.Router()
 
 	body := `{"profile":"bad-path-profile"}`

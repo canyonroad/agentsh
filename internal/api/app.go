@@ -44,6 +44,7 @@ type App struct {
 	broker   *events.Broker
 
 	apiKeyAuth *auth.APIKeyAuth
+	oidcAuth   *auth.OIDCAuth
 
 	approvals *approvals.Manager
 
@@ -56,7 +57,7 @@ type App struct {
 	policyLoader PolicyLoader
 }
 
-func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader) *App {
+func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader) *App {
 	// Apply EBPF map size overrides once per process (global maps); no-op if zero values.
 	ebpftrace.SetMapSizeOverrides(
 		uint32(cfg.Sandbox.Network.EBPF.MapAllowEntries),
@@ -80,6 +81,7 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		policy:       engine,
 		broker:       broker,
 		apiKeyAuth:   apiKeyAuth,
+		oidcAuth:     oidcAuth,
 		approvals:    approvalsMgr,
 		metrics:      metricsCollector,
 		platform:     plat,
@@ -193,29 +195,117 @@ func (a *App) authMiddleware(next http.Handler) http.Handler {
 }
 
 func (a *App) authMiddlewareProtected(next http.Handler) http.Handler {
-	if strings.EqualFold(a.cfg.Auth.Type, "api_key") {
-		if a.apiKeyAuth == nil {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-					"error": "api key auth enabled but keys not loaded",
-				})
-			})
-		}
+	authType := strings.ToLower(a.cfg.Auth.Type)
+
+	switch authType {
+	case "api_key":
+		return a.apiKeyAuthHandler(next)
+	case "oidc":
+		return a.oidcAuthHandler(next)
+	case "hybrid":
+		return a.hybridAuthHandler(next)
+	default:
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			key := r.Header.Get(a.apiKeyAuth.HeaderName())
-			if key == "" || !a.apiKeyAuth.IsAllowed(key) {
-				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-				return
-			}
-			role := a.apiKeyAuth.RoleForKey(key)
-			ctx := context.WithValue(r.Context(), ctxKeyRole, role)
-			r = r.WithContext(ctx)
-			next.ServeHTTP(w, r)
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unsupported auth type"})
+		})
+	}
+}
+
+// apiKeyAuthHandler handles API key authentication.
+func (a *App) apiKeyAuthHandler(next http.Handler) http.Handler {
+	if a.apiKeyAuth == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error": "api key auth enabled but keys not loaded",
+			})
 		})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unsupported auth type"})
+		key := r.Header.Get(a.apiKeyAuth.HeaderName())
+		if key == "" || !a.apiKeyAuth.IsAllowed(key) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+			return
+		}
+		role := a.apiKeyAuth.RoleForKey(key)
+		ctx := context.WithValue(r.Context(), ctxKeyRole, role)
+		r = r.WithContext(ctx)
+		next.ServeHTTP(w, r)
 	})
+}
+
+// oidcAuthHandler handles OIDC Bearer token authentication.
+func (a *App) oidcAuthHandler(next http.Handler) http.Handler {
+	if a.oidcAuth == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error": "oidc auth enabled but not configured",
+			})
+		})
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := extractBearerToken(r)
+		if token == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "missing bearer token"})
+			return
+		}
+		claims, err := a.oidcAuth.ValidateToken(r.Context(), token)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid token"})
+			return
+		}
+		role := a.oidcAuth.RoleForClaims(claims)
+		ctx := context.WithValue(r.Context(), ctxKeyRole, role)
+		r = r.WithContext(ctx)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hybridAuthHandler tries API key first, then OIDC Bearer token.
+func (a *App) hybridAuthHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Try API key first if configured
+		if a.apiKeyAuth != nil {
+			key := r.Header.Get(a.apiKeyAuth.HeaderName())
+			if key != "" && a.apiKeyAuth.IsAllowed(key) {
+				role := a.apiKeyAuth.RoleForKey(key)
+				ctx := context.WithValue(r.Context(), ctxKeyRole, role)
+				r = r.WithContext(ctx)
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		// Try OIDC Bearer token
+		if a.oidcAuth != nil {
+			token := extractBearerToken(r)
+			if token != "" {
+				claims, err := a.oidcAuth.ValidateToken(r.Context(), token)
+				if err == nil {
+					role := a.oidcAuth.RoleForClaims(claims)
+					ctx := context.WithValue(r.Context(), ctxKeyRole, role)
+					r = r.WithContext(ctx)
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+
+		// Neither method succeeded
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+	})
+}
+
+// extractBearerToken extracts the token from the Authorization header.
+func extractBearerToken(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	if auth == "" {
+		return ""
+	}
+	const prefix = "Bearer "
+	if len(auth) < len(prefix) || !strings.EqualFold(auth[:len(prefix)], prefix) {
+		return ""
+	}
+	return strings.TrimSpace(auth[len(prefix):])
 }
 
 func (a *App) requireRoles(roles ...string) func(http.Handler) http.Handler {
