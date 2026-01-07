@@ -164,6 +164,79 @@ auth:
     allowed_groups: ["agentsh-operators"]
 ```
 
+### MCP Security
+
+agentsh provides comprehensive security controls for Model Context Protocol (MCP) tool invocations:
+
+#### Tool Whitelisting
+
+Policy-based control over which MCP tools can be invoked:
+
+```yaml
+sandbox:
+  mcp:
+    enforce_policy: true
+    fail_closed: true
+    tool_policy: allowlist
+    allowed_tools:
+      - server: "filesystem"
+        tool: "read_file"
+      - server: "github"
+        tool: "*"
+```
+
+| Policy Mode | Behavior |
+|-------------|----------|
+| `allowlist` | Only explicitly listed tools are permitted |
+| `denylist` | Listed tools are blocked, all others allowed |
+| `none` | No policy enforcement |
+
+#### Version Pinning
+
+Detect and optionally block MCP tool definition changes (rug pull detection):
+
+```yaml
+sandbox:
+  mcp:
+    version_pinning:
+      enabled: true
+      on_change: block  # block, alert, allow
+      auto_trust_first: true
+```
+
+CLI management:
+```bash
+agentsh mcp pins list
+agentsh mcp pins trust --server github --tool create_issue --hash sha256:...
+agentsh mcp pins reset --server github --tool create_issue
+```
+
+#### Rate Limiting
+
+Token bucket rate limiting for MCP calls and network requests:
+
+```yaml
+sandbox:
+  mcp:
+    rate_limits:
+      enabled: true
+      default_rpm: 120
+      default_burst: 20
+      per_server:
+        "slow-api":
+          calls_per_minute: 30
+          burst: 5
+  network:
+    rate_limits:
+      enabled: true
+      global_rpm: 600
+      global_burst: 50
+      per_domain:
+        "api.openai.com":
+          requests_per_minute: 60
+          burst: 10
+```
+
 ### LLM Proxy and Data Loss Prevention (DLP)
 
 agentsh includes an embedded HTTP proxy that intercepts all LLM API requests from agents:
