@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -197,30 +198,17 @@ func (a *OIDCAuth) PolicyForGroups(groups []string) string {
 	return ""
 }
 
-// RoleForClaims determines the role based on the claims.
-// Returns "admin" for users in admin groups, "approver" for approver groups,
-// and "agent" as the default for all other authenticated users.
-func (a *OIDCAuth) RoleForClaims(claims *OIDCClaims) string {
+// RoleForClaims determines the role based on claims.
+func (o *OIDCAuth) RoleForClaims(claims *OIDCClaims) string {
 	if claims == nil {
-		return ""
+		return "agent"
 	}
-
-	// Check for admin role based on groups
-	for _, group := range claims.Groups {
-		// Check if this group maps to an admin policy
-		if policy := a.groupPolicyMap[group]; policy == "admin" {
+	// Check for admin groups
+	for _, g := range claims.Groups {
+		if strings.Contains(strings.ToLower(g), "admin") {
 			return "admin"
 		}
 	}
-
-	// Check for approver role based on groups
-	for _, group := range claims.Groups {
-		if policy := a.groupPolicyMap[group]; policy == "approver" {
-			return "approver"
-		}
-	}
-
-	// Default role for authenticated users
 	return "agent"
 }
 

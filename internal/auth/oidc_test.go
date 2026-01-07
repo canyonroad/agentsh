@@ -76,20 +76,17 @@ func TestOIDCAuth_PolicyForGroups_NilAuth(t *testing.T) {
 
 func TestOIDCAuth_RoleForClaims(t *testing.T) {
 	tests := []struct {
-		name           string
-		groupPolicyMap map[string]string
-		claims         *OIDCClaims
-		want           string
+		name   string
+		claims *OIDCClaims
+		want   string
 	}{
 		{
-			name:           "nil claims returns empty",
-			groupPolicyMap: map[string]string{"admins": "admin"},
-			claims:         nil,
-			want:           "",
+			name:   "nil claims returns agent",
+			claims: nil,
+			want:   "agent",
 		},
 		{
-			name:           "admin group returns admin role",
-			groupPolicyMap: map[string]string{"admins": "admin", "developers": "default"},
+			name: "group containing admin returns admin role",
 			claims: &OIDCClaims{
 				Subject:   "user123",
 				Groups:    []string{"admins"},
@@ -98,18 +95,25 @@ func TestOIDCAuth_RoleForClaims(t *testing.T) {
 			want: "admin",
 		},
 		{
-			name:           "approver group returns approver role",
-			groupPolicyMap: map[string]string{"approvers": "approver", "developers": "default"},
+			name: "group with Admin (case-insensitive) returns admin role",
 			claims: &OIDCClaims{
 				Subject:   "user123",
-				Groups:    []string{"approvers"},
+				Groups:    []string{"SuperAdmins"},
 				ExpiresAt: time.Now().Add(time.Hour),
 			},
-			want: "approver",
+			want: "admin",
 		},
 		{
-			name:           "default group returns agent role",
-			groupPolicyMap: map[string]string{"admins": "admin", "developers": "default"},
+			name: "group with ADMIN (uppercase) returns admin role",
+			claims: &OIDCClaims{
+				Subject:   "user123",
+				Groups:    []string{"ADMIN-TEAM"},
+				ExpiresAt: time.Now().Add(time.Hour),
+			},
+			want: "admin",
+		},
+		{
+			name: "developers group returns agent role",
 			claims: &OIDCClaims{
 				Subject:   "user123",
 				Groups:    []string{"developers"},
@@ -118,8 +122,7 @@ func TestOIDCAuth_RoleForClaims(t *testing.T) {
 			want: "agent",
 		},
 		{
-			name:           "no groups returns agent role",
-			groupPolicyMap: map[string]string{"admins": "admin"},
+			name: "no groups returns agent role",
 			claims: &OIDCClaims{
 				Subject:   "user123",
 				Groups:    []string{},
@@ -128,31 +131,19 @@ func TestOIDCAuth_RoleForClaims(t *testing.T) {
 			want: "agent",
 		},
 		{
-			name:           "unmapped groups returns agent role",
-			groupPolicyMap: map[string]string{"admins": "admin"},
+			name: "mixed groups with admin returns admin",
 			claims: &OIDCClaims{
 				Subject:   "user123",
-				Groups:    []string{"users", "guests"},
-				ExpiresAt: time.Now().Add(time.Hour),
-			},
-			want: "agent",
-		},
-		{
-			name:           "admin takes precedence over approver",
-			groupPolicyMap: map[string]string{"admins": "admin", "approvers": "approver"},
-			claims: &OIDCClaims{
-				Subject:   "user123",
-				Groups:    []string{"approvers", "admins"},
+				Groups:    []string{"users", "platform-admin", "guests"},
 				ExpiresAt: time.Now().Add(time.Hour),
 			},
 			want: "admin",
 		},
 		{
-			name:           "empty group policy map returns agent",
-			groupPolicyMap: map[string]string{},
+			name: "approvers group returns agent (no approver role)",
 			claims: &OIDCClaims{
 				Subject:   "user123",
-				Groups:    []string{"admins"},
+				Groups:    []string{"approvers"},
 				ExpiresAt: time.Now().Add(time.Hour),
 			},
 			want: "agent",
@@ -161,9 +152,7 @@ func TestOIDCAuth_RoleForClaims(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			auth := &OIDCAuth{
-				groupPolicyMap: tt.groupPolicyMap,
-			}
+			auth := &OIDCAuth{}
 
 			got := auth.RoleForClaims(tt.claims)
 			assert.Equal(t, tt.want, got)
