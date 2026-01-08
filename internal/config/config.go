@@ -186,6 +186,31 @@ type SessionsConfig struct {
 	DefaultTimeout     string `yaml:"default_timeout"`
 	DefaultIdleTimeout string `yaml:"default_idle_timeout"`
 	CleanupInterval    string `yaml:"cleanup_interval"`
+
+	// Checkpoints configures workspace checkpoint/rollback functionality.
+	Checkpoints CheckpointConfig `yaml:"checkpoints"`
+}
+
+// CheckpointConfig configures workspace checkpoint and rollback.
+type CheckpointConfig struct {
+	Enabled       bool                    `yaml:"enabled"`
+	StorageDir    string                  `yaml:"storage_dir"`    // Directory for checkpoint storage
+	MaxPerSession int                     `yaml:"max_per_session"` // Max checkpoints per session (0 = unlimited)
+	MaxSizeMB     int                     `yaml:"max_size_mb"`     // Max total size per session (0 = unlimited)
+	AutoCheckpoint AutoCheckpointConfig   `yaml:"auto_checkpoint"`
+	Retention     CheckpointRetentionConfig `yaml:"retention"`
+}
+
+// AutoCheckpointConfig configures automatic checkpointing before risky commands.
+type AutoCheckpointConfig struct {
+	Enabled  bool     `yaml:"enabled"`
+	Triggers []string `yaml:"triggers"` // Commands that trigger auto-checkpoint (e.g., "rm", "mv")
+}
+
+// CheckpointRetentionConfig configures checkpoint cleanup.
+type CheckpointRetentionConfig struct {
+	MaxAge          string `yaml:"max_age"`          // Duration string, e.g., "24h"
+	CleanupInterval string `yaml:"cleanup_interval"` // How often to run cleanup
 }
 
 type SandboxConfig struct {
