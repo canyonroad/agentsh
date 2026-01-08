@@ -73,19 +73,20 @@ builds:
       - -s -w
 
   # macwrap: XPC sandbox wrapper for macOS (requires CGO)
-  # NOTE: This build requires macOS with Xcode to compile
-  - id: macwrap-darwin
-    main: ./cmd/agentsh-macwrap
-    binary: agentsh-macwrap
-    env:
-      - CGO_ENABLED=1
-    goos:
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    ldflags:
-      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+  # NOTE: This build requires macOS with Xcode to compile - SKIPPED in CI
+  # Build locally with: CGO_ENABLED=1 go build -o bin/agentsh-macwrap ./cmd/agentsh-macwrap
+  # - id: macwrap-darwin
+  #   main: ./cmd/agentsh-macwrap
+  #   binary: agentsh-macwrap
+  #   env:
+  #     - CGO_ENABLED=1
+  #   goos:
+  #     - darwin
+  #   goarch:
+  #     - amd64
+  #     - arm64
+  #   ldflags:
+  #     - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
 
 archives:
   - id: agentsh-linux
@@ -107,7 +108,7 @@ archives:
     ids:
       - agentsh-darwin
       - shim-darwin
-      - macwrap-darwin
+      # macwrap-darwin excluded - requires native macOS build
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_darwin_{{ .Arch }}"
     files:
@@ -205,7 +206,7 @@ homebrew_casks:
     ids:
       - agentsh-darwin
       - shim-darwin
-      - macwrap-darwin
+      # macwrap-darwin excluded - requires native macOS build
     # Repository to push the cask to
     repository:
       owner: agentsh
@@ -222,7 +223,7 @@ homebrew_casks:
     binaries:
       - agentsh
       - agentsh-shell-shim
-      - agentsh-macwrap
+      # agentsh-macwrap excluded - requires native macOS build
     # Post-install hook to remove quarantine (unsigned binary)
     hooks:
       post:
