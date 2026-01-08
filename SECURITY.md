@@ -20,7 +20,7 @@ agentsh is designed to mitigate risks from **semi-trusted AI agents** operating 
 | Unauthorized network access | eBPF/policy-based network filtering |
 | Dangerous command execution | Command allowlists with args pattern matching |
 | Resource exhaustion | cgroup limits (memory, CPU, PIDs) |
-| Destructive operations | Approval workflows, soft-delete to trash |
+| Destructive operations | Approval workflows, soft-delete to trash, checkpoint/rollback |
 | PII leakage to LLMs | Embedded proxy with DLP redaction before requests reach provider |
 | Untracked LLM usage | Request/response logging with token usage for cost attribution |
 
@@ -130,6 +130,79 @@ Risky operations can require human approval before execution. agentsh supports m
 - WebAuthn provides cryptographic proof of human presence
 
 See [Approval Authentication](docs/approval-auth.md) for detailed configuration.
+
+### Checkpoint and Rollback
+
+agentsh provides workspace checkpoint and rollback capabilities for recovery from destructive operations:
+
+**Core Features:**
+- **Copy-on-write snapshots**: File contents backed up before risky commands
+- **Hash verification**: SHA-256 verification ensures rollback integrity
+- **Auto-checkpoint triggers**: Automatic checkpoints before rm, mv, git reset, etc.
+- **Diff inspection**: Compare current workspace to checkpoint state
+- **Purge management**: Retention policies for storage management
+
+**CLI Commands:**
+```bash
+# Create manual checkpoint
+agentsh checkpoint create --session <id> --workspace /path
+
+# List checkpoints
+agentsh checkpoint list --session <id>
+
+# Show checkpoint details and diff
+agentsh checkpoint show <cp-id> --session <id> --workspace /path --diff
+
+# Preview rollback (dry-run)
+agentsh checkpoint rollback <cp-id> --session <id> --workspace /path --dry-run
+
+# Perform rollback
+agentsh checkpoint rollback <cp-id> --session <id> --workspace /path
+
+# Purge old checkpoints
+agentsh checkpoint purge --session <id> --older-than 24h --keep 10
+```
+
+**Auto-Checkpoint Configuration:**
+```yaml
+sessions:
+  checkpoints:
+    enabled: true
+    storage_dir: /var/lib/agentsh/checkpoints
+    max_per_session: 50
+    auto_checkpoint:
+      enabled: true
+      triggers:
+        - rm
+        - mv
+        - git reset
+        - git checkout
+        - git clean
+        - git stash
+    retention:
+      max_age: 168h  # 7 days
+```
+
+**Default Auto-Checkpoint Triggers:**
+| Command | Risk |
+|---------|------|
+| `rm`, `rmdir`, `unlink` | File deletion |
+| `mv`, `rename` | File movement (source lost) |
+| `git reset` | Uncommitted changes lost |
+| `git checkout` | Local modifications discarded |
+| `git clean` | Untracked files deleted |
+| `git stash` | Changes stashed (may be forgotten) |
+
+**Safety Features:**
+- Skips files larger than 100MB by default
+- Skips hidden directories (.git, etc.)
+- Dry-run mode for rollback preview
+- Hash verification prevents corrupted restores
+
+**Limitations:**
+- Checkpoints only cover files, not external state (databases, APIs)
+- Large workspaces may require significant storage
+- Cannot checkpoint files outside the workspace
 
 ### Authentication and Authorization
 
@@ -725,11 +798,14 @@ Before deploying agentsh in production:
 - [ ] Configure DLP patterns for organization-specific sensitive data
 - [ ] Enable network rules to force LLM traffic through the proxy
 - [ ] Review LLM usage reports for unexpected token consumption
+- [ ] Enable checkpoint/rollback for sessions running destructive commands
+- [ ] Configure auto-checkpoint triggers appropriate for your workload
 
 ## Changelog
 
 | Date | Change |
 |------|--------|
+| 2026-01-07 | Added checkpoint/rollback for workspace state recovery with auto-checkpoint triggers |
 | 2026-01-03 | Wired up unix socket enforcement via seccomp user-notify (Linux only) |
 | 2026-01-03 | Implemented macOS sandbox-exec wrapper with SBPL profiles |
 | 2026-01-03 | Implemented FUSE event emission for file operation monitoring |

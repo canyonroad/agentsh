@@ -357,6 +357,36 @@ See [CI/CD Integration Guide](docs/cicd-integration.md) for pipeline examples.
 
 ---
 
+### Workspace Checkpoints
+
+Create snapshots of workspace state for recovery from destructive operations:
+
+```bash
+# Create a checkpoint before risky operations
+agentsh checkpoint create --session $SID --workspace /workspace --reason "before cleanup"
+
+# List checkpoints for a session
+agentsh checkpoint list --session $SID
+
+# Show what changed since a checkpoint
+agentsh checkpoint show <cp-id> --session $SID --workspace /workspace --diff
+
+# Preview what rollback would restore (dry-run)
+agentsh checkpoint rollback <cp-id> --session $SID --workspace /workspace --dry-run
+
+# Restore workspace to checkpoint state
+agentsh checkpoint rollback <cp-id> --session $SID --workspace /workspace
+
+# Clean up old checkpoints
+agentsh checkpoint purge --session $SID --older-than 24h --keep 5
+```
+
+**Auto-checkpoint:** When enabled, agentsh automatically creates checkpoints before risky commands (`rm`, `mv`, `git reset`, `git checkout`, etc.). Configure in `sessions.checkpoints.auto_checkpoint`.
+
+See [SECURITY.md](SECURITY.md#checkpoint-and-rollback) for full configuration options.
+
+---
+
 ### LLM Proxy and DLP
 
 agentsh includes an embedded proxy that intercepts all LLM API requests from agents:
