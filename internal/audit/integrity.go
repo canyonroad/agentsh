@@ -2,6 +2,7 @@
 package audit
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -14,6 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/agentsh/agentsh/internal/audit/kms"
+	"github.com/agentsh/agentsh/internal/config"
 )
 
 // IntegrityMetadata contains the tamper-proof chain fields for an audit entry.
@@ -102,6 +106,84 @@ func LoadKey(keyFile, keyEnv string) ([]byte, error) {
 	}
 
 	return nil, errors.New("no key source specified: provide key_file or key_env")
+}
+
+// NewKMSProvider creates a KMS provider from configuration.
+func NewKMSProvider(cfg config.AuditIntegrityConfig) (kms.Provider, error) {
+	// Determine key source
+	source := cfg.KeySource
+	if source == "" {
+		// Legacy: infer from which fields are set
+		if cfg.KeyFile != "" {
+			source = "file"
+		} else if cfg.KeyEnv != "" {
+			source = "env"
+		} else if cfg.AWSKMS.KeyID != "" {
+			source = "aws_kms"
+		} else if cfg.AzureKeyVault.VaultURL != "" {
+			source = "azure_keyvault"
+		} else if cfg.HashiCorpVault.Address != "" {
+			source = "hashicorp_vault"
+		} else if cfg.GCPKMS.KeyName != "" {
+			source = "gcp_kms"
+		}
+	}
+
+	kmsCfg := kms.Config{
+		Source:  source,
+		KeyFile: cfg.KeyFile,
+		KeyEnv:  cfg.KeyEnv,
+
+		AWSKeyID:            cfg.AWSKMS.KeyID,
+		AWSRegion:           cfg.AWSKMS.Region,
+		AWSEncryptedDEKFile: cfg.AWSKMS.EncryptedDEKFile,
+
+		AzureVaultURL:   cfg.AzureKeyVault.VaultURL,
+		AzureKeyName:    cfg.AzureKeyVault.KeyName,
+		AzureKeyVersion: cfg.AzureKeyVault.KeyVersion,
+
+		VaultAddress:    cfg.HashiCorpVault.Address,
+		VaultAuthMethod: cfg.HashiCorpVault.AuthMethod,
+		VaultTokenFile:  cfg.HashiCorpVault.TokenFile,
+		VaultK8sRole:    cfg.HashiCorpVault.K8sRole,
+		VaultAppRoleID:  cfg.HashiCorpVault.AppRoleID,
+		VaultSecretID:   cfg.HashiCorpVault.SecretID,
+		VaultSecretPath: cfg.HashiCorpVault.SecretPath,
+		VaultKeyField:   cfg.HashiCorpVault.KeyField,
+
+		GCPKeyName:          cfg.GCPKMS.KeyName,
+		GCPEncryptedDEKFile: cfg.GCPKMS.EncryptedDEKFile,
+	}
+
+	return kms.NewProvider(kmsCfg)
+}
+
+// NewIntegrityChainFromConfig creates an integrity chain from configuration.
+// It uses the configured KMS provider to retrieve the HMAC key.
+func NewIntegrityChainFromConfig(ctx context.Context, cfg config.AuditIntegrityConfig) (*IntegrityChain, kms.Provider, error) {
+	provider, err := NewKMSProvider(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create KMS provider: %w", err)
+	}
+
+	key, err := provider.GetKey(ctx)
+	if err != nil {
+		provider.Close()
+		return nil, nil, fmt.Errorf("get key from %s: %w", provider.Name(), err)
+	}
+
+	algorithm := cfg.Algorithm
+	if algorithm == "" {
+		algorithm = "hmac-sha256"
+	}
+
+	chain, err := NewIntegrityChainWithAlgorithm(key, algorithm)
+	if err != nil {
+		provider.Close()
+		return nil, nil, err
+	}
+
+	return chain, provider, nil
 }
 
 // Wrap adds integrity metadata to an event payload.

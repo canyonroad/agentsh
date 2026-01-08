@@ -508,6 +508,7 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 ## References
 
 * **Security & threat model:** [`SECURITY.md`](SECURITY.md) - what agentsh protects against, known limitations, operator checklist
+* **External KMS:** [`SECURITY.md#external-kms-integration`](SECURITY.md#external-kms-integration) - AWS KMS, Azure Key Vault, HashiCorp Vault, GCP Cloud KMS for audit integrity keys
 * Config template: [`configs/server-config.yaml`](configs/server-config.yaml)
 * Default policy: [`configs/policies/default.yaml`](configs/policies/default.yaml)
 * Example Dockerfile (with shim): [`Dockerfile.example`](Dockerfile.example)
