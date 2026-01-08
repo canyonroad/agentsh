@@ -204,6 +204,75 @@ sessions:
 - Large workspaces may require significant storage
 - Cannot checkpoint files outside the workspace
 
+### External KMS Integration
+
+agentsh supports external Key Management Systems for HMAC keys used in audit integrity chains:
+
+**Supported Providers:**
+| Provider | Key Source | Envelope Encryption |
+|----------|------------|---------------------|
+| File/Env | Local file or environment variable | No |
+| AWS KMS | AWS Key Management Service | Yes (GenerateDataKey) |
+| Azure Key Vault | Azure Key Vault secrets | No (direct secret) |
+| HashiCorp Vault | Vault KV v1/v2 secrets | No (direct secret) |
+| GCP Cloud KMS | Google Cloud KMS | Yes (Encrypt/Decrypt) |
+
+**Configuration Examples:**
+
+```yaml
+# AWS KMS (envelope encryption)
+audit:
+  integrity:
+    enabled: true
+    key_source: aws_kms
+    aws_kms:
+      key_id: "arn:aws:kms:us-east-1:123456789:key/abc-123"
+      region: us-east-1
+      encrypted_dek_file: /etc/agentsh/audit-dek.enc  # Cache encrypted DEK
+
+# Azure Key Vault
+audit:
+  integrity:
+    enabled: true
+    key_source: azure_keyvault
+    azure_keyvault:
+      vault_url: "https://myvault.vault.azure.net"
+      key_name: "agentsh-audit-key"
+      key_version: ""  # Empty = latest
+
+# HashiCorp Vault
+audit:
+  integrity:
+    enabled: true
+    key_source: hashicorp_vault
+    hashicorp_vault:
+      address: "https://vault.example.com:8200"
+      auth_method: kubernetes  # token, kubernetes, approle
+      kubernetes_role: agentsh
+      secret_path: "secret/data/agentsh/audit-key"
+      key_field: "hmac_key"
+
+# GCP Cloud KMS
+audit:
+  integrity:
+    enabled: true
+    key_source: gcp_kms
+    gcp_kms:
+      key_name: "projects/my-proj/locations/us/keyRings/agentsh/cryptoKeys/audit"
+      encrypted_dek_file: /etc/agentsh/audit-dek.enc
+```
+
+**Authentication:**
+- **AWS**: Uses default credential chain (env vars, shared config, IAM role)
+- **Azure**: Uses DefaultAzureCredential (managed identity, CLI, env vars)
+- **Vault**: Supports token, Kubernetes, and AppRole authentication
+- **GCP**: Uses Application Default Credentials
+
+**Key Caching:**
+- Keys are cached in memory after first retrieval
+- For envelope encryption (AWS/GCP), encrypted DEK can be cached to disk
+- Key refresh requires service restart
+
 ### Authentication and Authorization
 
 agentsh supports multiple authentication methods for API access:
@@ -800,11 +869,13 @@ Before deploying agentsh in production:
 - [ ] Review LLM usage reports for unexpected token consumption
 - [ ] Enable checkpoint/rollback for sessions running destructive commands
 - [ ] Configure auto-checkpoint triggers appropriate for your workload
+- [ ] For audit integrity, consider using external KMS (AWS/Azure/Vault/GCP) instead of local key files
 
 ## Changelog
 
 | Date | Change |
 |------|--------|
+| 2026-01-07 | Added external KMS integration for audit integrity keys (AWS KMS, Azure Key Vault, HashiCorp Vault, GCP Cloud KMS) |
 | 2026-01-07 | Added checkpoint/rollback for workspace state recovery with auto-checkpoint triggers |
 | 2026-01-03 | Wired up unix socket enforcement via seccomp user-notify (Linux only) |
 | 2026-01-03 | Implemented macOS sandbox-exec wrapper with SBPL profiles |

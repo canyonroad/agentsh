@@ -158,9 +158,58 @@ type AuditWebhookConfig struct {
 // AuditIntegrityConfig configures tamper-proof audit logging.
 type AuditIntegrityConfig struct {
 	Enabled   bool   `yaml:"enabled"`
-	KeyFile   string `yaml:"key_file"`  // Path to HMAC key file
-	KeyEnv    string `yaml:"key_env"`   // Or env var name containing key
 	Algorithm string `yaml:"algorithm"` // hmac-sha256 (default), hmac-sha512
+
+	// Key source (mutually exclusive options)
+	KeySource string `yaml:"key_source"` // file, env, aws_kms, azure_keyvault, hashicorp_vault, gcp_kms
+
+	// File/Env source (legacy, still supported)
+	KeyFile string `yaml:"key_file"` // Path to HMAC key file
+	KeyEnv  string `yaml:"key_env"`  // Or env var name containing key
+
+	// AWS KMS configuration
+	AWSKMS AWSKMSConfig `yaml:"aws_kms"`
+
+	// Azure Key Vault configuration
+	AzureKeyVault AzureKeyVaultConfig `yaml:"azure_keyvault"`
+
+	// HashiCorp Vault configuration
+	HashiCorpVault HashiCorpVaultConfig `yaml:"hashicorp_vault"`
+
+	// GCP Cloud KMS configuration
+	GCPKMS GCPKMSConfig `yaml:"gcp_kms"`
+}
+
+// AWSKMSConfig configures AWS KMS integration.
+type AWSKMSConfig struct {
+	KeyID            string `yaml:"key_id"`             // KMS key ARN or alias
+	Region           string `yaml:"region"`             // AWS region
+	EncryptedDEKFile string `yaml:"encrypted_dek_file"` // Optional path to cache encrypted DEK
+}
+
+// AzureKeyVaultConfig configures Azure Key Vault integration.
+type AzureKeyVaultConfig struct {
+	VaultURL   string `yaml:"vault_url"`   // Vault URL (e.g., https://myvault.vault.azure.net)
+	KeyName    string `yaml:"key_name"`    // Secret name in vault
+	KeyVersion string `yaml:"key_version"` // Optional version (empty = latest)
+}
+
+// HashiCorpVaultConfig configures HashiCorp Vault integration.
+type HashiCorpVaultConfig struct {
+	Address    string `yaml:"address"`     // Vault address
+	AuthMethod string `yaml:"auth_method"` // token, kubernetes, approle
+	TokenFile  string `yaml:"token_file"`  // Path to token file (for token auth)
+	K8sRole    string `yaml:"kubernetes_role"` // Role name (for kubernetes auth)
+	AppRoleID  string `yaml:"approle_id"`  // Role ID (for approle auth)
+	SecretID   string `yaml:"secret_id"`   // Secret ID (for approle auth, or use VAULT_SECRET_ID env)
+	SecretPath string `yaml:"secret_path"` // Path to secret (e.g., secret/data/agentsh/audit-key)
+	KeyField   string `yaml:"key_field"`   // Field name within secret (default: "key")
+}
+
+// GCPKMSConfig configures GCP Cloud KMS integration.
+type GCPKMSConfig struct {
+	KeyName          string `yaml:"key_name"`           // Full key resource name
+	EncryptedDEKFile string `yaml:"encrypted_dek_file"` // Optional path to cache encrypted DEK
 }
 
 // AuditEncryptionConfig configures encryption at rest.
