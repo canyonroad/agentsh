@@ -42,6 +42,7 @@ type OIDCAuth struct {
 	claimMappings  config.OIDCClaimMappings
 	allowedGroups  []string
 	groupPolicyMap map[string]string
+	groupRoleMap   map[string]string
 
 	mu    sync.RWMutex
 	cache map[string]*cachedToken
@@ -49,7 +50,7 @@ type OIDCAuth struct {
 
 // NewOIDCAuth creates a new OIDC authenticator.
 // It connects to the OIDC provider to fetch the JWKS for token validation.
-func NewOIDCAuth(ctx context.Context, issuer, clientID, audience string, mappings config.OIDCClaimMappings, allowedGroups []string, groupPolicyMap map[string]string) (*OIDCAuth, error) {
+func NewOIDCAuth(ctx context.Context, issuer, clientID, audience string, mappings config.OIDCClaimMappings, allowedGroups []string, groupPolicyMap, groupRoleMap map[string]string) (*OIDCAuth, error) {
 	if issuer == "" {
 		return nil, fmt.Errorf("OIDC issuer is required")
 	}
@@ -90,8 +91,19 @@ func NewOIDCAuth(ctx context.Context, issuer, clientID, audience string, mapping
 		claimMappings:  mappings,
 		allowedGroups:  allowedGroups,
 		groupPolicyMap: groupPolicyMap,
+		groupRoleMap:   groupRoleMap,
 		cache:          make(map[string]*cachedToken),
 	}, nil
+}
+
+// WarnIfNoRoleMap logs a warning if OIDC is configured without a group_role_map.
+// This should be called during server startup to alert administrators.
+func (o *OIDCAuth) WarnIfNoRoleMap() string {
+	if o.groupRoleMap == nil || len(o.groupRoleMap) == 0 {
+		return "WARNING: OIDC auth configured without group_role_map - all users will have 'agent' role. " +
+			"Configure auth.oidc.group_role_map to grant admin/approver roles."
+	}
+	return ""
 }
 
 // ValidateToken validates a JWT token and returns the extracted claims.
@@ -209,23 +221,42 @@ func (a *OIDCAuth) PolicyForGroups(groups []string) string {
 	return ""
 }
 
-// RoleForClaims determines the role based on claims.
+// RoleForClaims determines the role based on claims using explicit group-to-role mappings.
+// If no mapping is found, returns "agent" as the default role.
+// Role values are normalized to lowercase for consistent comparison.
 func (o *OIDCAuth) RoleForClaims(claims *OIDCClaims) string {
 	if claims == nil {
 		return "agent"
 	}
-	// Check for admin groups
-	for _, g := range claims.Groups {
-		if strings.Contains(strings.ToLower(g), "admin") {
-			return "admin"
+
+	// Use explicit group-to-role mappings if configured
+	if o.groupRoleMap != nil && len(o.groupRoleMap) > 0 {
+		// Check groups in order, return first matching role
+		// Priority: admin > approver > agent
+		// Normalize role values to lowercase for consistent comparison
+		for _, g := range claims.Groups {
+			if role, ok := o.groupRoleMap[g]; ok {
+				if strings.ToLower(role) == "admin" {
+					return "admin"
+				}
+			}
+		}
+		for _, g := range claims.Groups {
+			if role, ok := o.groupRoleMap[g]; ok {
+				if strings.ToLower(role) == "approver" {
+					return "approver"
+				}
+			}
+		}
+		for _, g := range claims.Groups {
+			if role, ok := o.groupRoleMap[g]; ok {
+				// Return normalized role value
+				return strings.ToLower(role)
+			}
 		}
 	}
-	// Check for approver groups
-	for _, g := range claims.Groups {
-		if strings.Contains(strings.ToLower(g), "approver") {
-			return "approver"
-		}
-	}
+
+	// No explicit mappings or no match found - return default role
 	return "agent"
 }
 
@@ -253,10 +284,17 @@ func (a *OIDCAuth) InjectTokenForTesting(token string, claims *OIDCClaims) {
 }
 
 // NewOIDCAuthForTesting creates an OIDCAuth suitable for testing without
-// connecting to an actual OIDC provider.
+// connecting to an actual OIDC provider. Includes default role mappings
+// for common test groups (admins, approvers, developers).
 func NewOIDCAuthForTesting() *OIDCAuth {
 	return &OIDCAuth{
 		issuer: "https://test.example.com",
 		cache:  make(map[string]*cachedToken),
+		// Default role mappings for testing - maps common group names to roles
+		groupRoleMap: map[string]string{
+			"admins":    "admin",
+			"approvers": "approver",
+			"agents":    "agent",
+		},
 	}
 }

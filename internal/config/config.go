@@ -110,6 +110,7 @@ type OIDCConfig struct {
 	ClaimMappings  OIDCClaimMappings `yaml:"claim_mappings"`
 	AllowedGroups  []string          `yaml:"allowed_groups"`   // Groups allowed to access
 	GroupPolicyMap map[string]string `yaml:"group_policy_map"` // group -> policy name
+	GroupRoleMap   map[string]string `yaml:"group_role_map"`   // group -> role (admin, approver, agent)
 }
 
 // OIDCClaimMappings maps OIDC claims to agentsh fields.

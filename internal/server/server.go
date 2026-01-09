@@ -184,10 +184,15 @@ func New(cfg *config.Config) (*Server, error) {
 			cfg.Auth.OIDC.ClaimMappings,
 			cfg.Auth.OIDC.AllowedGroups,
 			cfg.Auth.OIDC.GroupPolicyMap,
+			cfg.Auth.OIDC.GroupRoleMap,
 		)
 		if err != nil {
 			_ = store.Close()
 			return nil, fmt.Errorf("initialize OIDC auth: %w", err)
+		}
+		// Warn if no role mappings configured (silent role downgrade protection)
+		if warning := oidcAuth.WarnIfNoRoleMap(); warning != "" {
+			fmt.Fprintf(os.Stderr, "%s\n", warning)
 		}
 	}
 

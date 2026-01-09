@@ -353,6 +353,8 @@ AgentshPreSetInfo(
     ULONG64 sessionToken;
     AGENTSH_DECISION decision;
     WCHAR pathBuffer[AGENTSH_MAX_PATH];
+    WCHAR renameDestBuffer[AGENTSH_MAX_PATH];
+    PCWSTR renameDest = NULL;
     FILE_INFORMATION_CLASS infoClass;
     AGENTSH_FILE_OP operation;
     ULONG processId = HandleToULong(PsGetCurrentProcessId());
@@ -378,6 +380,42 @@ AgentshPreSetInfo(
     } else if (infoClass == FileRenameInformation ||
                infoClass == FileRenameInformationEx) {
         operation = FILE_OP_RENAME;
+
+        // Extract rename destination from FILE_RENAME_INFORMATION structure
+        // For IRP_MJ_SET_INFORMATION, InfoBuffer may be a user-mode pointer.
+        // Only access it if the system has already captured it as a system buffer,
+        // or if we're at PASSIVE_LEVEL and can safely probe the buffer.
+        PVOID infoBuffer = Data->Iopb->Parameters.SetFileInformation.InfoBuffer;
+        ULONG bufferLength = Data->Iopb->Parameters.SetFileInformation.Length;
+
+        // Check if this is a system buffer (safe to access directly)
+        // FLTFL_CALLBACK_DATA_SYSTEM_BUFFER indicates the buffer is in system space
+        if ((Data->Flags & FLTFL_CALLBACK_DATA_SYSTEM_BUFFER) &&
+            infoBuffer != NULL &&
+            bufferLength >= sizeof(FILE_RENAME_INFORMATION)) {
+
+            PFILE_RENAME_INFORMATION renameInfo = (PFILE_RENAME_INFORMATION)infoBuffer;
+
+            if (renameInfo->FileNameLength > 0) {
+                // Validate FileNameLength doesn't exceed the buffer
+                // Buffer layout: FILE_RENAME_INFORMATION header + FileName array
+                ULONG maxFileNameBytes = bufferLength - FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName);
+                ULONG fileNameBytes = renameInfo->FileNameLength;
+
+                if (fileNameBytes <= maxFileNameBytes) {
+                    SIZE_T charCount = fileNameBytes / sizeof(WCHAR);
+                    if (charCount >= AGENTSH_MAX_PATH) {
+                        charCount = AGENTSH_MAX_PATH - 1;
+                    }
+
+                    RtlCopyMemory(renameDestBuffer, renameInfo->FileName, charCount * sizeof(WCHAR));
+                    renameDestBuffer[charCount] = L'\0';
+                    renameDest = renameDestBuffer;
+                }
+            }
+        }
+        // If buffer is not a system buffer or validation fails, proceed without rename dest
+        // Policy can still check source path
     } else {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
@@ -398,13 +436,13 @@ AgentshPreSetInfo(
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
-    // Query policy (rename destination handling is simplified here)
+    // Query policy with rename destination if available
     if (AgentshQueryFilePolicy(
             sessionToken,
             HandleToULong(PsGetCurrentProcessId()),
             operation,
             pathBuffer,
-            NULL,  // TODO: Extract rename destination
+            renameDest,
             0,
             operation == FILE_OP_DELETE ? DELETE : 0,
             &decision))

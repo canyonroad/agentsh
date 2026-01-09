@@ -76,17 +76,40 @@ func TestOIDCAuth_PolicyForGroups_NilAuth(t *testing.T) {
 
 func TestOIDCAuth_RoleForClaims(t *testing.T) {
 	tests := []struct {
-		name   string
-		claims *OIDCClaims
-		want   string
+		name         string
+		groupRoleMap map[string]string
+		claims       *OIDCClaims
+		want         string
 	}{
 		{
-			name:   "nil claims returns agent",
-			claims: nil,
-			want:   "agent",
+			name:         "nil claims returns agent",
+			groupRoleMap: nil,
+			claims:       nil,
+			want:         "agent",
 		},
 		{
-			name: "group containing admin returns admin role",
+			name:         "no role map configured returns agent",
+			groupRoleMap: nil,
+			claims: &OIDCClaims{
+				Subject:   "user123",
+				Groups:    []string{"admins"},
+				ExpiresAt: time.Now().Add(time.Hour),
+			},
+			want: "agent",
+		},
+		{
+			name:         "empty role map returns agent",
+			groupRoleMap: map[string]string{},
+			claims: &OIDCClaims{
+				Subject:   "user123",
+				Groups:    []string{"admins"},
+				ExpiresAt: time.Now().Add(time.Hour),
+			},
+			want: "agent",
+		},
+		{
+			name:         "exact group match returns admin role",
+			groupRoleMap: map[string]string{"admins": "admin", "developers": "agent"},
 			claims: &OIDCClaims{
 				Subject:   "user123",
 				Groups:    []string{"admins"},
@@ -95,25 +118,28 @@ func TestOIDCAuth_RoleForClaims(t *testing.T) {
 			want: "admin",
 		},
 		{
-			name: "group with Admin (case-insensitive) returns admin role",
+			name:         "substring does NOT match - not-admins does not get admin",
+			groupRoleMap: map[string]string{"admins": "admin"},
 			claims: &OIDCClaims{
 				Subject:   "user123",
-				Groups:    []string{"SuperAdmins"},
+				Groups:    []string{"not-admins"},
 				ExpiresAt: time.Now().Add(time.Hour),
 			},
-			want: "admin",
+			want: "agent",
 		},
 		{
-			name: "group with ADMIN (uppercase) returns admin role",
+			name:         "case sensitive - Admins does not match admins",
+			groupRoleMap: map[string]string{"admins": "admin"},
 			claims: &OIDCClaims{
 				Subject:   "user123",
-				Groups:    []string{"ADMIN-TEAM"},
+				Groups:    []string{"Admins"},
 				ExpiresAt: time.Now().Add(time.Hour),
 			},
-			want: "admin",
+			want: "agent",
 		},
 		{
-			name: "developers group returns agent role",
+			name:         "developers group returns agent role",
+			groupRoleMap: map[string]string{"admins": "admin", "developers": "agent"},
 			claims: &OIDCClaims{
 				Subject:   "user123",
 				Groups:    []string{"developers"},
@@ -122,7 +148,8 @@ func TestOIDCAuth_RoleForClaims(t *testing.T) {
 			want: "agent",
 		},
 		{
-			name: "no groups returns agent role",
+			name:         "no groups returns agent role",
+			groupRoleMap: map[string]string{"admins": "admin"},
 			claims: &OIDCClaims{
 				Subject:   "user123",
 				Groups:    []string{},
@@ -131,16 +158,18 @@ func TestOIDCAuth_RoleForClaims(t *testing.T) {
 			want: "agent",
 		},
 		{
-			name: "mixed groups with admin returns admin",
+			name:         "admin takes precedence over other roles",
+			groupRoleMap: map[string]string{"admins": "admin", "approvers": "approver", "developers": "agent"},
 			claims: &OIDCClaims{
 				Subject:   "user123",
-				Groups:    []string{"users", "platform-admin", "guests"},
+				Groups:    []string{"developers", "approvers", "admins"},
 				ExpiresAt: time.Now().Add(time.Hour),
 			},
 			want: "admin",
 		},
 		{
-			name: "approvers group returns approver role",
+			name:         "approvers group returns approver role",
+			groupRoleMap: map[string]string{"admins": "admin", "approvers": "approver"},
 			claims: &OIDCClaims{
 				Subject:   "user123",
 				Groups:    []string{"approvers"},
@@ -149,37 +178,32 @@ func TestOIDCAuth_RoleForClaims(t *testing.T) {
 			want: "approver",
 		},
 		{
-			name: "group with Approver (case-insensitive) returns approver role",
+			name:         "approver takes precedence over agent",
+			groupRoleMap: map[string]string{"approvers": "approver", "developers": "agent"},
 			claims: &OIDCClaims{
 				Subject:   "user123",
-				Groups:    []string{"SuperApprovers"},
+				Groups:    []string{"developers", "approvers"},
 				ExpiresAt: time.Now().Add(time.Hour),
 			},
 			want: "approver",
 		},
 		{
-			name: "group with APPROVER (uppercase) returns approver role",
+			name:         "unmatched group returns agent",
+			groupRoleMap: map[string]string{"admins": "admin"},
 			claims: &OIDCClaims{
 				Subject:   "user123",
-				Groups:    []string{"APPROVER-TEAM"},
+				Groups:    []string{"random-group"},
 				ExpiresAt: time.Now().Add(time.Hour),
 			},
-			want: "approver",
-		},
-		{
-			name: "admin takes precedence over approver",
-			claims: &OIDCClaims{
-				Subject:   "user123",
-				Groups:    []string{"approvers", "admins"},
-				ExpiresAt: time.Now().Add(time.Hour),
-			},
-			want: "admin",
+			want: "agent",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			auth := &OIDCAuth{}
+			auth := &OIDCAuth{
+				groupRoleMap: tt.groupRoleMap,
+			}
 
 			got := auth.RoleForClaims(tt.claims)
 			assert.Equal(t, tt.want, got)

@@ -39,7 +39,7 @@ server:
 # =============================================================================
 
 auth:
-  # Authentication type: "none", "api_key", "jwt", "mtls"
+  # Authentication type: "none", "api_key", "oidc", "hybrid"
   # NOTE: local dev default is unauthenticated; server will refuse to bind to non-loopback addresses.
   type: "none"
   
@@ -55,13 +55,24 @@ auth:
     # gRPC clients should send the same key via metadata:
     # - "x-api-key" (default), or
     # - the configured header_name lowercased (e.g. "x-api-key").
-    
-  # JWT authentication (alternative)
-  jwt:
-    secret: ""                    # Or use jwks_url for public key
-    jwks_url: ""
-    issuer: ""
-    audience: ""
+
+  # OIDC authentication (for enterprise SSO)
+  # oidc:
+  #   issuer: "https://corp.okta.com"
+  #   client_id: "agentsh-server"
+  #   audience: "agentsh"
+  #   claim_mappings:
+  #     operator_id: "sub"
+  #     groups: "groups"
+  #   allowed_groups:
+  #     - "agentsh-users"
+  #   group_policy_map:
+  #     admins: "admin-policy"
+  #     developers: "default"
+  #   group_role_map:             # Explicit group-to-role mappings (required for admin/approver roles)
+  #     admins: "admin"           # Members of "admins" group get admin role
+  #     approvers: "approver"     # Members of "approvers" group get approver role
+  #     developers: "agent"       # Members of "developers" group get agent role
 
 # =============================================================================
 # LOGGING
