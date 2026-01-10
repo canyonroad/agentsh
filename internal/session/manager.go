@@ -61,6 +61,10 @@ type Session struct {
 
 	// TOTP approval support
 	TOTPSecret string // Secret for TOTP-based approval
+
+	// Project detection results
+	ProjectRoot string
+	GitRoot     string
 }
 
 type Manager struct {
@@ -218,16 +222,18 @@ func (s *Session) Snapshot() types.Session {
 	}
 
 	return types.Session{
-		ID:         s.ID,
-		State:      s.State,
-		CreatedAt:  s.CreatedAt,
-		Workspace:  s.Workspace,
-		Policy:     s.Policy,
-		Profile:    s.Profile,
-		Mounts:     mounts,
-		Cwd:        s.Cwd,
-		ProxyURL:   s.proxyURL,
-		TOTPSecret: s.TOTPSecret,
+		ID:          s.ID,
+		State:       s.State,
+		CreatedAt:   s.CreatedAt,
+		Workspace:   s.Workspace,
+		Policy:      s.Policy,
+		Profile:     s.Profile,
+		Mounts:      mounts,
+		Cwd:         s.Cwd,
+		ProxyURL:    s.proxyURL,
+		TOTPSecret:  s.TOTPSecret,
+		ProjectRoot: s.ProjectRoot,
+		GitRoot:     s.GitRoot,
 	}
 }
 

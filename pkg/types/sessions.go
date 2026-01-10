@@ -41,16 +41,18 @@ func (s SessionState) IsActive() bool {
 }
 
 type Session struct {
-	ID         string       `json:"id"`
-	State      SessionState `json:"state"`
-	CreatedAt  time.Time    `json:"created_at"`
-	Workspace  string       `json:"workspace"`
-	Policy     string       `json:"policy"`
-	Profile    string       `json:"profile,omitempty"`
-	Mounts     []MountInfo  `json:"mounts,omitempty"`
-	Cwd        string       `json:"cwd"`
-	ProxyURL   string       `json:"proxy_url,omitempty"`
-	TOTPSecret string       `json:"-"` // Hidden from JSON/API, used for TOTP approval mode
+	ID          string       `json:"id"`
+	State       SessionState `json:"state"`
+	CreatedAt   time.Time    `json:"created_at"`
+	Workspace   string       `json:"workspace"`
+	Policy      string       `json:"policy"`
+	Profile     string       `json:"profile,omitempty"`
+	Mounts      []MountInfo  `json:"mounts,omitempty"`
+	Cwd         string       `json:"cwd"`
+	ProxyURL    string       `json:"proxy_url,omitempty"`
+	TOTPSecret  string       `json:"-"` // Hidden from JSON/API, used for TOTP approval mode
+	ProjectRoot string       `json:"project_root,omitempty"`
+	GitRoot     string       `json:"git_root,omitempty"`
 }
 
 // MountInfo describes an active mount in a session.
@@ -101,10 +103,12 @@ type SessionResult struct {
 }
 
 type CreateSessionRequest struct {
-	ID        string `json:"id,omitempty"`
-	Workspace string `json:"workspace,omitempty"`
-	Policy    string `json:"policy,omitempty"`
-	Profile   string `json:"profile,omitempty"`
+	ID                string `json:"id,omitempty"`
+	Workspace         string `json:"workspace,omitempty"`
+	Policy            string `json:"policy,omitempty"`
+	Profile           string `json:"profile,omitempty"`
+	DetectProjectRoot *bool  `json:"detect_project_root,omitempty"` // Override server default
+	ProjectRoot       string `json:"project_root,omitempty"`        // Explicit override
 }
 
 type SessionPatchRequest struct {
