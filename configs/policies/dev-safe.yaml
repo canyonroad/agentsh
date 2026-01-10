@@ -4,7 +4,7 @@
 version: 1
 name: dev-safe
 description: |
-  Safe policy for local development. Allows workspace read/write,
+  Safe policy for local development. Allows project read/write,
   approves destructive operations, and blocks credential access.
 
 # =============================================================================
@@ -13,14 +13,14 @@ description: |
 
 file_rules:
   # ---------------------------------------------------------------------------
-  # Workspace - full access except deletes require approval
+  # Project - full access except deletes require approval
   # ---------------------------------------------------------------------------
 
-  - name: allow-workspace-read
-    description: Allow reading any file in workspace
+  - name: allow-project-read
+    description: Allow reading any file in project
     paths:
-      - "/workspace"
-      - "/workspace/**"
+      - "${PROJECT_ROOT}"
+      - "${PROJECT_ROOT}/**"
     operations:
       - read
       - open
@@ -29,11 +29,10 @@ file_rules:
       - readlink
     decision: allow
 
-  - name: allow-workspace-write
-    description: Allow writing/creating files in workspace
+  - name: allow-project-write
+    description: Allow writing/creating files in project
     paths:
-      - "/workspace"
-      - "/workspace/**"
+      - "${PROJECT_ROOT}/**"
     operations:
       - write
       - create
@@ -42,17 +41,32 @@ file_rules:
       - rename
     decision: allow
 
-  - name: approve-workspace-delete
-    description: Require approval for deleting files in workspace
+  - name: approve-project-delete
+    description: Require approval for deleting files in project
     paths:
-      - "/workspace"
-      - "/workspace/**"
+      - "${PROJECT_ROOT}/**"
     operations:
       - delete
       - rmdir
     decision: approve
     message: "Delete {{.Path}}?"
     timeout: 5m
+
+  # ---------------------------------------------------------------------------
+  # Git root for monorepo read access
+  # ---------------------------------------------------------------------------
+
+  - name: allow-git-root-read
+    description: Read-only access to git repository root (for monorepos)
+    paths:
+      - "${GIT_ROOT}/**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+      - readlink
+    decision: allow
 
   # ---------------------------------------------------------------------------
   # Temporary directories - full access
@@ -113,7 +127,7 @@ file_rules:
   - name: allow-npm-cache
     description: npm cache access
     paths:
-      - "/home/**/.npm/**"
+      - "${HOME}/.npm/**"
       - "/root/.npm/**"
     operations:
       - "*"
@@ -122,7 +136,7 @@ file_rules:
   - name: allow-pip-cache
     description: pip cache access
     paths:
-      - "/home/**/.cache/pip/**"
+      - "${HOME}/.cache/pip/**"
       - "/root/.cache/pip/**"
     operations:
       - "*"
@@ -131,7 +145,7 @@ file_rules:
   - name: allow-cargo-cache
     description: Cargo cache access
     paths:
-      - "/home/**/.cargo/**"
+      - "${HOME}/.cargo/**"
       - "/root/.cargo/**"
     operations:
       - "*"
@@ -140,7 +154,7 @@ file_rules:
   - name: allow-go-cache
     description: Go module cache access
     paths:
-      - "/home/**/go/**"
+      - "${HOME}/go/**"
       - "/root/go/**"
     operations:
       - "*"
@@ -153,7 +167,7 @@ file_rules:
   - name: deny-ssh-keys
     description: Block access to SSH keys
     paths:
-      - "/home/**/.ssh/**"
+      - "${HOME}/.ssh/**"
       - "/root/.ssh/**"
     operations:
       - "*"
@@ -162,7 +176,7 @@ file_rules:
   - name: deny-aws-credentials
     description: Block AWS credentials
     paths:
-      - "/home/**/.aws/**"
+      - "${HOME}/.aws/**"
       - "/root/.aws/**"
     operations:
       - "*"
@@ -171,9 +185,9 @@ file_rules:
   - name: deny-cloud-credentials
     description: Block cloud provider credentials
     paths:
-      - "/home/**/.gcloud/**"
-      - "/home/**/.azure/**"
-      - "/home/**/.config/gcloud/**"
+      - "${HOME}/.gcloud/**"
+      - "${HOME}/.azure/**"
+      - "${HOME}/.config/gcloud/**"
     operations:
       - "*"
     decision: deny
@@ -181,7 +195,7 @@ file_rules:
   - name: deny-git-credentials
     description: Block git credentials
     paths:
-      - "/home/**/.git-credentials"
+      - "${HOME}/.git-credentials"
       - "**/.netrc"
     operations:
       - "*"
