@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestLoad_ParsesServerTransportFields(t *testing.T) {
@@ -748,4 +750,41 @@ sandbox:
 	if mcp.RateLimits.Enabled {
 		t.Errorf("MCP.RateLimits.Enabled default should be false")
 	}
+}
+
+func TestPoliciesConfig_ShouldDetectProjectRoot(t *testing.T) {
+	t.Run("nil returns true (default)", func(t *testing.T) {
+		cfg := &PoliciesConfig{}
+		assert.True(t, cfg.ShouldDetectProjectRoot())
+	})
+
+	t.Run("explicit true returns true", func(t *testing.T) {
+		val := true
+		cfg := &PoliciesConfig{DetectProjectRoot: &val}
+		assert.True(t, cfg.ShouldDetectProjectRoot())
+	})
+
+	t.Run("explicit false returns false", func(t *testing.T) {
+		val := false
+		cfg := &PoliciesConfig{DetectProjectRoot: &val}
+		assert.False(t, cfg.ShouldDetectProjectRoot())
+	})
+}
+
+func TestPoliciesConfig_GetProjectMarkers(t *testing.T) {
+	t.Run("nil returns nil", func(t *testing.T) {
+		cfg := &PoliciesConfig{}
+		assert.Nil(t, cfg.GetProjectMarkers())
+	})
+
+	t.Run("empty returns nil", func(t *testing.T) {
+		cfg := &PoliciesConfig{ProjectMarkers: []string{}}
+		assert.Nil(t, cfg.GetProjectMarkers())
+	})
+
+	t.Run("custom markers returns markers", func(t *testing.T) {
+		markers := []string{".git", "Makefile"}
+		cfg := &PoliciesConfig{ProjectMarkers: markers}
+		assert.Equal(t, markers, cfg.GetProjectMarkers())
+	})
 }
