@@ -20,8 +20,8 @@ file_rules:
   - name: allow-workspace-read
     description: Allow reading files in workspace
     paths:
-      - "/workspace"
-      - "/workspace/**"
+      - "${PROJECT_ROOT}"
+      - "${PROJECT_ROOT}/**"
     operations:
       - read
       - open
@@ -33,8 +33,8 @@ file_rules:
   - name: allow-workspace-write
     description: Allow writing files in workspace
     paths:
-      - "/workspace"
-      - "/workspace/**"
+      - "${PROJECT_ROOT}"
+      - "${PROJECT_ROOT}/**"
     operations:
       - write
       - create
@@ -46,8 +46,8 @@ file_rules:
   - name: soft-delete-workspace
     description: Soft-delete files in workspace (recoverable)
     paths:
-      - "/workspace"
-      - "/workspace/**"
+      - "${PROJECT_ROOT}"
+      - "${PROJECT_ROOT}/**"
     operations:
       - delete
       - rmdir
@@ -107,7 +107,7 @@ file_rules:
   - name: approve-ssh-access
     description: Require approval for SSH key access
     paths:
-      - "/home/**/.ssh/**"
+      - "${HOME}/.ssh/**"
       - "/root/.ssh/**"
     operations:
       - "*"
@@ -118,7 +118,7 @@ file_rules:
   - name: approve-aws-credentials
     description: Require approval for AWS credentials
     paths:
-      - "/home/**/.aws/**"
+      - "${HOME}/.aws/**"
       - "/root/.aws/**"
     operations:
       - "*"
@@ -129,10 +129,10 @@ file_rules:
   - name: approve-cloud-credentials
     description: Require approval for cloud credentials
     paths:
-      - "/home/**/.gcloud/**"
-      - "/home/**/.azure/**"
-      - "/home/**/.config/gcloud/**"
-      - "/home/**/.kube/**"
+      - "${HOME}/.gcloud/**"
+      - "${HOME}/.azure/**"
+      - "${HOME}/.config/gcloud/**"
+      - "${HOME}/.kube/**"
     operations:
       - "*"
     decision: approve
@@ -153,7 +153,7 @@ file_rules:
   - name: approve-git-credentials
     description: Require approval for git credentials
     paths:
-      - "/home/**/.git-credentials"
+      - "${HOME}/.git-credentials"
       - "**/.netrc"
     operations:
       - "*"
@@ -168,9 +168,9 @@ file_rules:
   - name: allow-cache-read
     description: Read-only cache access
     paths:
-      - "/home/**/.npm/**"
-      - "/home/**/.cache/**"
-      - "/home/**/.cargo/**"
+      - "${HOME}/.npm/**"
+      - "${HOME}/.cache/**"
+      - "${HOME}/.cargo/**"
       - "/root/.npm/**"
       - "/root/.cache/**"
       - "/root/.cargo/**"
