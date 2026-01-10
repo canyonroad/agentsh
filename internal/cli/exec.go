@@ -27,6 +27,8 @@ func newExecCmd() *cobra.Command {
 	var output string
 	var events string
 	var root string
+	var noDetectRoot bool
+	var projectRoot string
 	c := &cobra.Command{
 		Use:   "exec [SESSION_ID] -- COMMAND [ARGS...]",
 		Short: "Execute a command in a session",
@@ -80,6 +82,19 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 				autoCreateRoot, _ = os.Getwd()
 			}
 
+			// Build CreateSessionRequest for auto-creating sessions
+			createReq := types.CreateSessionRequest{
+				ID:        sessionID,
+				Workspace: autoCreateRoot,
+			}
+			if noDetectRoot {
+				falseVal := false
+				createReq.DetectProjectRoot = &falseVal
+			}
+			if projectRoot != "" {
+				createReq.ProjectRoot = projectRoot
+			}
+
 			if pty {
 				if req.StreamOutput {
 					return fmt.Errorf("--pty and --stream are mutually exclusive")
@@ -96,6 +111,8 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 					Timeout:        req.Timeout,
 					Stdin:          req.Stdin,
 					AutoCreateRoot: autoCreateRoot,
+					NoDetectRoot:   noDetectRoot,
+					ProjectRoot:    projectRoot,
 				})
 			}
 
@@ -111,7 +128,7 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 			}
 
 			if req.StreamOutput {
-				return execStream(cmd, cl, cfg.serverAddr, sessionID, req, outMode, autoCreateRoot)
+				return execStream(cmd, cl, cfg.serverAddr, sessionID, req, outMode, createReq)
 			}
 
 			resp, err := cl.Exec(cmd.Context(), sessionID, req)
@@ -129,8 +146,8 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 					return ok && st.Code() == codes.NotFound
 				}
 				if (errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found")) || grpcNotFound(err) {
-					if autoCreateRoot != "" {
-						if _, createErr := cl.CreateSessionWithID(cmd.Context(), sessionID, autoCreateRoot, ""); createErr == nil {
+					if createReq.Workspace != "" {
+						if _, createErr := cl.CreateSessionWithRequest(cmd.Context(), createReq); createErr == nil {
 							resp, err = cl.Exec(cmd.Context(), sessionID, req)
 						}
 					}
@@ -173,10 +190,12 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 	c.Flags().StringVar(&output, "output", getenvDefault("AGENTSH_OUTPUT", "shell"), "Output format: shell|json")
 	c.Flags().StringVar(&events, "events", getenvDefault("AGENTSH_EVENTS", ""), "Events to include in response: all|summary|blocked|none (default depends on --output)")
 	c.Flags().StringVar(&root, "root", "", "Root directory for auto-creating session if it doesn't exist (defaults to $PWD)")
+	c.Flags().BoolVar(&noDetectRoot, "no-detect-root", false, "Disable project root detection when auto-creating session")
+	c.Flags().StringVar(&projectRoot, "project-root", "", "Explicit project root (skips detection) when auto-creating session")
 	return c
 }
 
-func execStream(cmd *cobra.Command, cl client.CLIClient, serverAddr, sessionID string, req types.ExecRequest, output string, autoCreateRoot string) error {
+func execStream(cmd *cobra.Command, cl client.CLIClient, serverAddr, sessionID string, req types.ExecRequest, output string, createReq types.CreateSessionRequest) error {
 	body, err := cl.ExecStream(cmd.Context(), sessionID, req)
 	if err != nil && !autoDisabled() && isConnectionError(err) {
 		if startErr := ensureServerRunning(cmd.Context(), serverAddr, cmd.ErrOrStderr()); startErr == nil {
@@ -192,8 +211,8 @@ func execStream(cmd *cobra.Command, cl client.CLIClient, serverAddr, sessionID s
 			return ok && st.Code() == codes.NotFound
 		}
 		if (errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found")) || grpcNotFound(err) {
-			if autoCreateRoot != "" {
-				if _, createErr := cl.CreateSessionWithID(cmd.Context(), sessionID, autoCreateRoot, ""); createErr == nil {
+			if createReq.Workspace != "" {
+				if _, createErr := cl.CreateSessionWithRequest(cmd.Context(), createReq); createErr == nil {
 					body, err = cl.ExecStream(cmd.Context(), sessionID, req)
 				}
 			}

@@ -13,6 +13,7 @@ import (
 type CLIClient interface {
 	CreateSession(ctx context.Context, workspace, policy string) (types.Session, error)
 	CreateSessionWithID(ctx context.Context, id, workspace, policy string) (types.Session, error)
+	CreateSessionWithRequest(ctx context.Context, req types.CreateSessionRequest) (types.Session, error)
 	ListSessions(ctx context.Context) ([]types.Session, error)
 	GetSession(ctx context.Context, id string) (types.Session, error)
 	DestroySession(ctx context.Context, id string) error
@@ -83,6 +84,13 @@ func (h *HybridClient) CreateSessionWithID(ctx context.Context, id, workspace, p
 		return h.grpc.CreateSessionWithID(ctx, id, workspace, policy)
 	}
 	return h.Client.CreateSessionWithID(ctx, id, workspace, policy)
+}
+
+func (h *HybridClient) CreateSessionWithRequest(ctx context.Context, req types.CreateSessionRequest) (types.Session, error) {
+	if h != nil && h.grpc != nil {
+		return h.grpc.CreateSessionWithRequest(ctx, req)
+	}
+	return h.Client.CreateSessionWithRequest(ctx, req)
 }
 
 func (h *HybridClient) Exec(ctx context.Context, sessionID string, req types.ExecRequest) (types.ExecResponse, error) {

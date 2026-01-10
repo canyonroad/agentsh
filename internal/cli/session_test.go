@@ -25,6 +25,9 @@ func (m *mockCLIClient) CreateSession(ctx context.Context, workspace, policy str
 func (m *mockCLIClient) CreateSessionWithID(ctx context.Context, id, workspace, policy string) (types.Session, error) {
 	return m.session, nil
 }
+func (m *mockCLIClient) CreateSessionWithRequest(ctx context.Context, req types.CreateSessionRequest) (types.Session, error) {
+	return m.session, nil
+}
 func (m *mockCLIClient) ListSessions(ctx context.Context) ([]types.Session, error) {
 	return []types.Session{m.session}, nil
 }

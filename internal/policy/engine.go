@@ -261,6 +261,60 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 	return e, nil
 }
 
+// NewEngineWithVariables creates an engine with variable expansion.
+// Variables in policy paths are expanded before glob compilation.
+func NewEngineWithVariables(p *Policy, enforceApprovals bool, vars map[string]string) (*Engine, error) {
+	// Deep copy and expand the policy
+	expanded, err := expandPolicy(p, vars)
+	if err != nil {
+		return nil, fmt.Errorf("expand policy variables: %w", err)
+	}
+	return NewEngine(expanded, enforceApprovals)
+}
+
+// expandPolicy creates a copy of the policy with all variables expanded.
+func expandPolicy(p *Policy, vars map[string]string) (*Policy, error) {
+	// Create a shallow copy
+	expanded := *p
+
+	// Expand file rules
+	expanded.FileRules = make([]FileRule, len(p.FileRules))
+	for i, rule := range p.FileRules {
+		expandedRule := rule
+		expandedRule.Paths = make([]string, len(rule.Paths))
+		for j, path := range rule.Paths {
+			expandedPath, err := ExpandVariables(path, vars)
+			if err != nil {
+				return nil, fmt.Errorf("rule %q path %q: %w", rule.Name, path, err)
+			}
+			expandedRule.Paths[j] = expandedPath
+		}
+		expanded.FileRules[i] = expandedRule
+	}
+
+	// Expand network rules (domains might use variables)
+	expanded.NetworkRules = make([]NetworkRule, len(p.NetworkRules))
+	for i, rule := range p.NetworkRules {
+		expandedRule := rule
+		expandedRule.Domains = make([]string, len(rule.Domains))
+		for j, domain := range rule.Domains {
+			expandedDomain, err := ExpandVariables(domain, vars)
+			if err != nil {
+				return nil, fmt.Errorf("network rule %q domain %q: %w", rule.Name, domain, err)
+			}
+			expandedRule.Domains[j] = expandedDomain
+		}
+		expanded.NetworkRules[i] = expandedRule
+	}
+
+	// Copy other rules as-is (command rules unlikely to need variables)
+	expanded.CommandRules = append([]CommandRule(nil), p.CommandRules...)
+	expanded.RegistryRules = append([]RegistryRule(nil), p.RegistryRules...)
+	expanded.UnixRules = append([]UnixSocketRule(nil), p.UnixRules...)
+
+	return &expanded, nil
+}
+
 // NetworkRules returns the raw network rules for read-only inspection (e.g., ebpf allowlist).
 func (e *Engine) NetworkRules() []NetworkRule {
 	if e == nil || e.policy == nil {

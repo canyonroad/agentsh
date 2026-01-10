@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -265,24 +266,93 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		return a.createSessionWithProfile(ctx, req)
 	}
 
-	if req.Policy == "" {
-		req.Policy = a.cfg.Policies.Default
+	policyName := req.Policy
+	if policyName == "" {
+		policyName = a.cfg.Policies.Default
+	}
+
+	// Determine if we should detect project root
+	shouldDetect := a.cfg.Policies.ShouldDetectProjectRoot()
+	if req.DetectProjectRoot != nil {
+		shouldDetect = *req.DetectProjectRoot
+	}
+
+	// Build variables map for policy expansion
+	policyVars := make(map[string]string)
+
+	if req.ProjectRoot != "" {
+		// Explicit project root provided
+		policyVars["PROJECT_ROOT"] = req.ProjectRoot
+		policyVars["GIT_ROOT"] = req.ProjectRoot // Assume same if explicit
+	} else if shouldDetect && req.Workspace != "" {
+		// Detect project roots
+		markers := a.cfg.Policies.GetProjectMarkers()
+		if markers == nil {
+			markers = policy.DefaultProjectMarkers()
+		}
+		roots, err := policy.DetectProjectRoots(req.Workspace, markers)
+		if err != nil {
+			// Log warning but continue with workspace as fallback
+			// (detection failure shouldn't block session creation)
+			slog.Warn("project root detection failed", "workspace", req.Workspace, "error", err)
+			policyVars["PROJECT_ROOT"] = req.Workspace
+		} else {
+			policyVars["PROJECT_ROOT"] = roots.ProjectRoot
+			if roots.GitRoot != "" {
+				policyVars["GIT_ROOT"] = roots.GitRoot
+			}
+		}
+	} else {
+		// No detection, use workspace as project root
+		policyVars["PROJECT_ROOT"] = req.Workspace
+	}
+
+	// Ensure GIT_ROOT is set (fall back to PROJECT_ROOT if not detected)
+	if policyVars["GIT_ROOT"] == "" && policyVars["PROJECT_ROOT"] != "" {
+		policyVars["GIT_ROOT"] = policyVars["PROJECT_ROOT"]
+	}
+
+	// Load and expand policy (or use global policy if no policy dir configured)
+	var engine *policy.Engine
+	if a.cfg.Policies.Dir != "" {
+		policyPath, err := policy.ResolvePolicyPath(a.cfg.Policies.Dir, policyName)
+		if err != nil {
+			return types.Session{}, http.StatusBadRequest, fmt.Errorf("resolve policy: %w", err)
+		}
+
+		pol, err := policy.LoadFromFile(policyPath)
+		if err != nil {
+			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("load policy: %w", err)
+		}
+
+		enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
+		engine, err = policy.NewEngineWithVariables(pol, enforceApprovals, policyVars)
+		if err != nil {
+			return types.Session{}, http.StatusBadRequest, fmt.Errorf("compile policy: %w", err)
+		}
+	} else {
+		// Fall back to global policy (e.g., in tests or when policies dir not configured)
+		engine = a.policy
 	}
 
 	var s *session.Session
-	var err error
+	var sessionErr error
 	if req.ID != "" {
-		s, err = a.sessions.CreateWithID(req.ID, req.Workspace, req.Policy)
+		s, sessionErr = a.sessions.CreateWithID(req.ID, req.Workspace, policyName)
 	} else {
-		s, err = a.sessions.Create(req.Workspace, req.Policy)
+		s, sessionErr = a.sessions.Create(req.Workspace, policyName)
 	}
-	if err != nil {
+	if sessionErr != nil {
 		code := http.StatusBadRequest
-		if errors.Is(err, session.ErrSessionExists) {
+		if errors.Is(sessionErr, session.ErrSessionExists) {
 			code = http.StatusConflict
 		}
-		return types.Session{}, code, err
+		return types.Session{}, code, sessionErr
 	}
+
+	// Store roots in session
+	s.ProjectRoot = policyVars["PROJECT_ROOT"]
+	s.GitRoot = policyVars["GIT_ROOT"]
 
 	// Generate TOTP secret if TOTP approval mode is enabled
 	if a.cfg.Approvals.Mode == "totp" {
@@ -306,8 +376,10 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		Type:      "session_created",
 		SessionID: s.ID,
 		Fields: map[string]any{
-			"workspace": s.Workspace,
-			"policy":    s.Policy,
+			"workspace":    s.Workspace,
+			"policy":       s.Policy,
+			"project_root": s.ProjectRoot,
+			"git_root":     s.GitRoot,
 		},
 	}
 	_ = a.store.AppendEvent(ctx, ev)
@@ -338,7 +410,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 				CommandIDFunc: func() string {
 					return s.CurrentCommandID()
 				},
-				PolicyEngine: platform.NewPolicyAdapter(a.policy),
+				PolicyEngine: platform.NewPolicyAdapter(engine),
 				EventChannel: eventChan,
 			}
 

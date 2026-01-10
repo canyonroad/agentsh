@@ -83,6 +83,14 @@ func (c *Client) CreateSessionWithID(ctx context.Context, id, workspace, policy 
 	return out, nil
 }
 
+func (c *Client) CreateSessionWithRequest(ctx context.Context, req types.CreateSessionRequest) (types.Session, error) {
+	var out types.Session
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/sessions", nil, req, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
 func (c *Client) CreateSessionWithProfile(ctx context.Context, profile string) (types.Session, error) {
 	var out types.Session
 	reqBody := types.CreateSessionRequest{Profile: profile}

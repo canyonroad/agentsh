@@ -23,7 +23,9 @@ int apply_sandbox(const char *profile, char **errorbuf) {
 }
 
 void free_error(char *errorbuf) {
-    sandbox_free_error(errorbuf);
+    // sandbox_free_error was deprecated in macOS 10.8
+    // The error buffer is just malloc'd memory, so free() works
+    free(errorbuf);
 }
 */
 import "C"

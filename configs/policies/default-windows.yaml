@@ -1,10 +1,10 @@
-# Default Policy for agentsh
-# This policy provides a balanced security posture for typical AI agent workloads
+# Default Policy for agentsh - Windows
+# This policy provides a balanced security posture for typical AI agent workloads on Windows
 
 version: 1
-name: default
+name: default-windows
 description: |
-  Standard policy for AI agent execution. Allows workspace operations,
+  Standard policy for AI agent execution on Windows. Allows workspace operations,
   common package registries, and blocks sensitive system paths.
 
 # =============================================================================
@@ -16,12 +16,12 @@ file_rules:
   # ---------------------------------------------------------------------------
   # Workspace - where agents do their work
   # ---------------------------------------------------------------------------
-  
+
   - name: allow-workspace-read
     description: Allow reading any file in workspace
     paths:
       - "${PROJECT_ROOT}"
-      - "${PROJECT_ROOT}/**"
+      - "${PROJECT_ROOT}\\**"
     operations:
       - read
       - open
@@ -29,12 +29,12 @@ file_rules:
       - list
       - readlink
     decision: allow
-    
+
   - name: allow-workspace-write
     description: Allow writing/creating files in workspace
     paths:
       - "${PROJECT_ROOT}"
-      - "${PROJECT_ROOT}/**"
+      - "${PROJECT_ROOT}\\**"
     operations:
       - write
       - create
@@ -42,12 +42,12 @@ file_rules:
       - chmod
       - rename
     decision: allow
-    
+
   - name: approve-workspace-delete
     description: Require approval for deleting files in workspace
     paths:
       - "${PROJECT_ROOT}"
-      - "${PROJECT_ROOT}/**"
+      - "${PROJECT_ROOT}\\**"
     operations:
       - delete
       - rmdir
@@ -56,31 +56,28 @@ file_rules:
     timeout: 5m
 
   # ---------------------------------------------------------------------------
-  # Temporary directories
+  # Temporary directories (Windows)
   # ---------------------------------------------------------------------------
-  
-  - name: allow-tmp
-    description: Full access to temp directories
+
+  - name: allow-temp
+    description: Full access to Windows temp directories
     paths:
-      - "/tmp/**"
-      - "/var/tmp/**"
+      - "${TEMP}\\**"
+      - "${TMP}\\**"
+      - "${LOCALAPPDATA}\\Temp\\**"
     operations:
       - "*"
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # System paths - mostly read-only
+  # System paths - mostly read-only (Windows)
   # ---------------------------------------------------------------------------
-  
-  - name: allow-system-read
-    description: Read access to standard system paths
+
+  - name: allow-program-files-read
+    description: Read access to Program Files
     paths:
-      - "/usr/**"
-      - "/lib/**"
-      - "/lib64/**"
-      - "/bin/**"
-      - "/sbin/**"
-      - "/opt/**"
+      - "C:\\Program Files\\**"
+      - "C:\\Program Files (x86)\\**"
     operations:
       - read
       - open
@@ -89,18 +86,12 @@ file_rules:
       - readlink
     decision: allow
 
-  - name: allow-etc-read-safe
-    description: Read common safe config files
+  - name: allow-windows-read-safe
+    description: Read common safe Windows config files
     paths:
-      - "/etc/hosts"
-      - "/etc/resolv.conf"
-      - "/etc/ssl/**"
-      - "/etc/ca-certificates/**"
-      - "/etc/localtime"
-      - "/etc/timezone"
-      - "/etc/mime.types"
-      - "/etc/protocols"
-      - "/etc/services"
+      - "C:\\Windows\\System32\\drivers\\etc\\hosts"
+      - "C:\\Windows\\System32\\drivers\\etc\\services"
+      - "C:\\Windows\\System32\\drivers\\etc\\protocol"
     operations:
       - read
       - open
@@ -108,117 +99,108 @@ file_rules:
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # Package manager caches
+  # Package manager caches (Windows)
   # ---------------------------------------------------------------------------
-  
+
   - name: allow-npm-cache
     description: npm cache access
     paths:
-      - "${HOME}/.npm/**"
-      - "/root/.npm/**"
+      - "${APPDATA}\\npm-cache\\**"
+      - "${LOCALAPPDATA}\\npm-cache\\**"
     operations:
       - "*"
     decision: allow
-    
+
   - name: allow-pip-cache
     description: pip cache access
     paths:
-      - "${HOME}/.cache/pip/**"
-      - "/root/.cache/pip/**"
+      - "${LOCALAPPDATA}\\pip\\Cache\\**"
     operations:
       - "*"
     decision: allow
-    
+
   - name: allow-cargo-cache
     description: Cargo cache access
     paths:
-      - "${HOME}/.cargo/**"
-      - "/root/.cargo/**"
+      - "${USERPROFILE}\\.cargo\\**"
+    operations:
+      - "*"
+    decision: allow
+
+  - name: allow-nuget-cache
+    description: NuGet cache access
+    paths:
+      - "${USERPROFILE}\\.nuget\\**"
+      - "${LOCALAPPDATA}\\NuGet\\**"
+    operations:
+      - "*"
+    decision: allow
+
+  - name: allow-go-cache
+    description: Go cache access
+    paths:
+      - "${USERPROFILE}\\go\\**"
+      - "${LOCALAPPDATA}\\go-build\\**"
     operations:
       - "*"
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # Blocked - sensitive paths
+  # Blocked - sensitive paths (Windows)
   # ---------------------------------------------------------------------------
-  
+
   - name: deny-ssh-keys
     description: Block access to SSH keys
     paths:
-      - "${HOME}/.ssh/**"
-      - "/root/.ssh/**"
+      - "${USERPROFILE}\\.ssh\\**"
     operations:
       - "*"
     decision: deny
-    
+
   - name: deny-aws-credentials
     description: Block AWS credentials
     paths:
-      - "${HOME}/.aws/**"
-      - "/root/.aws/**"
+      - "${USERPROFILE}\\.aws\\**"
     operations:
       - "*"
     decision: deny
-    
+
   - name: deny-cloud-credentials
     description: Block cloud provider credentials
     paths:
-      - "${HOME}/.gcloud/**"
-      - "${HOME}/.azure/**"
-      - "${HOME}/.config/gcloud/**"
+      - "${USERPROFILE}\\.gcloud\\**"
+      - "${USERPROFILE}\\.azure\\**"
+      - "${APPDATA}\\gcloud\\**"
     operations:
       - "*"
     decision: deny
-    
+
   - name: deny-env-files
     description: Block .env files which often contain secrets
     paths:
-      - "**/.env"
-      - "**/.env.*"
-      - "**/secrets/**"
-      - "**/credentials/**"
+      - "**\\.env"
+      - "**\\.env.*"
+      - "**\\secrets\\**"
+      - "**\\credentials\\**"
     operations:
       - "*"
     decision: deny
-    
+
   - name: deny-git-credentials
     description: Block git credentials
     paths:
-      - "${HOME}/.git-credentials"
-      - "${HOME}/.gitconfig"
-      - "**/.git/config"
+      - "${USERPROFILE}\\.git-credentials"
+      - "${USERPROFILE}\\.gitconfig"
+      - "**\\.git\\config"
     operations:
       - read
       - write
     decision: deny
 
-  - name: deny-passwd-shadow
-    description: Block password files
-    paths:
-      - "/etc/passwd"
-      - "/etc/shadow"
-      - "/etc/group"
-      - "/etc/gshadow"
-    operations:
-      - "*"
-    decision: deny
-    
-  - name: deny-system-sensitive
-    description: Block sensitive system files
-    paths:
-      - "/etc/sudoers"
-      - "/etc/sudoers.d/**"
-      - "/etc/security/**"
-      - "/proc/**"
-      - "/sys/**"
-    operations:
-      - "*"
-    decision: deny
-
   # ---------------------------------------------------------------------------
   # Default deny
   # ---------------------------------------------------------------------------
-  
+
   - name: default-deny-files
     description: Deny all other file operations
     paths:
@@ -235,7 +217,7 @@ network_rules:
   # ---------------------------------------------------------------------------
   # Package registries
   # ---------------------------------------------------------------------------
-  
+
   - name: allow-npm
     description: npm registry access
     domains:
@@ -244,7 +226,7 @@ network_rules:
       - "*.npmjs.com"
     ports: [443, 80]
     decision: allow
-    
+
   - name: allow-pypi
     description: PyPI access
     domains:
@@ -253,7 +235,7 @@ network_rules:
       - "*.pypi.org"
     ports: [443, 80]
     decision: allow
-    
+
   - name: allow-cargo
     description: Cargo registry access
     domains:
@@ -262,12 +244,12 @@ network_rules:
       - "static.crates.io"
     ports: [443, 80]
     decision: allow
-    
-  - name: allow-rubygems
-    description: RubyGems access
+
+  - name: allow-nuget
+    description: NuGet package registry
     domains:
-      - "rubygems.org"
-      - "*.rubygems.org"
+      - "api.nuget.org"
+      - "*.nuget.org"
     ports: [443, 80]
     decision: allow
 
@@ -283,7 +265,7 @@ network_rules:
   # ---------------------------------------------------------------------------
   # Code hosting
   # ---------------------------------------------------------------------------
-  
+
   - name: allow-github
     description: GitHub access
     domains:
@@ -294,7 +276,7 @@ network_rules:
       - "api.github.com"
     ports: [443, 80, 22]
     decision: allow
-    
+
   - name: allow-gitlab
     description: GitLab access
     domains:
@@ -302,7 +284,7 @@ network_rules:
       - "*.gitlab.com"
     ports: [443, 80, 22]
     decision: allow
-    
+
   - name: allow-bitbucket
     description: Bitbucket access
     domains:
@@ -311,10 +293,18 @@ network_rules:
     ports: [443, 80, 22]
     decision: allow
 
+  - name: allow-azure-devops
+    description: Azure DevOps access
+    domains:
+      - "dev.azure.com"
+      - "*.visualstudio.com"
+    ports: [443, 80]
+    decision: allow
+
   # ---------------------------------------------------------------------------
   # CDNs commonly used by packages
   # ---------------------------------------------------------------------------
-  
+
   - name: allow-cdns
     description: Common CDNs
     domains:
@@ -330,7 +320,7 @@ network_rules:
   # ---------------------------------------------------------------------------
   # Documentation and search
   # ---------------------------------------------------------------------------
-  
+
   - name: allow-docs
     description: Documentation sites
     domains:
@@ -341,15 +331,14 @@ network_rules:
       - "developer.mozilla.org"
       - "stackoverflow.com"
       - "*.stackoverflow.com"
+      - "docs.microsoft.com"
+      - "learn.microsoft.com"
     ports: [443, 80]
     decision: allow
 
   # ---------------------------------------------------------------------------
   # Embedded LLM Proxy
   # ---------------------------------------------------------------------------
-  # Allow connections to the embedded LLM proxy running on localhost.
-  # This rule MUST come before block-private-networks to take precedence.
-  # The proxy intercepts LLM API requests for logging, DLP, and token tracking.
 
   - name: allow-llm-proxy
     description: Allow connections to embedded LLM proxy on localhost
@@ -360,7 +349,7 @@ network_rules:
   # ---------------------------------------------------------------------------
   # Blocked networks
   # ---------------------------------------------------------------------------
-  
+
   - name: block-private-networks
     description: Block internal/private networks
     cidrs:
@@ -368,22 +357,22 @@ network_rules:
       - "172.16.0.0/12"
       - "192.168.0.0/16"
       - "127.0.0.0/8"
-      - "169.254.0.0/16"   # Link-local
-      - "fc00::/7"          # IPv6 private
-      - "fe80::/10"         # IPv6 link-local
+      - "169.254.0.0/16"
+      - "fc00::/7"
+      - "fe80::/10"
     decision: deny
-    
+
   - name: block-metadata-services
     description: Block cloud metadata services
     cidrs:
-      - "169.254.169.254/32"  # AWS, GCP, Azure metadata
-      - "100.100.100.200/32"  # Alibaba metadata
+      - "169.254.169.254/32"
+      - "100.100.100.200/32"
     decision: deny
 
   # ---------------------------------------------------------------------------
   # Require approval for unknown destinations
   # ---------------------------------------------------------------------------
-  
+
   - name: approve-unknown-https
     description: Require approval for unknown HTTPS destinations
     ports: [443]
@@ -394,7 +383,7 @@ network_rules:
   # ---------------------------------------------------------------------------
   # Default deny
   # ---------------------------------------------------------------------------
-  
+
   - name: default-deny-network
     description: Deny all other network connections
     domains:
@@ -412,32 +401,26 @@ command_rules:
   # Block dangerous commands (checked first!)
   # ---------------------------------------------------------------------------
 
-  - name: block-dangerous-rm
+  - name: block-dangerous-del
     description: Block recursive force delete
     commands:
-      - rm
+      - del
+      - rmdir
     args_patterns:
-      - "*-rf*"
-      - "*-fr*"
-      - "*--force*--recursive*"
+      - "*/s*"
+      - "*/q*"
     decision: deny
 
   - name: block-system-commands
     description: Block system administration commands
     commands:
       - shutdown
-      - reboot
-      - init
-      - systemctl
-      - service
-      - mount
-      - umount
-      - fdisk
-      - mkfs
-      - dd
-      - kill
-      - killall
-      - pkill
+      - sc
+      - net
+      - bcdedit
+      - diskpart
+      - format
+      - taskkill
     decision: deny
 
   # ---------------------------------------------------------------------------
@@ -451,9 +434,9 @@ command_rules:
       - pip
       - pip3
       - cargo
-      - apt
-      - apt-get
-      - yum
+      - dotnet
+      - choco
+      - winget
     args_patterns:
       - "install*"
       - "add*"
@@ -467,47 +450,35 @@ command_rules:
     commands:
       - curl
       - wget
+      - Invoke-WebRequest
     decision: approve
     message: "Agent wants to download: {{.Args}}"
 
   # ---------------------------------------------------------------------------
-  # Safe commands - no additional checks
+  # Safe commands - no additional checks (Windows)
   # ---------------------------------------------------------------------------
 
   - name: allow-safe-commands
     description: Standard safe commands
     commands:
-      - ls
-      - cat
-      - head
-      - tail
-      - grep
+      - dir
+      - type
+      - more
       - find
-      - wc
+      - findstr
       - sort
-      - uniq
-      - diff
-      - pwd
+      - where
       - echo
-      - printf
       - date
-      - which
+      - time
       - whoami
-      - id
-      - uname
-      - env
-      - printenv
-      - true
-      - false
-      - test
-      - "["
-      - sh
-      - bash
-      - zsh
-      - sh.real      # For agentsh shell shim integration
-      - bash.real    # For agentsh shell shim integration
+      - hostname
+      - set
+      - cmd
+      - powershell
+      - pwsh
     decision: allow
-    
+
   - name: allow-dev-tools
     description: Development tools
     commands:
@@ -522,33 +493,22 @@ command_rules:
       - cargo
       - rustc
       - go
-      - make
+      - dotnet
+      - msbuild
       - cmake
     decision: allow
 
   - name: allow-file-operations
     description: Common file operation commands
     commands:
-      - cp
-      - mv
-      - rm
+      - copy
+      - xcopy
+      - move
+      - ren
+      - del
       - mkdir
       - rmdir
-      - touch
-      - chmod
-      - ln
-      - stat
-      - file
-      - basename
-      - dirname
-      - realpath
-      - readlink
-      - tee
-      - tr
-      - cut
-      - sed
-      - awk
-      - xargs
+      - attrib
     decision: allow
 
 # =============================================================================
@@ -556,42 +516,26 @@ command_rules:
 # =============================================================================
 
 resource_limits:
-  # Memory
   max_memory_mb: 2048
-  memory_swap_max_mb: 0           # Disable swap
-  
-  # CPU
-  cpu_quota_percent: 80           # Max 80% of one CPU core
-  
-  # Disk I/O
+  memory_swap_max_mb: 0
+  cpu_quota_percent: 80
   disk_read_bps_max: 104857600    # 100 MB/s
   disk_write_bps_max: 52428800    # 50 MB/s
-  
-  # Network
   net_bandwidth_mbps: 100
-  
-  # Process limits
-  pids_max: 100                   # Max 100 processes
-  
-  # Time limits
-  command_timeout: 5m             # Max 5 minutes per command
-  session_timeout: 4h             # Max 4 hours per session
-  idle_timeout: 30m               # Kill after 30 min inactivity
+  pids_max: 100
+  command_timeout: 5m
+  session_timeout: 4h
+  idle_timeout: 30m
 
 # =============================================================================
 # AUDIT SETTINGS
 # =============================================================================
 
 audit:
-  # What to log
-  log_allowed: true               # Log allowed operations
-  log_denied: true                # Log denied operations
-  log_approved: true              # Log approved operations
-  
-  # Detail level
-  include_stdout: false           # Don't log stdout (can be large)
-  include_stderr: true            # Log stderr (errors are important)
-  include_file_content: false     # Don't log file contents
-  
-  # Retention
+  log_allowed: true
+  log_denied: true
+  log_approved: true
+  include_stdout: false
+  include_stderr: true
+  include_file_content: false
   retention_days: 30

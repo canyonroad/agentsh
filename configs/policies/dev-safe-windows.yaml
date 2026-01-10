@@ -1,11 +1,12 @@
-# Development Safe Policy for agentsh
-# Optimized for local development workflows with sensible guardrails
+# Development Safe Policy for agentsh - Windows
+# Optimized for local development workflows on Windows with sensible guardrails
 
 version: 1
-name: dev-safe
+name: dev-safe-windows
 description: |
-  Safe policy for local development. Allows project read/write,
-  approves destructive operations, and blocks credential access.
+  Safe policy for local development on Windows. Allows project read/write,
+  approves destructive operations, blocks credential access, and guards
+  critical registry locations.
 
 # =============================================================================
 # FILE OPERATION RULES
@@ -69,31 +70,28 @@ file_rules:
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # Temporary directories - full access
+  # Temporary directories - full access (Windows)
   # ---------------------------------------------------------------------------
 
-  - name: allow-tmp
-    description: Full access to temp directories
+  - name: allow-temp
+    description: Full access to Windows temp directories
     paths:
-      - "/tmp/**"
-      - "/var/tmp/**"
+      - "${TEMP}/**"
+      - "${TMP}/**"
+      - "${LOCALAPPDATA}\\Temp\\**"
     operations:
       - "*"
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # System paths - read-only for development tools
+  # System paths - read-only for development tools (Windows)
   # ---------------------------------------------------------------------------
 
-  - name: allow-system-read
-    description: Read access to standard system paths
+  - name: allow-program-files-read
+    description: Read access to Program Files
     paths:
-      - "/usr/**"
-      - "/lib/**"
-      - "/lib64/**"
-      - "/bin/**"
-      - "/sbin/**"
-      - "/opt/**"
+      - "C:\\Program Files\\**"
+      - "C:\\Program Files (x86)\\**"
     operations:
       - read
       - open
@@ -102,33 +100,26 @@ file_rules:
       - readlink
     decision: allow
 
-  - name: allow-etc-read
-    description: Read common config files
+  - name: allow-windows-read
+    description: Read access to Windows system directory
     paths:
-      - "/etc/hosts"
-      - "/etc/resolv.conf"
-      - "/etc/ssl/**"
-      - "/etc/ca-certificates/**"
-      - "/etc/localtime"
-      - "/etc/timezone"
-      - "/etc/mime.types"
-      - "/etc/protocols"
-      - "/etc/services"
+      - "C:\\Windows\\System32\\**"
     operations:
       - read
       - open
       - stat
+      - list
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # Package manager caches - full access for dev workflows
+  # Package manager caches - full access for dev workflows (Windows)
   # ---------------------------------------------------------------------------
 
   - name: allow-npm-cache
     description: npm cache access
     paths:
-      - "${HOME}/.npm/**"
-      - "/root/.npm/**"
+      - "${APPDATA}\\npm-cache\\**"
+      - "${LOCALAPPDATA}\\npm-cache\\**"
     operations:
       - "*"
     decision: allow
@@ -136,8 +127,7 @@ file_rules:
   - name: allow-pip-cache
     description: pip cache access
     paths:
-      - "${HOME}/.cache/pip/**"
-      - "/root/.cache/pip/**"
+      - "${LOCALAPPDATA}\\pip\\Cache\\**"
     operations:
       - "*"
     decision: allow
@@ -145,8 +135,7 @@ file_rules:
   - name: allow-cargo-cache
     description: Cargo cache access
     paths:
-      - "${HOME}/.cargo/**"
-      - "/root/.cargo/**"
+      - "${USERPROFILE}\\.cargo\\**"
     operations:
       - "*"
     decision: allow
@@ -154,21 +143,20 @@ file_rules:
   - name: allow-go-cache
     description: Go module cache access
     paths:
-      - "${HOME}/go/**"
-      - "/root/go/**"
+      - "${USERPROFILE}\\go\\**"
+      - "${LOCALAPPDATA}\\go-build\\**"
     operations:
       - "*"
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # BLOCKED - credentials and secrets
+  # BLOCKED - credentials and secrets (Windows)
   # ---------------------------------------------------------------------------
 
   - name: deny-ssh-keys
     description: Block access to SSH keys
     paths:
-      - "${HOME}/.ssh/**"
-      - "/root/.ssh/**"
+      - "${USERPROFILE}\\.ssh\\**"
     operations:
       - "*"
     decision: deny
@@ -176,8 +164,7 @@ file_rules:
   - name: deny-aws-credentials
     description: Block AWS credentials
     paths:
-      - "${HOME}/.aws/**"
-      - "/root/.aws/**"
+      - "${USERPROFILE}\\.aws\\**"
     operations:
       - "*"
     decision: deny
@@ -185,9 +172,9 @@ file_rules:
   - name: deny-cloud-credentials
     description: Block cloud provider credentials
     paths:
-      - "${HOME}/.gcloud/**"
-      - "${HOME}/.azure/**"
-      - "${HOME}/.config/gcloud/**"
+      - "${USERPROFILE}\\.gcloud\\**"
+      - "${USERPROFILE}\\.azure\\**"
+      - "${APPDATA}\\gcloud\\**"
     operations:
       - "*"
     decision: deny
@@ -195,8 +182,8 @@ file_rules:
   - name: deny-git-credentials
     description: Block git credentials
     paths:
-      - "${HOME}/.git-credentials"
-      - "**/.netrc"
+      - "${USERPROFILE}\\.git-credentials"
+      - "**\\.netrc"
     operations:
       - "*"
     decision: deny
@@ -255,6 +242,14 @@ network_rules:
       - "proxy.golang.org"
       - "sum.golang.org"
       - "*.golang.org"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-nuget
+    description: NuGet package registry
+    domains:
+      - "api.nuget.org"
+      - "*.nuget.org"
     ports: [443, 80]
     decision: allow
 
@@ -330,23 +325,15 @@ command_rules:
   - name: allow-safe-commands
     description: Standard safe commands
     commands:
-      - ls
-      - cat
-      - head
-      - tail
-      - grep
+      - dir
+      - type
+      - more
       - find
-      - wc
+      - findstr
       - sort
-      - uniq
-      - diff
-      - pwd
-      - echo
-      - date
-      - which
+      - where
       - whoami
-      - id
-      - uname
+      - hostname
     decision: allow
 
   - name: allow-dev-tools
@@ -363,27 +350,114 @@ command_rules:
       - cargo
       - rustc
       - go
-      - make
+      - dotnet
+      - msbuild
     decision: allow
 
-  - name: block-dangerous-rm
+  - name: block-dangerous-del
     description: Block recursive force delete
     commands:
-      - rm
+      - del
+      - rmdir
     args_patterns:
-      - "*-rf*"
-      - "*-fr*"
+      - "*/s*"
+      - "*/q*"
     decision: deny
 
   - name: block-system-commands
     description: Block system administration commands
     commands:
       - shutdown
-      - reboot
-      - systemctl
-      - service
-      - mount
-      - umount
+      - sc
+      - net
+      - reg
+      - bcdedit
+      - diskpart
+    decision: deny
+
+# =============================================================================
+# WINDOWS REGISTRY RULES (Dev: Permissive with safety guards)
+# =============================================================================
+
+registry_rules:
+  # ---------------------------------------------------------------------------
+  # Allow most application settings
+  # ---------------------------------------------------------------------------
+
+  - name: allow-hkcu-software
+    description: Allow user software settings
+    paths:
+      - 'HKCU\SOFTWARE\*'
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Block critical persistence/security (always)
+  # ---------------------------------------------------------------------------
+
+  - name: block-run-keys
+    description: Block startup Run key modifications
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+      - 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+    priority: 100
+
+  - name: block-security-settings
+    description: Block security-related registry
+    paths:
+      - 'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender*'
+      - 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa*'
+    operations:
+      - "*"
+    decision: deny
+    priority: 200
+
+  # ---------------------------------------------------------------------------
+  # Approve service modifications with timeout
+  # ---------------------------------------------------------------------------
+
+  - name: approve-service-changes
+    description: Require approval for service changes
+    paths:
+      - 'HKLM\SYSTEM\CurrentControlSet\Services\*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: approve
+    message: "Agent wants to modify service: {{.Path}}"
+    timeout: 5m
+
+  # ---------------------------------------------------------------------------
+  # Allow read everywhere
+  # ---------------------------------------------------------------------------
+
+  - name: allow-registry-read
+    description: Allow reading registry
+    paths:
+      - "*"
+    operations:
+      - read
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Default deny for HKLM writes
+  # ---------------------------------------------------------------------------
+
+  - name: default-deny-hklm-write
+    description: Deny HKLM modifications by default
+    paths:
+      - 'HKLM\*'
+    operations:
+      - write
+      - create
+      - delete
     decision: deny
 
 # =============================================================================

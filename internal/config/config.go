@@ -459,13 +459,34 @@ type MCPRateLimit struct {
 	Burst          int `yaml:"burst"`
 }
 
+// PoliciesConfig configures policy loading.
 type PoliciesConfig struct {
-	Dir          string          `yaml:"dir"`
-	Default      string          `yaml:"default"`
-	Allowed      []string        `yaml:"allowed"`
-	ManifestPath string          `yaml:"manifest_path"`
-	EnvPolicy    EnvPolicyConfig `yaml:"env_policy"`
-	EnvShimPath  string          `yaml:"env_shim_path"`
+	Dir               string          `yaml:"dir"`
+	Default           string          `yaml:"default"`
+	Allowed           []string        `yaml:"allowed"`
+	ManifestPath      string          `yaml:"manifest_path"`
+	EnvPolicy         EnvPolicyConfig `yaml:"env_policy"`
+	EnvShimPath       string          `yaml:"env_shim_path"`
+	ReloadInterval    string          `yaml:"reload_interval"`
+	DetectProjectRoot *bool           `yaml:"detect_project_root"` // nil means true (default enabled)
+	ProjectMarkers    []string        `yaml:"project_markers"`     // Override default markers
+}
+
+// ShouldDetectProjectRoot returns whether project root detection is enabled.
+// Returns true by default if DetectProjectRoot is nil.
+func (c *PoliciesConfig) ShouldDetectProjectRoot() bool {
+	if c.DetectProjectRoot == nil {
+		return true // Default enabled
+	}
+	return *c.DetectProjectRoot
+}
+
+// GetProjectMarkers returns custom project markers if configured, or nil to use defaults.
+func (c *PoliciesConfig) GetProjectMarkers() []string {
+	if len(c.ProjectMarkers) > 0 {
+		return c.ProjectMarkers
+	}
+	return nil // Use defaults from policy package
 }
 
 // MountProfile defines a collection of mounts with policies.
