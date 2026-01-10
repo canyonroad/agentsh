@@ -53,3 +53,55 @@ func TestExpandVariables_Simple(t *testing.T) {
 		})
 	}
 }
+
+func TestExpandVariables_Fallback(t *testing.T) {
+	vars := map[string]string{
+		"PROJECT_ROOT": "/home/user/myproject",
+	}
+
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "fallback not used when var exists",
+			input: "${PROJECT_ROOT:-/fallback}",
+			want:  "/home/user/myproject",
+		},
+		{
+			name:  "fallback used when var missing",
+			input: "${UNDEFINED:-/fallback}",
+			want:  "/fallback",
+		},
+		{
+			name:  "empty fallback",
+			input: "${UNDEFINED:-}",
+			want:  "",
+		},
+		{
+			name:  "fallback with path",
+			input: "${GIT_ROOT:-${PROJECT_ROOT}}/config",
+			want:  "${PROJECT_ROOT}/config", // nested not expanded
+		},
+		{
+			name:    "undefined without fallback errors",
+			input:   "${UNDEFINED}",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ExpandVariables(tt.input, vars)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "undefined variable")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
