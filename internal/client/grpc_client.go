@@ -54,6 +54,40 @@ func (c *GRPCClient) CreateSessionWithID(ctx context.Context, id, workspace, pol
 	return c.createSession(ctx, id, workspace, policy)
 }
 
+func (c *GRPCClient) CreateSessionWithRequest(ctx context.Context, req types.CreateSessionRequest) (types.Session, error) {
+	var out types.Session
+	reqBody := map[string]any{}
+	if req.ID != "" {
+		reqBody["id"] = req.ID
+	}
+	if req.Workspace != "" {
+		reqBody["workspace"] = req.Workspace
+	}
+	if req.Policy != "" {
+		reqBody["policy"] = req.Policy
+	}
+	if req.Profile != "" {
+		reqBody["profile"] = req.Profile
+	}
+	if req.DetectProjectRoot != nil {
+		reqBody["detect_project_root"] = *req.DetectProjectRoot
+	}
+	if req.ProjectRoot != "" {
+		reqBody["project_root"] = req.ProjectRoot
+	}
+	in, err := jsonToStruct(reqBody)
+	if err != nil {
+		return out, err
+	}
+	resp := &structpb.Struct{}
+	if err := c.invokeUnary(ctx, "/agentsh.v1.Agentsh/CreateSession", in, resp); err != nil {
+		return out, err
+	}
+	b, _ := protojson.Marshal(resp)
+	_ = json.Unmarshal(b, &out)
+	return out, nil
+}
+
 func (c *GRPCClient) createSession(ctx context.Context, id, workspace, policy string) (types.Session, error) {
 	var out types.Session
 	reqBody := map[string]any{

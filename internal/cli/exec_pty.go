@@ -17,6 +17,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/client"
 	"github.com/agentsh/agentsh/pkg/ptygrpc"
+	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/gorilla/websocket"
 	"golang.org/x/term"
 	"google.golang.org/grpc"
@@ -35,6 +36,8 @@ type execPTYRequest struct {
 	Timeout        string
 	Stdin          string
 	AutoCreateRoot string
+	NoDetectRoot   bool
+	ProjectRoot    string
 }
 
 type ptyTermState struct {
@@ -155,7 +158,18 @@ func execPTYWithDeps(ctx context.Context, cfg *clientConfig, sessionID string, r
 				Transport:   cfg.transport,
 			})
 			if clErr == nil {
-				if _, createErr := cl.CreateSessionWithID(ctx, sessionID, autoCreateRoot, ""); createErr == nil {
+				createReq := types.CreateSessionRequest{
+					ID:        sessionID,
+					Workspace: autoCreateRoot,
+				}
+				if req.NoDetectRoot {
+					falseVal := false
+					createReq.DetectProjectRoot = &falseVal
+				}
+				if req.ProjectRoot != "" {
+					createReq.ProjectRoot = req.ProjectRoot
+				}
+				if _, createErr := cl.CreateSessionWithRequest(ctx, createReq); createErr == nil {
 					err = try()
 				}
 			}
