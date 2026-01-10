@@ -61,6 +61,16 @@ dlp:
 policies:
   dir: "/etc/agentsh/policies"
   default: "default"
+  # Project root detection (enabled by default)
+  # When enabled, ${PROJECT_ROOT} and ${GIT_ROOT} are auto-detected
+  detect_project_root: true
+  # Custom project markers (optional, uses defaults if not specified)
+  # project_markers:
+  #   - ".git"
+  #   - "go.mod"
+  #   - "package.json"
+  #   - "Cargo.toml"
+  #   - "pyproject.toml"
 
 health:
   path: "/health"
