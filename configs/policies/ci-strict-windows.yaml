@@ -1,10 +1,10 @@
-# CI Strict Policy for agentsh
-# Locked-down policy for CI runners - deny anything outside workspace
+# CI Strict Policy for agentsh - Windows
+# Locked-down policy for CI runners on Windows - deny anything outside workspace
 
 version: 1
-name: ci-strict
+name: ci-strict-windows
 description: |
-  Strict policy for CI runners. Denies anything outside workspace,
+  Strict policy for CI runners on Windows. Denies anything outside workspace,
   blocks outbound network except artifact registries, denies interactive
   shells, and audits everything.
 
@@ -21,20 +21,21 @@ file_rules:
     description: Full access within workspace
     paths:
       - "${PROJECT_ROOT}"
-      - "${PROJECT_ROOT}/**"
+      - "${PROJECT_ROOT}\\**"
     operations:
       - "*"
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # Temp directories for build artifacts
+  # Temp directories for build artifacts (Windows)
   # ---------------------------------------------------------------------------
 
-  - name: allow-tmp
-    description: Full access to temp directories
+  - name: allow-temp
+    description: Full access to Windows temp directories
     paths:
-      - "/tmp/**"
-      - "/var/tmp/**"
+      - "${TEMP}\\**"
+      - "${TMP}\\**"
+      - "${LOCALAPPDATA}\\Temp\\**"
     operations:
       - "*"
     decision: allow
@@ -43,15 +44,11 @@ file_rules:
   # System paths - read-only (required for toolchains)
   # ---------------------------------------------------------------------------
 
-  - name: allow-system-read
-    description: Read-only access to system paths
+  - name: allow-program-files-read
+    description: Read-only access to Program Files
     paths:
-      - "/usr/**"
-      - "/lib/**"
-      - "/lib64/**"
-      - "/bin/**"
-      - "/sbin/**"
-      - "/opt/**"
+      - "C:\\Program Files\\**"
+      - "C:\\Program Files (x86)\\**"
     operations:
       - read
       - open
@@ -60,16 +57,11 @@ file_rules:
       - readlink
     decision: allow
 
-  - name: allow-etc-read
-    description: Read minimal config files
+  - name: allow-windows-read
+    description: Read minimal Windows config files
     paths:
-      - "/etc/hosts"
-      - "/etc/resolv.conf"
-      - "/etc/ssl/**"
-      - "/etc/ca-certificates/**"
-      - "/etc/localtime"
-      - "/etc/timezone"
-      - "/etc/passwd"  # Required by some tools for uid lookup
+      - "C:\\Windows\\System32\\drivers\\etc\\hosts"
+      - "C:\\Windows\\System32\\config\\systemprofile\\**"
     operations:
       - read
       - open
@@ -83,8 +75,8 @@ file_rules:
   - name: allow-npm-cache-read
     description: npm cache read access
     paths:
-      - "${HOME}/.npm/**"
-      - "/root/.npm/**"
+      - "${APPDATA}\\npm-cache\\**"
+      - "${LOCALAPPDATA}\\npm-cache\\**"
     operations:
       - read
       - open
@@ -95,8 +87,19 @@ file_rules:
   - name: allow-pip-cache-read
     description: pip cache read access
     paths:
-      - "${HOME}/.cache/pip/**"
-      - "/root/.cache/pip/**"
+      - "${LOCALAPPDATA}\\pip\\Cache\\**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+    decision: allow
+
+  - name: allow-nuget-cache-read
+    description: NuGet cache read access
+    paths:
+      - "${USERPROFILE}\\.nuget\\**"
+      - "${LOCALAPPDATA}\\NuGet\\**"
     operations:
       - read
       - open
@@ -108,11 +111,10 @@ file_rules:
   # DENY EVERYTHING ELSE
   # ---------------------------------------------------------------------------
 
-  - name: deny-home
-    description: Block access to home directories
+  - name: deny-user-profile
+    description: Block access to user profile directories
     paths:
-      - "${HOME}/**"
-      - "/root/**"
+      - "${USERPROFILE}\\**"
     operations:
       - "*"
     decision: deny
@@ -174,6 +176,14 @@ network_rules:
     ports: [443]
     decision: allow
 
+  - name: allow-nuget
+    description: NuGet package registry
+    domains:
+      - "api.nuget.org"
+      - "*.nuget.org"
+    ports: [443]
+    decision: allow
+
   - name: allow-docker
     description: Docker registries
     domains:
@@ -207,10 +217,17 @@ network_rules:
     ports: [443]
     decision: allow
 
+  - name: allow-azure-devops
+    description: Azure DevOps
+    domains:
+      - "dev.azure.com"
+      - "*.visualstudio.com"
+    ports: [443]
+    decision: allow
+
   # ---------------------------------------------------------------------------
   # Embedded LLM Proxy
   # ---------------------------------------------------------------------------
-  # Allow connections to the embedded LLM proxy running on localhost.
 
   - name: allow-llm-proxy
     description: Allow connections to embedded LLM proxy on localhost
@@ -256,12 +273,12 @@ command_rules:
   - name: deny-interactive-shells
     description: Block interactive shell invocations
     commands:
-      - bash
-      - sh
-      - zsh
+      - cmd
+      - powershell
+      - pwsh
     args_patterns:
-      - "-i*"
-      - "--login*"
+      - "*-i*"
+      - "*-NoExit*"
     decision: deny
 
   # ---------------------------------------------------------------------------
@@ -271,12 +288,12 @@ command_rules:
   - name: allow-build-commands
     description: Standard build commands
     commands:
-      - make
+      - msbuild
+      - dotnet
       - cmake
       - ninja
       - gradle
       - mvn
-      - ant
     decision: allow
 
   - name: allow-test-commands
@@ -289,46 +306,72 @@ command_rules:
       - go
       - npm
       - yarn
+      - dotnet
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # Block dangerous commands
+  # Block dangerous commands (Windows)
   # ---------------------------------------------------------------------------
 
-  - name: block-dangerous-rm
+  - name: block-dangerous-del
     description: Block recursive force delete
     commands:
-      - rm
+      - del
+      - rmdir
     args_patterns:
-      - "*-rf*"
-      - "*-fr*"
+      - "*/s*"
+      - "*/q*"
     decision: deny
 
   - name: block-network-tools
     description: Block raw network tools
     commands:
-      - nc
-      - netcat
-      - ncat
-      - socat
       - telnet
       - ssh
       - scp
+      - ftp
+      - netsh
     decision: deny
 
   - name: block-system-commands
     description: Block system administration commands
     commands:
       - shutdown
-      - reboot
-      - systemctl
-      - service
-      - mount
-      - umount
-      - dd
-      - fdisk
-      - mkfs
+      - sc
+      - net
+      - bcdedit
+      - diskpart
+      - format
     decision: deny
+
+# =============================================================================
+# WINDOWS REGISTRY RULES (CI: Block all writes)
+# =============================================================================
+
+registry_rules:
+  # ---------------------------------------------------------------------------
+  # CI runners should NEVER modify registry
+  # ---------------------------------------------------------------------------
+
+  - name: allow-registry-read-only
+    description: Allow reading registry for build tools
+    paths:
+      - "*"
+    operations:
+      - read
+    decision: allow
+
+  - name: deny-all-registry-writes
+    description: Block all registry modifications in CI
+    paths:
+      - "*"
+    operations:
+      - write
+      - create
+      - delete
+      - rename
+    decision: deny
+    notify: true
 
 # =============================================================================
 # RESOURCE LIMITS

@@ -1,0 +1,541 @@
+# Default Policy for agentsh - Windows
+# This policy provides a balanced security posture for typical AI agent workloads on Windows
+
+version: 1
+name: default-windows
+description: |
+  Standard policy for AI agent execution on Windows. Allows workspace operations,
+  common package registries, and blocks sensitive system paths.
+
+# =============================================================================
+# FILE OPERATION RULES
+# =============================================================================
+# Rules are evaluated in order. First match wins.
+
+file_rules:
+  # ---------------------------------------------------------------------------
+  # Workspace - where agents do their work
+  # ---------------------------------------------------------------------------
+
+  - name: allow-workspace-read
+    description: Allow reading any file in workspace
+    paths:
+      - "${PROJECT_ROOT}"
+      - "${PROJECT_ROOT}\\**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+      - readlink
+    decision: allow
+
+  - name: allow-workspace-write
+    description: Allow writing/creating files in workspace
+    paths:
+      - "${PROJECT_ROOT}"
+      - "${PROJECT_ROOT}\\**"
+    operations:
+      - write
+      - create
+      - mkdir
+      - chmod
+      - rename
+    decision: allow
+
+  - name: approve-workspace-delete
+    description: Require approval for deleting files in workspace
+    paths:
+      - "${PROJECT_ROOT}"
+      - "${PROJECT_ROOT}\\**"
+    operations:
+      - delete
+      - rmdir
+    decision: approve
+    message: "Agent wants to delete: {{.Path}}"
+    timeout: 5m
+
+  # ---------------------------------------------------------------------------
+  # Temporary directories (Windows)
+  # ---------------------------------------------------------------------------
+
+  - name: allow-temp
+    description: Full access to Windows temp directories
+    paths:
+      - "${TEMP}\\**"
+      - "${TMP}\\**"
+      - "${LOCALAPPDATA}\\Temp\\**"
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # System paths - mostly read-only (Windows)
+  # ---------------------------------------------------------------------------
+
+  - name: allow-program-files-read
+    description: Read access to Program Files
+    paths:
+      - "C:\\Program Files\\**"
+      - "C:\\Program Files (x86)\\**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+      - readlink
+    decision: allow
+
+  - name: allow-windows-read-safe
+    description: Read common safe Windows config files
+    paths:
+      - "C:\\Windows\\System32\\drivers\\etc\\hosts"
+      - "C:\\Windows\\System32\\drivers\\etc\\services"
+      - "C:\\Windows\\System32\\drivers\\etc\\protocol"
+    operations:
+      - read
+      - open
+      - stat
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Package manager caches (Windows)
+  # ---------------------------------------------------------------------------
+
+  - name: allow-npm-cache
+    description: npm cache access
+    paths:
+      - "${APPDATA}\\npm-cache\\**"
+      - "${LOCALAPPDATA}\\npm-cache\\**"
+    operations:
+      - "*"
+    decision: allow
+
+  - name: allow-pip-cache
+    description: pip cache access
+    paths:
+      - "${LOCALAPPDATA}\\pip\\Cache\\**"
+    operations:
+      - "*"
+    decision: allow
+
+  - name: allow-cargo-cache
+    description: Cargo cache access
+    paths:
+      - "${USERPROFILE}\\.cargo\\**"
+    operations:
+      - "*"
+    decision: allow
+
+  - name: allow-nuget-cache
+    description: NuGet cache access
+    paths:
+      - "${USERPROFILE}\\.nuget\\**"
+      - "${LOCALAPPDATA}\\NuGet\\**"
+    operations:
+      - "*"
+    decision: allow
+
+  - name: allow-go-cache
+    description: Go cache access
+    paths:
+      - "${USERPROFILE}\\go\\**"
+      - "${LOCALAPPDATA}\\go-build\\**"
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Blocked - sensitive paths (Windows)
+  # ---------------------------------------------------------------------------
+
+  - name: deny-ssh-keys
+    description: Block access to SSH keys
+    paths:
+      - "${USERPROFILE}\\.ssh\\**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-aws-credentials
+    description: Block AWS credentials
+    paths:
+      - "${USERPROFILE}\\.aws\\**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-cloud-credentials
+    description: Block cloud provider credentials
+    paths:
+      - "${USERPROFILE}\\.gcloud\\**"
+      - "${USERPROFILE}\\.azure\\**"
+      - "${APPDATA}\\gcloud\\**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-env-files
+    description: Block .env files which often contain secrets
+    paths:
+      - "**\\.env"
+      - "**\\.env.*"
+      - "**\\secrets\\**"
+      - "**\\credentials\\**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-git-credentials
+    description: Block git credentials
+    paths:
+      - "${USERPROFILE}\\.git-credentials"
+      - "${USERPROFILE}\\.gitconfig"
+      - "**\\.git\\config"
+    operations:
+      - read
+      - write
+    decision: deny
+
+  # ---------------------------------------------------------------------------
+  # Default deny
+  # ---------------------------------------------------------------------------
+
+  - name: default-deny-files
+    description: Deny all other file operations
+    paths:
+      - "**"
+    operations:
+      - "*"
+    decision: deny
+
+# =============================================================================
+# NETWORK OPERATION RULES
+# =============================================================================
+
+network_rules:
+  # ---------------------------------------------------------------------------
+  # Package registries
+  # ---------------------------------------------------------------------------
+
+  - name: allow-npm
+    description: npm registry access
+    domains:
+      - "registry.npmjs.org"
+      - "*.npmjs.org"
+      - "*.npmjs.com"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-pypi
+    description: PyPI access
+    domains:
+      - "pypi.org"
+      - "files.pythonhosted.org"
+      - "*.pypi.org"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-cargo
+    description: Cargo registry access
+    domains:
+      - "crates.io"
+      - "*.crates.io"
+      - "static.crates.io"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-nuget
+    description: NuGet package registry
+    domains:
+      - "api.nuget.org"
+      - "*.nuget.org"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-maven
+    description: Maven Central access
+    domains:
+      - "repo1.maven.org"
+      - "central.maven.org"
+      - "*.maven.org"
+    ports: [443, 80]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Code hosting
+  # ---------------------------------------------------------------------------
+
+  - name: allow-github
+    description: GitHub access
+    domains:
+      - "github.com"
+      - "*.github.com"
+      - "raw.githubusercontent.com"
+      - "*.githubusercontent.com"
+      - "api.github.com"
+    ports: [443, 80, 22]
+    decision: allow
+
+  - name: allow-gitlab
+    description: GitLab access
+    domains:
+      - "gitlab.com"
+      - "*.gitlab.com"
+    ports: [443, 80, 22]
+    decision: allow
+
+  - name: allow-bitbucket
+    description: Bitbucket access
+    domains:
+      - "bitbucket.org"
+      - "*.bitbucket.org"
+    ports: [443, 80, 22]
+    decision: allow
+
+  - name: allow-azure-devops
+    description: Azure DevOps access
+    domains:
+      - "dev.azure.com"
+      - "*.visualstudio.com"
+    ports: [443, 80]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # CDNs commonly used by packages
+  # ---------------------------------------------------------------------------
+
+  - name: allow-cdns
+    description: Common CDNs
+    domains:
+      - "*.cloudflare.com"
+      - "*.cloudfront.net"
+      - "*.akamaized.net"
+      - "*.fastly.net"
+      - "cdn.jsdelivr.net"
+      - "unpkg.com"
+    ports: [443, 80]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Documentation and search
+  # ---------------------------------------------------------------------------
+
+  - name: allow-docs
+    description: Documentation sites
+    domains:
+      - "docs.python.org"
+      - "docs.rs"
+      - "doc.rust-lang.org"
+      - "nodejs.org"
+      - "developer.mozilla.org"
+      - "stackoverflow.com"
+      - "*.stackoverflow.com"
+      - "docs.microsoft.com"
+      - "learn.microsoft.com"
+    ports: [443, 80]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Embedded LLM Proxy
+  # ---------------------------------------------------------------------------
+
+  - name: allow-llm-proxy
+    description: Allow connections to embedded LLM proxy on localhost
+    cidrs:
+      - "127.0.0.1/32"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Blocked networks
+  # ---------------------------------------------------------------------------
+
+  - name: block-private-networks
+    description: Block internal/private networks
+    cidrs:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+      - "127.0.0.0/8"
+      - "169.254.0.0/16"
+      - "fc00::/7"
+      - "fe80::/10"
+    decision: deny
+
+  - name: block-metadata-services
+    description: Block cloud metadata services
+    cidrs:
+      - "169.254.169.254/32"
+      - "100.100.100.200/32"
+    decision: deny
+
+  # ---------------------------------------------------------------------------
+  # Require approval for unknown destinations
+  # ---------------------------------------------------------------------------
+
+  - name: approve-unknown-https
+    description: Require approval for unknown HTTPS destinations
+    ports: [443]
+    decision: approve
+    message: "Agent wants to connect to: {{.RemoteAddr}}:{{.RemotePort}}"
+    timeout: 2m
+
+  # ---------------------------------------------------------------------------
+  # Default deny
+  # ---------------------------------------------------------------------------
+
+  - name: default-deny-network
+    description: Deny all other network connections
+    domains:
+      - "*"
+    decision: deny
+
+# =============================================================================
+# COMMAND RULES (Optional pre-execution checks)
+# =============================================================================
+# Rules are evaluated in order. First match wins.
+# Order: Block dangerous -> Approve risky -> Allow safe
+
+command_rules:
+  # ---------------------------------------------------------------------------
+  # Block dangerous commands (checked first!)
+  # ---------------------------------------------------------------------------
+
+  - name: block-dangerous-del
+    description: Block recursive force delete
+    commands:
+      - del
+      - rmdir
+    args_patterns:
+      - "*/s*"
+      - "*/q*"
+    decision: deny
+
+  - name: block-system-commands
+    description: Block system administration commands
+    commands:
+      - shutdown
+      - sc
+      - net
+      - bcdedit
+      - diskpart
+      - format
+      - taskkill
+    decision: deny
+
+  # ---------------------------------------------------------------------------
+  # Approve risky commands
+  # ---------------------------------------------------------------------------
+
+  - name: approve-package-install
+    description: Require approval for package installation
+    commands:
+      - npm
+      - pip
+      - pip3
+      - cargo
+      - dotnet
+      - choco
+      - winget
+    args_patterns:
+      - "install*"
+      - "add*"
+      - "update*"
+      - "upgrade*"
+    decision: approve
+    message: "Agent wants to install packages: {{.Args}}"
+
+  - name: approve-curl-wget
+    description: Require approval for downloads
+    commands:
+      - curl
+      - wget
+      - Invoke-WebRequest
+    decision: approve
+    message: "Agent wants to download: {{.Args}}"
+
+  # ---------------------------------------------------------------------------
+  # Safe commands - no additional checks (Windows)
+  # ---------------------------------------------------------------------------
+
+  - name: allow-safe-commands
+    description: Standard safe commands
+    commands:
+      - dir
+      - type
+      - more
+      - find
+      - findstr
+      - sort
+      - where
+      - echo
+      - date
+      - time
+      - whoami
+      - hostname
+      - set
+      - cmd
+      - powershell
+      - pwsh
+    decision: allow
+
+  - name: allow-dev-tools
+    description: Development tools
+    commands:
+      - git
+      - node
+      - npm
+      - npx
+      - python
+      - python3
+      - pip
+      - pip3
+      - cargo
+      - rustc
+      - go
+      - dotnet
+      - msbuild
+      - cmake
+    decision: allow
+
+  - name: allow-file-operations
+    description: Common file operation commands
+    commands:
+      - copy
+      - xcopy
+      - move
+      - ren
+      - del
+      - mkdir
+      - rmdir
+      - attrib
+    decision: allow
+
+# =============================================================================
+# RESOURCE LIMITS
+# =============================================================================
+
+resource_limits:
+  max_memory_mb: 2048
+  memory_swap_max_mb: 0
+  cpu_quota_percent: 80
+  disk_read_bps_max: 104857600    # 100 MB/s
+  disk_write_bps_max: 52428800    # 50 MB/s
+  net_bandwidth_mbps: 100
+  pids_max: 100
+  command_timeout: 5m
+  session_timeout: 4h
+  idle_timeout: 30m
+
+# =============================================================================
+# AUDIT SETTINGS
+# =============================================================================
+
+audit:
+  log_allowed: true
+  log_denied: true
+  log_approved: true
+  include_stdout: false
+  include_stderr: true
+  include_file_content: false
+  retention_days: 30

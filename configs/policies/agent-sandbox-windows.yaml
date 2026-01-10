@@ -1,10 +1,10 @@
-# Agent Sandbox Policy for agentsh
-# Maximum containment for running unknown/untrusted agent code
+# Agent Sandbox Policy for agentsh - Windows
+# Maximum containment for running unknown/untrusted agent code on Windows
 
 version: 1
-name: agent-sandbox
+name: agent-sandbox-windows
 description: |
-  High-security sandbox for AI agents running unknown code.
+  High-security sandbox for AI agents running unknown code on Windows.
   Default deny with explicit allowlist, approval for any credential access,
   redirect network tools to internal proxies, soft-delete for recovery.
 
@@ -21,7 +21,7 @@ file_rules:
     description: Allow reading files in workspace
     paths:
       - "${PROJECT_ROOT}"
-      - "${PROJECT_ROOT}/**"
+      - "${PROJECT_ROOT}\\**"
     operations:
       - read
       - open
@@ -34,7 +34,7 @@ file_rules:
     description: Allow writing files in workspace
     paths:
       - "${PROJECT_ROOT}"
-      - "${PROJECT_ROOT}/**"
+      - "${PROJECT_ROOT}\\**"
     operations:
       - write
       - create
@@ -47,7 +47,7 @@ file_rules:
     description: Soft-delete files in workspace (recoverable)
     paths:
       - "${PROJECT_ROOT}"
-      - "${PROJECT_ROOT}/**"
+      - "${PROJECT_ROOT}\\**"
     operations:
       - delete
       - rmdir
@@ -55,30 +55,28 @@ file_rules:
     message: "File quarantined (recoverable): {{.Path}}"
 
   # ---------------------------------------------------------------------------
-  # Temp directories - sandboxed
+  # Temp directories - sandboxed (Windows)
   # ---------------------------------------------------------------------------
 
-  - name: allow-tmp
-    description: Full access to temp directories
+  - name: allow-temp
+    description: Full access to Windows temp directories
     paths:
-      - "/tmp/**"
-      - "/var/tmp/**"
+      - "${TEMP}\\**"
+      - "${TMP}\\**"
+      - "${LOCALAPPDATA}\\Temp\\**"
     operations:
       - "*"
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # System paths - minimal read-only
+  # System paths - minimal read-only (Windows)
   # ---------------------------------------------------------------------------
 
-  - name: allow-system-read
-    description: Read access to system paths
+  - name: allow-program-files-read
+    description: Read access to Program Files
     paths:
-      - "/usr/**"
-      - "/lib/**"
-      - "/lib64/**"
-      - "/bin/**"
-      - "/sbin/**"
+      - "C:\\Program Files\\**"
+      - "C:\\Program Files (x86)\\**"
     operations:
       - read
       - open
@@ -87,14 +85,11 @@ file_rules:
       - readlink
     decision: allow
 
-  - name: allow-etc-minimal
-    description: Read minimal config files
+  - name: allow-windows-minimal
+    description: Read minimal Windows system files
     paths:
-      - "/etc/hosts"
-      - "/etc/resolv.conf"
-      - "/etc/ssl/certs/**"
-      - "/etc/ca-certificates/**"
-      - "/etc/localtime"
+      - "C:\\Windows\\System32\\drivers\\etc\\hosts"
+      - "C:\\Windows\\System32\\config\\systemprofile\\**"
     operations:
       - read
       - stat
@@ -107,8 +102,7 @@ file_rules:
   - name: approve-ssh-access
     description: Require approval for SSH key access
     paths:
-      - "${HOME}/.ssh/**"
-      - "/root/.ssh/**"
+      - "${USERPROFILE}\\.ssh\\**"
     operations:
       - "*"
     decision: approve
@@ -118,8 +112,7 @@ file_rules:
   - name: approve-aws-credentials
     description: Require approval for AWS credentials
     paths:
-      - "${HOME}/.aws/**"
-      - "/root/.aws/**"
+      - "${USERPROFILE}\\.aws\\**"
     operations:
       - "*"
     decision: approve
@@ -129,10 +122,10 @@ file_rules:
   - name: approve-cloud-credentials
     description: Require approval for cloud credentials
     paths:
-      - "${HOME}/.gcloud/**"
-      - "${HOME}/.azure/**"
-      - "${HOME}/.config/gcloud/**"
-      - "${HOME}/.kube/**"
+      - "${USERPROFILE}\\.gcloud\\**"
+      - "${USERPROFILE}\\.azure\\**"
+      - "${APPDATA}\\gcloud\\**"
+      - "${USERPROFILE}\\.kube\\**"
     operations:
       - "*"
     decision: approve
@@ -142,8 +135,8 @@ file_rules:
   - name: approve-env-files
     description: Require approval for .env files
     paths:
-      - "**/.env"
-      - "**/.env.*"
+      - "**\\.env"
+      - "**\\.env.*"
     operations:
       - "*"
     decision: approve
@@ -153,8 +146,8 @@ file_rules:
   - name: approve-git-credentials
     description: Require approval for git credentials
     paths:
-      - "${HOME}/.git-credentials"
-      - "**/.netrc"
+      - "${USERPROFILE}\\.git-credentials"
+      - "**\\.netrc"
     operations:
       - "*"
     decision: approve
@@ -162,18 +155,16 @@ file_rules:
     timeout: 5m
 
   # ---------------------------------------------------------------------------
-  # Package caches - read-only
+  # Package caches - read-only (Windows)
   # ---------------------------------------------------------------------------
 
   - name: allow-cache-read
     description: Read-only cache access
     paths:
-      - "${HOME}/.npm/**"
-      - "${HOME}/.cache/**"
-      - "${HOME}/.cargo/**"
-      - "/root/.npm/**"
-      - "/root/.cache/**"
-      - "/root/.cargo/**"
+      - "${APPDATA}\\npm-cache\\**"
+      - "${LOCALAPPDATA}\\pip\\Cache\\**"
+      - "${USERPROFILE}\\.cargo\\**"
+      - "${LOCALAPPDATA}\\go-build\\**"
     operations:
       - read
       - open
@@ -184,15 +175,6 @@ file_rules:
   # ---------------------------------------------------------------------------
   # DENY everything else
   # ---------------------------------------------------------------------------
-
-  - name: deny-proc-sys
-    description: Block /proc and /sys
-    paths:
-      - "/proc/**"
-      - "/sys/**"
-    operations:
-      - "*"
-    decision: deny
 
   - name: default-deny-files
     description: Deny all other file operations
@@ -253,10 +235,17 @@ network_rules:
     ports: [443]
     decision: allow
 
+  - name: allow-nuget
+    description: NuGet package registry
+    domains:
+      - "api.nuget.org"
+      - "*.nuget.org"
+    ports: [443]
+    decision: allow
+
   # ---------------------------------------------------------------------------
   # Embedded LLM Proxy
   # ---------------------------------------------------------------------------
-  # Allow connections to the embedded LLM proxy running on localhost.
 
   - name: allow-llm-proxy
     description: Allow connections to embedded LLM proxy on localhost
@@ -338,26 +327,22 @@ command_rules:
       args: ["--source", "wget"]
 
   # ---------------------------------------------------------------------------
-  # Allow safe commands
+  # Allow safe commands (Windows)
   # ---------------------------------------------------------------------------
 
   - name: allow-safe-commands
     description: Standard safe commands
     commands:
-      - ls
-      - cat
-      - head
-      - tail
-      - grep
+      - dir
+      - type
+      - more
       - find
-      - wc
+      - findstr
       - sort
-      - uniq
-      - diff
-      - pwd
+      - where
       - echo
       - date
-      - which
+      - time
     decision: allow
 
   - name: allow-dev-tools
@@ -372,7 +357,8 @@ command_rules:
       - pip3
       - cargo
       - go
-      - make
+      - dotnet
+      - msbuild
     decision: allow
 
   # ---------------------------------------------------------------------------
@@ -386,6 +372,7 @@ command_rules:
       - pip
       - pip3
       - cargo
+      - dotnet
     args_patterns:
       - "install*"
       - "add*"
@@ -393,57 +380,149 @@ command_rules:
     message: "Agent wants to install packages: {{.Args}}"
 
   # ---------------------------------------------------------------------------
-  # Block dangerous commands
+  # Block dangerous commands (Windows)
   # ---------------------------------------------------------------------------
 
-  - name: block-rm-recursive
+  - name: block-del-recursive
     description: Block recursive delete
     commands:
-      - rm
+      - del
+      - rmdir
     args_patterns:
-      - "*-r*"
-      - "*--recursive*"
+      - "*/s*"
+      - "*/q*"
     decision: deny
     message: "Recursive delete blocked. Files can be removed individually."
 
   - name: block-network-tools
     description: Block raw network tools
     commands:
-      - nc
-      - netcat
-      - ncat
-      - socat
       - telnet
       - ssh
       - scp
-      - rsync
+      - ftp
+      - netsh
     decision: deny
 
   - name: block-system-commands
     description: Block system administration commands
     commands:
       - shutdown
-      - reboot
-      - systemctl
-      - service
-      - mount
-      - umount
-      - dd
-      - fdisk
-      - mkfs
-      - kill
-      - killall
-      - pkill
+      - sc
+      - net
+      - bcdedit
+      - diskpart
+      - format
+      - taskkill
+      - tasklist
     decision: deny
 
   - name: block-shell-escape
     description: Block potential shell escapes
     commands:
-      - sudo
-      - su
-      - chroot
-      - nsenter
-      - unshare
+      - runas
+      - psexec
+    decision: deny
+
+# =============================================================================
+# WINDOWS REGISTRY RULES (Maximum containment for untrusted code)
+# =============================================================================
+
+registry_rules:
+  # ---------------------------------------------------------------------------
+  # Allow only application-specific settings
+  # ---------------------------------------------------------------------------
+
+  - name: allow-agentsh-settings
+    description: Allow agentsh registry settings only
+    paths:
+      - 'HKCU\SOFTWARE\agentsh\*'
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Block ALL high-risk locations (no approval, just deny)
+  # ---------------------------------------------------------------------------
+
+  - name: block-all-persistence
+    description: Block all persistence registry locations
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+      - 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run*'
+      - 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce*'
+      - 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon*'
+      - 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\*'
+      - 'HKLM\SYSTEM\CurrentControlSet\Services\*'
+    operations:
+      - write
+      - create
+      - delete
+      - rename
+    decision: deny
+    priority: 200
+    notify: true
+
+  - name: block-all-security
+    description: Block all security-related registry
+    paths:
+      - 'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender*'
+      - 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa*'
+      - 'HKLM\SECURITY\*'
+      - 'HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\*'
+    operations:
+      - "*"
+    decision: deny
+    priority: 300
+
+  - name: block-dll-hijack
+    description: Block DLL hijacking locations
+    paths:
+      - 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows*'
+      - 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options*'
+      - 'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs*'
+    operations:
+      - "*"
+    decision: deny
+    priority: 300
+
+  - name: block-com-hijack
+    description: Block COM object hijacking
+    paths:
+      - 'HKLM\SOFTWARE\Classes\CLSID\*'
+      - 'HKCU\SOFTWARE\Classes\CLSID\*'
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+    priority: 200
+
+  # ---------------------------------------------------------------------------
+  # Allow reading only
+  # ---------------------------------------------------------------------------
+
+  - name: allow-registry-read
+    description: Allow reading registry values
+    paths:
+      - "*"
+    operations:
+      - read
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Default deny ALL write operations
+  # ---------------------------------------------------------------------------
+
+  - name: default-deny-registry
+    description: Deny all other registry modifications
+    paths:
+      - "*"
+    operations:
+      - write
+      - create
+      - delete
+      - rename
     decision: deny
 
 # =============================================================================
@@ -480,6 +559,6 @@ audit:
 
 soft_delete:
   enabled: true
-  quarantine_path: "/var/lib/agentsh/quarantine"
+  quarantine_path: "${LOCALAPPDATA}\\agentsh\\quarantine"
   retention_days: 7
   max_file_size_mb: 100
