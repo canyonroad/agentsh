@@ -50,6 +50,11 @@ var signalGroups = map[string][]int{
 	"@job":    {int(unix.SIGSTOP), int(unix.SIGCONT), int(unix.SIGTSTP), int(unix.SIGTTIN), int(unix.SIGTTOU)},
 	"@reload": {int(unix.SIGHUP), int(unix.SIGUSR1), int(unix.SIGUSR2)},
 	"@ignore": {int(unix.SIGCHLD), int(unix.SIGURG), int(unix.SIGWINCH)},
+	"@all":    nil, // Initialized in init() to avoid circular dependency
+}
+
+func init() {
+	signalGroups["@all"] = AllSignals()
 }
 
 // SignalFromString converts a signal name or number to its numeric value.

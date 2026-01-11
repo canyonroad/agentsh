@@ -47,6 +47,7 @@ func TestExpandSignalGroup(t *testing.T) {
 	}{
 		{"@fatal", []int{int(unix.SIGKILL), int(unix.SIGTERM), int(unix.SIGQUIT), int(unix.SIGABRT)}, false},
 		{"@job", []int{int(unix.SIGSTOP), int(unix.SIGCONT), int(unix.SIGTSTP), int(unix.SIGTTIN), int(unix.SIGTTOU)}, false},
+		{"@all", AllSignals(), false},
 		{"@invalid", nil, true},
 	}
 	for _, tt := range tests {
