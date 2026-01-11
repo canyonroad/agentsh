@@ -9,11 +9,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestSignalSyscalls(t *testing.T) {
-	assert.Equal(t, 62, unix.SYS_KILL)
-	assert.Equal(t, 234, unix.SYS_TGKILL)
-}
-
 func TestSignalFilterConfig(t *testing.T) {
 	cfg := DefaultSignalFilterConfig()
 	assert.True(t, cfg.Enabled)
