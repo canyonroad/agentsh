@@ -161,6 +161,100 @@ Windows policies include:
 - Windows-specific commands (`dir`, `type`, `findstr`, `msbuild`)
 - NuGet package registry access
 
+## Signal Rules
+
+Signal rules control how signals (kill, terminate, stop, etc.) can be sent between processes within an agentsh session. This provides protection against runaway processes, accidental signal delivery to critical services, and enables graceful shutdown patterns.
+
+### Platform Support
+
+| Platform | Blocking | Redirect | Audit |
+|----------|----------|----------|-------|
+| Linux | Yes (seccomp) | Yes | Yes |
+| macOS | No | No | Yes (ES) |
+| Windows | Partial | No | Yes (ETW) |
+
+### Signal Specification
+
+Signals can be specified in three ways:
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| Name | `SIGKILL`, `SIGTERM`, `SIGHUP` | Standard signal name |
+| Number | `9`, `15`, `1` | Numeric signal value |
+| Group | `@fatal`, `@job`, `@reload` | Predefined signal group |
+
+#### Predefined Signal Groups
+
+| Group | Signals |
+|-------|---------|
+| `@fatal` | SIGKILL, SIGTERM, SIGQUIT, SIGABRT |
+| `@job` | SIGSTOP, SIGCONT, SIGTSTP, SIGTTIN, SIGTTOU |
+| `@reload` | SIGHUP, SIGUSR1, SIGUSR2 |
+| `@ignore` | SIGCHLD, SIGURG, SIGWINCH |
+| `@all` | All signals (1-31) |
+
+### Target Types
+
+Target types define which processes can receive signals:
+
+| Type | Description |
+|------|-------------|
+| `self` | Process sending to itself |
+| `children` | Direct children of sender |
+| `descendants` | All descendants |
+| `siblings` | Processes with same parent |
+| `session` | Any process in agentsh session |
+| `parent` | The agentsh supervisor |
+| `external` | PIDs outside session |
+| `system` | PID 1 and kernel threads |
+| `user` | Other processes owned by same user |
+| `process` | Match by process name pattern |
+| `pid_range` | Match by PID range |
+
+### Decision Types
+
+| Decision | Behavior |
+|----------|----------|
+| `allow` | Allow signal |
+| `deny` | Block signal (EPERM) |
+| `audit` | Allow + log |
+| `approve` | Require manual approval |
+| `redirect` | Change signal (e.g., SIGKILL to SIGTERM) |
+| `absorb` | Silently drop (no error to sender) |
+
+### Example Configuration
+
+```yaml
+signal_rules:
+  - name: allow-self-and-children
+    signals: ["@all"]
+    target:
+      type: self
+    decision: allow
+
+  - name: graceful-kill
+    signals: ["SIGKILL"]
+    target:
+      type: children
+    decision: redirect
+    redirect_to: SIGTERM
+
+  - name: deny-external-fatal
+    signals: ["@fatal"]
+    target:
+      type: external
+    decision: deny
+    fallback: audit
+    message: "Blocking signal to external process"
+
+  - name: protect-database
+    signals: ["@fatal"]
+    target:
+      type: process
+      pattern: "postgres*"
+    decision: deny
+```
+
 ## Troubleshooting
 
 ### Variable Not Expanding
