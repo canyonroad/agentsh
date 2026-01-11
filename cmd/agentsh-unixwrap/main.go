@@ -72,27 +72,27 @@ func main() {
 		}
 	}
 
-	// Install signal filter if enabled.
-	var sigFilter *signal.SignalFilter
-	if cfg.SignalFilterEnabled {
+	// Close notify socket - we're done with it
+	_ = unix.Close(sockFD)
+
+	// Install signal filter if enabled and we have a signal socket
+	sigSockFD, _ := signalSockFD()
+	if cfg.SignalFilterEnabled && sigSockFD >= 0 {
 		sigCfg := signal.DefaultSignalFilterConfig()
-		sigFilter, err = signal.InstallSignalFilter(sigCfg)
+		sigFilter, err := signal.InstallSignalFilter(sigCfg)
 		if err != nil {
-			// Signal filter is optional - log and continue
 			log.Printf("signal filter: %v (continuing without)", err)
 		} else {
 			defer sigFilter.Close()
-			// Send signal notify fd to server
 			sigFD := sigFilter.NotifFD()
 			if sigFD >= 0 {
-				if err := sendFD(sockFD, sigFD); err != nil {
+				if err := sendFD(sigSockFD, sigFD); err != nil {
 					log.Fatalf("send signal fd: %v", err)
 				}
 			}
 		}
+		_ = unix.Close(sigSockFD)
 	}
-
-	_ = unix.Close(sockFD)
 
 	// Exec the real command.
 	cmd := os.Args[2]
@@ -110,6 +110,18 @@ func notifySockFD() (int, error) {
 	n, err := strconv.Atoi(val)
 	if err != nil || n <= 0 {
 		return 0, fmt.Errorf("invalid AGENTSH_NOTIFY_SOCK_FD=%q", val)
+	}
+	return n, nil
+}
+
+func signalSockFD() (int, error) {
+	val := os.Getenv("AGENTSH_SIGNAL_SOCK_FD")
+	if val == "" {
+		return -1, nil // Signal socket not configured
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil || n <= 0 {
+		return -1, fmt.Errorf("invalid AGENTSH_SIGNAL_SOCK_FD=%q", val)
 	}
 	return n, nil
 }

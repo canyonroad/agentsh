@@ -708,6 +708,9 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 				// Create a second socket pair for signal filter fd
 				sigSP := createUnixSocketPair()
 				if sigSP != nil {
+					signalFD := 4 // second ExtraFile (after notify socket at FD 3)
+					wrappedReq.Env["AGENTSH_SIGNAL_SOCK_FD"] = strconv.Itoa(signalFD)
+					extraCfg.env["AGENTSH_SIGNAL_SOCK_FD"] = strconv.Itoa(signalFD)
 					extraCfg.extraFiles = append(extraCfg.extraFiles, sigSP.child)
 					extraCfg.signalParentSock = sigSP.parent
 					extraCfg.signalEngine = a.policy.SignalEngine()
