@@ -345,14 +345,17 @@ func TestPIDRegistryReRegister(t *testing.T) {
 	assert.Equal(t, "zsh", ctx.TargetCmd, "re-registered process should have new command")
 }
 
-func TestPIDRegistrySameUserDefault(t *testing.T) {
-	r := NewPIDRegistry("session-1", 1000)
-	r.Register(1001, 1000, "bash")
+func TestClassifyTargetSameUser(t *testing.T) {
+	r := NewPIDRegistryWithUID("test", 1000, 1000) // supervisor PID=1000, UID=1000
 
-	// SameUser should default to true (as noted in TODO)
-	ctx := r.ClassifyTarget(1001, 1001)
-	assert.True(t, ctx.SameUser)
+	// Register source process with UID 1000
+	r.RegisterWithUID(1001, 1000, "myapp", 1000)
 
+	// Target in session with same UID should have SameUser=true
+	ctx := r.ClassifyTarget(1001, 1000) // Signal to supervisor
+	assert.True(t, ctx.SameUser, "same user should be true when UIDs match")
+
+	// External process - we don't know its UID, so SameUser should be false
 	ctx = r.ClassifyTarget(1001, 9999)
-	assert.True(t, ctx.SameUser, "SameUser defaults to true for now")
+	assert.False(t, ctx.SameUser, "same user should be false for unknown external process")
 }

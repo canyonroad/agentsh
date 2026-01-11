@@ -12,6 +12,7 @@ type PIDRegistry struct {
 	mu            sync.RWMutex
 	sessionID     string
 	supervisorPID int
+	supervisorUID int
 
 	// pid -> parent pid
 	parents map[int]int
@@ -19,6 +20,8 @@ type PIDRegistry struct {
 	commands map[int]string
 	// pid -> child pids
 	children map[int][]int
+	// pid -> uid
+	uids map[int]int
 }
 
 // NewPIDRegistry creates a new registry for a session.
@@ -26,13 +29,29 @@ func NewPIDRegistry(sessionID string, supervisorPID int) *PIDRegistry {
 	return &PIDRegistry{
 		sessionID:     sessionID,
 		supervisorPID: supervisorPID,
+		supervisorUID: -1, // unknown UID
 		parents:       make(map[int]int),
 		commands:      make(map[int]string),
 		children:      make(map[int][]int),
+		uids:          make(map[int]int),
+	}
+}
+
+// NewPIDRegistryWithUID creates a new registry with a known supervisor UID.
+func NewPIDRegistryWithUID(sessionID string, supervisorPID, supervisorUID int) *PIDRegistry {
+	return &PIDRegistry{
+		sessionID:     sessionID,
+		supervisorPID: supervisorPID,
+		supervisorUID: supervisorUID,
+		parents:       make(map[int]int),
+		commands:      make(map[int]string),
+		children:      make(map[int][]int),
+		uids:          make(map[int]int),
 	}
 }
 
 // Register adds a process to the session.
+// It uses the supervisor's UID as the process UID.
 func (r *PIDRegistry) Register(pid, parentPID int, command string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -40,6 +59,20 @@ func (r *PIDRegistry) Register(pid, parentPID int, command string) {
 	r.parents[pid] = parentPID
 	r.commands[pid] = command
 	r.children[parentPID] = append(r.children[parentPID], pid)
+	if r.supervisorUID >= 0 {
+		r.uids[pid] = r.supervisorUID
+	}
+}
+
+// RegisterWithUID adds a process to the session with an explicit UID.
+func (r *PIDRegistry) RegisterWithUID(pid, parentPID int, command string, uid int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.parents[pid] = parentPID
+	r.commands[pid] = command
+	r.children[parentPID] = append(r.children[parentPID], pid)
+	r.uids[pid] = uid
 }
 
 // Unregister removes a process from the session.
@@ -50,6 +83,7 @@ func (r *PIDRegistry) Unregister(pid int) {
 	parentPID := r.parents[pid]
 	delete(r.parents, pid)
 	delete(r.commands, pid)
+	delete(r.uids, pid)
 
 	// Remove from parent's children
 	if children, ok := r.children[parentPID]; ok {
@@ -80,12 +114,28 @@ func (r *PIDRegistry) ClassifyTarget(sourcePID, targetPID int) *TargetContext {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	// Determine SameUser based on known UIDs
+	sourceUID, sourceKnown := r.uids[sourcePID]
+	if !sourceKnown && sourcePID == r.supervisorPID {
+		sourceUID = r.supervisorUID
+		sourceKnown = r.supervisorUID >= 0
+	}
+
+	targetUID, targetKnown := r.uids[targetPID]
+	if !targetKnown && targetPID == r.supervisorPID {
+		targetUID = r.supervisorUID
+		targetKnown = r.supervisorUID >= 0
+	}
+
+	// SameUser is only true if we know both UIDs and they match
+	sameUser := sourceKnown && targetKnown && sourceUID == targetUID
+
 	ctx := &TargetContext{
 		SourcePID: sourcePID,
 		TargetPID: targetPID,
 		TargetCmd: r.commands[targetPID],
 		InSession: r.inSessionLocked(targetPID),
-		SameUser:  true, // TODO: check actual user
+		SameUser:  sameUser,
 	}
 
 	// Self
