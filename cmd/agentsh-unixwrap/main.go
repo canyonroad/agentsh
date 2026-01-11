@@ -19,6 +19,7 @@ import (
 
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
+	"github.com/agentsh/agentsh/internal/signal"
 	"golang.org/x/sys/unix"
 )
 
@@ -70,6 +71,27 @@ func main() {
 			log.Fatalf("send fd: %v", err)
 		}
 	}
+
+	// Install signal filter if enabled.
+	var sigFilter *signal.SignalFilter
+	if cfg.SignalFilterEnabled {
+		sigCfg := signal.DefaultSignalFilterConfig()
+		sigFilter, err = signal.InstallSignalFilter(sigCfg)
+		if err != nil {
+			// Signal filter is optional - log and continue
+			log.Printf("signal filter: %v (continuing without)", err)
+		} else {
+			defer sigFilter.Close()
+			// Send signal notify fd to server
+			sigFD := sigFilter.NotifFD()
+			if sigFD >= 0 {
+				if err := sendFD(sockFD, sigFD); err != nil {
+					log.Fatalf("send signal fd: %v", err)
+				}
+			}
+		}
+	}
+
 	_ = unix.Close(sockFD)
 
 	// Exec the real command.
