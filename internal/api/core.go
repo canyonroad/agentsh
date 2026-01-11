@@ -20,6 +20,7 @@ import (
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/signal"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
@@ -700,6 +701,19 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 				notifyPolicy:     a.policy,
 				notifyStore:      a.store,
 				notifyBroker:     a.broker,
+			}
+
+			// Add signal filter config if policy has signal rules
+			if a.policy != nil && a.policy.SignalEngine() != nil {
+				// Create a second socket pair for signal filter fd
+				sigSP := createUnixSocketPair()
+				if sigSP != nil {
+					extraCfg.extraFiles = append(extraCfg.extraFiles, sigSP.child)
+					extraCfg.signalParentSock = sigSP.parent
+					extraCfg.signalEngine = a.policy.SignalEngine()
+					extraCfg.signalRegistry = signal.NewPIDRegistry(id, os.Getpid())
+					extraCfg.signalCommandID = func() string { return s.CurrentCommandID() }
+				}
 			}
 		}
 	}
