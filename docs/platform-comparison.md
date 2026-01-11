@@ -50,6 +50,11 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | seccomp-bpf | Yes | No | No | Yes | No | Yes |
 | Process exec blocking | Yes | Yes | No | Yes | No | Yes |
 | Syscall allowlist | Yes | No | No | Yes | No | Yes |
+| **Signal Interception** |
+| Implementation | seccomp | ES audit | ES audit | seccomp | ETW audit | seccomp |
+| Signal blocking | Yes | Audit | Audit | Yes | Audit | Yes |
+| Signal redirect | Yes | No | No | Yes | No | Yes |
+| Signal audit | Yes | Yes | Yes | Yes | Yes | Yes |
 | **Resource Limits** |
 | CPU limit | Yes | No | No | Yes | Job | Yes |
 | Memory limit | Yes | No | No | Yes | Job | Yes |
@@ -71,44 +76,44 @@ This document provides a comprehensive comparison of agentsh capabilities across
 
 ## Security Score Comparison
 
-| Platform | Score | File Block | Net Block | Isolation | Syscall Filter | Resources |
-|----------|:-----:|:----------:|:---------:|:---------:|:--------------:|:---------:|
-| **Linux Native** | 100% | Yes | Yes | Full | Yes | Full |
-| **Windows WSL2** | 100% | Yes | Yes | Full | Yes | Full |
-| **macOS ESF+NE** | 90% | Yes | Yes | Minimal | Exec only | None |
-| **macOS + Lima** | 85% | Yes | Yes | Full | Yes | Full |
-| **macOS FUSE-T** | 70% | Yes | Yes | Minimal | No | None |
-| **Windows Native** | 85% | Yes | Yes | Partial | No | Partial |
+| Platform | Score | File Block | Net Block | Signal | Isolation | Syscall Filter | Resources |
+|----------|:-----:|:----------:|:---------:|:------:|:---------:|:--------------:|:---------:|
+| **Linux Native** | 100% | Yes | Yes | Block | Full | Yes | Full |
+| **Windows WSL2** | 100% | Yes | Yes | Block | Full | Yes | Full |
+| **macOS ESF+NE** | 90% | Yes | Yes | Audit | Minimal | Exec only | None |
+| **macOS + Lima** | 85% | Yes | Yes | Block | Full | Yes | Full |
+| **macOS FUSE-T** | 70% | Yes | Yes | Audit | Minimal | No | None |
+| **Windows Native** | 85% | Yes | Yes | Audit | Partial | No | Partial |
 
 ## Security Feature Coverage
 
 ```
-Platform               File    Network  Isolation  Syscall  Resources  Score
-────────────────────────────────────────────────────────────────────────────
+Platform               File    Network  Signal   Isolation  Syscall  Resources  Score
+──────────────────────────────────────────────────────────────────────────────────────
 
-Linux Native          ████████████████████████████████████████████████  100%
-                      File✓   Net✓    Iso✓      Sys✓     Res✓
+Linux Native          ████████████████████████████████████████████████████████  100%
+                      File✓   Net✓    Sig✓    Iso✓      Sys✓     Res✓
 
-Windows WSL2          ████████████████████████████████████████████████  100%
-                      File✓   Net✓    Iso✓      Sys✓     Res✓
+Windows WSL2          ████████████████████████████████████████████████████████  100%
+                      File✓   Net✓    Sig✓    Iso✓      Sys✓     Res✓
 
-macOS ESF+NE          ████████████████████████████████████████░░░░░░░░   90%
-                      File✓   Net✓    Iso⚠      Sys⚠     Res✗
+macOS ESF+NE          ████████████████████████████████████████████░░░░░░░░░░░░   90%
+                      File✓   Net✓    Sig⚠    Iso⚠      Sys⚠     Res✗
                       (ESF requires Apple approval; NE is standard capability)
 
-macOS + Lima          ██████████████████████████████████████░░░░░░░░░░   85%
-                      File✓   Net✓    Iso✓      Sys✓     Res✓
+macOS + Lima          ██████████████████████████████████████████░░░░░░░░░░░░░░   85%
+                      File✓   Net✓    Sig✓    Iso✓      Sys✓     Res✓
                       (VM overhead, file I/O slightly slower)
 
-macOS FUSE-T + pf     ██████████████████████████████░░░░░░░░░░░░░░░░░░   70%
-                      File✓   Net✓    Iso⚠      Sys✗     Res✗
+macOS FUSE-T + pf     ██████████████████████████████████░░░░░░░░░░░░░░░░░░░░░░   70%
+                      File✓   Net✓    Sig⚠    Iso⚠      Sys✗     Res✗
                       (Minimal isolation via sandbox-exec, no syscall filter)
 
-Windows Native        ██████████████████████████████████████░░░░░░░░░░   85%
-                      File✓   Net✓    Iso⚠      Sys✗     Res⚠
+Windows Native        ██████████████████████████████████████████░░░░░░░░░░░░░░   85%
+                      File✓   Net✓    Sig⚠    Iso⚠      Sys✗     Res⚠
                       (Mini Filter + WinDivert + Registry blocking + AppContainer sandbox)
 
-Legend: ✓ = Full support  ⚠ = Partial support  ✗ = Not supported
+Legend: ✓ = Full support (Block+Audit)  ⚠ = Partial support (Audit only)  ✗ = Not supported
 ```
 
 ## Performance Impact
@@ -310,6 +315,7 @@ sandbox:
 - No significant limitations
 - Requires root or CAP_SYS_ADMIN for namespaces
 - eBPF requires kernel 5.x+ for full features
+- **Signal interception**: Full blocking and redirect via seccomp user-notify
 
 ### macOS ESF+NE
 - **ESF requires Apple approval** - must apply for ESF entitlement with business justification
@@ -318,6 +324,7 @@ sandbox:
 - **No resource limits** - no cgroups equivalent (cannot enforce limits)
 - **Resource monitoring available** - native Mach API monitoring for memory, CPU, and thread count
 - **No syscall filtering** - except exec blocking via ESF
+- **Signal interception**: Audit only via Endpoint Security; cannot block or redirect signals
 - Best option for commercial security products
 
 ### macOS FUSE-T + pf
@@ -327,6 +334,7 @@ sandbox:
 - **Resource monitoring available** - native Mach API monitoring for memory, CPU, and thread count
 - **No syscall filtering** - cannot block dangerous syscalls
 - **Requires root for pf** - network interception needs sudo
+- **Signal interception**: Audit only via Endpoint Security; cannot block or redirect signals
 - Best option for development and personal use
 
 ### macOS + Lima
@@ -334,6 +342,7 @@ sandbox:
 - File access through virtiofs slightly slower
 - Some edge cases with file permissions
 - Requires maintaining Lima VM
+- **Signal interception**: Full blocking and redirect via seccomp in Linux VM
 - Best option for production on macOS
 
 **Lima Implementation Details:**
@@ -364,6 +373,7 @@ sandbox:
 - **No peak memory in exec results** - Windows Rusage doesn't include Maxrss; would require GetProcessMemoryInfo before process exits
 - **WinDivert requires admin** - Administrator privileges needed for network interception
 - **Driver requires signing** - Mini filter driver requires test signing (dev) or EV signing (production)
+- **Signal interception**: Audit only via ETW; cannot block or redirect signals
 - Uses kernel-mode mini filter driver for filesystem and registry interception
 - Configurable fail modes (fail-open/fail-closed) for production reliability
 - See [Windows Driver Deployment Guide](windows-driver-deployment.md) for details
@@ -374,6 +384,7 @@ sandbox:
 - File I/O to Windows drives slower than native
 - Some Windows integration edge cases
 - **No registry monitoring** - WSL2 runs Linux, Windows registry not accessible
+- **Signal interception**: Full blocking and redirect via seccomp in Linux VM
 
 **WSL2 Implementation Details:**
 - **Resource limits**: cgroups v2 at `/sys/fs/cgroup/agentsh/<name>`
