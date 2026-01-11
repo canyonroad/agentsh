@@ -17,6 +17,7 @@ type Policy struct {
 	CommandRules  []CommandRule    `yaml:"command_rules"`
 	UnixRules     []UnixSocketRule `yaml:"unix_socket_rules"`
 	RegistryRules []RegistryRule   `yaml:"registry_rules"`
+	SignalRules   []SignalRule     `yaml:"signal_rules"`
 
 	ResourceLimits ResourceLimits `yaml:"resource_limits"`
 	EnvPolicy      EnvPolicy      `yaml:"env_policy"`
@@ -95,6 +96,27 @@ type RegistryRule struct {
 	Priority    int      `yaml:"priority"`  // Higher = evaluated first
 	CacheTTL    duration `yaml:"cache_ttl"` // Per-rule cache TTL override
 	Notify      bool     `yaml:"notify"`    // Always notify on this rule
+}
+
+// SignalRule controls signal sending between processes.
+type SignalRule struct {
+	Name        string           `yaml:"name"`
+	Description string           `yaml:"description"`
+	Signals     []string         `yaml:"signals"`     // Signal names, numbers, or groups (@fatal, @job)
+	Target      SignalTargetSpec `yaml:"target"`      // Who can receive the signal
+	Decision    string           `yaml:"decision"`    // allow, deny, audit, approve, redirect, absorb
+	Fallback    string           `yaml:"fallback"`    // Fallback decision if platform can't enforce
+	RedirectTo  string           `yaml:"redirect_to"` // For redirect: target signal
+	Message     string           `yaml:"message"`
+	Timeout     duration         `yaml:"timeout"`
+}
+
+// SignalTargetSpec defines the target of a signal rule.
+type SignalTargetSpec struct {
+	Type    string `yaml:"type"`              // self, children, external, system, etc.
+	Pattern string `yaml:"pattern,omitempty"` // For process name matching
+	Min     int    `yaml:"min,omitempty"`     // For pid_range
+	Max     int    `yaml:"max,omitempty"`     // For pid_range
 }
 
 type ResourceLimits struct {
