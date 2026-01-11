@@ -1,0 +1,65 @@
+# Signal Strict Policy
+# Maximum signal control - deny most signals, require approval for sensitive operations
+
+version: 1
+name: signal-strict
+description: Strict signal control policy for high-security environments
+
+signal_rules:
+  # Allow signals to self only
+  - name: allow-self
+    signals: ["@all"]
+    target:
+      type: self
+    decision: allow
+
+  # Allow graceful termination of children
+  - name: allow-graceful-children
+    signals: ["SIGTERM", "SIGINT"]
+    target:
+      type: children
+    decision: allow
+
+  # Redirect SIGKILL to SIGTERM for children (graceful shutdown)
+  - name: redirect-kill-to-term
+    signals: ["SIGKILL"]
+    target:
+      type: children
+    decision: redirect
+    redirect_to: SIGTERM
+    message: "Redirecting SIGKILL to SIGTERM for graceful shutdown"
+
+  # Require approval for job control signals
+  - name: approve-job-control
+    signals: ["@job"]
+    target:
+      type: session
+    decision: approve
+    message: "Job control signal requires approval"
+
+  # Deny all signals to parent
+  - name: deny-parent
+    signals: ["@all"]
+    target:
+      type: parent
+    decision: deny
+    fallback: audit
+    message: "Signals to supervisor are blocked"
+
+  # Deny all signals to external
+  - name: deny-external
+    signals: ["@all"]
+    target:
+      type: external
+    decision: deny
+    fallback: audit
+    message: "Signals to external processes are blocked"
+
+  # Deny all signals to system
+  - name: deny-system
+    signals: ["@all"]
+    target:
+      type: system
+    decision: deny
+    fallback: audit
+    message: "Signals to system processes are blocked"

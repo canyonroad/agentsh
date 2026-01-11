@@ -26,6 +26,9 @@ type Engine struct {
 	// Compiled env policy patterns for glob matching
 	compiledEnvAllow []glob.Glob
 	compiledEnvDeny  []glob.Glob
+
+	// Signal policy engine
+	signalEngine signalEngineType
 }
 
 type Limits struct {
@@ -258,6 +261,13 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 		e.compiledEnvDeny = append(e.compiledEnvDeny, g)
 	}
 
+	// Compile signal rules
+	sigEngine, err := compileSignalRules(p.SignalRules)
+	if err != nil {
+		return nil, err
+	}
+	e.signalEngine = sigEngine
+
 	return e, nil
 }
 
@@ -321,6 +331,11 @@ func (e *Engine) NetworkRules() []NetworkRule {
 		return nil
 	}
 	return e.policy.NetworkRules
+}
+
+// SignalEngine returns the signal policy engine, or nil if no signal rules.
+func (e *Engine) SignalEngine() signalEngineType {
+	return e.signalEngine
 }
 
 func (e *Engine) Limits() Limits {

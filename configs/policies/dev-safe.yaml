@@ -408,3 +408,54 @@ audit:
   log_approved: true
   include_stdout: false
   include_stderr: true
+
+# =============================================================================
+# SIGNAL RULES (Linux: enforced, macOS/Windows: audit only)
+# =============================================================================
+
+signal_rules:
+  # Allow signals to self
+  - name: allow-self
+    signals: ["@all"]
+    target:
+      type: self
+    decision: allow
+
+  # Allow signals to children
+  - name: allow-children
+    signals: ["@all"]
+    target:
+      type: children
+    decision: allow
+
+  # Allow signals within session
+  - name: allow-session
+    signals: ["SIGTERM", "SIGINT", "SIGHUP", "SIGUSR1", "SIGUSR2"]
+    target:
+      type: session
+    decision: allow
+
+  # Audit signals to parent (supervisor)
+  - name: audit-parent
+    signals: ["@all"]
+    target:
+      type: parent
+    decision: audit
+
+  # Deny fatal signals to external processes
+  - name: deny-external-fatal
+    signals: ["@fatal"]
+    target:
+      type: external
+    decision: deny
+    fallback: audit
+    message: "Blocking signal to process outside session"
+
+  # Deny all signals to system processes
+  - name: deny-system
+    signals: ["@all"]
+    target:
+      type: system
+    decision: deny
+    fallback: audit
+    message: "Blocking signal to system process"
