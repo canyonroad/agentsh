@@ -14,6 +14,7 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/signal"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -25,11 +26,17 @@ const (
 type extraProcConfig struct {
 	extraFiles       []*os.File
 	env              map[string]string
-	notifyParentSock *os.File      // Parent socket to receive seccomp notify fd (Linux only)
-	notifySessionID  string        // Session ID for notify handler
-	notifyStore      eventStore    // Event store for notify handler
-	notifyBroker     eventBroker   // Event broker for notify handler
+	notifyParentSock *os.File       // Parent socket to receive seccomp notify fd (Linux only)
+	notifySessionID  string         // Session ID for notify handler
+	notifyStore      eventStore     // Event store for notify handler
+	notifyBroker     eventBroker    // Event broker for notify handler
 	notifyPolicy     *policy.Engine // Policy engine for notify handler
+
+	// Signal filter fields
+	signalParentSock *os.File            // Parent socket to receive signal filter fd
+	signalEngine     *signal.Engine      // Signal policy engine
+	signalRegistry   *signal.PIDRegistry // Process registry for signal classification
+	signalCommandID  func() string       // Function to get current command ID
 }
 
 // eventStore is the interface for storing events.
