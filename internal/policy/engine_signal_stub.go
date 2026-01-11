@@ -2,10 +2,12 @@
 
 package policy
 
+import "github.com/agentsh/agentsh/internal/signal"
+
 // compileSignalRules is a no-op on Windows (signal interception not supported).
-func compileSignalRules(rules []SignalRule) (interface{}, error) {
+func compileSignalRules(rules []SignalRule) (*signal.Engine, error) {
 	return nil, nil
 }
 
-// signalEngineType is nil on Windows.
-type signalEngineType = interface{}
+// signalEngineType uses the stub Engine type on Windows.
+type signalEngineType = *signal.Engine
