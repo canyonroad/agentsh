@@ -27,8 +27,9 @@ import (
 // seccompWrapperConfig is passed to the agentsh-unixwrap wrapper via
 // AGENTSH_SECCOMP_CONFIG environment variable to configure seccomp-bpf filtering.
 type seccompWrapperConfig struct {
-	UnixSocketEnabled bool     `json:"unix_socket_enabled"`
-	BlockedSyscalls   []string `json:"blocked_syscalls"`
+	UnixSocketEnabled   bool     `json:"unix_socket_enabled"`
+	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
+	BlockedSyscalls     []string `json:"blocked_syscalls"`
 }
 
 // macSandboxWrapperConfig is passed to agentsh-macwrap via
@@ -677,8 +678,9 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 
 			// Pass seccomp configuration to the wrapper
 			seccompCfg := seccompWrapperConfig{
-				UnixSocketEnabled: a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
-				BlockedSyscalls:   a.cfg.Sandbox.Seccomp.Syscalls.Block,
+				UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
+				BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
+				SignalFilterEnabled: a.policy != nil && a.policy.SignalEngine() != nil,
 			}
 			if cfgJSON, err := json.Marshal(seccompCfg); err == nil {
 				wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"] = string(cfgJSON)

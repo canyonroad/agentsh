@@ -10,8 +10,9 @@ import (
 
 // WrapperConfig is the configuration passed via AGENTSH_SECCOMP_CONFIG env var.
 type WrapperConfig struct {
-	UnixSocketEnabled bool     `json:"unix_socket_enabled"`
-	BlockedSyscalls   []string `json:"blocked_syscalls"`
+	UnixSocketEnabled   bool     `json:"unix_socket_enabled"`
+	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
+	BlockedSyscalls     []string `json:"blocked_syscalls"`
 }
 
 // loadConfig reads the wrapper config from environment.
