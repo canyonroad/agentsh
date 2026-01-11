@@ -44,3 +44,32 @@ func TestSignalContextExtraction(t *testing.T) {
 	assert.Equal(t, 5678, ctx.TargetPID)
 	assert.Equal(t, 15, ctx.Signal)
 }
+
+func TestSignalContextProcessGroup(t *testing.T) {
+	// kill(0, sig) - caller's process group
+	ctx := SignalContext{PID: 1000, TargetPID: 0}
+	assert.True(t, ctx.IsProcessGroupSignal())
+	assert.Equal(t, 1000, ctx.ProcessGroupID()) // Returns caller's PID
+
+	// kill(-42, sig) - process group 42
+	ctx = SignalContext{PID: 1000, TargetPID: -42}
+	assert.True(t, ctx.IsProcessGroupSignal())
+	assert.Equal(t, 42, ctx.ProcessGroupID())
+
+	// kill(123, sig) - single process
+	ctx = SignalContext{PID: 1000, TargetPID: 123}
+	assert.False(t, ctx.IsProcessGroupSignal())
+	assert.Equal(t, 0, ctx.ProcessGroupID())
+}
+
+func TestSignalContextTkillSetsPID(t *testing.T) {
+	// When tkill is used, TargetPID should equal TargetTID for classification
+	ctx := SignalContext{
+		PID:       1000,
+		TargetTID: 1001,
+		TargetPID: 1001, // Set by ExtractSignalContext
+		Signal:    15,
+	}
+	assert.Equal(t, ctx.TargetTID, ctx.TargetPID)
+	assert.False(t, ctx.IsProcessGroupSignal())
+}

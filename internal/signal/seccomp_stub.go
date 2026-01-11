@@ -75,5 +75,21 @@ func ExtractSignalContext(req interface{}) SignalContext {
 	return SignalContext{}
 }
 
+// IsProcessGroupSignal returns true if the signal targets a process group.
+func (c *SignalContext) IsProcessGroupSignal() bool {
+	return c.TargetPID <= 0
+}
+
+// ProcessGroupID returns the process group ID for process group signals.
+func (c *SignalContext) ProcessGroupID() int {
+	if c.TargetPID == 0 {
+		return c.PID
+	}
+	if c.TargetPID < 0 {
+		return -c.TargetPID
+	}
+	return 0
+}
+
 // ErrSignalUnsupported indicates signal interception is not available.
 var ErrSignalUnsupported = fmt.Errorf("signal interception unsupported on this platform")

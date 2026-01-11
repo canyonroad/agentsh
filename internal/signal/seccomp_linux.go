@@ -159,7 +159,7 @@ func ExtractSignalContext(req *seccomp.ScmpNotifReq) SignalContext {
 	switch int(req.Data.Syscall) {
 	case unix.SYS_KILL:
 		// kill(pid_t pid, int sig)
-		ctx.TargetPID = int(req.Data.Args[0])
+		ctx.TargetPID = int(int32(req.Data.Args[0])) // Signed conversion for kill()
 		ctx.Signal = int(req.Data.Args[1])
 
 	case unix.SYS_TGKILL:
@@ -170,7 +170,9 @@ func ExtractSignalContext(req *seccomp.ScmpNotifReq) SignalContext {
 
 	case unix.SYS_TKILL:
 		// tkill(pid_t tid, int sig)
+		// For classification purposes, use TID as the target PID
 		ctx.TargetTID = int(req.Data.Args[0])
+		ctx.TargetPID = ctx.TargetTID // Use TID for classification
 		ctx.Signal = int(req.Data.Args[1])
 
 	case unix.SYS_RT_SIGQUEUEINFO:
@@ -186,6 +188,24 @@ func ExtractSignalContext(req *seccomp.ScmpNotifReq) SignalContext {
 	}
 
 	return ctx
+}
+
+// IsProcessGroupSignal returns true if the signal targets a process group.
+func (c *SignalContext) IsProcessGroupSignal() bool {
+	// kill(0, sig) or kill(-pgid, sig)
+	return c.TargetPID <= 0
+}
+
+// ProcessGroupID returns the process group ID for process group signals.
+// Returns 0 for non-process-group signals.
+func (c *SignalContext) ProcessGroupID() int {
+	if c.TargetPID == 0 {
+		return c.PID // Caller's process group
+	}
+	if c.TargetPID < 0 {
+		return -c.TargetPID // Explicit process group
+	}
+	return 0 // Not a process group signal
 }
 
 // ErrSignalUnsupported indicates signal interception is not available.
