@@ -208,5 +208,14 @@ func (c *SignalContext) ProcessGroupID() int {
 	return 0 // Not a process group signal
 }
 
+// NewSignalFilterFromFD creates a SignalFilter from an existing file descriptor.
+// This is used by the parent process to wrap an FD received from the child.
+func NewSignalFilterFromFD(fd int) *SignalFilter {
+	if fd < 0 {
+		return nil
+	}
+	return &SignalFilter{fd: seccomp.ScmpFd(fd)}
+}
+
 // ErrSignalUnsupported indicates signal interception is not available.
 var ErrSignalUnsupported = fmt.Errorf("signal interception unsupported on this platform")

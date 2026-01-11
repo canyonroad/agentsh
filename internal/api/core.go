@@ -20,6 +20,7 @@ import (
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/signal"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
@@ -27,8 +28,9 @@ import (
 // seccompWrapperConfig is passed to the agentsh-unixwrap wrapper via
 // AGENTSH_SECCOMP_CONFIG environment variable to configure seccomp-bpf filtering.
 type seccompWrapperConfig struct {
-	UnixSocketEnabled bool     `json:"unix_socket_enabled"`
-	BlockedSyscalls   []string `json:"blocked_syscalls"`
+	UnixSocketEnabled   bool     `json:"unix_socket_enabled"`
+	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
+	BlockedSyscalls     []string `json:"blocked_syscalls"`
 }
 
 // macSandboxWrapperConfig is passed to agentsh-macwrap via
@@ -677,8 +679,9 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 
 			// Pass seccomp configuration to the wrapper
 			seccompCfg := seccompWrapperConfig{
-				UnixSocketEnabled: a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
-				BlockedSyscalls:   a.cfg.Sandbox.Seccomp.Syscalls.Block,
+				UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
+				BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
+				SignalFilterEnabled: a.policy != nil && a.policy.SignalEngine() != nil,
 			}
 			if cfgJSON, err := json.Marshal(seccompCfg); err == nil {
 				wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"] = string(cfgJSON)
@@ -698,6 +701,22 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 				notifyPolicy:     a.policy,
 				notifyStore:      a.store,
 				notifyBroker:     a.broker,
+			}
+
+			// Add signal filter config if policy has signal rules
+			if a.policy != nil && a.policy.SignalEngine() != nil {
+				// Create a second socket pair for signal filter fd
+				sigSP := createUnixSocketPair()
+				if sigSP != nil {
+					signalFD := 4 // second ExtraFile (after notify socket at FD 3)
+					wrappedReq.Env["AGENTSH_SIGNAL_SOCK_FD"] = strconv.Itoa(signalFD)
+					extraCfg.env["AGENTSH_SIGNAL_SOCK_FD"] = strconv.Itoa(signalFD)
+					extraCfg.extraFiles = append(extraCfg.extraFiles, sigSP.child)
+					extraCfg.signalParentSock = sigSP.parent
+					extraCfg.signalEngine = a.policy.SignalEngine()
+					extraCfg.signalRegistry = signal.NewPIDRegistry(id, os.Getpid())
+					extraCfg.signalCommandID = func() string { return s.CurrentCommandID() }
+				}
 			}
 		}
 	}

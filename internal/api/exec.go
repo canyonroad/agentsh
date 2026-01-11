@@ -14,6 +14,7 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/signal"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -25,11 +26,17 @@ const (
 type extraProcConfig struct {
 	extraFiles       []*os.File
 	env              map[string]string
-	notifyParentSock *os.File      // Parent socket to receive seccomp notify fd (Linux only)
-	notifySessionID  string        // Session ID for notify handler
-	notifyStore      eventStore    // Event store for notify handler
-	notifyBroker     eventBroker   // Event broker for notify handler
+	notifyParentSock *os.File       // Parent socket to receive seccomp notify fd (Linux only)
+	notifySessionID  string         // Session ID for notify handler
+	notifyStore      eventStore     // Event store for notify handler
+	notifyBroker     eventBroker    // Event broker for notify handler
 	notifyPolicy     *policy.Engine // Policy engine for notify handler
+
+	// Signal filter fields
+	signalParentSock *os.File            // Parent socket to receive signal filter fd
+	signalEngine     *signal.Engine      // Signal policy engine
+	signalRegistry   *signal.PIDRegistry // Process registry for signal classification
+	signalCommandID  func() string       // Function to get current command ID
 }
 
 // eventStore is the interface for storing events.
@@ -186,6 +193,18 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		// The handler receives the notify fd from the wrapper and runs until ctx is cancelled.
 		if extra != nil && extra.notifyParentSock != nil {
 			startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker)
+		}
+
+		// Start signal filter handler if configured (Linux only).
+		// The handler receives the signal filter fd from the wrapper and runs until ctx is cancelled.
+		if extra != nil && extra.signalParentSock != nil && extra.signalEngine != nil {
+			// Register the spawned process in the signal registry
+			if extra.signalRegistry != nil {
+				extra.signalRegistry.Register(cmd.Process.Pid, pgid, req.Command)
+			}
+			startSignalHandler(ctx, extra.signalParentSock, extra.notifySessionID, cmd.Process.Pid,
+				extra.signalEngine, extra.signalRegistry,
+				extra.notifyStore, extra.notifyBroker, extra.signalCommandID)
 		}
 	}
 
