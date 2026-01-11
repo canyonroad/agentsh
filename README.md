@@ -470,6 +470,71 @@ The generated policy:
 
 ---
 
+## Signal Filtering
+
+agentsh intercepts signals (`kill`, `SIGTERM`, etc.) sent between processes, providing policy-based control over which signals can reach which targets.
+
+### Platform Support
+
+| Platform | Blocking | Redirect | Audit |
+|----------|----------|----------|-------|
+| Linux | Yes (seccomp user-notify) | Yes | Yes |
+| macOS | No | No | Yes (ES) |
+| Windows | Partial | No | Yes (ETW) |
+
+### Example Signal Rules
+
+```yaml
+signal_rules:
+  # Allow signals to self and children
+  - name: allow-self
+    signals: ["@all"]
+    target:
+      type: self
+    decision: allow
+
+  - name: allow-children
+    signals: ["@all"]
+    target:
+      type: children
+    decision: allow
+
+  # Redirect SIGKILL to graceful SIGTERM
+  - name: graceful-kill
+    signals: ["SIGKILL"]
+    target:
+      type: children
+    decision: redirect
+    redirect_to: SIGTERM
+
+  # Block fatal signals to external processes
+  - name: deny-external-fatal
+    signals: ["@fatal"]
+    target:
+      type: external
+    decision: deny
+```
+
+### Signal Groups
+
+- `@all` - All signals (1-31)
+- `@fatal` - SIGKILL, SIGTERM, SIGQUIT, SIGABRT
+- `@job` - SIGSTOP, SIGCONT, SIGTSTP, SIGTTIN, SIGTTOU
+- `@reload` - SIGHUP, SIGUSR1, SIGUSR2
+
+### Target Types
+
+- `self` - Process signaling itself
+- `children` - Direct child processes
+- `descendants` - All descendant processes
+- `session` - Any process in the agentsh session
+- `external` - PIDs outside the session
+- `system` - PID 1 and kernel threads
+
+See [Policy Documentation](docs/operations/policies.md#signal-rules) for full configuration options.
+
+---
+
 ## Starter policy packs
 
 You already have a default policy (`configs/policies/default.yaml`). These opinionated packs are available as separate files so teams can pick one:

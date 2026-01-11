@@ -4,10 +4,11 @@ agentsh uses seccomp-bpf to enforce syscall-level security controls on agent pro
 
 ## Overview
 
-When enabled, seccomp filtering provides two types of protection:
+When enabled, seccomp filtering provides three types of protection:
 
 1. **Unix Socket Monitoring**: Intercepts socket operations for policy-based access control
-2. **Syscall Blocking**: Immediately terminates processes that attempt blocked syscalls
+2. **Signal Interception**: Intercepts signal delivery for policy-based allow/deny/redirect
+3. **Syscall Blocking**: Immediately terminates processes that attempt blocked syscalls
 
 ## Configuration
 
@@ -18,6 +19,10 @@ sandbox:
     mode: enforce  # enforce | audit | disabled
 
     unix_socket:
+      enabled: true
+      action: enforce  # enforce | audit
+
+    signal_filter:
       enabled: true
       action: enforce  # enforce | audit
 
@@ -32,6 +37,95 @@ sandbox:
         # ... see defaults below
       on_block: kill  # kill | log_and_kill
 ```
+
+## Signal Interception
+
+Signal filtering uses `SECCOMP_RET_USER_NOTIF` to intercept signal-related syscalls before they execute. This allows agentsh to evaluate policy rules and decide whether to allow, deny, redirect, or audit the signal.
+
+### Intercepted Syscalls
+
+| Syscall | Purpose |
+|---------|---------|
+| `kill` | Send signal to process by PID |
+| `tkill` | Send signal to thread by TID |
+| `tgkill` | Send signal to thread in specific process |
+| `rt_sigqueueinfo` | Queue signal with additional data |
+| `pidfd_send_signal` | Send signal via process file descriptor |
+
+### How It Works
+
+1. Process calls `kill(pid, SIGTERM)` or similar
+2. seccomp traps the syscall and notifies agentsh via the user-notify fd
+3. agentsh classifies the target (self, child, external, system, etc.)
+4. Policy rules are evaluated for the signal/target combination
+5. Decision is executed:
+   - **allow**: Syscall continues normally
+   - **deny**: Returns EPERM to caller
+   - **redirect**: Signal number is modified (e.g., SIGKILL → SIGTERM)
+   - **audit**: Syscall allowed, event logged
+
+### Policy Configuration
+
+Signal rules are defined in the policy file:
+
+```yaml
+signal_rules:
+  # Allow signals to self and children
+  - name: allow-self
+    signals: ["@all"]
+    target:
+      type: self
+    decision: allow
+
+  - name: allow-children
+    signals: ["@all"]
+    target:
+      type: children
+    decision: allow
+
+  # Block fatal signals to external processes
+  - name: deny-external-fatal
+    signals: ["@fatal"]
+    target:
+      type: external
+    decision: deny
+
+  # Redirect SIGKILL to SIGTERM for graceful shutdown
+  - name: graceful-kill
+    signals: ["SIGKILL"]
+    target:
+      type: descendants
+    decision: redirect
+    redirect_to: SIGTERM
+```
+
+### Signal Groups
+
+| Group | Signals |
+|-------|---------|
+| `@all` | All signals (1-31) |
+| `@fatal` | SIGKILL, SIGTERM, SIGQUIT, SIGABRT |
+| `@job` | SIGSTOP, SIGCONT, SIGTSTP, SIGTTIN, SIGTTOU |
+| `@reload` | SIGHUP, SIGUSR1, SIGUSR2 |
+
+### Signal Events
+
+```json
+{
+  "type": "signal_blocked",
+  "timestamp": "2026-01-11T10:30:00Z",
+  "session_id": "sess_abc123",
+  "sender_pid": 12345,
+  "target_pid": 1,
+  "signal": "SIGKILL",
+  "signal_number": 9,
+  "target_type": "system",
+  "decision": "deny",
+  "policy_rule": "deny-system-signals"
+}
+```
+
+See [Policy Documentation](operations/policies.md#signal-rules) for full configuration options.
 
 ## Default Blocked Syscalls
 

@@ -783,6 +783,114 @@ func (d *DNSInterceptor) handleQuery(query []byte, clientAddr *net.UDPAddr) {
 }
 ```
 
+### 8.6 Signal Interception
+
+agentsh intercepts signal delivery between processes to enforce policy-based control over which signals can reach which targets. This prevents agents from terminating critical processes, enables graceful shutdown patterns, and provides audit trails for signal activity.
+
+#### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Agent Process Tree                         │
+│                                                             │
+│  ┌─────────────┐    kill(pid, sig)    ┌─────────────────┐  │
+│  │   Agent     │ ──────────────────▶ │  seccomp filter │  │
+│  │  Process    │                      │  (user-notify)  │  │
+│  └─────────────┘                      └────────┬────────┘  │
+│                                                │            │
+└────────────────────────────────────────────────┼────────────┘
+                                                 │ notify fd
+                                                 ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  agentsh Signal Handler                       │
+│                                                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │   Target    │  │   Policy    │  │   Decision          │ │
+│  │  Classify   │──│   Evaluate  │──│   Execute           │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+│                                                             │
+│  Decisions: allow → continue | deny → EPERM | redirect      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Implementation
+
+Signal interception uses Linux seccomp with `SECCOMP_RET_USER_NOTIF` to trap signal-related syscalls:
+
+| Syscall | Purpose | Intercepted |
+|---------|---------|-------------|
+| `kill` | Send signal to process | Yes |
+| `tkill` | Send signal to thread | Yes |
+| `tgkill` | Send signal to thread in group | Yes |
+| `rt_sigqueueinfo` | Queue signal with data | Yes |
+| `pidfd_send_signal` | Signal via pidfd | Yes |
+
+When a process attempts to send a signal:
+
+1. **seccomp traps** the syscall and notifies agentsh via the user-notify fd
+2. **Target classification** determines the relationship (self, child, external, etc.)
+3. **Policy evaluation** checks signal rules for a matching decision
+4. **Decision execution**:
+   - `allow`: Continue syscall normally
+   - `deny`: Return EPERM to caller
+   - `redirect`: Modify signal number and continue
+   - `audit`: Allow and log event
+
+#### Target Classification
+
+The PID registry tracks all processes in the session to classify signal targets:
+
+| Target Type | Description | Example |
+|-------------|-------------|---------|
+| `self` | Process signaling itself | `kill(getpid(), SIGTERM)` |
+| `children` | Direct child processes | Parent killing forked child |
+| `descendants` | All descendant processes | Grandparent signaling grandchild |
+| `siblings` | Same parent process | Two forked children |
+| `session` | Any process in agentsh session | Within sandbox |
+| `parent` | The agentsh supervisor | Child signaling parent |
+| `external` | PIDs outside session | Agent trying to kill host process |
+| `system` | PID 1, 2 (init, kthreadd) | Critical system processes |
+
+#### Signal Groups
+
+Signals can be specified individually or by group:
+
+| Group | Signals | Use Case |
+|-------|---------|----------|
+| `@all` | 1-31 | Match any signal |
+| `@fatal` | SIGKILL, SIGTERM, SIGQUIT, SIGABRT | Terminal signals |
+| `@job` | SIGSTOP, SIGCONT, SIGTSTP, SIGTTIN, SIGTTOU | Job control |
+| `@reload` | SIGHUP, SIGUSR1, SIGUSR2 | Config reload |
+| `@ignore` | SIGCHLD, SIGURG, SIGWINCH | Usually ignored |
+
+#### Event Schema
+
+```json
+{
+  "timestamp": "2026-01-11T10:30:45.123Z",
+  "type": "signal_blocked",
+  "session_id": "session-abc123",
+  "sender_pid": 12345,
+  "target_pid": 1,
+  "signal": "SIGKILL",
+  "signal_number": 9,
+  "target_type": "system",
+  "decision": "deny",
+  "policy_rule": "deny-system-signals",
+  "message": "Blocked fatal signal to init process"
+}
+```
+
+#### Platform Support
+
+| Platform | Blocking | Redirect | Audit |
+|----------|----------|----------|-------|
+| Linux | ✅ seccomp user-notify | ✅ | ✅ |
+| macOS | ❌ | ❌ | ✅ ES Framework |
+| Windows | ⚠️ Partial | ❌ | ✅ ETW |
+
+On platforms without blocking support, signals are logged but not intercepted.
+
 ---
 
 ## 9. Policy Engine

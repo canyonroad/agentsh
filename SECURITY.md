@@ -23,6 +23,8 @@ agentsh is designed to mitigate risks from **semi-trusted AI agents** operating 
 | Destructive operations | Approval workflows, soft-delete to trash, checkpoint/rollback |
 | PII leakage to LLMs | Embedded proxy with DLP redaction before requests reach provider |
 | Untracked LLM usage | Request/response logging with token usage for cost attribution |
+| Unauthorized signal delivery | Signal interception with policy-based allow/deny/redirect |
+| Process termination attacks | Signal rules blocking fatal signals to external/system processes |
 
 ### What agentsh Does NOT Protect Against
 
@@ -112,6 +114,42 @@ agentsh is **not** a full security sandbox like a VM or container with seccomp. 
 - CPU quota
 - Process count limits
 - Command and session timeouts
+
+### Signal Interception (Linux)
+
+agentsh intercepts signal delivery between processes using seccomp user-notify, providing policy-based control over which signals can reach which targets.
+
+**Implementation:**
+- Uses `SECCOMP_RET_USER_NOTIF` to trap signal syscalls (`kill`, `tkill`, `tgkill`, etc.)
+- PID registry tracks all processes in the session for target classification
+- Policy rules evaluated based on signal, sender, and target relationship
+
+**Target Classification:**
+
+| Target Type | Description |
+|-------------|-------------|
+| `self` | Process signaling itself |
+| `children` | Direct child processes |
+| `descendants` | All descendant processes |
+| `session` | Any process in agentsh session |
+| `external` | PIDs outside session |
+| `system` | PID 1 and kernel threads |
+
+**Decision Types:**
+
+| Decision | Behavior |
+|----------|----------|
+| `allow` | Signal delivered normally |
+| `deny` | Returns EPERM to sender |
+| `redirect` | Changes signal (e.g., SIGKILL → SIGTERM) |
+| `audit` | Allow + log event |
+
+**Platform Support:**
+- **Linux**: Full blocking and redirect via seccomp user-notify
+- **macOS**: Audit only via Endpoint Security Framework
+- **Windows**: Partial blocking via ETW
+
+See [Policy Documentation](docs/operations/policies.md#signal-rules) for configuration examples.
 
 ### Approval Workflows
 
@@ -835,6 +873,7 @@ For Windows deployments requiring full Linux-level security, agentsh supports WS
 | Network access | Deny (unless explicitly allowed) |
 | Command execution | Deny (unless explicitly allowed) |
 | Unix sockets | Deny (unless explicitly allowed) |
+| Signal delivery | Allow to self/children, deny to external/system (Linux only) |
 | Environment variables | Allow (unless in deny list or explicit allow-list defined) |
 | Approval timeout | Deny |
 
@@ -875,6 +914,7 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2026-01-11 | Added signal interception via seccomp user-notify for policy-based signal control (Linux) |
 | 2026-01-07 | Added external KMS integration for audit integrity keys (AWS KMS, Azure Key Vault, HashiCorp Vault, GCP Cloud KMS) |
 | 2026-01-07 | Added checkpoint/rollback for workspace state recovery with auto-checkpoint triggers |
 | 2026-01-03 | Wired up unix socket enforcement via seccomp user-notify (Linux only) |
