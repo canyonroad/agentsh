@@ -194,6 +194,18 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		if extra != nil && extra.notifyParentSock != nil {
 			startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker)
 		}
+
+		// Start signal filter handler if configured (Linux only).
+		// The handler receives the signal filter fd from the wrapper and runs until ctx is cancelled.
+		if extra != nil && extra.signalParentSock != nil && extra.signalEngine != nil {
+			// Register the spawned process in the signal registry
+			if extra.signalRegistry != nil {
+				extra.signalRegistry.Register(cmd.Process.Pid, pgid, req.Command)
+			}
+			startSignalHandler(ctx, extra.signalParentSock, extra.notifySessionID, cmd.Process.Pid,
+				extra.signalEngine, extra.signalRegistry,
+				extra.notifyStore, extra.notifyBroker, extra.signalCommandID)
+		}
 	}
 
 	waitErr := cmd.Wait()
