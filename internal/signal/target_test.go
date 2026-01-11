@@ -200,9 +200,10 @@ func TestMatchesSystem(t *testing.T) {
 		pid   int
 		match bool
 	}{
-		{1, true},   // init
-		{50, true},  // low system PID
-		{99, true},  // boundary
+		{1, true},    // init
+		{2, true},    // kthreadd
+		{50, false},  // not system (could be normal process in container)
+		{99, false},  // not system
 		{100, false}, // not system
 		{1000, false},
 	}
@@ -301,4 +302,24 @@ func TestParseCaseInsensitive(t *testing.T) {
 			assert.Equal(t, tt.expected, parsed.Type)
 		})
 	}
+}
+
+func TestTargetSystemMatching(t *testing.T) {
+	target := &ParsedTarget{Type: TargetSystem}
+
+	// PID 1 (init) should match
+	ctx := &TargetContext{TargetPID: 1}
+	assert.True(t, target.Matches(ctx), "PID 1 should match TargetSystem")
+
+	// PID 2 (kthreadd on Linux) should match
+	ctx = &TargetContext{TargetPID: 2}
+	assert.True(t, target.Matches(ctx), "PID 2 should match TargetSystem")
+
+	// Low PID like 50 should NOT match (could be normal process in container)
+	ctx = &TargetContext{TargetPID: 50}
+	assert.False(t, target.Matches(ctx), "PID 50 should NOT match TargetSystem")
+
+	// Normal PID should NOT match
+	ctx = &TargetContext{TargetPID: 1234}
+	assert.False(t, target.Matches(ctx), "PID 1234 should NOT match TargetSystem")
 }

@@ -125,7 +125,9 @@ func (t *ParsedTarget) Matches(ctx *TargetContext) bool {
 	case TargetExternal:
 		return !ctx.InSession
 	case TargetSystem:
-		return ctx.TargetPID == 1 || ctx.TargetPID < 100
+		// Match PID 1 (init) and PID 2 (kthreadd, Linux kernel thread parent)
+		// Other kernel threads have higher PIDs but are children of PID 2
+		return ctx.TargetPID == 1 || ctx.TargetPID == 2
 	case TargetUser:
 		return ctx.SameUser && !ctx.InSession
 	case TargetProcess:
