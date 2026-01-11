@@ -88,6 +88,16 @@ const (
 	EventSeccompBlocked EventType = "seccomp_blocked"
 )
 
+// Signal events.
+const (
+	EventSignalSent       EventType = "signal_sent"
+	EventSignalBlocked    EventType = "signal_blocked"
+	EventSignalRedirected EventType = "signal_redirected"
+	EventSignalAbsorbed   EventType = "signal_absorbed"
+	EventSignalApproved   EventType = "signal_approved"
+	EventSignalWouldDeny  EventType = "signal_would_deny"
+)
+
 // MCP inspection events.
 const (
 	EventMCPToolSeen    EventType = "mcp_tool_seen"
@@ -185,6 +195,14 @@ var EventCategory = map[EventType]string{
 	// Seccomp
 	EventSeccompBlocked: "seccomp",
 
+	// Signal
+	EventSignalSent:       "signal",
+	EventSignalBlocked:    "signal",
+	EventSignalRedirected: "signal",
+	EventSignalAbsorbed:   "signal",
+	EventSignalApproved:   "signal",
+	EventSignalWouldDeny:  "signal",
+
 	// MCP
 	EventMCPToolSeen:    "mcp",
 	EventMCPToolChanged: "mcp",
@@ -220,6 +238,9 @@ var AllEventTypes = []EventType{
 	EventNamedPipeOpen, EventNamedPipeBlocked, EventIPCObserved,
 	// Seccomp
 	EventSeccompBlocked,
+	// Signal
+	EventSignalSent, EventSignalBlocked, EventSignalRedirected,
+	EventSignalAbsorbed, EventSignalApproved, EventSignalWouldDeny,
 	// MCP
 	EventMCPToolSeen, EventMCPToolChanged, EventMCPDetection,
 	// Policy
