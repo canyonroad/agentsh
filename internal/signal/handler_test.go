@@ -401,3 +401,35 @@ func TestHandlerEventData(t *testing.T) {
 	assert.True(t, ok)
 	assert.WithinDuration(t, time.Now(), ts, 5*time.Second)
 }
+
+func TestHandlerRespectsPlatformCapability(t *testing.T) {
+	rules := []SignalRule{
+		{
+			Name:     "deny-external",
+			Signals:  []string{"SIGTERM"},
+			Target:   TargetSpec{Type: "external"},
+			Decision: "deny",
+			Fallback: "audit",
+		},
+	}
+	engine, err := NewEngine(rules)
+	require.NoError(t, err)
+
+	registry := NewPIDRegistry("test", 1000)
+	handler := NewHandler(engine, registry, nil)
+
+	// Handler should use platform detection
+	dec := handler.Handle(context.Background(), SignalContext{
+		PID:       1000,
+		TargetPID: 9999, // External
+		Signal:    15,
+	})
+
+	// On Linux with seccomp available, should be Deny
+	// Otherwise (macOS, Windows, no seccomp), should fallback to Audit
+	if CanBlockSignals() {
+		assert.Equal(t, DecisionDeny, dec.Action)
+	} else {
+		assert.Equal(t, DecisionAudit, dec.Action)
+	}
+}

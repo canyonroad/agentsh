@@ -58,9 +58,8 @@ func (h *Handler) Handle(ctx context.Context, sigCtx SignalContext) Decision {
 	// Evaluate against policy
 	dec := h.Evaluate(sigCtx)
 
-	// For now, assume we can block (seccomp user-notify supports it)
-	// In a real implementation, this would be determined by platform detection
-	canBlock := true
+	// Determine if platform can enforce blocking
+	canBlock := CanBlockSignals()
 	finalDec := ApplyFallback(dec, canBlock)
 
 	// Emit appropriate event
