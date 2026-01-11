@@ -91,5 +91,10 @@ func (c *SignalContext) ProcessGroupID() int {
 	return 0
 }
 
+// NewSignalFilterFromFD creates a SignalFilter from an existing file descriptor.
+func NewSignalFilterFromFD(fd int) *SignalFilter {
+	return nil
+}
+
 // ErrSignalUnsupported indicates signal interception is not available.
 var ErrSignalUnsupported = fmt.Errorf("signal interception unsupported on this platform")
