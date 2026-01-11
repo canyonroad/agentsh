@@ -6,18 +6,17 @@ package signal
 import (
 	"testing"
 
-	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
 func TestNewEngineBasic(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "allow-term-children",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "children"},
+			Target:   TargetSpec{Type: "children"},
 			Decision: "allow",
 			Message:  "allow SIGTERM to children",
 		},
@@ -30,11 +29,11 @@ func TestNewEngineBasic(t *testing.T) {
 }
 
 func TestNewEngineSignalGroup(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "allow-fatal-children",
 			Signals:  []string{"@fatal"},
-			Target:   policy.SignalTargetSpec{Type: "children"},
+			Target:   TargetSpec{Type: "children"},
 			Decision: "allow",
 		},
 	}
@@ -55,11 +54,11 @@ func TestNewEngineSignalGroup(t *testing.T) {
 }
 
 func TestNewEngineMixedSignals(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "mixed-signals",
 			Signals:  []string{"@reload", "SIGINT", "15"}, // group + name + number
-			Target:   policy.SignalTargetSpec{Type: "self"},
+			Target:   TargetSpec{Type: "self"},
 			Decision: "allow",
 		},
 	}
@@ -81,11 +80,11 @@ func TestNewEngineMixedSignals(t *testing.T) {
 }
 
 func TestNewEngineInvalidSignal(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "invalid",
 			Signals:  []string{"INVALID_SIGNAL"},
-			Target:   policy.SignalTargetSpec{Type: "self"},
+			Target:   TargetSpec{Type: "self"},
 			Decision: "allow",
 		},
 	}
@@ -95,11 +94,11 @@ func TestNewEngineInvalidSignal(t *testing.T) {
 }
 
 func TestNewEngineInvalidSignalGroup(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "invalid",
 			Signals:  []string{"@nonexistent"},
-			Target:   policy.SignalTargetSpec{Type: "self"},
+			Target:   TargetSpec{Type: "self"},
 			Decision: "allow",
 		},
 	}
@@ -109,11 +108,11 @@ func TestNewEngineInvalidSignalGroup(t *testing.T) {
 }
 
 func TestNewEngineInvalidTargetType(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "invalid",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "invalid_type"},
+			Target:   TargetSpec{Type: "invalid_type"},
 			Decision: "allow",
 		},
 	}
@@ -123,11 +122,11 @@ func TestNewEngineInvalidTargetType(t *testing.T) {
 }
 
 func TestNewEngineRedirectSignal(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:       "redirect-kill-to-term",
 			Signals:    []string{"SIGKILL"},
-			Target:     policy.SignalTargetSpec{Type: "children"},
+			Target:     TargetSpec{Type: "children"},
 			Decision:   "redirect",
 			RedirectTo: "SIGTERM",
 		},
@@ -139,11 +138,11 @@ func TestNewEngineRedirectSignal(t *testing.T) {
 }
 
 func TestNewEngineInvalidRedirectSignal(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:       "redirect-invalid",
 			Signals:    []string{"SIGKILL"},
-			Target:     policy.SignalTargetSpec{Type: "children"},
+			Target:     TargetSpec{Type: "children"},
 			Decision:   "redirect",
 			RedirectTo: "INVALID",
 		},
@@ -154,11 +153,11 @@ func TestNewEngineInvalidRedirectSignal(t *testing.T) {
 }
 
 func TestCheckBasicAllow(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "allow-term-children",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "children"},
+			Target:   TargetSpec{Type: "children"},
 			Decision: "allow",
 			Message:  "allowed",
 		},
@@ -176,11 +175,11 @@ func TestCheckBasicAllow(t *testing.T) {
 }
 
 func TestCheckBasicDeny(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "deny-kill-external",
 			Signals:  []string{"SIGKILL"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "deny",
 			Message:  "denied",
 		},
@@ -197,11 +196,11 @@ func TestCheckBasicDeny(t *testing.T) {
 }
 
 func TestCheckDefaultDeny(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "allow-term-children",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "children"},
+			Target:   TargetSpec{Type: "children"},
 			Decision: "allow",
 		},
 	}
@@ -223,18 +222,18 @@ func TestCheckDefaultDeny(t *testing.T) {
 }
 
 func TestCheckFirstMatchWins(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "deny-term-external",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "deny",
 			Message:  "first rule",
 		},
 		{
 			Name:     "allow-term-external",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "allow",
 			Message:  "second rule",
 		},
@@ -253,18 +252,18 @@ func TestCheckFirstMatchWins(t *testing.T) {
 }
 
 func TestCheckMultipleRulesCorrectMatch(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "allow-term-children",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "children"},
+			Target:   TargetSpec{Type: "children"},
 			Decision: "allow",
 			Message:  "children rule",
 		},
 		{
 			Name:     "deny-term-external",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "deny",
 			Message:  "external rule",
 		},
@@ -287,11 +286,11 @@ func TestCheckMultipleRulesCorrectMatch(t *testing.T) {
 }
 
 func TestCheckSignalGroup(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "allow-fatal-children",
 			Signals:  []string{"@fatal"},
-			Target:   policy.SignalTargetSpec{Type: "children"},
+			Target:   TargetSpec{Type: "children"},
 			Decision: "allow",
 		},
 	}
@@ -313,11 +312,11 @@ func TestCheckSignalGroup(t *testing.T) {
 }
 
 func TestCheckRedirectDecision(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:       "redirect-kill-to-term",
 			Signals:    []string{"SIGKILL"},
-			Target:     policy.SignalTargetSpec{Type: "children"},
+			Target:     TargetSpec{Type: "children"},
 			Decision:   "redirect",
 			RedirectTo: "SIGTERM",
 			Message:    "redirecting SIGKILL",
@@ -336,11 +335,11 @@ func TestCheckRedirectDecision(t *testing.T) {
 }
 
 func TestCheckAuditDecision(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "audit-signals",
 			Signals:  []string{"SIGUSR1"},
-			Target:   policy.SignalTargetSpec{Type: "session"},
+			Target:   TargetSpec{Type: "session"},
 			Decision: "audit",
 			Message:  "audit only",
 		},
@@ -357,11 +356,11 @@ func TestCheckAuditDecision(t *testing.T) {
 }
 
 func TestCheckApproveDecision(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "approve-kill",
 			Signals:  []string{"SIGKILL"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "approve",
 			Message:  "needs approval",
 		},
@@ -378,11 +377,11 @@ func TestCheckApproveDecision(t *testing.T) {
 }
 
 func TestCheckAbsorbDecision(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "absorb-int",
 			Signals:  []string{"SIGINT"},
-			Target:   policy.SignalTargetSpec{Type: "self"},
+			Target:   TargetSpec{Type: "self"},
 			Decision: "absorb",
 			Message:  "absorbed",
 		},
@@ -399,11 +398,11 @@ func TestCheckAbsorbDecision(t *testing.T) {
 }
 
 func TestCheckProcessTarget(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "allow-term-nginx",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "process", Pattern: "nginx*"},
+			Target:   TargetSpec{Type: "process", Pattern: "nginx*"},
 			Decision: "allow",
 		},
 	}
@@ -423,11 +422,11 @@ func TestCheckProcessTarget(t *testing.T) {
 }
 
 func TestCheckPIDRangeTarget(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "deny-signals-low-pids",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "pid_range", Min: 1, Max: 100},
+			Target:   TargetSpec{Type: "pid_range", Min: 1, Max: 100},
 			Decision: "deny",
 		},
 	}
@@ -448,11 +447,11 @@ func TestCheckPIDRangeTarget(t *testing.T) {
 }
 
 func TestCheckFallbackPreserved(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "deny-with-fallback",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "deny",
 			Fallback: "audit",
 			Message:  "denied",
@@ -574,11 +573,11 @@ func TestNewEngineEmptyRules(t *testing.T) {
 }
 
 func TestNewEngineMultipleSignalsInRule(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "multiple-signals",
 			Signals:  []string{"SIGTERM", "SIGINT", "SIGHUP"},
-			Target:   policy.SignalTargetSpec{Type: "children"},
+			Target:   TargetSpec{Type: "children"},
 			Decision: "allow",
 		},
 	}
@@ -596,11 +595,11 @@ func TestNewEngineMultipleSignalsInRule(t *testing.T) {
 }
 
 func TestCheckSignalByNumber(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "allow-by-number",
 			Signals:  []string{"9", "15"}, // SIGKILL, SIGTERM
-			Target:   policy.SignalTargetSpec{Type: "children"},
+			Target:   TargetSpec{Type: "children"},
 			Decision: "allow",
 		},
 	}

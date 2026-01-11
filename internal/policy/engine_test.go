@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEngine_CheckRegistry(t *testing.T) {
@@ -74,4 +75,26 @@ func TestEngine_CheckRegistry(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEngineCheckSignal(t *testing.T) {
+	p := &Policy{
+		Version: 1,
+		Name:    "test",
+		SignalRules: []SignalRule{
+			{
+				Name:     "deny-kill-external",
+				Signals:  []string{"SIGKILL"},
+				Target:   SignalTargetSpec{Type: "external"},
+				Decision: "deny",
+			},
+		},
+	}
+
+	engine, err := NewEngine(p, false)
+	require.NoError(t, err)
+
+	// Create signal engine
+	sigEngine := engine.SignalEngine()
+	require.NotNil(t, sigEngine)
 }

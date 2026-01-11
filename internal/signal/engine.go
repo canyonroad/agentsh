@@ -3,9 +3,18 @@
 // internal/signal/engine.go
 package signal
 
-import (
-	"github.com/agentsh/agentsh/internal/policy"
-)
+// SignalRule represents a signal policy rule.
+// This mirrors policy.SignalRule to avoid import cycles.
+type SignalRule struct {
+	Name        string
+	Description string
+	Signals     []string   // Signal names, numbers, or groups (@fatal, @job)
+	Target      TargetSpec // Who can receive the signal
+	Decision    string     // allow, deny, audit, approve, redirect, absorb
+	Fallback    string     // Fallback decision if platform can't enforce
+	RedirectTo  string     // For redirect: target signal
+	Message     string
+}
 
 // DecisionAction represents the action to take for a signal.
 type DecisionAction string
@@ -31,7 +40,7 @@ type Decision struct {
 // compiledSignalRule is an internal representation of a policy rule
 // with expanded signals and parsed target.
 type compiledSignalRule struct {
-	rule     policy.SignalRule
+	rule     SignalRule
 	signals  map[int]struct{} // Expanded signal numbers
 	target   *ParsedTarget
 	redirect int // For redirect decision
@@ -43,7 +52,7 @@ type Engine struct {
 }
 
 // NewEngine creates a signal policy engine from rules.
-func NewEngine(rules []policy.SignalRule) (*Engine, error) {
+func NewEngine(rules []SignalRule) (*Engine, error) {
 	compiled := make([]compiledSignalRule, 0, len(rules))
 
 	for _, rule := range rules {
@@ -72,13 +81,7 @@ func NewEngine(rules []policy.SignalRule) (*Engine, error) {
 		}
 
 		// Parse target specification
-		targetSpec := TargetSpec{
-			Type:    rule.Target.Type,
-			Pattern: rule.Target.Pattern,
-			Min:     rule.Target.Min,
-			Max:     rule.Target.Max,
-		}
-		target, err := ParseTargetSpec(targetSpec)
+		target, err := ParseTargetSpec(rule.Target)
 		if err != nil {
 			return nil, err
 		}

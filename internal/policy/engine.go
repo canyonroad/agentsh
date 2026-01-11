@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/signal"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/gobwas/glob"
 )
@@ -26,6 +27,9 @@ type Engine struct {
 	// Compiled env policy patterns for glob matching
 	compiledEnvAllow []glob.Glob
 	compiledEnvDeny  []glob.Glob
+
+	// Signal policy engine
+	signalEngine *signal.Engine
 }
 
 type Limits struct {
@@ -258,6 +262,34 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 		e.compiledEnvDeny = append(e.compiledEnvDeny, g)
 	}
 
+	// Compile signal rules
+	if len(p.SignalRules) > 0 {
+		// Convert policy.SignalRule to signal.SignalRule to avoid import cycle
+		sigRules := make([]signal.SignalRule, len(p.SignalRules))
+		for i, r := range p.SignalRules {
+			sigRules[i] = signal.SignalRule{
+				Name:        r.Name,
+				Description: r.Description,
+				Signals:     r.Signals,
+				Target: signal.TargetSpec{
+					Type:    r.Target.Type,
+					Pattern: r.Target.Pattern,
+					Min:     r.Target.Min,
+					Max:     r.Target.Max,
+				},
+				Decision:   r.Decision,
+				Fallback:   r.Fallback,
+				RedirectTo: r.RedirectTo,
+				Message:    r.Message,
+			}
+		}
+		sigEngine, err := signal.NewEngine(sigRules)
+		if err != nil {
+			return nil, fmt.Errorf("compile signal rules: %w", err)
+		}
+		e.signalEngine = sigEngine
+	}
+
 	return e, nil
 }
 
@@ -321,6 +353,11 @@ func (e *Engine) NetworkRules() []NetworkRule {
 		return nil
 	}
 	return e.policy.NetworkRules
+}
+
+// SignalEngine returns the signal policy engine, or nil if no signal rules.
+func (e *Engine) SignalEngine() *signal.Engine {
+	return e.signalEngine
 }
 
 func (e *Engine) Limits() Limits {

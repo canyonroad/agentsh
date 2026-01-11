@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/events"
-	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,11 +27,11 @@ func (m *mockEmitter) Emit(ctx context.Context, eventType events.EventType, data
 }
 
 func TestHandlerEvaluate(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "deny-external",
 			Signals:  []string{"SIGKILL"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "deny",
 		},
 	}
@@ -56,17 +55,17 @@ func TestHandlerEvaluate(t *testing.T) {
 }
 
 func TestHandlerEvaluateAllowSelf(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "allow-self",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "self"},
+			Target:   TargetSpec{Type: "self"},
 			Decision: "allow",
 		},
 		{
 			Name:     "deny-all",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "deny",
 		},
 	}
@@ -90,11 +89,11 @@ func TestHandlerEvaluateAllowSelf(t *testing.T) {
 }
 
 func TestHandlerEvaluateAllowSession(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "allow-session",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "session"},
+			Target:   TargetSpec{Type: "session"},
 			Decision: "allow",
 		},
 	}
@@ -118,11 +117,11 @@ func TestHandlerEvaluateAllowSession(t *testing.T) {
 }
 
 func TestHandlerHandle(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "deny-external-kill",
 			Signals:  []string{"SIGKILL"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "deny",
 			Message:  "cannot kill external processes",
 		},
@@ -156,11 +155,11 @@ func TestHandlerHandle(t *testing.T) {
 }
 
 func TestHandlerHandleAllowEmitsEvent(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "allow-children",
 			Signals:  []string{"SIGTERM"},
-			Target:   policy.SignalTargetSpec{Type: "children"},
+			Target:   TargetSpec{Type: "children"},
 			Decision: "allow",
 		},
 	}
@@ -189,11 +188,11 @@ func TestHandlerHandleAllowEmitsEvent(t *testing.T) {
 }
 
 func TestHandlerHandleRedirect(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:       "redirect-kill-to-term",
 			Signals:    []string{"SIGKILL"},
-			Target:     policy.SignalTargetSpec{Type: "children"},
+			Target:     TargetSpec{Type: "children"},
 			Decision:   "redirect",
 			RedirectTo: "SIGTERM",
 		},
@@ -226,11 +225,11 @@ func TestHandlerHandleRedirect(t *testing.T) {
 }
 
 func TestHandlerHandleAudit(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "audit-external",
 			Signals:  []string{"SIGUSR1"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "audit",
 		},
 	}
@@ -259,11 +258,11 @@ func TestHandlerHandleAudit(t *testing.T) {
 }
 
 func TestHandlerHandleAbsorb(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "absorb-sigchld",
 			Signals:  []string{"SIGCHLD"},
-			Target:   policy.SignalTargetSpec{Type: "session"},
+			Target:   TargetSpec{Type: "session"},
 			Decision: "absorb",
 		},
 	}
@@ -291,11 +290,11 @@ func TestHandlerHandleAbsorb(t *testing.T) {
 }
 
 func TestHandlerHandleApprove(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "approve-external-kill",
 			Signals:  []string{"SIGKILL"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "approve",
 			Message:  "killing external process requires approval",
 		},
@@ -325,11 +324,11 @@ func TestHandlerHandleApprove(t *testing.T) {
 }
 
 func TestHandlerNilEmitter(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "deny-external",
 			Signals:  []string{"SIGKILL"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "deny",
 		},
 	}
@@ -356,11 +355,11 @@ func TestHandlerNilEmitter(t *testing.T) {
 }
 
 func TestHandlerEventData(t *testing.T) {
-	rules := []policy.SignalRule{
+	rules := []SignalRule{
 		{
 			Name:     "deny-external",
 			Signals:  []string{"SIGKILL"},
-			Target:   policy.SignalTargetSpec{Type: "external"},
+			Target:   TargetSpec{Type: "external"},
 			Decision: "deny",
 			Message:  "test message",
 		},
