@@ -21,8 +21,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install build deps (envshim)
-        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev pkg-config gcc-aarch64-linux-gnu make
+      - name: Install build deps (envshim, fuse)
+        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev libfuse-dev pkg-config gcc-aarch64-linux-gnu make
 
       - name: Test
         run: go test ./...
