@@ -1,3 +1,5 @@
+//go:build !windows
+
 // internal/signal/types.go
 package signal
 
