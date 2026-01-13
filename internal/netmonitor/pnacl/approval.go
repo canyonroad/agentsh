@@ -89,9 +89,16 @@ type ApprovalConfig struct {
 	// Timeout is how long to wait for user approval.
 	Timeout time.Duration
 	// TimeoutFallback is the action when approval times out.
+	// Valid values: deny, allow, use_default.
+	// When use_default is specified, the DefaultDecisionFn is called to get the decision.
 	TimeoutFallback Decision // deny, allow, or use_default
 	// ConfigPath is the path to persist permanent rules.
 	ConfigPath string
+	// DefaultDecisionFn is called when TimeoutFallback is use_default to get the
+	// appropriate default decision from the policy engine. This allows timeout
+	// handling to respect the global or process-specific default from the config.
+	// If nil and TimeoutFallback is use_default, falls back to DecisionDeny.
+	DefaultDecisionFn func() Decision
 }
 
 // DefaultApprovalConfig returns sensible defaults.
@@ -284,11 +291,11 @@ func (ap *ApprovalProvider) handleResponse(ctx context.Context, req ApprovalRequ
 		}
 
 	case UserDecisionSkip:
-		decision = ap.config.TimeoutFallback
+		decision = ap.resolveFallbackDecision()
 		ap.emitEvent(ctx, req, "approval_skipped", "", userAction)
 
 	default:
-		decision = ap.config.TimeoutFallback
+		decision = ap.resolveFallbackDecision()
 		ap.emitEvent(ctx, req, "approval_unknown", "", userAction)
 	}
 
@@ -297,9 +304,23 @@ func (ap *ApprovalProvider) handleResponse(ctx context.Context, req ApprovalRequ
 
 // handleTimeout handles approval timeout.
 func (ap *ApprovalProvider) handleTimeout(ctx context.Context, req ApprovalRequest) (Decision, UserDecision, error) {
-	decision := ap.config.TimeoutFallback
+	decision := ap.resolveFallbackDecision()
 	ap.emitEvent(ctx, req, "approval_timeout", "", "timeout")
 	return decision, UserDecisionTimeout, fmt.Errorf("approval timeout after %v", ap.config.Timeout)
+}
+
+// resolveFallbackDecision returns the actual decision to use for timeout/skip cases.
+// If TimeoutFallback is use_default, it calls DefaultDecisionFn to get the policy default.
+func (ap *ApprovalProvider) resolveFallbackDecision() Decision {
+	fallback := ap.config.TimeoutFallback
+	if fallback == DecisionUseDefault {
+		if ap.config.DefaultDecisionFn != nil {
+			return ap.config.DefaultDecisionFn()
+		}
+		// No DefaultDecisionFn configured, fall back to deny for safety
+		return DecisionDeny
+	}
+	return fallback
 }
 
 // persistRule persists a rule to the configuration file.
@@ -400,6 +421,27 @@ func (ap *ApprovalProvider) Resolve(id string, decision UserDecision, reason str
 }
 
 // TTYPromptProvider implements PromptProvider for TTY-based prompts.
+//
+// Design Decision: Standalone vs. internal/approvals integration
+//
+// This TTYPromptProvider is intentionally separate from internal/approvals/Manager
+// because PNACL network approval has fundamentally different requirements:
+//
+// 1. Decision granularity: PNACL needs 5 decision types (allow_once, allow_permanent,
+//    deny_once, deny_forever, skip) with different persistence behaviors.
+//    internal/approvals uses binary approved/denied.
+//
+// 2. Request context: PNACL prompts for network connections (process, host, port, protocol).
+//    internal/approvals prompts for session commands (SessionID, CommandID, Rule).
+//
+// 3. UX requirements: PNACL needs sub-second single-key responses for real-time network
+//    decisions. internal/approvals uses challenge-response (math, TOTP, WebAuthn).
+//
+// 4. Timeout semantics: PNACL supports configurable fallback (deny, allow, use_default).
+//    internal/approvals always denies on timeout.
+//
+// Integration would require significant abstraction overhead without clear benefit
+// since the systems serve different security domains (network ACL vs. command approval).
 type TTYPromptProvider struct {
 	mu sync.Mutex
 }
@@ -433,7 +475,7 @@ func (p *TTYPromptProvider) Prompt(ctx context.Context, req ApprovalRequest) (Ap
 
 	// Display prompt
 	fmt.Fprintf(f, "\n")
-	fmt.Fprintf(f, "[PNACL] %s -> %s:%d (%s)\n", req.ProcessName, req.Target, req.Port, req.Protocol)
+	fmt.Fprintf(f, "[PNACL] %s → %s:%d (%s)\n", req.ProcessName, req.Target, req.Port, req.Protocol)
 	fmt.Fprintf(f, "Process: %s (pid: %d)\n", req.ProcessPath, req.PID)
 	fmt.Fprintf(f, "Action: [A]llow once | Allow [P]ermanent | [D]eny once | Deny [F]orever | [S]kip\n")
 	fmt.Fprintf(f, "> ")

@@ -23,6 +23,10 @@ const (
 	DecisionAllowOnceThenApprove Decision = "allow_once_then_approve"
 	// DecisionAudit allows but logs for review.
 	DecisionAudit Decision = "audit"
+	// DecisionUseDefault is a special value for timeout fallback that
+	// indicates the policy engine's global or process default should be used.
+	// This is only valid for ApprovalConfig.TimeoutFallback.
+	DecisionUseDefault Decision = "use_default"
 )
 
 // NetworkTarget specifies allowed/denied network destinations.

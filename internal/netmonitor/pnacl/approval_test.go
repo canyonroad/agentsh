@@ -616,3 +616,117 @@ func TestApprovalProvider_ConcurrentRequests(t *testing.T) {
 	}
 	mu.Unlock()
 }
+
+func TestApprovalProvider_Timeout_UseDefaultFallback(t *testing.T) {
+	config := DefaultApprovalConfig()
+	config.Timeout = 100 * time.Millisecond
+	config.TimeoutFallback = DecisionUseDefault
+	// Simulate policy engine returning allow as the default
+	config.DefaultDecisionFn = func() Decision {
+		return DecisionAllow
+	}
+
+	ap := NewApprovalProvider(config)
+
+	mockPrompt := &MockPromptProvider{
+		delay: 1 * time.Second, // Longer than timeout
+	}
+	ap.SetPromptProvider(mockPrompt)
+
+	mockEmitter := &MockEventEmitter{}
+	ap.SetEventEmitter(mockEmitter)
+
+	ctx := context.Background()
+	req := ApprovalRequest{
+		ProcessName: "test-process",
+		Target:      "api.example.com",
+		Port:        443,
+		Protocol:    "tcp",
+	}
+
+	decision, userDecision, err := ap.RequestApproval(ctx, req)
+
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	// Should use the value from DefaultDecisionFn (allow)
+	if decision != DecisionAllow {
+		t.Errorf("expected decision Allow from use_default, got %s", decision)
+	}
+	if userDecision != UserDecisionTimeout {
+		t.Errorf("expected user decision Timeout, got %s", userDecision)
+	}
+}
+
+func TestApprovalProvider_Timeout_UseDefaultFallback_NilFn(t *testing.T) {
+	config := DefaultApprovalConfig()
+	config.Timeout = 100 * time.Millisecond
+	config.TimeoutFallback = DecisionUseDefault
+	// DefaultDecisionFn is nil - should fall back to deny for safety
+
+	ap := NewApprovalProvider(config)
+
+	mockPrompt := &MockPromptProvider{
+		delay: 1 * time.Second,
+	}
+	ap.SetPromptProvider(mockPrompt)
+
+	ctx := context.Background()
+	req := ApprovalRequest{
+		ProcessName: "test-process",
+		Target:      "api.example.com",
+		Port:        443,
+		Protocol:    "tcp",
+	}
+
+	decision, _, err := ap.RequestApproval(ctx, req)
+
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	// With nil DefaultDecisionFn, should fall back to deny
+	if decision != DecisionDeny {
+		t.Errorf("expected decision Deny when DefaultDecisionFn is nil, got %s", decision)
+	}
+}
+
+func TestApprovalProvider_Skip_UseDefaultFallback(t *testing.T) {
+	config := DefaultApprovalConfig()
+	config.Timeout = 5 * time.Second
+	config.TimeoutFallback = DecisionUseDefault
+	// Simulate policy engine returning audit as the default
+	config.DefaultDecisionFn = func() Decision {
+		return DecisionAudit
+	}
+
+	ap := NewApprovalProvider(config)
+
+	mockPrompt := &MockPromptProvider{
+		response: ApprovalResponse{
+			Decision: UserDecisionSkip,
+		},
+		delay: 10 * time.Millisecond,
+	}
+	ap.SetPromptProvider(mockPrompt)
+
+	ctx := context.Background()
+	req := ApprovalRequest{
+		ProcessName: "test-process",
+		Target:      "api.example.com",
+		Port:        443,
+		Protocol:    "tcp",
+	}
+
+	decision, userDecision, err := ap.RequestApproval(ctx, req)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Skip should also use DefaultDecisionFn
+	if decision != DecisionAudit {
+		t.Errorf("expected decision Audit from use_default on skip, got %s", decision)
+	}
+	if userDecision != UserDecisionSkip {
+		t.Errorf("expected user decision Skip, got %s", userDecision)
+	}
+}
