@@ -60,6 +60,9 @@ func (pf *ProcessFilter) SetOnDeny(fn func(*ConnectionEvent)) {}
 // SetOnAllow is not supported on non-Linux platforms.
 func (pf *ProcessFilter) SetOnAllow(fn func(*ConnectionEvent)) {}
 
+// SetOnApprovalGranted is not supported on non-Linux platforms.
+func (pf *ProcessFilter) SetOnApprovalGranted(fn func(*ConnectionEvent)) {}
+
 // ProcessEvent is not supported on non-Linux platforms.
 func (pf *ProcessFilter) ProcessEvent(ctx context.Context, ev *ConnectEvent, config *ProcessFilterConfig) pnacl.Decision {
 	return pnacl.DecisionDeny

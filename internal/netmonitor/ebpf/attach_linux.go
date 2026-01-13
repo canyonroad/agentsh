@@ -18,10 +18,6 @@ func AttachConnectToCgroup(cgroupPath string) (*ebpf.Collection, func() error, e
 	}
 	if len(coll.Programs) == 0 {
 		coll.Close()
-		return nil, nil, fmt.Errorf("ebpf connect object has no programs (empty embed)")
-	}
-	if len(coll.Programs) == 0 {
-		coll.Close()
 		return nil, nil, fmt.Errorf("ebpf connect object has no programs")
 	}
 

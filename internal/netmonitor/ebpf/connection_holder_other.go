@@ -5,6 +5,7 @@ package ebpf
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/netmonitor/pnacl"
 )
@@ -14,7 +15,7 @@ type ConnectionHolder struct{}
 
 // ConnectionHolderConfig is not supported on non-Linux platforms.
 type ConnectionHolderConfig struct {
-	ApprovalTimeout  int
+	ApprovalTimeout  time.Duration
 	DefaultOnTimeout pnacl.Decision
 	EventBufferSize  int
 	EnableMetrics    bool
