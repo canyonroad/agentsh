@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -468,7 +467,7 @@ Note: This requires the agentsh daemon to be running with network monitoring ena
 
 			// For now, show a placeholder since we need the daemon running
 			// In production, this would connect to the SSE endpoint
-			return watchNetworkEvents(ctx, cmd, processFilter, outputJSON, configPath)
+			return watchNetworkEvents(ctx, cmd, processFilter, outputJSON)
 		},
 	}
 
@@ -560,7 +559,7 @@ func formatTarget(r pnacl.NetworkTarget) string {
 }
 
 func isValidACLDecision(d string) bool {
-	switch pnacl.Decision(d) {
+	switch pnacl.Decision(strings.ToLower(d)) {
 	case pnacl.DecisionAllow, pnacl.DecisionDeny, pnacl.DecisionApprove, pnacl.DecisionAudit:
 		return true
 	default:
@@ -569,7 +568,7 @@ func isValidACLDecision(d string) bool {
 }
 
 func promptForRule(cmd *cobra.Command) (processName, target, port, protocol, decision string, err error) {
-	reader := bufio.NewReader(os.Stdin)
+	reader := bufio.NewReader(cmd.InOrStdin())
 	w := cmd.OutOrStdout()
 
 	fmt.Fprint(w, "Process name: ")
@@ -610,7 +609,7 @@ func promptForRule(cmd *cobra.Command) (processName, target, port, protocol, dec
 	return processName, target, port, protocol, decision, nil
 }
 
-func watchNetworkEvents(ctx context.Context, cmd *cobra.Command, processFilter string, outputJSON bool, configPath string) error {
+func watchNetworkEvents(ctx context.Context, cmd *cobra.Command, processFilter string, outputJSON bool) error {
 	w := cmd.OutOrStdout()
 
 	// This is a simplified implementation that reads from the event file
@@ -740,35 +739,6 @@ func generateLearnedConfig(learned *LearnedRules) string {
 	return sb.String()
 }
 
-// NetworkACLEventStream represents a connection to the network ACL event stream.
-type NetworkACLEventStream struct {
-	ProcessFilter string
-	Events        chan NetworkACLEventData
-	Errors        chan error
-	done          chan struct{}
-}
-
-// NetworkACLEventData represents a network ACL event for display.
-type NetworkACLEventData struct {
-	Timestamp   time.Time `json:"timestamp"`
-	ProcessName string    `json:"process_name"`
-	ProcessPath string    `json:"process_path"`
-	PID         int       `json:"pid"`
-	Target      string    `json:"target"`
-	Port        int       `json:"port"`
-	Protocol    string    `json:"protocol"`
-	Decision    string    `json:"decision"`
-	RuleSource  string    `json:"rule_source,omitempty"`
-}
-
-// MarshalJSON implements json.Marshaler.
-func (e NetworkACLEventData) MarshalJSON() ([]byte, error) {
-	type Alias NetworkACLEventData
-	return json.Marshal(struct {
-		Timestamp string `json:"timestamp"`
-		Alias
-	}{
-		Timestamp: e.Timestamp.Format(time.RFC3339Nano),
-		Alias:     Alias(e),
-	})
-}
+// TODO: NetworkACLEventStream and NetworkACLEventData types will be needed
+// when implementing the daemon's event streaming functionality.
+// See watchNetworkEvents() for the planned integration point.
