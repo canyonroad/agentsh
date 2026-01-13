@@ -485,6 +485,9 @@ func (p *TTYPromptProvider) Prompt(ctx context.Context, req ApprovalRequest) (Ap
 		line string
 		err  error
 	}, 1)
+	// Note: If context is cancelled, this goroutine may block on ReadString until
+	// the TTY is closed. The deferred f.Close() ensures the goroutine eventually
+	// unblocks and terminates when the function returns.
 	go func() {
 		line, err := reader.ReadString('\n')
 		lineCh <- struct {

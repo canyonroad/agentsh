@@ -80,7 +80,7 @@ func (e *BrokerEventEmitter) EmitNetworkACLEvent(ctx context.Context, event Netw
 	// Append to persistent storage if available
 	if e.appender != nil {
 		if err := e.appender.AppendEvent(ctx, ev); err != nil {
-			// Log but don't fail
+			// Ignore error - event emission is best-effort
 			_ = err
 		}
 	}
