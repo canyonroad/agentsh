@@ -554,8 +554,9 @@ func TestFormatTarget(t *testing.T) {
 }
 
 func TestIsValidACLDecision(t *testing.T) {
-	validDecisions := []string{"allow", "deny", "approve", "audit"}
-	invalidDecisions := []string{"block", "permit", "invalid", "", "ALLOW"}
+	// Case-insensitive validation
+	validDecisions := []string{"allow", "deny", "approve", "audit", "ALLOW", "Allow", "DENY", "Audit"}
+	invalidDecisions := []string{"block", "permit", "invalid", ""}
 
 	for _, d := range validDecisions {
 		if !isValidACLDecision(d) {
