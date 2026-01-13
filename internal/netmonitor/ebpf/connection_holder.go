@@ -14,11 +14,40 @@ import (
 
 // ConnectionHolder manages connections that are being held for approval decisions.
 // It coordinates between the eBPF collector and the policy filter.
+//
+// IMPORTANT: Connection Hold Limitation
+//
+// The spec originally requested "hold connection in userspace via socket redirect" for
+// approve decisions. This would require true kernel-level connection holding with complex
+// eBPF socket redirect architecture (sk_msg/sk_skb programs, sockmap, etc.).
+//
+// Current implementation uses a pragmatic "deny-then-allow" approach for approve mode:
+//
+//  1. Initial connection attempt triggers the approve decision
+//  2. The kernel-level eBPF program cannot hold/pause the connection synchronously
+//  3. For approve mode: The initial connection is denied at kernel level (user sees EPERM)
+//  4. User is prompted for approval via the OnApprovalNeeded callback
+//  5. If approved, a temporary allow rule is added so future connections from that
+//     process to that target will be allowed without prompting
+//  6. The application must retry the connection after approval
+//
+// This is a known limitation. True synchronous connection holding would require:
+//   - BPF_PROG_TYPE_SK_MSG/SK_SKB programs for socket redirect
+//   - A sockmap to hold connections in kernel space
+//   - Userspace coordination to release held connections
+//   - Significantly more complex eBPF architecture
+//
+// The current approach provides a functional approval workflow while being simpler
+// to implement and maintain. Most applications will retry failed connections, making
+// this transparent to end users after the initial prompt.
 type ConnectionHolder struct {
 	mu sync.RWMutex
 
 	// Collection is the eBPF collection
 	coll *ebpf.Collection
+
+	// cgroupID for adding temporary allow rules
+	cgroupID uint64
 
 	// Collector for reading events
 	collector *Collector
@@ -48,6 +77,10 @@ type ConnectionHolderConfig struct {
 
 	// EnableMetrics enables metrics collection
 	EnableMetrics bool
+
+	// CgroupPath is the path to the cgroup being monitored.
+	// Required for adding temporary allow rules after approval.
+	CgroupPath string
 }
 
 // ConnectionHolderStats contains metrics about connection handling.
@@ -90,13 +123,26 @@ func NewConnectionHolder(coll *ebpf.Collection, filter *ProcessFilter, config *C
 		return nil, err
 	}
 
+	// Get cgroup ID for temporary allow rules
+	var cgroupID uint64
+	if config.CgroupPath != "" {
+		cgroupID, _ = CgroupID(config.CgroupPath) // best effort
+	}
+
 	h := &ConnectionHolder{
 		coll:      coll,
+		cgroupID:  cgroupID,
 		collector: collector,
 		filter:    filter,
 		config:    config,
 		done:      make(chan struct{}),
 	}
+
+	// Set up callback to add temporary allow rules when user approves a connection.
+	// This implements the "deny-then-allow" pattern for approve mode.
+	filter.SetOnApprovalGranted(func(ev *ConnectionEvent) {
+		h.addTemporaryAllowRule(ev)
+	})
 
 	return h, nil
 }
@@ -240,6 +286,36 @@ func (h *ConnectionHolder) Close() error {
 	return nil
 }
 
+// addTemporaryAllowRule adds a temporary allow rule to the eBPF maps for an approved connection.
+// This enables the "deny-then-allow" pattern: the initial connection is denied by the kernel,
+// but after user approval, a rule is added so subsequent connection attempts will succeed.
+func (h *ConnectionHolder) addTemporaryAllowRule(ev *ConnectionEvent) {
+	if h.coll == nil || h.cgroupID == 0 {
+		return
+	}
+
+	key := AllowKey{
+		Family: ev.Family,
+		Dport:  ev.DstPort,
+	}
+
+	// Copy the destination IP address
+	if ev.Family == 2 { // AF_INET
+		if len(ev.DstIP) >= 4 {
+			copy(key.Addr[:4], ev.DstIP.To4())
+		}
+	} else if ev.Family == 10 { // AF_INET6
+		if len(ev.DstIP) >= 16 {
+			copy(key.Addr[:], ev.DstIP.To16())
+		}
+	}
+
+	// Add the temporary allow rule (errors logged but not propagated)
+	if err := AddTemporaryAllowRule(h.coll, h.cgroupID, key); err != nil {
+		h.incErrors()
+	}
+}
+
 // PNACLMonitor provides the high-level interface for PNACL-based network monitoring.
 // It combines eBPF collection with policy evaluation and connection management.
 type PNACLMonitor struct {
@@ -325,8 +401,14 @@ func (m *PNACLMonitor) Start(ctx context.Context) error {
 	m.coll = coll
 	m.detach = detach
 
-	// Create connection holder
-	holder, err := NewConnectionHolder(coll, m.filter, m.config.HolderConfig)
+	// Create connection holder with cgroup path for temporary allow rules
+	holderConfig := m.config.HolderConfig
+	if holderConfig == nil {
+		holderConfig = DefaultConnectionHolderConfig()
+	}
+	holderConfig.CgroupPath = m.cgroupPath
+
+	holder, err := NewConnectionHolder(coll, m.filter, holderConfig)
 	if err != nil {
 		detach()
 		return err

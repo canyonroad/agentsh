@@ -513,3 +513,152 @@ func TestProcessFilter_Close(t *testing.T) {
 	err = filter.Close()
 	assert.NoError(t, err)
 }
+
+func TestProcessFilter_ProcessEvent_UDP(t *testing.T) {
+	processName := getTestProcessName()
+	config := &pnacl.Config{
+		Default: "deny",
+		Processes: []pnacl.ProcessConfig{
+			{
+				Name: "test-process",
+				Match: pnacl.ProcessMatchCriteria{
+					ProcessName: processName, // Match current test process
+				},
+				Rules: []pnacl.NetworkTarget{
+					{
+						IP:       "8.8.8.8",
+						Port:     "53",
+						Decision: pnacl.DecisionAllow,
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := pnacl.NewPolicyEngine(config)
+	require.NoError(t, err)
+
+	filter := NewProcessFilter(engine)
+
+	var allowCalled bool
+	filter.SetOnAllow(func(ev *ConnectionEvent) {
+		allowCalled = true
+		assert.Equal(t, uint16(53), ev.DstPort)
+		assert.Equal(t, "udp", ev.Protocol)
+	})
+
+	// UDP event (protocol 17)
+	ev := &ConnectEvent{
+		PID:      uint32(os.Getpid()),
+		TGID:     uint32(os.Getpid()),
+		Protocol: 17, // UDP
+		Family:   2,  // AF_INET
+		Dport:    53,
+		DstIPv4:  0x08080808,
+	}
+
+	decision := filter.ProcessEvent(context.Background(), ev, nil)
+	assert.Equal(t, pnacl.DecisionAllow, decision)
+	assert.True(t, allowCalled)
+}
+
+func TestProcessFilter_ProcessEvent_UDP_Deny(t *testing.T) {
+	processName := getTestProcessName()
+	config := &pnacl.Config{
+		Default: "allow",
+		Processes: []pnacl.ProcessConfig{
+			{
+				Name: "test-process",
+				Match: pnacl.ProcessMatchCriteria{
+					ProcessName: processName,
+				},
+				Rules: []pnacl.NetworkTarget{
+					{
+						IP:       "8.8.8.8",
+						Port:     "53",
+						Decision: pnacl.DecisionDeny,
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := pnacl.NewPolicyEngine(config)
+	require.NoError(t, err)
+
+	filter := NewProcessFilter(engine)
+
+	var denyCalled bool
+	filter.SetOnDeny(func(ev *ConnectionEvent) {
+		denyCalled = true
+		assert.Equal(t, "udp", ev.Protocol)
+		assert.True(t, ev.Blocked)
+	})
+
+	ev := &ConnectEvent{
+		PID:      uint32(os.Getpid()),
+		Protocol: 17, // UDP
+		Family:   2,
+		Dport:    53,
+		DstIPv4:  0x08080808,
+	}
+
+	decision := filter.ProcessEvent(context.Background(), ev, nil)
+	assert.Equal(t, pnacl.DecisionDeny, decision)
+	assert.True(t, denyCalled)
+}
+
+func TestProcessFilter_OnApprovalGranted(t *testing.T) {
+	processName := getTestProcessName()
+	config := &pnacl.Config{
+		Default: "deny",
+		Processes: []pnacl.ProcessConfig{
+			{
+				Name: "test-process",
+				Match: pnacl.ProcessMatchCriteria{
+					ProcessName: processName,
+				},
+				Rules: []pnacl.NetworkTarget{
+					{
+						IP:       "8.8.8.8",
+						Port:     "80",
+						Decision: pnacl.DecisionApprove,
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := pnacl.NewPolicyEngine(config)
+	require.NoError(t, err)
+
+	filter := NewProcessFilter(engine)
+
+	// Track approval granted callback
+	var approvalGrantedCalled bool
+	var approvalGrantedEvent *ConnectionEvent
+	filter.SetOnApprovalGranted(func(ev *ConnectionEvent) {
+		approvalGrantedCalled = true
+		approvalGrantedEvent = ev
+	})
+
+	// Set up approval handler that approves immediately
+	filter.SetOnApprovalNeeded(func(pc *PendingConnection) pnacl.Decision {
+		return pnacl.DecisionAllow
+	})
+
+	ev := &ConnectEvent{
+		PID:      uint32(os.Getpid()),
+		Cookie:   123,
+		Protocol: 6,
+		Family:   2,
+		Dport:    80,
+		DstIPv4:  0x08080808,
+	}
+
+	decision := filter.ProcessEvent(context.Background(), ev, nil)
+	assert.Equal(t, pnacl.DecisionAllow, decision)
+	assert.True(t, approvalGrantedCalled, "onApprovalGranted should be called")
+	assert.NotNil(t, approvalGrantedEvent)
+	assert.Equal(t, uint16(80), approvalGrantedEvent.DstPort)
+}

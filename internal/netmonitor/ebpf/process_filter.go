@@ -33,6 +33,10 @@ type ProcessFilter struct {
 	onDeny           func(*ConnectionEvent)
 	onAllow          func(*ConnectionEvent)
 
+	// Callback for adding temporary allow rules after approval
+	// This is set by ConnectionHolder to integrate with eBPF maps
+	onApprovalGranted func(*ConnectionEvent)
+
 	// Connection tracking
 	allowOnceKeys map[string]bool // Tracks allow_once_then_approve state
 
@@ -130,6 +134,14 @@ func (pf *ProcessFilter) SetOnAllow(fn func(*ConnectionEvent)) {
 	pf.mu.Lock()
 	defer pf.mu.Unlock()
 	pf.onAllow = fn
+}
+
+// SetOnApprovalGranted sets the callback for when a user approves a pending connection.
+// This callback is used by ConnectionHolder to add a temporary allow rule to the eBPF maps.
+func (pf *ProcessFilter) SetOnApprovalGranted(fn func(*ConnectionEvent)) {
+	pf.mu.Lock()
+	defer pf.mu.Unlock()
+	pf.onApprovalGranted = fn
 }
 
 // ProcessEvent processes a connection event from eBPF and returns the decision.
@@ -258,6 +270,9 @@ func (pf *ProcessFilter) handleApprove(ctx context.Context, ev *ConnectEvent, co
 		connEv.Decision = decision
 		switch decision {
 		case pnacl.DecisionAllow:
+			// Notify that approval was granted so a temporary allow rule can be added
+			// This enables the "deny-then-allow" pattern for approve mode
+			pf.notifyApprovalGranted(connEv)
 			pf.notifyAllow(connEv)
 			return pnacl.DecisionAllow
 		default:
@@ -527,6 +542,15 @@ func (pf *ProcessFilter) notifyDeny(ev *ConnectionEvent) {
 func (pf *ProcessFilter) notifyAudit(ev *ConnectionEvent) {
 	pf.mu.RLock()
 	fn := pf.onAudit
+	pf.mu.RUnlock()
+	if fn != nil {
+		fn(ev)
+	}
+}
+
+func (pf *ProcessFilter) notifyApprovalGranted(ev *ConnectionEvent) {
+	pf.mu.RLock()
+	fn := pf.onApprovalGranted
 	pf.mu.RUnlock()
 	if fn != nil {
 		fn(ev)

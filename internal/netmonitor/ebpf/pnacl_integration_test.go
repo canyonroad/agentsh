@@ -589,3 +589,161 @@ func TestIntegration_PNACLMonitor_ProcessMatching(t *testing.T) {
 	decision = filter.ProcessEvent(context.Background(), ev, nil)
 	assert.Equal(t, pnacl.DecisionDeny, decision)
 }
+
+// TestIntegration_PNACLMonitor_UDP tests UDP traffic handling.
+func TestIntegration_PNACLMonitor_UDP(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	if !limits.DetectCgroupV2() {
+		t.Skip("cgroup v2 required")
+	}
+
+	status := CheckSupport()
+	if !status.Supported {
+		t.Skipf("ebpf not supported: %s", status.Reason)
+	}
+
+	// Policy that allows UDP DNS traffic (port 53) but denies UDP port 123
+	config := &pnacl.Config{
+		Default: "deny",
+		Processes: []pnacl.ProcessConfig{
+			{
+				Name: "test",
+				Match: pnacl.ProcessMatchCriteria{
+					Path: "**/*", // Match all processes via path glob
+				},
+				Rules: []pnacl.NetworkTarget{
+					{
+						IP:       "8.8.8.8",
+						Port:     "53",
+						Decision: pnacl.DecisionAllow,
+					},
+					{
+						IP:       "8.8.8.8",
+						Port:     "123",
+						Decision: pnacl.DecisionDeny,
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := pnacl.NewPolicyEngine(config)
+	require.NoError(t, err)
+
+	filter := NewProcessFilter(engine)
+
+	var allowCount, denyCount int
+	var mu sync.Mutex
+
+	filter.SetOnAllow(func(ev *ConnectionEvent) {
+		mu.Lock()
+		allowCount++
+		mu.Unlock()
+	})
+
+	filter.SetOnDeny(func(ev *ConnectionEvent) {
+		mu.Lock()
+		denyCount++
+		mu.Unlock()
+	})
+
+	// Test UDP event to allowed port (DNS)
+	ev := &ConnectEvent{
+		PID:      uint32(os.Getpid()),
+		Cookie:   1,
+		Protocol: 17, // UDP
+		Family:   2,  // AF_INET
+		Dport:    53,
+		DstIPv4:  0x08080808, // 8.8.8.8
+	}
+
+	decision := filter.ProcessEvent(context.Background(), ev, nil)
+	assert.Equal(t, pnacl.DecisionAllow, decision)
+
+	// Test UDP event to denied port (NTP)
+	ev.Cookie = 2
+	ev.Dport = 123
+	decision = filter.ProcessEvent(context.Background(), ev, nil)
+	assert.Equal(t, pnacl.DecisionDeny, decision)
+
+	mu.Lock()
+	assert.Equal(t, 1, allowCount)
+	assert.Equal(t, 1, denyCount)
+	mu.Unlock()
+}
+
+// TestIntegration_ConnectionHolder_ApprovalAddsTemporaryRule tests the deny-then-allow pattern.
+func TestIntegration_ConnectionHolder_ApprovalAddsTemporaryRule(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	if !limits.DetectCgroupV2() {
+		t.Skip("cgroup v2 required")
+	}
+
+	status := CheckSupport()
+	if !status.Supported {
+		t.Skipf("ebpf not supported: %s", status.Reason)
+	}
+
+	// Policy that requires approval
+	config := &pnacl.Config{
+		Default: "deny",
+		Processes: []pnacl.ProcessConfig{
+			{
+				Name: "test",
+				Match: pnacl.ProcessMatchCriteria{
+					Path: "**/*",
+				},
+				Rules: []pnacl.NetworkTarget{
+					{
+						Host:     "*",
+						Port:     "*",
+						Decision: pnacl.DecisionApprove,
+					},
+				},
+			},
+		},
+	}
+
+	engine, err := pnacl.NewPolicyEngine(config)
+	require.NoError(t, err)
+
+	filter := NewProcessFilter(engine)
+
+	// Track approval granted calls
+	var approvalGrantedEvents []*ConnectionEvent
+	var mu sync.Mutex
+
+	filter.SetOnApprovalGranted(func(ev *ConnectionEvent) {
+		mu.Lock()
+		approvalGrantedEvents = append(approvalGrantedEvents, ev)
+		mu.Unlock()
+	})
+
+	// Auto-approve
+	filter.SetOnApprovalNeeded(func(pc *PendingConnection) pnacl.Decision {
+		return pnacl.DecisionAllow
+	})
+
+	ev := &ConnectEvent{
+		PID:      uint32(os.Getpid()),
+		Cookie:   1,
+		Protocol: 6,
+		Family:   2,
+		Dport:    443,
+		DstIPv4:  0x08080808,
+	}
+
+	decision := filter.ProcessEvent(context.Background(), ev, nil)
+	assert.Equal(t, pnacl.DecisionAllow, decision)
+
+	mu.Lock()
+	assert.Len(t, approvalGrantedEvents, 1)
+	if len(approvalGrantedEvents) > 0 {
+		assert.Equal(t, uint16(443), approvalGrantedEvents[0].DstPort)
+	}
+	mu.Unlock()
+}
