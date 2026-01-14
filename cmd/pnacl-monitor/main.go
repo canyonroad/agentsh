@@ -1,3 +1,5 @@
+//go:build linux
+
 // Quick test to run PNACL monitor with eBPF
 package main
 

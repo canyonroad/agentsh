@@ -168,13 +168,38 @@ func (pf *ProcessFilter) ProcessEvent(ctx context.Context, ev *ConnectEvent, con
 		return pnacl.DecisionAllow
 	}
 
-	result := engine.Evaluate(
-		*connEv.Process,
-		connEv.Host,
-		connEv.DstIP,
-		int(connEv.DstPort),
-		connEv.Protocol,
-	)
+	// Evaluate policy - use parent-child evaluation if we have parent info
+	var result pnacl.PolicyResult
+	if connEv.Process.ParentPID > 1 {
+		// Get parent process info and use parent-child evaluation
+		parentInfo := pf.getProcessInfo(uint32(connEv.Process.ParentPID))
+		if parentInfo != nil {
+			result = engine.EvaluateForParentChild(
+				*parentInfo,
+				*connEv.Process,
+				connEv.Host,
+				connEv.DstIP,
+				int(connEv.DstPort),
+				connEv.Protocol,
+			)
+		} else {
+			result = engine.Evaluate(
+				*connEv.Process,
+				connEv.Host,
+				connEv.DstIP,
+				int(connEv.DstPort),
+				connEv.Protocol,
+			)
+		}
+	} else {
+		result = engine.Evaluate(
+			*connEv.Process,
+			connEv.Host,
+			connEv.DstIP,
+			int(connEv.DstPort),
+			connEv.Protocol,
+		)
+	}
 
 	connEv.Decision = result.Decision
 
@@ -190,7 +215,7 @@ func (pf *ProcessFilter) ProcessEvent(ctx context.Context, ev *ConnectEvent, con
 
 	case pnacl.DecisionAudit:
 		pf.notifyAudit(connEv)
-		return pnacl.DecisionAllow
+		return pnacl.DecisionAudit // Return Audit so stats can track it
 
 	case pnacl.DecisionAllowOnceThenApprove:
 		key := pf.makeAllowOnceKey(connEv)
@@ -274,7 +299,7 @@ func (pf *ProcessFilter) handleApprove(ctx context.Context, ev *ConnectEvent, co
 			// This enables the "deny-then-allow" pattern for approve mode
 			pf.notifyApprovalGranted(connEv)
 			pf.notifyAllow(connEv)
-			return pnacl.DecisionAllow
+			return pnacl.DecisionApprove // Return Approve so stats can track it
 		default:
 			connEv.Blocked = true
 			pf.notifyDeny(connEv)
@@ -285,10 +310,11 @@ func (pf *ProcessFilter) handleApprove(ctx context.Context, ev *ConnectEvent, co
 		connEv.Blocked = config.DefaultOnTimeout != pnacl.DecisionAllow
 		if connEv.Blocked {
 			pf.notifyDeny(connEv)
+			return pnacl.DecisionDeny
 		} else {
 			pf.notifyAllow(connEv)
+			return pnacl.DecisionAllow
 		}
-		return config.DefaultOnTimeout
 	case <-pf.done:
 		connEv.Blocked = true
 		pf.notifyDeny(connEv)
@@ -339,32 +365,48 @@ func (pf *ProcessFilter) buildConnectionEvent(ev *ConnectEvent) *ConnectionEvent
 }
 
 // getProcessInfo retrieves process information for a PID.
+// It uses a cache but validates entries to handle PID reuse.
 func (pf *ProcessFilter) getProcessInfo(pid uint32) *pnacl.ProcessInfo {
+	pidStr := strconv.FormatUint(uint64(pid), 10)
+	commPath := filepath.Join("/proc", pidStr, "comm")
+
+	// Read current process name to validate cache
+	currentName := ""
+	if data, err := os.ReadFile(commPath); err == nil {
+		currentName = strings.TrimSpace(string(data))
+	} else {
+		// Process doesn't exist anymore
+		pf.processCacheMu.Lock()
+		delete(pf.processCache, pid)
+		pf.processCacheMu.Unlock()
+		return &pnacl.ProcessInfo{PID: int(pid)}
+	}
+
+	// Check cache - but validate that the cached entry matches current process
 	pf.processCacheMu.RLock()
 	if info, ok := pf.processCache[pid]; ok {
-		pf.processCacheMu.RUnlock()
-		return info
+		if info.Name == currentName {
+			pf.processCacheMu.RUnlock()
+			return info
+		}
+		// PID was reused - need to refresh
 	}
 	pf.processCacheMu.RUnlock()
 
+	// Build fresh process info
 	info := &pnacl.ProcessInfo{
-		PID: int(pid),
-	}
-
-	// Read process name from /proc/<pid>/comm
-	commPath := filepath.Join("/proc", strconv.FormatUint(uint64(pid), 10), "comm")
-	if data, err := os.ReadFile(commPath); err == nil {
-		info.Name = strings.TrimSpace(string(data))
+		PID:  int(pid),
+		Name: currentName,
 	}
 
 	// Read process path from /proc/<pid>/exe
-	exePath := filepath.Join("/proc", strconv.FormatUint(uint64(pid), 10), "exe")
+	exePath := filepath.Join("/proc", pidStr, "exe")
 	if target, err := os.Readlink(exePath); err == nil {
 		info.Path = target
 	}
 
 	// Read parent PID from /proc/<pid>/stat
-	statPath := filepath.Join("/proc", strconv.FormatUint(uint64(pid), 10), "stat")
+	statPath := filepath.Join("/proc", pidStr, "stat")
 	if data, err := os.ReadFile(statPath); err == nil {
 		info.ParentPID = parseParentPID(string(data))
 	}
@@ -414,19 +456,22 @@ func (pf *ProcessFilter) resolveHost(ip net.IP) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	var host string
-	done := make(chan struct{})
+	// Use channel to safely communicate result from goroutine
+	resultCh := make(chan string, 1)
 	go func() {
 		names, err := net.LookupAddr(ipStr)
 		if err == nil && len(names) > 0 {
-			host = strings.TrimSuffix(names[0], ".")
+			resultCh <- strings.TrimSuffix(names[0], ".")
+		} else {
+			resultCh <- ""
 		}
-		close(done)
 	}()
 
+	var host string
 	select {
-	case <-done:
+	case host = <-resultCh:
 	case <-ctx.Done():
+		// Timeout - use IP as host, let goroutine finish in background
 		host = ipStr
 	}
 

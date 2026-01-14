@@ -41,10 +41,20 @@ type ChildConfig struct {
 	Name string `yaml:"name"`
 	// Match defines criteria for matching this child process.
 	Match ProcessMatchCriteria `yaml:"match"`
-	// Inherit specifies whether to inherit parent rules (default: true).
-	Inherit bool `yaml:"inherit"`
+	// Inherit specifies whether to inherit parent rules.
+	// If nil (not specified), defaults to true.
+	Inherit *bool `yaml:"inherit,omitempty"`
 	// Rules are additional rules specific to this child.
 	Rules []NetworkTarget `yaml:"rules,omitempty"`
+}
+
+// InheritRules returns whether this child should inherit parent rules.
+// Defaults to true if not explicitly set.
+func (cc *ChildConfig) InheritRules() bool {
+	if cc.Inherit == nil {
+		return true
+	}
+	return *cc.Inherit
 }
 
 // NetworkACLConfig wraps the network_acl section of a policy file.
@@ -88,8 +98,9 @@ func ParseConfig(data []byte) (*NetworkACLConfig, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
-	if err := dec.Decode(&wrapped); err == nil && len(wrapped.NetworkACL.Processes) > 0 {
-		if err := ValidateConfig(&wrapped); err != nil {
+	if err := dec.Decode(&wrapped); err == nil && (wrapped.NetworkACL.Default != "" || len(wrapped.NetworkACL.Processes) > 0) {
+		config := wrapped.NetworkACL
+		if err := config.Validate(); err != nil {
 			return nil, fmt.Errorf("validate config: %w", err)
 		}
 		return &wrapped, nil
@@ -435,13 +446,13 @@ func mergeChildConfigs(base, overlay []ChildConfig) []ChildConfig {
 			mergedChild := ChildConfig{
 				Name:    baseCC.Name,
 				Match:   baseCC.Match,
-				Inherit: baseCC.Inherit,
+				Inherit: baseCC.Inherit, // Start with base inherit setting
 			}
 			if hasCriteria(overlayCC.Match) {
 				mergedChild.Match = overlayCC.Match
 			}
-			// Override inherit flag if overlay has rules or different inherit setting.
-			if len(overlayCC.Rules) > 0 || overlayCC.Inherit != baseCC.Inherit {
+			// Only override inherit if explicitly specified in overlay.
+			if overlayCC.Inherit != nil {
 				mergedChild.Inherit = overlayCC.Inherit
 			}
 			// Prepend overlay rules.

@@ -8,6 +8,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// boolPtr returns a pointer to the given bool value.
+func boolPtrPolicy(b bool) *bool {
+	return &b
+}
+
 func TestCompileNetworkRule(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -475,7 +480,7 @@ func TestPolicyEngine_ChildInheritance(t *testing.T) {
 						Match: ProcessMatchCriteria{
 							ProcessName: "curl",
 						},
-						Inherit: true,
+						Inherit: boolPtrPolicy(true),
 						Rules: []NetworkTarget{
 							{
 								Host:     "pypi.org",
@@ -489,7 +494,7 @@ func TestPolicyEngine_ChildInheritance(t *testing.T) {
 						Match: ProcessMatchCriteria{
 							ProcessName: "wget",
 						},
-						Inherit: false,
+						Inherit: boolPtrPolicy(false),
 						Rules: []NetworkTarget{
 							{
 								Host:     "files.example.com",
@@ -597,7 +602,7 @@ func TestPolicyEngine_EvaluateForParentChild(t *testing.T) {
 						Match: ProcessMatchCriteria{
 							ProcessName: "curl",
 						},
-						Inherit: true,
+						Inherit: boolPtrPolicy(true),
 						Rules: []NetworkTarget{
 							{
 								Host:     "pypi.org",

@@ -57,6 +57,7 @@ struct {
 struct allow_key {
     __u64 cgroup_id;
     __u8 family;
+    __u8 protocol; // IPPROTO_TCP or IPPROTO_UDP, 0 = any
     __u16 dport;
     __u8 addr[16];
 };
@@ -150,7 +151,8 @@ static __always_inline int emit_event(struct ctx_info *info, __u8 protocol, bool
         return 0;
 
     ev->ts_ns = bpf_ktime_get_ns();
-    ev->cookie = 0;
+    // Generate unique cookie for pending approval tracking using random values
+    ev->cookie = ((__u64)bpf_get_prandom_u32() << 32) | bpf_get_prandom_u32();
     ev->pid = bpf_get_current_pid_tgid() >> 32;
     ev->tgid = bpf_get_current_pid_tgid();
     ev->sport = 0;
@@ -169,19 +171,31 @@ static __always_inline int emit_event(struct ctx_info *info, __u8 protocol, bool
     return 0;
 }
 
-static __always_inline bool is_denied(struct ctx_info *info) {
+static __always_inline bool is_denied(struct ctx_info *info, __u8 protocol) {
     struct allow_key key = {};
     key.cgroup_id = info->cgroup_id;
     key.family = info->family;
+    key.protocol = protocol;
     key.dport = info->dport;
     if (info->family == AF_INET) {
         __builtin_memcpy(key.addr, &info->ipv4, 4);
     } else if (info->family == AF_INET6) {
         __builtin_memcpy(key.addr, info->ipv6, 16);
     }
+
+    // Check exact protocol match first
     __u8 *val = bpf_map_lookup_elem(&denylist, &key);
     if (val)
         return true;
+
+    // Check protocol-agnostic rule (protocol = 0)
+    if (protocol != 0) {
+        key.protocol = 0;
+        val = bpf_map_lookup_elem(&denylist, &key);
+        if (val)
+            return true;
+        key.protocol = protocol; // restore for CIDR checks
+    }
 
     // Check CIDR LPM maps.
     if (info->family == AF_INET) {
@@ -217,19 +231,30 @@ static __always_inline bool is_denied(struct ctx_info *info) {
     return false;
 }
 
-static __always_inline bool allow(struct ctx_info *info) {
+static __always_inline bool allow(struct ctx_info *info, __u8 protocol) {
     struct allow_key key = {};
     key.cgroup_id = info->cgroup_id;
     key.family = info->family;
+    key.protocol = protocol;
     key.dport = info->dport;
     if (info->family == AF_INET) {
         __builtin_memcpy(key.addr, &info->ipv4, 4);
     } else if (info->family == AF_INET6) {
         __builtin_memcpy(key.addr, info->ipv6, 16);
     }
+
+    // Check exact protocol match first
     __u8 *val = bpf_map_lookup_elem(&allowlist, &key);
     if (val)
         return true;
+
+    // Check protocol-agnostic rule (protocol = 0)
+    if (protocol != 0) {
+        key.protocol = 0;
+        val = bpf_map_lookup_elem(&allowlist, &key);
+        if (val)
+            return true;
+    }
 
     // Check CIDR LPM maps.
     if (info->family == AF_INET) {
@@ -284,9 +309,9 @@ int handle_connect4(struct bpf_sock_addr *ctx) {
     info.ipv4 = ip4;
 
     bool denied = false;
-    if (is_denied(&info)) {
+    if (is_denied(&info, IPPROTO_TCP)) {
         denied = true;
-    } else if (is_default_deny() && !allow(&info)) {
+    } else if (is_default_deny() && !allow(&info, IPPROTO_TCP)) {
         denied = true;
     }
     emit_event(&info, IPPROTO_TCP, denied);
@@ -313,9 +338,9 @@ int handle_connect6(struct bpf_sock_addr *ctx) {
     dst[3] = ip6_3;
 
     bool denied = false;
-    if (is_denied(&info)) {
+    if (is_denied(&info, IPPROTO_TCP)) {
         denied = true;
-    } else if (is_default_deny() && !allow(&info)) {
+    } else if (is_default_deny() && !allow(&info, IPPROTO_TCP)) {
         denied = true;
     }
     emit_event(&info, IPPROTO_TCP, denied);
@@ -335,9 +360,9 @@ int handle_sendmsg4(struct bpf_sock_addr *ctx) {
     info.ipv4 = ip4;
 
     bool denied = false;
-    if (is_denied(&info)) {
+    if (is_denied(&info, IPPROTO_UDP)) {
         denied = true;
-    } else if (is_default_deny() && !allow(&info)) {
+    } else if (is_default_deny() && !allow(&info, IPPROTO_UDP)) {
         denied = true;
     }
     emit_event(&info, IPPROTO_UDP, denied);
@@ -363,9 +388,9 @@ int handle_sendmsg6(struct bpf_sock_addr *ctx) {
     dst[3] = ip6_3;
 
     bool denied = false;
-    if (is_denied(&info)) {
+    if (is_denied(&info, IPPROTO_UDP)) {
         denied = true;
-    } else if (is_default_deny() && !allow(&info)) {
+    } else if (is_default_deny() && !allow(&info, IPPROTO_UDP)) {
         denied = true;
     }
     emit_event(&info, IPPROTO_UDP, denied);
