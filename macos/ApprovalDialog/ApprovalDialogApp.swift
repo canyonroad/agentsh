@@ -10,6 +10,8 @@ struct ApprovalDialogApp: App {
     @State private var isLoading = true
     @State private var hasProcessedLaunchURL = false
     @State private var currentRequestID: String?  // Tracks which request we're expecting
+    @State private var isSubmitting = false  // Tracks submission in progress
+    @State private var pendingDecision: (decision: String, permanent: Bool)?  // For retry
 
     private let serverClient = ServerClient()
 
@@ -42,7 +44,9 @@ struct ApprovalDialogApp: App {
 
     @ViewBuilder
     private var contentView: some View {
-        if let request = request {
+        if isSubmitting {
+            submittingView
+        } else if let request = request {
             ApprovalView(request: request, onDecision: handleDecision)
         } else if let error = errorMessage {
             errorView(message: error)
@@ -58,6 +62,18 @@ struct ApprovalDialogApp: App {
             ProgressView()
                 .scaleEffect(1.5)
             Text("Loading request...")
+                .foregroundColor(.secondary)
+        }
+        .frame(width: 300, height: 200)
+    }
+
+    // MARK: - Submitting View
+
+    private var submittingView: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .scaleEffect(1.5)
+            Text("Submitting decision...")
                 .foregroundColor(.secondary)
         }
         .frame(width: 300, height: 200)
@@ -80,13 +96,47 @@ struct ApprovalDialogApp: App {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            Button("Quit") {
-                quitApp()
+            HStack(spacing: 12) {
+                // Show retry button if we have a request to retry
+                if let requestID = currentRequestID {
+                    Button("Retry") {
+                        retryRequest(requestID: requestID)
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                Button("Quit") {
+                    quitApp()
+                }
+                .keyboardShortcut(.defaultAction)
             }
-            .keyboardShortcut(.defaultAction)
         }
-        .frame(width: 350, height: 250)
+        .frame(width: 350, height: 280)
         .padding()
+    }
+
+    // MARK: - Retry Logic
+
+    private func retryRequest(requestID: String) {
+        // If we have a pending decision, retry the submission
+        if let decision = pendingDecision, let req = request {
+            retrySubmission(requestID: req.requestID, decision: decision.decision, permanent: decision.permanent)
+        } else {
+            // Otherwise retry fetching the request
+            errorMessage = nil
+            isLoading = true
+            Task {
+                await fetchRequest(requestID: requestID)
+            }
+        }
+    }
+
+    private func retrySubmission(requestID: String, decision: String, permanent: Bool) {
+        errorMessage = nil
+        isSubmitting = true
+        Task {
+            await submitDecision(requestID: requestID, decision: decision, permanent: permanent)
+        }
     }
 
     // MARK: - URL Handling
@@ -168,26 +218,39 @@ struct ApprovalDialogApp: App {
 
         NSLog("ApprovalDialogApp: Submitting decision '\(decision)' (permanent: \(permanent)) for request: \(requestID)")
 
-        Task {
-            do {
-                let success = try await serverClient.submitDecision(
-                    requestID: requestID,
-                    decision: decision,
-                    permanent: permanent
-                )
+        // Store decision for potential retry
+        pendingDecision = (decision, permanent)
+        isSubmitting = true
 
+        Task {
+            await submitDecision(requestID: requestID, decision: decision, permanent: permanent)
+        }
+    }
+
+    private func submitDecision(requestID: String, decision: String, permanent: Bool) async {
+        do {
+            let success = try await serverClient.submitDecision(
+                requestID: requestID,
+                decision: decision,
+                permanent: permanent
+            )
+
+            await MainActor.run {
                 if success {
                     NSLog("ApprovalDialogApp: Decision submitted successfully")
+                    pendingDecision = nil
+                    quitApp()
                 } else {
                     NSLog("ApprovalDialogApp: Decision submission returned false")
+                    isSubmitting = false
+                    errorMessage = "Failed to submit decision.\nThe server rejected the request."
                 }
-            } catch {
-                NSLog("ApprovalDialogApp: Error submitting decision: \(error)")
             }
-
-            // Quit app after submission attempt (even on error, to avoid blocking)
+        } catch {
+            NSLog("ApprovalDialogApp: Error submitting decision: \(error)")
             await MainActor.run {
-                quitApp()
+                isSubmitting = false
+                errorMessage = "Failed to submit decision.\n\(error.localizedDescription)"
             }
         }
     }

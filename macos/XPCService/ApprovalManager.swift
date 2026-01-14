@@ -30,6 +30,9 @@ class ApprovalManager: NSObject {
     /// Queue for polling operations.
     private let pollQueue = DispatchQueue(label: "com.agentsh.approval.poll", qos: .utility)
 
+    /// Flag to indicate polling should stop (prevents in-flight polls from rescheduling).
+    private var isStopped: Bool = true
+
     /// Currently tracked pending requests (by requestID).
     private var pendingRequests: [String: ApprovalRequest] = [:]
     private let pendingLock = NSLock()
@@ -142,11 +145,15 @@ class ApprovalManager: NSObject {
     // MARK: - Polling with Exponential Backoff
 
     private func startPolling() {
+        isStopped = false
         stopPolling()
         scheduleNextPoll()
     }
 
     private func scheduleNextPoll() {
+        // Don't schedule if stopped
+        guard !isStopped else { return }
+
         let timer = DispatchSource.makeTimerSource(queue: pollQueue)
         timer.schedule(deadline: .now() + currentPollInterval)
         timer.setEventHandler { [weak self] in
@@ -157,15 +164,21 @@ class ApprovalManager: NSObject {
     }
 
     private func stopPolling() {
+        isStopped = true
         pollTimer?.cancel()
         pollTimer = nil
     }
 
     private func pollForApprovals() {
+        // Don't poll if stopped
+        guard !isStopped else { return }
         guard let bridge = bridge else { return }
 
         bridge.fetchPendingApprovals { [weak self] (approvals: [ApprovalRequest], success: Bool) in
             guard let self = self else { return }
+
+            // Don't continue if stopped during fetch
+            guard !self.isStopped else { return }
 
             if success {
                 // Reset backoff on success
@@ -182,7 +195,7 @@ class ApprovalManager: NSObject {
                 NSLog("ApprovalManager: Poll failed, backing off to \(self.currentPollInterval)s")
             }
 
-            // Schedule next poll
+            // Schedule next poll (only if not stopped)
             self.scheduleNextPoll()
         }
     }

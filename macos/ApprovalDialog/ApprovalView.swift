@@ -144,6 +144,7 @@ struct ApprovalView: View {
                 .buttonStyle(.bordered)
                 .tint(.green)
                 .controlSize(.large)
+                .disabled(decisionMade)
 
                 Button(action: { submitDecision("allow_permanent", true) }) {
                     Label("Allow Always", systemImage: "checkmark.circle.fill")
@@ -152,6 +153,7 @@ struct ApprovalView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
                 .controlSize(.large)
+                .disabled(decisionMade)
             }
 
             // Deny buttons row
@@ -163,6 +165,7 @@ struct ApprovalView: View {
                 .buttonStyle(.bordered)
                 .tint(.red)
                 .controlSize(.large)
+                .disabled(decisionMade)
 
                 Button(action: { submitDecision("deny_forever", true) }) {
                     Label("Deny Always", systemImage: "xmark.circle.fill")
@@ -171,6 +174,7 @@ struct ApprovalView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .controlSize(.large)
+                .disabled(decisionMade)
             }
         }
     }
@@ -179,6 +183,9 @@ struct ApprovalView: View {
 
     /// Submit a decision, stopping the timer first to prevent race conditions.
     private func submitDecision(_ decision: String, _ permanent: Bool) {
+        // Guard against repeat taps
+        guard !decisionMade else { return }
+
         // Stop timer immediately to prevent it from firing during submission
         stopTimer()
         decisionMade = true
