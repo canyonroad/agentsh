@@ -9,6 +9,7 @@ struct ApprovalDialogApp: App {
     @State private var errorMessage: String?
     @State private var isLoading = true
     @State private var hasProcessedLaunchURL = false
+    @State private var currentRequestID: String?  // Tracks which request we're expecting
 
     private let serverClient = ServerClient()
 
@@ -93,11 +94,6 @@ struct ApprovalDialogApp: App {
     private func handleURL(_ url: URL) {
         NSLog("ApprovalDialogApp: Handling URL: \(url)")
 
-        // Reset state for new URL - prevents showing stale data if a second approval arrives
-        request = nil
-        errorMessage = nil
-        isLoading = true
-
         // Parse request ID from URL
         // Expected format: agentsh-approval://approve?id=<requestID>
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -107,8 +103,15 @@ struct ApprovalDialogApp: App {
             NSLog("ApprovalDialogApp: Invalid URL format or missing request ID")
             errorMessage = "Invalid URL format.\nExpected: agentsh-approval://approve?id=<requestID>"
             isLoading = false
+            currentRequestID = nil
             return
         }
+
+        // Reset state for new URL - prevents showing stale data if a second approval arrives
+        request = nil
+        errorMessage = nil
+        isLoading = true
+        currentRequestID = requestID  // Track which request we're loading
 
         NSLog("ApprovalDialogApp: Fetching approval for request ID: \(requestID)")
 
@@ -125,12 +128,19 @@ struct ApprovalDialogApp: App {
         do {
             if let fetchedRequest = try await serverClient.fetchApproval(requestID: requestID) {
                 await MainActor.run {
+                    // Only update UI if this is still the request we're waiting for
+                    // (prevents older slow requests from overwriting newer ones)
+                    guard currentRequestID == requestID else {
+                        NSLog("ApprovalDialogApp: Ignoring stale response for \(requestID), now waiting for \(currentRequestID ?? "none")")
+                        return
+                    }
                     self.request = fetchedRequest
                     self.isLoading = false
                 }
                 NSLog("ApprovalDialogApp: Successfully loaded request: \(requestID)")
             } else {
                 await MainActor.run {
+                    guard currentRequestID == requestID else { return }
                     self.errorMessage = "Request not found.\nThe approval request may have expired or already been handled."
                     self.isLoading = false
                 }
@@ -138,6 +148,7 @@ struct ApprovalDialogApp: App {
             }
         } catch {
             await MainActor.run {
+                guard currentRequestID == requestID else { return }
                 self.errorMessage = "Failed to connect to server.\n\(error.localizedDescription)"
                 self.isLoading = false
             }

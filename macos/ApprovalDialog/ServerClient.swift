@@ -145,28 +145,60 @@ actor ServerClient {
         var dataWithNewline = requestData
         dataWithNewline.append(0x0A) // Append newline as message delimiter
 
-        // Send request
-        let written = dataWithNewline.withUnsafeBytes { ptr in
-            write(fd, ptr.baseAddress, ptr.count)
-        }
-        guard written == dataWithNewline.count else {
-            throw ServerError.writeFailed
-        }
-
-        // Read response
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        let bytesRead = read(fd, &buffer, buffer.count)
-
-        guard bytesRead > 0 else {
-            if errno == EAGAIN || errno == EWOULDBLOCK {
-                throw ServerError.timeout
+        // Send request (loop to handle partial writes)
+        var totalWritten = 0
+        while totalWritten < dataWithNewline.count {
+            let written = dataWithNewline.withUnsafeBytes { ptr in
+                write(fd, ptr.baseAddress! + totalWritten, ptr.count - totalWritten)
             }
-            throw ServerError.readFailed
+            if written <= 0 {
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw ServerError.timeout
+                }
+                throw ServerError.writeFailed
+            }
+            totalWritten += written
+        }
+
+        // Read response (loop until newline delimiter, handling partial reads)
+        // The Go server sends newline-delimited JSON responses
+        var responseBuffer = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let maxResponseSize = 1024 * 1024  // 1MB limit to prevent memory exhaustion
+
+        while true {
+            let bytesRead = read(fd, &buffer, buffer.count)
+
+            if bytesRead < 0 {
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw ServerError.timeout
+                }
+                throw ServerError.readFailed
+            }
+
+            if bytesRead == 0 {
+                // Connection closed before receiving complete response
+                if responseBuffer.isEmpty {
+                    throw ServerError.readFailed
+                }
+                break  // Try to parse what we have
+            }
+
+            responseBuffer.append(contentsOf: buffer[0..<bytesRead])
+
+            // Check for response size limit
+            if responseBuffer.count > maxResponseSize {
+                throw ServerError.serverError("Response too large")
+            }
+
+            // Check if we've received the complete message (ends with newline)
+            if let lastByte = responseBuffer.last, lastByte == 0x0A {
+                break
+            }
         }
 
         // Parse response JSON
-        let responseData = Data(bytes: buffer, count: bytesRead)
-        guard let response = try JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+        guard let response = try JSONSerialization.jsonObject(with: responseBuffer) as? [String: Any] else {
             throw ServerError.invalidResponse
         }
 

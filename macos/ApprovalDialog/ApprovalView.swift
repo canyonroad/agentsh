@@ -9,6 +9,7 @@ struct ApprovalView: View {
 
     @State private var timeRemaining: TimeInterval
     @State private var timer: Timer?
+    @State private var decisionMade: Bool = false  // Prevents timer from firing after user action
 
     init(request: ApprovalRequestData, onDecision: @escaping (String, Bool) -> Void) {
         self.request = request
@@ -136,7 +137,7 @@ struct ApprovalView: View {
         VStack(spacing: 12) {
             // Allow buttons row
             HStack(spacing: 12) {
-                Button(action: { onDecision("allow_once", false) }) {
+                Button(action: { submitDecision("allow_once", false) }) {
                     Label("Allow Once", systemImage: "checkmark.circle")
                         .frame(maxWidth: .infinity)
                 }
@@ -144,7 +145,7 @@ struct ApprovalView: View {
                 .tint(.green)
                 .controlSize(.large)
 
-                Button(action: { onDecision("allow_permanent", true) }) {
+                Button(action: { submitDecision("allow_permanent", true) }) {
                     Label("Allow Always", systemImage: "checkmark.circle.fill")
                         .frame(maxWidth: .infinity)
                 }
@@ -155,7 +156,7 @@ struct ApprovalView: View {
 
             // Deny buttons row
             HStack(spacing: 12) {
-                Button(action: { onDecision("deny_once", false) }) {
+                Button(action: { submitDecision("deny_once", false) }) {
                     Label("Deny Once", systemImage: "xmark.circle")
                         .frame(maxWidth: .infinity)
                 }
@@ -163,7 +164,7 @@ struct ApprovalView: View {
                 .tint(.red)
                 .controlSize(.large)
 
-                Button(action: { onDecision("deny_forever", true) }) {
+                Button(action: { submitDecision("deny_forever", true) }) {
                     Label("Deny Always", systemImage: "xmark.circle.fill")
                         .frame(maxWidth: .infinity)
                 }
@@ -172,6 +173,16 @@ struct ApprovalView: View {
                 .controlSize(.large)
             }
         }
+    }
+
+    // MARK: - Decision Handling
+
+    /// Submit a decision, stopping the timer first to prevent race conditions.
+    private func submitDecision(_ decision: String, _ permanent: Bool) {
+        // Stop timer immediately to prevent it from firing during submission
+        stopTimer()
+        decisionMade = true
+        onDecision(decision, permanent)
     }
 
     // MARK: - Helper Views
@@ -202,8 +213,11 @@ struct ApprovalView: View {
                 timeRemaining -= 1
             } else {
                 stopTimer()
-                // Auto-deny when timeout reaches zero
-                onDecision("deny_once", false)
+                // Auto-deny when timeout reaches zero, but only if user hasn't already acted
+                if !decisionMade {
+                    decisionMade = true
+                    onDecision("deny_once", false)
+                }
             }
         }
     }

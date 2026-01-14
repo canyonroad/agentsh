@@ -183,8 +183,13 @@ class ApprovalManager: NSObject {
     }
 
     private func handleApprovals(_ approvals: [ApprovalRequest]) {
+        // Collect actions to perform while holding the lock
+        var approvalsToNotify: [ApprovalRequest] = []
+        var approvalsToEscalateImmediately: [String] = []
+        var requestsToEscalate: [String] = []
+        var removedIDs: Set<String> = []
+
         pendingLock.lock()
-        defer { pendingLock.unlock() }
 
         // Check for timed-out requests that server hasn't cleaned up
         let now = Date()
@@ -214,25 +219,22 @@ class ApprovalManager: NSObject {
         }
 
         // Remove expired/resolved approvals from tracking
-        let removedIDs = existingIDs.subtracting(currentIDs)
+        removedIDs = existingIDs.subtracting(currentIDs)
         for id in removedIDs {
             pendingRequests.removeValue(forKey: id)
             notificationAttemptedAt.removeValue(forKey: id)
             escalatedRequests.remove(id)
-            // Remove any pending notification for this request
-            notificationCenter.removeDeliveredNotifications(withIdentifiers: [id])
-            notificationCenter.removePendingNotificationRequests(withIdentifiers: [id])
         }
 
-        // Show notifications for new approvals (or escalate immediately if notifications denied)
+        // Determine which approvals need notifications vs immediate escalation
         for approval in newApprovals {
             if notificationsDenied {
                 // Notifications not available - escalate to dialog immediately
                 NSLog("ApprovalManager: Notifications denied, escalating \(approval.requestID) to dialog immediately")
                 escalatedRequests.insert(approval.requestID)
-                launchDialog(for: approval.requestID)
+                approvalsToEscalateImmediately.append(approval.requestID)
             } else {
-                showNotification(for: approval)
+                approvalsToNotify.append(approval)
             }
         }
 
@@ -246,8 +248,34 @@ class ApprovalManager: NSObject {
             if now.timeIntervalSince(attemptedAt) >= escalationDelay {
                 NSLog("ApprovalManager: Escalating request \(requestID) to dialog after \(escalationDelay)s")
                 escalatedRequests.insert(requestID)
-                launchDialog(for: requestID)
+                requestsToEscalate.append(requestID)
             }
+        }
+
+        pendingLock.unlock()
+
+        // Now perform actions WITHOUT holding the lock (avoids deadlock)
+
+        // Remove notifications for resolved requests
+        if !removedIDs.isEmpty {
+            let ids = Array(removedIDs)
+            notificationCenter.removeDeliveredNotifications(withIdentifiers: ids)
+            notificationCenter.removePendingNotificationRequests(withIdentifiers: ids)
+        }
+
+        // Show notifications for new approvals
+        for approval in approvalsToNotify {
+            showNotification(for: approval)
+        }
+
+        // Launch dialog for immediate escalations
+        for requestID in approvalsToEscalateImmediately {
+            launchDialog(for: requestID)
+        }
+
+        // Launch dialog for delayed escalations
+        for requestID in requestsToEscalate {
+            launchDialog(for: requestID)
         }
     }
 
