@@ -9,6 +9,13 @@ const (
 	RequestTypeCommand RequestType = "command"
 	RequestTypeSession RequestType = "session"
 	RequestTypeEvent   RequestType = "event"
+
+	// PNACL (Process Network ACL) request types
+	RequestTypePNACLCheck        RequestType = "pnacl_check"
+	RequestTypePNACLEvent        RequestType = "pnacl_event"
+	RequestTypePNACLGetApprovals RequestType = "get_pending_approvals"
+	RequestTypePNACLSubmit       RequestType = "submit_approval"
+	RequestTypePNACLConfigure    RequestType = "pnacl_configure"
 )
 
 // PolicyRequest is sent from the XPC bridge to the Go policy server.
@@ -29,6 +36,27 @@ type PolicyRequest struct {
 
 	// Event emission
 	EventData []byte `json:"event_data,omitempty"`
+
+	// PNACL-specific fields
+	Protocol       string `json:"protocol,omitempty"`        // "tcp" or "udp"
+	BundleID       string `json:"bundle_id,omitempty"`       // macOS bundle identifier
+	ExecutablePath string `json:"executable_path,omitempty"` // Full path to executable
+	ProcessName    string `json:"process_name,omitempty"`    // Process name
+	ParentPID      int32  `json:"parent_pid,omitempty"`      // Parent process ID
+
+	// PNACL event fields
+	EventType string `json:"event_type,omitempty"` // connection_allowed, connection_denied, etc.
+	Decision  string `json:"decision,omitempty"`   // Policy decision for events
+	RuleID    string `json:"rule_id,omitempty"`    // Rule that matched
+
+	// PNACL approval fields
+	RequestID string `json:"request_id,omitempty"` // Approval request ID
+	Permanent bool   `json:"permanent,omitempty"`  // Whether to create permanent rule
+
+	// PNACL configuration fields
+	BlockingEnabled bool    `json:"blocking_enabled,omitempty"` // Enable actual blocking
+	DecisionTimeout float64 `json:"decision_timeout,omitempty"` // Timeout in seconds
+	FailOpen        bool    `json:"fail_open,omitempty"`        // Allow on timeout/error
 }
 
 // PolicyResponse is returned from the Go policy server.
@@ -37,4 +65,24 @@ type PolicyResponse struct {
 	Rule      string `json:"rule,omitempty"`
 	Message   string `json:"message,omitempty"`
 	SessionID string `json:"session_id,omitempty"` // for session lookups
+
+	// PNACL-specific response fields
+	Decision  string             `json:"decision,omitempty"`  // allow, deny, approve, audit, etc.
+	RuleID    string             `json:"rule_id,omitempty"`   // Matched rule identifier
+	Success   bool               `json:"success,omitempty"`   // For operations that return success/fail
+	Approvals []ApprovalResponse `json:"approvals,omitempty"` // Pending approval requests
+}
+
+// ApprovalResponse represents a pending approval request returned to the client.
+type ApprovalResponse struct {
+	RequestID      string  `json:"request_id"`
+	ProcessName    string  `json:"process_name"`
+	BundleID       string  `json:"bundle_id,omitempty"`
+	PID            int32   `json:"pid"`
+	TargetHost     string  `json:"target_host"`
+	TargetPort     int     `json:"target_port"`
+	TargetProtocol string  `json:"target_protocol"`
+	Timestamp      string  `json:"timestamp"`       // ISO 8601
+	Timeout        float64 `json:"timeout"`         // Seconds until auto-deny
+	ExecutablePath string  `json:"executable_path"` // Full path to executable
 }
