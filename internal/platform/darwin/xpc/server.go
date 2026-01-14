@@ -17,14 +17,61 @@ type PolicyHandler interface {
 	ResolveSession(pid int32) (sessionID string)
 }
 
+// PNACLHandler handles PNACL-specific policy queries.
+// Implementations should use the pnacl package for policy evaluation.
+type PNACLHandler interface {
+	// CheckNetwork evaluates a network connection against PNACL rules.
+	// Returns decision (allow, deny, approve, audit, etc.) and rule ID.
+	CheckNetwork(req PNACLCheckRequest) (decision, ruleID string)
+
+	// ReportEvent logs a PNACL network event.
+	ReportEvent(req PNACLEventRequest)
+
+	// GetPendingApprovals returns connections awaiting user approval.
+	GetPendingApprovals() []ApprovalResponse
+
+	// SubmitApproval records a user's approval decision.
+	SubmitApproval(requestID, decision string, permanent bool) bool
+
+	// Configure updates PNACL blocking behavior.
+	Configure(blockingEnabled bool, decisionTimeout float64, failOpen bool) bool
+}
+
+// PNACLCheckRequest contains all fields for a PNACL network check.
+type PNACLCheckRequest struct {
+	IP             string
+	Port           int
+	Protocol       string
+	Domain         string
+	PID            int32
+	BundleID       string
+	ExecutablePath string
+	ProcessName    string
+	ParentPID      int32
+}
+
+// PNACLEventRequest contains fields for a PNACL event report.
+type PNACLEventRequest struct {
+	EventType string
+	IP        string
+	Port      int
+	Protocol  string
+	Domain    string
+	PID       int32
+	BundleID  string
+	Decision  string
+	RuleID    string
+}
+
 // Server listens on a Unix socket for policy queries.
 type Server struct {
-	sockPath string
-	handler  PolicyHandler
-	listener net.Listener
-	mu       sync.Mutex
-	wg       sync.WaitGroup
-	ready    chan struct{} // closed when server is listening
+	sockPath     string
+	handler      PolicyHandler
+	pnaclHandler PNACLHandler
+	listener     net.Listener
+	mu           sync.Mutex
+	wg           sync.WaitGroup
+	ready        chan struct{} // closed when server is listening
 }
 
 // NewServer creates a new policy socket server.
@@ -37,6 +84,14 @@ func NewServer(sockPath string, handler PolicyHandler) *Server {
 		handler:  handler,
 		ready:    make(chan struct{}),
 	}
+}
+
+// SetPNACLHandler sets the handler for PNACL requests.
+// If not set, PNACL requests will return error responses.
+func (s *Server) SetPNACLHandler(h PNACLHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pnaclHandler = h
 }
 
 // Ready returns a channel that is closed when the server is listening.
@@ -146,7 +201,124 @@ func (s *Server) handleRequest(req *PolicyRequest) PolicyResponse {
 		// Events are fire-and-forget, always acknowledge
 		return PolicyResponse{Allow: true}
 
+	// PNACL request types
+	case RequestTypePNACLCheck:
+		return s.handlePNACLCheck(req)
+
+	case RequestTypePNACLEvent:
+		return s.handlePNACLEvent(req)
+
+	case RequestTypePNACLGetApprovals:
+		return s.handlePNACLGetApprovals()
+
+	case RequestTypePNACLSubmit:
+		return s.handlePNACLSubmit(req)
+
+	case RequestTypePNACLConfigure:
+		return s.handlePNACLConfigure(req)
+
 	default:
 		return PolicyResponse{Allow: false, Message: "unknown request type"}
 	}
+}
+
+// PNACL request handlers
+
+func (s *Server) getPNACLHandler() PNACLHandler {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pnaclHandler
+}
+
+func (s *Server) handlePNACLCheck(req *PolicyRequest) PolicyResponse {
+	h := s.getPNACLHandler()
+	if h == nil {
+		return PolicyResponse{Allow: true, Decision: "allow", Message: "PNACL handler not configured"}
+	}
+
+	// Validate port range
+	if req.Port < 0 || req.Port > 65535 {
+		return PolicyResponse{Allow: false, Decision: "deny", Message: "invalid port"}
+	}
+
+	checkReq := PNACLCheckRequest{
+		IP:             req.IP,
+		Port:           req.Port,
+		Protocol:       req.Protocol,
+		Domain:         req.Domain,
+		PID:            req.PID,
+		BundleID:       req.BundleID,
+		ExecutablePath: req.ExecutablePath,
+		ProcessName:    req.ProcessName,
+		ParentPID:      req.ParentPID,
+	}
+
+	decision, ruleID := h.CheckNetwork(checkReq)
+	return PolicyResponse{
+		Allow:    isAllowingDecision(decision),
+		Decision: decision,
+		RuleID:   ruleID,
+	}
+}
+
+// isAllowingDecision returns true for decisions that should allow the connection.
+func isAllowingDecision(decision string) bool {
+	switch decision {
+	case "allow", "audit", "allow_once_then_approve":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) handlePNACLEvent(req *PolicyRequest) PolicyResponse {
+	h := s.getPNACLHandler()
+	if h == nil {
+		return PolicyResponse{Allow: true, Success: true}
+	}
+
+	eventReq := PNACLEventRequest{
+		EventType: req.EventType,
+		IP:        req.IP,
+		Port:      req.Port,
+		Protocol:  req.Protocol,
+		Domain:    req.Domain,
+		PID:       req.PID,
+		BundleID:  req.BundleID,
+		Decision:  req.Decision,
+		RuleID:    req.RuleID,
+	}
+
+	h.ReportEvent(eventReq)
+	return PolicyResponse{Allow: true, Success: true}
+}
+
+func (s *Server) handlePNACLGetApprovals() PolicyResponse {
+	h := s.getPNACLHandler()
+	if h == nil {
+		return PolicyResponse{Approvals: nil, Success: true}
+	}
+
+	approvals := h.GetPendingApprovals()
+	return PolicyResponse{Approvals: approvals, Success: true}
+}
+
+func (s *Server) handlePNACLSubmit(req *PolicyRequest) PolicyResponse {
+	h := s.getPNACLHandler()
+	if h == nil {
+		return PolicyResponse{Success: false, Message: "PNACL handler not configured"}
+	}
+
+	success := h.SubmitApproval(req.RequestID, req.Decision, req.Permanent)
+	return PolicyResponse{Success: success}
+}
+
+func (s *Server) handlePNACLConfigure(req *PolicyRequest) PolicyResponse {
+	h := s.getPNACLHandler()
+	if h == nil {
+		return PolicyResponse{Success: false, Message: "PNACL handler not configured"}
+	}
+
+	success := h.Configure(req.BlockingEnabled, req.DecisionTimeout, req.FailOpen)
+	return PolicyResponse{Success: success}
 }

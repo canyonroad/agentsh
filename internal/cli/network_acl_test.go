@@ -193,16 +193,16 @@ func TestNetworkACLAdd(t *testing.T) {
 		t.Fatalf("load config: %v", err)
 	}
 
-	if len(config.Processes) != 1 {
-		t.Errorf("expected 1 process, got %d", len(config.Processes))
+	if len(config.NetworkACL.Processes) != 1 {
+		t.Errorf("expected 1 process, got %d", len(config.NetworkACL.Processes))
 	}
-	if config.Processes[0].Name != "my-process" {
-		t.Errorf("expected process name 'my-process', got %s", config.Processes[0].Name)
+	if config.NetworkACL.Processes[0].Name != "my-process" {
+		t.Errorf("expected process name 'my-process', got %s", config.NetworkACL.Processes[0].Name)
 	}
-	if len(config.Processes[0].Rules) != 1 {
-		t.Errorf("expected 1 rule, got %d", len(config.Processes[0].Rules))
+	if len(config.NetworkACL.Processes[0].Rules) != 1 {
+		t.Errorf("expected 1 rule, got %d", len(config.NetworkACL.Processes[0].Rules))
 	}
-	rule := config.Processes[0].Rules[0]
+	rule := config.NetworkACL.Processes[0].Rules[0]
 	if rule.Host != "api.example.com" {
 		t.Errorf("expected target 'api.example.com', got %s", rule.Host)
 	}
@@ -239,7 +239,7 @@ func TestNetworkACLAdd_IPTarget(t *testing.T) {
 		t.Fatalf("load config: %v", err)
 	}
 
-	rule := config.Processes[0].Rules[0]
+	rule := config.NetworkACL.Processes[0].Rules[0]
 	if rule.IP != "192.168.1.1" {
 		t.Errorf("expected IP '192.168.1.1', got %s", rule.IP)
 	}
@@ -273,7 +273,7 @@ func TestNetworkACLAdd_CIDRTarget(t *testing.T) {
 		t.Fatalf("load config: %v", err)
 	}
 
-	rule := config.Processes[0].Rules[0]
+	rule := config.NetworkACL.Processes[0].Rules[0]
 	if rule.CIDR != "10.0.0.0/8" {
 		t.Errorf("expected CIDR '10.0.0.0/8', got %s", rule.CIDR)
 	}
@@ -345,11 +345,11 @@ processes:
 		t.Fatalf("load config: %v", err)
 	}
 
-	if len(config.Processes[0].Rules) != 1 {
-		t.Errorf("expected 1 rule after removal, got %d", len(config.Processes[0].Rules))
+	if len(config.NetworkACL.Processes[0].Rules) != 1 {
+		t.Errorf("expected 1 rule after removal, got %d", len(config.NetworkACL.Processes[0].Rules))
 	}
-	if config.Processes[0].Rules[0].Host != "second.example.com" {
-		t.Errorf("expected remaining rule to be 'second.example.com', got %s", config.Processes[0].Rules[0].Host)
+	if config.NetworkACL.Processes[0].Rules[0].Host != "second.example.com" {
+		t.Errorf("expected remaining rule to be 'second.example.com', got %s", config.NetworkACL.Processes[0].Rules[0].Host)
 	}
 }
 
