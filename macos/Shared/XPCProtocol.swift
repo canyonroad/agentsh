@@ -73,6 +73,27 @@ import Foundation
         ruleID: String?,
         reply: @escaping (Bool) -> Void
     )
+
+    // MARK: - PNACL Approval Flow (Phase 3)
+
+    /// Get list of pending approval requests.
+    /// Returns an array of ApprovalRequest objects for connections awaiting user decision.
+    func getPendingApprovals(
+        reply: @escaping ([ApprovalRequest]) -> Void
+    )
+
+    /// Submit an approval decision for a pending request.
+    /// - Parameters:
+    ///   - requestID: The unique ID of the approval request
+    ///   - decision: "allow" or "deny"
+    ///   - permanent: If true, creates a persistent rule for this app/destination
+    ///   - reply: Called with success status
+    func submitApprovalDecision(
+        requestID: String,
+        decision: String,
+        permanent: Bool,
+        reply: @escaping (Bool) -> Void
+    )
 }
 
 /// XPC Service identifier.

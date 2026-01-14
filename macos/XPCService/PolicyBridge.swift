@@ -164,6 +164,50 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
         }
     }
 
+    // MARK: - PNACL Approval Flow (Phase 3)
+
+    func getPendingApprovals(reply: @escaping ([ApprovalRequest]) -> Void) {
+        let request: [String: Any] = [
+            "type": "get_pending_approvals"
+        ]
+        sendRequest(request) { response in
+            var approvals: [ApprovalRequest] = []
+
+            if let approvalsArray = response["approvals"] as? [[String: Any]] {
+                for json in approvalsArray {
+                    if let approval = ApprovalRequest.from(json: json) {
+                        approvals.append(approval)
+                    }
+                }
+            }
+
+            reply(approvals)
+        }
+    }
+
+    func submitApprovalDecision(
+        requestID: String,
+        decision: String,
+        permanent: Bool,
+        reply: @escaping (Bool) -> Void
+    ) {
+        let request: [String: Any] = [
+            "type": "submit_approval",
+            "request_id": requestID,
+            "decision": decision,
+            "permanent": permanent
+        ]
+        sendRequest(request) { response in
+            let success = response["success"] as? Bool ?? false
+            reply(success)
+        }
+    }
+
+    /// Fetch pending approvals for polling (internal use by ApprovalManager).
+    func fetchPendingApprovals(completion: @escaping ([ApprovalRequest]) -> Void) {
+        getPendingApprovals(reply: completion)
+    }
+
     // MARK: - Socket Communication
 
     private func sendRequest(
