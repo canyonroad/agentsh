@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -677,3 +678,141 @@ func TestValidateNetworkTarget_ValidProtocols(t *testing.T) {
 		})
 	}
 }
+
+func TestParseConfig_WithApprovalUI(t *testing.T) {
+	yaml := `
+network_acl:
+  default: deny
+  approval_ui:
+    mode: enabled
+    timeout: 30s
+  processes:
+    - name: "test-app"
+      match:
+        process_name: "test-app"
+      rules:
+        - target: "example.com"
+          decision: approve
+`
+
+	config, err := ParseConfig([]byte(yaml))
+	require.NoError(t, err)
+
+	assert.Equal(t, "deny", config.Default)
+	require.NotNil(t, config.ApprovalUI)
+	assert.Equal(t, "enabled", config.ApprovalUI.Mode)
+	assert.Equal(t, "30s", config.ApprovalUI.Timeout)
+	assert.Equal(t, "enabled", config.ApprovalUI.GetMode())
+	assert.Equal(t, 30*time.Second, config.ApprovalUI.GetTimeout())
+}
+
+func TestParseConfig_WithApprovalUIDirectFormat(t *testing.T) {
+	yaml := `
+default: allow
+approval_ui:
+  mode: disabled
+processes:
+  - name: "my-app"
+    match:
+      process_name: "my-app"
+    rules:
+      - target: "api.example.com"
+        decision: allow
+`
+
+	config, err := ParseConfig([]byte(yaml))
+	require.NoError(t, err)
+
+	assert.Equal(t, "allow", config.Default)
+	require.NotNil(t, config.ApprovalUI)
+	assert.Equal(t, "disabled", config.ApprovalUI.Mode)
+	assert.Equal(t, "", config.ApprovalUI.Timeout)
+	assert.Equal(t, "disabled", config.ApprovalUI.GetMode())
+	assert.Equal(t, time.Duration(0), config.ApprovalUI.GetTimeout())
+}
+
+func TestApprovalUIConfig_GetMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   *ApprovalUIConfig
+		expected string
+	}{
+		{
+			name:     "nil config returns auto",
+			config:   nil,
+			expected: "auto",
+		},
+		{
+			name:     "empty mode returns auto",
+			config:   &ApprovalUIConfig{Mode: ""},
+			expected: "auto",
+		},
+		{
+			name:     "auto mode returns auto",
+			config:   &ApprovalUIConfig{Mode: "auto"},
+			expected: "auto",
+		},
+		{
+			name:     "enabled mode returns enabled",
+			config:   &ApprovalUIConfig{Mode: "enabled"},
+			expected: "enabled",
+		},
+		{
+			name:     "disabled mode returns disabled",
+			config:   &ApprovalUIConfig{Mode: "disabled"},
+			expected: "disabled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.config.GetMode())
+		})
+	}
+}
+
+func TestApprovalUIConfig_GetTimeout(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   *ApprovalUIConfig
+		expected time.Duration
+	}{
+		{
+			name:     "nil config returns 0",
+			config:   nil,
+			expected: 0,
+		},
+		{
+			name:     "empty timeout returns 0",
+			config:   &ApprovalUIConfig{Timeout: ""},
+			expected: 0,
+		},
+		{
+			name:     "30s timeout",
+			config:   &ApprovalUIConfig{Timeout: "30s"},
+			expected: 30 * time.Second,
+		},
+		{
+			name:     "1m timeout",
+			config:   &ApprovalUIConfig{Timeout: "1m"},
+			expected: time.Minute,
+		},
+		{
+			name:     "2m30s timeout",
+			config:   &ApprovalUIConfig{Timeout: "2m30s"},
+			expected: 2*time.Minute + 30*time.Second,
+		},
+		{
+			name:     "invalid timeout returns 0",
+			config:   &ApprovalUIConfig{Timeout: "invalid"},
+			expected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.config.GetTimeout())
+		})
+	}
+}
+
