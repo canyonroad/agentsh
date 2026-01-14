@@ -151,8 +151,7 @@ static __always_inline int emit_event(struct ctx_info *info, __u8 protocol, bool
         return 0;
 
     ev->ts_ns = bpf_ktime_get_ns();
-    // Generate unique cookie for pending approval tracking
-    // Combine random value with PID and timestamp for uniqueness
+    // Generate unique cookie for pending approval tracking using random values
     ev->cookie = ((__u64)bpf_get_prandom_u32() << 32) | bpf_get_prandom_u32();
     ev->pid = bpf_get_current_pid_tgid() >> 32;
     ev->tgid = bpf_get_current_pid_tgid();

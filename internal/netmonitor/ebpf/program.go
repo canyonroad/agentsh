@@ -139,6 +139,7 @@ type AllowKey struct {
 type AllowCIDR struct {
 	CgroupID  uint64
 	Family    uint8
+	Protocol  uint8  // IPPROTO_TCP (6) or IPPROTO_UDP (17), 0 = any
 	PrefixLen uint32
 	Dport     uint16 // 0 means any port
 	Addr      [16]byte

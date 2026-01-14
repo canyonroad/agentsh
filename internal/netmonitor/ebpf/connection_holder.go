@@ -454,6 +454,14 @@ func (m *PNACLMonitor) Start(ctx context.Context) error {
 }
 
 // convertPolicyToMapEntries converts policy rules to BPF map entries.
+//
+// IMPORTANT LIMITATION: BPF maps are per-cgroup, not per-process. Rules from all
+// ProcessPolicies are merged into shared maps. This means IP/CIDR-based rules
+// apply to all processes in the cgroup, not just the process they were defined for.
+// Per-process rule enforcement is handled by the userspace policy engine, which
+// evaluates process identity for each connection event. The BPF maps provide a
+// first-pass filter; the definitive allow/deny decision comes from userspace.
+//
 // Note: Host-based rules (like *.example.com) cannot be enforced at the kernel level
 // and are handled by the userspace policy engine after DNS resolution.
 func (m *PNACLMonitor) convertPolicyToMapEntries() (allow []AllowKey, allowCIDRs []AllowCIDR, deny []AllowKey, denyCIDRs []AllowCIDR, defaultDeny bool) {
@@ -518,6 +526,7 @@ func (m *PNACLMonitor) convertPolicyToMapEntries() (allow []AllowKey, allowCIDRs
 				if err == nil {
 					ones, _ := ipnet.Mask.Size()
 					cidr := AllowCIDR{
+						Protocol:  protocol,
 						PrefixLen: uint32(ones),
 						Dport:     port,
 					}
@@ -550,13 +559,22 @@ func parsePort(s string) (int, error) {
 	return strconv.Atoi(s)
 }
 
-// SetPolicyEngine updates the policy engine.
+// SetPolicyEngine updates the policy engine and repopulates BPF maps.
 func (m *PNACLMonitor) SetPolicyEngine(engine *pnacl.PolicyEngine) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.engine = engine
 	if m.filter != nil {
 		m.filter.SetPolicyEngine(engine)
+	}
+
+	// Repopulate BPF maps if monitor is running
+	if m.running && m.coll != nil {
+		cgroupID, err := CgroupID(m.cgroupPath)
+		if err == nil {
+			allow, allowCIDRs, deny, denyCIDRs, defaultDeny := m.convertPolicyToMapEntries()
+			_ = PopulateAllowlist(m.coll, cgroupID, allow, allowCIDRs, deny, denyCIDRs, defaultDeny)
+		}
 	}
 }
 
