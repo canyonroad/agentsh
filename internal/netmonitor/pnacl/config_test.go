@@ -56,10 +56,10 @@ network_acl:
 	config, err := ParseConfig([]byte(yaml))
 	require.NoError(t, err)
 
-	assert.Equal(t, "deny", config.Default)
-	require.Len(t, config.Processes, 1)
+	assert.Equal(t, "deny", config.NetworkACL.Default)
+	require.Len(t, config.NetworkACL.Processes, 1)
 
-	proc := config.Processes[0]
+	proc := config.NetworkACL.Processes[0]
 	assert.Equal(t, "claude-code", proc.Name)
 	assert.Equal(t, "claude-code", proc.Match.ProcessName)
 	assert.Equal(t, "/usr/bin/claude-code", proc.Match.Path)
@@ -101,9 +101,9 @@ processes:
 	config, err := ParseConfig([]byte(yaml))
 	require.NoError(t, err)
 
-	assert.Equal(t, "allow", config.Default)
-	require.Len(t, config.Processes, 1)
-	assert.Equal(t, "my-app", config.Processes[0].Name)
+	assert.Equal(t, "allow", config.NetworkACL.Default)
+	require.Len(t, config.NetworkACL.Processes, 1)
+	assert.Equal(t, "my-app", config.NetworkACL.Processes[0].Name)
 }
 
 func TestLoadConfig_FromFile(t *testing.T) {
@@ -127,9 +127,9 @@ network_acl:
 	config, err := LoadConfig(configPath)
 	require.NoError(t, err)
 
-	assert.Equal(t, "deny", config.Default)
-	require.Len(t, config.Processes, 1)
-	assert.Equal(t, "test-app", config.Processes[0].Name)
+	assert.Equal(t, "deny", config.NetworkACL.Default)
+	require.Len(t, config.NetworkACL.Processes, 1)
+	assert.Equal(t, "test-app", config.NetworkACL.Processes[0].Name)
 }
 
 func TestLoadConfig_FileNotFound(t *testing.T) {
@@ -352,92 +352,96 @@ func TestConfig_Validate(t *testing.T) {
 }
 
 func TestMergeConfigs(t *testing.T) {
-	base := &Config{
-		Default: "deny",
-		Processes: []ProcessConfig{
-			{
-				Name: "app-a",
-				Match: ProcessMatchCriteria{
-					ProcessName: "app-a",
-				},
-				Default: "approve",
-				Rules: []NetworkTarget{
-					{
-						Host:     "base.example.com",
-						Decision: DecisionAllow,
+	base := &NetworkACLConfig{
+		NetworkACL: Config{
+			Default: "deny",
+			Processes: []ProcessConfig{
+				{
+					Name: "app-a",
+					Match: ProcessMatchCriteria{
+						ProcessName: "app-a",
 					},
-				},
-				Children: []ChildConfig{
-					{
-						Name: "child-a",
-						Match: ProcessMatchCriteria{
-							ProcessName: "child-a",
+					Default: "approve",
+					Rules: []NetworkTarget{
+						{
+							Host:     "base.example.com",
+							Decision: DecisionAllow,
 						},
-						Inherit: boolPtr(true),
-						Rules: []NetworkTarget{
-							{
-								Host:     "child-base.example.com",
-								Decision: DecisionAllow,
+					},
+					Children: []ChildConfig{
+						{
+							Name: "child-a",
+							Match: ProcessMatchCriteria{
+								ProcessName: "child-a",
+							},
+							Inherit: boolPtr(true),
+							Rules: []NetworkTarget{
+								{
+									Host:     "child-base.example.com",
+									Decision: DecisionAllow,
+								},
 							},
 						},
 					},
 				},
-			},
-			{
-				Name: "app-b",
-				Match: ProcessMatchCriteria{
-					ProcessName: "app-b",
-				},
-				Rules: []NetworkTarget{
-					{
-						Host:     "app-b.example.com",
-						Decision: DecisionAllow,
+				{
+					Name: "app-b",
+					Match: ProcessMatchCriteria{
+						ProcessName: "app-b",
+					},
+					Rules: []NetworkTarget{
+						{
+							Host:     "app-b.example.com",
+							Decision: DecisionAllow,
+						},
 					},
 				},
 			},
 		},
 	}
 
-	override := &Config{
-		Default: "allow",
-		Processes: []ProcessConfig{
-			{
-				Name: "app-a",
-				Match: ProcessMatchCriteria{
-					ProcessName: "app-a-override",
-				},
-				Default: "deny",
-				Rules: []NetworkTarget{
-					{
-						Host:     "override.example.com",
-						Decision: DecisionDeny,
+	override := &NetworkACLConfig{
+		NetworkACL: Config{
+			Default: "allow",
+			Processes: []ProcessConfig{
+				{
+					Name: "app-a",
+					Match: ProcessMatchCriteria{
+						ProcessName: "app-a-override",
 					},
-				},
-				Children: []ChildConfig{
-					{
-						Name: "child-a",
-						Match: ProcessMatchCriteria{
-							ProcessName: "child-a-override",
+					Default: "deny",
+					Rules: []NetworkTarget{
+						{
+							Host:     "override.example.com",
+							Decision: DecisionDeny,
 						},
-						Inherit: boolPtr(false),
-						Rules: []NetworkTarget{
-							{
-								Host:     "child-override.example.com",
-								Decision: DecisionDeny,
+					},
+					Children: []ChildConfig{
+						{
+							Name: "child-a",
+							Match: ProcessMatchCriteria{
+								ProcessName: "child-a-override",
+							},
+							Inherit: boolPtr(false),
+							Rules: []NetworkTarget{
+								{
+									Host:     "child-override.example.com",
+									Decision: DecisionDeny,
+								},
 							},
 						},
 					},
 				},
-			},
-			{
-				Name: "app-c",
-				Match: ProcessMatchCriteria{
-					ProcessName: "app-c",
-				},
-				Rules: []NetworkTarget{
-					{
-						Host:     "app-c.example.com",
-						Decision: DecisionAllow,
+				{
+					Name: "app-c",
+					Match: ProcessMatchCriteria{
+						ProcessName: "app-c",
+					},
+					Rules: []NetworkTarget{
+						{
+							Host:     "app-c.example.com",
+							Decision: DecisionAllow,
+						},
 					},
 				},
 			},
@@ -447,23 +451,23 @@ func TestMergeConfigs(t *testing.T) {
 	merged := MergeConfigs(base, override)
 
 	// Override default should take precedence.
-	assert.Equal(t, "allow", merged.Default)
+	assert.Equal(t, "allow", merged.NetworkACL.Default)
 
 	// Should have 3 processes: app-a (merged), app-b (base only), app-c (override only).
-	require.Len(t, merged.Processes, 3)
+	require.Len(t, merged.NetworkACL.Processes, 3)
 
 	// Find merged app-a.
 	var appA *ProcessConfig
 	var appB *ProcessConfig
 	var appC *ProcessConfig
-	for i := range merged.Processes {
-		switch merged.Processes[i].Name {
+	for i := range merged.NetworkACL.Processes {
+		switch merged.NetworkACL.Processes[i].Name {
 		case "app-a":
-			appA = &merged.Processes[i]
+			appA = &merged.NetworkACL.Processes[i]
 		case "app-b":
-			appB = &merged.Processes[i]
+			appB = &merged.NetworkACL.Processes[i]
 		case "app-c":
-			appC = &merged.Processes[i]
+			appC = &merged.NetworkACL.Processes[i]
 		}
 	}
 
@@ -500,15 +504,15 @@ func TestMergeConfigs(t *testing.T) {
 }
 
 func TestMergeConfigs_NilInputs(t *testing.T) {
-	config := &Config{Default: "allow"}
+	config := &NetworkACLConfig{NetworkACL: Config{Default: "allow"}}
 
 	// Nil base returns override.
 	merged := MergeConfigs(nil, config)
-	assert.Equal(t, config, merged)
+	assert.Equal(t, config.NetworkACL.Default, merged.NetworkACL.Default)
 
 	// Nil override returns base.
 	merged = MergeConfigs(config, nil)
-	assert.Equal(t, config, merged)
+	assert.Equal(t, config.NetworkACL.Default, merged.NetworkACL.Default)
 }
 
 func TestConfig_Clone(t *testing.T) {

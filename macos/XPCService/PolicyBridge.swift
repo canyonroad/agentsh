@@ -1,10 +1,20 @@
 // macos/XPCService/PolicyBridge.swift
 import Foundation
 
+/// Fail behavior when the policy server is unreachable.
+enum FailBehavior {
+    case failOpen   // Allow connections on error (availability priority)
+    case failClosed // Deny connections on error (security priority)
+}
+
 /// Bridges XPC calls to the Go policy server via Unix socket.
 class PolicyBridge: NSObject, AgentshXPCProtocol {
     private let socketPath = "/var/run/agentsh/policy.sock"
     private let timeout: TimeInterval = 5.0
+
+    /// Configurable fail behavior. Default is failOpen for availability.
+    /// Set to failClosed for security-critical deployments.
+    var failBehavior: FailBehavior = .failOpen
 
     func checkFile(
         path: String,
@@ -92,6 +102,173 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
         }
     }
 
+    // MARK: - PNACL Methods
+
+    func checkNetworkPNACL(
+        ip: String,
+        port: Int,
+        protocol proto: String,
+        domain: String?,
+        pid: pid_t,
+        bundleID: String?,
+        executablePath: String?,
+        processName: String?,
+        parentPID: pid_t,
+        reply: @escaping (String, String?) -> Void
+    ) {
+        let request: [String: Any] = [
+            "type": "pnacl_check",
+            "ip": ip,
+            "port": port,
+            "protocol": proto,
+            "domain": domain ?? "",
+            "pid": pid,
+            "bundle_id": bundleID ?? "",
+            "executable_path": executablePath ?? "",
+            "process_name": processName ?? "",
+            "parent_pid": parentPID
+        ]
+        sendRequest(request) { response in
+            let decision = response["decision"] as? String ?? "allow"
+            let ruleID = response["rule_id"] as? String
+            reply(decision, ruleID)
+        }
+    }
+
+    func reportPNACLEvent(
+        eventType: String,
+        ip: String,
+        port: Int,
+        protocol proto: String,
+        domain: String?,
+        pid: pid_t,
+        bundleID: String?,
+        decision: String,
+        ruleID: String?,
+        reply: @escaping (Bool) -> Void
+    ) {
+        let request: [String: Any] = [
+            "type": "pnacl_event",
+            "event_type": eventType,
+            "ip": ip,
+            "port": port,
+            "protocol": proto,
+            "domain": domain ?? "",
+            "pid": pid,
+            "bundle_id": bundleID ?? "",
+            "decision": decision,
+            "rule_id": ruleID ?? ""
+        ]
+        sendRequest(request) { _ in
+            reply(true)
+        }
+    }
+
+    // MARK: - PNACL Approval Flow (Phase 3)
+
+    func getPendingApprovals(reply: @escaping ([ApprovalRequest]) -> Void) {
+        let request: [String: Any] = [
+            "type": "get_pending_approvals"
+        ]
+        sendRequest(request) { response in
+            var approvals: [ApprovalRequest] = []
+
+            if let approvalsArray = response["approvals"] as? [[String: Any]] {
+                for json in approvalsArray {
+                    if let approval = ApprovalRequest.from(json: json) {
+                        approvals.append(approval)
+                    }
+                }
+            }
+
+            reply(approvals)
+        }
+    }
+
+    func submitApprovalDecision(
+        requestID: String,
+        decision: String,
+        permanent: Bool,
+        reply: @escaping (Bool) -> Void
+    ) {
+        let request: [String: Any] = [
+            "type": "submit_approval",
+            "request_id": requestID,
+            "decision": decision,
+            "permanent": permanent
+        ]
+        sendRequest(request) { response in
+            let success = response["success"] as? Bool ?? false
+            reply(success)
+        }
+    }
+
+    /// Fetch pending approvals for polling (internal use by ApprovalManager).
+    /// Returns (approvals, success) - success is false if server communication failed.
+    func fetchPendingApprovals(completion: @escaping ([ApprovalRequest], Bool) -> Void) {
+        let request: [String: Any] = [
+            "type": "get_pending_approvals"
+        ]
+        sendRequest(request) { response in
+            // Check if this was an error response
+            let isError = response["rule"] as? String == "error-failopen" ||
+                          response["rule"] as? String == "error-failclosed"
+
+            if isError {
+                completion([], false)
+                return
+            }
+
+            var approvals: [ApprovalRequest] = []
+            if let approvalsArray = response["approvals"] as? [[String: Any]] {
+                for json in approvalsArray {
+                    if let approval = ApprovalRequest.from(json: json) {
+                        approvals.append(approval)
+                    }
+                }
+            }
+            completion(approvals, true)
+        }
+    }
+
+    // MARK: - PNACL Configuration (Phase 4)
+
+    /// Current blocking configuration state.
+    /// These values are sent to FilterDataProvider when it queries configuration.
+    private var pnaclBlockingEnabled: Bool = false
+    private var pnaclDecisionTimeout: Double = 0.1
+    private var pnaclFailOpen: Bool = true
+
+    func configurePNACLBlocking(
+        blockingEnabled: Bool,
+        decisionTimeout: Double,
+        failOpen: Bool,
+        reply: @escaping (Bool) -> Void
+    ) {
+        // Store configuration locally for FilterDataProvider to query
+        pnaclBlockingEnabled = blockingEnabled
+        pnaclDecisionTimeout = decisionTimeout
+        pnaclFailOpen = failOpen
+
+        // Also notify the Go server of the configuration change
+        let request: [String: Any] = [
+            "type": "pnacl_configure",
+            "blocking_enabled": blockingEnabled,
+            "decision_timeout": decisionTimeout,
+            "fail_open": failOpen
+        ]
+        sendRequest(request) { response in
+            let success = response["success"] as? Bool ?? true
+            reply(success)
+        }
+    }
+
+    func getPNACLBlockingConfig(
+        reply: @escaping (Bool, Double, Bool) -> Void
+    ) {
+        reply(pnaclBlockingEnabled, pnaclDecisionTimeout, pnaclFailOpen)
+    }
+
     // MARK: - Socket Communication
 
     private func sendRequest(
@@ -110,10 +287,12 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
                     completion(response)
                 }
             } catch {
-                // Fail-open: allow on error
-                NSLog("PolicyBridge error: \(error)")
+                // Handle error based on configured fail behavior
+                let allow = self.failBehavior == .failOpen
+                let ruleDesc = allow ? "error-failopen" : "error-failclosed"
+                NSLog("PolicyBridge error (fail-\(allow ? "open" : "closed")): \(error)")
                 DispatchQueue.main.async {
-                    completion(["allow": true, "rule": "error-failopen"])
+                    completion(["allow": allow, "rule": ruleDesc])
                 }
             }
         }
@@ -130,7 +309,7 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
         // Connect
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        withUnsafeMutablePointer(to: &addr.sun_path.0) { ptr in
+        _ = withUnsafeMutablePointer(to: &addr.sun_path.0) { ptr in
             socketPath.withCString { cstr in
                 strcpy(ptr, cstr)
             }

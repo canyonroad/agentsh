@@ -1,9 +1,14 @@
+// Package pnacl provides Process Network ACL (PNACL) functionality for
+// per-process network access control policies.
 package pnacl
 
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -53,12 +58,20 @@ func (cc *ChildConfig) InheritRules() bool {
 }
 
 // NetworkACLConfig wraps the network_acl section of a policy file.
+// This allows loading from both standalone network-acl.yaml files
+// and from the network_acl block within an existing policy.yaml file.
 type NetworkACLConfig struct {
 	NetworkACL Config `yaml:"network_acl"`
 }
 
 // LoadConfig loads a PNACL configuration from a file.
-func LoadConfig(path string) (*Config, error) {
+// It supports loading from:
+//   - Standalone network-acl.yaml file with direct Config structure
+//   - Files with a network_acl wrapper block (e.g., within policy.yaml)
+//
+// The function automatically detects the format and parses accordingly.
+// Returns an error if the file cannot be read or parsed.
+func LoadConfig(path string) (*NetworkACLConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
@@ -68,7 +81,18 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 // ParseConfig parses a PNACL configuration from YAML data.
-func ParseConfig(data []byte) (*Config, error) {
+// It supports two formats:
+//  1. Wrapped format with network_acl key:
+//     network_acl:
+//     default: deny
+//     processes: [...]
+//  2. Direct format without wrapper:
+//     default: deny
+//     processes: [...]
+//
+// The function automatically validates the parsed configuration.
+// Returns an error if the YAML is malformed or validation fails.
+func ParseConfig(data []byte) (*NetworkACLConfig, error) {
 	// Try parsing as a wrapped config (network_acl: ...).
 	var wrapped NetworkACLConfig
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -79,10 +103,10 @@ func ParseConfig(data []byte) (*Config, error) {
 		if err := config.Validate(); err != nil {
 			return nil, fmt.Errorf("validate config: %w", err)
 		}
-		return &config, nil
+		return &wrapped, nil
 	}
 
-	// Try parsing as a direct config.
+	// Try parsing as a direct config (no network_acl wrapper).
 	var config Config
 	dec = yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -91,25 +115,45 @@ func ParseConfig(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	if err := config.Validate(); err != nil {
+	// Wrap the direct config in NetworkACLConfig.
+	result := &NetworkACLConfig{
+		NetworkACL: config,
+	}
+
+	if err := ValidateConfig(result); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
 
-	return &config, nil
+	return result, nil
 }
 
-// Validate validates the configuration.
-func (c *Config) Validate() error {
+// ValidateConfig validates the entire network ACL configuration.
+// It performs comprehensive validation including:
+//   - Decision values are valid (allow/deny/approve/audit/allow_once_then_approve)
+//   - Port ranges are valid (start <= end, within 1-65535)
+//   - CIDR notation is parseable
+//   - Protocol is tcp/udp/*
+//   - Process match has at least one identifier (name, path, or bundleID)
+//
+// Returns nil if the configuration is valid, or an error describing
+// the first validation failure encountered.
+func ValidateConfig(config *NetworkACLConfig) error {
+	if config == nil {
+		return fmt.Errorf("config is nil")
+	}
+
+	c := &config.NetworkACL
+
 	// Validate default decision if specified.
 	if c.Default != "" {
 		if !isValidDecision(c.Default) {
-			return fmt.Errorf("invalid default decision %q", c.Default)
+			return fmt.Errorf("invalid default decision %q: must be one of allow, deny, approve, audit, allow_once_then_approve", c.Default)
 		}
 	}
 
 	// Validate each process configuration.
 	for i, pc := range c.Processes {
-		if err := pc.Validate(); err != nil {
+		if err := validateProcessConfig(pc); err != nil {
 			return fmt.Errorf("process %d (%q): %w", i, pc.Name, err)
 		}
 	}
@@ -117,21 +161,88 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// Validate validates a process configuration.
-func (pc *ProcessConfig) Validate() error {
+// MergeConfigs merges two NetworkACLConfig configurations, with the overlay
+// taking precedence over the base configuration.
+//
+// Merge behavior:
+//   - If overlay specifies a default decision, it overrides base's default
+//   - Process configurations are merged by name:
+//   - If both base and overlay have the same process name, overlay's rules
+//     are prepended (higher priority) to base's rules
+//   - Process-specific defaults in overlay override base
+//   - Child configurations follow the same merge pattern
+//   - Processes only in base are preserved
+//   - Processes only in overlay are added
+//
+// Returns nil if both inputs are nil. Returns a clone of the non-nil input
+// if the other is nil.
+func MergeConfigs(base, overlay *NetworkACLConfig) *NetworkACLConfig {
+	if base == nil && overlay == nil {
+		return nil
+	}
+	if base == nil {
+		return overlay.Clone()
+	}
+	if overlay == nil {
+		return base.Clone()
+	}
+
+	merged := &NetworkACLConfig{
+		NetworkACL: Config{
+			Default:   base.NetworkACL.Default,
+			Processes: make([]ProcessConfig, 0),
+		},
+	}
+
+	// Override default if specified in overlay.
+	if overlay.NetworkACL.Default != "" {
+		merged.NetworkACL.Default = overlay.NetworkACL.Default
+	}
+
+	// Build a map of base processes by name.
+	baseProcesses := make(map[string]ProcessConfig)
+	for _, pc := range base.NetworkACL.Processes {
+		baseProcesses[pc.Name] = pc
+	}
+
+	// Track which base processes have been merged.
+	mergedNames := make(map[string]bool)
+
+	// Add overlay processes, merging with base if exists.
+	for _, overlayPC := range overlay.NetworkACL.Processes {
+		if basePC, exists := baseProcesses[overlayPC.Name]; exists {
+			merged.NetworkACL.Processes = append(merged.NetworkACL.Processes, mergeProcessConfigs(basePC, overlayPC))
+			mergedNames[overlayPC.Name] = true
+		} else {
+			merged.NetworkACL.Processes = append(merged.NetworkACL.Processes, overlayPC)
+		}
+	}
+
+	// Add remaining base processes that weren't overridden.
+	for _, pc := range base.NetworkACL.Processes {
+		if !mergedNames[pc.Name] {
+			merged.NetworkACL.Processes = append(merged.NetworkACL.Processes, pc)
+		}
+	}
+
+	return merged
+}
+
+// validateProcessConfig validates a process configuration.
+func validateProcessConfig(pc ProcessConfig) error {
 	if pc.Name == "" {
 		return fmt.Errorf("name is required")
 	}
 
-	// Validate match criteria.
+	// Validate match criteria - must have at least one identifier.
 	if !hasCriteria(pc.Match) {
-		return fmt.Errorf("at least one match criterion is required")
+		return fmt.Errorf("at least one match criterion is required (process_name, path, or bundle_id)")
 	}
 
 	// Validate default decision if specified.
 	if pc.Default != "" {
 		if !isValidDecision(pc.Default) {
-			return fmt.Errorf("invalid default decision %q", pc.Default)
+			return fmt.Errorf("invalid default decision %q: must be one of allow, deny, approve, audit, allow_once_then_approve", pc.Default)
 		}
 	}
 
@@ -144,7 +255,7 @@ func (pc *ProcessConfig) Validate() error {
 
 	// Validate children.
 	for i, child := range pc.Children {
-		if err := child.Validate(); err != nil {
+		if err := validateChildConfig(child); err != nil {
 			return fmt.Errorf("child %d (%q): %w", i, child.Name, err)
 		}
 	}
@@ -152,14 +263,14 @@ func (pc *ProcessConfig) Validate() error {
 	return nil
 }
 
-// Validate validates a child configuration.
-func (cc *ChildConfig) Validate() error {
+// validateChildConfig validates a child configuration.
+func validateChildConfig(cc ChildConfig) error {
 	if cc.Name == "" {
 		return fmt.Errorf("name is required")
 	}
 
 	if !hasCriteria(cc.Match) {
-		return fmt.Errorf("at least one match criterion is required")
+		return fmt.Errorf("at least one match criterion is required (process_name, path, or bundle_id)")
 	}
 
 	for i, rule := range cc.Rules {
@@ -171,7 +282,7 @@ func (cc *ChildConfig) Validate() error {
 	return nil
 }
 
-// validateNetworkTarget validates a network target.
+// validateNetworkTarget validates a network target rule.
 func validateNetworkTarget(t NetworkTarget) error {
 	// At least one target specifier is required.
 	if t.Host == "" && t.IP == "" && t.CIDR == "" {
@@ -183,15 +294,89 @@ func validateNetworkTarget(t NetworkTarget) error {
 		return fmt.Errorf("decision is required")
 	}
 	if !isValidDecision(string(t.Decision)) {
-		return fmt.Errorf("invalid decision %q", t.Decision)
+		return fmt.Errorf("invalid decision %q: must be one of allow, deny, approve, audit, allow_once_then_approve", t.Decision)
 	}
 
 	// Validate protocol if specified.
 	if t.Protocol != "" && t.Protocol != "*" {
-		proto := t.Protocol
+		proto := strings.ToLower(t.Protocol)
 		if proto != "tcp" && proto != "udp" {
-			return fmt.Errorf("invalid protocol %q (must be tcp, udp, or *)", proto)
+			return fmt.Errorf("invalid protocol %q: must be tcp, udp, or *", proto)
 		}
+	}
+
+	// Validate IP address if specified.
+	if t.IP != "" {
+		if ip := net.ParseIP(t.IP); ip == nil {
+			return fmt.Errorf("invalid IP address %q", t.IP)
+		}
+	}
+
+	// Validate CIDR notation if specified.
+	if t.CIDR != "" {
+		if _, _, err := net.ParseCIDR(t.CIDR); err != nil {
+			return fmt.Errorf("invalid CIDR notation %q: %w", t.CIDR, err)
+		}
+	}
+
+	// Validate port specification if provided.
+	if t.Port != "" && t.Port != "*" {
+		if err := validatePortSpec(t.Port); err != nil {
+			return fmt.Errorf("invalid port specification %q: %w", t.Port, err)
+		}
+	}
+
+	return nil
+}
+
+// validatePortSpec validates a port specification string.
+// Valid formats are: single port ("443"), range ("8000-9000"), or wildcard ("*").
+func validatePortSpec(spec string) error {
+	spec = strings.TrimSpace(spec)
+	if spec == "" || spec == "*" {
+		return nil
+	}
+
+	// Check for range format.
+	if strings.Contains(spec, "-") {
+		parts := strings.SplitN(spec, "-", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid range format")
+		}
+
+		start, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+		if err != nil {
+			return fmt.Errorf("invalid range start: %w", err)
+		}
+
+		end, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil {
+			return fmt.Errorf("invalid range end: %w", err)
+		}
+
+		// Validate start <= end.
+		if start > end {
+			return fmt.Errorf("port range start (%d) must be less than or equal to end (%d)", start, end)
+		}
+
+		// Validate port bounds.
+		if start < 1 || start > 65535 {
+			return fmt.Errorf("port range start %d out of bounds (1-65535)", start)
+		}
+		if end < 1 || end > 65535 {
+			return fmt.Errorf("port range end %d out of bounds (1-65535)", end)
+		}
+
+		return nil
+	}
+
+	// Single port.
+	port, err := strconv.Atoi(spec)
+	if err != nil {
+		return fmt.Errorf("invalid port number: %w", err)
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("port %d out of bounds (1-65535)", port)
 	}
 
 	return nil
@@ -207,95 +392,46 @@ func isValidDecision(d string) bool {
 	}
 }
 
-// MergeConfigs merges two configurations, with the override taking precedence.
-// Rules for the same process are merged, with override rules prepended (higher priority).
-func MergeConfigs(base, override *Config) *Config {
-	if base == nil {
-		return override
-	}
-	if override == nil {
-		return base
-	}
-
-	merged := &Config{
-		Default:   base.Default,
-		Processes: make([]ProcessConfig, 0),
-	}
-
-	// Override default if specified.
-	if override.Default != "" {
-		merged.Default = override.Default
-	}
-
-	// Build a map of base processes by name.
-	baseProcesses := make(map[string]ProcessConfig)
-	for _, pc := range base.Processes {
-		baseProcesses[pc.Name] = pc
-	}
-
-	// Track which base processes have been merged.
-	mergedNames := make(map[string]bool)
-
-	// Add override processes, merging with base if exists.
-	for _, overridePC := range override.Processes {
-		if basePC, exists := baseProcesses[overridePC.Name]; exists {
-			merged.Processes = append(merged.Processes, mergeProcessConfigs(basePC, overridePC))
-			mergedNames[overridePC.Name] = true
-		} else {
-			merged.Processes = append(merged.Processes, overridePC)
-		}
-	}
-
-	// Add remaining base processes that weren't overridden.
-	for _, pc := range base.Processes {
-		if !mergedNames[pc.Name] {
-			merged.Processes = append(merged.Processes, pc)
-		}
-	}
-
-	return merged
-}
-
 // mergeProcessConfigs merges two process configurations.
-func mergeProcessConfigs(base, override ProcessConfig) ProcessConfig {
+func mergeProcessConfigs(base, overlay ProcessConfig) ProcessConfig {
 	merged := ProcessConfig{
 		Name:  base.Name,
 		Match: base.Match,
 	}
 
-	// Override match criteria if specified.
-	if hasCriteria(override.Match) {
-		merged.Match = override.Match
+	// Override match criteria if specified in overlay.
+	if hasCriteria(overlay.Match) {
+		merged.Match = overlay.Match
 	}
 
-	// Override default if specified.
-	if override.Default != "" {
-		merged.Default = override.Default
+	// Override default if specified in overlay.
+	if overlay.Default != "" {
+		merged.Default = overlay.Default
 	} else {
 		merged.Default = base.Default
 	}
 
-	// Prepend override rules (higher priority).
-	merged.Rules = make([]NetworkTarget, 0, len(override.Rules)+len(base.Rules))
-	merged.Rules = append(merged.Rules, override.Rules...)
+	// Prepend overlay rules (higher priority).
+	merged.Rules = make([]NetworkTarget, 0, len(overlay.Rules)+len(base.Rules))
+	merged.Rules = append(merged.Rules, overlay.Rules...)
 	merged.Rules = append(merged.Rules, base.Rules...)
 
 	// Merge children.
-	merged.Children = mergeChildConfigs(base.Children, override.Children)
+	merged.Children = mergeChildConfigs(base.Children, overlay.Children)
 
 	return merged
 }
 
 // mergeChildConfigs merges child configurations.
-func mergeChildConfigs(base, override []ChildConfig) []ChildConfig {
-	if len(override) == 0 {
+func mergeChildConfigs(base, overlay []ChildConfig) []ChildConfig {
+	if len(overlay) == 0 {
 		return base
 	}
 	if len(base) == 0 {
-		return override
+		return overlay
 	}
 
-	// Build map of base children.
+	// Build map of base children by name.
 	baseChildren := make(map[string]ChildConfig)
 	for _, cc := range base {
 		baseChildren[cc.Name] = cc
@@ -304,27 +440,27 @@ func mergeChildConfigs(base, override []ChildConfig) []ChildConfig {
 	merged := make([]ChildConfig, 0)
 	mergedNames := make(map[string]bool)
 
-	// Add override children, merging with base if exists.
-	for _, overrideCC := range override {
-		if baseCC, exists := baseChildren[overrideCC.Name]; exists {
+	// Add overlay children, merging with base if exists.
+	for _, overlayCC := range overlay {
+		if baseCC, exists := baseChildren[overlayCC.Name]; exists {
 			mergedChild := ChildConfig{
 				Name:    baseCC.Name,
 				Match:   baseCC.Match,
 				Inherit: baseCC.Inherit, // Start with base inherit setting
 			}
-			if hasCriteria(overrideCC.Match) {
-				mergedChild.Match = overrideCC.Match
+			if hasCriteria(overlayCC.Match) {
+				mergedChild.Match = overlayCC.Match
 			}
-			// Only override inherit if explicitly specified in override
-			if overrideCC.Inherit != nil {
-				mergedChild.Inherit = overrideCC.Inherit
+			// Only override inherit if explicitly specified in overlay.
+			if overlayCC.Inherit != nil {
+				mergedChild.Inherit = overlayCC.Inherit
 			}
-			// Prepend override rules.
-			mergedChild.Rules = append(overrideCC.Rules, baseCC.Rules...)
+			// Prepend overlay rules.
+			mergedChild.Rules = append(overlayCC.Rules, baseCC.Rules...)
 			merged = append(merged, mergedChild)
-			mergedNames[overrideCC.Name] = true
+			mergedNames[overlayCC.Name] = true
 		} else {
-			merged = append(merged, overrideCC)
+			merged = append(merged, overlayCC)
 		}
 	}
 
@@ -338,7 +474,18 @@ func mergeChildConfigs(base, override []ChildConfig) []ChildConfig {
 	return merged
 }
 
-// Clone creates a deep copy of the configuration.
+// Clone creates a deep copy of the NetworkACLConfig.
+func (c *NetworkACLConfig) Clone() *NetworkACLConfig {
+	if c == nil {
+		return nil
+	}
+
+	return &NetworkACLConfig{
+		NetworkACL: *c.NetworkACL.Clone(),
+	}
+}
+
+// Clone creates a deep copy of the Config.
 func (c *Config) Clone() *Config {
 	if c == nil {
 		return nil
@@ -356,7 +503,7 @@ func (c *Config) Clone() *Config {
 	return clone
 }
 
-// Clone creates a deep copy of the process configuration.
+// Clone creates a deep copy of the ProcessConfig.
 func (pc ProcessConfig) Clone() ProcessConfig {
 	clone := ProcessConfig{
 		Name:     pc.Name,
@@ -375,7 +522,7 @@ func (pc ProcessConfig) Clone() ProcessConfig {
 	return clone
 }
 
-// Clone creates a deep copy of the child configuration.
+// Clone creates a deep copy of the ChildConfig.
 func (cc ChildConfig) Clone() ChildConfig {
 	clone := ChildConfig{
 		Name:    cc.Name,
@@ -387,4 +534,10 @@ func (cc ChildConfig) Clone() ChildConfig {
 	copy(clone.Rules, cc.Rules)
 
 	return clone
+}
+
+// Validate validates the Config. This is a convenience method that wraps
+// ValidateConfig for use when working directly with Config objects.
+func (c *Config) Validate() error {
+	return ValidateConfig(&NetworkACLConfig{NetworkACL: *c})
 }

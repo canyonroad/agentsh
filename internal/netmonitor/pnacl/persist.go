@@ -98,7 +98,11 @@ func (p *FileRulePersister) loadOrCreateConfig() (*Config, error) {
 		return nil, err
 	}
 
-	return ParseConfig(data)
+	nacl, err := ParseConfig(data)
+	if err != nil {
+		return nil, err
+	}
+	return nacl.NetworkACL.Clone(), nil
 }
 
 // writeConfigWithComment writes the config to file with a comment for the new rule.
