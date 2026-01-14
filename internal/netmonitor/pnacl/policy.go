@@ -1,3 +1,5 @@
+// Package pnacl provides Process Network ACL (PNACL) functionality for
+// per-process network access control policies.
 package pnacl
 
 import (
@@ -43,6 +45,36 @@ type NetworkTarget struct {
 	Protocol string `yaml:"protocol,omitempty"`
 	// Decision is the policy decision for this target.
 	Decision Decision `yaml:"decision"`
+}
+
+// ConnectionContext provides context for matching a network connection to a process policy.
+// This type contains both process and connection information for policy evaluation.
+type ConnectionContext struct {
+	// Process contains information about the process making the connection.
+	Process ProcessInfo
+	// Host is the target hostname (may be empty if connecting by IP).
+	Host string
+	// Port is the target port number.
+	Port int
+	// Protocol is the connection protocol (e.g., "tcp", "udp").
+	Protocol string
+}
+
+// ProcessACL represents the resolved ACL configuration for a matched process.
+// It contains the policy details that should be applied to the process's connections.
+type ProcessACL struct {
+	// Name is the human-readable name for this process policy.
+	Name string
+	// Match contains the criteria that matched this process.
+	Match ProcessMatchCriteria
+	// Default is the default decision for this process's connections.
+	Default Decision
+	// Rules are the network rules for this process.
+	Rules []NetworkTarget
+	// Children are the child process configurations.
+	Children []ChildConfig
+	// Specificity indicates how specific this match is.
+	Specificity MatchSpecificity
 }
 
 // NetworkRule is a compiled network rule for efficient evaluation.
@@ -454,4 +486,546 @@ func (e *PolicyEngine) EvaluateForParentChild(parentProc, childProc ProcessInfo,
 
 	// Check if the child itself matches a process policy directly.
 	return e.Evaluate(childProc, host, ip, port, protocol)
+}
+
+// EvaluationResult contains the result of policy evaluation for the PolicyEvaluator.
+type EvaluationResult struct {
+	// Decision is the policy decision.
+	Decision Decision
+	// MatchedRule is the rule that matched, or nil if default was used.
+	MatchedRule *NetworkTarget
+	// RuleIndex is the index of the matched rule, or -1 if default was used.
+	RuleIndex int
+	// ProcessACLName is the name of the matched process ACL.
+	ProcessACLName string
+	// IsInherited indicates if the decision came from an inherited parent rule.
+	IsInherited bool
+	// ChildACLName is the name of the matched child ACL, if any.
+	ChildACLName string
+}
+
+// PolicyEvaluatorACL defines network ACL rules for a specific process.
+// This is the runtime representation used by the PolicyEvaluator.
+type PolicyEvaluatorACL struct {
+	// Name is a human-readable name for this ACL.
+	Name string
+	// Match defines the process matching criteria.
+	Match ProcessMatchCriteria
+	// Default is the default decision when no rule matches.
+	Default Decision
+	// Rules are the network ACL rules evaluated in order.
+	Rules []NetworkTarget
+	// Children are ACLs for child processes.
+	Children []*PolicyEvaluatorACL
+	// Inherit indicates whether this ACL inherits rules from its parent.
+	Inherit bool
+}
+
+// PolicyEvaluator evaluates network ACL rules for connection requests.
+// It supports first-match-wins evaluation with parent-child inheritance.
+type PolicyEvaluator struct {
+	// GlobalDefault is the default decision when no process ACL matches.
+	GlobalDefault Decision
+	// ProcessACLs are the configured process-specific ACLs.
+	ProcessACLs []*PolicyEvaluatorACL
+	// compiledMatchers caches compiled process matchers by ACL name.
+	compiledMatchers map[string]*singleProcessMatcher
+	// compiledHostGlobs caches compiled host glob patterns.
+	compiledHostGlobs map[string]glob.Glob
+}
+
+// singleProcessMatcher is a simplified matcher for a single process criteria.
+type singleProcessMatcher struct {
+	criteria ProcessMatchCriteria
+	pathGlob glob.Glob
+}
+
+// NewPolicyEvaluator creates a new PolicyEvaluator with default settings.
+func NewPolicyEvaluator() *PolicyEvaluator {
+	return &PolicyEvaluator{
+		GlobalDefault:     DecisionDeny,
+		ProcessACLs:       make([]*PolicyEvaluatorACL, 0),
+		compiledMatchers:  make(map[string]*singleProcessMatcher),
+		compiledHostGlobs: make(map[string]glob.Glob),
+	}
+}
+
+// Evaluate evaluates the policy for a connection context against a process ACL.
+// Rules are evaluated in order, and the first matching rule wins.
+// If the process ACL has children (inheritance), child rules are evaluated first,
+// then inherited parent rules if no child rule matches.
+func (pe *PolicyEvaluator) Evaluate(ctx ConnectionContext, processACL *PolicyEvaluatorACL) EvaluationResult {
+	if processACL == nil {
+		return EvaluationResult{
+			Decision:  pe.GlobalDefault,
+			RuleIndex: -1,
+		}
+	}
+
+	// Check if there's a matching child ACL for the current process.
+	childACL := pe.findChildACL(processACL, ctx)
+	if childACL != nil {
+		return pe.evaluateWithInheritance(ctx, processACL, childACL)
+	}
+
+	// Evaluate rules directly on the process ACL.
+	return pe.evaluateACLRules(ctx, processACL.Rules, processACL.Name, processACL.Default, false, "")
+}
+
+// evaluateWithInheritance evaluates rules with parent-child inheritance.
+// Child rules are evaluated first, then parent rules if inheritance is enabled.
+func (pe *PolicyEvaluator) evaluateWithInheritance(ctx ConnectionContext, parent, child *PolicyEvaluatorACL) EvaluationResult {
+	// Evaluate child-specific rules first (most specific wins).
+	for i := range child.Rules {
+		rule := &child.Rules[i]
+		if pe.evaluateNetworkTarget(*rule, ctx) {
+			return EvaluationResult{
+				Decision:       rule.Decision,
+				MatchedRule:    rule,
+				RuleIndex:      i,
+				ProcessACLName: parent.Name,
+				IsInherited:    false,
+				ChildACLName:   child.Name,
+			}
+		}
+	}
+
+	// If inheritance is enabled, evaluate parent rules.
+	if child.Inherit {
+		for i := range parent.Rules {
+			rule := &parent.Rules[i]
+			if pe.evaluateNetworkTarget(*rule, ctx) {
+				return EvaluationResult{
+					Decision:       rule.Decision,
+					MatchedRule:    rule,
+					RuleIndex:      i,
+					ProcessACLName: parent.Name,
+					IsInherited:    true,
+					ChildACLName:   child.Name,
+				}
+			}
+		}
+	}
+
+	// No rule matched; use child's default if set, otherwise parent's default.
+	defaultDecision := child.Default
+	if defaultDecision == "" {
+		defaultDecision = parent.Default
+	}
+	if defaultDecision == "" {
+		defaultDecision = pe.GlobalDefault
+	}
+
+	return EvaluationResult{
+		Decision:       defaultDecision,
+		RuleIndex:      -1,
+		ProcessACLName: parent.Name,
+		IsInherited:    child.Inherit,
+		ChildACLName:   child.Name,
+	}
+}
+
+// evaluateACLRules evaluates a list of rules against a connection context.
+func (pe *PolicyEvaluator) evaluateACLRules(ctx ConnectionContext, rules []NetworkTarget, aclName string, defaultDecision Decision, isInherited bool, childName string) EvaluationResult {
+	for i := range rules {
+		rule := &rules[i]
+		if pe.evaluateNetworkTarget(*rule, ctx) {
+			return EvaluationResult{
+				Decision:       rule.Decision,
+				MatchedRule:    rule,
+				RuleIndex:      i,
+				ProcessACLName: aclName,
+				IsInherited:    isInherited,
+				ChildACLName:   childName,
+			}
+		}
+	}
+
+	// No rule matched; use default decision.
+	if defaultDecision == "" {
+		defaultDecision = pe.GlobalDefault
+	}
+
+	return EvaluationResult{
+		Decision:       defaultDecision,
+		RuleIndex:      -1,
+		ProcessACLName: aclName,
+		IsInherited:    isInherited,
+		ChildACLName:   childName,
+	}
+}
+
+// evaluateNetworkTarget checks if a single rule matches the connection context.
+// A rule matches if all specified criteria (host/IP/CIDR, port, protocol) match.
+// For target matching, host OR IP OR CIDR must match (if specified).
+func (pe *PolicyEvaluator) evaluateNetworkTarget(rule NetworkTarget, ctx ConnectionContext) bool {
+	// Check protocol first (most selective).
+	if !matchProtocol(rule.Protocol, ctx.Protocol) {
+		return false
+	}
+
+	// Check port.
+	if !matchPort(rule.Port, ctx.Port) {
+		return false
+	}
+
+	// Check target (host OR IP OR CIDR).
+	// At least one target specifier must be present and match.
+	targetMatched := false
+	hasTargetSpec := false
+
+	// Check host pattern.
+	if rule.Host != "" {
+		hasTargetSpec = true
+		if pe.matchHost(rule.Host, ctx.Host) {
+			targetMatched = true
+		}
+	}
+
+	// Check IP - ConnectionContext uses Host for IP as string.
+	if rule.IP != "" {
+		hasTargetSpec = true
+		ip := net.ParseIP(ctx.Host)
+		if matchIP(rule.IP, ip) {
+			targetMatched = true
+		}
+	}
+
+	// Check CIDR.
+	if rule.CIDR != "" {
+		hasTargetSpec = true
+		ip := net.ParseIP(ctx.Host)
+		if matchCIDR(rule.CIDR, ip) {
+			targetMatched = true
+		}
+	}
+
+	// If no target was specified, the rule matches any target.
+	if !hasTargetSpec {
+		return true
+	}
+
+	return targetMatched
+}
+
+// findChildACL finds a matching child ACL for the given connection context.
+// Returns nil if no child ACL matches.
+func (pe *PolicyEvaluator) findChildACL(parent *PolicyEvaluatorACL, ctx ConnectionContext) *PolicyEvaluatorACL {
+	if len(parent.Children) == 0 {
+		return nil
+	}
+
+	for _, child := range parent.Children {
+		matcher, err := pe.getOrCreateMatcher(child.Name, child.Match)
+		if err != nil {
+			continue
+		}
+
+		if matcher.matches(ctx.Process) {
+			return child
+		}
+	}
+
+	return nil
+}
+
+// getOrCreateMatcher retrieves a cached matcher or creates a new one.
+func (pe *PolicyEvaluator) getOrCreateMatcher(name string, criteria ProcessMatchCriteria) (*singleProcessMatcher, error) {
+	if matcher, ok := pe.compiledMatchers[name]; ok {
+		return matcher, nil
+	}
+
+	matcher := &singleProcessMatcher{
+		criteria: criteria,
+	}
+
+	// Compile path glob if specified.
+	if criteria.Path != "" {
+		g, err := glob.Compile(criteria.Path, '/')
+		if err != nil {
+			return nil, err
+		}
+		matcher.pathGlob = g
+	}
+
+	pe.compiledMatchers[name] = matcher
+	return matcher, nil
+}
+
+// matches checks if a process info matches this matcher's criteria.
+func (m *singleProcessMatcher) matches(info ProcessInfo) bool {
+	if m.criteria.Strict {
+		return m.matchStrict(info)
+	}
+	return m.matchFlexible(info)
+}
+
+// matchFlexible returns true if any specified criterion matches (OR semantics).
+func (m *singleProcessMatcher) matchFlexible(info ProcessInfo) bool {
+	if !hasCriteria(m.criteria) {
+		return false
+	}
+
+	// Check process name.
+	if m.criteria.ProcessName != "" {
+		if strings.EqualFold(m.criteria.ProcessName, info.Name) {
+			return true
+		}
+	}
+
+	// Check path.
+	if m.pathGlob != nil {
+		if m.pathGlob.Match(info.Path) {
+			return true
+		}
+	}
+
+	// Check bundle ID (macOS).
+	if m.criteria.BundleID != "" && info.BundleID != "" {
+		if strings.EqualFold(m.criteria.BundleID, info.BundleID) {
+			return true
+		}
+	}
+
+	// Check package family name (Windows).
+	if m.criteria.PackageFamilyName != "" && info.PackageFamilyName != "" {
+		if strings.EqualFold(m.criteria.PackageFamilyName, info.PackageFamilyName) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchStrict returns true only if all specified criteria match (AND semantics).
+func (m *singleProcessMatcher) matchStrict(info ProcessInfo) bool {
+	if !hasCriteria(m.criteria) {
+		return false
+	}
+
+	// Check process name if specified.
+	if m.criteria.ProcessName != "" {
+		if !strings.EqualFold(m.criteria.ProcessName, info.Name) {
+			return false
+		}
+	}
+
+	// Check path if specified.
+	if m.pathGlob != nil {
+		if !m.pathGlob.Match(info.Path) {
+			return false
+		}
+	}
+
+	// Check bundle ID if specified.
+	if m.criteria.BundleID != "" {
+		if !strings.EqualFold(m.criteria.BundleID, info.BundleID) {
+			return false
+		}
+	}
+
+	// Check package family name if specified.
+	if m.criteria.PackageFamilyName != "" {
+		if !strings.EqualFold(m.criteria.PackageFamilyName, info.PackageFamilyName) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// matchHost checks if a host matches a pattern.
+// Supports glob patterns like "*.example.com", "api.*.anthropic.com".
+func (pe *PolicyEvaluator) matchHost(pattern, host string) bool {
+	if pattern == "" || host == "" {
+		return false
+	}
+
+	// Normalize to lowercase.
+	pattern = strings.ToLower(pattern)
+	host = strings.ToLower(host)
+
+	// Exact match.
+	if pattern == host {
+		return true
+	}
+
+	// Wildcard match.
+	if pattern == "*" {
+		return true
+	}
+
+	// Check cache for compiled glob.
+	g, ok := pe.compiledHostGlobs[pattern]
+	if !ok {
+		// Compile and cache the glob.
+		var err error
+		g, err = glob.Compile(pattern, '.')
+		if err != nil {
+			return false
+		}
+		pe.compiledHostGlobs[pattern] = g
+	}
+
+	return g.Match(host)
+}
+
+// matchIP checks if an IP address matches a target IP string.
+// Performs exact IP match.
+func matchIP(target string, ip net.IP) bool {
+	if target == "" || ip == nil {
+		return false
+	}
+
+	// Parse the target IP.
+	targetIP := net.ParseIP(target)
+	if targetIP == nil {
+		return false
+	}
+
+	return targetIP.Equal(ip)
+}
+
+// matchCIDR checks if an IP address is contained within a CIDR block.
+// Uses net.ParseCIDR for proper CIDR containment check.
+func matchCIDR(cidr string, ip net.IP) bool {
+	if cidr == "" || ip == nil {
+		return false
+	}
+
+	// Parse the CIDR.
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return false
+	}
+
+	return ipNet.Contains(ip)
+}
+
+// matchPort checks if a port matches a port specification.
+// Supports:
+//   - Single port: "443"
+//   - Port range: "8000-9000"
+//   - Wildcard: "*" or empty string (matches any port)
+func matchPort(pattern string, port int) bool {
+	pattern = strings.TrimSpace(pattern)
+
+	// Empty or wildcard matches any port.
+	if pattern == "" || pattern == "*" {
+		return true
+	}
+
+	// Check for range.
+	if strings.Contains(pattern, "-") {
+		parts := strings.SplitN(pattern, "-", 2)
+		if len(parts) != 2 {
+			return false
+		}
+
+		min, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+		if err != nil {
+			return false
+		}
+
+		max, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil {
+			return false
+		}
+
+		return port >= min && port <= max
+	}
+
+	// Single port match.
+	targetPort, err := strconv.Atoi(pattern)
+	if err != nil {
+		return false
+	}
+
+	return port == targetPort
+}
+
+// matchProtocol checks if a protocol matches a pattern.
+// Supports "tcp", "udp", or "*" (matches any protocol).
+func matchProtocol(pattern, protocol string) bool {
+	pattern = strings.TrimSpace(strings.ToLower(pattern))
+	protocol = strings.TrimSpace(strings.ToLower(protocol))
+
+	// Empty or wildcard matches any protocol.
+	if pattern == "" || pattern == "*" {
+		return true
+	}
+
+	return pattern == protocol
+}
+
+// AddProcessACL adds a process ACL to the evaluator.
+func (pe *PolicyEvaluator) AddProcessACL(acl *PolicyEvaluatorACL) {
+	pe.ProcessACLs = append(pe.ProcessACLs, acl)
+}
+
+// FindProcessACL finds a process ACL that matches the given process info.
+func (pe *PolicyEvaluator) FindProcessACL(info ProcessInfo) *PolicyEvaluatorACL {
+	for _, acl := range pe.ProcessACLs {
+		matcher, err := pe.getOrCreateMatcher(acl.Name, acl.Match)
+		if err != nil {
+			continue
+		}
+
+		if matcher.matches(info) {
+			return acl
+		}
+	}
+	return nil
+}
+
+// EvaluateConnection is a convenience method that finds the matching process ACL
+// and evaluates the connection in one call.
+func (pe *PolicyEvaluator) EvaluateConnection(ctx ConnectionContext) EvaluationResult {
+	acl := pe.FindProcessACL(ctx.Process)
+	return pe.Evaluate(ctx, acl)
+}
+
+// SetGlobalDefault sets the global default decision.
+func (pe *PolicyEvaluator) SetGlobalDefault(decision Decision) {
+	pe.GlobalDefault = decision
+}
+
+// ClearCache clears all cached matchers and compiled globs.
+// Useful when ACLs are modified and need to be re-evaluated.
+func (pe *PolicyEvaluator) ClearCache() {
+	pe.compiledMatchers = make(map[string]*singleProcessMatcher)
+	pe.compiledHostGlobs = make(map[string]glob.Glob)
+}
+
+// LoadFromConfig creates a PolicyEvaluator from a Config.
+func LoadFromConfig(config *Config) *PolicyEvaluator {
+	pe := NewPolicyEvaluator()
+	if config.Default != "" {
+		pe.GlobalDefault = Decision(config.Default)
+	}
+
+	// Convert ProcessConfig to PolicyEvaluatorACL.
+	for _, pc := range config.Processes {
+		acl := &PolicyEvaluatorACL{
+			Name:    pc.Name,
+			Match:   pc.Match,
+			Default: Decision(pc.Default),
+			Rules:   pc.Rules,
+		}
+
+		// Convert children.
+		for _, cc := range pc.Children {
+			childACL := &PolicyEvaluatorACL{
+				Name:    cc.Name,
+				Match:   cc.Match,
+				Inherit: cc.Inherit,
+				Rules:   cc.Rules,
+			}
+			acl.Children = append(acl.Children, childACL)
+		}
+
+		pe.ProcessACLs = append(pe.ProcessACLs, acl)
+	}
+
+	return pe
 }

@@ -137,13 +137,13 @@ processes:
 		t.Fatalf("failed to load config: %v", err)
 	}
 
-	if len(config.Processes) != 2 {
-		t.Errorf("expected 2 processes, got %d", len(config.Processes))
+	if len(config.NetworkACL.Processes) != 2 {
+		t.Errorf("expected 2 processes, got %d", len(config.NetworkACL.Processes))
 	}
 
 	// Find new process
 	var found bool
-	for _, p := range config.Processes {
+	for _, p := range config.NetworkACL.Processes {
 		if p.Name == "new-process" {
 			found = true
 			if len(p.Rules) != 1 {

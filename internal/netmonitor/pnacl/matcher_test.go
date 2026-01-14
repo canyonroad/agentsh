@@ -296,7 +296,7 @@ func TestMatchProcessName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.pattern+"_"+tt.name, func(t *testing.T) {
-			got := matchProcessName(tt.pattern, tt.name)
+			got := matchProcessName(tt.pattern, tt.name, false)
 			assert.Equal(t, tt.want, got)
 		})
 	}
