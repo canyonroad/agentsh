@@ -101,6 +101,7 @@ struct ApprovalDialogApp: App {
               let requestID = queryItems.first(where: { $0.name == "id" })?.value,
               !requestID.isEmpty else {
             NSLog("ApprovalDialogApp: Invalid URL format or missing request ID")
+            request = nil  // Clear any existing request so error view shows
             errorMessage = "Invalid URL format.\nExpected: agentsh-approval://approve?id=<requestID>"
             isLoading = false
             currentRequestID = nil
