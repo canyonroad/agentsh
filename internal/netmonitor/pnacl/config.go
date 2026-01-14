@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -19,6 +20,36 @@ type Config struct {
 	Default string `yaml:"default,omitempty"`
 	// Processes defines per-process network policies.
 	Processes []ProcessConfig `yaml:"processes,omitempty"`
+	// ApprovalUI configures the interactive approval dialog.
+	ApprovalUI *ApprovalUIConfig `yaml:"approval_ui,omitempty"`
+}
+
+// ApprovalUIConfig configures the interactive approval dialog.
+type ApprovalUIConfig struct {
+	// Mode determines when to show dialogs: "auto" (default), "enabled", "disabled"
+	// auto: detect display availability, disable in CI environments
+	Mode string `yaml:"mode,omitempty"`
+
+	// Timeout for user response (e.g., "30s"). Uses approval timeout if not set.
+	Timeout string `yaml:"timeout,omitempty"`
+}
+
+// GetMode returns the mode, defaulting to "auto".
+func (c *ApprovalUIConfig) GetMode() string {
+	if c == nil || c.Mode == "" {
+		return "auto"
+	}
+	return c.Mode
+}
+
+// GetTimeout parses and returns the timeout duration.
+// Returns 0 (no timeout) if not set or invalid.
+func (c *ApprovalUIConfig) GetTimeout() time.Duration {
+	if c == nil || c.Timeout == "" {
+		return 0
+	}
+	d, _ := time.ParseDuration(c.Timeout)
+	return d
 }
 
 // ProcessConfig defines the network policy for a specific process.
@@ -98,7 +129,7 @@ func ParseConfig(data []byte) (*NetworkACLConfig, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
-	if err := dec.Decode(&wrapped); err == nil && (wrapped.NetworkACL.Default != "" || len(wrapped.NetworkACL.Processes) > 0) {
+	if err := dec.Decode(&wrapped); err == nil && (wrapped.NetworkACL.Default != "" || len(wrapped.NetworkACL.Processes) > 0 || wrapped.NetworkACL.ApprovalUI != nil) {
 		config := wrapped.NetworkACL
 		if err := config.Validate(); err != nil {
 			return nil, fmt.Errorf("validate config: %w", err)
