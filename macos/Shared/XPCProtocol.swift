@@ -94,6 +94,29 @@ import Foundation
         permanent: Bool,
         reply: @escaping (Bool) -> Void
     )
+
+    // MARK: - PNACL Configuration (Phase 4)
+
+    /// Configure PNACL blocking behavior for the filter provider.
+    /// This allows runtime configuration without recompiling.
+    /// - Parameters:
+    ///   - blockingEnabled: When true, actually blocks connections. When false, audit-only mode.
+    ///   - decisionTimeout: Max seconds to wait for policy decision (default 0.1 = 100ms)
+    ///   - failOpen: When true, allows on timeout/error. When false, denies on timeout/error.
+    ///   - reply: Called with success status
+    func configurePNACLBlocking(
+        blockingEnabled: Bool,
+        decisionTimeout: Double,
+        failOpen: Bool,
+        reply: @escaping (Bool) -> Void
+    )
+
+    /// Get current PNACL blocking configuration.
+    /// - Parameters:
+    ///   - reply: Returns (blockingEnabled, decisionTimeout, failOpen)
+    func getPNACLBlockingConfig(
+        reply: @escaping (Bool, Double, Bool) -> Void
+    )
 }
 
 /// XPC Service identifier.

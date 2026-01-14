@@ -231,6 +231,44 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
         }
     }
 
+    // MARK: - PNACL Configuration (Phase 4)
+
+    /// Current blocking configuration state.
+    /// These values are sent to FilterDataProvider when it queries configuration.
+    private var pnaclBlockingEnabled: Bool = false
+    private var pnaclDecisionTimeout: Double = 0.1
+    private var pnaclFailOpen: Bool = true
+
+    func configurePNACLBlocking(
+        blockingEnabled: Bool,
+        decisionTimeout: Double,
+        failOpen: Bool,
+        reply: @escaping (Bool) -> Void
+    ) {
+        // Store configuration locally for FilterDataProvider to query
+        pnaclBlockingEnabled = blockingEnabled
+        pnaclDecisionTimeout = decisionTimeout
+        pnaclFailOpen = failOpen
+
+        // Also notify the Go server of the configuration change
+        let request: [String: Any] = [
+            "type": "pnacl_configure",
+            "blocking_enabled": blockingEnabled,
+            "decision_timeout": decisionTimeout,
+            "fail_open": failOpen
+        ]
+        sendRequest(request) { response in
+            let success = response["success"] as? Bool ?? true
+            reply(success)
+        }
+    }
+
+    func getPNACLBlockingConfig(
+        reply: @escaping (Bool, Double, Bool) -> Void
+    ) {
+        reply(pnaclBlockingEnabled, pnaclDecisionTimeout, pnaclFailOpen)
+    }
+
     // MARK: - Socket Communication
 
     private func sendRequest(

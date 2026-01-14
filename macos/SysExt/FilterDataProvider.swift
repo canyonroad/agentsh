@@ -236,8 +236,7 @@ class FilterDataProvider: NEFilterDataProvider {
         }
 
         // Wait for response with timeout
-        let timeoutNanos = Int64(decisionTimeout * Double(NSEC_PER_SEC))
-        let result = semaphore.wait(timeout: .now() + .nanoseconds(Int(timeoutNanos)))
+        let result = semaphore.wait(timeout: .now() + decisionTimeout)
 
         // Determine verdict based on result
         let verdict: NEFilterNewFlowVerdict
@@ -250,21 +249,33 @@ class FilterDataProvider: NEFilterDataProvider {
             if let decision = policyDecision {
                 finalDecision = decision
                 switch decision {
-                case "allow":
+                case "allow", "allow_once", "allow_permanent":
+                    // Explicit allow decisions
                     verdict = .allow()
                     wasBlocked = false
-                case "deny":
+                case "deny", "deny_once", "deny_forever":
+                    // Explicit deny decisions
                     verdict = .drop()
                     wasBlocked = true
-                case "approve":
+                case "audit":
+                    // Audit-only mode - log but always allow
+                    verdict = .allow()
+                    wasBlocked = false
+                case "approve", "allow_once_then_approve":
                     // Pending approval - use fail behavior
-                    if failOpen {
+                    // allow_once_then_approve: allow this connection but queue for approval
+                    if failOpen || decision == "allow_once_then_approve" {
                         verdict = .allow()
                         wasBlocked = false
                     } else {
                         verdict = .drop()
                         wasBlocked = true
                     }
+                case "needRules":
+                    // No rules configured - use fail behavior
+                    NSLog("PNACL: No rules for \(ip):\(port) pid=\(pid), failOpen=\(failOpen)")
+                    verdict = failOpen ? .allow() : .drop()
+                    wasBlocked = !failOpen
                 default:
                     // Unknown decision - use fail behavior
                     NSLog("PNACL: Unknown decision '\(decision)' for \(ip):\(port) pid=\(pid)")
