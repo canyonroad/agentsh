@@ -5,6 +5,7 @@ package ebpf
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/approval/dialog"
 	"github.com/agentsh/agentsh/internal/netmonitor/pnacl"
@@ -44,10 +45,13 @@ func showApprovalDialog(pc *PendingConnection, config *pnacl.ApprovalUIConfig, f
 		pc.Protocol,
 	)
 
-	// Determine timeout
-	timeout := config.GetTimeout()
+	// Determine timeout (config.GetTimeout() safely handles nil config)
+	timeout := time.Duration(0)
+	if config != nil {
+		timeout = config.GetTimeout()
+	}
 	if timeout == 0 {
-		timeout = 30 * 1e9 // 30 seconds default
+		timeout = 30 * time.Second
 	}
 
 	req := dialog.Request{

@@ -771,6 +771,27 @@ func TestApprovalUIConfig_GetMode(t *testing.T) {
 	}
 }
 
+func TestParseConfig_WithApprovalUIOnlyWrapped(t *testing.T) {
+	// Test case for configs that only have approval_ui set (no default or processes).
+	// This verifies the fix for wrapped config detection.
+	yaml := `
+network_acl:
+  approval_ui:
+    mode: enabled
+    timeout: 45s
+`
+
+	config, err := ParseConfig([]byte(yaml))
+	require.NoError(t, err)
+
+	// Should parse as wrapped config even without default or processes
+	require.NotNil(t, config.ApprovalUI)
+	assert.Equal(t, "enabled", config.ApprovalUI.Mode)
+	assert.Equal(t, "45s", config.ApprovalUI.Timeout)
+	assert.Equal(t, "", config.Default)
+	assert.Len(t, config.Processes, 0)
+}
+
 func TestApprovalUIConfig_GetTimeout(t *testing.T) {
 	tests := []struct {
 		name     string

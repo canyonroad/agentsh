@@ -101,11 +101,9 @@ func showKDialog(ctx context.Context, path string, req Request) (Response, error
 
 // showPowerShell shows a dialog using PowerShell (for WSL).
 func showPowerShell(ctx context.Context, path string, req Request) (Response, error) {
-	// Escape double quotes in message and title
-	message := strings.ReplaceAll(req.Message, `"`, "`\"")
-	title := strings.ReplaceAll(req.Title, `"`, "`\"")
-	// Replace newlines with PowerShell newline
-	message = strings.ReplaceAll(message, "\n", "`n")
+	// Escape special characters for PowerShell to prevent command injection
+	message := escapePowerShell(req.Message)
+	title := escapePowerShell(req.Title)
 
 	script := `Add-Type -AssemblyName System.Windows.Forms; ` +
 		`[System.Windows.Forms.MessageBox]::Show("` + message + `", "` + title + `", "YesNo", "Question")`
@@ -124,4 +122,18 @@ func showPowerShell(ctx context.Context, path string, req Request) (Response, er
 	// "Yes" = Allow, "No" = Deny
 	result := strings.TrimSpace(string(output))
 	return Response{Allowed: result == "Yes"}, nil
+}
+
+// escapePowerShell escapes special characters for PowerShell strings.
+// This prevents command injection via $variable or $(subexpression) syntax.
+func escapePowerShell(s string) string {
+	// Escape backticks first (they're the escape character in PowerShell)
+	s = strings.ReplaceAll(s, "`", "``")
+	// Escape dollar signs to prevent variable/subexpression expansion
+	s = strings.ReplaceAll(s, "$", "`$")
+	// Escape double quotes
+	s = strings.ReplaceAll(s, `"`, "`\"")
+	// Convert newlines to PowerShell newline
+	s = strings.ReplaceAll(s, "\n", "`n")
+	return s
 }

@@ -4,7 +4,18 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/agentsh/agentsh/internal/approval/dialog"
 )
+
+// skipIfDialogAvailable skips the test if a dialog backend is available,
+// since the test would pop up actual modal dialogs requiring user interaction.
+func skipIfDialogAvailable(t *testing.T) {
+	t.Helper()
+	if dialog.CanShowDialog() {
+		t.Skip("Skipping test: dialog backend available - would pop modal dialog")
+	}
+}
 
 func TestDialogPromptProvider_NewDialogPromptProvider(t *testing.T) {
 	tests := []struct {
@@ -44,9 +55,7 @@ func TestDialogPromptProvider_ImplementsPromptProvider(t *testing.T) {
 }
 
 func TestDialogPromptProvider_Prompt_RequestFormatting(t *testing.T) {
-	// This test verifies the request is properly formatted for the dialog.
-	// Since we can't easily mock the dialog.Show function, we test the provider
-	// construction and verify it would handle the request correctly.
+	skipIfDialogAvailable(t)
 
 	provider := NewDialogPromptProvider(UserDecisionDenyOnce)
 
@@ -61,8 +70,8 @@ func TestDialogPromptProvider_Prompt_RequestFormatting(t *testing.T) {
 		ExpiresAt:   time.Now().Add(30 * time.Second),
 	}
 
-	// Calling Prompt will likely fail because dialog backend is unavailable in test,
-	// but it should return the fallback decision in that case
+	// Calling Prompt will fail because dialog backend is unavailable in test,
+	// but it should return the fallback decision
 	ctx := context.Background()
 	resp, _ := provider.Prompt(ctx, req)
 
@@ -76,6 +85,8 @@ func TestDialogPromptProvider_Prompt_RequestFormatting(t *testing.T) {
 }
 
 func TestDialogPromptProvider_Prompt_FallbackOnError(t *testing.T) {
+	skipIfDialogAvailable(t)
+
 	tests := []struct {
 		name     string
 		fallback UserDecision
@@ -120,6 +131,8 @@ func TestDialogPromptProvider_Prompt_FallbackOnError(t *testing.T) {
 }
 
 func TestDialogPromptProvider_Prompt_ContextCancellation(t *testing.T) {
+	skipIfDialogAvailable(t)
+
 	provider := NewDialogPromptProvider(UserDecisionDenyOnce)
 
 	req := ApprovalRequest{
@@ -148,6 +161,8 @@ func TestDialogPromptProvider_Prompt_ContextCancellation(t *testing.T) {
 }
 
 func TestDialogPromptProvider_Prompt_ExpiredRequest(t *testing.T) {
+	skipIfDialogAvailable(t)
+
 	provider := NewDialogPromptProvider(UserDecisionDenyOnce)
 
 	// Request that has already expired
@@ -171,6 +186,8 @@ func TestDialogPromptProvider_Prompt_ExpiredRequest(t *testing.T) {
 }
 
 func TestDialogPromptProvider_Prompt_ResponseTimestamp(t *testing.T) {
+	skipIfDialogAvailable(t)
+
 	provider := NewDialogPromptProvider(UserDecisionSkip)
 
 	req := ApprovalRequest{
@@ -195,6 +212,8 @@ func TestDialogPromptProvider_Prompt_ResponseTimestamp(t *testing.T) {
 }
 
 func TestDialogPromptProvider_Prompt_ReasonOnFallback(t *testing.T) {
+	skipIfDialogAvailable(t)
+
 	provider := NewDialogPromptProvider(UserDecisionDenyOnce)
 
 	req := ApprovalRequest{
@@ -212,6 +231,6 @@ func TestDialogPromptProvider_Prompt_ReasonOnFallback(t *testing.T) {
 
 	// When fallback is used, reason should be set
 	if resp.Reason == "" {
-		t.Log("Note: reason is empty, which is acceptable if dialog is available")
+		t.Error("expected reason to be set when using fallback")
 	}
 }

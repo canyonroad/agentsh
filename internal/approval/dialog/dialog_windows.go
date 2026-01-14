@@ -47,9 +47,13 @@ func showNative(ctx context.Context, req Request) (Response, error) {
 }
 
 // escapePowerShell escapes special characters for PowerShell strings.
+// This prevents command injection via $variable or $(subexpression) syntax.
 func escapePowerShell(s string) string {
-	// Escape backticks and double quotes
+	// Escape backticks first (they're the escape character in PowerShell)
 	s = strings.ReplaceAll(s, "`", "``")
+	// Escape dollar signs to prevent variable/subexpression expansion
+	s = strings.ReplaceAll(s, "$", "`$")
+	// Escape double quotes
 	s = strings.ReplaceAll(s, `"`, "`\"")
 	// Convert newlines to PowerShell newline
 	s = strings.ReplaceAll(s, "\n", "`n")

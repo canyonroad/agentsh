@@ -105,7 +105,7 @@ func ParseConfig(data []byte) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
-	if err := dec.Decode(&wrapped); err == nil && (wrapped.NetworkACL.Default != "" || len(wrapped.NetworkACL.Processes) > 0) {
+	if err := dec.Decode(&wrapped); err == nil && (wrapped.NetworkACL.Default != "" || len(wrapped.NetworkACL.Processes) > 0 || wrapped.NetworkACL.ApprovalUI != nil) {
 		config := wrapped.NetworkACL
 		if err := config.Validate(); err != nil {
 			return nil, fmt.Errorf("validate config: %w", err)

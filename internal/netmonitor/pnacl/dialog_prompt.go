@@ -34,14 +34,18 @@ func (p *DialogPromptProvider) Prompt(ctx context.Context, req ApprovalRequest) 
 	// Show dialog
 	resp, err := dialog.Show(ctx, dialogReq)
 
-	// Handle errors and timeout
+	// Handle errors and timeout - return fallback with nil error so caller uses the response
 	if err != nil || resp.TimedOut {
+		reason := "dialog timed out"
+		if err != nil {
+			reason = fmt.Sprintf("dialog unavailable: %v", err)
+		}
 		return ApprovalResponse{
 			RequestID: req.ID,
 			Decision:  p.FallbackDecision,
 			At:        time.Now().UTC(),
-			Reason:    "dialog unavailable or timed out",
-		}, err
+			Reason:    reason,
+		}, nil // Return nil error so the fallback response is used
 	}
 
 	// Convert response
