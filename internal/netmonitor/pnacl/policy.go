@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gobwas/glob"
 )
@@ -523,6 +524,7 @@ type PolicyEvaluatorACL struct {
 
 // PolicyEvaluator evaluates network ACL rules for connection requests.
 // It supports first-match-wins evaluation with parent-child inheritance.
+// PolicyEvaluator is thread-safe for concurrent Evaluate calls.
 type PolicyEvaluator struct {
 	// GlobalDefault is the default decision when no process ACL matches.
 	GlobalDefault Decision
@@ -532,6 +534,8 @@ type PolicyEvaluator struct {
 	compiledMatchers map[string]*singleProcessMatcher
 	// compiledHostGlobs caches compiled host glob patterns.
 	compiledHostGlobs map[string]glob.Glob
+	// cacheMu protects compiledMatchers and compiledHostGlobs for concurrent access.
+	cacheMu sync.RWMutex
 }
 
 // singleProcessMatcher is a simplified matcher for a single process criteria.
@@ -730,11 +734,17 @@ func (pe *PolicyEvaluator) findChildACL(parent *PolicyEvaluatorACL, ctx Connecti
 }
 
 // getOrCreateMatcher retrieves a cached matcher or creates a new one.
+// Thread-safe via cacheMu.
 func (pe *PolicyEvaluator) getOrCreateMatcher(name string, criteria ProcessMatchCriteria) (*singleProcessMatcher, error) {
+	// Check cache with read lock first.
+	pe.cacheMu.RLock()
 	if matcher, ok := pe.compiledMatchers[name]; ok {
+		pe.cacheMu.RUnlock()
 		return matcher, nil
 	}
+	pe.cacheMu.RUnlock()
 
+	// Create new matcher.
 	matcher := &singleProcessMatcher{
 		criteria: criteria,
 	}
@@ -748,7 +758,11 @@ func (pe *PolicyEvaluator) getOrCreateMatcher(name string, criteria ProcessMatch
 		matcher.pathGlob = g
 	}
 
+	// Store in cache with write lock.
+	pe.cacheMu.Lock()
 	pe.compiledMatchers[name] = matcher
+	pe.cacheMu.Unlock()
+
 	return matcher, nil
 }
 
@@ -855,16 +869,22 @@ func (pe *PolicyEvaluator) matchHost(pattern, host string) bool {
 		return true
 	}
 
-	// Check cache for compiled glob.
+	// Check cache for compiled glob with read lock.
+	pe.cacheMu.RLock()
 	g, ok := pe.compiledHostGlobs[pattern]
+	pe.cacheMu.RUnlock()
+
 	if !ok {
-		// Compile and cache the glob.
+		// Compile the glob.
 		var err error
 		g, err = glob.Compile(pattern, '.')
 		if err != nil {
 			return false
 		}
+		// Cache with write lock.
+		pe.cacheMu.Lock()
 		pe.compiledHostGlobs[pattern] = g
+		pe.cacheMu.Unlock()
 	}
 
 	return g.Match(host)
@@ -992,9 +1012,12 @@ func (pe *PolicyEvaluator) SetGlobalDefault(decision Decision) {
 
 // ClearCache clears all cached matchers and compiled globs.
 // Useful when ACLs are modified and need to be re-evaluated.
+// Thread-safe via cacheMu.
 func (pe *PolicyEvaluator) ClearCache() {
+	pe.cacheMu.Lock()
 	pe.compiledMatchers = make(map[string]*singleProcessMatcher)
 	pe.compiledHostGlobs = make(map[string]glob.Glob)
+	pe.cacheMu.Unlock()
 }
 
 // LoadFromConfig creates a PolicyEvaluator from a Config.

@@ -1,10 +1,20 @@
 // macos/XPCService/PolicyBridge.swift
 import Foundation
 
+/// Fail behavior when the policy server is unreachable.
+enum FailBehavior {
+    case failOpen   // Allow connections on error (availability priority)
+    case failClosed // Deny connections on error (security priority)
+}
+
 /// Bridges XPC calls to the Go policy server via Unix socket.
 class PolicyBridge: NSObject, AgentshXPCProtocol {
     private let socketPath = "/var/run/agentsh/policy.sock"
     private let timeout: TimeInterval = 5.0
+
+    /// Configurable fail behavior. Default is failOpen for availability.
+    /// Set to failClosed for security-critical deployments.
+    var failBehavior: FailBehavior = .failOpen
 
     func checkFile(
         path: String,
@@ -172,10 +182,12 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
                     completion(response)
                 }
             } catch {
-                // Fail-open: allow on error
-                NSLog("PolicyBridge error: \(error)")
+                // Handle error based on configured fail behavior
+                let allow = self.failBehavior == .failOpen
+                let ruleDesc = allow ? "error-failopen" : "error-failclosed"
+                NSLog("PolicyBridge error (fail-\(allow ? "open" : "closed")): \(error)")
                 DispatchQueue.main.async {
-                    completion(["allow": true, "rule": "error-failopen"])
+                    completion(["allow": allow, "rule": ruleDesc])
                 }
             }
         }
