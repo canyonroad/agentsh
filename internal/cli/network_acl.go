@@ -354,6 +354,17 @@ to connect to the target, without actually making any connection.`,
 			processName := args[0]
 			target := args[1]
 
+			// Parse host:port format if present
+			if host, portStr, err := net.SplitHostPort(target); err == nil {
+				target = host
+				if p, err := strconv.Atoi(portStr); err == nil {
+					// Only use parsed port if --port flag wasn't explicitly set
+					if !cmd.Flags().Changed("port") {
+						port = p
+					}
+				}
+			}
+
 			cfgPath := resolveNetworkACLConfigPath(configPath)
 			config, err := pnacl.LoadConfig(cfgPath)
 			if err != nil {
