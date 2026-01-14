@@ -145,8 +145,8 @@ class ApprovalManager: NSObject {
     // MARK: - Polling with Exponential Backoff
 
     private func startPolling() {
-        isStopped = false
-        stopPolling()
+        stopPolling()  // Cancel any existing timer first
+        isStopped = false  // Set after stopPolling so it's not reset
         scheduleNextPoll()
     }
 

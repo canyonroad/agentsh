@@ -11,7 +11,7 @@ struct ApprovalDialogApp: App {
     @State private var hasProcessedLaunchURL = false
     @State private var currentRequestID: String?  // Tracks which request we're expecting
     @State private var isSubmitting = false  // Tracks submission in progress
-    @State private var pendingDecision: (decision: String, permanent: Bool)?  // For retry
+    @State private var pendingDecision: (requestID: String, decision: String, permanent: Bool)?  // For retry
 
     private let serverClient = ServerClient()
 
@@ -119,8 +119,8 @@ struct ApprovalDialogApp: App {
 
     private func retryRequest(requestID: String) {
         // If we have a pending decision, retry the submission
-        if let decision = pendingDecision, let req = request {
-            retrySubmission(requestID: req.requestID, decision: decision.decision, permanent: decision.permanent)
+        if let decision = pendingDecision {
+            retrySubmission(requestID: decision.requestID, decision: decision.decision, permanent: decision.permanent)
         } else {
             // Otherwise retry fetching the request
             errorMessage = nil
@@ -218,8 +218,8 @@ struct ApprovalDialogApp: App {
 
         NSLog("ApprovalDialogApp: Submitting decision '\(decision)' (permanent: \(permanent)) for request: \(requestID)")
 
-        // Store decision for potential retry
-        pendingDecision = (decision, permanent)
+        // Store decision for potential retry (including requestID since request will be cleared on error)
+        pendingDecision = (requestID, decision, permanent)
         isSubmitting = true
 
         Task {
@@ -243,6 +243,7 @@ struct ApprovalDialogApp: App {
                 } else {
                     NSLog("ApprovalDialogApp: Decision submission returned false")
                     isSubmitting = false
+                    request = nil  // Clear request so error view shows
                     errorMessage = "Failed to submit decision.\nThe server rejected the request."
                 }
             }
@@ -250,6 +251,7 @@ struct ApprovalDialogApp: App {
             NSLog("ApprovalDialogApp: Error submitting decision: \(error)")
             await MainActor.run {
                 isSubmitting = false
+                request = nil  // Clear request so error view shows
                 errorMessage = "Failed to submit decision.\n\(error.localizedDescription)"
             }
         }
