@@ -130,7 +130,7 @@ func applyMapOverrides(spec *ebpf.CollectionSpec) {
 type AllowKey struct {
 	CgroupID uint64
 	Family   uint8
-	Pad      [1]byte
+	Protocol uint8 // IPPROTO_TCP (6) or IPPROTO_UDP (17), 0 = any
 	Dport    uint16
 	Addr     [16]byte
 }

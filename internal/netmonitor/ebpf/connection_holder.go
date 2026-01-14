@@ -5,6 +5,8 @@ package ebpf
 import (
 	"context"
 	"errors"
+	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -294,9 +296,21 @@ func (h *ConnectionHolder) addTemporaryAllowRule(ev *ConnectionEvent) {
 		return
 	}
 
+	// Convert protocol string to number
+	var protocol uint8
+	switch ev.Protocol {
+	case "tcp":
+		protocol = 6 // IPPROTO_TCP
+	case "udp":
+		protocol = 17 // IPPROTO_UDP
+	default:
+		protocol = 0 // any
+	}
+
 	key := AllowKey{
-		Family: ev.Family,
-		Dport:  ev.DstPort,
+		Family:   ev.Family,
+		Protocol: protocol,
+		Dport:    ev.DstPort,
 	}
 
 	// Copy the destination IP address
@@ -401,6 +415,22 @@ func (m *PNACLMonitor) Start(ctx context.Context) error {
 	m.coll = coll
 	m.detach = detach
 
+	// Get cgroup ID for map population
+	cgroupID, err := CgroupID(m.cgroupPath)
+	if err != nil {
+		detach()
+		return err
+	}
+
+	// Convert policy rules to BPF map entries and populate maps
+	if m.engine != nil {
+		allow, allowCIDRs, deny, denyCIDRs, defaultDeny := m.convertPolicyToMapEntries()
+		if err := PopulateAllowlist(coll, cgroupID, allow, allowCIDRs, deny, denyCIDRs, defaultDeny); err != nil {
+			detach()
+			return err
+		}
+	}
+
 	// Create connection holder with cgroup path for temporary allow rules
 	holderConfig := m.config.HolderConfig
 	if holderConfig == nil {
@@ -421,6 +451,103 @@ func (m *PNACLMonitor) Start(ctx context.Context) error {
 	holder.Start(ctx)
 
 	return nil
+}
+
+// convertPolicyToMapEntries converts policy rules to BPF map entries.
+// Note: Host-based rules (like *.example.com) cannot be enforced at the kernel level
+// and are handled by the userspace policy engine after DNS resolution.
+func (m *PNACLMonitor) convertPolicyToMapEntries() (allow []AllowKey, allowCIDRs []AllowCIDR, deny []AllowKey, denyCIDRs []AllowCIDR, defaultDeny bool) {
+	if m.engine == nil {
+		return
+	}
+
+	// Check global default
+	defaultDeny = m.engine.GlobalDefault == pnacl.DecisionDeny
+
+	// Iterate through process policies and their rules
+	for _, pp := range m.engine.ProcessPolicies {
+		for _, rule := range pp.Rules {
+			target := rule.Target()
+
+			// Get protocol number
+			var protocol uint8
+			switch target.Protocol {
+			case "tcp":
+				protocol = 6
+			case "udp":
+				protocol = 17
+			default:
+				protocol = 0 // any
+			}
+
+			// Parse port (0 means any)
+			var port uint16
+			if target.Port != "" && target.Port != "*" {
+				if p, err := parsePort(target.Port); err == nil && p > 0 && p <= 65535 {
+					port = uint16(p)
+				}
+			}
+
+			// Handle IP-based rules
+			if target.IP != "" {
+				ip := net.ParseIP(target.IP)
+				if ip != nil {
+					key := AllowKey{
+						Protocol: protocol,
+						Dport:    port,
+					}
+					if ip4 := ip.To4(); ip4 != nil {
+						key.Family = 2 // AF_INET
+						copy(key.Addr[:4], ip4)
+					} else {
+						key.Family = 10 // AF_INET6
+						copy(key.Addr[:], ip.To16())
+					}
+
+					if target.Decision == pnacl.DecisionAllow {
+						allow = append(allow, key)
+					} else if target.Decision == pnacl.DecisionDeny {
+						deny = append(deny, key)
+					}
+				}
+			}
+
+			// Handle CIDR-based rules
+			if target.CIDR != "" {
+				_, ipnet, err := net.ParseCIDR(target.CIDR)
+				if err == nil {
+					ones, _ := ipnet.Mask.Size()
+					cidr := AllowCIDR{
+						PrefixLen: uint32(ones),
+						Dport:     port,
+					}
+					if ipnet.IP.To4() != nil {
+						cidr.Family = 2
+						copy(cidr.Addr[:4], ipnet.IP.To4())
+					} else {
+						cidr.Family = 10
+						copy(cidr.Addr[:], ipnet.IP.To16())
+					}
+
+					if target.Decision == pnacl.DecisionAllow {
+						allowCIDRs = append(allowCIDRs, cidr)
+					} else if target.Decision == pnacl.DecisionDeny {
+						denyCIDRs = append(denyCIDRs, cidr)
+					}
+				}
+			}
+
+			// Note: Host-based rules (target.Host) are handled in userspace only
+			// because they require DNS resolution which cannot be done in the kernel
+		}
+	}
+
+	return
+}
+
+// parsePort parses a port string and returns the port number.
+func parsePort(s string) (int, error) {
+	return strconv.Atoi(s)
 }
 
 // SetPolicyEngine updates the policy engine.
