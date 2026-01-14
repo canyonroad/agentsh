@@ -117,6 +117,9 @@ func TestHandlerEvaluateAllowSession(t *testing.T) {
 }
 
 func TestHandlerHandle(t *testing.T) {
+	if !CanBlockSignals() {
+		t.Skip("signal blocking not supported on this platform")
+	}
 	rules := []SignalRule{
 		{
 			Name:     "deny-external-kill",
@@ -188,6 +191,9 @@ func TestHandlerHandleAllowEmitsEvent(t *testing.T) {
 }
 
 func TestHandlerHandleRedirect(t *testing.T) {
+	if !CanBlockSignals() {
+		t.Skip("signal blocking not supported on this platform")
+	}
 	rules := []SignalRule{
 		{
 			Name:       "redirect-kill-to-term",
@@ -258,6 +264,9 @@ func TestHandlerHandleAudit(t *testing.T) {
 }
 
 func TestHandlerHandleAbsorb(t *testing.T) {
+	if !CanBlockSignals() {
+		t.Skip("signal blocking not supported on this platform")
+	}
 	rules := []SignalRule{
 		{
 			Name:     "absorb-sigchld",
@@ -290,6 +299,9 @@ func TestHandlerHandleAbsorb(t *testing.T) {
 }
 
 func TestHandlerHandleApprove(t *testing.T) {
+	if !CanBlockSignals() {
+		t.Skip("signal blocking not supported on this platform")
+	}
 	rules := []SignalRule{
 		{
 			Name:     "approve-external-kill",
@@ -324,6 +336,9 @@ func TestHandlerHandleApprove(t *testing.T) {
 }
 
 func TestHandlerNilEmitter(t *testing.T) {
+	if !CanBlockSignals() {
+		t.Skip("signal blocking not supported on this platform")
+	}
 	rules := []SignalRule{
 		{
 			Name:     "deny-external",
@@ -355,6 +370,9 @@ func TestHandlerNilEmitter(t *testing.T) {
 }
 
 func TestHandlerEventData(t *testing.T) {
+	if !CanBlockSignals() {
+		t.Skip("signal blocking not supported on this platform")
+	}
 	rules := []SignalRule{
 		{
 			Name:     "deny-external",

@@ -20,7 +20,11 @@ func resolveRealPathUnderRoot(realRoot string, virtPath string, mustExist bool) 
 	rel := strings.TrimPrefix(virtPath, "/workspace")
 	rel = strings.TrimPrefix(rel, "/")
 
-	rootClean := filepath.Clean(realRoot)
+	// Resolve symlinks on root path to handle macOS /var -> /private/var etc.
+	rootClean, err := filepath.EvalSymlinks(filepath.Clean(realRoot))
+	if err != nil {
+		rootClean = filepath.Clean(realRoot) // fallback if root doesn't exist yet
+	}
 	candidate := filepath.Join(rootClean, filepath.FromSlash(rel))
 
 	// Fast ".." escape check before touching the filesystem.

@@ -43,7 +43,13 @@ file_rules:
 		t.Fatal(err)
 	}
 
-	sock := filepath.Join(dir, "agentsh.sock")
+	// Use /tmp for shorter socket path (macOS has 104 char limit)
+	sockDir, err := os.MkdirTemp("/tmp", "agsh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(sockDir)
+	sock := filepath.Join(sockDir, "s.sock")
 
 	cfg := &config.Config{}
 	cfg.Development.DisableAuth = true

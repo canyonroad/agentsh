@@ -33,7 +33,12 @@ func TestResolveRealPathUnderRoot_AllowsInTreeSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Clean(p) != filepath.Join(root, "dir", "a.txt") {
+	// Resolve symlinks on root for comparison (macOS /var -> /private/var)
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		resolvedRoot = root
+	}
+	if filepath.Clean(p) != filepath.Join(resolvedRoot, "dir", "a.txt") {
 		t.Fatalf("unexpected resolved path: %s", p)
 	}
 }

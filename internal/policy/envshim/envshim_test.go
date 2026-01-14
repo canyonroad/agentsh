@@ -37,6 +37,9 @@ func buildShim(t *testing.T) string {
 // Test that when AGENTSH_ENV_BLOCK_ITERATION=1, iterating env (via /usr/bin/env)
 // yields an empty environment.
 func TestEnvShimBlocksIteration(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("LD_PRELOAD only works on Linux; macOS SIP blocks DYLD_INSERT_LIBRARIES for system binaries")
+	}
 	shim := buildShim(t)
 
 	cmd := exec.Command("/usr/bin/env")
@@ -60,6 +63,9 @@ func TestEnvShimBlocksIteration(t *testing.T) {
 
 // Test that without the block flag, iteration still works and shows env vars.
 func TestEnvShimAllowsIterationWhenNotBlocked(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("LD_PRELOAD only works on Linux; macOS SIP blocks DYLD_INSERT_LIBRARIES for system binaries")
+	}
 	shim := buildShim(t)
 
 	cmd := exec.Command("/usr/bin/env")

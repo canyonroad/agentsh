@@ -13,6 +13,10 @@ import (
 func TestProjectRootAwarePolicies_Integration(t *testing.T) {
 	// Create temp project structure
 	base := t.TempDir()
+	// Resolve symlinks for macOS /var -> /private/var
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
 	repoDir := filepath.Join(base, "myrepo")
 	gitDir := filepath.Join(repoDir, ".git")
 	srcDir := filepath.Join(repoDir, "src")

@@ -62,13 +62,13 @@ func generateProfile(cfg *WrapperConfig) string {
 	// Workspace
 	if cfg.WorkspacePath != "" {
 		sb.WriteString(";; Workspace (full access)\n")
-		sb.WriteString(fmt.Sprintf("(allow file-read* file-write* file-ioctl\n    (subpath %q))\n\n",
+		sb.WriteString(fmt.Sprintf("(allow file-read* file-write* file-ioctl\n    (subpath \"%s\"))\n\n",
 			escapePath(cfg.WorkspacePath)))
 	}
 
 	// Additional paths
 	for _, p := range cfg.AllowedPaths {
-		sb.WriteString(fmt.Sprintf("(allow file-read* file-write*\n    (subpath %q))\n",
+		sb.WriteString(fmt.Sprintf("(allow file-read* file-write*\n    (subpath \"%s\"))\n",
 			escapePath(p)))
 	}
 	if len(cfg.AllowedPaths) > 0 {

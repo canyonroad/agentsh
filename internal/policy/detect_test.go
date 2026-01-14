@@ -13,6 +13,10 @@ import (
 func TestDetectProjectRoots(t *testing.T) {
 	// Create temp directory structure
 	base := t.TempDir()
+	// Resolve symlinks for macOS /var -> /private/var
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
 
 	// /base/repo/.git
 	// /base/repo/services/api/go.mod
@@ -38,6 +42,10 @@ func TestDetectProjectRoots(t *testing.T) {
 func TestDetectProjectRoots_NoMarkers(t *testing.T) {
 	// Create temp directory with no markers
 	base := t.TempDir()
+	// Resolve symlinks for macOS /var -> /private/var
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
 	workspace := filepath.Join(base, "some", "dir")
 	require.NoError(t, os.MkdirAll(workspace, 0755))
 
@@ -52,6 +60,10 @@ func TestDetectProjectRoots_NoMarkers(t *testing.T) {
 
 func TestDetectProjectRoots_GitOnly(t *testing.T) {
 	base := t.TempDir()
+	// Resolve symlinks for macOS /var -> /private/var
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
 	repoDir := filepath.Join(base, "repo")
 	gitDir := filepath.Join(repoDir, ".git")
 	subDir := filepath.Join(repoDir, "src")
