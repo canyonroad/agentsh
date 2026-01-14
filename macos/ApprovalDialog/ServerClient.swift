@@ -43,7 +43,14 @@ struct ApprovalRequestData {
             return nil
         }
 
-        let pid = json["pid"] as? Int32 ?? 0
+        let pid: Int32
+        if let pid32 = json["pid"] as? Int32 {
+            pid = pid32
+        } else if let pidInt = json["pid"] as? Int {
+            pid = Int32(pidInt)
+        } else {
+            pid = 0
+        }
         let bundleID = json["bundle_id"] as? String
         let executablePath = json["executable_path"] as? String
 
