@@ -128,8 +128,18 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
             "process_name": processName ?? "",
             "parent_pid": parentPID
         ]
-        sendRequest(request) { response in
-            let decision = response["decision"] as? String ?? "allow"
+        sendRequest(request) { [weak self] response in
+            // Check if this was an error response - respect fail behavior for PNACL
+            let rule = response["rule"] as? String ?? ""
+            if rule == "error-failclosed" {
+                reply("deny", nil)
+                return
+            } else if rule == "error-failopen" {
+                reply("allow", nil)
+                return
+            }
+
+            let decision = response["decision"] as? String ?? (self?.failBehavior == .failOpen ? "allow" : "deny")
             let ruleID = response["rule_id"] as? String
             reply(decision, ruleID)
         }

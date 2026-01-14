@@ -162,6 +162,8 @@ struct ApprovalDialogApp: App {
         request = nil
         errorMessage = nil
         isLoading = true
+        isSubmitting = false
+        pendingDecision = nil  // Clear any pending decision from previous request
         currentRequestID = requestID  // Track which request we're loading
 
         NSLog("ApprovalDialogApp: Fetching approval for request ID: \(requestID)")
