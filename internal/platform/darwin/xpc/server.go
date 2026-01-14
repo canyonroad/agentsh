@@ -236,6 +236,11 @@ func (s *Server) handlePNACLCheck(req *PolicyRequest) PolicyResponse {
 		return PolicyResponse{Allow: true, Decision: "allow", Message: "PNACL handler not configured"}
 	}
 
+	// Validate port range
+	if req.Port < 0 || req.Port > 65535 {
+		return PolicyResponse{Allow: false, Decision: "deny", Message: "invalid port"}
+	}
+
 	checkReq := PNACLCheckRequest{
 		IP:             req.IP,
 		Port:           req.Port,
@@ -250,9 +255,19 @@ func (s *Server) handlePNACLCheck(req *PolicyRequest) PolicyResponse {
 
 	decision, ruleID := h.CheckNetwork(checkReq)
 	return PolicyResponse{
-		Allow:    decision == "allow",
+		Allow:    isAllowingDecision(decision),
 		Decision: decision,
 		RuleID:   ruleID,
+	}
+}
+
+// isAllowingDecision returns true for decisions that should allow the connection.
+func isAllowingDecision(decision string) bool {
+	switch decision {
+	case "allow", "audit", "allow_once_then_approve":
+		return true
+	default:
+		return false
 	}
 }
 
