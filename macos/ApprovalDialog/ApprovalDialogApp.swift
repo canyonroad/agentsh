@@ -238,6 +238,12 @@ struct ApprovalDialogApp: App {
             )
 
             await MainActor.run {
+                // Guard against stale submissions - if a new request arrived, ignore this completion
+                guard pendingDecision?.requestID == requestID else {
+                    NSLog("ApprovalDialogApp: Ignoring stale submission result for \(requestID)")
+                    return
+                }
+
                 if success {
                     NSLog("ApprovalDialogApp: Decision submitted successfully")
                     pendingDecision = nil
@@ -252,6 +258,12 @@ struct ApprovalDialogApp: App {
         } catch {
             NSLog("ApprovalDialogApp: Error submitting decision: \(error)")
             await MainActor.run {
+                // Guard against stale submissions
+                guard pendingDecision?.requestID == requestID else {
+                    NSLog("ApprovalDialogApp: Ignoring stale submission error for \(requestID)")
+                    return
+                }
+
                 isSubmitting = false
                 request = nil  // Clear request so error view shows
                 errorMessage = "Failed to submit decision.\n\(error.localizedDescription)"

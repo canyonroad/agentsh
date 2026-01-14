@@ -260,6 +260,9 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
         pnaclDecisionTimeout = decisionTimeout
         pnaclFailOpen = failOpen
 
+        // Synchronize failBehavior so error handling respects this config
+        failBehavior = failOpen ? .failOpen : .failClosed
+
         // Also notify the Go server of the configuration change
         let request: [String: Any] = [
             "type": "pnacl_configure",
