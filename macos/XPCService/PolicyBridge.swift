@@ -92,6 +92,68 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
         }
     }
 
+    // MARK: - PNACL Methods
+
+    func checkNetworkPNACL(
+        ip: String,
+        port: Int,
+        protocol proto: String,
+        domain: String?,
+        pid: pid_t,
+        bundleID: String?,
+        executablePath: String?,
+        processName: String?,
+        parentPID: pid_t,
+        reply: @escaping (String, String?) -> Void
+    ) {
+        let request: [String: Any] = [
+            "type": "pnacl_check",
+            "ip": ip,
+            "port": port,
+            "protocol": proto,
+            "domain": domain ?? "",
+            "pid": pid,
+            "bundle_id": bundleID ?? "",
+            "executable_path": executablePath ?? "",
+            "process_name": processName ?? "",
+            "parent_pid": parentPID
+        ]
+        sendRequest(request) { response in
+            let decision = response["decision"] as? String ?? "allow"
+            let ruleID = response["rule_id"] as? String
+            reply(decision, ruleID)
+        }
+    }
+
+    func reportPNACLEvent(
+        eventType: String,
+        ip: String,
+        port: Int,
+        protocol proto: String,
+        domain: String?,
+        pid: pid_t,
+        bundleID: String?,
+        decision: String,
+        ruleID: String?,
+        reply: @escaping (Bool) -> Void
+    ) {
+        let request: [String: Any] = [
+            "type": "pnacl_event",
+            "event_type": eventType,
+            "ip": ip,
+            "port": port,
+            "protocol": proto,
+            "domain": domain ?? "",
+            "pid": pid,
+            "bundle_id": bundleID ?? "",
+            "decision": decision,
+            "rule_id": ruleID ?? ""
+        ]
+        sendRequest(request) { _ in
+            reply(true)
+        }
+    }
+
     // MARK: - Socket Communication
 
     private func sendRequest(
@@ -130,7 +192,7 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
         // Connect
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        withUnsafeMutablePointer(to: &addr.sun_path.0) { ptr in
+        _ = withUnsafeMutablePointer(to: &addr.sun_path.0) { ptr in
             socketPath.withCString { cstr in
                 strcpy(ptr, cstr)
             }

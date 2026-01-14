@@ -184,12 +184,16 @@ class ESFClient {
     // MARK: - NOTIFY Handlers
 
     private func handleNotifyFork(_ message: es_message_t, pid: pid_t) {
-        // Track parent-child relationship for session scoping
+        // Track parent-child relationship for session scoping and PNACL inheritance
         let childPid = audit_token_to_pid(message.event.fork.child.pointee.audit_token)
+        ProcessHierarchy.shared.recordFork(parentPID: pid, childPID: childPid)
         NSLog("Fork: \(pid) -> \(childPid)")
     }
 
     private func handleNotifyExit(_ message: es_message_t, pid: pid_t) {
+        // Clean up hierarchy tracking and invalidate process info cache
+        ProcessHierarchy.shared.recordExit(pid: pid)
+        ProcessIdentifier.invalidate(pid: pid)
         NSLog("Exit: \(pid)")
     }
 

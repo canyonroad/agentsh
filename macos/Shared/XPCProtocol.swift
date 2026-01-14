@@ -42,6 +42,37 @@ import Foundation
         event: Data,
         reply: @escaping (Bool) -> Void
     )
+
+    // MARK: - PNACL (Process Network ACL)
+
+    /// Check network connection with full process identification for PNACL.
+    /// Returns decision: "allow", "deny", "approve", "needRules"
+    func checkNetworkPNACL(
+        ip: String,
+        port: Int,
+        protocol: String,  // "tcp" or "udp"
+        domain: String?,   // SNI hostname if available
+        pid: pid_t,
+        bundleID: String?,
+        executablePath: String?,
+        processName: String?,
+        parentPID: pid_t,
+        reply: @escaping (String, String?) -> Void  // (decision, ruleID)
+    )
+
+    /// Report a PNACL connection event (for audit/logging).
+    func reportPNACLEvent(
+        eventType: String,  // "connection_allowed", "connection_denied", "connection_pending"
+        ip: String,
+        port: Int,
+        protocol: String,
+        domain: String?,
+        pid: pid_t,
+        bundleID: String?,
+        decision: String,
+        ruleID: String?,
+        reply: @escaping (Bool) -> Void
+    )
 }
 
 /// XPC Service identifier.
