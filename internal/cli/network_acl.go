@@ -79,11 +79,11 @@ and decision for each rule.`,
 			if outputJSON {
 				output := map[string]any{
 					"config_path": cfgPath,
-					"default":     config.Default,
+					"default":     config.NetworkACL.Default,
 					"processes":   []any{},
 				}
 				var processes []any
-				for _, pc := range config.Processes {
+				for _, pc := range config.NetworkACL.Processes {
 					if processFilter != "" && !strings.Contains(strings.ToLower(pc.Name), strings.ToLower(processFilter)) {
 						continue
 					}
@@ -96,17 +96,17 @@ and decision for each rule.`,
 			// Human-readable output
 			w := cmd.OutOrStdout()
 			fmt.Fprintf(w, "Config: %s\n", cfgPath)
-			if config.Default != "" {
-				fmt.Fprintf(w, "Default: %s\n", config.Default)
+			if config.NetworkACL.Default != "" {
+				fmt.Fprintf(w, "Default: %s\n", config.NetworkACL.Default)
 			}
 			fmt.Fprintln(w)
 
-			if len(config.Processes) == 0 {
+			if len(config.NetworkACL.Processes) == 0 {
 				fmt.Fprintln(w, "No process rules defined")
 				return nil
 			}
 
-			for _, pc := range config.Processes {
+			for _, pc := range config.NetworkACL.Processes {
 				if processFilter != "" && !strings.Contains(strings.ToLower(pc.Name), strings.ToLower(processFilter)) {
 					continue
 				}
@@ -299,9 +299,9 @@ Use 'agentsh network-acl list' to see rule indices.`,
 
 			// Find the process
 			var targetPC *pnacl.ProcessConfig
-			for i := range config.Processes {
-				if config.Processes[i].Name == processName {
-					targetPC = &config.Processes[i]
+			for i := range config.NetworkACL.Processes {
+				if config.NetworkACL.Processes[i].Name == processName {
+					targetPC = &config.NetworkACL.Processes[i]
 					break
 				}
 			}
@@ -376,7 +376,7 @@ to connect to the target, without actually making any connection.`,
 				return fmt.Errorf("load config: %w", err)
 			}
 
-			engine, err := pnacl.NewPolicyEngine(config)
+			engine, err := pnacl.NewPolicyEngine(&config.NetworkACL)
 			if err != nil {
 				return fmt.Errorf("create policy engine: %w", err)
 			}

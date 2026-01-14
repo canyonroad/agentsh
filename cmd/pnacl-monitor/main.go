@@ -37,7 +37,7 @@ func main() {
 	}
 
 	// Create policy engine
-	engine, err := pnacl.NewPolicyEngine(config)
+	engine, err := pnacl.NewPolicyEngine(&config.NetworkACL)
 	if err != nil {
 		log.Fatalf("Failed to create policy engine: %v", err)
 	}
