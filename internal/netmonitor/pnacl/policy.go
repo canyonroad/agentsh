@@ -307,7 +307,7 @@ func compileChildPolicy(cc ChildConfig) (*ChildPolicy, error) {
 	cp := &ChildPolicy{
 		Name:    cc.Name,
 		Match:   cc.Match,
-		Inherit: cc.Inherit,
+		Inherit: cc.InheritRules(), // Use method to get default-aware value
 		Matcher: matcher,
 	}
 

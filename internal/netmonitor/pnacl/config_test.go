@@ -9,6 +9,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// boolPtr returns a pointer to the given bool value.
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 func TestParseConfig_WrappedFormat(t *testing.T) {
 	yaml := `
 network_acl:
@@ -75,7 +80,7 @@ network_acl:
 	child := proc.Children[0]
 	assert.Equal(t, "curl", child.Name)
 	assert.Equal(t, "curl", child.Match.ProcessName)
-	assert.True(t, child.Inherit)
+	assert.True(t, child.InheritRules()) // Explicitly set to true in YAML
 	require.Len(t, child.Rules, 1)
 	assert.Equal(t, "pypi.org", child.Rules[0].Host)
 }
@@ -284,7 +289,7 @@ func TestConfig_Validate(t *testing.T) {
 								Match: ProcessMatchCriteria{
 									ProcessName: "child",
 								},
-								Inherit: true,
+								Inherit: boolPtr(true),
 							},
 						},
 					},
@@ -368,7 +373,7 @@ func TestMergeConfigs(t *testing.T) {
 						Match: ProcessMatchCriteria{
 							ProcessName: "child-a",
 						},
-						Inherit: true,
+						Inherit: boolPtr(true),
 						Rules: []NetworkTarget{
 							{
 								Host:     "child-base.example.com",
@@ -414,7 +419,7 @@ func TestMergeConfigs(t *testing.T) {
 						Match: ProcessMatchCriteria{
 							ProcessName: "child-a-override",
 						},
-						Inherit: false,
+						Inherit: boolPtr(false),
 						Rules: []NetworkTarget{
 							{
 								Host:     "child-override.example.com",
@@ -482,7 +487,7 @@ func TestMergeConfigs(t *testing.T) {
 	childA := appA.Children[0]
 	assert.Equal(t, "child-a", childA.Name)
 	assert.Equal(t, "child-a-override", childA.Match.ProcessName)
-	assert.False(t, childA.Inherit) // Override value.
+	assert.False(t, childA.InheritRules()) // Explicitly set to false in override.
 	require.Len(t, childA.Rules, 2)
 	assert.Equal(t, "child-override.example.com", childA.Rules[0].Host)
 	assert.Equal(t, "child-base.example.com", childA.Rules[1].Host)
@@ -528,7 +533,7 @@ func TestConfig_Clone(t *testing.T) {
 						Match: ProcessMatchCriteria{
 							ProcessName: "child",
 						},
-						Inherit: true,
+						Inherit: boolPtr(true),
 						Rules: []NetworkTarget{
 							{
 								Host:     "child.example.com",
@@ -599,7 +604,7 @@ func TestProcessConfig_Clone(t *testing.T) {
 			{
 				Name:    "child",
 				Match:   ProcessMatchCriteria{ProcessName: "child"},
-				Inherit: true,
+				Inherit: boolPtr(true),
 			},
 		},
 	}
@@ -620,7 +625,7 @@ func TestChildConfig_Clone(t *testing.T) {
 	original := ChildConfig{
 		Name:    "child",
 		Match:   ProcessMatchCriteria{ProcessName: "child"},
-		Inherit: true,
+		Inherit: boolPtr(true),
 		Rules: []NetworkTarget{
 			{Host: "example.com", Decision: DecisionAllow},
 		},
