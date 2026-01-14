@@ -8,6 +8,7 @@ struct ApprovalDialogApp: App {
     @State private var request: ApprovalRequestData?
     @State private var errorMessage: String?
     @State private var isLoading = true
+    @State private var hasProcessedLaunchURL = false
 
     private let serverClient = ServerClient()
 
@@ -17,6 +18,14 @@ struct ApprovalDialogApp: App {
                 .onAppear {
                     // Activate app to front when window appears
                     activateApp()
+
+                    // Handle launch URL on first appearance (for command-line launch)
+                    if !hasProcessedLaunchURL {
+                        hasProcessedLaunchURL = true
+                        if let url = getLaunchURL() {
+                            handleURL(url)
+                        }
+                    }
                 }
                 .onOpenURL { url in
                     handleURL(url)
@@ -28,16 +37,6 @@ struct ApprovalDialogApp: App {
             CommandGroup(replacing: .newItem) {}
         }
         .handlesExternalEvents(matching: ["approve"])
-    }
-
-    init() {
-        // Handle URL on launch (for when app is launched with URL)
-        if let url = getLaunchURL() {
-            // Process URL after a short delay to ensure app is fully initialized
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self.handleURL(url)
-            }
-        }
     }
 
     @ViewBuilder

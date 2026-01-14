@@ -1,4 +1,4 @@
-# Approval Dialog Implementation Plan
+# macOS Approval Dialog Implementation Plan
 
 ## Overview
 
@@ -14,7 +14,7 @@ Implement standalone SwiftUI macOS app that shows modal approval dialogs when PN
 **Details:**
 - Bundle ID: `com.agentsh.approval-dialog`
 - URL scheme: `agentsh-approval://`
-- Minimum macOS: 11.0
+- Minimum macOS: 13.0
 
 ### Task 2: Implement ServerClient
 **File to create:**
