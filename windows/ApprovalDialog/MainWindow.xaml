@@ -1,0 +1,79 @@
+<Window x:Class="ApprovalDialog.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Network Access Request"
+        Height="380" Width="520"
+        MinHeight="340" MinWidth="480"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        Topmost="True"
+        Background="#FAFAFA">
+
+    <DockPanel Margin="24">
+        <!-- Header - Top -->
+        <TextBlock DockPanel.Dock="Top" Text="Network Access Request" FontSize="20" FontWeight="SemiBold"
+                   Foreground="#1a1a1a" Margin="0,0,0,16"/>
+
+        <!-- Buttons - Bottom (always visible) -->
+        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button x:Name="DenyButton" Content="Deny" Click="DenyButton_Click"
+                    Padding="20,10" MinWidth="100" Margin="0,0,10,0"
+                    Background="#F5F5F5" BorderBrush="#CCC"/>
+            <Button x:Name="AllowOnceButton" Content="Allow Once" Click="AllowOnceButton_Click"
+                    Padding="20,10" MinWidth="100" Margin="0,0,10,0"
+                    Background="#F5F5F5" BorderBrush="#CCC"/>
+            <Button x:Name="AllowAlwaysButton" Content="Allow Always" Click="AllowAlwaysButton_Click"
+                    Padding="20,10" MinWidth="100"
+                    Background="#0078D4" Foreground="White" BorderBrush="#0078D4"/>
+        </StackPanel>
+
+        <!-- Timeout indicator - Bottom -->
+        <TextBlock DockPanel.Dock="Bottom" x:Name="TimeoutText" FontSize="12" Foreground="#888"
+                   Margin="0,12,0,0"/>
+
+        <!-- Scrollable Details Box - Fill remaining space -->
+        <Border Background="White" CornerRadius="4" BorderBrush="#E0E0E0" BorderThickness="1">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="90"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Process:" FontWeight="SemiBold"
+                               Foreground="#666" Margin="0,0,0,12"/>
+                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="ProcessText"
+                               Foreground="#1a1a1a" TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="PID:" FontWeight="SemiBold"
+                               Foreground="#666" Margin="0,0,0,12"/>
+                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="PidText"
+                               Foreground="#1a1a1a" Margin="0,0,0,12"/>
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Target:" FontWeight="SemiBold"
+                               Foreground="#666" Margin="0,0,0,12"/>
+                    <TextBlock Grid.Row="2" Grid.Column="1" x:Name="TargetText"
+                               Foreground="#1a1a1a" TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Protocol:" FontWeight="SemiBold"
+                               Foreground="#666" Margin="0,0,0,12"/>
+                    <TextBlock Grid.Row="3" Grid.Column="1" x:Name="ProtocolText"
+                               Foreground="#1a1a1a" Margin="0,0,0,12"/>
+
+                    <!-- Path (only shown if available) -->
+                    <TextBlock Grid.Row="4" Grid.Column="0" x:Name="PathLabel" Text="Path:" FontWeight="SemiBold"
+                               Foreground="#666" Visibility="Collapsed"/>
+                    <TextBlock Grid.Row="4" Grid.Column="1" x:Name="PathText"
+                               Foreground="#888" TextWrapping="Wrap" FontSize="11" Visibility="Collapsed"/>
+                </Grid>
+            </ScrollViewer>
+        </Border>
+    </DockPanel>
+</Window>
