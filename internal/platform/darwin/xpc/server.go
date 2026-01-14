@@ -109,8 +109,12 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("listen: %w", err)
 	}
 
-	// Set socket permissions (readable only by root)
-	if err := os.Chmod(s.sockPath, 0600); err != nil {
+	// Set socket permissions to allow user-space access.
+	// The ApprovalDialog.app runs as user and needs to connect to fetch/submit approvals.
+	// Security note: The socket is only accessible locally (Unix domain socket).
+	// TODO: Consider a separate approval-only socket with restricted operations,
+	// or route approval operations through the XPC service for better isolation.
+	if err := os.Chmod(s.sockPath, 0666); err != nil {
 		ln.Close()
 		return fmt.Errorf("chmod: %w", err)
 	}

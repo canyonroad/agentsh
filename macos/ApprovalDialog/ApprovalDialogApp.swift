@@ -93,6 +93,11 @@ struct ApprovalDialogApp: App {
     private func handleURL(_ url: URL) {
         NSLog("ApprovalDialogApp: Handling URL: \(url)")
 
+        // Reset state for new URL - prevents showing stale data if a second approval arrives
+        request = nil
+        errorMessage = nil
+        isLoading = true
+
         // Parse request ID from URL
         // Expected format: agentsh-approval://approve?id=<requestID>
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),

@@ -34,8 +34,12 @@ class ApprovalManager: NSObject {
     private var pendingRequests: [String: ApprovalRequest] = [:]
     private let pendingLock = NSLock()
 
-    /// Timestamps when notifications were shown (for escalation tracking).
-    private var notificationShownAt: [String: Date] = [:]
+    /// Timestamps when we attempted to show notifications (for escalation tracking).
+    /// We track attempt time, not success time, so escalation works even if notifications fail.
+    private var notificationAttemptedAt: [String: Date] = [:]
+
+    /// Whether notification permissions have been denied.
+    private var notificationsDenied: Bool = false
 
     /// Requests that have been escalated to the dialog app.
     private var escalatedRequests: Set<String> = []
@@ -116,13 +120,16 @@ class ApprovalManager: NSObject {
     }
 
     private func requestNotificationPermissions() {
-        notificationCenter.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+        notificationCenter.requestAuthorization(options: [.alert, .sound, .badge]) { [weak self] granted, error in
             if let error = error {
                 NSLog("ApprovalManager: Notification permission error: \(error)")
+                self?.notificationsDenied = true
             } else if granted {
                 NSLog("ApprovalManager: Notification permissions granted")
+                self?.notificationsDenied = false
             } else {
-                NSLog("ApprovalManager: Notification permissions denied")
+                NSLog("ApprovalManager: Notification permissions denied - will escalate to dialog immediately")
+                self?.notificationsDenied = true
             }
         }
     }
@@ -210,26 +217,33 @@ class ApprovalManager: NSObject {
         let removedIDs = existingIDs.subtracting(currentIDs)
         for id in removedIDs {
             pendingRequests.removeValue(forKey: id)
-            notificationShownAt.removeValue(forKey: id)
+            notificationAttemptedAt.removeValue(forKey: id)
             escalatedRequests.remove(id)
             // Remove any pending notification for this request
             notificationCenter.removeDeliveredNotifications(withIdentifiers: [id])
             notificationCenter.removePendingNotificationRequests(withIdentifiers: [id])
         }
 
-        // Show notifications for new approvals
+        // Show notifications for new approvals (or escalate immediately if notifications denied)
         for approval in newApprovals {
-            showNotification(for: approval)
+            if notificationsDenied {
+                // Notifications not available - escalate to dialog immediately
+                NSLog("ApprovalManager: Notifications denied, escalating \(approval.requestID) to dialog immediately")
+                escalatedRequests.insert(approval.requestID)
+                launchDialog(for: approval.requestID)
+            } else {
+                showNotification(for: approval)
+            }
         }
 
-        // Check for escalation (notification shown > 15 seconds ago without response)
-        for (requestID, shownAt) in notificationShownAt {
+        // Check for escalation (notification attempted > 15 seconds ago without response)
+        for (requestID, attemptedAt) in notificationAttemptedAt {
             // Skip if already escalated
             if escalatedRequests.contains(requestID) {
                 continue
             }
             // Check if escalation delay has passed
-            if now.timeIntervalSince(shownAt) >= escalationDelay {
+            if now.timeIntervalSince(attemptedAt) >= escalationDelay {
                 NSLog("ApprovalManager: Escalating request \(requestID) to dialog after \(escalationDelay)s")
                 escalatedRequests.insert(requestID)
                 launchDialog(for: requestID)
@@ -289,15 +303,17 @@ class ApprovalManager: NSObject {
             trigger: nil  // Show immediately
         )
 
-        notificationCenter.add(notificationRequest) { [weak self] error in
+        // Record attempt time BEFORE the async call so escalation works even if notification fails
+        pendingLock.lock()
+        notificationAttemptedAt[request.requestID] = Date()
+        pendingLock.unlock()
+
+        notificationCenter.add(notificationRequest) { error in
             if let error = error {
                 NSLog("ApprovalManager: Failed to show notification: \(error)")
+                // Attempt time already recorded - escalation will still work
             } else {
                 NSLog("ApprovalManager: Showed notification for request \(request.requestID)")
-                // Record when notification was shown for escalation tracking
-                self?.pendingLock.lock()
-                self?.notificationShownAt[request.requestID] = Date()
-                self?.pendingLock.unlock()
             }
         }
     }
@@ -329,7 +345,7 @@ class ApprovalManager: NSObject {
                 // Only remove from tracking after successful submission
                 self.pendingLock.lock()
                 self.pendingRequests.removeValue(forKey: requestID)
-                self.notificationShownAt.removeValue(forKey: requestID)
+                self.notificationAttemptedAt.removeValue(forKey: requestID)
                 self.escalatedRequests.remove(requestID)
                 self.pendingLock.unlock()
                 // Remove notification
