@@ -121,15 +121,20 @@ class ApprovalManager: NSObject {
 
     private func requestNotificationPermissions() {
         notificationCenter.requestAuthorization(options: [.alert, .sound, .badge]) { [weak self] granted, error in
+            guard let self = self else { return }
+
+            self.pendingLock.lock()
+            defer { self.pendingLock.unlock() }
+
             if let error = error {
                 NSLog("ApprovalManager: Notification permission error: \(error)")
-                self?.notificationsDenied = true
+                self.notificationsDenied = true
             } else if granted {
                 NSLog("ApprovalManager: Notification permissions granted")
-                self?.notificationsDenied = false
+                self.notificationsDenied = false
             } else {
                 NSLog("ApprovalManager: Notification permissions denied - will escalate to dialog immediately")
-                self?.notificationsDenied = true
+                self.notificationsDenied = true
             }
         }
     }
@@ -286,16 +291,29 @@ class ApprovalManager: NSObject {
         guard let encodedID = requestID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
               let url = URL(string: "agentsh-approval://approve?id=\(encodedID)") else {
             NSLog("ApprovalManager: Failed to create URL for dialog launch")
+            // Remove from escalated so it can be retried on next poll
+            pendingLock.lock()
+            escalatedRequests.remove(requestID)
+            pendingLock.unlock()
             return
         }
 
-        NSWorkspace.shared.open(url) { success, error in
+        NSWorkspace.shared.open(url) { [weak self] success, error in
+            guard let self = self else { return }
+
             if success {
                 NSLog("ApprovalManager: Launched dialog for request \(requestID)")
-            } else if let error = error {
-                NSLog("ApprovalManager: Failed to launch dialog: \(error)")
             } else {
-                NSLog("ApprovalManager: Failed to launch dialog for request \(requestID)")
+                // Dialog failed to launch - remove from escalated so it can be retried
+                self.pendingLock.lock()
+                self.escalatedRequests.remove(requestID)
+                self.pendingLock.unlock()
+
+                if let error = error {
+                    NSLog("ApprovalManager: Failed to launch dialog: \(error)")
+                } else {
+                    NSLog("ApprovalManager: Failed to launch dialog for request \(requestID)")
+                }
             }
         }
     }
