@@ -204,8 +204,31 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
     }
 
     /// Fetch pending approvals for polling (internal use by ApprovalManager).
-    func fetchPendingApprovals(completion: @escaping ([ApprovalRequest]) -> Void) {
-        getPendingApprovals(reply: completion)
+    /// Returns (approvals, success) - success is false if server communication failed.
+    func fetchPendingApprovals(completion: @escaping ([ApprovalRequest], Bool) -> Void) {
+        let request: [String: Any] = [
+            "type": "get_pending_approvals"
+        ]
+        sendRequest(request) { response in
+            // Check if this was an error response
+            let isError = response["rule"] as? String == "error-failopen" ||
+                          response["rule"] as? String == "error-failclosed"
+
+            if isError {
+                completion([], false)
+                return
+            }
+
+            var approvals: [ApprovalRequest] = []
+            if let approvalsArray = response["approvals"] as? [[String: Any]] {
+                for json in approvalsArray {
+                    if let approval = ApprovalRequest.from(json: json) {
+                        approvals.append(approval)
+                    }
+                }
+            }
+            completion(approvals, true)
+        }
     }
 
     // MARK: - Socket Communication

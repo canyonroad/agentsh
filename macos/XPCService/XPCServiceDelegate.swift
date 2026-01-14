@@ -32,8 +32,15 @@ class XPCServiceDelegate: NSObject, NSXPCListenerDelegate {
             NSArray.self,
             ApprovalRequest.self
         ])
+
+        // Safe cast with fallback
+        guard let classes = approvalClasses as? Set<AnyHashable> else {
+            NSLog("XPCServiceDelegate: Failed to create approval classes set")
+            return false
+        }
+
         interface.setClasses(
-            approvalClasses as! Set<AnyHashable>,
+            classes,
             for: #selector(AgentshXPCProtocol.getPendingApprovals(reply:)),
             argumentIndex: 0,
             ofReply: true

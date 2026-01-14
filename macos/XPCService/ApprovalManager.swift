@@ -8,8 +8,17 @@ class ApprovalManager: NSObject {
     /// Shared instance for the XPC service.
     static let shared = ApprovalManager()
 
-    /// Polling interval in seconds.
-    private let pollInterval: TimeInterval = 1.0
+    /// Base polling interval in seconds.
+    private let basePollInterval: TimeInterval = 1.0
+
+    /// Current polling interval (for exponential backoff).
+    private var currentPollInterval: TimeInterval = 1.0
+
+    /// Maximum backoff interval.
+    private let maxBackoffInterval: TimeInterval = 60.0
+
+    /// Number of consecutive failures.
+    private var consecutiveFailures: Int = 0
 
     /// Reference to the policy bridge for server communication.
     weak var bridge: PolicyBridge?
@@ -108,13 +117,16 @@ class ApprovalManager: NSObject {
         }
     }
 
-    // MARK: - Polling
+    // MARK: - Polling with Exponential Backoff
 
     private func startPolling() {
         stopPolling()
+        scheduleNextPoll()
+    }
 
+    private func scheduleNextPoll() {
         let timer = DispatchSource.makeTimerSource(queue: pollQueue)
-        timer.schedule(deadline: .now(), repeating: pollInterval)
+        timer.schedule(deadline: .now() + currentPollInterval)
         timer.setEventHandler { [weak self] in
             self?.pollForApprovals()
         }
@@ -130,8 +142,26 @@ class ApprovalManager: NSObject {
     private func pollForApprovals() {
         guard let bridge = bridge else { return }
 
-        bridge.fetchPendingApprovals { [weak self] (approvals: [ApprovalRequest]) in
-            self?.handleApprovals(approvals)
+        bridge.fetchPendingApprovals { [weak self] (approvals: [ApprovalRequest], success: Bool) in
+            guard let self = self else { return }
+
+            if success {
+                // Reset backoff on success
+                self.consecutiveFailures = 0
+                self.currentPollInterval = self.basePollInterval
+                self.handleApprovals(approvals)
+            } else {
+                // Apply exponential backoff on failure
+                self.consecutiveFailures += 1
+                self.currentPollInterval = min(
+                    self.basePollInterval * pow(2.0, Double(self.consecutiveFailures)),
+                    self.maxBackoffInterval
+                )
+                NSLog("ApprovalManager: Poll failed, backing off to \(self.currentPollInterval)s")
+            }
+
+            // Schedule next poll
+            self.scheduleNextPoll()
         }
     }
 
@@ -139,13 +169,29 @@ class ApprovalManager: NSObject {
         pendingLock.lock()
         defer { pendingLock.unlock() }
 
+        // Check for timed-out requests that server hasn't cleaned up
+        let now = Date()
+        for approval in approvals {
+            let timeoutDate = approval.timestamp.addingTimeInterval(approval.timeout)
+            if timeoutDate < now {
+                // Request has timed out - auto-deny
+                NSLog("ApprovalManager: Request \(approval.requestID) timed out, auto-denying")
+                submitDecisionAsync(requestID: approval.requestID, decision: "deny_once")
+            }
+        }
+
+        // Filter out timed-out requests
+        let validApprovals = approvals.filter { approval in
+            approval.timestamp.addingTimeInterval(approval.timeout) > now
+        }
+
         // Find new approvals that we haven't notified about yet
         let existingIDs = Set(pendingRequests.keys)
-        let newApprovals = approvals.filter { !existingIDs.contains($0.requestID) }
+        let newApprovals = validApprovals.filter { !existingIDs.contains($0.requestID) }
 
         // Update our tracking
         var currentIDs = Set<String>()
-        for approval in approvals {
+        for approval in validApprovals {
             currentIDs.insert(approval.requestID)
             pendingRequests[approval.requestID] = approval
         }
@@ -190,22 +236,10 @@ class ApprovalManager: NSObject {
             "targetProtocol": request.targetProtocol
         ]
 
-        // Calculate time until timeout for the notification trigger
-        let timeoutDate = request.timestamp.addingTimeInterval(request.timeout)
-        let remainingTime = timeoutDate.timeIntervalSinceNow
-
-        // Use immediate trigger if timeout is imminent, otherwise set a reminder
-        let trigger: UNNotificationTrigger?
-        if remainingTime > 5 {
-            trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.1, repeats: false)
-        } else {
-            trigger = nil
-        }
-
         let notificationRequest = UNNotificationRequest(
             identifier: request.requestID,
             content: content,
-            trigger: trigger
+            trigger: nil  // Show immediately
         )
 
         notificationCenter.add(notificationRequest) { error in
@@ -219,27 +253,39 @@ class ApprovalManager: NSObject {
 
     // MARK: - Decision Handling
 
-    private func handleDecision(requestID: String, decision: String, permanent: Bool) {
+    /// Submit decision asynchronously (used for auto-timeout).
+    private func submitDecisionAsync(requestID: String, decision: String) {
+        guard let bridge = bridge else { return }
+        bridge.submitApprovalDecision(requestID: requestID, decision: decision, permanent: false) { _ in }
+    }
+
+    /// Handle user decision from notification action.
+    /// Uses Go-compatible decision vocabulary: allow_once, allow_permanent, deny_once, deny_forever
+    private func handleDecision(requestID: String, decision: String) {
         guard let bridge = bridge else {
             NSLog("ApprovalManager: No bridge available for decision")
             return
         }
 
-        bridge.submitApprovalDecision(requestID: requestID, decision: decision, permanent: permanent) { success in
+        // Determine if permanent based on decision type
+        let permanent = decision == "allow_permanent" || decision == "deny_forever"
+
+        bridge.submitApprovalDecision(requestID: requestID, decision: decision, permanent: permanent) { [weak self] success in
+            guard let self = self else { return }
+
             if success {
                 NSLog("ApprovalManager: Successfully submitted decision '\(decision)' for \(requestID)")
+                // Only remove from tracking after successful submission
+                self.pendingLock.lock()
+                self.pendingRequests.removeValue(forKey: requestID)
+                self.pendingLock.unlock()
+                // Remove notification
+                self.notificationCenter.removeDeliveredNotifications(withIdentifiers: [requestID])
             } else {
-                NSLog("ApprovalManager: Failed to submit decision for \(requestID)")
+                NSLog("ApprovalManager: Failed to submit decision for \(requestID), will retry on next poll")
+                // Don't remove from tracking - will retry on next poll cycle
             }
         }
-
-        // Remove from our tracking
-        pendingLock.lock()
-        pendingRequests.removeValue(forKey: requestID)
-        pendingLock.unlock()
-
-        // Remove notification
-        notificationCenter.removeDeliveredNotifications(withIdentifiers: [requestID])
     }
 }
 
@@ -260,23 +306,24 @@ extension ApprovalManager: UNUserNotificationCenterDelegate {
 
         let actionIdentifier = response.actionIdentifier
 
+        // Use Go-compatible decision vocabulary
         switch actionIdentifier {
         case NotificationAction.allowOnce.rawValue:
-            handleDecision(requestID: requestID, decision: "allow", permanent: false)
+            handleDecision(requestID: requestID, decision: "allow_once")
 
         case NotificationAction.allowAlways.rawValue:
-            handleDecision(requestID: requestID, decision: "allow", permanent: true)
+            handleDecision(requestID: requestID, decision: "allow_permanent")
 
         case NotificationAction.denyOnce.rawValue:
-            handleDecision(requestID: requestID, decision: "deny", permanent: false)
+            handleDecision(requestID: requestID, decision: "deny_once")
 
         case NotificationAction.denyAlways.rawValue:
-            handleDecision(requestID: requestID, decision: "deny", permanent: true)
+            handleDecision(requestID: requestID, decision: "deny_forever")
 
         case UNNotificationDismissActionIdentifier:
             // User dismissed without action - treat as deny once
             NSLog("ApprovalManager: Notification dismissed for \(requestID)")
-            handleDecision(requestID: requestID, decision: "deny", permanent: false)
+            handleDecision(requestID: requestID, decision: "deny_once")
 
         case UNNotificationDefaultActionIdentifier:
             // User tapped notification body - could open UI, for now treat as no action

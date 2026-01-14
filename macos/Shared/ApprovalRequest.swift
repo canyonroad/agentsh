@@ -115,12 +115,29 @@ import Foundation
 
     /// Creates an ApprovalRequest from a JSON dictionary (from Go server).
     static func from(json: [String: Any]) -> ApprovalRequest? {
-        guard let requestID = json["request_id"] as? String,
-              let processName = json["process_name"] as? String,
-              let targetHost = json["target_host"] as? String,
-              let targetPort = json["target_port"] as? Int,
-              let targetProtocol = json["target_protocol"] as? String,
-              let timeout = json["timeout"] as? Double else {
+        // Validate required fields with detailed logging for debugging
+        guard let requestID = json["request_id"] as? String else {
+            NSLog("ApprovalRequest: Missing or invalid 'request_id' in JSON")
+            return nil
+        }
+        guard let processName = json["process_name"] as? String else {
+            NSLog("ApprovalRequest: Missing or invalid 'process_name' in JSON for request \(requestID)")
+            return nil
+        }
+        guard let targetHost = json["target_host"] as? String else {
+            NSLog("ApprovalRequest: Missing or invalid 'target_host' in JSON for request \(requestID)")
+            return nil
+        }
+        guard let targetPort = json["target_port"] as? Int else {
+            NSLog("ApprovalRequest: Missing or invalid 'target_port' in JSON for request \(requestID)")
+            return nil
+        }
+        guard let targetProtocol = json["target_protocol"] as? String else {
+            NSLog("ApprovalRequest: Missing or invalid 'target_protocol' in JSON for request \(requestID)")
+            return nil
+        }
+        guard let timeout = json["timeout"] as? Double else {
+            NSLog("ApprovalRequest: Missing or invalid 'timeout' in JSON for request \(requestID)")
             return nil
         }
 
