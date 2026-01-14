@@ -47,6 +47,11 @@ actor ServerClient {
 
         let response = try await sendRequest(request)
 
+        // Check for server error via message field
+        if let message = response["message"] as? String, !message.isEmpty {
+            throw ServerError.serverError(message)
+        }
+
         // Parse approvals array from response
         guard let approvalsArray = response["approvals"] as? [[String: Any]] else {
             return nil
@@ -66,7 +71,7 @@ actor ServerClient {
     /// Submit a decision for an approval request.
     /// - Parameters:
     ///   - requestID: The unique identifier of the approval request.
-    ///   - decision: The decision string (e.g., "allow_once", "deny_once", "allow_always", "deny_always").
+    ///   - decision: The decision string (e.g., "allow_once", "deny_once", "allow_permanent", "deny_forever").
     ///   - permanent: Whether this decision should be saved as a permanent rule.
     /// - Returns: True if the decision was successfully submitted.
     func submitDecision(requestID: String, decision: String, permanent: Bool) async throws -> Bool {
@@ -79,9 +84,9 @@ actor ServerClient {
 
         let response = try await sendRequest(request)
 
-        // Check for error in response
-        if let errorMessage = response["error"] as? String {
-            throw ServerError.serverError(errorMessage)
+        // Check for server error via message field
+        if let message = response["message"] as? String, !message.isEmpty {
+            throw ServerError.serverError(message)
         }
 
         return response["success"] as? Bool ?? false
