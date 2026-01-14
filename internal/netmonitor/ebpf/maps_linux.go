@@ -406,3 +406,41 @@ func isNoEntry(err error) bool {
 	}
 	return strings.Contains(err.Error(), "no such file or directory") || strings.Contains(err.Error(), "not found")
 }
+
+// AddTemporaryAllowRule adds a single allow rule for a specific connection.
+// This is used by the approve mode to allow future connections after user approval.
+// The rule is added to the allowlist map and will persist until explicitly removed
+// or the map is cleared during policy refresh.
+func AddTemporaryAllowRule(coll *ebpf.Collection, cgroupID uint64, key AllowKey) error {
+	if coll == nil {
+		return fmt.Errorf("nil collection")
+	}
+	allowMap, ok := coll.Maps["allowlist"]
+	if !ok {
+		return fmt.Errorf("allowlist map missing")
+	}
+
+	k := key
+	k.CgroupID = cgroupID
+	val := uint8(1)
+	if err := allowMap.Put(k, val); err != nil {
+		return fmt.Errorf("put temporary allow: %w", err)
+	}
+	return nil
+}
+
+// RemoveTemporaryAllowRule removes a previously added temporary allow rule.
+func RemoveTemporaryAllowRule(coll *ebpf.Collection, cgroupID uint64, key AllowKey) error {
+	if coll == nil {
+		return nil
+	}
+	allowMap, ok := coll.Maps["allowlist"]
+	if !ok {
+		return nil
+	}
+
+	k := key
+	k.CgroupID = cgroupID
+	_ = allowMap.Delete(k) // best effort
+	return nil
+}

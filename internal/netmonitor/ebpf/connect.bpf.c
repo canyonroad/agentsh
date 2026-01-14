@@ -17,6 +17,9 @@
 #ifndef IPPROTO_TCP
 #define IPPROTO_TCP 6
 #endif
+#ifndef IPPROTO_UDP
+#define IPPROTO_UDP 17
+#endif
 
 // Data emitted per connect attempt
 struct connect_event {
@@ -132,7 +135,7 @@ struct {
     __type(value, __u8);
 } lpm6_deny SEC(".maps");
 
-static __always_inline int emit_event(struct sock *sk, bool blocked) {
+static __always_inline int emit_event(struct sock *sk, __u8 protocol, bool blocked) {
     if (!sk)
         return 0;
 
@@ -151,7 +154,7 @@ static __always_inline int emit_event(struct sock *sk, bool blocked) {
     ev->sport = sport;
     ev->dport = bpf_ntohs(dport);
     ev->family = family;
-    ev->protocol = IPPROTO_TCP;
+    ev->protocol = protocol;
     ev->blocked = blocked ? 1 : 0;
 
     if (family == AF_INET) {
@@ -274,7 +277,7 @@ int handle_connect4(struct bpf_sock_addr *ctx) {
     } else if (is_default_deny() && !allow(ctx)) {
         denied = true;
     }
-    int ret = emit_event((struct sock *)ctx->sk, denied);
+    int ret = emit_event((struct sock *)ctx->sk, IPPROTO_TCP, denied);
     if (denied)
         return -EPERM;
     return ret;
@@ -288,7 +291,36 @@ int handle_connect6(struct bpf_sock_addr *ctx) {
     } else if (is_default_deny() && !allow(ctx)) {
         denied = true;
     }
-    int ret = emit_event((struct sock *)ctx->sk, denied);
+    int ret = emit_event((struct sock *)ctx->sk, IPPROTO_TCP, denied);
+    if (denied)
+        return -EPERM;
+    return ret;
+}
+
+// UDP sendmsg hooks for capturing outbound UDP traffic
+SEC("cgroup/sendmsg4")
+int handle_sendmsg4(struct bpf_sock_addr *ctx) {
+    bool denied = false;
+    if (is_denied(ctx)) {
+        denied = true;
+    } else if (is_default_deny() && !allow(ctx)) {
+        denied = true;
+    }
+    int ret = emit_event((struct sock *)ctx->sk, IPPROTO_UDP, denied);
+    if (denied)
+        return -EPERM;
+    return ret;
+}
+
+SEC("cgroup/sendmsg6")
+int handle_sendmsg6(struct bpf_sock_addr *ctx) {
+    bool denied = false;
+    if (is_denied(ctx)) {
+        denied = true;
+    } else if (is_default_deny() && !allow(ctx)) {
+        denied = true;
+    }
+    int ret = emit_event((struct sock *)ctx->sk, IPPROTO_UDP, denied);
     if (denied)
         return -EPERM;
     return ret;

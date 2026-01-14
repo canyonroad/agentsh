@@ -18,10 +18,6 @@ func AttachConnectToCgroup(cgroupPath string) (*ebpf.Collection, func() error, e
 	}
 	if len(coll.Programs) == 0 {
 		coll.Close()
-		return nil, nil, fmt.Errorf("ebpf connect object has no programs (empty embed)")
-	}
-	if len(coll.Programs) == 0 {
-		coll.Close()
 		return nil, nil, fmt.Errorf("ebpf connect object has no programs")
 	}
 
@@ -52,6 +48,18 @@ func AttachConnectToCgroup(cgroupPath string) (*ebpf.Collection, func() error, e
 		closeLinks(links)
 		coll.Close()
 		return nil, nil, fmt.Errorf("attach connect6: %w", err)
+	}
+
+	// Attach UDP sendmsg hooks for capturing outbound UDP traffic
+	if err := attach("handle_sendmsg4", ebpf.AttachCGroupUDP4Sendmsg); err != nil {
+		closeLinks(links)
+		coll.Close()
+		return nil, nil, fmt.Errorf("attach sendmsg4: %w", err)
+	}
+	if err := attach("handle_sendmsg6", ebpf.AttachCGroupUDP6Sendmsg); err != nil {
+		closeLinks(links)
+		coll.Close()
+		return nil, nil, fmt.Errorf("attach sendmsg6: %w", err)
 	}
 
 	return coll, func() error {

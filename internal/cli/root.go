@@ -43,6 +43,8 @@ func NewRoot(version string) *cobra.Command {
 	cmd.AddCommand(newBackupCmd())
 	cmd.AddCommand(newRestoreCmd())
 	cmd.AddCommand(newCheckpointCmd())
+	cmd.AddCommand(newNetworkACLCmd())
+	cmd.AddCommand(newDaemonCmd())
 
 	return cmd
 }
