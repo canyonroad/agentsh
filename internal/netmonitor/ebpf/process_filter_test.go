@@ -187,7 +187,7 @@ func TestProcessFilter_ProcessEvent_Audit(t *testing.T) {
 	}
 
 	decision := filter.ProcessEvent(context.Background(), ev, nil)
-	assert.Equal(t, pnacl.DecisionAllow, decision) // Audit allows but logs
+	assert.Equal(t, pnacl.DecisionAudit, decision) // Returns Audit for metrics tracking
 	assert.True(t, auditCalled)
 }
 
@@ -278,7 +278,7 @@ func TestProcessFilter_ProcessEvent_Approve(t *testing.T) {
 	}
 
 	decision := filter.ProcessEvent(context.Background(), ev, nil)
-	assert.Equal(t, pnacl.DecisionAllow, decision)
+	assert.Equal(t, pnacl.DecisionApprove, decision) // Returns Approve for metrics tracking
 }
 
 func TestProcessFilter_ProcessEvent_ApproveTimeout(t *testing.T) {
@@ -379,7 +379,7 @@ func TestProcessFilter_ApproveAndDenyConnection(t *testing.T) {
 	}
 
 	decision := filter.ProcessEvent(context.Background(), ev, nil)
-	assert.Equal(t, pnacl.DecisionAllow, decision)
+	assert.Equal(t, pnacl.DecisionApprove, decision) // Returns Approve for metrics tracking
 
 	// Test deny
 	go func() {
@@ -657,7 +657,7 @@ func TestProcessFilter_OnApprovalGranted(t *testing.T) {
 	}
 
 	decision := filter.ProcessEvent(context.Background(), ev, nil)
-	assert.Equal(t, pnacl.DecisionAllow, decision)
+	assert.Equal(t, pnacl.DecisionApprove, decision) // Returns Approve for metrics tracking
 	assert.True(t, approvalGrantedCalled, "onApprovalGranted should be called")
 	assert.NotNil(t, approvalGrantedEvent)
 	assert.Equal(t, uint16(80), approvalGrantedEvent.DstPort)

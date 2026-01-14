@@ -215,7 +215,7 @@ func (pf *ProcessFilter) ProcessEvent(ctx context.Context, ev *ConnectEvent, con
 
 	case pnacl.DecisionAudit:
 		pf.notifyAudit(connEv)
-		return pnacl.DecisionAllow
+		return pnacl.DecisionAudit // Return Audit so stats can track it
 
 	case pnacl.DecisionAllowOnceThenApprove:
 		key := pf.makeAllowOnceKey(connEv)
@@ -299,7 +299,7 @@ func (pf *ProcessFilter) handleApprove(ctx context.Context, ev *ConnectEvent, co
 			// This enables the "deny-then-allow" pattern for approve mode
 			pf.notifyApprovalGranted(connEv)
 			pf.notifyAllow(connEv)
-			return pnacl.DecisionAllow
+			return pnacl.DecisionApprove // Return Approve so stats can track it
 		default:
 			connEv.Blocked = true
 			pf.notifyDeny(connEv)
@@ -310,10 +310,11 @@ func (pf *ProcessFilter) handleApprove(ctx context.Context, ev *ConnectEvent, co
 		connEv.Blocked = config.DefaultOnTimeout != pnacl.DecisionAllow
 		if connEv.Blocked {
 			pf.notifyDeny(connEv)
+			return pnacl.DecisionDeny
 		} else {
 			pf.notifyAllow(connEv)
+			return pnacl.DecisionAllow
 		}
-		return config.DefaultOnTimeout
 	case <-pf.done:
 		connEv.Blocked = true
 		pf.notifyDeny(connEv)
