@@ -1,4 +1,5 @@
 // macos/XPCService/ApprovalManager.swift
+import AppKit
 import Foundation
 import UserNotifications
 
@@ -32,6 +33,15 @@ class ApprovalManager: NSObject {
     /// Currently tracked pending requests (by requestID).
     private var pendingRequests: [String: ApprovalRequest] = [:]
     private let pendingLock = NSLock()
+
+    /// Timestamps when notifications were shown (for escalation tracking).
+    private var notificationShownAt: [String: Date] = [:]
+
+    /// Requests that have been escalated to the dialog app.
+    private var escalatedRequests: Set<String> = []
+
+    /// Delay before escalating from notification to dialog (seconds).
+    private let escalationDelay: TimeInterval = 15.0
 
     /// Notification center for user notifications.
     private let notificationCenter = UNUserNotificationCenter.current()
@@ -200,6 +210,8 @@ class ApprovalManager: NSObject {
         let removedIDs = existingIDs.subtracting(currentIDs)
         for id in removedIDs {
             pendingRequests.removeValue(forKey: id)
+            notificationShownAt.removeValue(forKey: id)
+            escalatedRequests.remove(id)
             // Remove any pending notification for this request
             notificationCenter.removeDeliveredNotifications(withIdentifiers: [id])
             notificationCenter.removePendingNotificationRequests(withIdentifiers: [id])
@@ -208,6 +220,41 @@ class ApprovalManager: NSObject {
         // Show notifications for new approvals
         for approval in newApprovals {
             showNotification(for: approval)
+        }
+
+        // Check for escalation (notification shown > 15 seconds ago without response)
+        for (requestID, shownAt) in notificationShownAt {
+            // Skip if already escalated
+            if escalatedRequests.contains(requestID) {
+                continue
+            }
+            // Check if escalation delay has passed
+            if now.timeIntervalSince(shownAt) >= escalationDelay {
+                NSLog("ApprovalManager: Escalating request \(requestID) to dialog after \(escalationDelay)s")
+                escalatedRequests.insert(requestID)
+                launchDialog(for: requestID)
+            }
+        }
+    }
+
+    // MARK: - Dialog Escalation
+
+    /// Launch the ApprovalDialog app for a request that hasn't received a timely response.
+    private func launchDialog(for requestID: String) {
+        guard let encodedID = requestID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "agentsh-approval://approve?id=\(encodedID)") else {
+            NSLog("ApprovalManager: Failed to create URL for dialog launch")
+            return
+        }
+
+        NSWorkspace.shared.open(url) { success, error in
+            if success {
+                NSLog("ApprovalManager: Launched dialog for request \(requestID)")
+            } else if let error = error {
+                NSLog("ApprovalManager: Failed to launch dialog: \(error)")
+            } else {
+                NSLog("ApprovalManager: Failed to launch dialog for request \(requestID)")
+            }
         }
     }
 
@@ -242,11 +289,15 @@ class ApprovalManager: NSObject {
             trigger: nil  // Show immediately
         )
 
-        notificationCenter.add(notificationRequest) { error in
+        notificationCenter.add(notificationRequest) { [weak self] error in
             if let error = error {
                 NSLog("ApprovalManager: Failed to show notification: \(error)")
             } else {
                 NSLog("ApprovalManager: Showed notification for request \(request.requestID)")
+                // Record when notification was shown for escalation tracking
+                self?.pendingLock.lock()
+                self?.notificationShownAt[request.requestID] = Date()
+                self?.pendingLock.unlock()
             }
         }
     }
@@ -278,6 +329,8 @@ class ApprovalManager: NSObject {
                 // Only remove from tracking after successful submission
                 self.pendingLock.lock()
                 self.pendingRequests.removeValue(forKey: requestID)
+                self.notificationShownAt.removeValue(forKey: requestID)
+                self.escalatedRequests.remove(requestID)
                 self.pendingLock.unlock()
                 // Remove notification
                 self.notificationCenter.removeDeliveredNotifications(withIdentifiers: [requestID])
