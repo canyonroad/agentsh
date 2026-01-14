@@ -25,3 +25,4 @@ internal/netmonitor/ebpf/vmlinux.h
 .worktrees/
 
 .env
+agentsh
