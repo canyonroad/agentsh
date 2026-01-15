@@ -23,30 +23,13 @@ jobs:
 
       - name: Install build deps (envshim, fuse, seccomp)
         run: |
-          # Enable arm64 architecture for cross-compilation
-          sudo dpkg --add-architecture arm64
-
-          # Restrict existing sources to amd64 only, add arm64 from ports.ubuntu.com
-          # Backup and modify sources
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list 2>/dev/null || true
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list 2>/dev/null || true
-
-          # Add arm64 repository from ports.ubuntu.com
-          cat << 'SOURCES' | sudo tee /etc/apt/sources.list.d/arm64-ports.list
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main universe
-          SOURCES
-
           sudo apt-get update
-          # Install native amd64 deps + arm64 cross-compilation deps
           sudo apt-get install -y \
             libseccomp-dev \
             libfuse-dev \
             pkg-config \
             gcc-aarch64-linux-gnu \
-            make \
-            libseccomp-dev:arm64
+            make
 
       - name: Test
         run: go test ./...

@@ -73,7 +73,8 @@ builds:
       - -s -w
 
   # unixwrap: seccomp wrapper for Linux (requires CGO + libseccomp)
-  # Separate builds for amd64 and arm64 due to different cross-compilers
+  # Only building amd64 - arm64 cross-compilation requires libseccomp-dev:arm64
+  # which is complex to set up in CI. arm64 users get graceful degradation.
   - id: unixwrap-linux-amd64
     main: ./cmd/agentsh-unixwrap
     binary: agentsh-unixwrap
@@ -83,20 +84,6 @@ builds:
       - linux
     goarch:
       - amd64
-    ldflags:
-      - -s -w
-
-  - id: unixwrap-linux-arm64
-    main: ./cmd/agentsh-unixwrap
-    binary: agentsh-unixwrap
-    env:
-      - CGO_ENABLED=1
-      - CC=aarch64-linux-gnu-gcc
-      - PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
-    goos:
-      - linux
-    goarch:
-      - arm64
     ldflags:
       - -s -w
 
@@ -141,7 +128,7 @@ archives:
     ids:
       - agentsh-linux
       - shim-linux
-      - unixwrap-linux-arm64
+      # unixwrap not available for arm64 - users get graceful degradation
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_linux_arm64"
     files:
@@ -191,7 +178,7 @@ nfpms:
       - agentsh-linux
       - shim-linux
       - unixwrap-linux-amd64
-      - unixwrap-linux-arm64
+      # unixwrap not available for arm64 - users get graceful degradation
     formats:
       - deb
       - rpm
