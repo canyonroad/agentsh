@@ -25,6 +25,11 @@ jobs:
         run: |
           # Enable arm64 architecture for cross-compilation
           sudo dpkg --add-architecture arm64
+
+          # Add arm64 repository (ports.ubuntu.com has arm64 packages)
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe" | sudo tee /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+
           sudo apt-get update
           # Install native amd64 deps + arm64 cross-compilation deps
           sudo apt-get install -y \
