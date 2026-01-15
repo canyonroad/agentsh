@@ -50,6 +50,118 @@ type macSandboxMachServicesConfig struct {
 	BlockPrefixes []string `json:"block_prefixes"`
 }
 
+// wrapperSetupResult contains the result of setting up the seccomp wrapper.
+type wrapperSetupResult struct {
+	wrappedReq types.ExecRequest
+	extraCfg   *extraProcConfig
+}
+
+// setupSeccompWrapper configures the command to run through agentsh-unixwrap for seccomp enforcement.
+// Returns the wrapped request and extra process config, or nil extraCfg if wrapping is disabled.
+// Note: agentsh-unixwrap is Linux-only; this function returns early on other platforms.
+func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *session.Session) *wrapperSetupResult {
+	// agentsh-unixwrap is Linux-only (uses seccomp-bpf)
+	if runtime.GOOS != "linux" {
+		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
+	}
+
+	origCommand := req.Command
+	origArgs := append([]string{}, req.Args...)
+
+	unixEnabled := a.cfg.Sandbox.UnixSockets.Enabled != nil && *a.cfg.Sandbox.UnixSockets.Enabled
+	if !unixEnabled {
+		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
+	}
+
+	wrapperBin := strings.TrimSpace(a.cfg.Sandbox.UnixSockets.WrapperBin)
+	if wrapperBin == "" {
+		wrapperBin = "agentsh-unixwrap"
+	}
+
+	// Check if wrapper binary exists before proceeding (CGO-disabled builds won't have it)
+	if _, err := exec.LookPath(wrapperBin); err != nil {
+		slog.Warn("seccomp wrapper unavailable: wrapper binary not found (running without seccomp enforcement)",
+			"wrapper_bin", wrapperBin,
+			"session_id", sessionID)
+		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
+	}
+
+	sp := createUnixSocketPair()
+	if sp == nil {
+		// Log that seccomp wrapping failed - this is security-relevant
+		slog.Warn("seccomp wrapper disabled: failed to create notify socket pair",
+			"session_id", sessionID,
+			"command", origCommand)
+		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
+	}
+
+	wrappedReq := req
+	if wrappedReq.Env == nil {
+		wrappedReq.Env = map[string]string{}
+	}
+
+	envFD := 3 // first ExtraFile
+	wrappedReq.Env["AGENTSH_NOTIFY_SOCK_FD"] = strconv.Itoa(envFD)
+
+	// Check if signal filtering is available - only enable if socket pair succeeds
+	hasSignalEngine := a.policy != nil && a.policy.SignalEngine() != nil
+	signalFilterEnabled := false
+	var sigSP *unixSocketPair
+	if hasSignalEngine {
+		sigSP = createUnixSocketPair()
+		if sigSP != nil {
+			signalFilterEnabled = true
+		} else {
+			slog.Warn("signal filter disabled: failed to create signal socket pair",
+				"session_id", sessionID,
+				"command", origCommand)
+		}
+	}
+
+	// Pass seccomp configuration to the wrapper
+	seccompCfg := seccompWrapperConfig{
+		UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
+		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
+		SignalFilterEnabled: signalFilterEnabled, // Only true if signal socket succeeded
+	}
+	if cfgJSON, err := json.Marshal(seccompCfg); err == nil {
+		wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"] = string(cfgJSON)
+	}
+
+	wrappedReq.Command = wrapperBin
+	wrappedReq.Args = append([]string{"--", origCommand}, origArgs...)
+
+	extraEnv := map[string]string{"AGENTSH_NOTIFY_SOCK_FD": strconv.Itoa(envFD)}
+	if seccompJSON, ok := wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"]; ok {
+		extraEnv["AGENTSH_SECCOMP_CONFIG"] = seccompJSON
+	}
+
+	extraCfg := &extraProcConfig{
+		extraFiles:       []*os.File{sp.child},
+		env:              extraEnv,
+		notifyParentSock: sp.parent,
+		notifySessionID:  sessionID,
+		notifyPolicy:     a.policy,
+		notifyStore:      a.store,
+		notifyBroker:     a.broker,
+		origCommand:      origCommand, // Store original command for signal registry
+	}
+
+	// Add signal filter config if socket pair succeeded
+	if signalFilterEnabled && sigSP != nil {
+		signalFD := 4 // second ExtraFile (after notify socket at FD 3)
+		wrappedReq.Env["AGENTSH_SIGNAL_SOCK_FD"] = strconv.Itoa(signalFD)
+		extraCfg.env["AGENTSH_SIGNAL_SOCK_FD"] = strconv.Itoa(signalFD)
+		extraCfg.extraFiles = append(extraCfg.extraFiles, sigSP.child)
+		extraCfg.signalParentSock = sigSP.parent
+		extraCfg.signalEngine = a.policy.SignalEngine()
+		extraCfg.signalRegistry = signal.NewPIDRegistry(sessionID, os.Getpid())
+		extraCfg.signalCommandID = func() string { return s.CurrentCommandID() }
+	}
+
+	return &wrapperSetupResult{wrappedReq: wrappedReq, extraCfg: extraCfg}
+}
+
 // resolveProfile looks up a mount profile and validates it.
 func (a *App) resolveProfile(profileName string) (*config.MountProfile, error) {
 	if a.cfg.MountProfiles == nil {
@@ -661,65 +773,10 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	origCommand := req.Command
 	origArgs := append([]string{}, req.Args...)
 
-	wrappedReq := req
-	unixEnabled := a.cfg.Sandbox.UnixSockets.Enabled
-	wrapperBin := strings.TrimSpace(a.cfg.Sandbox.UnixSockets.WrapperBin)
-	var extraCfg *extraProcConfig
-	if unixEnabled {
-		if wrapperBin == "" {
-			wrapperBin = "agentsh-unixwrap"
-		}
-		sp := createUnixSocketPair()
-		if sp != nil {
-			if wrappedReq.Env == nil {
-				wrappedReq.Env = map[string]string{}
-			}
-			envFD := 3 // first ExtraFile
-			wrappedReq.Env["AGENTSH_NOTIFY_SOCK_FD"] = strconv.Itoa(envFD)
-
-			// Pass seccomp configuration to the wrapper
-			seccompCfg := seccompWrapperConfig{
-				UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
-				BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
-				SignalFilterEnabled: a.policy != nil && a.policy.SignalEngine() != nil,
-			}
-			if cfgJSON, err := json.Marshal(seccompCfg); err == nil {
-				wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"] = string(cfgJSON)
-			}
-
-			wrappedReq.Command = wrapperBin
-			wrappedReq.Args = append([]string{"--", origCommand}, origArgs...)
-			extraEnv := map[string]string{"AGENTSH_NOTIFY_SOCK_FD": strconv.Itoa(envFD)}
-			if seccompJSON, ok := wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"]; ok {
-				extraEnv["AGENTSH_SECCOMP_CONFIG"] = seccompJSON
-			}
-			extraCfg = &extraProcConfig{
-				extraFiles:       []*os.File{sp.child},
-				env:              extraEnv,
-				notifyParentSock: sp.parent,
-				notifySessionID:  id,
-				notifyPolicy:     a.policy,
-				notifyStore:      a.store,
-				notifyBroker:     a.broker,
-			}
-
-			// Add signal filter config if policy has signal rules
-			if a.policy != nil && a.policy.SignalEngine() != nil {
-				// Create a second socket pair for signal filter fd
-				sigSP := createUnixSocketPair()
-				if sigSP != nil {
-					signalFD := 4 // second ExtraFile (after notify socket at FD 3)
-					wrappedReq.Env["AGENTSH_SIGNAL_SOCK_FD"] = strconv.Itoa(signalFD)
-					extraCfg.env["AGENTSH_SIGNAL_SOCK_FD"] = strconv.Itoa(signalFD)
-					extraCfg.extraFiles = append(extraCfg.extraFiles, sigSP.child)
-					extraCfg.signalParentSock = sigSP.parent
-					extraCfg.signalEngine = a.policy.SignalEngine()
-					extraCfg.signalRegistry = signal.NewPIDRegistry(id, os.Getpid())
-					extraCfg.signalCommandID = func() string { return s.CurrentCommandID() }
-				}
-			}
-		}
-	}
+	// Set up seccomp wrapper (Linux) for syscall enforcement
+	wrapperResult := a.setupSeccompWrapper(req, id, s)
+	wrappedReq := wrapperResult.wrappedReq
+	extraCfg := wrapperResult.extraCfg
 
 	// macOS: sandbox wrapper with XPC control
 	if runtime.GOOS == "darwin" && a.cfg.Sandbox.XPC.Enabled && a.cfg.Sandbox.XPC.Mode == "enforce" {

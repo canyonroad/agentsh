@@ -371,7 +371,7 @@ type SandboxCgroupsConfig struct {
 }
 
 type SandboxUnixSocketsConfig struct {
-	Enabled    bool   `yaml:"enabled"`
+	Enabled    *bool  `yaml:"enabled"`     // defaults to true for seccomp enforcement
 	WrapperBin string `yaml:"wrapper_bin"` // optional override; defaults to "agentsh-unixwrap" in PATH
 }
 
@@ -770,6 +770,13 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	// cgroups defaults to disabled unless explicitly enabled.
 	if cfg.Sandbox.Cgroups.BasePath == "" {
 		cfg.Sandbox.Cgroups.BasePath = ""
+	}
+
+	// Unix sockets wrapper defaults to enabled for seccomp enforcement in shim mode.
+	// This wraps commands with agentsh-unixwrap which applies seccomp-bpf filters.
+	if cfg.Sandbox.UnixSockets.Enabled == nil {
+		t := true
+		cfg.Sandbox.UnixSockets.Enabled = &t
 	}
 
 	// Seccomp defaults

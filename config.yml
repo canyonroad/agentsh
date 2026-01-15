@@ -226,7 +226,12 @@ sandbox:
     pid: false
     uts: false
     user: false                    # Requires careful UID mapping
-    
+
+  # Unix sockets wrapper settings (seccomp enforcement for shell shim)
+  unix_sockets:
+    enabled: true                  # Wraps commands with agentsh-unixwrap for seccomp-bpf enforcement
+    # wrapper_bin: "agentsh-unixwrap"  # Optional: override wrapper binary path
+
   # seccomp settings
   seccomp:
     # Reserved for future hardening (not implemented yet).

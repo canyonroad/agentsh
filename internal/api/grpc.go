@@ -380,6 +380,11 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 	_ = s.app.store.AppendEvent(stream.Context(), startEv)
 	s.app.broker.Publish(startEv)
 
+	// Set up seccomp wrapper (Linux) for syscall enforcement
+	wrapperResult := s.app.setupSeccompWrapper(execReq, req.SessionID, sess)
+	wrappedReq := wrapperResult.wrappedReq
+	extraCfg := wrapperResult.extraCfg
+
 	emit := func(event string, payload map[string]any) error {
 		payload["event"] = event
 		out := &structpb.Struct{}
@@ -395,11 +400,12 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 		stream.Context(),
 		sess,
 		cmdID,
-		execReq,
+		wrappedReq,
 		s.app.cfg,
 		limits.CommandTimeout,
 		emit,
 		s.app.cgroupHook(req.SessionID, cmdID, limits),
+		extraCfg,
 	)
 	_ = s.app.store.SaveOutput(stream.Context(), req.SessionID, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 

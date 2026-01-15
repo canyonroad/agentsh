@@ -291,6 +291,53 @@ sandbox:
 	}
 }
 
+func TestLoad_UnixSocketsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	// Empty config - should get defaults
+	if err := os.WriteFile(cfgPath, []byte(``), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// UnixSockets.Enabled should default to true for seccomp enforcement
+	if cfg.Sandbox.UnixSockets.Enabled == nil {
+		t.Fatal("unix_sockets.enabled should not be nil")
+	}
+	if !*cfg.Sandbox.UnixSockets.Enabled {
+		t.Fatal("unix_sockets.enabled should default to true")
+	}
+}
+
+func TestLoad_UnixSocketsExplicitDisable(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  unix_sockets:
+    enabled: false
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Explicit false should be respected
+	if cfg.Sandbox.UnixSockets.Enabled == nil {
+		t.Fatal("unix_sockets.enabled should not be nil")
+	}
+	if *cfg.Sandbox.UnixSockets.Enabled {
+		t.Fatal("unix_sockets.enabled: explicit false should be respected")
+	}
+}
+
 func TestParseByteSize(t *testing.T) {
 	cases := []struct {
 		in   string

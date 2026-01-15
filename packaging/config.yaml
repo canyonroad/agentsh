@@ -74,6 +74,10 @@ sandbox:
   cgroups:
     enabled: true
 
+  # Unix sockets wrapper (seccomp enforcement for shell shim)
+  unix_sockets:
+    enabled: true  # Wraps commands with agentsh-unixwrap for seccomp-bpf enforcement
+
 # LLM Proxy configuration
 proxy:
   mode: "embedded"         # embedded | disabled

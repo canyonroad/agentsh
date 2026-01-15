@@ -37,6 +37,9 @@ type extraProcConfig struct {
 	signalEngine     *signal.Engine      // Signal policy engine
 	signalRegistry   *signal.PIDRegistry // Process registry for signal classification
 	signalCommandID  func() string       // Function to get current command ID
+
+	// Original command name (before wrapping) for signal registry
+	origCommand string
 }
 
 // eventStore is the interface for storing events.
@@ -200,7 +203,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		if extra != nil && extra.signalParentSock != nil && extra.signalEngine != nil {
 			// Register the spawned process in the signal registry
 			if extra.signalRegistry != nil {
-				extra.signalRegistry.Register(cmd.Process.Pid, pgid, req.Command)
+				extra.signalRegistry.Register(cmd.Process.Pid, pgid, extra.origCommand)
 			}
 			startSignalHandler(ctx, extra.signalParentSock, extra.notifySessionID, cmd.Process.Pid,
 				extra.signalEngine, extra.signalRegistry,

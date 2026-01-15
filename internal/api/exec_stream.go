@@ -178,11 +178,16 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
+	// Set up seccomp wrapper (Linux) for syscall enforcement
+	wrapperResult := a.setupSeccompWrapper(req, id, s)
+	wrappedReq := wrapperResult.wrappedReq
+	extraCfg := wrapperResult.extraCfg
+
 	limits := a.policy.Limits()
 	emit := func(event string, payload map[string]any) error {
 		return writeSSE(w, flusher, event, payload)
 	}
-	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResourcesStreamingEmit(r.Context(), s, cmdID, req, a.cfg, limits.CommandTimeout, emit, a.cgroupHook(id, cmdID, limits))
+	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResourcesStreamingEmit(r.Context(), s, cmdID, wrappedReq, a.cfg, limits.CommandTimeout, emit, a.cgroupHook(id, cmdID, limits), extraCfg)
 	_ = a.store.SaveOutput(r.Context(), id, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 
 	// Check if process was killed by seccomp (SIGSYS) and emit event
@@ -221,7 +226,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 
 type emitFunc func(event string, payload map[string]any) error
 
-func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration, emit emitFunc, hook postStartHook) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
+func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, policyLimit time.Duration, emit emitFunc, hook postStartHook, extra *extraProcConfig) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
 	timeout := chooseCommandTimeout(req, policyLimit)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -265,7 +270,18 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	}
 
 	env, _ := buildPolicyEnv(policy.ResolvedEnvPolicy{}, os.Environ(), s, req.Env)
+	// Add extra environment variables from seccomp wrapper config
+	if extra != nil && len(extra.env) > 0 {
+		for k, v := range extra.env {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
 	cmd.Env = env
+
+	// Add extra files (socket fds for seccomp notify/signal)
+	if extra != nil && len(extra.extraFiles) > 0 {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, extra.extraFiles...)
+	}
 
 	if req.Stdin != "" {
 		cmd.Stdin = strings.NewReader(req.Stdin)
@@ -317,6 +333,24 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
 				defer func() { _ = cleanup() }()
 			}
+		}
+
+		// Start unix socket notify handler if configured (Linux only).
+		// The handler receives the notify fd from the wrapper and runs until ctx is cancelled.
+		if extra != nil && extra.notifyParentSock != nil {
+			startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker)
+		}
+
+		// Start signal filter handler if configured (Linux only).
+		// The handler receives the signal filter fd from the wrapper and runs until ctx is cancelled.
+		if extra != nil && extra.signalParentSock != nil && extra.signalEngine != nil {
+			// Register the spawned process in the signal registry
+			if extra.signalRegistry != nil {
+				extra.signalRegistry.Register(cmd.Process.Pid, pgid, extra.origCommand)
+			}
+			startSignalHandler(ctx, extra.signalParentSock, extra.notifySessionID, cmd.Process.Pid,
+				extra.signalEngine, extra.signalRegistry,
+				extra.notifyStore, extra.notifyBroker, extra.signalCommandID)
 		}
 	}
 
