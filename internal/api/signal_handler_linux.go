@@ -51,30 +51,35 @@ func startSignalHandler(ctx context.Context, parentSock *os.File, sessID string,
 		return
 	}
 
-	// Receive the signal filter fd from the wrapper process
-	signalFD, err := unixmon.RecvFD(parentSock)
-	if err != nil {
-		slog.Debug("failed to receive signal fd", "error", err)
-		_ = parentSock.Close()
-		return
-	}
-	_ = parentSock.Close()
-
-	if signalFD == nil {
-		return
-	}
-
-	emitter := &signalEmitterAdapter{
-		store:     store,
-		broker:    broker,
-		sessionID: sessID,
-		commandID: commandIDFunc,
-	}
-	handler := signal.NewHandler(engine, registry, emitter)
-
-	// Start the signal handler loop in a goroutine
+	// Run the entire receive and serve logic in a goroutine to return immediately
 	go func() {
+		defer parentSock.Close()
+
+		// Set a read deadline to prevent blocking forever if wrapper fails
+		if err := parentSock.SetReadDeadline(time.Now().Add(recvFDTimeout)); err != nil {
+			slog.Debug("failed to set read deadline on signal socket", "error", err)
+			return
+		}
+
+		// Receive the signal filter fd from the wrapper process
+		signalFD, err := unixmon.RecvFD(parentSock)
+		if err != nil {
+			slog.Debug("failed to receive signal fd", "error", err)
+			return
+		}
+
+		if signalFD == nil {
+			return
+		}
 		defer signalFD.Close()
+
+		emitter := &signalEmitterAdapter{
+			store:     store,
+			broker:    broker,
+			sessionID: sessID,
+			commandID: commandIDFunc,
+		}
+		handler := signal.NewHandler(engine, registry, emitter)
 		serveSignalNotify(ctx, signalFD, handler)
 	}()
 }

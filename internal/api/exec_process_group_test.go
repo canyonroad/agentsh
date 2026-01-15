@@ -63,7 +63,7 @@ func TestRunCommandTimeoutKillsProcessGroup_Streaming(t *testing.T) {
 		Timeout: "100ms",
 	}
 
-	exitCode, _, _, _, _, _, _, _, err := runCommandWithResourcesStreamingEmit(context.Background(), s, "cmd-timeout-stream", req, cfg, 0, nil, nil)
+	exitCode, _, _, _, _, _, _, _, err := runCommandWithResourcesStreamingEmit(context.Background(), s, "cmd-timeout-stream", req, cfg, 0, nil, nil, nil)
 	if exitCode != 124 {
 		t.Fatalf("expected exit code 124 on timeout, got %d (err=%v)", exitCode, err)
 	}
