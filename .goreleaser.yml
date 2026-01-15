@@ -111,6 +111,8 @@ archives:
       - unixwrap-linux-amd64
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_linux_amd64"
+    # unixwrap only built for amd64, so binary count differs from arm64
+    allow_different_binary_count: true
     files:
       - README.md
       - LICENSE
@@ -131,6 +133,8 @@ archives:
       # unixwrap not available for arm64 - users get graceful degradation
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_linux_arm64"
+    # unixwrap only built for amd64, so binary count differs
+    allow_different_binary_count: true
     files:
       - README.md
       - LICENSE
