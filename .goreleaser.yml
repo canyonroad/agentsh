@@ -72,6 +72,34 @@ builds:
     ldflags:
       - -s -w
 
+  # unixwrap: seccomp wrapper for Linux (requires CGO + libseccomp)
+  # Separate builds for amd64 and arm64 due to different cross-compilers
+  - id: unixwrap-linux-amd64
+    main: ./cmd/agentsh-unixwrap
+    binary: agentsh-unixwrap
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+
+  - id: unixwrap-linux-arm64
+    main: ./cmd/agentsh-unixwrap
+    binary: agentsh-unixwrap
+    env:
+      - CGO_ENABLED=1
+      - CC=aarch64-linux-gnu-gcc
+      - PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+    goos:
+      - linux
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w
+
   # macwrap: XPC sandbox wrapper for macOS (requires CGO)
   # NOTE: This build requires macOS with Xcode to compile - SKIPPED in CI
   # Build locally with: CGO_ENABLED=1 go build -o bin/agentsh-macwrap ./cmd/agentsh-macwrap
@@ -89,20 +117,45 @@ builds:
   #     - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
 
 archives:
-  - id: agentsh-linux
+  - id: agentsh-linux-amd64
     ids:
       - agentsh-linux
       - shim-linux
+      - unixwrap-linux-amd64
     formats: [tar.gz]
-    name_template: "{{ .ProjectName }}_{{ .Version }}_linux_{{ .Arch }}"
+    name_template: "{{ .ProjectName }}_{{ .Version }}_linux_amd64"
     files:
       - README.md
       - LICENSE
       - config.yml
       - default-policy.yml
-      - src: build/envshim/linux_{{ .Arch }}/*
+      - src: build/envshim/linux_amd64/*
         dst: .
         strip_parent: true
+    builds_info:
+      mode: 0755
+      group: root
+      owner: root
+
+  - id: agentsh-linux-arm64
+    ids:
+      - agentsh-linux
+      - shim-linux
+      - unixwrap-linux-arm64
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_linux_arm64"
+    files:
+      - README.md
+      - LICENSE
+      - config.yml
+      - default-policy.yml
+      - src: build/envshim/linux_arm64/*
+        dst: .
+        strip_parent: true
+    builds_info:
+      mode: 0755
+      group: root
+      owner: root
 
   - id: agentsh-darwin
     ids:
@@ -137,6 +190,8 @@ nfpms:
     ids:
       - agentsh-linux
       - shim-linux
+      - unixwrap-linux-amd64
+      - unixwrap-linux-arm64
     formats:
       - deb
       - rpm

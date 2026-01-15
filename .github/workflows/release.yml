@@ -21,8 +21,19 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install build deps (envshim, fuse)
-        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev libfuse-dev pkg-config gcc-aarch64-linux-gnu make
+      - name: Install build deps (envshim, fuse, seccomp)
+        run: |
+          # Enable arm64 architecture for cross-compilation
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          # Install native amd64 deps + arm64 cross-compilation deps
+          sudo apt-get install -y \
+            libseccomp-dev \
+            libfuse-dev \
+            pkg-config \
+            gcc-aarch64-linux-gnu \
+            make \
+            libseccomp-dev:arm64
 
       - name: Test
         run: go test ./...
