@@ -104,6 +104,146 @@ ai-agent-task:
       dotenv: agent.env
 ```
 
+## Docker Container Integration
+
+When running agentsh in containers, proper startup sequencing is important to avoid race conditions between the daemon and shell shim.
+
+### Basic Dockerfile
+
+```dockerfile
+FROM debian:bookworm-slim
+
+# Install agentsh
+RUN curl -fsSL https://agentsh.dev/install.sh | bash
+
+# Copy your configuration
+COPY config.yaml /etc/agentsh/config.yaml
+COPY policies/ /etc/agentsh/policies/
+
+# Copy entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+```
+
+### Entrypoint Script with Health Check
+
+The shell shim has built-in retry logic, but for reliable container startup, explicitly wait for the daemon to be ready:
+
+```bash
+#!/bin/bash
+set -e
+
+# Start the agentsh daemon in the background
+agentsh daemon &
+
+# Wait for the daemon to be ready (polls /health endpoint)
+echo "Waiting for agentsh daemon..."
+until agentsh health 2>/dev/null; do
+    sleep 0.1
+done
+echo "agentsh daemon ready"
+
+# Create a session for the workspace
+export AGENTSH_SESSION=$(agentsh session create --workspace /workspace --policy default | jq -r '.id')
+
+# Execute the main command through the shell shim
+exec agentsh-shell-shim "$@"
+```
+
+### Docker Compose Example
+
+```yaml
+version: '3.8'
+
+services:
+  agent:
+    build: .
+    volumes:
+      - ./workspace:/workspace
+    environment:
+      - AGENTSH_LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "agentsh", "health"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    command: ["bash", "-c", "your-agent-command"]
+```
+
+### Kubernetes Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-agent
+spec:
+  template:
+    spec:
+      containers:
+        - name: agent
+          image: your-agent-image:latest
+          command: ["/entrypoint.sh"]
+          args: ["your-agent-command"]
+          readinessProbe:
+            exec:
+              command: ["agentsh", "health"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["agentsh", "health"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: workspace
+          emptyDir: {}
+```
+
+### Race Condition Prevention
+
+The shell shim (`agentsh-shell-shim`) internally calls `agentsh exec`, which has retry logic:
+- On connection failure, it checks if auto-start is enabled
+- If enabled, it starts the daemon and polls `/health` for up to 5 seconds
+
+However, for production container deployments, explicit health checking is more reliable:
+
+1. **Container orchestration health checks** - Let Kubernetes/Docker Compose manage readiness
+2. **Explicit wait in entrypoint** - Use `until agentsh health; do sleep 0.1; done`
+3. **Startup ordering** - In multi-container setups, use `depends_on` with health conditions
+
+### Daytona Integration
+
+For Daytona workspaces, add agentsh to your devcontainer configuration:
+
+```json
+{
+  "image": "your-base-image",
+  "postCreateCommand": "curl -fsSL https://agentsh.dev/install.sh | bash",
+  "postStartCommand": "agentsh daemon &",
+  "customizations": {
+    "agentsh": {
+      "policy": "daytona-workspace"
+    }
+  }
+}
+```
+
+Or use the agentsh-enabled base image:
+
+```json
+{
+  "image": "ghcr.io/agentsh/devcontainer:latest",
+  "postStartCommand": "agentsh daemon &"
+}
+```
+
 ## Best Practices
 
 ### 1. Always Generate Reports
