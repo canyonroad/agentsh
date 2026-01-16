@@ -65,7 +65,7 @@ func StartLLMProxy(
 	}
 
 	// Store in session
-	sess.SetProxy(proxyURL, closeFn)
+	sess.SetLLMProxy(proxyURL, closeFn)
 	sess.SetProxyInstance(proxy)
 
 	return proxyURL, closeFn, nil
@@ -74,18 +74,18 @@ func StartLLMProxy(
 // LLMProxyEnvVars returns the environment variables that should be set for
 // the agent process to use the embedded LLM proxy.
 //
-// Returns nil if no proxy is configured for the session.
+// Returns nil if no LLM proxy is configured for the session.
 func (s *Session) LLMProxyEnvVars() map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.proxyURL == "" {
+	if s.llmProxyURL == "" {
 		return nil
 	}
 
 	return map[string]string{
-		"ANTHROPIC_BASE_URL": s.proxyURL,
-		"OPENAI_BASE_URL":    s.proxyURL,
+		"ANTHROPIC_BASE_URL": s.llmProxyURL,
+		"OPENAI_BASE_URL":    s.llmProxyURL,
 		"AGENTSH_SESSION_ID": s.ID,
 	}
 }

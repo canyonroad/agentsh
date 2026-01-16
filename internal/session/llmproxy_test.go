@@ -70,8 +70,8 @@ func TestStartLLMProxy(t *testing.T) {
 	}
 
 	// Verify session has the proxy URL
-	if sess.ProxyURL() != proxyURL {
-		t.Errorf("session proxy URL mismatch: expected %s, got %s", proxyURL, sess.ProxyURL())
+	if sess.LLMProxyURL() != proxyURL {
+		t.Errorf("session proxy URL mismatch: expected %s, got %s", proxyURL, sess.LLMProxyURL())
 	}
 
 	// Verify we can make requests through the proxy
@@ -146,7 +146,7 @@ func TestSession_LLMProxyEnvVars(t *testing.T) {
 			}
 
 			if tt.proxyURL != "" {
-				sess.SetProxy(tt.proxyURL, func() error { return nil })
+				sess.SetLLMProxy(tt.proxyURL, func() error { return nil })
 			}
 
 			envVars := sess.LLMProxyEnvVars()
@@ -286,17 +286,17 @@ func TestSession_CloseProxy(t *testing.T) {
 	}
 
 	// Verify proxy is running
-	if sess.ProxyURL() == "" {
+	if sess.LLMProxyURL() == "" {
 		t.Error("expected proxy URL to be set")
 	}
 
 	// Close the proxy via session
-	if err := sess.CloseProxy(); err != nil {
-		t.Errorf("CloseProxy failed: %v", err)
+	if err := sess.CloseLLMProxy(); err != nil {
+		t.Errorf("CloseLLMProxy failed: %v", err)
 	}
 
 	// Verify proxy URL is cleared
-	if sess.ProxyURL() != "" {
+	if sess.LLMProxyURL() != "" {
 		t.Error("expected proxy URL to be cleared after close")
 	}
 
@@ -440,7 +440,7 @@ func TestSession_LLMProxyEnvVars_ThreadSafety(t *testing.T) {
 		t.Fatalf("failed to create session: %v", err)
 	}
 
-	sess.SetProxy("http://127.0.0.1:12345", func() error { return nil })
+	sess.SetLLMProxy("http://127.0.0.1:12345", func() error { return nil })
 
 	// Run concurrent reads
 	done := make(chan bool, 10)
@@ -451,7 +451,7 @@ func TestSession_LLMProxyEnvVars_ThreadSafety(t *testing.T) {
 				if envVars == nil {
 					t.Error("unexpected nil env vars")
 				}
-				_ = sess.ProxyURL()
+				_ = sess.LLMProxyURL()
 			}
 			done <- true
 		}()

@@ -93,9 +93,9 @@ func TestIntegration_LLMProxyStartedOnSessionCreate(t *testing.T) {
 	}()
 
 	// Verify the proxy URL is set on the session
-	proxyURL := sess.ProxyURL()
+	proxyURL := sess.LLMProxyURL()
 	if proxyURL == "" {
-		t.Error("expected proxy URL to be set on session")
+		t.Error("expected LLM proxy URL to be set on session")
 	}
 	if !strings.HasPrefix(proxyURL, "http://127.0.0.1:") {
 		t.Errorf("expected proxy URL to start with http://127.0.0.1:, got %s", proxyURL)
@@ -205,7 +205,7 @@ func TestIntegration_LLMProxyEnvVarsInSession(t *testing.T) {
 	}
 
 	// Verify required env vars
-	proxyURL := sess.ProxyURL()
+	proxyURL := sess.LLMProxyURL()
 
 	if envVars["ANTHROPIC_BASE_URL"] != proxyURL {
 		t.Errorf("ANTHROPIC_BASE_URL: expected %s, got %s", proxyURL, envVars["ANTHROPIC_BASE_URL"])
@@ -259,9 +259,12 @@ func TestIntegration_LLMProxyNotStartedWhenDisabled(t *testing.T) {
 	}
 	defer sessions.Destroy(snap.ID)
 
-	// Verify proxy URL is NOT set
+	// Verify proxy URLs are NOT set
 	if sess.ProxyURL() != "" {
-		t.Errorf("expected empty proxy URL when disabled, got %s", sess.ProxyURL())
+		t.Errorf("expected empty network proxy URL when disabled, got %s", sess.ProxyURL())
+	}
+	if sess.LLMProxyURL() != "" {
+		t.Errorf("expected empty LLM proxy URL when disabled, got %s", sess.LLMProxyURL())
 	}
 
 	// Verify no llm_proxy_started event was stored
@@ -331,7 +334,7 @@ func TestIntegration_LLMProxyBothDialects(t *testing.T) {
 	sess, _ := sessions.Get(snap.ID)
 	defer sessions.Destroy(snap.ID)
 
-	proxyURL := sess.ProxyURL()
+	proxyURL := sess.LLMProxyURL()
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	// Test Anthropic dialect

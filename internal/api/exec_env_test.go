@@ -155,3 +155,104 @@ func envSliceToMapMust(env []string, err error) map[string]string {
 	}
 	return envSliceToMap(env)
 }
+
+// TestBuildPolicyEnv_NetworkProxySetsHTTPProxy verifies that when the network proxy
+// is set (via SetProxy), the HTTP_PROXY env vars are injected.
+func TestBuildPolicyEnv_NetworkProxySetsHTTPProxy(t *testing.T) {
+	sessions := session.NewManager(10)
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := sessions.Create(ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set network proxy
+	sess.SetProxy("http://127.0.0.1:8888", func() error { return nil })
+
+	gotMap := envSliceToMapMust(buildPolicyEnv(policy.ResolvedEnvPolicy{}, nil, sess, nil))
+
+	// HTTP_PROXY should be set
+	if gotMap["HTTP_PROXY"] != "http://127.0.0.1:8888" {
+		t.Errorf("expected HTTP_PROXY=http://127.0.0.1:8888, got %q", gotMap["HTTP_PROXY"])
+	}
+	if gotMap["HTTPS_PROXY"] != "http://127.0.0.1:8888" {
+		t.Errorf("expected HTTPS_PROXY=http://127.0.0.1:8888, got %q", gotMap["HTTPS_PROXY"])
+	}
+	if gotMap["http_proxy"] != "http://127.0.0.1:8888" {
+		t.Errorf("expected http_proxy=http://127.0.0.1:8888, got %q", gotMap["http_proxy"])
+	}
+}
+
+// TestBuildPolicyEnv_LLMProxyDoesNotSetHTTPProxy verifies that when only the LLM proxy
+// is set (via SetLLMProxy), the HTTP_PROXY env vars are NOT injected.
+// This is a regression test for a bug where LLM proxy caused HTTP_PROXY to be set,
+// which broke HTTPS CONNECT tunneling because the LLM proxy returns 400 for non-LLM requests.
+func TestBuildPolicyEnv_LLMProxyDoesNotSetHTTPProxy(t *testing.T) {
+	sessions := session.NewManager(10)
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := sessions.Create(ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set only LLM proxy (not network proxy)
+	sess.SetLLMProxy("http://127.0.0.1:9999", func() error { return nil })
+
+	gotMap := envSliceToMapMust(buildPolicyEnv(policy.ResolvedEnvPolicy{}, nil, sess, nil))
+
+	// HTTP_PROXY should NOT be set
+	if _, ok := gotMap["HTTP_PROXY"]; ok {
+		t.Errorf("expected HTTP_PROXY to NOT be set when only LLM proxy is configured, got %q", gotMap["HTTP_PROXY"])
+	}
+	if _, ok := gotMap["HTTPS_PROXY"]; ok {
+		t.Errorf("expected HTTPS_PROXY to NOT be set when only LLM proxy is configured, got %q", gotMap["HTTPS_PROXY"])
+	}
+
+	// LLM env vars SHOULD be set
+	if gotMap["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:9999" {
+		t.Errorf("expected ANTHROPIC_BASE_URL=http://127.0.0.1:9999, got %q", gotMap["ANTHROPIC_BASE_URL"])
+	}
+	if gotMap["OPENAI_BASE_URL"] != "http://127.0.0.1:9999" {
+		t.Errorf("expected OPENAI_BASE_URL=http://127.0.0.1:9999, got %q", gotMap["OPENAI_BASE_URL"])
+	}
+}
+
+// TestBuildPolicyEnv_BothProxiesSetIndependently verifies that network proxy and LLM proxy
+// can be configured independently, with network proxy setting HTTP_PROXY and LLM proxy
+// setting ANTHROPIC_BASE_URL/OPENAI_BASE_URL.
+func TestBuildPolicyEnv_BothProxiesSetIndependently(t *testing.T) {
+	sessions := session.NewManager(10)
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := sessions.Create(ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set both proxies with different URLs
+	sess.SetProxy("http://127.0.0.1:8080", func() error { return nil })     // Network proxy
+	sess.SetLLMProxy("http://127.0.0.1:9090", func() error { return nil })  // LLM proxy
+
+	gotMap := envSliceToMapMust(buildPolicyEnv(policy.ResolvedEnvPolicy{}, nil, sess, nil))
+
+	// HTTP_PROXY should be set to network proxy
+	if gotMap["HTTP_PROXY"] != "http://127.0.0.1:8080" {
+		t.Errorf("expected HTTP_PROXY=http://127.0.0.1:8080, got %q", gotMap["HTTP_PROXY"])
+	}
+
+	// LLM env vars should be set to LLM proxy (different URL)
+	if gotMap["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:9090" {
+		t.Errorf("expected ANTHROPIC_BASE_URL=http://127.0.0.1:9090, got %q", gotMap["ANTHROPIC_BASE_URL"])
+	}
+	if gotMap["OPENAI_BASE_URL"] != "http://127.0.0.1:9090" {
+		t.Errorf("expected OPENAI_BASE_URL=http://127.0.0.1:9090, got %q", gotMap["OPENAI_BASE_URL"])
+	}
+}

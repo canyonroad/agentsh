@@ -48,9 +48,12 @@ type Session struct {
 
 	workspaceUnmount func() error
 
-	proxyURL   string
+	proxyURL   string      // Network proxy URL (for HTTP_PROXY env vars)
 	proxyClose func() error
-	proxy      interface{} // *llmproxy.Proxy - stored as interface to avoid import cycle
+
+	llmProxyURL   string        // LLM proxy URL (for ANTHROPIC_BASE_URL, OPENAI_BASE_URL)
+	llmProxyClose func() error
+	llmProxy      interface{}   // *llmproxy.Proxy - stored as interface to avoid import cycle
 
 	netnsName  string
 	netnsClose func() error
@@ -340,14 +343,14 @@ func (s *Session) SetProxy(url string, closeFn func() error) {
 func (s *Session) SetProxyInstance(proxy interface{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.proxy = proxy
+	s.llmProxy = proxy
 }
 
-// ProxyInstance returns the proxy instance, if any.
+// ProxyInstance returns the LLM proxy instance, if any.
 func (s *Session) ProxyInstance() interface{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.proxy
+	return s.llmProxy
 }
 
 func (s *Session) ProxyURL() string {
@@ -361,7 +364,35 @@ func (s *Session) CloseProxy() error {
 	fn := s.proxyClose
 	s.proxyClose = nil
 	s.proxyURL = ""
-	s.proxy = nil
+	s.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+// SetLLMProxy sets the LLM proxy URL and cleanup function.
+func (s *Session) SetLLMProxy(url string, closeFn func() error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.llmProxyURL = url
+	s.llmProxyClose = closeFn
+}
+
+// LLMProxyURL returns the LLM proxy URL.
+func (s *Session) LLMProxyURL() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.llmProxyURL
+}
+
+// CloseLLMProxy closes the LLM proxy.
+func (s *Session) CloseLLMProxy() error {
+	s.mu.Lock()
+	fn := s.llmProxyClose
+	s.llmProxyClose = nil
+	s.llmProxyURL = ""
+	s.llmProxy = nil
 	s.mu.Unlock()
 	if fn != nil {
 		return fn()
@@ -796,8 +827,11 @@ func (s *Session) cleanup() {
 	// Close network namespace
 	s.CloseNetNS()
 
-	// Close proxy
+	// Close network proxy
 	s.CloseProxy()
+
+	// Close LLM proxy
+	s.CloseLLMProxy()
 
 	// Unmount all mounts (multi-mount)
 	for i := range s.Mounts {
