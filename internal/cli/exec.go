@@ -148,18 +148,19 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 				}
 				isSessionNotFound := (errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found")) || grpcNotFound(err)
 				if isSessionNotFound {
-					// When sessionFile is provided (e.g., from shell shim), invalidate the cache
-					// and let the next invocation create a fresh session. Don't try auto-create
-					// since that could apply different policies than originally intended.
-					if sessionFile != "" {
-						_ = os.Remove(sessionFile)
-						return fmt.Errorf("session %q no longer exists (cache invalidated); retry your command", sessionID)
-					}
-					// Otherwise, try auto-create if we have a workspace (unless auto is disabled)
+					// Try auto-create first if we have a workspace (unless auto is disabled)
+					autoCreated := false
 					if !autoDisabled() && createReq.Workspace != "" {
 						if _, createErr := cl.CreateSessionWithRequest(cmd.Context(), createReq); createErr == nil {
 							resp, err = cl.Exec(cmd.Context(), sessionID, req)
+							autoCreated = true
 						}
+					}
+					// If auto-create didn't happen or failed, and we have a session file,
+					// invalidate the cache so next invocation resolves a fresh session ID
+					if !autoCreated && err != nil && sessionFile != "" {
+						_ = os.Remove(sessionFile)
+						return fmt.Errorf("session %q no longer exists (cache invalidated); retry your command", sessionID)
 					}
 				}
 			}
@@ -223,18 +224,19 @@ func execStream(cmd *cobra.Command, cl client.CLIClient, serverAddr, sessionID s
 		}
 		isSessionNotFound := (errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found")) || grpcNotFound(err)
 		if isSessionNotFound {
-			// When sessionFile is provided (e.g., from shell shim), invalidate the cache
-			// and let the next invocation create a fresh session. Don't try auto-create
-			// since that could apply different policies than originally intended.
-			if sessionFile != "" {
-				_ = os.Remove(sessionFile)
-				return fmt.Errorf("session %q no longer exists (cache invalidated); retry your command", sessionID)
-			}
-			// Otherwise, try auto-create if we have a workspace (unless auto is disabled)
+			// Try auto-create first if we have a workspace (unless auto is disabled)
+			autoCreated := false
 			if !autoDisabled() && createReq.Workspace != "" {
 				if _, createErr := cl.CreateSessionWithRequest(cmd.Context(), createReq); createErr == nil {
 					body, err = cl.ExecStream(cmd.Context(), sessionID, req)
+					autoCreated = true
 				}
+			}
+			// If auto-create didn't happen or failed, and we have a session file,
+			// invalidate the cache so next invocation resolves a fresh session ID
+			if !autoCreated && err != nil && sessionFile != "" {
+				_ = os.Remove(sessionFile)
+				return fmt.Errorf("session %q no longer exists (cache invalidated); retry your command", sessionID)
 			}
 		}
 	}

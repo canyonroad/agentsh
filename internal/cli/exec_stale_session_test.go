@@ -112,3 +112,80 @@ func TestExecCmd_DoesNotDeleteWithoutSessionFile(t *testing.T) {
 		t.Error("should not mention cache invalidation when --session-file not provided")
 	}
 }
+
+func TestExecCmd_AutoCreatesSessionBeforeInvalidating(t *testing.T) {
+	// Track requests to verify auto-create is attempted
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		t.Logf("Mock server received: %s %s", r.Method, r.URL.Path)
+
+		// First exec returns 404, session create succeeds, second exec succeeds
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/exec") {
+			if len(requests) == 1 {
+				// First exec attempt - session not found
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"session not found"}`))
+				return
+			}
+			// Second exec attempt - success
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"session_id":"test-session","command_id":"cmd-1","result":{"exit_code":0,"stdout":"hello\n"}}`))
+			return
+		}
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/sessions") {
+			// Session creation succeeds
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"test-session","state":"ready"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	// Create a temp directory for the session file
+	tmpDir, err := os.MkdirTemp("", "exec-auto-create-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create a session file
+	sessionFile := filepath.Join(tmpDir, "test-session.sid")
+	if err := os.WriteFile(sessionFile, []byte("test-session"), 0644); err != nil {
+		t.Fatalf("failed to write session file: %v", err)
+	}
+
+	// Enable auto (don't set AGENTSH_NO_AUTO)
+	t.Setenv("AGENTSH_NO_AUTO", "")
+
+	root := NewRoot("test")
+	root.SetArgs([]string{
+		"--server", server.URL,
+		"exec",
+		"--session-file", sessionFile,
+		"test-session",
+		"--", "echo", "hello",
+	})
+
+	err = root.Execute()
+	t.Logf("Requests: %v", requests)
+	t.Logf("Error: %v", err)
+
+	// Should succeed because auto-create worked
+	if err != nil {
+		t.Errorf("expected success after auto-create, got error: %v", err)
+	}
+
+	// Session file should NOT be deleted (auto-create succeeded)
+	if _, err := os.Stat(sessionFile); os.IsNotExist(err) {
+		t.Error("session file should NOT have been deleted when auto-create succeeds")
+	}
+
+	// Verify the request sequence: exec -> create -> exec
+	if len(requests) < 3 {
+		t.Errorf("expected at least 3 requests (exec, create, exec), got %d: %v", len(requests), requests)
+	}
+}
