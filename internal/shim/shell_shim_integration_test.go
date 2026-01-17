@@ -149,6 +149,39 @@ func TestShellShim_RecursionGuardExecsRealShell(t *testing.T) {
 	}
 }
 
+func TestShellShim_RecursionGuardFallsBackToPathWhenNoReal(t *testing.T) {
+	// Test that when AGENTSH_IN_SESSION=1 and .real doesn't exist,
+	// the shim falls back to looking up the shell in PATH.
+	repoRoot := repoRootOrSkip(t)
+	tmp := t.TempDir()
+
+	shimBin := filepath.Join(tmp, "agentsh-shell-shim")
+	buildOrSkip(t, repoRoot, "./cmd/agentsh-shell-shim", shimBin)
+
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	shimPath := filepath.Join(binDir, "sh")
+	copyFile(t, shimBin, shimPath, 0o755)
+
+	// Note: NOT creating sh.real - testing PATH fallback
+
+	cmd := exec.Command(shimPath, "-c", "echo PATH_FALLBACK_OK")
+	cmd.Env = append(os.Environ(),
+		"AGENTSH_IN_SESSION=1",
+		"AGENTSH_BIN=/nonexistent/agentsh",
+		// PATH includes /bin and /usr/bin where real sh exists
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shim failed: %v (out=%s)", err, string(out))
+	}
+	if !strings.Contains(string(out), "PATH_FALLBACK_OK") {
+		t.Fatalf("expected PATH fallback to work, got %q", string(out))
+	}
+}
+
 func TestShellShim_RespectsCustomArgv0(t *testing.T) {
 	repoRoot := repoRootOrSkip(t)
 	tmp := t.TempDir()

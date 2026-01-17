@@ -113,6 +113,39 @@ func TestExecCmd_DoesNotDeleteWithoutSessionFile(t *testing.T) {
 	}
 }
 
+func TestExecCmd_BashDashC(t *testing.T) {
+	// Test running "bash -c 'echo hello'" through exec
+	// This simulates the scenario that was failing with timeout
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("Mock server received: %s %s", r.Method, r.URL.Path)
+
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/exec") {
+			// Success - the command executes and returns
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"session_id":"test-session","command_id":"cmd-1","result":{"exit_code":0,"stdout":"hello\n"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("AGENTSH_NO_AUTO", "1")
+
+	root := NewRoot("test")
+	root.SetArgs([]string{
+		"--server", server.URL,
+		"exec",
+		"test-session",
+		"--", "bash", "-c", "echo hello",
+	})
+
+	err := root.Execute()
+	if err != nil {
+		t.Errorf("expected success, got error: %v", err)
+	}
+}
+
 func TestExecCmd_AutoCreatesSessionBeforeInvalidating(t *testing.T) {
 	// Track requests to verify auto-create is attempted
 	var requests []string

@@ -22,19 +22,32 @@ func main() {
 		shellName = "sh"
 	}
 
+	// Recursion guard: when agentsh executes a process, it sets AGENTSH_IN_SESSION=1.
+	// In that case, run the real shell directly. We try .real first (for proper shim
+	// installations) but fall back to system shell via PATH for containers/environments
+	// where the shim is installed but .real doesn't exist.
+	if strings.TrimSpace(os.Getenv("AGENTSH_IN_SESSION")) == "1" {
+		realShell, err := resolveRealShell(shellName)
+		if err != nil {
+			// Fall back to looking up the shell in PATH (skipping ourselves)
+			realShell, err = lookupShellInPath(shellName)
+			if err != nil {
+				fatalWithHint(127,
+					fmt.Sprintf("agentsh-shell-shim: in-session: could not find %s", shellName),
+					fmt.Sprintf("Tried %s.real and PATH lookup. Ensure the real shell is available.", shellName),
+				)
+			}
+		}
+		execOrExit(realShell, append([]string{argv0}, os.Args[1:]...), os.Environ())
+		return
+	}
+
 	realShell, err := resolveRealShell(shellName)
 	if err != nil {
 		fatalWithHint(127,
 			fmt.Sprintf("agentsh-shell-shim: resolve real shell: %v", err),
 			fmt.Sprintf("Expected %s.real to exist next to the shim (or in /bin or /usr/bin).", shellName),
 		)
-	}
-
-	// Recursion guard: when agentsh executes a process, it sets AGENTSH_IN_SESSION=1.
-	// In that case, run the real shell directly.
-	if strings.TrimSpace(os.Getenv("AGENTSH_IN_SESSION")) == "1" {
-		execOrExit(realShell, append([]string{argv0}, os.Args[1:]...), os.Environ())
-		return
 	}
 
 	agentshBin, err := resolveAgentshBin()
@@ -125,6 +138,44 @@ func resolveRealShell(shellName string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("could not find %s.real (tried %v)", shellName, candidates)
+}
+
+// lookupShellInPath finds the shell binary in PATH, skipping the current executable
+// (to avoid infinite recursion when the shim is installed as /bin/bash).
+func lookupShellInPath(shellName string) (string, error) {
+	// Get our own executable path to skip it
+	self, err := os.Executable()
+	if err != nil {
+		self = ""
+	}
+	selfReal, _ := filepath.EvalSymlinks(self)
+
+	pathEnv := os.Getenv("PATH")
+	if pathEnv == "" {
+		pathEnv = "/usr/bin:/bin"
+	}
+
+	for _, dir := range filepath.SplitList(pathEnv) {
+		candidate := filepath.Join(dir, shellName)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		// Check if this is a symlink and resolve it
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			resolved = candidate
+		}
+		// Skip if this resolves to ourselves
+		if resolved == self || resolved == selfReal {
+			continue
+		}
+		// Check if it's executable
+		if info.Mode()&0111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not find %s in PATH", shellName)
 }
 
 func execOrExit(path string, argv []string, env []string) {
