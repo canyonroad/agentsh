@@ -29,6 +29,7 @@ func newExecCmd() *cobra.Command {
 	var root string
 	var noDetectRoot bool
 	var projectRoot string
+	var sessionFile string
 	c := &cobra.Command{
 		Use:   "exec [SESSION_ID] -- COMMAND [ARGS...]",
 		Short: "Execute a command in a session",
@@ -128,7 +129,7 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 			}
 
 			if req.StreamOutput {
-				return execStream(cmd, cl, cfg.serverAddr, sessionID, req, outMode, createReq)
+				return execStream(cmd, cl, cfg.serverAddr, sessionID, req, outMode, createReq, sessionFile)
 			}
 
 			resp, err := cl.Exec(cmd.Context(), sessionID, req)
@@ -139,14 +140,23 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 					return fmt.Errorf("server unreachable (%v); auto-start failed: %w", err, startErr)
 				}
 			}
-			if err != nil && !autoDisabled() {
+			if err != nil {
 				var he *client.HTTPError
 				grpcNotFound := func(e error) bool {
 					st, ok := status.FromError(e)
 					return ok && st.Code() == codes.NotFound
 				}
-				if (errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found")) || grpcNotFound(err) {
-					if createReq.Workspace != "" {
+				isSessionNotFound := (errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found")) || grpcNotFound(err)
+				if isSessionNotFound {
+					// When sessionFile is provided (e.g., from shell shim), invalidate the cache
+					// and let the next invocation create a fresh session. Don't try auto-create
+					// since that could apply different policies than originally intended.
+					if sessionFile != "" {
+						_ = os.Remove(sessionFile)
+						return fmt.Errorf("session %q no longer exists (cache invalidated); retry your command", sessionID)
+					}
+					// Otherwise, try auto-create if we have a workspace (unless auto is disabled)
+					if !autoDisabled() && createReq.Workspace != "" {
 						if _, createErr := cl.CreateSessionWithRequest(cmd.Context(), createReq); createErr == nil {
 							resp, err = cl.Exec(cmd.Context(), sessionID, req)
 						}
@@ -192,10 +202,11 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 	c.Flags().StringVar(&root, "root", "", "Root directory for auto-creating session if it doesn't exist (defaults to $PWD)")
 	c.Flags().BoolVar(&noDetectRoot, "no-detect-root", false, "Disable project root detection when auto-creating session")
 	c.Flags().StringVar(&projectRoot, "project-root", "", "Explicit project root (skips detection) when auto-creating session")
+	c.Flags().StringVar(&sessionFile, "session-file", "", "Path to cached session file (deleted on 404 to invalidate stale sessions)")
 	return c
 }
 
-func execStream(cmd *cobra.Command, cl client.CLIClient, serverAddr, sessionID string, req types.ExecRequest, output string, createReq types.CreateSessionRequest) error {
+func execStream(cmd *cobra.Command, cl client.CLIClient, serverAddr, sessionID string, req types.ExecRequest, output string, createReq types.CreateSessionRequest, sessionFile string) error {
 	body, err := cl.ExecStream(cmd.Context(), sessionID, req)
 	if err != nil && !autoDisabled() && isConnectionError(err) {
 		if startErr := ensureServerRunning(cmd.Context(), serverAddr, cmd.ErrOrStderr()); startErr == nil {
@@ -204,14 +215,23 @@ func execStream(cmd *cobra.Command, cl client.CLIClient, serverAddr, sessionID s
 			return fmt.Errorf("server unreachable (%v); auto-start failed: %w", err, startErr)
 		}
 	}
-	if err != nil && !autoDisabled() {
+	if err != nil {
 		var he *client.HTTPError
 		grpcNotFound := func(e error) bool {
 			st, ok := status.FromError(e)
 			return ok && st.Code() == codes.NotFound
 		}
-		if (errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found")) || grpcNotFound(err) {
-			if createReq.Workspace != "" {
+		isSessionNotFound := (errors.As(err, &he) && he.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(he.Body), "session not found")) || grpcNotFound(err)
+		if isSessionNotFound {
+			// When sessionFile is provided (e.g., from shell shim), invalidate the cache
+			// and let the next invocation create a fresh session. Don't try auto-create
+			// since that could apply different policies than originally intended.
+			if sessionFile != "" {
+				_ = os.Remove(sessionFile)
+				return fmt.Errorf("session %q no longer exists (cache invalidated); retry your command", sessionID)
+			}
+			// Otherwise, try auto-create if we have a workspace (unless auto is disabled)
+			if !autoDisabled() && createReq.Workspace != "" {
 				if _, createErr := cl.CreateSessionWithRequest(cmd.Context(), createReq); createErr == nil {
 					body, err = cl.ExecStream(cmd.Context(), sessionID, req)
 				}

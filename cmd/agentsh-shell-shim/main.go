@@ -47,7 +47,7 @@ func main() {
 	}
 
 	wd, _ := os.Getwd()
-	sessID, _, err := shim.ResolveSessionID(shim.ResolveSessionIDOptions{
+	sessID, sessFile, err := shim.ResolveSessionID(shim.ResolveSessionIDOptions{
 		WorkDir: wd,
 	})
 	if err != nil {
@@ -61,6 +61,9 @@ func main() {
 	args := []string{agentshBin, "exec"}
 	if tty {
 		args = append(args, "--pty")
+	}
+	if sessFile != "" {
+		args = append(args, "--session-file", sessFile)
 	}
 	args = append(args, "--argv0", argv0, sessID, "--", realShell)
 	args = append(args, os.Args[1:]...)
