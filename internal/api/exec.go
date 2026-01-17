@@ -223,9 +223,11 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		}
 	}
 
+	waitStart := time.Now()
 	slog.Debug("exec waiting for command", "command", req.Command, "pid", cmd.Process.Pid)
 	waitErr := cmd.Wait()
-	slog.Debug("exec command finished", "command", req.Command, "pid", cmd.Process.Pid, "wait_error", waitErr, "ctx_err", ctx.Err())
+	waitDuration := time.Since(waitStart)
+	slog.Debug("exec command finished", "command", req.Command, "pid", cmd.Process.Pid, "wait_error", waitErr, "ctx_err", ctx.Err(), "wait_duration_ms", waitDuration.Milliseconds())
 	stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
 	stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
 	stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated

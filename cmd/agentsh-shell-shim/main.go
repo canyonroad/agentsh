@@ -26,7 +26,9 @@ func main() {
 	// In that case, run the real shell directly. We try .real first (for proper shim
 	// installations) but fall back to system shell via PATH for containers/environments
 	// where the shim is installed but .real doesn't exist.
-	if strings.TrimSpace(os.Getenv("AGENTSH_IN_SESSION")) == "1" {
+	inSession := strings.TrimSpace(os.Getenv("AGENTSH_IN_SESSION"))
+	debugLog("recursion check: AGENTSH_IN_SESSION=%q", inSession)
+	if inSession == "1" {
 		realShell, err := resolveRealShell(shellName)
 		if err != nil {
 			// Fall back to looking up the shell in PATH (skipping ourselves)
@@ -38,6 +40,7 @@ func main() {
 				)
 			}
 		}
+		debugLog("recursion guard: executing real shell %s", realShell)
 		execOrExit(realShell, append([]string{argv0}, os.Args[1:]...), os.Environ())
 		return
 	}
@@ -69,6 +72,7 @@ func main() {
 			"Set AGENTSH_SESSION_ID (best), or set AGENTSH_SESSION_FILE to a writable file path for a stable ID.",
 		)
 	}
+	debugLog("resolved session: id=%s file=%s wd=%s", sessID, sessFile, wd)
 
 	tty := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 	args := []string{agentshBin, "exec"}
@@ -199,4 +203,10 @@ func fatalWithHint(code int, msg string, hint string) {
 		}
 	}
 	os.Exit(code)
+}
+
+func debugLog(format string, args ...any) {
+	if strings.TrimSpace(os.Getenv("AGENTSH_SHIM_DEBUG")) == "1" {
+		_, _ = fmt.Fprintf(os.Stderr, "agentsh-shell-shim: "+format+"\n", args...)
+	}
 }

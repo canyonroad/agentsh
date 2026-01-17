@@ -364,7 +364,10 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		}
 	}
 
+	waitStart := time.Now()
 	waitErr := cmd.Wait()
+	waitDuration := time.Since(waitStart)
+	slog.Debug("exec_stream command finished", "command", req.Command, "pid", cmd.Process.Pid, "wait_error", waitErr, "ctx_err", ctx.Err(), "wait_duration_ms", waitDuration.Milliseconds())
 	stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
 	stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
 	stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
