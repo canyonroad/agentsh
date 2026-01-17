@@ -1,6 +1,6 @@
 //go:build linux && integration
 
-package ebpf
+package ebpf_test
 
 import (
 	"os"
@@ -30,20 +30,20 @@ func TestIntegration_AttachAndEnforce(t *testing.T) {
 	}
 	defer os.RemoveAll(tmp)
 
-	coll, detach, err := AttachConnectToCgroup(tmp)
+	coll, detach, err := ebpf.AttachConnectToCgroup(tmp)
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	defer detach()
 	defer coll.Close()
 
-	cgid, err := CgroupID(tmp)
+	cgid, err := ebpf.CgroupID(tmp)
 	if err != nil {
 		t.Fatalf("cgroup id: %v", err)
 	}
 
 	// Allow nothing; set default deny.
-	if err := PopulateAllowlist(coll, cgid, nil, nil, nil, nil, true); err != nil {
+	if err := ebpf.PopulateAllowlist(coll, cgid, nil, nil, nil, nil, true); err != nil {
 		t.Fatalf("populate: %v", err)
 	}
 
@@ -71,14 +71,14 @@ func TestIntegration_DenyWithoutDefaultDeny(t *testing.T) {
 	}
 	defer os.RemoveAll(tmp)
 
-	coll, detach, err := AttachConnectToCgroup(tmp)
+	coll, detach, err := ebpf.AttachConnectToCgroup(tmp)
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	defer detach()
 	defer coll.Close()
 
-	cgid, err := CgroupID(tmp)
+	cgid, err := ebpf.CgroupID(tmp)
 	if err != nil {
 		t.Fatalf("cgroup id: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestIntegration_DenyWithoutDefaultDeny(t *testing.T) {
 	deny := []ebpf.AllowKey{
 		{Family: 2, Dport: 80, Addr: [16]byte{1, 1, 1, 1}},
 	}
-	if err := PopulateAllowlist(coll, cgid, nil, nil, deny, nil, false); err != nil {
+	if err := ebpf.PopulateAllowlist(coll, cgid, nil, nil, deny, nil, false); err != nil {
 		t.Fatalf("populate deny: %v", err)
 	}
 
