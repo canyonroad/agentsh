@@ -118,6 +118,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	}
 
 	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
+	slog.Debug("exec command created", "command", req.Command, "args", req.Args, "session_id", s.ID)
 	if ns := s.NetNSName(); ns != "" {
 		// Run inside the session network namespace (Linux only; requires iproute2).
 		allArgs := append([]string{"netns", "exec", ns, req.Command}, req.Args...)
@@ -174,8 +175,10 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	cmd.Stderr = stderrW
 
 	if err := cmd.Start(); err != nil {
+		slog.Debug("exec command start failed", "command", req.Command, "error", err)
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
 	}
+	slog.Debug("exec command started", "command", req.Command, "pid", cmd.Process.Pid)
 
 	pgid := 0
 	if cmd.Process != nil {
@@ -220,7 +223,9 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		}
 	}
 
+	slog.Debug("exec waiting for command", "command", req.Command, "pid", cmd.Process.Pid)
 	waitErr := cmd.Wait()
+	slog.Debug("exec command finished", "command", req.Command, "pid", cmd.Process.Pid, "wait_error", waitErr, "ctx_err", ctx.Err())
 	stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
 	stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
 	stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
