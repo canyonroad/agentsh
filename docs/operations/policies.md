@@ -279,5 +279,5 @@ The detected PROJECT_ROOT and GIT_ROOT are included in session information:
 
 ```bash
 # Via API
-curl http://localhost:8080/api/v1/sessions/SESSION_ID | jq '.project_root, .git_root'
+curl http://localhost:18080/api/v1/sessions/SESSION_ID | jq '.project_root, .git_root'
 ```

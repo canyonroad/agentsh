@@ -14,7 +14,7 @@ func TestLoad_ParsesServerTransportFields(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(`
 server:
   http:
-    addr: "127.0.0.1:8080"
+    addr: "127.0.0.1:18080"
     read_timeout: 30s
     write_timeout: 5m
     max_request_size: 10MB
@@ -144,7 +144,7 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(`
 server:
   http:
-    addr: "127.0.0.1:8080"
+    addr: "127.0.0.1:18080"
   grpc:
     enabled: true
     addr: "127.0.0.1:9090"

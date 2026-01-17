@@ -1413,7 +1413,7 @@ agentsh exposes both HTTP REST and gRPC APIs for programmatic access.
 │                                                             │
 │  ┌─────────────────┐         ┌─────────────────────────┐   │
 │  │   HTTP/REST     │         │        gRPC             │   │
-│  │   Port 8080     │         │      Port 9090          │   │
+│  │   Port 18080    │         │      Port 9090          │   │
 │  └─────────────────┘         └─────────────────────────┘   │
 │           │                            │                    │
 │           └────────────┬───────────────┘                    │
@@ -2287,7 +2287,7 @@ See [Section 9.2](#92-policy-configuration) for policy file format.
 |----------|-------------|---------|
 | `AGENTSH_CONFIG` | CLI auto-start config path | `config.yml` |
 | `AGENTSH_LOG_LEVEL` | Override config `logging.level` | `info` |
-| `AGENTSH_HTTP_ADDR` | Override config `server.http.addr` | `127.0.0.1:8080` |
+| `AGENTSH_HTTP_ADDR` | Override config `server.http.addr` | `127.0.0.1:18080` |
 | `AGENTSH_GRPC_ADDR` | gRPC listen address | `127.0.0.1:9090` |
 | `AGENTSH_DATA_DIR` | Override data dir (sessions + SQLite DB) | unset |
 | `AGENTSH_NO_AUTO` | Disable CLI auto-start/auto-create behaviors | unset |
@@ -2372,7 +2372,7 @@ RUN mkdir -p /var/lib/agentsh /var/log/agentsh /var/run/agentsh
 
 # Need privileged mode for namespaces
 # Or specific capabilities: CAP_SYS_ADMIN, CAP_NET_ADMIN
-EXPOSE 8080 9090
+EXPOSE 18080 9090
 
 CMD ["agentsh", "server"]
 ```
@@ -2385,7 +2385,7 @@ docker run -d \
   --cap-add NET_ADMIN \
   --device /dev/fuse \
   --security-opt apparmor=unconfined \
-  -p 8080:8080 \
+  -p 18080:18080 \
   -p 9090:9090 \
   -v /path/to/workspaces:/workspaces \
   ghcr.io/agentsh/agentsh:latest
@@ -2414,7 +2414,7 @@ spec:
       - name: agentsh
         image: agentsh:latest
         ports:
-        - containerPort: 8080
+        - containerPort: 18080
         - containerPort: 9090
         securityContext:
           privileged: true  # Required for namespaces

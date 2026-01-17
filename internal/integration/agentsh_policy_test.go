@@ -123,7 +123,7 @@ func startServerContainer(t *testing.T, ctx context.Context, bin, configPath, po
 
 	req := testcontainers.ContainerRequest{
 		Image:        "debian:bookworm-slim",
-		ExposedPorts: []string{"8080/tcp"},
+		ExposedPorts: []string{"18080/tcp"},
 		Cmd:          []string{"/usr/local/bin/agentsh", "server", "--config", "/config.yaml"},
 		Mounts:       binds,
 		Privileged:   true,
@@ -139,7 +139,7 @@ func startServerContainer(t *testing.T, ctx context.Context, bin, configPath, po
 			}
 		},
 		WaitingFor: wait.ForHTTP("/health").
-			WithPort("8080/tcp").
+			WithPort("18080/tcp").
 			WithStartupTimeout(60 * time.Second).
 			WithStatusCodeMatcher(func(code int) bool { return code == http.StatusOK || code == http.StatusNotFound }),
 	}
@@ -165,7 +165,7 @@ func startServerContainer(t *testing.T, ctx context.Context, bin, configPath, po
 	if err != nil {
 		t.Fatalf("container host: %v", err)
 	}
-	mappedPort, err := container.MappedPort(ctx, "8080/tcp")
+	mappedPort, err := container.MappedPort(ctx, "18080/tcp")
 	if err != nil {
 		t.Fatalf("map port: %v", err)
 	}
@@ -225,7 +225,7 @@ const testAPIKeysYAML = `
 const testConfigTemplate = `
 server:
   http:
-    addr: "0.0.0.0:8080"
+    addr: "0.0.0.0:18080"
 auth:
   type: "api_key"
   api_key:

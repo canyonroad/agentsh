@@ -425,7 +425,7 @@ func TestHelmValues_CustomValues(t *testing.T) {
 		},
 		Service: ServiceConfig{
 			Type:        "LoadBalancer",
-			APIPort:     8080,
+			APIPort:     18080,
 			MetricsPort: 8081,
 		},
 		NodeSelector: map[string]string{

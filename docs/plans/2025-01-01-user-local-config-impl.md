@@ -372,7 +372,7 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	}
 
 	if cfg.Server.HTTP.Addr == "" {
-		cfg.Server.HTTP.Addr = "0.0.0.0:8080"
+		cfg.Server.HTTP.Addr = "0.0.0.0:18080"
 	}
 	if cfg.Server.GRPC.Addr == "" {
 		cfg.Server.GRPC.Addr = "127.0.0.1:9090"

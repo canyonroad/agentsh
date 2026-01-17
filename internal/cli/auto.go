@@ -48,7 +48,7 @@ func shouldAutoStartServer(serverAddr string) bool {
 		return false
 	}
 	port := u.Port()
-	return port == "" || port == "8080"
+	return port == "" || port == "18080"
 }
 
 func isConnectionError(err error) bool {

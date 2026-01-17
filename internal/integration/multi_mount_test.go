@@ -196,7 +196,7 @@ func startMultiMountServerContainer(t *testing.T, ctx context.Context, bin, conf
 
 	req := testcontainers.ContainerRequest{
 		Image:        "debian:bookworm-slim",
-		ExposedPorts: []string{"8080/tcp"},
+		ExposedPorts: []string{"18080/tcp"},
 		Cmd:          []string{"/usr/local/bin/agentsh", "server", "--config", "/config.yaml"},
 		Mounts:       binds,
 		Privileged:   true,
@@ -212,7 +212,7 @@ func startMultiMountServerContainer(t *testing.T, ctx context.Context, bin, conf
 			}
 		},
 		WaitingFor: wait.ForHTTP("/health").
-			WithPort("8080/tcp").
+			WithPort("18080/tcp").
 			WithStartupTimeout(60 * time.Second).
 			WithStatusCodeMatcher(func(code int) bool { return code == http.StatusOK || code == http.StatusNotFound }),
 	}
@@ -238,7 +238,7 @@ func startMultiMountServerContainer(t *testing.T, ctx context.Context, bin, conf
 	if err != nil {
 		t.Fatalf("container host: %v", err)
 	}
-	mappedPort, err := ctr.MappedPort(ctx, "8080/tcp")
+	mappedPort, err := ctr.MappedPort(ctx, "18080/tcp")
 	if err != nil {
 		t.Fatalf("map port: %v", err)
 	}
@@ -323,7 +323,7 @@ resource_limits:
 const multiMountConfigYAML = `
 server:
   http:
-    addr: "0.0.0.0:8080"
+    addr: "0.0.0.0:18080"
 auth:
   type: "api_key"
   api_key:

@@ -140,7 +140,7 @@ func TestPrintSessionCreated(t *testing.T) {
 			},
 			proxyStatus: map[string]any{
 				"state":           "running",
-				"address":         "127.0.0.1:8080",
+				"address":         "127.0.0.1:18080",
 				"dlp_mode":        "redact",
 				"active_patterns": float64(3),
 				// No pattern_names provided

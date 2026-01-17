@@ -169,7 +169,7 @@ agentsh shim install-shell \
 Point the shim at your server (sidecar or host):
 
 ```dockerfile
-ENV AGENTSH_SERVER=http://127.0.0.1:8080
+ENV AGENTSH_SERVER=http://127.0.0.1:18080
 ```
 
 Now any `/bin/sh -c ...` or `/bin/bash -lc ...` in the container routes through agentsh.

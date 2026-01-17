@@ -99,7 +99,7 @@ The agent and the approver MUST have completely separate credentials that cannot
 │            ▼                                      ▼                     │
 │  ┌──────────────────────┐              ┌──────────────────────┐        │
 │  │   Agent API          │              │   Approval API       │        │
-│  │   Port 8080          │              │   Port 8443          │        │
+│  │   Port 18080         │              │   Port 8443          │        │
 │  │                      │              │   (separate service) │        │
 │  │  Endpoints:          │              │                      │        │
 │  │  • /sessions         │              │  Endpoints:          │        │

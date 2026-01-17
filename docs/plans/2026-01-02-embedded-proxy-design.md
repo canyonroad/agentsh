@@ -282,11 +282,11 @@ collector:
 ```bash
 # Session start sets up proxy
 agentsh session start --policy=default
-# Outputs: SESSION_ID=xxx ANTHROPIC_BASE_URL=http://localhost:8080 ...
+# Outputs: SESSION_ID=xxx ANTHROPIC_BASE_URL=http://localhost:18080 ...
 
 # Check proxy status
 agentsh proxy status
-# Outputs: Proxy running on :8080, mode: embedded, dialect: auto-detect
+# Outputs: Proxy running on :18080, mode: embedded, dialect: auto-detect
 
 # View LLM request logs
 agentsh session logs <session-id> --type=llm

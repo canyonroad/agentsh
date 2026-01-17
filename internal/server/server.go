@@ -453,7 +453,7 @@ func isLoopbackListenAddr(addr string) bool {
 	if a == "" {
 		return false
 	}
-	// ":8080" binds on all interfaces.
+	// ":18080" binds on all interfaces.
 	if strings.HasPrefix(a, ":") {
 		return false
 	}

@@ -6,7 +6,7 @@
 #   docker-compose down           # Stop agentsh
 #
 # Access:
-#   HTTP API: http://localhost:8080
+#   HTTP API: http://localhost:18080
 #   gRPC API: localhost:9090
 
 version: '3.8'
@@ -39,7 +39,7 @@ services:
     
     # Port mappings
     ports:
-      - "8080:8080"    # HTTP API
+      - "18080:18080"    # HTTP API
       - "9090:9090"    # gRPC API
     
     # Volume mounts
@@ -63,7 +63,7 @@ services:
       # - AGENTSH_POLICY_NAME=default
       # Optional env iteration block via shim for commands with env_policy.block_iteration=true
       # - AGENTSH_ENV_BLOCK_ITERATION=0
-      # - AGENTSH_HTTP_ADDR=0.0.0.0:8080
+      # - AGENTSH_HTTP_ADDR=0.0.0.0:18080
       # - AGENTSH_GRPC_ADDR=0.0.0.0:9090
     
     # Resource limits
@@ -78,7 +78,7 @@ services:
     
     # Health check
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:18080/health"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -7263,7 +7263,7 @@ func main() {
     // Get server connection
     serverAddr := os.Getenv("AGENTSH_SERVER")
     if serverAddr == "" {
-        serverAddr = "http://127.0.0.1:8080"
+        serverAddr = "http://127.0.0.1:18080"
     }
     
     // Get or create session
@@ -7479,7 +7479,7 @@ provision:
         --i-understand-this-modifies-the-host
 
 env:
-  AGENTSH_SERVER: "http://127.0.0.1:8080"
+  AGENTSH_SERVER: "http://127.0.0.1:18080"
 ```
 
 ### 9.4 Windows Implementation

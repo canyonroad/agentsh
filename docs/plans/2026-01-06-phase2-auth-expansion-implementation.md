@@ -550,7 +550,7 @@ func TestNewWebAuthnService(t *testing.T) {
     svc, err := NewWebAuthnService(
         "localhost",
         "Test App",
-        []string{"http://localhost:8080"},
+        []string{"http://localhost:18080"},
         "preferred",
         store,
     )

@@ -18,7 +18,7 @@ func NewRoot(version string) *cobra.Command {
 	cmd.Version = version
 	cmd.SetVersionTemplate("agentsh {{.Version}}\n")
 
-	cmd.PersistentFlags().StringVar(&cfg.serverAddr, "server", getenvDefault("AGENTSH_SERVER", "http://127.0.0.1:8080"), "agentsh server base URL")
+	cmd.PersistentFlags().StringVar(&cfg.serverAddr, "server", getenvDefault("AGENTSH_SERVER", "http://127.0.0.1:18080"), "agentsh server base URL")
 	cmd.PersistentFlags().StringVar(&cfg.transport, "transport", getenvDefault("AGENTSH_TRANSPORT", "http"), "Client transport: http|grpc (grpc uses HTTP for non-gRPC endpoints)")
 	cmd.PersistentFlags().StringVar(&cfg.grpcAddr, "grpc-addr", getenvDefault("AGENTSH_GRPC_ADDR", "127.0.0.1:9090"), "agentsh gRPC address (host:port)")
 	cmd.PersistentFlags().StringVar(&cfg.apiKey, "api-key", getenvDefault("AGENTSH_API_KEY", ""), "API key (sent as X-API-Key)")
@@ -62,7 +62,7 @@ func getClientConfig(cmd *cobra.Command) *clientConfig {
 	grpcAddr, _ := cmd.Root().PersistentFlags().GetString("grpc-addr")
 	apiKey, _ := cmd.Root().PersistentFlags().GetString("api-key")
 	if serverAddr == "" {
-		serverAddr = "http://127.0.0.1:8080"
+		serverAddr = "http://127.0.0.1:18080"
 	}
 	return &clientConfig{serverAddr: serverAddr, transport: transport, grpcAddr: grpcAddr, apiKey: apiKey}
 }

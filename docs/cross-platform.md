@@ -355,7 +355,7 @@ docker run --rm -it \
   --cap-add SYS_ADMIN \
   --device /dev/fuse \
   --security-opt apparmor=unconfined \
-  -p 8080:8080 \
+  -p 18080:18080 \
   -v "$(pwd)":/workspace \
   ghcr.io/agentsh/agentsh:latest
 ```

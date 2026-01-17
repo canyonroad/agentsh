@@ -68,4 +68,4 @@ agentsh exec my-session -- ls -la
 |------------------------|--------------------------------------------------|
 | `AGENTSH_SESSION_ID`   | Default session ID (avoids passing as argument)  |
 | `AGENTSH_SESSION_ROOT` | Root directory for auto-creating sessions        |
-| `AGENTSH_SERVER`       | Server URL (default: `http://127.0.0.1:8080`)    |
+| `AGENTSH_SERVER`       | Server URL (default: `http://127.0.0.1:18080`)    |

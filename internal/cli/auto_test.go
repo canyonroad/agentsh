@@ -10,10 +10,10 @@ func TestAutoDisabled_FromEnv(t *testing.T) {
 }
 
 func TestShouldAutoStartServer_LoopbackDefaultPort(t *testing.T) {
-	if !shouldAutoStartServer("http://127.0.0.1:8080") {
-		t.Fatalf("expected loopback:8080 to be eligible for auto-start")
+	if !shouldAutoStartServer("http://127.0.0.1:18080") {
+		t.Fatalf("expected loopback:18080 to be eligible for auto-start")
 	}
-	if shouldAutoStartServer("http://example.com:8080") {
+	if shouldAutoStartServer("http://example.com:18080") {
 		t.Fatalf("expected non-loopback to be ineligible for auto-start")
 	}
 	if shouldAutoStartServer("http://127.0.0.1:9090") {
