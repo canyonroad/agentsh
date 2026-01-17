@@ -142,6 +142,15 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		msg := []byte(err.Error() + "\n")
 		return 2, []byte{}, msg, 0, int64(len(msg)), false, false, types.ExecResources{}, nil
 	}
+	// Debug: log whether AGENTSH_IN_SESSION is in the environment
+	hasInSession := false
+	for _, e := range env {
+		if strings.HasPrefix(e, "AGENTSH_IN_SESSION=") {
+			hasInSession = true
+			break
+		}
+	}
+	slog.Debug("exec env built", "command", req.Command, "has_AGENTSH_IN_SESSION", hasInSession, "env_count", len(env))
 	if envPol.BlockIteration {
 		env = maybeAddShimEnv(env, envPol, cfg)
 	}

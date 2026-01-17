@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -270,6 +271,15 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	}
 
 	env, _ := buildPolicyEnv(policy.ResolvedEnvPolicy{}, os.Environ(), s, req.Env)
+	// Debug: log whether AGENTSH_IN_SESSION is in the environment
+	hasInSession := false
+	for _, e := range env {
+		if strings.HasPrefix(e, "AGENTSH_IN_SESSION=") {
+			hasInSession = true
+			break
+		}
+	}
+	slog.Debug("exec_stream env built", "command", req.Command, "has_AGENTSH_IN_SESSION", hasInSession, "env_count", len(env))
 	// Add extra environment variables from seccomp wrapper config
 	if extra != nil && len(extra.env) > 0 {
 		for k, v := range extra.env {
