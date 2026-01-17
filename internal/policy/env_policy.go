@@ -99,9 +99,17 @@ func BuildEnv(pol ResolvedEnvPolicy, baseEnv []string, addKeys map[string]string
 		}
 	}
 
-	// Additional explicit keys
+	// Additional explicit keys - these go through policy filtering
 	for k, v := range addKeys {
 		if isAllowed(k) {
+			allowed[k] = v
+		}
+	}
+
+	// Internal variables that MUST always be present (bypass policy filtering).
+	// These are required for agentsh internals to function correctly.
+	for k, v := range addKeys {
+		if isInternalVar(k) {
 			allowed[k] = v
 		}
 	}
@@ -194,6 +202,13 @@ func ValidateEnvPolicy(p EnvPolicy) error {
 		return errors.New("max_bytes/max_keys must be non-negative")
 	}
 	return nil
+}
+
+// isInternalVar returns true for agentsh internal variables that must
+// always be present regardless of policy filtering. These are required
+// for agentsh internals to function correctly (e.g., recursion guards).
+func isInternalVar(name string) bool {
+	return strings.HasPrefix(name, "AGENTSH_")
 }
 
 // defaultSecretDeny contains environment variables that are blocked by default
