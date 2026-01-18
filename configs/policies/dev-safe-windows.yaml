@@ -336,6 +336,42 @@ command_rules:
       - hostname
     decision: allow
 
+  - name: no-direct-push-to-main
+    commands: [git]
+    args_match: "push.*(origin\\s+)?(main|master)"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["Push declined. Create a branch and open a pull request instead."]
+    message: "Direct pushes to main/master are not allowed. Use feature branches and pull requests."
+
+  - name: no-force-push
+    commands: [git]
+    args_match: "push.*(--force|-f)"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["Force push blocked. Resolve conflicts through proper merge."]
+    message: "Force pushing is not allowed—merge changes through the standard workflow."
+
+  - name: no-hard-reset
+    commands: [git]
+    args_match: "reset.*(--hard)"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["Hard reset blocked. Use git stash or git checkout to preserve changes."]
+    message: "git reset --hard discards uncommitted work. Use non-destructive alternatives."
+
+  - name: no-git-clean
+    commands: [git]
+    args_match: "clean.*(-f|--force)"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["git clean blocked. Untracked files may be needed—review before deleting."]
+    message: "git clean -fd permanently deletes untracked files. Review them manually first."
+
   - name: allow-dev-tools
     description: Development tools
     commands:
