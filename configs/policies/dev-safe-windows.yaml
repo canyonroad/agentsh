@@ -338,7 +338,8 @@ command_rules:
 
   - name: no-direct-push-to-main
     commands: [git]
-    args_match: "push.*(origin\\s+)?(main|master)"
+    args_patterns:
+      - "push.*(origin\\s+)?(main|master)"
     decision: redirect
     redirect_to:
       command: echo
@@ -347,7 +348,8 @@ command_rules:
 
   - name: no-force-push
     commands: [git]
-    args_match: "push.*(--force|-f)"
+    args_patterns:
+      - "push.*(--force|-f)"
     decision: redirect
     redirect_to:
       command: echo
@@ -356,7 +358,8 @@ command_rules:
 
   - name: no-hard-reset
     commands: [git]
-    args_match: "reset.*(--hard)"
+    args_patterns:
+      - "reset.*(--hard)"
     decision: redirect
     redirect_to:
       command: echo
@@ -365,7 +368,8 @@ command_rules:
 
   - name: no-git-clean
     commands: [git]
-    args_match: "clean.*(-f|--force)"
+    args_patterns:
+      - "clean.*(-f|--force)"
     decision: redirect
     redirect_to:
       command: echo
