@@ -7801,7 +7801,7 @@ command_rules:
       
   - name: redirect-git-clone
     commands: [git]
-    args_pattern: ["clone*", "pull*", "fetch*", "push*"]
+    args_patterns: ["clone*", "pull*", "fetch*", "push*"]
     decision: redirect
     redirect_to:
       command: agentsh-git

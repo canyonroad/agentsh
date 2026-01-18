@@ -1015,13 +1015,13 @@ command_rules:
     
   - name: approve-package-install
     commands: [npm, pip, cargo, apt]
-    args_pattern: ["install*", "add*"]
+    args_patterns: ["install*", "add*"]
     decision: approve
     message: "Agent wants to install packages: {args}"
     
   - name: deny-dangerous
     commands: [rm, dd, mkfs, fdisk]
-    args_pattern: ["-rf*", "-r *"]
+    args_patterns: ["-rf*", "-r *"]
     decision: deny
 
 # Registry rules (Windows-only)
