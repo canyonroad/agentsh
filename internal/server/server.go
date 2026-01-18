@@ -19,6 +19,7 @@ import (
 	"github.com/agentsh/agentsh/internal/api"
 	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/auth"
+	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/metrics"
@@ -71,6 +72,13 @@ func New(cfg *config.Config) (*Server, error) {
 		if cfg.Development.DisableAuth || strings.EqualFold(strings.TrimSpace(cfg.Auth.Type), "none") {
 			return nil, fmt.Errorf("approvals.mode=api requires auth.type=api_key (auth is disabled)")
 		}
+	}
+
+	// Check that required kernel capabilities are available for enabled features.
+	// This catches issues like running in a VM/container that doesn't support
+	// ptrace, seccomp user-notify, or eBPF.
+	if err := capabilities.CheckAll(cfg); err != nil {
+		return nil, err
 	}
 
 	pm := policy.NewManager(
