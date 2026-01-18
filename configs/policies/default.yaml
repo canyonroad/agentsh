@@ -417,9 +417,9 @@ command_rules:
     commands:
       - rm
     args_patterns:
-      - "*-rf*"
-      - "*-fr*"
-      - "*--force*--recursive*"
+      - ".*-rf.*"
+      - ".*-fr.*"
+      - ".*--force.*--recursive.*"
     decision: deny
 
   - name: block-system-commands
@@ -455,10 +455,10 @@ command_rules:
       - apt-get
       - yum
     args_patterns:
-      - "install*"
-      - "add*"
-      - "update*"
-      - "upgrade*"
+      - "install.*"
+      - "add.*"
+      - "update.*"
+      - "upgrade.*"
     decision: approve
     message: "Agent wants to install packages: {{.Args}}"
 

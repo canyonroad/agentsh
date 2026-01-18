@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -62,7 +63,7 @@ type compiledCommandRule struct {
 	basenameGlobs []glob.Glob         // Glob patterns for basenames (e.g., "go*", "*")
 	fullPaths     map[string]struct{} // Commands with paths (e.g., "/bin/sh") - match exact path
 	pathGlobs     []glob.Glob         // Glob patterns for paths (e.g., "/usr/*/sh")
-	argsGlobs     []glob.Glob
+	argsRegexes   []*regexp.Regexp    // Regex patterns matched against joined args string
 }
 
 type compiledUnixRule struct {
@@ -191,11 +192,11 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 			}
 		}
 		for _, pat := range r.ArgsPatterns {
-			g, err := glob.Compile(pat)
+			re, err := regexp.Compile(pat)
 			if err != nil {
 				return nil, fmt.Errorf("compile command rule %q arg pattern %q: %w", r.Name, pat, err)
 			}
-			cr.argsGlobs = append(cr.argsGlobs, g)
+			cr.argsRegexes = append(cr.argsRegexes, re)
 		}
 		e.compiledCommandRules = append(e.compiledCommandRules, cr)
 	}
@@ -460,17 +461,13 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 			continue
 		}
 
-		// Check argument patterns if specified
-		if len(r.argsGlobs) > 0 && len(args) > 0 {
+		// Check argument patterns if specified (regex on joined args string)
+		if len(r.argsRegexes) > 0 {
+			argsJoined := strings.Join(args, " ")
 			matched := false
-			for _, arg := range args {
-				for _, g := range r.argsGlobs {
-					if g.Match(arg) {
-						matched = true
-						break
-					}
-				}
-				if matched {
+			for _, re := range r.argsRegexes {
+				if re.MatchString(argsJoined) {
+					matched = true
 					break
 				}
 			}

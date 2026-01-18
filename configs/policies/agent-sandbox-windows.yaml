@@ -374,8 +374,8 @@ command_rules:
       - cargo
       - dotnet
     args_patterns:
-      - "install*"
-      - "add*"
+      - "install.*"
+      - "add.*"
     decision: approve
     message: "Agent wants to install packages: {{.Args}}"
 
@@ -389,8 +389,8 @@ command_rules:
       - del
       - rmdir
     args_patterns:
-      - "*/s*"
-      - "*/q*"
+      - ".*/s.*"
+      - ".*/q.*"
     decision: deny
     message: "Recursive delete blocked. Files can be removed individually."
 

@@ -411,8 +411,8 @@ command_rules:
     commands:
       - rm
     args_patterns:
-      - "*-rf*"
-      - "*-fr*"
+      - ".*-rf.*"
+      - ".*-fr.*"
     decision: deny
 
   - name: block-system-commands

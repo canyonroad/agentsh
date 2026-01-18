@@ -353,8 +353,8 @@ command_rules:
     commands:
       - rm
     args_patterns:
-      - "*-r*"
-      - "*--recursive*"
+      - ".*-r.*"
+      - ".*--recursive.*"
     decision: deny
     message: "Recursive delete blocked"
 

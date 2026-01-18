@@ -277,7 +277,7 @@ func TestEngine_CheckCommand_WithArgs(t *testing.T) {
 			{
 				Name:         "deny-rm-rf",
 				Commands:     []string{"rm"},
-				ArgsPatterns: []string{"-rf*", "-fr*", "--force*"},
+				ArgsPatterns: []string{"-rf", "-fr", "--force"},
 				Decision:     "deny",
 			},
 		},
@@ -377,6 +377,95 @@ func TestEngine_CheckCommand_EmptyPolicy(t *testing.T) {
 			}
 			if dec.Rule != "default-deny-commands" {
 				t.Errorf("expected rule 'default-deny-commands', got %q", dec.Rule)
+			}
+		})
+	}
+}
+
+func TestEngine_CheckCommand_GitSafetyRules(t *testing.T) {
+	p := &Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []CommandRule{
+			{
+				Name:         "no-direct-push-to-main",
+				Commands:     []string{"git"},
+				ArgsPatterns: []string{`push.*(origin\s+)?(main|master)`},
+				Decision:     "deny",
+			},
+			{
+				Name:         "no-force-push",
+				Commands:     []string{"git"},
+				ArgsPatterns: []string{`push.*(--force|-f)`},
+				Decision:     "deny",
+			},
+			{
+				Name:         "no-hard-reset",
+				Commands:     []string{"git"},
+				ArgsPatterns: []string{`reset.*(--hard)`},
+				Decision:     "deny",
+			},
+			{
+				Name:         "no-git-clean",
+				Commands:     []string{"git"},
+				ArgsPatterns: []string{`clean.*(-f|--force)`},
+				Decision:     "deny",
+			},
+			{
+				Name:     "allow-git",
+				Commands: []string{"git"},
+				Decision: "allow",
+			},
+		},
+	}
+	e, err := NewEngine(p, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		args     []string
+		decision types.Decision
+		rule     string
+	}{
+		// push to main/master should be blocked
+		{"push origin main", []string{"push", "origin", "main"}, types.DecisionDeny, "no-direct-push-to-main"},
+		{"push main", []string{"push", "main"}, types.DecisionDeny, "no-direct-push-to-main"},
+		{"push origin master", []string{"push", "origin", "master"}, types.DecisionDeny, "no-direct-push-to-main"},
+		// push to feature branch should be allowed
+		{"push origin feature", []string{"push", "origin", "feature"}, types.DecisionAllow, "allow-git"},
+		// checkout main should be allowed (not a push)
+		{"checkout main", []string{"checkout", "main"}, types.DecisionAllow, "allow-git"},
+		
+		// force push should be blocked
+		{"push --force", []string{"push", "--force"}, types.DecisionDeny, "no-force-push"},
+		{"push -f", []string{"push", "-f"}, types.DecisionDeny, "no-force-push"},
+		// push origin main --force matches no-direct-push-to-main first (rule order)
+		{"push origin main --force", []string{"push", "origin", "main", "--force"}, types.DecisionDeny, "no-direct-push-to-main"},
+		
+		// hard reset should be blocked
+		{"reset --hard", []string{"reset", "--hard"}, types.DecisionDeny, "no-hard-reset"},
+		{"reset --hard HEAD~1", []string{"reset", "--hard", "HEAD~1"}, types.DecisionDeny, "no-hard-reset"},
+		// soft reset should be allowed
+		{"reset --soft", []string{"reset", "--soft"}, types.DecisionAllow, "allow-git"},
+		
+		// git clean -f should be blocked
+		{"clean -f", []string{"clean", "-f"}, types.DecisionDeny, "no-git-clean"},
+		{"clean -fd", []string{"clean", "-fd"}, types.DecisionDeny, "no-git-clean"},
+		{"clean --force", []string{"clean", "--force"}, types.DecisionDeny, "no-git-clean"},
+		// git status should be allowed
+		{"status", []string{"status"}, types.DecisionAllow, "allow-git"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dec := e.CheckCommand("git", tc.args)
+			if dec.PolicyDecision != tc.decision {
+				t.Errorf("expected decision %s, got %s (rule=%s)", tc.decision, dec.PolicyDecision, dec.Rule)
+			}
+			if dec.Rule != tc.rule {
+				t.Errorf("expected rule %q, got %q", tc.rule, dec.Rule)
 			}
 		})
 	}

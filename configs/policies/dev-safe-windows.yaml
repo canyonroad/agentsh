@@ -400,8 +400,8 @@ command_rules:
       - del
       - rmdir
     args_patterns:
-      - "*/s*"
-      - "*/q*"
+      - ".*/s.*"
+      - ".*/q.*"
     decision: deny
 
   - name: block-system-commands

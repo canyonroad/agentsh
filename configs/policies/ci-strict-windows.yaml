@@ -277,8 +277,8 @@ command_rules:
       - powershell
       - pwsh
     args_patterns:
-      - "*-i*"
-      - "*-NoExit*"
+      - ".*-i.*"
+      - ".*-NoExit.*"
     decision: deny
 
   # ---------------------------------------------------------------------------
@@ -319,8 +319,8 @@ command_rules:
       - del
       - rmdir
     args_patterns:
-      - "*/s*"
-      - "*/q*"
+      - ".*/s.*"
+      - ".*/q.*"
     decision: deny
 
   - name: block-network-tools

@@ -260,8 +260,8 @@ command_rules:
       - sh
       - zsh
     args_patterns:
-      - "-i*"
-      - "--login*"
+      - "-i.*"
+      - "--login.*"
     decision: deny
 
   # ---------------------------------------------------------------------------
@@ -300,8 +300,8 @@ command_rules:
     commands:
       - rm
     args_patterns:
-      - "*-rf*"
-      - "*-fr*"
+      - ".*-rf.*"
+      - ".*-fr.*"
     decision: deny
 
   - name: block-network-tools

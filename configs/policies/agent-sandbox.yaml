@@ -387,8 +387,8 @@ command_rules:
       - pip3
       - cargo
     args_patterns:
-      - "install*"
-      - "add*"
+      - "install.*"
+      - "add.*"
     decision: approve
     message: "Agent wants to install packages: {{.Args}}"
 
@@ -401,8 +401,8 @@ command_rules:
     commands:
       - rm
     args_patterns:
-      - "*-r*"
-      - "*--recursive*"
+      - ".*-r.*"
+      - ".*--recursive.*"
     decision: deny
     message: "Recursive delete blocked. Files can be removed individually."
 
