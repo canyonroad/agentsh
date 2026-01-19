@@ -10,9 +10,108 @@ agentsh supports **Linux** and **macOS** natively. Linux provides the most compl
 
 If you're on Windows, the recommended approach is to run agentsh inside WSL2 or a Linux container. Unix socket enforcement (seccomp user-notify) is Linux-only.
 
+## Linux Security Levels
+
+Linux security features vary significantly depending on kernel version, runtime environment, and available privileges. agentsh automatically detects available features and selects the best security mode.
+
+### Environment Compatibility Matrix
+
+| Environment | seccomp | eBPF | Landlock | FUSE | Capabilities |
+|-------------|---------|------|----------|------|--------------|
+| Native Linux (kernel 6.7+) | ✅ | ✅ | ✅ (ABI v4) | ✅ | ✅ |
+| Native Linux (kernel 5.13-6.6) | ✅ | ✅ | ✅ (ABI v1-3) | ✅ | ✅ |
+| Native Linux (kernel < 5.13) | ✅ | ✅ | ❌ | ✅ | ✅ |
+| Docker (privileged) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Docker (unprivileged) | ❌* | ❌ | ✅ | ❌† | ✅ |
+| Kubernetes (standard) | ❌* | ❌ | ✅ | ❌† | ✅ |
+| Nested containers | ❌ | ❌ | ✅ | ❌ | ✅ |
+| gVisor/Firecracker | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+\* Requires seccomp user-notify support in container runtime
+† Requires `/dev/fuse` device and `SYS_ADMIN` capability
+
+### Security Mode by Environment
+
+Based on available features, agentsh selects one of four security modes:
+
+| Mode | Score | Typical Environment | Key Protections |
+|------|-------|---------------------|-----------------|
+| `full` | 100% | Native Linux, privileged containers | seccomp syscall filtering, eBPF network, FUSE filesystem |
+| `landlock` | ~85% | Unprivileged containers with FUSE | Landlock kernel sandbox + FUSE fine-grained control |
+| `landlock-only` | ~80% | Unprivileged containers, restricted runtimes | Landlock kernel sandbox, shim policy enforcement |
+| `minimal` | ~50% | gVisor, Firecracker, highly restricted | Capability dropping, shim policy only |
+
+### Feature Availability by Kernel Version
+
+| Kernel | Landlock ABI | Network Control | Filesystem Control |
+|--------|--------------|-----------------|-------------------|
+| 6.10+ | v5 | TCP bind/connect | Full + IOCTL |
+| 6.7+ | v4 | TCP bind/connect | Full |
+| 6.2+ | v3 | None | Full + truncate |
+| 5.19+ | v2 | None | Full + REFER |
+| 5.13+ | v1 | None | Basic |
+| < 5.13 | N/A | None (use eBPF) | None (use seccomp) |
+
+### What You Lose Without seccomp
+
+When seccomp is unavailable (nested containers, restricted runtimes):
+
+| Feature | With seccomp | Without seccomp | Mitigation |
+|---------|--------------|-----------------|------------|
+| Signal interception | Kernel-level | ❌ | PID namespace + dropped CAP_KILL |
+| Abstract Unix sockets | Blocked | ❌ | Path-based sockets blocked via Landlock |
+| Syscall filtering | 400+ syscalls | ❌ | Landlock + capabilities cover most cases |
+| Fine-grained execution | Per-syscall | ❌ | Landlock execute paths + shim |
+
+### What You Lose Without eBPF
+
+When eBPF is unavailable:
+
+| Feature | With eBPF | Without eBPF | Mitigation |
+|---------|-----------|--------------|------------|
+| Network visibility | All traffic | ❌ | Proxy-based monitoring |
+| Connection tracking | Kernel-level | ❌ | Landlock TCP (kernel 6.7+) |
+| DNS inspection | Deep | Proxy-level | DNS proxy |
+
+### Detection and Fallback
+
+agentsh performs capability detection at startup:
+
+```
+INFO  security capabilities detected
+        seccomp_user_notify=false    # Not available in this container
+        ebpf=false                   # No CAP_BPF
+        landlock=true
+        landlock_abi=4               # Kernel 6.7+
+        landlock_network=true        # Can restrict TCP
+        fuse=false                   # No /dev/fuse
+        capabilities=true            # Can drop caps
+
+INFO  selected security mode
+        mode=landlock-only
+        protection_score=80%
+```
+
+### Forcing Specific Modes
+
+Override auto-detection in configuration:
+
+```yaml
+security:
+  # Force a specific mode (fails if requirements not met when strict=true)
+  mode: landlock-only
+  strict: true
+
+  # Or set a minimum acceptable mode
+  mode: auto
+  minimum_mode: landlock-only  # Fail if only minimal is available
+```
+
+See [Security Modes](security-modes.md) for detailed mode configuration.
+
 ## What works today
 
-- **Linux (native):** primary supported platform with full feature set.
+- **Linux (native):** primary supported platform with tiered security (full → landlock → landlock-only → minimal depending on environment). See [Linux Security Levels](#linux-security-levels) above.
 - **macOS ESF+NE (enterprise):** Endpoint Security Framework + Network Extension for near-Linux enforcement (ESF needs Apple approval; NE is standard).
 - **macOS FUSE-T (standard):** FUSE-T support for file policy enforcement (requires `brew install fuse-t` and CGO).
 - **Windows:** run in **WSL2** (recommended) or a Linux container.
@@ -359,6 +458,38 @@ docker run --rm -it \
   -v "$(pwd)":/workspace \
   ghcr.io/agentsh/agentsh:latest
 ```
+
+## Detecting Available Capabilities
+
+Use `agentsh detect` to probe your environment and see what security features are available:
+
+```bash
+# Show capabilities in table format (default)
+agentsh detect
+
+# Output as JSON for scripting
+agentsh detect --output json
+
+# Output as YAML
+agentsh detect --output yaml
+```
+
+### Generating Optimized Configuration
+
+Use `agentsh detect config` to generate a configuration snippet optimized for your environment:
+
+```bash
+# Print to stdout
+agentsh detect config
+
+# Write to file
+agentsh detect config --output security.yaml
+
+# Redirect to file
+agentsh detect config > my-config.yaml
+```
+
+The generated config includes only security-related sections (`security:`, `landlock:`, `capabilities:`) that you can merge into your main configuration file.
 
 ## Troubleshooting
 

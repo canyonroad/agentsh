@@ -46,6 +46,7 @@ func NewRoot(version string) *cobra.Command {
 	cmd.AddCommand(newNetworkACLCmd())
 	cmd.AddCommand(newDaemonCmd())
 	cmd.AddCommand(newTaintCmd())
+	cmd.AddCommand(newDetectCmd())
 
 	return cmd
 }
