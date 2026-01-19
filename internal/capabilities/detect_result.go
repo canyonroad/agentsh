@@ -4,6 +4,9 @@ package capabilities
 
 import (
 	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -40,4 +43,62 @@ func (r *DetectResult) JSON() ([]byte, error) {
 // YAML returns the detection result as YAML bytes.
 func (r *DetectResult) YAML() ([]byte, error) {
 	return yaml.Marshal(r)
+}
+
+// Table returns a human-readable table representation.
+func (r *DetectResult) Table() string {
+	var sb strings.Builder
+
+	// Header
+	sb.WriteString(fmt.Sprintf("Platform: %s\n", r.Platform))
+	sb.WriteString(fmt.Sprintf("Security Mode: %s\n", r.SecurityMode))
+	sb.WriteString(fmt.Sprintf("Protection Score: %d%%\n", r.ProtectionScore))
+	sb.WriteString("\n")
+
+	// Capabilities table
+	sb.WriteString("CAPABILITIES\n")
+	sb.WriteString(strings.Repeat("-", 40) + "\n")
+
+	// Sort capability keys for consistent output
+	keys := make([]string, 0, len(r.Capabilities))
+	for k := range r.Capabilities {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		v := r.Capabilities[k]
+		status := formatCapabilityValue(v)
+		sb.WriteString(fmt.Sprintf("  %-24s %s\n", k, status))
+	}
+
+	// Tips section
+	if len(r.Tips) > 0 {
+		sb.WriteString("\nTIPS\n")
+		sb.WriteString(strings.Repeat("-", 40) + "\n")
+		for _, tip := range r.Tips {
+			sb.WriteString(fmt.Sprintf("  %s: %s\n", tip.Feature, tip.Impact))
+			sb.WriteString(fmt.Sprintf("    -> %s\n", tip.Action))
+		}
+	}
+
+	sb.WriteString("\nRun 'agentsh detect config' to generate an optimized configuration.\n")
+
+	return sb.String()
+}
+
+func formatCapabilityValue(v any) string {
+	switch val := v.(type) {
+	case bool:
+		if val {
+			return "✓"
+		}
+		return "-"
+	case int:
+		return fmt.Sprintf("✓ (v%d)", val)
+	case string:
+		return val
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
