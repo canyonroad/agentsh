@@ -10,22 +10,25 @@ import (
 )
 
 type Config struct {
-	Platform      PlatformConfig             `yaml:"platform"`
-	Server        ServerConfig               `yaml:"server"`
-	Auth          AuthConfig                 `yaml:"auth"`
-	Logging       LoggingConfig              `yaml:"logging"`
-	Audit         AuditConfig                `yaml:"audit"`
-	Sessions      SessionsConfig             `yaml:"sessions"`
-	Sandbox       SandboxConfig              `yaml:"sandbox"`
-	Policies      PoliciesConfig             `yaml:"policies"`
-	MountProfiles map[string]MountProfile    `yaml:"mount_profiles"`
-	Approvals     ApprovalsConfig            `yaml:"approvals"`
-	Metrics       MetricsConfig              `yaml:"metrics"`
-	Health        HealthConfig               `yaml:"health"`
-	Development   DevelopmentConfig          `yaml:"development"`
-	Proxy         ProxyConfig                `yaml:"proxy"`
-	DLP           DLPConfig                  `yaml:"dlp"`
-	LLMStorage    LLMStorageConfig           `yaml:"llm_storage"`
+	Platform          PlatformConfig          `yaml:"platform"`
+	Server            ServerConfig            `yaml:"server"`
+	Auth              AuthConfig              `yaml:"auth"`
+	Logging           LoggingConfig           `yaml:"logging"`
+	Audit             AuditConfig             `yaml:"audit"`
+	Sessions          SessionsConfig          `yaml:"sessions"`
+	Sandbox           SandboxConfig           `yaml:"sandbox"`
+	Policies          PoliciesConfig          `yaml:"policies"`
+	MountProfiles     map[string]MountProfile `yaml:"mount_profiles"`
+	Approvals         ApprovalsConfig         `yaml:"approvals"`
+	Metrics           MetricsConfig           `yaml:"metrics"`
+	Health            HealthConfig            `yaml:"health"`
+	Development       DevelopmentConfig       `yaml:"development"`
+	Proxy             ProxyConfig             `yaml:"proxy"`
+	DLP               DLPConfig               `yaml:"dlp"`
+	LLMStorage        LLMStorageConfig        `yaml:"llm_storage"`
+	Security          SecurityConfig          `yaml:"security"`
+	Landlock          LandlockConfig          `yaml:"landlock"`
+	LinuxCapabilities CapabilitiesConfig      `yaml:"capabilities"`
 }
 
 // PlatformConfig configures cross-platform selection and fallback behavior.
@@ -457,6 +460,36 @@ type MCPRateLimitsConfig struct {
 type MCPRateLimit struct {
 	CallsPerMinute int `yaml:"calls_per_minute"`
 	Burst          int `yaml:"burst"`
+}
+
+// SecurityConfig controls security mode selection and strictness.
+type SecurityConfig struct {
+	Mode         string `yaml:"mode"`          // auto, full, landlock, landlock-only, minimal
+	Strict       bool   `yaml:"strict"`        // Fail if mode requirements not met
+	MinimumMode  string `yaml:"minimum_mode"`  // Fail if auto-detect picks worse
+	WarnDegraded bool   `yaml:"warn_degraded"` // Log warnings in degraded mode
+}
+
+// LandlockConfig controls Landlock sandbox settings.
+type LandlockConfig struct {
+	Enabled      bool                  `yaml:"enabled"`
+	AllowExecute []string              `yaml:"allow_execute"` // Paths where execute is allowed
+	AllowRead    []string              `yaml:"allow_read"`    // Paths where read is allowed
+	AllowWrite   []string              `yaml:"allow_write"`   // Paths where write is allowed
+	DenyPaths    []string              `yaml:"deny_paths"`    // Paths to deny (by omission)
+	Network      LandlockNetworkConfig `yaml:"network"`
+}
+
+// LandlockNetworkConfig controls Landlock network restrictions (kernel 6.7+).
+type LandlockNetworkConfig struct {
+	AllowConnectTCP bool  `yaml:"allow_connect_tcp"` // Allow outbound TCP
+	AllowBindTCP    bool  `yaml:"allow_bind_tcp"`    // Allow listening
+	BindPorts       []int `yaml:"bind_ports"`        // Specific ports if bind allowed
+}
+
+// CapabilitiesConfig controls Linux capability dropping.
+type CapabilitiesConfig struct {
+	Allow []string `yaml:"allow"` // Capabilities to keep (empty = drop all droppable)
 }
 
 // PoliciesConfig configures policy loading.
@@ -905,6 +938,17 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		cfg.LLMStorage.Retention.Eviction = "oldest_first"
 	}
 	// StoreBodies default is false, which is the zero value, so no need to set
+
+	// Security defaults
+	if cfg.Security.Mode == "" {
+		cfg.Security.Mode = "auto"
+	}
+	// Default to warning when running in degraded mode
+	if !cfg.Security.WarnDegraded {
+		// Only set default if not explicitly set
+		// Since we can't distinguish false from unset, default to true for new configs
+		cfg.Security.WarnDegraded = true
+	}
 }
 
 // applyDefaults wraps applyDefaultsWithSource for backward compatibility.
@@ -974,6 +1018,20 @@ func validateConfig(cfg *Config) error {
 	case "", "allow", "deny":
 	default:
 		return fmt.Errorf("invalid sandbox.xpc.mach_services.default_action %q", cfg.Sandbox.XPC.MachServices.DefaultAction)
+	}
+	// Validate security mode
+	switch cfg.Security.Mode {
+	case "", "auto", "full", "landlock", "landlock-only", "minimal":
+	default:
+		return fmt.Errorf("invalid security.mode %q", cfg.Security.Mode)
+	}
+	// Validate minimum_mode if specified
+	if cfg.Security.MinimumMode != "" {
+		switch cfg.Security.MinimumMode {
+		case "full", "landlock", "landlock-only", "minimal":
+		default:
+			return fmt.Errorf("invalid security.minimum_mode %q", cfg.Security.MinimumMode)
+		}
 	}
 	return nil
 }
