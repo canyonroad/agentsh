@@ -7,28 +7,32 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"unsafe"
 )
 
 /*
-#include <sys/sysctl.h>
 #include <libproc.h>
+#include <sys/proc_info.h>
 */
 import "C"
 
-// captureSnapshotImpl captures process info using sysctl and libproc on macOS.
+// captureSnapshotImpl captures process info using libproc on macOS.
 func captureSnapshotImpl(pid int) (*ProcessSnapshot, error) {
 	snapshot := &ProcessSnapshot{}
 
-	// Get process info using sysctl
-	info, err := getProcessInfo(pid)
-	if err != nil {
-		return nil, err
+	// Get process info using proc_pidinfo
+	var info C.struct_proc_bsdinfo
+	ret := C.proc_pidinfo(C.int(pid), C.PROC_PIDTBSDINFO, 0,
+		unsafe.Pointer(&info), C.int(unsafe.Sizeof(info)))
+	if ret <= 0 {
+		return nil, fmt.Errorf("proc_pidinfo failed for pid %d", pid)
 	}
 
-	snapshot.Comm = info.comm
-	snapshot.StartTime = info.startTime
+	// Extract comm (process name)
+	snapshot.Comm = C.GoString(&info.pbi_comm[0])
+
+	// Extract start time (seconds since epoch)
+	snapshot.StartTime = uint64(info.pbi_start_tvsec)
 
 	// Get executable path using proc_pidpath
 	snapshot.ExePath = getExePath(pid)
@@ -37,44 +41,6 @@ func captureSnapshotImpl(pid int) (*ProcessSnapshot, error) {
 	snapshot.Cmdline = getCmdline(pid)
 
 	return snapshot, nil
-}
-
-type darwinProcessInfo struct {
-	comm      string
-	startTime uint64
-}
-
-func getProcessInfo(pid int) (*darwinProcessInfo, error) {
-	// Use KERN_PROC_PID to get process info
-	mib := []int32{C.CTL_KERN, C.KERN_PROC, C.KERN_PROC_PID, int32(pid)}
-
-	var info C.struct_kinfo_proc
-	size := C.size_t(unsafe.Sizeof(info))
-
-	_, _, errno := syscall.Syscall6(
-		syscall.SYS___SYSCTL,
-		uintptr(unsafe.Pointer(&mib[0])),
-		uintptr(len(mib)),
-		uintptr(unsafe.Pointer(&info)),
-		uintptr(unsafe.Pointer(&size)),
-		0,
-		0,
-	)
-
-	if errno != 0 {
-		return nil, fmt.Errorf("sysctl failed: %v", errno)
-	}
-
-	// Extract comm (process name)
-	comm := C.GoString(&info.kp_proc.p_comm[0])
-
-	// Extract start time (seconds since epoch)
-	startTime := uint64(info.kp_proc.p_starttime.tv_sec)
-
-	return &darwinProcessInfo{
-		comm:      comm,
-		startTime: startTime,
-	}, nil
 }
 
 func getExePath(pid int) string {
