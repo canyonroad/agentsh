@@ -848,6 +848,29 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		}
 	}
 
+	// Execve interception defaults - apply when enabled but not fully configured
+	if cfg.Sandbox.Seccomp.Execve.Enabled {
+		defaults := DefaultExecveConfig()
+		if cfg.Sandbox.Seccomp.Execve.MaxArgc == 0 {
+			cfg.Sandbox.Seccomp.Execve.MaxArgc = defaults.MaxArgc
+		}
+		if cfg.Sandbox.Seccomp.Execve.MaxArgvBytes == 0 {
+			cfg.Sandbox.Seccomp.Execve.MaxArgvBytes = defaults.MaxArgvBytes
+		}
+		if cfg.Sandbox.Seccomp.Execve.OnTruncated == "" {
+			cfg.Sandbox.Seccomp.Execve.OnTruncated = defaults.OnTruncated
+		}
+		if cfg.Sandbox.Seccomp.Execve.ApprovalTimeout == 0 {
+			cfg.Sandbox.Seccomp.Execve.ApprovalTimeout = defaults.ApprovalTimeout
+		}
+		if cfg.Sandbox.Seccomp.Execve.ApprovalTimeoutAction == "" {
+			cfg.Sandbox.Seccomp.Execve.ApprovalTimeoutAction = defaults.ApprovalTimeoutAction
+		}
+		if len(cfg.Sandbox.Seccomp.Execve.InternalBypass) == 0 {
+			cfg.Sandbox.Seccomp.Execve.InternalBypass = defaults.InternalBypass
+		}
+	}
+
 	// macOS XPC defaults
 	if cfg.Sandbox.XPC.Mode == "" {
 		cfg.Sandbox.XPC.Mode = "enforce"

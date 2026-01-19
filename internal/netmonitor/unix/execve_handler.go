@@ -83,20 +83,33 @@ func (h *ExecveHandler) SetEmitter(emitter ExecveEmitter) {
 	h.emitter = emitter
 }
 
+// RegisterSession registers the session root PID for depth tracking.
+// The root is registered at depth -1 so first command (direct) is at depth 0.
+func (h *ExecveHandler) RegisterSession(pid int, sessionID string) {
+	if h.depthTracker != nil {
+		h.depthTracker.RegisterSession(pid, sessionID)
+	}
+}
+
 // Handle processes an execve notification and returns the decision.
 func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
-	// Check internal bypass first (fast path)
-	if h.isInternalBypass(ctx.Filename) {
-		return ExecveResult{Allow: true, Rule: "internal_bypass"}
-	}
-
-	// Get depth from tracker
+	// Get depth from tracker first - needed even for internal bypass
+	// so that children of bypassed binaries inherit correct depth
 	if h.depthTracker != nil {
 		state, ok := h.depthTracker.Get(ctx.ParentPID)
 		if ok {
 			ctx.Depth = state.Depth + 1
 			ctx.SessionID = state.SessionID
 		}
+	}
+
+	// Check internal bypass (fast path, but still track depth)
+	if h.isInternalBypass(ctx.Filename) {
+		// Record for depth tracking so children inherit correct depth
+		if h.depthTracker != nil {
+			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
+		}
+		return ExecveResult{Allow: true, Rule: "internal_bypass"}
 	}
 
 	// Check truncation policy
@@ -137,7 +150,9 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 	decision := h.policy.CheckExecve(ctx.Filename, ctx.Argv, ctx.Depth)
 
 	switch decision.Decision {
-	case "allow":
+	case "allow", "audit", "redirect":
+		// Allow, audit, and redirect all permit execution for execve
+		// (redirect is for command redirect, not blocking)
 		// Record this PID for depth tracking
 		if h.depthTracker != nil {
 			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
@@ -156,7 +171,7 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 		h.emitEvent(ctx, result, decision.Rule)
 		return result
 
-	case "approval":
+	case "approve":
 		// TODO: implement approval flow with timeout
 		result := ExecveResult{
 			Allow:  false,

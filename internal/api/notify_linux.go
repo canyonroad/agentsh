@@ -12,6 +12,7 @@ import (
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
+	"golang.org/x/sys/unix"
 )
 
 // recvFDTimeout is the timeout for receiving the notify fd from the wrapper.
@@ -67,8 +68,9 @@ type policyEngineWrapper struct {
 
 func (w *policyEngineWrapper) CheckExecve(filename string, argv []string, depth int) unixmon.PolicyDecision {
 	dec := w.engine.CheckExecve(filename, argv, depth)
+	// Use PolicyDecision (not EffectiveDecision) to preserve redirect/audit/approve semantics
 	return unixmon.PolicyDecision{
-		Decision: string(dec.EffectiveDecision),
+		Decision: string(dec.PolicyDecision),
 		Rule:     dec.Rule,
 		Message:  dec.Message,
 	}
@@ -86,6 +88,16 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 	// Run the entire receive and serve logic in a goroutine to return immediately
 	go func() {
 		defer parentSock.Close()
+
+		// Get the wrapper's PID from socket credentials for session tracking
+		// This is the process that will exec the user's command
+		var wrapperPID int
+		ucred, err := unix.GetsockoptUcred(int(parentSock.Fd()), unix.SOL_SOCKET, unix.SO_PEERCRED)
+		if err != nil {
+			slog.Debug("failed to get socket peer credentials", "error", err)
+		} else {
+			wrapperPID = int(ucred.Pid)
+		}
 
 		// Set a read deadline to prevent blocking forever if wrapper fails
 		if err := parentSock.SetReadDeadline(time.Now().Add(recvFDTimeout)); err != nil {
@@ -113,6 +125,11 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 			h, _ = execveHandler.(*unixmon.ExecveHandler)
 			if h != nil {
 				h.SetEmitter(emitter)
+				// Register the wrapper as session root for depth tracking
+				// The wrapper's exec will be the first command (depth 0)
+				if wrapperPID > 0 {
+					h.RegisterSession(wrapperPID, sessID)
+				}
 			}
 		}
 		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h)

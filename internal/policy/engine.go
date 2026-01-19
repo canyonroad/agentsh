@@ -417,6 +417,12 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 	cmdBase := strings.ToLower(filepath.Base(command))
 
 	for _, r := range e.compiledCommandRules {
+		// Pre-check is always depth 0 (direct command from user)
+		// Skip rules that don't apply to direct commands
+		if !r.rule.Context.MatchesDepth(0) {
+			continue
+		}
+
 		// Check if command matches any of the rule's patterns
 		commandMatched := false
 
