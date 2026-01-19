@@ -14,6 +14,7 @@ func TestLoadConfig(t *testing.T) {
 		cfg, err := loadConfig()
 		require.NoError(t, err)
 		require.True(t, cfg.UnixSocketEnabled)
+		require.False(t, cfg.ExecveEnabled)
 		require.Nil(t, cfg.BlockedSyscalls)
 	})
 
@@ -30,6 +31,15 @@ func TestLoadConfig(t *testing.T) {
 		_, err := loadConfig()
 		require.Error(t, err)
 	})
+}
+
+func TestLoadConfig_WithExecve(t *testing.T) {
+	t.Setenv("AGENTSH_SECCOMP_CONFIG", `{"unix_socket_enabled":true,"execve_enabled":true}`)
+
+	cfg, err := loadConfig()
+	require.NoError(t, err)
+	require.True(t, cfg.UnixSocketEnabled)
+	require.True(t, cfg.ExecveEnabled)
 }
 
 func TestParseConfigJSON(t *testing.T) {

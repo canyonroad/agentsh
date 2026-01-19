@@ -49,6 +49,7 @@ func main() {
 	// Build filter config.
 	filterCfg := unixmon.FilterConfig{
 		UnixSocketEnabled: cfg.UnixSocketEnabled,
+		ExecveEnabled:     cfg.ExecveEnabled,
 		BlockedSyscalls:   blockedNrs,
 	}
 
