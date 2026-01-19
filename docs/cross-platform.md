@@ -459,6 +459,38 @@ docker run --rm -it \
   ghcr.io/agentsh/agentsh:latest
 ```
 
+## Detecting Available Capabilities
+
+Use `agentsh detect` to probe your environment and see what security features are available:
+
+```bash
+# Show capabilities in table format (default)
+agentsh detect
+
+# Output as JSON for scripting
+agentsh detect --output json
+
+# Output as YAML
+agentsh detect --output yaml
+```
+
+### Generating Optimized Configuration
+
+Use `agentsh detect config` to generate a configuration snippet optimized for your environment:
+
+```bash
+# Print to stdout
+agentsh detect config
+
+# Write to file
+agentsh detect config --output security.yaml
+
+# Redirect to file
+agentsh detect config > my-config.yaml
+```
+
+The generated config includes only security-related sections (`security:`, `landlock:`, `capabilities:`) that you can merge into your main configuration file.
+
 ## Troubleshooting
 
 - **FUSE mount fails (Linux):** ensure FUSE3 is installed (host/VM) and, in Docker, `/dev/fuse` is present and `SYS_ADMIN` is allowed.
