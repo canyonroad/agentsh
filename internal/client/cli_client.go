@@ -34,6 +34,12 @@ type CLIClient interface {
 
 	PolicyTest(ctx context.Context, sessionID, operation, path string) (map[string]any, error)
 	GetProxyStatus(ctx context.Context, sessionID string) (map[string]any, error)
+
+	// Taint-related operations
+	ListTaints(ctx context.Context, sessionID string) ([]types.TaintInfo, error)
+	GetTaint(ctx context.Context, pid int) (*types.TaintInfo, error)
+	GetTaintTrace(ctx context.Context, pid int) (*types.TaintTrace, error)
+	WatchTaints(ctx context.Context, agentOnly bool, handler func(types.TaintEvent)) error
 }
 
 type CLIOptions struct {
@@ -208,4 +214,24 @@ func (h *HybridClient) GetProxyStatus(ctx context.Context, sessionID string) (ma
 		return h.grpc.GetProxyStatus(ctx, sessionID)
 	}
 	return h.Client.GetProxyStatus(ctx, sessionID)
+}
+
+// ListTaints lists all tainted processes.
+func (h *HybridClient) ListTaints(ctx context.Context, sessionID string) ([]types.TaintInfo, error) {
+	return h.Client.ListTaints(ctx, sessionID)
+}
+
+// GetTaint gets taint info for a specific PID.
+func (h *HybridClient) GetTaint(ctx context.Context, pid int) (*types.TaintInfo, error) {
+	return h.Client.GetTaint(ctx, pid)
+}
+
+// GetTaintTrace gets the full ancestry trace for a PID.
+func (h *HybridClient) GetTaintTrace(ctx context.Context, pid int) (*types.TaintTrace, error) {
+	return h.Client.GetTaintTrace(ctx, pid)
+}
+
+// WatchTaints watches for taint events.
+func (h *HybridClient) WatchTaints(ctx context.Context, agentOnly bool, handler func(types.TaintEvent)) error {
+	return h.Client.WatchTaints(ctx, agentOnly, handler)
 }
