@@ -15,7 +15,7 @@ func TestValidateStrictMode(t *testing.T) {
 			name: "full mode with all caps",
 			mode: ModeFull,
 			caps: SecurityCapabilities{
-				Seccomp: true, eBPF: true, FUSE: true,
+				Seccomp: true, EBPF: true, FUSE: true,
 			},
 			wantErr: false,
 		},
@@ -23,7 +23,7 @@ func TestValidateStrictMode(t *testing.T) {
 			name: "full mode missing seccomp",
 			mode: ModeFull,
 			caps: SecurityCapabilities{
-				Seccomp: false, eBPF: true, FUSE: true,
+				Seccomp: false, EBPF: true, FUSE: true,
 			},
 			wantErr: true,
 		},
@@ -31,7 +31,7 @@ func TestValidateStrictMode(t *testing.T) {
 			name: "full mode missing eBPF",
 			mode: ModeFull,
 			caps: SecurityCapabilities{
-				Seccomp: true, eBPF: false, FUSE: true,
+				Seccomp: true, EBPF: false, FUSE: true,
 			},
 			wantErr: true,
 		},
@@ -39,7 +39,7 @@ func TestValidateStrictMode(t *testing.T) {
 			name: "full mode missing FUSE",
 			mode: ModeFull,
 			caps: SecurityCapabilities{
-				Seccomp: true, eBPF: true, FUSE: false,
+				Seccomp: true, EBPF: true, FUSE: false,
 			},
 			wantErr: true,
 		},
@@ -173,7 +173,7 @@ func TestValidatePolicyForMode(t *testing.T) {
 	caps := &SecurityCapabilities{
 		Seccomp:         false,
 		LandlockNetwork: false,
-		eBPF:            false,
+		EBPF:            false,
 	}
 
 	warnings := ValidatePolicyForMode(caps, true, true, true)
@@ -215,7 +215,7 @@ func TestValidatePolicyForMode_NoWarnings(t *testing.T) {
 	caps := &SecurityCapabilities{
 		Seccomp:         true,
 		LandlockNetwork: true,
-		eBPF:            true,
+		EBPF:            true,
 	}
 
 	warnings := ValidatePolicyForMode(caps, true, true, true)

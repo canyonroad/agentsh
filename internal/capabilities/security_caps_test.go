@@ -27,7 +27,7 @@ func TestSecurityCapabilities_SelectMode(t *testing.T) {
 		{
 			name: "full mode when all available",
 			caps: SecurityCapabilities{
-				Seccomp: true, eBPF: true, FUSE: true, Landlock: true,
+				Seccomp: true, EBPF: true, FUSE: true, Landlock: true,
 				Capabilities: true,
 			},
 			expected: "full",
@@ -35,7 +35,7 @@ func TestSecurityCapabilities_SelectMode(t *testing.T) {
 		{
 			name: "landlock mode when seccomp unavailable",
 			caps: SecurityCapabilities{
-				Seccomp: false, eBPF: false, FUSE: true, Landlock: true,
+				Seccomp: false, EBPF: false, FUSE: true, Landlock: true,
 				Capabilities: true,
 			},
 			expected: "landlock",
@@ -43,7 +43,7 @@ func TestSecurityCapabilities_SelectMode(t *testing.T) {
 		{
 			name: "landlock-only when FUSE also unavailable",
 			caps: SecurityCapabilities{
-				Seccomp: false, eBPF: false, FUSE: false, Landlock: true,
+				Seccomp: false, EBPF: false, FUSE: false, Landlock: true,
 				Capabilities: true,
 			},
 			expected: "landlock-only",
@@ -51,7 +51,7 @@ func TestSecurityCapabilities_SelectMode(t *testing.T) {
 		{
 			name: "minimal when nothing available",
 			caps: SecurityCapabilities{
-				Seccomp: false, eBPF: false, FUSE: false, Landlock: false,
+				Seccomp: false, EBPF: false, FUSE: false, Landlock: false,
 				Capabilities: true,
 			},
 			expected: "minimal",

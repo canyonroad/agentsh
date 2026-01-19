@@ -19,7 +19,7 @@ func ValidateStrictMode(mode string, caps *SecurityCapabilities) error {
 		if !caps.Seccomp {
 			return fmt.Errorf("strict mode %q requires seccomp", mode)
 		}
-		if !caps.eBPF {
+		if !caps.EBPF {
 			return fmt.Errorf("strict mode %q requires eBPF", mode)
 		}
 		if !caps.FUSE {
@@ -96,7 +96,7 @@ func ValidatePolicyForMode(caps *SecurityCapabilities, hasUnixSocketRules, hasSi
 		})
 	}
 
-	if !caps.LandlockNetwork && !caps.eBPF && hasNetworkRules {
+	if !caps.LandlockNetwork && !caps.EBPF && hasNetworkRules {
 		warnings = append(warnings, PolicyWarning{
 			Level:   "warn",
 			Message: "Network rules defined but no enforcement available (need eBPF or Landlock ABI v4+)",

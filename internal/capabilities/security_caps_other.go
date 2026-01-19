@@ -9,7 +9,7 @@ type SecurityCapabilities struct {
 	Landlock        bool // any Landlock support
 	LandlockABI     int  // 1-5, determines features
 	LandlockNetwork bool // ABI v4+, kernel 6.7+
-	eBPF            bool // network monitoring
+	EBPF            bool // network monitoring
 	FUSE            bool // filesystem interception
 	Capabilities    bool // can drop capabilities (always true)
 	PIDNamespace    bool // isolated PID namespace
@@ -33,7 +33,7 @@ func DetectSecurityCapabilities() *SecurityCapabilities {
 // SelectMode returns the best available security mode based on capabilities.
 func (c *SecurityCapabilities) SelectMode() string {
 	// Full mode: all features available
-	if c.Seccomp && c.eBPF && c.FUSE {
+	if c.Seccomp && c.EBPF && c.FUSE {
 		return ModeFull
 	}
 
