@@ -152,6 +152,16 @@ capabilities:
    - Without it, no kernel-level network enforcement is possible
    - eBPF-based network monitoring requires the `full` mode
 
+4. **Landlock network rules are port-specific**
+   - Landlock network rules must specify individual ports; there is no "allow all ports" wildcard
+   - To allow unrestricted network access, network must be excluded from the handled access mask entirely
+   - For selective restrictions (e.g., block bind but allow connect), specific port rules are required
+
+5. **Symlink limitations in deny paths**
+   - Symlinks pointing to denied paths are not explicitly detected during policy setup
+   - However, Landlock operates on resolved paths, so protection is still enforced at the kernel level
+   - Example: `/tmp/link -> /var/run/docker.sock` will be blocked by Landlock even if the symlink is added to allow paths
+
 ### In minimal Mode
 
 - No kernel-level enforcement of execution or filesystem restrictions
@@ -222,6 +232,7 @@ Regardless of security mode, agentsh drops dangerous Linux capabilities:
 | `CAP_DAC_OVERRIDE` | Bypass file permissions |
 | `CAP_DAC_READ_SEARCH` | Bypass read/search permissions |
 | `CAP_SETUID` / `CAP_SETGID` | Change UID/GID |
+| `CAP_SETPCAP` | Modify capability bounding set (could re-add dropped caps) |
 | `CAP_CHOWN` | Change file ownership |
 | `CAP_FOWNER` | Bypass owner permission checks |
 | `CAP_MKNOD` | Create device files |
