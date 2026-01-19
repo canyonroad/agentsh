@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/landlock"
@@ -59,6 +61,7 @@ func (h *LandlockHook) Apply() error {
 	if err != nil {
 		return fmt.Errorf("create landlock ruleset: %w", err)
 	}
+	defer unix.Close(rulesetFd)
 
 	// Enforce the ruleset
 	if err := landlock.Enforce(rulesetFd); err != nil {

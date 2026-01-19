@@ -17,9 +17,17 @@ import (
 // before exec, which requires a wrapper binary. This hook prepares the ruleset that
 // would be passed to such a wrapper.
 //
+// Parameters:
+//   - cfg: Landlock configuration (paths to allow/deny)
+//   - capsCfg: Capabilities configuration (which caps to keep)
+//   - secCaps: Detected security capabilities
+//   - workspace: The workspace path
+//   - pol: The policy for path derivation
+//
 // Returns nil if Landlock is disabled or unavailable.
 func MakeLandlockPostStartHook(
 	cfg *config.LandlockConfig,
+	capsCfg *config.CapabilitiesConfig,
 	secCaps *capabilities.SecurityCapabilities,
 	workspace string,
 	pol *policy.Policy,
@@ -64,7 +72,11 @@ func MakeLandlockPostStartHook(
 
 		// Drop capabilities in the parent's context (this affects children via bounding set)
 		// Note: This is partial protection - full protection requires applying in child
-		if err := capabilities.DropCapabilities(cfg.AllowExecute); err != nil {
+		var capsAllow []string
+		if capsCfg != nil {
+			capsAllow = capsCfg.Allow
+		}
+		if err := capabilities.DropCapabilities(capsAllow); err != nil {
 			slog.Warn("failed to drop capabilities",
 				"error", err,
 				"pid", pid,

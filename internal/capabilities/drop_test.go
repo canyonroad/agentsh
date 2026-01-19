@@ -15,6 +15,7 @@ func TestAlwaysDropCaps(t *testing.T) {
 		"CAP_DAC_OVERRIDE",
 		"CAP_SETUID",
 		"CAP_SETGID",
+		"CAP_SETPCAP",
 		"CAP_NET_ADMIN",
 	}
 
@@ -49,6 +50,11 @@ func TestValidateAllowList(t *testing.T) {
 		{
 			name:    "CAP_SYS_PTRACE is never allowable",
 			allow:   []string{"CAP_SYS_PTRACE"},
+			wantErr: true,
+		},
+		{
+			name:    "CAP_SETPCAP is never allowable",
+			allow:   []string{"CAP_SETPCAP"},
 			wantErr: true,
 		},
 	}

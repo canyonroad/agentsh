@@ -11,7 +11,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Landlock syscall numbers (for amd64)
+// Landlock syscall numbers
+// Note: These are consistent across amd64 and arm64 (verified in Linux 5.13+).
+// If golang.org/x/sys/unix exports these constants in a future version,
+// prefer those for better portability.
 const (
 	SYS_LANDLOCK_CREATE_RULESET = 444
 	SYS_LANDLOCK_ADD_RULE       = 445

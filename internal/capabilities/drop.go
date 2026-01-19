@@ -18,6 +18,7 @@ var alwaysDropCaps = map[string]struct{}{
 	"CAP_DAC_READ_SEARCH": {}, // Bypass read/search permissions
 	"CAP_SETUID":          {}, // Change UID
 	"CAP_SETGID":          {}, // Change GID
+	"CAP_SETPCAP":         {}, // Modify capability bounding set (could re-add dropped caps)
 	"CAP_CHOWN":           {}, // Change file ownership
 	"CAP_FOWNER":          {}, // Bypass owner permission checks
 	"CAP_MKNOD":           {}, // Create device files

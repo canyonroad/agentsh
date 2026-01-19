@@ -15,12 +15,16 @@ func TestMakeLandlockPostStartHook(t *testing.T) {
 		AllowExecute: []string{"/usr/bin", "/bin"},
 	}
 
+	capsCfg := &config.CapabilitiesConfig{
+		Allow: []string{},
+	}
+
 	secCaps := &capabilities.SecurityCapabilities{
 		Landlock:    true,
 		LandlockABI: 3,
 	}
 
-	hook := MakeLandlockPostStartHook(cfg, secCaps, "/tmp/workspace", nil)
+	hook := MakeLandlockPostStartHook(cfg, capsCfg, secCaps, "/tmp/workspace", nil)
 
 	if hook == nil {
 		t.Error("expected non-nil hook when Landlock enabled")
@@ -37,7 +41,7 @@ func TestMakeLandlockPostStartHook_Disabled(t *testing.T) {
 		LandlockABI: 3,
 	}
 
-	hook := MakeLandlockPostStartHook(cfg, secCaps, "/tmp/workspace", nil)
+	hook := MakeLandlockPostStartHook(cfg, nil, secCaps, "/tmp/workspace", nil)
 
 	if hook != nil {
 		t.Error("expected nil hook when Landlock disabled")
@@ -53,7 +57,7 @@ func TestMakeLandlockPostStartHook_Unavailable(t *testing.T) {
 		Landlock: false,
 	}
 
-	hook := MakeLandlockPostStartHook(cfg, secCaps, "/tmp/workspace", nil)
+	hook := MakeLandlockPostStartHook(cfg, nil, secCaps, "/tmp/workspace", nil)
 
 	if hook != nil {
 		t.Error("expected nil hook when Landlock unavailable")

@@ -14,6 +14,9 @@ import (
 )
 
 // Landlock syscall numbers
+// Note: These are consistent across amd64 and arm64 (verified in Linux 5.13+).
+// If golang.org/x/sys/unix exports these constants in a future version,
+// prefer those for better portability.
 const (
 	SYS_LANDLOCK_CREATE_RULESET = 444
 	SYS_LANDLOCK_ADD_RULE       = 445
@@ -148,15 +151,19 @@ func (b *RulesetBuilder) Build() (int, error) {
 		AccessFS: accessFS,
 	}
 
-	// Add network handling for ABI v4+
-	if b.abi >= 4 {
+	// Add network handling for ABI v4+ ONLY if we want to restrict network access.
+	// If both allowNetwork and allowBind are true, we don't add network to HandledAccessNet
+	// because that would allow all network access (no restrictions).
+	// We only handle network when we want to selectively allow/deny.
+	restrictNetwork := b.abi >= 4 && (!b.allowNetwork || !b.allowBind)
+	if restrictNetwork {
 		attr.AccessNet = LANDLOCK_ACCESS_NET_BIND_TCP |
 			LANDLOCK_ACCESS_NET_CONNECT_TCP
 	}
 
 	// Calculate size based on ABI version
 	var attrSize uintptr
-	if b.abi >= 4 {
+	if b.abi >= 4 && restrictNetwork {
 		attrSize = unsafe.Sizeof(attr)
 	} else {
 		attrSize = unsafe.Sizeof(attr.AccessFS)
@@ -222,8 +229,9 @@ func (b *RulesetBuilder) Build() (int, error) {
 		}
 	}
 
-	// Add network rules (ABI v4+)
-	if b.abi >= 4 {
+	// Add network rules (ABI v4+) only when restricting network
+	// When restrictNetwork is true, we add rules for what we ALLOW
+	if restrictNetwork {
 		if b.allowNetwork {
 			if err := b.addNetRule(rulesetFd, LANDLOCK_ACCESS_NET_CONNECT_TCP); err != nil {
 				unix.Close(rulesetFd)
@@ -294,10 +302,22 @@ func (b *RulesetBuilder) addPathRule(rulesetFd int, path string, access uint64) 
 }
 
 func (b *RulesetBuilder) addNetRule(rulesetFd int, access uint64) error {
-	// Network rules in Landlock allow all ports when port=0
+	// IMPORTANT: Landlock network rules are PORT-SPECIFIC.
+	// There is no way to allow "all ports" with a single rule.
+	// Port 0 only allows binding to ephemeral ports (32768-60999), NOT all ports.
+	//
+	// For blanket allow-all network access, the solution is to NOT include
+	// network access in HandledAccessNet at all (handled in Build()).
+	//
+	// This function adds a rule for port 0 which allows:
+	// - For BIND: binding to ephemeral ports only
+	// - For CONNECT: connecting to port 0 (rarely useful)
+	//
+	// For more granular control, we would need to iterate over specific ports.
+	// This is a known limitation documented in security-modes.md.
 	netAttr := landlockNetPortAttr{
 		AllowedAccess: access,
-		Port:          0, // 0 means all ports
+		Port:          0,
 	}
 
 	_, _, errno := syscall.Syscall6(
@@ -314,6 +334,12 @@ func (b *RulesetBuilder) addNetRule(rulesetFd int, access uint64) error {
 	return nil
 }
 
+// isDenied checks if a path is in the deny list.
+// LIMITATION: This check does not resolve symlinks. A symlink pointing to a
+// denied path (e.g., /tmp/link -> /var/run/docker.sock) will not be caught.
+// However, Landlock itself operates on the resolved path, so the actual
+// protection is still in place - we just might add a rule for a symlink
+// that won't be useful.
 func (b *RulesetBuilder) isDenied(path string) bool {
 	for _, deny := range b.denyPaths {
 		if path == deny || strings.HasPrefix(path, deny+string(os.PathSeparator)) {
