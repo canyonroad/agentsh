@@ -286,3 +286,87 @@ func (c *Client) addAuth(req *http.Request) {
 		req.Header.Set("X-API-Key", c.apiKey)
 	}
 }
+
+// ListTaints lists all tainted processes.
+// Note: Server endpoint not yet implemented.
+func (c *Client) ListTaints(ctx context.Context, sessionID string) ([]types.TaintInfo, error) {
+	var out []types.TaintInfo
+	path := "/api/v1/taints"
+	q := url.Values{}
+	if sessionID != "" {
+		q.Set("session_id", sessionID)
+	}
+	if err := c.doJSON(ctx, http.MethodGet, path, q, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GetTaint gets taint info for a specific PID.
+// Note: Server endpoint not yet implemented.
+func (c *Client) GetTaint(ctx context.Context, pid int) (*types.TaintInfo, error) {
+	var out types.TaintInfo
+	path := fmt.Sprintf("/api/v1/taints/%d", pid)
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetTaintTrace gets the full ancestry trace for a PID.
+// Note: Server endpoint not yet implemented.
+func (c *Client) GetTaintTrace(ctx context.Context, pid int) (*types.TaintTrace, error) {
+	var out types.TaintTrace
+	path := fmt.Sprintf("/api/v1/taints/%d/trace", pid)
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// WatchTaints watches for taint events via SSE.
+// Note: Server endpoint not yet implemented.
+func (c *Client) WatchTaints(ctx context.Context, agentOnly bool, handler func(types.TaintEvent)) error {
+	path := "/api/v1/taints/events"
+	if agentOnly {
+		path += "?agent_only=true"
+	}
+
+	u := c.baseURL + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	c.addAuth(req)
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+		return fmt.Errorf("watch taints: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+
+	// Parse SSE stream
+	decoder := json.NewDecoder(resp.Body)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		var event types.TaintEvent
+		if err := decoder.Decode(&event); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		handler(event)
+	}
+}

@@ -69,6 +69,18 @@ func (m *mockCLIClient) PolicyTest(ctx context.Context, sessionID, operation, pa
 func (m *mockCLIClient) GetProxyStatus(ctx context.Context, sessionID string) (map[string]any, error) {
 	return m.proxyStatus, nil
 }
+func (m *mockCLIClient) ListTaints(ctx context.Context, sessionID string) ([]types.TaintInfo, error) {
+	return nil, nil
+}
+func (m *mockCLIClient) GetTaint(ctx context.Context, pid int) (*types.TaintInfo, error) {
+	return nil, nil
+}
+func (m *mockCLIClient) GetTaintTrace(ctx context.Context, pid int) (*types.TaintTrace, error) {
+	return nil, nil
+}
+func (m *mockCLIClient) WatchTaints(ctx context.Context, agentOnly bool, handler func(types.TaintEvent)) error {
+	return nil
+}
 
 func TestPrintSessionCreated(t *testing.T) {
 	tests := []struct {
