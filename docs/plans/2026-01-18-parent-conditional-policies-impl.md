@@ -772,4 +772,23 @@ type TaintEvent struct {
 | Performance regression | Benchmark taint lookup, target <1ms |
 | False positives | Thorough escape hatch testing |
 | Platform differences | Abstract behind interfaces |
+
+## Follow-up Work
+
+The following items are intentionally deferred for future work:
+
+### Server Integration
+- Wire `ContextEngine` and `TaintCache` into the server request path
+- Integrate taint tracking with session lifecycle
+- Add process monitor hooks for taint cache updates
+
+### Taint API Endpoints
+- Implement `/api/v1/taints` server endpoints
+- Add SSE streaming endpoint for taint events
+- Update CLI commands to work with live server data
+
+### ProcessContext Advanced Fields
+- Implement `max_depth` enforcement during taint propagation
+- Implement `stop_at` process class to terminate taint chain
+- Implement `pass_through` process class for taint continuation without policy application
 | Config complexity | Good defaults, examples, validation |

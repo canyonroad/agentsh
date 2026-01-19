@@ -5,6 +5,7 @@ package ancestry
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -449,7 +450,7 @@ func (r *AgentRegistry) CheckMarkerFile(pid int) bool {
 		return false
 	}
 
-	markerPath := filepath.Join(home, ".agentsh", "agent-"+string(rune(pid)))
+	markerPath := filepath.Join(home, ".agentsh", "agent-"+strconv.Itoa(pid))
 	_, err = os.Stat(markerPath)
 	return err == nil
 }
@@ -563,19 +564,26 @@ func (d *BehaviorDetector) GetScore(pid int) float64 {
 	defer d.mu.RUnlock()
 
 	score := 0.0
+	cutoff := time.Now().Add(-d.window)
 
-	// High exec rate (>10/min = 0.3)
+	// High exec rate (>10/min = 0.3) - only count events within window
 	if execs, ok := d.execCounts[pid]; ok {
-		rate := float64(len(execs)) / d.window.Minutes()
+		validCount := 0
+		for _, t := range execs {
+			if t.After(cutoff) {
+				validCount++
+			}
+		}
+		rate := float64(validCount) / d.window.Minutes()
 		if rate > 10 {
 			score += 0.3
 		}
 	}
 
-	// Contacts LLM APIs (0.5)
+	// Contacts LLM APIs (0.5) - only count events within window
 	if events, ok := d.netAccess[pid]; ok {
 		for _, e := range events {
-			if d.llmDomains[e.Domain] {
+			if e.Time.After(cutoff) && d.llmDomains[e.Domain] {
 				score += 0.5
 				break
 			}

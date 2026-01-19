@@ -219,8 +219,9 @@ func (ce *ContextEngine) CheckCommandWithContext(ctx context.Context, pid int, c
 	}
 
 	// 2. Validate taint (race protection)
-	if !ce.validateTaint(taint) {
-		return ce.handleRaceCondition(taint, command, args)
+	validationResult := ce.validateTaint(taint)
+	if validationResult != ancestry.ValidationValid {
+		return ce.handleRaceCondition(validationResult, taint, command, args)
 	}
 
 	// 3. Find the process context
@@ -291,17 +292,18 @@ func (ce *ContextEngine) CheckCommandWithContext(ctx context.Context, pid int, c
 }
 
 // validateTaint checks if the taint data is still valid.
-func (ce *ContextEngine) validateTaint(taint *ancestry.ProcessTaint) bool {
+// Returns the validation result for detailed race policy handling.
+func (ce *ContextEngine) validateTaint(taint *ancestry.ProcessTaint) ancestry.ValidationResult {
 	// Validate source snapshot if available (non-zero snapshot has a StartTime)
 	if taint.SourceSnapshot.StartTime != 0 {
-		return ancestry.ValidateSnapshot(taint.SourcePID, &taint.SourceSnapshot)
+		return ancestry.ValidateSnapshotDetailed(taint.SourcePID, &taint.SourceSnapshot)
 	}
 	// No snapshot to validate - trust cached data
-	return true
+	return ancestry.ValidationValid
 }
 
 // handleRaceCondition handles the case where taint validation fails.
-func (ce *ContextEngine) handleRaceCondition(taint *ancestry.ProcessTaint, command string, args []string) Decision {
+func (ce *ContextEngine) handleRaceCondition(validationResult ancestry.ValidationResult, taint *ancestry.ProcessTaint, command string, args []string) Decision {
 	pctx := ce.findContext(taint.ContextName)
 	if pctx == nil {
 		return ce.Engine.CheckCommand(command, args)
@@ -314,11 +316,28 @@ func (ce *ContextEngine) handleRaceCondition(taint *ancestry.ProcessTaint, comma
 			PolicyDecision:    types.DecisionDeny,
 			EffectiveDecision: types.DecisionDeny,
 			Rule:              "race-condition",
-			Message:           "parent process unavailable for validation",
+			Message:           "taint validation failed",
 		}
 	}
 
-	action := racePolicy.OnMissingParent
+	// Select the appropriate action based on validation result
+	var action string
+	var message string
+	switch validationResult {
+	case ancestry.ValidationMissing:
+		action = racePolicy.OnMissingParent
+		message = "parent process data unavailable"
+	case ancestry.ValidationPIDMismatch:
+		action = racePolicy.OnPIDMismatch
+		message = "PID was reused by a different process"
+	case ancestry.ValidationError:
+		action = racePolicy.OnValidationError
+		message = "error validating process ancestry"
+	default:
+		action = "deny"
+		message = "unknown validation failure"
+	}
+
 	if action == "" {
 		action = "deny"
 	}
@@ -331,7 +350,7 @@ func (ce *ContextEngine) handleRaceCondition(taint *ancestry.ProcessTaint, comma
 			PolicyDecision:    types.DecisionApprove,
 			EffectiveDecision: types.DecisionApprove,
 			Rule:              "race-condition",
-			Message:           "parent process unavailable for validation",
+			Message:           message,
 			Approval:          &types.ApprovalInfo{Required: true, Mode: types.ApprovalModeEnforced},
 		}
 	default: // deny
@@ -339,7 +358,7 @@ func (ce *ContextEngine) handleRaceCondition(taint *ancestry.ProcessTaint, comma
 			PolicyDecision:    types.DecisionDeny,
 			EffectiveDecision: types.DecisionDeny,
 			Rule:              "race-condition",
-			Message:           "parent process unavailable for validation",
+			Message:           message,
 		}
 	}
 }
@@ -355,10 +374,16 @@ func (ce *ContextEngine) findContext(name string) *compiledContext {
 // evaluateContextPolicy evaluates the context-specific policy rules.
 func (ce *ContextEngine) evaluateContextPolicy(pctx *compiledContext, command string, args []string) Decision {
 	cmdBase := strings.ToLower(filepath.Base(command))
+	// Build full command string for matching patterns like "git status"
+	fullCmd := cmdBase
+	if len(args) > 0 {
+		fullCmd = cmdBase + " " + strings.Join(args, " ")
+	}
+	fullCmdLower := strings.ToLower(fullCmd)
 
 	// 1. Check denied commands first (deny always wins)
 	for _, g := range pctx.deniedCmds {
-		if g.Match(cmdBase) || g.Match(strings.ToLower(command)) {
+		if g.Match(cmdBase) || g.Match(strings.ToLower(command)) || g.Match(fullCmdLower) {
 			return Decision{
 				PolicyDecision:    types.DecisionDeny,
 				EffectiveDecision: types.DecisionDeny,
@@ -378,14 +403,14 @@ func (ce *ContextEngine) evaluateContextPolicy(pctx *compiledContext, command st
 
 	// 3. Check require approval commands
 	for _, g := range pctx.requireApproval {
-		if g.Match(cmdBase) || g.Match(strings.ToLower(command)) {
+		if g.Match(cmdBase) || g.Match(strings.ToLower(command)) || g.Match(fullCmdLower) {
 			return ce.wrapDecision("approve", "context:require_approval", "", nil)
 		}
 	}
 
 	// 4. Check allowed commands
 	for _, g := range pctx.allowedCmds {
-		if g.Match(cmdBase) || g.Match(strings.ToLower(command)) {
+		if g.Match(cmdBase) || g.Match(strings.ToLower(command)) || g.Match(fullCmdLower) {
 			return Decision{
 				PolicyDecision:    types.DecisionAllow,
 				EffectiveDecision: types.DecisionAllow,

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -352,21 +353,35 @@ func (c *Client) WatchTaints(ctx context.Context, agentOnly bool, handler func(t
 	}
 
 	// Parse SSE stream
-	decoder := json.NewDecoder(resp.Body)
-	for {
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
+		line := scanner.Text()
+
+		// SSE data lines start with "data: "
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "" {
+			continue
+		}
+
 		var event types.TaintEvent
-		if err := decoder.Decode(&event); err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue // Skip malformed events
 		}
 		handler(event)
 	}
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return nil
 }
