@@ -384,6 +384,7 @@ type SandboxSeccompConfig struct {
 	Mode       string                      `yaml:"mode"` // enforce, audit, disabled
 	UnixSocket SandboxSeccompUnixConfig    `yaml:"unix_socket"`
 	Syscalls   SandboxSeccompSyscallConfig `yaml:"syscalls"`
+	Execve     ExecveConfig                `yaml:"execve"`
 }
 
 // SandboxSeccompUnixConfig configures unix socket monitoring via seccomp.

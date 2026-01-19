@@ -29,7 +29,6 @@ func DefaultExecveConfig() ExecveConfig {
 		InternalBypass: []string{
 			"/usr/local/bin/agentsh",
 			"/usr/local/bin/agentsh-unixwrap",
-			"*.real",
 		},
 	}
 }

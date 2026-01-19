@@ -22,13 +22,16 @@ func NewDepthTracker() *DepthTracker {
 	}
 }
 
-// RegisterSession registers the root process of a session at depth 0.
+// RegisterSession registers the root process of a session.
+// The root is registered at depth -1 so that the first command (direct)
+// executed from it will be at depth 0, matching policy semantics where
+// 0 = direct (user-typed) and 1+ = nested (script-spawned).
 func (dt *DepthTracker) RegisterSession(pid int, sessionID string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 
 	dt.state[pid] = ExecveState{
-		Depth:     0,
+		Depth:     -1, // First child will be depth 0 (direct)
 		SessionID: sessionID,
 	}
 }

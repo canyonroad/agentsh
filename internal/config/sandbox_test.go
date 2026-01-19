@@ -18,7 +18,7 @@ func TestExecveConfig_Defaults(t *testing.T) {
 	assert.Equal(t, "deny", cfg.OnTruncated)
 	assert.Equal(t, 10*time.Second, cfg.ApprovalTimeout)
 	assert.Equal(t, "deny", cfg.ApprovalTimeoutAction)
-	assert.Equal(t, []string{"/usr/local/bin/agentsh", "/usr/local/bin/agentsh-unixwrap", "*.real"}, cfg.InternalBypass)
+	assert.Equal(t, []string{"/usr/local/bin/agentsh", "/usr/local/bin/agentsh-unixwrap"}, cfg.InternalBypass)
 }
 
 func TestExecveConfig_ParseYAML(t *testing.T) {

@@ -31,6 +31,7 @@ type extraProcConfig struct {
 	notifyStore      eventStore     // Event store for notify handler
 	notifyBroker     eventBroker    // Event broker for notify handler
 	notifyPolicy     *policy.Engine // Policy engine for notify handler
+	execveHandler    any            // Execve handler (*unixmon.ExecveHandler on Linux, nil otherwise)
 
 	// Signal filter fields
 	signalParentSock *os.File            // Parent socket to receive signal filter fd
@@ -207,7 +208,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		// Start unix socket notify handler if configured (Linux only).
 		// The handler receives the notify fd from the wrapper and runs until ctx is cancelled.
 		if extra != nil && extra.notifyParentSock != nil {
-			startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker)
+			startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker, extra.execveHandler)
 		}
 
 		// Start signal filter handler if configured (Linux only).

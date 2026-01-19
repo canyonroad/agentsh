@@ -19,16 +19,21 @@ func (c *ContextConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	}
 
 	// Try object syntax: min_depth, max_depth
+	// Use pointer for max_depth to distinguish "not set" from "set to 0"
 	type raw struct {
-		MinDepth int `yaml:"min_depth"`
-		MaxDepth int `yaml:"max_depth"`
+		MinDepth int  `yaml:"min_depth"`
+		MaxDepth *int `yaml:"max_depth"`
 	}
 	var r raw
 	if err := unmarshal(&r); err != nil {
 		return err
 	}
 	c.MinDepth = r.MinDepth
-	c.MaxDepth = r.MaxDepth
+	if r.MaxDepth != nil {
+		c.MaxDepth = *r.MaxDepth
+	} else {
+		c.MaxDepth = -1 // Default to unlimited when not specified
+	}
 	return nil
 }
 

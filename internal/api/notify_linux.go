@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/config"
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -31,11 +32,54 @@ func (a *notifyEmitterAdapter) Publish(ev types.Event) {
 	a.broker.Publish(ev)
 }
 
+// createExecveHandler creates an ExecveHandler from the configuration.
+// Returns nil if the config is not valid or policy is nil.
+func createExecveHandler(cfg config.ExecveConfig, pol *policy.Engine) any {
+	if !cfg.Enabled {
+		return nil
+	}
+
+	// Create depth tracker for process ancestry tracking
+	dt := unixmon.NewDepthTracker()
+
+	handlerCfg := unixmon.ExecveHandlerConfig{
+		MaxArgc:               cfg.MaxArgc,
+		MaxArgvBytes:          cfg.MaxArgvBytes,
+		OnTruncated:           cfg.OnTruncated,
+		ApprovalTimeout:       cfg.ApprovalTimeout,
+		ApprovalTimeoutAction: cfg.ApprovalTimeoutAction,
+		InternalBypass:        cfg.InternalBypass,
+	}
+
+	// Create policy checker wrapper if policy engine exists
+	var policyChecker unixmon.PolicyChecker
+	if pol != nil {
+		policyChecker = &policyEngineWrapper{engine: pol}
+	}
+
+	return unixmon.NewExecveHandler(handlerCfg, policyChecker, dt, nil)
+}
+
+// policyEngineWrapper adapts policy.Engine to unixmon.PolicyChecker.
+type policyEngineWrapper struct {
+	engine *policy.Engine
+}
+
+func (w *policyEngineWrapper) CheckExecve(filename string, argv []string, depth int) unixmon.PolicyDecision {
+	dec := w.engine.CheckExecve(filename, argv, depth)
+	return unixmon.PolicyDecision{
+		Decision: string(dec.EffectiveDecision),
+		Rule:     dec.Rule,
+		Message:  dec.Message,
+	}
+}
+
 // startNotifyHandler receives the seccomp notify fd from the parent socket and
 // starts the ServeNotify handler in a goroutine. It returns immediately.
 // The handler runs until ctx is cancelled or the fd is closed.
-func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string, pol *policy.Engine, store eventStore, broker eventBroker) {
-	if parentSock == nil || pol == nil {
+// If execveHandler is non-nil, uses ServeNotifyWithExecve for execve interception.
+func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string, pol *policy.Engine, store eventStore, broker eventBroker, execveHandler any) {
+	if parentSock == nil {
 		return
 	}
 
@@ -62,6 +106,15 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 		defer notifyFD.Close()
 
 		emitter := &notifyEmitterAdapter{store: store, broker: broker}
-		unixmon.ServeNotify(ctx, notifyFD, sessID, pol, emitter)
+
+		// Type-assert and set emitter on execve handler if configured
+		var h *unixmon.ExecveHandler
+		if execveHandler != nil {
+			h, _ = execveHandler.(*unixmon.ExecveHandler)
+			if h != nil {
+				h.SetEmitter(emitter)
+			}
+		}
+		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h)
 	}()
 }

@@ -16,12 +16,12 @@ import (
 // This doesn't require root and tests the logic in isolation
 //
 // DEPTH SEMANTICS:
-// - Session root (registered via RegisterSession) is at depth 0
-// - First command from session root has depth 1 (direct user command)
-// - Commands spawned by that command have depth 2+ (nested)
+// - Session root (registered via RegisterSession) is at depth -1 (marker only)
+// - First command from session root has depth 0 (direct user command)
+// - Commands spawned by that command have depth 1+ (nested)
 func TestExecveInterception_HandlerLogic(t *testing.T) {
-	// Create a simple policy that blocks curl when deeply nested (depth >= 2)
-	// Depth 1 = direct command from session, depth 2+ = nested (spawned by scripts)
+	// Create a simple policy that blocks curl when nested (depth >= 1)
+	// Depth 0 = direct command from session, depth 1+ = nested (spawned by scripts)
 	pol := &policy.Policy{
 		Version: 1,
 		Name:    "test-policy",
@@ -30,7 +30,7 @@ func TestExecveInterception_HandlerLogic(t *testing.T) {
 				Name:     "block-curl-nested",
 				Commands: []string{"curl"},
 				Decision: "deny",
-				Context:  policy.ContextConfig{MinDepth: 2, MaxDepth: -1}, // depth >= 2 means nested
+				Context:  policy.ContextConfig{MinDepth: 1, MaxDepth: -1}, // depth >= 1 means nested
 			},
 			{
 				Name:     "allow-all",
@@ -60,22 +60,22 @@ func TestExecveInterception_HandlerLogic(t *testing.T) {
 	policyWrapper := &policyEngineWrapper{engine: engine}
 	h := unixmon.NewExecveHandler(cfg, policyWrapper, dt, nil)
 
-	// Test 1: Direct curl should be allowed (depth 1, i.e. direct from session)
+	// Test 1: Direct curl should be allowed (depth 0, i.e. direct from session)
 	t.Run("direct curl allowed", func(t *testing.T) {
 		ctx := unixmon.ExecveContext{
 			PID:       1001,
-			ParentPID: 1000, // Parent is session root at depth 0
+			ParentPID: 1000, // Parent is session root at depth -1
 			Filename:  "/usr/bin/curl",
 			Argv:      []string{"curl", "http://example.com"},
 			Truncated: false,
 		}
 		result := h.Handle(ctx)
-		assert.True(t, result.Allow, "direct curl (depth 1) should be allowed")
+		assert.True(t, result.Allow, "direct curl (depth 0) should be allowed")
 	})
 
-	// Test 2: Nested curl should be blocked (depth >= 2)
+	// Test 2: Nested curl should be blocked (depth >= 1)
 	t.Run("nested curl blocked", func(t *testing.T) {
-		// First allow a shell (direct, depth 1)
+		// First allow a shell (direct, depth 0)
 		shellCtx := unixmon.ExecveContext{
 			PID:       1002,
 			ParentPID: 1000,
@@ -86,16 +86,16 @@ func TestExecveInterception_HandlerLogic(t *testing.T) {
 		shellResult := h.Handle(shellCtx)
 		assert.True(t, shellResult.Allow, "shell should be allowed")
 
-		// Now curl from the shell is nested (depth 2)
+		// Now curl from the shell is nested (depth 1)
 		curlCtx := unixmon.ExecveContext{
 			PID:       1003,
-			ParentPID: 1002, // Parent is shell at depth 1
+			ParentPID: 1002, // Parent is shell at depth 0
 			Filename:  "/usr/bin/curl",
 			Argv:      []string{"curl", "http://example.com"},
 			Truncated: false,
 		}
 		curlResult := h.Handle(curlCtx)
-		assert.False(t, curlResult.Allow, "nested curl (depth 2) should be blocked")
+		assert.False(t, curlResult.Allow, "nested curl (depth 1) should be blocked")
 	})
 
 	// Test 3: Internal bypass
@@ -128,10 +128,10 @@ func TestExecveInterception_HandlerLogic(t *testing.T) {
 }
 
 // TestExecveInterception_DepthTracking tests the depth tracker integration
-// Session root is depth 0, first command is depth 1, and so on.
+// Session root is at depth -1, first command is depth 0, and so on.
 func TestExecveInterception_DepthTracking(t *testing.T) {
-	// Create a policy that denies commands at depth >= 4
-	// (depth 1-3 allowed, depth 4+ denied)
+	// Create a policy that denies commands at depth >= 3
+	// (depth 0-2 allowed, depth 3+ denied)
 	pol := &policy.Policy{
 		Version: 1,
 		Name:    "depth-test-policy",
@@ -140,13 +140,13 @@ func TestExecveInterception_DepthTracking(t *testing.T) {
 				Name:     "deny-deep-nesting",
 				Commands: []string{"*"},
 				Decision: "deny",
-				Context:  policy.ContextConfig{MinDepth: 4, MaxDepth: -1},
+				Context:  policy.ContextConfig{MinDepth: 3, MaxDepth: -1},
 			},
 			{
 				Name:     "allow-shallow",
 				Commands: []string{"*"},
 				Decision: "allow",
-				Context:  policy.ContextConfig{MinDepth: 0, MaxDepth: 3},
+				Context:  policy.ContextConfig{MinDepth: 0, MaxDepth: 2},
 			},
 		},
 	}
@@ -155,7 +155,7 @@ func TestExecveInterception_DepthTracking(t *testing.T) {
 	require.NoError(t, err)
 
 	dt := unixmon.NewDepthTracker()
-	dt.RegisterSession(1000, "test-session") // depth 0
+	dt.RegisterSession(1000, "test-session") // depth -1
 
 	cfg := unixmon.ExecveHandlerConfig{
 		MaxArgc:      1000,
@@ -166,8 +166,8 @@ func TestExecveInterception_DepthTracking(t *testing.T) {
 	h := unixmon.NewExecveHandler(cfg, policyWrapper, dt, nil)
 
 	// Execute a chain: shell -> script -> nested command
-	// Depth 1: first shell (from session root at depth 0)
-	t.Run("depth 1 - direct command", func(t *testing.T) {
+	// Depth 0: first shell (from session root at depth -1)
+	t.Run("depth 0 - direct command", func(t *testing.T) {
 		ctx := unixmon.ExecveContext{
 			PID:       1001,
 			ParentPID: 1000, // session root
@@ -176,11 +176,11 @@ func TestExecveInterception_DepthTracking(t *testing.T) {
 			Truncated: false,
 		}
 		result := h.Handle(ctx)
-		assert.True(t, result.Allow, "depth 1 should be allowed")
+		assert.True(t, result.Allow, "depth 0 should be allowed")
 	})
 
-	// Depth 2: script from bash
-	t.Run("depth 2 - nested", func(t *testing.T) {
+	// Depth 1: script from bash
+	t.Run("depth 1 - nested", func(t *testing.T) {
 		ctx := unixmon.ExecveContext{
 			PID:       1002,
 			ParentPID: 1001,
@@ -189,11 +189,11 @@ func TestExecveInterception_DepthTracking(t *testing.T) {
 			Truncated: false,
 		}
 		result := h.Handle(ctx)
-		assert.True(t, result.Allow, "depth 2 should be allowed")
+		assert.True(t, result.Allow, "depth 1 should be allowed")
 	})
 
-	// Depth 3: command from script
-	t.Run("depth 3 - double nested", func(t *testing.T) {
+	// Depth 2: command from script
+	t.Run("depth 2 - double nested", func(t *testing.T) {
 		ctx := unixmon.ExecveContext{
 			PID:       1003,
 			ParentPID: 1002,
@@ -202,11 +202,11 @@ func TestExecveInterception_DepthTracking(t *testing.T) {
 			Truncated: false,
 		}
 		result := h.Handle(ctx)
-		assert.True(t, result.Allow, "depth 3 should be allowed")
+		assert.True(t, result.Allow, "depth 2 should be allowed")
 	})
 
-	// Depth 4: should be denied
-	t.Run("depth 4 - too deep", func(t *testing.T) {
+	// Depth 3: should be denied
+	t.Run("depth 3 - too deep", func(t *testing.T) {
 		ctx := unixmon.ExecveContext{
 			PID:       1004,
 			ParentPID: 1003,
@@ -215,7 +215,7 @@ func TestExecveInterception_DepthTracking(t *testing.T) {
 			Truncated: false,
 		}
 		result := h.Handle(ctx)
-		assert.False(t, result.Allow, "depth 4 should be denied")
+		assert.False(t, result.Allow, "depth 3 should be denied")
 	})
 }
 
@@ -267,7 +267,7 @@ func TestExecveInterception_SessionIsolation(t *testing.T) {
 		state, ok := dt.Get(1001)
 		require.True(t, ok, "PID should be recorded after allow")
 		assert.Equal(t, "session-A", state.SessionID)
-		assert.Equal(t, 1, state.Depth)
+		assert.Equal(t, 0, state.Depth) // Direct command from session root
 	})
 
 	// Execute commands in session B
@@ -286,7 +286,7 @@ func TestExecveInterception_SessionIsolation(t *testing.T) {
 		state, ok := dt.Get(2001)
 		require.True(t, ok, "PID should be recorded after allow")
 		assert.Equal(t, "session-B", state.SessionID)
-		assert.Equal(t, 1, state.Depth)
+		assert.Equal(t, 0, state.Depth) // Direct command from session root
 	})
 
 	// Cleanup session A and verify B still works

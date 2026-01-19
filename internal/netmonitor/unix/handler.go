@@ -218,11 +218,22 @@ func handleExecveNotification(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *E
 	}
 
 	filename, err := readString(pid, execveArgs.FilenamePtr, 4096)
-	if err != nil {
-		// Can't read filename - deny (fail-secure)
+	if err != nil && !execveArgs.IsExecveat {
+		// Can't read filename for execve - deny (fail-secure)
 		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
 		_ = seccomp.NotifRespond(fd, &resp)
 		return
+	}
+
+	// Handle execveat special cases: AT_EMPTY_PATH and relative paths
+	if execveArgs.IsExecveat {
+		filename, err = resolveExecveatPath(pid, execveArgs, filename)
+		if err != nil {
+			// Can't resolve path - deny (fail-secure)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
 	}
 
 	argv, truncated, err := ReadArgv(pid, execveArgs.ArgvPtr, cfg)
@@ -274,4 +285,47 @@ func getParentPID(pid int) int {
 	// fields[0] is state, fields[1] is ppid
 	ppid, _ := strconv.Atoi(fields[1])
 	return ppid
+}
+
+// resolveExecveatPath resolves the actual executable path for execveat syscalls.
+// It handles AT_EMPTY_PATH (execute fd directly) and relative paths (relative to dirfd).
+func resolveExecveatPath(pid int, args ExecveArgs, filename string) (string, error) {
+	const AT_EMPTY_PATH = 0x1000
+
+	// AT_EMPTY_PATH: pathname is empty and dirfd refers to the file to execute
+	if args.Flags&AT_EMPTY_PATH != 0 {
+		// Read the actual path from /proc/<pid>/fd/<dirfd>
+		fdPath := fmt.Sprintf("/proc/%d/fd/%d", pid, args.Dirfd)
+		resolved, err := os.Readlink(fdPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve AT_EMPTY_PATH: %w", err)
+		}
+		return resolved, nil
+	}
+
+	// If pathname is absolute, use it directly
+	if len(filename) > 0 && filename[0] == '/' {
+		return filename, nil
+	}
+
+	// Relative path: resolve relative to dirfd
+	// AT_FDCWD (-100) means current working directory
+	const AT_FDCWD = -100
+	if args.Dirfd == AT_FDCWD {
+		// Resolve relative to process's cwd
+		cwdPath := fmt.Sprintf("/proc/%d/cwd", pid)
+		cwd, err := os.Readlink(cwdPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve cwd: %w", err)
+		}
+		return cwd + "/" + filename, nil
+	}
+
+	// Resolve relative to dirfd
+	fdPath := fmt.Sprintf("/proc/%d/fd/%d", pid, args.Dirfd)
+	dirPath, err := os.Readlink(fdPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve dirfd: %w", err)
+	}
+	return dirPath + "/" + filename, nil
 }

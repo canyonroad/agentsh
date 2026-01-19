@@ -32,7 +32,7 @@ func TestStartNotifyHandler_NilSocket_NoOp(t *testing.T) {
 	pol := &policy.Engine{}
 
 	// Should not panic with nil socket
-	startNotifyHandler(context.Background(), nil, "test-session", pol, store, broker)
+	startNotifyHandler(context.Background(), nil, "test-session", pol, store, broker, nil)
 }
 
 func TestStartNotifyHandler_NilPolicy_NoOp(t *testing.T) {
@@ -48,7 +48,7 @@ func TestStartNotifyHandler_NilPolicy_NoOp(t *testing.T) {
 	broker := &notifyMockEventBroker{}
 
 	// Should close the socket and return without panic when policy is nil
-	startNotifyHandler(context.Background(), r, "test-session", nil, store, broker)
+	startNotifyHandler(context.Background(), r, "test-session", nil, store, broker, nil)
 }
 
 func TestStartNotifyHandler_NilStore_NoOp(t *testing.T) {
@@ -57,7 +57,7 @@ func TestStartNotifyHandler_NilStore_NoOp(t *testing.T) {
 	pol := &policy.Engine{}
 
 	// Should not panic with nil socket (store doesn't matter if socket is nil)
-	startNotifyHandler(context.Background(), nil, "test-session", pol, store, broker)
+	startNotifyHandler(context.Background(), nil, "test-session", pol, store, broker, nil)
 }
 
 func TestExtraProcConfig_NotifyFields(t *testing.T) {
@@ -71,6 +71,7 @@ func TestExtraProcConfig_NotifyFields(t *testing.T) {
 		notifyPolicy:     pol,
 		notifyStore:      store,
 		notifyBroker:     broker,
+		execveHandler:    nil, // Would be set when execve interception is enabled
 	}
 
 	if cfg.notifySessionID != "test-session-123" {
@@ -84,5 +85,8 @@ func TestExtraProcConfig_NotifyFields(t *testing.T) {
 	}
 	if cfg.notifyBroker != broker {
 		t.Error("broker not set correctly")
+	}
+	if cfg.execveHandler != nil {
+		t.Error("execveHandler should be nil")
 	}
 }
