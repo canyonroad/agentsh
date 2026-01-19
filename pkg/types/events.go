@@ -26,6 +26,15 @@ type Event struct {
 	PID       int         `json:"pid,omitempty"`
 	Policy    *PolicyInfo `json:"policy,omitempty"`
 
+	// Process context (for execve events)
+	ParentPID int `json:"parent_pid,omitempty"`
+	Depth     int `json:"depth,omitempty"`
+
+	// Execve details
+	Filename  string   `json:"filename,omitempty"`
+	Argv      []string `json:"argv,omitempty"`
+	Truncated bool     `json:"truncated,omitempty"`
+
 	// Common convenience fields for indexing/search.
 	Path      string `json:"path,omitempty"`
 	Abstract  bool   `json:"abstract,omitempty"`
@@ -33,6 +42,9 @@ type Event struct {
 	Remote    string `json:"remote,omitempty"`
 	Operation string `json:"operation,omitempty"`
 	// Unix socket remote or peer may reuse Remote field; kept for compatibility.
+
+	// Policy result
+	EffectiveAction string `json:"effective_action,omitempty"`
 
 	Fields map[string]any `json:"fields,omitempty"`
 }
