@@ -22,6 +22,10 @@ type Policy struct {
 	ResourceLimits ResourceLimits `yaml:"resource_limits"`
 	EnvPolicy      EnvPolicy      `yaml:"env_policy"`
 	Audit          AuditSettings  `yaml:"audit"`
+
+	// Process context-based rules (parent-conditional policies)
+	ProcessContexts   map[string]ProcessContext `yaml:"process_contexts,omitempty"`
+	ProcessIdentities map[string]ProcessIdentityConfig `yaml:"process_identities,omitempty"`
 }
 
 type FileRule struct {
@@ -148,6 +152,44 @@ type AuditSettings struct {
 	IncludeStderr      bool `yaml:"include_stderr"`
 	IncludeFileContent bool `yaml:"include_file_content"`
 	RetentionDays      int  `yaml:"retention_days"`
+}
+
+// ProcessContext defines rules that apply to processes spawned from specific parents.
+// This enables parent-conditional policies for AI tool sandboxing.
+type ProcessContext struct {
+	Description string   `yaml:"description,omitempty"`
+	Identities  []string `yaml:"identities"` // Process identities that trigger this context
+
+	// Rules that apply within this context (override global rules)
+	CommandRules  []CommandRule    `yaml:"command_rules,omitempty"`
+	FileRules     []FileRule       `yaml:"file_rules,omitempty"`
+	NetworkRules  []NetworkRule    `yaml:"network_rules,omitempty"`
+	UnixRules     []UnixSocketRule `yaml:"unix_socket_rules,omitempty"`
+	EnvPolicy     *EnvPolicy       `yaml:"env_policy,omitempty"`
+
+	// Propagation settings
+	MaxDepth   int      `yaml:"max_depth,omitempty"`   // Max ancestry depth (0 = unlimited)
+	StopAt     []string `yaml:"stop_at,omitempty"`     // Stop propagation at these process classes
+	PassThrough []string `yaml:"pass_through,omitempty"` // Classes that inherit but don't count toward depth
+}
+
+// ProcessIdentityConfig defines how to identify a process in policy configuration.
+// This is the YAML-friendly version of identity.ProcessIdentity.
+type ProcessIdentityConfig struct {
+	Description  string               `yaml:"description,omitempty"`
+	Linux        *PlatformMatchConfig `yaml:"linux,omitempty"`
+	Darwin       *PlatformMatchConfig `yaml:"darwin,omitempty"`
+	Windows      *PlatformMatchConfig `yaml:"windows,omitempty"`
+	AllPlatforms *PlatformMatchConfig `yaml:"all_platforms,omitempty"`
+}
+
+// PlatformMatchConfig defines platform-specific process matching rules.
+type PlatformMatchConfig struct {
+	Comm     []string `yaml:"comm,omitempty"`      // Process name patterns
+	ExePath  []string `yaml:"exe_path,omitempty"`  // Executable path patterns
+	Cmdline  []string `yaml:"cmdline,omitempty"`   // Command line patterns
+	BundleID []string `yaml:"bundle_id,omitempty"` // macOS bundle ID
+	ExeName  []string `yaml:"exe_name,omitempty"`  // Windows exe name
 }
 
 type duration struct{ time.Duration }
