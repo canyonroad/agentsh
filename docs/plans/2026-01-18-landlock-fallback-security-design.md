@@ -1,5 +1,11 @@
 # Landlock Fallback Security Design
 
+**Status:** Implemented (2026-01-19)
+
+**Implementation:** See [Security Modes Documentation](../security-modes.md) for user-facing configuration guide.
+
+---
+
 When seccomp is unavailable (nested containers, restricted runtimes), this design provides alternative security enforcement using Landlock, capability dropping, and the existing shim.
 
 ## Problem Statement
