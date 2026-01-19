@@ -57,3 +57,5 @@ Wildcard domains (`*.example.com`) disable strict/default-deny.
 ## Platform notes
 - Linux 5.4+ (5.15+ recommended); enforcement requires root and cgroup v2.
 - Maps are shared process-wide; map size overrides are set once at startup.
+
+**Tip:** Use `agentsh detect` to check if eBPF is available in your environment. See [Cross-Platform Notes](cross-platform.md#detecting-available-capabilities).

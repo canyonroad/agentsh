@@ -22,7 +22,9 @@ Security enforcement is provided through a combination of:
 
 ### Mode Selection
 
-By default, agentsh auto-detects the best available mode at startup:
+By default, agentsh auto-detects the best available mode at startup.
+
+**Tip:** Use `agentsh detect` to see what security features are available in your environment before configuring. See [Detecting Available Capabilities](cross-platform.md#detecting-available-capabilities).
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -296,5 +298,6 @@ This ordering ensures:
 
 ## Related Documentation
 
+- [Detecting Available Capabilities](cross-platform.md#detecting-available-capabilities) - `agentsh detect` command
 - [Seccomp-BPF Syscall Filtering](seccomp.md) - Full seccomp mode details
 - [Policy Documentation](operations/policies.md) - Command and signal policy configuration

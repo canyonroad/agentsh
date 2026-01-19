@@ -169,3 +169,5 @@ When a process is killed for attempting a blocked syscall, a `seccomp_blocked` e
 - Linux kernel 5.0+ with seccomp user-notify support
 - libseccomp installed (for syscall name resolution)
 - CAP_SYS_ADMIN or no_new_privs for filter installation
+
+**Tip:** Use `agentsh detect` to check if seccomp is available in your environment. See [Cross-Platform Notes](cross-platform.md#detecting-available-capabilities).
