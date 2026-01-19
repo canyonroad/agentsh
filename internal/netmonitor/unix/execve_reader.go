@@ -55,3 +55,64 @@ func readPointer(pid int, ptr uint64) (uint64, error) {
 	}
 	return val, nil
 }
+
+// ExecveReaderConfig configures argv reading limits.
+type ExecveReaderConfig struct {
+	MaxArgc      int
+	MaxArgvBytes int
+}
+
+// ReadArgv reads the argv array from tracee memory.
+// Returns the arguments, whether truncation occurred, and any error.
+func ReadArgv(pid int, argvPtr uint64, cfg ExecveReaderConfig) ([]string, bool, error) {
+	if argvPtr == 0 {
+		return nil, false, ErrNullPtr
+	}
+
+	var args []string
+	var totalBytes int
+	truncated := false
+
+	for i := 0; i < cfg.MaxArgc; i++ {
+		// Read pointer at argvPtr + i*8
+		ptr, err := readPointer(pid, argvPtr+uint64(i*8))
+		if err != nil {
+			return args, truncated, err
+		}
+		if ptr == 0 {
+			// NULL terminator - end of argv
+			break
+		}
+
+		// Calculate remaining bytes allowed
+		remaining := cfg.MaxArgvBytes - totalBytes
+		if remaining <= 0 {
+			truncated = true
+			break
+		}
+
+		arg, err := readString(pid, ptr, remaining)
+		if err != nil {
+			return args, truncated, err
+		}
+
+		totalBytes += len(arg)
+		args = append(args, arg)
+
+		if totalBytes >= cfg.MaxArgvBytes {
+			truncated = true
+			break
+		}
+	}
+
+	// Check if we hit MaxArgc limit
+	if len(args) >= cfg.MaxArgc {
+		// Check if there are more args
+		ptr, _ := readPointer(pid, argvPtr+uint64(cfg.MaxArgc*8))
+		if ptr != 0 {
+			truncated = true
+		}
+	}
+
+	return args, truncated, nil
+}
