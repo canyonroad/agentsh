@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func TestReadStringFromPID(t *testing.T) {
@@ -104,4 +105,47 @@ func TestReadArgv_Truncation_ByteLimit(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, truncated)
 	assert.Equal(t, []string{"hello", "world"}, result)
+}
+
+func TestExtractExecveArgs(t *testing.T) {
+	// Test with mock syscall args
+	// execve: arg0=filename, arg1=argv, arg2=envp
+	t.Run("execve syscall", func(t *testing.T) {
+		args := SyscallArgs{
+			Nr:   unix.SYS_EXECVE,
+			Arg0: 0x1000, // filename ptr
+			Arg1: 0x2000, // argv ptr
+			Arg2: 0x3000, // envp ptr
+		}
+
+		ctx := ExtractExecveArgs(args)
+		assert.Equal(t, uint64(0x1000), ctx.FilenamePtr)
+		assert.Equal(t, uint64(0x2000), ctx.ArgvPtr)
+		assert.False(t, ctx.IsExecveat)
+	})
+
+	// execveat: arg0=dirfd, arg1=filename, arg2=argv, arg3=envp, arg4=flags
+	t.Run("execveat syscall", func(t *testing.T) {
+		args := SyscallArgs{
+			Nr:   unix.SYS_EXECVEAT,
+			Arg0: 3,      // dirfd
+			Arg1: 0x1000, // filename ptr
+			Arg2: 0x2000, // argv ptr
+			Arg3: 0x3000, // envp ptr
+			Arg4: 0,      // flags
+		}
+
+		ctx := ExtractExecveArgs(args)
+		assert.Equal(t, uint64(0x1000), ctx.FilenamePtr)
+		assert.Equal(t, uint64(0x2000), ctx.ArgvPtr)
+		assert.True(t, ctx.IsExecveat)
+		assert.Equal(t, int32(3), ctx.Dirfd)
+	})
+}
+
+func TestIsExecveSyscall(t *testing.T) {
+	assert.True(t, IsExecveSyscall(unix.SYS_EXECVE))
+	assert.True(t, IsExecveSyscall(unix.SYS_EXECVEAT))
+	assert.False(t, IsExecveSyscall(unix.SYS_CONNECT))
+	assert.False(t, IsExecveSyscall(unix.SYS_SOCKET))
 }

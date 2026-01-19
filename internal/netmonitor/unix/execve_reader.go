@@ -16,6 +16,50 @@ var (
 	ErrNullPtr    = errors.New("null pointer")
 )
 
+// SyscallArgs holds the arguments from a seccomp notification.
+type SyscallArgs struct {
+	Nr   int32
+	Arg0 uint64
+	Arg1 uint64
+	Arg2 uint64
+	Arg3 uint64
+	Arg4 uint64
+	Arg5 uint64
+}
+
+// ExecveArgs holds the parsed execve/execveat arguments.
+type ExecveArgs struct {
+	FilenamePtr uint64
+	ArgvPtr     uint64
+	IsExecveat  bool
+	Dirfd       int32 // only for execveat
+	Flags       int32 // only for execveat
+}
+
+// ExtractExecveArgs extracts execve/execveat arguments from syscall args.
+func ExtractExecveArgs(args SyscallArgs) ExecveArgs {
+	if args.Nr == unix.SYS_EXECVEAT {
+		return ExecveArgs{
+			FilenamePtr: args.Arg1,
+			ArgvPtr:     args.Arg2,
+			IsExecveat:  true,
+			Dirfd:       int32(args.Arg0),
+			Flags:       int32(args.Arg4),
+		}
+	}
+	// SYS_EXECVE
+	return ExecveArgs{
+		FilenamePtr: args.Arg0,
+		ArgvPtr:     args.Arg1,
+		IsExecveat:  false,
+	}
+}
+
+// IsExecveSyscall returns true if nr is execve or execveat.
+func IsExecveSyscall(nr int32) bool {
+	return nr == unix.SYS_EXECVE || nr == unix.SYS_EXECVEAT
+}
+
 // readString reads a null-terminated string from the tracee's memory.
 func readString(pid int, ptr uint64, maxLen int) (string, error) {
 	if ptr == 0 {
