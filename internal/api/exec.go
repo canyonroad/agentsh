@@ -403,3 +403,26 @@ func mergeEnv(base []string, s *session.Session, overrides map[string]string) []
 	}
 	return env
 }
+
+// mergeEnvInject merges env_inject from global config and policy.
+// Policy values take precedence over config values for the same key.
+// These variables bypass policy env filtering (operator-trusted).
+func mergeEnvInject(cfg *config.Config, pol *policy.Engine) map[string]string {
+	result := make(map[string]string)
+
+	// 1. Start with global config
+	if cfg != nil {
+		for k, v := range cfg.Sandbox.EnvInject {
+			result[k] = v
+		}
+	}
+
+	// 2. Layer policy on top (policy wins conflicts)
+	if pol != nil {
+		for k, v := range pol.GetEnvInject() {
+			result[k] = v
+		}
+	}
+
+	return result
+}

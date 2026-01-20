@@ -256,3 +256,101 @@ func TestBuildPolicyEnv_BothProxiesSetIndependently(t *testing.T) {
 		t.Errorf("expected OPENAI_BASE_URL=http://127.0.0.1:9090, got %q", gotMap["OPENAI_BASE_URL"])
 	}
 }
+
+func TestMergeEnvInject(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfgEnv     map[string]string
+		polEnv     map[string]string
+		wantResult map[string]string
+	}{
+		{
+			name:       "both_nil",
+			cfgEnv:     nil,
+			polEnv:     nil,
+			wantResult: map[string]string{},
+		},
+		{
+			name:       "config_only",
+			cfgEnv:     map[string]string{"BASH_ENV": "/global/path"},
+			polEnv:     nil,
+			wantResult: map[string]string{"BASH_ENV": "/global/path"},
+		},
+		{
+			name:       "policy_only",
+			cfgEnv:     nil,
+			polEnv:     map[string]string{"BASH_ENV": "/policy/path"},
+			wantResult: map[string]string{"BASH_ENV": "/policy/path"},
+		},
+		{
+			name:       "policy_wins_conflict",
+			cfgEnv:     map[string]string{"BASH_ENV": "/global/path", "EXTRA": "global"},
+			polEnv:     map[string]string{"BASH_ENV": "/policy/path"},
+			wantResult: map[string]string{"BASH_ENV": "/policy/path", "EXTRA": "global"},
+		},
+		{
+			name:       "merge_disjoint",
+			cfgEnv:     map[string]string{"GLOBAL_VAR": "a"},
+			polEnv:     map[string]string{"POLICY_VAR": "b"},
+			wantResult: map[string]string{"GLOBAL_VAR": "a", "POLICY_VAR": "b"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Sandbox.EnvInject = tt.cfgEnv
+
+			var pol *policy.Engine
+			if tt.polEnv != nil {
+				p := &policy.Policy{
+					Version:   1,
+					Name:      "test",
+					EnvInject: tt.polEnv,
+				}
+				var err error
+				pol, err = policy.NewEngine(p, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got := mergeEnvInject(cfg, pol)
+			if len(got) != len(tt.wantResult) {
+				t.Errorf("mergeEnvInject() returned %d keys, want %d", len(got), len(tt.wantResult))
+			}
+			for k, v := range tt.wantResult {
+				if got[k] != v {
+					t.Errorf("mergeEnvInject()[%q] = %q, want %q", k, got[k], v)
+				}
+			}
+		})
+	}
+}
+
+func TestMergeEnvInject_NilConfig(t *testing.T) {
+	// Test with nil config
+	p := &policy.Policy{
+		Version:   1,
+		Name:      "test",
+		EnvInject: map[string]string{"BASH_ENV": "/policy/path"},
+	}
+	pol, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := mergeEnvInject(nil, pol)
+	if len(got) != 1 {
+		t.Errorf("mergeEnvInject(nil, pol) returned %d keys, want 1", len(got))
+	}
+	if got["BASH_ENV"] != "/policy/path" {
+		t.Errorf("mergeEnvInject(nil, pol)[BASH_ENV] = %q, want %q", got["BASH_ENV"], "/policy/path")
+	}
+
+	// Test with both nil
+	got2 := mergeEnvInject(nil, nil)
+	if len(got2) != 0 {
+		t.Errorf("mergeEnvInject(nil, nil) returned %d keys, want 0", len(got2))
+	}
+}
