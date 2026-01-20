@@ -7,7 +7,22 @@ before:
     - ./scripts/build-envshim.sh
 
 builds:
-  - id: agentsh-linux
+  # Linux amd64: CGO enabled for full seccomp user-notify support
+  - id: agentsh-linux-amd64
+    main: ./cmd/agentsh
+    binary: agentsh
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+
+  # Linux arm64: CGO disabled (cross-compilation complexity)
+  # Users get graceful degradation - seccomp features unavailable
+  - id: agentsh-linux-arm64
     main: ./cmd/agentsh
     binary: agentsh
     env:
@@ -15,7 +30,6 @@ builds:
     goos:
       - linux
     goarch:
-      - amd64
       - arm64
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
@@ -106,7 +120,8 @@ builds:
 archives:
   - id: agentsh-linux
     ids:
-      - agentsh-linux
+      - agentsh-linux-amd64
+      - agentsh-linux-arm64
       - shim-linux
       - unixwrap-linux-amd64
     formats: [tar.gz]
@@ -157,7 +172,8 @@ nfpms:
   - id: agentsh
     package_name: agentsh
     ids:
-      - agentsh-linux
+      - agentsh-linux-amd64
+      - agentsh-linux-arm64
       - shim-linux
       - unixwrap-linux-amd64
       # unixwrap not available for arm64 - users get graceful degradation
