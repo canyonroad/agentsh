@@ -354,3 +354,94 @@ func TestMergeEnvInject_NilConfig(t *testing.T) {
 		t.Errorf("mergeEnvInject(nil, nil) returned %d keys, want 0", len(got2))
 	}
 }
+
+// TestEnvInject_AppearsInCommandEnv verifies that env_inject values from both
+// config and policy appear in the merged environment result.
+func TestEnvInject_AppearsInCommandEnv(t *testing.T) {
+	// Setup config with env_inject
+	cfg := &config.Config{}
+	cfg.Sandbox.EnvInject = map[string]string{
+		"BASH_ENV":   "/usr/lib/agentsh/bash_startup.sh",
+		"CONFIG_VAR": "from-config",
+	}
+
+	// Setup policy with additional env_inject
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "test-policy",
+		EnvInject: map[string]string{
+			"POLICY_VAR": "from-policy",
+		},
+	}
+	pol, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatalf("failed to create policy engine: %v", err)
+	}
+
+	// Merge env_inject from config and policy
+	merged := mergeEnvInject(cfg, pol)
+
+	// Verify config values appear
+	if merged["BASH_ENV"] != "/usr/lib/agentsh/bash_startup.sh" {
+		t.Errorf("BASH_ENV not found or incorrect: got %q, want %q",
+			merged["BASH_ENV"], "/usr/lib/agentsh/bash_startup.sh")
+	}
+	if merged["CONFIG_VAR"] != "from-config" {
+		t.Errorf("CONFIG_VAR not found or incorrect: got %q, want %q",
+			merged["CONFIG_VAR"], "from-config")
+	}
+
+	// Verify policy values appear
+	if merged["POLICY_VAR"] != "from-policy" {
+		t.Errorf("POLICY_VAR not found or incorrect: got %q, want %q",
+			merged["POLICY_VAR"], "from-policy")
+	}
+
+	// Verify all expected keys are present
+	if len(merged) != 3 {
+		t.Errorf("expected 3 keys in merged result, got %d: %v", len(merged), merged)
+	}
+}
+
+// TestEnvInject_PolicyOverridesConfig verifies that when both config and policy
+// define the same env_inject key, the policy value takes precedence.
+func TestEnvInject_PolicyOverridesConfig(t *testing.T) {
+	// Setup config with env_inject
+	cfg := &config.Config{}
+	cfg.Sandbox.EnvInject = map[string]string{
+		"BASH_ENV":   "/global/bash_startup.sh",
+		"SHARED_VAR": "config-value",
+	}
+
+	// Setup policy with overlapping env_inject that should override
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "override-policy",
+		EnvInject: map[string]string{
+			"BASH_ENV":   "/policy/custom_startup.sh", // Override config
+			"SHARED_VAR": "policy-value",              // Override config
+		},
+	}
+	pol, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatalf("failed to create policy engine: %v", err)
+	}
+
+	// Merge env_inject from config and policy
+	merged := mergeEnvInject(cfg, pol)
+
+	// Verify policy values override config values
+	if merged["BASH_ENV"] != "/policy/custom_startup.sh" {
+		t.Errorf("BASH_ENV should be overridden by policy: got %q, want %q",
+			merged["BASH_ENV"], "/policy/custom_startup.sh")
+	}
+	if merged["SHARED_VAR"] != "policy-value" {
+		t.Errorf("SHARED_VAR should be overridden by policy: got %q, want %q",
+			merged["SHARED_VAR"], "policy-value")
+	}
+
+	// Verify only 2 keys (no duplicates)
+	if len(merged) != 2 {
+		t.Errorf("expected 2 keys in merged result (no duplicates), got %d: %v", len(merged), merged)
+	}
+}
