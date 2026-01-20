@@ -26,6 +26,7 @@ const (
 type extraProcConfig struct {
 	extraFiles       []*os.File
 	env              map[string]string
+	envInject        map[string]string // Operator-trusted env vars that bypass policy filtering
 	notifyParentSock *os.File       // Parent socket to receive seccomp notify fd (Linux only)
 	notifySessionID  string         // Session ID for notify handler
 	notifyStore      eventStore     // Event store for notify handler
@@ -158,6 +159,12 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	}
 	if extra != nil && len(extra.env) > 0 {
 		for k, v := range extra.env {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
+	// Add env_inject (operator-trusted, bypasses policy filtering)
+	if extra != nil && len(extra.envInject) > 0 {
+		for k, v := range extra.envInject {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
 		}
 	}
