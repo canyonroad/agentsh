@@ -398,6 +398,11 @@ sandbox:
     enabled: false
   network:
     enabled: false
+  unix_sockets:
+    enabled: false
+  seccomp:
+    execve:
+      enabled: false
 policies:
   dir: "/policies"
   default: "e2e-test"
