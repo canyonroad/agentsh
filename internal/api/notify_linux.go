@@ -100,10 +100,13 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 			wrapperPID = int(ucred.Pid)
 		}
 
-		// Set a read deadline to prevent blocking forever if wrapper fails
+		// Set a read deadline to prevent blocking forever if wrapper fails.
+		// Note: This may fail on some file types (e.g., socketpairs in Docker/containers),
+		// but we should still continue and try to receive the FD. RecvFD will block until
+		// it receives the FD or the socket is closed by the wrapper.
 		if err := parentSock.SetReadDeadline(time.Now().Add(recvFDTimeout)); err != nil {
-			slog.Debug("failed to set read deadline on notify socket", "error", err)
-			return
+			slog.Debug("failed to set read deadline on notify socket (continuing)", "error", err)
+			// Don't return - continue to RecvFD
 		}
 
 		// Receive the notify fd from the wrapper process
