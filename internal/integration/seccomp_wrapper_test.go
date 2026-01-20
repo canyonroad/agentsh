@@ -347,30 +347,26 @@ func TestExecveInterception_DepthEnforcement(t *testing.T) {
 	// If commands hang, we'll skip the test rather than wait forever
 	execTimeout := 10 * time.Second
 
-	// Test 1: Direct 'echo' should work (depth 0) - use this as a probe
-	t.Run("probe_seccomp_working", func(t *testing.T) {
-		execCtx, cancel := context.WithTimeout(ctx, execTimeout)
-		defer cancel()
-
-		result, err := cli.Exec(execCtx, sess.ID, types.ExecRequest{
-			Command: "echo",
-			Args:    []string{"probe"},
-		})
-		if err != nil {
-			// Timeout suggests seccomp-user-notify isn't working
-			if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "deadline exceeded") {
-				t.Skip("seccomp-user-notify appears to not be working in this environment (command timeout)")
-			}
-			t.Fatalf("Exec probe: %v", err)
-		}
-		if result.Result.ExitCode != 0 {
-			t.Skip("seccomp-user-notify may not be working (non-zero exit on simple command)")
-		}
-		t.Logf("Probe succeeded - seccomp appears to be working")
+	// Probe first (outside subtest) - if this fails, skip entire test
+	probeCtx, probeCancel := context.WithTimeout(ctx, execTimeout)
+	probeResult, probeErr := cli.Exec(probeCtx, sess.ID, types.ExecRequest{
+		Command: "echo",
+		Args:    []string{"probe"},
 	})
+	probeCancel()
 
-	// If we get here, seccomp seems to be working
-	// Test 2: Direct 'cat' should work (depth 0)
+	if probeErr != nil {
+		if errors.Is(probeErr, context.DeadlineExceeded) || strings.Contains(probeErr.Error(), "deadline exceeded") {
+			t.Skip("seccomp-user-notify appears to not be working in this environment (command timeout)")
+		}
+		t.Fatalf("Exec probe: %v", probeErr)
+	}
+	if probeResult.Result.ExitCode != 0 {
+		t.Skip("seccomp-user-notify may not be working (non-zero exit on simple command)")
+	}
+	t.Logf("Probe succeeded - seccomp appears to be working")
+
+	// Test 1: Direct 'cat' should work (depth 0)
 	t.Run("direct_cat_allowed", func(t *testing.T) {
 		execCtx, cancel := context.WithTimeout(ctx, execTimeout)
 		defer cancel()
