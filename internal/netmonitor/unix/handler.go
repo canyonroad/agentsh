@@ -45,7 +45,7 @@ func ServeNotify(ctx context.Context, fd *os.File, sessID string, pol *policy.En
 		}
 		ctxReq := ExtractContext(req)
 		if !isUnixSocketSyscall(ctxReq.Syscall) {
-			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID})
+			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue})
 			continue
 		}
 		allow := true
@@ -65,7 +65,9 @@ func ServeNotify(ctx context.Context, fd *os.File, sessID string, pol *policy.En
 			}
 		}
 		resp := seccomp.ScmpNotifResp{ID: req.ID}
-		if !allow {
+		if allow {
+			resp.Flags = seccomp.NotifRespFlagContinue
+		} else {
 			resp.Error = -errno
 		}
 		_ = seccomp.NotifRespond(scmpFD, &resp)
@@ -159,13 +161,13 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		// Existing unix socket handling
 		ctxReq := ExtractContext(req)
 		if !isUnixSocketSyscall(ctxReq.Syscall) {
-			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID})
+			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue})
 			continue
 		}
 
 		// Skip policy check if pol is nil - just allow
 		if pol == nil {
-			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID})
+			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue})
 			continue
 		}
 
@@ -186,7 +188,9 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 			}
 		}
 		resp := seccomp.ScmpNotifResp{ID: req.ID}
-		if !allow {
+		if allow {
+			resp.Flags = seccomp.NotifRespFlagContinue
+		} else {
 			resp.Error = -errno
 		}
 		_ = seccomp.NotifRespond(scmpFD, &resp)
@@ -265,7 +269,9 @@ func handleExecveNotification(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *E
 	result := h.Handle(ctx)
 
 	resp := seccomp.ScmpNotifResp{ID: req.ID}
-	if !result.Allow {
+	if result.Allow {
+		resp.Flags = seccomp.NotifRespFlagContinue
+	} else {
 		resp.Error = -result.Errno
 	}
 	_ = seccomp.NotifRespond(fd, &resp)
