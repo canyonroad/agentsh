@@ -23,6 +23,8 @@ type Policy struct {
 	EnvPolicy      EnvPolicy      `yaml:"env_policy"`
 	Audit          AuditSettings  `yaml:"audit"`
 
+	EnvInject map[string]string `yaml:"env_inject"`
+
 	// Process context-based rules (parent-conditional policies)
 	ProcessContexts   map[string]ProcessContext `yaml:"process_contexts,omitempty"`
 	ProcessIdentities map[string]ProcessIdentityConfig `yaml:"process_identities,omitempty"`
