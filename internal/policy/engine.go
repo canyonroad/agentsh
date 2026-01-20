@@ -417,6 +417,12 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 	cmdBase := strings.ToLower(filepath.Base(command))
 
 	for _, r := range e.compiledCommandRules {
+		// Pre-check is always depth 0 (direct command from user)
+		// Skip rules that don't apply to direct commands
+		if !r.rule.Context.MatchesDepth(0) {
+			continue
+		}
+
 		// Check if command matches any of the rule's patterns
 		commandMatched := false
 
@@ -800,4 +806,87 @@ func copyMap(m map[string]string) map[string]string {
 		result[k] = v
 	}
 	return result
+}
+
+// CheckExecve evaluates an execve call against command rules with depth context support.
+// Returns the decision from the first matching rule, or default deny if none match.
+// The depth parameter represents the ancestry depth: 0 = direct (user-typed), 1+ = nested (script-spawned).
+func (e *Engine) CheckExecve(filename string, argv []string, depth int) Decision {
+	cmdLower := strings.ToLower(filename)
+	cmdBase := strings.ToLower(filepath.Base(filename))
+
+	for _, r := range e.compiledCommandRules {
+		// Check depth/context constraint first
+		if !r.rule.Context.MatchesDepth(depth) {
+			continue
+		}
+
+		// Check if command matches any of the rule's patterns
+		commandMatched := false
+
+		// If no commands specified, rule applies to all commands
+		if len(r.basenames) == 0 && len(r.basenameGlobs) == 0 && len(r.fullPaths) == 0 && len(r.pathGlobs) == 0 {
+			commandMatched = true
+		} else {
+			// Check full path matches first (more specific)
+			if _, ok := r.fullPaths[cmdLower]; ok {
+				commandMatched = true
+			}
+
+			// Check path glob patterns
+			if !commandMatched {
+				for _, g := range r.pathGlobs {
+					if g.Match(cmdLower) || g.Match(filename) {
+						commandMatched = true
+						break
+					}
+				}
+			}
+
+			// Check basename matches (less specific, legacy behavior)
+			if !commandMatched {
+				if _, ok := r.basenames[cmdBase]; ok {
+					commandMatched = true
+				}
+			}
+
+			// Check basename glob patterns
+			if !commandMatched {
+				for _, g := range r.basenameGlobs {
+					if g.Match(cmdBase) || g.Match(filepath.Base(filename)) {
+						commandMatched = true
+						break
+					}
+				}
+			}
+		}
+
+		if !commandMatched {
+			continue
+		}
+
+		// Check argument patterns if specified (regex on joined args string)
+		if len(r.argsRegexes) > 0 {
+			argsJoined := strings.Join(argv, " ")
+			matched := false
+			for _, re := range r.argsRegexes {
+				if re.MatchString(argsJoined) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		dec := e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, r.rule.RedirectTo)
+		dec.EnvPolicy = MergeEnvPolicy(e.policy.EnvPolicy, r.rule)
+		return dec
+	}
+
+	// Default deny (consistent with other Check* methods)
+	dec := e.wrapDecision(string(types.DecisionDeny), "default-deny-execve", "", nil)
+	dec.EnvPolicy = MergeEnvPolicy(e.policy.EnvPolicy, CommandRule{})
+	return dec
 }

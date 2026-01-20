@@ -26,3 +26,6 @@ internal/netmonitor/ebpf/vmlinux.h
 
 .env
 agentsh
+
+# Build artifacts
+agentsh-unixwrap

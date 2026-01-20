@@ -11,6 +11,7 @@ import (
 // WrapperConfig is the configuration passed via AGENTSH_SECCOMP_CONFIG env var.
 type WrapperConfig struct {
 	UnixSocketEnabled   bool     `json:"unix_socket_enabled"`
+	ExecveEnabled       bool     `json:"execve_enabled"`
 	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
 	BlockedSyscalls     []string `json:"blocked_syscalls"`
 }
@@ -19,9 +20,10 @@ type WrapperConfig struct {
 func loadConfig() (*WrapperConfig, error) {
 	val := os.Getenv("AGENTSH_SECCOMP_CONFIG")
 	if val == "" {
-		// Default: unix socket monitoring only, no blocked syscalls
+		// Default: unix socket monitoring only, no blocked syscalls, no execve
 		return &WrapperConfig{
 			UnixSocketEnabled: true,
+			ExecveEnabled:     false,
 			BlockedSyscalls:   nil,
 		}, nil
 	}

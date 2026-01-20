@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/policy"
@@ -121,4 +123,216 @@ func emitEvent(emit Emitter, session string, dec policy.Decision, path string, a
 	}
 	_ = emit.AppendEvent(context.Background(), ev)
 	emit.Publish(ev)
+}
+
+// ServeNotifyWithExecve runs the seccomp notify loop with execve interception support.
+// It routes execve/execveat syscalls to the execveHandler and unix socket syscalls to the policy engine.
+// It stops when the fd is closed or ctx is done.
+func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol *policy.Engine, emit Emitter, execveHandler *ExecveHandler) {
+	if fd == nil || emit == nil {
+		return
+	}
+	scmpFD := seccomp.ScmpFd(fd.Fd())
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		req, err := seccomp.NotifReceive(scmpFD)
+		if err != nil {
+			if isEAGAIN(err) {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			return
+		}
+
+		syscallNr := int32(req.Data.Syscall)
+
+		// Route to appropriate handler
+		if IsExecveSyscall(syscallNr) && execveHandler != nil {
+			handleExecveNotification(scmpFD, req, execveHandler)
+			continue
+		}
+
+		// Existing unix socket handling
+		ctxReq := ExtractContext(req)
+		if !isUnixSocketSyscall(ctxReq.Syscall) {
+			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID})
+			continue
+		}
+
+		// Skip policy check if pol is nil - just allow
+		if pol == nil {
+			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID})
+			continue
+		}
+
+		allow := true
+		errno := int32(unix.EACCES)
+		path := ""
+		abstract := false
+		if raw, err := ReadSockaddr(ctxReq.PID, ctxReq.AddrPtr, ctxReq.AddrLen); err == nil {
+			if p, abs, perr := ParseSockaddr(raw); perr == nil {
+				path, abstract = p, abs
+				op := syscallName(ctxReq.Syscall)
+				dec := pol.CheckUnixSocket(path, op)
+				allow = dec.EffectiveDecision == types.DecisionAllow
+				if !allow {
+					errno = int32(unix.EACCES)
+					emitEvent(emit, sessID, dec, path, abstract, op)
+				}
+			}
+		}
+		resp := seccomp.ScmpNotifResp{ID: req.ID}
+		if !allow {
+			resp.Error = -errno
+		}
+		_ = seccomp.NotifRespond(scmpFD, &resp)
+	}
+}
+
+// handleExecveNotification processes an execve/execveat notification.
+// It reads the filename and argv from the tracee process, builds an ExecveContext,
+// and calls the handler to make a decision.
+func handleExecveNotification(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *ExecveHandler) {
+	// Extract syscall args
+	args := SyscallArgs{
+		Nr:   int32(req.Data.Syscall),
+		Arg0: req.Data.Args[0],
+		Arg1: req.Data.Args[1],
+		Arg2: req.Data.Args[2],
+		Arg3: req.Data.Args[3],
+		Arg4: req.Data.Args[4],
+		Arg5: req.Data.Args[5],
+	}
+
+	execveArgs := ExtractExecveArgs(args)
+	pid := int(req.Pid)
+
+	// Read filename from tracee
+	cfg := ExecveReaderConfig{
+		MaxArgc:      h.cfg.MaxArgc,
+		MaxArgvBytes: h.cfg.MaxArgvBytes,
+	}
+
+	filename, err := readString(pid, execveArgs.FilenamePtr, 4096)
+	if err != nil {
+		const AT_EMPTY_PATH = 0x1000
+		// For execve, always fail-secure if we can't read the filename
+		// For execveat with AT_EMPTY_PATH, we can resolve from fd
+		if !execveArgs.IsExecveat || (execveArgs.Flags&AT_EMPTY_PATH == 0) {
+			// Can't read filename - deny (fail-secure)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		// AT_EMPTY_PATH case: filename is ignored, will resolve from fd
+		filename = ""
+	}
+
+	// Handle execveat special cases: AT_EMPTY_PATH and relative paths
+	if execveArgs.IsExecveat {
+		filename, err = resolveExecveatPath(pid, execveArgs, filename)
+		if err != nil {
+			// Can't resolve path - deny (fail-secure)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+	}
+
+	argv, truncated, err := ReadArgv(pid, execveArgs.ArgvPtr, cfg)
+	if err != nil {
+		// Can't read argv - deny (fail-secure)
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
+		_ = seccomp.NotifRespond(fd, &resp)
+		return
+	}
+
+	// Get parent PID
+	parentPID := getParentPID(pid)
+
+	ctx := ExecveContext{
+		PID:       pid,
+		ParentPID: parentPID,
+		Filename:  filename,
+		Argv:      argv,
+		Truncated: truncated,
+	}
+
+	result := h.Handle(ctx)
+
+	resp := seccomp.ScmpNotifResp{ID: req.ID}
+	if !result.Allow {
+		resp.Error = -result.Errno
+	}
+	_ = seccomp.NotifRespond(fd, &resp)
+}
+
+// getParentPID reads the parent PID from /proc/<pid>/stat.
+// Returns 0 if the PID doesn't exist or the stat file can't be parsed.
+func getParentPID(pid int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	// Format: pid (comm) state ppid ...
+	// Find the closing paren to handle comm with spaces/special chars
+	str := string(data)
+	closeParenIdx := strings.LastIndex(str, ")")
+	if closeParenIdx == -1 || closeParenIdx+2 >= len(str) {
+		return 0
+	}
+	fields := strings.Fields(str[closeParenIdx+2:])
+	if len(fields) < 2 {
+		return 0
+	}
+	// fields[0] is state, fields[1] is ppid
+	ppid, _ := strconv.Atoi(fields[1])
+	return ppid
+}
+
+// resolveExecveatPath resolves the actual executable path for execveat syscalls.
+// It handles AT_EMPTY_PATH (execute fd directly) and relative paths (relative to dirfd).
+func resolveExecveatPath(pid int, args ExecveArgs, filename string) (string, error) {
+	const AT_EMPTY_PATH = 0x1000
+
+	// AT_EMPTY_PATH: pathname is empty and dirfd refers to the file to execute
+	if args.Flags&AT_EMPTY_PATH != 0 {
+		// Read the actual path from /proc/<pid>/fd/<dirfd>
+		fdPath := fmt.Sprintf("/proc/%d/fd/%d", pid, args.Dirfd)
+		resolved, err := os.Readlink(fdPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve AT_EMPTY_PATH: %w", err)
+		}
+		return resolved, nil
+	}
+
+	// If pathname is absolute, use it directly
+	if len(filename) > 0 && filename[0] == '/' {
+		return filename, nil
+	}
+
+	// Relative path: resolve relative to dirfd
+	// AT_FDCWD (-100) means current working directory
+	const AT_FDCWD = -100
+	if args.Dirfd == AT_FDCWD {
+		// Resolve relative to process's cwd
+		cwdPath := fmt.Sprintf("/proc/%d/cwd", pid)
+		cwd, err := os.Readlink(cwdPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve cwd: %w", err)
+		}
+		return cwd + "/" + filename, nil
+	}
+
+	// Resolve relative to dirfd
+	fdPath := fmt.Sprintf("/proc/%d/fd/%d", pid, args.Dirfd)
+	dirPath, err := os.Readlink(fdPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve dirfd: %w", err)
+	}
+	return dirPath + "/" + filename, nil
 }

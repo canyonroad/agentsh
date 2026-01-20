@@ -30,6 +30,7 @@ import (
 type seccompWrapperConfig struct {
 	UnixSocketEnabled   bool     `json:"unix_socket_enabled"`
 	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
+	ExecveEnabled       bool     `json:"execve_enabled"`
 	BlockedSyscalls     []string `json:"blocked_syscalls"`
 }
 
@@ -119,10 +120,12 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	}
 
 	// Pass seccomp configuration to the wrapper
+	execveEnabled := a.cfg.Sandbox.Seccomp.Execve.Enabled
 	seccompCfg := seccompWrapperConfig{
 		UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
 		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
 		SignalFilterEnabled: signalFilterEnabled, // Only true if signal socket succeeded
+		ExecveEnabled:       execveEnabled,
 	}
 	if cfgJSON, err := json.Marshal(seccompCfg); err == nil {
 		wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"] = string(cfgJSON)
@@ -145,6 +148,11 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		notifyStore:      a.store,
 		notifyBroker:     a.broker,
 		origCommand:      origCommand, // Store original command for signal registry
+	}
+
+	// Create execve handler if enabled (Linux-specific, will be nil on other platforms)
+	if execveEnabled {
+		extraCfg.execveHandler = createExecveHandler(a.cfg.Sandbox.Seccomp.Execve, a.policy)
 	}
 
 	// Add signal filter config if socket pair succeeded

@@ -171,6 +171,7 @@ func InstallOrWarn() (*Filter, error) {
 // FilterConfig configures the seccomp filter to install.
 type FilterConfig struct {
 	UnixSocketEnabled bool
+	ExecveEnabled     bool
 	BlockedSyscalls   []int // syscall numbers to block with KILL
 }
 
@@ -211,6 +212,20 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 		}
 	}
 
+	// Execve interception via user-notify
+	if cfg.ExecveEnabled {
+		trap := seccomp.ActNotify
+		execRules := []seccomp.ScmpSyscall{
+			seccomp.ScmpSyscall(unix.SYS_EXECVE),
+			seccomp.ScmpSyscall(unix.SYS_EXECVEAT),
+		}
+		for _, sc := range execRules {
+			if err := filt.AddRule(sc, trap); err != nil {
+				return nil, fmt.Errorf("add execve rule %v: %w", sc, err)
+			}
+		}
+	}
+
 	// Blocked syscalls via kill
 	for _, nr := range cfg.BlockedSyscalls {
 		sc := seccomp.ScmpSyscall(nr)
@@ -225,7 +240,7 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	fd, err := filt.GetNotifFd()
 	if err != nil {
 		// If no notify rules, fd will be -1, which is fine
-		if !cfg.UnixSocketEnabled {
+		if !cfg.UnixSocketEnabled && !cfg.ExecveEnabled {
 			return &Filter{fd: -1}, nil
 		}
 		return nil, err

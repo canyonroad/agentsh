@@ -384,6 +384,7 @@ type SandboxSeccompConfig struct {
 	Mode       string                      `yaml:"mode"` // enforce, audit, disabled
 	UnixSocket SandboxSeccompUnixConfig    `yaml:"unix_socket"`
 	Syscalls   SandboxSeccompSyscallConfig `yaml:"syscalls"`
+	Execve     ExecveConfig                `yaml:"execve"`
 }
 
 // SandboxSeccompUnixConfig configures unix socket monitoring via seccomp.
@@ -844,6 +845,29 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 			"init_module",
 			"finit_module",
 			"delete_module",
+		}
+	}
+
+	// Execve interception defaults - apply when enabled but not fully configured
+	if cfg.Sandbox.Seccomp.Execve.Enabled {
+		defaults := DefaultExecveConfig()
+		if cfg.Sandbox.Seccomp.Execve.MaxArgc == 0 {
+			cfg.Sandbox.Seccomp.Execve.MaxArgc = defaults.MaxArgc
+		}
+		if cfg.Sandbox.Seccomp.Execve.MaxArgvBytes == 0 {
+			cfg.Sandbox.Seccomp.Execve.MaxArgvBytes = defaults.MaxArgvBytes
+		}
+		if cfg.Sandbox.Seccomp.Execve.OnTruncated == "" {
+			cfg.Sandbox.Seccomp.Execve.OnTruncated = defaults.OnTruncated
+		}
+		if cfg.Sandbox.Seccomp.Execve.ApprovalTimeout == 0 {
+			cfg.Sandbox.Seccomp.Execve.ApprovalTimeout = defaults.ApprovalTimeout
+		}
+		if cfg.Sandbox.Seccomp.Execve.ApprovalTimeoutAction == "" {
+			cfg.Sandbox.Seccomp.Execve.ApprovalTimeoutAction = defaults.ApprovalTimeoutAction
+		}
+		if len(cfg.Sandbox.Seccomp.Execve.InternalBypass) == 0 {
+			cfg.Sandbox.Seccomp.Execve.InternalBypass = defaults.InternalBypass
 		}
 	}
 

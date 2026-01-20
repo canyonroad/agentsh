@@ -61,6 +61,7 @@ type CommandRule struct {
 	Decision     string           `yaml:"decision"`
 	Message      string           `yaml:"message"`
 	RedirectTo   *CommandRedirect `yaml:"redirect_to,omitempty"`
+	Context      ContextConfig    `yaml:"context"`
 
 	EnvAllow          []string `yaml:"env_allow"`
 	EnvDeny           []string `yaml:"env_deny"`
@@ -74,6 +75,22 @@ type CommandRedirect struct {
 	Args        []string          `yaml:"args,omitempty"`        // Prepended args
 	ArgsAppend  []string          `yaml:"args_append,omitempty"` // Appended args
 	Environment map[string]string `yaml:"environment,omitempty"` // Environment overrides
+}
+
+// UnmarshalYAML implements custom unmarshaling for CommandRule to set default context.
+func (r *CommandRule) UnmarshalYAML(value *yaml.Node) error {
+	// First set the default context (all depths)
+	r.Context = DefaultContext()
+
+	// Define a type alias to avoid infinite recursion
+	type rawCommandRule CommandRule
+	raw := (*rawCommandRule)(r)
+
+	if err := value.Decode(raw); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // UnixSocketRule controls AF_UNIX socket operations such as connect/bind/listen.

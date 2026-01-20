@@ -35,3 +35,17 @@ func TestFilterClose(t *testing.T) {
 	noNotifyFilter := &Filter{fd: -1}
 	require.NoError(t, noNotifyFilter.Close())
 }
+
+func TestFilterConfig_WithExecve(t *testing.T) {
+	cfg := FilterConfig{
+		UnixSocketEnabled: true,
+		ExecveEnabled:     true,
+		BlockedSyscalls:   nil,
+	}
+
+	// Just test that config is valid and field exists
+	// Actual filter installation requires elevated privileges
+	// and actual interception tested in integration tests
+	require.True(t, cfg.ExecveEnabled)
+	require.True(t, cfg.UnixSocketEnabled)
+}
