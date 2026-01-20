@@ -101,6 +101,7 @@ jobs:
             agentsh \
             agentsh-unixwrap \
             agentsh-shell-shim \
+            packaging/bash_startup.sh \
             README.md \
             LICENSE \
             config.yml \

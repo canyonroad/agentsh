@@ -318,3 +318,42 @@ func TestEngine_CheckExecve_DefaultDeny(t *testing.T) {
 	require.Equal(t, types.DecisionDeny, dec.EffectiveDecision)
 	require.Equal(t, "default-deny-execve", dec.Rule)
 }
+
+func TestEngine_GetEnvInject(t *testing.T) {
+	p := &Policy{
+		Version: 1,
+		Name:    "test-env-inject",
+		EnvInject: map[string]string{
+			"BASH_ENV":      "/usr/lib/agentsh/bash_startup.sh",
+			"MY_CUSTOM_VAR": "custom_value",
+		},
+	}
+	e, err := NewEngine(p, false)
+	require.NoError(t, err)
+
+	env := e.GetEnvInject()
+	require.Len(t, env, 2)
+	require.Equal(t, "/usr/lib/agentsh/bash_startup.sh", env["BASH_ENV"])
+	require.Equal(t, "custom_value", env["MY_CUSTOM_VAR"])
+}
+
+func TestEngine_GetEnvInject_Nil(t *testing.T) {
+	p := &Policy{
+		Version: 1,
+		Name:    "test-env-inject-nil",
+		// EnvInject not set
+	}
+	e, err := NewEngine(p, false)
+	require.NoError(t, err)
+
+	env := e.GetEnvInject()
+	require.NotNil(t, env)
+	require.Empty(t, env)
+}
+
+func TestEngine_GetEnvInject_NilEngine(t *testing.T) {
+	var e *Engine
+	env := e.GetEnvInject()
+	require.NotNil(t, env)
+	require.Empty(t, env)
+}
