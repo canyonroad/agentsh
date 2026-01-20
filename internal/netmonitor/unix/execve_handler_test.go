@@ -1,3 +1,5 @@
+//go:build linux && cgo
+
 // internal/netmonitor/unix/execve_handler_test.go
 package unix
 
