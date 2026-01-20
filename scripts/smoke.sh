@@ -144,6 +144,11 @@ sandbox:
     enabled: false
   network:
     enabled: false
+  unix_sockets:
+    enabled: false
+  seccomp:
+    execve:
+      enabled: false
 YAML
 
 ./bin/agentsh server --config "$tmp/config.yml" >"$tmp/server.log" 2>&1 &
