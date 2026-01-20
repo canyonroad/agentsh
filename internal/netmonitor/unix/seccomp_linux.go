@@ -133,6 +133,7 @@ func (f *Filter) Respond(reqID uint64, allow bool, errno int32) error {
 	if allow {
 		resp.Error = 0
 		resp.Val = 0
+		resp.Flags = seccomp.NotifRespFlagContinue
 	} else {
 		resp.Error = -errno
 	}
