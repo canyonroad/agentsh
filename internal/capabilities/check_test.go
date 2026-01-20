@@ -48,12 +48,23 @@ func TestCheckAll_AllDisabled(t *testing.T) {
 func TestCheckAll_SeccompUserNotify_Available(t *testing.T) {
 	// Save and restore original
 	orig := checkSeccompUserNotify
-	defer func() { checkSeccompUserNotify = orig }()
+	origBinary := checkWrapperBinary
+	defer func() {
+		checkSeccompUserNotify = orig
+		checkWrapperBinary = origBinary
+	}()
 
 	// Mock to return success
 	checkSeccompUserNotify = func() CheckResult {
 		return CheckResult{
 			Feature:   "seccomp-user-notify",
+			Available: true,
+		}
+	}
+	// Mock binary check to pass
+	checkWrapperBinary = func(string) CheckResult {
+		return CheckResult{
+			Feature:   "seccomp-wrapper-binary",
 			Available: true,
 		}
 	}
@@ -105,7 +116,11 @@ func TestCheckAll_SeccompUserNotify_Available_ViaSeccompEnabled(t *testing.T) {
 func TestCheckAll_SeccompUserNotify_Unavailable(t *testing.T) {
 	// Save and restore original
 	orig := checkSeccompUserNotify
-	defer func() { checkSeccompUserNotify = orig }()
+	origBinary := checkWrapperBinary
+	defer func() {
+		checkSeccompUserNotify = orig
+		checkWrapperBinary = origBinary
+	}()
 
 	// Mock to return failure
 	checkSeccompUserNotify = func() CheckResult {
@@ -113,6 +128,13 @@ func TestCheckAll_SeccompUserNotify_Unavailable(t *testing.T) {
 			Feature:   "seccomp-user-notify",
 			Available: false,
 			Error:     errors.New("kernel does not support SECCOMP_RET_USER_NOTIF (requires kernel 5.0+)"),
+		}
+	}
+	// Mock binary check to pass (so we can test seccomp failure in isolation)
+	checkWrapperBinary = func(string) CheckResult {
+		return CheckResult{
+			Feature:   "seccomp-wrapper-binary",
+			Available: true,
 		}
 	}
 
@@ -300,11 +322,13 @@ func TestCheckAll_MultipleFailures(t *testing.T) {
 	origPtrace := checkPtrace
 	origCgroups := checkCgroupsV2
 	origEBPF := checkeBPF
+	origBinary := checkWrapperBinary
 	defer func() {
 		checkSeccompUserNotify = origSeccomp
 		checkPtrace = origPtrace
 		checkCgroupsV2 = origCgroups
 		checkeBPF = origEBPF
+		checkWrapperBinary = origBinary
 	}()
 
 	// Mock all to return failure
@@ -337,6 +361,14 @@ func TestCheckAll_MultipleFailures(t *testing.T) {
 			Feature:   "ebpf",
 			Available: false,
 			Error:     errors.New("eBPF not available"),
+		}
+	}
+
+	// Mock binary check to pass (so we can test other failures in isolation)
+	checkWrapperBinary = func(string) CheckResult {
+		return CheckResult{
+			Feature:   "seccomp-wrapper-binary",
+			Available: true,
 		}
 	}
 
@@ -394,7 +426,11 @@ func TestCheckAll_MultipleFailures(t *testing.T) {
 func TestCheckAll_ErrorFormat(t *testing.T) {
 	// Save and restore original
 	orig := checkSeccompUserNotify
-	defer func() { checkSeccompUserNotify = orig }()
+	origBinary := checkWrapperBinary
+	defer func() {
+		checkSeccompUserNotify = orig
+		checkWrapperBinary = origBinary
+	}()
 
 	// Mock to return failure with specific error
 	checkSeccompUserNotify = func() CheckResult {
@@ -402,6 +438,13 @@ func TestCheckAll_ErrorFormat(t *testing.T) {
 			Feature:   "seccomp-user-notify",
 			Available: false,
 			Error:     errors.New("test error message"),
+		}
+	}
+	// Mock binary check to pass
+	checkWrapperBinary = func(string) CheckResult {
+		return CheckResult{
+			Feature:   "seccomp-wrapper-binary",
+			Available: true,
 		}
 	}
 
@@ -461,6 +504,9 @@ func TestCheckAll_SingleFeatureChecks(t *testing.T) {
 			setupMocks: func() {
 				checkSeccompUserNotify = func() CheckResult {
 					return CheckResult{Feature: "seccomp-user-notify", Available: true}
+				}
+				checkWrapperBinary = func(string) CheckResult {
+					return CheckResult{Feature: "seccomp-wrapper-binary", Available: true}
 				}
 			},
 			config: func() *config.Config {
@@ -532,6 +578,7 @@ func TestCheckAll_SingleFeatureChecks(t *testing.T) {
 	origPtrace := checkPtrace
 	origCgroups := checkCgroupsV2
 	origEBPF := checkeBPF
+	origBinary := checkWrapperBinary
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -540,6 +587,7 @@ func TestCheckAll_SingleFeatureChecks(t *testing.T) {
 			checkPtrace = origPtrace
 			checkCgroupsV2 = origCgroups
 			checkeBPF = origEBPF
+			checkWrapperBinary = origBinary
 
 			// Apply test-specific mocks
 			if tt.setupMocks != nil {
@@ -571,4 +619,144 @@ func TestCheckAll_SingleFeatureChecks(t *testing.T) {
 	checkPtrace = origPtrace
 	checkCgroupsV2 = origCgroups
 	checkeBPF = origEBPF
+	checkWrapperBinary = origBinary
+}
+
+func TestCheckAll_WrapperBinary_UnixSocketsEnabled(t *testing.T) {
+	// Save and restore originals
+	origSeccomp := checkSeccompUserNotify
+	origBinary := checkWrapperBinary
+	defer func() {
+		checkSeccompUserNotify = origSeccomp
+		checkWrapperBinary = origBinary
+	}()
+
+	// Mock seccomp to pass
+	checkSeccompUserNotify = func() CheckResult {
+		return CheckResult{Feature: "seccomp-user-notify", Available: true}
+	}
+
+	// Mock binary check to fail
+	checkWrapperBinary = func(path string) CheckResult {
+		return CheckResult{
+			Feature:   "seccomp-wrapper-binary",
+			Available: false,
+			Error:     errors.New("wrapper binary \"agentsh-unixwrap\" not found in PATH"),
+		}
+	}
+
+	enabled := true
+	cfg := &config.Config{
+		Sandbox: config.SandboxConfig{
+			UnixSockets: config.SandboxUnixSocketsConfig{
+				Enabled: &enabled,
+			},
+		},
+	}
+
+	err := CheckAll(cfg)
+	if err == nil {
+		t.Fatal("expected error when wrapper binary not found")
+	}
+
+	errStr := err.Error()
+
+	// Verify error message
+	if !strings.Contains(errStr, "seccomp-wrapper-binary") {
+		t.Errorf("error should mention feature, got: %v", err)
+	}
+	if !strings.Contains(errStr, "sandbox.unix_sockets.enabled") {
+		t.Errorf("error should mention config key, got: %v", err)
+	}
+	if !strings.Contains(errStr, "not found") {
+		t.Errorf("error should mention 'not found', got: %v", err)
+	}
+	if !strings.Contains(errStr, "Install the agentsh-unixwrap binary") {
+		t.Errorf("error should suggest installing binary, got: %v", err)
+	}
+	// Should NOT suggest kernel upgrade for binary issues
+	if strings.Contains(errStr, "upgrade to a kernel") {
+		t.Errorf("error should NOT suggest kernel upgrade for binary issue, got: %v", err)
+	}
+}
+
+func TestCheckAll_WrapperBinary_ExecveEnabled(t *testing.T) {
+	// Save and restore originals
+	origBinary := checkWrapperBinary
+	defer func() {
+		checkWrapperBinary = origBinary
+	}()
+
+	// Mock binary check to fail
+	checkWrapperBinary = func(path string) CheckResult {
+		return CheckResult{
+			Feature:   "seccomp-wrapper-binary",
+			Available: false,
+			Error:     errors.New("wrapper binary \"agentsh-unixwrap\" not found in PATH"),
+		}
+	}
+
+	// Enable only execve (not unix_sockets)
+	cfg := &config.Config{
+		Sandbox: config.SandboxConfig{
+			Seccomp: config.SandboxSeccompConfig{
+				Execve: config.ExecveConfig{
+					Enabled: true,
+				},
+			},
+		},
+	}
+
+	err := CheckAll(cfg)
+	if err == nil {
+		t.Fatal("expected error when wrapper binary not found with execve enabled")
+	}
+
+	errStr := err.Error()
+
+	// Verify config key is correct for execve
+	if !strings.Contains(errStr, "sandbox.seccomp.execve.enabled") {
+		t.Errorf("error should mention sandbox.seccomp.execve.enabled, got: %v", err)
+	}
+}
+
+func TestCheckAll_WrapperBinary_CustomPath(t *testing.T) {
+	// Save and restore originals
+	origSeccomp := checkSeccompUserNotify
+	origBinary := checkWrapperBinary
+	defer func() {
+		checkSeccompUserNotify = origSeccomp
+		checkWrapperBinary = origBinary
+	}()
+
+	// Mock seccomp to pass
+	checkSeccompUserNotify = func() CheckResult {
+		return CheckResult{Feature: "seccomp-user-notify", Available: true}
+	}
+
+	// Track what path was passed to the check
+	var checkedPath string
+	checkWrapperBinary = func(path string) CheckResult {
+		checkedPath = path
+		return CheckResult{Feature: "seccomp-wrapper-binary", Available: true}
+	}
+
+	enabled := true
+	cfg := &config.Config{
+		Sandbox: config.SandboxConfig{
+			UnixSockets: config.SandboxUnixSocketsConfig{
+				Enabled:    &enabled,
+				WrapperBin: "/custom/path/to/wrapper",
+			},
+		},
+	}
+
+	err := CheckAll(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if checkedPath != "/custom/path/to/wrapper" {
+		t.Errorf("expected custom path to be checked, got: %q", checkedPath)
+	}
 }

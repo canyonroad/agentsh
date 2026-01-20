@@ -6,6 +6,7 @@ package capabilities
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -29,6 +30,7 @@ var (
 	checkPtrace            = realCheckPtrace
 	checkCgroupsV2         = realCheckCgroupsV2
 	checkeBPF              = realCheckeBPF
+	checkWrapperBinary     = realCheckWrapperBinary
 )
 
 // Stub implementations - real implementations will be in separate files.
@@ -57,6 +59,24 @@ func realCheckCgroupsV2() CheckResult {
 func realCheckeBPF() CheckResult {
 	return CheckResult{
 		Feature:   "ebpf",
+		Available: true,
+	}
+}
+
+func realCheckWrapperBinary(binaryPath string) CheckResult {
+	if binaryPath == "" {
+		binaryPath = "agentsh-unixwrap"
+	}
+	_, err := exec.LookPath(binaryPath)
+	if err != nil {
+		return CheckResult{
+			Feature:   "seccomp-wrapper-binary",
+			Available: false,
+			Error:     fmt.Errorf("wrapper binary %q not found in PATH: %w", binaryPath, err),
+		}
+	}
+	return CheckResult{
+		Feature:   "seccomp-wrapper-binary",
 		Available: true,
 	}
 }
@@ -119,6 +139,34 @@ func CheckAll(cfg *config.Config) error {
 		}
 	}
 
+	// Check if seccomp wrapper binary is required and available
+	// The agentsh-unixwrap binary is required for:
+	// - unix_sockets.enabled (seccomp-based socket filtering)
+	// - seccomp.execve.enabled (execve interception)
+	unixEnabled := cfg.Sandbox.UnixSockets.Enabled != nil && *cfg.Sandbox.UnixSockets.Enabled
+	execveEnabled := cfg.Sandbox.Seccomp.Execve.Enabled
+	if unixEnabled || execveEnabled {
+		wrapperBin := strings.TrimSpace(cfg.Sandbox.UnixSockets.WrapperBin)
+		if wrapperBin == "" {
+			wrapperBin = "agentsh-unixwrap"
+		}
+		result := checkWrapperBinary(wrapperBin)
+		if unixEnabled {
+			result.ConfigKey = "sandbox.unix_sockets.enabled"
+		} else {
+			result.ConfigKey = "sandbox.seccomp.execve.enabled"
+		}
+		result.Suggestion = fmt.Sprintf(
+			"Install the agentsh-unixwrap binary, or disable the feature by setting '%s: false' in your config.\n"+
+				"          The agentsh-unixwrap binary is required for seccomp/execve interception.\n"+
+				"          It may be missing if you're using a CGO-disabled build.",
+			result.ConfigKey,
+		)
+		if !result.Available {
+			failures = append(failures, result)
+		}
+	}
+
 	if len(failures) == 0 {
 		return nil
 	}
@@ -140,7 +188,10 @@ func formatErrors(failures []CheckResult) error {
 		}
 		sb.WriteString("\n")
 		sb.WriteString(fmt.Sprintf("  To fix: %s\n", f.Suggestion))
-		sb.WriteString("          or upgrade to a kernel that supports this feature.\n")
+		// Only suggest kernel upgrade for kernel features, not missing binaries
+		if f.Feature != "seccomp-wrapper-binary" {
+			sb.WriteString("          or upgrade to a kernel that supports this feature.\n")
+		}
 	}
 
 	return fmt.Errorf("%s", sb.String())
