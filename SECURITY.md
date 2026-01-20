@@ -108,6 +108,23 @@ agentsh is **not** a full security sandbox like a VM or container with seccomp. 
   - Shell: `BASH_ENV`, `ENV`, `PROMPT_COMMAND`
 - Allow/deny patterns configurable per-policy
 
+**Operator-trusted injection (`env_inject`):**
+
+The `sandbox.env_inject` configuration allows operators to inject environment variables that bypass policy filtering. This is intentionally powerful and should only be used by operators with config file access.
+
+Primary use case: Setting `BASH_ENV` to point to a script that disables shell builtins (`kill`, `enable`, `ulimit`) which would otherwise bypass seccomp enforcement.
+
+```yaml
+sandbox:
+  env_inject:
+    BASH_ENV: "/usr/lib/agentsh/bash_startup.sh"
+```
+
+**Security properties:**
+- `env_inject` values bypass the deny list (operator explicitly wants them)
+- Policy-level `env_inject` overrides global config (for per-policy customization)
+- Trust boundary: config file access (not user-controllable)
+
 ### Resource Limits (cgroups v2)
 
 - Memory limits (with swap disabled)

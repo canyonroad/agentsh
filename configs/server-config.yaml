@@ -72,6 +72,16 @@ policies:
   #   - "Cargo.toml"
   #   - "pyproject.toml"
 
+# Sandbox configuration
+sandbox:
+  # env_inject: Environment variables injected into all commands
+  # These bypass env policy filtering (operator-trusted)
+  # Primary use: BASH_ENV to disable bash builtins that bypass seccomp
+  env_inject:
+    BASH_ENV: "/usr/lib/agentsh/bash_startup.sh"
+    # Add custom vars as needed:
+    # MY_CUSTOM_VAR: "value"
+
 health:
   path: "/health"
   readiness_path: "/ready"

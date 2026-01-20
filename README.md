@@ -218,6 +218,7 @@ Defaults:
 - **Overrides:** Per-command `env_allow`/`env_deny` plus `env_max_keys`/`env_max_bytes` cap and filter the child env at exec time.
 - **Block iteration:** `env_block_iteration: true` (global or per rule) hides env enumeration; set `policies.env_shim_path` to `libenvshim.so` so agentsh injects `LD_PRELOAD` + `AGENTSH_ENV_BLOCK_ITERATION=1`.
 - **Limits:** Errors if limits are exceeded; env builder is applied before exec for every command.
+- **env_inject:** Operator-trusted environment variables injected into all commands, bypassing policy filtering. Primary use: `BASH_ENV` to disable shell builtins that bypass seccomp. Configure in `sandbox.env_inject` (global) or policy-level `env_inject` (overrides global).
 - **Examples:** See `config.yml` and policy samples under `configs/`.
 
 ---
