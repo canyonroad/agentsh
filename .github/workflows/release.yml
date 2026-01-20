@@ -63,7 +63,8 @@ jobs:
             libseccomp-dev \
             libseccomp-static \
             make \
-            git
+            git \
+            file
 
       - name: Build agentsh (Alpine/musl static)
         run: |
