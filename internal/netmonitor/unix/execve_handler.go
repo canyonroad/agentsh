@@ -49,9 +49,10 @@ type PolicyChecker interface {
 
 // PolicyDecision represents a policy check result
 type PolicyDecision struct {
-	Decision string
-	Rule     string
-	Message  string
+	Decision          string // The policy decision (allow, deny, approve, audit, redirect)
+	EffectiveDecision string // What actually happens (allow or deny, respects enforcement mode)
+	Rule              string
+	Message           string
 }
 
 // ExecveEmitter interface for emitting execve events.
@@ -103,12 +104,19 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 			ctx.Depth = state.Depth + 1
 			ctx.SessionID = state.SessionID
 		} else {
-			// Parent not tracked - check if current PID is the session root
-			// This happens for the first execve: wrapper PID is registered at depth -1,
-			// but wrapper's parent (the server) isn't tracked
+			// Parent not tracked - check if current PID has state
+			// This handles two cases:
+			// 1. First execve from wrapper: wrapper registered at depth -1, increment to 0
+			// 2. Re-exec in same PID: use existing depth (don't increment)
 			selfState, selfOk := h.depthTracker.Get(ctx.PID)
 			if selfOk {
-				ctx.Depth = selfState.Depth + 1 // -1 + 1 = 0 (direct command)
+				if selfState.Depth == -1 {
+					// Session root transitioning to first command
+					ctx.Depth = 0
+				} else {
+					// Re-exec in same PID - preserve depth
+					ctx.Depth = selfState.Depth
+				}
 				ctx.SessionID = selfState.SessionID
 			}
 		}
@@ -167,10 +175,17 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 	// Check policy
 	decision := h.policy.CheckExecve(ctx.Filename, ctx.Argv, ctx.Depth)
 
-	switch decision.Decision {
-	case "allow", "audit", "redirect":
-		// Allow, audit, and redirect all permit execution for execve
-		// (redirect is for command redirect, not blocking)
+	// Use EffectiveDecision for actual enforcement (respects shadow mode)
+	// Use Decision for logging to preserve full policy semantics
+	effectiveDecision := decision.EffectiveDecision
+	if effectiveDecision == "" {
+		// Fallback if EffectiveDecision not set (e.g., old policy wrapper)
+		effectiveDecision = decision.Decision
+	}
+
+	switch effectiveDecision {
+	case "allow":
+		// Allowed by effective decision (includes shadow approve/audit/redirect)
 		// Record this PID for depth tracking
 		if h.depthTracker != nil {
 			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
@@ -185,29 +200,18 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 			Rule:     decision.Rule,
 			Reason:   decision.Message,
 			Errno:    int32(unix.EACCES),
-			Decision: "deny",
-		}
-		h.emitEvent(ctx, result, decision.Rule)
-		return result
-
-	case "approve":
-		// TODO: implement approval flow with timeout
-		result := ExecveResult{
-			Allow:    false,
-			Rule:     decision.Rule,
-			Reason:   "approval_required",
-			Errno:    int32(unix.EACCES),
-			Decision: "approve",
+			Decision: decision.Decision,
 		}
 		h.emitEvent(ctx, result, decision.Rule)
 		return result
 
 	default:
+		// Unknown effective decision - deny (fail-secure)
 		result := ExecveResult{
 			Allow:    false,
 			Reason:   "unknown_decision",
 			Errno:    int32(unix.EACCES),
-			Decision: "deny",
+			Decision: decision.Decision,
 		}
 		h.emitEvent(ctx, result, "unknown")
 		return result

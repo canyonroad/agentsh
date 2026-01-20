@@ -404,8 +404,9 @@ type policyEngineWrapper struct {
 func (w *policyEngineWrapper) CheckExecve(filename string, argv []string, depth int) unixmon.PolicyDecision {
 	dec := w.engine.CheckExecve(filename, argv, depth)
 	return unixmon.PolicyDecision{
-		Decision: string(dec.EffectiveDecision),
-		Rule:     dec.Rule,
-		Message:  dec.Message,
+		Decision:          string(dec.PolicyDecision),
+		EffectiveDecision: string(dec.EffectiveDecision),
+		Rule:              dec.Rule,
+		Message:           dec.Message,
 	}
 }

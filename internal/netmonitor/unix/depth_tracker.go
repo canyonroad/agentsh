@@ -37,16 +37,29 @@ func (dt *DepthTracker) RegisterSession(pid int, sessionID string) {
 }
 
 // RecordExecve records a new process, inheriting depth+1 from parent.
+// If the PID already has state (e.g., from RegisterSession or re-exec),
+// it preserves the session ID when the parent is unknown.
 func (dt *DepthTracker) RecordExecve(pid int, parentPID int) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 
 	parentState, ok := dt.state[parentPID]
 	if !ok {
-		// Unknown parent - start at depth 0
-		dt.state[pid] = ExecveState{
-			Depth:     0,
-			SessionID: "",
+		// Unknown parent - check if PID already has state (re-exec case)
+		// Preserve existing session ID if present
+		existing, hasExisting := dt.state[pid]
+		if hasExisting {
+			// Re-exec: preserve session ID and depth from existing state
+			dt.state[pid] = ExecveState{
+				Depth:     existing.Depth,
+				SessionID: existing.SessionID,
+			}
+		} else {
+			// Truly unknown - start at depth 0
+			dt.state[pid] = ExecveState{
+				Depth:     0,
+				SessionID: "",
+			}
 		}
 		return
 	}

@@ -68,11 +68,12 @@ type policyEngineWrapper struct {
 
 func (w *policyEngineWrapper) CheckExecve(filename string, argv []string, depth int) unixmon.PolicyDecision {
 	dec := w.engine.CheckExecve(filename, argv, depth)
-	// Use PolicyDecision (not EffectiveDecision) to preserve redirect/audit/approve semantics
+	// Return both PolicyDecision (for logging) and EffectiveDecision (for enforcement)
 	return unixmon.PolicyDecision{
-		Decision: string(dec.PolicyDecision),
-		Rule:     dec.Rule,
-		Message:  dec.Message,
+		Decision:          string(dec.PolicyDecision),
+		EffectiveDecision: string(dec.EffectiveDecision),
+		Rule:              dec.Rule,
+		Message:           dec.Message,
 	}
 }
 
