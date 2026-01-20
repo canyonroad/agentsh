@@ -835,3 +835,57 @@ func TestPoliciesConfig_GetProjectMarkers(t *testing.T) {
 		assert.Equal(t, markers, cfg.GetProjectMarkers())
 	})
 }
+
+func TestLoad_EnvInjectConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  env_inject:
+    BASH_ENV: "/usr/lib/agentsh/bash_startup.sh"
+    MY_CUSTOM_VAR: "custom_value"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify env_inject was parsed correctly
+	if cfg.Sandbox.EnvInject == nil {
+		t.Fatal("sandbox.env_inject should not be nil")
+	}
+	if len(cfg.Sandbox.EnvInject) != 2 {
+		t.Fatalf("sandbox.env_inject: expected 2 entries, got %d", len(cfg.Sandbox.EnvInject))
+	}
+	if cfg.Sandbox.EnvInject["BASH_ENV"] != "/usr/lib/agentsh/bash_startup.sh" {
+		t.Fatalf("sandbox.env_inject[BASH_ENV]: expected '/usr/lib/agentsh/bash_startup.sh', got %q", cfg.Sandbox.EnvInject["BASH_ENV"])
+	}
+	if cfg.Sandbox.EnvInject["MY_CUSTOM_VAR"] != "custom_value" {
+		t.Fatalf("sandbox.env_inject[MY_CUSTOM_VAR]: expected 'custom_value', got %q", cfg.Sandbox.EnvInject["MY_CUSTOM_VAR"])
+	}
+}
+
+func TestLoad_EnvInjectConfig_Empty(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	// Empty config - env_inject should be nil or empty map
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  enabled: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify env_inject is nil or empty when not configured
+	if cfg.Sandbox.EnvInject != nil && len(cfg.Sandbox.EnvInject) > 0 {
+		t.Fatalf("sandbox.env_inject: expected nil or empty, got %v", cfg.Sandbox.EnvInject)
+	}
+}

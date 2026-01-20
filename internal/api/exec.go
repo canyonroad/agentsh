@@ -26,6 +26,7 @@ const (
 type extraProcConfig struct {
 	extraFiles       []*os.File
 	env              map[string]string
+	envInject        map[string]string // Operator-trusted env vars that bypass policy filtering
 	notifyParentSock *os.File       // Parent socket to receive seccomp notify fd (Linux only)
 	notifySessionID  string         // Session ID for notify handler
 	notifyStore      eventStore     // Event store for notify handler
@@ -158,6 +159,12 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	}
 	if extra != nil && len(extra.env) > 0 {
 		for k, v := range extra.env {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
+	// Add env_inject (operator-trusted, bypasses policy filtering)
+	if extra != nil && len(extra.envInject) > 0 {
+		for k, v := range extra.envInject {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
 		}
 	}
@@ -402,4 +409,27 @@ func mergeEnv(base []string, s *session.Session, overrides map[string]string) []
 		return []string{}
 	}
 	return env
+}
+
+// mergeEnvInject merges env_inject from global config and policy.
+// Policy values take precedence over config values for the same key.
+// These variables bypass policy env filtering (operator-trusted).
+func mergeEnvInject(cfg *config.Config, pol *policy.Engine) map[string]string {
+	result := make(map[string]string)
+
+	// 1. Start with global config
+	if cfg != nil {
+		for k, v := range cfg.Sandbox.EnvInject {
+			result[k] = v
+		}
+	}
+
+	// 2. Layer policy on top (policy wins conflicts)
+	if pol != nil {
+		for k, v := range pol.GetEnvInject() {
+			result[k] = v
+		}
+	}
+
+	return result
 }

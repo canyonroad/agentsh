@@ -634,6 +634,15 @@ func (e *Engine) EnvPolicy() EnvPolicy {
 	return e.policy.EnvPolicy
 }
 
+// GetEnvInject returns the env_inject map from the policy.
+// Returns an empty map if engine, policy, or EnvInject is nil.
+func (e *Engine) GetEnvInject() map[string]string {
+	if e == nil || e.policy == nil || e.policy.EnvInject == nil {
+		return map[string]string{}
+	}
+	return e.policy.EnvInject
+}
+
 // CheckNetwork evaluates network_rules against a domain and port.
 // Deprecated: Use CheckNetworkCtx for proper cancellation support.
 func (e *Engine) CheckNetwork(domain string, port int) Decision {

@@ -232,6 +232,13 @@ sandbox:
     enabled: true                  # Wraps commands with agentsh-unixwrap for seccomp-bpf enforcement
     # wrapper_bin: "agentsh-unixwrap"  # Optional: override wrapper binary path
 
+  # env_inject: Environment variables injected into all commands
+  # These bypass env policy filtering (operator-trusted)
+  # Primary use: BASH_ENV to disable bash builtins that bypass seccomp
+  env_inject:
+    BASH_ENV: "/usr/lib/agentsh/bash_startup.sh"
+    # MY_CUSTOM_VAR: "value"  # Add custom vars as needed
+
   # seccomp settings
   seccomp:
     # Reserved for future hardening (not implemented yet).

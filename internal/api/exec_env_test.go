@@ -256,3 +256,192 @@ func TestBuildPolicyEnv_BothProxiesSetIndependently(t *testing.T) {
 		t.Errorf("expected OPENAI_BASE_URL=http://127.0.0.1:9090, got %q", gotMap["OPENAI_BASE_URL"])
 	}
 }
+
+func TestMergeEnvInject(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfgEnv     map[string]string
+		polEnv     map[string]string
+		wantResult map[string]string
+	}{
+		{
+			name:       "both_nil",
+			cfgEnv:     nil,
+			polEnv:     nil,
+			wantResult: map[string]string{},
+		},
+		{
+			name:       "config_only",
+			cfgEnv:     map[string]string{"BASH_ENV": "/global/path"},
+			polEnv:     nil,
+			wantResult: map[string]string{"BASH_ENV": "/global/path"},
+		},
+		{
+			name:       "policy_only",
+			cfgEnv:     nil,
+			polEnv:     map[string]string{"BASH_ENV": "/policy/path"},
+			wantResult: map[string]string{"BASH_ENV": "/policy/path"},
+		},
+		{
+			name:       "policy_wins_conflict",
+			cfgEnv:     map[string]string{"BASH_ENV": "/global/path", "EXTRA": "global"},
+			polEnv:     map[string]string{"BASH_ENV": "/policy/path"},
+			wantResult: map[string]string{"BASH_ENV": "/policy/path", "EXTRA": "global"},
+		},
+		{
+			name:       "merge_disjoint",
+			cfgEnv:     map[string]string{"GLOBAL_VAR": "a"},
+			polEnv:     map[string]string{"POLICY_VAR": "b"},
+			wantResult: map[string]string{"GLOBAL_VAR": "a", "POLICY_VAR": "b"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Sandbox.EnvInject = tt.cfgEnv
+
+			var pol *policy.Engine
+			if tt.polEnv != nil {
+				p := &policy.Policy{
+					Version:   1,
+					Name:      "test",
+					EnvInject: tt.polEnv,
+				}
+				var err error
+				pol, err = policy.NewEngine(p, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got := mergeEnvInject(cfg, pol)
+			if len(got) != len(tt.wantResult) {
+				t.Errorf("mergeEnvInject() returned %d keys, want %d", len(got), len(tt.wantResult))
+			}
+			for k, v := range tt.wantResult {
+				if got[k] != v {
+					t.Errorf("mergeEnvInject()[%q] = %q, want %q", k, got[k], v)
+				}
+			}
+		})
+	}
+}
+
+func TestMergeEnvInject_NilConfig(t *testing.T) {
+	// Test with nil config
+	p := &policy.Policy{
+		Version:   1,
+		Name:      "test",
+		EnvInject: map[string]string{"BASH_ENV": "/policy/path"},
+	}
+	pol, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := mergeEnvInject(nil, pol)
+	if len(got) != 1 {
+		t.Errorf("mergeEnvInject(nil, pol) returned %d keys, want 1", len(got))
+	}
+	if got["BASH_ENV"] != "/policy/path" {
+		t.Errorf("mergeEnvInject(nil, pol)[BASH_ENV] = %q, want %q", got["BASH_ENV"], "/policy/path")
+	}
+
+	// Test with both nil
+	got2 := mergeEnvInject(nil, nil)
+	if len(got2) != 0 {
+		t.Errorf("mergeEnvInject(nil, nil) returned %d keys, want 0", len(got2))
+	}
+}
+
+// TestEnvInject_AppearsInCommandEnv verifies that env_inject values from both
+// config and policy appear in the merged environment result.
+func TestEnvInject_AppearsInCommandEnv(t *testing.T) {
+	// Setup config with env_inject
+	cfg := &config.Config{}
+	cfg.Sandbox.EnvInject = map[string]string{
+		"BASH_ENV":   "/usr/lib/agentsh/bash_startup.sh",
+		"CONFIG_VAR": "from-config",
+	}
+
+	// Setup policy with additional env_inject
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "test-policy",
+		EnvInject: map[string]string{
+			"POLICY_VAR": "from-policy",
+		},
+	}
+	pol, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatalf("failed to create policy engine: %v", err)
+	}
+
+	// Merge env_inject from config and policy
+	merged := mergeEnvInject(cfg, pol)
+
+	// Verify config values appear
+	if merged["BASH_ENV"] != "/usr/lib/agentsh/bash_startup.sh" {
+		t.Errorf("BASH_ENV not found or incorrect: got %q, want %q",
+			merged["BASH_ENV"], "/usr/lib/agentsh/bash_startup.sh")
+	}
+	if merged["CONFIG_VAR"] != "from-config" {
+		t.Errorf("CONFIG_VAR not found or incorrect: got %q, want %q",
+			merged["CONFIG_VAR"], "from-config")
+	}
+
+	// Verify policy values appear
+	if merged["POLICY_VAR"] != "from-policy" {
+		t.Errorf("POLICY_VAR not found or incorrect: got %q, want %q",
+			merged["POLICY_VAR"], "from-policy")
+	}
+
+	// Verify all expected keys are present
+	if len(merged) != 3 {
+		t.Errorf("expected 3 keys in merged result, got %d: %v", len(merged), merged)
+	}
+}
+
+// TestEnvInject_PolicyOverridesConfig verifies that when both config and policy
+// define the same env_inject key, the policy value takes precedence.
+func TestEnvInject_PolicyOverridesConfig(t *testing.T) {
+	// Setup config with env_inject
+	cfg := &config.Config{}
+	cfg.Sandbox.EnvInject = map[string]string{
+		"BASH_ENV":   "/global/bash_startup.sh",
+		"SHARED_VAR": "config-value",
+	}
+
+	// Setup policy with overlapping env_inject that should override
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "override-policy",
+		EnvInject: map[string]string{
+			"BASH_ENV":   "/policy/custom_startup.sh", // Override config
+			"SHARED_VAR": "policy-value",              // Override config
+		},
+	}
+	pol, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatalf("failed to create policy engine: %v", err)
+	}
+
+	// Merge env_inject from config and policy
+	merged := mergeEnvInject(cfg, pol)
+
+	// Verify policy values override config values
+	if merged["BASH_ENV"] != "/policy/custom_startup.sh" {
+		t.Errorf("BASH_ENV should be overridden by policy: got %q, want %q",
+			merged["BASH_ENV"], "/policy/custom_startup.sh")
+	}
+	if merged["SHARED_VAR"] != "policy-value" {
+		t.Errorf("SHARED_VAR should be overridden by policy: got %q, want %q",
+			merged["SHARED_VAR"], "policy-value")
+	}
+
+	// Verify only 2 keys (no duplicates)
+	if len(merged) != 2 {
+		t.Errorf("expected 2 keys in merged result (no duplicates), got %d: %v", len(merged), merged)
+	}
+}

@@ -142,6 +142,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	extraCfg := &extraProcConfig{
 		extraFiles:       []*os.File{sp.child},
 		env:              extraEnv,
+		envInject:        mergeEnvInject(a.cfg, a.policy),
 		notifyParentSock: sp.parent,
 		notifySessionID:  sessionID,
 		notifyPolicy:     a.policy,
