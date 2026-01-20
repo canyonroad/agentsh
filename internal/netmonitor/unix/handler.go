@@ -218,11 +218,18 @@ func handleExecveNotification(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *E
 	}
 
 	filename, err := readString(pid, execveArgs.FilenamePtr, 4096)
-	if err != nil && !execveArgs.IsExecveat {
-		// Can't read filename for execve - deny (fail-secure)
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
-		_ = seccomp.NotifRespond(fd, &resp)
-		return
+	if err != nil {
+		const AT_EMPTY_PATH = 0x1000
+		// For execve, always fail-secure if we can't read the filename
+		// For execveat with AT_EMPTY_PATH, we can resolve from fd
+		if !execveArgs.IsExecveat || (execveArgs.Flags&AT_EMPTY_PATH == 0) {
+			// Can't read filename - deny (fail-secure)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		// AT_EMPTY_PATH case: filename is ignored, will resolve from fd
+		filename = ""
 	}
 
 	// Handle execveat special cases: AT_EMPTY_PATH and relative paths

@@ -35,10 +35,11 @@ type ExecveContext struct {
 
 // ExecveResult holds the result of handling an execve.
 type ExecveResult struct {
-	Allow  bool
-	Rule   string
-	Reason string
-	Errno  int32
+	Allow    bool
+	Rule     string
+	Reason   string
+	Errno    int32
+	Decision string // The actual policy decision (allow, deny, audit, redirect, approve)
 }
 
 // PolicyChecker interface for policy evaluation
@@ -96,10 +97,20 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 	// Get depth from tracker first - needed even for internal bypass
 	// so that children of bypassed binaries inherit correct depth
 	if h.depthTracker != nil {
+		// First try to find parent's state
 		state, ok := h.depthTracker.Get(ctx.ParentPID)
 		if ok {
 			ctx.Depth = state.Depth + 1
 			ctx.SessionID = state.SessionID
+		} else {
+			// Parent not tracked - check if current PID is the session root
+			// This happens for the first execve: wrapper PID is registered at depth -1,
+			// but wrapper's parent (the server) isn't tracked
+			selfState, selfOk := h.depthTracker.Get(ctx.PID)
+			if selfOk {
+				ctx.Depth = selfState.Depth + 1 // -1 + 1 = 0 (direct command)
+				ctx.SessionID = selfState.SessionID
+			}
 		}
 	}
 
@@ -109,7 +120,10 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 		if h.depthTracker != nil {
 			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
 		}
-		return ExecveResult{Allow: true, Rule: "internal_bypass"}
+		result := ExecveResult{Allow: true, Rule: "internal_bypass", Decision: "allow"}
+		// Log every execve per design doc, including internal bypass
+		h.emitEvent(ctx, result, "internal_bypass")
+		return result
 	}
 
 	// Check truncation policy
@@ -117,18 +131,20 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 		switch h.cfg.OnTruncated {
 		case "deny":
 			result := ExecveResult{
-				Allow:  false,
-				Reason: "truncated",
-				Errno:  int32(unix.EACCES),
+				Allow:    false,
+				Reason:   "truncated",
+				Errno:    int32(unix.EACCES),
+				Decision: "deny",
 			}
 			h.emitEvent(ctx, result, "truncated")
 			return result
 		case "approval":
 			// TODO: implement approval flow
 			result := ExecveResult{
-				Allow:  false,
-				Reason: "truncated_needs_approval",
-				Errno:  int32(unix.EACCES),
+				Allow:    false,
+				Reason:   "truncated_needs_approval",
+				Errno:    int32(unix.EACCES),
+				Decision: "approve",
 			}
 			h.emitEvent(ctx, result, "truncated_approval")
 			return result
@@ -138,11 +154,13 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 
 	// Skip policy check if no policy configured
 	if h.policy == nil {
-		result := ExecveResult{Allow: true, Rule: "no_policy"}
+		result := ExecveResult{Allow: true, Rule: "no_policy", Decision: "allow"}
 		// Record for depth tracking even without policy
 		if h.depthTracker != nil {
 			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
 		}
+		// Log every execve per design doc, including when no policy
+		h.emitEvent(ctx, result, "no_policy")
 		return result
 	}
 
@@ -157,16 +175,17 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 		if h.depthTracker != nil {
 			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
 		}
-		result := ExecveResult{Allow: true, Rule: decision.Rule}
+		result := ExecveResult{Allow: true, Rule: decision.Rule, Decision: decision.Decision}
 		h.emitEvent(ctx, result, decision.Rule)
 		return result
 
 	case "deny":
 		result := ExecveResult{
-			Allow:  false,
-			Rule:   decision.Rule,
-			Reason: decision.Message,
-			Errno:  int32(unix.EACCES),
+			Allow:    false,
+			Rule:     decision.Rule,
+			Reason:   decision.Message,
+			Errno:    int32(unix.EACCES),
+			Decision: "deny",
 		}
 		h.emitEvent(ctx, result, decision.Rule)
 		return result
@@ -174,19 +193,21 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 	case "approve":
 		// TODO: implement approval flow with timeout
 		result := ExecveResult{
-			Allow:  false,
-			Rule:   decision.Rule,
-			Reason: "approval_required",
-			Errno:  int32(unix.EACCES),
+			Allow:    false,
+			Rule:     decision.Rule,
+			Reason:   "approval_required",
+			Errno:    int32(unix.EACCES),
+			Decision: "approve",
 		}
 		h.emitEvent(ctx, result, decision.Rule)
 		return result
 
 	default:
 		result := ExecveResult{
-			Allow:  false,
-			Reason: "unknown_decision",
-			Errno:  int32(unix.EACCES),
+			Allow:    false,
+			Reason:   "unknown_decision",
+			Errno:    int32(unix.EACCES),
+			Decision: "deny",
 		}
 		h.emitEvent(ctx, result, "unknown")
 		return result
@@ -204,9 +225,20 @@ func (h *ExecveHandler) emitEvent(ctx ExecveContext, result ExecveResult, rule s
 		action = "blocked"
 	}
 
-	decision := types.DecisionAllow
+	// Use the actual policy decision, defaulting to allow/deny based on Allow flag
+	decision := types.Decision(result.Decision)
+	if decision == "" {
+		if result.Allow {
+			decision = types.DecisionAllow
+		} else {
+			decision = types.DecisionDeny
+		}
+	}
+
+	// Effective decision reflects what actually happened
+	effectiveDecision := types.DecisionAllow
 	if !result.Allow {
-		decision = types.DecisionDeny
+		effectiveDecision = types.DecisionDeny
 	}
 
 	ev := types.Event{
@@ -222,7 +254,7 @@ func (h *ExecveHandler) emitEvent(ctx ExecveContext, result ExecveResult, rule s
 		Truncated: ctx.Truncated,
 		Policy: &types.PolicyInfo{
 			Decision:          decision,
-			EffectiveDecision: decision,
+			EffectiveDecision: effectiveDecision,
 			Rule:              rule,
 			Message:           result.Reason,
 		},
