@@ -136,6 +136,7 @@ archives:
       - src: build/envshim/linux_{{ .Arch }}/*
         dst: .
         strip_parent: true
+      - packaging/bash_startup.sh
     builds_info:
       mode: 0755
       group: root
@@ -223,6 +224,11 @@ nfpms:
       # Envshim library (Linux only) - uses glob to skip if not built
       - src: build/envshim/linux_{{ .Arch }}/*.so
         dst: /usr/lib/agentsh/
+      # Bash startup script for environment injection
+      - src: packaging/bash_startup.sh
+        dst: /usr/lib/agentsh/bash_startup.sh
+        file_info:
+          mode: 0755
       # Create directories
       - dst: /etc/agentsh
         type: dir
