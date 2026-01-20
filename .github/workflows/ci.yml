@@ -78,8 +78,8 @@ jobs:
       - name: go build (with CGO for FUSE-T support)
         run: CGO_ENABLED=1 go build ./...
 
-      - name: go test (platform packages)
-        run: go test -v ./internal/platform/... ./pkg/...
+      - name: go test (all packages)
+        run: go test ./...
 
   test-windows:
     runs-on: windows-latest
