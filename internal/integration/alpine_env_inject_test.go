@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -68,7 +67,7 @@ func TestAlpineEnvInject_BashBuiltinDisabled(t *testing.T) {
 		defer cancel()
 
 		result, err := cli.Exec(execCtx, sess.ID, types.ExecRequest{
-			Command: "bash",
+			Command: "/bin/bash",
 			Args:    []string{"--version"},
 		})
 		if err != nil {
@@ -86,7 +85,7 @@ func TestAlpineEnvInject_BashBuiltinDisabled(t *testing.T) {
 		defer cancel()
 
 		result, err := cli.Exec(execCtx, sess.ID, types.ExecRequest{
-			Command: "bash",
+			Command: "/bin/bash",
 			Args:    []string{"-c", "type kill"},
 		})
 		if err != nil {
@@ -116,7 +115,7 @@ func TestAlpineEnvInject_BashBuiltinDisabled(t *testing.T) {
 		defer cancel()
 
 		result, err := cli.Exec(execCtx, sess.ID, types.ExecRequest{
-			Command: "bash",
+			Command: "/bin/bash",
 			Args:    []string{"-c", "type enable 2>&1 || true"},
 		})
 		if err != nil {
@@ -142,7 +141,7 @@ func TestAlpineEnvInject_BashBuiltinDisabled(t *testing.T) {
 
 		// kill -0 $$ tests if we can signal ourselves (always allowed)
 		result, err := cli.Exec(execCtx, sess.ID, types.ExecRequest{
-			Command: "bash",
+			Command: "/bin/bash",
 			Args:    []string{"-c", "kill -0 $$ && echo SUCCESS"},
 		})
 		if err != nil {
@@ -209,20 +208,20 @@ func buildAlpineBinaries(t *testing.T) (agentsh, unixwrap, startupScript string)
 	// Create a build container
 	buildScript := `#!/bin/sh
 set -e
-apk add --no-cache gcc musl-dev libseccomp-dev libseccomp-static git make
+apk add --no-cache gcc musl-dev libseccomp-dev libseccomp-static git make file
 
 cd /src
 
 # Build agentsh with static musl + libseccomp
 CGO_ENABLED=1 \
 CGO_LDFLAGS="-static -lseccomp" \
-go build -ldflags='-s -w -extldflags "-static"' \
+go build -buildvcs=false -ldflags='-s -w -extldflags "-static"' \
   -o /output/agentsh ./cmd/agentsh
 
 # Build agentsh-unixwrap with static musl + libseccomp
 CGO_ENABLED=1 \
 CGO_LDFLAGS="-static -lseccomp" \
-go build -ldflags='-s -w -extldflags "-static"' \
+go build -buildvcs=false -ldflags='-s -w -extldflags "-static"' \
   -o /output/agentsh-unixwrap ./cmd/agentsh-unixwrap
 
 # Verify they're statically linked
@@ -236,7 +235,7 @@ file /output/agentsh-unixwrap
 	}
 
 	req := testcontainers.ContainerRequest{
-		Image: "golang:1.24-alpine",
+		Image: "golang:1.25-alpine",
 		Mounts: []testcontainers.ContainerMount{
 			testcontainers.BindMount(repoRoot, "/src"),
 			testcontainers.BindMount(outputDir, "/output"),
