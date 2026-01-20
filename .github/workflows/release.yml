@@ -116,4 +116,5 @@ jobs:
 
           gh release upload "$VERSION" \
             "dist/agentsh_${VERSION}_linux_amd64_musl.tar.gz" \
+            --repo "${{ github.repository }}" \
             --clobber
