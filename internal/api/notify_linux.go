@@ -89,6 +89,7 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 	// Run the entire receive and serve logic in a goroutine to return immediately
 	go func() {
 		defer parentSock.Close()
+		slog.Debug("notify handler started", "session_id", sessID)
 
 		// Get the wrapper's PID from socket credentials for session tracking
 		// This is the process that will exec the user's command
@@ -98,6 +99,7 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 			slog.Debug("failed to get socket peer credentials", "error", err)
 		} else {
 			wrapperPID = int(ucred.Pid)
+			slog.Debug("got wrapper PID from socket credentials", "wrapper_pid", wrapperPID, "session_id", sessID)
 		}
 
 		// Set a read deadline to prevent blocking forever if wrapper fails.
@@ -110,15 +112,18 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 		}
 
 		// Receive the notify fd from the wrapper process
+		slog.Debug("waiting to receive notify fd from wrapper", "session_id", sessID)
 		notifyFD, err := unixmon.RecvFD(parentSock)
 		if err != nil {
-			slog.Debug("failed to receive notify fd", "error", err)
+			slog.Debug("failed to receive notify fd", "error", err, "session_id", sessID)
 			return
 		}
 
 		if notifyFD == nil {
+			slog.Debug("received nil notify fd", "session_id", sessID)
 			return
 		}
+		slog.Debug("received notify fd from wrapper", "fd", notifyFD.Fd(), "session_id", sessID)
 		defer notifyFD.Close()
 
 		emitter := &notifyEmitterAdapter{store: store, broker: broker}
@@ -136,6 +141,8 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 				}
 			}
 		}
+		slog.Debug("starting ServeNotifyWithExecve", "session_id", sessID, "has_execve_handler", h != nil, "has_policy", pol != nil)
 		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h)
+		slog.Debug("ServeNotifyWithExecve returned", "session_id", sessID)
 	}()
 }

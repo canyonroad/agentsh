@@ -5,6 +5,7 @@ package unix
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -132,12 +133,16 @@ func emitEvent(emit Emitter, session string, dec policy.Decision, path string, a
 // It stops when the fd is closed or ctx is done.
 func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol *policy.Engine, emit Emitter, execveHandler *ExecveHandler) {
 	if fd == nil || emit == nil {
+		slog.Debug("ServeNotifyWithExecve: nil fd or emit", "fd_nil", fd == nil, "emit_nil", emit == nil)
 		return
 	}
 	scmpFD := seccomp.ScmpFd(fd.Fd())
+	slog.Debug("ServeNotifyWithExecve: starting notify loop", "session_id", sessID, "scmp_fd", scmpFD)
+	notifCount := 0
 	for {
 		select {
 		case <-ctx.Done():
+			slog.Debug("ServeNotifyWithExecve: context done", "session_id", sessID, "total_notifications", notifCount)
 			return
 		default:
 		}
@@ -147,13 +152,17 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
+			slog.Debug("ServeNotifyWithExecve: NotifReceive error (exiting)", "session_id", sessID, "error", err, "total_notifications", notifCount)
 			return
 		}
+		notifCount++
 
 		syscallNr := int32(req.Data.Syscall)
+		slog.Debug("ServeNotifyWithExecve: received notification", "session_id", sessID, "syscall_nr", syscallNr, "pid", req.Pid, "count", notifCount)
 
 		// Route to appropriate handler
 		if IsExecveSyscall(syscallNr) && execveHandler != nil {
+			slog.Debug("ServeNotifyWithExecve: routing to execve handler", "session_id", sessID, "pid", req.Pid)
 			handleExecveNotification(scmpFD, req, execveHandler)
 			continue
 		}
@@ -161,6 +170,7 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		// Existing unix socket handling
 		ctxReq := ExtractContext(req)
 		if !isUnixSocketSyscall(ctxReq.Syscall) {
+			slog.Debug("ServeNotifyWithExecve: non-unix syscall, allowing", "session_id", sessID, "syscall", ctxReq.Syscall)
 			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue})
 			continue
 		}
