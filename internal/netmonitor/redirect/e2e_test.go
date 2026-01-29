@@ -291,6 +291,309 @@ func TestDefaultValues(t *testing.T) {
 	}
 }
 
+// TestSNIRewriteConfiguration tests SNI rewrite configuration and evaluation
+func TestSNIRewriteConfiguration(t *testing.T) {
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "sni-test",
+		ConnectRedirectRules: []policy.ConnectRedirectRule{
+			{
+				Name:       "anthropic-passthrough",
+				Match:      `api\.anthropic\.com:443`,
+				RedirectTo: "vertex-proxy.internal:443",
+				TLS:        &policy.ConnectRedirectTLSConfig{Mode: "passthrough"},
+				Message:    "Vertex presents cert for api.anthropic.com",
+			},
+			{
+				Name:       "openai-rewrite-sni",
+				Match:      `api\.openai\.com:443`,
+				RedirectTo: "azure-openai.internal:443",
+				TLS:        &policy.ConnectRedirectTLSConfig{Mode: "rewrite_sni", SNI: "azure-openai.internal"},
+				Message:    "Azure needs its own hostname in SNI",
+			},
+			{
+				Name:       "custom-api-rewrite",
+				Match:      `custom-llm\.example\.com:443`,
+				RedirectTo: "10.0.0.100:8443",
+				TLS:        &policy.ConnectRedirectTLSConfig{Mode: "rewrite_sni", SNI: "internal-llm.corp.local"},
+				Message:    "Internal LLM endpoint",
+			},
+		},
+	}
+
+	if err := p.Validate(); err != nil {
+		t.Fatalf("policy validation failed: %v", err)
+	}
+
+	engine, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		hostPort       string
+		wantMatch      bool
+		wantRedirectTo string
+		wantTLSMode    string
+		wantSNI        string
+		wantMessage    string
+	}{
+		{
+			name:           "passthrough keeps original SNI",
+			hostPort:       "api.anthropic.com:443",
+			wantMatch:      true,
+			wantRedirectTo: "vertex-proxy.internal:443",
+			wantTLSMode:    "passthrough",
+			wantSNI:        "", // empty means keep original
+			wantMessage:    "Vertex presents cert for api.anthropic.com",
+		},
+		{
+			name:           "rewrite SNI for Azure OpenAI",
+			hostPort:       "api.openai.com:443",
+			wantMatch:      true,
+			wantRedirectTo: "azure-openai.internal:443",
+			wantTLSMode:    "rewrite_sni",
+			wantSNI:        "azure-openai.internal",
+			wantMessage:    "Azure needs its own hostname in SNI",
+		},
+		{
+			name:           "rewrite SNI for internal endpoint",
+			hostPort:       "custom-llm.example.com:443",
+			wantMatch:      true,
+			wantRedirectTo: "10.0.0.100:8443",
+			wantTLSMode:    "rewrite_sni",
+			wantSNI:        "internal-llm.corp.local",
+			wantMessage:    "Internal LLM endpoint",
+		},
+		{
+			name:      "no match for unknown host",
+			hostPort:  "other.example.com:443",
+			wantMatch: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := engine.EvaluateConnectRedirect(tt.hostPort)
+
+			if result.Matched != tt.wantMatch {
+				t.Errorf("matched = %v, want %v", result.Matched, tt.wantMatch)
+				return
+			}
+
+			if !tt.wantMatch {
+				return
+			}
+
+			if result.RedirectTo != tt.wantRedirectTo {
+				t.Errorf("RedirectTo = %s, want %s", result.RedirectTo, tt.wantRedirectTo)
+			}
+			if result.TLSMode != tt.wantTLSMode {
+				t.Errorf("TLSMode = %s, want %s", result.TLSMode, tt.wantTLSMode)
+			}
+			if result.SNI != tt.wantSNI {
+				t.Errorf("SNI = %s, want %s", result.SNI, tt.wantSNI)
+			}
+			if result.Message != tt.wantMessage {
+				t.Errorf("Message = %s, want %s", result.Message, tt.wantMessage)
+			}
+		})
+	}
+}
+
+// TestSNIRewriteValidation tests that invalid SNI configurations are rejected
+func TestSNIRewriteValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		rule    policy.ConnectRedirectRule
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "passthrough without SNI is valid",
+			rule: policy.ConnectRedirectRule{
+				Name:       "test",
+				Match:      ".*:443",
+				RedirectTo: "proxy:443",
+				TLS:        &policy.ConnectRedirectTLSConfig{Mode: "passthrough"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "passthrough with SNI is valid (SNI ignored)",
+			rule: policy.ConnectRedirectRule{
+				Name:       "test",
+				Match:      ".*:443",
+				RedirectTo: "proxy:443",
+				TLS:        &policy.ConnectRedirectTLSConfig{Mode: "passthrough", SNI: "ignored.example.com"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "rewrite_sni with SNI is valid",
+			rule: policy.ConnectRedirectRule{
+				Name:       "test",
+				Match:      ".*:443",
+				RedirectTo: "proxy:443",
+				TLS:        &policy.ConnectRedirectTLSConfig{Mode: "rewrite_sni", SNI: "proxy.internal"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "rewrite_sni without SNI is invalid",
+			rule: policy.ConnectRedirectRule{
+				Name:       "test",
+				Match:      ".*:443",
+				RedirectTo: "proxy:443",
+				TLS:        &policy.ConnectRedirectTLSConfig{Mode: "rewrite_sni"},
+			},
+			wantErr: true,
+			errMsg:  "tls.sni required when mode is rewrite_sni",
+		},
+		{
+			name: "invalid TLS mode is rejected",
+			rule: policy.ConnectRedirectRule{
+				Name:       "test",
+				Match:      ".*:443",
+				RedirectTo: "proxy:443",
+				TLS:        &policy.ConnectRedirectTLSConfig{Mode: "mitm"},
+			},
+			wantErr: true,
+			errMsg:  "tls.mode must be passthrough or rewrite_sni",
+		},
+		{
+			name: "no TLS config defaults to passthrough",
+			rule: policy.ConnectRedirectRule{
+				Name:       "test",
+				Match:      ".*:443",
+				RedirectTo: "proxy:443",
+				// No TLS config
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &policy.Policy{
+				Version:              1,
+				Name:                 "test",
+				ConnectRedirectRules: []policy.ConnectRedirectRule{tt.rule},
+			}
+
+			err := p.Validate()
+			if tt.wantErr {
+				if err == nil {
+					t.Error("expected validation error, got nil")
+				} else if tt.errMsg != "" && !contains(err.Error(), tt.errMsg) {
+					t.Errorf("expected error containing %q, got %q", tt.errMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected validation error: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestEndToEndWithSNIRewrite tests the full flow with SNI rewrite
+func TestEndToEndWithSNIRewrite(t *testing.T) {
+	// Simulate: Client wants to connect to api.openai.com:443
+	// Policy: Redirect to azure-openai.internal:443 with SNI rewrite
+
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "e2e-sni-test",
+		DnsRedirectRules: []policy.DnsRedirectRule{
+			{
+				Name:      "openai-dns",
+				Match:     `api\.openai\.com`,
+				ResolveTo: "10.0.0.100", // Azure endpoint IP
+			},
+		},
+		ConnectRedirectRules: []policy.ConnectRedirectRule{
+			{
+				Name:       "openai-connect",
+				Match:      `api\.openai\.com:443`,
+				RedirectTo: "azure-openai.internal:443",
+				TLS: &policy.ConnectRedirectTLSConfig{
+					Mode: "rewrite_sni",
+					SNI:  "azure-openai.internal",
+				},
+				Visibility: "warn",
+				Message:    "Redirected to Azure OpenAI",
+			},
+		},
+	}
+
+	engine, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+
+	// Step 1: DNS resolution
+	hostname := "api.openai.com"
+	dnsResult := engine.EvaluateDnsRedirect(hostname)
+	if !dnsResult.Matched {
+		t.Fatal("DNS redirect should match")
+	}
+	t.Logf("DNS: %s -> %s", hostname, dnsResult.ResolveTo)
+
+	// Step 2: Correlation map
+	correlationMap := NewCorrelationMap(5 * time.Minute)
+	correlationMap.AddResolution(hostname, []net.IP{net.ParseIP(dnsResult.ResolveTo)})
+
+	// Step 3: Connect redirect evaluation
+	hostPort := hostname + ":443"
+	connectResult := engine.EvaluateConnectRedirect(hostPort)
+	if !connectResult.Matched {
+		t.Fatal("connect redirect should match")
+	}
+
+	// Verify the full redirect configuration
+	t.Logf("Connect: %s -> %s", hostPort, connectResult.RedirectTo)
+	t.Logf("TLS Mode: %s", connectResult.TLSMode)
+	t.Logf("SNI: %s", connectResult.SNI)
+
+	if connectResult.RedirectTo != "azure-openai.internal:443" {
+		t.Errorf("expected redirect to azure-openai.internal:443, got %s", connectResult.RedirectTo)
+	}
+	if connectResult.TLSMode != "rewrite_sni" {
+		t.Errorf("expected TLS mode rewrite_sni, got %s", connectResult.TLSMode)
+	}
+	if connectResult.SNI != "azure-openai.internal" {
+		t.Errorf("expected SNI azure-openai.internal, got %s", connectResult.SNI)
+	}
+	if connectResult.Visibility != "warn" {
+		t.Errorf("expected visibility warn, got %s", connectResult.Visibility)
+	}
+
+	// This test demonstrates what the eBPF layer would do:
+	// 1. Intercept connect() to resolved IP (10.0.0.100:443)
+	// 2. Look up hostname from correlation map: api.openai.com
+	// 3. Evaluate redirect: azure-openai.internal:443 with SNI rewrite
+	// 4. Modify sockaddr to point to azure-openai.internal
+	// 5. When TLS ClientHello is sent, rewrite SNI from api.openai.com to azure-openai.internal
+	// 6. Azure server sees correct SNI, presents valid cert, connection succeeds
+}
+
+// helper function
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
+		(len(s) > 0 && len(substr) > 0 && findSubstring(s, substr)))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
 // TestComplexRegexPatterns tests various regex patterns
 func TestComplexRegexPatterns(t *testing.T) {
 	p := &policy.Policy{
