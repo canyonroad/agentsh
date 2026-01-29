@@ -849,6 +849,86 @@ func copyMap(m map[string]string) map[string]string {
 	return result
 }
 
+// DnsRedirectResult contains the result of DNS redirect evaluation
+type DnsRedirectResult struct {
+	Matched    bool
+	Rule       string
+	ResolveTo  string
+	Visibility string
+	OnFailure  string
+}
+
+// EvaluateDnsRedirect checks if a hostname should be redirected
+func (e *Engine) EvaluateDnsRedirect(hostname string) *DnsRedirectResult {
+	for _, r := range e.dnsRedirectRules {
+		if r.pattern.MatchString(hostname) {
+			visibility := r.rule.Visibility
+			if visibility == "" {
+				visibility = "audit_only"
+			}
+			onFailure := r.rule.OnFailure
+			if onFailure == "" {
+				onFailure = "fail_closed"
+			}
+			return &DnsRedirectResult{
+				Matched:    true,
+				Rule:       r.rule.Name,
+				ResolveTo:  r.rule.ResolveTo,
+				Visibility: visibility,
+				OnFailure:  onFailure,
+			}
+		}
+	}
+	return &DnsRedirectResult{Matched: false}
+}
+
+// ConnectRedirectResult contains the result of connect redirect evaluation
+type ConnectRedirectResult struct {
+	Matched    bool
+	Rule       string
+	RedirectTo string
+	TLSMode    string
+	SNI        string
+	Visibility string
+	Message    string
+	OnFailure  string
+}
+
+// EvaluateConnectRedirect checks if a connection should be redirected
+func (e *Engine) EvaluateConnectRedirect(hostPort string) *ConnectRedirectResult {
+	for _, r := range e.connectRedirectRules {
+		if r.pattern.MatchString(hostPort) {
+			visibility := r.rule.Visibility
+			if visibility == "" {
+				visibility = "audit_only"
+			}
+			onFailure := r.rule.OnFailure
+			if onFailure == "" {
+				onFailure = "fail_closed"
+			}
+			tlsMode := "passthrough"
+			sni := ""
+			if r.rule.TLS != nil {
+				if r.rule.TLS.Mode != "" {
+					tlsMode = r.rule.TLS.Mode
+				}
+				sni = r.rule.TLS.SNI
+			}
+			return &ConnectRedirectResult{
+				Matched:    true,
+				Rule:       r.rule.Name,
+				RedirectTo: r.rule.RedirectTo,
+				TLSMode:    tlsMode,
+				SNI:        sni,
+				Visibility: visibility,
+				Message:    r.rule.Message,
+				OnFailure:  onFailure,
+			}
+		}
+	}
+	return &ConnectRedirectResult{Matched: false}
+}
+
 // CheckExecve evaluates an execve call against command rules with depth context support.
 // Returns the decision from the first matching rule, or default deny if none match.
 // The depth parameter represents the ancestry depth: 0 = direct (user-typed), 1+ = nested (script-spawned).
