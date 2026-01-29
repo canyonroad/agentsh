@@ -12,12 +12,14 @@ type Policy struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
 
-	FileRules     []FileRule       `yaml:"file_rules"`
-	NetworkRules  []NetworkRule    `yaml:"network_rules"`
-	CommandRules  []CommandRule    `yaml:"command_rules"`
-	UnixRules     []UnixSocketRule `yaml:"unix_socket_rules"`
-	RegistryRules []RegistryRule   `yaml:"registry_rules"`
-	SignalRules   []SignalRule     `yaml:"signal_rules"`
+	FileRules            []FileRule            `yaml:"file_rules"`
+	NetworkRules         []NetworkRule         `yaml:"network_rules"`
+	CommandRules         []CommandRule         `yaml:"command_rules"`
+	UnixRules            []UnixSocketRule      `yaml:"unix_socket_rules"`
+	RegistryRules        []RegistryRule        `yaml:"registry_rules"`
+	SignalRules          []SignalRule          `yaml:"signal_rules"`
+	DnsRedirectRules     []DnsRedirectRule     `yaml:"dns_redirects,omitempty"`
+	ConnectRedirectRules []ConnectRedirectRule `yaml:"connect_redirects,omitempty"`
 
 	ResourceLimits ResourceLimits `yaml:"resource_limits"`
 	EnvPolicy      EnvPolicy      `yaml:"env_policy"`
@@ -140,6 +142,32 @@ type SignalTargetSpec struct {
 	Pattern string `yaml:"pattern,omitempty"` // For process name matching
 	Min     int    `yaml:"min,omitempty"`     // For pid_range
 	Max     int    `yaml:"max,omitempty"`     // For pid_range
+}
+
+// DnsRedirectRule redirects DNS resolution for matching hostnames
+type DnsRedirectRule struct {
+	Name       string `yaml:"name"`
+	Match      string `yaml:"match"`                // regex pattern for hostname
+	ResolveTo  string `yaml:"resolve_to"`           // IP address to return
+	Visibility string `yaml:"visibility,omitempty"` // silent, audit_only, warn
+	OnFailure  string `yaml:"on_failure,omitempty"` // fail_closed, fail_open, retry_original
+}
+
+// ConnectRedirectRule redirects TCP connections for matching host:port
+type ConnectRedirectRule struct {
+	Name       string                    `yaml:"name"`
+	Match      string                    `yaml:"match"`                // regex pattern for host:port
+	RedirectTo string                    `yaml:"redirect_to"`          // new host:port destination
+	TLS        *ConnectRedirectTLSConfig `yaml:"tls,omitempty"`
+	Visibility string                    `yaml:"visibility,omitempty"` // silent, audit_only, warn
+	Message    string                    `yaml:"message,omitempty"`
+	OnFailure  string                    `yaml:"on_failure,omitempty"` // fail_closed, fail_open, retry_original
+}
+
+// ConnectRedirectTLSConfig controls TLS handling for connect redirects
+type ConnectRedirectTLSConfig struct {
+	Mode string `yaml:"mode,omitempty"` // passthrough, rewrite_sni
+	SNI  string `yaml:"sni,omitempty"`  // required if mode is rewrite_sni
 }
 
 type ResourceLimits struct {
