@@ -1,5 +1,8 @@
 # Network Redirect Design
 
+**Status:** Implemented (Tasks 1-11 complete)
+**Branch:** feature/network-redirect
+
 DNS and connect-level redirect for agentsh-wrapped processes.
 
 ## Overview
