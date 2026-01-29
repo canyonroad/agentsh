@@ -30,10 +30,10 @@ func TestPathRedirector_Redirect(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		path       string
-		operation  string
-		wantPath   string
+		name         string
+		path         string
+		operation    string
+		wantPath     string
 		wantRedirect bool
 	}{
 		{

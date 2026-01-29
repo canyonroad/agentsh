@@ -4,10 +4,10 @@ package events
 type ShellInvokeEvent struct {
 	BaseEvent
 
-	Shell       string   `json:"shell"`        // "sh", "bash", "zsh", "powershell", "cmd"
-	InvokedAs   string   `json:"invoked_as"`   // Actual binary name used
-	Args        []string `json:"args"`         // Arguments passed
-	Mode        string   `json:"mode"`         // "command" (-c), "script", "interactive"
+	Shell       string   `json:"shell"`      // "sh", "bash", "zsh", "powershell", "cmd"
+	InvokedAs   string   `json:"invoked_as"` // Actual binary name used
+	Args        []string `json:"args"`       // Arguments passed
+	Mode        string   `json:"mode"`       // "command" (-c), "script", "interactive"
 	Command     string   `json:"command,omitempty"`
 	Script      string   `json:"script,omitempty"`
 	Intercepted bool     `json:"intercepted"`
@@ -117,12 +117,12 @@ type WindowsJobInfo struct {
 type ResourceLimitSetEvent struct {
 	BaseEvent
 
-	TargetPID    int              `json:"target_pid"`
-	TargetType   string           `json:"target_type"` // "session", "command", "process"
-	Limits       ResourceLimits   `json:"limits"`
-	LinuxCgroup  *LinuxCgroupInfo `json:"linux_cgroup,omitempty"`
+	TargetPID    int               `json:"target_pid"`
+	TargetType   string            `json:"target_type"` // "session", "command", "process"
+	Limits       ResourceLimits    `json:"limits"`
+	LinuxCgroup  *LinuxCgroupInfo  `json:"linux_cgroup,omitempty"`
 	DarwinRlimit *DarwinRlimitInfo `json:"darwin_rlimit,omitempty"`
-	WindowsJob   *WindowsJobInfo  `json:"windows_job,omitempty"`
+	WindowsJob   *WindowsJobInfo   `json:"windows_job,omitempty"`
 }
 
 // ResourceLimitWarningEvent - Usage approaching threshold.
@@ -228,7 +228,7 @@ type ProcessTreeKillEvent struct {
 type UnixSocketEvent struct {
 	BaseEvent
 
-	Operation    string `json:"operation"` // "connect", "bind", "listen", "accept"
+	Operation    string `json:"operation"`   // "connect", "bind", "listen", "accept"
 	SocketType   string `json:"socket_type"` // "stream", "dgram", "seqpacket"
 	Path         string `json:"path,omitempty"`
 	AbstractName string `json:"abstract_name,omitempty"`

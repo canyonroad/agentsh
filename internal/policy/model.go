@@ -30,7 +30,7 @@ type Policy struct {
 	EnvInject map[string]string `yaml:"env_inject"`
 
 	// Process context-based rules (parent-conditional policies)
-	ProcessContexts   map[string]ProcessContext `yaml:"process_contexts,omitempty"`
+	ProcessContexts   map[string]ProcessContext        `yaml:"process_contexts,omitempty"`
 	ProcessIdentities map[string]ProcessIdentityConfig `yaml:"process_identities,omitempty"`
 }
 
@@ -158,8 +158,8 @@ type DnsRedirectRule struct {
 // ConnectRedirectRule redirects TCP connections for matching host:port
 type ConnectRedirectRule struct {
 	Name       string                    `yaml:"name"`
-	Match      string                    `yaml:"match"`                // regex pattern for host:port
-	RedirectTo string                    `yaml:"redirect_to"`          // new host:port destination
+	Match      string                    `yaml:"match"`       // regex pattern for host:port
+	RedirectTo string                    `yaml:"redirect_to"` // new host:port destination
 	TLS        *ConnectRedirectTLSConfig `yaml:"tls,omitempty"`
 	Visibility string                    `yaml:"visibility,omitempty"` // silent, audit_only, warn
 	Message    string                    `yaml:"message,omitempty"`
@@ -213,11 +213,11 @@ type ProcessContext struct {
 	ChainRules []ChainRuleConfig `yaml:"chain_rules,omitempty"`
 
 	// Rules that apply within this context (override global rules)
-	CommandRules  []CommandRule    `yaml:"command_rules,omitempty"`
-	FileRules     []FileRule       `yaml:"file_rules,omitempty"`
-	NetworkRules  []NetworkRule    `yaml:"network_rules,omitempty"`
-	UnixRules     []UnixSocketRule `yaml:"unix_socket_rules,omitempty"`
-	EnvPolicy     *EnvPolicy       `yaml:"env_policy,omitempty"`
+	CommandRules []CommandRule    `yaml:"command_rules,omitempty"`
+	FileRules    []FileRule       `yaml:"file_rules,omitempty"`
+	NetworkRules []NetworkRule    `yaml:"network_rules,omitempty"`
+	UnixRules    []UnixSocketRule `yaml:"unix_socket_rules,omitempty"`
+	EnvPolicy    *EnvPolicy       `yaml:"env_policy,omitempty"`
 
 	// Quick command lists (simpler alternative to full CommandRules)
 	AllowedCommands []string `yaml:"allowed_commands,omitempty"` // Commands allowed without restriction
@@ -279,10 +279,10 @@ type ChainConditionConfig struct {
 	IsAgent   *bool `yaml:"is_agent,omitempty"`   // Is detected as agent
 
 	// Execution context conditions
-	EnvContains  []string `yaml:"env_contains,omitempty"`  // Environment variable patterns
-	ArgsContain  []string `yaml:"args_contain,omitempty"`  // Command argument patterns
-	CommMatches  []string `yaml:"comm_matches,omitempty"`  // Command name patterns
-	PathMatches  []string `yaml:"path_matches,omitempty"`  // Executable path patterns
+	EnvContains []string `yaml:"env_contains,omitempty"` // Environment variable patterns
+	ArgsContain []string `yaml:"args_contain,omitempty"` // Command argument patterns
+	CommMatches []string `yaml:"comm_matches,omitempty"` // Command name patterns
+	PathMatches []string `yaml:"path_matches,omitempty"` // Executable path patterns
 
 	// Source conditions
 	SourceName    []string `yaml:"source_name,omitempty"`    // Source process name patterns

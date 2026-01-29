@@ -18,10 +18,10 @@ type Engine struct {
 	policy           *Policy
 	enforceApprovals bool
 
-	compiledFileRules    []compiledFileRule
-	compiledNetworkRules []compiledNetworkRule
-	compiledCommandRules []compiledCommandRule
-	compiledUnixRules    []compiledUnixRule
+	compiledFileRules     []compiledFileRule
+	compiledNetworkRules  []compiledNetworkRule
+	compiledCommandRules  []compiledCommandRule
+	compiledUnixRules     []compiledUnixRule
 	compiledRegistryRules []compiledRegistryRule
 
 	// Compiled redirect rules for DNS and connect interception
