@@ -321,3 +321,34 @@ type XPCSandboxViolationEvent struct {
 	Operation   string `json:"operation"` // mach-lookup, mach-register
 	Profile     string `json:"profile,omitempty"`
 }
+
+// DNSRedirectEvent records DNS resolution redirects.
+type DNSRedirectEvent struct {
+	BaseEvent
+	OriginalHost string `json:"original_host"`
+	ResolvedTo   string `json:"resolved_to"`
+	Rule         string `json:"rule"`
+	Visibility   string `json:"visibility"`
+}
+
+// ConnectRedirectEvent records TCP connection redirects.
+type ConnectRedirectEvent struct {
+	BaseEvent
+	Original     string `json:"original"`      // host:port
+	RedirectedTo string `json:"redirected_to"` // host:port
+	Rule         string `json:"rule"`
+	TLSMode      string `json:"tls_mode,omitempty"`
+	Visibility   string `json:"visibility"`
+	Message      string `json:"message,omitempty"`
+}
+
+// ConnectRedirectFallbackEvent records fallback to original destination.
+type ConnectRedirectFallbackEvent struct {
+	BaseEvent
+	Original          string `json:"original"`
+	RedirectAttempted string `json:"redirect_attempted"`
+	Error             string `json:"error"`
+	Action            string `json:"action"` // fail_open, retry_original
+	Status            string `json:"status"` // connected_to_original, failed
+	Rule              string `json:"rule"`
+}

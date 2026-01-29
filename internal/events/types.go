@@ -20,10 +20,13 @@ const (
 
 // Network operation events.
 const (
-	EventDNSQuery   EventType = "dns_query"
-	EventNetConnect EventType = "net_connect"
-	EventNetListen  EventType = "net_listen"
-	EventNetAccept  EventType = "net_accept"
+	EventDNSQuery                EventType = "dns_query"
+	EventNetConnect              EventType = "net_connect"
+	EventNetListen               EventType = "net_listen"
+	EventNetAccept               EventType = "net_accept"
+	EventDNSRedirect             EventType = "dns_redirect"
+	EventConnectRedirect         EventType = "connect_redirect"
+	EventConnectRedirectFallback EventType = "connect_redirect_fallback"
 )
 
 // Process operation events.
@@ -144,10 +147,13 @@ var EventCategory = map[EventType]string{
 	EventDirList:    "file",
 
 	// Network
-	EventDNSQuery:   "network",
-	EventNetConnect: "network",
-	EventNetListen:  "network",
-	EventNetAccept:  "network",
+	EventDNSQuery:                "network",
+	EventNetConnect:              "network",
+	EventNetListen:               "network",
+	EventNetAccept:               "network",
+	EventDNSRedirect:             "network",
+	EventConnectRedirect:         "network",
+	EventConnectRedirectFallback: "network",
 
 	// Process
 	EventProcessStart: "process",
@@ -221,6 +227,7 @@ var AllEventTypes = []EventType{
 	EventDirCreate, EventDirDelete, EventDirList,
 	// Network
 	EventDNSQuery, EventNetConnect, EventNetListen, EventNetAccept,
+	EventDNSRedirect, EventConnectRedirect, EventConnectRedirectFallback,
 	// Process
 	EventProcessStart, EventProcessEnd, EventProcessSpawn, EventProcessExit, EventProcessTree,
 	// Environment
