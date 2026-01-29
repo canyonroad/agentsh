@@ -2,6 +2,8 @@ package policy
 
 import (
 	"fmt"
+	"net"
+	"regexp"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -355,5 +357,61 @@ func (p Policy) Validate() error {
 	if p.Name == "" {
 		return fmt.Errorf("name is required")
 	}
+
+	// Validate DNS redirect rules
+	for i, r := range p.DnsRedirectRules {
+		if r.Name == "" {
+			return fmt.Errorf("dns_redirects[%d]: name is required", i)
+		}
+		if r.Match == "" {
+			return fmt.Errorf("dns_redirects[%d]: match is required", i)
+		}
+		if _, err := regexp.Compile(r.Match); err != nil {
+			return fmt.Errorf("dns_redirects[%d]: invalid match regex: %w", i, err)
+		}
+		if r.ResolveTo == "" {
+			return fmt.Errorf("dns_redirects[%d]: resolve_to is required", i)
+		}
+		if net.ParseIP(r.ResolveTo) == nil {
+			return fmt.Errorf("dns_redirects[%d]: resolve_to must be valid IP", i)
+		}
+		if r.Visibility != "" && r.Visibility != "silent" && r.Visibility != "audit_only" && r.Visibility != "warn" {
+			return fmt.Errorf("dns_redirects[%d]: visibility must be silent, audit_only, or warn", i)
+		}
+		if r.OnFailure != "" && r.OnFailure != "fail_closed" && r.OnFailure != "fail_open" && r.OnFailure != "retry_original" {
+			return fmt.Errorf("dns_redirects[%d]: on_failure must be fail_closed, fail_open, or retry_original", i)
+		}
+	}
+
+	// Validate connect redirect rules
+	for i, r := range p.ConnectRedirectRules {
+		if r.Name == "" {
+			return fmt.Errorf("connect_redirects[%d]: name is required", i)
+		}
+		if r.Match == "" {
+			return fmt.Errorf("connect_redirects[%d]: match is required", i)
+		}
+		if _, err := regexp.Compile(r.Match); err != nil {
+			return fmt.Errorf("connect_redirects[%d]: invalid match regex: %w", i, err)
+		}
+		if r.RedirectTo == "" {
+			return fmt.Errorf("connect_redirects[%d]: redirect_to is required", i)
+		}
+		if r.TLS != nil {
+			if r.TLS.Mode != "" && r.TLS.Mode != "passthrough" && r.TLS.Mode != "rewrite_sni" {
+				return fmt.Errorf("connect_redirects[%d]: tls.mode must be passthrough or rewrite_sni", i)
+			}
+			if r.TLS.Mode == "rewrite_sni" && r.TLS.SNI == "" {
+				return fmt.Errorf("connect_redirects[%d]: tls.sni required when mode is rewrite_sni", i)
+			}
+		}
+		if r.Visibility != "" && r.Visibility != "silent" && r.Visibility != "audit_only" && r.Visibility != "warn" {
+			return fmt.Errorf("connect_redirects[%d]: visibility must be silent, audit_only, or warn", i)
+		}
+		if r.OnFailure != "" && r.OnFailure != "fail_closed" && r.OnFailure != "fail_open" && r.OnFailure != "retry_original" {
+			return fmt.Errorf("connect_redirects[%d]: on_failure must be fail_closed, fail_open, or retry_original", i)
+		}
+	}
+
 	return nil
 }
