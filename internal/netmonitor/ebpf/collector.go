@@ -4,9 +4,14 @@ package ebpf
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"sync"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/internal/netmonitor/redirect"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
 )
@@ -36,6 +41,11 @@ type Collector struct {
 	done   chan struct{}
 
 	onDrop func()
+
+	// Connect redirect integration
+	policyEngine   *policy.Engine
+	correlationMap *redirect.CorrelationMap
+	onRedirect     func(*events.ConnectRedirectEvent)
 }
 
 // StartCollector starts reading events from the "events" ring buffer map.
@@ -83,6 +93,10 @@ func (c *Collector) loop() {
 		var ev ConnectEvent
 		if len(record.RawSample) >= 49 { // 49 bytes needed for blocked flag
 			copyToEvent(&ev, record.RawSample)
+
+			// Evaluate connect redirect if configured
+			c.evaluateConnectRedirect(&ev)
+
 			select {
 			case c.events <- ev:
 			default:
@@ -145,5 +159,96 @@ func (c *Collector) Close() error {
 	}
 	c.mu.Unlock()
 	_ = c.rd.Close()
+	return nil
+}
+
+// SetPolicyEngine sets the policy engine for connect redirect evaluation.
+func (c *Collector) SetPolicyEngine(engine *policy.Engine) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.policyEngine = engine
+}
+
+// SetCorrelationMap sets the correlation map for hostname lookups from IPs.
+func (c *Collector) SetCorrelationMap(corrMap *redirect.CorrelationMap) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.correlationMap = corrMap
+}
+
+// SetOnRedirect sets the callback for connect redirect events.
+func (c *Collector) SetOnRedirect(fn func(*events.ConnectRedirectEvent)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onRedirect = fn
+}
+
+// evaluateConnectRedirect checks if a connection should be redirected and emits an event.
+func (c *Collector) evaluateConnectRedirect(ev *ConnectEvent) {
+	// Get policy engine and correlation map under lock
+	c.mu.Lock()
+	engine := c.policyEngine
+	corrMap := c.correlationMap
+	onRedirect := c.onRedirect
+	c.mu.Unlock()
+
+	// Skip if redirect evaluation is not configured
+	if engine == nil || onRedirect == nil {
+		return
+	}
+
+	// Extract destination IP from event
+	dstIP := c.extractDstIP(ev)
+	if dstIP == nil {
+		return
+	}
+
+	// Look up hostname from correlation map
+	hostname := ""
+	if corrMap != nil {
+		hostname, _ = corrMap.LookupHostname(dstIP)
+	}
+
+	// If no hostname found, use IP address string
+	if hostname == "" {
+		hostname = dstIP.String()
+	}
+
+	// Build host:port string for evaluation
+	hostPort := fmt.Sprintf("%s:%d", hostname, ev.Dport)
+
+	// Evaluate connect redirect rules
+	result := engine.EvaluateConnectRedirect(hostPort)
+	if !result.Matched {
+		return
+	}
+
+	// Emit connect redirect event
+	redirectEvent := &events.ConnectRedirectEvent{
+		Original:     hostPort,
+		RedirectedTo: result.RedirectTo,
+		Rule:         result.Rule,
+		TLSMode:      result.TLSMode,
+		Visibility:   result.Visibility,
+		Message:      result.Message,
+	}
+
+	onRedirect(redirectEvent)
+}
+
+// extractDstIP extracts the destination IP from a connect event.
+func (c *Collector) extractDstIP(ev *ConnectEvent) net.IP {
+	if ev.Family == 2 { // AF_INET
+		ip := make(net.IP, 4)
+		ip[0] = byte(ev.DstIPv4)
+		ip[1] = byte(ev.DstIPv4 >> 8)
+		ip[2] = byte(ev.DstIPv4 >> 16)
+		ip[3] = byte(ev.DstIPv4 >> 24)
+		return ip
+	} else if ev.Family == 10 { // AF_INET6
+		ip := make(net.IP, 16)
+		copy(ip, ev.DstIPv6[:])
+		return ip
+	}
 	return nil
 }

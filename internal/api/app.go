@@ -21,6 +21,7 @@ import (
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/netmonitor"
 	ebpftrace "github.com/agentsh/agentsh/internal/netmonitor/ebpf"
+	"github.com/agentsh/agentsh/internal/netmonitor/redirect"
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
@@ -431,11 +432,13 @@ func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session
 
 	// Start interceptors on host; netns will DNAT to host veth IP.
 	dnsCache := netmonitor.NewDNSCache(5 * time.Minute)
+	// Create correlation map for DNS-to-IP mapping (used by connect redirect)
+	correlationMap := redirect.NewCorrelationMap(5 * time.Minute)
 	tcp, tcpPort, err := netmonitor.StartTransparentTCP("0.0.0.0:0", s.ID, s, dnsCache, a.policy, a.approvals, em)
 	if err != nil {
 		return err
 	}
-	dns, dnsPort, err := netmonitor.StartDNS("0.0.0.0:0", "8.8.8.8:53", s.ID, s, dnsCache, a.policy, a.approvals, em)
+	dns, dnsPort, err := netmonitor.StartDNS("0.0.0.0:0", "8.8.8.8:53", s.ID, s, dnsCache, a.policy, a.approvals, em, correlationMap)
 	if err != nil {
 		_ = tcp.Close()
 		return err
