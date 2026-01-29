@@ -24,6 +24,10 @@ type Engine struct {
 	compiledUnixRules    []compiledUnixRule
 	compiledRegistryRules []compiledRegistryRule
 
+	// Compiled redirect rules for DNS and connect interception
+	dnsRedirectRules     []compiledDnsRedirectRule
+	connectRedirectRules []compiledConnectRedirectRule
+
 	// Compiled env policy patterns for glob matching
 	compiledEnvAllow []glob.Glob
 	compiledEnvDeny  []glob.Glob
@@ -77,6 +81,16 @@ type compiledRegistryRule struct {
 	globs    []glob.Glob
 	ops      map[string]struct{}
 	priority int
+}
+
+type compiledDnsRedirectRule struct {
+	rule    DnsRedirectRule
+	pattern *regexp.Regexp
+}
+
+type compiledConnectRedirectRule struct {
+	rule    ConnectRedirectRule
+	pattern *regexp.Regexp
 }
 
 type Decision struct {
@@ -245,6 +259,24 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 	sort.Slice(e.compiledRegistryRules, func(i, j int) bool {
 		return e.compiledRegistryRules[i].priority > e.compiledRegistryRules[j].priority
 	})
+
+	// Compile DNS redirect rules
+	for _, r := range p.DnsRedirectRules {
+		pattern, _ := regexp.Compile(r.Match) // Already validated
+		e.dnsRedirectRules = append(e.dnsRedirectRules, compiledDnsRedirectRule{
+			rule:    r,
+			pattern: pattern,
+		})
+	}
+
+	// Compile connect redirect rules
+	for _, r := range p.ConnectRedirectRules {
+		pattern, _ := regexp.Compile(r.Match) // Already validated
+		e.connectRedirectRules = append(e.connectRedirectRules, compiledConnectRedirectRule{
+			rule:    r,
+			pattern: pattern,
+		})
+	}
 
 	// Compile env policy patterns
 	for _, pat := range p.EnvPolicy.Allow {
