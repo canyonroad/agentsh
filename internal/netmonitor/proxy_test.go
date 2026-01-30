@@ -69,3 +69,92 @@ func TestMaybeApproveNoApprovalsLeavesDecision(t *testing.T) {
 		t.Fatalf("expected unchanged decision when approvals manager missing, got %v", got.EffectiveDecision)
 	}
 }
+
+func TestEmitConnectRedirectEvent(t *testing.T) {
+	em := &stubEmitter{}
+	p := &Proxy{
+		sessionID: "test-session",
+		emit:      em,
+	}
+
+	result := &policy.ConnectRedirectResult{
+		Matched:    true,
+		Rule:       "anthropic-redirect",
+		RedirectTo: "vertex-proxy.internal:443",
+		TLSMode:    "passthrough",
+		Visibility: "audit_only",
+		Message:    "Routed through Vertex",
+	}
+
+	p.emitConnectRedirectEvent(context.Background(), "cmd-123", "api.anthropic.com", "api.anthropic.com:443", 443, result)
+
+	// Event should be emitted twice (AppendEvent + Publish)
+	if len(em.events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(em.events))
+	}
+
+	ev := em.events[0]
+	if ev.Type != "connect_redirect" {
+		t.Errorf("expected type 'connect_redirect', got %s", ev.Type)
+	}
+	if ev.SessionID != "test-session" {
+		t.Errorf("expected sessionID 'test-session', got %s", ev.SessionID)
+	}
+	if ev.Domain != "api.anthropic.com" {
+		t.Errorf("expected domain 'api.anthropic.com', got %s", ev.Domain)
+	}
+	if ev.Fields["redirect_to"] != "vertex-proxy.internal:443" {
+		t.Errorf("expected redirect_to 'vertex-proxy.internal:443', got %v", ev.Fields["redirect_to"])
+	}
+	if ev.Fields["tls_mode"] != "passthrough" {
+		t.Errorf("expected tls_mode 'passthrough', got %v", ev.Fields["tls_mode"])
+	}
+}
+
+func TestEmitConnectRedirectEventWithSNI(t *testing.T) {
+	em := &stubEmitter{}
+	p := &Proxy{
+		sessionID: "test-session",
+		emit:      em,
+	}
+
+	result := &policy.ConnectRedirectResult{
+		Matched:    true,
+		Rule:       "sni-rewrite",
+		RedirectTo: "vertex-proxy.internal:443",
+		TLSMode:    "rewrite_sni",
+		SNI:        "vertex-proxy.internal",
+		Visibility: "audit_only",
+		Message:    "SNI rewritten",
+	}
+
+	p.emitConnectRedirectEvent(context.Background(), "cmd-456", "api.openai.com", "api.openai.com:443", 443, result)
+
+	if len(em.events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(em.events))
+	}
+
+	ev := em.events[0]
+	if ev.Fields["sni"] != "vertex-proxy.internal" {
+		t.Errorf("expected sni 'vertex-proxy.internal', got %v", ev.Fields["sni"])
+	}
+	if ev.Fields["tls_mode"] != "rewrite_sni" {
+		t.Errorf("expected tls_mode 'rewrite_sni', got %v", ev.Fields["tls_mode"])
+	}
+}
+
+func TestEmitConnectRedirectEventNilEmitter(t *testing.T) {
+	p := &Proxy{
+		sessionID: "test-session",
+		emit:      nil,
+	}
+
+	result := &policy.ConnectRedirectResult{
+		Matched:    true,
+		Rule:       "test",
+		RedirectTo: "proxy:443",
+	}
+
+	// Should not panic
+	p.emitConnectRedirectEvent(context.Background(), "cmd", "example.com", "example.com:443", 443, result)
+}
