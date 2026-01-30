@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
+	"github.com/agentsh/agentsh/internal/netmonitor/redirect"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -18,12 +19,13 @@ import (
 )
 
 type DNSInterceptor struct {
-	sessionID string
-	sess      *session.Session
-	dnsCache  *DNSCache
-	policy    *policy.Engine
-	approvals *approvals.Manager
-	emit      Emitter
+	sessionID      string
+	sess           *session.Session
+	dnsCache       *DNSCache
+	policy         *policy.Engine
+	approvals      *approvals.Manager
+	emit           Emitter
+	correlationMap *redirect.CorrelationMap
 
 	pc   net.PacketConn
 	wg   sync.WaitGroup
@@ -32,7 +34,7 @@ type DNSInterceptor struct {
 	upstream string
 }
 
-func StartDNS(listenAddr string, upstream string, sessionID string, sess *session.Session, dnsCache *DNSCache, engine *policy.Engine, approvalsMgr *approvals.Manager, emit Emitter) (*DNSInterceptor, int, error) {
+func StartDNS(listenAddr string, upstream string, sessionID string, sess *session.Session, dnsCache *DNSCache, engine *policy.Engine, approvalsMgr *approvals.Manager, emit Emitter, correlationMap *redirect.CorrelationMap) (*DNSInterceptor, int, error) {
 	if upstream == "" {
 		upstream = "8.8.8.8:53"
 	}
@@ -41,15 +43,16 @@ func StartDNS(listenAddr string, upstream string, sessionID string, sess *sessio
 		return nil, 0, err
 	}
 	d := &DNSInterceptor{
-		sessionID: sessionID,
-		sess:      sess,
-		dnsCache:  dnsCache,
-		policy:    engine,
-		approvals: approvalsMgr,
-		emit:      emit,
-		pc:        pc,
-		done:      make(chan struct{}),
-		upstream:  upstream,
+		sessionID:      sessionID,
+		sess:           sess,
+		dnsCache:       dnsCache,
+		policy:         engine,
+		approvals:      approvalsMgr,
+		emit:           emit,
+		correlationMap: correlationMap,
+		pc:             pc,
+		done:           make(chan struct{}),
+		upstream:       upstream,
 	}
 	d.wg.Add(1)
 	go d.loop()
@@ -97,6 +100,14 @@ func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 	// Use timeout context for DNS handling
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	// Check for DNS redirect rules first
+	if domain != "" && d.policy != nil {
+		redirectResult := d.policy.EvaluateDnsRedirect(domain)
+		if redirectResult.Matched {
+			return d.handleDNSRedirect(ctx, clientAddr, query, domain, commandID, redirectResult)
+		}
+	}
 
 	dec := d.policyDecision(ctx, domain, 53)
 	// Default deny policies are typically intended for outbound TCP/UDP connects, not DNS lookups.
@@ -160,6 +171,56 @@ func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 	return nil
 }
 
+// handleDNSRedirect processes a DNS query that matches a redirect rule.
+// It returns a synthetic DNS response with the redirect IP instead of querying upstream.
+func (d *DNSInterceptor) handleDNSRedirect(ctx context.Context, clientAddr net.Addr, query []byte, domain, commandID string, result *policy.DnsRedirectResult) error {
+	redirectIP := net.ParseIP(result.ResolveTo)
+	if redirectIP == nil {
+		// Invalid IP in redirect rule, fall through to normal resolution
+		return nil
+	}
+
+	// Build synthetic DNS response
+	resp := buildDNSRedirectResponse(query, redirectIP)
+	if resp == nil {
+		return nil
+	}
+
+	// Update correlation map with the redirect
+	if d.correlationMap != nil {
+		d.correlationMap.AddResolution(strings.ToLower(domain), []net.IP{redirectIP})
+	}
+
+	// Update DNS cache with the redirected IP
+	if d.dnsCache != nil {
+		d.dnsCache.Record(strings.ToLower(domain), []net.IP{redirectIP}, time.Now().UTC())
+	}
+
+	// Emit DNS redirect event if visibility is not silent
+	if result.Visibility != "silent" && d.emit != nil {
+		ev := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now().UTC(),
+			Type:      "dns_redirect",
+			SessionID: d.sessionID,
+			CommandID: commandID,
+			Domain:    domain,
+			Fields: map[string]any{
+				"original_host": domain,
+				"resolved_to":   result.ResolveTo,
+				"rule":          result.Rule,
+				"visibility":    result.Visibility,
+			},
+		}
+		_ = d.emit.AppendEvent(ctx, ev)
+		d.emit.Publish(ev)
+	}
+
+	// Send the synthetic response
+	_, _ = d.pc.WriteTo(resp, clientAddr)
+	return nil
+}
+
 func (d *DNSInterceptor) policyDecision(ctx context.Context, domain string, port int) policy.Decision {
 	if d.policy == nil {
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
@@ -212,6 +273,92 @@ func dnsRefusedResponse(query []byte) []byte {
 	binary.BigEndian.PutUint16(resp[6:8], 0)
 	binary.BigEndian.PutUint16(resp[8:10], 0)
 	binary.BigEndian.PutUint16(resp[10:12], 0)
+	return resp
+}
+
+// buildDNSRedirectResponse creates a synthetic DNS response with the given IP.
+// It copies the query header and question, then adds an A record answer.
+func buildDNSRedirectResponse(query []byte, ip net.IP) []byte {
+	if len(query) < 12 {
+		return nil
+	}
+
+	// Find the end of the question section
+	qnameEnd := 12
+	for {
+		if qnameEnd >= len(query) {
+			return nil
+		}
+		l := int(query[qnameEnd])
+		if l == 0 {
+			qnameEnd++ // skip the null terminator
+			break
+		}
+		if l&0xC0 != 0 {
+			// Compression pointer - skip 2 bytes
+			qnameEnd += 2
+			break
+		}
+		qnameEnd += 1 + l
+	}
+	// Add QTYPE (2) + QCLASS (2)
+	questionEnd := qnameEnd + 4
+	if questionEnd > len(query) {
+		return nil
+	}
+
+	// Check if this is an A record query (type 1, class 1)
+	qtype := binary.BigEndian.Uint16(query[qnameEnd : qnameEnd+2])
+	if qtype != 1 {
+		// Not an A record query, don't redirect
+		return nil
+	}
+
+	// Get IPv4 address (use To4 to ensure 4-byte representation)
+	ipv4 := ip.To4()
+	if ipv4 == nil {
+		return nil
+	}
+
+	// Build response: header + question + answer
+	// Answer: NAME (pointer to offset 12) + TYPE (A=1) + CLASS (IN=1) + TTL + RDLENGTH + RDATA
+	answerLen := 2 + 2 + 2 + 4 + 2 + 4 // pointer + type + class + ttl + rdlen + rdata
+	resp := make([]byte, questionEnd+answerLen)
+
+	// Copy header and question
+	copy(resp, query[:questionEnd])
+
+	// Set response flags: QR=1, AA=1, RD=1, RA=1, RCODE=0 (no error)
+	flags := binary.BigEndian.Uint16(resp[2:4])
+	flags |= 1 << 15 // QR=1 (response)
+	flags |= 1 << 10 // AA=1 (authoritative)
+	flags |= 1 << 8  // RD=1 (recursion desired, copy from query)
+	flags |= 1 << 7  // RA=1 (recursion available)
+	flags &^= 0x000F // clear RCODE (success)
+	binary.BigEndian.PutUint16(resp[2:4], flags)
+
+	// Set counts: QDCOUNT=1, ANCOUNT=1, NSCOUNT=0, ARCOUNT=0
+	binary.BigEndian.PutUint16(resp[4:6], 1)  // QDCOUNT
+	binary.BigEndian.PutUint16(resp[6:8], 1)  // ANCOUNT
+	binary.BigEndian.PutUint16(resp[8:10], 0) // NSCOUNT
+	binary.BigEndian.PutUint16(resp[10:12], 0) // ARCOUNT
+
+	// Build answer section
+	answerStart := questionEnd
+	// NAME: compression pointer to offset 12 (0xC00C)
+	resp[answerStart] = 0xC0
+	resp[answerStart+1] = 0x0C
+	// TYPE: A (1)
+	binary.BigEndian.PutUint16(resp[answerStart+2:answerStart+4], 1)
+	// CLASS: IN (1)
+	binary.BigEndian.PutUint16(resp[answerStart+4:answerStart+6], 1)
+	// TTL: 60 seconds
+	binary.BigEndian.PutUint32(resp[answerStart+6:answerStart+10], 60)
+	// RDLENGTH: 4 (IPv4 address)
+	binary.BigEndian.PutUint16(resp[answerStart+10:answerStart+12], 4)
+	// RDATA: IPv4 address
+	copy(resp[answerStart+12:answerStart+16], ipv4)
+
 	return resp
 }
 

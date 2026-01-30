@@ -18,11 +18,15 @@ type Engine struct {
 	policy           *Policy
 	enforceApprovals bool
 
-	compiledFileRules    []compiledFileRule
-	compiledNetworkRules []compiledNetworkRule
-	compiledCommandRules []compiledCommandRule
-	compiledUnixRules    []compiledUnixRule
+	compiledFileRules     []compiledFileRule
+	compiledNetworkRules  []compiledNetworkRule
+	compiledCommandRules  []compiledCommandRule
+	compiledUnixRules     []compiledUnixRule
 	compiledRegistryRules []compiledRegistryRule
+
+	// Compiled redirect rules for DNS and connect interception
+	dnsRedirectRules     []compiledDnsRedirectRule
+	connectRedirectRules []compiledConnectRedirectRule
 
 	// Compiled env policy patterns for glob matching
 	compiledEnvAllow []glob.Glob
@@ -77,6 +81,16 @@ type compiledRegistryRule struct {
 	globs    []glob.Glob
 	ops      map[string]struct{}
 	priority int
+}
+
+type compiledDnsRedirectRule struct {
+	rule    DnsRedirectRule
+	pattern *regexp.Regexp
+}
+
+type compiledConnectRedirectRule struct {
+	rule    ConnectRedirectRule
+	pattern *regexp.Regexp
 }
 
 type Decision struct {
@@ -245,6 +259,24 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 	sort.Slice(e.compiledRegistryRules, func(i, j int) bool {
 		return e.compiledRegistryRules[i].priority > e.compiledRegistryRules[j].priority
 	})
+
+	// Compile DNS redirect rules
+	for _, r := range p.DnsRedirectRules {
+		pattern, _ := regexp.Compile(r.Match) // Already validated
+		e.dnsRedirectRules = append(e.dnsRedirectRules, compiledDnsRedirectRule{
+			rule:    r,
+			pattern: pattern,
+		})
+	}
+
+	// Compile connect redirect rules
+	for _, r := range p.ConnectRedirectRules {
+		pattern, _ := regexp.Compile(r.Match) // Already validated
+		e.connectRedirectRules = append(e.connectRedirectRules, compiledConnectRedirectRule{
+			rule:    r,
+			pattern: pattern,
+		})
+	}
 
 	// Compile env policy patterns
 	for _, pat := range p.EnvPolicy.Allow {
@@ -815,6 +847,86 @@ func copyMap(m map[string]string) map[string]string {
 		result[k] = v
 	}
 	return result
+}
+
+// DnsRedirectResult contains the result of DNS redirect evaluation
+type DnsRedirectResult struct {
+	Matched    bool
+	Rule       string
+	ResolveTo  string
+	Visibility string
+	OnFailure  string
+}
+
+// EvaluateDnsRedirect checks if a hostname should be redirected
+func (e *Engine) EvaluateDnsRedirect(hostname string) *DnsRedirectResult {
+	for _, r := range e.dnsRedirectRules {
+		if r.pattern.MatchString(hostname) {
+			visibility := r.rule.Visibility
+			if visibility == "" {
+				visibility = "audit_only"
+			}
+			onFailure := r.rule.OnFailure
+			if onFailure == "" {
+				onFailure = "fail_closed"
+			}
+			return &DnsRedirectResult{
+				Matched:    true,
+				Rule:       r.rule.Name,
+				ResolveTo:  r.rule.ResolveTo,
+				Visibility: visibility,
+				OnFailure:  onFailure,
+			}
+		}
+	}
+	return &DnsRedirectResult{Matched: false}
+}
+
+// ConnectRedirectResult contains the result of connect redirect evaluation
+type ConnectRedirectResult struct {
+	Matched    bool
+	Rule       string
+	RedirectTo string
+	TLSMode    string
+	SNI        string
+	Visibility string
+	Message    string
+	OnFailure  string
+}
+
+// EvaluateConnectRedirect checks if a connection should be redirected
+func (e *Engine) EvaluateConnectRedirect(hostPort string) *ConnectRedirectResult {
+	for _, r := range e.connectRedirectRules {
+		if r.pattern.MatchString(hostPort) {
+			visibility := r.rule.Visibility
+			if visibility == "" {
+				visibility = "audit_only"
+			}
+			onFailure := r.rule.OnFailure
+			if onFailure == "" {
+				onFailure = "fail_closed"
+			}
+			tlsMode := "passthrough"
+			sni := ""
+			if r.rule.TLS != nil {
+				if r.rule.TLS.Mode != "" {
+					tlsMode = r.rule.TLS.Mode
+				}
+				sni = r.rule.TLS.SNI
+			}
+			return &ConnectRedirectResult{
+				Matched:    true,
+				Rule:       r.rule.Name,
+				RedirectTo: r.rule.RedirectTo,
+				TLSMode:    tlsMode,
+				SNI:        sni,
+				Visibility: visibility,
+				Message:    r.rule.Message,
+				OnFailure:  onFailure,
+			}
+		}
+	}
+	return &ConnectRedirectResult{Matched: false}
 }
 
 // CheckExecve evaluates an execve call against command rules with depth context support.

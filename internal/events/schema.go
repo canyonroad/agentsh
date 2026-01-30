@@ -4,10 +4,10 @@ package events
 type ShellInvokeEvent struct {
 	BaseEvent
 
-	Shell       string   `json:"shell"`        // "sh", "bash", "zsh", "powershell", "cmd"
-	InvokedAs   string   `json:"invoked_as"`   // Actual binary name used
-	Args        []string `json:"args"`         // Arguments passed
-	Mode        string   `json:"mode"`         // "command" (-c), "script", "interactive"
+	Shell       string   `json:"shell"`      // "sh", "bash", "zsh", "powershell", "cmd"
+	InvokedAs   string   `json:"invoked_as"` // Actual binary name used
+	Args        []string `json:"args"`       // Arguments passed
+	Mode        string   `json:"mode"`       // "command" (-c), "script", "interactive"
 	Command     string   `json:"command,omitempty"`
 	Script      string   `json:"script,omitempty"`
 	Intercepted bool     `json:"intercepted"`
@@ -117,12 +117,12 @@ type WindowsJobInfo struct {
 type ResourceLimitSetEvent struct {
 	BaseEvent
 
-	TargetPID    int              `json:"target_pid"`
-	TargetType   string           `json:"target_type"` // "session", "command", "process"
-	Limits       ResourceLimits   `json:"limits"`
-	LinuxCgroup  *LinuxCgroupInfo `json:"linux_cgroup,omitempty"`
+	TargetPID    int               `json:"target_pid"`
+	TargetType   string            `json:"target_type"` // "session", "command", "process"
+	Limits       ResourceLimits    `json:"limits"`
+	LinuxCgroup  *LinuxCgroupInfo  `json:"linux_cgroup,omitempty"`
 	DarwinRlimit *DarwinRlimitInfo `json:"darwin_rlimit,omitempty"`
-	WindowsJob   *WindowsJobInfo  `json:"windows_job,omitempty"`
+	WindowsJob   *WindowsJobInfo   `json:"windows_job,omitempty"`
 }
 
 // ResourceLimitWarningEvent - Usage approaching threshold.
@@ -228,7 +228,7 @@ type ProcessTreeKillEvent struct {
 type UnixSocketEvent struct {
 	BaseEvent
 
-	Operation    string `json:"operation"` // "connect", "bind", "listen", "accept"
+	Operation    string `json:"operation"`   // "connect", "bind", "listen", "accept"
 	SocketType   string `json:"socket_type"` // "stream", "dgram", "seqpacket"
 	Path         string `json:"path,omitempty"`
 	AbstractName string `json:"abstract_name,omitempty"`
@@ -320,4 +320,35 @@ type XPCSandboxViolationEvent struct {
 	ServiceName string `json:"service_name"`
 	Operation   string `json:"operation"` // mach-lookup, mach-register
 	Profile     string `json:"profile,omitempty"`
+}
+
+// DNSRedirectEvent records DNS resolution redirects.
+type DNSRedirectEvent struct {
+	BaseEvent
+	OriginalHost string `json:"original_host"`
+	ResolvedTo   string `json:"resolved_to"`
+	Rule         string `json:"rule"`
+	Visibility   string `json:"visibility"`
+}
+
+// ConnectRedirectEvent records TCP connection redirects.
+type ConnectRedirectEvent struct {
+	BaseEvent
+	Original     string `json:"original"`      // host:port
+	RedirectedTo string `json:"redirected_to"` // host:port
+	Rule         string `json:"rule"`
+	TLSMode      string `json:"tls_mode,omitempty"`
+	Visibility   string `json:"visibility"`
+	Message      string `json:"message,omitempty"`
+}
+
+// ConnectRedirectFallbackEvent records fallback to original destination.
+type ConnectRedirectFallbackEvent struct {
+	BaseEvent
+	Original          string `json:"original"`
+	RedirectAttempted string `json:"redirect_attempted"`
+	Error             string `json:"error"`
+	Action            string `json:"action"` // fail_open, retry_original
+	Status            string `json:"status"` // connected_to_original, failed
+	Rule              string `json:"rule"`
 }

@@ -2,6 +2,8 @@ package policy
 
 import (
 	"fmt"
+	"net"
+	"regexp"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -12,12 +14,14 @@ type Policy struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
 
-	FileRules     []FileRule       `yaml:"file_rules"`
-	NetworkRules  []NetworkRule    `yaml:"network_rules"`
-	CommandRules  []CommandRule    `yaml:"command_rules"`
-	UnixRules     []UnixSocketRule `yaml:"unix_socket_rules"`
-	RegistryRules []RegistryRule   `yaml:"registry_rules"`
-	SignalRules   []SignalRule     `yaml:"signal_rules"`
+	FileRules            []FileRule            `yaml:"file_rules"`
+	NetworkRules         []NetworkRule         `yaml:"network_rules"`
+	CommandRules         []CommandRule         `yaml:"command_rules"`
+	UnixRules            []UnixSocketRule      `yaml:"unix_socket_rules"`
+	RegistryRules        []RegistryRule        `yaml:"registry_rules"`
+	SignalRules          []SignalRule          `yaml:"signal_rules"`
+	DnsRedirectRules     []DnsRedirectRule     `yaml:"dns_redirects,omitempty"`
+	ConnectRedirectRules []ConnectRedirectRule `yaml:"connect_redirects,omitempty"`
 
 	ResourceLimits ResourceLimits `yaml:"resource_limits"`
 	EnvPolicy      EnvPolicy      `yaml:"env_policy"`
@@ -26,7 +30,7 @@ type Policy struct {
 	EnvInject map[string]string `yaml:"env_inject"`
 
 	// Process context-based rules (parent-conditional policies)
-	ProcessContexts   map[string]ProcessContext `yaml:"process_contexts,omitempty"`
+	ProcessContexts   map[string]ProcessContext        `yaml:"process_contexts,omitempty"`
 	ProcessIdentities map[string]ProcessIdentityConfig `yaml:"process_identities,omitempty"`
 }
 
@@ -142,6 +146,32 @@ type SignalTargetSpec struct {
 	Max     int    `yaml:"max,omitempty"`     // For pid_range
 }
 
+// DnsRedirectRule redirects DNS resolution for matching hostnames
+type DnsRedirectRule struct {
+	Name       string `yaml:"name"`
+	Match      string `yaml:"match"`                // regex pattern for hostname
+	ResolveTo  string `yaml:"resolve_to"`           // IP address to return
+	Visibility string `yaml:"visibility,omitempty"` // silent, audit_only, warn
+	OnFailure  string `yaml:"on_failure,omitempty"` // fail_closed, fail_open, retry_original
+}
+
+// ConnectRedirectRule redirects TCP connections for matching host:port
+type ConnectRedirectRule struct {
+	Name       string                    `yaml:"name"`
+	Match      string                    `yaml:"match"`       // regex pattern for host:port
+	RedirectTo string                    `yaml:"redirect_to"` // new host:port destination
+	TLS        *ConnectRedirectTLSConfig `yaml:"tls,omitempty"`
+	Visibility string                    `yaml:"visibility,omitempty"` // silent, audit_only, warn
+	Message    string                    `yaml:"message,omitempty"`
+	OnFailure  string                    `yaml:"on_failure,omitempty"` // fail_closed, fail_open, retry_original
+}
+
+// ConnectRedirectTLSConfig controls TLS handling for connect redirects
+type ConnectRedirectTLSConfig struct {
+	Mode string `yaml:"mode,omitempty"` // passthrough, rewrite_sni
+	SNI  string `yaml:"sni,omitempty"`  // required if mode is rewrite_sni
+}
+
 type ResourceLimits struct {
 	MaxMemoryMB      int      `yaml:"max_memory_mb"`
 	MemorySwapMaxMB  int      `yaml:"memory_swap_max_mb"`
@@ -183,11 +213,11 @@ type ProcessContext struct {
 	ChainRules []ChainRuleConfig `yaml:"chain_rules,omitempty"`
 
 	// Rules that apply within this context (override global rules)
-	CommandRules  []CommandRule    `yaml:"command_rules,omitempty"`
-	FileRules     []FileRule       `yaml:"file_rules,omitempty"`
-	NetworkRules  []NetworkRule    `yaml:"network_rules,omitempty"`
-	UnixRules     []UnixSocketRule `yaml:"unix_socket_rules,omitempty"`
-	EnvPolicy     *EnvPolicy       `yaml:"env_policy,omitempty"`
+	CommandRules []CommandRule    `yaml:"command_rules,omitempty"`
+	FileRules    []FileRule       `yaml:"file_rules,omitempty"`
+	NetworkRules []NetworkRule    `yaml:"network_rules,omitempty"`
+	UnixRules    []UnixSocketRule `yaml:"unix_socket_rules,omitempty"`
+	EnvPolicy    *EnvPolicy       `yaml:"env_policy,omitempty"`
 
 	// Quick command lists (simpler alternative to full CommandRules)
 	AllowedCommands []string `yaml:"allowed_commands,omitempty"` // Commands allowed without restriction
@@ -249,10 +279,10 @@ type ChainConditionConfig struct {
 	IsAgent   *bool `yaml:"is_agent,omitempty"`   // Is detected as agent
 
 	// Execution context conditions
-	EnvContains  []string `yaml:"env_contains,omitempty"`  // Environment variable patterns
-	ArgsContain  []string `yaml:"args_contain,omitempty"`  // Command argument patterns
-	CommMatches  []string `yaml:"comm_matches,omitempty"`  // Command name patterns
-	PathMatches  []string `yaml:"path_matches,omitempty"`  // Executable path patterns
+	EnvContains []string `yaml:"env_contains,omitempty"` // Environment variable patterns
+	ArgsContain []string `yaml:"args_contain,omitempty"` // Command argument patterns
+	CommMatches []string `yaml:"comm_matches,omitempty"` // Command name patterns
+	PathMatches []string `yaml:"path_matches,omitempty"` // Executable path patterns
 
 	// Source conditions
 	SourceName    []string `yaml:"source_name,omitempty"`    // Source process name patterns
@@ -327,5 +357,61 @@ func (p Policy) Validate() error {
 	if p.Name == "" {
 		return fmt.Errorf("name is required")
 	}
+
+	// Validate DNS redirect rules
+	for i, r := range p.DnsRedirectRules {
+		if r.Name == "" {
+			return fmt.Errorf("dns_redirects[%d]: name is required", i)
+		}
+		if r.Match == "" {
+			return fmt.Errorf("dns_redirects[%d]: match is required", i)
+		}
+		if _, err := regexp.Compile(r.Match); err != nil {
+			return fmt.Errorf("dns_redirects[%d]: invalid match regex: %w", i, err)
+		}
+		if r.ResolveTo == "" {
+			return fmt.Errorf("dns_redirects[%d]: resolve_to is required", i)
+		}
+		if net.ParseIP(r.ResolveTo) == nil {
+			return fmt.Errorf("dns_redirects[%d]: resolve_to must be valid IP", i)
+		}
+		if r.Visibility != "" && r.Visibility != "silent" && r.Visibility != "audit_only" && r.Visibility != "warn" {
+			return fmt.Errorf("dns_redirects[%d]: visibility must be silent, audit_only, or warn", i)
+		}
+		if r.OnFailure != "" && r.OnFailure != "fail_closed" && r.OnFailure != "fail_open" && r.OnFailure != "retry_original" {
+			return fmt.Errorf("dns_redirects[%d]: on_failure must be fail_closed, fail_open, or retry_original", i)
+		}
+	}
+
+	// Validate connect redirect rules
+	for i, r := range p.ConnectRedirectRules {
+		if r.Name == "" {
+			return fmt.Errorf("connect_redirects[%d]: name is required", i)
+		}
+		if r.Match == "" {
+			return fmt.Errorf("connect_redirects[%d]: match is required", i)
+		}
+		if _, err := regexp.Compile(r.Match); err != nil {
+			return fmt.Errorf("connect_redirects[%d]: invalid match regex: %w", i, err)
+		}
+		if r.RedirectTo == "" {
+			return fmt.Errorf("connect_redirects[%d]: redirect_to is required", i)
+		}
+		if r.TLS != nil {
+			if r.TLS.Mode != "" && r.TLS.Mode != "passthrough" && r.TLS.Mode != "rewrite_sni" {
+				return fmt.Errorf("connect_redirects[%d]: tls.mode must be passthrough or rewrite_sni", i)
+			}
+			if r.TLS.Mode == "rewrite_sni" && r.TLS.SNI == "" {
+				return fmt.Errorf("connect_redirects[%d]: tls.sni required when mode is rewrite_sni", i)
+			}
+		}
+		if r.Visibility != "" && r.Visibility != "silent" && r.Visibility != "audit_only" && r.Visibility != "warn" {
+			return fmt.Errorf("connect_redirects[%d]: visibility must be silent, audit_only, or warn", i)
+		}
+		if r.OnFailure != "" && r.OnFailure != "fail_closed" && r.OnFailure != "fail_open" && r.OnFailure != "retry_original" {
+			return fmt.Errorf("connect_redirects[%d]: on_failure must be fail_closed, fail_open, or retry_original", i)
+		}
+	}
+
 	return nil
 }
