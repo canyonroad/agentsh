@@ -11,11 +11,17 @@ import (
 
 // cpuMonitor monitors CPU usage of a process and throttles if needed.
 type cpuMonitor struct {
-	pid            int
-	limitPercent   uint32
-	interval       time.Duration
-	lastCPUTime    uint64
-	lastSample     time.Time
+	pid          int
+	limitPercent uint32
+	interval     time.Duration
+
+	// These fields are only accessed from the run() goroutine (single-writer).
+	// start() initializes them before launching the goroutine.
+	lastCPUTime uint64
+	lastSample  time.Time
+
+	// lastCPUPercent is read via getCPUPercent() from other goroutines,
+	// so it requires mutex protection.
 	lastCPUPercent float64
 
 	mu      sync.Mutex

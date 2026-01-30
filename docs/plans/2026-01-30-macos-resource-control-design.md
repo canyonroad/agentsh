@@ -6,13 +6,13 @@
 
 ## Overview
 
-macOS lacks kernel-level resource control equivalent to Linux cgroups or Windows Job Objects. This design implements a hybrid approach: kernel-enforced memory limits via `setrlimit()` plus userspace CPU monitoring with SIGSTOP/SIGCONT throttling.
+macOS lacks kernel-level resource control equivalent to Linux cgroups or Windows Job Objects. This design implements a hybrid approach: userspace CPU monitoring with SIGSTOP/SIGCONT throttling. Memory limiting via RLIMIT_AS is designed but not yet implemented (requires child process rlimit enforcement).
 
 ## Feature Matrix
 
 | Resource | Linux | macOS | Windows |
 |----------|:-----:|:-----:|:-------:|
-| Memory | cgroups | RLIMIT_AS | Job Objects |
+| Memory | cgroups | **Not yet implemented** | Job Objects |
 | CPU | cgroups | Monitor+throttle | Job Objects |
 | Process count | cgroups | **Not supported** | Job Objects |
 | Disk I/O | cgroups | **Not supported** | Not supported |
@@ -24,7 +24,7 @@ macOS lacks kernel-level resource control equivalent to Linux cgroups or Windows
 ┌─────────────────────────────────────────────────────┐
 │                  ResourceLimiter                     │
 │  - Available() → true                               │
-│  - SupportedLimits() → [Memory, CPU]                │
+│  - SupportedLimits() → [CPU]                        │
 │  - Apply(config) → ResourceHandle                   │
 └─────────────────────────────────────────────────────┘
                           │
@@ -32,8 +32,7 @@ macOS lacks kernel-level resource control equivalent to Linux cgroups or Windows
 ┌─────────────────────────────────────────────────────┐
 │                  ResourceHandle                      │
 │  - AssignProcess(pid)                               │
-│    1. setrlimit(RLIMIT_AS, maxMemory) on child      │
-│    2. Start cpuMonitor goroutine                    │
+│    1. Start cpuMonitor goroutine                    │
 │  - Stats() → ResourceStats                          │
 │  - Release() → stops monitor, cleanup               │
 └─────────────────────────────────────────────────────┘
@@ -49,27 +48,19 @@ macOS lacks kernel-level resource control equivalent to Linux cgroups or Windows
 └─────────────────────────────────────────────────────┘
 ```
 
-## Memory Limiting
+## Memory Limiting (Future Work)
 
 ### Mechanism
 
-Uses `setrlimit(RLIMIT_AS, ...)` to limit virtual address space. Applied in child process after fork() but before exec().
+Would use `setrlimit(RLIMIT_AS, ...)` to limit virtual address space. Must be applied in child process after fork() but before exec().
 
-### Implementation
+### Implementation Status
 
-```go
-// In AssignProcess, before the process executes user code:
-if h.config.MaxMemoryMB > 0 {
-    var limit syscall.Rlimit
-    limit.Cur = h.config.MaxMemoryMB * 1024 * 1024
-    limit.Max = h.config.MaxMemoryMB * 1024 * 1024
-    // Applied via syscall.Setrlimit in the child process setup
-}
-```
+**Not yet implemented.** Go's `exec.Cmd` does not support setting rlimits via `SysProcAttr` on darwin. Future implementation options:
+1. Wrapper script that sets rlimits before exec
+2. CGO-based fork/exec with setrlimit in child
 
-### Sandbox Integration
-
-Since macOS lacks `prlimit()`, the sandbox's process spawning code queries ResourceHandle for rlimits to apply in the child:
+### Designed API (not enforced)
 
 ```go
 // ResourceHandle method for sandbox integration
@@ -86,7 +77,7 @@ func (h *ResourceHandle) GetRlimits() []RlimitConfig {
 }
 ```
 
-### Failure Behavior
+### Failure Behavior (when implemented)
 
 When process exceeds RLIMIT_AS, allocations fail with ENOMEM. Most programs crash or exit gracefully. Matches Windows Job Object behavior.
 
@@ -174,8 +165,8 @@ func NewResourceLimiter() *ResourceLimiter {
     return &ResourceLimiter{
         available: true,
         supportedLimits: []platform.ResourceType{
-            platform.ResourceMemory,
             platform.ResourceCPU,
+            // Note: ResourceMemory not supported until RLIMIT_AS enforcement implemented
         },
         handles: make(map[string]*ResourceHandle),
     }

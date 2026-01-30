@@ -10,7 +10,11 @@ import (
 )
 
 // ResourceLimiter implements platform.ResourceLimiter for macOS.
-// Uses setrlimit for memory limits and userspace monitoring for CPU limits.
+// Uses userspace CPU monitoring with SIGSTOP/SIGCONT throttling.
+//
+// Note: Memory limits via RLIMIT_AS are not yet implemented because Go's
+// exec.Cmd does not support setting rlimits via SysProcAttr on darwin.
+// A future implementation could use a wrapper script or CGO-based fork/exec.
 type ResourceLimiter struct {
 	available       bool
 	supportedLimits []platform.ResourceType
@@ -23,8 +27,9 @@ func NewResourceLimiter() *ResourceLimiter {
 	r := &ResourceLimiter{
 		available: true,
 		supportedLimits: []platform.ResourceType{
-			platform.ResourceMemory,
 			platform.ResourceCPU,
+			// Note: ResourceMemory is NOT listed because RLIMIT_AS enforcement
+			// is not yet implemented. See package comment.
 		},
 		handles: make(map[string]*ResourceHandle),
 	}
@@ -44,6 +49,9 @@ func (r *ResourceLimiter) SupportedLimits() []platform.ResourceType {
 // Apply applies resource limits.
 func (r *ResourceLimiter) Apply(config platform.ResourceConfig) (platform.ResourceHandle, error) {
 	// Validate: reject unsupported limits
+	if config.MaxMemoryMB > 0 {
+		return nil, fmt.Errorf("memory limits not yet implemented on macOS (requires RLIMIT_AS enforcement in child process)")
+	}
 	if config.MaxProcesses > 0 {
 		return nil, fmt.Errorf("process count limits not supported on macOS")
 	}
