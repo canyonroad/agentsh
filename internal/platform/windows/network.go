@@ -9,7 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/netmonitor"
 	"github.com/agentsh/agentsh/internal/platform"
+	"github.com/agentsh/agentsh/internal/policy"
 )
 
 // Network implements platform.NetworkInterceptor for Windows.
@@ -28,6 +30,10 @@ type Network struct {
 	windivert      *WinDivertHandle
 	natTable       *NATTable
 	driverClient   *DriverClient
+
+	// Policy engine and DNS cache for connect-level redirect support
+	policyEngine *policy.Engine
+	dnsCache     *netmonitor.DNSCache
 }
 
 // NewNetwork creates a new Windows network interceptor.
@@ -291,6 +297,23 @@ func (n *Network) SetDriverClient(client *DriverClient) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.driverClient = client
+}
+
+// SetPolicyEngine sets the policy engine for connect-level redirect evaluation.
+// This must be called BEFORE Setup() if redirect support is needed.
+func (n *Network) SetPolicyEngine(engine *policy.Engine) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.policyEngine = engine
+}
+
+// SetDNSCache sets the DNS cache for hostname correlation.
+// This enables looking up hostnames from destination IPs for redirect evaluation.
+// This must be called BEFORE Setup() if redirect support is needed.
+func (n *Network) SetDNSCache(cache *netmonitor.DNSCache) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.dnsCache = cache
 }
 
 // Compile-time interface check

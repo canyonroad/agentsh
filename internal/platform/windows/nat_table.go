@@ -1,6 +1,7 @@
 package windows
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -13,6 +14,24 @@ type NATEntry struct {
 	Protocol        string // "tcp" or "udp"
 	ProcessID       uint32
 	CreatedAt       time.Time
+
+	// Redirect fields for connect-level redirect support
+	RedirectTo  string // "host:port" if redirect matched, empty otherwise
+	RedirectTLS string // "passthrough" or "rewrite_sni"
+	RedirectSNI string // SNI to use if rewrite_sni mode
+}
+
+// IsRedirected returns true if this entry has a redirect destination.
+func (e *NATEntry) IsRedirected() bool {
+	return e.RedirectTo != ""
+}
+
+// GetConnectTarget returns the destination to connect to (redirect or original).
+func (e *NATEntry) GetConnectTarget() string {
+	if e.RedirectTo != "" {
+		return e.RedirectTo
+	}
+	return net.JoinHostPort(e.OriginalDstIP.String(), fmt.Sprintf("%d", e.OriginalDstPort))
 }
 
 // NATTable maps local proxy connections to original destinations.
@@ -40,6 +59,24 @@ func (t *NATTable) Insert(key string, entry *NATEntry) {
 		entry.CreatedAt = time.Now()
 	}
 	t.entries[key] = entry
+}
+
+// InsertWithRedirect adds a NAT entry with optional redirect destination.
+// This is used when connect-level redirect rules are matched.
+func (t *NATTable) InsertWithRedirect(key string, dstIP net.IP, dstPort uint16, protocol string, pid uint32, redirectTo, redirectTLS, redirectSNI string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.entries[key] = &NATEntry{
+		OriginalDstIP:   dstIP,
+		OriginalDstPort: dstPort,
+		Protocol:        protocol,
+		ProcessID:       pid,
+		CreatedAt:       time.Now(),
+		RedirectTo:      redirectTo,
+		RedirectTLS:     redirectTLS,
+		RedirectSNI:     redirectSNI,
+	}
 }
 
 // Lookup retrieves a NAT entry by key.
