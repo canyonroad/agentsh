@@ -689,6 +689,38 @@ registry_rules:
     decision: deny
 
 # =============================================================================
+# NETWORK REDIRECT RULES (Optional transparent API routing)
+# =============================================================================
+# Redirect DNS queries and TCP connections without code changes.
+# Use cases: route LLM APIs through corporate proxies, switch providers.
+
+# dns_redirect:
+#   # Route Anthropic API to internal proxy
+#   - match: "api.anthropic.com"
+#     redirect_ip: "10.0.0.50"
+#     visibility: audit_only
+#     on_failure: fail_closed
+#
+#   # Route all OpenAI subdomains
+#   - match: ".*\\.openai\\.com"
+#     redirect_ip: "10.0.0.51"
+#     visibility: warn
+
+# connect_redirect:
+#   # Redirect Claude API to Vertex AI proxy
+#   - match: "api.anthropic.com:443"
+#     redirect_to: "vertex-proxy.internal:8443"
+#     tls_mode: passthrough
+#     visibility: silent
+#
+#   # Redirect OpenAI to Azure with SNI rewrite
+#   - match: "api.openai.com:443"
+#     redirect_to: "azure-proxy.internal:443"
+#     tls_mode: rewrite_sni
+#     rewrite_sni: "azure-openai.example.com"
+#     visibility: audit_only
+
+# =============================================================================
 # RESOURCE LIMITS
 # =============================================================================
 

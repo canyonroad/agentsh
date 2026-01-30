@@ -255,6 +255,115 @@ signal_rules:
     decision: deny
 ```
 
+## Network Redirect Rules
+
+Network redirect rules transparently reroute DNS queries and TCP connections, enabling use cases like routing LLM API calls through corporate proxies or switching AI providers without code changes.
+
+### Platform Support
+
+| Feature | Linux | macOS | Windows |
+|---------|-------|-------|---------|
+| DNS Redirect | ✅ eBPF | ✅ pf/proxy | ✅ WinDivert |
+| Connect Redirect | ✅ eBPF | ✅ pf/proxy | ✅ WinDivert |
+| SNI Rewrite | ✅ | ✅ | ✅ |
+
+### DNS Redirect
+
+Intercept DNS resolution for specific hostnames and return configured IP addresses:
+
+```yaml
+dns_redirect:
+  - match: "api.anthropic.com"       # Exact match
+    redirect_ip: "10.0.0.50"
+    visibility: audit_only
+    on_failure: fail_closed
+
+  - match: ".*\\.openai\\.com"       # Regex pattern
+    redirect_ip: "10.0.0.51"
+    visibility: warn
+```
+
+| Field | Description |
+|-------|-------------|
+| `match` | Hostname pattern (exact string or regex) |
+| `redirect_ip` | IP address to return instead |
+| `visibility` | `silent`, `audit_only`, or `warn` |
+| `on_failure` | `fail_closed`, `fail_open`, or `retry_original` |
+
+### Connect Redirect
+
+Redirect TCP connections to different destinations with optional TLS handling:
+
+```yaml
+connect_redirect:
+  - match: "api.anthropic.com:443"
+    redirect_to: "vertex-proxy.internal:8443"
+    tls_mode: passthrough
+    visibility: silent
+
+  - match: "api.openai.com:443"
+    redirect_to: "azure-proxy.internal:443"
+    tls_mode: rewrite_sni
+    rewrite_sni: "azure-openai.example.com"
+    visibility: audit_only
+```
+
+| Field | Description |
+|-------|-------------|
+| `match` | `hostname:port` pattern (exact or regex) |
+| `redirect_to` | `host:port` destination |
+| `tls_mode` | `passthrough` (default) or `rewrite_sni` |
+| `rewrite_sni` | SNI value for TLS ClientHello (when `tls_mode: rewrite_sni`) |
+| `visibility` | `silent`, `audit_only`, or `warn` |
+
+### How It Works
+
+1. **DNS Redirect**: When a process resolves a hostname matching a rule, agentsh intercepts the DNS response and returns the configured IP. A correlation map stores the hostname→IP mapping.
+
+2. **Connect Redirect**: When a process connects to an IP:port, agentsh checks the correlation map to find the original hostname, evaluates redirect rules, and transparently redirects the connection.
+
+3. **TLS Handling**: In `passthrough` mode, encrypted traffic flows unchanged. In `rewrite_sni` mode, agentsh modifies the SNI in the TLS ClientHello before forwarding.
+
+### Visibility Options
+
+| Value | Behavior |
+|-------|----------|
+| `silent` | Redirect without logging or user notification |
+| `audit_only` | Log the redirect but don't notify user |
+| `warn` | Log and display a warning to user |
+
+### Failure Handling Options
+
+| Value | Behavior |
+|-------|----------|
+| `fail_closed` | If redirect fails, block the connection |
+| `fail_open` | If redirect fails, allow original connection |
+| `retry_original` | Try redirect, fall back to original on failure |
+
+### Example Use Cases
+
+**Route LLM APIs through corporate gateway:**
+```yaml
+dns_redirect:
+  - match: "api.anthropic.com"
+    redirect_ip: "10.1.1.100"
+    visibility: audit_only
+
+connect_redirect:
+  - match: "api.anthropic.com:443"
+    redirect_to: "llm-gateway.corp.local:443"
+    tls_mode: passthrough
+```
+
+**Switch from OpenAI to Azure OpenAI:**
+```yaml
+connect_redirect:
+  - match: "api.openai.com:443"
+    redirect_to: "mycompany.openai.azure.com:443"
+    tls_mode: rewrite_sni
+    rewrite_sni: "mycompany.openai.azure.com"
+```
+
 ## Troubleshooting
 
 ### Variable Not Expanding

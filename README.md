@@ -471,6 +471,69 @@ The generated policy:
 
 ---
 
+## Network Redirect
+
+agentsh can transparently redirect DNS and TCP connections, enabling use cases like routing API calls through corporate proxies or switching AI providers without code changes.
+
+### DNS Redirect
+
+Intercept DNS resolution and return configured IP addresses:
+
+```yaml
+dns_redirect:
+  - match: "api.anthropic.com"
+    redirect_ip: "10.0.0.50"
+    visibility: audit_only
+    on_failure: fail_closed
+
+  - match: ".*\\.openai\\.com"    # Regex pattern
+    redirect_ip: "10.0.0.51"
+    visibility: warn
+```
+
+### Connect Redirect
+
+Redirect TCP connections to different destinations with optional TLS handling:
+
+```yaml
+connect_redirect:
+  - match: "api.anthropic.com:443"
+    redirect_to: "vertex-proxy.internal:8443"
+    tls_mode: passthrough          # Forward encrypted traffic unchanged
+    visibility: silent
+
+  - match: "api.openai.com:443"
+    redirect_to: "azure-proxy.internal:443"
+    tls_mode: rewrite_sni          # Modify SNI in TLS ClientHello
+    rewrite_sni: "azure-openai.example.com"
+    visibility: audit_only
+```
+
+### Options
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `visibility` | `silent`, `audit_only`, `warn` | How redirects are logged/shown |
+| `on_failure` | `fail_closed`, `fail_open`, `retry_original` | What happens if redirect fails |
+| `tls_mode` | `passthrough`, `rewrite_sni` | TLS handling for connect redirect |
+
+### Platform Support
+
+| Feature | Linux | macOS | Windows |
+|---------|-------|-------|---------|
+| DNS Redirect | ✅ eBPF | ✅ pf/proxy | ✅ WinDivert |
+| Connect Redirect | ✅ eBPF | ✅ pf/proxy | ✅ WinDivert |
+| SNI Rewrite | ✅ | ✅ | ✅ |
+
+### Use Cases
+
+- **API Gateway Routing**: Route Anthropic/OpenAI calls through corporate LLM gateway
+- **Provider Switching**: Redirect Claude API to GCP Vertex AI or Azure OpenAI
+- **Testing**: Redirect production APIs to mock servers
+- **Compliance**: Force all LLM traffic through audit proxies
+
+---
+
 ## Signal Filtering
 
 agentsh intercepts signals (`kill`, `SIGTERM`, etc.) sent between processes, providing policy-based control over which signals can reach which targets.
@@ -579,6 +642,7 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 * Config template: [`configs/server-config.yaml`](configs/server-config.yaml)
 * Default policy: [`configs/policies/default.yaml`](configs/policies/default.yaml)
 * Example Dockerfile (with shim): [`Dockerfile.example`](Dockerfile.example)
+* **Policy documentation:** [`docs/operations/policies.md`](docs/operations/policies.md) - policy variables, signal rules, network redirect
 * **Platform comparison:** [`docs/platform-comparison.md`](docs/platform-comparison.md) - feature support, security scores, performance by platform
 * **Bubblewrap vs agentsh:** [`docs/bubblewrap-vs-agentsh-comparison.md`](docs/bubblewrap-vs-agentsh-comparison.md) - comparison with Bubblewrap for Linux container sandboxing
 * **LLM Proxy & DLP:** [`docs/llm-proxy.md`](docs/llm-proxy.md) - embedded proxy configuration, DLP patterns, usage tracking
