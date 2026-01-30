@@ -1,26 +1,32 @@
-//go:build darwin
+//go:build darwin && cgo
 
 package darwin
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/agentsh/agentsh/internal/platform"
 )
 
 // ResourceLimiter implements platform.ResourceLimiter for macOS.
-// Note: macOS lacks cgroups. Process limits can be set via setrlimit
-// but this is much more limited than Linux cgroups.
+// Uses setrlimit for memory limits and userspace monitoring for CPU limits.
 type ResourceLimiter struct {
 	available       bool
 	supportedLimits []platform.ResourceType
+	mu              sync.Mutex
+	handles         map[string]*ResourceHandle
 }
 
 // NewResourceLimiter creates a new macOS resource limiter.
 func NewResourceLimiter() *ResourceLimiter {
 	r := &ResourceLimiter{
-		available:       false, // No cgroups on macOS
-		supportedLimits: nil,
+		available: true,
+		supportedLimits: []platform.ResourceType{
+			platform.ResourceMemory,
+			platform.ResourceCPU,
+		},
+		handles: make(map[string]*ResourceHandle),
 	}
 	return r
 }
@@ -36,9 +42,59 @@ func (r *ResourceLimiter) SupportedLimits() []platform.ResourceType {
 }
 
 // Apply applies resource limits.
-// Note: Returns error as cgroups are not available on macOS.
 func (r *ResourceLimiter) Apply(config platform.ResourceConfig) (platform.ResourceHandle, error) {
-	return nil, fmt.Errorf("resource limiting not available on macOS (no cgroups)")
+	// Validate: reject unsupported limits
+	if config.MaxProcesses > 0 {
+		return nil, fmt.Errorf("process count limits not supported on macOS")
+	}
+	if config.MaxDiskReadMBps > 0 || config.MaxDiskWriteMBps > 0 {
+		return nil, fmt.Errorf("disk I/O limits not supported on macOS")
+	}
+	if len(config.CPUAffinity) > 0 {
+		return nil, fmt.Errorf("CPU affinity not supported on macOS")
+	}
+	if config.MaxNetworkMbps > 0 {
+		return nil, fmt.Errorf("network bandwidth limits not supported on macOS")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Check for duplicate
+	if _, exists := r.handles[config.Name]; exists {
+		return nil, fmt.Errorf("resource handle %q already exists", config.Name)
+	}
+
+	handle := newResourceHandle(config.Name, config)
+	r.handles[config.Name] = handle
+
+	return handle, nil
+}
+
+// GetHandle returns an existing handle by name.
+func (r *ResourceLimiter) GetHandle(name string) (*ResourceHandle, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	h, ok := r.handles[name]
+	return h, ok
+}
+
+// Release removes a resource handle.
+func (r *ResourceLimiter) Release(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	h, ok := r.handles[name]
+	if !ok {
+		return fmt.Errorf("handle %q not found", name)
+	}
+
+	if err := h.Release(); err != nil {
+		return err
+	}
+
+	delete(r.handles, name)
+	return nil
 }
 
 // Compile-time interface check
