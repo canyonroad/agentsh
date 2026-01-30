@@ -204,7 +204,7 @@ func (s *Sandbox) Execute(ctx context.Context, cmd string, args ...string) (*pla
 }
 
 func (s *Sandbox) executeInAppContainer(ctx context.Context, cmd string, args []string) (*platform.ExecResult, error) {
-	proc, err := s.container.createProcessWithCapture(ctx, cmd, args, nil, s.config.WorkspacePath, true)
+	proc, err := s.container.createProcessWithCapture(ctx, cmd, args, s.config.Environment, s.config.WorkspacePath, true)
 	if err != nil {
 		return nil, err
 	}
@@ -261,6 +261,15 @@ func (s *Sandbox) executeUnsandboxed(ctx context.Context, cmd string, args []str
 	execCmd := exec.CommandContext(ctx, cmd, args...)
 	if s.config.WorkspacePath != "" {
 		execCmd.Dir = s.config.WorkspacePath
+	}
+
+	// Set environment if configured
+	if len(s.config.Environment) > 0 {
+		env := os.Environ()
+		for k, v := range s.config.Environment {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
+		}
+		execCmd.Env = env
 	}
 
 	stdout, err := execCmd.Output()
