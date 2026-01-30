@@ -35,7 +35,7 @@ func TestNetworkDNSRedirect(t *testing.T) {
 	mustMkdir(t, policiesDir)
 
 	// Create policy with DNS redirect: redirect.test.local -> 127.0.0.1
-	policyYAML := fmt.Sprintf(`
+	policyYAML := `
 version: 1
 name: network-redirect-test
 description: Test DNS redirect policy
@@ -63,7 +63,7 @@ resource_limits:
   command_timeout: 30s
   session_timeout: 1h
   idle_timeout: 30m
-`, port)
+`
 
 	writeFile(t, filepath.Join(policiesDir, "default.yaml"), policyYAML)
 
