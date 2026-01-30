@@ -531,7 +531,7 @@ func createInheritablePipe() (r, w *os.File, err error) {
 
 // createProcess spawns a process inside the AppContainer.
 // Deprecated: Use createProcessWithCapture for output capture support.
-func (c *appContainer) createProcess(ctx context.Context, cmd string, args []string, env []string, workDir string) (*os.Process, error) {
+func (c *appContainer) createProcess(ctx context.Context, cmd string, args []string, env map[string]string, workDir string) (*os.Process, error) {
 	cp, err := c.createProcessWithCapture(ctx, cmd, args, env, workDir, false)
 	if err != nil {
 		return nil, err
@@ -540,7 +540,7 @@ func (c *appContainer) createProcess(ctx context.Context, cmd string, args []str
 }
 
 // createProcessWithCapture spawns a process inside the AppContainer with optional output capture.
-func (c *appContainer) createProcessWithCapture(ctx context.Context, cmd string, args []string, env []string, workDir string, captureOutput bool) (*ContainerProcess, error) {
+func (c *appContainer) createProcessWithCapture(ctx context.Context, cmd string, args []string, env map[string]string, workDir string, captureOutput bool) (*ContainerProcess, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -647,6 +647,19 @@ func (c *appContainer) createProcessWithCapture(ctx context.Context, cmd string,
 		workDirPtr, _ = syscall.UTF16PtrFromString(workDir)
 	}
 
+	// Build environment block if env provided
+	var envBlock *uint16
+	if len(env) > 0 {
+		merged := mergeWithParentEnv(env)
+		envBlock = buildEnvironmentBlock(merged)
+	}
+
+	// CreateProcess flags - add CREATE_UNICODE_ENVIRONMENT when using custom env
+	flags := uintptr(extendedStartupInfoPresent)
+	if envBlock != nil {
+		flags |= 0x00000400 // CREATE_UNICODE_ENVIRONMENT
+	}
+
 	// CreateProcess with extended startup info
 	// bInheritHandles must be TRUE (1) for pipe handles to be inherited
 	inheritHandles := uintptr(0)
@@ -659,8 +672,8 @@ func (c *appContainer) createProcessWithCapture(ctx context.Context, cmd string,
 		uintptr(unsafe.Pointer(cmdLinePtr)),
 		0, 0, // security attributes
 		inheritHandles,
-		extendedStartupInfoPresent,
-		0, // environment (inherit)
+		flags,
+		uintptr(unsafe.Pointer(envBlock)),
 		uintptr(unsafe.Pointer(workDirPtr)),
 		uintptr(unsafe.Pointer(&siEx)),
 		uintptr(unsafe.Pointer(&pi)),
