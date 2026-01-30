@@ -116,13 +116,36 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 
 	resolvedIP := p.resolveAndEmitDNS(context.Background(), commandID, host)
 
+	// Check for connect redirect rules
+	var redirectTo, redirectTLS, redirectSNI string
+	if p.policy != nil {
+		redirectResult := p.policy.EvaluateConnectRedirect(hostPort)
+		if redirectResult.Matched {
+			redirectTo = redirectResult.RedirectTo
+			redirectTLS = redirectResult.TLSMode
+			redirectSNI = redirectResult.SNI
+			// Emit redirect event if visibility is not silent
+			if redirectResult.Visibility != "silent" {
+				p.emitConnectRedirectEvent(context.Background(), commandID, host, hostPort, port, redirectResult)
+			}
+		}
+	}
+
 	ctx := req.Context()
 	dec := p.checkNetwork(ctx, host, port)
 	dec = p.maybeApprove(ctx, commandID, dec, "network", hostPort)
-	connectEv := p.emitNetEvent(context.Background(), "net_connect", commandID, host, hostPort, port, dec, map[string]any{
+	eventFields := map[string]any{
 		"method":      "CONNECT",
 		"resolved_ip": resolvedIP,
-	})
+	}
+	if redirectTo != "" {
+		eventFields["redirect_to"] = redirectTo
+		eventFields["redirect_tls"] = redirectTLS
+		if redirectSNI != "" {
+			eventFields["redirect_sni"] = redirectSNI
+		}
+	}
+	connectEv := p.emitNetEvent(context.Background(), "net_connect", commandID, host, hostPort, port, dec, eventFields)
 	if dec.EffectiveDecision == types.DecisionDeny {
 		_, _ = io.WriteString(client, "HTTP/1.1 403 Forbidden\r\n\r\n")
 		_ = p.emit.AppendEvent(context.Background(), connectEv)
@@ -132,10 +155,17 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 	_ = p.emit.AppendEvent(context.Background(), connectEv)
 	p.emit.Publish(connectEv)
 
+	// Determine dial target: redirect destination or original
 	dialTarget := hostPort
-	if resolvedIP != "" {
+	if redirectTo != "" {
+		dialTarget = redirectTo
+	} else if resolvedIP != "" {
 		dialTarget = net.JoinHostPort(resolvedIP, portStr)
 	}
+
+	// Store redirect info for potential SNI rewriting
+	_ = redirectTLS // TODO: implement SNI rewriting for rewrite_sni mode
+	_ = redirectSNI
 	up, err := net.DialTimeout("tcp", dialTarget, 20*time.Second)
 	if err != nil {
 		_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
@@ -333,6 +363,33 @@ func (p *Proxy) emitNetEvent(ctx context.Context, evType string, commandID strin
 		},
 	}
 	return ev
+}
+
+func (p *Proxy) emitConnectRedirectEvent(ctx context.Context, commandID string, domain string, hostPort string, port int, result *policy.ConnectRedirectResult) {
+	if p.emit == nil {
+		return
+	}
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "connect_redirect",
+		SessionID: p.sessionID,
+		CommandID: commandID,
+		Domain:    strings.ToLower(domain),
+		Remote:    hostPort,
+		Fields: map[string]any{
+			"rule":        result.Rule,
+			"redirect_to": result.RedirectTo,
+			"tls_mode":    result.TLSMode,
+			"message":     result.Message,
+			"visibility":  result.Visibility,
+		},
+	}
+	if result.SNI != "" {
+		ev.Fields["sni"] = result.SNI
+	}
+	_ = p.emit.AppendEvent(ctx, ev)
+	p.emit.Publish(ev)
 }
 
 func (p *Proxy) resolveAndEmitDNS(ctx context.Context, commandID string, host string) string {
