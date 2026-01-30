@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
+	"unicode/utf16"
 	"unsafe"
 
 	"github.com/agentsh/agentsh/internal/platform"
@@ -749,13 +749,10 @@ func buildEnvironmentBlock(env map[string]string) *uint16 {
 	// Join with nulls, add double-null terminator
 	joined := strings.Join(entries, "\x00") + "\x00\x00"
 
-	// Convert to UTF-16
-	utf16Block, err := syscall.UTF16FromString(joined)
-	if err != nil {
-		// This should never happen with valid environment variable strings
-		// but return nil to fail safely (will inherit parent env)
-		return nil
-	}
+	// Convert to UTF-16 using utf16.Encode which handles embedded nulls correctly.
+	// Note: syscall.UTF16FromString cannot be used here because it treats
+	// embedded null characters as string terminators.
+	utf16Block := utf16.Encode([]rune(joined))
 
 	// Note: The returned pointer remains valid for immediate use with CreateProcessW,
 	// which copies the block. Do not store this pointer for later use.
