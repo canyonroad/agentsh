@@ -27,8 +27,8 @@ func TestDriverClient_RegistryPolicyHandler(t *testing.T) {
 	msg := make([]byte, 16+8+4+4+4+4+4+520*2+256*2)
 	binary.LittleEndian.PutUint32(msg[0:4], MsgPolicyCheckRegistry)
 	binary.LittleEndian.PutUint32(msg[4:8], uint32(len(msg)))
-	binary.LittleEndian.PutUint64(msg[8:16], 123)  // request ID
-	binary.LittleEndian.PutUint64(msg[16:24], 456) // session token
+	binary.LittleEndian.PutUint64(msg[8:16], 123)   // request ID
+	binary.LittleEndian.PutUint64(msg[16:24], 456)  // session token
 	binary.LittleEndian.PutUint32(msg[24:28], 1234) // pid
 	binary.LittleEndian.PutUint32(msg[28:32], 5678) // tid
 	binary.LittleEndian.PutUint32(msg[32:36], uint32(DriverRegOpSetValue))

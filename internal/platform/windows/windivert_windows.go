@@ -286,7 +286,7 @@ func (w *WinDivertHandle) redirectPacket(packet *godivert.Packet, handle *godive
 			net.ParseIP(dstIP.String()),
 			dstPort,
 			"udp",
-			0, // PID not available in WinDivert 1.x
+			0,          // PID not available in WinDivert 1.x
 			"", "", "", // No redirect for DNS packets (handled by DNS proxy)
 		)
 

@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
+	"unicode/utf16"
 	"unsafe"
 
 	"github.com/agentsh/agentsh/internal/platform"
@@ -530,7 +532,7 @@ func createInheritablePipe() (r, w *os.File, err error) {
 
 // createProcess spawns a process inside the AppContainer.
 // Deprecated: Use createProcessWithCapture for output capture support.
-func (c *appContainer) createProcess(ctx context.Context, cmd string, args []string, env []string, workDir string) (*os.Process, error) {
+func (c *appContainer) createProcess(ctx context.Context, cmd string, args []string, env map[string]string, workDir string) (*os.Process, error) {
 	cp, err := c.createProcessWithCapture(ctx, cmd, args, env, workDir, false)
 	if err != nil {
 		return nil, err
@@ -539,7 +541,7 @@ func (c *appContainer) createProcess(ctx context.Context, cmd string, args []str
 }
 
 // createProcessWithCapture spawns a process inside the AppContainer with optional output capture.
-func (c *appContainer) createProcessWithCapture(ctx context.Context, cmd string, args []string, env []string, workDir string, captureOutput bool) (*ContainerProcess, error) {
+func (c *appContainer) createProcessWithCapture(ctx context.Context, cmd string, args []string, env map[string]string, workDir string, captureOutput bool) (*ContainerProcess, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -646,6 +648,19 @@ func (c *appContainer) createProcessWithCapture(ctx context.Context, cmd string,
 		workDirPtr, _ = syscall.UTF16PtrFromString(workDir)
 	}
 
+	// Build environment block if env provided
+	var envBlock *uint16
+	if len(env) > 0 {
+		merged := mergeWithParentEnv(env)
+		envBlock = buildEnvironmentBlock(merged)
+	}
+
+	// CreateProcess flags - add CREATE_UNICODE_ENVIRONMENT when using custom env
+	flags := uintptr(extendedStartupInfoPresent)
+	if envBlock != nil {
+		flags |= 0x00000400 // CREATE_UNICODE_ENVIRONMENT
+	}
+
 	// CreateProcess with extended startup info
 	// bInheritHandles must be TRUE (1) for pipe handles to be inherited
 	inheritHandles := uintptr(0)
@@ -658,8 +673,8 @@ func (c *appContainer) createProcessWithCapture(ctx context.Context, cmd string,
 		uintptr(unsafe.Pointer(cmdLinePtr)),
 		0, 0, // security attributes
 		inheritHandles,
-		extendedStartupInfoPresent,
-		0, // environment (inherit)
+		flags,
+		uintptr(unsafe.Pointer(envBlock)),
 		uintptr(unsafe.Pointer(workDirPtr)),
 		uintptr(unsafe.Pointer(&siEx)),
 		uintptr(unsafe.Pointer(&pi)),
@@ -695,4 +710,52 @@ func (c *appContainer) createProcessWithCapture(ctx context.Context, cmd string,
 	result.Process = proc
 
 	return result, nil
+}
+
+// mergeWithParentEnv combines os.Environ() with injected variables.
+// Injected values override parent values for the same key.
+func mergeWithParentEnv(inject map[string]string) map[string]string {
+	result := make(map[string]string)
+
+	// Start with parent environment
+	for _, e := range os.Environ() {
+		if k, v, ok := strings.Cut(e, "="); ok {
+			result[k] = v
+		}
+	}
+
+	// Layer injections on top
+	for k, v := range inject {
+		result[k] = v
+	}
+
+	return result
+}
+
+// buildEnvironmentBlock creates a Windows environment block from a map.
+// Returns nil if env is empty (signals inheritance to CreateProcessW).
+// The block is UTF-16 encoded, null-separated, double-null terminated.
+func buildEnvironmentBlock(env map[string]string) *uint16 {
+	if len(env) == 0 {
+		return nil
+	}
+
+	// Build "KEY=VALUE" strings
+	var entries []string
+	for k, v := range env {
+		entries = append(entries, k+"="+v)
+	}
+	sort.Strings(entries) // Windows convention: sorted
+
+	// Join with nulls, add double-null terminator
+	joined := strings.Join(entries, "\x00") + "\x00\x00"
+
+	// Convert to UTF-16 using utf16.Encode which handles embedded nulls correctly.
+	// Note: syscall.UTF16FromString cannot be used here because it treats
+	// embedded null characters as string terminators.
+	utf16Block := utf16.Encode([]rune(joined))
+
+	// Note: The returned pointer remains valid for immediate use with CreateProcessW,
+	// which copies the block. Do not store this pointer for later use.
+	return &utf16Block[0]
 }

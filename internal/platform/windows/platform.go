@@ -76,11 +76,11 @@ func (p *Platform) detectCapabilities() platform.Capabilities {
 		// Resource control - Job Objects instead of cgroups
 		HasCgroups:           false,
 		HasJobObjects:        p.checkJobObjects(),
-		CanLimitCPU:          true, // Job Objects support CPU limits
-		CanLimitMemory:       true, // Job Objects support memory limits
+		CanLimitCPU:          true,  // Job Objects support CPU limits
+		CanLimitMemory:       true,  // Job Objects support memory limits
 		CanLimitDiskIO:       false, // Limited IO control in Job Objects
 		CanLimitNetworkBW:    false, // No native network BW limiting
-		CanLimitProcessCount: true, // Job Objects support process limits
+		CanLimitProcessCount: true,  // Job Objects support process limits
 
 		// Windows-specific capabilities
 		HasRegistryMonitoring: p.checkRegistryMonitoring(),
