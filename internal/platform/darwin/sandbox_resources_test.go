@@ -10,10 +10,36 @@ import (
 	"github.com/agentsh/agentsh/internal/platform"
 )
 
+// sandboxExecWorks tests if sandbox-exec actually works (not just exists).
+// On some macOS systems (like CI runners), sandbox-exec may exist but be
+// restricted from running due to SIP or other security policies.
+func sandboxExecWorks(t *testing.T, m *SandboxManager) bool {
+	t.Helper()
+	if !m.Available() {
+		return false
+	}
+
+	// Try a simple execution to see if sandbox-exec actually works
+	sb, err := m.Create(platform.SandboxConfig{
+		Name:          "sandbox-test-probe",
+		WorkspacePath: t.TempDir(),
+	})
+	if err != nil {
+		return false
+	}
+	defer sb.Close()
+
+	result, err := sb.Execute(context.Background(), "true")
+	if err != nil {
+		return false
+	}
+	return result.ExitCode == 0
+}
+
 func TestSandboxExecuteWithResources(t *testing.T) {
 	m := NewSandboxManager()
-	if !m.Available() {
-		t.Skip("sandbox-exec not available")
+	if !sandboxExecWorks(t, m) {
+		t.Skip("sandbox-exec not functional on this system")
 	}
 
 	sb, err := m.Create(platform.SandboxConfig{
@@ -59,8 +85,8 @@ func TestSandboxExecuteWithResources(t *testing.T) {
 
 func TestSandboxExecuteWithResources_NilHandle(t *testing.T) {
 	m := NewSandboxManager()
-	if !m.Available() {
-		t.Skip("sandbox-exec not available")
+	if !sandboxExecWorks(t, m) {
+		t.Skip("sandbox-exec not functional on this system")
 	}
 
 	sb, err := m.Create(platform.SandboxConfig{

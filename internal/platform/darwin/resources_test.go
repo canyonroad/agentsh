@@ -19,31 +19,31 @@ func TestResourceLimiterSupportedLimits(t *testing.T) {
 	r := NewResourceLimiter()
 	supported := r.SupportedLimits()
 
-	hasMemory := false
 	hasCPU := false
 	for _, rt := range supported {
-		if rt == platform.ResourceMemory {
-			hasMemory = true
-		}
 		if rt == platform.ResourceCPU {
 			hasCPU = true
 		}
 	}
 
-	if !hasMemory {
-		t.Error("expected ResourceMemory to be supported")
-	}
 	if !hasCPU {
 		t.Error("expected ResourceCPU to be supported")
+	}
+
+	// Memory is NOT supported until RLIMIT_AS enforcement is implemented
+	for _, rt := range supported {
+		if rt == platform.ResourceMemory {
+			t.Error("ResourceMemory should not be in SupportedLimits until implemented")
+		}
 	}
 }
 
 func TestResourceLimiterApply(t *testing.T) {
 	r := NewResourceLimiter()
 
+	// Only CPU limits are currently supported
 	config := platform.ResourceConfig{
 		Name:          "test-limits",
-		MaxMemoryMB:   256,
 		MaxCPUPercent: 50,
 	}
 
@@ -58,6 +58,20 @@ func TestResourceLimiterApply(t *testing.T) {
 
 	// Cleanup
 	handle.Release()
+}
+
+func TestResourceLimiterApplyUnsupportedMemory(t *testing.T) {
+	r := NewResourceLimiter()
+
+	config := platform.ResourceConfig{
+		Name:        "test-limits",
+		MaxMemoryMB: 256,
+	}
+
+	_, err := r.Apply(config)
+	if err == nil {
+		t.Error("expected error for unsupported memory limits")
+	}
 }
 
 func TestResourceLimiterApplyUnsupportedProcessCount(t *testing.T) {
