@@ -6,10 +6,14 @@ package windows
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/agentsh/agentsh/internal/netmonitor"
 	"github.com/agentsh/agentsh/internal/platform"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/williamfhe/godivert"
 	"github.com/williamfhe/godivert/header"
 )
@@ -27,6 +31,10 @@ type WinDivertHandle struct {
 
 	// Driver client for process events
 	driver *DriverClient
+
+	// Policy engine and DNS cache for connect-level redirect
+	policyEngine *policy.Engine
+	dnsCache     *netmonitor.DNSCache
 
 	// Fail mode
 	failMode            FailMode
@@ -156,6 +164,16 @@ func (w *WinDivertHandle) IsSessionPID(pid uint32) bool {
 	return w.sessionPIDs[pid]
 }
 
+// SetPolicyEngine sets the policy engine for connect-level redirect evaluation.
+func (w *WinDivertHandle) SetPolicyEngine(engine *policy.Engine) {
+	w.policyEngine = engine
+}
+
+// SetDNSCache sets the DNS cache for hostname correlation.
+func (w *WinDivertHandle) SetDNSCache(cache *netmonitor.DNSCache) {
+	w.dnsCache = cache
+}
+
 // captureLoop is the main packet capture goroutine.
 func (w *WinDivertHandle) captureLoop() {
 	defer w.wg.Done()
@@ -241,14 +259,20 @@ func (w *WinDivertHandle) redirectPacket(packet *godivert.Packet, handle *godive
 		}
 
 		if tcpHdr.SYN() && !tcpHdr.ACK() {
-			// Store original destination in NAT table for new connections
-			entry := &NATEntry{
-				OriginalDstIP:   net.ParseIP(dstIP.String()),
-				OriginalDstPort: dstPort,
-				Protocol:        "tcp",
-				ProcessID:       0, // PID not available in WinDivert 1.x
-			}
-			w.natTable.Insert(key, entry)
+			// Evaluate connect redirect for new connections
+			redirectTo, redirectTLS, redirectSNI := w.evaluateConnectRedirect(dstIP, dstPort)
+
+			// Store original destination in NAT table
+			w.natTable.InsertWithRedirect(
+				key,
+				net.ParseIP(dstIP.String()),
+				dstPort,
+				"tcp",
+				0, // PID not available in WinDivert 1.x
+				redirectTo,
+				redirectTLS,
+				redirectSNI,
+			)
 		}
 
 		// Rewrite destination to proxy
@@ -257,13 +281,14 @@ func (w *WinDivertHandle) redirectPacket(packet *godivert.Packet, handle *godive
 
 	} else if nextHeader == header.UDP && dstPort == 53 {
 		// Store original destination in NAT table
-		entry := &NATEntry{
-			OriginalDstIP:   net.ParseIP(dstIP.String()),
-			OriginalDstPort: dstPort,
-			Protocol:        "udp",
-			ProcessID:       0, // PID not available in WinDivert 1.x
-		}
-		w.natTable.Insert(key, entry)
+		w.natTable.InsertWithRedirect(
+			key,
+			net.ParseIP(dstIP.String()),
+			dstPort,
+			"udp",
+			0, // PID not available in WinDivert 1.x
+			"", "", "", // No redirect for DNS packets (handled by DNS proxy)
+		)
 
 		// Rewrite destination to DNS proxy
 		packet.SetDstIP(net.ParseIP("127.0.0.1"))
@@ -277,6 +302,42 @@ func (w *WinDivertHandle) redirectPacket(packet *godivert.Packet, handle *godive
 	// Recalculate checksums and reinject
 	packet.CalcNewChecksum(handle)
 	_, _ = handle.Send(packet) // Ignore send errors
+}
+
+// evaluateConnectRedirect checks if a connection should be redirected.
+// Returns the redirect destination, TLS mode, and SNI (all empty if no redirect).
+func (w *WinDivertHandle) evaluateConnectRedirect(dstIP net.IP, dstPort uint16) (redirectTo, redirectTLS, redirectSNI string) {
+	// If no policy engine or DNS cache, no redirect
+	if w.policyEngine == nil || w.dnsCache == nil {
+		return "", "", ""
+	}
+
+	// Look up hostname from DNS cache using destination IP
+	hostname, found := w.dnsCache.LookupByIP(dstIP, time.Now())
+	if !found {
+		// No hostname correlation, use IP as hostname
+		hostname = dstIP.String()
+	}
+
+	// Build host:port string for policy matching
+	hostPort := net.JoinHostPort(hostname, strconv.Itoa(int(dstPort)))
+
+	// Evaluate network policy to check for redirect rules
+	// Note: The policy engine currently uses network_rules for allow/deny decisions.
+	// When connect_redirects are added to the policy schema, this will be updated
+	// to call a dedicated EvaluateConnectRedirect method.
+	//
+	// For now, check if the decision is "redirect" type which would indicate
+	// the policy wants to redirect this connection.
+	_ = hostPort // Placeholder for future policy evaluation
+
+	// TODO: When connect_redirects are added to policy.Engine:
+	// result := w.policyEngine.EvaluateConnectRedirect(hostPort)
+	// if result.Matched {
+	//     return result.RedirectTo, result.TLSMode, result.SNI
+	// }
+
+	return "", "", ""
 }
 
 // handleError handles packet capture errors.
