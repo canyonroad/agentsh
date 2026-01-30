@@ -107,3 +107,123 @@ func TestNATTable_ConcurrentAccess(t *testing.T) {
 	<-done
 	// Test passes if no race detector errors
 }
+
+func TestNATEntry_IsRedirected(t *testing.T) {
+	tests := []struct {
+		name       string
+		redirectTo string
+		want       bool
+	}{
+		{"empty redirect", "", false},
+		{"with redirect", "proxy.internal:443", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := &NATEntry{
+				OriginalDstIP:   net.ParseIP("10.0.0.1"),
+				OriginalDstPort: 443,
+				RedirectTo:      tt.redirectTo,
+			}
+			if got := entry.IsRedirected(); got != tt.want {
+				t.Errorf("IsRedirected() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNATEntry_GetConnectTarget(t *testing.T) {
+	tests := []struct {
+		name       string
+		dstIP      string
+		dstPort    uint16
+		redirectTo string
+		want       string
+	}{
+		{
+			name:       "no redirect returns original",
+			dstIP:      "10.0.0.1",
+			dstPort:    443,
+			redirectTo: "",
+			want:       "10.0.0.1:443",
+		},
+		{
+			name:       "with redirect returns redirect target",
+			dstIP:      "10.0.0.1",
+			dstPort:    443,
+			redirectTo: "proxy.internal:443",
+			want:       "proxy.internal:443",
+		},
+		{
+			name:       "redirect with different port",
+			dstIP:      "api.anthropic.com",
+			dstPort:    443,
+			redirectTo: "vertex-proxy.internal:8443",
+			want:       "vertex-proxy.internal:8443",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := &NATEntry{
+				OriginalDstIP:   net.ParseIP(tt.dstIP),
+				OriginalDstPort: tt.dstPort,
+				RedirectTo:      tt.redirectTo,
+			}
+			if got := entry.GetConnectTarget(); got != tt.want {
+				t.Errorf("GetConnectTarget() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNATTable_InsertWithRedirect(t *testing.T) {
+	table := NewNATTable(5 * time.Minute)
+
+	srcIP := net.ParseIP("192.168.1.100")
+	dstIP := net.ParseIP("10.0.0.1")
+
+	// Test without redirect
+	table.InsertWithRedirect("192.168.1.100:12345", dstIP, 443, "tcp", 1234, "", "", "")
+	entry := table.Lookup("192.168.1.100:12345")
+	if entry == nil {
+		t.Fatal("expected entry, got nil")
+	}
+	if entry.IsRedirected() {
+		t.Error("expected not redirected")
+	}
+	if got := entry.GetConnectTarget(); got != "10.0.0.1:443" {
+		t.Errorf("GetConnectTarget() = %s, want 10.0.0.1:443", got)
+	}
+
+	// Test with redirect
+	table.InsertWithRedirect("192.168.1.100:12346", dstIP, 443, "tcp", 1234,
+		"proxy.internal:443", "rewrite_sni", "proxy.internal")
+	entry = table.Lookup("192.168.1.100:12346")
+	if entry == nil {
+		t.Fatal("expected entry, got nil")
+	}
+	if !entry.IsRedirected() {
+		t.Error("expected redirected")
+	}
+	if got := entry.GetConnectTarget(); got != "proxy.internal:443" {
+		t.Errorf("GetConnectTarget() = %s, want proxy.internal:443", got)
+	}
+	if entry.RedirectTLS != "rewrite_sni" {
+		t.Errorf("RedirectTLS = %s, want rewrite_sni", entry.RedirectTLS)
+	}
+	if entry.RedirectSNI != "proxy.internal" {
+		t.Errorf("RedirectSNI = %s, want proxy.internal", entry.RedirectSNI)
+	}
+
+	// Verify original destination is preserved
+	if !entry.OriginalDstIP.Equal(dstIP) {
+		t.Errorf("OriginalDstIP = %v, want %v", entry.OriginalDstIP, dstIP)
+	}
+	if entry.OriginalDstPort != 443 {
+		t.Errorf("OriginalDstPort = %d, want 443", entry.OriginalDstPort)
+	}
+
+	// Use srcIP to avoid unused variable warning
+	_ = srcIP
+}
