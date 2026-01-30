@@ -737,6 +737,14 @@ func buildEnvironmentBlock(env map[string]string) *uint16 {
 	joined := strings.Join(entries, "\x00") + "\x00\x00"
 
 	// Convert to UTF-16
-	utf16Block, _ := syscall.UTF16FromString(joined)
+	utf16Block, err := syscall.UTF16FromString(joined)
+	if err != nil {
+		// This should never happen with valid environment variable strings
+		// but return nil to fail safely (will inherit parent env)
+		return nil
+	}
+
+	// Note: The returned pointer remains valid for immediate use with CreateProcessW,
+	// which copies the block. Do not store this pointer for later use.
 	return &utf16Block[0]
 }
