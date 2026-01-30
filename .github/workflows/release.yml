@@ -43,7 +43,7 @@ jobs:
             make
 
       - name: Test
-        run: go test ./...
+        run: go test -p=1 ./...
 
       - name: Smoke
         run: make smoke
