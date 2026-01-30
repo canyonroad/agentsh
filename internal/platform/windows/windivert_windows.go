@@ -322,20 +322,11 @@ func (w *WinDivertHandle) evaluateConnectRedirect(dstIP net.IP, dstPort uint16) 
 	// Build host:port string for policy matching
 	hostPort := net.JoinHostPort(hostname, strconv.Itoa(int(dstPort)))
 
-	// Evaluate network policy to check for redirect rules
-	// Note: The policy engine currently uses network_rules for allow/deny decisions.
-	// When connect_redirects are added to the policy schema, this will be updated
-	// to call a dedicated EvaluateConnectRedirect method.
-	//
-	// For now, check if the decision is "redirect" type which would indicate
-	// the policy wants to redirect this connection.
-	_ = hostPort // Placeholder for future policy evaluation
-
-	// TODO: When connect_redirects are added to policy.Engine:
-	// result := w.policyEngine.EvaluateConnectRedirect(hostPort)
-	// if result.Matched {
-	//     return result.RedirectTo, result.TLSMode, result.SNI
-	// }
+	// Evaluate connect redirect rules
+	result := w.policyEngine.EvaluateConnectRedirect(hostPort)
+	if result.Matched {
+		return result.RedirectTo, result.TLSMode, result.SNI
+	}
 
 	return "", "", ""
 }
