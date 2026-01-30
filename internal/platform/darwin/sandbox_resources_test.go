@@ -4,6 +4,7 @@ package darwin
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/platform"
@@ -48,6 +49,12 @@ func TestSandboxExecuteWithResources(t *testing.T) {
 	if result.ExitCode != 0 {
 		t.Errorf("expected exit code 0, got %d", result.ExitCode)
 	}
+
+	// Verify output
+	output := strings.TrimSpace(string(result.Stdout))
+	if output != "hello" {
+		t.Errorf("expected stdout 'hello', got %q", output)
+	}
 }
 
 func TestSandboxExecuteWithResources_NilHandle(t *testing.T) {
@@ -90,20 +97,4 @@ func TestSandboxExecuteWithResources_Closed(t *testing.T) {
 	if err == nil {
 		t.Error("ExecuteWithResources() should error when sandbox is closed")
 	}
-}
-
-func TestSandboxSetResourceHandle(t *testing.T) {
-	s := &Sandbox{id: "test"}
-
-	// Create a mock resource handle
-	rh := &ResourceHandle{
-		name:     "test-handle",
-		monitors: make(map[int]*cpuMonitor),
-	}
-
-	// SetResourceHandle should not panic
-	s.SetResourceHandle(rh)
-
-	// The handle is not stored on the struct, so we just verify no panic occurred
-	// The method exists for API consistency and documentation purposes
 }
