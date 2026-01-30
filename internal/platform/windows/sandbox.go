@@ -169,8 +169,8 @@ type Sandbox struct {
 	config       platform.SandboxConfig
 	mu           sync.Mutex
 	closed       bool
-	container    *appContainer  // nil if UseAppContainer=false
-	driverClient *DriverClient  // For minifilter integration
+	container    *appContainer   // nil if UseAppContainer=false
+	driverClient *DriverClient   // For minifilter integration
 	manager      *SandboxManager // Reference to parent manager for cleanup
 }
 

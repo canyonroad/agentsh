@@ -161,10 +161,10 @@ func TestMergeWithParentEnv(t *testing.T) {
 	}()
 
 	tests := []struct {
-		name     string
-		inject   map[string]string
-		wantKey  string
-		wantVal  string
+		name    string
+		inject  map[string]string
+		wantKey string
+		wantVal string
 	}{
 		{
 			name:    "empty inject returns parent env",
