@@ -20,6 +20,17 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: release-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            release-${{ runner.os }}-go-
 
       - name: Install build deps (envshim, fuse, seccomp)
         run: |
