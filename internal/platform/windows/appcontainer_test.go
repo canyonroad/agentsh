@@ -271,3 +271,109 @@ func decodeEnvironmentBlock(block *uint16) []string {
 	}
 	return result
 }
+
+func TestCreateProcessWithEnv(t *testing.T) {
+	if !isAdmin() {
+		t.Skip("requires admin privileges")
+	}
+
+	ac := newAppContainer("test-env-inject")
+	if err := ac.create(); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	defer ac.cleanup()
+
+	tempDir := t.TempDir()
+	if err := ac.grantPathAccess(tempDir, AccessReadWrite); err != nil {
+		t.Fatalf("grant path failed: %v", err)
+	}
+
+	// Test that injected env variables are visible in the process
+	env := map[string]string{
+		"TEST_INJECT_VAR": "hello_from_inject",
+	}
+
+	ctx := context.Background()
+	cp, err := ac.createProcessWithCapture(ctx, "cmd.exe", []string{"/c", "echo", "%TEST_INJECT_VAR%"}, env, tempDir, true)
+	if err != nil {
+		t.Skipf("createProcessWithCapture failed (may need full admin): %v", err)
+	}
+	defer cp.Close()
+
+	state, err := cp.Process.Wait()
+	if err != nil {
+		t.Fatalf("Wait failed: %v", err)
+	}
+	if state.ExitCode() != 0 {
+		t.Errorf("expected exit code 0, got %d", state.ExitCode())
+	}
+
+	// Read stdout and verify the injected value
+	output := make([]byte, 1024)
+	n, _ := cp.Stdout.Read(output)
+	outputStr := strings.TrimSpace(string(output[:n]))
+
+	if !strings.Contains(outputStr, "hello_from_inject") {
+		t.Errorf("expected output to contain 'hello_from_inject', got %q", outputStr)
+	}
+}
+
+func TestCreateProcessEnvOverridesParent(t *testing.T) {
+	if !isAdmin() {
+		t.Skip("requires admin privileges")
+	}
+
+	ac := newAppContainer("test-env-override")
+	if err := ac.create(); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	defer ac.cleanup()
+
+	tempDir := t.TempDir()
+	if err := ac.grantPathAccess(tempDir, AccessReadWrite); err != nil {
+		t.Fatalf("grant path failed: %v", err)
+	}
+
+	// Set a parent environment variable
+	origValue := os.Getenv("TEST_OVERRIDE_VAR")
+	os.Setenv("TEST_OVERRIDE_VAR", "parent_value")
+	defer func() {
+		if origValue == "" {
+			os.Unsetenv("TEST_OVERRIDE_VAR")
+		} else {
+			os.Setenv("TEST_OVERRIDE_VAR", origValue)
+		}
+	}()
+
+	// Inject a different value - should override parent
+	env := map[string]string{
+		"TEST_OVERRIDE_VAR": "injected_value",
+	}
+
+	ctx := context.Background()
+	cp, err := ac.createProcessWithCapture(ctx, "cmd.exe", []string{"/c", "echo", "%TEST_OVERRIDE_VAR%"}, env, tempDir, true)
+	if err != nil {
+		t.Skipf("createProcessWithCapture failed (may need full admin): %v", err)
+	}
+	defer cp.Close()
+
+	state, err := cp.Process.Wait()
+	if err != nil {
+		t.Fatalf("Wait failed: %v", err)
+	}
+	if state.ExitCode() != 0 {
+		t.Errorf("expected exit code 0, got %d", state.ExitCode())
+	}
+
+	// Read stdout and verify the override value (not parent value)
+	output := make([]byte, 1024)
+	n, _ := cp.Stdout.Read(output)
+	outputStr := strings.TrimSpace(string(output[:n]))
+
+	if strings.Contains(outputStr, "parent_value") {
+		t.Errorf("output should NOT contain parent value 'parent_value', got %q", outputStr)
+	}
+	if !strings.Contains(outputStr, "injected_value") {
+		t.Errorf("expected output to contain 'injected_value', got %q", outputStr)
+	}
+}
