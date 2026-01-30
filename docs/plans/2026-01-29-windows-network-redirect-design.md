@@ -1,5 +1,8 @@
 # Windows Network Redirect Design
 
+**Status:** Implemented (Infrastructure)
+**Branch:** feature/windows-network-redirect
+
 DNS and connect-level redirect for agentsh-wrapped processes on Windows.
 
 ## Overview
@@ -133,3 +136,31 @@ curl -v https://api.anthropic.com
 - WinDivert 2.x upgrade for per-packet ProcessId
 - WFP fallback for systems without WinDivert
 - IPv6 redirect support
+- SNI rewriting in TCP proxy
+- Full connect_redirects policy schema in policy.Engine
+
+## Implementation Notes
+
+The following infrastructure has been implemented:
+
+1. **NAT Table** (`internal/platform/windows/nat_table.go`):
+   - Added `RedirectTo`, `RedirectTLS`, `RedirectSNI` fields to `NATEntry`
+   - Added `IsRedirected()` and `GetConnectTarget()` helper methods
+   - Added `InsertWithRedirect()` method
+
+2. **Network Interceptor** (`internal/platform/windows/network.go`):
+   - Added `policyEngine` and `dnsCache` fields
+   - Added `SetPolicyEngine()` and `SetDNSCache()` setter methods
+
+3. **WinDivert** (`internal/platform/windows/windivert_windows.go`):
+   - Added `policyEngine` and `dnsCache` fields to `WinDivertHandle`
+   - Added `evaluateConnectRedirect()` method with hostname lookup from DNS cache
+   - Updated `redirectPacket()` to use `InsertWithRedirect()` for TCP SYN packets
+
+4. **Tests** (`internal/platform/windows/nat_table_test.go`):
+   - Added tests for `IsRedirected()`, `GetConnectTarget()`, `InsertWithRedirect()`
+
+**Not yet implemented:**
+- `connect_redirects` policy schema in `policy.Engine` (placeholder in `evaluateConnectRedirect`)
+- SNI rewriting in TCP proxy
+- Full API layer integration to start DNS/TCP proxies and wire DNS cache
