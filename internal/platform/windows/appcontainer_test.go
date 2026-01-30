@@ -4,6 +4,7 @@ package windows
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -140,5 +141,56 @@ func TestAppContainerCreateProcess(t *testing.T) {
 	}
 	if state.ExitCode() != 0 {
 		t.Errorf("expected exit code 0, got %d", state.ExitCode())
+	}
+}
+
+func TestMergeWithParentEnv(t *testing.T) {
+	// Save and restore environment
+	origEnv := os.Environ()
+	os.Clearenv()
+	os.Setenv("EXISTING_VAR", "original")
+	os.Setenv("PATH", "/usr/bin")
+	defer func() {
+		os.Clearenv()
+		for _, e := range origEnv {
+			if k, v, ok := strings.Cut(e, "="); ok {
+				os.Setenv(k, v)
+			}
+		}
+	}()
+
+	tests := []struct {
+		name     string
+		inject   map[string]string
+		wantKey  string
+		wantVal  string
+	}{
+		{
+			name:    "empty inject returns parent env",
+			inject:  map[string]string{},
+			wantKey: "EXISTING_VAR",
+			wantVal: "original",
+		},
+		{
+			name:    "inject adds new variable",
+			inject:  map[string]string{"NEW_VAR": "new_value"},
+			wantKey: "NEW_VAR",
+			wantVal: "new_value",
+		},
+		{
+			name:    "inject overrides existing variable",
+			inject:  map[string]string{"EXISTING_VAR": "overridden"},
+			wantKey: "EXISTING_VAR",
+			wantVal: "overridden",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := mergeWithParentEnv(tt.inject)
+			if result[tt.wantKey] != tt.wantVal {
+				t.Errorf("mergeWithParentEnv() got %q = %q, want %q", tt.wantKey, result[tt.wantKey], tt.wantVal)
+			}
+		})
 	}
 }

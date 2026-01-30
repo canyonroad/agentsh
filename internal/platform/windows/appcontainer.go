@@ -696,3 +696,23 @@ func (c *appContainer) createProcessWithCapture(ctx context.Context, cmd string,
 
 	return result, nil
 }
+
+// mergeWithParentEnv combines os.Environ() with injected variables.
+// Injected values override parent values for the same key.
+func mergeWithParentEnv(inject map[string]string) map[string]string {
+	result := make(map[string]string)
+
+	// Start with parent environment
+	for _, e := range os.Environ() {
+		if k, v, ok := strings.Cut(e, "="); ok {
+			result[k] = v
+		}
+	}
+
+	// Layer injections on top
+	for k, v := range inject {
+		result[k] = v
+	}
+
+	return result
+}
