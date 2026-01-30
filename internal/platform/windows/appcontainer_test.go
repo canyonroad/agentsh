@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/agentsh/agentsh/internal/platform"
 	"golang.org/x/sys/windows"
@@ -193,4 +194,80 @@ func TestMergeWithParentEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildEnvironmentBlock(t *testing.T) {
+	tests := []struct {
+		name     string
+		env      map[string]string
+		wantNil  bool
+		contains []string
+	}{
+		{
+			name:    "empty env returns nil",
+			env:     map[string]string{},
+			wantNil: true,
+		},
+		{
+			name:     "single var creates block",
+			env:      map[string]string{"FOO": "bar"},
+			wantNil:  false,
+			contains: []string{"FOO=bar"},
+		},
+		{
+			name:     "multiple vars creates block",
+			env:      map[string]string{"FOO": "bar", "BAZ": "qux"},
+			wantNil:  false,
+			contains: []string{"FOO=bar", "BAZ=qux"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildEnvironmentBlock(tt.env)
+			if tt.wantNil {
+				if result != nil {
+					t.Errorf("buildEnvironmentBlock() = %v, want nil", result)
+				}
+				return
+			}
+			if result == nil {
+				t.Errorf("buildEnvironmentBlock() = nil, want non-nil")
+				return
+			}
+			// Decode UTF-16 block back to string for verification
+			block := decodeEnvironmentBlock(result)
+			for _, want := range tt.contains {
+				found := false
+				for _, got := range block {
+					if got == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("buildEnvironmentBlock() missing %q in %v", want, block)
+				}
+			}
+		})
+	}
+}
+
+// decodeEnvironmentBlock converts a UTF-16 environment block back to strings for testing
+func decodeEnvironmentBlock(block *uint16) []string {
+	if block == nil {
+		return nil
+	}
+	var result []string
+	ptr := unsafe.Pointer(block)
+	for {
+		s := windows.UTF16PtrToString((*uint16)(ptr))
+		if s == "" {
+			break
+		}
+		result = append(result, s)
+		// Move pointer past this string + null terminator
+		ptr = unsafe.Pointer(uintptr(ptr) + uintptr((len(s)+1)*2))
+	}
+	return result
 }

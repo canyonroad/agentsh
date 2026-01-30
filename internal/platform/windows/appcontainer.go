@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -715,4 +716,27 @@ func mergeWithParentEnv(inject map[string]string) map[string]string {
 	}
 
 	return result
+}
+
+// buildEnvironmentBlock creates a Windows environment block from a map.
+// Returns nil if env is empty (signals inheritance to CreateProcessW).
+// The block is UTF-16 encoded, null-separated, double-null terminated.
+func buildEnvironmentBlock(env map[string]string) *uint16 {
+	if len(env) == 0 {
+		return nil
+	}
+
+	// Build "KEY=VALUE" strings
+	var entries []string
+	for k, v := range env {
+		entries = append(entries, k+"="+v)
+	}
+	sort.Strings(entries) // Windows convention: sorted
+
+	// Join with nulls, add double-null terminator
+	joined := strings.Join(entries, "\x00") + "\x00\x00"
+
+	// Convert to UTF-16
+	utf16Block, _ := syscall.UTF16FromString(joined)
+	return &utf16Block[0]
 }
