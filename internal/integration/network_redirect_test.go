@@ -52,7 +52,6 @@ dns_redirects:
     match: "redirect\\.test\\.local"
     resolve_to: "127.0.0.1"
     visibility: audit_only
-    message: "DNS redirected for testing"
 resource_limits:
   max_memory_mb: 0
   cpu_quota_percent: 0
