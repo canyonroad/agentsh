@@ -61,6 +61,24 @@ func (t *NATTable) Insert(key string, entry *NATEntry) {
 	t.entries[key] = entry
 }
 
+// InsertWithRedirect adds a NAT entry with optional redirect destination.
+// This is used when connect-level redirect rules are matched.
+func (t *NATTable) InsertWithRedirect(key string, dstIP net.IP, dstPort uint16, protocol string, pid uint32, redirectTo, redirectTLS, redirectSNI string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.entries[key] = &NATEntry{
+		OriginalDstIP:   dstIP,
+		OriginalDstPort: dstPort,
+		Protocol:        protocol,
+		ProcessID:       pid,
+		CreatedAt:       time.Now(),
+		RedirectTo:      redirectTo,
+		RedirectTLS:     redirectTLS,
+		RedirectSNI:     redirectSNI,
+	}
+}
+
 // Lookup retrieves a NAT entry by key.
 // Returns nil if not found or expired.
 func (t *NATTable) Lookup(key string) *NATEntry {
