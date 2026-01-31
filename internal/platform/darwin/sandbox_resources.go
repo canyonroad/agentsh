@@ -6,15 +6,18 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
-	"syscall"
 
 	"github.com/agentsh/agentsh/internal/platform"
 )
 
+// rlimitExecWrapper is the name of the wrapper binary for applying rlimits.
+const rlimitExecWrapper = "agentsh-rlimit-exec"
+
 // ExecuteWithResources runs a command with resource limiting.
-// Memory limits are applied via RLIMIT_AS before the process starts.
-// CPU monitoring starts after the process is running (inherent to approach).
+// Memory limits are applied via RLIMIT_AS using the agentsh-rlimit-exec wrapper.
+// CPU monitoring starts after the process is running.
 func (s *Sandbox) ExecuteWithResources(ctx context.Context, rh *ResourceHandle, cmd string, args ...string) (*platform.ExecResult, error) {
 	s.mu.Lock()
 	if s.closed {
@@ -23,38 +26,41 @@ func (s *Sandbox) ExecuteWithResources(ctx context.Context, rh *ResourceHandle, 
 	}
 	s.mu.Unlock()
 
+	// Determine if we need to wrap the command for rlimit enforcement
+	actualCmd := cmd
+	actualArgs := args
+	var rlimitEnv string
+
+	if rh != nil {
+		rlimits := rh.GetRlimits()
+		for _, rl := range rlimits {
+			if rl.Resource == RlimitAS && rl.Cur > 0 {
+				// Wrap with agentsh-rlimit-exec
+				actualCmd = rlimitExecWrapper
+				actualArgs = append([]string{cmd}, args...)
+				rlimitEnv = fmt.Sprintf("AGENTSH_RLIMIT_AS=%d", rl.Cur)
+				break
+			}
+		}
+	}
+
 	// Build sandbox-exec command with inline profile
-	sandboxArgs := []string{"-p", s.profile, cmd}
-	sandboxArgs = append(sandboxArgs, args...)
+	sandboxArgs := []string{"-p", s.profile, actualCmd}
+	sandboxArgs = append(sandboxArgs, actualArgs...)
 
 	execCmd := exec.CommandContext(ctx, "sandbox-exec", sandboxArgs...)
 	if s.config.WorkspacePath != "" {
 		execCmd.Dir = s.config.WorkspacePath
 	}
 
-	// Set environment variables if specified
-	if len(s.config.Environment) > 0 {
-		execCmd.Env = make([]string, 0, len(s.config.Environment))
-		for k, v := range s.config.Environment {
-			execCmd.Env = append(execCmd.Env, k+"="+v)
-		}
+	// Set environment variables
+	// Start with current environment so wrapper can find commands in PATH
+	execCmd.Env = os.Environ()
+	for k, v := range s.config.Environment {
+		execCmd.Env = append(execCmd.Env, k+"="+v)
 	}
-
-	// Apply rlimits (memory limits) before starting the process
-	if rh != nil {
-		rlimits := rh.GetRlimits()
-		if len(rlimits) > 0 {
-			if execCmd.SysProcAttr == nil {
-				execCmd.SysProcAttr = &syscall.SysProcAttr{}
-			}
-			// Note: Go's exec.Cmd does not directly support setting rlimits
-			// via SysProcAttr on darwin. The rlimits must be applied in the
-			// child process. We use a wrapper approach or document this limitation.
-			// For now, memory limits are advisory - the caller should be aware
-			// that RLIMIT_AS must be set by the spawned process itself.
-			//
-			// TODO: Consider using a wrapper script or cgo to set rlimits in child
-		}
+	if rlimitEnv != "" {
+		execCmd.Env = append(execCmd.Env, rlimitEnv)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -69,14 +75,11 @@ func (s *Sandbox) ExecuteWithResources(ctx context.Context, rh *ResourceHandle, 
 	// Register with resource handle for CPU monitoring.
 	// Note: There's an inherent race window between Start() and AssignProcess()
 	// where the process runs without CPU monitoring. This is unavoidable since
-	// we need the PID first. For memory limits, they should be applied before
-	// Start() via SysProcAttr (see TODO above).
+	// we need the PID first.
 	if rh != nil {
-		// AssignProcess currently always returns nil, but we check for future-proofing
 		if err := rh.AssignProcess(execCmd.Process.Pid); err != nil {
-			// Non-fatal: process is already running, just log and continue
-			// The process will run without CPU monitoring
-			_ = err // Intentionally ignored - monitoring failure shouldn't fail execution
+			// Non-fatal: process is already running, just continue
+			_ = err
 		}
 	}
 
