@@ -37,7 +37,20 @@ func main() {
 			fmt.Fprintf(os.Stderr, "agentsh-rlimit-exec: invalid AGENTSH_RLIMIT_AS: %v\n", err)
 			os.Exit(1)
 		}
-		rlimit := unix.Rlimit{Cur: limit, Max: limit}
+
+		// Get current limits to preserve hard limit (only root can raise it)
+		var current unix.Rlimit
+		if err := unix.Getrlimit(unix.RLIMIT_AS, &current); err != nil {
+			fmt.Fprintf(os.Stderr, "agentsh-rlimit-exec: getrlimit failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Set soft limit to requested value, keep hard limit unchanged
+		// If requested limit exceeds hard limit, cap at hard limit
+		rlimit := unix.Rlimit{Cur: limit, Max: current.Max}
+		if current.Max != unix.RLIM_INFINITY && limit > current.Max {
+			rlimit.Cur = current.Max
+		}
 		if err := unix.Setrlimit(unix.RLIMIT_AS, &rlimit); err != nil {
 			fmt.Fprintf(os.Stderr, "agentsh-rlimit-exec: setrlimit failed: %v\n", err)
 			os.Exit(1)
