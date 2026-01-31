@@ -19,9 +19,9 @@ func TestRlimitExecSetsLimit(t *testing.T) {
 	cmd := exec.Command(wrapper, "sh", "-c", "ulimit -v")
 	cmd.Env = append(os.Environ(), "AGENTSH_RLIMIT_AS="+strconv.FormatUint(limit, 10))
 
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("wrapper failed: %v", err)
+		t.Fatalf("wrapper failed: %v\noutput: %s", err, output)
 	}
 
 	// ulimit -v returns limit in KB
