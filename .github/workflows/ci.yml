@@ -108,7 +108,7 @@ jobs:
           CGO_ENABLED: 0
 
       - name: go test
-        run: go test -short ./...
+        run: go test ./...
         env:
           CGO_ENABLED: 0
 
