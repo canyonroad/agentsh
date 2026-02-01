@@ -31,6 +31,19 @@ This project cross-compiles to Linux, macOS, and Windows. Follow these rules.
 - Tests using Unix sockets, POSIX signals, or shell features should skip on Windows
 - Use `t.TempDir()` for test directories (auto-cleaned)
 
+## CI-Specific Issues
+
+**ConPTY tests hang in CI:** Windows ConPTY doesn't properly signal EOF in non-interactive environments. Tests using ConPTY should skip in CI:
+
+```go
+func skipInCI(t *testing.T) {
+    t.Helper()
+    if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
+        t.Skip("skipping ConPTY test in CI")
+    }
+}
+```
+
 ## Environment Variables
 
 - Use `os.Getenv()` / `os.Setenv()`
