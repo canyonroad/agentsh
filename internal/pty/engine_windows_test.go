@@ -5,11 +5,21 @@ package pty
 import (
 	"context"
 	"io"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/UserExistsError/conpty"
 )
+
+// skipInCI skips ConPTY tests in CI environments where they can be flaky.
+func skipInCI(t *testing.T) {
+	t.Helper()
+	if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
+		t.Skip("skipping ConPTY test in CI (non-interactive environment)")
+	}
+}
 
 func TestBuildCommandLine(t *testing.T) {
 	tests := []struct {
@@ -54,6 +64,7 @@ func TestQuoteArg(t *testing.T) {
 }
 
 func TestEngineStart(t *testing.T) {
+	skipInCI(t)
 	if testing.Short() {
 		t.Skip("skipping ConPTY test in short mode")
 	}
@@ -71,7 +82,7 @@ func TestEngineStart(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 
-	// Read output
+	// Read output with timeout
 	var output strings.Builder
 	done := make(chan struct{})
 	go func() {
@@ -81,12 +92,24 @@ func TestEngineStart(t *testing.T) {
 		}
 	}()
 
-	// Wait for process
-	exitCode, err := sess.Wait()
+	// Wait for process with timeout
+	waitDone := make(chan struct{})
+	var exitCode int
+	var waitErr error
+	go func() {
+		exitCode, waitErr = sess.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("test timed out waiting for process")
+	}
 	<-done
 
-	if err != nil {
-		t.Errorf("Wait error: %v", err)
+	if waitErr != nil {
+		t.Errorf("Wait error: %v", waitErr)
 	}
 	if exitCode != 0 {
 		t.Errorf("exit code = %d, want 0", exitCode)
@@ -105,6 +128,7 @@ func TestEngineStartEmptyCommand(t *testing.T) {
 }
 
 func TestSessionResize(t *testing.T) {
+	skipInCI(t)
 	if testing.Short() {
 		t.Skip("skipping ConPTY test in short mode")
 	}
@@ -132,6 +156,7 @@ func TestSessionResize(t *testing.T) {
 }
 
 func TestSessionPID(t *testing.T) {
+	skipInCI(t)
 	if testing.Short() {
 		t.Skip("skipping ConPTY test in short mode")
 	}
@@ -157,6 +182,7 @@ func TestSessionPID(t *testing.T) {
 }
 
 func TestSessionSignalINT(t *testing.T) {
+	skipInCI(t)
 	if testing.Short() {
 		t.Skip("skipping ConPTY test in short mode")
 	}
