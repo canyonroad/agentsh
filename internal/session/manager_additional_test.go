@@ -1,12 +1,13 @@
 package session
 
 import (
+	"os"
 	"testing"
 )
 
 func TestCreateWithInvalidID(t *testing.T) {
 	m := NewManager(2)
-	if _, err := m.CreateWithID("bad id", "/tmp", ""); err != ErrInvalidSessionID {
+	if _, err := m.CreateWithID("bad id", os.TempDir(), ""); err != ErrInvalidSessionID {
 		t.Fatalf("expected ErrInvalidSessionID, got %v", err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/session"
@@ -15,6 +16,9 @@ import (
 )
 
 func TestExec_Argv0_OverridesDollarZero(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("argv0 override via $0 is POSIX-specific")
+	}
 	st := newSQLiteStore(t)
 	store := composite.New(st, st)
 	sessions := session.NewManager(10)

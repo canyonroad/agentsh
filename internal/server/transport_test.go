@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,9 @@ import (
 )
 
 func TestServer_UnixSocketServesHealth(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sockets not available on Windows")
+	}
 	dir := t.TempDir()
 	policyDir := filepath.Join(dir, "policies")
 	if err := os.MkdirAll(policyDir, 0o755); err != nil {
