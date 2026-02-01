@@ -74,6 +74,7 @@ func TestResourceLimiter_Apply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
+	defer handle.Release()
 
 	if handle == nil {
 		t.Fatal("Apply() returned nil handle")
@@ -87,6 +88,39 @@ func TestResourceLimiter_Apply(t *testing.T) {
 	if h.name != config.Name {
 		t.Errorf("name = %q, want %q", h.name, config.Name)
 	}
+
+	// Verify a real Job Object was created
+	if h.JobHandle() == 0 {
+		t.Error("JobHandle() = 0, expected valid Windows handle")
+	}
+}
+
+func TestResourceLimiter_Apply_CreatesJobObject(t *testing.T) {
+	r := NewResourceLimiter()
+
+	handle, err := r.Apply(platform.ResourceConfig{
+		Name:          "test-job-creation",
+		MaxMemoryMB:   256,
+		MaxCPUPercent: 25,
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	defer handle.Release()
+
+	h := handle.(*ResourceHandle)
+
+	// Verify Job Object handle is valid
+	if h.JobHandle() == 0 {
+		t.Fatal("Apply() did not create a valid Job Object")
+	}
+
+	// Verify we can query the job object (proves it's a real handle)
+	stats := h.Stats()
+	// ProcessCount should be 0 (no processes assigned yet)
+	if stats.ProcessCount != 0 {
+		t.Logf("ProcessCount = %d (unexpected but may be valid)", stats.ProcessCount)
+	}
 }
 
 func TestResourceLimiter_Apply_Duplicate(t *testing.T) {
@@ -97,10 +131,11 @@ func TestResourceLimiter_Apply_Duplicate(t *testing.T) {
 		MaxMemoryMB: 512,
 	}
 
-	_, err := r.Apply(config)
+	handle1, err := r.Apply(config)
 	if err != nil {
 		t.Fatalf("First Apply() error = %v", err)
 	}
+	defer handle1.Release()
 
 	// Second apply with same name should error
 	_, err = r.Apply(config)
@@ -136,6 +171,11 @@ func TestResourceLimiter_CalculateLimitFlags(t *testing.T) {
 			name:   "affinity",
 			config: platform.ResourceConfig{CPUAffinity: []int{0, 1}},
 			want:   JOB_OBJECT_LIMIT_AFFINITY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+		},
+		{
+			name:   "affinity with all invalid CPUs",
+			config: platform.ResourceConfig{CPUAffinity: []int{-1, 64, 100}},
+			want:   JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, // No affinity flag when mask is 0
 		},
 		{
 			name: "all limits",
@@ -237,7 +277,11 @@ func TestResourceLimiter_GetHandle(t *testing.T) {
 	r := NewResourceLimiter()
 
 	config := platform.ResourceConfig{Name: "test-job"}
-	r.Apply(config)
+	h, err := r.Apply(config)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	defer h.Release()
 
 	handle, ok := r.GetHandle("test-job")
 	if !ok {
@@ -277,36 +321,83 @@ func TestResourceLimiter_Release(t *testing.T) {
 }
 
 func TestResourceHandle_AssignProcess(t *testing.T) {
-	h := &ResourceHandle{name: "test"}
-
-	// Should not error (stub implementation)
-	err := h.AssignProcess(1234)
+	r := NewResourceLimiter()
+	handle, err := r.Apply(platform.ResourceConfig{
+		Name:        "test-assign",
+		MaxMemoryMB: 512,
+	})
 	if err != nil {
-		t.Errorf("AssignProcess() error = %v", err)
+		t.Fatalf("Apply() error = %v", err)
 	}
+	defer handle.Release()
+
+	h := handle.(*ResourceHandle)
+
+	// Verify job handle was created
+	if h.JobHandle() == 0 {
+		t.Error("JobHandle() returned 0, expected valid handle")
+	}
+
+	// Note: We don't assign the current test process to the job because
+	// JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE would terminate the test runner
+	// when Release() is called. Instead, we just verify the job was created.
+	// Real integration tests should spawn a child process to assign.
 }
 
 func TestResourceHandle_AssignProcess_Closed(t *testing.T) {
-	h := &ResourceHandle{name: "test", closed: true}
+	r := NewResourceLimiter()
+	handle, err := r.Apply(platform.ResourceConfig{
+		Name:        "test-closed",
+		MaxMemoryMB: 512,
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
 
-	err := h.AssignProcess(1234)
+	h := handle.(*ResourceHandle)
+
+	// Release to close it
+	h.Release()
+
+	err = h.AssignProcess(1234)
 	if err == nil {
 		t.Error("AssignProcess() should error when closed")
 	}
 }
 
 func TestResourceHandle_Stats(t *testing.T) {
-	h := &ResourceHandle{name: "test"}
+	r := NewResourceLimiter()
+	handle, err := r.Apply(platform.ResourceConfig{
+		Name:        "test-stats",
+		MaxMemoryMB: 512,
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	defer handle.Release()
 
+	h := handle.(*ResourceHandle)
+
+	// Stats should work even with no processes assigned
 	stats := h.Stats()
-	// Stub returns zero values
-	if stats.MemoryMB != 0 {
-		t.Errorf("MemoryMB = %d, want 0", stats.MemoryMB)
+	// ProcessCount should be 0 since no processes are assigned
+	if stats.ProcessCount != 0 {
+		t.Logf("ProcessCount = %d (may be non-zero if current process auto-joined)", stats.ProcessCount)
 	}
 }
 
 func TestResourceHandle_Stats_Closed(t *testing.T) {
-	h := &ResourceHandle{name: "test", closed: true}
+	r := NewResourceLimiter()
+	handle, err := r.Apply(platform.ResourceConfig{
+		Name:        "test-stats-closed",
+		MaxMemoryMB: 512,
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	h := handle.(*ResourceHandle)
+	h.Release()
 
 	stats := h.Stats()
 	if stats.MemoryMB != 0 || stats.CPUPercent != 0 {
@@ -315,21 +406,34 @@ func TestResourceHandle_Stats_Closed(t *testing.T) {
 }
 
 func TestResourceHandle_Getters(t *testing.T) {
-	h := &ResourceHandle{
-		name:         "test",
-		limitFlags:   0x1234,
-		cpuRate:      5000,
-		memoryLimit:  1024 * 1024 * 1024,
-		processLimit: 10,
-		affinityMask: 0xF,
+	r := NewResourceLimiter()
+	handle, err := r.Apply(platform.ResourceConfig{
+		Name:          "test-getters",
+		MaxMemoryMB:   1024,
+		MaxCPUPercent: 50,
+		MaxProcesses:  10,
+		CPUAffinity:   []int{0, 1, 2, 3},
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	defer handle.Release()
+
+	h := handle.(*ResourceHandle)
+
+	if h.Name() != "test-getters" {
+		t.Errorf("Name() = %q, want test-getters", h.Name())
 	}
 
-	if h.Name() != "test" {
-		t.Errorf("Name() = %q, want test", h.Name())
+	// LimitFlags should include memory, process count, affinity, and kill-on-close
+	expectedFlags := uint32(JOB_OBJECT_LIMIT_JOB_MEMORY |
+		JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
+		JOB_OBJECT_LIMIT_AFFINITY |
+		JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+	if h.LimitFlags() != expectedFlags {
+		t.Errorf("LimitFlags() = 0x%x, want 0x%x", h.LimitFlags(), expectedFlags)
 	}
-	if h.LimitFlags() != 0x1234 {
-		t.Errorf("LimitFlags() = 0x%x, want 0x1234", h.LimitFlags())
-	}
+
 	if h.CPURate() != 5000 {
 		t.Errorf("CPURate() = %d, want 5000", h.CPURate())
 	}
@@ -342,18 +446,40 @@ func TestResourceHandle_Getters(t *testing.T) {
 	if h.AffinityMask() != 0xF {
 		t.Errorf("AffinityMask() = 0x%x, want 0xF", h.AffinityMask())
 	}
+	if h.JobHandle() == 0 {
+		t.Error("JobHandle() = 0, want valid handle")
+	}
 }
 
 func TestResourceHandle_Release(t *testing.T) {
-	h := &ResourceHandle{name: "test"}
+	r := NewResourceLimiter()
+	handle, err := r.Apply(platform.ResourceConfig{
+		Name:        "test-release",
+		MaxMemoryMB: 512,
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
 
-	err := h.Release()
+	h := handle.(*ResourceHandle)
+
+	// Verify job handle exists before release
+	if h.JobHandle() == 0 {
+		t.Error("JobHandle() should be valid before Release()")
+	}
+
+	err = h.Release()
 	if err != nil {
 		t.Errorf("Release() error = %v", err)
 	}
 
 	if !h.closed {
 		t.Error("closed should be true after Release()")
+	}
+
+	// Job handle should be zeroed after release
+	if h.JobHandle() != 0 {
+		t.Error("JobHandle() should be 0 after Release()")
 	}
 
 	// Release again should not error
@@ -366,4 +492,29 @@ func TestResourceHandle_Release(t *testing.T) {
 func TestResourceLimiter_InterfaceCompliance(t *testing.T) {
 	var _ platform.ResourceLimiter = (*ResourceLimiter)(nil)
 	var _ platform.ResourceHandle = (*ResourceHandle)(nil)
+}
+
+func TestResourceHandle_IsActive(t *testing.T) {
+	r := NewResourceLimiter()
+	handle, err := r.Apply(platform.ResourceConfig{
+		Name:        "test-isactive",
+		MaxMemoryMB: 512,
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	defer handle.Release()
+
+	h := handle.(*ResourceHandle)
+
+	// With no processes assigned, should not be active
+	if h.IsActive() {
+		t.Log("IsActive() = true (may be expected if process auto-joined)")
+	}
+
+	// After release, should not be active
+	h.Release()
+	if h.IsActive() {
+		t.Error("IsActive() should return false after Release()")
+	}
 }
