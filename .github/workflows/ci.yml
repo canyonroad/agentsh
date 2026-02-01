@@ -102,13 +102,13 @@ jobs:
           restore-keys: |
             ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-
 
-      - name: go build (Windows packages, no CGO)
-        run: go build ./internal/platform/windows/... ./internal/platform/wsl2/... ./internal/platform/fuse/... ./internal/limits/... ./internal/trash/... ./internal/session/... ./internal/pty/... ./internal/process/... ./internal/ipc/... ./internal/shim/...
+      - name: go build
+        run: go build ./...
         env:
           CGO_ENABLED: 0
 
-      - name: go test (Windows platform)
-        run: go test ./internal/platform/windows/... ./internal/platform/fuse/...
+      - name: go test
+        run: go test -short ./...
         env:
           CGO_ENABLED: 0
 
