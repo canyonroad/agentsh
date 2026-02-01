@@ -5,11 +5,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestResolveAgentshBin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix shell")
+	}
 	t.Run("uses AGENTSH_BIN when set", func(t *testing.T) {
 		t.Setenv("AGENTSH_BIN", "echo")
 		p, err := resolveAgentshBin()
@@ -40,6 +44,9 @@ func TestResolveAgentshBin(t *testing.T) {
 }
 
 func TestResolveRealShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix shell")
+	}
 	t.Run("finds sibling .real next to argv0", func(t *testing.T) {
 		tmp := t.TempDir()
 		shell := filepath.Join(tmp, "sh.real")

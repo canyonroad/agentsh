@@ -95,9 +95,16 @@ func TestBuiltinIdentities_CursorMatching(t *testing.T) {
 			platform: "linux", // only Linux has lowercase "cursor" in Comm
 		},
 		{
-			name: "Cursor comm capitalized",
-			info: &ProcessInfo{Comm: "Cursor"},
-			want: true, // works on both Linux and Darwin
+			name:     "Cursor comm capitalized",
+			info:     &ProcessInfo{Comm: "Cursor"},
+			want:     true,
+			platform: "linux", // Windows uses ExeName, not Comm
+		},
+		{
+			name:     "Cursor comm capitalized darwin",
+			info:     &ProcessInfo{Comm: "Cursor"},
+			want:     true,
+			platform: "darwin",
 		},
 		{
 			name:     "cursor exe path linux",
@@ -251,7 +258,15 @@ func TestBuiltinIdentities_MultipleMatches(t *testing.T) {
 	matches := m.Matches(&ProcessInfo{Comm: "bash"})
 	assert.Empty(t, matches)
 
-	// Process that matches cursor - use capitalized "Cursor" which works on both Linux and Darwin
-	matches = m.Matches(&ProcessInfo{Comm: "Cursor"})
+	// Process that matches cursor - use platform-appropriate matching
+	var info *ProcessInfo
+	if runtime.GOOS == "windows" {
+		// Windows matches ExeName pattern against the exe name extracted from ExePath
+		info = &ProcessInfo{ExePath: "C:\\Users\\test\\AppData\\Local\\Programs\\Cursor\\Cursor.exe"}
+	} else {
+		// Linux/Darwin use Comm
+		info = &ProcessInfo{Comm: "Cursor"}
+	}
+	matches = m.Matches(info)
 	assert.Contains(t, matches, "cursor")
 }

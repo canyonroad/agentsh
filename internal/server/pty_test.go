@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,9 @@ import (
 )
 
 func TestServer_HTTP_PTYWebSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PTY tests require Unix shell")
+	}
 	dir := t.TempDir()
 	policyDir := filepath.Join(dir, "policies")
 	if err := os.MkdirAll(policyDir, 0o755); err != nil {
@@ -149,6 +153,9 @@ file_rules:
 }
 
 func TestServer_GRPC_PTYExec(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PTY tests require Unix shell")
+	}
 	dir := t.TempDir()
 	policyDir := filepath.Join(dir, "policies")
 	if err := os.MkdirAll(policyDir, 0o755); err != nil {

@@ -3,6 +3,7 @@ package ancestry
 import (
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 	"time"
 
@@ -19,6 +20,10 @@ func TestProcessTreeIntegration_TaintPropagation(t *testing.T) {
 	//
 	// This test serves as a smoke test that the integration doesn't panic
 	// and the components can be wired together.
+
+	if runtime.GOOS == "windows" {
+		t.Skip("process tree test requires Unix shell and cgroups")
+	}
 
 	// Skip if we can't create subprocesses (e.g., in some CI environments)
 	if os.Getenv("CI") != "" {

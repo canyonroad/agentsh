@@ -173,6 +173,7 @@ func TestPlatform_Shutdown(t *testing.T) {
 }
 
 func TestPlatform_Filesystem(t *testing.T) {
+	skipIfWSLUnavailable(t)
 	p := &Platform{distro: "Ubuntu"}
 
 	fs := p.Filesystem()
@@ -188,6 +189,7 @@ func TestPlatform_Filesystem(t *testing.T) {
 }
 
 func TestPlatform_Network(t *testing.T) {
+	skipIfWSLUnavailable(t)
 	p := &Platform{distro: "Ubuntu"}
 
 	net := p.Network()
@@ -203,6 +205,7 @@ func TestPlatform_Network(t *testing.T) {
 }
 
 func TestPlatform_Sandbox(t *testing.T) {
+	skipIfWSLUnavailable(t)
 	p := &Platform{distro: "Ubuntu"}
 
 	sb := p.Sandbox()
@@ -218,6 +221,7 @@ func TestPlatform_Sandbox(t *testing.T) {
 }
 
 func TestPlatform_Resources(t *testing.T) {
+	skipIfWSLUnavailable(t)
 	p := &Platform{distro: "Ubuntu"}
 
 	res := p.Resources()

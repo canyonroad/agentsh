@@ -4,6 +4,7 @@ package policy
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,6 +12,9 @@ import (
 )
 
 func TestProjectRootAwarePolicies_Integration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("glob matching uses Unix-style path separators")
+	}
 	// Create temp project structure
 	base := t.TempDir()
 	// Resolve symlinks for macOS /var -> /private/var

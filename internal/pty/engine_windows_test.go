@@ -54,6 +54,9 @@ func TestQuoteArg(t *testing.T) {
 }
 
 func TestEngineStart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping ConPTY test in short mode")
+	}
 	if !conpty.IsConPtyAvailable() {
 		t.Skip("ConPTY not available")
 	}
@@ -102,6 +105,9 @@ func TestEngineStartEmptyCommand(t *testing.T) {
 }
 
 func TestSessionResize(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping ConPTY test in short mode")
+	}
 	if !conpty.IsConPtyAvailable() {
 		t.Skip("ConPTY not available")
 	}
@@ -126,6 +132,9 @@ func TestSessionResize(t *testing.T) {
 }
 
 func TestSessionPID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping ConPTY test in short mode")
+	}
 	if !conpty.IsConPtyAvailable() {
 		t.Skip("ConPTY not available")
 	}
@@ -148,6 +157,9 @@ func TestSessionPID(t *testing.T) {
 }
 
 func TestSessionSignalINT(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping ConPTY test in short mode")
+	}
 	if !conpty.IsConPtyAvailable() {
 		t.Skip("ConPTY not available")
 	}

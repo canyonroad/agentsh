@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -12,6 +13,9 @@ import (
 // the bash_startup.sh script, the kill builtin is disabled.
 // This is an E2E test for the startup script itself.
 func TestBashStartupScript_DisablesBuiltins(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash startup script tests require Unix shell")
+	}
 	// Find bash_startup.sh relative to this test file
 	// Test runs from internal/api/, script is at ../../packaging/bash_startup.sh
 	scriptPath := filepath.Join("..", "..", "packaging", "bash_startup.sh")
@@ -43,6 +47,9 @@ func TestBashStartupScript_DisablesBuiltins(t *testing.T) {
 
 // TestBashStartupScript_SyntaxValid verifies the bash_startup.sh script has valid bash syntax.
 func TestBashStartupScript_SyntaxValid(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash startup script tests require Unix shell")
+	}
 	// Find bash_startup.sh relative to this test file
 	scriptPath := filepath.Join("..", "..", "packaging", "bash_startup.sh")
 

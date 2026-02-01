@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,7 +29,14 @@ func TestCreateSession_RequestTooLargeReturns413(t *testing.T) {
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"workspace":"` + ws + `","policy":"default","pad":"` + strings.Repeat("x", 200) + `"}`
+	// Use json.Marshal to properly escape paths (especially Windows backslashes)
+	reqBody := map[string]string{
+		"workspace": ws,
+		"policy":    "default",
+		"pad":       strings.Repeat("x", 200),
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+	body := string(bodyBytes)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", strings.NewReader(body))
 	rr := httptest.NewRecorder()

@@ -1,12 +1,16 @@
 package landlock
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/policy"
 )
 
 func TestDeriveExecutePathsFromPolicy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("landlock tests use Unix paths")
+	}
 	// Create a policy with command rules
 	p := &policy.Policy{
 		CommandRules: []policy.CommandRule{
@@ -59,6 +63,9 @@ func TestDeriveExecutePathsFromPolicy(t *testing.T) {
 }
 
 func TestDeriveExecutePathsFromGlobs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("landlock tests use Unix paths")
+	}
 	p := &policy.Policy{
 		CommandRules: []policy.CommandRule{
 			{
@@ -92,6 +99,9 @@ func TestDeriveExecutePathsFromGlobs(t *testing.T) {
 }
 
 func TestDeriveReadPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("landlock tests use Unix paths")
+	}
 	// Test with file rules
 	p := &policy.Policy{
 		FileRules: []policy.FileRule{

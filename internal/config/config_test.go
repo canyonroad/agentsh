@@ -11,6 +11,9 @@ import (
 func TestLoad_ParsesServerTransportFields(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yml")
+	// Use forward slashes in YAML to avoid Windows backslash escape issues
+	sockPath := filepath.ToSlash(filepath.Join(dir, "agentsh.sock"))
+	cgroupsPath := filepath.ToSlash(filepath.Join(dir, "cgroups"))
 	if err := os.WriteFile(cfgPath, []byte(`
 server:
   http:
@@ -20,7 +23,7 @@ server:
     max_request_size: 10MB
   unix_socket:
     enabled: true
-    path: "`+filepath.Join(dir, "agentsh.sock")+`"
+    path: "`+sockPath+`"
     permissions: "0660"
   tls:
     enabled: true
@@ -29,7 +32,7 @@ server:
 sandbox:
   cgroups:
     enabled: true
-    base_path: "`+filepath.Join(dir, "cgroups")+`"
+    base_path: "`+cgroupsPath+`"
   network:
     ebpf:
       enabled: true
@@ -76,8 +79,9 @@ sandbox:
 	if !cfg.Sandbox.Cgroups.Enabled {
 		t.Fatalf("sandbox.cgroups.enabled: expected true")
 	}
-	if cfg.Sandbox.Cgroups.BasePath != filepath.Join(dir, "cgroups") {
-		t.Fatalf("sandbox.cgroups.base_path: got %q", cfg.Sandbox.Cgroups.BasePath)
+	// Compare against the forward-slash path that was written to YAML
+	if cfg.Sandbox.Cgroups.BasePath != cgroupsPath {
+		t.Fatalf("sandbox.cgroups.base_path: got %q, want %q", cfg.Sandbox.Cgroups.BasePath, cgroupsPath)
 	}
 	if !cfg.Sandbox.Network.EBPF.Enabled {
 		t.Fatalf("sandbox.network.ebpf.enabled: expected true")
@@ -141,6 +145,9 @@ sandbox:
 func TestLoad_EnvOverrides(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yml")
+	// Use forward slashes in YAML to avoid Windows backslash escape issues
+	sessionsPath := filepath.ToSlash(filepath.Join(dir, "sessions"))
+	eventsPath := filepath.ToSlash(filepath.Join(dir, "events.db"))
 	if err := os.WriteFile(cfgPath, []byte(`
 server:
   http:
@@ -149,10 +156,10 @@ server:
     enabled: true
     addr: "127.0.0.1:9090"
 sessions:
-  base_dir: "`+filepath.Join(dir, "sessions")+`"
+  base_dir: "`+sessionsPath+`"
 audit:
   storage:
-    sqlite_path: "`+filepath.Join(dir, "events.db")+`"
+    sqlite_path: "`+eventsPath+`"
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -392,13 +399,13 @@ func TestApplyDefaultsWithSource_UserSource(t *testing.T) {
 
 	// Sessions.BaseDir should use user data dir
 	userDataDir := GetUserDataDir()
-	wantSessionsDir := userDataDir + "/sessions"
+	wantSessionsDir := filepath.Join(userDataDir, "sessions")
 	if cfg.Sessions.BaseDir != wantSessionsDir {
 		t.Errorf("Sessions.BaseDir = %q, want %q", cfg.Sessions.BaseDir, wantSessionsDir)
 	}
 
 	// Audit.Storage.SQLitePath should use user data dir
-	wantSQLitePath := userDataDir + "/events.db"
+	wantSQLitePath := filepath.Join(userDataDir, "events.db")
 	if cfg.Audit.Storage.SQLitePath != wantSQLitePath {
 		t.Errorf("Audit.Storage.SQLitePath = %q, want %q", cfg.Audit.Storage.SQLitePath, wantSQLitePath)
 	}
@@ -410,13 +417,13 @@ func TestApplyDefaultsWithSource_SystemSource(t *testing.T) {
 
 	// Sessions.BaseDir should use system data dir
 	systemDataDir := GetDataDir()
-	wantSessionsDir := systemDataDir + "/sessions"
+	wantSessionsDir := filepath.Join(systemDataDir, "sessions")
 	if cfg.Sessions.BaseDir != wantSessionsDir {
 		t.Errorf("Sessions.BaseDir = %q, want %q", cfg.Sessions.BaseDir, wantSessionsDir)
 	}
 
 	// Audit.Storage.SQLitePath should use system data dir
-	wantSQLitePath := systemDataDir + "/events.db"
+	wantSQLitePath := filepath.Join(systemDataDir, "events.db")
 	if cfg.Audit.Storage.SQLitePath != wantSQLitePath {
 		t.Errorf("Audit.Storage.SQLitePath = %q, want %q", cfg.Audit.Storage.SQLitePath, wantSQLitePath)
 	}
@@ -432,7 +439,7 @@ func TestApplyDefaultsWithSource_EnvSource(t *testing.T) {
 
 	// Should derive data dir from config path location
 	wantDataDir := filepath.Join(tmpDir, "custom")
-	wantSessionsDir := wantDataDir + "/sessions"
+	wantSessionsDir := filepath.Join(wantDataDir, "sessions")
 	if cfg.Sessions.BaseDir != wantSessionsDir {
 		t.Errorf("Sessions.BaseDir = %q, want %q", cfg.Sessions.BaseDir, wantSessionsDir)
 	}
@@ -444,7 +451,7 @@ func TestApplyDefaultsWithSource_PoliciesDir(t *testing.T) {
 
 	// Policies.Dir should use user config dir
 	userConfigDir := GetUserConfigDir()
-	wantPoliciesDir := userConfigDir + "/policies"
+	wantPoliciesDir := filepath.Join(userConfigDir, "policies")
 	if cfg.Policies.Dir != wantPoliciesDir {
 		t.Errorf("Policies.Dir = %q, want %q", cfg.Policies.Dir, wantPoliciesDir)
 	}

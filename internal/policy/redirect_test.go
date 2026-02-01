@@ -1,12 +1,16 @@
 package policy
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
 func TestPathRedirector_Redirect(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("path redirect tests use Unix-style paths")
+	}
 	rules := []PathRedirectRule{
 		{
 			Name:          "redirect-home",
@@ -87,6 +91,9 @@ func TestPathRedirector_Redirect(t *testing.T) {
 }
 
 func TestPathRedirector_RedirectWithInfo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("path redirect tests use Unix-style paths")
+	}
 	rules := []PathRedirectRule{
 		{
 			Name:          "redirect-home",
@@ -136,6 +143,9 @@ func TestPathRedirector_Nil(t *testing.T) {
 }
 
 func TestCheckFile_WithRedirect(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("path redirect tests use Unix-style paths")
+	}
 	policy := &Policy{
 		Version: 1,
 		Name:    "test",

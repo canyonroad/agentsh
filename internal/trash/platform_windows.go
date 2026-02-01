@@ -96,3 +96,13 @@ func setSecurityDescriptor(path string, sdBytes []byte) error {
 		nil,
 	)
 }
+
+// setXattr is not supported on Windows. Returns an error so tests can skip.
+func setXattr(path, name string, value []byte) error {
+	return syscall.ENOTSUP
+}
+
+// getXattr is not supported on Windows. Returns an error so tests can skip.
+func getXattr(path, name string) ([]byte, error) {
+	return nil, syscall.ENOTSUP
+}

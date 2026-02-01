@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -136,6 +137,11 @@ func TestRestore_DryRunShowsFiles(t *testing.T) {
 }
 
 func TestSanitizeTarPath(t *testing.T) {
+	// Use platform-appropriate absolute path for testing
+	absPath := "/etc/passwd"
+	if runtime.GOOS == "windows" {
+		absPath = "C:\\Windows\\System32\\config"
+	}
 	tests := []struct {
 		name    string
 		input   string
@@ -143,7 +149,7 @@ func TestSanitizeTarPath(t *testing.T) {
 	}{
 		{"valid path", "config.yaml", false},
 		{"valid nested path", "policies/default.yaml", false},
-		{"absolute path rejected", "/etc/passwd", true},
+		{"absolute path rejected", absPath, true},
 		{"path traversal rejected", "../../../etc/passwd", true},
 		{"double dot rejected", "foo/../bar", false}, // Clean will resolve this to "bar"
 	}

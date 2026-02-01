@@ -3,6 +3,7 @@ package api
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -97,6 +98,9 @@ func TestMergeEnv_OverridesSecretStripped(t *testing.T) {
 }
 
 func TestMaybeAddShimEnv_AddsShimAndFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("LD_PRELOAD is not supported on Windows")
+	}
 	tmp := t.TempDir()
 	shimPath := filepath.Join(tmp, "libenvshim.so")
 	if err := os.WriteFile(shimPath, []byte("stub"), 0o644); err != nil {
@@ -118,6 +122,9 @@ func TestMaybeAddShimEnv_AddsShimAndFlag(t *testing.T) {
 }
 
 func TestMaybeAddShimEnv_PrependsExistingLDPreload(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("LD_PRELOAD is not supported on Windows")
+	}
 	tmp := t.TempDir()
 	shimPath := filepath.Join(tmp, "libenvshim.so")
 	if err := os.WriteFile(shimPath, []byte("stub"), 0o644); err != nil {

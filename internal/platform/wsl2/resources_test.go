@@ -9,6 +9,7 @@ import (
 )
 
 func TestNewResourceLimiter(t *testing.T) {
+	skipIfWSLUnavailable(t)
 	p := &Platform{distro: "Ubuntu"}
 	r := NewResourceLimiter(p)
 

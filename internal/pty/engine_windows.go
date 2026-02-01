@@ -73,6 +73,9 @@ func (s *Session) PID() int {
 
 // Write sends input to the PTY.
 func (s *Session) Write(p []byte) (int, error) {
+	if s == nil {
+		return 0, io.ErrClosedPipe
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -242,7 +245,8 @@ func (e *Engine) Start(ctx context.Context, req StartRequest) (*Session, error) 
 // buildCommandLine combines command and args into a single Windows command line.
 func buildCommandLine(command string, args []string) string {
 	if len(args) == 0 {
-		return command
+		// Quote command if it contains spaces even with no args
+		return quoteArg(command)
 	}
 
 	parts := make([]string, 0, len(args)+1)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -80,6 +81,9 @@ func TestDoJSONNoContent(t *testing.T) {
 }
 
 func TestUnixSchemeUsesUnixDialer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets not supported on Windows")
+	}
 	tmp := t.TempDir()
 	sock := filepath.Join(tmp, "srv.sock")
 	l, err := net.Listen("unix", sock)

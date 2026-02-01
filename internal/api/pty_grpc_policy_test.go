@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -24,6 +25,9 @@ import (
 )
 
 func TestGRPC_PTY_RespectsCommandPolicyDeny(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PTY tests require Unix shell")
+	}
 	db := newSQLiteStore(t)
 	store := composite.New(db, db)
 	sessions := session.NewManager(10)

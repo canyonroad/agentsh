@@ -6,12 +6,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestClient_UnixSocketHealth(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets not supported on Windows")
+	}
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "agentsh.sock")
 

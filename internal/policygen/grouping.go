@@ -158,8 +158,9 @@ func getBaseDomain(domain string) string {
 
 // isUnderCollapsedParent checks if the directory is under any collapsed parent.
 func isUnderCollapsedParent(dir string, collapsedParents map[string]bool) bool {
+	sep := string(filepath.Separator)
 	for parent := range collapsedParents {
-		if strings.HasPrefix(dir, parent+"/") {
+		if strings.HasPrefix(dir, parent+sep) {
 			return true
 		}
 	}

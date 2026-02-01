@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,9 @@ import (
 )
 
 func TestGRPC_PTY_ExecBasic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PTY tests require Unix shell")
+	}
 	st := newSQLiteStore(t)
 	store := composite.New(st, st)
 	sessions := session.NewManager(10)

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -581,7 +583,11 @@ func getActiveIPs() []string {
 func generateSessionID() string {
 	hostname, _ := os.Hostname()
 	timestamp := time.Now().UnixNano()
-	return fmt.Sprintf("%s-%d", hostname, timestamp)
+	// Add random suffix to ensure uniqueness even for rapid consecutive calls
+	randomBytes := make([]byte, 4)
+	_, _ = rand.Read(randomBytes)
+	randomSuffix := hex.EncodeToString(randomBytes)
+	return fmt.Sprintf("%s-%d-%s", hostname, timestamp, randomSuffix)
 }
 
 func formatUptime(d time.Duration) string {

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,9 @@ func TestPTYWebSocket_RequiresUpgrade(t *testing.T) {
 }
 
 func TestPTYWebSocket_StartAndExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PTY tests require Unix shell")
+	}
 	db := newSQLiteStore(t)
 	store := composite.New(db, db)
 	sessions := session.NewManager(10)

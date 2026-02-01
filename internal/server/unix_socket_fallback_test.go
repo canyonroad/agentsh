@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,9 @@ import (
 )
 
 func TestServer_UnixSocketPermissionErrorDoesNotPreventHTTP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sockets not supported on Windows")
+	}
 	dir := t.TempDir()
 	policyDir := filepath.Join(dir, "policies")
 	if err := os.MkdirAll(policyDir, 0o755); err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,7 +179,11 @@ func readOrCreateSessionIDFile(path string) (string, error) {
 	}
 	defer func() { _ = unlockFile(f) }()
 
-	b, _ := os.ReadFile(path)
+	// Read from the already-opened file handle to avoid conflicts with exclusive lock on Windows
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return "", err
+	}
 	if id := strings.TrimSpace(string(b)); id != "" {
 		return id, nil
 	}

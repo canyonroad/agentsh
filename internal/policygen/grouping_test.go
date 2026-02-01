@@ -1,16 +1,20 @@
 // internal/policygen/grouping_test.go
 package policygen
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestGroupPaths_ThresholdCollapse(t *testing.T) {
+	// Normalize paths to use platform-specific separators
 	paths := []string{
-		"/workspace/src/a.ts",
-		"/workspace/src/b.ts",
-		"/workspace/src/c.ts",
-		"/workspace/src/d.ts",
-		"/workspace/src/e.ts",
-		"/workspace/src/f.ts",
+		filepath.FromSlash("/workspace/src/a.ts"),
+		filepath.FromSlash("/workspace/src/b.ts"),
+		filepath.FromSlash("/workspace/src/c.ts"),
+		filepath.FromSlash("/workspace/src/d.ts"),
+		filepath.FromSlash("/workspace/src/e.ts"),
+		filepath.FromSlash("/workspace/src/f.ts"),
 	}
 
 	groups := GroupPaths(paths, 5)
@@ -18,15 +22,17 @@ func TestGroupPaths_ThresholdCollapse(t *testing.T) {
 	if len(groups) != 1 {
 		t.Fatalf("expected 1 group, got %d", len(groups))
 	}
-	if groups[0].Pattern != "/workspace/src/**" {
-		t.Errorf("expected pattern '/workspace/src/**', got %q", groups[0].Pattern)
+	wantPattern := filepath.FromSlash("/workspace/src") + "/**"
+	if groups[0].Pattern != wantPattern {
+		t.Errorf("expected pattern %q, got %q", wantPattern, groups[0].Pattern)
 	}
 }
 
 func TestGroupPaths_BelowThreshold(t *testing.T) {
+	// Normalize paths to use platform-specific separators
 	paths := []string{
-		"/workspace/src/a.ts",
-		"/workspace/src/b.ts",
+		filepath.FromSlash("/workspace/src/a.ts"),
+		filepath.FromSlash("/workspace/src/b.ts"),
 	}
 
 	groups := GroupPaths(paths, 5)
@@ -38,13 +44,14 @@ func TestGroupPaths_BelowThreshold(t *testing.T) {
 }
 
 func TestGroupPaths_CommonPrefix(t *testing.T) {
+	// Normalize paths to use platform-specific separators
 	paths := []string{
-		"/workspace/node_modules/lodash/index.js",
-		"/workspace/node_modules/lodash/fp.js",
-		"/workspace/node_modules/express/index.js",
-		"/workspace/node_modules/express/router.js",
-		"/workspace/node_modules/axios/index.js",
-		"/workspace/node_modules/axios/lib/core.js",
+		filepath.FromSlash("/workspace/node_modules/lodash/index.js"),
+		filepath.FromSlash("/workspace/node_modules/lodash/fp.js"),
+		filepath.FromSlash("/workspace/node_modules/express/index.js"),
+		filepath.FromSlash("/workspace/node_modules/express/router.js"),
+		filepath.FromSlash("/workspace/node_modules/axios/index.js"),
+		filepath.FromSlash("/workspace/node_modules/axios/lib/core.js"),
 	}
 
 	groups := GroupPaths(paths, 3)
@@ -53,8 +60,9 @@ func TestGroupPaths_CommonPrefix(t *testing.T) {
 	if len(groups) != 1 {
 		t.Fatalf("expected 1 group after prefix collapse, got %d: %+v", len(groups), groups)
 	}
-	if groups[0].Pattern != "/workspace/node_modules/**" {
-		t.Errorf("expected '/workspace/node_modules/**', got %q", groups[0].Pattern)
+	wantPattern := filepath.FromSlash("/workspace/node_modules") + "/**"
+	if groups[0].Pattern != wantPattern {
+		t.Errorf("expected %q, got %q", wantPattern, groups[0].Pattern)
 	}
 }
 

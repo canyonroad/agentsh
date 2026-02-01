@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,9 @@ import (
 )
 
 func TestPTYWebSocket_RespectsCommandPolicyDeny(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PTY tests require Unix shell")
+	}
 	db := newSQLiteStore(t)
 	store := composite.New(db, db)
 	sessions := session.NewManager(10)

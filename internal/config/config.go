@@ -657,9 +657,9 @@ func getDefaultPoliciesDir(source ConfigSource, configPath string) string {
 		if configPath != "" {
 			return filepath.Join(filepath.Dir(configPath), "policies")
 		}
-		return GetUserConfigDir() + "/policies"
+		return filepath.Join(GetUserConfigDir(), "policies")
 	case ConfigSourceUser:
-		return GetUserConfigDir() + "/policies"
+		return filepath.Join(GetUserConfigDir(), "policies")
 	case ConfigSourceSystem:
 		return GetPoliciesDir()
 	default:

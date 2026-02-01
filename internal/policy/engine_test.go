@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/agentsh/agentsh/pkg/types"
@@ -78,6 +79,9 @@ func TestEngine_CheckRegistry(t *testing.T) {
 }
 
 func TestEngineCheckSignal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signal handling not supported on Windows")
+	}
 	p := &Policy{
 		Version: 1,
 		Name:    "test",
