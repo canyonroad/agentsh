@@ -714,19 +714,21 @@ func (c *appContainer) createProcessWithCapture(ctx context.Context, cmd string,
 
 // mergeWithParentEnv combines os.Environ() with injected variables.
 // Injected values override parent values for the same key.
+// On Windows, environment variable keys are case-insensitive, so we use
+// uppercase keys for deduplication to prevent both PATH and Path appearing.
 func mergeWithParentEnv(inject map[string]string) map[string]string {
 	result := make(map[string]string)
 
-	// Start with parent environment
+	// Start with parent environment (use uppercase key for deduplication)
 	for _, e := range os.Environ() {
 		if k, v, ok := strings.Cut(e, "="); ok {
-			result[k] = v
+			result[strings.ToUpper(k)] = v
 		}
 	}
 
-	// Layer injections on top
+	// Layer injections on top (use uppercase key for deduplication)
 	for k, v := range inject {
-		result[k] = v
+		result[strings.ToUpper(k)] = v
 	}
 
 	return result

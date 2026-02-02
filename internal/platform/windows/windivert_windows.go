@@ -50,7 +50,7 @@ type WinDivertHandle struct {
 }
 
 // NewWinDivertHandle creates a new WinDivert handle.
-func NewWinDivertHandle(natTable *NATTable, config platform.NetConfig, driver *DriverClient) (*WinDivertHandle, error) {
+func NewWinDivertHandle(natTable *NATTable, config platform.NetConfig, driver *DriverClient, policyEngine *policy.Engine, dnsCache *netmonitor.DNSCache) (*WinDivertHandle, error) {
 	proxyPort := uint16(config.ProxyPort)
 	if proxyPort == 0 {
 		proxyPort = 9080
@@ -61,14 +61,16 @@ func NewWinDivertHandle(natTable *NATTable, config platform.NetConfig, driver *D
 	}
 
 	return &WinDivertHandle{
-		natTable:    natTable,
-		proxyPort:   proxyPort,
-		dnsPort:     dnsPort,
-		sessionPIDs: make(map[uint32]bool),
-		driver:      driver,
-		failMode:    FailModeOpen,
-		maxFailures: 10,
-		stopChan:    make(chan struct{}),
+		natTable:     natTable,
+		proxyPort:    proxyPort,
+		dnsPort:      dnsPort,
+		sessionPIDs:  make(map[uint32]bool),
+		driver:       driver,
+		policyEngine: policyEngine,
+		dnsCache:     dnsCache,
+		failMode:     FailModeOpen,
+		maxFailures:  10,
+		stopChan:     make(chan struct{}),
 	}, nil
 }
 

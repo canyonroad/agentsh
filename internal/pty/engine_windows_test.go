@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ func skipInCI(t *testing.T) {
 }
 
 func TestBuildCommandLine(t *testing.T) {
+	// Test cases use syscall.EscapeArg behavior
 	tests := []struct {
 		command string
 		args    []string
@@ -30,7 +32,8 @@ func TestBuildCommandLine(t *testing.T) {
 		{"cmd.exe", nil, "cmd.exe"},
 		{"cmd.exe", []string{"/c", "echo", "hello"}, `cmd.exe /c echo hello`},
 		{"cmd.exe", []string{"/c", "echo hello world"}, `cmd.exe /c "echo hello world"`},
-		{"cmd.exe", []string{"/c", `echo "quoted"`}, `cmd.exe /c "echo ""quoted"""`},
+		// Arg has space AND quotes: gets wrapped in quotes, internal quotes escaped
+		{"cmd.exe", []string{"/c", `echo "quoted"`}, `cmd.exe /c "echo \"quoted\""`},
 		{"C:\\Program Files\\app.exe", nil, `"C:\Program Files\app.exe"`},
 	}
 
@@ -42,23 +45,30 @@ func TestBuildCommandLine(t *testing.T) {
 	}
 }
 
-func TestQuoteArg(t *testing.T) {
+func TestSyscallEscapeArg(t *testing.T) {
+	// Verify syscall.EscapeArg behavior for documentation
+	// Note: EscapeArg only wraps in quotes if spaces/tabs present
 	tests := []struct {
 		arg  string
 		want string
 	}{
 		{"simple", "simple"},
 		{"with space", `"with space"`},
-		{`with"quote`, `"with""quote"`},
+		// No spaces = no quotes, but internal quotes are escaped
+		{`with"quote`, `with\"quote`},
 		{"", `""`},
 		{"path\\to\\file", "path\\to\\file"},
 		{"C:\\Program Files", `"C:\Program Files"`},
+		// Backslashes not before quotes are not escaped
+		{`path\`, `path\`},
+		// Backslashes before quotes are escaped
+		{`path\"`, `path\\\"`},
 	}
 
 	for _, tt := range tests {
-		got := quoteArg(tt.arg)
+		got := syscall.EscapeArg(tt.arg)
 		if got != tt.want {
-			t.Errorf("quoteArg(%q) = %q, want %q", tt.arg, got, tt.want)
+			t.Errorf("syscall.EscapeArg(%q) = %q, want %q", tt.arg, got, tt.want)
 		}
 	}
 }

@@ -246,26 +246,13 @@ func (e *Engine) Start(ctx context.Context, req StartRequest) (*Session, error) 
 func buildCommandLine(command string, args []string) string {
 	if len(args) == 0 {
 		// Quote command if it contains spaces even with no args
-		return quoteArg(command)
+		return syscall.EscapeArg(command)
 	}
 
 	parts := make([]string, 0, len(args)+1)
-	parts = append(parts, quoteArg(command))
+	parts = append(parts, syscall.EscapeArg(command))
 	for _, arg := range args {
-		parts = append(parts, quoteArg(arg))
+		parts = append(parts, syscall.EscapeArg(arg))
 	}
 	return strings.Join(parts, " ")
-}
-
-// quoteArg quotes an argument if it contains special characters.
-func quoteArg(arg string) string {
-	if arg == "" {
-		return `""`
-	}
-	if !strings.ContainsAny(arg, " \t\"") {
-		return arg
-	}
-	// Escape embedded quotes by doubling them
-	escaped := strings.ReplaceAll(arg, `"`, `""`)
-	return `"` + escaped + `"`
 }

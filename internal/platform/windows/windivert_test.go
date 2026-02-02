@@ -17,7 +17,7 @@ func TestWinDivertHandle_SessionPIDs(t *testing.T) {
 		DNSPort:   5353,
 	}
 
-	handle, err := NewWinDivertHandle(natTable, config, nil)
+	handle, err := NewWinDivertHandle(natTable, config, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewWinDivertHandle failed: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestWinDivertHandle_BaseFilter(t *testing.T) {
 		DNSPort:   5353,
 	}
 
-	handle, _ := NewWinDivertHandle(natTable, config, nil)
+	handle, _ := NewWinDivertHandle(natTable, config, nil, nil, nil)
 
 	filter := handle.baseFilter()
 	expected := "outbound and (tcp or (udp and udp.DstPort == 53))"
@@ -65,7 +65,7 @@ func TestWinDivertHandle_DefaultPorts(t *testing.T) {
 		DNSPort:   0,
 	}
 
-	handle, err := NewWinDivertHandle(natTable, config, nil)
+	handle, err := NewWinDivertHandle(natTable, config, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewWinDivertHandle failed: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestWinDivertHandle_RemovePIDCleansNAT(t *testing.T) {
 		DNSPort:   5353,
 	}
 
-	handle, _ := NewWinDivertHandle(natTable, config, nil)
+	handle, _ := NewWinDivertHandle(natTable, config, nil, nil, nil)
 
 	// Add NAT entries for PID 1234
 	natTable.Insert("127.0.0.1:5000", &NATEntry{ProcessID: 1234, OriginalDstPort: 80})
@@ -116,7 +116,7 @@ func TestWinDivertHandle_ConcurrentPIDAccess(t *testing.T) {
 		DNSPort:   5353,
 	}
 
-	handle, err := NewWinDivertHandle(natTable, config, nil)
+	handle, err := NewWinDivertHandle(natTable, config, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewWinDivertHandle failed: %v", err)
 	}

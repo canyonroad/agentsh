@@ -154,7 +154,7 @@ func (n *Network) setupWinDivert() error {
 	n.natTable = NewNATTable(5 * time.Minute)
 
 	var err error
-	n.windivert, err = NewWinDivertHandle(n.natTable, n.config, n.driverClient)
+	n.windivert, err = NewWinDivertHandle(n.natTable, n.config, n.driverClient, n.policyEngine, n.dnsCache)
 	if err != nil {
 		return fmt.Errorf("failed to create WinDivert handle: %w", err)
 	}

@@ -163,7 +163,24 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		}
 	}
 	// Add env_inject (operator-trusted, bypasses policy filtering)
+	// On POSIX, the first matching key wins, so we must remove existing keys
+	// before appending injected values to ensure they take effect.
 	if extra != nil && len(extra.envInject) > 0 {
+		// Build set of keys to inject (case-sensitive on POSIX)
+		injectKeys := make(map[string]bool)
+		for k := range extra.envInject {
+			injectKeys[k] = true
+		}
+		// Filter out existing entries that will be overridden
+		filtered := env[:0]
+		for _, e := range env {
+			if k, _, ok := strings.Cut(e, "="); ok && injectKeys[k] {
+				continue // Skip - will be replaced by injected value
+			}
+			filtered = append(filtered, e)
+		}
+		env = filtered
+		// Now append injected values
 		for k, v := range extra.envInject {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
 		}
