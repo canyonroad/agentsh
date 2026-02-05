@@ -62,7 +62,42 @@ func canMountFUSE() bool {
 		return false
 	}
 	const capSysAdmin = unix.CAP_SYS_ADMIN // capability 21
-	return data.Effective&(1<<uint(capSysAdmin)) != 0
+	if data.Effective&(1<<uint(capSysAdmin)) == 0 {
+		return false
+	}
+
+	// Probe mount() syscall to detect seccomp blocking.
+	// Environments like Firecracker have CAP_SYS_ADMIN and /dev/fuse but
+	// seccomp blocks mount(). Since we verified CAP_SYS_ADMIN above,
+	// EPERM here can only mean seccomp is blocking it.
+	return probeMountSyscall()
+}
+
+// probeMountSyscall attempts a harmless mount() call with invalid parameters
+// to detect whether seccomp is blocking the syscall.
+// Returns true if mount() is allowed (even though it fails with expected errors).
+func probeMountSyscall() bool {
+	type result struct {
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		err := unix.Mount("", "", "agentsh-probe", 0, "")
+		ch <- result{err: err}
+	}()
+
+	select {
+	case r := <-ch:
+		// EPERM with CAP_SYS_ADMIN means seccomp is blocking mount()
+		if r.err == unix.EPERM {
+			return false
+		}
+		// ENODEV, EINVAL, etc. = mount syscall is allowed (just bad params)
+		return true
+	case <-time.After(2 * time.Second):
+		// Timed out — mount() is blocked/hanging
+		return false
+	}
 }
 
 // detectImplementation returns the FUSE version.
