@@ -8,6 +8,8 @@ This document provides a comprehensive comparison of agentsh capabilities across
 |---------|:-----:|:------------:|:------------:|:----------:|:----------:|:--------:|
 | **Filesystem Interception** |
 | Implementation | FUSE3 | Endpoint Security | FUSE-T (NFS) | FUSE3 | Mini Filter + WinFsp | FUSE3 |
+
+> **Note on macOS Lima:** The "macOS Lima" column applies to both deployment modes. When running agentsh **inside** the Lima VM, you get 100% Linux-equivalent security. When running agentsh on macOS **orchestrating** the Lima VM, you get 85% due to VM boundary overhead. See [Lima Deployment Modes](#lima-deployment-modes) for details.
 | File read monitoring | Block | Block | Block | Block | Block | Block |
 | File write monitoring | Block | Block | Block | Block | Block | Block |
 | File create/delete | Block | Block | Block | Block | Block | Block |
@@ -81,7 +83,8 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | **Linux Native** | 100% | Yes | Yes | Block | Full | Yes | Full |
 | **Windows WSL2** | 100% | Yes | Yes | Block | Full | Yes | Full |
 | **macOS ESF+NE** | 90% | Yes | Yes | Audit | Minimal | Exec only | None |
-| **macOS + Lima** | 85% | Yes | Yes | Block | Full | Yes | Full |
+| **macOS + Lima (inside VM)** | 100% | Yes | Yes | Block | Full | Yes | Full |
+| **macOS + Lima (orchestrated)** | 85% | Yes | Yes | Block | Full | Yes | Full |
 | **macOS FUSE-T** | 70% | Yes | Yes | Audit | Minimal | No | None |
 | **Windows Native** | 85% | Yes | Yes | Audit | Partial | No | Partial |
 
@@ -101,9 +104,13 @@ macOS ESF+NE          ███████████████████�
                       File✓   Net✓    Sig⚠    Iso⚠      Sys⚠     Res✗
                       (ESF requires Apple approval; NE is standard capability)
 
-macOS + Lima          ██████████████████████████████████████████░░░░░░░░░░░░░░   85%
+macOS + Lima (in VM)  ████████████████████████████████████████████████████████  100%
                       File✓   Net✓    Sig✓    Iso✓      Sys✓     Res✓
-                      (VM overhead, file I/O slightly slower)
+                      (Run agentsh inside Lima VM = native Linux)
+
+macOS + Lima (orch)   ██████████████████████████████████████████░░░░░░░░░░░░░░   85%
+                      File✓   Net✓    Sig✓    Iso✓      Sys✓     Res✓
+                      (agentsh on macOS orchestrating Lima VM)
 
 macOS FUSE-T + pf     ██████████████████████████████████░░░░░░░░░░░░░░░░░░░░░░   70%
                       File✓   Net✓    Sig⚠    Iso⚠      Sys✗     Res✗
@@ -212,18 +219,23 @@ Lima/virtiofs   █████████████████████�
                                   │                          │
                                   ▼                          ▼
                     ┌─────────────────────┐    ┌─────────────────────┐
-                    │    macOS + Lima     │    │   Windows Native    │
-                    │    85% - Full       │    │   75% + Registry    │
-                    │    isolation        │    │   + WinDivert       │
-                    └─────────────────────┘    └─────────────────────┘
-                                  │
+                    │  Lima VM - choose:  │    │   Windows Native    │
+                    │                     │    │   75% + Registry    │
+                    │  Inside VM: 100%    │    │   + WinDivert       │
+                    │  (recommended)      │    └─────────────────────┘
+                    │                     │
+                    │  Orchestrated: 85%  │    ┌─────────────────────┐
+                    │  (macOS-native CLI) │    │   Windows WSL2      │
+                    └─────────────────────┘    │   100% - Full       │
+                                  │            │   Linux             │
+                                  │            └─────────────────────┘
                                   │ If Lima not acceptable
                                   ▼
-                    ┌─────────────────────┐    ┌─────────────────────┐
-                    │ Have Apple          │    │   Windows WSL2      │
-                    │ entitlements?       │    │   100% - Full       │
-                    └──────────┬──────────┘    │   Linux             │
-                          Yes  │  No           └─────────────────────┘
+                    ┌─────────────────────┐
+                    │ Have Apple          │
+                    │ entitlements?       │
+                    └──────────┬──────────┘
+                          Yes  │  No
                                │
               ┌────────────────┴────────────────┐
               ▼                                 ▼
@@ -242,7 +254,7 @@ Lima/virtiofs   █████████████████████�
 |----------|---------------------|:--------:|-------|
 | Production - Maximum Security | Linux Native | 100% | Full isolation, all features |
 | Production - Windows Server | Windows WSL2 | 100% | Full Linux security in VM |
-| Production - macOS | macOS + Lima | 85% | Full isolation via VM |
+| Production - macOS | macOS + Lima (inside VM) | 100% | Run agentsh inside Lima = native Linux |
 | Enterprise Security Product | macOS ESF+NE | 90% | ESF requires Apple approval; NE is standard |
 | Development - macOS | macOS FUSE-T | 70% | Easy setup, good monitoring |
 | Development - Windows | Windows Native | 75% | Registry monitoring + WinDivert network |
@@ -300,14 +312,29 @@ sandbox:
 |---------------|:-----------------:|:-------:|:---------:|:-------------:|:--------:|
 | ESF + NE | Endpoint Security | Network Extension | Minimal (sandbox-exec) | Medium (ESF needs approval) | 90% |
 | FUSE-T + pf | FUSE-T (NFS) | pf packet filter | Minimal (sandbox-exec) | Easy (`brew install`) | 70% |
-| Lima VM | FUSE3 in VM | iptables in VM | Full | Medium | 85% |
+| Lima VM (inside) | FUSE3 in VM | iptables in VM | Full | Medium | 100% |
+| Lima VM (orchestrated) | FUSE3 in VM | iptables in VM | Full | Medium | 85% |
 | Degraded | FSEvents (observe) | pcap (observe) | None | None required | 25% |
 
 **When to use each:**
 - **ESF + NE**: Building a commercial security product, have Apple Developer relationship
 - **FUSE-T + pf**: Development, testing, personal use - best balance of features/simplicity
-- **Lima VM**: Need full isolation and resource limits on macOS
+- **Lima VM (inside)**: Production on macOS - run agentsh inside VM for full Linux security
+- **Lima VM (orchestrated)**: When you need macOS-native CLI experience with Lima backend
 - **Degraded**: Quick testing, observation-only use cases
+
+## Lima Deployment Modes
+
+Lima provides two deployment modes for macOS users who need full Linux isolation:
+
+| Mode | Security | Description |
+|------|:--------:|-------------|
+| **Inside VM** | 100% | Run agentsh + AI agent inside Lima VM. Identical to native Linux. |
+| **Orchestrated** | 85% | Run agentsh on macOS, use Lima as execution sandbox via `limactl shell`. |
+
+**Recommendation:** Use Inside-VM mode for production. It's simpler (no special platform code needed) and provides full Linux-equivalent security.
+
+See [Known Limitations - macOS + Lima](#macos--lima) for detailed comparison.
 
 ## Known Limitations by Platform
 
@@ -338,14 +365,69 @@ sandbox:
 - Best option for development and personal use
 
 ### macOS + Lima
-- Adds VM overhead (~200-500MB RAM)
-- File access through virtiofs slightly slower
-- Some edge cases with file permissions
-- Requires maintaining Lima VM
-- **Signal interception**: Full blocking and redirect via seccomp in Linux VM
-- Best option for production on macOS
 
-**Lima Implementation Details:**
+Lima provides two deployment modes with different trade-offs:
+
+#### Inside-VM Mode (100% Security Score) - Recommended
+
+Run agentsh and the AI agent harness **entirely inside** the Lima VM:
+
+```
+┌─────────────────────────────────────┐
+│         macOS Host                  │
+│  ┌─────────────────────────────┐   │
+│  │      Lima VM (Linux)        │   │
+│  │  ┌───────────────────────┐  │   │
+│  │  │   agentsh (Linux)     │  │   │
+│  │  │   + AI Agent harness  │  │   │
+│  │  └───────────────────────┘  │   │
+│  └─────────────────────────────┘   │
+└─────────────────────────────────────┘
+```
+
+This is **identical to native Linux** - you get:
+- Full FUSE3 filesystem interception
+- Full iptables network interception
+- Full Linux namespace isolation
+- Full seccomp-bpf syscall filtering
+- Full cgroups v2 resource limits
+
+**Trade-offs:**
+- File I/O to macOS filesystem goes through virtiofs (15-30% overhead)
+- VM uses ~200-500MB RAM
+- Must SSH/shell into VM to interact
+
+**This is the simplest approach** - no special Lima platform code needed, just use the standard Linux platform implementation.
+
+#### Orchestrated Mode (85% Security Score)
+
+Run agentsh on macOS, using Lima as a remote execution sandbox:
+
+```
+┌─────────────────────────────────────┐
+│         macOS Host                  │
+│  ┌─────────────────────────────┐   │
+│  │   agentsh (macOS binary)   │   │
+│  └───────────┬─────────────────┘   │
+│              │ limactl shell       │
+│  ┌───────────▼─────────────────┐   │
+│  │      Lima VM (Linux)        │   │
+│  │   (execution sandbox)       │   │
+│  └─────────────────────────────┘   │
+└─────────────────────────────────────┘
+```
+
+This mode uses `internal/platform/lima/` to orchestrate commands inside the VM.
+
+**Trade-offs:**
+- Additional latency from `limactl shell` IPC
+- Path translation between macOS and Lima
+- More complex architecture
+- Useful when you need macOS-native agentsh CLI experience
+
+#### Lima Implementation Details (Both Modes)
+
+Inside the VM, both modes use standard Linux primitives:
 - **Resource limits**: cgroups v2 at `/sys/fs/cgroup/agentsh/<name>`
   - CPU: `cpu.max` (quota/period in microseconds)
   - Memory: `memory.max` (bytes)
@@ -363,6 +445,7 @@ sandbox:
   - Partial: mount, UTS, IPC, PID (when user namespace unavailable)
   - Flags: `--fork`, `--mount-proc`, `--map-root-user`
 - **Syscall filtering**: seccomp-bpf available in VM
+- **Signal interception**: Full blocking and redirect via seccomp
 
 ### Windows Native
 - **Partial isolation** - AppContainer provides file/registry isolation but not full namespace isolation

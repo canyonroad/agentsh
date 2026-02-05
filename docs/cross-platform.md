@@ -183,7 +183,11 @@ SIGNING_IDENTITY="Developer ID Application" make sign-bundle
 
 ### macOS (Lima VM - Full Isolation)
 
-For full Linux isolation on macOS, agentsh supports Lima VM. When Lima is installed with a running VM, agentsh automatically detects and uses it:
+For full Linux isolation on macOS, Lima VM provides two deployment modes:
+
+#### Inside-VM Mode (Recommended - 100% Security Score)
+
+Run agentsh and your AI agent harness **entirely inside** the Lima VM. This is identical to native Linux:
 
 ```bash
 # Install Lima
@@ -192,7 +196,40 @@ brew install lima
 # Create and start a VM
 limactl start default
 
-# agentsh automatically detects Lima and uses it
+# Shell into the VM
+limactl shell default
+
+# Inside the VM - install and run agentsh as normal Linux
+curl -fsSL https://get.agentsh.dev | bash
+agentsh server
+```
+
+This gives you **full Linux-equivalent protection**:
+- Full FUSE3 filesystem interception
+- Full iptables network interception
+- Full Linux namespace isolation (mount, network, PID, user)
+- Full seccomp-bpf syscall filtering
+- Full cgroups v2 resource limits
+
+**This is the simplest approach** - no special Lima platform code needed. Just treat the VM as a Linux server.
+
+**Trade-offs:**
+- File I/O to macOS filesystem via virtiofs (15-30% overhead)
+- VM uses ~200-500MB RAM
+- Interact via SSH/shell into VM
+
+#### Orchestrated Mode (85% Security Score)
+
+Run agentsh on macOS, using Lima as a remote execution sandbox:
+
+```bash
+# Install Lima
+brew install lima
+
+# Create and start a VM
+limactl start default
+
+# agentsh on macOS automatically detects Lima and uses it
 agentsh server  # Will use darwin-lima mode
 ```
 
@@ -203,27 +240,10 @@ agentsh server  # Will use darwin-lima mode
 - FUSE3 filesystem interception
 - iptables network interception
 
-**Resource Limits (cgroups v2):** Lima uses cgroups v2 inside the VM for resource enforcement:
-- Cgroup path: `/sys/fs/cgroup/agentsh/<session-name>`
-- Supported limits: CPU (quota/period), memory, process count, disk I/O (read/write bandwidth)
-- Stats available: memory usage, CPU time, process count, disk I/O bytes
-
-**Network Interception (iptables):** Lima uses iptables DNAT rules for traffic redirection:
-- Custom chain: `AGENTSH` in the nat table
-- TCP traffic redirected to proxy port (localhost excluded)
-- DNS (UDP port 53) redirected to DNS proxy port
-
-**Filesystem Mounting (bindfs):** Lima uses bindfs for FUSE-based filesystem mounting inside the VM:
-- Source directory mounted to mount point using bindfs (passthrough mount)
-- Automatic bindfs installation if not present (`sudo apt install bindfs`)
-- Unmount via `fusermount -u` with `sudo umount` fallback
-- Mount tracking prevents duplicate mounts to same location
-
-**Process Isolation (namespaces):** Lima uses Linux namespaces via `unshare` for process isolation:
-- Full isolation: user, mount, UTS, IPC, network, and PID namespaces
-- Partial isolation: mount, UTS, IPC, PID namespaces (when user namespace unavailable)
-- Automatic detection of available isolation level
-- Working directory support for sandboxed commands
+**Trade-offs:**
+- Additional latency from `limactl shell` IPC
+- Path translation between macOS and Lima paths
+- More complex architecture
 
 **Manual Mode Selection:** You can force Lima mode in your config:
 
@@ -232,7 +252,31 @@ platform:
   mode: darwin-lima  # or just "lima"
 ```
 
-**Security Score:** 85% - Full Linux capabilities with slight VM overhead.
+#### Lima Implementation Details (Both Modes)
+
+Inside the VM, both modes use standard Linux primitives:
+
+**Resource Limits (cgroups v2):**
+- Cgroup path: `/sys/fs/cgroup/agentsh/<session-name>`
+- Supported limits: CPU (quota/period), memory, process count, disk I/O (read/write bandwidth)
+- Stats available: memory usage, CPU time, process count, disk I/O bytes
+
+**Network Interception (iptables):**
+- Custom chain: `AGENTSH` in the nat table
+- TCP traffic redirected to proxy port (localhost excluded)
+- DNS (UDP port 53) redirected to DNS proxy port
+
+**Filesystem Mounting (bindfs):**
+- Source directory mounted to mount point using bindfs (passthrough mount)
+- Automatic bindfs installation if not present (`sudo apt install bindfs`)
+- Unmount via `fusermount -u` with `sudo umount` fallback
+- Mount tracking prevents duplicate mounts to same location
+
+**Process Isolation (namespaces):**
+- Full isolation: user, mount, UTS, IPC, network, and PID namespaces
+- Partial isolation: mount, UTS, IPC, PID namespaces (when user namespace unavailable)
+- Automatic detection of available isolation level
+- Working directory support for sandboxed commands
 
 ### macOS (sandbox-exec - Process Sandboxing)
 
