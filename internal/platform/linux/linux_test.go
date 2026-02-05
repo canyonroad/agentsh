@@ -23,12 +23,13 @@ func TestNewFilesystem(t *testing.T) {
 func TestFilesystem_Available(t *testing.T) {
 	fs := NewFilesystem()
 
-	// Check matches /dev/fuse existence
-	_, err := os.Stat("/dev/fuse")
-	expectAvailable := err == nil
+	// Available() now checks both O_RDWR access to /dev/fuse and
+	// CAP_SYS_ADMIN capability via canMountFUSE(), so the expected
+	// value must match that same logic, not just /dev/fuse existence.
+	expectAvailable := canMountFUSE()
 
 	if fs.Available() != expectAvailable {
-		t.Errorf("Available() = %v, expected %v based on /dev/fuse", fs.Available(), expectAvailable)
+		t.Errorf("Available() = %v, expected %v from canMountFUSE()", fs.Available(), expectAvailable)
 	}
 }
 
