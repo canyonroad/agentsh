@@ -84,18 +84,9 @@ func (p *Platform) detectCapabilities() platform.Capabilities {
 	return caps
 }
 
-// checkFUSE checks if FUSE is available.
+// checkFUSE checks if FUSE is available and mountable.
 func (p *Platform) checkFUSE() bool {
-	// Check for /dev/fuse
-	if _, err := os.Stat("/dev/fuse"); err == nil {
-		return true
-	}
-	// Check if fuse module is loaded
-	data, err := os.ReadFile("/proc/filesystems")
-	if err == nil && strings.Contains(string(data), "fuse") {
-		return true
-	}
-	return false
+	return canMountFUSE()
 }
 
 // detectFUSEVersion returns the FUSE implementation version.

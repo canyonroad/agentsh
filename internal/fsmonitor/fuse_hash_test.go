@@ -3,6 +3,7 @@
 package fsmonitor
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -40,7 +41,7 @@ func TestFUSE_SoftDeleteHashesSmallFile(t *testing.T) {
 		},
 	}
 
-	m, err := MountWorkspace(workspace, mountPoint, hooks)
+	m, err := MountWorkspace(context.Background(), workspace, mountPoint, hooks)
 	if err != nil {
 		t.Skipf("mount failed (skipping): %v", err)
 	}

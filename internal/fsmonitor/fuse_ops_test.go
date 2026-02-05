@@ -61,7 +61,7 @@ func TestFUSE_InterceptsExtraOps(t *testing.T) {
 		Emit:      em,
 	}
 
-	m, err := MountWorkspace(backing, mountPoint, hooks)
+	m, err := MountWorkspace(context.Background(), backing, mountPoint, hooks)
 	if err != nil {
 		t.Skipf("mount failed (skipping): %v", err)
 	}

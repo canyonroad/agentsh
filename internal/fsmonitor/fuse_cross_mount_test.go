@@ -43,7 +43,7 @@ func TestFUSE_CrossMountIntoWorkspaceEmitsCreate(t *testing.T) {
 		FUSEAudit: &FUSEAuditHooks{},
 	}
 
-	m, err := MountWorkspace(backing, mountPoint, hooks)
+	m, err := MountWorkspace(context.Background(), backing, mountPoint, hooks)
 	if err != nil {
 		t.Skipf("mount failed: %v", err)
 	}

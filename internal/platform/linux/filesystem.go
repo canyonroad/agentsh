@@ -15,6 +15,7 @@ import (
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/trash"
 	"github.com/agentsh/agentsh/pkg/types"
+	"golang.org/x/sys/unix"
 )
 
 // Filesystem implements platform.FilesystemInterceptor for Linux using FUSE.
@@ -35,13 +36,33 @@ func NewFilesystem() *Filesystem {
 	return fs
 }
 
-// checkAvailable checks if FUSE is available.
+// checkAvailable checks if FUSE is available and mountable.
 func (fs *Filesystem) checkAvailable() bool {
-	// Check for /dev/fuse
-	if _, err := os.Stat("/dev/fuse"); err == nil {
-		return true
+	return canMountFUSE()
+}
+
+// canMountFUSE checks if FUSE can actually be mounted by verifying:
+// 1. /dev/fuse can be opened with O_RDWR
+// 2. The process has CAP_SYS_ADMIN (required for the mount syscall)
+// This avoids false positives in environments like Firecracker where
+// /dev/fuse exists but mount is blocked by seccomp.
+func canMountFUSE() bool {
+	// Check that /dev/fuse can be opened (not just that it exists)
+	fd, err := unix.Open("/dev/fuse", unix.O_RDWR, 0)
+	if err != nil {
+		return false
 	}
-	return false
+	unix.Close(fd)
+
+	// Check for CAP_SYS_ADMIN in the effective capability set.
+	// The mount() syscall requires this capability.
+	hdr := &unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	data := &unix.CapUserData{}
+	if err := unix.Capget(hdr, data); err != nil {
+		return false
+	}
+	const capSysAdmin = unix.CAP_SYS_ADMIN // capability 21
+	return data.Effective&(1<<uint(capSysAdmin)) != 0
 }
 
 // detectImplementation returns the FUSE version.
@@ -106,8 +127,11 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 		}
 	}
 
-	// Create the FUSE mount using existing fsmonitor
-	fsMount, err := fsmonitor.MountWorkspace(cfg.SourcePath, cfg.MountPoint, hooks)
+	// Create the FUSE mount using existing fsmonitor with a timeout
+	// to prevent hanging if mount is blocked (e.g., by seccomp)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fsMount, err := fsmonitor.MountWorkspace(ctx, cfg.SourcePath, cfg.MountPoint, hooks)
 	if err != nil {
 		return nil, fmt.Errorf("failed to mount FUSE filesystem: %w", err)
 	}

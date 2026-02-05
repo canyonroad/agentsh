@@ -75,11 +75,24 @@ func checkSeccompBasic() bool {
 	return checkSeccompUserNotify().Available
 }
 
-// checkFUSE checks if /dev/fuse is accessible for filesystem interception.
+// checkFUSE checks if FUSE is usable for filesystem interception.
+// Verifies both /dev/fuse access and CAP_SYS_ADMIN capability.
 func checkFUSE() bool {
-	// Check if /dev/fuse exists and is accessible
-	// This is a simplified check - in production we might want to try opening it
-	return fileExists("/dev/fuse")
+	// Check that /dev/fuse can be opened (not just that it exists)
+	fd, err := unix.Open("/dev/fuse", unix.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	unix.Close(fd)
+
+	// Check for CAP_SYS_ADMIN in the effective capability set
+	hdr := &unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	data := &unix.CapUserData{}
+	if err := unix.Capget(hdr, data); err != nil {
+		return false
+	}
+	const capSysAdmin = unix.CAP_SYS_ADMIN
+	return data.Effective&(1<<uint(capSysAdmin)) != 0
 }
 
 // checkPIDNamespace checks if we're in a PID namespace (isolated process space).
@@ -87,11 +100,4 @@ func checkPIDNamespace() bool {
 	// Check if PID 1 is not init/systemd (would indicate PID namespace)
 	// For now, return false - we can refine this check later
 	return false
-}
-
-// fileExists is a helper to check if a file exists.
-func fileExists(path string) bool {
-	// Use unix.Access to check file existence without importing os
-	// This keeps the dependencies minimal in the capabilities package
-	return unix.Access(path, unix.F_OK) == nil
 }

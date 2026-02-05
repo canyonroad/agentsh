@@ -3,6 +3,7 @@
 package fsmonitor
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,7 +23,7 @@ type Options struct {
 	AttrTimeout  time.Duration
 }
 
-func MountWorkspace(backingDir string, mountPoint string, hooks *Hooks) (*Mount, error) {
+func MountWorkspace(ctx context.Context, backingDir string, mountPoint string, hooks *Hooks) (*Mount, error) {
 	if backingDir == "" {
 		return nil, fmt.Errorf("backingDir is empty")
 	}
@@ -49,15 +50,33 @@ func MountWorkspace(backingDir string, mountPoint string, hooks *Hooks) (*Mount,
 		},
 	}
 
-	server, err := fs.Mount(mountPoint, root, opts)
-	if err != nil {
-		return nil, err
+	type mountResult struct {
+		server *fuse.Server
+		err    error
 	}
-	if err := server.WaitMount(); err != nil {
-		return nil, err
-	}
+	ch := make(chan mountResult, 1)
+	go func() {
+		server, err := fs.Mount(mountPoint, root, opts)
+		if err != nil {
+			ch <- mountResult{nil, err}
+			return
+		}
+		if err := server.WaitMount(); err != nil {
+			ch <- mountResult{nil, err}
+			return
+		}
+		ch <- mountResult{server, nil}
+	}()
 
-	return &Mount{MountPoint: mountPoint, Server: server}, nil
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			return nil, res.err
+		}
+		return &Mount{MountPoint: mountPoint, Server: res.server}, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("FUSE mount timed out at %s (likely blocked by container runtime)", mountPoint)
+	}
 }
 
 func (m *Mount) Unmount() error {
