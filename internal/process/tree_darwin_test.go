@@ -147,34 +147,39 @@ func TestDarwinProcessTracker_DetectsChildExit(t *testing.T) {
 	err := tracker.Track(pid)
 	require.NoError(t, err)
 
+	// Start a child process first so we know its PID
+	cmd := exec.Command("sleep", "10")
+	err = cmd.Start()
+	require.NoError(t, err)
+
+	childPID := cmd.Process.Pid
+
 	var exitedPID int
 	var mu sync.Mutex
 	exited := make(chan struct{}, 1)
 	spawned := make(chan struct{}, 1)
 
-	tracker.OnSpawn(func(childPID, parentPID int) {
-		select {
-		case spawned <- struct{}{}:
-		default:
+	// Only signal when OUR child spawns/exits, not random system processes
+	tracker.OnSpawn(func(spawnedPID, parentPID int) {
+		if spawnedPID == childPID {
+			select {
+			case spawned <- struct{}{}:
+			default:
+			}
 		}
 	})
 
-	tracker.OnExit(func(childPID, exitCode int) {
-		mu.Lock()
-		exitedPID = childPID
-		mu.Unlock()
-		select {
-		case exited <- struct{}{}:
-		default:
+	tracker.OnExit(func(exitPID, exitCode int) {
+		if exitPID == childPID {
+			mu.Lock()
+			exitedPID = exitPID
+			mu.Unlock()
+			select {
+			case exited <- struct{}{}:
+			default:
+			}
 		}
 	})
-
-	// Start a child process that lives long enough to be detected
-	cmd := exec.Command("sleep", "1")
-	err = cmd.Start()
-	require.NoError(t, err)
-
-	childPID := cmd.Process.Pid
 
 	// Wait for spawn detection first
 	select {
