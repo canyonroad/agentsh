@@ -23,7 +23,7 @@ RUN set -eux; \
 # Download and install the agentsh RPM package.
 RUN set -eux; \
   version="${AGENTSH_TAG#v}"; \
-  rpm="agentsh-${version}-1.x86_64.rpm"; \
+  rpm="agentsh_${version}_linux_amd64.rpm"; \
   url="https://github.com/${AGENTSH_REPO}/releases/download/${AGENTSH_TAG}/${rpm}"; \
   echo "Downloading: ${url}"; \
   curl -fsSL -L "${url}" -o /tmp/agentsh.rpm; \
