@@ -151,7 +151,7 @@ func resolveRealShell(shellName string) (string, error) {
 					}
 				}
 			}
-			return resolved, nil
+			return p, nil
 		}
 	}
 	return "", fmt.Errorf("could not find %s.real (tried %v)", shellName, candidates)
