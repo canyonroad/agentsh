@@ -1,0 +1,538 @@
+# Self-contained integration test for agentsh (Fedora/RPM).
+# Installs the RPM from a GitHub release, sets up the shell shim,
+# starts the server internally, and runs end-to-end tests.
+#
+# Build:
+#   docker build -f Dockerfile.test.rpm \
+#     --build-arg AGENTSH_TAG=v0.9.2 \
+#     -t agentsh-test-fedora:latest .
+#
+# Run:
+#   docker run --rm agentsh-test-fedora:latest
+
+FROM fedora:latest
+
+ARG AGENTSH_REPO=canyonroad/agentsh
+ARG AGENTSH_TAG=v0.9.2
+
+# Install dependencies: curl for downloading, bash for shim tests, jq for JSON parsing.
+RUN set -eux; \
+  dnf install -y curl bash jq; \
+  dnf clean all
+
+# Download and install the agentsh RPM package.
+RUN set -eux; \
+  version="${AGENTSH_TAG#v}"; \
+  rpm="agentsh-${version}-1.x86_64.rpm"; \
+  url="https://github.com/${AGENTSH_REPO}/releases/download/${AGENTSH_TAG}/${rpm}"; \
+  echo "Downloading: ${url}"; \
+  curl -fsSL -L "${url}" -o /tmp/agentsh.rpm; \
+  rpm -i /tmp/agentsh.rpm; \
+  rm -f /tmp/agentsh.rpm; \
+  agentsh --version
+
+# Install the shell shim (replaces /bin/sh and /bin/bash).
+RUN agentsh shim install-shell \
+  --root / \
+  --shim /usr/bin/agentsh-shell-shim \
+  --bash \
+  --i-understand-this-modifies-the-host
+
+# Embed the test script.
+COPY <<'SCRIPT' /test.sh
+#!/bin/bash.real
+set -euo pipefail
+
+passed=0
+failed=0
+tests_run=0
+
+pass() {
+  passed=$((passed + 1))
+  tests_run=$((tests_run + 1))
+  echo "  PASS: $1"
+}
+
+fail() {
+  failed=$((failed + 1))
+  tests_run=$((tests_run + 1))
+  echo "  FAIL: $1 — $2" >&2
+}
+
+# -------------------------------------------------------------------
+# Pre-flight: verify shim installation
+# -------------------------------------------------------------------
+echo "=== Pre-flight checks ==="
+
+if [ -f /bin/sh.real ]; then
+  pass "/bin/sh.real exists"
+else
+  fail "/bin/sh.real exists" "file not found"
+fi
+
+if [ -f /bin/bash.real ]; then
+  pass "/bin/bash.real exists"
+else
+  fail "/bin/bash.real exists" "file not found"
+fi
+
+if [ -f /bin/sh ] && [ /bin/sh -ef /usr/bin/agentsh-shell-shim ]; then
+  pass "/bin/sh points to the shim"
+elif [ -f /bin/sh ]; then
+  pass "/bin/sh exists (shim installed)"
+else
+  fail "/bin/sh is the shim" "/bin/sh not found"
+fi
+
+# -------------------------------------------------------------------
+# Package completeness: binaries
+# -------------------------------------------------------------------
+echo ""
+echo "=== Package completeness ==="
+
+for bin in /usr/bin/agentsh /usr/bin/agentsh-shell-shim; do
+  if [ -x "$bin" ]; then
+    pass "$bin exists and is executable"
+  else
+    fail "$bin exists and is executable" "not found or not executable"
+  fi
+done
+
+# agentsh-unixwrap is only shipped on x86_64
+if [ "$(uname -m)" = "x86_64" ]; then
+  if [ -x /usr/bin/agentsh-unixwrap ]; then
+    pass "/usr/bin/agentsh-unixwrap exists (x86_64)"
+  else
+    fail "/usr/bin/agentsh-unixwrap exists (x86_64)" "not found or not executable"
+  fi
+fi
+
+# Config
+if [ -f /etc/agentsh/config.yaml ]; then
+  pass "/etc/agentsh/config.yaml exists"
+else
+  fail "/etc/agentsh/config.yaml exists" "not found"
+fi
+
+# All 10 policy files
+for policy in \
+  default.yaml default-windows.yaml \
+  dev-safe.yaml dev-safe-windows.yaml \
+  ci-strict.yaml ci-strict-windows.yaml \
+  agent-sandbox.yaml agent-sandbox-windows.yaml \
+  signal-strict.yaml system-readonly.yaml; do
+  if [ -f "/etc/agentsh/policies/$policy" ]; then
+    pass "policy $policy exists"
+  else
+    fail "policy $policy exists" "not found in /etc/agentsh/policies/"
+  fi
+done
+
+# Shell completions
+if [ -f /usr/share/bash-completion/completions/agentsh ]; then
+  pass "bash completion exists"
+else
+  fail "bash completion exists" "not found"
+fi
+
+if [ -f /usr/share/zsh/site-functions/_agentsh ]; then
+  pass "zsh completion exists"
+else
+  fail "zsh completion exists" "not found"
+fi
+
+if [ -f /usr/share/fish/vendor_completions.d/agentsh.fish ]; then
+  pass "fish completion exists"
+else
+  fail "fish completion exists" "not found"
+fi
+
+# Libs
+if [ -f /usr/lib/agentsh/bash_startup.sh ]; then
+  pass "/usr/lib/agentsh/bash_startup.sh exists"
+else
+  fail "/usr/lib/agentsh/bash_startup.sh exists" "not found"
+fi
+
+# -------------------------------------------------------------------
+# Start the agentsh server
+# -------------------------------------------------------------------
+echo ""
+echo "=== Starting agentsh server ==="
+
+tmp="$(mktemp -d)"
+trap 'set +e; [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; rm -rf "$tmp"' EXIT
+
+port=18923
+base_url="http://127.0.0.1:${port}"
+export AGENTSH_SERVER="$base_url"
+
+cat >"$tmp/config.yml" <<YAML
+server:
+  http:
+    addr: "127.0.0.1:${port}"
+  grpc:
+    enabled: false
+  unix_socket:
+    enabled: false
+
+auth:
+  type: "none"
+
+metrics:
+  enabled: false
+
+health:
+  path: "/health"
+  readiness_path: "/ready"
+
+policies:
+  dir: "/etc/agentsh/policies"
+  default: "default"
+
+sessions:
+  base_dir: "${tmp}/sessions"
+  max_sessions: 10
+
+audit:
+  enabled: true
+  output: "${tmp}/audit.jsonl"
+  storage:
+    sqlite_path: "${tmp}/events.db"
+
+sandbox:
+  fuse:
+    enabled: false
+  network:
+    enabled: false
+  unix_sockets:
+    enabled: false
+  seccomp:
+    execve:
+      enabled: false
+YAML
+
+agentsh server --config "$tmp/config.yml" >"$tmp/server.log" 2>&1 &
+SERVER_PID="$!"
+
+# Wait for server to become healthy.
+server_ready=0
+for _ in $(seq 1 100); do
+  if curl -fsS "${base_url}/health" >/dev/null 2>&1; then
+    server_ready=1
+    break
+  fi
+  sleep 0.1
+done
+
+if [ "$server_ready" = "1" ]; then
+  pass "server started and healthy"
+else
+  fail "server started and healthy" "server did not become ready"
+  echo "--- server log ---" >&2
+  head -100 "$tmp/server.log" >&2 || true
+  echo "--- end server log ---" >&2
+  echo ""
+  echo "=== Results: ${passed} passed, ${failed} failed, ${tests_run} total ==="
+  exit 1
+fi
+
+# -------------------------------------------------------------------
+# Create a session
+# -------------------------------------------------------------------
+echo ""
+echo "=== Creating session ==="
+
+sid_json="$(agentsh session create --workspace /tmp --json)"
+sid="$(echo "$sid_json" | jq -r '.id')"
+
+if [ -n "$sid" ] && [ "$sid" != "null" ]; then
+  pass "session created (id=${sid})"
+else
+  fail "session created" "failed to parse session id: ${sid_json}"
+  echo ""
+  echo "=== Results: ${passed} passed, ${failed} failed, ${tests_run} total ==="
+  exit 1
+fi
+
+# -------------------------------------------------------------------
+# Test: basic echo through /bin/sh shim
+# -------------------------------------------------------------------
+echo ""
+echo "=== Shim tests ==="
+
+sh_out="$(AGENTSH_SESSION_ID="$sid" /bin/sh -c 'echo hello_sh' 2>&1 | tr -d '\r' | tail -n 1)"
+if [ "$sh_out" = "hello_sh" ]; then
+  pass "echo through /bin/sh shim"
+else
+  fail "echo through /bin/sh shim" "got: ${sh_out}"
+fi
+
+# -------------------------------------------------------------------
+# Test: basic echo through /bin/bash shim
+# -------------------------------------------------------------------
+bash_out="$(AGENTSH_SESSION_ID="$sid" /bin/bash -c 'echo hello_bash' 2>&1 | tr -d '\r' | tail -n 1)"
+if [ "$bash_out" = "hello_bash" ]; then
+  pass "echo through /bin/bash shim"
+else
+  fail "echo through /bin/bash shim" "got: ${bash_out}"
+fi
+
+# -------------------------------------------------------------------
+# Test: recursion guard (AGENTSH_IN_SESSION)
+# -------------------------------------------------------------------
+rec_out="$(AGENTSH_BIN=/nonexistent/agentsh AGENTSH_IN_SESSION=1 /bin/sh -c 'echo recursion_ok' 2>&1 | tr -d '\r' | tail -n 1)"
+if [ "$rec_out" = "recursion_ok" ]; then
+  pass "AGENTSH_IN_SESSION recursion guard"
+else
+  fail "AGENTSH_IN_SESSION recursion guard" "got: ${rec_out}"
+fi
+
+# -------------------------------------------------------------------
+# Test: multi-word arguments preserved
+# -------------------------------------------------------------------
+multi_out="$(AGENTSH_SESSION_ID="$sid" /bin/sh -c 'echo "hello world"' 2>&1 | tr -d '\r' | tail -n 1)"
+if [ "$multi_out" = "hello world" ]; then
+  pass "multi-word arguments preserved"
+else
+  fail "multi-word arguments preserved" "got: ${multi_out}"
+fi
+
+# -------------------------------------------------------------------
+# Test: exit code propagation
+# -------------------------------------------------------------------
+set +e
+AGENTSH_SESSION_ID="$sid" /bin/sh -c 'exit 42' >/dev/null 2>&1
+exit_rc=$?
+set -e
+if [ "$exit_rc" = "42" ]; then
+  pass "exit code propagation (42)"
+else
+  fail "exit code propagation (42)" "got rc=${exit_rc}"
+fi
+
+# -------------------------------------------------------------------
+# Test: exec through agentsh CLI
+# -------------------------------------------------------------------
+exec_out="$(agentsh exec "$sid" -- sh -c 'echo exec_ok' 2>&1 | tr -d '\r' | tail -n 1)"
+if [ "$exec_out" = "exec_ok" ]; then
+  pass "agentsh exec command"
+else
+  fail "agentsh exec command" "got: ${exec_out}"
+fi
+
+# -------------------------------------------------------------------
+# Helper: exec_json — run a command via agentsh exec --output json
+# -------------------------------------------------------------------
+exec_json() {
+  local session="$1"; shift
+  set +e
+  _ej_json="$(agentsh exec --output json --events all "$session" -- "$@" 2>&1)"
+  _ej_rc=$?
+  set -e
+}
+
+# -------------------------------------------------------------------
+# Policy enforcement: default policy
+# -------------------------------------------------------------------
+echo ""
+echo "=== Policy enforcement: default policy ==="
+
+# rm -rf should be blocked by block-dangerous-rm
+exec_json "$sid" rm -rf /tmp/test
+if [ "$_ej_rc" -ne 0 ]; then
+  pass "rm -rf exits non-zero ($_ej_rc)"
+else
+  fail "rm -rf exits non-zero" "got exit code 0"
+fi
+
+ej_blocked="$(echo "$_ej_json" | jq -r '.guidance.blocked // false')"
+if [ "$ej_blocked" = "true" ]; then
+  pass "rm -rf guidance.blocked=true"
+else
+  fail "rm -rf guidance.blocked=true" "got: $ej_blocked"
+fi
+
+ej_rule="$(echo "$_ej_json" | jq -r '.result.error.policy_rule // empty')"
+if [ "$ej_rule" = "block-dangerous-rm" ]; then
+  pass "rm -rf policy_rule=block-dangerous-rm"
+else
+  fail "rm -rf policy_rule=block-dangerous-rm" "got: $ej_rule"
+fi
+
+# shutdown should be blocked by block-system-commands
+exec_json "$sid" shutdown now
+if [ "$_ej_rc" -ne 0 ]; then
+  pass "shutdown exits non-zero ($_ej_rc)"
+else
+  fail "shutdown exits non-zero" "got exit code 0"
+fi
+
+ej_blocked="$(echo "$_ej_json" | jq -r '.guidance.blocked // false')"
+if [ "$ej_blocked" = "true" ]; then
+  pass "shutdown guidance.blocked=true"
+else
+  fail "shutdown guidance.blocked=true" "got: $ej_blocked"
+fi
+
+ej_rule="$(echo "$_ej_json" | jq -r '.result.error.policy_rule // empty')"
+if [ "$ej_rule" = "block-system-commands" ]; then
+  pass "shutdown policy_rule=block-system-commands"
+else
+  fail "shutdown policy_rule=block-system-commands" "got: $ej_rule"
+fi
+
+# echo should be allowed
+exec_json "$sid" echo hello_policy
+if [ "$_ej_rc" -eq 0 ]; then
+  pass "echo allowed (exit 0)"
+else
+  fail "echo allowed (exit 0)" "got exit code $_ej_rc"
+fi
+
+ej_stdout="$(echo "$_ej_json" | jq -r '.result.stdout // empty' | tr -d '\n')"
+if [ "$ej_stdout" = "hello_policy" ]; then
+  pass "echo stdout=hello_policy"
+else
+  fail "echo stdout=hello_policy" "got: $ej_stdout"
+fi
+
+# ls /tmp should be allowed
+exec_json "$sid" ls /tmp
+if [ "$_ej_rc" -eq 0 ]; then
+  pass "ls /tmp allowed (exit 0)"
+else
+  fail "ls /tmp allowed (exit 0)" "got exit code $_ej_rc"
+fi
+
+# -------------------------------------------------------------------
+# Policy enforcement: agent-sandbox policy
+# -------------------------------------------------------------------
+echo ""
+echo "=== Policy enforcement: agent-sandbox policy ==="
+
+sid2_json="$(agentsh session create --workspace /tmp --policy agent-sandbox --json)"
+sid2="$(echo "$sid2_json" | jq -r '.id')"
+
+if [ -n "$sid2" ] && [ "$sid2" != "null" ]; then
+  pass "agent-sandbox session created (id=${sid2})"
+else
+  fail "agent-sandbox session created" "failed to parse session id: ${sid2_json}"
+fi
+
+# sudo should be blocked by block-shell-escape
+exec_json "$sid2" sudo whoami
+if [ "$_ej_rc" -ne 0 ]; then
+  pass "sudo exits non-zero in agent-sandbox ($_ej_rc)"
+else
+  fail "sudo exits non-zero in agent-sandbox" "got exit code 0"
+fi
+
+ej_blocked="$(echo "$_ej_json" | jq -r '.guidance.blocked // false')"
+if [ "$ej_blocked" = "true" ]; then
+  pass "sudo guidance.blocked=true"
+else
+  fail "sudo guidance.blocked=true" "got: $ej_blocked"
+fi
+
+ej_rule="$(echo "$_ej_json" | jq -r '.result.error.policy_rule // empty')"
+if [ "$ej_rule" = "block-shell-escape" ]; then
+  pass "sudo policy_rule=block-shell-escape"
+else
+  fail "sudo policy_rule=block-shell-escape" "got: $ej_rule"
+fi
+
+# echo should still work in agent-sandbox
+exec_json "$sid2" echo sandbox_ok
+if [ "$_ej_rc" -eq 0 ]; then
+  pass "echo allowed in agent-sandbox (exit 0)"
+else
+  fail "echo allowed in agent-sandbox (exit 0)" "got exit code $_ej_rc"
+fi
+
+ej_stdout="$(echo "$_ej_json" | jq -r '.result.stdout // empty' | tr -d '\n')"
+if [ "$ej_stdout" = "sandbox_ok" ]; then
+  pass "echo stdout=sandbox_ok in agent-sandbox"
+else
+  fail "echo stdout=sandbox_ok in agent-sandbox" "got: $ej_stdout"
+fi
+
+# -------------------------------------------------------------------
+# Policy selection: both sessions still work independently
+# -------------------------------------------------------------------
+echo ""
+echo "=== Policy selection: parallel sessions ==="
+
+# Original session (default policy) still works
+exec_json "$sid" echo default_still_ok
+if [ "$_ej_rc" -eq 0 ]; then
+  pass "default session still works after sandbox created"
+else
+  fail "default session still works after sandbox created" "got exit code $_ej_rc"
+fi
+
+# agent-sandbox session still works
+exec_json "$sid2" echo sandbox_still_ok
+if [ "$_ej_rc" -eq 0 ]; then
+  pass "agent-sandbox session still works"
+else
+  fail "agent-sandbox session still works" "got exit code $_ej_rc"
+fi
+
+# Default session does NOT block sudo (only agent-sandbox does)
+exec_json "$sid" sudo echo default_sudo
+if [ "$_ej_rc" -eq 0 ]; then
+  pass "sudo allowed in default policy"
+else
+  # sudo might fail for other reasons (not installed), check it's not policy-blocked
+  ej_blocked="$(echo "$_ej_json" | jq -r '.guidance.blocked // false')"
+  if [ "$ej_blocked" = "true" ]; then
+    fail "sudo allowed in default policy" "blocked by policy"
+  else
+    pass "sudo not policy-blocked in default (cmd failed: rc=$_ej_rc)"
+  fi
+fi
+
+# -------------------------------------------------------------------
+# Shim + policy integration
+# -------------------------------------------------------------------
+echo ""
+echo "=== Shim + policy integration ==="
+
+# Safe command through shim should work
+shim_safe="$(AGENTSH_SESSION_ID="$sid" /bin/sh -c 'echo shim_policy_ok' 2>&1 | tr -d '\r' | tail -n 1)"
+if [ "$shim_safe" = "shim_policy_ok" ]; then
+  pass "safe command through shim works"
+else
+  fail "safe command through shim works" "got: $shim_safe"
+fi
+
+# Blocked command through shim should fail
+set +e
+AGENTSH_SESSION_ID="$sid" /bin/sh -c 'shutdown now' >/dev/null 2>&1
+shim_block_rc=$?
+set -e
+if [ "$shim_block_rc" -ne 0 ]; then
+  pass "blocked command through shim fails (rc=$shim_block_rc)"
+else
+  fail "blocked command through shim fails" "got exit code 0"
+fi
+
+# -------------------------------------------------------------------
+# Summary
+# -------------------------------------------------------------------
+echo ""
+echo "=== Results: ${passed} passed, ${failed} failed, ${tests_run} total ==="
+
+if [ "$failed" -gt 0 ]; then
+  echo ""
+  echo "--- server log (last 50 lines) ---" >&2
+  tail -50 "$tmp/server.log" >&2 || true
+  exit 1
+fi
+
+exit 0
+SCRIPT
+
+# Use bash.real as entrypoint since /bin/bash is now the shim.
+ENTRYPOINT ["/bin/bash.real", "/test.sh"]

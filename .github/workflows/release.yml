@@ -131,18 +131,29 @@ jobs:
             --repo "${{ github.repository }}" \
             --clobber
 
-  # Run Dockerfile.test against the just-published deb package.
-  # Future: extend with rpm, alpine, arch variants via matrix.
+  # Run integration tests across all supported Linux distros.
   docker-test:
     runs-on: ubuntu-latest
-    needs: goreleaser
+    needs: [goreleaser, alpine-build]
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debian
+            dockerfile: Dockerfile.test
+          - name: fedora
+            dockerfile: Dockerfile.test.rpm
+          - name: archlinux
+            dockerfile: Dockerfile.test.arch
+          - name: alpine
+            dockerfile: Dockerfile.test.alpine
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build and run Dockerfile.test (debian)
+      - name: Build and run ${{ matrix.name }} integration test
         run: |
-          docker build -f Dockerfile.test \
+          docker build -f ${{ matrix.dockerfile }} \
             --build-arg AGENTSH_TAG=${{ github.ref_name }} \
-            -t agentsh-test:latest .
-          docker run --rm agentsh-test:latest
+            -t agentsh-test-${{ matrix.name }}:latest .
+          docker run --rm agentsh-test-${{ matrix.name }}:latest
