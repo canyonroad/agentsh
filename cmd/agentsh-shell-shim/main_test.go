@@ -74,6 +74,63 @@ func TestResolveRealShell(t *testing.T) {
 			t.Fatalf("expected error")
 		}
 	})
+
+	t.Run("returns original path not symlink target", func(t *testing.T) {
+		tmp := t.TempDir()
+
+		// Create a real binary that sh.real will symlink to.
+		target := filepath.Join(tmp, "dash")
+		if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// sh.real -> dash (symlink to another binary)
+		shReal := filepath.Join(tmp, "sh.real")
+		if err := os.Symlink(target, shReal); err != nil {
+			t.Fatal(err)
+		}
+
+		prevArgs := os.Args
+		os.Args = []string{filepath.Join(tmp, "sh"), "-c", "echo"}
+		t.Cleanup(func() { os.Args = prevArgs })
+
+		p, err := resolveRealShell("sh")
+		if err != nil {
+			t.Fatalf("resolveRealShell() err = %v", err)
+		}
+		// Must return the original sh.real path, not the resolved /dash path.
+		if p != shReal {
+			t.Fatalf("expected original path %q, got %q (should not resolve symlink target)", shReal, p)
+		}
+	})
+
+	t.Run("skips candidate that symlinks back to shim itself", func(t *testing.T) {
+		tmp := t.TempDir()
+
+		// os.Executable() in a test returns the test binary itself.
+		// Make fakeshell.real symlink to that binary so the self-loop guard fires.
+		self, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		shReal := filepath.Join(tmp, "fakeshell.real")
+		if err := os.Symlink(self, shReal); err != nil {
+			t.Fatal(err)
+		}
+
+		prevArgs := os.Args
+		// Use a unique name so /bin/fakeshell.real and /usr/bin/fakeshell.real won't exist.
+		os.Args = []string{filepath.Join(tmp, "fakeshell"), "-c", "echo"}
+		t.Cleanup(func() { os.Args = prevArgs })
+
+		// The self-loop candidate should be skipped, resulting in an error
+		// (since there are no other candidates that aren't self-loops).
+		_, err = resolveRealShell("fakeshell")
+		if err == nil {
+			t.Fatalf("expected error when fakeshell.real symlinks back to shim, but got nil")
+		}
+	})
 }
 
 func TestIsMCPCommand(t *testing.T) {
