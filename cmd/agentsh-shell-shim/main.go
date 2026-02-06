@@ -138,7 +138,20 @@ func resolveRealShell(shellName string) (string, error) {
 
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
-			return p, nil
+			// Resolve symlinks to avoid loops where sh.real -> bash (the shim).
+			resolved, err := filepath.EvalSymlinks(p)
+			if err != nil {
+				return p, nil
+			}
+			// If the resolved path is the shim itself, skip this candidate.
+			if self, err := os.Executable(); err == nil {
+				if selfResolved, err := filepath.EvalSymlinks(self); err == nil {
+					if resolved == selfResolved {
+						continue
+					}
+				}
+			}
+			return resolved, nil
 		}
 	}
 	return "", fmt.Errorf("could not find %s.real (tried %v)", shellName, candidates)

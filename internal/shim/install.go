@@ -86,8 +86,33 @@ func installOne(root, shellName string, shimBytes []byte) error {
 			// Already shimmed but missing .real; don't destroy the shim.
 			return nil
 		}
-		if err := os.Rename(target, real); err != nil {
-			return fmt.Errorf("rename %s -> %s: %w", target, real, err)
+
+		// If target is a symlink (e.g. /bin/sh -> /bin/bash on Fedora/Arch),
+		// resolve it and copy the real binary instead of renaming the symlink.
+		// A renamed symlink would point to the shim after bash gets shimmed,
+		// causing an infinite exec loop in the recursion guard.
+		if linkTarget, err := os.Readlink(target); err == nil {
+			// It's a symlink. Resolve to the absolute path of the real binary.
+			if !filepath.IsAbs(linkTarget) {
+				linkTarget = filepath.Join(filepath.Dir(target), linkTarget)
+			}
+			resolved, err := filepath.EvalSymlinks(linkTarget)
+			if err != nil {
+				return fmt.Errorf("resolve symlink %s -> %s: %w", target, linkTarget, err)
+			}
+			// Copy the resolved binary to *.real instead of renaming the symlink.
+			if err := copyFile(resolved, real); err != nil {
+				return fmt.Errorf("copy %s -> %s: %w", resolved, real, err)
+			}
+			// Remove the original symlink so we can write the shim in its place.
+			if err := os.Remove(target); err != nil {
+				return fmt.Errorf("remove symlink %s: %w", target, err)
+			}
+		} else {
+			// Not a symlink, rename as before.
+			if err := os.Rename(target, real); err != nil {
+				return fmt.Errorf("rename %s -> %s: %w", target, real, err)
+			}
 		}
 	}
 
@@ -111,6 +136,30 @@ func uninstallOne(root, shellName string) error {
 		return fmt.Errorf("rename %s -> %s: %w", real, target, err)
 	}
 	return nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
 }
 
 func sameFileContents(path string, want []byte) bool {
