@@ -86,11 +86,74 @@ else
   fail "/bin/sh is the shim" "/bin/sh not found"
 fi
 
-# Verify policies shipped with the deb
-if [ -d /etc/agentsh/policies ] && [ -f /etc/agentsh/policies/default.yaml ]; then
-  pass "deb shipped policies to /etc/agentsh/policies"
+# -------------------------------------------------------------------
+# Package completeness: binaries
+# -------------------------------------------------------------------
+echo ""
+echo "=== Package completeness ==="
+
+for bin in /usr/bin/agentsh /usr/bin/agentsh-shell-shim; do
+  if [ -x "$bin" ]; then
+    pass "$bin exists and is executable"
+  else
+    fail "$bin exists and is executable" "not found or not executable"
+  fi
+done
+
+# agentsh-unixwrap is only shipped on amd64
+if [ "$(dpkg --print-architecture)" = "amd64" ]; then
+  if [ -x /usr/bin/agentsh-unixwrap ]; then
+    pass "/usr/bin/agentsh-unixwrap exists (amd64)"
+  else
+    fail "/usr/bin/agentsh-unixwrap exists (amd64)" "not found or not executable"
+  fi
+fi
+
+# Config
+if [ -f /etc/agentsh/config.yaml ]; then
+  pass "/etc/agentsh/config.yaml exists"
 else
-  fail "deb shipped policies" "/etc/agentsh/policies/default.yaml not found"
+  fail "/etc/agentsh/config.yaml exists" "not found"
+fi
+
+# All 10 policy files
+for policy in \
+  default.yaml default-windows.yaml \
+  dev-safe.yaml dev-safe-windows.yaml \
+  ci-strict.yaml ci-strict-windows.yaml \
+  agent-sandbox.yaml agent-sandbox-windows.yaml \
+  signal-strict.yaml system-readonly.yaml; do
+  if [ -f "/etc/agentsh/policies/$policy" ]; then
+    pass "policy $policy exists"
+  else
+    fail "policy $policy exists" "not found in /etc/agentsh/policies/"
+  fi
+done
+
+# Shell completions
+if [ -f /usr/share/bash-completion/completions/agentsh ]; then
+  pass "bash completion exists"
+else
+  fail "bash completion exists" "not found"
+fi
+
+if [ -f /usr/share/zsh/site-functions/_agentsh ]; then
+  pass "zsh completion exists"
+else
+  fail "zsh completion exists" "not found"
+fi
+
+if [ -f /usr/share/fish/vendor_completions.d/agentsh.fish ]; then
+  pass "fish completion exists"
+else
+  fail "fish completion exists" "not found"
+fi
+
+# Libs
+if [ -f /usr/lib/agentsh/bash_startup.sh ]; then
+  pass "/usr/lib/agentsh/bash_startup.sh exists"
+else
+  fail "/usr/lib/agentsh/bash_startup.sh exists" "not found"
 fi
 
 # -------------------------------------------------------------------
@@ -261,6 +324,205 @@ if [ "$exec_out" = "exec_ok" ]; then
   pass "agentsh exec command"
 else
   fail "agentsh exec command" "got: ${exec_out}"
+fi
+
+# -------------------------------------------------------------------
+# Helper: exec_json — run a command via agentsh exec --output json
+# Usage: exec_json <session_id> <command> [args...]
+# Sets: _ej_rc (exit code), _ej_json (full JSON output)
+# -------------------------------------------------------------------
+exec_json() {
+  local session="$1"; shift
+  set +e
+  _ej_json="$(agentsh exec --output json --events all "$session" -- "$@" 2>&1)"
+  _ej_rc=$?
+  set -e
+}
+
+# -------------------------------------------------------------------
+# Policy enforcement: default policy
+# -------------------------------------------------------------------
+echo ""
+echo "=== Policy enforcement: default policy ==="
+
+# rm -rf should be blocked by block-dangerous-rm
+exec_json "$sid" rm -rf /tmp/test
+if [ "$_ej_rc" -ne 0 ]; then
+  pass "rm -rf exits non-zero ($_ej_rc)"
+else
+  fail "rm -rf exits non-zero" "got exit code 0"
+fi
+
+ej_blocked="$(echo "$_ej_json" | jq -r '.guidance.blocked // false')"
+if [ "$ej_blocked" = "true" ]; then
+  pass "rm -rf guidance.blocked=true"
+else
+  fail "rm -rf guidance.blocked=true" "got: $ej_blocked"
+fi
+
+ej_rule="$(echo "$_ej_json" | jq -r '.result.error.policy_rule // empty')"
+if [ "$ej_rule" = "block-dangerous-rm" ]; then
+  pass "rm -rf policy_rule=block-dangerous-rm"
+else
+  fail "rm -rf policy_rule=block-dangerous-rm" "got: $ej_rule"
+fi
+
+# shutdown should be blocked by block-system-commands
+exec_json "$sid" shutdown now
+if [ "$_ej_rc" -ne 0 ]; then
+  pass "shutdown exits non-zero ($_ej_rc)"
+else
+  fail "shutdown exits non-zero" "got exit code 0"
+fi
+
+ej_blocked="$(echo "$_ej_json" | jq -r '.guidance.blocked // false')"
+if [ "$ej_blocked" = "true" ]; then
+  pass "shutdown guidance.blocked=true"
+else
+  fail "shutdown guidance.blocked=true" "got: $ej_blocked"
+fi
+
+ej_rule="$(echo "$_ej_json" | jq -r '.result.error.policy_rule // empty')"
+if [ "$ej_rule" = "block-system-commands" ]; then
+  pass "shutdown policy_rule=block-system-commands"
+else
+  fail "shutdown policy_rule=block-system-commands" "got: $ej_rule"
+fi
+
+# echo should be allowed
+exec_json "$sid" echo hello_policy
+if [ "$_ej_rc" -eq 0 ]; then
+  pass "echo allowed (exit 0)"
+else
+  fail "echo allowed (exit 0)" "got exit code $_ej_rc"
+fi
+
+ej_stdout="$(echo "$_ej_json" | jq -r '.result.stdout // empty' | tr -d '\n')"
+if [ "$ej_stdout" = "hello_policy" ]; then
+  pass "echo stdout=hello_policy"
+else
+  fail "echo stdout=hello_policy" "got: $ej_stdout"
+fi
+
+# ls /tmp should be allowed
+exec_json "$sid" ls /tmp
+if [ "$_ej_rc" -eq 0 ]; then
+  pass "ls /tmp allowed (exit 0)"
+else
+  fail "ls /tmp allowed (exit 0)" "got exit code $_ej_rc"
+fi
+
+# -------------------------------------------------------------------
+# Policy enforcement: agent-sandbox policy
+# -------------------------------------------------------------------
+echo ""
+echo "=== Policy enforcement: agent-sandbox policy ==="
+
+sid2_json="$(agentsh session create --workspace /tmp --policy agent-sandbox --json)"
+sid2="$(echo "$sid2_json" | jq -r '.id')"
+
+if [ -n "$sid2" ] && [ "$sid2" != "null" ]; then
+  pass "agent-sandbox session created (id=${sid2})"
+else
+  fail "agent-sandbox session created" "failed to parse session id: ${sid2_json}"
+fi
+
+# sudo should be blocked by block-shell-escape
+exec_json "$sid2" sudo whoami
+if [ "$_ej_rc" -ne 0 ]; then
+  pass "sudo exits non-zero in agent-sandbox ($_ej_rc)"
+else
+  fail "sudo exits non-zero in agent-sandbox" "got exit code 0"
+fi
+
+ej_blocked="$(echo "$_ej_json" | jq -r '.guidance.blocked // false')"
+if [ "$ej_blocked" = "true" ]; then
+  pass "sudo guidance.blocked=true"
+else
+  fail "sudo guidance.blocked=true" "got: $ej_blocked"
+fi
+
+ej_rule="$(echo "$_ej_json" | jq -r '.result.error.policy_rule // empty')"
+if [ "$ej_rule" = "block-shell-escape" ]; then
+  pass "sudo policy_rule=block-shell-escape"
+else
+  fail "sudo policy_rule=block-shell-escape" "got: $ej_rule"
+fi
+
+# echo should still work in agent-sandbox
+exec_json "$sid2" echo sandbox_ok
+if [ "$_ej_rc" -eq 0 ]; then
+  pass "echo allowed in agent-sandbox (exit 0)"
+else
+  fail "echo allowed in agent-sandbox (exit 0)" "got exit code $_ej_rc"
+fi
+
+ej_stdout="$(echo "$_ej_json" | jq -r '.result.stdout // empty' | tr -d '\n')"
+if [ "$ej_stdout" = "sandbox_ok" ]; then
+  pass "echo stdout=sandbox_ok in agent-sandbox"
+else
+  fail "echo stdout=sandbox_ok in agent-sandbox" "got: $ej_stdout"
+fi
+
+# -------------------------------------------------------------------
+# Policy selection: both sessions still work independently
+# -------------------------------------------------------------------
+echo ""
+echo "=== Policy selection: parallel sessions ==="
+
+# Original session (default policy) still works
+exec_json "$sid" echo default_still_ok
+if [ "$_ej_rc" -eq 0 ]; then
+  pass "default session still works after sandbox created"
+else
+  fail "default session still works after sandbox created" "got exit code $_ej_rc"
+fi
+
+# agent-sandbox session still works
+exec_json "$sid2" echo sandbox_still_ok
+if [ "$_ej_rc" -eq 0 ]; then
+  pass "agent-sandbox session still works"
+else
+  fail "agent-sandbox session still works" "got exit code $_ej_rc"
+fi
+
+# Default session does NOT block sudo (only agent-sandbox does)
+exec_json "$sid" sudo echo default_sudo
+if [ "$_ej_rc" -eq 0 ]; then
+  pass "sudo allowed in default policy"
+else
+  # sudo might fail for other reasons (not installed), check it's not policy-blocked
+  ej_blocked="$(echo "$_ej_json" | jq -r '.guidance.blocked // false')"
+  if [ "$ej_blocked" = "true" ]; then
+    fail "sudo allowed in default policy" "blocked by policy"
+  else
+    pass "sudo not policy-blocked in default (cmd failed: rc=$_ej_rc)"
+  fi
+fi
+
+# -------------------------------------------------------------------
+# Shim + policy integration
+# -------------------------------------------------------------------
+echo ""
+echo "=== Shim + policy integration ==="
+
+# Safe command through shim should work
+shim_safe="$(AGENTSH_SESSION_ID="$sid" /bin/sh -c 'echo shim_policy_ok' 2>&1 | tr -d '\r' | tail -n 1)"
+if [ "$shim_safe" = "shim_policy_ok" ]; then
+  pass "safe command through shim works"
+else
+  fail "safe command through shim works" "got: $shim_safe"
+fi
+
+# Blocked command through shim should fail
+set +e
+AGENTSH_SESSION_ID="$sid" /bin/sh -c 'shutdown now' >/dev/null 2>&1
+shim_block_rc=$?
+set -e
+if [ "$shim_block_rc" -ne 0 ]; then
+  pass "blocked command through shim fails (rc=$shim_block_rc)"
+else
+  fail "blocked command through shim fails" "got exit code 0"
 fi
 
 # -------------------------------------------------------------------
