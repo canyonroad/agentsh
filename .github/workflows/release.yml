@@ -130,3 +130,19 @@ jobs:
             "dist/agentsh_${VERSION}_linux_amd64_musl.tar.gz" \
             --repo "${{ github.repository }}" \
             --clobber
+
+  # Run Dockerfile.test against the just-published deb package.
+  # Future: extend with rpm, alpine, arch variants via matrix.
+  docker-test:
+    runs-on: ubuntu-latest
+    needs: goreleaser
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run Dockerfile.test (debian)
+        run: |
+          docker build -f Dockerfile.test \
+            --build-arg AGENTSH_TAG=${{ github.ref_name }} \
+            -t agentsh-test:latest .
+          docker run --rm agentsh-test:latest
