@@ -3,21 +3,25 @@
 #
 # Build:
 #   docker build -f Dockerfile.example \
-#     --build-arg AGENTSH_REPO=erans/agentsh \
-#     --build-arg AGENTSH_TAG=v0.1.0 \
+#     --build-arg AGENTSH_REPO=canyonroad/agentsh \
+#     --build-arg AGENTSH_TAG=v0.9.2 \
 #     --build-arg DEB_ARCH=amd64 \
 #     -t agentsh-example:latest .
+#
+# Run (connect to an external agentsh server):
+#   docker run --rm -e AGENTSH_SERVER=http://host.docker.internal:8080 agentsh-example:latest
 #
 # Notes:
 # - The release tag is "v..." but the artifact filenames use the version without the "v" prefix.
 # - DEB_ARCH must match the artifact name (typically: amd64 or arm64).
+# - Set AGENTSH_SERVER to point at the agentsh server (e.g. http://host.docker.internal:8080).
 # - To select a non-default policy at runtime, set env var AGENTSH_POLICY_NAME to an allowed policy name.
 # - To block env iteration for matched commands, set AGENTSH_ENV_BLOCK_ITERATION=1 (requires env shim LD_PRELOAD if used).
 
 FROM debian:bookworm-slim
 
-ARG AGENTSH_REPO=erans/agentsh
-ARG AGENTSH_TAG=v0.1.0
+ARG AGENTSH_REPO=canyonroad/agentsh
+ARG AGENTSH_TAG=v0.9.2
 ARG DEB_ARCH=amd64
 
 RUN set -eux; \
