@@ -4,25 +4,25 @@ This document provides a comprehensive comparison of agentsh capabilities across
 
 ## Feature Support Matrix
 
+> **Note on macOS Lima:** The "macOS Lima" column applies to both deployment modes. When running agentsh **inside** the Lima VM, you get 100% Linux-equivalent security. When running agentsh on macOS **orchestrating** the Lima VM, you get 85% due to VM boundary overhead. See [Lima Deployment Modes](#lima-deployment-modes) for details.
+
 | Feature | Linux | macOS ESF+NE | macOS FUSE-T | macOS Lima | Win Native | Win WSL2 |
 |---------|:-----:|:------------:|:------------:|:----------:|:----------:|:--------:|
-| **Filesystem Interception** |
+| **Filesystem Interception** | | | | | | |
 | Implementation | FUSE3 | Endpoint Security | FUSE-T (NFS) | FUSE3 | Mini Filter + WinFsp | FUSE3 |
-
-> **Note on macOS Lima:** The "macOS Lima" column applies to both deployment modes. When running agentsh **inside** the Lima VM, you get 100% Linux-equivalent security. When running agentsh on macOS **orchestrating** the Lima VM, you get 85% due to VM boundary overhead. See [Lima Deployment Modes](#lima-deployment-modes) for details.
 | File read monitoring | Block | Block | Block | Block | Block | Block |
 | File write monitoring | Block | Block | Block | Block | Block | Block |
 | File create/delete | Block | Block | Block | Block | Block | Block |
 | File policy enforcement | Yes | Yes | Yes | Yes | Yes | Yes |
 | File event emission | Yes | Yes | Yes | Yes | Yes | Yes |
-| **Network Interception** |
+| **Network Interception** | | | | | | |
 | Implementation | iptables | Network Extension | pf | iptables | WinDivert | iptables |
 | TCP interception | Block | Block | Block | Block | Block | Block |
 | UDP interception | Block | Block | Block | Block | Block | Block |
 | DNS interception | Block | Block | Block | Block | Block | Block |
 | TLS inspection | Yes | Yes | Yes | Yes | Yes | Yes |
 | Per-app filtering | No | Yes | No | No | No | No |
-| **Synchronous Interception** |
+| **Synchronous Interception** | | | | | | |
 | File operations hold | Yes | Yes | Yes | Yes | Yes | Yes |
 | Network operations hold | Yes | Yes | Yes | Yes | Yes | Yes |
 | DNS hold | Yes | Yes | Yes | Yes | Yes | Yes |
@@ -34,45 +34,45 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | Env var redirect | Yes | Spawn | Partial | Yes | Partial | Yes |
 | Registry redirect | N/A | N/A | N/A | N/A | Yes | N/A |
 | Manual approval | Yes | Yes | Yes | Yes | Yes | Yes |
-| **Environment Variable Protection** |
+| **Environment Variable Protection** | | | | | | |
 | Spawn-time filtering | Yes | Yes | Yes | Yes | Yes | Yes |
 | Runtime interception | LD_PRELOAD | No | DYLD* | LD_PRELOAD | Detours | LD_PRELOAD |
 | env_read events | Yes | Spawn | Partial | Yes | Partial | Yes |
 | env_list events | Yes | Spawn | Partial | Yes | Partial | Yes |
 | env_write events | Yes | Spawn | Partial | Yes | Partial | Yes |
 | environ blocking | Yes | Yes | Non-SIP | Yes | Partial | Yes |
-| **Process Isolation** |
+| **Process Isolation** | | | | | | |
 | Mount namespace | Yes | No | No | Yes | No | Yes |
 | Network namespace | Yes | No | No | Yes | No | Yes |
 | PID namespace | Yes | No | No | Yes | No | Yes |
 | User namespace | Yes | No | No | Yes | No | Yes |
 | AppContainer | N/A | N/A | N/A | N/A | Partial | N/A |
 | sandbox-exec (SBPL) | N/A | Yes | Yes | N/A | N/A | N/A |
-| **Syscall Filtering** |
+| **Syscall Filtering** | | | | | | |
 | seccomp-bpf | Yes | No | No | Yes | No | Yes |
 | Process exec blocking | Yes | Yes | No | Yes | No | Yes |
 | Syscall allowlist | Yes | No | No | Yes | No | Yes |
-| **Signal Interception** |
+| **Signal Interception** | | | | | | |
 | Implementation | seccomp | ES audit | ES audit | seccomp | ETW audit | seccomp |
 | Signal blocking | Yes | Audit | Audit | Yes | Audit | Yes |
 | Signal redirect | Yes | No | No | Yes | No | Yes |
 | Signal audit | Yes | Yes | Yes | Yes | Yes | Yes |
-| **Resource Limits** |
+| **Resource Limits** | | | | | | |
 | CPU limit | Yes | No | No | Yes | Job | Yes |
 | Memory limit | Yes | No | No | Yes | Job | Yes |
 | Disk I/O limit | Yes | No | No | Yes | No | Yes |
 | Network BW limit | Yes | No | No | Yes | No | Yes |
 | Process count | Yes | No | No | Yes | Job | Yes |
-| **Process Execution Stats** |
+| **Process Execution Stats** | | | | | | |
 | CPU user time | Yes | Yes | Yes | Yes | Yes | Yes |
 | CPU system time | Yes | Yes | Yes | Yes | Yes | Yes |
 | Peak memory | Yes | Yes | Yes | Yes | No | Yes |
-| **Platform-Specific** |
+| **Platform-Specific** | | | | | | |
 | XPC/Mach IPC control | N/A | Yes | Yes | N/A | N/A | N/A |
 | Registry monitoring | N/A | N/A | N/A | N/A | Yes | N/A |
 | Registry blocking | N/A | N/A | N/A | N/A | Yes | N/A |
 | Kernel events | eBPF | ESF | No | eBPF | No | eBPF |
-| **Requirements** |
+| **Requirements** | | | | | | |
 | Special permissions | root | ESF approval + NE entitlements | root + brew | Lima VM | Admin | WSL2 |
 | Installation complexity | Low | Medium (ESF needs Apple approval) | Low | Medium | Medium | Low |
 
