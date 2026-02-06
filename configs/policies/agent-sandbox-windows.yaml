@@ -553,12 +553,3 @@ audit:
   include_file_content: false
   retention_days: 90
 
-# =============================================================================
-# SOFT DELETE SETTINGS
-# =============================================================================
-
-soft_delete:
-  enabled: true
-  quarantine_path: "${LOCALAPPDATA}\\agentsh\\quarantine"
-  retention_days: 7
-  max_file_size_mb: 100
