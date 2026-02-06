@@ -133,6 +133,9 @@ archives:
       - LICENSE
       - config.yml
       - default-policy.yml
+      - src: configs/policies/*.yaml
+        dst: policies
+        strip_parent: true
       - src: build/envshim/linux_{{ .Arch }}/*
         dst: .
         strip_parent: true
@@ -154,6 +157,9 @@ archives:
       - LICENSE
       - config.yml
       - default-policy.yml
+      - src: configs/policies/*.yaml
+        dst: policies
+        strip_parent: true
 
   - id: agentsh-windows
     ids:
@@ -165,6 +171,9 @@ archives:
       - LICENSE
       - config.yml
       - default-policy.yml
+      - src: configs/policies/*.yaml
+        dst: policies
+        strip_parent: true
 
 checksum:
   name_template: "checksums.txt"
@@ -229,8 +238,18 @@ nfpms:
         dst: /usr/lib/agentsh/bash_startup.sh
         file_info:
           mode: 0755
+      # Policy files
+      - src: configs/policies/*.yaml
+        dst: /etc/agentsh/policies/
+        type: config|noreplace
+        file_info:
+          mode: 0644
       # Create directories
       - dst: /etc/agentsh
+        type: dir
+        file_info:
+          mode: 0755
+      - dst: /etc/agentsh/policies
         type: dir
         file_info:
           mode: 0755

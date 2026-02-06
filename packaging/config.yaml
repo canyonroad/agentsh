@@ -105,7 +105,7 @@ dlp:
 # Policy configuration
 policies:
   dir: "/etc/agentsh/policies"
-  default_policy: "default"
+  default: "default"
 
 # Approvals configuration
 approvals:
