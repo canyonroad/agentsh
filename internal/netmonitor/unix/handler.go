@@ -278,13 +278,26 @@ func handleExecveNotification(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *E
 
 	result := h.Handle(ctx)
 
-	resp := seccomp.ScmpNotifResp{ID: req.ID}
-	if result.Allow {
-		resp.Flags = seccomp.NotifRespFlagContinue
-	} else {
-		resp.Error = -result.Errno
+	switch result.Action {
+	case ActionRedirect:
+		if err := handleRedirect(int(fd), req.ID, ctx); err != nil {
+			slog.Error("redirect failed, denying", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EPERM)}
+			_ = seccomp.NotifRespond(fd, &resp)
+		}
+		// handleRedirect uses SECCOMP_ADDFD_FLAG_SEND which atomically responds
+		return
+
+	case ActionDeny:
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -result.Errno}
+		_ = seccomp.NotifRespond(fd, &resp)
+		return
+
+	default: // ActionContinue
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+		_ = seccomp.NotifRespond(fd, &resp)
+		return
 	}
-	_ = seccomp.NotifRespond(fd, &resp)
 }
 
 // getParentPID reads the parent PID from /proc/<pid>/stat.
