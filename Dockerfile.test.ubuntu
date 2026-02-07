@@ -214,7 +214,7 @@ sandbox:
   network:
     enabled: false
   unix_sockets:
-    enabled: false
+    enabled: true
   seccomp:
     execve:
       enabled: true
