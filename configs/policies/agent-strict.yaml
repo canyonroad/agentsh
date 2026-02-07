@@ -1,0 +1,130 @@
+# Agent Strict Policy for agentsh
+# High-security policy with minimal permissions
+
+version: 1
+name: agent-strict
+description: |
+  High-security policy for AI agent supervision. Only read-only tools
+  are allowed by default, git is restricted to read operations, all
+  other commands require approval, file writes are denied outside
+  workspace, and all network access is blocked.
+
+# =============================================================================
+# COMMAND RULES
+# =============================================================================
+
+command_rules:
+  # ---------------------------------------------------------------------------
+  # Read-only tools - allow
+  # ---------------------------------------------------------------------------
+
+  - name: read-only-tools
+    description: Safe read-only commands
+    commands:
+      - ls
+      - cat
+      - head
+      - tail
+      - grep
+      - find
+      - wc
+      - file
+      - which
+      - whoami
+      - pwd
+      - env
+      - uname
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Git read operations - allow
+  # ---------------------------------------------------------------------------
+
+  - name: git-read
+    description: Allow git read-only operations
+    commands:
+      - git
+    args_patterns:
+      - "status.*"
+      - "log.*"
+      - "diff.*"
+      - "show.*"
+      - "branch.*"
+      - "tag.*"
+      - "remote.*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # All other commands - require approval
+  # ---------------------------------------------------------------------------
+
+  - name: all-other-commands
+    description: Require approval for all other commands
+    commands:
+      - "*"
+    decision: approve
+    message: "Agent wants to run: {{.Args}}"
+
+# =============================================================================
+# FILE OPERATION RULES
+# =============================================================================
+
+file_rules:
+  # ---------------------------------------------------------------------------
+  # Workspace - full access
+  # ---------------------------------------------------------------------------
+
+  - name: workspace
+    description: Full access to project workspace
+    paths:
+      - "${PROJECT_ROOT}"
+      - "${PROJECT_ROOT}/**"
+    operations:
+      - read
+      - write
+      - create
+      - delete
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # System paths - read only
+  # ---------------------------------------------------------------------------
+
+  - name: system-read
+    description: Read-only access to system and temp paths
+    paths:
+      - "/etc/**"
+      - "/usr/**"
+      - "/tmp/**"
+    operations:
+      - read
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # All writes denied
+  # ---------------------------------------------------------------------------
+
+  - name: all-writes-denied
+    description: Deny all write operations outside workspace
+    paths:
+      - "/**"
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+
+# =============================================================================
+# NETWORK OPERATION RULES
+# =============================================================================
+
+network_rules:
+  # ---------------------------------------------------------------------------
+  # All network access denied
+  # ---------------------------------------------------------------------------
+
+  - name: all-network-denied
+    description: Block all network access
+    domains:
+      - "*"
+    decision: deny
