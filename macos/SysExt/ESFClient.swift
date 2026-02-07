@@ -15,6 +15,10 @@ class ESFClient {
     private var auditTokenCache: [pid_t: audit_token_t] = [:]
     private let cacheQueue = DispatchQueue(label: "com.agentsh.audittokencache")
 
+    /// Active wrap sessions: maps session root PID to session ID
+    private var activeSessions: [pid_t: String] = [:]
+    private let sessionQueue = DispatchQueue(label: "com.agentsh.sessions")
+
     init() {
         // Connect to XPC Service
         xpc = NSXPCConnection(serviceName: xpcServiceIdentifier)
@@ -119,6 +123,42 @@ class ESFClient {
         muteProcess(auditToken: token)
     }
 
+    // MARK: - Session Management
+
+    /// Register a wrap session — called when agentsh wrap starts an agent
+    func registerSession(rootPID: pid_t, sessionID: String) {
+        sessionQueue.sync {
+            activeSessions[rootPID] = sessionID
+        }
+        NSLog("ESFClient: registered session \(sessionID) for root PID \(rootPID)")
+    }
+
+    /// Unregister a wrap session — called when the agent exits
+    func unregisterSession(rootPID: pid_t) {
+        sessionQueue.sync {
+            activeSessions.removeValue(forKey: rootPID)
+        }
+        NSLog("ESFClient: unregistered session for root PID \(rootPID)")
+    }
+
+    /// Find which session (if any) a process belongs to by walking its ancestry.
+    private func findSession(forPID pid: pid_t) -> (rootPID: pid_t, sessionID: String)? {
+        return sessionQueue.sync {
+            // Check if pid is directly a session root
+            if let sid = activeSessions[pid] {
+                return (pid, sid)
+            }
+            // Walk ancestors to find session root
+            let ancestors = ProcessHierarchy.shared.getAncestors(pid: pid)
+            for ancestor in ancestors {
+                if let sid = activeSessions[ancestor] {
+                    return (ancestor, sid)
+                }
+            }
+            return nil
+        }
+    }
+
     private func handleEvent(_ event: UnsafePointer<es_message_t>) {
         let message = event.pointee
         let pid = audit_token_to_pid(message.process.pointee.audit_token)
@@ -192,6 +232,22 @@ class ESFClient {
     private func handleAuthExec(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
         guard let client = getClient() else { return }
 
+        // Fast path: if no active sessions, allow everything immediately
+        let hasActiveSessions = sessionQueue.sync { !activeSessions.isEmpty }
+        if !hasActiveSessions {
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+            return
+        }
+
+        // Check if this process is in any active session tree
+        let sessionInfo = findSession(forPID: pid)
+        if sessionInfo == nil {
+            // Not in any active session — allow immediately, no policy check
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+            return
+        }
+
+        // Process is in a session — do the full pipeline check
         // Copy message for async callback - message only valid during sync callback
         guard let messageCopy = es_copy_message(event) else {
             es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
@@ -216,7 +272,7 @@ class ESFClient {
             args: args,
             pid: pid,
             parentPID: parentPID,
-            sessionID: nil
+            sessionID: sessionInfo?.sessionID
         ) { [weak self] decision, action, rule in
             guard let client = self?.getClient() else {
                 es_free_message(messageCopy)
@@ -266,6 +322,11 @@ class ESFClient {
         // Clean up audit token cache
         cacheQueue.sync {
             auditTokenCache.removeValue(forKey: pid)
+        }
+
+        // Clean up session registration if this was a session root
+        sessionQueue.sync {
+            activeSessions.removeValue(forKey: pid)
         }
 
         // Clean up hierarchy tracking and invalidate process info cache

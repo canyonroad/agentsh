@@ -42,6 +42,13 @@ type ExecHandler interface {
 	CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) ExecCheckResult
 }
 
+// SessionRegistrar handles session lifecycle events.
+// Implementations forward these to the ESF client for session-scoped filtering.
+type SessionRegistrar interface {
+	RegisterSession(rootPID int32, sessionID string)
+	UnregisterSession(rootPID int32)
+}
+
 // ExecCheckResult contains the full exec pipeline decision.
 type ExecCheckResult struct {
 	Decision string // "allow", "deny", "approve", "redirect", "audit"
@@ -78,14 +85,15 @@ type PNACLEventRequest struct {
 
 // Server listens on a Unix socket for policy queries.
 type Server struct {
-	sockPath     string
-	handler      PolicyHandler
-	pnaclHandler PNACLHandler
-	execHandler  ExecHandler
-	listener     net.Listener
-	mu           sync.Mutex
-	wg           sync.WaitGroup
-	ready        chan struct{} // closed when server is listening
+	sockPath           string
+	handler            PolicyHandler
+	pnaclHandler       PNACLHandler
+	execHandler        ExecHandler
+	sessionRegistrar   SessionRegistrar
+	listener           net.Listener
+	mu                 sync.Mutex
+	wg                 sync.WaitGroup
+	ready              chan struct{} // closed when server is listening
 }
 
 // NewServer creates a new policy socket server.
@@ -114,6 +122,14 @@ func (s *Server) SetExecHandler(h ExecHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.execHandler = h
+}
+
+// SetSessionRegistrar sets the handler for session lifecycle events.
+// If not set, register/unregister session requests are acknowledged but no-op.
+func (s *Server) SetSessionRegistrar(r SessionRegistrar) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessionRegistrar = r
 }
 
 // Ready returns a channel that is closed when the server is listening.
@@ -246,6 +262,16 @@ func (s *Server) handleRequest(req *PolicyRequest) PolicyResponse {
 	case RequestTypePNACLConfigure:
 		return s.handlePNACLConfigure(req)
 
+	// Session management request types
+	case RequestTypeRegisterSession:
+		return s.handleRegisterSession(req)
+
+	case RequestTypeUnregisterSession:
+		return s.handleUnregisterSession(req)
+
+	case RequestTypeMuteProcess:
+		return s.handleMuteProcess(req)
+
 	default:
 		return PolicyResponse{Allow: false, Message: "unknown request type"}
 	}
@@ -375,4 +401,35 @@ func (s *Server) handlePNACLConfigure(req *PolicyRequest) PolicyResponse {
 
 	success := h.Configure(req.BlockingEnabled, req.DecisionTimeout, req.FailOpen)
 	return PolicyResponse{Success: success}
+}
+
+// Session management request handlers
+
+func (s *Server) getSessionRegistrar() SessionRegistrar {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionRegistrar
+}
+
+func (s *Server) handleRegisterSession(req *PolicyRequest) PolicyResponse {
+	r := s.getSessionRegistrar()
+	if r != nil {
+		r.RegisterSession(req.RootPID, req.SessionID)
+	}
+	return PolicyResponse{Allow: true, Success: true}
+}
+
+func (s *Server) handleUnregisterSession(req *PolicyRequest) PolicyResponse {
+	r := s.getSessionRegistrar()
+	if r != nil {
+		r.UnregisterSession(req.RootPID)
+	}
+	return PolicyResponse{Allow: true, Success: true}
+}
+
+func (s *Server) handleMuteProcess(req *PolicyRequest) PolicyResponse {
+	// Mute process requests are acknowledged. The actual muting is handled
+	// by the ESF client; the session registrar interface can be extended
+	// to support this if needed.
+	return PolicyResponse{Allow: true, Success: true}
 }

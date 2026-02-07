@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -864,5 +865,224 @@ func TestServer_ExecCheckNoHandler_Deny(t *testing.T) {
 	}
 	if resp.Rule != "deny-all" {
 		t.Errorf("rule: got %q, want %q", resp.Rule, "deny-all")
+	}
+}
+
+// testSessionRegistrar is a mock implementation of SessionRegistrar for unit tests.
+type testSessionRegistrar struct {
+	mu                  sync.Mutex
+	registeredPID       int32
+	registeredSessionID string
+	unregisteredPID     int32
+	registerCalled      bool
+	unregisterCalled    bool
+}
+
+func (r *testSessionRegistrar) RegisterSession(rootPID int32, sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.registeredPID = rootPID
+	r.registeredSessionID = sessionID
+	r.registerCalled = true
+}
+
+func (r *testSessionRegistrar) UnregisterSession(rootPID int32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.unregisteredPID = rootPID
+	r.unregisterCalled = true
+}
+
+func TestServer_RegisterSession(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "policy.sock")
+
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+
+	registrar := &testSessionRegistrar{}
+	srv.SetSessionRegistrar(registrar)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	req := PolicyRequest{
+		Type:      RequestTypeRegisterSession,
+		RootPID:   4567,
+		SessionID: "session-wrap-1",
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	var resp PolicyResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !resp.Allow {
+		t.Error("expected Allow=true")
+	}
+	if !resp.Success {
+		t.Error("expected Success=true")
+	}
+
+	registrar.mu.Lock()
+	defer registrar.mu.Unlock()
+	if !registrar.registerCalled {
+		t.Fatal("expected RegisterSession to be called")
+	}
+	if registrar.registeredPID != 4567 {
+		t.Errorf("registered PID: got %d, want %d", registrar.registeredPID, 4567)
+	}
+	if registrar.registeredSessionID != "session-wrap-1" {
+		t.Errorf("registered session ID: got %q, want %q", registrar.registeredSessionID, "session-wrap-1")
+	}
+}
+
+func TestServer_UnregisterSession(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "policy.sock")
+
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+
+	registrar := &testSessionRegistrar{}
+	srv.SetSessionRegistrar(registrar)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	req := PolicyRequest{
+		Type:    RequestTypeUnregisterSession,
+		RootPID: 4567,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	var resp PolicyResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !resp.Allow {
+		t.Error("expected Allow=true")
+	}
+	if !resp.Success {
+		t.Error("expected Success=true")
+	}
+
+	registrar.mu.Lock()
+	defer registrar.mu.Unlock()
+	if !registrar.unregisterCalled {
+		t.Fatal("expected UnregisterSession to be called")
+	}
+	if registrar.unregisteredPID != 4567 {
+		t.Errorf("unregistered PID: got %d, want %d", registrar.unregisteredPID, 4567)
+	}
+}
+
+func TestServer_SessionNoRegistrar(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "policy.sock")
+
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+	// Note: NOT setting a session registrar
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	t.Run("register_succeeds_without_registrar", func(t *testing.T) {
+		req := PolicyRequest{
+			Type:      RequestTypeRegisterSession,
+			RootPID:   1234,
+			SessionID: "session-1",
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		if !resp.Allow {
+			t.Error("expected Allow=true even without registrar")
+		}
+		if !resp.Success {
+			t.Error("expected Success=true even without registrar")
+		}
+	})
+
+	t.Run("unregister_succeeds_without_registrar", func(t *testing.T) {
+		req := PolicyRequest{
+			Type:    RequestTypeUnregisterSession,
+			RootPID: 1234,
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		if !resp.Allow {
+			t.Error("expected Allow=true even without registrar")
+		}
+		if !resp.Success {
+			t.Error("expected Success=true even without registrar")
+		}
+	})
+}
+
+func TestServer_MuteProcess(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "policy.sock")
+
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	req := PolicyRequest{
+		Type: RequestTypeMuteProcess,
+		PID:  5678,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	var resp PolicyResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !resp.Allow {
+		t.Error("expected Allow=true")
+	}
+	if !resp.Success {
+		t.Error("expected Success=true")
 	}
 }

@@ -17,6 +17,13 @@ const (
 	RequestTypePNACLGetApprovals RequestType = "get_pending_approvals"
 	RequestTypePNACLSubmit       RequestType = "submit_approval"
 	RequestTypePNACLConfigure    RequestType = "pnacl_configure"
+
+	// Session management request types
+	RequestTypeRegisterSession   RequestType = "register_session"
+	RequestTypeUnregisterSession RequestType = "unregister_session"
+
+	// Process muting request type
+	RequestTypeMuteProcess RequestType = "mute_process"
 )
 
 // PolicyRequest is sent from the XPC bridge to the Go policy server.
@@ -58,6 +65,9 @@ type PolicyRequest struct {
 	BlockingEnabled bool    `json:"blocking_enabled,omitempty"` // Enable actual blocking
 	DecisionTimeout float64 `json:"decision_timeout,omitempty"` // Timeout in seconds
 	FailOpen        bool    `json:"fail_open,omitempty"`        // Allow on timeout/error
+
+	// Session management fields
+	RootPID int32 `json:"root_pid,omitempty"` // Root PID for session registration
 }
 
 // PolicyResponse is returned from the Go policy server.
