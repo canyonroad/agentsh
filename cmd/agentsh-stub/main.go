@@ -21,7 +21,7 @@ func run() int {
 	}
 
 	fd, err := strconv.Atoi(fdStr)
-	if err != nil {
+	if err != nil || fd < 0 {
 		fmt.Fprintf(os.Stderr, "agentsh-stub: invalid AGENTSH_STUB_FD: %s\n", fdStr)
 		return 126
 	}

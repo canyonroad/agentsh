@@ -14,6 +14,31 @@ description: |
 
 command_rules:
   # ---------------------------------------------------------------------------
+  # Package installation - require approval (MUST precede dev-tools so that
+  # first-match semantics route "npm install" etc. through the approval flow)
+  # ---------------------------------------------------------------------------
+
+  - name: pkg-install
+    description: Require approval for package installation
+    commands:
+      - apt
+      - yum
+      - brew
+      - pip
+      - pip3
+      - npm
+      - npx
+    args_patterns:
+      - "install.*"
+      - "add.*"
+      - "upgrade.*"
+      - "update.*"
+      - "^i$"
+      - "^ci$"
+    decision: approve
+    message: "Agent wants to install packages: {{.Args}}"
+
+  # ---------------------------------------------------------------------------
   # Development tools - allow by default
   # ---------------------------------------------------------------------------
 
@@ -31,6 +56,7 @@ command_rules:
       - python
       - python3
       - pip
+      - pip3
       - go
       - cargo
       - make
@@ -48,25 +74,6 @@ command_rules:
       - sh
       - zsh
     decision: allow
-
-  # ---------------------------------------------------------------------------
-  # Package installation - require approval
-  # ---------------------------------------------------------------------------
-
-  - name: pkg-install
-    description: Require approval for package installation
-    commands:
-      - apt
-      - yum
-      - brew
-      - pip
-      - npm
-    args_patterns:
-      - "install.*"
-      - "add.*"
-      - "upgrade.*"
-    decision: approve
-    message: "Agent wants to install packages: {{.Args}}"
 
   # ---------------------------------------------------------------------------
   # Dangerous commands - deny with specific patterns

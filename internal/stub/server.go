@@ -13,8 +13,13 @@ import (
 
 // ServeConfig configures the server-side stub handler.
 type ServeConfig struct {
-	Command    string
-	Args       []string
+	// Command is the executable path.
+	Command string
+
+	// Args is the full argv (Args[0] is typically the command name).
+	// If empty, only Command is used.
+	Args []string
+
 	Env        []string
 	WorkingDir string
 }
@@ -34,8 +39,14 @@ func ServeStubConnection(ctx context.Context, conn net.Conn, cfg ServeConfig) er
 		return fmt.Errorf("expected ready (0x%02x), got 0x%02x", MsgReady, msgType)
 	}
 
+	// Build args safely: Args[0] is the command name (argv[0]), rest are actual args.
+	var cmdArgs []string
+	if len(cfg.Args) > 1 {
+		cmdArgs = cfg.Args[1:]
+	}
+
 	// Start command.
-	cmd := exec.CommandContext(ctx, cfg.Command, cfg.Args[1:]...)
+	cmd := exec.CommandContext(ctx, cfg.Command, cmdArgs...)
 	if cfg.WorkingDir != "" {
 		cmd.Dir = cfg.WorkingDir
 	}
@@ -66,6 +77,10 @@ func ServeStubConnection(ctx context.Context, conn net.Conn, cfg ServeConfig) er
 		return err
 	}
 
+	// connWriter serializes frame writes to the connection, preventing
+	// interleaved/corrupted framing from concurrent stdout/stderr/exit goroutines.
+	cw := &connWriter{conn: conn}
+
 	// Proxy I/O.
 	var ioWg sync.WaitGroup
 
@@ -73,14 +88,14 @@ func ServeStubConnection(ctx context.Context, conn net.Conn, cfg ServeConfig) er
 	ioWg.Add(1)
 	go func() {
 		defer ioWg.Done()
-		pipeToFrame(stdoutPipe, conn, MsgStdout)
+		pipeToFrame(stdoutPipe, cw, MsgStdout)
 	}()
 
 	// stderr -> stub
 	ioWg.Add(1)
 	go func() {
 		defer ioWg.Done()
-		pipeToFrame(stderrPipe, conn, MsgStderr)
+		pipeToFrame(stderrPipe, cw, MsgStderr)
 	}()
 
 	// stdin from stub -> command. This goroutine runs independently; it
@@ -93,10 +108,17 @@ func ServeStubConnection(ctx context.Context, conn net.Conn, cfg ServeConfig) er
 			if rerr != nil {
 				return
 			}
-			if mt == MsgStdin && len(payload) > 0 {
-				if _, werr := stdinPipe.Write(payload); werr != nil {
-					return
+			switch mt {
+			case MsgStdin:
+				if len(payload) > 0 {
+					if _, werr := stdinPipe.Write(payload); werr != nil {
+						return
+					}
 				}
+			case MsgStdinClose:
+				// Client signaled stdin EOF; close the command's stdin pipe
+				// so the command receives EOF on its stdin.
+				return
 			}
 		}
 	}()
@@ -122,19 +144,34 @@ func ServeStubConnection(ctx context.Context, conn net.Conn, cfg ServeConfig) er
 	frame[0] = MsgExit
 	binary.BigEndian.PutUint32(frame[1:5], 4)
 	binary.BigEndian.PutUint32(frame[5:9], uint32(int32(exitCode)))
-	_, _ = conn.Write(frame)
+	cw.WriteFrame(frame)
 
 	return nil
 }
 
-// pipeToFrame reads from r and writes framed messages of the given type to conn.
-func pipeToFrame(r io.Reader, conn net.Conn, msgType byte) {
+// connWriter serializes writes to a net.Conn using a mutex.
+// This prevents interleaved frames from concurrent goroutines.
+type connWriter struct {
+	mu   sync.Mutex
+	conn net.Conn
+}
+
+// WriteFrame writes a complete frame to the connection under the mutex.
+func (w *connWriter) WriteFrame(frame []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_, err := w.conn.Write(frame)
+	return err
+}
+
+// pipeToFrame reads from r and writes framed messages of the given type to the writer.
+func pipeToFrame(r io.Reader, cw *connWriter, msgType byte) {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
 			frame := MakeFrame(msgType, buf[:n])
-			if _, werr := conn.Write(frame); werr != nil {
+			if werr := cw.WriteFrame(frame); werr != nil {
 				return
 			}
 		}

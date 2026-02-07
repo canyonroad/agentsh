@@ -89,16 +89,17 @@ func TestAgentPolicies_DefaultRuleDetails(t *testing.T) {
 	p, err := LoadFromFile(path)
 	require.NoError(t, err)
 
-	// Check dev-tools rule
-	assert.Equal(t, "dev-tools", p.CommandRules[0].Name)
-	assert.Equal(t, "allow", p.CommandRules[0].Decision)
-	assert.Contains(t, p.CommandRules[0].Commands, "git")
-	assert.Contains(t, p.CommandRules[0].Commands, "node")
+	// Check pkg-install requires approval (first rule — must precede dev-tools
+	// so that first-match semantics route "npm install" through approval)
+	assert.Equal(t, "pkg-install", p.CommandRules[0].Name)
+	assert.Equal(t, "approve", p.CommandRules[0].Decision)
+	assert.NotEmpty(t, p.CommandRules[0].ArgsPatterns)
 
-	// Check pkg-install requires approval
-	assert.Equal(t, "pkg-install", p.CommandRules[2].Name)
-	assert.Equal(t, "approve", p.CommandRules[2].Decision)
-	assert.NotEmpty(t, p.CommandRules[2].ArgsPatterns)
+	// Check dev-tools rule
+	assert.Equal(t, "dev-tools", p.CommandRules[1].Name)
+	assert.Equal(t, "allow", p.CommandRules[1].Decision)
+	assert.Contains(t, p.CommandRules[1].Commands, "git")
+	assert.Contains(t, p.CommandRules[1].Commands, "node")
 
 	// Check dangerous commands denied
 	assert.Equal(t, "dangerous", p.CommandRules[3].Name)

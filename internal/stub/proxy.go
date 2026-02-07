@@ -61,7 +61,7 @@ func RunProxy(conn net.Conn, stdin io.Reader, stdout, stderr io.Writer) (exitCod
 }
 
 // forwardStdin reads from stdin and sends MsgStdin frames to the server.
-// It runs until stdin returns io.EOF or an error occurs.
+// On EOF, sends a MsgStdinClose frame so the server can close the command's stdin pipe.
 func forwardStdin(conn net.Conn, stdin io.Reader) {
 	buf := make([]byte, 32*1024)
 	for {
@@ -73,6 +73,9 @@ func forwardStdin(conn net.Conn, stdin io.Reader) {
 			}
 		}
 		if err != nil {
+			// Signal stdin EOF to the server
+			closeFrame := MakeFrame(MsgStdinClose, nil)
+			conn.Write(closeFrame) //nolint:errcheck
 			return
 		}
 	}

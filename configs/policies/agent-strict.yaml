@@ -49,9 +49,16 @@ command_rules:
       - "log.*"
       - "diff.*"
       - "show.*"
-      - "branch.*"
-      - "tag.*"
-      - "remote.*"
+      - "branch$"
+      - "branch -[avr].*"
+      - "branch --list.*"
+      - "tag$"
+      - "tag -l.*"
+      - "tag --list.*"
+      - "remote$"
+      - "remote -v.*"
+      - "remote get-url.*"
+      - "remote show.*"
     decision: allow
 
   # ---------------------------------------------------------------------------

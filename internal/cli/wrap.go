@@ -81,7 +81,11 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 
 	workspace := opts.root
 	if workspace == "" {
-		workspace, _ = os.Getwd()
+		var wdErr error
+		workspace, wdErr = os.Getwd()
+		if wdErr != nil {
+			return fmt.Errorf("getwd: %w", wdErr)
+		}
 	}
 
 	var sessID string
@@ -141,8 +145,10 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 
 	// Set up signal forwarding
 	sigCh := make(chan os.Signal, 1)
+	sigDone := make(chan struct{})
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
+		defer close(sigDone)
 		for sig := range sigCh {
 			if agentProc.Process != nil {
 				agentProc.Process.Signal(sig)
@@ -188,6 +194,7 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 
 	signal.Stop(sigCh)
 	close(sigCh)
+	<-sigDone // Wait for the signal goroutine to exit before proceeding
 
 	exitCode := 0
 	if waitErr != nil {

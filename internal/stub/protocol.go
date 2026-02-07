@@ -13,8 +13,9 @@ const (
 	MsgStdout = byte(0x02) // server -> stub: stdout data
 	MsgStderr = byte(0x03) // server -> stub: stderr data
 	MsgStdin  = byte(0x04) // stub -> server: stdin data
-	MsgExit   = byte(0x05) // server -> stub: exit code (4 bytes big-endian int32)
-	MsgError  = byte(0x06) // server -> stub: error message
+	MsgExit       = byte(0x05) // server -> stub: exit code (4 bytes big-endian int32)
+	MsgError      = byte(0x06) // server -> stub: error message
+	MsgStdinClose = byte(0x07) // stub -> server: stdin EOF (no payload)
 )
 
 // headerSize is the size of the frame header: 1 byte type + 4 bytes length.

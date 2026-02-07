@@ -35,7 +35,7 @@ func (a *App) wrapInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, code, err := a.wrapInitCore(r.Context(), s, sessionID, req)
+	resp, code, err := a.wrapInitCore(s, sessionID, req)
 	if err != nil {
 		writeJSON(w, code, map[string]any{"error": err.Error()})
 		return
@@ -44,8 +44,12 @@ func (a *App) wrapInit(w http.ResponseWriter, r *http.Request) {
 }
 
 // wrapInitCore contains the core logic for wrap initialization.
-// Exported for testing via the App struct.
-func (a *App) wrapInitCore(ctx context.Context, s *session.Session, sessionID string, req types.WrapInitRequest) (types.WrapInitResponse, int, error) {
+// Uses context.Background() (not the HTTP request context) so that
+// the notify handler stays active after the HTTP response is sent.
+func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapInitRequest) (types.WrapInitResponse, int, error) {
+	// Use a background context so the notify handler outlives the HTTP request.
+	// The handler will be cleaned up when the session ends or the connection closes.
+	ctx := context.Background()
 	// Only supported on Linux
 	if runtime.GOOS != "linux" {
 		return types.WrapInitResponse{}, http.StatusBadRequest, errWrapNotSupported
@@ -87,16 +91,19 @@ func (a *App) wrapInitCore(ctx context.Context, s *session.Session, sessionID st
 		return types.WrapInitResponse{}, http.StatusInternalServerError, err
 	}
 
-	// Create a Unix listener socket for receiving the notify fd from the CLI.
-	// The CLI will:
-	// 1. Create a socketpair (parent/child)
-	// 2. Pass child fd to agentsh-unixwrap as ExtraFile
-	// 3. Receive the notify fd from unixwrap on the parent socket
-	// 4. Connect to this listener and forward the notify fd
-	notifySocketPath := filepath.Join(os.TempDir(), "agentsh-notify-"+sessionID+".sock")
-
-	// Remove stale socket if it exists
-	_ = os.Remove(notifySocketPath)
+	// Create a private temp directory for the notify socket to prevent
+	// other local users from connecting first (security: socket path injection).
+	// Sanitize session ID to a safe basename to prevent path traversal.
+	safeID := filepath.Base(sessionID)
+	notifyDir, err := os.MkdirTemp("", "agentsh-wrap-*")
+	if err != nil {
+		return types.WrapInitResponse{}, http.StatusInternalServerError, err
+	}
+	if err := os.Chmod(notifyDir, 0700); err != nil {
+		os.RemoveAll(notifyDir)
+		return types.WrapInitResponse{}, http.StatusInternalServerError, err
+	}
+	notifySocketPath := filepath.Join(notifyDir, "notify-"+safeID+".sock")
 
 	listener, err := net.Listen("unix", notifySocketPath)
 	if err != nil {
@@ -137,7 +144,8 @@ func (a *App) wrapInitCore(ctx context.Context, s *session.Session, sessionID st
 // receives the seccomp notify fd, and starts the notify handler.
 func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketPath string, sessionID string, s *session.Session, execveEnabled bool) {
 	defer listener.Close()
-	defer os.Remove(socketPath)
+	// Clean up the entire private temp directory containing the socket
+	defer os.RemoveAll(filepath.Dir(socketPath))
 
 	// Set a timeout for accepting the connection
 	if dl, ok := listener.(*net.UnixListener); ok {

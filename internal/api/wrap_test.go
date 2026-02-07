@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"runtime"
 	"testing"
 
@@ -45,7 +44,7 @@ func TestWrapInit_NotLinux(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	_, code, err := app.wrapInitCore(context.Background(), s, s.ID, types.WrapInitRequest{
+	_, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
 		AgentCommand: "/bin/echo",
 		AgentArgs:    []string{"hello"},
 	})
@@ -73,7 +72,7 @@ func TestWrapInit_WrapperNotFound(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	_, code, err := app.wrapInitCore(context.Background(), s, s.ID, types.WrapInitRequest{
+	_, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
 		AgentCommand: "/bin/echo",
 		AgentArgs:    []string{"hello"},
 	})
@@ -103,7 +102,7 @@ func TestWrapInit_Success(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	resp, code, err := app.wrapInitCore(context.Background(), s, s.ID, types.WrapInitRequest{
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
 		AgentCommand: "/bin/echo",
 		AgentArgs:    []string{"hello"},
 	})
@@ -151,7 +150,7 @@ func TestWrapInit_SeccompConfigContent(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	resp, _, err := app.wrapInitCore(context.Background(), s, s.ID, types.WrapInitRequest{
+	resp, _, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
 		AgentCommand: "/bin/echo",
 	})
 

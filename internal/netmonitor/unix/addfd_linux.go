@@ -49,17 +49,28 @@ const ioctlNotifAddFD = 0x40182103
 //   - notifFD: the seccomp notify file descriptor
 //   - notifID: the notification ID from the trapped syscall
 //   - srcFD: the file descriptor in the supervisor to inject
-//   - targetFD: the desired fd number in the tracee (-1 to let the kernel choose)
+//   - targetFD: the desired fd number in the tracee (only used when SECCOMP_ADDFD_FLAG_SETFD is set;
+//     otherwise set to 0 and the kernel will choose)
 //   - flags: SECCOMP_ADDFD_FLAG_* flags
 //
 // Returns the fd number allocated in the tracee, or an error.
 func NotifAddFD(notifFD int, notifID uint64, srcFD int, targetFD int, flags uint32) (int, error) {
+	// When SETFD is not set, newfd must be 0 (kernel chooses).
+	// When SETFD is set, targetFD must be non-negative.
+	newfd := uint32(0)
+	if flags&SECCOMP_ADDFD_FLAG_SETFD != 0 {
+		if targetFD < 0 {
+			return -1, fmt.Errorf("SECCOMP_IOCTL_NOTIF_ADDFD: targetFD must be >= 0 when SETFD flag is set")
+		}
+		newfd = uint32(targetFD)
+	}
+
 	req := seccompNotifAddFD{
 		id:         notifID,
 		flags:      flags,
 		srcfd:      uint32(srcFD),
-		newfd:      uint32(targetFD),
-		newfdFlags: 0,
+		newfd:      newfd,
+		newfdFlags: uint32(unix.O_CLOEXEC),
 	}
 
 	r1, _, errno := unix.Syscall(
