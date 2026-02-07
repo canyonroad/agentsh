@@ -11,6 +11,10 @@ class ESFClient {
     // Serial queue for thread-safe access to client
     private let clientQueue = DispatchQueue(label: "com.agentsh.esfclient")
 
+    /// Cache of PID -> audit_token_t for muting
+    private var auditTokenCache: [pid_t: audit_token_t] = [:]
+    private let cacheQueue = DispatchQueue(label: "com.agentsh.audittokencache")
+
     init() {
         // Connect to XPC Service
         xpc = NSXPCConnection(serviceName: xpcServiceIdentifier)
@@ -87,6 +91,32 @@ class ESFClient {
 
     private func getClient() -> OpaquePointer? {
         return clientQueue.sync { client }
+    }
+
+    // MARK: - Process Muting (Recursion Guard)
+
+    /// Mute a process and all its descendants so ES events are not delivered for them.
+    /// Used for recursion prevention — agentsh-spawned commands must not be re-intercepted.
+    func muteProcess(auditToken: audit_token_t) {
+        guard let client = getClient() else { return }
+        var token = auditToken
+        let result = es_mute_process(client, &token)
+        if result != ES_RETURN_SUCCESS {
+            NSLog("ESFClient: failed to mute process: \(result.rawValue)")
+        }
+    }
+
+    /// Mute a process by PID. Looks up the audit_token from the fork event cache.
+    /// Called from the Go side via XPC when the server spawns a command.
+    func muteProcessByPID(_ pid: pid_t) {
+        let token: audit_token_t? = cacheQueue.sync {
+            return auditTokenCache[pid]
+        }
+        guard let token = token else {
+            NSLog("ESFClient: cannot mute PID \(pid): no cached audit token")
+            return
+        }
+        muteProcess(auditToken: token)
     }
 
     private func handleEvent(_ event: UnsafePointer<es_message_t>) {
@@ -220,12 +250,24 @@ class ESFClient {
 
     private func handleNotifyFork(_ message: es_message_t, pid: pid_t) {
         // Track parent-child relationship for session scoping and PNACL inheritance
-        let childPid = audit_token_to_pid(message.event.fork.child.pointee.audit_token)
+        let childToken = message.event.fork.child.pointee.audit_token
+        let childPid = audit_token_to_pid(childToken)
+
+        // Cache audit token for muting
+        cacheQueue.sync {
+            auditTokenCache[childPid] = childToken
+        }
+
         ProcessHierarchy.shared.recordFork(parentPID: pid, childPID: childPid)
         NSLog("Fork: \(pid) -> \(childPid)")
     }
 
     private func handleNotifyExit(_ message: es_message_t, pid: pid_t) {
+        // Clean up audit token cache
+        cacheQueue.sync {
+            auditTokenCache.removeValue(forKey: pid)
+        }
+
         // Clean up hierarchy tracking and invalidate process info cache
         ProcessHierarchy.shared.recordExit(pid: pid)
         ProcessIdentifier.invalidate(pid: pid)

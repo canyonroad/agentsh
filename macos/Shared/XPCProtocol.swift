@@ -133,6 +133,12 @@ import Foundation
     func getPNACLBlockingConfig(
         reply: @escaping (Bool, Double, Bool) -> Void
     )
+
+    // MARK: - Process Muting (Recursion Guard)
+
+    /// Mute a process to prevent ES event delivery (recursion guard).
+    /// Called from Go side when the server spawns a command for the exec pipeline.
+    func muteProcess(pid: pid_t, reply: @escaping (Bool) -> Void)
 }
 
 /// XPC Service identifier.
