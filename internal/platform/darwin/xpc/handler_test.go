@@ -237,7 +237,9 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		}
 	})
 
-	t.Run("redirect_returns_redirect", func(t *testing.T) {
+	t.Run("redirect_effective_allow_returns_continue", func(t *testing.T) {
+		// Redirect policy: PolicyDecision is "redirect" but EffectiveDecision
+		// is "allow" (redirects are handled at another layer), so action = "continue".
 		p := &policy.Policy{
 			Version: 1,
 			Name:    "test",
@@ -257,8 +259,8 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		if result.Decision != "redirect" {
 			t.Errorf("decision: got %q, want %q", result.Decision, "redirect")
 		}
-		if result.Action != "redirect" {
-			t.Errorf("action: got %q, want %q", result.Action, "redirect")
+		if result.Action != "continue" {
+			t.Errorf("action: got %q, want %q (EffectiveDecision is allow)", result.Action, "continue")
 		}
 		if result.Rule != "redirect-git" {
 			t.Errorf("rule: got %q, want %q", result.Rule, "redirect-git")
@@ -293,7 +295,9 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		}
 	})
 
-	t.Run("approve_returns_redirect", func(t *testing.T) {
+	t.Run("approve_shadow_mode_returns_continue", func(t *testing.T) {
+		// In shadow mode (enforceApprovals=false), PolicyDecision is "approve"
+		// but EffectiveDecision is "allow", so the action should be "continue".
 		p := &policy.Policy{
 			Version: 1,
 			Name:    "test",
@@ -303,6 +307,36 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 			},
 		}
 		engine, err := policy.NewEngine(p, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		adapter := NewPolicyAdapter(engine, nil)
+		result := adapter.CheckExec("sudo", []string{"ls"}, 3333, 1, "session-1")
+
+		if result.Decision != "approve" {
+			t.Errorf("decision: got %q, want %q", result.Decision, "approve")
+		}
+		if result.Action != "continue" {
+			t.Errorf("action: got %q, want %q (shadow mode should continue, not redirect)", result.Action, "continue")
+		}
+		if result.Rule != "approve-sudo" {
+			t.Errorf("rule: got %q, want %q", result.Rule, "approve-sudo")
+		}
+	})
+
+	t.Run("approve_enforced_returns_redirect", func(t *testing.T) {
+		// In enforced mode (enforceApprovals=true), both PolicyDecision and
+		// EffectiveDecision are "approve", so the action should be "redirect".
+		p := &policy.Policy{
+			Version: 1,
+			Name:    "test",
+			CommandRules: []policy.CommandRule{
+				{Name: "approve-sudo", Commands: []string{"sudo"}, Decision: "approve"},
+				{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
+			},
+		}
+		engine, err := policy.NewEngine(p, true)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -4,10 +4,10 @@ package xpc
 type RequestType string
 
 const (
-	RequestTypeFile    RequestType = "file"
-	RequestTypeNetwork RequestType = "network"
-	RequestTypeCommand RequestType = "command"
-	RequestTypeSession RequestType = "session"
+	RequestTypeFile      RequestType = "file"
+	RequestTypeNetwork   RequestType = "network"
+	RequestTypeCommand   RequestType = "command"
+	RequestTypeSession   RequestType = "session"
 	RequestTypeEvent     RequestType = "event"
 	RequestTypeExecCheck RequestType = "exec_check"
 

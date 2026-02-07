@@ -76,16 +76,27 @@ func (a *PolicyAdapter) CheckExec(executable string, args []string, pid int32, p
 	}
 
 	dec := a.engine.CheckCommand(executable, args)
+
+	// Use PolicyDecision for audit logging (the raw policy intent)
 	decision := string(dec.PolicyDecision)
 
+	// Use EffectiveDecision for action mapping (what actually happens, respects shadow mode)
+	effectiveDecision := dec.EffectiveDecision
+	if effectiveDecision == "" {
+		effectiveDecision = dec.PolicyDecision
+	}
+
 	var action string
-	switch dec.PolicyDecision {
+	switch effectiveDecision {
 	case types.DecisionAllow, types.DecisionAudit:
 		action = "continue"
 	case types.DecisionDeny:
 		action = "deny"
 	case types.DecisionApprove, types.DecisionRedirect:
 		action = "redirect"
+	case types.DecisionSoftDelete:
+		// soft-delete is a file operation concept; for exec, treat as continue
+		action = "continue"
 	default:
 		// Unknown decisions default to continue (fail-open)
 		action = "continue"
