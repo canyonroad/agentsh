@@ -1,6 +1,8 @@
 package xpc
 
 import (
+	"log/slog"
+
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
 )
@@ -98,8 +100,13 @@ func (a *PolicyAdapter) CheckExec(executable string, args []string, pid int32, p
 		// soft-delete is a file operation concept; for exec, treat as continue
 		action = "continue"
 	default:
-		// Unknown decisions default to continue (fail-open)
-		action = "continue"
+		// Unknown decisions fail-closed to prevent accidental allows.
+		slog.Warn("xpc: unknown effective decision in CheckExec, denying",
+			"effective_decision", string(effectiveDecision),
+			"policy_decision", decision,
+			"cmd", executable,
+		)
+		action = "deny"
 	}
 
 	return ExecCheckResult{

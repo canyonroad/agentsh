@@ -107,6 +107,13 @@ class ESFClient {
         let result = es_mute_process(client, &token)
         if result != ES_RETURN_SUCCESS {
             NSLog("ESFClient: failed to mute process: \(result.rawValue)")
+        } else {
+            // Muted processes won't emit ES_EVENT_TYPE_NOTIFY_EXIT, so clean up
+            // the audit token cache now to prevent stale entries and unbounded growth.
+            let pid = audit_token_to_pid(token)
+            cacheQueue.sync {
+                auditTokenCache.removeValue(forKey: pid)
+            }
         }
     }
 
@@ -232,7 +239,11 @@ class ESFClient {
     private func handleAuthExec(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
         guard let client = getClient() else { return }
 
-        // Fast path: if no active sessions, allow everything immediately
+        // Fast path: if no active sessions, allow everything immediately.
+        // Sessions are populated via registerSession() which is called from the
+        // Go server through the register_session XPC request when agentsh wrap starts.
+        // Until at least one session is registered, all AUTH_EXEC events pass through
+        // without policy checks — this is by design (no wrapping = no interception).
         let hasActiveSessions = sessionQueue.sync { !activeSessions.isEmpty }
         if !hasActiveSessions {
             es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
@@ -257,12 +268,23 @@ class ESFClient {
         let execEvent = event.pointee.event.exec
         let execPath = String(cString: execEvent.target.pointee.executable.pointee.path.data)
 
-        // Extract argv from the exec event
+        // Extract argv from the exec event using length-aware conversion.
+        // es_string_token_t is NOT guaranteed NUL-terminated, so we use the
+        // explicit length field to avoid reading past bounds.
         let argc = es_exec_arg_count(&event.pointee.event.exec)
         var args: [String] = []
         for i in 0..<argc {
             let arg = es_exec_arg(&event.pointee.event.exec, i)
-            args.append(String(cString: arg.data))
+            let len = Int(arg.length)
+            if len > 0, let data = arg.data {
+                let str = String(
+                    bytes: UnsafeBufferPointer(start: data, count: len),
+                    encoding: .utf8
+                ) ?? String(cString: data)  // Fallback for non-UTF8
+                args.append(str)
+            } else {
+                args.append("")
+            }
         }
 
         let parentPID = event.pointee.process.pointee.ppid
@@ -293,9 +315,9 @@ class ESFClient {
                 es_respond_auth_result(client, messageCopy, ES_AUTH_RESULT_DENY, false)
 
             default:
-                // Unknown action, fail-open
-                NSLog("ESFClient: unknown action '\(action)' for exec \(execPath), allowing")
-                es_respond_auth_result(client, messageCopy, ES_AUTH_RESULT_ALLOW, false)
+                // Unknown action — fail-closed to prevent accidental allows
+                NSLog("ESFClient: unknown action '\(action)' for exec \(execPath), denying (fail-closed)")
+                es_respond_auth_result(client, messageCopy, ES_AUTH_RESULT_DENY, false)
             }
 
             es_free_message(messageCopy)

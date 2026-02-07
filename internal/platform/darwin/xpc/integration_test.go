@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/agentsh/agentsh/internal/policy"
 )
@@ -37,7 +37,7 @@ func TestIntegration_FullPolicyFlow(t *testing.T) {
 	}
 
 	// Start server
-	sockPath := "/tmp/agentsh-test-policy.sock"
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	tracker := NewSessionTracker()
 	tracker.RegisterProcess("session-test", 12345, 0)
 
@@ -48,8 +48,7 @@ func TestIntegration_FullPolicyFlow(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	<-srv.Ready()
 
 	// Test file allow
 	t.Run("file_allow", func(t *testing.T) {
@@ -171,7 +170,7 @@ func TestIntegration_PNACLFlow(t *testing.T) {
 	}
 
 	// Start server with PNACL handler
-	sockPath := "/tmp/agentsh-test-pnacl.sock"
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	tracker := NewSessionTracker()
 	adapter := NewPolicyAdapter(engine, tracker)
 	srv := NewServer(sockPath, adapter)
@@ -202,8 +201,7 @@ func TestIntegration_PNACLFlow(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	<-srv.Ready()
 
 	// Test PNACL check
 	t.Run("pnacl_check_allow", func(t *testing.T) {
@@ -333,7 +331,7 @@ func TestIntegration_ExecCheckWithHandler(t *testing.T) {
 	}
 
 	// Start server with a mock exec handler
-	sockPath := "/tmp/agentsh-test-exec-handler.sock"
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	tracker := NewSessionTracker()
 	adapter := NewPolicyAdapter(engine, tracker)
 	srv := NewServer(sockPath, adapter)
@@ -352,8 +350,7 @@ func TestIntegration_ExecCheckWithHandler(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	<-srv.Ready()
 
 	// Test exec_check with allow decision
 	t.Run("exec_check_allow", func(t *testing.T) {
@@ -458,7 +455,7 @@ func TestIntegration_ExecCheckAllDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := "/tmp/agentsh-test-exec-decisions.sock"
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	tracker := NewSessionTracker()
 	adapter := NewPolicyAdapter(engine, tracker)
 	srv := NewServer(sockPath, adapter)
@@ -470,8 +467,7 @@ func TestIntegration_ExecCheckAllDecisions(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	<-srv.Ready()
 
 	tests := []struct {
 		name         string
@@ -534,7 +530,7 @@ func TestIntegration_ExecCheckFallbackToCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := "/tmp/agentsh-test-exec-fallback.sock"
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	tracker := NewSessionTracker()
 	adapter := NewPolicyAdapter(engine, tracker)
 	srv := NewServer(sockPath, adapter)
@@ -544,8 +540,7 @@ func TestIntegration_ExecCheckFallbackToCommand(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	<-srv.Ready()
 
 	// Allowed command should fall back to command handler and allow
 	t.Run("fallback_allow", func(t *testing.T) {
@@ -562,9 +557,9 @@ func TestIntegration_ExecCheckFallbackToCommand(t *testing.T) {
 		if resp.Action != "continue" {
 			t.Errorf("action: got %q, want %q", resp.Action, "continue")
 		}
-		// ExecDecision should be empty when falling back to command handler
-		if resp.ExecDecision != "" {
-			t.Errorf("exec_decision: got %q, want empty (fallback to command handler)", resp.ExecDecision)
+		// ExecDecision should be populated in fallback path for consistent contract
+		if resp.ExecDecision != "allow" {
+			t.Errorf("exec_decision: got %q, want %q (fallback to command handler)", resp.ExecDecision, "allow")
 		}
 	})
 
@@ -610,7 +605,7 @@ func TestIntegration_PNACLNoHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := "/tmp/agentsh-test-pnacl-nohandler.sock"
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	tracker := NewSessionTracker()
 	adapter := NewPolicyAdapter(engine, tracker)
 	srv := NewServer(sockPath, adapter)
@@ -620,8 +615,7 @@ func TestIntegration_PNACLNoHandler(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	<-srv.Ready()
 
 	// PNACL check should default to allow when no handler
 	t.Run("pnacl_check_no_handler", func(t *testing.T) {

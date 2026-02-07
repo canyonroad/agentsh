@@ -6,8 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"net"
-	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -15,11 +15,17 @@ import (
 	"github.com/agentsh/agentsh/internal/policy"
 )
 
+func init() {
+	// Integration tests use Unix sockets which require linux or darwin.
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		// Tests will be skipped individually below.
+	}
+}
+
 // integrationPolicyChecker adapts a policy.Engine to ESExecPolicyChecker.
 // This bridges the real policy engine with the ESExecHandler for integration tests.
 type integrationPolicyChecker struct {
-	engine          *policy.Engine
-	enforceApproval bool
+	engine *policy.Engine
 }
 
 func (c *integrationPolicyChecker) CheckCommand(cmd string, args []string) ESExecPolicyResult {
@@ -32,9 +38,19 @@ func (c *integrationPolicyChecker) CheckCommand(cmd string, args []string) ESExe
 	}
 }
 
+// waitForIntegrationServer waits for the XPC server to be ready.
+func waitForIntegrationServer(t *testing.T, srv *xpc.Server) {
+	t.Helper()
+	select {
+	case <-srv.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not become ready within 5s")
+	}
+}
+
 func TestESExecHandler_XPCIntegration(t *testing.T) {
-	if os.Getenv("AGENTSH_INTEGRATION") != "1" {
-		t.Skip("set AGENTSH_INTEGRATION=1 to run")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("integration tests require Unix sockets (linux or darwin)")
 	}
 
 	// Create a policy with various command rules.
@@ -58,7 +74,7 @@ func TestESExecHandler_XPCIntegration(t *testing.T) {
 
 	// Create XPC server with PolicyAdapter as PolicyHandler
 	// and ESExecHandler as ExecHandler.
-	sockPath := filepath.Join(os.TempDir(), "agentsh-test-es-exec-integration.sock")
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	adapter := xpc.NewPolicyAdapter(engine, nil)
 	srv := xpc.NewServer(sockPath, adapter)
 	srv.SetExecHandler(execHandler)
@@ -67,8 +83,7 @@ func TestESExecHandler_XPCIntegration(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	waitForIntegrationServer(t, srv)
 
 	// Test: allowed command flows through ESExecHandler
 	t.Run("allow_through_pipeline", func(t *testing.T) {
@@ -157,8 +172,8 @@ func TestESExecHandler_XPCIntegration(t *testing.T) {
 }
 
 func TestESExecHandler_XPCIntegration_EnforcedApprove(t *testing.T) {
-	if os.Getenv("AGENTSH_INTEGRATION") != "1" {
-		t.Skip("set AGENTSH_INTEGRATION=1 to run")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("integration tests require Unix sockets (linux or darwin)")
 	}
 
 	// Create a policy with approve rule in enforced mode.
@@ -176,10 +191,10 @@ func TestESExecHandler_XPCIntegration_EnforcedApprove(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	checker := &integrationPolicyChecker{engine: engine, enforceApproval: true}
+	checker := &integrationPolicyChecker{engine: engine}
 	execHandler := NewESExecHandler(checker, "")
 
-	sockPath := filepath.Join(os.TempDir(), "agentsh-test-es-exec-approve.sock")
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	adapter := xpc.NewPolicyAdapter(engine, nil)
 	srv := xpc.NewServer(sockPath, adapter)
 	srv.SetExecHandler(execHandler)
@@ -188,8 +203,7 @@ func TestESExecHandler_XPCIntegration_EnforcedApprove(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	waitForIntegrationServer(t, srv)
 
 	// In enforced mode, approve decision should trigger redirect action
 	t.Run("approve_enforced_redirects", func(t *testing.T) {
@@ -217,8 +231,8 @@ func TestESExecHandler_XPCIntegration_EnforcedApprove(t *testing.T) {
 }
 
 func TestESExecHandler_XPCIntegration_ShadowMode(t *testing.T) {
-	if os.Getenv("AGENTSH_INTEGRATION") != "1" {
-		t.Skip("set AGENTSH_INTEGRATION=1 to run")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("integration tests require Unix sockets (linux or darwin)")
 	}
 
 	// Shadow mode: approve policy decision but effective is allow.
@@ -239,7 +253,7 @@ func TestESExecHandler_XPCIntegration_ShadowMode(t *testing.T) {
 	checker := &integrationPolicyChecker{engine: engine}
 	execHandler := NewESExecHandler(checker, "")
 
-	sockPath := filepath.Join(os.TempDir(), "agentsh-test-es-exec-shadow.sock")
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	adapter := xpc.NewPolicyAdapter(engine, nil)
 	srv := xpc.NewServer(sockPath, adapter)
 	srv.SetExecHandler(execHandler)
@@ -248,8 +262,7 @@ func TestESExecHandler_XPCIntegration_ShadowMode(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	waitForIntegrationServer(t, srv)
 
 	// In shadow mode, approve should log the intent but allow through
 	t.Run("approve_shadow_continues", func(t *testing.T) {
@@ -278,8 +291,8 @@ func TestESExecHandler_XPCIntegration_ShadowMode(t *testing.T) {
 }
 
 func TestESExecHandler_XPCIntegration_NilPolicyChecker(t *testing.T) {
-	if os.Getenv("AGENTSH_INTEGRATION") != "1" {
-		t.Skip("set AGENTSH_INTEGRATION=1 to run")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("integration tests require Unix sockets (linux or darwin)")
 	}
 
 	// ESExecHandler with nil policy checker should allow everything.
@@ -291,7 +304,7 @@ func TestESExecHandler_XPCIntegration_NilPolicyChecker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(os.TempDir(), "agentsh-test-es-exec-nil-checker.sock")
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	adapter := xpc.NewPolicyAdapter(engine, nil)
 	srv := xpc.NewServer(sockPath, adapter)
 	srv.SetExecHandler(execHandler)
@@ -300,8 +313,7 @@ func TestESExecHandler_XPCIntegration_NilPolicyChecker(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	waitForIntegrationServer(t, srv)
 
 	t.Run("nil_checker_allows_all", func(t *testing.T) {
 		resp := sendExecRequest(t, sockPath, xpc.PolicyRequest{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
@@ -150,8 +151,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// Set socket permissions to allow user-space access.
 	// The ApprovalDialog.app runs as user and needs to connect to fetch/submit approvals.
 	// Security note: The socket is only accessible locally (Unix domain socket).
-	// TODO: Consider a separate approval-only socket with restricted operations,
-	// or route approval operations through the XPC service for better isolation.
+	// TODO(security): The world-writable socket allows any local process to send
+	// state-changing requests (register_session, unregister_session). Consider:
+	//   1. A separate approval-only socket with restricted operations
+	//   2. Routing approval operations through the XPC service for better isolation
+	//   3. Using SO_PEERCRED/getpeereid to authenticate peers for state-changing ops
 	if err := os.Chmod(s.sockPath, 0666); err != nil {
 		ln.Close()
 		return fmt.Errorf("chmod: %w", err)
@@ -291,13 +295,16 @@ func (s *Server) handleExecCheck(req *PolicyRequest) PolicyResponse {
 	s.mu.Unlock()
 
 	if h == nil {
-		// No exec handler — fall back to simple allow/deny via policy handler
+		// No exec handler — fall back to simple allow/deny via policy handler.
+		// Populate ExecDecision to keep the response contract consistent.
 		allow, rule := s.handler.CheckCommand(req.Path, req.Args)
 		action := "continue"
+		execDecision := "allow"
 		if !allow {
 			action = "deny"
+			execDecision = "deny"
 		}
-		return PolicyResponse{Allow: allow, Rule: rule, Action: action}
+		return PolicyResponse{Allow: allow, Rule: rule, Action: action, ExecDecision: execDecision}
 	}
 
 	result := h.CheckExec(req.Path, req.Args, req.PID, req.ParentPID, req.SessionID)
@@ -428,8 +435,14 @@ func (s *Server) handleUnregisterSession(req *PolicyRequest) PolicyResponse {
 }
 
 func (s *Server) handleMuteProcess(req *PolicyRequest) PolicyResponse {
-	// Mute process requests are acknowledged. The actual muting is handled
-	// by the ESF client; the session registrar interface can be extended
-	// to support this if needed.
+	// TODO(phase2): Mute process requests are currently a no-op on the Go server side.
+	// The actual muting requires the ESFClient to call es_mute_process(), which can
+	// only be done from the System Extension process. The muteProcess request from
+	// PolicyBridge is routed here, but the Go server cannot directly invoke ES APIs.
+	// To implement: extend SessionRegistrar with a MuteProcess(pid int32) method
+	// that forwards to the ESFClient via the XPC service's reverse channel.
+	slog.Info("xpc: mute_process request received (no-op until phase2 wiring)",
+		"pid", req.PID,
+	)
 	return PolicyResponse{Allow: true, Success: true}
 }

@@ -820,9 +820,9 @@ func TestServer_ExecCheckNoHandler_Allow(t *testing.T) {
 	if resp.Rule != "test-allow" {
 		t.Errorf("rule: got %q, want %q", resp.Rule, "test-allow")
 	}
-	// ExecDecision should be empty when falling back to command handler
-	if resp.ExecDecision != "" {
-		t.Errorf("exec_decision: got %q, want empty", resp.ExecDecision)
+	// ExecDecision should be populated in fallback path for consistent contract
+	if resp.ExecDecision != "allow" {
+		t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "allow")
 	}
 }
 

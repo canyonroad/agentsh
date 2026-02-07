@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/platform/darwin/xpc"
 	"github.com/agentsh/agentsh/internal/stub"
@@ -124,12 +125,25 @@ func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, p
 // execution works but the output goes to the server's log rather than to the
 // caller. The launchStub method is a placeholder for the process-spawning part.
 func (h *ESExecHandler) spawnStubServer(executable string, args []string, pid int32, parentPID int32, sessionID string) {
+	if h.stubBinary == "" {
+		slog.Error("es_exec: stub binary path not configured, cannot redirect exec",
+			"cmd", executable,
+			"pid", pid,
+		)
+		return
+	}
+
 	srvConn, stubConn := net.Pipe()
+
+	// Use a timeout context to prevent indefinite hangs if the stub never
+	// sends MsgReady or the connection stalls.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
 	// Start serving the stub connection with the original command.
 	go func() {
+		defer cancel()
 		defer srvConn.Close()
-		sErr := stub.ServeStubConnection(context.Background(), srvConn, stub.ServeConfig{
+		sErr := stub.ServeStubConnection(ctx, srvConn, stub.ServeConfig{
 			Command: executable,
 			Args:    args,
 		})
