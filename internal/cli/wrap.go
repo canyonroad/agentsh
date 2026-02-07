@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"syscall"
 
 	"github.com/agentsh/agentsh/internal/client"
+	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/spf13/cobra"
 )
 
@@ -98,20 +100,44 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 		fmt.Fprintf(os.Stderr, "agentsh: session %s created (policy: %s)\n", sessID, opts.policy)
 	}
 
-	// 2. Launch the agent process
+	// 2. Resolve the agent binary
 	agentPath, err := exec.LookPath(opts.agentCmd)
 	if err != nil {
 		return fmt.Errorf("agent not found: %s: %w", opts.agentCmd, err)
 	}
 
-	agentProc := exec.CommandContext(ctx, agentPath, opts.agentArgs...)
-	agentProc.Stdin = os.Stdin
-	agentProc.Stdout = os.Stdout
-	agentProc.Stderr = os.Stderr
-	agentProc.Env = append(os.Environ(),
-		fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),
-		fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
-	)
+	// 3. Try to set up seccomp interception (Linux only)
+	var wrapCfg *wrapLaunchConfig
+	if runtime.GOOS == "linux" {
+		wrapCfg, err = setupWrapInterception(ctx, c, sessID, agentPath, opts.agentArgs, cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "agentsh: seccomp setup failed, running without interception: %v\n", err)
+			// Fall through to direct launch
+		}
+	}
+
+	// 4. Build the agent command
+	var agentProc *exec.Cmd
+	if wrapCfg != nil {
+		// Launch through the seccomp wrapper
+		agentProc = exec.CommandContext(ctx, wrapCfg.command, wrapCfg.args...)
+		agentProc.Stdin = os.Stdin
+		agentProc.Stdout = os.Stdout
+		agentProc.Stderr = os.Stderr
+		agentProc.Env = wrapCfg.env
+		agentProc.ExtraFiles = wrapCfg.extraFiles
+		agentProc.SysProcAttr = wrapCfg.sysProcAttr
+	} else {
+		// Direct launch (no interception)
+		agentProc = exec.CommandContext(ctx, agentPath, opts.agentArgs...)
+		agentProc.Stdin = os.Stdin
+		agentProc.Stdout = os.Stdout
+		agentProc.Stderr = os.Stderr
+		agentProc.Env = append(os.Environ(),
+			fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),
+			fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
+		)
+	}
 
 	// Set up signal forwarding
 	sigCh := make(chan os.Signal, 1)
@@ -127,12 +153,37 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 	if err := agentProc.Start(); err != nil {
 		signal.Stop(sigCh)
 		close(sigCh)
+		// Clean up extra files
+		if wrapCfg != nil {
+			for _, f := range wrapCfg.extraFiles {
+				if f != nil {
+					f.Close()
+				}
+			}
+		}
 		return fmt.Errorf("start agent: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "agentsh: agent %s started (pid: %d)\n", opts.agentCmd, agentProc.Process.Pid)
+	// Close the child end of the socket pair (now owned by the child process)
+	if wrapCfg != nil {
+		for _, f := range wrapCfg.extraFiles {
+			if f != nil {
+				f.Close()
+			}
+		}
+	}
 
-	// 3. Wait for agent to exit
+	if wrapCfg != nil {
+		fmt.Fprintf(os.Stderr, "agentsh: agent %s started with seccomp interception (pid: %d)\n", opts.agentCmd, agentProc.Process.Pid)
+		// Forward the notify fd to the server in the background
+		if wrapCfg.postStart != nil {
+			go wrapCfg.postStart()
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "agentsh: agent %s started (pid: %d)\n", opts.agentCmd, agentProc.Process.Pid)
+	}
+
+	// 5. Wait for agent to exit
 	waitErr := agentProc.Wait()
 
 	signal.Stop(sigCh)
@@ -147,7 +198,7 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 		}
 	}
 
-	// 4. Generate report
+	// 6. Generate report
 	if opts.report {
 		fmt.Fprintf(os.Stderr, "\nagentsh: session %s complete (agent exit code: %d)\n", sessID, exitCode)
 	}
@@ -156,4 +207,35 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 		os.Exit(exitCode)
 	}
 	return nil
+}
+
+// wrapLaunchConfig holds the configuration for launching the agent through a wrapper.
+type wrapLaunchConfig struct {
+	command     string
+	args        []string
+	env         []string
+	extraFiles  []*os.File
+	sysProcAttr *syscall.SysProcAttr
+	postStart   func() // Called after the process starts (e.g., to forward notify fd)
+}
+
+// setupWrapInterception initializes seccomp interception via the server and returns
+// the launch configuration for the agent process. This is the platform-independent
+// part that calls into platform-specific code.
+func setupWrapInterception(ctx context.Context, c client.CLIClient, sessID string, agentPath string, agentArgs []string, cfg *clientConfig) (*wrapLaunchConfig, error) {
+	// Call the server to get wrapper configuration
+	wrapResp, err := c.WrapInit(ctx, sessID, types.WrapInitRequest{
+		AgentCommand: agentPath,
+		AgentArgs:    agentArgs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wrap-init: %w", err)
+	}
+
+	if wrapResp.WrapperBinary == "" {
+		return nil, fmt.Errorf("server returned empty wrapper binary")
+	}
+
+	// Delegate to platform-specific code for socket pair creation and fd management
+	return platformSetupWrap(ctx, wrapResp, sessID, agentPath, agentArgs, cfg)
 }

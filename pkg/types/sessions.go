@@ -116,3 +116,18 @@ type SessionPatchRequest struct {
 	Env   map[string]string `json:"env,omitempty"`
 	Unset []string          `json:"unset,omitempty"`
 }
+
+// WrapInitRequest is sent by the CLI to initialize seccomp wrapping for a session.
+type WrapInitRequest struct {
+	AgentCommand string   `json:"agent_command"`
+	AgentArgs    []string `json:"agent_args,omitempty"`
+}
+
+// WrapInitResponse returns the seccomp wrapper configuration to the CLI.
+type WrapInitResponse struct {
+	WrapperBinary string            `json:"wrapper_binary"`
+	StubBinary    string            `json:"stub_binary,omitempty"`
+	SeccompConfig string            `json:"seccomp_config"` // JSON-encoded seccomp config
+	NotifySocket  string            `json:"notify_socket"`  // Unix socket path for forwarding notify fd
+	WrapperEnv    map[string]string `json:"wrapper_env"`    // Extra env vars for the wrapper
+}

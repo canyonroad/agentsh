@@ -145,6 +145,7 @@ func (a *App) Router() http.Handler {
 		r.Get("/sessions/{id}/proxy", a.getProxyStatus)
 		r.Get("/sessions/{id}/output/{cmdID}", a.getOutputChunk)
 		r.Post("/sessions/{id}/kill/{cmdID}", a.killCommand)
+		r.Post("/sessions/{id}/wrap-init", a.wrapInit)
 
 		r.Get("/events/search", a.searchEvents)
 

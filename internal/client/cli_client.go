@@ -40,6 +40,9 @@ type CLIClient interface {
 	GetTaint(ctx context.Context, pid int) (*types.TaintInfo, error)
 	GetTaintTrace(ctx context.Context, pid int) (*types.TaintTrace, error)
 	WatchTaints(ctx context.Context, agentOnly bool, handler func(types.TaintEvent)) error
+
+	// Wrap-related operations
+	WrapInit(ctx context.Context, sessionID string, req types.WrapInitRequest) (types.WrapInitResponse, error)
 }
 
 type CLIOptions struct {
@@ -234,4 +237,9 @@ func (h *HybridClient) GetTaintTrace(ctx context.Context, pid int) (*types.Taint
 // WatchTaints watches for taint events.
 func (h *HybridClient) WatchTaints(ctx context.Context, agentOnly bool, handler func(types.TaintEvent)) error {
 	return h.Client.WatchTaints(ctx, agentOnly, handler)
+}
+
+// WrapInit initializes seccomp wrapping for a session.
+func (h *HybridClient) WrapInit(ctx context.Context, sessionID string, req types.WrapInitRequest) (types.WrapInitResponse, error) {
+	return h.Client.WrapInit(ctx, sessionID, req)
 }

@@ -81,6 +81,9 @@ func (m *mockCLIClient) GetTaintTrace(ctx context.Context, pid int) (*types.Tain
 func (m *mockCLIClient) WatchTaints(ctx context.Context, agentOnly bool, handler func(types.TaintEvent)) error {
 	return nil
 }
+func (m *mockCLIClient) WrapInit(ctx context.Context, sessionID string, req types.WrapInitRequest) (types.WrapInitResponse, error) {
+	return types.WrapInitResponse{}, nil
+}
 
 func TestPrintSessionCreated(t *testing.T) {
 	tests := []struct {
