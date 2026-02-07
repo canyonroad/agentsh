@@ -1,0 +1,183 @@
+# Agent Default Policy for agentsh
+# Balanced supervision for AI agents in development workflows
+
+version: 1
+name: agent-default
+description: |
+  Default policy for AI agent supervision. Allows standard development
+  tools, requires approval for package installation and unknown network
+  access, and denies dangerous system operations.
+
+# =============================================================================
+# COMMAND RULES
+# =============================================================================
+
+command_rules:
+  # ---------------------------------------------------------------------------
+  # Package installation - require approval (MUST precede dev-tools so that
+  # first-match semantics route "npm install" etc. through the approval flow)
+  # ---------------------------------------------------------------------------
+
+  - name: pkg-install
+    description: Require approval for package installation
+    commands:
+      - apt
+      - yum
+      - brew
+      - pip
+      - pip3
+      - npm
+      - npx
+    args_patterns:
+      - "install.*"
+      - "add.*"
+      - "upgrade.*"
+      - "update.*"
+      - "^i$"
+      - "^ci$"
+    decision: approve
+    message: "Agent wants to install packages: {{.Args}}"
+
+  # ---------------------------------------------------------------------------
+  # Development tools - allow by default
+  # ---------------------------------------------------------------------------
+
+  - name: dev-tools
+    description: Standard development tools
+    commands:
+      - ls
+      - cat
+      - grep
+      - find
+      - git
+      - node
+      - npm
+      - npx
+      - python
+      - python3
+      - pip
+      - pip3
+      - go
+      - cargo
+      - make
+      - cmake
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Shell execution - allow
+  # ---------------------------------------------------------------------------
+
+  - name: shell-exec
+    description: Allow shell interpreters
+    commands:
+      - bash
+      - sh
+      - zsh
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Dangerous commands - deny with specific patterns
+  # ---------------------------------------------------------------------------
+
+  - name: dangerous
+    description: Block dangerous commands with destructive arguments
+    commands:
+      - rm
+      - dd
+      - mkfs
+      - fdisk
+    args_patterns:
+      - "-rf /.*"
+      - "--no-preserve-root.*"
+    decision: deny
+    message: "Destructive command blocked: {{.Args}}"
+
+# =============================================================================
+# FILE OPERATION RULES
+# =============================================================================
+
+file_rules:
+  # ---------------------------------------------------------------------------
+  # Workspace - full access
+  # ---------------------------------------------------------------------------
+
+  - name: workspace
+    description: Full access to project workspace
+    paths:
+      - "${PROJECT_ROOT}"
+      - "${PROJECT_ROOT}/**"
+    operations:
+      - read
+      - write
+      - create
+      - delete
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # System paths - read only
+  # ---------------------------------------------------------------------------
+
+  - name: system-read
+    description: Read-only access to system paths
+    paths:
+      - "/etc/**"
+      - "/usr/**"
+    operations:
+      - read
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # System paths - block writes
+  # ---------------------------------------------------------------------------
+
+  - name: system-write
+    description: Block writes to system paths
+    paths:
+      - "/etc/**"
+      - "/usr/**"
+      - "/bin/**"
+      - "/sbin/**"
+    operations:
+      - write
+      - create
+      - delete
+    decision: deny
+
+# =============================================================================
+# NETWORK OPERATION RULES
+# =============================================================================
+
+network_rules:
+  # ---------------------------------------------------------------------------
+  # Package registries - allow
+  # ---------------------------------------------------------------------------
+
+  - name: package-registries
+    description: Allow package registry access
+    domains:
+      - "registry.npmjs.org"
+      - "pypi.org"
+      - "proxy.golang.org"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # GitHub - allow
+  # ---------------------------------------------------------------------------
+
+  - name: github
+    description: Allow GitHub access
+    domains:
+      - "github.com"
+      - "*.githubusercontent.com"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # All other network - require approval
+  # ---------------------------------------------------------------------------
+
+  - name: other-network
+    description: Require approval for unknown network destinations
+    domains:
+      - "*"
+    decision: approve
+    message: "Agent wants to connect to: {{.RemoteAddr}}"

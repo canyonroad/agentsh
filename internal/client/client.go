@@ -209,6 +209,15 @@ func (c *Client) GetProxyStatus(ctx context.Context, sessionID string) (map[stri
 	return out, nil
 }
 
+func (c *Client) WrapInit(ctx context.Context, sessionID string, req types.WrapInitRequest) (types.WrapInitResponse, error) {
+	var out types.WrapInitResponse
+	path := "/api/v1/sessions/" + url.PathEscape(sessionID) + "/wrap-init"
+	if err := c.doJSON(ctx, http.MethodPost, path, nil, req, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
 func (c *Client) StreamSessionEvents(ctx context.Context, sessionID string) (io.ReadCloser, error) {
 	u := c.baseURL + "/api/v1/sessions/" + url.PathEscape(sessionID) + "/events"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)

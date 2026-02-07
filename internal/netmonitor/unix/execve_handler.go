@@ -12,6 +12,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Action constants for pipeline routing decisions.
+const (
+	ActionContinue = "continue" // Allow execve in-place (zero overhead)
+	ActionRedirect = "redirect" // Redirect execve to agentsh-stub
+	ActionDeny     = "deny"     // Fail execve with errno
+)
+
 // ExecveHandlerConfig configures the execve handler.
 type ExecveHandlerConfig struct {
 	MaxArgc               int
@@ -36,6 +43,7 @@ type ExecveContext struct {
 // ExecveResult holds the result of handling an execve.
 type ExecveResult struct {
 	Allow    bool
+	Action   string // ActionContinue | ActionRedirect | ActionDeny
 	Rule     string
 	Reason   string
 	Errno    int32
@@ -128,7 +136,7 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 		if h.depthTracker != nil {
 			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
 		}
-		result := ExecveResult{Allow: true, Rule: "internal_bypass", Decision: "allow"}
+		result := ExecveResult{Allow: true, Action: ActionContinue, Rule: "internal_bypass", Decision: "allow"}
 		// Log every execve per design doc, including internal bypass
 		h.emitEvent(ctx, result, "internal_bypass")
 		return result
@@ -140,6 +148,7 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 		case "deny":
 			result := ExecveResult{
 				Allow:    false,
+				Action:   ActionDeny,
 				Reason:   "truncated",
 				Errno:    int32(unix.EACCES),
 				Decision: "deny",
@@ -150,6 +159,7 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 			// TODO: implement approval flow
 			result := ExecveResult{
 				Allow:    false,
+				Action:   ActionRedirect,
 				Reason:   "truncated_needs_approval",
 				Errno:    int32(unix.EACCES),
 				Decision: "approve",
@@ -162,7 +172,7 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 
 	// Skip policy check if no policy configured
 	if h.policy == nil {
-		result := ExecveResult{Allow: true, Rule: "no_policy", Decision: "allow"}
+		result := ExecveResult{Allow: true, Action: ActionContinue, Rule: "no_policy", Decision: "allow"}
 		// Record for depth tracking even without policy
 		if h.depthTracker != nil {
 			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
@@ -190,16 +200,41 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 		if h.depthTracker != nil {
 			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
 		}
-		result := ExecveResult{Allow: true, Rule: decision.Rule, Decision: decision.Decision}
+		result := ExecveResult{Allow: true, Action: ActionContinue, Rule: decision.Rule, Decision: decision.Decision}
 		h.emitEvent(ctx, result, decision.Rule)
 		return result
 
 	case "deny":
 		result := ExecveResult{
 			Allow:    false,
+			Action:   ActionDeny,
 			Rule:     decision.Rule,
 			Reason:   decision.Message,
 			Errno:    int32(unix.EACCES),
+			Decision: decision.Decision,
+		}
+		h.emitEvent(ctx, result, decision.Rule)
+		return result
+
+	case "approve":
+		// Redirect to agentsh-stub for approval workflow
+		result := ExecveResult{
+			Allow:    false,
+			Action:   ActionRedirect,
+			Rule:     decision.Rule,
+			Reason:   decision.Message,
+			Decision: decision.Decision,
+		}
+		h.emitEvent(ctx, result, decision.Rule)
+		return result
+
+	case "redirect":
+		// Redirect execve to agentsh-stub
+		result := ExecveResult{
+			Allow:    false,
+			Action:   ActionRedirect,
+			Rule:     decision.Rule,
+			Reason:   decision.Message,
 			Decision: decision.Decision,
 		}
 		h.emitEvent(ctx, result, decision.Rule)
@@ -209,6 +244,7 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 		// Unknown effective decision - deny (fail-secure)
 		result := ExecveResult{
 			Allow:    false,
+			Action:   ActionDeny,
 			Reason:   "unknown_decision",
 			Errno:    int32(unix.EACCES),
 			Decision: decision.Decision,

@@ -63,6 +63,9 @@ mkdir -p "$BACKUP_DIR"
 # Backup audit database (most critical)
 cp /var/lib/agentsh/events.db "$BACKUP_DIR/"
 
+# Backup audit log file
+cp /var/log/agentsh/audit.jsonl "$BACKUP_DIR/" 2>/dev/null || true
+
 # Backup configuration
 cp /etc/agentsh/config.yaml "$BACKUP_DIR/"
 

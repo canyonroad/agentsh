@@ -72,7 +72,7 @@ Result (exit code, stdout, stderr) proxied back to agent
 
 When agentsh itself spawns the allowed command, that child exec must NOT be re-intercepted:
 
-- **Linux**: Child processes spawned by agentsh inherit a clean seccomp filter (no user-notify). Secondary guard via `AGENTSH_IN_SESSION=1` env var.
+- **Linux**: The agentsh server process runs **outside** the seccomp-filtered process tree (it is the supervisor, never a child of the wrapped agent). It maintains a kernel-side taint list via the seccomp notify fd — only PIDs descended from the agent root are in the filtered tree. Children spawned by the server are never subject to the filter because they inherit the server's (unfiltered) seccomp state, not the agent's.
 - **macOS**: `es_mute_process()` on any process spawned by the agentsh server. Muted processes and all descendants are invisible to the ES client.
 - **Windows**: Driver maintains a "muted PIDs" set. Processes spawned by `agentsh-svc.exe` are added to it and excluded from interception.
 
@@ -91,12 +91,14 @@ Extends the existing `agentsh-unixwrap` from allow/deny to full pipeline routing
 
 1. Same seccomp filter installation
 2. Supervisor receives execve notification
-3. Read target binary path and argv from `/proc/<pid>/mem`
+3. Read target binary path and argv from `/proc/<pid>/mem` (requires `PTRACE_MODE_READ` — the supervisor must be the direct parent or `CAP_SYS_PTRACE` must be held; `process_vm_readv` is an alternative that works under Yama ptrace_scope=1 when the supervisor is the parent)
 4. Send to agentsh server API (`POST /sessions/{sid}/exec`)
 5. Server runs full pipeline: policy → approval → audit → execute
 6. **If allowed (common case)**: `SECCOMP_IOCTL_NOTIF_SEND` continues the syscall in-place. Zero overhead.
-7. **If routed through pipeline**: Block the original execve with `ENOSYS`. The agentsh server spawns the command as a child of the session. Result (exit code, stdout, stderr) is proxied back via pipes that replaced the original fds.
+7. **If routed through pipeline (approve/redirect)**: Use `SECCOMP_ADDFD_FLAG_SEND` to inject an `agentsh-stub` binary fd, then respond with `SECCOMP_IOCTL_NOTIF_SEND` to continue the execve — but redirected to execute the stub instead of the original target. The stub inherits the original process's pid/ppid relationships and file descriptors, connects to the agentsh server over a pre-injected Unix socket fd, and proxies stdin/stdout/stderr from the server-spawned command. The stub exits with the proxied exit code, so `waitpid()` in the parent works correctly.
 8. **If denied**: Fail the syscall with `EPERM`.
+
+> **Design note**: We do NOT fail the execve and attempt to replace fds post-failure. A failed execve returns control to the calling process (typically a shell `exec` path), which does not expect to continue. Instead, we redirect the execve to a cooperative stub that preserves normal process lifecycle semantics.
 
 ### Taint Tracking
 
@@ -128,7 +130,9 @@ New binary `agentsh-macwrap-es` using Apple's Endpoint Security framework.
 7. Based on pipeline result:
    - **Allow**: `ES_AUTH_RESULT_ALLOW` — process runs natively, event is audited
    - **Deny**: `ES_AUTH_RESULT_DENY` — process gets `EPERM`
-   - **Redirect**: Deny original exec, rewrite to launch `agentsh-stub` (see I/O Proxying below)
+   - **Redirect/Approve**: `ES_AUTH_RESULT_DENY` the original exec. The agentsh server then spawns `agentsh-stub` as a new child of the original parent process (using `posix_spawn` with the parent's context). The stub connects to the agentsh server via Unix socket, receives proxied stdout/stderr, and exits with the proxied exit code. The parent sees a failed exec followed by a successful stub child — agents handle this gracefully as they retry or read from the next child.
+
+> **Design note**: ES `AUTH_EXEC` does not support rewriting the target binary or argv of a pending exec. We cannot "replace" the binary mid-exec. The deny-then-respawn pattern is the correct approach for the ES framework.
 
 ### Recursion Guard
 
@@ -162,17 +166,25 @@ The ES framework IS the mechanism that EDR tools use. An ES client is never flag
 3. Check if parent PID is in the tainted process tree (kernel-side hash table)
 4. If not tainted: return immediately — zero overhead for unrelated processes
 5. If tainted:
-   - Set `CreationStatus = STATUS_ACCESS_DENIED` to block process creation
+   - Allow process creation to proceed (do NOT block with `STATUS_ACCESS_DENIED`)
+   - Immediately suspend the new process via `PsSuspendProcess`
    - Queue message to userspace via `FltSendMessage` (filter communication port)
-   - Message contains: parent PID, target image path, command line, environment
+   - Message contains: new process PID, parent PID, target image path, command line, environment
+6. Userspace decides:
+   - **Allow**: Resume the suspended process via IOCTL (`PsResumeProcess`). Zero additional overhead.
+   - **Deny**: Terminate the suspended process via `ZwTerminateProcess(STATUS_ACCESS_DENIED)`. Parent receives the expected error.
+   - **Redirect**: Terminate the suspended process, spawn `agentsh-stub.exe` as a child of the original parent (via `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`). Stub proxies I/O from the server-spawned command.
+
+> **Design note**: The suspend-then-decide pattern preserves a valid process handle for the parent. Unlike blocking `CreateProcess` with `STATUS_ACCESS_DENIED` (which prevents the parent from receiving any handle), suspending allows the parent's `CreateProcess` call to succeed, giving it a valid handle to wait on.
 
 ### Userspace Service Flow
 
-1. `agentsh-svc.exe` receives blocked exec notification via IOCTL
+1. `agentsh-svc.exe` receives suspended-process notification via filter port
 2. Sends to agentsh server API (`POST /sessions/{sid}/exec`)
 3. Pipeline runs: policy → approval → audit → execute
-4. If allowed: spawns the process via `CreateProcessAsUser` with the original user token, proxies I/O back
-5. If denied: returns denial (parent already got `ACCESS_DENIED`)
+4. If allowed: resumes the suspended process via driver IOCTL, proxies I/O back
+5. If denied: terminates the suspended process, returns denial status to parent
+6. If redirected: terminates the suspended process, spawns `agentsh-stub.exe` as child of original parent with `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`, proxies I/O from the actual command
 
 ### Taint Tree Management
 
@@ -211,18 +223,25 @@ An AI agent calls `subprocess.Popen(["bash", "-c", "ls -la"])`. The OS intercept
 ### Solution: Per-OS Stub Pattern
 
 **Linux (seccomp)**:
-The original process is suspended mid-syscall. Fail the execve with `ENOSYS`, but replace the process's fds with pipes connected to the agentsh-spawned command. The original process's shell loop reads from the pipe and gets the output. Exit code propagated via `waitpid`.
+The seccomp supervisor intercepts the execve via `SECCOMP_RET_USER_NOTIF`. For redirect/approve decisions, it uses `SECCOMP_ADDFD_FLAG_SEND` to inject a Unix socket fd into the target process, then responds to the notification by redirecting the execve to `agentsh-stub`. The stub:
+- Connects to the agentsh server over the injected Unix socket
+- Receives proxied stdout/stderr from the actual command running under the agentsh pipeline
+- Exits with the proxied exit code
+
+The parent sees a child that exec'd, produced output, and exited — normal process lifecycle.
 
 **macOS (ES)**:
-Instead of denying the exec outright, allow it but replace the target binary with `agentsh-stub`. The ES `AUTH_EXEC` event lets us modify the process before it runs. The stub binary:
+The ES handler denies the original exec (`ES_AUTH_RESULT_DENY`). The agentsh server then spawns `agentsh-stub` as a new child process. The stub:
 - Connects to the agentsh server via Unix socket
 - Receives proxied stdout/stderr from the actual command
 - Exits with the proxied exit code
 
-The parent process sees a child that spawned, produced output, and exited normally.
+The parent sees a failed exec but the agent framework retries or the wrapping shell handles the failure. For agents that use `fork+exec` patterns, the stub is spawned by the server as a sibling process.
+
+> **Note**: ES `AUTH_EXEC` does not support rewriting exec targets. The deny-then-respawn pattern is the only viable approach.
 
 **Windows**:
-Same stub pattern. The service spawns `agentsh-stub.exe` as the "child" of the original parent (using `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`), which proxies I/O from the actual command running under the agentsh pipeline.
+The driver suspends the newly created process. For redirect decisions, the service terminates the suspended process and spawns `agentsh-stub.exe` as the "child" of the original parent (using `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`), which proxies I/O from the actual command running under the agentsh pipeline. For allow decisions, the suspended process is simply resumed.
 
 ### Common Case Optimization
 
@@ -380,6 +399,7 @@ Audit-only mode for initial profiling:
 - Implement stub process and I/O proxy for redirected commands
 - Add `agentsh wrap` CLI command
 - Ship default agent policies (`agent-default`, `agent-strict`, `agent-observe`)
+- Integration tests for proxy path: exit code fidelity, stdout/stderr ordering, waitpid semantics
 - Test with: Claude Code, Codex CLI, OpenCode, Amp, Cursor, Antigravity
 
 ### Phase 2: macOS (6-8 weeks)
@@ -387,8 +407,9 @@ Audit-only mode for initial profiling:
 - Build `agentsh-macwrap-es` using Endpoint Security framework
 - Apply for ES entitlement from Apple
 - Implement System Extension packaging and installation flow
-- Port stub process pattern to macOS
+- Port stub process pattern to macOS (deny-then-respawn)
 - Notarize and sign binary
+- Integration tests for proxy path: exit code fidelity, stdout/stderr ordering, child handle validity
 - Test with all 6 agents
 
 ### Phase 3: Windows (10-14 weeks)
@@ -396,12 +417,15 @@ Audit-only mode for initial profiling:
 - Build `agentsh-drv.sys` kernel driver in C
   - Process creation callback (`PsSetCreateProcessNotifyRoutineEx`)
   - Kernel-side taint hash table
+  - Suspend-then-decide flow (not block-then-respawn)
   - Filter communication port (`FltSendMessage`)
 - Build `agentsh-svc.exe` Go service
-  - IOCTL communication with driver
+  - Filter port communication with driver
   - Pipeline routing via agentsh server API
-  - `CreateProcessAsUser` for spawning allowed processes
+  - Resume/terminate suspended processes via driver IOCTL
+  - `CreateProcessAsUser` for spawning stub processes
 - Build `agentsh-stub.exe` I/O proxy
+- Integration tests for proxy path: exit code fidelity, stdout/stderr ordering, handle/wait behavior, suspended-process lifecycle
 - EV code-sign driver
 - Document EDR whitelisting (CrowdStrike, SentinelOne, Defender, Cortex XDR)
 - Test with all 6 agents

@@ -47,6 +47,7 @@ func NewRoot(version string) *cobra.Command {
 	cmd.AddCommand(newDaemonCmd())
 	cmd.AddCommand(newTaintCmd())
 	cmd.AddCommand(newDetectCmd())
+	cmd.AddCommand(newWrapCmd())
 
 	return cmd
 }

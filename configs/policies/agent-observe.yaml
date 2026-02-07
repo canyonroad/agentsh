@@ -1,0 +1,57 @@
+# Agent Observe Policy for agentsh
+# Audit-only mode for profiling agent behavior
+
+version: 1
+name: agent-observe
+description: |
+  Audit-only policy for the profile-then-lock workflow. All operations
+  are logged but never blocked. Use this to observe what an agent does,
+  then generate a locked-down policy from the audit trail.
+
+# =============================================================================
+# COMMAND RULES
+# =============================================================================
+
+command_rules:
+  - name: audit-all-commands
+    description: Audit all commands without blocking
+    commands:
+      - "*"
+    decision: audit
+
+# =============================================================================
+# FILE OPERATION RULES
+# =============================================================================
+
+file_rules:
+  - name: audit-all-files
+    description: Audit all file operations without blocking
+    paths:
+      - "/**"
+    operations:
+      - "*"
+    decision: audit
+
+# =============================================================================
+# NETWORK OPERATION RULES
+# =============================================================================
+
+network_rules:
+  - name: audit-all-network
+    description: Audit all network connections without blocking
+    domains:
+      - "*"
+    decision: audit
+
+# =============================================================================
+# AUDIT SETTINGS - FULL LOGGING
+# =============================================================================
+
+audit:
+  log_allowed: true
+  log_denied: true
+  log_approved: true
+  include_stdout: true
+  include_stderr: true
+  include_file_content: false
+  retention_days: 30
