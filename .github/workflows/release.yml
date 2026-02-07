@@ -142,12 +142,19 @@ jobs:
         include:
           - name: debian
             dockerfile: Dockerfile.test
+            docker_run_flags: ""
           - name: fedora
             dockerfile: Dockerfile.test.rpm
+            docker_run_flags: ""
           - name: archlinux
             dockerfile: Dockerfile.test.arch
+            docker_run_flags: ""
           - name: alpine
             dockerfile: Dockerfile.test.alpine
+            docker_run_flags: ""
+          - name: ubuntu
+            dockerfile: Dockerfile.test.ubuntu
+            docker_run_flags: "--device /dev/fuse --cap-add SYS_ADMIN"
     steps:
       - uses: actions/checkout@v4
 
@@ -156,4 +163,4 @@ jobs:
           docker build -f ${{ matrix.dockerfile }} \
             --build-arg AGENTSH_TAG=${{ github.ref_name }} \
             -t agentsh-test-${{ matrix.name }}:latest .
-          docker run --rm agentsh-test-${{ matrix.name }}:latest
+          docker run --rm ${{ matrix.docker_run_flags }} agentsh-test-${{ matrix.name }}:latest
