@@ -250,7 +250,7 @@ After any recovery, complete this checklist before declaring recovery successful
 
 - [ ] Audit log integrity verified:
   ```bash
-  agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /var/lib/agentsh/events.db
+  agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /var/log/agentsh/audit.jsonl
   ```
 - [ ] Recent events are present and readable
 - [ ] Encryption/decryption working (if enabled)

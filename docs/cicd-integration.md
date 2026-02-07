@@ -34,14 +34,11 @@ jobs:
           curl -fsSL https://agentsh.dev/install.sh | bash
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Start agentsh server
+      - name: Start agentsh and create session
+        id: session
         run: |
           agentsh server &
           sleep 2
-
-      - name: Create session
-        id: session
-        run: |
           SESSION=$(agentsh session create --workspace . --policy ci-agent | jq -r '.id')
           echo "id=$SESSION" >> $GITHUB_OUTPUT
 
