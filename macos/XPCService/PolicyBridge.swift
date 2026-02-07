@@ -81,6 +81,45 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
         }
     }
 
+    // MARK: - Exec Pipeline
+
+    func checkExecPipeline(
+        executable: String,
+        args: [String],
+        pid: pid_t,
+        parentPID: pid_t,
+        sessionID: String?,
+        reply: @escaping (String, String, String?) -> Void
+    ) {
+        let request: [String: Any] = [
+            "type": "exec_check",
+            "path": executable,
+            "args": args,
+            "pid": pid,
+            "parent_pid": parentPID,
+            "session_id": sessionID ?? ""
+        ]
+        sendRequest(request) { [weak self] response in
+            let decision = response["exec_decision"] as? String ?? "allow"
+            let action = response["action"] as? String ?? "continue"
+            let rule = response["rule"] as? String
+            reply(decision, action, rule)
+        }
+    }
+
+    // MARK: - Process Muting (Recursion Guard)
+
+    func muteProcess(pid: pid_t, reply: @escaping (Bool) -> Void) {
+        // Process muting is handled locally by the ESFClient.
+        // Forward the request via a notification to the System Extension.
+        NotificationCenter.default.post(
+            name: Notification.Name("com.agentsh.muteProcess"),
+            object: nil,
+            userInfo: ["pid": pid]
+        )
+        reply(true)
+    }
+
     func resolveSession(pid: pid_t, reply: @escaping (String?) -> Void) {
         let request: [String: Any] = [
             "type": "session",
