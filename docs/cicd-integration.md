@@ -36,7 +36,7 @@ jobs:
 
       - name: Start agentsh server
         run: |
-          agentsh server start --background
+          agentsh server &
           sleep 2
 
       - name: Create session
@@ -88,7 +88,7 @@ ai-agent-task:
   before_script:
     - curl -fsSL https://agentsh.dev/install.sh | bash
     - export PATH="$HOME/.local/bin:$PATH"
-    - agentsh server start --background
+    - agentsh server &
     - sleep 2
     - export AGENTSH_SESSION=$(agentsh session create --workspace . --policy ci-agent | jq -r '.id')
   script:
@@ -135,15 +135,15 @@ The shell shim has built-in retry logic, but for reliable container startup, exp
 #!/bin/bash
 set -e
 
-# Start the agentsh daemon in the background
-agentsh daemon &
+# Start the agentsh server in the background
+agentsh server &
 
-# Wait for the daemon to be ready (polls /health endpoint)
-echo "Waiting for agentsh daemon..."
-until agentsh health 2>/dev/null; do
+# Wait for the server to be ready (polls /health endpoint)
+echo "Waiting for agentsh server..."
+until curl -sf http://127.0.0.1:18080/health >/dev/null 2>&1; do
     sleep 0.1
 done
-echo "agentsh daemon ready"
+echo "agentsh server ready"
 
 # Create a session for the workspace
 export AGENTSH_SESSION=$(agentsh session create --workspace /workspace --policy default | jq -r '.id')
@@ -165,7 +165,7 @@ services:
     environment:
       - AGENTSH_LOG_LEVEL=info
     healthcheck:
-      test: ["CMD", "agentsh", "health"]
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:18080/health"]
       interval: 5s
       timeout: 3s
       start_period: 10s
@@ -189,13 +189,15 @@ spec:
           command: ["/entrypoint.sh"]
           args: ["your-agent-command"]
           readinessProbe:
-            exec:
-              command: ["agentsh", "health"]
+            httpGet:
+              path: /health
+              port: 18080
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
-            exec:
-              command: ["agentsh", "health"]
+            httpGet:
+              path: /health
+              port: 18080
             initialDelaySeconds: 10
             periodSeconds: 10
           volumeMounts:
@@ -215,7 +217,7 @@ The shell shim (`agentsh-shell-shim`) internally calls `agentsh exec`, which has
 However, for production container deployments, explicit health checking is more reliable:
 
 1. **Container orchestration health checks** - Let Kubernetes/Docker Compose manage readiness
-2. **Explicit wait in entrypoint** - Use `until agentsh health; do sleep 0.1; done`
+2. **Explicit wait in entrypoint** - Use `until curl -sf http://127.0.0.1:18080/health; do sleep 0.1; done`
 3. **Startup ordering** - In multi-container setups, use `depends_on` with health conditions
 
 ### Daytona Integration
@@ -337,7 +339,7 @@ jobs:
 
       - name: Start agentsh server
         run: |
-          agentsh server start --background
+          agentsh server &
           sleep 2
 
       - name: Create session

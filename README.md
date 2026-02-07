@@ -323,7 +323,7 @@ agentsh exec "$SID" -- rm -rf ./tmp
 # → With default policy: prompts for approval or denies based on your rules
 
 # 5) See what happened (structured audit trail)
-agentsh exec --output json --events full "$SID" -- ls
+agentsh exec --output json --events all "$SID" -- ls
 # → events[] shows every file operation, even from subprocesses
 ```
 

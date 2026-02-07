@@ -153,7 +153,7 @@ rm -rf /tmp/restore
 systemctl start agentsh
 
 # Verify audit chain integrity
-agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /var/lib/agentsh/events.db
+agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /var/log/agentsh/audit.jsonl
 ```
 
 ### Using agentsh CLI

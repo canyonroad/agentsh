@@ -60,7 +60,7 @@ The following table defines recovery targets by scenario:
 
 5. **Verify audit chain integrity**
    ```bash
-   agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /var/lib/agentsh/events.db
+   agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /var/log/agentsh/audit.jsonl
    ```
 
 6. **Start service**
@@ -114,7 +114,7 @@ The following table defines recovery targets by scenario:
    # Extract and verify audit chain
    mkdir -p /tmp/verify
    tar -xzf /tmp/20260105.tar.gz -C /tmp/verify/
-   agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /tmp/verify/events.db
+   agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /tmp/verify/audit.jsonl
 
    # If verification passes, proceed with restore
    ```
@@ -214,11 +214,7 @@ The following table defines recovery targets by scenario:
    - Consider audit log forensic analysis
 
 4. **If encryption key compromised**:
-   - Re-encrypt audit database with new key
-   ```bash
-   agentsh audit reencrypt --old-key /etc/agentsh/audit.key \
-     --new-key /etc/agentsh/audit.key.new
-   ```
+   - Re-encrypt audit database with new key (not yet implemented — requires manual export and re-import of audit logs with new key)
 
 5. **Rotate keys in production**
    ```bash
@@ -376,7 +372,7 @@ BACKUP=$(ls -t /backup/agentsh-*.tar.gz | head -1)
 TEMP_DIR=$(mktemp -d)
 
 tar -xzf "$BACKUP" -C "$TEMP_DIR"
-agentsh audit verify --key-file /etc/agentsh/audit-integrity.key "$TEMP_DIR/events.db"
+agentsh audit verify --key-file /etc/agentsh/audit-integrity.key "$TEMP_DIR/audit.jsonl"
 RESULT=$?
 
 rm -rf "$TEMP_DIR"
