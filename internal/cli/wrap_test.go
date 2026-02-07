@@ -211,8 +211,8 @@ func (m *mockWrapClient) WatchTaints(ctx context.Context, agentOnly bool, handle
 }
 
 func TestSetupWrapInterception_CallsWrapInit(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("wrap interception is Linux-only")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("wrap interception requires Linux or macOS")
 	}
 
 	mc := &mockWrapClient{
@@ -253,6 +253,10 @@ func TestSetupWrapInterception_CallsWrapInit(t *testing.T) {
 }
 
 func TestSetupWrapInterception_EmptyWrapperBinary(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("empty wrapper binary is valid on macOS (ES interception)")
+	}
+
 	mc := &mockWrapClient{
 		wrapInitResp: types.WrapInitResponse{
 			WrapperBinary: "",
@@ -279,8 +283,8 @@ func TestSetupWrapInterception_WrapInitError(t *testing.T) {
 }
 
 func TestWrapLaunchConfig_EnvContainsSessionAndWrapper(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("wrap interception is Linux-only")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("wrap interception requires Linux or macOS")
 	}
 
 	mc := &mockWrapClient{

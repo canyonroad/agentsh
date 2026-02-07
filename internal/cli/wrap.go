@@ -110,12 +110,12 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 		return fmt.Errorf("agent not found: %s: %w", opts.agentCmd, err)
 	}
 
-	// 3. Try to set up seccomp interception (Linux only)
+	// 3. Try to set up exec interception (Linux seccomp / macOS ES)
 	var wrapCfg *wrapLaunchConfig
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		wrapCfg, err = setupWrapInterception(ctx, c, sessID, agentPath, opts.agentArgs, cfg)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "agentsh: seccomp setup failed, running without interception: %v\n", err)
+			fmt.Fprintf(os.Stderr, "agentsh: interception setup failed, running without interception: %v\n", err)
 			// Fall through to direct launch
 		}
 	}
@@ -180,7 +180,11 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 	}
 
 	if wrapCfg != nil {
-		fmt.Fprintf(os.Stderr, "agentsh: agent %s started with seccomp interception (pid: %d)\n", opts.agentCmd, agentProc.Process.Pid)
+		mechanism := "seccomp"
+		if runtime.GOOS == "darwin" {
+			mechanism = "ES"
+		}
+		fmt.Fprintf(os.Stderr, "agentsh: agent %s started with %s interception (pid: %d)\n", opts.agentCmd, mechanism, agentProc.Process.Pid)
 		// Forward the notify fd to the server in the background
 		if wrapCfg.postStart != nil {
 			go wrapCfg.postStart()
@@ -239,7 +243,10 @@ func setupWrapInterception(ctx context.Context, c client.CLIClient, sessID strin
 		return nil, fmt.Errorf("wrap-init: %w", err)
 	}
 
-	if wrapResp.WrapperBinary == "" {
+	// On Linux, the server must provide a wrapper binary for seccomp interception.
+	// On macOS, an empty WrapperBinary is valid — ES interception is system-wide
+	// via the System Extension, so the agent can run directly.
+	if wrapResp.WrapperBinary == "" && runtime.GOOS != "darwin" {
 		return nil, fmt.Errorf("server returned empty wrapper binary")
 	}
 
