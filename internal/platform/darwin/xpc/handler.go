@@ -64,5 +64,41 @@ func (a *PolicyAdapter) ResolveSession(pid int32) string {
 	return a.sessions.SessionForPID(pid)
 }
 
-// Compile-time interface check
+// CheckExec evaluates a command through the exec pipeline, returning
+// the full decision and action for the ESF client to act on.
+func (a *PolicyAdapter) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) ExecCheckResult {
+	if a.engine == nil {
+		return ExecCheckResult{
+			Decision: "allow",
+			Action:   "continue",
+			Rule:     "no-policy",
+		}
+	}
+
+	dec := a.engine.CheckCommand(executable, args)
+	decision := string(dec.PolicyDecision)
+
+	var action string
+	switch dec.PolicyDecision {
+	case types.DecisionAllow, types.DecisionAudit:
+		action = "continue"
+	case types.DecisionDeny:
+		action = "deny"
+	case types.DecisionApprove, types.DecisionRedirect:
+		action = "redirect"
+	default:
+		// Unknown decisions default to continue (fail-open)
+		action = "continue"
+	}
+
+	return ExecCheckResult{
+		Decision: decision,
+		Action:   action,
+		Rule:     dec.Rule,
+		Message:  dec.Message,
+	}
+}
+
+// Compile-time interface checks
 var _ PolicyHandler = (*PolicyAdapter)(nil)
+var _ ExecHandler = (*PolicyAdapter)(nil)

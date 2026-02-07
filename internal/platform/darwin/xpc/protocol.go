@@ -8,7 +8,8 @@ const (
 	RequestTypeNetwork RequestType = "network"
 	RequestTypeCommand RequestType = "command"
 	RequestTypeSession RequestType = "session"
-	RequestTypeEvent   RequestType = "event"
+	RequestTypeEvent     RequestType = "event"
+	RequestTypeExecCheck RequestType = "exec_check"
 
 	// PNACL (Process Network ACL) request types
 	RequestTypePNACLCheck        RequestType = "pnacl_check"
@@ -65,6 +66,10 @@ type PolicyResponse struct {
 	Rule      string `json:"rule,omitempty"`
 	Message   string `json:"message,omitempty"`
 	SessionID string `json:"session_id,omitempty"` // for session lookups
+
+	// Exec pipeline response fields
+	Action       string `json:"action,omitempty"`        // "continue", "redirect", "deny" (exec pipeline action)
+	ExecDecision string `json:"exec_decision,omitempty"` // "allow", "deny", "approve", "redirect", "audit"
 
 	// PNACL-specific response fields
 	Decision  string             `json:"decision,omitempty"`  // allow, deny, approve, audit, etc.

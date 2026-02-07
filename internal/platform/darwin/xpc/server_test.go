@@ -593,3 +593,276 @@ func TestIsAllowingDecision(t *testing.T) {
 		})
 	}
 }
+
+// mockDenyPolicyEngine implements a deny-all policy for testing exec_check fallback.
+type mockDenyPolicyEngine struct {
+	mockPolicyEngine
+}
+
+func (m *mockDenyPolicyEngine) CheckCommand(cmd string, args []string) (bool, string) {
+	return false, "deny-all"
+}
+
+// testExecHandler is a mock implementation of ExecHandler for unit tests.
+type testExecHandler struct {
+	result ExecCheckResult
+}
+
+func (h *testExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) ExecCheckResult {
+	return h.result
+}
+
+func TestServer_HandleExecCheck(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "policy.sock")
+
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+
+	execHandler := &testExecHandler{
+		result: ExecCheckResult{
+			Decision: "allow",
+			Action:   "continue",
+			Rule:     "allow-ls",
+			Message:  "",
+		},
+	}
+	srv.SetExecHandler(execHandler)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	t.Run("allow_decision", func(t *testing.T) {
+		req := PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "/usr/bin/ls",
+			Args:      []string{"-la"},
+			PID:       1234,
+			ParentPID: 1,
+			SessionID: "session-1",
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		if !resp.Allow {
+			t.Error("expected Allow=true")
+		}
+		if resp.Action != "continue" {
+			t.Errorf("action: got %q, want %q", resp.Action, "continue")
+		}
+		if resp.ExecDecision != "allow" {
+			t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "allow")
+		}
+		if resp.Rule != "allow-ls" {
+			t.Errorf("rule: got %q, want %q", resp.Rule, "allow-ls")
+		}
+	})
+
+	t.Run("deny_decision", func(t *testing.T) {
+		execHandler.result = ExecCheckResult{
+			Decision: "deny",
+			Action:   "deny",
+			Rule:     "deny-rm",
+			Message:  "command denied by policy",
+		}
+
+		req := PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "/bin/rm",
+			Args:      []string{"-rf", "/"},
+			PID:       5678,
+			ParentPID: 1,
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		if resp.Allow {
+			t.Error("expected Allow=false")
+		}
+		if resp.Action != "deny" {
+			t.Errorf("action: got %q, want %q", resp.Action, "deny")
+		}
+		if resp.ExecDecision != "deny" {
+			t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "deny")
+		}
+		if resp.Rule != "deny-rm" {
+			t.Errorf("rule: got %q, want %q", resp.Rule, "deny-rm")
+		}
+		if resp.Message != "command denied by policy" {
+			t.Errorf("message: got %q, want %q", resp.Message, "command denied by policy")
+		}
+	})
+
+	t.Run("redirect_decision", func(t *testing.T) {
+		execHandler.result = ExecCheckResult{
+			Decision: "redirect",
+			Action:   "redirect",
+			Rule:     "redirect-git",
+			Message:  "redirecting to agentsh-stub",
+		}
+
+		req := PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "/usr/bin/git",
+			Args:      []string{"push"},
+			PID:       9999,
+			ParentPID: 1,
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		if resp.Allow {
+			t.Error("expected Allow=false for redirect action")
+		}
+		if resp.Action != "redirect" {
+			t.Errorf("action: got %q, want %q", resp.Action, "redirect")
+		}
+		if resp.ExecDecision != "redirect" {
+			t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "redirect")
+		}
+	})
+
+	t.Run("audit_decision_continues", func(t *testing.T) {
+		execHandler.result = ExecCheckResult{
+			Decision: "audit",
+			Action:   "continue",
+			Rule:     "audit-all",
+		}
+
+		req := PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "/usr/bin/curl",
+			Args:      []string{"https://example.com"},
+			PID:       2222,
+			ParentPID: 1,
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		if !resp.Allow {
+			t.Error("expected Allow=true for audit/continue")
+		}
+		if resp.Action != "continue" {
+			t.Errorf("action: got %q, want %q", resp.Action, "continue")
+		}
+		if resp.ExecDecision != "audit" {
+			t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "audit")
+		}
+	})
+}
+
+func TestServer_ExecCheckNoHandler_Allow(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "policy.sock")
+
+	// Use allow-all mock; do NOT set an exec handler
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	req := PolicyRequest{
+		Type:      RequestTypeExecCheck,
+		Path:      "/usr/bin/ls",
+		Args:      []string{"-la"},
+		PID:       1234,
+		ParentPID: 1,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	var resp PolicyResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !resp.Allow {
+		t.Error("expected Allow=true (fail-open) when no exec handler")
+	}
+	if resp.Action != "continue" {
+		t.Errorf("action: got %q, want %q", resp.Action, "continue")
+	}
+	if resp.Rule != "test-allow" {
+		t.Errorf("rule: got %q, want %q", resp.Rule, "test-allow")
+	}
+	// ExecDecision should be empty when falling back to command handler
+	if resp.ExecDecision != "" {
+		t.Errorf("exec_decision: got %q, want empty", resp.ExecDecision)
+	}
+}
+
+func TestServer_ExecCheckNoHandler_Deny(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "policy.sock")
+
+	// Use deny-all mock; do NOT set an exec handler
+	srv := NewServer(sockPath, &mockDenyPolicyEngine{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	req := PolicyRequest{
+		Type:      RequestTypeExecCheck,
+		Path:      "/bin/rm",
+		Args:      []string{"-rf", "/"},
+		PID:       1234,
+		ParentPID: 1,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	var resp PolicyResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.Allow {
+		t.Error("expected Allow=false when command handler denies")
+	}
+	if resp.Action != "deny" {
+		t.Errorf("action: got %q, want %q", resp.Action, "deny")
+	}
+	if resp.Rule != "deny-all" {
+		t.Errorf("rule: got %q, want %q", resp.Rule, "deny-all")
+	}
+}

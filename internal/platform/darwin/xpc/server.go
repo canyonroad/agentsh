@@ -37,6 +37,19 @@ type PNACLHandler interface {
 	Configure(blockingEnabled bool, decisionTimeout float64, failOpen bool) bool
 }
 
+// ExecHandler handles exec pipeline checks from the ESF client.
+type ExecHandler interface {
+	CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) ExecCheckResult
+}
+
+// ExecCheckResult contains the full exec pipeline decision.
+type ExecCheckResult struct {
+	Decision string // "allow", "deny", "approve", "redirect", "audit"
+	Action   string // "continue", "redirect", "deny"
+	Rule     string
+	Message  string
+}
+
 // PNACLCheckRequest contains all fields for a PNACL network check.
 type PNACLCheckRequest struct {
 	IP             string
@@ -68,6 +81,7 @@ type Server struct {
 	sockPath     string
 	handler      PolicyHandler
 	pnaclHandler PNACLHandler
+	execHandler  ExecHandler
 	listener     net.Listener
 	mu           sync.Mutex
 	wg           sync.WaitGroup
@@ -92,6 +106,14 @@ func (s *Server) SetPNACLHandler(h PNACLHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pnaclHandler = h
+}
+
+// SetExecHandler sets the handler for exec pipeline checks.
+// If not set, exec_check requests fall back to the basic command handler.
+func (s *Server) SetExecHandler(h ExecHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.execHandler = h
 }
 
 // Ready returns a channel that is closed when the server is listening.
@@ -205,6 +227,9 @@ func (s *Server) handleRequest(req *PolicyRequest) PolicyResponse {
 		// Events are fire-and-forget, always acknowledge
 		return PolicyResponse{Allow: true}
 
+	case RequestTypeExecCheck:
+		return s.handleExecCheck(req)
+
 	// PNACL request types
 	case RequestTypePNACLCheck:
 		return s.handlePNACLCheck(req)
@@ -232,6 +257,31 @@ func (s *Server) getPNACLHandler() PNACLHandler {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.pnaclHandler
+}
+
+func (s *Server) handleExecCheck(req *PolicyRequest) PolicyResponse {
+	s.mu.Lock()
+	h := s.execHandler
+	s.mu.Unlock()
+
+	if h == nil {
+		// No exec handler — fall back to simple allow/deny via policy handler
+		allow, rule := s.handler.CheckCommand(req.Path, req.Args)
+		action := "continue"
+		if !allow {
+			action = "deny"
+		}
+		return PolicyResponse{Allow: allow, Rule: rule, Action: action}
+	}
+
+	result := h.CheckExec(req.Path, req.Args, req.PID, req.ParentPID, req.SessionID)
+	return PolicyResponse{
+		Allow:        result.Action == "continue",
+		Rule:         result.Rule,
+		Action:       result.Action,
+		ExecDecision: result.Decision,
+		Message:      result.Message,
+	}
 }
 
 func (s *Server) handlePNACLCheck(req *PolicyRequest) PolicyResponse {

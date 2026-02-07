@@ -181,6 +181,147 @@ func TestPolicyAdapter_CheckCommand(t *testing.T) {
 	})
 }
 
+func TestPolicyAdapter_CheckExec(t *testing.T) {
+	t.Run("allow_returns_continue", func(t *testing.T) {
+		p := &policy.Policy{
+			Version: 1,
+			Name:    "test",
+			CommandRules: []policy.CommandRule{
+				{Name: "allow-ls", Commands: []string{"ls"}, Decision: "allow"},
+			},
+		}
+		engine, err := policy.NewEngine(p, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		adapter := NewPolicyAdapter(engine, nil)
+		result := adapter.CheckExec("ls", []string{"-la"}, 1234, 1, "session-1")
+
+		if result.Decision != "allow" {
+			t.Errorf("decision: got %q, want %q", result.Decision, "allow")
+		}
+		if result.Action != "continue" {
+			t.Errorf("action: got %q, want %q", result.Action, "continue")
+		}
+		if result.Rule != "allow-ls" {
+			t.Errorf("rule: got %q, want %q", result.Rule, "allow-ls")
+		}
+	})
+
+	t.Run("deny_returns_deny", func(t *testing.T) {
+		p := &policy.Policy{
+			Version: 1,
+			Name:    "test",
+			CommandRules: []policy.CommandRule{
+				{Name: "deny-rm", Commands: []string{"rm"}, Decision: "deny"},
+				{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
+			},
+		}
+		engine, err := policy.NewEngine(p, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		adapter := NewPolicyAdapter(engine, nil)
+		result := adapter.CheckExec("rm", []string{"-rf", "/"}, 5678, 1, "session-1")
+
+		if result.Decision != "deny" {
+			t.Errorf("decision: got %q, want %q", result.Decision, "deny")
+		}
+		if result.Action != "deny" {
+			t.Errorf("action: got %q, want %q", result.Action, "deny")
+		}
+		if result.Rule != "deny-rm" {
+			t.Errorf("rule: got %q, want %q", result.Rule, "deny-rm")
+		}
+	})
+
+	t.Run("redirect_returns_redirect", func(t *testing.T) {
+		p := &policy.Policy{
+			Version: 1,
+			Name:    "test",
+			CommandRules: []policy.CommandRule{
+				{Name: "redirect-git", Commands: []string{"git"}, Decision: "redirect"},
+				{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
+			},
+		}
+		engine, err := policy.NewEngine(p, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		adapter := NewPolicyAdapter(engine, nil)
+		result := adapter.CheckExec("git", []string{"push"}, 9999, 1, "session-1")
+
+		if result.Decision != "redirect" {
+			t.Errorf("decision: got %q, want %q", result.Decision, "redirect")
+		}
+		if result.Action != "redirect" {
+			t.Errorf("action: got %q, want %q", result.Action, "redirect")
+		}
+		if result.Rule != "redirect-git" {
+			t.Errorf("rule: got %q, want %q", result.Rule, "redirect-git")
+		}
+	})
+
+	t.Run("audit_returns_continue", func(t *testing.T) {
+		p := &policy.Policy{
+			Version: 1,
+			Name:    "test",
+			CommandRules: []policy.CommandRule{
+				{Name: "audit-curl", Commands: []string{"curl"}, Decision: "audit"},
+				{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
+			},
+		}
+		engine, err := policy.NewEngine(p, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		adapter := NewPolicyAdapter(engine, nil)
+		result := adapter.CheckExec("curl", []string{"https://example.com"}, 2222, 1, "session-1")
+
+		if result.Decision != "audit" {
+			t.Errorf("decision: got %q, want %q", result.Decision, "audit")
+		}
+		if result.Action != "continue" {
+			t.Errorf("action: got %q, want %q", result.Action, "continue")
+		}
+		if result.Rule != "audit-curl" {
+			t.Errorf("rule: got %q, want %q", result.Rule, "audit-curl")
+		}
+	})
+
+	t.Run("approve_returns_redirect", func(t *testing.T) {
+		p := &policy.Policy{
+			Version: 1,
+			Name:    "test",
+			CommandRules: []policy.CommandRule{
+				{Name: "approve-sudo", Commands: []string{"sudo"}, Decision: "approve"},
+				{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
+			},
+		}
+		engine, err := policy.NewEngine(p, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		adapter := NewPolicyAdapter(engine, nil)
+		result := adapter.CheckExec("sudo", []string{"ls"}, 3333, 1, "session-1")
+
+		if result.Decision != "approve" {
+			t.Errorf("decision: got %q, want %q", result.Decision, "approve")
+		}
+		if result.Action != "redirect" {
+			t.Errorf("action: got %q, want %q", result.Action, "redirect")
+		}
+		if result.Rule != "approve-sudo" {
+			t.Errorf("rule: got %q, want %q", result.Rule, "approve-sudo")
+		}
+	})
+}
+
 // mockSessionResolver implements SessionResolver for testing.
 type mockSessionResolver struct {
 	sessions map[int32]string
@@ -267,6 +408,19 @@ func TestPolicyAdapter_NilEngine(t *testing.T) {
 		session := adapter.ResolveSession(1234)
 		if session != "" {
 			t.Errorf("expected empty session, got %q", session)
+		}
+	})
+
+	t.Run("CheckExec returns no-policy", func(t *testing.T) {
+		result := adapter.CheckExec("/usr/bin/ls", []string{"-la"}, 1234, 1, "session-1")
+		if result.Decision != "allow" {
+			t.Errorf("decision: got %q, want %q", result.Decision, "allow")
+		}
+		if result.Action != "continue" {
+			t.Errorf("action: got %q, want %q", result.Action, "continue")
+		}
+		if result.Rule != "no-policy" {
+			t.Errorf("rule: got %q, want %q", result.Rule, "no-policy")
 		}
 	})
 }
