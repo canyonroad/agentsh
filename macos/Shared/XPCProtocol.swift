@@ -43,6 +43,22 @@ import Foundation
         reply: @escaping (Bool) -> Void
     )
 
+    // MARK: - Exec Pipeline
+
+    /// Check command execution through the full exec pipeline.
+    /// Returns: (decision, action, rule) where:
+    ///   - decision: "allow", "deny", "approve", "redirect", "audit"
+    ///   - action: "continue" (allow in-place), "redirect" (deny + spawn stub), "deny" (block)
+    ///   - rule: The matched policy rule name
+    func checkExecPipeline(
+        executable: String,
+        args: [String],
+        pid: pid_t,
+        parentPID: pid_t,
+        sessionID: String?,
+        reply: @escaping (String, String, String?) -> Void  // (decision, action, rule)
+    )
+
     // MARK: - PNACL (Process Network ACL)
 
     /// Check network connection with full process identification for PNACL.

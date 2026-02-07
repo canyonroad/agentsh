@@ -162,21 +162,56 @@ class ESFClient {
     private func handleAuthExec(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
         guard let client = getClient() else { return }
 
-        // Copy message for async callback
+        // Copy message for async callback - message only valid during sync callback
         guard let messageCopy = es_copy_message(event) else {
             es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
             return
         }
 
-        let execPath = String(cString: event.pointee.event.exec.target.pointee.executable.pointee.path.data)
+        let execEvent = event.pointee.event.exec
+        let execPath = String(cString: execEvent.target.pointee.executable.pointee.path.data)
 
-        xpcProxy?.checkCommand(executable: execPath, args: [], pid: pid, sessionID: nil) { [weak self] allow, _ in
+        // Extract argv from the exec event
+        let argc = es_exec_arg_count(&event.pointee.event.exec)
+        var args: [String] = []
+        for i in 0..<argc {
+            let arg = es_exec_arg(&event.pointee.event.exec, i)
+            args.append(String(cString: arg.data))
+        }
+
+        let parentPID = event.pointee.process.pointee.ppid
+
+        xpcProxy?.checkExecPipeline(
+            executable: execPath,
+            args: args,
+            pid: pid,
+            parentPID: parentPID,
+            sessionID: nil
+        ) { [weak self] decision, action, rule in
             guard let client = self?.getClient() else {
                 es_free_message(messageCopy)
                 return
             }
-            let result: es_auth_result_t = allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
-            es_respond_auth_result(client, messageCopy, result, false)
+
+            switch action {
+            case "continue":
+                // Allow exec in-place (common case, zero overhead)
+                es_respond_auth_result(client, messageCopy, ES_AUTH_RESULT_ALLOW, false)
+
+            case "deny":
+                // Block the exec
+                es_respond_auth_result(client, messageCopy, ES_AUTH_RESULT_DENY, false)
+
+            case "redirect":
+                // Deny the exec, then spawn stub (handled server-side via Go exec pipeline)
+                es_respond_auth_result(client, messageCopy, ES_AUTH_RESULT_DENY, false)
+
+            default:
+                // Unknown action, fail-open
+                NSLog("ESFClient: unknown action '\(action)' for exec \(execPath), allowing")
+                es_respond_auth_result(client, messageCopy, ES_AUTH_RESULT_ALLOW, false)
+            }
+
             es_free_message(messageCopy)
         }
     }
