@@ -39,7 +39,7 @@ func TestWrapInit_NotLinux(t *testing.T) {
 	app, mgr := newTestAppForWrap(t, cfg)
 
 	// Create a session
-	s, err := mgr.Create("/tmp", "default")
+	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestWrapInit_WrapperNotFound(t *testing.T) {
 	cfg.Sandbox.UnixSockets.WrapperBin = "nonexistent-wrapper-binary-xyz-12345"
 	app, mgr := newTestAppForWrap(t, cfg)
 
-	s, err := mgr.Create("/tmp", "default")
+	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestWrapInit_Success(t *testing.T) {
 	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
 	app, mgr := newTestAppForWrap(t, cfg)
 
-	s, err := mgr.Create("/tmp", "default")
+	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestWrapInit_SeccompConfigContent(t *testing.T) {
 	cfg.Sandbox.Seccomp.UnixSocket.Enabled = true
 	app, mgr := newTestAppForWrap(t, cfg)
 
-	s, err := mgr.Create("/tmp", "default")
+	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
