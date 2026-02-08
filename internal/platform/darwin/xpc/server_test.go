@@ -19,11 +19,16 @@ var sockCounter atomic.Int64
 
 // testSockPath returns a short, unique Unix socket path safe for macOS.
 // macOS limits sun_path to 104 bytes; $TMPDIR paths (e.g. /var/folders/...)
-// can be long and exceed this. This helper uses /tmp with a short unique name.
+// can be long and exceed this. On macOS we use /tmp explicitly; on other
+// platforms we use the default temp dir.
 func testSockPath(t *testing.T) string {
 	t.Helper()
 	n := sockCounter.Add(1)
-	dir, err := os.MkdirTemp("/tmp", fmt.Sprintf("xpc%d", n))
+	base := ""
+	if runtime.GOOS == "darwin" {
+		base = "/tmp"
+	}
+	dir, err := os.MkdirTemp(base, fmt.Sprintf("xpc%d", n))
 	if err != nil {
 		t.Fatal(err)
 	}
