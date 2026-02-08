@@ -200,3 +200,42 @@ func (r *recordingChecker) CheckCommand(cmd, cmdLine string) WinExecPolicyResult
 	}
 	return r.result
 }
+
+func TestWinExecHandler_NilRequestTerminates(t *testing.T) {
+	handler := NewWinExecHandler(&mockExecPolicyChecker{
+		decision:          "allow",
+		effectiveDecision: "allow",
+	}, "")
+
+	decision := handler.HandleSuspended(nil)
+	if decision != ExecDecisionTerminate {
+		t.Errorf("nil request should terminate, got %d", decision)
+	}
+}
+
+func TestWinExecHandler_EmptyEffectiveDecisionFallback(t *testing.T) {
+	// When EffectiveDecision is empty, should fall back to Decision
+	handler := NewWinExecHandler(&mockExecPolicyChecker{
+		decision:          "deny",
+		effectiveDecision: "", // Empty, should fall back to Decision
+	}, "")
+
+	req := &SuspendedProcessRequest{ProcessId: 1234}
+	decision := handler.HandleSuspended(req)
+	if decision != ExecDecisionTerminate {
+		t.Errorf("empty effectiveDecision with deny decision should terminate, got %d", decision)
+	}
+}
+
+func TestWinExecHandler_CaseInsensitiveDecision(t *testing.T) {
+	handler := NewWinExecHandler(&mockExecPolicyChecker{
+		decision:          "ALLOW",
+		effectiveDecision: "Allow",
+	}, "")
+
+	req := &SuspendedProcessRequest{ProcessId: 1234}
+	decision := handler.HandleSuspended(req)
+	if decision != ExecDecisionResume {
+		t.Errorf("mixed-case 'Allow' should map to resume, got %d", decision)
+	}
+}

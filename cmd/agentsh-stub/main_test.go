@@ -1,14 +1,11 @@
 package main
 
-import (
-	"os"
-	"testing"
-)
+import "testing"
 
 func TestRunNeitherEnvSet(t *testing.T) {
 	// Ensure neither env var is set
-	os.Unsetenv("AGENTSH_STUB_PIPE")
-	os.Unsetenv("AGENTSH_STUB_FD")
+	t.Setenv("AGENTSH_STUB_PIPE", "")
+	t.Setenv("AGENTSH_STUB_FD", "")
 
 	code := run()
 	if code != 126 {
@@ -17,9 +14,8 @@ func TestRunNeitherEnvSet(t *testing.T) {
 }
 
 func TestRunInvalidFD(t *testing.T) {
-	os.Unsetenv("AGENTSH_STUB_PIPE")
-	os.Setenv("AGENTSH_STUB_FD", "not-a-number")
-	defer os.Unsetenv("AGENTSH_STUB_FD")
+	t.Setenv("AGENTSH_STUB_PIPE", "")
+	t.Setenv("AGENTSH_STUB_FD", "not-a-number")
 
 	code := run()
 	if code != 126 {

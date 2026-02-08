@@ -1,5 +1,7 @@
 package windows
 
+import "strings"
+
 // WinExecPolicyChecker evaluates exec policy for a command.
 type WinExecPolicyChecker interface {
 	CheckCommand(cmd, cmdLine string) WinExecPolicyResult
@@ -30,6 +32,10 @@ func NewWinExecHandler(checker WinExecPolicyChecker, stubBinary string) *WinExec
 // HandleSuspended evaluates the policy for a suspended process and returns
 // the appropriate ExecDecision.
 func (h *WinExecHandler) HandleSuspended(req *SuspendedProcessRequest) ExecDecision {
+	if req == nil {
+		return ExecDecisionTerminate
+	}
+
 	if h.policyChecker == nil {
 		// Fail-open: resume if no policy checker
 		return ExecDecisionResume
@@ -43,7 +49,7 @@ func (h *WinExecHandler) HandleSuspended(req *SuspendedProcessRequest) ExecDecis
 		decision = result.Decision
 	}
 
-	switch decision {
+	switch strings.ToLower(decision) {
 	case "allow", "audit":
 		return ExecDecisionResume
 	case "deny":

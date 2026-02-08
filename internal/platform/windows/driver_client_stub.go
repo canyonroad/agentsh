@@ -229,13 +229,16 @@ func (c *DriverClient) SetSuspendedProcessHandler(handler SuspendedProcessHandle
 }
 
 // handleSuspendedProcess decodes a MsgProcessSuspended message, calls the handler,
-// and builds the appropriate reply. Exported for testing on non-Windows.
+// and builds the appropriate reply.
 func (c *DriverClient) handleSuspendedProcess(msg []byte, reply []byte) int {
 	const maxPath = 520
 	const maxCmdLine = 2048
 	const minSize = 16 + 8 + 4 + 4 + 8 + 8 // header + token + pid + ppid + createTime + padding
 
 	if len(msg) < minSize {
+		return 0
+	}
+	if len(reply) < 24 {
 		return 0
 	}
 

@@ -17,7 +17,11 @@ func run() int {
 	// Check for named pipe first (Windows)
 	pipeName := os.Getenv("AGENTSH_STUB_PIPE")
 	if pipeName != "" {
-		return runWithPipe(pipeName)
+		code := runWithPipe(pipeName)
+		if code >= 0 {
+			return code
+		}
+		// Negative return means pipe not supported on this platform; fall through to fd
 	}
 
 	// Fall back to fd (Unix)

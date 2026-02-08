@@ -494,6 +494,9 @@ func (c *DriverClient) handleSuspendedProcess(msg []byte, reply []byte) int {
 	if len(msg) < minSize {
 		return 0
 	}
+	if len(reply) < 24 {
+		return 0
+	}
 
 	requestId := binary.LittleEndian.Uint64(msg[8:16])
 
