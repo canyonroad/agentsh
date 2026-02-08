@@ -34,6 +34,9 @@ func TestWrapInit_NotLinux(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		t.Skip("this test only runs on non-Linux platforms")
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("wrap is supported on Windows via driver")
+	}
 
 	cfg := &config.Config{}
 	app, mgr := newTestAppForWrap(t, cfg)

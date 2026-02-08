@@ -262,6 +262,9 @@ func TestSetupWrapInterception_EmptyWrapperBinary(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("empty wrapper binary is valid on macOS (ES interception)")
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("empty wrapper binary is valid on Windows (driver interception)")
+	}
 
 	mc := &mockWrapClient{
 		wrapInitResp: types.WrapInitResponse{

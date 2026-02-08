@@ -30,6 +30,11 @@ const (
 	MsgGetMetrics          = 105
 	MsgMetricsReply        = 106
 	MsgExcludeProcess      = 107
+
+	// Exec interception messages
+	MsgProcessSuspended = 200
+	MsgResumeProcess    = 201
+	MsgTerminateProcess = 202
 )
 
 // Driver client version
@@ -100,6 +105,28 @@ type RegistryRequest struct {
 // RegistryPolicyHandler is called when the driver requests a registry policy decision
 type RegistryPolicyHandler func(req *RegistryRequest) (PolicyDecision, uint32)
 
+// ExecDecision represents the decision for a suspended process
+type ExecDecision uint32
+
+const (
+	ExecDecisionResume    ExecDecision = 0
+	ExecDecisionTerminate ExecDecision = 1
+	ExecDecisionRedirect  ExecDecision = 2
+)
+
+// SuspendedProcessRequest contains information about a process suspended by the driver
+type SuspendedProcessRequest struct {
+	SessionToken uint64
+	ProcessId    uint32
+	ParentId     uint32
+	CreateTime   uint64
+	ImagePath    string
+	CommandLine  string
+}
+
+// SuspendedProcessHandler is called when the driver notifies about a suspended process
+type SuspendedProcessHandler func(req *SuspendedProcessRequest) ExecDecision
+
 // FailMode represents the driver fail mode
 type FailMode uint32
 
@@ -146,6 +173,7 @@ type DriverClient struct {
 	processHandler        ProcessEventHandler
 	filePolicyHandler     FilePolicyHandler
 	registryPolicyHandler RegistryPolicyHandler
+	suspendedHandler      SuspendedProcessHandler
 }
 
 // NewDriverClient creates a new driver client
@@ -250,6 +278,13 @@ func (c *DriverClient) SetRegistryPolicyHandler(handler RegistryPolicyHandler) {
 	c.registryPolicyHandler = handler
 }
 
+// SetSuspendedProcessHandler sets the callback for suspended process notifications
+func (c *DriverClient) SetSuspendedProcessHandler(handler SuspendedProcessHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.suspendedHandler = handler
+}
+
 // messageLoop handles incoming messages from the driver
 func (c *DriverClient) messageLoop() {
 	defer c.wg.Done()
@@ -306,6 +341,8 @@ func (c *DriverClient) handleMessage(msg []byte, reply []byte) int {
 		return c.handleProcessEvent(msg, true)
 	case MsgProcessTerminated:
 		return c.handleProcessEvent(msg, false)
+	case MsgProcessSuspended:
+		return c.handleSuspendedProcess(msg, reply)
 	default:
 		// Unknown message type
 		return 0
@@ -443,6 +480,72 @@ func (c *DriverClient) handleRegistryPolicyCheck(msg []byte, reply []byte) int {
 	binary.LittleEndian.PutUint64(reply[8:16], requestId)
 	binary.LittleEndian.PutUint32(reply[16:20], uint32(decision))
 	binary.LittleEndian.PutUint32(reply[20:24], cacheTTL)
+
+	return 24
+}
+
+// handleSuspendedProcess decodes a MsgProcessSuspended message, calls the handler,
+// and builds the appropriate reply.
+func (c *DriverClient) handleSuspendedProcess(msg []byte, reply []byte) int {
+	const maxPath = 520
+	const maxCmdLine = 2048
+	const minSize = 16 + 8 + 4 + 4 + 8 + 8 // header + token + pid + ppid + createTime + padding
+
+	if len(msg) < minSize {
+		return 0
+	}
+	if len(reply) < 24 {
+		return 0
+	}
+
+	requestId := binary.LittleEndian.Uint64(msg[8:16])
+
+	req := &SuspendedProcessRequest{
+		SessionToken: binary.LittleEndian.Uint64(msg[16:24]),
+		ProcessId:    binary.LittleEndian.Uint32(msg[24:28]),
+		ParentId:     binary.LittleEndian.Uint32(msg[28:32]),
+		CreateTime:   binary.LittleEndian.Uint64(msg[32:40]),
+	}
+
+	// Decode imagePath (UTF-16LE at offset 48)
+	if len(msg) >= 48+maxPath*2 {
+		req.ImagePath = utf16Decode(msg[48 : 48+maxPath*2])
+	}
+	// Decode cmdLine (UTF-16LE at offset 48 + maxPath*2)
+	cmdLineStart := 48 + maxPath*2
+	if len(msg) >= cmdLineStart+maxCmdLine*2 {
+		req.CommandLine = utf16Decode(msg[cmdLineStart : cmdLineStart+maxCmdLine*2])
+	}
+
+	// Call handler or default to resume (fail-open)
+	c.mu.Lock()
+	handler := c.suspendedHandler
+	c.mu.Unlock()
+
+	decision := ExecDecisionResume
+	if handler != nil {
+		decision = handler(req)
+	}
+
+	// Build reply: header(16) + decision(4) + reserved(4) = 24
+	var replyMsgType uint32
+	switch decision {
+	case ExecDecisionResume:
+		replyMsgType = MsgResumeProcess
+	case ExecDecisionTerminate:
+		replyMsgType = MsgTerminateProcess
+	case ExecDecisionRedirect:
+		// Redirect: tell driver to terminate, Go-side handles the redirect
+		replyMsgType = MsgTerminateProcess
+	default:
+		replyMsgType = MsgResumeProcess
+	}
+
+	binary.LittleEndian.PutUint32(reply[0:4], replyMsgType)
+	binary.LittleEndian.PutUint32(reply[4:8], 24)
+	binary.LittleEndian.PutUint64(reply[8:16], requestId)
+	binary.LittleEndian.PutUint32(reply[16:20], uint32(decision))
+	binary.LittleEndian.PutUint32(reply[20:24], 0) // reserved
 
 	return 24
 }

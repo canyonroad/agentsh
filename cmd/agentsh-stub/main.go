@@ -14,9 +14,24 @@ func main() {
 }
 
 func run() int {
+	// Check for named pipe first (Windows)
+	pipeName := os.Getenv("AGENTSH_STUB_PIPE")
+	if pipeName != "" {
+		code := runWithPipe(pipeName)
+		if code >= 0 {
+			return code
+		}
+		// Negative return means pipe not supported on this platform; fall through to fd
+	}
+
+	// Fall back to fd (Unix)
 	fdStr := os.Getenv("AGENTSH_STUB_FD")
 	if fdStr == "" {
-		fmt.Fprintf(os.Stderr, "agentsh-stub: AGENTSH_STUB_FD not set\n")
+		if pipeName != "" {
+			fmt.Fprintf(os.Stderr, "agentsh-stub: pipe transport not supported on this platform and AGENTSH_STUB_FD not set\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "agentsh-stub: neither AGENTSH_STUB_PIPE nor AGENTSH_STUB_FD set\n")
+		}
 		return 126
 	}
 
@@ -26,7 +41,6 @@ func run() int {
 		return 126
 	}
 
-	// Convert the file descriptor to a net.Conn via os.NewFile + net.FileConn.
 	f := os.NewFile(uintptr(fd), "agentsh-stub-socket")
 	if f == nil {
 		fmt.Fprintf(os.Stderr, "agentsh-stub: failed to open fd %d\n", fd)
@@ -34,7 +48,7 @@ func run() int {
 	}
 
 	conn, err := net.FileConn(f)
-	f.Close() // Close the os.File; the net.Conn holds its own dup.
+	f.Close()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agentsh-stub: failed to create connection from fd %d: %v\n", fd, err)
 		return 126
