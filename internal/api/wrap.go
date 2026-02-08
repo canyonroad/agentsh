@@ -100,7 +100,12 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// Create a private temp directory for the notify socket to prevent
 	// other local users from connecting first (security: socket path injection).
 	// Sanitize session ID to a safe basename to prevent path traversal.
+	// Truncate to 36 chars (UUID length) to keep the Unix socket path
+	// under the ~108 byte platform limit.
 	safeID := filepath.Base(sessionID)
+	if len(safeID) > 36 {
+		safeID = safeID[:36]
+	}
 	notifyDir, err := os.MkdirTemp("", "agentsh-wrap-*")
 	if err != nil {
 		return types.WrapInitResponse{}, http.StatusInternalServerError, err
@@ -113,6 +118,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 
 	listener, err := net.Listen("unix", notifySocketPath)
 	if err != nil {
+		os.RemoveAll(notifyDir)
 		return types.WrapInitResponse{}, http.StatusInternalServerError, err
 	}
 

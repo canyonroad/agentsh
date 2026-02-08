@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -52,6 +53,33 @@ func TestServerHandler_NonZeroExit(t *testing.T) {
 	exitCode, err := RunProxy(stubConn, nil, stdout, stderr)
 	require.NoError(t, err)
 	assert.Equal(t, 42, exitCode)
+}
+
+func TestServerHandler_StdinClose(t *testing.T) {
+	srvConn, stubConn := net.Pipe()
+	defer srvConn.Close()
+	defer stubConn.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ServeStubConnection(context.Background(), srvConn, ServeConfig{
+			// cat reads stdin until EOF, then exits
+			Command: "/bin/cat",
+			Args:    []string{"cat"},
+		})
+	}()
+
+	// Use RunProxy with a strings.Reader as stdin. When the reader is
+	// exhausted, forwardStdin automatically sends MsgStdinClose, causing
+	// the server to close the command's stdin pipe and cat to exit.
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	exitCode, err := RunProxy(stubConn, strings.NewReader("hello\n"), stdout, stderr)
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.Equal(t, "hello\n", stdout.String())
+
+	require.NoError(t, <-errCh)
 }
 
 func TestServerHandler_StderrCapture(t *testing.T) {

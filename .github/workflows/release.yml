@@ -165,4 +165,10 @@ jobs:
           docker build -f ${{ matrix.dockerfile }} \
             --build-arg AGENTSH_TAG=${{ github.ref_name }} \
             -t agentsh-test-${{ matrix.name }}:latest .
-          docker run --rm ${{ matrix.docker_run_flags }} agentsh-test-${{ matrix.name }}:latest
+          RUN_FLAGS="${{ matrix.docker_run_flags }}"
+          # Only pass FUSE flags if /dev/fuse exists on the runner
+          if echo "$RUN_FLAGS" | grep -q '/dev/fuse' && [ ! -e /dev/fuse ]; then
+            echo "::warning::Skipping FUSE flags: /dev/fuse not available on this runner"
+            RUN_FLAGS=""
+          fi
+          docker run --rm $RUN_FLAGS agentsh-test-${{ matrix.name }}:latest
