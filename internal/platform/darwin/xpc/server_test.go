@@ -3,13 +3,33 @@ package xpc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// sockCounter ensures unique socket paths across tests.
+var sockCounter atomic.Int64
+
+// testSockPath returns a short, unique Unix socket path safe for macOS.
+// macOS limits sun_path to 104 bytes; t.TempDir() paths with long test
+// names can exceed this. This helper uses /tmp with a short unique name.
+func testSockPath(t *testing.T) string {
+	t.Helper()
+	n := sockCounter.Add(1)
+	dir, err := os.MkdirTemp("", fmt.Sprintf("xpc%d", n))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return filepath.Join(dir, "s.sock")
+}
 
 // mockPolicyEngine implements a simple allow-all policy for testing.
 type mockPolicyEngine struct{}
@@ -56,8 +76,7 @@ func waitForServer(t *testing.T, srv *Server, sockPath string, timeout time.Dura
 }
 
 func TestServer_HandleFileRequest(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -154,8 +173,7 @@ func (h *testPNACLHandler) Configure(blockingEnabled bool, decisionTimeout float
 }
 
 func TestServer_HandlePNACLCheck(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 
@@ -322,8 +340,7 @@ func TestServer_HandlePNACLCheck(t *testing.T) {
 }
 
 func TestServer_HandlePNACLEvent(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 
@@ -384,8 +401,7 @@ func TestServer_HandlePNACLOperations(t *testing.T) {
 
 	// This test combines multiple PNACL operations using a single shared server
 	// to avoid potential socket/goroutine scheduling issues with many short-lived servers.
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 
@@ -492,8 +508,7 @@ func TestServer_HandlePNACLOperations(t *testing.T) {
 }
 
 func TestServer_PNACLNoHandler(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 	// Note: NOT setting PNACL handler
@@ -614,8 +629,7 @@ func (h *testExecHandler) CheckExec(executable string, args []string, pid int32,
 }
 
 func TestServer_HandleExecCheck(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 
@@ -781,8 +795,7 @@ func TestServer_HandleExecCheck(t *testing.T) {
 }
 
 func TestServer_ExecCheckNoHandler_Allow(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	// Use allow-all mock; do NOT set an exec handler
 	srv := NewServer(sockPath, &mockPolicyEngine{})
@@ -827,8 +840,7 @@ func TestServer_ExecCheckNoHandler_Allow(t *testing.T) {
 }
 
 func TestServer_ExecCheckNoHandler_Deny(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	// Use deny-all mock; do NOT set an exec handler
 	srv := NewServer(sockPath, &mockDenyPolicyEngine{})
@@ -894,8 +906,7 @@ func (r *testSessionRegistrar) UnregisterSession(rootPID int32) {
 }
 
 func TestServer_RegisterSession(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 
@@ -945,8 +956,7 @@ func TestServer_RegisterSession(t *testing.T) {
 }
 
 func TestServer_UnregisterSession(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 
@@ -992,8 +1002,7 @@ func TestServer_UnregisterSession(t *testing.T) {
 }
 
 func TestServer_SessionNoRegistrar(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 	// Note: NOT setting a session registrar
@@ -1053,8 +1062,7 @@ func TestServer_SessionNoRegistrar(t *testing.T) {
 }
 
 func TestServer_MuteProcess(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 

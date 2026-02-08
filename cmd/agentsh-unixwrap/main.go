@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strconv"
 	"syscall"
 
@@ -97,8 +98,13 @@ func main() {
 
 	// Exec the real command.
 	cmd := os.Args[2]
+	// syscall.Exec requires an absolute path — resolve via PATH lookup.
+	cmdPath, err := exec.LookPath(cmd)
+	if err != nil {
+		log.Fatalf("exec %s failed: %v", cmd, err)
+	}
 	args := os.Args[2:]
-	if err := syscall.Exec(cmd, args, os.Environ()); err != nil {
+	if err := syscall.Exec(cmdPath, args, os.Environ()); err != nil {
 		log.Fatalf("exec %s failed: %v", cmd, err)
 	}
 }
