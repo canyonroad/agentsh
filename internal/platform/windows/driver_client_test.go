@@ -808,3 +808,26 @@ func TestHandleSuspendedProcessRedirect(t *testing.T) {
 		t.Errorf("expected ExecDecisionRedirect in reply body, got %d", decision)
 	}
 }
+
+func TestHandleSuspendedProcessShortReply(t *testing.T) {
+	const maxPath = 520
+	const maxCmdLine = 2048
+	msgSize := 16 + 8 + 4 + 4 + 8 + 8 + (maxPath * 2) + (maxCmdLine * 2)
+	msg := make([]byte, msgSize)
+
+	binary.LittleEndian.PutUint32(msg[0:4], MsgProcessSuspended)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], 1)
+
+	client := NewDriverClient()
+	client.SetSuspendedProcessHandler(func(req *SuspendedProcessRequest) ExecDecision {
+		return ExecDecisionResume
+	})
+
+	// Pass a reply buffer that's too short (< 24 bytes)
+	shortReply := make([]byte, 16)
+	replyLen := client.handleSuspendedProcess(msg, shortReply)
+	if replyLen != 0 {
+		t.Errorf("short reply buffer should return 0, got %d", replyLen)
+	}
+}

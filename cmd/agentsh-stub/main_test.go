@@ -22,3 +22,14 @@ func TestRunInvalidFD(t *testing.T) {
 		t.Errorf("expected exit code 126, got %d", code)
 	}
 }
+
+func TestRunPipeSetButUnsupported(t *testing.T) {
+	// On non-Windows, pipe is set but unsupported; with no FD, should still exit 126
+	t.Setenv("AGENTSH_STUB_PIPE", `\\.\pipe\test-pipe`)
+	t.Setenv("AGENTSH_STUB_FD", "")
+
+	code := run()
+	if code != 126 {
+		t.Errorf("expected exit code 126 when pipe unsupported and fd missing, got %d", code)
+	}
+}

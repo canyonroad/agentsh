@@ -95,6 +95,9 @@ func startDriverHandlerForWrap(ctx context.Context, sessionID string, sessionTok
 	// Set the suspended process handler
 	dc.SetSuspendedProcessHandler(func(req *winplat.SuspendedProcessRequest) winplat.ExecDecision {
 		decision := execHandler.HandleSuspended(req)
+		if req == nil {
+			return decision
+		}
 
 		switch decision {
 		case winplat.ExecDecisionResume:

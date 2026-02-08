@@ -27,7 +27,11 @@ func run() int {
 	// Fall back to fd (Unix)
 	fdStr := os.Getenv("AGENTSH_STUB_FD")
 	if fdStr == "" {
-		fmt.Fprintf(os.Stderr, "agentsh-stub: neither AGENTSH_STUB_PIPE nor AGENTSH_STUB_FD set\n")
+		if pipeName != "" {
+			fmt.Fprintf(os.Stderr, "agentsh-stub: pipe transport not supported on this platform and AGENTSH_STUB_FD not set\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "agentsh-stub: neither AGENTSH_STUB_PIPE nor AGENTSH_STUB_FD set\n")
+		}
 		return 126
 	}
 

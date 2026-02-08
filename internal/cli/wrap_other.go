@@ -10,7 +10,7 @@ import (
 )
 
 // platformSetupWrap returns an error on unsupported platforms since exec
-// interception requires Linux (seccomp) or macOS (Endpoint Security).
+// interception requires Linux (seccomp), macOS (Endpoint Security), or Windows (driver).
 func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, sessID string, agentPath string, agentArgs []string, cfg *clientConfig) (*wrapLaunchConfig, error) {
-	return nil, fmt.Errorf("exec interception is only supported on Linux and macOS")
+	return nil, fmt.Errorf("exec interception is only supported on Linux, macOS, and Windows")
 }

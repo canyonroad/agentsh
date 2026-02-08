@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/stub"
@@ -35,10 +36,9 @@ func handleRedirect(req *SuspendedProcessRequest, cfg RedirectConfig) error {
 	}
 	defer listener.Close()
 
-	// 4. Spawn agentsh-stub.exe as child of the original parent
-	stubEnv := []string{
-		fmt.Sprintf("AGENTSH_STUB_PIPE=%s", pipeName),
-	}
+	// 4. Spawn agentsh-stub.exe as child of the original parent.
+	// Pass full environment so the stub inherits SystemRoot, Path, etc.
+	stubEnv := append(os.Environ(), fmt.Sprintf("AGENTSH_STUB_PIPE=%s", pipeName))
 	stubPID, err := CreateProcessAsChild(
 		req.ParentId,
 		cfg.StubBinary,
