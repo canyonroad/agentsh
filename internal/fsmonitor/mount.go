@@ -48,7 +48,6 @@ func MountWorkspace(ctx context.Context, backingDir string, mountPoint string, h
 			Name:          "agentsh",
 			DisableXAttrs: false,
 			AllowOther:    true,
-			Debug:         true,
 		},
 	}
 
