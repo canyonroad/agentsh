@@ -1,0 +1,181 @@
+//go:build darwin
+
+package darwin
+
+import (
+	"testing"
+
+	"github.com/agentsh/agentsh/internal/platform/darwin/xpc"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// mockPolicyChecker implements ESExecPolicyChecker for testing.
+type mockPolicyChecker struct {
+	decision          string
+	effectiveDecision string
+	rule              string
+	message           string
+
+	// Capture the last call for verification.
+	lastCmd  string
+	lastArgs []string
+}
+
+func (m *mockPolicyChecker) CheckCommand(cmd string, args []string) ESExecPolicyResult {
+	m.lastCmd = cmd
+	m.lastArgs = args
+	return ESExecPolicyResult{
+		Decision:          m.decision,
+		EffectiveDecision: m.effectiveDecision,
+		Rule:              m.rule,
+		Message:           m.message,
+	}
+}
+
+func TestESExecHandler_PolicyMapping(t *testing.T) {
+	tests := []struct {
+		name              string
+		decision          string
+		effectiveDecision string
+		wantAction        string
+		wantDecision      string
+	}{
+		// Basic allow/deny/audit
+		{"allow", "allow", "allow", "continue", "allow"},
+		{"audit", "audit", "audit", "continue", "audit"},
+		{"deny", "deny", "deny", "deny", "deny"},
+
+		// Redirect and approve in enforced mode
+		{"approve_enforced", "approve", "approve", "redirect", "approve"},
+		{"redirect_enforced", "redirect", "redirect", "redirect", "redirect"},
+
+		// Shadow mode: policy says approve/redirect but effective is allow
+		// (shadow mode lets the command through while logging the policy intent)
+		{"approve_shadow", "approve", "allow", "continue", "approve"},
+		{"redirect_shadow", "redirect", "allow", "continue", "redirect"},
+
+		// Shadow mode: policy says deny but effective is allow
+		{"deny_shadow", "deny", "allow", "continue", "deny"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checker := &mockPolicyChecker{
+				decision:          tt.decision,
+				effectiveDecision: tt.effectiveDecision,
+				rule:              "test-rule",
+				message:           "test message",
+			}
+			handler := NewESExecHandler(checker, "")
+			result := handler.CheckExec("/usr/bin/test", []string{"/usr/bin/test", "-f", "foo"}, 1234, 1233, "sess-1")
+
+			assert.Equal(t, tt.wantAction, result.Action, "action mismatch")
+			assert.Equal(t, tt.wantDecision, result.Decision, "decision mismatch")
+			assert.Equal(t, "test-rule", result.Rule, "rule mismatch")
+			assert.Equal(t, "test message", result.Message, "message mismatch")
+		})
+	}
+}
+
+func TestESExecHandler_NilPolicyChecker(t *testing.T) {
+	handler := NewESExecHandler(nil, "")
+	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1")
+
+	assert.Equal(t, "continue", result.Action)
+	assert.Equal(t, "allow", result.Decision)
+	assert.Equal(t, "no_policy", result.Rule)
+	assert.Empty(t, result.Message)
+}
+
+func TestESExecHandler_UnknownDecision(t *testing.T) {
+	handler := NewESExecHandler(&mockPolicyChecker{
+		decision:          "something_unknown",
+		effectiveDecision: "something_unknown",
+		rule:              "weird-rule",
+		message:           "weird message",
+	}, "")
+	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1")
+
+	// Unknown decisions should fail-secure (deny).
+	assert.Equal(t, "deny", result.Action)
+	assert.Equal(t, "something_unknown", result.Decision)
+	assert.Equal(t, "unknown", result.Rule)
+	assert.Equal(t, "unknown effective decision", result.Message)
+}
+
+func TestESExecHandler_EffectiveDecisionFallback(t *testing.T) {
+	// When EffectiveDecision is empty, falls back to Decision.
+	handler := NewESExecHandler(&mockPolicyChecker{
+		decision:          "allow",
+		effectiveDecision: "", // empty
+		rule:              "fallback-rule",
+	}, "")
+	result := handler.CheckExec("/usr/bin/ls", nil, 100, 99, "sess-2")
+
+	assert.Equal(t, "continue", result.Action)
+	assert.Equal(t, "allow", result.Decision)
+	assert.Equal(t, "fallback-rule", result.Rule)
+}
+
+func TestESExecHandler_PassesArgsToChecker(t *testing.T) {
+	checker := &mockPolicyChecker{
+		decision:          "allow",
+		effectiveDecision: "allow",
+		rule:              "check-args",
+	}
+	handler := NewESExecHandler(checker, "")
+
+	args := []string{"/usr/bin/curl", "-s", "https://example.com"}
+	handler.CheckExec("/usr/bin/curl", args, 5678, 5677, "sess-3")
+
+	assert.Equal(t, "/usr/bin/curl", checker.lastCmd)
+	assert.Equal(t, args, checker.lastArgs)
+}
+
+func TestESExecHandler_RedirectSpawnsStub(t *testing.T) {
+	// Verify that redirect decisions trigger the stub spawn goroutine.
+	// We can't easily test the goroutine completes, but we can verify the
+	// response is correct and no panic occurs.
+	handler := NewESExecHandler(&mockPolicyChecker{
+		decision:          "redirect",
+		effectiveDecision: "redirect",
+		rule:              "redirect-rule",
+		message:           "redirecting",
+	}, "/usr/local/bin/agentsh-stub")
+
+	result := handler.CheckExec("/usr/bin/git", []string{"/usr/bin/git", "push"}, 9999, 9998, "sess-4")
+
+	assert.Equal(t, "redirect", result.Action)
+	assert.Equal(t, "redirect", result.Decision)
+	assert.Equal(t, "redirect-rule", result.Rule)
+	assert.Equal(t, "redirecting", result.Message)
+}
+
+func TestESExecHandler_ApproveSpawnsStub(t *testing.T) {
+	handler := NewESExecHandler(&mockPolicyChecker{
+		decision:          "approve",
+		effectiveDecision: "approve",
+		rule:              "approve-rule",
+		message:           "needs approval",
+	}, "/usr/local/bin/agentsh-stub")
+
+	result := handler.CheckExec("/usr/bin/rm", []string{"/usr/bin/rm", "-rf", "/"}, 1111, 1110, "sess-5")
+
+	assert.Equal(t, "redirect", result.Action)
+	assert.Equal(t, "approve", result.Decision)
+	assert.Equal(t, "approve-rule", result.Rule)
+	assert.Equal(t, "needs approval", result.Message)
+}
+
+func TestNewESExecHandler(t *testing.T) {
+	checker := &mockPolicyChecker{}
+	handler := NewESExecHandler(checker, "/path/to/stub")
+
+	require.NotNil(t, handler)
+	assert.Equal(t, "/path/to/stub", handler.stubBinary)
+	assert.Equal(t, checker, handler.policyChecker)
+}
+
+// Compile-time interface check: ESExecHandler must implement xpc.ExecHandler.
+var _ xpc.ExecHandler = (*ESExecHandler)(nil)

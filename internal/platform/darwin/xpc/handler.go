@@ -1,6 +1,8 @@
 package xpc
 
 import (
+	"log/slog"
+
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
 )
@@ -64,5 +66,57 @@ func (a *PolicyAdapter) ResolveSession(pid int32) string {
 	return a.sessions.SessionForPID(pid)
 }
 
-// Compile-time interface check
+// CheckExec evaluates a command through the exec pipeline, returning
+// the full decision and action for the ESF client to act on.
+func (a *PolicyAdapter) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) ExecCheckResult {
+	if a.engine == nil {
+		return ExecCheckResult{
+			Decision: "allow",
+			Action:   "continue",
+			Rule:     "no-policy",
+		}
+	}
+
+	dec := a.engine.CheckCommand(executable, args)
+
+	// Use PolicyDecision for audit logging (the raw policy intent)
+	decision := string(dec.PolicyDecision)
+
+	// Use EffectiveDecision for action mapping (what actually happens, respects shadow mode)
+	effectiveDecision := dec.EffectiveDecision
+	if effectiveDecision == "" {
+		effectiveDecision = dec.PolicyDecision
+	}
+
+	var action string
+	switch effectiveDecision {
+	case types.DecisionAllow, types.DecisionAudit:
+		action = "continue"
+	case types.DecisionDeny:
+		action = "deny"
+	case types.DecisionApprove, types.DecisionRedirect:
+		action = "redirect"
+	case types.DecisionSoftDelete:
+		// soft-delete is a file operation concept; for exec, treat as continue
+		action = "continue"
+	default:
+		// Unknown decisions fail-closed to prevent accidental allows.
+		slog.Warn("xpc: unknown effective decision in CheckExec, denying",
+			"effective_decision", string(effectiveDecision),
+			"policy_decision", decision,
+			"cmd", executable,
+		)
+		action = "deny"
+	}
+
+	return ExecCheckResult{
+		Decision: decision,
+		Action:   action,
+		Rule:     dec.Rule,
+		Message:  dec.Message,
+	}
+}
+
+// Compile-time interface checks
 var _ PolicyHandler = (*PolicyAdapter)(nil)
+var _ ExecHandler = (*PolicyAdapter)(nil)

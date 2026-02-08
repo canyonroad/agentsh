@@ -4,11 +4,12 @@ package xpc
 type RequestType string
 
 const (
-	RequestTypeFile    RequestType = "file"
-	RequestTypeNetwork RequestType = "network"
-	RequestTypeCommand RequestType = "command"
-	RequestTypeSession RequestType = "session"
-	RequestTypeEvent   RequestType = "event"
+	RequestTypeFile      RequestType = "file"
+	RequestTypeNetwork   RequestType = "network"
+	RequestTypeCommand   RequestType = "command"
+	RequestTypeSession   RequestType = "session"
+	RequestTypeEvent     RequestType = "event"
+	RequestTypeExecCheck RequestType = "exec_check"
 
 	// PNACL (Process Network ACL) request types
 	RequestTypePNACLCheck        RequestType = "pnacl_check"
@@ -16,6 +17,13 @@ const (
 	RequestTypePNACLGetApprovals RequestType = "get_pending_approvals"
 	RequestTypePNACLSubmit       RequestType = "submit_approval"
 	RequestTypePNACLConfigure    RequestType = "pnacl_configure"
+
+	// Session management request types
+	RequestTypeRegisterSession   RequestType = "register_session"
+	RequestTypeUnregisterSession RequestType = "unregister_session"
+
+	// Process muting request type
+	RequestTypeMuteProcess RequestType = "mute_process"
 )
 
 // PolicyRequest is sent from the XPC bridge to the Go policy server.
@@ -57,6 +65,9 @@ type PolicyRequest struct {
 	BlockingEnabled bool    `json:"blocking_enabled,omitempty"` // Enable actual blocking
 	DecisionTimeout float64 `json:"decision_timeout,omitempty"` // Timeout in seconds
 	FailOpen        bool    `json:"fail_open,omitempty"`        // Allow on timeout/error
+
+	// Session management fields
+	RootPID int32 `json:"root_pid,omitempty"` // Root PID for session registration
 }
 
 // PolicyResponse is returned from the Go policy server.
@@ -65,6 +76,10 @@ type PolicyResponse struct {
 	Rule      string `json:"rule,omitempty"`
 	Message   string `json:"message,omitempty"`
 	SessionID string `json:"session_id,omitempty"` // for session lookups
+
+	// Exec pipeline response fields
+	Action       string `json:"action,omitempty"`        // "continue", "redirect", "deny" (exec pipeline action)
+	ExecDecision string `json:"exec_decision,omitempty"` // "allow", "deny", "approve", "redirect", "audit"
 
 	// PNACL-specific response fields
 	Decision  string             `json:"decision,omitempty"`  // allow, deny, approve, audit, etc.

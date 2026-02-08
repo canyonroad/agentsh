@@ -3,12 +3,38 @@ package xpc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// sockCounter ensures unique socket paths across tests.
+var sockCounter atomic.Int64
+
+// testSockPath returns a short, unique Unix socket path safe for macOS.
+// macOS limits sun_path to 104 bytes; $TMPDIR paths (e.g. /var/folders/...)
+// can be long and exceed this. On macOS we use /tmp explicitly; on other
+// platforms we use the default temp dir.
+func testSockPath(t *testing.T) string {
+	t.Helper()
+	n := sockCounter.Add(1)
+	base := ""
+	if runtime.GOOS == "darwin" {
+		base = "/tmp"
+	}
+	dir, err := os.MkdirTemp(base, fmt.Sprintf("xpc%d", n))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return filepath.Join(dir, "s.sock")
+}
 
 // mockPolicyEngine implements a simple allow-all policy for testing.
 type mockPolicyEngine struct{}
@@ -39,11 +65,16 @@ func waitForServer(t *testing.T, srv *Server, sockPath string, timeout time.Dura
 	// Give the server goroutine a chance to start
 	runtime.Gosched()
 
-	// Wait for server to signal it's ready
+	// Wait for server to signal startup completed
 	select {
 	case <-srv.Ready():
 	case <-time.After(timeout):
 		t.Fatalf("server did not become ready within %v", timeout)
+	}
+
+	// Check if the server failed to start
+	if err := srv.StartErr(); err != nil {
+		t.Fatalf("server startup failed: %v (sockPath=%s)", err, sockPath)
 	}
 
 	// Now connect
@@ -55,8 +86,7 @@ func waitForServer(t *testing.T, srv *Server, sockPath string, timeout time.Dura
 }
 
 func TestServer_HandleFileRequest(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -153,8 +183,7 @@ func (h *testPNACLHandler) Configure(blockingEnabled bool, decisionTimeout float
 }
 
 func TestServer_HandlePNACLCheck(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 
@@ -321,8 +350,7 @@ func TestServer_HandlePNACLCheck(t *testing.T) {
 }
 
 func TestServer_HandlePNACLEvent(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 
@@ -383,8 +411,7 @@ func TestServer_HandlePNACLOperations(t *testing.T) {
 
 	// This test combines multiple PNACL operations using a single shared server
 	// to avoid potential socket/goroutine scheduling issues with many short-lived servers.
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 
@@ -491,8 +518,7 @@ func TestServer_HandlePNACLOperations(t *testing.T) {
 }
 
 func TestServer_PNACLNoHandler(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "policy.sock")
+	sockPath := testSockPath(t)
 
 	srv := NewServer(sockPath, &mockPolicyEngine{})
 	// Note: NOT setting PNACL handler
@@ -591,5 +617,490 @@ func TestIsAllowingDecision(t *testing.T) {
 				t.Errorf("isAllowingDecision(%q): got %v, want %v", tt.decision, got, tt.want)
 			}
 		})
+	}
+}
+
+// mockDenyPolicyEngine implements a deny-all policy for testing exec_check fallback.
+type mockDenyPolicyEngine struct {
+	mockPolicyEngine
+}
+
+func (m *mockDenyPolicyEngine) CheckCommand(cmd string, args []string) (bool, string) {
+	return false, "deny-all"
+}
+
+// testExecHandler is a mock implementation of ExecHandler for unit tests.
+type testExecHandler struct {
+	result ExecCheckResult
+}
+
+func (h *testExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) ExecCheckResult {
+	return h.result
+}
+
+func TestServer_HandleExecCheck(t *testing.T) {
+	sockPath := testSockPath(t)
+
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+
+	execHandler := &testExecHandler{
+		result: ExecCheckResult{
+			Decision: "allow",
+			Action:   "continue",
+			Rule:     "allow-ls",
+			Message:  "",
+		},
+	}
+	srv.SetExecHandler(execHandler)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	t.Run("allow_decision", func(t *testing.T) {
+		req := PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "/usr/bin/ls",
+			Args:      []string{"-la"},
+			PID:       1234,
+			ParentPID: 1,
+			SessionID: "session-1",
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		if !resp.Allow {
+			t.Error("expected Allow=true")
+		}
+		if resp.Action != "continue" {
+			t.Errorf("action: got %q, want %q", resp.Action, "continue")
+		}
+		if resp.ExecDecision != "allow" {
+			t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "allow")
+		}
+		if resp.Rule != "allow-ls" {
+			t.Errorf("rule: got %q, want %q", resp.Rule, "allow-ls")
+		}
+	})
+
+	t.Run("deny_decision", func(t *testing.T) {
+		execHandler.result = ExecCheckResult{
+			Decision: "deny",
+			Action:   "deny",
+			Rule:     "deny-rm",
+			Message:  "command denied by policy",
+		}
+
+		req := PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "/bin/rm",
+			Args:      []string{"-rf", "/"},
+			PID:       5678,
+			ParentPID: 1,
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		if resp.Allow {
+			t.Error("expected Allow=false")
+		}
+		if resp.Action != "deny" {
+			t.Errorf("action: got %q, want %q", resp.Action, "deny")
+		}
+		if resp.ExecDecision != "deny" {
+			t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "deny")
+		}
+		if resp.Rule != "deny-rm" {
+			t.Errorf("rule: got %q, want %q", resp.Rule, "deny-rm")
+		}
+		if resp.Message != "command denied by policy" {
+			t.Errorf("message: got %q, want %q", resp.Message, "command denied by policy")
+		}
+	})
+
+	t.Run("redirect_decision", func(t *testing.T) {
+		execHandler.result = ExecCheckResult{
+			Decision: "redirect",
+			Action:   "redirect",
+			Rule:     "redirect-git",
+			Message:  "redirecting to agentsh-stub",
+		}
+
+		req := PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "/usr/bin/git",
+			Args:      []string{"push"},
+			PID:       9999,
+			ParentPID: 1,
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		if resp.Allow {
+			t.Error("expected Allow=false for redirect action")
+		}
+		if resp.Action != "redirect" {
+			t.Errorf("action: got %q, want %q", resp.Action, "redirect")
+		}
+		if resp.ExecDecision != "redirect" {
+			t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "redirect")
+		}
+	})
+
+	t.Run("audit_decision_continues", func(t *testing.T) {
+		execHandler.result = ExecCheckResult{
+			Decision: "audit",
+			Action:   "continue",
+			Rule:     "audit-all",
+		}
+
+		req := PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "/usr/bin/curl",
+			Args:      []string{"https://example.com"},
+			PID:       2222,
+			ParentPID: 1,
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		if !resp.Allow {
+			t.Error("expected Allow=true for audit/continue")
+		}
+		if resp.Action != "continue" {
+			t.Errorf("action: got %q, want %q", resp.Action, "continue")
+		}
+		if resp.ExecDecision != "audit" {
+			t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "audit")
+		}
+	})
+}
+
+func TestServer_ExecCheckNoHandler_Allow(t *testing.T) {
+	sockPath := testSockPath(t)
+
+	// Use allow-all mock; do NOT set an exec handler
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	req := PolicyRequest{
+		Type:      RequestTypeExecCheck,
+		Path:      "/usr/bin/ls",
+		Args:      []string{"-la"},
+		PID:       1234,
+		ParentPID: 1,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	var resp PolicyResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !resp.Allow {
+		t.Error("expected Allow=true (fail-open) when no exec handler")
+	}
+	if resp.Action != "continue" {
+		t.Errorf("action: got %q, want %q", resp.Action, "continue")
+	}
+	if resp.Rule != "test-allow" {
+		t.Errorf("rule: got %q, want %q", resp.Rule, "test-allow")
+	}
+	// ExecDecision should be populated in fallback path for consistent contract
+	if resp.ExecDecision != "allow" {
+		t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "allow")
+	}
+}
+
+func TestServer_ExecCheckNoHandler_Deny(t *testing.T) {
+	sockPath := testSockPath(t)
+
+	// Use deny-all mock; do NOT set an exec handler
+	srv := NewServer(sockPath, &mockDenyPolicyEngine{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	req := PolicyRequest{
+		Type:      RequestTypeExecCheck,
+		Path:      "/bin/rm",
+		Args:      []string{"-rf", "/"},
+		PID:       1234,
+		ParentPID: 1,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	var resp PolicyResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.Allow {
+		t.Error("expected Allow=false when command handler denies")
+	}
+	if resp.Action != "deny" {
+		t.Errorf("action: got %q, want %q", resp.Action, "deny")
+	}
+	if resp.Rule != "deny-all" {
+		t.Errorf("rule: got %q, want %q", resp.Rule, "deny-all")
+	}
+}
+
+// testSessionRegistrar is a mock implementation of SessionRegistrar for unit tests.
+type testSessionRegistrar struct {
+	mu                  sync.Mutex
+	registeredPID       int32
+	registeredSessionID string
+	unregisteredPID     int32
+	registerCalled      bool
+	unregisterCalled    bool
+}
+
+func (r *testSessionRegistrar) RegisterSession(rootPID int32, sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.registeredPID = rootPID
+	r.registeredSessionID = sessionID
+	r.registerCalled = true
+}
+
+func (r *testSessionRegistrar) UnregisterSession(rootPID int32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.unregisteredPID = rootPID
+	r.unregisterCalled = true
+}
+
+func TestServer_RegisterSession(t *testing.T) {
+	sockPath := testSockPath(t)
+
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+
+	registrar := &testSessionRegistrar{}
+	srv.SetSessionRegistrar(registrar)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	req := PolicyRequest{
+		Type:      RequestTypeRegisterSession,
+		RootPID:   4567,
+		SessionID: "session-wrap-1",
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	var resp PolicyResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !resp.Allow {
+		t.Error("expected Allow=true")
+	}
+	if !resp.Success {
+		t.Error("expected Success=true")
+	}
+
+	registrar.mu.Lock()
+	defer registrar.mu.Unlock()
+	if !registrar.registerCalled {
+		t.Fatal("expected RegisterSession to be called")
+	}
+	if registrar.registeredPID != 4567 {
+		t.Errorf("registered PID: got %d, want %d", registrar.registeredPID, 4567)
+	}
+	if registrar.registeredSessionID != "session-wrap-1" {
+		t.Errorf("registered session ID: got %q, want %q", registrar.registeredSessionID, "session-wrap-1")
+	}
+}
+
+func TestServer_UnregisterSession(t *testing.T) {
+	sockPath := testSockPath(t)
+
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+
+	registrar := &testSessionRegistrar{}
+	srv.SetSessionRegistrar(registrar)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	req := PolicyRequest{
+		Type:    RequestTypeUnregisterSession,
+		RootPID: 4567,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	var resp PolicyResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !resp.Allow {
+		t.Error("expected Allow=true")
+	}
+	if !resp.Success {
+		t.Error("expected Success=true")
+	}
+
+	registrar.mu.Lock()
+	defer registrar.mu.Unlock()
+	if !registrar.unregisterCalled {
+		t.Fatal("expected UnregisterSession to be called")
+	}
+	if registrar.unregisteredPID != 4567 {
+		t.Errorf("unregistered PID: got %d, want %d", registrar.unregisteredPID, 4567)
+	}
+}
+
+func TestServer_SessionNoRegistrar(t *testing.T) {
+	sockPath := testSockPath(t)
+
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+	// Note: NOT setting a session registrar
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	t.Run("register_succeeds_without_registrar", func(t *testing.T) {
+		req := PolicyRequest{
+			Type:      RequestTypeRegisterSession,
+			RootPID:   1234,
+			SessionID: "session-1",
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		if !resp.Allow {
+			t.Error("expected Allow=true even without registrar")
+		}
+		if !resp.Success {
+			t.Error("expected Success=true even without registrar")
+		}
+	})
+
+	t.Run("unregister_succeeds_without_registrar", func(t *testing.T) {
+		req := PolicyRequest{
+			Type:    RequestTypeUnregisterSession,
+			RootPID: 1234,
+		}
+		if err := json.NewEncoder(conn).Encode(req); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+
+		var resp PolicyResponse
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		if !resp.Allow {
+			t.Error("expected Allow=true even without registrar")
+		}
+		if !resp.Success {
+			t.Error("expected Success=true even without registrar")
+		}
+	})
+}
+
+func TestServer_MuteProcess(t *testing.T) {
+	sockPath := testSockPath(t)
+
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	req := PolicyRequest{
+		Type: RequestTypeMuteProcess,
+		PID:  5678,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	var resp PolicyResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !resp.Allow {
+		t.Error("expected Allow=true")
+	}
+	if !resp.Success {
+		t.Error("expected Success=true")
 	}
 }

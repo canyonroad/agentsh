@@ -81,6 +81,62 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
         }
     }
 
+    // MARK: - Exec Pipeline
+
+    func checkExecPipeline(
+        executable: String,
+        args: [String],
+        pid: pid_t,
+        parentPID: pid_t,
+        sessionID: String?,
+        reply: @escaping (String, String, String?) -> Void
+    ) {
+        let request: [String: Any] = [
+            "type": "exec_check",
+            "path": executable,
+            "args": args,
+            "pid": pid,
+            "parent_pid": parentPID,
+            "session_id": sessionID ?? ""
+        ]
+        sendRequest(request) { [weak self] response in
+            // Check if this was an error response from sendRequest.
+            // On error, sendRequest returns {"allow": bool, "rule": "error-fail*"}.
+            // For exec pipeline, we must respect failBehavior for the action too.
+            let rule = response["rule"] as? String ?? ""
+            if rule == "error-failclosed" {
+                // Fail-closed: deny the exec on communication error
+                reply("deny", "deny", "error-failclosed")
+                return
+            } else if rule == "error-failopen" {
+                // Fail-open: allow the exec on communication error
+                reply("allow", "continue", "error-failopen")
+                return
+            }
+
+            let decision = response["exec_decision"] as? String ?? "allow"
+            let action = response["action"] as? String ?? "continue"
+            reply(decision, action, response["rule"] as? String)
+        }
+    }
+
+    // MARK: - Process Muting (Recursion Guard)
+
+    func muteProcess(pid: pid_t, reply: @escaping (Bool) -> Void) {
+        // Route mute request through the Go policy server's Unix socket.
+        // The server forwards it to the ESFClient via the session registrar interface.
+        // Note: NotificationCenter.default does not cross process boundaries,
+        // so we use the socket-based channel instead.
+        let request: [String: Any] = [
+            "type": "mute_process",
+            "pid": pid
+        ]
+        sendRequest(request) { response in
+            let success = response["success"] as? Bool ?? false
+            reply(success)
+        }
+    }
+
     func resolveSession(pid: pid_t, reply: @escaping (String?) -> Void) {
         let request: [String: Any] = [
             "type": "session",

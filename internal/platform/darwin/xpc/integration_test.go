@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/agentsh/agentsh/internal/policy"
 )
@@ -37,7 +37,7 @@ func TestIntegration_FullPolicyFlow(t *testing.T) {
 	}
 
 	// Start server
-	sockPath := "/tmp/agentsh-test-policy.sock"
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	tracker := NewSessionTracker()
 	tracker.RegisterProcess("session-test", 12345, 0)
 
@@ -48,8 +48,7 @@ func TestIntegration_FullPolicyFlow(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	<-srv.Ready()
 
 	// Test file allow
 	t.Run("file_allow", func(t *testing.T) {
@@ -171,7 +170,7 @@ func TestIntegration_PNACLFlow(t *testing.T) {
 	}
 
 	// Start server with PNACL handler
-	sockPath := "/tmp/agentsh-test-pnacl.sock"
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	tracker := NewSessionTracker()
 	adapter := NewPolicyAdapter(engine, tracker)
 	srv := NewServer(sockPath, adapter)
@@ -202,8 +201,7 @@ func TestIntegration_PNACLFlow(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	<-srv.Ready()
 
 	// Test PNACL check
 	t.Run("pnacl_check_allow", func(t *testing.T) {
@@ -314,6 +312,287 @@ func TestIntegration_PNACLFlow(t *testing.T) {
 	})
 }
 
+func TestIntegration_ExecCheckWithHandler(t *testing.T) {
+	if os.Getenv("AGENTSH_INTEGRATION") != "1" {
+		t.Skip("set AGENTSH_INTEGRATION=1 to run")
+	}
+
+	// Create basic policy (needed for PolicyAdapter as PolicyHandler)
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []policy.CommandRule{
+			{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
+		},
+	}
+	engine, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Start server with a mock exec handler
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	tracker := NewSessionTracker()
+	adapter := NewPolicyAdapter(engine, tracker)
+	srv := NewServer(sockPath, adapter)
+
+	execHandler := &mockExecHandler{
+		result: ExecCheckResult{
+			Decision: "allow",
+			Action:   "continue",
+			Rule:     "allow-ls",
+			Message:  "",
+		},
+	}
+	srv.SetExecHandler(execHandler)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	<-srv.Ready()
+
+	// Test exec_check with allow decision
+	t.Run("exec_check_allow", func(t *testing.T) {
+		resp := sendTestRequest(t, sockPath, PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "/usr/bin/ls",
+			Args:      []string{"-la"},
+			PID:       1234,
+			ParentPID: 1,
+			SessionID: "session-1",
+		})
+		if !resp.Allow {
+			t.Error("expected Allow=true")
+		}
+		if resp.Action != "continue" {
+			t.Errorf("action: got %q, want %q", resp.Action, "continue")
+		}
+		if resp.ExecDecision != "allow" {
+			t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "allow")
+		}
+		if resp.Rule != "allow-ls" {
+			t.Errorf("rule: got %q, want %q", resp.Rule, "allow-ls")
+		}
+	})
+
+	// Test exec_check with deny decision
+	t.Run("exec_check_deny", func(t *testing.T) {
+		execHandler.result = ExecCheckResult{
+			Decision: "deny",
+			Action:   "deny",
+			Rule:     "deny-rm",
+			Message:  "command denied by policy",
+		}
+
+		resp := sendTestRequest(t, sockPath, PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "/bin/rm",
+			Args:      []string{"-rf", "/"},
+			PID:       5678,
+			ParentPID: 1,
+		})
+		if resp.Allow {
+			t.Error("expected Allow=false")
+		}
+		if resp.Action != "deny" {
+			t.Errorf("action: got %q, want %q", resp.Action, "deny")
+		}
+		if resp.ExecDecision != "deny" {
+			t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "deny")
+		}
+		if resp.Rule != "deny-rm" {
+			t.Errorf("rule: got %q, want %q", resp.Rule, "deny-rm")
+		}
+		if resp.Message != "command denied by policy" {
+			t.Errorf("message: got %q, want %q", resp.Message, "command denied by policy")
+		}
+	})
+
+	// Test exec_check with redirect decision
+	t.Run("exec_check_redirect", func(t *testing.T) {
+		execHandler.result = ExecCheckResult{
+			Decision: "redirect",
+			Action:   "redirect",
+			Rule:     "redirect-git",
+			Message:  "redirecting to agentsh-stub",
+		}
+
+		resp := sendTestRequest(t, sockPath, PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "/usr/bin/git",
+			Args:      []string{"push"},
+			PID:       9999,
+			ParentPID: 1,
+		})
+		if resp.Allow {
+			t.Error("expected Allow=false for redirect")
+		}
+		if resp.Action != "redirect" {
+			t.Errorf("action: got %q, want %q", resp.Action, "redirect")
+		}
+		if resp.ExecDecision != "redirect" {
+			t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, "redirect")
+		}
+	})
+}
+
+func TestIntegration_ExecCheckAllDecisions(t *testing.T) {
+	if os.Getenv("AGENTSH_INTEGRATION") != "1" {
+		t.Skip("set AGENTSH_INTEGRATION=1 to run")
+	}
+
+	// Create basic policy
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []policy.CommandRule{
+			{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
+		},
+	}
+	engine, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	tracker := NewSessionTracker()
+	adapter := NewPolicyAdapter(engine, tracker)
+	srv := NewServer(sockPath, adapter)
+
+	execHandler := &mockExecHandler{}
+	srv.SetExecHandler(execHandler)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	<-srv.Ready()
+
+	tests := []struct {
+		name         string
+		decision     string
+		action       string
+		wantAllow    bool
+		wantAction   string
+		wantDecision string
+	}{
+		{"allow_continue", "allow", "continue", true, "continue", "allow"},
+		{"deny_deny", "deny", "deny", false, "deny", "deny"},
+		{"redirect_redirect", "redirect", "redirect", false, "redirect", "redirect"},
+		{"audit_continue", "audit", "continue", true, "continue", "audit"},
+		{"approve_redirect", "approve", "redirect", false, "redirect", "approve"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			execHandler.result = ExecCheckResult{
+				Decision: tt.decision,
+				Action:   tt.action,
+				Rule:     "test-rule",
+			}
+
+			resp := sendTestRequest(t, sockPath, PolicyRequest{
+				Type:      RequestTypeExecCheck,
+				Path:      "/usr/bin/test",
+				PID:       1234,
+				ParentPID: 1,
+			})
+			if resp.Allow != tt.wantAllow {
+				t.Errorf("Allow: got %v, want %v", resp.Allow, tt.wantAllow)
+			}
+			if resp.Action != tt.wantAction {
+				t.Errorf("action: got %q, want %q", resp.Action, tt.wantAction)
+			}
+			if resp.ExecDecision != tt.wantDecision {
+				t.Errorf("exec_decision: got %q, want %q", resp.ExecDecision, tt.wantDecision)
+			}
+		})
+	}
+}
+
+func TestIntegration_ExecCheckFallbackToCommand(t *testing.T) {
+	if os.Getenv("AGENTSH_INTEGRATION") != "1" {
+		t.Skip("set AGENTSH_INTEGRATION=1 to run")
+	}
+
+	// Create policy with command rules
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []policy.CommandRule{
+			{Name: "deny-rm", Commands: []string{"rm"}, Decision: "deny"},
+			{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
+		},
+	}
+	engine, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	tracker := NewSessionTracker()
+	adapter := NewPolicyAdapter(engine, tracker)
+	srv := NewServer(sockPath, adapter)
+	// Note: NOT setting exec handler — should fall back to basic command handler
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	<-srv.Ready()
+
+	// Allowed command should fall back to command handler and allow
+	t.Run("fallback_allow", func(t *testing.T) {
+		resp := sendTestRequest(t, sockPath, PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "/usr/bin/ls",
+			Args:      []string{"-la"},
+			PID:       1234,
+			ParentPID: 1,
+		})
+		if !resp.Allow {
+			t.Error("expected Allow=true via command handler fallback")
+		}
+		if resp.Action != "continue" {
+			t.Errorf("action: got %q, want %q", resp.Action, "continue")
+		}
+		// ExecDecision should be populated in fallback path for consistent contract
+		if resp.ExecDecision != "allow" {
+			t.Errorf("exec_decision: got %q, want %q (fallback to command handler)", resp.ExecDecision, "allow")
+		}
+	})
+
+	// Denied command should fall back to command handler and deny
+	t.Run("fallback_deny", func(t *testing.T) {
+		resp := sendTestRequest(t, sockPath, PolicyRequest{
+			Type:      RequestTypeExecCheck,
+			Path:      "rm",
+			Args:      []string{"-rf", "/"},
+			PID:       5678,
+			ParentPID: 1,
+		})
+		if resp.Allow {
+			t.Error("expected Allow=false via command handler fallback")
+		}
+		if resp.Action != "deny" {
+			t.Errorf("action: got %q, want %q", resp.Action, "deny")
+		}
+		if resp.Rule != "deny-rm" {
+			t.Errorf("rule: got %q, want %q", resp.Rule, "deny-rm")
+		}
+	})
+}
+
+// mockExecHandler is a mock implementation of ExecHandler for integration tests.
+type mockExecHandler struct {
+	result ExecCheckResult
+}
+
+func (h *mockExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) ExecCheckResult {
+	return h.result
+}
+
 func TestIntegration_PNACLNoHandler(t *testing.T) {
 	if os.Getenv("AGENTSH_INTEGRATION") != "1" {
 		t.Skip("set AGENTSH_INTEGRATION=1 to run")
@@ -326,7 +605,7 @@ func TestIntegration_PNACLNoHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := "/tmp/agentsh-test-pnacl-nohandler.sock"
+	sockPath := filepath.Join(t.TempDir(), "policy.sock")
 	tracker := NewSessionTracker()
 	adapter := NewPolicyAdapter(engine, tracker)
 	srv := NewServer(sockPath, adapter)
@@ -336,8 +615,7 @@ func TestIntegration_PNACLNoHandler(t *testing.T) {
 	defer cancel()
 
 	go srv.Run(ctx)
-	time.Sleep(100 * time.Millisecond)
-	defer os.Remove(sockPath)
+	<-srv.Ready()
 
 	// PNACL check should default to allow when no handler
 	t.Run("pnacl_check_no_handler", func(t *testing.T) {

@@ -211,8 +211,8 @@ func (m *mockWrapClient) WatchTaints(ctx context.Context, agentOnly bool, handle
 }
 
 func TestSetupWrapInterception_CallsWrapInit(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("wrap interception is Linux-only")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("wrap interception requires Linux or macOS")
 	}
 
 	mc := &mockWrapClient{
@@ -237,12 +237,18 @@ func TestSetupWrapInterception_CallsWrapInit(t *testing.T) {
 	assert.Equal(t, "/bin/echo", mc.wrapInitReq.AgentCommand)
 	assert.Equal(t, []string{"hello"}, mc.wrapInitReq.AgentArgs)
 
-	// Verify the launch config
-	assert.Equal(t, "/bin/true", lcfg.command, "command should be the wrapper binary")
-	assert.Equal(t, []string{"--", "/bin/echo", "hello"}, lcfg.args, "args should be -- agent-cmd agent-args")
-	assert.NotNil(t, lcfg.extraFiles, "extra files should be set (socket pair child)")
-	assert.Len(t, lcfg.extraFiles, 1, "should have exactly one extra file (child socket)")
-	assert.NotNil(t, lcfg.postStart, "postStart should be set")
+	// Verify the launch config (OS-specific assertions)
+	if runtime.GOOS == "linux" {
+		assert.Equal(t, "/bin/true", lcfg.command, "command should be the wrapper binary")
+		assert.Equal(t, []string{"--", "/bin/echo", "hello"}, lcfg.args, "args should be -- agent-cmd agent-args")
+		assert.NotNil(t, lcfg.extraFiles, "extra files should be set (socket pair child)")
+		assert.Len(t, lcfg.extraFiles, 1, "should have exactly one extra file (child socket)")
+		assert.NotNil(t, lcfg.postStart, "postStart should be set")
+	} else if runtime.GOOS == "darwin" {
+		// On macOS with a wrapper binary, we get the wrapper command + args, but no extraFiles/postStart
+		assert.Equal(t, "/bin/true", lcfg.command, "command should be the wrapper binary")
+		assert.Equal(t, []string{"--", "/bin/echo", "hello"}, lcfg.args, "args should be -- agent-cmd agent-args")
+	}
 
 	// Clean up
 	for _, f := range lcfg.extraFiles {
@@ -253,6 +259,10 @@ func TestSetupWrapInterception_CallsWrapInit(t *testing.T) {
 }
 
 func TestSetupWrapInterception_EmptyWrapperBinary(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("empty wrapper binary is valid on macOS (ES interception)")
+	}
+
 	mc := &mockWrapClient{
 		wrapInitResp: types.WrapInitResponse{
 			WrapperBinary: "",
@@ -279,8 +289,8 @@ func TestSetupWrapInterception_WrapInitError(t *testing.T) {
 }
 
 func TestWrapLaunchConfig_EnvContainsSessionAndWrapper(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("wrap interception is Linux-only")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("wrap interception requires Linux or macOS")
 	}
 
 	mc := &mockWrapClient{
@@ -307,7 +317,11 @@ func TestWrapLaunchConfig_EnvContainsSessionAndWrapper(t *testing.T) {
 	}
 	assert.True(t, envMap["AGENTSH_SESSION_ID=test-session"], "env should contain AGENTSH_SESSION_ID")
 	assert.True(t, envMap["AGENTSH_SERVER=http://127.0.0.1:18080"], "env should contain AGENTSH_SERVER")
-	assert.True(t, envMap["AGENTSH_NOTIFY_SOCK_FD=3"], "env should contain AGENTSH_NOTIFY_SOCK_FD=3")
+
+	// AGENTSH_NOTIFY_SOCK_FD is Linux-only (seccomp notification socket)
+	if runtime.GOOS == "linux" {
+		assert.True(t, envMap["AGENTSH_NOTIFY_SOCK_FD=3"], "env should contain AGENTSH_NOTIFY_SOCK_FD=3")
+	}
 
 	// Clean up
 	for _, f := range lcfg.extraFiles {

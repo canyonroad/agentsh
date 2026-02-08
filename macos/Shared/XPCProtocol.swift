@@ -43,6 +43,22 @@ import Foundation
         reply: @escaping (Bool) -> Void
     )
 
+    // MARK: - Exec Pipeline
+
+    /// Check command execution through the full exec pipeline.
+    /// Returns: (decision, action, rule) where:
+    ///   - decision: "allow", "deny", "approve", "redirect", "audit"
+    ///   - action: "continue" (allow in-place), "redirect" (deny + spawn stub), "deny" (block)
+    ///   - rule: The matched policy rule name
+    func checkExecPipeline(
+        executable: String,
+        args: [String],
+        pid: pid_t,
+        parentPID: pid_t,
+        sessionID: String?,
+        reply: @escaping (String, String, String?) -> Void  // (decision, action, rule)
+    )
+
     // MARK: - PNACL (Process Network ACL)
 
     /// Check network connection with full process identification for PNACL.
@@ -117,6 +133,12 @@ import Foundation
     func getPNACLBlockingConfig(
         reply: @escaping (Bool, Double, Bool) -> Void
     )
+
+    // MARK: - Process Muting (Recursion Guard)
+
+    /// Mute a process to prevent ES event delivery (recursion guard).
+    /// Called from Go side when the server spawns a command for the exec pipeline.
+    func muteProcess(pid: pid_t, reply: @escaping (Bool) -> Void)
 }
 
 /// XPC Service identifier.
