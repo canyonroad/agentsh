@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -116,12 +117,18 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	const socketPathLimit = 104 // use the most restrictive (macOS)
 	const fixedParts = len("/notify-") + len(".sock")
 	budget := socketPathLimit - len(notifyDir) - fixedParts
-	if budget < 8 {
-		budget = 8
+	if budget < 1 {
+		os.RemoveAll(notifyDir)
+		return types.WrapInitResponse{}, http.StatusInternalServerError,
+			fmt.Errorf("temp directory path too long for Unix socket (%d bytes remaining)", budget)
 	}
 	if len(safeID) > budget {
 		h := sha256.Sum256([]byte(safeID))
-		safeID = hex.EncodeToString(h[:])[:budget]
+		hashStr := hex.EncodeToString(h[:]) // 64 chars
+		if budget > len(hashStr) {
+			budget = len(hashStr)
+		}
+		safeID = hashStr[:budget]
 	}
 	notifySocketPath := filepath.Join(notifyDir, "notify-"+safeID+".sock")
 

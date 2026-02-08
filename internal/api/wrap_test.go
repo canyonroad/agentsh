@@ -1,7 +1,10 @@
 package api
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -186,4 +189,51 @@ func searchString(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestWrapInit_LongTMPDIR_LongSessionID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	// Use a TMPDIR that simulates macOS /var/folders nesting (~40 chars)
+	// while still leaving enough room for the socket path.
+	// Budget: 104 - len(TMPDIR) - ~25 (agentsh-wrap-*) - 13 (fixed parts)
+	longDir := filepath.Join(t.TempDir(), "deep")
+	if err := os.MkdirAll(longDir, 0700); err != nil {
+		t.Fatalf("create tmpdir: %v", err)
+	}
+	t.Setenv("TMPDIR", longDir)
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	// Use a 128-char session ID to exercise the hashing/truncation path
+	longSessionID := strings.Repeat("x", 128)
+	s, err := mgr.CreateWithID(longSessionID, t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, longSessionID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		AgentArgs:    []string{"hello"},
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != 200 {
+		t.Errorf("expected status 200, got %d", code)
+	}
+	if resp.NotifySocket == "" {
+		t.Error("expected notify socket path to be set")
+	}
+	// Verify socket path is under the limit
+	if len(resp.NotifySocket) > 104 {
+		t.Errorf("socket path %d bytes exceeds 104 byte limit: %s", len(resp.NotifySocket), resp.NotifySocket)
+	}
 }
