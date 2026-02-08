@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net"
@@ -100,12 +102,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// Create a private temp directory for the notify socket to prevent
 	// other local users from connecting first (security: socket path injection).
 	// Sanitize session ID to a safe basename to prevent path traversal.
-	// Truncate to 36 chars (UUID length) to keep the Unix socket path
-	// under the ~108 byte platform limit.
 	safeID := filepath.Base(sessionID)
-	if len(safeID) > 36 {
-		safeID = safeID[:36]
-	}
 	notifyDir, err := os.MkdirTemp("", "agentsh-wrap-*")
 	if err != nil {
 		return types.WrapInitResponse{}, http.StatusInternalServerError, err
@@ -113,6 +110,18 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	if err := os.Chmod(notifyDir, 0700); err != nil {
 		os.RemoveAll(notifyDir)
 		return types.WrapInitResponse{}, http.StatusInternalServerError, err
+	}
+	// Unix socket paths are limited to 104 bytes (macOS) or 108 (Linux).
+	// Compute remaining budget for the session ID portion and hash if needed.
+	const socketPathLimit = 104 // use the most restrictive (macOS)
+	const fixedParts = len("/notify-") + len(".sock")
+	budget := socketPathLimit - len(notifyDir) - fixedParts
+	if budget < 8 {
+		budget = 8
+	}
+	if len(safeID) > budget {
+		h := sha256.Sum256([]byte(safeID))
+		safeID = hex.EncodeToString(h[:])[:budget]
 	}
 	notifySocketPath := filepath.Join(notifyDir, "notify-"+safeID+".sock")
 
