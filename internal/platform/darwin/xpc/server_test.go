@@ -18,12 +18,12 @@ import (
 var sockCounter atomic.Int64
 
 // testSockPath returns a short, unique Unix socket path safe for macOS.
-// macOS limits sun_path to 104 bytes; t.TempDir() paths with long test
-// names can exceed this. This helper uses /tmp with a short unique name.
+// macOS limits sun_path to 104 bytes; $TMPDIR paths (e.g. /var/folders/...)
+// can be long and exceed this. This helper uses /tmp with a short unique name.
 func testSockPath(t *testing.T) string {
 	t.Helper()
 	n := sockCounter.Add(1)
-	dir, err := os.MkdirTemp("", fmt.Sprintf("xpc%d", n))
+	dir, err := os.MkdirTemp("/tmp", fmt.Sprintf("xpc%d", n))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,11 +60,16 @@ func waitForServer(t *testing.T, srv *Server, sockPath string, timeout time.Dura
 	// Give the server goroutine a chance to start
 	runtime.Gosched()
 
-	// Wait for server to signal it's ready
+	// Wait for server to signal startup completed
 	select {
 	case <-srv.Ready():
 	case <-time.After(timeout):
 		t.Fatalf("server did not become ready within %v", timeout)
+	}
+
+	// Check if the server failed to start
+	if err := srv.StartErr(); err != nil {
+		t.Fatalf("server startup failed: %v (sockPath=%s)", err, sockPath)
 	}
 
 	// Now connect

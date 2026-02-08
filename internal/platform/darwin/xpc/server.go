@@ -94,7 +94,8 @@ type Server struct {
 	listener           net.Listener
 	mu                 sync.Mutex
 	wg                 sync.WaitGroup
-	ready              chan struct{} // closed when server is listening
+	ready              chan struct{} // closed when server startup completes (check startErr)
+	startErr           error        // non-nil if Run failed during startup
 }
 
 // NewServer creates a new policy socket server.
@@ -133,9 +134,18 @@ func (s *Server) SetSessionRegistrar(r SessionRegistrar) {
 	s.sessionRegistrar = r
 }
 
-// Ready returns a channel that is closed when the server is listening.
+// Ready returns a channel that is closed when server startup completes.
+// After Ready() fires, check StartErr() to see if startup succeeded.
 func (s *Server) Ready() <-chan struct{} {
 	return s.ready
+}
+
+// StartErr returns a non-nil error if Run failed during startup.
+// Only valid after Ready() has fired.
+func (s *Server) StartErr() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.startErr
 }
 
 // Run starts the server and blocks until context is cancelled.
@@ -145,7 +155,12 @@ func (s *Server) Run(ctx context.Context) error {
 
 	ln, err := net.Listen("unix", s.sockPath)
 	if err != nil {
-		return fmt.Errorf("listen: %w", err)
+		err = fmt.Errorf("listen: %w", err)
+		s.mu.Lock()
+		s.startErr = err
+		s.mu.Unlock()
+		close(s.ready)
+		return err
 	}
 
 	// Set socket permissions to allow user-space access.
@@ -158,7 +173,12 @@ func (s *Server) Run(ctx context.Context) error {
 	//   3. Using SO_PEERCRED/getpeereid to authenticate peers for state-changing ops
 	if err := os.Chmod(s.sockPath, 0666); err != nil {
 		ln.Close()
-		return fmt.Errorf("chmod: %w", err)
+		err = fmt.Errorf("chmod: %w", err)
+		s.mu.Lock()
+		s.startErr = err
+		s.mu.Unlock()
+		close(s.ready)
+		return err
 	}
 
 	s.mu.Lock()
