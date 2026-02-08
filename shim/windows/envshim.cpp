@@ -37,10 +37,16 @@ static HANDLE log_pipe = INVALID_HANDLE_VALUE;
 static CRITICAL_SECTION init_cs;
 static int initialized = 0;
 
+// GetEnvironmentStrings is special: the ANSI function is named GetEnvironmentStrings
+// (no A suffix), but when UNICODE is defined it becomes a macro for GetEnvironmentStringsW.
+// We must grab the ANSI function pointer before the macro takes effect.
+#ifdef UNICODE
+#undef GetEnvironmentStrings
+#endif
 // Original function pointers
 static DWORD (WINAPI *Real_GetEnvironmentVariableA)(LPCSTR, LPSTR, DWORD) = GetEnvironmentVariableA;
 static DWORD (WINAPI *Real_GetEnvironmentVariableW)(LPCWSTR, LPWSTR, DWORD) = GetEnvironmentVariableW;
-static LPCH (WINAPI *Real_GetEnvironmentStringsA)(void) = GetEnvironmentStringsA;
+static LPCH (WINAPI *Real_GetEnvironmentStringsA)(void) = GetEnvironmentStrings;
 static LPWCH (WINAPI *Real_GetEnvironmentStringsW)(void) = GetEnvironmentStringsW;
 static BOOL (WINAPI *Real_SetEnvironmentVariableA)(LPCSTR, LPCSTR) = SetEnvironmentVariableA;
 static BOOL (WINAPI *Real_SetEnvironmentVariableW)(LPCWSTR, LPCWSTR) = SetEnvironmentVariableW;
