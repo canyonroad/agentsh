@@ -112,7 +112,7 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 
 	// 3. Try to set up exec interception (Linux seccomp / macOS ES)
 	var wrapCfg *wrapLaunchConfig
-	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		wrapCfg, err = setupWrapInterception(ctx, c, sessID, agentPath, opts.agentArgs, cfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "agentsh: interception setup failed, running without interception: %v\n", err)
@@ -183,6 +183,8 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 		mechanism := "seccomp"
 		if runtime.GOOS == "darwin" {
 			mechanism = "ES"
+		} else if runtime.GOOS == "windows" {
+			mechanism = "driver"
 		}
 		fmt.Fprintf(os.Stderr, "agentsh: agent %s started with %s interception (pid: %d)\n", opts.agentCmd, mechanism, agentProc.Process.Pid)
 		// Forward the notify fd to the server in the background
@@ -244,9 +246,9 @@ func setupWrapInterception(ctx context.Context, c client.CLIClient, sessID strin
 	}
 
 	// On Linux, the server must provide a wrapper binary for seccomp interception.
-	// On macOS, an empty WrapperBinary is valid — ES interception is system-wide
-	// via the System Extension, so the agent can run directly.
-	if wrapResp.WrapperBinary == "" && runtime.GOOS != "darwin" {
+	// On macOS and Windows, an empty WrapperBinary is valid — interception is
+	// system-wide via the System Extension (macOS) or driver (Windows).
+	if wrapResp.WrapperBinary == "" && runtime.GOOS == "linux" {
 		return nil, fmt.Errorf("server returned empty wrapper binary")
 	}
 
