@@ -1,11 +1,15 @@
-//go:build !linux || !cgo
+//go:build (!linux || !cgo) && !windows
 
 package api
 
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
+
+	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/pkg/types"
 )
 
 var (
@@ -19,4 +23,8 @@ func recvFDFromConn(sock *os.File) (*os.File, error) {
 
 func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool) {
 	// No-op on non-Linux platforms
+}
+
+func (a *App) wrapInitWindows(ctx context.Context, s *session.Session, sessionID string, req types.WrapInitRequest) (types.WrapInitResponse, int, error) {
+	return types.WrapInitResponse{}, http.StatusBadRequest, errWrapNotSupported
 }

@@ -50,7 +50,13 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// Use a background context so the notify handler outlives the HTTP request.
 	// The handler will be cleaned up when the session ends or the connection closes.
 	ctx := context.Background()
-	// Only supported on Linux
+
+	// Windows uses driver-based interception, not seccomp
+	if runtime.GOOS == "windows" {
+		return a.wrapInitWindows(ctx, s, sessionID, req)
+	}
+
+	// Only supported on Linux (seccomp) otherwise
 	if runtime.GOOS != "linux" {
 		return types.WrapInitResponse{}, http.StatusBadRequest, errWrapNotSupported
 	}

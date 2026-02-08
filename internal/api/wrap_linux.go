@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
+	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
 )
 
@@ -68,4 +71,9 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessionID, a.policy, emitter, execveHandler)
 		slog.Info("wrap: notify handler returned", "session_id", sessionID)
 	}()
+}
+
+// wrapInitWindows is not available on Linux.
+func (a *App) wrapInitWindows(_ context.Context, _ *session.Session, _ string, _ types.WrapInitRequest) (types.WrapInitResponse, int, error) {
+	return types.WrapInitResponse{}, http.StatusBadRequest, errWrapNotSupported
 }
