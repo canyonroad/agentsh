@@ -490,3 +490,321 @@ func TestDriverConfigDefaults(t *testing.T) {
 		t.Errorf("expected default cache entries 4096, got %d", cfg.CacheMaxEntries)
 	}
 }
+
+// --- Exec interception message tests ---
+
+func TestExecInterceptionMessageConstants(t *testing.T) {
+	tests := []struct {
+		name     string
+		got      uint32
+		expected uint32
+	}{
+		{"MsgProcessSuspended", MsgProcessSuspended, 200},
+		{"MsgResumeProcess", MsgResumeProcess, 201},
+		{"MsgTerminateProcess", MsgTerminateProcess, 202},
+	}
+
+	for _, tc := range tests {
+		if tc.got != tc.expected {
+			t.Errorf("%s: expected %d, got %d", tc.name, tc.expected, tc.got)
+		}
+	}
+}
+
+func TestExecDecisionConstants(t *testing.T) {
+	if ExecDecisionResume != 0 {
+		t.Errorf("ExecDecisionResume should be 0, got %d", ExecDecisionResume)
+	}
+	if ExecDecisionTerminate != 1 {
+		t.Errorf("ExecDecisionTerminate should be 1, got %d", ExecDecisionTerminate)
+	}
+	if ExecDecisionRedirect != 2 {
+		t.Errorf("ExecDecisionRedirect should be 2, got %d", ExecDecisionRedirect)
+	}
+}
+
+func TestSuspendedProcessRequestFields(t *testing.T) {
+	req := &SuspendedProcessRequest{
+		SessionToken: 0xDEADBEEF,
+		ProcessId:    1234,
+		ParentId:     5678,
+		CreateTime:   0x12345678,
+		ImagePath:    `C:\Windows\System32\cmd.exe`,
+		CommandLine:  `cmd.exe /c dir`,
+	}
+
+	if req.SessionToken != 0xDEADBEEF {
+		t.Errorf("SessionToken: expected 0xDEADBEEF, got 0x%X", req.SessionToken)
+	}
+	if req.ProcessId != 1234 {
+		t.Errorf("ProcessId: expected 1234, got %d", req.ProcessId)
+	}
+	if req.ParentId != 5678 {
+		t.Errorf("ParentId: expected 5678, got %d", req.ParentId)
+	}
+	if req.CreateTime != 0x12345678 {
+		t.Errorf("CreateTime: expected 0x12345678, got 0x%X", req.CreateTime)
+	}
+	if req.ImagePath != `C:\Windows\System32\cmd.exe` {
+		t.Errorf("ImagePath: expected cmd.exe path, got %q", req.ImagePath)
+	}
+	if req.CommandLine != `cmd.exe /c dir` {
+		t.Errorf("CommandLine: expected 'cmd.exe /c dir', got %q", req.CommandLine)
+	}
+}
+
+func TestSuspendedProcessMessageEncoding(t *testing.T) {
+	// Build a mock MsgProcessSuspended message matching the wire format:
+	// header(16) + sessionToken(8) + pid(4) + parentPid(4) + createTime(8) + padding(8) + imagePath(520*2) + cmdLine(2048*2)
+	const maxPath = 520
+	const maxCmdLine = 2048
+	msgSize := 16 + 8 + 4 + 4 + 8 + 8 + (maxPath * 2) + (maxCmdLine * 2)
+	msg := make([]byte, msgSize)
+
+	requestId := uint64(99999)
+
+	// Header
+	binary.LittleEndian.PutUint32(msg[0:4], MsgProcessSuspended)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], requestId)
+
+	// Body
+	binary.LittleEndian.PutUint64(msg[16:24], 0xCAFEBABE)  // sessionToken
+	binary.LittleEndian.PutUint32(msg[24:28], 4321)         // pid
+	binary.LittleEndian.PutUint32(msg[28:32], 1111)         // parentPid
+	binary.LittleEndian.PutUint64(msg[32:40], 0xABCDEF01)  // createTime
+	// padding at [40:48] is zero
+
+	// imagePath as UTF-16LE
+	imagePath := `C:\Windows\notepad.exe`
+	pathBytes := utf16Encode(imagePath)
+	copy(msg[48:], pathBytes)
+
+	// cmdLine as UTF-16LE
+	cmdLine := `notepad.exe C:\test.txt`
+	cmdLineBytes := utf16Encode(cmdLine)
+	copy(msg[48+maxPath*2:], cmdLineBytes)
+
+	// Decode and verify
+	if binary.LittleEndian.Uint32(msg[0:4]) != MsgProcessSuspended {
+		t.Errorf("expected MsgProcessSuspended (200), got %d", binary.LittleEndian.Uint32(msg[0:4]))
+	}
+	if binary.LittleEndian.Uint64(msg[8:16]) != requestId {
+		t.Errorf("expected requestId %d, got %d", requestId, binary.LittleEndian.Uint64(msg[8:16]))
+	}
+	if binary.LittleEndian.Uint64(msg[16:24]) != 0xCAFEBABE {
+		t.Errorf("expected sessionToken 0xCAFEBABE, got 0x%X", binary.LittleEndian.Uint64(msg[16:24]))
+	}
+	if binary.LittleEndian.Uint32(msg[24:28]) != 4321 {
+		t.Errorf("expected pid 4321, got %d", binary.LittleEndian.Uint32(msg[24:28]))
+	}
+	if binary.LittleEndian.Uint32(msg[28:32]) != 1111 {
+		t.Errorf("expected parentPid 1111, got %d", binary.LittleEndian.Uint32(msg[28:32]))
+	}
+
+	decodedPath := utf16Decode(msg[48 : 48+maxPath*2])
+	if decodedPath != imagePath {
+		t.Errorf("expected imagePath %q, got %q", imagePath, decodedPath)
+	}
+
+	decodedCmdLine := utf16Decode(msg[48+maxPath*2 : 48+maxPath*2+maxCmdLine*2])
+	if decodedCmdLine != cmdLine {
+		t.Errorf("expected cmdLine %q, got %q", cmdLine, decodedCmdLine)
+	}
+}
+
+func TestSuspendedProcessReplyEncoding(t *testing.T) {
+	// Reply format: header(16) + decision(4) + reserved(4) = 24 bytes
+	reply := make([]byte, 24)
+
+	requestId := uint64(99999)
+
+	// Test resume reply
+	binary.LittleEndian.PutUint32(reply[0:4], MsgResumeProcess)
+	binary.LittleEndian.PutUint32(reply[4:8], 24)
+	binary.LittleEndian.PutUint64(reply[8:16], requestId)
+	binary.LittleEndian.PutUint32(reply[16:20], uint32(ExecDecisionResume))
+	binary.LittleEndian.PutUint32(reply[20:24], 0) // reserved
+
+	if binary.LittleEndian.Uint32(reply[0:4]) != MsgResumeProcess {
+		t.Errorf("expected MsgResumeProcess, got %d", binary.LittleEndian.Uint32(reply[0:4]))
+	}
+	if binary.LittleEndian.Uint64(reply[8:16]) != requestId {
+		t.Errorf("expected requestId %d, got %d", requestId, binary.LittleEndian.Uint64(reply[8:16]))
+	}
+	if ExecDecision(binary.LittleEndian.Uint32(reply[16:20])) != ExecDecisionResume {
+		t.Errorf("expected ExecDecisionResume, got %d", binary.LittleEndian.Uint32(reply[16:20]))
+	}
+
+	// Test terminate reply
+	binary.LittleEndian.PutUint32(reply[0:4], MsgTerminateProcess)
+	binary.LittleEndian.PutUint32(reply[16:20], uint32(ExecDecisionTerminate))
+
+	if binary.LittleEndian.Uint32(reply[0:4]) != MsgTerminateProcess {
+		t.Errorf("expected MsgTerminateProcess, got %d", binary.LittleEndian.Uint32(reply[0:4]))
+	}
+	if ExecDecision(binary.LittleEndian.Uint32(reply[16:20])) != ExecDecisionTerminate {
+		t.Errorf("expected ExecDecisionTerminate, got %d", binary.LittleEndian.Uint32(reply[16:20]))
+	}
+}
+
+func TestHandleSuspendedProcessDecoding(t *testing.T) {
+	// Build a mock MsgProcessSuspended message
+	const maxPath = 520
+	const maxCmdLine = 2048
+	msgSize := 16 + 8 + 4 + 4 + 8 + 8 + (maxPath * 2) + (maxCmdLine * 2)
+	msg := make([]byte, msgSize)
+
+	requestId := uint64(42)
+
+	binary.LittleEndian.PutUint32(msg[0:4], MsgProcessSuspended)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], requestId)
+	binary.LittleEndian.PutUint64(msg[16:24], 0xBEEF)
+	binary.LittleEndian.PutUint32(msg[24:28], 9999)
+	binary.LittleEndian.PutUint32(msg[28:32], 8888)
+	binary.LittleEndian.PutUint64(msg[32:40], 0xFACE)
+
+	imagePath := `C:\test\app.exe`
+	copy(msg[48:], utf16Encode(imagePath))
+	cmdLine := `app.exe --flag`
+	copy(msg[48+maxPath*2:], utf16Encode(cmdLine))
+
+	// Set up a handler that records calls and returns Resume
+	var gotReq *SuspendedProcessRequest
+	client := NewDriverClient()
+	client.SetSuspendedProcessHandler(func(req *SuspendedProcessRequest) ExecDecision {
+		gotReq = req
+		return ExecDecisionResume
+	})
+
+	reply := make([]byte, 512)
+	replyLen := client.handleSuspendedProcess(msg, reply)
+
+	// Verify handler was called with correct data
+	if gotReq == nil {
+		t.Fatal("handler was not called")
+	}
+	if gotReq.SessionToken != 0xBEEF {
+		t.Errorf("SessionToken: expected 0xBEEF, got 0x%X", gotReq.SessionToken)
+	}
+	if gotReq.ProcessId != 9999 {
+		t.Errorf("ProcessId: expected 9999, got %d", gotReq.ProcessId)
+	}
+	if gotReq.ParentId != 8888 {
+		t.Errorf("ParentId: expected 8888, got %d", gotReq.ParentId)
+	}
+	if gotReq.CreateTime != 0xFACE {
+		t.Errorf("CreateTime: expected 0xFACE, got 0x%X", gotReq.CreateTime)
+	}
+	if gotReq.ImagePath != imagePath {
+		t.Errorf("ImagePath: expected %q, got %q", imagePath, gotReq.ImagePath)
+	}
+	if gotReq.CommandLine != cmdLine {
+		t.Errorf("CommandLine: expected %q, got %q", cmdLine, gotReq.CommandLine)
+	}
+
+	// Verify reply
+	if replyLen != 24 {
+		t.Fatalf("expected reply length 24, got %d", replyLen)
+	}
+	replyMsgType := binary.LittleEndian.Uint32(reply[0:4])
+	if replyMsgType != MsgResumeProcess {
+		t.Errorf("expected MsgResumeProcess reply, got %d", replyMsgType)
+	}
+	replyRequestId := binary.LittleEndian.Uint64(reply[8:16])
+	if replyRequestId != requestId {
+		t.Errorf("expected requestId %d, got %d", requestId, replyRequestId)
+	}
+}
+
+func TestHandleSuspendedProcessTerminate(t *testing.T) {
+	const maxPath = 520
+	const maxCmdLine = 2048
+	msgSize := 16 + 8 + 4 + 4 + 8 + 8 + (maxPath * 2) + (maxCmdLine * 2)
+	msg := make([]byte, msgSize)
+
+	binary.LittleEndian.PutUint32(msg[0:4], MsgProcessSuspended)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], 123)
+	binary.LittleEndian.PutUint64(msg[16:24], 0x1)
+	binary.LittleEndian.PutUint32(msg[24:28], 555)
+	binary.LittleEndian.PutUint32(msg[28:32], 444)
+
+	client := NewDriverClient()
+	client.SetSuspendedProcessHandler(func(req *SuspendedProcessRequest) ExecDecision {
+		return ExecDecisionTerminate
+	})
+
+	reply := make([]byte, 512)
+	replyLen := client.handleSuspendedProcess(msg, reply)
+
+	if replyLen != 24 {
+		t.Fatalf("expected reply length 24, got %d", replyLen)
+	}
+	replyMsgType := binary.LittleEndian.Uint32(reply[0:4])
+	if replyMsgType != MsgTerminateProcess {
+		t.Errorf("expected MsgTerminateProcess reply, got %d", replyMsgType)
+	}
+}
+
+func TestHandleSuspendedProcessNoHandler(t *testing.T) {
+	// Without a handler, should default to resume (fail-open)
+	const maxPath = 520
+	const maxCmdLine = 2048
+	msgSize := 16 + 8 + 4 + 4 + 8 + 8 + (maxPath * 2) + (maxCmdLine * 2)
+	msg := make([]byte, msgSize)
+
+	binary.LittleEndian.PutUint32(msg[0:4], MsgProcessSuspended)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], 1)
+
+	client := NewDriverClient()
+	// No handler set
+
+	reply := make([]byte, 512)
+	replyLen := client.handleSuspendedProcess(msg, reply)
+
+	if replyLen != 24 {
+		t.Fatalf("expected reply length 24, got %d", replyLen)
+	}
+	// Fail-open: should resume
+	replyMsgType := binary.LittleEndian.Uint32(reply[0:4])
+	if replyMsgType != MsgResumeProcess {
+		t.Errorf("expected MsgResumeProcess (fail-open), got %d", replyMsgType)
+	}
+}
+
+func TestHandleSuspendedProcessRedirect(t *testing.T) {
+	const maxPath = 520
+	const maxCmdLine = 2048
+	msgSize := 16 + 8 + 4 + 4 + 8 + 8 + (maxPath * 2) + (maxCmdLine * 2)
+	msg := make([]byte, msgSize)
+
+	binary.LittleEndian.PutUint32(msg[0:4], MsgProcessSuspended)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(msgSize))
+	binary.LittleEndian.PutUint64(msg[8:16], 1)
+	binary.LittleEndian.PutUint64(msg[16:24], 0x1)
+	binary.LittleEndian.PutUint32(msg[24:28], 555)
+
+	client := NewDriverClient()
+	client.SetSuspendedProcessHandler(func(req *SuspendedProcessRequest) ExecDecision {
+		return ExecDecisionRedirect
+	})
+
+	reply := make([]byte, 512)
+	replyLen := client.handleSuspendedProcess(msg, reply)
+
+	if replyLen != 24 {
+		t.Fatalf("expected reply length 24, got %d", replyLen)
+	}
+	// Redirect maps to terminate in the driver reply (Go-side handles the redirection)
+	replyMsgType := binary.LittleEndian.Uint32(reply[0:4])
+	if replyMsgType != MsgTerminateProcess {
+		t.Errorf("expected MsgTerminateProcess for redirect, got %d", replyMsgType)
+	}
+	decision := ExecDecision(binary.LittleEndian.Uint32(reply[16:20]))
+	if decision != ExecDecisionRedirect {
+		t.Errorf("expected ExecDecisionRedirect in reply body, got %d", decision)
+	}
+}
