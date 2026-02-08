@@ -2,7 +2,7 @@ package windows
 
 import (
 	"fmt"
-	"time"
+	"sync/atomic"
 )
 
 // RedirectConfig holds configuration for redirecting a suspended process through the stub.
@@ -11,9 +11,11 @@ type RedirectConfig struct {
 	SessionID  string // Current session ID
 }
 
+var pipeSeq atomic.Uint64
+
 // generateStubPipeNameForRedirect returns a unique pipe name for a redirect operation.
 func generateStubPipeNameForRedirect(sessionID string, pid uint32) string {
-	return fmt.Sprintf(`\\.\pipe\agentsh-stub-%s-%d-%d`, sessionID, pid, time.Now().UnixNano())
+	return fmt.Sprintf(`\\.\pipe\agentsh-stub-%s-%d-%d`, sessionID, pid, pipeSeq.Add(1))
 }
 
 // splitCommandLine splits a Windows command line into arguments, respecting double-quoted strings.
