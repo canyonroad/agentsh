@@ -28,10 +28,10 @@ func TestExecPTYStartMarshalRoundTrip(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 	if got.GetSessionId() != orig.SessionId || got.GetCommand() != orig.Command || got.GetWorkingDir() != orig.WorkingDir {
-		t.Fatalf("round trip mismatch: %+v", got)
+		t.Fatalf("round trip mismatch: %+v", &got)
 	}
 	if got.GetRows() != 24 || got.GetCols() != 80 || got.Env["KEY"] != "VALUE" {
-		t.Fatalf("fields mismatch after unmarshal: %+v", got)
+		t.Fatalf("fields mismatch after unmarshal: %+v", &got)
 	}
 }
 
@@ -46,7 +46,7 @@ func TestExecPTYOutputMarshalRoundTrip(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 	if string(got.GetData()) != "chunk" {
-		t.Fatalf("unexpected round trip: %+v", got)
+		t.Fatalf("unexpected round trip: %+v", &got)
 	}
 }
 
@@ -64,6 +64,6 @@ func TestExecPTYExitMarshalRoundTrip(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 	if got.GetExitCode() != 2 || got.GetDurationMs() != 1234 {
-		t.Fatalf("unexpected round trip: %+v", got)
+		t.Fatalf("unexpected round trip: %+v", &got)
 	}
 }

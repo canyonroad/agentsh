@@ -30,7 +30,7 @@ func TestNewDispatcher(t *testing.T) {
 func TestDispatcher_Register(t *testing.T) {
 	d := NewDispatcher()
 
-	cfg := WebhookConfig{
+	cfg := &WebhookConfig{
 		Name:    "test",
 		URL:     "http://example.com/webhook",
 		Events:  []string{"file_read", "file_write"},
@@ -71,7 +71,7 @@ func TestDispatcher_Register(t *testing.T) {
 func TestDispatcher_Register_Template(t *testing.T) {
 	d := NewDispatcher()
 
-	cfg := WebhookConfig{
+	cfg := &WebhookConfig{
 		Name:     "test",
 		URL:      "http://example.com/webhook",
 		Template: `{"event": "{{.Event.Type}}"}`,
@@ -91,7 +91,7 @@ func TestDispatcher_Register_Template(t *testing.T) {
 func TestDispatcher_Register_InvalidTemplate(t *testing.T) {
 	d := NewDispatcher()
 
-	cfg := WebhookConfig{
+	cfg := &WebhookConfig{
 		Name:     "test",
 		URL:      "http://example.com/webhook",
 		Template: `{{.Invalid`,
@@ -107,7 +107,7 @@ func TestDispatcher_Register_InvalidTemplate(t *testing.T) {
 func TestDispatcher_Unregister(t *testing.T) {
 	d := NewDispatcher()
 
-	cfg := WebhookConfig{
+	cfg := &WebhookConfig{
 		Name:    "test",
 		URL:     "http://example.com/webhook",
 		Enabled: true,
@@ -124,8 +124,8 @@ func TestDispatcher_Unregister(t *testing.T) {
 func TestDispatcher_List(t *testing.T) {
 	d := NewDispatcher()
 
-	d.Register(WebhookConfig{Name: "wh1", URL: "http://example.com/1", Enabled: true})
-	d.Register(WebhookConfig{Name: "wh2", URL: "http://example.com/2", Enabled: true})
+	d.Register(&WebhookConfig{Name: "wh1", URL: "http://example.com/1", Enabled: true})
+	d.Register(&WebhookConfig{Name: "wh2", URL: "http://example.com/2", Enabled: true})
 
 	list := d.List()
 	if len(list) != 2 {
@@ -212,7 +212,7 @@ func TestDispatcher_Dispatch(t *testing.T) {
 	defer server.Close()
 
 	d := NewDispatcher()
-	d.Register(WebhookConfig{
+	d.Register(&WebhookConfig{
 		Name:      "test",
 		URL:       server.URL,
 		Events:    []string{"file_read"},
@@ -253,7 +253,7 @@ func TestDispatcher_Dispatch_FilteredOut(t *testing.T) {
 	defer server.Close()
 
 	d := NewDispatcher()
-	d.Register(WebhookConfig{
+	d.Register(&WebhookConfig{
 		Name:      "test",
 		URL:       server.URL,
 		Events:    []string{"file_read"},
@@ -284,7 +284,7 @@ func TestDispatcher_Dispatch_Disabled(t *testing.T) {
 	defer server.Close()
 
 	d := NewDispatcher()
-	d.Register(WebhookConfig{
+	d.Register(&WebhookConfig{
 		Name:      "test",
 		URL:       server.URL,
 		Events:    []string{"*"},
@@ -317,7 +317,7 @@ func TestDispatcher_Dispatch_Template(t *testing.T) {
 	defer server.Close()
 
 	d := NewDispatcher()
-	d.Register(WebhookConfig{
+	d.Register(&WebhookConfig{
 		Name:      "test",
 		URL:       server.URL,
 		Template:  `{"type": "{{.Event.Type}}", "session": "{{.Event.SessionID}}"}`,
@@ -368,7 +368,7 @@ func TestDispatcher_Batching(t *testing.T) {
 	defer server.Close()
 
 	d := NewDispatcher()
-	d.Register(WebhookConfig{
+	d.Register(&WebhookConfig{
 		Name:          "test",
 		URL:           server.URL,
 		BatchSize:     3,
@@ -414,7 +414,7 @@ func TestDispatcher_Flush(t *testing.T) {
 	defer server.Close()
 
 	d := NewDispatcher()
-	d.Register(WebhookConfig{
+	d.Register(&WebhookConfig{
 		Name:          "test",
 		URL:           server.URL,
 		BatchSize:     10, // Large batch, won't trigger automatically
@@ -449,7 +449,7 @@ func TestDispatcher_Retry(t *testing.T) {
 	defer server.Close()
 
 	d := NewDispatcher()
-	d.Register(WebhookConfig{
+	d.Register(&WebhookConfig{
 		Name:       "test",
 		URL:        server.URL,
 		BatchSize:  1,
@@ -478,7 +478,7 @@ func TestDispatcher_Headers(t *testing.T) {
 	defer server.Close()
 
 	d := NewDispatcher()
-	d.Register(WebhookConfig{
+	d.Register(&WebhookConfig{
 		Name: "test",
 		URL:  server.URL,
 		Headers: map[string]string{
@@ -566,7 +566,7 @@ func TestDispatchBatch(t *testing.T) {
 	defer server.Close()
 
 	d := NewDispatcher()
-	d.Register(WebhookConfig{
+	d.Register(&WebhookConfig{
 		Name:      "test",
 		URL:       server.URL,
 		BatchSize: 1,

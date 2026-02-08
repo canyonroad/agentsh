@@ -82,7 +82,7 @@ func NewDispatcher() *Dispatcher {
 }
 
 // Register adds a webhook configuration.
-func (d *Dispatcher) Register(cfg WebhookConfig) error {
+func (d *Dispatcher) Register(cfg *WebhookConfig) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -116,7 +116,7 @@ func (d *Dispatcher) Register(cfg WebhookConfig) error {
 	}
 
 	cfg.lastFlush = time.Now().UTC()
-	d.webhooks[cfg.Name] = &cfg
+	d.webhooks[cfg.Name] = cfg
 	return nil
 }
 
