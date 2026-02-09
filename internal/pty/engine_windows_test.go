@@ -5,7 +5,6 @@ package pty
 import (
 	"context"
 	"io"
-	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -13,14 +12,6 @@ import (
 
 	"github.com/UserExistsError/conpty"
 )
-
-// skipInCI skips ConPTY tests in CI environments where they can be flaky.
-func skipInCI(t *testing.T) {
-	t.Helper()
-	if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
-		t.Skip("skipping ConPTY test in CI (non-interactive environment)")
-	}
-}
 
 func TestBuildCommandLine(t *testing.T) {
 	// Test cases use syscall.EscapeArg behavior
@@ -74,10 +65,6 @@ func TestSyscallEscapeArg(t *testing.T) {
 }
 
 func TestEngineStart(t *testing.T) {
-	skipInCI(t)
-	if testing.Short() {
-		t.Skip("skipping ConPTY test in short mode")
-	}
 	if !conpty.IsConPtyAvailable() {
 		t.Skip("ConPTY not available")
 	}
@@ -138,10 +125,6 @@ func TestEngineStartEmptyCommand(t *testing.T) {
 }
 
 func TestSessionResize(t *testing.T) {
-	skipInCI(t)
-	if testing.Short() {
-		t.Skip("skipping ConPTY test in short mode")
-	}
 	if !conpty.IsConPtyAvailable() {
 		t.Skip("ConPTY not available")
 	}
@@ -166,10 +149,6 @@ func TestSessionResize(t *testing.T) {
 }
 
 func TestSessionPID(t *testing.T) {
-	skipInCI(t)
-	if testing.Short() {
-		t.Skip("skipping ConPTY test in short mode")
-	}
 	if !conpty.IsConPtyAvailable() {
 		t.Skip("ConPTY not available")
 	}
@@ -192,10 +171,6 @@ func TestSessionPID(t *testing.T) {
 }
 
 func TestSessionSignalINT(t *testing.T) {
-	skipInCI(t)
-	if testing.Short() {
-		t.Skip("skipping ConPTY test in short mode")
-	}
 	if !conpty.IsConPtyAvailable() {
 		t.Skip("ConPTY not available")
 	}

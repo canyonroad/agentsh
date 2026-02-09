@@ -147,6 +147,11 @@ func (s *Session) Wait() (exitCode int, err error) {
 
 	code, err := s.cpty.Wait(context.Background())
 
+	// Close the ConPTY to unblock any pending Read calls in readOutput.
+	// ConPTY keeps pipe handles open after process exit; closing them causes
+	// ReadFile to return, allowing readOutput to finish and close outDone.
+	s.cpty.Close()
+
 	// Wait for output to drain
 	if s.outDone != nil {
 		<-s.outDone
