@@ -16,7 +16,7 @@ import (
 // handleRedirect terminates the suspended process, creates a named pipe,
 // spawns agentsh-stub.exe as a child of the original parent, and serves
 // the original command through the stub protocol.
-func handleRedirect(req *SuspendedProcessRequest, cfg RedirectConfig) error {
+func handleRedirect(req *SuspendedProcessRequest, cfg RedirectConfig, onStubSpawned func(pid uint32)) error {
 	if req == nil {
 		return fmt.Errorf("nil request")
 	}
@@ -52,6 +52,11 @@ func handleRedirect(req *SuspendedProcessRequest, cfg RedirectConfig) error {
 		return fmt.Errorf("spawn stub as child of %d: %w", req.ParentId, err)
 	}
 	slog.Info("redirect: spawned stub", "stub_pid", stubPID, "parent_pid", req.ParentId, "pipe", pipeName)
+
+	// Notify caller of stub PID immediately so it can be muted before driver intercepts it
+	if onStubSpawned != nil {
+		onStubSpawned(stubPID)
+	}
 
 	// 5. Accept the connection from the stub (with timeout via goroutine)
 	type acceptResult struct {
@@ -90,6 +95,6 @@ func handleRedirect(req *SuspendedProcessRequest, cfg RedirectConfig) error {
 }
 
 // HandleRedirect is the exported entry point for redirect operations.
-func HandleRedirect(req *SuspendedProcessRequest, cfg RedirectConfig) error {
-	return handleRedirect(req, cfg)
+func HandleRedirect(req *SuspendedProcessRequest, cfg RedirectConfig, onStubSpawned func(pid uint32)) error {
+	return handleRedirect(req, cfg, onStubSpawned)
 }

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/policy"
@@ -125,12 +126,27 @@ func startDriverHandlerForWrap(ctx context.Context, sessionID string, sessionTok
 	// Create the exec handler with the policy checker
 	execHandler := winplat.NewWinExecHandler(checker, stubBinary)
 
+	// Muted PID set: stub processes and their direct children are auto-resumed
+	// to prevent infinite recursion when the driver re-intercepts stub-spawned commands.
+	var mutedPIDs sync.Map // key: uint32, value: struct{}
+
 	// Set the suspended process handler
 	dc.SetSuspendedProcessHandler(func(req *winplat.SuspendedProcessRequest) winplat.ExecDecision {
-		decision := execHandler.HandleSuspended(req)
 		if req == nil {
-			return decision
+			return winplat.ExecDecisionResume
 		}
+
+		// Recursion guard: auto-resume muted PIDs and their direct children
+		if _, muted := mutedPIDs.Load(req.ProcessId); muted {
+			slog.Debug("wrap: auto-resuming muted stub process", "pid", req.ProcessId)
+			return winplat.ExecDecisionResume
+		}
+		if _, parentMuted := mutedPIDs.Load(req.ParentId); parentMuted {
+			slog.Debug("wrap: auto-resuming child of muted stub", "pid", req.ProcessId, "parent", req.ParentId)
+			return winplat.ExecDecisionResume
+		}
+
+		decision := execHandler.HandleSuspended(req)
 
 		// Emit exec_intercept event for audit
 		decisionStr := execDecisionString(decision)
@@ -167,7 +183,10 @@ func startDriverHandlerForWrap(ctx context.Context, sessionID string, sessionTok
 					StubBinary: stubBinary,
 					SessionID:  sessionID,
 				}
-				if err := winplat.HandleRedirect(req, cfg); err != nil {
+				if err := winplat.HandleRedirect(req, cfg, func(stubPID uint32) {
+					mutedPIDs.Store(stubPID, struct{}{})
+					slog.Debug("wrap: muted stub PID", "stub_pid", stubPID)
+				}); err != nil {
 					slog.Error("wrap: redirect failed", "pid", req.ProcessId, "error", err)
 				}
 			}()

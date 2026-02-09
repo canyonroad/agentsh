@@ -85,7 +85,7 @@ func TestSplitCommandLine(t *testing.T) {
 
 func TestHandleRedirectSignature(t *testing.T) {
 	// Verify handleRedirect exists with the expected signature
-	var fn func(req *SuspendedProcessRequest, cfg RedirectConfig) error
+	var fn func(req *SuspendedProcessRequest, cfg RedirectConfig, onStubSpawned func(pid uint32)) error
 	fn = handleRedirect
 	if fn == nil {
 		t.Fatal("handleRedirect should not be nil")
