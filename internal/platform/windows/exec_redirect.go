@@ -18,8 +18,8 @@ func generateStubPipeNameForRedirect(sessionID string, pid uint32) string {
 	return fmt.Sprintf(`\\.\pipe\agentsh-stub-%s-%d-%d`, sessionID, pid, pipeSeq.Add(1))
 }
 
-// splitCommandLine splits a Windows command line into arguments, respecting double-quoted strings.
-func splitCommandLine(cmdLine string) []string {
+// SplitCommandLine splits a Windows command line into arguments, respecting double-quoted strings.
+func SplitCommandLine(cmdLine string) []string {
 	if cmdLine == "" {
 		return nil
 	}

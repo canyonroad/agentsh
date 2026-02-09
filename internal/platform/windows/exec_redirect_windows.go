@@ -79,7 +79,7 @@ func handleRedirect(req *SuspendedProcessRequest, cfg RedirectConfig) error {
 	}
 
 	// 6. Parse original command line and serve through stub protocol
-	args := splitCommandLine(req.CommandLine)
+	args := SplitCommandLine(req.CommandLine)
 	serveCfg := stub.ServeConfig{
 		Command: req.ImagePath,
 		Args:    args,

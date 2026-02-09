@@ -12,8 +12,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
@@ -32,6 +35,31 @@ func recvFDFromConn(sock *os.File) (*os.File, error) {
 
 func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool) {
 	// Not used on Windows — the driver handles exec interception directly.
+}
+
+// winPolicyCheckerAdapter adapts policy.Engine to winplat.WinExecPolicyChecker.
+type winPolicyCheckerAdapter struct {
+	engine *policy.Engine
+}
+
+func (w *winPolicyCheckerAdapter) CheckCommand(cmd, cmdLine string) winplat.WinExecPolicyResult {
+	// Parse the command line into args for the policy engine
+	args := winplat.SplitCommandLine(cmdLine)
+
+	// Use the basename as the command identifier, matching how the policy
+	// engine normalizes commands on other platforms.
+	command := cmd
+	if command == "" && len(args) > 0 {
+		command = args[0]
+	}
+
+	dec := w.engine.CheckCommand(command, args)
+	return winplat.WinExecPolicyResult{
+		Decision:          string(dec.PolicyDecision),
+		EffectiveDecision: string(dec.EffectiveDecision),
+		Rule:              dec.Rule,
+		Message:           dec.Message,
+	}
 }
 
 // wrapInitWindows handles wrap initialization on Windows using driver-based exec interception.
@@ -88,9 +116,14 @@ func startDriverHandlerForWrap(ctx context.Context, sessionID string, sessionTok
 		return fmt.Errorf("register session: %w", err)
 	}
 
-	// Create the exec handler
-	execHandler := winplat.NewWinExecHandler(nil, stubBinary)
-	// TODO: Wire up policy checker when available
+	// Create the policy checker adapter if a policy engine is available
+	var checker winplat.WinExecPolicyChecker
+	if a.policy != nil {
+		checker = &winPolicyCheckerAdapter{engine: a.policy}
+	}
+
+	// Create the exec handler with the policy checker
+	execHandler := winplat.NewWinExecHandler(checker, stubBinary)
 
 	// Set the suspended process handler
 	dc.SetSuspendedProcessHandler(func(req *winplat.SuspendedProcessRequest) winplat.ExecDecision {
@@ -98,6 +131,26 @@ func startDriverHandlerForWrap(ctx context.Context, sessionID string, sessionTok
 		if req == nil {
 			return decision
 		}
+
+		// Emit exec_intercept event for audit
+		decisionStr := execDecisionString(decision)
+		ev := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now().UTC(),
+			Type:      "exec_intercept",
+			SessionID: sessionID,
+			Fields: map[string]any{
+				"pid":        req.ProcessId,
+				"parent_pid": req.ParentId,
+				"image_path": req.ImagePath,
+				"command":    filepath.Base(req.ImagePath),
+				"args":       strings.TrimSpace(req.CommandLine),
+				"decision":   decisionStr,
+				"mechanism":  "driver",
+			},
+		}
+		_ = a.store.AppendEvent(ctx, ev)
+		a.broker.Publish(ev)
 
 		switch decision {
 		case winplat.ExecDecisionResume:
@@ -130,6 +183,20 @@ func startDriverHandlerForWrap(ctx context.Context, sessionID string, sessionTok
 		dc.Disconnect()
 	}()
 
-	slog.Info("wrap: driver handler started", "session_id", sessionID)
+	slog.Info("wrap: driver handler started", "session_id", sessionID, "policy_enabled", checker != nil)
 	return nil
+}
+
+// execDecisionString returns a human-readable string for an ExecDecision.
+func execDecisionString(d winplat.ExecDecision) string {
+	switch d {
+	case winplat.ExecDecisionResume:
+		return "allow"
+	case winplat.ExecDecisionTerminate:
+		return "deny"
+	case winplat.ExecDecisionRedirect:
+		return "redirect"
+	default:
+		return "unknown"
+	}
 }

@@ -190,7 +190,7 @@ func TestExecPipeline_TerminateReply(t *testing.T) {
 	}
 }
 
-// TestCommandLineParsing tests splitCommandLine with various Windows command line formats.
+// TestCommandLineParsing tests SplitCommandLine with various Windows command line formats.
 func TestCommandLineParsing(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -231,7 +231,7 @@ func TestCommandLineParsing(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := splitCommandLine(tt.input)
+			result := SplitCommandLine(tt.input)
 			if len(result) != len(tt.expected) {
 				t.Fatalf("len = %d (%v), want %d (%v)", len(result), result, len(tt.expected), tt.expected)
 			}
