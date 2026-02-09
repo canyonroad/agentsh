@@ -4,7 +4,10 @@
 package unix
 
 import (
+	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,7 +42,7 @@ func TestExecveHandler_Handle_Allow(t *testing.T) {
 		Truncated: false,
 	}
 
-	result := h.Handle(ctx)
+	result := h.Handle(context.Background(), ctx)
 	assert.True(t, result.Allow)
 	assert.Equal(t, "allow-git", result.Rule)
 }
@@ -63,7 +66,7 @@ func TestExecveHandler_Handle_Deny(t *testing.T) {
 		Truncated: false,
 	}
 
-	result := h.Handle(ctx)
+	result := h.Handle(context.Background(), ctx)
 	assert.False(t, result.Allow)
 }
 
@@ -86,7 +89,7 @@ func TestExecveHandler_Handle_TruncatedDeny(t *testing.T) {
 		Truncated: true,
 	}
 
-	result := h.Handle(ctx)
+	result := h.Handle(context.Background(), ctx)
 	assert.False(t, result.Allow)
 	assert.Equal(t, "truncated", result.Reason)
 }
@@ -108,7 +111,7 @@ func TestExecveHandler_Handle_InternalBypass(t *testing.T) {
 		Truncated: false,
 	}
 
-	result := h.Handle(ctx)
+	result := h.Handle(context.Background(), ctx)
 	assert.True(t, result.Allow)
 	assert.Equal(t, "internal_bypass", result.Rule)
 }
@@ -156,7 +159,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, pol, dt, nil)
 
-		result := h.Handle(ExecveContext{
+		result := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/git",
@@ -180,7 +183,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, pol, dt, nil)
 
-		result := h.Handle(ExecveContext{
+		result := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/curl",
@@ -205,7 +208,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, pol, dt, nil)
 
-		result := h.Handle(ExecveContext{
+		result := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/rm",
@@ -229,7 +232,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, pol, dt, nil)
 
-		result := h.Handle(ExecveContext{
+		result := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/rm",
@@ -253,7 +256,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, pol, dt, nil)
 
-		result := h.Handle(ExecveContext{
+		result := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/npm",
@@ -272,7 +275,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt := NewDepthTracker()
 		h := NewExecveHandler(cfg, nil, dt, nil)
 
-		result := h.Handle(ExecveContext{
+		result := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/local/bin/agentsh",
@@ -290,7 +293,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, nil, dt, nil)
 
-		result := h.Handle(ExecveContext{
+		result := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/ls",
@@ -307,7 +310,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt := NewDepthTracker()
 		h := NewExecveHandler(cfg, nil, dt, nil)
 
-		result := h.Handle(ExecveContext{
+		result := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/something",
@@ -320,12 +323,12 @@ func TestExecveHandler_Action(t *testing.T) {
 		assert.Equal(t, int32(unix.EACCES), result.Errno)
 	})
 
-	t.Run("truncated approval produces ActionRedirect", func(t *testing.T) {
+	t.Run("truncated approval no approver produces ActionDeny", func(t *testing.T) {
 		cfg := ExecveHandlerConfig{OnTruncated: "approval"}
 		dt := NewDepthTracker()
 		h := NewExecveHandler(cfg, nil, dt, nil)
 
-		result := h.Handle(ExecveContext{
+		result := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/something",
@@ -334,8 +337,8 @@ func TestExecveHandler_Action(t *testing.T) {
 		})
 
 		require.False(t, result.Allow)
-		assert.Equal(t, ActionRedirect, result.Action)
-		assert.Equal(t, "approve", result.Decision)
+		assert.Equal(t, ActionDeny, result.Action)
+		assert.Equal(t, "truncated_no_approver", result.Reason)
 	})
 
 	t.Run("unknown effective decision produces ActionDeny (fail-secure)", func(t *testing.T) {
@@ -349,7 +352,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, pol, dt, nil)
 
-		result := h.Handle(ExecveContext{
+		result := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/mystery",
@@ -360,4 +363,151 @@ func TestExecveHandler_Action(t *testing.T) {
 		assert.Equal(t, ActionDeny, result.Action)
 		assert.Equal(t, int32(unix.EACCES), result.Errno)
 	})
+}
+
+// mockApprover implements ApprovalRequester for testing
+type mockApprover struct {
+	approved bool
+	err      error
+	called   bool
+	gotReq   ApprovalRequest
+}
+
+func (m *mockApprover) RequestExecApproval(ctx context.Context, req ApprovalRequest) (bool, error) {
+	m.called = true
+	m.gotReq = req
+	return m.approved, m.err
+}
+
+func TestExecveHandler_TruncatedApproval_Approved(t *testing.T) {
+	cfg := ExecveHandlerConfig{
+		OnTruncated:     "approval",
+		ApprovalTimeout: 5 * time.Second,
+	}
+	pol := &mockPolicy{decision: PolicyDecision{
+		Decision:          "allow",
+		EffectiveDecision: "allow",
+		Rule:              "test-rule",
+	}}
+	dt := NewDepthTracker()
+	dt.RegisterSession(1000, "sess-1")
+	approver := &mockApprover{approved: true}
+	h := NewExecveHandler(cfg, pol, dt, nil)
+	h.SetApprover(approver)
+
+	result := h.Handle(context.Background(), ExecveContext{
+		PID:       1001,
+		ParentPID: 1000,
+		Filename:  "/usr/bin/something",
+		Argv:      []string{"something", "arg1"},
+		Truncated: true,
+	})
+
+	require.True(t, approver.called)
+	assert.Equal(t, "/usr/bin/something", approver.gotReq.Command)
+	assert.Equal(t, []string{"something", "arg1"}, approver.gotReq.Args)
+	// Approved — falls through to policy check → ActionContinue
+	assert.True(t, result.Allow)
+	assert.Equal(t, ActionContinue, result.Action)
+}
+
+func TestExecveHandler_TruncatedApproval_Denied(t *testing.T) {
+	cfg := ExecveHandlerConfig{
+		OnTruncated:     "approval",
+		ApprovalTimeout: 5 * time.Second,
+	}
+	dt := NewDepthTracker()
+	approver := &mockApprover{approved: false}
+	h := NewExecveHandler(cfg, nil, dt, nil)
+	h.SetApprover(approver)
+
+	result := h.Handle(context.Background(), ExecveContext{
+		PID:       1001,
+		ParentPID: 1000,
+		Filename:  "/usr/bin/something",
+		Argv:      []string{"something"},
+		Truncated: true,
+	})
+
+	require.True(t, approver.called)
+	assert.False(t, result.Allow)
+	assert.Equal(t, ActionDeny, result.Action)
+	assert.Equal(t, "truncated_approval_denied", result.Reason)
+}
+
+func TestExecveHandler_TruncatedApproval_Timeout(t *testing.T) {
+	t.Run("timeout action deny", func(t *testing.T) {
+		cfg := ExecveHandlerConfig{
+			OnTruncated:           "approval",
+			ApprovalTimeout:       5 * time.Second,
+			ApprovalTimeoutAction: "deny",
+		}
+		dt := NewDepthTracker()
+		approver := &mockApprover{err: fmt.Errorf("context deadline exceeded")}
+		h := NewExecveHandler(cfg, nil, dt, nil)
+		h.SetApprover(approver)
+
+		result := h.Handle(context.Background(), ExecveContext{
+			PID:       1001,
+			ParentPID: 1000,
+			Filename:  "/usr/bin/something",
+			Argv:      []string{"something"},
+			Truncated: true,
+		})
+
+		require.True(t, approver.called)
+		assert.False(t, result.Allow)
+		assert.Equal(t, ActionDeny, result.Action)
+		assert.Equal(t, "truncated_approval_timeout", result.Reason)
+	})
+
+	t.Run("timeout action allow", func(t *testing.T) {
+		cfg := ExecveHandlerConfig{
+			OnTruncated:           "approval",
+			ApprovalTimeout:       5 * time.Second,
+			ApprovalTimeoutAction: "allow",
+		}
+		pol := &mockPolicy{decision: PolicyDecision{
+			Decision:          "allow",
+			EffectiveDecision: "allow",
+			Rule:              "test-rule",
+		}}
+		dt := NewDepthTracker()
+		dt.RegisterSession(1000, "sess-1")
+		approver := &mockApprover{err: fmt.Errorf("context deadline exceeded")}
+		h := NewExecveHandler(cfg, pol, dt, nil)
+		h.SetApprover(approver)
+
+		result := h.Handle(context.Background(), ExecveContext{
+			PID:       1001,
+			ParentPID: 1000,
+			Filename:  "/usr/bin/something",
+			Argv:      []string{"something"},
+			Truncated: true,
+		})
+
+		require.True(t, approver.called)
+		// Timeout with "allow" action — falls through to policy check
+		assert.True(t, result.Allow)
+		assert.Equal(t, ActionContinue, result.Action)
+	})
+}
+
+func TestExecveHandler_TruncatedApproval_NoApprover(t *testing.T) {
+	cfg := ExecveHandlerConfig{OnTruncated: "approval"}
+	dt := NewDepthTracker()
+	h := NewExecveHandler(cfg, nil, dt, nil)
+	// No approver set — fail-secure
+
+	result := h.Handle(context.Background(), ExecveContext{
+		PID:       1001,
+		ParentPID: 1000,
+		Filename:  "/usr/bin/something",
+		Argv:      []string{"something"},
+		Truncated: true,
+	})
+
+	assert.False(t, result.Allow)
+	assert.Equal(t, ActionDeny, result.Action)
+	assert.Equal(t, "truncated_no_approver", result.Reason)
 }

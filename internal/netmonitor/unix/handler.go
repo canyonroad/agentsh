@@ -163,7 +163,7 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		// Route to appropriate handler
 		if IsExecveSyscall(syscallNr) && execveHandler != nil {
 			slog.Debug("ServeNotifyWithExecve: routing to execve handler", "session_id", sessID, "pid", req.Pid)
-			handleExecveNotification(scmpFD, req, execveHandler)
+			handleExecveNotification(ctx, scmpFD, req, execveHandler)
 			continue
 		}
 
@@ -210,7 +210,7 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 // handleExecveNotification processes an execve/execveat notification.
 // It reads the filename and argv from the tracee process, builds an ExecveContext,
 // and calls the handler to make a decision.
-func handleExecveNotification(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *ExecveHandler) {
+func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *ExecveHandler) {
 	// Extract syscall args
 	args := SyscallArgs{
 		Nr:   int32(req.Data.Syscall),
@@ -268,7 +268,7 @@ func handleExecveNotification(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *E
 	// Get parent PID
 	parentPID := getParentPID(pid)
 
-	ctx := ExecveContext{
+	ectx := ExecveContext{
 		PID:       pid,
 		ParentPID: parentPID,
 		Filename:  filename,
@@ -276,11 +276,11 @@ func handleExecveNotification(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *E
 		Truncated: truncated,
 	}
 
-	result := h.Handle(ctx)
+	result := h.Handle(goCtx, ectx)
 
 	switch result.Action {
 	case ActionRedirect:
-		if err := handleRedirect(int(fd), req.ID, ctx); err != nil {
+		if err := handleRedirect(int(fd), req.ID, ectx); err != nil {
 			slog.Error("redirect failed, denying", "pid", pid, "error", err)
 			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EPERM)}
 			_ = seccomp.NotifRespond(fd, &resp)

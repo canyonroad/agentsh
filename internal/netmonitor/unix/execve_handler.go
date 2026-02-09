@@ -63,6 +63,20 @@ type PolicyDecision struct {
 	Message           string
 }
 
+// ApprovalRequester requests approval for exec operations.
+type ApprovalRequester interface {
+	RequestExecApproval(ctx context.Context, req ApprovalRequest) (bool, error)
+}
+
+// ApprovalRequest contains information for an exec approval request.
+type ApprovalRequest struct {
+	SessionID string
+	Command   string
+	Args      []string
+	Reason    string
+	Rule      string
+}
+
 // ExecveEmitter interface for emitting execve events.
 type ExecveEmitter interface {
 	AppendEvent(ctx context.Context, ev types.Event) error
@@ -75,6 +89,7 @@ type ExecveHandler struct {
 	policy       PolicyChecker
 	depthTracker *DepthTracker
 	emitter      ExecveEmitter
+	approver     ApprovalRequester
 }
 
 // NewExecveHandler creates a new execve handler.
@@ -93,6 +108,11 @@ func (h *ExecveHandler) SetEmitter(emitter ExecveEmitter) {
 	h.emitter = emitter
 }
 
+// SetApprover sets the approval requester for the handler.
+func (h *ExecveHandler) SetApprover(approver ApprovalRequester) {
+	h.approver = approver
+}
+
 // RegisterSession registers the session root PID for depth tracking.
 // The root is registered at depth -1 so first command (direct) is at depth 0.
 func (h *ExecveHandler) RegisterSession(pid int, sessionID string) {
@@ -102,7 +122,7 @@ func (h *ExecveHandler) RegisterSession(pid int, sessionID string) {
 }
 
 // Handle processes an execve notification and returns the decision.
-func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
+func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveResult {
 	// Get depth from tracker first - needed even for internal bypass
 	// so that children of bypassed binaries inherit correct depth
 	if h.depthTracker != nil {
@@ -156,16 +176,57 @@ func (h *ExecveHandler) Handle(ctx ExecveContext) ExecveResult {
 			h.emitEvent(ctx, result, "truncated")
 			return result
 		case "approval":
-			// TODO: implement approval flow
-			result := ExecveResult{
-				Allow:    false,
-				Action:   ActionRedirect,
-				Reason:   "truncated_needs_approval",
-				Errno:    int32(unix.EACCES),
-				Decision: "approve",
+			if h.approver == nil {
+				result := ExecveResult{
+					Allow:    false,
+					Action:   ActionDeny,
+					Reason:   "truncated_no_approver",
+					Errno:    int32(unix.EACCES),
+					Decision: "deny",
+				}
+				h.emitEvent(ctx, result, "truncated_no_approver")
+				return result
 			}
-			h.emitEvent(ctx, result, "truncated_approval")
-			return result
+			timeout := h.cfg.ApprovalTimeout
+			if timeout <= 0 {
+				timeout = 5 * time.Minute
+			}
+			approvalCtx, cancel := context.WithTimeout(goCtx, timeout)
+			approved, err := h.approver.RequestExecApproval(approvalCtx, ApprovalRequest{
+				SessionID: ctx.SessionID,
+				Command:   ctx.Filename,
+				Args:      ctx.Argv,
+				Reason:    "truncated args require approval",
+				Rule:      "truncated",
+			})
+			cancel()
+			if err != nil {
+				// Timeout or error — apply timeout action
+				if h.cfg.ApprovalTimeoutAction == "allow" {
+					break // fall through to policy check
+				}
+				result := ExecveResult{
+					Allow:    false,
+					Action:   ActionDeny,
+					Reason:   "truncated_approval_timeout",
+					Errno:    int32(unix.EACCES),
+					Decision: "deny",
+				}
+				h.emitEvent(ctx, result, "truncated_approval_timeout")
+				return result
+			}
+			if !approved {
+				result := ExecveResult{
+					Allow:    false,
+					Action:   ActionDeny,
+					Reason:   "truncated_approval_denied",
+					Errno:    int32(unix.EACCES),
+					Decision: "deny",
+				}
+				h.emitEvent(ctx, result, "truncated_approval_denied")
+				return result
+			}
+			// Approved — fall through to policy check
 		// "allow" falls through to policy check
 		}
 	}
