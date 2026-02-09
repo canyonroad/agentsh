@@ -12,6 +12,7 @@ import (
 
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/signal"
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
 )
@@ -70,6 +71,30 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 		slog.Info("wrap: starting notify handler", "session_id", sessionID, "has_execve", execveHandler != nil)
 		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessionID, a.policy, emitter, execveHandler)
 		slog.Info("wrap: notify handler returned", "session_id", sessionID)
+	}()
+}
+
+// startSignalHandlerForWrap starts the signal filter handler for a wrap session.
+func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID string, a *App) {
+	if a.policy == nil || a.policy.SignalEngine() == nil {
+		signalFD.Close()
+		return
+	}
+
+	emitter := &signalEmitterAdapter{
+		store:     a.store,
+		broker:    a.broker,
+		sessionID: sessionID,
+		commandID: func() string { return "" },
+	}
+	registry := signal.NewPIDRegistry(sessionID, os.Getpid())
+	handler := signal.NewHandler(a.policy.SignalEngine(), registry, emitter)
+
+	go func() {
+		defer signalFD.Close()
+		slog.Info("wrap: starting signal handler", "session_id", sessionID)
+		serveSignalNotify(ctx, signalFD, handler)
+		slog.Info("wrap: signal handler returned", "session_id", sessionID)
 	}()
 }
 

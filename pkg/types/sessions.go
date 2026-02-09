@@ -127,7 +127,8 @@ type WrapInitRequest struct {
 type WrapInitResponse struct {
 	WrapperBinary string            `json:"wrapper_binary"`
 	StubBinary    string            `json:"stub_binary,omitempty"`
-	SeccompConfig string            `json:"seccomp_config"` // JSON-encoded seccomp config
-	NotifySocket  string            `json:"notify_socket"`  // Unix socket path for forwarding notify fd
-	WrapperEnv    map[string]string `json:"wrapper_env"`    // Extra env vars for the wrapper
+	SeccompConfig string            `json:"seccomp_config"`          // JSON-encoded seccomp config
+	NotifySocket  string            `json:"notify_socket"`           // Unix socket path for forwarding notify fd
+	SignalSocket  string            `json:"signal_socket,omitempty"` // Unix socket path for forwarding signal filter fd
+	WrapperEnv    map[string]string `json:"wrapper_env"`             // Extra env vars for the wrapper
 }

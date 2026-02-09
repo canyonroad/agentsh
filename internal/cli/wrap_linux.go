@@ -36,6 +36,30 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 		return nil, fmt.Errorf("fcntl clear cloexec: %w", errno)
 	}
 
+	// Create a second socket pair for the signal filter fd if the server configured one.
+	// The child end is inherited as ExtraFiles[1] (fd 4).
+	var signalParentFile, signalChildFile *os.File
+	hasSignalSocket := wrapResp.SignalSocket != ""
+	if hasSignalSocket {
+		sigFds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			parentFile.Close()
+			childFile.Close()
+			return nil, fmt.Errorf("signal socketpair: %w", err)
+		}
+		signalParentFile = os.NewFile(uintptr(sigFds[0]), "signal-parent")
+		signalChildFile = os.NewFile(uintptr(sigFds[1]), "signal-child")
+
+		// Clear CLOEXEC on the child fd so it survives exec
+		if _, _, errno := unix.Syscall(unix.SYS_FCNTL, uintptr(sigFds[1]), unix.F_SETFD, 0); errno != 0 {
+			parentFile.Close()
+			childFile.Close()
+			signalParentFile.Close()
+			signalChildFile.Close()
+			return nil, fmt.Errorf("fcntl clear cloexec signal: %w", errno)
+		}
+	}
+
 	// Build env for the wrapped process
 	env := os.Environ()
 	env = append(env,
@@ -43,6 +67,9 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 		fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
 		"AGENTSH_NOTIFY_SOCK_FD=3", // fd 3 = ExtraFiles[0]
 	)
+	if hasSignalSocket {
+		env = append(env, "AGENTSH_SIGNAL_SOCK_FD=4") // fd 4 = ExtraFiles[1]
+	}
 
 	// Add wrapper env vars (seccomp config, etc.)
 	for k, v := range wrapResp.WrapperEnv {
@@ -53,12 +80,18 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 	wrapperArgs := append([]string{"--", agentPath}, agentArgs...)
 
 	notifySocket := wrapResp.NotifySocket
+	signalSocket := wrapResp.SignalSocket
+
+	extraFiles := []*os.File{childFile}
+	if hasSignalSocket {
+		extraFiles = append(extraFiles, signalChildFile)
+	}
 
 	return &wrapLaunchConfig{
 		command:    wrapResp.WrapperBinary,
 		args:       wrapperArgs,
 		env:        env,
-		extraFiles: []*os.File{childFile},
+		extraFiles: extraFiles,
 		sysProcAttr: &syscall.SysProcAttr{
 			Setpgid: true,
 		},
@@ -78,6 +111,23 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 				return
 			}
 			slog.Info("wrap: notify fd forwarded to server", "session_id", sessID, "socket", notifySocket)
+
+			// Forward signal filter fd if configured
+			if hasSignalSocket && signalParentFile != nil {
+				defer signalParentFile.Close()
+				signalFD, err := recvNotifyFD(signalParentFile)
+				if err != nil {
+					slog.Debug("wrap: no signal fd from wrapper (signal filter may not be supported)", "error", err, "session_id", sessID)
+					return
+				}
+				defer func() { unix.Close(signalFD) }()
+
+				if err := forwardNotifyFD(signalSocket, signalFD); err != nil {
+					slog.Error("wrap: failed to forward signal fd to server", "error", err, "session_id", sessID)
+					return
+				}
+				slog.Info("wrap: signal fd forwarded to server", "session_id", sessID)
+			}
 		},
 	}, nil
 }

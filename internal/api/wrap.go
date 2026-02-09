@@ -80,12 +80,16 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	stubBin := "agentsh-stub"
 	stubPath, _ := exec.LookPath(stubBin)
 
+	// Check if signal filtering should be enabled
+	hasSignalEngine := a.policy != nil && a.policy.SignalEngine() != nil
+	signalFilterEnabled := hasSignalEngine
+
 	// Build seccomp config
 	execveEnabled := a.cfg.Sandbox.Seccomp.Execve.Enabled
 	seccompCfg := seccompWrapperConfig{
 		UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
 		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
-		SignalFilterEnabled: false, // Signal filter not supported in wrap mode yet
+		SignalFilterEnabled: signalFilterEnabled,
 		ExecveEnabled:       execveEnabled,
 	}
 
@@ -141,6 +145,28 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// Start background goroutine to accept the notify fd connection
 	go a.acceptNotifyFD(ctx, listener, notifySocketPath, sessionID, s, execveEnabled)
 
+	// Create signal filter socket if signal filtering is enabled
+	var signalSocketPath string
+	if signalFilterEnabled {
+		signalSocketPath = filepath.Join(notifyDir, "signal-"+safeID+".sock")
+		signalListener, err := net.Listen("unix", signalSocketPath)
+		if err != nil {
+			slog.Warn("wrap: failed to create signal socket, disabling signal filter",
+				"error", err, "session_id", sessionID)
+			signalSocketPath = ""
+		} else {
+			go a.acceptSignalFD(ctx, signalListener, signalSocketPath, sessionID)
+		}
+	}
+
+	// Build wrapper env
+	wrapperEnv := map[string]string{
+		"AGENTSH_SECCOMP_CONFIG": string(cfgJSON),
+	}
+	if signalSocketPath != "" {
+		wrapperEnv["AGENTSH_SIGNAL_SOCK_FD"] = "4" // fd 4 = ExtraFiles[1]
+	}
+
 	// Emit wrap_init event
 	ev := types.Event{
 		ID:        uuid.NewString(),
@@ -162,9 +188,8 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		StubBinary:    stubPath,
 		SeccompConfig: string(cfgJSON),
 		NotifySocket:  notifySocketPath,
-		WrapperEnv: map[string]string{
-			"AGENTSH_SECCOMP_CONFIG": string(cfgJSON),
-		},
+		SignalSocket:  signalSocketPath,
+		WrapperEnv:    wrapperEnv,
 	}, http.StatusOK, nil
 }
 
@@ -216,4 +241,45 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 
 	// Start the notify handler using existing infrastructure
 	startNotifyHandlerForWrap(ctx, notifyFD, sessionID, a, execveEnabled)
+}
+
+// acceptSignalFD listens on the Unix socket for a single connection from the CLI,
+// receives the signal filter notify fd, and starts the signal handler.
+func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketPath string, sessionID string) {
+	defer listener.Close()
+	// Note: do NOT remove the parent directory here — acceptNotifyFD owns that cleanup.
+
+	if dl, ok := listener.(*net.UnixListener); ok {
+		dl.SetDeadline(time.Now().Add(30 * time.Second))
+	}
+
+	conn, err := listener.Accept()
+	if err != nil {
+		slog.Debug("wrap: failed to accept signal connection", "session_id", sessionID, "error", err)
+		return
+	}
+	defer conn.Close()
+
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		return
+	}
+
+	file, err := unixConn.File()
+	if err != nil {
+		return
+	}
+
+	signalFD, err := recvFDFromConn(file)
+	file.Close()
+	if err != nil {
+		slog.Debug("wrap: failed to receive signal fd", "session_id", sessionID, "error", err)
+		return
+	}
+	if signalFD == nil {
+		return
+	}
+
+	slog.Info("wrap: received signal fd", "session_id", sessionID, "fd", signalFD.Fd())
+	startSignalHandlerForWrap(ctx, signalFD, sessionID, a)
 }
