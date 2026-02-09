@@ -8,10 +8,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/config"
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
 )
 
@@ -35,7 +37,7 @@ func (a *notifyEmitterAdapter) Publish(ev types.Event) {
 
 // createExecveHandler creates an ExecveHandler from the configuration.
 // Returns nil if the config is not valid or policy is nil.
-func createExecveHandler(cfg config.ExecveConfig, pol *policy.Engine) any {
+func createExecveHandler(cfg config.ExecveConfig, pol *policy.Engine, approvalMgr *approvals.Manager) any {
 	if !cfg.Enabled {
 		return nil
 	}
@@ -58,7 +60,11 @@ func createExecveHandler(cfg config.ExecveConfig, pol *policy.Engine) any {
 		policyChecker = &policyEngineWrapper{engine: pol}
 	}
 
-	return unixmon.NewExecveHandler(handlerCfg, policyChecker, dt, nil)
+	h := unixmon.NewExecveHandler(handlerCfg, policyChecker, dt, nil)
+	if approvalMgr != nil {
+		h.SetApprover(&approvalRequesterAdapter{mgr: approvalMgr})
+	}
+	return h
 }
 
 // policyEngineWrapper adapts policy.Engine to unixmon.PolicyChecker.
@@ -75,6 +81,31 @@ func (w *policyEngineWrapper) CheckExecve(filename string, argv []string, depth 
 		Rule:              dec.Rule,
 		Message:           dec.Message,
 	}
+}
+
+// approvalRequesterAdapter adapts approvals.Manager to unixmon.ApprovalRequester.
+type approvalRequesterAdapter struct {
+	mgr *approvals.Manager
+}
+
+func (a *approvalRequesterAdapter) RequestExecApproval(ctx context.Context, req unixmon.ApprovalRequest) (bool, error) {
+	apr := approvals.Request{
+		ID:        "approval-" + uuid.NewString(),
+		SessionID: req.SessionID,
+		Kind:      "execve",
+		Target:    req.Command,
+		Rule:      req.Rule,
+		Message:   req.Reason,
+		Fields: map[string]any{
+			"command": req.Command,
+			"args":    req.Args,
+		},
+	}
+	res, err := a.mgr.RequestApproval(ctx, apr)
+	if err != nil {
+		return false, err
+	}
+	return res.Approved, nil
 }
 
 // startNotifyHandler receives the seccomp notify fd from the parent socket and

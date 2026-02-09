@@ -57,7 +57,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 	// Create execve handler if enabled
 	var execveHandler *unixmon.ExecveHandler
 	if execveEnabled {
-		if h := createExecveHandler(a.cfg.Sandbox.Seccomp.Execve, a.policy); h != nil {
+		if h := createExecveHandler(a.cfg.Sandbox.Seccomp.Execve, a.policy, a.approvals); h != nil {
 			execveHandler, _ = h.(*unixmon.ExecveHandler)
 			if execveHandler != nil {
 				execveHandler.SetEmitter(emitter)

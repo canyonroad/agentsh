@@ -153,7 +153,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 
 	// Create execve handler if enabled (Linux-specific, will be nil on other platforms)
 	if execveEnabled {
-		extraCfg.execveHandler = createExecveHandler(a.cfg.Sandbox.Seccomp.Execve, a.policy)
+		extraCfg.execveHandler = createExecveHandler(a.cfg.Sandbox.Seccomp.Execve, a.policy, a.approvals)
 	}
 
 	// Add signal filter config if socket pair succeeded

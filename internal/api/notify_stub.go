@@ -6,12 +6,13 @@ import (
 	"context"
 	"os"
 
+	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/policy"
 )
 
 // createExecveHandler is a no-op on non-Linux platforms.
-func createExecveHandler(cfg config.ExecveConfig, pol *policy.Engine) any {
+func createExecveHandler(cfg config.ExecveConfig, pol *policy.Engine, approvalMgr *approvals.Manager) any {
 	return nil
 }
 
