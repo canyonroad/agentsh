@@ -237,3 +237,45 @@ func TestWrapInit_LongTMPDIR_LongSessionID(t *testing.T) {
 		t.Errorf("socket path %d bytes exceeds 104 byte limit: %s", len(resp.NotifySocket), resp.NotifySocket)
 	}
 }
+
+func TestWrapInit_BudgetExhausted(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	// Create a TMPDIR so long that the socket path budget is exhausted (< 1).
+	// Socket path limit is 104; fixed parts take ~13 bytes; the temp dir
+	// (including "agentsh-wrap-*") must consume the rest.
+	base := t.TempDir()
+	longDir := filepath.Join(base, strings.Repeat("d", 120))
+	if err := os.MkdirAll(longDir, 0700); err != nil {
+		t.Fatalf("create tmpdir: %v", err)
+	}
+	t.Setenv("TMPDIR", longDir)
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		AgentArgs:    []string{"hello"},
+	})
+
+	if err == nil {
+		t.Fatal("expected error when TMPDIR is too long")
+	}
+	if code != 500 {
+		t.Errorf("expected status 500, got %d", code)
+	}
+	if !strings.Contains(err.Error(), "too long") {
+		t.Errorf("expected 'too long' in error, got: %v", err)
+	}
+}

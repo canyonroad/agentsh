@@ -123,6 +123,9 @@ func (h *ExecveHandler) RegisterSession(pid int, sessionID string) {
 
 // Handle processes an execve notification and returns the decision.
 func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveResult {
+	if goCtx == nil {
+		goCtx = context.Background()
+	}
 	// Get depth from tracker first - needed even for internal bypass
 	// so that children of bypassed binaries inherit correct depth
 	if h.depthTracker != nil {
@@ -201,18 +204,24 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 			})
 			cancel()
 			if err != nil {
-				// Timeout or error — apply timeout action
-				if h.cfg.ApprovalTimeoutAction == "allow" {
+				// Only treat context deadline/cancellation as timeout;
+				// other errors (transport, auth) always fail-secure.
+				isTimeout := err == context.DeadlineExceeded || err == context.Canceled
+				if isTimeout && h.cfg.ApprovalTimeoutAction == "allow" {
 					break // fall through to policy check
+				}
+				reason := "truncated_approval_error"
+				if isTimeout {
+					reason = "truncated_approval_timeout"
 				}
 				result := ExecveResult{
 					Allow:    false,
 					Action:   ActionDeny,
-					Reason:   "truncated_approval_timeout",
+					Reason:   reason,
 					Errno:    int32(unix.EACCES),
 					Decision: "deny",
 				}
-				h.emitEvent(ctx, result, "truncated_approval_timeout")
+				h.emitEvent(ctx, result, reason)
 				return result
 			}
 			if !approved {

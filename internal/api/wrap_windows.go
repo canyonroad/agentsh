@@ -47,14 +47,22 @@ func (w *winPolicyCheckerAdapter) CheckCommand(cmd, cmdLine string) winplat.WinE
 	// Parse the command line into args for the policy engine
 	args := winplat.SplitCommandLine(cmdLine)
 
-	// Use the basename as the command identifier, matching how the policy
-	// engine normalizes commands on other platforms.
-	command := cmd
+	// Normalize to basename without extension, matching how policies
+	// reference commands (e.g., "cmd", "git", "powershell").
+	command := filepath.Base(cmd)
+	command = strings.TrimSuffix(command, filepath.Ext(command))
 	if command == "" && len(args) > 0 {
 		command = args[0]
 	}
 
-	dec := w.engine.CheckCommand(command, args)
+	// Drop arg0 to match other call sites (policy args patterns expect
+	// arguments only, not the command repeated as first element).
+	policyArgs := args
+	if len(policyArgs) > 0 {
+		policyArgs = policyArgs[1:]
+	}
+
+	dec := w.engine.CheckCommand(command, policyArgs)
 	return winplat.WinExecPolicyResult{
 		Decision:          string(dec.PolicyDecision),
 		EffectiveDecision: string(dec.EffectiveDecision),
@@ -143,6 +151,9 @@ func startDriverHandlerForWrap(ctx context.Context, sessionID string, sessionTok
 		}
 		if _, parentMuted := mutedPIDs.Load(req.ParentId); parentMuted {
 			slog.Debug("wrap: auto-resuming child of muted stub", "pid", req.ProcessId, "parent", req.ParentId)
+			// Remove parent mute after first child resumes to narrow the bypass
+			// to only the single redirected command, not subsequent children.
+			mutedPIDs.Delete(req.ParentId)
 			return winplat.ExecDecisionResume
 		}
 
@@ -150,19 +161,21 @@ func startDriverHandlerForWrap(ctx context.Context, sessionID string, sessionTok
 
 		// Emit exec_intercept event for audit
 		decisionStr := execDecisionString(decision)
+		parsedArgs := winplat.SplitCommandLine(req.CommandLine)
 		ev := types.Event{
 			ID:        uuid.NewString(),
 			Timestamp: time.Now().UTC(),
 			Type:      "exec_intercept",
 			SessionID: sessionID,
 			Fields: map[string]any{
-				"pid":        req.ProcessId,
-				"parent_pid": req.ParentId,
-				"image_path": req.ImagePath,
-				"command":    filepath.Base(req.ImagePath),
-				"args":       strings.TrimSpace(req.CommandLine),
-				"decision":   decisionStr,
-				"mechanism":  "driver",
+				"pid":          req.ProcessId,
+				"parent_pid":   req.ParentId,
+				"image_path":   req.ImagePath,
+				"command":      filepath.Base(req.ImagePath),
+				"args":         parsedArgs,
+				"command_line": strings.TrimSpace(req.CommandLine),
+				"decision":     decisionStr,
+				"mechanism":    "driver",
 			},
 		}
 		_ = a.store.AppendEvent(ctx, ev)
@@ -183,11 +196,17 @@ func startDriverHandlerForWrap(ctx context.Context, sessionID string, sessionTok
 					StubBinary: stubBinary,
 					SessionID:  sessionID,
 				}
+				var spawnedPID uint32
 				if err := winplat.HandleRedirect(req, cfg, func(stubPID uint32) {
+					spawnedPID = stubPID
 					mutedPIDs.Store(stubPID, struct{}{})
 					slog.Debug("wrap: muted stub PID", "stub_pid", stubPID)
 				}); err != nil {
 					slog.Error("wrap: redirect failed", "pid", req.ProcessId, "error", err)
+				}
+				// Clean up muted PID after stub exits to prevent unbounded growth
+				if spawnedPID != 0 {
+					mutedPIDs.Delete(spawnedPID)
 				}
 			}()
 		}

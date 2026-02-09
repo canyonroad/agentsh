@@ -92,13 +92,14 @@ func (a *approvalRequesterAdapter) RequestExecApproval(ctx context.Context, req 
 	apr := approvals.Request{
 		ID:        "approval-" + uuid.NewString(),
 		SessionID: req.SessionID,
-		Kind:      "execve",
+		Kind:      "command",
 		Target:    req.Command,
 		Rule:      req.Rule,
 		Message:   req.Reason,
 		Fields: map[string]any{
 			"command": req.Command,
 			"args":    req.Args,
+			"source":  "execve",
 		},
 	}
 	res, err := a.mgr.RequestApproval(ctx, apr)

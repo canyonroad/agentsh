@@ -443,7 +443,7 @@ func TestExecveHandler_TruncatedApproval_Timeout(t *testing.T) {
 			ApprovalTimeoutAction: "deny",
 		}
 		dt := NewDepthTracker()
-		approver := &mockApprover{err: fmt.Errorf("context deadline exceeded")}
+		approver := &mockApprover{err: context.DeadlineExceeded}
 		h := NewExecveHandler(cfg, nil, dt, nil)
 		h.SetApprover(approver)
 
@@ -474,7 +474,7 @@ func TestExecveHandler_TruncatedApproval_Timeout(t *testing.T) {
 		}}
 		dt := NewDepthTracker()
 		dt.RegisterSession(1000, "sess-1")
-		approver := &mockApprover{err: fmt.Errorf("context deadline exceeded")}
+		approver := &mockApprover{err: context.DeadlineExceeded}
 		h := NewExecveHandler(cfg, pol, dt, nil)
 		h.SetApprover(approver)
 
@@ -490,6 +490,32 @@ func TestExecveHandler_TruncatedApproval_Timeout(t *testing.T) {
 		// Timeout with "allow" action — falls through to policy check
 		assert.True(t, result.Allow)
 		assert.Equal(t, ActionContinue, result.Action)
+	})
+
+	t.Run("non-timeout error always denies even with allow action", func(t *testing.T) {
+		cfg := ExecveHandlerConfig{
+			OnTruncated:           "approval",
+			ApprovalTimeout:       5 * time.Second,
+			ApprovalTimeoutAction: "allow",
+		}
+		dt := NewDepthTracker()
+		approver := &mockApprover{err: fmt.Errorf("transport error")}
+		h := NewExecveHandler(cfg, nil, dt, nil)
+		h.SetApprover(approver)
+
+		result := h.Handle(context.Background(), ExecveContext{
+			PID:       1001,
+			ParentPID: 1000,
+			Filename:  "/usr/bin/something",
+			Argv:      []string{"something"},
+			Truncated: true,
+		})
+
+		require.True(t, approver.called)
+		// Non-timeout error with "allow" action — still denies (fail-secure)
+		assert.False(t, result.Allow)
+		assert.Equal(t, ActionDeny, result.Action)
+		assert.Equal(t, "truncated_approval_error", result.Reason)
 	})
 }
 
