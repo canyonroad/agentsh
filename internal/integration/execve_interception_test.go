@@ -332,7 +332,7 @@ func TestExecveInterception_NoPolicy(t *testing.T) {
 		Truncated: false,
 	}
 
-	result := h.Handle(ctx)
+	result := h.Handle(context.Background(), ctx)
 	assert.True(t, result.Allow, "should allow when no policy")
 	assert.Equal(t, "no_policy", result.Rule)
 }
