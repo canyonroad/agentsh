@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/session"
@@ -57,17 +58,42 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 
 	// Create execve handler if enabled
 	var execveHandler *unixmon.ExecveHandler
+	var cleanupSymlink func()
 	if execveEnabled {
 		if h := createExecveHandler(a.cfg.Sandbox.Seccomp.Execve, a.policy, a.approvals); h != nil {
 			execveHandler, _ = h.(*unixmon.ExecveHandler)
 			if execveHandler != nil {
 				execveHandler.SetEmitter(emitter)
+
+				// Create stub symlink for execve redirect
+				stubPath, err := exec.LookPath("agentsh-stub")
+				if err != nil {
+					slog.Warn("wrap: agentsh-stub not found, redirect will deny",
+						"error", err, "session_id", sessionID)
+				} else {
+					symlinkPath, cleanup, err := unixmon.CreateStubSymlink(stubPath)
+					if err != nil {
+						slog.Warn("wrap: failed to create stub symlink, redirect will deny",
+							"error", err, "session_id", sessionID)
+					} else {
+						execveHandler.SetStubSymlinkPath(symlinkPath)
+						cleanupSymlink = cleanup
+						slog.Debug("wrap: created stub symlink",
+							"symlink", symlinkPath, "target", stubPath, "session_id", sessionID)
+					}
+
+					// Set the global stub binary path for reference
+					unixmon.SetStubBinaryPath(stubPath)
+				}
 			}
 		}
 	}
 
 	go func() {
 		defer notifyFD.Close()
+		if cleanupSymlink != nil {
+			defer cleanupSymlink()
+		}
 		slog.Info("wrap: starting notify handler", "session_id", sessionID, "has_execve", execveHandler != nil)
 		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessionID, a.policy, emitter, execveHandler)
 		slog.Info("wrap: notify handler returned", "session_id", sessionID)
