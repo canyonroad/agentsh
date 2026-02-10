@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -34,8 +35,12 @@ func recvFDFromConn(sock *os.File) (*os.File, error) {
 	return nil, fmt.Errorf("SCM_RIGHTS not available on Windows")
 }
 
-func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool) {
+func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int) {
 	// Not used on Windows — the driver handles exec interception directly.
+}
+
+func getConnPeerPID(conn *net.UnixConn) int {
+	return 0
 }
 
 func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID string, a *App) {

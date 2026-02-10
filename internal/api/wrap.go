@@ -219,6 +219,13 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 		return
 	}
 
+	// Get wrapper PID from socket credentials for depth tracking
+	wrapperPID := getConnPeerPID(unixConn)
+	if wrapperPID > 0 {
+		slog.Debug("wrap: got wrapper PID from socket credentials",
+			"wrapper_pid", wrapperPID, "session_id", sessionID)
+	}
+
 	file, err := unixConn.File()
 	if err != nil {
 		slog.Debug("wrap: failed to get file from connection", "session_id", sessionID, "error", err)
@@ -240,7 +247,7 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 	slog.Info("wrap: received notify fd", "session_id", sessionID, "fd", notifyFD.Fd())
 
 	// Start the notify handler using existing infrastructure
-	startNotifyHandlerForWrap(ctx, notifyFD, sessionID, a, execveEnabled)
+	startNotifyHandlerForWrap(ctx, notifyFD, sessionID, a, execveEnabled, wrapperPID)
 }
 
 // acceptSignalFD listens on the Unix socket for a single connection from the CLI,
