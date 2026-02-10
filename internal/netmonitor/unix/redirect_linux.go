@@ -4,6 +4,7 @@ package unix
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -15,6 +16,10 @@ import (
 
 // stubBinaryPath is the path to the agentsh-stub binary.
 var stubBinaryPath string
+
+// ErrRedirectPathTooLong is returned when the stub symlink path exceeds the
+// original filename length, making in-place memory overwrite impossible.
+var ErrRedirectPathTooLong = errors.New("stub symlink path longer than original filename")
 
 // SetStubBinaryPath sets the path to the agentsh-stub binary.
 func SetStubBinaryPath(path string) {
@@ -43,10 +48,26 @@ func createStubSocketPair() (stubRawFD int, srvConn net.Conn, err error) {
 }
 
 // handleRedirect implements the redirect path for an intercepted execve.
-// 1. Creates socketpair
-// 2. Injects stub-side fd into tracee via SECCOMP_ADDFD (with SEND flag to atomically respond)
-// 3. Starts ServeStubConnection to run the original command
-func handleRedirect(notifFD int, reqID uint64, ctx ExecveContext) error {
+//
+// Three-phase approach:
+//  1. Inject stub socket fd into tracee via SECCOMP_ADDFD (without SEND — notification stays pending)
+//  2. Overwrite filename in tracee memory with stub symlink path via process_vm_writev
+//  3. Return nil to signal the caller should respond with CONTINUE (kernel re-executes modified execve)
+//
+// If the stub symlink path is longer than the original filename, the overwrite
+// cannot safely fit and we return ErrRedirectPathTooLong. The caller should deny.
+//
+// Parameters:
+//   - filenamePtr: the tracee memory address of the filename string (from execve arg0)
+//   - stubSymlinkPath: short path to a symlink that points to agentsh-stub
+func handleRedirect(notifFD int, reqID uint64, ctx ExecveContext, filenamePtr uint64, stubSymlinkPath string) error {
+	// Validate the stub path fits within the original filename's memory.
+	// The original string at filenamePtr has len(ctx.Filename)+1 bytes (including null).
+	// We need len(stubSymlinkPath)+1 bytes for the replacement.
+	if len(stubSymlinkPath) > len(ctx.Filename) {
+		return ErrRedirectPathTooLong
+	}
+
 	stubRawFD, srvConn, err := createStubSocketPair()
 	if err != nil {
 		return fmt.Errorf("create socketpair: %w", err)
@@ -55,14 +76,25 @@ func handleRedirect(notifFD int, reqID uint64, ctx ExecveContext) error {
 	// Use a high fd number to avoid conflicts with the process's existing fds.
 	const targetFD = 100
 
-	// Inject the stub-side fd into the trapped process using SECCOMP_ADDFD_FLAG_SEND.
-	// SEND atomically adds the fd AND responds to the notification, avoiding TOCTOU.
-	_, err = NotifAddFD(notifFD, reqID, stubRawFD, targetFD, SECCOMP_ADDFD_FLAG_SETFD|SECCOMP_ADDFD_FLAG_SEND)
+	// Phase 1: Inject the stub-side fd WITHOUT SEND.
+	// The notification remains pending so we can modify memory before responding.
+	_, err = NotifAddFD(notifFD, reqID, stubRawFD, targetFD, SECCOMP_ADDFD_FLAG_SETFD)
 	sysunix.Close(stubRawFD) // Close our copy regardless of success
 	if err != nil {
 		srvConn.Close()
 		return fmt.Errorf("addfd: %w", err)
 	}
+
+	// Phase 2: Overwrite the filename in tracee memory with the stub symlink path.
+	// The tracee is frozen on the seccomp notification, so no race condition.
+	if err := writeString(ctx.PID, filenamePtr, stubSymlinkPath); err != nil {
+		srvConn.Close()
+		// fd 100 is already injected but the execve will be denied by caller.
+		// The leaked fd is harmless — the tracee doesn't know about it.
+		return fmt.Errorf("overwrite filename: %w", err)
+	}
+
+	// Phase 3 (CONTINUE response) is handled by the caller after we return nil.
 
 	// Start server handler in background to run the original command
 	// and proxy I/O to the stub.
