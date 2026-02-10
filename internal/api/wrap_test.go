@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -277,5 +279,174 @@ func TestWrapInit_BudgetExhausted(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "too long") {
 		t.Errorf("expected 'too long' in error, got: %v", err)
+	}
+}
+
+func newTestAppForWrapWithSignalPolicy(t *testing.T, cfg *config.Config) (*App, *session.Manager) {
+	t.Helper()
+	mgr := session.NewManager(5)
+	store := composite.New(mockEventStore{}, nil)
+	broker := events.NewBroker()
+	// Create a policy with signal rules so SignalEngine() returns non-nil
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "test-signal",
+		SignalRules: []policy.SignalRule{
+			{
+				Name:     "audit-all",
+				Signals:  []string{"SIGKILL"},
+				Target:   policy.SignalTargetSpec{Type: "external"},
+				Decision: "audit",
+			},
+		},
+	}
+	engine, err := policy.NewEngine(p, false)
+	if err != nil {
+		t.Fatalf("create policy engine: %v", err)
+	}
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil)
+	return app, mgr
+}
+
+func TestWrapInit_SignalFilterEnabled(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrapWithSignalPolicy(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != 200 {
+		t.Errorf("expected status 200, got %d", code)
+	}
+
+	// Verify signal_filter_enabled is true in the seccomp config
+	var seccompCfg map[string]interface{}
+	if err := json.Unmarshal([]byte(resp.SeccompConfig), &seccompCfg); err != nil {
+		t.Fatalf("failed to parse seccomp config: %v", err)
+	}
+	sigEnabled, ok := seccompCfg["signal_filter_enabled"]
+	if !ok {
+		t.Fatal("seccomp config missing signal_filter_enabled field")
+	}
+	if sigEnabled != true {
+		t.Errorf("expected signal_filter_enabled=true, got %v", sigEnabled)
+	}
+}
+
+func TestWrapInit_SignalSocketSet(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrapWithSignalPolicy(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != 200 {
+		t.Errorf("expected status 200, got %d", code)
+	}
+
+	// SignalSocket should be set when policy has signal rules
+	if resp.SignalSocket == "" {
+		t.Error("expected SignalSocket to be set when signal engine is available")
+	}
+	// Signal socket should be in the same directory as notify socket
+	if filepath.Dir(resp.SignalSocket) != filepath.Dir(resp.NotifySocket) {
+		t.Errorf("expected signal and notify sockets in same directory: signal=%s notify=%s",
+			resp.SignalSocket, resp.NotifySocket)
+	}
+	// Signal socket path should be under the limit
+	if len(resp.SignalSocket) > 104 {
+		t.Errorf("signal socket path %d bytes exceeds 104 byte limit: %s",
+			len(resp.SignalSocket), resp.SignalSocket)
+	}
+
+	// AGENTSH_SIGNAL_SOCK_FD should be in wrapper env
+	if fd, ok := resp.WrapperEnv["AGENTSH_SIGNAL_SOCK_FD"]; !ok {
+		t.Error("expected AGENTSH_SIGNAL_SOCK_FD in wrapper env")
+	} else if fd != "4" {
+		t.Errorf("expected AGENTSH_SIGNAL_SOCK_FD=4, got %q", fd)
+	}
+}
+
+func TestWrapInit_NoSignalSocketWithoutPolicy(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	// Use standard helper (no signal policy)
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != 200 {
+		t.Errorf("expected status 200, got %d", code)
+	}
+
+	// SignalSocket should NOT be set without signal policy
+	if resp.SignalSocket != "" {
+		t.Errorf("expected empty SignalSocket without signal policy, got %q", resp.SignalSocket)
+	}
+
+	// AGENTSH_SIGNAL_SOCK_FD should NOT be in wrapper env
+	if _, ok := resp.WrapperEnv["AGENTSH_SIGNAL_SOCK_FD"]; ok {
+		t.Error("expected no AGENTSH_SIGNAL_SOCK_FD in wrapper env without signal policy")
+	}
+
+	// signal_filter_enabled should be false in seccomp config
+	var seccompCfg map[string]interface{}
+	if err := json.Unmarshal([]byte(resp.SeccompConfig), &seccompCfg); err != nil {
+		t.Fatalf("failed to parse seccomp config: %v", err)
+	}
+	sigEnabled, ok := seccompCfg["signal_filter_enabled"]
+	if !ok {
+		t.Fatal("seccomp config missing signal_filter_enabled field")
+	}
+	if sigEnabled != false {
+		t.Errorf("expected signal_filter_enabled=false, got %v", sigEnabled)
 	}
 }

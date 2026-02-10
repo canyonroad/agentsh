@@ -38,6 +38,12 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 	// Not used on Windows — the driver handles exec interception directly.
 }
 
+func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID string, a *App) {
+	if signalFD != nil {
+		signalFD.Close()
+	}
+}
+
 // winPolicyCheckerAdapter adapts policy.Engine to winplat.WinExecPolicyChecker.
 type winPolicyCheckerAdapter struct {
 	engine *policy.Engine
@@ -52,7 +58,8 @@ func (w *winPolicyCheckerAdapter) CheckCommand(cmd, cmdLine string) winplat.WinE
 	command := filepath.Base(cmd)
 	command = strings.TrimSuffix(command, filepath.Ext(command))
 	if command == "" && len(args) > 0 {
-		command = args[0]
+		fallback := filepath.Base(args[0])
+		command = strings.TrimSuffix(fallback, filepath.Ext(fallback))
 	}
 
 	// Drop arg0 to match other call sites (policy args patterns expect
@@ -172,7 +179,7 @@ func startDriverHandlerForWrap(ctx context.Context, sessionID string, sessionTok
 				"parent_pid":   req.ParentId,
 				"image_path":   req.ImagePath,
 				"command":      filepath.Base(req.ImagePath),
-				"args":         parsedArgs,
+				"argv":         parsedArgs,
 				"command_line": strings.TrimSpace(req.CommandLine),
 				"decision":     decisionStr,
 				"mechanism":    "driver",
