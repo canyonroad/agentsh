@@ -143,6 +143,35 @@ func TestExtractExecveArgs(t *testing.T) {
 	})
 }
 
+func TestWriteStringToPID(t *testing.T) {
+	// Allocate a buffer in our own process memory
+	buf := make([]byte, 64)
+	copy(buf, "/usr/bin/original-binary\x00extra-padding-data")
+	bufPtr := uintptr(unsafe.Pointer(&buf[0]))
+
+	// First verify we can read from the buffer
+	result, err := readString(os.Getpid(), uint64(bufPtr), 4096)
+	require.NoError(t, err)
+	assert.Equal(t, "/usr/bin/original-binary", result)
+
+	// Overwrite with a shorter string
+	err = writeString(os.Getpid(), uint64(bufPtr), "/tmp/stub")
+	require.NoError(t, err)
+
+	// Read back and verify
+	result, err = readString(os.Getpid(), uint64(bufPtr), 4096)
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/stub", result)
+
+	// Ensure buf is not GC'd before this point
+	_ = buf
+}
+
+func TestWriteString_NullPtr(t *testing.T) {
+	err := writeString(os.Getpid(), 0, "/tmp/stub")
+	require.Error(t, err)
+}
+
 func TestIsExecveSyscall(t *testing.T) {
 	assert.True(t, IsExecveSyscall(unix.SYS_EXECVE))
 	assert.True(t, IsExecveSyscall(unix.SYS_EXECVEAT))
