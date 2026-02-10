@@ -80,28 +80,18 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	stubBin := "agentsh-stub"
 	stubPath, _ := exec.LookPath(stubBin)
 
-	// Check if signal filtering should be enabled
-	hasSignalEngine := a.policy != nil && a.policy.SignalEngine() != nil
-	signalFilterEnabled := hasSignalEngine
-
 	// Build seccomp config
 	execveEnabled := a.cfg.Sandbox.Seccomp.Execve.Enabled
 	seccompCfg := seccompWrapperConfig{
-		UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
-		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
-		SignalFilterEnabled: signalFilterEnabled,
-		ExecveEnabled:       execveEnabled,
+		UnixSocketEnabled: a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
+		BlockedSyscalls:   a.cfg.Sandbox.Seccomp.Syscalls.Block,
+		ExecveEnabled:     execveEnabled,
 	}
 
 	// Check if unix socket monitoring is enabled at all
 	unixEnabled := a.cfg.Sandbox.UnixSockets.Enabled != nil && *a.cfg.Sandbox.UnixSockets.Enabled
 	if unixEnabled {
 		seccompCfg.UnixSocketEnabled = true
-	}
-
-	cfgJSON, err := json.Marshal(seccompCfg)
-	if err != nil {
-		return types.WrapInitResponse{}, http.StatusInternalServerError, err
 	}
 
 	// Create a private temp directory for the notify socket to prevent
@@ -145,8 +135,11 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// Start background goroutine to accept the notify fd connection
 	go a.acceptNotifyFD(ctx, listener, notifySocketPath, sessionID, s, execveEnabled)
 
-	// Create signal filter socket if signal filtering is enabled
+	// Create signal filter socket if signal filtering is enabled.
+	// This must happen before marshaling the seccomp config so that
+	// signal_filter_enabled accurately reflects whether the socket was created.
 	var signalSocketPath string
+	signalFilterEnabled := a.policy != nil && a.policy.SignalEngine() != nil
 	if signalFilterEnabled {
 		signalSocketPath = filepath.Join(notifyDir, "signal-"+safeID+".sock")
 		signalListener, err := net.Listen("unix", signalSocketPath)
@@ -154,9 +147,16 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			slog.Warn("wrap: failed to create signal socket, disabling signal filter",
 				"error", err, "session_id", sessionID)
 			signalSocketPath = ""
+			signalFilterEnabled = false
 		} else {
 			go a.acceptSignalFD(ctx, signalListener, signalSocketPath, sessionID)
 		}
+	}
+	seccompCfg.SignalFilterEnabled = signalFilterEnabled
+
+	cfgJSON, err := json.Marshal(seccompCfg)
+	if err != nil {
+		return types.WrapInitResponse{}, http.StatusInternalServerError, err
 	}
 
 	// Build wrapper env
