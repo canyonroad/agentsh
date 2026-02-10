@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 
@@ -21,7 +22,7 @@ func recvFDFromConn(sock *os.File) (*os.File, error) {
 	return nil, errWrapNotSupported
 }
 
-func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool) {
+func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int) {
 	// No-op on non-Linux platforms
 }
 
@@ -33,4 +34,8 @@ func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID
 
 func (a *App) wrapInitWindows(ctx context.Context, s *session.Session, sessionID string, req types.WrapInitRequest) (types.WrapInitResponse, int, error) {
 	return types.WrapInitResponse{}, http.StatusBadRequest, errWrapNotSupported
+}
+
+func getConnPeerPID(conn *net.UnixConn) int {
+	return 0
 }

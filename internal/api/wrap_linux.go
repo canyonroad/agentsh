@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -53,7 +54,7 @@ func recvFDFromConn(sock *os.File) (*os.File, error) {
 // startNotifyHandlerForWrap starts the seccomp notify handler for a wrap session.
 // Unlike the exec path where the notify fd comes from a socketpair, here it comes
 // from the CLI via a Unix socket connection.
-func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool) {
+func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int) {
 	emitter := &notifyEmitterAdapter{store: a.store, broker: a.broker}
 
 	// Create execve handler if enabled
@@ -64,6 +65,11 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 			execveHandler, _ = h.(*unixmon.ExecveHandler)
 			if execveHandler != nil {
 				execveHandler.SetEmitter(emitter)
+
+				// Register wrapper process for depth tracking
+				if wrapperPID > 0 {
+					execveHandler.RegisterSession(wrapperPID, sessionID)
+				}
 
 				// Create stub symlink for execve redirect
 				stubPath, err := exec.LookPath("agentsh-stub")
@@ -127,4 +133,20 @@ func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID
 // wrapInitWindows is not available on Linux.
 func (a *App) wrapInitWindows(_ context.Context, _ *session.Session, _ string, _ types.WrapInitRequest) (types.WrapInitResponse, int, error) {
 	return types.WrapInitResponse{}, http.StatusBadRequest, errWrapNotSupported
+}
+
+// getConnPeerPID extracts the peer process PID from a Unix connection.
+func getConnPeerPID(conn *net.UnixConn) int {
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		return 0
+	}
+	var pid int
+	rawConn.Control(func(fd uintptr) {
+		ucred, err := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+		if err == nil {
+			pid = int(ucred.Pid)
+		}
+	})
+	return pid
 }
