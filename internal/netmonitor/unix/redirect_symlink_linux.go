@@ -5,6 +5,7 @@ package unix
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // CreateStubSymlink creates a short-path symlink pointing to the agentsh-stub binary.
@@ -24,7 +25,7 @@ func CreateStubSymlink(stubBinaryPath string) (string, func(), error) {
 	}
 
 	// Use single-char name "s" to keep the total path short.
-	symlinkPath := dir + "/s"
+	symlinkPath := filepath.Join(dir, "s")
 	if err := os.Symlink(stubBinaryPath, symlinkPath); err != nil {
 		os.RemoveAll(dir)
 		return "", nil, fmt.Errorf("create stub symlink: %w", err)

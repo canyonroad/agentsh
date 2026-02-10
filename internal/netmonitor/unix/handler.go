@@ -246,6 +246,10 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 		filename = ""
 	}
 
+	// Save original filename length before potential resolution by execveat.
+	// The memory at filenamePtr only has space for the original string.
+	originalFilenameLen := len(filename)
+
 	// Handle execveat special cases: AT_EMPTY_PATH and relative paths
 	if execveArgs.IsExecveat {
 		filename, err = resolveExecveatPath(pid, execveArgs, filename)
@@ -287,7 +291,7 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 			_ = seccomp.NotifRespond(fd, &resp)
 			return
 		}
-		if err := handleRedirect(int(fd), req.ID, ectx, execveArgs.FilenamePtr, h.stubSymlinkPath); err != nil {
+		if err := handleRedirect(int(fd), req.ID, ectx, execveArgs.FilenamePtr, h.stubSymlinkPath, originalFilenameLen); err != nil {
 			slog.Error("redirect failed, denying", "pid", pid, "error", err)
 			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EPERM)}
 			_ = seccomp.NotifRespond(fd, &resp)

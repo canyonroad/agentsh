@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/session"
@@ -77,6 +78,12 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 					slog.Warn("wrap: agentsh-stub not found, redirect will deny",
 						"error", err, "session_id", sessionID)
 				} else {
+					// Normalize to absolute path in case LookPath returns relative
+					if !filepath.IsAbs(stubPath) {
+						if abs, err := filepath.Abs(stubPath); err == nil {
+							stubPath = abs
+						}
+					}
 					symlinkPath, cleanup, err := unixmon.CreateStubSymlink(stubPath)
 					if err != nil {
 						slog.Warn("wrap: failed to create stub symlink, redirect will deny",
@@ -139,12 +146,15 @@ func (a *App) wrapInitWindows(_ context.Context, _ *session.Session, _ string, _
 func getConnPeerPID(conn *net.UnixConn) int {
 	rawConn, err := conn.SyscallConn()
 	if err != nil {
+		slog.Debug("getConnPeerPID: failed to get syscall conn", "error", err)
 		return 0
 	}
 	var pid int
 	rawConn.Control(func(fd uintptr) {
 		ucred, err := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
-		if err == nil {
+		if err != nil {
+			slog.Debug("getConnPeerPID: GetsockoptUcred failed", "error", err)
+		} else {
 			pid = int(ucred.Pid)
 		}
 	})

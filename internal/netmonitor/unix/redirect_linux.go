@@ -60,11 +60,11 @@ func createStubSocketPair() (stubRawFD int, srvConn net.Conn, err error) {
 // Parameters:
 //   - filenamePtr: the tracee memory address of the filename string (from execve arg0)
 //   - stubSymlinkPath: short path to a symlink that points to agentsh-stub
-func handleRedirect(notifFD int, reqID uint64, ctx ExecveContext, filenamePtr uint64, stubSymlinkPath string) error {
+func handleRedirect(notifFD int, reqID uint64, ctx ExecveContext, filenamePtr uint64, stubSymlinkPath string, originalFilenameLen int) error {
 	// Validate the stub path fits within the original filename's memory.
-	// The original string at filenamePtr has len(ctx.Filename)+1 bytes (including null).
+	// The original string at filenamePtr has originalFilenameLen+1 bytes (including null).
 	// We need len(stubSymlinkPath)+1 bytes for the replacement.
-	if len(stubSymlinkPath) > len(ctx.Filename) {
+	if len(stubSymlinkPath) > originalFilenameLen {
 		return ErrRedirectPathTooLong
 	}
 

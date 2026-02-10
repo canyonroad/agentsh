@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
@@ -176,6 +177,12 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 				// Create stub symlink for execve redirect
 				stubPath, err := exec.LookPath("agentsh-stub")
 				if err == nil {
+					// Normalize to absolute path in case LookPath returns relative
+					if !filepath.IsAbs(stubPath) {
+						if abs, err := filepath.Abs(stubPath); err == nil {
+							stubPath = abs
+						}
+					}
 					unixmon.SetStubBinaryPath(stubPath)
 					symlinkPath, cleanup, symlinkErr := unixmon.CreateStubSymlink(stubPath)
 					if symlinkErr == nil {

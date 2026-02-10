@@ -111,9 +111,12 @@ func writeString(pid int, ptr uint64, s string) error {
 	liov := unix.Iovec{Base: &data[0], Len: uint64(len(data))}
 	riov := unix.RemoteIovec{Base: uintptr(ptr), Len: len(data)}
 
-	_, err := unix.ProcessVMWritev(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	n, err := unix.ProcessVMWritev(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
 	if err != nil {
 		return fmt.Errorf("process_vm_writev: %w", err)
+	}
+	if n != len(data) {
+		return fmt.Errorf("process_vm_writev: short write (%d/%d bytes)", n, len(data))
 	}
 	return nil
 }
