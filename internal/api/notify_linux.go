@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/exec"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
@@ -170,6 +171,21 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 				// The wrapper's exec will be the first command (depth 0)
 				if wrapperPID > 0 {
 					h.RegisterSession(wrapperPID, sessID)
+				}
+
+				// Create stub symlink for execve redirect
+				stubPath, err := exec.LookPath("agentsh-stub")
+				if err == nil {
+					unixmon.SetStubBinaryPath(stubPath)
+					symlinkPath, cleanup, symlinkErr := unixmon.CreateStubSymlink(stubPath)
+					if symlinkErr == nil {
+						h.SetStubSymlinkPath(symlinkPath)
+						defer cleanup()
+					} else {
+						slog.Warn("exec: failed to create stub symlink", "error", symlinkErr, "session_id", sessID)
+					}
+				} else {
+					slog.Warn("exec: agentsh-stub not found, redirect will deny", "error", err, "session_id", sessID)
 				}
 			}
 		}
