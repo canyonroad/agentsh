@@ -100,6 +100,24 @@ func readPointer(pid int, ptr uint64) (uint64, error) {
 	return val, nil
 }
 
+// writeString writes a null-terminated string to the tracee's memory at the given address.
+// The caller must ensure the destination has enough space for len(s)+1 bytes.
+func writeString(pid int, ptr uint64, s string) error {
+	if ptr == 0 {
+		return ErrNullPtr
+	}
+
+	data := append([]byte(s), 0) // null-terminate
+	liov := unix.Iovec{Base: &data[0], Len: uint64(len(data))}
+	riov := unix.RemoteIovec{Base: uintptr(ptr), Len: len(data)}
+
+	_, err := unix.ProcessVMWritev(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil {
+		return fmt.Errorf("process_vm_writev: %w", err)
+	}
+	return nil
+}
+
 // ExecveReaderConfig configures argv reading limits.
 type ExecveReaderConfig struct {
 	MaxArgc      int
