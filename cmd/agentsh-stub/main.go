@@ -9,6 +9,12 @@ import (
 	"github.com/agentsh/agentsh/internal/stub"
 )
 
+// wellKnownStubFD is the fd number injected by the seccomp redirect handler.
+// When agentsh-stub is exec'd via memory rewrite redirect, AGENTSH_STUB_FD
+// is not in the environment — the stub must discover the socket by probing
+// this well-known fd number.
+const wellKnownStubFD = 100
+
 func main() {
 	os.Exit(run())
 }
@@ -24,20 +30,31 @@ func run() int {
 		// Negative return means pipe not supported on this platform; fall through to fd
 	}
 
-	// Fall back to fd (Unix)
+	// Check for explicit fd env var (Unix)
 	fdStr := os.Getenv("AGENTSH_STUB_FD")
-	if fdStr == "" {
-		if pipeName != "" {
-			fmt.Fprintf(os.Stderr, "agentsh-stub: pipe transport not supported on this platform and AGENTSH_STUB_FD not set\n")
-		} else {
-			fmt.Fprintf(os.Stderr, "agentsh-stub: neither AGENTSH_STUB_PIPE nor AGENTSH_STUB_FD set\n")
-		}
-		return 126
+	if fdStr != "" {
+		return runWithFD(fdStr)
 	}
 
+	// Try well-known fd 100 (redirect-injected socket)
+	if probeSocket(wellKnownStubFD) {
+		return runWithFD(strconv.Itoa(wellKnownStubFD))
+	}
+
+	// Nothing worked — report error
+	if pipeName != "" {
+		fmt.Fprintf(os.Stderr, "agentsh-stub: pipe transport not supported on this platform and AGENTSH_STUB_FD not set\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "agentsh-stub: neither AGENTSH_STUB_PIPE nor AGENTSH_STUB_FD set\n")
+	}
+	return 126
+}
+
+// runWithFD converts a string fd number to a net.Conn and runs the stub proxy.
+func runWithFD(fdStr string) int {
 	fd, err := strconv.Atoi(fdStr)
 	if err != nil || fd < 0 {
-		fmt.Fprintf(os.Stderr, "agentsh-stub: invalid AGENTSH_STUB_FD: %s\n", fdStr)
+		fmt.Fprintf(os.Stderr, "agentsh-stub: invalid fd: %s\n", fdStr)
 		return 126
 	}
 
