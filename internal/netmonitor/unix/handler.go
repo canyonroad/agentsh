@@ -280,12 +280,23 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 
 	switch result.Action {
 	case ActionRedirect:
-		if err := handleRedirect(int(fd), req.ID, ectx); err != nil {
+		if h.stubSymlinkPath == "" {
+			slog.Error("redirect requested but no stub symlink configured, denying",
+				"pid", pid, "cmd", ectx.Filename)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EPERM)}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		if err := handleRedirect(int(fd), req.ID, ectx, execveArgs.FilenamePtr, h.stubSymlinkPath); err != nil {
 			slog.Error("redirect failed, denying", "pid", pid, "error", err)
 			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EPERM)}
 			_ = seccomp.NotifRespond(fd, &resp)
+			return
 		}
-		// handleRedirect uses SECCOMP_ADDFD_FLAG_SEND which atomically responds
+		// handleRedirect succeeded — respond with CONTINUE to re-execute
+		// the modified execve (filename now points to agentsh-stub symlink).
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+		_ = seccomp.NotifRespond(fd, &resp)
 		return
 
 	case ActionDeny:

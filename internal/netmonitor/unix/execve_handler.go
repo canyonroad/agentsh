@@ -85,11 +85,12 @@ type ExecveEmitter interface {
 
 // ExecveHandler handles execve/execveat notifications.
 type ExecveHandler struct {
-	cfg          ExecveHandlerConfig
-	policy       PolicyChecker
-	depthTracker *DepthTracker
-	emitter      ExecveEmitter
-	approver     ApprovalRequester
+	cfg             ExecveHandlerConfig
+	policy          PolicyChecker
+	depthTracker    *DepthTracker
+	emitter         ExecveEmitter
+	approver        ApprovalRequester
+	stubSymlinkPath string // Short symlink path pointing to agentsh-stub
 }
 
 // NewExecveHandler creates a new execve handler.
@@ -111,6 +112,11 @@ func (h *ExecveHandler) SetEmitter(emitter ExecveEmitter) {
 // SetApprover sets the approval requester for the handler.
 func (h *ExecveHandler) SetApprover(approver ApprovalRequester) {
 	h.approver = approver
+}
+
+// SetStubSymlinkPath sets the path to the short symlink used for execve redirect.
+func (h *ExecveHandler) SetStubSymlinkPath(path string) {
+	h.stubSymlinkPath = path
 }
 
 // RegisterSession registers the session root PID for depth tracking.
