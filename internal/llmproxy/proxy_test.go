@@ -438,6 +438,11 @@ func TestProxy_New(t *testing.T) {
 			if err == nil && proxy == nil {
 				t.Error("New() returned nil proxy without error")
 			}
+			if proxy != nil {
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				proxy.Stop(shutdownCtx)
+			}
 		})
 	}
 }

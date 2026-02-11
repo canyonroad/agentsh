@@ -163,9 +163,6 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 		dialTarget = net.JoinHostPort(resolvedIP, portStr)
 	}
 
-	// Store redirect info for potential SNI rewriting
-	_ = redirectTLS // TODO: implement SNI rewriting for rewrite_sni mode
-	_ = redirectSNI
 	up, err := net.DialTimeout("tcp", dialTarget, 20*time.Second)
 	if err != nil {
 		_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
@@ -174,6 +171,16 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 	defer up.Close()
 
 	_, _ = io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n")
+
+	// Rewrite SNI in the TLS ClientHello if policy requires it
+	if redirectTLS == "rewrite_sni" && redirectSNI != "" {
+		if err := sniRewriteFirstRecord(client, up, redirectSNI); err != nil {
+			if !isSNIParseError(err) {
+				return nil // I/O error, connection broken
+			}
+			// Parse error: first record forwarded unchanged, continue
+		}
+	}
 
 	var upBytes, downBytes int64
 	errCh := make(chan error, 2)
