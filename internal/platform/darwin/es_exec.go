@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/platform/darwin/xpc"
@@ -197,13 +198,13 @@ func (h *ESExecHandler) spawnStubServer(executable string, args []string, pid in
 // launchStub spawns the agentsh-stub binary connected to the stub server.
 //
 // The stubFile is passed as fd 3 to the subprocess via ExtraFiles, and the
-// AGENTSH_STUB_FD=3 env var tells the stub which fd to use.
+// AGENTSH_STUB_FD=3 env var tells the stub which fd to use. Stdout/stderr
+// are connected to the denied process's TTY so output appears in the
+// original terminal.
 //
 // On macOS this is fundamentally different from Linux:
 //   - Linux: stub is injected INTO the trapped process via SECCOMP_ADDFD
 //   - macOS: original exec is denied (EPERM), stub is spawned as a new process
-//
-// TODO(phase3): implement real subprocess spawning with TTY routing.
 func (h *ESExecHandler) launchStub(stubFile *os.File, originalCmd string, originalPID int32, execCtx xpc.ExecContext) {
 	defer stubFile.Close()
 
@@ -212,11 +213,68 @@ func (h *ESExecHandler) launchStub(stubFile *os.File, originalCmd string, origin
 		return
 	}
 
-	slog.Info("es_exec: would launch stub for redirected exec",
+	cmd := exec.Command(h.stubBinary)
+	cmd.ExtraFiles = []*os.File{stubFile} // fd 3
+	cmd.Env = []string{
+		"AGENTSH_STUB_FD=3",
+		"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+	}
+
+	if execCtx.CWDPath != "" {
+		cmd.Dir = execCtx.CWDPath
+	}
+
+	// Connect stdin/stdout/stderr to the denied process's TTY so output
+	// appears in the original terminal where the command was typed.
+	if execCtx.TTYPath != "" {
+		ttyOut, err := os.OpenFile(execCtx.TTYPath, os.O_WRONLY, 0)
+		if err == nil {
+			defer ttyOut.Close()
+			cmd.Stdout = ttyOut
+			cmd.Stderr = ttyOut
+		} else {
+			slog.Warn("es_exec: cannot open TTY for output",
+				"tty", execCtx.TTYPath,
+				"error", err,
+			)
+		}
+
+		ttyIn, err := os.OpenFile(execCtx.TTYPath, os.O_RDONLY, 0)
+		if err == nil {
+			defer ttyIn.Close()
+			cmd.Stdin = ttyIn
+		} else {
+			slog.Warn("es_exec: cannot open TTY for input",
+				"tty", execCtx.TTYPath,
+				"error", err,
+			)
+		}
+	}
+
+	slog.Info("es_exec: launching stub for redirected exec",
 		"cmd", originalCmd,
 		"pid", originalPID,
 		"stub", h.stubBinary,
+		"tty", execCtx.TTYPath,
+		"cwd", execCtx.CWDPath,
 	)
+
+	if err := cmd.Start(); err != nil {
+		slog.Error("es_exec: failed to start stub",
+			"cmd", originalCmd,
+			"pid", originalPID,
+			"error", err,
+		)
+		return
+	}
+
+	if err := cmd.Wait(); err != nil {
+		slog.Debug("es_exec: stub exited with error",
+			"cmd", originalCmd,
+			"pid", originalPID,
+			"error", err,
+		)
+	}
 }
 
 // Compile-time interface check: ESExecHandler must implement xpc.ExecHandler.
