@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/approval/notify"
 	"github.com/google/uuid"
 )
 
@@ -533,23 +534,57 @@ func (p *TTYPromptProvider) Prompt(ctx context.Context, req ApprovalRequest) (Ap
 }
 
 // NotificationPromptProvider implements PromptProvider for desktop notifications.
-// This is a stub that can be implemented with platform-specific notification APIs.
+// Uses notify-send --action on Linux for lightweight approval prompts that
+// appear in the notification area without stealing focus.
 type NotificationPromptProvider struct {
-	// Fallback is the decision to use when notification is dismissed or unavailable.
-	Fallback UserDecision
+	// FallbackDecision is returned when notification is dismissed or unavailable.
+	FallbackDecision UserDecision
 }
 
-// Prompt sends a desktop notification and waits for response.
-// Note: This is a stub implementation. Real implementation would use
-// platform-specific notification APIs (D-Bus on Linux, etc.)
+// NewNotificationPromptProvider creates a new notification prompt provider.
+func NewNotificationPromptProvider(fallback UserDecision) *NotificationPromptProvider {
+	return &NotificationPromptProvider{
+		FallbackDecision: fallback,
+	}
+}
+
+// Prompt sends a desktop notification with Allow/Deny action buttons and waits for response.
 func (p *NotificationPromptProvider) Prompt(ctx context.Context, req ApprovalRequest) (ApprovalResponse, error) {
-	// TODO: Implement platform-specific notification delivery
-	// For now, return the fallback decision
+	notifyReq := notify.Request{
+		Title: "Network Access Request",
+		Message: fmt.Sprintf("Process: %s (pid: %d)\nTarget: %s:%d (%s)",
+			req.ProcessName, req.PID, req.Target, req.Port, req.Protocol),
+		Timeout: time.Until(req.ExpiresAt),
+		Urgency: "normal",
+	}
+
+	resp, err := notify.Show(ctx, notifyReq)
+
+	if err != nil || resp.Dismissed || resp.TimedOut {
+		reason := "notification dismissed"
+		if resp.TimedOut {
+			reason = "notification timed out"
+		}
+		if err != nil {
+			reason = fmt.Sprintf("notification unavailable: %v", err)
+		}
+		return ApprovalResponse{
+			RequestID: req.ID,
+			Decision:  p.FallbackDecision,
+			At:        time.Now().UTC(),
+			Reason:    reason,
+		}, nil
+	}
+
+	decision := UserDecisionDenyOnce
+	if resp.Allowed {
+		decision = UserDecisionAllowOnce
+	}
+
 	return ApprovalResponse{
 		RequestID: req.ID,
-		Decision:  p.Fallback,
+		Decision:  decision,
 		At:        time.Now().UTC(),
-		Reason:    "notification not implemented",
 	}, nil
 }
 
