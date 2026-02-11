@@ -3,6 +3,8 @@
 package darwin
 
 import (
+	"io"
+	"os"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/platform/darwin/xpc"
@@ -68,7 +70,7 @@ func TestESExecHandler_PolicyMapping(t *testing.T) {
 				message:           "test message",
 			}
 			handler := NewESExecHandler(checker, "")
-			result := handler.CheckExec("/usr/bin/test", []string{"/usr/bin/test", "-f", "foo"}, 1234, 1233, "sess-1")
+			result := handler.CheckExec("/usr/bin/test", []string{"/usr/bin/test", "-f", "foo"}, 1234, 1233, "sess-1", xpc.ExecContext{})
 
 			assert.Equal(t, tt.wantAction, result.Action, "action mismatch")
 			assert.Equal(t, tt.wantDecision, result.Decision, "decision mismatch")
@@ -80,7 +82,7 @@ func TestESExecHandler_PolicyMapping(t *testing.T) {
 
 func TestESExecHandler_NilPolicyChecker(t *testing.T) {
 	handler := NewESExecHandler(nil, "")
-	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1")
+	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1", xpc.ExecContext{})
 
 	assert.Equal(t, "continue", result.Action)
 	assert.Equal(t, "allow", result.Decision)
@@ -95,7 +97,7 @@ func TestESExecHandler_UnknownDecision(t *testing.T) {
 		rule:              "weird-rule",
 		message:           "weird message",
 	}, "")
-	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1")
+	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1", xpc.ExecContext{})
 
 	// Unknown decisions should fail-secure (deny).
 	assert.Equal(t, "deny", result.Action)
@@ -111,7 +113,7 @@ func TestESExecHandler_EffectiveDecisionFallback(t *testing.T) {
 		effectiveDecision: "", // empty
 		rule:              "fallback-rule",
 	}, "")
-	result := handler.CheckExec("/usr/bin/ls", nil, 100, 99, "sess-2")
+	result := handler.CheckExec("/usr/bin/ls", nil, 100, 99, "sess-2", xpc.ExecContext{})
 
 	assert.Equal(t, "continue", result.Action)
 	assert.Equal(t, "allow", result.Decision)
@@ -127,7 +129,7 @@ func TestESExecHandler_PassesArgsToChecker(t *testing.T) {
 	handler := NewESExecHandler(checker, "")
 
 	args := []string{"/usr/bin/curl", "-s", "https://example.com"}
-	handler.CheckExec("/usr/bin/curl", args, 5678, 5677, "sess-3")
+	handler.CheckExec("/usr/bin/curl", args, 5678, 5677, "sess-3", xpc.ExecContext{})
 
 	assert.Equal(t, "/usr/bin/curl", checker.lastCmd)
 	assert.Equal(t, args, checker.lastArgs)
@@ -144,7 +146,7 @@ func TestESExecHandler_RedirectSpawnsStub(t *testing.T) {
 		message:           "redirecting",
 	}, "/usr/local/bin/agentsh-stub")
 
-	result := handler.CheckExec("/usr/bin/git", []string{"/usr/bin/git", "push"}, 9999, 9998, "sess-4")
+	result := handler.CheckExec("/usr/bin/git", []string{"/usr/bin/git", "push"}, 9999, 9998, "sess-4", xpc.ExecContext{})
 
 	assert.Equal(t, "redirect", result.Action)
 	assert.Equal(t, "redirect", result.Decision)
@@ -160,7 +162,7 @@ func TestESExecHandler_ApproveSpawnsStub(t *testing.T) {
 		message:           "needs approval",
 	}, "/usr/local/bin/agentsh-stub")
 
-	result := handler.CheckExec("/usr/bin/rm", []string{"/usr/bin/rm", "-rf", "/"}, 1111, 1110, "sess-5")
+	result := handler.CheckExec("/usr/bin/rm", []string{"/usr/bin/rm", "-rf", "/"}, 1111, 1110, "sess-5", xpc.ExecContext{})
 
 	assert.Equal(t, "redirect", result.Action)
 	assert.Equal(t, "approve", result.Decision)
@@ -175,6 +177,79 @@ func TestNewESExecHandler(t *testing.T) {
 	require.NotNil(t, handler)
 	assert.Equal(t, "/path/to/stub", handler.stubBinary)
 	assert.Equal(t, checker, handler.policyChecker)
+}
+
+func TestCreateSocketPair(t *testing.T) {
+	stubFile, srvConn, err := createSocketPair()
+	require.NoError(t, err)
+	defer stubFile.Close()
+	defer srvConn.Close()
+
+	// Write from server side, read from stub side.
+	msg := []byte("hello from server")
+	_, err = srvConn.Write(msg)
+	require.NoError(t, err)
+
+	// The stubFile is an *os.File wrapping one end of the socketpair.
+	// Read from it to verify data flows through.
+	buf := make([]byte, 64)
+	n, err := stubFile.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, string(msg), string(buf[:n]))
+
+	// Write from stub side, read from server side.
+	msg2 := []byte("hello from stub")
+	_, err = stubFile.Write(msg2)
+	require.NoError(t, err)
+
+	buf2 := make([]byte, 64)
+	n2, err := io.ReadAtLeast(srvConn, buf2, len(msg2))
+	require.NoError(t, err)
+	assert.Equal(t, string(msg2), string(buf2[:n2]))
+}
+
+func TestLaunchStub_NoTTY(t *testing.T) {
+	// When TTYPath is empty, launchStub should not panic and should
+	// handle the missing binary gracefully (the stub binary doesn't exist in test).
+	handler := NewESExecHandler(&mockPolicyChecker{
+		decision:          "redirect",
+		effectiveDecision: "redirect",
+	}, "/nonexistent/agentsh-stub")
+
+	// Create a dummy file to pass as stubFile.
+	tmpFile, err := os.CreateTemp("", "stub-test-*")
+	require.NoError(t, err)
+	defer os.Remove(tmpFile.Name())
+
+	// Should not panic, even with empty TTY and missing binary.
+	handler.launchStub(tmpFile, "/usr/bin/test", 1234, xpc.ExecContext{
+		CWDPath: "/tmp",
+	})
+}
+
+func TestLaunchStub_MissingBinary(t *testing.T) {
+	handler := NewESExecHandler(&mockPolicyChecker{
+		decision:          "redirect",
+		effectiveDecision: "redirect",
+	}, "") // empty stub binary
+
+	tmpFile, err := os.CreateTemp("", "stub-test-*")
+	require.NoError(t, err)
+	defer os.Remove(tmpFile.Name())
+
+	// Should return early without panic when stub binary is empty.
+	handler.launchStub(tmpFile, "/usr/bin/test", 1234, xpc.ExecContext{})
+}
+
+func TestSpawnStubServer_NoStubBinary(t *testing.T) {
+	// Verify spawnStubServer returns early without panic when stubBinary is empty.
+	handler := NewESExecHandler(&mockPolicyChecker{
+		decision:          "redirect",
+		effectiveDecision: "redirect",
+	}, "") // empty stub binary
+
+	// Should not panic.
+	handler.spawnStubServer("/usr/bin/test", []string{"/usr/bin/test"}, 1234, 1233, "sess-1", xpc.ExecContext{})
 }
 
 // Compile-time interface check: ESExecHandler must implement xpc.ExecHandler.

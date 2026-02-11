@@ -56,6 +56,8 @@ import Foundation
         pid: pid_t,
         parentPID: pid_t,
         sessionID: String?,
+        ttyPath: String?,
+        cwdPath: String?,
         reply: @escaping (String, String, String?) -> Void  // (decision, action, rule)
     )
 

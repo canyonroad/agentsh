@@ -634,7 +634,7 @@ type testExecHandler struct {
 	result ExecCheckResult
 }
 
-func (h *testExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) ExecCheckResult {
+func (h *testExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string, _ ExecContext) ExecCheckResult {
 	return h.result
 }
 
@@ -898,6 +898,7 @@ type testSessionRegistrar struct {
 	unregisteredPID     int32
 	registerCalled      bool
 	unregisterCalled    bool
+	mutedPaths          []string
 }
 
 func (r *testSessionRegistrar) RegisterSession(rootPID int32, sessionID string) {
@@ -913,6 +914,12 @@ func (r *testSessionRegistrar) UnregisterSession(rootPID int32) {
 	defer r.mu.Unlock()
 	r.unregisteredPID = rootPID
 	r.unregisterCalled = true
+}
+
+func (r *testSessionRegistrar) MutePath(path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mutedPaths = append(r.mutedPaths, path)
 }
 
 func TestServer_RegisterSession(t *testing.T) {
@@ -1102,5 +1109,51 @@ func TestServer_MuteProcess(t *testing.T) {
 	}
 	if !resp.Success {
 		t.Error("expected Success=true")
+	}
+}
+
+func TestServer_MutePath(t *testing.T) {
+	sockPath := testSockPath(t)
+
+	srv := NewServer(sockPath, &mockPolicyEngine{})
+
+	registrar := &testSessionRegistrar{}
+	srv.SetSessionRegistrar(registrar)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+
+	conn := waitForServer(t, srv, sockPath, 5*time.Second)
+	defer conn.Close()
+
+	req := PolicyRequest{
+		Type: RequestTypeMutePath,
+		Path: "/usr/local/bin/agentsh-stub",
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	var resp PolicyResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !resp.Allow {
+		t.Error("expected Allow=true")
+	}
+	if !resp.Success {
+		t.Error("expected Success=true")
+	}
+
+	registrar.mu.Lock()
+	defer registrar.mu.Unlock()
+	if len(registrar.mutedPaths) != 1 {
+		t.Fatalf("expected 1 muted path, got %d", len(registrar.mutedPaths))
+	}
+	if registrar.mutedPaths[0] != "/usr/local/bin/agentsh-stub" {
+		t.Errorf("muted path: got %q, want %q", registrar.mutedPaths[0], "/usr/local/bin/agentsh-stub")
 	}
 }

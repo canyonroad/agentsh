@@ -24,6 +24,9 @@ const (
 
 	// Process muting request type
 	RequestTypeMuteProcess RequestType = "mute_process"
+
+	// Path muting request type (for es_mute_path_literal)
+	RequestTypeMutePath RequestType = "mute_path"
 )
 
 // PolicyRequest is sent from the XPC bridge to the Go policy server.
@@ -68,6 +71,10 @@ type PolicyRequest struct {
 
 	// Session management fields
 	RootPID int32 `json:"root_pid,omitempty"` // Root PID for session registration
+
+	// Exec context fields (from ESF event)
+	TTYPath string `json:"tty_path,omitempty"` // Controlling terminal path
+	CWDPath string `json:"cwd_path,omitempty"` // Working directory of the exec'ing process
 }
 
 // PolicyResponse is returned from the Go policy server.
@@ -86,6 +93,12 @@ type PolicyResponse struct {
 	RuleID    string             `json:"rule_id,omitempty"`   // Matched rule identifier
 	Success   bool               `json:"success,omitempty"`   // For operations that return success/fail
 	Approvals []ApprovalResponse `json:"approvals,omitempty"` // Pending approval requests
+}
+
+// ExecContext carries process context from the ESF event for exec redirect.
+type ExecContext struct {
+	TTYPath string // Controlling terminal path (e.g. /dev/ttys001)
+	CWDPath string // Working directory of the exec'ing process
 }
 
 // ApprovalResponse represents a pending approval request returned to the client.
