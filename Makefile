@@ -1,4 +1,4 @@
-.PHONY: build build-shim test lint clean proto
+.PHONY: build build-shim test lint clean proto ebpf
 .PHONY: smoke
 .PHONY: completions package-snapshot package-release
 .PHONY: build-macos-enterprise build-macos-go build-swift assemble-bundle sign-bundle
@@ -85,6 +85,10 @@ lint:
 
 clean:
 	rm -rf bin build coverage.out dist
+
+# Rebuild eBPF objects from source (requires clang and Linux BTF headers)
+ebpf:
+	$(MAKE) -C internal/netmonitor/ebpf clean all
 
 # Generate shell completions
 completions: build

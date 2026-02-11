@@ -11,7 +11,6 @@ import (
 )
 
 // connect_bpfel.o is the CO-RE compiled object for connect hooks.
-// TODO: replace placeholder with real object during build packaging.
 //
 //go:embed connect_bpfel.o
 var bpfObjBytes []byte
