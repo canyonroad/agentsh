@@ -3,6 +3,8 @@
 package darwin
 
 import (
+	"io"
+	"os"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/platform/darwin/xpc"
@@ -175,6 +177,79 @@ func TestNewESExecHandler(t *testing.T) {
 	require.NotNil(t, handler)
 	assert.Equal(t, "/path/to/stub", handler.stubBinary)
 	assert.Equal(t, checker, handler.policyChecker)
+}
+
+func TestCreateSocketPair(t *testing.T) {
+	stubFile, srvConn, err := createSocketPair()
+	require.NoError(t, err)
+	defer stubFile.Close()
+	defer srvConn.Close()
+
+	// Write from server side, read from stub side.
+	msg := []byte("hello from server")
+	_, err = srvConn.Write(msg)
+	require.NoError(t, err)
+
+	// The stubFile is an *os.File wrapping one end of the socketpair.
+	// Read from it to verify data flows through.
+	buf := make([]byte, 64)
+	n, err := stubFile.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, string(msg), string(buf[:n]))
+
+	// Write from stub side, read from server side.
+	msg2 := []byte("hello from stub")
+	_, err = stubFile.Write(msg2)
+	require.NoError(t, err)
+
+	buf2 := make([]byte, 64)
+	n2, err := io.ReadAtLeast(srvConn, buf2, len(msg2))
+	require.NoError(t, err)
+	assert.Equal(t, string(msg2), string(buf2[:n2]))
+}
+
+func TestLaunchStub_NoTTY(t *testing.T) {
+	// When TTYPath is empty, launchStub should not panic and should
+	// handle the missing binary gracefully (the stub binary doesn't exist in test).
+	handler := NewESExecHandler(&mockPolicyChecker{
+		decision:          "redirect",
+		effectiveDecision: "redirect",
+	}, "/nonexistent/agentsh-stub")
+
+	// Create a dummy file to pass as stubFile.
+	tmpFile, err := os.CreateTemp("", "stub-test-*")
+	require.NoError(t, err)
+	defer os.Remove(tmpFile.Name())
+
+	// Should not panic, even with empty TTY and missing binary.
+	handler.launchStub(tmpFile, "/usr/bin/test", 1234, xpc.ExecContext{
+		CWDPath: "/tmp",
+	})
+}
+
+func TestLaunchStub_MissingBinary(t *testing.T) {
+	handler := NewESExecHandler(&mockPolicyChecker{
+		decision:          "redirect",
+		effectiveDecision: "redirect",
+	}, "") // empty stub binary
+
+	tmpFile, err := os.CreateTemp("", "stub-test-*")
+	require.NoError(t, err)
+	defer os.Remove(tmpFile.Name())
+
+	// Should return early without panic when stub binary is empty.
+	handler.launchStub(tmpFile, "/usr/bin/test", 1234, xpc.ExecContext{})
+}
+
+func TestSpawnStubServer_NoStubBinary(t *testing.T) {
+	// Verify spawnStubServer returns early without panic when stubBinary is empty.
+	handler := NewESExecHandler(&mockPolicyChecker{
+		decision:          "redirect",
+		effectiveDecision: "redirect",
+	}, "") // empty stub binary
+
+	// Should not panic.
+	handler.spawnStubServer("/usr/bin/test", []string{"/usr/bin/test"}, 1234, 1233, "sess-1", xpc.ExecContext{})
 }
 
 // Compile-time interface check: ESExecHandler must implement xpc.ExecHandler.
