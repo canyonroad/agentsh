@@ -123,10 +123,14 @@ func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, p
 //   - stubFile: *os.File for passing to the subprocess via ExtraFiles (becomes fd 3)
 //   - srvConn: net.Conn for ServeStubConnection on the server side
 func createSocketPair() (stubFile *os.File, srvConn net.Conn, err error) {
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
 	if err != nil {
 		return nil, nil, fmt.Errorf("socketpair: %w", err)
 	}
+	// Set close-on-exec to prevent fd leaks to unrelated child processes.
+	// (ExtraFiles in exec.Command will dup the fd without CLOEXEC for the stub.)
+	unix.CloseOnExec(fds[0])
+	unix.CloseOnExec(fds[1])
 
 	// fds[0] → stubFile (will be passed to the stub subprocess via ExtraFiles)
 	stubFile = os.NewFile(uintptr(fds[0]), "stub-sock")
