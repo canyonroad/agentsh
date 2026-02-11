@@ -196,7 +196,7 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		}
 
 		adapter := NewPolicyAdapter(engine, nil)
-		result := adapter.CheckExec("ls", []string{"-la"}, 1234, 1, "session-1")
+		result := adapter.CheckExec("ls", []string{"-la"}, 1234, 1, "session-1", ExecContext{})
 
 		if result.Decision != "allow" {
 			t.Errorf("decision: got %q, want %q", result.Decision, "allow")
@@ -224,7 +224,7 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		}
 
 		adapter := NewPolicyAdapter(engine, nil)
-		result := adapter.CheckExec("rm", []string{"-rf", "/"}, 5678, 1, "session-1")
+		result := adapter.CheckExec("rm", []string{"-rf", "/"}, 5678, 1, "session-1", ExecContext{})
 
 		if result.Decision != "deny" {
 			t.Errorf("decision: got %q, want %q", result.Decision, "deny")
@@ -254,7 +254,7 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		}
 
 		adapter := NewPolicyAdapter(engine, nil)
-		result := adapter.CheckExec("git", []string{"push"}, 9999, 1, "session-1")
+		result := adapter.CheckExec("git", []string{"push"}, 9999, 1, "session-1", ExecContext{})
 
 		if result.Decision != "redirect" {
 			t.Errorf("decision: got %q, want %q", result.Decision, "redirect")
@@ -282,7 +282,7 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		}
 
 		adapter := NewPolicyAdapter(engine, nil)
-		result := adapter.CheckExec("curl", []string{"https://example.com"}, 2222, 1, "session-1")
+		result := adapter.CheckExec("curl", []string{"https://example.com"}, 2222, 1, "session-1", ExecContext{})
 
 		if result.Decision != "audit" {
 			t.Errorf("decision: got %q, want %q", result.Decision, "audit")
@@ -312,7 +312,7 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		}
 
 		adapter := NewPolicyAdapter(engine, nil)
-		result := adapter.CheckExec("sudo", []string{"ls"}, 3333, 1, "session-1")
+		result := adapter.CheckExec("sudo", []string{"ls"}, 3333, 1, "session-1", ExecContext{})
 
 		if result.Decision != "approve" {
 			t.Errorf("decision: got %q, want %q", result.Decision, "approve")
@@ -342,7 +342,7 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		}
 
 		adapter := NewPolicyAdapter(engine, nil)
-		result := adapter.CheckExec("sudo", []string{"ls"}, 3333, 1, "session-1")
+		result := adapter.CheckExec("sudo", []string{"ls"}, 3333, 1, "session-1", ExecContext{})
 
 		if result.Decision != "approve" {
 			t.Errorf("decision: got %q, want %q", result.Decision, "approve")
@@ -446,7 +446,7 @@ func TestPolicyAdapter_NilEngine(t *testing.T) {
 	})
 
 	t.Run("CheckExec returns no-policy", func(t *testing.T) {
-		result := adapter.CheckExec("/usr/bin/ls", []string{"-la"}, 1234, 1, "session-1")
+		result := adapter.CheckExec("/usr/bin/ls", []string{"-la"}, 1234, 1, "session-1", ExecContext{})
 		if result.Decision != "allow" {
 			t.Errorf("decision: got %q, want %q", result.Decision, "allow")
 		}

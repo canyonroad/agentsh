@@ -289,12 +289,22 @@ class ESFClient {
 
         let parentPID = event.pointee.process.pointee.ppid
 
+        // Extract TTY and CWD from the exec event's process context.
+        // These are passed through XPC to the Go server for exec redirect.
+        var ttyPath: String? = nil
+        if let ttyFile = event.pointee.process.pointee.tty {
+            ttyPath = String(cString: ttyFile.pointee.path.data)
+        }
+        let cwdPath = String(cString: event.pointee.process.pointee.cwd.pointee.path.data)
+
         xpcProxy?.checkExecPipeline(
             executable: execPath,
             args: args,
             pid: pid,
             parentPID: parentPID,
-            sessionID: sessionInfo?.sessionID
+            sessionID: sessionInfo?.sessionID,
+            ttyPath: ttyPath,
+            cwdPath: cwdPath
         ) { [weak self] decision, action, rule in
             guard let client = self?.getClient() else {
                 es_free_message(messageCopy)

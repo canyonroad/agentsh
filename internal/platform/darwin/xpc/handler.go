@@ -68,7 +68,7 @@ func (a *PolicyAdapter) ResolveSession(pid int32) string {
 
 // CheckExec evaluates a command through the exec pipeline, returning
 // the full decision and action for the ESF client to act on.
-func (a *PolicyAdapter) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) ExecCheckResult {
+func (a *PolicyAdapter) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string, _ ExecContext) ExecCheckResult {
 	if a.engine == nil {
 		return ExecCheckResult{
 			Decision: "allow",

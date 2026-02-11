@@ -68,7 +68,7 @@ func TestESExecHandler_PolicyMapping(t *testing.T) {
 				message:           "test message",
 			}
 			handler := NewESExecHandler(checker, "")
-			result := handler.CheckExec("/usr/bin/test", []string{"/usr/bin/test", "-f", "foo"}, 1234, 1233, "sess-1")
+			result := handler.CheckExec("/usr/bin/test", []string{"/usr/bin/test", "-f", "foo"}, 1234, 1233, "sess-1", xpc.ExecContext{})
 
 			assert.Equal(t, tt.wantAction, result.Action, "action mismatch")
 			assert.Equal(t, tt.wantDecision, result.Decision, "decision mismatch")
@@ -80,7 +80,7 @@ func TestESExecHandler_PolicyMapping(t *testing.T) {
 
 func TestESExecHandler_NilPolicyChecker(t *testing.T) {
 	handler := NewESExecHandler(nil, "")
-	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1")
+	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1", xpc.ExecContext{})
 
 	assert.Equal(t, "continue", result.Action)
 	assert.Equal(t, "allow", result.Decision)
@@ -95,7 +95,7 @@ func TestESExecHandler_UnknownDecision(t *testing.T) {
 		rule:              "weird-rule",
 		message:           "weird message",
 	}, "")
-	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1")
+	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1", xpc.ExecContext{})
 
 	// Unknown decisions should fail-secure (deny).
 	assert.Equal(t, "deny", result.Action)
@@ -111,7 +111,7 @@ func TestESExecHandler_EffectiveDecisionFallback(t *testing.T) {
 		effectiveDecision: "", // empty
 		rule:              "fallback-rule",
 	}, "")
-	result := handler.CheckExec("/usr/bin/ls", nil, 100, 99, "sess-2")
+	result := handler.CheckExec("/usr/bin/ls", nil, 100, 99, "sess-2", xpc.ExecContext{})
 
 	assert.Equal(t, "continue", result.Action)
 	assert.Equal(t, "allow", result.Decision)
@@ -127,7 +127,7 @@ func TestESExecHandler_PassesArgsToChecker(t *testing.T) {
 	handler := NewESExecHandler(checker, "")
 
 	args := []string{"/usr/bin/curl", "-s", "https://example.com"}
-	handler.CheckExec("/usr/bin/curl", args, 5678, 5677, "sess-3")
+	handler.CheckExec("/usr/bin/curl", args, 5678, 5677, "sess-3", xpc.ExecContext{})
 
 	assert.Equal(t, "/usr/bin/curl", checker.lastCmd)
 	assert.Equal(t, args, checker.lastArgs)
@@ -144,7 +144,7 @@ func TestESExecHandler_RedirectSpawnsStub(t *testing.T) {
 		message:           "redirecting",
 	}, "/usr/local/bin/agentsh-stub")
 
-	result := handler.CheckExec("/usr/bin/git", []string{"/usr/bin/git", "push"}, 9999, 9998, "sess-4")
+	result := handler.CheckExec("/usr/bin/git", []string{"/usr/bin/git", "push"}, 9999, 9998, "sess-4", xpc.ExecContext{})
 
 	assert.Equal(t, "redirect", result.Action)
 	assert.Equal(t, "redirect", result.Decision)
@@ -160,7 +160,7 @@ func TestESExecHandler_ApproveSpawnsStub(t *testing.T) {
 		message:           "needs approval",
 	}, "/usr/local/bin/agentsh-stub")
 
-	result := handler.CheckExec("/usr/bin/rm", []string{"/usr/bin/rm", "-rf", "/"}, 1111, 1110, "sess-5")
+	result := handler.CheckExec("/usr/bin/rm", []string{"/usr/bin/rm", "-rf", "/"}, 1111, 1110, "sess-5", xpc.ExecContext{})
 
 	assert.Equal(t, "redirect", result.Action)
 	assert.Equal(t, "approve", result.Decision)

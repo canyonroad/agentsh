@@ -634,7 +634,7 @@ type testExecHandler struct {
 	result ExecCheckResult
 }
 
-func (h *testExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) ExecCheckResult {
+func (h *testExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string, _ ExecContext) ExecCheckResult {
 	return h.result
 }
 

@@ -89,6 +89,8 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
         pid: pid_t,
         parentPID: pid_t,
         sessionID: String?,
+        ttyPath: String?,
+        cwdPath: String?,
         reply: @escaping (String, String, String?) -> Void
     ) {
         let request: [String: Any] = [
@@ -97,7 +99,9 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
             "args": args,
             "pid": pid,
             "parent_pid": parentPID,
-            "session_id": sessionID ?? ""
+            "session_id": sessionID ?? "",
+            "tty_path": ttyPath ?? "",
+            "cwd_path": cwdPath ?? ""
         ]
         sendRequest(request) { [weak self] response in
             // Check if this was an error response from sendRequest.

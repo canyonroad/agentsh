@@ -51,7 +51,7 @@ func NewESExecHandler(checker ESExecPolicyChecker, stubBinary string) *ESExecHan
 
 // CheckExec evaluates an exec request and returns the pipeline decision.
 // Implements the xpc.ExecHandler interface.
-func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) xpc.ExecCheckResult {
+func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string, execCtx xpc.ExecContext) xpc.ExecCheckResult {
 	if h.policyChecker == nil {
 		return xpc.ExecCheckResult{
 			Decision: "allow",
@@ -90,7 +90,7 @@ func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, p
 		// For redirect/approve: deny the original exec, spawn stub server-side.
 		// The ESF client will deny the exec (process gets EPERM), and we run
 		// the command independently through the stub protocol.
-		go h.spawnStubServer(executable, args, pid, parentPID, sessionID)
+		go h.spawnStubServer(executable, args, pid, parentPID, sessionID, execCtx)
 		return xpc.ExecCheckResult{
 			Decision: result.Decision,
 			Action:   "redirect",
@@ -126,7 +126,7 @@ func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, p
 // to the original process's terminal/PTY. For now, the server-side command
 // execution works but the output goes to the server's log rather than to the
 // caller. The launchStub method is a placeholder for the process-spawning part.
-func (h *ESExecHandler) spawnStubServer(executable string, args []string, pid int32, parentPID int32, sessionID string) {
+func (h *ESExecHandler) spawnStubServer(executable string, args []string, pid int32, parentPID int32, sessionID string, execCtx xpc.ExecContext) {
 	if h.stubBinary == "" {
 		slog.Error("es_exec: stub binary path not configured, cannot redirect exec",
 			"cmd", executable,

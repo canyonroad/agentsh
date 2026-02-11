@@ -40,7 +40,7 @@ type PNACLHandler interface {
 
 // ExecHandler handles exec pipeline checks from the ESF client.
 type ExecHandler interface {
-	CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) ExecCheckResult
+	CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string, execCtx ExecContext) ExecCheckResult
 }
 
 // SessionRegistrar handles session lifecycle events.
@@ -327,7 +327,10 @@ func (s *Server) handleExecCheck(req *PolicyRequest) PolicyResponse {
 		return PolicyResponse{Allow: allow, Rule: rule, Action: action, ExecDecision: execDecision}
 	}
 
-	result := h.CheckExec(req.Path, req.Args, req.PID, req.ParentPID, req.SessionID)
+	result := h.CheckExec(req.Path, req.Args, req.PID, req.ParentPID, req.SessionID, ExecContext{
+		TTYPath: req.TTYPath,
+		CWDPath: req.CWDPath,
+	})
 	return PolicyResponse{
 		Allow:        result.Action == "continue",
 		Rule:         result.Rule,
