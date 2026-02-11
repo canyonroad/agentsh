@@ -150,12 +150,10 @@ func (p *Proxy) Stop(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.server == nil {
-		return nil
-	}
-
-	if err := p.server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("shutdown: %w", err)
+	if p.server != nil {
+		if err := p.server.Shutdown(ctx); err != nil {
+			return fmt.Errorf("shutdown: %w", err)
+		}
 	}
 
 	if err := p.storage.Close(); err != nil {
