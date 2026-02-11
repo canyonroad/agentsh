@@ -898,6 +898,7 @@ type testSessionRegistrar struct {
 	unregisteredPID     int32
 	registerCalled      bool
 	unregisterCalled    bool
+	mutedPaths          []string
 }
 
 func (r *testSessionRegistrar) RegisterSession(rootPID int32, sessionID string) {
@@ -913,6 +914,12 @@ func (r *testSessionRegistrar) UnregisterSession(rootPID int32) {
 	defer r.mu.Unlock()
 	r.unregisteredPID = rootPID
 	r.unregisterCalled = true
+}
+
+func (r *testSessionRegistrar) MutePath(path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mutedPaths = append(r.mutedPaths, path)
 }
 
 func TestServer_RegisterSession(t *testing.T) {

@@ -24,6 +24,9 @@ const (
 
 	// Process muting request type
 	RequestTypeMuteProcess RequestType = "mute_process"
+
+	// Path muting request type (for es_mute_path_literal)
+	RequestTypeMutePath RequestType = "mute_path"
 )
 
 // PolicyRequest is sent from the XPC bridge to the Go policy server.

@@ -80,6 +80,17 @@ class ESFClient {
         }
 
         NSLog("ESF client started successfully")
+
+        // Mute agentsh binaries to prevent recursion during exec redirect.
+        // When the Go server spawns agentsh-stub, the ES client must not
+        // intercept it (which would cause infinite redirect loops).
+        if #available(macOS 12.0, *) {
+            for path in ["/usr/local/bin/agentsh-stub", "/usr/local/bin/agentsh"] {
+                es_mute_path_literal(newClient, path, ES_MUTE_PATH_TYPE_TARGET_LITERAL)
+            }
+            NSLog("ESFClient: muted agentsh binary paths for recursion prevention")
+        }
+
         return true
     }
 
@@ -98,6 +109,20 @@ class ESFClient {
     }
 
     // MARK: - Process Muting (Recursion Guard)
+
+    /// Mute a path so ES events are not delivered for processes at that path.
+    /// Used for dynamic recursion prevention — the Go server sends the actual
+    /// stub binary path during wrap initialization.
+    @available(macOS 12.0, *)
+    func mutePath(_ path: String) {
+        guard let client = getClient() else { return }
+        let result = es_mute_path_literal(client, path, ES_MUTE_PATH_TYPE_TARGET_LITERAL)
+        if result != ES_RETURN_SUCCESS {
+            NSLog("ESFClient: failed to mute path \(path): \(result.rawValue)")
+        } else {
+            NSLog("ESFClient: muted path \(path)")
+        }
+    }
 
     /// Mute a process and all its descendants so ES events are not delivered for them.
     /// Used for recursion prevention — agentsh-spawned commands must not be re-intercepted.
@@ -238,6 +263,14 @@ class ESFClient {
 
     private func handleAuthExec(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
         guard let client = getClient() else { return }
+
+        // Fast-path: allow agentsh-stub execs to prevent recursion on macOS < 12.0
+        // where es_mute_path_literal is unavailable.
+        let targetPath = String(cString: event.pointee.event.exec.target.pointee.executable.pointee.path.data)
+        if targetPath.hasSuffix("/agentsh-stub") || targetPath.hasSuffix("/agentsh") {
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+            return
+        }
 
         // Fast path: if no active sessions, allow everything immediately.
         // Sessions are populated via registerSession() which is called from the

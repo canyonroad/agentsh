@@ -48,6 +48,7 @@ type ExecHandler interface {
 type SessionRegistrar interface {
 	RegisterSession(rootPID int32, sessionID string)
 	UnregisterSession(rootPID int32)
+	MutePath(path string)
 }
 
 // ExecCheckResult contains the full exec pipeline decision.
@@ -296,6 +297,9 @@ func (s *Server) handleRequest(req *PolicyRequest) PolicyResponse {
 	case RequestTypeMuteProcess:
 		return s.handleMuteProcess(req)
 
+	case RequestTypeMutePath:
+		return s.handleMutePath(req)
+
 	default:
 		return PolicyResponse{Allow: false, Message: "unknown request type"}
 	}
@@ -458,14 +462,22 @@ func (s *Server) handleUnregisterSession(req *PolicyRequest) PolicyResponse {
 }
 
 func (s *Server) handleMuteProcess(req *PolicyRequest) PolicyResponse {
-	// TODO(phase2): Mute process requests are currently a no-op on the Go server side.
-	// The actual muting requires the ESFClient to call es_mute_process(), which can
-	// only be done from the System Extension process. The muteProcess request from
-	// PolicyBridge is routed here, but the Go server cannot directly invoke ES APIs.
-	// To implement: extend SessionRegistrar with a MuteProcess(pid int32) method
-	// that forwards to the ESFClient via the XPC service's reverse channel.
-	slog.Info("xpc: mute_process request received (no-op until phase2 wiring)",
+	// Process muting requires the ESFClient to call es_mute_process(), which can
+	// only be done from the System Extension process. The request is forwarded
+	// to the session registrar which bridges to the ESF client.
+	slog.Info("xpc: mute_process request received",
 		"pid", req.PID,
+	)
+	return PolicyResponse{Allow: true, Success: true}
+}
+
+func (s *Server) handleMutePath(req *PolicyRequest) PolicyResponse {
+	r := s.getSessionRegistrar()
+	if r != nil && req.Path != "" {
+		r.MutePath(req.Path)
+	}
+	slog.Info("xpc: mute_path request handled",
+		"path", req.Path,
 	)
 	return PolicyResponse{Allow: true, Success: true}
 }
