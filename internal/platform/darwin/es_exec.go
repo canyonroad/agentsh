@@ -4,12 +4,15 @@ package darwin
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/platform/darwin/xpc"
 	"github.com/agentsh/agentsh/internal/stub"
+	"golang.org/x/sys/unix"
 )
 
 // ESExecPolicyChecker evaluates exec commands against policy.
@@ -114,18 +117,38 @@ func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, p
 	}
 }
 
+// createSocketPair creates a Unix socketpair for stub <-> server communication.
+// Returns (stubFile, srvConn, error):
+//   - stubFile: *os.File for passing to the subprocess via ExtraFiles (becomes fd 3)
+//   - srvConn: net.Conn for ServeStubConnection on the server side
+func createSocketPair() (stubFile *os.File, srvConn net.Conn, err error) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("socketpair: %w", err)
+	}
+
+	// fds[0] → stubFile (will be passed to the stub subprocess via ExtraFiles)
+	stubFile = os.NewFile(uintptr(fds[0]), "stub-sock")
+
+	// fds[1] → srvConn (for ServeStubConnection)
+	srvFile := os.NewFile(uintptr(fds[1]), "srv-sock")
+	srvConn, err = net.FileConn(srvFile)
+	srvFile.Close() // FileConn dups the fd, so close the original
+	if err != nil {
+		stubFile.Close()
+		return nil, nil, fmt.Errorf("srv FileConn: %w", err)
+	}
+
+	return stubFile, srvConn, nil
+}
+
 // spawnStubServer spawns the original command via the stub protocol.
 // On macOS, we can't rewrite the exec target in ES, so we deny the original
 // exec and run the command server-side, with I/O proxied through the stub.
 //
-// This creates an in-process net.Pipe between the stub server (which runs the
-// command) and the stub client side. The stub server uses ServeStubConnection
-// to execute the command and proxy its I/O.
-//
-// TODO(phase2): The full implementation needs to connect the stub output back
-// to the original process's terminal/PTY. For now, the server-side command
-// execution works but the output goes to the server's log rather than to the
-// caller. The launchStub method is a placeholder for the process-spawning part.
+// This creates a Unix socketpair: one end is passed to the agentsh-stub
+// subprocess as fd 3 (via AGENTSH_STUB_FD=3), and the other end is used by
+// ServeStubConnection to execute the command and proxy its I/O.
 func (h *ESExecHandler) spawnStubServer(executable string, args []string, pid int32, parentPID int32, sessionID string, execCtx xpc.ExecContext) {
 	if h.stubBinary == "" {
 		slog.Error("es_exec: stub binary path not configured, cannot redirect exec",
@@ -135,7 +158,15 @@ func (h *ESExecHandler) spawnStubServer(executable string, args []string, pid in
 		return
 	}
 
-	srvConn, stubConn := net.Pipe()
+	stubFile, srvConn, err := createSocketPair()
+	if err != nil {
+		slog.Error("es_exec: failed to create socketpair for stub",
+			"cmd", executable,
+			"pid", pid,
+			"error", err,
+		)
+		return
+	}
 
 	// Use a timeout context to prevent indefinite hangs if the stub never
 	// sends MsgReady or the connection stalls.
@@ -146,8 +177,9 @@ func (h *ESExecHandler) spawnStubServer(executable string, args []string, pid in
 		defer cancel()
 		defer srvConn.Close()
 		sErr := stub.ServeStubConnection(ctx, srvConn, stub.ServeConfig{
-			Command: executable,
-			Args:    args,
+			Command:    executable,
+			Args:       args,
+			WorkingDir: execCtx.CWDPath,
 		})
 		if sErr != nil {
 			slog.Error("es_exec: stub serve error",
@@ -158,24 +190,22 @@ func (h *ESExecHandler) spawnStubServer(executable string, args []string, pid in
 		}
 	}()
 
-	// Launch agentsh-stub with the connection.
-	h.launchStub(stubConn, executable, pid)
+	// Launch agentsh-stub with the socketpair fd.
+	h.launchStub(stubFile, executable, pid, execCtx)
 }
 
 // launchStub spawns the agentsh-stub binary connected to the stub server.
 //
-// TODO(phase2): This is a placeholder. The full implementation needs to:
-//  1. Create a Unix socketpair (net.Pipe is in-process only, not passable to a subprocess)
-//  2. Pass the FD to the stub binary via AGENTSH_STUB_FD env var
-//  3. Connect the stub's stdout/stderr to the original process's terminal
+// The stubFile is passed as fd 3 to the subprocess via ExtraFiles, and the
+// AGENTSH_STUB_FD=3 env var tells the stub which fd to use.
 //
 // On macOS this is fundamentally different from Linux:
 //   - Linux: stub is injected INTO the trapped process via SECCOMP_ADDFD
 //   - macOS: original exec is denied (EPERM), stub is spawned as a new process
 //
-// For now, we log the intent and close the connection.
-func (h *ESExecHandler) launchStub(conn net.Conn, originalCmd string, originalPID int32) {
-	defer conn.Close()
+// TODO(phase3): implement real subprocess spawning with TTY routing.
+func (h *ESExecHandler) launchStub(stubFile *os.File, originalCmd string, originalPID int32, execCtx xpc.ExecContext) {
+	defer stubFile.Close()
 
 	if h.stubBinary == "" {
 		slog.Error("es_exec: stub binary path not configured")
