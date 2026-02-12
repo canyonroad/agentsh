@@ -410,7 +410,6 @@ type SandboxSeccompSyscallConfig struct {
 type SandboxSeccompFileMonitorConfig struct {
 	Enabled            bool `yaml:"enabled"`
 	EnforceWithoutFUSE bool `yaml:"enforce_without_fuse"`
-	AuditUnderFUSE     bool `yaml:"audit_under_fuse"`
 }
 
 // SandboxXPCConfig configures macOS XPC/Mach IPC control.
