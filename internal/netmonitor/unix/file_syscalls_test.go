@@ -3,7 +3,10 @@
 package unix
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
@@ -276,4 +279,75 @@ func TestFileSyscallName(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// pathToPtr creates a null-terminated byte buffer and returns its address as uint64.
+// The returned byte slice must be kept alive for the duration of the test.
+func pathToPtr(s string) (uint64, []byte) {
+	buf := append([]byte(s), 0)
+	return uint64(uintptr(unsafe.Pointer(&buf[0]))), buf
+}
+
+func TestResolvePathAt_Absolute(t *testing.T) {
+	pid := os.Getpid()
+	ptr, buf := pathToPtr("/usr/bin/ls")
+	_ = buf // keep alive
+
+	result, err := resolvePathAt(pid, -100, ptr)
+	assert.NoError(t, err)
+	assert.Equal(t, "/usr/bin/ls", result)
+}
+
+func TestResolvePathAt_AbsoluteClean(t *testing.T) {
+	pid := os.Getpid()
+	ptr, buf := pathToPtr("/usr/bin/../lib/test")
+	_ = buf
+
+	result, err := resolvePathAt(pid, -100, ptr)
+	assert.NoError(t, err)
+	assert.Equal(t, "/usr/lib/test", result)
+}
+
+func TestResolvePathAt_RelativeATFDCWD(t *testing.T) {
+	pid := os.Getpid()
+	ptr, buf := pathToPtr("somefile.txt")
+	_ = buf
+
+	cwd, err := os.Getwd()
+	assert.NoError(t, err)
+
+	result, err := resolvePathAt(pid, -100, ptr) // AT_FDCWD = -100
+	assert.NoError(t, err)
+	assert.Equal(t, filepath.Join(cwd, "somefile.txt"), result)
+}
+
+func TestResolvePathAt_RelativeToDirfd(t *testing.T) {
+	pid := os.Getpid()
+
+	// Open a directory to get a real dirfd
+	dir, err := os.Open("/tmp")
+	assert.NoError(t, err)
+	defer dir.Close()
+
+	ptr, buf := pathToPtr("testfile.txt")
+	_ = buf
+
+	result, err := resolvePathAt(pid, int32(dir.Fd()), ptr)
+	assert.NoError(t, err)
+	assert.Equal(t, "/tmp/testfile.txt", result)
+}
+
+func TestResolvePathAt_InvalidPid(t *testing.T) {
+	ptr, buf := pathToPtr("/some/path")
+	_ = buf
+
+	// Use a PID that certainly doesn't exist
+	_, err := resolvePathAt(999999999, -100, ptr)
+	assert.Error(t, err)
+}
+
+func TestResolvePathAt_NullPtr(t *testing.T) {
+	pid := os.Getpid()
+	_, err := resolvePathAt(pid, -100, 0)
+	assert.Error(t, err)
 }
