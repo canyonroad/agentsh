@@ -155,6 +155,10 @@ func applyLandlock(cfg *WrapperConfig) error {
 		builder.SetWorkspace(cfg.Workspace)
 	}
 
+	// Allow network by default — agentsh proxy handles network policy.
+	// Without this, Landlock ABI v4+ blocks ALL TCP connections.
+	builder.SetNetworkAccess(cfg.AllowNetwork, cfg.AllowBind)
+
 	for _, p := range cfg.AllowExecute {
 		_ = builder.AddExecutePath(p)
 	}

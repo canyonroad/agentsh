@@ -43,6 +43,8 @@ type seccompWrapperConfig struct {
 	AllowRead       []string `json:"allow_read,omitempty"`
 	AllowWrite      []string `json:"allow_write,omitempty"`
 	DenyPaths       []string `json:"deny_paths,omitempty"`
+	AllowNetwork    bool     `json:"allow_network,omitempty"`
+	AllowBind       bool     `json:"allow_bind,omitempty"`
 }
 
 // macSandboxWrapperConfig is passed to agentsh-macwrap via
@@ -160,6 +162,11 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 			seccompCfg.AllowRead = append(seccompCfg.AllowRead, a.cfg.Landlock.AllowRead...)
 			seccompCfg.AllowWrite = append(seccompCfg.AllowWrite, a.cfg.Landlock.AllowWrite...)
 			seccompCfg.DenyPaths = append(seccompCfg.DenyPaths, a.cfg.Landlock.DenyPaths...)
+
+			// Allow all network by default — agentsh proxy handles network policy.
+			// Without this, Landlock ABI v4+ blocks ALL TCP connections.
+			seccompCfg.AllowNetwork = true
+			seccompCfg.AllowBind = true
 
 			slog.Info("landlock config prepared for wrapper",
 				"abi", llResult.ABI,

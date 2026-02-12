@@ -23,6 +23,8 @@ type WrapperConfig struct {
 	AllowRead       []string `json:"allow_read,omitempty"`
 	AllowWrite      []string `json:"allow_write,omitempty"`
 	DenyPaths       []string `json:"deny_paths,omitempty"`
+	AllowNetwork    bool     `json:"allow_network,omitempty"`
+	AllowBind       bool     `json:"allow_bind,omitempty"`
 }
 
 // loadConfig reads the wrapper config from environment.

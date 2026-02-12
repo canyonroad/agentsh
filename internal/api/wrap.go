@@ -109,6 +109,10 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			seccompCfg.AllowRead = append(seccompCfg.AllowRead, a.cfg.Landlock.AllowRead...)
 			seccompCfg.AllowWrite = append(seccompCfg.AllowWrite, a.cfg.Landlock.AllowWrite...)
 			seccompCfg.DenyPaths = append(seccompCfg.DenyPaths, a.cfg.Landlock.DenyPaths...)
+
+			// Allow all network by default — agentsh proxy handles network policy.
+			seccompCfg.AllowNetwork = true
+			seccompCfg.AllowBind = true
 		}
 	}
 
