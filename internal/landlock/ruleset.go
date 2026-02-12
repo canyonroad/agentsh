@@ -214,12 +214,18 @@ func (b *RulesetBuilder) Build() (int, error) {
 		}
 	}
 
-	// Add write paths
+	// Add write paths (includes read access — writable paths must also be readable,
+	// e.g., to cat a file you just created, or for tools that read-then-write).
 	writeAccess := uint64(LANDLOCK_ACCESS_FS_WRITE_FILE |
+		LANDLOCK_ACCESS_FS_READ_FILE |
+		LANDLOCK_ACCESS_FS_READ_DIR |
 		LANDLOCK_ACCESS_FS_REMOVE_FILE |
 		LANDLOCK_ACCESS_FS_REMOVE_DIR |
 		LANDLOCK_ACCESS_FS_MAKE_REG |
 		LANDLOCK_ACCESS_FS_MAKE_DIR)
+	if b.abi >= 3 {
+		writeAccess |= LANDLOCK_ACCESS_FS_TRUNCATE
+	}
 	for _, path := range b.writePaths {
 		if b.isDenied(path) {
 			continue
