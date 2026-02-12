@@ -197,7 +197,7 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 			}
 		}
 		slog.Debug("starting ServeNotifyWithExecve", "session_id", sessID, "has_execve_handler", h != nil, "has_policy", pol != nil)
-		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h)
+		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h, nil)
 		slog.Debug("ServeNotifyWithExecve returned", "session_id", sessID)
 	}()
 }

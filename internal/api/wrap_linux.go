@@ -108,7 +108,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 			defer cleanupSymlink()
 		}
 		slog.Info("wrap: starting notify handler", "session_id", sessionID, "has_execve", execveHandler != nil)
-		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessionID, a.policy, emitter, execveHandler)
+		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessionID, a.policy, emitter, execveHandler, nil)
 		slog.Info("wrap: notify handler returned", "session_id", sessionID)
 	}()
 }
