@@ -115,7 +115,7 @@ func (a *approvalRequesterAdapter) RequestExecApproval(ctx context.Context, req 
 // starts the ServeNotify handler in a goroutine. It returns immediately.
 // The handler runs until ctx is cancelled or the fd is closed.
 // If execveHandler is non-nil, uses ServeNotifyWithExecve for execve interception.
-func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string, pol *policy.Engine, store eventStore, broker eventBroker, execveHandler any) {
+func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string, pol *policy.Engine, store eventStore, broker eventBroker, execveHandler any, fileMonitorCfg config.SandboxSeccompFileMonitorConfig) {
 	if parentSock == nil {
 		return
 	}
@@ -162,6 +162,9 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 
 		emitter := &notifyEmitterAdapter{store: store, broker: broker}
 
+		// Create file handler if configured
+		fileHandler := createFileHandler(fileMonitorCfg, pol, emitter)
+
 		// Type-assert and set emitter on execve handler if configured
 		var h *unixmon.ExecveHandler
 		if execveHandler != nil {
@@ -196,8 +199,8 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 				}
 			}
 		}
-		slog.Debug("starting ServeNotifyWithExecve", "session_id", sessID, "has_execve_handler", h != nil, "has_policy", pol != nil)
-		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h, nil)
+		slog.Debug("starting ServeNotifyWithExecve", "session_id", sessID, "has_execve_handler", h != nil, "has_file_handler", fileHandler != nil, "has_policy", pol != nil)
+		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h, fileHandler)
 		slog.Debug("ServeNotifyWithExecve returned", "session_id", sessID)
 	}()
 }

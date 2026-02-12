@@ -102,13 +102,16 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 		}
 	}
 
+	// Create file handler if configured
+	fileHandler := createFileHandler(a.cfg.Sandbox.Seccomp.FileMonitor, a.policy, emitter)
+
 	go func() {
 		defer notifyFD.Close()
 		if cleanupSymlink != nil {
 			defer cleanupSymlink()
 		}
-		slog.Info("wrap: starting notify handler", "session_id", sessionID, "has_execve", execveHandler != nil)
-		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessionID, a.policy, emitter, execveHandler, nil)
+		slog.Info("wrap: starting notify handler", "session_id", sessionID, "has_execve", execveHandler != nil, "has_file_handler", fileHandler != nil)
+		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessionID, a.policy, emitter, execveHandler, fileHandler)
 		slog.Info("wrap: notify handler returned", "session_id", sessionID)
 	}()
 }

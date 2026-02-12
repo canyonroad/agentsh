@@ -138,6 +138,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
 		SignalFilterEnabled: signalFilterEnabled, // Only true if signal socket succeeded
 		ExecveEnabled:       execveEnabled,
+		FileMonitorEnabled:  a.cfg.Sandbox.Seccomp.FileMonitor.Enabled,
 	}
 
 	// Add Landlock config if enabled
@@ -194,6 +195,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		notifyStore:      a.store,
 		notifyBroker:     a.broker,
 		origCommand:      origCommand, // Store original command for signal registry
+		fileMonitorCfg:   a.cfg.Sandbox.Seccomp.FileMonitor,
 	}
 
 	// Create execve handler if enabled (Linux-specific, will be nil on other platforms)
