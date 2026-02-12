@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -43,9 +44,8 @@ func (fs *Filesystem) checkAvailable() bool {
 
 // canMountFUSE checks if FUSE can actually be mounted by verifying:
 // 1. /dev/fuse can be opened with O_RDWR
-// 2. The process has CAP_SYS_ADMIN (required for the mount syscall)
-// This avoids false positives in environments like Firecracker where
-// /dev/fuse exists but mount is blocked by seccomp.
+// 2. fusermount suid binary is available (preferred), OR
+// 3. The process has CAP_SYS_ADMIN and mount() is not blocked by seccomp (fallback)
 func canMountFUSE() bool {
 	// Check that /dev/fuse can be opened (not just that it exists)
 	fd, err := unix.Open("/dev/fuse", unix.O_RDWR, 0)
@@ -54,6 +54,30 @@ func canMountFUSE() bool {
 	}
 	unix.Close(fd)
 
+	// Preferred path: check if fusermount is available.
+	// Since agentsh uses go-fuse without DirectMount, it will use the fusermount
+	// suid binary which handles mount() in its own privileged context. This works
+	// even when the calling process lacks CAP_SYS_ADMIN or seccomp blocks mount().
+	if hasFusermount() {
+		return true
+	}
+
+	// Fallback: check for direct mount capability (CAP_SYS_ADMIN + mount probe).
+	return checkDirectMount()
+}
+
+// hasFusermount checks if the fusermount suid binary is available in PATH.
+func hasFusermount() bool {
+	for _, name := range []string{"fusermount3", "fusermount"} {
+		if _, err := exec.LookPath(name); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// checkDirectMount checks if direct mount() is possible (CAP_SYS_ADMIN + unblocked syscall).
+func checkDirectMount() bool {
 	// Check for CAP_SYS_ADMIN in the effective capability set.
 	// The mount() syscall requires this capability.
 	hdr := &unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
@@ -67,9 +91,6 @@ func canMountFUSE() bool {
 	}
 
 	// Probe mount() syscall to detect seccomp blocking.
-	// Environments like Firecracker have CAP_SYS_ADMIN and /dev/fuse but
-	// seccomp blocks mount(). Since we verified CAP_SYS_ADMIN above,
-	// EPERM here can only mean seccomp is blocking it.
 	return probeMountSyscall()
 }
 

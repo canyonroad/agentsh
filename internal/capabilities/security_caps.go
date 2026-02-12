@@ -3,6 +3,7 @@
 package capabilities
 
 import (
+	"os/exec"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -80,7 +81,10 @@ func checkSeccompBasic() bool {
 }
 
 // checkFUSE checks if FUSE is usable for filesystem interception.
-// Verifies both /dev/fuse access and CAP_SYS_ADMIN capability.
+// It supports two mount paths:
+//   - fusermount (suid helper): works without CAP_SYS_ADMIN, used by go-fuse by default.
+//     This is the path used in Cloudflare Containers and similar environments.
+//   - direct mount (syscall.Mount): requires CAP_SYS_ADMIN and unblocked mount() syscall.
 func checkFUSE() bool {
 	// Check that /dev/fuse can be opened (not just that it exists)
 	fd, err := unix.Open("/dev/fuse", unix.O_RDWR, 0)
@@ -89,6 +93,31 @@ func checkFUSE() bool {
 	}
 	unix.Close(fd)
 
+	// Preferred path: check if fusermount is available.
+	// Since agentsh uses go-fuse without DirectMount, it will use the fusermount
+	// suid binary which handles mount() in its own privileged context. This works
+	// even when the calling process lacks CAP_SYS_ADMIN or seccomp blocks mount().
+	if hasFusermount() {
+		return true
+	}
+
+	// Fallback: check for direct mount capability (CAP_SYS_ADMIN + mount probe).
+	// This path is only reached if fusermount is not installed.
+	return checkDirectMount()
+}
+
+// hasFusermount checks if the fusermount suid binary is available in PATH.
+func hasFusermount() bool {
+	for _, name := range []string{"fusermount3", "fusermount"} {
+		if _, err := exec.LookPath(name); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// checkDirectMount checks if direct mount() is possible (CAP_SYS_ADMIN + unblocked syscall).
+func checkDirectMount() bool {
 	// Check for CAP_SYS_ADMIN in the effective capability set
 	hdr := &unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
 	data := &unix.CapUserData{}
