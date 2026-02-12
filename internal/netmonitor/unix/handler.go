@@ -131,7 +131,7 @@ func emitEvent(emit Emitter, session string, dec policy.Decision, path string, a
 // ServeNotifyWithExecve runs the seccomp notify loop with execve interception support.
 // It routes execve/execveat syscalls to the execveHandler and unix socket syscalls to the policy engine.
 // It stops when the fd is closed or ctx is done.
-func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol *policy.Engine, emit Emitter, execveHandler *ExecveHandler) {
+func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol *policy.Engine, emit Emitter, execveHandler *ExecveHandler, fileHandler *FileHandler) {
 	if fd == nil || emit == nil {
 		slog.Debug("ServeNotifyWithExecve: nil fd or emit", "fd_nil", fd == nil, "emit_nil", emit == nil)
 		return
@@ -164,6 +164,13 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		if IsExecveSyscall(syscallNr) && execveHandler != nil {
 			slog.Debug("ServeNotifyWithExecve: routing to execve handler", "session_id", sessID, "pid", req.Pid)
 			handleExecveNotification(ctx, scmpFD, req, execveHandler)
+			continue
+		}
+
+		// Route file syscalls to file handler
+		if isFileSyscall(syscallNr) && fileHandler != nil {
+			slog.Debug("ServeNotifyWithExecve: routing to file handler", "session_id", sessID, "pid", req.Pid, "syscall", syscallNr)
+			handleFileNotification(ctx, scmpFD, req, fileHandler, sessID)
 			continue
 		}
 
@@ -313,6 +320,82 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 		_ = seccomp.NotifRespond(fd, &resp)
 		return
 	}
+}
+
+// handleFileNotification processes a file syscall notification.
+// It reads the path from the tracee process, builds a FileRequest,
+// and calls the file handler to make a decision.
+func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *FileHandler, sessID string) {
+	args := SyscallArgs{
+		Nr:   int32(req.Data.Syscall),
+		Arg0: req.Data.Args[0],
+		Arg1: req.Data.Args[1],
+		Arg2: req.Data.Args[2],
+		Arg3: req.Data.Args[3],
+		Arg4: req.Data.Args[4],
+		Arg5: req.Data.Args[5],
+	}
+
+	pid := int(req.Pid)
+	fileArgs := extractFileArgs(args)
+
+	// For openat2, resolve actual flags from the open_how struct in tracee memory.
+	if args.Nr == unix.SYS_OPENAT2 && fileArgs.HowPtr != 0 {
+		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
+		if err != nil {
+			slog.Debug("file handler: failed to read open_how, allowing", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		fileArgs.Flags = uint32(howFlags)
+		fileArgs.Mode = uint32(howMode)
+	}
+
+	// Resolve primary path
+	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
+	if err != nil {
+		slog.Debug("file handler: failed to resolve path, allowing", "pid", pid, "error", err)
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+		_ = seccomp.NotifRespond(fd, &resp)
+		return
+	}
+
+	// Resolve second path for rename/link
+	var path2 string
+	if fileArgs.HasSecondPath {
+		p2, err := resolvePathAt(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+		if err != nil {
+			slog.Debug("file handler: failed to resolve second path, allowing", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		path2 = p2
+	}
+
+	operation := syscallToOperation(args.Nr, fileArgs.Flags)
+
+	frequest := FileRequest{
+		PID:       pid,
+		Syscall:   args.Nr,
+		Path:      path,
+		Path2:     path2,
+		Operation: operation,
+		Flags:     fileArgs.Flags,
+		Mode:      fileArgs.Mode,
+		SessionID: sessID,
+	}
+
+	result := h.Handle(frequest)
+
+	resp := seccomp.ScmpNotifResp{ID: req.ID}
+	if result.Action == ActionDeny {
+		resp.Error = -result.Errno
+	} else {
+		resp.Flags = seccomp.NotifRespFlagContinue
+	}
+	_ = seccomp.NotifRespond(fd, &resp)
 }
 
 // getParentPID reads the parent PID from /proc/<pid>/stat.

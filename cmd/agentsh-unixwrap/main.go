@@ -50,9 +50,10 @@ func main() {
 
 	// Build filter config.
 	filterCfg := unixmon.FilterConfig{
-		UnixSocketEnabled: cfg.UnixSocketEnabled,
-		ExecveEnabled:     cfg.ExecveEnabled,
-		BlockedSyscalls:   blockedNrs,
+		UnixSocketEnabled:  cfg.UnixSocketEnabled,
+		ExecveEnabled:      cfg.ExecveEnabled,
+		FileMonitorEnabled: cfg.FileMonitorEnabled,
+		BlockedSyscalls:    blockedNrs,
 	}
 
 	// Install seccomp filter.

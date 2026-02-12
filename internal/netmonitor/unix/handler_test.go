@@ -30,3 +30,12 @@ func TestGetParentPID(t *testing.T) {
 	ppid = getParentPID(999999999)
 	assert.Equal(t, 0, ppid, "parent PID should be 0 for non-existent PID")
 }
+
+func TestServeNotify_RoutesFileSyscalls(t *testing.T) {
+	assert.True(t, isFileSyscall(unix.SYS_OPENAT))
+	assert.True(t, isFileSyscall(unix.SYS_UNLINKAT))
+	assert.True(t, isFileSyscall(unix.SYS_MKDIRAT))
+	assert.True(t, isFileSyscall(unix.SYS_RENAMEAT2))
+	assert.False(t, isFileSyscall(unix.SYS_EXECVE))
+	assert.False(t, isFileSyscall(unix.SYS_CONNECT))
+}

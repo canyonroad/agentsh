@@ -173,6 +173,7 @@ func InstallOrWarn() (*Filter, error) {
 type FilterConfig struct {
 	UnixSocketEnabled bool
 	ExecveEnabled     bool
+	FileMonitorEnabled bool
 	BlockedSyscalls   []int // syscall numbers to block with KILL
 }
 
@@ -227,6 +228,27 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 		}
 	}
 
+	// File I/O monitoring via user-notify
+	if cfg.FileMonitorEnabled {
+		trap := seccomp.ActNotify
+		fileRules := []seccomp.ScmpSyscall{
+			seccomp.ScmpSyscall(unix.SYS_OPENAT),
+			seccomp.ScmpSyscall(unix.SYS_OPENAT2),
+			seccomp.ScmpSyscall(unix.SYS_UNLINKAT),
+			seccomp.ScmpSyscall(unix.SYS_MKDIRAT),
+			seccomp.ScmpSyscall(unix.SYS_RENAMEAT2),
+			seccomp.ScmpSyscall(unix.SYS_LINKAT),
+			seccomp.ScmpSyscall(unix.SYS_SYMLINKAT),
+			seccomp.ScmpSyscall(unix.SYS_FCHMODAT),
+			seccomp.ScmpSyscall(unix.SYS_FCHOWNAT),
+		}
+		for _, sc := range fileRules {
+			if err := filt.AddRule(sc, trap); err != nil {
+				return nil, fmt.Errorf("add file monitor rule %v: %w", sc, err)
+			}
+		}
+	}
+
 	// Blocked syscalls via kill
 	for _, nr := range cfg.BlockedSyscalls {
 		sc := seccomp.ScmpSyscall(nr)
@@ -241,7 +263,7 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	fd, err := filt.GetNotifFd()
 	if err != nil {
 		// If no notify rules, fd will be -1, which is fine
-		if !cfg.UnixSocketEnabled && !cfg.ExecveEnabled {
+		if !cfg.UnixSocketEnabled && !cfg.ExecveEnabled && !cfg.FileMonitorEnabled {
 			return &Filter{fd: -1}, nil
 		}
 		return nil, err

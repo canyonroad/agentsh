@@ -33,6 +33,7 @@ type seccompWrapperConfig struct {
 	UnixSocketEnabled   bool     `json:"unix_socket_enabled"`
 	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
 	ExecveEnabled       bool     `json:"execve_enabled"`
+	FileMonitorEnabled  bool     `json:"file_monitor_enabled"`
 	BlockedSyscalls     []string `json:"blocked_syscalls"`
 
 	// Landlock filesystem restrictions
@@ -139,6 +140,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
 		SignalFilterEnabled: signalFilterEnabled, // Only true if signal socket succeeded
 		ExecveEnabled:       execveEnabled,
+		FileMonitorEnabled:  a.cfg.Sandbox.Seccomp.FileMonitor.Enabled,
 	}
 
 	// Add Landlock config if enabled
@@ -200,6 +202,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		notifyStore:      a.store,
 		notifyBroker:     a.broker,
 		origCommand:      origCommand, // Store original command for signal registry
+		fileMonitorCfg:   a.cfg.Sandbox.Seccomp.FileMonitor,
 	}
 
 	// Create execve handler if enabled (Linux-specific, will be nil on other platforms)
@@ -306,12 +309,20 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					continue
 				}
 
+				// Register in MountRegistry so seccomp FileHandler
+				// knows this path is FUSE-managed (audit-only).
+				registerFUSEMount(s.ID, spec.Path)
+
+				// Capture for closure
+				sessionID := s.ID
+				sourcePath := spec.Path
 				mounts = append(mounts, session.ResolvedMount{
 					Path:         spec.Path,
 					Policy:       spec.Policy,
 					MountPoint:   mountPoint,
 					PolicyEngine: policyEngine,
 					Unmount: func() error {
+						deregisterFUSEMount(sessionID, sourcePath)
 						close(eventChan)
 						return m.Close()
 					},
@@ -629,8 +640,15 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 				a.broker.Publish(fail)
 			} else {
 				s.SetWorkspaceMount(mountPoint)
-				// Wrap unmount to also close the event channel
+				// Register the source path in the MountRegistry so the
+				// seccomp FileHandler knows this path is FUSE-managed.
+				registerFUSEMount(s.ID, s.Workspace)
+				// Wrap unmount to also close the event channel and
+				// deregister from MountRegistry.
+				sessionID := s.ID
+				workspace := s.Workspace
 				s.SetWorkspaceUnmount(func() error {
+					deregisterFUSEMount(sessionID, workspace)
 					close(eventChan)
 					return m.Close()
 				})
