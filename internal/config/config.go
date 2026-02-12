@@ -388,7 +388,8 @@ type SandboxSeccompConfig struct {
 	Mode       string                      `yaml:"mode"` // enforce, audit, disabled
 	UnixSocket SandboxSeccompUnixConfig    `yaml:"unix_socket"`
 	Syscalls   SandboxSeccompSyscallConfig `yaml:"syscalls"`
-	Execve     ExecveConfig                `yaml:"execve"`
+	Execve      ExecveConfig                    `yaml:"execve"`
+	FileMonitor SandboxSeccompFileMonitorConfig `yaml:"file_monitor"`
 }
 
 // SandboxSeccompUnixConfig configures unix socket monitoring via seccomp.
@@ -403,6 +404,13 @@ type SandboxSeccompSyscallConfig struct {
 	Block         []string `yaml:"block"`
 	Allow         []string `yaml:"allow"`
 	OnBlock       string   `yaml:"on_block"` // kill, log_and_kill
+}
+
+// SandboxSeccompFileMonitorConfig configures file I/O interception via seccomp.
+type SandboxSeccompFileMonitorConfig struct {
+	Enabled            bool `yaml:"enabled"`
+	EnforceWithoutFUSE bool `yaml:"enforce_without_fuse"`
+	AuditUnderFUSE     bool `yaml:"audit_under_fuse"`
 }
 
 // SandboxXPCConfig configures macOS XPC/Mach IPC control.

@@ -13,6 +13,7 @@ type WrapperConfig struct {
 	UnixSocketEnabled   bool     `json:"unix_socket_enabled"`
 	ExecveEnabled       bool     `json:"execve_enabled"`
 	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
+	FileMonitorEnabled  bool     `json:"file_monitor_enabled"`
 	BlockedSyscalls     []string `json:"blocked_syscalls"`
 
 	// Landlock filesystem restrictions

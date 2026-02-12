@@ -23,6 +23,7 @@ type Event struct {
 	Type      string      `json:"type"`
 	SessionID string      `json:"session_id"`
 	CommandID string      `json:"command_id,omitempty"`
+	Source    string      `json:"source,omitempty"`
 	PID       int         `json:"pid,omitempty"`
 	Policy    *PolicyInfo `json:"policy,omitempty"`
 
