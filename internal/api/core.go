@@ -302,12 +302,20 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					continue
 				}
 
+				// Register in MountRegistry so seccomp FileHandler
+				// knows this path is FUSE-managed (audit-only).
+				registerFUSEMount(s.ID, spec.Path)
+
+				// Capture for closure
+				sessionID := s.ID
+				sourcePath := spec.Path
 				mounts = append(mounts, session.ResolvedMount{
 					Path:         spec.Path,
 					Policy:       spec.Policy,
 					MountPoint:   mountPoint,
 					PolicyEngine: policyEngine,
 					Unmount: func() error {
+						deregisterFUSEMount(sessionID, sourcePath)
 						close(eventChan)
 						return m.Close()
 					},
@@ -625,8 +633,15 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 				a.broker.Publish(fail)
 			} else {
 				s.SetWorkspaceMount(mountPoint)
-				// Wrap unmount to also close the event channel
+				// Register the source path in the MountRegistry so the
+				// seccomp FileHandler knows this path is FUSE-managed.
+				registerFUSEMount(s.ID, s.Workspace)
+				// Wrap unmount to also close the event channel and
+				// deregister from MountRegistry.
+				sessionID := s.ID
+				workspace := s.Workspace
 				s.SetWorkspaceUnmount(func() error {
+					deregisterFUSEMount(sessionID, workspace)
 					close(eventChan)
 					return m.Close()
 				})
