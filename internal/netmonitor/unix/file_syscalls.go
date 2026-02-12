@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -34,6 +35,9 @@ type FileArgs struct {
 	HasSecondPath bool
 	Dirfd2        int32
 	PathPtr2      uint64
+
+	// For openat2: pointer to open_how struct in tracee memory.
+	HowPtr uint64
 }
 
 // extractFileArgs extracts file arguments based on syscall number.
@@ -49,11 +53,13 @@ func extractFileArgs(args SyscallArgs) FileArgs {
 		}
 
 	case unix.SYS_OPENAT2:
-		// openat2(dirfd, path, how, size) -- flags at Arg2 (how struct pointer)
+		// openat2(dirfd, path, how, size)
+		// Arg2 is a pointer to struct open_how in tracee memory.
+		// Actual flags/mode must be read at runtime via ProcessVMReadv.
 		return FileArgs{
 			Dirfd:   int32(args.Arg0),
 			PathPtr: args.Arg1,
-			Flags:   uint32(args.Arg2),
+			HowPtr:  args.Arg2,
 		}
 
 	case unix.SYS_UNLINKAT:
@@ -122,6 +128,29 @@ func extractFileArgs(args SyscallArgs) FileArgs {
 	default:
 		return FileArgs{}
 	}
+}
+
+// readOpenHow reads the open_how struct from tracee memory for openat2 syscalls.
+// struct open_how { __u64 flags; __u64 mode; __u64 resolve; }
+func readOpenHow(pid int, howPtr uint64) (flags uint64, mode uint64, err error) {
+	if howPtr == 0 {
+		return 0, 0, ErrNullPtr
+	}
+
+	// open_how is 24 bytes: flags(8) + mode(8) + resolve(8)
+	var buf [24]byte
+	liov := unix.Iovec{Base: &buf[0], Len: 24}
+	riov := unix.RemoteIovec{Base: uintptr(howPtr), Len: 24}
+
+	_, err = unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%w: open_how: %v", ErrReadMemory, err)
+	}
+
+	// Parse little-endian uint64s
+	flags = *(*uint64)(unsafe.Pointer(&buf[0]))
+	mode = *(*uint64)(unsafe.Pointer(&buf[8]))
+	return flags, mode, nil
 }
 
 // syscallToOperation maps a file syscall number and flags to a policy operation string.

@@ -112,20 +112,23 @@ func TestExtractFileArgs_Openat(t *testing.T) {
 }
 
 func TestExtractFileArgs_Openat2(t *testing.T) {
-	// openat2(dirfd, path, how, size) -- flags at Arg2 (how struct pointer)
+	// openat2(dirfd, path, how, size)
+	// Arg2 is a pointer to struct open_how in tracee memory.
 	args := SyscallArgs{
 		Nr:   unix.SYS_OPENAT2,
 		Arg0: fdcwdUint64(),    // dirfd
 		Arg1: 0x7fff2000, // path pointer
-		Arg2: 0x7fff3000, // how struct pointer (used as flags)
+		Arg2: 0x7fff3000, // how struct pointer
 		Arg3: 24,         // size
 	}
 
 	fa := extractFileArgs(args)
 	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
 	assert.Equal(t, uint64(0x7fff2000), fa.PathPtr)
-	// For openat2, Flags is the how pointer (Arg2) cast to uint32
-	assert.Equal(t, uint32(0x7fff3000), fa.Flags)
+	// For openat2, Flags should be 0 (resolved at runtime from open_how struct)
+	assert.Equal(t, uint32(0), fa.Flags)
+	// HowPtr should hold the pointer to the open_how struct
+	assert.Equal(t, uint64(0x7fff3000), fa.HowPtr)
 	assert.False(t, fa.HasSecondPath)
 }
 

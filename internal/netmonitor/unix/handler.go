@@ -339,6 +339,19 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 	pid := int(req.Pid)
 	fileArgs := extractFileArgs(args)
 
+	// For openat2, resolve actual flags from the open_how struct in tracee memory.
+	if args.Nr == unix.SYS_OPENAT2 && fileArgs.HowPtr != 0 {
+		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
+		if err != nil {
+			slog.Debug("file handler: failed to read open_how, allowing", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		fileArgs.Flags = uint32(howFlags)
+		fileArgs.Mode = uint32(howMode)
+	}
+
 	// Resolve primary path
 	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 	if err != nil {
