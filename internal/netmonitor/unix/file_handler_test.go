@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
 )
 
@@ -342,4 +343,95 @@ func TestFileHandler_NilPolicy(t *testing.T) {
 	if ev.Policy.Rule != "no_policy" {
 		t.Errorf("expected rule 'no_policy', got %q", ev.Policy.Rule)
 	}
+}
+
+func TestFileHandler_NilEmitter(t *testing.T) {
+	policy := &mockFilePolicy{
+		decisions: map[string]FilePolicyDecision{
+			"/some/path": {
+				Decision:          "allow",
+				EffectiveDecision: "allow",
+				Rule:              "allow_all",
+			},
+		},
+	}
+	registry := NewMountRegistry()
+	// nil emitter - should not panic
+	handler := NewFileHandler(policy, registry, nil, true)
+
+	req := FileRequest{
+		PID:       1234,
+		Syscall:   int32(unix.SYS_OPENAT),
+		Path:      "/some/path",
+		Operation: "open",
+		SessionID: "sess-1",
+	}
+
+	// Should not panic
+	result := handler.Handle(req)
+	assert.Equal(t, ActionContinue, result.Action)
+}
+
+func TestFileHandler_NilEmitterDeny(t *testing.T) {
+	policy := &mockFilePolicy{
+		decisions: map[string]FilePolicyDecision{}, // default deny
+	}
+	registry := NewMountRegistry()
+	handler := NewFileHandler(policy, registry, nil, true) // enforce=true, nil emitter
+
+	req := FileRequest{
+		PID:       1234,
+		Syscall:   int32(unix.SYS_OPENAT),
+		Path:      "/secret/path",
+		Operation: "open",
+		SessionID: "sess-1",
+	}
+
+	result := handler.Handle(req)
+	assert.Equal(t, ActionDeny, result.Action)
+	assert.Equal(t, int32(unix.EACCES), result.Errno)
+}
+
+func TestFileHandler_NilRegistry(t *testing.T) {
+	policy := &mockFilePolicy{
+		decisions: map[string]FilePolicyDecision{
+			"/home/user/file.txt": {
+				Decision:          "deny",
+				EffectiveDecision: "deny",
+				Rule:              "deny_all",
+			},
+		},
+	}
+	emitter := &mockFileEmitter{}
+	// nil registry - should not panic, paths won't match FUSE
+	handler := NewFileHandler(policy, nil, emitter, true)
+
+	req := FileRequest{
+		PID:       1234,
+		Syscall:   int32(unix.SYS_OPENAT),
+		Path:      "/home/user/file.txt",
+		Operation: "open",
+		SessionID: "sess-1",
+	}
+
+	result := handler.Handle(req)
+	// Should deny (not treated as FUSE path)
+	assert.Equal(t, ActionDeny, result.Action)
+	assert.Equal(t, int32(unix.EACCES), result.Errno)
+}
+
+func TestFileHandler_NilPolicyAndEmitter(t *testing.T) {
+	handler := NewFileHandler(nil, nil, nil, true)
+
+	req := FileRequest{
+		PID:       1234,
+		Syscall:   int32(unix.SYS_OPENAT),
+		Path:      "/any/path",
+		Operation: "open",
+		SessionID: "sess-1",
+	}
+
+	// Should not panic, should allow
+	result := handler.Handle(req)
+	assert.Equal(t, ActionContinue, result.Action)
 }
