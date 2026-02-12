@@ -281,12 +281,27 @@ func (b *RulesetBuilder) buildFSAccessMask() uint64 {
 	return access
 }
 
+// accessFile is the set of access rights valid for non-directory inodes.
+// The kernel returns EINVAL if directory-only rights are passed for a file.
+const accessFile = LANDLOCK_ACCESS_FS_EXECUTE |
+	LANDLOCK_ACCESS_FS_WRITE_FILE |
+	LANDLOCK_ACCESS_FS_READ_FILE |
+	LANDLOCK_ACCESS_FS_TRUNCATE
+
 func (b *RulesetBuilder) addPathRule(rulesetFd int, path string, access uint64) error {
 	fd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
 	defer unix.Close(fd)
+
+	// For non-directory inodes (files, devices, pipes), strip directory-only
+	// access rights. The kernel rejects rules with MAKE_REG, REMOVE_DIR, etc.
+	// on non-directory paths with EINVAL.
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err == nil && stat.Mode&unix.S_IFDIR == 0 {
+		access &= accessFile
+	}
 
 	pathBeneath := landlockPathBeneathAttr{
 		AllowedAccess: access,
