@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
+	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/landlock"
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
@@ -32,6 +34,15 @@ type seccompWrapperConfig struct {
 	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
 	ExecveEnabled       bool     `json:"execve_enabled"`
 	BlockedSyscalls     []string `json:"blocked_syscalls"`
+
+	// Landlock filesystem restrictions
+	LandlockEnabled bool     `json:"landlock_enabled,omitempty"`
+	LandlockABI     int      `json:"landlock_abi,omitempty"`
+	Workspace       string   `json:"workspace,omitempty"`
+	AllowExecute    []string `json:"allow_execute,omitempty"`
+	AllowRead       []string `json:"allow_read,omitempty"`
+	AllowWrite      []string `json:"allow_write,omitempty"`
+	DenyPaths       []string `json:"deny_paths,omitempty"`
 }
 
 // macSandboxWrapperConfig is passed to agentsh-macwrap via
@@ -126,6 +137,39 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
 		SignalFilterEnabled: signalFilterEnabled, // Only true if signal socket succeeded
 		ExecveEnabled:       execveEnabled,
+	}
+
+	// Add Landlock config if enabled
+	if a.cfg.Landlock.Enabled {
+		llResult := capabilities.DetectLandlock()
+		if llResult.Available {
+			workspace := s.WorkspaceMountPath()
+			seccompCfg.LandlockEnabled = true
+			seccompCfg.LandlockABI = llResult.ABI
+			seccompCfg.Workspace = workspace
+
+			// Derive paths from policy
+			if a.policy != nil {
+				seccompCfg.AllowExecute = landlock.DeriveExecutePathsFromPolicy(a.policy.Policy())
+				seccompCfg.AllowRead = landlock.DeriveReadPathsFromPolicy(a.policy.Policy())
+				seccompCfg.AllowWrite = landlock.DeriveWritePathsFromPolicy(a.policy.Policy())
+			}
+
+			// Add explicit config paths
+			seccompCfg.AllowExecute = append(seccompCfg.AllowExecute, a.cfg.Landlock.AllowExecute...)
+			seccompCfg.AllowRead = append(seccompCfg.AllowRead, a.cfg.Landlock.AllowRead...)
+			seccompCfg.AllowWrite = append(seccompCfg.AllowWrite, a.cfg.Landlock.AllowWrite...)
+			seccompCfg.DenyPaths = append(seccompCfg.DenyPaths, a.cfg.Landlock.DenyPaths...)
+
+			slog.Info("landlock config prepared for wrapper",
+				"abi", llResult.ABI,
+				"workspace", workspace,
+				"session_id", sessionID)
+		} else {
+			slog.Warn("landlock enabled but not available",
+				"error", llResult.Error,
+				"session_id", sessionID)
+		}
 	}
 	if cfgJSON, err := json.Marshal(seccompCfg); err == nil {
 		wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"] = string(cfgJSON)

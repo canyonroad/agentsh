@@ -366,6 +366,14 @@ func (e *Engine) NetworkRules() []NetworkRule {
 	return e.policy.NetworkRules
 }
 
+// Policy returns the underlying policy for read-only inspection (e.g., Landlock path derivation).
+func (e *Engine) Policy() *Policy {
+	if e == nil {
+		return nil
+	}
+	return e.policy
+}
+
 // SignalEngine returns the signal policy engine, or nil if no signal rules.
 func (e *Engine) SignalEngine() signalEngineType {
 	return e.signalEngine

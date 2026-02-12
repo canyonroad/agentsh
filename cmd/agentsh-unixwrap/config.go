@@ -14,6 +14,15 @@ type WrapperConfig struct {
 	ExecveEnabled       bool     `json:"execve_enabled"`
 	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
 	BlockedSyscalls     []string `json:"blocked_syscalls"`
+
+	// Landlock filesystem restrictions
+	LandlockEnabled bool     `json:"landlock_enabled,omitempty"`
+	LandlockABI     int      `json:"landlock_abi,omitempty"`
+	Workspace       string   `json:"workspace,omitempty"`
+	AllowExecute    []string `json:"allow_execute,omitempty"`
+	AllowRead       []string `json:"allow_read,omitempty"`
+	AllowWrite      []string `json:"allow_write,omitempty"`
+	DenyPaths       []string `json:"deny_paths,omitempty"`
 }
 
 // loadConfig reads the wrapper config from environment.

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/agentsh/agentsh/internal/landlock"
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
 	"github.com/agentsh/agentsh/internal/signal"
@@ -96,6 +97,14 @@ func main() {
 		_ = unix.Close(sigSockFD)
 	}
 
+	// Apply Landlock filesystem restrictions before exec.
+	// Landlock enforces kernel-level filesystem access control that works even for root.
+	if cfg.LandlockEnabled && cfg.LandlockABI > 0 {
+		if err := applyLandlock(cfg); err != nil {
+			log.Printf("landlock: %v (continuing without)", err)
+		}
+	}
+
 	// Exec the real command.
 	cmd := os.Args[2]
 	// syscall.Exec requires an absolute path — resolve via PATH lookup.
@@ -137,4 +146,38 @@ func sendFD(sock int, fd int) error {
 	rights := unix.UnixRights(fd)
 	// dummy payload
 	return unix.Sendmsg(sock, []byte{0}, rights, nil, 0)
+}
+
+func applyLandlock(cfg *WrapperConfig) error {
+	builder := landlock.NewRulesetBuilder(cfg.LandlockABI)
+
+	if cfg.Workspace != "" {
+		builder.SetWorkspace(cfg.Workspace)
+	}
+
+	for _, p := range cfg.AllowExecute {
+		_ = builder.AddExecutePath(p)
+	}
+	for _, p := range cfg.AllowRead {
+		_ = builder.AddReadPath(p)
+	}
+	for _, p := range cfg.AllowWrite {
+		_ = builder.AddWritePath(p)
+	}
+	for _, p := range cfg.DenyPaths {
+		builder.AddDenyPath(p)
+	}
+
+	rulesetFd, err := builder.Build()
+	if err != nil {
+		return fmt.Errorf("build ruleset: %w", err)
+	}
+	defer unix.Close(rulesetFd)
+
+	if err := landlock.Enforce(rulesetFd); err != nil {
+		return fmt.Errorf("enforce: %w", err)
+	}
+
+	log.Printf("landlock: restrictions applied (abi=%d, workspace=%s)", cfg.LandlockABI, cfg.Workspace)
+	return nil
 }
