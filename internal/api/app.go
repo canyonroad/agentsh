@@ -90,6 +90,11 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 	}
 }
 
+// SetPlatformForTest replaces the platform implementation. Test-only.
+func (a *App) SetPlatformForTest(p platform.Platform) {
+	a.platform = p
+}
+
 type ctxKey string
 
 const ctxKeyRole ctxKey = "role"
