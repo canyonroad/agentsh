@@ -27,6 +27,10 @@ func (fs *Filesystem) Available() bool {
 	return fuse.Available()
 }
 
+// Recheck re-probes FUSE availability. On macOS this is a no-op since
+// fuse.Available() always checks live state.
+func (fs *Filesystem) Recheck() {}
+
 // Implementation returns the FUSE implementation name.
 func (fs *Filesystem) Implementation() string {
 	return fuse.Implementation()

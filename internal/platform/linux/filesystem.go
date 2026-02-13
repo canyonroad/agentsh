@@ -139,6 +139,16 @@ func (fs *Filesystem) Available() bool {
 	return fs.available
 }
 
+// Recheck re-probes FUSE availability and implementation.
+// This is used for deferred FUSE mounting where /dev/fuse permissions
+// may change after initial startup (e.g., in E2B sandbox environments).
+func (fs *Filesystem) Recheck() {
+	fs.available = fs.checkAvailable()
+	if fs.available && fs.implementation == "" {
+		fs.implementation = fs.detectImplementation()
+	}
+}
+
 // Implementation returns the FUSE implementation name.
 func (fs *Filesystem) Implementation() string {
 	return fs.implementation

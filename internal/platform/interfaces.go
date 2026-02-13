@@ -39,6 +39,9 @@ type FilesystemInterceptor interface {
 	// Available returns whether filesystem interception is available
 	Available() bool
 
+	// Recheck re-probes availability (e.g., after /dev/fuse permissions change)
+	Recheck()
+
 	// Implementation returns the underlying technology (e.g., "fuse3", "fuse-t", "winfsp")
 	Implementation() string
 }

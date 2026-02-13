@@ -571,100 +571,14 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	a.broker.Publish(ev)
 
 	// Optional: mount FUSE loopback so we can monitor file operations.
-	if a.cfg.Sandbox.FUSE.Enabled && a.platform != nil {
+	if a.cfg.Sandbox.FUSE.Enabled && !a.cfg.Sandbox.FUSE.Deferred && a.platform != nil {
 		fs := a.platform.Filesystem()
 		if fs != nil && fs.Available() {
-			mountBase := a.cfg.Sandbox.FUSE.MountBaseDir
-			if mountBase == "" {
-				mountBase = a.cfg.Sessions.BaseDir
-			}
-			mountPoint := filepath.Join(mountBase, s.ID, "workspace-mnt")
-			hashLimit, _ := config.ParseByteSize(a.cfg.Sandbox.FUSE.Audit.HashSmallFilesUnder)
-
-			// Create event channel for filesystem events
-			eventChan := make(chan platform.IOEvent, 1000)
-
-			// Start goroutine to process events from the channel
-			go a.processIOEvents(ctx, eventChan)
-
-			// Build platform FSConfig
-			fsCfg := platform.FSConfig{
-				SourcePath: s.Workspace,
-				MountPoint: mountPoint,
-				SessionID:  s.ID,
-				CommandIDFunc: func() string {
-					return s.CurrentCommandID()
-				},
-				PolicyEngine: platform.NewPolicyAdapter(engine),
-				EventChannel: eventChan,
-			}
-
-			// Configure soft-delete/trash if enabled
-			if a.cfg.Sandbox.FUSE.Audit.Mode == "soft_delete" {
-				fsCfg.TrashConfig = &platform.TrashConfig{
-					Enabled:        true,
-					HashLimitBytes: hashLimit,
-				}
-				fsCfg.NotifySoftDelete = func(path, token string) {
-					ev := types.Event{
-						ID:        uuid.NewString(),
-						Timestamp: time.Now().UTC(),
-						Type:      "file_soft_deleted",
-						SessionID: s.ID,
-						CommandID: s.CurrentCommandID(),
-						Path:      path,
-						Fields: map[string]any{
-							"trash_token":  token,
-							"restore_hint": fmt.Sprintf("agentsh trash restore %s", token),
-						},
-					}
-					_ = a.store.AppendEvent(ctx, ev)
-					a.broker.Publish(ev)
-				}
-			}
-
-			m, err := fs.Mount(fsCfg)
-			if err != nil {
-				fail := types.Event{
-					ID:        uuid.NewString(),
-					Timestamp: time.Now().UTC(),
-					Type:      "fuse_mount_failed",
-					SessionID: s.ID,
-					Fields: map[string]any{
-						"mount_point":    mountPoint,
-						"error":          err.Error(),
-						"implementation": fs.Implementation(),
-					},
-				}
-				_ = a.store.AppendEvent(ctx, fail)
-				a.broker.Publish(fail)
-			} else {
-				s.SetWorkspaceMount(mountPoint)
-				// Register the source path in the MountRegistry so the
-				// seccomp FileHandler knows this path is FUSE-managed.
-				registerFUSEMount(s.ID, s.Workspace)
-				// Wrap unmount to also close the event channel and
-				// deregister from MountRegistry.
-				sessionID := s.ID
-				workspace := s.Workspace
-				s.SetWorkspaceUnmount(func() error {
-					deregisterFUSEMount(sessionID, workspace)
-					close(eventChan)
-					return m.Close()
-				})
-				okEv := types.Event{
-					ID:        uuid.NewString(),
-					Timestamp: time.Now().UTC(),
-					Type:      "fuse_mounted",
-					SessionID: s.ID,
-					Fields: map[string]any{
-						"mount_point":    mountPoint,
-						"implementation": fs.Implementation(),
-					},
-				}
-				_ = a.store.AppendEvent(ctx, okEv)
-				a.broker.Publish(okEv)
-			}
+			a.mountFUSEForSession(ctx, fuseMountParams{
+				session: s,
+				engine:  engine,
+				fs:      fs,
+			})
 		}
 	}
 
@@ -722,6 +636,11 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	unlock := s.LockExec()
 	defer unlock()
 	s.SetCurrentCommandID(cmdID)
+
+	// Deferred FUSE: mount on first exec if not yet mounted
+	if a.cfg.Sandbox.FUSE.Enabled && a.cfg.Sandbox.FUSE.Deferred {
+		a.ensureFUSEMount(ctx, s)
+	}
 
 	includeEvents := strings.ToLower(strings.TrimSpace(req.IncludeEvents))
 	if includeEvents == "" {
@@ -1001,6 +920,125 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	return resp, http.StatusOK, nil
 }
 
+// fuseMountParams holds parameters for mountFUSEForSession.
+type fuseMountParams struct {
+	session  *session.Session
+	engine   *policy.Engine
+	fs       platform.FilesystemInterceptor
+	deferred bool // adds "deferred": true to events
+}
+
+// mountFUSEForSession performs the FUSE mount for a session's workspace.
+// The caller is responsible for ensuring fs is non-nil and Available().
+// Returns true if the mount succeeded.
+func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
+	s := p.session
+	fs := p.fs
+
+	mountBase := a.cfg.Sandbox.FUSE.MountBaseDir
+	if mountBase == "" {
+		mountBase = a.cfg.Sessions.BaseDir
+	}
+	mountPoint := filepath.Join(mountBase, s.ID, "workspace-mnt")
+	hashLimit, _ := config.ParseByteSize(a.cfg.Sandbox.FUSE.Audit.HashSmallFilesUnder)
+
+	// Create event channel for filesystem events
+	eventChan := make(chan platform.IOEvent, 1000)
+
+	// Start goroutine to process events from the channel
+	go a.processIOEvents(ctx, eventChan)
+
+	// Build platform FSConfig
+	fsCfg := platform.FSConfig{
+		SourcePath: s.Workspace,
+		MountPoint: mountPoint,
+		SessionID:  s.ID,
+		CommandIDFunc: func() string {
+			return s.CurrentCommandID()
+		},
+		PolicyEngine: platform.NewPolicyAdapter(p.engine),
+		EventChannel: eventChan,
+	}
+
+	// Configure soft-delete/trash if enabled
+	if a.cfg.Sandbox.FUSE.Audit.Mode == "soft_delete" {
+		fsCfg.TrashConfig = &platform.TrashConfig{
+			Enabled:        true,
+			HashLimitBytes: hashLimit,
+		}
+		fsCfg.NotifySoftDelete = func(path, token string) {
+			ev := types.Event{
+				ID:        uuid.NewString(),
+				Timestamp: time.Now().UTC(),
+				Type:      "file_soft_deleted",
+				SessionID: s.ID,
+				CommandID: s.CurrentCommandID(),
+				Path:      path,
+				Fields: map[string]any{
+					"trash_token":  token,
+					"restore_hint": fmt.Sprintf("agentsh trash restore %s", token),
+				},
+			}
+			_ = a.store.AppendEvent(ctx, ev)
+			a.broker.Publish(ev)
+		}
+	}
+
+	m, err := fs.Mount(fsCfg)
+	if err != nil {
+		fields := map[string]any{
+			"mount_point":    mountPoint,
+			"error":          err.Error(),
+			"implementation": fs.Implementation(),
+		}
+		if p.deferred {
+			fields["deferred"] = true
+		}
+		fail := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now().UTC(),
+			Type:      "fuse_mount_failed",
+			SessionID: s.ID,
+			Fields:    fields,
+		}
+		_ = a.store.AppendEvent(ctx, fail)
+		a.broker.Publish(fail)
+		return false
+	}
+
+	s.SetWorkspaceMount(mountPoint)
+	// Register the source path in the MountRegistry so the
+	// seccomp FileHandler knows this path is FUSE-managed.
+	registerFUSEMount(s.ID, s.Workspace)
+	// Wrap unmount to also close the event channel and
+	// deregister from MountRegistry.
+	sessionID := s.ID
+	workspace := s.Workspace
+	s.SetWorkspaceUnmount(func() error {
+		deregisterFUSEMount(sessionID, workspace)
+		close(eventChan)
+		return m.Close()
+	})
+
+	fields := map[string]any{
+		"mount_point":    mountPoint,
+		"implementation": fs.Implementation(),
+	}
+	if p.deferred {
+		fields["deferred"] = true
+	}
+	okEv := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "fuse_mounted",
+		SessionID: s.ID,
+		Fields:    fields,
+	}
+	_ = a.store.AppendEvent(ctx, okEv)
+	a.broker.Publish(okEv)
+	return true
+}
+
 // processIOEvents reads events from the platform event channel and forwards
 // them to the event store and broker. It runs until the channel is closed.
 func (a *App) processIOEvents(ctx context.Context, eventChan <-chan platform.IOEvent) {
@@ -1013,6 +1051,88 @@ func (a *App) processIOEvents(ctx context.Context, eventChan <-chan platform.IOE
 		_ = a.store.AppendEvent(ctx, ev)
 		a.broker.Publish(ev)
 	}
+}
+
+// tryEnableFUSE runs the configured deferred enable command if present.
+// It checks the marker file first (if configured) and rechecks fs availability after.
+func (a *App) tryEnableFUSE(fs platform.FilesystemInterceptor) {
+	cmd := a.cfg.Sandbox.FUSE.DeferredEnableCommand
+	if len(cmd) == 0 {
+		return
+	}
+	// If a marker file is configured, only proceed when it exists.
+	if marker := a.cfg.Sandbox.FUSE.DeferredMarkerFile; marker != "" {
+		if _, err := os.Stat(marker); err != nil {
+			return
+		}
+	}
+	out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput()
+	if err != nil {
+		slog.Warn("ensureFUSEMount: deferred enable command failed", "cmd", cmd, "error", err, "output", string(out))
+	} else {
+		slog.Info("ensureFUSEMount: deferred enable command succeeded", "cmd", cmd)
+		fs.Recheck()
+	}
+}
+
+// ensureFUSEMount sets up the FUSE overlay for a session if not already mounted.
+// This is used for deferred FUSE mounting where FUSE becomes available after
+// session creation (e.g., in E2B sandbox environments where /dev/fuse permissions
+// change at runtime). The method is idempotent — it's a no-op if already mounted.
+func (a *App) ensureFUSEMount(ctx context.Context, s *session.Session) {
+	// Already have a real FUSE mount? (WorkspaceMount differs from Workspace when FUSE overlay is active)
+	if s.WorkspaceMount != "" && s.WorkspaceMount != s.Workspace {
+		return
+	}
+	if a.platform == nil {
+		slog.Warn("ensureFUSEMount: platform is nil")
+		return
+	}
+	fs := a.platform.Filesystem()
+	if fs == nil {
+		slog.Warn("ensureFUSEMount: filesystem is nil")
+		return
+	}
+	// Recheck availability (FUSE may have become usable after startup)
+	fs.Recheck()
+	if !fs.Available() {
+		// In deferred mode, /dev/fuse may be restricted from the snapshot.
+		// Run the configured enable command if present to make it accessible.
+		a.tryEnableFUSE(fs)
+		if !fs.Available() {
+			return
+		}
+	}
+	slog.Info("ensureFUSEMount: FUSE available, proceeding with mount", "session_id", s.ID)
+
+	// Load the session's policy engine for FUSE policy adapter.
+	// Must use NewEngineWithVariables to expand ${PROJECT_ROOT} etc.
+	var engine *policy.Engine
+	if a.cfg.Policies.Dir != "" {
+		policyPath, pErr := policy.ResolvePolicyPath(a.cfg.Policies.Dir, s.Policy)
+		if pErr == nil {
+			pol, lErr := policy.LoadFromFile(policyPath)
+			if lErr == nil {
+				policyVars := map[string]string{
+					"PROJECT_ROOT": s.Workspace,
+					"GIT_ROOT":     s.Workspace,
+					"HOME":         os.Getenv("HOME"),
+				}
+				enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
+				engine, _ = policy.NewEngineWithVariables(pol, enforceApprovals, policyVars)
+			}
+		}
+	}
+	if engine == nil {
+		engine = a.policy // fall back to global
+	}
+
+	a.mountFUSEForSession(ctx, fuseMountParams{
+		session:  s,
+		engine:   engine,
+		fs:       fs,
+		deferred: true,
+	})
 }
 
 // wrapWithMacSandbox wraps command with agentsh-macwrap for XPC control.

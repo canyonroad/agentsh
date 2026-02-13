@@ -33,6 +33,7 @@ type fuseFS struct {
 type openFile struct {
 	realPath string
 	virtPath string
+	fusePath string // raw FUSE path (for policy evaluation via source path)
 	flags    int
 	file     *os.File
 }
