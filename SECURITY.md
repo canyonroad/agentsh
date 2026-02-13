@@ -79,6 +79,40 @@ agentsh is **not** a full security sandbox like a VM or container with seccomp. 
 
 **Policy evaluation:** First matching rule wins. Default is deny.
 
+#### Deferred FUSE Mounting
+
+In some environments (E2B, Firecracker, or other snapshot-based sandboxes), `/dev/fuse` is not accessible at session creation time but becomes available later at runtime. Deferred FUSE mounting delays the mount until the first `exec` call, then mounts idempotently.
+
+**When to use:**
+- Snapshot-restore environments where device permissions change at runtime
+- Firecracker microVMs where `/dev/fuse` is gated behind a readiness marker
+- Any setup where FUSE availability is delayed relative to session creation
+
+**Configuration:**
+
+```yaml
+sandbox:
+  fuse:
+    enabled: true
+    deferred: true
+    # Optional: only run enable command when this file exists
+    deferred_marker_file: "/tmp/.agentsh-fuse-enabled"
+    # Optional: command to make /dev/fuse accessible
+    deferred_enable_command: ["sudo", "/bin/chmod", "666", "/dev/fuse"]
+```
+
+**Behavior:**
+- On each `exec`, `ensureFUSEMount` checks if FUSE is already mounted (idempotent no-op if so)
+- Calls `Recheck()` on the filesystem interceptor to re-probe `/dev/fuse`
+- If still unavailable and `deferred_enable_command` is configured, runs the command (gated by `deferred_marker_file` if set)
+- On success, mounts the FUSE overlay and emits a `fuse_mounted` event with `"deferred": true`
+- On failure, emits `fuse_mount_failed` and continues without FUSE (non-blocking)
+
+**Security considerations:**
+- The enable command runs as the agentsh process (not as the agent). If it uses `sudo`, ensure the sudoers policy is scoped to the specific command.
+- The marker file should be writable only by trusted infrastructure (not by the agent), since its presence triggers the enable command.
+- If `deferred_enable_command` is empty, no automatic enable is attempted — FUSE must become available through external means.
+
 ### Network Control (eBPF)
 
 - Attaches to process cgroup before execution begins
@@ -931,6 +965,7 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2026-02-13 | Added configurable deferred FUSE mounting for snapshot-restore environments |
 | 2026-01-11 | Added signal interception via seccomp user-notify for policy-based signal control (Linux) |
 | 2026-01-07 | Added external KMS integration for audit integrity keys (AWS KMS, Azure Key Vault, HashiCorp Vault, GCP Cloud KMS) |
 | 2026-01-07 | Added checkpoint/rollback for workspace state recovery with auto-checkpoint triggers |
