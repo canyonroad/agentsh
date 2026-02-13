@@ -298,6 +298,53 @@ sandbox:
 	}
 }
 
+func TestLoad_FUSEDeferredConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  fuse:
+    enabled: true
+    deferred: true
+    deferred_marker_file: "/tmp/.fuse-ready"
+    deferred_enable_command: ["sudo", "/bin/chmod", "666", "/dev/fuse"]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.True(t, cfg.Sandbox.FUSE.Enabled)
+	assert.True(t, cfg.Sandbox.FUSE.Deferred)
+	assert.Equal(t, "/tmp/.fuse-ready", cfg.Sandbox.FUSE.DeferredMarkerFile)
+	assert.Equal(t, []string{"sudo", "/bin/chmod", "666", "/dev/fuse"}, cfg.Sandbox.FUSE.DeferredEnableCommand)
+}
+
+func TestLoad_FUSEDeferredDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  fuse:
+    enabled: true
+    deferred: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.True(t, cfg.Sandbox.FUSE.Deferred)
+	assert.Empty(t, cfg.Sandbox.FUSE.DeferredMarkerFile)
+	assert.Empty(t, cfg.Sandbox.FUSE.DeferredEnableCommand)
+}
+
 func TestLoad_UnixSocketsDefaults(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yml")

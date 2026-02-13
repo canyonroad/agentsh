@@ -299,10 +299,17 @@ type SandboxLimitsConfig struct {
 }
 
 type SandboxFUSEConfig struct {
-	Enabled bool            `yaml:"enabled"`
-	Audit   FUSEAuditConfig `yaml:"audit"`
+	Enabled  bool            `yaml:"enabled"`
+	Deferred bool            `yaml:"deferred"`
+	Audit    FUSEAuditConfig `yaml:"audit"`
 	// Optional base dir for mounts; defaults to sessions.base_dir.
 	MountBaseDir string `yaml:"mount_base_dir"`
+	// DeferredMarkerFile is a file whose existence gates the enable command.
+	// If set, the enable command only runs when this file exists.
+	DeferredMarkerFile string `yaml:"deferred_marker_file"`
+	// DeferredEnableCommand is run when FUSE is unavailable in deferred mode
+	// to make /dev/fuse accessible (e.g., ["sudo", "/bin/chmod", "666", "/dev/fuse"]).
+	DeferredEnableCommand []string `yaml:"deferred_enable_command"`
 }
 
 type FUSEAuditConfig struct {

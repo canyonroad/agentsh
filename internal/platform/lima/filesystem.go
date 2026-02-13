@@ -42,6 +42,11 @@ func (fs *Filesystem) Available() bool {
 	return fs.available
 }
 
+// Recheck re-probes FUSE availability inside the Lima VM.
+func (fs *Filesystem) Recheck() {
+	fs.available = fs.checkAvailable()
+}
+
 // Implementation returns the filesystem implementation name.
 func (fs *Filesystem) Implementation() string {
 	return fs.implementation

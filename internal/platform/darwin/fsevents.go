@@ -213,6 +213,10 @@ func (fs *FSEventsFilesystem) Available() bool {
 	return fs.available
 }
 
+// Recheck re-probes availability. FSEvents is always available on macOS,
+// so this is a no-op.
+func (fs *FSEventsFilesystem) Recheck() {}
+
 // Implementation returns the implementation name.
 func (fs *FSEventsFilesystem) Implementation() string {
 	return "fsevents"

@@ -29,11 +29,13 @@ func (f *fuseFS) realPath(path string) string {
 }
 
 // checkPolicy checks the policy for a file operation.
-func (f *fuseFS) checkPolicy(virtPath string, operation platform.FileOperation) platform.Decision {
+// Uses the source path (not mount point) for policy evaluation because
+// policy rules reference ${PROJECT_ROOT} which resolves to the workspace source path.
+func (f *fuseFS) checkPolicy(fusePath string, operation platform.FileOperation) platform.Decision {
 	if f.cfg.PolicyEngine == nil {
 		return platform.DecisionAllow
 	}
-	return f.cfg.PolicyEngine.CheckFile(virtPath, operation)
+	return f.cfg.PolicyEngine.CheckFile(f.realPath(fusePath), operation)
 }
 
 // emitEvent emits a file event if an event channel is configured.
@@ -118,7 +120,7 @@ func (f *fuseFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 
 func (f *fuseFS) Opendir(path string) (int, uint64) {
 	virtPath := f.virtPath(path)
-	decision := f.checkPolicy(virtPath, platform.FileOpList)
+	decision := f.checkPolicy(path, platform.FileOpList)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("dir_open", virtPath, platform.FileOpList, decision, true)
 		return -fuse.EACCES, 0
@@ -164,7 +166,7 @@ func (f *fuseFS) Open(path string, flags int) (int, uint64) {
 		operation = platform.FileOpWrite
 	}
 
-	decision := f.checkPolicy(virtPath, operation)
+	decision := f.checkPolicy(path, operation)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("file_open", virtPath, operation, decision, true)
 		return -fuse.EACCES, 0
@@ -181,6 +183,7 @@ func (f *fuseFS) Open(path string, flags int) (int, uint64) {
 	f.openFiles.Store(fh, &openFile{
 		realPath: realPath,
 		virtPath: virtPath,
+		fusePath: path,
 		flags:    flags,
 		file:     file,
 	})
@@ -191,7 +194,7 @@ func (f *fuseFS) Open(path string, flags int) (int, uint64) {
 func (f *fuseFS) Create(path string, flags int, mode uint32) (int, uint64) {
 	virtPath := f.virtPath(path)
 
-	decision := f.checkPolicy(virtPath, platform.FileOpCreate)
+	decision := f.checkPolicy(path, platform.FileOpCreate)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("file_create", virtPath, platform.FileOpCreate, decision, true)
 		return -fuse.EACCES, 0
@@ -208,6 +211,7 @@ func (f *fuseFS) Create(path string, flags int, mode uint32) (int, uint64) {
 	f.openFiles.Store(fh, &openFile{
 		realPath: realPath,
 		virtPath: virtPath,
+		fusePath: path,
 		flags:    flags,
 		file:     file,
 	})
@@ -236,7 +240,7 @@ func (f *fuseFS) Write(path string, buff []byte, ofst int64, fh uint64) int {
 	}
 	openFile := of.(*openFile)
 
-	decision := f.checkPolicy(openFile.virtPath, platform.FileOpWrite)
+	decision := f.checkPolicy(openFile.fusePath, platform.FileOpWrite)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("file_write", openFile.virtPath, platform.FileOpWrite, decision, true)
 		return -fuse.EACCES
@@ -264,7 +268,7 @@ func (f *fuseFS) Unlink(path string) int {
 	virtPath := f.virtPath(path)
 	realPath := f.realPath(path)
 
-	decision := f.checkPolicy(virtPath, platform.FileOpDelete)
+	decision := f.checkPolicy(path, platform.FileOpDelete)
 
 	// Handle soft-delete
 	if decision == platform.DecisionSoftDelete {
@@ -286,7 +290,7 @@ func (f *fuseFS) Unlink(path string) int {
 func (f *fuseFS) Mkdir(path string, mode uint32) int {
 	virtPath := f.virtPath(path)
 
-	decision := f.checkPolicy(virtPath, platform.FileOpCreate)
+	decision := f.checkPolicy(path, platform.FileOpCreate)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("dir_create", virtPath, platform.FileOpCreate, decision, true)
 		return -fuse.EACCES
@@ -303,7 +307,7 @@ func (f *fuseFS) Mkdir(path string, mode uint32) int {
 func (f *fuseFS) Rmdir(path string) int {
 	virtPath := f.virtPath(path)
 
-	decision := f.checkPolicy(virtPath, platform.FileOpDelete)
+	decision := f.checkPolicy(path, platform.FileOpDelete)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("dir_delete", virtPath, platform.FileOpDelete, decision, true)
 		return -fuse.EACCES
@@ -321,12 +325,12 @@ func (f *fuseFS) Rename(oldpath string, newpath string) int {
 	virtOldPath := f.virtPath(oldpath)
 	virtNewPath := f.virtPath(newpath)
 
-	decision := f.checkPolicy(virtOldPath, platform.FileOpRename)
+	decision := f.checkPolicy(oldpath, platform.FileOpRename)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("file_rename", virtOldPath, platform.FileOpRename, decision, true)
 		return -fuse.EACCES
 	}
-	decision = f.checkPolicy(virtNewPath, platform.FileOpRename)
+	decision = f.checkPolicy(newpath, platform.FileOpRename)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("file_rename", virtNewPath, platform.FileOpRename, decision, true)
 		return -fuse.EACCES
@@ -344,7 +348,7 @@ func (f *fuseFS) Rename(oldpath string, newpath string) int {
 func (f *fuseFS) Chmod(path string, mode uint32) int {
 	virtPath := f.virtPath(path)
 
-	decision := f.checkPolicy(virtPath, platform.FileOpWrite)
+	decision := f.checkPolicy(path, platform.FileOpWrite)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("file_chmod", virtPath, platform.FileOpWrite, decision, true)
 		return -fuse.EACCES
@@ -361,7 +365,7 @@ func (f *fuseFS) Chmod(path string, mode uint32) int {
 func (f *fuseFS) Symlink(target string, newpath string) int {
 	virtPath := f.virtPath(newpath)
 
-	decision := f.checkPolicy(virtPath, platform.FileOpCreate)
+	decision := f.checkPolicy(newpath, platform.FileOpCreate)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("symlink_create", virtPath, platform.FileOpCreate, decision, true)
 		return -fuse.EACCES
@@ -378,7 +382,7 @@ func (f *fuseFS) Symlink(target string, newpath string) int {
 func (f *fuseFS) Readlink(path string) (int, string) {
 	virtPath := f.virtPath(path)
 
-	decision := f.checkPolicy(virtPath, platform.FileOpRead)
+	decision := f.checkPolicy(path, platform.FileOpRead)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("symlink_read", virtPath, platform.FileOpRead, decision, true)
 		return -fuse.EACCES, ""
@@ -396,7 +400,7 @@ func (f *fuseFS) Readlink(path string) (int, string) {
 func (f *fuseFS) Link(oldpath string, newpath string) int {
 	virtPath := f.virtPath(newpath)
 
-	decision := f.checkPolicy(virtPath, platform.FileOpCreate)
+	decision := f.checkPolicy(newpath, platform.FileOpCreate)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("link_create", virtPath, platform.FileOpCreate, decision, true)
 		return -fuse.EACCES
@@ -414,7 +418,7 @@ func (f *fuseFS) Link(oldpath string, newpath string) int {
 func (f *fuseFS) Truncate(path string, size int64, fh uint64) int {
 	virtPath := f.virtPath(path)
 
-	decision := f.checkPolicy(virtPath, platform.FileOpWrite)
+	decision := f.checkPolicy(path, platform.FileOpWrite)
 	if decision == platform.DecisionDeny {
 		f.emitEvent("file_truncate", virtPath, platform.FileOpWrite, decision, true)
 		return -fuse.EACCES
