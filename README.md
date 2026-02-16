@@ -1,5 +1,9 @@
 # agentsh
 
+> **macOS note:** We are currently working with Apple to obtain the Endpoint Security Framework entitlements required for full enforcement on macOS. Until then, the macOS binary has limited security capabilities (FUSE-T file monitoring only, no process or network enforcement). For production use, we recommend Linux.
+>
+> **Windows note:** We are working to get the minifilter drivers signed. Until then, only Windows WSL2 mode is fully supported for production use.
+
 **Secure, policy-enforced execution gateway for AI agents.**
 
 agentsh sits *under* your agent/tooling—intercepting **file**, **network**, **process**, and **signal** activity (including subprocess trees), enforcing the policy you define, and emitting **structured audit events**.
