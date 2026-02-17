@@ -145,6 +145,9 @@ type AuditConfig struct {
 
 	// Encryption configures AES-256-GCM encryption at rest.
 	Encryption AuditEncryptionConfig `yaml:"encryption"`
+
+	// OTEL configures OpenTelemetry event export.
+	OTEL AuditOTELConfig `yaml:"otel"`
 }
 
 type AuditStorageConfig struct {
@@ -222,6 +225,55 @@ type AuditEncryptionConfig struct {
 	KeySource string `yaml:"key_source"` // file, env
 	KeyFile   string `yaml:"key_file"`
 	KeyEnv    string `yaml:"key_env"`
+}
+
+// AuditOTELConfig configures OpenTelemetry event export.
+type AuditOTELConfig struct {
+	Enabled  bool              `yaml:"enabled"`
+	Endpoint string            `yaml:"endpoint"`
+	Protocol string            `yaml:"protocol"` // "grpc" or "http"
+	TLS      OTELTLSConfig     `yaml:"tls"`
+	Headers  map[string]string `yaml:"headers"`
+	Timeout  string            `yaml:"timeout"`
+	Signals  OTELSignalsConfig `yaml:"signals"`
+	Batch    OTELBatchConfig   `yaml:"batch"`
+	Filter   OTELFilterConfig  `yaml:"filter"`
+	Resource OTELResourceConfig `yaml:"resource"`
+}
+
+// OTELTLSConfig configures TLS for the OTEL exporter.
+type OTELTLSConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+	Insecure bool   `yaml:"insecure"`
+}
+
+// OTELSignalsConfig selects which OTEL signal types to export.
+type OTELSignalsConfig struct {
+	Logs  bool `yaml:"logs"`
+	Spans bool `yaml:"spans"`
+}
+
+// OTELBatchConfig configures OTEL export batching.
+type OTELBatchConfig struct {
+	MaxSize int    `yaml:"max_size"`
+	Timeout string `yaml:"timeout"`
+}
+
+// OTELFilterConfig controls which events are exported via OTEL.
+type OTELFilterConfig struct {
+	IncludeTypes      []string `yaml:"include_types"`
+	ExcludeTypes      []string `yaml:"exclude_types"`
+	IncludeCategories []string `yaml:"include_categories"`
+	ExcludeCategories []string `yaml:"exclude_categories"`
+	MinRiskLevel      string   `yaml:"min_risk_level"`
+}
+
+// OTELResourceConfig configures the OTEL resource attributes.
+type OTELResourceConfig struct {
+	ServiceName     string            `yaml:"service_name"`
+	ExtraAttributes map[string]string `yaml:"extra_attributes"`
 }
 
 type RotationConfig struct {
@@ -933,6 +985,29 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.Audit.Webhook.Timeout == "" {
 		cfg.Audit.Webhook.Timeout = "5s"
 	}
+	// OTEL defaults
+	if cfg.Audit.OTEL.Endpoint == "" {
+		cfg.Audit.OTEL.Endpoint = "localhost:4317"
+	}
+	if cfg.Audit.OTEL.Protocol == "" {
+		cfg.Audit.OTEL.Protocol = "grpc"
+	}
+	if cfg.Audit.OTEL.Timeout == "" {
+		cfg.Audit.OTEL.Timeout = "10s"
+	}
+	if !cfg.Audit.OTEL.Signals.Logs && !cfg.Audit.OTEL.Signals.Spans {
+		cfg.Audit.OTEL.Signals.Logs = true
+		cfg.Audit.OTEL.Signals.Spans = true
+	}
+	if cfg.Audit.OTEL.Batch.MaxSize == 0 {
+		cfg.Audit.OTEL.Batch.MaxSize = 512
+	}
+	if cfg.Audit.OTEL.Batch.Timeout == "" {
+		cfg.Audit.OTEL.Batch.Timeout = "5s"
+	}
+	if cfg.Audit.OTEL.Resource.ServiceName == "" {
+		cfg.Audit.OTEL.Resource.ServiceName = "agentsh"
+	}
 	if cfg.Approvals.Timeout == "" {
 		cfg.Approvals.Timeout = "5m"
 	}
@@ -1027,6 +1102,15 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Proxy.Port = port
 		}
 	}
+	// OTEL overrides
+	if v := os.Getenv("AGENTSH_OTEL_ENDPOINT"); v != "" {
+		cfg.Audit.OTEL.Endpoint = v
+	} else if v := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); v != "" {
+		cfg.Audit.OTEL.Endpoint = v
+	}
+	if v := os.Getenv("AGENTSH_OTEL_PROTOCOL"); v != "" {
+		cfg.Audit.OTEL.Protocol = v
+	}
 }
 
 func validateConfig(cfg *Config) error {
@@ -1073,6 +1157,22 @@ func validateConfig(cfg *Config) error {
 		case "full", "landlock", "landlock-only", "minimal":
 		default:
 			return fmt.Errorf("invalid security.minimum_mode %q", cfg.Security.MinimumMode)
+		}
+	}
+	// Validate OTEL config
+	if cfg.Audit.OTEL.Enabled {
+		switch cfg.Audit.OTEL.Protocol {
+		case "grpc", "http":
+		default:
+			return fmt.Errorf("invalid audit.otel.protocol %q (must be \"grpc\" or \"http\")", cfg.Audit.OTEL.Protocol)
+		}
+		if cfg.Audit.OTEL.Endpoint == "" {
+			return fmt.Errorf("audit.otel.endpoint is required when otel is enabled")
+		}
+		switch cfg.Audit.OTEL.Filter.MinRiskLevel {
+		case "", "low", "medium", "high", "critical":
+		default:
+			return fmt.Errorf("invalid audit.otel.filter.min_risk_level %q", cfg.Audit.OTEL.Filter.MinRiskLevel)
 		}
 	}
 	return nil
