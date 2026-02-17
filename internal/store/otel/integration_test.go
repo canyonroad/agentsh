@@ -76,11 +76,9 @@ func TestIntegration_OTELCollector(t *testing.T) {
 		Protocol:   "grpc",
 		TLSEnabled: false,
 		Signals: struct {
-			Logs  bool
-			Spans bool
+			Logs bool
 		}{
-			Logs:  true,
-			Spans: false,
+			Logs: true,
 		},
 		Resource: res,
 	})

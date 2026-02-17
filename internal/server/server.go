@@ -142,6 +142,9 @@ func New(cfg *config.Config) (*Server, error) {
 
 	var otelStore *otelstore.Store
 	if cfg.Audit.OTEL.Enabled {
+		if !cfg.Audit.OTEL.TLS.Enabled {
+			slog.Warn("OTEL export is configured without TLS; event data will be sent in plaintext")
+		}
 		otelTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Timeout)
 		if err != nil {
 			_ = db.Close()
@@ -156,16 +159,17 @@ func New(cfg *config.Config) (*Server, error) {
 			Endpoint:     cfg.Audit.OTEL.Endpoint,
 			Protocol:     cfg.Audit.OTEL.Protocol,
 			TLSEnabled:   cfg.Audit.OTEL.TLS.Enabled,
+			TLSCertFile:  cfg.Audit.OTEL.TLS.CertFile,
+			TLSKeyFile:   cfg.Audit.OTEL.TLS.KeyFile,
+			TLSInsecure:  cfg.Audit.OTEL.TLS.Insecure,
 			Headers:      cfg.Audit.OTEL.Headers,
 			Timeout:      otelTimeout,
 			BatchTimeout: otelBatchTimeout,
 			BatchMaxSize: cfg.Audit.OTEL.Batch.MaxSize,
 			Signals: struct {
-				Logs  bool
-				Spans bool
+				Logs bool
 			}{
-				Logs:  cfg.Audit.OTEL.Signals.Logs,
-				Spans: cfg.Audit.OTEL.Signals.Spans,
+				Logs: cfg.Audit.OTEL.Signals.Logs,
 			},
 			Filter: otelstore.Filter{
 				IncludeTypes:      cfg.Audit.OTEL.Filter.IncludeTypes,

@@ -69,7 +69,6 @@ func newTestStore(t *testing.T, filter *Filter) (*Store, *countingLogExporter) {
 		logProvider: logProvider,
 		logger:      logProvider.Logger("agentsh-test"),
 		enableLogs:  true,
-		enableSpans: false,
 	}
 
 	return s, exp
@@ -207,7 +206,6 @@ func TestStore_AppendEvent_LogsDisabled(t *testing.T) {
 		logProvider: logProvider,
 		logger:      logProvider.Logger("agentsh-test"),
 		enableLogs:  false, // Logs disabled.
-		enableSpans: false,
 	}
 	defer s.Close()
 
