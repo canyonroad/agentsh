@@ -207,9 +207,9 @@ func extractSpanID(ev types.Event) (trace.SpanID, bool) {
 	return sid, true
 }
 
-// buildResource creates an OTEL Resource with the agentsh service name and
+// BuildResource creates an OTEL Resource with the agentsh service name and
 // optional extra attributes.
-func buildResource(serviceName string, extraAttrs map[string]string) *resource.Resource {
+func BuildResource(serviceName string, extraAttrs map[string]string) *resource.Resource {
 	kvs := []attribute.KeyValue{
 		semconv.ServiceName(serviceName),
 	}

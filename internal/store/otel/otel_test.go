@@ -52,7 +52,7 @@ func newTestStore(t *testing.T, filter *Filter) (*Store, *countingLogExporter) {
 
 	// Use SimpleProcessor for synchronous, predictable behavior in tests.
 	proc := sdklog.NewSimpleProcessor(exp)
-	res := buildResource("agentsh-test", nil)
+	res := BuildResource("agentsh-test", nil)
 
 	logProvider := sdklog.NewLoggerProvider(
 		sdklog.WithProcessor(proc),
@@ -195,7 +195,7 @@ func TestStore_AppendEvent_MultipleEvents(t *testing.T) {
 func TestStore_AppendEvent_LogsDisabled(t *testing.T) {
 	exp := &countingLogExporter{}
 	proc := sdklog.NewSimpleProcessor(exp)
-	res := buildResource("agentsh-test", nil)
+	res := BuildResource("agentsh-test", nil)
 	logProvider := sdklog.NewLoggerProvider(
 		sdklog.WithProcessor(proc),
 		sdklog.WithResource(res),

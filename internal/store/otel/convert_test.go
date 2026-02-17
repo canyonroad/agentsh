@@ -279,7 +279,7 @@ func TestEventContext_InvalidTraceID(t *testing.T) {
 }
 
 func TestBuildResource(t *testing.T) {
-	res := buildResource("my-agentsh", map[string]string{"env": "prod"})
+	res := BuildResource("my-agentsh", map[string]string{"env": "prod"})
 
 	attrs := res.Attributes()
 	found := map[string]string{}
@@ -298,7 +298,7 @@ func TestBuildResource(t *testing.T) {
 }
 
 func TestBuildResource_NoExtras(t *testing.T) {
-	res := buildResource("agentsh", nil)
+	res := BuildResource("agentsh", nil)
 
 	attrs := res.Attributes()
 	found := false
