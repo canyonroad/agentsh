@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -941,5 +942,181 @@ sandbox:
 	// Verify env_inject is nil or empty when not configured
 	if cfg.Sandbox.EnvInject != nil && len(cfg.Sandbox.EnvInject) > 0 {
 		t.Fatalf("sandbox.env_inject: expected nil or empty, got %v", cfg.Sandbox.EnvInject)
+	}
+}
+
+func TestOTELConfigParsing(t *testing.T) {
+	yaml := `
+audit:
+  otel:
+    enabled: true
+    endpoint: "collector.example.com:4317"
+    protocol: grpc
+    tls:
+      enabled: true
+      cert_file: "/etc/certs/client.crt"
+      key_file: "/etc/certs/client.key"
+    headers:
+      Authorization: "Bearer test-token"
+    timeout: "15s"
+    signals:
+      logs: true
+      spans: false
+    batch:
+      max_size: 256
+      timeout: "3s"
+    filter:
+      include_types: ["file_*", "net_*"]
+      exclude_types: ["file_stat"]
+      include_categories: ["file", "network"]
+      min_risk_level: "medium"
+    resource:
+      service_name: "my-agentsh"
+      extra_attributes:
+        environment: "production"
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	os.WriteFile(path, []byte(yaml), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otel := cfg.Audit.OTEL
+	if !otel.Enabled {
+		t.Error("expected otel.enabled=true")
+	}
+	if otel.Endpoint != "collector.example.com:4317" {
+		t.Errorf("endpoint = %q", otel.Endpoint)
+	}
+	if otel.Protocol != "grpc" {
+		t.Errorf("protocol = %q", otel.Protocol)
+	}
+	if !otel.TLS.Enabled {
+		t.Error("expected tls.enabled=true")
+	}
+	if otel.Headers["Authorization"] != "Bearer test-token" {
+		t.Errorf("headers = %v", otel.Headers)
+	}
+	if otel.Timeout != "15s" {
+		t.Errorf("timeout = %q", otel.Timeout)
+	}
+	if !otel.Signals.Logs || otel.Signals.Spans {
+		t.Errorf("signals = %+v", otel.Signals)
+	}
+	if otel.Batch.MaxSize != 256 {
+		t.Errorf("batch.max_size = %d", otel.Batch.MaxSize)
+	}
+	if len(otel.Filter.IncludeTypes) != 2 || otel.Filter.IncludeTypes[0] != "file_*" {
+		t.Errorf("filter.include_types = %v", otel.Filter.IncludeTypes)
+	}
+	if otel.Filter.MinRiskLevel != "medium" {
+		t.Errorf("filter.min_risk_level = %q", otel.Filter.MinRiskLevel)
+	}
+	if otel.Resource.ServiceName != "my-agentsh" {
+		t.Errorf("resource.service_name = %q", otel.Resource.ServiceName)
+	}
+}
+
+func TestOTELConfigDefaults(t *testing.T) {
+	yaml := `
+audit:
+  otel:
+    enabled: true
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	os.WriteFile(path, []byte(yaml), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otel := cfg.Audit.OTEL
+	if otel.Endpoint != "localhost:4317" {
+		t.Errorf("default endpoint = %q, want localhost:4317", otel.Endpoint)
+	}
+	if otel.Protocol != "grpc" {
+		t.Errorf("default protocol = %q, want grpc", otel.Protocol)
+	}
+	if otel.Timeout != "10s" {
+		t.Errorf("default timeout = %q, want 10s", otel.Timeout)
+	}
+	if !otel.Signals.Logs || !otel.Signals.Spans {
+		t.Errorf("default signals = %+v, want both true", otel.Signals)
+	}
+	if otel.Batch.MaxSize != 512 {
+		t.Errorf("default batch.max_size = %d, want 512", otel.Batch.MaxSize)
+	}
+	if otel.Resource.ServiceName != "agentsh" {
+		t.Errorf("default resource.service_name = %q, want agentsh", otel.Resource.ServiceName)
+	}
+}
+
+func TestOTELConfigEnvOverrides(t *testing.T) {
+	yaml := `
+audit:
+  otel:
+    enabled: true
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	os.WriteFile(path, []byte(yaml), 0644)
+
+	t.Setenv("AGENTSH_OTEL_ENDPOINT", "otel.prod:4317")
+	t.Setenv("AGENTSH_OTEL_PROTOCOL", "http")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Audit.OTEL.Endpoint != "otel.prod:4317" {
+		t.Errorf("endpoint = %q, want otel.prod:4317", cfg.Audit.OTEL.Endpoint)
+	}
+	if cfg.Audit.OTEL.Protocol != "http" {
+		t.Errorf("protocol = %q, want http", cfg.Audit.OTEL.Protocol)
+	}
+}
+
+func TestOTELConfigValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "invalid protocol",
+			yaml: `
+audit:
+  otel:
+    enabled: true
+    protocol: websocket
+`,
+			wantErr: "invalid audit.otel.protocol",
+		},
+		{
+			name: "invalid risk level",
+			yaml: `
+audit:
+  otel:
+    enabled: true
+    filter:
+      min_risk_level: "extreme"
+`,
+			wantErr: "invalid audit.otel.filter.min_risk_level",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			os.WriteFile(path, []byte(tt.yaml), 0644)
+
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Load() error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }

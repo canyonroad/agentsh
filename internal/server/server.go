@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -28,6 +29,7 @@ import (
 	storepkg "github.com/agentsh/agentsh/internal/store"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/internal/store/jsonl"
+	otelstore "github.com/agentsh/agentsh/internal/store/otel"
 	"github.com/agentsh/agentsh/internal/store/sqlite"
 	"github.com/agentsh/agentsh/internal/store/webhook"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -138,12 +140,64 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 	}
 
+	var otelStore *otelstore.Store
+	if cfg.Audit.OTEL.Enabled {
+		if !cfg.Audit.OTEL.TLS.Enabled {
+			slog.Warn("OTEL export is configured without TLS; event data will be sent in plaintext")
+		}
+		otelTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Timeout)
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("parse audit.otel.timeout: %w", err)
+		}
+		otelBatchTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Batch.Timeout)
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("parse audit.otel.batch.timeout: %w", err)
+		}
+		otelStore, err = otelstore.New(context.Background(), otelstore.Config{
+			Endpoint:     cfg.Audit.OTEL.Endpoint,
+			Protocol:     cfg.Audit.OTEL.Protocol,
+			TLSEnabled:   cfg.Audit.OTEL.TLS.Enabled,
+			TLSCertFile:  cfg.Audit.OTEL.TLS.CertFile,
+			TLSKeyFile:   cfg.Audit.OTEL.TLS.KeyFile,
+			TLSInsecure:  cfg.Audit.OTEL.TLS.Insecure,
+			Headers:      cfg.Audit.OTEL.Headers,
+			Timeout:      otelTimeout,
+			BatchTimeout: otelBatchTimeout,
+			BatchMaxSize: cfg.Audit.OTEL.Batch.MaxSize,
+			Signals: struct {
+				Logs bool
+			}{
+				Logs: cfg.Audit.OTEL.Signals.Logs,
+			},
+			Filter: otelstore.Filter{
+				IncludeTypes:      cfg.Audit.OTEL.Filter.IncludeTypes,
+				ExcludeTypes:      cfg.Audit.OTEL.Filter.ExcludeTypes,
+				IncludeCategories: cfg.Audit.OTEL.Filter.IncludeCategories,
+				ExcludeCategories: cfg.Audit.OTEL.Filter.ExcludeCategories,
+				MinRiskLevel:      cfg.Audit.OTEL.Filter.MinRiskLevel,
+			},
+			Resource: otelstore.BuildResource(
+				cfg.Audit.OTEL.Resource.ServiceName,
+				cfg.Audit.OTEL.Resource.ExtraAttributes,
+			),
+		})
+		if err != nil {
+			slog.Error("failed to create OTEL store, continuing without it", "error", err)
+			otelStore = nil
+		}
+	}
+
 	var eventStores []storepkg.EventStore
 	if jsonlStore != nil {
 		eventStores = append(eventStores, jsonlStore)
 	}
 	if webhookStore != nil {
 		eventStores = append(eventStores, webhookStore)
+	}
+	if otelStore != nil {
+		eventStores = append(eventStores, otelStore)
 	}
 	// Wrap primary event store so metrics count each event exactly once.
 	primary := metrics.WrapEventStore(db, metricsCollector)
