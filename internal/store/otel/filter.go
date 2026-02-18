@@ -69,8 +69,9 @@ func (f *Filter) Match(eventType, category, riskLevel string) bool {
 		}
 	}
 
-	// Min risk level filter.
-	if f.MinRiskLevel != "" {
+	// Min risk level filter. Events without a risk level always pass
+	// so that the threshold only applies to events that carry one.
+	if f.MinRiskLevel != "" && riskLevel != "" {
 		threshold := riskLevels[f.MinRiskLevel]
 		actual := riskLevels[riskLevel]
 		if actual < threshold {

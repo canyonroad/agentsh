@@ -104,7 +104,7 @@ func TestFilter_MinRiskLevel(t *testing.T) {
 		{"high", true},
 		{"medium", true},
 		{"low", false},
-		{"", false}, // no risk = below threshold
+		{"", true}, // no risk level = passes through (threshold only applies to events that carry one)
 	}
 	for _, tt := range tests {
 		if got := f.Match("any", "any", tt.risk); got != tt.want {
