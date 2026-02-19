@@ -25,6 +25,7 @@ func newShimInstallShellCmd() *cobra.Command {
 	var root string
 	var shimPath string
 	var bash bool
+	var bashOnly bool
 	var iUnderstand bool
 	var dryRun bool
 	var output string
@@ -36,25 +37,26 @@ func newShimInstallShellCmd() *cobra.Command {
 			if shimPath == "" {
 				return fmt.Errorf("--shim is required")
 			}
+			if bash && bashOnly {
+				return fmt.Errorf("--bash and --bash-only are mutually exclusive")
+			}
 			if isHostRoot(root) && !iUnderstand && !dryRun {
 				return fmt.Errorf("refusing to modify host rootfs (%q); pass --i-understand-this-modifies-the-host to continue", root)
 			}
+			opts := shim.InstallShellShimOptions{
+				Root:        root,
+				ShimPath:    shimPath,
+				InstallBash: bash || bashOnly,
+				BashOnly:    bashOnly,
+			}
 			if dryRun {
-				p, err := shim.PlanInstallShellShim(shim.InstallShellShimOptions{
-					Root:        root,
-					ShimPath:    shimPath,
-					InstallBash: bash,
-				})
+				p, err := shim.PlanInstallShellShim(opts)
 				if err != nil {
 					return err
 				}
 				return printShimPlan(cmd, p, output)
 			}
-			return shim.InstallShellShim(shim.InstallShellShimOptions{
-				Root:        root,
-				ShimPath:    shimPath,
-				InstallBash: bash,
-			})
+			return shim.InstallShellShim(opts)
 		},
 		DisableFlagsInUseLine: true,
 	}
@@ -62,6 +64,7 @@ func newShimInstallShellCmd() *cobra.Command {
 	c.Flags().StringVar(&root, "root", "/", "Root filesystem to modify")
 	c.Flags().StringVar(&shimPath, "shim", "", "Path to agentsh shell shim binary (agentsh-shell-shim)")
 	c.Flags().BoolVar(&bash, "bash", false, "Also install shim for /bin/bash if present")
+	c.Flags().BoolVar(&bashOnly, "bash-only", false, "Install shim only for /bin/bash, leaving /bin/sh untouched")
 	c.Flags().BoolVar(&iUnderstand, "i-understand-this-modifies-the-host", false, "Allow modifying the host filesystem when --root=/")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "Show planned actions without modifying the filesystem")
 	c.Flags().StringVar(&output, "output", "shell", "Output format: shell|json")

@@ -317,6 +317,21 @@ else
 fi
 
 # -------------------------------------------------------------------
+# Test: non-interactive stdin passthrough (binary data integrity)
+# -------------------------------------------------------------------
+# Simulates: docker exec -i container sh -c "cat > /tmp/file" < binary
+# The shim must pass binary data through intact when stdin is piped.
+dd if=/dev/urandom bs=1024 count=4 of=/tmp/test_binary 2>/dev/null
+pipe_out="$(/bin/sh -c 'cat' < /tmp/test_binary | md5sum | awk '{print $1}')"
+orig_md5="$(md5sum /tmp/test_binary | awk '{print $1}')"
+if [ "$pipe_out" = "$orig_md5" ]; then
+  pass "binary stdin passthrough (md5 match)"
+else
+  fail "binary stdin passthrough (md5 match)" "orig=$orig_md5 got=$pipe_out"
+fi
+rm -f /tmp/test_binary
+
+# -------------------------------------------------------------------
 # Test: exec through agentsh CLI
 # -------------------------------------------------------------------
 exec_out="$(agentsh exec "$sid" -- sh -c 'echo exec_ok' 2>&1 | tr -d '\r' | tail -n 1)"
