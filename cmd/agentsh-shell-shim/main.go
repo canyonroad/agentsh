@@ -58,10 +58,18 @@ func main() {
 	// shell directly. This preserves binary stdin/stdout integrity — the shim
 	// never touches the data streams. Policy enforcement for commands inside
 	// agentsh sessions is handled by AGENTSH_IN_SESSION (checked above).
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	//
+	// AGENTSH_SHIM_FORCE=1 overrides this bypass for environments like sandbox
+	// platforms where commands are always non-interactive but still require
+	// policy enforcement (e.g. Blaxel, E2B sandbox APIs).
+	forceShim := strings.TrimSpace(os.Getenv("AGENTSH_SHIM_FORCE"))
+	if !term.IsTerminal(int(os.Stdin.Fd())) && forceShim != "1" {
 		debugLog("non-interactive bypass: stdin is not a tty, executing real shell %s", realShell)
 		execOrExit(realShell, append([]string{argv0}, os.Args[1:]...), os.Environ())
 		return
+	}
+	if forceShim == "1" {
+		debugLog("AGENTSH_SHIM_FORCE=1: enforcing policy despite non-interactive stdin")
 	}
 
 	agentshBin, err := resolveAgentshBin()
