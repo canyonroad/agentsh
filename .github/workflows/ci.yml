@@ -44,7 +44,9 @@ jobs:
           df -h /tmp /home/runner
 
       - name: go test
-        run: go test -p 2 ./...
+        run: |
+          mkdir -p "$GOTMPDIR"
+          go test -p 2 ./...
         env:
           GOTMPDIR: ${{ runner.temp }}/go-tmp
 
