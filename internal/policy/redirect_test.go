@@ -975,3 +975,87 @@ func TestDnsRedirect_ComplexPatterns(t *testing.T) {
 		})
 	}
 }
+
+func TestEvaluateDnsRedirect_CaseNormalization(t *testing.T) {
+	p := &Policy{
+		Version: 1,
+		Name:    "test",
+		DnsRedirectRules: []DnsRedirectRule{
+			{
+				Name:      "example",
+				Match:     `^example\.com$`,
+				ResolveTo: "127.0.0.1",
+			},
+		},
+	}
+
+	engine, err := NewEngine(p, false)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	tests := []struct {
+		hostname  string
+		wantMatch bool
+	}{
+		{"example.com", true},
+		{"Example.COM", true},
+		{"EXAMPLE.COM", true},
+		{"Example.Com", true},
+		{"example.com.", true},   // trailing dot (FQDN)
+		{"Example.COM.", true},   // mixed case + trailing dot
+		{"  example.com  ", true}, // whitespace
+		{"other.com", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.hostname, func(t *testing.T) {
+			result := engine.EvaluateDnsRedirect(tt.hostname)
+			if result.Matched != tt.wantMatch {
+				t.Errorf("EvaluateDnsRedirect(%q) matched = %v, want %v", tt.hostname, result.Matched, tt.wantMatch)
+			}
+		})
+	}
+}
+
+func TestEvaluateConnectRedirect_CaseNormalization(t *testing.T) {
+	p := &Policy{
+		Version: 1,
+		Name:    "test",
+		ConnectRedirectRules: []ConnectRedirectRule{
+			{
+				Name:       "example",
+				Match:      `^example\.com:443$`,
+				RedirectTo: "proxy.internal:443",
+			},
+		},
+	}
+
+	engine, err := NewEngine(p, false)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	tests := []struct {
+		hostPort  string
+		wantMatch bool
+	}{
+		{"example.com:443", true},
+		{"Example.COM:443", true},
+		{"EXAMPLE.COM:443", true},
+		{"Example.Com:443", true},
+		{"example.com.:443", true},   // trailing dot
+		{"Example.COM.:443", true},   // mixed case + trailing dot
+		{"  example.com:443  ", true}, // whitespace
+		{"other.com:443", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.hostPort, func(t *testing.T) {
+			result := engine.EvaluateConnectRedirect(tt.hostPort)
+			if result.Matched != tt.wantMatch {
+				t.Errorf("EvaluateConnectRedirect(%q) matched = %v, want %v", tt.hostPort, result.Matched, tt.wantMatch)
+			}
+		})
+	}
+}

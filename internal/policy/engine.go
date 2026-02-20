@@ -866,8 +866,11 @@ type DnsRedirectResult struct {
 	OnFailure  string
 }
 
-// EvaluateDnsRedirect checks if a hostname should be redirected
+// EvaluateDnsRedirect checks if a hostname should be redirected.
+// The hostname is normalized (lowercased, trimmed, trailing dot removed)
+// to ensure case-insensitive matching consistent with DNS semantics.
 func (e *Engine) EvaluateDnsRedirect(hostname string) *DnsRedirectResult {
+	hostname = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(hostname)), ".")
 	for _, r := range e.dnsRedirectRules {
 		if r.pattern.MatchString(hostname) {
 			visibility := r.rule.Visibility
@@ -902,8 +905,17 @@ type ConnectRedirectResult struct {
 	OnFailure  string
 }
 
-// EvaluateConnectRedirect checks if a connection should be redirected
+// EvaluateConnectRedirect checks if a connection should be redirected.
+// The host portion of hostPort is normalized (lowercased, trailing dot removed)
+// to ensure case-insensitive matching consistent with DNS semantics.
 func (e *Engine) EvaluateConnectRedirect(hostPort string) *ConnectRedirectResult {
+	hostPort = strings.TrimSpace(hostPort)
+	if host, port, err := net.SplitHostPort(hostPort); err == nil {
+		host = strings.TrimSuffix(strings.ToLower(host), ".")
+		hostPort = net.JoinHostPort(host, port)
+	} else {
+		hostPort = strings.TrimSuffix(strings.ToLower(hostPort), ".")
+	}
 	for _, r := range e.connectRedirectRules {
 		if r.pattern.MatchString(hostPort) {
 			visibility := r.rule.Visibility
