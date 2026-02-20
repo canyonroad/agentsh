@@ -62,7 +62,7 @@ jobs:
     needs: goreleaser  # Wait for release to be created
     timeout-minutes: 20
     container:
-      image: golang:1.25-alpine
+      image: golang:1.25.7-alpine
     steps:
       - uses: actions/checkout@v4
 

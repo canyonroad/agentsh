@@ -2,7 +2,7 @@ module github.com/agentsh/agentsh
 
 go 1.25.0
 
-toolchain go1.25.5
+toolchain go1.25.7
 
 require (
 	cloud.google.com/go/kms v1.23.2

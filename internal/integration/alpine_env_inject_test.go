@@ -235,7 +235,7 @@ file /output/agentsh-unixwrap
 	}
 
 	req := testcontainers.ContainerRequest{
-		Image: "golang:1.25-alpine",
+		Image: "golang:1.25.7-alpine",
 		Mounts: []testcontainers.ContainerMount{
 			testcontainers.BindMount(repoRoot, "/src"),
 			testcontainers.BindMount(outputDir, "/output"),
