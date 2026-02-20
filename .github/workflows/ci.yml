@@ -8,7 +8,7 @@ on:
 
 env:
   # Increment to bust Go module cache when needed
-  GO_CACHE_VERSION: v1
+  GO_CACHE_VERSION: v2
 
 jobs:
   test-linux:
