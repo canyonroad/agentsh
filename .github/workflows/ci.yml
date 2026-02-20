@@ -35,8 +35,18 @@ jobs:
           restore-keys: |
             ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-
 
+      - name: Free disk space
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h /tmp /home/runner
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/powershell
+          echo "=== Disk space after cleanup ==="
+          df -h /tmp /home/runner
+
       - name: go test
-        run: go test ./...
+        run: go test -p 2 ./...
+        env:
+          GOTMPDIR: ${{ runner.temp }}/go-tmp
 
       - name: smoke
         run: make smoke
