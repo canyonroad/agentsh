@@ -5,7 +5,7 @@
 #
 # Build:
 #   docker build -f Dockerfile.test.alpine \
-#     --build-arg AGENTSH_TAG=v0.10.0 \
+#     --build-arg AGENTSH_TAG=v0.10.1 \
 #     -t agentsh-test-alpine:latest .
 #
 # Run:
@@ -14,7 +14,7 @@
 FROM alpine:latest
 
 ARG AGENTSH_REPO=canyonroad/agentsh
-ARG AGENTSH_TAG=v0.10.0
+ARG AGENTSH_TAG=v0.10.1
 
 # Install dependencies: curl for downloading, bash for shim tests, jq for JSON parsing.
 RUN set -eux; \
