@@ -157,7 +157,7 @@ func probeMountSyscall() bool {
 		}
 		// ENODEV, EINVAL, etc. = mount syscall is allowed (just bad params)
 		return true
-	case <-time.After(2 * time.Second):
+	case <-time.After(500 * time.Millisecond):
 		// Timed out — mount() is blocked/hanging
 		return false
 	}

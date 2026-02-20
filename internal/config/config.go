@@ -106,14 +106,15 @@ type AuthAPIKeyConfig struct {
 
 // OIDCConfig configures OpenID Connect authentication.
 type OIDCConfig struct {
-	Issuer         string            `yaml:"issuer"`           // e.g., "https://corp.okta.com"
-	ClientID       string            `yaml:"client_id"`        // e.g., "agentsh-server"
-	Audience       string            `yaml:"audience"`         // Expected audience claim
-	JWKSCacheTTL   string            `yaml:"jwks_cache_ttl"`   // e.g., "1h"
-	ClaimMappings  OIDCClaimMappings `yaml:"claim_mappings"`
-	AllowedGroups  []string          `yaml:"allowed_groups"`   // Groups allowed to access
-	GroupPolicyMap map[string]string `yaml:"group_policy_map"` // group -> policy name
-	GroupRoleMap   map[string]string `yaml:"group_role_map"`   // group -> role (admin, approver, agent)
+	Issuer           string            `yaml:"issuer"`            // e.g., "https://corp.okta.com"
+	ClientID         string            `yaml:"client_id"`         // e.g., "agentsh-server"
+	Audience         string            `yaml:"audience"`          // Expected audience claim
+	JWKSCacheTTL     string            `yaml:"jwks_cache_ttl"`    // e.g., "1h"
+	DiscoveryTimeout string            `yaml:"discovery_timeout"` // Timeout for OIDC discovery (default: "5s")
+	ClaimMappings    OIDCClaimMappings `yaml:"claim_mappings"`
+	AllowedGroups    []string          `yaml:"allowed_groups"`    // Groups allowed to access
+	GroupPolicyMap   map[string]string `yaml:"group_policy_map"`  // group -> policy name
+	GroupRoleMap     map[string]string `yaml:"group_role_map"`    // group -> role (admin, approver, agent)
 }
 
 // OIDCClaimMappings maps OIDC claims to agentsh fields.

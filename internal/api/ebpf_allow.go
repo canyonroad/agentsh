@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/netmonitor/ebpf"
@@ -74,8 +75,37 @@ func buildAllowedEndpoints(p *policy.Engine, maxTTL time.Duration) ([]ebpf.Allow
 	addV4(net.ParseIP("127.0.0.1"), 0)
 	addV6(net.ParseIP("::1"), 0)
 
+	// Pre-resolve all literal domains in parallel so the loop below hits the cache.
+	rules := p.NetworkRules()
+	{
+		seen := make(map[string]struct{})
+		var domains []string
+		for _, r := range rules {
+			for _, d := range r.Domains {
+				if strings.ContainsAny(d, "*?[") {
+					continue
+				}
+				if _, ok := seen[d]; !ok {
+					seen[d] = struct{}{}
+					domains = append(domains, d)
+				}
+			}
+		}
+		if len(domains) > 1 {
+			var wg sync.WaitGroup
+			wg.Add(len(domains))
+			for _, d := range domains {
+				go func(domain string) {
+					defer wg.Done()
+					resolveDomainWithTTL(domain, maxTTL)
+				}(d)
+			}
+			wg.Wait()
+		}
+	}
+
 	// Expand allow network rules.
-	for _, r := range p.NetworkRules() {
+	for _, r := range rules {
 		isAllow := strings.EqualFold(r.Decision, string(types.DecisionAllow))
 		isDeny := strings.EqualFold(r.Decision, string(types.DecisionDeny))
 		if !isAllow && !isDeny {

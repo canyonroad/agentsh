@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/agentsh/agentsh/internal/platform"
 )
@@ -50,14 +51,34 @@ func (p *Platform) Capabilities() platform.Capabilities {
 }
 
 // detectCapabilities checks what's available on this Linux system.
+// Expensive checks (FUSE, iptables) run concurrently to reduce startup latency.
 func (p *Platform) detectCapabilities() platform.Capabilities {
-	caps := platform.Capabilities{
-		// Filesystem - FUSE is typically available on Linux
-		HasFUSE:            p.checkFUSE(),
-		FUSEImplementation: p.detectFUSEVersion(),
+	var (
+		hasFUSE, hasIptables bool
+		fuseVersion          string
+		wg                   sync.WaitGroup
+	)
 
-		// Network - iptables is standard on Linux
-		HasNetworkIntercept:   p.checkIptables(),
+	// Run expensive checks (PATH lookups, /dev/fuse probe) concurrently.
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		hasFUSE = p.checkFUSE()
+		fuseVersion = p.detectFUSEVersion()
+	}()
+	go func() {
+		defer wg.Done()
+		hasIptables = p.checkIptables()
+	}()
+	wg.Wait()
+
+	caps := platform.Capabilities{
+		// Filesystem
+		HasFUSE:            hasFUSE,
+		FUSEImplementation: fuseVersion,
+
+		// Network
+		HasNetworkIntercept:   hasIptables,
 		NetworkImplementation: "iptables",
 		CanRedirectTraffic:    true,
 		CanInspectTLS:         true,

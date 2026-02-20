@@ -236,7 +236,17 @@ func New(cfg *config.Config) (*Server, error) {
 
 	var oidcAuth *auth.OIDCAuth
 	if !cfg.Development.DisableAuth && (cfg.Auth.Type == "oidc" || cfg.Auth.Type == "hybrid") {
-		ctx := context.Background()
+		discoveryTimeout := 5 * time.Second
+		if cfg.Auth.OIDC.DiscoveryTimeout != "" {
+			d, err := time.ParseDuration(cfg.Auth.OIDC.DiscoveryTimeout)
+			if err != nil {
+				_ = store.Close()
+				return nil, fmt.Errorf("parse auth.oidc.discovery_timeout: %w", err)
+			}
+			discoveryTimeout = d
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
+		defer cancel()
 		var err error
 		oidcAuth, err = auth.NewOIDCAuth(
 			ctx,
