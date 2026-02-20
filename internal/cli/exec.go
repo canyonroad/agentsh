@@ -119,10 +119,11 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 
 			cfg := getClientConfig(cmd)
 			cl, err := client.NewForCLI(client.CLIOptions{
-				HTTPBaseURL: cfg.serverAddr,
-				GRPCAddr:    cfg.grpcAddr,
-				APIKey:      cfg.apiKey,
-				Transport:   cfg.transport,
+				HTTPBaseURL:   cfg.serverAddr,
+				GRPCAddr:      cfg.grpcAddr,
+				APIKey:        cfg.apiKey,
+				Transport:     cfg.transport,
+				ClientTimeout: cfg.getClientTimeout(),
 			})
 			if err != nil {
 				return err

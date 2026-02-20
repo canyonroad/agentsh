@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/agentsh/agentsh/pkg/types"
 )
@@ -46,10 +47,11 @@ type CLIClient interface {
 }
 
 type CLIOptions struct {
-	HTTPBaseURL string
-	GRPCAddr    string
-	APIKey      string
-	Transport   string // http|grpc
+	HTTPBaseURL   string
+	GRPCAddr      string
+	APIKey        string
+	Transport     string        // http|grpc
+	ClientTimeout time.Duration // HTTP client timeout (0 = default 30s)
 }
 
 func NewForCLI(opts CLIOptions) (CLIClient, error) {
@@ -59,9 +61,9 @@ func NewForCLI(opts CLIOptions) (CLIClient, error) {
 	}
 	switch transport {
 	case "http":
-		return New(opts.HTTPBaseURL, opts.APIKey), nil
+		return NewWithTimeout(opts.HTTPBaseURL, opts.APIKey, opts.ClientTimeout), nil
 	case "grpc":
-		httpc := New(opts.HTTPBaseURL, opts.APIKey)
+		httpc := NewWithTimeout(opts.HTTPBaseURL, opts.APIKey, opts.ClientTimeout)
 		gaddr := strings.TrimSpace(opts.GRPCAddr)
 		if gaddr == "" {
 			gaddr = "127.0.0.1:9090"

@@ -38,9 +38,19 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("%s %s: %s: %s", e.Method, e.Path, e.Status, msg)
 }
 
+// DefaultClientTimeout is the default HTTP client timeout for API requests.
+const DefaultClientTimeout = 30 * time.Second
+
 func New(baseURL string, apiKey string) *Client {
+	return NewWithTimeout(baseURL, apiKey, DefaultClientTimeout)
+}
+
+func NewWithTimeout(baseURL string, apiKey string, timeout time.Duration) *Client {
 	baseURL = strings.TrimRight(baseURL, "/")
-	hc := &http.Client{Timeout: 30 * time.Second}
+	if timeout <= 0 {
+		timeout = DefaultClientTimeout
+	}
+	hc := &http.Client{Timeout: timeout}
 	if u, err := url.Parse(baseURL); err == nil && strings.EqualFold(u.Scheme, "unix") {
 		sock := u.Path
 		if sock == "" {

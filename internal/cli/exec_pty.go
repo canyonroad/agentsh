@@ -152,10 +152,11 @@ func execPTYWithDeps(ctx context.Context, cfg *clientConfig, sessionID string, r
 		}
 		if autoCreateRoot != "" {
 			cl, clErr := client.NewForCLI(client.CLIOptions{
-				HTTPBaseURL: cfg.serverAddr,
-				GRPCAddr:    cfg.grpcAddr,
-				APIKey:      cfg.apiKey,
-				Transport:   cfg.transport,
+				HTTPBaseURL:   cfg.serverAddr,
+				GRPCAddr:      cfg.grpcAddr,
+				APIKey:        cfg.apiKey,
+				Transport:     cfg.transport,
+				ClientTimeout: cfg.getClientTimeout(),
 			})
 			if clErr == nil {
 				createReq := types.CreateSessionRequest{
