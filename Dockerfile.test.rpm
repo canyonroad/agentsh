@@ -4,7 +4,7 @@
 #
 # Build:
 #   docker build -f Dockerfile.test.rpm \
-#     --build-arg AGENTSH_TAG=v0.9.2 \
+#     --build-arg AGENTSH_TAG=v0.10.0 \
 #     -t agentsh-test-fedora:latest .
 #
 # Run:
@@ -13,7 +13,7 @@
 FROM fedora:latest
 
 ARG AGENTSH_REPO=canyonroad/agentsh
-ARG AGENTSH_TAG=v0.9.2
+ARG AGENTSH_TAG=v0.10.0
 
 # Install dependencies: curl for downloading, bash for shim tests, jq for JSON parsing.
 RUN set -eux; \

@@ -4,7 +4,7 @@
 # Build:
 #   docker build -f Dockerfile.example \
 #     --build-arg AGENTSH_REPO=canyonroad/agentsh \
-#     --build-arg AGENTSH_TAG=v0.9.2 \
+#     --build-arg AGENTSH_TAG=v0.10.0 \
 #     --build-arg DEB_ARCH=amd64 \
 #     -t agentsh-example:latest .
 #
@@ -21,7 +21,7 @@
 FROM debian:bookworm-slim
 
 ARG AGENTSH_REPO=canyonroad/agentsh
-ARG AGENTSH_TAG=v0.9.2
+ARG AGENTSH_TAG=v0.10.0
 ARG DEB_ARCH=amd64
 
 RUN set -eux; \
