@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -167,6 +169,170 @@ func TestIsMCPCommand(t *testing.T) {
 				t.Errorf("isMCPCommand(%q, %v) = %v, want %v", tt.argv0, tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+// buildShim compiles the shell shim binary into dir and returns its path.
+func buildShim(t *testing.T, dir string) string {
+	t.Helper()
+	shimBin := filepath.Join(dir, "sh")
+	cmd := exec.Command("go", "build", "-o", shimBin, ".")
+	// Resolve the source directory relative to this test file.
+	cmd.Dir = filepath.Join(srcDir(t), "cmd", "agentsh-shell-shim")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build shim: %v\n%s", err, out)
+	}
+	return shimBin
+}
+
+// srcDir returns the repository root by walking up from the test binary location.
+func srcDir(t *testing.T) string {
+	t.Helper()
+	// go test sets the working directory to the package directory.
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Walk up to find go.mod
+	dir := wd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not find repository root from %s", wd)
+		}
+		dir = parent
+	}
+}
+
+// copyFilePath copies src to dst preserving permissions.
+func copyFilePath(t *testing.T, src, dst string) {
+	t.Helper()
+	in, err := os.Open(src)
+	if err != nil {
+		t.Fatalf("open %s: %v", src, err)
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	if err != nil {
+		t.Fatalf("create %s: %v", dst, err)
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestShimPipedStdin_PassesBinaryDataThrough(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+
+	// Create sh.real as a copy of /bin/sh so the shim can resolve it.
+	copyFilePath(t, "/bin/sh", filepath.Join(tmp, "sh.real"))
+
+	// Generate binary data with null bytes, ELF-like header, and full byte range.
+	binaryData := make([]byte, 4096)
+	copy(binaryData, []byte{0x7f, 'E', 'L', 'F'}) // ELF magic
+	for i := 4; i < len(binaryData); i++ {
+		binaryData[i] = byte(i % 256)
+	}
+
+	// Run the shim with piped stdin (non-TTY). This simulates:
+	//   docker exec -i container sh -c "cat" < binary_file
+	cmd := exec.Command(shimBin, "-c", "cat")
+	cmd.Stdin = bytes.NewReader(binaryData)
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		// agentsh is not available — if the shim tries to go through agentsh,
+		// it will fail. With the non-interactive bypass, it should exec sh.real directly.
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		t.Fatalf("shim exited with error: %v\nstderr: %s", err, stderr.String())
+	}
+
+	if !bytes.Equal(stdout.Bytes(), binaryData) {
+		t.Fatalf("binary data corrupted: wrote %d bytes, got %d bytes back\nfirst 16 in:  %x\nfirst 16 out: %x",
+			len(binaryData), stdout.Len(), binaryData[:16], stdout.Bytes()[:min(16, stdout.Len())])
+	}
+}
+
+func TestShimPipedStdin_PreservesExitCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	copyFilePath(t, "/bin/sh", filepath.Join(tmp, "sh.real"))
+
+	// Non-interactive: run a command that exits with code 42.
+	cmd := exec.Command(shimBin, "-c", "exit 42")
+	cmd.Stdin = strings.NewReader("") // piped (non-TTY)
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+	}
+
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected non-zero exit")
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected ExitError, got %T: %v", err, err)
+	}
+	if ee.ExitCode() != 42 {
+		t.Fatalf("expected exit code 42, got %d", ee.ExitCode())
+	}
+}
+
+func TestShimPipedStdin_StderrNotContaminated(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	copyFilePath(t, "/bin/sh", filepath.Join(tmp, "sh.real"))
+
+	// Non-interactive: stdout and stderr should contain only what the command produces.
+	cmd := exec.Command(shimBin, "-c", "echo hello && echo err >&2")
+	cmd.Stdin = strings.NewReader("")
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("shim exited with error: %v\nstderr: %s", err, stderr.String())
+	}
+
+	if got := stdout.String(); got != "hello\n" {
+		t.Fatalf("stdout contaminated: expected %q, got %q", "hello\n", got)
+	}
+	if got := stderr.String(); got != "err\n" {
+		t.Fatalf("stderr contaminated: expected %q, got %q", "err\n", got)
 	}
 }
 

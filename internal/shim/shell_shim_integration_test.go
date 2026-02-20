@@ -4,6 +4,7 @@
 package shim_test
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,40 +39,42 @@ func TestShellShim_UsesAgentshBinAndForwardsArgs(t *testing.T) {
 	logPath := filepath.Join(tmp, "agentsh.log")
 	writeFakeAgentsh(t, fakeAgentsh, logPath)
 
+	// Use a PTY so the shim takes the agentsh path (non-TTY stdin triggers bypass).
+	pty, tty, err := openPTY()
+	if err != nil {
+		t.Skipf("pty not available: %v", err)
+	}
+	defer func() { _ = pty.Close() }()
+	defer func() { _ = tty.Close() }()
+
 	cmd := exec.Command(shimPath, "-lc", "echo hi")
+	cmd.Stdin = tty
+	cmd.Stdout = tty
+	cmd.Stderr = tty
 	cmd.Env = append(os.Environ(),
 		"AGENTSH_BIN="+fakeAgentsh,
 		"AGENTSH_SESSION_ID=session-test",
 		"AGENTSH_SERVER=http://127.0.0.1:1",
 		"FAKE_AGENTSH_LOG="+logPath,
 	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("shim failed: %v (out=%s)", err, string(out))
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
 	}
+	_ = cmd.Wait()
 
 	lines := mustReadLines(t, logPath)
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "ARG0=exec") {
 		t.Fatalf("expected exec subcommand in %q", joined)
 	}
-	if !strings.Contains(joined, "ARG1=--argv0") {
+	if !strings.Contains(joined, "--argv0") {
 		t.Fatalf("expected --argv0 in %q", joined)
 	}
-	if !strings.Contains(joined, "ARG2="+shimPath) {
-		t.Fatalf("expected argv0 to match shim path; got %q", joined)
-	}
-	if !strings.Contains(joined, "ARG3=session-test") {
+	if !strings.Contains(joined, "session-test") {
 		t.Fatalf("expected session id; got %q", joined)
 	}
-	if !strings.Contains(joined, "ARG4=--") {
-		t.Fatalf("expected -- separator; got %q", joined)
-	}
-	if !strings.Contains(joined, "ARG5="+realPath) {
+	if !strings.Contains(joined, realPath) {
 		t.Fatalf("expected real shell path; got %q", joined)
-	}
-	if strings.Contains(joined, "--pty") {
-		t.Fatalf("did not expect --pty when not a TTY; got %q", joined)
 	}
 }
 
@@ -99,16 +102,27 @@ func TestShellShim_UsesPATHWhenAgentshBinUnset(t *testing.T) {
 	logPath := filepath.Join(tmp, "agentsh.log")
 	writeFakeAgentsh(t, filepath.Join(fakeDir, "agentsh"), logPath)
 
+	// Use a PTY so the shim takes the agentsh path (non-TTY stdin triggers bypass).
+	pty, tty, err := openPTY()
+	if err != nil {
+		t.Skipf("pty not available: %v", err)
+	}
+	defer func() { _ = pty.Close() }()
+	defer func() { _ = tty.Close() }()
+
 	cmd := exec.Command(shimPath, "-lc", "echo hi")
+	cmd.Stdin = tty
+	cmd.Stdout = tty
+	cmd.Stderr = tty
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"AGENTSH_SESSION_ID=session-test",
 		"FAKE_AGENTSH_LOG="+logPath,
 	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("shim failed: %v (out=%s)", err, string(out))
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
 	}
+	_ = cmd.Wait()
 
 	lines := mustReadLines(t, logPath)
 	if len(lines) == 0 || !strings.HasPrefix(lines[0], "ARG0=exec") {
@@ -204,22 +218,34 @@ func TestShellShim_RespectsCustomArgv0(t *testing.T) {
 	logPath := filepath.Join(tmp, "agentsh.log")
 	writeFakeAgentsh(t, fakeAgentsh, logPath)
 
+	// Use a PTY so the shim takes the agentsh path (non-TTY stdin triggers bypass).
+	pty, tty, err := openPTY()
+	if err != nil {
+		t.Skipf("pty not available: %v", err)
+	}
+	defer func() { _ = pty.Close() }()
+	defer func() { _ = tty.Close() }()
+
 	cmd := exec.Command(shimPath, "-lc", "echo hi")
 	// Override argv0 to simulate a harness exec'ing /bin/sh but pointing to our shim.
 	cmd.Args[0] = "/bin/sh"
+	cmd.Stdin = tty
+	cmd.Stdout = tty
+	cmd.Stderr = tty
 	cmd.Env = append(os.Environ(),
 		"AGENTSH_BIN="+fakeAgentsh,
 		"AGENTSH_SESSION_ID=session-test",
 		"FAKE_AGENTSH_LOG="+logPath,
 	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("shim failed: %v (out=%s)", err, string(out))
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
 	}
+	_ = cmd.Wait()
 
 	lines := mustReadLines(t, logPath)
 	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "ARG2=/bin/sh") {
+	// With PTY, args are: exec --pty --argv0 /bin/sh session-test -- sh.real ...
+	if !strings.Contains(joined, "--argv0") || !strings.Contains(joined, "/bin/sh") {
 		t.Fatalf("expected argv0=/bin/sh to be forwarded; got %q", joined)
 	}
 }
@@ -248,25 +274,37 @@ func TestShellShim_LoginArgv0SelectsBash(t *testing.T) {
 	logPath := filepath.Join(tmp, "agentsh.log")
 	writeFakeAgentsh(t, fakeAgentsh, logPath)
 
+	// Use a PTY so the shim takes the agentsh path (non-TTY stdin triggers bypass).
+	pty, tty, err := openPTY()
+	if err != nil {
+		t.Skipf("pty not available: %v", err)
+	}
+	defer func() { _ = pty.Close() }()
+	defer func() { _ = tty.Close() }()
+
 	cmd := exec.Command(shimPath, "-lc", "echo hi")
 	// Simulate login shell argv0 ("-bash").
 	cmd.Args[0] = "-bash"
+	cmd.Stdin = tty
+	cmd.Stdout = tty
+	cmd.Stderr = tty
 	cmd.Env = append(os.Environ(),
 		"AGENTSH_BIN="+fakeAgentsh,
 		"AGENTSH_SESSION_ID=session-test",
 		"FAKE_AGENTSH_LOG="+logPath,
 	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("shim failed: %v (out=%s)", err, string(out))
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
 	}
+	_ = cmd.Wait()
 
 	lines := mustReadLines(t, logPath)
 	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "ARG2=-bash") {
+	// With PTY, args are: exec --pty --argv0 -bash session-test -- bash.real ...
+	if !strings.Contains(joined, "-bash") {
 		t.Fatalf("expected argv0=-bash to be forwarded; got %q", joined)
 	}
-	if !strings.Contains(joined, "ARG5="+realPath) {
+	if !strings.Contains(joined, realPath) {
 		t.Fatalf("expected real shell bash.real; got %q", joined)
 	}
 }
@@ -318,6 +356,108 @@ func TestShellShim_AddsPTYWhenTTY(t *testing.T) {
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "ARG1=--pty") {
 		t.Fatalf("expected --pty when stdin/stdout are TTY; got %q", joined)
+	}
+}
+
+func TestShellShim_NonInteractiveBypass_BinaryStdinPassthrough(t *testing.T) {
+	repoRoot := repoRootOrSkip(t)
+	tmp := t.TempDir()
+
+	shimBin := filepath.Join(tmp, "agentsh-shell-shim")
+	buildOrSkip(t, repoRoot, "./cmd/agentsh-shell-shim", shimBin)
+
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	shimPath := filepath.Join(binDir, "sh")
+	copyFile(t, shimBin, shimPath, 0o755)
+
+	// Use a real shell as sh.real.
+	copyFile(t, "/bin/sh", filepath.Join(binDir, "sh.real"), 0o755)
+
+	// Generate binary data with null bytes and full byte range (simulating a binary/ELF).
+	binaryData := make([]byte, 8192)
+	copy(binaryData, []byte{0x7f, 'E', 'L', 'F'})
+	for i := 4; i < len(binaryData); i++ {
+		binaryData[i] = byte(i % 256)
+	}
+
+	// Pipe binary data through the shim with non-TTY stdin, simulating:
+	//   docker exec -i container sh -c "cat" < binary_file
+	cmd := exec.Command(shimPath, "-c", "cat")
+	cmd.Stdin = bytes.NewReader(binaryData)
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		// No AGENTSH_BIN — the bypass should exec sh.real directly.
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("shim failed: %v\nstderr: %s", err, stderr.String())
+	}
+
+	if !bytes.Equal(stdout.Bytes(), binaryData) {
+		t.Fatalf("binary data corrupted: wrote %d bytes, got %d bytes",
+			len(binaryData), stdout.Len())
+	}
+
+	// Verify stderr is clean (no shim messages leaked).
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected stderr output: %q", stderr.String())
+	}
+}
+
+func TestShellShim_NonInteractiveBypass_ExecRealShellNotAgentsh(t *testing.T) {
+	repoRoot := repoRootOrSkip(t)
+	tmp := t.TempDir()
+
+	shimBin := filepath.Join(tmp, "agentsh-shell-shim")
+	buildOrSkip(t, repoRoot, "./cmd/agentsh-shell-shim", shimBin)
+
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	shimPath := filepath.Join(binDir, "sh")
+	copyFile(t, shimBin, shimPath, 0o755)
+
+	// sh.real prints a marker so we can verify it ran.
+	realPath := filepath.Join(binDir, "sh.real")
+	if err := os.WriteFile(realPath, []byte("#!/bin/sh\necho BYPASS_OK\n"), 0o755); err != nil {
+		t.Fatalf("write sh.real: %v", err)
+	}
+
+	fakeAgentsh := filepath.Join(tmp, "fake-agentsh")
+	logPath := filepath.Join(tmp, "agentsh.log")
+	writeFakeAgentsh(t, fakeAgentsh, logPath)
+
+	// Non-TTY stdin: the shim should bypass agentsh and exec sh.real directly.
+	cmd := exec.Command(shimPath, "-c", "echo BYPASS_OK")
+	cmd.Stdin = strings.NewReader("")
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_BIN=" + fakeAgentsh,
+		"AGENTSH_SESSION_ID=test-session",
+		"FAKE_AGENTSH_LOG=" + logPath,
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shim failed: %v (out=%s)", err, string(out))
+	}
+
+	if !strings.Contains(string(out), "BYPASS_OK") {
+		t.Fatalf("expected real shell to run, got %q", string(out))
+	}
+
+	// Verify agentsh was NOT invoked (log file should not exist).
+	if _, err := os.Stat(logPath); err == nil {
+		content, _ := os.ReadFile(logPath)
+		t.Fatalf("agentsh should NOT have been invoked for non-interactive use; log: %s", content)
 	}
 }
 

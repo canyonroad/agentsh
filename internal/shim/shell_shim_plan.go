@@ -34,7 +34,9 @@ func PlanInstallShellShim(opts InstallShellShimOptions) (*ShellShimPlan, error) 
 	}
 
 	var actions []ShellShimAction
-	actions = append(actions, planInstallOne(root, "sh", shimBytes)...)
+	if !opts.BashOnly {
+		actions = append(actions, planInstallOne(root, "sh", shimBytes)...)
+	}
 	if opts.InstallBash {
 		actions = append(actions, planInstallOne(root, "bash", shimBytes)...)
 	}

@@ -18,6 +18,12 @@ type InstallShellShimOptions struct {
 
 	// InstallBash controls whether to also install to bash when present.
 	InstallBash bool
+
+	// BashOnly installs only to /bin/bash, skipping /bin/sh entirely.
+	// This leaves /bin/sh untouched for orchestrators that pipe binary data
+	// through it (e.g., docker exec -i container sh -c "cat > /file").
+	// When set, InstallBash must also be true.
+	BashOnly bool
 }
 
 // InstallShellShim installs the agentsh shell shim as /bin/sh (and optionally /bin/bash)
@@ -37,8 +43,10 @@ func InstallShellShim(opts InstallShellShimOptions) error {
 		return fmt.Errorf("read shim: %w", err)
 	}
 
-	if err := installOne(root, "sh", shimBytes); err != nil {
-		return err
+	if !opts.BashOnly {
+		if err := installOne(root, "sh", shimBytes); err != nil {
+			return err
+		}
 	}
 	if opts.InstallBash {
 		if err := installOne(root, "bash", shimBytes); err != nil {

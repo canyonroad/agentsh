@@ -53,6 +53,17 @@ func main() {
 		)
 	}
 
+	// Non-interactive bypass: when stdin is not a terminal (piped data, e.g.
+	// docker exec -i container sh -c "cat > /file" < binary), exec the real
+	// shell directly. This preserves binary stdin/stdout integrity — the shim
+	// never touches the data streams. Policy enforcement for commands inside
+	// agentsh sessions is handled by AGENTSH_IN_SESSION (checked above).
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		debugLog("non-interactive bypass: stdin is not a tty, executing real shell %s", realShell)
+		execOrExit(realShell, append([]string{argv0}, os.Args[1:]...), os.Environ())
+		return
+	}
+
 	agentshBin, err := resolveAgentshBin()
 	if err != nil {
 		hint := "Set AGENTSH_BIN=/path/to/agentsh or ensure `agentsh` is available on PATH."
