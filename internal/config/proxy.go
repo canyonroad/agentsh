@@ -12,6 +12,11 @@ type ProxyProvidersConfig struct {
 	OpenAI    string `yaml:"openai"`
 }
 
+// IsMCPOnly returns true if the proxy runs in MCP-interception-only mode.
+func (c ProxyConfig) IsMCPOnly() bool {
+	return c.Mode == "mcp-only"
+}
+
 // IsCustomOpenAI returns true if a non-default OpenAI URL is configured.
 func (c ProxyProvidersConfig) IsCustomOpenAI() bool {
 	return c.OpenAI != "" && c.OpenAI != "https://api.openai.com"

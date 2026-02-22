@@ -499,11 +499,30 @@ type SandboxXPCESFConfig struct {
 type SandboxMCPConfig struct {
 	EnforcePolicy  bool                    `yaml:"enforce_policy"`
 	FailClosed     bool                    `yaml:"fail_closed"` // Block unknown tools if true
+	Servers        []MCPServerDeclaration  `yaml:"servers"`
+	ServerPolicy   string                  `yaml:"server_policy"` // allowlist, denylist, none
+	AllowedServers []MCPServerRule         `yaml:"allowed_servers"`
+	DeniedServers  []MCPServerRule         `yaml:"denied_servers"`
 	ToolPolicy     string                  `yaml:"tool_policy"` // allowlist, denylist, none
 	AllowedTools   []MCPToolRule           `yaml:"allowed_tools"`
 	DeniedTools    []MCPToolRule           `yaml:"denied_tools"`
 	VersionPinning MCPVersionPinningConfig `yaml:"version_pinning"`
 	RateLimits     MCPRateLimitsConfig     `yaml:"rate_limits"`
+}
+
+// MCPServerDeclaration defines an MCP server and how to connect to it.
+type MCPServerDeclaration struct {
+	ID             string   `yaml:"id"`
+	Type           string   `yaml:"type"`            // "stdio" | "http" | "sse"
+	Command        string   `yaml:"command"`          // For stdio servers
+	Args           []string `yaml:"args"`             // For stdio servers
+	URL            string   `yaml:"url"`              // For http/sse servers
+	TLSFingerprint string   `yaml:"tls_fingerprint"`  // Optional TLS cert pin
+}
+
+// MCPServerRule matches servers by ID (supports "*" wildcard).
+type MCPServerRule struct {
+	ID string `yaml:"id"`
 }
 
 // MCPToolRule defines a tool matching rule.
