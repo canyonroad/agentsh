@@ -1,7 +1,10 @@
 // internal/mcpinspect/events.go
 package mcpinspect
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // MCPToolSeenEvent is logged when a tool definition is observed.
 type MCPToolSeenEvent struct {
@@ -47,6 +50,20 @@ type MCPToolChangedEvent struct {
 
 	// New detection results
 	Detections []DetectionResult `json:"detections,omitempty"`
+}
+
+// MCPToolCalledEvent is logged when a tools/call JSON-RPC request is observed
+// on an MCP server's stdin.
+type MCPToolCalledEvent struct {
+	Type      string    `json:"type"` // "mcp_tool_called"
+	Timestamp time.Time `json:"timestamp"`
+	SessionID string    `json:"session_id"`
+	ServerID  string    `json:"server_id"`
+
+	// From JSON-RPC request
+	ToolName  string          `json:"tool_name"`
+	JSONRPCID json.RawMessage `json:"jsonrpc_id"`
+	Input     json.RawMessage `json:"input,omitempty"`
 }
 
 // MCPDetectionEvent is logged when suspicious patterns are detected.

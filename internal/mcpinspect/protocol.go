@@ -31,6 +31,26 @@ func ParseToolsListResponse(data []byte) (*ToolsListResponse, error) {
 	return &resp, nil
 }
 
+// ToolsCallRequest is the JSON-RPC request for tools/call.
+type ToolsCallRequest struct {
+	JSONRPC string `json:"jsonrpc"`
+	ID      any    `json:"id"`
+	Method  string `json:"method"` // "tools/call"
+	Params  struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	} `json:"params"`
+}
+
+// ParseToolsCallRequest parses a tools/call request from raw JSON.
+func ParseToolsCallRequest(data []byte) (*ToolsCallRequest, error) {
+	var req ToolsCallRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("parse tools/call request: %w", err)
+	}
+	return &req, nil
+}
+
 // MessageType identifies the type of MCP message.
 type MessageType int
 
