@@ -83,6 +83,31 @@ type MCPDetectionEvent struct {
 	Action string `json:"action"` // "alert" | "warn" | "block"
 }
 
+// MCPToolCallInterceptedEvent is logged when the LLM proxy detects a
+// tool_use/tool_calls block that matches a registered MCP tool.
+type MCPToolCallInterceptedEvent struct {
+	Type      string    `json:"type"`       // "mcp_tool_call_intercepted"
+	Timestamp time.Time `json:"timestamp"`
+	SessionID string    `json:"session_id"`
+	RequestID string    `json:"request_id"` // LLM proxy request ID
+	Dialect   string    `json:"dialect"`    // "anthropic" | "openai"
+
+	// From LLM response
+	ToolName   string          `json:"tool_name"`
+	ToolCallID string          `json:"tool_call_id"` // "toolu_..." or "call_..."
+	Input      json.RawMessage `json:"input"`
+
+	// From registry lookup
+	ServerID   string `json:"server_id"`
+	ServerType string `json:"server_type"` // "stdio" | "http" | "sse"
+	ServerAddr string `json:"server_addr,omitempty"`
+	ToolHash   string `json:"tool_hash"`
+
+	// Policy decision
+	Action string `json:"action"`           // "allow" | "block"
+	Reason string `json:"reason,omitempty"`
+}
+
 // FieldChange describes what changed in a tool definition.
 type FieldChange struct {
 	Field    string `json:"field"`
