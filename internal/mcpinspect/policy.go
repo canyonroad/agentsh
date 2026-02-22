@@ -36,19 +36,65 @@ func (p *PolicyEvaluator) IsAllowedWithHash(serverID, toolName, hash string) boo
 }
 
 // Evaluate performs a full policy evaluation and returns the decision.
+// Evaluation order: server-level policy first, then tool-level policy.
 func (p *PolicyEvaluator) Evaluate(serverID, toolName, hash string) PolicyDecision {
 	if !p.cfg.EnforcePolicy {
 		return PolicyDecision{Allowed: true, Reason: "policy enforcement disabled"}
 	}
 
+	// 1. Server-level policy check (runs before tool-level)
+	if decision, checked := p.evaluateServerPolicy(serverID); checked {
+		if !decision.Allowed {
+			return decision
+		}
+	}
+
+	// 2. Tool-level policy check
 	switch p.cfg.ToolPolicy {
 	case "allowlist":
 		return p.evaluateAllowlist(serverID, toolName, hash)
 	case "denylist":
 		return p.evaluateDenylist(serverID, toolName, hash)
 	default:
-		return PolicyDecision{Allowed: true, Reason: "no policy configured"}
+		return PolicyDecision{Allowed: true, Reason: "no tool policy configured"}
 	}
+}
+
+// evaluateServerPolicy checks server-level allow/deny rules.
+// Returns (decision, true) if a server-level decision was made, or (_, false) if
+// no server policy is configured (skip to tool-level).
+func (p *PolicyEvaluator) evaluateServerPolicy(serverID string) (PolicyDecision, bool) {
+	switch p.cfg.ServerPolicy {
+	case "allowlist":
+		for _, rule := range p.cfg.AllowedServers {
+			if matchesServerRule(rule, serverID) {
+				return PolicyDecision{Allowed: true, Reason: "server in allowlist"}, true
+			}
+		}
+		return PolicyDecision{Allowed: false, Reason: "server not in allowlist"}, true
+
+	case "denylist":
+		for _, rule := range p.cfg.DeniedServers {
+			if matchesServerRule(rule, serverID) {
+				return PolicyDecision{Allowed: false, Reason: "server in denylist"}, true
+			}
+		}
+		// Server not denied — pass through to tool-level check
+		return PolicyDecision{}, false
+
+	default:
+		// No server policy — skip to tool-level
+		return PolicyDecision{}, false
+	}
+}
+
+// matchesServerRule checks if a server ID matches a server rule.
+// Supports "*" wildcard to match any server.
+func matchesServerRule(rule config.MCPServerRule, serverID string) bool {
+	if rule.ID == "*" {
+		return true
+	}
+	return strings.EqualFold(rule.ID, serverID)
 }
 
 func (p *PolicyEvaluator) evaluateAllowlist(serverID, toolName, hash string) PolicyDecision {
