@@ -146,6 +146,13 @@ func (p *Proxy) versionPinCfg() *config.MCPVersionPinningConfig {
 	return &p.cfg.MCP.VersionPinning
 }
 
+// hasInterception returns true if any MCP interception control is active
+// (policy, rate limiter, or version pinning). Used to determine whether to
+// run the interception pipeline, even when EnforcePolicy is false.
+func (p *Proxy) hasInterception() bool {
+	return p.policy != nil || p.rateLimiter != nil || p.versionPinCfg() != nil
+}
+
 // SetRegistry sets the MCP tool registry on the proxy. It is safe for
 // concurrent use and is called once the shim has finished discovering tools.
 func (p *Proxy) SetRegistry(r *mcpregistry.Registry) {
@@ -326,8 +333,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 
-	// Configure real-time MCP interception if policy enforcement is enabled.
-	if reg := p.getRegistry(); reg != nil && p.policy != nil {
+	// Configure real-time MCP interception if any control is active.
+	if reg := p.getRegistry(); reg != nil && p.hasInterception() {
 		sseTransport.SetInterceptor(
 			reg, p.policy, dialect,
 			sessionID, requestID,
@@ -360,7 +367,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// MCP tool call interception (non-SSE only; SSE handled by SSEInterceptor).
-			if reg := p.getRegistry(); reg != nil && p.policy != nil && resp.StatusCode == http.StatusOK {
+			if reg := p.getRegistry(); reg != nil && p.hasInterception() && resp.StatusCode == http.StatusOK {
 				result := interceptMCPToolCalls(respBody, dialect, reg, p.policy, requestID, sessionID, p.getSessionAnalyzer(), p.rateLimiter, p.versionPinCfg())
 				for _, ev := range result.Events {
 					p.logger.Info("mcp tool call intercepted",

@@ -1825,3 +1825,101 @@ func TestSSEInterceptor_VersionPinBlock(t *testing.T) {
 		t.Errorf("event Reason = %q, want to contain 'hash changed'", events[0].Reason)
 	}
 }
+
+func TestSSEInterceptor_RateLimitBlocks_NilPolicy(t *testing.T) {
+	// Rate limiter should block even when policy is nil (EnforcePolicy=false).
+	rlCfg := config.MCPRateLimitsConfig{
+		Enabled:      true,
+		DefaultRPM:   0,
+		DefaultBurst: 0,
+	}
+	rateLimiter := mcpinspect.NewRateLimiterRegistry(rlCfg)
+
+	reg := mcpregistry.NewRegistry()
+	reg.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "h1"},
+	})
+
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(ev mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, ev)
+	}
+	logger := slog.Default()
+
+	// policy is nil — simulating EnforcePolicy=false with rate limiting enabled.
+	interceptor := NewSSEInterceptor(reg, nil, DialectAnthropic, "sess_1", "req_1", onEvent, logger, nil, rateLimiter, nil)
+
+	stream := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null}}\n\n" +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"get_weather\"}}\n\n" +
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
+	var buf bytes.Buffer
+	interceptor.Stream(io.NopCloser(strings.NewReader(stream)), &buf)
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Action != "block" {
+		t.Errorf("event Action = %q, want %q", events[0].Action, "block")
+	}
+	if !strings.Contains(events[0].Reason, "rate limit") {
+		t.Errorf("event Reason = %q, want to contain 'rate limit'", events[0].Reason)
+	}
+}
+
+func TestSSEInterceptor_VersionPinAlert(t *testing.T) {
+	// Version pin alert mode should allow the call but set a reason on the event.
+	reg := mcpregistry.NewRegistry()
+	reg.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v1"},
+	})
+	reg.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v2"},
+	})
+
+	policy := mcpinspect.NewPolicyEvaluator(config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "none",
+	})
+
+	vpCfg := &config.MCPVersionPinningConfig{
+		Enabled:  true,
+		OnChange: "alert",
+	}
+
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(ev mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, ev)
+	}
+	logger := slog.Default()
+
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger, nil, nil, vpCfg)
+
+	stream := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null}}\n\n" +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"get_weather\"}}\n\n" +
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
+	var buf bytes.Buffer
+	interceptor.Stream(io.NopCloser(strings.NewReader(stream)), &buf)
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	// Alert mode should allow the call.
+	if events[0].Action != "allow" {
+		t.Errorf("event Action = %q, want %q", events[0].Action, "allow")
+	}
+	// But the event should carry the alert reason.
+	if !strings.Contains(events[0].Reason, "hash changed") {
+		t.Errorf("event Reason = %q, want to contain 'hash changed'", events[0].Reason)
+	}
+	// The tool_use block should pass through (not blocked).
+	output := buf.String()
+	if strings.Contains(output, "blocked by policy") {
+		t.Error("alert mode should not block the tool call")
+	}
+}

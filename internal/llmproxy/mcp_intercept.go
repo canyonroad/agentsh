@@ -155,7 +155,7 @@ func interceptMCPToolCalls(
 
 	result := &InterceptResult{}
 
-	if registry == nil || policy == nil {
+	if registry == nil {
 		return result
 	}
 
@@ -212,9 +212,13 @@ func interceptMCPToolCalls(
 			}
 		}
 
-		// Policy evaluation (only if nothing above set a decision).
-		if crossServerDec == nil && decision == (mcpinspect.PolicyDecision{}) {
+		// Policy evaluation (only if nothing above set a decision and policy is present).
+		if crossServerDec == nil && decision == (mcpinspect.PolicyDecision{}) && policy != nil {
 			decision = policy.Evaluate(entry.ServerID, call.Name, entry.ToolHash)
+		}
+		// If no policy and no other check set a decision, default to allow.
+		if decision == (mcpinspect.PolicyDecision{}) && crossServerDec == nil {
+			decision = mcpinspect.PolicyDecision{Allowed: true}
 		}
 
 		action := "allow"

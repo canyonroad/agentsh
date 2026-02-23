@@ -351,7 +351,7 @@ func (s *SSEInterceptor) rewriteAnthropicStopReason(data string) string {
 // regular policy evaluation. The third return value carries the cross-server
 // decision details when the block was caused by a cross-server rule.
 func (s *SSEInterceptor) lookupAndEvaluate(toolName, toolCallID string) (*mcpregistry.ToolEntry, *mcpinspect.PolicyDecision, *mcpinspect.CrossServerDecision) {
-	if s.registry == nil || s.policy == nil {
+	if s.registry == nil {
 		return nil, nil, nil
 	}
 
@@ -404,8 +404,13 @@ func (s *SSEInterceptor) lookupAndEvaluate(toolName, toolCallID string) (*mcpreg
 		}
 	}
 
-	// Policy evaluation.
-	decision := s.policy.Evaluate(entry.ServerID, toolName, entry.ToolHash)
+	// Policy evaluation (only if policy is present).
+	var decision mcpinspect.PolicyDecision
+	if s.policy != nil {
+		decision = s.policy.Evaluate(entry.ServerID, toolName, entry.ToolHash)
+	} else {
+		decision = mcpinspect.PolicyDecision{Allowed: true}
+	}
 
 	// If policy blocks a call that cross-server allowed, update the window
 	// so the "allow" record becomes "block" (prevents false positives).

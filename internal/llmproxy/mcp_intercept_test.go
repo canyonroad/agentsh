@@ -653,7 +653,7 @@ func TestInterceptMCPToolCalls_NilRegistryReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestInterceptMCPToolCalls_NilPolicyReturnsEmpty(t *testing.T) {
+func TestInterceptMCPToolCalls_NilPolicyAllowsAll(t *testing.T) {
 	reg := newTestRegistry("my-server", "stdio", []mcpregistry.ToolInfo{
 		{Name: "get_weather", Hash: "abc123"},
 	})
@@ -665,12 +665,17 @@ func TestInterceptMCPToolCalls_NilPolicyReturnsEmpty(t *testing.T) {
 		]
 	}`)
 
+	// Nil policy + nil rate limiter + nil version pin = allow all.
 	result := interceptMCPToolCalls(body, DialectAnthropic, reg, nil, "req_1", "sess_1", nil, nil, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
-	if len(result.Events) != 0 {
-		t.Errorf("expected 0 events, got %d", len(result.Events))
+	// Should emit an "allow" event (tool was found in registry).
+	if len(result.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.Events))
+	}
+	if result.Events[0].Action != "allow" {
+		t.Errorf("expected action 'allow', got %q", result.Events[0].Action)
 	}
 	if result.HasBlocked {
 		t.Error("expected HasBlocked to be false")
@@ -1882,5 +1887,84 @@ func TestInterceptVersionPinDisabled(t *testing.T) {
 
 	if result.HasBlocked {
 		t.Fatal("expected Enabled=false versionPinCfg to allow the tool call")
+	}
+}
+
+func TestInterceptRateLimitBlocks_NilPolicy(t *testing.T) {
+	// Rate limiter should block even when policy is nil (EnforcePolicy=false).
+	rlCfg := config.MCPRateLimitsConfig{
+		Enabled:      true,
+		DefaultRPM:   0,
+		DefaultBurst: 0,
+	}
+	rateLimiter := mcpinspect.NewRateLimiterRegistry(rlCfg)
+
+	registry := mcpregistry.NewRegistry()
+	registry.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "h1"},
+	})
+
+	body := []byte(`{
+		"id": "msg_1",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}}
+		],
+		"stop_reason": "tool_use"
+	}`)
+
+	// policy is nil — simulating EnforcePolicy=false with rate limiting enabled.
+	result := interceptMCPToolCalls(body, DialectAnthropic, registry, nil,
+		"req-1", "sess-1", nil, rateLimiter, nil)
+
+	if !result.HasBlocked {
+		t.Fatal("expected rate limiter to block even with nil policy")
+	}
+	if len(result.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.Events))
+	}
+	if !strings.Contains(result.Events[0].Reason, "rate limit") {
+		t.Errorf("event Reason = %q, want to contain 'rate limit'", result.Events[0].Reason)
+	}
+}
+
+func TestInterceptVersionPinBlock_NilPolicy(t *testing.T) {
+	// Version pinning should block even when policy is nil (EnforcePolicy=false).
+	registry := mcpregistry.NewRegistry()
+	registry.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v1"},
+	})
+	registry.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v2"},
+	})
+
+	vpCfg := &config.MCPVersionPinningConfig{
+		Enabled:  true,
+		OnChange: "block",
+	}
+
+	body := []byte(`{
+		"id": "msg_1",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}}
+		],
+		"stop_reason": "tool_use"
+	}`)
+
+	// policy is nil — simulating EnforcePolicy=false with version pinning enabled.
+	result := interceptMCPToolCalls(body, DialectAnthropic, registry, nil,
+		"req-1", "sess-1", nil, nil, vpCfg)
+
+	if !result.HasBlocked {
+		t.Fatal("expected version pin to block even with nil policy")
+	}
+	if len(result.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.Events))
+	}
+	if !strings.Contains(result.Events[0].Reason, "hash changed") {
+		t.Errorf("event Reason = %q, want to contain 'hash changed'", result.Events[0].Reason)
 	}
 }

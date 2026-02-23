@@ -155,14 +155,14 @@ func (t *sseProxyTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 		// When MCP interception is active, the body may be rewritten to a
 		// different size, so remove Content-Length to force chunked transfer.
-		if t.registry != nil && t.policy != nil {
+		if t.registry != nil && (t.policy != nil || t.rateLimiter != nil || t.versionPinCfg != nil) {
 			sw.Header().Del("Content-Length")
 		}
 		sw.WriteHeader(resp.StatusCode)
 
 		// Stream body to client — with MCP interception if configured
 		var bufferedBody []byte
-		if t.registry != nil && t.policy != nil {
+		if t.registry != nil && (t.policy != nil || t.rateLimiter != nil || t.versionPinCfg != nil) {
 			interceptor := NewSSEInterceptor(
 				t.registry, t.policy, t.dialect,
 				t.sessionID, t.requestID, t.onEvent, t.logger,
