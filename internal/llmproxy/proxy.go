@@ -50,9 +50,12 @@ type Proxy struct {
 	logger          *slog.Logger
 	isCustomOpenAI  bool
 	chatGPTUpstream *url.URL
-	registry *mcpregistry.Registry
+	registry         *mcpregistry.Registry
 	// policy is immutable after construction — set once in New(), never changed.
-	policy *mcpinspect.PolicyEvaluator
+	policy           *mcpinspect.PolicyEvaluator
+	// onInterceptEvent is called for each MCP tool call intercept event.
+	// Set via SetEventCallback; the API layer uses it to persist events.
+	onInterceptEvent func(mcpinspect.MCPToolCallInterceptedEvent)
 
 	server   *http.Server
 	listener net.Listener
@@ -129,6 +132,21 @@ func (p *Proxy) SetRegistry(r *mcpregistry.Registry) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.registry = r
+}
+
+// SetEventCallback sets a callback that is invoked for each MCP tool call
+// intercept event. It is safe for concurrent use.
+func (p *Proxy) SetEventCallback(fn func(mcpinspect.MCPToolCallInterceptedEvent)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onInterceptEvent = fn
+}
+
+// getEventCallback returns the current event callback in a thread-safe manner.
+func (p *Proxy) getEventCallback() func(mcpinspect.MCPToolCallInterceptedEvent) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.onInterceptEvent
 }
 
 // getUpstreamForRequest returns the appropriate upstream URL for the request.
@@ -283,6 +301,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 							"tool", ev.ToolName, "action", ev.Action,
 							"server", ev.ServerID, "request_id", requestID)
 					}
+					if cb := p.getEventCallback(); cb != nil {
+						for _, ev := range result.Events {
+							cb(ev)
+						}
+					}
 				}
 			}
 			p.logResponseDirect(requestID, sessionID, dialect, resp, body, startTime)
@@ -316,6 +339,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					p.logger.Info("mcp tool call intercepted",
 						"tool", ev.ToolName, "action", ev.Action,
 						"server", ev.ServerID, "request_id", requestID)
+				}
+				if cb := p.getEventCallback(); cb != nil {
+					for _, ev := range result.Events {
+						cb(ev)
+					}
 				}
 				if result.HasBlocked && result.RewrittenBody != nil {
 					respBody = result.RewrittenBody
