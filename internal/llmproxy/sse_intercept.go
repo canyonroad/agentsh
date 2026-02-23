@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/mcpinspect"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
@@ -28,6 +29,8 @@ type SSEInterceptor struct {
 	requestID string
 	onEvent   func(mcpinspect.MCPToolCallInterceptedEvent)
 	logger    *slog.Logger
+	rateLimiter   *mcpinspect.RateLimiterRegistry
+	versionPinCfg *config.MCPVersionPinningConfig
 
 	// Anthropic state
 	blockedIndices map[int]bool
@@ -52,9 +55,8 @@ type openAIChoiceTracking struct {
 	nblocked int          // how many were blocked
 }
 
-// NewSSEInterceptor creates a new SSE stream interceptor. The optional
-// analyzer parameter enables cross-server pattern detection; pass nil or
-// omit to disable.
+// NewSSEInterceptor creates a new SSE stream interceptor. The analyzer
+// parameter enables cross-server pattern detection; pass nil to disable.
 func NewSSEInterceptor(
 	registry *mcpregistry.Registry,
 	policy *mcpinspect.PolicyEvaluator,
@@ -62,12 +64,10 @@ func NewSSEInterceptor(
 	sessionID, requestID string,
 	onEvent func(mcpinspect.MCPToolCallInterceptedEvent),
 	logger *slog.Logger,
-	optAnalyzer ...*mcpinspect.SessionAnalyzer,
+	analyzer *mcpinspect.SessionAnalyzer,
+	rateLimiter *mcpinspect.RateLimiterRegistry,
+	versionPinCfg *config.MCPVersionPinningConfig,
 ) *SSEInterceptor {
-	var analyzer *mcpinspect.SessionAnalyzer
-	if len(optAnalyzer) > 0 {
-		analyzer = optAnalyzer[0]
-	}
 	return &SSEInterceptor{
 		registry:       registry,
 		policy:         policy,
@@ -77,6 +77,8 @@ func NewSSEInterceptor(
 		requestID:      requestID,
 		onEvent:        onEvent,
 		logger:         logger,
+		rateLimiter:    rateLimiter,
+		versionPinCfg:  versionPinCfg,
 		blockedIndices: make(map[int]bool),
 		openAIChoices:  make(map[int]*openAIChoiceTracking),
 	}
@@ -266,7 +268,7 @@ func (s *SSEInterceptor) handleContentBlockStart(originalLine, data string, inde
 
 	if decision.Allowed {
 		// Allowed — pass through, fire event.
-		s.fireEvent(toolName, toolCallID, "allow", "", entry)
+		s.fireEvent(toolName, toolCallID, "allow", decision.Reason, entry)
 		return []string{originalLine}
 	}
 
@@ -365,6 +367,46 @@ func (s *SSEInterceptor) lookupAndEvaluate(toolName, toolCallID string) (*mcpreg
 		}
 	}
 
+	// Rate limit check.
+	if s.rateLimiter != nil {
+		if !s.rateLimiter.Allow(entry.ServerID, toolName) {
+			dec := mcpinspect.PolicyDecision{
+				Allowed: false,
+				Reason:  fmt.Sprintf("rate limit exceeded for server %q", entry.ServerID),
+			}
+			if s.analyzer != nil {
+				s.analyzer.MarkBlocked(entry.ServerID, toolName, toolCallID, s.requestID)
+			}
+			return entry, &dec, nil
+		}
+	}
+
+	// Version pin check.
+	if s.versionPinCfg != nil && s.versionPinCfg.Enabled {
+		if pinnedHash, pinned := s.registry.PinnedHash(toolName); pinned && entry.ToolHash != pinnedHash {
+			switch s.versionPinCfg.OnChange {
+			case "block":
+				dec := mcpinspect.PolicyDecision{
+					Allowed: false,
+					Reason: fmt.Sprintf("tool %q hash changed (pinned: %s, current: %s)",
+						toolName, pinnedHash, entry.ToolHash),
+				}
+				if s.analyzer != nil {
+					s.analyzer.MarkBlocked(entry.ServerID, toolName, toolCallID, s.requestID)
+				}
+				return entry, &dec, nil
+			case "alert":
+				dec := mcpinspect.PolicyDecision{
+					Allowed: true,
+					Reason: fmt.Sprintf("tool %q hash changed (pinned: %s, current: %s) [alert only]",
+						toolName, pinnedHash, entry.ToolHash),
+				}
+				return entry, &dec, nil
+			}
+		}
+	}
+
+	// Policy evaluation.
 	decision := s.policy.Evaluate(entry.ServerID, toolName, entry.ToolHash)
 
 	// If policy blocks a call that cross-server allowed, update the window

@@ -334,6 +334,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.getEventCallback(),
 			p.logger,
 			p.getSessionAnalyzer(),
+			p.rateLimiter,
+			p.versionPinCfg(),
 		)
 	}
 

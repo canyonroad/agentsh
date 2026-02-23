@@ -110,7 +110,7 @@ func TestSSEInterceptor_Anthropic_SingleBlocked(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// --- Execute ---
-	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger)
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger, nil, nil, nil)
 
 	reader := strings.NewReader(sseInput)
 	var clientBuf bytes.Buffer
@@ -291,7 +291,7 @@ func TestSSEInterceptor_Anthropic_SingleAllowed(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// --- Execute ---
-	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger)
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger, nil, nil, nil)
 
 	reader := strings.NewReader(sseInput)
 	var clientBuf bytes.Buffer
@@ -405,7 +405,7 @@ func TestSSEInterceptor_Anthropic_Unregistered(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// --- Execute ---
-	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger)
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger, nil, nil, nil)
 
 	reader := strings.NewReader(sseInput)
 	var clientBuf bytes.Buffer
@@ -572,7 +572,7 @@ func TestSSEInterceptor_Anthropic_PartialBlock(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// --- Execute ---
-	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger)
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger, nil, nil, nil)
 
 	reader := strings.NewReader(sseInput)
 	var clientBuf bytes.Buffer
@@ -779,7 +779,7 @@ func TestSSEInterceptor_Anthropic_AllBlocked(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// --- Execute ---
-	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger)
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger, nil, nil, nil)
 
 	reader := strings.NewReader(sseInput)
 	var clientBuf bytes.Buffer
@@ -992,7 +992,7 @@ func TestSSEInterceptor_OpenAI_SingleBlocked(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// --- Execute ---
-	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_1", "req_1", onEvent, logger)
+	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_1", "req_1", onEvent, logger, nil, nil, nil)
 
 	reader := strings.NewReader(sseInput)
 	var clientBuf bytes.Buffer
@@ -1146,7 +1146,7 @@ func TestSSEInterceptor_MalformedJSON(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// --- Execute (must not panic) ---
-	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_mj", "req_mj", onEvent, logger)
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_mj", "req_mj", onEvent, logger, nil, nil, nil)
 
 	reader := strings.NewReader(sseInput)
 	var clientBuf bytes.Buffer
@@ -1245,7 +1245,7 @@ func TestSSEInterceptor_TextOnlyStream(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// --- Execute ---
-	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_to", "req_to", onEvent, logger)
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_to", "req_to", onEvent, logger, nil, nil, nil)
 
 	reader := strings.NewReader(sseInput)
 	var clientBuf bytes.Buffer
@@ -1350,7 +1350,7 @@ func TestSSEInterceptor_OpenAI_PartialBlock(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// --- Execute ---
-	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_1", "req_1", onEvent, logger)
+	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_1", "req_1", onEvent, logger, nil, nil, nil)
 
 	reader := strings.NewReader(sseInput)
 	var clientBuf bytes.Buffer
@@ -1526,7 +1526,7 @@ func TestSSEInterceptor_OpenAI_MultiChoice(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_mc", "req_mc", onEvent, logger)
+	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_mc", "req_mc", onEvent, logger, nil, nil, nil)
 
 	reader := strings.NewReader(sseInput)
 	var clientBuf bytes.Buffer
@@ -1648,7 +1648,7 @@ func TestSSEInterceptor_OpenAI_MixedMCPAndNonMCP(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_mn", "req_mn", onEvent, logger)
+	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_mn", "req_mn", onEvent, logger, nil, nil, nil)
 
 	reader := strings.NewReader(sseInput)
 	var clientBuf bytes.Buffer
@@ -1719,7 +1719,7 @@ func TestSSEInterceptor_ClientWriteError(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_we", "req_we", nil, logger)
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_we", "req_we", nil, logger, nil, nil, nil)
 
 	reader := strings.NewReader(sseInput)
 
@@ -1740,5 +1740,88 @@ func TestSSEInterceptor_ClientWriteError(t *testing.T) {
 	// It may be less than the full stream if the scan loop aborted early.
 	if len(buffered) == 0 {
 		t.Error("buffered output should not be empty even when client disconnects")
+	}
+}
+
+func TestSSEInterceptor_RateLimitBlocks(t *testing.T) {
+	rlCfg := config.MCPRateLimitsConfig{
+		Enabled:      true,
+		DefaultRPM:   0,
+		DefaultBurst: 0,
+	}
+	rateLimiter := mcpinspect.NewRateLimiterRegistry(rlCfg)
+
+	reg := mcpregistry.NewRegistry()
+	reg.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "h1"},
+	})
+	policy := mcpinspect.NewPolicyEvaluator(config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "none",
+	})
+
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(ev mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, ev)
+	}
+	logger := slog.Default()
+
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger, nil, rateLimiter, nil)
+
+	stream := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"get_weather\",\"input\":{}}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
+	var buf bytes.Buffer
+	interceptor.Stream(io.NopCloser(strings.NewReader(stream)), &buf)
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Action != "block" {
+		t.Errorf("event Action = %q, want %q", events[0].Action, "block")
+	}
+	if !strings.Contains(events[0].Reason, "rate limit") {
+		t.Errorf("event Reason = %q, want to contain 'rate limit'", events[0].Reason)
+	}
+}
+
+func TestSSEInterceptor_VersionPinBlock(t *testing.T) {
+	reg := mcpregistry.NewRegistry()
+	reg.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v1"},
+	})
+	reg.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v2"},
+	})
+	policy := mcpinspect.NewPolicyEvaluator(config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "none",
+	})
+
+	vpCfg := &config.MCPVersionPinningConfig{
+		Enabled:  true,
+		OnChange: "block",
+	}
+
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(ev mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, ev)
+	}
+	logger := slog.Default()
+
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger, nil, nil, vpCfg)
+
+	stream := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"get_weather\",\"input\":{}}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
+	var buf bytes.Buffer
+	interceptor.Stream(io.NopCloser(strings.NewReader(stream)), &buf)
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Action != "block" {
+		t.Errorf("event Action = %q, want %q", events[0].Action, "block")
+	}
+	if !strings.Contains(events[0].Reason, "hash changed") {
+		t.Errorf("event Reason = %q, want to contain 'hash changed'", events[0].Reason)
 	}
 }
