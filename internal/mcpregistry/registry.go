@@ -46,7 +46,8 @@ type RegistryCallbacks struct {
 type Registry struct {
 	mu    sync.RWMutex
 	tools map[string]*ToolEntry // keyed by tool name
-	addrs map[string]string     // server addr -> server ID (for network monitor)
+	addrs        map[string]string // server addr -> server ID (for network monitor)
+	pinnedHashes map[string]string // toolName -> first-seen hash (for version pinning)
 
 	callbacks        *RegistryCallbacks
 	servers          map[string]struct{} // distinct server IDs seen
@@ -56,9 +57,10 @@ type Registry struct {
 // NewRegistry creates an empty, ready-to-use registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		tools:   make(map[string]*ToolEntry),
-		addrs:   make(map[string]string),
-		servers: make(map[string]struct{}),
+		tools:        make(map[string]*ToolEntry),
+		addrs:        make(map[string]string),
+		pinnedHashes: make(map[string]string),
+		servers:      make(map[string]struct{}),
 	}
 }
 
@@ -109,6 +111,9 @@ func (r *Registry) Register(serverID, serverType, serverAddr string, tools []Too
 			ServerAddr:   serverAddr,
 			ToolHash:     t.Hash,
 			RegisteredAt: now,
+		}
+		if _, alreadyPinned := r.pinnedHashes[t.Name]; !alreadyPinned {
+			r.pinnedHashes[t.Name] = t.Hash
 		}
 	}
 
@@ -194,6 +199,17 @@ func (r *Registry) ServerAddrs() map[string]string {
 		result[addr] = id
 	}
 	return result
+}
+
+// PinnedHash returns the first-seen hash for a tool name and whether it was
+// pinned. The pinned hash never changes once set, even if the tool is removed
+// and re-registered with a different hash. Used by the proxy for version
+// pinning enforcement.
+func (r *Registry) PinnedHash(toolName string) (hash string, pinned bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	hash, pinned = r.pinnedHashes[toolName]
+	return
 }
 
 // Remove deletes all tools that were registered by the given server and

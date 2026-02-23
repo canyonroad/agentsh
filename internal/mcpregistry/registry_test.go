@@ -763,3 +763,70 @@ func TestSetCallbacksNilThenNonNilBackfill(t *testing.T) {
 		t.Fatalf("expected backfill after nil-then-non-nil, got %d calls", calls)
 	}
 }
+
+func TestPinnedHash_FirstRegistration(t *testing.T) {
+	r := NewRegistry()
+	r.Register("server-1", "stdio", "", []ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+
+	hash, pinned := r.PinnedHash("get_weather")
+	if !pinned {
+		t.Fatal("expected tool to be pinned after first registration")
+	}
+	if hash != "abc123" {
+		t.Errorf("PinnedHash = %q, want %q", hash, "abc123")
+	}
+}
+
+func TestPinnedHash_HashChangePreservesPinned(t *testing.T) {
+	r := NewRegistry()
+	r.Register("server-1", "stdio", "", []ToolInfo{
+		{Name: "get_weather", Hash: "hash-v1"},
+	})
+
+	// Re-register with a different hash (different server or updated tool).
+	r.Register("server-2", "http", "host:443", []ToolInfo{
+		{Name: "get_weather", Hash: "hash-v2"},
+	})
+
+	hash, pinned := r.PinnedHash("get_weather")
+	if !pinned {
+		t.Fatal("expected tool to still be pinned")
+	}
+	if hash != "hash-v1" {
+		t.Errorf("PinnedHash = %q, want %q (original)", hash, "hash-v1")
+	}
+
+	// Current entry should have the new hash.
+	entry := r.Lookup("get_weather")
+	if entry.ToolHash != "hash-v2" {
+		t.Errorf("Lookup ToolHash = %q, want %q (current)", entry.ToolHash, "hash-v2")
+	}
+}
+
+func TestPinnedHash_RemoveDoesNotClearPin(t *testing.T) {
+	r := NewRegistry()
+	r.Register("server-1", "stdio", "", []ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+
+	r.Remove("server-1")
+
+	// Pinned hash should survive server removal.
+	hash, pinned := r.PinnedHash("get_weather")
+	if !pinned {
+		t.Fatal("pinned hash should survive Remove")
+	}
+	if hash != "abc123" {
+		t.Errorf("PinnedHash = %q, want %q", hash, "abc123")
+	}
+}
+
+func TestPinnedHash_UnknownTool(t *testing.T) {
+	r := NewRegistry()
+	_, pinned := r.PinnedHash("nonexistent")
+	if pinned {
+		t.Error("PinnedHash should return false for unknown tool")
+	}
+}
