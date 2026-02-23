@@ -484,6 +484,9 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 						analyzer.NotifyOverwrite(toolName, oldServerID, newServerID)
 					},
 				})
+			} else {
+				slog.Warn("mcp registry type assertion failed; cross-server callbacks not wired",
+					"session_id", s.ID)
 			}
 		}
 	}

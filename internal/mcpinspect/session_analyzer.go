@@ -8,7 +8,11 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 )
 
-// CrossServerDecision is the output of SessionAnalyzer.Check.
+// maxWindowEntries is the hard cap on the sliding window size. This bounds
+// both memory and CPU (linear scan) under adversarial conditions.
+const maxWindowEntries = 1000
+
+// CrossServerDecision is the output of SessionAnalyzer.CheckAndRecord.
 // It describes which rule fired, the severity, and the related tool calls
 // that contributed to the detection.
 type CrossServerDecision struct {
@@ -107,30 +111,51 @@ func (a *SessionAnalyzer) NotifyOverwrite(toolName, oldServerID, newServerID str
 	}
 }
 
-// Check evaluates all enabled rules against the current state.
-// Returns nil if no rule triggers.
+// ClearShadow removes a shadow entry for a tool. Called when a server
+// legitimately re-registers a tool (e.g., after restart) and the shadow
+// is no longer valid. Thread-safe.
+func (a *SessionAnalyzer) ClearShadow(toolName string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.shadows, toolName)
+}
+
+// CheckAndRecord atomically evaluates all enabled cross-server rules and
+// records the tool call in the sliding window. This single-lock operation
+// eliminates the TOCTOU race between evaluating rules and recording.
 //
-// When inactive and no shadows exist, returns nil immediately.
+// The call is recorded with action="allow" initially. If the caller's
+// PolicyEvaluator subsequently blocks the call, call MarkBlocked() to
+// update the record (prevents a blocked read from triggering
+// read-then-send for subsequent calls).
+//
+// Returns the cross-server decision (nil if no rule triggers) and the
+// tool's classified category.
+//
+// When the feature is disabled, returns (nil, category) immediately.
+// When inactive and no shadows exist, returns (nil, category) immediately.
 // When inactive but shadows exist, only checks the shadow rule.
 // When active, checks all enabled rules in order:
 //  1. Shadow tool (always, if enabled)
 //  2. Burst (if enabled)
 //  3. Read-then-send (if enabled, only when category is "send")
-//  4. Cross-server flow (if enabled, only when category is "write" or "send")
-func (a *SessionAnalyzer) Check(serverID, toolName, requestID string) *CrossServerDecision {
+//  4. Cross-server flow (if enabled, when category is write/send/compute/unknown from different server)
+func (a *SessionAnalyzer) CheckAndRecord(serverID, toolName, requestID string) (*CrossServerDecision, string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	category := a.classifier.Classify(toolName)
+
 	// Global kill switch: when cross-server detection is disabled, skip all rules.
 	if !a.cfg.Enabled {
-		return nil
+		return nil, category
 	}
 
 	hasShadows := len(a.shadows) > 0
 
 	// Fast path: nothing to check.
 	if !a.active && !hasShadows {
-		return nil
+		return nil, category
 	}
 
 	now := time.Now()
@@ -138,54 +163,109 @@ func (a *SessionAnalyzer) Check(serverID, toolName, requestID string) *CrossServ
 	// 1. Shadow tool detection (always checked if enabled).
 	if a.cfg.ShadowTool.Enabled {
 		if dec := a.checkShadow(toolName); dec != nil {
-			return dec
+			a.recordLocked(serverID, toolName, requestID, "block", category, now)
+			return dec, category
 		}
 	}
 
 	// Remaining rules require activation.
 	if !a.active {
-		return nil
+		return nil, category
 	}
 
 	// 2. Burst detection.
 	if a.cfg.Burst.Enabled {
 		if dec := a.checkBurst(serverID, now); dec != nil {
-			return dec
+			a.recordLocked(serverID, toolName, requestID, "block", category, now)
+			return dec, category
 		}
 	}
-
-	// Classify the tool for category-aware rules.
-	category := a.classifier.Classify(toolName)
 
 	// 3. Read-then-send (only when category is "send").
 	if a.cfg.ReadThenSend.Enabled && category == CategorySend {
 		if dec := a.checkReadThenSend(serverID, now); dec != nil {
-			return dec
+			a.recordLocked(serverID, toolName, requestID, "block", category, now)
+			return dec, category
 		}
 	}
 
-	// 4. Cross-server flow (only when category is "write" or "send").
-	if a.cfg.CrossServerFlow.Enabled && (category == CategoryWrite || category == CategorySend) {
+	// 4. Cross-server flow: triggers on write, send, compute, or unknown
+	// from a different server when a prior cross-server read exists.
+	// Unknown-category tools are included because an attacker can choose
+	// tool names to avoid classification (e.g., "transmit_data").
+	if a.cfg.CrossServerFlow.Enabled && isSuspiciousCategory(category) {
 		if dec := a.checkCrossServerFlow(serverID, requestID, now); dec != nil {
-			return dec
+			a.recordLocked(serverID, toolName, requestID, "block", category, now)
+			return dec, category
 		}
 	}
 
-	return nil
+	// No rule triggered — record as "allow" atomically so the entry is
+	// immediately visible to concurrent CheckAndRecord calls.
+	a.recordLocked(serverID, toolName, requestID, "allow", category, now)
+	return nil, category
 }
 
-// Record appends a tool call record to the sliding window and prunes entries
-// older than maxWindow. No-op when inactive.
-func (a *SessionAnalyzer) Record(rec ToolCallRecord) {
+// MarkBlocked updates the most recent "allow" window entry for the given
+// tool call to action="block". Called when the PolicyEvaluator blocks a
+// call that the cross-server analyzer initially allowed. This prevents a
+// blocked read from triggering read-then-send for subsequent calls.
+// Thread-safe.
+func (a *SessionAnalyzer) MarkBlocked(serverID, toolName, requestID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// Walk backward to find the most recent matching "allow" entry.
+	for i := len(a.window) - 1; i >= 0; i-- {
+		rec := &a.window[i]
+		if rec.ServerID == serverID && rec.ToolName == toolName &&
+			rec.RequestID == requestID && rec.Action == "allow" {
+			rec.Action = "block"
+			return
+		}
+	}
+}
+
+// Record adds a tool call to the sliding window. This is used for test setup
+// to inject records with specific timestamps and categories. Production code
+// should use CheckAndRecord() which records atomically with rule evaluation.
+func (a *SessionAnalyzer) Record(rec ToolCallRecord) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if !a.active {
 		return
 	}
-
 	a.window = append(a.window, rec)
 	a.pruneWindow(rec.Timestamp)
+}
+
+// isSuspiciousCategory returns true for categories that could be used for
+// data exfiltration or modification in cross-server patterns. Includes
+// "unknown" because an attacker can name tools to avoid classification.
+func isSuspiciousCategory(category string) bool {
+	switch category {
+	case CategoryWrite, CategorySend, CategoryCompute, CategoryUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// recordLocked appends a tool call to the sliding window and prunes.
+// Must be called with mu held.
+func (a *SessionAnalyzer) recordLocked(serverID, toolName, requestID, action, category string, now time.Time) {
+	if !a.active {
+		return
+	}
+	a.window = append(a.window, ToolCallRecord{
+		Timestamp: now,
+		ServerID:  serverID,
+		ToolName:  toolName,
+		RequestID: requestID,
+		Action:    action,
+		Category:  category,
+	})
+	a.pruneWindow(now)
 }
 
 // --- internal detection helpers (must be called with mu held) ---
@@ -294,13 +374,14 @@ func (a *SessionAnalyzer) checkCrossServerFlow(serverID, requestID string, now t
 }
 
 // Classify returns the category for a tool name by delegating to the internal
-// classifier. This allows callers to classify tools without constructing a
-// separate ToolClassifier instance.
+// classifier. The classifier is immutable after construction, so this method
+// is safe for concurrent use without locking.
 func (a *SessionAnalyzer) Classify(toolName string) string {
 	return a.classifier.Classify(toolName)
 }
 
-// pruneWindow removes entries older than maxWindow from the sliding window.
+// pruneWindow removes entries older than maxWindow from the sliding window
+// and enforces the hard cap on window size.
 func (a *SessionAnalyzer) pruneWindow(now time.Time) {
 	cutoff := now.Add(-a.maxWindow)
 	idx := 0
@@ -310,6 +391,16 @@ func (a *SessionAnalyzer) pruneWindow(now time.Time) {
 	if idx > 0 {
 		n := copy(a.window, a.window[idx:])
 		// Zero out stale references to allow GC.
+		for i := n; i < len(a.window); i++ {
+			a.window[i] = ToolCallRecord{}
+		}
+		a.window = a.window[:n]
+	}
+
+	// Hard cap: if the window exceeds maxWindowEntries, drop the oldest.
+	if len(a.window) > maxWindowEntries {
+		excess := len(a.window) - maxWindowEntries
+		n := copy(a.window, a.window[excess:])
 		for i := n; i < len(a.window); i++ {
 			a.window[i] = ToolCallRecord{}
 		}

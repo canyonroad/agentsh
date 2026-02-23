@@ -267,7 +267,6 @@ func (s *SSEInterceptor) handleContentBlockStart(originalLine, data string, inde
 	if decision.Allowed {
 		// Allowed — pass through, fire event.
 		s.fireEvent(toolName, toolCallID, "allow", "", entry)
-		s.recordCall(toolName, "allow", entry)
 		return []string{originalLine}
 	}
 
@@ -275,7 +274,6 @@ func (s *SSEInterceptor) handleContentBlockStart(originalLine, data string, inde
 	s.blockedToolUse++
 	s.blockedIndices[index] = true
 	s.fireEvent(toolName, toolCallID, "block", decision.Reason, entry, crossServerDec)
-	s.recordCall(toolName, "block", entry)
 
 	return s.emitAnthropicTextBlock(index, toolName)
 }
@@ -360,14 +358,21 @@ func (s *SSEInterceptor) lookupAndEvaluate(toolName string) (*mcpregistry.ToolEn
 		return nil, nil, nil
 	}
 
-	// Cross-server check (before regular policy).
+	// Cross-server check + record (atomic to eliminate TOCTOU race).
 	if s.analyzer != nil {
-		if block := s.analyzer.Check(entry.ServerID, toolName, s.requestID); block != nil {
+		if block, _ := s.analyzer.CheckAndRecord(entry.ServerID, toolName, s.requestID); block != nil {
 			return entry, &mcpinspect.PolicyDecision{Allowed: false, Reason: block.Reason}, block
 		}
 	}
 
 	decision := s.policy.Evaluate(entry.ServerID, toolName, entry.ToolHash)
+
+	// If policy blocks a call that cross-server allowed, update the window
+	// so the "allow" record becomes "block" (prevents false positives).
+	if !decision.Allowed && s.analyzer != nil {
+		s.analyzer.MarkBlocked(entry.ServerID, toolName, s.requestID)
+	}
+
 	return entry, &decision, nil
 }
 
@@ -402,22 +407,6 @@ func (s *SSEInterceptor) fireEvent(toolName, toolCallID, action, reason string, 
 	}
 
 	s.onEvent(ev)
-}
-
-// recordCall records a tool call in the session analyzer for cross-server
-// pattern detection. No-op if the analyzer is nil.
-func (s *SSEInterceptor) recordCall(toolName, action string, entry *mcpregistry.ToolEntry) {
-	if s.analyzer == nil {
-		return
-	}
-	s.analyzer.Record(mcpinspect.ToolCallRecord{
-		Timestamp: time.Now(),
-		ServerID:  entry.ServerID,
-		ToolName:  toolName,
-		RequestID: s.requestID,
-		Action:    action,
-		Category:  s.analyzer.Classify(toolName),
-	})
 }
 
 // writeLine writes a line to both the client writer and the internal buffer,
@@ -594,13 +583,11 @@ func (s *SSEInterceptor) handleOpenAIFirstToolChunk(choice *openAIChunkChoice) b
 
 		if decision.Allowed {
 			s.fireEvent(toolName, toolCallID, "allow", "", entry)
-			s.recordCall(toolName, "allow", entry)
 			allowed = append(allowed, tc)
 		} else {
 			st.nblocked++
 			st.blocked[tc.Index] = true
 			s.fireEvent(toolName, toolCallID, "block", decision.Reason, entry, crossServerDec)
-			s.recordCall(toolName, "block", entry)
 			blockedMessages = append(blockedMessages, fmt.Sprintf("[agentsh] Tool '%s' blocked by policy", toolName))
 		}
 	}
