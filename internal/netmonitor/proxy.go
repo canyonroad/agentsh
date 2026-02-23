@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,12 @@ import (
 type Emitter interface {
 	AppendEvent(ctx context.Context, ev types.Event) error
 	Publish(ev types.Event)
+}
+
+// mcpAddrSource is satisfied by *mcpregistry.Registry.
+// Used to check if a connection target is a known MCP server.
+type mcpAddrSource interface {
+	ServerAddrs() map[string]string
 }
 
 type Proxy struct {
@@ -155,6 +162,8 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 	_ = p.emit.AppendEvent(context.Background(), connectEv)
 	p.emit.Publish(connectEv)
 
+	emitMCPConnectionIfMatched(context.Background(), p.sess, p.emit, p.sessionID, commandID, host, hostPort, port)
+
 	// Determine dial target: redirect destination or original
 	dialTarget := hostPort
 	if redirectTo != "" {
@@ -278,6 +287,8 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 	_ = p.emit.AppendEvent(context.Background(), connectEv)
 	p.emit.Publish(connectEv)
 
+	emitMCPConnectionIfMatched(context.Background(), p.sess, p.emit, p.sessionID, commandID, host, net.JoinHostPort(host, strconv.Itoa(port)), port)
+
 	transport := &http.Transport{
 		Proxy: nil,
 	}
@@ -397,6 +408,47 @@ func (p *Proxy) emitConnectRedirectEvent(ctx context.Context, commandID string, 
 	}
 	_ = p.emit.AppendEvent(ctx, ev)
 	p.emit.Publish(ev)
+}
+
+// emitMCPConnectionIfMatched checks whether the connection target is a known
+// MCP server address and, if so, emits an mcp_network_connection event.
+// This is a shared function called from both Proxy and TransparentTCP handlers.
+func emitMCPConnectionIfMatched(ctx context.Context, sess *session.Session, emit Emitter, sessionID, commandID, domain, remote string, port int) {
+	if sess == nil || emit == nil {
+		return
+	}
+	src, ok := sess.MCPRegistry().(mcpAddrSource)
+	if !ok || src == nil {
+		return
+	}
+	addrs := src.ServerAddrs()
+	if len(addrs) == 0 {
+		return
+	}
+
+	hostPort := net.JoinHostPort(domain, strconv.Itoa(port))
+	serverID, found := addrs[hostPort]
+	if !found {
+		serverID, found = addrs[remote]
+	}
+	if !found {
+		return
+	}
+
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "mcp_network_connection",
+		SessionID: sessionID,
+		CommandID: commandID,
+		Domain:    strings.ToLower(domain),
+		Remote:    remote,
+		Fields: map[string]any{
+			"server_id": serverID,
+		},
+	}
+	_ = emit.AppendEvent(ctx, ev)
+	emit.Publish(ev)
 }
 
 func (p *Proxy) resolveAndEmitDNS(ctx context.Context, commandID string, host string) string {
