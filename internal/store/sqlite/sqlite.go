@@ -20,29 +20,29 @@ type Store struct {
 
 // MCPTool represents a registered MCP tool.
 type MCPTool struct {
-	ServerID       string
-	ToolName       string
-	ToolHash       string
-	Description    string
-	FirstSeen      time.Time
-	LastSeen       time.Time
-	Pinned         bool
-	DetectionCount int
-	MaxSeverity    string
+	ServerID       string    `json:"server_id"`
+	ToolName       string    `json:"tool_name"`
+	ToolHash       string    `json:"tool_hash"`
+	Description    string    `json:"description"`
+	FirstSeen      time.Time `json:"first_seen"`
+	LastSeen       time.Time `json:"last_seen"`
+	Pinned         bool      `json:"pinned"`
+	DetectionCount int       `json:"detection_count"`
+	MaxSeverity    string    `json:"max_severity"`
 }
 
 // MCPToolFilter for querying tools.
 type MCPToolFilter struct {
-	ServerID      string
-	HasDetections bool
+	ServerID      string `json:"server_id,omitempty"`
+	HasDetections bool   `json:"has_detections,omitempty"`
 }
 
 // MCPServerSummary aggregates tool info per server.
 type MCPServerSummary struct {
-	ServerID       string
-	ToolCount      int
-	LastSeen       time.Time
-	DetectionCount int
+	ServerID       string    `json:"server_id"`
+	ToolCount      int       `json:"tool_count"`
+	LastSeen       time.Time `json:"last_seen"`
+	DetectionCount int       `json:"detection_count"`
 }
 
 func Open(path string) (*Store, error) {

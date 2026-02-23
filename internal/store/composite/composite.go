@@ -124,3 +124,21 @@ func timeField(m map[string]any, key string) time.Time {
 	}
 	return time.Time{}
 }
+
+// ListMCPTools delegates to the primary SQLite store to query MCP tools.
+func (s *Store) ListMCPTools(ctx context.Context, filter sqlite.MCPToolFilter) ([]sqlite.MCPTool, error) {
+	sqliteStore, ok := s.primary.(*sqlite.Store)
+	if !ok {
+		return nil, fmt.Errorf("MCP queries not supported by primary store")
+	}
+	return sqliteStore.ListMCPTools(ctx, filter)
+}
+
+// ListMCPServers delegates to the primary SQLite store to query MCP server summaries.
+func (s *Store) ListMCPServers(ctx context.Context) ([]sqlite.MCPServerSummary, error) {
+	sqliteStore, ok := s.primary.(*sqlite.Store)
+	if !ok {
+		return nil, fmt.Errorf("MCP queries not supported by primary store")
+	}
+	return sqliteStore.ListMCPServers(ctx)
+}

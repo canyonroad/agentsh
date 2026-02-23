@@ -175,6 +175,10 @@ func (a *App) Router() http.Handler {
 
 		// Policy test endpoint (for debugging)
 		r.Post("/policy/test", a.policyTest)
+
+		// MCP query endpoints
+		r.Get("/mcp/tools", a.listMCPTools)
+		r.Get("/mcp/servers", a.listMCPServers)
 	})
 
 	return r
