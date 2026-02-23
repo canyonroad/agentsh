@@ -33,13 +33,22 @@ type SSEInterceptor struct {
 	totalToolUse   int
 	blockedToolUse int
 
-	// OpenAI state
-	blockedToolIdx map[int]bool // tool_calls[].index values that are blocked
-	totalTools     int          // total MCP tool calls seen
-	blockedTools   int          // how many were blocked
+	// OpenAI state — tracked per choice index for n>1 support.
+	openAIChoices map[int]*openAIChoiceTracking
 
 	// Internal buffer for the complete output (returned to caller for logging).
 	buf bytes.Buffer
+
+	// clientErr tracks the first write error to the client, used to abort early.
+	clientErr error
+}
+
+// openAIChoiceTracking tracks per-choice blocking state for OpenAI dialect.
+// Each choice (from the n parameter) has its own set of tool calls.
+type openAIChoiceTracking struct {
+	blocked  map[int]bool // tool_calls[].index → blocked
+	total    int          // all tool calls seen (MCP + non-MCP)
+	nblocked int          // how many were blocked
 }
 
 // NewSSEInterceptor creates a new SSE stream interceptor.
@@ -60,8 +69,19 @@ func NewSSEInterceptor(
 		onEvent:        onEvent,
 		logger:         logger,
 		blockedIndices: make(map[int]bool),
-		blockedToolIdx: make(map[int]bool),
+		openAIChoices:  make(map[int]*openAIChoiceTracking),
 	}
+}
+
+// getChoiceTracking returns the per-choice state for the given choice index,
+// creating it if needed.
+func (s *SSEInterceptor) getChoiceTracking(choiceIdx int) *openAIChoiceTracking {
+	st := s.openAIChoices[choiceIdx]
+	if st == nil {
+		st = &openAIChoiceTracking{blocked: make(map[int]bool)}
+		s.openAIChoices[choiceIdx] = st
+	}
+	return st
 }
 
 // Stream reads SSE lines from upstream, evaluates tool calls against policy,
@@ -80,6 +100,11 @@ func (s *SSEInterceptor) Stream(upstream io.Reader, client io.Writer) []byte {
 	suppressNextEmpty := false
 
 	for scanner.Scan() {
+		// Abort early if client disconnected.
+		if s.clientErr != nil {
+			break
+		}
+
 		line := scanner.Text()
 
 		var outputLines []string
@@ -145,7 +170,7 @@ func (s *SSEInterceptor) Stream(upstream io.Reader, client io.Writer) []byte {
 	}
 
 	// Flush any trailing pending event.
-	if hasPending {
+	if hasPending && s.clientErr == nil {
 		s.writeLine(client, pendingEvent)
 	}
 
@@ -350,24 +375,38 @@ func (s *SSEInterceptor) fireEvent(toolName, toolCallID, action, reason string, 
 
 // writeLine writes a line to both the client writer and the internal buffer,
 // followed by a newline. Flushes the client if it supports http.Flusher.
+// On the first write error, sets s.clientErr so the scan loop can abort.
 func (s *SSEInterceptor) writeLine(client io.Writer, line string) {
 	lineBytes := []byte(line + "\n")
 
+	// Always buffer (for return value / logging) regardless of client state.
+	s.buf.Write(lineBytes)
+
+	// Skip writing to client if a previous write already failed.
+	if s.clientErr != nil {
+		return
+	}
+
 	// Write to client.
-	client.Write(lineBytes) //nolint:errcheck
+	if _, err := client.Write(lineBytes); err != nil {
+		s.clientErr = err
+		s.logger.Debug("sse interceptor client write error",
+			"error", err,
+			"request_id", s.requestID,
+		)
+		return
+	}
 
 	// Flush if possible for immediate streaming.
 	if f, ok := client.(http.Flusher); ok {
 		f.Flush()
 	}
-
-	// Buffer for return value.
-	s.buf.Write(lineBytes)
 }
 
 // processOpenAIEvent implements the OpenAI SSE state machine.
 // OpenAI SSE lines are bare "data: ..." lines (no "event:" prefix).
 // Tool calls are embedded as arrays inside choices[].delta.tool_calls[].
+// All choices in each chunk are processed (supports n>1).
 func (s *SSEInterceptor) processOpenAIEvent(originalLine string) []string {
 	data, ok := extractSSEData(originalLine)
 	if !ok {
@@ -391,31 +430,62 @@ func (s *SSEInterceptor) processOpenAIEvent(originalLine string) []string {
 		return []string{originalLine}
 	}
 
-	choice := &chunk.Choices[0]
+	// Process ALL choices (supports n>1).
+	modified := false
+	for i := range chunk.Choices {
+		choice := &chunk.Choices[i]
 
-	// Check for finish_reason.
-	if choice.FinishReason != nil {
-		return s.handleOpenAIFinish(originalLine, &chunk)
-	}
+		// Check for finish_reason.
+		if choice.FinishReason != nil {
+			if s.rewriteOpenAIFinish(choice) {
+				modified = true
+			}
+			continue
+		}
 
-	// Check if this chunk has tool_calls.
-	if len(choice.Delta.ToolCalls) == 0 {
-		return []string{originalLine}
-	}
+		// Check if this chunk has tool_calls.
+		if len(choice.Delta.ToolCalls) == 0 {
+			continue
+		}
 
-	// Determine whether this is a first-chunk (has id+name) or argument-streaming chunk.
-	isFirstChunk := false
-	for _, tc := range choice.Delta.ToolCalls {
-		if tc.ID != "" {
-			isFirstChunk = true
-			break
+		// Determine whether this is a first-chunk (has id+name) or argument-streaming chunk.
+		isFirstChunk := false
+		for _, tc := range choice.Delta.ToolCalls {
+			if tc.ID != "" {
+				isFirstChunk = true
+				break
+			}
+		}
+
+		if isFirstChunk {
+			if s.handleOpenAIFirstToolChunk(choice) {
+				modified = true
+			}
+		} else {
+			if s.handleOpenAIArgChunk(choice) {
+				modified = true
+			}
 		}
 	}
 
-	if isFirstChunk {
-		return s.handleOpenAIFirstToolChunk(originalLine, &chunk)
+	if !modified {
+		return []string{originalLine}
 	}
-	return s.handleOpenAIArgChunk(originalLine, &chunk)
+
+	// Check if all choices ended up with empty deltas (all tool_calls suppressed).
+	// If so, suppress the entire line to avoid emitting useless empty chunks.
+	allEmpty := true
+	for _, c := range chunk.Choices {
+		if len(c.Delta.ToolCalls) > 0 || len(c.Delta.Content) > 0 || c.Delta.Role != "" || c.FinishReason != nil {
+			allEmpty = false
+			break
+		}
+	}
+	if allEmpty {
+		return nil // suppress entire line
+	}
+
+	return []string{s.safeDataJSON(&chunk, originalLine)}
 }
 
 // openAIChunk is the minimal structure we need to parse and rewrite OpenAI SSE chunks.
@@ -452,8 +522,9 @@ type openAIChunkToolCallFunction struct {
 
 // handleOpenAIFirstToolChunk processes the first chunk that introduces tool calls
 // (entries have id + function.name). It evaluates each tool call against policy.
-func (s *SSEInterceptor) handleOpenAIFirstToolChunk(originalLine string, chunk *openAIChunk) []string {
-	choice := &chunk.Choices[0]
+// Returns true if the chunk was modified.
+func (s *SSEInterceptor) handleOpenAIFirstToolChunk(choice *openAIChunkChoice) bool {
+	st := s.getChoiceTracking(choice.Index)
 	toolCalls := choice.Delta.ToolCalls
 
 	var allowed []openAIChunkToolCall
@@ -463,6 +534,10 @@ func (s *SSEInterceptor) handleOpenAIFirstToolChunk(originalLine string, chunk *
 		toolName := tc.Function.Name
 		toolCallID := tc.ID
 
+		// Count ALL tool calls toward total (MCP and non-MCP) so that
+		// finish_reason is only rewritten when truly all tools are blocked.
+		st.total++
+
 		entry, decision := s.lookupAndEvaluate(toolName)
 		if entry == nil {
 			// Not in registry — pass through silently (not an MCP tool).
@@ -470,17 +545,20 @@ func (s *SSEInterceptor) handleOpenAIFirstToolChunk(originalLine string, chunk *
 			continue
 		}
 
-		s.totalTools++
-
 		if decision.Allowed {
 			s.fireEvent(toolName, toolCallID, "allow", "", entry)
 			allowed = append(allowed, tc)
 		} else {
-			s.blockedTools++
-			s.blockedToolIdx[tc.Index] = true
+			st.nblocked++
+			st.blocked[tc.Index] = true
 			s.fireEvent(toolName, toolCallID, "block", decision.Reason, entry)
 			blockedMessages = append(blockedMessages, fmt.Sprintf("[agentsh] Tool '%s' blocked by policy", toolName))
 		}
+	}
+
+	if len(blockedMessages) == 0 {
+		// Nothing blocked — no modification.
+		return false
 	}
 
 	// ALL blocked: remove tool_calls, set content to combined blocked message.
@@ -488,71 +566,71 @@ func (s *SSEInterceptor) handleOpenAIFirstToolChunk(originalLine string, chunk *
 		choice.Delta.ToolCalls = nil
 		msg := strings.Join(blockedMessages, "\n")
 		choice.Delta.Content = json.RawMessage(mustMarshalString(msg))
-		return []string{"data: " + mustMarshalJSON(chunk)}
+		return true
 	}
 
 	// Partial block: filter tool_calls to keep only allowed entries.
-	if len(allowed) < len(toolCalls) {
-		choice.Delta.ToolCalls = allowed
-		return []string{"data: " + mustMarshalJSON(chunk)}
-	}
-
-	// None blocked — pass through original.
-	return []string{originalLine}
+	choice.Delta.ToolCalls = allowed
+	return true
 }
 
 // handleOpenAIArgChunk processes argument-streaming chunks (no id, just function.arguments).
-// Filters entries whose tool_calls index is in blockedToolIdx.
-func (s *SSEInterceptor) handleOpenAIArgChunk(originalLine string, chunk *openAIChunk) []string {
-	if len(s.blockedToolIdx) == 0 {
-		// No tools blocked — pass through.
-		return []string{originalLine}
+// Filters entries whose tool_calls index is blocked for this choice.
+// Returns true if the chunk was modified.
+func (s *SSEInterceptor) handleOpenAIArgChunk(choice *openAIChunkChoice) bool {
+	st := s.openAIChoices[choice.Index]
+	if st == nil || len(st.blocked) == 0 {
+		// No tools blocked for this choice — pass through.
+		return false
 	}
 
-	choice := &chunk.Choices[0]
 	var kept []openAIChunkToolCall
 	for _, tc := range choice.Delta.ToolCalls {
-		if !s.blockedToolIdx[tc.Index] {
+		if !st.blocked[tc.Index] {
 			kept = append(kept, tc)
 		}
 	}
 
-	if len(kept) == 0 {
-		// All entries in this chunk are for blocked tools — suppress entire line.
-		return nil
+	if len(kept) == len(choice.Delta.ToolCalls) {
+		// Nothing filtered — pass through.
+		return false
 	}
 
-	if len(kept) < len(choice.Delta.ToolCalls) {
-		// Some filtered — rewrite.
-		choice.Delta.ToolCalls = kept
-		return []string{"data: " + mustMarshalJSON(chunk)}
-	}
-
-	// Nothing filtered — pass through original.
-	return []string{originalLine}
+	// Some or all filtered — update the choice.
+	choice.Delta.ToolCalls = kept
+	return true
 }
 
-// handleOpenAIFinish handles the finish chunk (finish_reason is set).
-// If all tools were blocked, rewrites finish_reason from "tool_calls" to "stop".
-func (s *SSEInterceptor) handleOpenAIFinish(originalLine string, chunk *openAIChunk) []string {
-	choice := &chunk.Choices[0]
+// rewriteOpenAIFinish rewrites finish_reason from "tool_calls" to "stop"
+// when all tool calls in this choice were blocked.
+// Returns true if the chunk was modified.
+func (s *SSEInterceptor) rewriteOpenAIFinish(choice *openAIChunkChoice) bool {
+	st := s.openAIChoices[choice.Index]
+	if st == nil {
+		return false
+	}
 
-	if s.totalTools > 0 && s.blockedTools == s.totalTools && choice.FinishReason != nil && *choice.FinishReason == "tool_calls" {
+	if st.total > 0 && st.nblocked == st.total && choice.FinishReason != nil && *choice.FinishReason == "tool_calls" {
 		stop := "stop"
 		choice.FinishReason = &stop
-		return []string{"data: " + mustMarshalJSON(chunk)}
+		return true
 	}
 
-	return []string{originalLine}
+	return false
 }
 
-// mustMarshalJSON marshals a value to JSON string, panicking on error (should never happen for our structs).
-func mustMarshalJSON(v interface{}) string {
+// safeDataJSON marshals a value to a "data: <json>" SSE line.
+// On marshal error, logs a warning and returns the fallback line unchanged.
+func (s *SSEInterceptor) safeDataJSON(v interface{}, fallbackLine string) string {
 	b, err := json.Marshal(v)
 	if err != nil {
-		panic("mustMarshalJSON: " + err.Error())
+		s.logger.Warn("sse interceptor JSON marshal error",
+			"error", err,
+			"request_id", s.requestID,
+		)
+		return fallbackLine
 	}
-	return string(b)
+	return "data: " + string(b)
 }
 
 // mustMarshalString JSON-encodes a string value (with proper escaping).

@@ -1470,3 +1470,275 @@ func TestSSEInterceptor_OpenAI_PartialBlock(t *testing.T) {
 		t.Errorf("buffered output does not match client output.\nbuffered len=%d, client len=%d", len(buffered), len(clientOutput))
 	}
 }
+
+// buildOpenAIMultiChoiceSSE constructs an OpenAI SSE stream with two choices
+// (n=2). choice 0 has tool1, choice 1 has tool2.
+func buildOpenAIMultiChoiceSSE(tool1Name, call1ID, tool2Name, call2ID string) string {
+	var b strings.Builder
+
+	// First chunk: both choices with their respective tool calls.
+	b.WriteString(`data: {"id":"chatcmpl-mc","object":"chat.completion.chunk","choices":[` +
+		`{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"` + call1ID + `","type":"function","function":{"name":"` + tool1Name + `","arguments":""}}]},"finish_reason":null},` +
+		`{"index":1,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"` + call2ID + `","type":"function","function":{"name":"` + tool2Name + `","arguments":""}}]},"finish_reason":null}` +
+		`]}`)
+	b.WriteString("\n\n")
+
+	// Argument streaming: choice 0, tool 0
+	b.WriteString(`data: {"id":"chatcmpl-mc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":1}"}}]},"finish_reason":null}]}`)
+	b.WriteString("\n\n")
+
+	// Argument streaming: choice 1, tool 0
+	b.WriteString(`data: {"id":"chatcmpl-mc","object":"chat.completion.chunk","choices":[{"index":1,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":2}"}}]},"finish_reason":null}]}`)
+	b.WriteString("\n\n")
+
+	// Finish: both choices
+	b.WriteString(`data: {"id":"chatcmpl-mc","object":"chat.completion.chunk","choices":[` +
+		`{"index":0,"delta":{},"finish_reason":"tool_calls"},` +
+		`{"index":1,"delta":{},"finish_reason":"tool_calls"}` +
+		`]}`)
+	b.WriteString("\n\n")
+
+	b.WriteString("data: [DONE]\n\n")
+
+	return b.String()
+}
+
+// TestSSEInterceptor_OpenAI_MultiChoice verifies that tool calls in choices
+// beyond index 0 are inspected and blocked correctly (fix for C1).
+func TestSSEInterceptor_OpenAI_MultiChoice(t *testing.T) {
+	// choice 0: get_weather (allowed), choice 1: delete_all (blocked)
+	sseInput := buildOpenAIMultiChoiceSSE("get_weather", "call_C0", "delete_all", "call_C1")
+
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+	reg.Register("danger-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "delete_all", Hash: "def456"},
+	})
+
+	policy := newTestPolicy(config.MCPToolRule{Server: "danger-server", Tool: "delete_all"})
+
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(evt mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, evt)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_mc", "req_mc", onEvent, logger)
+
+	reader := strings.NewReader(sseInput)
+	var clientBuf bytes.Buffer
+	interceptor.Stream(reader, &clientBuf)
+
+	clientOutput := clientBuf.String()
+
+	// 1. get_weather (choice 0) must pass through.
+	if !strings.Contains(clientOutput, `"name":"get_weather"`) {
+		t.Error("allowed tool get_weather in choice 0 should pass through")
+	}
+
+	// 2. delete_all (choice 1) must be blocked — name should not appear.
+	if strings.Contains(clientOutput, `"name":"delete_all"`) {
+		t.Error("blocked tool delete_all in choice 1 should NOT pass through")
+	}
+
+	// 3. Blocked message for delete_all should appear.
+	if !strings.Contains(clientOutput, "[agentsh] Tool 'delete_all' blocked by policy") {
+		t.Error("expected blocked message for delete_all in choice 1")
+	}
+
+	// 4. choice 0 finish_reason should remain "tool_calls" (has an allowed tool).
+	// choice 1 finish_reason should be rewritten to "stop" (all tools blocked).
+	lines := strings.Split(clientOutput, "\n")
+	for _, line := range lines {
+		data, ok := extractSSEData(line)
+		if !ok || data == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Index        int     `json:"index"`
+				FinishReason *string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		for _, c := range chunk.Choices {
+			if c.FinishReason == nil {
+				continue
+			}
+			if c.Index == 0 && *c.FinishReason != "tool_calls" {
+				t.Errorf("choice 0 finish_reason should remain 'tool_calls', got %q", *c.FinishReason)
+			}
+			if c.Index == 1 && *c.FinishReason != "stop" {
+				t.Errorf("choice 1 finish_reason should be rewritten to 'stop', got %q", *c.FinishReason)
+			}
+		}
+	}
+
+	// 5. Argument chunk for choice 1 tool should be suppressed.
+	for _, line := range lines {
+		data, ok := extractSSEData(line)
+		if !ok || data == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Index int `json:"index"`
+				Delta struct {
+					ToolCalls []struct {
+						Index    int `json:"index"`
+						Function struct {
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		for _, c := range chunk.Choices {
+			if c.Index == 1 {
+				for _, tc := range c.Delta.ToolCalls {
+					if tc.Function.Arguments != "" {
+						t.Error("argument chunk for blocked tool in choice 1 should be suppressed")
+					}
+				}
+			}
+		}
+	}
+
+	// 6. Events: allow for get_weather, block for delete_all.
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if events[0].Action != "allow" || events[0].ToolName != "get_weather" {
+		t.Errorf("expected allow/get_weather, got %s/%s", events[0].Action, events[0].ToolName)
+	}
+	if events[1].Action != "block" || events[1].ToolName != "delete_all" {
+		t.Errorf("expected block/delete_all, got %s/%s", events[1].Action, events[1].ToolName)
+	}
+}
+
+// TestSSEInterceptor_OpenAI_MixedMCPAndNonMCP verifies that finish_reason
+// is NOT rewritten when blocked MCP tools coexist with non-MCP tools (fix for M1).
+func TestSSEInterceptor_OpenAI_MixedMCPAndNonMCP(t *testing.T) {
+	// Stream with two tool calls: str_replace_editor (non-MCP, not in registry)
+	// and delete_all (MCP, blocked). finish_reason should remain "tool_calls"
+	// because str_replace_editor passes through and the LLM expects a tool result.
+	sseInput := buildOpenAITwoToolSSE("str_replace_editor", "call_NM1", "delete_all", "call_NM2")
+
+	// Registry: only delete_all is registered (str_replace_editor is not MCP)
+	reg := mcpregistry.NewRegistry()
+	reg.Register("danger-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "delete_all", Hash: "def456"},
+	})
+
+	// Policy: denylist blocking delete_all
+	policy := newTestPolicy(config.MCPToolRule{Server: "danger-server", Tool: "delete_all"})
+
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(evt mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, evt)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_mn", "req_mn", onEvent, logger)
+
+	reader := strings.NewReader(sseInput)
+	var clientBuf bytes.Buffer
+	interceptor.Stream(reader, &clientBuf)
+
+	clientOutput := clientBuf.String()
+
+	// 1. str_replace_editor (non-MCP) must pass through.
+	if !strings.Contains(clientOutput, `"name":"str_replace_editor"`) {
+		t.Error("non-MCP tool str_replace_editor should pass through")
+	}
+
+	// 2. delete_all (blocked MCP) must NOT pass through.
+	if strings.Contains(clientOutput, `"name":"delete_all"`) {
+		t.Error("blocked MCP tool delete_all should not pass through")
+	}
+
+	// 3. finish_reason must remain "tool_calls" — NOT rewritten to "stop"
+	// because str_replace_editor still needs a tool result.
+	if !strings.Contains(clientOutput, `"finish_reason":"tool_calls"`) {
+		t.Errorf("finish_reason should remain 'tool_calls' when non-MCP tools pass through, got:\n%s", clientOutput)
+	}
+	if strings.Contains(clientOutput, `"finish_reason":"stop"`) {
+		t.Error("finish_reason should NOT be rewritten to 'stop' when non-MCP tools remain")
+	}
+
+	// 4. Only 1 event: block for delete_all (str_replace_editor is not in registry).
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event callback, got %d", len(events))
+	}
+	if events[0].Action != "block" || events[0].ToolName != "delete_all" {
+		t.Errorf("expected block/delete_all, got %s/%s", events[0].Action, events[0].ToolName)
+	}
+}
+
+// errorAfterN is a writer that returns an error after writing n bytes.
+type errorAfterN struct {
+	n       int
+	written int
+	buf     bytes.Buffer
+}
+
+func (e *errorAfterN) Write(p []byte) (int, error) {
+	if e.written >= e.n {
+		return 0, io.ErrClosedPipe
+	}
+	e.written += len(p)
+	if e.written > e.n {
+		// Allow partial write up to limit
+		allowed := len(p) - (e.written - e.n)
+		e.buf.Write(p[:allowed])
+		return allowed, io.ErrClosedPipe
+	}
+	return e.buf.Write(p)
+}
+
+// TestSSEInterceptor_ClientWriteError verifies that the interceptor handles
+// client disconnection gracefully, stops writing, and still returns buffered
+// output for logging (fix for M3).
+func TestSSEInterceptor_ClientWriteError(t *testing.T) {
+	// Build a text-only stream with substantial content.
+	sseInput := buildAnthropicSSE("get_weather", "toolu_err1")
+
+	reg := mcpregistry.NewRegistry()
+	// No tools registered — everything passes through (we're testing write errors, not blocking).
+
+	policy := newTestPolicy() // empty denylist
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_we", "req_we", nil, logger)
+
+	reader := strings.NewReader(sseInput)
+
+	// Client that errors after 100 bytes.
+	client := &errorAfterN{n: 100}
+
+	buffered := interceptor.Stream(reader, client)
+
+	// 1. The interceptor must not panic.
+	// (If we get here, it didn't.)
+
+	// 2. Client received limited output (≤ n bytes + partial write).
+	if client.buf.Len() > 200 {
+		t.Errorf("expected client to receive limited output after error, got %d bytes", client.buf.Len())
+	}
+
+	// 3. Buffered output should still contain content (for logging).
+	// It may be less than the full stream if the scan loop aborted early.
+	if len(buffered) == 0 {
+		t.Error("buffered output should not be empty even when client disconnects")
+	}
+}
