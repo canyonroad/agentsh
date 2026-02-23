@@ -8,6 +8,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/llmproxy"
+	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
 
 // StartLLMProxy creates and starts an embedded LLM proxy for the session.
@@ -21,11 +22,18 @@ func StartLLMProxy(
 	proxyCfg config.ProxyConfig,
 	dlpCfg config.DLPConfig,
 	storageCfg config.LLMStorageConfig,
+	mcpCfg config.SandboxMCPConfig,
 	storagePath string,
 	logger *slog.Logger,
 ) (string, func() error, error) {
 	if sess == nil {
 		return "", nil, fmt.Errorf("session is nil")
+	}
+
+	// In mcp-only mode, force DLP disabled and body storage on.
+	if proxyCfg.IsMCPOnly() {
+		dlpCfg.Mode = "disabled"
+		storageCfg.StoreBodies = true
 	}
 
 	// Build the proxy config
@@ -34,12 +42,20 @@ func StartLLMProxy(
 		Proxy:     proxyCfg,
 		DLP:       dlpCfg,
 		Storage:   storageCfg,
+		MCP:       mcpCfg,
 	}
 
 	// Create the proxy
 	proxy, err := llmproxy.New(cfg, storagePath, logger)
 	if err != nil {
 		return "", nil, fmt.Errorf("create llm proxy: %w", err)
+	}
+
+	// Create MCP registry and inject into proxy if MCP policy is configured
+	if mcpCfg.EnforcePolicy {
+		registry := mcpregistry.NewRegistry()
+		proxy.SetRegistry(registry)
+		sess.SetMCPRegistry(registry)
 	}
 
 	// Start the proxy

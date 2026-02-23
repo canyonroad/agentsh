@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
 
 func TestStartLLMProxy(t *testing.T) {
@@ -55,7 +56,8 @@ func TestStartLLMProxy(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Start the proxy
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, storagePath, logger)
+	mcpCfg := config.SandboxMCPConfig{}
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, storagePath, logger)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -105,7 +107,7 @@ func TestStartLLMProxy_NilSession(t *testing.T) {
 	storageCfg := config.DefaultLLMStorageConfig()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	_, _, err := StartLLMProxy(nil, proxyCfg, dlpCfg, storageCfg, t.TempDir(), logger)
+	_, _, err := StartLLMProxy(nil, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger)
 	if err == nil {
 		t.Error("expected error for nil session")
 	}
@@ -211,7 +213,7 @@ func TestSession_LLMProxyEnvVars_Integration(t *testing.T) {
 	storageCfg := config.DefaultLLMStorageConfig()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, t.TempDir(), logger)
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -280,7 +282,7 @@ func TestSession_CloseProxy(t *testing.T) {
 	storageCfg := config.DefaultLLMStorageConfig()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, _, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, t.TempDir(), logger)
+	proxyURL, _, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -359,7 +361,7 @@ func TestStartLLMProxy_WithDLP(t *testing.T) {
 	storageCfg := config.DefaultLLMStorageConfig()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, t.TempDir(), logger)
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -421,7 +423,7 @@ func TestStartLLMProxy_SessionIDInEnvVars(t *testing.T) {
 	storageCfg := config.DefaultLLMStorageConfig()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	_, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, t.TempDir(), logger)
+	_, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -467,5 +469,346 @@ func TestSession_LLMProxyEnvVars_ThreadSafety(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal("test timed out")
 		}
+	}
+}
+
+func TestStartLLMProxy_MCPOnlyMode(t *testing.T) {
+	// Create a mock upstream server
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":   "msg_test",
+			"type": "message",
+			"usage": map[string]int{
+				"input_tokens":  10,
+				"output_tokens": 20,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	mgr := NewManager(10)
+	sess, err := mgr.CreateWithID("mcp-only-test-session", t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	// Configure proxy in mcp-only mode
+	proxyCfg := config.ProxyConfig{
+		Mode: "mcp-only",
+		Port: 0,
+		Providers: config.ProxyProvidersConfig{
+			Anthropic: upstream.URL,
+			OpenAI:    upstream.URL,
+		},
+	}
+	// Pass DLP as "redact" — mcp-only mode should force it to "disabled"
+	dlpCfg := config.DLPConfig{
+		Mode: "redact",
+		Patterns: config.DLPPatternsConfig{
+			Email: true,
+		},
+	}
+	// Pass StoreBodies as false — mcp-only mode should force it to true
+	storageCfg := config.LLMStorageConfig{
+		StoreBodies: false,
+	}
+	mcpCfg := config.SandboxMCPConfig{}
+	storagePath := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, storagePath, logger)
+	if err != nil {
+		t.Fatalf("StartLLMProxy failed: %v", err)
+	}
+	defer closeFn()
+
+	// Verify proxy URL is non-empty and well-formed
+	if proxyURL == "" {
+		t.Error("expected non-empty proxy URL")
+	}
+	if !strings.HasPrefix(proxyURL, "http://127.0.0.1:") {
+		t.Errorf("expected proxy URL to start with http://127.0.0.1:, got %s", proxyURL)
+	}
+
+	// Verify session has the proxy URL
+	if sess.LLMProxyURL() != proxyURL {
+		t.Errorf("session proxy URL mismatch: expected %s, got %s", proxyURL, sess.LLMProxyURL())
+	}
+
+	// Verify we can make requests through the proxy
+	time.Sleep(10 * time.Millisecond)
+
+	reqBody := `{"model": "claude-sonnet-4-20250514", "messages": [{"role": "user", "content": "Hello"}]}`
+	req, err := http.NewRequest(http.MethodPost, proxyURL+"/v1/messages", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "test-key")
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request through proxy failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+}
+
+func TestStartLLMProxy_MCPConfigPassedThrough(t *testing.T) {
+	// Create a mock upstream server
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":   "msg_test",
+			"type": "message",
+			"usage": map[string]int{
+				"input_tokens":  5,
+				"output_tokens": 10,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	mgr := NewManager(10)
+	sess, err := mgr.CreateWithID("mcp-passthrough-test", t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	proxyCfg := config.ProxyConfig{
+		Mode: "mcp-only",
+		Port: 0,
+		Providers: config.ProxyProvidersConfig{
+			Anthropic: upstream.URL,
+			OpenAI:    upstream.URL,
+		},
+	}
+	dlpCfg := config.DLPConfig{Mode: "disabled"}
+	storageCfg := config.DefaultLLMStorageConfig()
+	mcpCfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		FailClosed:    true,
+		ToolPolicy:    "allowlist",
+		AllowedTools: []config.MCPToolRule{
+			{Server: "*", Tool: "safe_tool"},
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("StartLLMProxy failed: %v", err)
+	}
+	defer closeFn()
+
+	// Verify the proxy started successfully with MCP config
+	if proxyURL == "" {
+		t.Error("expected non-empty proxy URL")
+	}
+
+	// Verify session has the proxy URL set
+	if sess.LLMProxyURL() != proxyURL {
+		t.Errorf("session proxy URL mismatch: expected %s, got %s", proxyURL, sess.LLMProxyURL())
+	}
+
+	// Verify the proxy instance is stored in the session
+	proxyInst := sess.ProxyInstance()
+	if proxyInst == nil {
+		t.Error("expected non-nil proxy instance in session")
+	}
+}
+
+func TestStartLLMProxy_CreatesRegistry(t *testing.T) {
+	// Create a mock upstream server
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":   "msg_test",
+			"type": "message",
+			"usage": map[string]int{
+				"input_tokens":  5,
+				"output_tokens": 10,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	mgr := NewManager(10)
+	sess, err := mgr.CreateWithID("registry-enabled-test", t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	proxyCfg := config.ProxyConfig{
+		Mode: "mcp-only",
+		Port: 0,
+		Providers: config.ProxyProvidersConfig{
+			Anthropic: upstream.URL,
+			OpenAI:    upstream.URL,
+		},
+	}
+	dlpCfg := config.DLPConfig{Mode: "disabled"}
+	storageCfg := config.DefaultLLMStorageConfig()
+	mcpCfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		FailClosed:    true,
+		ToolPolicy:    "allowlist",
+		AllowedTools: []config.MCPToolRule{
+			{Server: "*", Tool: "safe_tool"},
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("StartLLMProxy failed: %v", err)
+	}
+	defer closeFn()
+
+	// Verify proxy started
+	if proxyURL == "" {
+		t.Error("expected non-empty proxy URL")
+	}
+
+	// Verify registry was created and stored in the session
+	reg := sess.MCPRegistry()
+	if reg == nil {
+		t.Fatal("expected non-nil MCP registry when EnforcePolicy is true")
+	}
+
+	// Verify it's actually a *mcpregistry.Registry
+	registry, ok := reg.(*mcpregistry.Registry)
+	if !ok {
+		t.Fatalf("expected *mcpregistry.Registry, got %T", reg)
+	}
+
+	// Verify the registry is functional (can register and look up tools)
+	registry.Register("test-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "test_tool", Hash: "abc123"},
+	})
+	entry := registry.Lookup("test_tool")
+	if entry == nil {
+		t.Error("expected to find registered tool in registry")
+	}
+	if entry != nil && entry.ServerID != "test-server" {
+		t.Errorf("expected server ID 'test-server', got %s", entry.ServerID)
+	}
+}
+
+func TestStartLLMProxy_NoRegistryWhenPolicyDisabled(t *testing.T) {
+	// Create a mock upstream server
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":   "msg_test",
+			"type": "message",
+			"usage": map[string]int{
+				"input_tokens":  5,
+				"output_tokens": 10,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	mgr := NewManager(10)
+	sess, err := mgr.CreateWithID("registry-disabled-test", t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	proxyCfg := config.ProxyConfig{
+		Mode: "embedded",
+		Port: 0,
+		Providers: config.ProxyProvidersConfig{
+			Anthropic: upstream.URL,
+			OpenAI:    upstream.URL,
+		},
+	}
+	dlpCfg := config.DLPConfig{Mode: "disabled"}
+	storageCfg := config.DefaultLLMStorageConfig()
+	// EnforcePolicy defaults to false
+	mcpCfg := config.SandboxMCPConfig{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("StartLLMProxy failed: %v", err)
+	}
+	defer closeFn()
+
+	// Verify proxy started
+	if proxyURL == "" {
+		t.Error("expected non-empty proxy URL")
+	}
+
+	// Verify registry was NOT created
+	reg := sess.MCPRegistry()
+	if reg != nil {
+		t.Errorf("expected nil MCP registry when EnforcePolicy is false, got %v", reg)
+	}
+}
+
+func TestSession_MCPRegistryClearedOnClose(t *testing.T) {
+	// Create a mock upstream server
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":   "msg_test",
+			"type": "message",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	mgr := NewManager(10)
+	sess, err := mgr.CreateWithID("registry-close-test", t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	proxyCfg := config.ProxyConfig{
+		Mode: "mcp-only",
+		Port: 0,
+		Providers: config.ProxyProvidersConfig{
+			Anthropic: upstream.URL,
+			OpenAI:    upstream.URL,
+		},
+	}
+	dlpCfg := config.DLPConfig{Mode: "disabled"}
+	storageCfg := config.DefaultLLMStorageConfig()
+	mcpCfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	_, _, err = StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("StartLLMProxy failed: %v", err)
+	}
+
+	// Verify registry is set
+	if sess.MCPRegistry() == nil {
+		t.Fatal("expected non-nil registry before close")
+	}
+
+	// Close the LLM proxy
+	if err := sess.CloseLLMProxy(); err != nil {
+		t.Fatalf("CloseLLMProxy failed: %v", err)
+	}
+
+	// Verify registry is cleared
+	if sess.MCPRegistry() != nil {
+		t.Error("expected nil registry after CloseLLMProxy")
 	}
 }

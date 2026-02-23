@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
 
 // TestProxy_AnthropicPassthrough tests that requests are correctly
@@ -910,4 +911,151 @@ func TestProxy_SSEStreamingWithDLP(t *testing.T) {
 	if !strings.Contains(string(receivedBody), "[REDACTED:email]") {
 		t.Error("email redaction marker not found in request to upstream")
 	}
+}
+
+// TestProxyWithMCPConfig tests that MCP config fields are wired into the proxy.
+func TestProxyWithMCPConfig(t *testing.T) {
+	t.Run("policy evaluator created when EnforcePolicy is true", func(t *testing.T) {
+		storageDir := t.TempDir()
+		cfg := Config{
+			SessionID: "test-mcp-policy",
+			Proxy:     config.DefaultProxyConfig(),
+			DLP:       config.DefaultDLPConfig(),
+			MCP: config.SandboxMCPConfig{
+				EnforcePolicy: true,
+				FailClosed:    true,
+				ToolPolicy:    "allowlist",
+				AllowedTools: []config.MCPToolRule{
+					{Server: "*", Tool: "get_weather"},
+				},
+			},
+		}
+
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		proxy, err := New(cfg, storageDir, logger)
+		if err != nil {
+			t.Fatalf("New() error: %v", err)
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			proxy.Stop(shutdownCtx)
+		}()
+
+		if proxy.policy == nil {
+			t.Fatal("expected policy evaluator to be set when EnforcePolicy is true")
+		}
+
+		// Verify the evaluator uses the config we passed in
+		decision := proxy.policy.Evaluate("any-server", "get_weather", "")
+		if !decision.Allowed {
+			t.Error("expected get_weather to be allowed by policy")
+		}
+
+		decision = proxy.policy.Evaluate("any-server", "delete_all", "")
+		if decision.Allowed {
+			t.Error("expected delete_all to be denied by policy")
+		}
+	})
+
+	t.Run("no policy evaluator when EnforcePolicy is false", func(t *testing.T) {
+		storageDir := t.TempDir()
+		cfg := Config{
+			SessionID: "test-mcp-no-policy",
+			Proxy:     config.DefaultProxyConfig(),
+			DLP:       config.DefaultDLPConfig(),
+			MCP: config.SandboxMCPConfig{
+				EnforcePolicy: false,
+			},
+		}
+
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		proxy, err := New(cfg, storageDir, logger)
+		if err != nil {
+			t.Fatalf("New() error: %v", err)
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			proxy.Stop(shutdownCtx)
+		}()
+
+		if proxy.policy != nil {
+			t.Fatal("expected policy evaluator to be nil when EnforcePolicy is false")
+		}
+	})
+
+	t.Run("SetRegistry sets registry", func(t *testing.T) {
+		storageDir := t.TempDir()
+		cfg := Config{
+			SessionID: "test-mcp-registry",
+			Proxy:     config.DefaultProxyConfig(),
+			DLP:       config.DefaultDLPConfig(),
+		}
+
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		proxy, err := New(cfg, storageDir, logger)
+		if err != nil {
+			t.Fatalf("New() error: %v", err)
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			proxy.Stop(shutdownCtx)
+		}()
+
+		if proxy.registry != nil {
+			t.Fatal("expected registry to be nil before SetRegistry")
+		}
+
+		reg := mcpregistry.NewRegistry()
+		reg.Register("test-server", "stdio", "", []mcpregistry.ToolInfo{
+			{Name: "my_tool", Hash: "abc123"},
+		})
+
+		proxy.SetRegistry(reg)
+
+		if proxy.registry == nil {
+			t.Fatal("expected registry to be set after SetRegistry")
+		}
+		if proxy.registry != reg {
+			t.Fatal("expected registry to be the same instance we passed")
+		}
+
+		// Verify the registry is usable through the proxy
+		entry := proxy.registry.Lookup("my_tool")
+		if entry == nil {
+			t.Fatal("expected to find my_tool in registry")
+		}
+		if entry.ServerID != "test-server" {
+			t.Errorf("expected ServerID %q, got %q", "test-server", entry.ServerID)
+		}
+	})
+
+	t.Run("default config has no MCP fields set", func(t *testing.T) {
+		storageDir := t.TempDir()
+		cfg := Config{
+			SessionID: "test-mcp-default",
+			Proxy:     config.DefaultProxyConfig(),
+			DLP:       config.DefaultDLPConfig(),
+		}
+
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		proxy, err := New(cfg, storageDir, logger)
+		if err != nil {
+			t.Fatalf("New() error: %v", err)
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			proxy.Stop(shutdownCtx)
+		}()
+
+		if proxy.policy != nil {
+			t.Error("expected nil policy for default config")
+		}
+		if proxy.registry != nil {
+			t.Error("expected nil registry for default config")
+		}
+	})
 }

@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/mcpinspect"
+	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
 
 // Config holds the proxy configuration using config package types.
@@ -33,6 +35,9 @@ type Config struct {
 
 	// Storage is the storage configuration.
 	Storage config.LLMStorageConfig
+
+	// MCP is the MCP security policy configuration.
+	MCP config.SandboxMCPConfig
 }
 
 // Proxy is an HTTP proxy that intercepts LLM API requests.
@@ -45,6 +50,9 @@ type Proxy struct {
 	logger          *slog.Logger
 	isCustomOpenAI  bool
 	chatGPTUpstream *url.URL
+	registry *mcpregistry.Registry
+	// policy is immutable after construction — set once in New(), never changed.
+	policy *mcpinspect.PolicyEvaluator
 
 	server   *http.Server
 	listener net.Listener
@@ -103,7 +111,24 @@ func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 		logger:          logger,
 		isCustomOpenAI:  cfg.Proxy.Providers.IsCustomOpenAI(),
 		chatGPTUpstream: chatGPTURL,
+		policy:          newPolicyEvaluator(cfg.MCP),
 	}, nil
+}
+
+// newPolicyEvaluator creates a PolicyEvaluator if policy enforcement is enabled.
+func newPolicyEvaluator(mcpCfg config.SandboxMCPConfig) *mcpinspect.PolicyEvaluator {
+	if !mcpCfg.EnforcePolicy {
+		return nil
+	}
+	return mcpinspect.NewPolicyEvaluator(mcpCfg)
+}
+
+// SetRegistry sets the MCP tool registry on the proxy. It is safe for
+// concurrent use and is called once the shim has finished discovering tools.
+func (p *Proxy) SetRegistry(r *mcpregistry.Registry) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.registry = r
 }
 
 // getUpstreamForRequest returns the appropriate upstream URL for the request.
@@ -235,12 +260,31 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Log request before proxying
 	p.logRequest(requestID, sessionID, dialect, outReq, reqBody, dlpResult)
 
-	// Create SSE-aware transport that handles streaming responses
+	// Create SSE-aware transport that handles streaming responses.
+	//
+	// SECURITY NOTE: SSE MCP interception is currently audit-only. The
+	// onComplete callback fires after the stream has been fully sent to
+	// the client, so blocked tool calls cannot be prevented in the SSE
+	// path. A client using stream=true will receive blocked tool calls.
+	// Real-time stream termination (replacing io.Copy with a per-chunk
+	// scanner that can abort) is planned as future work.
 	sseTransport := newSSEProxyTransport(
 		http.DefaultTransport,
 		w,
 		func(resp *http.Response, body []byte) {
-			// This callback is called when SSE stream completes
+			// MCP tool call interception for SSE (audit-only — stream already sent to client).
+			// See SECURITY NOTE above.
+			if reg := p.getRegistry(); reg != nil && p.policy != nil {
+				calls := ExtractToolCallsFromSSE(body, dialect)
+				if len(calls) > 0 {
+					result := interceptMCPToolCallsFromList(calls, dialect, reg, p.policy, requestID, sessionID)
+					for _, ev := range result.Events {
+						p.logger.Info("mcp tool call intercepted (sse)",
+							"tool", ev.ToolName, "action", ev.Action,
+							"server", ev.ServerID, "request_id", requestID)
+					}
+				}
+			}
 			p.logResponseDirect(requestID, sessionID, dialect, resp, body, startTime)
 		},
 	)
@@ -254,8 +298,37 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 		Transport: sseTransport,
 		ModifyResponse: func(resp *http.Response) error {
-			// Log non-SSE responses (SSE responses are logged via transport callback)
-			p.logResponse(requestID, sessionID, dialect, resp, startTime, dlpResult)
+			// Read body for both logging and MCP interception.
+			var respBody []byte
+			if resp.Body != nil {
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					p.logger.Error("read response body", "error", err, "request_id", requestID)
+					return nil
+				}
+				respBody = body
+			}
+
+			// MCP tool call interception (non-SSE only; SSE handled in onComplete).
+			if reg := p.getRegistry(); reg != nil && p.policy != nil && resp.StatusCode == http.StatusOK {
+				result := interceptMCPToolCalls(respBody, dialect, reg, p.policy, requestID, sessionID)
+				for _, ev := range result.Events {
+					p.logger.Info("mcp tool call intercepted",
+						"tool", ev.ToolName, "action", ev.Action,
+						"server", ev.ServerID, "request_id", requestID)
+				}
+				if result.HasBlocked && result.RewrittenBody != nil {
+					respBody = result.RewrittenBody
+				}
+			}
+
+			// Put body back for client.
+			resp.Body = io.NopCloser(bytes.NewReader(respBody))
+			resp.ContentLength = int64(len(respBody))
+			resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(respBody)))
+
+			// Log response with the (possibly rewritten) body.
+			p.logResponseDirect(requestID, sessionID, dialect, resp, respBody, startTime)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {

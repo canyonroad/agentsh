@@ -615,7 +615,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	}
 
 	// Start embedded LLM proxy if configured
-	if a.cfg.Proxy.Mode == "embedded" {
+	if a.cfg.Proxy.Mode == "embedded" || a.cfg.Proxy.IsMCPOnly() {
 		a.startLLMProxy(ctx, s)
 	}
 
