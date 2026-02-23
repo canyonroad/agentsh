@@ -638,7 +638,7 @@ func TestInterceptMCPToolCalls_NilRegistryReturnsEmpty(t *testing.T) {
 		]
 	}`)
 
-	result := interceptMCPToolCalls(body, DialectAnthropic, nil, newAllowingPolicy(), "req_1", "sess_1")
+	result := interceptMCPToolCalls(body, DialectAnthropic, nil, newAllowingPolicy(), "req_1", "sess_1", nil, nil, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -665,7 +665,7 @@ func TestInterceptMCPToolCalls_NilPolicyReturnsEmpty(t *testing.T) {
 		]
 	}`)
 
-	result := interceptMCPToolCalls(body, DialectAnthropic, reg, nil, "req_1", "sess_1")
+	result := interceptMCPToolCalls(body, DialectAnthropic, reg, nil, "req_1", "sess_1", nil, nil, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -692,7 +692,7 @@ func TestInterceptMCPToolCalls_UnknownToolSkipped(t *testing.T) {
 		]
 	}`)
 
-	result := interceptMCPToolCalls(body, DialectAnthropic, reg, policy, "req_1", "sess_1")
+	result := interceptMCPToolCalls(body, DialectAnthropic, reg, policy, "req_1", "sess_1", nil, nil, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -722,7 +722,7 @@ func TestInterceptMCPToolCalls_AllowedToolPassesThrough(t *testing.T) {
 		]
 	}`)
 
-	result := interceptMCPToolCalls(body, DialectAnthropic, reg, policy, "req_1", "sess_1")
+	result := interceptMCPToolCalls(body, DialectAnthropic, reg, policy, "req_1", "sess_1", nil, nil, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -781,7 +781,7 @@ func TestInterceptMCPToolCalls_BlockedToolRewritten(t *testing.T) {
 		]
 	}`)
 
-	result := interceptMCPToolCalls(body, DialectAnthropic, reg, policy, "req_1", "sess_1")
+	result := interceptMCPToolCalls(body, DialectAnthropic, reg, policy, "req_1", "sess_1", nil, nil, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -881,7 +881,7 @@ func TestInterceptMCPToolCalls_FailClosedBlocksViaAllowlist(t *testing.T) {
 		]
 	}`)
 
-	result := interceptMCPToolCalls(body, DialectAnthropic, reg, policy, "req_1", "sess_1")
+	result := interceptMCPToolCalls(body, DialectAnthropic, reg, policy, "req_1", "sess_1", nil, nil, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -929,7 +929,7 @@ func TestInterceptMCPToolCalls_PartialBlockAnthropic(t *testing.T) {
 		]
 	}`)
 
-	result := interceptMCPToolCalls(body, DialectAnthropic, reg, policy, "req_1", "sess_1")
+	result := interceptMCPToolCalls(body, DialectAnthropic, reg, policy, "req_1", "sess_1", nil, nil, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -1031,7 +1031,7 @@ func TestInterceptMCPToolCalls_OpenAIBlockedToolRewritten(t *testing.T) {
 		}]
 	}`)
 
-	result := interceptMCPToolCalls(body, DialectOpenAI, reg, policy, "req_1", "sess_1")
+	result := interceptMCPToolCalls(body, DialectOpenAI, reg, policy, "req_1", "sess_1", nil, nil, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -1130,7 +1130,7 @@ func TestInterceptMCPToolCalls_OpenAIPartialBlock(t *testing.T) {
 		}]
 	}`)
 
-	result := interceptMCPToolCalls(body, DialectOpenAI, reg, policy, "req_1", "sess_1")
+	result := interceptMCPToolCalls(body, DialectOpenAI, reg, policy, "req_1", "sess_1", nil, nil, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -1206,7 +1206,7 @@ func TestInterceptMCPToolCalls_MixedMCPAndNonMCP(t *testing.T) {
 		]
 	}`)
 
-	result := interceptMCPToolCalls(body, DialectAnthropic, reg, policy, "req_1", "sess_1")
+	result := interceptMCPToolCalls(body, DialectAnthropic, reg, policy, "req_1", "sess_1", nil, nil, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -1505,7 +1505,7 @@ func TestInterceptMCPToolCallsFromList_AllowedTool(t *testing.T) {
 		{ID: "toolu_01", Name: "get_weather"},
 	}
 
-	result := interceptMCPToolCallsFromList(calls, DialectAnthropic, reg, policy, "req_1", "sess_1")
+	result := interceptMCPToolCallsFromList(calls, DialectAnthropic, reg, policy, "req_1", "sess_1", nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -1533,7 +1533,7 @@ func TestInterceptMCPToolCallsFromList_BlockedTool(t *testing.T) {
 		{ID: "toolu_01", Name: "get_weather"},
 	}
 
-	result := interceptMCPToolCallsFromList(calls, DialectAnthropic, reg, policy, "req_1", "sess_1")
+	result := interceptMCPToolCallsFromList(calls, DialectAnthropic, reg, policy, "req_1", "sess_1", nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -1560,7 +1560,7 @@ func TestInterceptMCPToolCallsFromList_UnknownToolSkipped(t *testing.T) {
 		{ID: "toolu_01", Name: "unknown_tool"},
 	}
 
-	result := interceptMCPToolCallsFromList(calls, DialectAnthropic, reg, policy, "req_1", "sess_1")
+	result := interceptMCPToolCallsFromList(calls, DialectAnthropic, reg, policy, "req_1", "sess_1", nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -1702,5 +1702,173 @@ func TestProxy_MCPInterception_SSE_Integration(t *testing.T) {
 	logOutput := logBuf.String()
 	if !strings.Contains(logOutput, "weather-server") {
 		t.Logf("log output: %s", logOutput)
+	}
+}
+
+func TestInterceptRateLimitBlocks(t *testing.T) {
+	rlCfg := config.MCPRateLimitsConfig{
+		Enabled:      true,
+		DefaultRPM:   0,
+		DefaultBurst: 0,
+	}
+	rateLimiter := mcpinspect.NewRateLimiterRegistry(rlCfg)
+
+	registry := mcpregistry.NewRegistry()
+	registry.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "h1"},
+	})
+
+	policy := mcpinspect.NewPolicyEvaluator(config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "none",
+	})
+
+	body := []byte(`{
+		"id": "msg_1",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}}
+		],
+		"stop_reason": "tool_use"
+	}`)
+
+	result := interceptMCPToolCalls(body, DialectAnthropic, registry, policy,
+		"req-1", "sess-1", nil, rateLimiter, nil)
+
+	if !result.HasBlocked {
+		t.Fatal("expected rate limit to block the tool call")
+	}
+	if len(result.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.Events))
+	}
+	if result.Events[0].Action != "block" {
+		t.Errorf("event Action = %q, want %q", result.Events[0].Action, "block")
+	}
+	if !strings.Contains(result.Events[0].Reason, "rate limit") {
+		t.Errorf("event Reason = %q, want to contain 'rate limit'", result.Events[0].Reason)
+	}
+}
+
+func TestInterceptVersionPinBlock(t *testing.T) {
+	registry := mcpregistry.NewRegistry()
+	registry.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v1"},
+	})
+	registry.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v2"},
+	})
+
+	policy := mcpinspect.NewPolicyEvaluator(config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "none",
+	})
+
+	vpCfg := &config.MCPVersionPinningConfig{
+		Enabled:  true,
+		OnChange: "block",
+	}
+
+	body := []byte(`{
+		"id": "msg_1",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}}
+		],
+		"stop_reason": "tool_use"
+	}`)
+
+	result := interceptMCPToolCalls(body, DialectAnthropic, registry, policy,
+		"req-1", "sess-1", nil, nil, vpCfg)
+
+	if !result.HasBlocked {
+		t.Fatal("expected version pin to block the tool call")
+	}
+	if len(result.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.Events))
+	}
+	if !strings.Contains(result.Events[0].Reason, "hash changed") {
+		t.Errorf("event Reason = %q, want to contain 'hash changed'", result.Events[0].Reason)
+	}
+}
+
+func TestInterceptVersionPinAlert(t *testing.T) {
+	registry := mcpregistry.NewRegistry()
+	registry.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v1"},
+	})
+	registry.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v2"},
+	})
+
+	policy := mcpinspect.NewPolicyEvaluator(config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "none",
+	})
+
+	vpCfg := &config.MCPVersionPinningConfig{
+		Enabled:  true,
+		OnChange: "alert",
+	}
+
+	body := []byte(`{
+		"id": "msg_1",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}}
+		],
+		"stop_reason": "tool_use"
+	}`)
+
+	result := interceptMCPToolCalls(body, DialectAnthropic, registry, policy,
+		"req-1", "sess-1", nil, nil, vpCfg)
+
+	// Alert mode should NOT block.
+	if result.HasBlocked {
+		t.Fatal("expected alert mode to allow the tool call")
+	}
+	if len(result.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.Events))
+	}
+	if result.Events[0].Action != "allow" {
+		t.Errorf("event Action = %q, want %q", result.Events[0].Action, "allow")
+	}
+	if !strings.Contains(result.Events[0].Reason, "hash changed") {
+		t.Errorf("event Reason = %q, want to contain 'hash changed'", result.Events[0].Reason)
+	}
+}
+
+func TestInterceptVersionPinDisabled(t *testing.T) {
+	registry := mcpregistry.NewRegistry()
+	registry.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v1"},
+	})
+	registry.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v2"},
+	})
+
+	policy := mcpinspect.NewPolicyEvaluator(config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "none",
+	})
+
+	body := []byte(`{
+		"id": "msg_1",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}}
+		],
+		"stop_reason": "tool_use"
+	}`)
+
+	// versionPinCfg is nil (simulating Enabled=false -- versionPinCfg() returns nil).
+	result := interceptMCPToolCalls(body, DialectAnthropic, registry, policy,
+		"req-1", "sess-1", nil, nil, nil)
+
+	if result.HasBlocked {
+		t.Fatal("expected nil versionPinCfg to allow the tool call")
 	}
 }

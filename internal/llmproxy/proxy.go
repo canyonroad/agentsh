@@ -59,6 +59,8 @@ type Proxy struct {
 	// sessionAnalyzer detects cross-server attack patterns. When non-nil,
 	// tool calls are checked against cross-server rules before regular policy.
 	sessionAnalyzer *mcpinspect.SessionAnalyzer
+	// rateLimiter applies per-server rate limits to MCP tool calls.
+	rateLimiter *mcpinspect.RateLimiterRegistry
 
 	server   *http.Server
 	listener net.Listener
@@ -118,6 +120,7 @@ func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 		isCustomOpenAI:  cfg.Proxy.Providers.IsCustomOpenAI(),
 		chatGPTUpstream: chatGPTURL,
 		policy:          newPolicyEvaluator(cfg.MCP),
+		rateLimiter:     newRateLimiter(cfg.MCP),
 	}, nil
 }
 
@@ -127,6 +130,20 @@ func newPolicyEvaluator(mcpCfg config.SandboxMCPConfig) *mcpinspect.PolicyEvalua
 		return nil
 	}
 	return mcpinspect.NewPolicyEvaluator(mcpCfg)
+}
+
+func newRateLimiter(mcpCfg config.SandboxMCPConfig) *mcpinspect.RateLimiterRegistry {
+	if !mcpCfg.RateLimits.Enabled {
+		return nil
+	}
+	return mcpinspect.NewRateLimiterRegistry(mcpCfg.RateLimits)
+}
+
+func (p *Proxy) versionPinCfg() *config.MCPVersionPinningConfig {
+	if !p.cfg.MCP.VersionPinning.Enabled {
+		return nil
+	}
+	return &p.cfg.MCP.VersionPinning
 }
 
 // SetRegistry sets the MCP tool registry on the proxy. It is safe for
@@ -342,7 +359,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			// MCP tool call interception (non-SSE only; SSE handled by SSEInterceptor).
 			if reg := p.getRegistry(); reg != nil && p.policy != nil && resp.StatusCode == http.StatusOK {
-				result := interceptMCPToolCalls(respBody, dialect, reg, p.policy, requestID, sessionID, p.getSessionAnalyzer())
+				result := interceptMCPToolCalls(respBody, dialect, reg, p.policy, requestID, sessionID, p.getSessionAnalyzer(), p.rateLimiter, p.versionPinCfg())
 				for _, ev := range result.Events {
 					p.logger.Info("mcp tool call intercepted",
 						"tool", ev.ToolName, "action", ev.Action,
