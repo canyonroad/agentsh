@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/mcpinspect"
+	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
 
 // Config holds the proxy configuration using config package types.
@@ -33,6 +35,9 @@ type Config struct {
 
 	// Storage is the storage configuration.
 	Storage config.LLMStorageConfig
+
+	// MCP is the MCP security policy configuration.
+	MCP config.SandboxMCPConfig
 }
 
 // Proxy is an HTTP proxy that intercepts LLM API requests.
@@ -45,6 +50,8 @@ type Proxy struct {
 	logger          *slog.Logger
 	isCustomOpenAI  bool
 	chatGPTUpstream *url.URL
+	registry        *mcpregistry.Registry
+	policy          *mcpinspect.PolicyEvaluator
 
 	server   *http.Server
 	listener net.Listener
@@ -103,7 +110,24 @@ func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 		logger:          logger,
 		isCustomOpenAI:  cfg.Proxy.Providers.IsCustomOpenAI(),
 		chatGPTUpstream: chatGPTURL,
+		policy:          newPolicyEvaluator(cfg.MCP),
 	}, nil
+}
+
+// newPolicyEvaluator creates a PolicyEvaluator if policy enforcement is enabled.
+func newPolicyEvaluator(mcpCfg config.SandboxMCPConfig) *mcpinspect.PolicyEvaluator {
+	if !mcpCfg.EnforcePolicy {
+		return nil
+	}
+	return mcpinspect.NewPolicyEvaluator(mcpCfg)
+}
+
+// SetRegistry sets the MCP tool registry on the proxy. It is safe for
+// concurrent use and is called once the shim has finished discovering tools.
+func (p *Proxy) SetRegistry(r *mcpregistry.Registry) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.registry = r
 }
 
 // getUpstreamForRequest returns the appropriate upstream URL for the request.
