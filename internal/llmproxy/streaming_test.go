@@ -4,11 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/mcpinspect"
+	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
 
 func TestIsSSEResponse(t *testing.T) {
@@ -343,5 +348,113 @@ func TestSSEProxyTransport_LargeStream(t *testing.T) {
 	recEventCount := bytes.Count(rec.Body.Bytes(), []byte("data: event\n\n"))
 	if recEventCount != 100 {
 		t.Errorf("Recorder got %d events, want 100", recEventCount)
+	}
+}
+
+func TestSSEProxyTransport_WithInterceptor(t *testing.T) {
+	// Build a realistic Anthropic SSE stream with a blocked tool_use.
+	sseInput := buildAnthropicSSE("get_weather", "toolu_01A09q90qw90lq917835lq9")
+
+	// Create an SSE server that returns the stream.
+	sseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+
+		flusher := w.(http.Flusher)
+		// Write line-by-line to simulate realistic streaming.
+		for _, line := range strings.Split(sseInput, "\n") {
+			w.Write([]byte(line + "\n"))
+			flusher.Flush()
+		}
+	}))
+	defer sseServer.Close()
+
+	// Registry: get_weather from "weather-server"
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+
+	// Policy: denylist blocking get_weather
+	policy := mcpinspect.NewPolicyEvaluator(config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "denylist",
+		DeniedTools:   []config.MCPToolRule{{Server: "*", Tool: "get_weather"}},
+	})
+
+	// Collect event callbacks.
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(evt mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, evt)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Track callback body.
+	var callbackBody []byte
+	rec := httptest.NewRecorder()
+	transport := newSSEProxyTransport(
+		http.DefaultTransport,
+		rec,
+		func(resp *http.Response, body []byte) {
+			callbackBody = body
+		},
+	)
+
+	// Configure the interceptor on the transport.
+	transport.SetInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger)
+
+	// Make request through transport.
+	req, _ := http.NewRequest("POST", sseServer.URL+"/v1/messages", nil)
+	_, err := transport.RoundTrip(req)
+
+	if err != errSSEHandled {
+		t.Fatalf("Expected errSSEHandled, got %v", err)
+	}
+
+	clientOutput := rec.Body.String()
+
+	// 1. The blocked tool_use content_block_start must NOT appear in client output.
+	if strings.Contains(clientOutput, `"type":"tool_use"`) {
+		t.Error("blocked tool_use should be suppressed from client output")
+	}
+
+	// 2. The replacement text should appear.
+	if !strings.Contains(clientOutput, "[agentsh] Tool 'get_weather' blocked by policy") {
+		t.Error("replacement text should appear in client output")
+	}
+
+	// 3. The original text block should pass through.
+	if !strings.Contains(clientOutput, "Let me check the weather.") {
+		t.Error("original text block should pass through")
+	}
+
+	// 4. The callback body should also have the replacement (not the original tool_use).
+	if callbackBody == nil {
+		t.Fatal("callback was not called")
+	}
+	callbackStr := string(callbackBody)
+	if strings.Contains(callbackStr, `"type":"tool_use"`) {
+		t.Error("callback body should not contain blocked tool_use")
+	}
+	if !strings.Contains(callbackStr, "[agentsh] Tool 'get_weather' blocked by policy") {
+		t.Error("callback body should contain replacement text")
+	}
+
+	// 5. An intercept event should have been fired.
+	if len(events) != 1 {
+		t.Fatalf("expected 1 intercept event, got %d", len(events))
+	}
+	if events[0].Action != "block" {
+		t.Errorf("expected action=block, got %q", events[0].Action)
+	}
+	if events[0].ToolName != "get_weather" {
+		t.Errorf("expected tool=get_weather, got %q", events[0].ToolName)
+	}
+
+	// 6. Verify headers were forwarded.
+	if rec.Header().Get("Content-Type") != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", rec.Header().Get("Content-Type"))
 	}
 }

@@ -279,38 +279,27 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.logRequest(requestID, sessionID, dialect, outReq, reqBody, dlpResult)
 
 	// Create SSE-aware transport that handles streaming responses.
-	//
-	// SECURITY NOTE: SSE MCP interception is currently audit-only. The
-	// onComplete callback fires after the stream has been fully sent to
-	// the client, so blocked tool calls cannot be prevented in the SSE
-	// path. A client using stream=true will receive blocked tool calls.
-	// Real-time stream termination (replacing io.Copy with a per-chunk
-	// scanner that can abort) is planned as future work.
+	// When MCP policy is enabled, the transport uses an SSEInterceptor
+	// for real-time tool call blocking.
 	sseTransport := newSSEProxyTransport(
 		http.DefaultTransport,
 		w,
 		func(resp *http.Response, body []byte) {
-			// MCP tool call interception for SSE (audit-only — stream already sent to client).
-			// See SECURITY NOTE above.
-			if reg := p.getRegistry(); reg != nil && p.policy != nil {
-				calls := ExtractToolCallsFromSSE(body, dialect)
-				if len(calls) > 0 {
-					result := interceptMCPToolCallsFromList(calls, dialect, reg, p.policy, requestID, sessionID)
-					for _, ev := range result.Events {
-						p.logger.Info("mcp tool call intercepted (sse)",
-							"tool", ev.ToolName, "action", ev.Action,
-							"server", ev.ServerID, "request_id", requestID)
-					}
-					if cb := p.getEventCallback(); cb != nil {
-						for _, ev := range result.Events {
-							cb(ev)
-						}
-					}
-				}
-			}
+			// Log the response. MCP interception is handled inline by the
+			// SSEInterceptor (if configured), so this callback only logs.
 			p.logResponseDirect(requestID, sessionID, dialect, resp, body, startTime)
 		},
 	)
+
+	// Configure real-time MCP interception if policy enforcement is enabled.
+	if reg := p.getRegistry(); reg != nil && p.policy != nil {
+		sseTransport.SetInterceptor(
+			reg, p.policy, dialect,
+			sessionID, requestID,
+			p.getEventCallback(),
+			p.logger,
+		)
+	}
 
 	// Create reverse proxy for this request
 	proxy := &httputil.ReverseProxy{
@@ -332,7 +321,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				respBody = body
 			}
 
-			// MCP tool call interception (non-SSE only; SSE handled in onComplete).
+			// MCP tool call interception (non-SSE only; SSE handled by SSEInterceptor).
 			if reg := p.getRegistry(); reg != nil && p.policy != nil && resp.StatusCode == http.StatusOK {
 				result := interceptMCPToolCalls(respBody, dialect, reg, p.policy, requestID, sessionID)
 				for _, ev := range result.Events {
