@@ -56,6 +56,9 @@ type Proxy struct {
 	// onInterceptEvent is called for each MCP tool call intercept event.
 	// Set via SetEventCallback; the API layer uses it to persist events.
 	onInterceptEvent func(mcpinspect.MCPToolCallInterceptedEvent)
+	// sessionAnalyzer detects cross-server attack patterns. When non-nil,
+	// tool calls are checked against cross-server rules before regular policy.
+	sessionAnalyzer *mcpinspect.SessionAnalyzer
 
 	server   *http.Server
 	listener net.Listener
@@ -147,6 +150,21 @@ func (p *Proxy) getEventCallback() func(mcpinspect.MCPToolCallInterceptedEvent) 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.onInterceptEvent
+}
+
+// SetSessionAnalyzer sets the cross-server analyzer on the proxy. It is safe
+// for concurrent use and is called once the analyzer has been created.
+func (p *Proxy) SetSessionAnalyzer(analyzer *mcpinspect.SessionAnalyzer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sessionAnalyzer = analyzer
+}
+
+// getSessionAnalyzer returns the current session analyzer in a thread-safe manner.
+func (p *Proxy) getSessionAnalyzer() *mcpinspect.SessionAnalyzer {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sessionAnalyzer
 }
 
 // getUpstreamForRequest returns the appropriate upstream URL for the request.
@@ -298,6 +316,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			sessionID, requestID,
 			p.getEventCallback(),
 			p.logger,
+			p.getSessionAnalyzer(),
 		)
 	}
 
@@ -323,7 +342,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			// MCP tool call interception (non-SSE only; SSE handled by SSEInterceptor).
 			if reg := p.getRegistry(); reg != nil && p.policy != nil && resp.StatusCode == http.StatusOK {
-				result := interceptMCPToolCalls(respBody, dialect, reg, p.policy, requestID, sessionID)
+				result := interceptMCPToolCalls(respBody, dialect, reg, p.policy, requestID, sessionID, p.getSessionAnalyzer())
 				for _, ev := range result.Events {
 					p.logger.Info("mcp tool call intercepted",
 						"tool", ev.ToolName, "action", ev.Action,

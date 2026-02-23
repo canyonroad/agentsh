@@ -88,6 +88,7 @@ type sseProxyTransport struct {
 	// of io.Copy, enabling real-time tool call blocking.
 	registry  *mcpregistry.Registry
 	policy    *mcpinspect.PolicyEvaluator
+	analyzer  *mcpinspect.SessionAnalyzer
 	dialect   Dialect
 	sessionID string
 	requestID string
@@ -109,6 +110,7 @@ func newSSEProxyTransport(base http.RoundTripper, w http.ResponseWriter, onCompl
 // SetInterceptor configures the transport for real-time MCP tool call
 // interception. When both registry and policy are non-nil, SSE streams
 // are processed through an SSEInterceptor instead of io.Copy.
+// The optional analyzer parameter enables cross-server pattern detection.
 func (t *sseProxyTransport) SetInterceptor(
 	registry *mcpregistry.Registry,
 	policy *mcpinspect.PolicyEvaluator,
@@ -116,9 +118,13 @@ func (t *sseProxyTransport) SetInterceptor(
 	sessionID, requestID string,
 	onEvent func(mcpinspect.MCPToolCallInterceptedEvent),
 	logger *slog.Logger,
+	optAnalyzer ...*mcpinspect.SessionAnalyzer,
 ) {
 	t.registry = registry
 	t.policy = policy
+	if len(optAnalyzer) > 0 {
+		t.analyzer = optAnalyzer[0]
+	}
 	t.dialect = dialect
 	t.sessionID = sessionID
 	t.requestID = requestID
@@ -156,6 +162,7 @@ func (t *sseProxyTransport) RoundTrip(req *http.Request) (*http.Response, error)
 			interceptor := NewSSEInterceptor(
 				t.registry, t.policy, t.dialect,
 				t.sessionID, t.requestID, t.onEvent, t.logger,
+				t.analyzer,
 			)
 			bufferedBody = interceptor.Stream(resp.Body, sw)
 		} else {

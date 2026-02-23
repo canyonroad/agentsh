@@ -138,14 +138,22 @@ type InterceptResult struct {
 
 // interceptMCPToolCalls extracts tool calls from an LLM response body,
 // looks them up in the registry, evaluates policy, and returns events plus
-// an optional rewritten body for blocked tools.
+// an optional rewritten body for blocked tools. When an analyzer is provided
+// and non-nil, cross-server rules are checked before regular policy evaluation,
+// and tool calls are recorded in the analyzer after each decision.
 func interceptMCPToolCalls(
 	body []byte,
 	dialect Dialect,
 	registry *mcpregistry.Registry,
 	policy *mcpinspect.PolicyEvaluator,
 	requestID, sessionID string,
+	optAnalyzer ...*mcpinspect.SessionAnalyzer,
 ) *InterceptResult {
+	var analyzer *mcpinspect.SessionAnalyzer
+	if len(optAnalyzer) > 0 {
+		analyzer = optAnalyzer[0]
+	}
+
 	result := &InterceptResult{}
 
 	if registry == nil || policy == nil {
@@ -167,7 +175,18 @@ func interceptMCPToolCalls(
 			continue
 		}
 
-		decision := policy.Evaluate(entry.ServerID, call.Name, entry.ToolHash)
+		// Cross-server check (before regular policy).
+		var decision mcpinspect.PolicyDecision
+		var crossServerBlocked bool
+		if analyzer != nil {
+			if block := analyzer.Check(entry.ServerID, call.Name, requestID); block != nil {
+				decision = mcpinspect.PolicyDecision{Allowed: false, Reason: block.Reason}
+				crossServerBlocked = true
+			}
+		}
+		if !crossServerBlocked {
+			decision = policy.Evaluate(entry.ServerID, call.Name, entry.ToolHash)
+		}
 
 		action := "allow"
 		var reason string
@@ -176,6 +195,18 @@ func interceptMCPToolCalls(
 			reason = decision.Reason
 			result.HasBlocked = true
 			blockedNames[call.Name] = true
+		}
+
+		// Record in analyzer for cross-server pattern detection.
+		if analyzer != nil {
+			analyzer.Record(mcpinspect.ToolCallRecord{
+				Timestamp: now,
+				ServerID:  entry.ServerID,
+				ToolName:  call.Name,
+				RequestID: requestID,
+				Action:    action,
+				Category:  analyzer.Classify(call.Name),
+			})
 		}
 
 		result.Events = append(result.Events, mcpinspect.MCPToolCallInterceptedEvent{

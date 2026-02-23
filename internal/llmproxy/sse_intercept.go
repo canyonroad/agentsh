@@ -22,6 +22,7 @@ import (
 type SSEInterceptor struct {
 	registry  *mcpregistry.Registry
 	policy    *mcpinspect.PolicyEvaluator
+	analyzer  *mcpinspect.SessionAnalyzer
 	dialect   Dialect
 	sessionID string
 	requestID string
@@ -51,7 +52,9 @@ type openAIChoiceTracking struct {
 	nblocked int          // how many were blocked
 }
 
-// NewSSEInterceptor creates a new SSE stream interceptor.
+// NewSSEInterceptor creates a new SSE stream interceptor. The optional
+// analyzer parameter enables cross-server pattern detection; pass nil or
+// omit to disable.
 func NewSSEInterceptor(
 	registry *mcpregistry.Registry,
 	policy *mcpinspect.PolicyEvaluator,
@@ -59,10 +62,16 @@ func NewSSEInterceptor(
 	sessionID, requestID string,
 	onEvent func(mcpinspect.MCPToolCallInterceptedEvent),
 	logger *slog.Logger,
+	optAnalyzer ...*mcpinspect.SessionAnalyzer,
 ) *SSEInterceptor {
+	var analyzer *mcpinspect.SessionAnalyzer
+	if len(optAnalyzer) > 0 {
+		analyzer = optAnalyzer[0]
+	}
 	return &SSEInterceptor{
 		registry:       registry,
 		policy:         policy,
+		analyzer:       analyzer,
 		dialect:        dialect,
 		sessionID:      sessionID,
 		requestID:      requestID,
@@ -258,6 +267,7 @@ func (s *SSEInterceptor) handleContentBlockStart(originalLine, data string, inde
 	if decision.Allowed {
 		// Allowed — pass through, fire event.
 		s.fireEvent(toolName, toolCallID, "allow", "", entry)
+		s.recordCall(toolName, "allow", entry)
 		return []string{originalLine}
 	}
 
@@ -265,6 +275,7 @@ func (s *SSEInterceptor) handleContentBlockStart(originalLine, data string, inde
 	s.blockedToolUse++
 	s.blockedIndices[index] = true
 	s.fireEvent(toolName, toolCallID, "block", decision.Reason, entry)
+	s.recordCall(toolName, "block", entry)
 
 	return s.emitAnthropicTextBlock(index, toolName)
 }
@@ -336,6 +347,8 @@ func (s *SSEInterceptor) rewriteAnthropicStopReason(data string) string {
 
 // lookupAndEvaluate looks up a tool in the registry and evaluates policy.
 // Returns nil entry if the tool is not registered (not an MCP tool).
+// When a SessionAnalyzer is configured, cross-server rules are checked before
+// regular policy evaluation.
 func (s *SSEInterceptor) lookupAndEvaluate(toolName string) (*mcpregistry.ToolEntry, *mcpinspect.PolicyDecision) {
 	if s.registry == nil || s.policy == nil {
 		return nil, nil
@@ -344,6 +357,13 @@ func (s *SSEInterceptor) lookupAndEvaluate(toolName string) (*mcpregistry.ToolEn
 	entry := s.registry.Lookup(toolName)
 	if entry == nil {
 		return nil, nil
+	}
+
+	// Cross-server check (before regular policy).
+	if s.analyzer != nil {
+		if block := s.analyzer.Check(entry.ServerID, toolName, s.requestID); block != nil {
+			return entry, &mcpinspect.PolicyDecision{Allowed: false, Reason: block.Reason}
+		}
 	}
 
 	decision := s.policy.Evaluate(entry.ServerID, toolName, entry.ToolHash)
@@ -370,6 +390,22 @@ func (s *SSEInterceptor) fireEvent(toolName, toolCallID, action, reason string, 
 		ToolHash:   entry.ToolHash,
 		Action:     action,
 		Reason:     reason,
+	})
+}
+
+// recordCall records a tool call in the session analyzer for cross-server
+// pattern detection. No-op if the analyzer is nil.
+func (s *SSEInterceptor) recordCall(toolName, action string, entry *mcpregistry.ToolEntry) {
+	if s.analyzer == nil {
+		return
+	}
+	s.analyzer.Record(mcpinspect.ToolCallRecord{
+		Timestamp: time.Now(),
+		ServerID:  entry.ServerID,
+		ToolName:  toolName,
+		RequestID: s.requestID,
+		Action:    action,
+		Category:  s.analyzer.Classify(toolName),
 	})
 }
 
@@ -547,11 +583,13 @@ func (s *SSEInterceptor) handleOpenAIFirstToolChunk(choice *openAIChunkChoice) b
 
 		if decision.Allowed {
 			s.fireEvent(toolName, toolCallID, "allow", "", entry)
+			s.recordCall(toolName, "allow", entry)
 			allowed = append(allowed, tc)
 		} else {
 			st.nblocked++
 			st.blocked[tc.Index] = true
 			s.fireEvent(toolName, toolCallID, "block", decision.Reason, entry)
+			s.recordCall(toolName, "block", entry)
 			blockedMessages = append(blockedMessages, fmt.Sprintf("[agentsh] Tool '%s' blocked by policy", toolName))
 		}
 	}

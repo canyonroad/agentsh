@@ -288,6 +288,13 @@ func (a *SessionAnalyzer) checkCrossServerFlow(serverID, requestID string, now t
 	return nil
 }
 
+// Classify returns the category for a tool name by delegating to the internal
+// classifier. This allows callers to classify tools without constructing a
+// separate ToolClassifier instance.
+func (a *SessionAnalyzer) Classify(toolName string) string {
+	return a.classifier.Classify(toolName)
+}
+
 // pruneWindow removes entries older than maxWindow from the sliding window.
 func (a *SessionAnalyzer) pruneWindow(now time.Time) {
 	cutoff := now.Add(-a.maxWindow)
