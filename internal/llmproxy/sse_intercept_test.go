@@ -266,3 +266,652 @@ func TestSSEInterceptor_Anthropic_SingleBlocked(t *testing.T) {
 		t.Errorf("SSE output has %d event: lines but %d data: lines; they should match", eventLines, dataLines)
 	}
 }
+
+func TestSSEInterceptor_Anthropic_SingleAllowed(t *testing.T) {
+	// --- Setup ---
+
+	// Build an Anthropic SSE stream: text block at index 0, tool_use "get_weather" at index 1.
+	sseInput := buildAnthropicSSE("get_weather", "toolu_01A09q90qw90lq917835lq9")
+
+	// Registry: get_weather from "weather-server"
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+
+	// Policy: allowlist with get_weather allowed
+	policy := newTestAllowPolicy(config.MCPToolRule{Server: "weather-server", Tool: "get_weather"})
+
+	// Collect event callbacks
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(evt mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, evt)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// --- Execute ---
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger)
+
+	reader := strings.NewReader(sseInput)
+	var clientBuf bytes.Buffer
+	buffered := interceptor.Stream(reader, &clientBuf)
+
+	clientOutput := clientBuf.String()
+
+	// --- Assertions ---
+
+	// 1. The tool_use content_block_start must pass through unmodified.
+	if !strings.Contains(clientOutput, `"type":"tool_use"`) {
+		t.Error("allowed tool_use content_block_start should pass through to client output")
+	}
+	if !strings.Contains(clientOutput, `"name":"get_weather"`) {
+		t.Error("allowed tool name should appear in client output")
+	}
+
+	// 2. The original text block (index 0) must pass through.
+	if !strings.Contains(clientOutput, "Let me check the weather.") {
+		t.Error("original text block delta should pass through to client")
+	}
+
+	// 3. No [agentsh] replacement message should appear.
+	if strings.Contains(clientOutput, "[agentsh]") {
+		t.Error("no [agentsh] replacement message should appear for allowed tools")
+	}
+
+	// 4. stop_reason must remain "tool_use" (not rewritten).
+	foundToolUseStopReason := false
+	lines := strings.Split(clientOutput, "\n")
+	for _, line := range lines {
+		data, ok := extractSSEData(line)
+		if !ok {
+			continue
+		}
+		var evt struct {
+			Type  string `json:"type"`
+			Delta struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(data), &evt); err != nil {
+			continue
+		}
+		if evt.Type == "message_delta" && evt.Delta.StopReason == "tool_use" {
+			foundToolUseStopReason = true
+		}
+	}
+	if !foundToolUseStopReason {
+		t.Error("stop_reason should remain 'tool_use' when tool is allowed")
+	}
+	if strings.Contains(clientOutput, `"end_turn"`) {
+		t.Error("stop_reason should NOT be rewritten to end_turn when tool is allowed")
+	}
+
+	// 5. The input_json_delta for the tool must pass through.
+	if !strings.Contains(clientOutput, "input_json_delta") {
+		t.Error("input_json_delta for allowed tool should pass through")
+	}
+
+	// 6. Event callback should have fired with action=allow.
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event callback, got %d", len(events))
+	}
+	evt := events[0]
+	if evt.Action != "allow" {
+		t.Errorf("expected event action %q, got %q", "allow", evt.Action)
+	}
+	if evt.ToolName != "get_weather" {
+		t.Errorf("expected event tool name %q, got %q", "get_weather", evt.ToolName)
+	}
+	if evt.ToolCallID != "toolu_01A09q90qw90lq917835lq9" {
+		t.Errorf("expected event tool call ID %q, got %q", "toolu_01A09q90qw90lq917835lq9", evt.ToolCallID)
+	}
+	if evt.ServerID != "weather-server" {
+		t.Errorf("expected event server ID %q, got %q", "weather-server", evt.ServerID)
+	}
+	if evt.Dialect != "anthropic" {
+		t.Errorf("expected event dialect %q, got %q", "anthropic", evt.Dialect)
+	}
+
+	// 7. Buffered output must match client output.
+	if string(buffered) != clientOutput {
+		t.Errorf("buffered output does not match client output.\nbuffered len=%d, client len=%d", len(buffered), len(clientOutput))
+	}
+
+	// 8. message_stop must be present.
+	if !strings.Contains(clientOutput, `"message_stop"`) {
+		t.Error("message_stop event should be present in output")
+	}
+}
+
+func TestSSEInterceptor_Anthropic_Unregistered(t *testing.T) {
+	// --- Setup ---
+
+	// Build an Anthropic SSE stream with tool "str_replace_editor" (not an MCP tool).
+	sseInput := buildAnthropicSSE("str_replace_editor", "toolu_01XYZ999")
+
+	// Registry: empty (no MCP tools registered)
+	reg := mcpregistry.NewRegistry()
+
+	// Policy: denylist blocking everything
+	policy := newTestPolicy(config.MCPToolRule{Server: "*", Tool: "*"})
+
+	// Collect event callbacks
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(evt mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, evt)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// --- Execute ---
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger)
+
+	reader := strings.NewReader(sseInput)
+	var clientBuf bytes.Buffer
+	buffered := interceptor.Stream(reader, &clientBuf)
+
+	clientOutput := clientBuf.String()
+
+	// --- Assertions ---
+
+	// 1. The tool_use content_block_start must pass through (not an MCP tool, so not intercepted).
+	if !strings.Contains(clientOutput, `"type":"tool_use"`) {
+		t.Error("unregistered tool_use should pass through silently")
+	}
+	if !strings.Contains(clientOutput, `"name":"str_replace_editor"`) {
+		t.Error("unregistered tool name should appear in client output")
+	}
+
+	// 2. No [agentsh] replacement message should appear.
+	if strings.Contains(clientOutput, "[agentsh]") {
+		t.Error("no [agentsh] message should appear for unregistered (non-MCP) tools")
+	}
+
+	// 3. No events should have fired (tool not in registry, so no policy evaluation).
+	if len(events) != 0 {
+		t.Errorf("expected 0 event callbacks for unregistered tool, got %d", len(events))
+	}
+
+	// 4. stop_reason should remain "tool_use" (not rewritten).
+	foundToolUseStopReason := false
+	lines := strings.Split(clientOutput, "\n")
+	for _, line := range lines {
+		data, ok := extractSSEData(line)
+		if !ok {
+			continue
+		}
+		var evt struct {
+			Type  string `json:"type"`
+			Delta struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(data), &evt); err != nil {
+			continue
+		}
+		if evt.Type == "message_delta" && evt.Delta.StopReason == "tool_use" {
+			foundToolUseStopReason = true
+		}
+	}
+	if !foundToolUseStopReason {
+		t.Error("stop_reason should remain 'tool_use' for unregistered tool")
+	}
+
+	// 5. The input_json_delta must pass through.
+	if !strings.Contains(clientOutput, "input_json_delta") {
+		t.Error("input_json_delta for unregistered tool should pass through")
+	}
+
+	// 6. Buffered output must match client output.
+	if string(buffered) != clientOutput {
+		t.Errorf("buffered output does not match client output.\nbuffered len=%d, client len=%d", len(buffered), len(clientOutput))
+	}
+
+	// 7. message_stop must be present.
+	if !strings.Contains(clientOutput, `"message_stop"`) {
+		t.Error("message_stop event should be present in output")
+	}
+}
+
+// buildAnthropicSSETwoTools constructs an Anthropic SSE stream with a text block
+// at index 0 and two tool_use blocks at index 1 and index 2.
+func buildAnthropicSSETwoTools(tool1Name, tool1ID, tool2Name, tool2ID string) string {
+	var b strings.Builder
+
+	// message_start
+	b.WriteString("event: message_start\n")
+	b.WriteString(`data: {"type":"message_start","message":{"id":"msg_02","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}`)
+	b.WriteString("\n\n")
+
+	// text block: content_block_start (index 0)
+	b.WriteString("event: content_block_start\n")
+	b.WriteString(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+	b.WriteString("\n\n")
+
+	// text block: content_block_delta (index 0)
+	b.WriteString("event: content_block_delta\n")
+	b.WriteString(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I'll do both."}}`)
+	b.WriteString("\n\n")
+
+	// text block: content_block_stop (index 0)
+	b.WriteString("event: content_block_stop\n")
+	b.WriteString(`data: {"type":"content_block_stop","index":0}`)
+	b.WriteString("\n\n")
+
+	// tool_use block 1: content_block_start (index 1)
+	b.WriteString("event: content_block_start\n")
+	b.WriteString(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"` + tool1ID + `","name":"` + tool1Name + `"}}`)
+	b.WriteString("\n\n")
+
+	// tool_use block 1: content_block_delta (index 1)
+	b.WriteString("event: content_block_delta\n")
+	b.WriteString(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"location\": \"NYC\"}"}}`)
+	b.WriteString("\n\n")
+
+	// tool_use block 1: content_block_stop (index 1)
+	b.WriteString("event: content_block_stop\n")
+	b.WriteString(`data: {"type":"content_block_stop","index":1}`)
+	b.WriteString("\n\n")
+
+	// tool_use block 2: content_block_start (index 2)
+	b.WriteString("event: content_block_start\n")
+	b.WriteString(`data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"` + tool2ID + `","name":"` + tool2Name + `"}}`)
+	b.WriteString("\n\n")
+
+	// tool_use block 2: content_block_delta (index 2)
+	b.WriteString("event: content_block_delta\n")
+	b.WriteString(`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"confirm\": true}"}}`)
+	b.WriteString("\n\n")
+
+	// tool_use block 2: content_block_stop (index 2)
+	b.WriteString("event: content_block_stop\n")
+	b.WriteString(`data: {"type":"content_block_stop","index":2}`)
+	b.WriteString("\n\n")
+
+	// message_delta with stop_reason
+	b.WriteString("event: message_delta\n")
+	b.WriteString(`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":40}}`)
+	b.WriteString("\n\n")
+
+	// message_stop
+	b.WriteString("event: message_stop\n")
+	b.WriteString(`data: {"type":"message_stop"}`)
+	b.WriteString("\n\n")
+
+	return b.String()
+}
+
+func TestSSEInterceptor_Anthropic_PartialBlock(t *testing.T) {
+	// --- Setup ---
+
+	// Build an Anthropic SSE stream: text at index 0, get_weather at index 1, delete_all at index 2.
+	sseInput := buildAnthropicSSETwoTools(
+		"get_weather", "toolu_01AAA",
+		"delete_all", "toolu_01BBB",
+	)
+
+	// Registry: get_weather from "weather-server", delete_all from "danger-server"
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+	reg.Register("danger-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "delete_all", Hash: "def456"},
+	})
+
+	// Policy: denylist blocking delete_all only
+	policy := newTestPolicy(config.MCPToolRule{Server: "danger-server", Tool: "delete_all"})
+
+	// Collect event callbacks
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(evt mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, evt)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// --- Execute ---
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger)
+
+	reader := strings.NewReader(sseInput)
+	var clientBuf bytes.Buffer
+	buffered := interceptor.Stream(reader, &clientBuf)
+
+	clientOutput := clientBuf.String()
+
+	// --- Assertions ---
+
+	// 1. get_weather (index 1) must pass through.
+	if !strings.Contains(clientOutput, `"name":"get_weather"`) {
+		t.Error("allowed tool get_weather should pass through to client output")
+	}
+
+	// 2. delete_all tool_use block must be suppressed — the original tool_use start for delete_all must not appear.
+	if strings.Contains(clientOutput, `"name":"delete_all"`) {
+		t.Error("blocked tool delete_all should be suppressed from client output")
+	}
+
+	// 3. Replacement text block with blocked message for delete_all must be present.
+	expectedMsg := "[agentsh] Tool 'delete_all' blocked by policy"
+	if !strings.Contains(clientOutput, expectedMsg) {
+		t.Errorf("expected replacement text %q in client output, got:\n%s", expectedMsg, clientOutput)
+	}
+
+	// 4. No replacement message for get_weather.
+	if strings.Contains(clientOutput, "[agentsh] Tool 'get_weather'") {
+		t.Error("get_weather should not have a blocked message")
+	}
+
+	// 5. stop_reason must remain "tool_use" (one tool is still allowed).
+	foundToolUseStopReason := false
+	lines := strings.Split(clientOutput, "\n")
+	for _, line := range lines {
+		data, ok := extractSSEData(line)
+		if !ok {
+			continue
+		}
+		var evt struct {
+			Type  string `json:"type"`
+			Delta struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(data), &evt); err != nil {
+			continue
+		}
+		if evt.Type == "message_delta" && evt.Delta.StopReason == "tool_use" {
+			foundToolUseStopReason = true
+		}
+	}
+	if !foundToolUseStopReason {
+		t.Error("stop_reason should remain 'tool_use' when at least one tool is allowed")
+	}
+	if strings.Contains(clientOutput, `"end_turn"`) {
+		t.Error("stop_reason should NOT be rewritten to end_turn when some tools pass")
+	}
+
+	// 6. Exactly 2 events: allow for get_weather, block for delete_all.
+	if len(events) != 2 {
+		t.Fatalf("expected 2 event callbacks, got %d", len(events))
+	}
+	// Events fire in order of content_block_start: index 1 (get_weather) then index 2 (delete_all).
+	if events[0].Action != "allow" || events[0].ToolName != "get_weather" {
+		t.Errorf("expected first event: allow/get_weather, got %s/%s", events[0].Action, events[0].ToolName)
+	}
+	if events[1].Action != "block" || events[1].ToolName != "delete_all" {
+		t.Errorf("expected second event: block/delete_all, got %s/%s", events[1].Action, events[1].ToolName)
+	}
+	if events[1].Reason == "" {
+		t.Error("expected non-empty reason for blocked tool event")
+	}
+
+	// 7. No argument deltas for the blocked tool at index 2.
+	for _, line := range lines {
+		data, ok := extractSSEData(line)
+		if !ok {
+			continue
+		}
+		var delta struct {
+			Type  string `json:"type"`
+			Index int    `json:"index"`
+			Delta struct {
+				Type string `json:"type"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(data), &delta); err != nil {
+			continue
+		}
+		if delta.Type == "content_block_delta" && delta.Index == 2 && delta.Delta.Type == "input_json_delta" {
+			t.Error("input_json_delta for blocked tool at index 2 should be suppressed")
+		}
+	}
+
+	// 8. The original text block (index 0) must pass through.
+	if !strings.Contains(clientOutput, "I'll do both.") {
+		t.Error("original text block delta should pass through to client")
+	}
+
+	// 9. Buffered output must match client output.
+	if string(buffered) != clientOutput {
+		t.Errorf("buffered output does not match client output.\nbuffered len=%d, client len=%d", len(buffered), len(clientOutput))
+	}
+
+	// 10. No orphan event: lines.
+	eventLines := 0
+	dataLines := 0
+	for _, line := range lines {
+		if strings.HasPrefix(line, "event:") {
+			eventLines++
+		}
+		if strings.HasPrefix(line, "data:") {
+			dataLines++
+		}
+	}
+	if eventLines != dataLines {
+		t.Errorf("SSE output has %d event: lines but %d data: lines; they should match", eventLines, dataLines)
+	}
+}
+
+// buildAnthropicSSETwoToolsOnly constructs an Anthropic SSE stream with
+// two tool_use blocks only (no text block). Tool 1 at index 0, tool 2 at index 1.
+func buildAnthropicSSETwoToolsOnly(tool1Name, tool1ID, tool2Name, tool2ID string) string {
+	var b strings.Builder
+
+	// message_start
+	b.WriteString("event: message_start\n")
+	b.WriteString(`data: {"type":"message_start","message":{"id":"msg_03","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}`)
+	b.WriteString("\n\n")
+
+	// tool_use block 1: content_block_start (index 0)
+	b.WriteString("event: content_block_start\n")
+	b.WriteString(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"` + tool1ID + `","name":"` + tool1Name + `"}}`)
+	b.WriteString("\n\n")
+
+	// tool_use block 1: content_block_delta (index 0)
+	b.WriteString("event: content_block_delta\n")
+	b.WriteString(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"location\": \"NYC\"}"}}`)
+	b.WriteString("\n\n")
+
+	// tool_use block 1: content_block_stop (index 0)
+	b.WriteString("event: content_block_stop\n")
+	b.WriteString(`data: {"type":"content_block_stop","index":0}`)
+	b.WriteString("\n\n")
+
+	// tool_use block 2: content_block_start (index 1)
+	b.WriteString("event: content_block_start\n")
+	b.WriteString(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"` + tool2ID + `","name":"` + tool2Name + `"}}`)
+	b.WriteString("\n\n")
+
+	// tool_use block 2: content_block_delta (index 1)
+	b.WriteString("event: content_block_delta\n")
+	b.WriteString(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"confirm\": true}"}}`)
+	b.WriteString("\n\n")
+
+	// tool_use block 2: content_block_stop (index 1)
+	b.WriteString("event: content_block_stop\n")
+	b.WriteString(`data: {"type":"content_block_stop","index":1}`)
+	b.WriteString("\n\n")
+
+	// message_delta with stop_reason
+	b.WriteString("event: message_delta\n")
+	b.WriteString(`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":30}}`)
+	b.WriteString("\n\n")
+
+	// message_stop
+	b.WriteString("event: message_stop\n")
+	b.WriteString(`data: {"type":"message_stop"}`)
+	b.WriteString("\n\n")
+
+	return b.String()
+}
+
+func TestSSEInterceptor_Anthropic_AllBlocked(t *testing.T) {
+	// --- Setup ---
+
+	// Build an Anthropic SSE stream: two tool_use blocks, get_weather at index 0, delete_all at index 1.
+	sseInput := buildAnthropicSSETwoToolsOnly(
+		"get_weather", "toolu_01CCC",
+		"delete_all", "toolu_01DDD",
+	)
+
+	// Registry: both tools registered
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+	reg.Register("danger-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "delete_all", Hash: "def456"},
+	})
+
+	// Policy: denylist blocking both
+	policy := newTestPolicy(
+		config.MCPToolRule{Server: "weather-server", Tool: "get_weather"},
+		config.MCPToolRule{Server: "danger-server", Tool: "delete_all"},
+	)
+
+	// Collect event callbacks
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(evt mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, evt)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// --- Execute ---
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger)
+
+	reader := strings.NewReader(sseInput)
+	var clientBuf bytes.Buffer
+	buffered := interceptor.Stream(reader, &clientBuf)
+
+	clientOutput := clientBuf.String()
+
+	// --- Assertions ---
+
+	// 1. Both tool_use blocks must be suppressed — no original tool_use content_block_start.
+	if strings.Contains(clientOutput, `"type":"tool_use"`) {
+		t.Error("both blocked tool_use content_block_start events should be suppressed")
+	}
+
+	// 2. Replacement text blocks for both tools must be present.
+	expectedMsg1 := "[agentsh] Tool 'get_weather' blocked by policy"
+	expectedMsg2 := "[agentsh] Tool 'delete_all' blocked by policy"
+	if !strings.Contains(clientOutput, expectedMsg1) {
+		t.Errorf("expected replacement text %q in client output", expectedMsg1)
+	}
+	if !strings.Contains(clientOutput, expectedMsg2) {
+		t.Errorf("expected replacement text %q in client output", expectedMsg2)
+	}
+
+	// 3. stop_reason must be rewritten to "end_turn" (all tool_use blocked).
+	if !strings.Contains(clientOutput, `"end_turn"`) {
+		t.Error("stop_reason should be rewritten to end_turn when all tool_use are blocked")
+	}
+	// The original stop_reason "tool_use" in message_delta should NOT appear.
+	lines := strings.Split(clientOutput, "\n")
+	for _, line := range lines {
+		data, ok := extractSSEData(line)
+		if !ok {
+			continue
+		}
+		var evt struct {
+			Type  string `json:"type"`
+			Delta struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(data), &evt); err != nil {
+			continue
+		}
+		if evt.Type == "message_delta" && evt.Delta.StopReason == "tool_use" {
+			t.Error("message_delta stop_reason should not be 'tool_use' when all tools are blocked")
+		}
+	}
+
+	// 4. Exactly 2 block events.
+	if len(events) != 2 {
+		t.Fatalf("expected 2 event callbacks, got %d", len(events))
+	}
+	if events[0].Action != "block" || events[0].ToolName != "get_weather" {
+		t.Errorf("expected first event: block/get_weather, got %s/%s", events[0].Action, events[0].ToolName)
+	}
+	if events[0].ToolCallID != "toolu_01CCC" {
+		t.Errorf("expected first event tool call ID %q, got %q", "toolu_01CCC", events[0].ToolCallID)
+	}
+	if events[1].Action != "block" || events[1].ToolName != "delete_all" {
+		t.Errorf("expected second event: block/delete_all, got %s/%s", events[1].Action, events[1].ToolName)
+	}
+	if events[1].ToolCallID != "toolu_01DDD" {
+		t.Errorf("expected second event tool call ID %q, got %q", "toolu_01DDD", events[1].ToolCallID)
+	}
+	// Both events should have non-empty reasons.
+	if events[0].Reason == "" {
+		t.Error("expected non-empty reason for first blocked tool event")
+	}
+	if events[1].Reason == "" {
+		t.Error("expected non-empty reason for second blocked tool event")
+	}
+
+	// 5. No input_json_delta should appear (both tools blocked).
+	if strings.Contains(clientOutput, "input_json_delta") {
+		t.Error("input_json_delta for blocked tools should be suppressed")
+	}
+
+	// 6. Replacement text blocks should use the correct indices (0 and 1).
+	replacementIdx0Start := false
+	replacementIdx1Start := false
+	for _, line := range lines {
+		data, ok := extractSSEData(line)
+		if !ok {
+			continue
+		}
+		var block struct {
+			Type         string `json:"type"`
+			Index        int    `json:"index"`
+			ContentBlock struct {
+				Type string `json:"type"`
+			} `json:"content_block"`
+		}
+		if err := json.Unmarshal([]byte(data), &block); err != nil {
+			continue
+		}
+		if block.Type == "content_block_start" && block.ContentBlock.Type == "text" && block.Index == 0 {
+			replacementIdx0Start = true
+		}
+		if block.Type == "content_block_start" && block.ContentBlock.Type == "text" && block.Index == 1 {
+			replacementIdx1Start = true
+		}
+	}
+	if !replacementIdx0Start {
+		t.Error("expected replacement content_block_start for text block at index 0")
+	}
+	if !replacementIdx1Start {
+		t.Error("expected replacement content_block_start for text block at index 1")
+	}
+
+	// 7. message_stop must be present.
+	if !strings.Contains(clientOutput, `"message_stop"`) {
+		t.Error("message_stop event should be present in output")
+	}
+
+	// 8. Buffered output must match client output.
+	if string(buffered) != clientOutput {
+		t.Errorf("buffered output does not match client output.\nbuffered len=%d, client len=%d", len(buffered), len(clientOutput))
+	}
+
+	// 9. No orphan event: lines.
+	eventLines := 0
+	dataLines := 0
+	for _, line := range lines {
+		if strings.HasPrefix(line, "event:") {
+			eventLines++
+		}
+		if strings.HasPrefix(line, "data:") {
+			dataLines++
+		}
+	}
+	if eventLines != dataLines {
+		t.Errorf("SSE output has %d event: lines but %d data: lines; they should match", eventLines, dataLines)
+	}
+}
