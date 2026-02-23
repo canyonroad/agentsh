@@ -890,3 +890,134 @@ func TestSession_MCPRegistryClearedOnClose(t *testing.T) {
 		t.Error("expected nil registry after CloseLLMProxy")
 	}
 }
+
+func TestExtractAddr(t *testing.T) {
+	tests := []struct {
+		name string
+		srv  config.MCPServerDeclaration
+		want string
+	}{
+		{
+			name: "http URL with explicit port",
+			srv:  config.MCPServerDeclaration{ID: "s1", Type: "http", URL: "http://mcp.example.com:8080/path"},
+			want: "mcp.example.com:8080",
+		},
+		{
+			name: "https URL with explicit port",
+			srv:  config.MCPServerDeclaration{ID: "s2", Type: "sse", URL: "https://mcp.example.com:9090/sse"},
+			want: "mcp.example.com:9090",
+		},
+		{
+			name: "https URL without port defaults to 443",
+			srv:  config.MCPServerDeclaration{ID: "s3", Type: "http", URL: "https://secure.example.com/api"},
+			want: "secure.example.com:443",
+		},
+		{
+			name: "http URL without port defaults to 80",
+			srv:  config.MCPServerDeclaration{ID: "s4", Type: "http", URL: "http://plain.example.com/api"},
+			want: "plain.example.com:80",
+		},
+		{
+			name: "stdio server returns empty",
+			srv:  config.MCPServerDeclaration{ID: "s5", Type: "stdio", Command: "/usr/bin/tool"},
+			want: "",
+		},
+		{
+			name: "empty URL returns empty",
+			srv:  config.MCPServerDeclaration{ID: "s6", Type: "http", URL: ""},
+			want: "",
+		},
+		{
+			name: "malformed URL returns empty",
+			srv:  config.MCPServerDeclaration{ID: "s7", Type: "http", URL: "://bad"},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractAddr(tt.srv)
+			if got != tt.want {
+				t.Errorf("extractAddr() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStartLLMProxy_NetworkServerDeclarations(t *testing.T) {
+	// Create a mock upstream server
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":   "msg_test",
+			"type": "message",
+			"usage": map[string]int{
+				"input_tokens":  5,
+				"output_tokens": 10,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	mgr := NewManager(10)
+	sess, err := mgr.CreateWithID("network-decl-test", t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	proxyCfg := config.ProxyConfig{
+		Mode: "embedded",
+		Port: 0,
+		Providers: config.ProxyProvidersConfig{
+			Anthropic: upstream.URL,
+			OpenAI:    upstream.URL,
+		},
+	}
+	dlpCfg := config.DLPConfig{Mode: "disabled"}
+	storageCfg := config.DefaultLLMStorageConfig()
+	mcpCfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		Servers: []config.MCPServerDeclaration{
+			{ID: "myhttp", Type: "http", URL: "https://mcp.example.com:9090/sse"},
+			{ID: "mystdio", Type: "stdio", Command: "/usr/bin/tool"},
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("StartLLMProxy failed: %v", err)
+	}
+	defer closeFn()
+
+	if proxyURL == "" {
+		t.Fatal("expected non-empty proxy URL")
+	}
+
+	// Retrieve the registry from the session
+	reg := sess.MCPRegistry()
+	if reg == nil {
+		t.Fatal("expected non-nil MCP registry")
+	}
+
+	registry, ok := reg.(*mcpregistry.Registry)
+	if !ok {
+		t.Fatalf("expected *mcpregistry.Registry, got %T", reg)
+	}
+
+	// Verify the http server address was pre-registered
+	addrs := registry.ServerAddrs()
+	if serverID, found := addrs["mcp.example.com:9090"]; !found {
+		t.Error("expected mcp.example.com:9090 in ServerAddrs()")
+	} else if serverID != "myhttp" {
+		t.Errorf("expected server ID 'myhttp' for mcp.example.com:9090, got %q", serverID)
+	}
+
+	// Verify the stdio server does NOT appear in addrs (it has no network address)
+	for addr, serverID := range addrs {
+		if serverID == "mystdio" {
+			t.Errorf("stdio server should not appear in addrs, but found addr %q -> %q", addr, serverID)
+		}
+	}
+}

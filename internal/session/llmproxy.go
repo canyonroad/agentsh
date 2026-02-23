@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -59,6 +60,11 @@ func StartLLMProxy(
 
 	if needsRegistry {
 		registry := mcpregistry.NewRegistry()
+		// Pre-register declared servers so their addresses are available for network detection.
+		for _, srv := range mcpCfg.Servers {
+			addr := extractAddr(srv)
+			registry.Register(srv.ID, srv.Type, addr, nil)
+		}
 		proxy.SetRegistry(registry)
 		sess.SetMCPRegistry(registry)
 	}
@@ -109,4 +115,30 @@ func (s *Session) LLMProxyEnvVars() map[string]string {
 		"OPENAI_BASE_URL":    s.llmProxyURL,
 		"AGENTSH_SESSION_ID": s.ID,
 	}
+}
+
+// extractAddr parses host:port from a server declaration's URL.
+// Returns "" for stdio servers or unparseable URLs.
+func extractAddr(srv config.MCPServerDeclaration) string {
+	if srv.Type == "stdio" || srv.URL == "" {
+		return ""
+	}
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		switch u.Scheme {
+		case "https":
+			port = "443"
+		default:
+			port = "80"
+		}
+	}
+	if host == "" {
+		return ""
+	}
+	return host + ":" + port
 }
