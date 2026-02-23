@@ -398,6 +398,7 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 		a.cfg.Proxy,
 		a.cfg.DLP,
 		a.cfg.LLMStorage,
+		a.cfg.Sandbox.MCP,
 		storagePath,
 		slog.Default(),
 	)

@@ -21,11 +21,18 @@ func StartLLMProxy(
 	proxyCfg config.ProxyConfig,
 	dlpCfg config.DLPConfig,
 	storageCfg config.LLMStorageConfig,
+	mcpCfg config.SandboxMCPConfig,
 	storagePath string,
 	logger *slog.Logger,
 ) (string, func() error, error) {
 	if sess == nil {
 		return "", nil, fmt.Errorf("session is nil")
+	}
+
+	// In mcp-only mode, force DLP disabled and body storage on.
+	if proxyCfg.IsMCPOnly() {
+		dlpCfg.Mode = "disabled"
+		storageCfg.StoreBodies = true
 	}
 
 	// Build the proxy config
@@ -34,6 +41,7 @@ func StartLLMProxy(
 		Proxy:     proxyCfg,
 		DLP:       dlpCfg,
 		Storage:   storageCfg,
+		MCP:       mcpCfg,
 	}
 
 	// Create the proxy
