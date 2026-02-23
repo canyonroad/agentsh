@@ -106,10 +106,14 @@ func extractOpenAIToolCalls(body []byte) []ToolCall {
 			continue
 		}
 		for _, tc := range choice.Message.ToolCalls {
+			args := []byte(tc.Function.Arguments)
+			if !json.Valid(args) {
+				continue
+			}
 			calls = append(calls, ToolCall{
 				ID:    tc.ID,
 				Name:  tc.Function.Name,
-				Input: json.RawMessage(tc.Function.Arguments),
+				Input: json.RawMessage(args),
 			})
 		}
 	}

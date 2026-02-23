@@ -2,7 +2,6 @@
 package mcpinspect
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -147,19 +146,13 @@ func (i *Inspector) handleToolsCall(data []byte) error {
 		return err
 	}
 
-	// Marshal the JSON-RPC ID to json.RawMessage for the event.
-	idJSON, err := json.Marshal(req.ID)
-	if err != nil {
-		return err
-	}
-
 	event := MCPToolCalledEvent{
 		Type:      "mcp_tool_called",
 		Timestamp: time.Now(),
 		SessionID: i.sessionID,
 		ServerID:  i.serverID,
 		ToolName:  req.Params.Name,
-		JSONRPCID: idJSON,
+		JSONRPCID: req.ID,
 		Input:     req.Params.Arguments,
 	}
 	i.emitEvent(event)

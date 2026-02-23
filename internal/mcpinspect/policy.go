@@ -1,6 +1,8 @@
 package mcpinspect
 
 import (
+	"fmt"
+	"path"
 	"strings"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -55,8 +57,10 @@ func (p *PolicyEvaluator) Evaluate(serverID, toolName, hash string) PolicyDecisi
 		return p.evaluateAllowlist(serverID, toolName, hash)
 	case "denylist":
 		return p.evaluateDenylist(serverID, toolName, hash)
-	default:
+	case "":
 		return PolicyDecision{Allowed: true, Reason: "no tool policy configured"}
+	default:
+		return PolicyDecision{Allowed: false, Reason: fmt.Sprintf("unknown tool_policy %q; denying", p.cfg.ToolPolicy)}
 	}
 }
 
@@ -82,19 +86,31 @@ func (p *PolicyEvaluator) evaluateServerPolicy(serverID string) (PolicyDecision,
 		// Server not denied — pass through to tool-level check
 		return PolicyDecision{}, false
 
-	default:
+	case "":
 		// No server policy — skip to tool-level
 		return PolicyDecision{}, false
+
+	default:
+		// Unknown server policy value — fail closed
+		return PolicyDecision{Allowed: false, Reason: fmt.Sprintf("unknown server_policy %q; denying", p.cfg.ServerPolicy)}, true
 	}
 }
 
 // matchesServerRule checks if a server ID matches a server rule.
-// Supports "*" wildcard to match any server.
+// Supports glob patterns (*, ?) via path.Match.
 func matchesServerRule(rule config.MCPServerRule, serverID string) bool {
-	if rule.ID == "*" {
-		return true
+	return matchesPattern(rule.ID, serverID)
+}
+
+// matchesPattern performs case-insensitive glob matching.
+// Supports * and ? wildcards via path.Match.
+func matchesPattern(pattern, value string) bool {
+	matched, err := path.Match(strings.ToLower(pattern), strings.ToLower(value))
+	if err != nil {
+		// Invalid glob pattern, fall back to exact match.
+		return strings.EqualFold(pattern, value)
 	}
-	return strings.EqualFold(rule.ID, serverID)
+	return matched
 }
 
 func (p *PolicyEvaluator) evaluateAllowlist(serverID, toolName, hash string) PolicyDecision {
@@ -119,13 +135,13 @@ func (p *PolicyEvaluator) evaluateDenylist(serverID, toolName, hash string) Poli
 }
 
 func (p *PolicyEvaluator) matchesRule(rule config.MCPToolRule, serverID, toolName, hash string) bool {
-	// Check server match
-	if rule.Server != "*" && !strings.EqualFold(rule.Server, serverID) {
+	// Check server match (glob)
+	if !matchesPattern(rule.Server, serverID) {
 		return false
 	}
 
-	// Check tool match
-	if rule.Tool != "*" && !strings.EqualFold(rule.Tool, toolName) {
+	// Check tool match (glob)
+	if !matchesPattern(rule.Tool, toolName) {
 		return false
 	}
 

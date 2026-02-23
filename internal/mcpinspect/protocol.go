@@ -15,8 +15,8 @@ type ToolDefinition struct {
 
 // ToolsListResponse is the JSON-RPC response to tools/list.
 type ToolsListResponse struct {
-	JSONRPC string `json:"jsonrpc"`
-	ID      any    `json:"id"`
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
 	Result  struct {
 		Tools []ToolDefinition `json:"tools"`
 	} `json:"result"`
@@ -33,9 +33,9 @@ func ParseToolsListResponse(data []byte) (*ToolsListResponse, error) {
 
 // ToolsCallRequest is the JSON-RPC request for tools/call.
 type ToolsCallRequest struct {
-	JSONRPC string `json:"jsonrpc"`
-	ID      any    `json:"id"`
-	Method  string `json:"method"` // "tools/call"
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Method  string          `json:"method"` // "tools/call"
 	Params  struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`

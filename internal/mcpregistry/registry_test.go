@@ -85,15 +85,27 @@ func TestLookupEmptyRegistry(t *testing.T) {
 func TestRegisterEmptyTools(t *testing.T) {
 	r := NewRegistry()
 
-	// Should be a no-op; no panic, no entries.
+	// No tools, no addr — no entries at all.
 	r.Register("server-1", "stdio", "", nil)
-	r.Register("server-2", "http", "host:8080", []ToolInfo{})
 
 	if len(r.tools) != 0 {
 		t.Errorf("tools map has %d entries, want 0", len(r.tools))
 	}
 	if len(r.addrs) != 0 {
 		t.Errorf("addrs map has %d entries, want 0", len(r.addrs))
+	}
+
+	// No tools but has addr — addr should still be recorded.
+	r.Register("server-2", "http", "host:8080", []ToolInfo{})
+
+	if len(r.tools) != 0 {
+		t.Errorf("tools map has %d entries, want 0", len(r.tools))
+	}
+	if len(r.addrs) != 1 {
+		t.Errorf("addrs map has %d entries, want 1 (addr should be recorded even with empty tools)", len(r.addrs))
+	}
+	if r.addrs["host:8080"] != "server-2" {
+		t.Errorf("addrs[host:8080] = %q, want %q", r.addrs["host:8080"], "server-2")
 	}
 }
 
@@ -106,9 +118,22 @@ func TestDuplicateToolNameLastWriteWins(t *testing.T) {
 	})
 
 	// Second server also registers "get_weather" — should overwrite.
-	r.Register("server-2", "http", "weather.example.com:443", []ToolInfo{
+	overwrites := r.Register("server-2", "http", "weather.example.com:443", []ToolInfo{
 		{Name: "get_weather", Hash: "hash-v2"},
 	})
+
+	if len(overwrites) != 1 {
+		t.Fatalf("expected 1 overwrite, got %d", len(overwrites))
+	}
+	if overwrites[0].ToolName != "get_weather" {
+		t.Errorf("overwrite ToolName = %q, want %q", overwrites[0].ToolName, "get_weather")
+	}
+	if overwrites[0].PreviousServerID != "server-1" {
+		t.Errorf("overwrite PreviousServerID = %q, want %q", overwrites[0].PreviousServerID, "server-1")
+	}
+	if overwrites[0].NewServerID != "server-2" {
+		t.Errorf("overwrite NewServerID = %q, want %q", overwrites[0].NewServerID, "server-2")
+	}
 
 	entry := r.Lookup("get_weather")
 	if entry == nil {
@@ -478,5 +503,70 @@ func TestRegisteredAtTimestamp(t *testing.T) {
 	if !e1.RegisteredAt.Equal(e2.RegisteredAt) {
 		t.Errorf("tools in same batch have different timestamps: %v vs %v",
 			e1.RegisteredAt, e2.RegisteredAt)
+	}
+}
+
+func TestLookupReturnsCopy(t *testing.T) {
+	r := NewRegistry()
+
+	r.Register("server-1", "stdio", "", []ToolInfo{
+		{Name: "tool_a", Hash: "original"},
+	})
+
+	entry := r.Lookup("tool_a")
+	if entry == nil {
+		t.Fatal("Lookup returned nil")
+	}
+
+	// Mutate the returned copy.
+	entry.ToolHash = "mutated"
+	entry.ServerID = "hacked"
+
+	// Internal state should be unaffected.
+	entry2 := r.Lookup("tool_a")
+	if entry2.ToolHash != "original" {
+		t.Errorf("Lookup did not return a copy; mutation leaked: ToolHash = %q", entry2.ToolHash)
+	}
+	if entry2.ServerID != "server-1" {
+		t.Errorf("Lookup did not return a copy; mutation leaked: ServerID = %q", entry2.ServerID)
+	}
+}
+
+func TestLookupBatchReturnsCopies(t *testing.T) {
+	r := NewRegistry()
+
+	r.Register("server-1", "stdio", "", []ToolInfo{
+		{Name: "tool_a", Hash: "ha"},
+	})
+
+	batch := r.LookupBatch([]string{"tool_a"})
+	if batch["tool_a"] == nil {
+		t.Fatal("tool_a missing from batch")
+	}
+
+	// Mutate the returned copy.
+	batch["tool_a"].ToolHash = "mutated"
+
+	// Internal state should be unaffected.
+	entry := r.Lookup("tool_a")
+	if entry.ToolHash != "ha" {
+		t.Errorf("LookupBatch did not return copies; mutation leaked: ToolHash = %q", entry.ToolHash)
+	}
+}
+
+func TestRegisterSameServerNoOverwrite(t *testing.T) {
+	r := NewRegistry()
+
+	r.Register("server-1", "stdio", "", []ToolInfo{
+		{Name: "tool_a", Hash: "v1"},
+	})
+
+	// Same server re-registering the same tool should NOT be reported as overwrite.
+	overwrites := r.Register("server-1", "stdio", "", []ToolInfo{
+		{Name: "tool_a", Hash: "v2"},
+	})
+
+	if len(overwrites) != 0 {
+		t.Errorf("expected 0 overwrites for same server, got %d", len(overwrites))
 	}
 }

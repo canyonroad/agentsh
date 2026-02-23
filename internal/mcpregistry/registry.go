@@ -29,6 +29,13 @@ type ToolInfo struct {
 	Hash string
 }
 
+// OverwrittenTool reports when a tool name is overwritten by a different server.
+type OverwrittenTool struct {
+	ToolName         string
+	PreviousServerID string
+	NewServerID      string
+}
+
 // Registry maps tool names to their MCP server metadata.
 type Registry struct {
 	mu    sync.RWMutex
@@ -46,21 +53,25 @@ func NewRegistry() *Registry {
 
 // Register bulk-registers tools from a server. If a tool name already exists
 // in the registry (from a different server), the new entry overwrites it
-// (last-write-wins). If tools is empty, this is a no-op.
+// (last-write-wins) and the previous entry is reported in the return value.
 //
-// For network servers (non-empty serverAddr), the address is also recorded in
-// the address map so the network monitor can look it up.
-func (r *Registry) Register(serverID, serverType, serverAddr string, tools []ToolInfo) {
-	if len(tools) == 0 {
-		return
-	}
-
+// For network servers (non-empty serverAddr), the address is recorded in
+// the address map so the network monitor can look it up, even if tools is empty.
+func (r *Registry) Register(serverID, serverType, serverAddr string, tools []ToolInfo) []OverwrittenTool {
 	now := time.Now()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	var overwrites []OverwrittenTool
 	for _, t := range tools {
+		if existing, ok := r.tools[t.Name]; ok && existing.ServerID != serverID {
+			overwrites = append(overwrites, OverwrittenTool{
+				ToolName:         t.Name,
+				PreviousServerID: existing.ServerID,
+				NewServerID:      serverID,
+			})
+		}
 		r.tools[t.Name] = &ToolEntry{
 			ToolName:     t.Name,
 			ServerID:     serverID,
@@ -75,19 +86,28 @@ func (r *Registry) Register(serverID, serverType, serverAddr string, tools []Too
 	if serverAddr != "" {
 		r.addrs[serverAddr] = serverID
 	}
+
+	return overwrites
 }
 
 // Lookup returns the registry entry for a tool name, or nil if not found.
 // This is the hot-path call used by the LLM proxy on every tool_use block.
+// Returns a copy so callers cannot mutate internal state.
 func (r *Registry) Lookup(toolName string) *ToolEntry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.tools[toolName]
+	entry := r.tools[toolName]
+	if entry == nil {
+		return nil
+	}
+	cp := *entry
+	return &cp
 }
 
 // LookupBatch returns entries for multiple tool names at once. Only found
 // entries are included in the returned map; missing tools are omitted.
 // Used when an LLM response contains parallel tool calls.
+// Returns copies so callers cannot mutate internal state.
 func (r *Registry) LookupBatch(toolNames []string) map[string]*ToolEntry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -95,7 +115,8 @@ func (r *Registry) LookupBatch(toolNames []string) map[string]*ToolEntry {
 	result := make(map[string]*ToolEntry, len(toolNames))
 	for _, name := range toolNames {
 		if entry, ok := r.tools[name]; ok {
-			result[name] = entry
+			cp := *entry
+			result[name] = &cp
 		}
 	}
 	return result

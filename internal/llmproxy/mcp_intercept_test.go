@@ -478,6 +478,51 @@ func TestExtractToolCalls_OpenAIMultipleChoices(t *testing.T) {
 	}
 }
 
+func TestExtractToolCalls_OpenAIInvalidArgumentsSkipped(t *testing.T) {
+	// OpenAI arguments must be valid JSON. Invalid arguments should be skipped.
+	body := []byte(`{
+		"choices": [{
+			"finish_reason": "tool_calls",
+			"message": {
+				"tool_calls": [
+					{
+						"id": "call_valid",
+						"type": "function",
+						"function": {
+							"name": "good_tool",
+							"arguments": "{\"key\": \"value\"}"
+						}
+					},
+					{
+						"id": "call_invalid",
+						"type": "function",
+						"function": {
+							"name": "bad_tool",
+							"arguments": "not valid json {{"
+						}
+					},
+					{
+						"id": "call_empty",
+						"type": "function",
+						"function": {
+							"name": "empty_tool",
+							"arguments": ""
+						}
+					}
+				]
+			}
+		}]
+	}`)
+
+	calls := ExtractToolCalls(body, DialectOpenAI)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 valid tool call (invalid ones skipped), got %d", len(calls))
+	}
+	if calls[0].Name != "good_tool" {
+		t.Errorf("expected Name %q, got %q", "good_tool", calls[0].Name)
+	}
+}
+
 func TestExtractToolCalls_AnthropicComplexInput(t *testing.T) {
 	// Verify nested JSON objects in input are preserved
 	body := []byte(`{

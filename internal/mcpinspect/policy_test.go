@@ -277,3 +277,105 @@ func TestPolicyEvaluator_NoServerPolicySkipsToToolPolicy(t *testing.T) {
 		t.Error("Expected blocked — tool not in allowlist")
 	}
 }
+
+func TestPolicyEvaluator_GlobPatterns(t *testing.T) {
+	cfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "allowlist",
+		AllowedTools: []config.MCPToolRule{
+			{Server: "github-*", Tool: "read_*"},
+			{Server: "filesystem", Tool: "file_*"},
+		},
+	}
+
+	eval := NewPolicyEvaluator(cfg)
+
+	tests := []struct {
+		name     string
+		server   string
+		tool     string
+		expected bool
+	}{
+		{"glob server match", "github-prod", "read_file", true},
+		{"glob server match 2", "github-staging", "read_issues", true},
+		{"glob server no match", "gitlab-prod", "read_file", false},
+		{"glob tool match", "filesystem", "file_read", true},
+		{"glob tool match 2", "filesystem", "file_write", true},
+		{"glob tool no match", "filesystem", "dir_list", false},
+		{"exact match still works", "filesystem", "file_read", true},
+		{"case insensitive glob", "GitHub-Prod", "Read_File", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			decision := eval.Evaluate(tc.server, tc.tool, "")
+			if decision.Allowed != tc.expected {
+				t.Errorf("Evaluate(%q, %q) allowed=%v, want %v (reason: %s)",
+					tc.server, tc.tool, decision.Allowed, tc.expected, decision.Reason)
+			}
+		})
+	}
+}
+
+func TestPolicyEvaluator_ServerGlobPatterns(t *testing.T) {
+	cfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ServerPolicy:  "denylist",
+		DeniedServers: []config.MCPServerRule{
+			{ID: "untrusted-*"},
+		},
+	}
+
+	eval := NewPolicyEvaluator(cfg)
+
+	tests := []struct {
+		name     string
+		server   string
+		expected bool
+	}{
+		{"glob deny match", "untrusted-server", false},
+		{"glob deny match 2", "untrusted-prod", false},
+		{"glob deny no match", "trusted-server", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			decision := eval.Evaluate(tc.server, "any_tool", "")
+			if decision.Allowed != tc.expected {
+				t.Errorf("Evaluate(%q, _) allowed=%v, want %v (reason: %s)",
+					tc.server, decision.Allowed, tc.expected, decision.Reason)
+			}
+		})
+	}
+}
+
+func TestPolicyEvaluator_InvalidToolPolicyDenies(t *testing.T) {
+	cfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "allowist", // typo
+	}
+
+	eval := NewPolicyEvaluator(cfg)
+
+	decision := eval.Evaluate("any", "any", "")
+	if decision.Allowed {
+		t.Error("Expected denied — invalid tool_policy should fail closed")
+	}
+	if decision.Reason == "" {
+		t.Error("Expected a reason for denial")
+	}
+}
+
+func TestPolicyEvaluator_InvalidServerPolicyDenies(t *testing.T) {
+	cfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ServerPolicy:  "blocklist", // not a valid value
+	}
+
+	eval := NewPolicyEvaluator(cfg)
+
+	decision := eval.Evaluate("any", "any", "")
+	if decision.Allowed {
+		t.Error("Expected denied — invalid server_policy should fail closed")
+	}
+}

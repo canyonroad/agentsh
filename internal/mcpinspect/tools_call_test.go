@@ -7,12 +7,12 @@ import (
 
 func TestParseToolsCallRequest(t *testing.T) {
 	tests := []struct {
-		name      string
-		input     string
-		wantName  string
-		wantArgs  string
-		wantID    any
-		wantErr   bool
+		name     string
+		input    string
+		wantName string
+		wantArgs string
+		wantID   string // raw JSON of the ID field
+		wantErr  bool
 	}{
 		{
 			name: "valid tools/call with numeric ID",
@@ -27,7 +27,7 @@ func TestParseToolsCallRequest(t *testing.T) {
 			}`,
 			wantName: "get_weather",
 			wantArgs: `{"city": "London"}`,
-			wantID:   float64(42),
+			wantID:   "42",
 		},
 		{
 			name: "valid tools/call with string ID",
@@ -42,7 +42,7 @@ func TestParseToolsCallRequest(t *testing.T) {
 			}`,
 			wantName: "read_file",
 			wantArgs: `{"path": "/tmp/test.txt"}`,
-			wantID:   "req-123",
+			wantID:   `"req-123"`,
 		},
 		{
 			name: "tools/call with no arguments",
@@ -56,7 +56,7 @@ func TestParseToolsCallRequest(t *testing.T) {
 			}`,
 			wantName: "list_files",
 			wantArgs: "",
-			wantID:   float64(1),
+			wantID:   "1",
 		},
 		{
 			name: "tools/call with complex arguments",
@@ -75,7 +75,21 @@ func TestParseToolsCallRequest(t *testing.T) {
 			}`,
 			wantName: "execute_query",
 			wantArgs: `{"query": "SELECT * FROM users", "params": [1, 2, 3], "options": {"timeout": 30}}`,
-			wantID:   float64(7),
+			wantID:   "7",
+		},
+		{
+			name: "tools/call with large integer ID (precision test)",
+			input: `{
+				"jsonrpc": "2.0",
+				"id": 9007199254740993,
+				"method": "tools/call",
+				"params": {
+					"name": "precision_test"
+				}
+			}`,
+			wantName: "precision_test",
+			wantArgs: "",
+			wantID:   "9007199254740993",
 		},
 		{
 			name:    "invalid JSON",
@@ -101,8 +115,8 @@ func TestParseToolsCallRequest(t *testing.T) {
 				t.Errorf("tool name = %q, want %q", req.Params.Name, tt.wantName)
 			}
 
-			if req.ID != tt.wantID {
-				t.Errorf("ID = %v (%T), want %v (%T)", req.ID, req.ID, tt.wantID, tt.wantID)
+			if string(req.ID) != tt.wantID {
+				t.Errorf("ID = %s, want %s", string(req.ID), tt.wantID)
 			}
 
 			if tt.wantArgs == "" {
