@@ -125,3 +125,139 @@ func TestMCPInterceptedToEvent_Block(t *testing.T) {
 		t.Errorf("fields.dialect: got %v, want %q", out.Fields["dialect"], "openai")
 	}
 }
+
+func TestMCPCrossServerToEvent(t *testing.T) {
+	ts := time.Date(2026, 2, 23, 10, 30, 0, 0, time.UTC)
+	relatedTS := time.Date(2026, 2, 23, 10, 29, 55, 0, time.UTC)
+	ev := mcpinspect.MCPCrossServerEvent{
+		Type:            "mcp_cross_server_blocked",
+		Timestamp:       ts,
+		SessionID:       "sess-cross-1",
+		Rule:            "read_then_send",
+		Severity:        "critical",
+		BlockedServerID: "exfil-server",
+		BlockedToolName: "send_email",
+		RelatedCalls: []mcpinspect.ToolCallRecord{
+			{
+				Timestamp: relatedTS,
+				ServerID:  "db-server",
+				ToolName:  "read_secrets",
+				RequestID: "req_001",
+				Action:    "allow",
+				Category:  "read",
+			},
+		},
+		Reason: `Server "exfil-server" attempted send after "db-server" read data 5s ago`,
+	}
+
+	out := mcpCrossServerToEvent(ev)
+
+	if out.ID == "" {
+		t.Error("expected non-empty ID")
+	}
+	if out.Timestamp != ts {
+		t.Errorf("timestamp: got %v, want %v", out.Timestamp, ts)
+	}
+	if out.Type != "mcp_cross_server_blocked" {
+		t.Errorf("type: got %q, want %q", out.Type, "mcp_cross_server_blocked")
+	}
+	if out.SessionID != "sess-cross-1" {
+		t.Errorf("session_id: got %q, want %q", out.SessionID, "sess-cross-1")
+	}
+	if out.Source != "llm_proxy" {
+		t.Errorf("source: got %q, want %q", out.Source, "llm_proxy")
+	}
+	if out.Path != "send_email" {
+		t.Errorf("path: got %q, want %q", out.Path, "send_email")
+	}
+	if out.Domain != "exfil-server" {
+		t.Errorf("domain: got %q, want %q", out.Domain, "exfil-server")
+	}
+	if out.EffectiveAction != "block" {
+		t.Errorf("effective_action: got %q, want %q", out.EffectiveAction, "block")
+	}
+
+	// Policy checks
+	if out.Policy == nil {
+		t.Fatal("expected non-nil Policy")
+	}
+	if out.Policy.Decision != types.DecisionDeny {
+		t.Errorf("policy.decision: got %q, want %q", out.Policy.Decision, types.DecisionDeny)
+	}
+	if out.Policy.EffectiveDecision != types.DecisionDeny {
+		t.Errorf("policy.effective_decision: got %q, want %q", out.Policy.EffectiveDecision, types.DecisionDeny)
+	}
+	if out.Policy.Rule != "cross_server_read_then_send" {
+		t.Errorf("policy.rule: got %q, want %q", out.Policy.Rule, "cross_server_read_then_send")
+	}
+	if out.Policy.Message != ev.Reason {
+		t.Errorf("policy.message: got %q, want %q", out.Policy.Message, ev.Reason)
+	}
+
+	// Fields checks
+	expectedKeys := []string{"rule", "severity", "blocked_server_id", "blocked_tool_name", "reason", "related_calls"}
+	for _, k := range expectedKeys {
+		if _, ok := out.Fields[k]; !ok {
+			t.Errorf("fields missing key %q", k)
+		}
+	}
+	if out.Fields["rule"] != "read_then_send" {
+		t.Errorf("fields.rule: got %v, want %q", out.Fields["rule"], "read_then_send")
+	}
+	if out.Fields["severity"] != "critical" {
+		t.Errorf("fields.severity: got %v, want %q", out.Fields["severity"], "critical")
+	}
+	if out.Fields["blocked_server_id"] != "exfil-server" {
+		t.Errorf("fields.blocked_server_id: got %v, want %q", out.Fields["blocked_server_id"], "exfil-server")
+	}
+	if out.Fields["blocked_tool_name"] != "send_email" {
+		t.Errorf("fields.blocked_tool_name: got %v, want %q", out.Fields["blocked_tool_name"], "send_email")
+	}
+
+	// Verify related_calls is a slice with one entry
+	rc, ok := out.Fields["related_calls"].([]map[string]any)
+	if !ok {
+		t.Fatalf("related_calls: expected []map[string]any, got %T", out.Fields["related_calls"])
+	}
+	if len(rc) != 1 {
+		t.Fatalf("related_calls: expected 1 entry, got %d", len(rc))
+	}
+	if rc[0]["server_id"] != "db-server" {
+		t.Errorf("related_calls[0].server_id: got %v, want %q", rc[0]["server_id"], "db-server")
+	}
+	if rc[0]["tool_name"] != "read_secrets" {
+		t.Errorf("related_calls[0].tool_name: got %v, want %q", rc[0]["tool_name"], "read_secrets")
+	}
+	if rc[0]["category"] != "read" {
+		t.Errorf("related_calls[0].category: got %v, want %q", rc[0]["category"], "read")
+	}
+}
+
+func TestMCPCrossServerToEvent_EmptyRelatedCalls(t *testing.T) {
+	ts := time.Date(2026, 2, 23, 11, 0, 0, 0, time.UTC)
+	ev := mcpinspect.MCPCrossServerEvent{
+		Type:            "mcp_cross_server_blocked",
+		Timestamp:       ts,
+		SessionID:       "sess-cross-2",
+		Rule:            "shadow_tool",
+		Severity:        "critical",
+		BlockedServerID: "evil-server",
+		BlockedToolName: "read_file",
+		RelatedCalls:    nil,
+		Reason:          `Tool "read_file" was shadowed`,
+	}
+
+	out := mcpCrossServerToEvent(ev)
+
+	if out.Policy.Rule != "cross_server_shadow_tool" {
+		t.Errorf("policy.rule: got %q, want %q", out.Policy.Rule, "cross_server_shadow_tool")
+	}
+
+	rc, ok := out.Fields["related_calls"].([]map[string]any)
+	if !ok {
+		t.Fatalf("related_calls: expected []map[string]any, got %T", out.Fields["related_calls"])
+	}
+	if len(rc) != 0 {
+		t.Errorf("related_calls: expected 0 entries, got %d", len(rc))
+	}
+}

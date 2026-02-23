@@ -19,6 +19,7 @@ import (
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/llmproxy"
 	"github.com/agentsh/agentsh/internal/mcpinspect"
+	"github.com/agentsh/agentsh/internal/mcpregistry"
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/netmonitor"
 	ebpftrace "github.com/agentsh/agentsh/internal/netmonitor/ebpf"
@@ -448,6 +449,23 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 					broker.Publish(typesEv)
 				}()
 			})
+
+			// Wire cross-server pattern detection analyzer.
+			analyzer := mcpinspect.NewSessionAnalyzer(s.ID, a.cfg.Sandbox.MCP.CrossServer)
+			proxy.SetSessionAnalyzer(analyzer)
+
+			// Set registry callbacks so the analyzer is activated when multiple
+			// servers register and notified on tool name collisions (shadow tools).
+			if reg, ok := s.MCPRegistry().(*mcpregistry.Registry); ok {
+				reg.SetCallbacks(mcpregistry.RegistryCallbacks{
+					OnMultiServer: func() {
+						analyzer.Activate()
+					},
+					OnOverwrite: func(toolName, oldServerID, newServerID string) {
+						analyzer.NotifyOverwrite(toolName, oldServerID, newServerID)
+					},
+				})
+			}
 		}
 	}
 }

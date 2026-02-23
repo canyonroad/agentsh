@@ -47,3 +47,45 @@ func mcpInterceptedToEvent(ev mcpinspect.MCPToolCallInterceptedEvent) types.Even
 		},
 	}
 }
+
+// mcpCrossServerToEvent converts an MCPCrossServerEvent into a types.Event
+// suitable for the event store and broker.
+func mcpCrossServerToEvent(ev mcpinspect.MCPCrossServerEvent) types.Event {
+	// Convert related calls to a JSON-compatible slice of maps.
+	relatedCalls := make([]map[string]any, len(ev.RelatedCalls))
+	for i, rc := range ev.RelatedCalls {
+		relatedCalls[i] = map[string]any{
+			"timestamp":  rc.Timestamp,
+			"server_id":  rc.ServerID,
+			"tool_name":  rc.ToolName,
+			"request_id": rc.RequestID,
+			"action":     rc.Action,
+			"category":   rc.Category,
+		}
+	}
+
+	return types.Event{
+		ID:              uuid.NewString(),
+		Timestamp:       ev.Timestamp,
+		Type:            "mcp_cross_server_blocked",
+		SessionID:       ev.SessionID,
+		Source:          "llm_proxy",
+		Path:            ev.BlockedToolName,
+		Domain:          ev.BlockedServerID,
+		EffectiveAction: "block",
+		Policy: &types.PolicyInfo{
+			Decision:          types.DecisionDeny,
+			EffectiveDecision: types.DecisionDeny,
+			Rule:              "cross_server_" + ev.Rule,
+			Message:           ev.Reason,
+		},
+		Fields: map[string]any{
+			"rule":              ev.Rule,
+			"severity":          ev.Severity,
+			"blocked_server_id": ev.BlockedServerID,
+			"blocked_tool_name": ev.BlockedToolName,
+			"reason":            ev.Reason,
+			"related_calls":     relatedCalls,
+		},
+	}
+}
