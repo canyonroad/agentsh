@@ -112,8 +112,10 @@ func (r *Registry) Register(serverID, serverType, serverAddr string, tools []Too
 			ToolHash:     t.Hash,
 			RegisteredAt: now,
 		}
-		if _, alreadyPinned := r.pinnedHashes[t.Name]; !alreadyPinned {
-			r.pinnedHashes[t.Name] = t.Hash
+		if t.Hash != "" {
+			if _, alreadyPinned := r.pinnedHashes[t.Name]; !alreadyPinned {
+				r.pinnedHashes[t.Name] = t.Hash
+			}
 		}
 	}
 

@@ -830,3 +830,20 @@ func TestPinnedHash_UnknownTool(t *testing.T) {
 		t.Error("PinnedHash should return false for unknown tool")
 	}
 }
+
+func TestPinnedHash_EmptyHashNotPinned(t *testing.T) {
+	r := NewRegistry()
+	// Register a tool with an empty hash — should not pin.
+	r.Register("server-a", "stdio", "", []ToolInfo{{Name: "tool-x", Hash: ""}})
+	_, pinned := r.PinnedHash("tool-x")
+	if pinned {
+		t.Error("PinnedHash should not pin an empty hash")
+	}
+
+	// A later registration with a real hash should be pinned.
+	r.Register("server-a", "stdio", "", []ToolInfo{{Name: "tool-x", Hash: "abc123"}})
+	hash, pinned := r.PinnedHash("tool-x")
+	if !pinned || hash != "abc123" {
+		t.Errorf("expected pinned hash %q, got %q (pinned=%v)", "abc123", hash, pinned)
+	}
+}
