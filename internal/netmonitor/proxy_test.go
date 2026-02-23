@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
+	"github.com/agentsh/agentsh/internal/mcpregistry"
 	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -157,4 +159,117 @@ func TestEmitConnectRedirectEventNilEmitter(t *testing.T) {
 
 	// Should not panic
 	p.emitConnectRedirectEvent(context.Background(), "cmd", "example.com", "example.com:443", 443, result)
+}
+
+func newSessionWithRegistry(addrs map[string]string) *session.Session {
+	sess := &session.Session{ID: "test-session"}
+	reg := mcpregistry.NewRegistry()
+	for addr, serverID := range addrs {
+		reg.Register(serverID, "http", addr, nil)
+	}
+	sess.SetMCPRegistry(reg)
+	return sess
+}
+
+func TestMCPConnectionTaggingMatchesDomain(t *testing.T) {
+	em := &stubEmitter{}
+	sess := newSessionWithRegistry(map[string]string{
+		"mcp.example.com:443": "test-server",
+	})
+
+	emitMCPConnectionIfMatched(context.Background(), sess, em, "test-session", "cmd-1", "MCP.Example.Com", "mcp.example.com:443", 443)
+
+	var mcpEvents []types.Event
+	for _, ev := range em.events {
+		if ev.Type == "mcp_network_connection" {
+			mcpEvents = append(mcpEvents, ev)
+		}
+	}
+	if len(mcpEvents) != 2 { // AppendEvent + Publish
+		t.Fatalf("expected 2 mcp_network_connection events, got %d", len(mcpEvents))
+	}
+	ev := mcpEvents[0]
+	if ev.Domain != "mcp.example.com" {
+		t.Errorf("expected lowercased domain 'mcp.example.com', got %q", ev.Domain)
+	}
+	if ev.Fields["server_id"] != "test-server" {
+		t.Errorf("expected server_id 'test-server', got %v", ev.Fields["server_id"])
+	}
+	if ev.SessionID != "test-session" {
+		t.Errorf("expected sessionID 'test-session', got %q", ev.SessionID)
+	}
+	if ev.CommandID != "cmd-1" {
+		t.Errorf("expected commandID 'cmd-1', got %q", ev.CommandID)
+	}
+}
+
+func TestMCPConnectionTaggingMatchesRemote(t *testing.T) {
+	em := &stubEmitter{}
+	sess := newSessionWithRegistry(map[string]string{
+		"192.168.1.10:8080": "ip-server",
+	})
+
+	// domain won't match, but remote (IP:port) should
+	emitMCPConnectionIfMatched(context.Background(), sess, em, "test-session", "cmd-2", "some-host", "192.168.1.10:8080", 8080)
+
+	var mcpEvents []types.Event
+	for _, ev := range em.events {
+		if ev.Type == "mcp_network_connection" {
+			mcpEvents = append(mcpEvents, ev)
+		}
+	}
+	if len(mcpEvents) != 2 {
+		t.Fatalf("expected 2 mcp_network_connection events, got %d", len(mcpEvents))
+	}
+	if mcpEvents[0].Fields["server_id"] != "ip-server" {
+		t.Errorf("expected server_id 'ip-server', got %v", mcpEvents[0].Fields["server_id"])
+	}
+}
+
+func TestMCPConnectionTaggingNoMatchSkips(t *testing.T) {
+	em := &stubEmitter{}
+	sess := newSessionWithRegistry(map[string]string{
+		"mcp.example.com:443": "test-server",
+	})
+
+	emitMCPConnectionIfMatched(context.Background(), sess, em, "test-session", "cmd-3", "other.com", "other.com:443", 443)
+
+	for _, ev := range em.events {
+		if ev.Type == "mcp_network_connection" {
+			t.Fatal("unexpected mcp_network_connection event for unregistered address")
+		}
+	}
+}
+
+func TestMCPConnectionTaggingNilSession(t *testing.T) {
+	em := &stubEmitter{}
+
+	// Should not panic
+	emitMCPConnectionIfMatched(context.Background(), nil, em, "test-session", "cmd", "example.com", "example.com:443", 443)
+
+	if len(em.events) != 0 {
+		t.Fatalf("expected 0 events with nil session, got %d", len(em.events))
+	}
+}
+
+func TestMCPConnectionTaggingNoRegistry(t *testing.T) {
+	em := &stubEmitter{}
+	sess := &session.Session{ID: "test-session"}
+	// Don't set registry
+
+	// Should not panic, no events emitted
+	emitMCPConnectionIfMatched(context.Background(), sess, em, "test-session", "cmd", "example.com", "example.com:443", 443)
+
+	if len(em.events) != 0 {
+		t.Fatalf("expected 0 events with no registry, got %d", len(em.events))
+	}
+}
+
+func TestMCPConnectionTaggingNilEmitter(t *testing.T) {
+	sess := newSessionWithRegistry(map[string]string{
+		"mcp.example.com:443": "test-server",
+	})
+
+	// Should not panic with nil emitter
+	emitMCPConnectionIfMatched(context.Background(), sess, nil, "test-session", "cmd", "mcp.example.com", "mcp.example.com:443", 443)
 }

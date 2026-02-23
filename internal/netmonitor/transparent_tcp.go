@@ -115,6 +115,8 @@ func (t *TransparentTCP) handle(conn net.Conn) error {
 		return nil
 	}
 
+	emitMCPConnectionIfMatched(context.Background(), t.sess, t.emit, t.sessionID, commandID, domain, remote, dstPort)
+
 	up, err := net.DialTimeout("tcp", remote, 20*time.Second)
 	if err != nil {
 		return nil
