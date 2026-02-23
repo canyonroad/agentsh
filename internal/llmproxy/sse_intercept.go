@@ -382,6 +382,7 @@ func (s *SSEInterceptor) lookupAndEvaluate(toolName, toolCallID string) (*mcpreg
 	}
 
 	// Version pin check.
+	var alertReason string
 	if s.versionPinCfg != nil && s.versionPinCfg.Enabled {
 		if pinnedHash, pinned := s.registry.PinnedHash(toolName); pinned && entry.ToolHash != pinnedHash {
 			switch s.versionPinCfg.OnChange {
@@ -396,12 +397,9 @@ func (s *SSEInterceptor) lookupAndEvaluate(toolName, toolCallID string) (*mcpreg
 				}
 				return entry, &dec, nil
 			case "alert":
-				dec := mcpinspect.PolicyDecision{
-					Allowed: true,
-					Reason: fmt.Sprintf("tool %q hash changed (pinned: %s, current: %s) [alert only]",
-						toolName, pinnedHash, entry.ToolHash),
-				}
-				return entry, &dec, nil
+				// Store alert reason but continue to policy evaluation.
+				alertReason = fmt.Sprintf("tool %q hash changed (pinned: %s, current: %s) [alert only]",
+					toolName, pinnedHash, entry.ToolHash)
 			}
 		}
 	}
@@ -413,6 +411,11 @@ func (s *SSEInterceptor) lookupAndEvaluate(toolName, toolCallID string) (*mcpreg
 	// so the "allow" record becomes "block" (prevents false positives).
 	if !decision.Allowed && s.analyzer != nil {
 		s.analyzer.MarkBlocked(entry.ServerID, toolName, toolCallID, s.requestID)
+	}
+
+	// Preserve version pin alert reason when policy allows the call.
+	if decision.Allowed && alertReason != "" {
+		decision.Reason = alertReason
 	}
 
 	return entry, &decision, nil

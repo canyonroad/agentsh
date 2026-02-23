@@ -1864,11 +1864,23 @@ func TestInterceptVersionPinDisabled(t *testing.T) {
 		"stop_reason": "tool_use"
 	}`)
 
-	// versionPinCfg is nil (simulating Enabled=false -- versionPinCfg() returns nil).
+	// nil versionPinCfg (production path when Enabled=false).
 	result := interceptMCPToolCalls(body, DialectAnthropic, registry, policy,
 		"req-1", "sess-1", nil, nil, nil)
 
 	if result.HasBlocked {
 		t.Fatal("expected nil versionPinCfg to allow the tool call")
+	}
+
+	// Non-nil config with Enabled=false (direct call path).
+	vpCfg := &config.MCPVersionPinningConfig{
+		Enabled:  false,
+		OnChange: "block",
+	}
+	result = interceptMCPToolCalls(body, DialectAnthropic, registry, policy,
+		"req-1", "sess-1", nil, nil, vpCfg)
+
+	if result.HasBlocked {
+		t.Fatal("expected Enabled=false versionPinCfg to allow the tool call")
 	}
 }
