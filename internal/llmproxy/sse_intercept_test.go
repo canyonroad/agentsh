@@ -1087,6 +1087,241 @@ func TestSSEInterceptor_OpenAI_SingleBlocked(t *testing.T) {
 	}
 }
 
+func TestSSEInterceptor_MalformedJSON(t *testing.T) {
+	// --- Setup ---
+
+	// Build an Anthropic SSE stream that includes an invalid JSON data line between
+	// a valid message_start and message_stop. The interceptor must not panic and
+	// must pass all lines through unchanged (fail open).
+	var b strings.Builder
+
+	// message_start (valid)
+	b.WriteString("event: message_start\n")
+	b.WriteString(`data: {"type":"message_start","message":{"id":"msg_99","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":5,"output_tokens":0}}}`)
+	b.WriteString("\n\n")
+
+	// content_block_start for a text block (valid)
+	b.WriteString("event: content_block_start\n")
+	b.WriteString(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+	b.WriteString("\n\n")
+
+	// malformed JSON data line
+	b.WriteString("event: content_block_delta\n")
+	b.WriteString("data: {INVALID JSON HERE}\n\n")
+
+	// valid text delta
+	b.WriteString("event: content_block_delta\n")
+	b.WriteString(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello world."}}`)
+	b.WriteString("\n\n")
+
+	// content_block_stop (valid)
+	b.WriteString("event: content_block_stop\n")
+	b.WriteString(`data: {"type":"content_block_stop","index":0}`)
+	b.WriteString("\n\n")
+
+	// message_delta (valid)
+	b.WriteString("event: message_delta\n")
+	b.WriteString(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`)
+	b.WriteString("\n\n")
+
+	// message_stop (valid)
+	b.WriteString("event: message_stop\n")
+	b.WriteString(`data: {"type":"message_stop"}`)
+	b.WriteString("\n\n")
+
+	sseInput := b.String()
+
+	// Registry and policy: denylist blocking everything (to stress any blocking logic).
+	reg := mcpregistry.NewRegistry()
+	reg.Register("some-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "some_tool", Hash: "abc123"},
+	})
+	policy := newTestPolicy(config.MCPToolRule{Server: "*", Tool: "*"})
+
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(evt mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, evt)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// --- Execute (must not panic) ---
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_mj", "req_mj", onEvent, logger)
+
+	reader := strings.NewReader(sseInput)
+	var clientBuf bytes.Buffer
+
+	// Use a deferred recover to catch any panic and fail the test explicitly.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("interceptor panicked on malformed JSON: %v", r)
+			}
+		}()
+		interceptor.Stream(reader, &clientBuf)
+	}()
+
+	clientOutput := clientBuf.String()
+
+	// --- Assertions ---
+
+	// 1. The malformed JSON line must pass through unchanged (fail open).
+	if !strings.Contains(clientOutput, "{INVALID JSON HERE}") {
+		t.Error("malformed JSON data line should pass through unchanged (fail open)")
+	}
+
+	// 2. Valid events before and after the malformed line must also pass through.
+	if !strings.Contains(clientOutput, `"message_start"`) {
+		t.Error("message_start event should be present in output")
+	}
+	if !strings.Contains(clientOutput, "Hello world.") {
+		t.Error("valid text delta after malformed JSON should pass through")
+	}
+	if !strings.Contains(clientOutput, `"message_stop"`) {
+		t.Error("message_stop event should be present in output")
+	}
+
+	// 3. No [agentsh] replacement messages — no tool calls were in the stream.
+	if strings.Contains(clientOutput, "[agentsh]") {
+		t.Error("no [agentsh] message should appear when there are no tool calls")
+	}
+
+	// 4. No events should have fired (no MCP tool calls seen).
+	if len(events) != 0 {
+		t.Errorf("expected 0 event callbacks, got %d", len(events))
+	}
+}
+
+func TestSSEInterceptor_TextOnlyStream(t *testing.T) {
+	// --- Setup ---
+
+	// Build a standard Anthropic text-only SSE stream (no tool calls).
+	var b strings.Builder
+
+	// message_start
+	b.WriteString("event: message_start\n")
+	b.WriteString(`data: {"type":"message_start","message":{"id":"msg_text1","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":8,"output_tokens":0}}}`)
+	b.WriteString("\n\n")
+
+	// text content_block_start
+	b.WriteString("event: content_block_start\n")
+	b.WriteString(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+	b.WriteString("\n\n")
+
+	// text content_block_delta
+	b.WriteString("event: content_block_delta\n")
+	b.WriteString(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Here is a purely textual response."}}`)
+	b.WriteString("\n\n")
+
+	// text content_block_stop
+	b.WriteString("event: content_block_stop\n")
+	b.WriteString(`data: {"type":"content_block_stop","index":0}`)
+	b.WriteString("\n\n")
+
+	// message_delta with stop_reason=end_turn
+	b.WriteString("event: message_delta\n")
+	b.WriteString(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}`)
+	b.WriteString("\n\n")
+
+	// message_stop
+	b.WriteString("event: message_stop\n")
+	b.WriteString(`data: {"type":"message_stop"}`)
+	b.WriteString("\n\n")
+
+	sseInput := b.String()
+
+	// Registry and policy: denylist blocking everything (to ensure non-tool streams are unaffected).
+	reg := mcpregistry.NewRegistry()
+	reg.Register("some-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "some_tool", Hash: "abc123"},
+	})
+	policy := newTestPolicy(config.MCPToolRule{Server: "*", Tool: "*"})
+
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(evt mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, evt)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// --- Execute ---
+	interceptor := NewSSEInterceptor(reg, policy, DialectAnthropic, "sess_to", "req_to", onEvent, logger)
+
+	reader := strings.NewReader(sseInput)
+	var clientBuf bytes.Buffer
+	buffered := interceptor.Stream(reader, &clientBuf)
+
+	clientOutput := clientBuf.String()
+
+	// --- Assertions ---
+
+	// 1. All events must pass through unchanged.
+	if !strings.Contains(clientOutput, `"message_start"`) {
+		t.Error("message_start should be present in output")
+	}
+	if !strings.Contains(clientOutput, "Here is a purely textual response.") {
+		t.Error("text delta content should pass through unchanged")
+	}
+	if !strings.Contains(clientOutput, `"message_stop"`) {
+		t.Error("message_stop should be present in output")
+	}
+
+	// 2. stop_reason must remain "end_turn" — must not be rewritten.
+	foundEndTurn := false
+	lines := strings.Split(clientOutput, "\n")
+	for _, line := range lines {
+		data, ok := extractSSEData(line)
+		if !ok {
+			continue
+		}
+		var evt struct {
+			Type  string `json:"type"`
+			Delta struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(data), &evt); err != nil {
+			continue
+		}
+		if evt.Type == "message_delta" && evt.Delta.StopReason == "end_turn" {
+			foundEndTurn = true
+		}
+	}
+	if !foundEndTurn {
+		t.Error("stop_reason should be 'end_turn' in a text-only stream")
+	}
+
+	// 3. No [agentsh] messages — there were no tool calls.
+	if strings.Contains(clientOutput, "[agentsh]") {
+		t.Error("no [agentsh] message should appear in a text-only stream")
+	}
+
+	// 4. No event callbacks — no MCP tool calls were seen.
+	if len(events) != 0 {
+		t.Errorf("expected 0 event callbacks for text-only stream, got %d", len(events))
+	}
+
+	// 5. No orphan event: lines.
+	eventLines := 0
+	dataLines := 0
+	for _, line := range lines {
+		if strings.HasPrefix(line, "event:") {
+			eventLines++
+		}
+		if strings.HasPrefix(line, "data:") {
+			dataLines++
+		}
+	}
+	if eventLines != dataLines {
+		t.Errorf("SSE output has %d event: lines but %d data: lines; they should match", eventLines, dataLines)
+	}
+
+	// 6. Buffered output must match client output.
+	if string(buffered) != clientOutput {
+		t.Errorf("buffered output does not match client output.\nbuffered len=%d, client len=%d", len(buffered), len(clientOutput))
+	}
+}
+
 func TestSSEInterceptor_OpenAI_PartialBlock(t *testing.T) {
 	// --- Setup ---
 
