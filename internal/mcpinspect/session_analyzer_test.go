@@ -723,6 +723,34 @@ func TestSessionAnalyzer_MarkBlocked(t *testing.T) {
 	}
 }
 
+// 21b. MarkBlocked with toolCallID targets the correct record.
+func TestSessionAnalyzer_MarkBlockedByToolCallID(t *testing.T) {
+	a := NewSessionAnalyzer("sess-1", allEnabledConfig())
+	a.Activate()
+
+	// Record two reads from same server with same requestID but different toolCallIDs.
+	a.CheckAndRecord("server-a", "get_data", "toolu_01", "req-1")
+	a.CheckAndRecord("server-a", "get_data", "toolu_02", "req-1")
+
+	a.mu.Lock()
+	if len(a.window) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(a.window))
+	}
+	a.mu.Unlock()
+
+	// Mark only the first one as blocked by toolCallID.
+	a.MarkBlocked("server-a", "get_data", "toolu_01", "req-1")
+
+	a.mu.Lock()
+	if a.window[0].Action != "block" {
+		t.Errorf("record 0 (toolu_01): expected block, got %q", a.window[0].Action)
+	}
+	if a.window[1].Action != "allow" {
+		t.Errorf("record 1 (toolu_02): expected allow (untouched), got %q", a.window[1].Action)
+	}
+	a.mu.Unlock()
+}
+
 // 22. Window size cap prevents unbounded growth.
 func TestSessionAnalyzer_WindowSizeCap(t *testing.T) {
 	cfg := allEnabledConfig()

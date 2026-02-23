@@ -68,7 +68,8 @@ func NewRegistry() *Registry {
 // miss the multi-server state. Thread-safe; can be called at any time.
 func (r *Registry) SetCallbacks(cb RegistryCallbacks) {
 	r.mu.Lock()
-	fireMultiServer := len(r.servers) >= 2 && !r.multiServerFired
+	// Only backfill if OnMultiServer is provided and hasn't fired yet.
+	fireMultiServer := len(r.servers) >= 2 && !r.multiServerFired && cb.OnMultiServer != nil
 	if fireMultiServer {
 		r.multiServerFired = true
 	}
@@ -76,7 +77,7 @@ func (r *Registry) SetCallbacks(cb RegistryCallbacks) {
 	r.mu.Unlock()
 
 	// Fire outside lock to avoid deadlocks.
-	if fireMultiServer && cb.OnMultiServer != nil {
+	if fireMultiServer {
 		cb.OnMultiServer()
 	}
 }

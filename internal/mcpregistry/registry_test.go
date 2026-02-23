@@ -739,3 +739,27 @@ func TestSetCallbacksNoBackfillWithOneServer(t *testing.T) {
 		t.Fatalf("expected no backfill with 1 server, got %d calls", calls)
 	}
 }
+
+func TestSetCallbacksNilThenNonNilBackfill(t *testing.T) {
+	r := NewRegistry()
+
+	// Register 2 servers before any callbacks.
+	r.Register("server-a", "stdio", "", []ToolInfo{
+		{Name: "tool_a", Hash: "ha"},
+	})
+	r.Register("server-b", "stdio", "", []ToolInfo{
+		{Name: "tool_b", Hash: "hb"},
+	})
+
+	// First SetCallbacks with nil OnMultiServer — should NOT consume the event.
+	r.SetCallbacks(RegistryCallbacks{})
+
+	// Second SetCallbacks with real OnMultiServer — should backfill-fire.
+	var calls int
+	r.SetCallbacks(RegistryCallbacks{
+		OnMultiServer: func() { calls++ },
+	})
+	if calls != 1 {
+		t.Fatalf("expected backfill after nil-then-non-nil, got %d calls", calls)
+	}
+}

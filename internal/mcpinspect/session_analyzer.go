@@ -224,13 +224,18 @@ func (a *SessionAnalyzer) MarkBlocked(serverID, toolName, toolCallID, requestID 
 		if rec.Action != "allow" {
 			continue
 		}
-		if toolCallID != "" && rec.ToolCallID == toolCallID {
-			rec.Action = "block"
-			return
-		}
-		if rec.ServerID == serverID && rec.ToolName == toolName && rec.RequestID == requestID {
-			rec.Action = "block"
-			return
+		if toolCallID != "" {
+			// Precise match by tool call ID only.
+			if rec.ToolCallID == toolCallID {
+				rec.Action = "block"
+				return
+			}
+		} else {
+			// Fallback: match by (serverID, toolName, requestID).
+			if rec.ServerID == serverID && rec.ToolName == toolName && rec.RequestID == requestID {
+				rec.Action = "block"
+				return
+			}
 		}
 	}
 }
