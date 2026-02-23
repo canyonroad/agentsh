@@ -36,19 +36,38 @@ type OverwrittenTool struct {
 	NewServerID      string
 }
 
+// RegistryCallbacks allows external components to be notified of registry events.
+type RegistryCallbacks struct {
+	OnMultiServer func()                                          // called once when 2nd distinct server registers
+	OnOverwrite   func(toolName, oldServerID, newServerID string) // called on tool name collision
+}
+
 // Registry maps tool names to their MCP server metadata.
 type Registry struct {
 	mu    sync.RWMutex
 	tools map[string]*ToolEntry // keyed by tool name
 	addrs map[string]string     // server addr -> server ID (for network monitor)
+
+	callbacks        *RegistryCallbacks
+	servers          map[string]struct{} // distinct server IDs seen
+	multiServerFired bool               // true after OnMultiServer has been called
 }
 
 // NewRegistry creates an empty, ready-to-use registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		tools: make(map[string]*ToolEntry),
-		addrs: make(map[string]string),
+		tools:   make(map[string]*ToolEntry),
+		addrs:   make(map[string]string),
+		servers: make(map[string]struct{}),
 	}
+}
+
+// SetCallbacks configures optional callbacks for registry events.
+// Thread-safe; can be called at any time.
+func (r *Registry) SetCallbacks(cb RegistryCallbacks) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.callbacks = &cb
 }
 
 // Register bulk-registers tools from a server. If a tool name already exists
@@ -61,7 +80,6 @@ func (r *Registry) Register(serverID, serverType, serverAddr string, tools []Too
 	now := time.Now()
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	var overwrites []OverwrittenTool
 	for _, t := range tools {
@@ -85,6 +103,30 @@ func (r *Registry) Register(serverID, serverType, serverAddr string, tools []Too
 	// Record network server addresses for the network monitor.
 	if serverAddr != "" {
 		r.addrs[serverAddr] = serverID
+	}
+
+	// Track distinct servers and determine if we should fire OnMultiServer.
+	r.servers[serverID] = struct{}{}
+	fireMultiServer := len(r.servers) >= 2 && !r.multiServerFired
+	if fireMultiServer {
+		r.multiServerFired = true
+	}
+
+	// Snapshot callbacks pointer while under lock; call outside lock.
+	cb := r.callbacks
+
+	r.mu.Unlock()
+
+	// Fire callbacks outside the mutex to avoid deadlocks.
+	if cb != nil {
+		if fireMultiServer && cb.OnMultiServer != nil {
+			cb.OnMultiServer()
+		}
+		if cb.OnOverwrite != nil {
+			for _, ow := range overwrites {
+				cb.OnOverwrite(ow.ToolName, ow.PreviousServerID, ow.NewServerID)
+			}
+		}
 	}
 
 	return overwrites

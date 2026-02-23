@@ -570,3 +570,126 @@ func TestRegisterSameServerNoOverwrite(t *testing.T) {
 		t.Errorf("expected 0 overwrites for same server, got %d", len(overwrites))
 	}
 }
+
+func TestCallbackOnMultiServerFiresOnSecondServer(t *testing.T) {
+	r := NewRegistry()
+
+	var calls int
+	r.SetCallbacks(RegistryCallbacks{
+		OnMultiServer: func() { calls++ },
+	})
+
+	// Register first server — OnMultiServer should NOT fire.
+	r.Register("server-a", "stdio", "", []ToolInfo{
+		{Name: "tool_a", Hash: "ha"},
+	})
+	if calls != 0 {
+		t.Fatalf("OnMultiServer called after 1st server, got %d calls", calls)
+	}
+
+	// Register second server — OnMultiServer should fire exactly once.
+	r.Register("server-b", "stdio", "", []ToolInfo{
+		{Name: "tool_b", Hash: "hb"},
+	})
+	if calls != 1 {
+		t.Fatalf("OnMultiServer not called after 2nd server, got %d calls", calls)
+	}
+}
+
+func TestCallbackOnMultiServerNotFiredOnFirstServer(t *testing.T) {
+	r := NewRegistry()
+
+	var calls int
+	r.SetCallbacks(RegistryCallbacks{
+		OnMultiServer: func() { calls++ },
+	})
+
+	r.Register("server-a", "stdio", "", []ToolInfo{
+		{Name: "tool_a", Hash: "ha"},
+	})
+
+	if calls != 0 {
+		t.Errorf("OnMultiServer should not fire for first server, got %d calls", calls)
+	}
+}
+
+func TestCallbackOnMultiServerFiredOnlyOnce(t *testing.T) {
+	r := NewRegistry()
+
+	var calls int
+	r.SetCallbacks(RegistryCallbacks{
+		OnMultiServer: func() { calls++ },
+	})
+
+	r.Register("server-a", "stdio", "", []ToolInfo{
+		{Name: "tool_a", Hash: "ha"},
+	})
+	r.Register("server-b", "stdio", "", []ToolInfo{
+		{Name: "tool_b", Hash: "hb"},
+	})
+	r.Register("server-c", "stdio", "", []ToolInfo{
+		{Name: "tool_c", Hash: "hc"},
+	})
+
+	if calls != 1 {
+		t.Errorf("OnMultiServer should fire exactly once, got %d calls", calls)
+	}
+}
+
+func TestCallbackOnOverwriteFiresOnCollision(t *testing.T) {
+	r := NewRegistry()
+
+	type overwriteRecord struct {
+		toolName    string
+		oldServerID string
+		newServerID string
+	}
+	var records []overwriteRecord
+
+	r.SetCallbacks(RegistryCallbacks{
+		OnOverwrite: func(toolName, oldServerID, newServerID string) {
+			records = append(records, overwriteRecord{toolName, oldServerID, newServerID})
+		},
+	})
+
+	// Register "foo" from server-a.
+	r.Register("server-a", "stdio", "", []ToolInfo{
+		{Name: "foo", Hash: "h1"},
+	})
+	if len(records) != 0 {
+		t.Fatalf("OnOverwrite should not fire on first registration, got %d calls", len(records))
+	}
+
+	// Register "foo" from server-b — collision.
+	r.Register("server-b", "stdio", "", []ToolInfo{
+		{Name: "foo", Hash: "h2"},
+	})
+	if len(records) != 1 {
+		t.Fatalf("expected 1 OnOverwrite call, got %d", len(records))
+	}
+	if records[0].toolName != "foo" {
+		t.Errorf("OnOverwrite toolName = %q, want %q", records[0].toolName, "foo")
+	}
+	if records[0].oldServerID != "server-a" {
+		t.Errorf("OnOverwrite oldServerID = %q, want %q", records[0].oldServerID, "server-a")
+	}
+	if records[0].newServerID != "server-b" {
+		t.Errorf("OnOverwrite newServerID = %q, want %q", records[0].newServerID, "server-b")
+	}
+}
+
+func TestNoCallbacksSetNoPanic(t *testing.T) {
+	r := NewRegistry()
+
+	// Register without setting callbacks — should not panic.
+	r.Register("server-a", "stdio", "", []ToolInfo{
+		{Name: "tool_a", Hash: "ha"},
+	})
+	r.Register("server-b", "stdio", "", []ToolInfo{
+		{Name: "tool_a", Hash: "hb"}, // collision
+	})
+	r.Register("server-c", "http", "host:80", []ToolInfo{
+		{Name: "tool_c", Hash: "hc"},
+	})
+	// If we reach here without panic, the test passes.
+}
