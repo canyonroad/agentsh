@@ -1791,3 +1791,176 @@ func TestProxy_CrossServerBlocking_Integration(t *testing.T) {
 		t.Errorf("event 2 reason should mention cross-server read/send pattern, got: %q", ev2.Reason)
 	}
 }
+
+// TestProxyRateLimitBlocksToolCall is an end-to-end integration test that
+// exercises rate limiting through the full HTTP proxy stack. It configures
+// a rate limiter with 0 RPM / 0 burst (blocks everything) and verifies that
+// a tool_use block in the LLM response is replaced and a block event is emitted.
+func TestProxyRateLimitBlocksToolCall(t *testing.T) {
+	// Create upstream that returns an Anthropic response with a tool_use block.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":          "msg_test_rl",
+			"type":        "message",
+			"role":        "assistant",
+			"stop_reason": "tool_use",
+			"content": []map[string]interface{}{
+				{
+					"type":  "tool_use",
+					"id":    "toolu_01ratelimit",
+					"name":  "get_weather",
+					"input": map[string]string{"city": "NYC"},
+				},
+			},
+			"usage": map[string]int{"input_tokens": 10, "output_tokens": 5},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	storageDir := t.TempDir()
+	cfg := Config{
+		SessionID: "test-ratelimit-block",
+		Proxy: config.ProxyConfig{
+			Mode: "embedded",
+			Port: 0,
+			Providers: config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+			},
+		},
+		DLP: config.DLPConfig{Mode: "disabled"},
+		MCP: config.SandboxMCPConfig{
+			EnforcePolicy: true,
+			ToolPolicy:    "none",
+			RateLimits: config.MCPRateLimitsConfig{
+				Enabled:      true,
+				DefaultRPM:   0,
+				DefaultBurst: 0,
+			},
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy, err := New(cfg, storageDir, logger)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Register the tool in the registry.
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "sha256:abc"},
+	})
+	proxy.SetRegistry(reg)
+
+	// Set up a callback that collects events.
+	var mu sync.Mutex
+	var collected []mcpinspect.MCPToolCallInterceptedEvent
+	done := make(chan struct{}, 1)
+	proxy.SetEventCallback(func(ev mcpinspect.MCPToolCallInterceptedEvent) {
+		mu.Lock()
+		collected = append(collected, ev)
+		mu.Unlock()
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	})
+
+	ctx := context.Background()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(shutdownCtx)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Send a request through the proxy.
+	proxyURL := "http://" + proxy.Addr().String() + "/v1/messages"
+	reqBody := `{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"weather?"}]}`
+	req, err := http.NewRequest(http.MethodPost, proxyURL, strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-ant-test")
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	respBody, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d, body: %s", resp.StatusCode, string(respBody))
+	}
+
+	// Wait for callback to fire.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event callback")
+	}
+
+	// --- Assertions on the response body ---
+
+	bodyStr := string(respBody)
+
+	// The tool_use block should be replaced (no "tool_use" type in the response).
+	if strings.Contains(bodyStr, `"type":"tool_use"`) {
+		t.Error("expected tool_use block to be removed from response, but it is still present")
+	}
+
+	// The replacement text should be present.
+	if !strings.Contains(bodyStr, "[agentsh] Tool 'get_weather' blocked by policy") {
+		t.Errorf("expected replacement text in response, got: %s", bodyStr)
+	}
+
+	// stop_reason should be rewritten to "end_turn" since all tool_use blocks were blocked.
+	if !strings.Contains(bodyStr, `"end_turn"`) {
+		t.Errorf("expected stop_reason to be rewritten to 'end_turn', got: %s", bodyStr)
+	}
+
+	// --- Assertions on the event ---
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(collected) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(collected))
+	}
+
+	ev := collected[0]
+	if ev.ToolName != "get_weather" {
+		t.Errorf("tool_name: got %q, want %q", ev.ToolName, "get_weather")
+	}
+	if ev.Action != "block" {
+		t.Errorf("action: got %q, want %q", ev.Action, "block")
+	}
+	if !strings.Contains(ev.Reason, "rate limit") {
+		t.Errorf("reason should contain 'rate limit', got: %q", ev.Reason)
+	}
+	if ev.ServerID != "weather-server" {
+		t.Errorf("server_id: got %q, want %q", ev.ServerID, "weather-server")
+	}
+	if ev.ToolCallID != "toolu_01ratelimit" {
+		t.Errorf("tool_call_id: got %q, want %q", ev.ToolCallID, "toolu_01ratelimit")
+	}
+	if ev.Dialect != "anthropic" {
+		t.Errorf("dialect: got %q, want %q", ev.Dialect, "anthropic")
+	}
+	if ev.SessionID != "test-ratelimit-block" {
+		t.Errorf("session_id: got %q, want %q", ev.SessionID, "test-ratelimit-block")
+	}
+}

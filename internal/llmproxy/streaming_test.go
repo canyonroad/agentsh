@@ -403,7 +403,7 @@ func TestSSEProxyTransport_WithInterceptor(t *testing.T) {
 	)
 
 	// Configure the interceptor on the transport.
-	transport.SetInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger)
+	transport.SetInterceptor(reg, policy, DialectAnthropic, "sess_1", "req_1", onEvent, logger, nil, nil, nil)
 
 	// Make request through transport.
 	req, _ := http.NewRequest("POST", sseServer.URL+"/v1/messages", nil)

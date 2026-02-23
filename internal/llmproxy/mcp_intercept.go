@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/mcpinspect"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
@@ -147,16 +148,14 @@ func interceptMCPToolCalls(
 	registry *mcpregistry.Registry,
 	policy *mcpinspect.PolicyEvaluator,
 	requestID, sessionID string,
-	optAnalyzer ...*mcpinspect.SessionAnalyzer,
+	analyzer *mcpinspect.SessionAnalyzer,
+	rateLimiter *mcpinspect.RateLimiterRegistry,
+	versionPinCfg *config.MCPVersionPinningConfig,
 ) *InterceptResult {
-	var analyzer *mcpinspect.SessionAnalyzer
-	if len(optAnalyzer) > 0 {
-		analyzer = optAnalyzer[0]
-	}
 
 	result := &InterceptResult{}
 
-	if registry == nil || policy == nil {
+	if registry == nil {
 		return result
 	}
 
@@ -184,12 +183,45 @@ func interceptMCPToolCalls(
 				crossServerDec = block
 			}
 		}
-		if crossServerDec == nil {
+		// Rate limit check (only if cross-server didn't block).
+		if crossServerDec == nil && rateLimiter != nil {
+			if !rateLimiter.Allow(entry.ServerID, call.Name) {
+				decision = mcpinspect.PolicyDecision{
+					Allowed: false,
+					Reason:  fmt.Sprintf("rate limit exceeded for server %q", entry.ServerID),
+				}
+			}
+		}
+
+		// Version pin check (only if nothing above blocked).
+		var reason string
+		if crossServerDec == nil && decision == (mcpinspect.PolicyDecision{}) && versionPinCfg != nil && versionPinCfg.Enabled {
+			if pinnedHash, pinned := registry.PinnedHash(call.Name); pinned && entry.ToolHash != pinnedHash {
+				switch versionPinCfg.OnChange {
+				case "block":
+					decision = mcpinspect.PolicyDecision{
+						Allowed: false,
+						Reason: fmt.Sprintf("tool %q hash changed (pinned: %s, current: %s)",
+							call.Name, pinnedHash, entry.ToolHash),
+					}
+				case "alert":
+					// Don't set decision -- allow the call. But set reason for the event.
+					reason = fmt.Sprintf("tool %q hash changed (pinned: %s, current: %s) [alert only]",
+						call.Name, pinnedHash, entry.ToolHash)
+				}
+			}
+		}
+
+		// Policy evaluation (only if nothing above set a decision and policy is present).
+		if crossServerDec == nil && decision == (mcpinspect.PolicyDecision{}) && policy != nil {
 			decision = policy.Evaluate(entry.ServerID, call.Name, entry.ToolHash)
+		}
+		// If no policy and no other check set a decision, default to allow.
+		if decision == (mcpinspect.PolicyDecision{}) && crossServerDec == nil {
+			decision = mcpinspect.PolicyDecision{Allowed: true}
 		}
 
 		action := "allow"
-		var reason string
 		if !decision.Allowed {
 			action = "block"
 			reason = decision.Reason
@@ -421,12 +453,8 @@ func interceptMCPToolCallsFromList(
 	registry *mcpregistry.Registry,
 	policy *mcpinspect.PolicyEvaluator,
 	requestID, sessionID string,
-	optAnalyzer ...*mcpinspect.SessionAnalyzer,
+	analyzer *mcpinspect.SessionAnalyzer,
 ) *InterceptResult {
-	var analyzer *mcpinspect.SessionAnalyzer
-	if len(optAnalyzer) > 0 {
-		analyzer = optAnalyzer[0]
-	}
 
 	result := &InterceptResult{}
 

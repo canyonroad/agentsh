@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/mcpinspect"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
@@ -92,8 +93,10 @@ type sseProxyTransport struct {
 	dialect   Dialect
 	sessionID string
 	requestID string
-	onEvent   func(mcpinspect.MCPToolCallInterceptedEvent)
-	logger    *slog.Logger
+	onEvent       func(mcpinspect.MCPToolCallInterceptedEvent)
+	logger        *slog.Logger
+	rateLimiter   *mcpinspect.RateLimiterRegistry
+	versionPinCfg *config.MCPVersionPinningConfig
 }
 
 func newSSEProxyTransport(base http.RoundTripper, w http.ResponseWriter, onComplete func(resp *http.Response, body []byte)) *sseProxyTransport {
@@ -110,7 +113,6 @@ func newSSEProxyTransport(base http.RoundTripper, w http.ResponseWriter, onCompl
 // SetInterceptor configures the transport for real-time MCP tool call
 // interception. When both registry and policy are non-nil, SSE streams
 // are processed through an SSEInterceptor instead of io.Copy.
-// The optional analyzer parameter enables cross-server pattern detection.
 func (t *sseProxyTransport) SetInterceptor(
 	registry *mcpregistry.Registry,
 	policy *mcpinspect.PolicyEvaluator,
@@ -118,18 +120,20 @@ func (t *sseProxyTransport) SetInterceptor(
 	sessionID, requestID string,
 	onEvent func(mcpinspect.MCPToolCallInterceptedEvent),
 	logger *slog.Logger,
-	optAnalyzer ...*mcpinspect.SessionAnalyzer,
+	analyzer *mcpinspect.SessionAnalyzer,
+	rateLimiter *mcpinspect.RateLimiterRegistry,
+	versionPinCfg *config.MCPVersionPinningConfig,
 ) {
 	t.registry = registry
 	t.policy = policy
-	if len(optAnalyzer) > 0 {
-		t.analyzer = optAnalyzer[0]
-	}
+	t.analyzer = analyzer
 	t.dialect = dialect
 	t.sessionID = sessionID
 	t.requestID = requestID
 	t.onEvent = onEvent
 	t.logger = logger
+	t.rateLimiter = rateLimiter
+	t.versionPinCfg = versionPinCfg
 }
 
 func (t *sseProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -151,18 +155,18 @@ func (t *sseProxyTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 		// When MCP interception is active, the body may be rewritten to a
 		// different size, so remove Content-Length to force chunked transfer.
-		if t.registry != nil && t.policy != nil {
+		if t.registry != nil && (t.policy != nil || t.rateLimiter != nil || t.versionPinCfg != nil) {
 			sw.Header().Del("Content-Length")
 		}
 		sw.WriteHeader(resp.StatusCode)
 
 		// Stream body to client — with MCP interception if configured
 		var bufferedBody []byte
-		if t.registry != nil && t.policy != nil {
+		if t.registry != nil && (t.policy != nil || t.rateLimiter != nil || t.versionPinCfg != nil) {
 			interceptor := NewSSEInterceptor(
 				t.registry, t.policy, t.dialect,
 				t.sessionID, t.requestID, t.onEvent, t.logger,
-				t.analyzer,
+				t.analyzer, t.rateLimiter, t.versionPinCfg,
 			)
 			bufferedBody = interceptor.Stream(resp.Body, sw)
 		} else {
