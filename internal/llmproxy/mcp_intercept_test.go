@@ -1,9 +1,15 @@
 package llmproxy
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/mcpinspect"
@@ -1153,6 +1159,15 @@ func TestInterceptMCPToolCalls_OpenAIPartialBlock(t *testing.T) {
 	}
 }
 
+// newDenylistPolicy creates a policy that denies the specified tools.
+func newDenylistPolicy(rules []config.MCPToolRule) *mcpinspect.PolicyEvaluator {
+	return mcpinspect.NewPolicyEvaluator(config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "denylist",
+		DeniedTools:   rules,
+	})
+}
+
 func TestInterceptMCPToolCalls_MixedMCPAndNonMCP(t *testing.T) {
 	// One tool is in the registry (MCP), one is not (non-MCP).
 	// Only the MCP tool should generate an event.
@@ -1184,5 +1199,275 @@ func TestInterceptMCPToolCalls_MixedMCPAndNonMCP(t *testing.T) {
 	}
 	if result.HasBlocked {
 		t.Error("expected no blocking")
+	}
+}
+
+// --- Proxy-level integration tests for MCP interception ---
+
+// TestProxy_MCPInterception_Integration verifies that the proxy rewrites
+// a blocked tool_use response body when routing through the full HTTP proxy
+// pipeline (non-SSE path via ModifyResponse).
+func TestProxy_MCPInterception_Integration(t *testing.T) {
+	// Mock upstream returns an Anthropic response with a tool_use block.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+			"type": "message",
+			"role": "assistant",
+			"stop_reason": "tool_use",
+			"content": [
+				{"type": "text", "text": "Let me check the weather."},
+				{
+					"type": "tool_use",
+					"id": "toolu_01A09q90qw90lq917835lq9",
+					"name": "get_weather",
+					"input": {"location": "San Francisco, CA"}
+				}
+			],
+			"usage": {"input_tokens": 10, "output_tokens": 25}
+		}`))
+	}))
+	defer upstream.Close()
+
+	storageDir := t.TempDir()
+
+	// Configure proxy with a denylist that blocks get_weather.
+	cfg := Config{
+		SessionID: "test-mcp-interception",
+		Proxy: config.ProxyConfig{
+			Mode: "embedded",
+			Port: 0,
+			Providers: config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+			},
+		},
+		DLP: config.DLPConfig{Mode: "disabled"},
+		MCP: config.SandboxMCPConfig{
+			EnforcePolicy: true,
+			ToolPolicy:    "denylist",
+			DeniedTools: []config.MCPToolRule{
+				{Server: "*", Tool: "get_weather"},
+			},
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy, err := New(cfg, storageDir, logger)
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	// Register get_weather in the MCP registry so it is recognized as an MCP tool.
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+	proxy.SetRegistry(reg)
+
+	ctx := context.Background()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("failed to start proxy: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(shutdownCtx)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Send a request through the proxy.
+	proxyURL := "http://" + proxy.Addr().String() + "/v1/messages"
+	reqBody := `{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"What is the weather?"}]}`
+	req, err := http.NewRequest(http.MethodPost, proxyURL, strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-ant-test-key")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+
+	// Parse the rewritten response.
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	// stop_reason should be changed to "end_turn" (all tool_use blocks blocked).
+	var stopReason string
+	if err := json.Unmarshal(result["stop_reason"], &stopReason); err != nil {
+		t.Fatalf("failed to parse stop_reason: %v", err)
+	}
+	if stopReason != "end_turn" {
+		t.Errorf("expected stop_reason %q, got %q", "end_turn", stopReason)
+	}
+
+	// Content should have 2 blocks: original text + replacement text for blocked tool.
+	var content []map[string]json.RawMessage
+	if err := json.Unmarshal(result["content"], &content); err != nil {
+		t.Fatalf("failed to parse content: %v", err)
+	}
+	if len(content) != 2 {
+		t.Fatalf("expected 2 content blocks, got %d", len(content))
+	}
+
+	// Second block should be text (not tool_use) mentioning the blocked tool.
+	var blockType string
+	json.Unmarshal(content[1]["type"], &blockType)
+	if blockType != "text" {
+		t.Errorf("expected second block type %q, got %q", "text", blockType)
+	}
+
+	var blockText string
+	json.Unmarshal(content[1]["text"], &blockText)
+	if !strings.Contains(blockText, "get_weather") {
+		t.Errorf("expected replacement text to mention tool name, got %q", blockText)
+	}
+	if !strings.Contains(blockText, "blocked") {
+		t.Errorf("expected replacement text to mention 'blocked', got %q", blockText)
+	}
+}
+
+// TestProxy_MCPInterception_AllowedPassesThrough verifies that when the
+// tool is allowed by policy, the response body passes through unchanged.
+func TestProxy_MCPInterception_AllowedPassesThrough(t *testing.T) {
+	// The exact upstream response we expect to pass through unmodified.
+	upstreamBody := `{"id":"msg_01XFDUDYJgAACzvnptvVoYEL","type":"message","role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"Let me check."},{"type":"tool_use","id":"toolu_01A","name":"get_weather","input":{"location":"NYC"}}],"usage":{"input_tokens":10,"output_tokens":25}}`
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(upstreamBody))
+	}))
+	defer upstream.Close()
+
+	storageDir := t.TempDir()
+
+	// Configure proxy with an allowlist that explicitly allows get_weather.
+	cfg := Config{
+		SessionID: "test-mcp-allowed",
+		Proxy: config.ProxyConfig{
+			Mode: "embedded",
+			Port: 0,
+			Providers: config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+			},
+		},
+		DLP: config.DLPConfig{Mode: "disabled"},
+		MCP: config.SandboxMCPConfig{
+			EnforcePolicy: true,
+			ToolPolicy:    "allowlist",
+			AllowedTools: []config.MCPToolRule{
+				{Server: "*", Tool: "*"},
+			},
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy, err := New(cfg, storageDir, logger)
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	// Register get_weather in the MCP registry.
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+	proxy.SetRegistry(reg)
+
+	ctx := context.Background()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("failed to start proxy: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(shutdownCtx)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	proxyURL := "http://" + proxy.Addr().String() + "/v1/messages"
+	reqBody := `{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"What is the weather?"}]}`
+	req, err := http.NewRequest(http.MethodPost, proxyURL, strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-ant-test-key")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+
+	// The response should be semantically identical to what the upstream sent.
+	// Parse both and compare key fields (JSON serialization may differ in whitespace).
+	var got, want map[string]json.RawMessage
+	if err := json.Unmarshal(respBody, &got); err != nil {
+		t.Fatalf("failed to parse proxy response: %v", err)
+	}
+	if err := json.Unmarshal([]byte(upstreamBody), &want); err != nil {
+		t.Fatalf("failed to parse upstream body: %v", err)
+	}
+
+	// stop_reason should remain "tool_use" (tool was allowed).
+	var gotStopReason string
+	json.Unmarshal(got["stop_reason"], &gotStopReason)
+	if gotStopReason != "tool_use" {
+		t.Errorf("expected stop_reason %q, got %q", "tool_use", gotStopReason)
+	}
+
+	// Content should still have the tool_use block.
+	var gotContent []map[string]json.RawMessage
+	if err := json.Unmarshal(got["content"], &gotContent); err != nil {
+		t.Fatalf("failed to parse content: %v", err)
+	}
+	if len(gotContent) != 2 {
+		t.Fatalf("expected 2 content blocks, got %d", len(gotContent))
+	}
+
+	// Second block should still be tool_use.
+	var secondType string
+	json.Unmarshal(gotContent[1]["type"], &secondType)
+	if secondType != "tool_use" {
+		t.Errorf("expected second block type %q (unchanged), got %q", "tool_use", secondType)
+	}
+
+	var secondName string
+	json.Unmarshal(gotContent[1]["name"], &secondName)
+	if secondName != "get_weather" {
+		t.Errorf("expected tool name %q, got %q", "get_weather", secondName)
 	}
 }

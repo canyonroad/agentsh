@@ -278,8 +278,37 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 		Transport: sseTransport,
 		ModifyResponse: func(resp *http.Response) error {
-			// Log non-SSE responses (SSE responses are logged via transport callback)
-			p.logResponse(requestID, sessionID, dialect, resp, startTime, dlpResult)
+			// Read body for both logging and MCP interception.
+			var respBody []byte
+			if resp.Body != nil {
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					p.logger.Error("read response body", "error", err, "request_id", requestID)
+					return nil
+				}
+				respBody = body
+			}
+
+			// MCP tool call interception (non-SSE only; SSE handled in onComplete).
+			if reg := p.getRegistry(); reg != nil && p.policy != nil && resp.StatusCode == http.StatusOK {
+				result := interceptMCPToolCalls(respBody, dialect, reg, p.policy, requestID, sessionID)
+				for _, ev := range result.Events {
+					p.logger.Info("mcp tool call intercepted",
+						"tool", ev.ToolName, "action", ev.Action,
+						"server", ev.ServerID, "request_id", requestID)
+				}
+				if result.HasBlocked && result.RewrittenBody != nil {
+					respBody = result.RewrittenBody
+				}
+			}
+
+			// Put body back for client.
+			resp.Body = io.NopCloser(bytes.NewReader(respBody))
+			resp.ContentLength = int64(len(respBody))
+			resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(respBody)))
+
+			// Log response with the (possibly rewritten) body.
+			p.logResponseDirect(requestID, sessionID, dialect, resp, respBody, startTime)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
