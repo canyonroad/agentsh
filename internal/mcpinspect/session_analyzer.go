@@ -140,7 +140,7 @@ func (a *SessionAnalyzer) ClearShadow(toolName string) {
 //  2. Burst (if enabled)
 //  3. Read-then-send (if enabled, only when category is "send")
 //  4. Cross-server flow (if enabled, when category is write/send/compute/unknown from different server)
-func (a *SessionAnalyzer) CheckAndRecord(serverID, toolName, requestID string) (*CrossServerDecision, string) {
+func (a *SessionAnalyzer) CheckAndRecord(serverID, toolName, toolCallID, requestID string) (*CrossServerDecision, string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -161,9 +161,9 @@ func (a *SessionAnalyzer) CheckAndRecord(serverID, toolName, requestID string) (
 	now := time.Now()
 
 	// 1. Shadow tool detection (always checked if enabled).
-	if a.cfg.ShadowTool.Enabled {
+	if a.cfg.ShadowTool.Enabled != nil && *a.cfg.ShadowTool.Enabled {
 		if dec := a.checkShadow(toolName); dec != nil {
-			a.recordLocked(serverID, toolName, requestID, "block", category, now)
+			a.recordLocked(serverID, toolName, toolCallID, requestID, "block", category, now)
 			return dec, category
 		}
 	}
@@ -176,7 +176,7 @@ func (a *SessionAnalyzer) CheckAndRecord(serverID, toolName, requestID string) (
 	// 2. Burst detection.
 	if a.cfg.Burst.Enabled {
 		if dec := a.checkBurst(serverID, now); dec != nil {
-			a.recordLocked(serverID, toolName, requestID, "block", category, now)
+			a.recordLocked(serverID, toolName, toolCallID, requestID, "block", category, now)
 			return dec, category
 		}
 	}
@@ -184,7 +184,7 @@ func (a *SessionAnalyzer) CheckAndRecord(serverID, toolName, requestID string) (
 	// 3. Read-then-send (only when category is "send").
 	if a.cfg.ReadThenSend.Enabled && category == CategorySend {
 		if dec := a.checkReadThenSend(serverID, now); dec != nil {
-			a.recordLocked(serverID, toolName, requestID, "block", category, now)
+			a.recordLocked(serverID, toolName, toolCallID, requestID, "block", category, now)
 			return dec, category
 		}
 	}
@@ -195,14 +195,14 @@ func (a *SessionAnalyzer) CheckAndRecord(serverID, toolName, requestID string) (
 	// tool names to avoid classification (e.g., "transmit_data").
 	if a.cfg.CrossServerFlow.Enabled && isSuspiciousCategory(category) {
 		if dec := a.checkCrossServerFlow(serverID, requestID, now); dec != nil {
-			a.recordLocked(serverID, toolName, requestID, "block", category, now)
+			a.recordLocked(serverID, toolName, toolCallID, requestID, "block", category, now)
 			return dec, category
 		}
 	}
 
 	// No rule triggered — record as "allow" atomically so the entry is
 	// immediately visible to concurrent CheckAndRecord calls.
-	a.recordLocked(serverID, toolName, requestID, "allow", category, now)
+	a.recordLocked(serverID, toolName, toolCallID, requestID, "allow", category, now)
 	return nil, category
 }
 
@@ -210,16 +210,25 @@ func (a *SessionAnalyzer) CheckAndRecord(serverID, toolName, requestID string) (
 // tool call to action="block". Called when the PolicyEvaluator blocks a
 // call that the cross-server analyzer initially allowed. This prevents a
 // blocked read from triggering read-then-send for subsequent calls.
+//
+// When toolCallID is non-empty, it is used for precise matching.
+// Otherwise falls back to (serverID, toolName, requestID).
 // Thread-safe.
-func (a *SessionAnalyzer) MarkBlocked(serverID, toolName, requestID string) {
+func (a *SessionAnalyzer) MarkBlocked(serverID, toolName, toolCallID, requestID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	// Walk backward to find the most recent matching "allow" entry.
 	for i := len(a.window) - 1; i >= 0; i-- {
 		rec := &a.window[i]
-		if rec.ServerID == serverID && rec.ToolName == toolName &&
-			rec.RequestID == requestID && rec.Action == "allow" {
+		if rec.Action != "allow" {
+			continue
+		}
+		if toolCallID != "" && rec.ToolCallID == toolCallID {
+			rec.Action = "block"
+			return
+		}
+		if rec.ServerID == serverID && rec.ToolName == toolName && rec.RequestID == requestID {
 			rec.Action = "block"
 			return
 		}
@@ -253,17 +262,18 @@ func isSuspiciousCategory(category string) bool {
 
 // recordLocked appends a tool call to the sliding window and prunes.
 // Must be called with mu held.
-func (a *SessionAnalyzer) recordLocked(serverID, toolName, requestID, action, category string, now time.Time) {
+func (a *SessionAnalyzer) recordLocked(serverID, toolName, toolCallID, requestID, action, category string, now time.Time) {
 	if !a.active {
 		return
 	}
 	a.window = append(a.window, ToolCallRecord{
-		Timestamp: now,
-		ServerID:  serverID,
-		ToolName:  toolName,
-		RequestID: requestID,
-		Action:    action,
-		Category:  category,
+		Timestamp:  now,
+		ServerID:   serverID,
+		ToolName:   toolName,
+		ToolCallID: toolCallID,
+		RequestID:  requestID,
+		Action:     action,
+		Category:   category,
 	})
 	a.pruneWindow(now)
 }
@@ -289,6 +299,11 @@ func (a *SessionAnalyzer) checkShadow(toolName string) *CrossServerDecision {
 func (a *SessionAnalyzer) checkBurst(serverID string, now time.Time) *CrossServerDecision {
 	window := a.cfg.Burst.Window
 	maxCalls := a.cfg.Burst.MaxCalls
+
+	// Guard against misconfiguration: MaxCalls <= 0 would block everything.
+	if maxCalls <= 0 {
+		return nil
+	}
 
 	// Prune old timestamps for this server.
 	cutoff := now.Add(-window)
@@ -346,7 +361,7 @@ func (a *SessionAnalyzer) checkReadThenSend(serverID string, now time.Time) *Cro
 
 func (a *SessionAnalyzer) checkCrossServerFlow(serverID, requestID string, now time.Time) *CrossServerDecision {
 	window := a.cfg.CrossServerFlow.Window
-	sameTurnOnly := a.cfg.CrossServerFlow.SameTurnOnly
+	sameTurnOnly := a.cfg.CrossServerFlow.SameTurnOnly != nil && *a.cfg.CrossServerFlow.SameTurnOnly
 	cutoff := now.Add(-window)
 
 	for i := len(a.window) - 1; i >= 0; i-- {

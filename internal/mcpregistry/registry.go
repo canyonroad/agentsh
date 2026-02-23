@@ -63,11 +63,22 @@ func NewRegistry() *Registry {
 }
 
 // SetCallbacks configures optional callbacks for registry events.
-// Thread-safe; can be called at any time.
+// If 2+ servers are already registered and OnMultiServer hasn't fired yet,
+// it fires immediately (outside the lock) so late-attached consumers don't
+// miss the multi-server state. Thread-safe; can be called at any time.
 func (r *Registry) SetCallbacks(cb RegistryCallbacks) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	fireMultiServer := len(r.servers) >= 2 && !r.multiServerFired
+	if fireMultiServer {
+		r.multiServerFired = true
+	}
 	r.callbacks = &cb
+	r.mu.Unlock()
+
+	// Fire outside lock to avoid deadlocks.
+	if fireMultiServer && cb.OnMultiServer != nil {
+		cb.OnMultiServer()
+	}
 }
 
 // Register bulk-registers tools from a server. If a tool name already exists
@@ -108,12 +119,17 @@ func (r *Registry) Register(serverID, serverType, serverAddr string, tools []Too
 	// Track distinct servers and determine if we should fire OnMultiServer.
 	r.servers[serverID] = struct{}{}
 	fireMultiServer := len(r.servers) >= 2 && !r.multiServerFired
-	if fireMultiServer {
-		r.multiServerFired = true
-	}
 
 	// Snapshot callbacks pointer while under lock; call outside lock.
 	cb := r.callbacks
+
+	// Only mark as fired if we have a callback to actually call.
+	// Otherwise SetCallbacks can backfill later.
+	if fireMultiServer && cb != nil && cb.OnMultiServer != nil {
+		r.multiServerFired = true
+	} else {
+		fireMultiServer = false
+	}
 
 	r.mu.Unlock()
 

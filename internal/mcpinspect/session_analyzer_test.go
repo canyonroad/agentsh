@@ -7,6 +7,9 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 )
 
+// boolPtr returns a pointer to the given bool value.
+func boolPtr(b bool) *bool { return &b }
+
 // allEnabledConfig returns a CrossServerConfig with all rules enabled and
 // reasonable windows for testing.
 func allEnabledConfig() config.CrossServerConfig {
@@ -23,11 +26,11 @@ func allEnabledConfig() config.CrossServerConfig {
 		},
 		CrossServerFlow: config.CrossServerFlowConfig{
 			Enabled:      true,
-			SameTurnOnly: true,
+			SameTurnOnly: boolPtr(true),
 			Window:       30 * time.Second,
 		},
 		ShadowTool: config.ShadowToolConfig{
-			Enabled: true,
+			Enabled: boolPtr(true),
 		},
 	}
 }
@@ -36,7 +39,7 @@ func allEnabledConfig() config.CrossServerConfig {
 func TestSessionAnalyzer_InactiveReturnsNil(t *testing.T) {
 	a := NewSessionAnalyzer("sess-1", allEnabledConfig())
 
-	dec, _ := a.CheckAndRecord("server-a", "send_email", "req-1")
+	dec, _ := a.CheckAndRecord("server-a", "send_email", "", "req-1")
 	if dec != nil {
 		t.Fatalf("expected nil decision from inactive analyzer, got %+v", dec)
 	}
@@ -94,7 +97,7 @@ func TestSessionAnalyzer_ReadThenSendDetection(t *testing.T) {
 	})
 
 	// Check a send from server-b.
-	dec, _ := a.CheckAndRecord("server-b", "send_email", "req-1")
+	dec, _ := a.CheckAndRecord("server-b", "send_email", "", "req-1")
 	if dec == nil {
 		t.Fatal("expected a decision, got nil")
 	}
@@ -130,7 +133,7 @@ func TestSessionAnalyzer_ReadThenSendSameServer(t *testing.T) {
 	})
 
 	// Check a send from the SAME server (server-a).
-	dec, _ := a.CheckAndRecord("server-a", "send_email", "req-1")
+	dec, _ := a.CheckAndRecord("server-a", "send_email", "", "req-1")
 	if dec != nil {
 		t.Fatalf("expected nil for same-server send, got %+v", dec)
 	}
@@ -154,7 +157,7 @@ func TestSessionAnalyzer_ReadThenSendExpired(t *testing.T) {
 	})
 
 	// Check a send from server-b now.
-	dec, _ := a.CheckAndRecord("server-b", "send_email", "req-2")
+	dec, _ := a.CheckAndRecord("server-b", "send_email", "", "req-2")
 	if dec != nil {
 		t.Fatalf("expected nil for expired read, got %+v", dec)
 	}
@@ -172,14 +175,14 @@ func TestSessionAnalyzer_BurstDetection(t *testing.T) {
 
 	// Make 9 calls (under threshold) then the 10th should trigger.
 	for i := 0; i < 9; i++ {
-		dec, _ := a.CheckAndRecord("server-a", "get_data", "req-1")
+		dec, _ := a.CheckAndRecord("server-a", "get_data", "", "req-1")
 		if dec != nil {
 			t.Fatalf("call %d: expected nil, got %+v", i+1, dec)
 		}
 	}
 
 	// 10th call should trigger burst.
-	dec, _ := a.CheckAndRecord("server-a", "get_data", "req-1")
+	dec, _ := a.CheckAndRecord("server-a", "get_data", "", "req-1")
 	if dec == nil {
 		t.Fatal("expected burst detection on 10th call, got nil")
 	}
@@ -205,7 +208,7 @@ func TestSessionAnalyzer_BurstUnderThreshold(t *testing.T) {
 
 	// Make 9 calls (maxCalls is 10).
 	for i := 0; i < 9; i++ {
-		dec, _ := a.CheckAndRecord("server-a", "get_data", "req-1")
+		dec, _ := a.CheckAndRecord("server-a", "get_data", "", "req-1")
 		if dec != nil {
 			t.Fatalf("call %d: expected nil, got %+v", i+1, dec)
 		}
@@ -235,7 +238,7 @@ func TestSessionAnalyzer_CrossServerFlowSameTurn(t *testing.T) {
 	})
 
 	// Check write from server-b with same request R1.
-	dec, _ := a.CheckAndRecord("server-b", "write_file", "R1")
+	dec, _ := a.CheckAndRecord("server-b", "write_file", "", "R1")
 	if dec == nil {
 		t.Fatal("expected cross_server_flow detection, got nil")
 	}
@@ -255,7 +258,7 @@ func TestSessionAnalyzer_CrossServerFlowDifferentTurn(t *testing.T) {
 	cfg := allEnabledConfig()
 	cfg.ReadThenSend.Enabled = false
 	cfg.Burst.Enabled = false
-	cfg.CrossServerFlow.SameTurnOnly = true
+	cfg.CrossServerFlow.SameTurnOnly = boolPtr(true)
 
 	a := NewSessionAnalyzer("sess-1", cfg)
 	a.Activate()
@@ -273,7 +276,7 @@ func TestSessionAnalyzer_CrossServerFlowDifferentTurn(t *testing.T) {
 	})
 
 	// Check write from server-b with DIFFERENT request R2.
-	dec, _ := a.CheckAndRecord("server-b", "write_file", "R2")
+	dec, _ := a.CheckAndRecord("server-b", "write_file", "", "R2")
 	if dec != nil {
 		t.Fatalf("expected nil for different turn, got %+v", dec)
 	}
@@ -286,7 +289,7 @@ func TestSessionAnalyzer_ShadowToolDetection(t *testing.T) {
 
 	a.NotifyOverwrite("my_tool", "server-a", "server-b")
 
-	dec, _ := a.CheckAndRecord("server-b", "my_tool", "req-1")
+	dec, _ := a.CheckAndRecord("server-b", "my_tool", "", "req-1")
 	if dec == nil {
 		t.Fatal("expected shadow_tool detection, got nil")
 	}
@@ -308,7 +311,7 @@ func TestSessionAnalyzer_ShadowToolBeforeActivation(t *testing.T) {
 	// Do NOT call Activate().
 	a.NotifyOverwrite("my_tool", "server-a", "server-b")
 
-	dec, _ := a.CheckAndRecord("server-b", "my_tool", "req-1")
+	dec, _ := a.CheckAndRecord("server-b", "my_tool", "", "req-1")
 	if dec == nil {
 		t.Fatal("expected shadow_tool detection before activation, got nil")
 	}
@@ -377,7 +380,7 @@ func TestSessionAnalyzer_ClassifierIntegration(t *testing.T) {
 
 	// "send_email" should be classified as "send" by the classifier,
 	// triggering read_then_send since server-a just did a read.
-	dec, _ := a.CheckAndRecord("server-b", "send_email", "req-1")
+	dec, _ := a.CheckAndRecord("server-b", "send_email", "", "req-1")
 	if dec == nil {
 		t.Fatal("expected detection, got nil")
 	}
@@ -401,7 +404,7 @@ func TestSessionAnalyzer_ClassifierIntegration(t *testing.T) {
 
 	// "write_file" is classified as "write" -> should trigger cross_server_flow
 	// (not read_then_send, since that only fires for "send" category).
-	dec2, _ := a2.CheckAndRecord("server-b", "write_file", "req-1")
+	dec2, _ := a2.CheckAndRecord("server-b", "write_file", "", "req-1")
 	if dec2 == nil {
 		t.Fatal("expected detection for write, got nil")
 	}
@@ -425,11 +428,11 @@ func TestSessionAnalyzer_ConfigDisabled(t *testing.T) {
 		},
 		CrossServerFlow: config.CrossServerFlowConfig{
 			Enabled:      false,
-			SameTurnOnly: true,
+			SameTurnOnly: boolPtr(true),
 			Window:       30 * time.Second,
 		},
 		ShadowTool: config.ShadowToolConfig{
-			Enabled: false,
+			Enabled: boolPtr(false),
 		},
 	}
 
@@ -450,26 +453,26 @@ func TestSessionAnalyzer_ConfigDisabled(t *testing.T) {
 	})
 
 	// Check shadowed tool: should not trigger since all disabled.
-	dec, _ := a.CheckAndRecord("server-b", "my_tool", "req-1")
+	dec, _ := a.CheckAndRecord("server-b", "my_tool", "", "req-1")
 	if dec != nil {
 		t.Fatalf("expected nil with all rules disabled (shadow tool check), got %+v", dec)
 	}
 
 	// Check send from different server.
-	dec, _ = a.CheckAndRecord("server-b", "send_email", "req-1")
+	dec, _ = a.CheckAndRecord("server-b", "send_email", "", "req-1")
 	if dec != nil {
 		t.Fatalf("expected nil with all rules disabled (read_then_send check), got %+v", dec)
 	}
 
 	// Check write from different server.
-	dec, _ = a.CheckAndRecord("server-b", "write_file", "req-1")
+	dec, _ = a.CheckAndRecord("server-b", "write_file", "", "req-1")
 	if dec != nil {
 		t.Fatalf("expected nil with all rules disabled (cross_server_flow check), got %+v", dec)
 	}
 
 	// Burst: make 15 rapid calls.
 	for i := 0; i < 15; i++ {
-		dec, _ = a.CheckAndRecord("server-a", "get_data", "req-1")
+		dec, _ = a.CheckAndRecord("server-a", "get_data", "", "req-1")
 		if dec != nil {
 			t.Fatalf("call %d: expected nil with all rules disabled (burst check), got %+v", i+1, dec)
 		}
@@ -491,11 +494,11 @@ func TestSessionAnalyzer_TopLevelDisabledOverridesSubRules(t *testing.T) {
 		},
 		CrossServerFlow: config.CrossServerFlowConfig{
 			Enabled:      true,
-			SameTurnOnly: true,
+			SameTurnOnly: boolPtr(true),
 			Window:       30 * time.Second,
 		},
 		ShadowTool: config.ShadowToolConfig{
-			Enabled: true,
+			Enabled: boolPtr(true),
 		},
 	}
 
@@ -504,7 +507,7 @@ func TestSessionAnalyzer_TopLevelDisabledOverridesSubRules(t *testing.T) {
 
 	// Shadow tool should not trigger.
 	a.NotifyOverwrite("my_tool", "server-a", "server-b")
-	dec, _ := a.CheckAndRecord("server-b", "my_tool", "req-1")
+	dec, _ := a.CheckAndRecord("server-b", "my_tool", "", "req-1")
 	if dec != nil {
 		t.Fatalf("expected nil with top-level disabled (shadow), got %+v", dec)
 	}
@@ -518,7 +521,7 @@ func TestSessionAnalyzer_TopLevelDisabledOverridesSubRules(t *testing.T) {
 		Action:    "allow",
 		Category:  CategoryRead,
 	})
-	dec, _ = a.CheckAndRecord("server-b", "send_email", "req-1")
+	dec, _ = a.CheckAndRecord("server-b", "send_email", "", "req-1")
 	if dec != nil {
 		t.Fatalf("expected nil with top-level disabled (read_then_send), got %+v", dec)
 	}
@@ -546,7 +549,7 @@ func TestSessionAnalyzer_UnknownCategoryTriggersCrossServerFlow(t *testing.T) {
 	})
 
 	// "transmit_data" is unknown-category; should trigger cross_server_flow.
-	dec, cat := a.CheckAndRecord("server-b", "transmit_data", "req-1")
+	dec, cat := a.CheckAndRecord("server-b", "transmit_data", "", "req-1")
 	if cat != CategoryUnknown {
 		t.Errorf("expected category unknown, got %q", cat)
 	}
@@ -580,7 +583,7 @@ func TestSessionAnalyzer_ComputeCategoryTriggersCrossServerFlow(t *testing.T) {
 	})
 
 	// "exec_shell" is compute-category; should trigger cross_server_flow.
-	dec, cat := a.CheckAndRecord("server-b", "exec_shell", "req-1")
+	dec, cat := a.CheckAndRecord("server-b", "exec_shell", "", "req-1")
 	if cat != CategoryCompute {
 		t.Errorf("expected category compute, got %q", cat)
 	}
@@ -597,7 +600,7 @@ func TestSessionAnalyzer_CrossServerFlowSameTurnOnlyFalse(t *testing.T) {
 	cfg := allEnabledConfig()
 	cfg.ReadThenSend.Enabled = false
 	cfg.Burst.Enabled = false
-	cfg.CrossServerFlow.SameTurnOnly = false
+	cfg.CrossServerFlow.SameTurnOnly = boolPtr(false)
 
 	a := NewSessionAnalyzer("sess-1", cfg)
 	a.Activate()
@@ -616,7 +619,7 @@ func TestSessionAnalyzer_CrossServerFlowSameTurnOnlyFalse(t *testing.T) {
 
 	// Check write from server-b with DIFFERENT request R2.
 	// With SameTurnOnly=false, this should still trigger.
-	dec, _ := a.CheckAndRecord("server-b", "write_file", "R2")
+	dec, _ := a.CheckAndRecord("server-b", "write_file", "", "R2")
 	if dec == nil {
 		t.Fatal("expected cross_server_flow detection with SameTurnOnly=false, got nil")
 	}
@@ -647,7 +650,7 @@ func TestSessionAnalyzer_BurstWindowExpiry(t *testing.T) {
 	a.mu.Unlock()
 
 	// Next call should prune the old timestamps and only count this one.
-	dec, _ := a.CheckAndRecord("server-a", "get_data", "req-1")
+	dec, _ := a.CheckAndRecord("server-a", "get_data", "", "req-1")
 	if dec != nil {
 		t.Fatalf("expected nil after burst window expired, got %+v", dec)
 	}
@@ -669,7 +672,7 @@ func TestSessionAnalyzer_ClearShadow(t *testing.T) {
 	a.NotifyOverwrite("my_tool", "server-a", "server-b")
 
 	// Should trigger before clearing.
-	dec, _ := a.CheckAndRecord("server-b", "my_tool", "req-1")
+	dec, _ := a.CheckAndRecord("server-b", "my_tool", "", "req-1")
 	if dec == nil {
 		t.Fatal("expected shadow_tool detection, got nil")
 	}
@@ -678,7 +681,7 @@ func TestSessionAnalyzer_ClearShadow(t *testing.T) {
 	a.ClearShadow("my_tool")
 
 	// Should no longer trigger.
-	dec, _ = a.CheckAndRecord("server-b", "my_tool", "req-2")
+	dec, _ = a.CheckAndRecord("server-b", "my_tool", "", "req-2")
 	if dec != nil {
 		t.Fatalf("expected nil after ClearShadow, got %+v", dec)
 	}
@@ -690,7 +693,7 @@ func TestSessionAnalyzer_MarkBlocked(t *testing.T) {
 	a.Activate()
 
 	// CheckAndRecord a read from server-a (will be recorded as "allow").
-	dec, _ := a.CheckAndRecord("server-a", "get_data", "req-1")
+	dec, _ := a.CheckAndRecord("server-a", "get_data", "", "req-1")
 	if dec != nil {
 		t.Fatalf("expected nil, got %+v", dec)
 	}
@@ -703,7 +706,7 @@ func TestSessionAnalyzer_MarkBlocked(t *testing.T) {
 	a.mu.Unlock()
 
 	// Mark it as blocked (simulating PolicyEvaluator blocking it).
-	a.MarkBlocked("server-a", "get_data", "req-1")
+	a.MarkBlocked("server-a", "get_data", "", "req-1")
 
 	// The window record should now be "block".
 	a.mu.Lock()
@@ -714,7 +717,7 @@ func TestSessionAnalyzer_MarkBlocked(t *testing.T) {
 
 	// A subsequent send from server-b should NOT trigger read_then_send
 	// because the read was marked as blocked.
-	dec, _ = a.CheckAndRecord("server-b", "send_email", "req-2")
+	dec, _ = a.CheckAndRecord("server-b", "send_email", "", "req-2")
 	if dec != nil && dec.Rule == "read_then_send" {
 		t.Fatalf("expected no read_then_send after MarkBlocked, got %+v", dec)
 	}
@@ -747,7 +750,7 @@ func TestSessionAnalyzer_WindowSizeCap(t *testing.T) {
 	a.mu.Unlock()
 
 	// Next CheckAndRecord triggers pruning via recordLocked.
-	a.CheckAndRecord("server-a", "get_data", "req-2")
+	a.CheckAndRecord("server-a", "get_data", "", "req-2")
 
 	a.mu.Lock()
 	windowLen := len(a.window)
@@ -774,7 +777,7 @@ func TestSessionAnalyzer_CheckAndRecordReturnsCategory(t *testing.T) {
 		{"my_custom_tool", CategoryUnknown},
 	}
 	for _, tt := range tests {
-		_, cat := a.CheckAndRecord("server-a", tt.toolName, "req-1")
+		_, cat := a.CheckAndRecord("server-a", tt.toolName, "", "req-1")
 		if cat != tt.wantCat {
 			t.Errorf("CheckAndRecord(%q) category = %q, want %q", tt.toolName, cat, tt.wantCat)
 		}
@@ -803,7 +806,7 @@ func TestSessionAnalyzer_UnknownCategorySameServerNoTrigger(t *testing.T) {
 	})
 
 	// Unknown-category tool from the SAME server should not trigger.
-	dec, _ := a.CheckAndRecord("server-a", "transmit_data", "req-1")
+	dec, _ := a.CheckAndRecord("server-a", "transmit_data", "", "req-1")
 	if dec != nil {
 		t.Fatalf("expected nil for unknown-category tool from same server, got %+v", dec)
 	}

@@ -137,12 +137,13 @@ type MCPCrossServerEvent struct {
 
 // ToolCallRecord captures a single tool call for cross-server analysis.
 type ToolCallRecord struct {
-	Timestamp time.Time `json:"timestamp"`
-	ServerID  string    `json:"server_id"`
-	ToolName  string    `json:"tool_name"`
-	RequestID string    `json:"request_id"`
-	Action    string    `json:"action"`   // "allow" or "block"
-	Category  string    `json:"category"` // "read", "write", "send", "compute", "unknown"
+	Timestamp  time.Time `json:"timestamp"`
+	ServerID   string    `json:"server_id"`
+	ToolName   string    `json:"tool_name"`
+	ToolCallID string    `json:"tool_call_id,omitempty"` // "toolu_..." or "call_..."
+	RequestID  string    `json:"request_id"`
+	Action     string    `json:"action"`   // "allow" or "block"
+	Category   string    `json:"category"` // "read", "write", "send", "compute", "unknown"
 }
 
 // FieldChange describes what changed in a tool definition.

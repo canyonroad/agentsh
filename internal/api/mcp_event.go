@@ -57,12 +57,13 @@ func mcpCrossServerToEvent(ev mcpinspect.MCPCrossServerEvent) types.Event {
 	relatedCalls := make([]map[string]any, len(ev.RelatedCalls))
 	for i, rc := range ev.RelatedCalls {
 		relatedCalls[i] = map[string]any{
-			"timestamp":  rc.Timestamp,
-			"server_id":  rc.ServerID,
-			"tool_name":  rc.ToolName,
-			"request_id": rc.RequestID,
-			"action":     rc.Action,
-			"category":   rc.Category,
+			"timestamp":    rc.Timestamp,
+			"server_id":    rc.ServerID,
+			"tool_name":    rc.ToolName,
+			"tool_call_id": rc.ToolCallID,
+			"request_id":   rc.RequestID,
+			"action":       rc.Action,
+			"category":     rc.Category,
 		}
 	}
 

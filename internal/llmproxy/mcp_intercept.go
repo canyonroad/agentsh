@@ -179,7 +179,7 @@ func interceptMCPToolCalls(
 		var decision mcpinspect.PolicyDecision
 		var crossServerDec *mcpinspect.CrossServerDecision
 		if analyzer != nil {
-			if block, _ := analyzer.CheckAndRecord(entry.ServerID, call.Name, requestID); block != nil {
+			if block, _ := analyzer.CheckAndRecord(entry.ServerID, call.Name, call.ID, requestID); block != nil {
 				decision = mcpinspect.PolicyDecision{Allowed: false, Reason: block.Reason}
 				crossServerDec = block
 			}
@@ -200,7 +200,7 @@ func interceptMCPToolCalls(
 		// If policy blocked a call that cross-server allowed, update
 		// the window record so it doesn't cause false positives.
 		if !decision.Allowed && crossServerDec == nil && analyzer != nil {
-			analyzer.MarkBlocked(entry.ServerID, call.Name, requestID)
+			analyzer.MarkBlocked(entry.ServerID, call.Name, call.ID, requestID)
 		}
 
 		result.Events = append(result.Events, mcpinspect.MCPToolCallInterceptedEvent{
@@ -440,7 +440,7 @@ func interceptMCPToolCallsFromList(
 		var decision mcpinspect.PolicyDecision
 		var crossServerDec *mcpinspect.CrossServerDecision
 		if analyzer != nil {
-			if block, _ := analyzer.CheckAndRecord(entry.ServerID, call.Name, requestID); block != nil {
+			if block, _ := analyzer.CheckAndRecord(entry.ServerID, call.Name, call.ID, requestID); block != nil {
 				decision = mcpinspect.PolicyDecision{Allowed: false, Reason: block.Reason}
 				crossServerDec = block
 			}
@@ -451,7 +451,7 @@ func interceptMCPToolCallsFromList(
 
 		// If policy blocked a call that cross-server allowed, update the window.
 		if !decision.Allowed && crossServerDec == nil && analyzer != nil {
-			analyzer.MarkBlocked(entry.ServerID, call.Name, requestID)
+			analyzer.MarkBlocked(entry.ServerID, call.Name, call.ID, requestID)
 		}
 
 		event := mcpinspect.MCPToolCallInterceptedEvent{

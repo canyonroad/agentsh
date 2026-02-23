@@ -258,7 +258,7 @@ func (s *SSEInterceptor) handleContentBlockStart(originalLine, data string, inde
 	toolName := block.ContentBlock.Name
 	toolCallID := block.ContentBlock.ID
 
-	entry, decision, crossServerDec := s.lookupAndEvaluate(toolName)
+	entry, decision, crossServerDec := s.lookupAndEvaluate(toolName, toolCallID)
 	if entry == nil {
 		// Not in registry (not an MCP tool) — pass through silently.
 		return []string{originalLine}
@@ -348,7 +348,7 @@ func (s *SSEInterceptor) rewriteAnthropicStopReason(data string) string {
 // When a SessionAnalyzer is configured, cross-server rules are checked before
 // regular policy evaluation. The third return value carries the cross-server
 // decision details when the block was caused by a cross-server rule.
-func (s *SSEInterceptor) lookupAndEvaluate(toolName string) (*mcpregistry.ToolEntry, *mcpinspect.PolicyDecision, *mcpinspect.CrossServerDecision) {
+func (s *SSEInterceptor) lookupAndEvaluate(toolName, toolCallID string) (*mcpregistry.ToolEntry, *mcpinspect.PolicyDecision, *mcpinspect.CrossServerDecision) {
 	if s.registry == nil || s.policy == nil {
 		return nil, nil, nil
 	}
@@ -360,7 +360,7 @@ func (s *SSEInterceptor) lookupAndEvaluate(toolName string) (*mcpregistry.ToolEn
 
 	// Cross-server check + record (atomic to eliminate TOCTOU race).
 	if s.analyzer != nil {
-		if block, _ := s.analyzer.CheckAndRecord(entry.ServerID, toolName, s.requestID); block != nil {
+		if block, _ := s.analyzer.CheckAndRecord(entry.ServerID, toolName, toolCallID, s.requestID); block != nil {
 			return entry, &mcpinspect.PolicyDecision{Allowed: false, Reason: block.Reason}, block
 		}
 	}
@@ -370,7 +370,7 @@ func (s *SSEInterceptor) lookupAndEvaluate(toolName string) (*mcpregistry.ToolEn
 	// If policy blocks a call that cross-server allowed, update the window
 	// so the "allow" record becomes "block" (prevents false positives).
 	if !decision.Allowed && s.analyzer != nil {
-		s.analyzer.MarkBlocked(entry.ServerID, toolName, s.requestID)
+		s.analyzer.MarkBlocked(entry.ServerID, toolName, toolCallID, s.requestID)
 	}
 
 	return entry, &decision, nil
@@ -574,7 +574,7 @@ func (s *SSEInterceptor) handleOpenAIFirstToolChunk(choice *openAIChunkChoice) b
 		// finish_reason is only rewritten when truly all tools are blocked.
 		st.total++
 
-		entry, decision, crossServerDec := s.lookupAndEvaluate(toolName)
+		entry, decision, crossServerDec := s.lookupAndEvaluate(toolName, toolCallID)
 		if entry == nil {
 			// Not in registry — pass through silently (not an MCP tool).
 			allowed = append(allowed, tc)

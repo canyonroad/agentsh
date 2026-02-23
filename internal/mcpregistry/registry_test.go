@@ -693,3 +693,49 @@ func TestNoCallbacksSetNoPanic(t *testing.T) {
 	})
 	// If we reach here without panic, the test passes.
 }
+
+func TestSetCallbacksBackfillMultiServer(t *testing.T) {
+	r := NewRegistry()
+
+	// Register 2 servers BEFORE setting callbacks.
+	r.Register("server-a", "stdio", "", []ToolInfo{
+		{Name: "tool_a", Hash: "ha"},
+	})
+	r.Register("server-b", "stdio", "", []ToolInfo{
+		{Name: "tool_b", Hash: "hb"},
+	})
+
+	// Now attach callbacks — OnMultiServer should fire immediately.
+	var calls int
+	r.SetCallbacks(RegistryCallbacks{
+		OnMultiServer: func() { calls++ },
+	})
+	if calls != 1 {
+		t.Fatalf("expected OnMultiServer backfill, got %d calls", calls)
+	}
+
+	// Subsequent registrations should NOT re-fire.
+	r.Register("server-c", "stdio", "", []ToolInfo{
+		{Name: "tool_c", Hash: "hc"},
+	})
+	if calls != 1 {
+		t.Fatalf("expected no duplicate fire, got %d calls", calls)
+	}
+}
+
+func TestSetCallbacksNoBackfillWithOneServer(t *testing.T) {
+	r := NewRegistry()
+
+	// Register only 1 server before callbacks.
+	r.Register("server-a", "stdio", "", []ToolInfo{
+		{Name: "tool_a", Hash: "ha"},
+	})
+
+	var calls int
+	r.SetCallbacks(RegistryCallbacks{
+		OnMultiServer: func() { calls++ },
+	})
+	if calls != 0 {
+		t.Fatalf("expected no backfill with 1 server, got %d calls", calls)
+	}
+}

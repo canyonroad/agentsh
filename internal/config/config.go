@@ -582,13 +582,13 @@ type BurstConfig struct {
 // CrossServerFlowConfig detects tool calls that flow across different servers.
 type CrossServerFlowConfig struct {
 	Enabled      bool          `yaml:"enabled"`
-	SameTurnOnly bool          `yaml:"same_turn_only"` // default: true
+	SameTurnOnly *bool         `yaml:"same_turn_only"` // default: true
 	Window       time.Duration `yaml:"window"`          // default: 30s
 }
 
 // ShadowToolConfig detects tool names that shadow/mimic tools from other servers.
 type ShadowToolConfig struct {
-	Enabled bool `yaml:"enabled"` // default: true
+	Enabled *bool `yaml:"enabled"` // default: true
 }
 
 // SecurityConfig controls security mode selection and strictness.
@@ -1005,6 +1005,8 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	}
 	if cfg.Sandbox.MCP.CrossServer.Burst.MaxCalls == 0 {
 		cfg.Sandbox.MCP.CrossServer.Burst.MaxCalls = 10
+	} else if cfg.Sandbox.MCP.CrossServer.Burst.MaxCalls < 0 {
+		cfg.Sandbox.MCP.CrossServer.Burst.MaxCalls = 10
 	}
 	if cfg.Sandbox.MCP.CrossServer.Burst.Window == 0 {
 		cfg.Sandbox.MCP.CrossServer.Burst.Window = 5 * time.Second
@@ -1012,22 +1014,15 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.Sandbox.MCP.CrossServer.CrossServerFlow.Window == 0 {
 		cfg.Sandbox.MCP.CrossServer.CrossServerFlow.Window = 30 * time.Second
 	}
-	// SameTurnOnly defaults to true; since the zero value of bool is false,
-	// we apply this default when both Enabled and SameTurnOnly are false
-	// (suggesting the entire section was omitted). Known limitation: if a
-	// user sets cross_server_flow.enabled: true but omits same_turn_only,
-	// they get same_turn_only=false (the Go zero value). Use *bool if this
-	// distinction becomes important in a future version.
-	if !cfg.Sandbox.MCP.CrossServer.CrossServerFlow.Enabled &&
-		!cfg.Sandbox.MCP.CrossServer.CrossServerFlow.SameTurnOnly {
-		cfg.Sandbox.MCP.CrossServer.CrossServerFlow.SameTurnOnly = true
+	// SameTurnOnly defaults to true when not explicitly set.
+	if cfg.Sandbox.MCP.CrossServer.CrossServerFlow.SameTurnOnly == nil {
+		t := true
+		cfg.Sandbox.MCP.CrossServer.CrossServerFlow.SameTurnOnly = &t
 	}
-	// ShadowTool defaults to enabled. We enable it when the user hasn't
-	// explicitly set it (approximated by Enabled being false). This works
-	// regardless of the top-level CrossServer.Enabled flag — shadow
-	// detection is always active once the analyzer is created.
-	if !cfg.Sandbox.MCP.CrossServer.ShadowTool.Enabled {
-		cfg.Sandbox.MCP.CrossServer.ShadowTool.Enabled = true
+	// ShadowTool defaults to enabled when not explicitly set.
+	if cfg.Sandbox.MCP.CrossServer.ShadowTool.Enabled == nil {
+		t := true
+		cfg.Sandbox.MCP.CrossServer.ShadowTool.Enabled = &t
 	}
 
 	// macOS XPC defaults

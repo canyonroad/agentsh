@@ -1655,6 +1655,9 @@ func TestProxy_CrossServerBlocking_Integration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("request 1 failed: %v", err)
 		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request 1: expected status 200, got %d", resp.StatusCode)
+		}
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
@@ -1679,7 +1682,7 @@ func TestProxy_CrossServerBlocking_Integration(t *testing.T) {
 			t.Error("request 1: query_database should NOT be blocked")
 		}
 		// stop_reason should remain "tool_use" since the tool was allowed.
-		if !strings.Contains(sseOutput, `"tool_use"`) {
+		if !strings.Contains(sseOutput, `"stop_reason":"tool_use"`) {
 			t.Error("request 1: expected stop_reason to remain 'tool_use'")
 		}
 	}
@@ -1697,6 +1700,9 @@ func TestProxy_CrossServerBlocking_Integration(t *testing.T) {
 		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("request 2 failed: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request 2: expected status 200, got %d", resp.StatusCode)
 		}
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
