@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
+
+	"github.com/agentsh/agentsh/internal/mcpinspect"
+	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
 
 // IsSSEResponse returns true if the response is a Server-Sent Events stream.
@@ -79,6 +83,16 @@ type sseProxyTransport struct {
 	base       http.RoundTripper
 	w          http.ResponseWriter
 	onComplete func(resp *http.Response, body []byte)
+	// Optional MCP interception fields. When registry and policy are both
+	// non-nil, SSE streams are processed through an SSEInterceptor instead
+	// of io.Copy, enabling real-time tool call blocking.
+	registry  *mcpregistry.Registry
+	policy    *mcpinspect.PolicyEvaluator
+	dialect   Dialect
+	sessionID string
+	requestID string
+	onEvent   func(mcpinspect.MCPToolCallInterceptedEvent)
+	logger    *slog.Logger
 }
 
 func newSSEProxyTransport(base http.RoundTripper, w http.ResponseWriter, onComplete func(resp *http.Response, body []byte)) *sseProxyTransport {
@@ -90,6 +104,26 @@ func newSSEProxyTransport(base http.RoundTripper, w http.ResponseWriter, onCompl
 		w:          w,
 		onComplete: onComplete,
 	}
+}
+
+// SetInterceptor configures the transport for real-time MCP tool call
+// interception. When both registry and policy are non-nil, SSE streams
+// are processed through an SSEInterceptor instead of io.Copy.
+func (t *sseProxyTransport) SetInterceptor(
+	registry *mcpregistry.Registry,
+	policy *mcpinspect.PolicyEvaluator,
+	dialect Dialect,
+	sessionID, requestID string,
+	onEvent func(mcpinspect.MCPToolCallInterceptedEvent),
+	logger *slog.Logger,
+) {
+	t.registry = registry
+	t.policy = policy
+	t.dialect = dialect
+	t.sessionID = sessionID
+	t.requestID = requestID
+	t.onEvent = onEvent
+	t.logger = logger
 }
 
 func (t *sseProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -109,14 +143,35 @@ func (t *sseProxyTransport) RoundTrip(req *http.Request) (*http.Response, error)
 				sw.Header().Add(k, v)
 			}
 		}
+		// When MCP interception is active, the body may be rewritten to a
+		// different size, so remove Content-Length to force chunked transfer.
+		if t.registry != nil && t.policy != nil {
+			sw.Header().Del("Content-Length")
+		}
 		sw.WriteHeader(resp.StatusCode)
 
-		// Stream body to client while buffering
-		_, copyErr := io.Copy(sw, resp.Body)
+		// Stream body to client — with MCP interception if configured
+		var bufferedBody []byte
+		if t.registry != nil && t.policy != nil {
+			interceptor := NewSSEInterceptor(
+				t.registry, t.policy, t.dialect,
+				t.sessionID, t.requestID, t.onEvent, t.logger,
+			)
+			bufferedBody = interceptor.Stream(resp.Body, sw)
+		} else {
+			// Fast path: no MCP policy — direct io.Copy
+			_, copyErr := io.Copy(sw, resp.Body)
+			if copyErr != nil {
+				resp.Body.Close()
+				return nil, copyErr
+			}
+		}
 		resp.Body.Close()
 
 		// Get buffered body for logging
-		bufferedBody := sw.Data()
+		if bufferedBody == nil {
+			bufferedBody = sw.Data()
+		}
 
 		// Call completion callback with buffered body
 		if t.onComplete != nil {
@@ -133,9 +188,6 @@ func (t *sseProxyTransport) RoundTrip(req *http.Request) (*http.Response, error)
 
 		// Return sentinel error to prevent ReverseProxy from writing again
 		// The error handler will check for this and not report it
-		if copyErr != nil {
-			return nil, copyErr
-		}
 		return nil, errSSEHandled
 	}
 

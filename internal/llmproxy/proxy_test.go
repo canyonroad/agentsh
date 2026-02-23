@@ -1337,3 +1337,172 @@ func TestProxyEventCallback_SSE(t *testing.T) {
 		t.Errorf("dialect: got %q, want %q", ev.Dialect, "anthropic")
 	}
 }
+
+// TestProxy_SSEBlocking_Integration is an end-to-end test that starts the proxy,
+// sends a streaming request through it, and verifies that blocked MCP tool calls
+// are suppressed and replaced in the client-received SSE stream.
+func TestProxy_SSEBlocking_Integration(t *testing.T) {
+	// Anthropic SSE stream with a text block (index 0) followed by a tool_use block (index 1).
+	sseChunks := []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_02\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null}}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Let me check.\"}}\n\n",
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_02block\",\"name\":\"get_weather\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\": \\\"NYC\\\"}\"}}\n\n",
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":20}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		for _, chunk := range sseChunks {
+			w.Write([]byte(chunk))
+			flusher.Flush()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}))
+	defer upstream.Close()
+
+	storageDir := t.TempDir()
+	cfg := Config{
+		SessionID: "test-sse-blocking-integration",
+		Proxy: config.ProxyConfig{
+			Mode: "embedded",
+			Port: 0,
+			Providers: config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+			},
+		},
+		DLP: config.DLPConfig{Mode: "disabled"},
+		MCP: config.SandboxMCPConfig{
+			EnforcePolicy: true,
+			ToolPolicy:    "denylist",
+			DeniedTools: []config.MCPToolRule{
+				{Server: "*", Tool: "get_weather"},
+			},
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy, err := New(cfg, storageDir, logger)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "sha256:abc"},
+	})
+	proxy.SetRegistry(reg)
+
+	var mu sync.Mutex
+	var collected []mcpinspect.MCPToolCallInterceptedEvent
+	done := make(chan struct{}, 1)
+	proxy.SetEventCallback(func(ev mcpinspect.MCPToolCallInterceptedEvent) {
+		mu.Lock()
+		collected = append(collected, ev)
+		mu.Unlock()
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	})
+
+	ctx := context.Background()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(shutdownCtx)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	proxyURL := "http://" + proxy.Addr().String() + "/v1/messages"
+	reqBody := `{"model":"claude-sonnet-4-20250514","stream":true,"messages":[{"role":"user","content":"weather?"}]}`
+	req, err := http.NewRequest(http.MethodPost, proxyURL, strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-ant-test")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	sseOutput := string(body)
+	t.Logf("SSE output:\n%s", sseOutput)
+
+	// Wait for the event callback to fire.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SSE event callback")
+	}
+
+	// --- Assertions on the SSE output ---
+
+	// 1. Text block "Let me check." must pass through.
+	if !strings.Contains(sseOutput, "Let me check.") {
+		t.Error("expected text block 'Let me check.' to pass through in SSE output")
+	}
+
+	// 2. The original tool_use type must NOT appear (it was blocked and replaced).
+	if strings.Contains(sseOutput, `"type":"tool_use"`) {
+		t.Error("expected tool_use block to be suppressed, but found 'type:tool_use' in SSE output")
+	}
+
+	// 3. The replacement text must be present.
+	if !strings.Contains(sseOutput, "[agentsh] Tool 'get_weather' blocked by policy") {
+		t.Error("expected replacement text '[agentsh] Tool 'get_weather' blocked by policy' in SSE output")
+	}
+
+	// 4. stop_reason must be rewritten from "tool_use" to "end_turn" (all tools blocked).
+	if !strings.Contains(sseOutput, `"end_turn"`) {
+		t.Error("expected stop_reason to be rewritten to 'end_turn'")
+	}
+	if strings.Contains(sseOutput, `"stop_reason":"tool_use"`) {
+		t.Error("expected stop_reason 'tool_use' to be rewritten, but it still appears")
+	}
+
+	// --- Assertions on the event callback ---
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(collected) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(collected))
+	}
+
+	ev := collected[0]
+	if ev.ToolName != "get_weather" {
+		t.Errorf("tool_name: got %q, want %q", ev.ToolName, "get_weather")
+	}
+	if ev.Action != "block" {
+		t.Errorf("action: got %q, want %q", ev.Action, "block")
+	}
+	if ev.ServerID != "weather-server" {
+		t.Errorf("server_id: got %q, want %q", ev.ServerID, "weather-server")
+	}
+	if ev.ToolCallID != "toolu_02block" {
+		t.Errorf("tool_call_id: got %q, want %q", ev.ToolCallID, "toolu_02block")
+	}
+	if ev.Dialect != "anthropic" {
+		t.Errorf("dialect: got %q, want %q", ev.Dialect, "anthropic")
+	}
+}
