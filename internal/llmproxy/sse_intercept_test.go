@@ -915,3 +915,323 @@ func TestSSEInterceptor_Anthropic_AllBlocked(t *testing.T) {
 		t.Errorf("SSE output has %d event: lines but %d data: lines; they should match", eventLines, dataLines)
 	}
 }
+
+// --- OpenAI SSE helpers ---
+
+// buildOpenAISingleToolSSE constructs a realistic OpenAI SSE stream with a single tool call.
+func buildOpenAISingleToolSSE(toolName, callID string) string {
+	var b strings.Builder
+
+	// First chunk: tool call with id + function.name
+	b.WriteString(`data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"` + callID + `","type":"function","function":{"name":"` + toolName + `","arguments":""}}]},"finish_reason":null}]}`)
+	b.WriteString("\n\n")
+
+	// Argument streaming chunk
+	b.WriteString(`data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"location\": \"NYC\"}"}}]},"finish_reason":null}]}`)
+	b.WriteString("\n\n")
+
+	// Finish chunk
+	b.WriteString(`data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`)
+	b.WriteString("\n\n")
+
+	// DONE
+	b.WriteString("data: [DONE]")
+	b.WriteString("\n\n")
+
+	return b.String()
+}
+
+// buildOpenAITwoToolSSE constructs an OpenAI SSE stream with two parallel tool calls.
+func buildOpenAITwoToolSSE(tool1Name, call1ID, tool2Name, call2ID string) string {
+	var b strings.Builder
+
+	// First chunk: both tool calls with id + function.name
+	b.WriteString(`data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"` + call1ID + `","type":"function","function":{"name":"` + tool1Name + `","arguments":""}},{"index":1,"id":"` + call2ID + `","type":"function","function":{"name":"` + tool2Name + `","arguments":""}}]},"finish_reason":null}]}`)
+	b.WriteString("\n\n")
+
+	// Argument streaming chunk for tool 0
+	b.WriteString(`data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"location\": \"NYC\"}"}}]},"finish_reason":null}]}`)
+	b.WriteString("\n\n")
+
+	// Argument streaming chunk for tool 1
+	b.WriteString(`data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{}"}}]},"finish_reason":null}]}`)
+	b.WriteString("\n\n")
+
+	// Finish chunk
+	b.WriteString(`data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`)
+	b.WriteString("\n\n")
+
+	// DONE
+	b.WriteString("data: [DONE]")
+	b.WriteString("\n\n")
+
+	return b.String()
+}
+
+func TestSSEInterceptor_OpenAI_SingleBlocked(t *testing.T) {
+	// --- Setup ---
+
+	// Build an OpenAI SSE stream with a single tool call "get_weather" (blocked).
+	sseInput := buildOpenAISingleToolSSE("get_weather", "call_abc123")
+
+	// Registry: get_weather from "weather-server"
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+
+	// Policy: denylist blocking get_weather
+	policy := newTestPolicy(config.MCPToolRule{Server: "*", Tool: "get_weather"})
+
+	// Collect event callbacks
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(evt mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, evt)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// --- Execute ---
+	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_1", "req_1", onEvent, logger)
+
+	reader := strings.NewReader(sseInput)
+	var clientBuf bytes.Buffer
+	buffered := interceptor.Stream(reader, &clientBuf)
+
+	clientOutput := clientBuf.String()
+
+	// --- Assertions ---
+
+	// 1. tool_calls should be removed from the first chunk; content should have the blocked message.
+	expectedMsg := "[agentsh] Tool 'get_weather' blocked by policy"
+	if !strings.Contains(clientOutput, expectedMsg) {
+		t.Errorf("expected blocked message %q in client output, got:\n%s", expectedMsg, clientOutput)
+	}
+
+	// 2. The original tool_calls with get_weather function name should NOT appear in output.
+	if strings.Contains(clientOutput, `"name":"get_weather"`) {
+		t.Error("blocked tool call get_weather should not appear in client output")
+	}
+
+	// 3. finish_reason should be rewritten to "stop" (not "tool_calls").
+	if strings.Contains(clientOutput, `"finish_reason":"tool_calls"`) {
+		t.Error("finish_reason should be rewritten from 'tool_calls' to 'stop' when all tools are blocked")
+	}
+	if !strings.Contains(clientOutput, `"finish_reason":"stop"`) {
+		t.Errorf("expected finish_reason 'stop' in output, got:\n%s", clientOutput)
+	}
+
+	// 4. Argument streaming chunks should be suppressed.
+	lines := strings.Split(clientOutput, "\n")
+	for _, line := range lines {
+		data, ok := extractSSEData(line)
+		if !ok || data == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					ToolCalls []struct {
+						Index    int `json:"index"`
+						Function struct {
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		for _, choice := range chunk.Choices {
+			for _, tc := range choice.Delta.ToolCalls {
+				if tc.Function.Arguments != "" {
+					t.Errorf("argument-streaming chunk for blocked tool should be suppressed, found index %d with args %q", tc.Index, tc.Function.Arguments)
+				}
+			}
+		}
+	}
+
+	// 5. data: [DONE] must be present.
+	if !strings.Contains(clientOutput, "data: [DONE]") {
+		t.Error("[DONE] sentinel should be present in output")
+	}
+
+	// 6. Event callback should have fired with action=block.
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event callback, got %d", len(events))
+	}
+	evt := events[0]
+	if evt.Action != "block" {
+		t.Errorf("expected event action %q, got %q", "block", evt.Action)
+	}
+	if evt.ToolName != "get_weather" {
+		t.Errorf("expected event tool name %q, got %q", "get_weather", evt.ToolName)
+	}
+	if evt.ToolCallID != "call_abc123" {
+		t.Errorf("expected event tool call ID %q, got %q", "call_abc123", evt.ToolCallID)
+	}
+	if evt.ServerID != "weather-server" {
+		t.Errorf("expected event server ID %q, got %q", "weather-server", evt.ServerID)
+	}
+	if evt.Dialect != "openai" {
+		t.Errorf("expected event dialect %q, got %q", "openai", evt.Dialect)
+	}
+	if evt.Reason == "" {
+		t.Error("expected non-empty event reason for blocked tool")
+	}
+
+	// 7. Buffered output must match client output.
+	if string(buffered) != clientOutput {
+		t.Errorf("buffered output does not match client output.\nbuffered len=%d, client len=%d", len(buffered), len(clientOutput))
+	}
+}
+
+func TestSSEInterceptor_OpenAI_PartialBlock(t *testing.T) {
+	// --- Setup ---
+
+	// Build an OpenAI SSE stream with two parallel tools:
+	// get_weather (allowed, index 0) and delete_all (blocked, index 1).
+	sseInput := buildOpenAITwoToolSSE("get_weather", "call_AAA", "delete_all", "call_BBB")
+
+	// Registry: both tools registered
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+	reg.Register("danger-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "delete_all", Hash: "def456"},
+	})
+
+	// Policy: denylist blocking delete_all only
+	policy := newTestPolicy(config.MCPToolRule{Server: "danger-server", Tool: "delete_all"})
+
+	// Collect event callbacks
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(evt mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, evt)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// --- Execute ---
+	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_1", "req_1", onEvent, logger)
+
+	reader := strings.NewReader(sseInput)
+	var clientBuf bytes.Buffer
+	buffered := interceptor.Stream(reader, &clientBuf)
+
+	clientOutput := clientBuf.String()
+
+	// --- Assertions ---
+
+	// 1. get_weather (index 0) should be present in the output.
+	if !strings.Contains(clientOutput, `"name":"get_weather"`) {
+		t.Error("allowed tool get_weather should be present in client output")
+	}
+
+	// 2. delete_all (index 1) should NOT be present in the output.
+	if strings.Contains(clientOutput, `"name":"delete_all"`) {
+		t.Error("blocked tool delete_all should not be present in client output")
+	}
+
+	// 3. finish_reason should remain "tool_calls" (not all tools blocked).
+	if !strings.Contains(clientOutput, `"finish_reason":"tool_calls"`) {
+		t.Errorf("finish_reason should remain 'tool_calls' when some tools are allowed, got:\n%s", clientOutput)
+	}
+
+	// 4. Argument chunk for index 0 (get_weather) should pass through.
+	foundArgChunkIdx0 := false
+	lines := strings.Split(clientOutput, "\n")
+	for _, line := range lines {
+		data, ok := extractSSEData(line)
+		if !ok || data == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					ToolCalls []struct {
+						Index    int `json:"index"`
+						Function struct {
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		for _, choice := range chunk.Choices {
+			for _, tc := range choice.Delta.ToolCalls {
+				if tc.Index == 0 && tc.Function.Arguments != "" {
+					foundArgChunkIdx0 = true
+				}
+			}
+		}
+	}
+	if !foundArgChunkIdx0 {
+		t.Error("argument streaming chunk for allowed tool at index 0 should pass through")
+	}
+
+	// 5. Argument chunk for index 1 (delete_all) should be suppressed.
+	for _, line := range lines {
+		data, ok := extractSSEData(line)
+		if !ok || data == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					ToolCalls []struct {
+						Index    int `json:"index"`
+						Function struct {
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		for _, choice := range chunk.Choices {
+			for _, tc := range choice.Delta.ToolCalls {
+				if tc.Index == 1 && tc.Function.Arguments != "" {
+					t.Error("argument streaming chunk for blocked tool at index 1 should be suppressed")
+				}
+			}
+		}
+	}
+
+	// 6. data: [DONE] must be present.
+	if !strings.Contains(clientOutput, "data: [DONE]") {
+		t.Error("[DONE] sentinel should be present in output")
+	}
+
+	// 7. Exactly 2 events: allow for get_weather, block for delete_all.
+	if len(events) != 2 {
+		t.Fatalf("expected 2 event callbacks, got %d", len(events))
+	}
+	if events[0].Action != "allow" || events[0].ToolName != "get_weather" {
+		t.Errorf("expected first event: allow/get_weather, got %s/%s", events[0].Action, events[0].ToolName)
+	}
+	if events[0].ToolCallID != "call_AAA" {
+		t.Errorf("expected first event tool call ID %q, got %q", "call_AAA", events[0].ToolCallID)
+	}
+	if events[1].Action != "block" || events[1].ToolName != "delete_all" {
+		t.Errorf("expected second event: block/delete_all, got %s/%s", events[1].Action, events[1].ToolName)
+	}
+	if events[1].ToolCallID != "call_BBB" {
+		t.Errorf("expected second event tool call ID %q, got %q", "call_BBB", events[1].ToolCallID)
+	}
+	if events[1].Reason == "" {
+		t.Error("expected non-empty reason for blocked tool event")
+	}
+
+	// 8. Buffered output must match client output.
+	if string(buffered) != clientOutput {
+		t.Errorf("buffered output does not match client output.\nbuffered len=%d, client len=%d", len(buffered), len(clientOutput))
+	}
+}
