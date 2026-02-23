@@ -168,8 +168,10 @@ func interceptMCPToolCalls(
 		decision := policy.Evaluate(entry.ServerID, call.Name, entry.ToolHash)
 
 		action := "allow"
+		var reason string
 		if !decision.Allowed {
 			action = "block"
+			reason = decision.Reason
 			result.HasBlocked = true
 			blockedNames[call.Name] = true
 		}
@@ -187,8 +189,8 @@ func interceptMCPToolCalls(
 			ServerType: entry.ServerType,
 			ServerAddr: entry.ServerAddr,
 			ToolHash:   entry.ToolHash,
-			Action:     action,
-			Reason:     decision.Reason,
+			Action: action,
+			Reason: reason,
 		})
 	}
 

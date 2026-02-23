@@ -50,8 +50,9 @@ type Proxy struct {
 	logger          *slog.Logger
 	isCustomOpenAI  bool
 	chatGPTUpstream *url.URL
-	registry        *mcpregistry.Registry
-	policy          *mcpinspect.PolicyEvaluator
+	registry *mcpregistry.Registry
+	// policy is immutable after construction — set once in New(), never changed.
+	policy *mcpinspect.PolicyEvaluator
 
 	server   *http.Server
 	listener net.Listener
