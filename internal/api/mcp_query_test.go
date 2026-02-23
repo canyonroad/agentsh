@@ -331,6 +331,95 @@ func TestMCPListServers_WithData(t *testing.T) {
 	}
 }
 
+func TestMCPListTools_DetectionsParseBool(t *testing.T) {
+	st := newSQLiteStore(t)
+	seedMCPTools(t, st)
+	h := newMCPTestApp(t, st)
+
+	tests := []struct {
+		name      string
+		query     string
+		wantCount int
+	}{
+		{name: "true", query: "detections=true", wantCount: 2},
+		{name: "1", query: "detections=1", wantCount: 2},
+		{name: "false", query: "detections=false", wantCount: 4},
+		{name: "0", query: "detections=0", wantCount: 4},
+		{name: "invalid treats as false", query: "detections=bogus", wantCount: 4},
+		{name: "empty treats as false", query: "detections=", wantCount: 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/mcp/tools?"+tt.query, nil)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+			}
+
+			var tools []sqlite.MCPTool
+			if err := json.NewDecoder(rr.Body).Decode(&tools); err != nil {
+				t.Fatal(err)
+			}
+			if len(tools) != tt.wantCount {
+				t.Errorf("expected %d tools, got %d", tt.wantCount, len(tools))
+			}
+		})
+	}
+}
+
+func TestMCPListTools_StoreError(t *testing.T) {
+	st := newSQLiteStore(t)
+	h := newMCPTestApp(t, st)
+
+	// Close the store to force an error on the next query.
+	st.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mcp/tools", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rr.Code)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	errMsg, _ := body["error"].(string)
+	if errMsg != "internal server error" {
+		t.Errorf("expected generic error message, got %q", errMsg)
+	}
+}
+
+func TestMCPListServers_StoreError(t *testing.T) {
+	st := newSQLiteStore(t)
+	h := newMCPTestApp(t, st)
+
+	// Close the store to force an error on the next query.
+	st.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mcp/servers", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rr.Code)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	errMsg, _ := body["error"].(string)
+	if errMsg != "internal server error" {
+		t.Errorf("expected generic error message, got %q", errMsg)
+	}
+}
+
 func TestMCPListTools_ContentType(t *testing.T) {
 	st := newSQLiteStore(t)
 	h := newMCPTestApp(t, st)

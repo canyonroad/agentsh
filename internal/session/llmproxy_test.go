@@ -1053,3 +1053,80 @@ func TestStartLLMProxy_NetworkServerDeclarations(t *testing.T) {
 		}
 	}
 }
+
+func TestStartLLMProxy_StdioPreRegistrationNoMultiServerCallback(t *testing.T) {
+	// Regression test: declaring both a stdio and a network server should NOT trigger
+	// the OnMultiServer callback, because stdio servers are skipped during pre-registration.
+	// Only the network server should be registered, leaving the distinct-server count at 1.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":   "msg_test",
+			"type": "message",
+			"usage": map[string]int{
+				"input_tokens":  5,
+				"output_tokens": 10,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	mgr := NewManager(10)
+	sess, err := mgr.CreateWithID("stdio-callback-test", t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	proxyCfg := config.ProxyConfig{
+		Mode: "embedded",
+		Port: 0,
+		Providers: config.ProxyProvidersConfig{
+			Anthropic: upstream.URL,
+			OpenAI:    upstream.URL,
+		},
+	}
+	dlpCfg := config.DLPConfig{Mode: "disabled"}
+	storageCfg := config.DefaultLLMStorageConfig()
+	mcpCfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		Servers: []config.MCPServerDeclaration{
+			{ID: "myhttp", Type: "http", URL: "https://mcp.example.com:9090/sse"},
+			{ID: "mystdio", Type: "stdio", Command: "/usr/bin/tool"},
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("StartLLMProxy failed: %v", err)
+	}
+	defer closeFn()
+
+	if proxyURL == "" {
+		t.Fatal("expected non-empty proxy URL")
+	}
+
+	reg := sess.MCPRegistry()
+	if reg == nil {
+		t.Fatal("expected non-nil MCP registry")
+	}
+
+	registry, ok := reg.(*mcpregistry.Registry)
+	if !ok {
+		t.Fatalf("expected *mcpregistry.Registry, got %T", reg)
+	}
+
+	// Wire a callback AFTER startup. If stdio was pre-registered, the distinct-server
+	// count would already be 2, and SetCallbacks would backfill-fire OnMultiServer.
+	multiServerFired := false
+	registry.SetCallbacks(mcpregistry.RegistryCallbacks{
+		OnMultiServer: func() {
+			multiServerFired = true
+		},
+	})
+
+	if multiServerFired {
+		t.Error("OnMultiServer should not fire: only one server (network) was pre-registered; stdio was skipped")
+	}
+}
