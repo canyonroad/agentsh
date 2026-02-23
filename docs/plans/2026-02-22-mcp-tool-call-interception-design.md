@@ -97,6 +97,58 @@ t=0ms   mcp_tool_call_intercepted   (LLM proxy parsed tool_use from LLM response
 t=5ms   mcp_tool_called             (shim saw tools/call JSON-RPC on server stdin)
 ```
 
+## Org-Level MCP Approval (Approved MCP List)
+
+Organizations need the ability to declare which MCP servers are approved and block everything else. This is critical for enterprise environments where unapproved MCP servers represent a data exfiltration or supply-chain risk.
+
+### Configuration
+
+```yaml
+sandbox:
+  mcp:
+    enforce_policy: true
+    fail_closed: true              # Block undeclared servers/tools
+
+    # Org-approved MCP servers — only these are allowed
+    servers:
+      - id: filesystem
+        type: stdio
+        command: npx
+        args: ["@modelcontextprotocol/server-filesystem", "/home/user"]
+      - id: weather-api
+        type: http
+        url: https://mcp.example.com/sse
+
+    # Server-level: allowlist means ONLY declared servers are permitted
+    server_policy: allowlist
+    allowed_servers:
+      - id: filesystem
+      - id: weather-api
+    # denied_servers not needed when using allowlist — everything not listed is blocked
+```
+
+With `server_policy: allowlist` + `fail_closed: true`, any MCP tool call targeting a server NOT in `allowed_servers` is blocked. Any tool from an undeclared server is blocked. This gives orgs full control over which MCP integrations are permitted.
+
+### Enforcement
+
+Policy evaluation runs in the `PolicyEvaluator` with a new server-level check that executes **before** the existing tool-level check:
+
+```
+1. Server-level check (NEW)
+   ├─ server_policy == "allowlist" && server NOT in allowed_servers? → BLOCK
+   ├─ server_policy == "denylist" && server in denied_servers? → BLOCK
+   └─ Pass to tool-level check
+
+2. Tool-level check (existing)
+   ├─ tool_policy == "allowlist" && tool NOT in allowed_tools? → BLOCK
+   ├─ tool_policy == "denylist" && tool in denied_tools? → BLOCK
+   └─ ALLOW
+```
+
+### Undeclared Server Detection
+
+When `fail_closed: true` and a tool call arrives for a server ID not found in the `servers` declarations at all, it is blocked with reason `"undeclared server (fail closed)"`. This catches MCP servers that were injected dynamically or configured outside agentsh.
+
 ## MCP Tool Registry
 
 The registry is the central data structure shared by all three layers. It maps tool names to MCP server identity and connection details.

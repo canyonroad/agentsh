@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoad_ParsesServerTransportFields(t *testing.T) {
@@ -1119,4 +1120,215 @@ audit:
 			}
 		})
 	}
+}
+
+func TestLoad_MCPServerDeclarations(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  mcp:
+    enforce_policy: true
+    fail_closed: true
+    servers:
+      - id: filesystem
+        type: stdio
+        command: npx
+        args: ["@modelcontextprotocol/server-filesystem", "/home/user"]
+      - id: weather-api
+        type: http
+        url: https://mcp.example.com/sse
+      - id: internal-tools
+        type: http
+        url: https://mcp.internal.corp:8443/mcp
+        tls_fingerprint: "sha256:abc123"
+    server_policy: allowlist
+    allowed_servers:
+      - id: filesystem
+      - id: weather-api
+    denied_servers:
+      - id: "*"
+    tool_policy: denylist
+    allowed_tools:
+      - server: "*"
+        tool: "*"
+    denied_tools:
+      - server: weather-api
+        tool: "delete_*"
+    version_pinning:
+      enabled: true
+      on_change: block
+      auto_trust_first: true
+    rate_limits:
+      enabled: true
+      default_rpm: 60
+      per_server:
+        weather-api:
+          calls_per_minute: 10
+          burst: 3
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mcp := cfg.Sandbox.MCP
+
+	// Verify top-level settings
+	assert.True(t, mcp.EnforcePolicy)
+	assert.True(t, mcp.FailClosed)
+
+	// Verify server declarations
+	assert.Equal(t, 3, len(mcp.Servers))
+
+	assert.Equal(t, "filesystem", mcp.Servers[0].ID)
+	assert.Equal(t, "stdio", mcp.Servers[0].Type)
+	assert.Equal(t, "npx", mcp.Servers[0].Command)
+	assert.Equal(t, []string{"@modelcontextprotocol/server-filesystem", "/home/user"}, mcp.Servers[0].Args)
+	assert.Empty(t, mcp.Servers[0].URL)
+
+	assert.Equal(t, "weather-api", mcp.Servers[1].ID)
+	assert.Equal(t, "http", mcp.Servers[1].Type)
+	assert.Equal(t, "https://mcp.example.com/sse", mcp.Servers[1].URL)
+	assert.Empty(t, mcp.Servers[1].Command)
+
+	assert.Equal(t, "internal-tools", mcp.Servers[2].ID)
+	assert.Equal(t, "sha256:abc123", mcp.Servers[2].TLSFingerprint)
+
+	// Verify server-level policy
+	assert.Equal(t, "allowlist", mcp.ServerPolicy)
+	assert.Equal(t, 2, len(mcp.AllowedServers))
+	assert.Equal(t, "filesystem", mcp.AllowedServers[0].ID)
+	assert.Equal(t, "weather-api", mcp.AllowedServers[1].ID)
+	assert.Equal(t, 1, len(mcp.DeniedServers))
+	assert.Equal(t, "*", mcp.DeniedServers[0].ID)
+
+	// Verify existing tool-level policy still works
+	assert.Equal(t, "denylist", mcp.ToolPolicy)
+	assert.Equal(t, 1, len(mcp.AllowedTools))
+	assert.Equal(t, "*", mcp.AllowedTools[0].Server)
+	assert.Equal(t, 1, len(mcp.DeniedTools))
+	assert.Equal(t, "weather-api", mcp.DeniedTools[0].Server)
+	assert.Equal(t, "delete_*", mcp.DeniedTools[0].Tool)
+
+	// Verify existing version_pinning and rate_limits still work
+	assert.True(t, mcp.VersionPinning.Enabled)
+	assert.Equal(t, "block", mcp.VersionPinning.OnChange)
+	assert.True(t, mcp.RateLimits.Enabled)
+	assert.Equal(t, 60, mcp.RateLimits.DefaultRPM)
+}
+
+func TestLoad_MCPServerDeclarations_Defaults(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	// Config with no MCP server declarations - should have zero values
+	if err := os.WriteFile(cfgPath, []byte(`
+sandbox:
+  enabled: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mcp := cfg.Sandbox.MCP
+	assert.Empty(t, mcp.Servers)
+	assert.Empty(t, mcp.ServerPolicy)
+	assert.Empty(t, mcp.AllowedServers)
+	assert.Empty(t, mcp.DeniedServers)
+}
+
+func TestMCPServerDeclaration_YAMLRoundTrip(t *testing.T) {
+	original := SandboxMCPConfig{
+		EnforcePolicy: true,
+		FailClosed:    true,
+		Servers: []MCPServerDeclaration{
+			{
+				ID:      "fs",
+				Type:    "stdio",
+				Command: "npx",
+				Args:    []string{"@mcp/fs", "/data"},
+			},
+			{
+				ID:             "api",
+				Type:           "http",
+				URL:            "https://mcp.example.com",
+				TLSFingerprint: "sha256:deadbeef",
+			},
+		},
+		ServerPolicy: "allowlist",
+		AllowedServers: []MCPServerRule{
+			{ID: "fs"},
+			{ID: "api"},
+		},
+		DeniedServers: []MCPServerRule{
+			{ID: "*"},
+		},
+		ToolPolicy: "denylist",
+		AllowedTools: []MCPToolRule{
+			{Server: "*", Tool: "*"},
+		},
+		DeniedTools: []MCPToolRule{
+			{Server: "api", Tool: "delete_*"},
+		},
+		VersionPinning: MCPVersionPinningConfig{
+			Enabled:        true,
+			OnChange:       "block",
+			AutoTrustFirst: true,
+		},
+		RateLimits: MCPRateLimitsConfig{
+			Enabled:    true,
+			DefaultRPM: 60,
+		},
+	}
+
+	// Marshal to YAML
+	data, err := yaml.Marshal(&original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// Unmarshal back
+	var roundTripped SandboxMCPConfig
+	if err := yaml.Unmarshal(data, &roundTripped); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Verify all fields survived the round trip
+	assert.Equal(t, original.EnforcePolicy, roundTripped.EnforcePolicy)
+	assert.Equal(t, original.FailClosed, roundTripped.FailClosed)
+	assert.Equal(t, original.ServerPolicy, roundTripped.ServerPolicy)
+	assert.Equal(t, original.ToolPolicy, roundTripped.ToolPolicy)
+
+	// Server declarations
+	assert.Equal(t, len(original.Servers), len(roundTripped.Servers))
+	assert.Equal(t, "fs", roundTripped.Servers[0].ID)
+	assert.Equal(t, "stdio", roundTripped.Servers[0].Type)
+	assert.Equal(t, "npx", roundTripped.Servers[0].Command)
+	assert.Equal(t, []string{"@mcp/fs", "/data"}, roundTripped.Servers[0].Args)
+	assert.Equal(t, "api", roundTripped.Servers[1].ID)
+	assert.Equal(t, "http", roundTripped.Servers[1].Type)
+	assert.Equal(t, "https://mcp.example.com", roundTripped.Servers[1].URL)
+	assert.Equal(t, "sha256:deadbeef", roundTripped.Servers[1].TLSFingerprint)
+
+	// Server rules
+	assert.Equal(t, len(original.AllowedServers), len(roundTripped.AllowedServers))
+	assert.Equal(t, "fs", roundTripped.AllowedServers[0].ID)
+	assert.Equal(t, "api", roundTripped.AllowedServers[1].ID)
+	assert.Equal(t, 1, len(roundTripped.DeniedServers))
+	assert.Equal(t, "*", roundTripped.DeniedServers[0].ID)
+
+	// Tool rules (existing fields)
+	assert.Equal(t, len(original.AllowedTools), len(roundTripped.AllowedTools))
+	assert.Equal(t, len(original.DeniedTools), len(roundTripped.DeniedTools))
+
+	// Version pinning and rate limits
+	assert.Equal(t, original.VersionPinning.Enabled, roundTripped.VersionPinning.Enabled)
+	assert.Equal(t, original.RateLimits.DefaultRPM, roundTripped.RateLimits.DefaultRPM)
 }

@@ -16,6 +16,47 @@ func TestProxyConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestProxyConfig_IsMCPOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+		want bool
+	}{
+		{"mcp-only mode", "mcp-only", true},
+		{"embedded mode", "embedded", false},
+		{"disabled mode", "disabled", false},
+		{"empty mode", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ProxyConfig{Mode: tt.mode}
+			if got := cfg.IsMCPOnly(); got != tt.want {
+				t.Errorf("ProxyConfig{Mode: %q}.IsMCPOnly() = %v, want %v", tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProxyConfig_IsMCPOnly_YAMLParse(t *testing.T) {
+	yamlData := `
+proxy:
+  mode: mcp-only
+  port: 8080
+`
+	var cfg struct {
+		Proxy ProxyConfig `yaml:"proxy"`
+	}
+	if err := yaml.Unmarshal([]byte(yamlData), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !cfg.Proxy.IsMCPOnly() {
+		t.Errorf("expected IsMCPOnly() = true for mode %q", cfg.Proxy.Mode)
+	}
+	if cfg.Proxy.Port != 8080 {
+		t.Errorf("expected port 8080, got %d", cfg.Proxy.Port)
+	}
+}
+
 func TestDLPConfigParse(t *testing.T) {
 	yamlData := `
 dlp:

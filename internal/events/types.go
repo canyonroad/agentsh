@@ -103,9 +103,11 @@ const (
 
 // MCP inspection events.
 const (
-	EventMCPToolSeen    EventType = "mcp_tool_seen"
-	EventMCPToolChanged EventType = "mcp_tool_changed"
-	EventMCPDetection   EventType = "mcp_detection"
+	EventMCPToolSeen            EventType = "mcp_tool_seen"
+	EventMCPToolChanged         EventType = "mcp_tool_changed"
+	EventMCPToolCalled          EventType = "mcp_tool_called"
+	EventMCPDetection           EventType = "mcp_detection"
+	EventMCPToolCallIntercepted EventType = "mcp_tool_call_intercepted"
 )
 
 // Policy events.
@@ -210,9 +212,11 @@ var EventCategory = map[EventType]string{
 	EventSignalWouldDeny:  "signal",
 
 	// MCP
-	EventMCPToolSeen:    "mcp",
-	EventMCPToolChanged: "mcp",
-	EventMCPDetection:   "mcp",
+	EventMCPToolSeen:            "mcp",
+	EventMCPToolChanged:         "mcp",
+	EventMCPToolCalled:          "mcp",
+	EventMCPDetection:           "mcp",
+	EventMCPToolCallIntercepted: "mcp",
 
 	// Policy
 	EventPolicyLoaded:  "policy",
@@ -249,7 +253,7 @@ var AllEventTypes = []EventType{
 	EventSignalSent, EventSignalBlocked, EventSignalRedirected,
 	EventSignalAbsorbed, EventSignalApproved, EventSignalWouldDeny,
 	// MCP
-	EventMCPToolSeen, EventMCPToolChanged, EventMCPDetection,
+	EventMCPToolSeen, EventMCPToolChanged, EventMCPToolCalled, EventMCPDetection, EventMCPToolCallIntercepted,
 	// Policy
 	EventPolicyLoaded, EventPolicyChanged,
 }
