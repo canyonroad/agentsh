@@ -49,7 +49,9 @@ func TestDetectProjectRoots_NoMarkers(t *testing.T) {
 	workspace := filepath.Join(base, "some", "dir")
 	require.NoError(t, os.MkdirAll(workspace, 0755))
 
-	markers := DefaultProjectMarkers()
+	// Use custom markers that won't exist anywhere in the filesystem,
+	// so the test isn't affected by stray files in parent directories.
+	markers := []string{".git", ".nonexistent_test_marker_aef3b2"}
 	roots, err := DetectProjectRoots(workspace, markers)
 	require.NoError(t, err)
 

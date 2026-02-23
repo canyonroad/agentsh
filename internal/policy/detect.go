@@ -67,6 +67,11 @@ func DetectProjectRoots(workspace string, markers []string) (*ProjectRoots, erro
 			}
 		}
 
+		// .git marks the project boundary — don't walk above it.
+		if roots.GitRoot != "" {
+			break
+		}
+
 		// Move to parent
 		parent := filepath.Dir(dir)
 		if parent == dir {
