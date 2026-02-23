@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+// sseMaxLineSize is the maximum size of a single SSE line. The default
+// bufio.Scanner limit is 64KB which could truncate very large SSE data
+// lines (e.g., tool calls with large arguments). We use 256KB.
+const sseMaxLineSize = 256 * 1024
+
 // ExtractToolCallsFromSSE parses tool calls from a buffered SSE response body.
 // It dispatches to dialect-specific extractors based on the dialect parameter.
 // Returns nil if no tool calls are found.
@@ -24,6 +29,27 @@ func ExtractToolCallsFromSSE(sseBody []byte, dialect Dialect) []ToolCall {
 	return nil
 }
 
+// extractSSEData extracts the JSON payload from an SSE data line.
+// Handles both "data: {...}" (with space) and "data:{...}" (without space)
+// per the SSE specification. Returns empty string for non-data lines.
+func extractSSEData(line string) (string, bool) {
+	if strings.HasPrefix(line, "data: ") {
+		return line[len("data: "):], true
+	}
+	if strings.HasPrefix(line, "data:") {
+		return line[len("data:"):], true
+	}
+	return "", false
+}
+
+// newSSEScanner creates a bufio.Scanner with an increased buffer size
+// for parsing SSE bodies that may contain large data lines.
+func newSSEScanner(data []byte) *bufio.Scanner {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, sseMaxLineSize), sseMaxLineSize)
+	return scanner
+}
+
 // extractAnthropicSSEToolCalls scans SSE data lines for content_block_start
 // events where content_block.type == "tool_use". It extracts content_block.id
 // and content_block.name from each such event.
@@ -34,13 +60,12 @@ func ExtractToolCallsFromSSE(sseBody []byte, dialect Dialect) []ToolCall {
 func extractAnthropicSSEToolCalls(sseBody []byte) []ToolCall {
 	var calls []ToolCall
 
-	scanner := bufio.NewScanner(bytes.NewReader(sseBody))
+	scanner := newSSEScanner(sseBody)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		data, ok := extractSSEData(scanner.Text())
+		if !ok {
 			continue
 		}
-		data := line[len("data: "):]
 
 		var evt struct {
 			Type         string `json:"type"`
@@ -76,13 +101,12 @@ func extractOpenAISSEToolCalls(sseBody []byte) []ToolCall {
 	var calls []ToolCall
 	seen := make(map[string]bool)
 
-	scanner := bufio.NewScanner(bytes.NewReader(sseBody))
+	scanner := newSSEScanner(sseBody)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		data, ok := extractSSEData(scanner.Text())
+		if !ok {
 			continue
 		}
-		data := line[len("data: "):]
 		if data == "[DONE]" {
 			continue
 		}

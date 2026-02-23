@@ -113,14 +113,16 @@ func extractOpenAIToolCalls(body []byte) []ToolCall {
 			continue
 		}
 		for _, tc := range choice.Message.ToolCalls {
-			args := []byte(tc.Function.Arguments)
-			if !json.Valid(args) {
-				continue
+			var input json.RawMessage
+			if args := []byte(tc.Function.Arguments); json.Valid(args) {
+				input = args
 			}
+			// Always extract the tool call even with invalid args — policy
+			// evaluation is based on tool name, not arguments.
 			calls = append(calls, ToolCall{
 				ID:    tc.ID,
 				Name:  tc.Function.Name,
-				Input: json.RawMessage(args),
+				Input: input,
 			})
 		}
 	}

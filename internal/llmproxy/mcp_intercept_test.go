@@ -491,8 +491,9 @@ func TestExtractToolCalls_OpenAIMultipleChoices(t *testing.T) {
 	}
 }
 
-func TestExtractToolCalls_OpenAIInvalidArgumentsSkipped(t *testing.T) {
-	// OpenAI arguments must be valid JSON. Invalid arguments should be skipped.
+func TestExtractToolCalls_OpenAIInvalidArgumentsIncludedWithNilInput(t *testing.T) {
+	// OpenAI tool calls with invalid JSON arguments should still be extracted
+	// (with nil Input) so policy can evaluate based on tool name.
 	body := []byte(`{
 		"choices": [{
 			"finish_reason": "tool_calls",
@@ -528,11 +529,29 @@ func TestExtractToolCalls_OpenAIInvalidArgumentsSkipped(t *testing.T) {
 	}`)
 
 	calls := ExtractToolCalls(body, DialectOpenAI)
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 valid tool call (invalid ones skipped), got %d", len(calls))
+	if len(calls) != 3 {
+		t.Fatalf("expected 3 tool calls (all extracted, even invalid args), got %d", len(calls))
 	}
+	// Valid args → Input populated
 	if calls[0].Name != "good_tool" {
 		t.Errorf("expected Name %q, got %q", "good_tool", calls[0].Name)
+	}
+	if calls[0].Input == nil {
+		t.Error("expected non-nil Input for valid args")
+	}
+	// Invalid args → Input nil
+	if calls[1].Name != "bad_tool" {
+		t.Errorf("expected Name %q, got %q", "bad_tool", calls[1].Name)
+	}
+	if calls[1].Input != nil {
+		t.Errorf("expected nil Input for invalid args, got %s", calls[1].Input)
+	}
+	// Empty args → Input nil
+	if calls[2].Name != "empty_tool" {
+		t.Errorf("expected Name %q, got %q", "empty_tool", calls[2].Name)
+	}
+	if calls[2].Input != nil {
+		t.Errorf("expected nil Input for empty args, got %s", calls[2].Input)
 	}
 }
 

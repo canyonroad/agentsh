@@ -260,12 +260,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Log request before proxying
 	p.logRequest(requestID, sessionID, dialect, outReq, reqBody, dlpResult)
 
-	// Create SSE-aware transport that handles streaming responses
+	// Create SSE-aware transport that handles streaming responses.
+	//
+	// SECURITY NOTE: SSE MCP interception is currently audit-only. The
+	// onComplete callback fires after the stream has been fully sent to
+	// the client, so blocked tool calls cannot be prevented in the SSE
+	// path. A client using stream=true will receive blocked tool calls.
+	// Real-time stream termination (replacing io.Copy with a per-chunk
+	// scanner that can abort) is planned as future work.
 	sseTransport := newSSEProxyTransport(
 		http.DefaultTransport,
 		w,
 		func(resp *http.Response, body []byte) {
-			// MCP tool call interception for SSE (audit-only — stream already sent to client)
+			// MCP tool call interception for SSE (audit-only — stream already sent to client).
+			// See SECURITY NOTE above.
 			if reg := p.getRegistry(); reg != nil && p.policy != nil {
 				calls := ExtractToolCallsFromSSE(body, dialect)
 				if len(calls) > 0 {
