@@ -138,14 +138,22 @@ type InterceptResult struct {
 
 // interceptMCPToolCalls extracts tool calls from an LLM response body,
 // looks them up in the registry, evaluates policy, and returns events plus
-// an optional rewritten body for blocked tools.
+// an optional rewritten body for blocked tools. When an analyzer is provided
+// and non-nil, cross-server rules are checked before regular policy evaluation,
+// and tool calls are recorded in the analyzer after each decision.
 func interceptMCPToolCalls(
 	body []byte,
 	dialect Dialect,
 	registry *mcpregistry.Registry,
 	policy *mcpinspect.PolicyEvaluator,
 	requestID, sessionID string,
+	optAnalyzer ...*mcpinspect.SessionAnalyzer,
 ) *InterceptResult {
+	var analyzer *mcpinspect.SessionAnalyzer
+	if len(optAnalyzer) > 0 {
+		analyzer = optAnalyzer[0]
+	}
+
 	result := &InterceptResult{}
 
 	if registry == nil || policy == nil {
@@ -167,7 +175,18 @@ func interceptMCPToolCalls(
 			continue
 		}
 
-		decision := policy.Evaluate(entry.ServerID, call.Name, entry.ToolHash)
+		// Cross-server check + record (atomic to eliminate TOCTOU race).
+		var decision mcpinspect.PolicyDecision
+		var crossServerDec *mcpinspect.CrossServerDecision
+		if analyzer != nil {
+			if block, _ := analyzer.CheckAndRecord(entry.ServerID, call.Name, call.ID, requestID); block != nil {
+				decision = mcpinspect.PolicyDecision{Allowed: false, Reason: block.Reason}
+				crossServerDec = block
+			}
+		}
+		if crossServerDec == nil {
+			decision = policy.Evaluate(entry.ServerID, call.Name, entry.ToolHash)
+		}
 
 		action := "allow"
 		var reason string
@@ -176,6 +195,12 @@ func interceptMCPToolCalls(
 			reason = decision.Reason
 			result.HasBlocked = true
 			blockedNames[call.Name] = true
+		}
+
+		// If policy blocked a call that cross-server allowed, update
+		// the window record so it doesn't cause false positives.
+		if !decision.Allowed && crossServerDec == nil && analyzer != nil {
+			analyzer.MarkBlocked(entry.ServerID, call.Name, call.ID, requestID)
 		}
 
 		result.Events = append(result.Events, mcpinspect.MCPToolCallInterceptedEvent{
@@ -193,6 +218,9 @@ func interceptMCPToolCalls(
 			ToolHash:   entry.ToolHash,
 			Action: action,
 			Reason: reason,
+			CrossServerRule:     crossServerRule(crossServerDec),
+			CrossServerSeverity: crossServerSeverity(crossServerDec),
+			CrossServerRelated:  crossServerRelated(crossServerDec),
 		})
 	}
 
@@ -385,15 +413,21 @@ func rewriteOpenAIResponse(body []byte, blockedNames map[string]bool) []byte {
 }
 
 // interceptMCPToolCallsFromList performs interception on pre-extracted tool calls.
-// Used by the SSE path where tool calls are extracted from SSE chunks rather
-// than from a JSON body.
+// Used by tests; production SSE interception uses the SSEInterceptor directly.
+// The optional analyzer parameter enables cross-server pattern detection.
 func interceptMCPToolCallsFromList(
 	calls []ToolCall,
 	dialect Dialect,
 	registry *mcpregistry.Registry,
 	policy *mcpinspect.PolicyEvaluator,
 	requestID, sessionID string,
+	optAnalyzer ...*mcpinspect.SessionAnalyzer,
 ) *InterceptResult {
+	var analyzer *mcpinspect.SessionAnalyzer
+	if len(optAnalyzer) > 0 {
+		analyzer = optAnalyzer[0]
+	}
+
 	result := &InterceptResult{}
 
 	for _, call := range calls {
@@ -402,7 +436,23 @@ func interceptMCPToolCallsFromList(
 			continue
 		}
 
-		decision := policy.Evaluate(entry.ServerID, call.Name, entry.ToolHash)
+		// Cross-server check + record (atomic).
+		var decision mcpinspect.PolicyDecision
+		var crossServerDec *mcpinspect.CrossServerDecision
+		if analyzer != nil {
+			if block, _ := analyzer.CheckAndRecord(entry.ServerID, call.Name, call.ID, requestID); block != nil {
+				decision = mcpinspect.PolicyDecision{Allowed: false, Reason: block.Reason}
+				crossServerDec = block
+			}
+		}
+		if crossServerDec == nil {
+			decision = policy.Evaluate(entry.ServerID, call.Name, entry.ToolHash)
+		}
+
+		// If policy blocked a call that cross-server allowed, update the window.
+		if !decision.Allowed && crossServerDec == nil && analyzer != nil {
+			analyzer.MarkBlocked(entry.ServerID, call.Name, call.ID, requestID)
+		}
 
 		event := mcpinspect.MCPToolCallInterceptedEvent{
 			Type:       "mcp_tool_call_intercepted",
@@ -424,6 +474,9 @@ func interceptMCPToolCallsFromList(
 		} else {
 			event.Action = "block"
 			event.Reason = decision.Reason
+			event.CrossServerRule = crossServerRule(crossServerDec)
+			event.CrossServerSeverity = crossServerSeverity(crossServerDec)
+			event.CrossServerRelated = crossServerRelated(crossServerDec)
 			result.HasBlocked = true
 		}
 		result.Events = append(result.Events, event)
@@ -437,4 +490,28 @@ func (p *Proxy) getRegistry() *mcpregistry.Registry {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.registry
+}
+
+// crossServerRule returns the rule name from a CrossServerDecision, or "" if nil.
+func crossServerRule(dec *mcpinspect.CrossServerDecision) string {
+	if dec == nil {
+		return ""
+	}
+	return dec.Rule
+}
+
+// crossServerSeverity returns the severity from a CrossServerDecision, or "" if nil.
+func crossServerSeverity(dec *mcpinspect.CrossServerDecision) string {
+	if dec == nil {
+		return ""
+	}
+	return dec.Severity
+}
+
+// crossServerRelated returns the related calls from a CrossServerDecision, or nil.
+func crossServerRelated(dec *mcpinspect.CrossServerDecision) []mcpinspect.ToolCallRecord {
+	if dec == nil {
+		return nil
+	}
+	return dec.Related
 }
