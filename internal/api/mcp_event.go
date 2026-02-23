@@ -1,6 +1,8 @@
 package api
 
 import (
+	"strings"
+
 	"github.com/agentsh/agentsh/internal/mcpinspect"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
@@ -76,7 +78,7 @@ func mcpCrossServerToEvent(ev mcpinspect.MCPCrossServerEvent) types.Event {
 		Policy: &types.PolicyInfo{
 			Decision:          types.DecisionDeny,
 			EffectiveDecision: types.DecisionDeny,
-			Rule:              "cross_server_" + ev.Rule,
+			Rule:              crossServerPolicyRule(ev.Rule),
 			Message:           ev.Reason,
 		},
 		Fields: map[string]any{
@@ -88,4 +90,14 @@ func mcpCrossServerToEvent(ev mcpinspect.MCPCrossServerEvent) types.Event {
 			"related_calls":     relatedCalls,
 		},
 	}
+}
+
+// crossServerPolicyRule normalises a cross-server rule name for the Policy.Rule
+// field. Rules that already start with "cross_server_" are returned as-is;
+// others get the prefix added (e.g. "read_then_send" → "cross_server_read_then_send").
+func crossServerPolicyRule(rule string) string {
+	if strings.HasPrefix(rule, "cross_server_") {
+		return rule
+	}
+	return "cross_server_" + rule
 }

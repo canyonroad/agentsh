@@ -261,3 +261,23 @@ func TestMCPCrossServerToEvent_EmptyRelatedCalls(t *testing.T) {
 		t.Errorf("related_calls: expected 0 entries, got %d", len(rc))
 	}
 }
+
+func TestMCPCrossServerToEvent_CrossServerFlowNoDoublePrefix(t *testing.T) {
+	ev := mcpinspect.MCPCrossServerEvent{
+		Type:            "mcp_cross_server_blocked",
+		Timestamp:       time.Now(),
+		SessionID:       "sess-cross-3",
+		Rule:            "cross_server_flow",
+		Severity:        "high",
+		BlockedServerID: "attacker-server",
+		BlockedToolName: "exec_cmd",
+		Reason:          "cross-server data flow detected",
+	}
+
+	out := mcpCrossServerToEvent(ev)
+
+	// Must NOT double-prefix to "cross_server_cross_server_flow".
+	if out.Policy.Rule != "cross_server_flow" {
+		t.Errorf("policy.rule: got %q, want %q (should not double-prefix)", out.Policy.Rule, "cross_server_flow")
+	}
+}

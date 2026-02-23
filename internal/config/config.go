@@ -1022,9 +1022,11 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		!cfg.Sandbox.MCP.CrossServer.CrossServerFlow.SameTurnOnly {
 		cfg.Sandbox.MCP.CrossServer.CrossServerFlow.SameTurnOnly = true
 	}
-	// ShadowTool defaults to enabled (same bool zero-value heuristic).
-	if !cfg.Sandbox.MCP.CrossServer.ShadowTool.Enabled &&
-		!cfg.Sandbox.MCP.CrossServer.Enabled {
+	// ShadowTool defaults to enabled. We enable it when the user hasn't
+	// explicitly set it (approximated by Enabled being false). This works
+	// regardless of the top-level CrossServer.Enabled flag — shadow
+	// detection is always active once the analyzer is created.
+	if !cfg.Sandbox.MCP.CrossServer.ShadowTool.Enabled {
 		cfg.Sandbox.MCP.CrossServer.ShadowTool.Enabled = true
 	}
 
