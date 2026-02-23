@@ -264,7 +264,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.DefaultTransport,
 		w,
 		func(resp *http.Response, body []byte) {
-			// This callback is called when SSE stream completes
+			// MCP tool call interception for SSE (audit-only — stream already sent to client)
+			if reg := p.getRegistry(); reg != nil && p.policy != nil {
+				calls := ExtractToolCallsFromSSE(body, dialect)
+				if len(calls) > 0 {
+					result := interceptMCPToolCallsFromList(calls, dialect, reg, p.policy, requestID, sessionID)
+					for _, ev := range result.Events {
+						p.logger.Info("mcp tool call intercepted (sse)",
+							"tool", ev.ToolName, "action", ev.Action,
+							"server", ev.ServerID, "request_id", requestID)
+					}
+				}
+			}
 			p.logResponseDirect(requestID, sessionID, dialect, resp, body, startTime)
 		},
 	)

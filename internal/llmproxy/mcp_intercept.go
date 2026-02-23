@@ -380,6 +380,54 @@ func rewriteOpenAIResponse(body []byte, blockedNames map[string]bool) []byte {
 	return out
 }
 
+// interceptMCPToolCallsFromList performs interception on pre-extracted tool calls.
+// Used by the SSE path where tool calls are extracted from SSE chunks rather
+// than from a JSON body.
+func interceptMCPToolCallsFromList(
+	calls []ToolCall,
+	dialect Dialect,
+	registry *mcpregistry.Registry,
+	policy *mcpinspect.PolicyEvaluator,
+	requestID, sessionID string,
+) *InterceptResult {
+	result := &InterceptResult{}
+
+	for _, call := range calls {
+		entry := registry.Lookup(call.Name)
+		if entry == nil {
+			continue
+		}
+
+		decision := policy.Evaluate(entry.ServerID, call.Name, entry.ToolHash)
+
+		event := mcpinspect.MCPToolCallInterceptedEvent{
+			Type:       "mcp_tool_call_intercepted",
+			Timestamp:  time.Now(),
+			SessionID:  sessionID,
+			RequestID:  requestID,
+			Dialect:    string(dialect),
+			ToolName:   call.Name,
+			ToolCallID: call.ID,
+			Input:      call.Input,
+			ServerID:   entry.ServerID,
+			ServerType: entry.ServerType,
+			ServerAddr: entry.ServerAddr,
+			ToolHash:   entry.ToolHash,
+		}
+
+		if decision.Allowed {
+			event.Action = "allow"
+		} else {
+			event.Action = "block"
+			event.Reason = decision.Reason
+			result.HasBlocked = true
+		}
+		result.Events = append(result.Events, event)
+	}
+
+	return result
+}
+
 // getRegistry returns the MCP tool registry in a thread-safe manner.
 func (p *Proxy) getRegistry() *mcpregistry.Registry {
 	p.mu.Lock()

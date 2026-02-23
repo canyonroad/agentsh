@@ -1,8 +1,10 @@
 package llmproxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1469,5 +1471,221 @@ func TestProxy_MCPInterception_AllowedPassesThrough(t *testing.T) {
 	json.Unmarshal(gotContent[1]["name"], &secondName)
 	if secondName != "get_weather" {
 		t.Errorf("expected tool name %q, got %q", "get_weather", secondName)
+	}
+}
+
+// --- interceptMCPToolCallsFromList unit tests ---
+
+func TestInterceptMCPToolCallsFromList_AllowedTool(t *testing.T) {
+	reg := newTestRegistry("my-server", "stdio", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+	policy := newAllowingPolicy()
+
+	calls := []ToolCall{
+		{ID: "toolu_01", Name: "get_weather"},
+	}
+
+	result := interceptMCPToolCallsFromList(calls, DialectAnthropic, reg, policy, "req_1", "sess_1")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(result.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.Events))
+	}
+	if result.Events[0].Action != "allow" {
+		t.Errorf("expected action %q, got %q", "allow", result.Events[0].Action)
+	}
+	if result.Events[0].ToolName != "get_weather" {
+		t.Errorf("expected tool name %q, got %q", "get_weather", result.Events[0].ToolName)
+	}
+	if result.HasBlocked {
+		t.Error("expected HasBlocked to be false")
+	}
+}
+
+func TestInterceptMCPToolCallsFromList_BlockedTool(t *testing.T) {
+	reg := newTestRegistry("my-server", "stdio", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+	policy := newBlockingPolicy()
+
+	calls := []ToolCall{
+		{ID: "toolu_01", Name: "get_weather"},
+	}
+
+	result := interceptMCPToolCallsFromList(calls, DialectAnthropic, reg, policy, "req_1", "sess_1")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(result.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result.Events))
+	}
+	if result.Events[0].Action != "block" {
+		t.Errorf("expected action %q, got %q", "block", result.Events[0].Action)
+	}
+	if !result.HasBlocked {
+		t.Error("expected HasBlocked to be true")
+	}
+	// No RewrittenBody since this helper doesn't rewrite (SSE is audit-only)
+	if result.RewrittenBody != nil {
+		t.Error("expected RewrittenBody to be nil (list helper does not rewrite)")
+	}
+}
+
+func TestInterceptMCPToolCallsFromList_UnknownToolSkipped(t *testing.T) {
+	reg := mcpregistry.NewRegistry() // empty registry
+	policy := newAllowingPolicy()
+
+	calls := []ToolCall{
+		{ID: "toolu_01", Name: "unknown_tool"},
+	}
+
+	result := interceptMCPToolCallsFromList(calls, DialectAnthropic, reg, policy, "req_1", "sess_1")
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(result.Events) != 0 {
+		t.Errorf("expected 0 events for unknown tool, got %d", len(result.Events))
+	}
+}
+
+// --- Proxy-level SSE integration test for MCP interception ---
+
+// TestProxy_MCPInterception_SSE_Integration verifies that the proxy logs
+// MCP tool call interception events when processing an SSE streaming response
+// containing tool_use blocks. Since SSE responses are streamed directly to the
+// client, interception is audit-only (logged but not blocked).
+func TestProxy_MCPInterception_SSE_Integration(t *testing.T) {
+	// Build an Anthropic SSE stream with a tool_use content block.
+	sseBody := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me check."}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01A09q90qw90lq917835lq9","name":"get_weather"}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"location\": \"San Francisco\"}"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":1}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":25}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+
+	// Mock upstream returns an SSE stream.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Write the SSE body in a single write (sufficient for test).
+		fmt.Fprint(w, sseBody)
+	}))
+	defer upstream.Close()
+
+	storageDir := t.TempDir()
+
+	// Configure proxy with a denylist that blocks get_weather.
+	cfg := Config{
+		SessionID: "test-sse-mcp",
+		Proxy: config.ProxyConfig{
+			Mode: "embedded",
+			Port: 0,
+			Providers: config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+			},
+		},
+		DLP: config.DLPConfig{Mode: "disabled"},
+		MCP: config.SandboxMCPConfig{
+			EnforcePolicy: true,
+			ToolPolicy:    "denylist",
+			DeniedTools: []config.MCPToolRule{
+				{Server: "*", Tool: "get_weather"},
+			},
+		},
+	}
+
+	// Use a buffer-backed logger to capture log output.
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	proxy, err := New(cfg, storageDir, logger)
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	// Register get_weather in the MCP registry.
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "abc123"},
+	})
+	proxy.SetRegistry(reg)
+
+	ctx := context.Background()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("failed to start proxy: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(shutdownCtx)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Send a streaming request through the proxy.
+	proxyURL := "http://" + proxy.Addr().String() + "/v1/messages"
+	reqBody := `{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"What is the weather?"}],"stream":true}`
+	req, err := http.NewRequest(http.MethodPost, proxyURL, strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-ant-test-key")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unexpected status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	// Read the full response (SSE stream).
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+
+	// The SSE stream should have been passed through to the client unmodified.
+	if !strings.Contains(string(respBody), "content_block_start") {
+		t.Error("expected SSE stream to contain content_block_start events")
+	}
+	if !strings.Contains(string(respBody), "get_weather") {
+		t.Error("expected SSE stream to contain get_weather tool_use (audit-only, not blocked)")
+	}
+
+	// Wait briefly for the onComplete callback to fire and log.
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify the log output contains the SSE interception message.
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "mcp tool call intercepted (sse)") {
+		t.Errorf("expected log to contain 'mcp tool call intercepted (sse)', got:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, "get_weather") {
+		t.Errorf("expected log to contain tool name 'get_weather', got:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, "block") {
+		t.Errorf("expected log to contain action 'block', got:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, "weather-server") {
+		t.Errorf("expected log to contain server ID 'weather-server', got:\n%s", logOutput)
 	}
 }
