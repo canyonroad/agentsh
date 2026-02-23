@@ -1013,8 +1013,11 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		cfg.Sandbox.MCP.CrossServer.CrossServerFlow.Window = 30 * time.Second
 	}
 	// SameTurnOnly defaults to true; since the zero value of bool is false,
-	// we only apply this when the entire CrossServer config has not been set
-	// (Enabled == false and SameTurnOnly == false together suggest defaults).
+	// we apply this default when both Enabled and SameTurnOnly are false
+	// (suggesting the entire section was omitted). Known limitation: if a
+	// user sets cross_server_flow.enabled: true but omits same_turn_only,
+	// they get same_turn_only=false (the Go zero value). Use *bool if this
+	// distinction becomes important in a future version.
 	if !cfg.Sandbox.MCP.CrossServer.CrossServerFlow.Enabled &&
 		!cfg.Sandbox.MCP.CrossServer.CrossServerFlow.SameTurnOnly {
 		cfg.Sandbox.MCP.CrossServer.CrossServerFlow.SameTurnOnly = true

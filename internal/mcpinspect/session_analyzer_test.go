@@ -495,3 +495,53 @@ func TestSessionAnalyzer_ConfigDisabled(t *testing.T) {
 		}
 	}
 }
+
+// 15. Top-level Enabled=false disables all rules even when sub-rules are enabled.
+func TestSessionAnalyzer_TopLevelDisabledOverridesSubRules(t *testing.T) {
+	cfg := config.CrossServerConfig{
+		Enabled: false, // top-level kill switch
+		ReadThenSend: config.ReadThenSendConfig{
+			Enabled: true,
+			Window:  30 * time.Second,
+		},
+		Burst: config.BurstConfig{
+			Enabled:  true,
+			MaxCalls: 10,
+			Window:   5 * time.Second,
+		},
+		CrossServerFlow: config.CrossServerFlowConfig{
+			Enabled:      true,
+			SameTurnOnly: true,
+			Window:       30 * time.Second,
+		},
+		ShadowTool: config.ShadowToolConfig{
+			Enabled: true,
+		},
+	}
+
+	a := NewSessionAnalyzer("sess-1", cfg)
+	a.Activate()
+
+	now := time.Now()
+
+	// Shadow tool should not trigger.
+	a.NotifyOverwrite("my_tool", "server-a", "server-b")
+	dec := a.Check("server-b", "my_tool", "req-1")
+	if dec != nil {
+		t.Fatalf("expected nil with top-level disabled (shadow), got %+v", dec)
+	}
+
+	// Read-then-send should not trigger.
+	a.Record(ToolCallRecord{
+		Timestamp: now.Add(-2 * time.Second),
+		ServerID:  "server-a",
+		ToolName:  "get_data",
+		RequestID: "req-1",
+		Action:    "allow",
+		Category:  CategoryRead,
+	})
+	dec = a.Check("server-b", "send_email", "req-1")
+	if dec != nil {
+		t.Fatalf("expected nil with top-level disabled (read_then_send), got %+v", dec)
+	}
+}

@@ -447,6 +447,25 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 						slog.Error("persist mcp intercept event", "error", err, "tool", ev.ToolName, "session_id", ev.SessionID)
 					}
 					broker.Publish(typesEv)
+
+					// Emit a richer cross-server event when a cross-server rule triggered the block.
+					if ev.CrossServerRule != "" {
+						csEv := mcpCrossServerToEvent(mcpinspect.MCPCrossServerEvent{
+							Type:            "mcp_cross_server_blocked",
+							Timestamp:       ev.Timestamp,
+							SessionID:       ev.SessionID,
+							Rule:            ev.CrossServerRule,
+							Severity:        ev.CrossServerSeverity,
+							BlockedServerID: ev.ServerID,
+							BlockedToolName: ev.ToolName,
+							RelatedCalls:    ev.CrossServerRelated,
+							Reason:          ev.Reason,
+						})
+						if err := store.AppendEvent(persistCtx, csEv); err != nil {
+							slog.Error("persist mcp cross-server event", "error", err, "rule", ev.CrossServerRule, "session_id", ev.SessionID)
+						}
+						broker.Publish(csEv)
+					}
 				}()
 			})
 

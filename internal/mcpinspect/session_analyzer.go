@@ -121,6 +121,11 @@ func (a *SessionAnalyzer) Check(serverID, toolName, requestID string) *CrossServ
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// Global kill switch: when cross-server detection is disabled, skip all rules.
+	if !a.cfg.Enabled {
+		return nil
+	}
+
 	hasShadows := len(a.shadows) > 0
 
 	// Fast path: nothing to check.

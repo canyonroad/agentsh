@@ -177,14 +177,14 @@ func interceptMCPToolCalls(
 
 		// Cross-server check (before regular policy).
 		var decision mcpinspect.PolicyDecision
-		var crossServerBlocked bool
+		var crossServerDec *mcpinspect.CrossServerDecision
 		if analyzer != nil {
 			if block := analyzer.Check(entry.ServerID, call.Name, requestID); block != nil {
 				decision = mcpinspect.PolicyDecision{Allowed: false, Reason: block.Reason}
-				crossServerBlocked = true
+				crossServerDec = block
 			}
 		}
-		if !crossServerBlocked {
+		if crossServerDec == nil {
 			decision = policy.Evaluate(entry.ServerID, call.Name, entry.ToolHash)
 		}
 
@@ -224,6 +224,9 @@ func interceptMCPToolCalls(
 			ToolHash:   entry.ToolHash,
 			Action: action,
 			Reason: reason,
+			CrossServerRule:     crossServerRule(crossServerDec),
+			CrossServerSeverity: crossServerSeverity(crossServerDec),
+			CrossServerRelated:  crossServerRelated(crossServerDec),
 		})
 	}
 
@@ -468,4 +471,28 @@ func (p *Proxy) getRegistry() *mcpregistry.Registry {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.registry
+}
+
+// crossServerRule returns the rule name from a CrossServerDecision, or "" if nil.
+func crossServerRule(dec *mcpinspect.CrossServerDecision) string {
+	if dec == nil {
+		return ""
+	}
+	return dec.Rule
+}
+
+// crossServerSeverity returns the severity from a CrossServerDecision, or "" if nil.
+func crossServerSeverity(dec *mcpinspect.CrossServerDecision) string {
+	if dec == nil {
+		return ""
+	}
+	return dec.Severity
+}
+
+// crossServerRelated returns the related calls from a CrossServerDecision, or nil.
+func crossServerRelated(dec *mcpinspect.CrossServerDecision) []mcpinspect.ToolCallRecord {
+	if dec == nil {
+		return nil
+	}
+	return dec.Related
 }

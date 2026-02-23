@@ -258,7 +258,7 @@ func (s *SSEInterceptor) handleContentBlockStart(originalLine, data string, inde
 	toolName := block.ContentBlock.Name
 	toolCallID := block.ContentBlock.ID
 
-	entry, decision := s.lookupAndEvaluate(toolName)
+	entry, decision, crossServerDec := s.lookupAndEvaluate(toolName)
 	if entry == nil {
 		// Not in registry (not an MCP tool) — pass through silently.
 		return []string{originalLine}
@@ -274,7 +274,7 @@ func (s *SSEInterceptor) handleContentBlockStart(originalLine, data string, inde
 	// Blocked — suppress original and emit replacement text block.
 	s.blockedToolUse++
 	s.blockedIndices[index] = true
-	s.fireEvent(toolName, toolCallID, "block", decision.Reason, entry)
+	s.fireEvent(toolName, toolCallID, "block", decision.Reason, entry, crossServerDec)
 	s.recordCall(toolName, "block", entry)
 
 	return s.emitAnthropicTextBlock(index, toolName)
@@ -348,35 +348,37 @@ func (s *SSEInterceptor) rewriteAnthropicStopReason(data string) string {
 // lookupAndEvaluate looks up a tool in the registry and evaluates policy.
 // Returns nil entry if the tool is not registered (not an MCP tool).
 // When a SessionAnalyzer is configured, cross-server rules are checked before
-// regular policy evaluation.
-func (s *SSEInterceptor) lookupAndEvaluate(toolName string) (*mcpregistry.ToolEntry, *mcpinspect.PolicyDecision) {
+// regular policy evaluation. The third return value carries the cross-server
+// decision details when the block was caused by a cross-server rule.
+func (s *SSEInterceptor) lookupAndEvaluate(toolName string) (*mcpregistry.ToolEntry, *mcpinspect.PolicyDecision, *mcpinspect.CrossServerDecision) {
 	if s.registry == nil || s.policy == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	entry := s.registry.Lookup(toolName)
 	if entry == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Cross-server check (before regular policy).
 	if s.analyzer != nil {
 		if block := s.analyzer.Check(entry.ServerID, toolName, s.requestID); block != nil {
-			return entry, &mcpinspect.PolicyDecision{Allowed: false, Reason: block.Reason}
+			return entry, &mcpinspect.PolicyDecision{Allowed: false, Reason: block.Reason}, block
 		}
 	}
 
 	decision := s.policy.Evaluate(entry.ServerID, toolName, entry.ToolHash)
-	return entry, &decision
+	return entry, &decision, nil
 }
 
 // fireEvent fires the onEvent callback with the given parameters.
-func (s *SSEInterceptor) fireEvent(toolName, toolCallID, action, reason string, entry *mcpregistry.ToolEntry) {
+// When a cross-server decision is provided, its metadata is included in the event.
+func (s *SSEInterceptor) fireEvent(toolName, toolCallID, action, reason string, entry *mcpregistry.ToolEntry, crossServerDec ...*mcpinspect.CrossServerDecision) {
 	if s.onEvent == nil {
 		return
 	}
 
-	s.onEvent(mcpinspect.MCPToolCallInterceptedEvent{
+	ev := mcpinspect.MCPToolCallInterceptedEvent{
 		Type:       "mcp_tool_call_intercepted",
 		Timestamp:  time.Now(),
 		SessionID:  s.sessionID,
@@ -390,7 +392,16 @@ func (s *SSEInterceptor) fireEvent(toolName, toolCallID, action, reason string, 
 		ToolHash:   entry.ToolHash,
 		Action:     action,
 		Reason:     reason,
-	})
+	}
+
+	if len(crossServerDec) > 0 && crossServerDec[0] != nil {
+		dec := crossServerDec[0]
+		ev.CrossServerRule = dec.Rule
+		ev.CrossServerSeverity = dec.Severity
+		ev.CrossServerRelated = dec.Related
+	}
+
+	s.onEvent(ev)
 }
 
 // recordCall records a tool call in the session analyzer for cross-server
@@ -574,7 +585,7 @@ func (s *SSEInterceptor) handleOpenAIFirstToolChunk(choice *openAIChunkChoice) b
 		// finish_reason is only rewritten when truly all tools are blocked.
 		st.total++
 
-		entry, decision := s.lookupAndEvaluate(toolName)
+		entry, decision, crossServerDec := s.lookupAndEvaluate(toolName)
 		if entry == nil {
 			// Not in registry — pass through silently (not an MCP tool).
 			allowed = append(allowed, tc)
@@ -588,7 +599,7 @@ func (s *SSEInterceptor) handleOpenAIFirstToolChunk(choice *openAIChunkChoice) b
 		} else {
 			st.nblocked++
 			st.blocked[tc.Index] = true
-			s.fireEvent(toolName, toolCallID, "block", decision.Reason, entry)
+			s.fireEvent(toolName, toolCallID, "block", decision.Reason, entry, crossServerDec)
 			s.recordCall(toolName, "block", entry)
 			blockedMessages = append(blockedMessages, fmt.Sprintf("[agentsh] Tool '%s' blocked by policy", toolName))
 		}

@@ -106,6 +106,11 @@ type MCPToolCallInterceptedEvent struct {
 	// Policy decision
 	Action string `json:"action"`           // "allow" | "block"
 	Reason string `json:"reason,omitempty"`
+
+	// Cross-server detection metadata (populated when blocked by a cross-server rule).
+	CrossServerRule     string           `json:"cross_server_rule,omitempty"`
+	CrossServerSeverity string           `json:"cross_server_severity,omitempty"`
+	CrossServerRelated  []ToolCallRecord `json:"cross_server_related,omitempty"`
 }
 
 // MCPCrossServerEvent is logged when a cross-server pattern is detected and
