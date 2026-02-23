@@ -44,6 +44,10 @@ type CLIClient interface {
 
 	// Wrap-related operations
 	WrapInit(ctx context.Context, sessionID string, req types.WrapInitRequest) (types.WrapInitResponse, error)
+
+	// MCP-related operations
+	ListMCPTools(ctx context.Context, q url.Values) ([]map[string]any, error)
+	ListMCPServers(ctx context.Context) ([]map[string]any, error)
 }
 
 type CLIOptions struct {
@@ -244,4 +248,14 @@ func (h *HybridClient) WatchTaints(ctx context.Context, agentOnly bool, handler 
 // WrapInit initializes seccomp wrapping for a session.
 func (h *HybridClient) WrapInit(ctx context.Context, sessionID string, req types.WrapInitRequest) (types.WrapInitResponse, error) {
 	return h.Client.WrapInit(ctx, sessionID, req)
+}
+
+// ListMCPTools lists MCP tools matching the given query parameters.
+func (h *HybridClient) ListMCPTools(ctx context.Context, q url.Values) ([]map[string]any, error) {
+	return h.Client.ListMCPTools(ctx, q)
+}
+
+// ListMCPServers lists MCP server summaries.
+func (h *HybridClient) ListMCPServers(ctx context.Context) ([]map[string]any, error) {
+	return h.Client.ListMCPServers(ctx)
 }

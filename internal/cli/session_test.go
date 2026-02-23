@@ -84,6 +84,12 @@ func (m *mockCLIClient) WatchTaints(ctx context.Context, agentOnly bool, handler
 func (m *mockCLIClient) WrapInit(ctx context.Context, sessionID string, req types.WrapInitRequest) (types.WrapInitResponse, error) {
 	return types.WrapInitResponse{}, nil
 }
+func (m *mockCLIClient) ListMCPTools(ctx context.Context, q url.Values) ([]map[string]any, error) {
+	return nil, nil
+}
+func (m *mockCLIClient) ListMCPServers(ctx context.Context) ([]map[string]any, error) {
+	return nil, nil
+}
 
 func TestPrintSessionCreated(t *testing.T) {
 	tests := []struct {

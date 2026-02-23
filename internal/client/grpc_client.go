@@ -483,6 +483,16 @@ func (c *GRPCClient) GetProxyStatus(ctx context.Context, sessionID string) (map[
 	return out, nil
 }
 
+// ListMCPTools is not supported via gRPC.
+func (c *GRPCClient) ListMCPTools(ctx context.Context, q url.Values) ([]map[string]any, error) {
+	return nil, fmt.Errorf("ListMCPTools not supported via gRPC")
+}
+
+// ListMCPServers is not supported via gRPC.
+func (c *GRPCClient) ListMCPServers(ctx context.Context) ([]map[string]any, error) {
+	return nil, fmt.Errorf("ListMCPServers not supported via gRPC")
+}
+
 func (c *GRPCClient) invokeUnary(ctx context.Context, method string, in *structpb.Struct, out *structpb.Struct) error {
 	if c == nil || c.conn == nil {
 		return fmt.Errorf("grpc client not initialized")

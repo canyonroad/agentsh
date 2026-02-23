@@ -228,6 +228,24 @@ func (c *Client) WrapInit(ctx context.Context, sessionID string, req types.WrapI
 	return out, nil
 }
 
+// ListMCPTools lists MCP tools matching the given query parameters.
+func (c *Client) ListMCPTools(ctx context.Context, q url.Values) ([]map[string]any, error) {
+	var out []map[string]any
+	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/mcp/tools", q, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ListMCPServers lists MCP server summaries.
+func (c *Client) ListMCPServers(ctx context.Context) ([]map[string]any, error) {
+	var out []map[string]any
+	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/mcp/servers", nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *Client) StreamSessionEvents(ctx context.Context, sessionID string) (io.ReadCloser, error) {
 	u := c.baseURL + "/api/v1/sessions/" + url.PathEscape(sessionID) + "/events"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
