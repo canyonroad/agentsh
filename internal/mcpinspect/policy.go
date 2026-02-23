@@ -57,7 +57,7 @@ func (p *PolicyEvaluator) Evaluate(serverID, toolName, hash string) PolicyDecisi
 		return p.evaluateAllowlist(serverID, toolName, hash)
 	case "denylist":
 		return p.evaluateDenylist(serverID, toolName, hash)
-	case "":
+	case "", "none":
 		return PolicyDecision{Allowed: true, Reason: "no tool policy configured"}
 	default:
 		return PolicyDecision{Allowed: false, Reason: fmt.Sprintf("unknown tool_policy %q; denying", p.cfg.ToolPolicy)}
@@ -86,7 +86,7 @@ func (p *PolicyEvaluator) evaluateServerPolicy(serverID string) (PolicyDecision,
 		// Server not denied — pass through to tool-level check
 		return PolicyDecision{}, false
 
-	case "":
+	case "", "none":
 		// No server policy — skip to tool-level
 		return PolicyDecision{}, false
 

@@ -379,3 +379,40 @@ func TestPolicyEvaluator_InvalidServerPolicyDenies(t *testing.T) {
 		t.Error("Expected denied — invalid server_policy should fail closed")
 	}
 }
+
+func TestPolicyEvaluator_NoneToolPolicyAllows(t *testing.T) {
+	cfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "none",
+	}
+
+	eval := NewPolicyEvaluator(cfg)
+
+	decision := eval.Evaluate("any-server", "any-tool", "")
+	if !decision.Allowed {
+		t.Errorf("Expected allowed — tool_policy 'none' should allow all (reason: %s)", decision.Reason)
+	}
+}
+
+func TestPolicyEvaluator_NoneServerPolicySkipsToToolPolicy(t *testing.T) {
+	cfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ServerPolicy:  "none",
+		ToolPolicy:    "allowlist",
+		AllowedTools: []config.MCPToolRule{
+			{Server: "filesystem", Tool: "read_file"},
+		},
+	}
+
+	eval := NewPolicyEvaluator(cfg)
+
+	d1 := eval.Evaluate("filesystem", "read_file", "")
+	if !d1.Allowed {
+		t.Error("Expected allowed — server_policy 'none' skips to tool allowlist which matches")
+	}
+
+	d2 := eval.Evaluate("filesystem", "write_file", "")
+	if d2.Allowed {
+		t.Error("Expected blocked — server_policy 'none' skips to tool allowlist which doesn't match")
+	}
+}
