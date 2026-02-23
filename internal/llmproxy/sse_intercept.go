@@ -632,7 +632,7 @@ func (s *SSEInterceptor) handleOpenAIFirstToolChunk(choice *openAIChunkChoice) b
 		}
 
 		if decision.Allowed {
-			s.fireEvent(toolName, toolCallID, "allow", "", entry)
+			s.fireEvent(toolName, toolCallID, "allow", decision.Reason, entry)
 			allowed = append(allowed, tc)
 		} else {
 			st.nblocked++
