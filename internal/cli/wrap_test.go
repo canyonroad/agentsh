@@ -209,6 +209,12 @@ func (m *mockWrapClient) GetTaintTrace(ctx context.Context, pid int) (*types.Tai
 func (m *mockWrapClient) WatchTaints(ctx context.Context, agentOnly bool, handler func(types.TaintEvent)) error {
 	return nil
 }
+func (m *mockWrapClient) ListMCPTools(ctx context.Context, q url.Values) ([]map[string]any, error) {
+	return nil, nil
+}
+func (m *mockWrapClient) ListMCPServers(ctx context.Context) ([]map[string]any, error) {
+	return nil, nil
+}
 
 func TestSetupWrapInterception_CallsWrapInit(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {

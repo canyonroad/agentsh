@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -51,9 +53,22 @@ func StartLLMProxy(
 		return "", nil, fmt.Errorf("create llm proxy: %w", err)
 	}
 
-	// Create MCP registry and inject into proxy if MCP policy is configured
-	if mcpCfg.EnforcePolicy {
+	// Create MCP registry when any MCP feature needs it.
+	needsRegistry := mcpCfg.EnforcePolicy ||
+		proxyCfg.IsMCPOnly() ||
+		mcpCfg.RateLimits.Enabled ||
+		mcpCfg.VersionPinning.Enabled
+
+	if needsRegistry {
 		registry := mcpregistry.NewRegistry()
+		// Pre-register declared network servers so their addresses are available for network detection.
+		// Stdio servers are skipped — they have no network address and would falsely inflate
+		// the distinct-server count (triggering premature OnMultiServer callbacks).
+		for _, srv := range mcpCfg.Servers {
+			if addr := extractAddr(srv); addr != "" {
+				registry.Register(srv.ID, srv.Type, addr, nil)
+			}
+		}
 		proxy.SetRegistry(registry)
 		sess.SetMCPRegistry(registry)
 	}
@@ -104,4 +119,30 @@ func (s *Session) LLMProxyEnvVars() map[string]string {
 		"OPENAI_BASE_URL":    s.llmProxyURL,
 		"AGENTSH_SESSION_ID": s.ID,
 	}
+}
+
+// extractAddr parses host:port from a server declaration's URL.
+// Returns "" for stdio servers or unparseable URLs.
+func extractAddr(srv config.MCPServerDeclaration) string {
+	if srv.Type == "stdio" || srv.URL == "" {
+		return ""
+	}
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		switch u.Scheme {
+		case "https":
+			port = "443"
+		default:
+			port = "80"
+		}
+	}
+	if host == "" {
+		return ""
+	}
+	return net.JoinHostPort(host, port)
 }

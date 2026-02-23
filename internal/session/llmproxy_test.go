@@ -705,6 +705,101 @@ func TestStartLLMProxy_CreatesRegistry(t *testing.T) {
 	}
 }
 
+func TestStartLLMProxy_MCPOnlyWithoutPolicy(t *testing.T) {
+	// Table-driven test: verify that each needsRegistry trigger independently
+	// creates the registry when EnforcePolicy is false.
+	tests := []struct {
+		name     string
+		proxyCfg config.ProxyConfig
+		mcpCfg   config.SandboxMCPConfig
+	}{
+		{
+			name: "mcp-only mode alone",
+			proxyCfg: config.ProxyConfig{Mode: "mcp-only"},
+			mcpCfg:   config.SandboxMCPConfig{EnforcePolicy: false},
+		},
+		{
+			name: "rate limits alone",
+			proxyCfg: config.ProxyConfig{Mode: "embedded"},
+			mcpCfg: config.SandboxMCPConfig{
+				EnforcePolicy: false,
+				RateLimits:    config.MCPRateLimitsConfig{Enabled: true, DefaultRPM: 60},
+			},
+		},
+		{
+			name: "version pinning alone",
+			proxyCfg: config.ProxyConfig{Mode: "embedded"},
+			mcpCfg: config.SandboxMCPConfig{
+				EnforcePolicy:  false,
+				VersionPinning: config.MCPVersionPinningConfig{Enabled: true},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := map[string]interface{}{
+					"id":   "msg_test",
+					"type": "message",
+					"usage": map[string]int{
+						"input_tokens":  5,
+						"output_tokens": 10,
+					},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(resp)
+			}))
+			defer upstream.Close()
+
+			mgr := NewManager(10)
+			sess, err := mgr.CreateWithID("trigger-test", t.TempDir(), "default")
+			if err != nil {
+				t.Fatalf("failed to create session: %v", err)
+			}
+
+			proxyCfg := tt.proxyCfg
+			proxyCfg.Port = 0
+			proxyCfg.Providers = config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+				OpenAI:    upstream.URL,
+			}
+
+			dlpCfg := config.DLPConfig{Mode: "disabled"}
+			storageCfg := config.DefaultLLMStorageConfig()
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+			proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, tt.mcpCfg, t.TempDir(), logger)
+			if err != nil {
+				t.Fatalf("StartLLMProxy failed: %v", err)
+			}
+			defer closeFn()
+
+			if proxyURL == "" {
+				t.Error("expected non-empty proxy URL")
+			}
+
+			reg := sess.MCPRegistry()
+			if reg == nil {
+				t.Fatal("expected non-nil MCP registry")
+			}
+
+			registry, ok := reg.(*mcpregistry.Registry)
+			if !ok {
+				t.Fatalf("expected *mcpregistry.Registry, got %T", reg)
+			}
+
+			// Verify the registry is functional
+			registry.Register("test-server", "stdio", "", []mcpregistry.ToolInfo{
+				{Name: "test_tool", Hash: "abc123"},
+			})
+			if entry := registry.Lookup("test_tool"); entry == nil {
+				t.Error("expected to find registered tool in registry")
+			}
+		})
+	}
+}
+
 func TestStartLLMProxy_NoRegistryWhenPolicyDisabled(t *testing.T) {
 	// Create a mock upstream server
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -810,5 +905,228 @@ func TestSession_MCPRegistryClearedOnClose(t *testing.T) {
 	// Verify registry is cleared
 	if sess.MCPRegistry() != nil {
 		t.Error("expected nil registry after CloseLLMProxy")
+	}
+}
+
+func TestExtractAddr(t *testing.T) {
+	tests := []struct {
+		name string
+		srv  config.MCPServerDeclaration
+		want string
+	}{
+		{
+			name: "http URL with explicit port",
+			srv:  config.MCPServerDeclaration{ID: "s1", Type: "http", URL: "http://mcp.example.com:8080/path"},
+			want: "mcp.example.com:8080",
+		},
+		{
+			name: "https URL with explicit port",
+			srv:  config.MCPServerDeclaration{ID: "s2", Type: "sse", URL: "https://mcp.example.com:9090/sse"},
+			want: "mcp.example.com:9090",
+		},
+		{
+			name: "https URL without port defaults to 443",
+			srv:  config.MCPServerDeclaration{ID: "s3", Type: "http", URL: "https://secure.example.com/api"},
+			want: "secure.example.com:443",
+		},
+		{
+			name: "http URL without port defaults to 80",
+			srv:  config.MCPServerDeclaration{ID: "s4", Type: "http", URL: "http://plain.example.com/api"},
+			want: "plain.example.com:80",
+		},
+		{
+			name: "stdio server returns empty",
+			srv:  config.MCPServerDeclaration{ID: "s5", Type: "stdio", Command: "/usr/bin/tool"},
+			want: "",
+		},
+		{
+			name: "empty URL returns empty",
+			srv:  config.MCPServerDeclaration{ID: "s6", Type: "http", URL: ""},
+			want: "",
+		},
+		{
+			name: "malformed URL returns empty",
+			srv:  config.MCPServerDeclaration{ID: "s7", Type: "http", URL: "://bad"},
+			want: "",
+		},
+		{
+			name: "IPv6 URL with explicit port",
+			srv:  config.MCPServerDeclaration{ID: "s8", Type: "http", URL: "http://[::1]:8080/path"},
+			want: "[::1]:8080",
+		},
+		{
+			name: "IPv6 URL without port defaults to 80",
+			srv:  config.MCPServerDeclaration{ID: "s9", Type: "http", URL: "http://[2001:db8::1]/api"},
+			want: "[2001:db8::1]:80",
+		},
+		{
+			name: "IPv6 https URL without port defaults to 443",
+			srv:  config.MCPServerDeclaration{ID: "s10", Type: "http", URL: "https://[::1]/secure"},
+			want: "[::1]:443",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractAddr(tt.srv)
+			if got != tt.want {
+				t.Errorf("extractAddr() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStartLLMProxy_NetworkServerDeclarations(t *testing.T) {
+	// Create a mock upstream server
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":   "msg_test",
+			"type": "message",
+			"usage": map[string]int{
+				"input_tokens":  5,
+				"output_tokens": 10,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	mgr := NewManager(10)
+	sess, err := mgr.CreateWithID("network-decl-test", t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	proxyCfg := config.ProxyConfig{
+		Mode: "embedded",
+		Port: 0,
+		Providers: config.ProxyProvidersConfig{
+			Anthropic: upstream.URL,
+			OpenAI:    upstream.URL,
+		},
+	}
+	dlpCfg := config.DLPConfig{Mode: "disabled"}
+	storageCfg := config.DefaultLLMStorageConfig()
+	mcpCfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		Servers: []config.MCPServerDeclaration{
+			{ID: "myhttp", Type: "http", URL: "https://mcp.example.com:9090/sse"},
+			{ID: "mystdio", Type: "stdio", Command: "/usr/bin/tool"},
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("StartLLMProxy failed: %v", err)
+	}
+	defer closeFn()
+
+	if proxyURL == "" {
+		t.Fatal("expected non-empty proxy URL")
+	}
+
+	// Retrieve the registry from the session
+	reg := sess.MCPRegistry()
+	if reg == nil {
+		t.Fatal("expected non-nil MCP registry")
+	}
+
+	registry, ok := reg.(*mcpregistry.Registry)
+	if !ok {
+		t.Fatalf("expected *mcpregistry.Registry, got %T", reg)
+	}
+
+	// Verify the http server address was pre-registered
+	addrs := registry.ServerAddrs()
+	if serverID, found := addrs["mcp.example.com:9090"]; !found {
+		t.Error("expected mcp.example.com:9090 in ServerAddrs()")
+	} else if serverID != "myhttp" {
+		t.Errorf("expected server ID 'myhttp' for mcp.example.com:9090, got %q", serverID)
+	}
+
+	// Verify the stdio server does NOT appear in addrs (it has no network address)
+	for addr, serverID := range addrs {
+		if serverID == "mystdio" {
+			t.Errorf("stdio server should not appear in addrs, but found addr %q -> %q", addr, serverID)
+		}
+	}
+}
+
+func TestStartLLMProxy_StdioPreRegistrationNoMultiServerCallback(t *testing.T) {
+	// Regression test: declaring both a stdio and a network server should NOT trigger
+	// the OnMultiServer callback, because stdio servers are skipped during pre-registration.
+	// Only the network server should be registered, leaving the distinct-server count at 1.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":   "msg_test",
+			"type": "message",
+			"usage": map[string]int{
+				"input_tokens":  5,
+				"output_tokens": 10,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	mgr := NewManager(10)
+	sess, err := mgr.CreateWithID("stdio-callback-test", t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	proxyCfg := config.ProxyConfig{
+		Mode: "embedded",
+		Port: 0,
+		Providers: config.ProxyProvidersConfig{
+			Anthropic: upstream.URL,
+			OpenAI:    upstream.URL,
+		},
+	}
+	dlpCfg := config.DLPConfig{Mode: "disabled"}
+	storageCfg := config.DefaultLLMStorageConfig()
+	mcpCfg := config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		Servers: []config.MCPServerDeclaration{
+			{ID: "myhttp", Type: "http", URL: "https://mcp.example.com:9090/sse"},
+			{ID: "mystdio", Type: "stdio", Command: "/usr/bin/tool"},
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("StartLLMProxy failed: %v", err)
+	}
+	defer closeFn()
+
+	if proxyURL == "" {
+		t.Fatal("expected non-empty proxy URL")
+	}
+
+	reg := sess.MCPRegistry()
+	if reg == nil {
+		t.Fatal("expected non-nil MCP registry")
+	}
+
+	registry, ok := reg.(*mcpregistry.Registry)
+	if !ok {
+		t.Fatalf("expected *mcpregistry.Registry, got %T", reg)
+	}
+
+	// Wire a callback AFTER startup. If stdio was pre-registered, the distinct-server
+	// count would already be 2, and SetCallbacks would backfill-fire OnMultiServer.
+	multiServerFired := false
+	registry.SetCallbacks(mcpregistry.RegistryCallbacks{
+		OnMultiServer: func() {
+			multiServerFired = true
+		},
+	})
+
+	if multiServerFired {
+		t.Error("OnMultiServer should not fire: only one server (network) was pre-registered; stdio was skipped")
 	}
 }
