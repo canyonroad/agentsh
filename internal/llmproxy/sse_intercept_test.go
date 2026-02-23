@@ -1923,3 +1923,68 @@ func TestSSEInterceptor_VersionPinAlert(t *testing.T) {
 		t.Error("alert mode should not block the tool call")
 	}
 }
+
+func TestSSEInterceptor_OpenAI_VersionPinAlert(t *testing.T) {
+	// Version pin alert mode on the OpenAI SSE path should allow the call
+	// but propagate the alert reason in the event.
+	reg := mcpregistry.NewRegistry()
+	reg.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v1"},
+	})
+	// Re-register with changed hash; pinned hash remains "hash-v1".
+	reg.Register("server-1", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "hash-v2"},
+	})
+
+	policy := mcpinspect.NewPolicyEvaluator(config.SandboxMCPConfig{
+		EnforcePolicy: true,
+		ToolPolicy:    "none",
+	})
+
+	vpCfg := &config.MCPVersionPinningConfig{
+		Enabled:  true,
+		OnChange: "alert",
+	}
+
+	var events []mcpinspect.MCPToolCallInterceptedEvent
+	onEvent := func(ev mcpinspect.MCPToolCallInterceptedEvent) {
+		events = append(events, ev)
+	}
+	logger := slog.Default()
+
+	interceptor := NewSSEInterceptor(reg, policy, DialectOpenAI, "sess_oai_vpa", "req_oai_vpa", onEvent, logger, nil, nil, vpCfg)
+
+	sseInput := buildOpenAISingleToolSSE("get_weather", "call_vpa_01")
+
+	var buf bytes.Buffer
+	interceptor.Stream(io.NopCloser(strings.NewReader(sseInput)), &buf)
+
+	// 1. Exactly one event should fire.
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+
+	// 2. Alert mode should allow the call.
+	if events[0].Action != "allow" {
+		t.Errorf("event Action = %q, want %q", events[0].Action, "allow")
+	}
+
+	// 3. The event should carry the alert reason with "hash changed".
+	if !strings.Contains(events[0].Reason, "hash changed") {
+		t.Errorf("event Reason = %q, want to contain 'hash changed'", events[0].Reason)
+	}
+
+	// 4. The tool call should pass through (not blocked).
+	output := buf.String()
+	if strings.Contains(output, "blocked by policy") {
+		t.Error("alert mode should not block the tool call")
+	}
+	if !strings.Contains(output, `"name":"get_weather"`) {
+		t.Error("allowed tool get_weather should pass through in output")
+	}
+
+	// 5. finish_reason should remain "tool_calls" (tool was allowed).
+	if !strings.Contains(output, `"finish_reason":"tool_calls"`) {
+		t.Errorf("finish_reason should remain 'tool_calls' when tool is allowed, got:\n%s", output)
+	}
+}
