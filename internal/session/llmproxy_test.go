@@ -706,80 +706,97 @@ func TestStartLLMProxy_CreatesRegistry(t *testing.T) {
 }
 
 func TestStartLLMProxy_MCPOnlyWithoutPolicy(t *testing.T) {
-	// Verify that registry is created in mcp-only mode even when EnforcePolicy is false,
-	// as long as another MCP feature (rate limits) is enabled.
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := map[string]interface{}{
-			"id":   "msg_test",
-			"type": "message",
-			"usage": map[string]int{
-				"input_tokens":  5,
-				"output_tokens": 10,
+	// Table-driven test: verify that each needsRegistry trigger independently
+	// creates the registry when EnforcePolicy is false.
+	tests := []struct {
+		name     string
+		proxyCfg config.ProxyConfig
+		mcpCfg   config.SandboxMCPConfig
+	}{
+		{
+			name: "mcp-only mode alone",
+			proxyCfg: config.ProxyConfig{Mode: "mcp-only"},
+			mcpCfg:   config.SandboxMCPConfig{EnforcePolicy: false},
+		},
+		{
+			name: "rate limits alone",
+			proxyCfg: config.ProxyConfig{Mode: "embedded"},
+			mcpCfg: config.SandboxMCPConfig{
+				EnforcePolicy: false,
+				RateLimits:    config.MCPRateLimitsConfig{Enabled: true, DefaultRPM: 60},
 			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer upstream.Close()
-
-	mgr := NewManager(10)
-	sess, err := mgr.CreateWithID("mcp-only-no-policy-test", t.TempDir(), "default")
-	if err != nil {
-		t.Fatalf("failed to create session: %v", err)
-	}
-
-	proxyCfg := config.ProxyConfig{
-		Mode: "mcp-only",
-		Port: 0,
-		Providers: config.ProxyProvidersConfig{
-			Anthropic: upstream.URL,
-			OpenAI:    upstream.URL,
+		},
+		{
+			name: "version pinning alone",
+			proxyCfg: config.ProxyConfig{Mode: "embedded"},
+			mcpCfg: config.SandboxMCPConfig{
+				EnforcePolicy:  false,
+				VersionPinning: config.MCPVersionPinningConfig{Enabled: true},
+			},
 		},
 	}
-	dlpCfg := config.DLPConfig{Mode: "disabled"}
-	storageCfg := config.DefaultLLMStorageConfig()
-	mcpCfg := config.SandboxMCPConfig{
-		EnforcePolicy: false,
-		RateLimits: config.MCPRateLimitsConfig{
-			Enabled:    true,
-			DefaultRPM: 60,
-		},
-	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
-	if err != nil {
-		t.Fatalf("StartLLMProxy failed: %v", err)
-	}
-	defer closeFn()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := map[string]interface{}{
+					"id":   "msg_test",
+					"type": "message",
+					"usage": map[string]int{
+						"input_tokens":  5,
+						"output_tokens": 10,
+					},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(resp)
+			}))
+			defer upstream.Close()
 
-	// Verify proxy started
-	if proxyURL == "" {
-		t.Error("expected non-empty proxy URL")
-	}
+			mgr := NewManager(10)
+			sess, err := mgr.CreateWithID("trigger-test", t.TempDir(), "default")
+			if err != nil {
+				t.Fatalf("failed to create session: %v", err)
+			}
 
-	// Verify registry WAS created even though EnforcePolicy is false.
-	// The mcp-only mode + rate limits should trigger registry creation.
-	reg := sess.MCPRegistry()
-	if reg == nil {
-		t.Fatal("expected non-nil MCP registry in mcp-only mode with rate limits enabled")
-	}
+			proxyCfg := tt.proxyCfg
+			proxyCfg.Port = 0
+			proxyCfg.Providers = config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+				OpenAI:    upstream.URL,
+			}
 
-	// Verify the registry is functional
-	registry, ok := reg.(*mcpregistry.Registry)
-	if !ok {
-		t.Fatalf("expected *mcpregistry.Registry, got %T", reg)
-	}
+			dlpCfg := config.DLPConfig{Mode: "disabled"}
+			storageCfg := config.DefaultLLMStorageConfig()
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	registry.Register("test-server", "stdio", "", []mcpregistry.ToolInfo{
-		{Name: "rate_limited_tool", Hash: "def456"},
-	})
-	entry := registry.Lookup("rate_limited_tool")
-	if entry == nil {
-		t.Error("expected to find registered tool in registry")
-	}
-	if entry != nil && entry.ServerID != "test-server" {
-		t.Errorf("expected server ID 'test-server', got %s", entry.ServerID)
+			proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, tt.mcpCfg, t.TempDir(), logger)
+			if err != nil {
+				t.Fatalf("StartLLMProxy failed: %v", err)
+			}
+			defer closeFn()
+
+			if proxyURL == "" {
+				t.Error("expected non-empty proxy URL")
+			}
+
+			reg := sess.MCPRegistry()
+			if reg == nil {
+				t.Fatal("expected non-nil MCP registry")
+			}
+
+			registry, ok := reg.(*mcpregistry.Registry)
+			if !ok {
+				t.Fatalf("expected *mcpregistry.Registry, got %T", reg)
+			}
+
+			// Verify the registry is functional
+			registry.Register("test-server", "stdio", "", []mcpregistry.ToolInfo{
+				{Name: "test_tool", Hash: "abc123"},
+			})
+			if entry := registry.Lookup("test_tool"); entry == nil {
+				t.Error("expected to find registered tool in registry")
+			}
+		})
 	}
 }
 
@@ -931,6 +948,21 @@ func TestExtractAddr(t *testing.T) {
 			name: "malformed URL returns empty",
 			srv:  config.MCPServerDeclaration{ID: "s7", Type: "http", URL: "://bad"},
 			want: "",
+		},
+		{
+			name: "IPv6 URL with explicit port",
+			srv:  config.MCPServerDeclaration{ID: "s8", Type: "http", URL: "http://[::1]:8080/path"},
+			want: "[::1]:8080",
+		},
+		{
+			name: "IPv6 URL without port defaults to 80",
+			srv:  config.MCPServerDeclaration{ID: "s9", Type: "http", URL: "http://[2001:db8::1]/api"},
+			want: "[2001:db8::1]:80",
+		},
+		{
+			name: "IPv6 https URL without port defaults to 443",
+			srv:  config.MCPServerDeclaration{ID: "s10", Type: "http", URL: "https://[::1]/secure"},
+			want: "[::1]:443",
 		},
 	}
 

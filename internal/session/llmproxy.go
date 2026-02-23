@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"time"
 
@@ -60,10 +61,13 @@ func StartLLMProxy(
 
 	if needsRegistry {
 		registry := mcpregistry.NewRegistry()
-		// Pre-register declared servers so their addresses are available for network detection.
+		// Pre-register declared network servers so their addresses are available for network detection.
+		// Stdio servers are skipped — they have no network address and would falsely inflate
+		// the distinct-server count (triggering premature OnMultiServer callbacks).
 		for _, srv := range mcpCfg.Servers {
-			addr := extractAddr(srv)
-			registry.Register(srv.ID, srv.Type, addr, nil)
+			if addr := extractAddr(srv); addr != "" {
+				registry.Register(srv.ID, srv.Type, addr, nil)
+			}
 		}
 		proxy.SetRegistry(registry)
 		sess.SetMCPRegistry(registry)
@@ -140,5 +144,5 @@ func extractAddr(srv config.MCPServerDeclaration) string {
 	if host == "" {
 		return ""
 	}
-	return host + ":" + port
+	return net.JoinHostPort(host, port)
 }
