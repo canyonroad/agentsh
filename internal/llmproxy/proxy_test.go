@@ -11,10 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/mcpinspect"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
 
@@ -1058,4 +1060,280 @@ func TestProxyWithMCPConfig(t *testing.T) {
 			t.Error("expected nil registry for default config")
 		}
 	})
+}
+
+// TestProxyEventCallback tests that SetEventCallback is invoked during
+// MCP tool call interception.
+func TestProxyEventCallback(t *testing.T) {
+	// Create upstream that returns an Anthropic response with a tool_use block.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":          "msg_test",
+			"type":        "message",
+			"role":        "assistant",
+			"stop_reason": "tool_use",
+			"content": []map[string]interface{}{
+				{
+					"type":  "tool_use",
+					"id":    "toolu_01test",
+					"name":  "get_weather",
+					"input": map[string]string{"city": "NYC"},
+				},
+			},
+			"usage": map[string]int{"input_tokens": 10, "output_tokens": 5},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	storageDir := t.TempDir()
+	cfg := Config{
+		SessionID: "test-event-callback",
+		Proxy: config.ProxyConfig{
+			Mode: "embedded",
+			Port: 0,
+			Providers: config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+			},
+		},
+		DLP: config.DLPConfig{Mode: "disabled"},
+		MCP: config.SandboxMCPConfig{
+			EnforcePolicy: true,
+			FailClosed:    true,
+			ToolPolicy:    "allowlist",
+			AllowedTools: []config.MCPToolRule{
+				{Server: "*", Tool: "get_weather"},
+			},
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy, err := New(cfg, storageDir, logger)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Register the tool in the registry
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "sha256:abc"},
+	})
+	proxy.SetRegistry(reg)
+
+	// Set up a callback that collects events
+	var mu sync.Mutex
+	var collected []mcpinspect.MCPToolCallInterceptedEvent
+	done := make(chan struct{}, 1)
+	proxy.SetEventCallback(func(ev mcpinspect.MCPToolCallInterceptedEvent) {
+		mu.Lock()
+		collected = append(collected, ev)
+		mu.Unlock()
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	})
+
+	ctx := context.Background()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(shutdownCtx)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Send a request through the proxy
+	proxyURL := "http://" + proxy.Addr().String() + "/v1/messages"
+	reqBody := `{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"weather?"}]}`
+	req, err := http.NewRequest(http.MethodPost, proxyURL, strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-ant-test")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+
+	// Wait for callback to fire
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event callback")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(collected) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(collected))
+	}
+
+	ev := collected[0]
+	if ev.ToolName != "get_weather" {
+		t.Errorf("tool_name: got %q, want %q", ev.ToolName, "get_weather")
+	}
+	if ev.Action != "allow" {
+		t.Errorf("action: got %q, want %q", ev.Action, "allow")
+	}
+	if ev.ServerID != "weather-server" {
+		t.Errorf("server_id: got %q, want %q", ev.ServerID, "weather-server")
+	}
+	if ev.SessionID != "test-event-callback" {
+		t.Errorf("session_id: got %q, want %q", ev.SessionID, "test-event-callback")
+	}
+	if ev.ToolCallID != "toolu_01test" {
+		t.Errorf("tool_call_id: got %q, want %q", ev.ToolCallID, "toolu_01test")
+	}
+	if ev.Dialect != "anthropic" {
+		t.Errorf("dialect: got %q, want %q", ev.Dialect, "anthropic")
+	}
+}
+
+// TestProxyEventCallback_SSE tests that the event callback fires for SSE
+// streaming responses containing tool calls.
+func TestProxyEventCallback_SSE(t *testing.T) {
+	// Anthropic SSE stream with a tool_use content block.
+	sseChunks := []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null}}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01sse\",\"name\":\"get_weather\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\": \\\"NYC\\\"}\"}}\n\n",
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":10}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		for _, chunk := range sseChunks {
+			w.Write([]byte(chunk))
+			flusher.Flush()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}))
+	defer upstream.Close()
+
+	storageDir := t.TempDir()
+	cfg := Config{
+		SessionID: "test-event-callback-sse",
+		Proxy: config.ProxyConfig{
+			Mode: "embedded",
+			Port: 0,
+			Providers: config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+			},
+		},
+		DLP: config.DLPConfig{Mode: "disabled"},
+		MCP: config.SandboxMCPConfig{
+			EnforcePolicy: true,
+			FailClosed:    true,
+			ToolPolicy:    "allowlist",
+			AllowedTools: []config.MCPToolRule{
+				{Server: "*", Tool: "get_weather"},
+			},
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy, err := New(cfg, storageDir, logger)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	reg := mcpregistry.NewRegistry()
+	reg.Register("weather-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "get_weather", Hash: "sha256:abc"},
+	})
+	proxy.SetRegistry(reg)
+
+	var mu sync.Mutex
+	var collected []mcpinspect.MCPToolCallInterceptedEvent
+	done := make(chan struct{}, 1)
+	proxy.SetEventCallback(func(ev mcpinspect.MCPToolCallInterceptedEvent) {
+		mu.Lock()
+		collected = append(collected, ev)
+		mu.Unlock()
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	})
+
+	ctx := context.Background()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(shutdownCtx)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	proxyURL := "http://" + proxy.Addr().String() + "/v1/messages"
+	reqBody := `{"model":"claude-sonnet-4-20250514","stream":true,"messages":[{"role":"user","content":"weather?"}]}`
+	req, err := http.NewRequest(http.MethodPost, proxyURL, strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "sk-ant-test")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	// Must drain the body to trigger the SSE onComplete callback.
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Wait for callback to fire (SSE callback fires in onComplete, after stream ends)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SSE event callback")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(collected) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(collected))
+	}
+
+	ev := collected[0]
+	if ev.ToolName != "get_weather" {
+		t.Errorf("tool_name: got %q, want %q", ev.ToolName, "get_weather")
+	}
+	if ev.Action != "allow" {
+		t.Errorf("action: got %q, want %q", ev.Action, "allow")
+	}
+	if ev.ServerID != "weather-server" {
+		t.Errorf("server_id: got %q, want %q", ev.ServerID, "weather-server")
+	}
+	if ev.ToolCallID != "toolu_01sse" {
+		t.Errorf("tool_call_id: got %q, want %q", ev.ToolCallID, "toolu_01sse")
+	}
+	if ev.Dialect != "anthropic" {
+		t.Errorf("dialect: got %q, want %q", ev.Dialect, "anthropic")
+	}
 }

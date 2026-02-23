@@ -18,6 +18,7 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/llmproxy"
+	"github.com/agentsh/agentsh/internal/mcpinspect"
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/netmonitor"
 	ebpftrace "github.com/agentsh/agentsh/internal/netmonitor/ebpf"
@@ -431,6 +432,24 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 	}
 	_ = a.store.AppendEvent(ctx, okEv)
 	a.broker.Publish(okEv)
+
+	// Wire MCP intercept event callback so events are persisted and published.
+	if proxyInst := s.ProxyInstance(); proxyInst != nil {
+		if proxy, ok := proxyInst.(*llmproxy.Proxy); ok {
+			store, broker := a.store, a.broker
+			proxy.SetEventCallback(func(ev mcpinspect.MCPToolCallInterceptedEvent) {
+				go func() {
+					typesEv := mcpInterceptedToEvent(ev)
+					persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					if err := store.AppendEvent(persistCtx, typesEv); err != nil {
+						slog.Error("persist mcp intercept event", "error", err, "tool", ev.ToolName, "session_id", ev.SessionID)
+					}
+					broker.Publish(typesEv)
+				}()
+			})
+		}
+	}
 }
 
 func (a *App) tryStartTransparentNetwork(ctx context.Context, s *session.Session) error {
