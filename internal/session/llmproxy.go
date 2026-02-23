@@ -51,8 +51,13 @@ func StartLLMProxy(
 		return "", nil, fmt.Errorf("create llm proxy: %w", err)
 	}
 
-	// Create MCP registry and inject into proxy if MCP policy is configured
-	if mcpCfg.EnforcePolicy {
+	// Create MCP registry when any MCP feature needs it.
+	needsRegistry := mcpCfg.EnforcePolicy ||
+		proxyCfg.IsMCPOnly() ||
+		mcpCfg.RateLimits.Enabled ||
+		mcpCfg.VersionPinning.Enabled
+
+	if needsRegistry {
 		registry := mcpregistry.NewRegistry()
 		proxy.SetRegistry(registry)
 		sess.SetMCPRegistry(registry)

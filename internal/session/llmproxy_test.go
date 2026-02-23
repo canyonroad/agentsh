@@ -705,6 +705,84 @@ func TestStartLLMProxy_CreatesRegistry(t *testing.T) {
 	}
 }
 
+func TestStartLLMProxy_MCPOnlyWithoutPolicy(t *testing.T) {
+	// Verify that registry is created in mcp-only mode even when EnforcePolicy is false,
+	// as long as another MCP feature (rate limits) is enabled.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":   "msg_test",
+			"type": "message",
+			"usage": map[string]int{
+				"input_tokens":  5,
+				"output_tokens": 10,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	mgr := NewManager(10)
+	sess, err := mgr.CreateWithID("mcp-only-no-policy-test", t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	proxyCfg := config.ProxyConfig{
+		Mode: "mcp-only",
+		Port: 0,
+		Providers: config.ProxyProvidersConfig{
+			Anthropic: upstream.URL,
+			OpenAI:    upstream.URL,
+		},
+	}
+	dlpCfg := config.DLPConfig{Mode: "disabled"}
+	storageCfg := config.DefaultLLMStorageConfig()
+	mcpCfg := config.SandboxMCPConfig{
+		EnforcePolicy: false,
+		RateLimits: config.MCPRateLimitsConfig{
+			Enabled:    true,
+			DefaultRPM: 60,
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("StartLLMProxy failed: %v", err)
+	}
+	defer closeFn()
+
+	// Verify proxy started
+	if proxyURL == "" {
+		t.Error("expected non-empty proxy URL")
+	}
+
+	// Verify registry WAS created even though EnforcePolicy is false.
+	// The mcp-only mode + rate limits should trigger registry creation.
+	reg := sess.MCPRegistry()
+	if reg == nil {
+		t.Fatal("expected non-nil MCP registry in mcp-only mode with rate limits enabled")
+	}
+
+	// Verify the registry is functional
+	registry, ok := reg.(*mcpregistry.Registry)
+	if !ok {
+		t.Fatalf("expected *mcpregistry.Registry, got %T", reg)
+	}
+
+	registry.Register("test-server", "stdio", "", []mcpregistry.ToolInfo{
+		{Name: "rate_limited_tool", Hash: "def456"},
+	})
+	entry := registry.Lookup("rate_limited_tool")
+	if entry == nil {
+		t.Error("expected to find registered tool in registry")
+	}
+	if entry != nil && entry.ServerID != "test-server" {
+		t.Errorf("expected server ID 'test-server', got %s", entry.ServerID)
+	}
+}
+
 func TestStartLLMProxy_NoRegistryWhenPolicyDisabled(t *testing.T) {
 	// Create a mock upstream server
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
