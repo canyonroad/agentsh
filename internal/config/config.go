@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -508,6 +509,7 @@ type SandboxMCPConfig struct {
 	DeniedTools    []MCPToolRule           `yaml:"denied_tools"`
 	VersionPinning MCPVersionPinningConfig `yaml:"version_pinning"`
 	RateLimits     MCPRateLimitsConfig     `yaml:"rate_limits"`
+	CrossServer    CrossServerConfig       `yaml:"cross_server"`
 }
 
 // MCPServerDeclaration defines an MCP server and how to connect to it.
@@ -551,6 +553,42 @@ type MCPRateLimitsConfig struct {
 type MCPRateLimit struct {
 	CallsPerMinute int `yaml:"calls_per_minute"`
 	Burst          int `yaml:"burst"`
+}
+
+// CrossServerConfig configures cross-server pattern detection.
+// These patterns detect potentially malicious multi-server tool call sequences
+// (e.g., reading secrets from one server then sending them via another).
+type CrossServerConfig struct {
+	Enabled         bool                  `yaml:"enabled"`
+	ReadThenSend    ReadThenSendConfig    `yaml:"read_then_send"`
+	Burst           BurstConfig           `yaml:"burst"`
+	CrossServerFlow CrossServerFlowConfig `yaml:"cross_server_flow"`
+	ShadowTool      ShadowToolConfig      `yaml:"shadow_tool"`
+}
+
+// ReadThenSendConfig detects read-from-one-server-then-send-via-another patterns.
+type ReadThenSendConfig struct {
+	Enabled bool          `yaml:"enabled"`
+	Window  time.Duration `yaml:"window"` // default: 30s
+}
+
+// BurstConfig detects rapid-fire tool calls that may indicate exfiltration.
+type BurstConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	MaxCalls int           `yaml:"max_calls"` // default: 10
+	Window   time.Duration `yaml:"window"`    // default: 5s
+}
+
+// CrossServerFlowConfig detects tool calls that flow across different servers.
+type CrossServerFlowConfig struct {
+	Enabled      bool          `yaml:"enabled"`
+	SameTurnOnly bool          `yaml:"same_turn_only"` // default: true
+	Window       time.Duration `yaml:"window"`          // default: 30s
+}
+
+// ShadowToolConfig detects tool names that shadow/mimic tools from other servers.
+type ShadowToolConfig struct {
+	Enabled bool `yaml:"enabled"` // default: true
 }
 
 // SecurityConfig controls security mode selection and strictness.
@@ -959,6 +997,32 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		if len(cfg.Sandbox.Seccomp.Execve.InternalBypass) == 0 {
 			cfg.Sandbox.Seccomp.Execve.InternalBypass = defaults.InternalBypass
 		}
+	}
+
+	// Cross-server pattern detection defaults
+	if cfg.Sandbox.MCP.CrossServer.ReadThenSend.Window == 0 {
+		cfg.Sandbox.MCP.CrossServer.ReadThenSend.Window = 30 * time.Second
+	}
+	if cfg.Sandbox.MCP.CrossServer.Burst.MaxCalls == 0 {
+		cfg.Sandbox.MCP.CrossServer.Burst.MaxCalls = 10
+	}
+	if cfg.Sandbox.MCP.CrossServer.Burst.Window == 0 {
+		cfg.Sandbox.MCP.CrossServer.Burst.Window = 5 * time.Second
+	}
+	if cfg.Sandbox.MCP.CrossServer.CrossServerFlow.Window == 0 {
+		cfg.Sandbox.MCP.CrossServer.CrossServerFlow.Window = 30 * time.Second
+	}
+	// SameTurnOnly defaults to true; since the zero value of bool is false,
+	// we only apply this when the entire CrossServer config has not been set
+	// (Enabled == false and SameTurnOnly == false together suggest defaults).
+	if !cfg.Sandbox.MCP.CrossServer.CrossServerFlow.Enabled &&
+		!cfg.Sandbox.MCP.CrossServer.CrossServerFlow.SameTurnOnly {
+		cfg.Sandbox.MCP.CrossServer.CrossServerFlow.SameTurnOnly = true
+	}
+	// ShadowTool defaults to enabled (same bool zero-value heuristic).
+	if !cfg.Sandbox.MCP.CrossServer.ShadowTool.Enabled &&
+		!cfg.Sandbox.MCP.CrossServer.Enabled {
+		cfg.Sandbox.MCP.CrossServer.ShadowTool.Enabled = true
 	}
 
 	// macOS XPC defaults

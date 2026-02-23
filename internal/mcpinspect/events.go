@@ -108,6 +108,38 @@ type MCPToolCallInterceptedEvent struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// MCPCrossServerEvent is logged when a cross-server pattern is detected and
+// a tool call is blocked due to suspicious multi-server interaction.
+type MCPCrossServerEvent struct {
+	Type      string    `json:"type"`       // "mcp_cross_server_blocked"
+	Timestamp time.Time `json:"timestamp"`
+	SessionID string    `json:"session_id"`
+
+	// Which detection rule fired
+	Rule     string `json:"rule"`     // "read_then_send", "burst", "cross_server_flow", "shadow_tool"
+	Severity string `json:"severity"` // "critical", "high", "medium"
+
+	// The tool call that was blocked
+	BlockedServerID string `json:"blocked_server_id"`
+	BlockedToolName string `json:"blocked_tool_name"`
+
+	// Recent tool calls that contributed to the detection
+	RelatedCalls []ToolCallRecord `json:"related_calls"`
+
+	// Human-readable explanation of why the call was blocked
+	Reason string `json:"reason"`
+}
+
+// ToolCallRecord captures a single tool call for cross-server analysis.
+type ToolCallRecord struct {
+	Timestamp time.Time `json:"timestamp"`
+	ServerID  string    `json:"server_id"`
+	ToolName  string    `json:"tool_name"`
+	RequestID string    `json:"request_id"`
+	Action    string    `json:"action"`   // "allow" or "block"
+	Category  string    `json:"category"` // "read", "write", "send", "compute", "unknown"
+}
+
 // FieldChange describes what changed in a tool definition.
 type FieldChange struct {
 	Field    string `json:"field"`
