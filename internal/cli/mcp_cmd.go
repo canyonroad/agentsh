@@ -26,6 +26,7 @@ func newMCPCmd() *cobra.Command {
 	cmd.AddCommand(newMCPToolsCmd())
 	cmd.AddCommand(newMCPServersCmd())
 	cmd.AddCommand(newMCPEventsCmd())
+	cmd.AddCommand(newMCPCallsCmd())
 	cmd.AddCommand(newMCPDetectionsCmd())
 	cmd.AddCommand(newMCPPinsCmd())
 
@@ -240,6 +241,118 @@ func newMCPEventsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sessionID, "session", "", "Filter by session ID")
 	cmd.Flags().StringVar(&serverID, "server", "", "Filter by server ID")
 	cmd.Flags().StringVar(&eventType, "type", "", "Event type: mcp_tool_seen|mcp_tool_changed|mcp_detection")
+	cmd.Flags().StringVar(&since, "since", "", "Start time (RFC3339) or duration (e.g. 1h)")
+	cmd.Flags().IntVar(&limit, "limit", 100, "Result limit")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&directDB, "direct-db", false, "Query local SQLite directly")
+	cmd.Flags().StringVar(&dbPath, "db-path", "", "SQLite DB path (used with --direct-db)")
+
+	return cmd
+}
+
+func newMCPCallsCmd() *cobra.Command {
+	var (
+		sessionID string
+		serverID  string
+		toolName  string
+		action    string
+		since     string
+		limit     int
+		jsonOut   bool
+		directDB  bool
+		dbPath    string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "calls",
+		Short: "Query MCP tool call interceptions",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !directDB {
+				return fmt.Errorf("API mode not yet implemented, use --direct-db")
+			}
+
+			if limit <= 0 {
+				return fmt.Errorf("--limit must be a positive integer")
+			}
+
+			if dbPath == "" {
+				dbPath = getenvDefault("AGENTSH_DB_PATH", "./data/events.db")
+			}
+			st, err := sqlite.Open(dbPath)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer st.Close()
+
+			q := types.EventQuery{
+				SessionID: sessionID,
+				Types:     []string{"mcp_tool_call_intercepted"},
+				Limit:     limit,
+			}
+
+			if toolName != "" {
+				q.PathLike = "%" + toolName + "%"
+			}
+			if serverID != "" {
+				q.DomainLike = "%" + serverID + "%"
+			}
+			if action != "" {
+				switch action {
+				case "allow":
+					d := types.DecisionAllow
+					q.Decision = &d
+				case "block":
+					d := types.DecisionDeny
+					q.Decision = &d
+				default:
+					return fmt.Errorf("invalid --action %q: must be \"allow\" or \"block\"", action)
+				}
+			}
+			if since != "" {
+				t, err := parseTimeOrAgo(since)
+				if err != nil {
+					return fmt.Errorf("invalid --since: %w", err)
+				}
+				q.Since = &t
+			}
+
+			events, err := st.QueryEvents(cmd.Context(), q)
+			if err != nil {
+				return err
+			}
+
+			if len(events) == 0 {
+				cmd.Println("No MCP tool calls found")
+				return nil
+			}
+
+			if jsonOut {
+				return printJSON(cmd, events)
+			}
+
+			// Table output
+			cmd.Println("TIMESTAMP            TOOL                SERVER              ACTION  REASON")
+			for _, e := range events {
+				tool, _ := e.Fields["tool_name"].(string)
+				server, _ := e.Fields["server_id"].(string)
+				act, _ := e.Fields["action"].(string)
+				reason, _ := e.Fields["reason"].(string)
+				cmd.Printf("%-20s %-19s %-19s %-7s %s\n",
+					e.Timestamp.Format("2006-01-02 15:04:05"),
+					truncate(tool, 19),
+					truncate(server, 19),
+					act,
+					reason,
+				)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&sessionID, "session", "", "Filter by session ID")
+	cmd.Flags().StringVar(&serverID, "server", "", "Filter by server ID")
+	cmd.Flags().StringVar(&toolName, "tool", "", "Filter by tool name")
+	cmd.Flags().StringVar(&action, "action", "", "Filter by action: allow|block")
 	cmd.Flags().StringVar(&since, "since", "", "Start time (RFC3339) or duration (e.g. 1h)")
 	cmd.Flags().IntVar(&limit, "limit", 100, "Result limit")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output as JSON")
