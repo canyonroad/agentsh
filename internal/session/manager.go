@@ -55,6 +55,8 @@ type Session struct {
 	llmProxyClose func() error
 	llmProxy      interface{}   // *llmproxy.Proxy - stored as interface to avoid import cycle
 
+	mcpRegistry interface{} // *mcpregistry.Registry — stored as interface to avoid import cycle
+
 	netnsName  string
 	netnsClose func() error
 
@@ -353,6 +355,21 @@ func (s *Session) ProxyInstance() interface{} {
 	return s.llmProxy
 }
 
+// SetMCPRegistry stores the MCP tool registry instance in the session.
+// The registry is stored as interface{} to avoid an import cycle with mcpregistry.
+func (s *Session) SetMCPRegistry(r interface{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mcpRegistry = r
+}
+
+// MCPRegistry returns the MCP tool registry instance, if any.
+func (s *Session) MCPRegistry() interface{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mcpRegistry
+}
+
 func (s *Session) ProxyURL() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -393,6 +410,7 @@ func (s *Session) CloseLLMProxy() error {
 	s.llmProxyClose = nil
 	s.llmProxyURL = ""
 	s.llmProxy = nil
+	s.mcpRegistry = nil
 	s.mu.Unlock()
 	if fn != nil {
 		return fn()

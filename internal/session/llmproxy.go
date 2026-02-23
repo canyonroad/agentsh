@@ -8,6 +8,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/llmproxy"
+	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
 
 // StartLLMProxy creates and starts an embedded LLM proxy for the session.
@@ -48,6 +49,13 @@ func StartLLMProxy(
 	proxy, err := llmproxy.New(cfg, storagePath, logger)
 	if err != nil {
 		return "", nil, fmt.Errorf("create llm proxy: %w", err)
+	}
+
+	// Create MCP registry and inject into proxy if MCP policy is configured
+	if mcpCfg.EnforcePolicy {
+		registry := mcpregistry.NewRegistry()
+		proxy.SetRegistry(registry)
+		sess.SetMCPRegistry(registry)
 	}
 
 	// Start the proxy
