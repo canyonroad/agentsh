@@ -1,10 +1,15 @@
 package server
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
+	"github.com/agentsh/agentsh/internal/store/composite"
+	"github.com/agentsh/agentsh/internal/store/sqlite"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -125,5 +130,90 @@ func TestBridgeEventToRegistry_DefaultServerType(t *testing.T) {
 	}
 	if entry.ServerType != "stdio" {
 		t.Errorf("expected default server_type=stdio, got %q", entry.ServerType)
+	}
+}
+
+func TestServerEmitter_BridgesToRegistry(t *testing.T) {
+	dir := t.TempDir()
+	st, err := sqlite.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	store := composite.New(st, st)
+	broker := events.NewBroker()
+	reg := mcpregistry.NewRegistry()
+
+	emitter := serverEmitter{
+		store:  store,
+		broker: broker,
+		registryFor: func(sessionID string) *mcpregistry.Registry {
+			if sessionID == "sess-1" {
+				return reg
+			}
+			return nil
+		},
+	}
+
+	ev := types.Event{
+		ID:        "evt-1",
+		Type:      "mcp_tool_seen",
+		SessionID: "sess-1",
+		Source:    "shim",
+		Timestamp: time.Now(),
+		Fields: map[string]interface{}{
+			"server_id":   "db-server",
+			"server_type": "stdio",
+			"tool_name":   "query_db",
+			"tool_hash":   "sha256:xyz",
+		},
+	}
+
+	if err := emitter.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := reg.Lookup("query_db")
+	if entry == nil {
+		t.Fatal("expected tool to be in enforcement registry after AppendEvent")
+	}
+	if entry.ServerID != "db-server" {
+		t.Errorf("expected server_id=db-server, got %q", entry.ServerID)
+	}
+}
+
+func TestServerEmitter_NilRegistryNoOp(t *testing.T) {
+	dir := t.TempDir()
+	st, err := sqlite.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	store := composite.New(st, st)
+	broker := events.NewBroker()
+
+	emitter := serverEmitter{
+		store:  store,
+		broker: broker,
+		registryFor: func(sessionID string) *mcpregistry.Registry {
+			return nil
+		},
+	}
+
+	ev := types.Event{
+		ID:        "evt-2",
+		Type:      "mcp_tool_seen",
+		SessionID: "sess-2",
+		Source:    "shim",
+		Timestamp: time.Now(),
+		Fields: map[string]interface{}{
+			"server_id": "s", "tool_name": "t",
+		},
+	}
+
+	if err := emitter.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatal(err)
 	}
 }
