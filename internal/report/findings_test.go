@@ -156,3 +156,87 @@ func TestDetectMCPToolBlockedFinding_AllowOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectMCPCrossServerFinding_HighSeverity(t *testing.T) {
+	events := []types.Event{
+		{ID: "1", Type: "mcp_cross_server_blocked", Fields: map[string]any{
+			"rule": "read_then_send", "severity": "high",
+			"blocked_server_id": "srv", "blocked_tool_name": "tool",
+		}},
+	}
+
+	findings := detectFindings(events)
+
+	var found *Finding
+	for i := range findings {
+		if findings[i].Category == "mcp_cross_server" {
+			found = &findings[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("expected mcp_cross_server finding")
+	}
+	if found.Severity != SeverityCritical {
+		t.Errorf("expected critical severity for high event, got %s", found.Severity)
+	}
+}
+
+func TestDetectMCPCrossServerFinding_MediumSeverity(t *testing.T) {
+	events := []types.Event{
+		{ID: "1", Type: "mcp_cross_server_blocked", Fields: map[string]any{
+			"rule": "read_then_send", "severity": "medium",
+			"blocked_server_id": "srv", "blocked_tool_name": "tool",
+		}},
+	}
+
+	findings := detectFindings(events)
+
+	var found *Finding
+	for i := range findings {
+		if findings[i].Category == "mcp_cross_server" {
+			found = &findings[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("expected mcp_cross_server finding")
+	}
+	if found.Severity != SeverityWarning {
+		t.Errorf("expected warning severity for medium event, got %s", found.Severity)
+	}
+}
+
+func TestDetectMCPCrossServerFinding_MixedSeverity(t *testing.T) {
+	// When multiple cross-server events have different severities,
+	// the finding should use the highest observed severity.
+	events := []types.Event{
+		{ID: "1", Type: "mcp_cross_server_blocked", Fields: map[string]any{
+			"rule": "read_then_send", "severity": "medium",
+			"blocked_server_id": "srv1", "blocked_tool_name": "tool1",
+		}},
+		{ID: "2", Type: "mcp_cross_server_blocked", Fields: map[string]any{
+			"rule": "read_then_send", "severity": "critical",
+			"blocked_server_id": "srv2", "blocked_tool_name": "tool2",
+		}},
+	}
+
+	findings := detectFindings(events)
+
+	var found *Finding
+	for i := range findings {
+		if findings[i].Category == "mcp_cross_server" {
+			found = &findings[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("expected mcp_cross_server finding")
+	}
+	if found.Severity != SeverityCritical {
+		t.Errorf("expected critical (highest) severity for mixed events, got %s", found.Severity)
+	}
+	if found.Count != 2 {
+		t.Errorf("expected count 2, got %d", found.Count)
+	}
+}

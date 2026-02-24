@@ -39,6 +39,7 @@ func detectFindings(events []types.Event) []Finding {
 	var mcpDetectionEvents []string
 	var mcpToolBlockedEvents []string
 	var mcpCrossServerEvents []string
+	var mcpCrossServerMaxSeverity string
 
 	uniqueHosts := make(map[string]bool)
 
@@ -63,6 +64,11 @@ func detectFindings(events []types.Event) []Finding {
 			}
 		case "mcp_cross_server_blocked":
 			mcpCrossServerEvents = append(mcpCrossServerEvents, ev.ID)
+			if sev := stringField(ev.Fields, "severity"); sev != "" {
+				if severityRank(sev) > severityRank(mcpCrossServerMaxSeverity) {
+					mcpCrossServerMaxSeverity = sev
+				}
+			}
 		}
 
 		if ev.Policy == nil {
@@ -283,8 +289,9 @@ func detectFindings(events []types.Event) []Finding {
 	}
 
 	if len(mcpCrossServerEvents) > 0 {
+		sev := crossServerSeverity(mcpCrossServerMaxSeverity)
 		findings = append(findings, Finding{
-			Severity:    SeverityCritical,
+			Severity:    sev,
 			Category:    "mcp_cross_server",
 			Title:       "Cross-server attacks blocked",
 			Description: "Suspicious cross-server tool call patterns were detected and blocked",
@@ -305,4 +312,32 @@ func stringField(fields map[string]any, key string) string {
 		return v
 	}
 	return ""
+}
+
+// severityRank returns a numeric rank for severity comparison (higher = more severe).
+func severityRank(s string) int {
+	switch s {
+	case "critical":
+		return 3
+	case "high":
+		return 2
+	case "medium":
+		return 1
+	case "low":
+		return 0
+	default:
+		return -1
+	}
+}
+
+// crossServerSeverity maps the highest observed event severity to a Finding Severity.
+func crossServerSeverity(maxSev string) Severity {
+	switch maxSev {
+	case "critical", "high":
+		return SeverityCritical
+	case "medium":
+		return SeverityWarning
+	default:
+		return SeverityWarning
+	}
 }
