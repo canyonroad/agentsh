@@ -198,6 +198,59 @@ func TestFormatMarkdown_NoLLMStats(t *testing.T) {
 	}
 }
 
+func TestMarkdownMCPSection_InterceptedFields(t *testing.T) {
+	r := &Report{
+		SessionID:   "test-mcp",
+		GeneratedAt: time.Now(),
+		Level:       LevelSummary,
+		Session:     types.Session{ID: "test-mcp"},
+		MCPSummary: &MCPToolSummary{
+			ToolsSeen:          2,
+			ServersCount:       1,
+			InterceptedTotal:   5,
+			InterceptedBlocked: 1,
+			CrossServerBlocked: 1,
+			ToolCallsTotal:     3,
+			NetworkConnections: 4,
+		},
+	}
+
+	md := FormatMarkdown(r)
+
+	checks := []string{
+		"Tool Calls Observed",
+		"Intercepted (Proxy)",
+		"Blocked by Proxy",
+		"Cross-Server Blocked",
+		"Network Connections",
+	}
+	for _, want := range checks {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown missing %q", want)
+		}
+	}
+}
+
+func TestMarkdownMCPSection_InterceptedOnly(t *testing.T) {
+	// MCP section should appear even when ToolsSeen is 0
+	// (e.g. only intercepted events, no mcp_tool_seen)
+	r := &Report{
+		SessionID:   "test-mcp-intercept",
+		GeneratedAt: time.Now(),
+		Level:       LevelSummary,
+		Session:     types.Session{ID: "test-mcp-intercept"},
+		MCPSummary: &MCPToolSummary{
+			InterceptedTotal:   1,
+			InterceptedBlocked: 1,
+		},
+	}
+
+	md := FormatMarkdown(r)
+	if !strings.Contains(md, "## MCP Tools") {
+		t.Error("MCP section not rendered for intercepted-only summary")
+	}
+}
+
 func TestFormatNumber(t *testing.T) {
 	tests := []struct {
 		input int
