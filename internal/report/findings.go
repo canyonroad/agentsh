@@ -37,6 +37,8 @@ func detectFindings(events []types.Event) []Finding {
 	var mcpHighRiskEvents []string
 	var mcpChangedEvents []string
 	var mcpDetectionEvents []string
+	var mcpToolBlockedEvents []string
+	var mcpCrossServerEvents []string
 
 	uniqueHosts := make(map[string]bool)
 
@@ -55,6 +57,12 @@ func detectFindings(events []types.Event) []Finding {
 			mcpChangedEvents = append(mcpChangedEvents, ev.ID)
 		case "mcp_detection":
 			mcpDetectionEvents = append(mcpDetectionEvents, ev.ID)
+		case "mcp_tool_call_intercepted":
+			if stringField(ev.Fields, "action") == "block" {
+				mcpToolBlockedEvents = append(mcpToolBlockedEvents, ev.ID)
+			}
+		case "mcp_cross_server_blocked":
+			mcpCrossServerEvents = append(mcpCrossServerEvents, ev.ID)
 		}
 
 		if ev.Policy == nil {
@@ -260,6 +268,28 @@ func detectFindings(events []types.Event) []Finding {
 			Description: "Security patterns detected in MCP tool definitions",
 			Count:       len(mcpDetectionEvents),
 			Events:      mcpDetectionEvents,
+		})
+	}
+
+	if len(mcpToolBlockedEvents) > 0 {
+		findings = append(findings, Finding{
+			Severity:    SeverityCritical,
+			Category:    "mcp_tool_blocked",
+			Title:       "MCP tool calls blocked",
+			Description: "MCP tool calls were blocked by the LLM proxy",
+			Count:       len(mcpToolBlockedEvents),
+			Events:      mcpToolBlockedEvents,
+		})
+	}
+
+	if len(mcpCrossServerEvents) > 0 {
+		findings = append(findings, Finding{
+			Severity:    SeverityCritical,
+			Category:    "mcp_cross_server",
+			Title:       "Cross-server attacks blocked",
+			Description: "Suspicious cross-server tool call patterns were detected and blocked",
+			Count:       len(mcpCrossServerEvents),
+			Events:      mcpCrossServerEvents,
 		})
 	}
 
