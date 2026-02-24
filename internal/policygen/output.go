@@ -83,6 +83,74 @@ func FormatYAML(policy *GeneratedPolicy, name string) string {
 		b.WriteString("\n")
 	}
 
+	// MCP rules section
+	if len(policy.MCPToolRules) > 0 || len(policy.MCPBlockedTools) > 0 || policy.MCPConfig != nil {
+		b.WriteString("mcp_rules:\n")
+		b.WriteString("  enforce_policy: true\n")
+
+		// Tool allowlist
+		if len(policy.MCPToolRules) > 0 {
+			b.WriteString("  tool_policy: \"allowlist\"\n")
+			b.WriteString("  allowed_tools:\n")
+			for _, rule := range policy.MCPToolRules {
+				b.WriteString(fmt.Sprintf("    # Provenance: %s\n", rule.Provenance.String()))
+				b.WriteString(fmt.Sprintf("    - server: \"%s\"\n", rule.ServerID))
+				b.WriteString(fmt.Sprintf("      tool: \"%s\"\n", rule.ToolName))
+				if rule.ContentHash != "" {
+					b.WriteString(fmt.Sprintf("      content_hash: \"%s\"\n", rule.ContentHash))
+				}
+			}
+		}
+
+		// Server allowlist
+		if len(policy.MCPServers) > 0 {
+			b.WriteString("  allowed_servers:\n")
+			for _, srv := range policy.MCPServers {
+				b.WriteString(fmt.Sprintf("    - id: \"%s\"\n", srv.ServerID))
+			}
+		}
+
+		// Blocked tools (commented)
+		if len(policy.MCPBlockedTools) > 0 {
+			b.WriteString("  # --- Blocked tools (uncomment to allow) ---\n")
+			b.WriteString("  # denied_tools:\n")
+			for _, rule := range policy.MCPBlockedTools {
+				if rule.Provenance.Blocked && rule.Provenance.BlockReason != "" {
+					b.WriteString(fmt.Sprintf("  #   # BLOCKED: %s\n", rule.Provenance.BlockReason))
+				} else {
+					b.WriteString("  #   # BLOCKED:\n")
+				}
+				b.WriteString(fmt.Sprintf("  #   # Provenance: %s\n", rule.Provenance.String()))
+				b.WriteString(fmt.Sprintf("  #   - server: \"%s\"\n", rule.ServerID))
+				b.WriteString(fmt.Sprintf("  #     tool: \"%s\"\n", rule.ToolName))
+			}
+		}
+
+		// Version pinning
+		if policy.MCPConfig != nil {
+			b.WriteString("  version_pinning:\n")
+			if policy.MCPConfig.VersionPinning {
+				b.WriteString("    enabled: true\n")
+				b.WriteString(fmt.Sprintf("    on_change: \"%s\"\n", policy.MCPConfig.VersionOnChange))
+				b.WriteString("    auto_trust_first: true\n")
+			} else {
+				b.WriteString("    enabled: false\n")
+			}
+
+			// Cross-server detection
+			if policy.MCPConfig.CrossServer {
+				b.WriteString("  cross_server:\n")
+				b.WriteString("    enabled: true\n")
+				for _, rule := range policy.MCPConfig.CrossServerRules {
+					b.WriteString(fmt.Sprintf("    %s:\n", rule))
+					b.WriteString("      enabled: true\n")
+				}
+			}
+		}
+
+		b.WriteString("\n")
+	}
+
 	return b.String()
 }
 
