@@ -23,6 +23,7 @@ import (
 	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/internal/mcpregistry"
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
@@ -205,7 +206,18 @@ func New(cfg *config.Config) (*Server, error) {
 
 	sessions := session.NewManager(cfg.Sessions.MaxSessions)
 	broker := events.NewBroker()
-	emitter := serverEmitter{store: store, broker: broker}
+	emitter := serverEmitter{
+		store:  store,
+		broker: broker,
+		registryFor: func(sessionID string) *mcpregistry.Registry {
+			s, ok := sessions.Get(sessionID)
+			if !ok {
+				return nil
+			}
+			reg, _ := s.MCPRegistry().(*mcpregistry.Registry)
+			return reg
+		},
+	}
 
 	var approvalsMgr *approvals.Manager
 	if cfg.Approvals.Enabled {
@@ -562,8 +574,9 @@ func tlsListen(addr string, cert tls.Certificate) (net.Listener, error) {
 }
 
 type serverEmitter struct {
-	store  *composite.Store
-	broker *events.Broker
+	store       *composite.Store
+	broker      *events.Broker
+	registryFor func(sessionID string) *mcpregistry.Registry
 }
 
 func (e serverEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
@@ -572,6 +585,13 @@ func (e serverEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
 	}
 	// Also upsert to mcp_tools table for mcp_tool_seen events
 	_ = e.store.UpsertMCPToolFromEvent(ctx, ev)
+	// Bridge mcp_tool_seen/changed into the live enforcement registry
+	// so the LLM proxy can enforce policy on dynamically-discovered tools.
+	if e.registryFor != nil && ev.SessionID != "" {
+		if reg := e.registryFor(ev.SessionID); reg != nil {
+			bridgeEventToRegistry(ev, reg)
+		}
+	}
 	return nil
 }
 func (e serverEmitter) Publish(ev types.Event) { e.broker.Publish(ev) }
