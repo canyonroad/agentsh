@@ -134,6 +134,55 @@ func TestIntegration_FullPolicyGeneration(t *testing.T) {
 	}
 }
 
+func TestIntegration_MCPPolicyGeneration(t *testing.T) {
+	now := time.Now()
+	events := []types.Event{
+		// File event (existing behavior)
+		{Type: "file_read", Path: "/workspace/main.go", Timestamp: now,
+			Policy: &types.PolicyInfo{Decision: types.DecisionAllow}},
+		// MCP events
+		{ID: "m1", Type: "mcp_tool_seen", Timestamp: now.Add(time.Second), Fields: map[string]any{
+			"server_id": "gh", "tool_name": "create_pr",
+			"tool_hash": "sha256:pr123", "server_type": "stdio",
+		}},
+		{ID: "m2", Type: "mcp_tool_called", Timestamp: now.Add(2 * time.Second), Fields: map[string]any{
+			"server_id": "gh", "tool_name": "create_pr",
+		}},
+	}
+
+	store := &mockEventStore{events: events}
+	gen := NewGenerator(store)
+
+	sess := types.Session{ID: "integration-test"}
+	policy, err := gen.Generate(context.Background(), sess, DefaultOptions())
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// Should have both file rules AND MCP rules
+	if len(policy.FileRules) == 0 {
+		t.Error("expected file rules")
+	}
+	if len(policy.MCPToolRules) == 0 {
+		t.Error("expected MCP tool rules")
+	}
+
+	// Format YAML and verify both sections present
+	yaml := FormatYAML(policy, "integration-test")
+	if !strings.Contains(yaml, "file_rules:") {
+		t.Error("YAML missing file_rules section")
+	}
+	if !strings.Contains(yaml, "mcp_rules:") {
+		t.Error("YAML missing mcp_rules section")
+	}
+	if !strings.Contains(yaml, `tool: "create_pr"`) {
+		t.Error("YAML missing MCP tool")
+	}
+	if !strings.Contains(yaml, `content_hash: "sha256:pr123"`) {
+		t.Error("YAML missing content hash")
+	}
+}
+
 func allow() *types.PolicyInfo {
 	return &types.PolicyInfo{Decision: types.DecisionAllow}
 }
