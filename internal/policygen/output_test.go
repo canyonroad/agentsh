@@ -319,3 +319,119 @@ func TestFormatIntList(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatYAML_MCPRules(t *testing.T) {
+	policy := &GeneratedPolicy{
+		SessionID:   "abc123",
+		GeneratedAt: time.Now(),
+		MCPToolRules: []MCPToolRuleGen{
+			{
+				GeneratedRule: GeneratedRule{
+					Name:       "weather-get_weather",
+					Provenance: Provenance{EventCount: 5},
+				},
+				ServerID:    "weather",
+				ToolName:    "get_weather",
+				ContentHash: "sha256:abc123",
+			},
+		},
+		MCPServers: []MCPServerRuleGen{
+			{ServerID: "weather", ToolCount: 2},
+		},
+		MCPConfig: &MCPPolicyConfig{
+			VersionPinning:  true,
+			VersionOnChange: "block",
+		},
+	}
+
+	yaml := FormatYAML(policy, "test")
+
+	checks := []string{
+		"mcp_rules:",
+		"enforce_policy: true",
+		`tool_policy: "allowlist"`,
+		"allowed_tools:",
+		`server: "weather"`,
+		`tool: "get_weather"`,
+		`content_hash: "sha256:abc123"`,
+		`server_policy: "allowlist"`,
+		"allowed_servers:",
+		`id: "weather"`,
+		"version_pinning:",
+		"enabled: true",
+		`on_change: "block"`,
+	}
+	for _, want := range checks {
+		if !strings.Contains(yaml, want) {
+			t.Errorf("YAML missing %q", want)
+		}
+	}
+}
+
+func TestFormatYAML_MCPBlockedTools(t *testing.T) {
+	policy := &GeneratedPolicy{
+		SessionID:   "abc123",
+		GeneratedAt: time.Now(),
+		MCPBlockedTools: []MCPToolRuleGen{
+			{
+				GeneratedRule: GeneratedRule{
+					Name:       "weather-execute_cmd",
+					Provenance: Provenance{EventCount: 1, Blocked: true, BlockReason: "version_pin"},
+				},
+				ServerID:    "weather",
+				ToolName:    "execute_cmd",
+				Blocked:     true,
+				BlockReason: "version_pin",
+			},
+		},
+		MCPConfig: &MCPPolicyConfig{},
+	}
+
+	yaml := FormatYAML(policy, "test")
+
+	if !strings.Contains(yaml, "# --- Blocked tools") {
+		t.Error("missing blocked tools section header")
+	}
+	if !strings.Contains(yaml, "# BLOCKED:") {
+		t.Error("missing BLOCKED marker")
+	}
+}
+
+func TestFormatYAML_MCPCrossServer(t *testing.T) {
+	policy := &GeneratedPolicy{
+		SessionID:   "abc123",
+		GeneratedAt: time.Now(),
+		MCPConfig: &MCPPolicyConfig{
+			CrossServer:      true,
+			CrossServerRules: []string{"read_then_send", "burst"},
+		},
+	}
+
+	yaml := FormatYAML(policy, "test")
+
+	checks := []string{
+		"cross_server:",
+		"enabled: true",
+		"read_then_send:",
+		"burst:",
+	}
+	for _, want := range checks {
+		if !strings.Contains(yaml, want) {
+			t.Errorf("YAML missing %q", want)
+		}
+	}
+}
+
+func TestFormatYAML_NoMCPSection(t *testing.T) {
+	policy := &GeneratedPolicy{
+		SessionID:   "abc123",
+		GeneratedAt: time.Now(),
+		// No MCP data
+	}
+
+	yaml := FormatYAML(policy, "test")
+
+	if strings.Contains(yaml, "mcp_rules:") {
+		t.Error("should not have mcp_rules section when no MCP activity")
+	}
+}

@@ -64,6 +64,7 @@ func (g *Generator) Generate(ctx context.Context, sess types.Session, opts Optio
 		blockedCmdEvents    []types.Event
 		allowedUnixEvents   []types.Event
 		blockedUnixEvents   []types.Event
+		mcpEvents           []types.Event
 	)
 
 	// Track which commands made network calls or deleted files
@@ -107,6 +108,8 @@ func (g *Generator) Generate(ctx context.Context, sess types.Session, opts Optio
 			} else if opts.IncludeBlocked {
 				blockedUnixEvents = append(blockedUnixEvents, ev)
 			}
+		case isMCPEvent(ev.Type):
+			mcpEvents = append(mcpEvents, ev)
 		}
 	}
 
@@ -139,6 +142,10 @@ func (g *Generator) Generate(ctx context.Context, sess types.Session, opts Optio
 
 	// Generate unix socket rules
 	policy.UnixRules = g.generateUnixRules(allowedUnixEvents, false)
+
+	// Generate MCP rules
+	policy.MCPToolRules, policy.MCPBlockedTools, policy.MCPServers, policy.MCPConfig =
+		g.generateMCPRules(mcpEvents, opts)
 
 	return policy, nil
 }
@@ -421,6 +428,28 @@ func isUnixSocketEvent(t string) bool {
 	return false
 }
 
+// isMCPEvent checks if the event type is MCP-related.
+func isMCPEvent(t string) bool {
+	switch t {
+	case "mcp_tool_seen", "mcp_tool_changed", "mcp_tool_called",
+		"mcp_tool_call_intercepted",
+		"mcp_cross_server_blocked", "mcp_network_connection":
+		return true
+	}
+	return false
+}
+
+// stringFromFields extracts a string value from event Fields.
+func stringFromFields(fields map[string]any, key string) string {
+	if fields == nil {
+		return ""
+	}
+	if v, ok := fields[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
 // getFileOp converts event type to operation string.
 func getFileOp(t string) string {
 	switch t {
@@ -587,4 +616,175 @@ func uniqueStrings(strs []string) []string {
 		}
 	}
 	return result
+}
+
+// generateMCPRules creates MCP policy rules from events.
+func (g *Generator) generateMCPRules(events []types.Event, opts Options) (
+	toolRules []MCPToolRuleGen,
+	blockedTools []MCPToolRuleGen,
+	servers []MCPServerRuleGen,
+	config *MCPPolicyConfig,
+) {
+	if len(events) == 0 {
+		return nil, nil, nil, nil
+	}
+
+	// Track tools by server+tool identity
+	type toolKey struct {
+		serverID string
+		toolName string
+	}
+	type toolInfo struct {
+		serverID    string
+		toolName    string
+		contentHash string
+		blockReason string
+		events      []types.Event
+	}
+	seenTools := make(map[toolKey]*toolInfo)
+	blockedToolMap := make(map[toolKey]*toolInfo)
+	serverTools := make(map[string]map[string]bool) // server_id -> set of tool names
+
+	var hasChangedTools bool
+	var crossServerRules []string
+	crossServerRuleSet := make(map[string]bool)
+
+	for _, ev := range events {
+		serverID := stringFromFields(ev.Fields, "server_id")
+
+		switch ev.Type {
+		case "mcp_tool_seen":
+			toolName := stringFromFields(ev.Fields, "tool_name")
+			hash := stringFromFields(ev.Fields, "tool_hash")
+			if serverID != "" && toolName != "" {
+				key := toolKey{serverID, toolName}
+				if _, ok := seenTools[key]; !ok {
+					seenTools[key] = &toolInfo{
+						serverID:    serverID,
+						toolName:    toolName,
+						contentHash: hash,
+					}
+				}
+				seenTools[key].events = append(seenTools[key].events, ev)
+
+				if serverTools[serverID] == nil {
+					serverTools[serverID] = make(map[string]bool)
+				}
+				serverTools[serverID][toolName] = true
+			}
+
+		case "mcp_tool_called", "mcp_tool_call_intercepted":
+			toolName := stringFromFields(ev.Fields, "tool_name")
+			action := stringFromFields(ev.Fields, "action")
+
+			if ev.Type == "mcp_tool_call_intercepted" && action == "block" {
+				if serverID != "" && toolName != "" {
+					key := toolKey{serverID, toolName}
+					if _, ok := blockedToolMap[key]; !ok {
+						blockedToolMap[key] = &toolInfo{
+							serverID: serverID,
+							toolName: toolName,
+						}
+					}
+					info := blockedToolMap[key]
+					info.events = append(info.events, ev)
+					// Capture first block reason
+					if reason := stringFromFields(ev.Fields, "reason"); reason != "" && info.blockReason == "" {
+						info.blockReason = reason
+					}
+				}
+			}
+
+			// Track server activity
+			if serverID != "" {
+				if serverTools[serverID] == nil {
+					serverTools[serverID] = make(map[string]bool)
+				}
+				if toolName != "" {
+					serverTools[serverID][toolName] = true
+				}
+			}
+
+		case "mcp_tool_changed":
+			hasChangedTools = true
+
+		case "mcp_cross_server_blocked":
+			rule := stringFromFields(ev.Fields, "rule")
+			if rule != "" && !crossServerRuleSet[rule] {
+				crossServerRuleSet[rule] = true
+				crossServerRules = append(crossServerRules, rule)
+			}
+
+		case "mcp_network_connection":
+			if serverID != "" {
+				if serverTools[serverID] == nil {
+					serverTools[serverID] = make(map[string]bool)
+				}
+			}
+		}
+	}
+
+	// Build tool rules from seen tools
+	for _, info := range seenTools {
+		prov := buildProvenance(info.events, []string{info.serverID + "/" + info.toolName}, false, "")
+		toolRules = append(toolRules, MCPToolRuleGen{
+			GeneratedRule: GeneratedRule{
+				Name:        sanitizeName(info.serverID + "-" + info.toolName),
+				Description: fmt.Sprintf("MCP tool %s/%s", info.serverID, info.toolName),
+				Provenance:  prov,
+			},
+			ServerID:    info.serverID,
+			ToolName:    info.toolName,
+			ContentHash: info.contentHash,
+		})
+	}
+
+	// Build blocked tool rules
+	if opts.IncludeBlocked {
+		for _, info := range blockedToolMap {
+			reason := info.blockReason
+			prov := buildProvenance(info.events, []string{info.serverID + "/" + info.toolName}, true, reason)
+			blockedTools = append(blockedTools, MCPToolRuleGen{
+				GeneratedRule: GeneratedRule{
+					Name:        sanitizeName(info.serverID + "-" + info.toolName),
+					Description: fmt.Sprintf("MCP tool %s/%s (blocked)", info.serverID, info.toolName),
+					Provenance:  prov,
+				},
+				ServerID:    info.serverID,
+				ToolName:    info.toolName,
+				Blocked:     true,
+				BlockReason: reason,
+			})
+		}
+	}
+
+	// Build server list
+	for serverID, tools := range serverTools {
+		servers = append(servers, MCPServerRuleGen{
+			ServerID:  serverID,
+			ToolCount: len(tools),
+		})
+	}
+
+	// Sort for deterministic output
+	sort.Slice(toolRules, func(i, j int) bool { return toolRules[i].Name < toolRules[j].Name })
+	sort.Slice(blockedTools, func(i, j int) bool { return blockedTools[i].Name < blockedTools[j].Name })
+	sort.Slice(servers, func(i, j int) bool { return servers[i].ServerID < servers[j].ServerID })
+
+	// Build MCP config
+	config = &MCPPolicyConfig{
+		VersionPinning:   hasChangedTools,
+		VersionOnChange:  "block",
+		CrossServer:      len(crossServerRules) > 0,
+		CrossServerRules: crossServerRules,
+	}
+	// Always recommend version pinning if tools have hashes
+	for _, r := range toolRules {
+		if r.ContentHash != "" {
+			config.VersionPinning = true
+			break
+		}
+	}
+
+	return toolRules, blockedTools, servers, config
 }
