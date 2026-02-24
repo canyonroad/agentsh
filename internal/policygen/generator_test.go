@@ -168,3 +168,112 @@ func TestGenerator_CommandRulesWithRiskyDetection(t *testing.T) {
 		t.Error("expected ls to NOT be marked as risky")
 	}
 }
+
+func TestGenerator_MCPEvents(t *testing.T) {
+	now := time.Now()
+	events := []types.Event{
+		// mcp_tool_seen with hash
+		{ID: "1", Type: "mcp_tool_seen", Timestamp: now, Fields: map[string]any{
+			"server_id": "weather", "tool_name": "get_weather",
+			"tool_hash": "sha256:abc123", "server_type": "stdio",
+		}},
+		// mcp_tool_seen — different tool, same server
+		{ID: "2", Type: "mcp_tool_seen", Timestamp: now.Add(time.Second), Fields: map[string]any{
+			"server_id": "weather", "tool_name": "get_forecast",
+			"tool_hash": "sha256:def456", "server_type": "stdio",
+		}},
+		// mcp_tool_called — confirms usage
+		{ID: "3", Type: "mcp_tool_called", Timestamp: now.Add(2 * time.Second), Fields: map[string]any{
+			"server_id": "weather", "tool_name": "get_weather",
+		}},
+		// mcp_tool_call_intercepted — allowed
+		{ID: "4", Type: "mcp_tool_call_intercepted", Timestamp: now.Add(3 * time.Second), Fields: map[string]any{
+			"server_id": "weather", "tool_name": "get_weather",
+			"action": "allow", "tool_hash": "sha256:abc123",
+		}},
+		// mcp_tool_call_intercepted — blocked
+		{ID: "5", Type: "mcp_tool_call_intercepted", Timestamp: now.Add(4 * time.Second), Fields: map[string]any{
+			"server_id": "weather", "tool_name": "execute_cmd",
+			"action": "block", "reason": "version_pin",
+		}},
+		// mcp_tool_changed — triggers version pinning
+		{ID: "6", Type: "mcp_tool_changed", Timestamp: now.Add(5 * time.Second), Fields: map[string]any{
+			"server_id": "weather", "tool_name": "get_weather",
+			"new_hash": "sha256:changed",
+		}},
+		// mcp_cross_server_blocked
+		{ID: "7", Type: "mcp_cross_server_blocked", Timestamp: now.Add(6 * time.Second), Fields: map[string]any{
+			"rule": "read_then_send", "severity": "critical",
+			"blocked_server_id": "evil", "blocked_tool_name": "exfil",
+		}},
+		// mcp_network_connection
+		{ID: "8", Type: "mcp_network_connection", Timestamp: now.Add(7 * time.Second), Fields: map[string]any{
+			"server_id": "weather",
+		}},
+	}
+
+	store := &mockEventStore{events: events}
+	gen := NewGenerator(store)
+
+	sess := types.Session{ID: "test-session"}
+	policy, err := gen.Generate(context.Background(), sess, DefaultOptions())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have MCP tool rules (from mcp_tool_seen)
+	if len(policy.MCPToolRules) != 2 {
+		t.Errorf("expected 2 MCP tool rules, got %d", len(policy.MCPToolRules))
+	}
+
+	// Should have blocked tools (from intercepted block)
+	if len(policy.MCPBlockedTools) != 1 {
+		t.Errorf("expected 1 blocked MCP tool, got %d", len(policy.MCPBlockedTools))
+	}
+	if len(policy.MCPBlockedTools) > 0 && policy.MCPBlockedTools[0].BlockReason != "version_pin" {
+		t.Errorf("expected block reason 'version_pin', got %q", policy.MCPBlockedTools[0].BlockReason)
+	}
+
+	// Should have servers
+	if len(policy.MCPServers) == 0 {
+		t.Error("expected MCP servers")
+	}
+
+	// Should have MCP config
+	if policy.MCPConfig == nil {
+		t.Fatal("expected MCPConfig to be set")
+	}
+	if !policy.MCPConfig.VersionPinning {
+		t.Error("expected version pinning to be enabled (mcp_tool_changed present)")
+	}
+	if policy.MCPConfig.VersionOnChange != "block" {
+		t.Errorf("expected version on_change 'block', got %q", policy.MCPConfig.VersionOnChange)
+	}
+	if !policy.MCPConfig.CrossServer {
+		t.Error("expected cross-server to be enabled")
+	}
+}
+
+func TestGenerator_MCPEvents_NoMCPActivity(t *testing.T) {
+	now := time.Now()
+	events := []types.Event{
+		{Type: "file_read", Path: "/workspace/main.go", Timestamp: now,
+			Policy: &types.PolicyInfo{Decision: types.DecisionAllow}},
+	}
+
+	store := &mockEventStore{events: events}
+	gen := NewGenerator(store)
+
+	sess := types.Session{ID: "test-session"}
+	policy, err := gen.Generate(context.Background(), sess, DefaultOptions())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(policy.MCPToolRules) != 0 {
+		t.Error("expected no MCP tool rules for non-MCP session")
+	}
+	if policy.MCPConfig != nil {
+		t.Error("expected nil MCPConfig for non-MCP session")
+	}
+}
