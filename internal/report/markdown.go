@@ -115,7 +115,7 @@ func FormatMarkdown(r *Report) string {
 	}
 
 	// MCP Tools section (for both summary and detailed reports)
-	if r.MCPSummary != nil && r.MCPSummary.ToolsSeen > 0 {
+	if r.MCPSummary != nil {
 		sb.WriteString("## MCP Tools\n")
 		sb.WriteString("| Metric | Value |\n")
 		sb.WriteString("|--------|-------|\n")
@@ -126,6 +126,21 @@ func FormatMarkdown(r *Report) string {
 		}
 		if r.MCPSummary.ChangedTools > 0 {
 			sb.WriteString(fmt.Sprintf("| Changed Tools (Rug Pull) | %d |\n", r.MCPSummary.ChangedTools))
+		}
+		if r.MCPSummary.ToolCallsTotal > 0 {
+			sb.WriteString(fmt.Sprintf("| Tool Calls Observed | %d |\n", r.MCPSummary.ToolCallsTotal))
+		}
+		if r.MCPSummary.InterceptedTotal > 0 {
+			sb.WriteString(fmt.Sprintf("| Intercepted (Proxy) | %d |\n", r.MCPSummary.InterceptedTotal))
+		}
+		if r.MCPSummary.InterceptedBlocked > 0 {
+			sb.WriteString(fmt.Sprintf("| Blocked by Proxy | %d |\n", r.MCPSummary.InterceptedBlocked))
+		}
+		if r.MCPSummary.CrossServerBlocked > 0 {
+			sb.WriteString(fmt.Sprintf("| Cross-Server Blocked | %d |\n", r.MCPSummary.CrossServerBlocked))
+		}
+		if r.MCPSummary.NetworkConnections > 0 {
+			sb.WriteString(fmt.Sprintf("| Network Connections | %d |\n", r.MCPSummary.NetworkConnections))
 		}
 		sb.WriteString("\n")
 

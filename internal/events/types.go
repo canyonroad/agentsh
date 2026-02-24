@@ -108,6 +108,8 @@ const (
 	EventMCPToolCalled          EventType = "mcp_tool_called"
 	EventMCPDetection           EventType = "mcp_detection"
 	EventMCPToolCallIntercepted EventType = "mcp_tool_call_intercepted"
+	EventMCPCrossServerBlocked  EventType = "mcp_cross_server_blocked"
+	EventMCPNetworkConnection   EventType = "mcp_network_connection"
 )
 
 // Policy events.
@@ -217,6 +219,8 @@ var EventCategory = map[EventType]string{
 	EventMCPToolCalled:          "mcp",
 	EventMCPDetection:           "mcp",
 	EventMCPToolCallIntercepted: "mcp",
+	EventMCPCrossServerBlocked:  "mcp",
+	EventMCPNetworkConnection:   "mcp",
 
 	// Policy
 	EventPolicyLoaded:  "policy",
@@ -253,7 +257,8 @@ var AllEventTypes = []EventType{
 	EventSignalSent, EventSignalBlocked, EventSignalRedirected,
 	EventSignalAbsorbed, EventSignalApproved, EventSignalWouldDeny,
 	// MCP
-	EventMCPToolSeen, EventMCPToolChanged, EventMCPToolCalled, EventMCPDetection, EventMCPToolCallIntercepted,
+	EventMCPToolSeen, EventMCPToolChanged, EventMCPToolCalled, EventMCPDetection,
+	EventMCPToolCallIntercepted, EventMCPCrossServerBlocked, EventMCPNetworkConnection,
 	// Policy
 	EventPolicyLoaded, EventPolicyChanged,
 }

@@ -300,6 +300,11 @@ func extractMCPSummary(events []types.Event) *MCPToolSummary {
 	var highRiskTools []MCPToolRisk
 	var changedTools int
 	var totalDetections int
+	var toolCallsTotal int
+	var interceptedTotal int
+	var interceptedBlocked int
+	var crossServerBlocked int
+	var networkConnections int
 
 	for _, ev := range events {
 		switch ev.Type {
@@ -344,22 +349,44 @@ func extractMCPSummary(events []types.Event) *MCPToolSummary {
 			if severity != "" {
 				bySeverity[severity]++
 			}
+
+		case "mcp_tool_called":
+			toolCallsTotal++
+
+		case "mcp_tool_call_intercepted":
+			interceptedTotal++
+			if stringFromFields(ev.Fields, "action") == "block" {
+				interceptedBlocked++
+			}
+
+		case "mcp_cross_server_blocked":
+			crossServerBlocked++
+
+		case "mcp_network_connection":
+			networkConnections++
 		}
 	}
 
 	// Return nil if no MCP events found
-	if len(seenTools) == 0 && totalDetections == 0 {
+	if len(seenTools) == 0 && totalDetections == 0 &&
+		toolCallsTotal == 0 && interceptedTotal == 0 &&
+		crossServerBlocked == 0 && networkConnections == 0 {
 		return nil
 	}
 
 	return &MCPToolSummary{
-		ToolsSeen:       len(seenTools),
-		ServersCount:    len(toolsByServer),
-		DetectionsTotal: totalDetections,
-		ChangedTools:    changedTools,
-		ToolsByServer:   toolsByServer,
-		BySeverity:      bySeverity,
-		HighRiskTools:   highRiskTools,
+		ToolsSeen:          len(seenTools),
+		ServersCount:       len(toolsByServer),
+		DetectionsTotal:    totalDetections,
+		ChangedTools:       changedTools,
+		ToolsByServer:      toolsByServer,
+		BySeverity:         bySeverity,
+		HighRiskTools:      highRiskTools,
+		ToolCallsTotal:     toolCallsTotal,
+		InterceptedTotal:   interceptedTotal,
+		InterceptedBlocked: interceptedBlocked,
+		CrossServerBlocked: crossServerBlocked,
+		NetworkConnections: networkConnections,
 	}
 }
 
