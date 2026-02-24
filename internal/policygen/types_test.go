@@ -38,6 +38,26 @@ func TestProvenance_String_ZeroTimes(t *testing.T) {
 	}
 }
 
+func TestMCPToolRuleGen_Fields(t *testing.T) {
+	rule := MCPToolRuleGen{
+		GeneratedRule: GeneratedRule{
+			Name:        "weather-get_weather",
+			Description: "MCP tool weather/get_weather",
+			Provenance:  Provenance{EventCount: 5},
+		},
+		ServerID:    "weather",
+		ToolName:    "get_weather",
+		ContentHash: "sha256:abc123",
+	}
+
+	if rule.ServerID != "weather" {
+		t.Errorf("unexpected ServerID: %s", rule.ServerID)
+	}
+	if rule.ContentHash != "sha256:abc123" {
+		t.Errorf("unexpected ContentHash: %s", rule.ContentHash)
+	}
+}
+
 func TestOptions_Defaults(t *testing.T) {
 	opts := DefaultOptions()
 	if opts.Threshold != 5 {

@@ -86,6 +86,30 @@ type UnixRuleGen struct {
 	Decision   string
 }
 
+// MCPToolRuleGen extends GeneratedRule for MCP tool rules.
+type MCPToolRuleGen struct {
+	GeneratedRule
+	ServerID    string
+	ToolName    string
+	ContentHash string // SHA-256 of tool definition
+	Blocked     bool   // True if this tool was blocked by proxy
+	BlockReason string // Why it was blocked
+}
+
+// MCPServerRuleGen represents a discovered MCP server.
+type MCPServerRuleGen struct {
+	ServerID  string
+	ToolCount int // Number of tools seen on this server
+}
+
+// MCPPolicyConfig holds generated MCP policy configuration.
+type MCPPolicyConfig struct {
+	VersionPinning   bool     // Recommend version pinning
+	VersionOnChange  string   // "block" or "alert"
+	CrossServer      bool     // Recommend cross-server detection
+	CrossServerRules []string // Rules that fired (e.g., "read_then_send")
+}
+
 // GeneratedPolicy holds all generated rules.
 type GeneratedPolicy struct {
 	SessionID   string
@@ -102,4 +126,10 @@ type GeneratedPolicy struct {
 	BlockedFiles    []FileRuleGen
 	BlockedNetwork  []NetworkRuleGen
 	BlockedCommands []CommandRuleGen
+
+	// MCP rules
+	MCPToolRules    []MCPToolRuleGen
+	MCPBlockedTools []MCPToolRuleGen   // Tools blocked by proxy (for comments)
+	MCPServers      []MCPServerRuleGen
+	MCPConfig       *MCPPolicyConfig   // nil if no MCP activity
 }
