@@ -26,9 +26,24 @@
 
 ### Critical
 - **Dangerous command blocked**: `rm -rf /` - rm -rf blocked for safety
+- **MCP cross-server pattern detected**: read_then_send pattern between `notes` and `web-search` servers
 
 ### Warning
 - **Network access denied**: Connection to `internal.corp.local:80` blocked - internal networks blocked
+- **MCP tool blocked by proxy**: `web-search/fetch_url` blocked — version_pin (tool definition changed)
+
+## MCP Tools
+
+| Metric | Value |
+|--------|-------|
+| Tools Seen | 5 |
+| Servers | 2 |
+| Security Detections | 1 |
+| Changed Tools (Rug Pull) | 1 |
+| Tool Calls Observed | 8 |
+| Intercepted (Proxy) | 8 |
+| Blocked by Proxy | 2 |
+| Cross-Server Blocked | 1 |
 
 ## Policy Decisions
 
