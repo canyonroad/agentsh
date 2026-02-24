@@ -2,12 +2,14 @@
 package policygen
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/agentsh/agentsh/pkg/types"
+	"gopkg.in/yaml.v3"
 )
 
 func TestIntegration_FullPolicyGeneration(t *testing.T) {
@@ -180,6 +182,88 @@ func TestIntegration_MCPPolicyGeneration(t *testing.T) {
 	}
 	if !strings.Contains(yaml, `content_hash: "sha256:pr123"`) {
 		t.Error("YAML missing content hash")
+	}
+}
+
+func TestIntegration_MCPYAMLRoundTrip(t *testing.T) {
+	now := time.Now()
+	events := []types.Event{
+		{ID: "m1", Type: "mcp_tool_seen", Timestamp: now, Fields: map[string]any{
+			"server_id": "gh", "tool_name": "create_pr",
+			"tool_hash": "sha256:pr123", "server_type": "stdio",
+		}},
+		{ID: "m2", Type: "mcp_tool_called", Timestamp: now.Add(time.Second), Fields: map[string]any{
+			"server_id": "gh", "tool_name": "create_pr",
+		}},
+	}
+
+	store := &mockEventStore{events: events}
+	gen := NewGenerator(store)
+
+	sess := types.Session{ID: "roundtrip-test"}
+	policy, err := gen.Generate(context.Background(), sess, DefaultOptions())
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	yamlStr := FormatYAML(policy, "roundtrip-test")
+
+	// Parse the generated YAML with strict mode (KnownFields)
+	type policyDoc struct {
+		Version  int    `yaml:"version"`
+		Name     string `yaml:"name"`
+		MCPRules *struct {
+			EnforcePolicy bool   `yaml:"enforce_policy"`
+			ToolPolicy    string `yaml:"tool_policy"`
+			ServerPolicy  string `yaml:"server_policy"`
+			AllowedTools  []struct {
+				Server      string `yaml:"server"`
+				Tool        string `yaml:"tool"`
+				ContentHash string `yaml:"content_hash"`
+			} `yaml:"allowed_tools"`
+			AllowedServers []struct {
+				ID string `yaml:"id"`
+			} `yaml:"allowed_servers"`
+			VersionPinning struct {
+				Enabled        bool   `yaml:"enabled"`
+				OnChange       string `yaml:"on_change"`
+				AutoTrustFirst bool   `yaml:"auto_trust_first"`
+			} `yaml:"version_pinning"`
+		} `yaml:"mcp_rules"`
+	}
+
+	dec := yaml.NewDecoder(bytes.NewReader([]byte(yamlStr)))
+	var doc policyDoc
+	if err := dec.Decode(&doc); err != nil {
+		t.Fatalf("failed to parse generated YAML: %v\n\nYAML:\n%s", err, yamlStr)
+	}
+
+	if doc.MCPRules == nil {
+		t.Fatal("expected mcp_rules section in parsed YAML")
+	}
+	if !doc.MCPRules.EnforcePolicy {
+		t.Error("expected enforce_policy: true")
+	}
+	if doc.MCPRules.ToolPolicy != "allowlist" {
+		t.Errorf("expected tool_policy 'allowlist', got %q", doc.MCPRules.ToolPolicy)
+	}
+	if doc.MCPRules.ServerPolicy != "allowlist" {
+		t.Errorf("expected server_policy 'allowlist', got %q", doc.MCPRules.ServerPolicy)
+	}
+	if len(doc.MCPRules.AllowedTools) != 1 {
+		t.Fatalf("expected 1 allowed tool, got %d", len(doc.MCPRules.AllowedTools))
+	}
+	if doc.MCPRules.AllowedTools[0].Server != "gh" {
+		t.Errorf("expected server 'gh', got %q", doc.MCPRules.AllowedTools[0].Server)
+	}
+	if doc.MCPRules.AllowedTools[0].ContentHash != "sha256:pr123" {
+		t.Errorf("expected content_hash 'sha256:pr123', got %q", doc.MCPRules.AllowedTools[0].ContentHash)
+	}
+	if len(doc.MCPRules.AllowedServers) != 1 {
+		t.Fatalf("expected 1 allowed server, got %d", len(doc.MCPRules.AllowedServers))
+	}
+	if doc.MCPRules.AllowedServers[0].ID != "gh" {
+		t.Errorf("expected server id 'gh', got %q", doc.MCPRules.AllowedServers[0].ID)
 	}
 }
 

@@ -629,7 +629,11 @@ func (g *Generator) generateMCPRules(events []types.Event, opts Options) (
 		return nil, nil, nil, nil
 	}
 
-	// Track tools: key = "server_id:tool_name"
+	// Track tools by server+tool identity
+	type toolKey struct {
+		serverID string
+		toolName string
+	}
 	type toolInfo struct {
 		serverID    string
 		toolName    string
@@ -637,8 +641,8 @@ func (g *Generator) generateMCPRules(events []types.Event, opts Options) (
 		blockReason string
 		events      []types.Event
 	}
-	seenTools := make(map[string]*toolInfo)
-	blockedToolMap := make(map[string]*toolInfo)
+	seenTools := make(map[toolKey]*toolInfo)
+	blockedToolMap := make(map[toolKey]*toolInfo)
 	serverTools := make(map[string]map[string]bool) // server_id -> set of tool names
 
 	var hasChangedTools bool
@@ -653,7 +657,7 @@ func (g *Generator) generateMCPRules(events []types.Event, opts Options) (
 			toolName := stringFromFields(ev.Fields, "tool_name")
 			hash := stringFromFields(ev.Fields, "tool_hash")
 			if serverID != "" && toolName != "" {
-				key := serverID + ":" + toolName
+				key := toolKey{serverID, toolName}
 				if _, ok := seenTools[key]; !ok {
 					seenTools[key] = &toolInfo{
 						serverID:    serverID,
@@ -675,7 +679,7 @@ func (g *Generator) generateMCPRules(events []types.Event, opts Options) (
 
 			if ev.Type == "mcp_tool_call_intercepted" && action == "block" {
 				if serverID != "" && toolName != "" {
-					key := serverID + ":" + toolName
+					key := toolKey{serverID, toolName}
 					if _, ok := blockedToolMap[key]; !ok {
 						blockedToolMap[key] = &toolInfo{
 							serverID: serverID,

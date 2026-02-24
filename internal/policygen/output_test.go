@@ -354,6 +354,7 @@ func TestFormatYAML_MCPRules(t *testing.T) {
 		`server: "weather"`,
 		`tool: "get_weather"`,
 		`content_hash: "sha256:abc123"`,
+		`server_policy: "allowlist"`,
 		"allowed_servers:",
 		`id: "weather"`,
 		"version_pinning:",
