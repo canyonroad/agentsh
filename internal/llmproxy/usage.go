@@ -10,8 +10,9 @@ import (
 // Different providers use different field names, but we normalize to
 // input_tokens and output_tokens for consistent logging and cost attribution.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens  int  `json:"input_tokens"`
+	OutputTokens int  `json:"output_tokens"`
+	HasUsage     bool `json:"-"` // true when the response contained a parseable usage field
 }
 
 // anthropicUsage represents the usage format in Anthropic API responses.
@@ -67,9 +68,16 @@ func extractAnthropicUsage(body []byte) Usage {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return Usage{}
 	}
+	// Detect presence: if both tokens are zero, check whether the "usage"
+	// key exists at all (a response without usage vs usage:{...} with zeros).
+	hasUsage := resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0
+	if !hasUsage {
+		hasUsage = usageFieldPresent(body)
+	}
 	return Usage{
 		InputTokens:  resp.Usage.InputTokens,
 		OutputTokens: resp.Usage.OutputTokens,
+		HasUsage:     hasUsage,
 	}
 }
 
@@ -79,10 +87,26 @@ func extractOpenAIUsage(body []byte) Usage {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return Usage{}
 	}
+	hasUsage := resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0
+	if !hasUsage {
+		hasUsage = usageFieldPresent(body)
+	}
 	return Usage{
 		InputTokens:  resp.Usage.PromptTokens,
 		OutputTokens: resp.Usage.CompletionTokens,
+		HasUsage:     hasUsage,
 	}
+}
+
+// usageFieldPresent checks whether the raw JSON body contains a "usage" key.
+// Used to distinguish "usage present with zero tokens" from "no usage at all".
+func usageFieldPresent(body []byte) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return false
+	}
+	_, ok := raw["usage"]
+	return ok
 }
 
 // sseEvent is a minimal structure for extracting usage from SSE event data lines.
@@ -193,6 +217,7 @@ func extractAnthropicSSEUsage(body []byte) Usage {
 		case "message_start":
 			total.InputTokens += ev.Message.Usage.InputTokens
 			total.OutputTokens += ev.Message.Usage.OutputTokens
+			total.HasUsage = true
 		case "message_delta":
 			// Delta usage is cumulative — take the latest value.
 			if ev.Usage.OutputTokens > total.OutputTokens {
@@ -201,6 +226,7 @@ func extractAnthropicSSEUsage(body []byte) Usage {
 			if ev.Usage.InputTokens > total.InputTokens {
 				total.InputTokens = ev.Usage.InputTokens
 			}
+			total.HasUsage = true
 		}
 	}
 	return total
@@ -220,6 +246,7 @@ func extractOpenAISSEUsage(body []byte) Usage {
 		if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
 			total.InputTokens = chunk.Usage.PromptTokens
 			total.OutputTokens = chunk.Usage.CompletionTokens
+			total.HasUsage = true
 		}
 	}
 	return total

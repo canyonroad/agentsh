@@ -192,6 +192,9 @@ func (w *MCPExecWrapper) WrapCommand(cmd *exec.Cmd) (cleanup func(), err error) 
 		if len(cmd.Args) > 0 {
 			cmd.Args[0] = w.resolvedCommand
 		}
+		// Clear any lookup error from exec.Command — the original command
+		// may not have been in PATH, but we have a verified absolute path.
+		cmd.Err = nil
 	}
 
 	// Apply environment filtering before process launch.

@@ -131,6 +131,39 @@ func TestExtractUsage_UnknownDialect(t *testing.T) {
 	}
 }
 
+func TestExtractUsage_HasUsage_Present(t *testing.T) {
+	body := []byte(`{"usage": {"input_tokens": 100, "output_tokens": 50}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if !usage.HasUsage {
+		t.Error("HasUsage should be true when usage field is present with non-zero tokens")
+	}
+}
+
+func TestExtractUsage_HasUsage_PresentButZero(t *testing.T) {
+	// Usage field is present but tokens are zero — HasUsage should still be true.
+	body := []byte(`{"usage": {"input_tokens": 0, "output_tokens": 0}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if !usage.HasUsage {
+		t.Error("HasUsage should be true when usage field is present (even with zero tokens)")
+	}
+}
+
+func TestExtractUsage_HasUsage_Absent(t *testing.T) {
+	// No usage field at all — HasUsage should be false.
+	body := []byte(`{"id": "msg_123", "type": "message", "content": [{"type": "text", "text": "Hello!"}]}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when usage field is absent")
+	}
+}
+
+func TestExtractUsage_HasUsage_InvalidJSON(t *testing.T) {
+	usage := ExtractUsage([]byte(`{not valid`), DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false for invalid JSON")
+	}
+}
+
 func TestExtractSSEUsage_Anthropic(t *testing.T) {
 	body := []byte(
 		"event: message_start\n" +

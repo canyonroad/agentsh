@@ -386,10 +386,11 @@ func TestProxy_TPM_FallbackChargeOnMissingUsage(t *testing.T) {
 			},
 			RateLimits: config.LLMRateLimitsConfig{
 				Enabled:         true,
-				TokensPerMinute: 6000,
-				// Burst of 300: enough for 1 fallback charge (200) but not two
-				// when combined with pre-request budget depletion.
-				TokenBurst: 300,
+				TokensPerMinute: 60, // 1 token/sec — negligible replenishment during test
+				// Burst of 100 < fallback charge (200 tokens): ForceConsumeN
+				// drives the bucket to -100, ensuring the second request is
+				// deterministically blocked regardless of timing jitter.
+				TokenBurst: 100,
 			},
 		},
 		DLP: config.DefaultDLPConfig(),
@@ -433,23 +434,18 @@ func TestProxy_TPM_FallbackChargeOnMissingUsage(t *testing.T) {
 		return resp
 	}
 
-	// First request succeeds — upstream returns no usage, but fallback charge
-	// of 200 tokens is applied, leaving 100 of the 300-token burst.
+	// First request succeeds — upstream returns no usage, fallback charge
+	// of 200 tokens drives the 100-token burst budget to -100.
 	resp1 := makeRequest()
 	if resp1.StatusCode == http.StatusTooManyRequests {
 		t.Fatal("first request should not be rate limited")
 	}
 
-	// Second request also gets through (100 remaining > 0 budget check),
-	// consuming another 200 fallback, driving budget negative.
-	// Note: this may or may not be 429 depending on timing, so we just
-	// verify that by the third request the budget is definitely depleted.
-	makeRequest()
-
-	// Third request should be rate limited — budget depleted from fallback charges.
-	resp3 := makeRequest()
-	if resp3.StatusCode != http.StatusTooManyRequests {
-		t.Errorf("third request should be 429 (TPM depleted from fallback charges), got %d", resp3.StatusCode)
+	// Second request should be rate limited — budget fully depleted by
+	// the fallback charge from the first request.
+	resp2 := makeRequest()
+	if resp2.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("second request should be 429 (TPM depleted from fallback charge), got %d", resp2.StatusCode)
 	}
 }
 

@@ -511,12 +511,12 @@ func (p *Proxy) logResponseDirect(requestID, sessionID string, dialect Dialect, 
 	}
 
 	// Consume tokens from the TPM budget for rate limiting.
-	// When TPM is enabled but usage is missing/unparseable, apply a
+	// When TPM is enabled but usage is absent/unparseable, apply a
 	// conservative fallback charge to prevent fail-open bypass.
 	totalTokens := usage.InputTokens + usage.OutputTokens
 	if totalTokens > 0 {
 		p.llmRateLimiter.ConsumeTokens(totalTokens)
-	} else if p.llmRateLimiter.TPMEnabled() {
+	} else if p.llmRateLimiter.TPMEnabled() && !usage.HasUsage {
 		p.llmRateLimiter.ConsumeTokens(tpmFallbackTokenCharge)
 	}
 

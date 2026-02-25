@@ -462,3 +462,43 @@ func TestMCPExecWrapper_WrapCommand_NoPinNoOverride(t *testing.T) {
 		t.Errorf("cmd.Path should not change when pinning is disabled, got %q want %q", cmd.Path, originalPath)
 	}
 }
+
+func TestMCPExecWrapper_WrapCommand_ClearsCmdErr(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{verifyStatus: "match"}
+
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: true,
+		OnChange:       "block",
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("BuildMCPExecWrapper failed: %v", err)
+	}
+
+	// Create a command with a non-existent binary — exec.Command sets cmd.Err.
+	cmd := exec.Command("nonexistent-binary-xyz-12345")
+	if cmd.Err == nil {
+		t.Skip("exec.Command did not set Err for missing binary (Go < 1.19?)")
+	}
+
+	cleanup, err := wrapper.WrapCommand(cmd)
+	if err != nil {
+		t.Fatalf("WrapCommand failed: %v", err)
+	}
+	defer cleanup()
+
+	// WrapCommand should have cleared the stale lookup error.
+	if cmd.Err != nil {
+		t.Errorf("cmd.Err should be nil after WrapCommand overrides path, got: %v", cmd.Err)
+	}
+	if cmd.Path != bin {
+		t.Errorf("cmd.Path = %q, want %q", cmd.Path, bin)
+	}
+}
