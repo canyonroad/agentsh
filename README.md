@@ -300,9 +300,10 @@ See [SECURITY.md](SECURITY.md) for configuration details.
 
 - **Tool Whitelisting**: Control which MCP tools can be invoked via allowlist/denylist policies
 - **Version Pinning**: Detect tool definition changes (rug pull protection) with configurable responses
+- **Cross-Server Detection**: Block data exfiltration patterns (read from Server A → send via Server B)
 - **Rate Limiting**: Token bucket rate limiting for MCP servers and network domains
 
-See [SECURITY.md](SECURITY.md) for full configuration options.
+See [SECURITY.md](SECURITY.md) for full configuration options, or run the **[MCP Protection Demo](https://github.com/canyonroad/agentsh-mcp-protection-demo)** to see these detections in action.
 
 ---
 
@@ -641,6 +642,7 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 
 ## References
 
+* **MCP Protection Demo:** [`agentsh-mcp-protection-demo`](https://github.com/canyonroad/agentsh-mcp-protection-demo) - live demo of cross-server exfiltration detection, rug pull blocking, and policy generation
 * **Security & threat model:** [`SECURITY.md`](SECURITY.md) - what agentsh protects against, known limitations, operator checklist
 * **External KMS:** [`SECURITY.md#external-kms-integration`](SECURITY.md#external-kms-integration) - AWS KMS, Azure Key Vault, HashiCorp Vault, GCP Cloud KMS for audit integrity keys
 * Config template: [`configs/server-config.yaml`](configs/server-config.yaml)
