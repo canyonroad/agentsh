@@ -676,11 +676,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		if syncerDone != nil {
-			<-syncerDone
-		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		// Shut down listeners immediately; don't wait for syncer first.
 		if s.pprofServer != nil {
 			_ = s.pprofServer.Shutdown(shutdownCtx)
 		}
@@ -690,12 +688,13 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.grpcServer != nil {
 			s.grpcServer.GracefulStop()
 		}
-		return s.httpServer.Shutdown(shutdownCtx)
-	case err := <-errCh:
-		stop() // cancel context so syncer can exit
+		httpErr := s.httpServer.Shutdown(shutdownCtx)
 		if syncerDone != nil {
 			<-syncerDone
 		}
+		return httpErr
+	case err := <-errCh:
+		stop() // cancel context so syncer can exit
 		if s.pprofServer != nil {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -708,6 +707,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if s.grpcServer != nil {
 			s.grpcServer.Stop()
+		}
+		if syncerDone != nil {
+			<-syncerDone
 		}
 		return fmt.Errorf("server: %w", err)
 	}

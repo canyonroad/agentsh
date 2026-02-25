@@ -21,7 +21,7 @@ type ThreatCheckResult struct {
 }
 
 // ThreatChecker is an optional interface for domain-level threat feed lookups.
-// *threatfeed.Store satisfies this interface.
+// threatfeed.PolicyAdapter satisfies this interface, bridging the Store to the policy engine.
 type ThreatChecker interface {
 	Check(domain string) (ThreatCheckResult, bool)
 }

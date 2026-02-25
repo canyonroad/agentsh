@@ -31,19 +31,21 @@ func (p *HostfileParser) Parse(r io.Reader) ([]string, error) {
 		if len(fields) < 2 {
 			continue
 		}
-		domain := strings.ToLower(strings.TrimRight(fields[1], "."))
-		if domain == "" {
-			continue
+		for _, f := range fields[1:] {
+			domain := strings.ToLower(strings.TrimRight(f, "."))
+			if domain == "" {
+				continue
+			}
+			if domain == "localhost" || domain == "localhost.localdomain" ||
+				domain == "broadcasthost" || domain == "local" {
+				continue
+			}
+			if _, ok := seen[domain]; ok {
+				continue
+			}
+			seen[domain] = struct{}{}
+			domains = append(domains, domain)
 		}
-		if domain == "localhost" || domain == "localhost.localdomain" ||
-			domain == "broadcasthost" || domain == "local" {
-			continue
-		}
-		if _, ok := seen[domain]; ok {
-			continue
-		}
-		seen[domain] = struct{}{}
-		domains = append(domains, domain)
 	}
 	return domains, scanner.Err()
 }
