@@ -400,6 +400,41 @@ func (a *SessionAnalyzer) Classify(toolName string) string {
 	return a.classifier.Classify(toolName)
 }
 
+// CheckServerSimilarity compares a new server ID against known servers.
+// Known servers are collected from the sliding window and burst tracking.
+// Returns (similarID, score) or ("", 0) if none exceed the threshold.
+func (a *SessionAnalyzer) CheckServerSimilarity(newServerID string, threshold float64) (string, float64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	seen := make(map[string]struct{})
+	for _, rec := range a.window {
+		if rec.ServerID != newServerID {
+			seen[rec.ServerID] = struct{}{}
+		}
+	}
+	for id := range a.bursts {
+		if id != newServerID {
+			seen[id] = struct{}{}
+		}
+	}
+	// Also check shadow entries for server IDs.
+	for _, info := range a.shadows {
+		if info.OriginalServerID != newServerID {
+			seen[info.OriginalServerID] = struct{}{}
+		}
+		if info.NewServerID != newServerID {
+			seen[info.NewServerID] = struct{}{}
+		}
+	}
+
+	existing := make([]string, 0, len(seen))
+	for id := range seen {
+		existing = append(existing, id)
+	}
+	return CheckServerNameSimilarity(newServerID, existing, threshold)
+}
+
 // pruneWindow removes entries older than maxWindow from the sliding window
 // and enforces the hard cap on window size.
 func (a *SessionAnalyzer) pruneWindow(now time.Time) {

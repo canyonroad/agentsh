@@ -200,6 +200,19 @@ type MCPServerEnvFilteredEvent struct {
 	PassedCount  int       `json:"passed_count"`
 }
 
+// MCPServerNameSimilarityEvent is logged when a new MCP server's name is
+// suspiciously similar to an existing server (possible typosquatting).
+type MCPServerNameSimilarityEvent struct {
+	Type      string    `json:"type"` // "mcp_server_name_similarity"
+	Timestamp time.Time `json:"timestamp"`
+	SessionID string    `json:"session_id"`
+
+	NewServerID     string  `json:"new_server_id"`
+	SimilarServerID string  `json:"similar_server_id"`
+	SimilarityScore float64 `json:"similarity_score"`
+	Severity        string  `json:"severity"` // "warning"
+}
+
 // FieldChange describes what changed in a tool definition.
 type FieldChange struct {
 	Field    string `json:"field"`
