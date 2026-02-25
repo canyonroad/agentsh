@@ -27,6 +27,7 @@ import (
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/threatfeed"
 	storepkg "github.com/agentsh/agentsh/internal/store"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/internal/store/jsonl"
@@ -62,6 +63,9 @@ type Server struct {
 
 	pprofLn     net.Listener
 	pprofServer *http.Server
+
+	threatSyncer *threatfeed.Syncer
+	threatStore  *threatfeed.Store
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -100,6 +104,25 @@ func New(cfg *config.Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Threat feed (optional).
+	var threatStore *threatfeed.Store
+	var threatSyncer *threatfeed.Syncer
+	if cfg.ThreatFeeds.Enabled {
+		cacheDir := cfg.ThreatFeeds.CacheDir
+		if cacheDir == "" {
+			cacheDir = filepath.Join(config.GetDataDir(), "threat-feeds")
+		}
+		threatStore = threatfeed.NewStore(cacheDir, cfg.ThreatFeeds.Allowlist)
+		if err := threatStore.LoadFromDisk(); err != nil {
+			slog.Warn("threat feed cache load failed", "error", err)
+		} else if threatStore.Size() > 0 {
+			slog.Info("threat feed loaded from cache", "domains", threatStore.Size())
+		}
+		engine.SetThreatStore(&threatfeed.PolicyAdapter{Store: threatStore}, cfg.ThreatFeeds.Action)
+		threatSyncer = threatfeed.NewSyncer(threatStore, cfg.ThreatFeeds, slog.Default())
+	}
+
 	limits := engine.Limits()
 
 	metricsCollector := metrics.New()
@@ -363,6 +386,8 @@ func New(cfg *config.Config) (*Server, error) {
 		sessionTimeout: sessionTimeout,
 		idleTimeout:    idleTimeout,
 		reapInterval:   reapInterval,
+		threatSyncer:   threatSyncer,
+		threatStore:    threatStore,
 	}
 
 	ln, err := listenHTTP(cfg)
@@ -617,6 +642,10 @@ func (s *Server) Run(ctx context.Context) error {
 				}
 			}
 		}()
+	}
+
+	if s.threatSyncer != nil {
+		go s.threatSyncer.Run(ctx)
 	}
 
 	errCh := make(chan error, 3)
