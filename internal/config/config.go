@@ -1286,6 +1286,9 @@ func validateConfig(cfg *Config) error {
 		}
 	}
 	for i, f := range cfg.ThreatFeeds.Feeds {
+		if f.Name == "" {
+			return fmt.Errorf("threat_feeds.feeds[%d].name must not be empty", i)
+		}
 		if f.Format != "" {
 			switch f.Format {
 			case "hostfile", "domain-list":
@@ -1293,6 +1296,13 @@ func validateConfig(cfg *Config) error {
 				return fmt.Errorf("invalid threat_feeds.feeds[%d].format %q (must be \"hostfile\" or \"domain-list\")", i, f.Format)
 			}
 		}
+	}
+	feedNames := make(map[string]struct{}, len(cfg.ThreatFeeds.Feeds))
+	for i, f := range cfg.ThreatFeeds.Feeds {
+		if _, dup := feedNames[f.Name]; dup {
+			return fmt.Errorf("duplicate threat_feeds.feeds name %q at index %d", f.Name, i)
+		}
+		feedNames[f.Name] = struct{}{}
 	}
 	if cfg.ThreatFeeds.Realtime.OnTimeout != "" {
 		switch cfg.ThreatFeeds.Realtime.OnTimeout {

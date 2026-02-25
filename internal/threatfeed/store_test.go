@@ -173,3 +173,19 @@ func TestStore_TrailingDot(t *testing.T) {
 	_, matched := s.Check("evil.com.")
 	assert.True(t, matched, "trailing dot should be stripped")
 }
+
+func TestStore_AllowlistNormalization(t *testing.T) {
+	// Allowlist entries with trailing dots, spaces, and mixed case should still match.
+	s := NewStore("", []string{" Safe.Example.Com. ", "OTHER.NET."})
+	s.Update(map[string]FeedEntry{
+		"safe.example.com": {FeedName: "test", AddedAt: time.Now()},
+		"other.net":        {FeedName: "test", AddedAt: time.Now()},
+		"evil.com":         {FeedName: "test", AddedAt: time.Now()},
+	})
+	_, matched := s.Check("safe.example.com")
+	assert.False(t, matched, "allowlisted domain with trailing dot should be excluded")
+	_, matched = s.Check("other.net")
+	assert.False(t, matched, "allowlisted domain with trailing dot should be excluded")
+	_, matched = s.Check("evil.com")
+	assert.True(t, matched, "non-allowlisted domain should still match")
+}

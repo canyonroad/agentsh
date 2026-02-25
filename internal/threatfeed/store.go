@@ -28,7 +28,10 @@ type Store struct {
 func NewStore(cacheDir string, allowlist []string) *Store {
 	al := make(map[string]struct{}, len(allowlist))
 	for _, d := range allowlist {
-		al[strings.ToLower(d)] = struct{}{}
+		d = strings.ToLower(strings.TrimRight(strings.TrimSpace(d), "."))
+		if d != "" {
+			al[d] = struct{}{}
+		}
 	}
 	return &Store{
 		domains:   make(map[string]FeedEntry),

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -89,6 +90,7 @@ func (s *Syncer) syncAll(ctx context.Context) {
 
 	merged := make(map[string]FeedEntry)
 	anySucceeded := false
+	hasSources := len(s.feeds) > 0 || len(s.locals) > 0
 
 	for _, feed := range s.feeds {
 		domains, err := s.fetchFeed(ctx, feed)
@@ -119,7 +121,7 @@ func (s *Syncer) syncAll(ctx context.Context) {
 	}
 
 	for _, path := range s.locals {
-		key := "local:" + path
+		key := "local:" + filepath.Base(path)
 		domains, err := s.parseLocalFile(path)
 		if err != nil {
 			s.logger.Warn("local threat list failed, using cached data",
@@ -138,9 +140,10 @@ func (s *Syncer) syncAll(ctx context.Context) {
 	}
 
 	// Update the store if at least one source succeeded (even if the result is
-	// empty — that legitimately clears stale entries). Skip the update only when
-	// ALL sources failed, to preserve the disk-loaded cache.
-	if anySucceeded || len(merged) > 0 {
+	// empty — that legitimately clears stale entries). Also update when no sources
+	// are configured to clear any stale disk cache. Skip the update only when
+	// sources exist but ALL failed, to preserve the disk-loaded cache.
+	if anySucceeded || !hasSources || len(merged) > 0 {
 		s.store.Update(merged)
 		if err := s.store.SaveToDisk(); err != nil {
 			s.logger.Warn("threat feed disk save failed", "error", err)

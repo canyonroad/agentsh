@@ -132,3 +132,28 @@ func TestThreatFeedsValidation_ValidConfig(t *testing.T) {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 }
+
+func TestThreatFeedsValidation_DuplicateFeedNames(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Feeds = []ThreatFeedEntry{
+		{Name: "dup", URL: "https://a.com", Format: "hostfile"},
+		{Name: "dup", URL: "https://b.com", Format: "hostfile"},
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for duplicate feed names")
+	}
+}
+
+func TestThreatFeedsValidation_EmptyFeedName(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Feeds = []ThreatFeedEntry{
+		{Name: "", URL: "https://a.com", Format: "hostfile"},
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for empty feed name")
+	}
+}

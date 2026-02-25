@@ -316,6 +316,53 @@ func TestSyncer_DiskCachePartialFirstSyncFailure(t *testing.T) {
 	assert.True(t, matched, "feed-b domain should be retained from disk cache")
 }
 
+func TestSyncer_NoSourcesClearsStaleDiskCache(t *testing.T) {
+	dir := t.TempDir()
+
+	// Pre-populate disk cache.
+	s1 := NewStore(dir, nil)
+	s1.Update(map[string]FeedEntry{
+		"stale.com": {FeedName: "old-feed", AddedAt: time.Now()},
+	})
+	err := s1.SaveToDisk()
+	require.NoError(t, err)
+
+	// Load from disk, then sync with no sources configured.
+	store := NewStore(dir, nil)
+	err = store.LoadFromDisk()
+	require.NoError(t, err)
+	assert.Equal(t, 1, store.Size())
+
+	cfg := config.ThreatFeedsConfig{
+		SyncInterval: time.Hour,
+		// No feeds, no local lists.
+	}
+	syncer := NewSyncer(store, cfg, nil)
+	syncer.syncAll(context.Background())
+
+	assert.Equal(t, 0, store.Size(), "no sources configured should clear stale disk cache")
+}
+
+func TestSyncer_LocalListFeedNameUsesBasename(t *testing.T) {
+	dir := t.TempDir()
+	listPath := filepath.Join(dir, "blocklist.txt")
+	err := os.WriteFile(listPath, []byte("evil.com\n"), 0o644)
+	require.NoError(t, err)
+
+	store := NewStore("", nil)
+	cfg := config.ThreatFeedsConfig{
+		LocalLists:   []string{listPath},
+		SyncInterval: time.Hour,
+	}
+	syncer := NewSyncer(store, cfg, nil)
+	syncer.syncAll(context.Background())
+
+	entry, matched := store.Check("evil.com")
+	require.True(t, matched)
+	assert.Equal(t, "local:blocklist.txt", entry.FeedName, "feed name should use basename, not full path")
+	assert.NotContains(t, entry.FeedName, dir, "feed name must not contain the directory path")
+}
+
 func TestSyncer_LocalListFile(t *testing.T) {
 	dir := t.TempDir()
 	listPath := filepath.Join(dir, "custom.txt")
