@@ -164,6 +164,59 @@ func TestExtractUsage_HasUsage_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestExtractUsage_HasUsage_EmptyUsageObject(t *testing.T) {
+	// {"usage":{}} has the key but no token fields — should NOT count as HasUsage.
+	body := []byte(`{"usage": {}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when usage object has no token fields")
+	}
+}
+
+func TestExtractUsage_HasUsage_EmptyUsageObject_OpenAI(t *testing.T) {
+	body := []byte(`{"usage": {}}`)
+	usage := ExtractUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false for OpenAI when usage object has no token fields")
+	}
+}
+
+func TestExtractUsage_HasUsage_NullUsage(t *testing.T) {
+	// {"usage": null} — key present but not an object with token fields.
+	body := []byte(`{"usage": null}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when usage is null")
+	}
+}
+
+func TestExtractSSEUsage_OpenAI_ZeroTokenUsage(t *testing.T) {
+	// OpenAI SSE chunk with usage present but zero tokens — HasUsage should be true.
+	body := []byte(
+		`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}` + "\n\n" +
+			`data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if !usage.HasUsage {
+		t.Error("HasUsage should be true when OpenAI SSE chunk has usage with zero tokens")
+	}
+}
+
+func TestExtractSSEUsage_OpenAI_NoUsage(t *testing.T) {
+	// OpenAI SSE stream with no usage chunk at all — HasUsage should be false.
+	body := []byte(
+		`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when OpenAI SSE stream has no usage chunk")
+	}
+}
+
 func TestExtractSSEUsage_Anthropic(t *testing.T) {
 	body := []byte(
 		"event: message_start\n" +

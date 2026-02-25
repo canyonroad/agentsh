@@ -69,10 +69,10 @@ func extractAnthropicUsage(body []byte) Usage {
 		return Usage{}
 	}
 	// Detect presence: if both tokens are zero, check whether the "usage"
-	// key exists at all (a response without usage vs usage:{...} with zeros).
+	// object contains expected token fields (not just the "usage" key).
 	hasUsage := resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0
 	if !hasUsage {
-		hasUsage = usageFieldPresent(body)
+		hasUsage = usageHasTokenFields(body, DialectAnthropic)
 	}
 	return Usage{
 		InputTokens:  resp.Usage.InputTokens,
@@ -89,7 +89,7 @@ func extractOpenAIUsage(body []byte) Usage {
 	}
 	hasUsage := resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0
 	if !hasUsage {
-		hasUsage = usageFieldPresent(body)
+		hasUsage = usageHasTokenFields(body, DialectOpenAI)
 	}
 	return Usage{
 		InputTokens:  resp.Usage.PromptTokens,
@@ -98,15 +98,35 @@ func extractOpenAIUsage(body []byte) Usage {
 	}
 }
 
-// usageFieldPresent checks whether the raw JSON body contains a "usage" key.
-// Used to distinguish "usage present with zero tokens" from "no usage at all".
-func usageFieldPresent(body []byte) bool {
+// usageHasTokenFields checks whether the "usage" object in body contains
+// at least one of the expected token fields for the given dialect.
+// This prevents malformed usage objects (e.g. {"usage":{}}) from being
+// treated as valid usage, which would skip the fallback charge.
+func usageHasTokenFields(body []byte, dialect Dialect) bool {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return false
 	}
-	_, ok := raw["usage"]
-	return ok
+	usageRaw, ok := raw["usage"]
+	if !ok {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(usageRaw, &fields); err != nil {
+		return false
+	}
+	switch dialect {
+	case DialectAnthropic:
+		_, hasInput := fields["input_tokens"]
+		_, hasOutput := fields["output_tokens"]
+		return hasInput || hasOutput
+	case DialectOpenAI:
+		_, hasPrompt := fields["prompt_tokens"]
+		_, hasCompletion := fields["completion_tokens"]
+		return hasPrompt || hasCompletion
+	default:
+		return false
+	}
 }
 
 // sseEvent is a minimal structure for extracting usage from SSE event data lines.
@@ -246,6 +266,9 @@ func extractOpenAISSEUsage(body []byte) Usage {
 		if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
 			total.InputTokens = chunk.Usage.PromptTokens
 			total.OutputTokens = chunk.Usage.CompletionTokens
+			total.HasUsage = true
+		} else if !total.HasUsage && usageHasTokenFields(data, DialectOpenAI) {
+			// Usage object present with zero tokens — still counts as HasUsage.
 			total.HasUsage = true
 		}
 	}
