@@ -25,19 +25,20 @@ func NewMCPBridgeWithDetection(sessionID, serverID string, emitter func(interfac
 }
 
 // Inspect processes an MCP message and emits relevant events.
-func (b *MCPBridge) Inspect(data []byte, dir MCPDirection) {
+// Returns true if the message should be blocked (not forwarded).
+func (b *MCPBridge) Inspect(data []byte, dir MCPDirection) bool {
 	mcpDir := mcpinspect.DirectionRequest
 	if dir == MCPDirectionResponse {
 		mcpDir = mcpinspect.DirectionResponse
 	}
 
-	// Inspect returns error for invalid messages, but we don't block on errors
-	_ = b.inspector.Inspect(data, mcpDir)
+	result, _ := b.inspector.Inspect(data, mcpDir)
+	return result != nil && result.Action == "block"
 }
 
 // InspectorFunc returns a function suitable for ForwardWithInspection.
 func (b *MCPBridge) InspectorFunc() MCPInspector {
-	return func(data []byte, dir MCPDirection) {
-		b.Inspect(data, dir)
+	return func(data []byte, dir MCPDirection) bool {
+		return b.Inspect(data, dir)
 	}
 }

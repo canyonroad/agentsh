@@ -54,6 +54,21 @@ func TestDetectMessageType(t *testing.T) {
 			expected: MessageToolsCall,
 		},
 		{
+			name:     "tools/call response with content",
+			input:    `{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"hello"}]}}`,
+			expected: MessageToolsCallResponse,
+		},
+		{
+			name:     "tools/call response with empty content",
+			input:    `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`,
+			expected: MessageToolsCallResponse,
+		},
+		{
+			name:     "tools/call error response",
+			input:    `{"jsonrpc":"2.0","id":4,"error":{"code":-1,"message":"tool failed"}}`,
+			expected: MessageToolsCallResponse,
+		},
+		{
 			name:     "sampling request",
 			input:    `{"jsonrpc":"2.0","id":3,"method":"sampling/createMessage"}`,
 			expected: MessageSamplingRequest,
@@ -62,6 +77,16 @@ func TestDetectMessageType(t *testing.T) {
 			name:     "unknown message",
 			input:    `{"jsonrpc":"2.0","id":4,"method":"resources/list"}`,
 			expected: MessageUnknown,
+		},
+		{
+			name:     "notifications/tools/list_changed",
+			input:    `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`,
+			expected: MessageToolsListChanged,
+		},
+		{
+			name:     "notifications/tools/list_changed with no id field",
+			input:    `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`,
+			expected: MessageToolsListChanged,
 		},
 	}
 
@@ -75,5 +100,13 @@ func TestDetectMessageType(t *testing.T) {
 				t.Errorf("DetectMessageType() = %v, want %v", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestMessageToolsListChanged_String(t *testing.T) {
+	got := MessageToolsListChanged.String()
+	want := "notifications/tools/list_changed"
+	if got != want {
+		t.Errorf("MessageToolsListChanged.String() = %q, want %q", got, want)
 	}
 }

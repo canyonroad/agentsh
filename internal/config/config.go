@@ -500,18 +500,32 @@ type SandboxXPCESFConfig struct {
 
 // SandboxMCPConfig configures MCP security policies.
 type SandboxMCPConfig struct {
-	EnforcePolicy  bool                    `yaml:"enforce_policy"`
-	FailClosed     bool                    `yaml:"fail_closed"` // Block unknown tools if true
-	Servers        []MCPServerDeclaration  `yaml:"servers"`
-	ServerPolicy   string                  `yaml:"server_policy"` // allowlist, denylist, none
-	AllowedServers []MCPServerRule         `yaml:"allowed_servers"`
-	DeniedServers  []MCPServerRule         `yaml:"denied_servers"`
-	ToolPolicy     string                  `yaml:"tool_policy"` // allowlist, denylist, none
-	AllowedTools   []MCPToolRule           `yaml:"allowed_tools"`
-	DeniedTools    []MCPToolRule           `yaml:"denied_tools"`
-	VersionPinning MCPVersionPinningConfig `yaml:"version_pinning"`
-	RateLimits     MCPRateLimitsConfig     `yaml:"rate_limits"`
-	CrossServer    CrossServerConfig       `yaml:"cross_server"`
+	EnforcePolicy    bool                    `yaml:"enforce_policy"`
+	FailClosed       bool                    `yaml:"fail_closed"` // Block unknown tools if true
+	Servers          []MCPServerDeclaration  `yaml:"servers"`
+	ServerPolicy     string                  `yaml:"server_policy"` // allowlist, denylist, none
+	AllowedServers   []MCPServerRule         `yaml:"allowed_servers"`
+	DeniedServers    []MCPServerRule         `yaml:"denied_servers"`
+	ToolPolicy       string                  `yaml:"tool_policy"` // allowlist, denylist, none
+	AllowedTools     []MCPToolRule           `yaml:"allowed_tools"`
+	DeniedTools      []MCPToolRule           `yaml:"denied_tools"`
+	VersionPinning   MCPVersionPinningConfig `yaml:"version_pinning"`
+	RateLimits       MCPRateLimitsConfig     `yaml:"rate_limits"`
+	CrossServer      CrossServerConfig       `yaml:"cross_server"`
+	OutputInspection OutputInspectionConfig  `yaml:"output_inspection"`
+	Sampling         SamplingConfig          `yaml:"sampling"`
+}
+
+// OutputInspectionConfig configures scanning of MCP tool call responses.
+type OutputInspectionConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	OnDetection string `yaml:"on_detection"` // "alert" | "block" — default: "alert"
+}
+
+// SamplingConfig configures sampling/createMessage enforcement.
+type SamplingConfig struct {
+	Policy    string            `yaml:"policy"`     // "block" | "alert" | "allow" — default: "block"
+	PerServer map[string]string `yaml:"per_server"` // server_id → policy override
 }
 
 // MCPServerDeclaration defines an MCP server and how to connect to it.
@@ -522,6 +536,8 @@ type MCPServerDeclaration struct {
 	Args           []string `yaml:"args"`             // For stdio servers
 	URL            string   `yaml:"url"`              // For http/sse servers
 	TLSFingerprint string   `yaml:"tls_fingerprint"`  // Optional TLS cert pin
+	AllowedEnv     []string `yaml:"allowed_env"`      // If set, only these env vars (plus standard ones) are passed
+	DeniedEnv      []string `yaml:"denied_env"`       // If set, these env vars are stripped
 }
 
 // MCPServerRule matches servers by ID (supports "*" wildcard).

@@ -22,5 +22,5 @@
 //	    // Log or store the event
 //	}
 //	inspector := mcpinspect.NewInspectorWithDetection("session-id", "server-id", emitter)
-//	err := inspector.Inspect(messageBytes, mcpinspect.DirectionResponse)
+//	result, err := inspector.Inspect(messageBytes, mcpinspect.DirectionResponse)
 package mcpinspect

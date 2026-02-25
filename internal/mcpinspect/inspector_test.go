@@ -26,7 +26,7 @@ func TestInspector_ProcessToolsListResponse(t *testing.T) {
 		}
 	}`
 
-	err := inspector.Inspect([]byte(response), DirectionResponse)
+	_, err := inspector.Inspect([]byte(response), DirectionResponse)
 	if err != nil {
 		t.Fatalf("Inspect failed: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestInspector_DetectionEvents(t *testing.T) {
 		}
 	}`
 
-	err := inspector.Inspect([]byte(response), DirectionResponse)
+	_, err := inspector.Inspect([]byte(response), DirectionResponse)
 	if err != nil {
 		t.Fatalf("Inspect failed: %v", err)
 	}
@@ -172,5 +172,95 @@ func TestInspector_RateLimiting(t *testing.T) {
 	// 4th call should be blocked
 	if inspector.CheckRateLimit("tool1") {
 		t.Error("Call 4 should be rate limited")
+	}
+}
+
+func TestInspector_ToolsListChanged_EmitsEvent(t *testing.T) {
+	var capturedEvents []interface{}
+	emitter := func(event interface{}) {
+		capturedEvents = append(capturedEvents, event)
+	}
+
+	inspector := NewInspector("sess_456", "malicious-server", emitter)
+
+	// MCP notification: no id field, just method
+	notification := `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`
+
+	result, err := inspector.Inspect([]byte(notification), DirectionResponse)
+	if err != nil {
+		t.Fatalf("Inspect failed: %v", err)
+	}
+
+	// Should not block (result is nil)
+	if result != nil {
+		t.Errorf("expected nil result (no blocking), got %+v", result)
+	}
+
+	// Should emit exactly one MCPToolsListChangedEvent
+	if len(capturedEvents) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(capturedEvents))
+	}
+
+	event, ok := capturedEvents[0].(MCPToolsListChangedEvent)
+	if !ok {
+		t.Fatalf("expected MCPToolsListChangedEvent, got %T", capturedEvents[0])
+	}
+
+	if event.Type != "mcp_tools_list_changed" {
+		t.Errorf("event type = %q, want mcp_tools_list_changed", event.Type)
+	}
+	if event.SessionID != "sess_456" {
+		t.Errorf("session_id = %q, want sess_456", event.SessionID)
+	}
+	if event.ServerID != "malicious-server" {
+		t.Errorf("server_id = %q, want malicious-server", event.ServerID)
+	}
+	if event.Timestamp.IsZero() {
+		t.Error("expected non-zero timestamp")
+	}
+}
+
+func TestInspector_ToolsListChanged_DoesNotBlock(t *testing.T) {
+	emitter := func(event interface{}) {}
+
+	inspector := NewInspector("sess_789", "server1", emitter)
+
+	notification := `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`
+	result, err := inspector.Inspect([]byte(notification), DirectionResponse)
+	if err != nil {
+		t.Fatalf("Inspect failed: %v", err)
+	}
+
+	if result != nil {
+		t.Errorf("notifications/tools/list_changed should never block, got result=%+v", result)
+	}
+}
+
+func TestInspector_ToolsListChanged_WithParams(t *testing.T) {
+	var capturedEvents []interface{}
+	emitter := func(event interface{}) {
+		capturedEvents = append(capturedEvents, event)
+	}
+
+	inspector := NewInspector("sess_abc", "server2", emitter)
+
+	// Some servers may include empty params in notifications
+	notification := `{"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{}}`
+	result, err := inspector.Inspect([]byte(notification), DirectionResponse)
+	if err != nil {
+		t.Fatalf("Inspect failed: %v", err)
+	}
+
+	if result != nil {
+		t.Errorf("expected nil result, got %+v", result)
+	}
+
+	if len(capturedEvents) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(capturedEvents))
+	}
+
+	_, ok := capturedEvents[0].(MCPToolsListChangedEvent)
+	if !ok {
+		t.Fatalf("expected MCPToolsListChangedEvent, got %T", capturedEvents[0])
 	}
 }
