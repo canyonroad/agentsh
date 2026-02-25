@@ -15,7 +15,10 @@ import (
 
 const maxFeedSize = 100 * 1024 * 1024 // 100 MB
 
-var errNotModified = errors.New("not modified")
+var (
+	errNotModified = errors.New("not modified")
+	errTruncated   = errors.New("feed exceeds maximum size, skipping to avoid partial data")
+)
 
 // Syncer periodically downloads threat feeds and updates the store.
 type Syncer struct {
@@ -27,7 +30,8 @@ type Syncer struct {
 	logger   *slog.Logger
 	etags    map[string]string
 	// Per-feed last-known-good domain snapshots. Keyed by feed name.
-	lastGood map[string][]string
+	lastGood    map[string][]string
+	seededCache bool // true after lastGood has been seeded from store
 }
 
 // NewSyncer creates a new feed syncer. Pass nil for logger to disable logging.
@@ -72,6 +76,17 @@ func (s *Syncer) Run(ctx context.Context) {
 // syncAll fetches all feeds and local lists, merges results, and updates the store.
 // On fetch failure or 304 Not Modified, the feed's last-known-good data is preserved.
 func (s *Syncer) syncAll(ctx context.Context) {
+	// On first sync, seed lastGood from the store's disk-loaded data so that
+	// feeds that fail on first attempt retain their cached entries.
+	if !s.seededCache {
+		s.seededCache = true
+		for feedName, domains := range s.store.Snapshot() {
+			if _, exists := s.lastGood[feedName]; !exists {
+				s.lastGood[feedName] = domains
+			}
+		}
+	}
+
 	merged := make(map[string]FeedEntry)
 	anySucceeded := false
 
@@ -159,9 +174,17 @@ func (s *Syncer) fetchFeed(ctx context.Context, feed config.ThreatFeedEntry) ([]
 		s.etags[feed.URL] = etag
 	}
 
-	limited := io.LimitReader(resp.Body, maxFeedSize)
+	lr := &io.LimitedReader{R: resp.Body, N: maxFeedSize}
 	parser := ParserForFormat(feed.Format)
-	return parser.Parse(limited)
+	domains, err := parser.Parse(lr)
+	if err != nil {
+		return nil, err
+	}
+	// If LimitedReader is exhausted, the feed was truncated — reject it.
+	if lr.N <= 0 {
+		return nil, errTruncated
+	}
+	return domains, nil
 }
 
 func (s *Syncer) parseLocalFile(path string) ([]string, error) {

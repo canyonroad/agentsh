@@ -77,3 +77,19 @@ func TestDomainListParser_InlineComments(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evil.com", "bad.org", "good.net"}, domains)
 }
+
+func TestHostfileParser_TrailingDot(t *testing.T) {
+	input := "0.0.0.0 evil.com.\n0.0.0.0 bad.org\n"
+	p := &HostfileParser{}
+	domains, err := p.Parse(strings.NewReader(input))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"evil.com", "bad.org"}, domains)
+}
+
+func TestDomainListParser_TrailingDot(t *testing.T) {
+	input := "evil.com.\nbad.org\n"
+	p := &DomainListParser{}
+	domains, err := p.Parse(strings.NewReader(input))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"evil.com", "bad.org"}, domains)
+}

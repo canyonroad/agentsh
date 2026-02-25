@@ -1277,5 +1277,29 @@ func validateConfig(cfg *Config) error {
 			return fmt.Errorf("invalid audit.otel.filter.min_risk_level %q", cfg.Audit.OTEL.Filter.MinRiskLevel)
 		}
 	}
+	// Validate threat_feeds config
+	if cfg.ThreatFeeds.Action != "" {
+		switch cfg.ThreatFeeds.Action {
+		case "deny", "audit":
+		default:
+			return fmt.Errorf("invalid threat_feeds.action %q (must be \"deny\" or \"audit\")", cfg.ThreatFeeds.Action)
+		}
+	}
+	for i, f := range cfg.ThreatFeeds.Feeds {
+		if f.Format != "" {
+			switch f.Format {
+			case "hostfile", "domain-list":
+			default:
+				return fmt.Errorf("invalid threat_feeds.feeds[%d].format %q (must be \"hostfile\" or \"domain-list\")", i, f.Format)
+			}
+		}
+	}
+	if cfg.ThreatFeeds.Realtime.OnTimeout != "" {
+		switch cfg.ThreatFeeds.Realtime.OnTimeout {
+		case "local-only", "allow", "deny":
+		default:
+			return fmt.Errorf("invalid threat_feeds.realtime.on_timeout %q (must be \"local-only\", \"allow\", or \"deny\")", cfg.ThreatFeeds.Realtime.OnTimeout)
+		}
+	}
 	return nil
 }

@@ -86,3 +86,49 @@ func TestThreatFeedsConfigStruct(t *testing.T) {
 		t.Errorf("expected provider %q, got %q", "virustotal", cfg.Realtime.Provider)
 	}
 }
+
+func TestThreatFeedsValidation_InvalidAction(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Action = "typo"
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for invalid threat_feeds.action")
+	}
+}
+
+func TestThreatFeedsValidation_InvalidFormat(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Feeds = []ThreatFeedEntry{
+		{Name: "test", URL: "https://example.com", Format: "csv"},
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for invalid feed format")
+	}
+}
+
+func TestThreatFeedsValidation_InvalidOnTimeout(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Realtime.OnTimeout = "crash"
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for invalid realtime.on_timeout")
+	}
+}
+
+func TestThreatFeedsValidation_ValidConfig(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Action = "audit"
+	cfg.ThreatFeeds.Feeds = []ThreatFeedEntry{
+		{Name: "test", URL: "https://example.com", Format: "domain-list"},
+	}
+	cfg.ThreatFeeds.Realtime.OnTimeout = "allow"
+	err := validateConfig(cfg)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}

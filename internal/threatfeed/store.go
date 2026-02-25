@@ -96,6 +96,17 @@ func (s *Store) Size() int {
 	return len(s.domains)
 }
 
+// Snapshot returns a copy of the current domain map grouped by feed name.
+func (s *Store) Snapshot() map[string][]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	grouped := make(map[string][]string)
+	for domain, entry := range s.domains {
+		grouped[entry.FeedName] = append(grouped[entry.FeedName], domain)
+	}
+	return grouped
+}
+
 type diskCache struct {
 	Domains map[string]FeedEntry
 }

@@ -269,6 +269,53 @@ func TestSyncer_SuccessfulEmptySyncClearsStore(t *testing.T) {
 	assert.Equal(t, 0, store.Size(), "successful empty sync should clear stale entries")
 }
 
+func TestSyncer_DiskCachePartialFirstSyncFailure(t *testing.T) {
+	dir := t.TempDir()
+
+	// Pre-populate disk cache with entries from two feeds.
+	s1 := NewStore(dir, nil)
+	s1.Update(map[string]FeedEntry{
+		"feed-a-evil.com": {FeedName: "feed-a", AddedAt: time.Now()},
+		"feed-b-evil.com": {FeedName: "feed-b", AddedAt: time.Now()},
+	})
+	err := s1.SaveToDisk()
+	require.NoError(t, err)
+
+	// New store loads disk cache.
+	store := NewStore(dir, nil)
+	err = store.LoadFromDisk()
+	require.NoError(t, err)
+	assert.Equal(t, 2, store.Size())
+
+	// feed-a succeeds, feed-b fails on first sync.
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "feed-a-evil.com")
+	}))
+	defer srvA.Close()
+
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srvB.Close()
+
+	cfg := config.ThreatFeedsConfig{
+		Feeds: []config.ThreatFeedEntry{
+			{Name: "feed-a", URL: srvA.URL, Format: "domain-list"},
+			{Name: "feed-b", URL: srvB.URL, Format: "domain-list"},
+		},
+		SyncInterval: time.Hour,
+	}
+	syncer := NewSyncer(store, cfg, nil)
+	syncer.syncAll(context.Background())
+
+	// Both domains should be present: feed-a from fresh fetch, feed-b from seeded cache.
+	assert.Equal(t, 2, store.Size(), "partial first-sync failure should retain cached entries for failed feed")
+	_, matched := store.Check("feed-a-evil.com")
+	assert.True(t, matched, "feed-a domain should be present from fresh fetch")
+	_, matched = store.Check("feed-b-evil.com")
+	assert.True(t, matched, "feed-b domain should be retained from disk cache")
+}
+
 func TestSyncer_LocalListFile(t *testing.T) {
 	dir := t.TempDir()
 	listPath := filepath.Join(dir, "custom.txt")

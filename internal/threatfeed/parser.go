@@ -30,7 +30,10 @@ func (p *HostfileParser) Parse(r io.Reader) ([]string, error) {
 		if len(fields) < 2 {
 			continue
 		}
-		domain := strings.ToLower(fields[1])
+		domain := strings.ToLower(strings.TrimRight(fields[1], "."))
+		if domain == "" {
+			continue
+		}
 		if domain == "localhost" || domain == "localhost.localdomain" ||
 			domain == "broadcasthost" || domain == "local" {
 			continue
@@ -62,7 +65,10 @@ func (p *DomainListParser) Parse(r io.Reader) ([]string, error) {
 		if line == "" {
 			continue
 		}
-		domain := strings.ToLower(line)
+		domain := strings.ToLower(strings.TrimRight(line, "."))
+		if domain == "" {
+			continue
+		}
 		if _, ok := seen[domain]; ok {
 			continue
 		}
