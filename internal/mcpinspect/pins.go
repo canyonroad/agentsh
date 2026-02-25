@@ -253,24 +253,24 @@ func (s *PinStore) TrustBinary(serverID, binaryPath, hash string) error {
 }
 
 // VerifyBinary checks if a server binary hash matches its pin.
-func (s *PinStore) VerifyBinary(serverID, hash string) (*VerifyResult, error) {
-	var pinnedHash string
-	err := s.db.QueryRow(`
+// Returns status ("not_pinned", "match", "mismatch") and the pinned hash.
+func (s *PinStore) VerifyBinary(serverID, hash string) (status, pinnedHash string, err error) {
+	var storedHash string
+	err = s.db.QueryRow(`
 		SELECT binary_hash FROM mcp_server_pins WHERE server_id = ?
-	`, serverID).Scan(&pinnedHash)
+	`, serverID).Scan(&storedHash)
 
 	if err == sql.ErrNoRows {
-		return &VerifyResult{Status: PinStatusNotPinned, CurrentHash: hash}, nil
+		return "not_pinned", "", nil
 	}
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
 
-	status := PinStatusMatch
-	if pinnedHash != hash {
-		status = PinStatusMismatch
+	if storedHash != hash {
+		return "mismatch", storedHash, nil
 	}
-	return &VerifyResult{Status: status, PinnedHash: pinnedHash, CurrentHash: hash}, nil
+	return "match", storedHash, nil
 }
 
 // ListBinaryPins returns all binary pins ordered by server ID.

@@ -13,14 +13,8 @@ import (
 // BinaryPinVerifier abstracts binary pin operations (implemented by mcpinspect.PinStore).
 type BinaryPinVerifier interface {
 	TrustBinary(serverID, binaryPath, hash string) error
-	VerifyBinary(serverID, hash string) (*BinaryVerifyResult, error)
-}
-
-// BinaryVerifyResult mirrors mcpinspect.VerifyResult for the shim package.
-type BinaryVerifyResult struct {
-	Status      string // "not_pinned", "match", "mismatch"
-	PinnedHash  string
-	CurrentHash string
+	// VerifyBinary returns status ("not_pinned", "match", "mismatch") and the pinned hash.
+	VerifyBinary(serverID, hash string) (status, pinnedHash string, err error)
 }
 
 // MCPExecConfig configures MCP inspection for a command.
@@ -53,25 +47,27 @@ func BuildMCPExecWrapper(cfg MCPExecConfig) (*MCPExecWrapper, error) {
 			}
 			// alert/allow: log but continue
 		} else {
-			result, err := cfg.PinStore.VerifyBinary(cfg.ServerID, hash)
+			status, pinnedHash, err := cfg.PinStore.VerifyBinary(cfg.ServerID, hash)
 			if err != nil {
 				return nil, fmt.Errorf("binary pin: verify failed: %w", err)
 			}
-			switch result.Status {
+			switch status {
 			case "not_pinned":
 				if cfg.AutoTrustFirst {
-					_ = cfg.PinStore.TrustBinary(cfg.ServerID, absPath, hash)
+					if trustErr := cfg.PinStore.TrustBinary(cfg.ServerID, absPath, hash); trustErr != nil {
+						log.Printf("binary pin: failed to trust %s: %v", cfg.ServerID, trustErr)
+					}
 				}
 			case "mismatch":
 				if cfg.OnChange == "block" {
-					return nil, fmt.Errorf("binary pin mismatch for server %s: expected %s, got %s", cfg.ServerID, result.PinnedHash, hash)
+					return nil, fmt.Errorf("binary pin mismatch for server %s: expected %s, got %s", cfg.ServerID, pinnedHash, hash)
 				}
 				// alert mode: emit event if emitter available
 				if cfg.OnChange == "alert" && cfg.EventEmitter != nil {
 					cfg.EventEmitter(map[string]any{
 						"type":         "mcp_server_binary_mismatch",
 						"server_id":    cfg.ServerID,
-						"pinned_hash":  result.PinnedHash,
+						"pinned_hash":  pinnedHash,
 						"current_hash": hash,
 						"binary_path":  absPath,
 						"action":       "alert",

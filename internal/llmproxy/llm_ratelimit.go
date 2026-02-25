@@ -55,9 +55,10 @@ func (l *LLMRateLimiter) AllowTokens(n int) bool {
 }
 
 // ConsumeTokens deducts tokens from the TPM budget after a response is received.
+// Uses force-consume since the operation already happened and must be accounted for.
 func (l *LLMRateLimiter) ConsumeTokens(n int) {
 	if !l.enabled || l.tpmLimit == nil || n <= 0 {
 		return
 	}
-	l.tpmLimit.AllowN(n)
+	l.tpmLimit.ForceConsumeN(n)
 }

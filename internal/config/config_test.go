@@ -1141,7 +1141,7 @@ sandbox:
       - id: internal-tools
         type: http
         url: https://mcp.internal.corp:8443/mcp
-        tls_fingerprint: "sha256:abc123"
+        tls_fingerprint: "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
     server_policy: allowlist
     allowed_servers:
       - id: filesystem
@@ -1196,7 +1196,7 @@ sandbox:
 	assert.Empty(t, mcp.Servers[1].Command)
 
 	assert.Equal(t, "internal-tools", mcp.Servers[2].ID)
-	assert.Equal(t, "sha256:abc123", mcp.Servers[2].TLSFingerprint)
+	assert.Equal(t, "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", mcp.Servers[2].TLSFingerprint)
 
 	// Verify server-level policy
 	assert.Equal(t, "allowlist", mcp.ServerPolicy)
@@ -1259,7 +1259,7 @@ func TestMCPServerDeclaration_YAMLRoundTrip(t *testing.T) {
 				ID:             "api",
 				Type:           "http",
 				URL:            "https://mcp.example.com",
-				TLSFingerprint: "sha256:deadbeef",
+				TLSFingerprint: "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
 			},
 		},
 		ServerPolicy: "allowlist",
@@ -1315,7 +1315,7 @@ func TestMCPServerDeclaration_YAMLRoundTrip(t *testing.T) {
 	assert.Equal(t, "api", roundTripped.Servers[1].ID)
 	assert.Equal(t, "http", roundTripped.Servers[1].Type)
 	assert.Equal(t, "https://mcp.example.com", roundTripped.Servers[1].URL)
-	assert.Equal(t, "sha256:deadbeef", roundTripped.Servers[1].TLSFingerprint)
+	assert.Equal(t, "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", roundTripped.Servers[1].TLSFingerprint)
 
 	// Server rules
 	assert.Equal(t, len(original.AllowedServers), len(roundTripped.AllowedServers))

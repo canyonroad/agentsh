@@ -113,28 +113,28 @@ func TestPinStore_BinaryTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := store.VerifyBinary("server-git", "sha256:abc123")
+	status, _, err := store.VerifyBinary("server-git", "sha256:abc123")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != PinStatusMatch {
-		t.Errorf("expected match, got %s", result.Status)
+	if status != "match" {
+		t.Errorf("expected match, got %s", status)
 	}
 
-	result, err = store.VerifyBinary("server-git", "sha256:different")
+	status, _, err = store.VerifyBinary("server-git", "sha256:different")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != PinStatusMismatch {
-		t.Errorf("expected mismatch, got %s", result.Status)
+	if status != "mismatch" {
+		t.Errorf("expected mismatch, got %s", status)
 	}
 
-	result, err = store.VerifyBinary("unknown", "sha256:abc")
+	status, _, err = store.VerifyBinary("unknown", "sha256:abc")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != PinStatusNotPinned {
-		t.Errorf("expected not_pinned, got %s", result.Status)
+	if status != "not_pinned" {
+		t.Errorf("expected not_pinned, got %s", status)
 	}
 }
 

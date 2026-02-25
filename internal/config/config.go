@@ -1383,5 +1383,27 @@ func validateConfig(cfg *Config) error {
 			return fmt.Errorf("invalid threat_feeds.realtime.on_timeout %q (must be \"local-only\", \"allow\", or \"deny\")", cfg.ThreatFeeds.Realtime.OnTimeout)
 		}
 	}
+	// Validate MCP transport policy
+	if err := ValidateMCPTransports(cfg.Sandbox.MCP); err != nil {
+		return err
+	}
+	// Validate TLS fingerprint format for MCP servers
+	for _, srv := range cfg.Sandbox.MCP.Servers {
+		if srv.TLSFingerprint != "" {
+			fp := srv.TLSFingerprint
+			if len(fp) < 7 || fp[:7] != "sha256:" {
+				return fmt.Errorf("MCP server %q: TLS fingerprint must start with 'sha256:'", srv.ID)
+			}
+			hexPart := fp[7:]
+			if len(hexPart) != 64 {
+				return fmt.Errorf("MCP server %q: TLS fingerprint hex must be 64 characters (SHA-256), got %d", srv.ID, len(hexPart))
+			}
+			for _, c := range hexPart {
+				if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+					return fmt.Errorf("MCP server %q: TLS fingerprint contains invalid hex character %q", srv.ID, string(c))
+				}
+			}
+		}
+	}
 	return nil
 }
