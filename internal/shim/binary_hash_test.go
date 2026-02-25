@@ -37,7 +37,9 @@ func TestHashBinary(t *testing.T) {
 }
 
 func TestHashBinary_NotFound(t *testing.T) {
-	_, _, err := HashBinary("/nonexistent/binary")
+	// Use a path in a temp directory that definitely doesn't exist (portable).
+	missing := filepath.Join(t.TempDir(), "nonexistent-binary")
+	_, _, err := HashBinary(missing)
 	if err == nil {
 		t.Fatal("expected error for missing binary")
 	}

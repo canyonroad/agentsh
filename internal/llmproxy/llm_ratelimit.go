@@ -11,7 +11,15 @@ type LLMRateLimiter struct {
 	enabled  bool
 	reqLimit *ratelimit.Limiter
 	tpmLimit *ratelimit.Limiter
+	// inFlight limits concurrent requests when TPM is enabled, bounding
+	// overspend from requests that pass the pre-request budget check before
+	// post-response token accounting occurs.
+	inFlight chan struct{}
 }
+
+// defaultMaxInFlight is the concurrency cap when TPM is enabled.
+// This bounds worst-case overspend to maxInFlight * avgTokensPerRequest.
+const defaultMaxInFlight = 4
 
 // NewLLMRateLimiter creates a new LLM rate limiter from configuration.
 func NewLLMRateLimiter(cfg config.LLMRateLimitsConfig) *LLMRateLimiter {
@@ -34,6 +42,7 @@ func NewLLMRateLimiter(cfg config.LLMRateLimitsConfig) *LLMRateLimiter {
 			burst = max(cfg.TokensPerMinute/6, 1)
 		}
 		l.tpmLimit = ratelimit.NewLimiter(rate, burst)
+		l.inFlight = make(chan struct{}, defaultMaxInFlight)
 	}
 	return l
 }
@@ -72,4 +81,25 @@ func (l *LLMRateLimiter) ConsumeTokens(n int) {
 		return
 	}
 	l.tpmLimit.ForceConsumeN(n)
+}
+
+// AcquireInFlight blocks until an in-flight slot is available (when TPM is
+// enabled). Returns false if TPM is not configured (caller should proceed
+// without releasing). This bounds concurrent requests to prevent bulk
+// overspend before post-response token accounting.
+func (l *LLMRateLimiter) AcquireInFlight() bool {
+	if l.inFlight == nil {
+		return false
+	}
+	l.inFlight <- struct{}{}
+	return true
+}
+
+// ReleaseInFlight releases an in-flight slot. Must be called after
+// AcquireInFlight returns true, typically in a defer.
+func (l *LLMRateLimiter) ReleaseInFlight() {
+	if l.inFlight == nil {
+		return
+	}
+	<-l.inFlight
 }

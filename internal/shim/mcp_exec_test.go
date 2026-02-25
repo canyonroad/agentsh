@@ -4,9 +4,25 @@ package shim
 import (
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// testBinaryPath returns the absolute path to a real binary for testing.
+// Uses "go" since it's always available when running Go tests.
+func testBinaryPath(t *testing.T) string {
+	t.Helper()
+	p, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("cannot find 'go' binary for test")
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		t.Fatalf("cannot resolve absolute path: %v", err)
+	}
+	return abs
+}
 
 func TestMCPExecConfig(t *testing.T) {
 	cfg := MCPExecConfig{
@@ -89,6 +105,7 @@ func (m *mockPinStore) VerifyBinary(serverID, hash string) (status, pinnedHash s
 }
 
 func TestBuildMCPExecWrapper_TrustBinaryFailure_BlockMode(t *testing.T) {
+	bin := testBinaryPath(t)
 	store := &mockPinStore{
 		verifyStatus: "not_pinned",
 		trustErr:     errors.New("db readonly"),
@@ -97,7 +114,7 @@ func TestBuildMCPExecWrapper_TrustBinaryFailure_BlockMode(t *testing.T) {
 	cfg := MCPExecConfig{
 		SessionID:      "sess_1",
 		ServerID:       "srv-1",
-		Command:        "/usr/bin/true",
+		Command:        bin,
 		PinBinary:      true,
 		PinStore:       store,
 		AutoTrustFirst: true,
@@ -114,6 +131,7 @@ func TestBuildMCPExecWrapper_TrustBinaryFailure_BlockMode(t *testing.T) {
 }
 
 func TestBuildMCPExecWrapper_TrustBinaryFailure_AlertMode(t *testing.T) {
+	bin := testBinaryPath(t)
 	store := &mockPinStore{
 		verifyStatus: "not_pinned",
 		trustErr:     errors.New("db readonly"),
@@ -122,7 +140,7 @@ func TestBuildMCPExecWrapper_TrustBinaryFailure_AlertMode(t *testing.T) {
 	cfg := MCPExecConfig{
 		SessionID:      "sess_1",
 		ServerID:       "srv-1",
-		Command:        "/usr/bin/true",
+		Command:        bin,
 		PinBinary:      true,
 		PinStore:       store,
 		AutoTrustFirst: true,
@@ -145,7 +163,7 @@ func TestBuildMCPExecWrapper_PinMisconfigured_BlockMode(t *testing.T) {
 		ServerID:  "srv-1",
 		PinBinary: true,
 		PinStore:  nil, // Missing store
-		Command:   "/usr/bin/true",
+		Command:   testBinaryPath(t),
 		OnChange:  "block",
 	}
 
@@ -156,6 +174,7 @@ func TestBuildMCPExecWrapper_PinMisconfigured_BlockMode(t *testing.T) {
 }
 
 func TestBuildMCPExecWrapper_ResolvedCommand(t *testing.T) {
+	bin := testBinaryPath(t)
 	store := &mockPinStore{
 		verifyStatus: "not_pinned",
 	}
@@ -163,7 +182,7 @@ func TestBuildMCPExecWrapper_ResolvedCommand(t *testing.T) {
 	cfg := MCPExecConfig{
 		SessionID:      "sess_1",
 		ServerID:       "srv-1",
-		Command:        "/usr/bin/true",
+		Command:        bin,
 		PinBinary:      true,
 		PinStore:       store,
 		AutoTrustFirst: true,
@@ -178,8 +197,8 @@ func TestBuildMCPExecWrapper_ResolvedCommand(t *testing.T) {
 	if resolved == "" {
 		t.Fatal("ResolvedCommand should return the absolute path after pin verification")
 	}
-	if resolved != "/usr/bin/true" {
-		t.Errorf("ResolvedCommand = %q, want /usr/bin/true", resolved)
+	if resolved != bin {
+		t.Errorf("ResolvedCommand = %q, want %q", resolved, bin)
 	}
 }
 
@@ -196,5 +215,54 @@ func TestBuildMCPExecWrapper_ResolvedCommand_NoPinning(t *testing.T) {
 	}
 	if wrapper.ResolvedCommand() != "" {
 		t.Errorf("ResolvedCommand should be empty when pin is disabled, got %q", wrapper.ResolvedCommand())
+	}
+}
+
+func TestBuildMCPExecWrapper_UnknownStatus_BlockMode(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{
+		verifyStatus: "something_unexpected",
+	}
+
+	cfg := MCPExecConfig{
+		SessionID: "sess_1",
+		ServerID:  "srv-1",
+		Command:   bin,
+		PinBinary: true,
+		PinStore:  store,
+		OnChange:  "block",
+	}
+
+	_, err := BuildMCPExecWrapper(cfg)
+	if err == nil {
+		t.Fatal("expected error for unknown verify status in block mode")
+	}
+	if !strings.Contains(err.Error(), "unexpected verify status") {
+		t.Errorf("error should mention unexpected status, got: %v", err)
+	}
+}
+
+func TestBuildMCPExecWrapper_UnknownStatus_AlertMode(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{
+		verifyStatus: "something_unexpected",
+	}
+
+	cfg := MCPExecConfig{
+		SessionID: "sess_1",
+		ServerID:  "srv-1",
+		Command:   bin,
+		PinBinary: true,
+		PinStore:  store,
+		OnChange:  "alert",
+	}
+
+	// Alert mode: should log and continue, not error
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("alert mode should not error on unknown status, got: %v", err)
+	}
+	if wrapper == nil {
+		t.Fatal("wrapper should not be nil")
 	}
 }

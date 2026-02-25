@@ -39,59 +39,9 @@ type MCPExecWrapper struct {
 
 // BuildMCPExecWrapper creates a wrapper configured for MCP inspection.
 func BuildMCPExecWrapper(cfg MCPExecConfig) (*MCPExecWrapper, error) {
-	var resolvedCmd string
-
-	// Binary pinning check
-	if cfg.PinBinary {
-		if cfg.PinStore == nil || cfg.Command == "" {
-			// Pinning enabled but misconfigured — fail closed in block mode
-			if cfg.OnChange == "block" {
-				return nil, fmt.Errorf("binary pin: enabled but PinStore or Command not configured for server %s", cfg.ServerID)
-			}
-			log.Printf("binary pin: enabled but PinStore or Command not configured for server %s, skipping", cfg.ServerID)
-		} else {
-			absPath, hash, err := HashBinary(cfg.Command)
-			if err != nil {
-				if cfg.OnChange == "block" {
-					return nil, fmt.Errorf("binary pin: cannot hash %s: %w", cfg.Command, err)
-				}
-				// alert/allow: log but continue
-			} else {
-				// Bind the resolved absolute path to prevent TOCTOU attacks
-				resolvedCmd = absPath
-
-				status, pinnedHash, err := cfg.PinStore.VerifyBinary(cfg.ServerID, hash)
-				if err != nil {
-					return nil, fmt.Errorf("binary pin: verify failed: %w", err)
-				}
-				switch status {
-				case "not_pinned":
-					if cfg.AutoTrustFirst {
-						if trustErr := cfg.PinStore.TrustBinary(cfg.ServerID, absPath, hash); trustErr != nil {
-							if cfg.OnChange == "block" {
-								return nil, fmt.Errorf("binary pin: failed to persist trust for %s: %w", cfg.ServerID, trustErr)
-							}
-							log.Printf("binary pin: failed to trust %s: %v", cfg.ServerID, trustErr)
-						}
-					}
-				case "mismatch":
-					if cfg.OnChange == "block" {
-						return nil, fmt.Errorf("binary pin mismatch for server %s: expected %s, got %s", cfg.ServerID, pinnedHash, hash)
-					}
-					// alert mode: emit event if emitter available
-					if cfg.OnChange == "alert" && cfg.EventEmitter != nil {
-						cfg.EventEmitter(map[string]any{
-							"type":         "mcp_server_binary_mismatch",
-							"server_id":    cfg.ServerID,
-							"pinned_hash":  pinnedHash,
-							"current_hash": hash,
-							"binary_path":  absPath,
-							"action":       "alert",
-						})
-					}
-				}
-			}
-		}
+	resolvedCmd, err := verifyBinaryPin(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	var bridge *MCPBridge
@@ -102,6 +52,71 @@ func BuildMCPExecWrapper(cfg MCPExecConfig) (*MCPExecWrapper, error) {
 	}
 
 	return &MCPExecWrapper{bridge: bridge, resolvedCommand: resolvedCmd}, nil
+}
+
+// verifyBinaryPin performs binary pin verification. Returns the resolved
+// absolute path (empty if pinning disabled) or an error.
+func verifyBinaryPin(cfg MCPExecConfig) (string, error) {
+	if !cfg.PinBinary {
+		return "", nil
+	}
+
+	if cfg.PinStore == nil || cfg.Command == "" {
+		if cfg.OnChange == "block" {
+			return "", fmt.Errorf("binary pin: enabled but PinStore or Command not configured for server %s", cfg.ServerID)
+		}
+		log.Printf("binary pin: enabled but PinStore or Command not configured for server %s, skipping", cfg.ServerID)
+		return "", nil
+	}
+
+	absPath, hash, err := HashBinary(cfg.Command)
+	if err != nil {
+		if cfg.OnChange == "block" {
+			return "", fmt.Errorf("binary pin: cannot hash %s: %w", cfg.Command, err)
+		}
+		log.Printf("binary pin: cannot hash %s for server %s: %v", cfg.Command, cfg.ServerID, err)
+		return "", nil
+	}
+
+	status, pinnedHash, err := cfg.PinStore.VerifyBinary(cfg.ServerID, hash)
+	if err != nil {
+		return "", fmt.Errorf("binary pin: verify failed: %w", err)
+	}
+
+	switch status {
+	case "match":
+		// Pin verified successfully.
+	case "not_pinned":
+		if cfg.AutoTrustFirst {
+			if trustErr := cfg.PinStore.TrustBinary(cfg.ServerID, absPath, hash); trustErr != nil {
+				if cfg.OnChange == "block" {
+					return "", fmt.Errorf("binary pin: failed to persist trust for %s: %w", cfg.ServerID, trustErr)
+				}
+				log.Printf("binary pin: failed to trust %s: %v", cfg.ServerID, trustErr)
+			}
+		}
+	case "mismatch":
+		if cfg.OnChange == "block" {
+			return "", fmt.Errorf("binary pin mismatch for server %s: expected %s, got %s", cfg.ServerID, pinnedHash, hash)
+		}
+		if cfg.OnChange == "alert" && cfg.EventEmitter != nil {
+			cfg.EventEmitter(map[string]any{
+				"type":         "mcp_server_binary_mismatch",
+				"server_id":    cfg.ServerID,
+				"pinned_hash":  pinnedHash,
+				"current_hash": hash,
+				"binary_path":  absPath,
+				"action":       "alert",
+			})
+		}
+	default:
+		if cfg.OnChange == "block" {
+			return "", fmt.Errorf("binary pin: unexpected verify status %q for server %s", status, cfg.ServerID)
+		}
+		log.Printf("binary pin: unexpected verify status %q for server %s, continuing", status, cfg.ServerID)
+	}
+
+	return absPath, nil
 }
 
 // ResolvedCommand returns the absolute path to the binary that was verified

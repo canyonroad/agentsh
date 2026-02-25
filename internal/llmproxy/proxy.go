@@ -299,6 +299,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Acquire an in-flight slot to bound concurrent requests when TPM is
+	// enabled. This prevents bulk overspend from requests that pass the
+	// pre-check before post-response token accounting occurs.
+	if acquired := p.llmRateLimiter.AcquireInFlight(); acquired {
+		defer p.llmRateLimiter.ReleaseInFlight()
+	}
+
 	p.logger.Debug("proxying request",
 		"request_id", requestID,
 		"dialect", dialect,
