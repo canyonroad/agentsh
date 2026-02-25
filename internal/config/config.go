@@ -1294,8 +1294,8 @@ func validateConfig(cfg *Config) error {
 			return fmt.Errorf("threat_feeds.feeds[%d].url must not be empty", i)
 		}
 		u, err := url.Parse(f.URL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-			return fmt.Errorf("invalid threat_feeds.feeds[%d].url %q (must be http or https)", i, f.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("invalid threat_feeds.feeds[%d].url %q (must be http or https with a valid host)", i, f.URL)
 		}
 		switch f.Format {
 		case "hostfile", "domain-list":

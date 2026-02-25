@@ -120,6 +120,7 @@ type Decision struct {
 	EnvPolicy         ResolvedEnvPolicy
 	ThreatFeed        string
 	ThreatMatch       string
+	ThreatAction      string // "deny" or "audit" — set when a threat feed matched
 }
 
 func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
@@ -440,6 +441,7 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 					"domain matched threat feed: "+result.FeedName+" (matched: "+result.MatchedDomain+")", nil)
 				dec.ThreatFeed = result.FeedName
 				dec.ThreatMatch = result.MatchedDomain
+				dec.ThreatAction = "deny"
 				return dec
 			}
 			// Audit mode: record threat metadata, continue normal rule evaluation.
@@ -496,6 +498,7 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 		if threatResult != nil {
 			dec.ThreatFeed = threatResult.FeedName
 			dec.ThreatMatch = threatResult.MatchedDomain
+			dec.ThreatAction = "audit"
 		}
 		return dec
 	}
@@ -504,6 +507,7 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 	if threatResult != nil {
 		dec.ThreatFeed = threatResult.FeedName
 		dec.ThreatMatch = threatResult.MatchedDomain
+		dec.ThreatAction = "audit"
 	}
 	return dec
 }
@@ -760,6 +764,7 @@ func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) D
 					"domain matched threat feed: "+entry.FeedName+" (matched: "+entry.MatchedDomain+")", nil)
 				dec.ThreatFeed = entry.FeedName
 				dec.ThreatMatch = entry.MatchedDomain
+				dec.ThreatAction = "deny"
 				return dec
 			}
 			// Audit mode: record threat metadata, continue normal rule evaluation.
@@ -839,6 +844,7 @@ func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) D
 		if threatResult != nil {
 			dec.ThreatFeed = threatResult.FeedName
 			dec.ThreatMatch = threatResult.MatchedDomain
+			dec.ThreatAction = "audit"
 		}
 		return dec
 	}
@@ -847,6 +853,7 @@ func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) D
 	if threatResult != nil {
 		dec.ThreatFeed = threatResult.FeedName
 		dec.ThreatMatch = threatResult.MatchedDomain
+		dec.ThreatAction = "audit"
 	}
 	return dec
 }

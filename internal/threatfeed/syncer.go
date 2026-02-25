@@ -176,14 +176,15 @@ func (s *Syncer) fetchFeed(ctx context.Context, feed config.ThreatFeedEntry) ([]
 		s.etags[feed.URL] = etag
 	}
 
-	lr := &io.LimitedReader{R: resp.Body, N: maxFeedSize}
+	// Use maxFeedSize+1 so we can distinguish "exactly at limit" from "truncated".
+	lr := &io.LimitedReader{R: resp.Body, N: maxFeedSize + 1}
 	parser := ParserForFormat(feed.Format)
 	domains, err := parser.Parse(lr)
 	if err != nil {
 		return nil, err
 	}
-	// If LimitedReader is exhausted, the feed was truncated — reject it.
-	if lr.N <= 0 {
+	// If the extra byte was consumed (N == 0), the feed exceeded maxFeedSize.
+	if lr.N == 0 {
 		return nil, errTruncated
 	}
 	return domains, nil

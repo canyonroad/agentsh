@@ -193,3 +193,15 @@ func TestThreatFeedsValidation_InvalidFeedURL(t *testing.T) {
 		t.Fatal("expected error for non-http(s) feed URL")
 	}
 }
+
+func TestThreatFeedsValidation_FeedURLMissingHost(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Feeds = []ThreatFeedEntry{
+		{Name: "test", URL: "https:///path", Format: "hostfile"},
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for feed URL with no host")
+	}
+}

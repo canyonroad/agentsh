@@ -70,6 +70,7 @@ func TestCheckNetworkCtx_ThreatFeedDeny(t *testing.T) {
 	dec := e.CheckNetworkCtx(context.Background(), "evil.com", 443)
 	assert.Equal(t, types.DecisionDeny, dec.EffectiveDecision)
 	assert.Equal(t, "threat-feed:urlhaus", dec.Rule)
+	assert.Equal(t, "deny", dec.ThreatAction)
 }
 
 func TestCheckNetworkCtx_ThreatFeedAudit(t *testing.T) {
@@ -91,6 +92,7 @@ func TestCheckNetworkCtx_ThreatFeedAudit(t *testing.T) {
 	assert.Equal(t, "allow-all", dec.Rule)
 	assert.Equal(t, "urlhaus", dec.ThreatFeed)
 	assert.Equal(t, "evil.com", dec.ThreatMatch)
+	assert.Equal(t, "audit", dec.ThreatAction)
 }
 
 func TestCheckNetworkCtx_ThreatFeedNoMatchFallsThrough(t *testing.T) {
@@ -109,6 +111,7 @@ func TestCheckNetworkCtx_ThreatFeedNoMatchFallsThrough(t *testing.T) {
 	dec := e.CheckNetworkCtx(context.Background(), "safe.com", 443)
 	assert.Equal(t, types.DecisionAllow, dec.EffectiveDecision)
 	assert.Equal(t, "allow-all", dec.Rule)
+	assert.Empty(t, dec.ThreatAction, "non-matching domain should have empty ThreatAction")
 }
 
 func TestCheckNetworkCtx_NilThreatStoreSkipsCheck(t *testing.T) {
@@ -156,6 +159,7 @@ func TestCheckNetworkCtx_ThreatFeedFields(t *testing.T) {
 	dec := e.CheckNetworkCtx(context.Background(), "sub.evil.com", 443)
 	assert.Equal(t, "urlhaus", dec.ThreatFeed)
 	assert.Equal(t, "evil.com", dec.ThreatMatch)
+	assert.Equal(t, "deny", dec.ThreatAction)
 }
 
 func TestCheckNetworkIP_ThreatFeedDeny(t *testing.T) {
@@ -173,6 +177,7 @@ func TestCheckNetworkIP_ThreatFeedDeny(t *testing.T) {
 	dec := e.CheckNetworkIP("evil.com", nil, 443)
 	assert.Equal(t, types.DecisionDeny, dec.EffectiveDecision)
 	assert.Equal(t, "threat-feed:urlhaus", dec.Rule)
+	assert.Equal(t, "deny", dec.ThreatAction)
 }
 
 func TestSetThreatStore_InvalidActionDefaultsToDeny(t *testing.T) {
@@ -210,6 +215,7 @@ func TestCheckNetworkCtx_ThreatFeedAuditRespectsExplicitDenyRule(t *testing.T) {
 	assert.Equal(t, "deny-evil", dec.Rule)
 	assert.Equal(t, "urlhaus", dec.ThreatFeed)
 	assert.Equal(t, "evil.com", dec.ThreatMatch)
+	assert.Equal(t, "audit", dec.ThreatAction)
 }
 
 func TestCheckNetworkCtx_ThreatFeedAuditRespectsDefaultDeny(t *testing.T) {
@@ -227,4 +233,5 @@ func TestCheckNetworkCtx_ThreatFeedAuditRespectsDefaultDeny(t *testing.T) {
 	assert.Equal(t, types.DecisionDeny, dec.EffectiveDecision)
 	assert.Equal(t, "default-deny-network", dec.Rule)
 	assert.Equal(t, "urlhaus", dec.ThreatFeed)
+	assert.Equal(t, "audit", dec.ThreatAction)
 }
