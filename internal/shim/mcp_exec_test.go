@@ -266,3 +266,49 @@ func TestBuildMCPExecWrapper_UnknownStatus_AlertMode(t *testing.T) {
 		t.Fatal("wrapper should not be nil")
 	}
 }
+
+func TestMCPExecWrapper_WrapCommand_EnvFiltering(t *testing.T) {
+	cfg := MCPExecConfig{
+		SessionID: "sess_1",
+		ServerID:  "srv-1",
+		DeniedEnv: []string{"SECRET_TOKEN"},
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("BuildMCPExecWrapper failed: %v", err)
+	}
+
+	cmd := exec.Command("cat")
+	cmd.Env = []string{"PATH=/usr/bin", "SECRET_TOKEN=hunter2", "HOME=/home/test"}
+
+	cleanup, err := wrapper.WrapCommand(cmd)
+	if err != nil {
+		t.Fatalf("WrapCommand failed: %v", err)
+	}
+	defer cleanup()
+
+	// Verify SECRET_TOKEN was stripped from cmd.Env.
+	for _, env := range cmd.Env {
+		if strings.HasPrefix(env, "SECRET_TOKEN=") {
+			t.Error("SECRET_TOKEN should have been stripped from cmd.Env")
+		}
+	}
+
+	// Verify PATH and HOME are still present.
+	found := map[string]bool{}
+	for _, env := range cmd.Env {
+		if strings.HasPrefix(env, "PATH=") {
+			found["PATH"] = true
+		}
+		if strings.HasPrefix(env, "HOME=") {
+			found["HOME"] = true
+		}
+	}
+	if !found["PATH"] {
+		t.Error("PATH should remain in cmd.Env")
+	}
+	if !found["HOME"] {
+		t.Error("HOME should remain in cmd.Env")
+	}
+}

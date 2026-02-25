@@ -29,12 +29,17 @@ type MCPExecConfig struct {
 	PinBinary      bool
 	AutoTrustFirst bool
 	OnChange       string // "block", "alert", "allow"
+	// Environment filtering
+	AllowedEnv []string
+	DeniedEnv  []string
 }
 
 // MCPExecWrapper wraps a command's stdio with MCP inspection.
 type MCPExecWrapper struct {
 	bridge          *MCPBridge
 	resolvedCommand string // absolute path to the verified binary (set when pin verification runs)
+	allowedEnv      []string
+	deniedEnv       []string
 }
 
 // BuildMCPExecWrapper creates a wrapper configured for MCP inspection.
@@ -51,7 +56,12 @@ func BuildMCPExecWrapper(cfg MCPExecConfig) (*MCPExecWrapper, error) {
 		bridge = NewMCPBridge(cfg.SessionID, cfg.ServerID, cfg.EventEmitter)
 	}
 
-	return &MCPExecWrapper{bridge: bridge, resolvedCommand: resolvedCmd}, nil
+	return &MCPExecWrapper{
+		bridge:          bridge,
+		resolvedCommand: resolvedCmd,
+		allowedEnv:      cfg.AllowedEnv,
+		deniedEnv:       cfg.DeniedEnv,
+	}, nil
 }
 
 // verifyBinaryPin performs binary pin verification. Returns the resolved
@@ -145,6 +155,19 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 // WrapCommand sets up stdio interception for the given command.
 // Returns cleanup function to be called after command completes.
 func (w *MCPExecWrapper) WrapCommand(cmd *exec.Cmd) (cleanup func(), err error) {
+	// Apply environment filtering before process launch.
+	if len(w.allowedEnv) > 0 || len(w.deniedEnv) > 0 {
+		environ := cmd.Env
+		if environ == nil {
+			environ = os.Environ()
+		}
+		filtered, stripped := FilterEnvForMCPServer(environ, w.allowedEnv, w.deniedEnv)
+		cmd.Env = filtered
+		if len(stripped) > 0 {
+			log.Printf("MCP env filter: stripped %d vars for server", len(stripped))
+		}
+	}
+
 	// Get original stdin
 	origStdin := cmd.Stdin
 	if origStdin == nil {

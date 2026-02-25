@@ -2,6 +2,7 @@
 package mcpinspect
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -102,6 +103,10 @@ func (i *Inspector) Inspect(data []byte, dir Direction) (*InspectResult, error) 
 		return nil, i.handleToolsListChanged()
 	case MessageSamplingRequest:
 		return i.handleSamplingRequest(data)
+	case MessageUnknown:
+		// Clean up pending-call entries for unrecognised responses (e.g.
+		// JSON-RPC error responses that lack result.content).
+		i.cleanupPendingCall(data)
 	}
 
 	return nil, nil
@@ -399,4 +404,20 @@ func (i *Inspector) CheckRateLimit(toolName string) bool {
 		return true
 	}
 	return i.rateLimiter.Allow(i.serverID, toolName)
+}
+
+// cleanupPendingCall removes the pending-call entry for a response message
+// that was not classified as a tools/call response (e.g. JSON-RPC error
+// responses). This prevents the pendingCalls map from leaking entries.
+func (i *Inspector) cleanupPendingCall(data []byte) {
+	var msg struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil || len(msg.ID) == 0 {
+		return
+	}
+	idKey := string(msg.ID)
+	i.mu.Lock()
+	delete(i.pendingCalls, idKey)
+	i.mu.Unlock()
 }

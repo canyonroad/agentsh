@@ -176,11 +176,11 @@ func DetectMessageType(data []byte) (MessageType, error) {
 			return MessageToolsListResponse, nil
 		}
 
-		// Classify as tools/call response when content is present (even empty)
-		// or when the response is an error. This ensures pending-call cleanup
-		// for all response shapes. Non-tool error responses may also match here
-		// but are handled gracefully (lookup misses use "unknown" tool name).
-		if msg.Result.Content != nil || len(msg.Error) > 0 {
+		// Classify as tools/call response only when result.content is present
+		// (even empty). Error responses are left as MessageUnknown because
+		// JSON-RPC errors don't indicate which method they belong to —
+		// misclassifying them causes incorrect event emission.
+		if msg.Result.Content != nil {
 			return MessageToolsCallResponse, nil
 		}
 	}

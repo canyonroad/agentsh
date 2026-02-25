@@ -264,3 +264,54 @@ func TestInspector_ToolsListChanged_WithParams(t *testing.T) {
 		t.Fatalf("expected MCPToolsListChangedEvent, got %T", capturedEvents[0])
 	}
 }
+
+func TestInspector_ErrorResponse_CleansPendingCall(t *testing.T) {
+	var capturedEvents []interface{}
+	emitter := func(event interface{}) {
+		capturedEvents = append(capturedEvents, event)
+	}
+
+	inspector := NewInspector("sess_err", "srv1", emitter)
+
+	// 1. Send a tools/call request to register a pending call.
+	callReq := `{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"read_file","arguments":{}}}`
+	_, err := inspector.Inspect([]byte(callReq), DirectionRequest)
+	if err != nil {
+		t.Fatalf("Inspect call request failed: %v", err)
+	}
+
+	// Verify pending call was recorded.
+	inspector.mu.Lock()
+	if _, ok := inspector.pendingCalls["42"]; !ok {
+		inspector.mu.Unlock()
+		t.Fatal("expected pending call for id 42")
+	}
+	inspector.mu.Unlock()
+
+	// 2. Send a JSON-RPC error response for that ID.
+	errResp := `{"jsonrpc":"2.0","id":42,"error":{"code":-32600,"message":"tool failed"}}`
+	capturedEvents = nil
+	result, err := inspector.Inspect([]byte(errResp), DirectionResponse)
+	if err != nil {
+		t.Fatalf("Inspect error response failed: %v", err)
+	}
+
+	// Should not block.
+	if result != nil {
+		t.Errorf("error response should not block, got %+v", result)
+	}
+
+	// Should NOT emit mcp_tool_result_inspected (not a tools/call response).
+	for _, ev := range capturedEvents {
+		if e, ok := ev.(MCPToolResultInspectedEvent); ok {
+			t.Errorf("unexpected MCPToolResultInspectedEvent: %+v", e)
+		}
+	}
+
+	// Pending call should be cleaned up.
+	inspector.mu.Lock()
+	if _, ok := inspector.pendingCalls["42"]; ok {
+		t.Error("pending call for id 42 should have been cleaned up")
+	}
+	inspector.mu.Unlock()
+}

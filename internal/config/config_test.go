@@ -1520,6 +1520,26 @@ sandbox:
 `,
 			wantErr: "",
 		},
+		{
+			name: "valid version_pinning on_change",
+			yaml: `
+sandbox:
+  mcp:
+    version_pinning:
+      on_change: block
+`,
+			wantErr: "",
+		},
+		{
+			name: "invalid version_pinning on_change",
+			yaml: `
+sandbox:
+  mcp:
+    version_pinning:
+      on_change: deny
+`,
+			wantErr: `invalid sandbox.mcp.version_pinning.on_change "deny"`,
+		},
 	}
 
 	for _, tt := range tests {

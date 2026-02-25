@@ -1430,6 +1430,14 @@ func validateConfig(cfg *Config) error {
 			return fmt.Errorf("invalid sandbox.mcp.sampling.per_server[%q] %q (must be \"allow\", \"alert\", or \"block\")", serverID, policy)
 		}
 	}
+	// Validate version_pinning.on_change enum
+	if cfg.Sandbox.MCP.VersionPinning.OnChange != "" {
+		switch cfg.Sandbox.MCP.VersionPinning.OnChange {
+		case "block", "alert", "allow":
+		default:
+			return fmt.Errorf("invalid sandbox.mcp.version_pinning.on_change %q (must be \"block\", \"alert\", or \"allow\")", cfg.Sandbox.MCP.VersionPinning.OnChange)
+		}
+	}
 	// Validate SimilarityThreshold bounds
 	if t := cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold; t != nil {
 		if *t < 0 || *t > 1 {
