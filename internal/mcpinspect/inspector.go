@@ -105,8 +105,12 @@ func (i *Inspector) Inspect(data []byte, dir Direction) (*InspectResult, error) 
 		return i.handleSamplingRequest(data)
 	case MessageUnknown:
 		// Clean up pending-call entries for unrecognised responses (e.g.
-		// JSON-RPC error responses that lack result.content).
-		i.cleanupPendingCall(data)
+		// JSON-RPC error responses that lack result.content). Only run for
+		// response direction to avoid accidentally deleting entries when an
+		// unknown request happens to carry an id field.
+		if dir == DirectionResponse {
+			i.cleanupPendingCall(data)
+		}
 	}
 
 	return nil, nil

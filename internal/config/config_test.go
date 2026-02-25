@@ -1345,6 +1345,8 @@ func TestMCPAllowedTransportsValidation(t *testing.T) {
 		{"stdio only rejects http", []string{"stdio"}, "http", true},
 		{"stdio only allows stdio", []string{"stdio"}, "stdio", false},
 		{"explicit all allows sse", []string{"stdio", "http", "sse"}, "sse", false},
+		{"invalid transport value", []string{"stdio", "grpc"}, "stdio", true},
+		{"typo in transport", []string{"stdoi"}, "stdio", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

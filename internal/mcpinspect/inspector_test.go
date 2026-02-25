@@ -315,3 +315,29 @@ func TestInspector_ErrorResponse_CleansPendingCall(t *testing.T) {
 	}
 	inspector.mu.Unlock()
 }
+
+func TestInspector_UnknownRequest_DoesNotCleanPendingCall(t *testing.T) {
+	emitter := func(event interface{}) {}
+	inspector := NewInspector("sess_dir", "srv1", emitter)
+
+	// Register a pending call.
+	callReq := `{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"my_tool","arguments":{}}}`
+	_, err := inspector.Inspect([]byte(callReq), DirectionRequest)
+	if err != nil {
+		t.Fatalf("Inspect call request failed: %v", err)
+	}
+
+	// Send an unknown request that happens to reuse the same id.
+	// This should NOT clean up the pending call because direction is Request.
+	unknownReq := `{"jsonrpc":"2.0","id":99,"method":"resources/list"}`
+	_, err = inspector.Inspect([]byte(unknownReq), DirectionRequest)
+	if err != nil {
+		t.Fatalf("Inspect unknown request failed: %v", err)
+	}
+
+	inspector.mu.Lock()
+	if _, ok := inspector.pendingCalls["99"]; !ok {
+		t.Error("pending call for id 99 should NOT have been cleaned up by a request-direction unknown message")
+	}
+	inspector.mu.Unlock()
+}

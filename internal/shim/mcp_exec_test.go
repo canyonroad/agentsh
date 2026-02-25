@@ -157,6 +157,88 @@ func TestBuildMCPExecWrapper_TrustBinaryFailure_AlertMode(t *testing.T) {
 	}
 }
 
+func TestBuildMCPExecWrapper_NotPinned_NoAutoTrust_BlockMode(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{verifyStatus: "not_pinned"}
+
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: false,
+		OnChange:       "block",
+	}
+
+	_, err := BuildMCPExecWrapper(cfg)
+	if err == nil {
+		t.Fatal("expected error when not_pinned with auto_trust_first=false in block mode")
+	}
+	if !strings.Contains(err.Error(), "no pinned binary") {
+		t.Errorf("error should mention no pinned binary, got: %v", err)
+	}
+}
+
+func TestBuildMCPExecWrapper_NotPinned_NoAutoTrust_AlertMode(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{verifyStatus: "not_pinned"}
+
+	var emittedEvents []interface{}
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: false,
+		OnChange:       "alert",
+		EventEmitter:   func(e interface{}) { emittedEvents = append(emittedEvents, e) },
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("alert mode should not error, got: %v", err)
+	}
+	if wrapper == nil {
+		t.Fatal("wrapper should not be nil")
+	}
+	if len(emittedEvents) != 1 {
+		t.Fatalf("expected 1 alert event, got %d", len(emittedEvents))
+	}
+	ev, ok := emittedEvents[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map event, got %T", emittedEvents[0])
+	}
+	if ev["type"] != "mcp_server_binary_not_pinned" {
+		t.Errorf("event type = %v, want mcp_server_binary_not_pinned", ev["type"])
+	}
+}
+
+func TestBuildMCPExecWrapper_NotPinned_NoAutoTrust_AllowMode(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{verifyStatus: "not_pinned"}
+
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: false,
+		OnChange:       "allow",
+	}
+
+	// Allow mode: should proceed without error or event
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("allow mode should not error, got: %v", err)
+	}
+	if wrapper == nil {
+		t.Fatal("wrapper should not be nil")
+	}
+}
+
 func TestBuildMCPExecWrapper_PinMisconfigured_BlockMode(t *testing.T) {
 	cfg := MCPExecConfig{
 		SessionID: "sess_1",

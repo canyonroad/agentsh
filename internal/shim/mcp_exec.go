@@ -104,6 +104,22 @@ func verifyBinaryPin(cfg MCPExecConfig) (string, error) {
 				}
 				log.Printf("binary pin: failed to trust %s: %v", cfg.ServerID, trustErr)
 			}
+		} else {
+			// AutoTrustFirst is off — enforce on_change policy for unknown binaries.
+			switch cfg.OnChange {
+			case "block":
+				return "", fmt.Errorf("binary pin: server %s has no pinned binary and auto_trust_first is disabled", cfg.ServerID)
+			case "alert":
+				if cfg.EventEmitter != nil {
+					cfg.EventEmitter(map[string]any{
+						"type":        "mcp_server_binary_not_pinned",
+						"server_id":   cfg.ServerID,
+						"binary_hash": hash,
+						"binary_path": absPath,
+						"action":      "alert",
+					})
+				}
+			}
 		}
 	case "mismatch":
 		if cfg.OnChange == "block" {
@@ -150,6 +166,19 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.w.Write(p)
+}
+
+// WriteFrame writes data followed by a newline atomically under a single lock
+// acquisition, preventing interleaved writes from concurrent goroutines.
+func (s *syncWriter) WriteFrame(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, err := s.w.Write(p)
+	if err != nil {
+		return n, err
+	}
+	n2, err := s.w.Write([]byte("\n"))
+	return n + n2, err
 }
 
 // WrapCommand sets up stdio interception for the given command.

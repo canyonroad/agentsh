@@ -56,11 +56,13 @@ func ForwardWithInspection(src io.Reader, dst io.Writer, dir MCPDirection, inspe
 			}
 		}
 
-		// Forward
-		if _, err := dst.Write(line); err != nil {
-			return err
-		}
-		if _, err := dst.Write([]byte("\n")); err != nil {
+		// Forward as a single write to prevent interleaved framing when dst
+		// is shared between goroutines (e.g. syncWriter on os.Stdout).
+		// Copy line to avoid mutating the scanner's internal buffer.
+		frame := make([]byte, len(line)+1)
+		copy(frame, line)
+		frame[len(line)] = '\n'
+		if _, err := dst.Write(frame); err != nil {
 			return err
 		}
 	}
@@ -85,9 +87,8 @@ func writeBlockError(blockedMsg []byte, dir MCPDirection, dst, replyWriter io.Wr
 		target = replyWriter
 	}
 
-	errResp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"error":{"code":-32600,"message":"blocked by security policy"}}`, string(id))
-	target.Write([]byte(errResp))  //nolint:errcheck
-	target.Write([]byte("\n"))     //nolint:errcheck
+	errResp := fmt.Sprintf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"error\":{\"code\":-32600,\"message\":\"blocked by security policy\"}}\n", string(id))
+	target.Write([]byte(errResp)) //nolint:errcheck
 }
 
 // extractJSONRPCID extracts the "id" field from a JSON-RPC message.

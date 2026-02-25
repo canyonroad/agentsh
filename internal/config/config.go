@@ -534,8 +534,13 @@ func ValidateMCPTransports(cfg SandboxMCPConfig) error {
 	if len(cfg.AllowedTransports) == 0 {
 		return nil
 	}
+	// Validate enum values first.
+	validTransports := map[string]bool{"stdio": true, "http": true, "sse": true}
 	allowed := make(map[string]bool, len(cfg.AllowedTransports))
 	for _, t := range cfg.AllowedTransports {
+		if !validTransports[t] {
+			return fmt.Errorf("invalid allowed_transports value %q (valid: stdio, http, sse)", t)
+		}
 		allowed[t] = true
 	}
 	for _, srv := range cfg.Servers {
