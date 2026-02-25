@@ -1406,6 +1406,30 @@ func validateConfig(cfg *Config) error {
 			}
 		}
 	}
+	// Validate output_inspection.on_detection enum
+	if cfg.Sandbox.MCP.OutputInspection.OnDetection != "" {
+		switch cfg.Sandbox.MCP.OutputInspection.OnDetection {
+		case "allow", "alert", "block":
+		default:
+			return fmt.Errorf("invalid sandbox.mcp.output_inspection.on_detection %q (must be \"allow\", \"alert\", or \"block\")", cfg.Sandbox.MCP.OutputInspection.OnDetection)
+		}
+	}
+	// Validate sampling.policy enum
+	if cfg.Sandbox.MCP.Sampling.Policy != "" {
+		switch cfg.Sandbox.MCP.Sampling.Policy {
+		case "allow", "alert", "block":
+		default:
+			return fmt.Errorf("invalid sandbox.mcp.sampling.policy %q (must be \"allow\", \"alert\", or \"block\")", cfg.Sandbox.MCP.Sampling.Policy)
+		}
+	}
+	// Validate sampling.per_server enum values
+	for serverID, policy := range cfg.Sandbox.MCP.Sampling.PerServer {
+		switch policy {
+		case "allow", "alert", "block":
+		default:
+			return fmt.Errorf("invalid sandbox.mcp.sampling.per_server[%q] %q (must be \"allow\", \"alert\", or \"block\")", serverID, policy)
+		}
+	}
 	// Validate SimilarityThreshold bounds
 	if t := cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold; t != nil {
 		if *t < 0 || *t > 1 {

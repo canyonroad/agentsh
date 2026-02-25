@@ -1,10 +1,57 @@
 package shim
 
 import (
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
 )
+
+func TestStandardVars_ContainsCoreVars(t *testing.T) {
+	// Core vars must always be in the standard set regardless of OS.
+	for _, name := range []string{"PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "TMPDIR"} {
+		if !standardVars[name] {
+			t.Errorf("standardVars missing %q", name)
+		}
+	}
+}
+
+func TestFilterEnvForMCPServer_WindowsVarsInAllowlistMode(t *testing.T) {
+	// On Windows, critical system vars should pass through in allowlist mode.
+	// On non-Windows, they would be stripped (expected). This test documents
+	// the cross-platform behavior.
+	environ := []string{
+		"PATH=C:\\Windows",
+		"SYSTEMROOT=C:\\Windows",
+		"COMSPEC=C:\\Windows\\system32\\cmd.exe",
+		"TEMP=C:\\Temp",
+		"TMP=C:\\Temp",
+		"USERPROFILE=C:\\Users\\test",
+		"PATHEXT=.COM;.EXE;.BAT",
+		"CUSTOM_VAR=hello",
+	}
+
+	allowedEnv := []string{"CUSTOM_VAR"}
+	filtered, _ := FilterEnvForMCPServer(environ, allowedEnv, nil)
+	filteredNames := envNameSet(filtered)
+
+	// PATH is always standard.
+	if !filteredNames["PATH"] {
+		t.Error("PATH should always be in standard vars")
+	}
+	// CUSTOM_VAR is in allowlist.
+	if !filteredNames["CUSTOM_VAR"] {
+		t.Error("CUSTOM_VAR should pass through via allowlist")
+	}
+
+	if runtime.GOOS == "windows" {
+		for _, v := range []string{"SYSTEMROOT", "COMSPEC", "TEMP", "TMP", "USERPROFILE", "PATHEXT"} {
+			if !filteredNames[v] {
+				t.Errorf("on Windows, %q should pass through as a standard var", v)
+			}
+		}
+	}
+}
 
 func TestFilterEnvForMCPServer_EmptyListsFullPassthrough(t *testing.T) {
 	environ := []string{

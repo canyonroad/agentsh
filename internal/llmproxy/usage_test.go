@@ -262,3 +262,63 @@ func TestExtractSSEUsage_OpenAIDataNoSpace(t *testing.T) {
 		t.Errorf("OutputTokens = %d, want 15", usage.OutputTokens)
 	}
 }
+
+func TestExtractSSEUsage_MultiLineEvent(t *testing.T) {
+	// SSE spec allows one event's data to span multiple "data:" lines.
+	// The lines are concatenated with newlines before parsing as JSON.
+	body := []byte(
+		"event: message_start\n" +
+			// JSON split across two data: lines
+			`data: {"type":"message_start",` + "\n" +
+			`data: "message":{"id":"msg_01","usage":{"input_tokens":99,"output_tokens":0}}}` + "\n\n" +
+			"event: message_delta\n" +
+			`data: {"type":"message_delta","usage":{"output_tokens":33}}` + "\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectAnthropic)
+	if usage.InputTokens != 99 {
+		t.Errorf("InputTokens = %d, want 99", usage.InputTokens)
+	}
+	if usage.OutputTokens != 33 {
+		t.Errorf("OutputTokens = %d, want 33", usage.OutputTokens)
+	}
+}
+
+func TestExtractSSEUsage_MultiLineOpenAI(t *testing.T) {
+	body := []byte(
+		`data: {"id":"chatcmpl-1",` + "\n" +
+			`data: "choices":[],"usage":{"prompt_tokens":77,"completion_tokens":22}}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if usage.InputTokens != 77 {
+		t.Errorf("InputTokens = %d, want 77", usage.InputTokens)
+	}
+	if usage.OutputTokens != 22 {
+		t.Errorf("OutputTokens = %d, want 22", usage.OutputTokens)
+	}
+}
+
+func TestParseSSEEvents(t *testing.T) {
+	body := []byte(
+		": comment\n" +
+			"event: foo\n" +
+			"data: line1\n" +
+			"data: line2\n" +
+			"\n" +
+			"data: single\n" +
+			"\n",
+	)
+
+	events := parseSSEEvents(body)
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if string(events[0]) != "line1\nline2" {
+		t.Errorf("event[0] = %q, want %q", events[0], "line1\nline2")
+	}
+	if string(events[1]) != "single" {
+		t.Errorf("event[1] = %q, want %q", events[1], "single")
+	}
+}

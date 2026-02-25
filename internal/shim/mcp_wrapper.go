@@ -3,6 +3,8 @@ package shim
 
 import (
 	"bufio"
+	"encoding/json"
+	"fmt"
 	"io"
 )
 
@@ -32,8 +34,12 @@ type MCPInspector func(data []byte, dir MCPDirection) bool
 
 // ForwardWithInspection copies data from src to dst while calling inspector
 // for each line (JSON-RPC message). If the inspector returns true (blocked),
-// the line is not forwarded. Returns when src is exhausted.
-func ForwardWithInspection(src io.Reader, dst io.Writer, dir MCPDirection, inspector MCPInspector) error {
+// a JSON-RPC error response is written so the caller does not hang waiting
+// for a reply that never arrives. For blocked requests, the error is sent to
+// replyWriter (the client); for blocked responses, it replaces the original
+// in dst. If replyWriter is nil, blocked requests are dropped silently
+// (backward compatible). Returns when src is exhausted.
+func ForwardWithInspection(src io.Reader, dst io.Writer, dir MCPDirection, inspector MCPInspector, replyWriter io.Writer) error {
 	scanner := bufio.NewScanner(src)
 	// Increase buffer size for large messages
 	buf := make([]byte, 64*1024)
@@ -45,7 +51,8 @@ func ForwardWithInspection(src io.Reader, dst io.Writer, dir MCPDirection, inspe
 		// Inspect and check if blocked
 		if inspector != nil && len(line) > 0 {
 			if inspector(line, dir) {
-				continue // blocked, do not forward
+				writeBlockError(line, dir, dst, replyWriter)
+				continue
 			}
 		}
 
@@ -59,4 +66,41 @@ func ForwardWithInspection(src io.Reader, dst io.Writer, dir MCPDirection, inspe
 	}
 
 	return scanner.Err()
+}
+
+// writeBlockError synthesizes a JSON-RPC error response for a blocked message.
+// For request direction, the error is sent to replyWriter (the client).
+// For response direction, the error replaces the blocked message in dst.
+func writeBlockError(blockedMsg []byte, dir MCPDirection, dst, replyWriter io.Writer) {
+	id := extractJSONRPCID(blockedMsg)
+	if id == nil {
+		return // notification or unparseable — no response needed
+	}
+
+	target := dst
+	if dir == MCPDirectionRequest {
+		if replyWriter == nil {
+			return
+		}
+		target = replyWriter
+	}
+
+	errResp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"error":{"code":-32600,"message":"blocked by security policy"}}`, string(id))
+	target.Write([]byte(errResp))  //nolint:errcheck
+	target.Write([]byte("\n"))     //nolint:errcheck
+}
+
+// extractJSONRPCID extracts the "id" field from a JSON-RPC message.
+// Returns the raw JSON value, or nil if no id is present (e.g. notifications).
+func extractJSONRPCID(data []byte) json.RawMessage {
+	var msg struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return nil
+	}
+	if len(msg.ID) == 0 || string(msg.ID) == "null" {
+		return nil
+	}
+	return msg.ID
 }

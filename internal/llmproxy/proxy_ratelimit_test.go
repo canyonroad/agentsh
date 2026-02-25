@@ -136,6 +136,54 @@ func TestLLMRateLimiter_OnlyTPM(t *testing.T) {
 	}
 }
 
+func TestLLMRateLimiter_AcquireInFlight_NonBlocking(t *testing.T) {
+	lim := NewLLMRateLimiter(config.LLMRateLimitsConfig{
+		Enabled:         true,
+		TokensPerMinute: 1000,
+		TokenBurst:      100,
+	})
+
+	// Fill all in-flight slots (defaultMaxInFlight = 4).
+	for i := 0; i < defaultMaxInFlight; i++ {
+		if !lim.AcquireInFlight() {
+			t.Fatalf("slot %d should be acquired", i)
+		}
+	}
+
+	// Next acquire should return false immediately (non-blocking).
+	done := make(chan bool, 1)
+	go func() {
+		done <- lim.AcquireInFlight()
+	}()
+
+	select {
+	case got := <-done:
+		if got {
+			t.Fatal("AcquireInFlight should return false when all slots are occupied")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("AcquireInFlight blocked instead of returning immediately")
+	}
+
+	// Release one slot and try again.
+	lim.ReleaseInFlight()
+	if !lim.AcquireInFlight() {
+		t.Fatal("should acquire after releasing a slot")
+	}
+}
+
+func TestLLMRateLimiter_AcquireInFlight_Disabled(t *testing.T) {
+	lim := NewLLMRateLimiter(config.LLMRateLimitsConfig{
+		Enabled:           true,
+		RequestsPerMinute: 60,
+		// No TPM = no inFlight channel
+	})
+
+	if lim.AcquireInFlight() {
+		t.Fatal("AcquireInFlight should return false when TPM is not configured")
+	}
+}
+
 func TestLLMRateLimiter_TokenBudgetAvailable(t *testing.T) {
 	lim := NewLLMRateLimiter(config.LLMRateLimitsConfig{
 		Enabled:         true,

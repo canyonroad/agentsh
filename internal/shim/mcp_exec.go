@@ -128,6 +128,20 @@ func (w *MCPExecWrapper) ResolvedCommand() string {
 	return w.resolvedCommand
 }
 
+// syncWriter wraps an io.Writer with a mutex for thread-safe concurrent writes.
+// Used when multiple goroutines (stdin block-error replies and stdout forwarding)
+// both write to the same underlying writer (os.Stdout).
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
 // WrapCommand sets up stdio interception for the given command.
 // Returns cleanup function to be called after command completes.
 func (w *MCPExecWrapper) WrapCommand(cmd *exec.Cmd) (cleanup func(), err error) {
@@ -145,6 +159,10 @@ func (w *MCPExecWrapper) WrapCommand(cmd *exec.Cmd) (cleanup func(), err error) 
 	stdoutReader, stdoutWriter := io.Pipe()
 	cmd.Stdout = stdoutWriter
 
+	// syncWriter provides thread-safe writes to os.Stdout, shared between
+	// the stdout forwarder and the stdin goroutine's block-error replies.
+	sw := &syncWriter{w: os.Stdout}
+
 	// WaitGroup to track goroutine completion
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -153,7 +171,8 @@ func (w *MCPExecWrapper) WrapCommand(cmd *exec.Cmd) (cleanup func(), err error) 
 	go func() {
 		defer wg.Done()
 		defer stdinWriter.Close()
-		if err := ForwardWithInspection(origStdin, stdinWriter, MCPDirectionRequest, w.bridge.InspectorFunc()); err != nil {
+		// Pass sw as replyWriter so blocked request errors go back to client.
+		if err := ForwardWithInspection(origStdin, stdinWriter, MCPDirectionRequest, w.bridge.InspectorFunc(), sw); err != nil {
 			log.Printf("MCP stdin inspection error: %v", err)
 		}
 	}()
@@ -164,7 +183,9 @@ func (w *MCPExecWrapper) WrapCommand(cmd *exec.Cmd) (cleanup func(), err error) 
 			// Drain any remaining data
 			io.Copy(io.Discard, stdoutReader)
 		}()
-		if err := ForwardWithInspection(stdoutReader, os.Stdout, MCPDirectionResponse, w.bridge.InspectorFunc()); err != nil {
+		// Use sw as dst so all client-facing writes are synchronized.
+		// nil replyWriter — response blocking writes error to dst directly.
+		if err := ForwardWithInspection(stdoutReader, sw, MCPDirectionResponse, w.bridge.InspectorFunc(), nil); err != nil {
 			log.Printf("MCP stdout inspection error: %v", err)
 		}
 	}()

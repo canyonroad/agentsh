@@ -7,16 +7,38 @@ import (
 
 // standardVars are environment variables that are always passed through to MCP
 // server processes, even when an allowlist is configured. These are required
-// for basic process operation.
-var standardVars = map[string]bool{
-	"PATH":            true,
-	"HOME":            true,
-	"USER":            true,
-	"SHELL":           true,
-	"TERM":            true,
-	"LANG":            true,
-	"TMPDIR":          true,
-	"XDG_RUNTIME_DIR": true,
+// for basic process operation. The set is OS-aware: on Windows, critical
+// system variables (SYSTEMROOT, COMSPEC, etc.) are included.
+var standardVars = buildStandardVars()
+
+func buildStandardVars() map[string]bool {
+	vars := map[string]bool{
+		"PATH":            true,
+		"HOME":            true,
+		"USER":            true,
+		"SHELL":           true,
+		"TERM":            true,
+		"LANG":            true,
+		"TMPDIR":          true,
+		"XDG_RUNTIME_DIR": true,
+	}
+	if runtime.GOOS == "windows" {
+		for _, v := range []string{
+			"SYSTEMROOT",
+			"COMSPEC",
+			"TEMP",
+			"TMP",
+			"USERPROFILE",
+			"PATHEXT",
+			"APPDATA",
+			"LOCALAPPDATA",
+			"PROGRAMDATA",
+			"SYSTEMDRIVE",
+		} {
+			vars[v] = true
+		}
+	}
+	return vars
 }
 
 // sensitivePatterns are suffix patterns that are stripped by default when an

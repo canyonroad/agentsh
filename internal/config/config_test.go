@@ -1436,3 +1436,107 @@ proxy:
 		})
 	}
 }
+
+func TestSamplingAndOutputInspectionEnumValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "valid sampling policy",
+			yaml: `
+sandbox:
+  mcp:
+    sampling:
+      policy: block
+`,
+			wantErr: "",
+		},
+		{
+			name: "invalid sampling policy",
+			yaml: `
+sandbox:
+  mcp:
+    sampling:
+      policy: deny
+`,
+			wantErr: `invalid sandbox.mcp.sampling.policy "deny"`,
+		},
+		{
+			name: "valid per_server override",
+			yaml: `
+sandbox:
+  mcp:
+    sampling:
+      policy: block
+      per_server:
+        trusted-srv: allow
+`,
+			wantErr: "",
+		},
+		{
+			name: "invalid per_server override",
+			yaml: `
+sandbox:
+  mcp:
+    sampling:
+      per_server:
+        bad-srv: reject
+`,
+			wantErr: `invalid sandbox.mcp.sampling.per_server["bad-srv"] "reject"`,
+		},
+		{
+			name: "valid output_inspection on_detection",
+			yaml: `
+sandbox:
+  mcp:
+    output_inspection:
+      enabled: true
+      on_detection: alert
+`,
+			wantErr: "",
+		},
+		{
+			name: "invalid output_inspection on_detection",
+			yaml: `
+sandbox:
+  mcp:
+    output_inspection:
+      enabled: true
+      on_detection: warn
+`,
+			wantErr: `invalid sandbox.mcp.output_inspection.on_detection "warn"`,
+		},
+		{
+			name: "empty values accepted",
+			yaml: `
+sandbox:
+  mcp:
+    sampling:
+      policy: ""
+    output_inspection:
+      on_detection: ""
+`,
+			wantErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			os.WriteFile(path, []byte(tt.yaml), 0644)
+
+			_, err := Load(path)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("Load() unexpected error: %v", err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("Load() error = %v, want containing %q", err, tt.wantErr)
+				}
+			}
+		})
+	}
+}

@@ -302,8 +302,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Acquire an in-flight slot to bound concurrent requests when TPM is
 	// enabled. This prevents bulk overspend from requests that pass the
 	// pre-check before post-response token accounting occurs.
-	if acquired := p.llmRateLimiter.AcquireInFlight(); acquired {
-		defer p.llmRateLimiter.ReleaseInFlight()
+	// Non-blocking: reject immediately if concurrency cap is reached.
+	if l := p.llmRateLimiter; l.inFlightEnabled() {
+		if acquired := l.AcquireInFlight(); acquired {
+			defer l.ReleaseInFlight()
+		} else {
+			p.logger.Warn("LLM API rate limited (concurrency)", "request_id", requestID, "session_id", sessionID)
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "too many concurrent requests", http.StatusTooManyRequests)
+			return
+		}
 	}
 
 	p.logger.Debug("proxying request",

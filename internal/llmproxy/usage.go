@@ -142,17 +142,49 @@ func extractSSEDataPayload(line []byte) []byte {
 	return nil
 }
 
-// extractAnthropicSSEUsage scans SSE lines for Anthropic usage events.
+// parseSSEEvents splits an SSE body into individual event data payloads.
+// Per the SSE spec, an event's data may span multiple "data:" lines; these
+// are concatenated (with newlines) until a blank line terminates the event.
+// Returns only events that had at least one data line.
+func parseSSEEvents(body []byte) [][]byte {
+	var events [][]byte
+	var dataBuf []byte
+	hasData := false
+
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		if len(line) == 0 {
+			// Blank line = event boundary.
+			if hasData {
+				events = append(events, dataBuf)
+				dataBuf = nil
+				hasData = false
+			}
+			continue
+		}
+		if payload := extractSSEDataPayload(line); payload != nil {
+			if hasData {
+				dataBuf = append(dataBuf, '\n')
+			}
+			dataBuf = append(dataBuf, payload...)
+			hasData = true
+		}
+		// Other fields (event:, id:, retry:, comments) are ignored.
+	}
+	// Flush trailing event if body doesn't end with a blank line.
+	if hasData {
+		events = append(events, dataBuf)
+	}
+	return events
+}
+
+// extractAnthropicSSEUsage scans SSE events for Anthropic usage.
 // input_tokens comes from message_start. output_tokens comes from
 // message_delta — Anthropic delta usage is cumulative, so we take the
 // latest (highest) value rather than summing.
 func extractAnthropicSSEUsage(body []byte) Usage {
 	var total Usage
-	for _, line := range bytes.Split(body, []byte("\n")) {
-		data := extractSSEDataPayload(line)
-		if data == nil {
-			continue
-		}
+	for _, data := range parseSSEEvents(body) {
 		var ev sseEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
 			continue
@@ -174,14 +206,10 @@ func extractAnthropicSSEUsage(body []byte) Usage {
 	return total
 }
 
-// extractOpenAISSEUsage scans SSE lines for OpenAI usage in the final chunk.
+// extractOpenAISSEUsage scans SSE events for OpenAI usage in the final chunk.
 func extractOpenAISSEUsage(body []byte) Usage {
 	var total Usage
-	for _, line := range bytes.Split(body, []byte("\n")) {
-		data := extractSSEDataPayload(line)
-		if data == nil {
-			continue
-		}
+	for _, data := range parseSSEEvents(body) {
 		if bytes.Equal(data, []byte("[DONE]")) {
 			continue
 		}

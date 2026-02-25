@@ -83,16 +83,25 @@ func (l *LLMRateLimiter) ConsumeTokens(n int) {
 	l.tpmLimit.ForceConsumeN(n)
 }
 
-// AcquireInFlight blocks until an in-flight slot is available (when TPM is
-// enabled). Returns false if TPM is not configured (caller should proceed
-// without releasing). This bounds concurrent requests to prevent bulk
-// overspend before post-response token accounting.
+// inFlightEnabled returns true if the in-flight concurrency limiter is active.
+func (l *LLMRateLimiter) inFlightEnabled() bool {
+	return l.inFlight != nil
+}
+
+// AcquireInFlight attempts to acquire an in-flight slot (when TPM is enabled).
+// Returns false if TPM is not configured or the concurrency cap is reached.
+// Non-blocking: if all slots are occupied, returns false immediately so the
+// caller can reject the request (e.g. 429) instead of piling up goroutines.
 func (l *LLMRateLimiter) AcquireInFlight() bool {
 	if l.inFlight == nil {
 		return false
 	}
-	l.inFlight <- struct{}{}
-	return true
+	select {
+	case l.inFlight <- struct{}{}:
+		return true
+	default:
+		return false
+	}
 }
 
 // ReleaseInFlight releases an in-flight slot. Must be called after
