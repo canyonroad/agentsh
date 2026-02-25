@@ -63,6 +63,16 @@ func TestDetectMessageType(t *testing.T) {
 			input:    `{"jsonrpc":"2.0","id":4,"method":"resources/list"}`,
 			expected: MessageUnknown,
 		},
+		{
+			name:     "notifications/tools/list_changed",
+			input:    `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`,
+			expected: MessageToolsListChanged,
+		},
+		{
+			name:     "notifications/tools/list_changed with no id field",
+			input:    `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`,
+			expected: MessageToolsListChanged,
+		},
 	}
 
 	for _, tt := range tests {
@@ -75,5 +85,13 @@ func TestDetectMessageType(t *testing.T) {
 				t.Errorf("DetectMessageType() = %v, want %v", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestMessageToolsListChanged_String(t *testing.T) {
+	got := MessageToolsListChanged.String()
+	want := "notifications/tools/list_changed"
+	if got != want {
+		t.Errorf("MessageToolsListChanged.String() = %q, want %q", got, want)
 	}
 }

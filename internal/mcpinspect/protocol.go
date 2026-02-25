@@ -51,6 +51,64 @@ func ParseToolsCallRequest(data []byte) (*ToolsCallRequest, error) {
 	return &req, nil
 }
 
+// ContentBlock represents a content block in an MCP tool result.
+type ContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+// ToolsCallResponse is the JSON-RPC response to tools/call.
+type ToolsCallResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Result  struct {
+		Content []ContentBlock `json:"content"`
+	} `json:"result"`
+}
+
+// ParseToolsCallResponse parses a tools/call response from raw JSON.
+func ParseToolsCallResponse(data []byte) (*ToolsCallResponse, error) {
+	var resp ToolsCallResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("parse tools/call response: %w", err)
+	}
+	return &resp, nil
+}
+
+// SamplingCreateMessageRequest is the JSON-RPC request for sampling/createMessage.
+type SamplingCreateMessageRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Method  string          `json:"method"` // "sampling/createMessage"
+	Params  struct {
+		Messages         []SamplingMessage `json:"messages"`
+		ModelPreferences *struct {
+			Hints []struct {
+				Name string `json:"name"`
+			} `json:"hints"`
+		} `json:"modelPreferences,omitempty"`
+		MaxTokens int `json:"maxTokens"`
+	} `json:"params"`
+}
+
+// SamplingMessage represents a message in a sampling/createMessage request.
+type SamplingMessage struct {
+	Role    string `json:"role"`
+	Content struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+// ParseSamplingRequest parses a sampling/createMessage request from raw JSON.
+func ParseSamplingRequest(data []byte) (*SamplingCreateMessageRequest, error) {
+	var req SamplingCreateMessageRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("parse sampling/createMessage request: %w", err)
+	}
+	return &req, nil
+}
+
 // MessageType identifies the type of MCP message.
 type MessageType int
 
@@ -61,6 +119,7 @@ const (
 	MessageToolsCall
 	MessageToolsCallResponse
 	MessageSamplingRequest
+	MessageToolsListChanged
 )
 
 // String returns the string representation of MessageType.
@@ -76,6 +135,8 @@ func (m MessageType) String() string {
 		return "tools/call_response"
 	case MessageSamplingRequest:
 		return "sampling/createMessage"
+	case MessageToolsListChanged:
+		return "notifications/tools/list_changed"
 	default:
 		return "unknown"
 	}
@@ -86,7 +147,8 @@ func DetectMessageType(data []byte) (MessageType, error) {
 	var msg struct {
 		Method string `json:"method"`
 		Result struct {
-			Tools []json.RawMessage `json:"tools"`
+			Tools   []json.RawMessage `json:"tools"`
+			Content []json.RawMessage `json:"content"`
 		} `json:"result"`
 	}
 
@@ -101,11 +163,18 @@ func DetectMessageType(data []byte) (MessageType, error) {
 		return MessageToolsCall, nil
 	case "sampling/createMessage":
 		return MessageSamplingRequest, nil
+	case "notifications/tools/list_changed":
+		return MessageToolsListChanged, nil
 	}
 
 	// Check for tools/list response (has tools array in result)
 	if len(msg.Result.Tools) > 0 {
 		return MessageToolsListResponse, nil
+	}
+
+	// Check for tools/call response (has content array in result, no tools)
+	if len(msg.Result.Content) > 0 {
+		return MessageToolsCallResponse, nil
 	}
 
 	return MessageUnknown, nil

@@ -61,6 +61,16 @@ func NewDetectorWithPatterns(custom []PatternConfig) *Detector {
 	return &Detector{patterns: patterns}
 }
 
+// InspectText scans arbitrary text for suspicious patterns.
+// field identifies the source (e.g., "arguments", "tool_result", "sampling_prompt").
+func (d *Detector) InspectText(text, field string) []DetectionResult {
+	results := d.inspectText(text, field)
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Severity > results[j].Severity
+	})
+	return results
+}
+
 // Inspect scans a tool definition and returns any detections.
 func (d *Detector) Inspect(tool ToolDefinition) []DetectionResult {
 	var results []DetectionResult

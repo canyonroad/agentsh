@@ -180,7 +180,7 @@ func TestInspector_HandleToolsCall_EmitsEvent(t *testing.T) {
 		}
 	}`)
 
-	err := inspector.Inspect(data, DirectionRequest)
+	_, err := inspector.Inspect(data, DirectionRequest)
 	if err != nil {
 		t.Fatalf("Inspect returned error: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestInspector_HandleToolsCall_NoArgsEmitsEvent(t *testing.T) {
 		}
 	}`)
 
-	err := inspector.Inspect(data, DirectionRequest)
+	_, err := inspector.Inspect(data, DirectionRequest)
 	if err != nil {
 		t.Fatalf("Inspect returned error: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestInspector_HandleToolsCall_StringID(t *testing.T) {
 		}
 	}`)
 
-	err := inspector.Inspect(data, DirectionRequest)
+	_, err := inspector.Inspect(data, DirectionRequest)
 	if err != nil {
 		t.Fatalf("Inspect returned error: %v", err)
 	}
@@ -339,4 +339,279 @@ func TestMCPToolCalledEvent_JSON(t *testing.T) {
 	if decoded["jsonrpc_id"] != float64(42) {
 		t.Errorf("jsonrpc_id = %v, want 42", decoded["jsonrpc_id"])
 	}
+}
+
+// --- Argument scanning tests ---
+
+func TestToolsCall_CleanArgs_NoDetections(t *testing.T) {
+	var emitted []interface{}
+	emitter := func(event interface{}) {
+		emitted = append(emitted, event)
+	}
+
+	inspector := NewInspectorWithDetection("sess-1", "srv-1", emitter)
+
+	data := []byte(`{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "tools/call",
+		"params": {
+			"name": "get_weather",
+			"arguments": {"city": "London", "units": "metric"}
+		}
+	}`)
+
+	_, err := inspector.Inspect(data, DirectionRequest)
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+
+	if len(emitted) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(emitted))
+	}
+
+	event := emitted[0].(MCPToolCalledEvent)
+	if len(event.Detections) != 0 {
+		t.Errorf("expected 0 detections for clean args, got %d", len(event.Detections))
+	}
+	if event.MaxSeverity != "" {
+		t.Errorf("expected empty MaxSeverity for clean args, got %q", event.MaxSeverity)
+	}
+}
+
+func TestToolsCall_PathTraversal_Detected(t *testing.T) {
+	var emitted []interface{}
+	emitter := func(event interface{}) {
+		emitted = append(emitted, event)
+	}
+
+	inspector := NewInspectorWithDetection("sess-1", "srv-1", emitter)
+
+	data := []byte(`{
+		"jsonrpc": "2.0",
+		"id": 2,
+		"method": "tools/call",
+		"params": {
+			"name": "read_file",
+			"arguments": {"path": "../../etc/shadow"}
+		}
+	}`)
+
+	_, err := inspector.Inspect(data, DirectionRequest)
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+
+	event := emitted[0].(MCPToolCalledEvent)
+	if len(event.Detections) == 0 {
+		t.Fatal("expected detections for path traversal arguments")
+	}
+
+	// Should detect path traversal and/or credential patterns
+	found := false
+	for _, d := range event.Detections {
+		if d.Category == "path_traversal" || d.Category == "credential_theft" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected path_traversal or credential_theft category, got categories: %v",
+			detectionCategories(event.Detections))
+	}
+
+	if event.MaxSeverity == "" {
+		t.Error("expected MaxSeverity to be set")
+	}
+}
+
+func TestToolsCall_CommandInjection_Detected(t *testing.T) {
+	var emitted []interface{}
+	emitter := func(event interface{}) {
+		emitted = append(emitted, event)
+	}
+
+	inspector := NewInspectorWithDetection("sess-1", "srv-1", emitter)
+
+	data := []byte(`{
+		"jsonrpc": "2.0",
+		"id": 3,
+		"method": "tools/call",
+		"params": {
+			"name": "run_command",
+			"arguments": {"cmd": "ls; rm -rf /"}
+		}
+	}`)
+
+	_, err := inspector.Inspect(data, DirectionRequest)
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+
+	event := emitted[0].(MCPToolCalledEvent)
+	if len(event.Detections) == 0 {
+		t.Fatal("expected detections for command injection arguments")
+	}
+
+	found := false
+	for _, d := range event.Detections {
+		if d.Category == "shell_injection" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected shell_injection category, got categories: %v",
+			detectionCategories(event.Detections))
+	}
+}
+
+func TestToolsCall_CredentialTheft_CriticalSeverity(t *testing.T) {
+	var emitted []interface{}
+	emitter := func(event interface{}) {
+		emitted = append(emitted, event)
+	}
+
+	inspector := NewInspectorWithDetection("sess-1", "srv-1", emitter)
+
+	data := []byte(`{
+		"jsonrpc": "2.0",
+		"id": 4,
+		"method": "tools/call",
+		"params": {
+			"name": "read_file",
+			"arguments": {"file": "~/.ssh/id_rsa"}
+		}
+	}`)
+
+	_, err := inspector.Inspect(data, DirectionRequest)
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+
+	event := emitted[0].(MCPToolCalledEvent)
+	if len(event.Detections) == 0 {
+		t.Fatal("expected detections for credential theft arguments")
+	}
+
+	if event.MaxSeverity != "critical" {
+		t.Errorf("expected MaxSeverity = %q, got %q", "critical", event.MaxSeverity)
+	}
+
+	found := false
+	for _, d := range event.Detections {
+		if d.Category == "credential_theft" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected credential_theft category, got categories: %v",
+			detectionCategories(event.Detections))
+	}
+}
+
+func TestToolsCall_NoDetector_NoDetections(t *testing.T) {
+	var emitted []interface{}
+	emitter := func(event interface{}) {
+		emitted = append(emitted, event)
+	}
+
+	// Basic inspector without detector
+	inspector := NewInspector("sess-1", "srv-1", emitter)
+
+	data := []byte(`{
+		"jsonrpc": "2.0",
+		"id": 5,
+		"method": "tools/call",
+		"params": {
+			"name": "read_file",
+			"arguments": {"file": "~/.ssh/id_rsa"}
+		}
+	}`)
+
+	_, err := inspector.Inspect(data, DirectionRequest)
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+
+	event := emitted[0].(MCPToolCalledEvent)
+	if len(event.Detections) != 0 {
+		t.Errorf("expected 0 detections without detector, got %d", len(event.Detections))
+	}
+	if event.MaxSeverity != "" {
+		t.Errorf("expected empty MaxSeverity without detector, got %q", event.MaxSeverity)
+	}
+}
+
+func TestToolsCall_DetectionField_IsArguments(t *testing.T) {
+	var emitted []interface{}
+	emitter := func(event interface{}) {
+		emitted = append(emitted, event)
+	}
+
+	inspector := NewInspectorWithDetection("sess-1", "srv-1", emitter)
+
+	data := []byte(`{
+		"jsonrpc": "2.0",
+		"id": 6,
+		"method": "tools/call",
+		"params": {
+			"name": "read_file",
+			"arguments": {"path": "/etc/shadow"}
+		}
+	}`)
+
+	_, err := inspector.Inspect(data, DirectionRequest)
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+
+	event := emitted[0].(MCPToolCalledEvent)
+	if len(event.Detections) == 0 {
+		t.Fatal("expected detections")
+	}
+
+	for _, d := range event.Detections {
+		if d.Field != "arguments" {
+			t.Errorf("expected detection field = %q, got %q", "arguments", d.Field)
+		}
+	}
+}
+
+func TestToolsCall_NoArgs_NoDetections_WithDetector(t *testing.T) {
+	var emitted []interface{}
+	emitter := func(event interface{}) {
+		emitted = append(emitted, event)
+	}
+
+	inspector := NewInspectorWithDetection("sess-1", "srv-1", emitter)
+
+	data := []byte(`{
+		"jsonrpc": "2.0",
+		"id": 7,
+		"method": "tools/call",
+		"params": {
+			"name": "list_files"
+		}
+	}`)
+
+	_, err := inspector.Inspect(data, DirectionRequest)
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+
+	event := emitted[0].(MCPToolCalledEvent)
+	if len(event.Detections) != 0 {
+		t.Errorf("expected 0 detections for no-arg call, got %d", len(event.Detections))
+	}
+}
+
+// detectionCategories is a test helper that extracts category strings.
+func detectionCategories(detections []DetectionResult) []string {
+	cats := make([]string, len(detections))
+	for i, d := range detections {
+		cats[i] = d.Category
+	}
+	return cats
 }
