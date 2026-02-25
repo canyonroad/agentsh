@@ -7,14 +7,19 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 )
 
 // HashBinary computes SHA-256 of the binary at the given path.
 // If path is not absolute, resolves via exec.LookPath.
 func HashBinary(path string) (absPath string, hash string, err error) {
-	absPath, err = exec.LookPath(path)
-	if err != nil {
-		return "", "", fmt.Errorf("resolve binary path: %w", err)
+	if filepath.IsAbs(path) {
+		absPath = path
+	} else {
+		absPath, err = exec.LookPath(path)
+		if err != nil {
+			return "", "", fmt.Errorf("resolve binary path: %w", err)
+		}
 	}
 	f, err := os.Open(absPath)
 	if err != nil {

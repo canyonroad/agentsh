@@ -35,6 +35,9 @@ func VerifyTLSFingerprint(conn *tls.Conn, expected string) error {
 	if expected == "" {
 		return nil
 	}
+	// Normalize to lowercase so uppercase hex in config still matches
+	expected = strings.ToLower(expected)
+
 	state := conn.ConnectionState()
 	if len(state.PeerCertificates) == 0 {
 		return fmt.Errorf("no peer certificates presented")

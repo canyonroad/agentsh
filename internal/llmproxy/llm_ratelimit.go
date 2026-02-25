@@ -46,6 +46,17 @@ func (l *LLMRateLimiter) AllowRequest() bool {
 	return l.reqLimit.Allow()
 }
 
+// TokenBudgetAvailable returns true if the TPM bucket is not depleted.
+// Use this as a pre-request gate: if previous responses have driven the
+// token bucket negative (via ForceConsumeN), block new requests until
+// tokens replenish.
+func (l *LLMRateLimiter) TokenBudgetAvailable() bool {
+	if !l.enabled || l.tpmLimit == nil {
+		return true
+	}
+	return l.tpmLimit.Tokens() > 0
+}
+
 // AllowTokens checks whether the given number of tokens is allowed under the TPM limit.
 func (l *LLMRateLimiter) AllowTokens(n int) bool {
 	if !l.enabled || l.tpmLimit == nil {

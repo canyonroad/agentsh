@@ -291,6 +291,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check TPM budget — block if token budget is depleted from previous responses
+	if !p.llmRateLimiter.TokenBudgetAvailable() {
+		p.logger.Warn("LLM API rate limited (TPM)", "request_id", requestID, "session_id", sessionID)
+		w.Header().Set("Retry-After", "10")
+		http.Error(w, "token budget exceeded", http.StatusTooManyRequests)
+		return
+	}
+
 	p.logger.Debug("proxying request",
 		"request_id", requestID,
 		"dialect", dialect,
