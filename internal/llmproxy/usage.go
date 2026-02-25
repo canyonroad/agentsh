@@ -2,6 +2,7 @@
 package llmproxy
 
 import (
+	"bytes"
 	"encoding/json"
 )
 
@@ -82,4 +83,97 @@ func extractOpenAIUsage(body []byte) Usage {
 		InputTokens:  resp.Usage.PromptTokens,
 		OutputTokens: resp.Usage.CompletionTokens,
 	}
+}
+
+// sseEvent is a minimal structure for extracting usage from SSE event data lines.
+// Anthropic SSE streams embed usage in message_start (input_tokens) and
+// message_delta (output_tokens) events.
+type sseEvent struct {
+	Type    string `json:"type"`
+	Message struct {
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+	Usage struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+// openAISSEChunk represents the final chunk in an OpenAI SSE stream that
+// contains aggregated usage.
+type openAISSEChunk struct {
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
+}
+
+// ExtractSSEUsage extracts token usage from an SSE event stream body.
+// It scans each "data:" line for usage information and sums the totals.
+func ExtractSSEUsage(body []byte, dialect Dialect) Usage {
+	if len(body) == 0 {
+		return Usage{}
+	}
+
+	switch dialect {
+	case DialectAnthropic:
+		return extractAnthropicSSEUsage(body)
+	case DialectOpenAI:
+		return extractOpenAISSEUsage(body)
+	default:
+		return Usage{}
+	}
+}
+
+// extractAnthropicSSEUsage scans SSE lines for Anthropic usage events.
+// input_tokens comes from message_start, output_tokens from message_delta.
+func extractAnthropicSSEUsage(body []byte) Usage {
+	var total Usage
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data: ")) {
+			continue
+		}
+		data := line[6:] // strip "data: "
+		var ev sseEvent
+		if err := json.Unmarshal(data, &ev); err != nil {
+			continue
+		}
+		switch ev.Type {
+		case "message_start":
+			total.InputTokens += ev.Message.Usage.InputTokens
+			total.OutputTokens += ev.Message.Usage.OutputTokens
+		case "message_delta":
+			total.InputTokens += ev.Usage.InputTokens
+			total.OutputTokens += ev.Usage.OutputTokens
+		}
+	}
+	return total
+}
+
+// extractOpenAISSEUsage scans SSE lines for OpenAI usage in the final chunk.
+func extractOpenAISSEUsage(body []byte) Usage {
+	var total Usage
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data: ")) {
+			continue
+		}
+		data := line[6:]
+		if bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+		var chunk openAISSEChunk
+		if err := json.Unmarshal(data, &chunk); err != nil {
+			continue
+		}
+		if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
+			total.InputTokens = chunk.Usage.PromptTokens
+			total.OutputTokens = chunk.Usage.CompletionTokens
+		}
+	}
+	return total
 }

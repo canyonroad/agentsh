@@ -1412,5 +1412,24 @@ func validateConfig(cfg *Config) error {
 			return fmt.Errorf("sandbox.mcp.cross_server.shadow_tool.similarity_threshold must be in [0, 1], got %v", *t)
 		}
 	}
+	// Validate proxy rate limits
+	rl := cfg.Proxy.RateLimits
+	if rl.Enabled {
+		if rl.RequestsPerMinute < 0 {
+			return fmt.Errorf("proxy.rate_limits.requests_per_minute must be >= 0, got %d", rl.RequestsPerMinute)
+		}
+		if rl.RequestBurst < 0 {
+			return fmt.Errorf("proxy.rate_limits.request_burst must be >= 0, got %d", rl.RequestBurst)
+		}
+		if rl.TokensPerMinute < 0 {
+			return fmt.Errorf("proxy.rate_limits.tokens_per_minute must be >= 0, got %d", rl.TokensPerMinute)
+		}
+		if rl.TokenBurst < 0 {
+			return fmt.Errorf("proxy.rate_limits.token_burst must be >= 0, got %d", rl.TokenBurst)
+		}
+		if rl.RequestsPerMinute == 0 && rl.TokensPerMinute == 0 {
+			return fmt.Errorf("proxy.rate_limits: enabled but neither requests_per_minute nor tokens_per_minute is set")
+		}
+	}
 	return nil
 }

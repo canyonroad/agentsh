@@ -481,8 +481,14 @@ func (p *Proxy) logResponse(requestID, sessionID string, dialect Dialect, resp *
 
 // logResponseDirect logs a response with a pre-read body (used for SSE streams).
 func (p *Proxy) logResponseDirect(requestID, sessionID string, dialect Dialect, resp *http.Response, respBody []byte, startTime time.Time) {
-	// Extract token usage from the response
-	usage := ExtractUsage(respBody, dialect)
+	// Extract token usage from the response.
+	// SSE bodies start with "event:" or "data:" lines; use SSE-aware extraction.
+	var usage Usage
+	if bytes.HasPrefix(respBody, []byte("event:")) || bytes.HasPrefix(respBody, []byte("data:")) {
+		usage = ExtractSSEUsage(respBody, dialect)
+	} else {
+		usage = ExtractUsage(respBody, dialect)
+	}
 
 	// Consume tokens from the TPM budget for rate limiting
 	totalTokens := usage.InputTokens + usage.OutputTokens

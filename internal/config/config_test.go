@@ -1361,3 +1361,78 @@ func TestMCPAllowedTransportsValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestRateLimitsValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "enabled with no limits rejects",
+			yaml: `
+proxy:
+  rate_limits:
+    enabled: true
+`,
+			wantErr: "neither requests_per_minute nor tokens_per_minute is set",
+		},
+		{
+			name: "negative rpm rejects",
+			yaml: `
+proxy:
+  rate_limits:
+    enabled: true
+    requests_per_minute: -5
+`,
+			wantErr: "requests_per_minute must be >= 0",
+		},
+		{
+			name: "negative tpm rejects",
+			yaml: `
+proxy:
+  rate_limits:
+    enabled: true
+    tokens_per_minute: -100
+`,
+			wantErr: "tokens_per_minute must be >= 0",
+		},
+		{
+			name: "valid rpm only accepts",
+			yaml: `
+proxy:
+  rate_limits:
+    enabled: true
+    requests_per_minute: 60
+`,
+			wantErr: "",
+		},
+		{
+			name: "disabled with zero limits accepts",
+			yaml: `
+proxy:
+  rate_limits:
+    enabled: false
+`,
+			wantErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			os.WriteFile(path, []byte(tt.yaml), 0644)
+
+			_, err := Load(path)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("Load() unexpected error: %v", err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("Load() error = %v, want containing %q", err, tt.wantErr)
+				}
+			}
+		})
+	}
+}

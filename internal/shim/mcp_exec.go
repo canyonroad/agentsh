@@ -62,6 +62,9 @@ func BuildMCPExecWrapper(cfg MCPExecConfig) (*MCPExecWrapper, error) {
 				case "not_pinned":
 					if cfg.AutoTrustFirst {
 						if trustErr := cfg.PinStore.TrustBinary(cfg.ServerID, absPath, hash); trustErr != nil {
+							if cfg.OnChange == "block" {
+								return nil, fmt.Errorf("binary pin: failed to persist trust for %s: %w", cfg.ServerID, trustErr)
+							}
 							log.Printf("binary pin: failed to trust %s: %v", cfg.ServerID, trustErr)
 						}
 					}
