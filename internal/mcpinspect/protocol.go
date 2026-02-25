@@ -176,9 +176,11 @@ func DetectMessageType(data []byte) (MessageType, error) {
 			return MessageToolsListResponse, nil
 		}
 
-		// Any other response (has content, empty content, or error) is treated
-		// as a tools/call response so that pending-calls can be cleaned up.
-		if len(msg.Result.Content) > 0 || len(msg.Error) > 0 {
+		// Classify as tools/call response when content is present (even empty)
+		// or when the response is an error. This ensures pending-call cleanup
+		// for all response shapes. Non-tool error responses may also match here
+		// but are handled gracefully (lookup misses use "unknown" tool name).
+		if msg.Result.Content != nil || len(msg.Error) > 0 {
 			return MessageToolsCallResponse, nil
 		}
 	}

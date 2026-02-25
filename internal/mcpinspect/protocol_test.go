@@ -59,6 +59,11 @@ func TestDetectMessageType(t *testing.T) {
 			expected: MessageToolsCallResponse,
 		},
 		{
+			name:     "tools/call response with empty content",
+			input:    `{"jsonrpc":"2.0","id":3,"result":{"content":[]}}`,
+			expected: MessageToolsCallResponse,
+		},
+		{
 			name:     "tools/call error response",
 			input:    `{"jsonrpc":"2.0","id":4,"error":{"code":-1,"message":"tool failed"}}`,
 			expected: MessageToolsCallResponse,
