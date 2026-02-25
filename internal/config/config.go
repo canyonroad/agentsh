@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +31,7 @@ type Config struct {
 	Security          SecurityConfig          `yaml:"security"`
 	Landlock          LandlockConfig          `yaml:"landlock"`
 	LinuxCapabilities CapabilitiesConfig      `yaml:"capabilities"`
+	ThreatFeeds       ThreatFeedsConfig       `yaml:"threat_feeds"`
 }
 
 // PlatformConfig configures cross-platform selection and fallback behavior.
@@ -1150,6 +1152,23 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		// Since we can't distinguish false from unset, default to true for new configs
 		cfg.Security.WarnDegraded = true
 	}
+
+	// Threat feeds defaults
+	if cfg.ThreatFeeds.Action == "" {
+		cfg.ThreatFeeds.Action = "deny"
+	}
+	if cfg.ThreatFeeds.SyncInterval == 0 {
+		cfg.ThreatFeeds.SyncInterval = 6 * time.Hour
+	}
+	if cfg.ThreatFeeds.Realtime.Timeout == 0 {
+		cfg.ThreatFeeds.Realtime.Timeout = 500 * time.Millisecond
+	}
+	if cfg.ThreatFeeds.Realtime.CacheTTL == 0 {
+		cfg.ThreatFeeds.Realtime.CacheTTL = 1 * time.Hour
+	}
+	if cfg.ThreatFeeds.Realtime.OnTimeout == "" {
+		cfg.ThreatFeeds.Realtime.OnTimeout = "local-only"
+	}
 }
 
 // applyDefaults wraps applyDefaultsWithSource for backward compatibility.
@@ -1195,6 +1214,16 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("AGENTSH_OTEL_PROTOCOL"); v != "" {
 		cfg.Audit.OTEL.Protocol = v
 	}
+}
+
+// isSafeFeedName checks that a feed name contains only safe characters.
+func isSafeFeedName(name string) bool {
+	for _, c := range name {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func validateConfig(cfg *Config) error {
@@ -1257,6 +1286,53 @@ func validateConfig(cfg *Config) error {
 		case "", "low", "medium", "high", "critical":
 		default:
 			return fmt.Errorf("invalid audit.otel.filter.min_risk_level %q", cfg.Audit.OTEL.Filter.MinRiskLevel)
+		}
+	}
+	// Validate threat_feeds config
+	if cfg.ThreatFeeds.Action != "" {
+		switch cfg.ThreatFeeds.Action {
+		case "deny", "audit":
+		default:
+			return fmt.Errorf("invalid threat_feeds.action %q (must be \"deny\" or \"audit\")", cfg.ThreatFeeds.Action)
+		}
+	}
+	for i, f := range cfg.ThreatFeeds.Feeds {
+		if f.Name == "" {
+			return fmt.Errorf("threat_feeds.feeds[%d].name must not be empty", i)
+		}
+		if !isSafeFeedName(f.Name) {
+			return fmt.Errorf("invalid threat_feeds.feeds[%d].name %q (must match [A-Za-z0-9._-]+)", i, f.Name)
+		}
+		if f.URL == "" {
+			return fmt.Errorf("threat_feeds.feeds[%d].url must not be empty", i)
+		}
+		u, err := url.Parse(f.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("invalid threat_feeds.feeds[%d].url %q (must be http or https with a valid host)", i, f.URL)
+		}
+		switch f.Format {
+		case "hostfile", "domain-list":
+		case "":
+			return fmt.Errorf("threat_feeds.feeds[%d].format must not be empty (use \"hostfile\" or \"domain-list\")", i)
+		default:
+			return fmt.Errorf("invalid threat_feeds.feeds[%d].format %q (must be \"hostfile\" or \"domain-list\")", i, f.Format)
+		}
+	}
+	feedNames := make(map[string]struct{}, len(cfg.ThreatFeeds.Feeds))
+	for i, f := range cfg.ThreatFeeds.Feeds {
+		if _, dup := feedNames[f.Name]; dup {
+			return fmt.Errorf("duplicate threat_feeds.feeds name %q at index %d", f.Name, i)
+		}
+		feedNames[f.Name] = struct{}{}
+	}
+	if cfg.ThreatFeeds.Realtime.Provider != "" {
+		return fmt.Errorf("threat_feeds.realtime.provider %q is not supported in this version", cfg.ThreatFeeds.Realtime.Provider)
+	}
+	if cfg.ThreatFeeds.Realtime.OnTimeout != "" {
+		switch cfg.ThreatFeeds.Realtime.OnTimeout {
+		case "local-only", "allow", "deny":
+		default:
+			return fmt.Errorf("invalid threat_feeds.realtime.on_timeout %q (must be \"local-only\", \"allow\", or \"deny\")", cfg.ThreatFeeds.Realtime.OnTimeout)
 		}
 	}
 	return nil

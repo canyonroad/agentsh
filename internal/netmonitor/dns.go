@@ -113,7 +113,9 @@ func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 	// Default deny policies are typically intended for outbound TCP/UDP connects, not DNS lookups.
 	// If the only match is default-deny, treat DNS as monitor-only unless the policy explicitly matches port 53.
 	if dec.PolicyDecision == types.DecisionDeny && dec.Rule == "default-deny-network" {
-		dec = policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow, Rule: "dns-monitor-only"}
+		dec.PolicyDecision = types.DecisionAllow
+		dec.EffectiveDecision = types.DecisionAllow
+		dec.Rule = "dns-monitor-only"
 	}
 	dec = d.maybeApprove(ctx, commandID, dec, "dns", domain)
 
@@ -133,6 +135,9 @@ func (d *DNSInterceptor) handle(clientAddr net.Addr, query []byte) error {
 			Rule:              dec.Rule,
 			Message:           dec.Message,
 			Approval:          dec.Approval,
+			ThreatFeed:        dec.ThreatFeed,
+			ThreatMatch:       dec.ThreatMatch,
+			ThreatAction:      dec.ThreatAction,
 		},
 	}
 	if d.emit != nil {

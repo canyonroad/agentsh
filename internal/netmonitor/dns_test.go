@@ -197,3 +197,144 @@ func splitLabels(domain string) [][]byte {
 	}
 	return out
 }
+
+func TestDNSInterceptor_ThreatMetadataInEvent(t *testing.T) {
+	up := startUDPUpstream(t)
+	defer up.Close()
+
+	serverPC, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("udp listen not permitted in this environment: %v", err)
+		}
+		t.Fatal(err)
+	}
+	defer serverPC.Close()
+
+	// Policy with threat feed that matches evil.com in audit mode.
+	pol := &policy.Policy{
+		Version: 1,
+		Name:    "test",
+		NetworkRules: []policy.NetworkRule{
+			{Name: "allow-all", Domains: []string{"*"}, Ports: []int{53}, Decision: "allow"},
+		},
+	}
+	engine, err := policy.NewEngine(pol, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.SetThreatStore(&stubThreatChecker{
+		feedName: "urlhaus",
+		matched:  "evil.com",
+	}, "audit")
+
+	em := &captureEmitter{}
+	d := &DNSInterceptor{
+		sessionID: "session-test",
+		pc:        serverPC,
+		upstream:  up.LocalAddr().String(),
+		emit:      em,
+		policy:    engine,
+	}
+
+	query := makeDNSQuery(t, "evil.com", 0xABCD)
+	_ = d.handle(serverPC.LocalAddr(), query)
+
+	if len(em.events) == 0 {
+		t.Fatal("expected dns_query event")
+	}
+	ev := em.events[0]
+	if ev.Policy == nil {
+		t.Fatal("expected Policy to be set")
+	}
+	if ev.Policy.ThreatFeed != "urlhaus" {
+		t.Errorf("expected ThreatFeed %q, got %q", "urlhaus", ev.Policy.ThreatFeed)
+	}
+	if ev.Policy.ThreatMatch != "evil.com" {
+		t.Errorf("expected ThreatMatch %q, got %q", "evil.com", ev.Policy.ThreatMatch)
+	}
+	if ev.Policy.ThreatAction != "audit" {
+		t.Errorf("expected ThreatAction %q, got %q", "audit", ev.Policy.ThreatAction)
+	}
+}
+
+func TestDNSInterceptor_MonitorOnlyPreservesThreatMetadata(t *testing.T) {
+	up := startUDPUpstream(t)
+	defer up.Close()
+
+	serverPC, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("udp listen not permitted in this environment: %v", err)
+		}
+		t.Fatal(err)
+	}
+	defer serverPC.Close()
+
+	// Policy with a rule that doesn't match evil.com — evil.com will fall through
+	// to default-deny-network, which DNS rewrites to monitor-only.
+	pol := &policy.Policy{
+		Version: 1,
+		Name:    "test",
+		NetworkRules: []policy.NetworkRule{
+			{Name: "allow-safe", Domains: []string{"safe.com"}, Ports: []int{53}, Decision: "allow"},
+		},
+	}
+	engine, err := policy.NewEngine(pol, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.SetThreatStore(&stubThreatChecker{
+		feedName: "phishtank",
+		matched:  "evil.com",
+	}, "audit")
+
+	em := &captureEmitter{}
+	d := &DNSInterceptor{
+		sessionID: "session-test",
+		pc:        serverPC,
+		upstream:  up.LocalAddr().String(),
+		emit:      em,
+		policy:    engine,
+	}
+
+	query := makeDNSQuery(t, "evil.com", 0x1234)
+	_ = d.handle(serverPC.LocalAddr(), query)
+
+	if len(em.events) == 0 {
+		t.Fatal("expected dns_query event")
+	}
+	ev := em.events[0]
+	if ev.Policy == nil {
+		t.Fatal("expected Policy to be set")
+	}
+	// Rule should be rewritten to dns-monitor-only but threat fields preserved.
+	if ev.Policy.Rule != "dns-monitor-only" {
+		t.Errorf("expected Rule %q, got %q", "dns-monitor-only", ev.Policy.Rule)
+	}
+	if ev.Policy.ThreatFeed != "phishtank" {
+		t.Errorf("expected ThreatFeed %q, got %q", "phishtank", ev.Policy.ThreatFeed)
+	}
+	if ev.Policy.ThreatMatch != "evil.com" {
+		t.Errorf("expected ThreatMatch %q, got %q", "evil.com", ev.Policy.ThreatMatch)
+	}
+	if ev.Policy.ThreatAction != "audit" {
+		t.Errorf("expected ThreatAction %q, got %q", "audit", ev.Policy.ThreatAction)
+	}
+}
+
+// stubThreatChecker implements policy.ThreatChecker for testing.
+type stubThreatChecker struct {
+	feedName string
+	matched  string
+}
+
+func (s *stubThreatChecker) Check(domain string) (policy.ThreatCheckResult, bool) {
+	if domain == s.matched {
+		return policy.ThreatCheckResult{
+			FeedName:      s.feedName,
+			MatchedDomain: s.matched,
+		}, true
+	}
+	return policy.ThreatCheckResult{}, false
+}

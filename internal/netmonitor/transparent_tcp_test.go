@@ -29,3 +29,47 @@ func TestTransparentTCPMaybeApproveWithoutManager(t *testing.T) {
 		t.Fatalf("expected unchanged decision without approvals manager")
 	}
 }
+
+func TestTransparentTCPNetEventThreatMetadata(t *testing.T) {
+	tcp := &TransparentTCP{sessionID: "test-session"}
+	dec := policy.Decision{
+		PolicyDecision:    types.DecisionDeny,
+		EffectiveDecision: types.DecisionDeny,
+		Rule:              "threat-feed:urlhaus",
+		ThreatFeed:        "urlhaus",
+		ThreatMatch:       "evil.com",
+		ThreatAction:      "deny",
+	}
+	ev := tcp.netEvent("net_connect", "cmd-1", "evil.com", "1.2.3.4:443", 443, dec, nil)
+	if ev.Policy == nil {
+		t.Fatal("expected Policy to be set")
+	}
+	if ev.Policy.ThreatFeed != "urlhaus" {
+		t.Errorf("expected ThreatFeed %q, got %q", "urlhaus", ev.Policy.ThreatFeed)
+	}
+	if ev.Policy.ThreatMatch != "evil.com" {
+		t.Errorf("expected ThreatMatch %q, got %q", "evil.com", ev.Policy.ThreatMatch)
+	}
+	if ev.Policy.ThreatAction != "deny" {
+		t.Errorf("expected ThreatAction %q, got %q", "deny", ev.Policy.ThreatAction)
+	}
+}
+
+func TestTransparentTCPNetEventNoThreatMetadata(t *testing.T) {
+	tcp := &TransparentTCP{sessionID: "test-session"}
+	dec := policy.Decision{
+		PolicyDecision:    types.DecisionAllow,
+		EffectiveDecision: types.DecisionAllow,
+		Rule:              "allow-all",
+	}
+	ev := tcp.netEvent("net_connect", "cmd-1", "safe.com", "1.2.3.4:443", 443, dec, nil)
+	if ev.Policy == nil {
+		t.Fatal("expected Policy to be set")
+	}
+	if ev.Policy.ThreatFeed != "" {
+		t.Errorf("expected empty ThreatFeed, got %q", ev.Policy.ThreatFeed)
+	}
+	if ev.Policy.ThreatAction != "" {
+		t.Errorf("expected empty ThreatAction, got %q", ev.Policy.ThreatAction)
+	}
+}

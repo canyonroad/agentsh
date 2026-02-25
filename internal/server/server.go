@@ -27,6 +27,7 @@ import (
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
+	"github.com/agentsh/agentsh/internal/threatfeed"
 	storepkg "github.com/agentsh/agentsh/internal/store"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/internal/store/jsonl"
@@ -62,6 +63,9 @@ type Server struct {
 
 	pprofLn     net.Listener
 	pprofServer *http.Server
+
+	threatSyncer *threatfeed.Syncer
+	threatStore  *threatfeed.Store
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -100,6 +104,25 @@ func New(cfg *config.Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Threat feed (optional).
+	var threatStore *threatfeed.Store
+	var threatSyncer *threatfeed.Syncer
+	if cfg.ThreatFeeds.Enabled {
+		cacheDir := cfg.ThreatFeeds.CacheDir
+		if cacheDir == "" {
+			cacheDir = filepath.Join(config.GetDataDir(), "threat-feeds")
+		}
+		threatStore = threatfeed.NewStore(cacheDir, cfg.ThreatFeeds.Allowlist)
+		if err := threatStore.LoadFromDisk(); err != nil {
+			slog.Warn("threat feed cache load failed", "error", err)
+		} else if threatStore.Size() > 0 {
+			slog.Info("threat feed loaded from cache", "domains", threatStore.Size())
+		}
+		engine.SetThreatStore(&threatfeed.PolicyAdapter{Store: threatStore}, cfg.ThreatFeeds.Action)
+		threatSyncer = threatfeed.NewSyncer(threatStore, cfg.ThreatFeeds, slog.Default())
+	}
+
 	limits := engine.Limits()
 
 	metricsCollector := metrics.New()
@@ -363,6 +386,8 @@ func New(cfg *config.Config) (*Server, error) {
 		sessionTimeout: sessionTimeout,
 		idleTimeout:    idleTimeout,
 		reapInterval:   reapInterval,
+		threatSyncer:   threatSyncer,
+		threatStore:    threatStore,
 	}
 
 	ln, err := listenHTTP(cfg)
@@ -619,6 +644,20 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
+	var syncerDone chan struct{}
+	if s.threatSyncer != nil {
+		syncerDone = make(chan struct{})
+		go func() {
+			defer close(syncerDone)
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("threat feed syncer panicked", "panic", r)
+				}
+			}()
+			s.threatSyncer.Run(ctx)
+		}()
+	}
+
 	errCh := make(chan error, 3)
 	go func() {
 		if err := s.httpServer.Serve(s.httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -644,6 +683,7 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		// Shut down listeners immediately; don't wait for syncer first.
 		if s.pprofServer != nil {
 			_ = s.pprofServer.Shutdown(shutdownCtx)
 		}
@@ -653,8 +693,13 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.grpcServer != nil {
 			s.grpcServer.GracefulStop()
 		}
-		return s.httpServer.Shutdown(shutdownCtx)
+		httpErr := s.httpServer.Shutdown(shutdownCtx)
+		if syncerDone != nil {
+			<-syncerDone
+		}
+		return httpErr
 	case err := <-errCh:
+		stop() // cancel context so syncer can exit
 		if s.pprofServer != nil {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -667,6 +712,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if s.grpcServer != nil {
 			s.grpcServer.Stop()
+		}
+		if syncerDone != nil {
+			<-syncerDone
 		}
 		return fmt.Errorf("server: %w", err)
 	}

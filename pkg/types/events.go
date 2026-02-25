@@ -9,6 +9,9 @@ type PolicyInfo struct {
 	Message           string        `json:"message,omitempty"`
 	Approval          *ApprovalInfo `json:"approval,omitempty"`
 	Redirect          *RedirectInfo `json:"redirect,omitempty"`
+	ThreatFeed        string        `json:"threat_feed,omitempty"`
+	ThreatMatch       string        `json:"threat_match,omitempty"`
+	ThreatAction      string        `json:"threat_action,omitempty"`
 }
 
 type ApprovalInfo struct {
