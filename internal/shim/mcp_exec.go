@@ -33,11 +33,14 @@ type MCPExecConfig struct {
 
 // MCPExecWrapper wraps a command's stdio with MCP inspection.
 type MCPExecWrapper struct {
-	bridge *MCPBridge
+	bridge          *MCPBridge
+	resolvedCommand string // absolute path to the verified binary (set when pin verification runs)
 }
 
 // BuildMCPExecWrapper creates a wrapper configured for MCP inspection.
 func BuildMCPExecWrapper(cfg MCPExecConfig) (*MCPExecWrapper, error) {
+	var resolvedCmd string
+
 	// Binary pinning check
 	if cfg.PinBinary {
 		if cfg.PinStore == nil || cfg.Command == "" {
@@ -54,6 +57,9 @@ func BuildMCPExecWrapper(cfg MCPExecConfig) (*MCPExecWrapper, error) {
 				}
 				// alert/allow: log but continue
 			} else {
+				// Bind the resolved absolute path to prevent TOCTOU attacks
+				resolvedCmd = absPath
+
 				status, pinnedHash, err := cfg.PinStore.VerifyBinary(cfg.ServerID, hash)
 				if err != nil {
 					return nil, fmt.Errorf("binary pin: verify failed: %w", err)
@@ -95,7 +101,16 @@ func BuildMCPExecWrapper(cfg MCPExecConfig) (*MCPExecWrapper, error) {
 		bridge = NewMCPBridge(cfg.SessionID, cfg.ServerID, cfg.EventEmitter)
 	}
 
-	return &MCPExecWrapper{bridge: bridge}, nil
+	return &MCPExecWrapper{bridge: bridge, resolvedCommand: resolvedCmd}, nil
+}
+
+// ResolvedCommand returns the absolute path to the binary that was verified
+// during pin checking. If binary pinning was not enabled or the command was
+// not resolved, it returns an empty string. Callers should use this path
+// (when non-empty) to launch the actual process, preventing TOCTOU attacks
+// where PATH changes between pin verification and execution.
+func (w *MCPExecWrapper) ResolvedCommand() string {
+	return w.resolvedCommand
 }
 
 // WrapCommand sets up stdio interception for the given command.

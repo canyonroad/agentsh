@@ -112,7 +112,7 @@ type openAISSEChunk struct {
 }
 
 // ExtractSSEUsage extracts token usage from an SSE event stream body.
-// It scans each "data:" line for usage information and sums the totals.
+// It scans each "data:" line for usage information.
 func ExtractSSEUsage(body []byte, dialect Dialect) Usage {
 	if len(body) == 0 {
 		return Usage{}
@@ -128,16 +128,31 @@ func ExtractSSEUsage(body []byte, dialect Dialect) Usage {
 	}
 }
 
+// extractSSEDataPayload extracts the JSON payload from an SSE data line.
+// Handles both "data: {...}" (with space) and "data:{...}" (without space).
+// Returns nil if the line is not a data line.
+func extractSSEDataPayload(line []byte) []byte {
+	line = bytes.TrimSpace(line)
+	if bytes.HasPrefix(line, []byte("data: ")) {
+		return line[6:]
+	}
+	if bytes.HasPrefix(line, []byte("data:")) {
+		return line[5:]
+	}
+	return nil
+}
+
 // extractAnthropicSSEUsage scans SSE lines for Anthropic usage events.
-// input_tokens comes from message_start, output_tokens from message_delta.
+// input_tokens comes from message_start. output_tokens comes from
+// message_delta — Anthropic delta usage is cumulative, so we take the
+// latest (highest) value rather than summing.
 func extractAnthropicSSEUsage(body []byte) Usage {
 	var total Usage
 	for _, line := range bytes.Split(body, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if !bytes.HasPrefix(line, []byte("data: ")) {
+		data := extractSSEDataPayload(line)
+		if data == nil {
 			continue
 		}
-		data := line[6:] // strip "data: "
 		var ev sseEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
 			continue
@@ -147,8 +162,13 @@ func extractAnthropicSSEUsage(body []byte) Usage {
 			total.InputTokens += ev.Message.Usage.InputTokens
 			total.OutputTokens += ev.Message.Usage.OutputTokens
 		case "message_delta":
-			total.InputTokens += ev.Usage.InputTokens
-			total.OutputTokens += ev.Usage.OutputTokens
+			// Delta usage is cumulative — take the latest value.
+			if ev.Usage.OutputTokens > total.OutputTokens {
+				total.OutputTokens = ev.Usage.OutputTokens
+			}
+			if ev.Usage.InputTokens > total.InputTokens {
+				total.InputTokens = ev.Usage.InputTokens
+			}
 		}
 	}
 	return total
@@ -158,11 +178,10 @@ func extractAnthropicSSEUsage(body []byte) Usage {
 func extractOpenAISSEUsage(body []byte) Usage {
 	var total Usage
 	for _, line := range bytes.Split(body, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if !bytes.HasPrefix(line, []byte("data: ")) {
+		data := extractSSEDataPayload(line)
+		if data == nil {
 			continue
 		}
-		data := line[6:]
 		if bytes.Equal(data, []byte("[DONE]")) {
 			continue
 		}

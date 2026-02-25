@@ -154,3 +154,47 @@ func TestBuildMCPExecWrapper_PinMisconfigured_BlockMode(t *testing.T) {
 		t.Fatal("expected error when PinStore is nil in block mode")
 	}
 }
+
+func TestBuildMCPExecWrapper_ResolvedCommand(t *testing.T) {
+	store := &mockPinStore{
+		verifyStatus: "not_pinned",
+	}
+
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        "/usr/bin/true",
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: true,
+		OnChange:       "block",
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resolved := wrapper.ResolvedCommand()
+	if resolved == "" {
+		t.Fatal("ResolvedCommand should return the absolute path after pin verification")
+	}
+	if resolved != "/usr/bin/true" {
+		t.Errorf("ResolvedCommand = %q, want /usr/bin/true", resolved)
+	}
+}
+
+func TestBuildMCPExecWrapper_ResolvedCommand_NoPinning(t *testing.T) {
+	cfg := MCPExecConfig{
+		SessionID: "sess_1",
+		ServerID:  "srv-1",
+		PinBinary: false,
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wrapper.ResolvedCommand() != "" {
+		t.Errorf("ResolvedCommand should be empty when pin is disabled, got %q", wrapper.ResolvedCommand())
+	}
+}

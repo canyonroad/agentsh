@@ -183,3 +183,82 @@ func TestExtractSSEUsage_PlainJSON(t *testing.T) {
 		t.Errorf("expected zero from ExtractSSEUsage on non-SSE body, got %+v", usage)
 	}
 }
+
+func TestExtractSSEUsage_DataNoSpace(t *testing.T) {
+	// SSE spec allows "data:" without trailing space — parser must handle both.
+	body := []byte(
+		"event: message_start\n" +
+			`data:{"type":"message_start","message":{"id":"msg_01","usage":{"input_tokens":80,"output_tokens":0}}}` + "\n\n" +
+			"event: message_delta\n" +
+			`data:{"type":"message_delta","usage":{"output_tokens":20}}` + "\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectAnthropic)
+	if usage.InputTokens != 80 {
+		t.Errorf("InputTokens = %d, want 80", usage.InputTokens)
+	}
+	if usage.OutputTokens != 20 {
+		t.Errorf("OutputTokens = %d, want 20", usage.OutputTokens)
+	}
+}
+
+func TestExtractSSEUsage_LeadingComments(t *testing.T) {
+	// SSE allows comment lines (starting with ":") and blank lines — should be ignored.
+	body := []byte(
+		": this is a comment\n" +
+			"\n" +
+			"event: message_start\n" +
+			`data: {"type":"message_start","message":{"id":"msg_01","usage":{"input_tokens":50,"output_tokens":0}}}` + "\n\n" +
+			": heartbeat\n" +
+			"event: message_delta\n" +
+			`data: {"type":"message_delta","usage":{"output_tokens":15}}` + "\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectAnthropic)
+	if usage.InputTokens != 50 {
+		t.Errorf("InputTokens = %d, want 50", usage.InputTokens)
+	}
+	if usage.OutputTokens != 15 {
+		t.Errorf("OutputTokens = %d, want 15", usage.OutputTokens)
+	}
+}
+
+func TestExtractSSEUsage_AnthropicCumulativeDeltas(t *testing.T) {
+	// Anthropic message_delta usage is cumulative — multiple deltas should
+	// result in the latest (highest) value, not the sum.
+	body := []byte(
+		"event: message_start\n" +
+			`data: {"type":"message_start","message":{"id":"msg_01","usage":{"input_tokens":100,"output_tokens":0}}}` + "\n\n" +
+			"event: message_delta\n" +
+			`data: {"type":"message_delta","usage":{"output_tokens":10}}` + "\n\n" +
+			"event: message_delta\n" +
+			`data: {"type":"message_delta","usage":{"output_tokens":25}}` + "\n\n" +
+			"event: message_delta\n" +
+			`data: {"type":"message_delta","usage":{"output_tokens":42}}` + "\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectAnthropic)
+	if usage.InputTokens != 100 {
+		t.Errorf("InputTokens = %d, want 100", usage.InputTokens)
+	}
+	// Should be 42 (latest), not 77 (sum)
+	if usage.OutputTokens != 42 {
+		t.Errorf("OutputTokens = %d, want 42 (latest cumulative, not sum)", usage.OutputTokens)
+	}
+}
+
+func TestExtractSSEUsage_OpenAIDataNoSpace(t *testing.T) {
+	body := []byte(
+		`data:{"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}` + "\n\n" +
+			`data:{"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":60,"completion_tokens":15}}` + "\n\n" +
+			"data:[DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if usage.InputTokens != 60 {
+		t.Errorf("InputTokens = %d, want 60", usage.InputTokens)
+	}
+	if usage.OutputTokens != 15 {
+		t.Errorf("OutputTokens = %d, want 15", usage.OutputTokens)
+	}
+}
