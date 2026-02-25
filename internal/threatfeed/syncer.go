@@ -53,7 +53,7 @@ func NewSyncer(store *Store, cfg config.ThreatFeedsConfig, logger *slog.Logger) 
 
 // Run starts the periodic sync loop. It blocks until ctx is cancelled.
 func (s *Syncer) Run(ctx context.Context) {
-	s.syncAll()
+	s.syncAll(ctx)
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 	for {
@@ -64,22 +64,24 @@ func (s *Syncer) Run(ctx context.Context) {
 			}
 			return
 		case <-ticker.C:
-			s.syncAll()
+			s.syncAll(ctx)
 		}
 	}
 }
 
 // syncAll fetches all feeds and local lists, merges results, and updates the store.
 // On fetch failure or 304 Not Modified, the feed's last-known-good data is preserved.
-func (s *Syncer) syncAll() {
+func (s *Syncer) syncAll(ctx context.Context) {
 	merged := make(map[string]FeedEntry)
+	anySucceeded := false
 
 	for _, feed := range s.feeds {
-		domains, err := s.fetchFeed(feed)
+		domains, err := s.fetchFeed(ctx, feed)
 		if err != nil {
 			if errors.Is(err, errNotModified) {
 				// 304: reuse last-known-good data for this feed.
 				s.logger.Debug("threat feed not modified", "feed", feed.Name)
+				anySucceeded = true // 304 means source is reachable
 			} else {
 				// Fetch failure: reuse last-known-good, log warning.
 				s.logger.Warn("threat feed fetch failed, using cached data",
@@ -91,6 +93,7 @@ func (s *Syncer) syncAll() {
 			s.lastGood[feed.Name] = domains
 			s.logger.Info("threat feed synced",
 				"feed", feed.Name, "domains", len(domains))
+			anySucceeded = true
 		}
 		now := time.Now()
 		for _, d := range domains {
@@ -109,6 +112,7 @@ func (s *Syncer) syncAll() {
 			domains = s.lastGood[key]
 		} else {
 			s.lastGood[key] = domains
+			anySucceeded = true
 		}
 		now := time.Now()
 		for _, d := range domains {
@@ -118,9 +122,10 @@ func (s *Syncer) syncAll() {
 		}
 	}
 
-	// Only update the store if we have data. This prevents wiping a disk-loaded
-	// cache when all feeds fail on the first sync (e.g., no network at startup).
-	if len(merged) > 0 {
+	// Update the store if at least one source succeeded (even if the result is
+	// empty — that legitimately clears stale entries). Skip the update only when
+	// ALL sources failed, to preserve the disk-loaded cache.
+	if anySucceeded || len(merged) > 0 {
 		s.store.Update(merged)
 		if err := s.store.SaveToDisk(); err != nil {
 			s.logger.Warn("threat feed disk save failed", "error", err)
@@ -128,8 +133,8 @@ func (s *Syncer) syncAll() {
 	}
 }
 
-func (s *Syncer) fetchFeed(feed config.ThreatFeedEntry) ([]string, error) {
-	req, err := http.NewRequest("GET", feed.URL, nil)
+func (s *Syncer) fetchFeed(ctx context.Context, feed config.ThreatFeedEntry) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", feed.URL, nil)
 	if err != nil {
 		return nil, err
 	}

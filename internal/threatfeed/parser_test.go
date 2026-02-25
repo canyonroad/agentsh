@@ -69,3 +69,11 @@ func TestDomainListParser_EmptyInput(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, domains)
 }
+
+func TestDomainListParser_InlineComments(t *testing.T) {
+	input := "evil.com # known malware\nbad.org#phishing\n# full comment\ngood.net\n"
+	p := &DomainListParser{}
+	domains, err := p.Parse(strings.NewReader(input))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"evil.com", "bad.org", "good.net"}, domains)
+}

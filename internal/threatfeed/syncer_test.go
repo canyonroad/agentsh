@@ -31,7 +31,7 @@ func TestSyncer_FetchesAndPopulatesStore(t *testing.T) {
 		SyncInterval: time.Hour,
 	}
 	syncer := NewSyncer(store, cfg, nil)
-	syncer.syncAll()
+	syncer.syncAll(context.Background())
 
 	assert.Equal(t, 2, store.Size())
 	_, matched := store.Check("evil.com")
@@ -55,7 +55,7 @@ func TestSyncer_DomainListFormat(t *testing.T) {
 		SyncInterval: time.Hour,
 	}
 	syncer := NewSyncer(store, cfg, nil)
-	syncer.syncAll()
+	syncer.syncAll(context.Background())
 
 	_, matched := store.Check("phish.net")
 	assert.True(t, matched)
@@ -81,7 +81,7 @@ func TestSyncer_MergesMultipleFeeds(t *testing.T) {
 		SyncInterval: time.Hour,
 	}
 	syncer := NewSyncer(store, cfg, nil)
-	syncer.syncAll()
+	syncer.syncAll(context.Background())
 
 	assert.Equal(t, 2, store.Size())
 }
@@ -107,11 +107,11 @@ func TestSyncer_FetchFailureKeepsPreviousData(t *testing.T) {
 	}
 	syncer := NewSyncer(store, cfg, nil)
 
-	syncer.syncAll()
+	syncer.syncAll(context.Background())
 	assert.Equal(t, 1, store.Size())
 
 	// Second sync fails — store should keep previous data via last-known-good.
-	syncer.syncAll()
+	syncer.syncAll(context.Background())
 	assert.Equal(t, 1, store.Size())
 	_, matched := store.Check("evil.com")
 	assert.True(t, matched)
@@ -143,11 +143,11 @@ func TestSyncer_NotModifiedPreservesData(t *testing.T) {
 	}
 	syncer := NewSyncer(store, cfg, nil)
 
-	syncer.syncAll()
+	syncer.syncAll(context.Background())
 	assert.Equal(t, 1, store.Size())
 
 	// Second sync gets 304 — store should still have the domain.
-	syncer.syncAll()
+	syncer.syncAll(context.Background())
 	assert.Equal(t, 1, store.Size())
 	_, matched := store.Check("evil.com")
 	assert.True(t, matched)
@@ -180,11 +180,11 @@ func TestSyncer_PartialFeedFailurePreservesOtherFeed(t *testing.T) {
 	}
 	syncer := NewSyncer(store, cfg, nil)
 
-	syncer.syncAll()
+	syncer.syncAll(context.Background())
 	assert.Equal(t, 2, store.Size())
 
 	// Second sync: flaky fails, stable succeeds — both domains should remain.
-	syncer.syncAll()
+	syncer.syncAll(context.Background())
 	assert.Equal(t, 2, store.Size())
 	_, matched := store.Check("flaky-evil.com")
 	assert.True(t, matched, "flaky feed's last-known-good should be preserved")
@@ -231,11 +231,42 @@ func TestSyncer_AllFailFirstSyncPreservesDiskCache(t *testing.T) {
 		SyncInterval: time.Hour,
 	}
 	syncer := NewSyncer(store, cfg, nil)
-	syncer.syncAll()
+	syncer.syncAll(context.Background())
 
 	assert.Equal(t, 1, store.Size(), "disk-loaded cache should be preserved when all feeds fail")
 	_, matched := store.Check("cached-evil.com")
 	assert.True(t, matched)
+}
+
+func TestSyncer_SuccessfulEmptySyncClearsStore(t *testing.T) {
+	// First sync populates the store.
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			fmt.Fprintln(w, "0.0.0.0 evil.com")
+			return
+		}
+		// Second call: return empty (all domains removed from feed).
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	store := NewStore("", nil)
+	cfg := config.ThreatFeedsConfig{
+		Feeds: []config.ThreatFeedEntry{
+			{Name: "clearing", URL: srv.URL, Format: "hostfile"},
+		},
+		SyncInterval: time.Hour,
+	}
+	syncer := NewSyncer(store, cfg, nil)
+
+	syncer.syncAll(context.Background())
+	assert.Equal(t, 1, store.Size())
+
+	// Second sync succeeds with empty result — stale entries should be cleared.
+	syncer.syncAll(context.Background())
+	assert.Equal(t, 0, store.Size(), "successful empty sync should clear stale entries")
 }
 
 func TestSyncer_LocalListFile(t *testing.T) {
@@ -250,7 +281,7 @@ func TestSyncer_LocalListFile(t *testing.T) {
 		SyncInterval: time.Hour,
 	}
 	syncer := NewSyncer(store, cfg, nil)
-	syncer.syncAll()
+	syncer.syncAll(context.Background())
 
 	_, matched := store.Check("custom-bad.com")
 	assert.True(t, matched)
@@ -275,6 +306,40 @@ func TestSyncer_RunRespectsContextCancellation(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("syncer did not stop after context cancellation")
+	}
+}
+
+func TestSyncer_CancelDuringFetch(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		// Block until the request context is cancelled.
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	store := NewStore("", nil)
+	cfg := config.ThreatFeedsConfig{
+		Feeds: []config.ThreatFeedEntry{
+			{Name: "slow", URL: srv.URL, Format: "hostfile"},
+		},
+		SyncInterval: time.Hour,
+	}
+	syncer := NewSyncer(store, cfg, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		syncer.syncAll(ctx)
+		close(done)
+	}()
+
+	<-started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("syncAll did not return after context cancellation during fetch")
 	}
 }
 

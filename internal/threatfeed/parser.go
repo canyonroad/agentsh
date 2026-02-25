@@ -56,6 +56,12 @@ func (p *DomainListParser) Parse(r io.Reader) ([]string, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			line = strings.TrimSpace(line[:idx])
+		}
+		if line == "" {
+			continue
+		}
 		domain := strings.ToLower(line)
 		if _, ok := seen[domain]; ok {
 			continue
