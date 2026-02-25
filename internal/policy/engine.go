@@ -14,6 +14,18 @@ import (
 	"github.com/gobwas/glob"
 )
 
+// ThreatCheckResult holds the outcome of a threat feed lookup.
+type ThreatCheckResult struct {
+	FeedName      string
+	MatchedDomain string
+}
+
+// ThreatChecker is an optional interface for domain-level threat feed lookups.
+// *threatfeed.Store satisfies this interface.
+type ThreatChecker interface {
+	Check(domain string) (ThreatCheckResult, bool)
+}
+
 type Engine struct {
 	policy           *Policy
 	enforceApprovals bool
@@ -34,6 +46,10 @@ type Engine struct {
 
 	// Signal policy engine
 	signalEngine signalEngineType
+
+	// Optional threat feed store for domain checking
+	threatStore  ThreatChecker
+	threatAction string
 }
 
 type Limits struct {
@@ -102,6 +118,8 @@ type Decision struct {
 	Redirect          *types.RedirectInfo
 	FileRedirect      *types.FileRedirectInfo
 	EnvPolicy         ResolvedEnvPolicy
+	ThreatFeed        string
+	ThreatMatch       string
 }
 
 func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
@@ -313,6 +331,12 @@ func NewEngineWithVariables(p *Policy, enforceApprovals bool, vars map[string]st
 		return nil, fmt.Errorf("expand policy variables: %w", err)
 	}
 	return NewEngine(expanded, enforceApprovals)
+}
+
+// SetThreatStore configures an optional threat feed store for domain checking.
+func (e *Engine) SetThreatStore(store ThreatChecker, action string) {
+	e.threatStore = store
+	e.threatAction = action
 }
 
 // expandPolicy creates a copy of the policy with all variables expanded.
@@ -694,6 +718,18 @@ func (e *Engine) CheckNetwork(domain string, port int) Decision {
 // will be performed using the provided context for cancellation.
 func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) Decision {
 	domain = strings.ToLower(strings.TrimSpace(domain))
+
+	// Threat feed pre-check.
+	if e.threatStore != nil {
+		if entry, matched := e.threatStore.Check(domain); matched {
+			dec := e.wrapDecision(e.threatAction, "threat-feed:"+entry.FeedName,
+				"domain matched threat feed: "+entry.FeedName+" (matched: "+entry.MatchedDomain+")", nil)
+			dec.ThreatFeed = entry.FeedName
+			dec.ThreatMatch = entry.MatchedDomain
+			return dec
+		}
+	}
+
 	var (
 		ips      []net.IP
 		resolved bool
