@@ -103,13 +103,14 @@ const (
 
 // MCP inspection events.
 const (
-	EventMCPToolSeen            EventType = "mcp_tool_seen"
-	EventMCPToolChanged         EventType = "mcp_tool_changed"
-	EventMCPToolCalled          EventType = "mcp_tool_called"
-	EventMCPDetection           EventType = "mcp_detection"
-	EventMCPToolCallIntercepted EventType = "mcp_tool_call_intercepted"
-	EventMCPCrossServerBlocked  EventType = "mcp_cross_server_blocked"
-	EventMCPNetworkConnection   EventType = "mcp_network_connection"
+	EventMCPToolSeen              EventType = "mcp_tool_seen"
+	EventMCPToolChanged           EventType = "mcp_tool_changed"
+	EventMCPToolCalled            EventType = "mcp_tool_called"
+	EventMCPDetection             EventType = "mcp_detection"
+	EventMCPToolCallIntercepted   EventType = "mcp_tool_call_intercepted"
+	EventMCPCrossServerBlocked    EventType = "mcp_cross_server_blocked"
+	EventMCPNetworkConnection     EventType = "mcp_network_connection"
+	EventMCPServerNameSimilarity  EventType = "mcp_server_name_similarity"
 )
 
 // Policy events.
@@ -214,13 +215,14 @@ var EventCategory = map[EventType]string{
 	EventSignalWouldDeny:  "signal",
 
 	// MCP
-	EventMCPToolSeen:            "mcp",
-	EventMCPToolChanged:         "mcp",
-	EventMCPToolCalled:          "mcp",
-	EventMCPDetection:           "mcp",
-	EventMCPToolCallIntercepted: "mcp",
-	EventMCPCrossServerBlocked:  "mcp",
-	EventMCPNetworkConnection:   "mcp",
+	EventMCPToolSeen:             "mcp",
+	EventMCPToolChanged:          "mcp",
+	EventMCPToolCalled:           "mcp",
+	EventMCPDetection:            "mcp",
+	EventMCPToolCallIntercepted:  "mcp",
+	EventMCPCrossServerBlocked:   "mcp",
+	EventMCPNetworkConnection:    "mcp",
+	EventMCPServerNameSimilarity: "mcp",
 
 	// Policy
 	EventPolicyLoaded:  "policy",
@@ -259,6 +261,7 @@ var AllEventTypes = []EventType{
 	// MCP
 	EventMCPToolSeen, EventMCPToolChanged, EventMCPToolCalled, EventMCPDetection,
 	EventMCPToolCallIntercepted, EventMCPCrossServerBlocked, EventMCPNetworkConnection,
+	EventMCPServerNameSimilarity,
 	// Policy
 	EventPolicyLoaded, EventPolicyChanged,
 }

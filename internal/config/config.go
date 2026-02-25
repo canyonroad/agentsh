@@ -606,7 +606,9 @@ type CrossServerFlowConfig struct {
 
 // ShadowToolConfig detects tool names that shadow/mimic tools from other servers.
 type ShadowToolConfig struct {
-	Enabled *bool `yaml:"enabled"` // default: true
+	Enabled             *bool   `yaml:"enabled"`              // default: true
+	SimilarityCheck     *bool   `yaml:"similarity_check"`     // default: false
+	SimilarityThreshold float64 `yaml:"similarity_threshold"` // default: 0.85
 }
 
 // SecurityConfig controls security mode selection and strictness.
@@ -1041,6 +1043,13 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.Sandbox.MCP.CrossServer.ShadowTool.Enabled == nil {
 		t := true
 		cfg.Sandbox.MCP.CrossServer.ShadowTool.Enabled = &t
+	}
+	if cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityCheck == nil {
+		f := false
+		cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityCheck = &f
+	}
+	if cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold == 0 {
+		cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold = 0.85
 	}
 
 	// macOS XPC defaults
