@@ -1332,3 +1332,32 @@ func TestMCPServerDeclaration_YAMLRoundTrip(t *testing.T) {
 	assert.Equal(t, original.VersionPinning.Enabled, roundTripped.VersionPinning.Enabled)
 	assert.Equal(t, original.RateLimits.DefaultRPM, roundTripped.RateLimits.DefaultRPM)
 }
+
+func TestMCPAllowedTransportsValidation(t *testing.T) {
+	tests := []struct {
+		name       string
+		allowed    []string
+		serverType string
+		wantErr    bool
+	}{
+		{"stdio allowed by default", nil, "stdio", false},
+		{"http allowed by default", nil, "http", false},
+		{"stdio only rejects http", []string{"stdio"}, "http", true},
+		{"stdio only allows stdio", []string{"stdio"}, "stdio", false},
+		{"explicit all allows sse", []string{"stdio", "http", "sse"}, "sse", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := SandboxMCPConfig{
+				AllowedTransports: tt.allowed,
+				Servers: []MCPServerDeclaration{
+					{ID: "test", Type: tt.serverType},
+				},
+			}
+			err := ValidateMCPTransports(cfg)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateMCPTransports() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
