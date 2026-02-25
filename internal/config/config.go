@@ -30,6 +30,7 @@ type Config struct {
 	Security          SecurityConfig          `yaml:"security"`
 	Landlock          LandlockConfig          `yaml:"landlock"`
 	LinuxCapabilities CapabilitiesConfig      `yaml:"capabilities"`
+	ThreatFeeds       ThreatFeedsConfig       `yaml:"threat_feeds"`
 }
 
 // PlatformConfig configures cross-platform selection and fallback behavior.
@@ -1149,6 +1150,23 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		// Only set default if not explicitly set
 		// Since we can't distinguish false from unset, default to true for new configs
 		cfg.Security.WarnDegraded = true
+	}
+
+	// Threat feeds defaults
+	if cfg.ThreatFeeds.Action == "" {
+		cfg.ThreatFeeds.Action = "deny"
+	}
+	if cfg.ThreatFeeds.SyncInterval == 0 {
+		cfg.ThreatFeeds.SyncInterval = 6 * time.Hour
+	}
+	if cfg.ThreatFeeds.Realtime.Timeout == 0 {
+		cfg.ThreatFeeds.Realtime.Timeout = 500 * time.Millisecond
+	}
+	if cfg.ThreatFeeds.Realtime.CacheTTL == 0 {
+		cfg.ThreatFeeds.Realtime.CacheTTL = 1 * time.Hour
+	}
+	if cfg.ThreatFeeds.Realtime.OnTimeout == "" {
+		cfg.ThreatFeeds.Realtime.OnTimeout = "local-only"
 	}
 }
 
