@@ -755,9 +755,9 @@ func (e *Engine) CheckNetwork(domain string, port int) Decision {
 func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) Decision {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 
-	// Threat feed pre-check.
+	// Threat feed pre-check (skip for empty domain, consistent with CheckNetworkIP).
 	var threatResult *ThreatCheckResult
-	if e.threatStore != nil {
+	if e.threatStore != nil && domain != "" {
 		if entry, matched := e.threatStore.Check(domain); matched {
 			if e.threatAction == "deny" {
 				dec := e.wrapDecision("deny", "threat-feed:"+entry.FeedName,

@@ -43,3 +43,15 @@ func TestPolicyAdapter_NilAdapterDoesNotPanic(t *testing.T) {
 	_, matched := adapter.Check("evil.com")
 	assert.False(t, matched, "nil adapter should return no match")
 }
+
+func TestPolicyAdapter_SanitizesLocalBasename(t *testing.T) {
+	store := NewStore("", nil)
+	store.Update(map[string]FeedEntry{
+		"evil.com": {FeedName: "local:/tmp/my list (v2).txt", AddedAt: time.Now()},
+	})
+
+	adapter := &PolicyAdapter{Store: store}
+	result, matched := adapter.Check("evil.com")
+	require.True(t, matched)
+	assert.Equal(t, "local:my_list__v2_.txt", result.FeedName, "special chars in basename should be replaced with underscores")
+}
