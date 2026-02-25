@@ -110,10 +110,95 @@ func TestSyncer_FetchFailureKeepsPreviousData(t *testing.T) {
 	syncer.syncAll()
 	assert.Equal(t, 1, store.Size())
 
+	// Second sync fails — store should keep previous data via last-known-good.
 	syncer.syncAll()
 	assert.Equal(t, 1, store.Size())
 	_, matched := store.Check("evil.com")
 	assert.True(t, matched)
+}
+
+func TestSyncer_NotModifiedPreservesData(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("ETag", "\"abc123\"")
+			fmt.Fprintln(w, "0.0.0.0 evil.com")
+			return
+		}
+		if r.Header.Get("If-None-Match") == "\"abc123\"" {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		fmt.Fprintln(w, "0.0.0.0 evil.com")
+	}))
+	defer srv.Close()
+
+	store := NewStore("", nil)
+	cfg := config.ThreatFeedsConfig{
+		Feeds: []config.ThreatFeedEntry{
+			{Name: "etag-feed", URL: srv.URL, Format: "hostfile"},
+		},
+		SyncInterval: time.Hour,
+	}
+	syncer := NewSyncer(store, cfg, nil)
+
+	syncer.syncAll()
+	assert.Equal(t, 1, store.Size())
+
+	// Second sync gets 304 — store should still have the domain.
+	syncer.syncAll()
+	assert.Equal(t, 1, store.Size())
+	_, matched := store.Check("evil.com")
+	assert.True(t, matched)
+}
+
+func TestSyncer_PartialFeedFailurePreservesOtherFeed(t *testing.T) {
+	calls := 0
+	srvFlaky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			fmt.Fprintln(w, "0.0.0.0 flaky-evil.com")
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srvFlaky.Close()
+
+	srvStable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "stable-evil.com")
+	}))
+	defer srvStable.Close()
+
+	store := NewStore("", nil)
+	cfg := config.ThreatFeedsConfig{
+		Feeds: []config.ThreatFeedEntry{
+			{Name: "flaky", URL: srvFlaky.URL, Format: "hostfile"},
+			{Name: "stable", URL: srvStable.URL, Format: "domain-list"},
+		},
+		SyncInterval: time.Hour,
+	}
+	syncer := NewSyncer(store, cfg, nil)
+
+	syncer.syncAll()
+	assert.Equal(t, 2, store.Size())
+
+	// Second sync: flaky fails, stable succeeds — both domains should remain.
+	syncer.syncAll()
+	assert.Equal(t, 2, store.Size())
+	_, matched := store.Check("flaky-evil.com")
+	assert.True(t, matched, "flaky feed's last-known-good should be preserved")
+	_, matched = store.Check("stable-evil.com")
+	assert.True(t, matched)
+}
+
+func TestSyncer_NonPositiveIntervalDefaults(t *testing.T) {
+	store := NewStore("", nil)
+	cfg := config.ThreatFeedsConfig{
+		SyncInterval: 0, // invalid
+	}
+	syncer := NewSyncer(store, cfg, nil)
+	assert.Equal(t, 6*time.Hour, syncer.interval)
 }
 
 func TestSyncer_LocalListFile(t *testing.T) {
@@ -158,8 +243,13 @@ func TestSyncer_RunRespectsContextCancellation(t *testing.T) {
 
 func TestSyncer_SavesToDiskOnShutdown(t *testing.T) {
 	dir := t.TempDir()
+	fetched := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "0.0.0.0 evil.com")
+		select {
+		case fetched <- struct{}{}:
+		default:
+		}
 	}))
 	defer srv.Close()
 
@@ -179,7 +269,12 @@ func TestSyncer_SavesToDiskOnShutdown(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the initial sync to complete.
+	select {
+	case <-fetched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("syncer did not fetch feed in time")
+	}
 	cancel()
 	<-done
 

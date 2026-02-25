@@ -425,6 +425,17 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 	}
 	domain = strings.ToLower(strings.TrimSpace(domain))
 
+	// Threat feed pre-check.
+	if e.threatStore != nil && domain != "" {
+		if result, matched := e.threatStore.Check(domain); matched {
+			dec := e.wrapDecision(e.threatAction, "threat-feed:"+result.FeedName,
+				"domain matched threat feed: "+result.FeedName+" (matched: "+result.MatchedDomain+")", nil)
+			dec.ThreatFeed = result.FeedName
+			dec.ThreatMatch = result.MatchedDomain
+			return dec
+		}
+	}
+
 	var ips []net.IP
 	if ip != nil {
 		ips = []net.IP{ip}

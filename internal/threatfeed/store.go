@@ -40,7 +40,7 @@ func NewStore(cacheDir string, allowlist []string) *Store {
 // Check returns the matching FeedEntry if the domain (or a parent domain) is in
 // the threat feed store and not in the allowlist.
 func (s *Store) Check(domain string) (FeedEntry, bool) {
-	domain = strings.ToLower(strings.TrimSpace(domain))
+	domain = strings.ToLower(strings.TrimRight(strings.TrimSpace(domain), "."))
 	if domain == "" {
 		return FeedEntry{}, false
 	}
@@ -70,7 +70,7 @@ func (s *Store) Check(domain string) (FeedEntry, bool) {
 		if !strings.Contains(d, ".") {
 			break
 		}
-		if _, ok := s.allowlist[domain]; ok {
+		if _, ok := s.allowlist[d]; ok {
 			return FeedEntry{}, false
 		}
 		if entry, ok := s.domains[d]; ok {

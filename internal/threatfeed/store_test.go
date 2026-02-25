@@ -155,3 +155,21 @@ func TestStore_Size(t *testing.T) {
 	})
 	assert.Equal(t, 2, s.Size())
 }
+
+func TestStore_AllowlistOverridesParentDomain(t *testing.T) {
+	s := NewStore("", []string{"evil.com"})
+	s.Update(map[string]FeedEntry{
+		"evil.com": {FeedName: "urlhaus", AddedAt: time.Now()},
+	})
+	_, matched := s.Check("sub.evil.com")
+	assert.False(t, matched, "parent domain is allowlisted, child should not match")
+}
+
+func TestStore_TrailingDot(t *testing.T) {
+	s := NewStore("", nil)
+	s.Update(map[string]FeedEntry{
+		"evil.com": {FeedName: "urlhaus", AddedAt: time.Now()},
+	})
+	_, matched := s.Check("evil.com.")
+	assert.True(t, matched, "trailing dot should be stripped")
+}

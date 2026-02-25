@@ -644,8 +644,13 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
+	var syncerDone chan struct{}
 	if s.threatSyncer != nil {
-		go s.threatSyncer.Run(ctx)
+		syncerDone = make(chan struct{})
+		go func() {
+			s.threatSyncer.Run(ctx)
+			close(syncerDone)
+		}()
 	}
 
 	errCh := make(chan error, 3)
@@ -671,6 +676,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		if syncerDone != nil {
+			<-syncerDone
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if s.pprofServer != nil {
@@ -684,6 +692,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return s.httpServer.Shutdown(shutdownCtx)
 	case err := <-errCh:
+		if syncerDone != nil {
+			<-syncerDone
+		}
 		if s.pprofServer != nil {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()

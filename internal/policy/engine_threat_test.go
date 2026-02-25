@@ -154,3 +154,20 @@ func TestCheckNetworkCtx_ThreatFeedFields(t *testing.T) {
 	assert.Equal(t, "urlhaus", dec.ThreatFeed)
 	assert.Equal(t, "evil.com", dec.ThreatMatch)
 }
+
+func TestCheckNetworkIP_ThreatFeedDeny(t *testing.T) {
+	p := &Policy{Version: 1, Name: "test", NetworkRules: []NetworkRule{
+		{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
+	}}
+	e, err := NewEngine(p, false)
+	require.NoError(t, err)
+
+	store := &mockThreatStore{domains: map[string]ThreatCheckResult{
+		"evil.com": {FeedName: "urlhaus", MatchedDomain: "evil.com"},
+	}}
+	e.SetThreatStore(store, "deny")
+
+	dec := e.CheckNetworkIP("evil.com", nil, 443)
+	assert.Equal(t, types.DecisionDeny, dec.EffectiveDecision)
+	assert.Equal(t, "threat-feed:urlhaus", dec.Rule)
+}

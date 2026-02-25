@@ -2,6 +2,7 @@ package threatfeed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,10 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 )
 
+const maxFeedSize = 100 * 1024 * 1024 // 100 MB
+
+var errNotModified = errors.New("not modified")
+
 // Syncer periodically downloads threat feeds and updates the store.
 type Syncer struct {
 	store    *Store
@@ -21,6 +26,8 @@ type Syncer struct {
 	client   *http.Client
 	logger   *slog.Logger
 	etags    map[string]string
+	// Per-feed last-known-good domain snapshots. Keyed by feed name.
+	lastGood map[string][]string
 }
 
 // NewSyncer creates a new feed syncer. Pass nil for logger to disable logging.
@@ -28,14 +35,19 @@ func NewSyncer(store *Store, cfg config.ThreatFeedsConfig, logger *slog.Logger) 
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	interval := cfg.SyncInterval
+	if interval <= 0 {
+		interval = 6 * time.Hour
+	}
 	return &Syncer{
 		store:    store,
 		feeds:    cfg.Feeds,
 		locals:   cfg.LocalLists,
-		interval: cfg.SyncInterval,
+		interval: interval,
 		client:   &http.Client{Timeout: 30 * time.Second},
 		logger:   logger,
 		etags:    make(map[string]string),
+		lastGood: make(map[string][]string),
 	}
 }
 
@@ -47,7 +59,9 @@ func (s *Syncer) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			s.store.SaveToDisk()
+			if err := s.store.SaveToDisk(); err != nil {
+				s.logger.Warn("threat feed disk save failed on shutdown", "error", err)
+			}
 			return
 		case <-ticker.C:
 			s.syncAll()
@@ -56,47 +70,60 @@ func (s *Syncer) Run(ctx context.Context) {
 }
 
 // syncAll fetches all feeds and local lists, merges results, and updates the store.
+// On fetch failure or 304 Not Modified, the feed's last-known-good data is preserved.
 func (s *Syncer) syncAll() {
 	merged := make(map[string]FeedEntry)
-	allFailed := true
+	anySource := len(s.feeds) > 0 || len(s.locals) > 0
 
 	for _, feed := range s.feeds {
 		domains, err := s.fetchFeed(feed)
 		if err != nil {
-			s.logger.Warn("threat feed fetch failed",
-				"feed", feed.Name, "url", feed.URL, "error", err)
-			continue
+			if errors.Is(err, errNotModified) {
+				// 304: reuse last-known-good data for this feed.
+				s.logger.Debug("threat feed not modified", "feed", feed.Name)
+			} else {
+				// Fetch failure: reuse last-known-good, log warning.
+				s.logger.Warn("threat feed fetch failed, using cached data",
+					"feed", feed.Name, "url", feed.URL, "error", err)
+			}
+			domains = s.lastGood[feed.Name]
+		} else {
+			// Success: update last-known-good snapshot.
+			s.lastGood[feed.Name] = domains
+			s.logger.Info("threat feed synced",
+				"feed", feed.Name, "domains", len(domains))
 		}
-		allFailed = false
 		now := time.Now()
 		for _, d := range domains {
 			if _, exists := merged[d]; !exists {
 				merged[d] = FeedEntry{FeedName: feed.Name, AddedAt: now}
 			}
 		}
-		s.logger.Info("threat feed synced",
-			"feed", feed.Name, "domains", len(domains))
 	}
 
 	for _, path := range s.locals {
+		key := "local:" + path
 		domains, err := s.parseLocalFile(path)
 		if err != nil {
-			s.logger.Warn("local threat list failed",
+			s.logger.Warn("local threat list failed, using cached data",
 				"path", path, "error", err)
-			continue
+			domains = s.lastGood[key]
+		} else {
+			s.lastGood[key] = domains
 		}
-		allFailed = false
 		now := time.Now()
 		for _, d := range domains {
 			if _, exists := merged[d]; !exists {
-				merged[d] = FeedEntry{FeedName: "local:" + path, AddedAt: now}
+				merged[d] = FeedEntry{FeedName: key, AddedAt: now}
 			}
 		}
 	}
 
-	if !allFailed || (len(s.feeds) == 0 && len(s.locals) == 0) {
+	if anySource || len(merged) > 0 {
 		s.store.Update(merged)
-		s.store.SaveToDisk()
+		if err := s.store.SaveToDisk(); err != nil {
+			s.logger.Warn("threat feed disk save failed", "error", err)
+		}
 	}
 }
 
@@ -116,7 +143,7 @@ func (s *Syncer) fetchFeed(feed config.ThreatFeedEntry) ([]string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotModified {
-		return nil, nil
+		return nil, errNotModified
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -126,8 +153,9 @@ func (s *Syncer) fetchFeed(feed config.ThreatFeedEntry) ([]string, error) {
 		s.etags[feed.URL] = etag
 	}
 
+	limited := io.LimitReader(resp.Body, maxFeedSize)
 	parser := ParserForFormat(feed.Format)
-	return parser.Parse(resp.Body)
+	return parser.Parse(limited)
 }
 
 func (s *Syncer) parseLocalFile(path string) ([]string, error) {
