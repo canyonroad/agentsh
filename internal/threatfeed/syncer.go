@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -76,11 +77,16 @@ func (s *Syncer) Run(ctx context.Context) {
 // syncAll fetches all feeds and local lists, merges results, and updates the store.
 // On fetch failure or 304 Not Modified, the feed's last-known-good data is preserved.
 func (s *Syncer) syncAll(ctx context.Context) {
-	// On first sync, seed lastGood from the store's disk-loaded data so that
-	// feeds that fail on first attempt retain their cached entries.
+	// On first sync, seed lastGood from the store's disk-loaded data, but only
+	// for feeds that are currently configured. This prevents domains from removed
+	// feeds from persisting indefinitely.
 	if !s.seededCache {
 		s.seededCache = true
+		configuredKeys := s.configuredFeedKeys()
 		for feedName, domains := range s.store.Snapshot() {
+			if _, configured := configuredKeys[feedName]; !configured {
+				continue // skip entries from feeds no longer in config
+			}
 			if _, exists := s.lastGood[feedName]; !exists {
 				s.lastGood[feedName] = domains
 			}
@@ -101,7 +107,7 @@ func (s *Syncer) syncAll(ctx context.Context) {
 			} else {
 				// Fetch failure: reuse last-known-good, log warning.
 				s.logger.Warn("threat feed fetch failed, using cached data",
-					"feed", feed.Name, "url", feed.URL, "error", err)
+					"feed", feed.Name, "url", sanitizeURL(feed.URL), "error", err)
 			}
 			domains = s.lastGood[feed.Name]
 		} else {
@@ -155,7 +161,7 @@ func (s *Syncer) fetchFeed(ctx context.Context, feed config.ThreatFeedEntry) ([]
 	if err != nil {
 		return nil, err
 	}
-	if etag, ok := s.etags[feed.URL]; ok {
+	if etag, ok := s.etags[feed.Name]; ok {
 		req.Header.Set("If-None-Match", etag)
 	}
 
@@ -173,7 +179,7 @@ func (s *Syncer) fetchFeed(ctx context.Context, feed config.ThreatFeedEntry) ([]
 	}
 
 	if etag := resp.Header.Get("ETag"); etag != "" {
-		s.etags[feed.URL] = etag
+		s.etags[feed.Name] = etag
 	}
 
 	// Use maxFeedSize+1 so we can distinguish "exactly at limit" from "truncated".
@@ -198,4 +204,29 @@ func (s *Syncer) parseLocalFile(path string) ([]string, error) {
 	defer f.Close()
 	p := &DomainListParser{}
 	return p.Parse(f)
+}
+
+// configuredFeedKeys returns the set of feed keys (remote names + local cache keys)
+// that are currently configured, used to filter out stale cache entries from removed feeds.
+func (s *Syncer) configuredFeedKeys() map[string]struct{} {
+	keys := make(map[string]struct{}, len(s.feeds)+len(s.locals))
+	for _, feed := range s.feeds {
+		keys[feed.Name] = struct{}{}
+	}
+	for _, path := range s.locals {
+		keys["local:"+path] = struct{}{}
+	}
+	return keys
+}
+
+// sanitizeURL strips userinfo and query parameters from a URL for safe logging.
+func sanitizeURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "<invalid-url>"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }

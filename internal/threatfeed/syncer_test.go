@@ -558,3 +558,70 @@ func TestSyncer_SavesToDiskOnShutdown(t *testing.T) {
 	_, err := os.Stat(filepath.Join(dir, "feeds.cache"))
 	assert.NoError(t, err)
 }
+
+func TestSyncer_RemovedFeedNotRetainedOnAllFail(t *testing.T) {
+	dir := t.TempDir()
+
+	// Pre-populate disk cache with entries from two feeds.
+	s1 := NewStore(dir, nil)
+	s1.Update(map[string]FeedEntry{
+		"old-feed-evil.com": {FeedName: "old-feed", AddedAt: time.Now()},
+		"current-evil.com":  {FeedName: "current-feed", AddedAt: time.Now()},
+	})
+	err := s1.SaveToDisk()
+	require.NoError(t, err)
+
+	// Load from disk, then sync with only "current-feed" configured (old-feed removed).
+	store := NewStore(dir, nil)
+	err = store.LoadFromDisk()
+	require.NoError(t, err)
+	assert.Equal(t, 2, store.Size())
+
+	// current-feed fails on first sync.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cfg := config.ThreatFeedsConfig{
+		Feeds: []config.ThreatFeedEntry{
+			{Name: "current-feed", URL: srv.URL, Format: "domain-list"},
+		},
+		SyncInterval: time.Hour,
+	}
+	syncer := NewSyncer(store, cfg, nil)
+	syncer.syncAll(context.Background())
+
+	// current-feed's cached entry should be retained, but old-feed's should be gone.
+	_, matched := store.Check("current-evil.com")
+	assert.True(t, matched, "current feed's cached entry should be retained")
+	_, matched = store.Check("old-feed-evil.com")
+	assert.False(t, matched, "removed feed's entry should NOT be retained")
+}
+
+func TestSyncer_DuplicateURLDifferentNames(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("ETag", fmt.Sprintf("\"etag-%d\"", calls))
+		fmt.Fprintln(w, "evil.com")
+	}))
+	defer srv.Close()
+
+	store := NewStore("", nil)
+	cfg := config.ThreatFeedsConfig{
+		Feeds: []config.ThreatFeedEntry{
+			{Name: "feed-a", URL: srv.URL, Format: "domain-list"},
+			{Name: "feed-b", URL: srv.URL, Format: "domain-list"},
+		},
+		SyncInterval: time.Hour,
+	}
+	syncer := NewSyncer(store, cfg, nil)
+	syncer.syncAll(context.Background())
+
+	// Both feeds should have been fetched (no premature 304).
+	assert.Equal(t, 2, calls, "both feeds should fetch independently despite same URL")
+	assert.Equal(t, 1, store.Size())
+	_, matched := store.Check("evil.com")
+	assert.True(t, matched)
+}
