@@ -343,7 +343,7 @@ func TestSyncer_NoSourcesClearsStaleDiskCache(t *testing.T) {
 	assert.Equal(t, 0, store.Size(), "no sources configured should clear stale disk cache")
 }
 
-func TestSyncer_LocalListFeedNameUsesBasename(t *testing.T) {
+func TestSyncer_LocalListUsesFullPathAsCacheKey(t *testing.T) {
 	dir := t.TempDir()
 	listPath := filepath.Join(dir, "blocklist.txt")
 	err := os.WriteFile(listPath, []byte("evil.com\n"), 0o644)
@@ -357,10 +357,10 @@ func TestSyncer_LocalListFeedNameUsesBasename(t *testing.T) {
 	syncer := NewSyncer(store, cfg, nil)
 	syncer.syncAll(context.Background())
 
+	// Internally, FeedName uses the full path for cache key consistency.
 	entry, matched := store.Check("evil.com")
 	require.True(t, matched)
-	assert.Equal(t, "local:blocklist.txt", entry.FeedName, "feed name should use basename, not full path")
-	assert.NotContains(t, entry.FeedName, dir, "feed name must not contain the directory path")
+	assert.Equal(t, "local:"+listPath, entry.FeedName)
 }
 
 func TestSyncer_LocalListBasenamCollisionKeepsSeparateCache(t *testing.T) {
@@ -399,6 +399,49 @@ func TestSyncer_LocalListBasenamCollisionKeepsSeparateCache(t *testing.T) {
 	assert.True(t, matched, "list1 last-known-good should be retained independently")
 	_, matched = store.Check("evil-from-list2.com")
 	assert.True(t, matched)
+}
+
+func TestSyncer_RestartLocalFailRemoteSuccessRetainsCachedLocal(t *testing.T) {
+	dir := t.TempDir()
+	listPath := filepath.Join(dir, "local.txt")
+
+	// Pre-populate disk cache with a local list entry and a remote feed entry.
+	s1 := NewStore(dir, nil)
+	s1.Update(map[string]FeedEntry{
+		"local-evil.com":  {FeedName: "local:" + listPath, AddedAt: time.Now()},
+		"remote-evil.com": {FeedName: "remote-feed", AddedAt: time.Now()},
+	})
+	err := s1.SaveToDisk()
+	require.NoError(t, err)
+
+	// Simulate restart: load from disk.
+	store := NewStore(dir, nil)
+	err = store.LoadFromDisk()
+	require.NoError(t, err)
+	assert.Equal(t, 2, store.Size())
+
+	// Remote feed succeeds, local list file is missing (fails).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "remote-evil.com")
+	}))
+	defer srv.Close()
+
+	cfg := config.ThreatFeedsConfig{
+		Feeds: []config.ThreatFeedEntry{
+			{Name: "remote-feed", URL: srv.URL, Format: "domain-list"},
+		},
+		LocalLists:   []string{listPath}, // file doesn't exist — will fail
+		SyncInterval: time.Hour,
+	}
+	syncer := NewSyncer(store, cfg, nil)
+	syncer.syncAll(context.Background())
+
+	// Both domains should be present: remote from fresh fetch, local from seeded cache.
+	assert.Equal(t, 2, store.Size(), "local list cached entries should survive restart + failure")
+	_, matched := store.Check("remote-evil.com")
+	assert.True(t, matched)
+	_, matched = store.Check("local-evil.com")
+	assert.True(t, matched, "local list entries should be retained from disk cache via seeded lastGood")
 }
 
 func TestSyncer_LocalListFile(t *testing.T) {

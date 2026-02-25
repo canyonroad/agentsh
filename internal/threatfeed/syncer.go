@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -121,8 +120,7 @@ func (s *Syncer) syncAll(ctx context.Context) {
 	}
 
 	for _, path := range s.locals {
-		cacheKey := "local:" + path                  // unique key for lastGood
-		displayName := "local:" + filepath.Base(path) // safe name for logs/events
+		cacheKey := "local:" + path // unique key for lastGood and FeedEntry
 		domains, err := s.parseLocalFile(path)
 		if err != nil {
 			s.logger.Warn("local threat list failed, using cached data",
@@ -135,7 +133,7 @@ func (s *Syncer) syncAll(ctx context.Context) {
 		now := time.Now()
 		for _, d := range domains {
 			if _, exists := merged[d]; !exists {
-				merged[d] = FeedEntry{FeedName: displayName, AddedAt: now}
+				merged[d] = FeedEntry{FeedName: cacheKey, AddedAt: now}
 			}
 		}
 	}

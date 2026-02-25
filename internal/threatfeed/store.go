@@ -4,6 +4,7 @@ import (
 	"encoding/gob"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -143,6 +144,10 @@ func (s *Store) SaveToDisk() error {
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
 		return err
+	}
+	// On Windows, os.Rename fails if the destination exists. Remove it first.
+	if runtime.GOOS == "windows" {
+		os.Remove(path)
 	}
 	return os.Rename(tmp, path)
 }

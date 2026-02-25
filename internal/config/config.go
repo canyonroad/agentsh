@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1288,6 +1289,13 @@ func validateConfig(cfg *Config) error {
 	for i, f := range cfg.ThreatFeeds.Feeds {
 		if f.Name == "" {
 			return fmt.Errorf("threat_feeds.feeds[%d].name must not be empty", i)
+		}
+		if f.URL == "" {
+			return fmt.Errorf("threat_feeds.feeds[%d].url must not be empty", i)
+		}
+		u, err := url.Parse(f.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("invalid threat_feeds.feeds[%d].url %q (must be http or https)", i, f.URL)
 		}
 		switch f.Format {
 		case "hostfile", "domain-list":

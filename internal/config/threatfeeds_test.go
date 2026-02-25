@@ -169,3 +169,27 @@ func TestThreatFeedsValidation_EmptyFeedFormat(t *testing.T) {
 		t.Fatal("expected error for empty feed format")
 	}
 }
+
+func TestThreatFeedsValidation_EmptyFeedURL(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Feeds = []ThreatFeedEntry{
+		{Name: "test", URL: "", Format: "hostfile"},
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for empty feed URL")
+	}
+}
+
+func TestThreatFeedsValidation_InvalidFeedURL(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Feeds = []ThreatFeedEntry{
+		{Name: "test", URL: "ftp://example.com/list", Format: "hostfile"},
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for non-http(s) feed URL")
+	}
+}

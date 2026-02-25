@@ -146,6 +146,32 @@ func TestStore_LoadFromDisk_NoFile(t *testing.T) {
 	assert.NoError(t, err, "missing cache file should not be an error")
 }
 
+func TestStore_SaveToDisk_MultipleTimes(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, nil)
+
+	// First save.
+	s.Update(map[string]FeedEntry{
+		"evil.com": {FeedName: "test", AddedAt: time.Now()},
+	})
+	err := s.SaveToDisk()
+	require.NoError(t, err)
+
+	// Second save overwrites existing file.
+	s.Update(map[string]FeedEntry{
+		"evil.com": {FeedName: "test", AddedAt: time.Now()},
+		"bad.org":  {FeedName: "test", AddedAt: time.Now()},
+	})
+	err = s.SaveToDisk()
+	require.NoError(t, err)
+
+	// Verify second save's data persisted.
+	s2 := NewStore(dir, nil)
+	err = s2.LoadFromDisk()
+	require.NoError(t, err)
+	assert.Equal(t, 2, s2.Size())
+}
+
 func TestStore_Size(t *testing.T) {
 	s := NewStore("", nil)
 	assert.Equal(t, 0, s.Size())
