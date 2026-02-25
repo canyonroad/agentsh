@@ -692,6 +692,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return s.httpServer.Shutdown(shutdownCtx)
 	case err := <-errCh:
+		stop() // cancel context so syncer can exit
 		if syncerDone != nil {
 			<-syncerDone
 		}

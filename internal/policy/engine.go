@@ -334,9 +334,15 @@ func NewEngineWithVariables(p *Policy, enforceApprovals bool, vars map[string]st
 }
 
 // SetThreatStore configures an optional threat feed store for domain checking.
+// action must be "deny" or "audit"; defaults to "deny" if invalid.
 func (e *Engine) SetThreatStore(store ThreatChecker, action string) {
 	e.threatStore = store
-	e.threatAction = action
+	switch action {
+	case "deny", "audit":
+		e.threatAction = action
+	default:
+		e.threatAction = "deny"
+	}
 }
 
 // expandPolicy creates a copy of the policy with all variables expanded.

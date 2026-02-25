@@ -171,3 +171,19 @@ func TestCheckNetworkIP_ThreatFeedDeny(t *testing.T) {
 	assert.Equal(t, types.DecisionDeny, dec.EffectiveDecision)
 	assert.Equal(t, "threat-feed:urlhaus", dec.Rule)
 }
+
+func TestSetThreatStore_InvalidActionDefaultsToDeny(t *testing.T) {
+	p := &Policy{Version: 1, Name: "test", NetworkRules: []NetworkRule{
+		{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
+	}}
+	e, err := NewEngine(p, false)
+	require.NoError(t, err)
+
+	store := &mockThreatStore{domains: map[string]ThreatCheckResult{
+		"evil.com": {FeedName: "urlhaus", MatchedDomain: "evil.com"},
+	}}
+	e.SetThreatStore(store, "typo-dney")
+
+	dec := e.CheckNetworkCtx(context.Background(), "evil.com", 443)
+	assert.Equal(t, types.DecisionDeny, dec.EffectiveDecision, "invalid action should default to deny")
+}

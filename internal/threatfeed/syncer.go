@@ -73,7 +73,6 @@ func (s *Syncer) Run(ctx context.Context) {
 // On fetch failure or 304 Not Modified, the feed's last-known-good data is preserved.
 func (s *Syncer) syncAll() {
 	merged := make(map[string]FeedEntry)
-	anySource := len(s.feeds) > 0 || len(s.locals) > 0
 
 	for _, feed := range s.feeds {
 		domains, err := s.fetchFeed(feed)
@@ -119,7 +118,9 @@ func (s *Syncer) syncAll() {
 		}
 	}
 
-	if anySource || len(merged) > 0 {
+	// Only update the store if we have data. This prevents wiping a disk-loaded
+	// cache when all feeds fail on the first sync (e.g., no network at startup).
+	if len(merged) > 0 {
 		s.store.Update(merged)
 		if err := s.store.SaveToDisk(); err != nil {
 			s.logger.Warn("threat feed disk save failed", "error", err)

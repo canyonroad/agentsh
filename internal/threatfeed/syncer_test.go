@@ -201,6 +201,43 @@ func TestSyncer_NonPositiveIntervalDefaults(t *testing.T) {
 	assert.Equal(t, 6*time.Hour, syncer.interval)
 }
 
+func TestSyncer_AllFailFirstSyncPreservesDiskCache(t *testing.T) {
+	dir := t.TempDir()
+
+	// Pre-populate disk cache.
+	s1 := NewStore(dir, nil)
+	s1.Update(map[string]FeedEntry{
+		"cached-evil.com": {FeedName: "old-feed", AddedAt: time.Now()},
+	})
+	err := s1.SaveToDisk()
+	require.NoError(t, err)
+
+	// Create new store, load from disk.
+	store := NewStore(dir, nil)
+	err = store.LoadFromDisk()
+	require.NoError(t, err)
+	assert.Equal(t, 1, store.Size())
+
+	// All feeds fail on first sync — should NOT wipe the disk-loaded cache.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cfg := config.ThreatFeedsConfig{
+		Feeds: []config.ThreatFeedEntry{
+			{Name: "broken", URL: srv.URL, Format: "hostfile"},
+		},
+		SyncInterval: time.Hour,
+	}
+	syncer := NewSyncer(store, cfg, nil)
+	syncer.syncAll()
+
+	assert.Equal(t, 1, store.Size(), "disk-loaded cache should be preserved when all feeds fail")
+	_, matched := store.Check("cached-evil.com")
+	assert.True(t, matched)
+}
+
 func TestSyncer_LocalListFile(t *testing.T) {
 	dir := t.TempDir()
 	listPath := filepath.Join(dir, "custom.txt")
