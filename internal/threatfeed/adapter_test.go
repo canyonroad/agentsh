@@ -17,7 +17,7 @@ func TestPolicyAdapter_RedactsLocalListPath(t *testing.T) {
 	adapter := &PolicyAdapter{Store: store}
 	result, matched := adapter.Check("evil.com")
 	require.True(t, matched)
-	assert.Equal(t, "local:blocklist.txt", result.FeedName, "adapter should redact directory path")
+	assert.Equal(t, "local:blocklist.txt.1fb68369", result.FeedName, "adapter should redact directory path and append hash")
 }
 
 func TestPolicyAdapter_PreservesRemoteFeedName(t *testing.T) {
@@ -53,5 +53,5 @@ func TestPolicyAdapter_SanitizesLocalBasename(t *testing.T) {
 	adapter := &PolicyAdapter{Store: store}
 	result, matched := adapter.Check("evil.com")
 	require.True(t, matched)
-	assert.Equal(t, "local:my_list__v2_.txt", result.FeedName, "special chars in basename should be replaced with underscores")
+	assert.Equal(t, "local:my_list__v2_.txt.2fbd3502", result.FeedName, "special chars in basename should be replaced with underscores and hash appended")
 }

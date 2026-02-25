@@ -479,7 +479,9 @@ func (p *Proxy) resolveAndEmitDNS(ctx context.Context, commandID string, host st
 	dec := p.checkNetwork(ctx, host, 53)
 	// Mirror dns.go behavior: treat default deny as monitor-only unless explicitly matching DNS.
 	if dec.PolicyDecision == types.DecisionDeny && dec.Rule == "default-deny-network" {
-		dec = policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow, Rule: "dns-monitor-only"}
+		dec.PolicyDecision = types.DecisionAllow
+		dec.EffectiveDecision = types.DecisionAllow
+		dec.Rule = "dns-monitor-only"
 	}
 	dec = p.maybeApprove(ctx, commandID, dec, "dns", host)
 
@@ -501,6 +503,9 @@ func (p *Proxy) resolveAndEmitDNS(ctx context.Context, commandID string, host st
 				Rule:              dec.Rule,
 				Message:           dec.Message,
 				Approval:          dec.Approval,
+				ThreatFeed:        dec.ThreatFeed,
+				ThreatMatch:       dec.ThreatMatch,
+				ThreatAction:      dec.ThreatAction,
 			},
 		}
 		if err != nil {

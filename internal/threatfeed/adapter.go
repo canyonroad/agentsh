@@ -1,6 +1,8 @@
 package threatfeed
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 
@@ -29,12 +31,15 @@ func (a *PolicyAdapter) Check(domain string) (policy.ThreatCheckResult, bool) {
 
 // redactFeedName strips directory paths from local list feed names so that
 // filesystem paths are not exposed in policy decisions, logs, or events.
-// The basename is also sanitized to the safe charset [A-Za-z0-9._-] to
-// prevent unusual filenames from injecting into rule/message fields.
+// The basename is sanitized and a short hash of the full path is appended
+// to distinguish local lists that share the same basename.
 func redactFeedName(name string) string {
 	if strings.HasPrefix(name, "local:") {
-		base := filepath.Base(strings.TrimPrefix(name, "local:"))
-		return "local:" + sanitizeBasename(base)
+		fullPath := strings.TrimPrefix(name, "local:")
+		base := sanitizeBasename(filepath.Base(fullPath))
+		h := sha256.Sum256([]byte(fullPath))
+		suffix := hex.EncodeToString(h[:4]) // 8 hex chars
+		return "local:" + base + "." + suffix
 	}
 	return name
 }
