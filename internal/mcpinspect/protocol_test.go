@@ -54,6 +54,16 @@ func TestDetectMessageType(t *testing.T) {
 			expected: MessageToolsCall,
 		},
 		{
+			name:     "tools/call response with content",
+			input:    `{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"hello"}]}}`,
+			expected: MessageToolsCallResponse,
+		},
+		{
+			name:     "tools/call error response",
+			input:    `{"jsonrpc":"2.0","id":4,"error":{"code":-1,"message":"tool failed"}}`,
+			expected: MessageToolsCallResponse,
+		},
+		{
 			name:     "sampling request",
 			input:    `{"jsonrpc":"2.0","id":3,"method":"sampling/createMessage"}`,
 			expected: MessageSamplingRequest,

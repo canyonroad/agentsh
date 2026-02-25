@@ -27,10 +27,12 @@ func (d MCPDirection) String() string {
 }
 
 // MCPInspector is called for each message passing through the wrapper.
-type MCPInspector func(data []byte, dir MCPDirection)
+// Returns true if the message should be blocked (not forwarded).
+type MCPInspector func(data []byte, dir MCPDirection) bool
 
 // ForwardWithInspection copies data from src to dst while calling inspector
-// for each line (JSON-RPC message). Returns when src is exhausted.
+// for each line (JSON-RPC message). If the inspector returns true (blocked),
+// the line is not forwarded. Returns when src is exhausted.
 func ForwardWithInspection(src io.Reader, dst io.Writer, dir MCPDirection, inspector MCPInspector) error {
 	scanner := bufio.NewScanner(src)
 	// Increase buffer size for large messages
@@ -40,12 +42,14 @@ func ForwardWithInspection(src io.Reader, dst io.Writer, dir MCPDirection, inspe
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
-		// Inspect (non-blocking, errors logged internally)
+		// Inspect and check if blocked
 		if inspector != nil && len(line) > 0 {
-			inspector(line, dir)
+			if inspector(line, dir) {
+				continue // blocked, do not forward
+			}
 		}
 
-		// Always forward
+		// Forward
 		if _, err := dst.Write(line); err != nil {
 			return err
 		}

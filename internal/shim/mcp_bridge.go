@@ -38,7 +38,7 @@ func (b *MCPBridge) Inspect(data []byte, dir MCPDirection) bool {
 
 // InspectorFunc returns a function suitable for ForwardWithInspection.
 func (b *MCPBridge) InspectorFunc() MCPInspector {
-	return func(data []byte, dir MCPDirection) {
-		b.Inspect(data, dir)
+	return func(data []byte, dir MCPDirection) bool {
+		return b.Inspect(data, dir)
 	}
 }

@@ -1,6 +1,9 @@
 package shim
 
-import "strings"
+import (
+	"runtime"
+	"strings"
+)
 
 // standardVars are environment variables that are always passed through to MCP
 // server processes, even when an allowlist is configured. These are required
@@ -53,17 +56,14 @@ func FilterEnvForMCPServer(environ []string, allowedEnv, deniedEnv []string) (fi
 func filterByAllowlist(environ []string, allowedEnv []string) (filtered []string, stripped []string) {
 	allowed := make(map[string]bool, len(allowedEnv))
 	for _, v := range allowedEnv {
-		allowed[v] = true
+		allowed[normalizeEnvKey(v)] = true
 	}
 
 	for _, entry := range environ {
 		name := envName(entry)
-		if standardVars[name] || allowed[name] {
-			// Even if allowed or standard, check sensitive patterns.
-			// Standard vars won't match sensitive patterns, but explicitly
-			// allowed vars that happen to match sensitive patterns should
-			// still be passed through (the operator explicitly asked for them).
-			if allowed[name] || !matchesSensitivePattern(name) {
+		key := normalizeEnvKey(name)
+		if standardVars[key] || allowed[key] {
+			if allowed[key] || !matchesSensitivePattern(name) {
 				filtered = append(filtered, entry)
 			} else {
 				stripped = append(stripped, name)
@@ -79,12 +79,12 @@ func filterByAllowlist(environ []string, allowedEnv []string) (filtered []string
 func filterByDenylist(environ []string, deniedEnv []string) (filtered []string, stripped []string) {
 	denied := make(map[string]bool, len(deniedEnv))
 	for _, v := range deniedEnv {
-		denied[v] = true
+		denied[normalizeEnvKey(v)] = true
 	}
 
 	for _, entry := range environ {
 		name := envName(entry)
-		if denied[name] {
+		if denied[normalizeEnvKey(name)] {
 			stripped = append(stripped, name)
 		} else {
 			filtered = append(filtered, entry)
@@ -111,4 +111,13 @@ func envName(entry string) string {
 		return entry[:i]
 	}
 	return entry
+}
+
+// normalizeEnvKey returns the canonical form of an env var name for map lookups.
+// On Windows, env var names are case-insensitive, so we normalize to uppercase.
+func normalizeEnvKey(name string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(name)
+	}
+	return name
 }

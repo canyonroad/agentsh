@@ -2,6 +2,7 @@
 package mcpinspect
 
 import (
+	"sync"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -27,6 +28,7 @@ type Inspector struct {
 	policyEval   *PolicyEvaluator
 	rateLimiter  *RateLimiterRegistry
 	emitEvent    EventEmitter
+	mu           sync.Mutex
 	pendingCalls map[string]string // JSON-RPC ID string → tool name
 	cfg          config.SandboxMCPConfig
 	samplingCfg  config.SamplingConfig
@@ -173,9 +175,11 @@ func (i *Inspector) handleToolsCall(data []byte) error {
 	// Record the pending call for correlation with the response.
 	// Cap at maxPendingCalls to bound memory; skip recording if full.
 	idKey := string(req.ID)
+	i.mu.Lock()
 	if len(i.pendingCalls) < maxPendingCalls {
 		i.pendingCalls[idKey] = req.Params.Name
 	}
+	i.mu.Unlock()
 
 	event := MCPToolCalledEvent{
 		Type:      "mcp_tool_called",
@@ -280,10 +284,12 @@ func (i *Inspector) handleToolsCallResponse(data []byte) (*InspectResult, error)
 	// Look up tool name from pending calls correlation.
 	idKey := string(resp.ID)
 	toolName := "unknown"
+	i.mu.Lock()
 	if name, ok := i.pendingCalls[idKey]; ok {
 		toolName = name
 		delete(i.pendingCalls, idKey)
 	}
+	i.mu.Unlock()
 
 	// Extract all text content blocks.
 	var allText []string
@@ -295,9 +301,9 @@ func (i *Inspector) handleToolsCallResponse(data []byte) (*InspectResult, error)
 		}
 	}
 
-	// Run detection on each text block if detector is set.
+	// Run detection on each text block if detector is set and output inspection is enabled.
 	var allDetections []DetectionResult
-	if i.detector != nil {
+	if i.detector != nil && i.cfg.OutputInspection.Enabled {
 		for _, text := range allText {
 			detections := i.detector.InspectText(text, "tool_result")
 			allDetections = append(allDetections, detections...)

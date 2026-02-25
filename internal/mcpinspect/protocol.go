@@ -145,11 +145,13 @@ func (m MessageType) String() string {
 // DetectMessageType determines the MCP message type from raw JSON.
 func DetectMessageType(data []byte) (MessageType, error) {
 	var msg struct {
-		Method string `json:"method"`
+		Method string          `json:"method"`
+		ID     json.RawMessage `json:"id"`
 		Result struct {
 			Tools   []json.RawMessage `json:"tools"`
 			Content []json.RawMessage `json:"content"`
 		} `json:"result"`
+		Error json.RawMessage `json:"error"`
 	}
 
 	if err := json.Unmarshal(data, &msg); err != nil {
@@ -167,14 +169,18 @@ func DetectMessageType(data []byte) (MessageType, error) {
 		return MessageToolsListChanged, nil
 	}
 
-	// Check for tools/list response (has tools array in result)
-	if len(msg.Result.Tools) > 0 {
-		return MessageToolsListResponse, nil
-	}
+	// Responses have an ID but no method.
+	if len(msg.ID) > 0 && msg.Method == "" {
+		// Check for tools/list response (has tools array in result)
+		if len(msg.Result.Tools) > 0 {
+			return MessageToolsListResponse, nil
+		}
 
-	// Check for tools/call response (has content array in result, no tools)
-	if len(msg.Result.Content) > 0 {
-		return MessageToolsCallResponse, nil
+		// Any other response (has content, empty content, or error) is treated
+		// as a tools/call response so that pending-calls can be cleaned up.
+		if len(msg.Result.Content) > 0 || len(msg.Error) > 0 {
+			return MessageToolsCallResponse, nil
+		}
 	}
 
 	return MessageUnknown, nil
