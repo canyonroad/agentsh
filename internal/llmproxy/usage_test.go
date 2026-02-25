@@ -234,6 +234,23 @@ func TestExtractUsage_HasUsage_StringTokenValues(t *testing.T) {
 	}
 }
 
+func TestExtractUsage_HasUsage_NegativeTokenValues(t *testing.T) {
+	// Negative token values — should NOT count as valid usage.
+	body := []byte(`{"usage": {"input_tokens": -1, "output_tokens": -1}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when token values are negative")
+	}
+}
+
+func TestExtractUsage_HasUsage_NegativeTokenValues_OpenAI(t *testing.T) {
+	body := []byte(`{"usage": {"prompt_tokens": -5, "completion_tokens": -3}}`)
+	usage := ExtractUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false for OpenAI when token values are negative")
+	}
+}
+
 func TestExtractSSEUsage_OpenAI_NullTokenUsage(t *testing.T) {
 	// OpenAI SSE chunk with usage keys but null values — HasUsage should be false.
 	body := []byte(

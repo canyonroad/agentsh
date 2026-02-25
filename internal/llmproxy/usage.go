@@ -126,13 +126,14 @@ func usageHasTokenFields(body []byte, dialect Dialect) bool {
 	}
 }
 
-// isJSONNumber returns true if raw is a valid JSON number (not null, string, etc.).
+// isJSONNumber returns true if raw is a non-negative JSON number.
+// Rejects null, strings, booleans, and negative numbers — only values
+// starting with a digit are accepted as valid token counts.
 func isJSONNumber(raw json.RawMessage) bool {
 	if len(raw) == 0 {
 		return false
 	}
-	// JSON numbers start with a digit or '-'.
-	return raw[0] == '-' || (raw[0] >= '0' && raw[0] <= '9')
+	return raw[0] >= '0' && raw[0] <= '9'
 }
 
 // sseEvent is a minimal structure for extracting usage from SSE event data lines.
