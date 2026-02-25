@@ -205,3 +205,27 @@ func TestThreatFeedsValidation_FeedURLMissingHost(t *testing.T) {
 		t.Fatal("expected error for feed URL with no host")
 	}
 }
+
+func TestThreatFeedsValidation_UnsafeFeedName(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Feeds = []ThreatFeedEntry{
+		{Name: "bad name!", URL: "https://example.com", Format: "hostfile"},
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for feed name with unsafe characters")
+	}
+}
+
+func TestThreatFeedsValidation_SafeFeedName(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Feeds = []ThreatFeedEntry{
+		{Name: "my-feed_v2.0", URL: "https://example.com", Format: "hostfile"},
+	}
+	err := validateConfig(cfg)
+	if err != nil {
+		t.Fatalf("expected no error for safe feed name, got: %v", err)
+	}
+}

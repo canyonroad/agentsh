@@ -18,6 +18,7 @@ func (p *HostfileParser) Parse(r io.Reader) ([]string, error) {
 	seen := make(map[string]struct{})
 	var domains []string
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // allow lines up to 1 MB
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -54,6 +55,7 @@ func (p *DomainListParser) Parse(r io.Reader) ([]string, error) {
 	seen := make(map[string]struct{})
 	var domains []string
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // allow lines up to 1 MB
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {

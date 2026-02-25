@@ -378,6 +378,9 @@ func (p *Proxy) emitNetEvent(ctx context.Context, evType string, commandID strin
 			Rule:              dec.Rule,
 			Message:           dec.Message,
 			Approval:          dec.Approval,
+			ThreatFeed:        dec.ThreatFeed,
+			ThreatMatch:       dec.ThreatMatch,
+			ThreatAction:      dec.ThreatAction,
 		},
 	}
 	return ev

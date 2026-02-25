@@ -1216,6 +1216,16 @@ func applyEnvOverrides(cfg *Config) {
 	}
 }
 
+// isSafeFeedName checks that a feed name contains only safe characters.
+func isSafeFeedName(name string) bool {
+	for _, c := range name {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 func validateConfig(cfg *Config) error {
 	switch cfg.Sandbox.FUSE.Audit.Mode {
 	case "monitor", "soft_block", "soft_delete", "strict":
@@ -1289,6 +1299,9 @@ func validateConfig(cfg *Config) error {
 	for i, f := range cfg.ThreatFeeds.Feeds {
 		if f.Name == "" {
 			return fmt.Errorf("threat_feeds.feeds[%d].name must not be empty", i)
+		}
+		if !isSafeFeedName(f.Name) {
+			return fmt.Errorf("invalid threat_feeds.feeds[%d].name %q (must match [A-Za-z0-9._-]+)", i, f.Name)
 		}
 		if f.URL == "" {
 			return fmt.Errorf("threat_feeds.feeds[%d].url must not be empty", i)

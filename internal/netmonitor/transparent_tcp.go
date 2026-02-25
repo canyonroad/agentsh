@@ -195,6 +195,9 @@ func (t *TransparentTCP) netEvent(evType string, commandID string, domain string
 			Rule:              dec.Rule,
 			Message:           dec.Message,
 			Approval:          dec.Approval,
+			ThreatFeed:        dec.ThreatFeed,
+			ThreatMatch:       dec.ThreatMatch,
+			ThreatAction:      dec.ThreatAction,
 		},
 	}
 	return ev

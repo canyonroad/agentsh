@@ -93,3 +93,25 @@ func TestDomainListParser_TrailingDot(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"evil.com", "bad.org"}, domains)
 }
+
+func TestHostfileParser_LongLine(t *testing.T) {
+	// Line longer than default bufio.Scanner token size (64 KiB).
+	longComment := strings.Repeat("x", 100*1024)
+	input := "0.0.0.0 evil.com # " + longComment + "\n0.0.0.0 bad.org\n"
+	p := &HostfileParser{}
+	domains, err := p.Parse(strings.NewReader(input))
+	require.NoError(t, err)
+	assert.Contains(t, domains, "evil.com")
+	assert.Contains(t, domains, "bad.org")
+}
+
+func TestDomainListParser_LongLine(t *testing.T) {
+	// Line longer than default bufio.Scanner token size (64 KiB).
+	longComment := strings.Repeat("x", 100*1024)
+	input := "evil.com # " + longComment + "\nbad.org\n"
+	p := &DomainListParser{}
+	domains, err := p.Parse(strings.NewReader(input))
+	require.NoError(t, err)
+	assert.Contains(t, domains, "evil.com")
+	assert.Contains(t, domains, "bad.org")
+}
