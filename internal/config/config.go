@@ -1289,12 +1289,12 @@ func validateConfig(cfg *Config) error {
 		if f.Name == "" {
 			return fmt.Errorf("threat_feeds.feeds[%d].name must not be empty", i)
 		}
-		if f.Format != "" {
-			switch f.Format {
-			case "hostfile", "domain-list":
-			default:
-				return fmt.Errorf("invalid threat_feeds.feeds[%d].format %q (must be \"hostfile\" or \"domain-list\")", i, f.Format)
-			}
+		switch f.Format {
+		case "hostfile", "domain-list":
+		case "":
+			return fmt.Errorf("threat_feeds.feeds[%d].format must not be empty (use \"hostfile\" or \"domain-list\")", i)
+		default:
+			return fmt.Errorf("invalid threat_feeds.feeds[%d].format %q (must be \"hostfile\" or \"domain-list\")", i, f.Format)
 		}
 	}
 	feedNames := make(map[string]struct{}, len(cfg.ThreatFeeds.Feeds))

@@ -121,20 +121,21 @@ func (s *Syncer) syncAll(ctx context.Context) {
 	}
 
 	for _, path := range s.locals {
-		key := "local:" + filepath.Base(path)
+		cacheKey := "local:" + path                  // unique key for lastGood
+		displayName := "local:" + filepath.Base(path) // safe name for logs/events
 		domains, err := s.parseLocalFile(path)
 		if err != nil {
 			s.logger.Warn("local threat list failed, using cached data",
 				"path", path, "error", err)
-			domains = s.lastGood[key]
+			domains = s.lastGood[cacheKey]
 		} else {
-			s.lastGood[key] = domains
+			s.lastGood[cacheKey] = domains
 			anySucceeded = true
 		}
 		now := time.Now()
 		for _, d := range domains {
 			if _, exists := merged[d]; !exists {
-				merged[d] = FeedEntry{FeedName: key, AddedAt: now}
+				merged[d] = FeedEntry{FeedName: displayName, AddedAt: now}
 			}
 		}
 	}

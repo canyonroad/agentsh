@@ -157,3 +157,15 @@ func TestThreatFeedsValidation_EmptyFeedName(t *testing.T) {
 		t.Fatal("expected error for empty feed name")
 	}
 }
+
+func TestThreatFeedsValidation_EmptyFeedFormat(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Feeds = []ThreatFeedEntry{
+		{Name: "test", URL: "https://a.com", Format: ""},
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for empty feed format")
+	}
+}

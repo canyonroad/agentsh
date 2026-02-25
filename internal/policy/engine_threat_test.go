@@ -84,10 +84,13 @@ func TestCheckNetworkCtx_ThreatFeedAudit(t *testing.T) {
 	}}
 	e.SetThreatStore(store, "audit")
 
+	// Audit mode should NOT short-circuit — normal rules still evaluate.
+	// The allow-all rule matches, so effective decision is allow with threat metadata.
 	dec := e.CheckNetworkCtx(context.Background(), "evil.com", 443)
-	assert.Equal(t, types.DecisionAudit, dec.PolicyDecision)
 	assert.Equal(t, types.DecisionAllow, dec.EffectiveDecision)
-	assert.Equal(t, "threat-feed:urlhaus", dec.Rule)
+	assert.Equal(t, "allow-all", dec.Rule)
+	assert.Equal(t, "urlhaus", dec.ThreatFeed)
+	assert.Equal(t, "evil.com", dec.ThreatMatch)
 }
 
 func TestCheckNetworkCtx_ThreatFeedNoMatchFallsThrough(t *testing.T) {
@@ -186,4 +189,42 @@ func TestSetThreatStore_InvalidActionDefaultsToDeny(t *testing.T) {
 
 	dec := e.CheckNetworkCtx(context.Background(), "evil.com", 443)
 	assert.Equal(t, types.DecisionDeny, dec.EffectiveDecision, "invalid action should default to deny")
+}
+
+func TestCheckNetworkCtx_ThreatFeedAuditRespectsExplicitDenyRule(t *testing.T) {
+	p := &Policy{Version: 1, Name: "test", NetworkRules: []NetworkRule{
+		{Name: "deny-evil", Domains: []string{"evil.com"}, Decision: "deny"},
+		{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
+	}}
+	e, err := NewEngine(p, false)
+	require.NoError(t, err)
+
+	store := &mockThreatStore{domains: map[string]ThreatCheckResult{
+		"evil.com": {FeedName: "urlhaus", MatchedDomain: "evil.com"},
+	}}
+	e.SetThreatStore(store, "audit")
+
+	// Audit mode must NOT override the explicit deny rule.
+	dec := e.CheckNetworkCtx(context.Background(), "evil.com", 443)
+	assert.Equal(t, types.DecisionDeny, dec.EffectiveDecision)
+	assert.Equal(t, "deny-evil", dec.Rule)
+	assert.Equal(t, "urlhaus", dec.ThreatFeed)
+	assert.Equal(t, "evil.com", dec.ThreatMatch)
+}
+
+func TestCheckNetworkCtx_ThreatFeedAuditRespectsDefaultDeny(t *testing.T) {
+	// No rules at all — default-deny should still apply.
+	p := &Policy{Version: 1, Name: "test", NetworkRules: []NetworkRule{}}
+	e, err := NewEngine(p, false)
+	require.NoError(t, err)
+
+	store := &mockThreatStore{domains: map[string]ThreatCheckResult{
+		"evil.com": {FeedName: "urlhaus", MatchedDomain: "evil.com"},
+	}}
+	e.SetThreatStore(store, "audit")
+
+	dec := e.CheckNetworkCtx(context.Background(), "evil.com", 443)
+	assert.Equal(t, types.DecisionDeny, dec.EffectiveDecision)
+	assert.Equal(t, "default-deny-network", dec.Rule)
+	assert.Equal(t, "urlhaus", dec.ThreatFeed)
 }

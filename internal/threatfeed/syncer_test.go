@@ -363,6 +363,44 @@ func TestSyncer_LocalListFeedNameUsesBasename(t *testing.T) {
 	assert.NotContains(t, entry.FeedName, dir, "feed name must not contain the directory path")
 }
 
+func TestSyncer_LocalListBasenamCollisionKeepsSeparateCache(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	// Two lists with the same basename but different directories and content.
+	list1 := filepath.Join(dir1, "blocklist.txt")
+	list2 := filepath.Join(dir2, "blocklist.txt")
+	err := os.WriteFile(list1, []byte("evil-from-list1.com\n"), 0o644)
+	require.NoError(t, err)
+	err = os.WriteFile(list2, []byte("evil-from-list2.com\n"), 0o644)
+	require.NoError(t, err)
+
+	store := NewStore("", nil)
+	cfg := config.ThreatFeedsConfig{
+		LocalLists:   []string{list1, list2},
+		SyncInterval: time.Hour,
+	}
+	syncer := NewSyncer(store, cfg, nil)
+	syncer.syncAll(context.Background())
+
+	// Both domains should be present — no collision.
+	assert.Equal(t, 2, store.Size(), "same-basename local lists should not collide")
+	_, matched := store.Check("evil-from-list1.com")
+	assert.True(t, matched)
+	_, matched = store.Check("evil-from-list2.com")
+	assert.True(t, matched)
+
+	// Now make list1 fail — list2 should still work, and list1's cached data should be retained.
+	os.Remove(list1)
+	syncer.syncAll(context.Background())
+
+	assert.Equal(t, 2, store.Size(), "failed list should use its own last-known-good, not the other list's")
+	_, matched = store.Check("evil-from-list1.com")
+	assert.True(t, matched, "list1 last-known-good should be retained independently")
+	_, matched = store.Check("evil-from-list2.com")
+	assert.True(t, matched)
+}
+
 func TestSyncer_LocalListFile(t *testing.T) {
 	dir := t.TempDir()
 	listPath := filepath.Join(dir, "custom.txt")

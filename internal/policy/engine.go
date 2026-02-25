@@ -432,13 +432,18 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 
 	// Threat feed pre-check.
+	var threatResult *ThreatCheckResult
 	if e.threatStore != nil && domain != "" {
 		if result, matched := e.threatStore.Check(domain); matched {
-			dec := e.wrapDecision(e.threatAction, "threat-feed:"+result.FeedName,
-				"domain matched threat feed: "+result.FeedName+" (matched: "+result.MatchedDomain+")", nil)
-			dec.ThreatFeed = result.FeedName
-			dec.ThreatMatch = result.MatchedDomain
-			return dec
+			if e.threatAction == "deny" {
+				dec := e.wrapDecision("deny", "threat-feed:"+result.FeedName,
+					"domain matched threat feed: "+result.FeedName+" (matched: "+result.MatchedDomain+")", nil)
+				dec.ThreatFeed = result.FeedName
+				dec.ThreatMatch = result.MatchedDomain
+				return dec
+			}
+			// Audit mode: record threat metadata, continue normal rule evaluation.
+			threatResult = &result
 		}
 	}
 
@@ -487,10 +492,20 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 			}
 		}
 
-		return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
+		dec := e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
+		if threatResult != nil {
+			dec.ThreatFeed = threatResult.FeedName
+			dec.ThreatMatch = threatResult.MatchedDomain
+		}
+		return dec
 	}
 
-	return e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "", nil)
+	dec := e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "", nil)
+	if threatResult != nil {
+		dec.ThreatFeed = threatResult.FeedName
+		dec.ThreatMatch = threatResult.MatchedDomain
+	}
+	return dec
 }
 
 func (e *Engine) CheckCommand(command string, args []string) Decision {
@@ -737,13 +752,18 @@ func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) D
 	domain = strings.ToLower(strings.TrimSpace(domain))
 
 	// Threat feed pre-check.
+	var threatResult *ThreatCheckResult
 	if e.threatStore != nil {
 		if entry, matched := e.threatStore.Check(domain); matched {
-			dec := e.wrapDecision(e.threatAction, "threat-feed:"+entry.FeedName,
-				"domain matched threat feed: "+entry.FeedName+" (matched: "+entry.MatchedDomain+")", nil)
-			dec.ThreatFeed = entry.FeedName
-			dec.ThreatMatch = entry.MatchedDomain
-			return dec
+			if e.threatAction == "deny" {
+				dec := e.wrapDecision("deny", "threat-feed:"+entry.FeedName,
+					"domain matched threat feed: "+entry.FeedName+" (matched: "+entry.MatchedDomain+")", nil)
+				dec.ThreatFeed = entry.FeedName
+				dec.ThreatMatch = entry.MatchedDomain
+				return dec
+			}
+			// Audit mode: record threat metadata, continue normal rule evaluation.
+			threatResult = &entry
 		}
 	}
 
@@ -815,10 +835,20 @@ func (e *Engine) CheckNetworkCtx(ctx context.Context, domain string, port int) D
 		}
 
 		// If rule has no selectors, it matches (e.g., approve unknown https by port only).
-		return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
+		dec := e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, nil)
+		if threatResult != nil {
+			dec.ThreatFeed = threatResult.FeedName
+			dec.ThreatMatch = threatResult.MatchedDomain
+		}
+		return dec
 	}
 
-	return e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "", nil)
+	dec := e.wrapDecision(string(types.DecisionDeny), "default-deny-network", "", nil)
+	if threatResult != nil {
+		dec.ThreatFeed = threatResult.FeedName
+		dec.ThreatMatch = threatResult.MatchedDomain
+	}
+	return dec
 }
 
 func matchOp(ops map[string]struct{}, op string) bool {
