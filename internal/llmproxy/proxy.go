@@ -61,6 +61,8 @@ type Proxy struct {
 	sessionAnalyzer *mcpinspect.SessionAnalyzer
 	// rateLimiter applies per-server rate limits to MCP tool calls.
 	rateLimiter *mcpinspect.RateLimiterRegistry
+	// llmRateLimiter enforces RPM and TPM limits on LLM API calls.
+	llmRateLimiter *LLMRateLimiter
 
 	server   *http.Server
 	listener net.Listener
@@ -110,6 +112,8 @@ func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 		return nil, fmt.Errorf("create storage: %w", err)
 	}
 
+	llmRL := NewLLMRateLimiter(cfg.Proxy.RateLimits)
+
 	return &Proxy{
 		cfg:             cfg,
 		detector:        detector,
@@ -121,6 +125,7 @@ func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 		chatGPTUpstream: chatGPTURL,
 		policy:          newPolicyEvaluator(cfg.MCP),
 		rateLimiter:     newRateLimiter(cfg.MCP),
+		llmRateLimiter:  llmRL,
 	}, nil
 }
 
@@ -276,6 +281,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.Header.Get("X-Session-ID")
 	if sessionID == "" {
 		sessionID = p.cfg.SessionID
+	}
+
+	// Check RPM rate limit before processing the request
+	if !p.llmRateLimiter.AllowRequest() {
+		p.logger.Warn("LLM API rate limited (RPM)", "request_id", requestID, "session_id", sessionID)
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+		return
 	}
 
 	p.logger.Debug("proxying request",
@@ -462,6 +475,12 @@ func (p *Proxy) logResponse(requestID, sessionID string, dialect Dialect, resp *
 func (p *Proxy) logResponseDirect(requestID, sessionID string, dialect Dialect, resp *http.Response, respBody []byte, startTime time.Time) {
 	// Extract token usage from the response
 	usage := ExtractUsage(respBody, dialect)
+
+	// Consume tokens from the TPM budget for rate limiting
+	totalTokens := usage.InputTokens + usage.OutputTokens
+	if totalTokens > 0 {
+		p.llmRateLimiter.ConsumeTokens(totalTokens)
+	}
 
 	entry := &ResponseLogEntry{
 		RequestID:  requestID,
