@@ -99,9 +99,10 @@ func extractOpenAIUsage(body []byte) Usage {
 }
 
 // usageHasTokenFields checks whether the "usage" object in body contains
-// all expected token fields for the given dialect. Requires both fields
-// (e.g. input_tokens AND output_tokens for Anthropic) to prevent partial
-// or malformed usage objects from suppressing fallback charges.
+// all expected token fields with valid numeric values for the given dialect.
+// Requires both fields (e.g. input_tokens AND output_tokens for Anthropic)
+// with numeric values to prevent partial, null, or malformed usage objects
+// from suppressing fallback charges.
 func usageHasTokenFields(body []byte, dialect Dialect) bool {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -117,16 +118,21 @@ func usageHasTokenFields(body []byte, dialect Dialect) bool {
 	}
 	switch dialect {
 	case DialectAnthropic:
-		_, hasInput := fields["input_tokens"]
-		_, hasOutput := fields["output_tokens"]
-		return hasInput && hasOutput
+		return isJSONNumber(fields["input_tokens"]) && isJSONNumber(fields["output_tokens"])
 	case DialectOpenAI:
-		_, hasPrompt := fields["prompt_tokens"]
-		_, hasCompletion := fields["completion_tokens"]
-		return hasPrompt && hasCompletion
+		return isJSONNumber(fields["prompt_tokens"]) && isJSONNumber(fields["completion_tokens"])
 	default:
 		return false
 	}
+}
+
+// isJSONNumber returns true if raw is a valid JSON number (not null, string, etc.).
+func isJSONNumber(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	// JSON numbers start with a digit or '-'.
+	return raw[0] == '-' || (raw[0] >= '0' && raw[0] <= '9')
 }
 
 // sseEvent is a minimal structure for extracting usage from SSE event data lines.

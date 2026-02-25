@@ -208,6 +208,46 @@ func TestExtractUsage_HasUsage_PartialOpenAI(t *testing.T) {
 	}
 }
 
+func TestExtractUsage_HasUsage_NullTokenValues(t *testing.T) {
+	// Token fields present but null — should NOT count as valid usage.
+	body := []byte(`{"usage": {"input_tokens": null, "output_tokens": null}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when token values are null")
+	}
+}
+
+func TestExtractUsage_HasUsage_NullTokenValues_OpenAI(t *testing.T) {
+	body := []byte(`{"usage": {"prompt_tokens": null, "completion_tokens": null}}`)
+	usage := ExtractUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false for OpenAI when token values are null")
+	}
+}
+
+func TestExtractUsage_HasUsage_StringTokenValues(t *testing.T) {
+	// Token fields present but string values — should NOT count as valid usage.
+	body := []byte(`{"usage": {"input_tokens": "many", "output_tokens": "few"}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when token values are strings")
+	}
+}
+
+func TestExtractSSEUsage_OpenAI_NullTokenUsage(t *testing.T) {
+	// OpenAI SSE chunk with usage keys but null values — HasUsage should be false.
+	body := []byte(
+		`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}` + "\n\n" +
+			`data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":null,"completion_tokens":null}}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when OpenAI SSE chunk has null token values")
+	}
+}
+
 func TestExtractSSEUsage_OpenAI_ZeroTokenUsage(t *testing.T) {
 	// OpenAI SSE chunk with usage present but zero tokens — HasUsage should be true.
 	body := []byte(
