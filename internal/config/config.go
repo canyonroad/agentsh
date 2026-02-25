@@ -629,9 +629,9 @@ type CrossServerFlowConfig struct {
 
 // ShadowToolConfig detects tool names that shadow/mimic tools from other servers.
 type ShadowToolConfig struct {
-	Enabled             *bool   `yaml:"enabled"`              // default: true
-	SimilarityCheck     *bool   `yaml:"similarity_check"`     // default: false
-	SimilarityThreshold float64 `yaml:"similarity_threshold"` // default: 0.85
+	Enabled             *bool    `yaml:"enabled"`              // default: true
+	SimilarityCheck     *bool    `yaml:"similarity_check"`     // default: false
+	SimilarityThreshold *float64 `yaml:"similarity_threshold"` // default: 0.85, range [0,1]
 }
 
 // SecurityConfig controls security mode selection and strictness.
@@ -1071,8 +1071,9 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		f := false
 		cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityCheck = &f
 	}
-	if cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold == 0 {
-		cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold = 0.85
+	if cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold == nil {
+		d := 0.85
+		cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold = &d
 	}
 
 	// macOS XPC defaults
@@ -1403,6 +1404,12 @@ func validateConfig(cfg *Config) error {
 					return fmt.Errorf("MCP server %q: TLS fingerprint contains invalid hex character %q", srv.ID, string(c))
 				}
 			}
+		}
+	}
+	// Validate SimilarityThreshold bounds
+	if t := cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold; t != nil {
+		if *t < 0 || *t > 1 {
+			return fmt.Errorf("sandbox.mcp.cross_server.shadow_tool.similarity_threshold must be in [0, 1], got %v", *t)
 		}
 	}
 	return nil
