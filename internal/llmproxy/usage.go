@@ -99,9 +99,9 @@ func extractOpenAIUsage(body []byte) Usage {
 }
 
 // usageHasTokenFields checks whether the "usage" object in body contains
-// at least one of the expected token fields for the given dialect.
-// This prevents malformed usage objects (e.g. {"usage":{}}) from being
-// treated as valid usage, which would skip the fallback charge.
+// all expected token fields for the given dialect. Requires both fields
+// (e.g. input_tokens AND output_tokens for Anthropic) to prevent partial
+// or malformed usage objects from suppressing fallback charges.
 func usageHasTokenFields(body []byte, dialect Dialect) bool {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -119,11 +119,11 @@ func usageHasTokenFields(body []byte, dialect Dialect) bool {
 	case DialectAnthropic:
 		_, hasInput := fields["input_tokens"]
 		_, hasOutput := fields["output_tokens"]
-		return hasInput || hasOutput
+		return hasInput && hasOutput
 	case DialectOpenAI:
 		_, hasPrompt := fields["prompt_tokens"]
 		_, hasCompletion := fields["completion_tokens"]
-		return hasPrompt || hasCompletion
+		return hasPrompt && hasCompletion
 	default:
 		return false
 	}

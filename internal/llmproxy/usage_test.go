@@ -190,6 +190,24 @@ func TestExtractUsage_HasUsage_NullUsage(t *testing.T) {
 	}
 }
 
+func TestExtractUsage_HasUsage_PartialAnthropic(t *testing.T) {
+	// Only input_tokens present — incomplete schema should not count as valid usage.
+	body := []byte(`{"usage": {"input_tokens": 0}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when only input_tokens is present (partial)")
+	}
+}
+
+func TestExtractUsage_HasUsage_PartialOpenAI(t *testing.T) {
+	// Only prompt_tokens present — incomplete schema should not count as valid usage.
+	body := []byte(`{"usage": {"prompt_tokens": 0}}`)
+	usage := ExtractUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when only prompt_tokens is present (partial)")
+	}
+}
+
 func TestExtractSSEUsage_OpenAI_ZeroTokenUsage(t *testing.T) {
 	// OpenAI SSE chunk with usage present but zero tokens — HasUsage should be true.
 	body := []byte(
