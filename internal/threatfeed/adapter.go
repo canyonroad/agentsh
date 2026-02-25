@@ -14,6 +14,9 @@ type PolicyAdapter struct {
 
 // Check implements policy.ThreatChecker.
 func (a *PolicyAdapter) Check(domain string) (policy.ThreatCheckResult, bool) {
+	if a == nil || a.Store == nil {
+		return policy.ThreatCheckResult{}, false
+	}
 	entry, matched := a.Store.Check(domain)
 	if !matched {
 		return policy.ThreatCheckResult{}, false

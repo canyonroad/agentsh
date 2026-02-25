@@ -31,3 +31,15 @@ func TestPolicyAdapter_PreservesRemoteFeedName(t *testing.T) {
 	require.True(t, matched)
 	assert.Equal(t, "urlhaus", result.FeedName, "remote feed names should not be modified")
 }
+
+func TestPolicyAdapter_NilStoreDoesNotPanic(t *testing.T) {
+	adapter := &PolicyAdapter{Store: nil}
+	_, matched := adapter.Check("evil.com")
+	assert.False(t, matched, "nil store should return no match")
+}
+
+func TestPolicyAdapter_NilAdapterDoesNotPanic(t *testing.T) {
+	var adapter *PolicyAdapter
+	_, matched := adapter.Check("evil.com")
+	assert.False(t, matched, "nil adapter should return no match")
+}

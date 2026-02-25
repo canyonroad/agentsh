@@ -204,10 +204,10 @@ func TestSyncer_NonPositiveIntervalDefaults(t *testing.T) {
 func TestSyncer_AllFailFirstSyncPreservesDiskCache(t *testing.T) {
 	dir := t.TempDir()
 
-	// Pre-populate disk cache.
+	// Pre-populate disk cache with an entry from a currently-configured feed.
 	s1 := NewStore(dir, nil)
 	s1.Update(map[string]FeedEntry{
-		"cached-evil.com": {FeedName: "old-feed", AddedAt: time.Now()},
+		"cached-evil.com": {FeedName: "broken", AddedAt: time.Now()},
 	})
 	err := s1.SaveToDisk()
 	require.NoError(t, err)
@@ -218,7 +218,8 @@ func TestSyncer_AllFailFirstSyncPreservesDiskCache(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, store.Size())
 
-	// All feeds fail on first sync — should NOT wipe the disk-loaded cache.
+	// All feeds fail on first sync — should NOT wipe the disk-loaded cache
+	// for currently configured feeds.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -624,4 +625,41 @@ func TestSyncer_DuplicateURLDifferentNames(t *testing.T) {
 	assert.Equal(t, 1, store.Size())
 	_, matched := store.Check("evil.com")
 	assert.True(t, matched)
+}
+
+func TestSyncer_RemovedFeedOnlyCacheAllFail(t *testing.T) {
+	dir := t.TempDir()
+
+	// Disk cache contains ONLY removed-feed entries (no current-feed entries).
+	s1 := NewStore(dir, nil)
+	s1.Update(map[string]FeedEntry{
+		"removed-evil.com": {FeedName: "removed-feed", AddedAt: time.Now()},
+	})
+	err := s1.SaveToDisk()
+	require.NoError(t, err)
+
+	store := NewStore(dir, nil)
+	err = store.LoadFromDisk()
+	require.NoError(t, err)
+	assert.Equal(t, 1, store.Size())
+
+	// Current feed fails on first sync.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cfg := config.ThreatFeedsConfig{
+		Feeds: []config.ThreatFeedEntry{
+			{Name: "current-feed", URL: srv.URL, Format: "domain-list"},
+		},
+		SyncInterval: time.Hour,
+	}
+	syncer := NewSyncer(store, cfg, nil)
+	syncer.syncAll(context.Background())
+
+	// Removed-feed domain should be pruned even though all current feeds failed.
+	assert.Equal(t, 0, store.Size(), "removed-feed-only cache should be pruned on first sync")
+	_, matched := store.Check("removed-evil.com")
+	assert.False(t, matched, "removed feed domain should not persist")
 }

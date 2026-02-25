@@ -80,12 +80,14 @@ func (s *Syncer) syncAll(ctx context.Context) {
 	// On first sync, seed lastGood from the store's disk-loaded data, but only
 	// for feeds that are currently configured. This prevents domains from removed
 	// feeds from persisting indefinitely.
+	needsPrune := false
 	if !s.seededCache {
 		s.seededCache = true
 		configuredKeys := s.configuredFeedKeys()
 		for feedName, domains := range s.store.Snapshot() {
 			if _, configured := configuredKeys[feedName]; !configured {
-				continue // skip entries from feeds no longer in config
+				needsPrune = true // disk cache has entries from removed feeds
+				continue
 			}
 			if _, exists := s.lastGood[feedName]; !exists {
 				s.lastGood[feedName] = domains
@@ -146,9 +148,10 @@ func (s *Syncer) syncAll(ctx context.Context) {
 
 	// Update the store if at least one source succeeded (even if the result is
 	// empty — that legitimately clears stale entries). Also update when no sources
-	// are configured to clear any stale disk cache. Skip the update only when
-	// sources exist but ALL failed, to preserve the disk-loaded cache.
-	if anySucceeded || !hasSources || len(merged) > 0 {
+	// are configured to clear any stale disk cache, or when we need to prune
+	// entries from removed feeds. Skip the update only when sources exist but
+	// ALL failed and no pruning is needed, to preserve the disk-loaded cache.
+	if anySucceeded || !hasSources || len(merged) > 0 || needsPrune {
 		s.store.Update(merged)
 		if err := s.store.SaveToDisk(); err != nil {
 			s.logger.Warn("threat feed disk save failed", "error", err)
