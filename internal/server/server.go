@@ -648,8 +648,13 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.threatSyncer != nil {
 		syncerDone = make(chan struct{})
 		go func() {
+			defer close(syncerDone)
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("threat feed syncer panicked", "panic", r)
+				}
+			}()
 			s.threatSyncer.Run(ctx)
-			close(syncerDone)
 		}()
 	}
 

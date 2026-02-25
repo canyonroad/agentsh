@@ -222,14 +222,12 @@ func (s *Syncer) configuredFeedKeys() map[string]struct{} {
 	return keys
 }
 
-// sanitizeURL strips userinfo and query parameters from a URL for safe logging.
+// sanitizeURL strips everything except scheme and host from a URL for safe
+// logging. Path segments may contain tokens or secrets in some feed URLs.
 func sanitizeURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "<invalid-url>"
 	}
-	u.User = nil
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String()
+	return u.Scheme + "://" + u.Host
 }

@@ -1325,6 +1325,9 @@ func validateConfig(cfg *Config) error {
 		}
 		feedNames[f.Name] = struct{}{}
 	}
+	if cfg.ThreatFeeds.Realtime.Provider != "" {
+		return fmt.Errorf("threat_feeds.realtime.provider %q is not supported in this version", cfg.ThreatFeeds.Realtime.Provider)
+	}
 	if cfg.ThreatFeeds.Realtime.OnTimeout != "" {
 		switch cfg.ThreatFeeds.Realtime.OnTimeout {
 		case "local-only", "allow", "deny":

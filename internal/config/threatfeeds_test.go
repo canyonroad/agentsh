@@ -229,3 +229,13 @@ func TestThreatFeedsValidation_SafeFeedName(t *testing.T) {
 		t.Fatalf("expected no error for safe feed name, got: %v", err)
 	}
 }
+
+func TestThreatFeedsValidation_RealtimeProviderRejected(t *testing.T) {
+	cfg := &Config{}
+	applyDefaults(cfg)
+	cfg.ThreatFeeds.Realtime.Provider = "virustotal"
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error when realtime.provider is set")
+	}
+}
