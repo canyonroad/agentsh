@@ -365,3 +365,114 @@ func TestProxy_RPM_Returns429(t *testing.T) {
 		t.Error("rate limited response should include Retry-After header")
 	}
 }
+
+func TestProxy_TPM_FallbackChargeOnMissingUsage(t *testing.T) {
+	// Upstream returns a response with no usage field — simulates providers
+	// that omit usage or SSE streams without include_usage.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-sonnet-4-20250514"}`))
+	}))
+	defer upstream.Close()
+
+	storageDir := t.TempDir()
+	cfg := Config{
+		SessionID: "test-tpm-fallback",
+		Proxy: config.ProxyConfig{
+			Mode: "embedded",
+			Port: 0,
+			Providers: config.ProxyProvidersConfig{
+				Anthropic: upstream.URL,
+			},
+			RateLimits: config.LLMRateLimitsConfig{
+				Enabled:         true,
+				TokensPerMinute: 6000,
+				// Burst of 300: enough for 1 fallback charge (200) but not two
+				// when combined with pre-request budget depletion.
+				TokenBurst: 300,
+			},
+		},
+		DLP: config.DefaultDLPConfig(),
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy, err := New(cfg, storageDir, logger)
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := proxy.Start(ctx); err != nil {
+		t.Fatalf("failed to start proxy: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		proxy.Stop(shutdownCtx)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	addr := proxy.Addr()
+	if addr == nil {
+		t.Fatal("proxy address is nil")
+	}
+	proxyURL := "http://" + addr.String()
+
+	makeRequest := func() *http.Response {
+		req, _ := http.NewRequest("POST", proxyURL+"/v1/messages",
+			strings.NewReader(`{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-api-key", "test-key")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp
+	}
+
+	// First request succeeds — upstream returns no usage, but fallback charge
+	// of 200 tokens is applied, leaving 100 of the 300-token burst.
+	resp1 := makeRequest()
+	if resp1.StatusCode == http.StatusTooManyRequests {
+		t.Fatal("first request should not be rate limited")
+	}
+
+	// Second request also gets through (100 remaining > 0 budget check),
+	// consuming another 200 fallback, driving budget negative.
+	// Note: this may or may not be 429 depending on timing, so we just
+	// verify that by the third request the budget is definitely depleted.
+	makeRequest()
+
+	// Third request should be rate limited — budget depleted from fallback charges.
+	resp3 := makeRequest()
+	if resp3.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("third request should be 429 (TPM depleted from fallback charges), got %d", resp3.StatusCode)
+	}
+}
+
+func TestLLMRateLimiter_TPMEnabled(t *testing.T) {
+	withTPM := NewLLMRateLimiter(config.LLMRateLimitsConfig{
+		Enabled:         true,
+		TokensPerMinute: 100,
+		TokenBurst:      50,
+	})
+	if !withTPM.TPMEnabled() {
+		t.Error("TPMEnabled should return true when TPM is configured")
+	}
+
+	withoutTPM := NewLLMRateLimiter(config.LLMRateLimitsConfig{
+		Enabled:           true,
+		RequestsPerMinute: 60,
+	})
+	if withoutTPM.TPMEnabled() {
+		t.Error("TPMEnabled should return false when only RPM is configured")
+	}
+
+	disabled := NewLLMRateLimiter(config.LLMRateLimitsConfig{Enabled: false})
+	if disabled.TPMEnabled() {
+		t.Error("TPMEnabled should return false when rate limiting is disabled")
+	}
+}

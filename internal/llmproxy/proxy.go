@@ -22,6 +22,11 @@ import (
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
 
+// tpmFallbackTokenCharge is the conservative token charge applied when TPM
+// limiting is enabled but the response contains no parseable usage data.
+// This prevents fail-open bypass by providers/stream modes that omit usage.
+const tpmFallbackTokenCharge = 200
+
 // Config holds the proxy configuration using config package types.
 type Config struct {
 	// SessionID is the current session ID (set by agentsh).
@@ -505,10 +510,14 @@ func (p *Proxy) logResponseDirect(requestID, sessionID string, dialect Dialect, 
 		usage = ExtractUsage(respBody, dialect)
 	}
 
-	// Consume tokens from the TPM budget for rate limiting
+	// Consume tokens from the TPM budget for rate limiting.
+	// When TPM is enabled but usage is missing/unparseable, apply a
+	// conservative fallback charge to prevent fail-open bypass.
 	totalTokens := usage.InputTokens + usage.OutputTokens
 	if totalTokens > 0 {
 		p.llmRateLimiter.ConsumeTokens(totalTokens)
+	} else if p.llmRateLimiter.TPMEnabled() {
+		p.llmRateLimiter.ConsumeTokens(tpmFallbackTokenCharge)
 	}
 
 	entry := &ResponseLogEntry{

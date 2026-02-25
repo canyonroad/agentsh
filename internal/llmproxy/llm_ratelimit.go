@@ -83,6 +83,11 @@ func (l *LLMRateLimiter) ConsumeTokens(n int) {
 	l.tpmLimit.ForceConsumeN(n)
 }
 
+// TPMEnabled returns true if tokens-per-minute limiting is active.
+func (l *LLMRateLimiter) TPMEnabled() bool {
+	return l.enabled && l.tpmLimit != nil
+}
+
 // inFlightEnabled returns true if the in-flight concurrency limiter is active.
 func (l *LLMRateLimiter) inFlightEnabled() bool {
 	return l.inFlight != nil

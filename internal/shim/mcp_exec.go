@@ -184,6 +184,16 @@ func (s *syncWriter) WriteFrame(p []byte) (int, error) {
 // WrapCommand sets up stdio interception for the given command.
 // Returns cleanup function to be called after command completes.
 func (w *MCPExecWrapper) WrapCommand(cmd *exec.Cmd) (cleanup func(), err error) {
+	// Enforce the pinned binary path to prevent TOCTOU/PATH-hijack attacks.
+	// When binary pinning resolved an absolute path, override cmd.Path so
+	// the process launches the exact binary that was verified.
+	if w.resolvedCommand != "" {
+		cmd.Path = w.resolvedCommand
+		if len(cmd.Args) > 0 {
+			cmd.Args[0] = w.resolvedCommand
+		}
+	}
+
 	// Apply environment filtering before process launch.
 	if len(w.allowedEnv) > 0 || len(w.deniedEnv) > 0 {
 		environ := cmd.Env

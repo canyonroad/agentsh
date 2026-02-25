@@ -394,3 +394,71 @@ func TestMCPExecWrapper_WrapCommand_EnvFiltering(t *testing.T) {
 		t.Error("HOME should remain in cmd.Env")
 	}
 }
+
+func TestMCPExecWrapper_WrapCommand_EnforcesPinnedPath(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{verifyStatus: "match"}
+
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: true,
+		OnChange:       "block",
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("BuildMCPExecWrapper failed: %v", err)
+	}
+
+	// Create a command using a different path (simulating PATH resolution).
+	cmd := exec.Command("cat")
+	originalPath := cmd.Path
+
+	cleanup, err := wrapper.WrapCommand(cmd)
+	if err != nil {
+		t.Fatalf("WrapCommand failed: %v", err)
+	}
+	defer cleanup()
+
+	// WrapCommand should have overridden cmd.Path with the resolved binary.
+	if cmd.Path == originalPath {
+		t.Error("WrapCommand should override cmd.Path with resolvedCommand")
+	}
+	if cmd.Path != bin {
+		t.Errorf("cmd.Path = %q, want %q", cmd.Path, bin)
+	}
+	if len(cmd.Args) > 0 && cmd.Args[0] != bin {
+		t.Errorf("cmd.Args[0] = %q, want %q", cmd.Args[0], bin)
+	}
+}
+
+func TestMCPExecWrapper_WrapCommand_NoPinNoOverride(t *testing.T) {
+	cfg := MCPExecConfig{
+		SessionID: "sess_1",
+		ServerID:  "srv-1",
+		PinBinary: false,
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("BuildMCPExecWrapper failed: %v", err)
+	}
+
+	cmd := exec.Command("cat")
+	originalPath := cmd.Path
+
+	cleanup, err := wrapper.WrapCommand(cmd)
+	if err != nil {
+		t.Fatalf("WrapCommand failed: %v", err)
+	}
+	defer cleanup()
+
+	// Without pinning, cmd.Path should remain unchanged.
+	if cmd.Path != originalPath {
+		t.Errorf("cmd.Path should not change when pinning is disabled, got %q want %q", cmd.Path, originalPath)
+	}
+}
