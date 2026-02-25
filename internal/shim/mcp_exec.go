@@ -2,6 +2,7 @@
 package shim
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -9,12 +10,31 @@ import (
 	"sync"
 )
 
+// BinaryPinVerifier abstracts binary pin operations (implemented by mcpinspect.PinStore).
+type BinaryPinVerifier interface {
+	TrustBinary(serverID, binaryPath, hash string) error
+	VerifyBinary(serverID, hash string) (*BinaryVerifyResult, error)
+}
+
+// BinaryVerifyResult mirrors mcpinspect.VerifyResult for the shim package.
+type BinaryVerifyResult struct {
+	Status      string // "not_pinned", "match", "mismatch"
+	PinnedHash  string
+	CurrentHash string
+}
+
 // MCPExecConfig configures MCP inspection for a command.
 type MCPExecConfig struct {
 	SessionID       string
 	ServerID        string
+	Command         string
 	EnableDetection bool
 	EventEmitter    func(interface{})
+	// Binary pinning
+	PinStore       BinaryPinVerifier
+	PinBinary      bool
+	AutoTrustFirst bool
+	OnChange       string // "block", "alert", "allow"
 }
 
 // MCPExecWrapper wraps a command's stdio with MCP inspection.
@@ -23,7 +43,44 @@ type MCPExecWrapper struct {
 }
 
 // BuildMCPExecWrapper creates a wrapper configured for MCP inspection.
-func BuildMCPExecWrapper(cfg MCPExecConfig) *MCPExecWrapper {
+func BuildMCPExecWrapper(cfg MCPExecConfig) (*MCPExecWrapper, error) {
+	// Binary pinning check
+	if cfg.PinBinary && cfg.PinStore != nil && cfg.Command != "" {
+		absPath, hash, err := HashBinary(cfg.Command)
+		if err != nil {
+			if cfg.OnChange == "block" {
+				return nil, fmt.Errorf("binary pin: cannot hash %s: %w", cfg.Command, err)
+			}
+			// alert/allow: log but continue
+		} else {
+			result, err := cfg.PinStore.VerifyBinary(cfg.ServerID, hash)
+			if err != nil {
+				return nil, fmt.Errorf("binary pin: verify failed: %w", err)
+			}
+			switch result.Status {
+			case "not_pinned":
+				if cfg.AutoTrustFirst {
+					_ = cfg.PinStore.TrustBinary(cfg.ServerID, absPath, hash)
+				}
+			case "mismatch":
+				if cfg.OnChange == "block" {
+					return nil, fmt.Errorf("binary pin mismatch for server %s: expected %s, got %s", cfg.ServerID, result.PinnedHash, hash)
+				}
+				// alert mode: emit event if emitter available
+				if cfg.OnChange == "alert" && cfg.EventEmitter != nil {
+					cfg.EventEmitter(map[string]any{
+						"type":         "mcp_server_binary_mismatch",
+						"server_id":    cfg.ServerID,
+						"pinned_hash":  result.PinnedHash,
+						"current_hash": hash,
+						"binary_path":  absPath,
+						"action":       "alert",
+					})
+				}
+			}
+		}
+	}
+
 	var bridge *MCPBridge
 	if cfg.EnableDetection {
 		bridge = NewMCPBridgeWithDetection(cfg.SessionID, cfg.ServerID, cfg.EventEmitter)
@@ -31,9 +88,7 @@ func BuildMCPExecWrapper(cfg MCPExecConfig) *MCPExecWrapper {
 		bridge = NewMCPBridge(cfg.SessionID, cfg.ServerID, cfg.EventEmitter)
 	}
 
-	return &MCPExecWrapper{
-		bridge: bridge,
-	}
+	return &MCPExecWrapper{bridge: bridge}, nil
 }
 
 // WrapCommand sets up stdio interception for the given command.

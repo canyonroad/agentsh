@@ -28,7 +28,10 @@ func TestBuildMCPExecWrapper(t *testing.T) {
 		},
 	}
 
-	wrapper := BuildMCPExecWrapper(cfg)
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("BuildMCPExecWrapper failed: %v", err)
+	}
 	if wrapper == nil {
 		t.Fatal("BuildMCPExecWrapper returned nil")
 	}
@@ -47,7 +50,10 @@ func TestMCPExecWrapper_WrapCommand(t *testing.T) {
 		EventEmitter:    emitter,
 	}
 
-	wrapper := BuildMCPExecWrapper(cfg)
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("BuildMCPExecWrapper failed: %v", err)
+	}
 
 	// Create a simple command
 	cmd := exec.Command("cat")

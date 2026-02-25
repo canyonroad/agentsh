@@ -557,6 +557,7 @@ type MCPVersionPinningConfig struct {
 	Enabled        bool   `yaml:"enabled"`
 	OnChange       string `yaml:"on_change"`        // block, alert, allow
 	AutoTrustFirst bool   `yaml:"auto_trust_first"` // Pin on first use
+	PinBinary      bool   `yaml:"pin_binary"`
 }
 
 // MCPRateLimitsConfig configures MCP rate limiting.

@@ -88,6 +88,13 @@ func initPinSchema(db *sql.DB) error {
 			PRIMARY KEY (server_id, tool_name)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_pins_server ON mcp_pins(server_id);`,
+		`CREATE TABLE IF NOT EXISTS mcp_server_pins (
+			server_id TEXT NOT NULL PRIMARY KEY,
+			binary_path TEXT NOT NULL,
+			binary_hash TEXT NOT NULL,
+			trusted_at_ns INTEGER NOT NULL,
+			trusted_by TEXT
+		);`,
 	}
 
 	for _, stmt := range stmts {
@@ -225,4 +232,66 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+// BinaryPin represents a pinned server binary.
+type BinaryPin struct {
+	ServerID   string    `json:"server_id"`
+	BinaryPath string    `json:"binary_path"`
+	BinaryHash string    `json:"binary_hash"`
+	TrustedAt  time.Time `json:"trusted_at"`
+	TrustedBy  string    `json:"trusted_by,omitempty"`
+}
+
+// TrustBinary pins a server binary at the given hash.
+func (s *PinStore) TrustBinary(serverID, binaryPath, hash string) error {
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO mcp_server_pins (server_id, binary_path, binary_hash, trusted_at_ns, trusted_by)
+		VALUES (?, ?, ?, ?, NULL)
+	`, serverID, binaryPath, hash, time.Now().UTC().UnixNano())
+	return err
+}
+
+// VerifyBinary checks if a server binary hash matches its pin.
+func (s *PinStore) VerifyBinary(serverID, hash string) (*VerifyResult, error) {
+	var pinnedHash string
+	err := s.db.QueryRow(`
+		SELECT binary_hash FROM mcp_server_pins WHERE server_id = ?
+	`, serverID).Scan(&pinnedHash)
+
+	if err == sql.ErrNoRows {
+		return &VerifyResult{Status: PinStatusNotPinned, CurrentHash: hash}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	status := PinStatusMatch
+	if pinnedHash != hash {
+		status = PinStatusMismatch
+	}
+	return &VerifyResult{Status: status, PinnedHash: pinnedHash, CurrentHash: hash}, nil
+}
+
+// ListBinaryPins returns all binary pins ordered by server ID.
+func (s *PinStore) ListBinaryPins() ([]BinaryPin, error) {
+	rows, err := s.db.Query(`
+		SELECT server_id, binary_path, binary_hash, trusted_at_ns, COALESCE(trusted_by, '')
+		FROM mcp_server_pins ORDER BY server_id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pins []BinaryPin
+	for rows.Next() {
+		var p BinaryPin
+		var trustedAtNs int64
+		if err := rows.Scan(&p.ServerID, &p.BinaryPath, &p.BinaryHash, &trustedAtNs, &p.TrustedBy); err != nil {
+			return nil, err
+		}
+		p.TrustedAt = time.Unix(0, trustedAtNs)
+		pins = append(pins, p)
+	}
+	return pins, rows.Err()
 }
