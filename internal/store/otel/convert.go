@@ -13,7 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// convertToLogRecord converts an agentsh Event to an OTEL log Record.
+// convertToLogRecord converts an Event to an OTEL log Record.
 // The returned record is intended for use with Logger.Emit().
 func convertToLogRecord(ev types.Event) otellog.Record {
 	var rec otellog.Record
@@ -86,7 +86,7 @@ func eventSeverity(ev types.Event) otellog.Severity {
 }
 
 // eventAttributes builds OTEL log attributes from an event using semantic
-// conventions where applicable and the agentsh.* namespace for custom fields.
+// conventions where applicable and the canyonroad.* namespace for custom fields.
 func eventAttributes(ev types.Event) []otellog.KeyValue {
 	var attrs []otellog.KeyValue
 
@@ -101,43 +101,44 @@ func eventAttributes(ev types.Event) []otellog.KeyValue {
 		attrs = append(attrs, otellog.String("process.executable.path", ev.Filename))
 	}
 
-	// agentsh namespace.
+	// canyonroad namespace.
+	attrs = append(attrs, otellog.String("canyonroad.product", "agentsh"))
 	if ev.ID != "" {
-		attrs = append(attrs, otellog.String("agentsh.event.id", ev.ID))
+		attrs = append(attrs, otellog.String("canyonroad.event.id", ev.ID))
 	}
-	attrs = append(attrs, otellog.String("agentsh.event.type", ev.Type))
+	attrs = append(attrs, otellog.String("canyonroad.event.type", ev.Type))
 	if ev.SessionID != "" {
-		attrs = append(attrs, otellog.String("agentsh.session.id", ev.SessionID))
+		attrs = append(attrs, otellog.String("canyonroad.session.id", ev.SessionID))
 	}
 	if ev.CommandID != "" {
-		attrs = append(attrs, otellog.String("agentsh.command.id", ev.CommandID))
+		attrs = append(attrs, otellog.String("canyonroad.command.id", ev.CommandID))
 	}
 	if ev.Source != "" {
-		attrs = append(attrs, otellog.String("agentsh.source", ev.Source))
+		attrs = append(attrs, otellog.String("canyonroad.source", ev.Source))
 	}
 	if ev.Path != "" {
-		attrs = append(attrs, otellog.String("agentsh.path", ev.Path))
+		attrs = append(attrs, otellog.String("canyonroad.path", ev.Path))
 	}
 	if ev.Domain != "" {
-		attrs = append(attrs, otellog.String("agentsh.domain", ev.Domain))
+		attrs = append(attrs, otellog.String("canyonroad.domain", ev.Domain))
 	}
 	if ev.Remote != "" {
-		attrs = append(attrs, otellog.String("agentsh.remote", ev.Remote))
+		attrs = append(attrs, otellog.String("canyonroad.remote", ev.Remote))
 	}
 	if ev.Operation != "" {
-		attrs = append(attrs, otellog.String("agentsh.operation", ev.Operation))
+		attrs = append(attrs, otellog.String("canyonroad.operation", ev.Operation))
 	}
 	if ev.EffectiveAction != "" {
-		attrs = append(attrs, otellog.String("agentsh.effective_action", ev.EffectiveAction))
+		attrs = append(attrs, otellog.String("canyonroad.effective_action", ev.EffectiveAction))
 	}
 
 	// Policy info.
 	if ev.Policy != nil {
 		if ev.Policy.Decision != "" {
-			attrs = append(attrs, otellog.String("agentsh.decision", string(ev.Policy.Decision)))
+			attrs = append(attrs, otellog.String("canyonroad.decision", string(ev.Policy.Decision)))
 		}
 		if ev.Policy.Rule != "" {
-			attrs = append(attrs, otellog.String("agentsh.policy.rule", ev.Policy.Rule))
+			attrs = append(attrs, otellog.String("canyonroad.policy.rule", ev.Policy.Rule))
 		}
 	}
 
@@ -156,14 +157,14 @@ func eventAttributes(ev types.Event) []otellog.KeyValue {
 			switch val := v.(type) {
 			case string:
 				if val != "" {
-					attrs = append(attrs, otellog.String("agentsh."+key, val))
+					attrs = append(attrs, otellog.String("canyonroad."+key, val))
 				}
 			case int:
-				attrs = append(attrs, otellog.Int("agentsh."+key, val))
+				attrs = append(attrs, otellog.Int("canyonroad."+key, val))
 			case int64:
-				attrs = append(attrs, otellog.Int64("agentsh."+key, val))
+				attrs = append(attrs, otellog.Int64("canyonroad."+key, val))
 			case float64:
-				attrs = append(attrs, otellog.Float64("agentsh."+key, val))
+				attrs = append(attrs, otellog.Float64("canyonroad."+key, val))
 			}
 		}
 	}
@@ -207,8 +208,8 @@ func extractSpanID(ev types.Event) (trace.SpanID, bool) {
 	return sid, true
 }
 
-// BuildResource creates an OTEL Resource with the agentsh service name and
-// optional extra attributes.
+// BuildResource creates an OTEL Resource with the service name and optional
+// extra attributes.
 func BuildResource(serviceName string, extraAttrs map[string]string) *resource.Resource {
 	kvs := []attribute.KeyValue{
 		semconv.ServiceName(serviceName),
