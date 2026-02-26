@@ -32,7 +32,6 @@ const (
 // Process operation events.
 const (
 	EventProcessStart EventType = "process_start"
-	EventProcessEnd   EventType = "process_end"
 	EventProcessSpawn EventType = "process_spawn"
 	EventProcessExit  EventType = "process_exit"
 	EventProcessTree  EventType = "process_tree_kill"
@@ -162,7 +161,6 @@ var EventCategory = map[EventType]string{
 
 	// Process
 	EventProcessStart: "process",
-	EventProcessEnd:   "process",
 	EventProcessSpawn: "process",
 	EventProcessExit:  "process",
 	EventProcessTree:  "process",
@@ -239,7 +237,7 @@ var AllEventTypes = []EventType{
 	EventDNSQuery, EventNetConnect, EventNetListen, EventNetAccept,
 	EventDNSRedirect, EventConnectRedirect, EventConnectRedirectFallback,
 	// Process
-	EventProcessStart, EventProcessEnd, EventProcessSpawn, EventProcessExit, EventProcessTree,
+	EventProcessStart, EventProcessSpawn, EventProcessExit, EventProcessTree,
 	// Environment
 	EventEnvRead, EventEnvWrite, EventEnvList, EventEnvBlocked,
 	// Soft delete
