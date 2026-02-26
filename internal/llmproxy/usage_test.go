@@ -260,6 +260,31 @@ func TestExtractUsage_HasUsage_DecimalTokenValues(t *testing.T) {
 	}
 }
 
+func TestExtractUsage_HasUsage_DecimalTokenValues_OpenAI(t *testing.T) {
+	body := []byte(`{"usage": {"prompt_tokens": 0.5, "completion_tokens": 1.5}}`)
+	usage := ExtractUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false for OpenAI when token values are decimals")
+	}
+}
+
+func TestExtractUsage_HasUsage_ExponentTokenValues(t *testing.T) {
+	// Scientific notation like 1e6 is not a valid integer literal.
+	body := []byte(`{"usage": {"input_tokens": 1e6, "output_tokens": 2e3}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when token values use scientific notation")
+	}
+}
+
+func TestExtractUsage_HasUsage_ExponentTokenValues_OpenAI(t *testing.T) {
+	body := []byte(`{"usage": {"prompt_tokens": 1e6, "completion_tokens": 2e3}}`)
+	usage := ExtractUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false for OpenAI when token values use scientific notation")
+	}
+}
+
 func TestExtractSSEUsage_OpenAI_NegativeTokenUsage(t *testing.T) {
 	// OpenAI SSE chunk with negative token values — HasUsage should be false.
 	body := []byte(
