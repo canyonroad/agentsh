@@ -4,6 +4,8 @@ package llmproxy
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
+	"strings"
 )
 
 // Usage represents normalized token usage from LLM responses.
@@ -118,22 +120,24 @@ func usageHasTokenFields(body []byte, dialect Dialect) bool {
 	}
 	switch dialect {
 	case DialectAnthropic:
-		return isJSONNumber(fields["input_tokens"]) && isJSONNumber(fields["output_tokens"])
+		return isNonNegativeInt(fields["input_tokens"]) && isNonNegativeInt(fields["output_tokens"])
 	case DialectOpenAI:
-		return isJSONNumber(fields["prompt_tokens"]) && isJSONNumber(fields["completion_tokens"])
+		return isNonNegativeInt(fields["prompt_tokens"]) && isNonNegativeInt(fields["completion_tokens"])
 	default:
 		return false
 	}
 }
 
-// isJSONNumber returns true if raw is a non-negative JSON number.
-// Rejects null, strings, booleans, and negative numbers — only values
-// starting with a digit are accepted as valid token counts.
-func isJSONNumber(raw json.RawMessage) bool {
-	if len(raw) == 0 {
+// isNonNegativeInt returns true if raw is a valid non-negative JSON integer.
+// Rejects null, strings, booleans, negative numbers, and decimals/exponents
+// that would coerce to zero when decoded into a Go int field.
+func isNonNegativeInt(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	if s == "" {
 		return false
 	}
-	return raw[0] >= '0' && raw[0] <= '9'
+	n, err := strconv.Atoi(s)
+	return err == nil && n >= 0
 }
 
 // sseEvent is a minimal structure for extracting usage from SSE event data lines.

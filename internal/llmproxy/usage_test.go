@@ -251,6 +251,29 @@ func TestExtractUsage_HasUsage_NegativeTokenValues_OpenAI(t *testing.T) {
 	}
 }
 
+func TestExtractUsage_HasUsage_DecimalTokenValues(t *testing.T) {
+	// Decimal values like 0.5 are not valid integer token counts.
+	body := []byte(`{"usage": {"input_tokens": 0.5, "output_tokens": 1.5}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when token values are decimals")
+	}
+}
+
+func TestExtractSSEUsage_OpenAI_NegativeTokenUsage(t *testing.T) {
+	// OpenAI SSE chunk with negative token values — HasUsage should be false.
+	body := []byte(
+		`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}` + "\n\n" +
+			`data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":-1,"completion_tokens":-1}}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when OpenAI SSE chunk has negative token values")
+	}
+}
+
 func TestExtractSSEUsage_OpenAI_NullTokenUsage(t *testing.T) {
 	// OpenAI SSE chunk with usage keys but null values — HasUsage should be false.
 	body := []byte(
