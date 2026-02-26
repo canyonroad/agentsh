@@ -22,6 +22,11 @@ import (
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
 
+// tpmFallbackTokenCharge is the conservative token charge applied when TPM
+// limiting is enabled but the response contains no parseable usage data.
+// This prevents fail-open bypass by providers/stream modes that omit usage.
+const tpmFallbackTokenCharge = 200
+
 // Config holds the proxy configuration using config package types.
 type Config struct {
 	// SessionID is the current session ID (set by agentsh).
@@ -61,6 +66,8 @@ type Proxy struct {
 	sessionAnalyzer *mcpinspect.SessionAnalyzer
 	// rateLimiter applies per-server rate limits to MCP tool calls.
 	rateLimiter *mcpinspect.RateLimiterRegistry
+	// llmRateLimiter enforces RPM and TPM limits on LLM API calls.
+	llmRateLimiter *LLMRateLimiter
 
 	server   *http.Server
 	listener net.Listener
@@ -110,6 +117,8 @@ func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 		return nil, fmt.Errorf("create storage: %w", err)
 	}
 
+	llmRL := NewLLMRateLimiter(cfg.Proxy.RateLimits)
+
 	return &Proxy{
 		cfg:             cfg,
 		detector:        detector,
@@ -121,6 +130,7 @@ func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 		chatGPTUpstream: chatGPTURL,
 		policy:          newPolicyEvaluator(cfg.MCP),
 		rateLimiter:     newRateLimiter(cfg.MCP),
+		llmRateLimiter:  llmRL,
 	}, nil
 }
 
@@ -276,6 +286,37 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.Header.Get("X-Session-ID")
 	if sessionID == "" {
 		sessionID = p.cfg.SessionID
+	}
+
+	// Check RPM rate limit before processing the request
+	if !p.llmRateLimiter.AllowRequest() {
+		p.logger.Warn("LLM API rate limited (RPM)", "request_id", requestID, "session_id", sessionID)
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
+
+	// Check TPM budget — block if token budget is depleted from previous responses
+	if !p.llmRateLimiter.TokenBudgetAvailable() {
+		p.logger.Warn("LLM API rate limited (TPM)", "request_id", requestID, "session_id", sessionID)
+		w.Header().Set("Retry-After", "10")
+		http.Error(w, "token budget exceeded", http.StatusTooManyRequests)
+		return
+	}
+
+	// Acquire an in-flight slot to bound concurrent requests when TPM is
+	// enabled. This prevents bulk overspend from requests that pass the
+	// pre-check before post-response token accounting occurs.
+	// Non-blocking: reject immediately if concurrency cap is reached.
+	if l := p.llmRateLimiter; l.inFlightEnabled() {
+		if acquired := l.AcquireInFlight(); acquired {
+			defer l.ReleaseInFlight()
+		} else {
+			p.logger.Warn("LLM API rate limited (concurrency)", "request_id", requestID, "session_id", sessionID)
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "too many concurrent requests", http.StatusTooManyRequests)
+			return
+		}
 	}
 
 	p.logger.Debug("proxying request",
@@ -460,8 +501,24 @@ func (p *Proxy) logResponse(requestID, sessionID string, dialect Dialect, resp *
 
 // logResponseDirect logs a response with a pre-read body (used for SSE streams).
 func (p *Proxy) logResponseDirect(requestID, sessionID string, dialect Dialect, resp *http.Response, respBody []byte, startTime time.Time) {
-	// Extract token usage from the response
-	usage := ExtractUsage(respBody, dialect)
+	// Extract token usage from the response.
+	// Use Content-Type to detect SSE streams rather than body prefix heuristics.
+	var usage Usage
+	if IsSSEResponse(resp) {
+		usage = ExtractSSEUsage(respBody, dialect)
+	} else {
+		usage = ExtractUsage(respBody, dialect)
+	}
+
+	// Consume tokens from the TPM budget for rate limiting.
+	// When TPM is enabled but usage is absent/unparseable, apply a
+	// conservative fallback charge to prevent fail-open bypass.
+	totalTokens := usage.InputTokens + usage.OutputTokens
+	if totalTokens > 0 {
+		p.llmRateLimiter.ConsumeTokens(totalTokens)
+	} else if p.llmRateLimiter.TPMEnabled() && !usage.HasUsage {
+		p.llmRateLimiter.ConsumeTokens(tpmFallbackTokenCharge)
+	}
 
 	entry := &ResponseLogEntry{
 		RequestID:  requestID,

@@ -2,9 +2,10 @@ package config
 
 // ProxyConfig configures the embedded LLM proxy.
 type ProxyConfig struct {
-	Mode      string               `yaml:"mode"`
-	Port      int                  `yaml:"port"`
-	Providers ProxyProvidersConfig `yaml:"providers"`
+	Mode       string               `yaml:"mode"`
+	Port       int                  `yaml:"port"`
+	Providers  ProxyProvidersConfig `yaml:"providers"`
+	RateLimits LLMRateLimitsConfig  `yaml:"rate_limits"`
 }
 
 type ProxyProvidersConfig struct {
@@ -51,6 +52,15 @@ type LLMStorageRetentionConfig struct {
 	MaxAgeDays int    `yaml:"max_age_days"`
 	MaxSizeMB  int    `yaml:"max_size_mb"`
 	Eviction   string `yaml:"eviction"`
+}
+
+// LLMRateLimitsConfig configures rate limiting for LLM API calls.
+type LLMRateLimitsConfig struct {
+	Enabled           bool `yaml:"enabled"`
+	RequestsPerMinute int  `yaml:"requests_per_minute"`
+	RequestBurst      int  `yaml:"request_burst"`
+	TokensPerMinute   int  `yaml:"tokens_per_minute"`
+	TokenBurst        int  `yaml:"token_burst"`
 }
 
 func DefaultProxyConfig() ProxyConfig {

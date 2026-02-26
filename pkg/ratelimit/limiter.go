@@ -262,3 +262,21 @@ func (l *Limiter) SetBurst(burst int) {
 		l.tokens = float64(burst)
 	}
 }
+
+// ForceConsumeN unconditionally deducts n tokens, allowing the bucket to go negative.
+// Use this for post-fact accounting where the operation already happened.
+func (l *Limiter) ForceConsumeN(n int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(l.lastTime).Seconds()
+	l.lastTime = now
+
+	l.tokens += elapsed * l.rate
+	if l.tokens > float64(l.burst) {
+		l.tokens = float64(l.burst)
+	}
+
+	l.tokens -= float64(n)
+}

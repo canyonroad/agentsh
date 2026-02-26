@@ -399,27 +399,35 @@ func TestToolResultInspection_ErrorResponseCleansPendingCalls(t *testing.T) {
 		t.Fatalf("Inspect call failed: %v", err)
 	}
 
+	// Verify pending call was recorded.
+	inspector.mu.Lock()
+	if _, ok := inspector.pendingCalls["55"]; !ok {
+		inspector.mu.Unlock()
+		t.Fatal("expected pending call for id 55")
+	}
+	inspector.mu.Unlock()
+
 	// Send error response (no result.content).
+	// Error responses are now classified as MessageUnknown (not
+	// MessageToolsCallResponse) to avoid misclassifying non-tool errors.
 	errorResp := `{"jsonrpc":"2.0","id":55,"error":{"code":-32603,"message":"internal error"}}`
+	capturedEvents = nil
 	_, err = inspector.Inspect([]byte(errorResp), DirectionResponse)
 	if err != nil {
 		t.Fatalf("Inspect error response failed: %v", err)
 	}
 
-	// Verify the event was emitted with the correlated tool name.
-	var resultEvent *MCPToolResultInspectedEvent
+	// No MCPToolResultInspectedEvent should be emitted for error responses.
 	for _, e := range capturedEvents {
-		if ev, ok := e.(MCPToolResultInspectedEvent); ok {
-			resultEvent = &ev
-			break
+		if _, ok := e.(MCPToolResultInspectedEvent); ok {
+			t.Error("unexpected MCPToolResultInspectedEvent for error response")
 		}
 	}
 
-	if resultEvent == nil {
-		t.Fatal("expected MCPToolResultInspectedEvent for error response")
+	// Pending call should still be cleaned up by cleanupPendingCall.
+	inspector.mu.Lock()
+	if _, ok := inspector.pendingCalls["55"]; ok {
+		t.Error("pending call for id 55 should have been cleaned up")
 	}
-
-	if resultEvent.ToolName != "failing_tool" {
-		t.Errorf("tool name = %q, want failing_tool (correlated from call)", resultEvent.ToolName)
-	}
+	inspector.mu.Unlock()
 }

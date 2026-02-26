@@ -130,3 +130,404 @@ func TestExtractUsage_UnknownDialect(t *testing.T) {
 		t.Errorf("expected OutputTokens=0, got %d", usage.OutputTokens)
 	}
 }
+
+func TestExtractUsage_HasUsage_Present(t *testing.T) {
+	body := []byte(`{"usage": {"input_tokens": 100, "output_tokens": 50}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if !usage.HasUsage {
+		t.Error("HasUsage should be true when usage field is present with non-zero tokens")
+	}
+}
+
+func TestExtractUsage_HasUsage_PresentButZero(t *testing.T) {
+	// Usage field is present but tokens are zero — HasUsage should still be true.
+	body := []byte(`{"usage": {"input_tokens": 0, "output_tokens": 0}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if !usage.HasUsage {
+		t.Error("HasUsage should be true when usage field is present (even with zero tokens)")
+	}
+}
+
+func TestExtractUsage_HasUsage_Absent(t *testing.T) {
+	// No usage field at all — HasUsage should be false.
+	body := []byte(`{"id": "msg_123", "type": "message", "content": [{"type": "text", "text": "Hello!"}]}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when usage field is absent")
+	}
+}
+
+func TestExtractUsage_HasUsage_InvalidJSON(t *testing.T) {
+	usage := ExtractUsage([]byte(`{not valid`), DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false for invalid JSON")
+	}
+}
+
+func TestExtractUsage_HasUsage_EmptyUsageObject(t *testing.T) {
+	// {"usage":{}} has the key but no token fields — should NOT count as HasUsage.
+	body := []byte(`{"usage": {}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when usage object has no token fields")
+	}
+}
+
+func TestExtractUsage_HasUsage_EmptyUsageObject_OpenAI(t *testing.T) {
+	body := []byte(`{"usage": {}}`)
+	usage := ExtractUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false for OpenAI when usage object has no token fields")
+	}
+}
+
+func TestExtractUsage_HasUsage_NullUsage(t *testing.T) {
+	// {"usage": null} — key present but not an object with token fields.
+	body := []byte(`{"usage": null}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when usage is null")
+	}
+}
+
+func TestExtractUsage_HasUsage_PartialAnthropic(t *testing.T) {
+	// Only input_tokens present — incomplete schema should not count as valid usage.
+	body := []byte(`{"usage": {"input_tokens": 0}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when only input_tokens is present (partial)")
+	}
+}
+
+func TestExtractUsage_HasUsage_PartialOpenAI(t *testing.T) {
+	// Only prompt_tokens present — incomplete schema should not count as valid usage.
+	body := []byte(`{"usage": {"prompt_tokens": 0}}`)
+	usage := ExtractUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when only prompt_tokens is present (partial)")
+	}
+}
+
+func TestExtractUsage_HasUsage_NullTokenValues(t *testing.T) {
+	// Token fields present but null — should NOT count as valid usage.
+	body := []byte(`{"usage": {"input_tokens": null, "output_tokens": null}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when token values are null")
+	}
+}
+
+func TestExtractUsage_HasUsage_NullTokenValues_OpenAI(t *testing.T) {
+	body := []byte(`{"usage": {"prompt_tokens": null, "completion_tokens": null}}`)
+	usage := ExtractUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false for OpenAI when token values are null")
+	}
+}
+
+func TestExtractUsage_HasUsage_StringTokenValues(t *testing.T) {
+	// Token fields present but string values — should NOT count as valid usage.
+	body := []byte(`{"usage": {"input_tokens": "many", "output_tokens": "few"}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when token values are strings")
+	}
+}
+
+func TestExtractUsage_HasUsage_NegativeTokenValues(t *testing.T) {
+	// Negative token values — should NOT count as valid usage.
+	body := []byte(`{"usage": {"input_tokens": -1, "output_tokens": -1}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when token values are negative")
+	}
+}
+
+func TestExtractUsage_HasUsage_NegativeTokenValues_OpenAI(t *testing.T) {
+	body := []byte(`{"usage": {"prompt_tokens": -5, "completion_tokens": -3}}`)
+	usage := ExtractUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false for OpenAI when token values are negative")
+	}
+}
+
+func TestExtractUsage_HasUsage_DecimalTokenValues(t *testing.T) {
+	// Decimal values like 0.5 are not valid integer token counts.
+	body := []byte(`{"usage": {"input_tokens": 0.5, "output_tokens": 1.5}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when token values are decimals")
+	}
+}
+
+func TestExtractUsage_HasUsage_DecimalTokenValues_OpenAI(t *testing.T) {
+	body := []byte(`{"usage": {"prompt_tokens": 0.5, "completion_tokens": 1.5}}`)
+	usage := ExtractUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false for OpenAI when token values are decimals")
+	}
+}
+
+func TestExtractUsage_HasUsage_ExponentTokenValues(t *testing.T) {
+	// Scientific notation like 1e6 is not a valid integer literal.
+	body := []byte(`{"usage": {"input_tokens": 1e6, "output_tokens": 2e3}}`)
+	usage := ExtractUsage(body, DialectAnthropic)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when token values use scientific notation")
+	}
+}
+
+func TestExtractUsage_HasUsage_ExponentTokenValues_OpenAI(t *testing.T) {
+	body := []byte(`{"usage": {"prompt_tokens": 1e6, "completion_tokens": 2e3}}`)
+	usage := ExtractUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false for OpenAI when token values use scientific notation")
+	}
+}
+
+func TestExtractSSEUsage_OpenAI_NegativeTokenUsage(t *testing.T) {
+	// OpenAI SSE chunk with negative token values — HasUsage should be false.
+	body := []byte(
+		`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}` + "\n\n" +
+			`data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":-1,"completion_tokens":-1}}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when OpenAI SSE chunk has negative token values")
+	}
+}
+
+func TestExtractSSEUsage_OpenAI_NullTokenUsage(t *testing.T) {
+	// OpenAI SSE chunk with usage keys but null values — HasUsage should be false.
+	body := []byte(
+		`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}` + "\n\n" +
+			`data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":null,"completion_tokens":null}}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when OpenAI SSE chunk has null token values")
+	}
+}
+
+func TestExtractSSEUsage_OpenAI_ZeroTokenUsage(t *testing.T) {
+	// OpenAI SSE chunk with usage present but zero tokens — HasUsage should be true.
+	body := []byte(
+		`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}` + "\n\n" +
+			`data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if !usage.HasUsage {
+		t.Error("HasUsage should be true when OpenAI SSE chunk has usage with zero tokens")
+	}
+}
+
+func TestExtractSSEUsage_OpenAI_NoUsage(t *testing.T) {
+	// OpenAI SSE stream with no usage chunk at all — HasUsage should be false.
+	body := []byte(
+		`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if usage.HasUsage {
+		t.Error("HasUsage should be false when OpenAI SSE stream has no usage chunk")
+	}
+}
+
+func TestExtractSSEUsage_Anthropic(t *testing.T) {
+	body := []byte(
+		"event: message_start\n" +
+			`data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":150,"output_tokens":0}}}` + "\n\n" +
+			"event: content_block_delta\n" +
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}` + "\n\n" +
+			"event: message_delta\n" +
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}` + "\n\n" +
+			"event: message_stop\n" +
+			`data: {"type":"message_stop"}` + "\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectAnthropic)
+	if usage.InputTokens != 150 {
+		t.Errorf("InputTokens = %d, want 150", usage.InputTokens)
+	}
+	if usage.OutputTokens != 42 {
+		t.Errorf("OutputTokens = %d, want 42", usage.OutputTokens)
+	}
+}
+
+func TestExtractSSEUsage_AnthropicEmpty(t *testing.T) {
+	usage := ExtractSSEUsage(nil, DialectAnthropic)
+	if usage.InputTokens != 0 || usage.OutputTokens != 0 {
+		t.Errorf("expected zero usage for nil body, got %+v", usage)
+	}
+}
+
+func TestExtractSSEUsage_OpenAI(t *testing.T) {
+	body := []byte(
+		`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}` + "\n\n" +
+			`data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":25}}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if usage.InputTokens != 100 {
+		t.Errorf("InputTokens = %d, want 100", usage.InputTokens)
+	}
+	if usage.OutputTokens != 25 {
+		t.Errorf("OutputTokens = %d, want 25", usage.OutputTokens)
+	}
+}
+
+func TestExtractSSEUsage_PlainJSON(t *testing.T) {
+	// Non-SSE JSON body should return zero from ExtractSSEUsage
+	body := []byte(`{"usage":{"input_tokens":50,"output_tokens":10}}`)
+	usage := ExtractSSEUsage(body, DialectAnthropic)
+	if usage.InputTokens != 0 || usage.OutputTokens != 0 {
+		t.Errorf("expected zero from ExtractSSEUsage on non-SSE body, got %+v", usage)
+	}
+}
+
+func TestExtractSSEUsage_DataNoSpace(t *testing.T) {
+	// SSE spec allows "data:" without trailing space — parser must handle both.
+	body := []byte(
+		"event: message_start\n" +
+			`data:{"type":"message_start","message":{"id":"msg_01","usage":{"input_tokens":80,"output_tokens":0}}}` + "\n\n" +
+			"event: message_delta\n" +
+			`data:{"type":"message_delta","usage":{"output_tokens":20}}` + "\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectAnthropic)
+	if usage.InputTokens != 80 {
+		t.Errorf("InputTokens = %d, want 80", usage.InputTokens)
+	}
+	if usage.OutputTokens != 20 {
+		t.Errorf("OutputTokens = %d, want 20", usage.OutputTokens)
+	}
+}
+
+func TestExtractSSEUsage_LeadingComments(t *testing.T) {
+	// SSE allows comment lines (starting with ":") and blank lines — should be ignored.
+	body := []byte(
+		": this is a comment\n" +
+			"\n" +
+			"event: message_start\n" +
+			`data: {"type":"message_start","message":{"id":"msg_01","usage":{"input_tokens":50,"output_tokens":0}}}` + "\n\n" +
+			": heartbeat\n" +
+			"event: message_delta\n" +
+			`data: {"type":"message_delta","usage":{"output_tokens":15}}` + "\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectAnthropic)
+	if usage.InputTokens != 50 {
+		t.Errorf("InputTokens = %d, want 50", usage.InputTokens)
+	}
+	if usage.OutputTokens != 15 {
+		t.Errorf("OutputTokens = %d, want 15", usage.OutputTokens)
+	}
+}
+
+func TestExtractSSEUsage_AnthropicCumulativeDeltas(t *testing.T) {
+	// Anthropic message_delta usage is cumulative — multiple deltas should
+	// result in the latest (highest) value, not the sum.
+	body := []byte(
+		"event: message_start\n" +
+			`data: {"type":"message_start","message":{"id":"msg_01","usage":{"input_tokens":100,"output_tokens":0}}}` + "\n\n" +
+			"event: message_delta\n" +
+			`data: {"type":"message_delta","usage":{"output_tokens":10}}` + "\n\n" +
+			"event: message_delta\n" +
+			`data: {"type":"message_delta","usage":{"output_tokens":25}}` + "\n\n" +
+			"event: message_delta\n" +
+			`data: {"type":"message_delta","usage":{"output_tokens":42}}` + "\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectAnthropic)
+	if usage.InputTokens != 100 {
+		t.Errorf("InputTokens = %d, want 100", usage.InputTokens)
+	}
+	// Should be 42 (latest), not 77 (sum)
+	if usage.OutputTokens != 42 {
+		t.Errorf("OutputTokens = %d, want 42 (latest cumulative, not sum)", usage.OutputTokens)
+	}
+}
+
+func TestExtractSSEUsage_OpenAIDataNoSpace(t *testing.T) {
+	body := []byte(
+		`data:{"id":"chatcmpl-1","choices":[{"delta":{"content":"Hi"}}]}` + "\n\n" +
+			`data:{"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":60,"completion_tokens":15}}` + "\n\n" +
+			"data:[DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if usage.InputTokens != 60 {
+		t.Errorf("InputTokens = %d, want 60", usage.InputTokens)
+	}
+	if usage.OutputTokens != 15 {
+		t.Errorf("OutputTokens = %d, want 15", usage.OutputTokens)
+	}
+}
+
+func TestExtractSSEUsage_MultiLineEvent(t *testing.T) {
+	// SSE spec allows one event's data to span multiple "data:" lines.
+	// The lines are concatenated with newlines before parsing as JSON.
+	body := []byte(
+		"event: message_start\n" +
+			// JSON split across two data: lines
+			`data: {"type":"message_start",` + "\n" +
+			`data: "message":{"id":"msg_01","usage":{"input_tokens":99,"output_tokens":0}}}` + "\n\n" +
+			"event: message_delta\n" +
+			`data: {"type":"message_delta","usage":{"output_tokens":33}}` + "\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectAnthropic)
+	if usage.InputTokens != 99 {
+		t.Errorf("InputTokens = %d, want 99", usage.InputTokens)
+	}
+	if usage.OutputTokens != 33 {
+		t.Errorf("OutputTokens = %d, want 33", usage.OutputTokens)
+	}
+}
+
+func TestExtractSSEUsage_MultiLineOpenAI(t *testing.T) {
+	body := []byte(
+		`data: {"id":"chatcmpl-1",` + "\n" +
+			`data: "choices":[],"usage":{"prompt_tokens":77,"completion_tokens":22}}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	usage := ExtractSSEUsage(body, DialectOpenAI)
+	if usage.InputTokens != 77 {
+		t.Errorf("InputTokens = %d, want 77", usage.InputTokens)
+	}
+	if usage.OutputTokens != 22 {
+		t.Errorf("OutputTokens = %d, want 22", usage.OutputTokens)
+	}
+}
+
+func TestParseSSEEvents(t *testing.T) {
+	body := []byte(
+		": comment\n" +
+			"event: foo\n" +
+			"data: line1\n" +
+			"data: line2\n" +
+			"\n" +
+			"data: single\n" +
+			"\n",
+	)
+
+	events := parseSSEEvents(body)
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if string(events[0]) != "line1\nline2" {
+		t.Errorf("event[0] = %q, want %q", events[0], "line1\nline2")
+	}
+	if string(events[1]) != "single" {
+		t.Errorf("event[1] = %q, want %q", events[1], "single")
+	}
+}

@@ -115,9 +115,9 @@ type OIDCConfig struct {
 	JWKSCacheTTL     string            `yaml:"jwks_cache_ttl"`    // e.g., "1h"
 	DiscoveryTimeout string            `yaml:"discovery_timeout"` // Timeout for OIDC discovery (default: "5s")
 	ClaimMappings    OIDCClaimMappings `yaml:"claim_mappings"`
-	AllowedGroups    []string          `yaml:"allowed_groups"`    // Groups allowed to access
-	GroupPolicyMap   map[string]string `yaml:"group_policy_map"`  // group -> policy name
-	GroupRoleMap     map[string]string `yaml:"group_role_map"`    // group -> role (admin, approver, agent)
+	AllowedGroups    []string          `yaml:"allowed_groups"`   // Groups allowed to access
+	GroupPolicyMap   map[string]string `yaml:"group_policy_map"` // group -> policy name
+	GroupRoleMap     map[string]string `yaml:"group_role_map"`   // group -> role (admin, approver, agent)
 }
 
 // OIDCClaimMappings maps OIDC claims to agentsh fields.
@@ -207,14 +207,14 @@ type AzureKeyVaultConfig struct {
 
 // HashiCorpVaultConfig configures HashiCorp Vault integration.
 type HashiCorpVaultConfig struct {
-	Address    string `yaml:"address"`     // Vault address
-	AuthMethod string `yaml:"auth_method"` // token, kubernetes, approle
-	TokenFile  string `yaml:"token_file"`  // Path to token file (for token auth)
+	Address    string `yaml:"address"`         // Vault address
+	AuthMethod string `yaml:"auth_method"`     // token, kubernetes, approle
+	TokenFile  string `yaml:"token_file"`      // Path to token file (for token auth)
 	K8sRole    string `yaml:"kubernetes_role"` // Role name (for kubernetes auth)
-	AppRoleID  string `yaml:"approle_id"`  // Role ID (for approle auth)
-	SecretID   string `yaml:"secret_id"`   // Secret ID (for approle auth, or use VAULT_SECRET_ID env)
-	SecretPath string `yaml:"secret_path"` // Path to secret (e.g., secret/data/agentsh/audit-key)
-	KeyField   string `yaml:"key_field"`   // Field name within secret (default: "key")
+	AppRoleID  string `yaml:"approle_id"`      // Role ID (for approle auth)
+	SecretID   string `yaml:"secret_id"`       // Secret ID (for approle auth, or use VAULT_SECRET_ID env)
+	SecretPath string `yaml:"secret_path"`     // Path to secret (e.g., secret/data/agentsh/audit-key)
+	KeyField   string `yaml:"key_field"`       // Field name within secret (default: "key")
 }
 
 // GCPKMSConfig configures GCP Cloud KMS integration.
@@ -233,15 +233,15 @@ type AuditEncryptionConfig struct {
 
 // AuditOTELConfig configures OpenTelemetry event export.
 type AuditOTELConfig struct {
-	Enabled  bool              `yaml:"enabled"`
-	Endpoint string            `yaml:"endpoint"`
-	Protocol string            `yaml:"protocol"` // "grpc" or "http"
-	TLS      OTELTLSConfig     `yaml:"tls"`
-	Headers  map[string]string `yaml:"headers"`
-	Timeout  string            `yaml:"timeout"`
-	Signals  OTELSignalsConfig `yaml:"signals"`
-	Batch    OTELBatchConfig   `yaml:"batch"`
-	Filter   OTELFilterConfig  `yaml:"filter"`
+	Enabled  bool               `yaml:"enabled"`
+	Endpoint string             `yaml:"endpoint"`
+	Protocol string             `yaml:"protocol"` // "grpc" or "http"
+	TLS      OTELTLSConfig      `yaml:"tls"`
+	Headers  map[string]string  `yaml:"headers"`
+	Timeout  string             `yaml:"timeout"`
+	Signals  OTELSignalsConfig  `yaml:"signals"`
+	Batch    OTELBatchConfig    `yaml:"batch"`
+	Filter   OTELFilterConfig   `yaml:"filter"`
 	Resource OTELResourceConfig `yaml:"resource"`
 }
 
@@ -302,12 +302,12 @@ type SessionsConfig struct {
 
 // CheckpointConfig configures workspace checkpoint and rollback.
 type CheckpointConfig struct {
-	Enabled       bool                    `yaml:"enabled"`
-	StorageDir    string                  `yaml:"storage_dir"`    // Directory for checkpoint storage
-	MaxPerSession int                     `yaml:"max_per_session"` // Max checkpoints per session (0 = unlimited)
-	MaxSizeMB     int                     `yaml:"max_size_mb"`     // Max total size per session (0 = unlimited)
-	AutoCheckpoint AutoCheckpointConfig   `yaml:"auto_checkpoint"`
-	Retention     CheckpointRetentionConfig `yaml:"retention"`
+	Enabled        bool                      `yaml:"enabled"`
+	StorageDir     string                    `yaml:"storage_dir"`     // Directory for checkpoint storage
+	MaxPerSession  int                       `yaml:"max_per_session"` // Max checkpoints per session (0 = unlimited)
+	MaxSizeMB      int                       `yaml:"max_size_mb"`     // Max total size per session (0 = unlimited)
+	AutoCheckpoint AutoCheckpointConfig      `yaml:"auto_checkpoint"`
+	Retention      CheckpointRetentionConfig `yaml:"retention"`
 }
 
 // AutoCheckpointConfig configures automatic checkpointing before risky commands.
@@ -447,10 +447,10 @@ type SandboxUnixSocketsConfig struct {
 
 // SandboxSeccompConfig configures seccomp-bpf filtering.
 type SandboxSeccompConfig struct {
-	Enabled    bool                        `yaml:"enabled"`
-	Mode       string                      `yaml:"mode"` // enforce, audit, disabled
-	UnixSocket SandboxSeccompUnixConfig    `yaml:"unix_socket"`
-	Syscalls   SandboxSeccompSyscallConfig `yaml:"syscalls"`
+	Enabled     bool                            `yaml:"enabled"`
+	Mode        string                          `yaml:"mode"` // enforce, audit, disabled
+	UnixSocket  SandboxSeccompUnixConfig        `yaml:"unix_socket"`
+	Syscalls    SandboxSeccompSyscallConfig     `yaml:"syscalls"`
 	Execve      ExecveConfig                    `yaml:"execve"`
 	FileMonitor SandboxSeccompFileMonitorConfig `yaml:"file_monitor"`
 }
@@ -500,20 +500,21 @@ type SandboxXPCESFConfig struct {
 
 // SandboxMCPConfig configures MCP security policies.
 type SandboxMCPConfig struct {
-	EnforcePolicy    bool                    `yaml:"enforce_policy"`
-	FailClosed       bool                    `yaml:"fail_closed"` // Block unknown tools if true
-	Servers          []MCPServerDeclaration  `yaml:"servers"`
-	ServerPolicy     string                  `yaml:"server_policy"` // allowlist, denylist, none
-	AllowedServers   []MCPServerRule         `yaml:"allowed_servers"`
-	DeniedServers    []MCPServerRule         `yaml:"denied_servers"`
-	ToolPolicy       string                  `yaml:"tool_policy"` // allowlist, denylist, none
-	AllowedTools     []MCPToolRule           `yaml:"allowed_tools"`
-	DeniedTools      []MCPToolRule           `yaml:"denied_tools"`
-	VersionPinning   MCPVersionPinningConfig `yaml:"version_pinning"`
-	RateLimits       MCPRateLimitsConfig     `yaml:"rate_limits"`
-	CrossServer      CrossServerConfig       `yaml:"cross_server"`
-	OutputInspection OutputInspectionConfig  `yaml:"output_inspection"`
-	Sampling         SamplingConfig          `yaml:"sampling"`
+	EnforcePolicy     bool                    `yaml:"enforce_policy"`
+	FailClosed        bool                    `yaml:"fail_closed"`        // Block unknown tools if true
+	AllowedTransports []string                `yaml:"allowed_transports"` // "stdio", "http", "sse"; empty = all allowed
+	Servers           []MCPServerDeclaration  `yaml:"servers"`
+	ServerPolicy      string                  `yaml:"server_policy"` // allowlist, denylist, none
+	AllowedServers    []MCPServerRule         `yaml:"allowed_servers"`
+	DeniedServers     []MCPServerRule         `yaml:"denied_servers"`
+	ToolPolicy        string                  `yaml:"tool_policy"` // allowlist, denylist, none
+	AllowedTools      []MCPToolRule           `yaml:"allowed_tools"`
+	DeniedTools       []MCPToolRule           `yaml:"denied_tools"`
+	VersionPinning    MCPVersionPinningConfig `yaml:"version_pinning"`
+	RateLimits        MCPRateLimitsConfig     `yaml:"rate_limits"`
+	CrossServer       CrossServerConfig       `yaml:"cross_server"`
+	OutputInspection  OutputInspectionConfig  `yaml:"output_inspection"`
+	Sampling          SamplingConfig          `yaml:"sampling"`
 }
 
 // OutputInspectionConfig configures scanning of MCP tool call responses.
@@ -528,16 +529,42 @@ type SamplingConfig struct {
 	PerServer map[string]string `yaml:"per_server"` // server_id → policy override
 }
 
+// ValidateMCPTransports checks that all declared MCP servers use allowed transports.
+func ValidateMCPTransports(cfg SandboxMCPConfig) error {
+	if len(cfg.AllowedTransports) == 0 {
+		return nil
+	}
+	// Validate enum values first.
+	validTransports := map[string]bool{"stdio": true, "http": true, "sse": true}
+	allowed := make(map[string]bool, len(cfg.AllowedTransports))
+	for _, t := range cfg.AllowedTransports {
+		if !validTransports[t] {
+			return fmt.Errorf("invalid allowed_transports value %q (valid: stdio, http, sse)", t)
+		}
+		allowed[t] = true
+	}
+	for _, srv := range cfg.Servers {
+		srvType := srv.Type
+		if srvType == "" {
+			srvType = "stdio"
+		}
+		if !allowed[srvType] {
+			return fmt.Errorf("MCP server %q uses transport %q which is not in allowed_transports %v", srv.ID, srvType, cfg.AllowedTransports)
+		}
+	}
+	return nil
+}
+
 // MCPServerDeclaration defines an MCP server and how to connect to it.
 type MCPServerDeclaration struct {
 	ID             string   `yaml:"id"`
 	Type           string   `yaml:"type"`            // "stdio" | "http" | "sse"
-	Command        string   `yaml:"command"`          // For stdio servers
-	Args           []string `yaml:"args"`             // For stdio servers
-	URL            string   `yaml:"url"`              // For http/sse servers
-	TLSFingerprint string   `yaml:"tls_fingerprint"`  // Optional TLS cert pin
-	AllowedEnv     []string `yaml:"allowed_env"`      // If set, only these env vars (plus standard ones) are passed
-	DeniedEnv      []string `yaml:"denied_env"`       // If set, these env vars are stripped
+	Command        string   `yaml:"command"`         // For stdio servers
+	Args           []string `yaml:"args"`            // For stdio servers
+	URL            string   `yaml:"url"`             // For http/sse servers
+	TLSFingerprint string   `yaml:"tls_fingerprint"` // Optional TLS cert pin
+	AllowedEnv     []string `yaml:"allowed_env"`     // If set, only these env vars (plus standard ones) are passed
+	DeniedEnv      []string `yaml:"denied_env"`      // If set, these env vars are stripped
 }
 
 // MCPServerRule matches servers by ID (supports "*" wildcard).
@@ -557,12 +584,13 @@ type MCPVersionPinningConfig struct {
 	Enabled        bool   `yaml:"enabled"`
 	OnChange       string `yaml:"on_change"`        // block, alert, allow
 	AutoTrustFirst bool   `yaml:"auto_trust_first"` // Pin on first use
+	PinBinary      bool   `yaml:"pin_binary"`
 }
 
 // MCPRateLimitsConfig configures MCP rate limiting.
 type MCPRateLimitsConfig struct {
 	Enabled      bool                    `yaml:"enabled"`
-	DefaultRPM   int                     `yaml:"default_rpm"`   // Default calls per minute
+	DefaultRPM   int                     `yaml:"default_rpm"` // Default calls per minute
 	DefaultBurst int                     `yaml:"default_burst"`
 	PerServer    map[string]MCPRateLimit `yaml:"per_server"`
 }
@@ -601,12 +629,14 @@ type BurstConfig struct {
 type CrossServerFlowConfig struct {
 	Enabled      bool          `yaml:"enabled"`
 	SameTurnOnly *bool         `yaml:"same_turn_only"` // default: true
-	Window       time.Duration `yaml:"window"`          // default: 30s
+	Window       time.Duration `yaml:"window"`         // default: 30s
 }
 
 // ShadowToolConfig detects tool names that shadow/mimic tools from other servers.
 type ShadowToolConfig struct {
-	Enabled *bool `yaml:"enabled"` // default: true
+	Enabled             *bool    `yaml:"enabled"`              // default: true
+	SimilarityCheck     *bool    `yaml:"similarity_check"`     // default: false
+	SimilarityThreshold *float64 `yaml:"similarity_threshold"` // default: 0.85, range [0,1]
 }
 
 // SecurityConfig controls security mode selection and strictness.
@@ -1042,6 +1072,14 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		t := true
 		cfg.Sandbox.MCP.CrossServer.ShadowTool.Enabled = &t
 	}
+	if cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityCheck == nil {
+		f := false
+		cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityCheck = &f
+	}
+	if cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold == nil {
+		d := 0.85
+		cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold = &d
+	}
 
 	// macOS XPC defaults
 	if cfg.Sandbox.XPC.Mode == "" {
@@ -1349,6 +1387,85 @@ func validateConfig(cfg *Config) error {
 		case "local-only", "allow", "deny":
 		default:
 			return fmt.Errorf("invalid threat_feeds.realtime.on_timeout %q (must be \"local-only\", \"allow\", or \"deny\")", cfg.ThreatFeeds.Realtime.OnTimeout)
+		}
+	}
+	// Validate MCP transport policy
+	if err := ValidateMCPTransports(cfg.Sandbox.MCP); err != nil {
+		return err
+	}
+	// Validate TLS fingerprint format for MCP servers
+	for _, srv := range cfg.Sandbox.MCP.Servers {
+		if srv.TLSFingerprint != "" {
+			fp := srv.TLSFingerprint
+			if len(fp) < 7 || fp[:7] != "sha256:" {
+				return fmt.Errorf("MCP server %q: TLS fingerprint must start with 'sha256:'", srv.ID)
+			}
+			hexPart := fp[7:]
+			if len(hexPart) != 64 {
+				return fmt.Errorf("MCP server %q: TLS fingerprint hex must be 64 characters (SHA-256), got %d", srv.ID, len(hexPart))
+			}
+			for _, c := range hexPart {
+				if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+					return fmt.Errorf("MCP server %q: TLS fingerprint contains invalid hex character %q", srv.ID, string(c))
+				}
+			}
+		}
+	}
+	// Validate output_inspection.on_detection enum
+	if cfg.Sandbox.MCP.OutputInspection.OnDetection != "" {
+		switch cfg.Sandbox.MCP.OutputInspection.OnDetection {
+		case "allow", "alert", "block":
+		default:
+			return fmt.Errorf("invalid sandbox.mcp.output_inspection.on_detection %q (must be \"allow\", \"alert\", or \"block\")", cfg.Sandbox.MCP.OutputInspection.OnDetection)
+		}
+	}
+	// Validate sampling.policy enum
+	if cfg.Sandbox.MCP.Sampling.Policy != "" {
+		switch cfg.Sandbox.MCP.Sampling.Policy {
+		case "allow", "alert", "block":
+		default:
+			return fmt.Errorf("invalid sandbox.mcp.sampling.policy %q (must be \"allow\", \"alert\", or \"block\")", cfg.Sandbox.MCP.Sampling.Policy)
+		}
+	}
+	// Validate sampling.per_server enum values
+	for serverID, policy := range cfg.Sandbox.MCP.Sampling.PerServer {
+		switch policy {
+		case "allow", "alert", "block":
+		default:
+			return fmt.Errorf("invalid sandbox.mcp.sampling.per_server[%q] %q (must be \"allow\", \"alert\", or \"block\")", serverID, policy)
+		}
+	}
+	// Validate version_pinning.on_change enum
+	if cfg.Sandbox.MCP.VersionPinning.OnChange != "" {
+		switch cfg.Sandbox.MCP.VersionPinning.OnChange {
+		case "block", "alert", "allow":
+		default:
+			return fmt.Errorf("invalid sandbox.mcp.version_pinning.on_change %q (must be \"block\", \"alert\", or \"allow\")", cfg.Sandbox.MCP.VersionPinning.OnChange)
+		}
+	}
+	// Validate SimilarityThreshold bounds
+	if t := cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold; t != nil {
+		if *t < 0 || *t > 1 {
+			return fmt.Errorf("sandbox.mcp.cross_server.shadow_tool.similarity_threshold must be in [0, 1], got %v", *t)
+		}
+	}
+	// Validate proxy rate limits
+	rl := cfg.Proxy.RateLimits
+	if rl.Enabled {
+		if rl.RequestsPerMinute < 0 {
+			return fmt.Errorf("proxy.rate_limits.requests_per_minute must be >= 0, got %d", rl.RequestsPerMinute)
+		}
+		if rl.RequestBurst < 0 {
+			return fmt.Errorf("proxy.rate_limits.request_burst must be >= 0, got %d", rl.RequestBurst)
+		}
+		if rl.TokensPerMinute < 0 {
+			return fmt.Errorf("proxy.rate_limits.tokens_per_minute must be >= 0, got %d", rl.TokensPerMinute)
+		}
+		if rl.TokenBurst < 0 {
+			return fmt.Errorf("proxy.rate_limits.token_burst must be >= 0, got %d", rl.TokenBurst)
+		}
+		if rl.RequestsPerMinute == 0 && rl.TokensPerMinute == 0 {
+			return fmt.Errorf("proxy.rate_limits: enabled but neither requests_per_minute nor tokens_per_minute is set")
 		}
 	}
 	return nil

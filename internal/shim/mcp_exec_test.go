@@ -2,9 +2,27 @@
 package shim
 
 import (
+	"errors"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// testBinaryPath returns the absolute path to a real binary for testing.
+// Uses "go" since it's always available when running Go tests.
+func testBinaryPath(t *testing.T) string {
+	t.Helper()
+	p, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("cannot find 'go' binary for test")
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		t.Fatalf("cannot resolve absolute path: %v", err)
+	}
+	return abs
+}
 
 func TestMCPExecConfig(t *testing.T) {
 	cfg := MCPExecConfig{
@@ -28,7 +46,10 @@ func TestBuildMCPExecWrapper(t *testing.T) {
 		},
 	}
 
-	wrapper := BuildMCPExecWrapper(cfg)
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("BuildMCPExecWrapper failed: %v", err)
+	}
 	if wrapper == nil {
 		t.Fatal("BuildMCPExecWrapper returned nil")
 	}
@@ -47,7 +68,10 @@ func TestMCPExecWrapper_WrapCommand(t *testing.T) {
 		EventEmitter:    emitter,
 	}
 
-	wrapper := BuildMCPExecWrapper(cfg)
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("BuildMCPExecWrapper failed: %v", err)
+	}
 
 	// Create a simple command
 	cmd := exec.Command("cat")
@@ -61,5 +85,420 @@ func TestMCPExecWrapper_WrapCommand(t *testing.T) {
 	// Verify cleanup function is not nil
 	if cleanup == nil {
 		t.Error("expected non-nil cleanup function")
+	}
+}
+
+// mockPinStore implements BinaryPinVerifier for testing.
+type mockPinStore struct {
+	verifyStatus string
+	verifyHash   string
+	verifyErr    error
+	trustErr     error
+}
+
+func (m *mockPinStore) TrustBinary(serverID, binaryPath, hash string) error {
+	return m.trustErr
+}
+
+func (m *mockPinStore) VerifyBinary(serverID, hash string) (status, pinnedHash string, err error) {
+	return m.verifyStatus, m.verifyHash, m.verifyErr
+}
+
+func TestBuildMCPExecWrapper_TrustBinaryFailure_BlockMode(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{
+		verifyStatus: "not_pinned",
+		trustErr:     errors.New("db readonly"),
+	}
+
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: true,
+		OnChange:       "block",
+	}
+
+	_, err := BuildMCPExecWrapper(cfg)
+	if err == nil {
+		t.Fatal("expected error when TrustBinary fails in block mode")
+	}
+	if !strings.Contains(err.Error(), "failed to persist trust") {
+		t.Errorf("error should mention persist trust failure, got: %v", err)
+	}
+}
+
+func TestBuildMCPExecWrapper_TrustBinaryFailure_AlertMode(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{
+		verifyStatus: "not_pinned",
+		trustErr:     errors.New("db readonly"),
+	}
+
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: true,
+		OnChange:       "alert",
+	}
+
+	// In alert mode, TrustBinary failure should log but not block
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("alert mode should not error on TrustBinary failure, got: %v", err)
+	}
+	if wrapper == nil {
+		t.Fatal("wrapper should not be nil")
+	}
+}
+
+func TestBuildMCPExecWrapper_NotPinned_NoAutoTrust_BlockMode(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{verifyStatus: "not_pinned"}
+
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: false,
+		OnChange:       "block",
+	}
+
+	_, err := BuildMCPExecWrapper(cfg)
+	if err == nil {
+		t.Fatal("expected error when not_pinned with auto_trust_first=false in block mode")
+	}
+	if !strings.Contains(err.Error(), "no pinned binary") {
+		t.Errorf("error should mention no pinned binary, got: %v", err)
+	}
+}
+
+func TestBuildMCPExecWrapper_NotPinned_NoAutoTrust_AlertMode(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{verifyStatus: "not_pinned"}
+
+	var emittedEvents []interface{}
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: false,
+		OnChange:       "alert",
+		EventEmitter:   func(e interface{}) { emittedEvents = append(emittedEvents, e) },
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("alert mode should not error, got: %v", err)
+	}
+	if wrapper == nil {
+		t.Fatal("wrapper should not be nil")
+	}
+	if len(emittedEvents) != 1 {
+		t.Fatalf("expected 1 alert event, got %d", len(emittedEvents))
+	}
+	ev, ok := emittedEvents[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map event, got %T", emittedEvents[0])
+	}
+	if ev["type"] != "mcp_server_binary_not_pinned" {
+		t.Errorf("event type = %v, want mcp_server_binary_not_pinned", ev["type"])
+	}
+}
+
+func TestBuildMCPExecWrapper_NotPinned_NoAutoTrust_AllowMode(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{verifyStatus: "not_pinned"}
+
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: false,
+		OnChange:       "allow",
+	}
+
+	// Allow mode: should proceed without error or event
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("allow mode should not error, got: %v", err)
+	}
+	if wrapper == nil {
+		t.Fatal("wrapper should not be nil")
+	}
+}
+
+func TestBuildMCPExecWrapper_PinMisconfigured_BlockMode(t *testing.T) {
+	cfg := MCPExecConfig{
+		SessionID: "sess_1",
+		ServerID:  "srv-1",
+		PinBinary: true,
+		PinStore:  nil, // Missing store
+		Command:   testBinaryPath(t),
+		OnChange:  "block",
+	}
+
+	_, err := BuildMCPExecWrapper(cfg)
+	if err == nil {
+		t.Fatal("expected error when PinStore is nil in block mode")
+	}
+}
+
+func TestBuildMCPExecWrapper_ResolvedCommand(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{
+		verifyStatus: "not_pinned",
+	}
+
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: true,
+		OnChange:       "block",
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resolved := wrapper.ResolvedCommand()
+	if resolved == "" {
+		t.Fatal("ResolvedCommand should return the absolute path after pin verification")
+	}
+	if resolved != bin {
+		t.Errorf("ResolvedCommand = %q, want %q", resolved, bin)
+	}
+}
+
+func TestBuildMCPExecWrapper_ResolvedCommand_NoPinning(t *testing.T) {
+	cfg := MCPExecConfig{
+		SessionID: "sess_1",
+		ServerID:  "srv-1",
+		PinBinary: false,
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wrapper.ResolvedCommand() != "" {
+		t.Errorf("ResolvedCommand should be empty when pin is disabled, got %q", wrapper.ResolvedCommand())
+	}
+}
+
+func TestBuildMCPExecWrapper_UnknownStatus_BlockMode(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{
+		verifyStatus: "something_unexpected",
+	}
+
+	cfg := MCPExecConfig{
+		SessionID: "sess_1",
+		ServerID:  "srv-1",
+		Command:   bin,
+		PinBinary: true,
+		PinStore:  store,
+		OnChange:  "block",
+	}
+
+	_, err := BuildMCPExecWrapper(cfg)
+	if err == nil {
+		t.Fatal("expected error for unknown verify status in block mode")
+	}
+	if !strings.Contains(err.Error(), "unexpected verify status") {
+		t.Errorf("error should mention unexpected status, got: %v", err)
+	}
+}
+
+func TestBuildMCPExecWrapper_UnknownStatus_AlertMode(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{
+		verifyStatus: "something_unexpected",
+	}
+
+	cfg := MCPExecConfig{
+		SessionID: "sess_1",
+		ServerID:  "srv-1",
+		Command:   bin,
+		PinBinary: true,
+		PinStore:  store,
+		OnChange:  "alert",
+	}
+
+	// Alert mode: should log and continue, not error
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("alert mode should not error on unknown status, got: %v", err)
+	}
+	if wrapper == nil {
+		t.Fatal("wrapper should not be nil")
+	}
+}
+
+func TestMCPExecWrapper_WrapCommand_EnvFiltering(t *testing.T) {
+	cfg := MCPExecConfig{
+		SessionID: "sess_1",
+		ServerID:  "srv-1",
+		DeniedEnv: []string{"SECRET_TOKEN"},
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("BuildMCPExecWrapper failed: %v", err)
+	}
+
+	cmd := exec.Command("cat")
+	cmd.Env = []string{"PATH=/usr/bin", "SECRET_TOKEN=hunter2", "HOME=/home/test"}
+
+	cleanup, err := wrapper.WrapCommand(cmd)
+	if err != nil {
+		t.Fatalf("WrapCommand failed: %v", err)
+	}
+	defer cleanup()
+
+	// Verify SECRET_TOKEN was stripped from cmd.Env.
+	for _, env := range cmd.Env {
+		if strings.HasPrefix(env, "SECRET_TOKEN=") {
+			t.Error("SECRET_TOKEN should have been stripped from cmd.Env")
+		}
+	}
+
+	// Verify PATH and HOME are still present.
+	found := map[string]bool{}
+	for _, env := range cmd.Env {
+		if strings.HasPrefix(env, "PATH=") {
+			found["PATH"] = true
+		}
+		if strings.HasPrefix(env, "HOME=") {
+			found["HOME"] = true
+		}
+	}
+	if !found["PATH"] {
+		t.Error("PATH should remain in cmd.Env")
+	}
+	if !found["HOME"] {
+		t.Error("HOME should remain in cmd.Env")
+	}
+}
+
+func TestMCPExecWrapper_WrapCommand_EnforcesPinnedPath(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{verifyStatus: "match"}
+
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: true,
+		OnChange:       "block",
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("BuildMCPExecWrapper failed: %v", err)
+	}
+
+	// Create a command using a different path (simulating PATH resolution).
+	cmd := exec.Command("cat")
+	originalPath := cmd.Path
+
+	cleanup, err := wrapper.WrapCommand(cmd)
+	if err != nil {
+		t.Fatalf("WrapCommand failed: %v", err)
+	}
+	defer cleanup()
+
+	// WrapCommand should have overridden cmd.Path with the resolved binary.
+	if cmd.Path == originalPath {
+		t.Error("WrapCommand should override cmd.Path with resolvedCommand")
+	}
+	if cmd.Path != bin {
+		t.Errorf("cmd.Path = %q, want %q", cmd.Path, bin)
+	}
+	if len(cmd.Args) > 0 && cmd.Args[0] != bin {
+		t.Errorf("cmd.Args[0] = %q, want %q", cmd.Args[0], bin)
+	}
+}
+
+func TestMCPExecWrapper_WrapCommand_NoPinNoOverride(t *testing.T) {
+	cfg := MCPExecConfig{
+		SessionID: "sess_1",
+		ServerID:  "srv-1",
+		PinBinary: false,
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("BuildMCPExecWrapper failed: %v", err)
+	}
+
+	cmd := exec.Command("cat")
+	originalPath := cmd.Path
+
+	cleanup, err := wrapper.WrapCommand(cmd)
+	if err != nil {
+		t.Fatalf("WrapCommand failed: %v", err)
+	}
+	defer cleanup()
+
+	// Without pinning, cmd.Path should remain unchanged.
+	if cmd.Path != originalPath {
+		t.Errorf("cmd.Path should not change when pinning is disabled, got %q want %q", cmd.Path, originalPath)
+	}
+}
+
+func TestMCPExecWrapper_WrapCommand_ClearsCmdErr(t *testing.T) {
+	bin := testBinaryPath(t)
+	store := &mockPinStore{verifyStatus: "match"}
+
+	cfg := MCPExecConfig{
+		SessionID:      "sess_1",
+		ServerID:       "srv-1",
+		Command:        bin,
+		PinBinary:      true,
+		PinStore:       store,
+		AutoTrustFirst: true,
+		OnChange:       "block",
+	}
+
+	wrapper, err := BuildMCPExecWrapper(cfg)
+	if err != nil {
+		t.Fatalf("BuildMCPExecWrapper failed: %v", err)
+	}
+
+	// Create a command with a non-existent binary — exec.Command sets cmd.Err.
+	cmd := exec.Command("nonexistent-binary-xyz-12345")
+	if cmd.Err == nil {
+		t.Skip("exec.Command did not set Err for missing binary (Go < 1.19?)")
+	}
+
+	cleanup, err := wrapper.WrapCommand(cmd)
+	if err != nil {
+		t.Fatalf("WrapCommand failed: %v", err)
+	}
+	defer cleanup()
+
+	// WrapCommand should have cleared the stale lookup error.
+	if cmd.Err != nil {
+		t.Errorf("cmd.Err should be nil after WrapCommand overrides path, got: %v", cmd.Err)
+	}
+	if cmd.Path != bin {
+		t.Errorf("cmd.Path = %q, want %q", cmd.Path, bin)
 	}
 }

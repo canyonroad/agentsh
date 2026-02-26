@@ -25,7 +25,7 @@ func TestMCPIntegration_FullPipeline(t *testing.T) {
 	input := bytes.NewBufferString(serverOutput)
 	output := &bytes.Buffer{}
 
-	err := ForwardWithInspection(input, output, MCPDirectionResponse, bridge.InspectorFunc())
+	err := ForwardWithInspection(input, output, MCPDirectionResponse, bridge.InspectorFunc(), nil)
 	if err != nil {
 		t.Fatalf("ForwardWithInspection failed: %v", err)
 	}

@@ -1141,7 +1141,7 @@ sandbox:
       - id: internal-tools
         type: http
         url: https://mcp.internal.corp:8443/mcp
-        tls_fingerprint: "sha256:abc123"
+        tls_fingerprint: "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
     server_policy: allowlist
     allowed_servers:
       - id: filesystem
@@ -1196,7 +1196,7 @@ sandbox:
 	assert.Empty(t, mcp.Servers[1].Command)
 
 	assert.Equal(t, "internal-tools", mcp.Servers[2].ID)
-	assert.Equal(t, "sha256:abc123", mcp.Servers[2].TLSFingerprint)
+	assert.Equal(t, "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", mcp.Servers[2].TLSFingerprint)
 
 	// Verify server-level policy
 	assert.Equal(t, "allowlist", mcp.ServerPolicy)
@@ -1259,7 +1259,7 @@ func TestMCPServerDeclaration_YAMLRoundTrip(t *testing.T) {
 				ID:             "api",
 				Type:           "http",
 				URL:            "https://mcp.example.com",
-				TLSFingerprint: "sha256:deadbeef",
+				TLSFingerprint: "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
 			},
 		},
 		ServerPolicy: "allowlist",
@@ -1315,7 +1315,7 @@ func TestMCPServerDeclaration_YAMLRoundTrip(t *testing.T) {
 	assert.Equal(t, "api", roundTripped.Servers[1].ID)
 	assert.Equal(t, "http", roundTripped.Servers[1].Type)
 	assert.Equal(t, "https://mcp.example.com", roundTripped.Servers[1].URL)
-	assert.Equal(t, "sha256:deadbeef", roundTripped.Servers[1].TLSFingerprint)
+	assert.Equal(t, "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", roundTripped.Servers[1].TLSFingerprint)
 
 	// Server rules
 	assert.Equal(t, len(original.AllowedServers), len(roundTripped.AllowedServers))
@@ -1331,4 +1331,234 @@ func TestMCPServerDeclaration_YAMLRoundTrip(t *testing.T) {
 	// Version pinning and rate limits
 	assert.Equal(t, original.VersionPinning.Enabled, roundTripped.VersionPinning.Enabled)
 	assert.Equal(t, original.RateLimits.DefaultRPM, roundTripped.RateLimits.DefaultRPM)
+}
+
+func TestMCPAllowedTransportsValidation(t *testing.T) {
+	tests := []struct {
+		name       string
+		allowed    []string
+		serverType string
+		wantErr    bool
+	}{
+		{"stdio allowed by default", nil, "stdio", false},
+		{"http allowed by default", nil, "http", false},
+		{"stdio only rejects http", []string{"stdio"}, "http", true},
+		{"stdio only allows stdio", []string{"stdio"}, "stdio", false},
+		{"explicit all allows sse", []string{"stdio", "http", "sse"}, "sse", false},
+		{"invalid transport value", []string{"stdio", "grpc"}, "stdio", true},
+		{"typo in transport", []string{"stdoi"}, "stdio", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := SandboxMCPConfig{
+				AllowedTransports: tt.allowed,
+				Servers: []MCPServerDeclaration{
+					{ID: "test", Type: tt.serverType},
+				},
+			}
+			err := ValidateMCPTransports(cfg)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateMCPTransports() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRateLimitsValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "enabled with no limits rejects",
+			yaml: `
+proxy:
+  rate_limits:
+    enabled: true
+`,
+			wantErr: "neither requests_per_minute nor tokens_per_minute is set",
+		},
+		{
+			name: "negative rpm rejects",
+			yaml: `
+proxy:
+  rate_limits:
+    enabled: true
+    requests_per_minute: -5
+`,
+			wantErr: "requests_per_minute must be >= 0",
+		},
+		{
+			name: "negative tpm rejects",
+			yaml: `
+proxy:
+  rate_limits:
+    enabled: true
+    tokens_per_minute: -100
+`,
+			wantErr: "tokens_per_minute must be >= 0",
+		},
+		{
+			name: "valid rpm only accepts",
+			yaml: `
+proxy:
+  rate_limits:
+    enabled: true
+    requests_per_minute: 60
+`,
+			wantErr: "",
+		},
+		{
+			name: "disabled with zero limits accepts",
+			yaml: `
+proxy:
+  rate_limits:
+    enabled: false
+`,
+			wantErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			os.WriteFile(path, []byte(tt.yaml), 0644)
+
+			_, err := Load(path)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("Load() unexpected error: %v", err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("Load() error = %v, want containing %q", err, tt.wantErr)
+				}
+			}
+		})
+	}
+}
+
+func TestSamplingAndOutputInspectionEnumValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "valid sampling policy",
+			yaml: `
+sandbox:
+  mcp:
+    sampling:
+      policy: block
+`,
+			wantErr: "",
+		},
+		{
+			name: "invalid sampling policy",
+			yaml: `
+sandbox:
+  mcp:
+    sampling:
+      policy: deny
+`,
+			wantErr: `invalid sandbox.mcp.sampling.policy "deny"`,
+		},
+		{
+			name: "valid per_server override",
+			yaml: `
+sandbox:
+  mcp:
+    sampling:
+      policy: block
+      per_server:
+        trusted-srv: allow
+`,
+			wantErr: "",
+		},
+		{
+			name: "invalid per_server override",
+			yaml: `
+sandbox:
+  mcp:
+    sampling:
+      per_server:
+        bad-srv: reject
+`,
+			wantErr: `invalid sandbox.mcp.sampling.per_server["bad-srv"] "reject"`,
+		},
+		{
+			name: "valid output_inspection on_detection",
+			yaml: `
+sandbox:
+  mcp:
+    output_inspection:
+      enabled: true
+      on_detection: alert
+`,
+			wantErr: "",
+		},
+		{
+			name: "invalid output_inspection on_detection",
+			yaml: `
+sandbox:
+  mcp:
+    output_inspection:
+      enabled: true
+      on_detection: warn
+`,
+			wantErr: `invalid sandbox.mcp.output_inspection.on_detection "warn"`,
+		},
+		{
+			name: "empty values accepted",
+			yaml: `
+sandbox:
+  mcp:
+    sampling:
+      policy: ""
+    output_inspection:
+      on_detection: ""
+`,
+			wantErr: "",
+		},
+		{
+			name: "valid version_pinning on_change",
+			yaml: `
+sandbox:
+  mcp:
+    version_pinning:
+      on_change: block
+`,
+			wantErr: "",
+		},
+		{
+			name: "invalid version_pinning on_change",
+			yaml: `
+sandbox:
+  mcp:
+    version_pinning:
+      on_change: deny
+`,
+			wantErr: `invalid sandbox.mcp.version_pinning.on_change "deny"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			os.WriteFile(path, []byte(tt.yaml), 0644)
+
+			_, err := Load(path)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("Load() unexpected error: %v", err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("Load() error = %v, want containing %q", err, tt.wantErr)
+				}
+			}
+		})
+	}
 }
