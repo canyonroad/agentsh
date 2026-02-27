@@ -423,3 +423,33 @@ func TestNewEvaluatorAllOptionsRulesFilteredFallsThrough(t *testing.T) {
 	require.NotNil(t, verdict)
 	assert.Equal(t, VerdictAllow, verdict.Action, "only catch-all allow rule remains")
 }
+
+func TestNewEvaluatorAllRulesFilteredFailsClosed(t *testing.T) {
+	// If ALL rules have Options and are filtered out, the evaluator should
+	// fail closed (deny) rather than defaulting to allow.
+	rules := []policy.PackageRule{
+		{
+			Match: policy.PackageMatch{
+				FindingType: "vulnerability",
+				Options:     map[string]any{"min_cvss": 7.0},
+			},
+			Action: "deny",
+			Reason: "has options",
+		},
+	}
+
+	ev := NewEvaluator(rules)
+
+	findings := []Finding{
+		{
+			Type:     FindingVulnerability,
+			Provider: "osv",
+			Package:  PackageRef{Name: "pkg", Version: "1.0"},
+			Severity: SeverityCritical,
+		},
+	}
+
+	verdict := ev.Evaluate(findings, EcosystemNPM)
+	require.NotNil(t, verdict)
+	assert.Equal(t, VerdictBlock, verdict.Action, "all rules filtered, fail-closed deny injected")
+}

@@ -652,6 +652,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	pre := a.policy.CheckCommand(req.Command, req.Args)
 	redirected, originalCmd, originalArgs := applyCommandRedirect(&req.Command, &req.Args, pre)
 	approvalErr := error(nil)
+	pkgApprovalDenied := false
 	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && a.approvals != nil {
 		apr := approvals.Request{
 			ID:        "approval-" + uuid.NewString(),
@@ -710,16 +711,16 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 					res, aprErr := a.approvals.RequestApproval(ctx, apr)
 					if aprErr != nil {
 						approvalErr = aprErr
+						pkgApprovalDenied = true
 						pre.EffectiveDecision = types.DecisionDeny
-						pre.PolicyDecision = types.DecisionApprove
 						pre.Message = fmt.Sprintf("package install approval error: %v", aprErr)
 						if pre.Approval == nil {
 							pre.Approval = &types.ApprovalInfo{Required: true, Mode: ""}
 						}
 						pre.Approval.ID = apr.ID
 					} else if !res.Approved {
+						pkgApprovalDenied = true
 						pre.EffectiveDecision = types.DecisionDeny
-						pre.PolicyDecision = types.DecisionApprove
 						pre.Message = fmt.Sprintf("package install approval denied: %s", verdict.Summary)
 						if pre.Approval == nil {
 							pre.Approval = &types.ApprovalInfo{Required: true, Mode: ""}
@@ -783,7 +784,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 
 	if pre.EffectiveDecision == types.DecisionDeny {
 		code := "E_POLICY_DENIED"
-		if pre.PolicyDecision == types.DecisionApprove {
+		if pre.PolicyDecision == types.DecisionApprove || pkgApprovalDenied {
 			code = "E_APPROVAL_DENIED"
 			if approvalErr != nil && strings.Contains(strings.ToLower(approvalErr.Error()), "timeout") {
 				code = "E_APPROVAL_TIMEOUT"

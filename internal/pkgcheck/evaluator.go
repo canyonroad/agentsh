@@ -20,11 +20,22 @@ type Evaluator struct {
 // Policy.Validate(), which rejects such rules at load time.
 func NewEvaluator(rules []policy.PackageRule) *Evaluator {
 	var valid []policy.PackageRule
+	filtered := 0
 	for _, r := range rules {
 		if len(r.Match.Options) > 0 {
+			filtered++
 			continue
 		}
 		valid = append(valid, r)
+	}
+	// If rules were provided but all got filtered, add a fail-closed default
+	// to prevent accidental fail-open.
+	if filtered > 0 && len(valid) == 0 {
+		valid = append(valid, policy.PackageRule{
+			Match:  policy.PackageMatch{},
+			Action: "deny",
+			Reason: "all rules use unsupported options; fail closed",
+		})
 	}
 	return &Evaluator{rules: valid}
 }
@@ -210,8 +221,12 @@ func mapAction(action string) VerdictAction {
 // It applies the last rule as the default.
 func (e *Evaluator) noFindingsVerdict() *Verdict {
 	action := VerdictAllow
+	// Use the last rule's action as default, but only if it's a catch-all
+	// (empty match). This prevents filtered-out Options rules from shifting
+	// the default behavior.
 	if len(e.rules) > 0 {
-		action = mapAction(e.rules[len(e.rules)-1].Action)
+		last := e.rules[len(e.rules)-1]
+		action = mapAction(last.Action)
 	}
 	return &Verdict{
 		Action:  action,
