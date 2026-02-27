@@ -112,6 +112,16 @@ const (
 	EventMCPServerNameSimilarity  EventType = "mcp_server_name_similarity"
 )
 
+// Package check events.
+const (
+	EventPackageCheckStarted   EventType = "package_check_started"
+	EventPackageCheckCompleted EventType = "package_check_completed"
+	EventPackageBlocked        EventType = "package_blocked"
+	EventPackageApproved       EventType = "package_approved"
+	EventPackageWarning        EventType = "package_warning"
+	EventProviderError         EventType = "provider_error"
+)
+
 // Policy events.
 const (
 	EventPolicyLoaded  EventType = "policy_loaded"
@@ -222,6 +232,14 @@ var EventCategory = map[EventType]string{
 	EventMCPNetworkConnection:    "mcp",
 	EventMCPServerNameSimilarity: "mcp",
 
+	// Package
+	EventPackageCheckStarted:   "package",
+	EventPackageCheckCompleted: "package",
+	EventPackageBlocked:        "package",
+	EventPackageApproved:       "package",
+	EventPackageWarning:        "package",
+	EventProviderError:         "package",
+
 	// Policy
 	EventPolicyLoaded:  "policy",
 	EventPolicyChanged: "policy",
@@ -260,6 +278,9 @@ var AllEventTypes = []EventType{
 	EventMCPToolSeen, EventMCPToolChanged, EventMCPToolCalled, EventMCPDetection,
 	EventMCPToolCallIntercepted, EventMCPCrossServerBlocked, EventMCPNetworkConnection,
 	EventMCPServerNameSimilarity,
+	// Package
+	EventPackageCheckStarted, EventPackageCheckCompleted, EventPackageBlocked,
+	EventPackageApproved, EventPackageWarning, EventProviderError,
 	// Policy
 	EventPolicyLoaded, EventPolicyChanged,
 }
