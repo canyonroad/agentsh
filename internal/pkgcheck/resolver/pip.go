@@ -38,6 +38,7 @@ func (r *pipResolver) Name() string { return "pip" }
 func (r *pipResolver) CanResolve(command string, args []string) bool {
 	base := filepath.Base(command)
 	base = strings.TrimSuffix(base, ".exe")
+	base = strings.ToLower(base)
 	if base != "pip" && base != "pip3" {
 		return false
 	}

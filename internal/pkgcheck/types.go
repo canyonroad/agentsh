@@ -161,6 +161,12 @@ type Verdict struct {
 // If there are no packages, it returns the verdict's own action.
 func (v Verdict) HighestAction() VerdictAction {
 	highest := v.Action
+	// If the verdict's own action is empty/unknown, seed with VerdictAllow
+	// to prevent the unknown weight (4) from making it impossible for
+	// package verdicts to override.
+	if highest == "" {
+		highest = VerdictAllow
+	}
 	for _, pv := range v.Packages {
 		if pv.Action.weight() > highest.weight() {
 			highest = pv.Action

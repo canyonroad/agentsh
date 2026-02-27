@@ -172,7 +172,9 @@ func (c *Cache) flushToDisk() error {
 	now := time.Now()
 	filtered := make(map[string]entry, len(c.entries))
 	for k, e := range c.entries {
-		if now.Before(e.ExpiresAt) {
+		// Use !now.After to match Get's behavior: entries exactly at the
+		// boundary are considered valid (not expired).
+		if !now.After(e.ExpiresAt) {
 			filtered[k] = e
 		}
 	}

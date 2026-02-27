@@ -118,14 +118,13 @@ func TestSnykProvider_ServerError(t *testing.T) {
 		APIKey:  "bad-key",
 		OrgID:   "org-123",
 	})
-	resp, err := p.CheckBatch(context.Background(), pkgcheck.CheckRequest{
+	_, err := p.CheckBatch(context.Background(), pkgcheck.CheckRequest{
 		Ecosystem: pkgcheck.EcosystemNPM,
 		Packages:  []pkgcheck.PackageRef{{Name: "express", Version: "4.18.0"}},
 	})
-	// Per-package errors result in partial response.
-	require.NoError(t, err)
-	assert.True(t, resp.Metadata.Partial)
-	assert.Empty(t, resp.Findings)
+	// Auth errors (401/403) now return immediately with an error.
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "authentication failed")
 }
 
 func TestSnykProvider_NoIssues(t *testing.T) {

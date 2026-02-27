@@ -139,11 +139,22 @@ func (p *osvProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest)
 		return nil, fmt.Errorf("osv: decode response: %w", err)
 	}
 
+	// Validate that the response has the expected number of results.
+	// If OSV returns fewer results than requested, mark as partial and
+	// only iterate the results we received.
+	partial := false
+	resultCount := len(batchResp.Results)
+	if resultCount != len(req.Packages) {
+		partial = true
+	}
+	iterCount := resultCount
+	if iterCount > len(req.Packages) {
+		iterCount = len(req.Packages)
+	}
+
 	var findings []pkgcheck.Finding
-	for i, result := range batchResp.Results {
-		if i >= len(req.Packages) {
-			break
-		}
+	for i := 0; i < iterCount; i++ {
+		result := batchResp.Results[i]
 		pkg := req.Packages[i]
 		for _, vuln := range result.Vulns {
 			severity := mapOSVSeverity(vuln.Severity)
@@ -174,6 +185,7 @@ func (p *osvProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest)
 		Findings: findings,
 		Metadata: pkgcheck.ResponseMetadata{
 			Duration: time.Since(start),
+			Partial:  partial,
 		},
 	}, nil
 }

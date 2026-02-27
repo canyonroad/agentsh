@@ -39,7 +39,12 @@ type Orchestrator struct {
 
 // NewOrchestrator creates a new Orchestrator with the given configuration.
 func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
-	return &Orchestrator{cfg: cfg}
+	// Defensively copy the Providers map to prevent external mutation.
+	providers := make(map[string]ProviderEntry, len(cfg.Providers))
+	for k, v := range cfg.Providers {
+		providers[k] = v
+	}
+	return &Orchestrator{cfg: OrchestratorConfig{Providers: providers}}
 }
 
 // CheckAll dispatches the request to all configured providers in parallel and
@@ -60,6 +65,18 @@ func (o *Orchestrator) CheckAll(ctx context.Context, req CheckRequest) ([]Findin
 		wg.Add(1)
 		go func(name string, entry ProviderEntry) {
 			defer wg.Done()
+
+			// Guard against nil provider to prevent panics.
+			if entry.Provider == nil {
+				mu.Lock()
+				errs = append(errs, ProviderError{
+					Provider:  name,
+					Err:       fmt.Errorf("provider is nil"),
+					OnFailure: entry.OnFailure,
+				})
+				mu.Unlock()
+				return
+			}
 
 			providerCtx := ctx
 			if entry.Timeout > 0 {

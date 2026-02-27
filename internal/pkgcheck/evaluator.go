@@ -2,6 +2,7 @@ package pkgcheck
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/agentsh/agentsh/internal/policy"
@@ -151,6 +152,28 @@ func matchesRule(f Finding, ecosystem Ecosystem, m policy.PackageMatch) bool {
 				return false
 			}
 		}
+	}
+
+	// NamePatterns check: if specified, the finding's package name must match
+	// at least one pattern (using filepath.Match for glob-style matching).
+	if len(m.NamePatterns) > 0 {
+		matched := false
+		for _, pattern := range m.NamePatterns {
+			if ok, _ := filepath.Match(pattern, f.Package.Name); ok {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+
+	// Options check: these are provider-specific options that are not yet
+	// implemented. Fail closed — treat as non-matching if Options is set.
+	// TODO: implement provider-specific option matching
+	if len(m.Options) > 0 {
+		return false
 	}
 
 	return true

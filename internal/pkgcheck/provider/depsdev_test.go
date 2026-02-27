@@ -2,10 +2,13 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/stretchr/testify/assert"
@@ -97,12 +100,26 @@ func TestDepsDevProvider_LowScorecardScore(t *testing.T) {
 }
 
 func TestDepsDevProvider_PackageTooNew(t *testing.T) {
-	fixture, err := os.ReadFile(testdataPath("depsdev_low_score_response.json"))
-	require.NoError(t, err)
+	// Generate a dynamic publishedAt timestamp (yesterday) so this test
+	// does not depend on a hardcoded date in the fixture file.
+	yesterday := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	dynamicResponse := fmt.Sprintf(`{
+  "versionKey": {
+    "system": "npm",
+    "name": "sketchy-pkg",
+    "version": "1.0.0"
+  },
+  "licenses": [],
+  "publishedAt": %q,
+  "scorecardV2": {
+    "overallScore": 2.1,
+    "date": "2026-02-20"
+  }
+}`, yesterday)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(fixture)
+		w.Write([]byte(dynamicResponse))
 	}))
 	defer server.Close()
 
@@ -115,7 +132,7 @@ func TestDepsDevProvider_PackageTooNew(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// The fixture has publishedAt = 2026-02-25, which is yesterday — should be "too new".
+	// The dynamic publishedAt is yesterday — should be "too new".
 	var tooNewFinding *pkgcheck.Finding
 	for i, f := range resp.Findings {
 		if f.Type == pkgcheck.FindingReputation && hasReasonCode(f, "package_too_new") {
@@ -199,9 +216,9 @@ func TestDepsDevProvider_PyPIEcosystem(t *testing.T) {
 }
 
 func TestDepsDevProvider_MultiplePackages(t *testing.T) {
-	requestCount := 0
+	var requestCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		requestCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"versionKey":{"system":"npm","name":"test","version":"1.0.0"},"licenses":["MIT"]}`))
 	}))
@@ -218,7 +235,7 @@ func TestDepsDevProvider_MultiplePackages(t *testing.T) {
 	})
 	require.NoError(t, err)
 	// Should make one request per package.
-	assert.Equal(t, 3, requestCount)
+	assert.Equal(t, int32(3), requestCount.Load())
 	// Each package gets a license finding.
 	assert.Len(t, resp.Findings, 3)
 }

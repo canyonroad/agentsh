@@ -39,6 +39,7 @@ func (r *uvResolver) Name() string { return "uv" }
 func (r *uvResolver) CanResolve(command string, args []string) bool {
 	base := filepath.Base(command)
 	base = strings.TrimSuffix(base, ".exe")
+	base = strings.ToLower(base)
 	if base != "uv" {
 		return false
 	}

@@ -109,14 +109,25 @@ func (p *snykProvider) CheckBatch(ctx context.Context, req pkgcheck.CheckRequest
 
 	var allFindings []pkgcheck.Finding
 	var partial bool
+	var errCount int
 
 	for _, pkg := range req.Packages {
 		findings, err := p.fetchIssues(ctx, ecosystem, pkg)
 		if err != nil {
+			errCount++
 			partial = true
+			// Check for authentication errors -- return immediately.
+			if isSnykAuthError(err) {
+				return nil, fmt.Errorf("snyk: authentication failed: %w", err)
+			}
 			continue
 		}
 		allFindings = append(allFindings, findings...)
+	}
+
+	// If ALL packages failed, return an error instead of a partial empty response.
+	if errCount > 0 && errCount == len(req.Packages) {
+		return nil, fmt.Errorf("snyk: all %d packages failed checks", errCount)
 	}
 
 	return &pkgcheck.CheckResponse{
@@ -153,6 +164,9 @@ func (p *snykProvider) fetchIssues(ctx context.Context, ecosystem string, pkg pk
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, &snykAuthError{status: resp.StatusCode, body: string(body)}
+		}
 		return nil, fmt.Errorf("snyk: unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -262,4 +276,20 @@ func mapEcosystemSnyk(eco pkgcheck.Ecosystem) string {
 	default:
 		return string(eco)
 	}
+}
+
+// snykAuthError represents an authentication failure from the Snyk API.
+type snykAuthError struct {
+	status int
+	body   string
+}
+
+func (e *snykAuthError) Error() string {
+	return fmt.Sprintf("snyk: auth error status %d: %s", e.status, e.body)
+}
+
+// isSnykAuthError checks if an error is a Snyk authentication error (401/403).
+func isSnykAuthError(err error) bool {
+	_, ok := err.(*snykAuthError)
+	return ok
 }

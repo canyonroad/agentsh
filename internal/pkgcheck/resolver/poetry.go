@@ -38,6 +38,7 @@ func (r *poetryResolver) Name() string { return "poetry" }
 func (r *poetryResolver) CanResolve(command string, args []string) bool {
 	base := filepath.Base(command)
 	base = strings.TrimSuffix(base, ".exe")
+	base = strings.ToLower(base)
 	if base != "poetry" {
 		return false
 	}

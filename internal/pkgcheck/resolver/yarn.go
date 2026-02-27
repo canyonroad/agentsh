@@ -39,6 +39,7 @@ func (r *yarnResolver) CanResolve(command string, args []string) bool {
 	base := filepath.Base(command)
 	base = strings.TrimSuffix(base, ".exe")
 	base = trimWindowsScriptExt(base)
+	base = strings.ToLower(base)
 	if base != "yarn" {
 		return false
 	}

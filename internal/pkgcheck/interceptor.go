@@ -67,6 +67,8 @@ func ClassifyInstallCommand(command string, args []string, scope string) *Instal
 	if ext == ".cmd" || ext == ".bat" {
 		base = base[:len(base)-len(ext)]
 	}
+	// Normalize to lowercase for case-insensitive matching (e.g., NPM.EXE, Yarn.cmd).
+	base = strings.ToLower(base)
 
 	switch base {
 	case "npm":
