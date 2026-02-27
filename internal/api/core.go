@@ -1380,6 +1380,10 @@ func (a *App) setTraceContext(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.TraceFlags != "" && !isValidHex(req.TraceFlags, 2) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "trace_flags must be 2 hex characters"})
+		return
+	}
 
 	s.SetCurrentTraceContext(req.TraceID, req.SpanID, req.TraceFlags)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
