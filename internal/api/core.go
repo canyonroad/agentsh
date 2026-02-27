@@ -315,7 +315,7 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					CommandIDFunc: func() string {
 						return s.CurrentCommandID()
 					},
-					TraceContextFunc: func() (string, string) {
+					TraceContextFunc: func() (string, string, string) {
 						return s.CurrentTraceContext()
 					},
 					PolicyEngine: platform.NewPolicyAdapter(policyEngine),
@@ -666,8 +666,8 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 		}
 	}
 	if tp != "" {
-		if traceID, spanID, ok := parseTraceparent(tp); ok {
-			s.SetCurrentTraceContext(traceID, spanID)
+		if traceID, spanID, traceFlags, ok := parseTraceparent(tp); ok {
+			s.SetCurrentTraceContext(traceID, spanID, traceFlags)
 		}
 	}
 
@@ -1051,7 +1051,7 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 		CommandIDFunc: func() string {
 			return s.CurrentCommandID()
 		},
-		TraceContextFunc: func() (string, string) {
+		TraceContextFunc: func() (string, string, string) {
 			return s.CurrentTraceContext()
 		},
 		PolicyEngine: platform.NewPolicyAdapter(p.engine),
@@ -1355,17 +1355,32 @@ func (a *App) setTraceContext(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		TraceID string `json:"trace_id"`
-		SpanID  string `json:"span_id"`
+		TraceID    string `json:"trace_id"`
+		SpanID     string `json:"span_id"`
+		TraceFlags string `json:"trace_flags"`
 	}
 	if ok := decodeJSON(w, r, &req, "invalid json"); !ok {
 		return
 	}
-	if req.TraceID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "trace_id is required"})
+	if !isValidHex(req.TraceID, 32) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "trace_id must be 32 hex characters"})
 		return
 	}
+	if req.TraceID == "00000000000000000000000000000000" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "trace_id must not be all zeros"})
+		return
+	}
+	if req.SpanID != "" {
+		if !isValidHex(req.SpanID, 16) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "span_id must be 16 hex characters"})
+			return
+		}
+		if req.SpanID == "0000000000000000" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "span_id must not be all zeros"})
+			return
+		}
+	}
 
-	s.SetCurrentTraceContext(req.TraceID, req.SpanID)
+	s.SetCurrentTraceContext(req.TraceID, req.SpanID, req.TraceFlags)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

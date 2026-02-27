@@ -232,6 +232,71 @@ func TestEventContext_WithTraceCorrelation(t *testing.T) {
 	if sc.SpanID().String() != "b7ad6b7169203331" {
 		t.Errorf("span_id = %q", sc.SpanID().String())
 	}
+	// Without explicit trace_flags, should default to sampled
+	if !sc.IsSampled() {
+		t.Error("expected sampled flag when trace_flags absent")
+	}
+}
+
+func TestEventContext_TraceFlags_Sampled(t *testing.T) {
+	ev := types.Event{
+		Timestamp: time.Now(),
+		Type:      "net_connect",
+		SessionID: "s",
+		Fields: map[string]any{
+			"trace_id":    "0af7651916cd43dd8448eb211c80319c",
+			"span_id":     "b7ad6b7169203331",
+			"trace_flags": "01",
+		},
+	}
+
+	ctx := eventContext(context.Background(), ev)
+	sc := trace.SpanContextFromContext(ctx)
+
+	if !sc.IsSampled() {
+		t.Error("expected sampled flag for trace_flags=01")
+	}
+}
+
+func TestEventContext_TraceFlags_Unsampled(t *testing.T) {
+	ev := types.Event{
+		Timestamp: time.Now(),
+		Type:      "net_connect",
+		SessionID: "s",
+		Fields: map[string]any{
+			"trace_id":    "0af7651916cd43dd8448eb211c80319c",
+			"span_id":     "b7ad6b7169203331",
+			"trace_flags": "00",
+		},
+	}
+
+	ctx := eventContext(context.Background(), ev)
+	sc := trace.SpanContextFromContext(ctx)
+
+	if sc.IsSampled() {
+		t.Error("expected unsampled for trace_flags=00")
+	}
+}
+
+func TestEventContext_TraceFlags_Invalid(t *testing.T) {
+	ev := types.Event{
+		Timestamp: time.Now(),
+		Type:      "net_connect",
+		SessionID: "s",
+		Fields: map[string]any{
+			"trace_id":    "0af7651916cd43dd8448eb211c80319c",
+			"span_id":     "b7ad6b7169203331",
+			"trace_flags": "zz",
+		},
+	}
+
+	ctx := eventContext(context.Background(), ev)
+	sc := trace.SpanContextFromContext(ctx)
+
+	// Invalid trace_flags should fall back to default (sampled)
+	if !sc.IsSampled() {
+		t.Error("expected sampled flag as default when trace_flags is invalid")
+	}
 }
 
 func TestEventContext_NoTraceFields(t *testing.T) {

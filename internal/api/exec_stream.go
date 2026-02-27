@@ -48,8 +48,8 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 
 	// Propagate W3C trace context for distributed tracing correlation
 	if tp := r.Header.Get("Traceparent"); tp != "" {
-		if traceID, spanID, ok := parseTraceparent(tp); ok {
-			s.SetCurrentTraceContext(traceID, spanID)
+		if traceID, spanID, traceFlags, ok := parseTraceparent(tp); ok {
+			s.SetCurrentTraceContext(traceID, spanID, traceFlags)
 		}
 	}
 

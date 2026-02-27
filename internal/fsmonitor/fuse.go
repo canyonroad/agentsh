@@ -34,7 +34,7 @@ type Hooks struct {
 	Approvals        *approvals.Manager
 	Emit             Emitter
 	FUSEAudit        *FUSEAuditHooks
-	TraceContextFunc func() (traceID, spanID string)
+	TraceContextFunc func() (traceID, spanID, traceFlags string)
 }
 
 func NewMonitoredLoopbackRoot(realRoot string, hooks *Hooks) (fs.InodeEmbedder, error) {
@@ -502,10 +502,13 @@ func (n *node) emitFileEvent(ctx context.Context, evType string, virtPath string
 	if n.hooks.Session != nil {
 		n.hooks.Session.InjectTraceContext(ev.Fields)
 	} else if n.hooks.TraceContextFunc != nil {
-		if tid, sid := n.hooks.TraceContextFunc(); tid != "" {
+		if tid, sid, tfl := n.hooks.TraceContextFunc(); tid != "" {
 			ev.Fields["trace_id"] = tid
 			if sid != "" {
 				ev.Fields["span_id"] = sid
+			}
+			if tfl != "" {
+				ev.Fields["trace_flags"] = tfl
 			}
 		}
 	}

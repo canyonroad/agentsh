@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -280,8 +281,8 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 	// Propagate W3C trace context for distributed tracing correlation
 	if md, ok := metadata.FromIncomingContext(stream.Context()); ok {
 		if tp := firstMetadataValue(md, "traceparent"); tp != "" {
-			if traceID, spanID, ok := parseTraceparent(tp); ok {
-				sess.SetCurrentTraceContext(traceID, spanID)
+			if traceID, spanID, traceFlags, ok := parseTraceparent(tp); ok {
+				sess.SetCurrentTraceContext(traceID, spanID, traceFlags)
 			}
 		}
 	}
@@ -946,17 +947,31 @@ func firstMetadataValue(md metadata.MD, key string) string {
 	return vals[0]
 }
 
-// parseTraceparent parses a W3C traceparent header into trace ID and span ID.
+// parseTraceparent parses a W3C traceparent header into trace ID, span ID, and trace flags.
 // Format: version-trace_id-parent_id-trace_flags (e.g., 00-<32hex>-<16hex>-01)
-func parseTraceparent(tp string) (traceID, spanID string, ok bool) {
+// Validates hex format and rejects all-zero trace/span IDs per the W3C spec.
+func parseTraceparent(tp string) (traceID, spanID, traceFlags string, ok bool) {
 	parts := strings.Split(tp, "-")
 	if len(parts) != 4 {
-		return "", "", false
+		return "", "", "", false
 	}
-	if len(parts[1]) != 32 || len(parts[2]) != 16 {
-		return "", "", false
+	traceID, spanID, traceFlags = parts[1], parts[2], parts[3]
+	if !isValidHex(traceID, 32) || !isValidHex(spanID, 16) || !isValidHex(traceFlags, 2) {
+		return "", "", "", false
 	}
-	return parts[1], parts[2], true
+	if traceID == "00000000000000000000000000000000" || spanID == "0000000000000000" {
+		return "", "", "", false
+	}
+	return traceID, spanID, traceFlags, true
+}
+
+// isValidHex checks that s is exactly length hex characters.
+func isValidHex(s string, length int) bool {
+	if len(s) != length {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 func (a *App) grpcCreateSession(ctx context.Context, reqJSON []byte) (*structpb.Struct, error) {
