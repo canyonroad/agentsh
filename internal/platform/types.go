@@ -328,6 +328,7 @@ func (e *IOEvent) ToEvent() types.Event {
 		Remote:    e.RemoteAddr,
 		Operation: string(e.Operation),
 		Policy: &types.PolicyInfo{
+			Decision:          e.Decision,
 			EffectiveDecision: e.Decision,
 			Rule:              e.PolicyRule,
 		},

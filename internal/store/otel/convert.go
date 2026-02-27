@@ -40,12 +40,17 @@ func eventContext(ctx context.Context, ev types.Event) context.Context {
 		return ctx
 	}
 
-	cfg := trace.SpanContextConfig{}
+	cfg := trace.SpanContextConfig{
+		TraceFlags: trace.FlagsSampled, // default when no explicit flags
+	}
 	if hasTrace {
 		cfg.TraceID = traceID
 	}
 	if hasSpan {
 		cfg.SpanID = spanID
+	}
+	if tf, ok := extractTraceFlags(ev); ok {
+		cfg.TraceFlags = tf
 	}
 	sc := trace.NewSpanContext(cfg)
 	return trace.ContextWithSpanContext(ctx, sc)
@@ -206,6 +211,22 @@ func extractSpanID(ev types.Event) (trace.SpanID, bool) {
 	var sid trace.SpanID
 	copy(sid[:], b)
 	return sid, true
+}
+
+// extractTraceFlags parses a 2-hex-character trace flags string from event fields.
+func extractTraceFlags(ev types.Event) (trace.TraceFlags, bool) {
+	if ev.Fields == nil {
+		return 0, false
+	}
+	s, ok := ev.Fields["trace_flags"].(string)
+	if !ok || s == "" {
+		return 0, false
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != 1 {
+		return 0, false
+	}
+	return trace.TraceFlags(b[0]), true
 }
 
 // BuildResource creates an OTEL Resource with the service name and optional

@@ -26,8 +26,24 @@ import (
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/signal"
 	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"google.golang.org/grpc/metadata"
 )
+
+// traceparentKey is the context key for W3C traceparent propagation.
+type traceparentKey struct{}
+
+func withTraceparent(ctx context.Context, tp string) context.Context {
+	return context.WithValue(ctx, traceparentKey{}, tp)
+}
+
+func traceparentFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(traceparentKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
 
 // seccompWrapperConfig is passed to the agentsh-unixwrap wrapper via
 // AGENTSH_SECCOMP_CONFIG environment variable to configure seccomp-bpf filtering.
@@ -298,6 +314,9 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					SessionID:  s.ID,
 					CommandIDFunc: func() string {
 						return s.CurrentCommandID()
+					},
+					TraceContextFunc: func() (string, string, string) {
+						return s.CurrentTraceContext()
 					},
 					PolicyEngine: platform.NewPolicyAdapter(policyEngine),
 					EventChannel: eventChan,
@@ -639,6 +658,19 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	defer unlock()
 	s.SetCurrentCommandID(cmdID)
 
+	// Propagate W3C trace context for distributed tracing correlation
+	tp := traceparentFromContext(ctx)
+	if tp == "" {
+		if md, ok := metadata.FromIncomingContext(ctx); ok {
+			tp = firstMetadataValue(md, "traceparent")
+		}
+	}
+	if tp != "" {
+		if traceID, spanID, traceFlags, ok := parseTraceparent(tp); ok {
+			s.SetCurrentTraceContext(traceID, spanID, traceFlags)
+		}
+	}
+
 	// Deferred FUSE: mount on first exec if not yet mounted
 	if a.cfg.Sandbox.FUSE.Enabled && a.cfg.Sandbox.FUSE.Deferred {
 		a.ensureFUSEMount(ctx, s)
@@ -754,6 +786,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 			"args":    originalArgs,
 		},
 	}
+	s.InjectTraceContext(preEv.Fields)
 	_ = a.store.AppendEvent(ctx, preEv)
 	a.broker.Publish(preEv)
 
@@ -778,6 +811,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 				"to_args":      req.Args,
 			},
 		}
+		s.InjectTraceContext(redirEv.Fields)
 		_ = a.store.AppendEvent(ctx, redirEv)
 		a.broker.Publish(redirEv)
 	}
@@ -850,6 +884,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 			"args":    origArgs,
 		},
 	}
+	s.InjectTraceContext(startEv.Fields)
 	_ = a.store.AppendEvent(ctx, startEv)
 	a.broker.Publish(startEv)
 
@@ -878,6 +913,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	if execErr != nil {
 		endEv.Fields["error"] = execErr.Error()
 	}
+	s.InjectTraceContext(endEv.Fields)
 	_ = a.store.AppendEvent(ctx, endEv)
 	a.broker.Publish(endEv)
 
@@ -1015,6 +1051,9 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 		CommandIDFunc: func() string {
 			return s.CurrentCommandID()
 		},
+		TraceContextFunc: func() (string, string, string) {
+			return s.CurrentTraceContext()
+		},
 		PolicyEngine: platform.NewPolicyAdapter(p.engine),
 		EventChannel: eventChan,
 	}
@@ -1105,6 +1144,11 @@ func (a *App) processIOEvents(ctx context.Context, eventChan <-chan platform.IOE
 		// Convert platform.IOEvent to types.Event
 		ev := ioEvent.ToEvent()
 		ev.ID = uuid.NewString()
+
+		// Inject trace context from session for distributed tracing correlation
+		if s, ok := a.sessions.Get(ioEvent.SessionID); ok {
+			s.InjectTraceContext(ev.Fields)
+		}
 
 		// Store and publish the event
 		_ = a.store.AppendEvent(ctx, ev)
@@ -1297,4 +1341,50 @@ func (a *App) emitPackageCheckEvent(ctx context.Context, sessionID, commandID st
 	}
 	_ = a.store.AppendEvent(ctx, ev)
 	a.broker.Publish(ev)
+}
+
+// setTraceContext sets the W3C trace context on a session for distributed
+// tracing correlation. This allows external processes (e.g. Python agents)
+// running inside a session to associate their OTEL traces with agentsh events.
+func (a *App) setTraceContext(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	s, ok := a.sessions.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+
+	var req struct {
+		TraceID    string `json:"trace_id"`
+		SpanID     string `json:"span_id"`
+		TraceFlags string `json:"trace_flags"`
+	}
+	if ok := decodeJSON(w, r, &req, "invalid json"); !ok {
+		return
+	}
+	if !isValidHex(req.TraceID, 32) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "trace_id must be 32 hex characters"})
+		return
+	}
+	if req.TraceID == "00000000000000000000000000000000" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "trace_id must not be all zeros"})
+		return
+	}
+	if req.SpanID != "" {
+		if !isValidHex(req.SpanID, 16) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "span_id must be 16 hex characters"})
+			return
+		}
+		if req.SpanID == "0000000000000000" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "span_id must not be all zeros"})
+			return
+		}
+	}
+	if req.TraceFlags != "" && !isValidHex(req.TraceFlags, 2) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "trace_flags must be 2 hex characters"})
+		return
+	}
+
+	s.SetCurrentTraceContext(req.TraceID, req.SpanID, req.TraceFlags)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

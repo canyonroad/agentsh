@@ -46,6 +46,13 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 	defer unlock()
 	s.SetCurrentCommandID(cmdID)
 
+	// Propagate W3C trace context for distributed tracing correlation
+	if tp := r.Header.Get("Traceparent"); tp != "" {
+		if traceID, spanID, traceFlags, ok := parseTraceparent(tp); ok {
+			s.SetCurrentTraceContext(traceID, spanID, traceFlags)
+		}
+	}
+
 	pre := a.policy.CheckCommand(req.Command, req.Args)
 	redirected, originalCmd, originalArgs := applyCommandRedirect(&req.Command, &req.Args, pre)
 	approvalErr := error(nil)
@@ -94,6 +101,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 			"args":    originalArgs,
 		},
 	}
+	s.InjectTraceContext(preEv.Fields)
 	_ = a.store.AppendEvent(r.Context(), preEv)
 	a.broker.Publish(preEv)
 
@@ -118,6 +126,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 				"to_args":      req.Args,
 			},
 		}
+		s.InjectTraceContext(redirEv.Fields)
 		_ = a.store.AppendEvent(r.Context(), redirEv)
 		a.broker.Publish(redirEv)
 	}
@@ -165,6 +174,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 			"args":    req.Args,
 		},
 	}
+	s.InjectTraceContext(startEv.Fields)
 	_ = a.store.AppendEvent(r.Context(), startEv)
 	a.broker.Publish(startEv)
 
@@ -212,6 +222,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 	if execErr != nil {
 		endEv.Fields["error"] = execErr.Error()
 	}
+	s.InjectTraceContext(endEv.Fields)
 	_ = a.store.AppendEvent(r.Context(), endEv)
 	a.broker.Publish(endEv)
 
@@ -271,15 +282,6 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	}
 
 	env, _ := buildPolicyEnv(policy.ResolvedEnvPolicy{}, os.Environ(), s, req.Env)
-	// Debug: log whether AGENTSH_IN_SESSION is in the environment
-	hasInSession := false
-	for _, e := range env {
-		if strings.HasPrefix(e, "AGENTSH_IN_SESSION=") {
-			hasInSession = true
-			break
-		}
-	}
-	slog.Debug("exec_stream env built", "command", req.Command, "has_AGENTSH_IN_SESSION", hasInSession, "env_count", len(env))
 	// Add extra environment variables from seccomp wrapper config
 	if extra != nil && len(extra.env) > 0 {
 		for k, v := range extra.env {

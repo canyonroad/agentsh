@@ -44,6 +44,9 @@ type Session struct {
 
 	currentCommandID string
 	currentProcPID   int
+	currentTraceID    string // W3C trace context: trace ID (32 hex chars)
+	currentSpanID     string // W3C trace context: parent span ID (16 hex chars)
+	currentTraceFlags string // W3C trace context: trace flags (2 hex chars, e.g. "01")
 	execMu           sync.Mutex
 
 	workspaceUnmount func() error
@@ -253,6 +256,9 @@ func (s *Session) LockExec() func() {
 		s.State = types.SessionStateReady
 		s.currentCommandID = ""
 		s.currentProcPID = 0
+		s.currentTraceID = ""
+		s.currentSpanID = ""
+		s.currentTraceFlags = ""
 		s.LastActivity = time.Now().UTC()
 		s.mu.Unlock()
 		s.execMu.Unlock()
@@ -281,6 +287,37 @@ func (s *Session) CurrentProcessPID() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.currentProcPID
+}
+
+// SetCurrentTraceContext stores the W3C trace context for the current command execution.
+func (s *Session) SetCurrentTraceContext(traceID, spanID, traceFlags string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.currentTraceID = traceID
+	s.currentSpanID = spanID
+	s.currentTraceFlags = traceFlags
+}
+
+// CurrentTraceContext returns the trace context for the current command execution.
+func (s *Session) CurrentTraceContext() (traceID, spanID, traceFlags string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.currentTraceID, s.currentSpanID, s.currentTraceFlags
+}
+
+// InjectTraceContext adds trace_id, span_id, and trace_flags to the event fields if trace context is set.
+func (s *Session) InjectTraceContext(fields map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.currentTraceID != "" {
+		fields["trace_id"] = s.currentTraceID
+	}
+	if s.currentSpanID != "" {
+		fields["span_id"] = s.currentSpanID
+	}
+	if s.currentTraceFlags != "" {
+		fields["trace_flags"] = s.currentTraceFlags
+	}
 }
 
 func (s *Session) TouchAt(t time.Time) {

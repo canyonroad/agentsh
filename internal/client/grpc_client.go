@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -521,10 +522,14 @@ func (c *GRPCClient) newServerStream(ctx context.Context, method string, in *str
 }
 
 func (c *GRPCClient) withAuth(ctx context.Context) context.Context {
-	if strings.TrimSpace(c.apiKey) == "" {
-		return ctx
+	if strings.TrimSpace(c.apiKey) != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-api-key", c.apiKey)
 	}
-	return metadata.AppendToOutgoingContext(ctx, "x-api-key", c.apiKey)
+	// Propagate W3C trace context so agentsh events nest under the caller's trace
+	if tp := os.Getenv("TRACEPARENT"); tp != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "traceparent", tp)
+	}
+	return ctx
 }
 
 func jsonToStruct(v any) (*structpb.Struct, error) {
