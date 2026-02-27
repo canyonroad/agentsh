@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "vulns": [
+        {
+          "id": "GHSA-test-1234",
+          "summary": "Test vulnerability in express",
+          "details": "A test vulnerability that allows remote code execution via crafted HTTP headers.",
+          "severity": [
+            {
+              "type": "CVSS_V3",
+              "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+            }
+          ],
+          "references": [
+            {
+              "type": "WEB",
+              "url": "https://github.com/advisories/GHSA-test-1234"
+            },
+            {
+              "type": "PACKAGE",
+              "url": "https://www.npmjs.com/package/express"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "vulns": []
+    }
+  ]
+}

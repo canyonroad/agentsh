@@ -1,0 +1,44 @@
+{
+  "install": [
+    {
+      "metadata": {
+        "name": "flask",
+        "version": "3.0.0"
+      },
+      "is_direct": true,
+      "requested": true
+    },
+    {
+      "metadata": {
+        "name": "Werkzeug",
+        "version": "3.0.1"
+      },
+      "is_direct": false,
+      "requested": false
+    },
+    {
+      "metadata": {
+        "name": "Jinja2",
+        "version": "3.1.2"
+      },
+      "is_direct": false,
+      "requested": false
+    },
+    {
+      "metadata": {
+        "name": "MarkupSafe",
+        "version": "2.1.3"
+      },
+      "is_direct": false,
+      "requested": false
+    },
+    {
+      "metadata": {
+        "name": "itsdangerous",
+        "version": "2.1.2"
+      },
+      "is_direct": false,
+      "requested": false
+    }
+  ]
+}

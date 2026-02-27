@@ -26,6 +26,7 @@ import (
 	"github.com/agentsh/agentsh/internal/netmonitor/redirect"
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/internal/trash"
@@ -58,6 +59,9 @@ type App struct {
 
 	// policyLoader loads policies by name for per-mount policy support
 	policyLoader PolicyLoader
+
+	// pkgChecker is the optional package install checker; nil when package_checks.enabled=false
+	pkgChecker *pkgcheck.Checker
 }
 
 func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader) *App {
@@ -95,6 +99,11 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 // SetPlatformForTest replaces the platform implementation. Test-only.
 func (a *App) SetPlatformForTest(p platform.Platform) {
 	a.platform = p
+}
+
+// SetPackageChecker attaches a package install checker to the app.
+func (a *App) SetPackageChecker(c *pkgcheck.Checker) {
+	a.pkgChecker = c
 }
 
 type ctxKey string
@@ -805,11 +814,12 @@ func addSoftDeleteHints(fileOps []types.Event, stderrB []byte, stderrTotal int64
 	return stderrB, stderrTotal, softSuggestions
 }
 
-func guidanceForPolicyDenied(req types.ExecRequest, pre policy.Decision, preEv types.Event, approvalErr error) *types.ExecGuidance {
+func guidanceForPolicyDenied(req types.ExecRequest, pre policy.Decision, preEv types.Event, approvalErr error, pkgApprovalDenied bool) *types.ExecGuidance {
+	approvalRelated := pre.PolicyDecision == types.DecisionApprove || pkgApprovalDenied
 	g := &types.ExecGuidance{
 		Status:    "blocked",
 		Blocked:   true,
-		Retryable: pre.PolicyDecision == types.DecisionApprove,
+		Retryable: approvalRelated,
 		Reason:    "command denied by policy",
 		PolicyRule: func() string {
 			if pre.Rule != "" {
@@ -828,7 +838,7 @@ func guidanceForPolicyDenied(req types.ExecRequest, pre policy.Decision, preEv t
 		g.Reason = "approval timed out"
 		g.Retryable = true
 	}
-	if pre.PolicyDecision == types.DecisionApprove {
+	if approvalRelated {
 		g.Suggestions = append(g.Suggestions, types.Suggestion{
 			Action: "request_approval",
 			Reason: "operation requires approval per policy (enable approvals or approve via API)",

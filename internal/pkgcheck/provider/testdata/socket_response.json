@@ -1,0 +1,45 @@
+{
+  "packages": [
+    {
+      "name": "evil-pkg",
+      "version": "1.0.0",
+      "alerts": [
+        {
+          "type": "malware",
+          "severity": "critical",
+          "title": "Known malware detected",
+          "detail": "This package contains code that exfiltrates environment variables to a remote server.",
+          "key": "malware-env-exfil"
+        },
+        {
+          "type": "typosquat",
+          "severity": "high",
+          "title": "Possible typosquatting",
+          "detail": "Package name is similar to the popular 'eval-pkg' package.",
+          "key": "typosquat-eval-pkg"
+        }
+      ],
+      "score": {
+        "overall": 0.1,
+        "supply": 0.0,
+        "quality": 0.2,
+        "maintenance": 0.1,
+        "vulnerability": 0.0,
+        "license": 0.5
+      }
+    },
+    {
+      "name": "safe-pkg",
+      "version": "2.0.0",
+      "alerts": [],
+      "score": {
+        "overall": 0.95,
+        "supply": 0.9,
+        "quality": 0.95,
+        "maintenance": 0.98,
+        "vulnerability": 1.0,
+        "license": 0.9
+      }
+    }
+  ]
+}

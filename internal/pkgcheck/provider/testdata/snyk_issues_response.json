@@ -1,0 +1,45 @@
+{
+  "data": [
+    {
+      "id": "SNYK-JS-EXPRESS-1234567",
+      "type": "issue",
+      "attributes": {
+        "title": "Denial of Service (DoS)",
+        "description": "express before 4.18.2 is vulnerable to denial of service via malformed Content-Type headers.",
+        "severity": "high",
+        "type": "vulnerability",
+        "cvss": {
+          "score": 7.5,
+          "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+        },
+        "slots": {
+          "references": [
+            {
+              "url": "https://security.snyk.io/vuln/SNYK-JS-EXPRESS-1234567",
+              "title": "Snyk Advisory"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "SNYK-JS-EXPRESS-LICENSE-001",
+      "type": "issue",
+      "attributes": {
+        "title": "Non-OSI approved license",
+        "description": "Package uses a license that is not approved by the Open Source Initiative.",
+        "severity": "medium",
+        "type": "license",
+        "slots": {
+          "license": "SSPL-1.0",
+          "references": [
+            {
+              "url": "https://snyk.io/learn/what-is-sspl/",
+              "title": "SSPL License Information"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

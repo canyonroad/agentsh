@@ -35,6 +35,9 @@ type Policy struct {
 	// Process context-based rules (parent-conditional policies)
 	ProcessContexts   map[string]ProcessContext        `yaml:"process_contexts,omitempty"`
 	ProcessIdentities map[string]ProcessIdentityConfig `yaml:"process_identities,omitempty"`
+
+	// Package install check rules
+	PackageRules []PackageRule `yaml:"package_rules,omitempty"`
 }
 
 type FileRule struct {
@@ -394,6 +397,31 @@ type MCPSubRuleEnabled struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+// PackageRule defines a policy rule for package install checks.
+type PackageRule struct {
+	Match  PackageMatch `yaml:"match"`
+	Action string       `yaml:"action"` // allow, warn, approve, block
+	Reason string       `yaml:"reason,omitempty"`
+}
+
+// PackageMatch specifies conditions for matching packages in policy rules.
+type PackageMatch struct {
+	Packages     []string        `yaml:"packages,omitempty"`      // Exact package names
+	NamePatterns []string        `yaml:"name_patterns,omitempty"` // Glob patterns for package names
+	FindingType  string          `yaml:"finding_type,omitempty"`  // vulnerability, license, etc.
+	Severity     string          `yaml:"severity,omitempty"`      // critical, high, medium, low, info
+	Reasons      []string        `yaml:"reasons,omitempty"`       // Match specific reason codes
+	LicenseSPDX  *LicenseSPDXMatch `yaml:"license_spdx,omitempty"` // SPDX license matching
+	Ecosystem    string          `yaml:"ecosystem,omitempty"`     // npm, pypi
+	Options      map[string]any    `yaml:"options,omitempty"`     // Provider-specific options
+}
+
+// LicenseSPDXMatch defines allow/deny lists for SPDX license identifiers.
+type LicenseSPDXMatch struct {
+	Allow []string `yaml:"allow,omitempty"`
+	Deny  []string `yaml:"deny,omitempty"`
+}
+
 // Validate performs minimal semantic validation of a policy.
 func (p Policy) Validate() error {
 	if p.Version <= 0 {
@@ -425,6 +453,13 @@ func (p Policy) Validate() error {
 		}
 		if r.OnFailure != "" && r.OnFailure != "fail_closed" && r.OnFailure != "fail_open" && r.OnFailure != "retry_original" {
 			return fmt.Errorf("dns_redirects[%d]: on_failure must be fail_closed, fail_open, or retry_original", i)
+		}
+	}
+
+	// Validate package rules
+	for i, r := range p.PackageRules {
+		if len(r.Match.Options) > 0 {
+			return fmt.Errorf("package rule %d: match.options is not yet supported; remove options or wait for a future release", i)
 		}
 	}
 

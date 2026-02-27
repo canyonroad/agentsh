@@ -1,0 +1,13 @@
+{
+  "versionKey": {
+    "system": "npm",
+    "name": "express",
+    "version": "4.18.0"
+  },
+  "licenses": ["MIT"],
+  "publishedAt": "2022-04-25T00:00:00Z",
+  "scorecardV2": {
+    "overallScore": 5.2,
+    "date": "2024-01-15"
+  }
+}

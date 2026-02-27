@@ -1,0 +1,13 @@
+{
+  "versionKey": {
+    "system": "npm",
+    "name": "sketchy-pkg",
+    "version": "1.0.0"
+  },
+  "licenses": [],
+  "publishedAt": "2026-02-25T00:00:00Z",
+  "scorecardV2": {
+    "overallScore": 2.1,
+    "date": "2026-02-20"
+  }
+}
