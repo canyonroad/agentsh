@@ -677,6 +677,48 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 			pre.EffectiveDecision = types.DecisionAllow
 		}
 	}
+
+	// Package install check (after command policy check and approval, before event emission).
+	if a.pkgChecker != nil && pre.EffectiveDecision != types.DecisionDeny {
+		verdict, pkgErr := a.pkgChecker.Check(ctx, req.Command, req.Args, req.WorkingDir)
+		if pkgErr != nil {
+			slog.Warn("package check error", "err", pkgErr)
+			pre.EffectiveDecision = types.DecisionDeny
+			pre.Message = fmt.Sprintf("package check failed: %v", pkgErr)
+		} else if verdict != nil {
+			a.emitPackageCheckEvent(ctx, id, cmdID, verdict)
+
+			switch verdict.Action {
+			case pkgcheck.VerdictBlock:
+				pre.EffectiveDecision = types.DecisionDeny
+				pre.Message = verdict.Summary
+			case pkgcheck.VerdictApprove:
+				if a.approvals != nil {
+					apr := approvals.Request{
+						ID:        "pkg-" + uuid.NewString(),
+						SessionID: id,
+						CommandID: cmdID,
+						Kind:      "package",
+						Target:    verdict.Summary,
+						Message:   verdict.Summary,
+						Fields: map[string]any{
+							"source":   "package_check",
+							"action":   string(verdict.Action),
+							"findings": len(verdict.Findings),
+						},
+					}
+					res, err := a.approvals.RequestApproval(ctx, apr)
+					if err != nil || !res.Approved {
+						pre.EffectiveDecision = types.DecisionDeny
+						pre.Message = "package install not approved"
+					}
+				}
+			case pkgcheck.VerdictWarn:
+				slog.Warn("package install warning", "summary", verdict.Summary)
+			}
+		}
+	}
+
 	preEv := types.Event{
 		ID:        uuid.NewString(),
 		Timestamp: start,
@@ -723,45 +765,6 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 		}
 		_ = a.store.AppendEvent(ctx, redirEv)
 		a.broker.Publish(redirEv)
-	}
-
-	// Package install check (after command policy check, before execution).
-	if a.pkgChecker != nil && pre.EffectiveDecision != types.DecisionDeny {
-		verdict, pkgErr := a.pkgChecker.Check(ctx, req.Command, req.Args, req.WorkingDir)
-		if pkgErr != nil {
-			slog.Warn("package check error", "err", pkgErr)
-		} else if verdict != nil {
-			a.emitPackageCheckEvent(ctx, id, cmdID, verdict)
-
-			switch verdict.Action {
-			case pkgcheck.VerdictBlock:
-				pre.EffectiveDecision = types.DecisionDeny
-				pre.Message = verdict.Summary
-			case pkgcheck.VerdictApprove:
-				if a.approvals != nil {
-					apr := approvals.Request{
-						ID:        "pkg-" + uuid.NewString(),
-						SessionID: id,
-						CommandID: cmdID,
-						Kind:      "package",
-						Target:    verdict.Summary,
-						Message:   verdict.Summary,
-						Fields: map[string]any{
-							"source":   "package_check",
-							"action":   string(verdict.Action),
-							"findings": len(verdict.Findings),
-						},
-					}
-					res, err := a.approvals.RequestApproval(ctx, apr)
-					if err != nil || !res.Approved {
-						pre.EffectiveDecision = types.DecisionDeny
-						pre.Message = "package install not approved"
-					}
-				}
-			case pkgcheck.VerdictWarn:
-				slog.Warn("package install warning", "summary", verdict.Summary)
-			}
-		}
 	}
 
 	if pre.EffectiveDecision == types.DecisionDeny {
@@ -1247,6 +1250,20 @@ func (a *App) emitPackageCheckEvent(ctx context.Context, sessionID, commandID st
 		evType = events.EventPackageWarning
 	}
 
+	var decision types.Decision
+	switch verdict.Action {
+	case pkgcheck.VerdictBlock:
+		decision = types.DecisionDeny
+	case pkgcheck.VerdictWarn:
+		decision = types.DecisionAudit
+	case pkgcheck.VerdictApprove:
+		decision = types.DecisionApprove
+	case pkgcheck.VerdictAllow:
+		decision = types.DecisionAllow
+	default:
+		decision = types.DecisionDeny // fail closed
+	}
+
 	ev := types.Event{
 		ID:        uuid.NewString(),
 		Timestamp: time.Now().UTC(),
@@ -1254,12 +1271,13 @@ func (a *App) emitPackageCheckEvent(ctx context.Context, sessionID, commandID st
 		SessionID: sessionID,
 		CommandID: commandID,
 		Policy: &types.PolicyInfo{
-			Decision:          types.Decision(verdict.Action),
-			EffectiveDecision: types.Decision(verdict.Action),
+			Decision:          decision,
+			EffectiveDecision: decision,
 		},
 		Fields: map[string]any{
-			"findings_count": len(verdict.Findings),
-			"summary":        verdict.Summary,
+			"findings_count":  len(verdict.Findings),
+			"summary":         verdict.Summary,
+			"package_verdict": string(verdict.Action),
 		},
 	}
 	_ = a.store.AppendEvent(ctx, ev)

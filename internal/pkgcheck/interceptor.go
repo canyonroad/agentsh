@@ -323,23 +323,6 @@ func classifyUV(command string, args []string, scope string) *InstallIntent {
 		return nil
 	}
 
-	// "uv add ..."
-	if sub == "add" {
-		remaining := afterSub
-		pkgs := extractPackages(remaining)
-		if len(pkgs) > 0 {
-			return &InstallIntent{
-				Tool:        "uv",
-				Ecosystem:   EcosystemPyPI,
-				Packages:    pkgs,
-				BulkInstall: false,
-				OrigCommand: command,
-				OrigArgs:    args,
-			}
-		}
-		return nil
-	}
-
 	return nil
 }
 

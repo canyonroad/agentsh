@@ -47,9 +47,12 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 	}
 
 	// 2. Find a resolver that can handle this tool.
+	// Strip leading global flags so args[0] is the subcommand,
+	// which is what resolvers' CanResolve expects.
+	cleanArgs := stripGlobalFlags(intent.OrigArgs)
 	var resolver Resolver
 	for _, r := range c.cfg.Resolvers {
-		if r.CanResolve(intent.Tool, intent.OrigArgs) {
+		if r.CanResolve(intent.Tool, cleanArgs) {
 			resolver = r
 			break
 		}
@@ -73,14 +76,18 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 
 	// 5. Handle provider errors.
 	for _, pe := range providerErrs {
-		if pe.OnFailure == "deny" {
+		switch pe.OnFailure {
+		case "deny":
 			return &Verdict{
 				Action:  VerdictBlock,
 				Summary: fmt.Sprintf("provider %s failed and on_failure=deny: %v", pe.Provider, pe.Err),
 			}, nil
-		}
-		// For "approve", "warn", or "allow" on failure — add a finding so evaluator can decide.
-		if pe.OnFailure == "approve" || pe.OnFailure == "warn" {
+		case "approve":
+			return &Verdict{
+				Action:  VerdictApprove,
+				Summary: fmt.Sprintf("Provider %s unavailable (on_failure=approve): %v", pe.Provider, pe.Err),
+			}, nil
+		case "warn":
 			findings = append(findings, Finding{
 				Type:     FindingReputation,
 				Provider: pe.Provider,
@@ -89,6 +96,7 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 				Detail:   pe.Err.Error(),
 			})
 		}
+		// "allow" on failure: no finding injected, evaluator decides on existing findings.
 	}
 
 	// 6. Evaluate findings against policy rules.
@@ -106,6 +114,18 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 	verdict.Summary = buildCheckerSummary(intent, plan, verdict)
 
 	return verdict, nil
+}
+
+// stripGlobalFlags removes leading global flags from args so that args[0]
+// is the subcommand. Resolvers' CanResolve expects args[0] to be the
+// subcommand (e.g., "install", "add", "pip"), but raw command args may
+// contain leading flags like "--prefix /tmp".
+func stripGlobalFlags(args []string) []string {
+	sub, remaining := skipGlobalFlags(args)
+	if sub == "" {
+		return args
+	}
+	return append([]string{sub}, remaining...)
 }
 
 // buildCheckerSummary creates a human-readable summary for the verdict.

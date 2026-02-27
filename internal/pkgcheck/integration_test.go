@@ -284,6 +284,7 @@ func TestIntegrationProviderDown(t *testing.T) {
 
 		// on_failure="allow" means no finding is injected, so no findings -> default allow.
 		assert.Equal(t, VerdictAllow, verdict.Action)
+		assert.Empty(t, verdict.Findings)
 		assert.True(t, allowlist.IsAllowed("", "express", "4.18.2"))
 	})
 
@@ -304,6 +305,7 @@ func TestIntegrationProviderDown(t *testing.T) {
 
 		// A finding is injected for the provider error, but the catch-all rule allows.
 		assert.Equal(t, VerdictAllow, verdict.Action)
+		assert.Len(t, verdict.Findings, 1)
 		assert.True(t, allowlist.IsAllowed("", "express", "4.18.2"))
 	})
 }
