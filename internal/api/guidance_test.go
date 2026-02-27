@@ -159,9 +159,19 @@ func TestGuidanceForPolicyDenied_PkgApprovalTimeout(t *testing.T) {
 	if g.Reason != "approval timed out" {
 		t.Fatalf("expected 'approval timed out' reason, got %q", g.Reason)
 	}
+	foundApproval := false
+	for _, s := range g.Suggestions {
+		if s.Action == "request_approval" {
+			foundApproval = true
+			break
+		}
+	}
+	if !foundApproval {
+		t.Fatalf("expected request_approval suggestion on timeout, got %+v", g.Suggestions)
+	}
 }
 
-func TestGuidanceForPolicyDenied_NoPkgApproval_CommandPolicyAllow(t *testing.T) {
+func TestGuidanceForPolicyDenied_PurePolicyDeny(t *testing.T) {
 	// When neither command approval nor package approval is involved,
 	// guidance should show adjust_policy and not be retryable.
 	req := types.ExecRequest{Command: "rm", Args: []string{"-rf", "/"}}
