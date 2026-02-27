@@ -300,3 +300,54 @@ func TestNotifyHandlerRecover_BlockingStore_BrokerStillReceives(t *testing.T) {
 		t.Errorf("broker error = %q, want %q", evs[0].Fields["error"], "original panic")
 	}
 }
+
+// blockingBroker is an eventBroker whose Publish blocks forever,
+// used to test that the recovery timeout prevents hanging.
+type blockingBroker struct{}
+
+func (b *blockingBroker) Publish(ev types.Event) {
+	select {} // block forever
+}
+
+func TestNotifyHandlerRecover_BlockingBroker_BoundedReturn(t *testing.T) {
+	// Verify that a blocking broker doesn't prevent notifyHandlerRecover
+	// from returning within the recoverTimeout bound.
+	store := &notifyMockEventStore{}
+	broker := &blockingBroker{}
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		defer close(done)
+		defer notifyHandlerRecover("test-blocking-broker", store, broker)
+		panic("original panic")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(recoverTimeout + 2*time.Second):
+		t.Fatal("timed out — blocking broker prevented recovery from returning")
+	}
+
+	elapsed := time.Since(start)
+	if elapsed > recoverTimeout+time.Second {
+		t.Errorf("recovery took %v, expected within %v", elapsed, recoverTimeout+time.Second)
+	}
+
+	// Store should still have received the event (runs in separate goroutine).
+	deadline := time.After(2 * time.Second)
+	for {
+		store.mu.Lock()
+		n := len(store.events)
+		store.mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for store event")
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
