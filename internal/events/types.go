@@ -119,7 +119,7 @@ const (
 	EventPackageBlocked        EventType = "package_blocked"
 	EventPackageApproved       EventType = "package_approved"
 	EventPackageWarning        EventType = "package_warning"
-	EventProviderError         EventType = "provider_error"
+	EventProviderError         EventType = "package_provider_error"
 )
 
 // Policy events.

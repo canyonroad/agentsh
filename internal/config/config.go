@@ -1224,6 +1224,30 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.ThreatFeeds.Realtime.OnTimeout == "" {
 		cfg.ThreatFeeds.Realtime.OnTimeout = "local-only"
 	}
+
+	// Package checks defaults
+	pkgDefaults := DefaultPackageChecksConfig()
+	if cfg.PackageChecks.Scope == "" {
+		cfg.PackageChecks.Scope = pkgDefaults.Scope
+	}
+	if cfg.PackageChecks.Cache.TTL.Vulnerability == 0 {
+		cfg.PackageChecks.Cache.TTL.Vulnerability = pkgDefaults.Cache.TTL.Vulnerability
+	}
+	if cfg.PackageChecks.Cache.TTL.License == 0 {
+		cfg.PackageChecks.Cache.TTL.License = pkgDefaults.Cache.TTL.License
+	}
+	if cfg.PackageChecks.Cache.TTL.Provenance == 0 {
+		cfg.PackageChecks.Cache.TTL.Provenance = pkgDefaults.Cache.TTL.Provenance
+	}
+	if cfg.PackageChecks.Cache.TTL.Reputation == 0 {
+		cfg.PackageChecks.Cache.TTL.Reputation = pkgDefaults.Cache.TTL.Reputation
+	}
+	if cfg.PackageChecks.Cache.TTL.Malware == 0 {
+		cfg.PackageChecks.Cache.TTL.Malware = pkgDefaults.Cache.TTL.Malware
+	}
+	if cfg.PackageChecks.Providers == nil {
+		cfg.PackageChecks.Providers = pkgDefaults.Providers
+	}
 }
 
 // applyDefaults wraps applyDefaultsWithSource for backward compatibility.
@@ -1467,6 +1491,37 @@ func validateConfig(cfg *Config) error {
 		}
 		if rl.RequestsPerMinute == 0 && rl.TokensPerMinute == 0 {
 			return fmt.Errorf("proxy.rate_limits: enabled but neither requests_per_minute nor tokens_per_minute is set")
+		}
+	}
+	// Validate package_checks config
+	if cfg.PackageChecks.Scope != "" {
+		switch cfg.PackageChecks.Scope {
+		case "new_packages_only", "all_installs":
+		default:
+			return fmt.Errorf("invalid package_checks.scope %q (must be \"new_packages_only\" or \"all_installs\")", cfg.PackageChecks.Scope)
+		}
+	}
+	for name, p := range cfg.PackageChecks.Providers {
+		if p.OnFailure != "" {
+			switch p.OnFailure {
+			case "warn", "deny", "allow", "approve":
+			default:
+				return fmt.Errorf("invalid package_checks.providers[%q].on_failure %q (must be \"warn\", \"deny\", \"allow\", or \"approve\")", name, p.OnFailure)
+			}
+		}
+		if p.Type != "" {
+			switch p.Type {
+			case "exec":
+			default:
+				return fmt.Errorf("invalid package_checks.providers[%q].type %q (must be \"exec\")", name, p.Type)
+			}
+		}
+	}
+	for name, r := range cfg.PackageChecks.Registries {
+		switch r.Trust {
+		case "check_full", "check_local_only", "trusted":
+		default:
+			return fmt.Errorf("invalid package_checks.registries[%q].trust %q (must be \"check_full\", \"check_local_only\", or \"trusted\")", name, r.Trust)
 		}
 	}
 	return nil

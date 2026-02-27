@@ -5,7 +5,7 @@ import "time"
 // PackageChecksConfig configures package install security checks.
 type PackageChecksConfig struct {
 	Enabled    bool                         `yaml:"enabled"`
-	Scope      string                       `yaml:"scope"`      // "direct", "all"
+	Scope      string                       `yaml:"scope"`      // "new_packages_only", "all_installs"
 	Cache      PackageCacheConfig           `yaml:"cache"`
 	Registries map[string]RegistryTrustConfig `yaml:"registries"`
 	Providers  map[string]ProviderConfig    `yaml:"providers"`
@@ -55,7 +55,7 @@ type ResolverConfig struct {
 func DefaultPackageChecksConfig() PackageChecksConfig {
 	return PackageChecksConfig{
 		Enabled: false,
-		Scope:   "direct",
+		Scope:   "new_packages_only",
 		Cache: PackageCacheConfig{
 			Dir: "",
 			TTL: PackageCacheTTL{

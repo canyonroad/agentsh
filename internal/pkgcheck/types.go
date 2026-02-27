@@ -87,7 +87,7 @@ func (s Severity) Weight() int {
 	case SeverityInfo:
 		return 0
 	default:
-		return 0
+		return 5 // unknown severities fail closed (stricter than critical)
 	}
 }
 
@@ -133,7 +133,7 @@ func (v VerdictAction) weight() int {
 	case VerdictBlock:
 		return 3
 	default:
-		return 0
+		return 4 // unknown actions fail closed (stricter than block)
 	}
 }
 

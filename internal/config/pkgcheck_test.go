@@ -13,7 +13,7 @@ func TestDefaultPackageChecksConfig(t *testing.T) {
 	cfg := DefaultPackageChecksConfig()
 
 	assert.False(t, cfg.Enabled)
-	assert.Equal(t, "direct", cfg.Scope)
+	assert.Equal(t, "new_packages_only", cfg.Scope)
 	assert.Equal(t, 1*time.Hour, cfg.Cache.TTL.Vulnerability)
 	assert.Equal(t, 24*time.Hour, cfg.Cache.TTL.License)
 	assert.Equal(t, 24*time.Hour, cfg.Cache.TTL.Provenance)
@@ -47,7 +47,7 @@ func TestDefaultPackageChecksConfig(t *testing.T) {
 func TestPackageChecksConfig_YAMLRoundTrip(t *testing.T) {
 	original := PackageChecksConfig{
 		Enabled: true,
-		Scope:   "all",
+		Scope:   "all_installs",
 		Cache: PackageCacheConfig{
 			Dir: "/tmp/pkgcache",
 			TTL: PackageCacheTTL{
@@ -138,7 +138,7 @@ func TestPackageChecksConfig_InConfig(t *testing.T) {
 	yamlInput := `
 package_checks:
   enabled: true
-  scope: all
+  scope: all_installs
   cache:
     dir: /tmp/cache
     ttl:
@@ -153,7 +153,7 @@ package_checks:
 	require.NoError(t, err)
 
 	assert.True(t, cfg.PackageChecks.Enabled)
-	assert.Equal(t, "all", cfg.PackageChecks.Scope)
+	assert.Equal(t, "all_installs", cfg.PackageChecks.Scope)
 	assert.Equal(t, "/tmp/cache", cfg.PackageChecks.Cache.Dir)
 	assert.Equal(t, 30*time.Minute, cfg.PackageChecks.Cache.TTL.Vulnerability)
 	assert.Equal(t, 12*time.Hour, cfg.PackageChecks.Cache.TTL.License)

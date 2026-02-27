@@ -110,7 +110,7 @@ func TestResolver_Interface(t *testing.T) {
 	assert.Equal(t, "npm-resolver", r.Name())
 	assert.True(t, r.CanResolve("npm", []string{"install", "express"}))
 
-	plan, err := r.Resolve(context.Background(), "/tmp", []string{"npm", "install", "express"})
+	plan, err := r.Resolve(context.Background(), t.TempDir(), []string{"npm", "install", "express"})
 	require.NoError(t, err)
 	assert.Equal(t, EcosystemNPM, plan.Ecosystem)
 	assert.Len(t, plan.Direct, 1)
@@ -132,7 +132,7 @@ func TestResolver_Error(t *testing.T) {
 		err:        assert.AnError,
 	}
 
-	plan, err := r.Resolve(context.Background(), "/tmp", []string{"npm", "install"})
+	plan, err := r.Resolve(context.Background(), t.TempDir(), []string{"npm", "install"})
 	assert.Error(t, err)
 	assert.Nil(t, plan)
 }

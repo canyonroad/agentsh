@@ -70,7 +70,12 @@ func TestSeverity_Weight(t *testing.T) {
 
 func TestSeverity_Weight_Unknown(t *testing.T) {
 	unknown := Severity("unknown")
-	assert.Equal(t, 0, unknown.Weight())
+	assert.Equal(t, 5, unknown.Weight(), "unknown severity should fail closed with weight > critical")
+}
+
+func TestVerdictAction_Weight_Unknown(t *testing.T) {
+	unknown := VerdictAction("unknown")
+	assert.Equal(t, 4, unknown.weight(), "unknown action should fail closed with weight > block")
 }
 
 func TestFindingType_Uniqueness(t *testing.T) {

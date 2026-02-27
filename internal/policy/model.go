@@ -413,7 +413,7 @@ type PackageMatch struct {
 	Reasons      []string        `yaml:"reasons,omitempty"`       // Match specific reason codes
 	LicenseSPDX  *LicenseSPDXMatch `yaml:"license_spdx,omitempty"` // SPDX license matching
 	Ecosystem    string          `yaml:"ecosystem,omitempty"`     // npm, pypi
-	Options      map[string]string `yaml:"options,omitempty"`     // Provider-specific options
+	Options      map[string]any    `yaml:"options,omitempty"`     // Provider-specific options
 }
 
 // LicenseSPDXMatch defines allow/deny lists for SPDX license identifiers.

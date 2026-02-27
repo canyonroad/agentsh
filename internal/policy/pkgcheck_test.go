@@ -49,7 +49,7 @@ package_rules:
   - match:
       finding_type: license
       options:
-        strict: "true"
+        strict: true
     action: approve
 `
 
@@ -98,7 +98,7 @@ package_rules:
 	// Rule 7: options
 	r = p.PackageRules[6]
 	assert.Equal(t, "license", r.Match.FindingType)
-	assert.Equal(t, "true", r.Match.Options["strict"])
+	assert.Equal(t, true, r.Match.Options["strict"])
 	assert.Equal(t, "approve", r.Action)
 }
 
