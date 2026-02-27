@@ -18,7 +18,9 @@ import (
 	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/landlock"
+	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
@@ -723,6 +725,45 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 		a.broker.Publish(redirEv)
 	}
 
+	// Package install check (after command policy check, before execution).
+	if a.pkgChecker != nil && pre.EffectiveDecision != types.DecisionDeny {
+		verdict, pkgErr := a.pkgChecker.Check(ctx, req.Command, req.Args, req.WorkingDir)
+		if pkgErr != nil {
+			slog.Warn("package check error", "err", pkgErr)
+		} else if verdict != nil {
+			a.emitPackageCheckEvent(ctx, id, cmdID, verdict)
+
+			switch verdict.Action {
+			case pkgcheck.VerdictBlock:
+				pre.EffectiveDecision = types.DecisionDeny
+				pre.Message = verdict.Summary
+			case pkgcheck.VerdictApprove:
+				if a.approvals != nil {
+					apr := approvals.Request{
+						ID:        "pkg-" + uuid.NewString(),
+						SessionID: id,
+						CommandID: cmdID,
+						Kind:      "package",
+						Target:    verdict.Summary,
+						Message:   verdict.Summary,
+						Fields: map[string]any{
+							"source":   "package_check",
+							"action":   string(verdict.Action),
+							"findings": len(verdict.Findings),
+						},
+					}
+					res, err := a.approvals.RequestApproval(ctx, apr)
+					if err != nil || !res.Approved {
+						pre.EffectiveDecision = types.DecisionDeny
+						pre.Message = "package install not approved"
+					}
+				}
+			case pkgcheck.VerdictWarn:
+				slog.Warn("package install warning", "summary", verdict.Summary)
+			}
+		}
+	}
+
 	if pre.EffectiveDecision == types.DecisionDeny {
 		code := "E_POLICY_DENIED"
 		if pre.PolicyDecision == types.DecisionApprove {
@@ -1192,4 +1233,35 @@ func (a *App) wrapWithMacSandbox(
 	req.Env["AGENTSH_SANDBOX_CONFIG"] = string(cfgJSON)
 	req.Command = wrapperBin
 	req.Args = append([]string{"--", origCommand}, origArgs...)
+}
+
+// emitPackageCheckEvent publishes a package check audit event.
+func (a *App) emitPackageCheckEvent(ctx context.Context, sessionID, commandID string, verdict *pkgcheck.Verdict) {
+	evType := events.EventPackageCheckCompleted
+	switch verdict.Action {
+	case pkgcheck.VerdictBlock:
+		evType = events.EventPackageBlocked
+	case pkgcheck.VerdictApprove:
+		evType = events.EventPackageApproved
+	case pkgcheck.VerdictWarn:
+		evType = events.EventPackageWarning
+	}
+
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      string(evType),
+		SessionID: sessionID,
+		CommandID: commandID,
+		Policy: &types.PolicyInfo{
+			Decision:          types.Decision(verdict.Action),
+			EffectiveDecision: types.Decision(verdict.Action),
+		},
+		Fields: map[string]any{
+			"findings_count": len(verdict.Findings),
+			"summary":        verdict.Summary,
+		},
+	}
+	_ = a.store.AppendEvent(ctx, ev)
+	a.broker.Publish(ev)
 }

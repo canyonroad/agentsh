@@ -25,6 +25,7 @@ import (
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 	"github.com/agentsh/agentsh/internal/metrics"
+	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/threatfeed"
@@ -305,6 +306,28 @@ func New(cfg *config.Config) (*Server, error) {
 
 	policyLoader := api.NewDefaultPolicyLoader(cfg.Policies.Dir, enforceApprovals)
 	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, oidcAuth, approvalsMgr, metricsCollector, policyLoader)
+
+	// Initialize package checker (optional).
+	if cfg.PackageChecks.Enabled {
+		providerEntries := make(map[string]pkgcheck.ProviderEntry)
+		for name, provCfg := range cfg.PackageChecks.Providers {
+			if !provCfg.Enabled {
+				continue
+			}
+			// Concrete provider wiring will be added in a follow-up;
+			// for now only the skeleton is set up.
+			_ = name
+			_ = provCfg
+		}
+
+		pkgChecker := pkgcheck.NewChecker(pkgcheck.CheckerConfig{
+			Scope:     cfg.PackageChecks.Scope,
+			Providers: providerEntries,
+			Rules:     engine.PackageRules(),
+			Allowlist: pkgcheck.NewAllowlist(30 * time.Second),
+		})
+		app.SetPackageChecker(pkgChecker)
+	}
 	router := app.Router()
 
 	readTimeoutStr := cfg.Server.HTTP.ReadTimeout

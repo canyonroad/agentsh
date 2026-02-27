@@ -334,6 +334,14 @@ func NewEngineWithVariables(p *Policy, enforceApprovals bool, vars map[string]st
 	return NewEngine(expanded, enforceApprovals)
 }
 
+// PackageRules returns the package install check rules from the loaded policy.
+func (e *Engine) PackageRules() []PackageRule {
+	if e.policy == nil {
+		return nil
+	}
+	return e.policy.PackageRules
+}
+
 // SetThreatStore configures an optional threat feed store for domain checking.
 // action must be "deny" or "audit"; defaults to "deny" if invalid.
 func (e *Engine) SetThreatStore(store ThreatChecker, action string) {
