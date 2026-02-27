@@ -38,6 +38,7 @@ func (r *npmResolver) Name() string { return "npm" }
 func (r *npmResolver) CanResolve(command string, args []string) bool {
 	base := filepath.Base(command)
 	base = strings.TrimSuffix(base, ".exe")
+	base = trimWindowsScriptExt(base)
 	if base != "npm" {
 		return false
 	}
@@ -219,4 +220,17 @@ func pkgBaseName(spec string) string {
 		}
 	}
 	return spec
+}
+
+// trimWindowsScriptExt strips .cmd and .bat extensions (case-insensitive)
+// from a command base name for Windows compatibility.
+func trimWindowsScriptExt(base string) string {
+	if len(base) < 5 {
+		return base
+	}
+	ext := strings.ToLower(base[len(base)-4:])
+	if ext == ".cmd" || ext == ".bat" {
+		return base[:len(base)-4]
+	}
+	return base
 }

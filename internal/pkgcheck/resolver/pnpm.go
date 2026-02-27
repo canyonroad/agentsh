@@ -38,6 +38,7 @@ func (r *pnpmResolver) Name() string { return "pnpm" }
 func (r *pnpmResolver) CanResolve(command string, args []string) bool {
 	base := filepath.Base(command)
 	base = strings.TrimSuffix(base, ".exe")
+	base = trimWindowsScriptExt(base)
 	if base != "pnpm" {
 		return false
 	}
@@ -87,6 +88,8 @@ type pnpmDryRunPkg struct {
 }
 
 // parsePNPMDryRunOutput parses pnpm's output into an InstallPlan.
+// TODO: The expected JSON format {"added":[...]} needs verification against actual
+// pnpm CLI output. `pnpm add --dry-run` outputs text, not JSON.
 func parsePNPMDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.InstallPlan, error) {
 	var output pnpmDryRunOutput
 	if err := json.Unmarshal(data, &output); err != nil {

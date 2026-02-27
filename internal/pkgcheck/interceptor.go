@@ -24,6 +24,7 @@ var flagsWithValues = map[string]bool{
 	"--cache":           true,
 	"--prefix":          true,
 	"--target":          true,
+	"-t":                true,
 	"--index-url":       true,
 	"--extra-index-url": true,
 	"-i":                true,
@@ -34,6 +35,11 @@ var flagsWithValues = map[string]bool{
 	"--config-file":     true,
 	"--group":           true,
 	"-G":                true,
+	"--timeout":         true,
+	"--retries":         true,
+	"--cache-dir":       true,
+	"--trusted-host":    true,
+	"--proxy":           true,
 }
 
 // ClassifyInstallCommand inspects a command and its arguments and returns an
@@ -55,8 +61,12 @@ func ClassifyInstallCommand(command string, args []string, scope string) *Instal
 	if idx := strings.LastIndex(base, `\`); idx >= 0 {
 		base = base[idx+1:]
 	}
-	// Strip .exe suffix for Windows compatibility.
+	// Strip .exe, .cmd, .bat suffixes for Windows compatibility.
 	base = strings.TrimSuffix(base, ".exe")
+	ext := strings.ToLower(filepath.Ext(base))
+	if ext == ".cmd" || ext == ".bat" {
+		base = base[:len(base)-len(ext)]
+	}
 
 	switch base {
 	case "npm":
@@ -82,8 +92,10 @@ func classifyNPM(command string, args []string, scope string) *InstallIntent {
 		return nil
 	}
 
-	sub := args[0]
-	remaining := args[1:]
+	sub, remaining := skipGlobalFlags(args)
+	if sub == "" {
+		return nil
+	}
 
 	switch sub {
 	case "install", "i", "add":
@@ -133,8 +145,10 @@ func classifyPNPM(command string, args []string, scope string) *InstallIntent {
 		return nil
 	}
 
-	sub := args[0]
-	remaining := args[1:]
+	sub, remaining := skipGlobalFlags(args)
+	if sub == "" {
+		return nil
+	}
 
 	switch sub {
 	case "add":
@@ -174,8 +188,10 @@ func classifyYarn(command string, args []string, scope string) *InstallIntent {
 		return nil
 	}
 
-	sub := args[0]
-	remaining := args[1:]
+	sub, remaining := skipGlobalFlags(args)
+	if sub == "" {
+		return nil
+	}
 
 	switch sub {
 	case "add":
@@ -215,11 +231,10 @@ func classifyPip(command string, args []string, scope string) *InstallIntent {
 		return nil
 	}
 
-	if args[0] != "install" {
+	sub, remaining := skipGlobalFlags(args)
+	if sub != "install" {
 		return nil
 	}
-
-	remaining := args[1:]
 
 	// Check for -r / --requirement flag (bulk install from requirements file)
 	if hasFlag(remaining, "-r") || hasFlag(remaining, "--requirement") {
@@ -256,12 +271,42 @@ func classifyUV(command string, args []string, scope string) *InstallIntent {
 		return nil
 	}
 
-	// "uv pip install ..."
-	if args[0] == "pip" && len(args) > 1 && args[1] == "install" {
-		remaining := args[2:]
+	sub, afterSub := skipGlobalFlags(args)
+	if sub == "" {
+		return nil
+	}
 
-		// Check for -r / --requirement flag
-		if hasFlag(remaining, "-r") || hasFlag(remaining, "--requirement") {
+	// "uv pip install ..."
+	if sub == "pip" && len(afterSub) > 0 {
+		pipSub, remaining := skipGlobalFlags(afterSub)
+		if pipSub == "install" {
+			// Check for -r / --requirement flag
+			if hasFlag(remaining, "-r") || hasFlag(remaining, "--requirement") {
+				if scope == "all_installs" {
+					return &InstallIntent{
+						Tool:        "uv",
+						Ecosystem:   EcosystemPyPI,
+						BulkInstall: true,
+						OrigCommand: command,
+						OrigArgs:    args,
+					}
+				}
+				return nil
+			}
+
+			pkgs := extractPackages(remaining)
+			if len(pkgs) > 0 {
+				return &InstallIntent{
+					Tool:        "uv",
+					Ecosystem:   EcosystemPyPI,
+					Packages:    pkgs,
+					BulkInstall: false,
+					OrigCommand: command,
+					OrigArgs:    args,
+				}
+			}
+
+			// "uv pip install" with no args is bulk
 			if scope == "all_installs" {
 				return &InstallIntent{
 					Tool:        "uv",
@@ -273,35 +318,12 @@ func classifyUV(command string, args []string, scope string) *InstallIntent {
 			}
 			return nil
 		}
-
-		pkgs := extractPackages(remaining)
-		if len(pkgs) > 0 {
-			return &InstallIntent{
-				Tool:        "uv",
-				Ecosystem:   EcosystemPyPI,
-				Packages:    pkgs,
-				BulkInstall: false,
-				OrigCommand: command,
-				OrigArgs:    args,
-			}
-		}
-
-		// "uv pip install" with no args is bulk
-		if scope == "all_installs" {
-			return &InstallIntent{
-				Tool:        "uv",
-				Ecosystem:   EcosystemPyPI,
-				BulkInstall: true,
-				OrigCommand: command,
-				OrigArgs:    args,
-			}
-		}
 		return nil
 	}
 
 	// "uv add ..."
-	if args[0] == "add" {
-		remaining := args[1:]
+	if sub == "add" {
+		remaining := afterSub
 		pkgs := extractPackages(remaining)
 		if len(pkgs) > 0 {
 			return &InstallIntent{
@@ -325,8 +347,10 @@ func classifyPoetry(command string, args []string, scope string) *InstallIntent 
 		return nil
 	}
 
-	sub := args[0]
-	remaining := args[1:]
+	sub, remaining := skipGlobalFlags(args)
+	if sub == "" {
+		return nil
+	}
 
 	switch sub {
 	case "add":
@@ -391,11 +415,39 @@ func extractPackages(args []string) []string {
 }
 
 // hasFlag reports whether the given flag appears in args.
+// Also matches the --flag=value compact form.
 func hasFlag(args []string, flag string) bool {
 	for _, a := range args {
 		if a == flag {
 			return true
 		}
+		if strings.HasPrefix(a, flag+"=") {
+			return true
+		}
 	}
 	return false
+}
+
+// skipGlobalFlags advances past leading flags (anything starting with "-")
+// and their values before finding the subcommand. For flags that take values
+// (found in flagsWithValues), the next argument is also skipped.
+func skipGlobalFlags(args []string) (sub string, remaining []string) {
+	i := 0
+	for i < len(args) {
+		if !strings.HasPrefix(args[i], "-") {
+			return args[i], args[i+1:]
+		}
+		// Handle --flag=value compact form
+		if strings.Contains(args[i], "=") {
+			i++
+			continue
+		}
+		// Check if this flag takes a value
+		if flagsWithValues[args[i]] {
+			i += 2 // skip flag and its value
+		} else {
+			i++ // skip boolean flag
+		}
+	}
+	return "", nil
 }

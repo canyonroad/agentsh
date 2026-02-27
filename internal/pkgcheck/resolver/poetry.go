@@ -44,12 +44,8 @@ func (r *poetryResolver) CanResolve(command string, args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	switch args[0] {
-	case "add", "install":
-		return true
-	default:
-		return false
-	}
+	// Only "add" is supported by Resolve (which runs poetry add --dry-run).
+	return args[0] == "add"
 }
 
 func (r *poetryResolver) Resolve(ctx context.Context, workDir string, command []string) (*pkgcheck.InstallPlan, error) {
@@ -87,6 +83,9 @@ type poetryDryRunPkg struct {
 }
 
 // parsePoetryDryRunOutput parses poetry's output into an InstallPlan.
+// TODO: The expected JSON format {"added":[...]} needs verification against actual
+// poetry CLI output. `poetry add --dry-run` outputs text lines like
+// "- Installing package (version)", not JSON.
 func parsePoetryDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.InstallPlan, error) {
 	var output poetryDryRunOutput
 	if err := json.Unmarshal(data, &output); err != nil {

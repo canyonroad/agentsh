@@ -94,6 +94,7 @@ func TestNPMResolver_CanResolve(t *testing.T) {
 		{"empty args", "npm", nil, false},
 		{"full path", "/usr/local/bin/npm", []string{"install", "express"}, true},
 		{"windows path", "npm.exe", []string{"install", "express"}, true},
+		{"npm.cmd", "npm.cmd", []string{"install", "express"}, true},
 		{"not npm", "pip", []string{"install", "requests"}, false},
 	}
 
@@ -238,13 +239,13 @@ func TestUVResolver_CanResolve(t *testing.T) {
 		want    bool
 	}{
 		{"uv pip install", "uv", []string{"pip", "install", "flask"}, true},
-		{"uv add", "uv", []string{"add", "flask"}, true},
+		{"uv add not supported by resolver", "uv", []string{"add", "flask"}, false},
 		{"uv pip install no args", "uv", []string{"pip", "install"}, true},
 		{"uv run", "uv", []string{"run", "script.py"}, false},
 		{"uv pip only", "uv", []string{"pip"}, false},
 		{"empty args", "uv", nil, false},
 		{"full path", "/usr/local/bin/uv", []string{"pip", "install", "flask"}, true},
-		{"uv.exe", "uv.exe", []string{"add", "flask"}, true},
+		{"uv.exe", "uv.exe", []string{"pip", "install", "flask"}, true},
 		{"not uv", "npm", []string{"install", "express"}, false},
 	}
 
@@ -343,6 +344,7 @@ func TestPNPMResolver_CanResolve(t *testing.T) {
 		{"empty args", "pnpm", nil, false},
 		{"full path", "/usr/local/bin/pnpm", []string{"add", "react"}, true},
 		{"pnpm.exe", "pnpm.exe", []string{"add", "react"}, true},
+		{"pnpm.cmd", "pnpm.cmd", []string{"add", "react"}, true},
 		{"not pnpm", "npm", []string{"install", "express"}, false},
 	}
 
@@ -398,12 +400,13 @@ func TestYarnResolver_CanResolve(t *testing.T) {
 		want    bool
 	}{
 		{"yarn add", "yarn", []string{"add", "typescript"}, true},
-		{"yarn install", "yarn", []string{"install"}, true},
+		{"yarn install not supported by resolver", "yarn", []string{"install"}, false},
 		{"yarn test", "yarn", []string{"test"}, false},
 		{"yarn run", "yarn", []string{"run", "build"}, false},
 		{"empty args", "yarn", nil, false},
 		{"full path", "/usr/local/bin/yarn", []string{"add", "react"}, true},
 		{"yarn.exe", "yarn.exe", []string{"add", "react"}, true},
+		{"yarn.cmd", "yarn.cmd", []string{"add", "react"}, true},
 		{"not yarn", "npm", []string{"install", "express"}, false},
 	}
 
@@ -453,7 +456,7 @@ func TestPoetryResolver_CanResolve(t *testing.T) {
 		want    bool
 	}{
 		{"poetry add", "poetry", []string{"add", "django"}, true},
-		{"poetry install", "poetry", []string{"install"}, true},
+		{"poetry install not supported by resolver", "poetry", []string{"install"}, false},
 		{"poetry build", "poetry", []string{"build"}, false},
 		{"poetry publish", "poetry", []string{"publish"}, false},
 		{"empty args", "poetry", nil, false},

@@ -867,4 +867,180 @@ func TestHasFlag(t *testing.T) {
 	assert.True(t, hasFlag([]string{"--requirement", "requirements.txt"}, "--requirement"))
 	assert.False(t, hasFlag([]string{"--save-dev"}, "-r"))
 	assert.False(t, hasFlag(nil, "-r"))
+	// --flag=value compact form
+	assert.True(t, hasFlag([]string{"--requirement=requirements.txt"}, "--requirement"))
+	assert.True(t, hasFlag([]string{"--index-url=https://example.com"}, "--index-url"))
+}
+
+func TestSkipGlobalFlags(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantSub   string
+		wantRest  []string
+	}{
+		{
+			name:     "no flags",
+			args:     []string{"install", "express"},
+			wantSub:  "install",
+			wantRest: []string{"express"},
+		},
+		{
+			name:     "flags before subcommand",
+			args:     []string{"--python", "/usr/bin/python3", "install", "requests"},
+			wantSub:  "install",
+			wantRest: []string{"requests"},
+		},
+		{
+			name:     "boolean flag before subcommand",
+			args:     []string{"--verbose", "install", "requests"},
+			wantSub:  "install",
+			wantRest: []string{"requests"},
+		},
+		{
+			name:     "flag=value before subcommand",
+			args:     []string{"--prefix=/custom", "install", "requests"},
+			wantSub:  "install",
+			wantRest: []string{"requests"},
+		},
+		{
+			name:     "only flags no subcommand",
+			args:     []string{"--verbose", "--debug"},
+			wantSub:  "",
+			wantRest: nil,
+		},
+		{
+			name:     "empty args",
+			args:     nil,
+			wantSub:  "",
+			wantRest: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sub, rest := skipGlobalFlags(tt.args)
+			assert.Equal(t, tt.wantSub, sub)
+			assert.Equal(t, tt.wantRest, rest)
+		})
+	}
+}
+
+func TestClassifyInstallCommand_WindowsExtensions(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		args    []string
+		wantTool string
+	}{
+		{
+			name:     "npm.cmd",
+			command:  `C:\nodejs\npm.cmd`,
+			args:     []string{"install", "express"},
+			wantTool: "npm",
+		},
+		{
+			name:     "pip.bat",
+			command:  `C:\Python\pip.bat`,
+			args:     []string{"install", "requests"},
+			wantTool: "pip",
+		},
+		{
+			name:     "yarn.CMD uppercase",
+			command:  `C:\yarn\yarn.CMD`,
+			args:     []string{"add", "react"},
+			wantTool: "yarn",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyInstallCommand(tt.command, tt.args, "new_packages_only")
+			require.NotNil(t, got, "expected non-nil intent for %s", tt.command)
+			assert.Equal(t, tt.wantTool, got.Tool)
+		})
+	}
+}
+
+func TestClassifyInstallCommand_GlobalFlagsBeforeSubcommand(t *testing.T) {
+	tests := []struct {
+		name     string
+		command  string
+		args     []string
+		scope    string
+		wantTool string
+		wantPkgs []string
+	}{
+		{
+			name:     "pip --python /path install requests",
+			command:  "pip",
+			args:     []string{"--python", "/usr/bin/python3", "install", "requests"},
+			scope:    "new_packages_only",
+			wantTool: "pip",
+			wantPkgs: []string{"requests"},
+		},
+		{
+			name:     "npm --prefix /path install express",
+			command:  "npm",
+			args:     []string{"--prefix", "/tmp/project", "install", "express"},
+			scope:    "new_packages_only",
+			wantTool: "npm",
+			wantPkgs: []string{"express"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyInstallCommand(tt.command, tt.args, tt.scope)
+			require.NotNil(t, got, "expected non-nil intent")
+			assert.Equal(t, tt.wantTool, got.Tool)
+			assert.Equal(t, tt.wantPkgs, got.Packages)
+		})
+	}
+}
+
+func TestExtractPackages_ExpandedValueFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "timeout flag value not treated as package",
+			args: []string{"--timeout", "5", "requests"},
+			want: []string{"requests"},
+		},
+		{
+			name: "retries flag value not treated as package",
+			args: []string{"--retries", "3", "flask"},
+			want: []string{"flask"},
+		},
+		{
+			name: "cache-dir flag value not treated as package",
+			args: []string{"--cache-dir", "/tmp/cache", "django"},
+			want: []string{"django"},
+		},
+		{
+			name: "proxy flag value not treated as package",
+			args: []string{"--proxy", "http://proxy:8080", "requests"},
+			want: []string{"requests"},
+		},
+		{
+			name: "target -t short flag",
+			args: []string{"-t", "/tmp/target", "numpy"},
+			want: []string{"numpy"},
+		},
+		{
+			name: "trusted-host flag",
+			args: []string{"--trusted-host", "pypi.example.com", "requests"},
+			want: []string{"requests"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractPackages(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }

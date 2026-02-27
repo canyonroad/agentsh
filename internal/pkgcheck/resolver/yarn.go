@@ -38,18 +38,15 @@ func (r *yarnResolver) Name() string { return "yarn" }
 func (r *yarnResolver) CanResolve(command string, args []string) bool {
 	base := filepath.Base(command)
 	base = strings.TrimSuffix(base, ".exe")
+	base = trimWindowsScriptExt(base)
 	if base != "yarn" {
 		return false
 	}
 	if len(args) == 0 {
 		return false
 	}
-	switch args[0] {
-	case "add", "install":
-		return true
-	default:
-		return false
-	}
+	// Only "add" is supported by Resolve (which runs yarn add --mode update-lockfile).
+	return args[0] == "add"
 }
 
 func (r *yarnResolver) Resolve(ctx context.Context, workDir string, command []string) (*pkgcheck.InstallPlan, error) {
@@ -87,6 +84,8 @@ type yarnDryRunPkg struct {
 }
 
 // parseYarnDryRunOutput parses yarn's output into an InstallPlan.
+// TODO: The expected JSON format {"added":[...]} needs verification against actual
+// yarn CLI output. Yarn v1 --json outputs ndjson; v2+ may differ.
 func parseYarnDryRunOutput(data []byte, requestedPkgs []string) (*pkgcheck.InstallPlan, error) {
 	var output yarnDryRunOutput
 	if err := json.Unmarshal(data, &output); err != nil {

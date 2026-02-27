@@ -45,12 +45,8 @@ func (r *uvResolver) CanResolve(command string, args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	// "uv pip install ..."
+	// Only "uv pip install ..." is supported by Resolve (which runs uv pip install --dry-run).
 	if args[0] == "pip" && len(args) > 1 && args[1] == "install" {
-		return true
-	}
-	// "uv add ..."
-	if args[0] == "add" {
 		return true
 	}
 	return false

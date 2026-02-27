@@ -89,24 +89,49 @@ func (c *Cache) Get(key Key) ([]pkgcheck.Finding, bool) {
 	if time.Now().After(e.ExpiresAt) {
 		return nil, false
 	}
-	// Return a copy so callers cannot mutate cached data.
-	out := make([]pkgcheck.Finding, len(e.Findings))
-	copy(out, e.Findings)
-	return out, true
+	// Return a deep copy so callers cannot mutate cached data.
+	return deepCopyFindings(e.Findings), true
 }
 
-// Put stores findings under the given key with the configured TTL.
+// Put stores findings under the given key with a TTL derived from the findings.
+// The TTL is the maximum TTLByType value among all finding types in the batch,
+// falling back to DefaultTTL when no finding type matches.
 func (c *Cache) Put(key Key, findings []pkgcheck.Finding) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	stored := make([]pkgcheck.Finding, len(findings))
-	copy(stored, findings)
+	stored := deepCopyFindings(findings)
+
+	ttl := c.computeTTL(findings)
 
 	c.entries[key.String()] = entry{
 		Findings:  stored,
-		ExpiresAt: time.Now().Add(c.cfg.DefaultTTL),
+		ExpiresAt: time.Now().Add(ttl),
 	}
+}
+
+// computeTTL returns the maximum TTLByType value among all finding types,
+// falling back to DefaultTTL when no match is found.
+func (c *Cache) computeTTL(findings []pkgcheck.Finding) time.Duration {
+	if len(c.cfg.TTLByType) == 0 {
+		return c.cfg.DefaultTTL
+	}
+
+	maxTTL := time.Duration(0)
+	found := false
+	for _, f := range findings {
+		if ttl, ok := c.cfg.TTLByType[string(f.Type)]; ok {
+			if !found || ttl > maxTTL {
+				maxTTL = ttl
+				found = true
+			}
+		}
+	}
+
+	if !found {
+		return c.cfg.DefaultTTL
+	}
+	return maxTTL
 }
 
 // Close flushes all entries to disk.
@@ -140,10 +165,19 @@ func (c *Cache) loadFromDisk() error {
 	return nil
 }
 
-// flushToDisk writes the current entries to the cache file.
+// flushToDisk writes the current non-expired entries to the cache file.
+// Expired entries are filtered out and not persisted.
 // The caller must hold at least an RLock.
 func (c *Cache) flushToDisk() error {
-	df := diskFormat{Entries: c.entries}
+	now := time.Now()
+	filtered := make(map[string]entry, len(c.entries))
+	for k, e := range c.entries {
+		if now.Before(e.ExpiresAt) {
+			filtered[k] = e
+		}
+	}
+
+	df := diskFormat{Entries: filtered}
 	data, err := json.Marshal(df)
 	if err != nil {
 		return fmt.Errorf("marshal cache: %w", err)
@@ -152,4 +186,37 @@ func (c *Cache) flushToDisk() error {
 		return fmt.Errorf("write cache file: %w", err)
 	}
 	return nil
+}
+
+// deepCopyFindings returns a deep copy of a slice of findings,
+// properly copying nested Reasons, Links, and Metadata fields.
+func deepCopyFindings(src []pkgcheck.Finding) []pkgcheck.Finding {
+	if src == nil {
+		return nil
+	}
+	dst := make([]pkgcheck.Finding, len(src))
+	for i, f := range src {
+		dst[i] = f // shallow copy of value fields
+
+		// Deep copy Reasons
+		if f.Reasons != nil {
+			dst[i].Reasons = make([]pkgcheck.Reason, len(f.Reasons))
+			copy(dst[i].Reasons, f.Reasons)
+		}
+
+		// Deep copy Links
+		if f.Links != nil {
+			dst[i].Links = make([]string, len(f.Links))
+			copy(dst[i].Links, f.Links)
+		}
+
+		// Deep copy Metadata
+		if f.Metadata != nil {
+			dst[i].Metadata = make(map[string]string, len(f.Metadata))
+			for k, v := range f.Metadata {
+				dst[i].Metadata[k] = v
+			}
+		}
+	}
+	return dst
 }
