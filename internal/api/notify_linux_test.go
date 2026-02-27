@@ -192,3 +192,40 @@ func TestNotifyHandlerRecover_BrokerPanic_NoCrash(t *testing.T) {
 		t.Errorf("store error = %q, want %q", storeEvs[0].Fields["error"], "original panic")
 	}
 }
+
+// panickingStore is an eventStore whose AppendEvent always panics,
+// used to test that a store panic doesn't prevent broker.Publish.
+type panickingStore struct{}
+
+func (s *panickingStore) AppendEvent(ctx context.Context, ev types.Event) error {
+	panic("store panic")
+}
+
+func TestNotifyHandlerRecover_StorePanic_BrokerStillReceives(t *testing.T) {
+	// Verify that a panicking store doesn't prevent broker.Publish
+	// from being called.
+	store := &panickingStore{}
+	broker := &notifyMockEventBroker{}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer notifyHandlerRecover("test-store-panic", store, broker)
+		panic("original panic")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out — store panic likely crashed the goroutine")
+	}
+
+	// Broker should still have received the event despite the store panicking.
+	evs := broker.getEvents()
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 broker event, got %d", len(evs))
+	}
+	if evs[0].Fields["error"] != "original panic" {
+		t.Errorf("broker error = %q, want %q", evs[0].Fields["error"], "original panic")
+	}
+}

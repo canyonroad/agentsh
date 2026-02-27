@@ -116,8 +116,9 @@ func (a *approvalRequesterAdapter) RequestExecApproval(ctx context.Context, req 
 
 // notifyHandlerRecover is the deferred recovery function for the notify handler
 // goroutine. It logs the panic with a stack trace, persists an event to the
-// store, and publishes it to the broker (both best-effort). Extracted for
-// testability.
+// store, and publishes it to the broker (both best-effort). Each sink is
+// isolated so one panicking doesn't prevent the other from running. Extracted
+// for testability.
 func notifyHandlerRecover(sessID string, store eventStore, broker eventBroker) {
 	r := recover()
 	if r == nil {
@@ -134,12 +135,16 @@ func notifyHandlerRecover(sessID string, store eventStore, broker eventBroker) {
 		},
 	}
 	if store != nil {
-		defer func() { recover() }() // best-effort: don't let AppendEvent panic crash the process
-		_ = store.AppendEvent(context.Background(), ev)
+		func() {
+			defer func() { recover() }()
+			_ = store.AppendEvent(context.Background(), ev)
+		}()
 	}
 	if broker != nil {
-		defer func() { recover() }() // best-effort: don't let Publish panic crash the process
-		broker.Publish(ev)
+		func() {
+			defer func() { recover() }()
+			broker.Publish(ev)
+		}()
 	}
 }
 
