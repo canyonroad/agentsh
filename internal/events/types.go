@@ -87,7 +87,8 @@ const (
 
 // Seccomp events.
 const (
-	EventSeccompBlocked EventType = "seccomp_blocked"
+	EventSeccompBlocked      EventType = "seccomp_blocked"
+	EventNotifyHandlerPanic  EventType = "notify_handler_panic"
 )
 
 // Signal events.
@@ -202,7 +203,8 @@ var EventCategory = map[EventType]string{
 	EventIPCObserved:       "ipc",
 
 	// Seccomp
-	EventSeccompBlocked: "seccomp",
+	EventSeccompBlocked:     "seccomp",
+	EventNotifyHandlerPanic: "seccomp",
 
 	// Signal
 	EventSignalSent:       "signal",
@@ -252,7 +254,7 @@ var AllEventTypes = []EventType{
 	EventUnixSocketConnect, EventUnixSocketBind, EventUnixSocketBlocked,
 	EventNamedPipeOpen, EventNamedPipeBlocked, EventIPCObserved,
 	// Seccomp
-	EventSeccompBlocked,
+	EventSeccompBlocked, EventNotifyHandlerPanic,
 	// Signal
 	EventSignalSent, EventSignalBlocked, EventSignalRedirected,
 	EventSignalAbsorbed, EventSignalApproved, EventSignalWouldDeny,

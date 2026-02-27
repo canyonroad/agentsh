@@ -14,6 +14,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/events"
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -113,6 +114,27 @@ func (a *approvalRequesterAdapter) RequestExecApproval(ctx context.Context, req 
 	return res.Approved, nil
 }
 
+// notifyHandlerRecover is the deferred recovery function for the notify handler
+// goroutine. It logs the panic with a stack trace and publishes an observable
+// event to the broker (best-effort). Extracted for testability.
+func notifyHandlerRecover(sessID string, broker eventBroker) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	slog.Error("panic in notify handler", "recover", r, "session_id", sessID, "stack", string(debug.Stack()))
+	if broker != nil {
+		defer func() { recover() }() // best-effort: don't let Publish panic crash the process
+		broker.Publish(types.Event{
+			Type:      string(events.EventNotifyHandlerPanic),
+			SessionID: sessID,
+			Fields: map[string]any{
+				"error": fmt.Sprint(r),
+			},
+		})
+	}
+}
+
 // startNotifyHandler receives the seccomp notify fd from the parent socket and
 // starts the ServeNotify handler in a goroutine. It returns immediately.
 // The handler runs until ctx is cancelled or the fd is closed.
@@ -124,18 +146,7 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 
 	// Run the entire receive and serve logic in a goroutine to return immediately
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("panic in notify handler", "recover", r, "session_id", sessID, "stack", string(debug.Stack()))
-				broker.Publish(types.Event{
-					Type:      "notify_handler_panic",
-					SessionID: sessID,
-					Fields: map[string]any{
-						"error": fmt.Sprint(r),
-					},
-				})
-			}
-		}()
+		defer notifyHandlerRecover(sessID, broker)
 		defer parentSock.Close()
 		slog.Debug("notify handler started", "session_id", sessID)
 
