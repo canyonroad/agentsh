@@ -29,19 +29,26 @@ type PackageCacheTTL struct {
 
 // RegistryTrustConfig defines trust settings for a package registry.
 type RegistryTrustConfig struct {
-	URL     string `yaml:"url"`
-	Trusted bool   `yaml:"trusted"`
+	Trust  string   `yaml:"trust"`            // "check_full" | "check_local_only" | "trusted"
+	Scopes []string `yaml:"scopes,omitempty"` // e.g., ["@acme"]
 }
 
 // ProviderConfig configures a single check provider.
 type ProviderConfig struct {
-	Enabled bool              `yaml:"enabled"`
-	Config  map[string]string `yaml:"config,omitempty"`
+	Enabled   bool           `yaml:"enabled"`
+	Type      string         `yaml:"type,omitempty"`       // "" (built-in) | "exec"
+	Command   string         `yaml:"command,omitempty"`    // for exec providers
+	Priority  int            `yaml:"priority"`
+	Timeout   time.Duration  `yaml:"timeout"`
+	OnFailure string         `yaml:"on_failure"`           // "warn" | "deny" | "allow" | "approve"
+	APIKeyEnv string         `yaml:"api_key_env,omitempty"`
+	Options   map[string]any `yaml:"options,omitempty"`
 }
 
 // ResolverConfig configures a single lock-file resolver.
 type ResolverConfig struct {
-	Enabled bool `yaml:"enabled"`
+	DryRunCommand string        `yaml:"dry_run_command"`
+	Timeout       time.Duration `yaml:"timeout"`
 }
 
 // DefaultPackageChecksConfig returns the default configuration for package checks.
@@ -60,7 +67,25 @@ func DefaultPackageChecksConfig() PackageChecksConfig {
 			},
 		},
 		Registries: nil,
-		Providers:  nil,
-		Resolvers:  nil,
+		Providers: map[string]ProviderConfig{
+			"osv": {
+				Enabled:   true,
+				Priority:  1,
+				Timeout:   10 * time.Second,
+				OnFailure: "warn",
+			},
+			"depsdev": {
+				Enabled:   true,
+				Priority:  2,
+				Timeout:   10 * time.Second,
+				OnFailure: "warn",
+			},
+			"local": {
+				Enabled:   true,
+				Priority:  0,
+				OnFailure: "warn",
+			},
+		},
+		Resolvers: nil,
 	}
 }

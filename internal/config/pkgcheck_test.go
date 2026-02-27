@@ -20,8 +20,28 @@ func TestDefaultPackageChecksConfig(t *testing.T) {
 	assert.Equal(t, 6*time.Hour, cfg.Cache.TTL.Reputation)
 	assert.Equal(t, 1*time.Hour, cfg.Cache.TTL.Malware)
 	assert.Nil(t, cfg.Registries)
-	assert.Nil(t, cfg.Providers)
 	assert.Nil(t, cfg.Resolvers)
+
+	// Providers should have defaults
+	require.NotNil(t, cfg.Providers)
+	require.Len(t, cfg.Providers, 3)
+
+	osv := cfg.Providers["osv"]
+	assert.True(t, osv.Enabled)
+	assert.Equal(t, 1, osv.Priority)
+	assert.Equal(t, 10*time.Second, osv.Timeout)
+	assert.Equal(t, "warn", osv.OnFailure)
+
+	depsdev := cfg.Providers["depsdev"]
+	assert.True(t, depsdev.Enabled)
+	assert.Equal(t, 2, depsdev.Priority)
+	assert.Equal(t, 10*time.Second, depsdev.Timeout)
+	assert.Equal(t, "warn", depsdev.OnFailure)
+
+	local := cfg.Providers["local"]
+	assert.True(t, local.Enabled)
+	assert.Equal(t, 0, local.Priority)
+	assert.Equal(t, "warn", local.OnFailure)
 }
 
 func TestPackageChecksConfig_YAMLRoundTrip(t *testing.T) {
@@ -40,19 +60,34 @@ func TestPackageChecksConfig_YAMLRoundTrip(t *testing.T) {
 		},
 		Registries: map[string]RegistryTrustConfig{
 			"npmjs": {
-				URL:     "https://registry.npmjs.org",
-				Trusted: true,
+				Trust:  "check_full",
+				Scopes: []string{"@acme", "@internal"},
+			},
+			"private": {
+				Trust: "trusted",
 			},
 		},
 		Providers: map[string]ProviderConfig{
 			"osv": {
-				Enabled: true,
-				Config:  map[string]string{"api_url": "https://api.osv.dev"},
+				Enabled:   true,
+				Priority:  1,
+				Timeout:   10 * time.Second,
+				OnFailure: "warn",
+			},
+			"custom": {
+				Enabled:   true,
+				Type:      "exec",
+				Command:   "/usr/local/bin/check",
+				Priority:  5,
+				Timeout:   30 * time.Second,
+				OnFailure: "deny",
+				APIKeyEnv: "CUSTOM_API_KEY",
+				Options:   map[string]any{"verbose": true},
 			},
 		},
 		Resolvers: map[string]ResolverConfig{
-			"npm": {Enabled: true},
-			"pip": {Enabled: false},
+			"npm": {DryRunCommand: "npm install --dry-run --json", Timeout: 30 * time.Second},
+			"pip": {DryRunCommand: "pip install --dry-run", Timeout: 20 * time.Second},
 		},
 	}
 
@@ -69,12 +104,34 @@ func TestPackageChecksConfig_YAMLRoundTrip(t *testing.T) {
 	assert.Equal(t, original.Cache.TTL.Vulnerability, decoded.Cache.TTL.Vulnerability)
 	assert.Equal(t, original.Cache.TTL.License, decoded.Cache.TTL.License)
 	assert.Equal(t, original.Cache.TTL.Malware, decoded.Cache.TTL.Malware)
-	assert.True(t, decoded.Registries["npmjs"].Trusted)
-	assert.Equal(t, "https://registry.npmjs.org", decoded.Registries["npmjs"].URL)
-	assert.True(t, decoded.Providers["osv"].Enabled)
-	assert.Equal(t, "https://api.osv.dev", decoded.Providers["osv"].Config["api_url"])
-	assert.True(t, decoded.Resolvers["npm"].Enabled)
-	assert.False(t, decoded.Resolvers["pip"].Enabled)
+
+	// RegistryTrustConfig fields
+	assert.Equal(t, "check_full", decoded.Registries["npmjs"].Trust)
+	assert.Equal(t, []string{"@acme", "@internal"}, decoded.Registries["npmjs"].Scopes)
+	assert.Equal(t, "trusted", decoded.Registries["private"].Trust)
+	assert.Nil(t, decoded.Registries["private"].Scopes)
+
+	// ProviderConfig fields
+	osv := decoded.Providers["osv"]
+	assert.True(t, osv.Enabled)
+	assert.Equal(t, 1, osv.Priority)
+	assert.Equal(t, 10*time.Second, osv.Timeout)
+	assert.Equal(t, "warn", osv.OnFailure)
+
+	custom := decoded.Providers["custom"]
+	assert.True(t, custom.Enabled)
+	assert.Equal(t, "exec", custom.Type)
+	assert.Equal(t, "/usr/local/bin/check", custom.Command)
+	assert.Equal(t, 5, custom.Priority)
+	assert.Equal(t, 30*time.Second, custom.Timeout)
+	assert.Equal(t, "deny", custom.OnFailure)
+	assert.Equal(t, "CUSTOM_API_KEY", custom.APIKeyEnv)
+
+	// ResolverConfig fields
+	assert.Equal(t, "npm install --dry-run --json", decoded.Resolvers["npm"].DryRunCommand)
+	assert.Equal(t, 30*time.Second, decoded.Resolvers["npm"].Timeout)
+	assert.Equal(t, "pip install --dry-run", decoded.Resolvers["pip"].DryRunCommand)
+	assert.Equal(t, 20*time.Second, decoded.Resolvers["pip"].Timeout)
 }
 
 func TestPackageChecksConfig_InConfig(t *testing.T) {
