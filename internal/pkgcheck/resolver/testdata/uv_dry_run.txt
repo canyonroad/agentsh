@@ -1,0 +1,2 @@
+Resolved 5 packages in 120ms
+Would install flask-3.0.0 werkzeug-3.0.1 jinja2-3.1.2 markupsafe-2.1.3 itsdangerous-2.1.2

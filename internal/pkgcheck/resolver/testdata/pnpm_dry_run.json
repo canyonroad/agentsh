@@ -1,0 +1,24 @@
+{
+  "added": [
+    {
+      "name": "react",
+      "version": "18.2.0"
+    },
+    {
+      "name": "react-dom",
+      "version": "18.2.0"
+    },
+    {
+      "name": "js-tokens",
+      "version": "4.0.0"
+    },
+    {
+      "name": "loose-envify",
+      "version": "1.4.0"
+    },
+    {
+      "name": "scheduler",
+      "version": "0.23.0"
+    }
+  ]
+}
