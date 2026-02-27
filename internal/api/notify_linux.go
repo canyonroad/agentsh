@@ -4,14 +4,17 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/events"
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -19,7 +22,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// recvFDTimeout is the timeout for receiving the notify fd from the wrapper.
+// recoverTimeout is the maximum time to spend persisting a panic event
+// in the recovery path. Prevents a slow store from blocking broker delivery.
+const recoverTimeout = 5 * time.Second
 // This prevents blocking forever if the wrapper fails to set up seccomp.
 const recvFDTimeout = 10 * time.Second
 
@@ -111,6 +116,53 @@ func (a *approvalRequesterAdapter) RequestExecApproval(ctx context.Context, req 
 	return res.Approved, nil
 }
 
+// notifyHandlerRecover is the deferred recovery function for the notify handler
+// goroutine. It logs the panic with a stack trace, persists an event to the
+// store, and publishes it to the broker (both best-effort). Each sink is
+// isolated so one panicking doesn't prevent the other from running. Extracted
+// for testability.
+func notifyHandlerRecover(sessID string, store eventStore, broker eventBroker) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	slog.Error("panic in notify handler", "recover", r, "session_id", sessID, "stack", string(debug.Stack()))
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      string(events.EventNotifyHandlerPanic),
+		SessionID: sessID,
+		Fields: map[string]any{
+			"error": fmt.Sprint(r),
+		},
+	}
+	// Run store and broker delivery concurrently so a slow/blocking store
+	// cannot prevent broker publish. Both are best-effort with panic guards.
+	delivered := make(chan struct{})
+	if store != nil {
+		go func() {
+			defer func() { recover() }()
+			ctx, cancel := context.WithTimeout(context.Background(), recoverTimeout)
+			defer cancel()
+			_ = store.AppendEvent(ctx, ev)
+		}()
+	}
+	if broker != nil {
+		go func() {
+			defer close(delivered)
+			defer func() { recover() }()
+			broker.Publish(ev)
+		}()
+	} else {
+		close(delivered)
+	}
+	// Wait for broker delivery (bounded) but don't wait for store.
+	select {
+	case <-delivered:
+	case <-time.After(recoverTimeout):
+	}
+}
+
 // startNotifyHandler receives the seccomp notify fd from the parent socket and
 // starts the ServeNotify handler in a goroutine. It returns immediately.
 // The handler runs until ctx is cancelled or the fd is closed.
@@ -122,6 +174,7 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 
 	// Run the entire receive and serve logic in a goroutine to return immediately
 	go func() {
+		defer notifyHandlerRecover(sessID, store, broker)
 		defer parentSock.Close()
 		slog.Debug("notify handler started", "session_id", sessID)
 

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -11,20 +12,34 @@ import (
 )
 
 type notifyMockEventStore struct {
+	mu     sync.Mutex
 	events []types.Event
 }
 
 func (m *notifyMockEventStore) AppendEvent(ctx context.Context, ev types.Event) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.events = append(m.events, ev)
 	return nil
 }
 
 type notifyMockEventBroker struct {
+	mu     sync.Mutex
 	events []types.Event
 }
 
 func (m *notifyMockEventBroker) Publish(ev types.Event) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.events = append(m.events, ev)
+}
+
+func (m *notifyMockEventBroker) getEvents() []types.Event {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make([]types.Event, len(m.events))
+	copy(cp, m.events)
+	return cp
 }
 
 func TestStartNotifyHandler_NilSocket_NoOp(t *testing.T) {
