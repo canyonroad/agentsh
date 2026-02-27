@@ -456,6 +456,13 @@ func (p Policy) Validate() error {
 		}
 	}
 
+	// Validate package rules
+	for i, r := range p.PackageRules {
+		if len(r.Match.Options) > 0 {
+			return fmt.Errorf("package rule %d: match.options is not yet supported; remove options or wait for a future release", i)
+		}
+	}
+
 	// Validate connect redirect rules
 	for i, r := range p.ConnectRedirectRules {
 		if r.Name == "" {

@@ -169,12 +169,13 @@ func matchesRule(f Finding, ecosystem Ecosystem, m policy.PackageMatch) bool {
 		}
 	}
 
-	// TODO: implement Options evaluation; currently matches conservatively when Options is set
-	// Options check: if Options is non-empty and all other conditions match,
-	// we treat the rule as matching. This is conservative -- better to
-	// over-enforce than under-enforce, because in a first-match-wins system
-	// returning false here would let the finding fall through to a catch-all
-	// allow rule, effectively bypassing the intended restriction.
+	// Options check: Options is not yet implemented. Rules with non-empty
+	// Options are rejected at validation time (Policy.Validate), so this
+	// code path should never be hit in practice. Return false (non-match)
+	// as a safe fallback.
+	if len(m.Options) > 0 {
+		return false
+	}
 
 	return true
 }

@@ -95,6 +95,7 @@ func TestNPMResolver_CanResolve(t *testing.T) {
 		{"full path", "/usr/local/bin/npm", []string{"install", "express"}, true},
 		{"windows path", "npm.exe", []string{"install", "express"}, true},
 		{"npm.cmd", "npm.cmd", []string{"install", "express"}, true},
+		{"mixed case NPM.EXE", "NPM.EXE", []string{"install", "express"}, true},
 		{"not npm", "pip", []string{"install", "requests"}, false},
 	}
 
@@ -170,6 +171,7 @@ func TestPipResolver_CanResolve(t *testing.T) {
 		{"empty args", "pip", nil, false},
 		{"full path", "/usr/bin/pip3", []string{"install", "requests"}, true},
 		{"pip.exe", "pip.exe", []string{"install", "requests"}, true},
+		{"mixed case PIP3.CMD", "PIP3.CMD", []string{"install", "requests"}, true},
 		{"not pip", "npm", []string{"install", "express"}, false},
 	}
 
@@ -246,6 +248,7 @@ func TestUVResolver_CanResolve(t *testing.T) {
 		{"empty args", "uv", nil, false},
 		{"full path", "/usr/local/bin/uv", []string{"pip", "install", "flask"}, true},
 		{"uv.exe", "uv.exe", []string{"pip", "install", "flask"}, true},
+		{"mixed case UV.EXE", "UV.EXE", []string{"pip", "install", "flask"}, true},
 		{"not uv", "npm", []string{"install", "express"}, false},
 	}
 
@@ -345,6 +348,7 @@ func TestPNPMResolver_CanResolve(t *testing.T) {
 		{"full path", "/usr/local/bin/pnpm", []string{"add", "react"}, true},
 		{"pnpm.exe", "pnpm.exe", []string{"add", "react"}, true},
 		{"pnpm.cmd", "pnpm.cmd", []string{"add", "react"}, true},
+		{"mixed case Pnpm.Cmd", "Pnpm.Cmd", []string{"add", "react"}, true},
 		{"not pnpm", "npm", []string{"install", "express"}, false},
 	}
 
@@ -407,6 +411,7 @@ func TestYarnResolver_CanResolve(t *testing.T) {
 		{"full path", "/usr/local/bin/yarn", []string{"add", "react"}, true},
 		{"yarn.exe", "yarn.exe", []string{"add", "react"}, true},
 		{"yarn.cmd", "yarn.cmd", []string{"add", "react"}, true},
+		{"mixed case YARN.BAT", "YARN.BAT", []string{"add", "react"}, true},
 		{"not yarn", "npm", []string{"install", "express"}, false},
 	}
 
@@ -462,6 +467,7 @@ func TestPoetryResolver_CanResolve(t *testing.T) {
 		{"empty args", "poetry", nil, false},
 		{"full path", "/usr/local/bin/poetry", []string{"add", "django"}, true},
 		{"poetry.exe", "poetry.exe", []string{"add", "django"}, true},
+		{"mixed case Poetry.Cmd", "Poetry.Cmd", []string{"add", "django"}, true},
 		{"not poetry", "pip", []string{"install", "requests"}, false},
 	}
 

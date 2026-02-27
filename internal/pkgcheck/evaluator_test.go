@@ -299,9 +299,10 @@ func TestEvaluatorNamePatterns(t *testing.T) {
 	assert.Equal(t, VerdictAllow, verdict3.Action)
 }
 
-func TestEvaluatorOptionsConservativeMatch(t *testing.T) {
-	// When Options is set but all other conditions match, the rule should
-	// match conservatively (not fall through to catch-all allow).
+func TestEvaluatorOptionsNonMatch(t *testing.T) {
+	// Rules with Options are rejected at validation time (Policy.Validate),
+	// so in practice the evaluator never sees them. But if it does, the
+	// Options rule should be a non-match so it falls through safely.
 	rules := []policy.PackageRule{
 		{
 			Match: policy.PackageMatch{
@@ -310,7 +311,7 @@ func TestEvaluatorOptionsConservativeMatch(t *testing.T) {
 				Options:     map[string]any{"some_option": "value"},
 			},
 			Action: "deny",
-			Reason: "critical vulns with options should still match",
+			Reason: "this rule has unsupported Options, should not match",
 		},
 		{
 			Match:  policy.PackageMatch{},
@@ -333,11 +334,11 @@ func TestEvaluatorOptionsConservativeMatch(t *testing.T) {
 	verdict := ev.Evaluate(findings, EcosystemNPM)
 
 	require.NotNil(t, verdict)
-	// With the conservative Options handling, the deny rule should match
-	// (not fall through to the catch-all allow).
-	assert.Equal(t, VerdictBlock, verdict.Action)
+	// The Options rule should NOT match; the finding falls through to
+	// the catch-all allow rule.
+	assert.Equal(t, VerdictAllow, verdict.Action)
 
 	pv, ok := verdict.Packages["bad-pkg@1.0.0"]
 	require.True(t, ok)
-	assert.Equal(t, VerdictBlock, pv.Action)
+	assert.Equal(t, VerdictAllow, pv.Action)
 }
