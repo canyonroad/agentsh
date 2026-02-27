@@ -32,6 +32,14 @@ jobs:
           restore-keys: |
             release-${{ runner.os }}-go-
 
+      - name: Free disk space
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h /tmp /home/runner
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/powershell
+          echo "=== Disk space after cleanup ==="
+          df -h /tmp /home/runner
+
       - name: Install build deps (envshim, fuse, seccomp)
         run: |
           sudo apt-get update
@@ -43,7 +51,11 @@ jobs:
             make
 
       - name: Test
-        run: go test -p=1 ./...
+        run: |
+          mkdir -p "$GOTMPDIR"
+          go test -p=1 ./...
+        env:
+          GOTMPDIR: ${{ runner.temp }}/go-tmp
 
       - name: Smoke
         run: make smoke
