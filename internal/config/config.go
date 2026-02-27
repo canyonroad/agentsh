@@ -32,6 +32,7 @@ type Config struct {
 	Landlock          LandlockConfig          `yaml:"landlock"`
 	LinuxCapabilities CapabilitiesConfig      `yaml:"capabilities"`
 	ThreatFeeds       ThreatFeedsConfig       `yaml:"threat_feeds"`
+	PackageChecks     PackageChecksConfig     `yaml:"package_checks"`
 }
 
 // PlatformConfig configures cross-platform selection and fallback behavior.
