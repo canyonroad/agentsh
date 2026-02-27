@@ -180,6 +180,7 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 			sessionID:     cfg.SessionID,
 			commandIDFunc: cfg.CommandIDFunc,
 		},
+		TraceContextFunc: cfg.TraceContextFunc,
 	}
 
 	// Set up trash/soft-delete if configured
@@ -334,9 +335,9 @@ func (e *eventEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
 }
 
 // Publish implements fsmonitor.Emitter.
-func (e *eventEmitter) Publish(ev types.Event) {
-	_ = e.AppendEvent(context.Background(), ev)
-}
+// No-op: AppendEvent already sends to the event channel, and processIOEvents
+// handles both store.AppendEvent and broker.Publish on the receiving end.
+func (e *eventEmitter) Publish(ev types.Event) {}
 
 // wrapPolicyEngine extracts *policy.Engine from platform.PolicyEngine.
 // If the PolicyEngine is a *PolicyAdapter, it returns the underlying engine.

@@ -75,6 +75,10 @@ type FSConfig struct {
 	// CommandIDFunc returns the current command ID (called per-operation)
 	CommandIDFunc func() string
 
+	// TraceContextFunc returns the current W3C trace context (trace_id, span_id)
+	// for distributed tracing correlation (called per-operation)
+	TraceContextFunc func() (traceID, spanID string)
+
 	// PolicyEngine evaluates access decisions
 	PolicyEngine PolicyEngine
 

@@ -277,6 +277,15 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 	defer unlock()
 	sess.SetCurrentCommandID(cmdID)
 
+	// Propagate W3C trace context for distributed tracing correlation
+	if md, ok := metadata.FromIncomingContext(stream.Context()); ok {
+		if tp := firstMetadataValue(md, "traceparent"); tp != "" {
+			if traceID, spanID, ok := parseTraceparent(tp); ok {
+				sess.SetCurrentTraceContext(traceID, spanID)
+			}
+		}
+	}
+
 	pre := s.app.policy.CheckCommand(execReq.Command, execReq.Args)
 	redirected, originalCmd, originalArgs := applyCommandRedirect(&execReq.Command, &execReq.Args, pre)
 	approvalErr := error(nil)
@@ -325,6 +334,7 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 			"args":    originalArgs,
 		},
 	}
+	sess.InjectTraceContext(preEv.Fields)
 	_ = s.app.store.AppendEvent(stream.Context(), preEv)
 	s.app.broker.Publish(preEv)
 
@@ -349,6 +359,7 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 				"to_args":      execReq.Args,
 			},
 		}
+		sess.InjectTraceContext(redirEv.Fields)
 		_ = s.app.store.AppendEvent(stream.Context(), redirEv)
 		s.app.broker.Publish(redirEv)
 	}
@@ -377,6 +388,7 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 			"args":    execReq.Args,
 		},
 	}
+	sess.InjectTraceContext(startEv.Fields)
 	_ = s.app.store.AppendEvent(stream.Context(), startEv)
 	s.app.broker.Publish(startEv)
 
@@ -430,6 +442,7 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 	if execErr != nil {
 		endEv.Fields["error"] = execErr.Error()
 	}
+	sess.InjectTraceContext(endEv.Fields)
 	_ = s.app.store.AppendEvent(stream.Context(), endEv)
 	s.app.broker.Publish(endEv)
 
@@ -931,6 +944,19 @@ func firstMetadataValue(md metadata.MD, key string) string {
 		return ""
 	}
 	return vals[0]
+}
+
+// parseTraceparent parses a W3C traceparent header into trace ID and span ID.
+// Format: version-trace_id-parent_id-trace_flags (e.g., 00-<32hex>-<16hex>-01)
+func parseTraceparent(tp string) (traceID, spanID string, ok bool) {
+	parts := strings.Split(tp, "-")
+	if len(parts) != 4 {
+		return "", "", false
+	}
+	if len(parts[1]) != 32 || len(parts[2]) != 16 {
+		return "", "", false
+	}
+	return parts[1], parts[2], true
 }
 
 func (a *App) grpcCreateSession(ctx context.Context, reqJSON []byte) (*structpb.Struct, error) {

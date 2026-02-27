@@ -28,12 +28,13 @@ type Emitter interface {
 }
 
 type Hooks struct {
-	SessionID string
-	Session   *session.Session
-	Policy    *policy.Engine
-	Approvals *approvals.Manager
-	Emit      Emitter
-	FUSEAudit *FUSEAuditHooks
+	SessionID        string
+	Session          *session.Session
+	Policy           *policy.Engine
+	Approvals        *approvals.Manager
+	Emit             Emitter
+	FUSEAudit        *FUSEAuditHooks
+	TraceContextFunc func() (traceID, spanID string)
 }
 
 func NewMonitoredLoopbackRoot(realRoot string, hooks *Hooks) (fs.InodeEmbedder, error) {
@@ -496,6 +497,17 @@ func (n *node) emitFileEvent(ctx context.Context, evType string, virtPath string
 	ev.Fields["blocked"] = blocked
 	for k, v := range extra {
 		ev.Fields[k] = v
+	}
+	// Inject W3C trace context from the current command execution
+	if n.hooks.Session != nil {
+		n.hooks.Session.InjectTraceContext(ev.Fields)
+	} else if n.hooks.TraceContextFunc != nil {
+		if tid, sid := n.hooks.TraceContextFunc(); tid != "" {
+			ev.Fields["trace_id"] = tid
+			if sid != "" {
+				ev.Fields["span_id"] = sid
+			}
+		}
 	}
 	if err := n.hooks.Emit.AppendEvent(ctx, ev); err != nil {
 		fmt.Fprintf(os.Stderr, "fuse: failed to append event (type=%s path=%s): %v\n", evType, virtPath, err)

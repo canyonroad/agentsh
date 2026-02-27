@@ -40,7 +40,9 @@ func eventContext(ctx context.Context, ev types.Event) context.Context {
 		return ctx
 	}
 
-	cfg := trace.SpanContextConfig{}
+	cfg := trace.SpanContextConfig{
+		TraceFlags: trace.FlagsSampled,
+	}
 	if hasTrace {
 		cfg.TraceID = traceID
 	}

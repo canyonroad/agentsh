@@ -162,6 +162,7 @@ func (a *App) Router() http.Handler {
 		r.Get("/sessions/{id}/output/{cmdID}", a.getOutputChunk)
 		r.Post("/sessions/{id}/kill/{cmdID}", a.killCommand)
 		r.Post("/sessions/{id}/wrap-init", a.wrapInit)
+		r.Put("/sessions/{id}/trace-context", a.setTraceContext)
 
 		r.Get("/events/search", a.searchEvents)
 
@@ -735,7 +736,11 @@ func (a *App) execInSession(w http.ResponseWriter, r *http.Request) {
 	if ok := decodeJSON(w, r, &req, "invalid json"); !ok {
 		return
 	}
-	resp, code, err := a.execInSessionCore(r.Context(), id, req)
+	ctx := r.Context()
+	if tp := r.Header.Get("Traceparent"); tp != "" {
+		ctx = withTraceparent(ctx, tp)
+	}
+	resp, code, err := a.execInSessionCore(ctx, id, req)
 	if err != nil {
 		writeJSON(w, code, map[string]any{"error": err.Error()})
 		return

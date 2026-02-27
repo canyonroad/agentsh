@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -322,6 +323,10 @@ func (c *Client) doJSON(ctx context.Context, method, path string, q url.Values, 
 func (c *Client) addAuth(req *http.Request) {
 	if c.apiKey != "" {
 		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	// Propagate W3C trace context so agentsh events nest under the caller's trace
+	if tp := os.Getenv("TRACEPARENT"); tp != "" {
+		req.Header.Set("Traceparent", tp)
 	}
 }
 
