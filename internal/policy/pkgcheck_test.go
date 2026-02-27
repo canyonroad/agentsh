@@ -140,6 +140,44 @@ name: test
 	assert.Nil(t, p.PackageRules)
 }
 
+func TestPackageRules_ValidateRejectsOptions(t *testing.T) {
+	p := Policy{
+		Version: 1,
+		Name:    "test-validate-options",
+		PackageRules: []PackageRule{
+			{
+				Match: PackageMatch{
+					FindingType: "license",
+					Options:     map[string]any{"strict": true},
+				},
+				Action: "approve",
+			},
+		},
+	}
+	err := p.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "match.options is not yet supported")
+}
+
+func TestPackageRules_ValidateAcceptsNoOptions(t *testing.T) {
+	p := Policy{
+		Version: 1,
+		Name:    "test-validate-no-options",
+		PackageRules: []PackageRule{
+			{
+				Match:  PackageMatch{FindingType: "vulnerability", Severity: "critical"},
+				Action: "block",
+			},
+			{
+				Match:  PackageMatch{},
+				Action: "allow",
+			},
+		},
+	}
+	err := p.Validate()
+	require.NoError(t, err)
+}
+
 func TestPackageRules_RoundTrip(t *testing.T) {
 	original := []PackageRule{
 		{

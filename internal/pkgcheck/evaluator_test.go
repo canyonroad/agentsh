@@ -342,3 +342,84 @@ func TestEvaluatorOptionsNonMatch(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, VerdictAllow, pv.Action)
 }
+
+func TestNewEvaluatorFiltersOptionsRules(t *testing.T) {
+	// NewEvaluator should silently drop rules that have non-empty Options
+	// as a defense-in-depth measure.
+	rules := []policy.PackageRule{
+		{
+			Match: policy.PackageMatch{
+				FindingType: "vulnerability",
+				Severity:    "critical",
+				Options:     map[string]any{"strict": true},
+			},
+			Action: "deny",
+			Reason: "should be filtered out",
+		},
+		{
+			Match:  policy.PackageMatch{FindingType: "vulnerability", Severity: "critical"},
+			Action: "deny",
+			Reason: "this one stays",
+		},
+		{
+			Match:  policy.PackageMatch{},
+			Action: "allow",
+			Reason: "default allow",
+		},
+	}
+
+	ev := NewEvaluator(rules)
+
+	// The Options rule is filtered out, so the evaluator should still have
+	// the non-Options deny rule. A critical vuln finding should be blocked.
+	findings := []Finding{
+		{
+			Type:     FindingVulnerability,
+			Provider: "osv",
+			Package:  PackageRef{Name: "vuln-pkg", Version: "1.0.0"},
+			Severity: SeverityCritical,
+			Title:    "critical vulnerability",
+		},
+	}
+
+	verdict := ev.Evaluate(findings, EcosystemNPM)
+	require.NotNil(t, verdict)
+	assert.Equal(t, VerdictBlock, verdict.Action, "non-Options deny rule should still match")
+}
+
+func TestNewEvaluatorAllOptionsRulesFilteredFallsThrough(t *testing.T) {
+	// If all deny rules have Options and are filtered out, findings
+	// should fall through to the catch-all allow rule.
+	rules := []policy.PackageRule{
+		{
+			Match: policy.PackageMatch{
+				FindingType: "vulnerability",
+				Severity:    "critical",
+				Options:     map[string]any{"extra": 42},
+			},
+			Action: "deny",
+			Reason: "filtered out due to Options",
+		},
+		{
+			Match:  policy.PackageMatch{},
+			Action: "allow",
+			Reason: "default allow",
+		},
+	}
+
+	ev := NewEvaluator(rules)
+
+	findings := []Finding{
+		{
+			Type:     FindingVulnerability,
+			Provider: "osv",
+			Package:  PackageRef{Name: "pkg", Version: "2.0.0"},
+			Severity: SeverityCritical,
+			Title:    "critical vulnerability",
+		},
+	}
+
+	verdict := ev.Evaluate(findings, EcosystemNPM)
+	require.NotNil(t, verdict)
+	assert.Equal(t, VerdictAllow, verdict.Action, "only catch-all allow rule remains")
+}

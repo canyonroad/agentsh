@@ -15,8 +15,18 @@ type Evaluator struct {
 }
 
 // NewEvaluator creates a new Evaluator with the given rules.
+// Rules with non-empty Match.Options are silently filtered out as a
+// defense-in-depth measure. The primary validation gate is
+// Policy.Validate(), which rejects such rules at load time.
 func NewEvaluator(rules []policy.PackageRule) *Evaluator {
-	return &Evaluator{rules: rules}
+	var valid []policy.PackageRule
+	for _, r := range rules {
+		if len(r.Match.Options) > 0 {
+			continue
+		}
+		valid = append(valid, r)
+	}
+	return &Evaluator{rules: valid}
 }
 
 // Evaluate applies the configured rules to the provided findings and returns
