@@ -22,7 +22,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// recvFDTimeout is the timeout for receiving the notify fd from the wrapper.
+// recoverTimeout is the maximum time to spend persisting a panic event
+// in the recovery path. Prevents a slow store from blocking broker delivery.
+const recoverTimeout = 5 * time.Second
 // This prevents blocking forever if the wrapper fails to set up seccomp.
 const recvFDTimeout = 10 * time.Second
 
@@ -137,7 +139,9 @@ func notifyHandlerRecover(sessID string, store eventStore, broker eventBroker) {
 	if store != nil {
 		func() {
 			defer func() { recover() }()
-			_ = store.AppendEvent(context.Background(), ev)
+			ctx, cancel := context.WithTimeout(context.Background(), recoverTimeout)
+			defer cancel()
+			_ = store.AppendEvent(ctx, ev)
 		}()
 	}
 	if broker != nil {
