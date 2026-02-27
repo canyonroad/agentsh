@@ -958,7 +958,7 @@ func parseTraceparent(tp string) (traceID, spanID, traceFlags string, ok bool) {
 	version := parts[0]
 	traceID, spanID, traceFlags = parts[1], parts[2], parts[3]
 	// Validate version: must be 2 hex chars, reject "ff" (reserved per W3C spec)
-	if !isValidHex(version, 2) || version == "ff" {
+	if !isValidHex(version, 2) || strings.ToLower(version) == "ff" {
 		return "", "", "", false
 	}
 	if !isValidHex(traceID, 32) || !isValidHex(spanID, 16) || !isValidHex(traceFlags, 2) {

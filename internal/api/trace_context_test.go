@@ -56,6 +56,7 @@ func TestParseTraceparent_Invalid(t *testing.T) {
 		{"all-zero span_id", "00-0af7651916cd43dd8448eb211c80319c-0000000000000000-01"},
 		{"empty", ""},
 		{"reserved version ff", "ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
+		{"reserved version FF uppercase", "FF-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
 		{"non-hex version", "zz-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
 	}
 	for _, tt := range tests {
