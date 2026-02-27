@@ -36,9 +36,10 @@ func NewPoetryResolver(cfg PoetryResolverConfig) pkgcheck.Resolver {
 func (r *poetryResolver) Name() string { return "poetry" }
 
 func (r *poetryResolver) CanResolve(command string, args []string) bool {
-	base := filepath.Base(command)
+	base := strings.ToLower(filepath.Base(command))
 	base = strings.TrimSuffix(base, ".exe")
-	base = strings.ToLower(base)
+	base = strings.TrimSuffix(base, ".cmd")
+	base = strings.TrimSuffix(base, ".bat")
 	if base != "poetry" {
 		return false
 	}

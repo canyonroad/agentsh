@@ -1030,3 +1030,57 @@ func TestExtractPackages_ExpandedValueFlags(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyInstallCommand_MixedCaseExecutables(t *testing.T) {
+	tests := []struct {
+		name     string
+		command  string
+		args     []string
+		wantTool string
+	}{
+		{
+			name:     "NPM.EXE uppercase",
+			command:  `C:\Program Files\nodejs\NPM.EXE`,
+			args:     []string{"install", "express"},
+			wantTool: "npm",
+		},
+		{
+			name:     "PIP3.CMD uppercase",
+			command:  `C:\Python\PIP3.CMD`,
+			args:     []string{"install", "requests"},
+			wantTool: "pip",
+		},
+		{
+			name:     "Yarn.Exe mixed case",
+			command:  `C:\Yarn\Yarn.Exe`,
+			args:     []string{"add", "react"},
+			wantTool: "yarn",
+		},
+		{
+			name:     "PNPM.BAT uppercase",
+			command:  `C:\pnpm\PNPM.BAT`,
+			args:     []string{"add", "vue"},
+			wantTool: "pnpm",
+		},
+		{
+			name:     "UV.EXE uppercase",
+			command:  `C:\Python\UV.EXE`,
+			args:     []string{"pip", "install", "flask"},
+			wantTool: "uv",
+		},
+		{
+			name:     "POETRY.CMD uppercase",
+			command:  `C:\Python\POETRY.CMD`,
+			args:     []string{"add", "django"},
+			wantTool: "poetry",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyInstallCommand(tt.command, tt.args, "new_packages_only")
+			require.NotNil(t, got, "expected non-nil intent for %s", tt.command)
+			assert.Equal(t, tt.wantTool, got.Tool)
+		})
+	}
+}

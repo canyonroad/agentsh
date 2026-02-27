@@ -204,3 +204,84 @@ func TestCheckerProviderFailureWarn(t *testing.T) {
 	// With the "warn" on_failure, a finding is injected but the default rule allows.
 	assert.Equal(t, VerdictAllow, verdict.Action)
 }
+
+func TestCheckerMixedProviderFailures_DenyWins(t *testing.T) {
+	// Two providers fail: one with on_failure="approve", one with on_failure="deny".
+	// The deny (VerdictBlock) is stricter than approve, so deny must win.
+	resolver := &mockResolver{
+		name:       "npm-resolver",
+		canResolve: true,
+		plan: &InstallPlan{
+			Tool:      "npm",
+			Ecosystem: EcosystemNPM,
+			Direct: []PackageRef{
+				{Name: "lodash", Version: "4.17.21", Direct: true},
+			},
+		},
+	}
+	approveProvider := &mockProvider{
+		name: "approve-provider",
+		err:  assert.AnError,
+	}
+	denyProvider := &mockProvider{
+		name: "deny-provider",
+		err:  assert.AnError,
+	}
+	rules := []policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	}
+
+	checker := newTestChecker(
+		[]Resolver{resolver},
+		map[string]ProviderEntry{
+			"approve-provider": {Provider: approveProvider, Timeout: 5 * time.Second, OnFailure: "approve"},
+			"deny-provider":    {Provider: denyProvider, Timeout: 5 * time.Second, OnFailure: "deny"},
+		},
+		rules,
+	)
+
+	verdict, err := checker.Check(context.Background(), "npm", []string{"install", "lodash"}, t.TempDir())
+	require.NoError(t, err)
+	require.NotNil(t, verdict)
+	// Deny is stricter than approve, so block must win.
+	assert.Equal(t, VerdictBlock, verdict.Action)
+	assert.Contains(t, verdict.Summary, "on_failure=deny")
+}
+
+func TestCheckerProviderFailureApproveUpgrades(t *testing.T) {
+	// Provider fails with on_failure="approve" and findings evaluate to allow.
+	// The approve failure should upgrade the verdict from allow to approve.
+	resolver := &mockResolver{
+		name:       "npm-resolver",
+		canResolve: true,
+		plan: &InstallPlan{
+			Tool:      "npm",
+			Ecosystem: EcosystemNPM,
+			Direct: []PackageRef{
+				{Name: "express", Version: "4.18.0", Direct: true},
+			},
+		},
+	}
+	failProvider := &mockProvider{
+		name: "approve-on-fail",
+		err:  assert.AnError,
+	}
+	rules := []policy.PackageRule{
+		{Match: policy.PackageMatch{}, Action: "allow"},
+	}
+
+	checker := newTestChecker(
+		[]Resolver{resolver},
+		map[string]ProviderEntry{
+			"approve-on-fail": {Provider: failProvider, Timeout: 5 * time.Second, OnFailure: "approve"},
+		},
+		rules,
+	)
+
+	verdict, err := checker.Check(context.Background(), "npm", []string{"install", "express"}, t.TempDir())
+	require.NoError(t, err)
+	require.NotNil(t, verdict)
+	// Findings evaluate to allow, but the approve failure upgrades to approve.
+	assert.Equal(t, VerdictApprove, verdict.Action)
+	assert.Contains(t, verdict.Summary, "on_failure=approve")
+}

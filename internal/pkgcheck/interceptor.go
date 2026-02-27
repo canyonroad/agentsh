@@ -61,14 +61,13 @@ func ClassifyInstallCommand(command string, args []string, scope string) *Instal
 	if idx := strings.LastIndex(base, `\`); idx >= 0 {
 		base = base[idx+1:]
 	}
+	// Normalize to lowercase FIRST so that extension stripping is case-insensitive
+	// (e.g., NPM.EXE -> npm.exe -> npm, not NPM.EXE -> NPM -> npm.exe).
+	base = strings.ToLower(base)
 	// Strip .exe, .cmd, .bat suffixes for Windows compatibility.
 	base = strings.TrimSuffix(base, ".exe")
-	ext := strings.ToLower(filepath.Ext(base))
-	if ext == ".cmd" || ext == ".bat" {
-		base = base[:len(base)-len(ext)]
-	}
-	// Normalize to lowercase for case-insensitive matching (e.g., NPM.EXE, Yarn.cmd).
-	base = strings.ToLower(base)
+	base = strings.TrimSuffix(base, ".cmd")
+	base = strings.TrimSuffix(base, ".bat")
 
 	switch base {
 	case "npm":

@@ -36,10 +36,10 @@ func NewNPMResolver(cfg NPMResolverConfig) pkgcheck.Resolver {
 func (r *npmResolver) Name() string { return "npm" }
 
 func (r *npmResolver) CanResolve(command string, args []string) bool {
-	base := filepath.Base(command)
+	base := strings.ToLower(filepath.Base(command))
 	base = strings.TrimSuffix(base, ".exe")
-	base = trimWindowsScriptExt(base)
-	base = strings.ToLower(base)
+	base = strings.TrimSuffix(base, ".cmd")
+	base = strings.TrimSuffix(base, ".bat")
 	if base != "npm" {
 		return false
 	}

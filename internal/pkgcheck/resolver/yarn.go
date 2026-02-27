@@ -36,10 +36,10 @@ func NewYarnResolver(cfg YarnResolverConfig) pkgcheck.Resolver {
 func (r *yarnResolver) Name() string { return "yarn" }
 
 func (r *yarnResolver) CanResolve(command string, args []string) bool {
-	base := filepath.Base(command)
+	base := strings.ToLower(filepath.Base(command))
 	base = strings.TrimSuffix(base, ".exe")
-	base = trimWindowsScriptExt(base)
-	base = strings.ToLower(base)
+	base = strings.TrimSuffix(base, ".cmd")
+	base = strings.TrimSuffix(base, ".bat")
 	if base != "yarn" {
 		return false
 	}

@@ -37,9 +37,10 @@ func NewUVResolver(cfg UVResolverConfig) pkgcheck.Resolver {
 func (r *uvResolver) Name() string { return "uv" }
 
 func (r *uvResolver) CanResolve(command string, args []string) bool {
-	base := filepath.Base(command)
+	base := strings.ToLower(filepath.Base(command))
 	base = strings.TrimSuffix(base, ".exe")
-	base = strings.ToLower(base)
+	base = strings.TrimSuffix(base, ".cmd")
+	base = strings.TrimSuffix(base, ".bat")
 	if base != "uv" {
 		return false
 	}

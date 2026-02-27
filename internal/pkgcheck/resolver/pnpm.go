@@ -36,10 +36,10 @@ func NewPNPMResolver(cfg PNPMResolverConfig) pkgcheck.Resolver {
 func (r *pnpmResolver) Name() string { return "pnpm" }
 
 func (r *pnpmResolver) CanResolve(command string, args []string) bool {
-	base := filepath.Base(command)
+	base := strings.ToLower(filepath.Base(command))
 	base = strings.TrimSuffix(base, ".exe")
-	base = trimWindowsScriptExt(base)
-	base = strings.ToLower(base)
+	base = strings.TrimSuffix(base, ".cmd")
+	base = strings.TrimSuffix(base, ".bat")
 	if base != "pnpm" {
 		return false
 	}

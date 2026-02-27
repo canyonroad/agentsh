@@ -710,7 +710,11 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 					res, err := a.approvals.RequestApproval(ctx, apr)
 					if err != nil || !res.Approved {
 						pre.EffectiveDecision = types.DecisionDeny
-						pre.Message = "package install not approved"
+						pre.Message = fmt.Sprintf("package install approval denied: %s", verdict.Summary)
+						if pre.Approval == nil {
+							pre.Approval = &types.ApprovalInfo{Required: true, Mode: ""}
+						}
+						pre.Approval.ID = apr.ID
 					}
 				}
 			case pkgcheck.VerdictWarn:

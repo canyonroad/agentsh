@@ -36,9 +36,10 @@ func NewPipResolver(cfg PipResolverConfig) pkgcheck.Resolver {
 func (r *pipResolver) Name() string { return "pip" }
 
 func (r *pipResolver) CanResolve(command string, args []string) bool {
-	base := filepath.Base(command)
+	base := strings.ToLower(filepath.Base(command))
 	base = strings.TrimSuffix(base, ".exe")
-	base = strings.ToLower(base)
+	base = strings.TrimSuffix(base, ".cmd")
+	base = strings.TrimSuffix(base, ".bat")
 	if base != "pip" && base != "pip3" {
 		return false
 	}

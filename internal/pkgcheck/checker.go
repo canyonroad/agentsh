@@ -74,19 +74,26 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 		Packages:  plan.AllPackages(),
 	})
 
-	// 5. Handle provider errors.
+	// 5. Handle provider errors: collect all, then apply strictest action.
+	// Process provider errors by strictness after seeing ALL of them.
+	// Initialize to VerdictAllow (weight 0) so the first real action always wins.
+	strictestFailAction := VerdictAllow
+	var strictestFailSummary string
+	hasFailAction := false
 	for _, pe := range providerErrs {
 		switch pe.OnFailure {
 		case "deny":
-			return &Verdict{
-				Action:  VerdictBlock,
-				Summary: fmt.Sprintf("provider %s failed and on_failure=deny: %v", pe.Provider, pe.Err),
-			}, nil
+			if VerdictBlock.weight() > strictestFailAction.weight() {
+				strictestFailAction = VerdictBlock
+				strictestFailSummary = fmt.Sprintf("Provider %s unavailable (on_failure=%s): %v", pe.Provider, pe.OnFailure, pe.Err)
+				hasFailAction = true
+			}
 		case "approve":
-			return &Verdict{
-				Action:  VerdictApprove,
-				Summary: fmt.Sprintf("Provider %s unavailable (on_failure=approve): %v", pe.Provider, pe.Err),
-			}, nil
+			if VerdictApprove.weight() > strictestFailAction.weight() {
+				strictestFailAction = VerdictApprove
+				strictestFailSummary = fmt.Sprintf("Provider %s unavailable (on_failure=%s): %v", pe.Provider, pe.OnFailure, pe.Err)
+				hasFailAction = true
+			}
 		case "warn":
 			findings = append(findings, Finding{
 				Type:     FindingReputation,
@@ -99,8 +106,21 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 		// "allow" on failure: no finding injected, evaluator decides on existing findings.
 	}
 
+	// Apply strictest failure action.
+	if hasFailAction && strictestFailAction == VerdictBlock {
+		return &Verdict{
+			Action:  VerdictBlock,
+			Summary: strictestFailSummary,
+		}, nil
+	}
+
 	// 6. Evaluate findings against policy rules.
 	verdict := c.eval.Evaluate(findings, plan.Ecosystem)
+
+	// If any provider needs approval and verdict is weaker, upgrade to approve.
+	if hasFailAction && strictestFailAction == VerdictApprove && verdict.Action.weight() < VerdictApprove.weight() {
+		verdict.Action = VerdictApprove
+	}
 
 	// 7. Populate allowlist for allow/warn verdicts.
 	if c.cfg.Allowlist != nil && (verdict.Action == VerdictAllow || verdict.Action == VerdictWarn) {
@@ -110,8 +130,11 @@ func (c *Checker) Check(ctx context.Context, command string, args []string, work
 		}
 	}
 
-	// 8. Enrich summary with package list.
+	// 8. Enrich summary with package list; append provider failure reason if present.
 	verdict.Summary = buildCheckerSummary(intent, plan, verdict)
+	if hasFailAction && strictestFailSummary != "" {
+		verdict.Summary = verdict.Summary + "; " + strictestFailSummary
+	}
 
 	return verdict, nil
 }

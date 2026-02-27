@@ -237,3 +237,107 @@ func TestEvaluatorEcosystemScope(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, VerdictAllow, pv.Action)
 }
+
+func TestEvaluatorNamePatterns(t *testing.T) {
+	rules := []policy.PackageRule{
+		{
+			Match: policy.PackageMatch{
+				NamePatterns: []string{"@evil/*", "malicious-*"},
+			},
+			Action: "deny",
+			Reason: "block known bad patterns",
+		},
+		{
+			Match:  policy.PackageMatch{},
+			Action: "allow",
+			Reason: "default allow",
+		},
+	}
+
+	ev := NewEvaluator(rules)
+
+	// Package matching @evil/* glob should be blocked
+	findings := []Finding{
+		{
+			Type:     FindingReputation,
+			Provider: "test",
+			Package:  PackageRef{Name: "@evil/inject", Version: "1.0.0"},
+			Severity: SeverityHigh,
+			Title:    "suspicious package",
+		},
+	}
+	verdict := ev.Evaluate(findings, EcosystemNPM)
+	require.NotNil(t, verdict)
+	assert.Equal(t, VerdictBlock, verdict.Action)
+
+	// Package matching malicious-* glob should be blocked
+	findings2 := []Finding{
+		{
+			Type:     FindingReputation,
+			Provider: "test",
+			Package:  PackageRef{Name: "malicious-lib", Version: "0.1.0"},
+			Severity: SeverityMedium,
+			Title:    "bad package",
+		},
+	}
+	verdict2 := ev.Evaluate(findings2, EcosystemNPM)
+	require.NotNil(t, verdict2)
+	assert.Equal(t, VerdictBlock, verdict2.Action)
+
+	// Package not matching any glob should be allowed (catch-all)
+	findings3 := []Finding{
+		{
+			Type:     FindingReputation,
+			Provider: "test",
+			Package:  PackageRef{Name: "safe-lib", Version: "2.0.0"},
+			Severity: SeverityLow,
+			Title:    "normal package",
+		},
+	}
+	verdict3 := ev.Evaluate(findings3, EcosystemNPM)
+	require.NotNil(t, verdict3)
+	assert.Equal(t, VerdictAllow, verdict3.Action)
+}
+
+func TestEvaluatorOptionsConservativeMatch(t *testing.T) {
+	// When Options is set but all other conditions match, the rule should
+	// match conservatively (not fall through to catch-all allow).
+	rules := []policy.PackageRule{
+		{
+			Match: policy.PackageMatch{
+				FindingType: "vulnerability",
+				Severity:    "critical",
+				Options:     map[string]any{"some_option": "value"},
+			},
+			Action: "deny",
+			Reason: "critical vulns with options should still match",
+		},
+		{
+			Match:  policy.PackageMatch{},
+			Action: "allow",
+			Reason: "default allow",
+		},
+	}
+
+	findings := []Finding{
+		{
+			Type:     FindingVulnerability,
+			Provider: "osv",
+			Package:  PackageRef{Name: "bad-pkg", Version: "1.0.0"},
+			Severity: SeverityCritical,
+			Title:    "critical vulnerability",
+		},
+	}
+
+	ev := NewEvaluator(rules)
+	verdict := ev.Evaluate(findings, EcosystemNPM)
+
+	require.NotNil(t, verdict)
+	// With the conservative Options handling, the deny rule should match
+	// (not fall through to the catch-all allow).
+	assert.Equal(t, VerdictBlock, verdict.Action)
+
+	pv, ok := verdict.Packages["bad-pkg@1.0.0"]
+	require.True(t, ok)
+	assert.Equal(t, VerdictBlock, pv.Action)
+}
