@@ -100,13 +100,26 @@ func TestNotifyHandlerRecover_PublishesPanicEvent(t *testing.T) {
 		t.Error("event Timestamp should be set")
 	}
 
-	// Verify store also received the event.
+	// Verify store also received the event (store runs in a background
+	// goroutine, so poll briefly).
+	deadline2 := time.After(2 * time.Second)
+	for {
+		store.mu.Lock()
+		n := len(store.events)
+		store.mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		select {
+		case <-deadline2:
+			t.Fatal("timed out waiting for store event")
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	store.mu.Lock()
 	storeEvs := store.events
 	store.mu.Unlock()
-	if len(storeEvs) != 1 {
-		t.Fatalf("expected 1 store event, got %d", len(storeEvs))
-	}
 	if storeEvs[0].Type != string(events.EventNotifyHandlerPanic) {
 		t.Errorf("store event type = %q, want %q", storeEvs[0].Type, string(events.EventNotifyHandlerPanic))
 	}
@@ -180,8 +193,23 @@ func TestNotifyHandlerRecover_BrokerPanic_NoCrash(t *testing.T) {
 		t.Fatal("timed out — broker panic likely crashed the goroutine")
 	}
 
-	// The store should still have received the event (AppendEvent runs
-	// before Publish in the recovery function).
+	// The store should still have received the event (store runs in a
+	// background goroutine, so poll briefly).
+	deadline := time.After(2 * time.Second)
+	for {
+		store.mu.Lock()
+		n := len(store.events)
+		store.mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for store event")
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	store.mu.Lock()
 	storeEvs := store.events
 	store.mu.Unlock()
@@ -221,6 +249,49 @@ func TestNotifyHandlerRecover_StorePanic_BrokerStillReceives(t *testing.T) {
 	}
 
 	// Broker should still have received the event despite the store panicking.
+	evs := broker.getEvents()
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 broker event, got %d", len(evs))
+	}
+	if evs[0].Fields["error"] != "original panic" {
+		t.Errorf("broker error = %q, want %q", evs[0].Fields["error"], "original panic")
+	}
+}
+
+// blockingStore is an eventStore whose AppendEvent blocks forever,
+// ignoring context cancellation. Used to test that broker delivery
+// is not blocked by a slow store.
+type blockingStore struct {
+	blocked chan struct{} // closed when AppendEvent is entered
+}
+
+func (s *blockingStore) AppendEvent(ctx context.Context, ev types.Event) error {
+	if s.blocked != nil {
+		close(s.blocked)
+	}
+	select {} // block forever
+}
+
+func TestNotifyHandlerRecover_BlockingStore_BrokerStillReceives(t *testing.T) {
+	// Verify that a store that blocks forever (ignoring context) doesn't
+	// prevent broker.Publish from being called.
+	store := &blockingStore{blocked: make(chan struct{})}
+	broker := &notifyMockEventBroker{}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer notifyHandlerRecover("test-blocking-store", store, broker)
+		panic("original panic")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out — blocking store prevented recovery from completing")
+	}
+
+	// Broker should have received the event despite the store blocking.
 	evs := broker.getEvents()
 	if len(evs) != 1 {
 		t.Fatalf("expected 1 broker event, got %d", len(evs))

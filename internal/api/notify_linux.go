@@ -136,8 +136,11 @@ func notifyHandlerRecover(sessID string, store eventStore, broker eventBroker) {
 			"error": fmt.Sprint(r),
 		},
 	}
+	// Run store and broker delivery concurrently so a slow/blocking store
+	// cannot prevent broker publish. Both are best-effort with panic guards.
+	delivered := make(chan struct{})
 	if store != nil {
-		func() {
+		go func() {
 			defer func() { recover() }()
 			ctx, cancel := context.WithTimeout(context.Background(), recoverTimeout)
 			defer cancel()
@@ -145,10 +148,18 @@ func notifyHandlerRecover(sessID string, store eventStore, broker eventBroker) {
 		}()
 	}
 	if broker != nil {
-		func() {
+		go func() {
+			defer close(delivered)
 			defer func() { recover() }()
 			broker.Publish(ev)
 		}()
+	} else {
+		close(delivered)
+	}
+	// Wait for broker delivery (bounded) but don't wait for store.
+	select {
+	case <-delivered:
+	case <-time.After(recoverTimeout):
 	}
 }
 
