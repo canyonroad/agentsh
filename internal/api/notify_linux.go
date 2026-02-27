@@ -115,23 +115,31 @@ func (a *approvalRequesterAdapter) RequestExecApproval(ctx context.Context, req 
 }
 
 // notifyHandlerRecover is the deferred recovery function for the notify handler
-// goroutine. It logs the panic with a stack trace and publishes an observable
-// event to the broker (best-effort). Extracted for testability.
-func notifyHandlerRecover(sessID string, broker eventBroker) {
+// goroutine. It logs the panic with a stack trace, persists an event to the
+// store, and publishes it to the broker (both best-effort). Extracted for
+// testability.
+func notifyHandlerRecover(sessID string, store eventStore, broker eventBroker) {
 	r := recover()
 	if r == nil {
 		return
 	}
 	slog.Error("panic in notify handler", "recover", r, "session_id", sessID, "stack", string(debug.Stack()))
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      string(events.EventNotifyHandlerPanic),
+		SessionID: sessID,
+		Fields: map[string]any{
+			"error": fmt.Sprint(r),
+		},
+	}
+	if store != nil {
+		defer func() { recover() }() // best-effort: don't let AppendEvent panic crash the process
+		_ = store.AppendEvent(context.Background(), ev)
+	}
 	if broker != nil {
 		defer func() { recover() }() // best-effort: don't let Publish panic crash the process
-		broker.Publish(types.Event{
-			Type:      string(events.EventNotifyHandlerPanic),
-			SessionID: sessID,
-			Fields: map[string]any{
-				"error": fmt.Sprint(r),
-			},
-		})
+		broker.Publish(ev)
 	}
 }
 
@@ -146,7 +154,7 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 
 	// Run the entire receive and serve logic in a goroutine to return immediately
 	go func() {
-		defer notifyHandlerRecover(sessID, broker)
+		defer notifyHandlerRecover(sessID, store, broker)
 		defer parentSock.Close()
 		slog.Debug("notify handler started", "session_id", sessID)
 
