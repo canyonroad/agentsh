@@ -4,10 +4,12 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
@@ -124,7 +126,14 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				slog.Error("panic in notify handler", "recover", r, "session_id", sessID)
+				slog.Error("panic in notify handler", "recover", r, "session_id", sessID, "stack", string(debug.Stack()))
+				broker.Publish(types.Event{
+					Type:      "notify_handler_panic",
+					SessionID: sessID,
+					Fields: map[string]any{
+						"error": fmt.Sprint(r),
+					},
+				})
 			}
 		}()
 		defer parentSock.Close()
