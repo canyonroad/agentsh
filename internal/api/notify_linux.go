@@ -122,6 +122,11 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 
 	// Run the entire receive and serve logic in a goroutine to return immediately
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic in notify handler", "recover", r, "session_id", sessID)
+			}
+		}()
 		defer parentSock.Close()
 		slog.Debug("notify handler started", "session_id", sessID)
 
