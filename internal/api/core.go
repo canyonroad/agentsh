@@ -790,7 +790,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 				code = "E_APPROVAL_TIMEOUT"
 			}
 		}
-		g := guidanceForPolicyDenied(req, pre, preEv, approvalErr)
+		g := guidanceForPolicyDenied(req, pre, preEv, approvalErr, pkgApprovalDenied)
 		resp := &types.ExecResponse{
 			CommandID: cmdID,
 			SessionID: id,

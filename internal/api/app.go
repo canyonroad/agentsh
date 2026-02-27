@@ -814,11 +814,12 @@ func addSoftDeleteHints(fileOps []types.Event, stderrB []byte, stderrTotal int64
 	return stderrB, stderrTotal, softSuggestions
 }
 
-func guidanceForPolicyDenied(req types.ExecRequest, pre policy.Decision, preEv types.Event, approvalErr error) *types.ExecGuidance {
+func guidanceForPolicyDenied(req types.ExecRequest, pre policy.Decision, preEv types.Event, approvalErr error, pkgApprovalDenied bool) *types.ExecGuidance {
+	approvalRelated := pre.PolicyDecision == types.DecisionApprove || pkgApprovalDenied
 	g := &types.ExecGuidance{
 		Status:    "blocked",
 		Blocked:   true,
-		Retryable: pre.PolicyDecision == types.DecisionApprove,
+		Retryable: approvalRelated,
 		Reason:    "command denied by policy",
 		PolicyRule: func() string {
 			if pre.Rule != "" {
@@ -837,7 +838,7 @@ func guidanceForPolicyDenied(req types.ExecRequest, pre policy.Decision, preEv t
 		g.Reason = "approval timed out"
 		g.Retryable = true
 	}
-	if pre.PolicyDecision == types.DecisionApprove {
+	if approvalRelated {
 		g.Suggestions = append(g.Suggestions, types.Suggestion{
 			Action: "request_approval",
 			Reason: "operation requires approval per policy (enable approvals or approve via API)",
