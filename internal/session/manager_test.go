@@ -168,3 +168,84 @@ func TestCreateWithProfile_InvalidSessionID(t *testing.T) {
 		t.Errorf("CreateWithProfile with invalid ID: got %v, want ErrInvalidSessionID", err)
 	}
 }
+
+func TestCreateWithID_DefaultVirtualRoot(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-default-vroot", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.VirtualRoot != "/workspace" {
+		t.Errorf("VirtualRoot = %q, want /workspace", s.VirtualRoot)
+	}
+	if s.Cwd != "/workspace" {
+		t.Errorf("Cwd = %q, want /workspace", s.Cwd)
+	}
+}
+
+func TestSetRealPaths_Enable(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-real-enable", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetRealPaths(true)
+	if s.VirtualRoot != ws {
+		t.Errorf("VirtualRoot = %q, want %q", s.VirtualRoot, ws)
+	}
+	if s.Cwd != ws {
+		t.Errorf("Cwd = %q, want %q", s.Cwd, ws)
+	}
+}
+
+func TestSetRealPaths_Disable(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-real-disable", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetRealPaths(true)
+	s.SetRealPaths(false)
+	if s.VirtualRoot != "/workspace" {
+		t.Errorf("VirtualRoot = %q, want /workspace", s.VirtualRoot)
+	}
+	if s.Cwd != "/workspace" {
+		t.Errorf("Cwd = %q, want /workspace", s.Cwd)
+	}
+}
+
+func TestCreateWithProfile_DefaultVirtualRoot(t *testing.T) {
+	m := NewManager(10)
+	mounts := []ResolvedMount{
+		{Path: "/tmp/test-project", Policy: "workspace-rw"},
+	}
+	s, err := m.CreateWithProfile("test-profile-vroot", "my-profile", "default", mounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.VirtualRoot != "/workspace" {
+		t.Errorf("VirtualRoot = %q, want /workspace", s.VirtualRoot)
+	}
+}
+
+func TestSetRealPaths_TrailingSlash(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-trailing", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Manually set workspace with trailing slash to test normalization
+	s.Workspace = ws + "/"
+	s.SetRealPaths(true)
+	if s.VirtualRoot != ws {
+		t.Errorf("VirtualRoot = %q, want %q (no trailing slash)", s.VirtualRoot, ws)
+	}
+}

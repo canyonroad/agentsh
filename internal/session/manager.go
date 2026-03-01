@@ -34,7 +34,8 @@ type Session struct {
 	WorkspaceMount string
 	Policy         string
 
-	Cwd     string
+	Cwd         string
+	VirtualRoot string // "/workspace" or real workspace path when real_paths enabled
 	Env     map[string]string
 	History []string
 
@@ -131,6 +132,7 @@ func (m *Manager) CreateWithProfile(id, profile, basePolicy string, mounts []Res
 		Profile:      profile,
 		Mounts:       mounts,
 		Cwd:          "/workspace",
+		VirtualRoot:  "/workspace",
 		Env:          map[string]string{},
 	}
 	m.sessions[id] = s
@@ -177,6 +179,7 @@ func (m *Manager) CreateWithID(id, workspace, policy string) (*Session, error) {
 		WorkspaceMount: abs,
 		Policy:         policy,
 		Cwd:            "/workspace",
+		VirtualRoot:    "/workspace",
 		Env:            map[string]string{},
 	}
 	m.sessions[id] = s
@@ -352,6 +355,23 @@ func (s *Session) WorkspaceMountPath() string {
 		return s.WorkspaceMount
 	}
 	return s.Workspace
+}
+
+// SetRealPaths switches the session to use real host paths instead of /workspace.
+func (s *Session) SetRealPaths(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if enabled {
+		vroot := strings.TrimRight(s.Workspace, "/")
+		if vroot == "" {
+			vroot = "/"
+		}
+		s.VirtualRoot = vroot
+		s.Cwd = vroot
+	} else {
+		s.VirtualRoot = "/workspace"
+		s.Cwd = "/workspace"
+	}
 }
 
 func (s *Session) SetWorkspaceUnmount(fn func() error) {
