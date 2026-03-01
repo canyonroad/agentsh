@@ -109,6 +109,7 @@ type CreateSessionRequest struct {
 	Profile           string `json:"profile,omitempty"`
 	DetectProjectRoot *bool  `json:"detect_project_root,omitempty"` // Override server default
 	ProjectRoot       string `json:"project_root,omitempty"`        // Explicit override
+	RealPaths         *bool  `json:"real_paths,omitempty"`          // Use actual host paths instead of /workspace
 }
 
 type SessionPatchRequest struct {

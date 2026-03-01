@@ -297,6 +297,11 @@ type SessionsConfig struct {
 	DefaultIdleTimeout string `yaml:"default_idle_timeout"`
 	CleanupInterval    string `yaml:"cleanup_interval"`
 
+	// RealPaths, when true, mounts workspace at its actual host path instead of
+	// virtualizing under /workspace. This preserves path continuity between
+	// host and sandbox environments.
+	RealPaths bool `yaml:"real_paths"`
+
 	// Checkpoints configures workspace checkpoint/rollback functionality.
 	Checkpoints CheckpointConfig `yaml:"checkpoints"`
 }
