@@ -496,3 +496,26 @@ func TestBuiltin_Cd_NoArgs_ResetsToVirtualRoot(t *testing.T) {
 		t.Errorf("after cd (no args): cwd=%q want %q", cwd, s.VirtualRoot)
 	}
 }
+
+func TestIsRealPathUnder(t *testing.T) {
+	tests := []struct {
+		path string
+		root string
+		want bool
+	}{
+		{"/tmp/ws/sub", "/tmp/ws", true},
+		{"/tmp/ws", "/tmp/ws", true},
+		{"/tmp/ws2", "/tmp/ws", false},
+		{"/other", "/tmp/ws", false},
+		// Root == "/" — everything is under root
+		{"/etc", "/", true},
+		{"/tmp/foo", "/", true},
+		{"/", "/", true},
+	}
+	for _, tt := range tests {
+		got := IsRealPathUnder(tt.path, tt.root)
+		if got != tt.want {
+			t.Errorf("IsRealPathUnder(%q, %q) = %v, want %v", tt.path, tt.root, got, tt.want)
+		}
+	}
+}

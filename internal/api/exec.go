@@ -312,7 +312,7 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 	real = filepath.Clean(real)
 
 	rootClean := filepath.Clean(root)
-	if real != rootClean && !strings.HasPrefix(real, rootClean+string(os.PathSeparator)) {
+	if !session.IsRealPathUnder(real, rootClean) {
 		return "", fmt.Errorf("working_dir escapes workspace mount")
 	}
 	return real, nil

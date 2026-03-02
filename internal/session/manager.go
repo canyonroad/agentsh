@@ -510,20 +510,34 @@ func IsUnderRoot(path, root string) bool {
 	return path == root || strings.HasPrefix(path, root+"/")
 }
 
+// IsRealPathUnder checks if a real filesystem path is equal to or under root,
+// using os.PathSeparator for boundary checks.  Handles root=="/" or root==sep.
+func IsRealPathUnder(path, root string) bool {
+	sep := string(os.PathSeparator)
+	if root == "/" || root == sep {
+		return true
+	}
+	return path == root || strings.HasPrefix(path, root+sep)
+}
+
 func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, stdout, stderr []byte) {
 	switch req.Command {
 	case "cd":
 		s.Touch()
-		target := s.VirtualRoot
+		s.mu.Lock()
+		vroot := s.VirtualRoot
+		cwd := s.Cwd
+		s.mu.Unlock()
+		target := vroot
 		if len(req.Args) > 0 && req.Args[0] != "" {
 			t := req.Args[0]
 			if !filepath.IsAbs(t) {
-				t = filepath.ToSlash(filepath.Join(s.Cwd, t))
+				t = filepath.ToSlash(filepath.Join(cwd, t))
 			}
 			target = filepath.ToSlash(filepath.Clean(t))
 		}
-		if !IsUnderRoot(target, s.VirtualRoot) {
-			return true, 1, nil, []byte(fmt.Sprintf("cd: path must be under %s\n", s.VirtualRoot))
+		if !IsUnderRoot(target, vroot) {
+			return true, 1, nil, []byte(fmt.Sprintf("cd: path must be under %s\n", vroot))
 		}
 		s.mu.Lock()
 		s.Cwd = target
@@ -766,7 +780,7 @@ func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, e
 	root := s.WorkspaceMountPath()
 	real = filepath.Clean(filepath.Join(root, filepath.FromSlash(rel)))
 	rootClean := filepath.Clean(root)
-	if real != rootClean && !strings.HasPrefix(real, rootClean+string(os.PathSeparator)) {
+	if !IsRealPathUnder(real, rootClean) {
 		return "", "", fmt.Errorf("path escapes workspace mount")
 	}
 	return virt, real, nil

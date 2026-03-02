@@ -7,6 +7,16 @@ import (
 	"strings"
 )
 
+// isRealPathUnder checks if a real filesystem path is equal to or under root,
+// using os.PathSeparator for boundary checks.  Handles root=="/" or root==sep.
+func isRealPathUnder(path, root string) bool {
+	sep := string(os.PathSeparator)
+	if root == "/" || root == sep {
+		return true
+	}
+	return path == root || strings.HasPrefix(path, root+sep)
+}
+
 // resolveRealPathUnderRoot maps a virtual path (under virtualRoot) to a real path under realRoot and verifies
 // it does not escape via ".." components or symlinks.
 //
@@ -36,7 +46,7 @@ func resolveRealPathUnderRoot(realRoot string, virtPath string, mustExist bool, 
 
 	// Fast ".." escape check before touching the filesystem.
 	cleanCandidate := filepath.Clean(candidate)
-	if cleanCandidate != rootClean && !strings.HasPrefix(cleanCandidate, rootClean+string(os.PathSeparator)) {
+	if !isRealPathUnder(cleanCandidate, rootClean) {
 		return "", fmt.Errorf("path escapes workspace root")
 	}
 
@@ -46,7 +56,7 @@ func resolveRealPathUnderRoot(realRoot string, virtPath string, mustExist bool, 
 			return "", err
 		}
 		resolved = filepath.Clean(resolved)
-		if resolved != rootClean && !strings.HasPrefix(resolved, rootClean+string(os.PathSeparator)) {
+		if !isRealPathUnder(resolved, rootClean) {
 			return "", fmt.Errorf("symlink escape outside workspace root")
 		}
 		return resolved, nil
@@ -58,12 +68,12 @@ func resolveRealPathUnderRoot(realRoot string, virtPath string, mustExist bool, 
 		return "", err
 	}
 	resolvedParent = filepath.Clean(resolvedParent)
-	if resolvedParent != rootClean && !strings.HasPrefix(resolvedParent, rootClean+string(os.PathSeparator)) {
+	if !isRealPathUnder(resolvedParent, rootClean) {
 		return "", fmt.Errorf("symlink escape outside workspace root")
 	}
 	out := filepath.Join(resolvedParent, filepath.Base(cleanCandidate))
 	out = filepath.Clean(out)
-	if out != rootClean && !strings.HasPrefix(out, rootClean+string(os.PathSeparator)) {
+	if !isRealPathUnder(out, rootClean) {
 		return "", fmt.Errorf("path escapes workspace root")
 	}
 	return out, nil
