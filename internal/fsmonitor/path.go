@@ -30,6 +30,17 @@ func isRealPathUnder(path, root string) bool {
 	return path == root || strings.HasPrefix(path, root+sep)
 }
 
+// trimRootPrefix removes root from the front of path, using case-insensitive
+// matching on Windows.
+func trimRootPrefix(path, root string) string {
+	if runtime.GOOS == "windows" && len(path) >= len(root) {
+		if strings.EqualFold(path[:len(root)], root) {
+			return path[len(root):]
+		}
+	}
+	return strings.TrimPrefix(path, root)
+}
+
 // resolveRealPathUnderRoot maps a virtual path (under virtualRoot) to a real path under realRoot and verifies
 // it does not escape via ".." components or symlinks.
 //
@@ -47,7 +58,7 @@ func resolveRealPathUnderRoot(realRoot string, virtPath string, mustExist bool, 
 	if !underRoot(virtPath, virtualRoot) {
 		return "", fmt.Errorf("path must be under %s", virtualRoot)
 	}
-	rel := strings.TrimPrefix(virtPath, virtualRoot)
+	rel := trimRootPrefix(virtPath, virtualRoot)
 	rel = strings.TrimPrefix(rel, "/")
 
 	// Resolve symlinks on root path to handle macOS /var -> /private/var etc.

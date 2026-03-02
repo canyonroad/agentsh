@@ -542,6 +542,17 @@ func IsRealPathUnder(path, root string) bool {
 	return path == root || strings.HasPrefix(path, root+sep)
 }
 
+// TrimRootPrefix removes root from the front of path, using case-insensitive
+// matching on Windows.  Returns the remaining suffix (which may start with "/").
+func TrimRootPrefix(path, root string) string {
+	if runtime.GOOS == "windows" && len(path) >= len(root) {
+		if strings.EqualFold(path[:len(root)], root) {
+			return path[len(root):]
+		}
+	}
+	return strings.TrimPrefix(path, root)
+}
+
 func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, stdout, stderr []byte) {
 	switch req.Command {
 	case "cd":
@@ -797,7 +808,7 @@ func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, e
 		// resolveWorkingDir in exec.go where seccomp enforces policy.
 		return "", "", fmt.Errorf("path must be under %s", s.VirtualRoot)
 	}
-	rel := strings.TrimPrefix(virt, s.VirtualRoot)
+	rel := TrimRootPrefix(virt, s.VirtualRoot)
 	rel = strings.TrimPrefix(rel, "/")
 	root := s.WorkspaceMountPath()
 	real = filepath.Clean(filepath.Join(root, filepath.FromSlash(rel)))

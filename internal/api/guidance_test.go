@@ -28,7 +28,7 @@ func TestGuidance_NetworkBlocked_HTTPToHTTPSSubstitution(t *testing.T) {
 		},
 	}
 
-	g := guidanceForResponse(req, res, blocked)
+	g := guidanceForResponse(req, res, blocked, "/workspace")
 	if g == nil || g.Status != "blocked" || !g.Blocked {
 		t.Fatalf("expected blocked guidance, got %+v", g)
 	}
@@ -57,7 +57,7 @@ func TestGuidance_CommandFailed_PyenvShimSuggestsSystemPython(t *testing.T) {
 		},
 	}
 
-	g := guidanceForResponse(req, res, nil)
+	g := guidanceForResponse(req, res, nil, "/workspace")
 	if g == nil || g.Status != "failed" {
 		t.Fatalf("expected failed guidance, got %+v", g)
 	}
@@ -94,7 +94,7 @@ func TestGuidance_ApprovalBlocked_IsRetryable(t *testing.T) {
 		},
 	}
 
-	g := guidanceForResponse(req, res, blocked)
+	g := guidanceForResponse(req, res, blocked, "/workspace")
 	if g == nil || g.Status != "blocked" || !g.Retryable {
 		t.Fatalf("expected retryable blocked guidance, got %+v", g)
 	}

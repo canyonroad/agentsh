@@ -861,7 +861,7 @@ func guidanceForPolicyDenied(req types.ExecRequest, pre policy.Decision, preEv t
 	return g
 }
 
-func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps []types.Event) *types.ExecGuidance {
+func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps []types.Event, virtualRoot string) *types.ExecGuidance {
 	g := &types.ExecGuidance{}
 
 	if len(blockedOps) > 0 {
@@ -958,6 +958,18 @@ func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps
 				Command: "https://" + strings.TrimSuffix(target, ":80"),
 				Reason:  "try HTTPS (port 443) instead of HTTP (port 80)",
 			})
+		}
+
+		// File policy recourse (only in default /workspace mode).
+		if virtualRoot == "/workspace" {
+			if strings.HasPrefix(ev.Type, "file_") || strings.HasPrefix(ev.Type, "dir_") || strings.HasPrefix(ev.Type, "symlink_") {
+				if ev.Path != "" && !strings.HasPrefix(ev.Path, "/workspace") {
+					g.Suggestions = append(g.Suggestions, types.Suggestion{
+						Action: "move_to_workspace",
+						Reason: "copy/move required inputs under /workspace so the policy can allow access",
+					})
+				}
+			}
 		}
 
 		// Generic remediation.

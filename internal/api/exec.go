@@ -298,7 +298,7 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 		// Real-paths mode: pass through as-is for policy/seccomp enforcement
 		return virtual, nil
 	}
-	rel := strings.TrimPrefix(virtual, vroot)
+	rel := session.TrimRootPrefix(virtual, vroot)
 	rel = strings.TrimPrefix(rel, "/")
 
 	// Security: Ensure rel is not an absolute path (could escape on Windows)

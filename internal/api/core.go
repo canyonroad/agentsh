@@ -1008,7 +1008,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 			OtherCount:             len(otherOps),
 		},
 		Resources: &resources,
-		Guidance:  guidanceForResponse(req, res, blockedOps),
+		Guidance:  guidanceForResponse(req, res, blockedOps, s.VirtualRoot),
 	}
 	addRedirectGuidance(resp, pre, originalCmd, originalArgs)
 	if len(softSuggestions) > 0 {
