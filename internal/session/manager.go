@@ -529,8 +529,11 @@ func IsUnderRoot(path, root string) bool {
 // IsRealPathUnder checks if a real filesystem path is equal to or under root,
 // using os.PathSeparator for boundary checks.  Handles root=="/" or volume
 // roots like "C:\" where root already ends with the separator.
-// On Windows, comparisons are case-insensitive.
+// Returns false for empty root.  On Windows, comparisons are case-insensitive.
 func IsRealPathUnder(path, root string) bool {
+	if root == "" {
+		return false
+	}
 	sep := string(os.PathSeparator)
 	if root == "/" || root == sep {
 		return true

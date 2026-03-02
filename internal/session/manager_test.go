@@ -519,6 +519,9 @@ func TestIsRealPathUnder(t *testing.T) {
 		{"/etc", "/", true},
 		{"/tmp/foo", "/", true},
 		{"/", "/", true},
+		// Empty root must always return false
+		{"/anything", "", false},
+		{"", "", false},
 	}
 	for _, tt := range tests {
 		got := IsRealPathUnder(tt.path, tt.root)

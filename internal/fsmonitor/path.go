@@ -13,6 +13,9 @@ import (
 // roots like "C:\" where root already ends with the separator.
 // On Windows, comparisons are case-insensitive.
 func isRealPathUnder(path, root string) bool {
+	if root == "" {
+		return false
+	}
 	sep := string(os.PathSeparator)
 	if root == "/" || root == sep {
 		return true
