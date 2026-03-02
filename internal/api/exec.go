@@ -288,6 +288,9 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 			virtual = filepath.ToSlash(filepath.Join(cwd, reqWorkingDir))
 		}
 	}
+	// Normalize to resolve ".." before root boundary check, so paths like
+	// /home/u/proj/../tmp are correctly classified as outside-workspace.
+	virtual = filepath.ToSlash(filepath.Clean(filepath.FromSlash(virtual)))
 
 	vroot := s.VirtualRoot
 	if vroot == "" {

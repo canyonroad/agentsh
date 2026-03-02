@@ -198,7 +198,43 @@ func TestResolveWorkingDir_SymlinkEscape_RealPathsMode(t *testing.T) {
 	}
 }
 
-// Integration test: HTTP exec handler with real_paths=true allows outside-workspace working_dir.
+func TestResolveWorkingDir_DotDotEscape_RealPaths(t *testing.T) {
+	m := session.NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-dotdot-real", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetRealPaths(true)
+
+	wsClean := filepath.ToSlash(filepath.Clean(ws))
+	// Path with ".." that resolves outside workspace should be treated as
+	// outside-workspace (pass through), not rejected as escape.
+	real, err := resolveWorkingDir(s, wsClean+"/../tmp")
+	if err != nil {
+		t.Fatalf("expected pass-through for dotdot outside workspace in real_paths mode, got: %v", err)
+	}
+	// After normalization, should resolve to the parent's "tmp" sibling
+	if strings.Contains(real, "..") {
+		t.Errorf("result should not contain '..': %q", real)
+	}
+}
+
+func TestResolveWorkingDir_DotDotEscape_Default(t *testing.T) {
+	m := session.NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-dotdot-default", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Default mode: /workspace/./../etc should be rejected
+	_, err = resolveWorkingDir(s, "/workspace/../etc")
+	if err == nil {
+		t.Error("expected error for dotdot escape outside /workspace in default mode")
+	}
+}
 func TestExec_RealPaths_OutsideWorkspace_Allowed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("exec integration test is POSIX-specific")
