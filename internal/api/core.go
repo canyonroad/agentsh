@@ -320,7 +320,7 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					},
 					PolicyEngine: platform.NewPolicyAdapter(policyEngine),
 					EventChannel: eventChan,
-					VirtualRoot:  s.VirtualRoot,
+					VirtualRoot:  filepath.ToSlash(spec.Path),
 				}
 
 				m, err := fs.Mount(fsCfg)
@@ -395,14 +395,23 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 	// Build initial mounts from profile specs (without FUSE yet)
 	var initialMounts []session.ResolvedMount
 	for _, spec := range profile.Mounts {
+		// Normalize to absolute path to avoid CWD-dependent behavior
+		mountPath := spec.Path
+		if !filepath.IsAbs(mountPath) {
+			var err error
+			mountPath, err = filepath.Abs(mountPath)
+			if err != nil {
+				return types.Session{}, http.StatusBadRequest, fmt.Errorf("mount path %q: cannot resolve absolute path: %w", spec.Path, err)
+			}
+		}
 		// Validate path exists
-		if _, err := os.Stat(spec.Path); err != nil {
-			return types.Session{}, http.StatusBadRequest, fmt.Errorf("mount path %q: %w", spec.Path, err)
+		if _, err := os.Stat(mountPath); err != nil {
+			return types.Session{}, http.StatusBadRequest, fmt.Errorf("mount path %q: %w", mountPath, err)
 		}
 		initialMounts = append(initialMounts, session.ResolvedMount{
-			Path:       spec.Path,
+			Path:       mountPath,
 			Policy:     spec.Policy,
-			MountPoint: spec.Path,
+			MountPoint: mountPath,
 		})
 	}
 
