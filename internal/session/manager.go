@@ -8,11 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/pathutil"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
@@ -506,60 +506,21 @@ func (s *Session) CloseNetNS() error {
 }
 
 // IsUnderRoot checks if path is equal to or a child of root using
-// path-boundary-aware logic.  Handles root=="/" where root+"/" would be "//".
-// Returns false for empty root.  On Windows, comparisons are case-insensitive.
+// path-boundary-aware logic. Delegates to pathutil.IsUnderRoot.
 func IsUnderRoot(path, root string) bool {
-	if root == "" {
-		return false
-	}
-	if root == "/" {
-		return strings.HasPrefix(path, "/")
-	}
-	if runtime.GOOS == "windows" {
-		lp, lr := strings.ToLower(path), strings.ToLower(root)
-		// Handle roots like "C:/" that already end with separator
-		if strings.HasSuffix(lr, "/") {
-			return strings.HasPrefix(lp, lr)
-		}
-		return lp == lr || strings.HasPrefix(lp, lr+"/")
-	}
-	return path == root || strings.HasPrefix(path, root+"/")
+	return pathutil.IsUnderRoot(path, root)
 }
 
 // IsRealPathUnder checks if a real filesystem path is equal to or under root,
-// using os.PathSeparator for boundary checks.  Handles root=="/" or volume
-// roots like "C:\" where root already ends with the separator.
-// Returns false for empty root.  On Windows, comparisons are case-insensitive.
+// using os.PathSeparator for boundary checks. Delegates to pathutil.IsRealPathUnder.
 func IsRealPathUnder(path, root string) bool {
-	if root == "" {
-		return false
-	}
-	sep := string(os.PathSeparator)
-	if root == "/" || root == sep {
-		return true
-	}
-	if runtime.GOOS == "windows" {
-		lp, lr := strings.ToLower(path), strings.ToLower(root)
-		if strings.HasSuffix(lr, sep) {
-			return strings.HasPrefix(lp, lr)
-		}
-		return lp == lr || strings.HasPrefix(lp, lr+sep)
-	}
-	if strings.HasSuffix(root, sep) {
-		return strings.HasPrefix(path, root)
-	}
-	return path == root || strings.HasPrefix(path, root+sep)
+	return pathutil.IsRealPathUnder(path, root)
 }
 
 // TrimRootPrefix removes root from the front of path, using case-insensitive
-// matching on Windows.  Returns the remaining suffix (which may start with "/").
+// matching on Windows. Delegates to pathutil.TrimRootPrefix.
 func TrimRootPrefix(path, root string) string {
-	if runtime.GOOS == "windows" && len(path) >= len(root) {
-		if strings.EqualFold(path[:len(root)], root) {
-			return path[len(root):]
-		}
-	}
-	return strings.TrimPrefix(path, root)
+	return pathutil.TrimRootPrefix(path, root)
 }
 
 func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, stdout, stderr []byte) {
