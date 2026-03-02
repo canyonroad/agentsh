@@ -110,6 +110,37 @@ func TestGuidance_ApprovalBlocked_IsRetryable(t *testing.T) {
 	}
 }
 
+func TestGuidance_RealPathsMode_NoMoveToWorkspaceSuggestion(t *testing.T) {
+	req := types.ExecRequest{
+		Command: "cat",
+		Args:    []string{"/etc/passwd"},
+	}
+	res := types.ExecResult{ExitCode: 126}
+	blocked := []types.Event{
+		{
+			Type:      "file_open",
+			Operation: "open",
+			Path:      "/etc/passwd",
+			Policy: &types.PolicyInfo{
+				Decision:          types.DecisionDeny,
+				EffectiveDecision: types.DecisionDeny,
+				Rule:              "default-deny-files",
+			},
+		},
+	}
+
+	// In real-paths mode, move_to_workspace should NOT be suggested
+	g := guidanceForResponse(req, res, blocked, "/home/user/project")
+	if g == nil {
+		t.Fatal("expected guidance, got nil")
+	}
+	for _, s := range g.Suggestions {
+		if s.Action == "move_to_workspace" {
+			t.Error("move_to_workspace should not be suggested in real-paths mode")
+		}
+	}
+}
+
 func TestGuidanceForPolicyDenied_PkgApprovalDenied_CommandPolicyAllow(t *testing.T) {
 	// When command policy is "allow" but package approval is denied,
 	// guidance should still show request_approval and be retryable.
