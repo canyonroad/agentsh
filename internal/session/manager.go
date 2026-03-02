@@ -241,6 +241,7 @@ func (s *Session) Snapshot() types.Session {
 		Profile:     s.Profile,
 		Mounts:      mounts,
 		Cwd:         s.Cwd,
+		VirtualRoot: s.VirtualRoot,
 		ProxyURL:    s.proxyURL,
 		TOTPSecret:  s.TOTPSecret,
 		ProjectRoot: s.ProjectRoot,

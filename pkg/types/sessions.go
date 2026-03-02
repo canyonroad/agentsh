@@ -49,6 +49,7 @@ type Session struct {
 	Profile     string       `json:"profile,omitempty"`
 	Mounts      []MountInfo  `json:"mounts,omitempty"`
 	Cwd         string       `json:"cwd"`
+	VirtualRoot string       `json:"virtual_root,omitempty"`
 	ProxyURL    string       `json:"proxy_url,omitempty"`
 	TOTPSecret  string       `json:"-"` // Hidden from JSON/API, used for TOTP approval mode
 	ProjectRoot string       `json:"project_root,omitempty"`
