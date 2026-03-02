@@ -31,6 +31,7 @@ func newSessionCreateCmd() *cobra.Command {
 	var workspace string
 	var policy string
 	var outputJSON bool
+	var realPaths bool
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a new session",
@@ -40,7 +41,12 @@ func newSessionCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			s, err := c.CreateSession(cmd.Context(), workspace, policy)
+			req := types.CreateSessionRequest{Workspace: workspace, Policy: policy}
+			if realPaths {
+				trueVal := true
+				req.RealPaths = &trueVal
+			}
+			s, err := c.CreateSessionWithRequest(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
@@ -56,6 +62,7 @@ func newSessionCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&workspace, "workspace", ".", "Workspace directory")
 	cmd.Flags().StringVar(&policy, "policy", "default", "Policy name")
 	cmd.Flags().BoolVar(&outputJSON, "json", false, "Output in JSON format")
+	cmd.Flags().BoolVar(&realPaths, "real-paths", false, "Use real host paths instead of /workspace")
 	return cmd
 }
 
