@@ -320,6 +320,7 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					},
 					PolicyEngine: platform.NewPolicyAdapter(policyEngine),
 					EventChannel: eventChan,
+					VirtualRoot:  s.VirtualRoot,
 				}
 
 				m, err := fs.Mount(fsCfg)
