@@ -12,7 +12,7 @@ func TestResolveRealPathUnderRoot_BlocksSymlinkEscape(t *testing.T) {
 	if err := os.Symlink("/etc/passwd", link); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
-	_, err := resolveRealPathUnderRoot(root, "/workspace/link", true)
+	_, err := resolveRealPathUnderRoot(root, "/workspace/link", true, "/workspace")
 	if err == nil {
 		t.Fatalf("expected escape error")
 	}
@@ -29,7 +29,7 @@ func TestResolveRealPathUnderRoot_AllowsInTreeSymlink(t *testing.T) {
 	if err := os.Symlink("dir/a.txt", filepath.Join(root, "in")); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
-	p, err := resolveRealPathUnderRoot(root, "/workspace/in", true)
+	p, err := resolveRealPathUnderRoot(root, "/workspace/in", true, "/workspace")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestResolveRealPathUnderRoot_UsesParentForCreate(t *testing.T) {
 	if err := os.Symlink("/etc", filepath.Join(root, "p")); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
-	_, err := resolveRealPathUnderRoot(root, "/workspace/p/newfile", false)
+	_, err := resolveRealPathUnderRoot(root, "/workspace/p/newfile", false, "/workspace")
 	if err == nil {
 		t.Fatalf("expected escape error")
 	}

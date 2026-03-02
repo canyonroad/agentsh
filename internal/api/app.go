@@ -958,12 +958,6 @@ func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps
 
 		// File policy recourse.
 		if strings.HasPrefix(ev.Type, "file_") || strings.HasPrefix(ev.Type, "dir_") || strings.HasPrefix(ev.Type, "symlink_") {
-			if ev.Path != "" && !strings.HasPrefix(ev.Path, "/workspace") {
-				g.Suggestions = append(g.Suggestions, types.Suggestion{
-					Action: "move_to_workspace",
-					Reason: "copy/move required inputs under /workspace so the policy can allow access",
-				})
-			}
 		}
 
 		// Generic remediation.

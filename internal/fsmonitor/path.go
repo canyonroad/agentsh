@@ -7,17 +7,17 @@ import (
 	"strings"
 )
 
-// resolveRealPathUnderRoot maps a virtual "/workspace/..." path to a real path under realRoot and verifies
+// resolveRealPathUnderRoot maps a virtual path (under virtualRoot) to a real path under realRoot and verifies
 // it does not escape via ".." components or symlinks.
 //
 // If mustExist is true, the target is expected to exist and will be evaluated directly.
 // If mustExist is false, the parent directory is evaluated for symlink escape and the final path may not exist yet.
-func resolveRealPathUnderRoot(realRoot string, virtPath string, mustExist bool) (string, error) {
+func resolveRealPathUnderRoot(realRoot string, virtPath string, mustExist bool, virtualRoot string) (string, error) {
 	virtPath = filepath.ToSlash(virtPath)
-	if !strings.HasPrefix(virtPath, "/workspace") {
-		return "", fmt.Errorf("path must be under /workspace")
+	if !strings.HasPrefix(virtPath, virtualRoot) {
+		return "", fmt.Errorf("path must be under %s", virtualRoot)
 	}
-	rel := strings.TrimPrefix(virtPath, "/workspace")
+	rel := strings.TrimPrefix(virtPath, virtualRoot)
 	rel = strings.TrimPrefix(rel, "/")
 
 	// Resolve symlinks on root path to handle macOS /var -> /private/var etc.

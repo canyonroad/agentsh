@@ -382,7 +382,7 @@ func (n *node) checkWithExist(_ context.Context, virtPath string, op string, mus
 		realRoot = n.RootData.Path
 	}
 	if realRoot != "" {
-		if _, err := resolveRealPathUnderRoot(realRoot, virtPath, mustExist); err != nil {
+		if _, err := resolveRealPathUnderRoot(realRoot, virtPath, mustExist, "/workspace"); err != nil {
 			return policy.Decision{
 				PolicyDecision:    types.DecisionDeny,
 				EffectiveDecision: types.DecisionDeny,
@@ -564,7 +564,7 @@ func (n *node) realPath(virt string, mustExist bool) (string, error) {
 	if n.RootData != nil {
 		root = n.RootData.Path
 	}
-	return resolveRealPathUnderRoot(root, virt, mustExist)
+	return resolveRealPathUnderRoot(root, virt, mustExist, "/workspace")
 }
 
 func (n *node) makeDivertFunc(realPath string) func() (*trash.Entry, error) {
