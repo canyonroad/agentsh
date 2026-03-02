@@ -290,6 +290,9 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 	}
 
 	vroot := s.VirtualRoot
+	if vroot == "" {
+		vroot = "/workspace" // fail closed for uninitialized sessions
+	}
 	if !session.IsUnderRoot(virtual, vroot) {
 		if vroot == "/workspace" {
 			// Default mode: reject outside-workspace paths (preserves pre-real-paths behavior)

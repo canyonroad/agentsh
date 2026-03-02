@@ -79,3 +79,21 @@ func TestResolveWorkingDir_RootVirtualRoot(t *testing.T) {
 		t.Fatalf("resolveWorkingDir with VirtualRoot=/: %v", err)
 	}
 }
+
+func TestResolveWorkingDir_EmptyVirtualRoot_FailsClosed(t *testing.T) {
+	m := session.NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-exec-emptyvr", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate uninitialized/restored session with empty VirtualRoot
+	s.VirtualRoot = ""
+
+	// Should fail closed (treat as /workspace mode and reject outside paths)
+	_, err = resolveWorkingDir(s, "/etc")
+	if err == nil {
+		t.Error("expected error for outside-workspace path when VirtualRoot is empty")
+	}
+}
