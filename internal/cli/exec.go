@@ -96,9 +96,8 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 			if projectRoot != "" {
 				createReq.ProjectRoot = projectRoot
 			}
-			if realPaths {
-				trueVal := true
-				createReq.RealPaths = &trueVal
+			if cmd.Flags().Changed("real-paths") {
+				createReq.RealPaths = &realPaths
 			}
 
 			if pty {
@@ -119,6 +118,7 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 					AutoCreateRoot: autoCreateRoot,
 					NoDetectRoot:   noDetectRoot,
 					ProjectRoot:    projectRoot,
+					RealPaths:      createReq.RealPaths,
 				})
 			}
 

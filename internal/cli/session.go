@@ -42,9 +42,8 @@ func newSessionCreateCmd() *cobra.Command {
 				return err
 			}
 			req := types.CreateSessionRequest{Workspace: workspace, Policy: policy}
-			if realPaths {
-				trueVal := true
-				req.RealPaths = &trueVal
+			if cmd.Flags().Changed("real-paths") {
+				req.RealPaths = &realPaths
 			}
 			s, err := c.CreateSessionWithRequest(cmd.Context(), req)
 			if err != nil {
