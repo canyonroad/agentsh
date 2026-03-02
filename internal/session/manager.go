@@ -360,12 +360,14 @@ func (s *Session) WorkspaceMountPath() string {
 }
 
 // SetRealPaths switches the session to use real host paths instead of /workspace.
-func (s *Session) SetRealPaths(enabled bool) {
+// Returns false when enabled is true but the workspace is empty (real paths cannot
+// be applied).
+func (s *Session) SetRealPaths(enabled bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if enabled {
 		if s.Workspace == "" {
-			return // no-op: empty workspace cannot be used as virtual root
+			return false // empty workspace cannot be used as virtual root
 		}
 		vroot := filepath.ToSlash(filepath.Clean(s.Workspace))
 		s.VirtualRoot = vroot
@@ -374,6 +376,7 @@ func (s *Session) SetRealPaths(enabled bool) {
 		s.VirtualRoot = "/workspace"
 		s.Cwd = "/workspace"
 	}
+	return true
 }
 
 func (s *Session) SetWorkspaceUnmount(fn func() error) {

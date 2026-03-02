@@ -265,7 +265,9 @@ func TestSetRealPaths_EmptyWorkspace(t *testing.T) {
 	}
 	// Manually set workspace to empty to test defensive behavior
 	s.Workspace = ""
-	s.SetRealPaths(true)
+	if s.SetRealPaths(true) {
+		t.Error("SetRealPaths(true) returned true on empty workspace, want false")
+	}
 	// Should be a no-op: VirtualRoot stays at default
 	if s.VirtualRoot != "/workspace" {
 		t.Errorf("VirtualRoot = %q, want /workspace (no-op on empty workspace)", s.VirtualRoot)

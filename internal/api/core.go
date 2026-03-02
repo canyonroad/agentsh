@@ -1406,7 +1406,11 @@ func (a *App) applyRealPaths(s *session.Session, reqRealPaths *bool) {
 		realPaths = *reqRealPaths
 	}
 	if realPaths {
-		s.SetRealPaths(true)
+		if !s.SetRealPaths(true) {
+			slog.Warn("real_paths requested but workspace is empty; falling back to /workspace",
+				"session_id", s.ID)
+			return
+		}
 		if !a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE {
 			slog.Warn("session created with real_paths but enforce_without_fuse is false: outside-workspace file access will be audit-only",
 				"session_id", s.ID)
