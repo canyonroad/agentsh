@@ -89,19 +89,33 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 	}
 
 	var sessID string
+	var workspaceMount string
+	var llmProxyURL string
 	if opts.sessionID != "" {
 		sess, err := c.GetSession(ctx, opts.sessionID)
 		if err != nil {
 			return fmt.Errorf("get session %s: %w", opts.sessionID, err)
 		}
 		sessID = sess.ID
+		workspaceMount = sess.WorkspaceMount
+		llmProxyURL = sess.LLMProxyURL
 	} else {
 		sess, err := c.CreateSession(ctx, workspace, opts.policy)
 		if err != nil {
 			return fmt.Errorf("create session: %w", err)
 		}
 		sessID = sess.ID
+		workspaceMount = sess.WorkspaceMount
+		llmProxyURL = sess.LLMProxyURL
 		fmt.Fprintf(os.Stderr, "agentsh: session %s created (policy: %s)\n", sessID, opts.policy)
+	}
+
+	// If FUSE is active, the server provides a mount path that intercepts file I/O.
+	// Use it as the working directory so all file operations go through FUSE.
+	workDir := ""
+	if workspaceMount != "" {
+		fmt.Fprintf(os.Stderr, "agentsh: FUSE workspace mount: %s\n", workspaceMount)
+		workDir = workspaceMount
 	}
 
 	// 2. Resolve the agent binary
@@ -140,6 +154,23 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 		agentProc.Env = append(os.Environ(),
 			fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),
 			fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
+		)
+	}
+
+	// If FUSE mount is active, add it to the environment so the child
+	// process can cd into it. Direct chdir from the CLI may fail because
+	// the FUSE daemon runs in the server process.
+	if workDir != "" {
+		agentProc.Env = append(agentProc.Env, fmt.Sprintf("AGENTSH_WORKSPACE_MOUNT=%s", workDir))
+	}
+
+	// If the LLM proxy is active, route agent API calls through it so
+	// requests/responses are logged and DLP-scanned.
+	if llmProxyURL != "" {
+		fmt.Fprintf(os.Stderr, "agentsh: LLM proxy: %s\n", llmProxyURL)
+		agentProc.Env = append(agentProc.Env,
+			fmt.Sprintf("ANTHROPIC_BASE_URL=%s", llmProxyURL),
+			fmt.Sprintf("OPENAI_BASE_URL=%s", llmProxyURL),
 		)
 	}
 
@@ -198,6 +229,11 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 	// 5. Wait for agent to exit
 	waitErr := agentProc.Wait()
 
+	// Reclaim terminal foreground if needed (before writing to stderr)
+	if wrapCfg != nil && wrapCfg.postWait != nil {
+		wrapCfg.postWait()
+	}
+
 	signal.Stop(sigCh)
 	close(sigCh)
 	<-sigDone // Wait for the signal goroutine to exit before proceeding
@@ -230,6 +266,7 @@ type wrapLaunchConfig struct {
 	extraFiles  []*os.File
 	sysProcAttr *syscall.SysProcAttr
 	postStart   func() // Called after the process starts (e.g., to forward notify fd)
+	postWait    func() // Called after the process exits (e.g., to reclaim terminal)
 }
 
 // setupWrapInterception initializes seccomp interception via the server and returns

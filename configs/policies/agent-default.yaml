@@ -25,7 +25,7 @@ command_rules:
     description: Block force push, suggest --force-with-lease
     commands: [git]
     args_patterns:
-      - "push.*(--force|-f)(?!.*--force-with-lease)"
+      - "push.*(--force(\\s|$)|-f(\\s|$))"
     decision: redirect
     redirect_to:
       command: echo
@@ -336,6 +336,19 @@ command_rules:
       - top
       - htop
       - pgrep
+    decision: allow
+
+  - name: allow-ai-tools
+    description: AI coding agents and assistants
+    commands:
+      - claude
+      - codex
+      - aider
+      - copilot
+      - gh
+      - agentsh
+      - agentsh-unixwrap
+      - agentsh-stub
     decision: allow
 
 # =============================================================================

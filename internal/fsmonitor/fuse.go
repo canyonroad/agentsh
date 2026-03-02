@@ -389,8 +389,14 @@ func (n *node) checkWithExist(_ context.Context, virtPath string, op string, mus
 	if n.RootData != nil {
 		realRoot = n.RootData.Path
 	}
+	// Resolve the virtual path to a real path under the workspace root.
+	// Use the resolved real path for the policy check so that paths like
+	// "/workspace/foo" match policy rules compiled with PROJECT_ROOT set
+	// to the real workspace directory (e.g. "/work/app/foo").
+	policyPath := virtPath
 	if realRoot != "" {
-		if _, err := resolveRealPathUnderRoot(realRoot, virtPath, mustExist, n.vroot()); err != nil {
+		resolved, err := resolveRealPathUnderRoot(realRoot, virtPath, mustExist, n.vroot())
+		if err != nil {
 			return policy.Decision{
 				PolicyDecision:    types.DecisionDeny,
 				EffectiveDecision: types.DecisionDeny,
@@ -398,12 +404,13 @@ func (n *node) checkWithExist(_ context.Context, virtPath string, op string, mus
 				Message:           err.Error(),
 			}
 		}
+		policyPath = resolved
 	}
 
 	if n.hooks == nil || n.hooks.Policy == nil {
 		return policy.Decision{PolicyDecision: types.DecisionAllow, EffectiveDecision: types.DecisionAllow}
 	}
-	return n.hooks.Policy.CheckFile(virtPath, op)
+	return n.hooks.Policy.CheckFile(policyPath, op)
 }
 
 func combinePathDecisionsForRename(a, b policy.Decision) policy.Decision {

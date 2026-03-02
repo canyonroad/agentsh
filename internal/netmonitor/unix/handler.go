@@ -42,6 +42,10 @@ func ServeNotify(ctx context.Context, fd *os.File, sessID string, pol *policy.En
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
+			if isENOENT(err) {
+				// Target process was killed — non-fatal, continue serving
+				continue
+			}
 			return
 		}
 		ctxReq := ExtractContext(req)
@@ -108,6 +112,16 @@ func isEAGAIN(err error) bool {
 	return false
 }
 
+// isENOENT checks if the error is ENOENT (target process was killed/exited).
+// This is non-fatal for seccomp notification handlers — the handler should
+// continue processing notifications from other processes.
+func isENOENT(err error) bool {
+	if errno, ok := err.(unix.Errno); ok {
+		return errno == unix.ENOENT
+	}
+	return false
+}
+
 func emitEvent(emit Emitter, session string, dec policy.Decision, path string, abstract bool, op string) {
 	ev := types.Event{
 		ID:        fmt.Sprintf("evt-%d", time.Now().UnixNano()),
@@ -152,7 +166,13 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
-			slog.Debug("ServeNotifyWithExecve: NotifReceive error (exiting)", "session_id", sessID, "error", err, "total_notifications", notifCount)
+			if isENOENT(err) {
+				// Target process was killed or notification cancelled — non-fatal.
+				// Sleep briefly to avoid tight spin.
+				time.Sleep(1 * time.Millisecond)
+				continue
+			}
+			slog.Error("ServeNotifyWithExecve: NotifReceive error (exiting)", "session_id", sessID, "error", err, "total_notifications", notifCount)
 			return
 		}
 		notifCount++

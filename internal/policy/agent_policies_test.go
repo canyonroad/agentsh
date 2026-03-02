@@ -1,10 +1,12 @@
 package policy
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,7 +42,7 @@ func TestAgentPolicies(t *testing.T) {
 		{
 			file:             "agent-default.yaml",
 			name:             "agent-default",
-			wantCommandRules: 20,
+			wantCommandRules: 21,
 			wantFileRules:    12,
 			wantNetworkRules: 15,
 		},
@@ -261,4 +263,668 @@ func TestAgentPolicies_ObserveRuleDetails(t *testing.T) {
 	assert.True(t, p.Audit.LogApproved)
 	assert.True(t, p.Audit.IncludeStdout)
 	assert.True(t, p.Audit.IncludeStderr)
+}
+
+// loadAgentDefaultEngine loads agent-default.yaml and creates an engine with
+// variable expansion and enforced approvals.
+func loadAgentDefaultEngine(t *testing.T) *Engine {
+	t.Helper()
+	root := findProjectRoot(t)
+	path := filepath.Join(root, "configs", "policies", "agent-default.yaml")
+	p, err := LoadFromFile(path)
+	require.NoError(t, err)
+
+	vars := map[string]string{
+		"PROJECT_ROOT": "/home/user/project",
+		"GIT_ROOT":     "/home/user/project",
+		"HOME":         "/home/user",
+	}
+	engine, err := NewEngineWithVariables(p, true, vars)
+	require.NoError(t, err)
+	return engine
+}
+
+func TestAgentDefault_CommandDecisions(t *testing.T) {
+	e := loadAgentDefaultEngine(t)
+
+	tests := []struct {
+		name     string
+		cmd      string
+		args     []string
+		wantDec  types.Decision
+		wantRule string
+	}{
+		// Allowed dev tools
+		{
+			name:     "curl allowed",
+			cmd:      "curl",
+			args:     []string{"https://example.com"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-http-tools",
+		},
+		{
+			name:     "git status allowed",
+			cmd:      "git",
+			args:     []string{"status"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-dev-tools",
+		},
+		{
+			name:     "node allowed",
+			cmd:      "node",
+			args:     []string{"index.js"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-dev-tools",
+		},
+		{
+			name:     "ls allowed",
+			cmd:      "ls",
+			args:     []string{"-la"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-file-ops",
+		},
+		{
+			name:     "grep allowed",
+			cmd:      "grep",
+			args:     []string{"-r", "TODO", "."},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-search-tools",
+		},
+		{
+			name:     "jq allowed",
+			cmd:      "jq",
+			args:     []string{"."},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-text-processing",
+		},
+		{
+			name:     "bash allowed",
+			cmd:      "bash",
+			args:     []string{"-c", "echo hello"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-shell-exec",
+		},
+		{
+			name:     "docker allowed",
+			cmd:      "docker",
+			args:     []string{"ps"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-containers",
+		},
+		{
+			name:     "pytest allowed",
+			cmd:      "pytest",
+			args:     []string{"-v"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-build-test",
+		},
+		{
+			name:     "tar allowed",
+			cmd:      "tar",
+			args:     []string{"-xzf", "archive.tar.gz"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-archive-tools",
+		},
+		{
+			name:     "ps allowed",
+			cmd:      "ps",
+			args:     []string{"aux"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-misc-tools",
+		},
+
+		// Denied commands
+		{
+			name:     "sudo denied",
+			cmd:      "sudo",
+			args:     []string{"rm", "-rf", "/"},
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-privilege-escalation",
+		},
+		{
+			name:     "su denied",
+			cmd:      "su",
+			args:     []string{"-"},
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-privilege-escalation",
+		},
+		{
+			name:     "shutdown denied",
+			cmd:      "shutdown",
+			args:     []string{"-h", "now"},
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-system-admin",
+		},
+		{
+			name:     "nc denied",
+			cmd:      "nc",
+			args:     []string{"-l", "8080"},
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-raw-network",
+		},
+		{
+			name:     "apt install denied",
+			cmd:      "apt",
+			args:     []string{"install", "nginx"},
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-system-pkg-install",
+		},
+
+		// Git guardrails (redirects)
+		{
+			name:     "git push --force redirected",
+			cmd:      "git",
+			args:     []string{"push", "--force"},
+			wantDec:  types.DecisionRedirect,
+			wantRule: "redirect-git-force-push",
+		},
+		{
+			name:     "git push -f redirected",
+			cmd:      "git",
+			args:     []string{"push", "-f"},
+			wantDec:  types.DecisionRedirect,
+			wantRule: "redirect-git-force-push",
+		},
+		{
+			name:     "git reset --hard redirected",
+			cmd:      "git",
+			args:     []string{"reset", "--hard", "HEAD~1"},
+			wantDec:  types.DecisionRedirect,
+			wantRule: "redirect-git-hard-reset",
+		},
+		{
+			name:     "git clean -fd redirected",
+			cmd:      "git",
+			args:     []string{"clean", "-fd"},
+			wantDec:  types.DecisionRedirect,
+			wantRule: "redirect-git-clean",
+		},
+		{
+			name:     "git push origin main redirected",
+			cmd:      "git",
+			args:     []string{"push", "origin", "main"},
+			wantDec:  types.DecisionRedirect,
+			wantRule: "redirect-git-push-main",
+		},
+		{
+			name:     "git push origin master redirected",
+			cmd:      "git",
+			args:     []string{"push", "origin", "master"},
+			wantDec:  types.DecisionRedirect,
+			wantRule: "redirect-git-push-main",
+		},
+		{
+			name:     "rm -rf / redirected",
+			cmd:      "rm",
+			args:     []string{"-rf", "/"},
+			wantDec:  types.DecisionRedirect,
+			wantRule: "redirect-destructive-rm",
+		},
+
+		// Git normal ops still allowed (not caught by redirects)
+		{
+			name:     "git commit allowed",
+			cmd:      "git",
+			args:     []string{"commit", "-m", "fix: stuff"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-dev-tools",
+		},
+		{
+			name:     "git push feature branch allowed",
+			cmd:      "git",
+			args:     []string{"push", "origin", "feature-branch"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-dev-tools",
+		},
+		{
+			name:     "rm single file allowed",
+			cmd:      "rm",
+			args:     []string{"temp.txt"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-file-ops",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dec := e.CheckCommand(tt.cmd, tt.args)
+			assert.Equal(t, tt.wantDec, dec.PolicyDecision, "decision mismatch")
+			assert.Equal(t, tt.wantRule, dec.Rule, "rule mismatch")
+		})
+	}
+}
+
+func TestAgentDefault_FileDecisions(t *testing.T) {
+	e := loadAgentDefaultEngine(t)
+
+	tests := []struct {
+		name     string
+		path     string
+		op       string
+		wantDec  types.Decision
+		wantRule string
+	}{
+		// Workspace full access
+		{
+			name:     "read project file",
+			path:     "/home/user/project/main.go",
+			op:       "read",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-workspace",
+		},
+		{
+			name:     "write project file",
+			path:     "/home/user/project/src/app.ts",
+			op:       "write",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-workspace",
+		},
+		{
+			name:     "delete project file",
+			path:     "/home/user/project/old.txt",
+			op:       "delete",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-workspace",
+		},
+
+		// Temp full access
+		{
+			name:     "write to tmp",
+			path:     "/tmp/build-output/result.json",
+			op:       "write",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-tmp",
+		},
+
+		// Package caches
+		{
+			name:     "npm cache access",
+			path:     "/home/user/.npm/_cacache/content-v2/sha512/abc",
+			op:       "write",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-package-caches",
+		},
+		{
+			name:     "cargo cache access",
+			path:     "/home/user/.cargo/registry/src/index.crates.io/serde-1.0/src/lib.rs",
+			op:       "read",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-package-caches",
+		},
+
+		// System read-only
+		{
+			name:     "read /usr/lib",
+			path:     "/usr/lib/libssl.so",
+			op:       "read",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-system-read",
+		},
+		{
+			name:     "write /usr denied",
+			path:     "/usr/local/bin/tool",
+			op:       "write",
+			wantDec:  types.DecisionDeny,
+			wantRule: "default-deny-files",
+		},
+		{
+			name:     "read /etc/hosts",
+			path:     "/etc/hosts",
+			op:       "read",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-etc-read",
+		},
+
+		// Credential paths require approval
+		{
+			name:     "read SSH private key",
+			path:     "/home/user/.ssh/id_rsa",
+			op:       "read",
+			wantDec:  types.DecisionApprove,
+			wantRule: "approve-ssh-keys",
+		},
+		{
+			name:     "read AWS credentials",
+			path:     "/home/user/.aws/credentials",
+			op:       "read",
+			wantDec:  types.DecisionApprove,
+			wantRule: "approve-cloud-credentials",
+		},
+		{
+			name:     "read kube config",
+			path:     "/home/user/.kube/config",
+			op:       "read",
+			wantDec:  types.DecisionApprove,
+			wantRule: "approve-cloud-credentials",
+		},
+		{
+			name:     "read git-credentials",
+			path:     "/home/user/.git-credentials",
+			op:       "read",
+			wantDec:  types.DecisionApprove,
+			wantRule: "approve-git-credentials",
+		},
+		{
+			name:     "read .env in project (workspace allows)",
+			path:     "/home/user/project/.env",
+			op:       "read",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-workspace",
+		},
+		{
+			name:     "read .env outside project (approval gate)",
+			path:     "/home/user/other-project/.env",
+			op:       "read",
+			wantDec:  types.DecisionApprove,
+			wantRule: "approve-env-files",
+		},
+
+		// Denied paths
+		{
+			name:     "read /proc denied",
+			path:     "/proc/self/environ",
+			op:       "read",
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-proc-sys",
+		},
+		{
+			name:     "read /sys denied",
+			path:     "/sys/class/net/eth0/address",
+			op:       "read",
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-proc-sys",
+		},
+		{
+			name:     "read random home path denied",
+			path:     "/home/user/.bashrc",
+			op:       "read",
+			wantDec:  types.DecisionDeny,
+			wantRule: "default-deny-files",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dec := e.CheckFile(tt.path, tt.op)
+			assert.Equal(t, tt.wantDec, dec.PolicyDecision, "decision mismatch")
+			assert.Equal(t, tt.wantRule, dec.Rule, "rule mismatch")
+		})
+	}
+}
+
+func TestAgentDefault_NetworkDecisions(t *testing.T) {
+	e := loadAgentDefaultEngine(t)
+
+	tests := []struct {
+		name     string
+		domain   string
+		port     int
+		wantDec  types.Decision
+		wantRule string
+	}{
+		// LLM providers
+		{
+			name:     "Anthropic API allowed",
+			domain:   "api.anthropic.com",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-llm-providers",
+		},
+		{
+			name:     "OpenAI API allowed",
+			domain:   "api.openai.com",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-llm-providers",
+		},
+		{
+			name:     "Google AI API allowed",
+			domain:   "generativelanguage.googleapis.com",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-llm-providers",
+		},
+
+		// Package registries
+		{
+			name:     "npm registry allowed",
+			domain:   "registry.npmjs.org",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-npm",
+		},
+		{
+			name:     "PyPI allowed",
+			domain:   "pypi.org",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-pypi",
+		},
+		{
+			name:     "crates.io allowed",
+			domain:   "crates.io",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-cargo",
+		},
+		{
+			name:     "Go proxy allowed",
+			domain:   "proxy.golang.org",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-go-proxy",
+		},
+		{
+			name:     "Maven Central allowed",
+			domain:   "repo1.maven.org",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-other-registries",
+		},
+		{
+			name:     "RubyGems allowed",
+			domain:   "rubygems.org",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-other-registries",
+		},
+		{
+			name:     "Docker Hub allowed",
+			domain:   "registry-1.docker.io",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-other-registries",
+		},
+
+		// Code hosting
+		{
+			name:     "GitHub HTTPS allowed",
+			domain:   "github.com",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-github",
+		},
+		{
+			name:     "GitHub SSH allowed",
+			domain:   "github.com",
+			port:     22,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-github",
+		},
+		{
+			name:     "GitLab allowed",
+			domain:   "gitlab.com",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-gitlab",
+		},
+
+		// CDNs
+		{
+			name:     "jsdelivr allowed",
+			domain:   "cdn.jsdelivr.net",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-cdns",
+		},
+		{
+			name:     "unpkg allowed",
+			domain:   "unpkg.com",
+			port:     443,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-cdns",
+		},
+
+		// Unknown HTTPS requires approval
+		{
+			name:     "random.com HTTPS requires approval",
+			domain:   "random.com",
+			port:     443,
+			wantDec:  types.DecisionApprove,
+			wantRule: "approve-unknown-https",
+		},
+
+		// Non-HTTPS unknown denied
+		{
+			name:     "random.com HTTP denied",
+			domain:   "random.com",
+			port:     80,
+			wantDec:  types.DecisionDeny,
+			wantRule: "default-deny-network",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dec := e.CheckNetwork(tt.domain, tt.port)
+			assert.Equal(t, tt.wantDec, dec.PolicyDecision, "decision mismatch")
+			assert.Equal(t, tt.wantRule, dec.Rule, "rule mismatch")
+		})
+	}
+}
+
+func TestAgentDefault_NetworkIPDecisions(t *testing.T) {
+	e := loadAgentDefaultEngine(t)
+
+	tests := []struct {
+		name     string
+		ip       string
+		port     int
+		wantDec  types.Decision
+		wantRule string
+	}{
+		{
+			name:     "localhost allowed",
+			ip:       "127.0.0.1",
+			port:     3000,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-localhost",
+		},
+		{
+			name:     "IPv6 localhost allowed",
+			ip:       "::1",
+			port:     8080,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-localhost",
+		},
+		{
+			name:     "cloud metadata denied",
+			ip:       "169.254.169.254",
+			port:     80,
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-metadata-services",
+		},
+		{
+			name:     "Alibaba metadata denied",
+			ip:       "100.100.100.200",
+			port:     80,
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-metadata-services",
+		},
+		{
+			name:     "private network 10.x denied",
+			ip:       "10.0.0.1",
+			port:     443,
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-private-networks",
+		},
+		{
+			name:     "private network 172.16.x denied",
+			ip:       "172.16.0.1",
+			port:     443,
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-private-networks",
+		},
+		{
+			name:     "private network 192.168.x denied",
+			ip:       "192.168.1.1",
+			port:     443,
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-private-networks",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dec := e.CheckNetworkIP("", net.ParseIP(tt.ip), tt.port)
+			assert.Equal(t, tt.wantDec, dec.PolicyDecision, "decision mismatch")
+			assert.Equal(t, tt.wantRule, dec.Rule, "rule mismatch")
+		})
+	}
+}
+
+func TestAgentDefault_EnvDecisions(t *testing.T) {
+	e := loadAgentDefaultEngine(t)
+
+	tests := []struct {
+		name        string
+		envVar      string
+		wantAllowed bool
+	}{
+		// Safe vars allowed
+		{name: "PATH allowed", envVar: "PATH", wantAllowed: true},
+		{name: "HOME allowed", envVar: "HOME", wantAllowed: true},
+		{name: "GOPATH allowed", envVar: "GOPATH", wantAllowed: true},
+		{name: "NODE_ENV allowed", envVar: "NODE_ENV", wantAllowed: true},
+		{name: "EDITOR allowed", envVar: "EDITOR", wantAllowed: true},
+
+		// Explicit deny patterns
+		{name: "ANTHROPIC_API_KEY denied", envVar: "ANTHROPIC_API_KEY", wantAllowed: false},
+		{name: "OPENAI_API_KEY denied", envVar: "OPENAI_API_KEY", wantAllowed: false},
+		{name: "GITHUB_TOKEN denied", envVar: "GITHUB_TOKEN", wantAllowed: false},
+		{name: "GH_TOKEN denied", envVar: "GH_TOKEN", wantAllowed: false},
+		{name: "NPM_TOKEN denied", envVar: "NPM_TOKEN", wantAllowed: false},
+		{name: "AWS_SECRET_ACCESS_KEY denied", envVar: "AWS_SECRET_ACCESS_KEY", wantAllowed: false},
+		{name: "AWS_SESSION_TOKEN denied", envVar: "AWS_SESSION_TOKEN", wantAllowed: false},
+		{name: "GOOGLE_APPLICATION_CREDENTIALS denied", envVar: "GOOGLE_APPLICATION_CREDENTIALS", wantAllowed: false},
+
+		// Wildcard deny patterns
+		{name: "MY_SECRET_KEY denied (*_SECRET*)", envVar: "MY_SECRET_KEY", wantAllowed: false},
+		{name: "DB_PASSWORD denied (*_PASSWORD*)", envVar: "DB_PASSWORD", wantAllowed: false},
+		{name: "SSH_PRIVATE_KEY denied (*_PRIVATE_KEY*)", envVar: "SSH_PRIVATE_KEY", wantAllowed: false},
+		{name: "STRIPE_API_KEY denied (*_API_KEY*)", envVar: "STRIPE_API_KEY", wantAllowed: false},
+		{name: "AWS_ACCESS_KEY_ID denied (*_ACCESS_KEY*)", envVar: "AWS_ACCESS_KEY_ID", wantAllowed: false},
+		{name: "SESSION_TOKEN denied (*_TOKEN)", envVar: "SESSION_TOKEN", wantAllowed: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dec := e.CheckEnv(tt.envVar)
+			assert.Equal(t, tt.wantAllowed, dec.Allowed, "env decision mismatch for %s", tt.envVar)
+		})
+	}
+}
+
+func TestAgentDefault_UnixSocketDecisions(t *testing.T) {
+	e := loadAgentDefaultEngine(t)
+
+	// Docker socket allowed for connect
+	dec := e.CheckUnixSocket("/var/run/docker.sock", "connect")
+	assert.Equal(t, types.DecisionAllow, dec.PolicyDecision)
+	assert.Equal(t, "allow-docker-socket", dec.Rule)
+
+	// Other system sockets denied
+	dec = e.CheckUnixSocket("/var/run/dbus/system_bus_socket", "connect")
+	assert.Equal(t, types.DecisionDeny, dec.PolicyDecision)
+	assert.Equal(t, "deny-system-sockets", dec.Rule)
 }

@@ -41,19 +41,21 @@ func (s SessionState) IsActive() bool {
 }
 
 type Session struct {
-	ID          string       `json:"id"`
-	State       SessionState `json:"state"`
-	CreatedAt   time.Time    `json:"created_at"`
-	Workspace   string       `json:"workspace"`
-	Policy      string       `json:"policy"`
-	Profile     string       `json:"profile,omitempty"`
-	Mounts      []MountInfo  `json:"mounts,omitempty"`
-	Cwd         string       `json:"cwd"`
-	VirtualRoot string       `json:"virtual_root,omitempty"`
-	ProxyURL    string       `json:"proxy_url,omitempty"`
-	TOTPSecret  string       `json:"-"` // Hidden from JSON/API, used for TOTP approval mode
-	ProjectRoot string       `json:"project_root,omitempty"`
-	GitRoot     string       `json:"git_root,omitempty"`
+	ID             string       `json:"id"`
+	State          SessionState `json:"state"`
+	CreatedAt      time.Time    `json:"created_at"`
+	Workspace      string       `json:"workspace"`
+	WorkspaceMount string       `json:"workspace_mount,omitempty"` // FUSE mount point (if active)
+	Policy         string       `json:"policy"`
+	Profile        string       `json:"profile,omitempty"`
+	Mounts         []MountInfo  `json:"mounts,omitempty"`
+	Cwd            string       `json:"cwd"`
+	VirtualRoot    string       `json:"virtual_root,omitempty"`
+	ProxyURL       string       `json:"proxy_url,omitempty"`
+	LLMProxyURL    string       `json:"llm_proxy_url,omitempty"`
+	TOTPSecret     string       `json:"-"` // Hidden from JSON/API, used for TOTP approval mode
+	ProjectRoot    string       `json:"project_root,omitempty"`
+	GitRoot        string       `json:"git_root,omitempty"`
 }
 
 // MountInfo describes an active mount in a session.

@@ -1,0 +1,176 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl bash jq git nodejs npm \
+      sudo netcat-openbsd procps python3 \
+      fuse3 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy locally-built binaries
+COPY agentsh /usr/bin/agentsh
+COPY agentsh-unixwrap /usr/bin/agentsh-unixwrap
+COPY agentsh-stub /usr/bin/agentsh-stub
+RUN chmod +x /usr/bin/agentsh /usr/bin/agentsh-unixwrap /usr/bin/agentsh-stub
+
+# Copy policies
+COPY configs/policies/ /etc/agentsh/policies/
+
+# Create workspace and Claude config dir
+RUN mkdir -p /work/app /root/.claude
+
+# Entrypoint: start agentsh server, then launch wrap session
+COPY <<'SCRIPT' /entrypoint.sh
+#!/bin/bash
+set -euo pipefail
+
+tmp="$(mktemp -d)"
+
+# Docker --env-file doesn't strip quotes; remove them from API keys.
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY%\"}"
+  ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY#\"}"
+  export ANTHROPIC_API_KEY
+fi
+trap 'set +e; [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; rm -rf "$tmp"' EXIT
+
+port=18923
+base_url="http://127.0.0.1:${port}"
+export AGENTSH_SERVER="$base_url"
+
+cat >"$tmp/config.yml" <<YAML
+server:
+  http:
+    addr: "127.0.0.1:${port}"
+  grpc:
+    enabled: false
+  unix_socket:
+    enabled: false
+auth:
+  type: "none"
+logging:
+  level: "debug"
+  format: "text"
+metrics:
+  enabled: false
+health:
+  path: "/health"
+  readiness_path: "/ready"
+policies:
+  dir: "/etc/agentsh/policies"
+  default: "agent-default"
+sessions:
+  base_dir: "${tmp}/sessions"
+  max_sessions: 10
+audit:
+  enabled: true
+  output: "${tmp}/audit.jsonl"
+  storage:
+    sqlite_path: "${tmp}/events.db"
+sandbox:
+  enabled: true
+  allow_degraded: true
+  fuse:
+    enabled: true
+    audit:
+      mode: "monitor"
+  network:
+    enabled: false
+  cgroups:
+    enabled: false
+  unix_sockets:
+    enabled: false
+  seccomp:
+    enabled: true
+    unix_socket:
+      enabled: false
+    execve:
+      enabled: true
+proxy:
+  mode: "embedded"
+  port: 0
+  providers:
+    anthropic: "https://api.anthropic.com"
+    openai: "https://api.openai.com"
+dlp:
+  mode: "redact"
+  patterns:
+    email: true
+    phone: true
+    credit_card: true
+    ssn: true
+    api_keys: true
+llm_storage:
+  store_bodies: true
+  retention:
+    max_age_days: 7
+    max_size_mb: 100
+YAML
+
+echo "Starting agentsh server..."
+agentsh server --config "$tmp/config.yml" >"$tmp/server.log" 2>&1 &
+SERVER_PID="$!"
+
+for _ in $(seq 1 100); do
+  if curl -fsS "${base_url}/health" >/dev/null 2>&1; then break; fi
+  sleep 0.1
+done
+echo "Server ready (PID: $SERVER_PID)"
+echo ""
+
+if command -v claude >/dev/null 2>&1; then
+  echo "Claude Code: $(claude --version 2>/dev/null || echo 'version unknown')"
+else
+  echo "Claude Code: not found (mount via -v \$(which claude):/usr/local/bin/claude:ro)"
+fi
+
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "Auth: ANTHROPIC_API_KEY set"
+else
+  echo "Auth: ANTHROPIC_API_KEY not set (pass --env-file .env)"
+fi
+echo ""
+
+# Check FUSE availability
+if [ -e /dev/fuse ]; then
+  echo "FUSE: /dev/fuse available"
+else
+  echo "FUSE: /dev/fuse NOT available (mount with --device /dev/fuse)"
+fi
+echo ""
+
+echo "================================================================"
+echo "  agentsh wrap — agent-default policy (seccomp + FUSE)"
+echo "  Workspace: /work/app"
+echo ""
+echo "  Run Claude Code:  claude -p 'your prompt'"
+echo "  Interactive:       claude"
+echo "  View LLM logs:    agentsh llm-logs \$AGENTSH_SESSION_ID"
+echo "  View audit log:   cat ${tmp}/audit.jsonl | jq ."
+echo "================================================================"
+echo ""
+
+# Launch wrap session — interactive shell or provided command.
+# The child process receives AGENTSH_WORKSPACE_MOUNT env var if FUSE is active.
+# We wrap the shell to cd into the FUSE mount for file-level interception.
+if [ $# -gt 0 ]; then
+  exec agentsh wrap --policy agent-default --root /work/app -- /bin/bash -c '
+    if [ -n "$AGENTSH_WORKSPACE_MOUNT" ] && cd "$AGENTSH_WORKSPACE_MOUNT" 2>/dev/null; then
+      echo "agentsh: FUSE active — working directory: $(pwd)" >&2
+    fi
+    exec "$@"
+  ' -- "$@"
+else
+  exec agentsh wrap --policy agent-default --root /work/app -- /bin/bash -c '
+    if [ -n "$AGENTSH_WORKSPACE_MOUNT" ] && cd "$AGENTSH_WORKSPACE_MOUNT" 2>/dev/null; then
+      echo "agentsh: FUSE active — working directory: $(pwd)" >&2
+    fi
+    export PS1="agentsh:/work/app\$ "
+    exec /bin/bash --norc -i
+  '
+fi
+SCRIPT
+RUN chmod +x /entrypoint.sh
+
+WORKDIR /work/app
+ENTRYPOINT ["/bin/bash", "/entrypoint.sh"]

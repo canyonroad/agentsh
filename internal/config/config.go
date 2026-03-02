@@ -1001,7 +1001,10 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	}
 	if cfg.Sandbox.Seccomp.Enabled && !cfg.Sandbox.Seccomp.UnixSocket.Enabled {
 		// Enable unix socket monitoring by default if seccomp is enabled
-		cfg.Sandbox.Seccomp.UnixSocket.Enabled = true
+		// AND the user hasn't explicitly disabled it via sandbox.unix_sockets.enabled=false.
+		if cfg.Sandbox.UnixSockets.Enabled == nil || *cfg.Sandbox.UnixSockets.Enabled {
+			cfg.Sandbox.Seccomp.UnixSocket.Enabled = true
+		}
 	}
 	if cfg.Sandbox.Seccomp.UnixSocket.Action == "" {
 		cfg.Sandbox.Seccomp.UnixSocket.Action = "enforce"

@@ -166,8 +166,11 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// Create signal filter socket if signal filtering is enabled.
 	// This must happen before marshaling the seccomp config so that
 	// signal_filter_enabled accurately reflects whether the socket was created.
+	// NOTE: Signal filter is disabled when execve interception is enabled because
+	// stacking two seccomp USER_NOTIF filters causes notification delivery failures
+	// (the signal filter's semaphore interferes with execve notification reception).
 	var signalSocketPath string
-	signalFilterEnabled := a.policy != nil && a.policy.SignalEngine() != nil
+	signalFilterEnabled := a.policy != nil && a.policy.SignalEngine() != nil && !execveEnabled
 	if signalFilterEnabled {
 		signalSocketPath = filepath.Join(notifyDir, "signal-"+safeID+".sock")
 		signalListener, err := net.Listen("unix", signalSocketPath)

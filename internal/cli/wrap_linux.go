@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"syscall"
+	"unsafe"
 
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
@@ -92,8 +93,22 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 		args:       wrapperArgs,
 		env:        env,
 		extraFiles: extraFiles,
-		sysProcAttr: &syscall.SysProcAttr{
-			Setpgid: true,
+		sysProcAttr: func() *syscall.SysProcAttr {
+			attr := &syscall.SysProcAttr{Setpgid: true}
+			// If stdin is a terminal, make the child the foreground process
+			// group so interactive shells (bash -i) can read from the TTY.
+			if isTerminal(os.Stdin.Fd()) {
+				attr.Foreground = true
+				attr.Ctty = int(os.Stdin.Fd())
+			}
+			return attr
+		}(),
+		postWait: func() {
+			// Reclaim the terminal's foreground process group after the child
+			// exits so the parent can continue writing to stderr.
+			if isTerminal(os.Stdin.Fd()) {
+				reclaimTerminal()
+			}
 		},
 		postStart: func() {
 			defer parentFile.Close()
@@ -111,6 +126,13 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 				return
 			}
 			slog.Info("wrap: notify fd forwarded to server", "session_id", sessID, "socket", notifySocket)
+
+			// Send ACK to wrapper so it knows the handler is ready before exec.
+			// This prevents a race where the wrapper execs before the seccomp
+			// notify handler is started on the server.
+			if _, err := parentFile.Write([]byte{1}); err != nil {
+				slog.Debug("wrap: ACK write failed (wrapper may have already exited)", "error", err, "session_id", sessID)
+			}
 
 			// Forward signal filter fd if configured
 			if hasSignalSocket && signalParentFile != nil {
@@ -186,4 +208,16 @@ func forwardNotifyFD(socketPath string, notifyFD int) error {
 	}
 
 	return nil
+}
+
+// isTerminal returns true if the given file descriptor is a terminal.
+func isTerminal(fd uintptr) bool {
+	_, err := unix.IoctlGetTermios(int(fd), unix.TCGETS)
+	return err == nil
+}
+
+// reclaimTerminal makes the current process group the foreground group of stdin.
+func reclaimTerminal() {
+	pgid := int32(unix.Getpgrp())
+	_, _, _ = unix.Syscall(unix.SYS_IOCTL, os.Stdin.Fd(), unix.TIOCSPGRP, uintptr(unsafe.Pointer(&pgid)))
 }

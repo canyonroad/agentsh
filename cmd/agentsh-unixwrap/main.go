@@ -76,6 +76,14 @@ func main() {
 		}
 	}
 
+	// Wait for ACK from the CLI confirming the server has received the notify fd
+	// and started the handler. This prevents a race where we exec before the
+	// handler is ready to process seccomp notifications.
+	ackBuf := make([]byte, 1)
+	if _, err := unix.Read(sockFD, ackBuf); err != nil {
+		log.Printf("warning: ACK read failed (server may not be ready): %v", err)
+	}
+
 	// Close notify socket - we're done with it
 	_ = unix.Close(sockFD)
 

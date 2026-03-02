@@ -234,19 +234,21 @@ func (s *Session) Snapshot() types.Session {
 	}
 
 	return types.Session{
-		ID:          s.ID,
-		State:       s.State,
-		CreatedAt:   s.CreatedAt,
-		Workspace:   s.Workspace,
-		Policy:      s.Policy,
-		Profile:     s.Profile,
-		Mounts:      mounts,
-		Cwd:         s.Cwd,
-		VirtualRoot: s.VirtualRoot,
-		ProxyURL:    s.proxyURL,
-		TOTPSecret:  s.TOTPSecret,
-		ProjectRoot: s.ProjectRoot,
-		GitRoot:     s.GitRoot,
+		ID:             s.ID,
+		State:          s.State,
+		CreatedAt:      s.CreatedAt,
+		Workspace:      s.Workspace,
+		WorkspaceMount: s.WorkspaceMount,
+		Policy:         s.Policy,
+		Profile:        s.Profile,
+		Mounts:         mounts,
+		Cwd:            s.Cwd,
+		VirtualRoot:    s.VirtualRoot,
+		ProxyURL:       s.proxyURL,
+		LLMProxyURL:    s.llmProxyURL,
+		TOTPSecret:     s.TOTPSecret,
+		ProjectRoot:    s.ProjectRoot,
+		GitRoot:        s.GitRoot,
 	}
 }
 
