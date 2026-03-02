@@ -387,3 +387,112 @@ func TestApplyPatch_RealPaths_SiblingPath(t *testing.T) {
 		t.Error("expected error patching cwd to sibling path")
 	}
 }
+
+func TestIsUnderRoot(t *testing.T) {
+	tests := []struct {
+		path string
+		root string
+		want bool
+	}{
+		{"/workspace", "/workspace", true},
+		{"/workspace/foo", "/workspace", true},
+		{"/workspace/foo/bar", "/workspace", true},
+		{"/workspace2", "/workspace", false},
+		{"/workspacefoo", "/workspace", false},
+		{"/other", "/workspace", false},
+		// Root == "/" edge case
+		{"/anything", "/", true},
+		{"/workspace", "/", true},
+		{"/", "/", true},
+		// Real-paths style roots
+		{"/home/user/work", "/home/user/work", true},
+		{"/home/user/work/src", "/home/user/work", true},
+		{"/home/user/work2", "/home/user/work", false},
+		{"/home/user/worker", "/home/user/work", false},
+	}
+	for _, tt := range tests {
+		got := isUnderRoot(tt.path, tt.root)
+		if got != tt.want {
+			t.Errorf("isUnderRoot(%q, %q) = %v, want %v", tt.path, tt.root, got, tt.want)
+		}
+	}
+}
+
+func TestBuiltin_Cd_RelativePath(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-cd-rel", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetRealPaths(true)
+
+	// cd to a subdirectory (relative)
+	handled, code, _, _ := s.Builtin(types.ExecRequest{Command: "cd", Args: []string{"subdir"}})
+	if !handled || code != 0 {
+		t.Fatalf("cd subdir: handled=%v code=%d", handled, code)
+	}
+	cwd, _, _ := s.GetCwdEnvHistory()
+	want := s.VirtualRoot + "/subdir"
+	if cwd != want {
+		t.Errorf("after cd subdir: cwd=%q want %q", cwd, want)
+	}
+
+	// cd to parent with .. — should resolve back to VirtualRoot
+	handled, code, _, _ = s.Builtin(types.ExecRequest{Command: "cd", Args: []string{".."}})
+	if !handled || code != 0 {
+		t.Fatalf("cd ..: handled=%v code=%d", handled, code)
+	}
+	cwd, _, _ = s.GetCwdEnvHistory()
+	if cwd != s.VirtualRoot {
+		t.Errorf("after cd ..: cwd=%q want %q", cwd, s.VirtualRoot)
+	}
+}
+
+func TestBuiltin_Cd_EscapeWithDotDot(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-cd-escape", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetRealPaths(true)
+
+	// Try to escape with ..
+	handled, code, _, stderr := s.Builtin(types.ExecRequest{Command: "cd", Args: []string{".."}})
+	if !handled {
+		t.Fatal("cd should be handled")
+	}
+	if code == 0 {
+		t.Error("cd .. from VirtualRoot should fail")
+	}
+	if len(stderr) == 0 {
+		t.Error("expected error message in stderr")
+	}
+}
+
+func TestBuiltin_Cd_NoArgs_ResetsToVirtualRoot(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-cd-noargs", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetRealPaths(true)
+
+	// First cd into a subdirectory
+	s.Builtin(types.ExecRequest{Command: "cd", Args: []string{"sub"}})
+
+	// cd with no args should reset to VirtualRoot
+	handled, code, _, _ := s.Builtin(types.ExecRequest{Command: "cd"})
+	if !handled || code != 0 {
+		t.Fatalf("cd (no args): handled=%v code=%d", handled, code)
+	}
+	cwd, _, _ := s.GetCwdEnvHistory()
+	if cwd != s.VirtualRoot {
+		t.Errorf("after cd (no args): cwd=%q want %q", cwd, s.VirtualRoot)
+	}
+}
