@@ -25,7 +25,7 @@ command_rules:
     description: Block force push, suggest --force-with-lease
     commands: [git]
     args_patterns:
-      - "push.*(--force(\\s|$)|-f(\\s|$))"
+      - "push.*((^|\\s)--force(\\s|$)|(^|\\s)-f(\\s|$))"
     decision: redirect
     redirect_to:
       command: echo
@@ -358,6 +358,21 @@ command_rules:
 
 file_rules:
   # ---------------------------------------------------------------------------
+  # Credential/env files — require approval (MUST precede workspace allow)
+  # ---------------------------------------------------------------------------
+
+  - name: approve-env-files
+    description: Require approval for .env file access (even inside workspace)
+    paths:
+      - "**/.env"
+      - "**/.env.*"
+    operations:
+      - "*"
+    decision: approve
+    message: "Agent wants to access environment file: {{.Path}}"
+    timeout: 5m
+
+  # ---------------------------------------------------------------------------
   # Workspace — full access
   # ---------------------------------------------------------------------------
 
@@ -489,17 +504,6 @@ file_rules:
       - "*"
     decision: approve
     message: "Agent wants to access git credentials: {{.Path}}"
-    timeout: 5m
-
-  - name: approve-env-files
-    description: Require approval for .env file access
-    paths:
-      - "**/.env"
-      - "**/.env.*"
-    operations:
-      - "*"
-    decision: approve
-    message: "Agent wants to access environment file: {{.Path}}"
     timeout: 5m
 
   # ---------------------------------------------------------------------------

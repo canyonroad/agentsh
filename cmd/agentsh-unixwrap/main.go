@@ -80,8 +80,11 @@ func main() {
 	// and started the handler. This prevents a race where we exec before the
 	// handler is ready to process seccomp notifications.
 	ackBuf := make([]byte, 1)
-	if _, err := unix.Read(sockFD, ackBuf); err != nil {
+	n, err := unix.Read(sockFD, ackBuf)
+	if err != nil {
 		log.Printf("warning: ACK read failed (server may not be ready): %v", err)
+	} else if n != 1 {
+		log.Printf("warning: ACK incomplete (got %d bytes, expected 1)", n)
 	}
 
 	// Close notify socket - we're done with it

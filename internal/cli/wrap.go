@@ -157,11 +157,12 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 		)
 	}
 
-	// If FUSE mount is active, add it to the environment so the child
-	// process can cd into it. Direct chdir from the CLI may fail because
-	// the FUSE daemon runs in the server process.
+	// If FUSE mount is active, add it to the environment and set the working
+	// directory so the child process starts inside the mount. This ensures even
+	// non-shell agents that don't cd themselves will operate through FUSE.
 	if workDir != "" {
 		agentProc.Env = append(agentProc.Env, fmt.Sprintf("AGENTSH_WORKSPACE_MOUNT=%s", workDir))
+		agentProc.Dir = workDir
 	}
 
 	// If the LLM proxy is active, route agent API calls through it so

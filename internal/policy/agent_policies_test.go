@@ -140,17 +140,22 @@ func TestAgentPolicies_DefaultRuleDetails(t *testing.T) {
 
 	// --- File rules ---
 
+	// Env files require approval (MUST precede workspace allow)
+	assert.Equal(t, "approve-env-files", p.FileRules[0].Name)
+	assert.Equal(t, "approve", p.FileRules[0].Decision)
+	assert.Contains(t, p.FileRules[0].Paths, "**/.env")
+
 	// Workspace full access
-	assert.Equal(t, "allow-workspace", p.FileRules[0].Name)
-	assert.Equal(t, "allow", p.FileRules[0].Decision)
-	assert.Contains(t, p.FileRules[0].Paths, "${PROJECT_ROOT}/**")
+	assert.Equal(t, "allow-workspace", p.FileRules[1].Name)
+	assert.Equal(t, "allow", p.FileRules[1].Decision)
+	assert.Contains(t, p.FileRules[1].Paths, "${PROJECT_ROOT}/**")
 
 	// Credential paths require approval
-	assert.Equal(t, "approve-ssh-keys", p.FileRules[6].Name)
-	assert.Equal(t, "approve", p.FileRules[6].Decision)
-
-	assert.Equal(t, "approve-cloud-credentials", p.FileRules[7].Name)
+	assert.Equal(t, "approve-ssh-keys", p.FileRules[7].Name)
 	assert.Equal(t, "approve", p.FileRules[7].Decision)
+
+	assert.Equal(t, "approve-cloud-credentials", p.FileRules[8].Name)
+	assert.Equal(t, "approve", p.FileRules[8].Decision)
 
 	// Default deny at the end
 	assert.Equal(t, "default-deny-files", p.FileRules[11].Name)
@@ -477,6 +482,13 @@ func TestAgentDefault_CommandDecisions(t *testing.T) {
 			wantRule: "allow-dev-tools",
 		},
 		{
+			name:     "git push branch ending in -f allowed",
+			cmd:      "git",
+			args:     []string{"push", "origin", "topic-f"},
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-dev-tools",
+		},
+		{
 			name:     "rm single file allowed",
 			cmd:      "rm",
 			args:     []string{"temp.txt"},
@@ -605,11 +617,11 @@ func TestAgentDefault_FileDecisions(t *testing.T) {
 			wantRule: "approve-git-credentials",
 		},
 		{
-			name:     "read .env in project (workspace allows)",
+			name:     "read .env in project (approval required)",
 			path:     "/home/user/project/.env",
 			op:       "read",
-			wantDec:  types.DecisionAllow,
-			wantRule: "allow-workspace",
+			wantDec:  types.DecisionApprove,
+			wantRule: "approve-env-files",
 		},
 		{
 			name:     "read .env outside project (approval gate)",
