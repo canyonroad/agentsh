@@ -252,6 +252,23 @@ func TestSetRealPaths_TrailingSlash(t *testing.T) {
 	}
 }
 
+func TestSetRealPaths_EmptyWorkspace(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-empty-ws", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Manually set workspace to empty to test defensive behavior
+	s.Workspace = ""
+	s.SetRealPaths(true)
+	// Should be a no-op: VirtualRoot stays at default
+	if s.VirtualRoot != "/workspace" {
+		t.Errorf("VirtualRoot = %q, want /workspace (no-op on empty workspace)", s.VirtualRoot)
+	}
+}
+
 func TestBuiltin_Cd_RealPaths(t *testing.T) {
 	m := NewManager(10)
 	ws := t.TempDir()

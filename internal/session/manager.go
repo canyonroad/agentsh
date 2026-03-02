@@ -362,10 +362,10 @@ func (s *Session) SetRealPaths(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if enabled {
-		vroot := strings.TrimRight(s.Workspace, "/")
-		if vroot == "" {
-			vroot = "/"
+		if s.Workspace == "" {
+			return // no-op: empty workspace cannot be used as virtual root
 		}
+		vroot := filepath.Clean(s.Workspace)
 		s.VirtualRoot = vroot
 		s.Cwd = vroot
 	} else {
