@@ -81,6 +81,10 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		fmt.Fprintf(os.Stderr, "platform init: %v\n", err)
 	}
 
+	if cfg.Sessions.RealPaths && !cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE {
+		slog.Warn("real_paths enabled but enforce_without_fuse is false: outside-workspace file access will be audit-only (not blocked)")
+	}
+
 	return &App{
 		cfg:          cfg,
 		sessions:     sessions,
