@@ -1045,9 +1045,10 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 
 	// Build platform FSConfig
 	fsCfg := platform.FSConfig{
-		SourcePath: s.Workspace,
-		MountPoint: mountPoint,
-		SessionID:  s.ID,
+		SourcePath:  s.Workspace,
+		MountPoint:  mountPoint,
+		SessionID:   s.ID,
+		VirtualRoot: s.VirtualRoot,
 		CommandIDFunc: func() string {
 			return s.CurrentCommandID()
 		},

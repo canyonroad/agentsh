@@ -171,7 +171,8 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 	// Create the fsmonitor hooks
 	// This bridges the new platform.FSConfig to the existing fsmonitor.Hooks
 	hooks := &fsmonitor.Hooks{
-		SessionID: cfg.SessionID,
+		SessionID:   cfg.SessionID,
+		VirtualRoot: cfg.VirtualRoot,
 		// Policy will be wrapped from cfg.PolicyEngine
 		Policy: wrapPolicyEngine(cfg.PolicyEngine),
 		// Event emission bridged to cfg.EventChannel

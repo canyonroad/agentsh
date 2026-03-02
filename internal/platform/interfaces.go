@@ -72,6 +72,9 @@ type FSConfig struct {
 	// SessionID identifies the session this mount belongs to
 	SessionID string
 
+	// VirtualRoot is the virtual path prefix ("/workspace" or real path)
+	VirtualRoot string
+
 	// CommandIDFunc returns the current command ID (called per-operation)
 	CommandIDFunc func() string
 

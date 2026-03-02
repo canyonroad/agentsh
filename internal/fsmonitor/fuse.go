@@ -35,6 +35,7 @@ type Hooks struct {
 	Emit             Emitter
 	FUSEAudit        *FUSEAuditHooks
 	TraceContextFunc func() (traceID, spanID, traceFlags string)
+	VirtualRoot      string // "/workspace" or real path
 }
 
 func NewMonitoredLoopbackRoot(realRoot string, hooks *Hooks) (fs.InodeEmbedder, error) {
@@ -63,6 +64,13 @@ func NewMonitoredLoopbackRoot(realRoot string, hooks *Hooks) (fs.InodeEmbedder, 
 type node struct {
 	fs.LoopbackNode
 	hooks *Hooks
+}
+
+func (n *node) vroot() string {
+	if n.hooks != nil && n.hooks.VirtualRoot != "" {
+		return n.hooks.VirtualRoot
+	}
+	return "/workspace"
 }
 
 func (n *node) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
@@ -167,7 +175,7 @@ func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 
 func (n *node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	virtFrom := n.virtualChildPath(name)
-	virtTo := path.Clean("/workspace/" + sanitizeName(newName))
+	virtTo := path.Clean(n.vroot() + "/" + sanitizeName(newName))
 	newParentNode, ok := newParent.(*node)
 	if ok {
 		virtTo = newParentNode.virtualChildPath(newName)
@@ -382,7 +390,7 @@ func (n *node) checkWithExist(_ context.Context, virtPath string, op string, mus
 		realRoot = n.RootData.Path
 	}
 	if realRoot != "" {
-		if _, err := resolveRealPathUnderRoot(realRoot, virtPath, mustExist, "/workspace"); err != nil {
+		if _, err := resolveRealPathUnderRoot(realRoot, virtPath, mustExist, n.vroot()); err != nil {
 			return policy.Decision{
 				PolicyDecision:    types.DecisionDeny,
 				EffectiveDecision: types.DecisionDeny,
@@ -525,16 +533,18 @@ func (n *node) virtualPath() string {
 	} else {
 		rel = n.Path(nil)
 	}
+	vr := n.vroot()
 	if rel == "" || rel == "." {
-		return "/workspace"
+		return vr
 	}
-	return path.Clean("/workspace/" + filepath.ToSlash(rel))
+	return path.Clean(vr + "/" + filepath.ToSlash(rel))
 }
 
 func (n *node) virtualChildPath(name string) string {
 	base := n.virtualPath()
-	if base == "/workspace" {
-		return path.Clean("/workspace/" + sanitizeName(name))
+	vr := n.vroot()
+	if base == vr {
+		return path.Clean(vr + "/" + sanitizeName(name))
 	}
 	return path.Clean(base + "/" + sanitizeName(name))
 }
@@ -564,7 +574,7 @@ func (n *node) realPath(virt string, mustExist bool) (string, error) {
 	if n.RootData != nil {
 		root = n.RootData.Path
 	}
-	return resolveRealPathUnderRoot(root, virt, mustExist, "/workspace")
+	return resolveRealPathUnderRoot(root, virt, mustExist, n.vroot())
 }
 
 func (n *node) makeDivertFunc(realPath string) func() (*trash.Entry, error) {
