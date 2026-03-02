@@ -568,6 +568,9 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 		s.Touch()
 		s.mu.Lock()
 		vroot := s.VirtualRoot
+		if vroot == "" {
+			vroot = "/workspace"
+		}
 		cwd := s.Cwd
 		s.mu.Unlock()
 		target := vroot
@@ -769,15 +772,16 @@ func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 
 	if patch.Cwd != "" {
 		cwd := patch.Cwd
+		vroot := s.effectiveVirtualRoot()
 		if !strings.HasPrefix(cwd, "/") {
 			cwd = filepath.ToSlash(filepath.Join(s.Cwd, cwd))
 		}
 		cwd = filepath.ToSlash(filepath.Clean(cwd))
 		if cwd == "." || cwd == "" {
-			cwd = s.VirtualRoot
+			cwd = vroot
 		}
-		if !IsUnderRoot(cwd, s.VirtualRoot) {
-			return fmt.Errorf("cwd must be under %s", s.VirtualRoot)
+		if !IsUnderRoot(cwd, vroot) {
+			return fmt.Errorf("cwd must be under %s", vroot)
 		}
 		s.Cwd = cwd
 	}
@@ -797,8 +801,17 @@ func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 	return nil
 }
 
+// effectiveVirtualRoot returns VirtualRoot with a safe default for legacy/empty sessions.
+func (s *Session) effectiveVirtualRoot() string {
+	if s.VirtualRoot == "" {
+		return "/workspace"
+	}
+	return s.VirtualRoot
+}
+
 func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, err error) {
 	cwd, _, _ := s.GetCwdEnvHistory()
+	vroot := s.effectiveVirtualRoot()
 	virt = cwd
 	if strings.TrimSpace(arg) != "" {
 		if strings.HasPrefix(arg, "/") {
@@ -809,15 +822,15 @@ func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, e
 	}
 	virt = filepath.ToSlash(filepath.Clean(virt))
 	if virt == "." || virt == "" {
-		virt = s.VirtualRoot
+		virt = vroot
 	}
-	if !IsUnderRoot(virt, s.VirtualRoot) {
+	if !IsUnderRoot(virt, vroot) {
 		// Outside workspace — reject for builtins (acat/als/astat run in-process
 		// and bypass seccomp). Subprocess commands handle outside paths via
 		// resolveWorkingDir in exec.go where seccomp enforces policy.
-		return "", "", fmt.Errorf("path must be under %s", s.VirtualRoot)
+		return "", "", fmt.Errorf("path must be under %s", vroot)
 	}
-	rel := TrimRootPrefix(virt, s.VirtualRoot)
+	rel := TrimRootPrefix(virt, vroot)
 	rel = strings.TrimPrefix(rel, "/")
 	root := s.WorkspaceMountPath()
 	real = filepath.Clean(filepath.Join(root, filepath.FromSlash(rel)))
@@ -825,6 +838,18 @@ func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, e
 	if !IsRealPathUnder(real, rootClean) {
 		return "", "", fmt.Errorf("path escapes workspace mount")
 	}
+	// Resolve symlinks to prevent escape via workspace symlinks.
+	// Builtins run in-process and bypass seccomp, so we must verify the
+	// resolved real path stays under the workspace root.
+	resolved, resolveErr := filepath.EvalSymlinks(real)
+	if resolveErr == nil {
+		resolved = filepath.Clean(resolved)
+		if !IsRealPathUnder(resolved, rootClean) {
+			return "", "", fmt.Errorf("symlink escape outside workspace root")
+		}
+		real = resolved
+	}
+	// If EvalSymlinks fails (e.g., file doesn't exist), the lexical check above is sufficient
 	return virt, real, nil
 }
 

@@ -1,7 +1,9 @@
 package session
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -502,6 +504,42 @@ func TestBuiltin_Cd_NoArgs_ResetsToVirtualRoot(t *testing.T) {
 	cwd, _, _ := s.GetCwdEnvHistory()
 	if cwd != s.VirtualRoot {
 		t.Errorf("after cd (no args): cwd=%q want %q", cwd, s.VirtualRoot)
+	}
+}
+
+func TestBuiltin_Acat_SymlinkEscape(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	// Create a symlink inside workspace pointing outside
+	target := t.TempDir()
+	secretFile := filepath.Join(target, "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(ws, "escape")
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	s, err := m.CreateWithID("test-symlink-escape", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// acat through symlink should be rejected
+	handled, code, _, stderr := s.Builtin(types.ExecRequest{
+		Command: "acat",
+		Args:    []string{"/workspace/escape/secret.txt"},
+	})
+	if !handled {
+		t.Fatal("acat should be handled as builtin")
+	}
+	if code == 0 {
+		t.Errorf("acat through symlink escape should fail, but got code=0")
+	}
+	if !strings.Contains(string(stderr), "symlink escape") {
+		t.Logf("stderr: %s", stderr)
 	}
 }
 
