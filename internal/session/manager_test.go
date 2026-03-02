@@ -1,6 +1,7 @@
 package session
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -196,11 +197,12 @@ func TestSetRealPaths_Enable(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.SetRealPaths(true)
-	if s.VirtualRoot != ws {
-		t.Errorf("VirtualRoot = %q, want %q", s.VirtualRoot, ws)
+	want := filepath.ToSlash(filepath.Clean(ws))
+	if s.VirtualRoot != want {
+		t.Errorf("VirtualRoot = %q, want %q", s.VirtualRoot, want)
 	}
-	if s.Cwd != ws {
-		t.Errorf("Cwd = %q, want %q", s.Cwd, ws)
+	if s.Cwd != want {
+		t.Errorf("Cwd = %q, want %q", s.Cwd, want)
 	}
 }
 
@@ -247,8 +249,9 @@ func TestSetRealPaths_TrailingSlash(t *testing.T) {
 	// Manually set workspace with trailing slash to test normalization
 	s.Workspace = ws + "/"
 	s.SetRealPaths(true)
-	if s.VirtualRoot != ws {
-		t.Errorf("VirtualRoot = %q, want %q (no trailing slash)", s.VirtualRoot, ws)
+	want := filepath.ToSlash(filepath.Clean(ws))
+	if s.VirtualRoot != want {
+		t.Errorf("VirtualRoot = %q, want %q (no trailing slash)", s.VirtualRoot, want)
 	}
 }
 

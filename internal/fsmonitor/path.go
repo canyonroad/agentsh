@@ -8,11 +8,16 @@ import (
 )
 
 // isRealPathUnder checks if a real filesystem path is equal to or under root,
-// using os.PathSeparator for boundary checks.  Handles root=="/" or root==sep.
+// using os.PathSeparator for boundary checks.  Handles root=="/" or volume
+// roots like "C:\" where root already ends with the separator.
 func isRealPathUnder(path, root string) bool {
 	sep := string(os.PathSeparator)
 	if root == "/" || root == sep {
 		return true
+	}
+	// Volume roots (e.g. "C:\") already end with separator
+	if strings.HasSuffix(root, sep) {
+		return strings.HasPrefix(path, root)
 	}
 	return path == root || strings.HasPrefix(path, root+sep)
 }

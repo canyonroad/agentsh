@@ -43,8 +43,9 @@ func TestCreateSession_RealPaths_RequestOverride(t *testing.T) {
 
 	// When real_paths is true, Cwd should be the real workspace path, not /workspace
 	absWs, _ := filepath.Abs(ws)
-	if out.Cwd != absWs {
-		t.Errorf("Cwd = %q, want %q (real workspace path)", out.Cwd, absWs)
+	wantCwd := filepath.ToSlash(filepath.Clean(absWs))
+	if out.Cwd != wantCwd {
+		t.Errorf("Cwd = %q, want %q (real workspace path)", out.Cwd, wantCwd)
 	}
 }
 
@@ -79,8 +80,9 @@ func TestCreateSession_RealPaths_ConfigDefault(t *testing.T) {
 	}
 
 	absWs, _ := filepath.Abs(ws)
-	if out.Cwd != absWs {
-		t.Errorf("Cwd = %q, want %q (config default real_paths=true)", out.Cwd, absWs)
+	wantCwd := filepath.ToSlash(filepath.Clean(absWs))
+	if out.Cwd != wantCwd {
+		t.Errorf("Cwd = %q, want %q (config default real_paths=true)", out.Cwd, wantCwd)
 	}
 }
 
