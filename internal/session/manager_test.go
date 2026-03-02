@@ -346,16 +346,10 @@ func TestResolvePathForBuiltin_RealPaths_OutsideWorkspace(t *testing.T) {
 	}
 	s.SetRealPaths(true)
 
-	// Outside workspace path should pass through
-	virt, real, err := s.resolvePathForBuiltin("/etc/hosts")
-	if err != nil {
-		t.Fatalf("resolvePathForBuiltin: %v", err)
-	}
-	if virt != "/etc/hosts" {
-		t.Errorf("virt = %q, want /etc/hosts", virt)
-	}
-	if real != "/etc/hosts" {
-		t.Errorf("real = %q, want /etc/hosts", real)
+	// Outside workspace path should be rejected for builtins
+	_, _, err = s.resolvePathForBuiltin("/etc/hosts")
+	if err == nil {
+		t.Error("expected error for path outside workspace in builtins")
 	}
 }
 
@@ -369,17 +363,27 @@ func TestResolvePathForBuiltin_SiblingPath_NotConfused(t *testing.T) {
 	}
 	s.SetRealPaths(true)
 
-	// A sibling path like /tmp/TestXXX123-extra should NOT match
+	// A sibling path like /tmp/TestXXX123-extra should NOT match — rejected by builtins
 	sibling := ws + "-extra/file.txt"
-	virt, real, err := s.resolvePathForBuiltin(sibling)
+	_, _, err = s.resolvePathForBuiltin(sibling)
+	if err == nil {
+		t.Error("expected error for sibling path outside workspace")
+	}
+}
+
+func TestApplyPatch_RealPaths_SiblingPath(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-patch-sibling", ws, "default")
 	if err != nil {
-		t.Fatalf("resolvePathForBuiltin: %v", err)
+		t.Fatal(err)
 	}
-	// Should be treated as outside workspace (pass through)
-	if virt != sibling {
-		t.Errorf("virt = %q, want %q", virt, sibling)
-	}
-	if real != sibling {
-		t.Errorf("real = %q, want %q", real, sibling)
+	s.SetRealPaths(true)
+
+	// Sibling path should be rejected
+	err = s.ApplyPatch(types.SessionPatchRequest{Cwd: ws + "-extra"})
+	if err == nil {
+		t.Error("expected error patching cwd to sibling path")
 	}
 }

@@ -703,7 +703,7 @@ func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 		if cwd == "." || cwd == "" {
 			cwd = s.VirtualRoot
 		}
-		if !strings.HasPrefix(cwd, s.VirtualRoot) {
+		if cwd != s.VirtualRoot && !strings.HasPrefix(cwd, s.VirtualRoot+"/") {
 			return fmt.Errorf("cwd must be under %s", s.VirtualRoot)
 		}
 		s.Cwd = cwd
@@ -739,8 +739,10 @@ func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, e
 		virt = s.VirtualRoot
 	}
 	if virt != s.VirtualRoot && !strings.HasPrefix(virt, s.VirtualRoot+"/") {
-		// Outside workspace — pass through as-is for policy/seccomp enforcement
-		return virt, virt, nil
+		// Outside workspace — reject for builtins (acat/als/astat run in-process
+		// and bypass seccomp). Subprocess commands handle outside paths via
+		// resolveWorkingDir in exec.go where seccomp enforces policy.
+		return "", "", fmt.Errorf("path must be under %s", s.VirtualRoot)
 	}
 	rel := strings.TrimPrefix(virt, s.VirtualRoot)
 	rel = strings.TrimPrefix(rel, "/")
