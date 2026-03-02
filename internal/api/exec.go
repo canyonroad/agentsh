@@ -282,8 +282,8 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 	cwd, _, _ := s.GetCwdEnvHistory()
 	virtual := cwd
 	if reqWorkingDir != "" {
-		if strings.HasPrefix(reqWorkingDir, "/") {
-			virtual = reqWorkingDir
+		if filepath.IsAbs(reqWorkingDir) {
+			virtual = filepath.ToSlash(reqWorkingDir)
 		} else {
 			virtual = filepath.ToSlash(filepath.Join(cwd, reqWorkingDir))
 		}

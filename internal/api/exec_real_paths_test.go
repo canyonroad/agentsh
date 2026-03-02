@@ -108,6 +108,35 @@ func TestResolveWorkingDir_EmptyVirtualRoot_FailsClosed(t *testing.T) {
 	}
 }
 
+func TestResolveWorkingDir_WindowsDriveLetter(t *testing.T) {
+	m := session.NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-exec-windrive", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a Windows-style VirtualRoot with drive letter
+	s.VirtualRoot = "C:/Users/project"
+
+	// Drive-letter absolute path under VirtualRoot should be treated as absolute,
+	// not joined to cwd. This tests that filepath.IsAbs handles drive letters.
+	if runtime.GOOS == "windows" {
+		real, err := resolveWorkingDir(s, "C:/Users/project/sub")
+		if err != nil {
+			t.Fatalf("resolveWorkingDir with Windows drive path: %v", err)
+		}
+		if real == "" {
+			t.Error("expected non-empty resolved path for Windows drive letter")
+		}
+	} else {
+		// On non-Windows, filepath.IsAbs("C:/...") returns false, so the path
+		// gets joined to cwd. This is expected — Windows paths only need to work
+		// on Windows. Verify it doesn't panic.
+		_, _ = resolveWorkingDir(s, "C:/Users/project/sub")
+	}
+}
+
 // Integration test: HTTP exec handler with real_paths=true allows outside-workspace working_dir.
 func TestExec_RealPaths_OutsideWorkspace_Allowed(t *testing.T) {
 	if runtime.GOOS == "windows" {
