@@ -16,6 +16,16 @@ import (
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
+// pwdCommand returns a command and args that print the working directory,
+// bypassing the session builtin. On Windows uses "cmd /c cd", on POSIX
+// uses "/bin/pwd".
+func pwdCommand() (string, []string) {
+	if runtime.GOOS == "windows" {
+		return "cmd", []string{"/c", "cd"}
+	}
+	return "/bin/pwd", nil
+}
+
 func TestResolveWorkingDir_RealPaths(t *testing.T) {
 	m := session.NewManager(10)
 	ws := t.TempDir()
@@ -236,9 +246,6 @@ func TestResolveWorkingDir_DotDotEscape_Default(t *testing.T) {
 	}
 }
 func TestExec_RealPaths_OutsideWorkspace_Allowed(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("exec integration test is POSIX-specific")
-	}
 	st := newSQLiteStore(t)
 	store := composite.New(st, st)
 	sessions := session.NewManager(10)
@@ -256,12 +263,12 @@ func TestExec_RealPaths_OutsideWorkspace_Allowed(t *testing.T) {
 	app := newTestApp(t, sessions, store)
 	h := app.Router()
 
-	// Execute /bin/pwd in an outside dir — should succeed in real_paths mode.
-	// NOTE: Must use /bin/pwd (not "pwd") because "pwd" is a session builtin
-	// that returns s.Cwd without going through resolveWorkingDir.
+	// Execute a non-builtin pwd command in an outside dir — should succeed in real_paths mode.
+	cmd, args := pwdCommand()
 	outsideDir := t.TempDir() // use a real existing temp dir
 	body, _ := json.Marshal(map[string]any{
-		"command":        "/bin/pwd",
+		"command":        cmd,
+		"args":           args,
 		"working_dir":    outsideDir,
 		"include_events": "none",
 	})
@@ -287,9 +294,6 @@ func TestExec_RealPaths_OutsideWorkspace_Allowed(t *testing.T) {
 
 // Integration test: HTTP exec handler in default mode rejects outside-workspace working_dir.
 func TestExec_Default_OutsideWorkspace_Rejected(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("exec integration test is POSIX-specific")
-	}
 	st := newSQLiteStore(t)
 	store := composite.New(st, st)
 	sessions := session.NewManager(10)
@@ -307,9 +311,12 @@ func TestExec_Default_OutsideWorkspace_Rejected(t *testing.T) {
 	app := newTestApp(t, sessions, store)
 	h := app.Router()
 
+	cmd, args := pwdCommand()
+	outsideDir := t.TempDir()
 	body, _ := json.Marshal(map[string]any{
-		"command":        "/bin/pwd",
-		"working_dir":    "/tmp",
+		"command":        cmd,
+		"args":           args,
+		"working_dir":    outsideDir,
 		"include_events": "none",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sess.ID+"/exec", bytes.NewReader(body))
@@ -335,9 +342,6 @@ func TestExec_Default_OutsideWorkspace_Rejected(t *testing.T) {
 // Integration test: HTTP exec handler with real_paths mode resolves in-workspace
 // commands to real host paths.
 func TestExec_RealPaths_InWorkspace_UsesRealPath(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("exec integration test is POSIX-specific")
-	}
 	st := newSQLiteStore(t)
 	store := composite.New(st, st)
 	sessions := session.NewManager(10)
@@ -356,11 +360,12 @@ func TestExec_RealPaths_InWorkspace_UsesRealPath(t *testing.T) {
 	app := newTestApp(t, sessions, store)
 	h := app.Router()
 
-	// Execute /bin/pwd in a workspace subdirectory using the real path.
-	// NOTE: Must use /bin/pwd (not "pwd") to bypass session builtin.
+	// Execute pwd in a workspace subdirectory using the real path.
+	cmd, args := pwdCommand()
 	wsClean := filepath.ToSlash(filepath.Clean(ws))
 	body, _ := json.Marshal(map[string]any{
-		"command":        "/bin/pwd",
+		"command":        cmd,
+		"args":           args,
 		"working_dir":    wsClean + "/sub",
 		"include_events": "none",
 	})
