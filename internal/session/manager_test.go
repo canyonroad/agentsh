@@ -293,8 +293,10 @@ func TestBuiltin_Cd_RealPaths(t *testing.T) {
 		t.Fatalf("cd: handled=%v code=%d", handled, code)
 	}
 	cwd, _, _ := s.GetCwdEnvHistory()
-	if cwd != ws {
-		t.Errorf("after cd: Cwd = %q, want %q", cwd, ws)
+	// VirtualRoot uses forward slashes; compare accordingly
+	want := filepath.ToSlash(filepath.Clean(ws))
+	if cwd != want {
+		t.Errorf("after cd: Cwd = %q, want %q", cwd, want)
 	}
 }
 
@@ -333,11 +335,13 @@ func TestApplyPatch_RealPaths(t *testing.T) {
 		t.Fatalf("ApplyPatch: %v", err)
 	}
 	cwd, _, _ := s.GetCwdEnvHistory()
-	if cwd != ws+"/subdir" {
-		t.Errorf("Cwd = %q, want %q", cwd, ws+"/subdir")
+	// VirtualRoot uses forward slashes; compare accordingly
+	wantCwd := filepath.ToSlash(filepath.Clean(ws)) + "/subdir"
+	if cwd != wantCwd {
+		t.Errorf("Cwd = %q, want %q", cwd, wantCwd)
 	}
 
-	// Patch cwd outside workspace should fail
+	// Patch cwd outside workspace should fail (use a virtual absolute path)
 	err = s.ApplyPatch(types.SessionPatchRequest{Cwd: "/etc"})
 	if err == nil {
 		t.Error("expected error patching cwd outside workspace")

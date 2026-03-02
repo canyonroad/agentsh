@@ -726,6 +726,14 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 	}
 }
 
+// isVirtualPathAbs checks if a virtual path (using forward slashes) is absolute.
+// Handles both POSIX paths ("/foo") and Windows drive-letter paths ("C:/foo").
+// On Windows, filepath.IsAbs("/foo") returns false, but virtual paths always
+// use "/" as root, so we also check for a leading slash.
+func isVirtualPathAbs(p string) bool {
+	return strings.HasPrefix(p, "/") || filepath.IsAbs(p)
+}
+
 func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 	s.Touch()
 	s.mu.Lock()
@@ -734,7 +742,7 @@ func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 	if patch.Cwd != "" {
 		cwd := patch.Cwd
 		vroot := s.EffectiveVirtualRoot()
-		if !filepath.IsAbs(cwd) {
+		if !isVirtualPathAbs(cwd) {
 			cwd = filepath.ToSlash(filepath.Join(s.Cwd, cwd))
 		}
 		cwd = filepath.ToSlash(filepath.Clean(cwd))
@@ -775,7 +783,7 @@ func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, e
 	vroot := s.EffectiveVirtualRoot()
 	virt = cwd
 	if strings.TrimSpace(arg) != "" {
-		if filepath.IsAbs(arg) {
+		if isVirtualPathAbs(arg) {
 			virt = arg
 		} else {
 			virt = filepath.ToSlash(filepath.Join(cwd, arg))
@@ -799,13 +807,18 @@ func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, e
 	if !IsRealPathUnder(real, rootClean) {
 		return "", "", fmt.Errorf("path escapes workspace mount")
 	}
+	// Resolve root symlinks for consistent comparison (macOS /var -> /private/var)
+	rootResolved, rootErr := filepath.EvalSymlinks(rootClean)
+	if rootErr != nil {
+		rootResolved = rootClean
+	}
 	// Resolve symlinks to prevent escape via workspace symlinks.
 	// Builtins run in-process and bypass seccomp, so we must verify the
 	// resolved real path stays under the workspace root.
 	resolved, resolveErr := filepath.EvalSymlinks(real)
 	if resolveErr == nil {
 		resolved = filepath.Clean(resolved)
-		if !IsRealPathUnder(resolved, rootClean) {
+		if !IsRealPathUnder(resolved, rootResolved) {
 			return "", "", fmt.Errorf("symlink escape outside workspace root")
 		}
 		real = resolved

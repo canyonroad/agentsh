@@ -15,12 +15,18 @@ func TestResolveRealPathUnderRoot_CustomVirtualRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Resolve expected path to handle macOS /var -> /private/var symlink
+	wantSub, _ := filepath.EvalSymlinks(sub)
+	if wantSub == "" {
+		wantSub = sub
+	}
+
 	got, err := resolveRealPathUnderRoot(root, root+"/sub", true, root)
 	if err != nil {
 		t.Fatalf("resolveRealPathUnderRoot: %v", err)
 	}
-	if got != sub {
-		t.Errorf("got %q, want %q", got, sub)
+	if got != wantSub {
+		t.Errorf("got %q, want %q", got, wantSub)
 	}
 }
 
@@ -31,12 +37,17 @@ func TestResolveRealPathUnderRoot_DefaultWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	wantSub, _ := filepath.EvalSymlinks(sub)
+	if wantSub == "" {
+		wantSub = sub
+	}
+
 	got, err := resolveRealPathUnderRoot(root, "/workspace/sub", true, "/workspace")
 	if err != nil {
 		t.Fatalf("resolveRealPathUnderRoot: %v", err)
 	}
-	if got != sub {
-		t.Errorf("got %q, want %q", got, sub)
+	if got != wantSub {
+		t.Errorf("got %q, want %q", got, wantSub)
 	}
 }
 
@@ -66,12 +77,17 @@ func TestResolveRealPathUnderRoot_RootVirtualRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	wantSub, _ := filepath.EvalSymlinks(sub)
+	if wantSub == "" {
+		wantSub = sub
+	}
+
 	// When virtualRoot is "/", paths like "/etc" should be accepted
 	got, err := resolveRealPathUnderRoot(root, "/etc", true, "/")
 	if err != nil {
 		t.Fatalf("resolveRealPathUnderRoot with root /: %v", err)
 	}
-	if got != sub {
-		t.Errorf("got %q, want %q", got, sub)
+	if got != wantSub {
+		t.Errorf("got %q, want %q", got, wantSub)
 	}
 }

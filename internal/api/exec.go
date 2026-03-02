@@ -282,7 +282,9 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 	cwd, _, _ := s.GetCwdEnvHistory()
 	virtual := cwd
 	if reqWorkingDir != "" {
-		if filepath.IsAbs(reqWorkingDir) {
+		// Virtual paths always use "/" prefix; on Windows filepath.IsAbs("/workspace")
+		// returns false, so also check for leading slash.
+		if strings.HasPrefix(reqWorkingDir, "/") || filepath.IsAbs(reqWorkingDir) {
 			virtual = filepath.ToSlash(reqWorkingDir)
 		} else {
 			virtual = filepath.ToSlash(filepath.Join(cwd, reqWorkingDir))

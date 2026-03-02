@@ -56,13 +56,14 @@ func TestResolveWorkingDir_RealPaths_OutsideWorkspace(t *testing.T) {
 	}
 	s.SetRealPaths(true)
 
-	// Outside workspace should pass through
-	real, err := resolveWorkingDir(s, "/tmp")
+	// Use a real outside-workspace path (platform-appropriate absolute path)
+	outsideDir := t.TempDir()
+	real, err := resolveWorkingDir(s, outsideDir)
 	if err != nil {
 		t.Fatalf("resolveWorkingDir: %v", err)
 	}
-	if real != "/tmp" {
-		t.Errorf("real = %q, want /tmp", real)
+	if real != outsideDir {
+		t.Errorf("real = %q, want %q", real, outsideDir)
 	}
 }
 
@@ -75,8 +76,10 @@ func TestResolveWorkingDir_Default_OutsideReject(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Default /workspace mode: outside workspace paths should be rejected
-	_, err = resolveWorkingDir(s, "/etc")
+	// Default /workspace mode: outside workspace paths should be rejected.
+	// Use a real absolute path that's outside /workspace on all platforms.
+	outsideDir := t.TempDir()
+	_, err = resolveWorkingDir(s, outsideDir)
 	if err == nil {
 		t.Error("expected error for outside-workspace path in default mode")
 	}
