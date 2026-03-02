@@ -1038,10 +1038,11 @@ type CreateSessionRequestCompat struct {
 	ID        string `json:"id"`
 	Workspace string `json:"workspace"`
 	Policy    string `json:"policy"`
+	RealPaths *bool  `json:"real_paths,omitempty"`
 }
 
 func (c CreateSessionRequestCompat) ToTypes() types.CreateSessionRequest {
-	return types.CreateSessionRequest{ID: c.ID, Workspace: c.Workspace, Policy: c.Policy}
+	return types.CreateSessionRequest{ID: c.ID, Workspace: c.Workspace, Policy: c.Policy, RealPaths: c.RealPaths}
 }
 
 // execRequestCompat matches HTTP ExecRequest plus a session_id field.

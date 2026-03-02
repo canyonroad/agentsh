@@ -76,6 +76,9 @@ func (c *GRPCClient) CreateSessionWithRequest(ctx context.Context, req types.Cre
 	if req.ProjectRoot != "" {
 		reqBody["project_root"] = req.ProjectRoot
 	}
+	if req.RealPaths != nil {
+		reqBody["real_paths"] = *req.RealPaths
+	}
 	in, err := jsonToStruct(reqBody)
 	if err != nil {
 		return out, err

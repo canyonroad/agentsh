@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/pathutil"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
@@ -34,7 +35,8 @@ type Session struct {
 	WorkspaceMount string
 	Policy         string
 
-	Cwd     string
+	Cwd         string
+	VirtualRoot string // "/workspace" or real workspace path when real_paths enabled
 	Env     map[string]string
 	History []string
 
@@ -131,6 +133,7 @@ func (m *Manager) CreateWithProfile(id, profile, basePolicy string, mounts []Res
 		Profile:      profile,
 		Mounts:       mounts,
 		Cwd:          "/workspace",
+		VirtualRoot:  "/workspace",
 		Env:          map[string]string{},
 	}
 	m.sessions[id] = s
@@ -177,6 +180,7 @@ func (m *Manager) CreateWithID(id, workspace, policy string) (*Session, error) {
 		WorkspaceMount: abs,
 		Policy:         policy,
 		Cwd:            "/workspace",
+		VirtualRoot:    "/workspace",
 		Env:            map[string]string{},
 	}
 	m.sessions[id] = s
@@ -238,6 +242,7 @@ func (s *Session) Snapshot() types.Session {
 		Profile:     s.Profile,
 		Mounts:      mounts,
 		Cwd:         s.Cwd,
+		VirtualRoot: s.VirtualRoot,
 		ProxyURL:    s.proxyURL,
 		TOTPSecret:  s.TOTPSecret,
 		ProjectRoot: s.ProjectRoot,
@@ -352,6 +357,26 @@ func (s *Session) WorkspaceMountPath() string {
 		return s.WorkspaceMount
 	}
 	return s.Workspace
+}
+
+// SetRealPaths switches the session to use real host paths instead of /workspace.
+// Returns false when enabled is true but the workspace is empty (real paths cannot
+// be applied).
+func (s *Session) SetRealPaths(enabled bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if enabled {
+		if s.Workspace == "" {
+			return false // empty workspace cannot be used as virtual root
+		}
+		vroot := filepath.ToSlash(filepath.Clean(s.Workspace))
+		s.VirtualRoot = vroot
+		s.Cwd = vroot
+	} else {
+		s.VirtualRoot = "/workspace"
+		s.Cwd = "/workspace"
+	}
+	return true
 }
 
 func (s *Session) SetWorkspaceUnmount(fn func() error) {
@@ -480,13 +505,45 @@ func (s *Session) CloseNetNS() error {
 	return nil
 }
 
+// IsUnderRoot checks if path is equal to or a child of root using
+// path-boundary-aware logic. Delegates to pathutil.IsUnderRoot.
+func IsUnderRoot(path, root string) bool {
+	return pathutil.IsUnderRoot(path, root)
+}
+
+// IsRealPathUnder checks if a real filesystem path is equal to or under root,
+// using os.PathSeparator for boundary checks. Delegates to pathutil.IsRealPathUnder.
+func IsRealPathUnder(path, root string) bool {
+	return pathutil.IsRealPathUnder(path, root)
+}
+
+// TrimRootPrefix removes root from the front of path, using case-insensitive
+// matching on Windows. Delegates to pathutil.TrimRootPrefix.
+func TrimRootPrefix(path, root string) string {
+	return pathutil.TrimRootPrefix(path, root)
+}
+
 func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, stdout, stderr []byte) {
 	switch req.Command {
 	case "cd":
 		s.Touch()
-		target := "/workspace"
+		s.mu.Lock()
+		vroot := s.VirtualRoot
+		if vroot == "" {
+			vroot = "/workspace"
+		}
+		cwd := s.Cwd
+		s.mu.Unlock()
+		target := vroot
 		if len(req.Args) > 0 && req.Args[0] != "" {
-			target = req.Args[0]
+			t := req.Args[0]
+			if !filepath.IsAbs(t) {
+				t = filepath.ToSlash(filepath.Join(cwd, t))
+			}
+			target = filepath.ToSlash(filepath.Clean(t))
+		}
+		if !IsUnderRoot(target, vroot) {
+			return true, 1, nil, []byte(fmt.Sprintf("cd: path must be under %s\n", vroot))
 		}
 		s.mu.Lock()
 		s.Cwd = target
@@ -628,7 +685,7 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 	case "acat":
 		s.Touch()
 		if len(req.Args) < 1 {
-			return true, 2, nil, []byte("usage: acat /workspace/path\n")
+			return true, 2, nil, []byte("usage: acat <path>\n")
 		}
 		virt, real, err := s.resolvePathForBuiltin(req.Args[0])
 		if err != nil {
@@ -669,6 +726,14 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 	}
 }
 
+// isVirtualPathAbs checks if a virtual path (using forward slashes) is absolute.
+// Handles both POSIX paths ("/foo") and Windows drive-letter paths ("C:/foo").
+// On Windows, filepath.IsAbs("/foo") returns false, but virtual paths always
+// use "/" as root, so we also check for a leading slash.
+func isVirtualPathAbs(p string) bool {
+	return strings.HasPrefix(p, "/") || filepath.IsAbs(p)
+}
+
 func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 	s.Touch()
 	s.mu.Lock()
@@ -676,15 +741,16 @@ func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 
 	if patch.Cwd != "" {
 		cwd := patch.Cwd
-		if !strings.HasPrefix(cwd, "/") {
+		vroot := s.EffectiveVirtualRoot()
+		if !isVirtualPathAbs(cwd) {
 			cwd = filepath.ToSlash(filepath.Join(s.Cwd, cwd))
 		}
 		cwd = filepath.ToSlash(filepath.Clean(cwd))
 		if cwd == "." || cwd == "" {
-			cwd = "/workspace"
+			cwd = vroot
 		}
-		if !strings.HasPrefix(cwd, "/workspace") {
-			return fmt.Errorf("cwd must be under /workspace")
+		if !IsUnderRoot(cwd, vroot) {
+			return fmt.Errorf("cwd must be under %s", vroot)
 		}
 		s.Cwd = cwd
 	}
@@ -704,11 +770,20 @@ func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 	return nil
 }
 
+// EffectiveVirtualRoot returns VirtualRoot with a safe default for legacy/empty sessions.
+func (s *Session) EffectiveVirtualRoot() string {
+	if s.VirtualRoot == "" {
+		return "/workspace"
+	}
+	return s.VirtualRoot
+}
+
 func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, err error) {
 	cwd, _, _ := s.GetCwdEnvHistory()
+	vroot := s.EffectiveVirtualRoot()
 	virt = cwd
 	if strings.TrimSpace(arg) != "" {
-		if strings.HasPrefix(arg, "/") {
+		if isVirtualPathAbs(arg) {
 			virt = arg
 		} else {
 			virt = filepath.ToSlash(filepath.Join(cwd, arg))
@@ -716,19 +791,39 @@ func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, e
 	}
 	virt = filepath.ToSlash(filepath.Clean(virt))
 	if virt == "." || virt == "" {
-		virt = "/workspace"
+		virt = vroot
 	}
-	if !strings.HasPrefix(virt, "/workspace") {
-		return "", "", fmt.Errorf("path must be under /workspace")
+	if !IsUnderRoot(virt, vroot) {
+		// Outside workspace — reject for builtins (acat/als/astat run in-process
+		// and bypass seccomp). Subprocess commands handle outside paths via
+		// resolveWorkingDir in exec.go where seccomp enforces policy.
+		return "", "", fmt.Errorf("path must be under %s", vroot)
 	}
-	rel := strings.TrimPrefix(virt, "/workspace")
+	rel := TrimRootPrefix(virt, vroot)
 	rel = strings.TrimPrefix(rel, "/")
 	root := s.WorkspaceMountPath()
 	real = filepath.Clean(filepath.Join(root, filepath.FromSlash(rel)))
 	rootClean := filepath.Clean(root)
-	if real != rootClean && !strings.HasPrefix(real, rootClean+string(os.PathSeparator)) {
+	if !IsRealPathUnder(real, rootClean) {
 		return "", "", fmt.Errorf("path escapes workspace mount")
 	}
+	// Resolve root symlinks for consistent comparison (macOS /var -> /private/var)
+	rootResolved, rootErr := filepath.EvalSymlinks(rootClean)
+	if rootErr != nil {
+		rootResolved = rootClean
+	}
+	// Resolve symlinks to prevent escape via workspace symlinks.
+	// Builtins run in-process and bypass seccomp, so we must verify the
+	// resolved real path stays under the workspace root.
+	resolved, resolveErr := filepath.EvalSymlinks(real)
+	if resolveErr == nil {
+		resolved = filepath.Clean(resolved)
+		if !IsRealPathUnder(resolved, rootResolved) {
+			return "", "", fmt.Errorf("symlink escape outside workspace root")
+		}
+		real = resolved
+	}
+	// If EvalSymlinks fails (e.g., file doesn't exist), the lexical check above is sufficient
 	return virt, real, nil
 }
 

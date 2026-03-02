@@ -172,6 +172,131 @@ func TestCreateSessionWithProfile_MissingMountPath(t *testing.T) {
 	}
 }
 
+func TestCreateSessionWithProfile_RealPaths(t *testing.T) {
+	st := newSQLiteStore(t)
+	store := composite.New(st, st)
+	sessions := session.NewManager(10)
+
+	// Create temp directories for mount paths
+	temp := t.TempDir()
+	workspace := filepath.Join(temp, "workspace")
+	configDir := filepath.Join(temp, "config")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create config with mount profile and real_paths enabled
+	cfg := &config.Config{}
+	cfg.Development.DisableAuth = true
+	cfg.Metrics.Enabled = false
+	cfg.Health.Path = "/health"
+	cfg.Health.ReadinessPath = "/ready"
+	cfg.Sandbox.FUSE.Enabled = false
+	cfg.Sandbox.Network.Enabled = false
+	cfg.Sandbox.Network.Transparent.Enabled = false
+	cfg.Policies.Default = "default"
+	cfg.Policies.Dir = temp
+	cfg.MountProfiles = map[string]config.MountProfile{
+		"test-profile": {
+			BasePolicy: "default",
+			Mounts: []config.MountSpec{
+				{Path: workspace, Policy: "workspace-rw"},
+				{Path: configDir, Policy: "config-readonly"},
+			},
+		},
+	}
+
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
+	h := app.Router()
+
+	body := `{"profile":"test-profile","real_paths":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var out types.Session
+	if err := json.NewDecoder(rr.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+
+	// Profile session with real_paths=true should use workspace as VirtualRoot/Cwd
+	absWs, _ := filepath.Abs(workspace)
+	wantCwd := filepath.ToSlash(filepath.Clean(absWs))
+	if out.Cwd != wantCwd {
+		t.Errorf("Cwd = %q, want %q (profile + real_paths)", out.Cwd, wantCwd)
+	}
+}
+
+func TestCreateSessionWithProfile_RealPathsDisabled(t *testing.T) {
+	st := newSQLiteStore(t)
+	store := composite.New(st, st)
+	sessions := session.NewManager(10)
+
+	temp := t.TempDir()
+	workspace := filepath.Join(temp, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Development.DisableAuth = true
+	cfg.Metrics.Enabled = false
+	cfg.Health.Path = "/health"
+	cfg.Health.ReadinessPath = "/ready"
+	cfg.Sandbox.FUSE.Enabled = false
+	cfg.Sandbox.Network.Enabled = false
+	cfg.Sandbox.Network.Transparent.Enabled = false
+	cfg.Policies.Default = "default"
+	cfg.Policies.Dir = temp
+	cfg.Sessions.RealPaths = true // config default is true
+	cfg.MountProfiles = map[string]config.MountProfile{
+		"test-profile": {
+			BasePolicy: "default",
+			Mounts: []config.MountSpec{
+				{Path: workspace, Policy: "workspace-rw"},
+			},
+		},
+	}
+
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
+	h := app.Router()
+
+	// Request with real_paths=false overrides config default
+	body := `{"profile":"test-profile","real_paths":false}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var out types.Session
+	if err := json.NewDecoder(rr.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+
+	// With real_paths=false override, should use /workspace
+	if out.Cwd != "/workspace" {
+		t.Errorf("Cwd = %q, want /workspace (profile + real_paths=false override)", out.Cwd)
+	}
+}
+
 func TestResolveProfile(t *testing.T) {
 	temp := t.TempDir()
 	workspace := filepath.Join(temp, "workspace")

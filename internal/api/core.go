@@ -268,15 +268,31 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 	}
 
 	for i, spec := range profile.Mounts {
+		// Normalize to absolute clean path
+		mountPath := spec.Path
+		if !filepath.IsAbs(mountPath) {
+			absPath, err := filepath.Abs(mountPath)
+			if err != nil {
+				for _, m := range mounts {
+					if m.Unmount != nil {
+						_ = m.Unmount()
+					}
+				}
+				return nil, fmt.Errorf("mount path %q: %w", spec.Path, err)
+			}
+			mountPath = absPath
+		}
+		mountPath = filepath.Clean(mountPath)
+
 		// Validate path exists
-		if _, err := os.Stat(spec.Path); err != nil {
+		if _, err := os.Stat(mountPath); err != nil {
 			// Cleanup already-created mounts
 			for _, m := range mounts {
 				if m.Unmount != nil {
 					_ = m.Unmount()
 				}
 			}
-			return nil, fmt.Errorf("mount path %q: %w", spec.Path, err)
+			return nil, fmt.Errorf("mount path %q: %w", mountPath, err)
 		}
 
 		// Load per-mount policy if specified
@@ -291,7 +307,7 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 						_ = m.Unmount()
 					}
 				}
-				return nil, fmt.Errorf("load policy %q for mount %q: %w", spec.Policy, spec.Path, err)
+				return nil, fmt.Errorf("load policy %q for mount %q: %w", spec.Policy, mountPath, err)
 			}
 		} else {
 			// Fall back to global policy if no per-mount policy specified
@@ -309,7 +325,7 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 				go a.processIOEvents(ctx, eventChan)
 
 				fsCfg := platform.FSConfig{
-					SourcePath: spec.Path,
+					SourcePath: mountPath,
 					MountPoint: mountPoint,
 					SessionID:  s.ID,
 					CommandIDFunc: func() string {
@@ -320,25 +336,36 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					},
 					PolicyEngine: platform.NewPolicyAdapter(policyEngine),
 					EventChannel: eventChan,
+					// For the primary workspace mount, use the session's effective virtual
+					// root so FUSE events report paths consistent with the session (e.g.
+					// /workspace in default mode). Non-workspace mounts use their real
+					// path since they aren't mapped under the session's virtual root.
+					VirtualRoot: func() string {
+						wsClean := filepath.Clean(s.WorkspaceMountPath())
+						if filepath.Clean(mountPath) == wsClean {
+							return s.EffectiveVirtualRoot()
+						}
+						return filepath.ToSlash(mountPath)
+					}(),
 				}
 
 				m, err := fs.Mount(fsCfg)
 				if err != nil {
 					close(eventChan)
 					// Log but continue - mount failure shouldn't block session
-					a.logMountFailure(ctx, s.ID, spec.Path, mountPoint, err)
+					a.logMountFailure(ctx, s.ID, mountPath, mountPoint, err)
 					continue
 				}
 
 				// Register in MountRegistry so seccomp FileHandler
 				// knows this path is FUSE-managed (audit-only).
-				registerFUSEMount(s.ID, spec.Path)
+				registerFUSEMount(s.ID, mountPath)
 
 				// Capture for closure
 				sessionID := s.ID
-				sourcePath := spec.Path
+				sourcePath := mountPath
 				mounts = append(mounts, session.ResolvedMount{
-					Path:         spec.Path,
+					Path:         mountPath,
 					Policy:       spec.Policy,
 					MountPoint:   mountPoint,
 					PolicyEngine: policyEngine,
@@ -352,9 +379,9 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 		} else {
 			// No FUSE, just track the mount without actual mounting
 			mounts = append(mounts, session.ResolvedMount{
-				Path:         spec.Path,
+				Path:         mountPath,
 				Policy:       spec.Policy,
-				MountPoint:   spec.Path, // Direct path when not using FUSE
+				MountPoint:   mountPath, // Direct path when not using FUSE
 				PolicyEngine: policyEngine,
 			})
 		}
@@ -394,14 +421,23 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 	// Build initial mounts from profile specs (without FUSE yet)
 	var initialMounts []session.ResolvedMount
 	for _, spec := range profile.Mounts {
+		// Normalize to absolute path to avoid CWD-dependent behavior
+		mountPath := spec.Path
+		if !filepath.IsAbs(mountPath) {
+			var err error
+			mountPath, err = filepath.Abs(mountPath)
+			if err != nil {
+				return types.Session{}, http.StatusBadRequest, fmt.Errorf("mount path %q: cannot resolve absolute path: %w", spec.Path, err)
+			}
+		}
 		// Validate path exists
-		if _, err := os.Stat(spec.Path); err != nil {
-			return types.Session{}, http.StatusBadRequest, fmt.Errorf("mount path %q: %w", spec.Path, err)
+		if _, err := os.Stat(mountPath); err != nil {
+			return types.Session{}, http.StatusBadRequest, fmt.Errorf("mount path %q: %w", mountPath, err)
 		}
 		initialMounts = append(initialMounts, session.ResolvedMount{
-			Path:       spec.Path,
+			Path:       mountPath,
 			Policy:     spec.Policy,
-			MountPoint: spec.Path,
+			MountPoint: mountPath,
 		})
 	}
 
@@ -419,6 +455,9 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 		}
 		return types.Session{}, code, err
 	}
+
+	// Apply real-paths mode if requested
+	a.applyRealPaths(s, req.RealPaths)
 
 	// Generate TOTP secret if TOTP approval mode is enabled
 	if a.cfg.Approvals.Mode == "totp" {
@@ -559,6 +598,9 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	// Store roots in session
 	s.ProjectRoot = policyVars["PROJECT_ROOT"]
 	s.GitRoot = policyVars["GIT_ROOT"]
+
+	// Apply real-paths mode if requested
+	a.applyRealPaths(s, req.RealPaths)
 
 	// Generate TOTP secret if TOTP approval mode is enabled
 	if a.cfg.Approvals.Mode == "totp" {
@@ -1001,7 +1043,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 			OtherCount:             len(otherOps),
 		},
 		Resources: &resources,
-		Guidance:  guidanceForResponse(req, res, blockedOps),
+		Guidance:  guidanceForResponse(req, res, blockedOps, s.EffectiveVirtualRoot()),
 	}
 	addRedirectGuidance(resp, pre, originalCmd, originalArgs)
 	if len(softSuggestions) > 0 {
@@ -1045,9 +1087,10 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 
 	// Build platform FSConfig
 	fsCfg := platform.FSConfig{
-		SourcePath: s.Workspace,
-		MountPoint: mountPoint,
-		SessionID:  s.ID,
+		SourcePath:  s.Workspace,
+		MountPoint:  mountPoint,
+		SessionID:   s.ID,
+		VirtualRoot: s.EffectiveVirtualRoot(),
 		CommandIDFunc: func() string {
 			return s.CurrentCommandID()
 		},
@@ -1387,4 +1430,25 @@ func (a *App) setTraceContext(w http.ResponseWriter, r *http.Request) {
 
 	s.SetCurrentTraceContext(req.TraceID, req.SpanID, req.TraceFlags)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// applyRealPaths resolves the effective real-paths mode (config default overridden
+// by request) and applies it to the session, emitting a warning when enforcement
+// is incomplete.
+func (a *App) applyRealPaths(s *session.Session, reqRealPaths *bool) {
+	realPaths := a.cfg.Sessions.RealPaths
+	if reqRealPaths != nil {
+		realPaths = *reqRealPaths
+	}
+	if realPaths {
+		if !s.SetRealPaths(true) {
+			slog.Warn("real_paths requested but workspace is empty; falling back to /workspace",
+				"session_id", s.ID)
+			return
+		}
+		if !a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE {
+			slog.Warn("session created with real_paths but enforce_without_fuse is false: outside-workspace file access will be audit-only",
+				"session_id", s.ID)
+		}
+	}
 }

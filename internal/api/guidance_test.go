@@ -28,7 +28,7 @@ func TestGuidance_NetworkBlocked_HTTPToHTTPSSubstitution(t *testing.T) {
 		},
 	}
 
-	g := guidanceForResponse(req, res, blocked)
+	g := guidanceForResponse(req, res, blocked, "/workspace")
 	if g == nil || g.Status != "blocked" || !g.Blocked {
 		t.Fatalf("expected blocked guidance, got %+v", g)
 	}
@@ -57,7 +57,7 @@ func TestGuidance_CommandFailed_PyenvShimSuggestsSystemPython(t *testing.T) {
 		},
 	}
 
-	g := guidanceForResponse(req, res, nil)
+	g := guidanceForResponse(req, res, nil, "/workspace")
 	if g == nil || g.Status != "failed" {
 		t.Fatalf("expected failed guidance, got %+v", g)
 	}
@@ -94,7 +94,7 @@ func TestGuidance_ApprovalBlocked_IsRetryable(t *testing.T) {
 		},
 	}
 
-	g := guidanceForResponse(req, res, blocked)
+	g := guidanceForResponse(req, res, blocked, "/workspace")
 	if g == nil || g.Status != "blocked" || !g.Retryable {
 		t.Fatalf("expected retryable blocked guidance, got %+v", g)
 	}
@@ -107,6 +107,37 @@ func TestGuidance_ApprovalBlocked_IsRetryable(t *testing.T) {
 	}
 	if !foundApprovalHint {
 		t.Fatalf("expected request_approval suggestion, got %+v", g.Suggestions)
+	}
+}
+
+func TestGuidance_RealPathsMode_NoMoveToWorkspaceSuggestion(t *testing.T) {
+	req := types.ExecRequest{
+		Command: "cat",
+		Args:    []string{"/etc/passwd"},
+	}
+	res := types.ExecResult{ExitCode: 126}
+	blocked := []types.Event{
+		{
+			Type:      "file_open",
+			Operation: "open",
+			Path:      "/etc/passwd",
+			Policy: &types.PolicyInfo{
+				Decision:          types.DecisionDeny,
+				EffectiveDecision: types.DecisionDeny,
+				Rule:              "default-deny-files",
+			},
+		},
+	}
+
+	// In real-paths mode, move_to_workspace should NOT be suggested
+	g := guidanceForResponse(req, res, blocked, "/home/user/project")
+	if g == nil {
+		t.Fatal("expected guidance, got nil")
+	}
+	for _, s := range g.Suggestions {
+		if s.Action == "move_to_workspace" {
+			t.Error("move_to_workspace should not be suggested in real-paths mode")
+		}
 	}
 }
 

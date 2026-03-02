@@ -30,6 +30,7 @@ func newExecCmd() *cobra.Command {
 	var noDetectRoot bool
 	var projectRoot string
 	var sessionFile string
+	var realPaths bool
 	c := &cobra.Command{
 		Use:   "exec [SESSION_ID] -- COMMAND [ARGS...]",
 		Short: "Execute a command in a session",
@@ -95,6 +96,9 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 			if projectRoot != "" {
 				createReq.ProjectRoot = projectRoot
 			}
+			if cmd.Flags().Changed("real-paths") {
+				createReq.RealPaths = &realPaths
+			}
 
 			if pty {
 				if req.StreamOutput {
@@ -114,6 +118,7 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 					AutoCreateRoot: autoCreateRoot,
 					NoDetectRoot:   noDetectRoot,
 					ProjectRoot:    projectRoot,
+					RealPaths:      createReq.RealPaths,
 				})
 			}
 
@@ -205,6 +210,7 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 	c.Flags().BoolVar(&noDetectRoot, "no-detect-root", false, "Disable project root detection when auto-creating session")
 	c.Flags().StringVar(&projectRoot, "project-root", "", "Explicit project root (skips detection) when auto-creating session")
 	c.Flags().StringVar(&sessionFile, "session-file", "", "Path to cached session file (deleted on 404 to invalidate stale sessions)")
+	c.Flags().BoolVar(&realPaths, "real-paths", false, "Use real host paths instead of /workspace")
 	return c
 }
 

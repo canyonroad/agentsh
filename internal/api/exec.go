@@ -282,17 +282,31 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 	cwd, _, _ := s.GetCwdEnvHistory()
 	virtual := cwd
 	if reqWorkingDir != "" {
-		if strings.HasPrefix(reqWorkingDir, "/") {
-			virtual = reqWorkingDir
+		// Virtual paths always use "/" prefix; on Windows filepath.IsAbs("/workspace")
+		// returns false, so also check for leading slash.
+		if strings.HasPrefix(reqWorkingDir, "/") || filepath.IsAbs(reqWorkingDir) {
+			virtual = filepath.ToSlash(reqWorkingDir)
 		} else {
 			virtual = filepath.ToSlash(filepath.Join(cwd, reqWorkingDir))
 		}
 	}
+	// Normalize to resolve ".." before root boundary check, so paths like
+	// /home/u/proj/../tmp are correctly classified as outside-workspace.
+	virtual = filepath.ToSlash(filepath.Clean(filepath.FromSlash(virtual)))
 
-	if !strings.HasPrefix(virtual, "/workspace") {
-		return "", fmt.Errorf("working_dir must be under /workspace")
+	vroot := s.VirtualRoot
+	if vroot == "" {
+		vroot = "/workspace" // fail closed for uninitialized sessions
 	}
-	rel := strings.TrimPrefix(virtual, "/workspace")
+	if !session.IsUnderRoot(virtual, vroot) {
+		if vroot == "/workspace" {
+			// Default mode: reject outside-workspace paths (preserves pre-real-paths behavior)
+			return "", fmt.Errorf("working_dir must be under /workspace")
+		}
+		// Real-paths mode: pass through as-is for policy/seccomp enforcement
+		return virtual, nil
+	}
+	rel := session.TrimRootPrefix(virtual, vroot)
 	rel = strings.TrimPrefix(rel, "/")
 
 	// Security: Ensure rel is not an absolute path (could escape on Windows)
@@ -306,10 +320,38 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 	real = filepath.Clean(real)
 
 	rootClean := filepath.Clean(root)
-	if real != rootClean && !strings.HasPrefix(real, rootClean+string(os.PathSeparator)) {
+	if !session.IsRealPathUnder(real, rootClean) {
 		return "", fmt.Errorf("working_dir escapes workspace mount")
 	}
-	return real, nil
+
+	// Resolve root symlinks for consistent comparison (macOS /var -> /private/var)
+	rootResolved, err := filepath.EvalSymlinks(rootClean)
+	if err != nil {
+		rootResolved = rootClean
+	}
+
+	// Resolve symlinks to prevent symlink escape (e.g., /workspace/link -> /etc).
+	// If the target doesn't exist yet, evaluate the parent directory instead.
+	resolved, resolveErr := filepath.EvalSymlinks(real)
+	if resolveErr != nil {
+		// Path doesn't exist — evaluate parent to catch symlink escapes in ancestors
+		parent := filepath.Dir(real)
+		resolvedParent, parentErr := filepath.EvalSymlinks(parent)
+		if parentErr != nil {
+			// Parent also doesn't exist — use lexical path (already checked above)
+			return real, nil
+		}
+		resolvedParent = filepath.Clean(resolvedParent)
+		if !session.IsRealPathUnder(resolvedParent, rootResolved) {
+			return "", fmt.Errorf("working_dir symlink escapes workspace mount")
+		}
+		return filepath.Clean(filepath.Join(resolvedParent, filepath.Base(real))), nil
+	}
+	resolved = filepath.Clean(resolved)
+	if !session.IsRealPathUnder(resolved, rootResolved) {
+		return "", fmt.Errorf("working_dir symlink escapes workspace mount")
+	}
+	return resolved, nil
 }
 
 func buildPolicyEnv(pol policy.ResolvedEnvPolicy, hostEnv []string, s *session.Session, overrides map[string]string) ([]string, error) {

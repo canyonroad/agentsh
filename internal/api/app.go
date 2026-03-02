@@ -81,6 +81,10 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		fmt.Fprintf(os.Stderr, "platform init: %v\n", err)
 	}
 
+	if cfg.Sessions.RealPaths && !cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE {
+		slog.Warn("real_paths enabled but enforce_without_fuse is false: outside-workspace file access will be audit-only (not blocked)")
+	}
+
 	return &App{
 		cfg:          cfg,
 		sessions:     sessions,
@@ -857,7 +861,7 @@ func guidanceForPolicyDenied(req types.ExecRequest, pre policy.Decision, preEv t
 	return g
 }
 
-func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps []types.Event) *types.ExecGuidance {
+func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps []types.Event, virtualRoot string) *types.ExecGuidance {
 	g := &types.ExecGuidance{}
 
 	if len(blockedOps) > 0 {
@@ -956,13 +960,15 @@ func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps
 			})
 		}
 
-		// File policy recourse.
-		if strings.HasPrefix(ev.Type, "file_") || strings.HasPrefix(ev.Type, "dir_") || strings.HasPrefix(ev.Type, "symlink_") {
-			if ev.Path != "" && !strings.HasPrefix(ev.Path, "/workspace") {
-				g.Suggestions = append(g.Suggestions, types.Suggestion{
-					Action: "move_to_workspace",
-					Reason: "copy/move required inputs under /workspace so the policy can allow access",
-				})
+		// File policy recourse (only in default /workspace mode).
+		if virtualRoot == "/workspace" {
+			if strings.HasPrefix(ev.Type, "file_") || strings.HasPrefix(ev.Type, "dir_") || strings.HasPrefix(ev.Type, "symlink_") {
+				if ev.Path != "" && !session.IsUnderRoot(ev.Path, "/workspace") {
+					g.Suggestions = append(g.Suggestions, types.Suggestion{
+						Action: "move_to_workspace",
+						Reason: "copy/move required inputs under /workspace so the policy can allow access",
+					})
+				}
 			}
 		}
 

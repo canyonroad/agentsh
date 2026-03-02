@@ -38,6 +38,7 @@ type execPTYRequest struct {
 	AutoCreateRoot string
 	NoDetectRoot   bool
 	ProjectRoot    string
+	RealPaths      *bool
 }
 
 type ptyTermState struct {
@@ -169,6 +170,9 @@ func execPTYWithDeps(ctx context.Context, cfg *clientConfig, sessionID string, r
 				}
 				if req.ProjectRoot != "" {
 					createReq.ProjectRoot = req.ProjectRoot
+				}
+				if req.RealPaths != nil {
+					createReq.RealPaths = req.RealPaths
 				}
 				if _, createErr := cl.CreateSessionWithRequest(ctx, createReq); createErr == nil {
 					err = try()
