@@ -504,7 +504,7 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 	switch req.Command {
 	case "cd":
 		s.Touch()
-		target := "/workspace"
+		target := s.VirtualRoot
 		if len(req.Args) > 0 && req.Args[0] != "" {
 			target = req.Args[0]
 		}
@@ -648,7 +648,7 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 	case "acat":
 		s.Touch()
 		if len(req.Args) < 1 {
-			return true, 2, nil, []byte("usage: acat /workspace/path\n")
+			return true, 2, nil, []byte("usage: acat <path>\n")
 		}
 		virt, real, err := s.resolvePathForBuiltin(req.Args[0])
 		if err != nil {
@@ -701,10 +701,10 @@ func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 		}
 		cwd = filepath.ToSlash(filepath.Clean(cwd))
 		if cwd == "." || cwd == "" {
-			cwd = "/workspace"
+			cwd = s.VirtualRoot
 		}
-		if !strings.HasPrefix(cwd, "/workspace") {
-			return fmt.Errorf("cwd must be under /workspace")
+		if !strings.HasPrefix(cwd, s.VirtualRoot) {
+			return fmt.Errorf("cwd must be under %s", s.VirtualRoot)
 		}
 		s.Cwd = cwd
 	}
@@ -736,12 +736,13 @@ func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, e
 	}
 	virt = filepath.ToSlash(filepath.Clean(virt))
 	if virt == "." || virt == "" {
-		virt = "/workspace"
+		virt = s.VirtualRoot
 	}
-	if !strings.HasPrefix(virt, "/workspace") {
-		return "", "", fmt.Errorf("path must be under /workspace")
+	if virt != s.VirtualRoot && !strings.HasPrefix(virt, s.VirtualRoot+"/") {
+		// Outside workspace — pass through as-is for policy/seccomp enforcement
+		return virt, virt, nil
 	}
-	rel := strings.TrimPrefix(virt, "/workspace")
+	rel := strings.TrimPrefix(virt, s.VirtualRoot)
 	rel = strings.TrimPrefix(rel, "/")
 	root := s.WorkspaceMountPath()
 	real = filepath.Clean(filepath.Join(root, filepath.FromSlash(rel)))

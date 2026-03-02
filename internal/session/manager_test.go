@@ -3,6 +3,8 @@ package session
 import (
 	"testing"
 	"time"
+
+	"github.com/agentsh/agentsh/pkg/types"
 )
 
 func TestManager_ReapExpired_IdleTimeout(t *testing.T) {
@@ -247,5 +249,120 @@ func TestSetRealPaths_TrailingSlash(t *testing.T) {
 	s.SetRealPaths(true)
 	if s.VirtualRoot != ws {
 		t.Errorf("VirtualRoot = %q, want %q (no trailing slash)", s.VirtualRoot, ws)
+	}
+}
+
+func TestBuiltin_Cd_RealPaths(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-cd-real", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetRealPaths(true)
+
+	// cd with no args should go to VirtualRoot
+	handled, code, _, _ := s.Builtin(types.ExecRequest{Command: "cd"})
+	if !handled || code != 0 {
+		t.Fatalf("cd: handled=%v code=%d", handled, code)
+	}
+	cwd, _, _ := s.GetCwdEnvHistory()
+	if cwd != ws {
+		t.Errorf("after cd: Cwd = %q, want %q", cwd, ws)
+	}
+}
+
+func TestBuiltin_Cd_DefaultWorkspace(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-cd-default", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handled, code, _, _ := s.Builtin(types.ExecRequest{Command: "cd"})
+	if !handled || code != 0 {
+		t.Fatalf("cd: handled=%v code=%d", handled, code)
+	}
+	cwd, _, _ := s.GetCwdEnvHistory()
+	if cwd != "/workspace" {
+		t.Errorf("after cd: Cwd = %q, want /workspace", cwd)
+	}
+}
+
+func TestApplyPatch_RealPaths(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-patch-real", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetRealPaths(true)
+
+	// Patch cwd to subdir under workspace
+	err = s.ApplyPatch(types.SessionPatchRequest{Cwd: ws + "/subdir"})
+	if err != nil {
+		t.Fatalf("ApplyPatch: %v", err)
+	}
+	cwd, _, _ := s.GetCwdEnvHistory()
+	if cwd != ws+"/subdir" {
+		t.Errorf("Cwd = %q, want %q", cwd, ws+"/subdir")
+	}
+
+	// Patch cwd outside workspace should fail
+	err = s.ApplyPatch(types.SessionPatchRequest{Cwd: "/etc"})
+	if err == nil {
+		t.Error("expected error patching cwd outside workspace")
+	}
+}
+
+func TestResolvePathForBuiltin_RealPaths_OutsideWorkspace(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-resolve-outside", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetRealPaths(true)
+
+	// Outside workspace path should pass through
+	virt, real, err := s.resolvePathForBuiltin("/etc/hosts")
+	if err != nil {
+		t.Fatalf("resolvePathForBuiltin: %v", err)
+	}
+	if virt != "/etc/hosts" {
+		t.Errorf("virt = %q, want /etc/hosts", virt)
+	}
+	if real != "/etc/hosts" {
+		t.Errorf("real = %q, want /etc/hosts", real)
+	}
+}
+
+func TestResolvePathForBuiltin_SiblingPath_NotConfused(t *testing.T) {
+	m := NewManager(10)
+	ws := t.TempDir() // e.g., /tmp/TestXXX123
+
+	s, err := m.CreateWithID("test-sibling", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetRealPaths(true)
+
+	// A sibling path like /tmp/TestXXX123-extra should NOT match
+	sibling := ws + "-extra/file.txt"
+	virt, real, err := s.resolvePathForBuiltin(sibling)
+	if err != nil {
+		t.Fatalf("resolvePathForBuiltin: %v", err)
+	}
+	// Should be treated as outside workspace (pass through)
+	if virt != sibling {
+		t.Errorf("virt = %q, want %q", virt, sibling)
+	}
+	if real != sibling {
+		t.Errorf("real = %q, want %q", real, sibling)
 	}
 }
