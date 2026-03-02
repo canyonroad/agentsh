@@ -61,3 +61,21 @@ func TestResolveWorkingDir_Default_OutsideReject(t *testing.T) {
 		t.Error("expected error for outside-workspace path in default mode")
 	}
 }
+
+func TestResolveWorkingDir_RootVirtualRoot(t *testing.T) {
+	m := session.NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-exec-rootvr", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate VirtualRoot=="/" — paths like "/etc" should be considered
+	// in-root and resolved normally (not passed through as outside)
+	s.VirtualRoot = "/"
+
+	_, err = resolveWorkingDir(s, "/etc")
+	if err != nil {
+		t.Fatalf("resolveWorkingDir with VirtualRoot=/: %v", err)
+	}
+}

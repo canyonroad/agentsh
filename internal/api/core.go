@@ -421,17 +421,7 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 	}
 
 	// Apply real-paths mode if requested
-	realPaths := a.cfg.Sessions.RealPaths // config default
-	if req.RealPaths != nil {
-		realPaths = *req.RealPaths // request override
-	}
-	if realPaths {
-		s.SetRealPaths(true)
-		if !a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE {
-			slog.Warn("session created with real_paths but enforce_without_fuse is false: outside-workspace file access will be audit-only",
-				"session_id", s.ID)
-		}
-	}
+	a.applyRealPaths(s, req.RealPaths)
 
 	// Generate TOTP secret if TOTP approval mode is enabled
 	if a.cfg.Approvals.Mode == "totp" {
@@ -574,17 +564,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	s.GitRoot = policyVars["GIT_ROOT"]
 
 	// Apply real-paths mode if requested
-	realPaths := a.cfg.Sessions.RealPaths // config default
-	if req.RealPaths != nil {
-		realPaths = *req.RealPaths // request override
-	}
-	if realPaths {
-		s.SetRealPaths(true)
-		if !a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE {
-			slog.Warn("session created with real_paths but enforce_without_fuse is false: outside-workspace file access will be audit-only",
-				"session_id", s.ID)
-		}
-	}
+	a.applyRealPaths(s, req.RealPaths)
 
 	// Generate TOTP secret if TOTP approval mode is enabled
 	if a.cfg.Approvals.Mode == "totp" {
@@ -1414,4 +1394,21 @@ func (a *App) setTraceContext(w http.ResponseWriter, r *http.Request) {
 
 	s.SetCurrentTraceContext(req.TraceID, req.SpanID, req.TraceFlags)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// applyRealPaths resolves the effective real-paths mode (config default overridden
+// by request) and applies it to the session, emitting a warning when enforcement
+// is incomplete.
+func (a *App) applyRealPaths(s *session.Session, reqRealPaths *bool) {
+	realPaths := a.cfg.Sessions.RealPaths
+	if reqRealPaths != nil {
+		realPaths = *reqRealPaths
+	}
+	if realPaths {
+		s.SetRealPaths(true)
+		if !a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE {
+			slog.Warn("session created with real_paths but enforce_without_fuse is false: outside-workspace file access will be audit-only",
+				"session_id", s.ID)
+		}
+	}
 }

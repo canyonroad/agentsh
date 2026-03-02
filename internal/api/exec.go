@@ -290,7 +290,7 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 	}
 
 	vroot := s.VirtualRoot
-	if virtual != vroot && !strings.HasPrefix(virtual, vroot+"/") {
+	if !session.IsUnderRoot(virtual, vroot) {
 		if vroot == "/workspace" {
 			// Default mode: reject outside-workspace paths (preserves pre-real-paths behavior)
 			return "", fmt.Errorf("working_dir must be under /workspace")

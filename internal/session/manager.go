@@ -501,9 +501,9 @@ func (s *Session) CloseNetNS() error {
 	return nil
 }
 
-// isUnderRoot checks if path is equal to or a child of root using
+// IsUnderRoot checks if path is equal to or a child of root using
 // path-boundary-aware logic.  Handles root=="/" where root+"/" would be "//".
-func isUnderRoot(path, root string) bool {
+func IsUnderRoot(path, root string) bool {
 	if root == "/" {
 		return strings.HasPrefix(path, "/")
 	}
@@ -522,7 +522,7 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 			}
 			target = filepath.ToSlash(filepath.Clean(t))
 		}
-		if !isUnderRoot(target, s.VirtualRoot) {
+		if !IsUnderRoot(target, s.VirtualRoot) {
 			return true, 1, nil, []byte(fmt.Sprintf("cd: path must be under %s\n", s.VirtualRoot))
 		}
 		s.mu.Lock()
@@ -720,7 +720,7 @@ func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 		if cwd == "." || cwd == "" {
 			cwd = s.VirtualRoot
 		}
-		if !isUnderRoot(cwd, s.VirtualRoot) {
+		if !IsUnderRoot(cwd, s.VirtualRoot) {
 			return fmt.Errorf("cwd must be under %s", s.VirtualRoot)
 		}
 		s.Cwd = cwd
@@ -755,7 +755,7 @@ func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, e
 	if virt == "." || virt == "" {
 		virt = s.VirtualRoot
 	}
-	if !isUnderRoot(virt, s.VirtualRoot) {
+	if !IsUnderRoot(virt, s.VirtualRoot) {
 		// Outside workspace — reject for builtins (acat/als/astat run in-process
 		// and bypass seccomp). Subprocess commands handle outside paths via
 		// resolveWorkingDir in exec.go where seccomp enforces policy.

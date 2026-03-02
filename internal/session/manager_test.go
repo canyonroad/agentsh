@@ -411,9 +411,9 @@ func TestIsUnderRoot(t *testing.T) {
 		{"/home/user/worker", "/home/user/work", false},
 	}
 	for _, tt := range tests {
-		got := isUnderRoot(tt.path, tt.root)
+		got := IsUnderRoot(tt.path, tt.root)
 		if got != tt.want {
-			t.Errorf("isUnderRoot(%q, %q) = %v, want %v", tt.path, tt.root, got, tt.want)
+			t.Errorf("IsUnderRoot(%q, %q) = %v, want %v", tt.path, tt.root, got, tt.want)
 		}
 	}
 }
