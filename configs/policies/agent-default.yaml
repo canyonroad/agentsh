@@ -358,7 +358,8 @@ command_rules:
 
 file_rules:
   # ---------------------------------------------------------------------------
-  # Credential/env files — require approval (MUST precede workspace allow)
+  # Credential/sensitive files — require approval (MUST precede workspace allow)
+  # These use ** globs that would otherwise be swallowed by allow-workspace.
   # ---------------------------------------------------------------------------
 
   - name: approve-env-files
@@ -370,6 +371,17 @@ file_rules:
       - "*"
     decision: approve
     message: "Agent wants to access environment file: {{.Path}}"
+    timeout: 5m
+
+  - name: approve-git-credentials
+    description: Require approval for git credential access
+    paths:
+      - "${HOME}/.git-credentials"
+      - "**/.netrc"
+    operations:
+      - "*"
+    decision: approve
+    message: "Agent wants to access git credentials: {{.Path}}"
     timeout: 5m
 
   # ---------------------------------------------------------------------------
@@ -493,17 +505,6 @@ file_rules:
       - "*"
     decision: approve
     message: "Agent wants to access cloud credentials: {{.Path}}"
-    timeout: 5m
-
-  - name: approve-git-credentials
-    description: Require approval for git credential access
-    paths:
-      - "${HOME}/.git-credentials"
-      - "**/.netrc"
-    operations:
-      - "*"
-    decision: approve
-    message: "Agent wants to access git credentials: {{.Path}}"
     timeout: 5m
 
   # ---------------------------------------------------------------------------

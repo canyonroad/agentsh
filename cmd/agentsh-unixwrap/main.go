@@ -81,10 +81,11 @@ func main() {
 	// handler is ready to process seccomp notifications.
 	ackBuf := make([]byte, 1)
 	n, err := unix.Read(sockFD, ackBuf)
-	if err != nil {
-		log.Printf("warning: ACK read failed (server may not be ready): %v", err)
-	} else if n != 1 {
-		log.Printf("warning: ACK incomplete (got %d bytes, expected 1)", n)
+	if err != nil || n != 1 {
+		if err != nil {
+			log.Fatalf("ACK handshake failed (server may not be ready): %v", err)
+		}
+		log.Fatalf("ACK handshake failed: got %d bytes, expected 1 (server may have closed connection)", n)
 	}
 
 	// Close notify socket - we're done with it

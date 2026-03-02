@@ -145,17 +145,22 @@ func TestAgentPolicies_DefaultRuleDetails(t *testing.T) {
 	assert.Equal(t, "approve", p.FileRules[0].Decision)
 	assert.Contains(t, p.FileRules[0].Paths, "**/.env")
 
+	// Git credentials require approval (MUST precede workspace allow)
+	assert.Equal(t, "approve-git-credentials", p.FileRules[1].Name)
+	assert.Equal(t, "approve", p.FileRules[1].Decision)
+	assert.Contains(t, p.FileRules[1].Paths, "**/.netrc")
+
 	// Workspace full access
-	assert.Equal(t, "allow-workspace", p.FileRules[1].Name)
-	assert.Equal(t, "allow", p.FileRules[1].Decision)
-	assert.Contains(t, p.FileRules[1].Paths, "${PROJECT_ROOT}/**")
+	assert.Equal(t, "allow-workspace", p.FileRules[2].Name)
+	assert.Equal(t, "allow", p.FileRules[2].Decision)
+	assert.Contains(t, p.FileRules[2].Paths, "${PROJECT_ROOT}/**")
 
 	// Credential paths require approval
-	assert.Equal(t, "approve-ssh-keys", p.FileRules[7].Name)
-	assert.Equal(t, "approve", p.FileRules[7].Decision)
-
-	assert.Equal(t, "approve-cloud-credentials", p.FileRules[8].Name)
+	assert.Equal(t, "approve-ssh-keys", p.FileRules[8].Name)
 	assert.Equal(t, "approve", p.FileRules[8].Decision)
+
+	assert.Equal(t, "approve-cloud-credentials", p.FileRules[9].Name)
+	assert.Equal(t, "approve", p.FileRules[9].Decision)
 
 	// Default deny at the end
 	assert.Equal(t, "default-deny-files", p.FileRules[11].Name)
@@ -612,6 +617,13 @@ func TestAgentDefault_FileDecisions(t *testing.T) {
 		{
 			name:     "read git-credentials",
 			path:     "/home/user/.git-credentials",
+			op:       "read",
+			wantDec:  types.DecisionApprove,
+			wantRule: "approve-git-credentials",
+		},
+		{
+			name:     "read .netrc in project (approval required)",
+			path:     "/home/user/project/.netrc",
 			op:       "read",
 			wantDec:  types.DecisionApprove,
 			wantRule: "approve-git-credentials",
