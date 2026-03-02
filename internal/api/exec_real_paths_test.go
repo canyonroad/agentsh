@@ -62,8 +62,10 @@ func TestResolveWorkingDir_RealPaths_OutsideWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveWorkingDir: %v", err)
 	}
-	if real != outsideDir {
-		t.Errorf("real = %q, want %q", real, outsideDir)
+	// resolveWorkingDir normalizes to forward slashes
+	wantDir := filepath.ToSlash(outsideDir)
+	if real != wantDir {
+		t.Errorf("real = %q, want %q", real, wantDir)
 	}
 }
 
