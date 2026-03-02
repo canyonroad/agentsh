@@ -79,13 +79,8 @@ func main() {
 	// Wait for ACK from the CLI confirming the server has received the notify fd
 	// and started the handler. This prevents a race where we exec before the
 	// handler is ready to process seccomp notifications.
-	ackBuf := make([]byte, 1)
-	n, err := unix.Read(sockFD, ackBuf)
-	if err != nil || n != 1 {
-		if err != nil {
-			log.Fatalf("ACK handshake failed (server may not be ready): %v", err)
-		}
-		log.Fatalf("ACK handshake failed: got %d bytes, expected 1 (server may have closed connection)", n)
+	if err := waitForACK(sockFD); err != nil {
+		log.Fatalf("ACK handshake failed: %v", err)
 	}
 
 	// Close notify socket - we're done with it
@@ -159,6 +154,27 @@ func sendFD(sock int, fd int) error {
 	rights := unix.UnixRights(fd)
 	// dummy payload
 	return unix.Sendmsg(sock, []byte{0}, rights, nil, 0)
+}
+
+// waitForACK blocks until a single ACK byte is received on the given fd.
+// It retries on EINTR (signal interruption) and fails on any other error or
+// unexpected byte count. This prevents the wrapper from exec-ing the target
+// command before the seccomp notify handler is ready.
+func waitForACK(fd int) error {
+	buf := make([]byte, 1)
+	for {
+		n, err := unix.Read(fd, buf)
+		if err != nil {
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			return fmt.Errorf("read: %w", err)
+		}
+		if n != 1 {
+			return fmt.Errorf("expected 1 ACK byte, got %d (server may have closed connection)", n)
+		}
+		return nil
+	}
 }
 
 func applyLandlock(cfg *WrapperConfig) error {
