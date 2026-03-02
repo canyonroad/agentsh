@@ -511,6 +511,10 @@ func IsUnderRoot(path, root string) bool {
 	}
 	if runtime.GOOS == "windows" {
 		lp, lr := strings.ToLower(path), strings.ToLower(root)
+		// Handle roots like "C:/" that already end with separator
+		if strings.HasSuffix(lr, "/") {
+			return strings.HasPrefix(lp, lr)
+		}
 		return lp == lr || strings.HasPrefix(lp, lr+"/")
 	}
 	return path == root || strings.HasPrefix(path, root+"/")
