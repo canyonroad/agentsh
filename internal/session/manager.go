@@ -772,7 +772,7 @@ func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 
 	if patch.Cwd != "" {
 		cwd := patch.Cwd
-		vroot := s.effectiveVirtualRoot()
+		vroot := s.EffectiveVirtualRoot()
 		if !strings.HasPrefix(cwd, "/") {
 			cwd = filepath.ToSlash(filepath.Join(s.Cwd, cwd))
 		}
@@ -801,8 +801,8 @@ func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 	return nil
 }
 
-// effectiveVirtualRoot returns VirtualRoot with a safe default for legacy/empty sessions.
-func (s *Session) effectiveVirtualRoot() string {
+// EffectiveVirtualRoot returns VirtualRoot with a safe default for legacy/empty sessions.
+func (s *Session) EffectiveVirtualRoot() string {
 	if s.VirtualRoot == "" {
 		return "/workspace"
 	}
@@ -811,7 +811,7 @@ func (s *Session) effectiveVirtualRoot() string {
 
 func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, err error) {
 	cwd, _, _ := s.GetCwdEnvHistory()
-	vroot := s.effectiveVirtualRoot()
+	vroot := s.EffectiveVirtualRoot()
 	virt = cwd
 	if strings.TrimSpace(arg) != "" {
 		if strings.HasPrefix(arg, "/") {

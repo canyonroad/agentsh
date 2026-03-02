@@ -1035,7 +1035,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 			OtherCount:             len(otherOps),
 		},
 		Resources: &resources,
-		Guidance:  guidanceForResponse(req, res, blockedOps, s.VirtualRoot),
+		Guidance:  guidanceForResponse(req, res, blockedOps, s.EffectiveVirtualRoot()),
 	}
 	addRedirectGuidance(resp, pre, originalCmd, originalArgs)
 	if len(softSuggestions) > 0 {
@@ -1082,7 +1082,7 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 		SourcePath:  s.Workspace,
 		MountPoint:  mountPoint,
 		SessionID:   s.ID,
-		VirtualRoot: s.VirtualRoot,
+		VirtualRoot: s.EffectiveVirtualRoot(),
 		CommandIDFunc: func() string {
 			return s.CurrentCommandID()
 		},
