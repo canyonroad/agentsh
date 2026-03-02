@@ -336,7 +336,9 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					},
 					PolicyEngine: platform.NewPolicyAdapter(policyEngine),
 					EventChannel: eventChan,
-					VirtualRoot:  filepath.ToSlash(mountPath),
+					// Profile mounts use their real path as virtual root regardless of
+					// session mode: profile mounts expose real paths directly (not /workspace).
+					VirtualRoot: filepath.ToSlash(mountPath),
 				}
 
 				m, err := fs.Mount(fsCfg)

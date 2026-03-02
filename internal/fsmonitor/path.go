@@ -52,9 +52,20 @@ func trimRootPrefix(path, root string) string {
 func resolveRealPathUnderRoot(realRoot string, virtPath string, mustExist bool, virtualRoot string) (string, error) {
 	virtPath = filepath.ToSlash(virtPath)
 	// Boundary-safe check: handle virtualRoot=="/" where root+"/" would be "//"
+	// On Windows, uses case-insensitive comparison.
 	underRoot := func(path, root string) bool {
+		if root == "" {
+			return false
+		}
 		if root == "/" {
 			return strings.HasPrefix(path, "/")
+		}
+		if runtime.GOOS == "windows" {
+			lp, lr := strings.ToLower(path), strings.ToLower(root)
+			if strings.HasSuffix(lr, "/") {
+				return strings.HasPrefix(lp, lr)
+			}
+			return lp == lr || strings.HasPrefix(lp, lr+"/")
 		}
 		return path == root || strings.HasPrefix(path, root+"/")
 	}
