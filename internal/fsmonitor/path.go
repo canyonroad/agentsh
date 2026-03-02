@@ -4,18 +4,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
 // isRealPathUnder checks if a real filesystem path is equal to or under root,
 // using os.PathSeparator for boundary checks.  Handles root=="/" or volume
 // roots like "C:\" where root already ends with the separator.
+// On Windows, comparisons are case-insensitive.
 func isRealPathUnder(path, root string) bool {
 	sep := string(os.PathSeparator)
 	if root == "/" || root == sep {
 		return true
 	}
-	// Volume roots (e.g. "C:\") already end with separator
+	if runtime.GOOS == "windows" {
+		lp, lr := strings.ToLower(path), strings.ToLower(root)
+		if strings.HasSuffix(lr, sep) {
+			return strings.HasPrefix(lp, lr)
+		}
+		return lp == lr || strings.HasPrefix(lp, lr+sep)
+	}
 	if strings.HasSuffix(root, sep) {
 		return strings.HasPrefix(path, root)
 	}
