@@ -336,9 +336,17 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					},
 					PolicyEngine: platform.NewPolicyAdapter(policyEngine),
 					EventChannel: eventChan,
-					// Profile mounts use their real path as virtual root regardless of
-					// session mode: profile mounts expose real paths directly (not /workspace).
-					VirtualRoot: filepath.ToSlash(mountPath),
+					// For the primary workspace mount, use the session's effective virtual
+					// root so FUSE events report paths consistent with the session (e.g.
+					// /workspace in default mode). Non-workspace mounts use their real
+					// path since they aren't mapped under the session's virtual root.
+					VirtualRoot: func() string {
+						wsClean := filepath.Clean(s.WorkspaceMountPath())
+						if filepath.Clean(mountPath) == wsClean {
+							return s.EffectiveVirtualRoot()
+						}
+						return filepath.ToSlash(mountPath)
+					}(),
 				}
 
 				m, err := fs.Mount(fsCfg)
