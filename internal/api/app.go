@@ -960,10 +960,6 @@ func guidanceForResponse(req types.ExecRequest, res types.ExecResult, blockedOps
 			})
 		}
 
-		// File policy recourse.
-		if strings.HasPrefix(ev.Type, "file_") || strings.HasPrefix(ev.Type, "dir_") || strings.HasPrefix(ev.Type, "symlink_") {
-		}
-
 		// Generic remediation.
 		g.Suggestions = append(g.Suggestions, types.Suggestion{
 			Action: "inspect_events",

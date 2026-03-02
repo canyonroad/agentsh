@@ -48,3 +48,13 @@ func TestResolveRealPathUnderRoot_EscapeBlocked(t *testing.T) {
 		t.Error("expected error for path escape")
 	}
 }
+
+func TestResolveRealPathUnderRoot_SiblingPrefix(t *testing.T) {
+	root := t.TempDir()
+
+	// Sibling path like /tmp/ws-extra should NOT match virtualRoot /tmp/ws
+	_, err := resolveRealPathUnderRoot(root, root+"-extra/file", true, root)
+	if err == nil {
+		t.Error("expected error for sibling-prefix path")
+	}
+}
