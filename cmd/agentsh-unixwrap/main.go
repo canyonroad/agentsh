@@ -79,7 +79,7 @@ func main() {
 	// Wait for ACK from the CLI confirming the server has received the notify fd
 	// and started the handler. This prevents a race where we exec before the
 	// handler is ready to process seccomp notifications.
-	if err := waitForACK(sockFD); err != nil {
+	if err := waitForACK(func(b []byte) (int, error) { return unix.Read(sockFD, b) }); err != nil {
 		log.Fatalf("ACK handshake failed: %v", err)
 	}
 
@@ -156,14 +156,14 @@ func sendFD(sock int, fd int) error {
 	return unix.Sendmsg(sock, []byte{0}, rights, nil, 0)
 }
 
-// waitForACK blocks until a single ACK byte is received on the given fd.
-// It retries on EINTR (signal interruption) and fails on any other error or
-// unexpected byte count. This prevents the wrapper from exec-ing the target
-// command before the seccomp notify handler is ready.
-func waitForACK(fd int) error {
+// waitForACK blocks until a single ACK byte is received via the provided read
+// function. It retries on EINTR (signal interruption) and fails on any other
+// error or unexpected byte count. The readFn abstraction enables deterministic
+// testing of the EINTR retry path.
+func waitForACK(readFn func([]byte) (int, error)) error {
 	buf := make([]byte, 1)
 	for {
-		n, err := unix.Read(fd, buf)
+		n, err := readFn(buf)
 		if err != nil {
 			if errors.Is(err, syscall.EINTR) {
 				continue
