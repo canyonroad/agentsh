@@ -268,15 +268,31 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 	}
 
 	for i, spec := range profile.Mounts {
+		// Normalize to absolute clean path
+		mountPath := spec.Path
+		if !filepath.IsAbs(mountPath) {
+			absPath, err := filepath.Abs(mountPath)
+			if err != nil {
+				for _, m := range mounts {
+					if m.Unmount != nil {
+						_ = m.Unmount()
+					}
+				}
+				return nil, fmt.Errorf("mount path %q: %w", spec.Path, err)
+			}
+			mountPath = absPath
+		}
+		mountPath = filepath.Clean(mountPath)
+
 		// Validate path exists
-		if _, err := os.Stat(spec.Path); err != nil {
+		if _, err := os.Stat(mountPath); err != nil {
 			// Cleanup already-created mounts
 			for _, m := range mounts {
 				if m.Unmount != nil {
 					_ = m.Unmount()
 				}
 			}
-			return nil, fmt.Errorf("mount path %q: %w", spec.Path, err)
+			return nil, fmt.Errorf("mount path %q: %w", mountPath, err)
 		}
 
 		// Load per-mount policy if specified
@@ -291,7 +307,7 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 						_ = m.Unmount()
 					}
 				}
-				return nil, fmt.Errorf("load policy %q for mount %q: %w", spec.Policy, spec.Path, err)
+				return nil, fmt.Errorf("load policy %q for mount %q: %w", spec.Policy, mountPath, err)
 			}
 		} else {
 			// Fall back to global policy if no per-mount policy specified
@@ -309,7 +325,7 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 				go a.processIOEvents(ctx, eventChan)
 
 				fsCfg := platform.FSConfig{
-					SourcePath: spec.Path,
+					SourcePath: mountPath,
 					MountPoint: mountPoint,
 					SessionID:  s.ID,
 					CommandIDFunc: func() string {
@@ -320,26 +336,26 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					},
 					PolicyEngine: platform.NewPolicyAdapter(policyEngine),
 					EventChannel: eventChan,
-					VirtualRoot:  filepath.ToSlash(spec.Path),
+					VirtualRoot:  filepath.ToSlash(mountPath),
 				}
 
 				m, err := fs.Mount(fsCfg)
 				if err != nil {
 					close(eventChan)
 					// Log but continue - mount failure shouldn't block session
-					a.logMountFailure(ctx, s.ID, spec.Path, mountPoint, err)
+					a.logMountFailure(ctx, s.ID, mountPath, mountPoint, err)
 					continue
 				}
 
 				// Register in MountRegistry so seccomp FileHandler
 				// knows this path is FUSE-managed (audit-only).
-				registerFUSEMount(s.ID, spec.Path)
+				registerFUSEMount(s.ID, mountPath)
 
 				// Capture for closure
 				sessionID := s.ID
-				sourcePath := spec.Path
+				sourcePath := mountPath
 				mounts = append(mounts, session.ResolvedMount{
-					Path:         spec.Path,
+					Path:         mountPath,
 					Policy:       spec.Policy,
 					MountPoint:   mountPoint,
 					PolicyEngine: policyEngine,
@@ -353,9 +369,9 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 		} else {
 			// No FUSE, just track the mount without actual mounting
 			mounts = append(mounts, session.ResolvedMount{
-				Path:         spec.Path,
+				Path:         mountPath,
 				Policy:       spec.Policy,
-				MountPoint:   spec.Path, // Direct path when not using FUSE
+				MountPoint:   mountPath, // Direct path when not using FUSE
 				PolicyEngine: policyEngine,
 			})
 		}

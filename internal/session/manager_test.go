@@ -414,6 +414,9 @@ func TestIsUnderRoot(t *testing.T) {
 		{"/home/user/work/src", "/home/user/work", true},
 		{"/home/user/work2", "/home/user/work", false},
 		{"/home/user/worker", "/home/user/work", false},
+		// Empty root must always return false
+		{"/anything", "", false},
+		{"", "", false},
 	}
 	for _, tt := range tests {
 		got := IsUnderRoot(tt.path, tt.root)

@@ -507,8 +507,11 @@ func (s *Session) CloseNetNS() error {
 
 // IsUnderRoot checks if path is equal to or a child of root using
 // path-boundary-aware logic.  Handles root=="/" where root+"/" would be "//".
-// On Windows, comparisons are case-insensitive.
+// Returns false for empty root.  On Windows, comparisons are case-insensitive.
 func IsUnderRoot(path, root string) bool {
+	if root == "" {
+		return false
+	}
 	if root == "/" {
 		return strings.HasPrefix(path, "/")
 	}
