@@ -420,6 +420,15 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 		return types.Session{}, code, err
 	}
 
+	// Apply real-paths mode if requested
+	realPaths := a.cfg.Sessions.RealPaths // config default
+	if req.RealPaths != nil {
+		realPaths = *req.RealPaths // request override
+	}
+	if realPaths {
+		s.SetRealPaths(true)
+	}
+
 	// Generate TOTP secret if TOTP approval mode is enabled
 	if a.cfg.Approvals.Mode == "totp" {
 		secret, err := approvals.GenerateTOTPSecret()
@@ -559,6 +568,15 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	// Store roots in session
 	s.ProjectRoot = policyVars["PROJECT_ROOT"]
 	s.GitRoot = policyVars["GIT_ROOT"]
+
+	// Apply real-paths mode if requested
+	realPaths := a.cfg.Sessions.RealPaths // config default
+	if req.RealPaths != nil {
+		realPaths = *req.RealPaths // request override
+	}
+	if realPaths {
+		s.SetRealPaths(true)
+	}
 
 	// Generate TOTP secret if TOTP approval mode is enabled
 	if a.cfg.Approvals.Mode == "totp" {
