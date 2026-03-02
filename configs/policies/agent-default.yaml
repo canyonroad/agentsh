@@ -1,183 +1,811 @@
 # Agent Default Policy for agentsh
-# Balanced supervision for AI agents in development workflows
+# Comprehensive policy for AI coding agents (Claude Code, Codex CLI, etc.)
 
 version: 1
 name: agent-default
 description: |
-  Default policy for AI agent supervision. Allows standard development
-  tools, requires approval for package installation and unknown network
-  access, and denies dangerous system operations.
+  Default policy for AI coding agents running under agentsh wrap. Provides
+  a comprehensive dev toolchain allowlist, LLM API access, credential
+  protection, git guardrails, env variable filtering, and default-deny
+  on files and network. Agents can work productively while credentials
+  are protected and destructive operations are blocked.
 
 # =============================================================================
 # COMMAND RULES
 # =============================================================================
+# Rules are evaluated in order. First match wins.
+# Order: Redirect dangerous patterns → Deny dangerous commands → Allow toolchain
 
 command_rules:
   # ---------------------------------------------------------------------------
-  # Package installation - require approval (MUST precede dev-tools so that
-  # first-match semantics route "npm install" etc. through the approval flow)
+  # Git guardrails — redirects (MUST precede allow-dev-tools)
   # ---------------------------------------------------------------------------
 
-  - name: pkg-install
-    description: Require approval for package installation
+  - name: redirect-git-force-push
+    description: Block force push, suggest --force-with-lease
+    commands: [git]
+    args_patterns:
+      - "push.*(--force|-f)(?!.*--force-with-lease)"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["Force push blocked. Use --force-with-lease or resolve conflicts."]
+    message: "Force pushing is not allowed — use --force-with-lease for safer updates."
+
+  - name: redirect-git-hard-reset
+    description: Block hard reset, suggest stash
+    commands: [git]
+    args_patterns:
+      - "reset.*(--hard)"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["Hard reset blocked. Use git stash to preserve changes."]
+    message: "git reset --hard discards uncommitted work. Use git stash instead."
+
+  - name: redirect-git-clean
+    description: Block git clean -f, suggest reviewing untracked files
+    commands: [git]
+    args_patterns:
+      - "clean.*(-f|--force)"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["git clean blocked. Review untracked files before deleting."]
+    message: "git clean -f permanently deletes untracked files. Review them first."
+
+  - name: redirect-git-push-main
+    description: Block direct push to main/master
+    commands: [git]
+    args_patterns:
+      - "push.*(origin\\s+)?(main|master)"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["Push to main/master declined. Create a branch and open a pull request."]
+    message: "Direct pushes to main/master are not allowed. Use feature branches."
+
+  # ---------------------------------------------------------------------------
+  # Destructive rm — redirect with explanation
+  # ---------------------------------------------------------------------------
+
+  - name: redirect-destructive-rm
+    description: Block catastrophic rm commands
+    commands: [rm]
+    args_patterns:
+      - "-rf\\s+/"
+      - "-rf\\s+~"
+      - "-fr\\s+/"
+      - "-fr\\s+~"
+      - "--no-preserve-root"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["Destructive delete blocked. This would remove critical files."]
+    message: "Catastrophic rm command blocked."
+
+  # ---------------------------------------------------------------------------
+  # Deny — system admin, privilege escalation, raw network
+  # ---------------------------------------------------------------------------
+
+  - name: deny-system-admin
+    description: Block system administration commands
+    commands:
+      - shutdown
+      - reboot
+      - systemctl
+      - service
+      - mount
+      - umount
+      - dd
+      - mkfs
+      - fdisk
+    decision: deny
+    message: "System administration command blocked."
+
+  - name: deny-privilege-escalation
+    description: Block privilege escalation
+    commands:
+      - sudo
+      - su
+      - chroot
+      - nsenter
+      - unshare
+    decision: deny
+    message: "Privilege escalation blocked."
+
+  - name: deny-raw-network
+    description: Block raw network tools
+    commands:
+      - nc
+      - netcat
+      - ncat
+      - socat
+      - telnet
+    decision: deny
+    message: "Raw network tool blocked. Use curl/wget for HTTP requests."
+
+  - name: deny-system-pkg-install
+    description: Block system package manager install/upgrade
     commands:
       - apt
+      - apt-get
       - yum
+      - dnf
       - brew
-      - pip
-      - pip3
-      - npm
-      - npx
     args_patterns:
       - "install.*"
-      - "add.*"
       - "upgrade.*"
-      - "update.*"
-      - "^i$"
-      - "^ci$"
-    decision: approve
-    message: "Agent wants to install packages: {{.Args}}"
+    decision: deny
+    message: "System package installation blocked. Use language-specific package managers."
 
   # ---------------------------------------------------------------------------
-  # Development tools - allow by default
+  # Allow — comprehensive dev toolchain
   # ---------------------------------------------------------------------------
 
-  - name: dev-tools
-    description: Standard development tools
+  - name: allow-file-ops
+    description: File operations
     commands:
       - ls
       - cat
-      - grep
-      - find
-      - git
-      - node
-      - npm
-      - npx
-      - python
-      - python3
-      - pip
-      - pip3
-      - go
-      - cargo
-      - make
-      - cmake
+      - head
+      - tail
+      - less
+      - more
+      - file
+      - stat
+      - wc
+      - du
+      - df
+      - touch
+      - mkdir
+      - cp
+      - mv
+      - ln
+      - chmod
+      - rm
+      - rmdir
+      - basename
+      - dirname
+      - realpath
+      - readlink
     decision: allow
 
-  # ---------------------------------------------------------------------------
-  # Shell execution - allow
-  # ---------------------------------------------------------------------------
+  - name: allow-search-tools
+    description: Search and locate tools
+    commands:
+      - grep
+      - rg
+      - find
+      - fd
+      - ag
+      - ack
+      - which
+      - whereis
+      - type
+      - locate
+    decision: allow
 
-  - name: shell-exec
-    description: Allow shell interpreters
+  - name: allow-text-processing
+    description: Text processing tools
+    commands:
+      - sed
+      - awk
+      - tr
+      - sort
+      - uniq
+      - cut
+      - paste
+      - tee
+      - xargs
+      - jq
+      - yq
+      - column
+      - fmt
+      - fold
+      - expand
+      - unexpand
+    decision: allow
+
+  - name: allow-shell-exec
+    description: Shell interpreters and builtins
     commands:
       - bash
       - sh
       - zsh
+      - env
+      - printenv
+      - "true"
+      - "false"
+      - test
+      - "["
+      - expr
+      - seq
+      - sh.real
+      - bash.real
     decision: allow
 
-  # ---------------------------------------------------------------------------
-  # Dangerous commands - deny with specific patterns
-  # ---------------------------------------------------------------------------
-
-  - name: dangerous
-    description: Block dangerous commands with destructive arguments
+  - name: allow-info-commands
+    description: System information commands
     commands:
-      - rm
-      - dd
-      - mkfs
-      - fdisk
-    args_patterns:
-      - "-rf /.*"
-      - "--no-preserve-root.*"
-    decision: deny
-    message: "Destructive command blocked: {{.Args}}"
+      - whoami
+      - id
+      - uname
+      - hostname
+      - pwd
+      - date
+      - echo
+      - printf
+      - "yes"
+      - sleep
+      - time
+      - timeout
+    decision: allow
+
+  - name: allow-dev-tools
+    description: Development tools and language runtimes
+    commands:
+      - git
+      - node
+      - npm
+      - npx
+      - yarn
+      - pnpm
+      - bun
+      - deno
+      - python
+      - python3
+      - pip
+      - pip3
+      - uv
+      - go
+      - cargo
+      - rustc
+      - rustup
+      - make
+      - cmake
+      - gcc
+      - g++
+      - clang
+      - clang++
+      - ld
+      - ar
+      - javac
+      - java
+      - mvn
+      - gradle
+      - ruby
+      - gem
+      - bundler
+      - php
+      - composer
+    decision: allow
+
+  - name: allow-build-test
+    description: Build, test, and lint tools
+    commands:
+      - pytest
+      - jest
+      - mocha
+      - vitest
+      - tsc
+      - eslint
+      - prettier
+      - rubocop
+      - rspec
+      - phpunit
+    decision: allow
+
+  - name: allow-http-tools
+    description: HTTP clients (network rules are the real guard)
+    commands:
+      - curl
+      - wget
+    decision: allow
+
+  - name: allow-containers
+    description: Container tools
+    commands:
+      - docker
+      - docker-compose
+      - podman
+    decision: allow
+
+  - name: allow-archive-tools
+    description: Archive and compression tools
+    commands:
+      - tar
+      - gzip
+      - gunzip
+      - zip
+      - unzip
+      - bzip2
+      - xz
+    decision: allow
+
+  - name: allow-misc-tools
+    description: Miscellaneous utilities and process info
+    commands:
+      - nohup
+      - patch
+      - diff
+      - bc
+      - openssl
+      - ssh-keygen
+      - ps
+      - top
+      - htop
+      - pgrep
+    decision: allow
 
 # =============================================================================
 # FILE OPERATION RULES
 # =============================================================================
+# Rules are evaluated in order. First match wins.
 
 file_rules:
   # ---------------------------------------------------------------------------
-  # Workspace - full access
+  # Workspace — full access
   # ---------------------------------------------------------------------------
 
-  - name: workspace
+  - name: allow-workspace
     description: Full access to project workspace
     paths:
       - "${PROJECT_ROOT}"
       - "${PROJECT_ROOT}/**"
     operations:
-      - read
-      - write
-      - create
-      - delete
+      - "*"
     decision: allow
 
-  # ---------------------------------------------------------------------------
-  # System paths - read only
-  # ---------------------------------------------------------------------------
-
-  - name: system-read
-    description: Read-only access to system paths
+  - name: allow-git-root
+    description: Full access to git repository root (monorepo support)
     paths:
-      - "/etc/**"
-      - "/usr/**"
+      - "${GIT_ROOT}"
+      - "${GIT_ROOT}/**"
     operations:
-      - read
+      - "*"
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # System paths - block writes
+  # Temp directories — full access
   # ---------------------------------------------------------------------------
 
-  - name: system-write
-    description: Block writes to system paths
+  - name: allow-tmp
+    description: Full access to temp directories
     paths:
-      - "/etc/**"
+      - "/tmp/**"
+      - "/var/tmp/**"
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Package caches — full access for dev workflows
+  # ---------------------------------------------------------------------------
+
+  - name: allow-package-caches
+    description: Full access to package manager caches
+    paths:
+      - "${HOME}/.npm/**"
+      - "${HOME}/.yarn/**"
+      - "${HOME}/.pnpm-store/**"
+      - "${HOME}/.cache/**"
+      - "${HOME}/.cargo/**"
+      - "${HOME}/go/**"
+      - "${HOME}/.local/**"
+      - "${HOME}/.rustup/**"
+      - "${HOME}/.bun/**"
+    operations:
+      - "*"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # System paths — read-only
+  # ---------------------------------------------------------------------------
+
+  - name: allow-system-read
+    description: Read access to standard system paths
+    paths:
       - "/usr/**"
+      - "/lib/**"
+      - "/lib64/**"
       - "/bin/**"
       - "/sbin/**"
+      - "/opt/**"
     operations:
-      - write
-      - create
-      - delete
+      - read
+      - open
+      - stat
+      - list
+      - readlink
+    decision: allow
+
+  - name: allow-etc-read
+    description: Read common config files
+    paths:
+      - "/etc/hosts"
+      - "/etc/resolv.conf"
+      - "/etc/ssl/**"
+      - "/etc/ca-certificates/**"
+      - "/etc/localtime"
+      - "/etc/timezone"
+      - "/etc/passwd"
+      - "/etc/mime.types"
+      - "/etc/protocols"
+      - "/etc/services"
+    operations:
+      - read
+      - open
+      - stat
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Credential paths — require approval
+  # ---------------------------------------------------------------------------
+
+  - name: approve-ssh-keys
+    description: Require approval for SSH key access
+    paths:
+      - "${HOME}/.ssh/**"
+    operations:
+      - "*"
+    decision: approve
+    message: "Agent wants to access SSH keys: {{.Path}}"
+    timeout: 5m
+
+  - name: approve-cloud-credentials
+    description: Require approval for cloud credential access
+    paths:
+      - "${HOME}/.aws/**"
+      - "${HOME}/.gcloud/**"
+      - "${HOME}/.azure/**"
+      - "${HOME}/.config/gcloud/**"
+      - "${HOME}/.kube/**"
+    operations:
+      - "*"
+    decision: approve
+    message: "Agent wants to access cloud credentials: {{.Path}}"
+    timeout: 5m
+
+  - name: approve-git-credentials
+    description: Require approval for git credential access
+    paths:
+      - "${HOME}/.git-credentials"
+      - "**/.netrc"
+    operations:
+      - "*"
+    decision: approve
+    message: "Agent wants to access git credentials: {{.Path}}"
+    timeout: 5m
+
+  - name: approve-env-files
+    description: Require approval for .env file access
+    paths:
+      - "**/.env"
+      - "**/.env.*"
+    operations:
+      - "*"
+    decision: approve
+    message: "Agent wants to access environment file: {{.Path}}"
+    timeout: 5m
+
+  # ---------------------------------------------------------------------------
+  # Deny — sensitive system paths and default
+  # ---------------------------------------------------------------------------
+
+  - name: deny-proc-sys
+    description: Block /proc and /sys
+    paths:
+      - "/proc/**"
+      - "/sys/**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: default-deny-files
+    description: Deny all other file operations
+    paths:
+      - "**"
+    operations:
+      - "*"
     decision: deny
 
 # =============================================================================
 # NETWORK OPERATION RULES
 # =============================================================================
+# Rules are evaluated in order. First match wins.
 
 network_rules:
   # ---------------------------------------------------------------------------
-  # Package registries - allow
+  # LLM providers — agents need access to their own backends
   # ---------------------------------------------------------------------------
 
-  - name: package-registries
-    description: Allow package registry access
+  - name: allow-llm-providers
+    description: LLM API providers (Anthropic, OpenAI, Google)
+    domains:
+      - "api.anthropic.com"
+      - "*.anthropic.com"
+      - "api.openai.com"
+      - "*.openai.com"
+      - "generativelanguage.googleapis.com"
+      - "*.googleapis.com"
+    ports: [443]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Package registries
+  # ---------------------------------------------------------------------------
+
+  - name: allow-npm
+    description: npm registry
     domains:
       - "registry.npmjs.org"
+      - "*.npmjs.org"
+      - "*.npmjs.com"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-pypi
+    description: PyPI
+    domains:
       - "pypi.org"
+      - "*.pypi.org"
+      - "files.pythonhosted.org"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-cargo
+    description: Cargo registry
+    domains:
+      - "crates.io"
+      - "*.crates.io"
+      - "static.crates.io"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-go-proxy
+    description: Go module proxy
+    domains:
       - "proxy.golang.org"
+      - "sum.golang.org"
+      - "*.golang.org"
+    ports: [443, 80]
+    decision: allow
+
+  - name: allow-other-registries
+    description: Maven, RubyGems, Docker Hub, Homebrew
+    domains:
+      - "repo1.maven.org"
+      - "central.maven.org"
+      - "*.maven.org"
+      - "rubygems.org"
+      - "*.rubygems.org"
+      - "registry-1.docker.io"
+      - "*.docker.io"
+      - "*.docker.com"
+      - "ghcr.io"
+      - "*.ghcr.io"
+      - "formulae.brew.sh"
+    ports: [443, 80]
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # GitHub - allow
+  # Code hosting (HTTPS + SSH)
   # ---------------------------------------------------------------------------
 
-  - name: github
-    description: Allow GitHub access
+  - name: allow-github
+    description: GitHub access
     domains:
       - "github.com"
+      - "*.github.com"
       - "*.githubusercontent.com"
+      - "api.github.com"
+    ports: [443, 80, 22]
+    decision: allow
+
+  - name: allow-gitlab
+    description: GitLab access
+    domains:
+      - "gitlab.com"
+      - "*.gitlab.com"
+    ports: [443, 80, 22]
+    decision: allow
+
+  - name: allow-bitbucket
+    description: Bitbucket access
+    domains:
+      - "bitbucket.org"
+      - "*.bitbucket.org"
+    ports: [443, 80, 22]
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # All other network - require approval
+  # CDNs
   # ---------------------------------------------------------------------------
 
-  - name: other-network
-    description: Require approval for unknown network destinations
+  - name: allow-cdns
+    description: Common CDNs and JS delivery
+    domains:
+      - "*.cloudflare.com"
+      - "*.cloudfront.net"
+      - "cdn.jsdelivr.net"
+      - "unpkg.com"
+      - "esm.sh"
+    ports: [443, 80]
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Localhost
+  # ---------------------------------------------------------------------------
+
+  - name: allow-localhost
+    description: Allow localhost connections (dev servers, LLM proxy)
+    cidrs:
+      - "127.0.0.1/32"
+      - "::1/128"
+    decision: allow
+
+  # ---------------------------------------------------------------------------
+  # Blocked networks
+  # ---------------------------------------------------------------------------
+
+  - name: deny-metadata-services
+    description: Block cloud metadata services
+    cidrs:
+      - "169.254.169.254/32"
+      - "100.100.100.200/32"
+    decision: deny
+
+  - name: deny-private-networks
+    description: Block private/internal networks
+    cidrs:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+    decision: deny
+
+  # ---------------------------------------------------------------------------
+  # Unknown HTTPS — require approval
+  # ---------------------------------------------------------------------------
+
+  - name: approve-unknown-https
+    description: Require approval for unknown HTTPS destinations
+    ports: [443]
+    decision: approve
+    message: "Agent wants to connect to: {{.RemoteAddr}}:{{.RemotePort}}"
+    timeout: 2m
+
+  # ---------------------------------------------------------------------------
+  # Default deny
+  # ---------------------------------------------------------------------------
+
+  - name: default-deny-network
+    description: Deny all other network connections
     domains:
       - "*"
-    decision: approve
-    message: "Agent wants to connect to: {{.RemoteAddr}}"
+    decision: deny
+
+# =============================================================================
+# UNIX SOCKET RULES
+# =============================================================================
+
+unix_socket_rules:
+  - name: allow-docker-socket
+    description: Allow Docker socket connections
+    paths:
+      - "/var/run/docker.sock"
+    operations: [connect]
+    decision: allow
+
+  - name: deny-system-sockets
+    description: Deny other system sockets
+    paths:
+      - "/var/run/**"
+    operations: [connect, bind, listen, sendto]
+    decision: deny
+
+# =============================================================================
+# ENVIRONMENT VARIABLE POLICY
+# =============================================================================
+
+env_policy:
+  deny:
+    - "*_SECRET*"
+    - "*_PASSWORD*"
+    - "*_PRIVATE_KEY*"
+    - "*_API_KEY*"
+    - "*_ACCESS_KEY*"
+    - "*_TOKEN"
+    - "ANTHROPIC_API_KEY"
+    - "OPENAI_API_KEY"
+    - "GITHUB_TOKEN"
+    - "GH_TOKEN"
+    - "NPM_TOKEN"
+    - "AWS_SECRET_ACCESS_KEY"
+    - "AWS_SESSION_TOKEN"
+    - "GOOGLE_APPLICATION_CREDENTIALS"
+  block_iteration: true
+
+# =============================================================================
+# PACKAGE RULES
+# =============================================================================
+
+package_rules:
+  - match:
+      finding_type: vulnerability
+      severity: critical
+    action: block
+    reason: "Critical vulnerability — review before installing"
+
+  - match:
+      finding_type: malware
+    action: block
+    reason: "Known malware detected"
+
+# =============================================================================
+# RESOURCE LIMITS
+# =============================================================================
+
+resource_limits:
+  max_memory_mb: 8192
+  cpu_quota_percent: 100
+  pids_max: 500
+  command_timeout: 15m
+  session_timeout: 12h
+  idle_timeout: 30m
+
+# =============================================================================
+# SIGNAL RULES (Linux: enforced, macOS/Windows: audit only)
+# =============================================================================
+
+signal_rules:
+  - name: allow-self
+    signals: ["@all"]
+    target:
+      type: self
+    decision: allow
+
+  - name: allow-children
+    signals: ["@all"]
+    target:
+      type: children
+    decision: allow
+
+  - name: allow-session
+    signals: ["SIGTERM", "SIGINT", "SIGHUP", "SIGUSR1", "SIGUSR2"]
+    target:
+      type: session
+    decision: allow
+
+  - name: audit-parent
+    signals: ["@all"]
+    target:
+      type: parent
+    decision: audit
+
+  - name: deny-external-fatal
+    signals: ["@fatal"]
+    target:
+      type: external
+    decision: deny
+    fallback: audit
+    message: "Blocking signal to process outside session"
+
+  - name: deny-system
+    signals: ["@all"]
+    target:
+      type: system
+    decision: deny
+    fallback: audit
+    message: "Blocking signal to system process"
+
+# =============================================================================
+# AUDIT SETTINGS
+# =============================================================================
+
+audit:
+  log_allowed: false
+  log_denied: true
+  log_approved: true
+  include_stdout: false
+  include_stderr: true

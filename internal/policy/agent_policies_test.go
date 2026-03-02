@@ -40,9 +40,9 @@ func TestAgentPolicies(t *testing.T) {
 		{
 			file:             "agent-default.yaml",
 			name:             "agent-default",
-			wantCommandRules: 4,
-			wantFileRules:    3,
-			wantNetworkRules: 3,
+			wantCommandRules: 20,
+			wantFileRules:    12,
+			wantNetworkRules: 15,
 		},
 		{
 			file:             "agent-strict.yaml",
@@ -89,35 +89,120 @@ func TestAgentPolicies_DefaultRuleDetails(t *testing.T) {
 	p, err := LoadFromFile(path)
 	require.NoError(t, err)
 
-	// Check pkg-install requires approval (first rule — must precede dev-tools
-	// so that first-match semantics route "npm install" through approval)
-	assert.Equal(t, "pkg-install", p.CommandRules[0].Name)
-	assert.Equal(t, "approve", p.CommandRules[0].Decision)
-	assert.NotEmpty(t, p.CommandRules[0].ArgsPatterns)
+	// --- Command rules ---
 
-	// Check dev-tools rule
-	assert.Equal(t, "dev-tools", p.CommandRules[1].Name)
-	assert.Equal(t, "allow", p.CommandRules[1].Decision)
-	assert.Contains(t, p.CommandRules[1].Commands, "git")
-	assert.Contains(t, p.CommandRules[1].Commands, "node")
+	// Git guardrails come first (redirects before allow-dev-tools)
+	assert.Equal(t, "redirect-git-force-push", p.CommandRules[0].Name)
+	assert.Equal(t, "redirect", p.CommandRules[0].Decision)
 
-	// Check dangerous commands denied
-	assert.Equal(t, "dangerous", p.CommandRules[3].Name)
-	assert.Equal(t, "deny", p.CommandRules[3].Decision)
+	assert.Equal(t, "redirect-git-hard-reset", p.CommandRules[1].Name)
+	assert.Equal(t, "redirect", p.CommandRules[1].Decision)
 
-	// Check workspace file rule
-	assert.Equal(t, "workspace", p.FileRules[0].Name)
+	assert.Equal(t, "redirect-git-clean", p.CommandRules[2].Name)
+	assert.Equal(t, "redirect", p.CommandRules[2].Decision)
+
+	assert.Equal(t, "redirect-git-push-main", p.CommandRules[3].Name)
+	assert.Equal(t, "redirect", p.CommandRules[3].Decision)
+
+	assert.Equal(t, "redirect-destructive-rm", p.CommandRules[4].Name)
+	assert.Equal(t, "redirect", p.CommandRules[4].Decision)
+
+	// Deny rules follow redirects
+	assert.Equal(t, "deny-system-admin", p.CommandRules[5].Name)
+	assert.Equal(t, "deny", p.CommandRules[5].Decision)
+
+	assert.Equal(t, "deny-privilege-escalation", p.CommandRules[6].Name)
+	assert.Equal(t, "deny", p.CommandRules[6].Decision)
+
+	assert.Equal(t, "deny-raw-network", p.CommandRules[7].Name)
+	assert.Equal(t, "deny", p.CommandRules[7].Decision)
+
+	assert.Equal(t, "deny-system-pkg-install", p.CommandRules[8].Name)
+	assert.Equal(t, "deny", p.CommandRules[8].Decision)
+	assert.NotEmpty(t, p.CommandRules[8].ArgsPatterns)
+
+	// Dev tools allowed
+	assert.Equal(t, "allow-dev-tools", p.CommandRules[14].Name)
+	assert.Equal(t, "allow", p.CommandRules[14].Decision)
+	assert.Contains(t, p.CommandRules[14].Commands, "git")
+	assert.Contains(t, p.CommandRules[14].Commands, "node")
+	assert.Contains(t, p.CommandRules[14].Commands, "npm")
+	assert.Contains(t, p.CommandRules[14].Commands, "cargo")
+	assert.Contains(t, p.CommandRules[14].Commands, "go")
+
+	// HTTP tools allowed (network rules are the guard)
+	assert.Equal(t, "allow-http-tools", p.CommandRules[16].Name)
+	assert.Equal(t, "allow", p.CommandRules[16].Decision)
+	assert.Contains(t, p.CommandRules[16].Commands, "curl")
+	assert.Contains(t, p.CommandRules[16].Commands, "wget")
+
+	// --- File rules ---
+
+	// Workspace full access
+	assert.Equal(t, "allow-workspace", p.FileRules[0].Name)
 	assert.Equal(t, "allow", p.FileRules[0].Decision)
 	assert.Contains(t, p.FileRules[0].Paths, "${PROJECT_ROOT}/**")
 
-	// Check system write deny
-	assert.Equal(t, "system-write", p.FileRules[2].Name)
-	assert.Equal(t, "deny", p.FileRules[2].Decision)
+	// Credential paths require approval
+	assert.Equal(t, "approve-ssh-keys", p.FileRules[6].Name)
+	assert.Equal(t, "approve", p.FileRules[6].Decision)
 
-	// Check GitHub network access
-	assert.Equal(t, "github", p.NetworkRules[1].Name)
-	assert.Equal(t, "allow", p.NetworkRules[1].Decision)
-	assert.Contains(t, p.NetworkRules[1].Domains, "github.com")
+	assert.Equal(t, "approve-cloud-credentials", p.FileRules[7].Name)
+	assert.Equal(t, "approve", p.FileRules[7].Decision)
+
+	// Default deny at the end
+	assert.Equal(t, "default-deny-files", p.FileRules[11].Name)
+	assert.Equal(t, "deny", p.FileRules[11].Decision)
+
+	// --- Network rules ---
+
+	// LLM providers allowed (agents need their backends)
+	assert.Equal(t, "allow-llm-providers", p.NetworkRules[0].Name)
+	assert.Equal(t, "allow", p.NetworkRules[0].Decision)
+	assert.Contains(t, p.NetworkRules[0].Domains, "api.anthropic.com")
+	assert.Contains(t, p.NetworkRules[0].Domains, "api.openai.com")
+
+	// GitHub allowed
+	assert.Equal(t, "allow-github", p.NetworkRules[6].Name)
+	assert.Equal(t, "allow", p.NetworkRules[6].Decision)
+	assert.Contains(t, p.NetworkRules[6].Domains, "github.com")
+
+	// Cloud metadata denied
+	assert.Equal(t, "deny-metadata-services", p.NetworkRules[11].Name)
+	assert.Equal(t, "deny", p.NetworkRules[11].Decision)
+
+	// Default deny at the end
+	assert.Equal(t, "default-deny-network", p.NetworkRules[14].Name)
+	assert.Equal(t, "deny", p.NetworkRules[14].Decision)
+
+	// --- Env policy ---
+	assert.True(t, p.EnvPolicy.BlockIteration)
+	assert.Contains(t, p.EnvPolicy.Deny, "ANTHROPIC_API_KEY")
+	assert.Contains(t, p.EnvPolicy.Deny, "OPENAI_API_KEY")
+	assert.Contains(t, p.EnvPolicy.Deny, "*_SECRET*")
+
+	// --- Package rules ---
+	require.Len(t, p.PackageRules, 2)
+	assert.Equal(t, "block", p.PackageRules[0].Action)
+	assert.Equal(t, "vulnerability", p.PackageRules[0].Match.FindingType)
+	assert.Equal(t, "critical", p.PackageRules[0].Match.Severity)
+	assert.Equal(t, "block", p.PackageRules[1].Action)
+	assert.Equal(t, "malware", p.PackageRules[1].Match.FindingType)
+
+	// --- Resource limits ---
+	assert.Equal(t, 8192, p.ResourceLimits.MaxMemoryMB)
+	assert.Equal(t, 100, p.ResourceLimits.CPUQuotaPercent)
+	assert.Equal(t, 500, p.ResourceLimits.PidsMax)
+
+	// --- Signal rules ---
+	require.Len(t, p.SignalRules, 6)
+	assert.Equal(t, "allow-self", p.SignalRules[0].Name)
+	assert.Equal(t, "deny-system", p.SignalRules[5].Name)
+
+	// --- Audit ---
+	assert.False(t, p.Audit.LogAllowed)
+	assert.True(t, p.Audit.LogDenied)
+	assert.True(t, p.Audit.LogApproved)
 }
 
 func TestAgentPolicies_StrictRuleDetails(t *testing.T) {
