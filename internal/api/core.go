@@ -427,6 +427,10 @@ func (a *App) createSessionWithProfile(ctx context.Context, req types.CreateSess
 	}
 	if realPaths {
 		s.SetRealPaths(true)
+		if !a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE {
+			slog.Warn("session created with real_paths but enforce_without_fuse is false: outside-workspace file access will be audit-only",
+				"session_id", s.ID)
+		}
 	}
 
 	// Generate TOTP secret if TOTP approval mode is enabled
@@ -576,6 +580,10 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	}
 	if realPaths {
 		s.SetRealPaths(true)
+		if !a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE {
+			slog.Warn("session created with real_paths but enforce_without_fuse is false: outside-workspace file access will be audit-only",
+				"session_id", s.ID)
+		}
 	}
 
 	// Generate TOTP secret if TOTP approval mode is enabled

@@ -58,3 +58,20 @@ func TestResolveRealPathUnderRoot_SiblingPrefix(t *testing.T) {
 		t.Error("expected error for sibling-prefix path")
 	}
 }
+
+func TestResolveRealPathUnderRoot_RootVirtualRoot(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "etc")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// When virtualRoot is "/", paths like "/etc" should be accepted
+	got, err := resolveRealPathUnderRoot(root, "/etc", true, "/")
+	if err != nil {
+		t.Fatalf("resolveRealPathUnderRoot with root /: %v", err)
+	}
+	if got != sub {
+		t.Errorf("got %q, want %q", got, sub)
+	}
+}

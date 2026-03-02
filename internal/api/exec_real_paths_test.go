@@ -46,7 +46,7 @@ func TestResolveWorkingDir_RealPaths_OutsideWorkspace(t *testing.T) {
 	}
 }
 
-func TestResolveWorkingDir_Default_OutsidePassthrough(t *testing.T) {
+func TestResolveWorkingDir_Default_OutsideReject(t *testing.T) {
 	m := session.NewManager(10)
 	ws := t.TempDir()
 
@@ -55,12 +55,9 @@ func TestResolveWorkingDir_Default_OutsidePassthrough(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Outside workspace paths pass through for policy/seccomp enforcement
-	real, err := resolveWorkingDir(s, "/etc")
-	if err != nil {
-		t.Fatalf("resolveWorkingDir: %v", err)
-	}
-	if real != "/etc" {
-		t.Errorf("real = %q, want /etc", real)
+	// Default /workspace mode: outside workspace paths should be rejected
+	_, err = resolveWorkingDir(s, "/etc")
+	if err == nil {
+		t.Error("expected error for outside-workspace path in default mode")
 	}
 }

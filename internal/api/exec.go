@@ -291,7 +291,11 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 
 	vroot := s.VirtualRoot
 	if virtual != vroot && !strings.HasPrefix(virtual, vroot+"/") {
-		// Outside workspace — pass through as-is for policy/seccomp enforcement
+		if vroot == "/workspace" {
+			// Default mode: reject outside-workspace paths (preserves pre-real-paths behavior)
+			return "", fmt.Errorf("working_dir must be under /workspace")
+		}
+		// Real-paths mode: pass through as-is for policy/seccomp enforcement
 		return virtual, nil
 	}
 	rel := strings.TrimPrefix(virtual, vroot)

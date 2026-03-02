@@ -14,7 +14,14 @@ import (
 // If mustExist is false, the parent directory is evaluated for symlink escape and the final path may not exist yet.
 func resolveRealPathUnderRoot(realRoot string, virtPath string, mustExist bool, virtualRoot string) (string, error) {
 	virtPath = filepath.ToSlash(virtPath)
-	if virtPath != virtualRoot && !strings.HasPrefix(virtPath, virtualRoot+"/") {
+	// Boundary-safe check: handle virtualRoot=="/" where root+"/" would be "//"
+	underRoot := func(path, root string) bool {
+		if root == "/" {
+			return strings.HasPrefix(path, "/")
+		}
+		return path == root || strings.HasPrefix(path, root+"/")
+	}
+	if !underRoot(virtPath, virtualRoot) {
 		return "", fmt.Errorf("path must be under %s", virtualRoot)
 	}
 	rel := strings.TrimPrefix(virtPath, virtualRoot)

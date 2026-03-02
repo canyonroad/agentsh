@@ -366,7 +366,7 @@ func (s *Session) SetRealPaths(enabled bool) {
 		if s.Workspace == "" {
 			return // no-op: empty workspace cannot be used as virtual root
 		}
-		vroot := filepath.Clean(s.Workspace)
+		vroot := filepath.ToSlash(filepath.Clean(s.Workspace))
 		s.VirtualRoot = vroot
 		s.Cwd = vroot
 	} else {
@@ -517,7 +517,7 @@ func (s *Session) Builtin(req types.ExecRequest) (handled bool, exitCode int, st
 		target := s.VirtualRoot
 		if len(req.Args) > 0 && req.Args[0] != "" {
 			t := req.Args[0]
-			if !strings.HasPrefix(t, "/") {
+			if !filepath.IsAbs(t) {
 				t = filepath.ToSlash(filepath.Join(s.Cwd, t))
 			}
 			target = filepath.ToSlash(filepath.Clean(t))
