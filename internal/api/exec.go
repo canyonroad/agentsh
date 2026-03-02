@@ -318,7 +318,35 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 	if !session.IsRealPathUnder(real, rootClean) {
 		return "", fmt.Errorf("working_dir escapes workspace mount")
 	}
-	return real, nil
+
+	// Resolve root symlinks for consistent comparison (macOS /var -> /private/var)
+	rootResolved, err := filepath.EvalSymlinks(rootClean)
+	if err != nil {
+		rootResolved = rootClean
+	}
+
+	// Resolve symlinks to prevent symlink escape (e.g., /workspace/link -> /etc).
+	// If the target doesn't exist yet, evaluate the parent directory instead.
+	resolved, resolveErr := filepath.EvalSymlinks(real)
+	if resolveErr != nil {
+		// Path doesn't exist — evaluate parent to catch symlink escapes in ancestors
+		parent := filepath.Dir(real)
+		resolvedParent, parentErr := filepath.EvalSymlinks(parent)
+		if parentErr != nil {
+			// Parent also doesn't exist — use lexical path (already checked above)
+			return real, nil
+		}
+		resolvedParent = filepath.Clean(resolvedParent)
+		if !session.IsRealPathUnder(resolvedParent, rootResolved) {
+			return "", fmt.Errorf("working_dir symlink escapes workspace mount")
+		}
+		return filepath.Clean(filepath.Join(resolvedParent, filepath.Base(real))), nil
+	}
+	resolved = filepath.Clean(resolved)
+	if !session.IsRealPathUnder(resolved, rootResolved) {
+		return "", fmt.Errorf("working_dir symlink escapes workspace mount")
+	}
+	return resolved, nil
 }
 
 func buildPolicyEnv(pol policy.ResolvedEnvPolicy, hostEnv []string, s *session.Session, overrides map[string]string) ([]string, error) {

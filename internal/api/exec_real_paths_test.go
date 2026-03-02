@@ -137,6 +137,67 @@ func TestResolveWorkingDir_WindowsDriveLetter(t *testing.T) {
 	}
 }
 
+func TestResolveWorkingDir_SymlinkEscape_DefaultMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test is POSIX-specific")
+	}
+	m := session.NewManager(10)
+	ws := t.TempDir()
+
+	// Create a symlink inside workspace pointing outside
+	outsideDir := t.TempDir()
+	symlinkPath := filepath.Join(ws, "escape-link")
+	if err := os.Symlink(outsideDir, symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := m.CreateWithID("test-symlink-default", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Default mode: VirtualRoot == "/workspace", workspace mount == ws
+	// The symlink /workspace/escape-link -> outsideDir should be rejected
+	_, err = resolveWorkingDir(s, "/workspace/escape-link")
+	if err == nil {
+		t.Error("expected error for symlink escape in default mode")
+	}
+	if err != nil && !strings.Contains(err.Error(), "symlink escapes") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveWorkingDir_SymlinkEscape_RealPathsMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test is POSIX-specific")
+	}
+	m := session.NewManager(10)
+	ws := t.TempDir()
+
+	// Create a symlink inside workspace pointing outside
+	outsideDir := t.TempDir()
+	symlinkPath := filepath.Join(ws, "escape-link")
+	if err := os.Symlink(outsideDir, symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := m.CreateWithID("test-symlink-real", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetRealPaths(true)
+
+	// In real-paths mode: VirtualRoot == ws path
+	// A path like <ws>/escape-link is "under root" but resolves outside — should be rejected
+	wsClean := filepath.ToSlash(filepath.Clean(ws))
+	_, err = resolveWorkingDir(s, wsClean+"/escape-link")
+	if err == nil {
+		t.Error("expected error for symlink escape in real_paths mode")
+	}
+	if err != nil && !strings.Contains(err.Error(), "symlink escapes") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 // Integration test: HTTP exec handler with real_paths=true allows outside-workspace working_dir.
 func TestExec_RealPaths_OutsideWorkspace_Allowed(t *testing.T) {
 	if runtime.GOOS == "windows" {
