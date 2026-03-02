@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -562,9 +563,34 @@ func TestIsRealPathUnder(t *testing.T) {
 		{"", "", false},
 	}
 	for _, tt := range tests {
-		got := IsRealPathUnder(tt.path, tt.root)
+		// Normalize to platform separators since IsRealPathUnder uses os.PathSeparator
+		path := filepath.FromSlash(tt.path)
+		root := filepath.FromSlash(tt.root)
+		got := IsRealPathUnder(path, root)
 		if got != tt.want {
-			t.Errorf("IsRealPathUnder(%q, %q) = %v, want %v", tt.path, tt.root, got, tt.want)
+			t.Errorf("IsRealPathUnder(%q, %q) = %v, want %v", path, root, got, tt.want)
+		}
+	}
+	// Windows-specific: drive-letter roots
+	if runtime.GOOS == "windows" {
+		winTests := []struct {
+			path string
+			root string
+			want bool
+		}{
+			{`C:\Users\project\sub`, `C:\Users\project`, true},
+			{`C:\Users\project`, `C:\Users\project`, true},
+			{`C:\Users\project2`, `C:\Users\project`, false},
+			{`c:\users\project\sub`, `C:\Users\project`, true}, // case-insensitive
+			{`D:\other`, `C:\Users\project`, false},
+			{`C:\`, `C:\`, true},      // volume root
+			{`C:\foo`, `C:\`, true},    // under volume root
+		}
+		for _, tt := range winTests {
+			got := IsRealPathUnder(tt.path, tt.root)
+			if got != tt.want {
+				t.Errorf("IsRealPathUnder(%q, %q) = %v, want %v", tt.path, tt.root, got, tt.want)
+			}
 		}
 	}
 }
