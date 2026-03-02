@@ -734,7 +734,7 @@ func (s *Session) ApplyPatch(patch types.SessionPatchRequest) error {
 	if patch.Cwd != "" {
 		cwd := patch.Cwd
 		vroot := s.EffectiveVirtualRoot()
-		if !strings.HasPrefix(cwd, "/") {
+		if !filepath.IsAbs(cwd) {
 			cwd = filepath.ToSlash(filepath.Join(s.Cwd, cwd))
 		}
 		cwd = filepath.ToSlash(filepath.Clean(cwd))
@@ -775,7 +775,7 @@ func (s *Session) resolvePathForBuiltin(arg string) (virt string, real string, e
 	vroot := s.EffectiveVirtualRoot()
 	virt = cwd
 	if strings.TrimSpace(arg) != "" {
-		if strings.HasPrefix(arg, "/") {
+		if filepath.IsAbs(arg) {
 			virt = arg
 		} else {
 			virt = filepath.ToSlash(filepath.Join(cwd, arg))
