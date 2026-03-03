@@ -252,6 +252,11 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 				}
 			}
 		}
+		// Send ACK to wrapper so it knows the notify handler is ready before exec.
+		// This mirrors the ACK in internal/cli/wrap_linux.go:133.
+		if _, err := parentSock.Write([]byte{1}); err != nil {
+			slog.Debug("notify: ACK write to wrapper failed", "error", err, "session_id", sessID)
+		}
 		slog.Debug("starting ServeNotifyWithExecve", "session_id", sessID, "has_execve_handler", h != nil, "has_file_handler", fileHandler != nil, "has_policy", pol != nil)
 		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h, fileHandler)
 		slog.Debug("ServeNotifyWithExecve returned", "session_id", sessID)
