@@ -25,8 +25,8 @@ internal/netmonitor/ebpf/vmlinux.h
 .worktrees/
 
 .env
-agentsh
+/agentsh
 
 # Build artifacts
-agentsh-unixwrap
-agentsh-stub
+/agentsh-unixwrap
+/agentsh-stub
