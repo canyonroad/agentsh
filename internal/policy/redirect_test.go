@@ -288,6 +288,65 @@ func TestDecision_AuditAndSoftDelete(t *testing.T) {
 	}
 }
 
+func TestEnforceRedirects_ShadowVsEnforced(t *testing.T) {
+	pol := &Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []CommandRule{
+			{
+				Name:     "redirect-git-force",
+				Commands: []string{"git"},
+				ArgsPatterns: []string{`push\s+--force|push\s+-f`},
+				Decision: "redirect",
+				Message:  "force push redirected",
+				RedirectTo: &CommandRedirect{
+					Command: "agentsh-stub",
+					Args:    []string{"--deny"},
+				},
+			},
+			{
+				Name:     "allow-all",
+				Commands: []string{"*"},
+				Decision: "allow",
+			},
+		},
+	}
+
+	t.Run("shadow_mode_effective_allow", func(t *testing.T) {
+		engine, err := NewEngine(pol, false, false)
+		if err != nil {
+			t.Fatalf("NewEngine: %v", err)
+		}
+		dec := engine.CheckCommand("git", []string{"push", "--force", "origin", "main"})
+		if dec.PolicyDecision != types.DecisionRedirect {
+			t.Errorf("PolicyDecision = %q, want redirect", dec.PolicyDecision)
+		}
+		if dec.EffectiveDecision != types.DecisionAllow {
+			t.Errorf("EffectiveDecision = %q, want allow (shadow mode)", dec.EffectiveDecision)
+		}
+		if dec.Redirect == nil {
+			t.Error("expected Redirect info even in shadow mode")
+		}
+	})
+
+	t.Run("enforced_mode_effective_redirect", func(t *testing.T) {
+		engine, err := NewEngine(pol, false, true)
+		if err != nil {
+			t.Fatalf("NewEngine: %v", err)
+		}
+		dec := engine.CheckCommand("git", []string{"push", "--force", "origin", "main"})
+		if dec.PolicyDecision != types.DecisionRedirect {
+			t.Errorf("PolicyDecision = %q, want redirect", dec.PolicyDecision)
+		}
+		if dec.EffectiveDecision != types.DecisionRedirect {
+			t.Errorf("EffectiveDecision = %q, want redirect (enforced)", dec.EffectiveDecision)
+		}
+		if dec.Redirect == nil {
+			t.Error("expected Redirect info in enforced mode")
+		}
+	})
+}
+
 // --- DNS and Connect Redirect Tests ---
 
 func TestDnsRedirectRuleValidation(t *testing.T) {
