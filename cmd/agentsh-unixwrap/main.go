@@ -69,18 +69,20 @@ func main() {
 
 	notifFD := filt.NotifFD()
 
-	// Send notify fd to server over socketpair (only if we have one).
+	// Send notify fd to server over socketpair and wait for ACK (only if we
+	// actually have a notify fd to send). When all seccomp features are disabled
+	// the filter returns fd=-1 and there is nothing to hand off.
 	if notifFD >= 0 {
 		if err := sendFD(sockFD, notifFD); err != nil {
 			log.Fatalf("send fd: %v", err)
 		}
-	}
 
-	// Wait for ACK from the CLI confirming the server has received the notify fd
-	// and started the handler. This prevents a race where we exec before the
-	// handler is ready to process seccomp notifications.
-	if err := waitForACK(func(b []byte) (int, error) { return unix.Read(sockFD, b) }); err != nil {
-		log.Fatalf("ACK handshake failed: %v", err)
+		// Wait for ACK from the server confirming it has received the notify fd
+		// and started the handler. This prevents a race where we exec before the
+		// handler is ready to process seccomp notifications.
+		if err := waitForACK(func(b []byte) (int, error) { return unix.Read(sockFD, b) }); err != nil {
+			log.Fatalf("ACK handshake failed: %v", err)
+		}
 	}
 
 	// Close notify socket - we're done with it
