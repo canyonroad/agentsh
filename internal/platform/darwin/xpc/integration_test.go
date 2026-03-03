@@ -31,7 +31,7 @@ func TestIntegration_FullPolicyFlow(t *testing.T) {
 			{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestIntegration_PNACLFlow(t *testing.T) {
 		Name:      "test",
 		FileRules: []policy.FileRule{},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestIntegration_ExecCheckWithHandler(t *testing.T) {
 			{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +450,7 @@ func TestIntegration_ExecCheckAllDecisions(t *testing.T) {
 			{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +525,7 @@ func TestIntegration_ExecCheckFallbackToCommand(t *testing.T) {
 			{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,7 +600,7 @@ func TestIntegration_PNACLNoHandler(t *testing.T) {
 
 	// Create server without PNACL handler
 	p := &policy.Policy{Version: 1, Name: "test"}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

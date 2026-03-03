@@ -28,7 +28,7 @@ resource_limits:
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

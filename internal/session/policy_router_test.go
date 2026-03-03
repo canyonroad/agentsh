@@ -21,7 +21,7 @@ func TestPolicyRouter_CheckFile(t *testing.T) {
 			},
 		},
 	}
-	allowEngine, err := policy.NewEngine(allowPolicy, false)
+	allowEngine, err := policy.NewEngine(allowPolicy, false, true)
 	if err != nil {
 		t.Fatalf("failed to create allow engine: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestPolicyRouter_CheckFile(t *testing.T) {
 			},
 		},
 	}
-	denyWriteEngine, err := policy.NewEngine(denyWritePolicy, false)
+	denyWriteEngine, err := policy.NewEngine(denyWritePolicy, false, true)
 	if err != nil {
 		t.Fatalf("failed to create deny-write engine: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestPolicyRouter_BasePolicyDenies(t *testing.T) {
 			{Name: "allow", Paths: []string{"/**"}, Operations: []string{"read", "write"}, Decision: "allow"},
 		},
 	}
-	allowEngine, err := policy.NewEngine(allowPolicy, false)
+	allowEngine, err := policy.NewEngine(allowPolicy, false, true)
 	if err != nil {
 		t.Fatalf("failed to create allow engine: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestPolicyRouter_BasePolicyDenies(t *testing.T) {
 			{Name: "deny-write", Paths: []string{"/**"}, Operations: []string{"write"}, Decision: "deny"},
 		},
 	}
-	denyWriteEngine, err := policy.NewEngine(denyWritePolicy, false)
+	denyWriteEngine, err := policy.NewEngine(denyWritePolicy, false, true)
 	if err != nil {
 		t.Fatalf("failed to create deny-write engine: %v", err)
 	}

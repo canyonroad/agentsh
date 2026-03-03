@@ -45,7 +45,7 @@ func TestEBPFConnectEventFlow(t *testing.T) {
 	cfg.Sandbox.Network.EBPF.Enabled = true
 	cfg.Sandbox.Cgroups.Enabled = true
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

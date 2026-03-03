@@ -1391,13 +1391,15 @@ func (a *App) policyTest(w http.ResponseWriter, r *http.Request) {
 type DefaultPolicyLoader struct {
 	policyDir        string
 	enforceApprovals bool
+	enforceRedirects bool
 }
 
 // NewDefaultPolicyLoader creates a policy loader that loads from the given directory.
-func NewDefaultPolicyLoader(policyDir string, enforceApprovals bool) *DefaultPolicyLoader {
+func NewDefaultPolicyLoader(policyDir string, enforceApprovals bool, enforceRedirects bool) *DefaultPolicyLoader {
 	return &DefaultPolicyLoader{
 		policyDir:        policyDir,
 		enforceApprovals: enforceApprovals,
+		enforceRedirects: enforceRedirects,
 	}
 }
 
@@ -1414,7 +1416,7 @@ func (l *DefaultPolicyLoader) Load(name string) (*policy.Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load policy %q: %w", name, err)
 	}
-	engine, err := policy.NewEngine(p, l.enforceApprovals)
+	engine, err := policy.NewEngine(p, l.enforceApprovals, l.enforceRedirects)
 	if err != nil {
 		return nil, fmt.Errorf("create policy engine for %q: %w", name, err)
 	}

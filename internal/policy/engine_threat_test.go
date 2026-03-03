@@ -59,7 +59,7 @@ func TestCheckNetworkCtx_ThreatFeedDeny(t *testing.T) {
 	p := &Policy{Version: 1, Name: "test", NetworkRules: []NetworkRule{
 		{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 	}}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	store := &mockThreatStore{domains: map[string]ThreatCheckResult{
@@ -77,7 +77,7 @@ func TestCheckNetworkCtx_ThreatFeedAudit(t *testing.T) {
 	p := &Policy{Version: 1, Name: "test", NetworkRules: []NetworkRule{
 		{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 	}}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	store := &mockThreatStore{domains: map[string]ThreatCheckResult{
@@ -100,7 +100,7 @@ func TestCheckNetworkCtx_ThreatFeedNoMatchFallsThrough(t *testing.T) {
 		{Name: "deny-bad", Domains: []string{"bad.org"}, Decision: "deny"},
 		{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 	}}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	store := &mockThreatStore{domains: map[string]ThreatCheckResult{
@@ -118,7 +118,7 @@ func TestCheckNetworkCtx_NilThreatStoreSkipsCheck(t *testing.T) {
 	p := &Policy{Version: 1, Name: "test", NetworkRules: []NetworkRule{
 		{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 	}}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	dec := e.CheckNetworkCtx(context.Background(), "evil.com", 443)
@@ -130,7 +130,7 @@ func TestCheckNetworkCtx_ThreatFeedParentDomainMatch(t *testing.T) {
 	p := &Policy{Version: 1, Name: "test", NetworkRules: []NetworkRule{
 		{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 	}}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	store := &mockThreatStore{domains: map[string]ThreatCheckResult{
@@ -148,7 +148,7 @@ func TestCheckNetworkCtx_ThreatFeedFields(t *testing.T) {
 	p := &Policy{Version: 1, Name: "test", NetworkRules: []NetworkRule{
 		{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 	}}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	store := &mockThreatStore{domains: map[string]ThreatCheckResult{
@@ -166,7 +166,7 @@ func TestCheckNetworkIP_ThreatFeedDeny(t *testing.T) {
 	p := &Policy{Version: 1, Name: "test", NetworkRules: []NetworkRule{
 		{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 	}}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	store := &mockThreatStore{domains: map[string]ThreatCheckResult{
@@ -184,7 +184,7 @@ func TestSetThreatStore_InvalidActionDefaultsToDeny(t *testing.T) {
 	p := &Policy{Version: 1, Name: "test", NetworkRules: []NetworkRule{
 		{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 	}}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	store := &mockThreatStore{domains: map[string]ThreatCheckResult{
@@ -201,7 +201,7 @@ func TestCheckNetworkCtx_ThreatFeedAuditRespectsExplicitDenyRule(t *testing.T) {
 		{Name: "deny-evil", Domains: []string{"evil.com"}, Decision: "deny"},
 		{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 	}}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	store := &mockThreatStore{domains: map[string]ThreatCheckResult{
@@ -221,7 +221,7 @@ func TestCheckNetworkCtx_ThreatFeedAuditRespectsExplicitDenyRule(t *testing.T) {
 func TestCheckNetworkCtx_ThreatFeedAuditRespectsDefaultDeny(t *testing.T) {
 	// No rules at all — default-deny should still apply.
 	p := &Policy{Version: 1, Name: "test", NetworkRules: []NetworkRule{}}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	store := &mockThreatStore{domains: map[string]ThreatCheckResult{

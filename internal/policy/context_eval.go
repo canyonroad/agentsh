@@ -43,8 +43,8 @@ type ContextEngineConfig struct {
 }
 
 // NewContextEngine creates a context-aware policy engine.
-func NewContextEngine(p *Policy, enforceApprovals bool, cfg ContextEngineConfig) (*ContextEngine, error) {
-	base, err := NewEngine(p, enforceApprovals)
+func NewContextEngine(p *Policy, enforceApprovals bool, enforceRedirects bool, cfg ContextEngineConfig) (*ContextEngine, error) {
+	base, err := NewEngine(p, enforceApprovals, enforceRedirects)
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +427,7 @@ func (ce *ContextEngine) evaluateContextPolicy(pctx *compiledContext, command st
 			Name:         "context",
 			CommandRules: pctx.config.CommandRules,
 		}
-		tempEngine, err := NewEngine(tempPolicy, ce.enforceApprovals)
+		tempEngine, err := NewEngine(tempPolicy, ce.enforceApprovals, ce.enforceRedirects)
 		if err == nil {
 			dec := tempEngine.CheckCommand(command, args)
 			// Only return if it's not the default deny

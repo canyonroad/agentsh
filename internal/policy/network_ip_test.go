@@ -17,7 +17,7 @@ func TestEngine_CheckNetworkIP_MatchesDomainAndCIDR(t *testing.T) {
 			{Name: "default", Domains: []string{"*"}, Decision: "deny"},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

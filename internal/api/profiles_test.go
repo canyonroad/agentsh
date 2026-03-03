@@ -29,7 +29,7 @@ func TestListProfiles_Empty(t *testing.T) {
 	cfg.Sandbox.FUSE.Enabled = false
 	cfg.Sandbox.Network.Enabled = false
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestListProfiles_MultipleProfiles(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestListProfiles_ContentType(t *testing.T) {
 	cfg.Sandbox.FUSE.Enabled = false
 	cfg.Sandbox.Network.Enabled = false
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

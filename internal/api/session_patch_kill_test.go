@@ -45,7 +45,7 @@ func newTestApp(t *testing.T, sessions *session.Manager, store *composite.Store)
 		NetworkRules: []policy.NetworkRule{
 			{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 		},
-	}, false)
+	}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

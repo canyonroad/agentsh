@@ -42,7 +42,7 @@ func TestExecveInterception_HandlerLogic(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	require.NoError(t, err)
 
 	// Create depth tracker and register a session
@@ -152,7 +152,7 @@ func TestExecveInterception_DepthTracking(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	require.NoError(t, err)
 
 	dt := unixmon.NewDepthTracker()
@@ -235,7 +235,7 @@ func TestExecveInterception_SessionIsolation(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	require.NoError(t, err)
 
 	dt := unixmon.NewDepthTracker()
@@ -352,7 +352,7 @@ func TestExecveInterception_TruncationPolicies(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	require.NoError(t, err)
 
 	tests := []struct {

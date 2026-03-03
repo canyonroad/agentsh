@@ -38,7 +38,7 @@ func TestContextEngine_NotTainted_UsesNormalPolicy(t *testing.T) {
 
 	taintCache := setupTaintCache(map[string]string{"cursor": "ai_tools"})
 
-	ce, err := NewContextEngine(policy, true, ContextEngineConfig{
+	ce, err := NewContextEngine(policy, true, true, ContextEngineConfig{
 		TaintCache: taintCache,
 	})
 	require.NoError(t, err)
@@ -83,7 +83,7 @@ func TestContextEngine_Tainted_UsesContextPolicy(t *testing.T) {
 		Comm: "bash",
 	})
 
-	ce, err := NewContextEngine(policy, true, ContextEngineConfig{
+	ce, err := NewContextEngine(policy, true, true, ContextEngineConfig{
 		TaintCache: taintCache,
 	})
 	require.NoError(t, err)
@@ -150,7 +150,7 @@ func TestContextEngine_ChainRule_EscapeHatch(t *testing.T) {
 		Comm: "bash",
 	})
 
-	ce, err := NewContextEngine(policy, true, ContextEngineConfig{
+	ce, err := NewContextEngine(policy, true, true, ContextEngineConfig{
 		TaintCache: taintCache,
 	})
 	require.NoError(t, err)
@@ -231,7 +231,7 @@ func TestContextEngine_ChainRule_ShellLaundering(t *testing.T) {
 		Comm: "bash",
 	})
 
-	ce, err := NewContextEngine(policy, true, ContextEngineConfig{
+	ce, err := NewContextEngine(policy, true, true, ContextEngineConfig{
 		TaintCache: taintCache,
 	})
 	require.NoError(t, err)
@@ -278,7 +278,7 @@ func TestContextEngine_ChainRule_DepthLimit(t *testing.T) {
 		taintCache.OnSpawn(1000+i, 1000+i-1, &ancestry.ProcessInfo{PID: 1000 + i, PPID: 1000 + i - 1, Comm: "bash"})
 	}
 
-	ce, err := NewContextEngine(policy, true, ContextEngineConfig{
+	ce, err := NewContextEngine(policy, true, true, ContextEngineConfig{
 		TaintCache: taintCache,
 	})
 	require.NoError(t, err)
@@ -318,7 +318,7 @@ func TestContextEngine_CommandOverride(t *testing.T) {
 	taintCache.OnSpawn(1000, 1, &ancestry.ProcessInfo{PID: 1000, PPID: 1, Comm: "cursor"})
 	taintCache.OnSpawn(1001, 1000, &ancestry.ProcessInfo{PID: 1001, PPID: 1000, Comm: "bash"})
 
-	ce, err := NewContextEngine(policy, true, ContextEngineConfig{
+	ce, err := NewContextEngine(policy, true, true, ContextEngineConfig{
 		TaintCache: taintCache,
 	})
 	require.NoError(t, err)
@@ -358,7 +358,7 @@ func TestContextEngine_RequireApproval(t *testing.T) {
 	taintCache.OnSpawn(1000, 1, &ancestry.ProcessInfo{PID: 1000, PPID: 1, Comm: "cursor"})
 	taintCache.OnSpawn(1001, 1000, &ancestry.ProcessInfo{PID: 1001, PPID: 1000, Comm: "bash"})
 
-	ce, err := NewContextEngine(policy, true, ContextEngineConfig{
+	ce, err := NewContextEngine(policy, true, true, ContextEngineConfig{
 		TaintCache: taintCache,
 	})
 	require.NoError(t, err)
@@ -435,7 +435,7 @@ func TestContextEngine_RaceConditionHandling(t *testing.T) {
 				Comm: "bash",
 			})
 
-			ce, err := NewContextEngine(policy, true, ContextEngineConfig{
+			ce, err := NewContextEngine(policy, true, true, ContextEngineConfig{
 				TaintCache: taintCache,
 			})
 			require.NoError(t, err)
@@ -480,7 +480,7 @@ func TestContextEngine_ContextSpecificRules(t *testing.T) {
 	taintCache.OnSpawn(1000, 1, &ancestry.ProcessInfo{PID: 1000, PPID: 1, Comm: "cursor"})
 	taintCache.OnSpawn(1001, 1000, &ancestry.ProcessInfo{PID: 1001, PPID: 1000, Comm: "bash"})
 
-	ce, err := NewContextEngine(policy, true, ContextEngineConfig{
+	ce, err := NewContextEngine(policy, true, true, ContextEngineConfig{
 		TaintCache: taintCache,
 	})
 	require.NoError(t, err)
@@ -529,7 +529,7 @@ func TestContextEngine_MultipleContexts(t *testing.T) {
 	taintCache.OnSpawn(2000, 1, &ancestry.ProcessInfo{PID: 2000, PPID: 1, Comm: "aider"})
 	taintCache.OnSpawn(2001, 2000, &ancestry.ProcessInfo{PID: 2001, PPID: 2000, Comm: "bash"})
 
-	ce, err := NewContextEngine(policy, true, ContextEngineConfig{
+	ce, err := NewContextEngine(policy, true, true, ContextEngineConfig{
 		TaintCache: taintCache,
 	})
 	require.NoError(t, err)
@@ -590,7 +590,7 @@ func TestContextEngine_MarkAsAgent(t *testing.T) {
 	taintCache.OnSpawn(1001, 1000, &ancestry.ProcessInfo{PID: 1001, PPID: 1000, Comm: "aider"})
 	taintCache.OnSpawn(1002, 1001, &ancestry.ProcessInfo{PID: 1002, PPID: 1001, Comm: "bash"})
 
-	ce, err := NewContextEngine(policy, true, ContextEngineConfig{
+	ce, err := NewContextEngine(policy, true, true, ContextEngineConfig{
 		TaintCache: taintCache,
 	})
 	require.NoError(t, err)

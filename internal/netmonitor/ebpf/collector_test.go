@@ -91,7 +91,7 @@ func TestEvaluateConnectRedirect_NoCallback(t *testing.T) {
 			},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine error: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestEvaluateConnectRedirect_MatchingRule(t *testing.T) {
 			},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine error: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestEvaluateConnectRedirect_NoMatch(t *testing.T) {
 			},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine error: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestEvaluateConnectRedirect_WithoutCorrelationMap(t *testing.T) {
 			},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine error: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestEvaluateConnectRedirect_SNIRewrite(t *testing.T) {
 			},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine error: %v", err)
 	}

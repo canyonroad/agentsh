@@ -316,7 +316,7 @@ func TestMergeEnvInject(t *testing.T) {
 					EnvInject: tt.polEnv,
 				}
 				var err error
-				pol, err = policy.NewEngine(p, false)
+				pol, err = policy.NewEngine(p, false, true)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -342,7 +342,7 @@ func TestMergeEnvInject_NilConfig(t *testing.T) {
 		Name:      "test",
 		EnvInject: map[string]string{"BASH_ENV": "/policy/path"},
 	}
-	pol, err := policy.NewEngine(p, false)
+	pol, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestEnvInject_AppearsInCommandEnv(t *testing.T) {
 			"POLICY_VAR": "from-policy",
 		},
 	}
-	pol, err := policy.NewEngine(p, false)
+	pol, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("failed to create policy engine: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestEnvInject_PolicyOverridesConfig(t *testing.T) {
 			"SHARED_VAR": "policy-value",              // Override config
 		},
 	}
-	pol, err := policy.NewEngine(p, false)
+	pol, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("failed to create policy engine: %v", err)
 	}

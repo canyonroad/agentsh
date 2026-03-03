@@ -12,7 +12,7 @@ func TestEngine_CheckEnv_DenyPatterns(t *testing.T) {
 			Deny: []string{"AWS_*", "*_SECRET", "PASSWORD"},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestEngine_CheckEnv_AllowPatterns(t *testing.T) {
 			Deny:  []string{"MY_SECRET"},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestEngine_CheckEnv_DefaultSecrets(t *testing.T) {
 		Name:      "test",
 		EnvPolicy: EnvPolicy{},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestEngine_CheckEnv_DangerousLinkerVars(t *testing.T) {
 		Name:      "test",
 		EnvPolicy: EnvPolicy{},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -36,7 +36,7 @@ func TestEndToEndDNSToConnectFlow(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -225,7 +225,7 @@ connect_redirects:
 	}
 
 	// Create engine and test evaluation
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestDefaultValues(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestSNIRewriteConfiguration(t *testing.T) {
 		t.Fatalf("policy validation failed: %v", err)
 	}
 
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -528,7 +528,7 @@ func TestEndToEndWithSNIRewrite(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -630,7 +630,7 @@ func TestComplexRegexPatterns(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}

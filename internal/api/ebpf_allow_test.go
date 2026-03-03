@@ -23,7 +23,7 @@ func TestBuildAllowedEndpoints_StrictExactDomain(t *testing.T) {
 			},
 		},
 	}
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestBuildAllowedEndpoints_NonStrictOnWildcard(t *testing.T) {
 			},
 		},
 	}
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestBuildAllowedEndpoints_NonStrictOnCIDR(t *testing.T) {
 			},
 		},
 	}
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

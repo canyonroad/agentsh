@@ -23,7 +23,7 @@ func TestRouter_MetricsEnabledServesPath(t *testing.T) {
 	cfg.Health.ReadinessPath = "/ready"
 
 	sessions := session.NewManager(10)
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

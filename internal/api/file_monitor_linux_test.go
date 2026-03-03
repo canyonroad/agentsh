@@ -59,7 +59,7 @@ func TestCreateFileHandler_EnforceWithoutFUSE(t *testing.T) {
 			},
 		},
 	}
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	require.NoError(t, err)
 
 	t.Run("enforce_false_allows_denied", func(t *testing.T) {
@@ -117,7 +117,7 @@ func TestFilePolicyEngineWrapper_CheckFile(t *testing.T) {
 			},
 		},
 	}
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	require.NoError(t, err)
 
 	w := &filePolicyEngineWrapper{engine: engine}

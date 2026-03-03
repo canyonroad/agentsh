@@ -101,7 +101,7 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, err
 	}
 	enforceApprovals := cfg.Approvals.Enabled
-	engine, err := policy.NewEngine(p, enforceApprovals)
+	engine, err := policy.NewEngine(p, enforceApprovals, true)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +304,7 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 	}
 
-	policyLoader := api.NewDefaultPolicyLoader(cfg.Policies.Dir, enforceApprovals)
+	policyLoader := api.NewDefaultPolicyLoader(cfg.Policies.Dir, enforceApprovals, true)
 	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, oidcAuth, approvalsMgr, metricsCollector, policyLoader)
 
 	// Initialize package checker (optional).

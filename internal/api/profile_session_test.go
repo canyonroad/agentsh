@@ -55,7 +55,7 @@ func TestCreateSessionWithProfile(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestCreateSessionWithProfile_ProfileNotFound(t *testing.T) {
 	cfg.Sandbox.Network.Transparent.Enabled = false
 	cfg.Policies.Default = "default"
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestCreateSessionWithProfile_MissingMountPath(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestCreateSessionWithProfile_RealPaths(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestCreateSessionWithProfile_RealPathsDisabled(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -20,7 +20,7 @@ func TestHandleConnectDeniedWrites403(t *testing.T) {
 			{Name: "deny-all", Decision: "deny", Domains: []string{"*"}},
 		},
 	}
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}

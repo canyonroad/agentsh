@@ -168,7 +168,7 @@ func TestCheckFile_WithRedirect(t *testing.T) {
 		},
 	}
 
-	engine, err := NewEngine(policy, false)
+	engine, err := NewEngine(policy, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestCheckCommand_WithEnhancedRedirect(t *testing.T) {
 		},
 	}
 
-	engine, err := NewEngine(policy, false)
+	engine, err := NewEngine(policy, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestDecision_AuditAndSoftDelete(t *testing.T) {
 		},
 	}
 
-	engine, err := NewEngine(policy, false)
+	engine, err := NewEngine(policy, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestEvaluateDnsRedirect(t *testing.T) {
 		},
 	}
 
-	engine, err := NewEngine(p, false)
+	engine, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
@@ -722,7 +722,7 @@ func TestEvaluateDnsRedirect_Defaults(t *testing.T) {
 		},
 	}
 
-	engine, err := NewEngine(p, false)
+	engine, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
@@ -745,7 +745,7 @@ func TestEvaluateDnsRedirect_NoRules(t *testing.T) {
 		Name:    "test",
 	}
 
-	engine, err := NewEngine(p, false)
+	engine, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
@@ -777,7 +777,7 @@ func TestEvaluateConnectRedirect(t *testing.T) {
 		},
 	}
 
-	engine, err := NewEngine(p, false)
+	engine, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
@@ -843,7 +843,7 @@ func TestEvaluateConnectRedirect_Defaults(t *testing.T) {
 		},
 	}
 
-	engine, err := NewEngine(p, false)
+	engine, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
@@ -869,7 +869,7 @@ func TestEvaluateConnectRedirect_NoRules(t *testing.T) {
 		Name:    "test",
 	}
 
-	engine, err := NewEngine(p, false)
+	engine, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
@@ -899,7 +899,7 @@ func TestEvaluateConnectRedirect_RuleOrder(t *testing.T) {
 		},
 	}
 
-	engine, err := NewEngine(p, false)
+	engine, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
@@ -943,7 +943,7 @@ func TestDnsRedirect_ComplexPatterns(t *testing.T) {
 		},
 	}
 
-	engine, err := NewEngine(p, false)
+	engine, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
@@ -989,7 +989,7 @@ func TestEvaluateDnsRedirect_CaseNormalization(t *testing.T) {
 		},
 	}
 
-	engine, err := NewEngine(p, false)
+	engine, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
@@ -1031,7 +1031,7 @@ func TestEvaluateConnectRedirect_CaseNormalization(t *testing.T) {
 		},
 	}
 
-	engine, err := NewEngine(p, false)
+	engine, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine() error = %v", err)
 	}

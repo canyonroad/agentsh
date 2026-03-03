@@ -571,7 +571,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		}
 
 		enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
-		engine, err = policy.NewEngineWithVariables(pol, enforceApprovals, policyVars)
+		engine, err = policy.NewEngineWithVariables(pol, enforceApprovals, true, policyVars)
 		if err != nil {
 			return types.Session{}, http.StatusBadRequest, fmt.Errorf("compile policy: %w", err)
 		}
@@ -1265,7 +1265,7 @@ func (a *App) ensureFUSEMount(ctx context.Context, s *session.Session) {
 					"HOME":         os.Getenv("HOME"),
 				}
 				enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
-				engine, _ = policy.NewEngineWithVariables(pol, enforceApprovals, policyVars)
+				engine, _ = policy.NewEngineWithVariables(pol, enforceApprovals, true, policyVars)
 			}
 		}
 	}

@@ -63,7 +63,7 @@ func TestDNSInterceptor_DenyDoesNotForwardAndRefuses(t *testing.T) {
 			{Name: "deny-example", Domains: []string{"example.com"}, Ports: []int{53}, Decision: "deny"},
 		},
 	}
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestDNSInterceptor_ThreatMetadataInEvent(t *testing.T) {
 			{Name: "allow-all", Domains: []string{"*"}, Ports: []int{53}, Decision: "allow"},
 		},
 	}
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestDNSInterceptor_MonitorOnlyPreservesThreatMetadata(t *testing.T) {
 			{Name: "allow-safe", Domains: []string{"safe.com"}, Ports: []int{53}, Decision: "allow"},
 		},
 	}
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

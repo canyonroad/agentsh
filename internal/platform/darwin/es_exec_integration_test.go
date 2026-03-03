@@ -63,7 +63,7 @@ func TestESExecHandler_XPCIntegration(t *testing.T) {
 			{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestESExecHandler_XPCIntegration_EnforcedApprove(t *testing.T) {
 		},
 	}
 	// enforceApprovals=true so EffectiveDecision matches PolicyDecision
-	engine, err := policy.NewEngine(p, true)
+	engine, err := policy.NewEngine(p, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestESExecHandler_XPCIntegration_ShadowMode(t *testing.T) {
 		},
 	}
 	// enforceApprovals=false (shadow mode)
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestESExecHandler_XPCIntegration_NilPolicyChecker(t *testing.T) {
 	execHandler := NewESExecHandler(nil, "")
 
 	p := &policy.Policy{Version: 1, Name: "test"}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

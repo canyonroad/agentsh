@@ -66,7 +66,7 @@ func TestPolicyAdapter_WithEngine(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	if err != nil {
 		t.Fatalf("Failed to create policy engine: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestPolicyAdapter_DenyPolicy(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	if err != nil {
 		t.Fatalf("Failed to create policy engine: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestPolicyAdapter_CheckRegistry(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}

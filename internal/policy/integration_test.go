@@ -61,7 +61,7 @@ func TestProjectRootAwarePolicies_Integration(t *testing.T) {
 		"GIT_ROOT":     roots.GitRoot,
 	}
 
-	engine, err := NewEngineWithVariables(policy, false, vars)
+	engine, err := NewEngineWithVariables(policy, false, true, vars)
 	require.NoError(t, err)
 
 	// Test file access

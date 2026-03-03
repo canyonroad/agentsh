@@ -29,6 +29,7 @@ type ThreatChecker interface {
 type Engine struct {
 	policy           *Policy
 	enforceApprovals bool
+	enforceRedirects bool
 
 	compiledFileRules     []compiledFileRule
 	compiledNetworkRules  []compiledNetworkRule
@@ -123,10 +124,11 @@ type Decision struct {
 	ThreatAction      string // "deny" or "audit" — set when a threat feed matched
 }
 
-func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
+func NewEngine(p *Policy, enforceApprovals bool, enforceRedirects bool) (*Engine, error) {
 	e := &Engine{
 		policy:           p,
 		enforceApprovals: enforceApprovals,
+		enforceRedirects: enforceRedirects,
 	}
 
 	for _, r := range p.FileRules {
@@ -325,13 +327,13 @@ func NewEngine(p *Policy, enforceApprovals bool) (*Engine, error) {
 
 // NewEngineWithVariables creates an engine with variable expansion.
 // Variables in policy paths are expanded before glob compilation.
-func NewEngineWithVariables(p *Policy, enforceApprovals bool, vars map[string]string) (*Engine, error) {
+func NewEngineWithVariables(p *Policy, enforceApprovals bool, enforceRedirects bool, vars map[string]string) (*Engine, error) {
 	// Deep copy and expand the policy
 	expanded, err := expandPolicy(p, vars)
 	if err != nil {
 		return nil, fmt.Errorf("expand policy variables: %w", err)
 	}
-	return NewEngine(expanded, enforceApprovals)
+	return NewEngine(expanded, enforceApprovals, enforceRedirects)
 }
 
 // PackageRules returns the package install check rules from the loaded policy.
@@ -902,6 +904,15 @@ func (e *Engine) wrapDecision(decision string, rule string, msg string, redirect
 			Approval:          &types.ApprovalInfo{Required: true, Mode: types.ApprovalModeShadow},
 		}
 	case types.DecisionRedirect:
+		if e.enforceRedirects {
+			return Decision{
+				PolicyDecision:    pd,
+				EffectiveDecision: pd,
+				Rule:              rule,
+				Message:           msg,
+				Redirect:          toRedirectInfo(redirect, msg),
+			}
+		}
 		return Decision{
 			PolicyDecision:    pd,
 			EffectiveDecision: types.DecisionAllow,

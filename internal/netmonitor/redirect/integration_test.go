@@ -23,7 +23,7 @@ func TestDNSRedirectIntegration(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestConnectRedirectIntegration(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestCombinedRedirectIntegration(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestRuleOrderingIntegration(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
 	}

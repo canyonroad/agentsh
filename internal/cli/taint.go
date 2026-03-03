@@ -498,7 +498,7 @@ func simulateTaintEvaluation(ctx context.Context, viaChain []string, command str
 	}
 
 	// Create context engine
-	ce, err := policy.NewContextEngine(p, true, policy.ContextEngineConfig{
+	ce, err := policy.NewContextEngine(p, true, true, policy.ContextEngineConfig{
 		TaintCache: taintCache,
 	})
 	if err != nil {

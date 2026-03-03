@@ -37,7 +37,7 @@ func TestBuildAllowedEndpoints_MixedRules(t *testing.T) {
 			},
 		},
 	}
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestBuildAllowedEndpoints_WildcardForcesNonStrict(t *testing.T) {
 			},
 		},
 	}
-	engine, _ := policy.NewEngine(pol, false)
+	engine, _ := policy.NewEngine(pol, false, true)
 	_, _, _, _, strict, _, _ := buildAllowedEndpoints(engine, 60*time.Second)
 	if strict {
 		t.Fatalf("wildcard should keep non-strict (default-deny off)")

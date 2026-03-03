@@ -14,7 +14,7 @@ func TestPolicyAdapter_CheckFile_Allow(t *testing.T) {
 			{Name: "allow-all", Paths: []string{"/**"}, Operations: []string{"*"}, Decision: "allow"},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestPolicyAdapter_CheckFile_Deny(t *testing.T) {
 			{Name: "allow-all", Paths: []string{"/**"}, Operations: []string{"*"}, Decision: "allow"},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestPolicyAdapter_CheckNetwork(t *testing.T) {
 				{Name: "allow-example", Domains: []string{"example.com"}, Ports: []int{443}, Decision: "allow"},
 			},
 		}
-		engine, err := policy.NewEngine(p, false)
+		engine, err := policy.NewEngine(p, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -88,7 +88,7 @@ func TestPolicyAdapter_CheckNetwork(t *testing.T) {
 				{Name: "allow-ip", CIDRs: []string{"10.0.0.0/8"}, Ports: []int{80}, Decision: "allow"},
 			},
 		}
-		engine, err := policy.NewEngine(p, false)
+		engine, err := policy.NewEngine(p, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -112,7 +112,7 @@ func TestPolicyAdapter_CheckNetwork(t *testing.T) {
 				{Name: "allow-domain", Domains: []string{"api.example.com"}, Ports: []int{443}, Decision: "allow"},
 			},
 		}
-		engine, err := policy.NewEngine(p, false)
+		engine, err := policy.NewEngine(p, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -139,7 +139,7 @@ func TestPolicyAdapter_CheckCommand(t *testing.T) {
 				{Name: "allow-ls", Commands: []string{"ls"}, Decision: "allow"},
 			},
 		}
-		engine, err := policy.NewEngine(p, false)
+		engine, err := policy.NewEngine(p, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -164,7 +164,7 @@ func TestPolicyAdapter_CheckCommand(t *testing.T) {
 				{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
 			},
 		}
-		engine, err := policy.NewEngine(p, false)
+		engine, err := policy.NewEngine(p, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -190,7 +190,7 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 				{Name: "allow-ls", Commands: []string{"ls"}, Decision: "allow"},
 			},
 		}
-		engine, err := policy.NewEngine(p, false)
+		engine, err := policy.NewEngine(p, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -218,7 +218,7 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 				{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
 			},
 		}
-		engine, err := policy.NewEngine(p, false)
+		engine, err := policy.NewEngine(p, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -237,9 +237,9 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		}
 	})
 
-	t.Run("redirect_effective_allow_returns_continue", func(t *testing.T) {
-		// Redirect policy: PolicyDecision is "redirect" but EffectiveDecision
-		// is "allow" (redirects are handled at another layer), so action = "continue".
+	t.Run("redirect_enforced_returns_redirect", func(t *testing.T) {
+		// Redirect policy with enforceRedirects=true: both PolicyDecision and
+		// EffectiveDecision are "redirect", so action = "redirect".
 		p := &policy.Policy{
 			Version: 1,
 			Name:    "test",
@@ -248,7 +248,7 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 				{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
 			},
 		}
-		engine, err := policy.NewEngine(p, false)
+		engine, err := policy.NewEngine(p, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -259,8 +259,8 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 		if result.Decision != "redirect" {
 			t.Errorf("decision: got %q, want %q", result.Decision, "redirect")
 		}
-		if result.Action != "continue" {
-			t.Errorf("action: got %q, want %q (EffectiveDecision is allow)", result.Action, "continue")
+		if result.Action != "redirect" {
+			t.Errorf("action: got %q, want %q (enforceRedirects=true)", result.Action, "redirect")
 		}
 		if result.Rule != "redirect-git" {
 			t.Errorf("rule: got %q, want %q", result.Rule, "redirect-git")
@@ -276,7 +276,7 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 				{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
 			},
 		}
-		engine, err := policy.NewEngine(p, false)
+		engine, err := policy.NewEngine(p, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -306,7 +306,7 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 				{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
 			},
 		}
-		engine, err := policy.NewEngine(p, false)
+		engine, err := policy.NewEngine(p, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -336,7 +336,7 @@ func TestPolicyAdapter_CheckExec(t *testing.T) {
 				{Name: "allow-all", Commands: []string{"*"}, Decision: "allow"},
 			},
 		}
-		engine, err := policy.NewEngine(p, true)
+		engine, err := policy.NewEngine(p, true, true)
 		if err != nil {
 			t.Fatal(err)
 		}

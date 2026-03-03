@@ -30,7 +30,7 @@ func TestFUSE_CrossMountIntoWorkspaceEmitsCreate(t *testing.T) {
 			{Name: "allow-workspace", Paths: []string{"/workspace", "/workspace/**"}, Operations: []string{"*"}, Decision: "allow"},
 		},
 	}
-	engine, err := policy.NewEngine(pol, false)
+	engine, err := policy.NewEngine(pol, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

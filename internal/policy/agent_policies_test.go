@@ -289,7 +289,7 @@ func loadAgentDefaultEngine(t *testing.T) *Engine {
 		"GIT_ROOT":     "/home/user/project",
 		"HOME":         "/home/user",
 	}
-	engine, err := NewEngineWithVariables(p, true, vars)
+	engine, err := NewEngineWithVariables(p, true, true, vars)
 	require.NoError(t, err)
 	return engine
 }

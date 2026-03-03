@@ -300,7 +300,7 @@ func newTestAppForWrapWithSignalPolicy(t *testing.T, cfg *config.Config) (*App, 
 			},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("create policy engine: %v", err)
 	}

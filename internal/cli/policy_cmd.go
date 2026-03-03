@@ -89,7 +89,7 @@ func newPolicyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := policy.NewEngine(po, false); err != nil {
+			if _, err := policy.NewEngine(po, false, true); err != nil {
 				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "ok")

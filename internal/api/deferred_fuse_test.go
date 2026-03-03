@@ -109,7 +109,7 @@ func newDeferredTestApp(t *testing.T, sessions *session.Manager, store *composit
 		NetworkRules: []policy.NetworkRule{
 			{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 		},
-	}, false)
+	}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestEnsureFUSEMount_NilPolicyAndEmitter(t *testing.T) {
 		NetworkRules: []policy.NetworkRule{
 			{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 		},
-	}, false)
+	}, false, true)
 
 	app := NewApp(cfg, mgr, store, engine, events.NewBroker(), nil, nil, nil, nil, nil)
 
@@ -352,7 +352,7 @@ func TestMountFUSEForSession_DeferredEventField(t *testing.T) {
 		NetworkRules: []policy.NetworkRule{
 			{Name: "allow-all", Domains: []string{"**"}, Decision: "allow"},
 		},
-	}, false)
+	}, false, true)
 
 	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, metrics.New(), nil)
 

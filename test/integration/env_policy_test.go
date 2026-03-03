@@ -19,7 +19,7 @@ func TestEnvPolicyCheckEnv(t *testing.T) {
 		},
 	}
 
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine failed: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestEnvPolicyDefaultSecrets(t *testing.T) {
 		EnvPolicy: policy.EnvPolicy{},
 	}
 
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine failed: %v", err)
 	}

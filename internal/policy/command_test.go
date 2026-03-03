@@ -19,7 +19,7 @@ func TestEngine_CheckCommand_BasenameMatch(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestEngine_CheckCommand_FullPathMatch(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestEngine_CheckCommand_PathGlobMatch(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestEngine_CheckCommand_MixedRules(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestEngine_CheckCommand_SecurityBypass(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestEngine_CheckCommand_CaseInsensitive(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestEngine_CheckCommand_WithArgs(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestEngine_CheckCommand_DefaultDeny(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestEngine_CheckCommand_EmptyPolicy(t *testing.T) {
 		Name:         "test",
 		CommandRules: []CommandRule{}, // No rules
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +418,7 @@ func TestEngine_CheckCommand_GitSafetyRules(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

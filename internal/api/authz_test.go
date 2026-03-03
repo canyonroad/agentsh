@@ -45,7 +45,7 @@ func TestApprovalsEndpointsRequireApproverRole(t *testing.T) {
 	}
 
 	sessions := session.NewManager(10)
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestApprovalsEndpointsForbiddenWhenAuthDisabled(t *testing.T) {
 	cfg.Metrics.Enabled = false
 
 	sessions := session.NewManager(10)
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestApprovalsEndpointsForbiddenWhenDevelopmentDisableAuth(t *testing.T) {
 	cfg.Metrics.Enabled = false
 
 	sessions := session.NewManager(10)
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestOIDCAuthModeWithValidToken(t *testing.T) {
 	})
 
 	sessions := session.NewManager(10)
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestOIDCAuthMissingToken(t *testing.T) {
 	oidcAuth := auth.NewOIDCAuthForTesting()
 
 	sessions := session.NewManager(10)
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestOIDCAuthEmptyToken(t *testing.T) {
 	oidcAuth := auth.NewOIDCAuthForTesting()
 
 	sessions := session.NewManager(10)
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestOIDCAuthInvalidToken(t *testing.T) {
 	oidcAuth := auth.NewOIDCAuthForTesting()
 
 	sessions := session.NewManager(10)
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestHybridAuthModeAPIKeyFirst(t *testing.T) {
 	})
 
 	sessions := session.NewManager(10)
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +358,7 @@ func TestHybridAuthModeOIDCFallback(t *testing.T) {
 	})
 
 	sessions := session.NewManager(10)
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestHybridAuthModeNeitherSucceeds(t *testing.T) {
 	// No tokens injected, so OIDC validation will fail
 
 	sessions := session.NewManager(10)
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

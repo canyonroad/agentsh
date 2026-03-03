@@ -96,7 +96,7 @@ func TestExec_IncludeEventsSummary_CapsBlockedOps(t *testing.T) {
 			{Name: "deny-rm", Commands: []string{"rm"}, Decision: "deny"},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

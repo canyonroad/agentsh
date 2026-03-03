@@ -19,7 +19,7 @@ func TestDNSInterceptorPolicyAdjustments(t *testing.T) {
 			{Name: "approve-dns", Decision: "approve", Domains: []string{"example.com"}, Ports: []int{53}},
 		},
 	}
-	engine, err := policy.NewEngine(pol, true)
+	engine, err := policy.NewEngine(pol, true, true)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}

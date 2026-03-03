@@ -30,7 +30,7 @@ func TestEngine_CheckRegistry(t *testing.T) {
 		},
 	}
 
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestEngineCheckSignal(t *testing.T) {
 		},
 	}
 
-	engine, err := NewEngine(p, false)
+	engine, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	// Create signal engine
@@ -116,7 +116,7 @@ func TestEngine_CheckExecve_BasicAllow(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	dec := e.CheckExecve("/usr/bin/git", []string{"git", "status"}, 0)
@@ -137,7 +137,7 @@ func TestEngine_CheckExecve_ContextDirect(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	// Depth 0 should match
@@ -170,7 +170,7 @@ func TestEngine_CheckExecve_ContextNested(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	// Depth 0 (direct) should NOT match deny rule, fall through to allow-all
@@ -204,7 +204,7 @@ func TestEngine_CheckExecve_ArgsPattern(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	// rm without -rf should fall through to allow-all
@@ -231,7 +231,7 @@ func TestEngine_CheckExecve_FullPathMatch(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	// Exact path match
@@ -258,7 +258,7 @@ func TestEngine_CheckExecve_PathGlobMatch(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	// Should match the glob
@@ -284,7 +284,7 @@ func TestEngine_CheckExecve_BasenameGlobMatch(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	// Should match python3
@@ -314,7 +314,7 @@ func TestEngine_CheckExecve_DefaultDeny(t *testing.T) {
 			},
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	// Should default deny for commands not matching any rule
@@ -332,7 +332,7 @@ func TestEngine_GetEnvInject(t *testing.T) {
 			"MY_CUSTOM_VAR": "custom_value",
 		},
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	env := e.GetEnvInject()
@@ -347,7 +347,7 @@ func TestEngine_GetEnvInject_Nil(t *testing.T) {
 		Name:    "test-env-inject-nil",
 		// EnvInject not set
 	}
-	e, err := NewEngine(p, false)
+	e, err := NewEngine(p, false, true)
 	require.NoError(t, err)
 
 	env := e.GetEnvInject()

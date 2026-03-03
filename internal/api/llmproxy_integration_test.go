@@ -61,7 +61,7 @@ func TestIntegration_LLMProxyStartedOnSessionCreate(t *testing.T) {
 	// Disable DLP for simpler testing
 	cfg.DLP.Mode = "disabled"
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestIntegration_LLMProxyEnvVarsInSession(t *testing.T) {
 	cfg.Proxy.Providers.OpenAI = upstream.URL
 	cfg.DLP.Mode = "disabled"
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestIntegration_LLMProxyNotStartedWhenDisabled(t *testing.T) {
 	// Disable LLM proxy
 	cfg.Proxy.Mode = "disabled"
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestIntegration_LLMProxyBothDialects(t *testing.T) {
 	cfg.Proxy.Providers.OpenAI = upstream.URL
 	cfg.DLP.Mode = "disabled"
 
-	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false)
+	engine, err := policy.NewEngine(&policy.Policy{Version: 1, Name: "test"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

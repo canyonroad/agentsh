@@ -32,7 +32,7 @@ func TestNewEngineWithVariables(t *testing.T) {
 		"HOME":         "/home/user",
 	}
 
-	engine, err := NewEngineWithVariables(p, false, vars)
+	engine, err := NewEngineWithVariables(p, false, true, vars)
 	require.NoError(t, err)
 
 	// Should allow files under project root
@@ -64,7 +64,7 @@ func TestNewEngineWithVariables_UndefinedError(t *testing.T) {
 
 	vars := map[string]string{}
 
-	_, err := NewEngineWithVariables(p, false, vars)
+	_, err := NewEngineWithVariables(p, false, true, vars)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "undefined variable")
 }
@@ -88,7 +88,7 @@ func TestNewEngineWithVariables_NetworkRulesDomainExpansion(t *testing.T) {
 		"INTERNAL_HOST":  "internal.corp.net",
 	}
 
-	engine, err := NewEngineWithVariables(p, false, vars)
+	engine, err := NewEngineWithVariables(p, false, true, vars)
 	require.NoError(t, err)
 
 	// Should allow subdomains of example.com

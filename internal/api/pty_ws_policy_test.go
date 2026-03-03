@@ -53,7 +53,7 @@ func TestPTYWebSocket_RespectsCommandPolicyDeny(t *testing.T) {
 			{Name: "deny-sh", Commands: []string{"sh"}, Decision: string(types.DecisionDeny)},
 		},
 	}
-	engine, err := policy.NewEngine(p, false)
+	engine, err := policy.NewEngine(p, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
