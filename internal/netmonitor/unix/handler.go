@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -288,6 +289,14 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 		}
 	}
 
+	// Canonicalize filename: resolve symlinks, /proc/self/root, etc.
+	// This defeats path manipulation attacks (e.g., /proc/self/root/usr/bin/npx).
+	rawFilename := filename
+	if resolved, err := filepath.EvalSymlinks(filename); err == nil {
+		filename = resolved
+	}
+	// rawFilename preserved for audit; filename is now canonical
+
 	argv, truncated, err := ReadArgv(pid, execveArgs.ArgvPtr, cfg)
 	if err != nil {
 		// Can't read argv - deny (fail-secure)
@@ -300,11 +309,12 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 	parentPID := getParentPID(pid)
 
 	ectx := ExecveContext{
-		PID:       pid,
-		ParentPID: parentPID,
-		Filename:  filename,
-		Argv:      argv,
-		Truncated: truncated,
+		PID:         pid,
+		ParentPID:   parentPID,
+		Filename:    filename,
+		RawFilename: rawFilename,
+		Argv:        argv,
+		Truncated:   truncated,
 	}
 
 	result := h.Handle(goCtx, ectx)
