@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestEngine_CheckRegistry(t *testing.T) {
@@ -360,4 +362,27 @@ func TestEngine_GetEnvInject_NilEngine(t *testing.T) {
 	env := e.GetEnvInject()
 	require.NotNil(t, env)
 	require.Empty(t, env)
+}
+
+func TestPolicy_TransparentCommands_Parsing(t *testing.T) {
+	yamlData := `
+version: 1
+name: test-transparent
+transparent_commands:
+  add:
+    - myrunner
+    - custom-wrapper
+  remove:
+    - sudo
+command_rules:
+  - name: allow-all
+    commands: ["*"]
+    decision: allow
+`
+	var p Policy
+	err := yaml.Unmarshal([]byte(yamlData), &p)
+	require.NoError(t, err)
+	require.NotNil(t, p.TransparentCommands)
+	assert.Equal(t, []string{"myrunner", "custom-wrapper"}, p.TransparentCommands.Add)
+	assert.Equal(t, []string{"sudo"}, p.TransparentCommands.Remove)
 }
