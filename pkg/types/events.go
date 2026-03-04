@@ -35,9 +35,14 @@ type Event struct {
 	Depth     int `json:"depth,omitempty"`
 
 	// Execve details
-	Filename  string   `json:"filename,omitempty"`
-	Argv      []string `json:"argv,omitempty"`
-	Truncated bool     `json:"truncated,omitempty"`
+	Filename    string   `json:"filename,omitempty"`
+	RawFilename string   `json:"raw_filename,omitempty"`
+	Argv        []string `json:"argv,omitempty"`
+	Truncated   bool     `json:"truncated,omitempty"`
+
+	// Transparent command unwrapping
+	UnwrappedFrom  string `json:"unwrapped_from,omitempty"`
+	PayloadCommand string `json:"payload_command,omitempty"`
 
 	// Common convenience fields for indexing/search.
 	Path      string `json:"path,omitempty"`

@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestEngine_CheckRegistry(t *testing.T) {
@@ -360,4 +362,156 @@ func TestEngine_GetEnvInject_NilEngine(t *testing.T) {
 	env := e.GetEnvInject()
 	require.NotNil(t, env)
 	require.Empty(t, env)
+}
+
+func TestEngine_TransparentOverrides(t *testing.T) {
+	t.Run("returns overrides when TransparentCommands is set", func(t *testing.T) {
+		p := &Policy{
+			Version: 1,
+			Name:    "test-transparent-overrides",
+			TransparentCommands: &TransparentCommandsConfig{
+				Add:    []string{"myrunner"},
+				Remove: []string{"sudo"},
+			},
+		}
+		e, err := NewEngine(p, false, true)
+		require.NoError(t, err)
+
+		overrides := e.TransparentOverrides()
+		require.NotNil(t, overrides)
+		assert.Equal(t, []string{"myrunner"}, overrides.Add)
+		assert.Equal(t, []string{"sudo"}, overrides.Remove)
+	})
+
+	t.Run("returns nil when TransparentCommands is nil", func(t *testing.T) {
+		p := &Policy{
+			Version: 1,
+			Name:    "test-no-transparent",
+		}
+		e, err := NewEngine(p, false, true)
+		require.NoError(t, err)
+
+		overrides := e.TransparentOverrides()
+		assert.Nil(t, overrides)
+	})
+
+	t.Run("returns nil on nil engine", func(t *testing.T) {
+		var e *Engine
+		overrides := e.TransparentOverrides()
+		assert.Nil(t, overrides)
+	})
+}
+
+// TestEngine_CheckExecve_PostUnwrapEvaluation verifies that CheckExecve correctly
+// evaluates commands as they would appear after transparent unwrap (bare basename at
+// depth > 0). The actual unwrap logic is tested in execve_handler_test.go; this test
+// confirms the engine matches post-unwrap inputs correctly.
+func TestEngine_CheckExecve_PostUnwrapEvaluation(t *testing.T) {
+	p := &Policy{
+		Version: 1,
+		Name:    "test-transparent-unwrap",
+		CommandRules: []CommandRule{
+			{
+				Name:     "allow-git",
+				Commands: []string{"git"},
+				Decision: "allow",
+				Context:  DefaultContext(),
+			},
+			{
+				Name:     "block-wget",
+				Commands: []string{"wget"},
+				Decision: "deny",
+				Context:  DefaultContext(),
+			},
+			{
+				Name:     "allow-env",
+				Commands: []string{"env"},
+				Decision: "allow",
+				Context:  DefaultContext(),
+			},
+		},
+	}
+	e, err := NewEngine(p, false, true)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		filename string
+		argv     []string
+		depth    int
+		wantDec  types.Decision
+		wantRule string
+	}{
+		{
+			name:     "direct wget denied",
+			filename: "/usr/bin/wget",
+			argv:     []string{"wget", "http://evil.com"},
+			depth:    0,
+			wantDec:  types.DecisionDeny,
+			wantRule: "block-wget",
+		},
+		{
+			name:     "bare basename at depth 1 matches deny rule",
+			filename: "wget",
+			argv:     []string{"wget", "http://evil.com"},
+			depth:    1,
+			wantDec:  types.DecisionDeny,
+			wantRule: "block-wget",
+		},
+		{
+			name:     "wrapper command matched by its own allow rule",
+			filename: "/usr/bin/env",
+			argv:     []string{"env", "wget"},
+			depth:    0,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-env",
+		},
+		{
+			name:     "full path matches basename rule",
+			filename: "/usr/bin/git",
+			argv:     []string{"git", "status"},
+			depth:    0,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-git",
+		},
+		{
+			name:     "unknown command hits default deny",
+			filename: "/usr/bin/unknown",
+			argv:     []string{"unknown"},
+			depth:    0,
+			wantDec:  types.DecisionDeny,
+			wantRule: "default-deny-execve",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dec := e.CheckExecve(tt.filename, tt.argv, tt.depth)
+			assert.Equal(t, tt.wantDec, dec.EffectiveDecision, "decision mismatch")
+			assert.Equal(t, tt.wantRule, dec.Rule, "rule mismatch")
+		})
+	}
+}
+
+func TestPolicy_TransparentCommands_Parsing(t *testing.T) {
+	yamlData := `
+version: 1
+name: test-transparent
+transparent_commands:
+  add:
+    - myrunner
+    - custom-wrapper
+  remove:
+    - sudo
+command_rules:
+  - name: allow-all
+    commands: ["*"]
+    decision: allow
+`
+	var p Policy
+	err := yaml.Unmarshal([]byte(yamlData), &p)
+	require.NoError(t, err)
+	require.NotNil(t, p.TransparentCommands)
+	assert.Equal(t, []string{"myrunner", "custom-wrapper"}, p.TransparentCommands.Add)
+	assert.Equal(t, []string{"sudo"}, p.TransparentCommands.Remove)
 }

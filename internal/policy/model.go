@@ -38,6 +38,9 @@ type Policy struct {
 
 	// Package install check rules
 	PackageRules []PackageRule `yaml:"package_rules,omitempty"`
+
+	// Transparent command overrides (add/remove from built-in defaults)
+	TransparentCommands *TransparentCommandsConfig `yaml:"transparent_commands,omitempty"`
 }
 
 type FileRule struct {
@@ -420,6 +423,14 @@ type PackageMatch struct {
 type LicenseSPDXMatch struct {
 	Allow []string `yaml:"allow,omitempty"`
 	Deny  []string `yaml:"deny,omitempty"`
+}
+
+// TransparentCommandsConfig allows policy to override the built-in transparent command set.
+// Transparent commands are wrappers/interpreters whose payload argument is the real command
+// to evaluate (e.g., env, sudo, ld-linux).
+type TransparentCommandsConfig struct {
+	Add    []string `yaml:"add,omitempty"`    // Additional transparent commands
+	Remove []string `yaml:"remove,omitempty"` // Remove from built-in defaults
 }
 
 // Validate performs minimal semantic validation of a policy.
