@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/netmonitor"
 	"github.com/agentsh/agentsh/pkg/types"
 	"golang.org/x/sys/unix"
 )
@@ -36,9 +37,11 @@ type ExecveContext struct {
 	Filename    string
 	RawFilename string // Original filename before canonicalization
 	Argv        []string
-	Truncated   bool
-	SessionID   string
-	Depth       int
+	Truncated      bool
+	SessionID      string
+	Depth          int
+	UnwrappedFrom  string   // If unwrapped: the transparent wrapper command
+	PayloadCommand string   // If unwrapped: the real command being evaluated
 }
 
 // ExecveResult holds the result of handling an execve.
@@ -91,7 +94,8 @@ type ExecveHandler struct {
 	depthTracker    *DepthTracker
 	emitter         ExecveEmitter
 	approver        ApprovalRequester
-	stubSymlinkPath string // Short symlink path pointing to agentsh-stub
+	stubSymlinkPath      string // Short symlink path pointing to agentsh-stub
+	transparentOverrides *netmonitor.TransparentOverrides
 }
 
 // NewExecveHandler creates a new execve handler.
@@ -118,6 +122,11 @@ func (h *ExecveHandler) SetApprover(approver ApprovalRequester) {
 // SetStubSymlinkPath sets the path to the short symlink used for execve redirect.
 func (h *ExecveHandler) SetStubSymlinkPath(path string) {
 	h.stubSymlinkPath = path
+}
+
+// SetTransparentOverrides sets the transparent command overrides for unwrapping.
+func (h *ExecveHandler) SetTransparentOverrides(overrides *netmonitor.TransparentOverrides) {
+	h.transparentOverrides = overrides
 }
 
 // RegisterSession registers the session root PID for depth tracking.
@@ -247,6 +256,90 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 		}
 	}
 
+	// Transparent command unwrapping: detect wrappers and evaluate payload
+	payloadCmd, payloadArgs, unwrapDepth := netmonitor.UnwrapTransparentCommand(
+		ctx.Filename, ctx.Argv, h.transparentOverrides,
+	)
+
+	if unwrapDepth > 0 && h.policy != nil {
+		ctx.UnwrappedFrom = ctx.Filename
+		ctx.PayloadCommand = payloadCmd
+
+		// Evaluate the payload command against policy
+		payloadDecision := h.policy.CheckExecve(payloadCmd, payloadArgs, ctx.Depth)
+		payloadEffective := payloadDecision.EffectiveDecision
+		if payloadEffective == "" {
+			payloadEffective = payloadDecision.Decision
+		}
+
+		// Evaluate the wrapper command against policy
+		wrapperDecision := h.policy.CheckExecve(ctx.Filename, ctx.Argv, ctx.Depth)
+		wrapperEffective := wrapperDecision.EffectiveDecision
+		if wrapperEffective == "" {
+			wrapperEffective = wrapperDecision.Decision
+		}
+
+		// Most restrictive wins: if either denies, deny
+		if payloadEffective == "deny" {
+			result := ExecveResult{
+				Allow:    false,
+				Action:   ActionDeny,
+				Rule:     payloadDecision.Rule,
+				Reason:   fmt.Sprintf("denied: %s (unwrapped from: %s)", payloadCmd, filepath.Base(ctx.Filename)),
+				Errno:    int32(unix.EACCES),
+				Decision: payloadDecision.Decision,
+			}
+			h.emitEvent(ctx, result, payloadDecision.Rule)
+			return result
+		}
+		if wrapperEffective == "deny" {
+			result := ExecveResult{
+				Allow:    false,
+				Action:   ActionDeny,
+				Rule:     wrapperDecision.Rule,
+				Reason:   wrapperDecision.Message,
+				Errno:    int32(unix.EACCES),
+				Decision: wrapperDecision.Decision,
+			}
+			h.emitEvent(ctx, result, wrapperDecision.Rule)
+			return result
+		}
+
+		// Both allowed — use the more restrictive decision
+		chosenDecision := wrapperDecision
+		if isMoreRestrictive(payloadEffective, wrapperEffective) {
+			chosenDecision = payloadDecision
+		}
+
+		if h.depthTracker != nil {
+			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
+		}
+
+		effectiveDecision := chosenDecision.EffectiveDecision
+		if effectiveDecision == "" {
+			effectiveDecision = chosenDecision.Decision
+		}
+
+		switch effectiveDecision {
+		case "allow":
+			result := ExecveResult{Allow: true, Action: ActionContinue, Rule: chosenDecision.Rule, Decision: chosenDecision.Decision}
+			h.emitEvent(ctx, result, chosenDecision.Rule)
+			return result
+		case "approve", "redirect":
+			result := ExecveResult{
+				Allow:    false,
+				Action:   ActionRedirect,
+				Rule:     chosenDecision.Rule,
+				Reason:   chosenDecision.Message,
+				Decision: chosenDecision.Decision,
+			}
+			h.emitEvent(ctx, result, chosenDecision.Rule)
+			return result
+		default:
+			// Unknown — fall through to normal evaluation
+		}
+	}
+
 	// Skip policy check if no policy configured
 	if h.policy == nil {
 		result := ExecveResult{Allow: true, Action: ActionContinue, Rule: "no_policy", Decision: "allow"}
@@ -369,7 +462,9 @@ func (h *ExecveHandler) emitEvent(ctx ExecveContext, result ExecveResult, rule s
 		Filename:    ctx.Filename,
 		RawFilename: ctx.RawFilename,
 		Argv:        ctx.Argv,
-		Truncated: ctx.Truncated,
+		Truncated:      ctx.Truncated,
+		UnwrappedFrom:  ctx.UnwrappedFrom,
+		PayloadCommand: ctx.PayloadCommand,
 		Policy: &types.PolicyInfo{
 			Decision:          decision,
 			EffectiveDecision: effectiveDecision,
@@ -398,4 +493,10 @@ func (h *ExecveHandler) isInternalBypass(filename string) bool {
 		}
 	}
 	return false
+}
+
+// isMoreRestrictive returns true if decision a is more restrictive than decision b.
+func isMoreRestrictive(a, b string) bool {
+	order := map[string]int{"deny": 5, "approve": 4, "redirect": 3, "audit": 2, "allow": 1}
+	return order[a] > order[b]
 }
