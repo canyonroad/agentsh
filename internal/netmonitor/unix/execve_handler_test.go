@@ -519,6 +519,28 @@ func TestExecveHandler_TruncatedApproval_Timeout(t *testing.T) {
 	})
 }
 
+func TestExecveContext_RawFilename(t *testing.T) {
+	// Verify RawFilename is preserved through Handle
+	cfg := ExecveHandlerConfig{}
+	pol := &mockPolicy{decision: PolicyDecision{Decision: "allow", EffectiveDecision: "allow", Rule: "allow-all"}}
+	dt := NewDepthTracker()
+	dt.RegisterSession(1000, "sess-1")
+	h := NewExecveHandler(cfg, pol, dt, nil)
+
+	ctx := ExecveContext{
+		PID:         1001,
+		ParentPID:   1000,
+		Filename:    "/usr/bin/git",
+		RawFilename: "/proc/self/root/usr/bin/git",
+		Argv:        []string{"git", "status"},
+	}
+
+	result := h.Handle(context.Background(), ctx)
+	assert.True(t, result.Allow)
+	// RawFilename should be accessible on the context
+	assert.Equal(t, "/proc/self/root/usr/bin/git", ctx.RawFilename)
+}
+
 func TestExecveHandler_TruncatedApproval_NoApprover(t *testing.T) {
 	cfg := ExecveHandlerConfig{OnTruncated: "approval"}
 	dt := NewDepthTracker()

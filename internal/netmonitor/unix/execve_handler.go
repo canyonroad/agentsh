@@ -31,13 +31,14 @@ type ExecveHandlerConfig struct {
 
 // ExecveContext holds context for an execve notification.
 type ExecveContext struct {
-	PID       int
-	ParentPID int
-	Filename  string
-	Argv      []string
-	Truncated bool
-	SessionID string
-	Depth     int
+	PID         int
+	ParentPID   int
+	Filename    string
+	RawFilename string // Original filename before canonicalization
+	Argv        []string
+	Truncated   bool
+	SessionID   string
+	Depth       int
 }
 
 // ExecveResult holds the result of handling an execve.
