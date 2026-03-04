@@ -135,3 +135,15 @@ network_rules:
     domains:
       - "*"
     decision: deny
+
+# =============================================================================
+# TRANSPARENT COMMANDS (optional)
+# =============================================================================
+# Transparent commands (env, sudo, nice, etc.) are auto-unwrapped to evaluate
+# the real payload. The strict policy already requires approval for unknown
+# commands, so unwrapping adds defense-in-depth by evaluating both wrapper
+# and payload separately.
+#
+# transparent_commands:
+#   add:
+#     - myrunner       # Custom launcher to treat as transparent

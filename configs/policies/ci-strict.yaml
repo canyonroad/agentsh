@@ -355,3 +355,14 @@ audit:
   include_stderr: true
   include_file_content: false
   retention_days: 90
+
+# =============================================================================
+# TRANSPARENT COMMANDS (optional)
+# =============================================================================
+# In CI, transparent command unwrapping ensures that wrappers like env or nice
+# can't be used to bypass command restrictions. Built-in defaults are sufficient
+# for most CI environments.
+#
+# transparent_commands:
+#   add:
+#     - ci-runner       # If your CI uses a custom wrapper

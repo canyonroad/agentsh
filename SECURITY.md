@@ -129,6 +129,8 @@ sandbox:
   - **Full path:** `/bin/sh` matches only that exact path
   - **Glob pattern:** `/usr/*/python3` matches `/usr/bin/python3`, `/usr/local/python3`
 - Args pattern matching for dangerous flag combinations
+- **Path canonicalization:** `filepath.EvalSymlinks` resolves symlinks before policy evaluation, preventing bypass via symlinks, `/proc/self/root`, or relative paths
+- **Transparent command unwrapping:** Wrapper commands (env, sudo, nice, ld-linux, etc.) are unwrapped to find the real payload; both wrapper and payload are evaluated with the most restrictive decision winning
 
 **Default behavior:** Deny if no rule matches.
 
@@ -521,6 +523,12 @@ Network rules based on domain names resolve DNS at connection time. An attacker 
 If the eBPF/cgroup attachment fails after process start, child processes might execute before controls are in place.
 
 **Mitigation:** Ptrace-stopped start ensures attachment completes before any user code runs. Hook failures result in process termination.
+
+### Transparent Unwrap Heuristic
+
+The transparent command unwrapping uses a simple heuristic to identify payload arguments (skip flags, env assignments, stop at first non-flag arg). This may misidentify a flag's value as the payload in some edge cases (e.g., `nice -n 10 wget` identifies `10` as the payload, not `wget`).
+
+**Mitigation:** Misidentified payloads don't match any command rule and hit default-deny, which is the safe outcome. Network enforcement provides a backstop for the actual payload command.
 
 ### Approval Bypass via Timing
 
@@ -965,6 +973,7 @@ Before deploying agentsh in production:
 
 | Date | Change |
 |------|--------|
+| 2026-03-04 | Added execve hardening: path canonicalization via EvalSymlinks and transparent command unwrapping with dual evaluation |
 | 2026-02-13 | Added configurable deferred FUSE mounting for snapshot-restore environments |
 | 2026-01-11 | Added signal interception via seccomp user-notify for policy-based signal control (Linux) |
 | 2026-01-07 | Added external KMS integration for audit integrity keys (AWS KMS, Azure Key Vault, HashiCorp Vault, GCP Cloud KMS) |

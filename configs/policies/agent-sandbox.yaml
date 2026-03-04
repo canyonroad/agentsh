@@ -473,3 +473,16 @@ audit:
   include_stderr: true
   include_file_content: false
   retention_days: 90
+
+# =============================================================================
+# TRANSPARENT COMMANDS (optional)
+# =============================================================================
+# Transparent commands are wrappers (env, sudo, nice, etc.) that agentsh
+# automatically "unwraps" to evaluate the real payload command against policy.
+# Built-in defaults cover common wrappers. Use this section to customize:
+#
+# transparent_commands:
+#   add:
+#     - myrunner       # Custom launcher to treat as transparent
+#   remove:
+#     - sudo           # Don't unwrap sudo (block it directly instead)

