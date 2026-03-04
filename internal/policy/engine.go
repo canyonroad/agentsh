@@ -419,7 +419,7 @@ func (e *Engine) Policy() *Policy {
 // (Add/Remove slices), or nil if no transparent commands config is set.
 // The caller is responsible for converting to the appropriate handler type.
 func (e *Engine) TransparentOverrides() *TransparentCommandsConfig {
-	if e.policy == nil || e.policy.TransparentCommands == nil {
+	if e == nil || e.policy == nil || e.policy.TransparentCommands == nil {
 		return nil
 	}
 	return e.policy.TransparentCommands

