@@ -364,6 +364,38 @@ func TestEngine_GetEnvInject_NilEngine(t *testing.T) {
 	require.Empty(t, env)
 }
 
+func TestEngine_TransparentOverrides(t *testing.T) {
+	t.Run("returns overrides when TransparentCommands is set", func(t *testing.T) {
+		p := &Policy{
+			Version: 1,
+			Name:    "test-transparent-overrides",
+			TransparentCommands: &TransparentCommandsConfig{
+				Add:    []string{"myrunner"},
+				Remove: []string{"sudo"},
+			},
+		}
+		e, err := NewEngine(p, false, true)
+		require.NoError(t, err)
+
+		overrides := e.TransparentOverrides()
+		require.NotNil(t, overrides)
+		assert.Equal(t, []string{"myrunner"}, overrides.Add)
+		assert.Equal(t, []string{"sudo"}, overrides.Remove)
+	})
+
+	t.Run("returns nil when TransparentCommands is nil", func(t *testing.T) {
+		p := &Policy{
+			Version: 1,
+			Name:    "test-no-transparent",
+		}
+		e, err := NewEngine(p, false, true)
+		require.NoError(t, err)
+
+		overrides := e.TransparentOverrides()
+		assert.Nil(t, overrides)
+	})
+}
+
 func TestPolicy_TransparentCommands_Parsing(t *testing.T) {
 	yamlData := `
 version: 1

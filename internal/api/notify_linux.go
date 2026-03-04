@@ -15,6 +15,7 @@ import (
 	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/internal/netmonitor"
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -68,6 +69,14 @@ func createExecveHandler(cfg config.ExecveConfig, pol *policy.Engine, approvalMg
 	}
 
 	h := unixmon.NewExecveHandler(handlerCfg, policyChecker, dt, nil)
+	if pol != nil {
+		if tc := pol.TransparentOverrides(); tc != nil {
+			h.SetTransparentOverrides(&netmonitor.TransparentOverrides{
+				Add:    tc.Add,
+				Remove: tc.Remove,
+			})
+		}
+	}
 	if approvalMgr != nil {
 		h.SetApprover(&approvalRequesterAdapter{mgr: approvalMgr})
 	}

@@ -415,6 +415,16 @@ func (e *Engine) Policy() *Policy {
 	return e.policy
 }
 
+// TransparentOverrides returns the policy's transparent command overrides
+// (Add/Remove slices), or nil if no transparent commands config is set.
+// The caller is responsible for converting to the appropriate handler type.
+func (e *Engine) TransparentOverrides() *TransparentCommandsConfig {
+	if e.policy == nil || e.policy.TransparentCommands == nil {
+		return nil
+	}
+	return e.policy.TransparentCommands
+}
+
 // SignalEngine returns the signal policy engine, or nil if no signal rules.
 func (e *Engine) SignalEngine() signalEngineType {
 	return e.signalEngine
