@@ -396,6 +396,93 @@ func TestEngine_TransparentOverrides(t *testing.T) {
 	})
 }
 
+func TestEngine_CheckExecve_TransparentUnwrapScenarios(t *testing.T) {
+	p := &Policy{
+		Version: 1,
+		Name:    "test-transparent-unwrap",
+		CommandRules: []CommandRule{
+			{
+				Name:     "allow-git",
+				Commands: []string{"git"},
+				Decision: "allow",
+				Context:  DefaultContext(),
+			},
+			{
+				Name:     "block-wget",
+				Commands: []string{"wget"},
+				Decision: "deny",
+				Context:  DefaultContext(),
+			},
+			{
+				Name:     "allow-env",
+				Commands: []string{"env"},
+				Decision: "allow",
+				Context:  DefaultContext(),
+			},
+		},
+	}
+	e, err := NewEngine(p, false, true)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		filename string
+		argv     []string
+		depth    int
+		wantDec  types.Decision
+		wantRule string
+	}{
+		{
+			name:     "direct wget denied",
+			filename: "/usr/bin/wget",
+			argv:     []string{"wget", "http://evil.com"},
+			depth:    0,
+			wantDec:  types.DecisionDeny,
+			wantRule: "block-wget",
+		},
+		{
+			name:     "unwrapped wget denied by basename",
+			filename: "wget",
+			argv:     []string{"wget", "http://evil.com"},
+			depth:    1,
+			wantDec:  types.DecisionDeny,
+			wantRule: "block-wget",
+		},
+		{
+			name:     "env allowed as wrapper",
+			filename: "/usr/bin/env",
+			argv:     []string{"env", "wget"},
+			depth:    0,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-env",
+		},
+		{
+			name:     "canonicalized path matches",
+			filename: "/usr/bin/git",
+			argv:     []string{"git", "status"},
+			depth:    0,
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-git",
+		},
+		{
+			name:     "unknown command hits default deny",
+			filename: "/usr/bin/unknown",
+			argv:     []string{"unknown"},
+			depth:    0,
+			wantDec:  types.DecisionDeny,
+			wantRule: "default-deny-execve",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dec := e.CheckExecve(tt.filename, tt.argv, tt.depth)
+			assert.Equal(t, tt.wantDec, dec.EffectiveDecision, "decision mismatch")
+			assert.Equal(t, tt.wantRule, dec.Rule, "rule mismatch")
+		})
+	}
+}
+
 func TestPolicy_TransparentCommands_Parsing(t *testing.T) {
 	yamlData := `
 version: 1
