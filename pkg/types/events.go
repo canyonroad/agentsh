@@ -35,8 +35,9 @@ type Event struct {
 	Depth     int `json:"depth,omitempty"`
 
 	// Execve details
-	Filename  string   `json:"filename,omitempty"`
-	Argv      []string `json:"argv,omitempty"`
+	Filename    string   `json:"filename,omitempty"`
+	RawFilename string   `json:"raw_filename,omitempty"`
+	Argv        []string `json:"argv,omitempty"`
 	Truncated bool     `json:"truncated,omitempty"`
 
 	// Common convenience fields for indexing/search.

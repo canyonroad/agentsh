@@ -366,8 +366,9 @@ func (h *ExecveHandler) emitEvent(ctx ExecveContext, result ExecveResult, rule s
 		PID:       ctx.PID,
 		ParentPID: ctx.ParentPID,
 		Depth:     ctx.Depth,
-		Filename:  ctx.Filename,
-		Argv:      ctx.Argv,
+		Filename:    ctx.Filename,
+		RawFilename: ctx.RawFilename,
+		Argv:        ctx.Argv,
 		Truncated: ctx.Truncated,
 		Policy: &types.PolicyInfo{
 			Decision:          decision,
