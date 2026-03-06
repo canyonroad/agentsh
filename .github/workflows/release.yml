@@ -187,8 +187,10 @@ jobs:
         env:
           SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
-          for bin in unsigned/agentsh unsigned/agentsh-shell-shim; do
+          # Sign all agentsh binaries in the archive
+          for bin in unsigned/agentsh*; do
             [ -f "$bin" ] || continue
+            file "$bin" | grep -q "Mach-O" || continue
             codesign --force --sign "$SIGNING_IDENTITY" \
               --entitlements macos/AgentSH/AgentSH.entitlements \
               --options runtime --timestamp \
