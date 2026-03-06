@@ -188,9 +188,11 @@ jobs:
             tar -xzf "$ARCHIVE" -C "unsigned-${arch}"
           done
 
-      - name: Create universal Go binaries
+      - name: Create and sign universal Go binaries
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
-          mkdir -p build/AgentSH.app/Contents/MacOS
+          mkdir -p build/go-universal
           # Lipo each Mach-O binary into a universal
           for bin in unsigned-arm64/agentsh*; do
             name=$(basename "$bin")
@@ -198,18 +200,21 @@ jobs:
             file "$bin" | grep -q "Mach-O" || continue
             amd64_bin="unsigned-amd64/${name}"
             if [ -f "$amd64_bin" ]; then
-              lipo -create -output "build/AgentSH.app/Contents/MacOS/${name}" \
+              lipo -create -output "build/go-universal/${name}" \
                 "$bin" "$amd64_bin"
               echo "Created universal binary: ${name}"
             else
-              cp "$bin" "build/AgentSH.app/Contents/MacOS/${name}"
+              cp "$bin" "build/go-universal/${name}"
               echo "Copied arm64-only binary: ${name}"
             fi
           done
-          # Verify universals
-          for bin in build/AgentSH.app/Contents/MacOS/*; do
+          # Sign and verify each binary
+          for bin in build/go-universal/*; do
             echo "--- $(basename "$bin") ---"
             lipo -info "$bin"
+            codesign --force --sign "$SIGNING_IDENTITY" \
+              --options runtime --timestamp \
+              "$bin"
           done
 
       - name: Build Swift targets (universal)
@@ -227,6 +232,10 @@ jobs:
 
       - name: Assemble app bundle
         run: |
+          # Copy signed Go binaries
+          mkdir -p build/AgentSH.app/Contents/MacOS
+          cp build/go-universal/* build/AgentSH.app/Contents/MacOS/
+
           # Copy Info.plist for host app
           cp macos/AgentSH-files/Info.plist build/AgentSH.app/Contents/
 
@@ -255,14 +264,6 @@ jobs:
         env:
           SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
-          # 0. Sign all Go binaries in MacOS/
-          for bin in build/AgentSH.app/Contents/MacOS/*; do
-            echo "Signing $(basename "$bin")"
-            codesign --force --sign "$SIGNING_IDENTITY" \
-              --options runtime --timestamp \
-              "$bin"
-          done
-
           # 1. System Extension
           codesign --force --sign "$SIGNING_IDENTITY" \
             --entitlements macos/agentsh/SysExt.entitlements \
