@@ -148,7 +148,7 @@ jobs:
     runs-on: macos-15
     needs: goreleaser
     environment: build
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -301,7 +301,7 @@ jobs:
             --apple-id "$APPLE_ID" \
             --password "$APPLE_PASSWORD" \
             --team-id "$TEAM_ID" \
-            --wait --timeout 20m
+            --wait --timeout 30m
           xcrun stapler staple build/AgentSH.app
 
       - name: Create DMG and upload to release
