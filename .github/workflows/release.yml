@@ -297,11 +297,42 @@ jobs:
           TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
         run: |
           ditto -c -k --keepParent build/AgentSH.app build/AgentSH.zip
-          xcrun notarytool submit build/AgentSH.zip \
+
+          # Submit and capture submission ID
+          SUBMIT_OUT=$(xcrun notarytool submit build/AgentSH.zip \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_PASSWORD" \
             --team-id "$TEAM_ID" \
-            --wait --timeout 30m
+            --output-format json)
+          echo "$SUBMIT_OUT"
+          SUBMISSION_ID=$(echo "$SUBMIT_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          echo "Submission ID: $SUBMISSION_ID"
+
+          # Wait for completion with long timeout
+          if ! xcrun notarytool wait "$SUBMISSION_ID" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID" \
+            --timeout 35m; then
+            echo "=== Fetching notarization log ==="
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$TEAM_ID" || true
+            echo "=== Checking submission info ==="
+            xcrun notarytool info "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$TEAM_ID" || true
+            exit 1
+          fi
+
+          # Check final status
+          xcrun notarytool info "$SUBMISSION_ID" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID"
+
           xcrun stapler staple build/AgentSH.app
 
       - name: Create DMG and upload to release
