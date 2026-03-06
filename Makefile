@@ -100,6 +100,12 @@ assemble-bundle: build-macos-go build-swift
 
 # Sign bundle (requires SIGNING_IDENTITY env var)
 sign-bundle:
+	for bin in build/AgentSH.app/Contents/MacOS/*; do \
+		echo "Signing $$(basename $$bin)"; \
+		codesign --force --sign "$(SIGNING_IDENTITY)" \
+			--options runtime --timestamp \
+			"$$bin"; \
+	done
 	codesign --force --sign "$(SIGNING_IDENTITY)" \
 		--entitlements macos/agentsh/SysExt.entitlements \
 		--options runtime --timestamp \

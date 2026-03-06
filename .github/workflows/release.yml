@@ -255,6 +255,14 @@ jobs:
         env:
           SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
+          # 0. Sign all Go binaries in MacOS/
+          for bin in build/AgentSH.app/Contents/MacOS/*; do
+            echo "Signing $(basename "$bin")"
+            codesign --force --sign "$SIGNING_IDENTITY" \
+              --options runtime --timestamp \
+              "$bin"
+          done
+
           # 1. System Extension
           codesign --force --sign "$SIGNING_IDENTITY" \
             --entitlements macos/agentsh/SysExt.entitlements \
