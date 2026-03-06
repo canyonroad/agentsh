@@ -212,7 +212,7 @@ jobs:
             --apple-id "$APPLE_ID" \
             --password "$APPLE_PASSWORD" \
             --team-id "$TEAM_ID" \
-            --wait --timeout 10m
+            --wait --timeout 20m
           rm "$NOTARIZE_ZIP"
 
       - name: Re-package signed archive
