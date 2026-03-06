@@ -1,0 +1,85 @@
+name: Staple macOS Notarization
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (e.g. v0.14.1-rc1)"
+        required: true
+      submission_id:
+        description: "Notarization submission ID (optional — checks latest if empty)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  staple:
+    runs-on: macos-15
+    environment: build
+    timeout-minutes: 15
+    steps:
+      - name: Check notarization status
+        env:
+          APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
+          TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+          SUBMISSION_ID: ${{ inputs.submission_id }}
+        run: |
+          if [ -n "$SUBMISSION_ID" ]; then
+            echo "Checking submission: $SUBMISSION_ID"
+            xcrun notarytool info "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$TEAM_ID"
+          else
+            echo "Listing recent submissions:"
+            xcrun notarytool history \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$TEAM_ID"
+          fi
+
+      - name: Download DMG from release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release download "$VERSION" \
+            --pattern "AgentSH-${VERSION}.dmg" \
+            --repo "${{ github.repository }}" \
+            --dir .
+          echo "Downloaded AgentSH-${VERSION}.dmg"
+
+      - name: Extract app, staple, and repackage
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          # Mount DMG and copy app out
+          hdiutil attach "AgentSH-${VERSION}.dmg" -mountpoint /tmp/agentsh-dmg -nobrowse
+          cp -R /tmp/agentsh-dmg/AgentSH.app ./AgentSH.app
+          hdiutil detach /tmp/agentsh-dmg
+
+          # Staple the notarization ticket
+          xcrun stapler staple AgentSH.app
+
+          # Verify
+          xcrun stapler validate AgentSH.app
+          spctl --assess --type exec --verbose=2 AgentSH.app || true
+
+          # Repackage DMG
+          rm "AgentSH-${VERSION}.dmg"
+          hdiutil create -volname "AgentSH" \
+            -srcfolder AgentSH.app \
+            -ov -format UDZO \
+            "AgentSH-${VERSION}.dmg"
+
+      - name: Upload stapled DMG to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release upload "$VERSION" "AgentSH-${VERSION}.dmg" \
+            --repo "${{ github.repository }}" \
+            --clobber
+          echo "Uploaded stapled DMG to release $VERSION"
