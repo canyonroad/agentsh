@@ -28,10 +28,23 @@ jobs:
         run: |
           if [ -n "$SUBMISSION_ID" ]; then
             echo "Checking submission: $SUBMISSION_ID"
-            xcrun notarytool info "$SUBMISSION_ID" \
+            INFO=$(xcrun notarytool info "$SUBMISSION_ID" \
               --apple-id "$APPLE_ID" \
               --password "$APPLE_PASSWORD" \
-              --team-id "$TEAM_ID"
+              --team-id "$TEAM_ID" 2>&1)
+            echo "$INFO"
+            if echo "$INFO" | grep -q "status: In Progress"; then
+              echo "::error::Notarization still in progress. Try again later."
+              exit 1
+            fi
+            if echo "$INFO" | grep -q "status: Invalid"; then
+              echo "::error::Notarization was rejected. Check the log:"
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_PASSWORD" \
+                --team-id "$TEAM_ID" || true
+              exit 1
+            fi
           else
             echo "Listing recent submissions:"
             xcrun notarytool history \
