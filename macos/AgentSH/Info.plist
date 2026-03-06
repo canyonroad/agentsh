@@ -3,18 +3,26 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>ai.canyonroad.agentsh</string>
+    <string>ai.canyonroad.agentsh.sysext</string>
     <key>CFBundleName</key>
-    <string>AgentSH</string>
+    <string>AgentSH System Extension</string>
     <key>CFBundleExecutable</key>
-    <string>agentsh</string>
+    <string>ai.canyonroad.agentsh.sysext</string>
     <key>CFBundleVersion</key>
     <string>1.0.0</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>SYSX</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
+    <key>NetworkExtension</key>
+    <dict>
+        <key>NEProviderClasses</key>
+        <dict>
+            <key>com.apple.networkextension.filter-data</key>
+            <string>$(PRODUCT_MODULE_NAME).FilterDataProvider</string>
+            <key>com.apple.networkextension.dns-proxy</key>
+            <string>$(PRODUCT_MODULE_NAME).DNSProxyProvider</string>
+        </dict>
+    </dict>
 </dict>
 </plist>

@@ -28,5 +28,6 @@ internal/netmonitor/ebpf/vmlinux.h
 /agentsh
 
 # Build artifacts
+build/
 /agentsh-unixwrap
 /agentsh-stub

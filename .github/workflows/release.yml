@@ -143,17 +143,20 @@ jobs:
             --repo "${{ github.repository }}" \
             --clobber
 
-  # Sign and notarize macOS binaries produced by GoReleaser.
-  sign-macos:
-    runs-on: macos-latest
+  # Build, sign, and notarize macOS app bundle with system extension.
+  build-macos-app:
+    runs-on: macos-15
     needs: goreleaser
     environment: build
-    timeout-minutes: 20
-    strategy:
-      matrix:
-        arch: [amd64, arm64]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          # Use latest available Xcode on the runner
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
 
       - name: Import signing certificate
         env:
@@ -170,66 +173,156 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           rm cert.p12
 
-      - name: Download release archive
+      - name: Download darwin archives from GoReleaser
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ github.ref_name }}
         run: |
-          ARCHIVE="agentsh_${VERSION#v}_darwin_${{ matrix.arch }}.tar.gz"
-          gh release download "$VERSION" \
-            --pattern "$ARCHIVE" \
-            --repo "${{ github.repository }}" \
-            --dir .
-          mkdir -p unsigned
-          tar -xzf "$ARCHIVE" -C unsigned
+          for arch in amd64 arm64; do
+            ARCHIVE="agentsh_${VERSION#v}_darwin_${arch}.tar.gz"
+            gh release download "$VERSION" \
+              --pattern "$ARCHIVE" \
+              --repo "${{ github.repository }}" \
+              --dir .
+            mkdir -p "unsigned-${arch}"
+            tar -xzf "$ARCHIVE" -C "unsigned-${arch}"
+          done
 
-      - name: Sign binaries
+      - name: Create universal Go binaries
+        run: |
+          mkdir -p build/AgentSH.app/Contents/MacOS
+          # Lipo each Mach-O binary into a universal
+          for bin in unsigned-arm64/agentsh*; do
+            name=$(basename "$bin")
+            [ -f "$bin" ] || continue
+            file "$bin" | grep -q "Mach-O" || continue
+            amd64_bin="unsigned-amd64/${name}"
+            if [ -f "$amd64_bin" ]; then
+              lipo -create -output "build/AgentSH.app/Contents/MacOS/${name}" \
+                "$bin" "$amd64_bin"
+              echo "Created universal binary: ${name}"
+            else
+              cp "$bin" "build/AgentSH.app/Contents/MacOS/${name}"
+              echo "Copied arm64-only binary: ${name}"
+            fi
+          done
+          # Verify universals
+          for bin in build/AgentSH.app/Contents/MacOS/*; do
+            echo "--- $(basename "$bin") ---"
+            lipo -info "$bin"
+          done
+
+      - name: Build Swift targets (universal)
+        run: |
+          xcodebuild \
+            -project macos/agentsh/agentsh.xcodeproj \
+            -scheme agentsh \
+            -configuration Release \
+            -derivedDataPath build/DerivedData \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Assemble app bundle
+        run: |
+          # Copy Info.plist for host app
+          cp macos/AgentSH-files/Info.plist build/AgentSH.app/Contents/
+
+          # Copy Swift build products from DerivedData
+          PRODUCTS="build/DerivedData/Build/Products/Release"
+
+          # System Extension
+          mkdir -p "build/AgentSH.app/Contents/Library/SystemExtensions"
+          cp -R "${PRODUCTS}/SysExt.systemextension" \
+            "build/AgentSH.app/Contents/Library/SystemExtensions/"
+
+          # XPC Service
+          mkdir -p "build/AgentSH.app/Contents/XPCServices"
+          cp -R "${PRODUCTS}/xpc.xpc" \
+            "build/AgentSH.app/Contents/XPCServices/"
+
+          # Approval Dialog
+          mkdir -p "build/AgentSH.app/Contents/Resources"
+          cp -R "${PRODUCTS}/approval-dialog.app" \
+            "build/AgentSH.app/Contents/Resources/"
+
+          echo "=== App bundle structure ==="
+          find build/AgentSH.app -type f | sort
+
+      - name: Sign app bundle (inside-out)
         env:
           SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
-          # Sign all agentsh binaries in the archive
-          for bin in unsigned/agentsh*; do
-            [ -f "$bin" ] || continue
-            file "$bin" | grep -q "Mach-O" || continue
-            codesign --force --sign "$SIGNING_IDENTITY" \
-              --entitlements macos/AgentSH/AgentSH.entitlements \
-              --options runtime --timestamp \
-              "$bin"
-            codesign --verify --strict "$bin"
-          done
+          # 1. System Extension
+          codesign --force --sign "$SIGNING_IDENTITY" \
+            --entitlements macos/agentsh/SysExt.entitlements \
+            --options runtime --timestamp \
+            "build/AgentSH.app/Contents/Library/SystemExtensions/SysExt.systemextension"
 
-      - name: Notarize binaries
+          # 2. XPC Service
+          codesign --force --sign "$SIGNING_IDENTITY" \
+            --options runtime --timestamp \
+            "build/AgentSH.app/Contents/XPCServices/xpc.xpc"
+
+          # 3. Approval Dialog
+          codesign --force --sign "$SIGNING_IDENTITY" \
+            --entitlements macos/agentsh/approval-dialog/approval-dialog.entitlements \
+            --options runtime --timestamp \
+            "build/AgentSH.app/Contents/Resources/approval-dialog.app"
+
+          # 4. Main app bundle
+          codesign --force --sign "$SIGNING_IDENTITY" \
+            --entitlements macos/agentsh/agentsh/agentsh.entitlements \
+            --options runtime --timestamp \
+            "build/AgentSH.app"
+
+          # 5. Verify
+          codesign --verify --deep --strict --verbose=2 "build/AgentSH.app"
+
+      - name: Notarize app bundle
         env:
           APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
           TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
-          VERSION: ${{ github.ref_name }}
         run: |
-          # Create a zip for notarization (notarytool requires zip/dmg/pkg)
-          NOTARIZE_ZIP="agentsh-notarize-${{ matrix.arch }}.zip"
-          ditto -c -k --keepParent unsigned "$NOTARIZE_ZIP"
-          xcrun notarytool submit "$NOTARIZE_ZIP" \
+          ditto -c -k --keepParent build/AgentSH.app build/AgentSH.zip
+          xcrun notarytool submit build/AgentSH.zip \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_PASSWORD" \
             --team-id "$TEAM_ID" \
             --wait --timeout 20m
-          rm "$NOTARIZE_ZIP"
+          xcrun stapler staple build/AgentSH.app
 
-      - name: Re-package signed archive
+      - name: Create DMG and upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ github.ref_name }}
         run: |
-          ARCHIVE="agentsh_${VERSION#v}_darwin_${{ matrix.arch }}.tar.gz"
-          tar -czf "$ARCHIVE" -C unsigned .
-          gh release upload "$VERSION" "$ARCHIVE" \
+          # Create DMG
+          hdiutil create -volname "AgentSH" \
+            -srcfolder build/AgentSH.app \
+            -ov -format UDZO \
+            "build/AgentSH-${VERSION}.dmg"
+
+          # Delete old darwin tarballs from release
+          for arch in amd64 arm64; do
+            ARCHIVE="agentsh_${VERSION#v}_darwin_${arch}.tar.gz"
+            gh release delete-asset "$VERSION" "$ARCHIVE" \
+              --repo "${{ github.repository }}" \
+              --yes || true
+          done
+
+          # Upload DMG
+          gh release upload "$VERSION" "build/AgentSH-${VERSION}.dmg" \
             --repo "${{ github.repository }}" \
             --clobber
 
   # Update checksums after macOS signing replaces the darwin archives.
   update-checksums:
     runs-on: ubuntu-latest
-    needs: [goreleaser, alpine-build, sign-macos]
+    needs: [goreleaser, alpine-build, build-macos-app]
     timeout-minutes: 10
     steps:
       - name: Download all release assets and regenerate checksums
