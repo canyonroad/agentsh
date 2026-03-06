@@ -9,15 +9,15 @@ class ESFClient {
     private var xpcProxy: AgentshXPCProtocol?
 
     // Serial queue for thread-safe access to client
-    private let clientQueue = DispatchQueue(label: "com.agentsh.esfclient")
+    private let clientQueue = DispatchQueue(label: "ai.canyonroad.agentsh.esfclient")
 
     /// Cache of PID -> audit_token_t for muting
     private var auditTokenCache: [pid_t: audit_token_t] = [:]
-    private let cacheQueue = DispatchQueue(label: "com.agentsh.audittokencache")
+    private let cacheQueue = DispatchQueue(label: "ai.canyonroad.agentsh.audittokencache")
 
     /// Active wrap sessions: maps session root PID to session ID
     private var activeSessions: [pid_t: String] = [:]
-    private let sessionQueue = DispatchQueue(label: "com.agentsh.sessions")
+    private let sessionQueue = DispatchQueue(label: "ai.canyonroad.agentsh.sessions")
 
     init() {
         // Connect to XPC Service

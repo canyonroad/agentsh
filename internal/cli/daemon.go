@@ -59,7 +59,7 @@ func newDaemonInstallCmd() *cobra.Command {
 On Linux, this creates a systemd user service at ~/.config/systemd/user/agentsh.service
 that starts automatically on user login.
 
-On macOS, this creates a launchd plist at ~/Library/LaunchAgents/com.agentsh.daemon.plist.`,
+On macOS, this creates a launchd plist at ~/Library/LaunchAgents/ai.canyonroad.agentsh.daemon.plist.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			w := cmd.OutOrStdout()
 
@@ -354,7 +354,7 @@ const launchdPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.agentsh.daemon</string>
+    <string>ai.canyonroad.agentsh.daemon</string>
     <key>ProgramArguments</key>
     <array>
         <string>%s</string>
@@ -383,7 +383,7 @@ const launchdPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 
 func getLaunchdPlistPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", "com.agentsh.daemon.plist")
+	return filepath.Join(home, "Library", "LaunchAgents", "ai.canyonroad.agentsh.daemon.plist")
 }
 
 func installLaunchdService(cmd *cobra.Command, force bool) error {
@@ -521,7 +521,7 @@ func getCurrentSession(cmd *cobra.Command) (*PNACLSession, error) {
 		}
 	case "darwin":
 		output, err := exec.Command("launchctl", "list").Output()
-		if err == nil && strings.Contains(string(output), "com.agentsh.daemon") {
+		if err == nil && strings.Contains(string(output), "ai.canyonroad.agentsh.daemon") {
 			session.Status = "running"
 		} else {
 			session.Status = "stopped"

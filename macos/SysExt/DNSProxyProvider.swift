@@ -4,7 +4,7 @@ import NetworkExtension
 class DNSProxyProvider: NEDNSProxyProvider {
     private var xpc: NSXPCConnection?
     private var xpcProxy: AgentshXPCProtocol?
-    private let queue = DispatchQueue(label: "com.agentsh.dnsproxyprovider")
+    private let queue = DispatchQueue(label: "ai.canyonroad.agentsh.dnsproxyprovider")
 
     override func startProxy(options: [String: Any]? = nil, completionHandler: @escaping (Error?) -> Void) {
         queue.sync {

@@ -28,7 +28,7 @@ class ApprovalManager: NSObject {
     private var pollTimer: DispatchSourceTimer?
 
     /// Queue for polling operations.
-    private let pollQueue = DispatchQueue(label: "com.agentsh.approval.poll", qos: .utility)
+    private let pollQueue = DispatchQueue(label: "ai.canyonroad.agentsh.approval.poll", qos: .utility)
 
     /// Flag to indicate polling should stop (prevents in-flight polls from rescheduling).
     private var isStopped: Bool = true

@@ -8,7 +8,7 @@ import Foundation
 class FilterDataProvider: NEFilterDataProvider {
     private var xpc: NSXPCConnection?
     private var xpcProxy: AgentshXPCProtocol?
-    private let queue = DispatchQueue(label: "com.agentsh.filterprovider")
+    private let queue = DispatchQueue(label: "ai.canyonroad.agentsh.filterprovider")
 
     // MARK: - Blocking Configuration
 

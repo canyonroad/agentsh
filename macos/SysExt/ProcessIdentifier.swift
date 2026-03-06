@@ -191,7 +191,7 @@ final class ProcessIdentifier {
 /// Thread-safe cache for ProcessInfo lookups.
 private final class ProcessInfoCache {
     private var storage: [pid_t: ProcessInfo] = [:]
-    private let queue = DispatchQueue(label: "com.agentsh.processidentifier.cache", attributes: .concurrent)
+    private let queue = DispatchQueue(label: "ai.canyonroad.agentsh.processidentifier.cache", attributes: .concurrent)
 
     func get(pid: pid_t) -> ProcessInfo? {
         return queue.sync {

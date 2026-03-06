@@ -165,11 +165,11 @@ jobs:
           cp macos/AgentSH/Info.plist build/AgentSH.app/Contents/
 
           # Copy System Extension
-          cp -r build/DerivedData/Build/Products/Release/com.agentsh.sysext.systemextension \
+          cp -r build/DerivedData/Build/Products/Release/ai.canyonroad.agentsh.sysext.systemextension \
             build/AgentSH.app/Contents/Library/SystemExtensions/
 
           # Copy XPC Service
-          cp -r build/DerivedData/Build/Products/Release/com.agentsh.xpc.xpc \
+          cp -r build/DerivedData/Build/Products/Release/ai.canyonroad.agentsh.xpc.xpc \
             build/AgentSH.app/Contents/XPCServices/
 
           echo "App bundle structure:"
@@ -185,13 +185,13 @@ jobs:
             --entitlements macos/SysExt/SysExt.entitlements \
             --options runtime \
             --timestamp \
-            build/AgentSH.app/Contents/Library/SystemExtensions/com.agentsh.sysext.systemextension
+            build/AgentSH.app/Contents/Library/SystemExtensions/ai.canyonroad.agentsh.sysext.systemextension
 
           echo "Signing XPC Service..."
           codesign --force --deep --sign "$SIGNING_IDENTITY" \
             --options runtime \
             --timestamp \
-            build/AgentSH.app/Contents/XPCServices/com.agentsh.xpc.xpc
+            build/AgentSH.app/Contents/XPCServices/ai.canyonroad.agentsh.xpc.xpc
 
           echo "Signing main binary..."
           codesign --force --sign "$SIGNING_IDENTITY" \
@@ -209,7 +209,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 build/AgentSH.app
 
           echo "Displaying entitlements..."
-          codesign -d --entitlements - build/AgentSH.app/Contents/Library/SystemExtensions/com.agentsh.sysext.systemextension
+          codesign -d --entitlements - build/AgentSH.app/Contents/Library/SystemExtensions/ai.canyonroad.agentsh.sysext.systemextension
 
       # Notarize app bundle (optional)
       - name: Notarize app bundle
@@ -371,9 +371,9 @@ jobs:
         run: |
           mkdir -p build/AgentSH.app/Contents/{Library/SystemExtensions,XPCServices,Resources}
           cp macos/AgentSH/Info.plist build/AgentSH.app/Contents/
-          cp -r build/DerivedData/Build/Products/Release/com.agentsh.sysext.systemextension \
+          cp -r build/DerivedData/Build/Products/Release/ai.canyonroad.agentsh.sysext.systemextension \
             build/AgentSH.app/Contents/Library/SystemExtensions/
-          cp -r build/DerivedData/Build/Products/Release/com.agentsh.xpc.xpc \
+          cp -r build/DerivedData/Build/Products/Release/ai.canyonroad.agentsh.xpc.xpc \
             build/AgentSH.app/Contents/XPCServices/
 
       - name: Sign app bundle
@@ -384,12 +384,12 @@ jobs:
             --entitlements macos/SysExt/SysExt.entitlements \
             --options runtime \
             --timestamp \
-            build/AgentSH.app/Contents/Library/SystemExtensions/com.agentsh.sysext.systemextension
+            build/AgentSH.app/Contents/Library/SystemExtensions/ai.canyonroad.agentsh.sysext.systemextension
 
           codesign --force --deep --sign "$SIGNING_IDENTITY" \
             --options runtime \
             --timestamp \
-            build/AgentSH.app/Contents/XPCServices/com.agentsh.xpc.xpc
+            build/AgentSH.app/Contents/XPCServices/ai.canyonroad.agentsh.xpc.xpc
 
           codesign --force --sign "$SIGNING_IDENTITY" \
             --options runtime \

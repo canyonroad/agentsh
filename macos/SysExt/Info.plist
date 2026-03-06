@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.agentsh.sysext</string>
+    <string>ai.canyonroad.agentsh.sysext</string>
     <key>CFBundleName</key>
     <string>AgentSH System Extension</string>
     <key>CFBundleExecutable</key>
-    <string>com.agentsh.sysext</string>
+    <string>ai.canyonroad.agentsh.sysext</string>
     <key>CFBundleVersion</key>
     <string>1.0.0</string>
     <key>CFBundlePackageType</key>

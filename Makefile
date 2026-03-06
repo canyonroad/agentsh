@@ -127,8 +127,8 @@ assemble-bundle: build-macos-go build-swift build-approval-dialog
 	mkdir -p build/AgentSH-amd64.app/Contents/{Library/SystemExtensions,XPCServices,Resources}
 	cp macos/AgentSH/Info.plist build/AgentSH.app/Contents/
 	cp macos/AgentSH/Info.plist build/AgentSH-amd64.app/Contents/
-	cp -r build/Release/com.agentsh.sysext.systemextension build/AgentSH.app/Contents/Library/SystemExtensions/
-	cp -r build/Release/com.agentsh.xpc.xpc build/AgentSH.app/Contents/XPCServices/
+	cp -r build/Release/ai.canyonroad.agentsh.sysext.systemextension build/AgentSH.app/Contents/Library/SystemExtensions/
+	cp -r build/Release/ai.canyonroad.agentsh.xpc.xpc build/AgentSH.app/Contents/XPCServices/
 	# Copy ApprovalDialog.app to Resources
 	cp -r build/ApprovalDialog.app build/AgentSH.app/Contents/Resources/
 	cp -r build/ApprovalDialog-amd64.app build/AgentSH-amd64.app/Contents/Resources/ApprovalDialog.app
@@ -138,10 +138,10 @@ sign-bundle:
 	# Sign system extension
 	codesign --force --deep --sign "$(SIGNING_IDENTITY)" \
 		--entitlements macos/SysExt/SysExt.entitlements \
-		build/AgentSH.app/Contents/Library/SystemExtensions/com.agentsh.sysext.systemextension
+		build/AgentSH.app/Contents/Library/SystemExtensions/ai.canyonroad.agentsh.sysext.systemextension
 	# Sign XPC service
 	codesign --force --deep --sign "$(SIGNING_IDENTITY)" \
-		build/AgentSH.app/Contents/XPCServices/com.agentsh.xpc.xpc
+		build/AgentSH.app/Contents/XPCServices/ai.canyonroad.agentsh.xpc.xpc
 	# Sign ApprovalDialog.app (embedded in Resources)
 	codesign --force --deep --sign "$(SIGNING_IDENTITY)" \
 		--entitlements macos/ApprovalDialog/ApprovalDialog.entitlements \

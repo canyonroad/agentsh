@@ -88,8 +88,8 @@ make build-macos-go
 make build-swift
 
 # This builds:
-# - com.agentsh.sysext.systemextension
-# - com.agentsh.xpc.xpc
+# - ai.canyonroad.agentsh.sysext.systemextension
+# - ai.canyonroad.agentsh.xpc.xpc
 ```
 
 #### 3. Assemble App Bundle
@@ -126,16 +126,16 @@ build/AgentSH.app/
 │   │   └── agentsh                    # Go binary
 │   ├── Library/
 │   │   └── SystemExtensions/
-│   │       └── com.agentsh.sysext.systemextension/
+│   │       └── ai.canyonroad.agentsh.sysext.systemextension/
 │   │           ├── Contents/
 │   │           │   ├── MacOS/
-│   │           │   │   └── com.agentsh.sysext  # ESF + NE
+│   │           │   │   └── ai.canyonroad.agentsh.sysext  # ESF + NE
 │   │           │   └── Info.plist
 │   └── XPCServices/
-│       └── com.agentsh.xpc.xpc/
+│       └── ai.canyonroad.agentsh.xpc.xpc/
 │           ├── Contents/
 │           │   ├── MacOS/
-│           │   │   └── com.agentsh.xpc  # XPC bridge
+│           │   │   └── ai.canyonroad.agentsh.xpc  # XPC bridge
 │           │   └── Info.plist
 ```
 

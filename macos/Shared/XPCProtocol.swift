@@ -144,4 +144,4 @@ import Foundation
 }
 
 /// XPC Service identifier.
-let xpcServiceIdentifier = "com.agentsh.xpc"
+let xpcServiceIdentifier = "ai.canyonroad.agentsh.xpc"

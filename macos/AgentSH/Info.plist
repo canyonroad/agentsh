@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.agentsh.app</string>
+    <string>ai.canyonroad.agentsh</string>
     <key>CFBundleName</key>
     <string>AgentSH</string>
     <key>CFBundleExecutable</key>

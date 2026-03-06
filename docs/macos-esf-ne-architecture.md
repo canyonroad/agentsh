@@ -28,7 +28,7 @@ ESF+NE provides enterprise-tier (90% security score) enforcement on macOS by lev
 │  │                                           ▼                     │ │
 │  │  ┌──────────────────────────────────────────────────────────┐  │ │
 │  │  │              System Extension                              │  │ │
-│  │  │              (com.agentsh.sysext)                          │  │ │
+│  │  │              (ai.canyonroad.agentsh.sysext)                          │  │ │
 │  │  │                                                            │  │ │
 │  │  │  ┌────────────────┐  ┌────────────────┐  ┌──────────────┐ │  │ │
 │  │  │  │   ESFClient    │  │ FilterData     │  │ DNSProxy     │ │  │ │
@@ -72,7 +72,7 @@ The Go binary (`agentsh`) runs the policy engine and API server:
 
 ### XPC Service
 
-The XPC Service (`com.agentsh.xpc`) bridges between Swift and Go:
+The XPC Service (`ai.canyonroad.agentsh.xpc`) bridges between Swift and Go:
 
 - **PolicyBridge.swift** - Connects to Go server via Unix socket
 - **XPCServiceDelegate.swift** - Handles XPC connection lifecycle
@@ -80,7 +80,7 @@ The XPC Service (`com.agentsh.xpc`) bridges between Swift and Go:
 
 ### System Extension
 
-The System Extension (`com.agentsh.sysext`) provides kernel-level interception:
+The System Extension (`ai.canyonroad.agentsh.sysext`) provides kernel-level interception:
 
 #### ESFClient.swift
 
@@ -249,7 +249,7 @@ type SessionTracker struct {
 XPC connections use serial dispatch queues for thread safety:
 
 ```swift
-private let queue = DispatchQueue(label: "com.agentsh.xpc")
+private let queue = DispatchQueue(label: "ai.canyonroad.agentsh.xpc")
 
 queue.sync {
     self.xpcProxy = connection.remoteObjectProxy as? AgentSHXPCProtocol

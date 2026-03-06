@@ -15,7 +15,7 @@ class ProcessHierarchy {
     private var childrenMap: [pid_t: Set<pid_t>] = [:]
 
     /// Serial queue for thread-safe access
-    private let queue = DispatchQueue(label: "com.agentsh.processhierarchy")
+    private let queue = DispatchQueue(label: "ai.canyonroad.agentsh.processhierarchy")
 
     private init() {}
 
