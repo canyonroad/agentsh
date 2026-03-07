@@ -6,53 +6,27 @@ on:
       version:
         description: "Release tag (e.g. v0.14.1-rc1)"
         required: true
+      mode:
+        description: "Mode: 'staple' (use existing submission) or 'resubmit' (fresh notarization)"
+        required: true
+        default: "resubmit"
+        type: choice
+        options:
+          - resubmit
+          - staple
       submission_id:
-        description: "Notarization submission ID (optional — checks latest if empty)"
+        description: "Submission ID (only for 'staple' mode)"
         required: false
 
 permissions:
   contents: write
 
 jobs:
-  staple:
+  notarize-and-staple:
     runs-on: macos-15
     environment: build
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
-      - name: Check notarization status
-        env:
-          APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
-          TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
-          SUBMISSION_ID: ${{ inputs.submission_id }}
-        run: |
-          if [ -n "$SUBMISSION_ID" ]; then
-            echo "Checking submission: $SUBMISSION_ID"
-            INFO=$(xcrun notarytool info "$SUBMISSION_ID" \
-              --apple-id "$APPLE_ID" \
-              --password "$APPLE_PASSWORD" \
-              --team-id "$TEAM_ID" 2>&1)
-            echo "$INFO"
-            if echo "$INFO" | grep -q "status: In Progress"; then
-              echo "::error::Notarization still in progress. Try again later."
-              exit 1
-            fi
-            if echo "$INFO" | grep -q "status: Invalid"; then
-              echo "::error::Notarization was rejected. Check the log:"
-              xcrun notarytool log "$SUBMISSION_ID" \
-                --apple-id "$APPLE_ID" \
-                --password "$APPLE_PASSWORD" \
-                --team-id "$TEAM_ID" || true
-              exit 1
-            fi
-          else
-            echo "Listing recent submissions:"
-            xcrun notarytool history \
-              --apple-id "$APPLE_ID" \
-              --password "$APPLE_PASSWORD" \
-              --team-id "$TEAM_ID"
-          fi
-
       - name: Download DMG from release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -64,23 +38,67 @@ jobs:
             --dir .
           echo "Downloaded AgentSH-${VERSION}.dmg"
 
-      - name: Extract app, staple, and repackage
+      - name: Extract app from DMG
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          # Mount DMG and copy app out
           hdiutil attach "AgentSH-${VERSION}.dmg" -mountpoint /tmp/agentsh-dmg -nobrowse
           cp -R /tmp/agentsh-dmg/AgentSH.app ./AgentSH.app
           hdiutil detach /tmp/agentsh-dmg
 
-          # Staple the notarization ticket
-          xcrun stapler staple AgentSH.app
+      - name: Submit fresh notarization
+        if: inputs.mode == 'resubmit'
+        env:
+          APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
+          TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent AgentSH.app AgentSH.zip
 
-          # Verify
+          xcrun notarytool submit AgentSH.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID" \
+            --wait --timeout 35m
+
+      - name: Check existing submission
+        if: inputs.mode == 'staple'
+        env:
+          APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
+          TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+          SUBMISSION_ID: ${{ inputs.submission_id }}
+        run: |
+          if [ -z "$SUBMISSION_ID" ]; then
+            echo "::error::submission_id is required in staple mode"
+            exit 1
+          fi
+          INFO=$(xcrun notarytool info "$SUBMISSION_ID" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID" 2>&1)
+          echo "$INFO"
+          if echo "$INFO" | grep -q "status: In Progress"; then
+            echo "::error::Notarization still in progress. Try again later."
+            exit 1
+          fi
+          if echo "$INFO" | grep -q "status: Invalid"; then
+            echo "::error::Notarization was rejected. Check the log:"
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$TEAM_ID" || true
+            exit 1
+          fi
+
+      - name: Staple and repackage DMG
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          xcrun stapler staple AgentSH.app
           xcrun stapler validate AgentSH.app
           spctl --assess --type exec --verbose=2 AgentSH.app || true
 
-          # Repackage DMG
           rm "AgentSH-${VERSION}.dmg"
           hdiutil create -volname "AgentSH" \
             -srcfolder AgentSH.app \
