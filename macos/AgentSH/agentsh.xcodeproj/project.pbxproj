@@ -238,7 +238,7 @@
 			);
 			productName = SysExt;
 			productReference = A018260B2F5A9D11000B0164 /* SysExt.systemextension */;
-			productType = "com.apple.product-type.bundle";
+			productType = "com.apple.product-type.system-extension";
 		};
 		A01826262F5A9FEB000B0164 /* xpc */ = {
 			isa = PBXNativeTarget;
@@ -605,6 +605,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = WCKWMMKJ35;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSPrincipalClass = "";
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Bundles";
@@ -632,6 +633,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = WCKWMMKJ35;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSPrincipalClass = "";
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Bundles";
