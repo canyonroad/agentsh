@@ -14,7 +14,15 @@
     <string>SYSX</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
-    <key>NSSystemExtensionUsageDescription</key>
-    <string>AgentSH uses a system extension for security monitoring.</string>
+    <key>NetworkExtension</key>
+    <dict>
+        <key>NEProviderClasses</key>
+        <dict>
+            <key>com.apple.networkextension.filter-data</key>
+            <string>$(PRODUCT_MODULE_NAME).FilterDataProvider</string>
+            <key>com.apple.networkextension.dns-proxy</key>
+            <string>$(PRODUCT_MODULE_NAME).DNSProxyProvider</string>
+        </dict>
+    </dict>
 </dict>
 </plist>
