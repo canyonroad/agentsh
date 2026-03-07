@@ -4,7 +4,6 @@
 <dict>
     <key>com.apple.developer.networking.networkextension</key>
     <array>
-        <string>content-filter-provider</string>
         <string>dns-proxy</string>
     </array>
 </dict>
