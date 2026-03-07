@@ -7,13 +7,14 @@ on:
         description: "Release tag (e.g. v0.14.1-rc1)"
         required: true
       mode:
-        description: "Mode: 'staple' (use existing submission) or 'resubmit' (fresh notarization)"
+        description: "Mode: 'staple' (use existing submission) or 'resubmit' (fresh notarization) or 'test-stripped' (submit without sysext to diagnose)"
         required: true
         default: "resubmit"
         type: choice
         options:
           - resubmit
           - staple
+          - test-stripped
       submission_id:
         description: "Submission ID (only for 'staple' mode)"
         required: false
@@ -46,8 +47,20 @@ jobs:
           cp -R /tmp/agentsh-dmg/AgentSH.app ./AgentSH.app
           hdiutil detach /tmp/agentsh-dmg
 
+      - name: Strip sysext for diagnostic test
+        if: inputs.mode == 'test-stripped'
+        run: |
+          echo "=== Before stripping ==="
+          find AgentSH.app -type d -maxdepth 4 | sort
+          rm -rf AgentSH.app/Contents/Library/SystemExtensions
+          rm -rf AgentSH.app/Contents/XPCServices
+          rm -rf AgentSH.app/Contents/Resources/approval-dialog.app
+          echo "=== After stripping ==="
+          find AgentSH.app -type d -maxdepth 4 | sort
+          echo "Stripped sysext, xpc, and approval-dialog for diagnostic submission"
+
       - name: Submit fresh notarization
-        if: inputs.mode == 'resubmit'
+        if: inputs.mode == 'resubmit' || inputs.mode == 'test-stripped'
         env:
           APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
@@ -92,6 +105,7 @@ jobs:
           fi
 
       - name: Staple and repackage DMG
+        if: inputs.mode != 'test-stripped'
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -106,6 +120,7 @@ jobs:
             "AgentSH-${VERSION}.dmg"
 
       - name: Upload stapled DMG to release
+        if: inputs.mode != 'test-stripped'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ inputs.version }}
