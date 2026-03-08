@@ -129,7 +129,7 @@ sandbox:
   - **Full path:** `/bin/sh` matches only that exact path
   - **Glob pattern:** `/usr/*/python3` matches `/usr/bin/python3`, `/usr/local/python3`
 - Args pattern matching for dangerous flag combinations
-- **Path canonicalization:** `filepath.EvalSymlinks` resolves symlinks before policy evaluation, preventing bypass via symlinks, `/proc/self/root`, or relative paths
+- **Path canonicalization:** `filepath.EvalSymlinks` resolves symlinks before policy evaluation, preventing bypass via symlinks or `/proc/self/root` paths (relative path resolution is applied for `execveat` calls)
 - **Transparent command unwrapping:** Wrapper commands (env, sudo, nice, ld-linux, etc.) are unwrapped to find the real payload; both wrapper and payload are evaluated with the most restrictive decision winning
 
 **Default behavior:** Deny if no rule matches.

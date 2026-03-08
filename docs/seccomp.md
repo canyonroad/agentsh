@@ -157,15 +157,23 @@ See [Policy Documentation](operations/policies.md#transparent-commands) for conf
 
 ```json
 {
-  "type": "command_blocked",
+  "type": "execve",
   "timestamp": "2026-03-04T10:30:00Z",
   "session_id": "sess_abc123",
-  "command": "/usr/bin/wget",
+  "pid": 12345,
+  "parent_pid": 12300,
+  "depth": 1,
+  "filename": "/usr/bin/wget",
   "raw_filename": "/proc/self/root/usr/bin/wget",
+  "argv": ["wget", "https://example.com"],
   "unwrapped_from": "/usr/bin/env",
   "payload_command": "wget",
-  "decision": "deny",
-  "policy_rule": "block-wget"
+  "effective_action": "blocked",
+  "policy": {
+    "decision": "deny",
+    "effective_decision": "deny",
+    "rule": "block-wget"
+  }
 }
 ```
 

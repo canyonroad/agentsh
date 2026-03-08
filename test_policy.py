@@ -2,7 +2,6 @@
 """Policy enforcement test — exercises agentsh command_rules via subprocess."""
 import subprocess
 import sys
-import json
 
 passed = 0
 failed = 0

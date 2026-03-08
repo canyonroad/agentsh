@@ -209,13 +209,29 @@ jobs:
             fi
           done
           # Sign and verify each binary
+          signed=0
           for bin in build/go-universal/*; do
             echo "--- $(basename "$bin") ---"
             lipo -info "$bin"
-            codesign --force --sign "$SIGNING_IDENTITY" \
-              --options runtime --timestamp \
-              "$bin"
+            # Use minimal entitlements for shim binaries
+            if echo "$bin" | grep -q "agentsh-shell-shim"; then
+              codesign --force --sign "$SIGNING_IDENTITY" \
+                --options runtime --timestamp \
+                "$bin"
+            else
+              codesign --force --sign "$SIGNING_IDENTITY" \
+                --entitlements macos/AgentSH/AgentSH.entitlements \
+                --options runtime --timestamp \
+                "$bin"
+            fi
+            codesign --verify --strict "$bin"
+            signed=$((signed + 1))
           done
+          if [ "$signed" -eq 0 ]; then
+            echo "::error::No binaries were signed"
+            exit 1
+          fi
+          echo "Signed $signed binaries"
 
       - name: Build Swift targets (universal)
         run: |
