@@ -242,6 +242,10 @@ func execPTYGRPC(ctx context.Context, cfg *clientConfig, sessionID string, req e
 	if strings.TrimSpace(cfg.apiKey) != "" {
 		ctx = metadata.AppendToOutgoingContext(ctx, "x-api-key", strings.TrimSpace(cfg.apiKey))
 	}
+	// Propagate W3C trace context so agentsh events nest under the caller's trace
+	if tp := os.Getenv("TRACEPARENT"); tp != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "traceparent", tp)
+	}
 
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
@@ -409,6 +413,10 @@ func execPTYWS(ctx context.Context, cfg *clientConfig, sessionID string, req exe
 	h := http.Header{}
 	if strings.TrimSpace(cfg.apiKey) != "" {
 		h.Set("X-API-Key", strings.TrimSpace(cfg.apiKey))
+	}
+	// Propagate W3C trace context so agentsh events nest under the caller's trace
+	if tp := os.Getenv("TRACEPARENT"); tp != "" {
+		h.Set("Traceparent", tp)
 	}
 
 	conn, resp, err := dialer.DialContext(ctx, wsURL, h)
