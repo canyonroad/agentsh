@@ -220,7 +220,7 @@ jobs:
                 "$bin"
             else
               codesign --force --sign "$SIGNING_IDENTITY" \
-                --entitlements macos/AgentSH/AgentSH.entitlements \
+                --entitlements macos/AgentSH/agentsh/agentsh.entitlements \
                 --options runtime --timestamp \
                 "$bin"
             fi
