@@ -247,6 +247,11 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 				return nil, fmt.Errorf("add file monitor rule %v: %w", sc, err)
 			}
 		}
+		for _, sc := range legacyFileSyscallList() {
+			if err := filt.AddRule(seccomp.ScmpSyscall(sc), trap); err != nil {
+				return nil, fmt.Errorf("add legacy file rule %v: %w", sc, err)
+			}
+		}
 	}
 
 	// Blocked syscalls via kill
