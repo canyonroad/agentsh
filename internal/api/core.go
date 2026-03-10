@@ -133,11 +133,20 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		wrappedReq.Env = map[string]string{}
 	}
 
+	// Use session-specific policy engine (with expanded ${PROJECT_ROOT} etc.)
+	// for seccomp handlers, falling back to global policy if unavailable.
+	sessionPolicy := a.policy
+	if s != nil {
+		if sp := s.PolicyEngine(); sp != nil {
+			sessionPolicy = sp
+		}
+	}
+
 	envFD := 3 // first ExtraFile
 	wrappedReq.Env["AGENTSH_NOTIFY_SOCK_FD"] = strconv.Itoa(envFD)
 
 	// Check if signal filtering is available - only enable if socket pair succeeds
-	hasSignalEngine := a.policy != nil && a.policy.SignalEngine() != nil
+	hasSignalEngine := sessionPolicy != nil && sessionPolicy.SignalEngine() != nil
 	signalFilterEnabled := false
 	var sigSP *unixSocketPair
 	if hasSignalEngine {
@@ -171,10 +180,10 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 			seccompCfg.Workspace = workspace
 
 			// Derive paths from policy
-			if a.policy != nil {
-				seccompCfg.AllowExecute = landlock.DeriveExecutePathsFromPolicy(a.policy.Policy())
-				seccompCfg.AllowRead = landlock.DeriveReadPathsFromPolicy(a.policy.Policy())
-				seccompCfg.AllowWrite = landlock.DeriveWritePathsFromPolicy(a.policy.Policy())
+			if sessionPolicy != nil {
+				seccompCfg.AllowExecute = landlock.DeriveExecutePathsFromPolicy(sessionPolicy.Policy())
+				seccompCfg.AllowRead = landlock.DeriveReadPathsFromPolicy(sessionPolicy.Policy())
+				seccompCfg.AllowWrite = landlock.DeriveWritePathsFromPolicy(sessionPolicy.Policy())
 			}
 
 			// Add explicit config paths
@@ -213,10 +222,10 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	extraCfg := &extraProcConfig{
 		extraFiles:       []*os.File{sp.child},
 		env:              extraEnv,
-		envInject:        mergeEnvInject(a.cfg, a.policy),
+		envInject:        mergeEnvInject(a.cfg, sessionPolicy),
 		notifyParentSock: sp.parent,
 		notifySessionID:  sessionID,
-		notifyPolicy:     a.policy,
+		notifyPolicy:     sessionPolicy,
 		notifyStore:      a.store,
 		notifyBroker:     a.broker,
 		origCommand:      origCommand, // Store original command for signal registry
@@ -225,7 +234,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 
 	// Create execve handler if enabled (Linux-specific, will be nil on other platforms)
 	if execveEnabled {
-		extraCfg.execveHandler = createExecveHandler(a.cfg.Sandbox.Seccomp.Execve, a.policy, a.approvals)
+		extraCfg.execveHandler = createExecveHandler(a.cfg.Sandbox.Seccomp.Execve, sessionPolicy, a.approvals)
 	}
 
 	// Add signal filter config if socket pair succeeded
@@ -235,7 +244,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		extraCfg.env["AGENTSH_SIGNAL_SOCK_FD"] = strconv.Itoa(signalFD)
 		extraCfg.extraFiles = append(extraCfg.extraFiles, sigSP.child)
 		extraCfg.signalParentSock = sigSP.parent
-		extraCfg.signalEngine = a.policy.SignalEngine()
+		extraCfg.signalEngine = sessionPolicy.SignalEngine()
 		extraCfg.signalRegistry = signal.NewPIDRegistry(sessionID, os.Getpid())
 		extraCfg.signalCommandID = func() string { return s.CurrentCommandID() }
 	}
@@ -596,9 +605,10 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		return types.Session{}, code, sessionErr
 	}
 
-	// Store roots in session
+	// Store roots and session-specific policy engine
 	s.ProjectRoot = policyVars["PROJECT_ROOT"]
 	s.GitRoot = policyVars["GIT_ROOT"]
+	s.SetPolicyEngine(engine)
 
 	// Apply real-paths mode if requested
 	a.applyRealPaths(s, req.RealPaths)
@@ -1272,6 +1282,11 @@ func (a *App) ensureFUSEMount(ctx context.Context, s *session.Session) {
 	}
 	if engine == nil {
 		engine = a.policy // fall back to global
+	}
+
+	// Store session-specific engine if session doesn't have one yet
+	if s.PolicyEngine() == nil {
+		s.SetPolicyEngine(engine)
 	}
 
 	a.mountFUSEForSession(ctx, fuseMountParams{

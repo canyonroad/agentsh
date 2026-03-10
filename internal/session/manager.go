@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/pathutil"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
@@ -75,6 +76,25 @@ type Session struct {
 	// Project detection results
 	ProjectRoot string
 	GitRoot     string
+
+	// Session-specific policy engine with expanded variables (e.g. ${PROJECT_ROOT}).
+	// Used by seccomp file_monitor and execve handler for accurate path matching.
+	// Falls back to the global policy if nil.
+	policyEngine *policy.Engine
+}
+
+// SetPolicyEngine stores the session-specific policy engine with expanded variables.
+func (s *Session) SetPolicyEngine(engine *policy.Engine) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.policyEngine = engine
+}
+
+// PolicyEngine returns the session-specific policy engine, or nil if not set.
+func (s *Session) PolicyEngine() *policy.Engine {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.policyEngine
 }
 
 type Manager struct {
