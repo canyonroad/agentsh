@@ -1149,15 +1149,15 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 	}
 
 	s.SetWorkspaceMount(mountPoint)
-	// Register the source path in the MountRegistry so the
-	// seccomp FileHandler knows this path is FUSE-managed.
-	registerFUSEMount(s.ID, s.Workspace)
+	// Register the FUSE mount point (not source path) in MountRegistry
+	// so seccomp FileHandler defers only for paths accessed through FUSE.
+	registerFUSEMount(s.ID, mountPoint)
 	// Wrap unmount to also close the event channel and
 	// deregister from MountRegistry.
 	sessionID := s.ID
-	workspace := s.Workspace
+	capturedMountPoint := mountPoint
 	s.SetWorkspaceUnmount(func() error {
-		deregisterFUSEMount(sessionID, workspace)
+		deregisterFUSEMount(sessionID, capturedMountPoint)
 		close(eventChan)
 		return m.Close()
 	})
