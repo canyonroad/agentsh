@@ -20,7 +20,7 @@ func isFileSyscall(nr int32) bool {
 		unix.SYS_FCHMODAT, unix.SYS_FCHOWNAT:
 		return true
 	default:
-		return false
+		return isLegacyFileSyscall(nr)
 	}
 }
 
@@ -126,7 +126,7 @@ func extractFileArgs(args SyscallArgs) FileArgs {
 		}
 
 	default:
-		return FileArgs{}
+		return extractLegacyFileArgs(args)
 	}
 }
 
@@ -185,7 +185,7 @@ func syscallToOperation(nr int32, flags uint32) string {
 	case unix.SYS_FCHOWNAT:
 		return "chown"
 	default:
-		return ""
+		return legacySyscallToOperation(nr, flags)
 	}
 }
 
@@ -211,7 +211,7 @@ func fileSyscallName(nr int32) string {
 	case unix.SYS_FCHOWNAT:
 		return "fchownat"
 	default:
-		return ""
+		return legacyFileSyscallName(nr)
 	}
 }
 
