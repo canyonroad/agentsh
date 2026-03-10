@@ -101,6 +101,33 @@ builds:
     ldflags:
       - -s -w
 
+  # stub: exec redirect proxy for FUSE/seccomp interception
+  - id: stub-linux
+    main: ./cmd/agentsh-stub
+    binary: agentsh-stub
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+  - id: stub-darwin
+    main: ./cmd/agentsh-stub
+    binary: agentsh-stub
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
   # macwrap: XPC sandbox wrapper for macOS (requires CGO)
   # NOTE: This build requires macOS with Xcode to compile - SKIPPED in CI
   # Build locally with: CGO_ENABLED=1 go build -o bin/agentsh-macwrap ./cmd/agentsh-macwrap
@@ -124,6 +151,7 @@ archives:
       - agentsh-linux-arm64
       - shim-linux
       - unixwrap-linux-amd64
+      - stub-linux
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_linux_{{ .Arch }}"
     # unixwrap only built for amd64, so binary count differs from arm64
@@ -149,6 +177,7 @@ archives:
     ids:
       - agentsh-darwin
       - shim-darwin
+      - stub-darwin
       # macwrap-darwin excluded - requires native macOS build
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_darwin_{{ .Arch }}"
@@ -186,6 +215,7 @@ nfpms:
       - agentsh-linux-arm64
       - shim-linux
       - unixwrap-linux-amd64
+      - stub-linux
       # unixwrap not available for arm64 - users get graceful degradation
     formats:
       - deb
@@ -271,6 +301,7 @@ homebrew_casks:
     ids:
       - agentsh-darwin
       - shim-darwin
+      - stub-darwin
       # macwrap-darwin excluded - requires native macOS build
     # Repository to push the cask to
     repository:
@@ -288,6 +319,7 @@ homebrew_casks:
     binaries:
       - agentsh
       - agentsh-shell-shim
+      - agentsh-stub
       # agentsh-macwrap excluded - requires native macOS build
     # Post-install hook to remove quarantine (unsigned binary)
     hooks:
