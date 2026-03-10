@@ -54,20 +54,20 @@ func createFileHandler(cfg config.SandboxSeccompFileMonitorConfig, pol *policy.E
 	return unixmon.NewFileHandler(policyChecker, registry, emitter, enforce)
 }
 
-// registerFUSEMount records a FUSE source path in the global MountRegistry
-// so the seccomp FileHandler knows this path is FUSE-managed (audit-only).
-func registerFUSEMount(sessionID, sourcePath string) {
-	getMountRegistry().Register(sessionID, sourcePath)
+// registerFUSEMount records a FUSE mount point in the global MountRegistry
+// so the seccomp FileHandler defers enforcement for paths under the FUSE mount.
+func registerFUSEMount(sessionID, mountPoint string) {
+	getMountRegistry().Register(sessionID, mountPoint)
 	slog.Debug("registered FUSE mount in MountRegistry",
 		"session_id", sessionID,
-		"source_path", sourcePath)
+		"mount_point", mountPoint)
 }
 
-// deregisterFUSEMount removes a FUSE source path from the global MountRegistry
+// deregisterFUSEMount removes a FUSE mount point from the global MountRegistry
 // during session teardown.
-func deregisterFUSEMount(sessionID, sourcePath string) {
-	getMountRegistry().Deregister(sessionID, sourcePath)
+func deregisterFUSEMount(sessionID, mountPoint string) {
+	getMountRegistry().Deregister(sessionID, mountPoint)
 	slog.Debug("deregistered FUSE mount from MountRegistry",
 		"session_id", sessionID,
-		"source_path", sourcePath)
+		"mount_point", mountPoint)
 }

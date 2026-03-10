@@ -6,10 +6,14 @@ import (
 	"sync"
 )
 
-// MountRegistry tracks active FUSE mount source paths per session.
+// MountRegistry tracks active FUSE mount point paths per session.
+// Paths registered here are the actual FUSE mount points (e.g.,
+// sessions/{id}/mount-0), NOT the source paths being overlaid.
+// This ensures seccomp only defers enforcement for paths the process
+// accesses through the FUSE filesystem.
 type MountRegistry struct {
 	mu     sync.RWMutex
-	mounts map[string][]string // sessionID -> list of source paths
+	mounts map[string][]string // sessionID -> list of mount point paths
 }
 
 // NewMountRegistry creates a new MountRegistry.
@@ -19,23 +23,23 @@ func NewMountRegistry() *MountRegistry {
 	}
 }
 
-// Register adds a source path to the session's mount list.
-func (r *MountRegistry) Register(sessionID, sourcePath string) {
+// Register adds a mount point path to the session's mount list.
+func (r *MountRegistry) Register(sessionID, mountPoint string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.mounts[sessionID] = append(r.mounts[sessionID], sourcePath)
+	r.mounts[sessionID] = append(r.mounts[sessionID], mountPoint)
 }
 
-// Deregister removes a specific source path from the session's mount list.
+// Deregister removes a specific mount point path from the session's mount list.
 // If the list becomes empty, the session key is deleted.
-func (r *MountRegistry) Deregister(sessionID, sourcePath string) {
+func (r *MountRegistry) Deregister(sessionID, mountPoint string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	paths := r.mounts[sessionID]
 	for i, p := range paths {
-		if p == sourcePath {
+		if p == mountPoint {
 			// Remove element by swapping with last and truncating.
 			paths[i] = paths[len(paths)-1]
 			paths = paths[:len(paths)-1]

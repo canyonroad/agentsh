@@ -357,20 +357,21 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 					continue
 				}
 
-				// Register in MountRegistry so seccomp FileHandler
-				// knows this path is FUSE-managed (audit-only).
-				registerFUSEMount(s.ID, mountPath)
+				// Register the FUSE mount point (not source path) in MountRegistry
+				// so seccomp FileHandler defers only for paths the process
+				// actually accesses through the FUSE filesystem.
+				registerFUSEMount(s.ID, mountPoint)
 
 				// Capture for closure
 				sessionID := s.ID
-				sourcePath := mountPath
+				capturedMountPoint := mountPoint
 				mounts = append(mounts, session.ResolvedMount{
 					Path:         mountPath,
 					Policy:       spec.Policy,
 					MountPoint:   mountPoint,
 					PolicyEngine: policyEngine,
 					Unmount: func() error {
-						deregisterFUSEMount(sessionID, sourcePath)
+						deregisterFUSEMount(sessionID, capturedMountPoint)
 						close(eventChan)
 						return m.Close()
 					},

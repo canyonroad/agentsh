@@ -244,6 +244,14 @@ sandbox:
     # Reserved for future hardening (not implemented yet).
     enabled: false
     profile: "default"             # or path to custom profile
+    # File I/O interception via seccomp-notify.
+    # When enabled, seccomp intercepts file syscalls (openat, unlinkat, etc.)
+    # and evaluates them against the active policy's file_rules.
+    file_monitor:
+      enabled: true
+      # Enforce file policy directly via seccomp, even when FUSE is unavailable.
+      # Without this, denied file operations are audit-only when FUSE is not active.
+      enforce_without_fuse: true
     
   # cgroups settings (v2)
   cgroups:

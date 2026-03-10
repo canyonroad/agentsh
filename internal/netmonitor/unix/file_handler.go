@@ -78,7 +78,9 @@ func (h *FileHandler) Handle(req FileRequest) FileResult {
 		return FileResult{Action: ActionContinue}
 	}
 
-	// 2. Path under FUSE mount — audit-only; let FUSE handle enforcement.
+	// 2. Path under FUSE mount point — audit-only; FUSE handles enforcement.
+	//    Only defers when the resolved syscall path is actually under a FUSE
+	//    mount point (e.g., sessions/{id}/mount-0), not a source path.
 	if h.registry != nil && h.registry.IsUnderFUSEMount(req.SessionID, req.Path) {
 		dec := h.policy.CheckFile(req.Path, req.Operation)
 		shadowDeny := dec.EffectiveDecision == "deny"
