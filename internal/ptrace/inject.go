@@ -4,6 +4,7 @@ package ptrace
 
 import (
 	"fmt"
+	"log/slog"
 
 	"golang.org/x/sys/unix"
 )
@@ -41,26 +42,42 @@ func (t *Tracer) injectSyscall(tid int, savedRegs Regs, nr int, args ...uint64) 
 		return 0, fmt.Errorf("inject setRegs: %w", err)
 	}
 
+	// Best-effort register restore on any failure after setRegs succeeds.
+	var injectErr error
+	defer func() {
+		if injectErr != nil {
+			if restoreErr := t.setRegs(tid, savedRegs); restoreErr != nil {
+				slog.Warn("inject: failed to restore registers after error",
+					"tid", tid, "injectErr", injectErr, "restoreErr", restoreErr)
+			}
+		}
+	}()
+
 	// Phase 1: resume -> wait for syscall-enter stop.
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
-		return 0, fmt.Errorf("inject resume-enter: %w", err)
+		injectErr = fmt.Errorf("inject resume-enter: %w", err)
+		return 0, injectErr
 	}
 	if err := t.waitForSyscallStop(tid); err != nil {
-		return 0, fmt.Errorf("inject wait-enter: %w", err)
+		injectErr = fmt.Errorf("inject wait-enter: %w", err)
+		return 0, injectErr
 	}
 
 	// Phase 2: resume -> wait for syscall-exit stop.
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
-		return 0, fmt.Errorf("inject resume-exit: %w", err)
+		injectErr = fmt.Errorf("inject resume-exit: %w", err)
+		return 0, injectErr
 	}
 	if err := t.waitForSyscallStop(tid); err != nil {
-		return 0, fmt.Errorf("inject wait-exit: %w", err)
+		injectErr = fmt.Errorf("inject wait-exit: %w", err)
+		return 0, injectErr
 	}
 
 	// Read return value.
 	retRegs, err := t.getRegs(tid)
 	if err != nil {
-		return 0, fmt.Errorf("inject getRegs: %w", err)
+		injectErr = fmt.Errorf("inject getRegs: %w", err)
+		return 0, injectErr
 	}
 	ret := retRegs.ReturnValue()
 
@@ -84,10 +101,11 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 		if status.Stopped() && status.StopSignal() == unix.SIGTRAP|0x80 {
 			return nil
 		}
-		// If the tracee received a signal during injection, suppress it
-		// and continue waiting for the syscall stop.
+		// If the tracee received a signal during injection, reinject it
+		// so it is not lost, then continue waiting for the syscall stop.
 		if status.Stopped() {
-			if err := unix.PtraceSyscall(tid, 0); err != nil {
+			sig := int(status.StopSignal())
+			if err := unix.PtraceSyscall(tid, sig); err != nil {
 				return fmt.Errorf("inject re-resume tid %d: %w", tid, err)
 			}
 			continue

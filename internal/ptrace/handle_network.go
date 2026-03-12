@@ -150,6 +150,8 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 	}
 
 	switch action {
+	case "allow":
+		t.allowSyscall(tid)
 	case "deny":
 		errno := result.Errno
 		if errno == 0 {
@@ -159,7 +161,8 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 	case "redirect":
 		t.redirectConnect(ctx, tid, regs, result)
 	default:
-		t.allowSyscall(tid)
+		slog.Warn("handleNetwork: unknown action, denying", "tid", tid, "action", action)
+		t.denySyscall(tid, int(unix.EACCES))
 	}
 }
 

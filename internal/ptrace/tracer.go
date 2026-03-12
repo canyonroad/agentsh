@@ -516,6 +516,7 @@ func (t *Tracer) handleExit(tid int) {
 	t.mu.Lock()
 	state := t.tracees[tid]
 	var tgid int
+	lastThread := true
 	if state != nil {
 		tgid = state.TGID
 		if state.MemFD >= 0 {
@@ -526,11 +527,18 @@ func (t *Tracer) handleExit(tid int) {
 			delete(t.parkedTracees, tid)
 			slog.Warn("ptrace: parked tracee exited before approval", "tid", tid)
 		}
+		// Check if any remaining threads belong to the same TGID.
+		for _, other := range t.tracees {
+			if other.TGID == tgid {
+				lastThread = false
+				break
+			}
+		}
 		t.metrics.SetTraceeCount(len(t.tracees))
 	}
 	t.mu.Unlock()
 
-	if state != nil {
+	if state != nil && lastThread {
 		t.invalidateScratchPage(tgid)
 	}
 }
@@ -610,6 +618,8 @@ func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
 	})
 
 	switch result.Action {
+	case "", "continue":
+		t.allowSyscall(tid)
 	case "deny":
 		errno := result.Errno
 		if errno == 0 {
@@ -619,7 +629,8 @@ func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
 	case "redirect":
 		t.redirectExec(ctx, tid, regs, result)
 	default:
-		t.allowSyscall(tid)
+		slog.Warn("handleExecve: unknown action, denying", "tid", tid, "action", result.Action)
+		t.denySyscall(tid, int(unix.EACCES))
 	}
 }
 
