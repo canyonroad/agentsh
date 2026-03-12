@@ -20,11 +20,14 @@ type SecurityCapabilities struct {
 	FUSE            bool // filesystem interception
 	Capabilities    bool // can drop capabilities (always true)
 	PIDNamespace    bool // isolated PID namespace
+	Ptrace          bool // SYS_PTRACE capability available
+	PtraceEnabled   bool // ptrace enforcement enabled in config
 }
 
 // SecurityMode represents the security enforcement mode.
 const (
 	ModeFull         = "full"
+	ModePtrace       = "ptrace"
 	ModeLandlock     = "landlock"
 	ModeLandlockOnly = "landlock-only"
 	ModeMinimal      = "minimal"
@@ -48,6 +51,7 @@ func DetectSecurityCapabilities() *SecurityCapabilities {
 	caps.EBPF = checkeBPF().Available
 	caps.FUSE = checkFUSE()
 	caps.PIDNamespace = checkPIDNamespace()
+	caps.Ptrace = checkPtraceCapability()
 
 	return caps
 }
@@ -57,6 +61,11 @@ func (c *SecurityCapabilities) SelectMode() string {
 	// Full mode: all features available
 	if c.Seccomp && c.EBPF && c.FUSE {
 		return ModeFull
+	}
+
+	// Ptrace mode: SYS_PTRACE available and enabled
+	if c.Ptrace && c.PtraceEnabled {
+		return ModePtrace
 	}
 
 	// Landlock mode: Landlock + FUSE (no seccomp)

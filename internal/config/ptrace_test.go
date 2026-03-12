@@ -1,0 +1,105 @@
+// internal/config/ptrace_test.go
+package config
+
+import (
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+func TestDefaultPtraceConfig(t *testing.T) {
+	cfg := DefaultPtraceConfig()
+
+	if cfg.Enabled {
+		t.Error("ptrace should be disabled by default")
+	}
+	if cfg.AttachMode != "children" {
+		t.Errorf("attach_mode: got %q, want %q", cfg.AttachMode, "children")
+	}
+	if !cfg.Trace.Execve || !cfg.Trace.File || !cfg.Trace.Network || !cfg.Trace.Signal {
+		t.Error("all trace classes should be enabled by default")
+	}
+	if !cfg.Performance.SeccompPrefilter {
+		t.Error("seccomp_prefilter should be enabled by default")
+	}
+	if cfg.Performance.MaxTracees != 500 {
+		t.Errorf("max_tracees: got %d, want 500", cfg.Performance.MaxTracees)
+	}
+	if cfg.Performance.MaxHoldMs != 5000 {
+		t.Errorf("max_hold_ms: got %d, want 5000", cfg.Performance.MaxHoldMs)
+	}
+	if cfg.MaskTracerPid != "off" {
+		t.Errorf("mask_tracer_pid: got %q, want %q", cfg.MaskTracerPid, "off")
+	}
+	if cfg.OnAttachFailure != "fail_open" {
+		t.Errorf("on_attach_failure: got %q, want %q", cfg.OnAttachFailure, "fail_open")
+	}
+}
+
+func TestPtraceConfig_YAMLRoundTrip(t *testing.T) {
+	orig := DefaultPtraceConfig()
+	orig.Enabled = true
+	orig.TargetPID = 42
+
+	data, err := yaml.Marshal(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded SandboxPtraceConfig
+	if err := yaml.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+
+	if decoded.TargetPID != 42 {
+		t.Errorf("target_pid: got %d, want 42", decoded.TargetPID)
+	}
+	if !decoded.Enabled {
+		t.Error("enabled not preserved")
+	}
+}
+
+func TestPtraceConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		modify  func(*SandboxPtraceConfig)
+		wantErr bool
+	}{
+		{"defaults are valid", func(c *SandboxPtraceConfig) {}, false},
+		{"pid mode with target_pid", func(c *SandboxPtraceConfig) {
+			c.AttachMode = "pid"
+			c.TargetPID = 123
+		}, false},
+		{"pid mode with target_pid_file", func(c *SandboxPtraceConfig) {
+			c.AttachMode = "pid"
+			c.TargetPIDFile = "/shared/workload.pid"
+		}, false},
+		{"pid mode without target", func(c *SandboxPtraceConfig) {
+			c.AttachMode = "pid"
+		}, true},
+		{"invalid attach_mode", func(c *SandboxPtraceConfig) {
+			c.AttachMode = "sidecar"
+		}, true},
+		{"invalid on_attach_failure", func(c *SandboxPtraceConfig) {
+			c.OnAttachFailure = "panic"
+		}, true},
+		{"invalid mask_tracer_pid", func(c *SandboxPtraceConfig) {
+			c.MaskTracerPid = "ptrace"
+		}, true},
+		{"max_hold_ms zero", func(c *SandboxPtraceConfig) {
+			c.Performance.MaxHoldMs = 0
+		}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultPtraceConfig()
+			cfg.Enabled = true
+			tt.modify(&cfg)
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}

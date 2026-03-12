@@ -18,7 +18,7 @@ agentsh is designed to mitigate risks from **semi-trusted AI agents** operating 
 | Credential theft via files | Deny rules for `.ssh/`, `.aws/`, `.env`, etc. |
 | Credential theft via environment | Deny list for secrets + dangerous vars (LD_PRELOAD, etc.) |
 | Unauthorized network access | eBPF/policy-based network filtering |
-| Dangerous command execution | Command allowlists with args pattern matching |
+| Dangerous command execution | Command allowlists with args pattern matching; kernel-level enforcement via seccomp or ptrace |
 | Resource exhaustion | cgroup limits (memory, CPU, PIDs) |
 | Destructive operations | Approval workflows, soft-delete to trash, checkpoint/rollback |
 | PII leakage to LLMs | Embedded proxy with DLP redaction before requests reach provider |
@@ -51,6 +51,10 @@ agentsh is **not** a full security sandbox like a VM or container with seccomp. 
 │  │  │   Policy    │  │    FUSE     │  │    eBPF      │   │  │
 │  │  │   Engine    │  │  Intercept  │  │   Network    │   │  │
 │  │  └─────────────┘  └─────────────┘  └──────────────┘   │  │
+│  │  ┌─────────────┐  ┌─────────────┐                     │  │
+│  │  │   Ptrace    │  │   Seccomp   │                     │  │
+│  │  │  Intercept  │  │   Filter    │                     │  │
+│  │  └─────────────┘  └─────────────┘                     │  │
 │  │  ┌─────────────────────────────────────────────────┐  │  │
 │  │  │              AGENT SANDBOX                       │  │  │
 │  │  │  • Restricted file access (/workspace only)     │  │  │
@@ -133,6 +137,31 @@ sandbox:
 - **Transparent command unwrapping:** Wrapper commands (env, sudo, nice, ld-linux, etc.) are unwrapped to find the real payload; both wrapper and payload are evaluated with the most restrictive decision winning
 
 **Default behavior:** Deny if no rule matches.
+
+### Command Execution Enforcement (ptrace)
+
+In environments where seccomp user-notify is unavailable (e.g. AWS Fargate, restricted containers), agentsh uses ptrace-based syscall interception as an alternative enforcement mechanism.
+
+**Implementation:**
+- Uses `PTRACE_SEIZE` to attach without stopping the target process
+- Intercepts `execve(2)` and `execveat(2)` syscalls at entry
+- Reads filename and argv from tracee process memory via `/proc/<tid>/mem`
+- Evaluates the same policy rules as seccomp mode
+- Deny: sets syscall number to -1 (invalid), then fixes up return value with `-EACCES` on exit
+- Auto-attaches to fork/clone/vfork children via `PTRACE_O_TRACECLONE`/`TRACEFORK`/`TRACEVFORK`
+
+**Security properties:**
+- Kernel-level enforcement: the denied syscall never executes
+- Process tree tracking: all descendants are traced, preventing escape via fork+exec
+- `execveat` with `AT_EMPTY_PATH` (fd-based exec) is intercepted alongside regular `execve`
+- Path resolution: relative paths and fd-based paths are resolved to absolute paths for policy evaluation
+
+**Limitations:**
+- Currently intercepts execve/execveat only (Phase 1); file, network, and signal syscalls are classified but auto-allowed
+- Small race window between fork and ptrace auto-attach
+- Requires `SYS_PTRACE` capability (Linux-only)
+
+**Configuration:** See [Security Modes - Ptrace Configuration](docs/security-modes.md#ptrace-configuration).
 
 ### Environment Variables
 

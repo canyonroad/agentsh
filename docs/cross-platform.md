@@ -16,19 +16,22 @@ Linux security features vary significantly depending on kernel version, runtime 
 
 ### Environment Compatibility Matrix
 
-| Environment | seccomp | eBPF | Landlock | FUSE | Capabilities |
-|-------------|---------|------|----------|------|--------------|
-| Native Linux (kernel 6.7+) | ✅ | ✅ | ✅ (ABI v4) | ✅ | ✅ |
-| Native Linux (kernel 5.13-6.6) | ✅ | ✅ | ✅ (ABI v1-3) | ✅ | ✅ |
-| Native Linux (kernel < 5.13) | ✅ | ✅ | ❌ | ✅ | ✅ |
-| Docker (privileged) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Docker (unprivileged) | ❌* | ❌ | ✅ | ❌† | ✅ |
-| Kubernetes (standard) | ❌* | ❌ | ✅ | ❌† | ✅ |
-| Nested containers | ❌ | ❌ | ✅ | ❌ | ✅ |
-| gVisor/Firecracker | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Environment | seccomp | eBPF | Landlock | FUSE | ptrace | Capabilities |
+|-------------|---------|------|----------|------|--------|--------------|
+| Native Linux (kernel 6.7+) | ✅ | ✅ | ✅ (ABI v4) | ✅ | ✅ | ✅ |
+| Native Linux (kernel 5.13-6.6) | ✅ | ✅ | ✅ (ABI v1-3) | ✅ | ✅ | ✅ |
+| Native Linux (kernel < 5.13) | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Docker (privileged) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Docker (unprivileged) | ❌* | ❌ | ✅ | ❌† | ❌‡ | ✅ |
+| Docker (--cap-add SYS_PTRACE) | ❌* | ❌ | ✅ | ❌† | ✅ | ✅ |
+| Kubernetes (standard) | ❌* | ❌ | ✅ | ❌† | ❌‡ | ✅ |
+| AWS Fargate | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Nested containers | ❌ | ❌ | ✅ | ❌ | ❌‡ | ✅ |
+| gVisor/Firecracker | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 
 \* Requires seccomp user-notify support in container runtime
 † Requires `/dev/fuse` device and `SYS_ADMIN` capability
+‡ Requires `SYS_PTRACE` capability (add via `--cap-add SYS_PTRACE` or securityContext)
 
 ### Security Mode by Environment
 
@@ -37,6 +40,7 @@ Based on available features, agentsh selects one of four security modes:
 | Mode | Score | Typical Environment | Key Protections |
 |------|-------|---------------------|-----------------|
 | `full` | 100% | Native Linux, privileged containers | seccomp syscall filtering, eBPF network, FUSE filesystem |
+| `ptrace` | ~90% | AWS Fargate, containers with SYS_PTRACE | ptrace execve interception, shim policy enforcement |
 | `landlock` | ~85% | Unprivileged containers with FUSE | Landlock kernel sandbox + FUSE fine-grained control |
 | `landlock-only` | ~80% | Unprivileged containers, restricted runtimes | Landlock kernel sandbox, shim policy enforcement |
 | `minimal` | ~50% | gVisor, Firecracker, highly restricted | Capability dropping, shim policy only |
@@ -73,6 +77,20 @@ When eBPF is unavailable:
 | Connection tracking | Kernel-level | ❌ | Landlock TCP (kernel 6.7+) |
 | DNS inspection | Deep | Proxy-level | DNS proxy |
 
+### What You Gain With ptrace
+
+When seccomp user-notify is unavailable but `SYS_PTRACE` capability is present (e.g. AWS Fargate), ptrace mode provides kernel-level execve interception:
+
+| Feature | Without ptrace | With ptrace | Notes |
+|---------|----------------|-------------|-------|
+| Execution control | Shim only | Kernel-level | Intercepts execve/execveat syscalls |
+| Deny enforcement | Shim check | Syscall invalidation | Returns -EACCES before exec runs |
+| Fork/clone tracking | No | Yes | Auto-attaches to child processes |
+| Process tree depth | No | Yes | Tracks nesting for policy decisions |
+| execveat support | No | Yes | Handles fd-based exec (AT_EMPTY_PATH) |
+
+**Typical use case:** AWS Fargate tasks where seccomp user-notify and eBPF are unavailable, but `SYS_PTRACE` is granted via `linuxParameters.capabilities.add`.
+
 ### Detection and Fallback
 
 agentsh performs capability detection at startup:
@@ -85,11 +103,12 @@ INFO  security capabilities detected
         landlock_abi=4               # Kernel 6.7+
         landlock_network=true        # Can restrict TCP
         fuse=false                   # No /dev/fuse
+        ptrace=true                  # SYS_PTRACE available
         capabilities=true            # Can drop caps
 
 INFO  selected security mode
-        mode=landlock-only
-        protection_score=80%
+        mode=ptrace
+        protection_score=90%
 ```
 
 ### Forcing Specific Modes
@@ -130,6 +149,7 @@ See [Security Modes](security-modes.md) for detailed mode configuration.
 - **Process execution stats:** CPU user/system time returned in exec results on all platforms. Peak memory available on Unix (Linux/macOS) but not Windows.
 - **Registry monitoring + policy enforcement:** Windows-only, requires mini filter driver (see below).
 - **seccomp syscall filtering:** Linux-only via seccomp user-notify for unix socket enforcement.
+- **ptrace execve interception:** Linux-only via PTRACE_SEIZE for execve/execveat enforcement in restricted containers (e.g. AWS Fargate with SYS_PTRACE).
 - **XPC/Mach IPC control:** macOS-only via sandbox profiles with mach-lookup restrictions. See [macOS XPC Sandbox](macos-xpc-sandbox.md).
 - **Full namespace isolation:** Linux, Lima VM, and WSL2 via `unshare` (user, mount, PID, network namespaces).
 - **eBPF network enforcement:** Linux-only, requires cgroups v2 and root/CAP_BPF.

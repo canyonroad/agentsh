@@ -29,6 +29,7 @@ type Capabilities struct {
 
 	// Syscall filtering
 	HasSeccomp bool `json:"has_seccomp"`
+	HasPtrace  bool `json:"has_ptrace"`
 
 	// Resource control
 	HasCgroups           bool `json:"has_cgroups"`

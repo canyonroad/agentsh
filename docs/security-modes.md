@@ -7,6 +7,7 @@ agentsh supports multiple security modes depending on available kernel features.
 Security enforcement is provided through a combination of:
 - **Landlock** - Kernel-enforced filesystem and network sandboxing
 - **Seccomp** - Syscall filtering with user-notify support
+- **Ptrace** - Syscall-level execve interception via PTRACE_SEIZE
 - **FUSE** - Filesystem interception for fine-grained control
 - **eBPF** - Network monitoring and policy enforcement
 - **Capability dropping** - Linux capability restrictions
@@ -16,6 +17,7 @@ Security enforcement is provided through a combination of:
 | Mode | Requirements | Protection Level | Description |
 |------|--------------|------------------|-------------|
 | `full` | seccomp + eBPF + FUSE | 100% | Full security with all features |
+| `ptrace` | SYS_PTRACE capability | ~90% | Execve interception via ptrace (for restricted containers) |
 | `landlock` | Landlock + FUSE | ~85% | Kernel-enforced execution and FS control |
 | `landlock-only` | Landlock | ~80% | Landlock without FUSE granularity |
 | `minimal` | (none) | ~50% | Capability dropping and shim policy only |
@@ -30,6 +32,10 @@ By default, agentsh auto-detects the best available mode at startup.
 ┌─────────────────────────────────────────────┐
 │ Seccomp + eBPF + FUSE available?            │
 │   Yes → full mode                           │
+│   No ↓                                      │
+├─────────────────────────────────────────────┤
+│ SYS_PTRACE capability available?            │
+│   Yes → ptrace mode                         │
 │   No ↓                                      │
 ├─────────────────────────────────────────────┤
 │ Landlock + FUSE available?                  │
@@ -48,7 +54,7 @@ By default, agentsh auto-detects the best available mode at startup.
 
 ```yaml
 security:
-  mode: auto              # auto | full | landlock | landlock-only | minimal
+  mode: auto              # auto | full | ptrace | landlock | landlock-only | minimal
   strict: false           # Fail if mode requirements not met
   minimum_mode: ""        # Fail if auto-detect picks worse than this
   warn_degraded: true     # Log warnings when running in degraded mode
@@ -108,20 +114,51 @@ capabilities:
   #   - CAP_NET_RAW
 ```
 
+### Ptrace Configuration
+
+When ptrace mode is selected (environments with `SYS_PTRACE` but no seccomp user-notify, e.g. AWS Fargate):
+
+```yaml
+ptrace:
+  enabled: true
+
+  trace:
+    execve: true        # Intercept execve/execveat syscalls
+    file: false         # File syscall tracing (future)
+    network: false      # Network syscall tracing (future)
+    signal: false       # Signal syscall tracing (future)
+
+  performance:
+    max_tracees: 1024           # Maximum concurrent traced threads
+    max_hold_ms: 5000           # Maximum time to hold a syscall for policy
+    seccomp_prefilter: true     # Use seccomp-BPF to filter non-exec syscalls
+    on_attach_failure: "warn"   # "warn" or "fail"
+```
+
+**How it works:**
+- Uses `PTRACE_SEIZE` (non-stopping) to attach to child processes and their descendants
+- Intercepts `execve`/`execveat` syscalls at entry, reads filename/argv from tracee memory
+- Policy evaluation via the same `ExecHandler` as seccomp mode
+- Deny: invalidates syscall number (`nr = -1`), fixes up return value with `-EACCES`
+- Two tracing modes: `TRACESYSGOOD` (all syscalls) or `TRACESECCOMP` (prefiltered via seccomp-BPF)
+- Process tree tracking for fork/clone/vfork descendants with depth calculation
+
 ## Feature Matrix
 
 ### By Security Mode
 
-| Feature | full | landlock | landlock-only | minimal |
-|---------|------|----------|---------------|---------|
-| Execution control (shim) | Yes | Yes | Yes | Yes |
-| Execution control (kernel) | seccomp | Landlock | Landlock | No |
-| Filesystem (fine-grained) | FUSE | FUSE | Landlock | No |
-| Unix sockets (path-based) | seccomp | Landlock | Landlock | No |
-| Unix sockets (abstract) | seccomp | No | No | No |
-| Signal interception | seccomp | No* | No* | No* |
-| Network (kernel) | eBPF | Landlock** | Landlock** | No |
-| Resource limits | cgroups | cgroups | cgroups | cgroups |
+| Feature | full | ptrace | landlock | landlock-only | minimal |
+|---------|------|--------|----------|---------------|---------|
+| Execution control (shim) | Yes | Yes | Yes | Yes | Yes |
+| Execution control (kernel) | seccomp | ptrace | Landlock | Landlock | No |
+| Filesystem (fine-grained) | FUSE | No* | FUSE | Landlock | No |
+| Unix sockets (path-based) | seccomp | No | Landlock | Landlock | No |
+| Unix sockets (abstract) | seccomp | No | No | No | No |
+| Signal interception | seccomp | No | No* | No* | No* |
+| Network (kernel) | eBPF | No | Landlock** | Landlock** | No |
+| Resource limits | cgroups | cgroups | cgroups | cgroups | cgroups |
+
+*ptrace mode currently intercepts execve/execveat only. File, network, and signal syscall tracing is classified but not yet enforced.
 
 *Relies on PID namespace isolation + dropped CAP_KILL
 **Requires kernel 6.7+ (Landlock ABI v4)
@@ -137,6 +174,28 @@ capabilities:
 | v5 | 6.10+ | IOCTL restrictions |
 
 ## Known Limitations
+
+### In ptrace Mode
+
+1. **Execve-only interception (Phase 1)**
+   - Currently only `execve` and `execveat` syscalls are intercepted for policy enforcement
+   - File, network, and signal syscalls are classified but auto-allowed
+   - Future phases will add enforcement for these syscall categories
+
+2. **No FUSE or eBPF**
+   - Ptrace mode is designed for environments without seccomp user-notify (e.g. AWS Fargate)
+   - Fine-grained filesystem interception and eBPF network monitoring are unavailable
+   - Mitigation: shim-based policy checks still apply
+
+3. **Performance overhead**
+   - Each traced syscall requires two context switches (entry + exit) in TRACESYSGOOD mode
+   - Seccomp prefilter (`seccomp_prefilter: true`) reduces overhead by only trapping exec syscalls
+   - Single-threaded event loop may become a bottleneck with many concurrent tracees
+
+4. **Attach race window**
+   - Between `fork()` and `PTRACE_SEIZE`, a brief window exists where the child is untraced
+   - Ptrace auto-attaches to fork/clone/vfork children via `PTRACE_O_TRACECLONE` etc.
+   - The initial attach to the root process has a small race if the process execs immediately
 
 ### In landlock and landlock-only Modes
 
@@ -185,6 +244,7 @@ security:
 | Mode | Required Capabilities |
 |------|----------------------|
 | `full` | Seccomp with user-notify, eBPF, FUSE |
+| `ptrace` | SYS_PTRACE capability |
 | `landlock` | Landlock, FUSE |
 | `landlock-only` | Landlock |
 | `minimal` | (none) |
@@ -213,6 +273,7 @@ INFO  security capabilities detected
         landlock_network=true
         ebpf=false
         fuse=true
+        ptrace=false
         capabilities=true
 WARN  running in degraded security mode
         mode=landlock

@@ -41,6 +41,12 @@ var linuxTips = []tipDefinition{
 		Impact:   "Resource limits unavailable",
 		Action:   "Enable cgroups v2 in kernel or container runtime",
 	},
+	{
+		Feature:  "ptrace",
+		CheckKey: "ptrace",
+		Impact:   "Syscall-level enforcement via ptrace unavailable",
+		Action:   "Add SYS_PTRACE capability to enable ptrace-based enforcement for restricted runtimes",
+	},
 }
 
 var darwinTips = []tipDefinition{

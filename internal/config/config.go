@@ -345,6 +345,7 @@ type SandboxConfig struct {
 	Seccomp     SandboxSeccompConfig     `yaml:"seccomp"`
 	XPC         SandboxXPCConfig         `yaml:"xpc"`
 	MCP         SandboxMCPConfig         `yaml:"mcp"`
+	Ptrace      SandboxPtraceConfig      `yaml:"ptrace"`
 
 	// EnvInject specifies environment variables to inject into every command execution.
 	// These bypass policy filtering as they are operator-configured (trusted).

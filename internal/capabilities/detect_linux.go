@@ -19,6 +19,7 @@ func Detect() (*DetectResult, error) {
 		"cgroups_v2":          checkCgroupsV2().Available,
 		"pid_namespace":       secCaps.PIDNamespace,
 		"capabilities_drop":   secCaps.Capabilities,
+		"ptrace":              secCaps.Ptrace,
 	}
 
 	mode := secCaps.SelectMode()
@@ -65,6 +66,8 @@ func modeToScore(mode string) int {
 	switch mode {
 	case ModeFull:
 		return 100
+	case ModePtrace:
+		return 90
 	case ModeLandlock:
 		return 85
 	case ModeLandlockOnly:
