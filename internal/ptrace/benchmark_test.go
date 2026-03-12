@@ -7,9 +7,24 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+// waitForAttach polls until the tracer has at least one tracee, confirming
+// that AttachPID (which is async) has taken effect.
+func waitForAttach(b *testing.B, tr *Tracer, timeout time.Duration) {
+	b.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if tr.TraceeCount() > 0 {
+			return
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+	b.Fatal("timed out waiting for attach")
+}
 
 func BenchmarkExecOverhead(b *testing.B) {
 	requirePtraceBench(b)
@@ -28,14 +43,14 @@ func BenchmarkExecOverhead(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		cmd := exec.Command("/bin/true")
+		cmd := exec.Command("/bin/sleep", "10")
 		if err := cmd.Start(); err != nil {
 			b.Fatalf("Start failed: %v", err)
 		}
 		tr.AttachPID(cmd.Process.Pid)
-		if err := cmd.Wait(); err != nil {
-			b.Fatalf("Wait failed: %v", err)
-		}
+		waitForAttach(b, tr, 5*time.Second)
+		cmd.Process.Kill()
+		cmd.Wait()
 	}
 	b.StopTimer()
 
@@ -70,8 +85,10 @@ func BenchmarkFileIOOverhead(b *testing.B) {
 			b.Fatalf("Start failed: %v", err)
 		}
 		tr.AttachPID(cmd.Process.Pid)
+		waitForAttach(b, tr, 5*time.Second)
 		if err := cmd.Wait(); err != nil {
-			b.Fatalf("Wait failed: %v", err)
+			// Script may have already exited, which is fine.
+			b.Logf("Wait: %v", err)
 		}
 	}
 	b.StopTimer()

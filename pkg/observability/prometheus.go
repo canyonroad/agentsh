@@ -548,7 +548,7 @@ func (c *PrometheusCollector) writePtraceAttachFailures(w http.ResponseWriter) {
 	for _, reason := range keys {
 		ptr, _ := c.ptraceAttachFails.Load(reason)
 		n := ptr.(*atomic.Uint64).Load()
-		fmt.Fprintf(w, "agentsh_ptrace_attach_failures_total{reason=%q} %d\n", escapeLabelValue(reason), n)
+		fmt.Fprintf(w, "agentsh_ptrace_attach_failures_total{reason=%q} %d\n", reason, n)
 	}
 	fmt.Fprint(w, "\n")
 }
