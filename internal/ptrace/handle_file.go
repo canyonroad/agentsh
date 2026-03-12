@@ -107,7 +107,8 @@ func resolvePathNoFollow(tid int, dirfd int, path string) (string, error) {
 }
 
 // resolveToAbsolute converts a potentially relative path to an absolute path
-// using the dirfd for resolution.
+// using the dirfd for resolution. Does NOT clean the path (no filepath.Join)
+// to preserve ".." components for correct symlink traversal semantics.
 func resolveToAbsolute(tid int, dirfd int, path string) (string, error) {
 	if filepath.IsAbs(path) {
 		return path, nil
@@ -116,7 +117,7 @@ func resolveToAbsolute(tid int, dirfd int, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve dirfd %d: %w", dirfd, err)
 	}
-	return filepath.Join(base, path), nil
+	return base + "/" + path, nil
 }
 
 // resolveParentFallback resolves the parent directory with EvalSymlinks and
@@ -205,27 +206,31 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		pathPtr := regs.Arg(1)
 		howPtr := regs.Arg(2)
 		howSize := regs.Arg(3)
-		// We need at least 8 bytes to read the flags field.
-		if howSize < 8 || howSize > 24 {
-			return "", "", 0, fmt.Errorf("openat2 size out of range: %d", howSize)
+		// The kernel requires at least 24 bytes (OPEN_HOW_SIZE_VER0).
+		// Future kernels may extend the struct, so allow larger sizes.
+		if howSize < 24 {
+			return "", "", 0, fmt.Errorf("openat2 size too small: %d", howSize)
 		}
 		rawPath, err := t.readString(tid, pathPtr, 4096)
 		if err != nil {
 			return "", "", 0, err
 		}
-		howBuf := make([]byte, howSize)
+		// Read at least the first 24 bytes (flags + mode + resolve).
+		readSize := howSize
+		if readSize > 64 {
+			readSize = 64 // Cap read to avoid excessive memory allocation
+		}
+		howBuf := make([]byte, readSize)
 		if err := t.readBytes(tid, howPtr, howBuf); err != nil {
 			return "", "", 0, fmt.Errorf("read open_how: %w", err)
 		}
 		flags = int(binary.NativeEndian.Uint64(howBuf[0:8]))
-		// If resolve field is present and non-zero, the kernel applies
-		// restricted path resolution (RESOLVE_IN_ROOT, RESOLVE_BENEATH, etc.)
-		// that we cannot replicate. Fail closed.
-		if howSize >= 24 {
-			resolve := binary.NativeEndian.Uint64(howBuf[16:24])
-			if resolve != 0 {
-				return "", "", 0, fmt.Errorf("openat2 resolve flags 0x%x not supported", resolve)
-			}
+		// If resolve flags are set, the kernel applies restricted path
+		// resolution (RESOLVE_IN_ROOT, RESOLVE_BENEATH, etc.) that we
+		// cannot replicate. Fail closed.
+		resolve := binary.NativeEndian.Uint64(howBuf[16:24])
+		if resolve != 0 {
+			return "", "", 0, fmt.Errorf("openat2 resolve flags 0x%x not supported", resolve)
 		}
 		path, err = resolvePath(tid, dirfd, rawPath)
 		return path, "", flags, err
