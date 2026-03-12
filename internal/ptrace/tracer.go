@@ -264,6 +264,10 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 	}
 	regs.SetSyscallNr(-1)
 	if err := t.setRegs(tid, regs); err != nil {
+		if errors.Is(err, unix.ESRCH) {
+			t.handleExit(tid)
+			return nil
+		}
 		t.mu.Lock()
 		state := t.tracees[tid]
 		tgid := tid
@@ -282,7 +286,14 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 	}
 	t.mu.Unlock()
 
-	return unix.PtraceSyscall(tid, 0)
+	if err := unix.PtraceSyscall(tid, 0); err != nil {
+		if errors.Is(err, unix.ESRCH) {
+			t.handleExit(tid)
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // resumeTracee resumes a tracee with an optional signal to deliver.
@@ -602,6 +613,10 @@ func (t *Tracer) Run(ctx context.Context) error {
 			return err
 		}
 
+		// Sweep parked timeouts on every iteration so enforcement is not
+		// load-dependent (previously only ran on the idle path).
+		t.sweepParkedTimeouts()
+
 		var status unix.WaitStatus
 		tid, err := unix.Wait4(-1, &status, unix.WALL|unix.WNOHANG, nil)
 
@@ -641,7 +656,6 @@ func (t *Tracer) Run(ctx context.Context) error {
 			case req := <-t.resumeQueue:
 				t.handleResumeRequest(req)
 			case <-time.After(5 * time.Millisecond):
-				t.sweepParkedTimeouts()
 			}
 			continue
 		}
