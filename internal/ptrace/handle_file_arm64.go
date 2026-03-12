@@ -7,5 +7,6 @@ func syscallToOperationLegacy(nr int, flags int) string {
 }
 
 func isLegacyOpenSyscall(nr int) bool    { return false }
+func isLegacyCreatSyscall(nr int) bool   { return false }
 func isLegacyTwoPathSyscall(nr int) bool { return false }
 func isLegacySymlinkSyscall(nr int) bool { return false }

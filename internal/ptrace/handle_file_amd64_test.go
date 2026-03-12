@@ -18,6 +18,7 @@ func TestSyscallToOperation_LegacyAmd64(t *testing.T) {
 		{"legacy open rdonly", unix.SYS_OPEN, unix.O_RDONLY, "read"},
 		{"legacy open wronly", unix.SYS_OPEN, unix.O_WRONLY, "write"},
 		{"legacy open creat", unix.SYS_OPEN, unix.O_WRONLY | unix.O_CREAT, "create"},
+		{"legacy creat", unix.SYS_CREAT, 0, "create"},
 		{"legacy unlink", unix.SYS_UNLINK, 0, "delete"},
 		{"legacy rename", unix.SYS_RENAME, 0, "rename"},
 		{"legacy mkdir", unix.SYS_MKDIR, 0, "mkdir"},

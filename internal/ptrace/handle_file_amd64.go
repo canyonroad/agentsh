@@ -8,6 +8,8 @@ func syscallToOperationLegacy(nr int, flags int) string {
 	switch nr {
 	case unix.SYS_OPEN:
 		return openatOperation(flags)
+	case unix.SYS_CREAT:
+		return "create"
 	case unix.SYS_UNLINK:
 		return "delete"
 	case unix.SYS_RMDIR:
@@ -31,6 +33,10 @@ func syscallToOperationLegacy(nr int, flags int) string {
 
 func isLegacyOpenSyscall(nr int) bool {
 	return nr == unix.SYS_OPEN
+}
+
+func isLegacyCreatSyscall(nr int) bool {
+	return nr == unix.SYS_CREAT
 }
 
 func isLegacyTwoPathSyscall(nr int) bool {

@@ -62,18 +62,13 @@ func resolveDirFD(tid int, dirfd int) (string, error) {
 }
 
 // resolvePath resolves a path from a *at syscall to an absolute canonical path.
-// For nonexistent files (e.g. create operations), resolves the parent directory
-// and appends the basename.
+// This follows symlinks on the final component (suitable for openat, fchmodat
+// without AT_SYMLINK_NOFOLLOW, etc.). For nonexistent files (e.g. create
+// operations), resolves the parent directory and appends the basename.
 func resolvePath(tid int, dirfd int, path string) (string, error) {
-	var full string
-	if filepath.IsAbs(path) {
-		full = path
-	} else {
-		base, err := resolveDirFD(tid, dirfd)
-		if err != nil {
-			return "", fmt.Errorf("resolve dirfd %d: %w", dirfd, err)
-		}
-		full = filepath.Join(base, path)
+	full, err := resolveToAbsolute(tid, dirfd, path)
+	if err != nil {
+		return "", err
 	}
 
 	resolved, err := filepath.EvalSymlinks(full)
@@ -96,8 +91,37 @@ func resolvePath(tid int, dirfd int, path string) (string, error) {
 		return "", fmt.Errorf("resolve path %q: dangling symlink", full)
 	}
 
-	// File doesn't exist yet — resolve the parent directory to
-	// canonicalize any symlinked path components.
+	return resolveParentFallback(full)
+}
+
+// resolvePathNoFollow resolves a path without following the final symlink
+// component. Used for syscalls that operate on directory entries rather than
+// their targets (e.g. unlinkat, renameat2, linkat newpath).
+func resolvePathNoFollow(tid int, dirfd int, path string) (string, error) {
+	full, err := resolveToAbsolute(tid, dirfd, path)
+	if err != nil {
+		return "", err
+	}
+	return resolveParentFallback(full)
+}
+
+// resolveToAbsolute converts a potentially relative path to an absolute path
+// using the dirfd for resolution.
+func resolveToAbsolute(tid int, dirfd int, path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+	base, err := resolveDirFD(tid, dirfd)
+	if err != nil {
+		return "", fmt.Errorf("resolve dirfd %d: %w", dirfd, err)
+	}
+	return filepath.Join(base, path), nil
+}
+
+// resolveParentFallback resolves the parent directory with EvalSymlinks and
+// joins the leaf basename. This canonicalizes parent components without
+// following the final component.
+func resolveParentFallback(full string) (string, error) {
 	dir := filepath.Dir(full)
 	base := filepath.Base(full)
 	resolvedDir, err := filepath.EvalSymlinks(dir)
@@ -181,17 +205,40 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		if err != nil {
 			return "", "", 0, err
 		}
-		path, err = resolvePath(tid, dirfd, rawPath)
+		// These syscalls operate on directory entries, not symlink targets.
+		path, err = resolvePathNoFollow(tid, dirfd, rawPath)
 		return path, "", flags, err
 
-	case unix.SYS_FCHMODAT, unix.SYS_FCHOWNAT:
+	case unix.SYS_FCHMODAT:
 		dirfd := int(int32(regs.Arg(0)))
 		pathPtr := regs.Arg(1)
+		// fchmodat(dirfd, path, mode, flags): flags in arg3
+		atFlags := int(int32(regs.Arg(3)))
 		rawPath, err := t.readString(tid, pathPtr, 4096)
 		if err != nil {
 			return "", "", 0, err
 		}
-		path, err = resolvePath(tid, dirfd, rawPath)
+		if atFlags&unix.AT_SYMLINK_NOFOLLOW != 0 {
+			path, err = resolvePathNoFollow(tid, dirfd, rawPath)
+		} else {
+			path, err = resolvePath(tid, dirfd, rawPath)
+		}
+		return path, "", 0, err
+
+	case unix.SYS_FCHOWNAT:
+		dirfd := int(int32(regs.Arg(0)))
+		pathPtr := regs.Arg(1)
+		// fchownat(dirfd, path, owner, group, flags): flags in arg4
+		atFlags := int(int32(regs.Arg(4)))
+		rawPath, err := t.readString(tid, pathPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		if atFlags&unix.AT_SYMLINK_NOFOLLOW != 0 {
+			path, err = resolvePathNoFollow(tid, dirfd, rawPath)
+		} else {
+			path, err = resolvePath(tid, dirfd, rawPath)
+		}
 		return path, "", 0, err
 
 	case unix.SYS_RENAMEAT2:
@@ -208,11 +255,12 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		if err != nil {
 			return "", "", 0, err
 		}
-		path, err = resolvePath(tid, oldDirfd, rawOld)
+		// rename operates on directory entries, not symlink targets.
+		path, err = resolvePathNoFollow(tid, oldDirfd, rawOld)
 		if err != nil {
 			return "", "", 0, err
 		}
-		path2, err = resolvePath(tid, newDirfd, rawNew)
+		path2, err = resolvePathNoFollow(tid, newDirfd, rawNew)
 		return path, path2, 0, err
 
 	case unix.SYS_LINKAT:
@@ -220,6 +268,7 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		oldPathPtr := regs.Arg(1)
 		newDirfd := int(int32(regs.Arg(2)))
 		newPathPtr := regs.Arg(3)
+		linkFlags := int(int32(regs.Arg(4)))
 
 		rawOld, err := t.readString(tid, oldPathPtr, 4096)
 		if err != nil {
@@ -229,11 +278,17 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		if err != nil {
 			return "", "", 0, err
 		}
-		path, err = resolvePath(tid, oldDirfd, rawOld)
+		// Old path follows symlinks only if AT_SYMLINK_FOLLOW is set.
+		if linkFlags&unix.AT_SYMLINK_FOLLOW != 0 {
+			path, err = resolvePath(tid, oldDirfd, rawOld)
+		} else {
+			path, err = resolvePathNoFollow(tid, oldDirfd, rawOld)
+		}
 		if err != nil {
 			return "", "", 0, err
 		}
-		path2, err = resolvePath(tid, newDirfd, rawNew)
+		// New path is always a directory entry.
+		path2, err = resolvePathNoFollow(tid, newDirfd, rawNew)
 		return path, path2, 0, err
 
 	case unix.SYS_SYMLINKAT:
@@ -249,7 +304,8 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		if err != nil {
 			return "", "", 0, err
 		}
-		path, err = resolvePath(tid, newDirfd, rawLink)
+		// The link path is a new directory entry.
+		path, err = resolvePathNoFollow(tid, newDirfd, rawLink)
 		return path, target, 0, err
 
 	default:
@@ -274,7 +330,8 @@ func (t *Tracer) extractLegacyFileArgs(tid int, nr int, regs Regs) (path, path2 
 		if err != nil {
 			return "", "", 0, err
 		}
-		linkPath, err := resolvePath(tid, unix.AT_FDCWD, rawLinkPath)
+		// The link path is a new directory entry.
+		linkPath, err := resolvePathNoFollow(tid, unix.AT_FDCWD, rawLinkPath)
 		if err != nil {
 			return "", "", 0, err
 		}
@@ -286,25 +343,42 @@ func (t *Tracer) extractLegacyFileArgs(tid int, nr int, regs Regs) (path, path2 
 	if err != nil {
 		return "", "", 0, err
 	}
-	path, err = resolvePath(tid, unix.AT_FDCWD, rawPath)
-	if err != nil {
-		return "", "", 0, err
-	}
 
 	switch {
 	case isLegacyOpenSyscall(nr):
+		// open/creat follow symlinks.
+		path, err = resolvePath(tid, unix.AT_FDCWD, rawPath)
+		if err != nil {
+			return "", "", 0, err
+		}
 		flags = int(int32(regs.Arg(1)))
 		return path, "", flags, nil
+	case isLegacyCreatSyscall(nr):
+		// creat(path, mode) is O_CREAT|O_WRONLY|O_TRUNC — always creates.
+		path, err = resolvePath(tid, unix.AT_FDCWD, rawPath)
+		if err != nil {
+			return "", "", 0, err
+		}
+		return path, "", unix.O_CREAT | unix.O_WRONLY | unix.O_TRUNC, nil
 	case isLegacyTwoPathSyscall(nr):
-		// rename(old, new), link(old, new)
+		// rename(old, new), link(old, new) — operate on entries, not targets.
+		path, err = resolvePathNoFollow(tid, unix.AT_FDCWD, rawPath)
+		if err != nil {
+			return "", "", 0, err
+		}
 		path2Ptr := regs.Arg(1)
 		rawPath2, err := t.readString(tid, path2Ptr, 4096)
 		if err != nil {
 			return path, "", 0, err
 		}
-		path2, err = resolvePath(tid, unix.AT_FDCWD, rawPath2)
+		path2, err = resolvePathNoFollow(tid, unix.AT_FDCWD, rawPath2)
 		return path, path2, 0, err
 	default:
+		// unlink, rmdir, mkdir, chmod, chown — operate on entries.
+		path, err = resolvePathNoFollow(tid, unix.AT_FDCWD, rawPath)
+		if err != nil {
+			return "", "", 0, err
+		}
 		return path, "", 0, nil
 	}
 }
