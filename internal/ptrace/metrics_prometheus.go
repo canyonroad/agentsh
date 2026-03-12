@@ -16,7 +16,11 @@ type prometheusMetrics struct {
 }
 
 // NewPrometheusMetrics creates a Metrics implementation backed by a PtraceMetricsCollector.
+// Returns nopMetrics if c is nil.
 func NewPrometheusMetrics(c PtraceMetricsCollector) Metrics {
+	if c == nil {
+		return nopMetrics{}
+	}
 	return &prometheusMetrics{c: c}
 }
 
