@@ -724,7 +724,6 @@ func (t *Tracer) sweepParkedTimeouts() {
 			"tid", tid,
 			"max_hold_ms", t.cfg.MaxHoldMs,
 		)
-		t.metrics.IncTimeout()
 
 		resolved := false
 		if err := t.denySyscall(tid, int(unix.EACCES)); err != nil {
@@ -754,6 +753,7 @@ func (t *Tracer) sweepParkedTimeouts() {
 		}
 
 		if resolved {
+			t.metrics.IncTimeout()
 			t.mu.Lock()
 			delete(t.parkedTracees, tid)
 			if state, ok := t.tracees[tid]; ok {

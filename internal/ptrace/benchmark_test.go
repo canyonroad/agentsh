@@ -29,9 +29,13 @@ func BenchmarkExecOverhead(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		cmd := exec.Command("/bin/true")
-		cmd.Start()
+		if err := cmd.Start(); err != nil {
+			b.Fatalf("Start failed: %v", err)
+		}
 		tr.AttachPID(cmd.Process.Pid)
-		cmd.Wait()
+		if err := cmd.Wait(); err != nil {
+			b.Fatalf("Wait failed: %v", err)
+		}
 	}
 	b.StopTimer()
 
@@ -62,9 +66,13 @@ func BenchmarkFileIOOverhead(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		cmd := exec.Command("/bin/sh", script)
-		cmd.Start()
+		if err := cmd.Start(); err != nil {
+			b.Fatalf("Start failed: %v", err)
+		}
 		tr.AttachPID(cmd.Process.Pid)
-		cmd.Wait()
+		if err := cmd.Wait(); err != nil {
+			b.Fatalf("Wait failed: %v", err)
+		}
 	}
 	b.StopTimer()
 
