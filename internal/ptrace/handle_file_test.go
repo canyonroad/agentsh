@@ -34,6 +34,7 @@ func TestSyscallToOperation(t *testing.T) {
 		{"linkat", unix.SYS_LINKAT, 0, "link"},
 		{"symlinkat", unix.SYS_SYMLINKAT, 0, "symlink"},
 		{"fchmodat", unix.SYS_FCHMODAT, 0, "chmod"},
+		{"fchmodat2", unix.SYS_FCHMODAT2, 0, "chmod"},
 		{"fchownat", unix.SYS_FCHOWNAT, 0, "chown"},
 		{"unknown", 99999, 0, "unknown"},
 	}

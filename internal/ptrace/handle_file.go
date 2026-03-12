@@ -31,7 +31,7 @@ func syscallToOperation(nr int, flags int) string {
 		return "link"
 	case unix.SYS_SYMLINKAT:
 		return "symlink"
-	case unix.SYS_FCHMODAT:
+	case unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2:
 		return "chmod"
 	case unix.SYS_FCHOWNAT:
 		return "chown"
@@ -218,6 +218,15 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 			return "", "", 0, fmt.Errorf("read open_how: %w", err)
 		}
 		flags = int(binary.NativeEndian.Uint64(howBuf[0:8]))
+		// If resolve field is present and non-zero, the kernel applies
+		// restricted path resolution (RESOLVE_IN_ROOT, RESOLVE_BENEATH, etc.)
+		// that we cannot replicate. Fail closed.
+		if howSize >= 24 {
+			resolve := binary.NativeEndian.Uint64(howBuf[16:24])
+			if resolve != 0 {
+				return "", "", 0, fmt.Errorf("openat2 resolve flags 0x%x not supported", resolve)
+			}
+		}
 		path, err = resolvePath(tid, dirfd, rawPath)
 		return path, "", flags, err
 
@@ -234,9 +243,20 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		return path, "", flags, err
 
 	case unix.SYS_FCHMODAT:
+		// fchmodat(dirfd, path, mode) — 3-arg syscall, always follows symlinks.
 		dirfd := int(int32(regs.Arg(0)))
 		pathPtr := regs.Arg(1)
-		// fchmodat(dirfd, path, mode, flags): flags in arg3
+		rawPath, err := t.readString(tid, pathPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		path, err = resolvePath(tid, dirfd, rawPath)
+		return path, "", 0, err
+
+	case unix.SYS_FCHMODAT2:
+		// fchmodat2(dirfd, path, mode, flags) — 4-arg syscall with flag support.
+		dirfd := int(int32(regs.Arg(0)))
+		pathPtr := regs.Arg(1)
 		atFlags := int(int32(regs.Arg(3)))
 		rawPath, err := t.readString(tid, pathPtr, 4096)
 		if err != nil {
