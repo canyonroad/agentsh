@@ -8,12 +8,14 @@ func syscallToOperationLegacy(nr int, flags int) string {
 	switch nr {
 	case unix.SYS_OPEN:
 		return openatOperation(flags)
-	case unix.SYS_UNLINK, unix.SYS_RMDIR:
+	case unix.SYS_UNLINK:
 		return "delete"
+	case unix.SYS_RMDIR:
+		return "rmdir"
 	case unix.SYS_RENAME:
 		return "rename"
 	case unix.SYS_MKDIR:
-		return "create"
+		return "mkdir"
 	case unix.SYS_LINK:
 		return "link"
 	case unix.SYS_SYMLINK:

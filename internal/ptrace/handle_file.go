@@ -18,9 +18,12 @@ func syscallToOperation(nr int, flags int) string {
 	case unix.SYS_OPENAT:
 		return openatOperation(flags)
 	case unix.SYS_UNLINKAT:
+		if flags&unix.AT_REMOVEDIR != 0 {
+			return "rmdir"
+		}
 		return "delete"
 	case unix.SYS_MKDIRAT:
-		return "create"
+		return "mkdir"
 	case unix.SYS_RENAMEAT2:
 		return "rename"
 	case unix.SYS_LINKAT:
@@ -38,6 +41,9 @@ func syscallToOperation(nr int, flags int) string {
 
 func openatOperation(flags int) string {
 	if flags&unix.O_CREAT != 0 {
+		return "create"
+	}
+	if flags&unix.O_TMPFILE == unix.O_TMPFILE {
 		return "create"
 	}
 	if flags&(unix.O_WRONLY|unix.O_RDWR) != 0 {
@@ -152,12 +158,13 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 	case unix.SYS_UNLINKAT, unix.SYS_MKDIRAT:
 		dirfd := int(int32(regs.Arg(0)))
 		pathPtr := regs.Arg(1)
+		flags = int(int32(regs.Arg(2))) // AT_REMOVEDIR for unlinkat
 		rawPath, err := t.readString(tid, pathPtr, 4096)
 		if err != nil {
 			return "", "", 0, err
 		}
 		path, err = resolvePath(tid, dirfd, rawPath)
-		return path, "", 0, err
+		return path, "", flags, err
 
 	case unix.SYS_FCHMODAT, unix.SYS_FCHOWNAT:
 		dirfd := int(int32(regs.Arg(0)))

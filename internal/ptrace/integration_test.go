@@ -772,6 +772,19 @@ func TestIntegration_FileDeny(t *testing.T) {
 	if len(calls) == 0 {
 		t.Error("file handler did not intercept denied.txt access")
 	}
+
+	// Assert the denied file was NOT created (enforcement outcome)
+	if _, err := os.Stat(targetFile); err == nil {
+		t.Error("denied.txt should not have been created, but it exists")
+	}
+
+	// Assert the marker file was created (shell fallback executed)
+	if data, err := os.ReadFile(markerFile); err == nil {
+		content := strings.TrimSpace(string(data))
+		if content != "denied" {
+			t.Errorf("expected marker 'denied', got %q", content)
+		}
+	}
 }
 
 func TestIntegration_FileAllow(t *testing.T) {
