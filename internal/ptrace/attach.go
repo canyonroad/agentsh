@@ -3,6 +3,7 @@
 package ptrace
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -38,6 +39,13 @@ func (t *Tracer) attachProcess(pid int) error {
 func (t *Tracer) attachThread(tid int) error {
 	err := unix.PtraceSeize(tid)
 	if err != nil {
+		reason := "other"
+		if errors.Is(err, unix.ESRCH) {
+			reason = "esrch"
+		} else if errors.Is(err, unix.EPERM) {
+			reason = "eperm"
+		}
+		t.metrics.IncAttachFailure(reason)
 		return fmt.Errorf("PTRACE_SEIZE tid %d: %w", tid, err)
 	}
 
@@ -93,6 +101,7 @@ func (t *Tracer) attachThread(tid int) error {
 		Attached: time.Now(),
 		MemFD:    memFD,
 	}
+	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
 
 	return nil

@@ -120,6 +120,7 @@ type TracerConfig struct {
 	FileHandler      FileHandler
 	NetworkHandler   NetworkHandler
 	SignalHandler    SignalHandler
+	Metrics          Metrics
 }
 
 // TraceeState tracks the state of a single traced thread.
@@ -146,6 +147,7 @@ type resumeRequest struct {
 // Tracer implements a ptrace-based syscall tracer.
 type Tracer struct {
 	cfg             TracerConfig
+	metrics         Metrics
 	processTree     *ProcessTree
 	prefilterActive bool
 
@@ -161,8 +163,13 @@ type Tracer struct {
 
 // NewTracer creates a new ptrace tracer.
 func NewTracer(cfg TracerConfig) *Tracer {
+	metrics := cfg.Metrics
+	if metrics == nil {
+		metrics = nopMetrics{}
+	}
 	return &Tracer{
 		cfg:           cfg,
+		metrics:       metrics,
 		processTree:   NewProcessTree(),
 		attachQueue:   make(chan int, 64),
 		resumeQueue:   make(chan resumeRequest, 64),
@@ -414,6 +421,7 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 		SessionID: parent.SessionID,
 		Attached:  time.Now(),
 	}
+	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
 
 	if isNewProcess {
@@ -457,6 +465,7 @@ func (t *Tracer) handleExecEvent(tid int) {
 			delete(t.tracees, otherTID)
 		}
 	}
+	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
 }
 
@@ -469,6 +478,7 @@ func (t *Tracer) handleExit(tid int) {
 		}
 		delete(t.tracees, tid)
 	}
+	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
 }
 
