@@ -196,7 +196,11 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		if err != nil {
 			return "", "", 0, err
 		}
-		path, err = resolvePath(tid, dirfd, rawPath)
+		if flags&unix.O_NOFOLLOW != 0 {
+			path, err = resolvePathNoFollow(tid, dirfd, rawPath)
+		} else {
+			path, err = resolvePath(tid, dirfd, rawPath)
+		}
 		return path, "", flags, err
 
 	case unix.SYS_OPENAT2:
@@ -232,7 +236,11 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		if resolve != 0 {
 			return "", "", 0, fmt.Errorf("openat2 resolve flags 0x%x not supported", resolve)
 		}
-		path, err = resolvePath(tid, dirfd, rawPath)
+		if flags&unix.O_NOFOLLOW != 0 {
+			path, err = resolvePathNoFollow(tid, dirfd, rawPath)
+		} else {
+			path, err = resolvePath(tid, dirfd, rawPath)
+		}
 		return path, "", flags, err
 
 	case unix.SYS_UNLINKAT, unix.SYS_MKDIRAT:
@@ -267,6 +275,10 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		if err != nil {
 			return "", "", 0, err
 		}
+		if rawPath == "" && atFlags&unix.AT_EMPTY_PATH != 0 {
+			path, err = resolveDirFD(tid, dirfd)
+			return path, "", 0, err
+		}
 		if atFlags&unix.AT_SYMLINK_NOFOLLOW != 0 {
 			path, err = resolvePathNoFollow(tid, dirfd, rawPath)
 		} else {
@@ -282,6 +294,10 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		rawPath, err := t.readString(tid, pathPtr, 4096)
 		if err != nil {
 			return "", "", 0, err
+		}
+		if rawPath == "" && atFlags&unix.AT_EMPTY_PATH != 0 {
+			path, err = resolveDirFD(tid, dirfd)
+			return path, "", 0, err
 		}
 		if atFlags&unix.AT_SYMLINK_NOFOLLOW != 0 {
 			path, err = resolvePathNoFollow(tid, dirfd, rawPath)
@@ -395,12 +411,15 @@ func (t *Tracer) extractLegacyFileArgs(tid int, nr int, regs Regs) (path, path2 
 
 	switch {
 	case isLegacyOpenSyscall(nr):
-		// open/creat follow symlinks.
-		path, err = resolvePath(tid, unix.AT_FDCWD, rawPath)
+		flags = int(int32(regs.Arg(1)))
+		if flags&unix.O_NOFOLLOW != 0 {
+			path, err = resolvePathNoFollow(tid, unix.AT_FDCWD, rawPath)
+		} else {
+			path, err = resolvePath(tid, unix.AT_FDCWD, rawPath)
+		}
 		if err != nil {
 			return "", "", 0, err
 		}
-		flags = int(int32(regs.Arg(1)))
 		return path, "", flags, nil
 	case isLegacyCreatSyscall(nr):
 		// creat(path, mode) is O_CREAT|O_WRONLY|O_TRUNC — always creates.
