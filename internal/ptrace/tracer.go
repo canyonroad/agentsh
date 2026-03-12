@@ -4,6 +4,7 @@ package ptrace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
@@ -120,6 +121,7 @@ type TracerConfig struct {
 	FileHandler      FileHandler
 	NetworkHandler   NetworkHandler
 	SignalHandler    SignalHandler
+	Metrics          Metrics
 }
 
 // TraceeState tracks the state of a single traced thread.
@@ -131,6 +133,7 @@ type TraceeState struct {
 	InSyscall        bool
 	LastNr           int
 	Attached         time.Time
+	ParkedAt         time.Time
 	PendingDenyErrno int
 	PendingInterrupt bool
 	IsVforkChild     bool
@@ -146,6 +149,7 @@ type resumeRequest struct {
 // Tracer implements a ptrace-based syscall tracer.
 type Tracer struct {
 	cfg             TracerConfig
+	metrics         Metrics
 	processTree     *ProcessTree
 	prefilterActive bool
 
@@ -161,8 +165,13 @@ type Tracer struct {
 
 // NewTracer creates a new ptrace tracer.
 func NewTracer(cfg TracerConfig) *Tracer {
+	metrics := cfg.Metrics
+	if metrics == nil {
+		metrics = nopMetrics{}
+	}
 	return &Tracer{
 		cfg:           cfg,
+		metrics:       metrics,
 		processTree:   NewProcessTree(),
 		attachQueue:   make(chan int, 64),
 		resumeQueue:   make(chan resumeRequest, 64),
@@ -183,6 +192,16 @@ func (t *Tracer) TraceeCount() int {
 func (t *Tracer) AttachPID(pid int) error {
 	t.attachQueue <- pid
 	return nil
+}
+
+// ParkTracee marks a tracee as parked (awaiting async approval).
+func (t *Tracer) ParkTracee(tid int) {
+	t.mu.Lock()
+	t.parkedTracees[tid] = struct{}{}
+	if state, ok := t.tracees[tid]; ok {
+		state.ParkedAt = time.Now()
+	}
+	t.mu.Unlock()
 }
 
 // Available returns whether ptrace tracing is available.
@@ -222,10 +241,14 @@ func (t *Tracer) setRegs(tid int, regs Regs) error {
 
 // allowSyscall resumes the tracee, allowing the syscall to proceed.
 func (t *Tracer) allowSyscall(tid int) {
+	var err error
 	if t.prefilterActive {
-		unix.PtraceCont(tid, 0)
+		err = unix.PtraceCont(tid, 0)
 	} else {
-		unix.PtraceSyscall(tid, 0)
+		err = unix.PtraceSyscall(tid, 0)
+	}
+	if err != nil && errors.Is(err, unix.ESRCH) {
+		t.handleExit(tid)
 	}
 }
 
@@ -233,10 +256,18 @@ func (t *Tracer) allowSyscall(tid int) {
 func (t *Tracer) denySyscall(tid int, errno int) error {
 	regs, err := t.getRegs(tid)
 	if err != nil {
+		if errors.Is(err, unix.ESRCH) {
+			t.handleExit(tid)
+			return nil
+		}
 		return err
 	}
 	regs.SetSyscallNr(-1)
 	if err := t.setRegs(tid, regs); err != nil {
+		if errors.Is(err, unix.ESRCH) {
+			t.handleExit(tid)
+			return nil
+		}
 		t.mu.Lock()
 		state := t.tracees[tid]
 		tgid := tid
@@ -255,7 +286,14 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 	}
 	t.mu.Unlock()
 
-	return unix.PtraceSyscall(tid, 0)
+	if err := unix.PtraceSyscall(tid, 0); err != nil {
+		if errors.Is(err, unix.ESRCH) {
+			t.handleExit(tid)
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // resumeTracee resumes a tracee with an optional signal to deliver.
@@ -414,6 +452,7 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 		SessionID: parent.SessionID,
 		Attached:  time.Now(),
 	}
+	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
 
 	if isNewProcess {
@@ -457,6 +496,7 @@ func (t *Tracer) handleExecEvent(tid int) {
 			delete(t.tracees, otherTID)
 		}
 	}
+	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
 }
 
@@ -468,6 +508,11 @@ func (t *Tracer) handleExit(tid int) {
 			unix.Close(state.MemFD)
 		}
 		delete(t.tracees, tid)
+		if _, parked := t.parkedTracees[tid]; parked {
+			delete(t.parkedTracees, tid)
+			slog.Warn("ptrace: parked tracee exited before approval", "tid", tid)
+		}
+		t.metrics.SetTraceeCount(len(t.tracees))
 	}
 	t.mu.Unlock()
 }
@@ -568,6 +613,10 @@ func (t *Tracer) Run(ctx context.Context) error {
 			return err
 		}
 
+		// Sweep parked timeouts on every iteration so enforcement is not
+		// load-dependent (previously only ran on the idle path).
+		t.sweepParkedTimeouts()
+
 		var status unix.WaitStatus
 		tid, err := unix.Wait4(-1, &status, unix.WALL|unix.WNOHANG, nil)
 
@@ -648,16 +697,92 @@ func (t *Tracer) drainQueues(ctx context.Context) error {
 	}
 }
 
+// sweepParkedTimeouts denies parked tracees that have exceeded max_hold_ms.
+func (t *Tracer) sweepParkedTimeouts() {
+	if t.cfg.MaxHoldMs <= 0 {
+		return
+	}
+	maxDuration := time.Duration(t.cfg.MaxHoldMs) * time.Millisecond
+
+	t.mu.Lock()
+	var expired []int
+	for tid := range t.parkedTracees {
+		state := t.tracees[tid]
+		if state == nil {
+			// Tracee already exited — clean up stale parking entry.
+			delete(t.parkedTracees, tid)
+			continue
+		}
+		if !state.ParkedAt.IsZero() && time.Since(state.ParkedAt) > maxDuration {
+			expired = append(expired, tid)
+		}
+	}
+	t.mu.Unlock()
+
+	for _, tid := range expired {
+		slog.Warn("ptrace: max_hold_ms timeout, denying syscall",
+			"tid", tid,
+			"max_hold_ms", t.cfg.MaxHoldMs,
+		)
+
+		resolved := false
+		if err := t.denySyscall(tid, int(unix.EACCES)); err != nil {
+			slog.Error("ptrace: deny after timeout failed, killing tracee",
+				"tid", tid, "error", err)
+			t.mu.Lock()
+			state := t.tracees[tid]
+			tgid := tid
+			if state != nil {
+				tgid = state.TGID
+			}
+			t.mu.Unlock()
+			if err := unix.Tgkill(tgid, tid, unix.SIGKILL); err != nil {
+				if errors.Is(err, unix.ESRCH) {
+					// Tracee already gone.
+					t.handleExit(tid)
+					resolved = true
+				} else {
+					slog.Error("ptrace: kill after timeout also failed, will retry",
+						"tid", tid, "error", err)
+				}
+			} else {
+				resolved = true
+			}
+		} else {
+			resolved = true
+		}
+
+		if resolved {
+			t.metrics.IncTimeout()
+			t.mu.Lock()
+			delete(t.parkedTracees, tid)
+			if state, ok := t.tracees[tid]; ok {
+				state.ParkedAt = time.Time{}
+			}
+			t.mu.Unlock()
+		}
+	}
+}
+
 func (t *Tracer) handleResumeRequest(req resumeRequest) {
 	t.mu.Lock()
 	_, parked := t.parkedTracees[req.TID]
 	if parked {
 		delete(t.parkedTracees, req.TID)
 	}
+	state := t.tracees[req.TID]
+	if state != nil {
+		state.ParkedAt = time.Time{}
+	}
 	t.mu.Unlock()
 
 	if !parked {
 		slog.Warn("resume request for non-parked tracee", "tid", req.TID)
+		return
+	}
+
+	if state == nil {
+		slog.Warn("resume request for exited tracee, skipping", "tid", req.TID)
 		return
 	}
 

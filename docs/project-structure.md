@@ -29,7 +29,7 @@ agentsh/
 - `internal/fsmonitor/` — FUSE workspace view + file operation capture.
 - `internal/netmonitor/` — Network proxy + DNS cache/resolver and optional netns/transparent plumbing.
 - `internal/limits/` — Optional cgroups v2 enforcement (Linux-only; wired from exec hooks).
-- `internal/ptrace/` — Ptrace-based syscall tracer for restricted containers (Linux-only, requires SYS_PTRACE). Intercepts exec, file, network, and signal syscalls via PTRACE_SEIZE. Architecture-specific register access (amd64, arm64).
+- `internal/ptrace/` — Ptrace-based syscall tracer for restricted containers (Linux-only, requires SYS_PTRACE). Intercepts exec, file, network, and signal syscalls via PTRACE_SEIZE. Architecture-specific register access (amd64, arm64). Includes `Metrics` interface with Prometheus adapter (`metrics.go`, `metrics_prometheus.go`) and overhead benchmarks (`benchmark_test.go`).
 - `internal/events/` — In-memory event broker for SSE.
 - `internal/store/` — Event sinks (SQLite, JSONL, webhook) and composition.
 - `internal/auth/` — API key auth implementation.

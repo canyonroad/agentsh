@@ -3,6 +3,7 @@
 package ptrace
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -38,22 +39,32 @@ func (t *Tracer) attachProcess(pid int) error {
 func (t *Tracer) attachThread(tid int) error {
 	err := unix.PtraceSeize(tid)
 	if err != nil {
+		reason := "other"
+		if errors.Is(err, unix.ESRCH) {
+			reason = "esrch"
+		} else if errors.Is(err, unix.EPERM) {
+			reason = "eperm"
+		}
+		t.metrics.IncAttachFailure(reason)
 		return fmt.Errorf("PTRACE_SEIZE tid %d: %w", tid, err)
 	}
 
 	if err := unix.PtraceSetOptions(tid, t.ptraceOptions()); err != nil {
 		t.safeDetach(tid)
+		t.metrics.IncAttachFailure("other")
 		return fmt.Errorf("PTRACE_SETOPTIONS tid %d: %w", tid, err)
 	}
 
 	tgid, err := readTGID(tid)
 	if err != nil {
 		t.safeDetach(tid)
+		t.metrics.IncAttachFailure("other")
 		return fmt.Errorf("read TGID for tid %d: %w", tid, err)
 	}
 
 	if err := unix.PtraceInterrupt(tid); err != nil {
 		t.safeDetach(tid)
+		t.metrics.IncAttachFailure("other")
 		return fmt.Errorf("PTRACE_INTERRUPT tid %d: %w", tid, err)
 	}
 
@@ -61,11 +72,13 @@ func (t *Tracer) attachThread(tid int) error {
 	_, err = unix.Wait4(tid, &status, 0, nil)
 	if err != nil {
 		t.safeDetach(tid)
+		t.metrics.IncAttachFailure("other")
 		return fmt.Errorf("wait4 after interrupt tid %d: %w", tid, err)
 	}
 
 	if !status.Stopped() {
 		t.safeDetach(tid)
+		t.metrics.IncAttachFailure("other")
 		return fmt.Errorf("tid %d: expected ptrace-stop after interrupt, got status %v", tid, status)
 	}
 
@@ -76,6 +89,7 @@ func (t *Tracer) attachThread(tid int) error {
 	}
 	if err != nil {
 		unix.PtraceDetach(tid)
+		t.metrics.IncAttachFailure("other")
 		return fmt.Errorf("restart tid %d: %w", tid, err)
 	}
 
@@ -93,6 +107,7 @@ func (t *Tracer) attachThread(tid int) error {
 		Attached: time.Now(),
 		MemFD:    memFD,
 	}
+	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
 
 	return nil

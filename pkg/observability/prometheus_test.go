@@ -205,3 +205,38 @@ func TestEscapeLabelValue(t *testing.T) {
 		}
 	}
 }
+
+func TestPrometheusCollector_PtraceMetrics(t *testing.T) {
+	c := NewPrometheusCollector()
+
+	c.SetPtraceTraceeCount(5)
+	c.IncPtraceAttachFailure("eperm")
+	c.IncPtraceAttachFailure("eperm")
+	c.IncPtraceAttachFailure("esrch")
+	c.IncPtraceTimeout()
+
+	handler := c.Handler(HandlerOptions{})
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	body := w.Body.String()
+
+	expected := []string{
+		"agentsh_ptrace_tracees_active 5",
+		"agentsh_ptrace_attach_failures_total",
+		"agentsh_ptrace_timeouts_total 1",
+	}
+	for _, m := range expected {
+		if !strings.Contains(body, m) {
+			t.Errorf("response missing: %s", m)
+		}
+	}
+}
+
+func TestPrometheusCollector_PtraceNilSafety(t *testing.T) {
+	var c *PrometheusCollector
+	// Must not panic
+	c.SetPtraceTraceeCount(1)
+	c.IncPtraceAttachFailure("esrch")
+	c.IncPtraceTimeout()
+}
