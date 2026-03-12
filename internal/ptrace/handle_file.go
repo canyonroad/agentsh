@@ -81,13 +81,23 @@ func resolvePath(tid int, dirfd int, path string) (string, error) {
 		return resolved, nil
 	}
 
-	// File may not exist yet (create operation).
-	// Resolve the parent directory to canonicalize symlinked parents.
+	// Only fall back for nonexistent files (e.g. create operations).
+	// For other errors (EACCES, ELOOP, ENOTDIR), propagate them so
+	// callers can fail closed rather than operating on an unresolved path.
+	if !os.IsNotExist(err) {
+		return "", fmt.Errorf("resolve path %q: %w", full, err)
+	}
+
+	// File doesn't exist yet — resolve the parent directory to
+	// canonicalize any symlinked path components.
 	dir := filepath.Dir(full)
 	base := filepath.Base(full)
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return full, nil // Parent doesn't exist either; use best-effort path
+		if os.IsNotExist(err) {
+			return full, nil // Parent doesn't exist either; use best-effort path
+		}
+		return "", fmt.Errorf("resolve parent %q: %w", dir, err)
 	}
 	return filepath.Join(resolvedDir, base), nil
 }
@@ -103,8 +113,8 @@ func (t *Tracer) handleFile(ctx context.Context, tid int, regs Regs) {
 
 	path, path2, flags, err := t.extractFileArgs(tid, nr, regs)
 	if err != nil {
-		slog.Warn("handleFile: cannot extract args", "tid", tid, "nr", nr, "error", err)
-		t.allowSyscall(tid)
+		slog.Warn("handleFile: cannot extract args, denying", "tid", tid, "nr", nr, "error", err)
+		t.denySyscall(tid, int(unix.EACCES))
 		return
 	}
 

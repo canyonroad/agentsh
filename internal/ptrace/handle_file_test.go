@@ -3,6 +3,8 @@
 package ptrace
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -40,5 +42,46 @@ func TestSyscallToOperation(t *testing.T) {
 				t.Errorf("syscallToOperation(%d, %d) = %q, want %q", tt.nr, tt.flags, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolvePath_NonexistentFile(t *testing.T) {
+	// resolvePath should succeed for a nonexistent file in an existing directory
+	// (e.g. create operations).
+	dir := t.TempDir()
+	path, err := resolvePath(0, unix.AT_FDCWD, filepath.Join(dir, "newfile"))
+	if err != nil {
+		t.Fatalf("resolvePath for nonexistent file: unexpected error: %v", err)
+	}
+	if path != filepath.Join(dir, "newfile") {
+		t.Errorf("resolvePath = %q, want %q", path, filepath.Join(dir, "newfile"))
+	}
+}
+
+func TestResolvePath_SymlinkLoop(t *testing.T) {
+	// resolvePath should return an error for a symlink loop (ELOOP),
+	// not silently fall back to an unresolved path.
+	dir := t.TempDir()
+	link1 := filepath.Join(dir, "loop1")
+	link2 := filepath.Join(dir, "loop2")
+	os.Symlink(link2, link1)
+	os.Symlink(link1, link2)
+
+	_, err := resolvePath(0, unix.AT_FDCWD, link1)
+	if err == nil {
+		t.Fatal("resolvePath for symlink loop: expected error, got nil")
+	}
+}
+
+func TestResolvePath_NotDir(t *testing.T) {
+	// resolvePath should return an error when a path component is not a directory.
+	dir := t.TempDir()
+	file := filepath.Join(dir, "afile")
+	os.WriteFile(file, []byte("x"), 0o644)
+
+	// Try to resolve a path through a regular file as if it were a directory.
+	_, err := resolvePath(0, unix.AT_FDCWD, filepath.Join(file, "child"))
+	if err == nil {
+		t.Fatal("resolvePath through non-directory: expected error, got nil")
 	}
 }

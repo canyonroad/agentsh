@@ -84,8 +84,8 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 
 	buf := make([]byte, addrLen)
 	if err := t.readBytes(tid, addrPtr, buf); err != nil {
-		slog.Warn("handleNetwork: cannot read sockaddr", "tid", tid, "error", err)
-		t.allowSyscall(tid)
+		slog.Warn("handleNetwork: cannot read sockaddr, denying", "tid", tid, "error", err)
+		t.denySyscall(tid, int(unix.EACCES))
 		return
 	}
 
