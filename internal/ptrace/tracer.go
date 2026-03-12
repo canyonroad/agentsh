@@ -39,6 +39,70 @@ type ExecResult struct {
 	Reason string
 }
 
+// FileHandler evaluates file syscall policy.
+type FileHandler interface {
+	HandleFile(ctx context.Context, fc FileContext) FileResult
+}
+
+// FileContext carries file syscall information for policy evaluation.
+type FileContext struct {
+	PID       int
+	SessionID string
+	Syscall   int
+	Path      string
+	Path2     string
+	Operation string
+	Flags     int
+}
+
+// FileResult carries the file policy decision.
+type FileResult struct {
+	Allow bool
+	Errno int32
+}
+
+// NetworkHandler evaluates network syscall policy.
+type NetworkHandler interface {
+	HandleNetwork(ctx context.Context, nc NetworkContext) NetworkResult
+}
+
+// NetworkContext carries network syscall information for policy evaluation.
+type NetworkContext struct {
+	PID       int
+	SessionID string
+	Syscall   int
+	Family    int
+	Address   string
+	Port      int
+	Operation string
+}
+
+// NetworkResult carries the network policy decision.
+type NetworkResult struct {
+	Allow bool
+	Errno int32
+}
+
+// SignalHandler evaluates signal delivery policy.
+type SignalHandler interface {
+	HandleSignal(ctx context.Context, sc SignalContext) SignalResult
+}
+
+// SignalContext carries signal delivery information for policy evaluation.
+type SignalContext struct {
+	PID       int
+	SessionID string
+	TargetPID int
+	Signal    int
+}
+
+// SignalResult carries the signal policy decision.
+type SignalResult struct {
+	Allow          bool
+	Errno          int32
+	RedirectSignal int
+}
+
 // TracerConfig holds configuration for the ptrace tracer.
 type TracerConfig struct {
 	AttachMode       string
@@ -53,6 +117,9 @@ type TracerConfig struct {
 	MaxHoldMs        int
 	OnAttachFailure  string
 	ExecHandler      ExecHandler
+	FileHandler      FileHandler
+	NetworkHandler   NetworkHandler
+	SignalHandler    SignalHandler
 }
 
 // TraceeState tracks the state of a single traced thread.
@@ -307,11 +374,11 @@ func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, regs Regs
 	case isExecveSyscall(nr):
 		t.handleExecve(ctx, tid, regs)
 	case isFileSyscall(nr):
-		t.allowSyscall(tid)
+		t.handleFile(ctx, tid, regs)
 	case isNetworkSyscall(nr):
-		t.allowSyscall(tid)
+		t.handleNetwork(ctx, tid, regs)
 	case isSignalSyscall(nr):
-		t.allowSyscall(tid)
+		t.handleSignal(ctx, tid, regs)
 	default:
 		t.allowSyscall(tid)
 	}

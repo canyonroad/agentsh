@@ -3,7 +3,7 @@
 **Version:** 0.1 — Draft  
 **Date:** 2026-03-11  
 **Author:** Eran / Canyon Road  
-**Status:** Proposed
+**Status:** Phase 2 Complete
 
 ---
 
@@ -104,9 +104,9 @@ sandbox:
     # Disabling a class means those syscalls pass through without stopping.
     trace:
       execve: true          # execve, execveat
-      file: true            # openat, openat2, unlinkat, renameat2, mkdirat, linkat, symlinkat, fchmodat, fchownat
-      network: true         # connect, socket, bind, sendto
-      signal: true          # kill, tgkill, tkill, rt_sigqueueinfo, rt_tgsigqueueinfo
+      file: true            # openat, openat2, unlinkat, renameat2, mkdirat, linkat, symlinkat, fchmodat, fchmodat2, fchownat (+ legacy amd64: open, creat, unlink, rmdir, rename, mkdir, link, symlink, chmod, chown)
+      network: true         # connect, bind — with sockaddr parsing for AF_INET, AF_INET6, AF_UNIX, AF_UNSPEC
+      signal: true          # kill, tgkill, tkill, rt_sigqueueinfo, rt_tgsigqueueinfo — with optional redirect via register rewrite (kill/tkill/tgkill only)
 
     # Performance tuning
     performance:
@@ -1721,14 +1721,18 @@ A separate integration test deploys the full sidecar task definition to Fargate 
 
 **Deliverable:** agentsh can trace a workload process, enforce command allow/deny via ptrace, and emit execve audit events. `children` mode has seccomp prefilter for low overhead. `pid` mode works on Fargate with explicit target PID.
 
-### Phase 2: Full Syscall Coverage
+### Phase 2: Full Syscall Coverage ✓
 
-- File syscall handling (reuse `FileHandler`) — allow/deny/audit only, no redirect
-- Network syscall handling (connect/bind tracking) — allow/deny/audit only
-- Signal syscall handling (reuse `signal.Engine`) — allow/deny/redirect (register rewrite is straightforward for signals)
-- `agentsh detect` updates to report ptrace mode
+- File syscall handling via `FileHandler` — allow/deny/audit for openat, openat2, unlinkat, renameat2, mkdirat, linkat, symlinkat, fchmodat, fchmodat2, fchownat, plus legacy amd64 equivalents (open, creat, unlink, rmdir, rename, mkdir, link, symlink, chmod, chown)
+- Full path resolution with symlink handling: `resolvePath` (follows final symlink), `resolvePathNoFollow` (preserves leaf), dangling symlink detection, ELOOP/ENOTDIR fail-closed
+- Network syscall handling (connect/bind) with sockaddr parsing for AF_INET, AF_INET6 (with scope_id), AF_UNIX (path + abstract with preserved NUL bytes), AF_UNSPEC
+- Signal syscall handling (kill, tkill, tgkill, rt_sigqueueinfo, rt_tgsigqueueinfo) with optional redirect via register rewrite for kill/tkill/tgkill
+- openat2 support with `open_how` struct parsing and fail-closed on resolve flags
+- Fail-closed error handling: all extraction/parse errors deny with EACCES
+- Unit tests for operation mapping, path resolution, sockaddr parsing, signal extraction
+- Integration tests for file deny, network deny, signal deny, signal redirect
 
-**Deliverable:** Full allow/deny/audit parity with seccomp user-notify for file, network, and signal. No steering yet.
+**Deliverable:** Full allow/deny/audit parity with seccomp user-notify for file, network, and signal. Signal redirect for kill/tkill/tgkill via register rewrite. No file/network steering yet.
 
 ### Phase 3: Production Hardening + Sidecar Discovery
 
