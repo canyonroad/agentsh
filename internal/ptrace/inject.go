@@ -91,8 +91,11 @@ func (t *Tracer) injectSyscall(tid int, savedRegs Regs, nr int, args ...uint64) 
 
 // waitForSyscallStop waits for the specified tid to hit a syscall stop.
 // It uses waitpid with the specific tid to avoid consuming other tracees' events.
-// Returns errTraceeExited if the tracee exits during the wait, after performing
+// Returns an error if the tracee exits during the wait, after performing
 // bookkeeping cleanup.
+//
+// Handles both TRACESYSGOOD mode (syscall stops report SIGTRAP|0x80) and
+// prefilter/seccomp mode (syscall stops report plain SIGTRAP with no event).
 func (t *Tracer) waitForSyscallStop(tid int) error {
 	const maxAttempts = 100 // guard against infinite loop from unexpected stops
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -101,28 +104,40 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 		if err != nil {
 			return fmt.Errorf("wait4 tid %d: %w", tid, err)
 		}
-		if status.Stopped() && status.StopSignal() == unix.SIGTRAP|0x80 {
+		if !status.Stopped() {
+			if status.Exited() || status.Signaled() {
+				// Clean up tracee bookkeeping before returning.
+				t.handleExit(tid)
+				return fmt.Errorf("tracee %d exited during injection", tid)
+			}
+			continue
+		}
+
+		sig := status.StopSignal()
+
+		// TRACESYSGOOD mode: syscall stops have SIGTRAP|0x80.
+		if sig == unix.SIGTRAP|0x80 {
 			return nil
 		}
-		// Handle other stopped states: distinguish ptrace event stops
-		// from real signal-delivery stops.
-		if status.Stopped() {
-			sig := int(status.StopSignal())
-			// Ptrace event stops (fork, clone, exec, seccomp, etc.) report
-			// SIGTRAP with a non-zero TrapCause. These are not real signals
-			// and must be resumed with signal 0 to avoid injecting SIGTRAP.
-			if sig == int(unix.SIGTRAP) && status.TrapCause() != 0 {
-				sig = 0
-			}
-			if err := unix.PtraceSyscall(tid, sig); err != nil {
+
+		// Non-TRACESYSGOOD mode: plain SIGTRAP with no ptrace event
+		// is a syscall stop.
+		if sig == unix.SIGTRAP && status.TrapCause() == 0 {
+			return nil
+		}
+
+		// Ptrace event stops (fork, clone, exec, seccomp, etc.) report
+		// SIGTRAP with a non-zero TrapCause. Resume with signal 0.
+		if sig == unix.SIGTRAP && status.TrapCause() != 0 {
+			if err := unix.PtraceSyscall(tid, 0); err != nil {
 				return fmt.Errorf("inject re-resume tid %d: %w", tid, err)
 			}
 			continue
 		}
-		if status.Exited() || status.Signaled() {
-			// Clean up tracee bookkeeping before returning.
-			t.handleExit(tid)
-			return fmt.Errorf("tracee %d exited during injection", tid)
+
+		// Real signal delivery: reinject the signal.
+		if err := unix.PtraceSyscall(tid, int(sig)); err != nil {
+			return fmt.Errorf("inject re-resume tid %d: %w", tid, err)
 		}
 	}
 	return fmt.Errorf("waitForSyscallStop tid %d: exceeded %d attempts", tid, maxAttempts)
