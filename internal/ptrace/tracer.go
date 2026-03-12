@@ -374,11 +374,11 @@ func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, regs Regs
 	case isExecveSyscall(nr):
 		t.handleExecve(ctx, tid, regs)
 	case isFileSyscall(nr):
-		t.allowSyscall(tid)
+		t.handleFile(ctx, tid, regs)
 	case isNetworkSyscall(nr):
-		t.allowSyscall(tid)
+		t.handleNetwork(ctx, tid, regs)
 	case isSignalSyscall(nr):
-		t.allowSyscall(tid)
+		t.handleSignal(ctx, tid, regs)
 	default:
 		t.allowSyscall(tid)
 	}
