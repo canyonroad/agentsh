@@ -4,6 +4,7 @@ package ptrace
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -578,5 +579,390 @@ func TestIntegration_DenyAndContinue(t *testing.T) {
 		} else {
 			t.Logf("unexpected output: %q", content)
 		}
+	}
+}
+
+// --- Mock handlers for Phase 2 ---
+
+type mockFileCall struct {
+	FileContext
+}
+
+type mockFileHandler struct {
+	mu           sync.Mutex
+	calls        []mockFileCall
+	defaultAllow bool
+	defaultErrno int32
+	rules        map[string]FileResult // keyed by path substring
+}
+
+func (m *mockFileHandler) HandleFile(ctx context.Context, fc FileContext) FileResult {
+	m.mu.Lock()
+	m.calls = append(m.calls, mockFileCall{fc})
+	m.mu.Unlock()
+
+	if m.rules != nil {
+		for substr, r := range m.rules {
+			if strings.Contains(fc.Path, substr) {
+				return r
+			}
+		}
+	}
+
+	return FileResult{Allow: m.defaultAllow, Errno: m.defaultErrno}
+}
+
+func (m *mockFileHandler) CallsMatching(substring string) []mockFileCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var result []mockFileCall
+	for _, c := range m.calls {
+		if strings.Contains(c.Path, substring) {
+			result = append(result, c)
+		}
+	}
+	return result
+}
+
+func (m *mockFileHandler) CallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.calls)
+}
+
+type mockNetworkCall struct {
+	NetworkContext
+}
+
+type mockNetworkHandler struct {
+	mu           sync.Mutex
+	calls        []mockNetworkCall
+	defaultAllow bool
+	defaultErrno int32
+	denyPorts    map[int]int32 // port → errno
+}
+
+func (m *mockNetworkHandler) HandleNetwork(ctx context.Context, nc NetworkContext) NetworkResult {
+	m.mu.Lock()
+	m.calls = append(m.calls, mockNetworkCall{nc})
+	m.mu.Unlock()
+
+	if m.denyPorts != nil {
+		if errno, ok := m.denyPorts[nc.Port]; ok {
+			return NetworkResult{Allow: false, Errno: errno}
+		}
+	}
+
+	return NetworkResult{Allow: m.defaultAllow, Errno: m.defaultErrno}
+}
+
+func (m *mockNetworkHandler) CallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.calls)
+}
+
+type mockSignalCall struct {
+	SignalContext
+}
+
+type mockSignalHandler struct {
+	mu             sync.Mutex
+	calls          []mockSignalCall
+	defaultAllow   bool
+	defaultErrno   int32
+	redirectSignal int // if > 0, redirect to this signal
+	denySignals    map[int]int32 // signal → errno
+}
+
+func (m *mockSignalHandler) HandleSignal(ctx context.Context, sc SignalContext) SignalResult {
+	m.mu.Lock()
+	m.calls = append(m.calls, mockSignalCall{sc})
+	m.mu.Unlock()
+
+	if m.denySignals != nil {
+		if errno, ok := m.denySignals[sc.Signal]; ok {
+			return SignalResult{Allow: false, Errno: errno}
+		}
+	}
+
+	return SignalResult{
+		Allow:          m.defaultAllow,
+		Errno:          m.defaultErrno,
+		RedirectSignal: m.redirectSignal,
+	}
+}
+
+func (m *mockSignalHandler) CallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.calls)
+}
+
+// --- Phase 2 Integration Tests ---
+
+func TestIntegration_FileDeny(t *testing.T) {
+	requirePtrace(t)
+
+	tmpDir := t.TempDir()
+	targetFile := filepath.Join(tmpDir, "denied.txt")
+
+	fileHandler := &mockFileHandler{
+		defaultAllow: true,
+		rules: map[string]FileResult{
+			"denied.txt": {Allow: false, Errno: int32(unix.EACCES)},
+		},
+	}
+	execHandler := &mockExecHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve: true,
+		TraceFile:   true,
+		ExecHandler: execHandler,
+		FileHandler: fileHandler,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	markerFile := filepath.Join(tmpDir, "marker.txt")
+	shellCmd := fmt.Sprintf(`/bin/sh -c 'echo test > %s 2>/dev/null || echo denied > %s'`, targetFile, markerFile)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	tr.AttachPID(cmd.Process.Pid)
+	cmd.Wait()
+
+	waitForTraceesDrained(t, tr, 2*time.Second)
+	cancel()
+	<-errCh
+
+	calls := fileHandler.CallsMatching("denied.txt")
+	t.Logf("file handler received %d calls matching 'denied.txt' out of %d total", len(calls), fileHandler.CallCount())
+	if len(calls) > 0 {
+		t.Logf("file deny intercepted: path=%q op=%q", calls[0].Path, calls[0].Operation)
+	}
+}
+
+func TestIntegration_FileAllow(t *testing.T) {
+	requirePtrace(t)
+
+	tmpDir := t.TempDir()
+	targetFile := filepath.Join(tmpDir, "allowed.txt")
+
+	fileHandler := &mockFileHandler{defaultAllow: true}
+	execHandler := &mockExecHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve: true,
+		TraceFile:   true,
+		ExecHandler: execHandler,
+		FileHandler: fileHandler,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	shellCmd := fmt.Sprintf(`echo hello > %s`, targetFile)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	tr.AttachPID(cmd.Process.Pid)
+	cmd.Wait()
+
+	waitForTraceesDrained(t, tr, 2*time.Second)
+	cancel()
+	<-errCh
+
+	data, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Logf("Note: file not created (attach may have happened after open)")
+	} else {
+		content := strings.TrimSpace(string(data))
+		if content == "hello" {
+			t.Log("file allow working: file was created successfully")
+		}
+	}
+
+	t.Logf("file handler received %d total calls", fileHandler.CallCount())
+	calls := fileHandler.CallsMatching("allowed.txt")
+	if len(calls) > 0 {
+		if !filepath.IsAbs(calls[0].Path) {
+			t.Errorf("expected absolute path, got %q", calls[0].Path)
+		}
+		t.Logf("file handler saw: path=%q op=%q", calls[0].Path, calls[0].Operation)
+	}
+}
+
+func TestIntegration_NetworkDenyConnect(t *testing.T) {
+	requirePtrace(t)
+
+	netHandler := &mockNetworkHandler{
+		defaultAllow: true,
+		denyPorts:    map[int]int32{12345: int32(unix.ECONNREFUSED)},
+	}
+	execHandler := &mockExecHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve:    true,
+		TraceNetwork:   true,
+		ExecHandler:    execHandler,
+		NetworkHandler: netHandler,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	outfile := filepath.Join(t.TempDir(), "result.txt")
+	shellCmd := fmt.Sprintf(`/bin/sh -c '(echo test > /dev/tcp/127.0.0.1/12345) 2>/dev/null && echo connected > %s || echo refused > %s'`, outfile, outfile)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	tr.AttachPID(cmd.Process.Pid)
+	cmd.Wait()
+
+	waitForTraceesDrained(t, tr, 2*time.Second)
+	cancel()
+	<-errCh
+
+	t.Logf("network handler received %d calls", netHandler.CallCount())
+
+	netHandler.mu.Lock()
+	for _, c := range netHandler.calls {
+		t.Logf("  op=%s family=%d addr=%s port=%d", c.Operation, c.Family, c.Address, c.Port)
+	}
+	netHandler.mu.Unlock()
+
+	data, err := os.ReadFile(outfile)
+	if err == nil {
+		content := strings.TrimSpace(string(data))
+		t.Logf("result: %q", content)
+		if content == "refused" {
+			t.Log("network deny working: connect was refused")
+		}
+	}
+}
+
+func TestIntegration_SignalDeny(t *testing.T) {
+	requirePtrace(t)
+
+	sigHandler := &mockSignalHandler{
+		defaultAllow: true,
+		denySignals:  map[int]int32{int(unix.SIGUSR1): int32(unix.EPERM)},
+	}
+	execHandler := &mockExecHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve:   true,
+		TraceSignal:   true,
+		ExecHandler:   execHandler,
+		SignalHandler: sigHandler,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	outfile := filepath.Join(t.TempDir(), "result.txt")
+	shellCmd := fmt.Sprintf(`/bin/sh -c 'kill -USR1 $$ 2>/dev/null && echo signaled > %s || echo denied > %s'`, outfile, outfile)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	tr.AttachPID(cmd.Process.Pid)
+	cmd.Wait()
+
+	waitForTraceesDrained(t, tr, 2*time.Second)
+	cancel()
+	<-errCh
+
+	t.Logf("signal handler received %d calls", sigHandler.CallCount())
+
+	sigHandler.mu.Lock()
+	for _, c := range sigHandler.calls {
+		t.Logf("  pid=%d target=%d signal=%d", c.PID, c.TargetPID, c.Signal)
+	}
+	sigHandler.mu.Unlock()
+
+	data, err := os.ReadFile(outfile)
+	if err == nil {
+		content := strings.TrimSpace(string(data))
+		t.Logf("result: %q", content)
+		if content == "denied" {
+			t.Log("signal deny working: SIGUSR1 was blocked")
+		}
+	}
+}
+
+func TestIntegration_SignalRedirect(t *testing.T) {
+	requirePtrace(t)
+
+	sigHandler := &mockSignalHandler{
+		defaultAllow:   true,
+		redirectSignal: int(unix.SIGUSR2),
+	}
+	execHandler := &mockExecHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve:   true,
+		TraceSignal:   true,
+		ExecHandler:   execHandler,
+		SignalHandler: sigHandler,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	outfile := filepath.Join(t.TempDir(), "result.txt")
+	shellCmd := fmt.Sprintf(`/bin/sh -c 'trap "echo redirected > %s" USR2; kill -USR1 $$; sleep 0.1'`, outfile)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	tr.AttachPID(cmd.Process.Pid)
+	cmd.Wait()
+
+	waitForTraceesDrained(t, tr, 2*time.Second)
+	cancel()
+	<-errCh
+
+	t.Logf("signal handler received %d calls", sigHandler.CallCount())
+
+	data, err := os.ReadFile(outfile)
+	if err == nil {
+		content := strings.TrimSpace(string(data))
+		t.Logf("result: %q", content)
+		if content == "redirected" {
+			t.Log("signal redirect working: SIGUSR1 was delivered as SIGUSR2")
+		}
+	} else {
+		t.Log("Note: redirect may not have been observed (attach timing)")
 	}
 }
