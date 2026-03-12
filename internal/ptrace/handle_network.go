@@ -74,12 +74,13 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 
 	// Args: sockfd(arg0), addr(arg1), addrlen(arg2)
 	addrPtr := regs.Arg(1)
-	addrLen := int(regs.Arg(2))
+	rawLen := regs.Arg(2)
 
-	if addrLen == 0 || addrLen > 128 {
+	if rawLen == 0 || rawLen > 128 {
 		t.allowSyscall(tid)
 		return
 	}
+	addrLen := int(rawLen)
 
 	buf := make([]byte, addrLen)
 	if err := t.readBytes(tid, addrPtr, buf); err != nil {
@@ -90,8 +91,8 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 
 	family, address, port, err := parseSockaddr(buf)
 	if err != nil {
-		slog.Warn("handleNetwork: cannot parse sockaddr", "tid", tid, "error", err)
-		t.allowSyscall(tid)
+		slog.Warn("handleNetwork: cannot parse sockaddr, denying", "tid", tid, "error", err)
+		t.denySyscall(tid, int(unix.EACCES))
 		return
 	}
 

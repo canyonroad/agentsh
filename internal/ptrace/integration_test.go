@@ -43,6 +43,19 @@ func waitForTraceesDrained(t *testing.T, tr *Tracer, timeout time.Duration) {
 	}
 }
 
+// waitForAttach polls until TraceeCount() > 0 or timeout, ensuring attach happened.
+func waitForAttach(t *testing.T, tr *Tracer, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if tr.TraceeCount() > 0 {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
 // --- Enhanced mockExecHandler with per-filename rules ---
 
 type mockExecHandler struct {
@@ -706,6 +719,7 @@ func TestIntegration_FileDeny(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	targetFile := filepath.Join(tmpDir, "denied.txt")
+	readyFile := filepath.Join(tmpDir, "ready")
 
 	fileHandler := &mockFileHandler{
 		defaultAllow: true,
@@ -729,16 +743,22 @@ func TestIntegration_FileDeny(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- tr.Run(ctx) }()
 
+	// Use ready-file sync: shell waits for ready file before running test action
 	markerFile := filepath.Join(tmpDir, "marker.txt")
-	shellCmd := fmt.Sprintf(`/bin/sh -c 'echo test > %s 2>/dev/null || echo denied > %s'`, targetFile, markerFile)
+	shellCmd := fmt.Sprintf(`while [ ! -f %s ]; do sleep 0.01; done; echo test > %s 2>/dev/null || echo denied > %s`, readyFile, targetFile, markerFile)
 	cmd := exec.Command("/bin/sh", "-c", shellCmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 
 	tr.AttachPID(cmd.Process.Pid)
-	cmd.Wait()
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	// Signal the child to proceed
+	os.WriteFile(readyFile, []byte("go"), 0644)
 
+	cmd.Wait()
 	waitForTraceesDrained(t, tr, 2*time.Second)
 	cancel()
 	<-errCh
@@ -746,12 +766,11 @@ func TestIntegration_FileDeny(t *testing.T) {
 	calls := fileHandler.CallsMatching("denied.txt")
 	t.Logf("file handler received %d calls matching 'denied.txt' out of %d total", len(calls), fileHandler.CallCount())
 
-	// The file handler must have received at least some calls (proving wiring works)
 	if fileHandler.CallCount() == 0 {
 		t.Error("file handler received zero calls; handleFile is not wired up")
 	}
-	if len(calls) > 0 {
-		t.Logf("file deny intercepted: path=%q op=%q", calls[0].Path, calls[0].Operation)
+	if len(calls) == 0 {
+		t.Error("file handler did not intercept denied.txt access")
 	}
 }
 
@@ -760,6 +779,7 @@ func TestIntegration_FileAllow(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	targetFile := filepath.Join(tmpDir, "allowed.txt")
+	readyFile := filepath.Join(tmpDir, "ready")
 
 	fileHandler := &mockFileHandler{defaultAllow: true}
 	execHandler := &mockExecHandler{defaultAllow: true}
@@ -778,40 +798,39 @@ func TestIntegration_FileAllow(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- tr.Run(ctx) }()
 
-	shellCmd := fmt.Sprintf(`echo hello > %s`, targetFile)
+	shellCmd := fmt.Sprintf(`while [ ! -f %s ]; do sleep 0.01; done; echo hello > %s`, readyFile, targetFile)
 	cmd := exec.Command("/bin/sh", "-c", shellCmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 
 	tr.AttachPID(cmd.Process.Pid)
-	cmd.Wait()
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
 
+	cmd.Wait()
 	waitForTraceesDrained(t, tr, 2*time.Second)
 	cancel()
 	<-errCh
 
+	// Assert file was created with expected content
 	data, err := os.ReadFile(targetFile)
 	if err != nil {
-		t.Logf("Note: file not created (attach may have happened after open)")
-	} else {
-		content := strings.TrimSpace(string(data))
-		if content != "hello" {
-			t.Errorf("expected file content %q, got %q", "hello", content)
-		}
+		t.Fatalf("allowed file was not created: %v", err)
+	}
+	content := strings.TrimSpace(string(data))
+	if content != "hello" {
+		t.Errorf("expected file content %q, got %q", "hello", content)
 	}
 
-	// The file handler must have received at least some calls (proving wiring works)
 	if fileHandler.CallCount() == 0 {
 		t.Error("file handler received zero calls; handleFile is not wired up")
 	}
-	t.Logf("file handler received %d total calls", fileHandler.CallCount())
 	calls := fileHandler.CallsMatching("allowed.txt")
-	if len(calls) > 0 {
-		if !filepath.IsAbs(calls[0].Path) {
-			t.Errorf("expected absolute path, got %q", calls[0].Path)
-		}
-		t.Logf("file handler saw: path=%q op=%q", calls[0].Path, calls[0].Operation)
+	if len(calls) > 0 && !filepath.IsAbs(calls[0].Path) {
+		t.Errorf("expected absolute path, got %q", calls[0].Path)
 	}
 }
 
@@ -838,43 +857,37 @@ func TestIntegration_NetworkDenyConnect(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- tr.Run(ctx) }()
 
-	outfile := filepath.Join(t.TempDir(), "result.txt")
-	// Use a Go helper to attempt a TCP connect to localhost:12345
-	// This avoids bash/dash dependency for /dev/tcp
-	shellCmd := fmt.Sprintf(`/bin/sh -c '(echo test | /usr/bin/nc -w 1 127.0.0.1 12345) 2>/dev/null && echo connected > %s || echo refused > %s'`, outfile, outfile)
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	outfile := filepath.Join(tmpDir, "result.txt")
+	shellCmd := fmt.Sprintf(`while [ ! -f %s ]; do sleep 0.01; done; (echo test | /usr/bin/nc -w 1 127.0.0.1 12345) 2>/dev/null && echo connected > %s || echo refused > %s`, readyFile, outfile, outfile)
 	cmd := exec.Command("/bin/sh", "-c", shellCmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 
 	tr.AttachPID(cmd.Process.Pid)
-	cmd.Wait()
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
 
+	cmd.Wait()
 	waitForTraceesDrained(t, tr, 2*time.Second)
 	cancel()
 	<-errCh
 
-	t.Logf("network handler received %d calls", netHandler.CallCount())
-
-	// The network handler must have received at least some calls (proving wiring works)
 	if netHandler.CallCount() == 0 {
 		t.Error("network handler received zero calls; handleNetwork is not wired up")
 	}
 
-	netHandler.mu.Lock()
-	for _, c := range netHandler.calls {
-		t.Logf("  op=%s family=%d addr=%s port=%d", c.Operation, c.Family, c.Address, c.Port)
-	}
-	netHandler.mu.Unlock()
-
-	// Verify the connect was refused (outcome assertion)
 	data, err := os.ReadFile(outfile)
-	if err == nil {
-		content := strings.TrimSpace(string(data))
-		t.Logf("result: %q", content)
-		if content != "refused" {
-			t.Errorf("expected 'refused', got %q", content)
-		}
+	if err != nil {
+		t.Fatal("expected result file to exist")
+	}
+	content := strings.TrimSpace(string(data))
+	if content != "refused" {
+		t.Errorf("expected 'refused', got %q", content)
 	}
 }
 
@@ -901,40 +914,37 @@ func TestIntegration_SignalDeny(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- tr.Run(ctx) }()
 
-	outfile := filepath.Join(t.TempDir(), "result.txt")
-	shellCmd := fmt.Sprintf(`/bin/sh -c 'kill -USR1 $$ 2>/dev/null && echo signaled > %s || echo denied > %s'`, outfile, outfile)
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	outfile := filepath.Join(tmpDir, "result.txt")
+	shellCmd := fmt.Sprintf(`while [ ! -f %s ]; do sleep 0.01; done; kill -USR1 $$ 2>/dev/null && echo signaled > %s || echo denied > %s`, readyFile, outfile, outfile)
 	cmd := exec.Command("/bin/sh", "-c", shellCmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 
 	tr.AttachPID(cmd.Process.Pid)
-	cmd.Wait()
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
 
+	cmd.Wait()
 	waitForTraceesDrained(t, tr, 2*time.Second)
 	cancel()
 	<-errCh
 
-	t.Logf("signal handler received %d calls", sigHandler.CallCount())
-
-	// The signal handler must have received at least some calls (proving wiring works)
 	if sigHandler.CallCount() == 0 {
 		t.Error("signal handler received zero calls; handleSignal is not wired up")
 	}
 
-	sigHandler.mu.Lock()
-	for _, c := range sigHandler.calls {
-		t.Logf("  pid=%d target=%d signal=%d", c.PID, c.TargetPID, c.Signal)
-	}
-	sigHandler.mu.Unlock()
-
 	data, err := os.ReadFile(outfile)
-	if err == nil {
-		content := strings.TrimSpace(string(data))
-		t.Logf("result: %q", content)
-		if content != "denied" {
-			t.Errorf("expected 'denied', got %q", content)
-		}
+	if err != nil {
+		t.Fatal("expected result file to exist")
+	}
+	content := strings.TrimSpace(string(data))
+	if content != "denied" {
+		t.Errorf("expected 'denied', got %q", content)
 	}
 }
 
@@ -961,35 +971,36 @@ func TestIntegration_SignalRedirect(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- tr.Run(ctx) }()
 
-	outfile := filepath.Join(t.TempDir(), "result.txt")
-	shellCmd := fmt.Sprintf(`/bin/sh -c 'trap "echo redirected > %s" USR2; kill -USR1 $$; sleep 0.1'`, outfile)
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	outfile := filepath.Join(tmpDir, "result.txt")
+	shellCmd := fmt.Sprintf(`trap "echo redirected > %s" USR2; while [ ! -f %s ]; do sleep 0.01; done; kill -USR1 $$; sleep 0.1`, outfile, readyFile)
 	cmd := exec.Command("/bin/sh", "-c", shellCmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 
 	tr.AttachPID(cmd.Process.Pid)
-	cmd.Wait()
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
 
+	cmd.Wait()
 	waitForTraceesDrained(t, tr, 2*time.Second)
 	cancel()
 	<-errCh
 
-	t.Logf("signal handler received %d calls", sigHandler.CallCount())
-
-	// The signal handler must have received at least some calls (proving wiring works)
 	if sigHandler.CallCount() == 0 {
 		t.Error("signal handler received zero calls; handleSignal is not wired up")
 	}
 
 	data, err := os.ReadFile(outfile)
-	if err == nil {
-		content := strings.TrimSpace(string(data))
-		t.Logf("result: %q", content)
-		if content != "redirected" {
-			t.Errorf("expected 'redirected', got %q", content)
-		}
-	} else {
-		t.Log("Note: redirect output file not created (attach timing)")
+	if err != nil {
+		t.Fatal("expected redirect output file to exist")
+	}
+	content := strings.TrimSpace(string(data))
+	if content != "redirected" {
+		t.Errorf("expected 'redirected', got %q", content)
 	}
 }
