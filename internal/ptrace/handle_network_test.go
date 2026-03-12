@@ -12,7 +12,7 @@ import (
 
 func TestParseSockaddr_IPv4(t *testing.T) {
 	buf := make([]byte, 16)
-	binary.LittleEndian.PutUint16(buf[0:2], unix.AF_INET)
+	binary.NativeEndian.PutUint16(buf[0:2], unix.AF_INET)
 	binary.BigEndian.PutUint16(buf[2:4], 8080)
 	copy(buf[4:8], net.ParseIP("192.168.1.1").To4())
 
@@ -33,7 +33,7 @@ func TestParseSockaddr_IPv4(t *testing.T) {
 
 func TestParseSockaddr_IPv6(t *testing.T) {
 	buf := make([]byte, 28)
-	binary.LittleEndian.PutUint16(buf[0:2], unix.AF_INET6)
+	binary.NativeEndian.PutUint16(buf[0:2], unix.AF_INET6)
 	binary.BigEndian.PutUint16(buf[2:4], 443)
 	copy(buf[8:24], net.ParseIP("::1").To16())
 
@@ -54,10 +54,10 @@ func TestParseSockaddr_IPv6(t *testing.T) {
 
 func TestParseSockaddr_IPv6LinkLocal(t *testing.T) {
 	buf := make([]byte, 28)
-	binary.LittleEndian.PutUint16(buf[0:2], unix.AF_INET6)
+	binary.NativeEndian.PutUint16(buf[0:2], unix.AF_INET6)
 	binary.BigEndian.PutUint16(buf[2:4], 80)
 	copy(buf[8:24], net.ParseIP("fe80::1").To16())
-	binary.LittleEndian.PutUint32(buf[24:28], 3) // scope_id = 3
+	binary.NativeEndian.PutUint32(buf[24:28], 3) // scope_id = 3
 
 	family, addr, port, err := parseSockaddr(buf)
 	if err != nil {
@@ -77,7 +77,7 @@ func TestParseSockaddr_IPv6LinkLocal(t *testing.T) {
 func TestParseSockaddr_Unix(t *testing.T) {
 	path := "/var/run/docker.sock"
 	buf := make([]byte, 2+len(path)+1)
-	binary.LittleEndian.PutUint16(buf[0:2], unix.AF_UNIX)
+	binary.NativeEndian.PutUint16(buf[0:2], unix.AF_UNIX)
 	copy(buf[2:], path)
 
 	family, addr, port, err := parseSockaddr(buf)
@@ -98,7 +98,7 @@ func TestParseSockaddr_Unix(t *testing.T) {
 func TestParseSockaddr_UnixAbstract(t *testing.T) {
 	name := "my-abstract-socket"
 	buf := make([]byte, 2+1+len(name))
-	binary.LittleEndian.PutUint16(buf[0:2], unix.AF_UNIX)
+	binary.NativeEndian.PutUint16(buf[0:2], unix.AF_UNIX)
 	buf[2] = 0
 	copy(buf[3:], name)
 
@@ -118,12 +118,12 @@ func TestParseSockaddr_UnixAbstractWithNulls(t *testing.T) {
 	// Abstract socket names preserve all bytes including trailing NULs.
 	// Two names that differ only by trailing NULs must produce different addresses.
 	buf1 := make([]byte, 2+1+4) // \0name
-	binary.LittleEndian.PutUint16(buf1[0:2], unix.AF_UNIX)
+	binary.NativeEndian.PutUint16(buf1[0:2], unix.AF_UNIX)
 	buf1[2] = 0
 	copy(buf1[3:], "abc")
 
 	buf2 := make([]byte, 2+1+5) // \0name\0
-	binary.LittleEndian.PutUint16(buf2[0:2], unix.AF_UNIX)
+	binary.NativeEndian.PutUint16(buf2[0:2], unix.AF_UNIX)
 	buf2[2] = 0
 	copy(buf2[3:], "abc\x00")
 
@@ -146,7 +146,7 @@ func TestParseSockaddr_TooShort(t *testing.T) {
 func TestParseSockaddr_AFUnspec(t *testing.T) {
 	// AF_UNSPEC is used with connect() to disconnect datagram sockets.
 	buf := make([]byte, 16)
-	binary.LittleEndian.PutUint16(buf[0:2], unix.AF_UNSPEC)
+	binary.NativeEndian.PutUint16(buf[0:2], unix.AF_UNSPEC)
 
 	family, addr, port, err := parseSockaddr(buf)
 	if err != nil {

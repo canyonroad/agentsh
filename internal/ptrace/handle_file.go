@@ -217,7 +217,7 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		if err := t.readBytes(tid, howPtr, howBuf); err != nil {
 			return "", "", 0, fmt.Errorf("read open_how: %w", err)
 		}
-		flags = int(binary.LittleEndian.Uint64(howBuf[0:8]))
+		flags = int(binary.NativeEndian.Uint64(howBuf[0:8]))
 		path, err = resolvePath(tid, dirfd, rawPath)
 		return path, "", flags, err
 

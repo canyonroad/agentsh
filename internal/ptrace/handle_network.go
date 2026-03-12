@@ -19,7 +19,7 @@ func parseSockaddr(buf []byte) (family int, address string, port int, err error)
 		return 0, "", 0, fmt.Errorf("sockaddr too short: %d bytes", len(buf))
 	}
 
-	family = int(binary.LittleEndian.Uint16(buf[0:2]))
+	family = int(binary.NativeEndian.Uint16(buf[0:2]))
 
 	switch family {
 	case unix.AF_UNSPEC:
@@ -43,7 +43,7 @@ func parseSockaddr(buf []byte) (family int, address string, port int, err error)
 		addr := ip.String()
 		// Include scope_id for link-local addresses if present.
 		if len(buf) >= 28 {
-			scopeID := binary.LittleEndian.Uint32(buf[24:28])
+			scopeID := binary.NativeEndian.Uint32(buf[24:28])
 			if scopeID != 0 {
 				addr = fmt.Sprintf("%s%%%d", addr, scopeID)
 			}
