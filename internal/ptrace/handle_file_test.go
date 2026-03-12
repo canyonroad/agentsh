@@ -85,3 +85,17 @@ func TestResolvePath_NotDir(t *testing.T) {
 		t.Fatal("resolvePath through non-directory: expected error, got nil")
 	}
 }
+
+func TestResolvePath_DanglingSymlink(t *testing.T) {
+	// A dangling symlink should cause resolvePath to fail, not silently
+	// return the symlink path. The kernel would follow the symlink on
+	// O_CREAT, potentially creating a file in a forbidden directory.
+	dir := t.TempDir()
+	link := filepath.Join(dir, "dangling")
+	os.Symlink("/nonexistent/target/file", link)
+
+	_, err := resolvePath(0, unix.AT_FDCWD, link)
+	if err == nil {
+		t.Fatal("resolvePath for dangling symlink: expected error, got nil")
+	}
+}

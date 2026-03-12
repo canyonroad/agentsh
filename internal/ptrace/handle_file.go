@@ -88,6 +88,14 @@ func resolvePath(tid int, dirfd int, path string) (string, error) {
 		return "", fmt.Errorf("resolve path %q: %w", full, err)
 	}
 
+	// Guard against dangling symlinks: if the leaf itself exists as a symlink
+	// but its target doesn't, Lstat will succeed. The kernel would follow the
+	// symlink on O_CREAT, potentially creating a file in a forbidden directory.
+	// Fail closed because we can't determine the real target path.
+	if fi, lstatErr := os.Lstat(full); lstatErr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("resolve path %q: dangling symlink", full)
+	}
+
 	// File doesn't exist yet — resolve the parent directory to
 	// canonicalize any symlinked path components.
 	dir := filepath.Dir(full)
