@@ -132,6 +132,7 @@ type TraceeState struct {
 	InSyscall        bool
 	LastNr           int
 	Attached         time.Time
+	ParkedAt         time.Time
 	PendingDenyErrno int
 	PendingInterrupt bool
 	IsVforkChild     bool
@@ -190,6 +191,16 @@ func (t *Tracer) TraceeCount() int {
 func (t *Tracer) AttachPID(pid int) error {
 	t.attachQueue <- pid
 	return nil
+}
+
+// ParkTracee marks a tracee as parked (awaiting async approval).
+func (t *Tracer) ParkTracee(tid int) {
+	t.mu.Lock()
+	t.parkedTracees[tid] = struct{}{}
+	if state, ok := t.tracees[tid]; ok {
+		state.ParkedAt = time.Now()
+	}
+	t.mu.Unlock()
 }
 
 // Available returns whether ptrace tracing is available.
@@ -617,6 +628,7 @@ func (t *Tracer) Run(ctx context.Context) error {
 			case req := <-t.resumeQueue:
 				t.handleResumeRequest(req)
 			case <-time.After(5 * time.Millisecond):
+				t.sweepParkedTimeouts()
 			}
 			continue
 		}
@@ -655,6 +667,46 @@ func (t *Tracer) drainQueues(ctx context.Context) error {
 		default:
 			return nil
 		}
+	}
+}
+
+// sweepParkedTimeouts denies parked tracees that have exceeded max_hold_ms.
+func (t *Tracer) sweepParkedTimeouts() {
+	if t.cfg.MaxHoldMs <= 0 {
+		return
+	}
+	maxDuration := time.Duration(t.cfg.MaxHoldMs) * time.Millisecond
+
+	t.mu.Lock()
+	var expired []int
+	for tid := range t.parkedTracees {
+		state := t.tracees[tid]
+		if state == nil {
+			expired = append(expired, tid)
+			continue
+		}
+		if !state.ParkedAt.IsZero() && time.Since(state.ParkedAt) > maxDuration {
+			expired = append(expired, tid)
+		}
+	}
+	for _, tid := range expired {
+		delete(t.parkedTracees, tid)
+	}
+	t.mu.Unlock()
+
+	for _, tid := range expired {
+		t.mu.Lock()
+		state := t.tracees[tid]
+		t.mu.Unlock()
+		if state == nil {
+			continue
+		}
+		slog.Warn("ptrace: max_hold_ms timeout, denying syscall",
+			"tid", tid,
+			"max_hold_ms", t.cfg.MaxHoldMs,
+		)
+		t.metrics.IncTimeout()
+		t.denySyscall(tid, int(unix.EACCES))
 	}
 }
 
