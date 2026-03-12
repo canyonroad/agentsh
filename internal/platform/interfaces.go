@@ -28,6 +28,15 @@ type Platform interface {
 	Shutdown(ctx context.Context) error
 }
 
+// SyscallTracer provides syscall-level interception via ptrace or equivalent.
+type SyscallTracer interface {
+	Start(ctx context.Context) error
+	AttachPID(pid int) error
+	TraceeCount() int
+	Available() bool
+	Implementation() string
+}
+
 // FilesystemInterceptor handles FUSE-based (or equivalent) file monitoring and interception.
 type FilesystemInterceptor interface {
 	// Mount creates a new intercepted filesystem mount

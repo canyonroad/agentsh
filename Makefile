@@ -1,5 +1,5 @@
 .PHONY: build build-shim test lint clean proto ebpf
-.PHONY: smoke
+.PHONY: smoke ptrace-test
 .PHONY: completions package-snapshot package-release
 .PHONY: build-macos-enterprise build-macos-go build-swift assemble-bundle sign-bundle
 .PHONY: build-driver build-driver-debug install-driver uninstall-driver build-windows-full
@@ -40,6 +40,10 @@ test:
 
 smoke:
 	bash scripts/smoke.sh
+
+ptrace-test:
+	docker build -f Dockerfile.ptrace-test -t agentsh-ptrace-test .
+	docker run --rm --cap-add SYS_PTRACE agentsh-ptrace-test
 
 lint:
 	@echo "No linter configured"

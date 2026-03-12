@@ -1,0 +1,8 @@
+FROM golang:1.25
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go test -c -tags integration -o /ptrace-test ./internal/ptrace/
+ENTRYPOINT ["/ptrace-test"]
+CMD ["-test.v", "-test.timeout=120s"]

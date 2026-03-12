@@ -43,10 +43,12 @@ func realCheckSeccompUserNotify() CheckResult {
 }
 
 func realCheckPtrace() CheckResult {
-	return CheckResult{
-		Feature:   "ptrace",
-		Available: true,
+	available := checkPtraceCapability()
+	r := CheckResult{Feature: "ptrace", Available: available}
+	if !available {
+		r.Error = fmt.Errorf("SYS_PTRACE capability not available or ptrace blocked by seccomp")
 	}
+	return r
 }
 
 func realCheckCgroupsV2() CheckResult {
@@ -134,6 +136,16 @@ func CheckAll(cfg *config.Config) error {
 		result := checkeBPF()
 		result.ConfigKey = "sandbox.network.ebpf.enabled"
 		result.Suggestion = "Set 'sandbox.network.ebpf.enabled: false' in your config"
+		if !result.Available {
+			failures = append(failures, result)
+		}
+	}
+
+	// Check ptrace capability when enabled
+	if cfg.Sandbox.Ptrace.Enabled {
+		result := checkPtrace()
+		result.ConfigKey = "sandbox.ptrace.enabled"
+		result.Suggestion = "Set 'sandbox.ptrace.enabled: false' or add SYS_PTRACE capability"
 		if !result.Available {
 			failures = append(failures, result)
 		}
