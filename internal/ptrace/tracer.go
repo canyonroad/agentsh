@@ -488,8 +488,12 @@ func (t *Tracer) handleExit(tid int) {
 			unix.Close(state.MemFD)
 		}
 		delete(t.tracees, tid)
+		if _, parked := t.parkedTracees[tid]; parked {
+			delete(t.parkedTracees, tid)
+			slog.Warn("ptrace: parked tracee exited before approval", "tid", tid)
+		}
+		t.metrics.SetTraceeCount(len(t.tracees))
 	}
-	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
 }
 
@@ -716,10 +720,19 @@ func (t *Tracer) handleResumeRequest(req resumeRequest) {
 	if parked {
 		delete(t.parkedTracees, req.TID)
 	}
+	state := t.tracees[req.TID]
+	if state != nil {
+		state.ParkedAt = time.Time{}
+	}
 	t.mu.Unlock()
 
 	if !parked {
 		slog.Warn("resume request for non-parked tracee", "tid", req.TID)
+		return
+	}
+
+	if state == nil {
+		slog.Warn("resume request for exited tracee, skipping", "tid", req.TID)
 		return
 	}
 
