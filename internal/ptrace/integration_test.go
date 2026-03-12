@@ -839,7 +839,9 @@ func TestIntegration_NetworkDenyConnect(t *testing.T) {
 	go func() { errCh <- tr.Run(ctx) }()
 
 	outfile := filepath.Join(t.TempDir(), "result.txt")
-	shellCmd := fmt.Sprintf(`/bin/sh -c '(echo test > /dev/tcp/127.0.0.1/12345) 2>/dev/null && echo connected > %s || echo refused > %s'`, outfile, outfile)
+	// Use a Go helper to attempt a TCP connect to localhost:12345
+	// This avoids bash/dash dependency for /dev/tcp
+	shellCmd := fmt.Sprintf(`/bin/sh -c '(echo test | /usr/bin/nc -w 1 127.0.0.1 12345) 2>/dev/null && echo connected > %s || echo refused > %s'`, outfile, outfile)
 	cmd := exec.Command("/bin/sh", "-c", shellCmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -864,6 +866,16 @@ func TestIntegration_NetworkDenyConnect(t *testing.T) {
 		t.Logf("  op=%s family=%d addr=%s port=%d", c.Operation, c.Family, c.Address, c.Port)
 	}
 	netHandler.mu.Unlock()
+
+	// Verify the connect was refused (outcome assertion)
+	data, err := os.ReadFile(outfile)
+	if err == nil {
+		content := strings.TrimSpace(string(data))
+		t.Logf("result: %q", content)
+		if content != "refused" {
+			t.Errorf("expected 'refused', got %q", content)
+		}
+	}
 }
 
 func TestIntegration_SignalDeny(t *testing.T) {

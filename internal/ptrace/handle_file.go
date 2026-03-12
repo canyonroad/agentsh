@@ -56,26 +56,34 @@ func resolveDirFD(tid int, dirfd int) (string, error) {
 }
 
 // resolvePath resolves a path from a *at syscall to an absolute canonical path.
+// For nonexistent files (e.g. create operations), resolves the parent directory
+// and appends the basename.
 func resolvePath(tid int, dirfd int, path string) (string, error) {
+	var full string
 	if filepath.IsAbs(path) {
-		resolved, err := filepath.EvalSymlinks(path)
+		full = path
+	} else {
+		base, err := resolveDirFD(tid, dirfd)
 		if err != nil {
-			return path, nil // Use original if symlink resolution fails
+			return "", fmt.Errorf("resolve dirfd %d: %w", dirfd, err)
 		}
+		full = filepath.Join(base, path)
+	}
+
+	resolved, err := filepath.EvalSymlinks(full)
+	if err == nil {
 		return resolved, nil
 	}
 
-	base, err := resolveDirFD(tid, dirfd)
+	// File may not exist yet (create operation).
+	// Resolve the parent directory to canonicalize symlinked parents.
+	dir := filepath.Dir(full)
+	base := filepath.Base(full)
+	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return "", fmt.Errorf("resolve dirfd %d: %w", dirfd, err)
+		return full, nil // Parent doesn't exist either; use best-effort path
 	}
-
-	full := filepath.Join(base, path)
-	resolved, err := filepath.EvalSymlinks(full)
-	if err != nil {
-		return full, nil // Use joined path if symlink resolution fails
-	}
-	return resolved, nil
+	return filepath.Join(resolvedDir, base), nil
 }
 
 // handleFile intercepts file syscalls for policy evaluation.

@@ -74,7 +74,7 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 
 	// Args: sockfd(arg0), addr(arg1), addrlen(arg2)
 	addrPtr := regs.Arg(1)
-	addrLen := regs.Arg(2)
+	addrLen := int(regs.Arg(2))
 
 	if addrLen == 0 || addrLen > 128 {
 		t.allowSyscall(tid)
