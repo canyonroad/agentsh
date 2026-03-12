@@ -174,15 +174,42 @@ func (t *Tracer) handleFile(ctx context.Context, tid int, regs Regs) {
 		Flags:     flags,
 	})
 
-	if !result.Allow {
+	// Dispatch based on Action field (new path) or Allow field (legacy path).
+	action := result.Action
+	if action == "" {
+		if result.Allow {
+			action = "allow"
+		} else {
+			action = "deny"
+		}
+	}
+
+	switch action {
+	case "deny":
 		errno := result.Errno
 		if errno == 0 {
 			errno = int32(unix.EACCES)
 		}
 		t.denySyscall(tid, int(errno))
-	} else {
+	case "redirect":
+		t.redirectFile(ctx, tid, regs, nr, result)
+	case "soft-delete":
+		t.softDeleteFile(ctx, tid, regs, result)
+	default:
 		t.allowSyscall(tid)
 	}
+}
+
+// redirectFile redirects a file syscall to a different path.
+func (t *Tracer) redirectFile(ctx context.Context, tid int, regs Regs, nr int, result FileResult) {
+	slog.Warn("redirectFile: not yet implemented, denying", "tid", tid)
+	t.denySyscall(tid, int(unix.EACCES))
+}
+
+// softDeleteFile performs a soft-delete by moving the file to trash.
+func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, result FileResult) {
+	slog.Warn("softDeleteFile: not yet implemented, denying", "tid", tid)
+	t.denySyscall(tid, int(unix.EACCES))
 }
 
 // extractFileArgs reads file syscall arguments from registers and tracee memory.

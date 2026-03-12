@@ -139,13 +139,32 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 		Operation: operation,
 	})
 
-	if !result.Allow {
+	// Dispatch based on Action field (new path) or Allow field (legacy path).
+	action := result.Action
+	if action == "" {
+		if result.Allow {
+			action = "allow"
+		} else {
+			action = "deny"
+		}
+	}
+
+	switch action {
+	case "deny":
 		errno := result.Errno
 		if errno == 0 {
 			errno = int32(unix.EACCES)
 		}
 		t.denySyscall(tid, int(errno))
-	} else {
+	case "redirect":
+		t.redirectConnect(ctx, tid, regs, result)
+	default:
 		t.allowSyscall(tid)
 	}
+}
+
+// redirectConnect redirects a connect syscall to a different address.
+func (t *Tracer) redirectConnect(ctx context.Context, tid int, regs Regs, result NetworkResult) {
+	slog.Warn("redirectConnect: not yet implemented, denying", "tid", tid)
+	t.denySyscall(tid, int(unix.EACCES))
 }

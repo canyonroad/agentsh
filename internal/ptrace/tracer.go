@@ -33,11 +33,12 @@ type ExecContext struct {
 
 // ExecResult carries the policy decision.
 type ExecResult struct {
-	Allow  bool
-	Action string // "continue", "deny", "redirect"
-	Errno  int32
-	Rule   string
-	Reason string
+	Allow    bool
+	Action   string // "continue", "deny", "redirect"
+	Errno    int32
+	Rule     string
+	Reason   string
+	StubPath string // for redirect: path to stub binary
 }
 
 // FileHandler evaluates file syscall policy.
@@ -58,8 +59,11 @@ type FileContext struct {
 
 // FileResult carries the file policy decision.
 type FileResult struct {
-	Allow bool
-	Errno int32
+	Allow        bool
+	Action       string // "" (legacy), "allow", "deny", "redirect", "soft-delete"
+	Errno        int32
+	RedirectPath string // for redirect
+	TrashDir     string // for soft-delete
 }
 
 // NetworkHandler evaluates network syscall policy.
@@ -80,8 +84,11 @@ type NetworkContext struct {
 
 // NetworkResult carries the network policy decision.
 type NetworkResult struct {
-	Allow bool
-	Errno int32
+	Allow        bool
+	Action       string // "" (legacy), "allow", "deny", "redirect"
+	Errno        int32
+	RedirectAddr string // for redirect
+	RedirectPort int    // for redirect
 }
 
 // SignalHandler evaluates signal delivery policy.
@@ -609,9 +616,18 @@ func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
 			errno = int32(unix.EACCES)
 		}
 		t.denySyscall(tid, int(errno))
+	case "redirect":
+		t.redirectExec(ctx, tid, regs, result)
 	default:
 		t.allowSyscall(tid)
 	}
+}
+
+// redirectExec redirects an execve to a stub binary.
+// Implemented in redirect_exec.go.
+func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result ExecResult) {
+	slog.Warn("redirectExec: not yet implemented, denying", "tid", tid)
+	t.denySyscall(tid, int(unix.EACCES))
 }
 
 // Run starts the ptrace event loop.
