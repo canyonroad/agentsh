@@ -159,6 +159,7 @@ type Tracer struct {
 	mu            sync.Mutex
 	tracees       map[int]*TraceeState
 	parkedTracees map[int]struct{}
+	tgidScratch   map[int]*scratchPage
 
 	stopped chan struct{}
 }
@@ -177,6 +178,7 @@ func NewTracer(cfg TracerConfig) *Tracer {
 		resumeQueue:   make(chan resumeRequest, 64),
 		tracees:       make(map[int]*TraceeState),
 		parkedTracees: make(map[int]struct{}),
+		tgidScratch:   make(map[int]*scratchPage),
 		stopped:       make(chan struct{}),
 	}
 }
@@ -498,12 +500,17 @@ func (t *Tracer) handleExecEvent(tid int) {
 	}
 	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
+
+	// Exec replaces the process address space, invalidating any scratch page.
+	t.invalidateScratchPage(tgid)
 }
 
 func (t *Tracer) handleExit(tid int) {
 	t.mu.Lock()
 	state := t.tracees[tid]
+	var tgid int
 	if state != nil {
+		tgid = state.TGID
 		if state.MemFD >= 0 {
 			unix.Close(state.MemFD)
 		}
@@ -515,6 +522,10 @@ func (t *Tracer) handleExit(tid int) {
 		t.metrics.SetTraceeCount(len(t.tracees))
 	}
 	t.mu.Unlock()
+
+	if state != nil {
+		t.invalidateScratchPage(tgid)
+	}
 }
 
 func (t *Tracer) handleEventStop(tid int) {
