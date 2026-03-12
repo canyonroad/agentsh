@@ -618,7 +618,7 @@ func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
 	})
 
 	switch result.Action {
-	case "", "continue":
+	case "", "continue", "allow":
 		t.allowSyscall(tid)
 	case "deny":
 		errno := result.Errno

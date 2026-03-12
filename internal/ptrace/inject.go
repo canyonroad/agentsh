@@ -101,10 +101,16 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 		if status.Stopped() && status.StopSignal() == unix.SIGTRAP|0x80 {
 			return nil
 		}
-		// If the tracee received a signal during injection, reinject it
-		// so it is not lost, then continue waiting for the syscall stop.
+		// Handle other stopped states: distinguish ptrace event stops
+		// from real signal-delivery stops.
 		if status.Stopped() {
 			sig := int(status.StopSignal())
+			// Ptrace event stops (fork, clone, exec, seccomp, etc.) report
+			// SIGTRAP with a non-zero TrapCause. These are not real signals
+			// and must be resumed with signal 0 to avoid injecting SIGTRAP.
+			if sig == int(unix.SIGTRAP) && status.TrapCause() != 0 {
+				sig = 0
+			}
 			if err := unix.PtraceSyscall(tid, sig); err != nil {
 				return fmt.Errorf("inject re-resume tid %d: %w", tid, err)
 			}
