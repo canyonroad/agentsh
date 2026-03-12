@@ -98,6 +98,14 @@ func (t *Tracer) writeBytes(tid int, addr uint64, buf []byte) error {
 	return err
 }
 
+// writeString writes a NUL-terminated string to the tracee's memory.
+func (t *Tracer) writeString(tid int, addr uint64, s string) error {
+	buf := make([]byte, len(s)+1) // +1 for NUL terminator
+	copy(buf, s)
+	// buf[len(s)] is already 0 from make
+	return t.writeBytes(tid, addr, buf)
+}
+
 // readArgv reads the argv array from tracee memory.
 func (t *Tracer) readArgv(tid int, argvPtr uint64, maxArgc int, maxBytes int) ([]string, bool, error) {
 	r, err := t.getMemReader(tid)
