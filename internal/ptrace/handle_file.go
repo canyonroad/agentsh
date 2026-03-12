@@ -3,7 +3,9 @@
 package ptrace
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -74,4 +76,180 @@ func resolvePath(tid int, dirfd int, path string) (string, error) {
 		return full, nil // Use joined path if symlink resolution fails
 	}
 	return resolved, nil
+}
+
+// handleFile intercepts file syscalls for policy evaluation.
+func (t *Tracer) handleFile(ctx context.Context, tid int, regs Regs) {
+	if t.cfg.FileHandler == nil || !t.cfg.TraceFile {
+		t.allowSyscall(tid)
+		return
+	}
+
+	nr := regs.SyscallNr()
+
+	path, path2, flags, err := t.extractFileArgs(tid, nr, regs)
+	if err != nil {
+		slog.Warn("handleFile: cannot extract args", "tid", tid, "nr", nr, "error", err)
+		t.allowSyscall(tid)
+		return
+	}
+
+	operation := syscallToOperation(nr, flags)
+
+	t.mu.Lock()
+	state := t.tracees[tid]
+	var tgid int
+	var sessionID string
+	if state != nil {
+		tgid = state.TGID
+		sessionID = state.SessionID
+	}
+	t.mu.Unlock()
+
+	result := t.cfg.FileHandler.HandleFile(ctx, FileContext{
+		PID:       tgid,
+		SessionID: sessionID,
+		Syscall:   nr,
+		Path:      path,
+		Path2:     path2,
+		Operation: operation,
+		Flags:     flags,
+	})
+
+	if !result.Allow {
+		errno := result.Errno
+		if errno == 0 {
+			errno = int32(unix.EACCES)
+		}
+		t.denySyscall(tid, int(errno))
+	} else {
+		t.allowSyscall(tid)
+	}
+}
+
+// extractFileArgs reads file syscall arguments from registers and tracee memory.
+func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string, flags int, err error) {
+	switch nr {
+	case unix.SYS_OPENAT:
+		dirfd := int(int32(regs.Arg(0)))
+		pathPtr := regs.Arg(1)
+		flags = int(int32(regs.Arg(2)))
+		rawPath, err := t.readString(tid, pathPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		path, err = resolvePath(tid, dirfd, rawPath)
+		return path, "", flags, err
+
+	case unix.SYS_UNLINKAT, unix.SYS_MKDIRAT:
+		dirfd := int(int32(regs.Arg(0)))
+		pathPtr := regs.Arg(1)
+		rawPath, err := t.readString(tid, pathPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		path, err = resolvePath(tid, dirfd, rawPath)
+		return path, "", 0, err
+
+	case unix.SYS_FCHMODAT, unix.SYS_FCHOWNAT:
+		dirfd := int(int32(regs.Arg(0)))
+		pathPtr := regs.Arg(1)
+		rawPath, err := t.readString(tid, pathPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		path, err = resolvePath(tid, dirfd, rawPath)
+		return path, "", 0, err
+
+	case unix.SYS_RENAMEAT2:
+		oldDirfd := int(int32(regs.Arg(0)))
+		oldPathPtr := regs.Arg(1)
+		newDirfd := int(int32(regs.Arg(2)))
+		newPathPtr := regs.Arg(3)
+
+		rawOld, err := t.readString(tid, oldPathPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		rawNew, err := t.readString(tid, newPathPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		path, err = resolvePath(tid, oldDirfd, rawOld)
+		if err != nil {
+			return "", "", 0, err
+		}
+		path2, err = resolvePath(tid, newDirfd, rawNew)
+		return path, path2, 0, err
+
+	case unix.SYS_LINKAT:
+		oldDirfd := int(int32(regs.Arg(0)))
+		oldPathPtr := regs.Arg(1)
+		newDirfd := int(int32(regs.Arg(2)))
+		newPathPtr := regs.Arg(3)
+
+		rawOld, err := t.readString(tid, oldPathPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		rawNew, err := t.readString(tid, newPathPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		path, err = resolvePath(tid, oldDirfd, rawOld)
+		if err != nil {
+			return "", "", 0, err
+		}
+		path2, err = resolvePath(tid, newDirfd, rawNew)
+		return path, path2, 0, err
+
+	case unix.SYS_SYMLINKAT:
+		targetPtr := regs.Arg(0)
+		newDirfd := int(int32(regs.Arg(1)))
+		linkPathPtr := regs.Arg(2)
+
+		target, err := t.readString(tid, targetPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		rawLink, err := t.readString(tid, linkPathPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		path, err = resolvePath(tid, newDirfd, rawLink)
+		return path, target, 0, err
+
+	default:
+		return t.extractLegacyFileArgs(tid, nr, regs)
+	}
+}
+
+// extractLegacyFileArgs handles legacy (non-at) file syscalls.
+// On arm64 this is never called because isLegacyFileSyscall returns false.
+func (t *Tracer) extractLegacyFileArgs(tid int, nr int, regs Regs) (path, path2 string, flags int, err error) {
+	pathPtr := regs.Arg(0)
+	rawPath, err := t.readString(tid, pathPtr, 4096)
+	if err != nil {
+		return "", "", 0, err
+	}
+	path, err = resolvePath(tid, unix.AT_FDCWD, rawPath)
+	if err != nil {
+		return "", "", 0, err
+	}
+
+	switch {
+	case isLegacyOpenSyscall(nr):
+		flags = int(int32(regs.Arg(1)))
+		return path, "", flags, nil
+	case isLegacyTwoPathSyscall(nr):
+		path2Ptr := regs.Arg(1)
+		rawPath2, err := t.readString(tid, path2Ptr, 4096)
+		if err != nil {
+			return path, "", 0, err
+		}
+		path2, err = resolvePath(tid, unix.AT_FDCWD, rawPath2)
+		return path, path2, 0, err
+	default:
+		return path, "", 0, nil
+	}
 }
