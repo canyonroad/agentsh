@@ -4,6 +4,7 @@ package ptrace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
@@ -240,10 +241,14 @@ func (t *Tracer) setRegs(tid int, regs Regs) error {
 
 // allowSyscall resumes the tracee, allowing the syscall to proceed.
 func (t *Tracer) allowSyscall(tid int) {
+	var err error
 	if t.prefilterActive {
-		unix.PtraceCont(tid, 0)
+		err = unix.PtraceCont(tid, 0)
 	} else {
-		unix.PtraceSyscall(tid, 0)
+		err = unix.PtraceSyscall(tid, 0)
+	}
+	if err != nil && errors.Is(err, unix.ESRCH) {
+		t.handleExit(tid)
 	}
 }
 
@@ -251,6 +256,10 @@ func (t *Tracer) allowSyscall(tid int) {
 func (t *Tracer) denySyscall(tid int, errno int) error {
 	regs, err := t.getRegs(tid)
 	if err != nil {
+		if errors.Is(err, unix.ESRCH) {
+			t.handleExit(tid)
+			return nil
+		}
 		return err
 	}
 	regs.SetSyscallNr(-1)
