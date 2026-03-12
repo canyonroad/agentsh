@@ -67,7 +67,8 @@ func parseSockaddr(buf []byte) (family int, address string, port int, err error)
 		return family, string(pathBytes), 0, nil
 
 	default:
-		return family, "", 0, fmt.Errorf("unsupported address family: %d", family)
+		// Unknown family — pass to handler with family only and let policy decide.
+		return family, "", 0, nil
 	}
 }
 

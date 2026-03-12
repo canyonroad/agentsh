@@ -15,7 +15,7 @@ func TestSyscallToOperation_LegacyAmd64(t *testing.T) {
 		flags int
 		want  string
 	}{
-		{"legacy open rdonly", unix.SYS_OPEN, unix.O_RDONLY, "read"},
+		{"legacy open rdonly", unix.SYS_OPEN, unix.O_RDONLY, "open"},
 		{"legacy open wronly", unix.SYS_OPEN, unix.O_WRONLY, "write"},
 		{"legacy open creat", unix.SYS_OPEN, unix.O_WRONLY | unix.O_CREAT, "create"},
 		{"legacy creat", unix.SYS_CREAT, 0, "create"},

@@ -50,7 +50,7 @@ func openatOperation(flags int) string {
 	if flags&(unix.O_WRONLY|unix.O_RDWR) != 0 {
 		return "write"
 	}
-	return "read"
+	return "open"
 }
 
 // resolveDirFD resolves the base directory for a *at syscall.

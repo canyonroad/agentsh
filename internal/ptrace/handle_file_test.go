@@ -17,14 +17,14 @@ func TestSyscallToOperation(t *testing.T) {
 		flags int
 		want  string
 	}{
-		{"openat read-only", unix.SYS_OPENAT, unix.O_RDONLY, "read"},
+		{"openat read-only", unix.SYS_OPENAT, unix.O_RDONLY, "open"},
 		{"openat write-only", unix.SYS_OPENAT, unix.O_WRONLY, "write"},
 		{"openat read-write", unix.SYS_OPENAT, unix.O_RDWR, "write"},
 		{"openat create", unix.SYS_OPENAT, unix.O_WRONLY | unix.O_CREAT, "create"},
 		{"openat create rdwr", unix.SYS_OPENAT, unix.O_RDWR | unix.O_CREAT, "create"},
 		{"openat trunc", unix.SYS_OPENAT, unix.O_WRONLY | unix.O_TRUNC, "write"},
 		{"openat tmpfile", unix.SYS_OPENAT, unix.O_TMPFILE | unix.O_RDWR, "create"},
-		{"openat2 read-only", unix.SYS_OPENAT2, unix.O_RDONLY, "read"},
+		{"openat2 read-only", unix.SYS_OPENAT2, unix.O_RDONLY, "open"},
 		{"openat2 write", unix.SYS_OPENAT2, unix.O_WRONLY, "write"},
 		{"openat2 create", unix.SYS_OPENAT2, unix.O_WRONLY | unix.O_CREAT, "create"},
 		{"unlinkat", unix.SYS_UNLINKAT, 0, "delete"},
