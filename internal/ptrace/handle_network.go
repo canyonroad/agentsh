@@ -22,6 +22,10 @@ func parseSockaddr(buf []byte) (family int, address string, port int, err error)
 	family = int(binary.LittleEndian.Uint16(buf[0:2]))
 
 	switch family {
+	case unix.AF_UNSPEC:
+		// AF_UNSPEC is used with connect() to "disconnect" datagram sockets.
+		return family, "", 0, nil
+
 	case unix.AF_INET:
 		if len(buf) < 8 {
 			return family, "", 0, fmt.Errorf("sockaddr_in too short: %d bytes", len(buf))

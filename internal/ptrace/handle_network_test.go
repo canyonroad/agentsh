@@ -99,3 +99,23 @@ func TestParseSockaddr_TooShort(t *testing.T) {
 		t.Error("expected error for short buffer")
 	}
 }
+
+func TestParseSockaddr_AFUnspec(t *testing.T) {
+	// AF_UNSPEC is used with connect() to disconnect datagram sockets.
+	buf := make([]byte, 16)
+	binary.LittleEndian.PutUint16(buf[0:2], unix.AF_UNSPEC)
+
+	family, addr, port, err := parseSockaddr(buf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if family != unix.AF_UNSPEC {
+		t.Errorf("family = %d, want %d", family, unix.AF_UNSPEC)
+	}
+	if addr != "" {
+		t.Errorf("addr = %q, want empty", addr)
+	}
+	if port != 0 {
+		t.Errorf("port = %d, want 0", port)
+	}
+}

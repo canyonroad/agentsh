@@ -80,14 +80,23 @@ func (t *Tracer) handleSignal(ctx context.Context, tid int, regs Regs) {
 		t.denySyscall(tid, int(errno))
 
 	case result.RedirectSignal > 0 && result.RedirectSignal != signal:
-		// Redirect: rewrite the signal argument register
-		regs.SetArg(sigArgIndex, uint64(result.RedirectSignal))
-		if err := t.setRegs(tid, regs); err != nil {
-			slog.Warn("handleSignal: cannot rewrite signal register, denying", "tid", tid, "error", err)
+		// Redirect is only safe for kill/tkill/tgkill where we can rewrite
+		// the signal register. For rt_sigqueueinfo/rt_tgsigqueueinfo, the
+		// signal is also embedded in siginfo_t.si_signo which we can't
+		// reliably patch, so deny if redirect is requested for those.
+		switch nr {
+		case unix.SYS_KILL, unix.SYS_TKILL, unix.SYS_TGKILL:
+			regs.SetArg(sigArgIndex, uint64(result.RedirectSignal))
+			if err := t.setRegs(tid, regs); err != nil {
+				slog.Warn("handleSignal: cannot rewrite signal register, denying", "tid", tid, "error", err)
+				t.denySyscall(tid, int(unix.EPERM))
+				return
+			}
+			t.allowSyscall(tid)
+		default:
+			slog.Warn("handleSignal: redirect not supported for this syscall, denying", "tid", tid, "nr", nr)
 			t.denySyscall(tid, int(unix.EPERM))
-			return
 		}
-		t.allowSyscall(tid)
 
 	default:
 		t.allowSyscall(tid)
