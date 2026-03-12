@@ -52,6 +52,28 @@ func TestParseSockaddr_IPv6(t *testing.T) {
 	}
 }
 
+func TestParseSockaddr_IPv6LinkLocal(t *testing.T) {
+	buf := make([]byte, 28)
+	binary.LittleEndian.PutUint16(buf[0:2], unix.AF_INET6)
+	binary.BigEndian.PutUint16(buf[2:4], 80)
+	copy(buf[8:24], net.ParseIP("fe80::1").To16())
+	binary.LittleEndian.PutUint32(buf[24:28], 3) // scope_id = 3
+
+	family, addr, port, err := parseSockaddr(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if family != unix.AF_INET6 {
+		t.Errorf("family = %d, want %d", family, unix.AF_INET6)
+	}
+	if addr != "fe80::1%3" {
+		t.Errorf("addr = %q, want %q", addr, "fe80::1%3")
+	}
+	if port != 80 {
+		t.Errorf("port = %d, want %d", port, 80)
+	}
+}
+
 func TestParseSockaddr_Unix(t *testing.T) {
 	path := "/var/run/docker.sock"
 	buf := make([]byte, 2+len(path)+1)
@@ -89,6 +111,27 @@ func TestParseSockaddr_UnixAbstract(t *testing.T) {
 	}
 	if addr != "@"+name {
 		t.Errorf("addr = %q, want %q", addr, "@"+name)
+	}
+}
+
+func TestParseSockaddr_UnixAbstractWithNulls(t *testing.T) {
+	// Abstract socket names preserve all bytes including trailing NULs.
+	// Two names that differ only by trailing NULs must produce different addresses.
+	buf1 := make([]byte, 2+1+4) // \0name
+	binary.LittleEndian.PutUint16(buf1[0:2], unix.AF_UNIX)
+	buf1[2] = 0
+	copy(buf1[3:], "abc")
+
+	buf2 := make([]byte, 2+1+5) // \0name\0
+	binary.LittleEndian.PutUint16(buf2[0:2], unix.AF_UNIX)
+	buf2[2] = 0
+	copy(buf2[3:], "abc\x00")
+
+	_, addr1, _, _ := parseSockaddr(buf1)
+	_, addr2, _, _ := parseSockaddr(buf2)
+
+	if addr1 == addr2 {
+		t.Errorf("abstract sockets with different trailing NULs should differ: %q vs %q", addr1, addr2)
 	}
 }
 

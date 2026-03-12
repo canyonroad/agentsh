@@ -204,12 +204,17 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		dirfd := int(int32(regs.Arg(0)))
 		pathPtr := regs.Arg(1)
 		howPtr := regs.Arg(2)
+		howSize := regs.Arg(3)
+		// We need at least 8 bytes to read the flags field.
+		if howSize < 8 || howSize > 24 {
+			return "", "", 0, fmt.Errorf("openat2 size out of range: %d", howSize)
+		}
 		rawPath, err := t.readString(tid, pathPtr, 4096)
 		if err != nil {
 			return "", "", 0, err
 		}
-		var howBuf [24]byte
-		if err := t.readBytes(tid, howPtr, howBuf[:]); err != nil {
+		howBuf := make([]byte, howSize)
+		if err := t.readBytes(tid, howPtr, howBuf); err != nil {
 			return "", "", 0, fmt.Errorf("read open_how: %w", err)
 		}
 		flags = int(binary.LittleEndian.Uint64(howBuf[0:8]))

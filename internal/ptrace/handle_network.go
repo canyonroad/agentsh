@@ -40,7 +40,15 @@ func parseSockaddr(buf []byte) (family int, address string, port int, err error)
 		}
 		port = int(binary.BigEndian.Uint16(buf[2:4]))
 		ip := net.IP(buf[8:24])
-		return family, ip.String(), port, nil
+		addr := ip.String()
+		// Include scope_id for link-local addresses if present.
+		if len(buf) >= 28 {
+			scopeID := binary.LittleEndian.Uint32(buf[24:28])
+			if scopeID != 0 {
+				addr = fmt.Sprintf("%s%%%d", addr, scopeID)
+			}
+		}
+		return family, addr, port, nil
 
 	case unix.AF_UNIX:
 		if len(buf) <= 2 {
@@ -48,7 +56,9 @@ func parseSockaddr(buf []byte) (family int, address string, port int, err error)
 		}
 		pathBytes := buf[2:]
 		if pathBytes[0] == 0 {
-			name := string(bytes.TrimRight(pathBytes[1:], "\x00"))
+			// Abstract socket: all bytes after the leading NUL are the name,
+			// including any embedded or trailing NUL bytes.
+			name := string(pathBytes[1:])
 			return family, "@" + name, 0, nil
 		}
 		if idx := bytes.IndexByte(pathBytes, 0); idx >= 0 {
