@@ -725,6 +725,8 @@ func (t *Tracer) sweepParkedTimeouts() {
 			"max_hold_ms", t.cfg.MaxHoldMs,
 		)
 		t.metrics.IncTimeout()
+
+		resolved := false
 		if err := t.denySyscall(tid, int(unix.EACCES)); err != nil {
 			slog.Error("ptrace: deny after timeout failed, killing tracee",
 				"tid", tid, "error", err)
@@ -735,15 +737,30 @@ func (t *Tracer) sweepParkedTimeouts() {
 				tgid = state.TGID
 			}
 			t.mu.Unlock()
-			unix.Tgkill(tgid, tid, unix.SIGKILL)
+			if err := unix.Tgkill(tgid, tid, unix.SIGKILL); err != nil {
+				if errors.Is(err, unix.ESRCH) {
+					// Tracee already gone.
+					t.handleExit(tid)
+					resolved = true
+				} else {
+					slog.Error("ptrace: kill after timeout also failed, will retry",
+						"tid", tid, "error", err)
+				}
+			} else {
+				resolved = true
+			}
+		} else {
+			resolved = true
 		}
-		// Clear parked state after deny succeeded or tracee was killed.
-		t.mu.Lock()
-		delete(t.parkedTracees, tid)
-		if state, ok := t.tracees[tid]; ok {
-			state.ParkedAt = time.Time{}
+
+		if resolved {
+			t.mu.Lock()
+			delete(t.parkedTracees, tid)
+			if state, ok := t.tracees[tid]; ok {
+				state.ParkedAt = time.Time{}
+			}
+			t.mu.Unlock()
 		}
-		t.mu.Unlock()
 	}
 }
 
