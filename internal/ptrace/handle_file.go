@@ -241,7 +241,22 @@ func (t *Tracer) extractLegacyFileArgs(tid int, nr int, regs Regs) (path, path2 
 	case isLegacyOpenSyscall(nr):
 		flags = int(int32(regs.Arg(1)))
 		return path, "", flags, nil
+	case isLegacySymlinkSyscall(nr):
+		// symlink(target, linkpath): arg0=target, arg1=linkpath
+		// Path should be the link path (arg1), Path2 should be the target (arg0)
+		linkPathPtr := regs.Arg(1)
+		rawLinkPath, err := t.readString(tid, linkPathPtr, 4096)
+		if err != nil {
+			return path, "", 0, err
+		}
+		linkPath, err := resolvePath(tid, unix.AT_FDCWD, rawLinkPath)
+		if err != nil {
+			return path, "", 0, err
+		}
+		// path (from arg0) is the target string, linkPath is the resolved link path
+		return linkPath, rawPath, 0, nil
 	case isLegacyTwoPathSyscall(nr):
+		// rename(old, new), link(old, new)
 		path2Ptr := regs.Arg(1)
 		rawPath2, err := t.readString(tid, path2Ptr, 4096)
 		if err != nil {

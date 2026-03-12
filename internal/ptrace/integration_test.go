@@ -745,6 +745,11 @@ func TestIntegration_FileDeny(t *testing.T) {
 
 	calls := fileHandler.CallsMatching("denied.txt")
 	t.Logf("file handler received %d calls matching 'denied.txt' out of %d total", len(calls), fileHandler.CallCount())
+
+	// The file handler must have received at least some calls (proving wiring works)
+	if fileHandler.CallCount() == 0 {
+		t.Error("file handler received zero calls; handleFile is not wired up")
+	}
 	if len(calls) > 0 {
 		t.Logf("file deny intercepted: path=%q op=%q", calls[0].Path, calls[0].Operation)
 	}
@@ -791,11 +796,15 @@ func TestIntegration_FileAllow(t *testing.T) {
 		t.Logf("Note: file not created (attach may have happened after open)")
 	} else {
 		content := strings.TrimSpace(string(data))
-		if content == "hello" {
-			t.Log("file allow working: file was created successfully")
+		if content != "hello" {
+			t.Errorf("expected file content %q, got %q", "hello", content)
 		}
 	}
 
+	// The file handler must have received at least some calls (proving wiring works)
+	if fileHandler.CallCount() == 0 {
+		t.Error("file handler received zero calls; handleFile is not wired up")
+	}
 	t.Logf("file handler received %d total calls", fileHandler.CallCount())
 	calls := fileHandler.CallsMatching("allowed.txt")
 	if len(calls) > 0 {
@@ -845,20 +854,16 @@ func TestIntegration_NetworkDenyConnect(t *testing.T) {
 
 	t.Logf("network handler received %d calls", netHandler.CallCount())
 
+	// The network handler must have received at least some calls (proving wiring works)
+	if netHandler.CallCount() == 0 {
+		t.Error("network handler received zero calls; handleNetwork is not wired up")
+	}
+
 	netHandler.mu.Lock()
 	for _, c := range netHandler.calls {
 		t.Logf("  op=%s family=%d addr=%s port=%d", c.Operation, c.Family, c.Address, c.Port)
 	}
 	netHandler.mu.Unlock()
-
-	data, err := os.ReadFile(outfile)
-	if err == nil {
-		content := strings.TrimSpace(string(data))
-		t.Logf("result: %q", content)
-		if content == "refused" {
-			t.Log("network deny working: connect was refused")
-		}
-	}
 }
 
 func TestIntegration_SignalDeny(t *testing.T) {
@@ -900,6 +905,11 @@ func TestIntegration_SignalDeny(t *testing.T) {
 
 	t.Logf("signal handler received %d calls", sigHandler.CallCount())
 
+	// The signal handler must have received at least some calls (proving wiring works)
+	if sigHandler.CallCount() == 0 {
+		t.Error("signal handler received zero calls; handleSignal is not wired up")
+	}
+
 	sigHandler.mu.Lock()
 	for _, c := range sigHandler.calls {
 		t.Logf("  pid=%d target=%d signal=%d", c.PID, c.TargetPID, c.Signal)
@@ -910,8 +920,8 @@ func TestIntegration_SignalDeny(t *testing.T) {
 	if err == nil {
 		content := strings.TrimSpace(string(data))
 		t.Logf("result: %q", content)
-		if content == "denied" {
-			t.Log("signal deny working: SIGUSR1 was blocked")
+		if content != "denied" {
+			t.Errorf("expected 'denied', got %q", content)
 		}
 	}
 }
@@ -955,14 +965,19 @@ func TestIntegration_SignalRedirect(t *testing.T) {
 
 	t.Logf("signal handler received %d calls", sigHandler.CallCount())
 
+	// The signal handler must have received at least some calls (proving wiring works)
+	if sigHandler.CallCount() == 0 {
+		t.Error("signal handler received zero calls; handleSignal is not wired up")
+	}
+
 	data, err := os.ReadFile(outfile)
 	if err == nil {
 		content := strings.TrimSpace(string(data))
 		t.Logf("result: %q", content)
-		if content == "redirected" {
-			t.Log("signal redirect working: SIGUSR1 was delivered as SIGUSR2")
+		if content != "redirected" {
+			t.Errorf("expected 'redirected', got %q", content)
 		}
 	} else {
-		t.Log("Note: redirect may not have been observed (attach timing)")
+		t.Log("Note: redirect output file not created (attach timing)")
 	}
 }

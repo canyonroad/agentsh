@@ -32,5 +32,9 @@ func isLegacyOpenSyscall(nr int) bool {
 }
 
 func isLegacyTwoPathSyscall(nr int) bool {
-	return nr == unix.SYS_RENAME || nr == unix.SYS_LINK || nr == unix.SYS_SYMLINK
+	return nr == unix.SYS_RENAME || nr == unix.SYS_LINK
+}
+
+func isLegacySymlinkSyscall(nr int) bool {
+	return nr == unix.SYS_SYMLINK
 }

@@ -73,9 +73,12 @@ func (t *Tracer) handleSignal(ctx context.Context, tid int, regs Regs) {
 		t.denySyscall(tid, int(errno))
 
 	case result.RedirectSignal > 0 && result.RedirectSignal != signal:
+		// Redirect: rewrite the signal argument register
 		regs.SetArg(sigArgIndex, uint64(result.RedirectSignal))
 		if err := t.setRegs(tid, regs); err != nil {
-			slog.Warn("handleSignal: cannot rewrite signal register", "tid", tid, "error", err)
+			slog.Warn("handleSignal: cannot rewrite signal register, denying", "tid", tid, "error", err)
+			t.denySyscall(tid, int(unix.EPERM))
+			return
 		}
 		t.allowSyscall(tid)
 
