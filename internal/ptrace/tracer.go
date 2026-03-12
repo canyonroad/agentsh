@@ -709,31 +709,41 @@ func (t *Tracer) sweepParkedTimeouts() {
 	for tid := range t.parkedTracees {
 		state := t.tracees[tid]
 		if state == nil {
-			expired = append(expired, tid)
+			// Tracee already exited — clean up stale parking entry.
+			delete(t.parkedTracees, tid)
 			continue
 		}
 		if !state.ParkedAt.IsZero() && time.Since(state.ParkedAt) > maxDuration {
 			expired = append(expired, tid)
 		}
 	}
-	for _, tid := range expired {
-		delete(t.parkedTracees, tid)
-	}
 	t.mu.Unlock()
 
 	for _, tid := range expired {
-		t.mu.Lock()
-		state := t.tracees[tid]
-		t.mu.Unlock()
-		if state == nil {
-			continue
-		}
 		slog.Warn("ptrace: max_hold_ms timeout, denying syscall",
 			"tid", tid,
 			"max_hold_ms", t.cfg.MaxHoldMs,
 		)
 		t.metrics.IncTimeout()
-		t.denySyscall(tid, int(unix.EACCES))
+		if err := t.denySyscall(tid, int(unix.EACCES)); err != nil {
+			slog.Error("ptrace: deny after timeout failed, killing tracee",
+				"tid", tid, "error", err)
+			t.mu.Lock()
+			state := t.tracees[tid]
+			tgid := tid
+			if state != nil {
+				tgid = state.TGID
+			}
+			t.mu.Unlock()
+			unix.Tgkill(tgid, tid, unix.SIGKILL)
+		}
+		// Clear parked state after deny succeeded or tracee was killed.
+		t.mu.Lock()
+		delete(t.parkedTracees, tid)
+		if state, ok := t.tracees[tid]; ok {
+			state.ParkedAt = time.Time{}
+		}
+		t.mu.Unlock()
 	}
 }
 
