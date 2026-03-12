@@ -343,8 +343,10 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		if err != nil {
 			return "", "", 0, err
 		}
-		// Old path follows symlinks only if AT_SYMLINK_FOLLOW is set.
-		if linkFlags&unix.AT_SYMLINK_FOLLOW != 0 {
+		// AT_EMPTY_PATH: old path is "" and references the inode via olddirfd.
+		if rawOld == "" && linkFlags&unix.AT_EMPTY_PATH != 0 {
+			path, err = resolveDirFD(tid, oldDirfd)
+		} else if linkFlags&unix.AT_SYMLINK_FOLLOW != 0 {
 			path, err = resolvePath(tid, oldDirfd, rawOld)
 		} else {
 			path, err = resolvePathNoFollow(tid, oldDirfd, rawOld)

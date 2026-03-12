@@ -850,6 +850,11 @@ func TestIntegration_FileAllow(t *testing.T) {
 func TestIntegration_NetworkDenyConnect(t *testing.T) {
 	requirePtrace(t)
 
+	ncPath, err := exec.LookPath("nc")
+	if err != nil {
+		t.Skip("nc not found in PATH")
+	}
+
 	netHandler := &mockNetworkHandler{
 		defaultAllow: true,
 		denyPorts:    map[int]int32{12345: int32(unix.ECONNREFUSED)},
@@ -873,7 +878,7 @@ func TestIntegration_NetworkDenyConnect(t *testing.T) {
 	tmpDir := t.TempDir()
 	readyFile := filepath.Join(tmpDir, "ready")
 	outfile := filepath.Join(tmpDir, "result.txt")
-	shellCmd := fmt.Sprintf(`while [ ! -f %s ]; do sleep 0.01; done; (echo test | /usr/bin/nc -w 1 127.0.0.1 12345) 2>/dev/null && echo connected > %s || echo refused > %s`, readyFile, outfile, outfile)
+	shellCmd := fmt.Sprintf(`while [ ! -f %s ]; do sleep 0.01; done; (echo test | %s -w 1 127.0.0.1 12345) 2>/dev/null && echo connected > %s || echo refused > %s`, readyFile, ncPath, outfile, outfile)
 	cmd := exec.Command("/bin/sh", "-c", shellCmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
