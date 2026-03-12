@@ -11,4 +11,6 @@ type Regs interface {
 	ReturnValue() int64
 	SetReturnValue(val int64)
 	InstructionPointer() uint64
+	SetInstructionPointer(addr uint64)
+	Clone() Regs
 }
