@@ -10,7 +10,7 @@ func isExecveSyscall(nr int) bool {
 
 func isFileSyscall(nr int) bool {
 	switch nr {
-	case unix.SYS_OPENAT, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
+	case unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
 		unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
 		unix.SYS_FCHMODAT, unix.SYS_FCHOWNAT:
 		return true
@@ -39,7 +39,7 @@ func isSignalSyscall(nr int) bool {
 func tracedSyscallNumbers() []int {
 	nums := []int{
 		unix.SYS_EXECVE, unix.SYS_EXECVEAT,
-		unix.SYS_OPENAT, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
+		unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
 		unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
 		unix.SYS_FCHMODAT, unix.SYS_FCHOWNAT,
 		unix.SYS_CONNECT, unix.SYS_SOCKET, unix.SYS_BIND,

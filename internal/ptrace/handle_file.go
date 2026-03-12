@@ -4,6 +4,7 @@ package ptrace
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,7 +16,7 @@ import (
 // syscallToOperation maps a file syscall number and flags to an operation string.
 func syscallToOperation(nr int, flags int) string {
 	switch nr {
-	case unix.SYS_OPENAT:
+	case unix.SYS_OPENAT, unix.SYS_OPENAT2:
 		return openatOperation(flags)
 	case unix.SYS_UNLINKAT:
 		if flags&unix.AT_REMOVEDIR != 0 {
@@ -197,6 +198,24 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		path, err = resolvePath(tid, dirfd, rawPath)
 		return path, "", flags, err
 
+	case unix.SYS_OPENAT2:
+		// openat2(dirfd, path, how, size): how is a pointer to struct open_how
+		// struct open_how { __u64 flags; __u64 mode; __u64 resolve; }
+		dirfd := int(int32(regs.Arg(0)))
+		pathPtr := regs.Arg(1)
+		howPtr := regs.Arg(2)
+		rawPath, err := t.readString(tid, pathPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		var howBuf [24]byte
+		if err := t.readBytes(tid, howPtr, howBuf[:]); err != nil {
+			return "", "", 0, fmt.Errorf("read open_how: %w", err)
+		}
+		flags = int(binary.LittleEndian.Uint64(howBuf[0:8]))
+		path, err = resolvePath(tid, dirfd, rawPath)
+		return path, "", flags, err
+
 	case unix.SYS_UNLINKAT, unix.SYS_MKDIRAT:
 		dirfd := int(int32(regs.Arg(0)))
 		pathPtr := regs.Arg(1)
@@ -373,8 +392,15 @@ func (t *Tracer) extractLegacyFileArgs(tid int, nr int, regs Regs) (path, path2 
 		}
 		path2, err = resolvePathNoFollow(tid, unix.AT_FDCWD, rawPath2)
 		return path, path2, 0, err
+	case isLegacyChmodChownSyscall(nr):
+		// chmod/chown follow symlinks on the final component.
+		path, err = resolvePath(tid, unix.AT_FDCWD, rawPath)
+		if err != nil {
+			return "", "", 0, err
+		}
+		return path, "", 0, nil
 	default:
-		// unlink, rmdir, mkdir, chmod, chown — operate on entries.
+		// unlink, rmdir, mkdir — operate on directory entries.
 		path, err = resolvePathNoFollow(tid, unix.AT_FDCWD, rawPath)
 		if err != nil {
 			return "", "", 0, err

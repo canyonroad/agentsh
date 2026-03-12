@@ -19,6 +19,12 @@ func extractSignalArgs(nr int, arg0, arg1, arg2 int) (int, int, int) {
 		return arg0, arg1, 1
 	case unix.SYS_TGKILL:
 		return arg0, arg2, 2
+	case unix.SYS_RT_SIGQUEUEINFO:
+		// rt_sigqueueinfo(pid, sig, info): arg0=pid, arg1=sig
+		return arg0, arg1, 1
+	case unix.SYS_RT_TGSIGQUEUEINFO:
+		// rt_tgsigqueueinfo(tgid, tid, sig, info): arg0=tgid, arg2=sig
+		return arg0, arg2, 2
 	default:
 		return arg0, arg1, 1
 	}
@@ -34,7 +40,8 @@ func (t *Tracer) handleSignal(ctx context.Context, tid int, regs Regs) {
 	nr := regs.SyscallNr()
 
 	switch nr {
-	case unix.SYS_KILL, unix.SYS_TGKILL, unix.SYS_TKILL:
+	case unix.SYS_KILL, unix.SYS_TGKILL, unix.SYS_TKILL,
+		unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO:
 		// handled below
 	default:
 		t.allowSyscall(tid)

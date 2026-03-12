@@ -46,3 +46,7 @@ func isLegacyTwoPathSyscall(nr int) bool {
 func isLegacySymlinkSyscall(nr int) bool {
 	return nr == unix.SYS_SYMLINK
 }
+
+func isLegacyChmodChownSyscall(nr int) bool {
+	return nr == unix.SYS_CHMOD || nr == unix.SYS_CHOWN
+}
