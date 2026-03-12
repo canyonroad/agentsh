@@ -46,3 +46,21 @@ func TestPtraceOptions_WithoutPrefilter(t *testing.T) {
 		t.Error("PTRACE_O_TRACESECCOMP must not be set when no prefilter")
 	}
 }
+
+func TestTracerConfig_HandlerFields(t *testing.T) {
+	cfg := TracerConfig{
+		TraceFile:    true,
+		TraceNetwork: true,
+		TraceSignal:  true,
+	}
+	tr := NewTracer(cfg)
+	if tr.cfg.FileHandler != nil {
+		t.Error("FileHandler should be nil by default")
+	}
+	if tr.cfg.NetworkHandler != nil {
+		t.Error("NetworkHandler should be nil by default")
+	}
+	if tr.cfg.SignalHandler != nil {
+		t.Error("SignalHandler should be nil by default")
+	}
+}
