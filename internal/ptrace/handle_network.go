@@ -77,7 +77,8 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 	rawLen := regs.Arg(2)
 
 	if rawLen == 0 || rawLen > 128 {
-		t.allowSyscall(tid)
+		slog.Warn("handleNetwork: addrlen out of range, denying", "tid", tid, "addrlen", rawLen)
+		t.denySyscall(tid, int(unix.EACCES))
 		return
 	}
 	addrLen := int(rawLen)

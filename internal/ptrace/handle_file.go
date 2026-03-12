@@ -252,6 +252,27 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 // extractLegacyFileArgs handles legacy (non-at) file syscalls.
 // On arm64 this is never called because isLegacyFileSyscall returns false.
 func (t *Tracer) extractLegacyFileArgs(tid int, nr int, regs Regs) (path, path2 string, flags int, err error) {
+	// For symlink(target, linkpath), arg0 is the raw target string which
+	// should NOT be resolved — it can be an arbitrary string including
+	// nonexistent or unresolvable paths. Handle it before resolving arg0.
+	if isLegacySymlinkSyscall(nr) {
+		targetPtr := regs.Arg(0)
+		target, err := t.readString(tid, targetPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		linkPathPtr := regs.Arg(1)
+		rawLinkPath, err := t.readString(tid, linkPathPtr, 4096)
+		if err != nil {
+			return "", "", 0, err
+		}
+		linkPath, err := resolvePath(tid, unix.AT_FDCWD, rawLinkPath)
+		if err != nil {
+			return "", "", 0, err
+		}
+		return linkPath, target, 0, nil
+	}
+
 	pathPtr := regs.Arg(0)
 	rawPath, err := t.readString(tid, pathPtr, 4096)
 	if err != nil {
@@ -266,20 +287,6 @@ func (t *Tracer) extractLegacyFileArgs(tid int, nr int, regs Regs) (path, path2 
 	case isLegacyOpenSyscall(nr):
 		flags = int(int32(regs.Arg(1)))
 		return path, "", flags, nil
-	case isLegacySymlinkSyscall(nr):
-		// symlink(target, linkpath): arg0=target, arg1=linkpath
-		// Path should be the link path (arg1), Path2 should be the target (arg0)
-		linkPathPtr := regs.Arg(1)
-		rawLinkPath, err := t.readString(tid, linkPathPtr, 4096)
-		if err != nil {
-			return path, "", 0, err
-		}
-		linkPath, err := resolvePath(tid, unix.AT_FDCWD, rawLinkPath)
-		if err != nil {
-			return path, "", 0, err
-		}
-		// path (from arg0) is the target string, linkPath is the resolved link path
-		return linkPath, rawPath, 0, nil
 	case isLegacyTwoPathSyscall(nr):
 		// rename(old, new), link(old, new)
 		path2Ptr := regs.Arg(1)
