@@ -91,8 +91,11 @@ func (t *Tracer) injectSyscall(tid int, savedRegs Regs, nr int, args ...uint64) 
 
 // waitForSyscallStop waits for the specified tid to hit a syscall stop.
 // It uses waitpid with the specific tid to avoid consuming other tracees' events.
+// Returns errTraceeExited if the tracee exits during the wait, after performing
+// bookkeeping cleanup.
 func (t *Tracer) waitForSyscallStop(tid int) error {
-	for {
+	const maxAttempts = 100 // guard against infinite loop from unexpected stops
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		var status unix.WaitStatus
 		_, err := unix.Wait4(tid, &status, 0, nil)
 		if err != nil {
@@ -117,9 +120,12 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 			continue
 		}
 		if status.Exited() || status.Signaled() {
+			// Clean up tracee bookkeeping before returning.
+			t.handleExit(tid)
 			return fmt.Errorf("tracee %d exited during injection", tid)
 		}
 	}
+	return fmt.Errorf("waitForSyscallStop tid %d: exceeded %d attempts", tid, maxAttempts)
 }
 
 // injectSyscallRet is a convenience that returns an error if the injected

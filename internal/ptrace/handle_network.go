@@ -150,7 +150,7 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 	}
 
 	switch action {
-	case "allow":
+	case "allow", "continue":
 		t.allowSyscall(tid)
 	case "deny":
 		errno := result.Errno
