@@ -3,7 +3,7 @@
 **Version:** 0.1 — Draft  
 **Date:** 2026-03-11  
 **Author:** Eran / Canyon Road  
-**Status:** Phase 2 Complete
+**Status:** Phase 3 Complete
 
 ---
 
@@ -60,6 +60,9 @@ internal/
     args_arm64.go              ← aarch64 register layout
     process_tree.go            ← Tracee process tree tracking
     process_tree_test.go
+    metrics.go                 ← Metrics interface + nopMetrics (Phase 3)
+    metrics_prometheus.go      ← PtraceMetricsCollector adapter (Phase 3)
+    benchmark_test.go          ← Overhead benchmarks (Phase 3)
     integration_test.go        ← Integration tests requiring SYS_PTRACE
     doc.go
   capabilities/
@@ -1607,6 +1610,13 @@ The agentsh sidecar polls the PID file on startup and attaches once it appears. 
 - `performance.max_hold_ms: 5000` — prevents hung policy from blocking workload
 - `trace.file: false` — disable file tracing if file policy is not needed, reducing overhead further
 
+**Monitoring:** Phase 3 Prometheus metrics track operational overhead:
+- `agentsh_ptrace_tracees_active` — current thread count (correlates with context switch load)
+- `agentsh_ptrace_attach_failures_total{reason}` — attach failures by reason
+- `agentsh_ptrace_timeouts_total` — max_hold_ms timeout events (high count indicates policy latency problems)
+
+**Benchmarking:** `BenchmarkExecOverhead` and `BenchmarkFileIOOverhead` (behind `//go:build integration && linux`) provide reproducible measurements. Run via Docker with `--cap-add SYS_PTRACE`.
+
 ### 12.5 Single-Threaded Tracer Constraint
 
 **Issue:** ptrace operations must come from the same OS thread that performed the attach. This means the tracer loop is single-threaded.
@@ -1734,23 +1744,26 @@ A separate integration test deploys the full sidecar task definition to Fargate 
 
 **Deliverable:** Full allow/deny/audit parity with seccomp user-notify for file, network, and signal. Signal redirect for kill/tkill/tgkill via register rewrite. No file/network steering yet.
 
-### Phase 3: Production Hardening + Sidecar Discovery
+### Phase 3: Production Hardening ✓
+
+- `max_hold_ms` timeout enforcement: `ParkedAt` timestamp on `TraceeState`, `ParkTracee()` method, `sweepParkedTimeouts()` runs every event loop iteration. Expired tracees denied with `EACCES` (fail-closed). Kill fallback if deny fails, retry if both fail.
+- Ptrace-specific Prometheus metrics via `Metrics` interface (decoupled from observability package):
+  - `agentsh_ptrace_tracees_active` (gauge) — current traced thread count
+  - `agentsh_ptrace_attach_failures_total{reason}` (counter) — attach failures by reason (eperm, esrch, other)
+  - `agentsh_ptrace_timeouts_total` (counter) — max_hold_ms timeout events
+- `nopMetrics` zero-value fallback when no collector configured; `PtraceMetricsCollector` adapter avoids import dependency from ptrace → observability
+- Graceful degradation: parked tracees cleaned up on exit, `handleResumeRequest` guards against dead tracees, ESRCH handling in `allowSyscall`/`denySyscall` triggers `handleExit` cleanup instead of SIGKILL fallback
+- Overhead benchmarks behind `//go:build integration && linux`: `BenchmarkExecOverhead`, `BenchmarkFileIOOverhead` with synchronized attach verification
+
+**Deliverable:** Production-hardened ptrace backend with timeout enforcement, operational metrics, and graceful handling of tracee exit races. Sidecar auto-discovery and Fargate E2E deferred to Phase 4 (requires AWS access).
+
+### Phase 4: Steering, Anti-Detection, Sidecar Discovery, and EKS Fargate
+
+Phase 4 brings ptrace mode to full feature parity with seccomp+FUSE for redirect/steering behaviors, plus detection resistance, sidecar auto-discovery, and EKS support.
 
 - Sidecar auto-discovery (`sidecar` attach mode) based on real Fargate E2E testing
 - Research spike: seccomp prefilter injection for `pid`/`sidecar` mode (via syscall injection)
-- Graceful degradation when tracee exits unexpectedly
-- Metrics: traced syscalls/sec, overhead latency per attach mode, tracee/thread count
-- `max_hold_ms` timeout enforcement
 - Fargate E2E test in CI (ECS task definition, end-to-end policy enforcement)
-- Measured overhead comparison: children (with prefilter) vs pid (without) vs full mode
-- Documentation: `docs/ptrace.md`, `docs/cross-platform.md`, `docs/security-modes.md`
-
-**Deliverable:** Production-ready ptrace backend suitable for Fargate deployments. Measured overhead data to guide when prefilter injection is worth pursuing.
-
-### Phase 4: Steering, Anti-Detection, and EKS Fargate
-
-Phase 4 brings ptrace mode to full feature parity with seccomp+FUSE for redirect/steering behaviors, plus detection resistance and EKS support.
-
 - Exec redirect via syscall injection and memory rewrite (§15)
 - File path redirect via register + memory rewrite (§16)
 - Soft-delete via injected `renameat2` (§16.5)

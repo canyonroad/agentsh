@@ -130,7 +130,7 @@ ptrace:
 
   performance:
     max_tracees: 1024           # Maximum concurrent traced threads
-    max_hold_ms: 5000           # Maximum time to hold a syscall for policy
+    max_hold_ms: 5000           # Maximum time to hold a syscall for policy (fail-closed: deny with EACCES)
     seccomp_prefilter: true     # Use seccomp-BPF to filter non-traced syscalls
     on_attach_failure: "warn"   # "warn" or "fail"
 ```
@@ -145,6 +145,15 @@ ptrace:
 - Deny: invalidates syscall number (`nr = -1`), fixes up return value with `-EACCES`
 - Two tracing modes: `TRACESYSGOOD` (all syscalls) or `TRACESECCOMP` (prefiltered via seccomp-BPF)
 - Process tree tracking for fork/clone/vfork descendants with depth calculation
+- `max_hold_ms` timeout enforcement: parked tracees (awaiting async policy approval) are automatically denied with `EACCES` if the timeout expires. Kill fallback if deny fails. Timeout is swept on every event loop iteration (not load-dependent).
+- Graceful degradation: tracees that exit while parked are cleaned up automatically; resume requests for dead tracees are safely skipped; ESRCH errors in allow/deny trigger cleanup instead of SIGKILL
+
+**Monitoring:**
+
+Ptrace mode exposes Prometheus metrics at the `/metrics` endpoint:
+- `agentsh_ptrace_tracees_active` — current number of traced threads (gauge)
+- `agentsh_ptrace_attach_failures_total{reason}` — attach failures by reason: eperm, esrch, other (counter)
+- `agentsh_ptrace_timeouts_total` — max_hold_ms timeout events (counter)
 
 ## Feature Matrix
 
@@ -192,11 +201,17 @@ ptrace:
    - Each traced syscall requires two context switches (entry + exit) in TRACESYSGOOD mode
    - Seccomp prefilter (`seccomp_prefilter: true`) reduces overhead by only trapping traced syscalls
    - Single-threaded event loop may become a bottleneck with many concurrent tracees
+   - Mitigation: Prometheus metrics (`agentsh_ptrace_tracees_active`, `agentsh_ptrace_timeouts_total`) help identify bottlenecks
 
 4. **Attach race window**
    - Between `fork()` and `PTRACE_SEIZE`, a brief window exists where the child is untraced
    - Ptrace auto-attaches to fork/clone/vfork children via `PTRACE_O_TRACECLONE` etc.
    - The initial attach to the root process has a small race if the process execs immediately
+
+5. **Timeout behavior is fail-closed**
+   - When `max_hold_ms` expires on a parked tracee, the syscall is denied with `EACCES`
+   - This prevents hung policy decisions from blocking the workload indefinitely
+   - If both deny and kill fail, the tracee remains parked for retry on the next sweep
 
 ### In landlock and landlock-only Modes
 
