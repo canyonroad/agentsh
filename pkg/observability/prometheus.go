@@ -44,6 +44,11 @@ type PrometheusCollector struct {
 	ebpfDropped     atomic.Uint64
 	ebpfAttachFail  atomic.Uint64
 	ebpfUnavailable atomic.Uint64
+
+	// Ptrace metrics
+	ptraceTracees     atomic.Int64
+	ptraceAttachFails sync.Map // key: reason -> *atomic.Uint64
+	ptraceTimeouts    atomic.Uint64
 }
 
 type sessionDuration struct {
@@ -212,6 +217,33 @@ func (c *PrometheusCollector) IncEBPFUnavailable() {
 	c.ebpfUnavailable.Add(1)
 }
 
+// Ptrace metrics
+
+// SetPtraceTraceeCount sets the current ptrace tracee gauge.
+func (c *PrometheusCollector) SetPtraceTraceeCount(n int) {
+	if c == nil {
+		return
+	}
+	c.ptraceTracees.Store(int64(n))
+}
+
+// IncPtraceAttachFailure increments ptrace attach failure counter by reason.
+func (c *PrometheusCollector) IncPtraceAttachFailure(reason string) {
+	if c == nil {
+		return
+	}
+	ptr, _ := c.ptraceAttachFails.LoadOrStore(reason, &atomic.Uint64{})
+	ptr.(*atomic.Uint64).Add(1)
+}
+
+// IncPtraceTimeout increments the ptrace max_hold_ms timeout counter.
+func (c *PrometheusCollector) IncPtraceTimeout() {
+	if c == nil {
+		return
+	}
+	c.ptraceTimeouts.Add(1)
+}
+
 // HandlerOptions configures the metrics HTTP handler.
 type HandlerOptions struct {
 	SessionCount func() int
@@ -268,6 +300,18 @@ func (c *PrometheusCollector) Handler(opts HandlerOptions) http.Handler {
 		fmt.Fprint(w, "# HELP agentsh_net_ebpf_unavailable_total Times eBPF was unavailable on host.\n")
 		fmt.Fprint(w, "# TYPE agentsh_net_ebpf_unavailable_total counter\n")
 		fmt.Fprintf(w, "agentsh_net_ebpf_unavailable_total %d\n", c.ebpfUnavailable.Load())
+
+		// Ptrace metrics
+		fmt.Fprint(w, "\n")
+		fmt.Fprint(w, "# HELP agentsh_ptrace_tracees_active Current number of ptrace-traced threads.\n")
+		fmt.Fprint(w, "# TYPE agentsh_ptrace_tracees_active gauge\n")
+		fmt.Fprintf(w, "agentsh_ptrace_tracees_active %d\n\n", c.ptraceTracees.Load())
+
+		c.writePtraceAttachFailures(w)
+
+		fmt.Fprint(w, "# HELP agentsh_ptrace_timeouts_total Ptrace max_hold_ms timeouts.\n")
+		fmt.Fprint(w, "# TYPE agentsh_ptrace_timeouts_total counter\n")
+		fmt.Fprintf(w, "agentsh_ptrace_timeouts_total %d\n", c.ptraceTimeouts.Load())
 	})
 }
 
@@ -490,6 +534,21 @@ func (c *PrometheusCollector) writeEventsByType(w http.ResponseWriter) {
 			n = ptr.(*atomic.Uint64).Load()
 		}
 		fmt.Fprintf(w, "agentsh_events_by_type_total{type=%q} %d\n", escapeLabelValue(t), n)
+	}
+	fmt.Fprint(w, "\n")
+}
+
+func (c *PrometheusCollector) writePtraceAttachFailures(w http.ResponseWriter) {
+	keys := snapshotMapKeys(&c.ptraceAttachFails)
+	if len(keys) == 0 {
+		return
+	}
+	fmt.Fprint(w, "# HELP agentsh_ptrace_attach_failures_total Ptrace attach failures by reason.\n")
+	fmt.Fprint(w, "# TYPE agentsh_ptrace_attach_failures_total counter\n")
+	for _, reason := range keys {
+		ptr, _ := c.ptraceAttachFails.Load(reason)
+		n := ptr.(*atomic.Uint64).Load()
+		fmt.Fprintf(w, "agentsh_ptrace_attach_failures_total{reason=%q} %d\n", escapeLabelValue(reason), n)
 	}
 	fmt.Fprint(w, "\n")
 }
