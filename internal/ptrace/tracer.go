@@ -325,6 +325,18 @@ func (t *Tracer) applyDenyFixup(tid int, errno int) {
 	t.setRegs(tid, regs)
 }
 
+// hasPendingSyscallExit returns true if the tracee has a pending deny errno
+// or fake-zero fixup that needs to be applied at syscall exit.
+func (t *Tracer) hasPendingSyscallExit(tid int) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	state := t.tracees[tid]
+	if state == nil {
+		return false
+	}
+	return state.InSyscall && (state.PendingDenyErrno != 0 || state.PendingFakeZero)
+}
+
 // handleStop dispatches a tracee stop event.
 func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus) {
 	switch {
@@ -358,7 +370,15 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 			case unix.PTRACE_EVENT_STOP:
 				t.handleEventStop(tid)
 			default:
-				t.resumeTracee(tid, 0)
+				// In prefilter mode (PTRACE_O_TRACESECCOMP without
+				// TRACESYSGOOD), a plain SIGTRAP with no event can be
+				// a syscall-exit stop if we explicitly used PtraceSyscall
+				// (e.g., after soft-delete). Check for pending fixups.
+				if t.hasPendingSyscallExit(tid) {
+					t.handleSyscallStop(ctx, tid)
+				} else {
+					t.resumeTracee(tid, 0)
+				}
 			}
 
 		default:
