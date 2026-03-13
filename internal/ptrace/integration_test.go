@@ -42,6 +42,7 @@ func waitForTraceesDrained(t *testing.T, tr *Tracer, timeout time.Duration) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	t.Logf("waitForTraceesDrained: timed out after %v with %d tracees remaining", timeout, tr.TraceeCount())
 }
 
 // waitForAttach polls until TraceeCount() > 0 or timeout, ensuring attach happened.

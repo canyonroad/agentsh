@@ -4,6 +4,7 @@ package ptrace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -186,7 +187,14 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	}
 	t.mu.Unlock()
 
-	t.allowSyscall(tid)
+	// Use PtraceSyscall (not allowSyscall) to ensure we catch the exec
+	// exit stop even in prefilter/seccomp mode. This is needed so the
+	// PendingExecStubFD cleanup runs on exec failure.
+	if err := unix.PtraceSyscall(tid, 0); err != nil {
+		if errors.Is(err, unix.ESRCH) {
+			t.handleExit(tid)
+		}
+	}
 }
 
 
