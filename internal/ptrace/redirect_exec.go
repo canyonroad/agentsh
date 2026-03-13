@@ -140,6 +140,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	// edge cases like AT_EMPTY_PATH or non-AT_FDCWD dirfds that could
 	// bypass the redirect.
 	gadget := syscallGadgetAddr(savedRegs)
+	filenameArg := regs.Arg(0) // save before SetReturnValue (clobbers x0/arg0 on arm64)
 	injRegs := regs.Clone()
 	injRegs.SetSyscallNr(unix.SYS_EXECVE)
 	injRegs.SetReturnValue(int64(unix.SYS_EXECVE))
@@ -150,6 +151,10 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		injRegs.SetArg(0, injRegs.Arg(1)) // filename (already rewritten above)
 		injRegs.SetArg(1, regs.Arg(2))    // argv
 		injRegs.SetArg(2, regs.Arg(3))    // envp
+	} else {
+		// On arm64, SetReturnValue writes x0 which is also arg0. Restore the
+		// filename pointer which was clobbered.
+		injRegs.SetArg(0, filenameArg)
 	}
 
 	if err := t.setRegs(tid, injRegs); err != nil {
