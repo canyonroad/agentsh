@@ -617,8 +617,18 @@ func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
 		Depth:     depth,
 	})
 
-	switch result.Action {
-	case "", "continue", "allow":
+	// Dispatch based on Action field (preferred) or Allow field (legacy fallback).
+	action := result.Action
+	if action == "" {
+		if result.Allow {
+			action = "allow"
+		} else {
+			action = "deny"
+		}
+	}
+
+	switch action {
+	case "allow", "continue":
 		t.allowSyscall(tid)
 	case "deny":
 		errno := result.Errno
@@ -629,7 +639,7 @@ func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
 	case "redirect":
 		t.redirectExec(ctx, tid, regs, result)
 	default:
-		slog.Warn("handleExecve: unknown action, denying", "tid", tid, "action", result.Action)
+		slog.Warn("handleExecve: unknown action, denying", "tid", tid, "action", action)
 		t.denySyscall(tid, int(unix.EACCES))
 	}
 }
