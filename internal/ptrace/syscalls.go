@@ -58,6 +58,7 @@ func tracedSyscallNumbers() []int {
 		unix.SYS_SENDTO, unix.SYS_LISTEN,
 		unix.SYS_KILL, unix.SYS_TGKILL, unix.SYS_TKILL,
 		unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO,
+		unix.SYS_WRITE, unix.SYS_READ, unix.SYS_PREAD64, unix.SYS_CLOSE,
 	}
 	nums = append(nums, legacyFileSyscalls()...)
 	return nums

@@ -81,6 +81,34 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 
 	nr := regs.SyscallNr()
 
+	// Sendto DNS redirect: if sendto targets port 53, rewrite destination to proxy
+	if t.dnsProxy != nil && nr == unix.SYS_SENDTO {
+		destAddrPtr := regs.Arg(4) // sendto arg4 = dest_addr
+		destAddrLen := int(regs.Arg(5)) // sendto arg5 = addrlen
+		if destAddrPtr != 0 && destAddrLen > 0 && destAddrLen <= 128 {
+			destBuf := make([]byte, destAddrLen)
+			if err := t.readBytes(tid, destAddrPtr, destBuf); err == nil {
+				destFamily, _, destPort, err := parseSockaddr(destBuf)
+				if err == nil && destPort == 53 &&
+					(destFamily == unix.AF_INET || destFamily == unix.AF_INET6) {
+
+					var newDest []byte
+					if destFamily == unix.AF_INET {
+						newDest = buildSockaddrIn4(net.ParseIP("127.0.0.1").To4(), t.dnsProxy.port4)
+					} else {
+						newDest = buildSockaddrIn6(net.ParseIP("::1"), t.dnsProxy.port6)
+						regs.SetArg(5, 28) // update addrlen
+						t.setRegs(tid, regs)
+					}
+					if err := t.writeBytes(tid, destAddrPtr, newDest); err == nil {
+						t.allowSyscall(tid)
+						return
+					}
+				}
+			}
+		}
+	}
+
 	// Only evaluate policy for connect and bind
 	if nr != unix.SYS_CONNECT && nr != unix.SYS_BIND {
 		t.allowSyscall(tid)
@@ -109,6 +137,49 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 	if err != nil {
 		slog.Warn("handleNetwork: cannot parse sockaddr, denying", "tid", tid, "error", err)
 		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
+
+	// DNS redirect: if connecting to port 53, redirect to local DNS proxy
+	if t.dnsProxy != nil && port == 53 &&
+		(family == unix.AF_INET || family == unix.AF_INET6) &&
+		nr == unix.SYS_CONNECT {
+
+		t.mu.Lock()
+		state := t.tracees[tid]
+		var tgid int
+		var sessionID string
+		if state != nil {
+			tgid = state.TGID
+			sessionID = state.SessionID
+		}
+		t.mu.Unlock()
+
+		fd := int(int32(regs.Arg(0)))
+		originalResolver := fmt.Sprintf("%s:%d", address, port)
+
+		// Rewrite sockaddr to point to DNS proxy, preserving address family
+		var newSockaddr []byte
+		if family == unix.AF_INET {
+			newSockaddr = buildSockaddrIn4(net.ParseIP("127.0.0.1").To4(), t.dnsProxy.port4)
+		} else {
+			newSockaddr = buildSockaddrIn6(net.ParseIP("::1"), t.dnsProxy.port6)
+			// Update addrlen register for larger sockaddr_in6
+			regs.SetArg(2, 28)
+			if err := t.setRegs(tid, regs); err != nil {
+				slog.Warn("handleNetwork: DNS redirect setRegs failed", "tid", tid, "error", err)
+			}
+		}
+		if err := t.writeBytes(tid, addrPtr, newSockaddr); err != nil {
+			slog.Warn("handleNetwork: DNS redirect write failed", "tid", tid, "error", err)
+			t.denySyscall(tid, int(unix.EACCES))
+			return
+		}
+
+		// Record redirect info keyed by TGID+fd for proxy PID attribution
+		t.fds.recordDNSRedirect(tgid, fd, tgid, sessionID, originalResolver)
+
+		t.allowSyscall(tid)
 		return
 	}
 
@@ -172,4 +243,22 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 		slog.Warn("handleNetwork: unknown action, denying", "tid", tid, "action", action)
 		t.denySyscall(tid, int(unix.EACCES))
 	}
+}
+
+// buildSockaddrIn4 builds a raw sockaddr_in for IPv4.
+func buildSockaddrIn4(ip net.IP, port int) []byte {
+	buf := make([]byte, 16) // sizeof(sockaddr_in)
+	binary.NativeEndian.PutUint16(buf[0:2], unix.AF_INET)
+	binary.BigEndian.PutUint16(buf[2:4], uint16(port))
+	copy(buf[4:8], ip.To4())
+	return buf
+}
+
+// buildSockaddrIn6 builds a raw sockaddr_in6 for IPv6.
+func buildSockaddrIn6(ip net.IP, port int) []byte {
+	buf := make([]byte, 28) // sizeof(sockaddr_in6)
+	binary.NativeEndian.PutUint16(buf[0:2], unix.AF_INET6)
+	binary.BigEndian.PutUint16(buf[2:4], uint16(port))
+	copy(buf[8:24], ip.To16())
+	return buf
 }
