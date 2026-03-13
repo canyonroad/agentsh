@@ -33,6 +33,11 @@ func TestMaskTracerPid(t *testing.T) {
 			input:  "TracerPid:\t999",
 			expect: "TracerPid:\t0  ",
 		},
+		{
+			name:   "prefix at buffer end with no PID bytes",
+			input:  "Name:\tsleep\nTracerPid:\t",
+			expect: "Name:\tsleep\nTracerPid:\t",
+		},
 	}
 
 	for _, tt := range tests {

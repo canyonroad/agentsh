@@ -34,6 +34,11 @@ func maskTracerPid(buf []byte) {
 		pidEnd++
 	}
 
+	// No PID bytes (prefix at end of buffer with no digits) — nothing to mask
+	if pidStart >= pidEnd {
+		return
+	}
+
 	// Already zero — nothing to do
 	pid := string(buf[pidStart:pidEnd])
 	if strings.TrimSpace(pid) == "0" {
