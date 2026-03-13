@@ -11,25 +11,106 @@ import (
 
 // injectSyscall executes an arbitrary syscall inside a stopped tracee.
 //
-// The tracee MUST be stopped at a syscall-enter or PTRACE_EVENT_SECCOMP stop
-// so that the instruction pointer can be used to locate a syscall gadget.
+// Works from two stop states:
 //
-// Sequence:
-//  1. Save current registers (caller passes savedRegs)
-//  2. Set up injected syscall (nr + up to 6 args)
-//  3. Set IP to the syscall instruction gadget
-//  4. Resume with PtraceSyscall -> wait for syscall-enter stop
-//  5. Resume with PtraceSyscall -> wait for syscall-exit stop
-//  6. Read return value
-//  7. Restore original registers
+//   - Syscall-enter (InSyscall=true): modifies ORIG_RAX in place so the kernel
+//     dispatches the injected syscall instead of the original. One PtraceSyscall
+//     cycle reaches the exit stop where the return value is available.
 //
-// Returns the syscall return value, or an error if any ptrace operation fails.
+//   - Between syscalls / exit stop (InSyscall=false): sets the instruction
+//     pointer to a syscall gadget (the `syscall` instruction from the original
+//     stop site). Two PtraceSyscall cycles: first to reach the gadget's
+//     syscall-enter, second to reach its exit.
+//
+// After reading the return value, the original registers are restored and
+// InSyscall is set to false (the tracee is always left at a syscall-exit stop).
 func (t *Tracer) injectSyscall(tid int, savedRegs Regs, nr int, args ...uint64) (int64, error) {
-	gadget := syscallGadgetAddr(savedRegs)
+	// Determine whether we're at a syscall-enter or between syscalls.
+	atEntry := false
+	t.mu.Lock()
+	if state := t.tracees[tid]; state != nil {
+		atEntry = state.InSyscall
+	}
+	t.mu.Unlock()
 
-	// Build injection registers from a clone of saved state.
+	if atEntry {
+		return t.injectFromEntry(tid, savedRegs, nr, args...)
+	}
+	return t.injectFromExit(tid, savedRegs, nr, args...)
+}
+
+// injectFromEntry handles injection when the tracee is at a syscall-enter stop.
+// Modifying ORIG_RAX replaces the current syscall. One cycle to exit.
+func (t *Tracer) injectFromEntry(tid int, savedRegs Regs, nr int, args ...uint64) (int64, error) {
 	injRegs := savedRegs.Clone()
 	injRegs.SetSyscallNr(nr)
+	// On amd64, the CPU reads the syscall number from RAX, not ORIG_RAX.
+	// SetSyscallNr sets ORIG_RAX; we must also set RAX.
+	injRegs.SetReturnValue(int64(nr))
+	for i, v := range args {
+		if i > 5 {
+			break
+		}
+		injRegs.SetArg(i, v)
+	}
+	// Don't change IP — we're hijacking the current syscall entry.
+
+	if err := t.setRegs(tid, injRegs); err != nil {
+		return 0, fmt.Errorf("inject setRegs: %w", err)
+	}
+
+	var injectErr error
+	defer func() {
+		if injectErr != nil {
+			if restoreErr := t.setRegs(tid, savedRegs); restoreErr != nil {
+				slog.Warn("inject: failed to restore registers after error",
+					"tid", tid, "injectErr", injectErr, "restoreErr", restoreErr)
+			}
+		}
+	}()
+
+	// Resume → kernel dispatches our modified syscall → exit stop.
+	if err := unix.PtraceSyscall(tid, 0); err != nil {
+		injectErr = fmt.Errorf("inject resume: %w", err)
+		return 0, injectErr
+	}
+	if err := t.waitForSyscallStop(tid); err != nil {
+		injectErr = fmt.Errorf("inject wait-exit: %w", err)
+		return 0, injectErr
+	}
+
+	retRegs, err := t.getRegs(tid)
+	if err != nil {
+		injectErr = fmt.Errorf("inject getRegs: %w", err)
+		return 0, injectErr
+	}
+	ret := retRegs.ReturnValue()
+
+	// Restore original registers.
+	if err := t.setRegs(tid, savedRegs); err != nil {
+		return 0, fmt.Errorf("inject restore: %w", err)
+	}
+
+	// We consumed the enter→exit transition. Mark as exit state so
+	// subsequent injections use the two-phase gadget protocol.
+	t.mu.Lock()
+	if state := t.tracees[tid]; state != nil {
+		state.InSyscall = false
+	}
+	t.mu.Unlock()
+
+	return ret, nil
+}
+
+// injectFromExit handles injection when the tracee is at a syscall-exit
+// (between-syscall) stop. Uses a gadget: sets IP to the `syscall` instruction,
+// two cycles (enter + exit).
+func (t *Tracer) injectFromExit(tid int, savedRegs Regs, nr int, args ...uint64) (int64, error) {
+	gadget := syscallGadgetAddr(savedRegs)
+
+	injRegs := savedRegs.Clone()
+	injRegs.SetSyscallNr(nr)
+	injRegs.SetReturnValue(int64(nr))
 	for i, v := range args {
 		if i > 5 {
 			break
@@ -42,7 +123,6 @@ func (t *Tracer) injectSyscall(tid int, savedRegs Regs, nr int, args ...uint64) 
 		return 0, fmt.Errorf("inject setRegs: %w", err)
 	}
 
-	// Best-effort register restore on any failure after setRegs succeeds.
 	var injectErr error
 	defer func() {
 		if injectErr != nil {
@@ -53,7 +133,7 @@ func (t *Tracer) injectSyscall(tid int, savedRegs Regs, nr int, args ...uint64) 
 		}
 	}()
 
-	// Phase 1: resume -> wait for syscall-enter stop.
+	// Phase 1: resume → tracee returns to gadget → executes syscall → enter stop.
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
 		injectErr = fmt.Errorf("inject resume-enter: %w", err)
 		return 0, injectErr
@@ -63,7 +143,7 @@ func (t *Tracer) injectSyscall(tid int, savedRegs Regs, nr int, args ...uint64) 
 		return 0, injectErr
 	}
 
-	// Phase 2: resume -> wait for syscall-exit stop.
+	// Phase 2: resume → kernel dispatches injected syscall → exit stop.
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
 		injectErr = fmt.Errorf("inject resume-exit: %w", err)
 		return 0, injectErr
@@ -73,7 +153,6 @@ func (t *Tracer) injectSyscall(tid int, savedRegs Regs, nr int, args ...uint64) 
 		return 0, injectErr
 	}
 
-	// Read return value.
 	retRegs, err := t.getRegs(tid)
 	if err != nil {
 		injectErr = fmt.Errorf("inject getRegs: %w", err)
@@ -81,7 +160,6 @@ func (t *Tracer) injectSyscall(tid int, savedRegs Regs, nr int, args ...uint64) 
 	}
 	ret := retRegs.ReturnValue()
 
-	// Restore original registers.
 	if err := t.setRegs(tid, savedRegs); err != nil {
 		return 0, fmt.Errorf("inject restore: %w", err)
 	}
@@ -124,22 +202,13 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 		}
 
 		// Non-TRACESYSGOOD mode: plain SIGTRAP with no ptrace event
-		// is a syscall stop. In theory a real SIGTRAP signal delivery
-		// could match this pattern, but during the brief injection
-		// window (two syscall stops) this is extremely unlikely.
-		// The alternative (PTRACE_GETSIGINFO si_code check) adds
-		// complexity with minimal practical benefit.
+		// is a syscall stop.
 		if sig == unix.SIGTRAP && status.TrapCause() == 0 {
 			return nil
 		}
 
 		// Ptrace event stops (fork, clone, exec, seccomp, etc.) report
 		// SIGTRAP with a non-zero TrapCause. Resume with signal 0.
-		// Note: injected syscalls (mmap for scratch pages) should not
-		// trigger fork/clone/exec events. Seccomp events are possible
-		// but unlikely for MAP_ANONYMOUS mmap. If they do occur, we
-		// skip normal event handling since the injection must complete
-		// atomically before the tracer loop can process further events.
 		if sig == unix.SIGTRAP && status.TrapCause() != 0 {
 			if err := unix.PtraceSyscall(tid, 0); err != nil {
 				return fmt.Errorf("inject re-resume tid %d: %w", tid, err)

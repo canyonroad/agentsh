@@ -49,6 +49,47 @@ func (t *Tracer) attachThread(tid int) error {
 		return fmt.Errorf("PTRACE_SEIZE tid %d: %w", tid, err)
 	}
 
+	// PTRACE_SEIZE does not stop the tracee. We must interrupt it and wait
+	// for the ptrace-stop before calling PTRACE_SETOPTIONS, which requires
+	// the tracee to be stopped (otherwise it returns ESRCH).
+	if err := unix.PtraceInterrupt(tid); err != nil {
+		t.safeDetach(tid)
+		t.metrics.IncAttachFailure("other")
+		return fmt.Errorf("PTRACE_INTERRUPT tid %d: %w", tid, err)
+	}
+
+	// Wait for the interrupt stop with a timeout. Use WNOHANG to avoid
+	// blocking forever if Go's runtime reaps the child first (e.g., when
+	// cmd.Wait() races with our Wait4).
+	var status unix.WaitStatus
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		wpid, werr := unix.Wait4(tid, &status, unix.WNOHANG|unix.WALL, nil)
+		if werr != nil {
+			if werr == unix.EINTR {
+				continue
+			}
+			t.safeDetach(tid)
+			t.metrics.IncAttachFailure("other")
+			return fmt.Errorf("wait4 after interrupt tid %d: %w", tid, werr)
+		}
+		if wpid == tid {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.safeDetach(tid)
+			t.metrics.IncAttachFailure("other")
+			return fmt.Errorf("wait4 after interrupt tid %d: timed out", tid)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if !status.Stopped() {
+		t.safeDetach(tid)
+		t.metrics.IncAttachFailure("other")
+		return fmt.Errorf("tid %d: expected ptrace-stop after interrupt, got status %v", tid, status)
+	}
+
 	if err := unix.PtraceSetOptions(tid, t.ptraceOptions()); err != nil {
 		t.safeDetach(tid)
 		t.metrics.IncAttachFailure("other")
@@ -60,26 +101,6 @@ func (t *Tracer) attachThread(tid int) error {
 		t.safeDetach(tid)
 		t.metrics.IncAttachFailure("other")
 		return fmt.Errorf("read TGID for tid %d: %w", tid, err)
-	}
-
-	if err := unix.PtraceInterrupt(tid); err != nil {
-		t.safeDetach(tid)
-		t.metrics.IncAttachFailure("other")
-		return fmt.Errorf("PTRACE_INTERRUPT tid %d: %w", tid, err)
-	}
-
-	var status unix.WaitStatus
-	_, err = unix.Wait4(tid, &status, 0, nil)
-	if err != nil {
-		t.safeDetach(tid)
-		t.metrics.IncAttachFailure("other")
-		return fmt.Errorf("wait4 after interrupt tid %d: %w", tid, err)
-	}
-
-	if !status.Stopped() {
-		t.safeDetach(tid)
-		t.metrics.IncAttachFailure("other")
-		return fmt.Errorf("tid %d: expected ptrace-stop after interrupt, got status %v", tid, status)
 	}
 
 	if t.prefilterActive {
@@ -118,7 +139,7 @@ func (t *Tracer) safeDetach(tid int) {
 		return
 	}
 	var status unix.WaitStatus
-	if _, err := unix.Wait4(tid, &status, 0, nil); err != nil {
+	if _, err := unix.Wait4(tid, &status, unix.WNOHANG|unix.WALL, nil); err != nil {
 		return
 	}
 	if status.Stopped() {

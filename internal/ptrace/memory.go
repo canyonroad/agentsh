@@ -51,17 +51,48 @@ func readStringFrom(r memReader, addr uint64, maxLen int) (string, error) {
 
 // Tracer-level memory access methods using the cached MemFD.
 
-func (t *Tracer) getMemReader(tid int) (memReader, error) {
+// ensureMemFD lazily opens /proc/<tid>/mem if not yet available (e.g., for
+// auto-attached children via PTRACE_O_TRACEFORK). Returns the fd.
+func (t *Tracer) ensureMemFD(tid int) (int, error) {
 	t.mu.Lock()
 	state := t.tracees[tid]
-	fd := -1
-	if state != nil {
+	if state == nil {
+		t.mu.Unlock()
+		return -1, fmt.Errorf("no tracee state for tid %d", tid)
+	}
+	fd := state.MemFD
+	t.mu.Unlock()
+
+	if fd >= 0 {
+		return fd, nil
+	}
+
+	newFD, err := unix.Open(fmt.Sprintf("/proc/%d/mem", tid), unix.O_RDWR, 0)
+	if err != nil {
+		newFD, err = unix.Open(fmt.Sprintf("/proc/%d/mem", tid), unix.O_RDONLY, 0)
+		if err != nil {
+			return -1, fmt.Errorf("open /proc/%d/mem: %w", tid, err)
+		}
+	}
+
+	t.mu.Lock()
+	if state.MemFD >= 0 {
+		// Another goroutine opened it first; close ours.
+		unix.Close(newFD)
 		fd = state.MemFD
+	} else {
+		state.MemFD = newFD
+		fd = newFD
 	}
 	t.mu.Unlock()
 
-	if fd < 0 {
-		return nil, fmt.Errorf("no memfd for tid %d", tid)
+	return fd, nil
+}
+
+func (t *Tracer) getMemReader(tid int) (memReader, error) {
+	fd, err := t.ensureMemFD(tid)
+	if err != nil {
+		return nil, err
 	}
 	return &procMemReader{fd: fd}, nil
 }
@@ -83,18 +114,11 @@ func (t *Tracer) readString(tid int, addr uint64, maxLen int) (string, error) {
 }
 
 func (t *Tracer) writeBytes(tid int, addr uint64, buf []byte) error {
-	t.mu.Lock()
-	state := t.tracees[tid]
-	fd := -1
-	if state != nil {
-		fd = state.MemFD
+	fd, err := t.ensureMemFD(tid)
+	if err != nil {
+		return err
 	}
-	t.mu.Unlock()
-
-	if fd < 0 {
-		return fmt.Errorf("no memfd for tid %d", tid)
-	}
-	_, err := unix.Pwrite(fd, buf, int64(addr))
+	_, err = unix.Pwrite(fd, buf, int64(addr))
 	return err
 }
 

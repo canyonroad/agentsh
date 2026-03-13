@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"runtime"
 	"sync"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -141,10 +140,13 @@ type TraceeState struct {
 	LastNr           int
 	Attached         time.Time
 	ParkedAt         time.Time
-	PendingDenyErrno int
-	PendingFakeZero  bool // force return value to 0 on syscall exit
-	PendingInterrupt bool
+	PendingDenyErrno      int
+	PendingFakeZero       bool  // force return value to 0 on syscall exit
+	PendingReturnOverride int64 // force return value to this on syscall exit
+	HasPendingReturn      bool  // whether PendingReturnOverride is active
+	PendingInterrupt      bool
 	IsVforkChild     bool
+	SuppressInitialStop bool // suppress initial SIGSTOP from auto-trace
 	MemFD            int
 }
 
@@ -325,6 +327,17 @@ func (t *Tracer) applyDenyFixup(tid int, errno int) {
 	t.setRegs(tid, regs)
 }
 
+// applyReturnOverride overwrites the syscall return value with an arbitrary value.
+// Used by file redirect to pass through the fd from an injected openat syscall.
+func (t *Tracer) applyReturnOverride(tid int, retval int64) {
+	regs, err := t.getRegs(tid)
+	if err != nil {
+		return
+	}
+	regs.SetReturnValue(retval)
+	t.setRegs(tid, regs)
+}
+
 // hasPendingSyscallExit returns true if the tracee has a pending deny errno
 // or fake-zero fixup that needs to be applied at syscall exit.
 func (t *Tracer) hasPendingSyscallExit(tid int) bool {
@@ -334,7 +347,7 @@ func (t *Tracer) hasPendingSyscallExit(tid int) bool {
 	if state == nil {
 		return false
 	}
-	return state.InSyscall && (state.PendingDenyErrno != 0 || state.PendingFakeZero)
+	return state.InSyscall && (state.PendingDenyErrno != 0 || state.PendingFakeZero || state.HasPendingReturn)
 }
 
 // handleStop dispatches a tracee stop event.
@@ -352,6 +365,7 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 
 		case sig == unix.SIGTRAP:
 			event := status.TrapCause()
+			slog.Info("handleStop: SIGTRAP event", "tid", tid, "event", event)
 			switch event {
 			case unix.PTRACE_EVENT_FORK, unix.PTRACE_EVENT_CLONE:
 				t.handleNewChild(tid, event)
@@ -382,6 +396,20 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 			}
 
 		default:
+			// Suppress initial SIGSTOP for auto-traced children.
+			if sig == unix.SIGSTOP {
+				t.mu.Lock()
+				state := t.tracees[tid]
+				suppress := state != nil && state.SuppressInitialStop
+				if suppress {
+					state.SuppressInitialStop = false
+				}
+				t.mu.Unlock()
+				if suppress {
+					t.resumeTracee(tid, 0)
+					break
+				}
+			}
 			t.resumeTracee(tid, int(sig))
 		}
 	}
@@ -398,13 +426,21 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 	}
 	entering := !state.InSyscall
 	state.InSyscall = entering
+	lastNr := state.LastNr
+	slog.Info("handleSyscallStop", "tid", tid, "entering", entering, "lastNr", lastNr)
 	pendingErrno := 0
 	pendingFakeZero := false
+	hasPendingReturn := false
+	var pendingReturnOverride int64
 	if !entering {
 		pendingErrno = state.PendingDenyErrno
 		state.PendingDenyErrno = 0
 		pendingFakeZero = state.PendingFakeZero
 		state.PendingFakeZero = false
+		hasPendingReturn = state.HasPendingReturn
+		pendingReturnOverride = state.PendingReturnOverride
+		state.HasPendingReturn = false
+		state.PendingReturnOverride = 0
 	}
 	t.mu.Unlock()
 
@@ -415,6 +451,7 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 			return
 		}
 		nr := regs.SyscallNr()
+		slog.Info("handleSyscallStop entering dispatch", "tid", tid, "nr", nr)
 		t.mu.Lock()
 		state.LastNr = nr
 		tgid := state.TGID
@@ -426,10 +463,19 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 
 		t.dispatchSyscall(ctx, tid, nr, regs)
 	} else {
+		// At exit, read the actual orig_rax to verify it matches the enter.
+		exitRegs, exitErr := t.getRegs(tid)
+		exitNr := -1
+		if exitErr == nil {
+			exitNr = exitRegs.SyscallNr()
+		}
+		slog.Info("handleSyscallStop exit check", "tid", tid, "exitNr", exitNr, "lastNr", lastNr)
 		if pendingErrno != 0 {
 			t.applyDenyFixup(tid, pendingErrno)
 		} else if pendingFakeZero {
 			t.applyDenyFixup(tid, 0)
+		} else if hasPendingReturn {
+			t.applyReturnOverride(tid, pendingReturnOverride)
 		}
 		t.allowSyscall(tid)
 	}
@@ -500,11 +546,13 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 	isNewProcess := childTGID != parent.TGID
 
 	t.tracees[tid] = &TraceeState{
-		TID:       tid,
-		TGID:      childTGID,
-		ParentPID: parent.TGID,
-		SessionID: parent.SessionID,
-		Attached:  time.Now(),
+		TID:                tid,
+		TGID:               childTGID,
+		ParentPID:          parent.TGID,
+		SessionID:          parent.SessionID,
+		Attached:           time.Now(),
+		MemFD:              -1, // opened lazily on first memory access
+		SuppressInitialStop: true, // suppress the initial SIGSTOP from auto-trace
 	}
 	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
@@ -534,7 +582,13 @@ func (t *Tracer) handleExecEvent(tid int) {
 		return
 	}
 	state.IsVforkChild = false
-	state.InSyscall = false
+	// Keep InSyscall = true: the PTRACE_EVENT_EXEC fires between the
+	// execve's syscall-enter and syscall-exit. The next SIGTRAP|0x80
+	// stop will be the execve exit; by leaving InSyscall true, the
+	// tracer correctly treats it as an exit (entering = !true = false)
+	// and subsequent syscalls are dispatched on entry as expected.
+	// Without this, the enter/exit tracking drifts off-by-one and
+	// handlers see syscalls only at exit — too late to intercept.
 
 	formerTID, err := unix.PtraceGetEventMsg(tid)
 	if err == nil && int(formerTID) != tid {
@@ -550,6 +604,20 @@ func (t *Tracer) handleExecEvent(tid int) {
 			delete(t.tracees, otherTID)
 		}
 	}
+
+	// Exec replaces the process address space, so reopen /proc/<tid>/mem
+	// to get a fresh fd pointing to the new address space.
+	if state.MemFD >= 0 {
+		unix.Close(state.MemFD)
+		state.MemFD = -1
+	}
+	fd, err := unix.Open(fmt.Sprintf("/proc/%d/mem", tid), unix.O_RDWR, 0)
+	if err != nil {
+		slog.Warn("handleExecEvent: O_RDWR open failed, trying O_RDONLY", "tid", tid, "error", err)
+		fd, _ = unix.Open(fmt.Sprintf("/proc/%d/mem", tid), unix.O_RDONLY, 0)
+	}
+	state.MemFD = fd
+
 	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
 
@@ -597,10 +665,34 @@ func (t *Tracer) handleEventStop(tid int) {
 		t.resumeTracee(tid, 0)
 		return
 	}
+	hasState := state != nil
 	t.mu.Unlock()
-	// PTRACE_LISTEN is not wrapped by x/sys/unix, so use RawSyscall directly.
-	_, _, e := syscall.RawSyscall6(syscall.SYS_PTRACE, unix.PTRACE_LISTEN, uintptr(tid), 0, 0, 0, 0)
-	_ = e
+
+	// Auto-attached children (via PTRACE_O_TRACEFORK/VFORK/CLONE) receive
+	// PTRACE_EVENT_STOP as their initial stop. If handleNewChild hasn't run
+	// yet (race with parent's fork event), the child has no state. In either
+	// case, resume the child so it can continue executing. Do NOT use
+	// PTRACE_LISTEN here: it's only appropriate for group-stops during
+	// PTRACE_SEIZE, not for initial auto-attach stops.
+	if !hasState {
+		// Create minimal state so the child doesn't get lost.
+		childTGID, _ := readTGID(tid)
+		if childTGID == 0 {
+			childTGID = tid
+		}
+		t.mu.Lock()
+		if _, exists := t.tracees[tid]; !exists {
+			t.tracees[tid] = &TraceeState{
+				TID:   tid,
+				TGID:  childTGID,
+				MemFD: -1,
+			}
+			t.metrics.SetTraceeCount(len(t.tracees))
+		}
+		t.mu.Unlock()
+	}
+
+	t.resumeTracee(tid, 0)
 }
 
 // handleExecve intercepts execve/execveat syscalls for policy evaluation.
