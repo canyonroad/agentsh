@@ -146,3 +146,15 @@ func (ft *fdTracker) domainForIP(ip string) (string, bool) {
 	ft.mu.Unlock()
 	return domain, ok
 }
+
+// anyDNSRedirect returns any registered DNS redirect info. This is used as a
+// fallback when the proxy cannot identify the exact source TGID/fd from the
+// UDP packet (full attribution is wired in Task 9).
+func (ft *fdTracker) anyDNSRedirect() (dnsRedirectInfo, bool) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	for _, info := range ft.dnsRedirects {
+		return info, true
+	}
+	return dnsRedirectInfo{}, false
+}
