@@ -90,7 +90,9 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 			if err := t.readBytes(tid, destAddrPtr, destBuf); err == nil {
 				destFamily, _, destPort, err := parseSockaddr(destBuf)
 				if err == nil && destPort == 53 &&
-					(destFamily == unix.AF_INET || destFamily == unix.AF_INET6) {
+					(destFamily == unix.AF_INET || destFamily == unix.AF_INET6) &&
+					((destFamily == unix.AF_INET && destAddrLen >= 16) ||
+						(destFamily == unix.AF_INET6 && destAddrLen >= 28)) {
 
 					var newDest []byte
 					if destFamily == unix.AF_INET {
@@ -159,6 +161,14 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 		originalResolver := fmt.Sprintf("%s:%d", address, port)
 
 		// Rewrite sockaddr to point to DNS proxy, preserving address family
+		if family == unix.AF_INET && addrLen < 16 {
+			t.allowSyscall(tid)
+			return
+		}
+		if family == unix.AF_INET6 && addrLen < 28 {
+			t.allowSyscall(tid)
+			return
+		}
 		var newSockaddr []byte
 		if family == unix.AF_INET {
 			newSockaddr = buildSockaddrIn4(net.ParseIP("127.0.0.1").To4(), t.dnsProxy.port4)
