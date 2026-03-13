@@ -1288,7 +1288,7 @@ func TestIntegration_ConnectRedirect(t *testing.T) {
 	content, _ := os.ReadFile(outputFile)
 	trimmed := strings.TrimSpace(string(content))
 	if trimmed != "redirected" {
-		t.Logf("connect redirect output: %q (may need nc installed in Docker image)", trimmed)
+		t.Errorf("connect redirect output: expected %q, got %q", "redirected", trimmed)
 	}
 }
 

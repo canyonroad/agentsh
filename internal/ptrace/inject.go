@@ -236,3 +236,31 @@ func (t *Tracer) injectSyscallRet(tid int, savedRegs Regs, nr int, args ...uint6
 	}
 	return uint64(ret), nil
 }
+
+// advancePastEntry nullifies the current syscall entry and advances the tracee
+// to the EXIT stop. This allows subsequent injections to use the two-phase
+// gadget protocol. The original registers are restored afterward and InSyscall
+// is set to false.
+func (t *Tracer) advancePastEntry(tid int, savedRegs Regs) error {
+	nullRegs := savedRegs.Clone()
+	nullRegs.SetSyscallNr(-1)
+	nullRegs.SetReturnValue(-1)
+	if err := t.setRegs(tid, nullRegs); err != nil {
+		return fmt.Errorf("advance setRegs: %w", err)
+	}
+	if err := unix.PtraceSyscall(tid, 0); err != nil {
+		return fmt.Errorf("advance resume: %w", err)
+	}
+	if err := t.waitForSyscallStop(tid); err != nil {
+		return fmt.Errorf("advance wait: %w", err)
+	}
+	if err := t.setRegs(tid, savedRegs); err != nil {
+		return fmt.Errorf("advance restore: %w", err)
+	}
+	t.mu.Lock()
+	if state := t.tracees[tid]; state != nil {
+		state.InSyscall = false
+	}
+	t.mu.Unlock()
+	return nil
+}

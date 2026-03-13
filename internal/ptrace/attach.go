@@ -139,8 +139,19 @@ func (t *Tracer) safeDetach(tid int) {
 		return
 	}
 	var status unix.WaitStatus
-	if _, err := unix.Wait4(tid, &status, unix.WNOHANG|unix.WALL, nil); err != nil {
-		return
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		wpid, err := unix.Wait4(tid, &status, unix.WNOHANG|unix.WALL, nil)
+		if err != nil {
+			return
+		}
+		if wpid == tid {
+			break
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if status.Stopped() {
 		unix.PtraceDetach(tid)

@@ -17,11 +17,13 @@ const stubFDNum = 100 // Well-known fd number for stub communication
 // redirectExec redirects an execve syscall to a stub binary.
 //
 // Sequence:
-//  1. Create socketpair in tracer for stub communication
-//  2. Inject tracer's socketpair fd into tracee at fd 100 via pidfd_getfd
-//  3. Write stub path into tracee memory
-//  4. Update registers so kernel executes execve with stub path
-//  5. Resume — stub runs and connects back to tracer via fd 100
+//  1. Advance past the original execve entry (nullify it) so helper
+//     injections use the two-phase gadget protocol from EXIT state.
+//  2. Create socketpair in tracer for stub communication
+//  3. Inject tracer's socketpair fd into tracee at fd 100 via pidfd_getfd
+//  4. Write stub path into tracee memory
+//  5. Re-inject execve via gadget, advance to its ENTRY stop, and resume —
+//     the main tracer loop handles the exec event from there.
 func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result ExecResult) {
 	if result.StubPath == "" {
 		slog.Warn("redirectExec: no stub path, denying", "tid", tid)
@@ -30,12 +32,22 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	}
 
 	savedRegs := regs.Clone()
+	nr := regs.SyscallNr()
+
+	// Advance past the original execve entry to EXIT state. All helper
+	// injections will use the two-phase gadget protocol, and the final
+	// execve is re-injected explicitly via gadget at the end.
+	if err := t.advancePastEntry(tid, savedRegs); err != nil {
+		slog.Warn("redirectExec: advance past entry failed, denying", "tid", tid, "error", err)
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
 
 	// Step 1: Create socketpair in tracer process.
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
-		slog.Warn("redirectExec: socketpair failed, denying", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		slog.Warn("redirectExec: socketpair failed", "tid", tid, "error", err)
+		t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 	tracerFD := fds[0]
@@ -45,13 +57,12 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 
 	// Step 2: Inject fd into tracee via pidfd_getfd.
 	if err := t.injectFDIntoTracee(tid, savedRegs, injectFD, stubFDNum); err != nil {
-		slog.Warn("redirectExec: fd injection failed, denying", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		slog.Warn("redirectExec: fd injection failed", "tid", tid, "error", err)
+		t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 
 	// Step 3: Write stub path into tracee memory.
-	nr := regs.SyscallNr()
 	var filenamePtr uint64
 	if nr == unix.SYS_EXECVEAT {
 		filenamePtr = regs.Arg(1)
@@ -61,9 +72,9 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 
 	origFilename, err := t.readString(tid, filenamePtr, 4096)
 	if err != nil {
-		slog.Warn("redirectExec: read original filename failed, denying", "tid", tid, "error", err)
+		slog.Warn("redirectExec: read original filename failed", "tid", tid, "error", err)
 		t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-		t.denySyscall(tid, int(unix.EACCES))
+		t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 	origLen := len(origFilename) + 1
@@ -71,9 +82,9 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	stubPath := result.StubPath
 	if len(stubPath)+1 <= origLen {
 		if err := t.writeString(tid, filenamePtr, stubPath); err != nil {
-			slog.Warn("redirectExec: write stub path failed, denying", "tid", tid, "error", err)
+			slog.Warn("redirectExec: write stub path failed", "tid", tid, "error", err)
 			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-			t.denySyscall(tid, int(unix.EACCES))
+			t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
 			return
 		}
 	} else {
@@ -87,24 +98,24 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 
 		sp, err := t.ensureScratchPage(tid, tgid, savedRegs)
 		if err != nil {
-			slog.Warn("redirectExec: scratch alloc failed, denying", "tid", tid, "error", err)
+			slog.Warn("redirectExec: scratch alloc failed", "tid", tid, "error", err)
 			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-			t.denySyscall(tid, int(unix.EACCES))
+			t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
 			return
 		}
 
 		scratchAddr, err := sp.allocate(len(stubPath) + 1)
 		if err != nil {
-			slog.Warn("redirectExec: scratch page full, denying", "tid", tid, "error", err)
+			slog.Warn("redirectExec: scratch page full", "tid", tid, "error", err)
 			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-			t.denySyscall(tid, int(unix.EACCES))
+			t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
 			return
 		}
 
 		if err := t.writeString(tid, scratchAddr, stubPath); err != nil {
-			slog.Warn("redirectExec: write to scratch failed, denying", "tid", tid, "error", err)
+			slog.Warn("redirectExec: write to scratch failed", "tid", tid, "error", err)
 			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-			t.denySyscall(tid, int(unix.EACCES))
+			t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
 			return
 		}
 
@@ -115,15 +126,51 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		}
 	}
 
-	// Step 4: Set registers and resume.
-	if err := t.setRegs(tid, regs); err != nil {
-		slog.Warn("redirectExec: setRegs failed, denying", "tid", tid, "error", err)
+	// Step 4: Inject the execve via gadget and advance to its ENTRY stop.
+	// We're at EXIT state, so we set IP to the syscall gadget and resume.
+	gadget := syscallGadgetAddr(savedRegs)
+	injRegs := regs.Clone()
+	injRegs.SetSyscallNr(nr)
+	injRegs.SetReturnValue(int64(nr))
+	injRegs.SetInstructionPointer(gadget)
+
+	if err := t.setRegs(tid, injRegs); err != nil {
+		slog.Warn("redirectExec: setRegs failed", "tid", tid, "error", err)
 		t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-		t.setRegs(tid, savedRegs)
-		t.denySyscall(tid, int(unix.EACCES))
+		t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 
+	// Resume → gadget's syscall instruction → execve ENTRY stop.
+	if err := unix.PtraceSyscall(tid, 0); err != nil {
+		slog.Warn("redirectExec: resume to entry failed", "tid", tid, "error", err)
+		t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
+		t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
+		return
+	}
+	if err := t.waitForSyscallStop(tid); err != nil {
+		// Tracee exited during injection — nothing more to do.
+		return
+	}
+
+	// Now at the injected execve ENTRY. Update tracking and let the
+	// main tracer loop handle the exec event and exit stop.
+	t.mu.Lock()
+	if state := t.tracees[tid]; state != nil {
+		state.InSyscall = true
+	}
+	t.mu.Unlock()
+
+	t.allowSyscall(tid)
+}
+
+// abortExecRedirect recovers from a failed exec redirect when the tracee is
+// at an EXIT stop (after advancePastEntry). It makes the original syscall
+// appear to return the specified errno and resumes the tracee.
+func (t *Tracer) abortExecRedirect(tid int, savedRegs Regs, errno int) {
+	errRegs := savedRegs.Clone()
+	errRegs.SetReturnValue(int64(-errno))
+	t.setRegs(tid, errRegs)
 	t.allowSyscall(tid)
 }
 
