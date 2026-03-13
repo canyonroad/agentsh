@@ -199,10 +199,13 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		} else {
 			slog.Warn("redirectExec: PtraceSyscall failed, cleaning up stub fd",
 				"tid", tid, "error", err)
+			// Clean up the injected stub fd and restore any displaced fd.
+			t.cleanupInjectedFD(tid, savedRegs, stubFDNum, savedFD)
 			// Clear pending state to avoid stale references.
 			t.mu.Lock()
 			if state := t.tracees[tid]; state != nil {
 				state.PendingExecStubFD = -1
+				state.PendingExecSavedFD = -1
 				state.InSyscall = false
 			}
 			t.mu.Unlock()
