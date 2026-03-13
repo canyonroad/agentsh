@@ -123,10 +123,11 @@ func (t *Tracer) attachThread(tid int) error {
 
 	t.mu.Lock()
 	t.tracees[tid] = &TraceeState{
-		TID:      tid,
-		TGID:     tgid,
-		Attached: time.Now(),
-		MemFD:    memFD,
+		TID:               tid,
+		TGID:              tgid,
+		Attached:          time.Now(),
+		MemFD:             memFD,
+		PendingExecStubFD: -1,
 	}
 	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()

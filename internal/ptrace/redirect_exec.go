@@ -132,12 +132,22 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	}
 
 	// Step 4: Inject the execve via gadget and advance to its ENTRY stop.
-	// We're at EXIT state, so we set IP to the syscall gadget and resume.
+	// Always normalize to SYS_EXECVE with the stub path as arg0, regardless
+	// of whether the original call was execve or execveat. This avoids
+	// edge cases like AT_EMPTY_PATH or non-AT_FDCWD dirfds that could
+	// bypass the redirect.
 	gadget := syscallGadgetAddr(savedRegs)
 	injRegs := regs.Clone()
-	injRegs.SetSyscallNr(nr)
-	injRegs.SetReturnValue(int64(nr))
+	injRegs.SetSyscallNr(unix.SYS_EXECVE)
+	injRegs.SetReturnValue(int64(unix.SYS_EXECVE))
 	injRegs.SetInstructionPointer(gadget)
+
+	// For execveat, move filename to arg0 and argv to arg1 for SYS_EXECVE.
+	if nr == unix.SYS_EXECVEAT {
+		injRegs.SetArg(0, injRegs.Arg(1)) // filename (already rewritten above)
+		injRegs.SetArg(1, regs.Arg(2))    // argv
+		injRegs.SetArg(2, regs.Arg(3))    // envp
+	}
 
 	if err := t.setRegs(tid, injRegs); err != nil {
 		slog.Warn("redirectExec: setRegs failed", "tid", tid, "error", err)
@@ -170,6 +180,9 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	t.mu.Lock()
 	if state := t.tracees[tid]; state != nil {
 		state.InSyscall = true
+		// Track the injected stub fd so it can be cleaned up if the
+		// exec fails (no PTRACE_EVENT_EXEC, just an error return).
+		state.PendingExecStubFD = stubFDNum
 	}
 	t.mu.Unlock()
 

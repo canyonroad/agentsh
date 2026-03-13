@@ -159,7 +159,15 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 		}
 		t.denySyscall(tid, int(errno))
 	case "redirect":
-		t.redirectConnect(ctx, tid, regs, result)
+		// Redirect is only supported for connect; deny bind-redirect to
+		// avoid unintentionally mutating bind behavior.
+		if nr == unix.SYS_CONNECT {
+			t.redirectConnect(ctx, tid, regs, result)
+		} else {
+			slog.Warn("handleNetwork: redirect not supported for this syscall, denying",
+				"tid", tid, "operation", operation)
+			t.denySyscall(tid, int(unix.EACCES))
+		}
 	default:
 		slog.Warn("handleNetwork: unknown action, denying", "tid", tid, "action", action)
 		t.denySyscall(tid, int(unix.EACCES))
