@@ -86,14 +86,15 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	origLen := len(origFilename) + 1
 
 	stubPath := result.StubPath
-	if len(stubPath)+1 <= origLen {
+	useScratch := len(stubPath)+1 > origLen
+	if !useScratch {
+		// Try in-place overwrite first.
 		if err := t.writeString(tid, filenamePtr, stubPath); err != nil {
-			slog.Warn("redirectExec: write stub path failed", "tid", tid, "error", err)
-			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-			t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
-			return
+			slog.Info("redirectExec: in-place write failed, falling back to scratch", "tid", tid, "error", err)
+			useScratch = true
 		}
-	} else {
+	}
+	if useScratch {
 		t.mu.Lock()
 		state := t.tracees[tid]
 		tgid := tid

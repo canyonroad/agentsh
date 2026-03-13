@@ -76,6 +76,13 @@ func (t *Tracer) ensureMemFD(tid int) (int, error) {
 	}
 
 	t.mu.Lock()
+	state = t.tracees[tid]
+	if state == nil {
+		// Tracee exited while we were opening the fd.
+		unix.Close(newFD)
+		t.mu.Unlock()
+		return -1, fmt.Errorf("tracee %d exited during memfd open", tid)
+	}
 	if state.MemFD >= 0 {
 		// Another goroutine opened it first; close ours.
 		unix.Close(newFD)
