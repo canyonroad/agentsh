@@ -1262,9 +1262,10 @@ func TestIntegration_ConnectRedirect(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- tr.Run(ctx) }()
 
-	// Use nc (netcat) to connect; wait for ready file first.
+	// Use nc (netcat) to connect; -n skips DNS resolution to avoid
+	// systemd-resolved latency. Wait for ready file first.
 	cmd := exec.Command("/bin/sh", "-c",
-		fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; echo | nc -w2 127.0.0.1 %d > %s 2>/dev/null || echo failed > %s",
+		fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; echo | nc -n -w2 127.0.0.1 %d > %s 2>/dev/null || echo failed > %s",
 			readyFile, origPort, outputFile, outputFile))
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -1281,7 +1282,7 @@ func TestIntegration_ConnectRedirect(t *testing.T) {
 	}
 	os.WriteFile(readyFile, []byte("go"), 0644)
 
-	waitForTraceesDrained(t, tr, 5*time.Second)
+	waitForTraceesDrained(t, tr, 8*time.Second)
 	cancel()
 	<-errCh
 

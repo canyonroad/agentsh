@@ -52,6 +52,11 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	}
 	tracerFD := fds[0]
 	injectFD := fds[1]
+	// TODO: tracerFD should be kept alive in tracer state until the stub
+	// handshake/IPC is complete. Currently closed immediately because the
+	// stub communication protocol is not yet implemented. Once implemented,
+	// tracerFD must be stored in session/tracee state and closed during
+	// explicit cleanup.
 	defer syscall.Close(tracerFD)
 	defer syscall.Close(injectFD)
 

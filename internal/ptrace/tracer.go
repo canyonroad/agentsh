@@ -534,6 +534,12 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 
 	isNewProcess := childTGID != parent.TGID
 
+	// If a child-stop arrived before this parent event, a minimal state
+	// already exists and the initial SIGSTOP was already handled. Only set
+	// SuppressInitialStop when creating a brand-new state to avoid
+	// incorrectly suppressing a later real SIGSTOP.
+	existing := t.tracees[tid]
+	suppressInitial := existing == nil
 	t.tracees[tid] = &TraceeState{
 		TID:                tid,
 		TGID:               childTGID,
@@ -541,7 +547,7 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 		SessionID:          parent.SessionID,
 		Attached:           time.Now(),
 		MemFD:              -1, // opened lazily on first memory access
-		SuppressInitialStop: true, // suppress the initial SIGSTOP from auto-trace
+		SuppressInitialStop: suppressInitial,
 	}
 	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()

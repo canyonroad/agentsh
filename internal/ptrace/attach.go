@@ -136,6 +136,9 @@ func (t *Tracer) attachThread(tid int) error {
 
 func (t *Tracer) safeDetach(tid int) {
 	if err := unix.PtraceInterrupt(tid); err != nil {
+		// If interrupt fails (e.g., ESRCH), the tracee may have already
+		// exited. Try detach anyway in case it's still stopped.
+		unix.PtraceDetach(tid)
 		return
 	}
 	var status unix.WaitStatus
@@ -143,17 +146,20 @@ func (t *Tracer) safeDetach(tid int) {
 	for {
 		wpid, err := unix.Wait4(tid, &status, unix.WNOHANG|unix.WALL, nil)
 		if err != nil {
+			// Wait4 failed — try best-effort detach.
+			unix.PtraceDetach(tid)
 			return
 		}
 		if wpid == tid {
 			break
 		}
 		if time.Now().After(deadline) {
+			// Timed out waiting for stop. Try detach anyway to avoid
+			// leaving the tracee permanently ptrace-attached.
+			unix.PtraceDetach(tid)
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if status.Stopped() {
-		unix.PtraceDetach(tid)
-	}
+	unix.PtraceDetach(tid)
 }
