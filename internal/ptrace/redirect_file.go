@@ -101,11 +101,10 @@ func (t *Tracer) redirectFileImpl(ctx context.Context, tid int, regs Regs, nr in
 
 // redirectFile redirects a file syscall to a different path.
 //
-// After injectSyscall returns, the injected syscall has completed its full
-// enter+exit cycle and the original registers are restored. The tracee is
-// stopped between syscalls (not inside one). We set the return value register
-// directly so the tracee sees the injected result, clear InSyscall to keep
-// the tracer's enter/exit tracking synchronized, and resume normally.
+// Advances past the original syscall entry first, so all injections use
+// the two-phase gadget protocol from EXIT state. After the injected
+// replacement syscall completes, sets the return value directly and
+// resumes the tracee.
 func (t *Tracer) redirectFile(ctx context.Context, tid int, regs Regs, nr int, result FileResult) {
 	if result.RedirectPath == "" {
 		slog.Warn("redirectFile: no redirect path, denying", "tid", tid)
@@ -113,10 +112,20 @@ func (t *Tracer) redirectFile(ctx context.Context, tid int, regs Regs, nr int, r
 		return
 	}
 
+	savedRegs := regs.Clone()
+
+	// Advance past the original syscall entry so all injections use
+	// the gadget protocol from EXIT state.
+	if err := t.advancePastEntry(tid, savedRegs); err != nil {
+		slog.Warn("redirectFile: advance past entry failed, denying", "tid", tid, "error", err)
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
+
 	ret, err := t.redirectFileImpl(ctx, tid, regs, nr, result.RedirectPath)
 	if err != nil {
-		slog.Warn("redirectFile: failed, denying", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		slog.Warn("redirectFile: failed", "tid", tid, "error", err)
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 
@@ -125,20 +134,11 @@ func (t *Tracer) redirectFile(ctx context.Context, tid int, regs Regs, nr int, r
 	regs.SetReturnValue(ret)
 	if err := t.setRegs(tid, regs); err != nil {
 		slog.Warn("redirectFile: setRegs failed", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 
-	// Clear InSyscall: the injection consumed the original syscall's
-	// enter+exit cycle via injectSyscall's internal Wait4 calls.
-	// The tracee is now stopped between syscalls, so the next ptrace
-	// stop will be a fresh syscall-enter.
-	t.mu.Lock()
-	if s, ok := t.tracees[tid]; ok {
-		s.InSyscall = false
-	}
-	t.mu.Unlock()
-
+	// InSyscall is already false from advancePastEntry.
 	t.allowSyscall(tid)
 }
 
@@ -171,6 +171,14 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, absPath
 
 	savedRegs := regs.Clone()
 
+	// Advance past the original syscall entry so all injections use
+	// the gadget protocol from EXIT state.
+	if err := t.advancePastEntry(tid, savedRegs); err != nil {
+		slog.Warn("softDeleteFile: advance past entry failed, denying", "tid", tid, "error", err)
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
+
 	// Get TGID for scratch page.
 	t.mu.Lock()
 	state := t.tracees[tid]
@@ -182,8 +190,8 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, absPath
 
 	sp, err := t.ensureScratchPage(tid, tgid, savedRegs)
 	if err != nil {
-		slog.Warn("softDeleteFile: scratch page failed, denying", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		slog.Warn("softDeleteFile: scratch page failed", "tid", tid, "error", err)
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 
@@ -191,25 +199,25 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, absPath
 	trashDirAddr, err := sp.allocate(len(result.TrashDir) + 1)
 	if err != nil {
 		slog.Warn("softDeleteFile: scratch alloc trashDir failed", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 	if err := t.writeString(tid, trashDirAddr, result.TrashDir); err != nil {
 		slog.Warn("softDeleteFile: write trashDir failed", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 
 	mkdirRet, err := t.injectSyscall(tid, savedRegs, unix.SYS_MKDIRAT,
 		atFDCWD, trashDirAddr, 0700)
 	if err != nil {
-		slog.Warn("softDeleteFile: mkdirat injection failed, denying", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		slog.Warn("softDeleteFile: mkdirat injection failed", "tid", tid, "error", err)
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 	if mkdirRet < 0 && unix.Errno(-mkdirRet) != unix.EEXIST {
-		slog.Warn("softDeleteFile: mkdirat failed, denying", "tid", tid, "errno", unix.Errno(-mkdirRet))
-		t.denySyscall(tid, int(unix.EACCES))
+		slog.Warn("softDeleteFile: mkdirat failed", "tid", tid, "errno", unix.Errno(-mkdirRet))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 
@@ -219,24 +227,24 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, absPath
 	oldPathAddr, err := sp.allocate(len(absPath) + 1)
 	if err != nil {
 		slog.Warn("softDeleteFile: scratch alloc oldPath failed", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 	if err := t.writeString(tid, oldPathAddr, absPath); err != nil {
 		slog.Warn("softDeleteFile: write oldPath failed", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 
 	trashPathAddr, err := sp.allocate(len(trashPath) + 1)
 	if err != nil {
 		slog.Warn("softDeleteFile: scratch alloc trashPath failed", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 	if err := t.writeString(tid, trashPathAddr, trashPath); err != nil {
 		slog.Warn("softDeleteFile: write trashPath failed", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 
@@ -246,14 +254,14 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, absPath
 		atFDCWD, trashPathAddr,
 		0)
 	if err != nil {
-		slog.Warn("softDeleteFile: renameat2 injection failed, denying", "tid", tid, "error", err)
-		t.denySyscall(tid, int(unix.EACCES))
+		slog.Warn("softDeleteFile: renameat2 injection failed", "tid", tid, "error", err)
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 	if renameRet < 0 {
 		errno := unix.Errno(-renameRet)
-		slog.Warn("softDeleteFile: renameat2 failed, denying", "tid", tid, "errno", errno)
-		t.denySyscall(tid, int(unix.EACCES))
+		slog.Warn("softDeleteFile: renameat2 failed", "tid", tid, "errno", errno)
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 
@@ -264,15 +272,6 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, absPath
 		slog.Warn("softDeleteFile: setRegs failed after rename", "tid", tid, "error", err)
 	}
 
-	// Clear InSyscall: the injection consumed the original syscall's
-	// enter+exit cycle via injectSyscall's internal Wait4 calls.
-	// The tracee is now stopped between syscalls, so the next ptrace
-	// stop will be a fresh syscall-enter.
-	t.mu.Lock()
-	if s, ok := t.tracees[tid]; ok {
-		s.InSyscall = false
-	}
-	t.mu.Unlock()
-
+	// InSyscall is already false from advancePastEntry.
 	t.allowSyscall(tid)
 }

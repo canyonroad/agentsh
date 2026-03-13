@@ -325,6 +325,17 @@ func ptraceListen(tid int) {
 		uintptr(unix.PTRACE_LISTEN), uintptr(tid), 0, 0, 0, 0)
 }
 
+// resumeWithErrno resumes a tracee from EXIT/between-syscalls state,
+// making the current or previous syscall appear to return the specified errno.
+// Used in error paths after advancePastEntry or injection has consumed the
+// original entry.
+func (t *Tracer) resumeWithErrno(tid int, savedRegs Regs, errno int) {
+	errRegs := savedRegs.Clone()
+	errRegs.SetReturnValue(int64(-errno))
+	t.setRegs(tid, errRegs)
+	t.allowSyscall(tid)
+}
+
 // applyDenyFixup overwrites the syscall return value with -errno.
 func (t *Tracer) applyDenyFixup(tid int, errno int) {
 	regs, err := t.getRegs(tid)
@@ -569,19 +580,24 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 	isNewProcess := childTGID != parent.TGID
 
 	// If a child-stop arrived before this parent event, a minimal state
-	// already exists and the initial SIGSTOP was already handled. Only set
-	// SuppressInitialStop when creating a brand-new state to avoid
-	// incorrectly suppressing a later real SIGSTOP.
+	// already exists and the initial SIGSTOP was already handled. Update
+	// metadata in place to preserve runtime fields (InSyscall, MemFD, etc.).
 	existing := t.tracees[tid]
-	suppressInitial := existing == nil
-	t.tracees[tid] = &TraceeState{
-		TID:                tid,
-		TGID:               childTGID,
-		ParentPID:          parent.TGID,
-		SessionID:          parent.SessionID,
-		Attached:           time.Now(),
-		MemFD:              -1, // opened lazily on first memory access
-		SuppressInitialStop: suppressInitial,
+	if existing != nil {
+		existing.TGID = childTGID
+		existing.ParentPID = parent.TGID
+		existing.SessionID = parent.SessionID
+		existing.Attached = time.Now()
+	} else {
+		t.tracees[tid] = &TraceeState{
+			TID:                 tid,
+			TGID:                childTGID,
+			ParentPID:           parent.TGID,
+			SessionID:           parent.SessionID,
+			Attached:            time.Now(),
+			MemFD:               -1,
+			SuppressInitialStop: true,
+		}
 	}
 	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()

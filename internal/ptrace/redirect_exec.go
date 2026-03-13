@@ -47,7 +47,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		slog.Warn("redirectExec: socketpair failed", "tid", tid, "error", err)
-		t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 	tracerFD := fds[0]
@@ -63,7 +63,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	// Step 2: Inject fd into tracee via pidfd_getfd.
 	if err := t.injectFDIntoTracee(tid, savedRegs, injectFD, stubFDNum); err != nil {
 		slog.Warn("redirectExec: fd injection failed", "tid", tid, "error", err)
-		t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 
@@ -79,7 +79,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	if err != nil {
 		slog.Warn("redirectExec: read original filename failed", "tid", tid, "error", err)
 		t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-		t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 	origLen := len(origFilename) + 1
@@ -89,7 +89,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		if err := t.writeString(tid, filenamePtr, stubPath); err != nil {
 			slog.Warn("redirectExec: write stub path failed", "tid", tid, "error", err)
 			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-			t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
+			t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 			return
 		}
 	} else {
@@ -105,7 +105,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		if err != nil {
 			slog.Warn("redirectExec: scratch alloc failed", "tid", tid, "error", err)
 			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-			t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
+			t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 			return
 		}
 
@@ -113,14 +113,14 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		if err != nil {
 			slog.Warn("redirectExec: scratch page full", "tid", tid, "error", err)
 			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-			t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
+			t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 			return
 		}
 
 		if err := t.writeString(tid, scratchAddr, stubPath); err != nil {
 			slog.Warn("redirectExec: write to scratch failed", "tid", tid, "error", err)
 			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-			t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
+			t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 			return
 		}
 
@@ -142,7 +142,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	if err := t.setRegs(tid, injRegs); err != nil {
 		slog.Warn("redirectExec: setRegs failed", "tid", tid, "error", err)
 		t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-		t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 
@@ -150,7 +150,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
 		slog.Warn("redirectExec: resume to entry failed", "tid", tid, "error", err)
 		t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-		t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
+		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
 	if err := t.waitForSyscallStop(tid); err != nil {
@@ -160,7 +160,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		t.mu.Unlock()
 		if tracked {
 			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
-			t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
+			t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		}
 		return
 	}
@@ -176,15 +176,6 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	t.allowSyscall(tid)
 }
 
-// abortExecRedirect recovers from a failed exec redirect when the tracee is
-// at an EXIT stop (after advancePastEntry). It makes the original syscall
-// appear to return the specified errno and resumes the tracee.
-func (t *Tracer) abortExecRedirect(tid int, savedRegs Regs, errno int) {
-	errRegs := savedRegs.Clone()
-	errRegs.SetReturnValue(int64(-errno))
-	t.setRegs(tid, errRegs)
-	t.allowSyscall(tid)
-}
 
 // injectFDIntoTracee injects a file descriptor from the tracer into the tracee
 // at the specified fd number, using pidfd_open + pidfd_getfd + dup3.
