@@ -62,7 +62,8 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	defer syscall.Close(injectFD)
 
 	// Step 2: Inject fd into tracee via pidfd_getfd.
-	if err := t.injectFDIntoTracee(tid, savedRegs, injectFD, stubFDNum); err != nil {
+	savedFD, err := t.injectFDIntoTracee(tid, savedRegs, injectFD, stubFDNum)
+	if err != nil {
 		slog.Warn("redirectExec: fd injection failed", "tid", tid, "error", err)
 		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
@@ -79,7 +80,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	origFilename, err := t.readString(tid, filenamePtr, 4096)
 	if err != nil {
 		slog.Warn("redirectExec: read original filename failed", "tid", tid, "error", err)
-		t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
+		t.cleanupInjectedFD(tid, savedRegs, stubFDNum, savedFD)
 		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
@@ -106,7 +107,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		sp, err := t.ensureScratchPage(tid, tgid, savedRegs)
 		if err != nil {
 			slog.Warn("redirectExec: scratch alloc failed", "tid", tid, "error", err)
-			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
+			t.cleanupInjectedFD(tid, savedRegs, stubFDNum, savedFD)
 			t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 			return
 		}
@@ -114,14 +115,14 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		scratchAddr, err := sp.allocate(len(stubPath) + 1)
 		if err != nil {
 			slog.Warn("redirectExec: scratch page full", "tid", tid, "error", err)
-			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
+			t.cleanupInjectedFD(tid, savedRegs, stubFDNum, savedFD)
 			t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 			return
 		}
 
 		if err := t.writeString(tid, scratchAddr, stubPath); err != nil {
 			slog.Warn("redirectExec: write to scratch failed", "tid", tid, "error", err)
-			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
+			t.cleanupInjectedFD(tid, savedRegs, stubFDNum, savedFD)
 			t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 			return
 		}
@@ -153,7 +154,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 
 	if err := t.setRegs(tid, injRegs); err != nil {
 		slog.Warn("redirectExec: setRegs failed", "tid", tid, "error", err)
-		t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
+		t.cleanupInjectedFD(tid, savedRegs, stubFDNum, savedFD)
 		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
@@ -161,7 +162,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	// Resume → gadget's syscall instruction → execve ENTRY stop.
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
 		slog.Warn("redirectExec: resume to entry failed", "tid", tid, "error", err)
-		t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
+		t.cleanupInjectedFD(tid, savedRegs, stubFDNum, savedFD)
 		t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		return
 	}
@@ -171,7 +172,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		tracked := t.tracees[tid] != nil
 		t.mu.Unlock()
 		if tracked {
-			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
+			t.cleanupInjectedFD(tid, savedRegs, stubFDNum, savedFD)
 			t.resumeWithErrno(tid, savedRegs, int(unix.EACCES))
 		}
 		return
@@ -185,6 +186,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		// Track the injected stub fd so it can be cleaned up if the
 		// exec fails (no PTRACE_EVENT_EXEC, just an error return).
 		state.PendingExecStubFD = stubFDNum
+		state.PendingExecSavedFD = savedFD
 	}
 	t.mu.Unlock()
 
@@ -211,29 +213,50 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 
 // injectFDIntoTracee injects a file descriptor from the tracer into the tracee
 // at the specified fd number, using pidfd_open + pidfd_getfd + dup3.
-func (t *Tracer) injectFDIntoTracee(tid int, savedRegs Regs, srcFD int, dstFDNum int) error {
+// If dstFDNum was already in use, it is saved via dup and the saved fd number
+// is returned so the caller can restore it on failure. Returns -1 if the
+// destination was not previously open.
+func (t *Tracer) injectFDIntoTracee(tid int, savedRegs Regs, srcFD int, dstFDNum int) (savedFD int, err error) {
 	tracerPID := os.Getpid()
 
 	pidfd, err := t.injectSyscallRet(tid, savedRegs, unix.SYS_PIDFD_OPEN,
 		uint64(tracerPID), 0)
 	if err != nil {
-		return fmt.Errorf("pidfd_open: %w", err)
+		return -1, fmt.Errorf("pidfd_open: %w", err)
 	}
 
 	gotFD, err := t.injectSyscallRet(tid, savedRegs, unix.SYS_PIDFD_GETFD,
 		pidfd, uint64(srcFD), 0)
 	if err != nil {
 		t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, pidfd)
-		return fmt.Errorf("pidfd_getfd: %w (if EPERM, check kernel.yama.ptrace_scope sysctl)", err)
+		return -1, fmt.Errorf("pidfd_getfd: %w (if EPERM, check kernel.yama.ptrace_scope sysctl)", err)
 	}
 
+	// Check if dstFDNum is already open in the tracee. If so, save it via
+	// dup so we can restore it if the redirect fails.
+	savedFD = -1
 	if gotFD != uint64(dstFDNum) {
+		// fcntl(dstFDNum, F_GETFD) returns 0 or flags on success, -EBADF if not open.
+		ret, _ := t.injectSyscall(tid, savedRegs, unix.SYS_FCNTL,
+			uint64(dstFDNum), uint64(unix.F_GETFD))
+		if ret >= 0 {
+			// dstFDNum is open; save it via dup.
+			dupRet, dupErr := t.injectSyscallRet(tid, savedRegs, unix.SYS_DUP,
+				uint64(dstFDNum))
+			if dupErr == nil {
+				savedFD = int(dupRet)
+			}
+		}
+
 		_, err = t.injectSyscallRet(tid, savedRegs, unix.SYS_DUP3,
 			gotFD, uint64(dstFDNum), 0)
 		if err != nil {
+			if savedFD >= 0 {
+				t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, uint64(savedFD))
+			}
 			t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, gotFD)
 			t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, pidfd)
-			return fmt.Errorf("dup3: %w", err)
+			return -1, fmt.Errorf("dup3: %w", err)
 		}
 		t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, gotFD)
 	} else {
@@ -245,16 +268,24 @@ func (t *Tracer) injectFDIntoTracee(tid int, savedRegs Regs, srcFD int, dstFDNum
 		if err != nil {
 			t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, gotFD)
 			t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, pidfd)
-			return fmt.Errorf("fcntl F_SETFD: %w", err)
+			return -1, fmt.Errorf("fcntl F_SETFD: %w", err)
 		}
 	}
 
 	t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, pidfd)
 
-	return nil
+	return savedFD, nil
 }
 
-// cleanupInjectedFD closes a previously injected fd in the tracee.
-func (t *Tracer) cleanupInjectedFD(tid int, savedRegs Regs, fdNum int) {
-	t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, uint64(fdNum))
+// cleanupInjectedFD closes a previously injected fd in the tracee and restores
+// any saved fd that was displaced.
+func (t *Tracer) cleanupInjectedFD(tid int, savedRegs Regs, fdNum int, savedFD int) {
+	if savedFD >= 0 {
+		// Restore the original fd by dup3-ing the saved copy back.
+		t.injectSyscall(tid, savedRegs, unix.SYS_DUP3,
+			uint64(savedFD), uint64(fdNum), 0)
+		t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, uint64(savedFD))
+	} else {
+		t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, uint64(fdNum))
+	}
 }

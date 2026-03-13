@@ -147,8 +147,9 @@ type TraceeState struct {
 	PendingInterrupt      bool
 	IsVforkChild     bool
 	SuppressInitialStop bool // suppress initial SIGSTOP from auto-trace
-	PendingExecStubFD int  // fd injected for exec redirect; cleaned up on exec failure (-1 = none)
-	MemFD            int
+	PendingExecStubFD  int // fd injected for exec redirect; cleaned up on exec failure (-1 = none)
+	PendingExecSavedFD int // fd that was displaced by stub fd; restored on exec failure (-1 = none)
+	MemFD              int
 }
 
 type resumeRequest struct {
@@ -441,10 +442,11 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 					t.mu.Lock()
 					if _, exists := t.tracees[tid]; !exists {
 						t.tracees[tid] = &TraceeState{
-							TID:               tid,
-							TGID:              childTGID,
-							MemFD:             -1,
-							PendingExecStubFD: -1,
+							TID:                tid,
+							TGID:               childTGID,
+							MemFD:              -1,
+							PendingExecStubFD:  -1,
+							PendingExecSavedFD: -1,
 						}
 						t.metrics.SetTraceeCount(len(t.tracees))
 					}
@@ -497,6 +499,7 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 	hasPendingReturn := false
 	var pendingReturnOverride int64
 	pendingExecStubFD := -1
+	pendingExecSavedFD := -1
 	if !entering {
 		pendingErrno = state.PendingDenyErrno
 		state.PendingDenyErrno = 0
@@ -507,7 +510,9 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		state.HasPendingReturn = false
 		state.PendingReturnOverride = 0
 		pendingExecStubFD = state.PendingExecStubFD
+		pendingExecSavedFD = state.PendingExecSavedFD
 		state.PendingExecStubFD = -1
+		state.PendingExecSavedFD = -1
 	}
 	t.mu.Unlock()
 
@@ -543,7 +548,7 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 			regs, err := t.getRegs(tid)
 			if err == nil && regs.ReturnValue() < 0 {
 				savedRegs := regs.Clone()
-				t.cleanupInjectedFD(tid, savedRegs, pendingExecStubFD)
+				t.cleanupInjectedFD(tid, savedRegs, pendingExecStubFD, pendingExecSavedFD)
 			}
 		}
 
@@ -635,6 +640,7 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 			Attached:            time.Now(),
 			MemFD:               -1,
 			PendingExecStubFD:   -1,
+			PendingExecSavedFD:  -1,
 			SuppressInitialStop: true,
 		}
 	}
@@ -668,7 +674,9 @@ func (t *Tracer) handleExecEvent(tid int) {
 	state.IsVforkChild = false
 	// Exec succeeded: the stub fd is now inherited by the new process.
 	// Clear PendingExecStubFD so the exit handler doesn't try to clean it up.
+	// The saved fd (if any) was also replaced by exec; discard it.
 	state.PendingExecStubFD = -1
+	state.PendingExecSavedFD = -1
 	// Keep InSyscall = true: the PTRACE_EVENT_EXEC fires between the
 	// execve's syscall-enter and syscall-exit. The next SIGTRAP|0x80
 	// stop will be the execve exit; by leaving InSyscall true, the
@@ -774,10 +782,11 @@ func (t *Tracer) handleEventStop(tid int) {
 		t.mu.Lock()
 		if _, exists := t.tracees[tid]; !exists {
 			t.tracees[tid] = &TraceeState{
-				TID:               tid,
-				TGID:              childTGID,
-				MemFD:             -1,
-				PendingExecStubFD: -1,
+				TID:                tid,
+				TGID:               childTGID,
+				MemFD:              -1,
+				PendingExecStubFD:  -1,
+				PendingExecSavedFD: -1,
 			}
 			t.metrics.SetTraceeCount(len(t.tracees))
 		}
