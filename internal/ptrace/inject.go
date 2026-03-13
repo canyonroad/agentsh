@@ -121,7 +121,11 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 		}
 
 		// Non-TRACESYSGOOD mode: plain SIGTRAP with no ptrace event
-		// is a syscall stop.
+		// is a syscall stop. In theory a real SIGTRAP signal delivery
+		// could match this pattern, but during the brief injection
+		// window (two syscall stops) this is extremely unlikely.
+		// The alternative (PTRACE_GETSIGINFO si_code check) adds
+		// complexity with minimal practical benefit.
 		if sig == unix.SIGTRAP && status.TrapCause() == 0 {
 			return nil
 		}
