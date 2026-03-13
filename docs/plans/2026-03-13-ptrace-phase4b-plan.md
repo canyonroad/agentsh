@@ -4,7 +4,7 @@
 
 **Goal:** Add DNS redirect, SNI rewrite, and TracerPid masking to the ptrace backend.
 
-**Architecture:** In-process DNS proxy goroutine receives redirected DNS traffic via Phase 4a's connect redirect. SNI rewrite intercepts `write`/`sendto`/`sendmsg` on TLS-watched fds and patches ClientHello in tracee memory. TracerPid masking patches `/proc/*/status` reads on syscall-exit. All three features share a per-TGID fd tracker for lifecycle management.
+**Architecture:** In-process DNS proxy goroutine receives redirected DNS traffic via both connect redirect (Phase 4a) and sendto/sendmsg destination rewriting. SNI rewrite intercepts `write`/`sendto`/`sendmsg` on TLS-watched fds and patches ClientHello in tracee memory. TracerPid masking patches `/proc/*/status` reads on syscall-exit. All three features share a per-TGID fd tracker for lifecycle management.
 
 **Tech Stack:** Go, `golang.org/x/sys/unix`, `golang.org/x/net/dns/dnsmessage` (DNS wire format)
 
@@ -347,17 +347,17 @@ func TestFdTracker_CloseFd(t *testing.T) {
 func TestFdTracker_DNSMapping(t *testing.T) {
 	ft := newFdTracker()
 
-	ft.recordDNSRedirect(12345, 100, "session1", "8.8.8.8:53")
-	info, ok := ft.getDNSRedirect(12345)
+	ft.recordDNSRedirect(100, 5, 100, "session1", "8.8.8.8:53") // tgid=100, fd=5
+	info, ok := ft.getDNSRedirect(100, 5)
 	if !ok {
-		t.Fatal("expected DNS redirect info for source port 12345")
+		t.Fatal("expected DNS redirect info for tgid=100 fd=5")
 	}
 	if info.pid != 100 || info.sessionID != "session1" || info.originalResolver != "8.8.8.8:53" {
 		t.Fatalf("unexpected DNS redirect info: %+v", info)
 	}
 
-	ft.removeDNSRedirect(12345)
-	if _, ok := ft.getDNSRedirect(12345); ok {
+	ft.removeDNSRedirect(100, 5)
+	if _, ok := ft.getDNSRedirect(100, 5); ok {
 		t.Fatal("DNS redirect should be removed")
 	}
 }
@@ -411,8 +411,8 @@ type fdTracker struct {
 	// Masked /proc/*/status fds: tgid+fd → tracked
 	statusFds map[tgidFd]struct{}
 
-	// DNS redirect: source port → redirect info (for proxy PID lookup)
-	dnsRedirects map[int]dnsRedirectInfo
+	// DNS redirect: tgid+fd → redirect info (for proxy PID lookup)
+	dnsRedirects map[tgidFd]dnsRedirectInfo
 
 	// IP → domain mapping (populated by DNS proxy on resolution)
 	ipToDomain map[string]string
@@ -422,7 +422,7 @@ func newFdTracker() *fdTracker {
 	return &fdTracker{
 		tlsWatched:   make(map[tgidFd]string),
 		statusFds:    make(map[tgidFd]struct{}),
-		dnsRedirects: make(map[int]dnsRedirectInfo),
+		dnsRedirects: make(map[tgidFd]dnsRedirectInfo),
 		ipToDomain:   make(map[string]string),
 	}
 }
@@ -485,12 +485,17 @@ func (ft *fdTracker) clearTGID(tgid int) {
 			delete(ft.statusFds, k)
 		}
 	}
+	for k := range ft.dnsRedirects {
+		if k.tgid == tgid {
+			delete(ft.dnsRedirects, k)
+		}
+	}
 	ft.mu.Unlock()
 }
 
-func (ft *fdTracker) recordDNSRedirect(srcPort, pid int, sessionID, originalResolver string) {
+func (ft *fdTracker) recordDNSRedirect(tgid, fd, pid int, sessionID, originalResolver string) {
 	ft.mu.Lock()
-	ft.dnsRedirects[srcPort] = dnsRedirectInfo{
+	ft.dnsRedirects[tgidFd{tgid, fd}] = dnsRedirectInfo{
 		pid:              pid,
 		sessionID:        sessionID,
 		originalResolver: originalResolver,
@@ -498,16 +503,16 @@ func (ft *fdTracker) recordDNSRedirect(srcPort, pid int, sessionID, originalReso
 	ft.mu.Unlock()
 }
 
-func (ft *fdTracker) getDNSRedirect(srcPort int) (dnsRedirectInfo, bool) {
+func (ft *fdTracker) getDNSRedirect(tgid, fd int) (dnsRedirectInfo, bool) {
 	ft.mu.Lock()
-	info, ok := ft.dnsRedirects[srcPort]
+	info, ok := ft.dnsRedirects[tgidFd{tgid, fd}]
 	ft.mu.Unlock()
 	return info, ok
 }
 
-func (ft *fdTracker) removeDNSRedirect(srcPort int) {
+func (ft *fdTracker) removeDNSRedirect(tgid, fd int) {
 	ft.mu.Lock()
-	delete(ft.dnsRedirects, srcPort)
+	delete(ft.dnsRedirects, tgidFd{tgid, fd})
 	ft.mu.Unlock()
 }
 
@@ -1016,19 +1021,15 @@ func TestDNSProxy_Allow(t *testing.T) {
 	defer cancel()
 	go proxy.run(ctx)
 
-	// Register the source port mapping so proxy knows the original resolver
-	ft.recordDNSRedirect(0, 1, "test", upstream.LocalAddr().String())
+	// Register the original resolver so proxy knows where to forward
+	ft.recordDNSRedirect(1, 0, 1, "test", upstream.LocalAddr().String())
 
 	// Send query to proxy
-	conn, err := net.Dial("udp", proxy.addr())
+	conn, err := net.Dial("udp", proxy.addr4())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-
-	// Record source port for DNS redirect lookup
-	localPort := conn.LocalAddr().(*net.UDPAddr).Port
-	ft.recordDNSRedirect(localPort, 1, "test", upstream.LocalAddr().String())
 
 	query := buildDNSQuery(t, "example.com", dnsmessage.TypeA)
 	conn.Write(query)
@@ -1065,14 +1066,11 @@ func TestDNSProxy_Deny(t *testing.T) {
 	defer cancel()
 	go proxy.run(ctx)
 
-	conn, err := net.Dial("udp", proxy.addr())
+	conn, err := net.Dial("udp", proxy.addr4())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-
-	localPort := conn.LocalAddr().(*net.UDPAddr).Port
-	ft.recordDNSRedirect(localPort, 1, "test", "8.8.8.8:53")
 
 	query := buildDNSQuery(t, "blocked.example.com", dnsmessage.TypeA)
 	conn.Write(query)
@@ -1111,14 +1109,11 @@ func TestDNSProxy_SyntheticRecords(t *testing.T) {
 	defer cancel()
 	go proxy.run(ctx)
 
-	conn, err := net.Dial("udp", proxy.addr())
+	conn, err := net.Dial("udp", proxy.addr4())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-
-	localPort := conn.LocalAddr().(*net.UDPAddr).Port
-	ft.recordDNSRedirect(localPort, 1, "test", "8.8.8.8:53")
 
 	query := buildDNSQuery(t, "api.example.com", dnsmessage.TypeA)
 	conn.Write(query)
@@ -1173,44 +1168,73 @@ import (
 // dnsProxy is an in-process DNS proxy that intercepts DNS queries
 // and applies policy via the NetworkHandler.
 type dnsProxy struct {
-	handler NetworkHandler
-	fds     *fdTracker
-	udpConn *net.UDPConn
-	port    int
+	handler   NetworkHandler
+	fds       *fdTracker
+	udpConn4  *net.UDPConn // IPv4 listener
+	udpConn6  *net.UDPConn // IPv6 listener
+	port4     int
+	port6     int
 }
 
 func newDNSProxy(handler NetworkHandler, fds *fdTracker) (*dnsProxy, error) {
-	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	// Bind IPv4
+	udpAddr4, err := net.ResolveUDPAddr("udp4", "127.0.0.1:0")
 	if err != nil {
-		return nil, fmt.Errorf("resolve UDP addr: %w", err)
+		return nil, fmt.Errorf("resolve UDP4 addr: %w", err)
 	}
-	conn, err := net.ListenUDP("udp", udpAddr)
+	conn4, err := net.ListenUDP("udp4", udpAddr4)
 	if err != nil {
-		return nil, fmt.Errorf("listen UDP: %w", err)
+		return nil, fmt.Errorf("listen UDP4: %w", err)
 	}
-	port := conn.LocalAddr().(*net.UDPAddr).Port
+	port4 := conn4.LocalAddr().(*net.UDPAddr).Port
+
+	// Bind IPv6
+	udpAddr6, err := net.ResolveUDPAddr("udp6", "[::1]:0")
+	if err != nil {
+		conn4.Close()
+		return nil, fmt.Errorf("resolve UDP6 addr: %w", err)
+	}
+	conn6, err := net.ListenUDP("udp6", udpAddr6)
+	if err != nil {
+		conn4.Close()
+		return nil, fmt.Errorf("listen UDP6: %w", err)
+	}
+	port6 := conn6.LocalAddr().(*net.UDPAddr).Port
 
 	return &dnsProxy{
-		handler: handler,
-		fds:     fds,
-		udpConn: conn,
-		port:    port,
+		handler:  handler,
+		fds:      fds,
+		udpConn4: conn4,
+		udpConn6: conn6,
+		port4:    port4,
+		port6:    port6,
 	}, nil
 }
 
-func (p *dnsProxy) addr() string {
-	return fmt.Sprintf("127.0.0.1:%d", p.port)
+func (p *dnsProxy) addr4() string {
+	return fmt.Sprintf("127.0.0.1:%d", p.port4)
+}
+
+func (p *dnsProxy) addr6() string {
+	return fmt.Sprintf("[::1]:%d", p.port6)
 }
 
 func (p *dnsProxy) run(ctx context.Context) {
 	go func() {
 		<-ctx.Done()
-		p.udpConn.Close()
+		p.udpConn4.Close()
+		p.udpConn6.Close()
 	}()
 
+	// Run IPv4 and IPv6 listeners concurrently
+	go p.listenUDP(ctx, p.udpConn4)
+	p.listenUDP(ctx, p.udpConn6)
+}
+
+func (p *dnsProxy) listenUDP(ctx context.Context, conn *net.UDPConn) {
 	buf := make([]byte, 4096)
 	for {
-		n, remoteAddr, err := p.udpConn.ReadFromUDP(buf)
+		n, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -1218,11 +1242,11 @@ func (p *dnsProxy) run(ctx context.Context) {
 			slog.Warn("dns_proxy: read error", "error", err)
 			continue
 		}
-		go p.handleQuery(ctx, buf[:n], remoteAddr)
+		go p.handleQuery(ctx, conn, buf[:n], remoteAddr)
 	}
 }
 
-func (p *dnsProxy) handleQuery(ctx context.Context, raw []byte, remoteAddr *net.UDPAddr) {
+func (p *dnsProxy) handleQuery(ctx context.Context, conn *net.UDPConn, raw []byte, remoteAddr *net.UDPAddr) {
 	var msg dnsmessage.Message
 	if err := msg.Unpack(raw); err != nil {
 		slog.Warn("dns_proxy: failed to parse DNS query", "error", err)
@@ -1236,13 +1260,16 @@ func (p *dnsProxy) handleQuery(ctx context.Context, raw []byte, remoteAddr *net.
 	q := msg.Questions[0]
 	domain := strings.TrimSuffix(q.Name.String(), ".")
 
-	// Look up tracee info from source port
-	srcPort := remoteAddr.Port
-	redirectInfo, ok := p.fds.getDNSRedirect(srcPort)
-	if !ok {
-		// Unknown source — still process but without PID context
-		redirectInfo = dnsRedirectInfo{}
-	}
+	// Look up tracee info — the proxy receives queries from redirected connections.
+	// The fd tracker stores TGID+fd → redirect info. For UDP, the proxy can't
+	// directly resolve the source to a TGID. The tracer records the redirect info
+	// keyed by TGID+fd before allowing the syscall, and passes it via a
+	// per-query context channel or connection metadata. For simplicity in this
+	// initial implementation, we use a fallback: if no specific mapping is found,
+	// the proxy still processes the query but without PID attribution.
+	var redirectInfo dnsRedirectInfo
+	// TODO: The tracer should pass TGID+fd context to the proxy at redirect time.
+	// For now, use empty info — policy can still make domain-based decisions.
 
 	// Query policy
 	result := p.handler.HandleNetwork(ctx, NetworkContext{
@@ -1286,7 +1313,7 @@ func (p *dnsProxy) handleQuery(ctx context.Context, raw []byte, remoteAddr *net.
 	// Record IP→domain mappings from response for SNI rewrite
 	p.recordResolutions(resp, domain)
 
-	p.udpConn.WriteToUDP(resp, remoteAddr)
+	conn.WriteToUDP(resp, remoteAddr)
 }
 
 func (p *dnsProxy) buildNXDomain(query dnsmessage.Message) ([]byte, error) {
@@ -1909,7 +1936,7 @@ if t.cfg.TraceNetwork && t.cfg.NetworkHandler != nil {
 	} else {
 		t.dnsProxy = proxy
 		go t.dnsProxy.run(ctx)
-		slog.Info("ptrace: DNS proxy started", "addr", t.dnsProxy.addr())
+		slog.Info("ptrace: DNS proxy started", "addr4", t.dnsProxy.addr4(), "addr6", t.dnsProxy.addr6())
 	}
 }
 ```
@@ -2081,14 +2108,11 @@ func (t *Tracer) handleConnectExit(tid int, regs Regs) {
 In `internal/ptrace/handle_network.go`, in the `handleNetwork` method, after parsing the sockaddr and before calling the handler, add DNS redirect logic:
 
 ```go
-// DNS redirect: if connecting to port 53 or 853, redirect to local DNS proxy
-if t.dnsProxy != nil && (port == 53 || port == 853) &&
+// DNS redirect: if connecting to port 53, redirect to local DNS proxy
+if t.dnsProxy != nil && port == 53 &&
 	(family == unix.AF_INET || family == unix.AF_INET6) &&
 	nr == unix.SYS_CONNECT {
 
-	// Record the redirect for PID tracking
-	// Source port will be determined by the kernel; we use the fd to track later.
-	// For now, record using the original resolver address.
 	originalResolver := fmt.Sprintf("%s:%d", address, port)
 
 	t.mu.Lock()
@@ -2101,28 +2125,35 @@ if t.dnsProxy != nil && (port == 53 || port == 853) &&
 	}
 	t.mu.Unlock()
 
-	// Rewrite sockaddr to point to DNS proxy
-	proxyAddr := t.dnsProxy.addr() // "127.0.0.1:<port>"
-	newSockaddr := buildSockaddrIn4(net.ParseIP("127.0.0.1").To4(), t.dnsProxy.port)
+	fd := int(int32(regs.Arg(0)))
+
+	// Rewrite sockaddr to point to DNS proxy, preserving address family
+	var newSockaddr []byte
+	if family == unix.AF_INET {
+		newSockaddr = buildSockaddrIn4(net.ParseIP("127.0.0.1").To4(), t.dnsProxy.port4)
+	} else {
+		newSockaddr = buildSockaddrIn6(net.ParseIP("::1"), t.dnsProxy.port6)
+		// Update addrlen register for larger sockaddr_in6
+		regs.SetArg(2, 28)
+		if err := t.setRegs(tid, regs); err != nil {
+			slog.Warn("handleNetwork: DNS redirect setRegs failed", "tid", tid, "error", err)
+		}
+	}
 	if err := t.writeBytes(tid, addrPtr, newSockaddr); err != nil {
 		slog.Warn("handleNetwork: DNS redirect write failed", "tid", tid, "error", err)
 		t.denySyscall(tid, int(unix.EACCES))
 		return
 	}
 
-	// We'll record the DNS redirect info once we know the source port
-	// (after connect completes). For now, store on the TraceeState.
-	// TODO: record srcPort→PID mapping after connect-exit
-	_ = originalResolver
-	_ = tgid
-	_ = sessionID
+	// Record redirect info keyed by TGID+fd for proxy PID attribution
+	t.fds.recordDNSRedirect(tgid, fd, tgid, sessionID, originalResolver)
 
 	t.allowSyscall(tid)
 	return
 }
 ```
 
-Add helper to build sockaddr_in:
+Add helpers to build sockaddr:
 
 ```go
 // buildSockaddrIn4 builds a raw sockaddr_in for IPv4.
@@ -2133,27 +2164,50 @@ func buildSockaddrIn4(ip net.IP, port int) []byte {
 	copy(buf[4:8], ip.To4())
 	return buf
 }
+
+// buildSockaddrIn6 builds a raw sockaddr_in6 for IPv6.
+func buildSockaddrIn6(ip net.IP, port int) []byte {
+	buf := make([]byte, 28) // sizeof(sockaddr_in6)
+	binary.NativeEndian.PutUint16(buf[0:2], unix.AF_INET6)
+	binary.BigEndian.PutUint16(buf[2:4], uint16(port))
+	// flow info at bytes 4-7 = 0
+	copy(buf[8:24], ip.To16())
+	// scope_id at bytes 24-27 = 0
+	return buf
+}
 ```
 
-**Step 8: Add SNI rewrite for sendto in handleNetwork**
+**Step 8: Add sendto/sendmsg DNS redirect in handleNetwork**
 
-In `handleNetwork`, add handling for `SYS_SENDTO` on TLS-watched fds (before the existing connect/bind check):
+For unconnected UDP DNS (sendto with destination port 53), rewrite the destination address:
 
 ```go
-// SNI rewrite: check if sendto is on a TLS-watched fd
-if nr == unix.SYS_SENDTO && t.fds != nil {
-	fd := int(int32(regs.Arg(0)))
-	t.mu.Lock()
-	state := t.tracees[tid]
-	var tgid int
-	if state != nil {
-		tgid = state.TGID
-	}
-	t.mu.Unlock()
+// Sendto DNS redirect: if sendto targets port 53, rewrite destination to proxy
+if t.dnsProxy != nil && nr == unix.SYS_SENDTO {
+	destAddrPtr := regs.Arg(4) // sendto arg4 = dest_addr
+	destAddrLen := int(regs.Arg(5)) // sendto arg5 = addrlen
+	if destAddrPtr != 0 && destAddrLen > 0 && destAddrLen <= 128 {
+		destBuf := make([]byte, destAddrLen)
+		if err := t.readBytes(tid, destAddrPtr, destBuf); err == nil {
+			destFamily, _, destPort, err := parseSockaddr(destBuf)
+			if err == nil && destPort == 53 &&
+				(destFamily == unix.AF_INET || destFamily == unix.AF_INET6) {
 
-	if _, watched := t.fds.getTLSWatch(tgid, fd); watched {
-		t.handleWrite(ctx, tid, regs) // reuse write handler for SNI
-		return
+				// Rewrite destination to DNS proxy
+				var newDest []byte
+				if destFamily == unix.AF_INET {
+					newDest = buildSockaddrIn4(net.ParseIP("127.0.0.1").To4(), t.dnsProxy.port4)
+				} else {
+					newDest = buildSockaddrIn6(net.ParseIP("::1"), t.dnsProxy.port6)
+					regs.SetArg(5, 28) // update addrlen
+					t.setRegs(tid, regs)
+				}
+				if err := t.writeBytes(tid, destAddrPtr, newDest); err == nil {
+					t.allowSyscall(tid)
+					return
+				}
+			}
+		}
 	}
 }
 ```
