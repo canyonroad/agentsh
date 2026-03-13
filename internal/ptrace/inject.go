@@ -207,7 +207,13 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 			return nil
 		}
 
-		// Ptrace event stops (fork, clone, exec, seccomp, etc.) report
+		// PTRACE_EVENT_SECCOMP is a syscall-entry-equivalent stop.
+		// Treat it as a syscall stop to keep injection phases in sync.
+		if sig == unix.SIGTRAP && status.TrapCause() == unix.PTRACE_EVENT_SECCOMP {
+			return nil
+		}
+
+		// Other ptrace event stops (fork, clone, exec, etc.) report
 		// SIGTRAP with a non-zero TrapCause. Resume with signal 0.
 		if sig == unix.SIGTRAP && status.TrapCause() != 0 {
 			if err := unix.PtraceSyscall(tid, 0); err != nil {

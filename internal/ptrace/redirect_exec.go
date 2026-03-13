@@ -205,7 +205,7 @@ func (t *Tracer) injectFDIntoTracee(tid int, savedRegs Regs, srcFD int, dstFDNum
 		pidfd, uint64(srcFD), 0)
 	if err != nil {
 		t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, pidfd)
-		return fmt.Errorf("pidfd_getfd: %w", err)
+		return fmt.Errorf("pidfd_getfd: %w (if EPERM, check kernel.yama.ptrace_scope sysctl)", err)
 	}
 
 	if gotFD != uint64(dstFDNum) {
