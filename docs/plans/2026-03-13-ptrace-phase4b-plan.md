@@ -4,7 +4,7 @@
 
 **Goal:** Add DNS redirect, SNI rewrite, and TracerPid masking to the ptrace backend.
 
-**Architecture:** In-process DNS proxy goroutine receives redirected DNS traffic via both connect redirect (Phase 4a) and sendto/sendmsg destination rewriting. SNI rewrite intercepts `write`/`sendto`/`sendmsg` on TLS-watched fds and patches ClientHello in tracee memory. TracerPid masking patches `/proc/*/status` reads on syscall-exit. All three features share a per-TGID fd tracker for lifecycle management.
+**Architecture:** In-process DNS proxy goroutine receives redirected DNS traffic via both connect redirect (Phase 4a) and sendto destination rewriting. SNI rewrite intercepts `write` (and `sendto` via handleNetwork) on TLS-watched fds and patches ClientHello in tracee memory. TracerPid masking patches `/proc/*/status` reads on syscall-exit. All three features share a per-TGID fd tracker for lifecycle management.
 
 **Tech Stack:** Go, `golang.org/x/sys/unix`, `golang.org/x/net/dns/dnsmessage` (DNS wire format)
 
@@ -367,6 +367,26 @@ func TestFdTracker_IPToDomain(t *testing.T) {
 	ft.recordDNSResolution("93.184.216.34", "example.com")
 	if domain, ok := ft.domainForIP("93.184.216.34"); !ok || domain != "example.com" {
 		t.Fatalf("expected domain mapping, got ok=%v domain=%q", ok, domain)
+	}
+}
+
+func TestFdTracker_NoWatchOnEmptyDomain(t *testing.T) {
+	ft := newFdTracker()
+
+	// domainForIP returns empty when IP has no DNS resolution recorded
+	domain, ok := ft.domainForIP("192.168.1.1")
+	if ok || domain != "" {
+		t.Fatalf("expected no domain for unknown IP, got ok=%v domain=%q", ok, domain)
+	}
+
+	// Simulate the guard in handleConnectExit: only watch if domain is non-empty
+	if ok && domain != "" {
+		ft.watchTLS(100, 5, domain)
+	}
+
+	// Verify no TLS watch was armed
+	if _, watched := ft.getTLSWatch(100, 5); watched {
+		t.Fatal("TLS watch should not be armed for unknown domain")
 	}
 }
 ```
@@ -1508,7 +1528,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// handleWrite intercepts write/sendmsg for SNI rewrite on TLS-watched fds.
+// handleWrite intercepts write for SNI rewrite on TLS-watched fds.
 func (t *Tracer) handleWrite(ctx context.Context, tid int, regs Regs) {
 	if t.fds == nil {
 		t.allowSyscall(tid)
@@ -2179,7 +2199,7 @@ func buildSockaddrIn6(ip net.IP, port int) []byte {
 }
 ```
 
-**Step 8: Add sendto/sendmsg DNS redirect in handleNetwork**
+**Step 8: Add sendto DNS redirect in handleNetwork**
 
 For unconnected UDP DNS (sendto with destination port 53), rewrite the destination address:
 
