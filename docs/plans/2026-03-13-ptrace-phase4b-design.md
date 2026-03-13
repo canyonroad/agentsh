@@ -76,13 +76,15 @@ Starts when the tracer starts (if `TraceNetwork` is enabled). Stops when the tra
 
 ### Fd Tracking
 
-When a `connect` syscall completes successfully (syscall-exit, return value 0) and the destination port is 443 or 853, the tracer adds the fd to a per-TGID `tlsWatchedFds` set. The entry stores the destination domain — known from the prior DNS resolution (the DNS proxy's PID tracking maps IP back to the domain that resolved to it).
+When a `connect` syscall completes successfully (syscall-exit, return value 0) and the destination port is 443 or 853, the tracer looks up the destination IP in the DNS resolution cache (`domainForIP`). If a non-empty domain is found, the fd is added to a per-TGID `tlsWatchedFds` set with that domain. If no domain is known (IP was hardcoded, or DNS resolution happened before attach), the fd is **not** watched — this avoids rewriting SNI to an empty string.
 
 Cleared on `close(fd)`, `dup2` over the fd, and `exec` (fd table reset).
 
 ### Write Interception
 
-`SYS_WRITE`, `SYS_SENDTO`, and `SYS_SENDMSG` are added to syscall dispatch. On syscall-enter, check if the fd (arg0) is in `tlsWatchedFds`. If not, allow immediately — near-zero overhead for non-TLS writes.
+`SYS_WRITE` is added to syscall dispatch for SNI rewrite. `SYS_SENDTO` is already in `isNetworkSyscall` and checked for TLS fd watching there. On syscall-enter, check if the fd (arg0) is in `tlsWatchedFds`. If not, allow immediately — near-zero overhead for non-TLS writes.
+
+`SYS_SENDMSG` is **not** handled for SNI rewrite — its arg layout differs (`arg1=msghdr*`, `arg2=flags`) and TLS writes over sendmsg are rare in practice. If needed later, dedicated msghdr/iovec parsing can be added.
 
 If the fd is watched:
 
@@ -116,7 +118,7 @@ All are at known offsets once parsed. The tracer writes the corrected lengths ba
 | Partial write (buffer split across syscalls) | Only inspect first write per fd; if header incomplete, remove from watch and allow |
 | TLS 1.3 with encrypted ClientHello (ECH) | SNI not visible — allow, can't rewrite |
 | Non-TLS traffic on port 443 (HTTP, WebSocket upgrade) | First bytes won't match TLS record header — allow |
-| `sendmsg` with scatter/gather iovec | Read first iovec only; if too small for header, allow |
+| `sendmsg` with scatter/gather iovec | Not handled for SNI rewrite — different arg layout (`msghdr*`, not buf+len) |
 
 ## 3. TracerPid Masking
 
@@ -205,10 +207,12 @@ type TracerConfig struct {
 ### New Classifications
 
 ```
-isWriteSyscall(nr):  SYS_WRITE, SYS_SENDTO, SYS_SENDMSG
+isWriteSyscall(nr):  SYS_WRITE
 isReadSyscall(nr):   SYS_READ, SYS_PREAD64
 isCloseSyscall(nr):  SYS_CLOSE
 ```
+
+Note: `SYS_SENDTO` remains in `isNetworkSyscall` — the handler checks for both DNS redirect (destination port 53) and TLS fd watching (SNI rewrite). `SYS_SENDMSG` is not intercepted for SNI rewrite due to incompatible arg layout.
 
 ### Updated Dispatch
 
@@ -284,7 +288,7 @@ All runnable via `docker run --cap-add SYS_PTRACE`.
 | `internal/ptrace/dns_proxy_test.go` | Create | Unit tests for DNS parsing/response building |
 | `internal/ptrace/sni.go` | Create | ClientHello parser, SNI extraction and rewrite logic |
 | `internal/ptrace/sni_test.go` | Create | Unit tests for TLS parsing |
-| `internal/ptrace/handle_write.go` | Create | Write/sendto/sendmsg handler — TLS fd check, SNI rewrite dispatch |
+| `internal/ptrace/handle_write.go` | Create | Write syscall handler — TLS fd check, SNI rewrite dispatch |
 | `internal/ptrace/handle_read.go` | Create | Read/pread64 handler — TracerPid masking on syscall-exit |
 | `internal/ptrace/handle_close.go` | Create | Close handler — fd tracking cleanup |
 | `internal/ptrace/fd_tracker.go` | Create | Per-TGID fd tracking for TLS-watched fds and masked status fds |
@@ -302,3 +306,10 @@ All runnable via `docker run --cap-add SYS_PTRACE`.
 - `PTRACE_TRACEME` detection masking
 - Encrypted ClientHello (ECH) rewrite — not feasible without TLS proxy
 - Multi-resolver chaining (single upstream per redirect)
+
+## 9. Known Limitations
+
+- **Unconnected UDP DNS response source address**: When `sendto` DNS traffic is redirected, `recvfrom` returns the proxy's address (127.0.0.1/::1) as the source instead of the original resolver. DNS clients that validate response source address may reject the reply. In practice, glibc uses connected sockets and musl doesn't validate source, so this is unlikely to cause issues. If needed, a `recvfrom` exit-time source address rewrite can be added later.
+- **Single resolver per fd for unconnected UDP DNS**: The `{TGID, fd}` key stores one `originalResolver` per socket. If a process sends to multiple resolvers on the same unconnected socket concurrently, the mapping may be stale. In practice DNS clients use one resolver per socket.
+- **SYS_SENDMSG not handled for SNI rewrite**: The `sendmsg` syscall has a different argument layout (`arg1=msghdr*`, `arg2=flags`) than `write`/`sendto`. TLS writes via `sendmsg` are rare; dedicated msghdr/iovec parsing can be added if needed.
+- **TLS watch requires prior DNS resolution**: Connections to hardcoded IPs (no DNS lookup) or IPs resolved before tracer attachment will not have domain→IP mappings, so TLS fd watching and SNI rewrite will not activate for those connections.

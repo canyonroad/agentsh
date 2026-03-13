@@ -180,7 +180,6 @@ func TestIsWriteSyscall(t *testing.T) {
 		want bool
 	}{
 		{unix.SYS_WRITE, true},
-		{unix.SYS_SENDMSG, true},
 		{unix.SYS_READ, false},
 		{unix.SYS_OPENAT, false},
 	}
@@ -228,7 +227,7 @@ Add to `internal/ptrace/syscalls.go` after the existing classification functions
 
 ```go
 func isWriteSyscall(nr int) bool {
-	return nr == unix.SYS_WRITE || nr == unix.SYS_SENDMSG
+	return nr == unix.SYS_WRITE
 }
 
 func isReadSyscall(nr int) bool {
@@ -244,12 +243,12 @@ Also update `tracedSyscallNumbers()` to include the new syscalls:
 
 ```go
 // Add to the nums slice in tracedSyscallNumbers():
-unix.SYS_WRITE, unix.SYS_SENDMSG,
+unix.SYS_WRITE,
 unix.SYS_READ, unix.SYS_PREAD64,
 unix.SYS_CLOSE,
 ```
 
-Note: `SYS_SENDTO` is already in `isNetworkSyscall` and `tracedSyscallNumbers()`. The SNI check for sendto will be handled inside `handleNetwork()`.
+Note: `SYS_SENDTO` is already in `isNetworkSyscall` and `tracedSyscallNumbers()`. The SNI check for sendto is handled inside `handleNetwork()`. `SYS_SENDMSG` is intentionally excluded from SNI rewrite — its arg layout (`arg1=msghdr*`, `arg2=flags`) is incompatible with the write handler's `arg1=buf, arg2=len` assumption.
 
 **Step 4: Run test to verify it passes**
 
@@ -1455,7 +1454,7 @@ git commit -m "feat(ptrace): add in-process DNS proxy with policy integration"
 **Files:**
 - Create: `internal/ptrace/handle_write.go`
 
-This handler intercepts `SYS_WRITE` and `SYS_SENDMSG` on TLS-watched fds. It reads the write buffer from tracee memory, checks for ClientHello, and rewrites SNI if needed.
+This handler intercepts `SYS_WRITE` on TLS-watched fds. It reads the write buffer from tracee memory, checks for ClientHello, and rewrites SNI if needed. `SYS_SENDTO` on TLS-watched fds is routed here from `handleNetwork()`. `SYS_SENDMSG` is not handled (incompatible arg layout).
 
 **Step 1: Write the failing test (integration)**
 
@@ -2098,7 +2097,10 @@ func (t *Tracer) handleConnectExit(tid int, regs Regs) {
 	fd := int(int32(regs.Arg(0)))
 
 	// Look up domain from DNS resolution cache
-	domain, _ := t.fds.domainForIP(address)
+	domain, ok := t.fds.domainForIP(address)
+	if !ok || domain == "" {
+		return // No domain known — skip TLS watch to avoid empty SNI rewrite
+	}
 	t.fds.watchTLS(tgid, fd, domain)
 }
 ```
