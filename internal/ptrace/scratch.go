@@ -39,6 +39,9 @@ func (s *scratchPage) reset() {
 
 // ensureScratchPage returns the scratch page for the given TGID, allocating one
 // via mmap injection if needed.
+//
+// Note: in practice this is only called from the single-threaded tracer event
+// loop, so races are not expected. The double-check pattern is defensive.
 func (t *Tracer) ensureScratchPage(tid, tgid int, savedRegs Regs) (*scratchPage, error) {
 	t.mu.Lock()
 	sp := t.tgidScratch[tgid]
@@ -63,6 +66,13 @@ func (t *Tracer) ensureScratchPage(tid, tgid int, savedRegs Regs) (*scratchPage,
 	sp = &scratchPage{addr: addr, size: 4096}
 
 	t.mu.Lock()
+	// Double-check: another path may have created a scratch page while we
+	// were injecting mmap. Use the existing one and let our mapping leak
+	// (harmless: it will be unmapped when the process exits).
+	if existing := t.tgidScratch[tgid]; existing != nil {
+		t.mu.Unlock()
+		return existing, nil
+	}
 	t.tgidScratch[tgid] = sp
 	t.mu.Unlock()
 
