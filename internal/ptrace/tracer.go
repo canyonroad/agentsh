@@ -79,15 +79,26 @@ type NetworkContext struct {
 	Address   string
 	Port      int
 	Operation string
+	Domain    string // DNS query name (set when Operation == "dns")
+	QueryType uint16 // DNS query type: A=1, AAAA=28, CNAME=5, etc.
 }
 
 // NetworkResult carries the network policy decision.
 type NetworkResult struct {
-	Allow        bool
-	Action       string // "" (legacy), "allow", "deny", "redirect"
-	Errno        int32
-	RedirectAddr string // for redirect
-	RedirectPort int    // for redirect
+	Allow            bool
+	Action           string // "" (legacy), "allow", "deny", "redirect"
+	Errno            int32
+	RedirectAddr     string // for redirect
+	RedirectPort     int    // for redirect
+	RedirectUpstream string // Forward DNS query to this resolver (ip:port)
+	Records          []DNSRecord // Synthetic DNS response records
+}
+
+// DNSRecord represents a single DNS response record.
+type DNSRecord struct {
+	Type  uint16 // A=1, AAAA=28, CNAME=5
+	Value string // IP address or domain name
+	TTL   uint32
 }
 
 // SignalHandler evaluates signal delivery policy.
