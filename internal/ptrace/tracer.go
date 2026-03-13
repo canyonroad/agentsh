@@ -142,6 +142,7 @@ type TraceeState struct {
 	Attached         time.Time
 	ParkedAt         time.Time
 	PendingDenyErrno int
+	PendingFakeZero  bool // force return value to 0 on syscall exit
 	PendingInterrupt bool
 	IsVforkChild     bool
 	MemFD            int
@@ -378,9 +379,12 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 	entering := !state.InSyscall
 	state.InSyscall = entering
 	pendingErrno := 0
+	pendingFakeZero := false
 	if !entering {
 		pendingErrno = state.PendingDenyErrno
 		state.PendingDenyErrno = 0
+		pendingFakeZero = state.PendingFakeZero
+		state.PendingFakeZero = false
 	}
 	t.mu.Unlock()
 
@@ -404,6 +408,8 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 	} else {
 		if pendingErrno != 0 {
 			t.applyDenyFixup(tid, pendingErrno)
+		} else if pendingFakeZero {
+			t.applyDenyFixup(tid, 0)
 		}
 		t.allowSyscall(tid)
 	}

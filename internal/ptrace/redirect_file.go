@@ -175,8 +175,13 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, result 
 		return
 	}
 
-	mkdirRet, _ := t.injectSyscall(tid, savedRegs, unix.SYS_MKDIRAT,
+	mkdirRet, err := t.injectSyscall(tid, savedRegs, unix.SYS_MKDIRAT,
 		atFDCWD, trashDirAddr, 0700)
+	if err != nil {
+		slog.Warn("softDeleteFile: mkdirat injection failed, denying", "tid", tid, "error", err)
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
 	if mkdirRet < 0 && unix.Errno(-mkdirRet) != unix.EEXIST {
 		slog.Warn("softDeleteFile: mkdirat failed, denying", "tid", tid, "errno", unix.Errno(-mkdirRet))
 		t.denySyscall(tid, int(unix.EACCES))
@@ -211,10 +216,15 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, result 
 	}
 
 	// Inject renameat2.
-	renameRet, _ := t.injectSyscall(tid, savedRegs, unix.SYS_RENAMEAT2,
+	renameRet, err := t.injectSyscall(tid, savedRegs, unix.SYS_RENAMEAT2,
 		atFDCWD, oldPathAddr,
 		atFDCWD, trashPathAddr,
 		0)
+	if err != nil {
+		slog.Warn("softDeleteFile: renameat2 injection failed, denying", "tid", tid, "error", err)
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
 	if renameRet < 0 {
 		errno := unix.Errno(-renameRet)
 		slog.Warn("softDeleteFile: renameat2 failed, denying", "tid", tid, "errno", errno)
@@ -235,7 +245,7 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, result 
 
 	t.mu.Lock()
 	if s, ok := t.tracees[tid]; ok {
-		s.PendingDenyErrno = 0
+		s.PendingFakeZero = true
 		s.InSyscall = true
 	}
 	t.mu.Unlock()
