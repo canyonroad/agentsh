@@ -194,6 +194,16 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
 		if errors.Is(err, unix.ESRCH) {
 			t.handleExit(tid)
+		} else {
+			slog.Warn("redirectExec: PtraceSyscall failed, cleaning up stub fd",
+				"tid", tid, "error", err)
+			// Clear pending state to avoid stale references.
+			t.mu.Lock()
+			if state := t.tracees[tid]; state != nil {
+				state.PendingExecStubFD = -1
+				state.InSyscall = false
+			}
+			t.mu.Unlock()
 		}
 	}
 }
