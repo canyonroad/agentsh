@@ -644,13 +644,6 @@ func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
 	}
 }
 
-// redirectExec redirects an execve to a stub binary.
-// Implemented in redirect_exec.go.
-func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result ExecResult) {
-	slog.Warn("redirectExec: not yet implemented, denying", "tid", tid)
-	t.denySyscall(tid, int(unix.EACCES))
-}
-
 // Run starts the ptrace event loop.
 func (t *Tracer) Run(ctx context.Context) error {
 	runtime.LockOSThread()
