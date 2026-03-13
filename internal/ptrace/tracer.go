@@ -253,6 +253,12 @@ func (t *Tracer) setRegs(tid int, regs Regs) error {
 	return setRegsArch(tid, regs)
 }
 
+// traceSysGood reports whether PTRACE_O_TRACESYSGOOD is active.
+// When true, syscall stops use SIGTRAP|0x80 and plain SIGTRAP is a real signal.
+func (t *Tracer) traceSysGood() bool {
+	return !t.prefilterActive
+}
+
 // allowSyscall resumes the tracee, allowing the syscall to proceed.
 func (t *Tracer) allowSyscall(tid int) {
 	var err error
