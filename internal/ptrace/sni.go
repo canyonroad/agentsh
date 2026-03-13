@@ -106,23 +106,34 @@ func parseSNI(buf []byte) (serverName string, offset int, length int, err error)
 		pos += 4
 
 		if extType == 0x0000 { // server_name
-			// Bound all inner parsing to this extension's own length so
-			// malformed SNI internals cannot read adjacent extension bytes.
-			extEnd := pos + extLen
-			if extEnd > extensionsEnd {
-				extEnd = extensionsEnd
-			}
-			if pos+5 > extEnd {
+			// Hard-error if the extension length exceeds the extensions block.
+			if pos+extLen > extensionsEnd {
 				return "", 0, 0, errTruncated
 			}
-			nameType := buf[pos+2]
+			extEnd := pos + extLen
+
+			// Validate server_name_list length field.
+			if pos+2 > extEnd {
+				return "", 0, 0, errTruncated
+			}
+			listLen := int(binary.BigEndian.Uint16(buf[pos : pos+2]))
+			listEnd := pos + 2 + listLen
+			if listEnd > extEnd {
+				return "", 0, 0, errTruncated
+			}
+
+			innerPos := pos + 2
+			if innerPos+3 > listEnd {
+				return "", 0, 0, errTruncated
+			}
+			nameType := buf[innerPos]
 			if nameType != 0 {
 				pos += extLen
 				continue
 			}
-			nameLen := int(binary.BigEndian.Uint16(buf[pos+3 : pos+5]))
-			nameOffset := pos + 5
-			if nameOffset+nameLen > extEnd {
+			nameLen := int(binary.BigEndian.Uint16(buf[innerPos+1 : innerPos+3]))
+			nameOffset := innerPos + 3
+			if nameOffset+nameLen > listEnd {
 				return "", 0, 0, errTruncated
 			}
 			return string(buf[nameOffset : nameOffset+nameLen]), nameOffset, nameLen, nil
