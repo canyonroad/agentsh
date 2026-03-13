@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-12
 **Author:** Eran / Canyon Road
-**Status:** Design Complete
+**Status:** Implemented (2026-03-13)
 
 ---
 
@@ -201,3 +201,62 @@ All runnable via `docker run --cap-add SYS_PTRACE`.
 - Fargate E2E tests (Phase 4c)
 - EKS Fargate support (Phase 4c)
 - Multi-thread tracer scaling (future, only if measurements show bottleneck)
+
+## 11. Implementation Notes (2026-03-13)
+
+Key design refinements discovered during implementation:
+
+### Injection engine
+
+- **Dual-mode injection**: `injectSyscall` auto-selects between single-phase
+  (from entry stop, hijacks ORIG_RAX) and two-phase (from exit, uses gadget)
+  based on `state.InSyscall`. Callers don't need to know the stop state.
+- **waitForSyscallStop**: Uses WNOHANG|WALL polling with 5s deadline (not
+  blocking Wait4). Handles PTRACE_EVENT_SECCOMP as a syscall-entry-equivalent
+  stop. Only counts actual stop events toward the 100-event guard, not empty
+  polls.
+- **TRACESYSGOOD vs prefilter**: Plain SIGTRAP is a syscall stop only in
+  prefilter mode (no TRACESYSGOOD). In TRACESYSGOOD mode, plain SIGTRAP is
+  a real ptrace event signal. `traceSysGood()` method gates the check.
+
+### Exec redirect
+
+- **FD displacement protection**: `injectFDIntoTracee` checks if fd 100 is
+  already open via `fcntl(F_GETFD)` and saves it with `F_DUPFD_CLOEXEC`
+  (CLOEXEC ensures the saved copy auto-closes on successful exec, preventing
+  fd leaks into the stub). `cleanupInjectedFD` restores on failure.
+- **arm64 arg0 clobber**: `SetReturnValue` writes x0 (which is also arg0 on
+  arm64). The filename pointer must be saved before `SetReturnValue` and
+  restored afterward for the non-execveat case.
+- **In-place write fallback**: Tries overwriting the original filename buffer
+  first. On failure (e.g., read-only mapping), falls back to scratch page.
+- **execveat normalization**: Always converts to SYS_EXECVE with the stub
+  path, avoiding AT_EMPTY_PATH and non-AT_FDCWD edge cases.
+- **PendingExecStubFD/PendingExecSavedFD**: TraceeState fields for tracking
+  injected stub fd across the exec boundary. Cleaned up on exec failure in
+  `handleSyscallStop`, cleared on exec success in `handleExecEvent`.
+
+### File redirect and soft-delete
+
+- **advancePastEntry**: Both `redirectFile` and `softDeleteFile` advance past
+  the original entry (nullify ORIG_RAX, PtraceSyscall to EXIT, restore regs)
+  before doing helper injections. This ensures all injections use the
+  two-phase gadget protocol from EXIT state.
+- **Legacy syscall support**: amd64 has legacy SYS_OPEN, SYS_UNLINK, etc.
+  `filePathArgIndex` delegates to arch-specific `legacyFilePathArgIndex` for
+  unknown syscalls. `softDeleteFile` accepts `isLegacyUnlink(nr)`.
+
+### Connect redirect
+
+- **In-place sockaddr overwrite**: IPv4 sockaddr is 16 bytes, IPv6 is 28
+  bytes — both fixed-size, always fit in the original buffer. No scratch
+  page needed.
+
+### Error recovery
+
+- **resumeWithErrno**: Sets RAX=-errno and calls `allowSyscall` from EXIT
+  state. All redirect functions use this for error recovery after
+  `advancePastEntry`.
+- **hasPendingSyscallExit**: Routes plain SIGTRAP to `handleSyscallStop` in
+  prefilter mode. Includes `PendingExecStubFD >= 0` to ensure failed execs
+  get cleanup routed correctly.
