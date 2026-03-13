@@ -130,6 +130,7 @@ type TracerConfig struct {
 	TraceFile        bool
 	TraceNetwork     bool
 	TraceSignal      bool
+	MaskTracerPid    bool
 	SeccompPrefilter bool
 	MaxTracees       int
 	MaxHoldMs        int
