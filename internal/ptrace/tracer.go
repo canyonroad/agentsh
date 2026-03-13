@@ -179,6 +179,8 @@ type Tracer struct {
 	attachQueue chan int
 	resumeQueue chan resumeRequest
 
+	fds *fdTracker
+
 	mu            sync.Mutex
 	tracees       map[int]*TraceeState
 	parkedTracees map[int]struct{}
