@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/sys/unix"
 )
 
 type dnsProxy struct {
@@ -64,11 +65,11 @@ func (p *dnsProxy) run(ctx context.Context) {
 		p.udpConn4.Close()
 		p.udpConn6.Close()
 	}()
-	go p.listenUDP(ctx, p.udpConn4)
-	p.listenUDP(ctx, p.udpConn6)
+	go p.listenUDP(ctx, p.udpConn4, unix.AF_INET)
+	p.listenUDP(ctx, p.udpConn6, unix.AF_INET6)
 }
 
-func (p *dnsProxy) listenUDP(ctx context.Context, conn *net.UDPConn) {
+func (p *dnsProxy) listenUDP(ctx context.Context, conn *net.UDPConn, family int) {
 	buf := make([]byte, 4096)
 	for {
 		n, remoteAddr, err := conn.ReadFromUDP(buf)
@@ -82,11 +83,11 @@ func (p *dnsProxy) listenUDP(ctx context.Context, conn *net.UDPConn) {
 		// Copy the packet data before passing to goroutine since buf is reused.
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
-		go p.handleQuery(ctx, conn, pkt, remoteAddr)
+		go p.handleQuery(ctx, conn, pkt, remoteAddr, family)
 	}
 }
 
-func (p *dnsProxy) handleQuery(ctx context.Context, conn *net.UDPConn, raw []byte, remoteAddr *net.UDPAddr) {
+func (p *dnsProxy) handleQuery(ctx context.Context, conn *net.UDPConn, raw []byte, remoteAddr *net.UDPAddr, family int) {
 	var msg dnsmessage.Message
 	if err := msg.Unpack(raw); err != nil {
 		slog.Warn("dns_proxy: failed to parse DNS query", "error", err)
@@ -99,14 +100,14 @@ func (p *dnsProxy) handleQuery(ctx context.Context, conn *net.UDPConn, raw []byt
 	q := msg.Questions[0]
 	domain := strings.TrimSuffix(q.Name.String(), ".")
 
-	// Look up redirect info from fdTracker. Full TGID+fd attribution is
-	// wired in Task 9; for now use any registered redirect as fallback.
-	redirectInfo, _ := p.fds.anyDNSRedirect()
+	// TODO(Task 9): Wire proper TGID+fd attribution from the redirected
+	// UDP socket so PID, SessionID, and originalResolver are populated.
+	redirectInfo := dnsRedirectInfo{}
 
 	result := p.handler.HandleNetwork(ctx, NetworkContext{
 		PID:       redirectInfo.pid,
 		SessionID: redirectInfo.sessionID,
-		Family:    int(q.Class),
+		Family:    family,
 		Address:   redirectInfo.originalResolver,
 		Port:      53,
 		Operation: "dns",
@@ -207,7 +208,7 @@ func (p *dnsProxy) buildSyntheticResponse(query dnsmessage.Message, q dnsmessage
 
 func (p *dnsProxy) forwardQuery(raw []byte, upstream string) ([]byte, error) {
 	if _, _, err := net.SplitHostPort(upstream); err != nil {
-		upstream = upstream + ":53"
+		upstream = net.JoinHostPort(upstream, "53")
 	}
 	conn, err := net.Dial("udp", upstream)
 	if err != nil {

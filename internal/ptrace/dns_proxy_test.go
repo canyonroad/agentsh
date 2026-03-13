@@ -77,7 +77,10 @@ func TestDNSProxy_Allow(t *testing.T) {
 	}()
 
 	ft := newFdTracker()
-	handler := &mockDNSNetworkHandler{result: NetworkResult{Allow: true}}
+	handler := &mockDNSNetworkHandler{result: NetworkResult{
+		Allow:             true,
+		RedirectUpstream:  upstream.LocalAddr().String(),
+	}}
 
 	proxy, err := newDNSProxy(handler, ft)
 	if err != nil {
@@ -87,9 +90,6 @@ func TestDNSProxy_Allow(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go proxy.run(ctx)
-
-	// Register the original resolver so proxy knows where to forward
-	ft.recordDNSRedirect(1, 0, 1, "test", upstream.LocalAddr().String())
 
 	// Send query to proxy
 	conn, err := net.Dial("udp", proxy.addr4())
