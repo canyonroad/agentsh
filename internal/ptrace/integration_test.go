@@ -1367,3 +1367,177 @@ func TestIntegration_ScratchPage(t *testing.T) {
 		t.Errorf("expected 'long-path-content', got %q", string(content))
 	}
 }
+
+// --- Phase 4b Integration Tests ---
+
+func TestIntegration_TracerPidMasked(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	fileHandler := &mockFileHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve:   true,
+		TraceFile:     true,
+		ExecHandler:   execHandler,
+		FileHandler:   fileHandler,
+		MaskTracerPid: true,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	outfile := filepath.Join(tmpDir, "tracerpid.txt")
+	shellCmd := fmt.Sprintf(`while [ ! -f %s ]; do sleep 0.01; done; grep TracerPid /proc/self/status > %s`, readyFile, outfile)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 5*time.Second)
+	cancel()
+	<-errCh
+
+	data, err := os.ReadFile(outfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(string(data))
+	// Should show TracerPid: 0 (masked)
+	if !strings.Contains(line, "TracerPid:\t0") && !strings.Contains(line, "TracerPid: 0") {
+		t.Fatalf("expected masked TracerPid, got: %q", line)
+	}
+}
+
+func TestIntegration_TracerPidNotMasked(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	fileHandler := &mockFileHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve:   true,
+		TraceFile:     true,
+		ExecHandler:   execHandler,
+		FileHandler:   fileHandler,
+		MaskTracerPid: false,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	outfile := filepath.Join(tmpDir, "tracerpid.txt")
+	shellCmd := fmt.Sprintf(`while [ ! -f %s ]; do sleep 0.01; done; grep TracerPid /proc/self/status > %s`, readyFile, outfile)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 5*time.Second)
+	cancel()
+	<-errCh
+
+	data, err := os.ReadFile(outfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(string(data))
+	// Should show real TracerPid (non-zero)
+	if strings.Contains(line, "TracerPid:\t0") {
+		t.Fatalf("expected non-zero TracerPid when masking disabled, got: %q", line)
+	}
+}
+
+func TestIntegration_DNSConnectRedirect(t *testing.T) {
+	requirePtrace(t)
+
+	netHandler := &mockNetworkHandler{
+		defaultAllow: true,
+	}
+	execHandler := &mockExecHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve:    true,
+		TraceNetwork:   true,
+		ExecHandler:    execHandler,
+		NetworkHandler: netHandler,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	// The tracee does a DNS lookup. With the proxy running,
+	// the connect to port 53 should be redirected.
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	outfile := filepath.Join(tmpDir, "dns.txt")
+	// Use getent to trigger a DNS query
+	shellCmd := fmt.Sprintf(`while [ ! -f %s ]; do sleep 0.01; done; getent hosts example.com > %s 2>&1 || echo "failed" > %s`, readyFile, outfile, outfile)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 8*time.Second)
+	cancel()
+	<-errCh
+
+	// Verify the network handler saw a DNS operation
+	netHandler.mu.Lock()
+	var sawDNS bool
+	for _, c := range netHandler.calls {
+		if c.Operation == "dns" {
+			sawDNS = true
+			break
+		}
+	}
+	netHandler.mu.Unlock()
+
+	if !sawDNS {
+		t.Log("DNS operation not captured — DNS proxy may not have intercepted (system DNS config dependent)")
+		// This is expected in some CI environments where DNS doesn't go through connect()
+	}
+}

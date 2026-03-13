@@ -3,7 +3,7 @@
 **Version:** 0.1 — Draft  
 **Date:** 2026-03-11  
 **Author:** Eran / Canyon Road  
-**Status:** Phase 3 Complete
+**Status:** Phase 4b Complete
 
 ---
 
@@ -13,7 +13,7 @@ agentsh's kernel-level enforcement (seccomp user-notify, eBPF, FUSE) requires Li
 
 Fargate does, however, support exactly one additional capability: **`SYS_PTRACE`**, combined with `pidMode: "task"` (shared PID namespace across containers in an ECS task). This is the same mechanism used by Datadog CWS, Falco, Lacework, and Sysdig for runtime security on Fargate.
 
-A ptrace-based tracer backend would allow agentsh to provide strong enforcement on Fargate and similar restricted environments — full allow/deny/audit for all four syscall planes (exec, file, network, signal), with steering/redirect support in Phase 4. Entirely opt-in and feature-flagged off by default.
+A ptrace-based tracer backend would allow agentsh to provide strong enforcement on Fargate and similar restricted environments — full allow/deny/audit for all four syscall planes (exec, file, network, signal), with steering/redirect support (Phases 4a-4b). Entirely opt-in and feature-flagged off by default.
 
 ### 1.1 Non-Goals
 
@@ -1585,7 +1585,7 @@ The agentsh sidecar polls the PID file on startup and attaches once it appears. 
 
 **Issue:** Any process can read `/proc/self/status` and see `TracerPid: <nonzero>`.
 
-**Mitigation:** For the AI agent security use case, this is low risk — supply chain attacks in npm/pip packages are not writing anti-ptrace checks today. Phase 4 adds TracerPid masking (§19) which raises the bar further, but is not a complete defense against a determined adversary targeting ptrace specifically.
+**Mitigation:** For the AI agent security use case, this is low risk — supply chain attacks in npm/pip packages are not writing anti-ptrace checks today. Phase 4b adds TracerPid masking (§19) which intercepts `/proc/*/status` reads on syscall-exit and patches `TracerPid` to `0`. This raises the bar for casual detection but is not a complete defense against a determined adversary targeting ptrace specifically (e.g., using `PTRACE_TRACEME` or timing side-channels).
 
 ### 12.2 TOCTOU on Pointer Arguments
 
@@ -1755,25 +1755,35 @@ A separate integration test deploys the full sidecar task definition to Fargate 
 - Graceful degradation: parked tracees cleaned up on exit, `handleResumeRequest` guards against dead tracees, ESRCH handling in `allowSyscall`/`denySyscall` triggers `handleExit` cleanup instead of SIGKILL fallback
 - Overhead benchmarks behind `//go:build integration && linux`: `BenchmarkExecOverhead`, `BenchmarkFileIOOverhead` with synchronized attach verification
 
-**Deliverable:** Production-hardened ptrace backend with timeout enforcement, operational metrics, and graceful handling of tracee exit races. Sidecar auto-discovery and Fargate E2E deferred to Phase 4 (requires AWS access).
+**Deliverable:** Production-hardened ptrace backend with timeout enforcement, operational metrics, and graceful handling of tracee exit races. Sidecar auto-discovery and Fargate E2E deferred to Phase 4c (requires AWS access).
 
-### Phase 4: Steering, Anti-Detection, Sidecar Discovery, and EKS Fargate
+### Phase 4a: Core Steering Engine ✓
 
-Phase 4 brings ptrace mode to full feature parity with seccomp+FUSE for redirect/steering behaviors, plus detection resistance, sidecar auto-discovery, and EKS support.
-
-- Sidecar auto-discovery (`sidecar` attach mode) based on real Fargate E2E testing
-- Research spike: seccomp prefilter injection for `pid`/`sidecar` mode (via syscall injection)
-- Fargate E2E test in CI (ECS task definition, end-to-end policy enforcement)
 - Exec redirect via syscall injection and memory rewrite (§15)
 - File path redirect via register + memory rewrite (§16)
 - Soft-delete via injected `renameat2` (§16.5)
 - Network connect redirect via sockaddr rewrite (§17.1)
-- DNS redirect — basic UDP sendto/recvfrom rewrite (§17.2) — **best-effort, see fragility notes**
-- SNI rewrite — single-write ClientHello case (§17.3) — **best-effort, see fragility notes**
-- TracerPid masking via ptrace-intercepted /proc reads (§19) — **raises bar for casual detection, not a security boundary**
-- EKS Fargate support (pending AWS `SYS_PTRACE` for EKS) (§20)
+- Signal redirect via register rewrite (Phase 2)
+- Syscall injection engine (`inject.go`, `scratch.go`) for arbitrary syscall execution in tracee context
+
+**Deliverable:** Core steering/redirect support for exec, file, network connect, and signal. Foundation for Phase 4b DNS/SNI/masking.
+
+### Phase 4b: DNS Redirect, SNI Rewrite, TracerPid Masking ✓
+
+- DNS redirect via in-process dual-stack DNS proxy with connect redirect (port 53) and sendto destination rewrite (§17.2) — **best-effort, see fragility notes**
+- SNI rewrite via TLS ClientHello parsing and in-place SNI replacement with 6 length field fixups (§17.3) — **best-effort, see fragility notes**
+- TracerPid masking via ptrace-intercepted `/proc/*/status` reads on syscall-exit (§19) — **raises bar for casual detection, not a security boundary**
+- Per-TGID fd tracker for lifecycle management of status fds, TLS-watched fds, and DNS redirect mappings
+- Syscall-exit handling for `SYS_READ`/`SYS_PREAD64` (TracerPid masking), `SYS_OPENAT`/`SYS_OPENAT2` (fd tracking), `SYS_CONNECT` (TLS fd watching)
 
 **Deliverable:** Complete steering support for the common cases. Honest about coverage gaps in DNS and TLS interception.
+
+### Phase 4c: Sidecar Discovery and EKS Fargate (Planned)
+
+- Sidecar auto-discovery (`sidecar` attach mode) based on real Fargate E2E testing
+- Research spike: seccomp prefilter injection for `pid`/`sidecar` mode (via syscall injection)
+- Fargate E2E test in CI (ECS task definition, end-to-end policy enforcement)
+- EKS Fargate support (pending AWS `SYS_PTRACE` for EKS) (§20)
 
 ---
 
@@ -2686,7 +2696,7 @@ The following matrix describes what ptrace mode can and cannot do at each phase,
 
 **Phase 1-3 (allow/deny/audit):** Strong fallback mode for restricted runtimes. Full enforcement coverage for command, file, network, and signal policy. Good audit trail. No steering.
 
-**Phase 4 (with steering):** Near-complete feature parity with full mode for the common cases that matter to AI agent security: exec redirect, file redirect, connect redirect. DNS and SNI rewriting are best-effort and should not be relied on as primary controls — use the LLM proxy for API routing instead.
+**Phase 4a-4b (with steering):** Near-complete feature parity with full mode for the common cases that matter to AI agent security: exec redirect, file redirect, connect redirect, DNS redirect, SNI rewrite, TracerPid masking. DNS and SNI rewriting are best-effort and should not be relied on as primary controls — use the LLM proxy for API routing instead.
 
 **For the target use case** (AI agents running untrusted code from packages, repos, and MCP tools on Fargate): ptrace mode provides equivalent practical protection to full mode. The evasion gap (TracerPid, timing) requires a targeted adversary who knows agentsh is running and has built anti-ptrace checks — this is not the threat model agentsh is designed for. Supply chain attacks, MCP exfiltration, and agent prompt injection do not check for ptrace.
 

@@ -128,6 +128,9 @@ ptrace:
     network: true       # Network syscall tracing (connect, bind)
     signal: true        # Signal syscall tracing (kill, tkill, tgkill, rt_sigqueueinfo)
 
+  # Anti-detection: mask TracerPid in /proc/*/status reads (default: false)
+  mask_tracer_pid: false
+
   performance:
     max_tracees: 1024           # Maximum concurrent traced threads
     max_hold_ms: 5000           # Maximum time to hold a syscall for policy (fail-closed: deny with EACCES)
@@ -147,6 +150,9 @@ ptrace:
 - Process tree tracking for fork/clone/vfork descendants with depth calculation
 - `max_hold_ms` timeout enforcement: parked tracees (awaiting async policy approval) are automatically denied with `EACCES` if the timeout expires. Kill fallback if deny fails. Timeout is swept on every event loop iteration (not load-dependent).
 - Graceful degradation: tracees that exit while parked are cleaned up automatically; resume requests for dead tracees are safely skipped; ESRCH errors in allow/deny trigger cleanup instead of SIGKILL
+- DNS redirect: in-process dual-stack DNS proxy intercepts connect/sendto to port 53; tracee DNS queries are redirected to the proxy via sockaddr rewrite (when `NetworkHandler` is configured)
+- SNI rewrite: TLS ClientHello interception on connect-redirect sockets; in-place SNI replacement with length field fixups (best-effort, single `write()` only)
+- TracerPid masking: intercepts `/proc/*/status` reads on syscall-exit and patches `TracerPid` to `0` (when `mask_tracer_pid: true`)
 
 **Monitoring:**
 
@@ -187,9 +193,10 @@ Ptrace mode exposes Prometheus metrics at the `/metrics` endpoint:
 
 ### In ptrace Mode
 
-1. **No redirect/steering (Phase 2)**
-   - File, network, and signal syscalls are intercepted for allow/deny/audit
-   - Redirect/steering behaviors (exec redirect, file path redirect, connect redirect) require Phase 4
+1. **DNS and SNI interception are best-effort**
+   - DNS redirect intercepts UDP port 53 via connect and sendto rewriting to an in-process proxy
+   - SNI rewrite handles single `write()` ClientHello only (no writev, sendmsg, or partial sends)
+   - Neither is a security boundary — use the LLM proxy for API routing instead
    - Mitigation: shim-based policy checks still apply for command steering
 
 2. **No FUSE or eBPF**

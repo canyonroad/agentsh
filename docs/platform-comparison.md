@@ -82,7 +82,7 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | Platform | Score | File Block | Net Block | Signal | Isolation | Syscall Filter | Resources |
 |----------|:-----:|:----------:|:---------:|:------:|:---------:|:--------------:|:---------:|
 | **Linux Native** | 100% | Yes | Yes | Block | Full | Yes | Full |
-| **Linux (ptrace mode)** | 90% | No | No | No | Partial | Exec only | Full |
+| **Linux (ptrace mode)** | 95% | No | No | Redirect | Partial | Full | Full |
 | **Windows WSL2** | 100% | Yes | Yes | Block | Full | Yes | Full |
 | **macOS ESF+NE** | 90% | Yes | Yes | Audit | Minimal | Exec only | None |
 | **macOS + Lima (inside VM)** | 100% | Yes | Yes | Block | Full | Yes | Full |
@@ -99,8 +99,8 @@ Platform               File    Network  Signal   Isolation  Syscall  Resources  
 Linux Native          ████████████████████████████████████████████████████████  100%
                       File✓   Net✓    Sig✓    Iso✓      Sys✓     Res✓
 
-Linux (ptrace mode)   ████████████████████████████████████████████░░░░░░░░░░░░   90%
-                      File✗   Net✗    Sig✗    Iso⚠      Sys⚠     Res✓
+Linux (ptrace mode)   ██████████████████████████████████████████████████████░░░░   95%
+                      File✓   Net✓    Sig✓    Iso⚠      Sys✓     Res✓
                       (Restricted containers: AWS Fargate, Docker with SYS_PTRACE)
 
 Windows WSL2          ████████████████████████████████████████████████████████  100%
@@ -259,7 +259,7 @@ Lima/virtiofs   █████████████████████�
 | Use Case | Recommended Platform | Security | Notes |
 |----------|---------------------|:--------:|-------|
 | Production - Maximum Security | Linux Native | 100% | Full isolation, all features |
-| Production - AWS Fargate | Linux (ptrace mode) | 90% | SYS_PTRACE for execve enforcement |
+| Production - AWS Fargate | Linux (ptrace mode) | 95% | SYS_PTRACE for full syscall enforcement with steering |
 | Production - Windows Server | Windows WSL2 | 100% | Full Linux security in VM |
 | Production - macOS | macOS + Lima (inside VM) | 100% | Run agentsh inside Lima = native Linux |
 | Enterprise Security Product | macOS ESF+NE | 90% | ESF requires Apple approval; NE is standard |
@@ -350,7 +350,7 @@ See [Known Limitations - macOS + Lima](#macos--lima) for detailed comparison.
 - Requires root or CAP_SYS_ADMIN for namespaces
 - eBPF requires kernel 5.x+ for full features
 - **Signal interception**: Full blocking and redirect via seccomp user-notify
-- **ptrace mode**: Available in restricted containers (e.g. AWS Fargate) with `SYS_PTRACE` capability; provides execve-level enforcement when seccomp user-notify is unavailable
+- **ptrace mode**: Available in restricted containers (e.g. AWS Fargate) with `SYS_PTRACE` capability; provides full syscall enforcement with steering (exec/file/network redirect, DNS redirect, SNI rewrite, TracerPid masking) when seccomp user-notify is unavailable
 
 ### macOS ESF+NE
 - **ESF requires Apple approval** - must apply for ESF entitlement with business justification

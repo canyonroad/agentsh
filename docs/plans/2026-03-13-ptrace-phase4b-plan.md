@@ -1,6 +1,6 @@
 # Ptrace Phase 4b Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **Status:** Implemented (all 11 tasks complete)
 
 **Goal:** Add DNS redirect, SNI rewrite, and TracerPid masking to the ptrace backend.
 

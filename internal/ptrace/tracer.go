@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"runtime"
 	"sync"
 	"time"
@@ -79,15 +80,26 @@ type NetworkContext struct {
 	Address   string
 	Port      int
 	Operation string
+	Domain    string // DNS query name (set when Operation == "dns")
+	QueryType uint16 // DNS query type: A=1, AAAA=28, CNAME=5, etc.
 }
 
 // NetworkResult carries the network policy decision.
 type NetworkResult struct {
-	Allow        bool
-	Action       string // "" (legacy), "allow", "deny", "redirect"
-	Errno        int32
-	RedirectAddr string // for redirect
-	RedirectPort int    // for redirect
+	Allow            bool
+	Action           string // "" (legacy), "allow", "deny", "redirect"
+	Errno            int32
+	RedirectAddr     string // for redirect
+	RedirectPort     int    // for redirect
+	RedirectUpstream string // Forward DNS query to this resolver (ip:port)
+	Records          []DNSRecord // Synthetic DNS response records
+}
+
+// DNSRecord represents a single DNS response record.
+type DNSRecord struct {
+	Type  uint16 // A=1, AAAA=28, CNAME=5
+	Value string // IP address or domain name
+	TTL   uint32
 }
 
 // SignalHandler evaluates signal delivery policy.
@@ -119,6 +131,7 @@ type TracerConfig struct {
 	TraceFile        bool
 	TraceNetwork     bool
 	TraceSignal      bool
+	MaskTracerPid    bool
 	SeccompPrefilter bool
 	MaxTracees       int
 	MaxHoldMs        int
@@ -167,6 +180,9 @@ type Tracer struct {
 
 	attachQueue chan int
 	resumeQueue chan resumeRequest
+
+	fds      *fdTracker
+	dnsProxy *dnsProxy
 
 	mu            sync.Mutex
 	tracees       map[int]*TraceeState
@@ -450,6 +466,7 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 						t.tracees[tid] = &TraceeState{
 							TID:                tid,
 							TGID:               childTGID,
+							LastNr:             -1,
 							MemFD:              -1,
 							PendingExecStubFD:  -1,
 							PendingExecSavedFD: -1,
@@ -558,6 +575,21 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 			}
 		}
 
+		// Phase 4b: exit-time handlers
+		nr := -1
+		t.mu.Lock()
+		if state != nil {
+			nr = state.LastNr
+		}
+		t.mu.Unlock()
+
+		if nr >= 0 {
+			exitRegs, err := t.getRegs(tid)
+			if err == nil {
+				t.handleSyscallExit(tid, nr, exitRegs)
+			}
+		}
+
 		t.allowSyscall(tid)
 	}
 }
@@ -600,9 +632,110 @@ func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, regs Regs
 		t.handleNetwork(ctx, tid, regs)
 	case isSignalSyscall(nr):
 		t.handleSignal(ctx, tid, regs)
+	case isWriteSyscall(nr):
+		t.handleWrite(ctx, tid, regs)
+	case isCloseSyscall(nr):
+		t.handleClose(ctx, tid, regs)
+	case isReadSyscall(nr):
+		t.allowSyscall(tid) // read is handled on exit, not entry
 	default:
 		t.allowSyscall(tid)
 	}
+}
+
+// handleSyscallExit runs exit-time handlers for syscalls that need post-processing.
+func (t *Tracer) handleSyscallExit(tid int, nr int, regs Regs) {
+	switch {
+	case isReadSyscall(nr):
+		t.handleReadExit(tid, regs)
+	case nr == unix.SYS_OPENAT || nr == unix.SYS_OPENAT2:
+		t.handleOpenatExit(tid, regs)
+	case nr == unix.SYS_CONNECT:
+		t.handleConnectExit(tid, regs)
+	}
+}
+
+// handleOpenatExit tracks fds opened on /proc/*/status for TracerPid masking.
+func (t *Tracer) handleOpenatExit(tid int, regs Regs) {
+	if t.fds == nil || !t.cfg.MaskTracerPid {
+		return
+	}
+
+	retVal := regs.ReturnValue()
+	if retVal < 0 {
+		return // open failed
+	}
+	fd := int(retVal)
+
+	t.mu.Lock()
+	state := t.tracees[tid]
+	var tgid int
+	if state != nil {
+		tgid = state.TGID
+	}
+	t.mu.Unlock()
+
+	// Read the path from /proc/<tid>/fd/<fd> to check if it's a status file.
+	path, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%d", tid, fd))
+	if err != nil {
+		return
+	}
+
+	if isProcStatus(path) {
+		t.fds.trackStatusFd(tgid, fd)
+	}
+}
+
+// handleConnectExit marks fds as TLS-watched after successful connect to TLS ports.
+func (t *Tracer) handleConnectExit(tid int, regs Regs) {
+	if t.fds == nil {
+		return
+	}
+
+	retVal := regs.ReturnValue()
+	// connect returns 0 on success, or -EINPROGRESS for non-blocking
+	if retVal != 0 && retVal != -int64(unix.EINPROGRESS) {
+		return
+	}
+
+	t.mu.Lock()
+	state := t.tracees[tid]
+	var tgid int
+	if state != nil {
+		tgid = state.TGID
+	}
+	t.mu.Unlock()
+
+	// Read the destination address from the connect args.
+	addrPtr := regs.Arg(1)
+	addrLen := int(regs.Arg(2))
+	if addrLen <= 0 || addrLen > 128 {
+		return
+	}
+
+	buf := make([]byte, addrLen)
+	if err := t.readBytes(tid, addrPtr, buf); err != nil {
+		return
+	}
+
+	_, address, port, err := parseSockaddr(buf)
+	if err != nil {
+		return
+	}
+
+	// Only watch TLS-relevant ports
+	if port != 443 && port != 853 {
+		return
+	}
+
+	fd := int(int32(regs.Arg(0)))
+
+	// Look up domain from DNS resolution cache
+	domain, ok := t.fds.domainForIP(address)
+	if !ok || domain == "" {
+		return // No domain known — skip TLS watch to avoid empty SNI rewrite
+	}
+	t.fds.watchTLS(tgid, fd, domain)
 }
 
 // handleNewChild processes a fork/clone/vfork event.
@@ -644,6 +777,7 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 			ParentPID:           parent.TGID,
 			SessionID:           parent.SessionID,
 			Attached:            time.Now(),
+			LastNr:              -1,
 			MemFD:               -1,
 			PendingExecStubFD:   -1,
 			PendingExecSavedFD:  -1,
@@ -722,6 +856,11 @@ func (t *Tracer) handleExecEvent(tid int) {
 	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
 
+	// Phase 4b: exec resets fd table, clear all fd tracking for this TGID.
+	if t.fds != nil {
+		t.fds.clearTGID(tgid)
+	}
+
 	// Exec replaces the process address space, invalidating any scratch page.
 	t.invalidateScratchPage(tgid)
 }
@@ -753,6 +892,9 @@ func (t *Tracer) handleExit(tid int) {
 	t.mu.Unlock()
 
 	if state != nil && lastThread {
+		if t.fds != nil {
+			t.fds.clearTGID(tgid)
+		}
 		t.invalidateScratchPage(tgid)
 	}
 }
@@ -790,6 +932,7 @@ func (t *Tracer) handleEventStop(tid int) {
 			t.tracees[tid] = &TraceeState{
 				TID:                tid,
 				TGID:               childTGID,
+				LastNr:             -1,
 				MemFD:              -1,
 				PendingExecStubFD:  -1,
 				PendingExecSavedFD: -1,
@@ -892,6 +1035,18 @@ func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
 func (t *Tracer) Run(ctx context.Context) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+
+	t.fds = newFdTracker()
+	if t.cfg.TraceNetwork && t.cfg.NetworkHandler != nil {
+		proxy, err := newDNSProxy(t.cfg.NetworkHandler, t.fds)
+		if err != nil {
+			slog.Warn("ptrace: failed to start DNS proxy", "error", err)
+		} else {
+			t.dnsProxy = proxy
+			go t.dnsProxy.run(ctx)
+			slog.Info("ptrace: DNS proxy started", "addr4", t.dnsProxy.addr4(), "addr6", t.dnsProxy.addr6())
+		}
+	}
 
 	for {
 		if err := t.drainQueues(ctx); err != nil {
