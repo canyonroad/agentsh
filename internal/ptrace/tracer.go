@@ -358,8 +358,9 @@ func (t *Tracer) applyReturnOverride(tid int, retval int64) {
 	t.setRegs(tid, regs)
 }
 
-// hasPendingSyscallExit returns true if the tracee has a pending deny errno
-// or fake-zero fixup that needs to be applied at syscall exit.
+// hasPendingSyscallExit returns true if the tracee has a pending deny errno,
+// fake-zero fixup, return override, or exec stub fd cleanup that needs to be
+// applied at syscall exit.
 func (t *Tracer) hasPendingSyscallExit(tid int) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -367,7 +368,7 @@ func (t *Tracer) hasPendingSyscallExit(tid int) bool {
 	if state == nil {
 		return false
 	}
-	return state.InSyscall && (state.PendingDenyErrno != 0 || state.PendingFakeZero || state.HasPendingReturn)
+	return state.InSyscall && (state.PendingDenyErrno != 0 || state.PendingFakeZero || state.HasPendingReturn || state.PendingExecStubFD >= 0)
 }
 
 // handleStop dispatches a tracee stop event.

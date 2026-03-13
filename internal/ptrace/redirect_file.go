@@ -270,6 +270,8 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, absPath
 	regs.SetReturnValue(0)
 	if err := t.setRegs(tid, regs); err != nil {
 		slog.Warn("softDeleteFile: setRegs failed after rename", "tid", tid, "error", err)
+		t.resumeWithErrno(tid, savedRegs, int(unix.EIO))
+		return
 	}
 
 	// InSyscall is already false from advancePastEntry.
