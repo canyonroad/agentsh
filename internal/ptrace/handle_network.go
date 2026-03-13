@@ -139,13 +139,37 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 		Operation: operation,
 	})
 
-	if !result.Allow {
+	// Dispatch based on Action field (new path) or Allow field (legacy path).
+	action := result.Action
+	if action == "" {
+		if result.Allow {
+			action = "allow"
+		} else {
+			action = "deny"
+		}
+	}
+
+	switch action {
+	case "allow", "continue":
+		t.allowSyscall(tid)
+	case "deny":
 		errno := result.Errno
 		if errno == 0 {
 			errno = int32(unix.EACCES)
 		}
 		t.denySyscall(tid, int(errno))
-	} else {
-		t.allowSyscall(tid)
+	case "redirect":
+		// Redirect is only supported for connect; deny bind-redirect to
+		// avoid unintentionally mutating bind behavior.
+		if nr == unix.SYS_CONNECT {
+			t.redirectConnect(ctx, tid, regs, result)
+		} else {
+			slog.Warn("handleNetwork: redirect not supported for this syscall, denying",
+				"tid", tid, "operation", operation)
+			t.denySyscall(tid, int(unix.EACCES))
+		}
+	default:
+		slog.Warn("handleNetwork: unknown action, denying", "tid", tid, "action", action)
+		t.denySyscall(tid, int(unix.EACCES))
 	}
 }

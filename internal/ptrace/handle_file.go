@@ -174,14 +174,32 @@ func (t *Tracer) handleFile(ctx context.Context, tid int, regs Regs) {
 		Flags:     flags,
 	})
 
-	if !result.Allow {
+	// Dispatch based on Action field (new path) or Allow field (legacy path).
+	action := result.Action
+	if action == "" {
+		if result.Allow {
+			action = "allow"
+		} else {
+			action = "deny"
+		}
+	}
+
+	switch action {
+	case "allow", "continue":
+		t.allowSyscall(tid)
+	case "deny":
 		errno := result.Errno
 		if errno == 0 {
 			errno = int32(unix.EACCES)
 		}
 		t.denySyscall(tid, int(errno))
-	} else {
-		t.allowSyscall(tid)
+	case "redirect":
+		t.redirectFile(ctx, tid, regs, nr, result)
+	case "soft-delete":
+		t.softDeleteFile(ctx, tid, regs, path, result)
+	default:
+		slog.Warn("handleFile: unknown action, denying", "tid", tid, "action", action)
+		t.denySyscall(tid, int(unix.EACCES))
 	}
 }
 
