@@ -466,6 +466,7 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 						t.tracees[tid] = &TraceeState{
 							TID:                tid,
 							TGID:               childTGID,
+							LastNr:             -1,
 							MemFD:              -1,
 							PendingExecStubFD:  -1,
 							PendingExecSavedFD: -1,
@@ -575,14 +576,14 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		}
 
 		// Phase 4b: exit-time handlers
-		nr := 0
+		nr := -1
 		t.mu.Lock()
 		if state != nil {
 			nr = state.LastNr
 		}
 		t.mu.Unlock()
 
-		if nr != 0 {
+		if nr >= 0 {
 			exitRegs, err := t.getRegs(tid)
 			if err == nil {
 				t.handleSyscallExit(tid, nr, exitRegs)
@@ -776,6 +777,7 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 			ParentPID:           parent.TGID,
 			SessionID:           parent.SessionID,
 			Attached:            time.Now(),
+			LastNr:              -1,
 			MemFD:               -1,
 			PendingExecStubFD:   -1,
 			PendingExecSavedFD:  -1,
@@ -930,6 +932,7 @@ func (t *Tracer) handleEventStop(tid int) {
 			t.tracees[tid] = &TraceeState{
 				TID:                tid,
 				TGID:               childTGID,
+				LastNr:             -1,
 				MemFD:              -1,
 				PendingExecStubFD:  -1,
 				PendingExecSavedFD: -1,
