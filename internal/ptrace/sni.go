@@ -49,10 +49,19 @@ func parseSNI(buf []byte) (serverName string, offset int, length int, err error)
 	if len(buf) < 9 {
 		return "", 0, 0, errTruncated
 	}
+
+	// Enforce TLS record-length boundary so parsing cannot run past the
+	// current record into subsequent bytes in the buffer.
+	recordLen := int(binary.BigEndian.Uint16(buf[3:5]))
+	recordEnd := 5 + recordLen
+	if recordEnd > len(buf) {
+		recordEnd = len(buf)
+	}
+
 	handshakeLen := int(buf[6])<<16 | int(buf[7])<<8 | int(buf[8])
 	handshakeEnd := 9 + handshakeLen
-	if handshakeEnd > len(buf) {
-		handshakeEnd = len(buf)
+	if handshakeEnd > recordEnd {
+		handshakeEnd = recordEnd
 	}
 
 	// ClientHello body: client_version(2) + random(32)
@@ -97,7 +106,13 @@ func parseSNI(buf []byte) (serverName string, offset int, length int, err error)
 		pos += 4
 
 		if extType == 0x0000 { // server_name
-			if pos+5 > extensionsEnd {
+			// Bound all inner parsing to this extension's own length so
+			// malformed SNI internals cannot read adjacent extension bytes.
+			extEnd := pos + extLen
+			if extEnd > extensionsEnd {
+				extEnd = extensionsEnd
+			}
+			if pos+5 > extEnd {
 				return "", 0, 0, errTruncated
 			}
 			nameType := buf[pos+2]
@@ -107,7 +122,7 @@ func parseSNI(buf []byte) (serverName string, offset int, length int, err error)
 			}
 			nameLen := int(binary.BigEndian.Uint16(buf[pos+3 : pos+5]))
 			nameOffset := pos + 5
-			if nameOffset+nameLen > extensionsEnd {
+			if nameOffset+nameLen > extEnd {
 				return "", 0, 0, errTruncated
 			}
 			return string(buf[nameOffset : nameOffset+nameLen]), nameOffset, nameLen, nil
