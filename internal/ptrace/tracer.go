@@ -393,7 +393,12 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		nr := regs.SyscallNr()
 		t.mu.Lock()
 		state.LastNr = nr
+		tgid := state.TGID
 		t.mu.Unlock()
+
+		// Reset scratch page allocator at each syscall-enter so that
+		// redirect/soft-delete operations always start with a fresh page.
+		t.resetScratchIfPresent(tgid)
 
 		t.dispatchSyscall(ctx, tid, nr, regs)
 	} else {
@@ -412,6 +417,20 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 		return
 	}
 	nr := regs.SyscallNr()
+
+	// Reset scratch page allocator at each syscall-enter so that
+	// redirect/soft-delete operations always start with a fresh page.
+	t.mu.Lock()
+	state := t.tracees[tid]
+	var tgid int
+	if state != nil {
+		tgid = state.TGID
+	}
+	t.mu.Unlock()
+	if tgid != 0 {
+		t.resetScratchIfPresent(tgid)
+	}
+
 	t.dispatchSyscall(ctx, tid, nr, regs)
 }
 

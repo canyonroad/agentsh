@@ -85,3 +85,14 @@ func (t *Tracer) invalidateScratchPage(tgid int) {
 	delete(t.tgidScratch, tgid)
 	t.mu.Unlock()
 }
+
+// resetScratchIfPresent resets the bump allocator for the given TGID's scratch
+// page, if one exists. Called at each syscall-enter to reclaim space.
+func (t *Tracer) resetScratchIfPresent(tgid int) {
+	t.mu.Lock()
+	sp := t.tgidScratch[tgid]
+	t.mu.Unlock()
+	if sp != nil {
+		sp.reset()
+	}
+}

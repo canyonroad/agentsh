@@ -59,7 +59,13 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		filenamePtr = regs.Arg(0)
 	}
 
-	origFilename, _ := t.readString(tid, filenamePtr, 4096)
+	origFilename, err := t.readString(tid, filenamePtr, 4096)
+	if err != nil {
+		slog.Warn("redirectExec: read original filename failed, denying", "tid", tid, "error", err)
+		t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
 	origLen := len(origFilename) + 1
 
 	stubPath := result.StubPath
@@ -148,6 +154,17 @@ func (t *Tracer) injectFDIntoTracee(tid int, savedRegs Regs, srcFD int, dstFDNum
 			return fmt.Errorf("dup3: %w", err)
 		}
 		t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, gotFD)
+	} else {
+		// pidfd_getfd returns the fd with FD_CLOEXEC set. dup3 would clear
+		// it (flags=0), but since we skipped dup3, explicitly clear it so
+		// the fd survives execve.
+		_, err = t.injectSyscallRet(tid, savedRegs, unix.SYS_FCNTL,
+			gotFD, uint64(unix.F_SETFD), 0)
+		if err != nil {
+			t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, gotFD)
+			t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, pidfd)
+			return fmt.Errorf("fcntl F_SETFD: %w", err)
+		}
 	}
 
 	t.injectSyscall(tid, savedRegs, unix.SYS_CLOSE, pidfd)

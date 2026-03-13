@@ -226,7 +226,12 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, result 
 
 	// Deny the original unlinkat with fake success (return 0).
 	regs.SetSyscallNr(-1)
-	t.setRegs(tid, regs)
+	if err := t.setRegs(tid, regs); err != nil {
+		slog.Warn("softDeleteFile: setRegs failed after rename", "tid", tid, "error", err)
+		// File is already moved; best effort to resume the tracee.
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
 
 	t.mu.Lock()
 	if s, ok := t.tracees[tid]; ok {
@@ -235,5 +240,7 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, result 
 	}
 	t.mu.Unlock()
 
-	unix.PtraceSyscall(tid, 0)
+	if err := unix.PtraceSyscall(tid, 0); err != nil {
+		slog.Warn("softDeleteFile: PtraceSyscall failed", "tid", tid, "error", err)
+	}
 }
