@@ -18,20 +18,38 @@ Phase 4b adds three features to the ptrace backend, all building on Phase 4a's s
 
 ### Architecture
 
-An in-process DNS proxy runs as a goroutine in the tracer process. It binds to `127.0.0.1:0` (OS-assigned port) on both UDP and TCP. The assigned port is stored on the `Tracer` struct.
+An in-process DNS proxy runs as a goroutine in the tracer process. It binds to both `127.0.0.1:0` and `[::1]:0` (OS-assigned ports) on UDP and TCP. The assigned ports are stored on the `Tracer` struct. IPv4 tracee traffic is redirected to the IPv4 listener, IPv6 to the IPv6 listener — preserving socket family semantics.
 
-When a tracee connects to any destination on port 53 (or 853 for DoT), the existing connect redirect from Phase 4a rewrites the sockaddr to `127.0.0.1:<proxyPort>`. The proxy receives the query, consults policy, and returns or relays the response.
+DNS traffic reaches the proxy via two interception paths:
+
+1. **Connected sockets** (`connect` to port 53): The existing connect redirect from Phase 4a rewrites the sockaddr to `127.0.0.1:<proxyPort>` (AF_INET) or `[::1]:<proxyPort>` (AF_INET6). Subsequent `send`/`write` goes to the proxy naturally.
+
+2. **Unconnected sockets** (`sendto`/`sendmsg` to port 53): Many DNS implementations (musl libc, custom resolvers) use `sendto` with a destination address without calling `connect` first. The tracer intercepts `sendto`/`sendmsg` on syscall-enter, parses the destination sockaddr from arg4/arg5, and if the destination port is 53, rewrites the destination address in tracee memory to the proxy's address. The original resolver address is saved for forwarding.
+
+**DoT (port 853) is NOT redirected** to the DNS proxy. DoT wraps DNS in TLS — the plain proxy cannot process TLS-wrapped queries. DoT interception would require TLS termination, which is out of scope. Port 853 is only used for SNI fd-watching (Section 2).
 
 ### Connect Redirect Integration
 
-In the existing `handleNetwork()` path, after `parseSockaddr()` resolves the destination, add a check: if the destination port is 53 or 853 and the family is AF_INET/AF_INET6, redirect the connect to `127.0.0.1:<proxyPort>`. This uses the same connect redirect mechanism from Phase 4a — rewrite the sockaddr in tracee memory.
+In `handleNetwork()`, after `parseSockaddr()`, if the destination port is 53 and family is AF_INET or AF_INET6, redirect:
+- AF_INET → rewrite sockaddr to `127.0.0.1:<proxyPort>` (16-byte `sockaddr_in`)
+- AF_INET6 → rewrite sockaddr to `[::1]:<proxyPort>` (28-byte `sockaddr_in6`), update `addrlen` register
+
+### Sendto/Sendmsg Redirect Integration
+
+In `handleWrite()` (or a dedicated `handleSendto()`), on syscall-enter for `SYS_SENDTO`:
+1. Check arg4 (dest_addr pointer) — if NULL, this is a connected-mode send, skip
+2. Read and parse the destination sockaddr
+3. If port is 53: save original resolver, rewrite dest_addr to proxy address (matching family), allow syscall
+4. If port is not 53: fall through to TLS fd-watch check (SNI rewrite)
+
+For `SYS_SENDMSG`, the destination is in the `msghdr.msg_name` field. Read the `msghdr` struct from tracee memory, extract `msg_name` pointer and `msg_namelen`, then apply the same logic.
 
 ### Query Processing Flow
 
 ```
-Tracee sendto(53) → connect redirected to proxy → proxy receives DNS query
+Tracee DNS query (via connect-redirect or sendto-redirect) → proxy receives query
   1. Parse DNS question (domain, type)
-  2. Look up tracee PID from connection source port (tracked on redirect)
+  2. Look up tracee info from TGID+fd key (tracked on redirect)
   3. Call NetworkHandler.HandleNetwork() with:
      - Operation: "dns"
      - Domain: query name
@@ -48,7 +66,7 @@ Tracee sendto(53) → connect redirected to proxy → proxy receives DNS query
 
 ### PID Tracking
 
-When connect redirect fires for a DNS socket, the proxy needs to know which tracee PID owns the connection. The tracer records `{srcPort → PID, sessionID, originalResolver}` at redirect time. The proxy looks this up when a query arrives on that source port.
+The proxy needs to know which tracee PID owns each connection. The tracer records `{TGID, fd} → {PID, sessionID, originalResolver}` at redirect time — using TGID+fd as the key (not source port, which is collision-prone under port reuse). The proxy resolves the connection back to this mapping via the fd tracker.
 
 ### Proxy Lifecycle
 
@@ -77,8 +95,8 @@ If the fd is watched:
 
 ### Rewrite Mechanics
 
-- **Same length or shorter:** overwrite in-place, pad SNI value with trailing bytes if needed (SNI length field updated)
-- **Longer:** allocate from scratch page, write modified ClientHello there, update write buffer pointer register (arg1) and length register (arg2)
+- **Any length change (shorter or longer):** build a new compacted buffer with the replacement SNI and all length fields updated (TLS record, handshake, extensions, SNI extension, server name list, host name). If the new buffer fits in the original write length, overwrite in-place. If longer, allocate from scratch page, write the new buffer there, and update the buffer pointer register (arg1) and length register (arg2).
+- **Same length:** overwrite the SNI bytes in-place. No length fixup needed.
 - After rewrite, remove fd from watch set (SNI only appears in the first ClientHello)
 
 ### TLS Record Length Fixup
@@ -234,6 +252,8 @@ Integration tests behind `//go:build integration && linux`, following the existi
 | `TestIntegration_DNSProxyRedirectUpstream` | Handler returns redirect, query forwarded to alternate resolver |
 | `TestIntegration_DNSProxySyntheticRecords` | Handler returns synthetic A/AAAA records, tracee gets those IPs |
 | `TestIntegration_DNSConnectRedirect` | Tracee's connect to `8.8.8.8:53` transparently redirected to proxy |
+| `TestIntegration_DNSSendtoRedirect` | Tracee uses unconnected sendto to `8.8.8.8:53`, query intercepted by proxy |
+| `TestIntegration_DNSIPv6Redirect` | Tracee connects to `[2001:4860:4860::8888]:53`, redirected to `[::1]:<proxyPort>` |
 
 ### SNI Rewrite Tests
 
@@ -270,13 +290,14 @@ All runnable via `docker run --cap-add SYS_PTRACE`.
 | `internal/ptrace/fd_tracker.go` | Create | Per-TGID fd tracking for TLS-watched fds and masked status fds |
 | `internal/ptrace/syscalls.go` | Modify | Add `isWriteSyscall`, `isReadSyscall`, `isCloseSyscall` |
 | `internal/ptrace/tracer.go` | Modify | Wire new handlers into dispatch, start DNS proxy, add exit-time handling |
-| `internal/ptrace/handle_network.go` | Modify | Add DNS connect redirect (port 53/853 → proxy), PID tracking |
+| `internal/ptrace/handle_network.go` | Modify | Add DNS connect redirect (port 53 → proxy), sendto/sendmsg DNS redirect, PID tracking |
 | `internal/ptrace/args.go` | Modify | Add `Domain`, `QueryType` to NetworkContext; extend NetworkResult |
 | `internal/ptrace/integration_test.go` | Modify | Add Phase 4b integration tests |
 
 ## 8. What's NOT in Phase 4b
 
 - DoH (DNS-over-HTTPS) interception — would require HTTPS MITM
+- DoT (DNS-over-TLS, port 853) interception — would require TLS termination in the proxy
 - Full TLS proxy / certificate management
 - `PTRACE_TRACEME` detection masking
 - Encrypted ClientHello (ECH) rewrite — not feasible without TLS proxy
