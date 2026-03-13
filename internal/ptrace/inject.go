@@ -181,12 +181,16 @@ func (t *Tracer) injectFromExit(tid int, savedRegs Regs, nr int, args ...uint64)
 // prefilter/seccomp mode (syscall stops report plain SIGTRAP with no event).
 func (t *Tracer) waitForSyscallStop(tid int) error {
 	const (
-		maxAttempts = 100 // guard against infinite loop from unexpected stops
-		timeout     = 5 * time.Second
-		pollDelay   = 200 * time.Microsecond
+		maxStopEvents = 100 // guard against infinite loop from unexpected stop events
+		timeout       = 5 * time.Second
+		pollDelay     = 200 * time.Microsecond
 	)
 	deadline := time.Now().Add(timeout)
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	stopEvents := 0
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("waitForSyscallStop tid %d: timed out after %v", tid, timeout)
+		}
 		var status unix.WaitStatus
 		wpid, err := unix.Wait4(tid, &status, unix.WNOHANG, nil)
 		if err != nil {
@@ -196,10 +200,7 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 			return fmt.Errorf("wait4 tid %d: %w", tid, err)
 		}
 		if wpid == 0 {
-			// Tracee hasn't stopped yet; check deadline.
-			if time.Now().After(deadline) {
-				return fmt.Errorf("waitForSyscallStop tid %d: timed out after %v", tid, timeout)
-			}
+			// Tracee hasn't stopped yet.
 			time.Sleep(pollDelay)
 			continue
 		}
@@ -234,6 +235,10 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 		// Other ptrace event stops (fork, clone, exec, etc.) report
 		// SIGTRAP with a non-zero TrapCause. Resume with signal 0.
 		if sig == unix.SIGTRAP && status.TrapCause() != 0 {
+			stopEvents++
+			if stopEvents >= maxStopEvents {
+				return fmt.Errorf("waitForSyscallStop tid %d: exceeded %d non-progress stop events", tid, maxStopEvents)
+			}
 			if err := unix.PtraceSyscall(tid, 0); err != nil {
 				return fmt.Errorf("inject re-resume tid %d: %w", tid, err)
 			}
@@ -241,11 +246,14 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 		}
 
 		// Real signal delivery: reinject the signal.
+		stopEvents++
+		if stopEvents >= maxStopEvents {
+			return fmt.Errorf("waitForSyscallStop tid %d: exceeded %d non-progress stop events", tid, maxStopEvents)
+		}
 		if err := unix.PtraceSyscall(tid, int(sig)); err != nil {
 			return fmt.Errorf("inject re-resume tid %d: %w", tid, err)
 		}
 	}
-	return fmt.Errorf("waitForSyscallStop tid %d: exceeded %d attempts", tid, maxAttempts)
 }
 
 // injectSyscallRet is a convenience that returns an error if the injected
