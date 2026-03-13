@@ -75,13 +75,11 @@ func parseSockaddr(buf []byte) (family int, address string, port int, err error)
 // handleNetwork intercepts network syscalls for policy evaluation.
 func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 	if t.cfg.NetworkHandler == nil || !t.cfg.TraceNetwork {
-		slog.Info("handleNetwork: skipping", "tid", tid)
 		t.allowSyscall(tid)
 		return
 	}
 
 	nr := regs.SyscallNr()
-	slog.Info("handleNetwork: dispatching", "tid", tid, "nr", nr)
 
 	// Only evaluate policy for connect and bind
 	if nr != unix.SYS_CONNECT && nr != unix.SYS_BIND {

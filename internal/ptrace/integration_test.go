@@ -905,19 +905,25 @@ func TestIntegration_NetworkDenyConnect(t *testing.T) {
 	tmpDir := t.TempDir()
 	readyFile := filepath.Join(tmpDir, "ready")
 	outfile := filepath.Join(tmpDir, "result.txt")
-	shellCmd := fmt.Sprintf(`while [ ! -f %s ]; do sleep 0.01; done; (echo test | %s -w 1 127.0.0.1 12345) 2>/dev/null && echo connected > %s || echo refused > %s`, readyFile, ncPath, outfile, outfile)
+	// Use -n to skip DNS resolution (avoids systemd-resolved latency).
+	shellCmd := fmt.Sprintf(`while [ ! -f %s ]; do sleep 0.01; done; (echo test | %s -n -w 1 127.0.0.1 12345) 2>/dev/null && echo connected > %s || echo refused > %s`, readyFile, ncPath, outfile, outfile)
 	cmd := exec.Command("/bin/sh", "-c", shellCmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 
-	tr.AttachPID(cmd.Process.Pid)
+	// Release the process from Go's runtime tracking to prevent its internal
+	// waitpid from competing with our ptrace tracer's Wait4(-1) for events.
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
 	if !waitForAttach(t, tr, 2*time.Second) {
 		t.Skip("could not attach in time")
 	}
 	os.WriteFile(readyFile, []byte("go"), 0644)
 
-	waitForTraceesDrained(t, tr, 5*time.Second)
+	waitForTraceesDrained(t, tr, 8*time.Second)
 	cancel()
 	<-errCh
 

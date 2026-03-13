@@ -104,12 +104,11 @@ func TestIntegration_ExecveatATEmptyPath(t *testing.T) {
 	<-errCh
 
 	handler.mu.Lock()
-	defer handler.mu.Unlock()
-
 	t.Logf("total handler calls: %d", len(handler.calls))
 	for _, c := range handler.calls {
 		t.Logf("  filename=%q argv=%v", c.Filename, c.Argv)
 	}
+	handler.mu.Unlock()
 
 	// Check if handler received a call with /bin/echo (resolved from fd)
 	echoCalls := handler.CallsMatching("echo")

@@ -365,7 +365,6 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 
 		case sig == unix.SIGTRAP:
 			event := status.TrapCause()
-			slog.Info("handleStop: SIGTRAP event", "tid", tid, "event", event)
 			switch event {
 			case unix.PTRACE_EVENT_FORK, unix.PTRACE_EVENT_CLONE:
 				t.handleNewChild(tid, event)
@@ -426,8 +425,6 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 	}
 	entering := !state.InSyscall
 	state.InSyscall = entering
-	lastNr := state.LastNr
-	slog.Info("handleSyscallStop", "tid", tid, "entering", entering, "lastNr", lastNr)
 	pendingErrno := 0
 	pendingFakeZero := false
 	hasPendingReturn := false
@@ -451,7 +448,6 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 			return
 		}
 		nr := regs.SyscallNr()
-		slog.Info("handleSyscallStop entering dispatch", "tid", tid, "nr", nr)
 		t.mu.Lock()
 		state.LastNr = nr
 		tgid := state.TGID
@@ -463,13 +459,6 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 
 		t.dispatchSyscall(ctx, tid, nr, regs)
 	} else {
-		// At exit, read the actual orig_rax to verify it matches the enter.
-		exitRegs, exitErr := t.getRegs(tid)
-		exitNr := -1
-		if exitErr == nil {
-			exitNr = exitRegs.SyscallNr()
-		}
-		slog.Info("handleSyscallStop exit check", "tid", tid, "exitNr", exitNr, "lastNr", lastNr)
 		if pendingErrno != 0 {
 			t.applyDenyFixup(tid, pendingErrno)
 		} else if pendingFakeZero {

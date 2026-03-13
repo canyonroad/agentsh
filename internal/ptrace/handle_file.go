@@ -139,13 +139,11 @@ func resolveParentFallback(full string) (string, error) {
 // handleFile intercepts file syscalls for policy evaluation.
 func (t *Tracer) handleFile(ctx context.Context, tid int, regs Regs) {
 	if t.cfg.FileHandler == nil || !t.cfg.TraceFile {
-		slog.Info("handleFile: skipping (no handler or trace disabled)", "tid", tid)
 		t.allowSyscall(tid)
 		return
 	}
 
 	nr := regs.SyscallNr()
-	slog.Info("handleFile: extracting args", "tid", tid, "nr", nr)
 
 	path, path2, flags, err := t.extractFileArgs(tid, nr, regs)
 	if err != nil {
@@ -175,8 +173,6 @@ func (t *Tracer) handleFile(ctx context.Context, tid int, regs Regs) {
 		Operation: operation,
 		Flags:     flags,
 	})
-
-	slog.Info("handleFile: handler returned", "tid", tid, "path", path, "operation", operation, "action", result.Action, "allow", result.Allow, "redirect", result.RedirectPath)
 
 	// Dispatch based on Action field (new path) or Allow field (legacy path).
 	action := result.Action
