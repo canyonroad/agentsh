@@ -317,6 +317,14 @@ func (t *Tracer) resumeTracee(tid int, sig int) {
 	}
 }
 
+// ptraceListen calls PTRACE_LISTEN on the specified tid. In PTRACE_SEIZE
+// mode, this keeps the tracee group-stopped while still allowing the tracer
+// to receive ptrace events.
+func ptraceListen(tid int) {
+	unix.RawSyscall6(unix.SYS_PTRACE,
+		uintptr(unix.PTRACE_LISTEN), uintptr(tid), 0, 0, 0, 0)
+}
+
 // applyDenyFixup overwrites the syscall return value with -errno.
 func (t *Tracer) applyDenyFixup(tid int, errno int) {
 	regs, err := t.getRegs(tid)
@@ -395,7 +403,31 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 			}
 
 		default:
-			// Suppress initial SIGSTOP for auto-traced children.
+			// In PTRACE_SEIZE mode, group-stops (SIGSTOP, SIGTSTP, SIGTTIN,
+			// SIGTTOU) are reported with TrapCause == PTRACE_EVENT_STOP and
+			// the stopping signal in StopSignal. Use PTRACE_LISTEN to keep
+			// the tracee group-stopped.
+			if status.TrapCause() == unix.PTRACE_EVENT_STOP {
+				// Exception: suppress the initial SIGSTOP for auto-traced
+				// children so they can start running.
+				if sig == unix.SIGSTOP {
+					t.mu.Lock()
+					state := t.tracees[tid]
+					suppress := state != nil && state.SuppressInitialStop
+					if suppress {
+						state.SuppressInitialStop = false
+					}
+					t.mu.Unlock()
+					if suppress {
+						t.resumeTracee(tid, 0)
+						break
+					}
+				}
+				ptraceListen(tid)
+				break
+			}
+
+			// Suppress initial SIGSTOP for auto-traced children (non-group-stop).
 			if sig == unix.SIGSTOP {
 				t.mu.Lock()
 				state := t.tracees[tid]
@@ -665,12 +697,16 @@ func (t *Tracer) handleEventStop(tid int) {
 	hasState := state != nil
 	t.mu.Unlock()
 
-	// Auto-attached children (via PTRACE_O_TRACEFORK/VFORK/CLONE) receive
-	// PTRACE_EVENT_STOP as their initial stop. If handleNewChild hasn't run
-	// yet (race with parent's fork event), the child has no state. In either
-	// case, resume the child so it can continue executing. Do NOT use
-	// PTRACE_LISTEN here: it's only appropriate for group-stops during
-	// PTRACE_SEIZE, not for initial auto-attach stops.
+	// This handler is only reached when sig == SIGTRAP (see handleStop
+	// dispatcher). Group-stops under PTRACE_SEIZE have the actual stopping
+	// signal (SIGSTOP/SIGTSTP/etc.) as StopSignal, so they fall into the
+	// default signal handler and never reach here. That means we only see
+	// two kinds of PTRACE_EVENT_STOP with SIGTRAP:
+	//   1. Initial auto-attach stops for children traced via
+	//      PTRACE_O_TRACEFORK/VFORK/CLONE.
+	//   2. PTRACE_INTERRUPT-induced stops (handled above via PendingInterrupt).
+	// Both are correctly resumed with PtraceSyscall/PtraceCont; PTRACE_LISTEN
+	// is not needed here.
 	if !hasState {
 		// Create minimal state so the child doesn't get lost.
 		childTGID, _ := readTGID(tid)

@@ -21,6 +21,13 @@ func (t *Tracer) redirectConnect(ctx context.Context, tid int, regs Regs, result
 		return
 	}
 
+	if result.RedirectPort < 0 || result.RedirectPort > 65535 {
+		slog.Warn("redirectConnect: invalid redirect port, denying",
+			"tid", tid, "port", result.RedirectPort)
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
+
 	addrPtr := regs.Arg(1)
 	addrLen := int(regs.Arg(2))
 	if addrLen == 0 || addrLen > 128 {
@@ -44,31 +51,16 @@ func (t *Tracer) redirectConnect(ctx context.Context, tid int, regs Regs, result
 
 	family := int(binary.NativeEndian.Uint16(buf[0:2]))
 
-	// Resolve redirect address.
+	// Parse redirect address — must be a literal IP. DNS resolution in the
+	// ptrace stop path would block the tracer loop and stall all tracees.
 	var redirectIP net.IP
 	if result.RedirectAddr != "" {
 		redirectIP = net.ParseIP(result.RedirectAddr)
 		if redirectIP == nil {
-			ips, err := net.LookupIP(result.RedirectAddr)
-			if err != nil || len(ips) == 0 {
-				slog.Warn("redirectConnect: cannot resolve redirect addr, denying",
-					"tid", tid, "addr", result.RedirectAddr, "error", err)
-				t.denySyscall(tid, int(unix.EACCES))
-				return
-			}
-			for _, ip := range ips {
-				if family == unix.AF_INET && ip.To4() != nil {
-					redirectIP = ip.To4()
-					break
-				}
-				if family == unix.AF_INET6 && ip.To4() == nil {
-					redirectIP = ip
-					break
-				}
-			}
-			if redirectIP == nil {
-				redirectIP = ips[0]
-			}
+			slog.Warn("redirectConnect: redirect addr is not a literal IP, denying",
+				"tid", tid, "addr", result.RedirectAddr)
+			t.denySyscall(tid, int(unix.EACCES))
+			return
 		}
 	}
 
