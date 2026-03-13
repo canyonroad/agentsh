@@ -419,21 +419,42 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 			// the stopping signal in StopSignal. Use PTRACE_LISTEN to keep
 			// the tracee group-stopped.
 			if status.TrapCause() == unix.PTRACE_EVENT_STOP {
-				// Exception: suppress the initial SIGSTOP for auto-traced
-				// children so they can start running.
-				if sig == unix.SIGSTOP {
+				t.mu.Lock()
+				state := t.tracees[tid]
+				hasState := state != nil
+				suppress := state != nil && sig == unix.SIGSTOP && state.SuppressInitialStop
+				if suppress {
+					state.SuppressInitialStop = false
+				}
+				t.mu.Unlock()
+
+				// Auto-attached children may receive this stop before
+				// handleNewChild creates their state. Create minimal
+				// state and resume to avoid leaving them stuck.
+				if !hasState {
+					childTGID, _ := readTGID(tid)
+					if childTGID == 0 {
+						childTGID = tid
+					}
 					t.mu.Lock()
-					state := t.tracees[tid]
-					suppress := state != nil && state.SuppressInitialStop
-					if suppress {
-						state.SuppressInitialStop = false
+					if _, exists := t.tracees[tid]; !exists {
+						t.tracees[tid] = &TraceeState{
+							TID:   tid,
+							TGID:  childTGID,
+							MemFD: -1,
+						}
+						t.metrics.SetTraceeCount(len(t.tracees))
 					}
 					t.mu.Unlock()
-					if suppress {
-						t.resumeTracee(tid, 0)
-						break
-					}
+					t.resumeTracee(tid, 0)
+					break
 				}
+
+				if suppress {
+					t.resumeTracee(tid, 0)
+					break
+				}
+
 				ptraceListen(tid)
 				break
 			}
