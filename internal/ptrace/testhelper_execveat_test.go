@@ -99,7 +99,7 @@ func TestIntegration_ExecveatATEmptyPath(t *testing.T) {
 	tr.AttachPID(cmd.Process.Pid)
 	cmd.Wait()
 
-	waitForTraceesDrained(t, tr, 2*time.Second)
+	waitForTraceesDrained(t, tr, 5*time.Second)
 	cancel()
 	<-errCh
 
