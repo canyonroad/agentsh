@@ -779,8 +779,10 @@ func TestIntegration_FileDeny(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
 
-	tr.AttachPID(cmd.Process.Pid)
+	tr.AttachPID(pid)
 	if !waitForAttach(t, tr, 2*time.Second) {
 		t.Skip("could not attach in time")
 	}
@@ -844,8 +846,10 @@ func TestIntegration_FileAllow(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
 
-	tr.AttachPID(cmd.Process.Pid)
+	tr.AttachPID(pid)
 	if !waitForAttach(t, tr, 2*time.Second) {
 		t.Skip("could not attach in time")
 	}
@@ -972,8 +976,10 @@ func TestIntegration_SignalDeny(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
 
-	tr.AttachPID(cmd.Process.Pid)
+	tr.AttachPID(pid)
 	if !waitForAttach(t, tr, 2*time.Second) {
 		t.Skip("could not attach in time")
 	}
@@ -1028,8 +1034,10 @@ func TestIntegration_SignalRedirect(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
 
-	tr.AttachPID(cmd.Process.Pid)
+	tr.AttachPID(pid)
 	if !waitForAttach(t, tr, 2*time.Second) {
 		t.Skip("could not attach in time")
 	}
