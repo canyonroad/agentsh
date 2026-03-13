@@ -165,9 +165,3 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 		t.denySyscall(tid, int(unix.EACCES))
 	}
 }
-
-// redirectConnect redirects a connect syscall to a different address.
-func (t *Tracer) redirectConnect(ctx context.Context, tid int, regs Regs, result NetworkResult) {
-	slog.Warn("redirectConnect: not yet implemented, denying", "tid", tid)
-	t.denySyscall(tid, int(unix.EACCES))
-}
