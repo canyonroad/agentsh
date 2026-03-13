@@ -479,13 +479,15 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	}
 	nr := regs.SyscallNr()
 
-	// Reset scratch page allocator at each syscall-enter so that
-	// redirect/soft-delete operations always start with a fresh page.
+	// Mark as syscall-entry so that injection helpers (injectSyscall)
+	// use the single-phase entry protocol (modify ORIG_RAX, one cycle
+	// to exit) instead of the two-phase gadget protocol.
 	t.mu.Lock()
 	state := t.tracees[tid]
 	var tgid int
 	if state != nil {
 		tgid = state.TGID
+		state.InSyscall = true
 	}
 	t.mu.Unlock()
 	if tgid != 0 {

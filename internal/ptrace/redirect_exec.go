@@ -154,7 +154,14 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 		return
 	}
 	if err := t.waitForSyscallStop(tid); err != nil {
-		// Tracee exited during injection — nothing more to do.
+		// Check if tracee is still tracked (non-exit failure).
+		t.mu.Lock()
+		tracked := t.tracees[tid] != nil
+		t.mu.Unlock()
+		if tracked {
+			t.cleanupInjectedFD(tid, savedRegs, stubFDNum)
+			t.abortExecRedirect(tid, savedRegs, int(unix.EACCES))
+		}
 		return
 	}
 
