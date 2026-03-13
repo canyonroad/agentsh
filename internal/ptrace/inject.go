@@ -102,6 +102,9 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 		var status unix.WaitStatus
 		_, err := unix.Wait4(tid, &status, 0, nil)
 		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
 			return fmt.Errorf("wait4 tid %d: %w", tid, err)
 		}
 		if !status.Stopped() {
@@ -132,6 +135,11 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 
 		// Ptrace event stops (fork, clone, exec, seccomp, etc.) report
 		// SIGTRAP with a non-zero TrapCause. Resume with signal 0.
+		// Note: injected syscalls (mmap for scratch pages) should not
+		// trigger fork/clone/exec events. Seccomp events are possible
+		// but unlikely for MAP_ANONYMOUS mmap. If they do occur, we
+		// skip normal event handling since the injection must complete
+		// atomically before the tracer loop can process further events.
 		if sig == unix.SIGTRAP && status.TrapCause() != 0 {
 			if err := unix.PtraceSyscall(tid, 0); err != nil {
 				return fmt.Errorf("inject re-resume tid %d: %w", tid, err)
