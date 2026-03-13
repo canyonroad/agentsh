@@ -203,18 +203,6 @@ func (t *Tracer) handleFile(ctx context.Context, tid int, regs Regs) {
 	}
 }
 
-// redirectFile redirects a file syscall to a different path.
-func (t *Tracer) redirectFile(ctx context.Context, tid int, regs Regs, nr int, result FileResult) {
-	slog.Warn("redirectFile: not yet implemented, denying", "tid", tid)
-	t.denySyscall(tid, int(unix.EACCES))
-}
-
-// softDeleteFile performs a soft-delete by moving the file to trash.
-func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, result FileResult) {
-	slog.Warn("softDeleteFile: not yet implemented, denying", "tid", tid)
-	t.denySyscall(tid, int(unix.EACCES))
-}
-
 // extractFileArgs reads file syscall arguments from registers and tracee memory.
 func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string, flags int, err error) {
 	switch nr {
