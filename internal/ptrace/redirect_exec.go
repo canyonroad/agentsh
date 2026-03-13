@@ -248,9 +248,11 @@ func (t *Tracer) injectFDIntoTracee(tid int, savedRegs Regs, srcFD int, dstFDNum
 		ret, _ := t.injectSyscall(tid, savedRegs, unix.SYS_FCNTL,
 			uint64(dstFDNum), uint64(unix.F_GETFD))
 		if ret >= 0 {
-			// dstFDNum is open; save it via dup.
-			dupRet, dupErr := t.injectSyscallRet(tid, savedRegs, unix.SYS_DUP,
-				uint64(dstFDNum))
+			// dstFDNum is open; save it via fcntl(F_DUPFD_CLOEXEC) so the
+			// saved copy is automatically closed on successful exec and does
+			// not leak into the stub process.
+			dupRet, dupErr := t.injectSyscallRet(tid, savedRegs, unix.SYS_FCNTL,
+				uint64(dstFDNum), uint64(unix.F_DUPFD_CLOEXEC), 0)
 			if dupErr == nil {
 				savedFD = int(dupRet)
 			}

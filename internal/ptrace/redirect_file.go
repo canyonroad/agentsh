@@ -36,7 +36,8 @@ func filePathArgIndex(nr int) int {
 	case unix.SYS_SYMLINKAT:
 		return 0
 	default:
-		return -1
+		// Check for legacy (non-at) file syscalls on architectures that have them.
+		return legacyFilePathArgIndex(nr)
 	}
 }
 
@@ -153,8 +154,8 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, absPath
 	}
 
 	nr := regs.SyscallNr()
-	if nr != unix.SYS_UNLINKAT {
-		slog.Warn("softDeleteFile: only supported for unlinkat", "tid", tid, "nr", nr)
+	if nr != unix.SYS_UNLINKAT && !isLegacyUnlink(nr) {
+		slog.Warn("softDeleteFile: only supported for unlinkat/unlink", "tid", tid, "nr", nr)
 		t.denySyscall(tid, int(unix.EACCES))
 		return
 	}
