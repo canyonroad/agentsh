@@ -5,6 +5,7 @@ package ptrace
 import (
 	"fmt"
 	"log/slog"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -172,18 +173,35 @@ func (t *Tracer) injectFromExit(tid int, savedRegs Regs, nr int, args ...uint64)
 // Returns an error if the tracee exits during the wait, after performing
 // bookkeeping cleanup.
 //
+// Uses WNOHANG polling with a deadline to prevent indefinite blocking if the
+// expected stop is lost. Injected syscalls complete in microseconds, so the
+// polling overhead is negligible in practice.
+//
 // Handles both TRACESYSGOOD mode (syscall stops report SIGTRAP|0x80) and
 // prefilter/seccomp mode (syscall stops report plain SIGTRAP with no event).
 func (t *Tracer) waitForSyscallStop(tid int) error {
-	const maxAttempts = 100 // guard against infinite loop from unexpected stops
+	const (
+		maxAttempts = 100 // guard against infinite loop from unexpected stops
+		timeout     = 5 * time.Second
+		pollDelay   = 200 * time.Microsecond
+	)
+	deadline := time.Now().Add(timeout)
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		var status unix.WaitStatus
-		_, err := unix.Wait4(tid, &status, 0, nil)
+		wpid, err := unix.Wait4(tid, &status, unix.WNOHANG, nil)
 		if err != nil {
 			if err == unix.EINTR {
 				continue
 			}
 			return fmt.Errorf("wait4 tid %d: %w", tid, err)
+		}
+		if wpid == 0 {
+			// Tracee hasn't stopped yet; check deadline.
+			if time.Now().After(deadline) {
+				return fmt.Errorf("waitForSyscallStop tid %d: timed out after %v", tid, timeout)
+			}
+			time.Sleep(pollDelay)
+			continue
 		}
 		if !status.Stopped() {
 			if status.Exited() || status.Signaled() {
