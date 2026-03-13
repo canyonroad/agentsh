@@ -57,6 +57,7 @@ func TestFdTracker_CloseFd(t *testing.T) {
 
 	ft.watchTLS(100, 5, "example.com")
 	ft.trackStatusFd(100, 5)
+	ft.recordDNSRedirect(100, 5, 100, "session1", "8.8.8.8:53")
 	ft.closeFd(100, 5)
 
 	if _, ok := ft.getTLSWatch(100, 5); ok {
@@ -64,6 +65,9 @@ func TestFdTracker_CloseFd(t *testing.T) {
 	}
 	if ft.isStatusFd(100, 5) {
 		t.Fatal("status fd should be cleared after closeFd")
+	}
+	if _, ok := ft.getDNSRedirect(100, 5); ok {
+		t.Fatal("DNS redirect should be cleared after closeFd")
 	}
 }
 

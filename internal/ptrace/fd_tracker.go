@@ -87,6 +87,7 @@ func (ft *fdTracker) closeFd(tgid, fd int) {
 	key := tgidFd{tgid, fd}
 	delete(ft.tlsWatched, key)
 	delete(ft.statusFds, key)
+	delete(ft.dnsRedirects, key)
 	ft.mu.Unlock()
 }
 
