@@ -129,7 +129,7 @@ func (p *dnsProxy) handleQuery(ctx context.Context, conn *net.UDPConn, raw []byt
 		if redirectInfo.originalResolver != "" {
 			resp, err = p.forwardQuery(raw, redirectInfo.originalResolver)
 		} else {
-			resp, err = p.buildNXDomain(msg)
+			resp, err = p.buildSERVFAIL(msg) // No resolver known yet (Task 9 wires attribution)
 		}
 	}
 
@@ -150,6 +150,20 @@ func (p *dnsProxy) buildNXDomain(query dnsmessage.Message) ([]byte, error) {
 			RecursionDesired:   query.Header.RecursionDesired,
 			RecursionAvailable: true,
 			RCode:              dnsmessage.RCodeNameError,
+		},
+		Questions: query.Questions,
+	}
+	return resp.Pack()
+}
+
+func (p *dnsProxy) buildSERVFAIL(query dnsmessage.Message) ([]byte, error) {
+	resp := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:                 query.Header.ID,
+			Response:           true,
+			RecursionDesired:   query.Header.RecursionDesired,
+			RecursionAvailable: true,
+			RCode:              dnsmessage.RCodeServerFailure,
 		},
 		Questions: query.Questions,
 	}
@@ -208,7 +222,10 @@ func (p *dnsProxy) buildSyntheticResponse(query dnsmessage.Message, q dnsmessage
 
 func (p *dnsProxy) forwardQuery(raw []byte, upstream string) ([]byte, error) {
 	if _, _, err := net.SplitHostPort(upstream); err != nil {
-		upstream = net.JoinHostPort(upstream, "53")
+		// Strip brackets from bare IPv6 addresses like "[::1]" to avoid
+		// net.JoinHostPort producing "[[::1]]:53".
+		host := strings.TrimPrefix(strings.TrimSuffix(upstream, "]"), "[")
+		upstream = net.JoinHostPort(host, "53")
 	}
 	conn, err := net.Dial("udp", upstream)
 	if err != nil {
