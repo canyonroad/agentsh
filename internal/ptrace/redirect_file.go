@@ -140,7 +140,11 @@ func (t *Tracer) softDeleteFile(ctx context.Context, tid int, regs Regs, result 
 
 	// Generate unique trash filename.
 	var rndBuf [8]byte
-	rand.Read(rndBuf[:])
+	if _, err := rand.Read(rndBuf[:]); err != nil {
+		slog.Warn("softDeleteFile: rand.Read failed, denying", "tid", tid, "error", err)
+		t.denySyscall(tid, int(unix.EACCES))
+		return
+	}
 	trashName := hex.EncodeToString(rndBuf[:])
 	trashPath := result.TrashDir + "/" + trashName
 

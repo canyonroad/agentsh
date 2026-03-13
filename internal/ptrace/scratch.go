@@ -88,6 +88,12 @@ func (t *Tracer) invalidateScratchPage(tgid int) {
 
 // resetScratchIfPresent resets the bump allocator for the given TGID's scratch
 // page, if one exists. Called at each syscall-enter to reclaim space.
+//
+// This is safe despite sharing per-TGID because the tracer event loop is
+// single-threaded: it processes one syscall stop at a time. By the time the
+// next thread in the same TGID hits syscall-enter (triggering reset), the
+// previous thread's redirected path has already been consumed by the kernel
+// during the setRegs+resume sequence.
 func (t *Tracer) resetScratchIfPresent(tgid int) {
 	t.mu.Lock()
 	sp := t.tgidScratch[tgid]
