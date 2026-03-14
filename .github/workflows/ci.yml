@@ -255,7 +255,7 @@ jobs:
           docker push $ECR_REGISTRY/agentsh-test:$IMAGE_TAG
 
       - name: Build seccomp probe
-        run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o build/seccomp-probe ./cmd/seccomp-probe/
+        run: mkdir -p build && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o build/seccomp-probe ./cmd/seccomp-probe/
 
       - name: Build and push workload test image
         env:

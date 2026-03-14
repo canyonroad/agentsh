@@ -171,3 +171,17 @@ func TestParseAuditEvents_Empty(t *testing.T) {
 		t.Errorf("event count = %d, want 0", len(events))
 	}
 }
+
+func TestParseAuditEvents_QuotedValueNotFalsePositive(t *testing.T) {
+	// "action=deny" appearing inside a quoted msg value should NOT be
+	// parsed as a real audit event field.
+	logs := []string{
+		`level=INFO msg="user said action=deny is configured" pid=1234`,
+	}
+
+	events := ParseAuditEvents(logs)
+
+	if len(events) != 0 {
+		t.Errorf("event count = %d, want 0 (action=deny was inside quotes)", len(events))
+	}
+}

@@ -68,8 +68,8 @@ type AuditEvent struct {
 }
 
 // ParseAuditEvents scans agentsh log lines for audit events.
-// Parses key=value tokens from structured log lines, skipping quoted values
-// to avoid false positives from logfmt msg fields containing "action=".
+// Uses quote-aware field parsing to avoid false positives from
+// key=value pairs appearing inside quoted logfmt values.
 func ParseAuditEvents(lines []string) []AuditEvent {
 	var events []AuditEvent
 
@@ -78,16 +78,7 @@ func ParseAuditEvents(lines []string) []AuditEvent {
 			continue
 		}
 
-		fields := make(map[string]string)
-		for _, token := range strings.Fields(line) {
-			// Skip tokens that are part of quoted strings (logfmt values with spaces)
-			if strings.ContainsRune(token, '"') {
-				continue
-			}
-			if k, v, ok := strings.Cut(token, "="); ok {
-				fields[k] = v
-			}
-		}
+		fields := parseLogFields(line)
 
 		action, ok := fields["action"]
 		if !ok {
@@ -102,4 +93,55 @@ func ParseAuditEvents(lines []string) []AuditEvent {
 	}
 
 	return events
+}
+
+// parseLogFields extracts key=value pairs from a structured log line,
+// correctly handling quoted values (e.g., msg="some text action=deny").
+func parseLogFields(line string) map[string]string {
+	fields := make(map[string]string)
+	i := 0
+	for i < len(line) {
+		// Skip whitespace
+		for i < len(line) && line[i] == ' ' {
+			i++
+		}
+		if i >= len(line) {
+			break
+		}
+
+		// Find key (up to '=' or space)
+		start := i
+		for i < len(line) && line[i] != '=' && line[i] != ' ' {
+			i++
+		}
+		if i >= len(line) || line[i] != '=' {
+			// No '=' found — skip this token
+			for i < len(line) && line[i] != ' ' {
+				i++
+			}
+			continue
+		}
+		key := line[start:i]
+		i++ // skip '='
+
+		// Read value (quoted or unquoted)
+		if i < len(line) && line[i] == '"' {
+			i++ // skip opening quote
+			valStart := i
+			for i < len(line) && line[i] != '"' {
+				i++
+			}
+			fields[key] = line[valStart:i]
+			if i < len(line) {
+				i++ // skip closing quote
+			}
+		} else {
+			valStart := i
+			for i < len(line) && line[i] != ' ' {
+				i++
+			}
+			fields[key] = line[valStart:i]
+		}
+	}
+	return fields
 }
