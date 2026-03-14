@@ -1,0 +1,353 @@
+# Benchmark Realistic Policy for agentsh
+# Models real-world enforcement with deny, redirect, and allow rules plus full audit.
+
+version: 1
+name: bench-realistic
+description: |
+  Realistic policy for benchmarking. Has deny rules (system admin, privilege
+  escalation, raw network), redirect rules (destructive rm, git force push,
+  git hard reset), and a comprehensive allow list. Full audit logging enabled.
+  Mirrors agent-default patterns without approve decisions (which would hang).
+
+# =============================================================================
+# COMMAND RULES
+# =============================================================================
+
+command_rules:
+  # ---------------------------------------------------------------------------
+  # Redirect — git guardrails and destructive rm
+  # ---------------------------------------------------------------------------
+
+  - name: redirect-git-force-push
+    description: Block force push, suggest --force-with-lease
+    commands: [git]
+    args_patterns:
+      - "push.*((^|\\s)--force(\\s|$)|(^|\\s)-f(\\s|$))"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["Force push blocked. Use --force-with-lease."]
+    message: "Force push blocked."
+
+  - name: redirect-git-hard-reset
+    description: Block hard reset, suggest stash
+    commands: [git]
+    args_patterns:
+      - "reset.*(--hard)"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["Hard reset blocked. Use git stash."]
+    message: "Hard reset blocked."
+
+  - name: redirect-git-clean
+    description: Block git clean -f
+    commands: [git]
+    args_patterns:
+      - "clean.*(-f|--force)"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["git clean blocked."]
+    message: "git clean blocked."
+
+  - name: redirect-destructive-rm
+    description: Block catastrophic rm commands
+    commands: [rm]
+    args_patterns:
+      - "-rf\\s+/"
+      - "-rf\\s+~"
+      - "-fr\\s+/"
+      - "-fr\\s+~"
+      - "--no-preserve-root"
+    decision: redirect
+    redirect_to:
+      command: echo
+      args: ["Destructive delete blocked."]
+    message: "Catastrophic rm blocked."
+
+  # ---------------------------------------------------------------------------
+  # Deny — system admin, privilege escalation, raw network
+  # ---------------------------------------------------------------------------
+
+  - name: deny-system-admin
+    description: Block system administration commands
+    commands:
+      - shutdown
+      - reboot
+      - systemctl
+      - service
+      - mount
+      - umount
+      - dd
+      - mkfs
+      - fdisk
+    decision: deny
+    message: "System administration command blocked."
+
+  - name: deny-privilege-escalation
+    description: Block privilege escalation
+    commands:
+      - sudo
+      - su
+      - chroot
+      - nsenter
+      - unshare
+    decision: deny
+    message: "Privilege escalation blocked."
+
+  - name: deny-raw-network
+    description: Block raw network tools
+    commands:
+      - nc
+      - netcat
+      - ncat
+      - socat
+      - telnet
+    decision: deny
+    message: "Raw network tool blocked."
+
+  - name: deny-system-pkg-install
+    description: Block system package manager install/upgrade
+    commands:
+      - apt
+      - apt-get
+      - yum
+      - dnf
+    args_patterns:
+      - "install.*"
+      - "upgrade.*"
+    decision: deny
+    message: "System package installation blocked."
+
+  # ---------------------------------------------------------------------------
+  # Allow — comprehensive dev toolchain
+  # ---------------------------------------------------------------------------
+
+  - name: allow-shell-exec
+    description: Shell interpreters and builtins
+    commands:
+      - bash
+      - sh
+      - env
+      - printenv
+      - "true"
+      - "false"
+      - test
+      - "["
+      - expr
+      - seq
+      - sh.real
+      - bash.real
+    decision: allow
+
+  - name: allow-file-ops
+    description: File operations
+    commands:
+      - ls
+      - cat
+      - head
+      - tail
+      - file
+      - stat
+      - wc
+      - touch
+      - mkdir
+      - cp
+      - mv
+      - rm
+      - rmdir
+      - basename
+      - dirname
+      - realpath
+      - readlink
+      - tee
+      - chmod
+      - ln
+    decision: allow
+
+  - name: allow-search-text
+    description: Search and text processing tools
+    commands:
+      - grep
+      - rg
+      - find
+      - sed
+      - awk
+      - tr
+      - sort
+      - uniq
+      - cut
+      - xargs
+      - jq
+      - diff
+    decision: allow
+
+  - name: allow-info-commands
+    description: System information commands
+    commands:
+      - whoami
+      - id
+      - uname
+      - pwd
+      - date
+      - echo
+      - printf
+      - sleep
+      - time
+      - timeout
+    decision: allow
+
+  - name: allow-dev-tools
+    description: Development tools
+    commands:
+      - git
+      - node
+      - npm
+      - python
+      - python3
+      - go
+      - cargo
+      - make
+      - curl
+      - wget
+    decision: allow
+
+# =============================================================================
+# FILE OPERATION RULES
+# =============================================================================
+
+file_rules:
+  - name: deny-ssh-keys
+    description: Block access to SSH keys
+    paths:
+      - "${HOME}/.ssh/**"
+      - "/root/.ssh/**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-cloud-credentials
+    description: Block cloud credentials
+    paths:
+      - "${HOME}/.aws/**"
+      - "${HOME}/.gcloud/**"
+      - "${HOME}/.azure/**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-proc-sys
+    description: Block /proc and /sys
+    paths:
+      - "/proc/**"
+      - "/sys/**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: allow-workspace
+    description: Full access to workspace and bench dirs
+    paths:
+      - "/bench/**"
+    operations:
+      - "*"
+    decision: allow
+
+  - name: allow-tmp
+    description: Full access to temp directories
+    paths:
+      - "/tmp/**"
+      - "/var/tmp/**"
+    operations:
+      - "*"
+    decision: allow
+
+  - name: allow-system-read
+    description: Read access to system paths
+    paths:
+      - "/usr/**"
+      - "/lib/**"
+      - "/lib64/**"
+      - "/bin/**"
+      - "/sbin/**"
+      - "/opt/**"
+    operations:
+      - read
+      - open
+      - stat
+      - list
+      - readlink
+    decision: allow
+
+  - name: allow-etc-read
+    description: Read common config files
+    paths:
+      - "/etc/hosts"
+      - "/etc/resolv.conf"
+      - "/etc/ssl/**"
+      - "/etc/ca-certificates/**"
+      - "/etc/localtime"
+      - "/etc/timezone"
+      - "/etc/passwd"
+      - "/etc/protocols"
+      - "/etc/services"
+      - "/etc/agentsh/**"
+    operations:
+      - read
+      - open
+      - stat
+    decision: allow
+
+  - name: default-deny-files
+    description: Deny all other file operations
+    paths:
+      - "**"
+    operations:
+      - "*"
+    decision: deny
+
+# =============================================================================
+# NETWORK OPERATION RULES
+# =============================================================================
+
+network_rules:
+  - name: allow-localhost
+    description: Allow localhost (dev servers, bench HTTP server)
+    cidrs:
+      - "127.0.0.1/32"
+      - "::1/128"
+    decision: allow
+
+  - name: deny-metadata-services
+    description: Block cloud metadata services
+    cidrs:
+      - "169.254.169.254/32"
+    decision: deny
+
+  - name: deny-private-networks
+    description: Block private/internal networks
+    cidrs:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+    decision: deny
+
+  - name: default-deny-network
+    description: Deny all other network connections
+    domains:
+      - "*"
+    decision: deny
+
+# =============================================================================
+# AUDIT SETTINGS — FULL LOGGING
+# =============================================================================
+
+audit:
+  log_allowed: true
+  log_denied: true
+  log_approved: true
+  include_stdout: false
+  include_stderr: true
+  include_file_content: false
+  retention_days: 7

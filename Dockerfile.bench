@@ -1,0 +1,437 @@
+# Performance benchmark: ptrace vs full mode vs baseline.
+#
+# Build & run:
+#   make bench
+#
+# Or manually:
+#   docker build -f Dockerfile.bench -t agentsh-bench:latest .
+#   docker run --rm \
+#     --cap-add SYS_ADMIN --cap-add SYS_PTRACE \
+#     --device /dev/fuse \
+#     --security-opt seccomp=unconfined \
+#     agentsh-bench:latest
+
+# ---------------------------------------------------------------------------
+# Build stage
+# ---------------------------------------------------------------------------
+FROM golang:1.25 AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends libseccomp-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o /out/agentsh          ./cmd/agentsh && \
+    go build -o /out/agentsh-shell-shim ./cmd/agentsh-shell-shim && \
+    go build -o /out/agentsh-unixwrap  ./cmd/agentsh-unixwrap && \
+    go build -o /out/agentsh-stub      ./cmd/agentsh-stub
+
+# ---------------------------------------------------------------------------
+# Runtime stage
+# ---------------------------------------------------------------------------
+FROM ubuntu:24.04
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      libseccomp2 fuse3 libfuse3-dev curl bash git ca-certificates jq python3 && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/agentsh          /usr/bin/agentsh
+COPY --from=builder /out/agentsh-shell-shim /usr/bin/agentsh-shell-shim
+COPY --from=builder /out/agentsh-unixwrap  /usr/bin/agentsh-unixwrap
+COPY --from=builder /out/agentsh-stub      /usr/bin/agentsh-stub
+
+COPY configs/policies/ /etc/agentsh/policies/
+
+# Create a bare git repo with 20 Go source files for the git-workflow phase.
+RUN mkdir -p /bench/repo.git && cd /bench/repo.git && git init --bare && \
+    tmp=$(mktemp -d) && cd "$tmp" && git init && \
+    git config user.email "bench@test" && git config user.name "bench" && \
+    for p in $(seq 1 20); do \
+      mkdir -p "src/pkg${p}"; \
+      printf 'package pkg%d\n\nfunc Hello%d() string { return "Hello from pkg%d" }\n' \
+        "$p" "$p" "$p" > "src/pkg${p}/main.go"; \
+    done && \
+    git add -A && git commit -m "init" && \
+    git remote add origin /bench/repo.git && git push origin HEAD:main && \
+    cd / && rm -rf "$tmp"
+
+# Embed the workload script.
+COPY <<'WORKLOAD' /bench/workload.sh
+#!/usr/bin/env bash
+set -uo pipefail
+
+sid="$1"
+agentsh=/usr/bin/agentsh
+
+emit() { echo "BENCH:$1:$2"; }
+
+ts_ms() { date +%s%3N; }
+
+# Phase 1 — Process spawning (120 flat processes)
+t0=$(ts_ms)
+for i in $(seq 1 30); do
+  "$agentsh" exec "$sid" -- /bin/true
+  "$agentsh" exec "$sid" -- /bin/echo "bench"  >/dev/null
+  "$agentsh" exec "$sid" -- /bin/cat /dev/null
+  "$agentsh" exec "$sid" -- /bin/ls /tmp        >/dev/null
+done
+t1=$(ts_ms)
+emit "spawn" $(( t1 - t0 ))
+
+# Phase 2 — File I/O (1000 ops inside single exec)
+t0=$(ts_ms)
+"$agentsh" exec "$sid" -- sh -c '
+  d=/tmp/bench-fio; mkdir -p $d
+  for i in $(seq 1 500); do echo "data_$i" > $d/f$i; done
+  for f in $d/f*; do cat "$f" > /dev/null; done
+  rm $d/f*; rmdir $d
+'
+t1=$(ts_ms)
+emit "fileio" $(( t1 - t0 ))
+
+# Phase 3 — Mixed git workflow (single exec)
+t0=$(ts_ms)
+"$agentsh" exec "$sid" -- sh -c '
+  cd /tmp && git clone /bench/repo.git bench-repo 2>/dev/null && cd bench-repo
+  grep -r "Hello" . > /dev/null 2>&1
+  for i in $(seq 1 5); do echo "// mod" >> src/pkg${i}/main.go; done
+  git add -A && git -c user.email=b@t -c user.name=b commit -m "bench" >/dev/null 2>&1
+  rm -rf /tmp/bench-repo
+'
+t1=$(ts_ms)
+emit "git" $(( t1 - t0 ))
+
+# Phase 4 — Network (10 curl requests against local HTTP server)
+t0=$(ts_ms)
+for i in $(seq 1 10); do
+  "$agentsh" exec "$sid" -- curl -so /dev/null http://127.0.0.1:18888/bench
+done
+t1=$(ts_ms)
+emit "network" $(( t1 - t0 ))
+
+# Phase 5 — Policy deny enforcement (50 denied commands)
+# Trigger commands that bench-realistic policy denies.
+t0=$(ts_ms)
+for i in $(seq 1 10); do
+  "$agentsh" exec "$sid" -- sudo echo hi          2>/dev/null || true
+  "$agentsh" exec "$sid" -- shutdown -h now        2>/dev/null || true
+  "$agentsh" exec "$sid" -- nc -z 127.0.0.1 80    2>/dev/null || true
+  "$agentsh" exec "$sid" -- systemctl status       2>/dev/null || true
+  "$agentsh" exec "$sid" -- apt-get install curl   2>/dev/null || true
+done
+t1=$(ts_ms)
+emit "deny" $(( t1 - t0 ))
+
+# Phase 6 — Policy redirect enforcement (50 redirected commands)
+# Trigger commands that bench-realistic policy redirects.
+t0=$(ts_ms)
+for i in $(seq 1 10); do
+  "$agentsh" exec "$sid" -- rm -rf /                 2>/dev/null || true
+  "$agentsh" exec "$sid" -- git push --force          2>/dev/null || true
+  "$agentsh" exec "$sid" -- git reset --hard HEAD     2>/dev/null || true
+  "$agentsh" exec "$sid" -- git clean -f              2>/dev/null || true
+  "$agentsh" exec "$sid" -- rm -fr ~/important        2>/dev/null || true
+done
+t1=$(ts_ms)
+emit "redirect" $(( t1 - t0 ))
+
+# Phase 7 — Deep process tree (20 x 4-level nesting)
+# sh → sh → sh → sh → /bin/true
+# Tests process tree tracking overhead in ptrace and seccomp.
+t0=$(ts_ms)
+for i in $(seq 1 20); do
+  "$agentsh" exec "$sid" -- sh -c 'sh -c "sh -c \"sh -c /bin/true\""'
+done
+t1=$(ts_ms)
+emit "tree_deep" $(( t1 - t0 ))
+
+# Phase 8 — Wide process tree (10 x fan-out of 10 children)
+# Single exec spawns 10 parallel children, each runs a command.
+t0=$(ts_ms)
+for i in $(seq 1 10); do
+  "$agentsh" exec "$sid" -- sh -c '
+    for j in $(seq 1 10); do
+      sh -c "/bin/true" &
+    done
+    wait
+  '
+done
+t1=$(ts_ms)
+emit "tree_wide" $(( t1 - t0 ))
+WORKLOAD
+
+# Embed the entrypoint script.
+COPY <<'ENTRYPOINT_SCRIPT' /bench/entrypoint.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+export AGENTSH_SERVER="http://127.0.0.1:18080"
+base_url="$AGENTSH_SERVER"
+agentsh=/usr/bin/agentsh
+
+# ---- helpers ----------------------------------------------------------------
+
+cleanup_all() {
+  set +e
+  cleanup_server
+  # Stop local HTTP server
+  if [[ -n "${HTTP_PID:-}" ]] && kill -0 "$HTTP_PID" 2>/dev/null; then
+    kill "$HTTP_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup_all EXIT INT TERM
+
+cleanup_server() {
+  if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    sleep 0.2
+    kill -9 "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  SERVER_PID=""
+}
+
+wait_healthy() {
+  for _ in $(seq 1 200); do
+    if curl -fsS "${base_url}/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "ERROR: server failed to become ready" >&2
+  return 1
+}
+
+write_config() {
+  local mode="$1"
+  local dir="/tmp/bench/${mode}"
+  mkdir -p "$dir"
+
+  local fuse_enabled=false
+  local seccomp_execve_enabled=false
+  local ptrace_enabled=false
+
+  case "$mode" in
+    baseline) ;;
+    full)
+      fuse_enabled=true
+      seccomp_execve_enabled=true
+      ;;
+    ptrace)
+      ptrace_enabled=true
+      ;;
+  esac
+
+  cat >"${dir}/config.yaml" <<YAML
+server:
+  http:
+    addr: "127.0.0.1:18080"
+  grpc:
+    enabled: false
+  unix_socket:
+    enabled: false
+
+auth:
+  type: "none"
+
+metrics:
+  enabled: false
+
+health:
+  path: "/health"
+  readiness_path: "/ready"
+
+policies:
+  dir: "/etc/agentsh/policies"
+  default: "bench-realistic"
+
+sessions:
+  base_dir: "${dir}/sessions"
+  max_sessions: 10
+
+audit:
+  enabled: true
+  output: "${dir}/audit.jsonl"
+  storage:
+    sqlite_path: "${dir}/events.db"
+
+sandbox:
+  fuse:
+    enabled: ${fuse_enabled}
+  network:
+    enabled: false
+  unix_sockets:
+    enabled: false
+  seccomp:
+    execve:
+      enabled: ${seccomp_execve_enabled}
+  ptrace:
+    enabled: ${ptrace_enabled}
+    attach_mode: "children"
+    performance:
+      seccomp_prefilter: true
+YAML
+  echo "${dir}/config.yaml"
+}
+
+run_mode() {
+  local mode="$1"
+  local config_path
+  config_path="$(write_config "$mode")"
+  local session_dir
+  session_dir="$(dirname "$config_path")/sessions"
+  mkdir -p "$session_dir"
+
+  # Start server
+  "$agentsh" server --config "$config_path" >/tmp/bench/${mode}/server.log 2>&1 &
+  SERVER_PID="$!"
+
+  if ! wait_healthy; then
+    echo "--- server log ($mode) ---" >&2
+    head -100 "/tmp/bench/${mode}/server.log" >&2 || true
+    cleanup_server
+    return 1
+  fi
+
+  # Create session
+  local sid_json sid
+  sid_json="$("$agentsh" session create --workspace /bench --json)"
+  sid="$(echo "$sid_json" | jq -r '.id')"
+  if [[ -z "$sid" || "$sid" == "null" ]]; then
+    echo "ERROR: failed to create session for mode=$mode" >&2
+    cleanup_server
+    return 1
+  fi
+
+  # Warmup (discarded)
+  bash /bench/workload.sh "$sid" >/dev/null 2>&1 || true
+
+  # Timed runs
+  local results_file="/tmp/bench/${mode}/results.txt"
+  : > "$results_file"
+  for run in 1 2 3; do
+    bash /bench/workload.sh "$sid" 2>/dev/null >> "$results_file"
+  done
+
+  cleanup_server
+  # Clean up FUSE mounts if any
+  umount -l "$session_dir"/*/fuse 2>/dev/null || true
+
+  echo "$results_file"
+}
+
+# ---- median helper ----------------------------------------------------------
+
+median_of() {
+  # Reads three values from args, returns the median.
+  local a=$1 b=$2 c=$3
+  if (( a <= b )); then
+    if (( b <= c )); then echo "$b"
+    elif (( a <= c )); then echo "$c"
+    else echo "$a"; fi
+  else
+    if (( a <= c )); then echo "$a"
+    elif (( b <= c )); then echo "$c"
+    else echo "$b"; fi
+  fi
+}
+
+extract_phase() {
+  local file="$1" phase="$2"
+  grep "^BENCH:${phase}:" "$file" | cut -d: -f3
+}
+
+# ---- main -------------------------------------------------------------------
+
+echo "bench: starting benchmark..."
+mkdir -p /tmp/bench
+
+# Start a local HTTP server for the network phase (avoids external dependency).
+mkdir -p /tmp/bench/www
+echo "ok" > /tmp/bench/www/bench
+python3 -m http.server 18888 --directory /tmp/bench/www >/dev/null 2>&1 &
+HTTP_PID="$!"
+# Wait briefly for it to bind.
+sleep 0.3
+
+declare -A results_files
+
+for mode in baseline full ptrace; do
+  echo "bench: running mode=$mode ..."
+  results_files[$mode]="$(run_mode "$mode")"
+done
+
+# Collect medians
+phases=(spawn fileio git network deny redirect tree_deep tree_wide)
+phase_labels=("Process spawn (120)" "File I/O (1000 ops)" "Git workflow" "Network (10 curl)" "Deny enforcement (50)" "Redirect enforce (50)" "Deep tree (20x4-lvl)" "Wide tree (10x10-fan)")
+
+declare -A medians
+for mode in baseline full ptrace; do
+  for phase in "${phases[@]}"; do
+    vals=( $(extract_phase "${results_files[$mode]}" "$phase") )
+    if [[ ${#vals[@]} -lt 3 ]]; then
+      medians["${mode}_${phase}"]=0
+    else
+      medians["${mode}_${phase}"]="$(median_of "${vals[0]}" "${vals[1]}" "${vals[2]}")"
+    fi
+  done
+done
+
+# Compute totals
+for mode in baseline full ptrace; do
+  total=0
+  for phase in "${phases[@]}"; do
+    total=$(( total + ${medians["${mode}_${phase}"]} ))
+  done
+  medians["${mode}_total"]=$total
+done
+
+# Print table
+overhead() {
+  local base=$1 val=$2
+  if (( base == 0 )); then
+    echo "N/A"
+    return
+  fi
+  awk -v val="$val" -v base="$base" 'BEGIN { printf "+%.1f%%", (val - base) / base * 100 }'
+}
+
+echo ""
+echo "=== agentsh mode benchmark (median of 3 runs) ==="
+echo ""
+printf "| %-22s | %8s | %9s | %13s | %7s | %15s |\n" \
+  "Phase" "Baseline" "Full mode" "Full overhead" "Ptrace" "Ptrace overhead"
+printf "|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|\n" \
+  "$(printf '%0.s-' {1..22})" \
+  "$(printf '%0.s-' {1..8})" \
+  "$(printf '%0.s-' {1..9})" \
+  "$(printf '%0.s-' {1..13})" \
+  "$(printf '%0.s-' {1..7})" \
+  "$(printf '%0.s-' {1..15})"
+
+for i in "${!phases[@]}"; do
+  phase="${phases[$i]}"
+  label="${phase_labels[$i]}"
+  bval="${medians[baseline_${phase}]}"
+  fval="${medians[full_${phase}]}"
+  pval="${medians[ptrace_${phase}]}"
+  foh="$(overhead "$bval" "$fval")"
+  poh="$(overhead "$bval" "$pval")"
+  printf "| %-22s | %6sms | %7sms | %13s | %5sms | %15s |\n" \
+    "$label" "$bval" "$fval" "$foh" "$pval" "$poh"
+done
+
+# Total row
+bval="${medians[baseline_total]}"
+fval="${medians[full_total]}"
+pval="${medians[ptrace_total]}"
+foh="$(overhead "$bval" "$fval")"
+poh="$(overhead "$bval" "$pval")"
+printf "| %-22s | %6sms | %7sms | %13s | %5sms | %15s |\n" \
+  "**TOTAL**" "$bval" "$fval" "$foh" "$pval" "$poh"
+
+echo ""
+echo "bench: done"
+ENTRYPOINT_SCRIPT
+
+ENTRYPOINT ["/bin/bash", "/bench/entrypoint.sh"]

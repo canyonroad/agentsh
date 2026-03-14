@@ -1,5 +1,5 @@
 .PHONY: build build-shim test lint clean proto ebpf
-.PHONY: smoke ptrace-test seccomp-probe
+.PHONY: smoke ptrace-test seccomp-probe bench
 .PHONY: completions package-snapshot package-release
 .PHONY: build-macos-enterprise build-macos-go build-swift assemble-bundle sign-bundle
 .PHONY: build-driver build-driver-debug install-driver uninstall-driver build-windows-full
@@ -48,6 +48,9 @@ ptrace-test:
 seccomp-probe:
 	mkdir -p build
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o build/seccomp-probe ./cmd/seccomp-probe/
+
+bench:
+	bash scripts/bench-modes.sh
 
 lint:
 	@echo "No linter configured"
