@@ -185,3 +185,32 @@ func TestParseAuditEvents_QuotedValueNotFalsePositive(t *testing.T) {
 		t.Errorf("event count = %d, want 0 (action=deny was inside quotes)", len(events))
 	}
 }
+
+func TestParseAuditEvents_TabDelimited(t *testing.T) {
+	logs := []string{
+		"level=INFO\tmsg=\"audit\"\taction=deny\tsyscall=execve\tpid=1234",
+	}
+
+	events := ParseAuditEvents(logs)
+
+	if len(events) != 1 {
+		t.Fatalf("event count = %d, want 1", len(events))
+	}
+	if events[0].Syscall != "execve" {
+		t.Errorf("syscall = %q, want execve", events[0].Syscall)
+	}
+}
+
+func TestParseAuditEvents_UnclosedQuote(t *testing.T) {
+	// Unclosed quote should consume remainder of line as the value,
+	// not cause a false positive for fields after the quote.
+	logs := []string{
+		`level=INFO msg="unclosed quote with action=deny`,
+	}
+
+	events := ParseAuditEvents(logs)
+
+	if len(events) != 0 {
+		t.Errorf("event count = %d, want 0 (action=deny inside unclosed quote)", len(events))
+	}
+}

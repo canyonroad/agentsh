@@ -97,26 +97,31 @@ func ParseAuditEvents(lines []string) []AuditEvent {
 
 // parseLogFields extracts key=value pairs from a structured log line,
 // correctly handling quoted values (e.g., msg="some text action=deny").
+//
+// Supported format: space-delimited key=value or key="quoted value" pairs
+// (standard logfmt). Tabs are treated as whitespace. Unclosed quotes consume
+// the remainder of the line. Escaped quotes inside values are not supported
+// (slog/logfmt does not produce them).
 func parseLogFields(line string) map[string]string {
 	fields := make(map[string]string)
 	i := 0
 	for i < len(line) {
-		// Skip whitespace
-		for i < len(line) && line[i] == ' ' {
+		// Skip whitespace (space or tab)
+		for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
 			i++
 		}
 		if i >= len(line) {
 			break
 		}
 
-		// Find key (up to '=' or space)
+		// Find key (up to '=' or whitespace)
 		start := i
-		for i < len(line) && line[i] != '=' && line[i] != ' ' {
+		for i < len(line) && line[i] != '=' && line[i] != ' ' && line[i] != '\t' {
 			i++
 		}
 		if i >= len(line) || line[i] != '=' {
 			// No '=' found — skip this token
-			for i < len(line) && line[i] != ' ' {
+			for i < len(line) && line[i] != ' ' && line[i] != '\t' {
 				i++
 			}
 			continue
@@ -137,7 +142,7 @@ func parseLogFields(line string) map[string]string {
 			}
 		} else {
 			valStart := i
-			for i < len(line) && line[i] != ' ' {
+			for i < len(line) && line[i] != ' ' && line[i] != '\t' {
 				i++
 			}
 			fields[key] = line[valStart:i]

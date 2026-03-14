@@ -92,7 +92,7 @@ func TestFargateE2E(t *testing.T) {
 
 	t.Logf("task diagnostics:\n%s", taskDiagnostics(task))
 
-	workloadLogs, err := fetchLogs(ctx, cwlClient, logGroup, logStreamPrefix+"-workload", 8)
+	workloadLogs, err := fetchLogs(ctx, cwlClient, logGroup, logStreamPrefix+"-workload")
 	if err != nil {
 		t.Fatalf("fetch workload logs: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestFargateE2E(t *testing.T) {
 		t.Logf("  %s", line)
 	}
 
-	agentshLogs, err := fetchLogs(ctx, cwlClient, logGroup, logStreamPrefix+"-agentsh", 8)
+	agentshLogs, err := fetchLogs(ctx, cwlClient, logGroup, logStreamPrefix+"-agentsh")
 	if err != nil {
 		t.Fatalf("fetch agentsh logs: %v", err)
 	}

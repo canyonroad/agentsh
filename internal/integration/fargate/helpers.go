@@ -98,11 +98,13 @@ func deregisterTaskDef(ctx context.Context, client *ecs.Client, taskDefARN strin
 	return err
 }
 
-// fetchLogs retrieves CloudWatch log events for log streams matching a prefix, with retry.
-func fetchLogs(ctx context.Context, client *cloudwatchlogs.Client, logGroup, logStreamPrefix string, maxRetries int) ([]string, error) {
+// fetchLogs retrieves CloudWatch log events for log streams matching a prefix.
+// Retries with exponential backoff (capped at 15s) until logs appear or ctx expires.
+func fetchLogs(ctx context.Context, client *cloudwatchlogs.Client, logGroup, logStreamPrefix string) ([]string, error) {
 	var lines []string
+	attempt := 0
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for {
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
 			if backoff > 15*time.Second {
@@ -111,10 +113,11 @@ func fetchLogs(ctx context.Context, client *cloudwatchlogs.Client, logGroup, log
 			slog.Info("retrying log fetch", "attempt", attempt, "backoff", backoff)
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, fmt.Errorf("log fetch timed out after %d attempts for prefix %q: %w", attempt, logStreamPrefix, ctx.Err())
 			case <-time.After(backoff):
 			}
 		}
+		attempt++
 
 		streams, err := client.DescribeLogStreams(ctx, &cloudwatchlogs.DescribeLogStreamsInput{
 			LogGroupName:        aws.String(logGroup),
@@ -145,10 +148,7 @@ func fetchLogs(ctx context.Context, client *cloudwatchlogs.Client, logGroup, log
 		}
 	}
 
-	if len(lines) == 0 {
-		return nil, fmt.Errorf("no logs found for prefix %q after %d retries", logStreamPrefix, maxRetries)
-	}
-	return lines, nil
+	return nil, fmt.Errorf("no logs found for prefix %q (context expired)", logStreamPrefix)
 }
 
 // getAllLogEvents paginates through all events in a log stream.
