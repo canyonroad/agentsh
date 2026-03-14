@@ -30,10 +30,7 @@ func TestFargateE2E(t *testing.T) {
 	execRole := requiredEnv(t, "AWS_ECS_EXECUTION_ROLE_ARN")
 	agentshImage := requiredEnv(t, "AGENTSH_TEST_IMAGE")
 	workloadImage := requiredEnv(t, "WORKLOAD_TEST_IMAGE")
-	region := os.Getenv("AWS_REGION")
-	if region == "" {
-		region = "us-east-1"
-	}
+	region := requiredEnv(t, "AWS_REGION")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -106,12 +103,11 @@ func TestFargateE2E(t *testing.T) {
 
 	agentshLogs, err := fetchLogs(ctx, cwlClient, logGroup, logStreamPrefix+"-agentsh", 5)
 	if err != nil {
-		t.Logf("warning: could not fetch agentsh logs: %v", err)
-	} else {
-		t.Logf("agentsh logs (%d lines):", len(agentshLogs))
-		for _, line := range agentshLogs {
-			t.Logf("  %s", line)
-		}
+		t.Fatalf("fetch agentsh logs: %v", err)
+	}
+	t.Logf("agentsh logs (%d lines):", len(agentshLogs))
+	for _, line := range agentshLogs {
+		t.Logf("  %s", line)
 	}
 
 	result := ParseWorkloadLogs(workloadLogs)
@@ -133,7 +129,9 @@ func TestFargateE2E(t *testing.T) {
 		t.Errorf("INFRASTRUCTURE FAILURE: file write control failed: %s — writes broken, FILE test unreliable", fctrl.Detail)
 	}
 
-	if setup, ok := result.Results["SETUP"]; ok && !setup.Pass {
+	if setup, ok := result.Results["SETUP"]; !ok {
+		t.Fatal("SETUP result not found in workload output")
+	} else if !setup.Pass {
 		t.Fatalf("setup failed: %s", setup.Detail)
 	}
 
@@ -151,19 +149,17 @@ func TestFargateE2E(t *testing.T) {
 
 	t.Logf("seccomp probe result: %s", result.SeccompAvailable)
 
-	if agentshLogs != nil {
-		events := ParseAuditEvents(agentshLogs)
-		t.Logf("found %d audit events", len(events))
+	events := ParseAuditEvents(agentshLogs)
+	t.Logf("found %d audit events", len(events))
 
-		denyEvents := 0
-		for _, e := range events {
-			if e.Action == "deny" {
-				denyEvents++
-				t.Logf("  deny event: syscall=%s fields=%v", e.Syscall, e.Fields)
-			}
+	denyEvents := 0
+	for _, e := range events {
+		if e.Action == "deny" {
+			denyEvents++
+			t.Logf("  deny event: syscall=%s fields=%v", e.Syscall, e.Fields)
 		}
-		if denyEvents == 0 {
-			t.Error("no deny audit events found in agentsh logs — tracer may not be making enforcement decisions")
-		}
+	}
+	if denyEvents == 0 {
+		t.Error("no deny audit events found in agentsh logs — tracer may not be making enforcement decisions")
 	}
 }
