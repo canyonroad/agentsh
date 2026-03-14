@@ -222,12 +222,14 @@ func (t *Tracer) TraceeCount() int {
 }
 
 // writeReadyFile writes the sentinel file if configured and not yet written.
+// On failure it sets readyFileWritten to prevent tight-loop retries.
 func (t *Tracer) writeReadyFile() {
 	if t.cfg.ReadyFile == "" || t.readyFileWritten {
 		return
 	}
 	if err := os.WriteFile(t.cfg.ReadyFile, []byte("ready\n"), 0644); err != nil {
 		slog.Error("failed to write ready file", "path", t.cfg.ReadyFile, "error", err)
+		t.readyFileWritten = true // prevent retry spam
 		return
 	}
 	t.readyFileWritten = true

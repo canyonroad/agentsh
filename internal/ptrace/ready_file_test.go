@@ -67,11 +67,14 @@ func TestReadyFileWrittenAfterAttach(t *testing.T) {
 func TestReadyFileNotWrittenWhenEmpty(t *testing.T) {
 	requirePtrace(t)
 
+	// Use a known directory so we can assert no file appears.
+	sentinelDir := t.TempDir()
+
 	handler := &mockExecHandler{defaultAllow: true}
 	cfg := TracerConfig{
 		TraceExecve: true,
 		ExecHandler: handler,
-		// ReadyFile intentionally empty
+		// ReadyFile intentionally empty — no sentinel should be written
 	}
 	tr := NewTracer(cfg)
 
@@ -97,5 +100,13 @@ func TestReadyFileNotWrittenWhenEmpty(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	cancel()
 	<-errCh
-	// Test passes if no panic/error from empty ReadyFile path
+
+	// Assert no files were created in the sentinel directory.
+	entries, err := os.ReadDir(sentinelDir)
+	if err != nil {
+		t.Fatalf("read sentinel dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected no files in sentinel dir, found %d", len(entries))
+	}
 }
