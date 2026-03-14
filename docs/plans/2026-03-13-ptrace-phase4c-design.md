@@ -6,11 +6,23 @@
 
 ---
 
+## Prerequisites
+
+The following must be merged and passing before Phase 4c implementation begins:
+
+1. **ptrace runtime wiring** — The server startup path must wire `TracerConfig` from `sandbox.ptrace` config into the ptrace `Tracer.Run()` loop. This exists in `internal/ptrace/tracer.go` and is exercised by integration tests.
+2. **PID-file attach path** — `pid` mode with `target_pid_file` must be functional: poll for PID file, read PID, call `attachProcess()`. This exists in `internal/ptrace/tracer.go:discoverTarget()`.
+3. **Policy handler interfaces** — `ExecHandler`, `FileHandler`, `NetworkHandler` must be wired from the server's policy engine to the tracer config. This is the existing integration path used by `children` mode.
+
+All three are already implemented and tested. Phase 4c adds E2E validation on real Fargate infrastructure.
+
+---
+
 ## Scope Decisions
 
 ### What's In
 
-1. **Fargate E2E test infrastructure** — ECS task definition, CI plumbing, test harness that launches agentsh + workload as a multi-container Fargate task and verifies policy enforcement end-to-end. Ready to run once AWS credentials are provided.
+1. **Fargate E2E test infrastructure** — ECS task definition, CI plumbing, test harness that launches agentsh + workload as a multi-container Fargate task and verifies policy enforcement end-to-end.
 
 2. **Seccomp availability probe** — A test that runs inside Fargate and reports whether `seccomp(SECCOMP_SET_MODE_FILTER)` with `SECCOMP_RET_TRACE` is available to containers. This determines whether prefilter injection is feasible on Fargate.
 
@@ -51,12 +63,20 @@ The Fargate E2E test harness:
 1. **Build and push** agentsh + test workload images to ECR (done in CI before the test)
 2. **Register** an ECS task definition with two containers (agentsh sidecar + workload) sharing a PID namespace via `pidMode: "task"`
 3. **Run** the task on Fargate, wait for completion
-4. **Pull** CloudWatch logs and assert policy enforcement worked (exec denied, file denied, network denied)
-5. **Clean up** (deregister task def)
+4. **Pull** CloudWatch logs and assert policy enforcement via both agentsh audit events and workload exit codes
+5. **Clean up** (stop task on timeout/failure, deregister task def)
 
-The test workload container runs a script that exercises each enforcement plane — tries to run blocked commands, open blocked files, connect to blocked addresses — and writes results to stdout. The agentsh sidecar uses `pid` mode with a PID file on a shared volume.
+### Assertion Strategy
 
-CI integration: a new workflow job `fargate-e2e` gated on `AWS_ACCESS_KEY_ID` secret presence — skipped when credentials aren't set, runs when they are.
+Tests use **positive and negative controls** to distinguish policy enforcement from environmental failures:
+
+- **Positive control (known-allowed):** Run a command that the test policy explicitly allows (e.g., `ls /tmp`). If this fails, the test environment is broken, not policy.
+- **Negative control (known-denied):** Run a command that the test policy explicitly denies (e.g., `wget`). If this succeeds, enforcement is broken.
+- **Agentsh audit events:** The test harness also checks agentsh container logs for structured audit events (`action=deny`, `command=wget`, etc.) to confirm the tracer made the decision, not a missing binary or filesystem permission.
+
+This prevents false positives from `wget` not being installed, filesystem permission errors, or network unreachability being misinterpreted as policy enforcement.
+
+CI integration: a new workflow job `fargate-e2e` gated on `vars.AWS_ECS_CLUSTER` — skipped when AWS isn't configured, runs when the variable is set. Credentials provided via `aws-actions/configure-aws-credentials` (OIDC preferred, static keys as fallback).
 
 ---
 
@@ -74,62 +94,106 @@ CI integration: a new workflow job `fargate-e2e` gated on `AWS_ACCESS_KEY_ID` se
 - `SYS_PTRACE` capability added
 - Config: `attach_mode: "pid"`, `target_pid_file: "/shared/workload.pid"`, test policy baked in
 - Health check: HTTP `/health` on API port
+- On attach success: writes `/shared/tracer-ready` sentinel file
 - Essential: true
 
 **`workload`:**
 - Image: `${ECR_REGISTRY}/agentsh-fargate-workload:${SHA}`
 - Depends on agentsh container being `HEALTHY`
-- Entrypoint: writes PID to `/shared/workload.pid`, sleeps 3s for agentsh attach, runs test script
+- Entrypoint: writes PID to `/shared/workload.pid`, polls for `/shared/tracer-ready` (up to 30s), then runs test script
 - Essential: true
 
 **Shared volume:**
 - Name: `shared`
 - Bind mount at `/shared` in both containers
-- Used for PID file exchange
+- Used for PID file exchange and tracer-ready sentinel
 
 **Logging:**
 - CloudWatch Logs driver for both containers
 - Log group: `/agentsh/fargate-e2e`
 - Stream prefix: `test-${RUN_ID}`
 
-### Container Ordering
+### Container Ordering and Startup Synchronization
 
-The workload container depends on agentsh being `HEALTHY`. The workload writes its PID, then sleeps 3 seconds for agentsh to discover the PID file and attach. Then the test script runs. This is sufficient for E2E validation — production deployments can use tighter coordination.
+The workload container depends on agentsh being `HEALTHY` (ECS `dependsOn` with `HEALTHY` condition). After writing its PID, the workload polls for the `/shared/tracer-ready` sentinel file that agentsh writes after successfully attaching to the workload process:
+
+```sh
+# Wait for tracer to attach (condition-based, not time-based)
+echo $$ > /shared/workload.pid
+timeout=30
+while [ ! -f /shared/tracer-ready ] && [ $timeout -gt 0 ]; do
+  sleep 0.5
+  timeout=$((timeout - 1))
+done
+if [ ! -f /shared/tracer-ready ]; then
+  echo "SETUP:FAIL:tracer did not attach within 15s"
+  exit 1
+fi
+```
+
+This replaces a fixed `sleep 3` with condition-based readiness, eliminating race conditions under cold starts.
 
 ---
 
 ## 3. Test Workload Script
 
-The workload runs a deterministic test script that produces parseable output:
+The workload runs a deterministic test script with positive and negative controls:
 
 ```sh
 #!/bin/sh
 echo $$ > /shared/workload.pid
-sleep 3  # Wait for agentsh to attach
+
+# Wait for tracer to attach
+timeout=30
+while [ ! -f /shared/tracer-ready ] && [ $timeout -gt 0 ]; do
+  sleep 0.5
+  timeout=$((timeout - 1))
+done
+if [ ! -f /shared/tracer-ready ]; then
+  echo "SETUP:FAIL:tracer did not attach within 15s"
+  exit 1
+fi
+echo "SETUP:PASS:tracer attached"
+
+echo "=== POSITIVE CONTROL ==="
+# This command IS allowed by test policy — verifies environment works
+ls /tmp > /dev/null 2>&1 && echo "CONTROL:PASS:allowed command ran" || echo "CONTROL:FAIL:allowed command blocked"
 
 echo "=== EXEC TEST ==="
-wget --version 2>&1 && echo "EXEC:FAIL:wget ran" || echo "EXEC:PASS:wget denied"
+# wget is explicitly denied by test policy AND installed in the image
+wget --spider http://example.com 2>&1 && echo "EXEC:FAIL:wget ran" || echo "EXEC:PASS:wget denied"
 
 echo "=== FILE TEST ==="
+# /etc/shadow.test is in a denied path pattern
 touch /etc/shadow.test 2>&1 && echo "FILE:FAIL:write succeeded" || echo "FILE:PASS:write denied"
 
 echo "=== NETWORK TEST ==="
-curl -s --connect-timeout 2 http://169.254.169.254/ 2>&1 \
+# 169.254.169.254 (IMDS) is denied by test policy
+# Use a known-installed tool, not curl (may not be present)
+wget --spider --timeout=2 http://169.254.169.254/ 2>&1 \
   && echo "NET:FAIL:connect succeeded" || echo "NET:PASS:connect denied"
 
 echo "=== SECCOMP PROBE ==="
-/shared/seccomp-probe && echo "SECCOMP:AVAILABLE" || echo "SECCOMP:UNAVAILABLE"
+/usr/local/bin/seccomp-probe && echo "SECCOMP:AVAILABLE" || echo "SECCOMP:UNAVAILABLE"
 
 echo "=== DONE ==="
 ```
 
-The test harness scans CloudWatch logs for `EXEC:PASS`, `FILE:PASS`, `NET:PASS` lines. Any `FAIL` line fails the test. The `SECCOMP` result is reported but does not fail the test — it's informational for the prefilter injection decision.
+### Assertion Rules
+
+The test harness scans **both** workload and agentsh CloudWatch logs:
+
+1. **Workload logs:** `SETUP:PASS`, `CONTROL:PASS`, `EXEC:PASS`, `FILE:PASS`, `NET:PASS` must all be present. Any `FAIL` line fails the test. `SECCOMP` result is reported but informational.
+
+2. **Agentsh logs:** Must contain audit events for each denied action (`action=deny` for wget, file write, IMDS connect). This confirms the tracer made the decision, not environmental happenstance.
+
+3. **Positive control:** `CONTROL:PASS` must be present. If missing, the test environment is broken (not a policy issue) and the test is marked as an infrastructure failure, not a policy failure.
 
 ---
 
 ## 4. Seccomp Probe Binary
 
-A small standalone Go program at `cmd/seccomp-probe/main.go`:
+A small standalone Go program at `cmd/seccomp-probe/main.go`, installed at `/usr/local/bin/seccomp-probe` in the workload image:
 
 ```go
 func main() {
@@ -141,7 +205,7 @@ func main() {
 }
 ```
 
-The BPF program allows everything (`RET_ALLOW`) — it doesn't actually filter anything. We just want to know if the `seccomp()` syscall is permitted by the Fargate environment. The binary is cross-compiled into the workload image.
+The BPF program allows everything (`RET_ALLOW`) — it doesn't actually filter anything. We just want to know if the `seccomp()` syscall is permitted by the Fargate environment. The binary is cross-compiled (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`) and `COPY`'d into the workload Dockerfile.
 
 ---
 
@@ -160,11 +224,22 @@ Uses `aws-sdk-go-v2/service/ecs` and `aws-sdk-go-v2/service/cloudwatchlogs`.
 
 3. **Run task:** `RunTask` with Fargate launch type, subnet and security group from env vars, auto-assign public IP for outbound internet.
 
-4. **Wait:** Poll `DescribeTasks` until task status is `STOPPED` (timeout: 120s).
+4. **Wait:** Poll `DescribeTasks` with status-based progress logging until task reaches `STOPPED` (timeout: 300s). On each poll, log current task status (`PROVISIONING` → `PENDING` → `RUNNING` → `STOPPED`). On timeout, call `StopTask` with reason `"E2E test timeout"` before failing.
 
-5. **Assert:** Pull CloudWatch log events for the workload container's log stream. Scan for `PASS`/`FAIL` markers. Report seccomp probe result separately.
+5. **Assert:** Retry CloudWatch `GetLogEvents` with up to 30s backoff to handle eventual consistency lag. Scan workload logs for `PASS`/`FAIL` markers. Scan agentsh logs for audit events. Report seccomp probe result separately.
 
-6. **Cleanup:** Deregister task definition revision. Log group persists for debugging.
+6. **Cleanup (always runs, even on failure):**
+   - Call `StopTask` if task is still running
+   - Deregister task definition revision
+   - Log group persists for post-mortem debugging
+   - Log `stoppedReason` and per-container exit codes on failure for diagnostics
+
+### Error Handling
+
+- **Task fails to start:** Log `stoppedReason` from `DescribeTasks`, fail test with diagnostic message.
+- **Container exits non-zero:** Log per-container `exitCode` and `reason` from task description.
+- **CloudWatch logs missing:** Retry with exponential backoff (1s, 2s, 4s, ...) up to 30s. If still missing, fail with "logs not available" rather than false pass.
+- **Partial log output:** If `DONE` marker is missing, report incomplete test run.
 
 ### Environment Variables (from CI secrets)
 
@@ -205,37 +280,82 @@ fargate-e2e:
 ```
 
 - **Only runs on main pushes** — not on PRs (costs money, needs secrets)
-- **Gated on `AWS_ECS_CLUSTER` variable** — skipped entirely when AWS isn't configured
+- **Gated on `vars.AWS_ECS_CLUSTER`** — skipped entirely when AWS isn't configured. This single gate covers all AWS resources (cluster implies credentials, subnet, etc. are also configured)
 - **After unit + integration pass** — no point running Fargate if basic tests fail
-- **15 min timeout** — generous for task startup (~30s) + test (~30s) + teardown
+- **15 min timeout** — generous for image push + Fargate cold start + test + teardown
+- **Non-blocking on main:** If the job becomes flaky, it can be disabled by clearing the `AWS_ECS_CLUSTER` variable without code changes. The job is `continue-on-error: true` to avoid blocking main merges while Fargate infrastructure is being stabilized.
 
 ---
 
 ## 7. AWS Resources (Pre-Provisioned)
 
-These must exist before the test runs. Documented in `docs/fargate-e2e-setup.md`:
+These must exist before the test runs. Documented in `docs/fargate-e2e-setup.md` (deliverable of this phase):
 
 - **ECS cluster** (Fargate-only, no EC2 capacity providers)
-- **ECR repository** (for agentsh + workload images, with lifecycle policy)
+- **ECR repositories** (two: `agentsh-test` + `agentsh-fargate-workload`, with lifecycle policy to keep last 5 images)
 - **VPC** with public subnet + internet gateway
 - **Security group** allowing all egress, no ingress
 - **IAM task execution role** with `AmazonECSTaskExecutionRolePolicy` + CloudWatch Logs permissions
-- **CloudWatch log group** `/agentsh/fargate-e2e`
-- **GitHub Actions secrets** for credentials
+- **CloudWatch log group** `/agentsh/fargate-e2e` (7-day retention)
+- **GitHub Actions:** `vars.AWS_ECS_CLUSTER` variable + credential secrets (OIDC preferred)
+
+---
+
+## 8. Implementation Phases
+
+### Phase A: Scaffold and seccomp probe (no AWS needed)
+
+1. Create `cmd/seccomp-probe/main.go` with the trivial BPF probe
+2. Create `Dockerfile.fargate-test` for workload image (includes wget, test script, seccomp-probe binary)
+3. Create `internal/integration/fargate/` package scaffold with build tag
+4. Verify seccomp probe compiles and runs locally (`docker run --cap-add SYS_PTRACE`)
+
+**Acceptance:** `seccomp-probe` binary runs in Docker, workload Dockerfile builds.
+
+### Phase B: Task definition builder
+
+5. Implement `task_definition.go` — Go function that builds the `RegisterTaskDefinitionInput` struct with both containers, shared volume, PID mode, capabilities, logging config
+6. Unit test the task definition builder (verify struct fields, no AWS calls)
+
+**Acceptance:** Task def builder produces correct JSON, unit tests pass.
+
+### Phase C: Test harness (runner + waiter + log parser)
+
+7. Implement `helpers.go` — AWS client setup, `runTask()`, `waitForTask()` with status logging and timeout, `stopTask()`, `fetchLogs()` with retry, `deregisterTaskDef()`
+8. Implement `fargate_test.go` — `TestFargateE2E` orchestrating the full flow, assertion logic for positive/negative controls and audit events
+9. Cleanup logic in `t.Cleanup()` — always stops task + deregisters task def
+
+**Acceptance:** Test compiles, harness logic is correct (can't run without AWS).
+
+### Phase D: CI wiring
+
+10. Add `fargate-e2e` job to `.github/workflows/ci.yml`
+11. Write `docs/fargate-e2e-setup.md` with AWS resource provisioning instructions and GitHub Actions configuration
+
+**Acceptance:** CI job appears in workflow, is skipped when `AWS_ECS_CLUSTER` is not set.
+
+### Phase E: End-to-end validation (requires AWS credentials)
+
+12. Provision AWS resources per setup guide
+13. Configure GitHub Actions secrets/variables
+14. Run the test, verify pass, check seccomp probe result
+
+**Acceptance:** Test passes on real Fargate. Seccomp probe result documented.
 
 ---
 
 ## File Map
 
-| Component | Location |
-|-----------|----------|
-| Seccomp probe binary | `cmd/seccomp-probe/main.go` |
-| Workload Dockerfile | `Dockerfile.fargate-test` |
-| ECS task def (Go code) | `internal/integration/fargate/task_definition.go` |
-| Test harness | `internal/integration/fargate/fargate_test.go` |
-| Test helpers | `internal/integration/fargate/helpers.go` |
-| CI job | `.github/workflows/ci.yml` (`fargate-e2e` job) |
-| Setup guide | `docs/fargate-e2e-setup.md` |
+| Component | Location | Deliverable |
+|-----------|----------|-------------|
+| Seccomp probe binary | `cmd/seccomp-probe/main.go` | Phase A |
+| Workload Dockerfile | `Dockerfile.fargate-test` | Phase A |
+| ECS task def builder | `internal/integration/fargate/task_definition.go` | Phase B |
+| Task def unit tests | `internal/integration/fargate/task_definition_test.go` | Phase B |
+| Test helpers (AWS ops) | `internal/integration/fargate/helpers.go` | Phase C |
+| Test harness | `internal/integration/fargate/fargate_test.go` | Phase C |
+| CI job | `.github/workflows/ci.yml` (`fargate-e2e` job) | Phase D |
+| Setup guide | `docs/fargate-e2e-setup.md` | Phase D |
 
 ---
 
