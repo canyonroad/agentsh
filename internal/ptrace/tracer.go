@@ -190,7 +190,8 @@ type Tracer struct {
 	parkedTracees map[int]struct{}
 	tgidScratch   map[int]*scratchPage
 
-	readyFileWritten bool
+	readyFileWritten  bool
+	readyFileAttempts int
 
 	stopped chan struct{}
 }
@@ -222,14 +223,18 @@ func (t *Tracer) TraceeCount() int {
 }
 
 // writeReadyFile writes the sentinel file if configured and not yet written.
-// On failure it sets readyFileWritten to prevent tight-loop retries.
+// Retries up to 3 times on failure before giving up.
 func (t *Tracer) writeReadyFile() {
 	if t.cfg.ReadyFile == "" || t.readyFileWritten {
 		return
 	}
+	t.readyFileAttempts++
 	if err := os.WriteFile(t.cfg.ReadyFile, []byte("ready\n"), 0644); err != nil {
-		slog.Error("failed to write ready file", "path", t.cfg.ReadyFile, "error", err)
-		t.readyFileWritten = true // prevent retry spam
+		slog.Error("failed to write ready file", "path", t.cfg.ReadyFile, "error", err, "attempt", t.readyFileAttempts)
+		if t.readyFileAttempts >= 3 {
+			slog.Error("giving up on ready file after max attempts", "path", t.cfg.ReadyFile)
+			t.readyFileWritten = true // stop retrying
+		}
 		return
 	}
 	t.readyFileWritten = true
