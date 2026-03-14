@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-13
 **Author:** Eran / Canyon Road
-**Status:** Design Complete
+**Status:** Implemented
 
 ---
 
@@ -158,9 +158,15 @@ echo "=== POSITIVE CONTROL ==="
 # This command IS allowed by test policy — verifies environment works
 ls /tmp > /dev/null 2>&1 && echo "CONTROL:PASS:allowed command ran" || echo "CONTROL:FAIL:allowed command blocked"
 
+echo "=== FILE WRITE CONTROL ==="
+# Baseline: can we write to /tmp at all? If this fails, filesystem is broken.
+touch /tmp/write-control-test 2>&1 && echo "FILECONTROL:PASS:write works" || echo "FILECONTROL:FAIL:write failed"
+rm -f /tmp/write-control-test
+
 echo "=== EXEC TEST ==="
 # wget is explicitly denied by test policy AND installed in the image
-wget --spider http://example.com 2>&1 && echo "EXEC:FAIL:wget ran" || echo "EXEC:PASS:wget denied"
+# Uses --version (no network needed) to test exec denial only
+wget --version > /dev/null 2>&1 && echo "EXEC:FAIL:wget ran" || echo "EXEC:PASS:wget denied"
 
 echo "=== FILE TEST ==="
 # /etc/shadow.test is in a denied path pattern
@@ -170,12 +176,16 @@ echo "=== NETWORK TEST ==="
 # 169.254.169.254 (IMDS) is denied by network policy
 # Use python3 (exec-allowed) to test network denial independently of exec denial
 python3 -c "
-import urllib.request, sys
+import urllib.request, urllib.error, socket, sys
 try:
     urllib.request.urlopen('http://169.254.169.254/', timeout=2)
     print('NET:FAIL:connect succeeded')
-except Exception:
-    print('NET:PASS:connect denied')
+except urllib.error.HTTPError as e:
+    print('NET:FAIL:connect succeeded (HTTP ' + str(e.code) + ')')
+except (ConnectionRefusedError, ConnectionResetError, OSError) as e:
+    print('NET:PASS:connect denied (' + type(e).__name__ + ')')
+except Exception as e:
+    print('NET:WARN:unexpected error (' + type(e).__name__ + ': ' + str(e) + ')')
 " 2>&1
 
 echo "=== SECCOMP PROBE ==="
@@ -188,11 +198,11 @@ echo "=== DONE ==="
 
 The test harness scans **both** workload and agentsh CloudWatch logs:
 
-1. **Workload logs:** `SETUP:PASS`, `CONTROL:PASS`, `EXEC:PASS`, `FILE:PASS`, `NET:PASS` must all be present. Any `FAIL` line fails the test. `SECCOMP` result is reported but informational.
+1. **Workload logs:** `SETUP:PASS`, `CONTROL:PASS`, `FILECONTROL:PASS`, `EXEC:PASS`, `FILE:PASS`, `NET:PASS` must all be present. Any `FAIL` line fails the test. `NET:WARN` is treated as non-pass (needs investigation). `SECCOMP` result is reported but informational.
 
-2. **Agentsh logs:** Must contain audit events for each denied action (`action=deny` for wget, file write, IMDS connect). This confirms the tracer made the decision, not environmental happenstance.
+2. **Agentsh logs:** Must contain audit events for each denied action (`action=deny` for wget, file write, IMDS connect). This confirms the tracer made the decision, not environmental happenstance. Log parsing uses quote-aware field extraction to avoid false positives from `key=value` pairs inside quoted logfmt values.
 
-3. **Positive control:** `CONTROL:PASS` must be present. If missing, the test environment is broken (not a policy issue) and the test is marked as an infrastructure failure, not a policy failure.
+3. **Positive controls:** `CONTROL:PASS` (exec works) and `FILECONTROL:PASS` (writes work) must be present. If missing, the test environment is broken (not a policy issue) and the test is marked as an infrastructure failure, not a policy failure.
 
 ---
 
@@ -356,9 +366,11 @@ These must exist before the test runs. Documented in `docs/fargate-e2e-setup.md`
 
 | Component | Location | Deliverable |
 |-----------|----------|-------------|
-| Seccomp probe binary | `cmd/seccomp-probe/main.go` | Phase A |
-| Workload Dockerfile | `Dockerfile.fargate-test` | Phase A |
+| Seccomp probe binary | `cmd/seccomp-probe/main.go`, `main_stub.go` | Phase A |
+| Workload Dockerfile | `Dockerfile.fargate-workload` | Phase A |
+| Workload test script | `scripts/fargate-workload-test.sh` | Phase A |
 | Tracer-ready sentinel | `internal/ptrace/tracer.go` (ReadyFile support) | Phase A |
+| Sentinel tests | `internal/ptrace/ready_file_test.go` | Phase A |
 | ECS task def builder | `internal/integration/fargate/task_definition.go` | Phase B |
 | Task def unit tests | `internal/integration/fargate/task_definition_test.go` | Phase B |
 | Test helpers (AWS ops) | `internal/integration/fargate/helpers.go` | Phase C |
@@ -366,6 +378,7 @@ These must exist before the test runs. Documented in `docs/fargate-e2e-setup.md`
 | Test harness | `internal/integration/fargate/fargate_test.go` | Phase C |
 | CI job | `.github/workflows/ci.yml` (`fargate-e2e` job) | Phase D |
 | Setup guide | `docs/fargate-e2e-setup.md` | Phase D |
+| Makefile target | `Makefile` (`seccomp-probe` target) | Phase D |
 
 ---
 
