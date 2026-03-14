@@ -58,11 +58,14 @@ func BuildTaskDefinition(p TaskDefParams) *ecs.RegisterTaskDefinitionInput {
 					},
 				},
 				HealthCheck: &ecstypes.HealthCheck{
-					Command:     []string{"CMD-SHELL", "test -f /tmp/healthy || exit 1"},
+					// Verifies the agentsh process is running. This will be replaced
+					// with an HTTP /health check once server startup wiring is complete
+					// (prerequisite #1 in the Phase 4c design).
+					Command:     []string{"CMD-SHELL", "test -f /shared/tracer-ready || kill -0 1"},
 					Interval:    aws.Int32(5),
 					Timeout:     aws.Int32(2),
 					Retries:     aws.Int32(10),
-					StartPeriod: aws.Int32(10),
+					StartPeriod: aws.Int32(15),
 				},
 				LogConfiguration: &ecstypes.LogConfiguration{
 					LogDriver: ecstypes.LogDriverAwslogs,
