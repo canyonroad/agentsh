@@ -98,10 +98,10 @@ func ParseAuditEvents(lines []string) []AuditEvent {
 // parseLogFields extracts key=value pairs from a structured log line,
 // correctly handling quoted values (e.g., msg="some text action=deny").
 //
-// Supported format: space-delimited key=value or key="quoted value" pairs
-// (standard logfmt). Tabs are treated as whitespace. Unclosed quotes consume
-// the remainder of the line. Escaped quotes inside values are not supported
-// (slog/logfmt does not produce them).
+// Supported format: space/tab-delimited key=value or key="quoted value" pairs
+// (standard logfmt). Backslash-escaped quotes (\" ) inside quoted values are
+// handled for defense in depth, though slog/logfmt does not produce them.
+// Unclosed quotes consume the remainder of the line.
 func parseLogFields(line string) map[string]string {
 	fields := make(map[string]string)
 	i := 0
@@ -132,11 +132,15 @@ func parseLogFields(line string) map[string]string {
 		// Read value (quoted or unquoted)
 		if i < len(line) && line[i] == '"' {
 			i++ // skip opening quote
-			valStart := i
+			var val []byte
 			for i < len(line) && line[i] != '"' {
+				if line[i] == '\\' && i+1 < len(line) {
+					i++ // skip backslash, take next char literally
+				}
+				val = append(val, line[i])
 				i++
 			}
-			fields[key] = line[valStart:i]
+			fields[key] = string(val)
 			if i < len(line) {
 				i++ // skip closing quote
 			}

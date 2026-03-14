@@ -92,7 +92,11 @@ func TestFargateE2E(t *testing.T) {
 
 	t.Logf("task diagnostics:\n%s", taskDiagnostics(task))
 
-	workloadLogs, err := fetchLogs(ctx, cwlClient, logGroup, logStreamPrefix+"-workload")
+	// Use per-phase timeouts for log fetching to avoid one phase consuming the entire budget
+	logCtx, logCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer logCancel()
+
+	workloadLogs, err := fetchLogs(logCtx, cwlClient, logGroup, logStreamPrefix+"-workload")
 	if err != nil {
 		t.Fatalf("fetch workload logs: %v", err)
 	}
@@ -101,7 +105,10 @@ func TestFargateE2E(t *testing.T) {
 		t.Logf("  %s", line)
 	}
 
-	agentshLogs, err := fetchLogs(ctx, cwlClient, logGroup, logStreamPrefix+"-agentsh")
+	agentLogCtx, agentLogCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer agentLogCancel()
+
+	agentshLogs, err := fetchLogs(agentLogCtx, cwlClient, logGroup, logStreamPrefix+"-agentsh")
 	if err != nil {
 		t.Fatalf("fetch agentsh logs: %v", err)
 	}

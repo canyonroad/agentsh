@@ -105,6 +105,12 @@ func fetchLogs(ctx context.Context, client *cloudwatchlogs.Client, logGroup, log
 	attempt := 0
 
 	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("log fetch timed out after %d attempts for prefix %q: %w", attempt, logStreamPrefix, ctx.Err())
+		default:
+		}
+
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
 			if backoff > 15*time.Second {
@@ -147,8 +153,6 @@ func fetchLogs(ctx context.Context, client *cloudwatchlogs.Client, logGroup, log
 			return lines, nil
 		}
 	}
-
-	return nil, fmt.Errorf("no logs found for prefix %q (context expired)", logStreamPrefix)
 }
 
 // getAllLogEvents paginates through all events in a log stream.

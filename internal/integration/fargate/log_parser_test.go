@@ -214,3 +214,16 @@ func TestParseAuditEvents_UnclosedQuote(t *testing.T) {
 		t.Errorf("event count = %d, want 0 (action=deny inside unclosed quote)", len(events))
 	}
 }
+
+func TestParseAuditEvents_EscapedQuote(t *testing.T) {
+	// Backslash-escaped quote inside a quoted value should not terminate the value.
+	logs := []string{
+		`level=INFO msg="said \"action=deny\" in chat" pid=1234`,
+	}
+
+	events := ParseAuditEvents(logs)
+
+	if len(events) != 0 {
+		t.Errorf("event count = %d, want 0 (action=deny inside escaped quotes)", len(events))
+	}
+}
