@@ -39,10 +39,13 @@ echo "=== NETWORK TEST ==="
 # Use python3 (exec-allowed) to test network denial independently of exec denial.
 # Catch specific exceptions to distinguish policy denial from env issues.
 python3 -c "
-import urllib.request, socket, sys
+import urllib.request, urllib.error, socket, sys
 try:
     urllib.request.urlopen('http://169.254.169.254/', timeout=2)
     print('NET:FAIL:connect succeeded')
+except urllib.error.HTTPError as e:
+    # Got an HTTP response — connection was NOT denied by policy
+    print('NET:FAIL:connect succeeded (HTTP ' + str(e.code) + ')')
 except (ConnectionRefusedError, ConnectionResetError, OSError) as e:
     # Policy enforcement typically causes ECONNREFUSED, EACCES, or EPERM
     print('NET:PASS:connect denied (' + type(e).__name__ + ')')

@@ -1,5 +1,3 @@
-//go:build fargate
-
 // Package fargate contains end-to-end tests that run on AWS Fargate.
 //
 // These tests require AWS credentials and are gated by the "fargate" build tag.
