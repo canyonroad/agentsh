@@ -207,3 +207,71 @@ jobs:
 
       - name: Run API integration tests
         run: go test -v -tags=integration ./internal/api/... ./internal/llmproxy/...
+
+  fargate-e2e:
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.AWS_ECS_CLUSTER != ''
+    needs: [test-linux, integration]
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-fargate-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-fargate-
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push agentsh test image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -f Dockerfile.ptrace-test -t $ECR_REGISTRY/agentsh-test:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/agentsh-test:$IMAGE_TAG
+
+      - name: Build seccomp probe
+        run: mkdir -p build && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o build/seccomp-probe ./cmd/seccomp-probe/
+
+      - name: Build and push workload test image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -f Dockerfile.fargate-workload -t $ECR_REGISTRY/agentsh-fargate-workload:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/agentsh-fargate-workload:$IMAGE_TAG
+
+      - name: Run Fargate E2E tests
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          AWS_ECS_CLUSTER: ${{ vars.AWS_ECS_CLUSTER }}
+          AWS_ECS_SUBNET: ${{ vars.AWS_ECS_SUBNET }}
+          AWS_ECS_SECURITY_GROUP: ${{ vars.AWS_ECS_SECURITY_GROUP }}
+          AWS_ECS_EXECUTION_ROLE_ARN: ${{ vars.AWS_ECS_EXECUTION_ROLE_ARN }}
+          AGENTSH_TEST_IMAGE: ${{ steps.ecr-login.outputs.registry }}/agentsh-test:${{ github.sha }}
+          WORKLOAD_TEST_IMAGE: ${{ steps.ecr-login.outputs.registry }}/agentsh-fargate-workload:${{ github.sha }}
+        run: go test -v -tags=fargate -timeout 5m ./internal/integration/fargate/...

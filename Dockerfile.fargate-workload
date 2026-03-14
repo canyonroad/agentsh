@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+# Install tools needed by the test script
+RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
+
+# Copy seccomp probe binary (pre-built for linux/amd64)
+COPY build/seccomp-probe /usr/local/bin/seccomp-probe
+
+# Copy test script
+COPY scripts/fargate-workload-test.sh /usr/local/bin/workload-test.sh
+RUN chmod +x /usr/local/bin/workload-test.sh
+
+# Shared volume mount point
+RUN mkdir -p /shared
+
+ENTRYPOINT ["/usr/local/bin/workload-test.sh"]

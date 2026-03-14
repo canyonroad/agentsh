@@ -3,7 +3,7 @@
 **Version:** 0.1 — Draft  
 **Date:** 2026-03-11  
 **Author:** Eran / Canyon Road  
-**Status:** Phase 4b Complete
+**Status:** Phase 4c Complete
 
 ---
 
@@ -44,10 +44,15 @@ The agentsh server process in the sidecar runs the ptrace tracer loop, which att
 ### 2.3 Component Placement
 
 ```
+cmd/
+  seccomp-probe/               ← Seccomp availability probe (Phase 4c)
+    main.go                    ← Linux: trivial BPF RET_ALLOW probe
+    main_stub.go               ← Non-Linux stub for cross-platform builds
 internal/
   ptrace/                      ← NEW package
-    tracer.go                  ← Core ptrace event loop
+    tracer.go                  ← Core ptrace event loop + ReadyFile sentinel support
     tracer_test.go
+    ready_file_test.go         ← Sentinel file integration tests (Phase 4c)
     attach.go                  ← Process discovery and attachment
     attach_test.go
     syscall_handler.go         ← Syscall dispatch (exec, file, net, signal)
@@ -65,6 +70,15 @@ internal/
     benchmark_test.go          ← Overhead benchmarks (Phase 3)
     integration_test.go        ← Integration tests requiring SYS_PTRACE
     doc.go
+  integration/
+    fargate/                   ← Fargate E2E test infrastructure (Phase 4c)
+      doc.go                   ← Package docs + env var reference
+      task_definition.go       ← ECS task definition builder
+      task_definition_test.go
+      log_parser.go            ← Workload marker + audit event parser
+      log_parser_test.go
+      helpers.go               ← AWS client ops (runTask, waitForTask, fetchLogs, etc.)
+      fargate_test.go          ← TestFargateE2E orchestration
   capabilities/
     check.go                   ← Add ptrace availability check
     security_caps.go           ← Add ModePtrace, update SelectMode()
@@ -1759,6 +1773,10 @@ A separate integration test deploys the full sidecar task definition to Fargate 
 
 ### Phase 4a: Core Steering Engine ✓
 
+Phase 4 brings ptrace mode to full feature parity with seccomp+FUSE for redirect/steering behaviors, plus detection resistance, sidecar auto-discovery, and EKS support.
+
+#### Phase 4a: Core Steering Engine ✓
+
 - Exec redirect via syscall injection and memory rewrite (§15)
 - File path redirect via register + memory rewrite (§16)
 - Soft-delete via injected `renameat2` (§16.5)
@@ -1778,11 +1796,23 @@ A separate integration test deploys the full sidecar task definition to Fargate 
 
 **Deliverable:** Complete steering support for the common cases. Honest about coverage gaps in DNS and TLS interception.
 
-### Phase 4c: Sidecar Discovery and EKS Fargate (Planned)
+### Phase 4c: Fargate E2E Test Infrastructure ✓
+
+- Tracer-ready sentinel file support (`TracerConfig.ReadyFile`) — tracer writes `/shared/tracer-ready` after successful attach, with 3-attempt retry
+- Seccomp availability probe binary (`cmd/seccomp-probe/`) — tests whether `seccomp(SECCOMP_SET_MODE_FILTER)` is available in the container runtime
+- Fargate E2E test workload (`Dockerfile.fargate-workload`, `scripts/fargate-workload-test.sh`) — positive/negative controls for exec, file, network enforcement
+- ECS task definition builder (`internal/integration/fargate/task_definition.go`) — builds multi-container Fargate task with PID namespace sharing, SYS_PTRACE, shared volume
+- Log parser (`internal/integration/fargate/log_parser.go`) — quote-aware logfmt parser for workload markers and agentsh audit events, with escape and tab handling
+- Test harness (`internal/integration/fargate/fargate_test.go`, `helpers.go`) — full E2E orchestration with deadline-driven CloudWatch log retry and per-phase timeouts
+- CI integration (`.github/workflows/ci.yml` `fargate-e2e` job) — gated on `vars.AWS_ECS_CLUSTER`, `continue-on-error: true`, runs after unit + integration tests
+- Setup documentation (`docs/fargate-e2e-setup.md`) — AWS resource provisioning and GitHub Actions configuration
+
+**Deliverable:** Complete Fargate E2E test infrastructure. Tests validate policy enforcement end-to-end on real Fargate tasks with both workload exit markers and agentsh audit event assertions.
+
+### Phase 4d: Sidecar Discovery and EKS Fargate (Planned)
 
 - Sidecar auto-discovery (`sidecar` attach mode) based on real Fargate E2E testing
 - Research spike: seccomp prefilter injection for `pid`/`sidecar` mode (via syscall injection)
-- Fargate E2E test in CI (ECS task definition, end-to-end policy enforcement)
 - EKS Fargate support (pending AWS `SYS_PTRACE` for EKS) (§20)
 
 ---
@@ -2697,6 +2727,8 @@ The following matrix describes what ptrace mode can and cannot do at each phase,
 **Phase 1-3 (allow/deny/audit):** Strong fallback mode for restricted runtimes. Full enforcement coverage for command, file, network, and signal policy. Good audit trail. No steering.
 
 **Phase 4a-4b (with steering):** Near-complete feature parity with full mode for the common cases that matter to AI agent security: exec redirect, file redirect, connect redirect, DNS redirect, SNI rewrite, TracerPid masking. DNS and SNI rewriting are best-effort and should not be relied on as primary controls — use the LLM proxy for API routing instead.
+
+**Phase 4c (Fargate E2E):** Full test infrastructure validates enforcement end-to-end on real Fargate tasks. CI integration with gated job, positive/negative controls, and dual assertion (workload markers + agentsh audit events).
 
 **For the target use case** (AI agents running untrusted code from packages, repos, and MCP tools on Fargate): ptrace mode provides equivalent practical protection to full mode. The evasion gap (TracerPid, timing) requires a targeted adversary who knows agentsh is running and has built anti-ptrace checks — this is not the threat model agentsh is designed for. Supply chain attacks, MCP exfiltration, and agent prompt injection do not check for ptrace.
 

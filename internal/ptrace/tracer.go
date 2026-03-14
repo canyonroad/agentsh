@@ -136,6 +136,7 @@ type TracerConfig struct {
 	MaxTracees       int
 	MaxHoldMs        int
 	OnAttachFailure  string
+	ReadyFile        string // Path to write after successful attach (sentinel for workload readiness)
 	ExecHandler      ExecHandler
 	FileHandler      FileHandler
 	NetworkHandler   NetworkHandler
@@ -189,6 +190,9 @@ type Tracer struct {
 	parkedTracees map[int]struct{}
 	tgidScratch   map[int]*scratchPage
 
+	readyFileWritten  bool
+	readyFileAttempts int
+
 	stopped chan struct{}
 }
 
@@ -216,6 +220,25 @@ func (t *Tracer) TraceeCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.tracees)
+}
+
+// writeReadyFile writes the sentinel file if configured and not yet written.
+// Retries up to 3 times on failure before giving up.
+func (t *Tracer) writeReadyFile() {
+	if t.cfg.ReadyFile == "" || t.readyFileWritten {
+		return
+	}
+	t.readyFileAttempts++
+	if err := os.WriteFile(t.cfg.ReadyFile, []byte("ready\n"), 0644); err != nil {
+		slog.Error("failed to write ready file", "path", t.cfg.ReadyFile, "error", err, "attempt", t.readyFileAttempts)
+		if t.readyFileAttempts >= 3 {
+			slog.Error("giving up on ready file after max attempts", "path", t.cfg.ReadyFile)
+			t.readyFileWritten = true // stop retrying
+		}
+		return
+	}
+	t.readyFileWritten = true
+	slog.Info("tracer ready file written", "path", t.cfg.ReadyFile)
 }
 
 // AttachPID enqueues attachment to a process.
@@ -1056,6 +1079,10 @@ func (t *Tracer) Run(ctx context.Context) error {
 		// Sweep parked timeouts on every iteration so enforcement is not
 		// load-dependent (previously only ran on the idle path).
 		t.sweepParkedTimeouts()
+
+		if !t.readyFileWritten && t.TraceeCount() > 0 {
+			t.writeReadyFile()
+		}
 
 		var status unix.WaitStatus
 		tid, err := unix.Wait4(-1, &status, unix.WALL|unix.WNOHANG, nil)
