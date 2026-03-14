@@ -1,0 +1,56 @@
+# Benchmark Allow-All Policy for agentsh
+# Zero-overhead policy for performance benchmarking
+
+version: 1
+name: bench-allow-all
+description: |
+  Allow-all policy with audit logging disabled. Used by the performance
+  benchmark to isolate sandbox mechanism overhead from policy evaluation
+  and I/O costs.
+
+# =============================================================================
+# COMMAND RULES
+# =============================================================================
+
+command_rules:
+  - name: allow-all-commands
+    description: Allow all commands without logging
+    commands:
+      - "*"
+    decision: allow
+
+# =============================================================================
+# FILE OPERATION RULES
+# =============================================================================
+
+file_rules:
+  - name: allow-all-files
+    description: Allow all file operations without logging
+    paths:
+      - "/**"
+    operations:
+      - "*"
+    decision: allow
+
+# =============================================================================
+# NETWORK OPERATION RULES
+# =============================================================================
+
+network_rules:
+  - name: allow-all-network
+    description: Allow all network connections without logging
+    domains:
+      - "*"
+    decision: allow
+
+# =============================================================================
+# AUDIT SETTINGS - DISABLED
+# =============================================================================
+
+audit:
+  log_allowed: false
+  log_denied: false
+  log_approved: false
+  include_stdout: false
+  include_stderr: false
+  include_file_content: false
