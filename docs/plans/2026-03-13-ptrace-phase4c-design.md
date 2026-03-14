@@ -8,13 +8,12 @@
 
 ## Prerequisites
 
-The following must be merged and passing before Phase 4c implementation begins:
+The following must be functional before Fargate E2E tests can pass (Phase E). Phases A-D can proceed without them.
 
-1. **ptrace runtime wiring** — The server startup path must wire `TracerConfig` from `sandbox.ptrace` config into the ptrace `Tracer.Run()` loop. This exists in `internal/ptrace/tracer.go` and is exercised by integration tests.
-2. **PID-file attach path** — `pid` mode with `target_pid_file` must be functional: poll for PID file, read PID, call `attachProcess()`. This exists in `internal/ptrace/tracer.go:discoverTarget()`.
-3. **Policy handler interfaces** — `ExecHandler`, `FileHandler`, `NetworkHandler` must be wired from the server's policy engine to the tracer config. This is the existing integration path used by `children` mode.
-
-All three are already implemented and tested. Phase 4c adds E2E validation on real Fargate infrastructure.
+1. **ptrace runtime wiring** — The server startup path must wire `TracerConfig` from `sandbox.ptrace` config into the ptrace `Tracer.Run()` loop. The tracer itself (`internal/ptrace/tracer.go`) is implemented and integration-tested, but the server entrypoint (`internal/server/server.go`) does not yet start the tracer. **Blocker for Phase E.** Merge criteria: `agentsh serve` with `sandbox.ptrace.enabled: true` starts the ptrace event loop.
+2. **PID-file attach path** — `pid` mode with `target_pid_file` must poll for a PID file, read PID, and call `attachProcess()`. This attach-by-PID logic needs to be implemented in the tracer's `Run()` method. **Blocker for Phase E.** Merge criteria: integration test demonstrating attach via PID file.
+3. **Policy handler interfaces** — `ExecHandler`, `FileHandler`, `NetworkHandler` must be wired from the server's policy engine to the tracer config. Currently exercised in `children` mode integration tests but not in server startup. **Blocker for Phase E.** Merge criteria: server passes policy handlers to `TracerConfig`.
+4. **Tracer-ready sentinel** — After successful attach, the tracer must write a sentinel file (path from config, e.g., `/shared/tracer-ready`) so the workload knows tracing is active. **New work, implemented in Phase A** (see §8). Merge criteria: integration test verifying sentinel file creation after attach.
 
 ---
 
@@ -120,13 +119,13 @@ The workload container depends on agentsh being `HEALTHY` (ECS `dependsOn` with 
 ```sh
 # Wait for tracer to attach (condition-based, not time-based)
 echo $$ > /shared/workload.pid
-timeout=30
-while [ ! -f /shared/tracer-ready ] && [ $timeout -gt 0 ]; do
+i=0
+while [ ! -f /shared/tracer-ready ] && [ $i -lt 60 ]; do
   sleep 0.5
-  timeout=$((timeout - 1))
+  i=$((i + 1))
 done
 if [ ! -f /shared/tracer-ready ]; then
-  echo "SETUP:FAIL:tracer did not attach within 15s"
+  echo "SETUP:FAIL:tracer did not attach within 30s"
   exit 1
 fi
 ```
@@ -144,13 +143,13 @@ The workload runs a deterministic test script with positive and negative control
 echo $$ > /shared/workload.pid
 
 # Wait for tracer to attach
-timeout=30
-while [ ! -f /shared/tracer-ready ] && [ $timeout -gt 0 ]; do
+i=0
+while [ ! -f /shared/tracer-ready ] && [ $i -lt 60 ]; do
   sleep 0.5
-  timeout=$((timeout - 1))
+  i=$((i + 1))
 done
 if [ ! -f /shared/tracer-ready ]; then
-  echo "SETUP:FAIL:tracer did not attach within 15s"
+  echo "SETUP:FAIL:tracer did not attach within 30s"
   exit 1
 fi
 echo "SETUP:PASS:tracer attached"
@@ -168,10 +167,16 @@ echo "=== FILE TEST ==="
 touch /etc/shadow.test 2>&1 && echo "FILE:FAIL:write succeeded" || echo "FILE:PASS:write denied"
 
 echo "=== NETWORK TEST ==="
-# 169.254.169.254 (IMDS) is denied by test policy
-# Use a known-installed tool, not curl (may not be present)
-wget --spider --timeout=2 http://169.254.169.254/ 2>&1 \
-  && echo "NET:FAIL:connect succeeded" || echo "NET:PASS:connect denied"
+# 169.254.169.254 (IMDS) is denied by network policy
+# Use python3 (exec-allowed) to test network denial independently of exec denial
+python3 -c "
+import urllib.request, sys
+try:
+    urllib.request.urlopen('http://169.254.169.254/', timeout=2)
+    print('NET:FAIL:connect succeeded')
+except Exception:
+    print('NET:PASS:connect denied')
+" 2>&1
 
 echo "=== SECCOMP PROBE ==="
 /usr/local/bin/seccomp-probe && echo "SECCOMP:AVAILABLE" || echo "SECCOMP:UNAVAILABLE"
@@ -267,6 +272,7 @@ fargate-e2e:
     github.ref == 'refs/heads/main' &&
     vars.AWS_ECS_CLUSTER != ''
   needs: [test-linux, integration]
+  continue-on-error: true
   runs-on: ubuntu-latest
   timeout-minutes: 15
   steps:
@@ -303,14 +309,15 @@ These must exist before the test runs. Documented in `docs/fargate-e2e-setup.md`
 
 ## 8. Implementation Phases
 
-### Phase A: Scaffold and seccomp probe (no AWS needed)
+### Phase A: Scaffold, seccomp probe, and tracer-ready sentinel (no AWS needed)
 
 1. Create `cmd/seccomp-probe/main.go` with the trivial BPF probe
-2. Create `Dockerfile.fargate-test` for workload image (includes wget, test script, seccomp-probe binary)
+2. Create `Dockerfile.fargate-test` for workload image (includes wget, python3, test script, seccomp-probe binary)
 3. Create `internal/integration/fargate/` package scaffold with build tag
-4. Verify seccomp probe compiles and runs locally (`docker run --cap-add SYS_PTRACE`)
+4. Add tracer-ready sentinel file support to `internal/ptrace/tracer.go` — after successful attach in `pid` mode, write a configurable sentinel file path (new `TracerConfig.ReadyFile` field). Include integration test.
+5. Verify seccomp probe compiles and runs locally (`docker run --cap-add SYS_PTRACE`)
 
-**Acceptance:** `seccomp-probe` binary runs in Docker, workload Dockerfile builds.
+**Acceptance:** `seccomp-probe` binary runs in Docker, workload Dockerfile builds, sentinel file written after attach in integration test.
 
 ### Phase B: Task definition builder
 
@@ -324,8 +331,9 @@ These must exist before the test runs. Documented in `docs/fargate-e2e-setup.md`
 7. Implement `helpers.go` — AWS client setup, `runTask()`, `waitForTask()` with status logging and timeout, `stopTask()`, `fetchLogs()` with retry, `deregisterTaskDef()`
 8. Implement `fargate_test.go` — `TestFargateE2E` orchestrating the full flow, assertion logic for positive/negative controls and audit events
 9. Cleanup logic in `t.Cleanup()` — always stops task + deregisters task def
+10. Unit tests for log parser — test `parseWorkloadLogs()` and `parseAuditEvents()` with mock log output (deterministic, no AWS calls). Covers: all-pass, exec-fail, missing-control, incomplete output (no DONE marker), mixed results.
 
-**Acceptance:** Test compiles, harness logic is correct (can't run without AWS).
+**Acceptance:** Test compiles, log parser unit tests pass, harness logic is correct.
 
 ### Phase D: CI wiring
 
@@ -350,9 +358,11 @@ These must exist before the test runs. Documented in `docs/fargate-e2e-setup.md`
 |-----------|----------|-------------|
 | Seccomp probe binary | `cmd/seccomp-probe/main.go` | Phase A |
 | Workload Dockerfile | `Dockerfile.fargate-test` | Phase A |
+| Tracer-ready sentinel | `internal/ptrace/tracer.go` (ReadyFile support) | Phase A |
 | ECS task def builder | `internal/integration/fargate/task_definition.go` | Phase B |
 | Task def unit tests | `internal/integration/fargate/task_definition_test.go` | Phase B |
 | Test helpers (AWS ops) | `internal/integration/fargate/helpers.go` | Phase C |
+| Log parser + unit tests | `internal/integration/fargate/log_parser.go`, `log_parser_test.go` | Phase C |
 | Test harness | `internal/integration/fargate/fargate_test.go` | Phase C |
 | CI job | `.github/workflows/ci.yml` (`fargate-e2e` job) | Phase D |
 | Setup guide | `docs/fargate-e2e-setup.md` | Phase D |
