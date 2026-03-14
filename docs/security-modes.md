@@ -209,6 +209,7 @@ Ptrace mode exposes Prometheus metrics at the `/metrics` endpoint:
    - Seccomp prefilter (`seccomp_prefilter: true`) reduces overhead by only trapping traced syscalls
    - Single-threaded event loop may become a bottleneck with many concurrent tracees
    - Mitigation: Prometheus metrics (`agentsh_ptrace_tracees_active`, `agentsh_ptrace_timeouts_total`) help identify bottlenecks
+   - **Measured overhead is <3% across all workload types** — see [Performance Benchmarks](#performance-benchmarks) below
 
 4. **Attach race window**
    - Between `fork()` and `PTRACE_SEIZE`, a brief window exists where the child is untraced
@@ -379,6 +380,46 @@ This ordering ensures:
 - No privilege escalation after restrictions are applied
 - Landlock is enforced before the untrusted command runs
 - Multiple layers of protection work together
+
+## Performance Benchmarks
+
+Measured with `make bench`, which runs a Dockerized workload under each mode (baseline with sandbox disabled, full seccomp+FUSE, ptrace) using a realistic policy with deny, redirect, and allow rules plus full audit logging. Results are median of 3 runs.
+
+### Results
+
+| Phase | Baseline | Full mode | Full overhead | Ptrace | Ptrace overhead |
+|---|---|---|---|---|---|
+| Process spawn (120 execs) | 3540ms | 3566ms | +0.7% | 3553ms | +0.4% |
+| File I/O (1000 ops) | 272ms | 273ms | +0.4% | 268ms | -1.5% |
+| Git workflow (clone+grep+commit) | 53ms | 52ms | -1.9% | 53ms | +0.0% |
+| Network (10 curl) | 374ms | 354ms | -5.3% | 354ms | -5.3% |
+| Deny enforcement (50 blocked) | 610ms | 590ms | -3.3% | 594ms | -2.6% |
+| Redirect enforcement (50 redirected) | 1787ms | 1794ms | +0.4% | 1772ms | -0.8% |
+| Deep process tree (20x 4-level) | 624ms | 639ms | +2.4% | 636ms | +1.9% |
+| Wide process tree (10x 10-fan) | 328ms | 331ms | +0.9% | 319ms | -2.7% |
+| **Total** | **7588ms** | **7599ms** | **+0.1%** | **7549ms** | **-0.5%** |
+
+### Analysis
+
+Both full mode and ptrace mode add **less than 3% overhead** across all workload types. The variance between runs (3-5%) exceeds the actual mechanism overhead, making the three modes statistically indistinguishable.
+
+**Why overhead is so low:**
+
+1. **Per-exec RPC dominates.** Each `agentsh exec` call goes through the CLI → HTTP → server → fork/exec path (~30ms). With 120 flat execs, that alone accounts for ~3.5s. The sandbox mechanism cost (seccomp user-notify dispatch or ptrace SEIZE + syscall traps) is a fraction of a millisecond per exec — invisible against the RPC overhead.
+
+2. **Policy evaluation is fast.** Even with a realistic policy (30+ rules with deny, redirect, and allow decisions) and full audit logging (SQLite + JSONL), policy evaluation adds negligible latency. Deny and redirect decisions short-circuit before the command is forked.
+
+3. **File I/O is unaffected.** The file I/O phase runs 1000 operations inside a single exec. FUSE intercepts each file operation in full mode, and ptrace traps each `openat`/`unlinkat` syscall — but the per-operation overhead (~1μs) is lost in the noise of the actual I/O.
+
+4. **Process tree tracking scales.** Deep trees (4-level sh→sh→sh→sh→true) and wide trees (10 parallel children) show no measurable overhead. Ptrace auto-attaches to fork/clone descendants via `PTRACE_O_TRACECLONE`, and seccomp prefiltering ensures only traced syscalls generate events.
+
+### Reproducing
+
+```bash
+make bench
+```
+
+Requires Docker with `--cap-add SYS_ADMIN --cap-add SYS_PTRACE --device /dev/fuse --security-opt seccomp=unconfined`. Total runtime ~5-10 minutes.
 
 ## Related Documentation
 

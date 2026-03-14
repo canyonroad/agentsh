@@ -1619,6 +1619,8 @@ The agentsh sidecar polls the PID file on startup and attaches once it appears. 
 
 **Mitigation:** In `children` mode, the seccomp pre-filter (§7.2) reduces traced syscalls to only the ~25 we care about (out of 400+). With the pre-filter, overhead is <5% on typical agent workloads (Datadog CWS benchmarks report similar). In `pid` mode (no pre-filter in Phase 1), overhead can reach 10-30% on I/O-heavy workloads.
 
+**Measured:** End-to-end benchmarks (`make bench`) show **<3% total overhead** for ptrace mode with `children` + seccomp prefilter on realistic agent workloads — including flat process spawning (120 execs), file I/O (1000 ops), git clone+grep+commit, network requests, deny/redirect policy enforcement, and nested process trees (4-level deep, 10-way fan-out). The per-exec RPC cost (~30ms) dominates; ptrace mechanism cost is invisible at the application level. See [Performance Benchmarks](security-modes.md#performance-benchmarks) for full results.
+
 **Configuration:**
 - `attach_mode: children` — enables pre-filter, lowest overhead
 - `performance.max_hold_ms: 5000` — prevents hung policy from blocking workload
