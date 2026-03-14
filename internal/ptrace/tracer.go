@@ -136,6 +136,7 @@ type TracerConfig struct {
 	MaxTracees       int
 	MaxHoldMs        int
 	OnAttachFailure  string
+	ReadyFile        string // Path to write after successful attach (sentinel for workload readiness)
 	ExecHandler      ExecHandler
 	FileHandler      FileHandler
 	NetworkHandler   NetworkHandler
