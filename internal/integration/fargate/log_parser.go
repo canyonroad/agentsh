@@ -68,6 +68,8 @@ type AuditEvent struct {
 }
 
 // ParseAuditEvents scans agentsh log lines for audit events.
+// Parses key=value tokens from structured log lines, skipping quoted values
+// to avoid false positives from logfmt msg fields containing "action=".
 func ParseAuditEvents(lines []string) []AuditEvent {
 	var events []AuditEvent
 
@@ -78,6 +80,10 @@ func ParseAuditEvents(lines []string) []AuditEvent {
 
 		fields := make(map[string]string)
 		for _, token := range strings.Fields(line) {
+			// Skip tokens that are part of quoted strings (logfmt values with spaces)
+			if strings.ContainsRune(token, '"') {
+				continue
+			}
 			if k, v, ok := strings.Cut(token, "="); ok {
 				fields[k] = v
 			}

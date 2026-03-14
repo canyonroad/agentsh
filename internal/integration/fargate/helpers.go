@@ -70,7 +70,11 @@ func waitForTask(ctx context.Context, client *ecs.Client, cluster, taskARN strin
 			return &task, nil
 		}
 
-		time.Sleep(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
 	}
 
 	return nil, fmt.Errorf("task did not reach STOPPED within %v (last status: %s)", timeout, lastStatus)
@@ -117,6 +121,7 @@ func fetchLogs(ctx context.Context, client *cloudwatchlogs.Client, logGroup, log
 			LogStreamNamePrefix: aws.String(logStreamPrefix),
 		})
 		if err != nil {
+			slog.Warn("DescribeLogStreams failed", "error", err, "attempt", attempt)
 			continue
 		}
 		if len(streams.LogStreams) == 0 {
@@ -127,6 +132,7 @@ func fetchLogs(ctx context.Context, client *cloudwatchlogs.Client, logGroup, log
 		for _, stream := range streams.LogStreams {
 			events, err := getAllLogEvents(ctx, client, logGroup, aws.ToString(stream.LogStreamName))
 			if err != nil {
+				slog.Warn("GetLogEvents failed", "stream", aws.ToString(stream.LogStreamName), "error", err)
 				continue
 			}
 			for _, event := range events {
