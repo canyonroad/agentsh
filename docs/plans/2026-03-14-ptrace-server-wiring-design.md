@@ -224,7 +224,7 @@ func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecCo
         }
     default:
         return ptrace.ExecResult{
-            Action: "allow",
+            Action: "continue",  // matches ExecResult.Action documented values
             Allow:  true,
             Rule:   decision.Rule,
         }
@@ -271,29 +271,47 @@ Change `attachQueue` from `chan int` to `chan attachRequest`:
 attachQueue chan attachRequest  // was: chan int
 ```
 
-This requires updating all receive sites:
+This requires updating all receive sites and callee signatures:
 - `drainQueues()` in `Run()` — receives `attachRequest` instead of `int`
 - `Run()` ECHILD fallback path (tracer.go ~line 1101) — `case req := <-t.attachQueue`
 - `Run()` tid==0 idle path (tracer.go ~line 1119) — `case req := <-t.attachQueue`
-- `attachProcess()` — accepts `attachOpts`, passes to `attachThread()`
-- `attachThread()` — uses `opts` to set `TraceeState` fields and honor `keepStopped`
+- `attachProcess(pid int, opts attachOpts)` — updated signature, passes opts to attachThread
+- `attachThread(tid int, opts attachOpts)` — updated signature, uses opts for TraceeState and keepStopped
 
-In `attachThread()` (`attach.go`), propagate metadata to `TraceeState`:
+In `attachThread()` (`attach.go`), propagate metadata to `TraceeState` and handle `keepStopped`:
 
 ```go
+// Updated signature:
+func (t *Tracer) attachThread(tid int, opts attachOpts) error
+
+// ... existing PTRACE_SEIZE + PTRACE_INTERRUPT + PTRACE_SETOPTIONS ...
+
 t.tracees[tid] = &TraceeState{
     TID:       tid,
     TGID:      tgid,
-    SessionID: opts.sessionID,   // already exists on TraceeState, currently unused at attach time
+    SessionID: opts.sessionID,   // populated for directly-attached processes
     CommandID: opts.commandID,   // NEW field to add
     Attached:  time.Now(),
     // ... existing fields ...
 }
+
+if opts.keepStopped {
+    // Register in parkedTracees so handleResumeRequest can find and resume it.
+    // Without this, ResumePID would be a silent no-op (handleResumeRequest
+    // checks parkedTracees and returns early with a warning if not found).
+    t.parkedTracees[tid] = struct{}{}
+    // Skip PtraceSyscall/PtraceCont — leave tracee stopped for cgroup hook
+} else {
+    // Existing resume code (lines 106-115 of attach.go)
+    if t.cfg.SeccompPrefilter && t.cfg.AttachMode == "children" {
+        unix.PtraceSyscall(tid, 0)
+    } else {
+        unix.PtraceCont(tid, 0)
+    }
+}
 ```
 
-Note: `TraceeState` already has a `SessionID` field (set during child inheritance in `handleNewChild`). Only `CommandID` needs to be added.
-
-When `keepStopped` is true, `attachThread` skips the final `PtraceSyscall`/`PtraceCont` call (lines 106-115 of attach.go), leaving the tracee in ptrace-stop state after `PTRACE_SETOPTIONS`. The tracee is still registered in `t.tracees` so the event loop knows about it, but no events will arrive from it until `ResumePID` is called. The tracee is also registered in `t.parkedTracees` so that `handleResumeRequest` can find and resume it. The event loop's `Wait4(-1, WNOHANG)` will simply not see this PID — it's stopped, not delivering events, which is correct. The `WaitAttached` channel signals completion so the caller knows the tracee is ready.
+Note: `TraceeState.SessionID` already exists but is only populated during child inheritance in `handleNewChild` (line ~804). For directly-attached processes (the exec/wrap path), it must be explicitly set in `attachThread` from `opts.sessionID`, otherwise it would remain empty string. Only `CommandID` is a new field to add.
 
 **Multi-thread note**: `attachProcess` iterates all threads in `/proc/<pid>/task/` and calls `attachThread` for each. With `keepStopped`, all threads get stopped and registered in `parkedTracees`. `ResumePID` must resume all threads of the TGID, not just the leader. Implementation: `ResumePID(pid)` sends a resume request for each TID that shares the TGID with `pid`. For the exec path, freshly-started processes are single-threaded, so this is a non-issue. For the wrap path, `keepStopped` is not used (see Section 7), avoiding the multi-thread complexity entirely.
 
@@ -471,6 +489,8 @@ if !wrapResp.PtraceMode && runtime.GOOS == "linux" && wrapResp.WrapperBinary == 
     return nil, fmt.Errorf("server returned empty wrapper binary")
 }
 ```
+
+**Deployment ordering**: This CLI guard fix must be deployed before (or simultaneously with) the server-side `wrapInitCore` ptrace change. If the server change is deployed first, the CLI would reject the ptrace-mode response (empty `WrapperBinary`) and error out.
 
 ---
 
