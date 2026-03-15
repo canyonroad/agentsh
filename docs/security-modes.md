@@ -209,10 +209,10 @@ Ptrace mode exposes Prometheus metrics at the `/metrics` endpoint:
 
 3. **Performance overhead**
    - Each traced syscall requires two context switches (entry + exit) in TRACESYSGOOD mode
-   - Seccomp prefilter (`seccomp_prefilter: true`) reduces overhead by only trapping traced syscalls
+   - Seccomp prefilter (`seccomp_prefilter: true`) reduces overhead by only trapping traced syscalls; note: the prefilter is currently only active in standalone sidecar mode, not in server-wired mode (requires BPF injection, planned)
+   - Without the prefilter (server-wired mode), overhead is ~10-50x due to trapping all syscalls
    - Single-threaded event loop may become a bottleneck with many concurrent tracees
    - Mitigation: Prometheus metrics (`agentsh_ptrace_tracees_active`, `agentsh_ptrace_timeouts_total`) help identify bottlenecks
-   - **Measured overhead is <3% across all workload types** — see [Performance Benchmarks](#performance-benchmarks) below
 
 4. **Attach race window**
    - In the exec path, a brief window exists between `cmd.Start()` and `PTRACE_SEIZE` where the child is untraced
