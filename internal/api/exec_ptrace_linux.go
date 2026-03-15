@@ -32,7 +32,10 @@ func ptraceExecAttach(tracer any, pid int, sessionID, commandID string, keepStop
 
 	// Register exit notify BEFORE attach — process can't exit via tracer
 	// until it's attached, so this is race-free.
-	exitCh := tr.RegisterExitNotify(pid)
+	exitCh, regErr := tr.RegisterExitNotify(pid)
+	if regErr != nil {
+		return nil, nil, fmt.Errorf("register exit notify pid %d: %w", pid, regErr)
+	}
 
 	opts := []ptrace.AttachOption{
 		ptrace.WithSessionID(sessionID),
