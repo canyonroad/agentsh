@@ -640,22 +640,10 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 			case unix.PTRACE_EVENT_STOP:
 				t.handleEventStop(tid)
 			default:
-				// In prefilter mode, a plain SIGTRAP with no event can be
-				// a syscall-exit stop if we explicitly used PtraceSyscall
-				// (e.g., for exit-needing syscalls or pending fixups).
-				// Only treat as syscall-exit when the tracee has a prefilter
-				// AND is in a syscall. Otherwise, it's a real SIGTRAP signal.
-				t.mu.Lock()
-				isSyscallExit := false
-				if s := t.tracees[tid]; s != nil && s.HasPrefilter && s.InSyscall {
-					isSyscallExit = s.NeedExitStop || s.PendingDenyErrno != 0 || s.PendingFakeZero || s.HasPendingReturn || s.PendingExecStubFD >= 0
-				}
-				t.mu.Unlock()
-				if isSyscallExit {
-					t.handleSyscallStop(ctx, tid)
-				} else {
-					t.resumeTracee(tid, int(sig))
-				}
+				// With TRACESYSGOOD always set, syscall stops are SIGTRAP|0x80.
+				// Seccomp entries are PTRACE_EVENT_SECCOMP. A plain SIGTRAP
+				// with no event is always a real signal — reinject it.
+				t.resumeTracee(tid, int(sig))
 			}
 
 		default:
