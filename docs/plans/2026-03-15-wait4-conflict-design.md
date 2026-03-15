@@ -83,7 +83,7 @@ If `WaitAttached` fails (timeout, ESRCH, tracer shutdown), the exit notify entry
 
 ### Edge Cases
 
-- **Duplicate registration**: Second call for the same PID overwrites the channel. Previous channel receives nothing (caller's problem — don't register twice).
+- **Duplicate registration**: Returns the existing channel if one is already registered for the PID (idempotent). Callers must not register the same PID from multiple goroutines concurrently.
 - **PID reuse**: Safe because `RegisterExitNotify` is called for a specific known-alive process and consumed before the PID can be recycled. The sync.Map entry is deleted on dispatch or failure cleanup.
 - **Late registration** (after exit): Cannot happen due to register-while-stopped ordering above.
 
@@ -241,7 +241,14 @@ Current code derives exit codes from `cmd.Wait()` error:
 - `*exec.ExitError` → `ee.ExitCode()` (returns `-1` for signaled processes in Go)
 - other error → exit code 127
 
-With tracer-managed wait, derive from `ExitStatus` **preserving exact compatibility**:
+With tracer-managed wait, derive from `ExitStatus` with the following compatibility mapping:
+
+| Reason | Mapping | Compatibility |
+|--------|---------|---------------|
+| `ExitNormal`, not signaled | `status.Code` | Identical to `ee.ExitCode()` |
+| `ExitNormal`, signaled | `-1` | Identical to `ee.ExitCode()` |
+| `ExitVanished` | `-1` | New case (ESRCH); approximated as signaled. Current `cmd.Wait()` path never encounters this. |
+| `ExitTracerDown` | `127` | Matches "other error" path in current code |
 
 ```go
 switch status.Reason {
@@ -259,7 +266,7 @@ case ExitTracerDown:
 }
 ```
 
-This is **identical** to current behavior: signaled → `-1`, normal → code, infrastructure failure → 127.
+This is **compatible** with current behavior for normal and signaled exits. `ExitVanished` is a new case that only occurs under ptrace (see compatibility table above).
 
 Context deadline handling (timeout → kill → exit code 124) remains unchanged — the timeout check happens before reading the exit status.
 
