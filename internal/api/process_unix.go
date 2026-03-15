@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/agentsh/agentsh/pkg/types"
+	"golang.org/x/sys/unix"
 )
 
 // killProcess sends SIGTERM then SIGKILL to a process and its process group.
@@ -64,6 +65,17 @@ func resourcesFromProcessState(ps *os.ProcessState) types.ExecResources {
 	}
 	ru, ok := ps.SysUsage().(*syscall.Rusage)
 	if !ok || ru == nil {
+		return types.ExecResources{}
+	}
+	return types.ExecResources{
+		CPUUserMs:    int64(ru.Utime.Sec)*1000 + int64(ru.Utime.Usec)/1000,
+		CPUSystemMs:  int64(ru.Stime.Sec)*1000 + int64(ru.Stime.Usec)/1000,
+		MemoryPeakKB: int64(ru.Maxrss),
+	}
+}
+
+func resourcesFromRusage(ru *unix.Rusage) types.ExecResources {
+	if ru == nil {
 		return types.ExecResources{}
 	}
 	return types.ExecResources{

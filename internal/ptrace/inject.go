@@ -207,7 +207,7 @@ func (t *Tracer) waitForSyscallStop(tid int) error {
 		if !status.Stopped() {
 			if status.Exited() || status.Signaled() {
 				// Clean up tracee bookkeeping before returning.
-				t.handleExit(tid)
+				t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 				return fmt.Errorf("tracee %d exited during injection", tid)
 			}
 			continue
