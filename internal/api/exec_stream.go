@@ -333,7 +333,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 
 		if tracer != nil {
 			// Ptrace tracer active: attach via PTRACE_SEIZE, run hook while stopped, resume
-			resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
+			waitExit, resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
 			if attachErr != nil {
 				_ = killProcess(cmd.Process.Pid)
 				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace attach: %w", attachErr)
@@ -349,6 +349,26 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 					return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace resume: %w", resumeErr)
 				}
 			}
+
+			// Tracer-managed wait: block on exit channel instead of cmd.Wait()
+			waitStart := time.Now()
+			slog.Debug("exec_stream waiting for command (ptrace)", "command", req.Command, "pid", cmd.Process.Pid)
+			result := waitExit()
+			waitDuration := time.Since(waitStart)
+			slog.Debug("exec_stream command finished (ptrace)", "command", req.Command, "pid", cmd.Process.Pid, "exit_code", result.exitCode, "wait_duration_ms", waitDuration.Milliseconds())
+			stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
+			stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
+			stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
+			resources = result.resources
+			cmd.Process.Release()
+
+			if ctx.Err() != nil {
+				_ = killProcessGroup(pgid)
+			}
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
+			}
+			return result.exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, err
 		} else if hook != nil {
 			// Seccomp stopped-start: process started with PTRACE_TRACEME
 			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {

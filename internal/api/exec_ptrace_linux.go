@@ -4,18 +4,34 @@ package api
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/agentsh/agentsh/internal/ptrace"
+	"github.com/agentsh/agentsh/pkg/types"
 )
+
+// ptraceExecResult holds the result of waiting for a traced process to exit.
+type ptraceExecResult struct {
+	exitCode  int
+	resources types.ExecResources
+}
 
 // ptraceExecAttach attaches the ptrace tracer to a running process, waits for
 // the attachment to complete, and optionally keeps the process stopped (for
-// cgroup hook). Returns a resume function that must be called after the hook.
-func ptraceExecAttach(tracer any, pid int, sessionID, commandID string, keepStopped bool) (resume func() error, err error) {
+// cgroup hook). Returns a waitExit function that blocks until the process exits
+// (replacing cmd.Wait()) and a resume function for keepStopped mode.
+//
+// Registration ordering: RegisterExitNotify is called BEFORE AttachPID to
+// guarantee the channel exists before the tracer can dispatch exit events.
+func ptraceExecAttach(tracer any, pid int, sessionID, commandID string, keepStopped bool) (waitExit func() ptraceExecResult, resume func() error, err error) {
 	tr, ok := tracer.(*ptrace.Tracer)
 	if !ok || tr == nil {
-		return nil, fmt.Errorf("ptraceExecAttach: invalid tracer type %T", tracer)
+		return nil, nil, fmt.Errorf("ptraceExecAttach: invalid tracer type %T", tracer)
 	}
+
+	// Register exit notify BEFORE attach — process can't exit via tracer
+	// until it's attached, so this is race-free.
+	exitCh := tr.RegisterExitNotify(pid)
 
 	opts := []ptrace.AttachOption{
 		ptrace.WithSessionID(sessionID),
@@ -26,16 +42,41 @@ func ptraceExecAttach(tracer any, pid int, sessionID, commandID string, keepStop
 	}
 
 	if err := tr.AttachPID(pid, opts...); err != nil {
-		return nil, fmt.Errorf("attach pid %d: %w", pid, err)
+		tr.UnregisterExitNotify(pid)
+		return nil, nil, fmt.Errorf("attach pid %d: %w", pid, err)
 	}
 	if err := tr.WaitAttached(pid); err != nil {
-		return nil, fmt.Errorf("wait attached pid %d: %w", pid, err)
+		tr.UnregisterExitNotify(pid)
+		return nil, nil, fmt.Errorf("wait attached pid %d: %w", pid, err)
+	}
+
+	waitFn := func() ptraceExecResult {
+		status := <-exitCh
+		var code int
+		switch status.Reason {
+		case ptrace.ExitNormal:
+			if status.Signal != 0 {
+				code = -1 // matches ee.ExitCode() for signaled processes
+			} else {
+				code = status.Code
+			}
+		case ptrace.ExitVanished:
+			code = -1 // process disappeared, treat like signaled
+			slog.Warn("traced process vanished (ESRCH)", "pid", pid)
+		case ptrace.ExitTracerDown:
+			code = 127 // infrastructure failure
+			slog.Error("tracer shut down while process was running", "pid", pid)
+		}
+		return ptraceExecResult{
+			exitCode:  code,
+			resources: resourcesFromRusage(status.Rusage),
+		}
 	}
 
 	if keepStopped {
-		return func() error {
+		return waitFn, func() error {
 			return tr.ResumePID(pid)
 		}, nil
 	}
-	return func() error { return nil }, nil
+	return waitFn, func() error { return nil }, nil
 }
