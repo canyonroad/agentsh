@@ -67,6 +67,8 @@ type Server struct {
 
 	threatSyncer *threatfeed.Syncer
 	threatStore  *threatfeed.Store
+
+	app *api.App // for lifecycle management (ptrace tracer shutdown)
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -415,6 +417,7 @@ func New(cfg *config.Config) (*Server, error) {
 		reapInterval:   reapInterval,
 		threatSyncer:   threatSyncer,
 		threatStore:    threatStore,
+		app:            app,
 	}
 
 	ln, err := listenHTTP(cfg)
@@ -721,6 +724,9 @@ func (s *Server) Run(ctx context.Context) error {
 			s.grpcServer.GracefulStop()
 		}
 		httpErr := s.httpServer.Shutdown(shutdownCtx)
+		if s.app != nil {
+			s.app.Close()
+		}
 		if syncerDone != nil {
 			<-syncerDone
 		}
@@ -771,6 +777,9 @@ func (s *Server) Close() error {
 	if s.pprofLn != nil {
 		_ = s.pprofLn.Close()
 		s.pprofLn = nil
+	}
+	if s.app != nil {
+		s.app.Close()
 	}
 	if s.sessions != nil {
 		for _, sess := range s.sessions.List() {
