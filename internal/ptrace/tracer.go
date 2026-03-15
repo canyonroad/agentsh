@@ -450,19 +450,13 @@ func (t *Tracer) setRegs(tid int, regs Regs) error {
 
 // allowSyscall resumes the tracee, allowing the syscall to proceed.
 func (t *Tracer) allowSyscall(tid int) {
-	t.mu.Lock()
-	hasPrefilter := false
-	if s := t.tracees[tid]; s != nil {
-		hasPrefilter = s.HasPrefilter
-	}
-	t.mu.Unlock()
-
+	// Always use PtraceSyscall to catch syscall-exit stops, which are needed
+	// for exit-time handlers (TracerPid masking, fd tracking, TLS SNI, etc.).
+	// In prefilter mode, the BPF filter ensures only traced syscalls generate
+	// entry stops; PtraceSyscall then catches their exits. Non-traced syscalls
+	// don't stop at all (BPF returns ALLOW), so this is still efficient.
 	var err error
-	if hasPrefilter {
-		err = unix.PtraceCont(tid, 0)
-	} else {
-		err = unix.PtraceSyscall(tid, 0)
-	}
+	err = unix.PtraceSyscall(tid, 0)
 	if err != nil && errors.Is(err, unix.ESRCH) {
 		t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 	}
@@ -513,19 +507,9 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 }
 
 // resumeTracee resumes a tracee with an optional signal to deliver.
+// Always uses PtraceSyscall to catch exit-time stops (see allowSyscall).
 func (t *Tracer) resumeTracee(tid int, sig int) {
-	t.mu.Lock()
-	hasPrefilter := false
-	if s := t.tracees[tid]; s != nil {
-		hasPrefilter = s.HasPrefilter
-	}
-	t.mu.Unlock()
-
-	if hasPrefilter {
-		unix.PtraceCont(tid, sig)
-	} else {
-		unix.PtraceSyscall(tid, sig)
-	}
+	unix.PtraceSyscall(tid, sig)
 }
 
 // ptraceListen calls PTRACE_LISTEN on the specified tid. In PTRACE_SEIZE

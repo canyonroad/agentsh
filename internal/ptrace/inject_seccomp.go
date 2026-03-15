@@ -102,8 +102,7 @@ func (t *Tracer) injectSeccompFilter(tid int) error {
 	if err != nil {
 		return fmt.Errorf("inject prctl: %w", err)
 	}
-	if ret != 0 && ret != -int64(unix.EINVAL) {
-		// EINVAL is acceptable (already set). Other errors are real failures.
+	if ret != 0 {
 		return fmt.Errorf("prctl(PR_SET_NO_NEW_PRIVS) returned %d (%s)", ret, unix.Errno(-ret))
 	}
 
