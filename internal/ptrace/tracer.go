@@ -173,6 +173,24 @@ type resumeRequest struct {
 	Errno int
 }
 
+// ExitReason describes why a process exited.
+type ExitReason int
+
+const (
+	ExitNormal    ExitReason = iota // process exited or was signaled (Code/Signal valid)
+	ExitVanished                    // ESRCH — process disappeared (ptrace call failed)
+	ExitTracerDown                  // tracer shut down while process was running
+)
+
+// ExitStatus carries process exit information for tracer-managed wait.
+type ExitStatus struct {
+	PID    int
+	Code   int
+	Signal int
+	Reason ExitReason
+	Rusage *unix.Rusage
+}
+
 // attachRequest carries a PID and options for the attach queue.
 type attachRequest struct {
 	pid  int
@@ -222,6 +240,7 @@ type Tracer struct {
 	tgidScratch   map[int]*scratchPage
 
 	attachDone sync.Map // pid → chan error
+	exitNotify sync.Map // pid → chan ExitStatus
 
 	readyFileWritten  bool
 	readyFileAttempts int
@@ -350,6 +369,42 @@ func (t *Tracer) cancelPendingAttachWaiters() {
 	})
 }
 
+// RegisterExitNotify registers an exit notification channel for a PID (TGID).
+// Must be called before AttachPID to ensure no race with fast-exit processes.
+// Returns an error if a channel is already registered for this PID.
+func (t *Tracer) RegisterExitNotify(pid int) (<-chan ExitStatus, error) {
+	ch := make(chan ExitStatus, 1)
+	_, loaded := t.exitNotify.LoadOrStore(pid, ch)
+	if loaded {
+		return nil, fmt.Errorf("exit notify already registered for pid %d", pid)
+	}
+	return ch, nil
+}
+
+// UnregisterExitNotify removes a pending exit notification only if it matches
+// the given channel (ownership check). Safe for concurrent flows on different PIDs.
+func (t *Tracer) UnregisterExitNotify(pid int, ch <-chan ExitStatus) {
+	if v, ok := t.exitNotify.Load(pid); ok {
+		if v.(chan ExitStatus) == ch {
+			t.exitNotify.Delete(pid)
+		}
+	}
+}
+
+// cancelPendingExitWaiters signals all pending exit notification channels
+// so they don't block indefinitely when the tracer shuts down.
+func (t *Tracer) cancelPendingExitWaiters() {
+	t.exitNotify.Range(func(key, value any) bool {
+		ch := value.(chan ExitStatus)
+		select {
+		case ch <- ExitStatus{Reason: ExitTracerDown}:
+		default:
+		}
+		t.exitNotify.Delete(key)
+		return true
+	})
+}
+
 // ParkTracee marks a tracee as parked (awaiting async approval).
 func (t *Tracer) ParkTracee(tid int) {
 	t.mu.Lock()
@@ -410,7 +465,7 @@ func (t *Tracer) allowSyscall(tid int) {
 		err = unix.PtraceSyscall(tid, 0)
 	}
 	if err != nil && errors.Is(err, unix.ESRCH) {
-		t.handleExit(tid)
+		t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 	}
 }
 
@@ -419,7 +474,7 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 	regs, err := t.getRegs(tid)
 	if err != nil {
 		if errors.Is(err, unix.ESRCH) {
-			t.handleExit(tid)
+			t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 			return nil
 		}
 		return err
@@ -427,7 +482,7 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 	regs.SetSyscallNr(-1)
 	if err := t.setRegs(tid, regs); err != nil {
 		if errors.Is(err, unix.ESRCH) {
-			t.handleExit(tid)
+			t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 			return nil
 		}
 		t.mu.Lock()
@@ -450,7 +505,7 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
 		if errors.Is(err, unix.ESRCH) {
-			t.handleExit(tid)
+			t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 			return nil
 		}
 		return err
@@ -521,10 +576,10 @@ func (t *Tracer) hasPendingSyscallExit(tid int) bool {
 }
 
 // handleStop dispatches a tracee stop event.
-func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus) {
+func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus, rusage *unix.Rusage) {
 	switch {
 	case status.Exited() || status.Signaled():
-		t.handleExit(tid)
+		t.handleExit(tid, status, rusage, ExitNormal)
 
 	case status.Stopped():
 		sig := status.StopSignal()
@@ -991,7 +1046,7 @@ func (t *Tracer) handleExecEvent(tid int) {
 	t.invalidateScratchPage(tgid)
 }
 
-func (t *Tracer) handleExit(tid int) {
+func (t *Tracer) handleExit(tid int, status unix.WaitStatus, rusage *unix.Rusage, reason ExitReason) {
 	t.mu.Lock()
 	state := t.tracees[tid]
 	var tgid int
@@ -1018,6 +1073,27 @@ func (t *Tracer) handleExit(tid int) {
 	t.mu.Unlock()
 
 	if state != nil && lastThread {
+		if v, ok := t.exitNotify.LoadAndDelete(tgid); ok {
+			ch := v.(chan ExitStatus)
+			// Deep-copy rusage to avoid aliasing the loop-local variable
+			// in Run() which gets reused on subsequent Wait4 iterations.
+			var ruCopy *unix.Rusage
+			if rusage != nil {
+				ru := *rusage
+				ruCopy = &ru
+			}
+			es := ExitStatus{
+				PID:    tgid,
+				Reason: reason,
+				Rusage: ruCopy,
+			}
+			if status.Exited() {
+				es.Code = status.ExitStatus()
+			} else if status.Signaled() {
+				es.Signal = int(status.Signal())
+			}
+			ch <- es
+		}
 		if t.fds != nil {
 			t.fds.clearTGID(tgid)
 		}
@@ -1162,6 +1238,7 @@ func (t *Tracer) Run(ctx context.Context) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer t.cancelPendingAttachWaiters()
+	defer t.cancelPendingExitWaiters()
 
 	t.fds = newFdTracker()
 	if t.cfg.TraceNetwork && t.cfg.NetworkHandler != nil {
@@ -1189,7 +1266,8 @@ func (t *Tracer) Run(ctx context.Context) error {
 		}
 
 		var status unix.WaitStatus
-		tid, err := unix.Wait4(-1, &status, unix.WALL|unix.WNOHANG, nil)
+		var rusage unix.Rusage
+		tid, err := unix.Wait4(-1, &status, unix.WALL|unix.WNOHANG, &rusage)
 
 		if err != nil {
 			if err == unix.EINTR {
@@ -1237,7 +1315,7 @@ func (t *Tracer) Run(ctx context.Context) error {
 			continue
 		}
 
-		t.handleStop(ctx, tid, status)
+		t.handleStop(ctx, tid, status, &rusage)
 	}
 }
 
@@ -1319,7 +1397,7 @@ func (t *Tracer) sweepParkedTimeouts() {
 			if err := unix.Tgkill(tgid, tid, unix.SIGKILL); err != nil {
 				if errors.Is(err, unix.ESRCH) {
 					// Tracee already gone.
-					t.handleExit(tid)
+					t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 					resolved = true
 				} else {
 					slog.Error("ptrace: kill after timeout also failed, will retry",

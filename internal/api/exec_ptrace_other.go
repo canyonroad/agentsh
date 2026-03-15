@@ -2,8 +2,18 @@
 
 package api
 
-import "fmt"
+import (
+	"fmt"
 
-func ptraceExecAttach(tracer any, pid int, sessionID, commandID string, keepStopped bool) (resume func() error, err error) {
-	return nil, fmt.Errorf("ptrace not supported on this platform")
+	"github.com/agentsh/agentsh/pkg/types"
+)
+
+type ptraceExecResult struct {
+	exitCode  int
+	resources types.ExecResources
+	err       error
+}
+
+func ptraceExecAttach(tracer any, pid int, sessionID, commandID string, keepStopped bool) (waitExit func() ptraceExecResult, resume func() error, err error) {
+	return nil, nil, fmt.Errorf("ptrace not supported on this platform")
 }

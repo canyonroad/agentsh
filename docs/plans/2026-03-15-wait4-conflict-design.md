@@ -1,7 +1,7 @@
 # Design: Fix Wait4 Conflict Between Ptrace Tracer and Go Runtime
 
 **Date:** 2026-03-15
-**Status:** Draft
+**Status:** Implemented
 
 ---
 

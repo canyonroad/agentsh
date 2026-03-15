@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -122,12 +124,24 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		return 2, []byte{}, msg, 0, int64(len(msg)), false, false, types.ExecResources{}, nil
 	}
 
-	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
+	// When ptrace is active, use exec.Command (not CommandContext) because we
+	// skip cmd.Wait() — CommandContext starts an internal goroutine that needs
+	// Wait() for cleanup. We handle timeout/cancellation via killProcessGroup.
+	var cmd *exec.Cmd
+	if tracer != nil {
+		cmd = exec.Command(req.Command, req.Args...)
+	} else {
+		cmd = exec.CommandContext(ctx, req.Command, req.Args...)
+	}
 	slog.Debug("exec command created", "command", req.Command, "args", req.Args, "session_id", s.ID)
 	if ns := s.NetNSName(); ns != "" {
 		// Run inside the session network namespace (Linux only; requires iproute2).
 		allArgs := append([]string{"netns", "exec", ns, req.Command}, req.Args...)
-		cmd = exec.CommandContext(ctx, "ip", allArgs...)
+		if tracer != nil {
+			cmd = exec.Command("ip", allArgs...)
+		} else {
+			cmd = exec.CommandContext(ctx, "ip", allArgs...)
+		}
 	} else if strings.TrimSpace(req.Argv0) != "" && len(cmd.Args) > 0 {
 		cmd.Args[0] = req.Argv0
 	}
@@ -201,14 +215,61 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 
 	stdoutW := newCaptureWriter(defaultMaxOutputBytes, nil)
 	stderrW := newCaptureWriter(defaultMaxOutputBytes, nil)
-	cmd.Stdout = stdoutW
-	cmd.Stderr = stderrW
+
+	// For ptrace mode, use explicit pipes so we can drain them independently
+	// of cmd.Wait() (which we skip to avoid the Wait4 race). For non-ptrace,
+	// set writers directly and let cmd.Wait() handle pipe synchronization.
+	var stdoutPipeR, stderrPipeR, stdoutPipeW, stderrPipeW *os.File
+	var pipeWG sync.WaitGroup
+	if tracer != nil {
+		var pipeErr error
+		stdoutPipeR, stdoutPipeW, pipeErr = os.Pipe()
+		if pipeErr != nil {
+			return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stdout pipe: %w", pipeErr)
+		}
+		stderrPipeR, stderrPipeW, pipeErr = os.Pipe()
+		if pipeErr != nil {
+			stdoutPipeR.Close()
+			stdoutPipeW.Close()
+			return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stderr pipe: %w", pipeErr)
+		}
+		cmd.Stdout = stdoutPipeW
+		cmd.Stderr = stderrPipeW
+	} else {
+		cmd.Stdout = stdoutW
+		cmd.Stderr = stderrW
+	}
+
+	// Fail fast if context is already cancelled (ptrace mode doesn't use CommandContext)
+	if tracer != nil && ctx.Err() != nil {
+		if stdoutPipeR != nil { stdoutPipeR.Close() }
+		if stderrPipeR != nil { stderrPipeR.Close() }
+		if stdoutPipeW != nil { stdoutPipeW.Close() }
+		if stderrPipeW != nil { stderrPipeW.Close() }
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return 124, nil, nil, 0, 0, false, false, types.ExecResources{}, ctx.Err()
+		}
+		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, ctx.Err()
+	}
 
 	if err := cmd.Start(); err != nil {
 		slog.Debug("exec command start failed", "command", req.Command, "error", err)
+		if stdoutPipeR != nil { stdoutPipeR.Close() }
+		if stderrPipeR != nil { stderrPipeR.Close() }
+		if stdoutPipeW != nil { stdoutPipeW.Close() }
+		if stderrPipeW != nil { stderrPipeW.Close() }
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
 	}
 	slog.Debug("exec command started", "command", req.Command, "pid", cmd.Process.Pid)
+
+	// For ptrace mode: close write ends (now owned by child) and start draining
+	if tracer != nil && stdoutPipeW != nil {
+		stdoutPipeW.Close()
+		stderrPipeW.Close()
+		pipeWG.Add(2)
+		go func() { defer pipeWG.Done(); if _, err := io.Copy(stdoutW, stdoutPipeR); err != nil { slog.Debug("ptrace stdout drain error", "error", err) }; stdoutPipeR.Close() }()
+		go func() { defer pipeWG.Done(); if _, err := io.Copy(stderrW, stderrPipeR); err != nil { slog.Debug("ptrace stderr drain error", "error", err) }; stderrPipeR.Close() }()
+	}
 
 	pgid := 0
 	if cmd.Process != nil {
@@ -218,10 +279,26 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		// If we started with ptrace (stopped), run the hook BEFORE resuming.
 		// This ensures eBPF/cgroups are attached before the process executes.
 		if tracer != nil {
+			// Context cancellation watcher: start BEFORE attach so timeout
+			// is enforced even if WaitAttached stalls.
+			ptraceDone := make(chan struct{})
+			go func() {
+				select {
+				case <-ctx.Done():
+					_ = killProcessGroup(pgid)
+					_ = killProcess(cmd.Process.Pid)
+				case <-ptraceDone:
+				}
+			}()
+
 			// Ptrace tracer active: attach via PTRACE_SEIZE, run hook while stopped, resume
-			resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
+			waitExit, resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
 			if attachErr != nil {
+				close(ptraceDone)
 				_ = killProcess(cmd.Process.Pid)
+				_ = killProcessGroup(pgid)
+				pipeWG.Wait()
+				cmd.Process.Release()
 				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace attach: %w", attachErr)
 			}
 			if hook != nil {
@@ -231,10 +308,45 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 			}
 			if resume != nil {
 				if resumeErr := resume(); resumeErr != nil {
+					close(ptraceDone)
 					_ = killProcess(cmd.Process.Pid)
+					_ = killProcessGroup(pgid)
+					pipeWG.Wait()
+					cmd.Process.Release()
 					return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace resume: %w", resumeErr)
 				}
 			}
+
+			// Tracer-managed wait: block on exit channel instead of cmd.Wait()
+			// to avoid Wait4(-1) race between tracer and Go runtime.
+			waitStart := time.Now()
+			slog.Debug("exec waiting for command (ptrace)", "command", req.Command, "pid", cmd.Process.Pid)
+			result := waitExit()
+			close(ptraceDone) // stop context watcher immediately after exit
+			// On tracer shutdown, force-kill child before draining pipes
+			if result.err != nil {
+				_ = killProcess(cmd.Process.Pid)
+				_ = killProcessGroup(pgid)
+			}
+			waitDuration := time.Since(waitStart)
+			slog.Debug("exec command finished (ptrace)", "command", req.Command, "pid", cmd.Process.Pid, "exit_code", result.exitCode, "wait_duration_ms", waitDuration.Milliseconds())
+			pipeWG.Wait() // drain pipes before reading capture writers
+			stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
+			stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
+			stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
+			resources = result.resources
+			cmd.Process.Release()
+
+			if ctx.Err() != nil {
+				_ = killProcessGroup(pgid)
+			}
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
+			}
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return 127, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, ctx.Err()
+			}
+			return result.exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, result.err
 		} else if hook != nil {
 			// Seccomp stopped-start: process started with PTRACE_TRACEME
 			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {

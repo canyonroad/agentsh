@@ -1830,7 +1830,22 @@ Phase 4 brings ptrace mode to full feature parity with seccomp+FUSE for redirect
 - Fail-closed guards on all execution paths: HTTP exec, streaming exec, gRPC ExecStream, PTY
 - Cross-platform: `app_ptrace_other.go` stubs, `exec_ptrace_other.go` stubs, `wrap_other.go`/`wrap_windows.go` stubs
 
-**Deliverable:** ptrace tracer is fully wired into the server. When `sandbox.ptrace.enabled: true`, all processes spawned via exec, exec/stream, and wrap are traced. Policy enforcement, audit events, and lifecycle management work end-to-end. Known limitation: brief pre-attach execution window between cmd.Start() and PTRACE_SEIZE (Phase 6 pipe barrier).
+**Deliverable:** ptrace tracer is fully wired into the server. When `sandbox.ptrace.enabled: true`, all processes spawned via exec, exec/stream, and wrap are traced. Policy enforcement, audit events, and lifecycle management work end-to-end. Known limitations: (1) brief pre-attach execution window between cmd.Start() and PTRACE_SEIZE, (2) seccomp prefilter not active in server-wired mode (all syscalls trapped, ~10-50x overhead vs baseline).
+
+### Phase 5b: Wait4 Conflict Fix ✓
+
+- **Problem**: tracer's `Wait4(-1)` races with Go's `cmd.Wait()` — both compete to reap child exit events, causing `cmd.Wait()` to hang indefinitely
+- **Fix**: tracer-managed exit notifications replace `cmd.Wait()` for traced processes
+- `ExitStatus` type with `ExitReason` enum (`ExitNormal`, `ExitVanished`, `ExitTracerDown`)
+- `RegisterExitNotify`/`UnregisterExitNotify` with duplicate-rejection and ownership-checked unregister
+- `handleExit` dispatches on last-thread exit with deep-copied `Rusage`
+- Explicit `os.Pipe()` + `WaitGroup` draining (replaces `os/exec` internal pipe sync)
+- `exec.Command` (not `CommandContext`) with context watcher goroutine gated by done channel
+- `resourcesFromRusage` for resource usage from `Wait4` rusage (replaces `cmd.ProcessState`)
+- Exit code mapping: signaled → `-1`, `ExitVanished` → `-1`, `ExitTracerDown` → `127`, timeout → `124`, cancelled → `127`
+- Force-kill child on `ExitTracerDown` before pipe drain; pre-start `ctx.Err()` fail-fast
+
+**Deliverable:** ptrace exec paths complete reliably without `cmd.Wait()` hangs. Exit codes, signals, and resource usage preserved.
 
 ---
 

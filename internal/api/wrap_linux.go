@@ -217,7 +217,7 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socket
 	// Clear read deadline for the keepalive phase
 	conn.SetDeadline(time.Time{})
 
-	_, attachErr := ptraceExecAttach(a.ptraceTracer, pid, sessionID, "", false)
+	_, _, attachErr := ptraceExecAttach(a.ptraceTracer, pid, sessionID, "", false)
 	if attachErr != nil {
 		conn.Write([]byte{0}) // NACK
 		conn.Close()

@@ -200,7 +200,7 @@ func (t *Tracer) redirectExec(ctx context.Context, tid int, regs Regs, result Ex
 	// PendingExecStubFD cleanup runs on exec failure.
 	if err := unix.PtraceSyscall(tid, 0); err != nil {
 		if errors.Is(err, unix.ESRCH) {
-			t.handleExit(tid)
+			t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 		} else {
 			slog.Warn("redirectExec: PtraceSyscall failed, cleaning up stub fd",
 				"tid", tid, "error", err)
