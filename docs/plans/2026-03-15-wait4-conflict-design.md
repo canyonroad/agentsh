@@ -15,7 +15,7 @@ This does not occur in standalone sidecar mode where the tracer runs in a separa
 
 - Traced processes complete reliably without `cmd.Wait()` hangs
 - Exit codes, signals, and resource usage (CPU, memory) are preserved
-- Fast-exiting processes don't drop notifications
+- Fast-exiting processes don't drop notifications (post-attach; pre-attach race is separate future work)
 - Multi-threaded process exit is handled correctly
 - Tracer shutdown unblocks all pending waiters
 
@@ -209,7 +209,9 @@ When the child exits, the kernel closes the write ends, the read goroutines drai
 
 ### Pipe Drain Failure
 
-If the context is cancelled (command timeout), the exec path kills the process group as it does today. The kill closes the write ends, draining completes, and `wg.Wait()` returns. No special handling needed.
+If `io.Copy` encounters a read error during drain, the output is truncated but the exit code is still reported correctly — drain errors are non-fatal. This matches the current `cmd.Wait()` behavior where stdout/stderr pipes are best-effort (kernel may truncate on SIGKILL).
+
+If the context is cancelled (command timeout), the exec path kills the process group as it does today. The kill closes the write ends, draining completes, and `wg.Wait()` returns.
 
 ## 6. Resource Usage
 
@@ -249,7 +251,9 @@ case ExitNormal:
     }
     return status.Code
 case ExitVanished:
-    return -1      // process disappeared, treat like signaled
+    return -1      // process disappeared — intentional approximation as "signaled"
+                   // (current cmd.Wait() path never encounters this case since Go
+                   // runtime always reaps its own children successfully)
 case ExitTracerDown:
     return 127     // infrastructure failure, matches "other error" path
 }
@@ -265,10 +269,10 @@ Context deadline handling (timeout → kill → exit code 124) remains unchanged
 
 | File | Change |
 |------|--------|
-| `internal/ptrace/tracer.go` | Add `exitNotify sync.Map`, `ExitStatus`, `RegisterExitNotify()`, `UnregisterExitNotify()`. Change `Wait4` to capture `Rusage`. Change `handleExit` signature to accept `WaitStatus`, `*Rusage`, `error`. Dispatch on last-thread exit. Add `cancelPendingExitWaiters`. Update ~8 ESRCH call sites. |
-| `internal/api/exec.go` | When `tracer != nil`: explicit pipes, register exit notify, block on exit channel, drain pipes, `cmd.Process.Release()`, use `resourcesFromRusage`. |
+| `internal/ptrace/tracer.go` | Add `exitNotify sync.Map`, `ExitStatus`, `ExitReason`, `RegisterExitNotify()`, `UnregisterExitNotify()`. Change `Wait4` to capture `Rusage`. Change `handleExit` signature to accept `WaitStatus`, `*Rusage`, `ExitReason`. Dispatch on last-thread exit. Add `cancelPendingExitWaiters`. Update ~8 ESRCH call sites to pass `ExitVanished`. |
+| `internal/api/exec.go` | When `tracer != nil`: explicit pipes, register exit notify, block on exit channel, drain pipes, `cmd.Process.Release()`, use `resourcesFromRusage`. Pipe drain errors are non-fatal (output may be truncated but exit code is still reported). |
 | `internal/api/exec_stream.go` | Same changes for streaming exec path. |
-| `internal/api/exec_ptrace_linux.go` | Update `ptraceExecAttach` to call `RegisterExitNotify` between `AttachPID` and `WaitAttached`, return exit channel. Cleanup on failure via `UnregisterExitNotify`. |
+| `internal/api/exec_ptrace_linux.go` | Update `ptraceExecAttach` to call `RegisterExitNotify` BEFORE `AttachPID`, return exit channel. Cleanup on failure via `UnregisterExitNotify`. |
 | `internal/api/process_unix.go` | Add `resourcesFromRusage` alongside existing `resourcesFromProcessState`. |
 
 ### Unchanged
