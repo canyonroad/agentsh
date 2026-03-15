@@ -13,11 +13,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func (t *Tracer) attachProcess(pid int) error {
+func (t *Tracer) attachProcess(pid int, opts attachOpts) error {
+	// Seed directly-attached processes as roots in the process tree so
+	// depth-based policy rules work correctly (depth 0 for direct attaches).
+	t.processTree.AddRoot(pid)
+
 	taskDir := fmt.Sprintf("/proc/%d/task", pid)
 	entries, err := os.ReadDir(taskDir)
 	if err != nil {
-		return t.attachThread(pid)
+		return t.attachThread(pid, opts)
 	}
 
 	var firstErr error
@@ -26,7 +30,7 @@ func (t *Tracer) attachProcess(pid int) error {
 		if err != nil {
 			continue
 		}
-		if err := t.attachThread(tid); err != nil {
+		if err := t.attachThread(tid, opts); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -36,7 +40,7 @@ func (t *Tracer) attachProcess(pid int) error {
 	return firstErr
 }
 
-func (t *Tracer) attachThread(tid int) error {
+func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 	err := unix.PtraceSeize(tid)
 	if err != nil {
 		reason := "other"
@@ -103,7 +107,10 @@ func (t *Tracer) attachThread(tid int) error {
 		return fmt.Errorf("read TGID for tid %d: %w", tid, err)
 	}
 
-	if t.prefilterActive {
+	if opts.keepStopped {
+		// Leave tracee stopped for cgroup hook; register in parkedTracees
+		// so ResumePID (via handleResumeRequest) can find and resume it.
+	} else if t.prefilterActive {
 		err = unix.PtraceCont(tid, 0)
 	} else {
 		err = unix.PtraceSyscall(tid, 0)
@@ -125,11 +132,16 @@ func (t *Tracer) attachThread(tid int) error {
 	t.tracees[tid] = &TraceeState{
 		TID:                tid,
 		TGID:               tgid,
+		SessionID:          opts.sessionID,
+		CommandID:          opts.commandID,
 		Attached:           time.Now(),
 		LastNr:             -1,
 		MemFD:              memFD,
 		PendingExecStubFD:  -1,
 		PendingExecSavedFD: -1,
+	}
+	if opts.keepStopped {
+		t.parkedTracees[tid] = struct{}{}
 	}
 	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()

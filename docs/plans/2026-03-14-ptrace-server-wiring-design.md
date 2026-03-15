@@ -1,7 +1,7 @@
 # Design: Wire ptrace Tracer into Server Exec and Wrap Paths
 
 **Date:** 2026-03-14
-**Status:** Draft
+**Status:** Implemented
 
 ---
 

@@ -43,6 +43,10 @@ func getConnPeerPID(conn *net.UnixConn) int {
 	return 0
 }
 
+func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string) {
+	listener.Close()
+}
+
 func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID string, a *App) {
 	if signalFD != nil {
 		signalFD.Close()

@@ -3,7 +3,7 @@
 **Version:** 0.1 — Draft  
 **Date:** 2026-03-11  
 **Author:** Eran / Canyon Road  
-**Status:** Phase 4c Complete
+**Status:** Phase 5 Complete (Server Wiring)
 
 ---
 
@@ -1816,6 +1816,21 @@ Phase 4 brings ptrace mode to full feature parity with seccomp+FUSE for redirect
 - Sidecar auto-discovery (`sidecar` attach mode) based on real Fargate E2E testing
 - Research spike: seccomp prefilter injection for `pid`/`sidecar` mode (via syscall injection)
 - EKS Fargate support (pending AWS `SYS_PTRACE` for EKS) (§20)
+
+### Phase 5: Server Wiring ✓
+
+- Config validation: ptrace + seccomp.execve and ptrace + unix_sockets mutual exclusion (`SandboxConfig.Validate()`)
+- Ptrace API extensions: `AttachOption` (WithSessionID, WithCommandID, WithKeepStopped), `WaitAttached` (10s timeout), `ResumePID` (TGID-aware multi-thread resume), `attachDone` sync.Map for attach completion signaling
+- Handler router (`internal/api/ptrace_handlers.go`): `ptraceHandlerRouter` implementing all four handler interfaces, routing syscall events to session-level policy engines. Fail-closed on nil PolicyEngine, nil redirect payloads, soft-delete (no trash dir in ptrace context). Depth clamped to 0 for directly-attached processes.
+- App lifecycle (`internal/api/app_ptrace_linux.go`): tracer field on App, init in NewApp, Close method, `ptraceFailed` atomic flag for fail-closed on tracer crash
+- Server shutdown: App.Close() in both Run() graceful shutdown and Server.Close()
+- Exec path: three-path refactor in `runCommandWithResources` (ptrace/seccomp/none), `ptraceExecAttach` helper for AttachPID/WaitAttached/ResumePID flow, both regular and streaming exec wired
+- Wrap path: `PtraceMode` in WrapInitResponse, explicit child PID handshake (4-byte LE, not SO_PEERCRED) with ACK/NACK, `acceptPtracePID` with accept/read deadlines, process tree root seeding
+- CLI wrap: `ptracePostStart` callback with child PID, signal cleanup on handshake failure
+- Fail-closed guards on all execution paths: HTTP exec, streaming exec, gRPC ExecStream, PTY
+- Cross-platform: `app_ptrace_other.go` stubs, `exec_ptrace_other.go` stubs, `wrap_other.go`/`wrap_windows.go` stubs
+
+**Deliverable:** ptrace tracer is fully wired into the server. When `sandbox.ptrace.enabled: true`, all processes spawned via exec, exec/stream, and wrap are traced. Policy enforcement, audit events, and lifecycle management work end-to-end. Known limitation: brief pre-attach execution window between cmd.Start() and PTRACE_SEIZE (Phase 6 pipe barrier).
 
 ---
 

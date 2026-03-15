@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -212,11 +213,27 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 	}
 
 	if wrapCfg != nil {
+		// Ptrace handshake: send child PID to server and wait for attach ACK
+		// before allowing the child to proceed. Must happen before postStart.
+		if wrapCfg.ptracePostStart != nil {
+			if err := wrapCfg.ptracePostStart(agentProc.Process.Pid); err != nil {
+				_ = agentProc.Process.Kill()
+				_ = agentProc.Wait()
+				signal.Stop(sigCh)
+				close(sigCh)
+				<-sigDone
+				return fmt.Errorf("ptrace handshake failed: %w", err)
+			}
+		}
+
 		mechanism := "seccomp"
 		if runtime.GOOS == "darwin" {
 			mechanism = "ES"
 		} else if runtime.GOOS == "windows" {
 			mechanism = "driver"
+		}
+		if wrapCfg.ptracePostStart != nil {
+			mechanism = "ptrace"
 		}
 		fmt.Fprintf(os.Stderr, "agentsh: agent %s started with %s interception (pid: %d)\n", opts.agentCmd, mechanism, agentProc.Process.Pid)
 		// Forward the notify fd to the server in the background
@@ -233,6 +250,9 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 	// Reclaim terminal foreground if needed (before writing to stderr)
 	if wrapCfg != nil && wrapCfg.postWait != nil {
 		wrapCfg.postWait()
+	}
+	if wrapCfg != nil && wrapCfg.keepAlive != nil {
+		wrapCfg.keepAlive.Close()
 	}
 
 	signal.Stop(sigCh)
@@ -268,6 +288,10 @@ type wrapLaunchConfig struct {
 	sysProcAttr *syscall.SysProcAttr
 	postStart   func() // Called after the process starts (e.g., to forward notify fd)
 	postWait    func() // Called after the process exits (e.g., to reclaim terminal)
+	keepAlive   io.Closer // Held open during shell lifetime (e.g., ptrace handshake conn)
+	// ptracePostStart is called after the child is started with the child PID.
+	// It performs the ptrace handshake (send PID, wait for ACK).
+	ptracePostStart func(childPID int) error
 }
 
 // setupWrapInterception initializes seccomp interception via the server and returns
@@ -283,10 +307,11 @@ func setupWrapInterception(ctx context.Context, c client.CLIClient, sessID strin
 		return nil, fmt.Errorf("wrap-init: %w", err)
 	}
 
-	// On Linux, the server must provide a wrapper binary for seccomp interception.
+	// On Linux, the server must provide a wrapper binary for seccomp interception,
+	// unless ptrace mode is active (no wrapper needed).
 	// On macOS and Windows, an empty WrapperBinary is valid — interception is
 	// system-wide via the System Extension (macOS) or driver (Windows).
-	if wrapResp.WrapperBinary == "" && runtime.GOOS == "linux" {
+	if !wrapResp.PtraceMode && wrapResp.WrapperBinary == "" && runtime.GOOS == "linux" {
 		return nil, fmt.Errorf("server returned empty wrapper binary")
 	}
 

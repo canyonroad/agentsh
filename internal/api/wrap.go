@@ -66,6 +66,70 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		return types.WrapInitResponse{}, http.StatusBadRequest, errWrapNotSupported
 	}
 
+	// Ptrace mode: skip seccomp wrapper entirely. Create a socket for PID handshake.
+	if a.ptraceTracer != nil {
+		if a.ptraceFailed.Load() {
+			return types.WrapInitResponse{}, http.StatusServiceUnavailable,
+				fmt.Errorf("ptrace tracer is not healthy; refusing wrap-init")
+		}
+		notifyDir, err := os.MkdirTemp("", "agentsh-wrap-*")
+		if err != nil {
+			return types.WrapInitResponse{}, http.StatusInternalServerError, err
+		}
+		if err := os.Chmod(notifyDir, 0700); err != nil {
+			os.RemoveAll(notifyDir)
+			return types.WrapInitResponse{}, http.StatusInternalServerError, err
+		}
+		// Apply same path-budget + hash truncation as seccomp wrap path
+		safeID := filepath.Base(sessionID)
+		const socketPathLimit = 104
+		prefix := "ptrace-"
+		suffix := ".sock"
+		budget := socketPathLimit - len(notifyDir) - 1 - len(prefix) - len(suffix)
+		if budget < 1 {
+			os.RemoveAll(notifyDir)
+			return types.WrapInitResponse{}, http.StatusInternalServerError,
+				fmt.Errorf("temp directory path too long for Unix socket (%d bytes remaining)", budget)
+		}
+		if len(safeID) > budget {
+			h := sha256.Sum256([]byte(safeID))
+			hashStr := hex.EncodeToString(h[:])
+			if budget > len(hashStr) {
+				budget = len(hashStr)
+			}
+			safeID = hashStr[:budget]
+		}
+		notifySocketPath := filepath.Join(notifyDir, prefix+safeID+suffix)
+
+		listener, err := net.Listen("unix", notifySocketPath)
+		if err != nil {
+			os.RemoveAll(notifyDir)
+			return types.WrapInitResponse{}, http.StatusInternalServerError, err
+		}
+
+		go a.acceptPtracePID(ctx, listener, notifySocketPath, sessionID)
+
+		ev := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now().UTC(),
+			Type:      "wrap_init",
+			SessionID: sessionID,
+			Fields: map[string]any{
+				"ptrace_mode":   true,
+				"agent_command": req.AgentCommand,
+				"agent_args":    req.AgentArgs,
+				"notify_socket": notifySocketPath,
+			},
+		}
+		_ = a.store.AppendEvent(ctx, ev)
+		a.broker.Publish(ev)
+
+		return types.WrapInitResponse{
+			PtraceMode:   true,
+			NotifySocket: notifySocketPath,
+		}, http.StatusOK, nil
+	}
+
 	// Resolve wrapper binary
 	wrapperBin := strings.TrimSpace(a.cfg.Sandbox.UnixSockets.WrapperBin)
 	if wrapperBin == "" {

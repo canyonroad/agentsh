@@ -39,3 +39,7 @@ func (a *App) wrapInitWindows(ctx context.Context, s *session.Session, sessionID
 func getConnPeerPID(conn *net.UnixConn) int {
 	return 0
 }
+
+func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string) {
+	listener.Close()
+}

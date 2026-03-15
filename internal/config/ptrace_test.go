@@ -2,6 +2,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -56,6 +57,101 @@ func TestPtraceConfig_YAMLRoundTrip(t *testing.T) {
 	}
 	if !decoded.Enabled {
 		t.Error("enabled not preserved")
+	}
+}
+
+func TestSandboxConfig_Validate_MutualExclusion(t *testing.T) {
+	boolPtr := func(v bool) *bool { return &v }
+
+	tests := []struct {
+		name    string
+		cfg     SandboxConfig
+		wantErr string
+	}{
+		{
+			name: "ptrace alone is valid",
+			cfg: SandboxConfig{
+				Ptrace: func() SandboxPtraceConfig {
+					c := DefaultPtraceConfig()
+					c.Enabled = true
+					return c
+				}(),
+			},
+		},
+		{
+			name: "ptrace + seccomp.execve rejected",
+			cfg: SandboxConfig{
+				Ptrace: func() SandboxPtraceConfig {
+					c := DefaultPtraceConfig()
+					c.Enabled = true
+					return c
+				}(),
+				Seccomp: SandboxSeccompConfig{
+					Execve: ExecveConfig{Enabled: true},
+				},
+			},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name: "ptrace + unix_sockets rejected",
+			cfg: SandboxConfig{
+				Ptrace: func() SandboxPtraceConfig {
+					c := DefaultPtraceConfig()
+					c.Enabled = true
+					return c
+				}(),
+				UnixSockets: SandboxUnixSocketsConfig{Enabled: boolPtr(true)},
+			},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name: "ptrace + unix_sockets nil is valid",
+			cfg: SandboxConfig{
+				Ptrace: func() SandboxPtraceConfig {
+					c := DefaultPtraceConfig()
+					c.Enabled = true
+					return c
+				}(),
+				UnixSockets: SandboxUnixSocketsConfig{Enabled: nil},
+			},
+		},
+		{
+			name: "ptrace + unix_sockets false is valid",
+			cfg: SandboxConfig{
+				Ptrace: func() SandboxPtraceConfig {
+					c := DefaultPtraceConfig()
+					c.Enabled = true
+					return c
+				}(),
+				UnixSockets: SandboxUnixSocketsConfig{Enabled: boolPtr(false)},
+			},
+		},
+		{
+			name: "ptrace disabled + seccomp.execve is valid",
+			cfg: SandboxConfig{
+				Seccomp: SandboxSeccompConfig{
+					Execve: ExecveConfig{Enabled: true},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
 

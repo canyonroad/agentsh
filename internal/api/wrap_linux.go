@@ -4,14 +4,17 @@ package api
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/session"
@@ -162,4 +165,82 @@ func getConnPeerPID(conn *net.UnixConn) int {
 		}
 	})
 	return pid
+}
+
+// acceptPtracePID accepts a connection on the notify socket, extracts the peer
+// PID via SO_PEERCRED, and attaches the ptrace tracer. The connection is kept
+// open as a keepalive — when the shell exits, the connection closes.
+func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string) {
+	defer listener.Close()
+	defer os.RemoveAll(filepath.Dir(socketPath))
+
+	// Set accept deadline to prevent indefinite goroutine leak
+	if ul, ok := listener.(*net.UnixListener); ok {
+		ul.SetDeadline(time.Now().Add(30 * time.Second))
+	}
+
+	conn, err := listener.Accept()
+	if err != nil {
+		slog.Error("ptrace wrap: accept failed", "error", err, "session_id", sessionID)
+		return
+	}
+
+	// Set read deadline for the handshake
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	// Read child PID from client (4-byte little-endian).
+	// The CLI sends the spawned shell's PID explicitly rather than relying
+	// on SO_PEERCRED, which would give the CLI's PID instead.
+	pidBuf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, pidBuf); err != nil {
+		conn.Write([]byte{0}) // NACK
+		conn.Close()
+		slog.Error("ptrace wrap: failed to read PID", "error", err, "session_id", sessionID)
+		return
+	}
+	pid := int(binary.LittleEndian.Uint32(pidBuf))
+	if pid <= 0 {
+		conn.Write([]byte{0}) // NACK
+		conn.Close()
+		slog.Error("ptrace wrap: invalid PID", "pid", pid, "session_id", sessionID)
+		return
+	}
+
+	// Basic validation: verify the PID exists
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); err != nil {
+		conn.Write([]byte{0}) // NACK
+		conn.Close()
+		slog.Error("ptrace wrap: PID does not exist", "pid", pid, "error", err, "session_id", sessionID)
+		return
+	}
+
+	// Clear read deadline for the keepalive phase
+	conn.SetDeadline(time.Time{})
+
+	_, attachErr := ptraceExecAttach(a.ptraceTracer, pid, sessionID, "", false)
+	if attachErr != nil {
+		conn.Write([]byte{0}) // NACK
+		conn.Close()
+		slog.Error("ptrace wrap: attach failed", "pid", pid, "error", attachErr, "session_id", sessionID)
+		return
+	}
+
+	// ACK: attach succeeded, CLI can proceed
+	conn.Write([]byte{1})
+	slog.Info("ptrace wrap: attached to shell", "pid", pid, "session_id", sessionID)
+
+	// Keep connection open until context is cancelled or shell exits.
+	go func() {
+		defer conn.Close()
+		buf := make([]byte, 1)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				conn.Read(buf) // blocks until close or error
+				return
+			}
+		}
+	}()
 }

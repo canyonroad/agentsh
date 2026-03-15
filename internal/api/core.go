@@ -98,6 +98,11 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
 	}
 
+	// Ptrace mode: no wrapper, no seccomp notify sockets
+	if a.ptraceTracer != nil {
+		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
+	}
+
 	origCommand := req.Command
 	origArgs := append([]string{}, req.Args...)
 
@@ -697,6 +702,9 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 }
 
 func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRequest) (*types.ExecResponse, int, error) {
+	if a.ptraceFailed.Load() {
+		return nil, http.StatusServiceUnavailable, errors.New("ptrace tracer exited unexpectedly; refusing to execute commands without enforcement")
+	}
 	s, ok := a.sessions.Get(id)
 	if !ok {
 		return nil, http.StatusNotFound, errors.New("session not found")
@@ -943,7 +951,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 
 	limits := a.policy.Limits()
 	cmdDecision := a.policy.CheckCommand(wrappedReq.Command, wrappedReq.Args)
-	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(ctx, s, cmdID, wrappedReq, a.cfg, cmdDecision.EnvPolicy, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits), extraCfg)
+	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(ctx, s, cmdID, wrappedReq, a.cfg, cmdDecision.EnvPolicy, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits), extraCfg, a.ptraceTracer, id)
 
 	// Check if process was killed by seccomp (SIGSYS) and emit event
 	emitSeccompBlockedIfSIGSYS(ctx, a.store, a.broker, id, cmdID, execErr)

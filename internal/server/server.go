@@ -67,6 +67,8 @@ type Server struct {
 
 	threatSyncer *threatfeed.Syncer
 	threatStore  *threatfeed.Store
+
+	app *api.App // for lifecycle management (ptrace tracer shutdown)
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -87,6 +89,10 @@ func New(cfg *config.Config) (*Server, error) {
 	// ptrace, seccomp user-notify, or eBPF.
 	if err := capabilities.CheckAll(cfg); err != nil {
 		return nil, err
+	}
+
+	if err := cfg.Sandbox.Validate(); err != nil {
+		return nil, fmt.Errorf("sandbox config: %w", err)
 	}
 
 	pm := policy.NewManager(
@@ -306,6 +312,12 @@ func New(cfg *config.Config) (*Server, error) {
 
 	policyLoader := api.NewDefaultPolicyLoader(cfg.Policies.Dir, enforceApprovals, true)
 	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, oidcAuth, approvalsMgr, metricsCollector, policyLoader)
+	appCloser := app.Close // ensure cleanup on error paths below
+	defer func() {
+		if appCloser != nil {
+			appCloser()
+		}
+	}()
 
 	// Initialize package checker (optional).
 	if cfg.PackageChecks.Enabled {
@@ -411,6 +423,7 @@ func New(cfg *config.Config) (*Server, error) {
 		reapInterval:   reapInterval,
 		threatSyncer:   threatSyncer,
 		threatStore:    threatStore,
+		app:            app,
 	}
 
 	ln, err := listenHTTP(cfg)
@@ -528,6 +541,7 @@ unixDone:
 		srv.pprofServer = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	}
 
+	appCloser = nil // success — don't close app on defer
 	return srv, nil
 }
 
@@ -717,6 +731,9 @@ func (s *Server) Run(ctx context.Context) error {
 			s.grpcServer.GracefulStop()
 		}
 		httpErr := s.httpServer.Shutdown(shutdownCtx)
+		if s.app != nil {
+			s.app.Close()
+		}
 		if syncerDone != nil {
 			<-syncerDone
 		}
@@ -767,6 +784,9 @@ func (s *Server) Close() error {
 	if s.pprofLn != nil {
 		_ = s.pprofLn.Close()
 		s.pprofLn = nil
+	}
+	if s.app != nil {
+		s.app.Close()
 	}
 	if s.sessions != nil {
 		for _, sess := range s.sessions.List() {

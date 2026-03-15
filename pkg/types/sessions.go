@@ -129,6 +129,7 @@ type WrapInitRequest struct {
 
 // WrapInitResponse returns the seccomp wrapper configuration to the CLI.
 type WrapInitResponse struct {
+	PtraceMode    bool              `json:"ptrace_mode,omitempty"`
 	WrapperBinary string            `json:"wrapper_binary"`
 	StubBinary    string            `json:"stub_binary,omitempty"`
 	SeccompConfig string            `json:"seccomp_config"`          // JSON-encoded seccomp config

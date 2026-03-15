@@ -41,6 +41,9 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 	if a == nil {
 		return nil, http.StatusServiceUnavailable, errors.New("server not initialized")
 	}
+	if a.ptraceFailed.Load() {
+		return nil, http.StatusServiceUnavailable, errors.New("ptrace tracer exited unexpectedly; refusing to execute commands without enforcement")
+	}
 	sess, ok := a.sessions.Get(sessionID)
 	if !ok {
 		return nil, http.StatusNotFound, errors.New("session not found")

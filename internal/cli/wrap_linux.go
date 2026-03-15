@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"net"
@@ -19,6 +20,73 @@ import (
 // returns a postStart function that receives the notify fd from the wrapper and
 // forwards it to the server's Unix listener socket.
 func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, sessID string, agentPath string, agentArgs []string, cfg *clientConfig) (*wrapLaunchConfig, error) {
+	// Ptrace mode: no wrapper binary needed. Connect to the server's socket
+	// for PID handshake via SO_PEERCRED, then launch the shell directly.
+	if wrapResp.PtraceMode {
+		notifySocket := wrapResp.NotifySocket
+
+		env := os.Environ()
+		env = append(env,
+			fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),
+			fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
+		)
+
+		// connHolder stores the keepalive connection set by ptracePostStart.
+		var connHolder net.Conn
+
+		return &wrapLaunchConfig{
+			command: agentPath,
+			args:    agentArgs,
+			env:     env,
+			sysProcAttr: func() *syscall.SysProcAttr {
+				attr := &syscall.SysProcAttr{Setpgid: true}
+				if isTerminal(os.Stdin.Fd()) {
+					attr.Foreground = true
+					attr.Ctty = int(os.Stdin.Fd())
+				}
+				return attr
+			}(),
+			ptracePostStart: func(childPID int) error {
+				// Connect after child starts, send the child PID explicitly
+				// (SO_PEERCRED would give our parent PID, not the child's).
+				conn, err := net.Dial("unix", notifySocket)
+				if err != nil {
+					return fmt.Errorf("dial: %w", err)
+				}
+
+				// Send child PID as 4-byte little-endian
+				pidBytes := make([]byte, 4)
+				binary.LittleEndian.PutUint32(pidBytes, uint32(childPID))
+				if _, err := conn.Write(pidBytes); err != nil {
+					conn.Close()
+					return fmt.Errorf("send PID: %w", err)
+				}
+
+				// Wait for server ACK/NACK
+				ack := make([]byte, 1)
+				if _, err := conn.Read(ack); err != nil {
+					conn.Close()
+					return fmt.Errorf("read ACK: %w", err)
+				}
+				if ack[0] != 1 {
+					conn.Close()
+					return fmt.Errorf("server rejected attach")
+				}
+
+				connHolder = conn
+				return nil
+			},
+			postWait: func() {
+				if connHolder != nil {
+					connHolder.Close()
+				}
+				if isTerminal(os.Stdin.Fd()) {
+					reclaimTerminal()
+				}
+			},
+		}, nil
+	}
+
 	// Create a socket pair for the notify fd exchange between the wrapper and this CLI process.
 	// The child end (fds[1]) is inherited by agentsh-unixwrap as ExtraFiles[0] (fd 3).
 	// The parent end (fds[0]) receives the seccomp notify fd from the wrapper.

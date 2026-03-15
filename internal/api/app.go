@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
@@ -62,6 +63,15 @@ type App struct {
 
 	// pkgChecker is the optional package install checker; nil when package_checks.enabled=false
 	pkgChecker *pkgcheck.Checker
+
+	// ptraceTracer holds the ptrace.Tracer on Linux (nil on other platforms or when disabled).
+	// Type is any because ptrace package is Linux-only.
+	ptraceTracer any
+	ptraceCancel context.CancelFunc
+	// ptraceFailed is set when the tracer exits unexpectedly while ptrace mode
+	// is configured. When true, command execution is blocked to prevent running
+	// without syscall enforcement (fail-closed).
+	ptraceFailed atomic.Bool
 }
 
 func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader) *App {
@@ -85,7 +95,7 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		slog.Warn("real_paths enabled but enforce_without_fuse is false: outside-workspace file access will be audit-only (not blocked)")
 	}
 
-	return &App{
+	app := &App{
 		cfg:          cfg,
 		sessions:     sessions,
 		store:        store,
@@ -98,6 +108,8 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		platform:     plat,
 		policyLoader: policyLoader,
 	}
+	app.initPtraceTracer()
+	return app
 }
 
 // SetPlatformForTest replaces the platform implementation. Test-only.
@@ -108,6 +120,11 @@ func (a *App) SetPlatformForTest(p platform.Platform) {
 // SetPackageChecker attaches a package install checker to the app.
 func (a *App) SetPackageChecker(c *pkgcheck.Checker) {
 	a.pkgChecker = c
+}
+
+// Close releases resources held by the app (e.g., ptrace tracer).
+func (a *App) Close() {
+	a.closePtraceTracer()
 }
 
 type ctxKey string

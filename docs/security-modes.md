@@ -129,14 +129,17 @@ ptrace:
     signal: true        # Signal syscall tracing (kill, tkill, tgkill, rt_sigqueueinfo)
 
   # Anti-detection: mask TracerPid in /proc/*/status reads (default: false)
-  mask_tracer_pid: false
+  mask_tracer_pid: "off"
 
   performance:
     max_tracees: 1024           # Maximum concurrent traced threads
     max_hold_ms: 5000           # Maximum time to hold a syscall for policy (fail-closed: deny with EACCES)
     seccomp_prefilter: true     # Use seccomp-BPF to filter non-traced syscalls
-    on_attach_failure: "warn"   # "warn" or "fail"
+
+  on_attach_failure: fail_open  # "fail_open" or "fail_closed"
 ```
+
+**Note:** Ptrace mode is mutually exclusive with `seccomp.execve` and `unix_sockets`. Enabling ptrace with either of these will cause a startup validation error.
 
 **How it works:**
 - Uses `PTRACE_SEIZE` (non-stopping) to attach to child processes and their descendants
@@ -212,9 +215,10 @@ Ptrace mode exposes Prometheus metrics at the `/metrics` endpoint:
    - **Measured overhead is <3% across all workload types** — see [Performance Benchmarks](#performance-benchmarks) below
 
 4. **Attach race window**
-   - Between `fork()` and `PTRACE_SEIZE`, a brief window exists where the child is untraced
+   - In the exec path, a brief window exists between `cmd.Start()` and `PTRACE_SEIZE` where the child is untraced
    - Ptrace auto-attaches to fork/clone/vfork children via `PTRACE_O_TRACECLONE` etc.
-   - The initial attach to the root process has a small race if the process execs immediately
+   - The initial exec target is typically a known-safe binary; a pipe-based start barrier is planned for a follow-up
+   - In the wrap path, the CLI connects to the server after the shell starts, sends the child PID, and waits for an ACK confirming attach before proceeding
 
 5. **Timeout behavior is fail-closed**
    - When `max_hold_ms` expires on a parked tracee, the syscall is denied with `EACCES`
@@ -364,22 +368,32 @@ Explicit `landlock.allow_execute` paths are merged with derived paths.
 
 ## Session Enforcement Flow
 
-When a command is executed in a session:
+When a command is executed in a session, the enforcement path depends on the active security mode:
+
+### Seccomp/Full Mode
 
 ```
 1. Pre-fork policy check (shim validates command)
-2. Fork child process
+2. Fork child process (with seccomp wrapper)
 3. Set PR_SET_NO_NEW_PRIVS
 4. Drop capabilities
 5. Apply Landlock ruleset
 6. Apply cgroup limits (if available)
-7. Execute actual command
+7. Execute actual command (seccomp user-notify intercepts syscalls)
 ```
 
-This ordering ensures:
-- No privilege escalation after restrictions are applied
-- Landlock is enforced before the untrusted command runs
-- Multiple layers of protection work together
+### Ptrace Mode
+
+```
+1. Pre-fork policy check (shim validates command)
+2. Fork child process (normal start, no seccomp wrapper)
+3. Tracer attaches via PTRACE_SEIZE + PTRACE_INTERRUPT (stops process)
+4. Apply cgroup limits while process is stopped
+5. Tracer resumes process
+6. Tracer intercepts syscalls for ongoing enforcement
+```
+
+Note: In ptrace mode, there is a brief pre-attach window between fork and PTRACE_SEIZE where the child process may execute a few instructions untraced. This is acceptable for Phase 1 since the initial exec target is typically a known-safe binary path, and the seccomp prefilter auto-attaches to fork/clone descendants.
 
 ## Performance Benchmarks
 

@@ -30,7 +30,7 @@ func TestRunCommand_ReturnsResourcesForExternalCommand(t *testing.T) {
 	cfg := &config.Config{}
 	req := types.ExecRequest{Command: "sh", Args: []string{"-c", "echo hi"}}
 
-	_, _, _, _, _, _, _, res, err := runCommandWithResources(context.Background(), s, "cmd-test", req, cfg, policy.ResolvedEnvPolicy{}, 0, nil, nil)
+	_, _, _, _, _, _, _, res, err := runCommandWithResources(context.Background(), s, "cmd-test", req, cfg, policy.ResolvedEnvPolicy{}, 0, nil, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

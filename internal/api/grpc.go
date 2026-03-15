@@ -249,6 +249,9 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 	if s == nil || s.app == nil {
 		return status.Error(codes.Internal, "server not initialized")
 	}
+	if s.app.ptraceFailed.Load() {
+		return status.Error(codes.Unavailable, "ptrace tracer exited unexpectedly; refusing to execute commands without enforcement")
+	}
 	var reqMap map[string]any
 	if err := json.Unmarshal(mustProtoJSON(in), &reqMap); err != nil {
 		return status.Error(codes.InvalidArgument, "invalid request")
@@ -419,6 +422,8 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 		emit,
 		s.app.cgroupHook(req.SessionID, cmdID, limits),
 		extraCfg,
+		s.app.ptraceTracer,
+		req.SessionID,
 	)
 	_ = s.app.store.SaveOutput(stream.Context(), req.SessionID, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 
