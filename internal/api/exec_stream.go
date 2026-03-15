@@ -392,10 +392,14 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			}
 
 			// Context cancellation watcher
+			ptraceDone := make(chan struct{})
 			go func() {
-				<-ctx.Done()
-				_ = killProcessGroup(pgid)
-				_ = killProcess(cmd.Process.Pid)
+				select {
+				case <-ctx.Done():
+					_ = killProcessGroup(pgid)
+					_ = killProcess(cmd.Process.Pid)
+				case <-ptraceDone:
+				}
 			}()
 
 			// Tracer-managed wait: block on exit channel instead of cmd.Wait()
@@ -410,6 +414,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
 			resources = result.resources
 			cmd.Process.Release()
+			close(ptraceDone)
 
 			if ctx.Err() != nil {
 				_ = killProcessGroup(pgid)

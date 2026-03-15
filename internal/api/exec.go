@@ -137,7 +137,11 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	if ns := s.NetNSName(); ns != "" {
 		// Run inside the session network namespace (Linux only; requires iproute2).
 		allArgs := append([]string{"netns", "exec", ns, req.Command}, req.Args...)
-		cmd = exec.CommandContext(ctx, "ip", allArgs...)
+		if tracer != nil {
+			cmd = exec.Command("ip", allArgs...)
+		} else {
+			cmd = exec.CommandContext(ctx, "ip", allArgs...)
+		}
 	} else if strings.TrimSpace(req.Argv0) != "" && len(cmd.Args) > 0 {
 		cmd.Args[0] = req.Argv0
 	}
@@ -283,10 +287,14 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 
 			// Context cancellation watcher: kill process group on timeout/cancel
 			// since we're not using CommandContext in ptrace mode.
+			ptraceDone := make(chan struct{})
 			go func() {
-				<-ctx.Done()
-				_ = killProcessGroup(pgid)
-				_ = killProcess(cmd.Process.Pid)
+				select {
+				case <-ctx.Done():
+					_ = killProcessGroup(pgid)
+					_ = killProcess(cmd.Process.Pid)
+				case <-ptraceDone:
+				}
 			}()
 
 			// Tracer-managed wait: block on exit channel instead of cmd.Wait()
@@ -302,6 +310,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 			stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
 			resources = result.resources
 			cmd.Process.Release()
+			close(ptraceDone) // stop context watcher — normal completion
 
 			if ctx.Err() != nil {
 				_ = killProcessGroup(pgid)
