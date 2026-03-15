@@ -12,13 +12,13 @@ Wire the existing `ptrace.Tracer` into the agentsh server so that when `sandbox.
 **Architecture**: One `ptrace.Tracer` per server process, started at boot, runs for the server's lifetime. Processes are attached via `tracer.AttachPID(pid)` as they're spawned. The tracer dispatches syscall events to the session's policy engine through thin adapter handlers that reuse the existing policy evaluation and audit emission code.
 
 **Key decisions**:
-- Ptrace mode and seccomp mode are mutually exclusive — when ptrace is on, `agentsh-unixwrap` is not used
-- The tracer owns the process pause/resume lifecycle, replacing the existing `getSysProcAttrStopped()` / `resumeTracedProcess()` mechanism
+- Ptrace mode and seccomp mode are mutually exclusive — when ptrace is on, `agentsh-unixwrap` is not used. Enforced by config validation.
+- The tracer owns the process pause/resume lifecycle, replacing the existing `getSysProcAttrStopped()` / `resumeTracedProcess()` mechanism. Processes start normally (no `PTRACE_TRACEME`); the tracer's `PTRACE_SEIZE` + `PTRACE_INTERRUPT` stops them.
 - For `wrap`, the CLI skips the seccomp wrapper and reports the shell PID to the server for attachment
 - Cleanup follows the server context — tracer stops when the server shuts down, individual tracee cleanup happens through natural exit events
 
 **Files touched**:
-- `internal/api/app.go` — add tracer field, init at boot
+- `internal/api/app.go` — add tracer field, `Close()` method, init at boot
 - `internal/api/core.go` — conditional exec path (ptrace vs seccomp)
 - `internal/api/exec.go` — attach tracer instead of seccomp wrapper
 - `internal/api/wrap.go` — ptrace-mode wrap handshake
@@ -26,11 +26,35 @@ Wire the existing `ptrace.Tracer` into the agentsh server so that when `sandbox.
 - `internal/api/ptrace_handlers.go` — new file, adapter handlers
 - `internal/api/process_linux.go` — tracer-aware pause/resume
 - `internal/ptrace/tracer.go` — `WaitAttached`, `ResumePID`, `AttachOption`
-- `pkg/types/wrap.go` — add `PtraceMode` flag to `WrapInitResponse`
+- `internal/ptrace/attach.go` — propagate `attachOpts` to `TraceeState`
+- `internal/config/ptrace.go` — mutual exclusion validation
+- `internal/server/server.go` — plumb `App.Close()` into server shutdown
+- `internal/cli/wrap_linux.go` — ptrace-mode branch in `platformSetupWrap`
+- `pkg/types/sessions.go` — add `PtraceMode` field to `WrapInitResponse`
 
 ---
 
-## 2. Server Boot — Tracer Initialization
+## 2. Config Validation
+
+Add mutual exclusion validation in `internal/config/ptrace.go`:
+
+```go
+// In SandboxConfig.Validate() or a new cross-field validator:
+if c.Ptrace.Enabled && c.Seccomp.Execve.Enabled {
+    return fmt.Errorf("sandbox.ptrace and sandbox.seccomp.execve are mutually exclusive")
+}
+if c.Ptrace.Enabled && c.UnixSockets.Enabled {
+    return fmt.Errorf("sandbox.ptrace and sandbox.unix_sockets are mutually exclusive")
+}
+```
+
+This prevents both interception mechanisms from being active simultaneously, which would cause `PTRACE_TRACEME` / `PTRACE_SEIZE` conflicts and duplicate syscall handling.
+
+Note: `MaskTracerPid` config validation currently rejects any value other than `"off"`. The tracer's `MaskTracerPid` field should be set to `false` unconditionally until that validation is relaxed in a future change.
+
+---
+
+## 3. Server Boot — Tracer Initialization
 
 Add a tracer field to the `App` struct and initialize it in `NewApp()`.
 
@@ -58,7 +82,7 @@ if cfg.Sandbox.Ptrace.Enabled {
         TraceFile:        cfg.Sandbox.Ptrace.Trace.File,
         TraceNetwork:     cfg.Sandbox.Ptrace.Trace.Network,
         TraceSignal:      cfg.Sandbox.Ptrace.Trace.Signal,
-        MaskTracerPid:    cfg.Sandbox.Ptrace.MaskTracerPid == "on",
+        MaskTracerPid:    false,  // validation rejects non-"off" values for now
         SeccompPrefilter: cfg.Sandbox.Ptrace.Performance.SeccompPrefilter,
         MaxTracees:       cfg.Sandbox.Ptrace.Performance.MaxTracees,
         MaxHoldMs:        cfg.Sandbox.Ptrace.Performance.MaxHoldMs,
@@ -74,11 +98,42 @@ if cfg.Sandbox.Ptrace.Enabled {
 }
 ```
 
-A `Close()` method on App calls `ptraceCancel()` during shutdown.
+### Shutdown
+
+Add a `Close()` method to `App`:
+
+```go
+func (a *App) Close() {
+    if a.ptraceCancel != nil {
+        a.ptraceCancel()
+    }
+}
+```
+
+Plumb this into the server lifecycle. `Server` currently does not hold a reference to `App` — it only calls `app.Router()` to get an `http.Handler`. To fix this:
+
+```go
+// server.go — add App reference
+type Server struct {
+    // ... existing fields ...
+    app *api.App  // for lifecycle management
+}
+
+// In Server.Close():
+func (s *Server) Close() error {
+    // ... existing shutdown ...
+    if s.app != nil {
+        s.app.Close()
+    }
+    return nil
+}
+```
+
+When the tracer's context is cancelled, its `Run()` method exits, which detaches all tracees gracefully (existing cleanup path in the tracer).
 
 ---
 
-## 3. Handler Adapters — Routing Syscalls to Policy
+## 4. Handler Adapters — Routing Syscalls to Policy
 
 The tracer is singleton but policy engines are per-session. A handler router looks up the right session for each syscall event.
 
@@ -96,8 +151,8 @@ This struct implements all four ptrace handler interfaces. On each syscall event
 
 1. Reads `SessionID` from the event context (set during `AttachPID`)
 2. Looks up the session via `sessions.Get(sessionID)`
-3. Gets the session's policy engine
-4. Evaluates the policy (same `EvaluateCommand()` / `EvaluateFile()` / `EvaluateNetwork()` calls the seccomp path uses)
+3. Gets the session's policy engine via `s.PolicyEngine()` (returns `*policy.Engine`)
+4. Evaluates the policy using the real API: `pe.CheckCommand()`, `pe.CheckFile()`, `pe.CheckNetwork()`
 5. Emits an audit event to the store
 6. Returns allow/deny/redirect to the tracer
 
@@ -105,22 +160,98 @@ Example for exec:
 
 ```go
 func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecContext) ptrace.ExecResult {
-    s, _ := r.sessions.Get(ec.SessionID)
-    pe := s.PolicyEngine()
-    decision := pe.EvaluateCommand(ec.Filename, ec.Argv)
-    r.store.Record(audit.ExecEvent{...})
-    if decision.Action == policy.Deny {
-        return ptrace.ExecResult{Action: ptrace.Deny}
+    s, ok := r.sessions.Get(ec.SessionID)
+    if !ok {
+        return ptrace.ExecResult{Action: ptrace.Deny}  // unknown session = deny
     }
-    return ptrace.ExecResult{Action: ptrace.Allow}
+    pe := s.PolicyEngine()
+    result := pe.CheckCommand(ec.Filename, ec.Argv)
+    // Emit audit event
+    r.store.Record(...)
+    switch result.Decision {
+    case policy.Deny:
+        return ptrace.ExecResult{Action: ptrace.Deny}
+    case policy.Redirect:
+        return ptrace.ExecResult{Action: ptrace.Redirect, RedirectTo: result.RedirectTo}
+    default:
+        return ptrace.ExecResult{Action: ptrace.Allow}
+    }
 }
 ```
 
-Same pattern for `HandleFile`, `HandleNetwork`, `HandleSignal`. The redirect case maps `policy.Redirect` to ptrace's syscall injection (Phase 4a).
+Same pattern for `HandleFile`, `HandleNetwork`, `HandleSignal`. The redirect case maps to ptrace's syscall injection engine (Phase 4a).
 
 ---
 
-## 4. Exec Path — Tracer Attachment
+## 5. Ptrace API Extensions
+
+### 5.1 AttachPID with Options
+
+Current signature: `func (t *Tracer) AttachPID(pid int) error`
+
+Extend to accept metadata:
+
+```go
+func (t *Tracer) AttachPID(pid int, opts ...AttachOption) error
+
+type AttachOption func(*attachOpts)
+type attachOpts struct {
+    sessionID   string
+    commandID   string
+    keepStopped bool  // if true, leave tracee stopped after attach
+}
+
+func WithSessionID(id string) AttachOption {
+    return func(o *attachOpts) { o.sessionID = id }
+}
+
+func WithCommandID(id string) AttachOption {
+    return func(o *attachOpts) { o.commandID = id }
+}
+
+func WithKeepStopped() AttachOption {
+    return func(o *attachOpts) { o.keepStopped = true }
+}
+```
+
+The `attachOpts` are sent through `attachQueue` alongside the PID. In `attachThread()` (`attach.go`), propagate to `TraceeState`:
+
+```go
+t.tracees[tid] = &TraceeState{
+    TID:       tid,
+    TGID:      tgid,
+    SessionID: opts.sessionID,   // NEW
+    CommandID: opts.commandID,   // NEW
+    Attached:  time.Now(),
+    // ... existing fields ...
+}
+```
+
+Add `CommandID string` field to `TraceeState`.
+
+When `keepStopped` is true, `attachThread` skips the final `PtraceSyscall`/`PtraceCont` call, leaving the tracee stopped after `PTRACE_SETOPTIONS`. This is needed for the cgroup hook window.
+
+All child processes forked from this PID inherit the same session/command IDs via existing process tree tracking.
+
+### 5.2 WaitAttached
+
+```go
+func (t *Tracer) WaitAttached(pid int) error
+```
+
+Implementation: `AttachPID` creates a per-PID channel stored in a `sync.Map` on the tracer. When `attachThread` completes (after seize + interrupt + set options), it signals this channel. `WaitAttached` blocks on the channel. This is safe because `WaitAttached` runs on the API goroutine, not the tracer's locked OS thread.
+
+### 5.3 ResumePID
+
+```go
+func (t *Tracer) ResumePID(pid int) error
+```
+
+Implementation: sends a resume request through a channel to the tracer's event loop. The event loop calls `PtraceSyscall` (or `PtraceCont`) on the tracee. This must happen on the tracer's locked OS thread, not the caller's goroutine, because ptrace operations must be performed by the thread that owns the tracee.
+
+---
+
+## 6. Exec Path — Tracer Attachment
 
 In `core.go`, `execInSessionCore()` conditionally skips the seccomp wrapper:
 
@@ -133,16 +264,23 @@ if a.ptraceTracer != nil {
 }
 ```
 
-In `exec.go`, `runCommandWithResources()` uses the tracer for pause/resume when active:
+In `exec.go`, `runCommandWithResources()` uses the tracer for pause/resume when active. The process is started **without** `Ptrace: true` in `SysProcAttr` — no `PTRACE_TRACEME`. Instead, the tracer uses `PTRACE_SEIZE` externally:
 
 ```go
 if tracer != nil {
+    // Start process normally (no PTRACE_TRACEME — incompatible with PTRACE_SEIZE)
+    cmd.SysProcAttr = getSysProcAttr()  // just Setpgid: true
+
+    if err := cmd.Start(); err != nil { ... }
+
+    // Tracer attaches via PTRACE_SEIZE + PTRACE_INTERRUPT (stops the process)
     tracer.AttachPID(cmd.Process.Pid,
         ptrace.WithSessionID(sessionID),
-        ptrace.WithCommandID(cmdID))
+        ptrace.WithCommandID(cmdID),
+        ptrace.WithKeepStopped())
     tracer.WaitAttached(cmd.Process.Pid)
 
-    // Cgroup hook runs while process is stopped
+    // Cgroup hook runs while process is stopped by tracer
     if hook != nil {
         cleanup, _ := hook(cmd.Process.Pid)
         if cleanup != nil {
@@ -153,23 +291,29 @@ if tracer != nil {
     // Resume — tracer stays attached for ongoing tracing
     tracer.ResumePID(cmd.Process.Pid)
 } else {
-    // Existing seccomp path unchanged
+    // Existing seccomp path unchanged (PTRACE_TRACEME for cgroup hook)
 }
 ```
 
-The tracer's `PTRACE_SEIZE` + `PTRACE_INTERRUPT` replaces the existing `getSysProcAttrStopped()` / `resumeTracedProcess()` mechanism. One ptrace owner, no conflicts.
-
-New methods on tracer:
-- `WaitAttached(pid)` — blocks until the tracee is seized and stopped
-- `ResumePID(pid)` — resumes the tracee while keeping tracer attached
+**Race window note**: Between `cmd.Start()` and `PTRACE_SEIZE`, the process runs briefly untraced. With seccomp prefilter in `children` mode, the tracer auto-attaches to fork children via `PTRACE_O_TRACECLONE`. For the initial `exec` call, this window is typically <1ms and the process hasn't reached `main()` yet. If this proves insufficient, a pipe-based barrier can be added in a follow-up.
 
 ---
 
-## 5. Wrap Path — Ptrace Mode Handshake
+## 7. Wrap Path — Ptrace Mode Handshake
 
 When ptrace is active, the server tells the CLI to skip `agentsh-unixwrap` entirely.
 
-**Server side** — `wrapInitCore()`:
+**Types change** — in `pkg/types/sessions.go`, add field to `WrapInitResponse`:
+
+```go
+type WrapInitResponse struct {
+    PtraceMode    bool              `json:"ptrace_mode,omitempty"`
+    WrapperBinary string            `json:"wrapper_binary,omitempty"`
+    // ... existing fields ...
+}
+```
+
+**Server side** — `wrapInitCore()` in `wrap.go`:
 
 ```go
 if a.ptraceTracer != nil {
@@ -191,54 +335,38 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, sessio
     a.ptraceTracer.AttachPID(pid, ptrace.WithSessionID(sessionID))
     a.ptraceTracer.WaitAttached(pid)
     a.ptraceTracer.ResumePID(pid)
+    // Keep conn open — when shell exits, connection closes for detection
 }
 ```
 
-**CLI side** — when `WrapInitResponse.PtraceMode` is true:
+**CLI side** — in `internal/cli/wrap_linux.go`, `platformSetupWrap()` branches on ptrace mode:
 
 ```go
-if resp.PtraceMode {
-    conn, _ := net.Dial("unix", resp.NotifySocket)
-    defer conn.Close()
-    syscall.Exec(shellPath, shellArgs, env)
+func platformSetupWrap(...) {
+    if wrapResp.PtraceMode {
+        // Skip agentsh-unixwrap wrapper, socket pair creation, ACK handshake.
+        // Connect to server socket for PID handshake via SO_PEERCRED.
+        conn, _ := net.Dial("unix", wrapResp.NotifySocket)
+        defer conn.Close()
+        // Exec the agent shell directly — no wrapper
+        syscall.Exec(shellPath, shellArgs, env)
+        return
+    }
+    // ... existing seccomp wrapper path (unchanged) ...
 }
 ```
 
-The socket connection transmits the PID via credentials and serves as a keepalive — when the shell exits, the connection closes.
+The existing `runWrap()` in `internal/cli/wrap.go` checks `WrapperBinary == ""` on Linux and errors. With ptrace mode, this check must be guarded:
+
+```go
+if !resp.PtraceMode && runtime.GOOS == "linux" && resp.WrapperBinary == "" {
+    return fmt.Errorf("server did not provide wrapper binary")
+}
+```
 
 ---
 
-## 6. Session ID Propagation
-
-Extend `AttachPID` to accept metadata via functional options:
-
-```go
-func (t *Tracer) AttachPID(pid int, opts ...AttachOption) error
-
-type AttachOption func(*attachOpts)
-type attachOpts struct {
-    sessionID string
-    commandID string
-}
-
-func WithSessionID(id string) AttachOption {
-    return func(o *attachOpts) { o.sessionID = id }
-}
-
-func WithCommandID(id string) AttachOption {
-    return func(o *attachOpts) { o.commandID = id }
-}
-```
-
-The tracer propagates these to `TraceeState` when the attach completes. All child processes forked from this PID inherit the same session ID via the existing process tree tracking.
-
-The handler router reads `ec.SessionID` on every syscall event and routes to the correct policy engine.
-
-This keeps the tracer package decoupled from the API layer — it stores and propagates opaque string IDs without importing `session` or `policy`.
-
----
-
-## 7. Testing and Validation
+## 8. Testing and Validation
 
 **Unit tests** — `internal/api/ptrace_handlers_test.go`:
 - Handler router with mock session manager and policy engine
@@ -256,3 +384,7 @@ This keeps the tracer package decoupled from the API layer — it stores and pro
 **Smoke test** — extend `scripts/smoke.sh`:
 - Ptrace-mode test: server with `sandbox.ptrace.enabled: true`, basic exec
 - Skipped when `SYS_PTRACE` capability unavailable
+
+**Config validation tests** — `internal/config/ptrace_test.go`:
+- Verify mutual exclusion: ptrace + seccomp.execve → error
+- Verify mutual exclusion: ptrace + unix_sockets → error
