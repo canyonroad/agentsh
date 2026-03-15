@@ -124,24 +124,17 @@ Remove the global `prefilterActive` field from `Tracer`.
 
 ### Multi-Thread Attach
 
-`SECCOMP_SET_MODE_FILTER` without `SECCOMP_FILTER_FLAG_TSYNC` is **thread-scoped** — it only applies to the calling thread. For multi-threaded processes, each attached thread needs its own injection.
+`SECCOMP_SET_MODE_FILTER` without `SECCOMP_FILTER_FLAG_TSYNC` is **thread-scoped** — it only applies to the calling thread (the thread we inject the syscall into).
 
-However, for the exec path (server wiring), attached processes are always **single-threaded** (freshly started by `cmd.Start()`). The child hasn't had a chance to spawn threads yet. So single-thread injection is sufficient.
+**Exec path**: Processes are always single-threaded at attach time (freshly started by `cmd.Start()`). Single-thread injection works. Forked children inherit the filter via kernel seccomp inheritance.
 
-For the wrap path, the shell may be multi-threaded by the time we attach. Use `SECCOMP_FILTER_FLAG_TSYNC` to apply the filter to all threads atomically:
+**Wrap path**: The shell may be multi-threaded. Inject the filter on **every attached thread** individually in `attachThread`. Each thread that gets successfully injected has `HasPrefilter = true`; threads where injection fails fall back to `PtraceSyscall` (TRACESYSGOOD). This avoids TSYNC complexity entirely.
 
-```go
-// Step 4: install filter with TSYNC for multi-threaded targets
-flags := 0
-if threadCount > 1 {
-    flags = SECCOMP_FILTER_FLAG_TSYNC
-}
-injectSyscall(seccomp, SECCOMP_SET_MODE_FILTER, flags, &prog)
-```
-
-If `TSYNC` fails (returns `EINVAL` on older kernels or `ESRCH` if threads are in incompatible states), fall back to per-thread injection: inject on each attached thread individually.
-
-Track injection status per-TGID with a dedicated `seccompInjected` field on `TraceeState` (not via scratch page existence, which is shared with other features). When the first thread in a TGID is injected with TSYNC, mark all threads' `HasPrefilter = true`. Without TSYNC (per-thread), each thread sets its own `HasPrefilter` independently.
+The per-thread approach is simpler and more robust than TSYNC:
+- No TSYNC failure semantics to handle
+- No TGID-level state tracking needed
+- Mixed-mode (some threads with prefilter, some without) works because `handleStop` dispatches both stop types and `allowSyscall`/`resumeTracee` check per-tracee `HasPrefilter`
+- Overhead of per-thread injection is negligible (3 injected syscalls per thread, done once at attach)
 
 ## 6. Scope
 
