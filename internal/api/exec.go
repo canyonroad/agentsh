@@ -105,7 +105,7 @@ func chooseCommandTimeout(req types.ExecRequest, policyLimit time.Duration) time
 	return d
 }
 
-func runCommandWithResources(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, envPol policy.ResolvedEnvPolicy, policyLimit time.Duration, hook postStartHook, extra *extraProcConfig) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
+func runCommandWithResources(ctx context.Context, s *session.Session, cmdID string, req types.ExecRequest, cfg *config.Config, envPol policy.ResolvedEnvPolicy, policyLimit time.Duration, hook postStartHook, extra *extraProcConfig, tracer any, sessionID string) (exitCode int, stdout []byte, stderr []byte, stdoutTotal int64, stderrTotal int64, stdoutTrunc bool, stderrTrunc bool, resources types.ExecResources, err error) {
 	timeout := chooseCommandTimeout(req, policyLimit)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -133,11 +133,13 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	}
 	cmd.Dir = workdir
 
-	// If we have a post-start hook (e.g., eBPF/cgroup), start the process in a
-	// stopped state using ptrace. This closes the race condition window where
-	// the process could make network connections before eBPF is attached.
-	startStopped := hook != nil
-	if startStopped {
+	// Determine process start mode:
+	// - ptrace tracer active: start normally, tracer attaches via PTRACE_SEIZE
+	// - cgroup hook without tracer: start stopped via PTRACE_TRACEME
+	// - no interception: start normally
+	if tracer != nil {
+		cmd.SysProcAttr = getSysProcAttr()
+	} else if hook != nil {
 		cmd.SysProcAttr = getSysProcAttrStopped()
 	} else {
 		cmd.SysProcAttr = getSysProcAttr()
@@ -215,7 +217,26 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 
 		// If we started with ptrace (stopped), run the hook BEFORE resuming.
 		// This ensures eBPF/cgroups are attached before the process executes.
-		if startStopped && hook != nil {
+		if tracer != nil {
+			// Ptrace tracer active: attach via PTRACE_SEIZE, run hook while stopped, resume
+			resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
+			if attachErr != nil {
+				_ = killProcess(cmd.Process.Pid)
+				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace attach: %w", attachErr)
+			}
+			if hook != nil {
+				if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
+					defer func() { _ = cleanup() }()
+				}
+			}
+			if resume != nil {
+				if resumeErr := resume(); resumeErr != nil {
+					_ = killProcess(cmd.Process.Pid)
+					return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace resume: %w", resumeErr)
+				}
+			}
+		} else if hook != nil {
+			// Seccomp stopped-start: process started with PTRACE_TRACEME
 			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
 				defer func() { _ = cleanup() }()
 			}
@@ -224,11 +245,6 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 				// Failed to resume - kill the process and return error
 				_ = killProcess(cmd.Process.Pid)
 				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("resume traced process: %w", resumeErr)
-			}
-		} else if hook != nil {
-			// Non-stopped mode (fallback) - just run the hook
-			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
-				defer func() { _ = cleanup() }()
 			}
 		}
 
