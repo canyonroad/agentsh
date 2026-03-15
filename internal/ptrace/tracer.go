@@ -150,6 +150,7 @@ type TraceeState struct {
 	TGID             int
 	ParentPID        int
 	SessionID        string
+	CommandID        string
 	InSyscall        bool
 	LastNr           int
 	Attached         time.Time
@@ -172,6 +173,36 @@ type resumeRequest struct {
 	Errno int
 }
 
+// attachRequest carries a PID and options for the attach queue.
+type attachRequest struct {
+	pid  int
+	opts attachOpts
+}
+
+type attachOpts struct {
+	sessionID   string
+	commandID   string
+	keepStopped bool
+}
+
+// AttachOption configures how a process is attached.
+type AttachOption func(*attachOpts)
+
+// WithSessionID associates a session ID with the attached process.
+func WithSessionID(id string) AttachOption {
+	return func(o *attachOpts) { o.sessionID = id }
+}
+
+// WithCommandID associates a command ID with the attached process.
+func WithCommandID(id string) AttachOption {
+	return func(o *attachOpts) { o.commandID = id }
+}
+
+// WithKeepStopped keeps the tracee stopped after attach (for cgroup hook).
+func WithKeepStopped() AttachOption {
+	return func(o *attachOpts) { o.keepStopped = true }
+}
+
 // Tracer implements a ptrace-based syscall tracer.
 type Tracer struct {
 	cfg             TracerConfig
@@ -179,7 +210,7 @@ type Tracer struct {
 	processTree     *ProcessTree
 	prefilterActive bool
 
-	attachQueue chan int
+	attachQueue chan attachRequest
 	resumeQueue chan resumeRequest
 
 	fds      *fdTracker
@@ -189,6 +220,8 @@ type Tracer struct {
 	tracees       map[int]*TraceeState
 	parkedTracees map[int]struct{}
 	tgidScratch   map[int]*scratchPage
+
+	attachDone sync.Map // pid → chan error
 
 	readyFileWritten  bool
 	readyFileAttempts int
@@ -206,7 +239,7 @@ func NewTracer(cfg TracerConfig) *Tracer {
 		cfg:           cfg,
 		metrics:       metrics,
 		processTree:   NewProcessTree(),
-		attachQueue:   make(chan int, 64),
+		attachQueue:   make(chan attachRequest, 64),
 		resumeQueue:   make(chan resumeRequest, 64),
 		tracees:       make(map[int]*TraceeState),
 		parkedTracees: make(map[int]struct{}),
@@ -242,9 +275,40 @@ func (t *Tracer) writeReadyFile() {
 }
 
 // AttachPID enqueues attachment to a process.
-func (t *Tracer) AttachPID(pid int) error {
-	t.attachQueue <- pid
+func (t *Tracer) AttachPID(pid int, opts ...AttachOption) error {
+	var o attachOpts
+	for _, fn := range opts {
+		fn(&o)
+	}
+	done := make(chan error, 1)
+	t.attachDone.Store(pid, done)
+	t.attachQueue <- attachRequest{pid: pid, opts: o}
 	return nil
+}
+
+// WaitAttached blocks until the process has been attached (or attach failed).
+func (t *Tracer) WaitAttached(pid int) error {
+	v, ok := t.attachDone.Load(pid)
+	if !ok {
+		return fmt.Errorf("no pending attach for pid %d", pid)
+	}
+	done := v.(chan error)
+	err := <-done
+	t.attachDone.Delete(pid)
+	return err
+}
+
+// ResumePID resumes a keepStopped tracee via the resume queue.
+func (t *Tracer) ResumePID(pid int) error {
+	t.resumeQueue <- resumeRequest{TID: pid, Allow: true}
+	return nil
+}
+
+// signalAttachDone signals the WaitAttached channel for a PID, if one exists.
+func (t *Tracer) signalAttachDone(pid int, err error) {
+	if v, ok := t.attachDone.Load(pid); ok {
+		v.(chan error) <- err
+	}
 }
 
 // ParkTracee marks a tracee as parked (awaiting async approval).
@@ -1097,9 +1161,12 @@ func (t *Tracer) Run(ctx context.Context) error {
 					return ctx.Err()
 				case <-t.stopped:
 					return nil
-				case pid := <-t.attachQueue:
-					if err := t.attachProcess(pid); err != nil {
-						slog.Error("attach from queue failed", "pid", pid, "error", err)
+				case req := <-t.attachQueue:
+					if err := t.attachProcess(req.pid, req.opts); err != nil {
+						slog.Error("attach from queue failed", "pid", req.pid, "error", err)
+						t.signalAttachDone(req.pid, err)
+					} else {
+						t.signalAttachDone(req.pid, nil)
 					}
 					continue
 				case req := <-t.resumeQueue:
@@ -1116,9 +1183,12 @@ func (t *Tracer) Run(ctx context.Context) error {
 				return ctx.Err()
 			case <-t.stopped:
 				return nil
-			case pid := <-t.attachQueue:
-				if err := t.attachProcess(pid); err != nil {
-					slog.Error("attach from queue failed", "pid", pid, "error", err)
+			case req := <-t.attachQueue:
+				if err := t.attachProcess(req.pid, req.opts); err != nil {
+					slog.Error("attach from queue failed", "pid", req.pid, "error", err)
+					t.signalAttachDone(req.pid, err)
+				} else {
+					t.signalAttachDone(req.pid, nil)
 				}
 			case req := <-t.resumeQueue:
 				t.handleResumeRequest(req)
@@ -1152,9 +1222,12 @@ func (t *Tracer) drainQueues(ctx context.Context) error {
 			return ctx.Err()
 		case <-t.stopped:
 			return fmt.Errorf("tracer stopped")
-		case pid := <-t.attachQueue:
-			if err := t.attachProcess(pid); err != nil {
-				slog.Error("attach from queue failed", "pid", pid, "error", err)
+		case req := <-t.attachQueue:
+			if err := t.attachProcess(req.pid, req.opts); err != nil {
+				slog.Error("attach from queue failed", "pid", req.pid, "error", err)
+				t.signalAttachDone(req.pid, err)
+			} else {
+				t.signalAttachDone(req.pid, nil)
 			}
 		case req := <-t.resumeQueue:
 			t.handleResumeRequest(req)
