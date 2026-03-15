@@ -146,7 +146,7 @@ The per-thread approach is simpler and more robust than TSYNC:
 | `internal/ptrace/seccomp_filter_test.go` | New. Verify instruction count, architecture coverage, parity with `tracedSyscallNumbers()`. |
 | `internal/ptrace/inject_seccomp.go` | New. `injectSeccompFilter(tid)` — scratch page alloc, write BPF via `process_vm_writev`, inject `prctl` + `seccomp`. |
 | `internal/ptrace/tracer.go` | Remove `prefilterActive`. Add `HasPrefilter` to `TraceeState`. Update `allowSyscall`, `resumeTracee`, `denySyscall`, `ptraceOptions`, `handleNewChild`. Remove `traceSysGood`. |
-| `internal/ptrace/attach.go` | Reorder: open MemFD and create TraceeState before injection. Call `injectSeccompFilter` for explicitly-attached processes (TSYNC for multi-thread, per-thread fallback). Set `HasPrefilter`. |
+| `internal/ptrace/attach.go` | Reorder: open MemFD and create TraceeState before injection. Call `injectSeccompFilter` for each explicitly-attached thread. Set `HasPrefilter` per-thread on success. |
 | `internal/ptrace/inject.go` | `waitForSyscallStop`: add `PTRACE_EVENT_SECCOMP` as a valid syscall-stop signal alongside `SIGTRAP\|0x80`. Currently only recognizes `SIGTRAP\|0x80` (TRACESYSGOOD). With both flags set, injected syscalls in prefilter tracees generate `PTRACE_EVENT_SECCOMP` stops. |
 
 ### Unchanged
@@ -164,5 +164,5 @@ The per-thread approach is simpler and more robust than TSYNC:
 - **Fallback**: mock seccomp injection failure, verify TRACESYSGOOD fallback works
 - **Inheritance**: forked children inherit filter without re-injection
 - **Mixed-mode**: coexisting prefilter and non-prefilter tracees (if injection fails for one)
-- **Multi-thread target**: attach to already-multithreaded process, verify TSYNC applies filter to all threads (or per-thread fallback works)
+- **Multi-thread target**: attach to already-multithreaded process, verify each thread gets its own filter injection and `HasPrefilter = true`
 - **Benchmark**: `make bench` baseline vs ptrace — target <5% overhead
