@@ -469,6 +469,17 @@ func needsExitStop(nr int) bool {
 	return false
 }
 
+// mustCatchExit returns true if the tracee must be resumed with PtraceSyscall
+// to catch the syscall exit stop. True when NeedExitStop is set or when
+// pending fixups (deny errno, fake zero, return override, exec stub) require
+// exit-time processing.
+func mustCatchExit(s *TraceeState) bool {
+	if s == nil {
+		return false
+	}
+	return s.NeedExitStop || s.PendingDenyErrno != 0 || s.PendingFakeZero || s.HasPendingReturn || s.PendingExecStubFD >= 0
+}
+
 // allowSyscall resumes the tracee, allowing the syscall to proceed.
 func (t *Tracer) allowSyscall(tid int) {
 	t.mu.Lock()
@@ -476,7 +487,7 @@ func (t *Tracer) allowSyscall(tid int) {
 	needExit := false
 	if s := t.tracees[tid]; s != nil {
 		hasPrefilter = s.HasPrefilter
-		needExit = s.NeedExitStop || s.PendingDenyErrno != 0 || s.PendingFakeZero || s.HasPendingReturn || s.PendingExecStubFD >= 0
+		needExit = mustCatchExit(s)
 	}
 	t.mu.Unlock()
 
@@ -544,7 +555,7 @@ func (t *Tracer) resumeTracee(tid int, sig int) {
 	needExit := false
 	if s := t.tracees[tid]; s != nil {
 		hasPrefilter = s.HasPrefilter
-		needExit = s.NeedExitStop || s.PendingDenyErrno != 0 || s.PendingFakeZero || s.HasPendingReturn || s.PendingExecStubFD >= 0
+		needExit = mustCatchExit(s)
 	}
 	t.mu.Unlock()
 
