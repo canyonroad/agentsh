@@ -64,8 +64,9 @@ func buildPrefilterBPF() ([]unix.SockFilter, error) {
 	// Check architecture: if match jump over the ALLOW, otherwise fall through to ALLOW.
 	prog = append(prog, unix.SockFilter{Code: bpfJMP | bpfJEQ | bpfK, Jt: 1, Jf: 0, K: auditArch})
 
-	// Wrong architecture: allow.
-	prog = append(prog, unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetAllow})
+	// Wrong architecture: trace (fail closed). This ensures compat/x32
+	// tracees still generate ptrace stops rather than silently bypassing.
+	prog = append(prog, unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetTrace})
 
 	// Load syscall number.
 	prog = append(prog, unix.SockFilter{Code: bpfLD | bpfW | bpfABS, K: offsetNr})

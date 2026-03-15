@@ -161,6 +161,7 @@ type TraceeState struct {
 	HasPendingReturn      bool  // whether PendingReturnOverride is active
 	PendingInterrupt      bool
 	HasPrefilter     bool // true if seccomp prefilter is installed for this tracee
+	PendingPrefilter bool // inject seccomp filter on next syscall stop
 	IsVforkChild     bool
 	SuppressInitialStop bool // suppress initial SIGSTOP from auto-trace
 	PendingExecStubFD  int // fd injected for exec redirect; cleaned up on exec failure (-1 = none)
@@ -691,8 +692,32 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 
 // handleSyscallStop handles SIGTRAP|0x80 stops (TRACESYSGOOD mode).
 func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
+	// Deferred seccomp prefilter injection: inject on the first syscall stop
+	// (not at attach time, where RIP is arbitrary and injectSyscall would fail).
 	t.mu.Lock()
 	state := t.tracees[tid]
+	if state != nil && state.PendingPrefilter {
+		state.PendingPrefilter = false
+		t.mu.Unlock()
+		if err := t.injectSeccompFilter(tid); err != nil {
+			slog.Warn("seccomp prefilter injection failed, falling back to TRACESYSGOOD",
+				"tid", tid, "error", err)
+		} else {
+			t.mu.Lock()
+			if s := t.tracees[tid]; s != nil {
+				s.HasPrefilter = true
+			}
+			t.mu.Unlock()
+		}
+		// Resume — if injection succeeded, the tracee now has the filter and
+		// will generate PTRACE_EVENT_SECCOMP stops going forward.
+		t.allowSyscall(tid)
+		return
+	}
+	t.mu.Unlock()
+
+	t.mu.Lock()
+	state = t.tracees[tid]
 	if state == nil {
 		t.mu.Unlock()
 		t.allowSyscall(tid)

@@ -135,37 +135,25 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
 
-	// Inject seccomp prefilter for explicitly-attached processes.
-	// Only inject when sessionID is set (exec/wrap path), not for
-	// auto-traced children (which inherit the filter via fork).
+	// Mark for deferred seccomp prefilter injection on the first syscall stop.
+	// Injection can't happen here (interrupt stop — RIP is arbitrary, not at
+	// a syscall boundary). The tracer's handleSyscallStop will check
+	// PendingPrefilter and inject on the first syscall entry.
 	if t.cfg.SeccompPrefilter && opts.sessionID != "" {
-		if injErr := t.injectSeccompFilter(tid); injErr != nil {
-			slog.Warn("seccomp prefilter injection failed, falling back to TRACESYSGOOD",
-				"tid", tid, "error", injErr)
-		} else {
-			t.mu.Lock()
-			if s := t.tracees[tid]; s != nil {
-				s.HasPrefilter = true
-			}
-			t.mu.Unlock()
+		t.mu.Lock()
+		if s := t.tracees[tid]; s != nil {
+			s.PendingPrefilter = true
 		}
+		t.mu.Unlock()
 	}
 
 	// Resume the tracee (unless keepStopped for cgroup hook).
+	// Always use PtraceSyscall here — HasPrefilter is never true at attach
+	// time (injection is deferred to the first syscall stop).
 	if opts.keepStopped {
 		// Already registered in parkedTracees above.
 	} else {
-		t.mu.Lock()
-		hasPrefilter := false
-		if s := t.tracees[tid]; s != nil {
-			hasPrefilter = s.HasPrefilter
-		}
-		t.mu.Unlock()
-		if hasPrefilter {
-			err = unix.PtraceCont(tid, 0)
-		} else {
-			err = unix.PtraceSyscall(tid, 0)
-		}
+		err = unix.PtraceSyscall(tid, 0)
 	}
 	if err != nil {
 		// Rollback: clean up TraceeState and MemFD on resume failure
