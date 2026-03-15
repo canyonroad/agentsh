@@ -38,10 +38,15 @@ func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecCo
 
 	pe := s.PolicyEngine()
 	if pe == nil {
-		return ptrace.ExecResult{Allow: true, Action: "continue"}
+		slog.Warn("ptrace: no policy engine for session, denying execve", "session_id", ec.SessionID, "pid", ec.PID)
+		return ptrace.ExecResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES), Rule: "no_policy_engine"}
 	}
 
-	decision := pe.CheckExecve(ec.Filename, ec.Argv, ec.Depth)
+	depth := ec.Depth
+	if depth < 0 {
+		depth = 0
+	}
+	decision := pe.CheckExecve(ec.Filename, ec.Argv, depth)
 
 	// Emit audit event
 	ev := types.Event{
@@ -102,7 +107,8 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 
 	pe := s.PolicyEngine()
 	if pe == nil {
-		return ptrace.FileResult{Allow: true, Action: "allow"}
+		slog.Warn("ptrace: no policy engine for session, denying file op", "session_id", fc.SessionID, "pid", fc.PID)
+		return ptrace.FileResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES)}
 	}
 
 	decision := pe.CheckFile(fc.Path, fc.Operation)
@@ -139,9 +145,12 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 		}
 		return ptrace.FileResult{Allow: true, Action: "allow"}
 	case types.DecisionSoftDelete:
+		// Soft-delete requires a trash directory which is not available in the
+		// ptrace handler context. Deny with audit visibility.
 		return ptrace.FileResult{
-			Action:   "soft-delete",
-			TrashDir: "", // trash dir resolved by caller
+			Allow:  false,
+			Action: "deny",
+			Errno:  int32(syscall.EACCES),
 		}
 	default:
 		return ptrace.FileResult{Allow: true, Action: "allow"}
@@ -157,7 +166,8 @@ func (r *ptraceHandlerRouter) HandleNetwork(ctx context.Context, nc ptrace.Netwo
 
 	pe := s.PolicyEngine()
 	if pe == nil {
-		return ptrace.NetworkResult{Allow: true, Action: "allow"}
+		slog.Warn("ptrace: no policy engine for session, denying network op", "session_id", nc.SessionID, "pid", nc.PID)
+		return ptrace.NetworkResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES)}
 	}
 
 	decision := pe.CheckNetwork(nc.Address, nc.Port)

@@ -298,9 +298,28 @@ func (t *Tracer) WaitAttached(pid int) error {
 	return err
 }
 
-// ResumePID resumes a keepStopped tracee via the resume queue.
+// ResumePID resumes all keepStopped threads of a process via the resume queue.
+// For freshly-started processes (exec path), only one thread exists.
+// For multi-threaded processes, all threads sharing the TGID are resumed.
 func (t *Tracer) ResumePID(pid int) error {
-	t.resumeQueue <- resumeRequest{TID: pid, Allow: true}
+	t.mu.Lock()
+	var tids []int
+	for tid := range t.parkedTracees {
+		state := t.tracees[tid]
+		if state != nil && (state.TGID == pid || tid == pid) {
+			tids = append(tids, tid)
+		}
+	}
+	t.mu.Unlock()
+
+	if len(tids) == 0 {
+		// Fallback: send resume for the pid directly
+		t.resumeQueue <- resumeRequest{TID: pid, Allow: true}
+		return nil
+	}
+	for _, tid := range tids {
+		t.resumeQueue <- resumeRequest{TID: tid, Allow: true}
+	}
 	return nil
 }
 
@@ -309,6 +328,20 @@ func (t *Tracer) signalAttachDone(pid int, err error) {
 	if v, ok := t.attachDone.Load(pid); ok {
 		v.(chan error) <- err
 	}
+}
+
+// cancelPendingAttachWaiters signals all pending WaitAttached callers with an
+// error so they don't block indefinitely when the tracer shuts down.
+func (t *Tracer) cancelPendingAttachWaiters() {
+	t.attachDone.Range(func(key, value any) bool {
+		ch := value.(chan error)
+		select {
+		case ch <- fmt.Errorf("tracer shutting down"):
+		default:
+		}
+		t.attachDone.Delete(key)
+		return true
+	})
 }
 
 // ParkTracee marks a tracee as parked (awaiting async approval).
@@ -1122,6 +1155,7 @@ func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
 func (t *Tracer) Run(ctx context.Context) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	defer t.cancelPendingAttachWaiters()
 
 	t.fds = newFdTracker()
 	if t.cfg.TraceNetwork && t.cfg.NetworkHandler != nil {
