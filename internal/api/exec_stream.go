@@ -444,6 +444,9 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
 			}
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return 127, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, ctx.Err()
+			}
 			return result.exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, result.err
 		} else if hook != nil {
 			// Seccomp stopped-start: process started with PTRACE_TRACEME
