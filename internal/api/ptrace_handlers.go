@@ -76,14 +76,20 @@ func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecCo
 			Rule:   decision.Rule,
 		}
 	case types.DecisionRedirect:
-		if decision.Redirect != nil {
+		if decision.Redirect != nil && decision.Redirect.Command != "" {
 			return ptrace.ExecResult{
 				Action:   "redirect",
 				StubPath: decision.Redirect.Command,
 				Rule:     decision.Rule,
 			}
 		}
-		return ptrace.ExecResult{Allow: true, Action: "continue", Rule: decision.Rule}
+		// Invalid redirect payload — deny to fail closed.
+		return ptrace.ExecResult{
+			Action: "deny",
+			Allow:  false,
+			Errno:  int32(syscall.EACCES),
+			Rule:   decision.Rule + " (redirect with no target, denied)",
+		}
 	case types.DecisionApprove:
 		// Approval-required decisions cannot be handled synchronously via ptrace.
 		// Deny with a descriptive rule for audit visibility.
@@ -137,13 +143,14 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 			Errno:  int32(syscall.EACCES),
 		}
 	case types.DecisionRedirect:
-		if decision.FileRedirect != nil {
+		if decision.FileRedirect != nil && decision.FileRedirect.RedirectPath != "" {
 			return ptrace.FileResult{
 				Action:       "redirect",
 				RedirectPath: decision.FileRedirect.RedirectPath,
 			}
 		}
-		return ptrace.FileResult{Allow: true, Action: "allow"}
+		// Invalid redirect payload — deny to fail closed.
+		return ptrace.FileResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES)}
 	case types.DecisionSoftDelete:
 		// Soft-delete requires a trash directory which is not available in the
 		// ptrace handler context. Deny with audit visibility.

@@ -68,6 +68,10 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 
 	// Ptrace mode: skip seccomp wrapper entirely. Create a socket for PID handshake.
 	if a.ptraceTracer != nil {
+		if a.ptraceFailed.Load() {
+			return types.WrapInitResponse{}, http.StatusServiceUnavailable,
+				fmt.Errorf("ptrace tracer is not healthy; refusing wrap-init")
+		}
 		notifyDir, err := os.MkdirTemp("", "agentsh-wrap-*")
 		if err != nil {
 			return types.WrapInitResponse{}, http.StatusInternalServerError, err
@@ -76,8 +80,26 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			os.RemoveAll(notifyDir)
 			return types.WrapInitResponse{}, http.StatusInternalServerError, err
 		}
+		// Apply same path-budget + hash truncation as seccomp wrap path
 		safeID := filepath.Base(sessionID)
-		notifySocketPath := filepath.Join(notifyDir, "ptrace-"+safeID+".sock")
+		const socketPathLimit = 104
+		prefix := "ptrace-"
+		suffix := ".sock"
+		budget := socketPathLimit - len(notifyDir) - 1 - len(prefix) - len(suffix)
+		if budget < 1 {
+			os.RemoveAll(notifyDir)
+			return types.WrapInitResponse{}, http.StatusInternalServerError,
+				fmt.Errorf("temp directory path too long for Unix socket (%d bytes remaining)", budget)
+		}
+		if len(safeID) > budget {
+			h := sha256.Sum256([]byte(safeID))
+			hashStr := hex.EncodeToString(h[:])
+			if budget > len(hashStr) {
+				budget = len(hashStr)
+			}
+			safeID = hashStr[:budget]
+		}
+		notifySocketPath := filepath.Join(notifyDir, prefix+safeID+suffix)
 
 		listener, err := net.Listen("unix", notifySocketPath)
 		if err != nil {

@@ -219,6 +219,9 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 			if err := wrapCfg.ptracePostStart(agentProc.Process.Pid); err != nil {
 				_ = agentProc.Process.Kill()
 				_ = agentProc.Wait()
+				signal.Stop(sigCh)
+				close(sigCh)
+				<-sigDone
 				return fmt.Errorf("ptrace handshake failed: %w", err)
 			}
 		}

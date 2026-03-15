@@ -287,15 +287,21 @@ func (t *Tracer) AttachPID(pid int, opts ...AttachOption) error {
 }
 
 // WaitAttached blocks until the process has been attached (or attach failed).
+// Times out after 10 seconds to avoid indefinite blocking when the tracer is down.
 func (t *Tracer) WaitAttached(pid int) error {
 	v, ok := t.attachDone.Load(pid)
 	if !ok {
 		return fmt.Errorf("no pending attach for pid %d", pid)
 	}
 	done := v.(chan error)
-	err := <-done
-	t.attachDone.Delete(pid)
-	return err
+	select {
+	case err := <-done:
+		t.attachDone.Delete(pid)
+		return err
+	case <-time.After(10 * time.Second):
+		t.attachDone.Delete(pid)
+		return fmt.Errorf("attach timed out for pid %d", pid)
+	}
 }
 
 // ResumePID resumes all keepStopped threads of a process via the resume queue.
