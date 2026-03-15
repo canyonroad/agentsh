@@ -7,9 +7,18 @@
 
 ## 1. Problem
 
-In server-wired ptrace mode, every syscall generates a ptrace-stop (`TRACESYSGOOD` mode) because the seccomp prefilter is not installed. Only ~30 syscall types need tracing (exec, file, network, signal), but the tracer traps all ~300+ syscall types, causing ~10-50x overhead compared to baseline.
+In server-wired ptrace mode, every syscall generates a ptrace-stop (`TRACESYSGOOD` mode) because the seccomp prefilter is not installed. Only ~30 syscall types need tracing, but the tracer traps all ~300+ syscall types, causing ~10-50x overhead compared to baseline.
 
-The seccomp prefilter (`SeccompPrefilter: true` in config) was designed for sidecar mode where the BPF could be installed before the workload starts. In server-wired mode, the child process is started by Go's `os/exec` and the tracer attaches afterward — there's no pre-exec hook to install the BPF.
+### Goals
+
+- Reduce ptrace overhead to <5% vs baseline (matching sidecar-mode performance)
+- Zero behavioral regressions in exec, file, network, signal, DNS redirect, SNI rewrite, TracerPid masking
+- Graceful fallback when seccomp injection is blocked by the container runtime
+
+### Non-Goals
+
+- Changing sidecar mode behavior
+- x32 ABI support (not used by agentsh workloads)
 
 ## 2. Solution: Inject BPF via Ptrace Syscall Injection
 
@@ -17,58 +26,103 @@ After `PTRACE_SEIZE` + `PTRACE_INTERRUPT` stops the child, inject a `seccomp(SEC
 
 ## 3. BPF Program
 
-A static seccomp-BPF filter (~30-40 instructions) that traces:
+The BPF syscall list is generated from the existing `tracedSyscallNumbers()` function in `syscalls.go` — the single source of truth for which syscalls the tracer handles. This includes:
 
 - **Exec**: `execve`, `execveat`
 - **File**: `openat`, `openat2`, `unlinkat`, `renameat2`, `mkdirat`, `linkat`, `symlinkat`, `fchmodat`, `fchmodat2`, `fchownat` (+ legacy amd64: `open`, `creat`, `mkdir`, `rmdir`, `unlink`, `rename`, `link`, `symlink`, `chmod`, `chown`)
-- **Network**: `connect`, `bind`
+- **Network**: `connect`, `bind`, `socket`, `sendto`, `listen`
 - **Signal**: `kill`, `tkill`, `tgkill`, `rt_sigqueueinfo`, `rt_tgsigqueueinfo`
-- **Syscall-exit tracking**: `read`, `pread64`, `close` (TracerPid masking, fd tracking)
+- **I/O tracking**: `write`, `read`, `pread64`, `close` (DNS redirect sendto rewrite, TracerPid masking, TLS SNI rewrite, fd tracking)
 
-Structure: load syscall number → compare against each traced number → `SECCOMP_RET_TRACE` on match → `SECCOMP_RET_ALLOW` on default.
+Structure: BPF validates `arch == AUDIT_ARCH_X86_64` (or `AUDIT_ARCH_AARCH64`), loads syscall number, compares against each traced number, returns `SECCOMP_RET_TRACE` on match, `SECCOMP_RET_ALLOW` on default. Architecture check prevents mismatches on compat/x32 syscalls.
 
-Architecture-specific (amd64 vs arm64 syscall numbers). Built once at tracer startup, reused for every child attach. Compiled in Go as `[]unix.SockFilter`, not loaded from a file.
+Built once at tracer startup from `tracedSyscallNumbers()`, cached as `[]unix.SockFilter`. ~40-50 instructions depending on architecture.
 
-## 4. Injection Point
+## 4. Injection Point and Lifecycle
 
-Injection happens in `attachThread()` after `PTRACE_SETOPTIONS` and before the tracee is resumed:
+Injection happens in `attachThread()` after `PTRACE_SETOPTIONS` and before the tracee is resumed. The lifecycle is reordered to support injection:
 
-```go
-// In attachThread, after PTRACE_SETOPTIONS:
-if t.cfg.SeccompPrefilter && opts.sessionID != "" {
-    if err := t.injectSeccompFilter(tid); err != nil {
-        slog.Warn("seccomp prefilter injection failed, falling back to TRACESYSGOOD",
-            "tid", tid, "error", err)
-        // Non-fatal: fall back to trapping all syscalls
-    }
-}
+```
+attachThread(tid, opts):
+  PTRACE_SEIZE(tid)
+  PTRACE_INTERRUPT(tid)
+  Wait4(tid) — stopped
+  readTGID(tid)
+
+  // Open MemFD early (needed for injection memory writes)
+  memFD = open(/proc/tid/mem)
+
+  // Create TraceeState early (needed for scratch page allocator)
+  t.tracees[tid] = &TraceeState{..., MemFD: memFD}
+
+  PTRACE_SETOPTIONS(tid, TRACESECCOMP | TRACESYSGOOD | ...)  ← always set BOTH
+
+  // Inject seccomp prefilter (only for explicitly-attached processes)
+  if t.cfg.SeccompPrefilter && opts.sessionID != "" {
+      if err := t.injectSeccompFilter(tid); err != nil {
+          slog.Warn("prefilter injection failed, falling back", ...)
+          // TraceeState.HasPrefilter stays false — TRACESYSGOOD mode
+      } else {
+          t.tracees[tid].HasPrefilter = true
+      }
+  }
+
+  // Resume
+  if opts.keepStopped {
+      // parked for cgroup hook
+  } else if t.tracees[tid].HasPrefilter {
+      PtraceCont(tid, 0)     ← prefilter mode
+  } else {
+      PtraceSyscall(tid, 0)  ← fallback: trap all syscalls
+  }
 ```
 
-`injectSeccompFilter(tid)` performs three injected syscalls:
+Key changes from current `attachThread`:
+- `MemFD` opened before `PTRACE_SETOPTIONS` (currently opened after resume)
+- `TraceeState` created before injection (currently created after resume)
+- `PTRACE_SETOPTIONS` always sets both `TRACESECCOMP` and `TRACESYSGOOD` (currently one or the other). This is safe: `handleStop` already dispatches both `SIGTRAP|0x80` (TRACESYSGOOD) and `PTRACE_EVENT_SECCOMP` stops.
 
-1. **Write BPF to tracee memory** — use the scratch page allocator (`tgidScratch`, already exists for exec redirect) to write the `sock_filter` array into the tracee's address space
-2. **Inject `prctl(PR_SET_NO_NEW_PRIVS, 1)`** — required before `seccomp()`. Idempotent if already set.
-3. **Inject `seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog)`** — installs the BPF filter
+### Injection Steps
 
-Only explicitly-attached processes (from `ptraceExecAttach`, identified by `opts.sessionID != ""`) get injection. Auto-traced children from `handleNewChild` inherit the filter via the kernel's seccomp fork inheritance — no injection needed.
+`injectSeccompFilter(tid)` uses `process_vm_writev` (not MemFD) to write the BPF array into the tracee's scratch page, then injects two syscalls:
 
-Injection failure is non-fatal — falls back to TRACESYSGOOD (current behavior, all syscalls trapped). This handles environments where `seccomp()` is blocked.
+1. **Allocate scratch page** — `injectSyscall(mmap, ...)` if not already allocated for this TGID
+2. **Write BPF program + sock_fprog struct** — `process_vm_writev` to the scratch page
+3. **Inject `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)`** — required before seccomp. Idempotent.
+4. **Inject `seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog)`** — installs the BPF
+
+### Failure Handling
+
+On injection failure:
+- `TraceeState.HasPrefilter` stays `false`
+- Tracee resumes with `PtraceSyscall` (TRACESYSGOOD mode — all syscalls trapped)
+- No `PTRACE_SETOPTIONS` change needed (both flags already set)
+- Warning logged with reason (EPERM, EINVAL, etc.)
+
+### PR_SET_NO_NEW_PRIVS Impact
+
+`PR_SET_NO_NEW_PRIVS` prevents setuid/setcap escalation. This is acceptable for agentsh workloads — sandboxed agent commands should not escalate privileges. The flag is already set by the seccomp wrapper in non-ptrace mode.
 
 ## 5. Per-Tracee Prefilter State
 
-Replace the global `prefilterActive bool` on `Tracer` with per-tracee state:
+Replace the global `prefilterActive bool` on `Tracer` with per-tracee state.
 
-Add `HasPrefilter bool` to `TraceeState`. Set it on successful injection. In `handleNewChild`, inherit from parent: `child.HasPrefilter = parent.HasPrefilter`.
+Add `HasPrefilter bool` to `TraceeState`. Set on successful injection. In `handleNewChild`, inherit from parent: `child.HasPrefilter = parent.HasPrefilter` (kernel inherits the seccomp filter across fork/clone/exec).
 
-Update all ~5 call sites that check `prefilterActive` to check per-tracee state:
+Update all call sites that check `prefilterActive`:
 
-- `allowSyscall(tid)` — `PtraceCont` if prefilter, `PtraceSyscall` if not
-- `resumeTracee(tid, sig)` — same
-- `denySyscall(tid, errno)` — resume after deny uses same logic
-- `attachThread` initial resume — `PtraceCont` if prefilter, `PtraceSyscall` if not
-- `traceSysGood()` — no longer needed as global; with prefilter, stops come as `PTRACE_EVENT_SECCOMP`, without they come as `SIGTRAP|0x80`. `handleStop` already dispatches both.
+- `allowSyscall(tid)` — lock, read `tracees[tid].HasPrefilter`, unlock, then `PtraceCont` or `PtraceSyscall`
+- `resumeTracee(tid, sig)` — same pattern
+- `denySyscall(tid, errno)` — deny fixup uses `PtraceSyscall` to catch syscall-exit for return value rewrite, regardless of prefilter mode. This is correct: even with `SECCOMP_RET_TRACE`, the deny path needs syscall-exit to apply the errno. After the fixup completes, resume switches back to `PtraceCont`.
+- `attachThread` initial resume — `PtraceCont` if `HasPrefilter`, `PtraceSyscall` if not
+- `ptraceOptions()` — always return `TRACESECCOMP | TRACESYSGOOD` (both flags). Remove the `prefilterActive` branch.
+- `traceSysGood()` — remove (no longer needed as global). `handleStop` dispatches both stop types already.
 
 Remove the global `prefilterActive` field from `Tracer`.
+
+### Multi-Thread Attach
+
+For multi-threaded processes, `attachProcess` iterates `/proc/pid/task/` and calls `attachThread` for each thread. Only the first thread (or any one thread) needs injection — the seccomp filter applies process-wide (all threads in the thread group). However, injecting on each thread is harmless (filters stack, and identical filters are a no-op for performance). For simplicity, inject only when `tid == tgid` (thread group leader).
 
 ## 6. Scope
 
@@ -76,23 +130,26 @@ Remove the global `prefilterActive` field from `Tracer`.
 
 | File | Change |
 |------|--------|
-| `internal/ptrace/seccomp_filter.go` | New. BPF program builder (`buildPrefilterBPF`) returning `[]unix.SockFilter`. |
-| `internal/ptrace/seccomp_filter_amd64.go` | amd64 traced syscall number list (includes legacy). |
-| `internal/ptrace/seccomp_filter_arm64.go` | arm64 traced syscall number list. |
-| `internal/ptrace/inject_seccomp.go` | New. `injectSeccompFilter(tid)` — writes BPF to tracee memory, injects `prctl` + `seccomp` syscalls. |
-| `internal/ptrace/tracer.go` | Remove global `prefilterActive`. Add `HasPrefilter` to `TraceeState`. Update `allowSyscall`, `resumeTracee`, `denySyscall`, `traceSysGood` to check per-tracee state. Inherit `HasPrefilter` in `handleNewChild`. |
-| `internal/ptrace/attach.go` | Call `injectSeccompFilter` after `PTRACE_SETOPTIONS` for explicitly-attached processes. Set `HasPrefilter` on `TraceeState`. |
+| `internal/ptrace/seccomp_filter.go` | New. `buildPrefilterBPF()` generates BPF from `tracedSyscallNumbers()`. Architecture validation instruction. |
+| `internal/ptrace/seccomp_filter_test.go` | New. Verify instruction count, architecture coverage, parity with `tracedSyscallNumbers()`. |
+| `internal/ptrace/inject_seccomp.go` | New. `injectSeccompFilter(tid)` — scratch page alloc, write BPF via `process_vm_writev`, inject `prctl` + `seccomp`. |
+| `internal/ptrace/tracer.go` | Remove `prefilterActive`. Add `HasPrefilter` to `TraceeState`. Update `allowSyscall`, `resumeTracee`, `denySyscall`, `ptraceOptions`, `handleNewChild`. Remove `traceSysGood`. |
+| `internal/ptrace/attach.go` | Reorder: open MemFD and create TraceeState before injection. Call `injectSeccompFilter` for explicitly-attached leader threads. |
+| `internal/ptrace/inject.go` | Update `waitForSyscallStop` if needed for mixed-mode handling. |
 
 ### Unchanged
 
 - `internal/api/` — prefilter is internal to the tracer
+- Config — `seccomp_prefilter: true` already exists
 - Wrap path — same attach flow, gets prefilter automatically
-- Config — `seccomp_prefilter: true` already exists, just wasn't functional in server mode
 
 ### Testing
 
-- **Unit**: verify BPF program compiles and has correct instruction count per architecture
-- **Integration**: attach to child, verify `PTRACE_EVENT_SECCOMP` events (not `SIGTRAP|0x80`)
-- **Benchmark**: re-run bench comparing baseline vs ptrace with prefilter
-- **Fallback**: verify injection failure falls back gracefully (non-fatal)
-- **Inheritance**: verify forked children inherit the filter without re-injection
+- **Unit**: BPF instruction parity with `tracedSyscallNumbers()` — no syscall can be in one but not the other
+- **Integration**: attach to child with prefilter, verify `PTRACE_EVENT_SECCOMP` events arrive
+- **Integration**: DNS redirect (`sendto` rewrite) works with prefilter active
+- **Integration**: TracerPid masking (`read` interception) works with prefilter active
+- **Fallback**: mock seccomp injection failure, verify TRACESYSGOOD fallback works
+- **Inheritance**: forked children inherit filter without re-injection
+- **Mixed-mode**: coexisting prefilter and non-prefilter tracees (if injection fails for one)
+- **Benchmark**: `make bench` baseline vs ptrace — target <5% overhead
