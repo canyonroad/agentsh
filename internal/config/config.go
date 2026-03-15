@@ -352,6 +352,17 @@ type SandboxConfig struct {
 	EnvInject map[string]string `yaml:"env_inject"`
 }
 
+// Validate checks cross-field constraints in the sandbox configuration.
+func (c *SandboxConfig) Validate() error {
+	if c.Ptrace.Enabled && c.Seccomp.Execve.Enabled {
+		return fmt.Errorf("sandbox.ptrace and sandbox.seccomp.execve are mutually exclusive")
+	}
+	if c.Ptrace.Enabled && c.UnixSockets.Enabled != nil && *c.UnixSockets.Enabled {
+		return fmt.Errorf("sandbox.ptrace and sandbox.unix_sockets are mutually exclusive")
+	}
+	return c.Ptrace.Validate()
+}
+
 // SandboxLimitsConfig configures resource limits.
 type SandboxLimitsConfig struct {
 	MaxMemoryMB    int `yaml:"max_memory_mb"`

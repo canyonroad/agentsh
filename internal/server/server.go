@@ -89,6 +89,10 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, err
 	}
 
+	if err := cfg.Sandbox.Validate(); err != nil {
+		return nil, fmt.Errorf("sandbox config: %w", err)
+	}
+
 	pm := policy.NewManager(
 		cfg.Policies.Dir,
 		cfg.Policies.Default,
