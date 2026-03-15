@@ -285,6 +285,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 				close(ptraceDone)
 				_ = killProcessGroup(pgid)
 				pipeWG.Wait()
+				cmd.Process.Release()
 				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace attach: %w", attachErr)
 			}
 			if hook != nil {
@@ -297,6 +298,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 					close(ptraceDone)
 					_ = killProcessGroup(pgid)
 					pipeWG.Wait()
+					cmd.Process.Release()
 					return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace resume: %w", resumeErr)
 				}
 			}

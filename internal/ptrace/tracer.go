@@ -1070,10 +1070,17 @@ func (t *Tracer) handleExit(tid int, status unix.WaitStatus, rusage *unix.Rusage
 	if state != nil && lastThread {
 		if v, ok := t.exitNotify.LoadAndDelete(tgid); ok {
 			ch := v.(chan ExitStatus)
+			// Deep-copy rusage to avoid aliasing the loop-local variable
+			// in Run() which gets reused on subsequent Wait4 iterations.
+			var ruCopy *unix.Rusage
+			if rusage != nil {
+				ru := *rusage
+				ruCopy = &ru
+			}
 			es := ExitStatus{
 				PID:    tgid,
 				Reason: reason,
-				Rusage: rusage,
+				Rusage: ruCopy,
 			}
 			if status.Exited() {
 				es.Code = status.ExitStatus()
