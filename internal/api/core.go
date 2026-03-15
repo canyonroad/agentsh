@@ -98,6 +98,11 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
 	}
 
+	// Ptrace mode: no wrapper, no seccomp notify sockets
+	if a.ptraceTracer != nil {
+		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
+	}
+
 	origCommand := req.Command
 	origArgs := append([]string{}, req.Args...)
 
