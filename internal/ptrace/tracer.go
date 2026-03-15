@@ -683,13 +683,18 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 	// (not entry — injectFromEntry replaces the current syscall, which would
 	// drop the tracee's first real syscall). At exit, the syscall already
 	// completed, so injection is safe.
+	//
+	// State.InSyscall tracks what the PREVIOUS stop set:
+	//   InSyscall=false → this is an entry stop (first time)
+	//   InSyscall=true  → this is an exit stop (entry was processed)
 	t.mu.Lock()
 	state := t.tracees[tid]
-	if state != nil && state.PendingPrefilter && state.InSyscall {
-		// We're at a syscall entry. Wait for the exit.
-		// (InSyscall will be toggled by the normal handling below.)
-	} else if state != nil && state.PendingPrefilter && !state.InSyscall {
-		// We're at a syscall exit — safe to inject.
+	if state != nil && state.PendingPrefilter && !state.InSyscall {
+		// This is a syscall entry. Let normal handling process it.
+		// The next stop will be the exit, where we'll inject.
+		t.mu.Unlock()
+	} else if state != nil && state.PendingPrefilter && state.InSyscall {
+		// This is a syscall exit — safe to inject now.
 		state.PendingPrefilter = false
 		t.mu.Unlock()
 		if err := t.injectSeccompFilter(tid); err != nil {
@@ -705,9 +710,6 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		// Resume — the tracee will now generate PTRACE_EVENT_SECCOMP stops.
 		t.allowSyscall(tid)
 		return
-	}
-	if state != nil && !state.PendingPrefilter {
-		t.mu.Unlock()
 	} else {
 		t.mu.Unlock()
 	}
