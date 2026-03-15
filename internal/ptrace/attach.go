@@ -107,22 +107,9 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 		return fmt.Errorf("read TGID for tid %d: %w", tid, err)
 	}
 
-	if opts.keepStopped {
-		// Leave tracee stopped for cgroup hook; register in parkedTracees
-		// so ResumePID (via handleResumeRequest) can find and resume it.
-	} else {
-		// HasPrefilter is always false for freshly attached threads
-		// (injection hasn't happened yet), so this takes the PtraceSyscall
-		// path. When injection is wired in, HasPrefilter will be set to
-		// true and this will use PtraceCont instead.
-		err = unix.PtraceSyscall(tid, 0)
-	}
-	if err != nil {
-		unix.PtraceDetach(tid)
-		t.metrics.IncAttachFailure("other")
-		return fmt.Errorf("restart tid %d: %w", tid, err)
-	}
-
+	// Open MemFD and create TraceeState BEFORE injection and resume.
+	// The injection engine needs TraceeState (for scratch page) and MemFD
+	// (for register read/write during injectSyscall).
 	memFD := -1
 	fd, err := unix.Open(fmt.Sprintf("/proc/%d/mem", tid), unix.O_RDWR, 0)
 	if err != nil {
@@ -147,6 +134,44 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 	}
 	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
+
+	// Inject seccomp prefilter for explicitly-attached processes.
+	// Only inject when sessionID is set (exec/wrap path), not for
+	// auto-traced children (which inherit the filter via fork).
+	if t.cfg.SeccompPrefilter && opts.sessionID != "" {
+		if injErr := t.injectSeccompFilter(tid); injErr != nil {
+			slog.Warn("seccomp prefilter injection failed, falling back to TRACESYSGOOD",
+				"tid", tid, "error", injErr)
+		} else {
+			t.mu.Lock()
+			if s := t.tracees[tid]; s != nil {
+				s.HasPrefilter = true
+			}
+			t.mu.Unlock()
+		}
+	}
+
+	// Resume the tracee (unless keepStopped for cgroup hook).
+	if opts.keepStopped {
+		// Already registered in parkedTracees above.
+	} else {
+		t.mu.Lock()
+		hasPrefilter := false
+		if s := t.tracees[tid]; s != nil {
+			hasPrefilter = s.HasPrefilter
+		}
+		t.mu.Unlock()
+		if hasPrefilter {
+			err = unix.PtraceCont(tid, 0)
+		} else {
+			err = unix.PtraceSyscall(tid, 0)
+		}
+	}
+	if err != nil {
+		unix.PtraceDetach(tid)
+		t.metrics.IncAttachFailure("other")
+		return fmt.Errorf("restart tid %d: %w", tid, err)
+	}
 
 	return nil
 }
