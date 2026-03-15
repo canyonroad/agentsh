@@ -323,10 +323,9 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	cmd.Stderr = stderrW
 
 	// For ptrace mode, use explicit pipes for drain synchronization
-	var stdoutPipeR, stderrPipeR *os.File
+	var stdoutPipeR, stderrPipeR, stdoutPipeW, stderrPipeW *os.File
 	var pipeWG sync.WaitGroup
 	if tracer != nil {
-		var stdoutPipeW, stderrPipeW *os.File
 		var pipeErr error
 		stdoutPipeR, stdoutPipeW, pipeErr = os.Pipe()
 		if pipeErr != nil {
@@ -345,13 +344,15 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	if err := cmd.Start(); err != nil {
 		if stdoutPipeR != nil { stdoutPipeR.Close() }
 		if stderrPipeR != nil { stderrPipeR.Close() }
+		if stdoutPipeW != nil { stdoutPipeW.Close() }
+		if stderrPipeW != nil { stderrPipeW.Close() }
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
 	}
 
 	// For ptrace mode: close write ends and start draining
-	if tracer != nil && stdoutPipeR != nil {
-		if w, ok := cmd.Stdout.(*os.File); ok { w.Close() }
-		if w, ok := cmd.Stderr.(*os.File); ok { w.Close() }
+	if tracer != nil && stdoutPipeW != nil {
+		stdoutPipeW.Close()
+		stderrPipeW.Close()
 		pipeWG.Add(2)
 		go func() { defer pipeWG.Done(); io.Copy(stdoutW, stdoutPipeR); stdoutPipeR.Close() }()
 		go func() { defer pipeWG.Done(); io.Copy(stderrW, stderrPipeR); stderrPipeR.Close() }()

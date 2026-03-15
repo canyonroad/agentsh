@@ -207,10 +207,9 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	// For ptrace mode, use explicit pipes so we can drain them independently
 	// of cmd.Wait() (which we skip to avoid the Wait4 race). For non-ptrace,
 	// set writers directly and let cmd.Wait() handle pipe synchronization.
-	var stdoutPipeR, stderrPipeR *os.File
+	var stdoutPipeR, stderrPipeR, stdoutPipeW, stderrPipeW *os.File
 	var pipeWG sync.WaitGroup
 	if tracer != nil {
-		var stdoutPipeW, stderrPipeW *os.File
 		var pipeErr error
 		stdoutPipeR, stdoutPipeW, pipeErr = os.Pipe()
 		if pipeErr != nil {
@@ -224,7 +223,6 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		}
 		cmd.Stdout = stdoutPipeW
 		cmd.Stderr = stderrPipeW
-		// Write ends are closed after cmd.Start() below
 	} else {
 		cmd.Stdout = stdoutW
 		cmd.Stderr = stderrW
@@ -234,15 +232,16 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		slog.Debug("exec command start failed", "command", req.Command, "error", err)
 		if stdoutPipeR != nil { stdoutPipeR.Close() }
 		if stderrPipeR != nil { stderrPipeR.Close() }
+		if stdoutPipeW != nil { stdoutPipeW.Close() }
+		if stderrPipeW != nil { stderrPipeW.Close() }
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
 	}
 	slog.Debug("exec command started", "command", req.Command, "pid", cmd.Process.Pid)
 
 	// For ptrace mode: close write ends (now owned by child) and start draining
-	if tracer != nil && stdoutPipeR != nil {
-		// Close write ends in parent — child has inherited them
-		if w, ok := cmd.Stdout.(*os.File); ok { w.Close() }
-		if w, ok := cmd.Stderr.(*os.File); ok { w.Close() }
+	if tracer != nil && stdoutPipeW != nil {
+		stdoutPipeW.Close()
+		stderrPipeW.Close()
 		pipeWG.Add(2)
 		go func() { defer pipeWG.Done(); io.Copy(stdoutW, stdoutPipeR); stdoutPipeR.Close() }()
 		go func() { defer pipeWG.Done(); io.Copy(stderrW, stderrPipeR); stderrPipeR.Close() }()
