@@ -9,14 +9,13 @@
 
 The seccomp prefilter BPF is installed in traced processes but has no performance effect. `allowSyscall` and `resumeTracee` always use `PtraceSyscall`, which traps every syscall exit — including non-traced syscalls that the BPF already allowed at entry. This makes prefilter vs no-prefilter nearly identical (~8-40x overhead vs baseline).
 
-Only ~5 of the ~30 traced syscalls need exit processing:
+Only 7 of the ~30+ traced syscalls need exit processing:
 - `read`, `pread64` — TracerPid masking (`handleReadExit`)
 - `openat`, `openat2` — fd tracking for status/TLS files (`handleOpenatExit`)
 - `connect` — TLS fd watching (`handleConnectExit`)
+- `execve`, `execveat` — failed exec needs exit to reset `InSyscall` (successful exec uses `PTRACE_EVENT_EXEC`)
 
-Note: `close` is entry-only (fd cleanup in `handleClose` happens at entry). `execve` generates `PTRACE_EVENT_EXEC` (a ptrace event, not a syscall stop) which fires regardless of `PtraceCont` vs `PtraceSyscall`.
-
-The other ~25+ traced syscalls only need entry handling and can be resumed with `PtraceCont`, skipping directly to the next BPF-matched entry.
+The other ~23+ traced syscalls only need entry handling and can be resumed with `PtraceCont`.
 
 ### Denied/redirected syscalls
 
@@ -24,7 +23,7 @@ The other ~25+ traced syscalls only need entry handling and can be resumed with 
 
 ## 2. Solution
 
-Add `NeedExitStop bool` to `TraceeState`. At syscall entry, set it for the ~5 exit-needing syscalls. `allowSyscall` and `resumeTracee` check the flag:
+Add `NeedExitStop bool` to `TraceeState`. At syscall entry, set it for the 7 exit-needing syscalls. `allowSyscall` and `resumeTracee` check the flag:
 - `HasPrefilter && !NeedExitStop` → `PtraceCont` (skip to next seccomp event)
 - otherwise → `PtraceSyscall` (catch exit)
 
@@ -160,6 +159,6 @@ func (t *Tracer) resumeTracee(tid int, sig int) {
 - **Benchmark**: re-run 4-mode bench. Target: ptrace+prefilter within 2-3x of baseline (down from 8-40x)
 - **Integration**: `make ptrace-test` — all 76 tests pass
 - **Regression — exit handlers**: TracerPid masking (`TestIntegration_TracerPidMasked`), DNS redirect (`TestIntegration_DNSConnectRedirect`), connect redirect (`TestIntegration_ConnectRedirect`) — depend on read/connect exit handlers
-- **Regression — deny/redirect**: exec deny (`TestIntegration_ExecveDeny`), file deny (`TestIntegration_FileDeny`), exec redirect — use `denySyscall`/`redirectExec` which bypass `allowSyscall` and always use `PtraceSyscall`
-- **Regression — exec**: successful exec (`TestIntegration_ExecveAllow`) — state alignment after `PTRACE_EVENT_EXEC` with `PtraceSyscall` for exec exit
+- **Regression — deny/redirect**: `TestIntegration_ExecveDeny`, `TestIntegration_FileDeny`, `TestIntegration_FileRedirect`, `TestIntegration_SoftDelete` — use `denySyscall`/`redirectExec` which bypass `allowSyscall` and always use `PtraceSyscall`
+- **Regression — exec**: `TestIntegration_InSyscallResetAfterExec` — verifies `InSyscall` state alignment after successful exec with `PTRACE_EVENT_EXEC`
 - **Unit**: verify `needsExitStop` returns true for exactly the 7 syscalls (read, pread64, openat, openat2, connect, execve, execveat)
