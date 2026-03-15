@@ -240,6 +240,15 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		cmd.Stderr = stderrW
 	}
 
+	// Fail fast if context is already cancelled (ptrace mode doesn't use CommandContext)
+	if tracer != nil && ctx.Err() != nil {
+		if stdoutPipeR != nil { stdoutPipeR.Close() }
+		if stderrPipeR != nil { stderrPipeR.Close() }
+		if stdoutPipeW != nil { stdoutPipeW.Close() }
+		if stderrPipeW != nil { stderrPipeW.Close() }
+		return 124, nil, nil, 0, 0, false, false, types.ExecResources{}, ctx.Err()
+	}
+
 	if err := cmd.Start(); err != nil {
 		slog.Debug("exec command start failed", "command", req.Command, "error", err)
 		if stdoutPipeR != nil { stdoutPipeR.Close() }
@@ -311,6 +320,11 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 			slog.Debug("exec waiting for command (ptrace)", "command", req.Command, "pid", cmd.Process.Pid)
 			result := waitExit()
 			close(ptraceDone) // stop context watcher immediately after exit
+			// On tracer shutdown, force-kill child before draining pipes
+			if result.err != nil {
+				_ = killProcess(cmd.Process.Pid)
+				_ = killProcessGroup(pgid)
+			}
 			waitDuration := time.Since(waitStart)
 			slog.Debug("exec command finished (ptrace)", "command", req.Command, "pid", cmd.Process.Pid, "exit_code", result.exitCode, "wait_duration_ms", waitDuration.Milliseconds())
 			pipeWG.Wait() // drain pipes before reading capture writers
