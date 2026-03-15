@@ -712,6 +712,13 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		}
 		// Fall through to normal exit handling for this syscall.
 		// Do NOT return — the first syscall's exit handlers still need to run.
+		// Restore InSyscall=true so the normal toggle correctly identifies
+		// this as a syscall exit (entering := !state.InSyscall → false).
+		t.mu.Lock()
+		if s := t.tracees[tid]; s != nil {
+			s.InSyscall = true
+		}
+		t.mu.Unlock()
 	} else {
 		t.mu.Unlock()
 	}
