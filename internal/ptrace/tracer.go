@@ -710,9 +710,8 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 			}
 			t.mu.Unlock()
 		}
-		// Resume — the tracee will now generate PTRACE_EVENT_SECCOMP stops.
-		t.allowSyscall(tid)
-		return
+		// Fall through to normal exit handling for this syscall.
+		// Do NOT return — the first syscall's exit handlers still need to run.
 	} else {
 		t.mu.Unlock()
 	}
