@@ -1,7 +1,7 @@
 # Design: Seccomp Prefilter Injection for Server-Wired Ptrace Mode
 
 **Date:** 2026-03-15
-**Status:** Draft
+**Status:** Implemented
 
 ---
 

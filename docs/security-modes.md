@@ -209,8 +209,9 @@ Ptrace mode exposes Prometheus metrics at the `/metrics` endpoint:
 
 3. **Performance overhead**
    - Each traced syscall requires two context switches (entry + exit) in TRACESYSGOOD mode
-   - Seccomp prefilter (`seccomp_prefilter: true`) reduces overhead by only trapping traced syscalls; note: the prefilter is currently only active in standalone sidecar mode, not in server-wired mode (requires BPF injection, planned)
-   - Without the prefilter (server-wired mode), overhead is ~10-50x due to trapping all syscalls
+   - Seccomp prefilter (`seccomp_prefilter: true`) injects a BPF filter that returns `SECCOMP_RET_TRACE` only for traced syscalls; non-traced syscalls pass through at kernel speed
+   - The prefilter is injected via ptrace syscall injection at attach time; injection failure falls back to TRACESYSGOOD (all syscalls trapped)
+   - Note: exit-time handlers (TracerPid masking, fd tracking, TLS SNI) require `PtraceSyscall` after entry, so non-traced syscalls still generate exit stops in prefilter mode. A per-syscall resume optimization is planned.
    - Single-threaded event loop may become a bottleneck with many concurrent tracees
    - Mitigation: Prometheus metrics (`agentsh_ptrace_tracees_active`, `agentsh_ptrace_timeouts_total`) help identify bottlenecks
 

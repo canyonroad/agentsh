@@ -1847,6 +1847,20 @@ Phase 4 brings ptrace mode to full feature parity with seccomp+FUSE for redirect
 
 **Deliverable:** ptrace exec paths complete reliably without `cmd.Wait()` hangs. Exit codes, signals, and resource usage preserved.
 
+### Phase 5c: Seccomp Prefilter Injection ✓
+
+- **Problem**: without the seccomp prefilter, every syscall generates a ptrace stop (~10-50x overhead)
+- **Fix**: inject seccomp-BPF filter into traced processes at attach time via `injectSyscall` engine
+- `buildPrefilterBPF()` generates BPF from `tracedSyscallNumbers()` — single source of truth, architecture-validated (AUDIT_ARCH check, fail-closed on mismatch)
+- `injectSeccompFilter(tid)` writes BPF to tracee scratch page, injects `prctl(PR_SET_NO_NEW_PRIVS)` + `seccomp(SECCOMP_SET_MODE_FILTER)`. Non-fatal on failure.
+- Per-tracee `HasPrefilter`/`PendingPrefilter` replacing global `prefilterActive`. Children inherit via `handleNewChild`.
+- Deferred injection at first syscall EXIT (not at attach interrupt stop). `InSyscall` state managed around injection.
+- `handleSeccompStop` sets `LastNr` for exit-time handlers
+- `ptraceOptions` conditionally sets `PTRACE_O_TRACESECCOMP` when prefilter enabled
+- Known limitation: `PtraceSyscall` used uniformly (not `PtraceCont`) to preserve exit-time handlers; per-syscall resume optimization planned
+
+**Deliverable:** seccomp prefilter infrastructure in place. BPF filter injected into traced processes. Foundation for per-syscall resume optimization.
+
 ---
 
 ## 15. Phase 4 Design: Exec Redirect via ptrace
