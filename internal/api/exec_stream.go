@@ -355,7 +355,10 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		if stderrPipeR != nil { stderrPipeR.Close() }
 		if stdoutPipeW != nil { stdoutPipeW.Close() }
 		if stderrPipeW != nil { stderrPipeW.Close() }
-		return 124, nil, nil, 0, 0, false, false, types.ExecResources{}, ctx.Err()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return 124, nil, nil, 0, 0, false, false, types.ExecResources{}, ctx.Err()
+		}
+		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, ctx.Err()
 	}
 
 	if err := cmd.Start(); err != nil {
