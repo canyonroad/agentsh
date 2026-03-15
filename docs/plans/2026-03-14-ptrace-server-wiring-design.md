@@ -167,11 +167,11 @@ This struct implements all four ptrace handler interfaces. On each syscall event
 1. Reads `SessionID` from the event context (set during `AttachPID`)
 2. Looks up the session via `sessions.Get(sessionID)`
 3. Gets the session's policy engine via `s.PolicyEngine()` (returns `*policy.Engine`)
-4. Evaluates the policy using the actual API: `pe.CheckCommand()` returns `policy.PreCheckResult`
+4. Evaluates the policy using the actual API: `pe.CheckCommand()` returns `policy.Decision`
 5. Emits an audit event to the store
 6. Returns allow/deny/redirect to the tracer
 
-Example for exec — translating between `policy.PreCheckResult` and `ptrace.ExecResult`:
+Example for exec — translating between `policy.Decision` and `ptrace.ExecResult`:
 
 ```go
 func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecContext) ptrace.ExecResult {
@@ -181,7 +181,7 @@ func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecCo
         return ptrace.ExecResult{Allow: false, Errno: int32(syscall.EACCES)}
     }
     pe := s.PolicyEngine()
-    pcr := pe.CheckCommand(ec.Filename, ec.Argv)
+    decision := pe.CheckCommand(ec.Filename, ec.Argv)
     // Emit audit event
     r.store.Record(...)
 
@@ -192,25 +192,41 @@ func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecCo
     //   Errno  int32     — errno to return on deny (e.g. EACCES)
     //   StubPath string  — path to stub binary for redirect
     //   Rule   string    — matched rule name for audit
-    switch pcr.EffectiveDecision {
-    case "deny":
+    //
+    // policy.Decision fields:
+    //   EffectiveDecision types.Decision — "allow", "deny", "approve", "redirect", etc.
+    //   Redirect          *types.RedirectInfo — has .Command field for redirect target
+    //   Rule              string
+    switch decision.EffectiveDecision {
+    case types.DecisionDeny:
         return ptrace.ExecResult{
             Action: "deny",
             Allow:  false,
             Errno:  int32(syscall.EACCES),
-            Rule:   pcr.Rule,
+            Rule:   decision.Rule,
         }
-    case "redirect":
+    case types.DecisionRedirect:
         return ptrace.ExecResult{
             Action:   "redirect",
-            StubPath: pcr.RedirectTo.Command,
-            Rule:     pcr.Rule,
+            StubPath: decision.Redirect.Command,
+            Rule:     decision.Rule,
+        }
+    case types.DecisionApprove:
+        // Approval-required decisions cannot be handled via ptrace's synchronous
+        // handler path (no HTTP request context to block on). Deny with a
+        // descriptive rule name so operators can see what happened in audit logs.
+        // Future: wire into ParkTracee for async approval flow.
+        return ptrace.ExecResult{
+            Action: "deny",
+            Allow:  false,
+            Errno:  int32(syscall.EACCES),
+            Rule:   decision.Rule + " (approval required, denied in ptrace mode)",
         }
     default:
         return ptrace.ExecResult{
             Action: "allow",
             Allow:  true,
-            Rule:   pcr.Rule,
+            Rule:   decision.Rule,
         }
     }
 }
@@ -294,27 +310,41 @@ Error cases: if `attachThread` fails (e.g., process exited before seize), it sig
 func (t *Tracer) ResumePID(pid int) error
 ```
 
-Implementation: sends a resume request through the existing `resumeQueue chan resumeRequest` to the tracer's event loop. The `resumeRequest` struct currently has `TID int, Allow bool, Errno int` — this is used by `ParkTracee`/`handleResumeRequest` for policy approval parks. For the keepStopped-resume case, reuse this queue with `Allow: true, Errno: 0`, which causes `handleResumeRequest` to call `PtraceSyscall` on the tracee. This works because the resume-from-park path and resume-from-keepStopped path both need the same operation: `PtraceSyscall(tid, 0)`.
+Implementation: sends a resume request through the existing `resumeQueue chan resumeRequest` to the tracer's event loop. The `resumeRequest` struct has `TID int, Allow bool, Errno int` — used by `ParkTracee`/`handleResumeRequest` for policy approval parks.
+
+For `keepStopped` tracees, `attachThread` must register the tracee in `t.parkedTracees` (in addition to `t.tracees`) so that `handleResumeRequest` recognizes it. Without this, `handleResumeRequest` checks `t.parkedTracees[req.TID]`, finds nothing, logs a warning, and returns without resuming — leaving the tracee stopped forever. By adding the tracee to `parkedTracees` during `keepStopped` attach, the existing `handleResumeRequest` path works unchanged: it removes from `parkedTracees` and calls `PtraceSyscall` to resume.
 
 ---
 
 ## 6. Exec Path — Tracer Attachment
 
-In `core.go`, `execInSessionCore()` conditionally skips the seccomp wrapper:
+In `core.go`, `execInSessionCore()` conditionally skips the seccomp wrapper. When ptrace is active, `extraCfg` must be `nil` to suppress all seccomp notify handler goroutines in `runCommandWithResources()`:
 
 ```go
+var extraCfg *extraProcConfig
+var wrappedReq types.ExecRequest
+
 if a.ptraceTracer != nil {
-    wrappedReq = req  // no wrapper, run command directly
+    wrappedReq = req   // no wrapper, run command directly
+    extraCfg = nil     // no seccomp notify sockets, no signal filter
 } else {
     result := a.setupSeccompWrapper(req, id, s)
-    // ... existing seccomp path
+    if result != nil {
+        wrappedReq = result.wrappedReq
+        extraCfg = result.extraCfg
+    }
 }
 ```
 
-In `exec.go`, `runCommandWithResources()` uses the tracer for pause/resume when active. The process is started **without** `Ptrace: true` in `SysProcAttr` — no `PTRACE_TRACEME`. Instead, the tracer uses `PTRACE_SEIZE` externally:
+In `exec.go`, `runCommandWithResources()` currently has two paths controlled by `startStopped := hook != nil`. With ptrace, this must be refactored into three paths:
+
+1. **Ptrace tracer active** — process starts normally (`getSysProcAttr()`), tracer attaches via `PTRACE_SEIZE`, cgroup hook runs while tracer holds process stopped, tracer resumes
+2. **Seccomp stopped-start** (existing) — process starts with `PTRACE_TRACEME` via `getSysProcAttrStopped()`, cgroup hook runs, `resumeTracedProcess()` detaches
+3. **No interception** — process starts normally, no hook
 
 ```go
 if tracer != nil {
+    // Path 1: Ptrace tracer active
     // Start process normally (no PTRACE_TRACEME — incompatible with PTRACE_SEIZE)
     cmd.SysProcAttr = getSysProcAttr()  // just Setpgid: true
 
@@ -381,10 +411,15 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, sessio
     if err != nil {
         return fmt.Errorf("accept ptrace PID: %w", err)
     }
-    pid, err := getPeerPID(conn)
-    if err != nil || pid <= 0 {
+    unixConn, ok := conn.(*net.UnixConn)
+    if !ok {
         conn.Close()
-        return fmt.Errorf("get peer PID: %w", err)
+        return fmt.Errorf("expected Unix connection, got %T", conn)
+    }
+    pid := getConnPeerPID(unixConn)  // existing function in wrap_linux.go
+    if pid <= 0 {
+        conn.Close()
+        return fmt.Errorf("getConnPeerPID returned invalid PID: %d", pid)
     }
     if err := a.ptraceTracer.AttachPID(pid, ptrace.WithSessionID(sessionID)); err != nil {
         conn.Close()
@@ -394,7 +429,9 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, sessio
         conn.Close()
         return fmt.Errorf("wait attached PID %d: %w", pid, err)
     }
-    a.ptraceTracer.ResumePID(pid)
+    if err := a.ptraceTracer.ResumePID(pid); err != nil {
+        log.Printf("warn: ResumePID %d: %v", pid, err)
+    }
     // Keep conn open — when shell exits, connection closes for detection
     return nil
 }
