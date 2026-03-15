@@ -19,6 +19,41 @@ import (
 // returns a postStart function that receives the notify fd from the wrapper and
 // forwards it to the server's Unix listener socket.
 func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, sessID string, agentPath string, agentArgs []string, cfg *clientConfig) (*wrapLaunchConfig, error) {
+	// Ptrace mode: no wrapper binary needed. Connect to the server's socket
+	// for PID handshake via SO_PEERCRED, then launch the shell directly.
+	if wrapResp.PtraceMode {
+		conn, err := net.Dial("unix", wrapResp.NotifySocket)
+		if err != nil {
+			return nil, fmt.Errorf("ptrace handshake: %w", err)
+		}
+
+		env := os.Environ()
+		env = append(env,
+			fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),
+			fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
+		)
+
+		return &wrapLaunchConfig{
+			command: agentPath,
+			args:    agentArgs,
+			env:     env,
+			sysProcAttr: func() *syscall.SysProcAttr {
+				attr := &syscall.SysProcAttr{Setpgid: true}
+				if isTerminal(os.Stdin.Fd()) {
+					attr.Foreground = true
+					attr.Ctty = int(os.Stdin.Fd())
+				}
+				return attr
+			}(),
+			keepAlive: conn,
+			postWait: func() {
+				if isTerminal(os.Stdin.Fd()) {
+					reclaimTerminal()
+				}
+			},
+		}, nil
+	}
+
 	// Create a socket pair for the notify fd exchange between the wrapper and this CLI process.
 	// The child end (fds[1]) is inherited by agentsh-unixwrap as ExtraFiles[0] (fd 3).
 	// The parent end (fds[0]) receives the seccomp notify fd from the wrapper.

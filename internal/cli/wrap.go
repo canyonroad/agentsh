@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -234,6 +235,9 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 	if wrapCfg != nil && wrapCfg.postWait != nil {
 		wrapCfg.postWait()
 	}
+	if wrapCfg != nil && wrapCfg.keepAlive != nil {
+		wrapCfg.keepAlive.Close()
+	}
 
 	signal.Stop(sigCh)
 	close(sigCh)
@@ -268,6 +272,7 @@ type wrapLaunchConfig struct {
 	sysProcAttr *syscall.SysProcAttr
 	postStart   func() // Called after the process starts (e.g., to forward notify fd)
 	postWait    func() // Called after the process exits (e.g., to reclaim terminal)
+	keepAlive   io.Closer // Held open during shell lifetime (e.g., ptrace handshake conn)
 }
 
 // setupWrapInterception initializes seccomp interception via the server and returns
@@ -283,10 +288,11 @@ func setupWrapInterception(ctx context.Context, c client.CLIClient, sessID strin
 		return nil, fmt.Errorf("wrap-init: %w", err)
 	}
 
-	// On Linux, the server must provide a wrapper binary for seccomp interception.
+	// On Linux, the server must provide a wrapper binary for seccomp interception,
+	// unless ptrace mode is active (no wrapper needed).
 	// On macOS and Windows, an empty WrapperBinary is valid — interception is
 	// system-wide via the System Extension (macOS) or driver (Windows).
-	if wrapResp.WrapperBinary == "" && runtime.GOOS == "linux" {
+	if !wrapResp.PtraceMode && wrapResp.WrapperBinary == "" && runtime.GOOS == "linux" {
 		return nil, fmt.Errorf("server returned empty wrapper binary")
 	}
 
