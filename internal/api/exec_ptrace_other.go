@@ -11,6 +11,7 @@ import (
 type ptraceExecResult struct {
 	exitCode  int
 	resources types.ExecResources
+	err       error
 }
 
 func ptraceExecAttach(tracer any, pid int, sessionID, commandID string, keepStopped bool) (waitExit func() ptraceExecResult, resume func() error, err error) {

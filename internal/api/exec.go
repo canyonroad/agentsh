@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
@@ -201,14 +203,50 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 
 	stdoutW := newCaptureWriter(defaultMaxOutputBytes, nil)
 	stderrW := newCaptureWriter(defaultMaxOutputBytes, nil)
-	cmd.Stdout = stdoutW
-	cmd.Stderr = stderrW
+
+	// For ptrace mode, use explicit pipes so we can drain them independently
+	// of cmd.Wait() (which we skip to avoid the Wait4 race). For non-ptrace,
+	// set writers directly and let cmd.Wait() handle pipe synchronization.
+	var stdoutPipeR, stderrPipeR *os.File
+	var pipeWG sync.WaitGroup
+	if tracer != nil {
+		var stdoutPipeW, stderrPipeW *os.File
+		var pipeErr error
+		stdoutPipeR, stdoutPipeW, pipeErr = os.Pipe()
+		if pipeErr != nil {
+			return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stdout pipe: %w", pipeErr)
+		}
+		stderrPipeR, stderrPipeW, pipeErr = os.Pipe()
+		if pipeErr != nil {
+			stdoutPipeR.Close()
+			stdoutPipeW.Close()
+			return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stderr pipe: %w", pipeErr)
+		}
+		cmd.Stdout = stdoutPipeW
+		cmd.Stderr = stderrPipeW
+		// Write ends are closed after cmd.Start() below
+	} else {
+		cmd.Stdout = stdoutW
+		cmd.Stderr = stderrW
+	}
 
 	if err := cmd.Start(); err != nil {
 		slog.Debug("exec command start failed", "command", req.Command, "error", err)
+		if stdoutPipeR != nil { stdoutPipeR.Close() }
+		if stderrPipeR != nil { stderrPipeR.Close() }
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
 	}
 	slog.Debug("exec command started", "command", req.Command, "pid", cmd.Process.Pid)
+
+	// For ptrace mode: close write ends (now owned by child) and start draining
+	if tracer != nil && stdoutPipeR != nil {
+		// Close write ends in parent — child has inherited them
+		if w, ok := cmd.Stdout.(*os.File); ok { w.Close() }
+		if w, ok := cmd.Stderr.(*os.File); ok { w.Close() }
+		pipeWG.Add(2)
+		go func() { defer pipeWG.Done(); io.Copy(stdoutW, stdoutPipeR); stdoutPipeR.Close() }()
+		go func() { defer pipeWG.Done(); io.Copy(stderrW, stderrPipeR); stderrPipeR.Close() }()
+	}
 
 	pgid := 0
 	if cmd.Process != nil {
@@ -243,6 +281,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 			result := waitExit()
 			waitDuration := time.Since(waitStart)
 			slog.Debug("exec command finished (ptrace)", "command", req.Command, "pid", cmd.Process.Pid, "exit_code", result.exitCode, "wait_duration_ms", waitDuration.Milliseconds())
+			pipeWG.Wait() // drain pipes before reading capture writers
 			stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
 			stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
 			stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
@@ -255,7 +294,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
 			}
-			return result.exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, err
+			return result.exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, result.err
 		} else if hook != nil {
 			// Seccomp stopped-start: process started with PTRACE_TRACEME
 			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {

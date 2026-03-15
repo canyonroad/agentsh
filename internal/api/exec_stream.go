@@ -322,8 +322,39 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	cmd.Stdout = stdoutW
 	cmd.Stderr = stderrW
 
+	// For ptrace mode, use explicit pipes for drain synchronization
+	var stdoutPipeR, stderrPipeR *os.File
+	var pipeWG sync.WaitGroup
+	if tracer != nil {
+		var stdoutPipeW, stderrPipeW *os.File
+		var pipeErr error
+		stdoutPipeR, stdoutPipeW, pipeErr = os.Pipe()
+		if pipeErr != nil {
+			return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stdout pipe: %w", pipeErr)
+		}
+		stderrPipeR, stderrPipeW, pipeErr = os.Pipe()
+		if pipeErr != nil {
+			stdoutPipeR.Close()
+			stdoutPipeW.Close()
+			return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("stderr pipe: %w", pipeErr)
+		}
+		cmd.Stdout = stdoutPipeW
+		cmd.Stderr = stderrPipeW
+	}
+
 	if err := cmd.Start(); err != nil {
+		if stdoutPipeR != nil { stdoutPipeR.Close() }
+		if stderrPipeR != nil { stderrPipeR.Close() }
 		return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("start: %w", err)
+	}
+
+	// For ptrace mode: close write ends and start draining
+	if tracer != nil && stdoutPipeR != nil {
+		if w, ok := cmd.Stdout.(*os.File); ok { w.Close() }
+		if w, ok := cmd.Stderr.(*os.File); ok { w.Close() }
+		pipeWG.Add(2)
+		go func() { defer pipeWG.Done(); io.Copy(stdoutW, stdoutPipeR); stdoutPipeR.Close() }()
+		go func() { defer pipeWG.Done(); io.Copy(stderrW, stderrPipeR); stderrPipeR.Close() }()
 	}
 
 	pgid := 0
@@ -356,6 +387,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			result := waitExit()
 			waitDuration := time.Since(waitStart)
 			slog.Debug("exec_stream command finished (ptrace)", "command", req.Command, "pid", cmd.Process.Pid, "exit_code", result.exitCode, "wait_duration_ms", waitDuration.Milliseconds())
+			pipeWG.Wait() // drain pipes before reading capture writers
 			stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
 			stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
 			stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
@@ -368,7 +400,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
 			}
-			return result.exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, err
+			return result.exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, result.err
 		} else if hook != nil {
 			// Seccomp stopped-start: process started with PTRACE_TRACEME
 			if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
