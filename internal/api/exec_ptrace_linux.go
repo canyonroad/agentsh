@@ -43,11 +43,11 @@ func ptraceExecAttach(tracer any, pid int, sessionID, commandID string, keepStop
 	}
 
 	if err := tr.AttachPID(pid, opts...); err != nil {
-		tr.UnregisterExitNotify(pid)
+		tr.UnregisterExitNotify(pid, exitCh)
 		return nil, nil, fmt.Errorf("attach pid %d: %w", pid, err)
 	}
 	if err := tr.WaitAttached(pid); err != nil {
-		tr.UnregisterExitNotify(pid)
+		tr.UnregisterExitNotify(pid, exitCh)
 		return nil, nil, fmt.Errorf("wait attached pid %d: %w", pid, err)
 	}
 

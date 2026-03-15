@@ -371,19 +371,21 @@ func (t *Tracer) cancelPendingAttachWaiters() {
 
 // RegisterExitNotify registers an exit notification channel for a PID (TGID).
 // Must be called before AttachPID to ensure no race with fast-exit processes.
-// Returns existing channel if already registered (idempotent).
+// Returns a channel unique to this registration.
 func (t *Tracer) RegisterExitNotify(pid int) <-chan ExitStatus {
-	if v, ok := t.exitNotify.Load(pid); ok {
-		return v.(chan ExitStatus)
-	}
 	ch := make(chan ExitStatus, 1)
-	actual, _ := t.exitNotify.LoadOrStore(pid, ch)
-	return actual.(chan ExitStatus)
+	t.exitNotify.Store(pid, ch)
+	return ch
 }
 
-// UnregisterExitNotify removes a pending exit notification (cleanup on failure).
-func (t *Tracer) UnregisterExitNotify(pid int) {
-	t.exitNotify.Delete(pid)
+// UnregisterExitNotify removes a pending exit notification only if it matches
+// the given channel (ownership check). Safe for concurrent flows on different PIDs.
+func (t *Tracer) UnregisterExitNotify(pid int, ch <-chan ExitStatus) {
+	if v, ok := t.exitNotify.Load(pid); ok {
+		if v.(chan ExitStatus) == ch {
+			t.exitNotify.Delete(pid)
+		}
+	}
 }
 
 // cancelPendingExitWaiters signals all pending exit notification channels
