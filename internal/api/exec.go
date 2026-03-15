@@ -281,6 +281,14 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 				}
 			}
 
+			// Context cancellation watcher: kill process group on timeout/cancel
+			// since we're not using CommandContext in ptrace mode.
+			go func() {
+				<-ctx.Done()
+				_ = killProcessGroup(pgid)
+				_ = killProcess(cmd.Process.Pid)
+			}()
+
 			// Tracer-managed wait: block on exit channel instead of cmd.Wait()
 			// to avoid Wait4(-1) race between tracer and Go runtime.
 			waitStart := time.Now()

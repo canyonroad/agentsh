@@ -391,6 +391,13 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 				}
 			}
 
+			// Context cancellation watcher
+			go func() {
+				<-ctx.Done()
+				_ = killProcessGroup(pgid)
+				_ = killProcess(cmd.Process.Pid)
+			}()
+
 			// Tracer-managed wait: block on exit channel instead of cmd.Wait()
 			waitStart := time.Now()
 			slog.Debug("exec_stream waiting for command (ptrace)", "command", req.Command, "pid", cmd.Process.Pid)
