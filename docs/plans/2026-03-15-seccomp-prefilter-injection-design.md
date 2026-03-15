@@ -147,7 +147,7 @@ The per-thread approach is simpler and more robust than TSYNC:
 | `internal/ptrace/inject_seccomp.go` | New. `injectSeccompFilter(tid)` — scratch page alloc, write BPF via `process_vm_writev`, inject `prctl` + `seccomp`. |
 | `internal/ptrace/tracer.go` | Remove `prefilterActive`. Add `HasPrefilter` to `TraceeState`. Update `allowSyscall`, `resumeTracee`, `denySyscall`, `ptraceOptions`, `handleNewChild`. Remove `traceSysGood`. |
 | `internal/ptrace/attach.go` | Reorder: open MemFD and create TraceeState before injection. Call `injectSeccompFilter` for each explicitly-attached thread. Set `HasPrefilter` per-thread on success. |
-| `internal/ptrace/inject.go` | `waitForSyscallStop`: add `PTRACE_EVENT_SECCOMP` as a valid syscall-stop signal alongside `SIGTRAP\|0x80`. Currently only recognizes `SIGTRAP\|0x80` (TRACESYSGOOD). With both flags set, injected syscalls in prefilter tracees generate `PTRACE_EVENT_SECCOMP` stops. |
+| `internal/ptrace/inject.go` | Verify `waitForSyscallStop` handles `PTRACE_EVENT_SECCOMP` stops (already implemented at inject.go:232). May need no changes if existing handling is sufficient. |
 
 ### Unchanged
 
@@ -165,4 +165,5 @@ The per-thread approach is simpler and more robust than TSYNC:
 - **Inheritance**: forked children inherit filter without re-injection
 - **Mixed-mode**: coexisting prefilter and non-prefilter tracees (if injection fails for one)
 - **Multi-thread target**: attach to already-multithreaded process, verify each thread gets its own filter injection and `HasPrefilter = true`
+- **Partial injection failure**: simulate injection failure on some threads within a TGID, verify mixed-mode (some `PTRACE_EVENT_SECCOMP`, some `SIGTRAP|0x80`) works correctly with per-tracee resume logic
 - **Benchmark**: `make bench` baseline vs ptrace — target <5% overhead
