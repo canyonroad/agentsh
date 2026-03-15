@@ -267,26 +267,8 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		// If we started with ptrace (stopped), run the hook BEFORE resuming.
 		// This ensures eBPF/cgroups are attached before the process executes.
 		if tracer != nil {
-			// Ptrace tracer active: attach via PTRACE_SEIZE, run hook while stopped, resume
-			waitExit, resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
-			if attachErr != nil {
-				_ = killProcess(cmd.Process.Pid)
-				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace attach: %w", attachErr)
-			}
-			if hook != nil {
-				if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
-					defer func() { _ = cleanup() }()
-				}
-			}
-			if resume != nil {
-				if resumeErr := resume(); resumeErr != nil {
-					_ = killProcess(cmd.Process.Pid)
-					return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace resume: %w", resumeErr)
-				}
-			}
-
-			// Context cancellation watcher: kill process group on timeout/cancel
-			// since we're not using CommandContext in ptrace mode.
+			// Context cancellation watcher: start BEFORE attach so timeout
+			// is enforced even if WaitAttached stalls.
 			ptraceDone := make(chan struct{})
 			go func() {
 				select {
@@ -296,6 +278,28 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 				case <-ptraceDone:
 				}
 			}()
+
+			// Ptrace tracer active: attach via PTRACE_SEIZE, run hook while stopped, resume
+			waitExit, resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
+			if attachErr != nil {
+				close(ptraceDone)
+				_ = killProcessGroup(pgid)
+				pipeWG.Wait()
+				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace attach: %w", attachErr)
+			}
+			if hook != nil {
+				if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
+					defer func() { _ = cleanup() }()
+				}
+			}
+			if resume != nil {
+				if resumeErr := resume(); resumeErr != nil {
+					close(ptraceDone)
+					_ = killProcessGroup(pgid)
+					pipeWG.Wait()
+					return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace resume: %w", resumeErr)
+				}
+			}
 
 			// Tracer-managed wait: block on exit channel instead of cmd.Wait()
 			// to avoid Wait4(-1) race between tracer and Go runtime.

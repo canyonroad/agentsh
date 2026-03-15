@@ -373,25 +373,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		pgid = getProcessGroupID(cmd.Process.Pid)
 
 		if tracer != nil {
-			// Ptrace tracer active: attach via PTRACE_SEIZE, run hook while stopped, resume
-			waitExit, resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
-			if attachErr != nil {
-				_ = killProcess(cmd.Process.Pid)
-				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace attach: %w", attachErr)
-			}
-			if hook != nil {
-				if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
-					defer func() { _ = cleanup() }()
-				}
-			}
-			if resume != nil {
-				if resumeErr := resume(); resumeErr != nil {
-					_ = killProcess(cmd.Process.Pid)
-					return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace resume: %w", resumeErr)
-				}
-			}
-
-			// Context cancellation watcher
+			// Context cancellation watcher: start BEFORE attach
 			ptraceDone := make(chan struct{})
 			go func() {
 				select {
@@ -401,6 +383,27 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 				case <-ptraceDone:
 				}
 			}()
+
+			waitExit, resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
+			if attachErr != nil {
+				close(ptraceDone)
+				_ = killProcessGroup(pgid)
+				pipeWG.Wait()
+				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace attach: %w", attachErr)
+			}
+			if hook != nil {
+				if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
+					defer func() { _ = cleanup() }()
+				}
+			}
+			if resume != nil {
+				if resumeErr := resume(); resumeErr != nil {
+					close(ptraceDone)
+					_ = killProcessGroup(pgid)
+					pipeWG.Wait()
+					return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace resume: %w", resumeErr)
+				}
+			}
 
 			// Tracer-managed wait: block on exit channel instead of cmd.Wait()
 			waitStart := time.Now()
