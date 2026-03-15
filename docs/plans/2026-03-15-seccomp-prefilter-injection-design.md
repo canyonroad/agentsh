@@ -78,18 +78,20 @@ attachThread(tid, opts):
 ```
 
 Key changes from current `attachThread`:
-- `MemFD` opened before `PTRACE_SETOPTIONS` (currently opened after resume)
-- `TraceeState` created before injection (currently created after resume)
+- `MemFD` opened before `PTRACE_SETOPTIONS` (currently opened after resume). Needed for scratch page allocator used by `injectSyscall`, not for the BPF write itself.
+- `TraceeState` created before injection (currently created after resume). Needed because `injectSyscall` looks up TraceeState for the scratch page.
 - `PTRACE_SETOPTIONS` always sets both `TRACESECCOMP` and `TRACESYSGOOD` (currently one or the other). This is safe: `handleStop` already dispatches both `SIGTRAP|0x80` (TRACESYSGOOD) and `PTRACE_EVENT_SECCOMP` stops.
 
 ### Injection Steps
 
-`injectSeccompFilter(tid)` uses `process_vm_writev` (not MemFD) to write the BPF array into the tracee's scratch page, then injects two syscalls:
+`injectSeccompFilter(tid)` uses `process_vm_writev` to write the BPF program bytes into the tracee's scratch page (allocated via `injectSyscall(mmap)` if not already present). Then injects two syscalls via the `injectSyscall` engine (which uses MemFD for register save/restore):
 
-1. **Allocate scratch page** — `injectSyscall(mmap, ...)` if not already allocated for this TGID
-2. **Write BPF program + sock_fprog struct** — `process_vm_writev` to the scratch page
-3. **Inject `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)`** — required before seccomp. Idempotent.
-4. **Inject `seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog)`** — installs the BPF
+1. **Allocate scratch page** — `injectSyscall(mmap, ...)` if not already allocated for this TGID. Uses the existing scratch page allocator.
+2. **Write BPF program + `sock_fprog` struct** — `process_vm_writev` writes the filter bytes to the scratch page. This does NOT use MemFD.
+3. **Inject `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)`** — via `injectSyscall`. Uses MemFD for register read/write.
+4. **Inject `seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog)`** — via `injectSyscall`. Uses MemFD for register read/write.
+
+In summary: `process_vm_writev` for data writes, `MemFD` for register manipulation during syscall injection.
 
 ### Failure Handling
 
@@ -122,7 +124,9 @@ Remove the global `prefilterActive` field from `Tracer`.
 
 ### Multi-Thread Attach
 
-For multi-threaded processes, `attachProcess` iterates `/proc/pid/task/` and calls `attachThread` for each thread. Only the first thread (or any one thread) needs injection — the seccomp filter applies process-wide (all threads in the thread group). However, injecting on each thread is harmless (filters stack, and identical filters are a no-op for performance). For simplicity, inject only when `tid == tgid` (thread group leader).
+For multi-threaded processes, `attachProcess` iterates `/proc/pid/task/` and calls `attachThread` for each thread. The seccomp filter applies process-wide (all threads in the thread group), so only one thread needs injection. Inject on the **first successfully attached thread** (not strictly the leader, in case leader attach fails). Track injection status per-TGID via the scratch page allocator — if a scratch page already exists for the TGID, injection was already done.
+
+For the exec path (server wiring), attached processes are always single-threaded (freshly started by `cmd.Start()`), so multi-thread injection is a non-issue in practice. It only matters for the wrap path if the shell has already spawned threads before attach.
 
 ## 6. Scope
 
@@ -135,7 +139,7 @@ For multi-threaded processes, `attachProcess` iterates `/proc/pid/task/` and cal
 | `internal/ptrace/inject_seccomp.go` | New. `injectSeccompFilter(tid)` — scratch page alloc, write BPF via `process_vm_writev`, inject `prctl` + `seccomp`. |
 | `internal/ptrace/tracer.go` | Remove `prefilterActive`. Add `HasPrefilter` to `TraceeState`. Update `allowSyscall`, `resumeTracee`, `denySyscall`, `ptraceOptions`, `handleNewChild`. Remove `traceSysGood`. |
 | `internal/ptrace/attach.go` | Reorder: open MemFD and create TraceeState before injection. Call `injectSeccompFilter` for explicitly-attached leader threads. |
-| `internal/ptrace/inject.go` | Update `waitForSyscallStop` if needed for mixed-mode handling. |
+| `internal/ptrace/inject.go` | `waitForSyscallStop`: add `PTRACE_EVENT_SECCOMP` as a valid syscall-stop signal alongside `SIGTRAP\|0x80`. Currently only recognizes `SIGTRAP\|0x80` (TRACESYSGOOD). With both flags set, injected syscalls in prefilter tracees generate `PTRACE_EVENT_SECCOMP` stops. |
 
 ### Unchanged
 
