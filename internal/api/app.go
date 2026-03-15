@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
@@ -70,7 +71,7 @@ type App struct {
 	// ptraceFailed is set when the tracer exits unexpectedly while ptrace mode
 	// is configured. When true, command execution is blocked to prevent running
 	// without syscall enforcement (fail-closed).
-	ptraceFailed bool
+	ptraceFailed atomic.Bool
 }
 
 func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader) *App {

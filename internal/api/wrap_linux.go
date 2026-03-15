@@ -4,8 +4,10 @@ package api
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -181,13 +183,13 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socket
 	// The CLI sends the spawned shell's PID explicitly rather than relying
 	// on SO_PEERCRED, which would give the CLI's PID instead.
 	pidBuf := make([]byte, 4)
-	if _, err := conn.Read(pidBuf); err != nil {
+	if _, err := io.ReadFull(conn, pidBuf); err != nil {
 		conn.Write([]byte{0}) // NACK
 		conn.Close()
 		slog.Error("ptrace wrap: failed to read PID", "error", err, "session_id", sessionID)
 		return
 	}
-	pid := int(pidBuf[0]) | int(pidBuf[1])<<8 | int(pidBuf[2])<<16 | int(pidBuf[3])<<24
+	pid := int(binary.LittleEndian.Uint32(pidBuf))
 	if pid <= 0 {
 		conn.Write([]byte{0}) // NACK
 		conn.Close()

@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"net"
@@ -55,10 +56,7 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 
 				// Send child PID as 4-byte little-endian
 				pidBytes := make([]byte, 4)
-				pidBytes[0] = byte(childPID)
-				pidBytes[1] = byte(childPID >> 8)
-				pidBytes[2] = byte(childPID >> 16)
-				pidBytes[3] = byte(childPID >> 24)
+				binary.LittleEndian.PutUint32(pidBytes, uint32(childPID))
 				if _, err := conn.Write(pidBytes); err != nil {
 					conn.Close()
 					return fmt.Errorf("send PID: %w", err)
