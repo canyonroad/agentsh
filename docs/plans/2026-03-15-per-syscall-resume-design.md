@@ -9,17 +9,22 @@
 
 The seccomp prefilter BPF is installed in traced processes but has no performance effect. `allowSyscall` and `resumeTracee` always use `PtraceSyscall`, which traps every syscall exit — including non-traced syscalls that the BPF already allowed at entry. This makes prefilter vs no-prefilter nearly identical (~8-40x overhead vs baseline).
 
-Only ~6 of the ~30 traced syscalls need exit processing:
-- `read`, `pread64` — TracerPid masking
-- `openat`, `openat2` — fd tracking for status/TLS files
-- `connect` — TLS fd watching
-- `close` — fd cleanup
+Only ~5 of the ~30 traced syscalls need exit processing:
+- `read`, `pread64` — TracerPid masking (`handleReadExit`)
+- `openat`, `openat2` — fd tracking for status/TLS files (`handleOpenatExit`)
+- `connect` — TLS fd watching (`handleConnectExit`)
 
-The other ~24 traced syscalls (execve, unlinkat, kill, bind, etc.) only need entry handling and can be resumed with `PtraceCont`, skipping directly to the next BPF-matched entry.
+Note: `close` is entry-only (fd cleanup in `handleClose` happens at entry). `execve` generates `PTRACE_EVENT_EXEC` (a ptrace event, not a syscall stop) which fires regardless of `PtraceCont` vs `PtraceSyscall`.
+
+The other ~25+ traced syscalls only need entry handling and can be resumed with `PtraceCont`, skipping directly to the next BPF-matched entry.
+
+### Denied/redirected syscalls
+
+`denySyscall` and `redirectExec` already use `PtraceSyscall` directly (they don't go through `allowSyscall`). They set `PendingDenyErrno`, `PendingFakeZero`, `HasPendingReturn`, or `PendingExecStubFD` and always catch the exit for fixup. This optimization only affects `allowSyscall` (allowed syscalls).
 
 ## 2. Solution
 
-Add `NeedExitStop bool` to `TraceeState`. At syscall entry, set it for the ~6 exit-needing syscalls. `allowSyscall` and `resumeTracee` check the flag:
+Add `NeedExitStop bool` to `TraceeState`. At syscall entry, set it for the ~5 exit-needing syscalls. `allowSyscall` and `resumeTracee` check the flag:
 - `HasPrefilter && !NeedExitStop` → `PtraceCont` (skip to next seccomp event)
 - otherwise → `PtraceSyscall` (catch exit)
 
@@ -29,19 +34,26 @@ At syscall exit, clear `NeedExitStop`.
 
 ### `needsExitStop(nr int) bool`
 
-New function:
+New function, derived from actual exit handlers in the codebase:
 
 ```go
 func needsExitStop(nr int) bool {
     switch nr {
-    case unix.SYS_READ, unix.SYS_PREAD64,
-         unix.SYS_OPENAT, unix.SYS_OPENAT2,
-         unix.SYS_CONNECT, unix.SYS_CLOSE:
+    case unix.SYS_READ, unix.SYS_PREAD64,  // handleReadExit (TracerPid masking)
+         unix.SYS_OPENAT, unix.SYS_OPENAT2, // handleOpenatExit (fd tracking)
+         unix.SYS_CONNECT:                   // handleConnectExit (TLS fd watch)
         return true
     }
     return false
 }
 ```
+
+Not included:
+- `close` — entry-only handler (`handleClose`)
+- `execve`/`execveat` — uses `PTRACE_EVENT_EXEC` (fires with `PtraceCont`)
+- `write` — entry-only for TLS SNI rewrite
+- `sendto` — entry-only for DNS redirect
+- All file/signal/network syscalls — entry-only policy evaluation
 
 ### `TraceeState`
 
@@ -123,7 +135,7 @@ func (t *Tracer) resumeTracee(tid int, sig int) {
 
 ## 4. Scope
 
-**Only `internal/ptrace/tracer.go` changes.** No new files. ~30 lines changed.
+**Only `internal/ptrace/tracer.go` changes.** No new files. ~40 lines changed.
 
 | Location | Change |
 |----------|--------|
@@ -134,11 +146,18 @@ func (t *Tracer) resumeTracee(tid int, sig int) {
 | `allowSyscall` | Check `HasPrefilter && !NeedExitStop` for `PtraceCont` |
 | `resumeTracee` | Same check |
 
-**Unchanged**: `denySyscall` (deny fixup always needs exit stop via `PtraceSyscall`), `handleNewChild`, `inject.go`, `attach.go`, all API code.
+**Unchanged:**
+- `denySyscall` — always uses `PtraceSyscall` directly (sets pending fixup states)
+- `redirectExec` — always uses `PtraceSyscall` directly
+- `handleNewChild` — `NeedExitStop` defaults to false (correct for new children)
+- `inject.go`, `attach.go` — no changes
+- All API code — no changes
 
 ## 5. Testing
 
 - **Benchmark**: re-run 4-mode bench. Target: ptrace+prefilter within 2-3x of baseline (down from 8-40x)
-- **Integration**: `make ptrace-test` — all 76 tests pass (exit handlers still work for read/openat/connect/close)
-- **Unit**: verify `needsExitStop` returns true for the 6 syscalls
-- **Regression**: TracerPid masking, fd tracking, TLS SNI still functional (these depend on exit stops for read/openat/connect)
+- **Integration**: `make ptrace-test` — all 76 tests pass
+- **Regression**: TracerPid masking test (`TestIntegration_TracerPidMasked`) — depends on read exit handler
+- **Regression**: DNS redirect test (`TestIntegration_DNSConnectRedirect`) — depends on connect exit handler
+- **Regression**: File redirect test — depends on openat entry (not exit)
+- **Unit**: verify `needsExitStop` returns true for exactly the 5 syscalls
