@@ -387,6 +387,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			waitExit, resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
 			if attachErr != nil {
 				close(ptraceDone)
+				_ = killProcess(cmd.Process.Pid)
 				_ = killProcessGroup(pgid)
 				pipeWG.Wait()
 				cmd.Process.Release()
@@ -400,6 +401,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			if resume != nil {
 				if resumeErr := resume(); resumeErr != nil {
 					close(ptraceDone)
+					_ = killProcess(cmd.Process.Pid)
 					_ = killProcessGroup(pgid)
 					pipeWG.Wait()
 					cmd.Process.Release()
