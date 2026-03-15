@@ -594,18 +594,6 @@ func (t *Tracer) applyReturnOverride(tid int, retval int64) {
 	t.setRegs(tid, regs)
 }
 
-// hasNeedExitStop returns true if the tracee needs an exit stop for exit-time
-// handlers (read masking, fd tracking, TLS watch, exec failure reset).
-func (t *Tracer) hasNeedExitStop(tid int) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	state := t.tracees[tid]
-	if state == nil {
-		return false
-	}
-	return state.InSyscall && state.NeedExitStop
-}
-
 // hasPendingSyscallExit returns true if the tracee has a pending deny errno,
 // fake-zero fixup, return override, or exec stub fd cleanup that needs to be
 // applied at syscall exit.
@@ -655,10 +643,18 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 				// In prefilter mode, a plain SIGTRAP with no event can be
 				// a syscall-exit stop if we explicitly used PtraceSyscall
 				// (e.g., for exit-needing syscalls or pending fixups).
-				if t.hasPendingSyscallExit(tid) || t.hasNeedExitStop(tid) {
+				// Only treat as syscall-exit when the tracee has a prefilter
+				// AND is in a syscall. Otherwise, it's a real SIGTRAP signal.
+				t.mu.Lock()
+				isSyscallExit := false
+				if s := t.tracees[tid]; s != nil && s.HasPrefilter && s.InSyscall {
+					isSyscallExit = s.NeedExitStop || s.PendingDenyErrno != 0 || s.PendingFakeZero || s.HasPendingReturn || s.PendingExecStubFD >= 0
+				}
+				t.mu.Unlock()
+				if isSyscallExit {
 					t.handleSyscallStop(ctx, tid)
 				} else {
-					t.resumeTracee(tid, 0)
+					t.resumeTracee(tid, int(sig))
 				}
 			}
 
