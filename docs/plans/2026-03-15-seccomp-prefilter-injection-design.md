@@ -124,9 +124,24 @@ Remove the global `prefilterActive` field from `Tracer`.
 
 ### Multi-Thread Attach
 
-For multi-threaded processes, `attachProcess` iterates `/proc/pid/task/` and calls `attachThread` for each thread. The seccomp filter applies process-wide (all threads in the thread group), so only one thread needs injection. Inject on the **first successfully attached thread** (not strictly the leader, in case leader attach fails). Track injection status per-TGID via the scratch page allocator — if a scratch page already exists for the TGID, injection was already done.
+`SECCOMP_SET_MODE_FILTER` without `SECCOMP_FILTER_FLAG_TSYNC` is **thread-scoped** — it only applies to the calling thread. For multi-threaded processes, each attached thread needs its own injection.
 
-For the exec path (server wiring), attached processes are always single-threaded (freshly started by `cmd.Start()`), so multi-thread injection is a non-issue in practice. It only matters for the wrap path if the shell has already spawned threads before attach.
+However, for the exec path (server wiring), attached processes are always **single-threaded** (freshly started by `cmd.Start()`). The child hasn't had a chance to spawn threads yet. So single-thread injection is sufficient.
+
+For the wrap path, the shell may be multi-threaded by the time we attach. Use `SECCOMP_FILTER_FLAG_TSYNC` to apply the filter to all threads atomically:
+
+```go
+// Step 4: install filter with TSYNC for multi-threaded targets
+flags := 0
+if threadCount > 1 {
+    flags = SECCOMP_FILTER_FLAG_TSYNC
+}
+injectSyscall(seccomp, SECCOMP_SET_MODE_FILTER, flags, &prog)
+```
+
+If `TSYNC` fails (returns `EINVAL` on older kernels or `ESRCH` if threads are in incompatible states), fall back to per-thread injection: inject on each attached thread individually.
+
+Track injection status per-TGID with a dedicated `seccompInjected` field on `TraceeState` (not via scratch page existence, which is shared with other features). When the first thread in a TGID is injected with TSYNC, mark all threads' `HasPrefilter = true`. Without TSYNC (per-thread), each thread sets its own `HasPrefilter` independently.
 
 ## 6. Scope
 
@@ -138,7 +153,7 @@ For the exec path (server wiring), attached processes are always single-threaded
 | `internal/ptrace/seccomp_filter_test.go` | New. Verify instruction count, architecture coverage, parity with `tracedSyscallNumbers()`. |
 | `internal/ptrace/inject_seccomp.go` | New. `injectSeccompFilter(tid)` — scratch page alloc, write BPF via `process_vm_writev`, inject `prctl` + `seccomp`. |
 | `internal/ptrace/tracer.go` | Remove `prefilterActive`. Add `HasPrefilter` to `TraceeState`. Update `allowSyscall`, `resumeTracee`, `denySyscall`, `ptraceOptions`, `handleNewChild`. Remove `traceSysGood`. |
-| `internal/ptrace/attach.go` | Reorder: open MemFD and create TraceeState before injection. Call `injectSeccompFilter` for explicitly-attached leader threads. |
+| `internal/ptrace/attach.go` | Reorder: open MemFD and create TraceeState before injection. Call `injectSeccompFilter` for explicitly-attached processes (TSYNC for multi-thread, per-thread fallback). Set `HasPrefilter`. |
 | `internal/ptrace/inject.go` | `waitForSyscallStop`: add `PTRACE_EVENT_SECCOMP` as a valid syscall-stop signal alongside `SIGTRAP\|0x80`. Currently only recognizes `SIGTRAP\|0x80` (TRACESYSGOOD). With both flags set, injected syscalls in prefilter tracees generate `PTRACE_EVENT_SECCOMP` stops. |
 
 ### Unchanged
@@ -156,4 +171,5 @@ For the exec path (server wiring), attached processes are always single-threaded
 - **Fallback**: mock seccomp injection failure, verify TRACESYSGOOD fallback works
 - **Inheritance**: forked children inherit filter without re-injection
 - **Mixed-mode**: coexisting prefilter and non-prefilter tracees (if injection fails for one)
+- **Multi-thread target**: attach to already-multithreaded process, verify TSYNC applies filter to all threads (or per-thread fallback works)
 - **Benchmark**: `make bench` baseline vs ptrace — target <5% overhead
