@@ -111,11 +111,12 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 	// The injection engine needs TraceeState (for scratch page) and MemFD
 	// (for register read/write during injectSyscall).
 	memFD := -1
-	fd, err := unix.Open(fmt.Sprintf("/proc/%d/mem", tid), unix.O_RDWR, 0)
-	if err != nil {
+	if fd, openErr := unix.Open(fmt.Sprintf("/proc/%d/mem", tid), unix.O_RDWR, 0); openErr != nil {
 		fd, _ = unix.Open(fmt.Sprintf("/proc/%d/mem", tid), unix.O_RDONLY, 0)
+		memFD = fd
+	} else {
+		memFD = fd
 	}
-	memFD = fd
 
 	t.mu.Lock()
 	t.tracees[tid] = &TraceeState{
@@ -150,12 +151,13 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 	// Resume the tracee (unless keepStopped for cgroup hook).
 	// Always use PtraceSyscall here — HasPrefilter is never true at attach
 	// time (injection is deferred to the first syscall stop).
+	var resumeErr error
 	if opts.keepStopped {
 		// Already registered in parkedTracees above.
 	} else {
-		err = unix.PtraceSyscall(tid, 0)
+		resumeErr = unix.PtraceSyscall(tid, 0)
 	}
-	if err != nil {
+	if resumeErr != nil {
 		// Rollback: clean up TraceeState and MemFD on resume failure
 		t.mu.Lock()
 		if s := t.tracees[tid]; s != nil {
@@ -169,7 +171,7 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 		t.mu.Unlock()
 		unix.PtraceDetach(tid)
 		t.metrics.IncAttachFailure("other")
-		return fmt.Errorf("restart tid %d: %w", tid, err)
+		return fmt.Errorf("restart tid %d: %w", tid, resumeErr)
 	}
 
 	return nil

@@ -700,6 +700,9 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 	state := t.tracees[tid]
 	if state != nil && state.PendingPrefilter {
 		state.PendingPrefilter = false
+		// Mark as entering syscall so injectSyscall uses the correct
+		// entry-stop protocol (the first syscall stop is always an entry).
+		state.InSyscall = true
 		t.mu.Unlock()
 		if err := t.injectSeccompFilter(tid); err != nil {
 			slog.Warn("seccomp prefilter injection failed, falling back to TRACESYSGOOD",
