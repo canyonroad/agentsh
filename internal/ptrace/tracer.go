@@ -160,6 +160,8 @@ type TraceeState struct {
 	PendingReturnOverride int64 // force return value to this on syscall exit
 	HasPendingReturn      bool  // whether PendingReturnOverride is active
 	PendingInterrupt      bool
+	HasPrefilter     bool // true if seccomp prefilter is installed for this tracee
+	PendingPrefilter bool // inject seccomp filter on next syscall stop
 	IsVforkChild     bool
 	SuppressInitialStop bool // suppress initial SIGSTOP from auto-trace
 	PendingExecStubFD  int // fd injected for exec redirect; cleaned up on exec failure (-1 = none)
@@ -226,7 +228,6 @@ type Tracer struct {
 	cfg             TracerConfig
 	metrics         Metrics
 	processTree     *ProcessTree
-	prefilterActive bool
 
 	attachQueue chan attachRequest
 	resumeQueue chan resumeRequest
@@ -431,14 +432,11 @@ func (t *Tracer) ptraceOptions() int {
 		unix.PTRACE_O_TRACEVFORK |
 		unix.PTRACE_O_TRACEEXEC |
 		unix.PTRACE_O_TRACEEXIT |
-		unix.PTRACE_O_EXITKILL
-
-	if t.prefilterActive {
+		unix.PTRACE_O_EXITKILL |
+		unix.PTRACE_O_TRACESYSGOOD
+	if t.cfg.SeccompPrefilter {
 		opts |= unix.PTRACE_O_TRACESECCOMP
-	} else {
-		opts |= unix.PTRACE_O_TRACESYSGOOD
 	}
-
 	return opts
 }
 
@@ -450,20 +448,15 @@ func (t *Tracer) setRegs(tid int, regs Regs) error {
 	return setRegsArch(tid, regs)
 }
 
-// traceSysGood reports whether PTRACE_O_TRACESYSGOOD is active.
-// When true, syscall stops use SIGTRAP|0x80 and plain SIGTRAP is a real signal.
-func (t *Tracer) traceSysGood() bool {
-	return !t.prefilterActive
-}
-
 // allowSyscall resumes the tracee, allowing the syscall to proceed.
 func (t *Tracer) allowSyscall(tid int) {
+	// Always use PtraceSyscall to catch syscall-exit stops, which are needed
+	// for exit-time handlers (TracerPid masking, fd tracking, TLS SNI, etc.).
+	// In prefilter mode, the BPF filter ensures only traced syscalls generate
+	// entry stops; PtraceSyscall then catches their exits. Non-traced syscalls
+	// don't stop at all (BPF returns ALLOW), so this is still efficient.
 	var err error
-	if t.prefilterActive {
-		err = unix.PtraceCont(tid, 0)
-	} else {
-		err = unix.PtraceSyscall(tid, 0)
-	}
+	err = unix.PtraceSyscall(tid, 0)
 	if err != nil && errors.Is(err, unix.ESRCH) {
 		t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 	}
@@ -514,12 +507,9 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 }
 
 // resumeTracee resumes a tracee with an optional signal to deliver.
+// Always uses PtraceSyscall to catch exit-time stops (see allowSyscall).
 func (t *Tracer) resumeTracee(tid int, sig int) {
-	if t.prefilterActive {
-		unix.PtraceCont(tid, sig)
-	} else {
-		unix.PtraceSyscall(tid, sig)
-	}
+	unix.PtraceSyscall(tid, sig)
 }
 
 // ptraceListen calls PTRACE_LISTEN on the specified tid. In PTRACE_SEIZE
@@ -689,8 +679,52 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 
 // handleSyscallStop handles SIGTRAP|0x80 stops (TRACESYSGOOD mode).
 func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
+	// Deferred seccomp prefilter injection: inject on the first syscall EXIT
+	// (not entry — injectFromEntry replaces the current syscall, which would
+	// drop the tracee's first real syscall). At exit, the syscall already
+	// completed, so injection is safe.
+	//
+	// State.InSyscall tracks what the PREVIOUS stop set:
+	//   InSyscall=false → this is an entry stop (first time)
+	//   InSyscall=true  → this is an exit stop (entry was processed)
 	t.mu.Lock()
 	state := t.tracees[tid]
+	if state != nil && state.PendingPrefilter && !state.InSyscall {
+		// This is a syscall entry. Let normal handling process it.
+		// The next stop will be the exit, where we'll inject.
+		t.mu.Unlock()
+	} else if state != nil && state.PendingPrefilter && state.InSyscall {
+		// This is a syscall exit — safe to inject now.
+		state.PendingPrefilter = false
+		// Set InSyscall=false before injection so injectSyscall uses the
+		// correct exit-stop protocol (injectFromExit).
+		state.InSyscall = false
+		t.mu.Unlock()
+		if err := t.injectSeccompFilter(tid); err != nil {
+			slog.Warn("seccomp prefilter injection failed, falling back to TRACESYSGOOD",
+				"tid", tid, "error", err)
+		} else {
+			t.mu.Lock()
+			if s := t.tracees[tid]; s != nil {
+				s.HasPrefilter = true
+			}
+			t.mu.Unlock()
+		}
+		// Fall through to normal exit handling for this syscall.
+		// Do NOT return — the first syscall's exit handlers still need to run.
+		// Restore InSyscall=true so the normal toggle correctly identifies
+		// this as a syscall exit (entering := !state.InSyscall → false).
+		t.mu.Lock()
+		if s := t.tracees[tid]; s != nil {
+			s.InSyscall = true
+		}
+		t.mu.Unlock()
+	} else {
+		t.mu.Unlock()
+	}
+
+	t.mu.Lock()
+	state = t.tracees[tid]
 	if state == nil {
 		t.mu.Unlock()
 		t.allowSyscall(tid)
@@ -793,6 +827,7 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	if state != nil {
 		tgid = state.TGID
 		state.InSyscall = true
+		state.LastNr = nr
 	}
 	t.mu.Unlock()
 	if tgid != 0 {
@@ -950,6 +985,8 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 		existing.TGID = childTGID
 		existing.ParentPID = parent.TGID
 		existing.SessionID = parent.SessionID
+		existing.HasPrefilter = parent.HasPrefilter
+		existing.PendingPrefilter = parent.PendingPrefilter
 		existing.Attached = time.Now()
 	} else {
 		t.tracees[tid] = &TraceeState{
@@ -957,6 +994,8 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 			TGID:                childTGID,
 			ParentPID:           parent.TGID,
 			SessionID:           parent.SessionID,
+			HasPrefilter:        parent.HasPrefilter,
+			PendingPrefilter:    parent.PendingPrefilter,
 			Attached:            time.Now(),
 			LastNr:              -1,
 			MemFD:               -1,

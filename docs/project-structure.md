@@ -29,7 +29,7 @@ agentsh/
 - `internal/fsmonitor/` — FUSE workspace view + file operation capture.
 - `internal/netmonitor/` — Network proxy + DNS cache/resolver and optional netns/transparent plumbing.
 - `internal/limits/` — Optional cgroups v2 enforcement (Linux-only; wired from exec hooks).
-- `internal/ptrace/` — Ptrace-based syscall tracer for restricted containers (Linux-only, requires SYS_PTRACE). Intercepts exec, file, network, and signal syscalls via PTRACE_SEIZE. Architecture-specific register access (amd64, arm64). Wired into the server via `internal/api/` for both exec and wrap paths. Includes `AttachOption` functional options for session/command association and keepStopped control, `WaitAttached`/`ResumePID` for synchronous attach flow. `Metrics` interface with Prometheus adapter (`metrics.go`, `metrics_prometheus.go`) and overhead benchmarks (`benchmark_test.go`).
+- `internal/ptrace/` — Ptrace-based syscall tracer for restricted containers (Linux-only, requires SYS_PTRACE). Intercepts exec, file, network, and signal syscalls via PTRACE_SEIZE. Architecture-specific register access (amd64, arm64). Wired into the server via `internal/api/` for both exec and wrap paths. Includes `AttachOption` functional options for session/command association and keepStopped control, `WaitAttached`/`ResumePID` for synchronous attach flow. Seccomp prefilter injection (`inject_seccomp.go`, `seccomp_filter.go`) for reduced overhead. `Metrics` interface with Prometheus adapter (`metrics.go`, `metrics_prometheus.go`) and overhead benchmarks (`benchmark_test.go`).
 - `internal/events/` — In-memory event broker for SSE.
 - `internal/store/` — Event sinks (SQLite, JSONL, webhook) and composition.
 - `internal/auth/` — API key auth implementation.

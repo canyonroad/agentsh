@@ -107,26 +107,16 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 		return fmt.Errorf("read TGID for tid %d: %w", tid, err)
 	}
 
-	if opts.keepStopped {
-		// Leave tracee stopped for cgroup hook; register in parkedTracees
-		// so ResumePID (via handleResumeRequest) can find and resume it.
-	} else if t.prefilterActive {
-		err = unix.PtraceCont(tid, 0)
-	} else {
-		err = unix.PtraceSyscall(tid, 0)
-	}
-	if err != nil {
-		unix.PtraceDetach(tid)
-		t.metrics.IncAttachFailure("other")
-		return fmt.Errorf("restart tid %d: %w", tid, err)
-	}
-
+	// Open MemFD and create TraceeState BEFORE injection and resume.
+	// The injection engine needs TraceeState (for scratch page) and MemFD
+	// (for register read/write during injectSyscall).
 	memFD := -1
-	fd, err := unix.Open(fmt.Sprintf("/proc/%d/mem", tid), unix.O_RDWR, 0)
-	if err != nil {
+	if fd, openErr := unix.Open(fmt.Sprintf("/proc/%d/mem", tid), unix.O_RDWR, 0); openErr != nil {
 		fd, _ = unix.Open(fmt.Sprintf("/proc/%d/mem", tid), unix.O_RDONLY, 0)
+		memFD = fd
+	} else {
+		memFD = fd
 	}
-	memFD = fd
 
 	t.mu.Lock()
 	t.tracees[tid] = &TraceeState{
@@ -145,6 +135,44 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 	}
 	t.metrics.SetTraceeCount(len(t.tracees))
 	t.mu.Unlock()
+
+	// Mark for deferred seccomp prefilter injection on the first syscall stop.
+	// Injection can't happen here (interrupt stop — RIP is arbitrary, not at
+	// a syscall boundary). The tracer's handleSyscallStop will check
+	// PendingPrefilter and inject on the first syscall entry.
+	if t.cfg.SeccompPrefilter && opts.sessionID != "" {
+		t.mu.Lock()
+		if s := t.tracees[tid]; s != nil {
+			s.PendingPrefilter = true
+		}
+		t.mu.Unlock()
+	}
+
+	// Resume the tracee (unless keepStopped for cgroup hook).
+	// Always use PtraceSyscall here — HasPrefilter is never true at attach
+	// time (injection is deferred to the first syscall stop).
+	var resumeErr error
+	if opts.keepStopped {
+		// Already registered in parkedTracees above.
+	} else {
+		resumeErr = unix.PtraceSyscall(tid, 0)
+	}
+	if resumeErr != nil {
+		// Rollback: clean up TraceeState and MemFD on resume failure
+		t.mu.Lock()
+		if s := t.tracees[tid]; s != nil {
+			if s.MemFD >= 0 {
+				unix.Close(s.MemFD)
+			}
+			delete(t.tracees, tid)
+			delete(t.parkedTracees, tid)
+			t.metrics.SetTraceeCount(len(t.tracees))
+		}
+		t.mu.Unlock()
+		unix.PtraceDetach(tid)
+		t.metrics.IncAttachFailure("other")
+		return fmt.Errorf("restart tid %d: %w", tid, resumeErr)
+	}
 
 	return nil
 }
