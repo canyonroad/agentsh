@@ -679,28 +679,22 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 
 // handleSyscallStop handles SIGTRAP|0x80 stops (TRACESYSGOOD mode).
 func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
-	// Deferred seccomp prefilter injection: inject on the first syscall stop
-	// (not at attach time, where RIP is arbitrary and injectSyscall would fail).
-	// After injection, fall through to normal syscall handling so the current
-	// syscall is still evaluated by policy (no enforcement gap).
+	// Deferred seccomp prefilter injection: inject on the first syscall EXIT
+	// (not entry — injectFromEntry replaces the current syscall, which would
+	// drop the tracee's first real syscall). At exit, the syscall already
+	// completed, so injection is safe.
 	t.mu.Lock()
 	state := t.tracees[tid]
-	if state != nil && state.PendingPrefilter {
+	if state != nil && state.PendingPrefilter && state.InSyscall {
+		// We're at a syscall entry. Wait for the exit.
+		// (InSyscall will be toggled by the normal handling below.)
+	} else if state != nil && state.PendingPrefilter && !state.InSyscall {
+		// We're at a syscall exit — safe to inject.
 		state.PendingPrefilter = false
-		// Mark as entering syscall so injectSyscall uses the correct
-		// entry-stop protocol (the first syscall stop is always an entry).
-		prevInSyscall := state.InSyscall
-		state.InSyscall = true
 		t.mu.Unlock()
 		if err := t.injectSeccompFilter(tid); err != nil {
 			slog.Warn("seccomp prefilter injection failed, falling back to TRACESYSGOOD",
 				"tid", tid, "error", err)
-			// Restore InSyscall on failure so entry/exit tracking stays correct
-			t.mu.Lock()
-			if s := t.tracees[tid]; s != nil {
-				s.InSyscall = prevInSyscall
-			}
-			t.mu.Unlock()
 		} else {
 			t.mu.Lock()
 			if s := t.tracees[tid]; s != nil {
@@ -708,8 +702,12 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 			}
 			t.mu.Unlock()
 		}
-		// Fall through to normal syscall handling below — do NOT return.
-		// The current syscall still needs policy evaluation.
+		// Resume — the tracee will now generate PTRACE_EVENT_SECCOMP stops.
+		t.allowSyscall(tid)
+		return
+	}
+	if state != nil && !state.PendingPrefilter {
+		t.mu.Unlock()
 	} else {
 		t.mu.Unlock()
 	}
@@ -818,6 +816,7 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	if state != nil {
 		tgid = state.TGID
 		state.InSyscall = true
+		state.LastNr = nr
 	}
 	t.mu.Unlock()
 	if tgid != 0 {
