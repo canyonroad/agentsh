@@ -427,14 +427,17 @@ func (t *Tracer) Implementation() string {
 }
 
 func (t *Tracer) ptraceOptions() int {
-	return unix.PTRACE_O_TRACECLONE |
+	opts := unix.PTRACE_O_TRACECLONE |
 		unix.PTRACE_O_TRACEFORK |
 		unix.PTRACE_O_TRACEVFORK |
 		unix.PTRACE_O_TRACEEXEC |
 		unix.PTRACE_O_TRACEEXIT |
 		unix.PTRACE_O_EXITKILL |
-		unix.PTRACE_O_TRACESECCOMP |
 		unix.PTRACE_O_TRACESYSGOOD
+	if t.cfg.SeccompPrefilter {
+		opts |= unix.PTRACE_O_TRACESECCOMP
+	}
+	return opts
 }
 
 func (t *Tracer) getRegs(tid int) (Regs, error) {
@@ -702,11 +705,18 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		state.PendingPrefilter = false
 		// Mark as entering syscall so injectSyscall uses the correct
 		// entry-stop protocol (the first syscall stop is always an entry).
+		prevInSyscall := state.InSyscall
 		state.InSyscall = true
 		t.mu.Unlock()
 		if err := t.injectSeccompFilter(tid); err != nil {
 			slog.Warn("seccomp prefilter injection failed, falling back to TRACESYSGOOD",
 				"tid", tid, "error", err)
+			// Restore InSyscall on failure so entry/exit tracking stays correct
+			t.mu.Lock()
+			if s := t.tracees[tid]; s != nil {
+				s.InSyscall = prevInSyscall
+			}
+			t.mu.Unlock()
 		} else {
 			t.mu.Lock()
 			if s := t.tracees[tid]; s != nil {
