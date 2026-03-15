@@ -5,7 +5,10 @@ package ptrace
 import "testing"
 
 func TestPrefilterBPFNonEmpty(t *testing.T) {
-	prog := buildPrefilterBPF()
+	prog, err := buildPrefilterBPF()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(prog) == 0 {
 		t.Fatal("buildPrefilterBPF returned empty filter")
 	}
@@ -13,7 +16,10 @@ func TestPrefilterBPFNonEmpty(t *testing.T) {
 
 func TestPrefilterBPFInstructionCount(t *testing.T) {
 	syscalls := tracedSyscallNumbers()
-	prog := buildPrefilterBPF()
+	prog, err := buildPrefilterBPF()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// 4 header instructions + len(syscalls) comparisons + 2 return instructions.
 	want := 4 + len(syscalls) + 2
@@ -25,7 +31,10 @@ func TestPrefilterBPFInstructionCount(t *testing.T) {
 
 func TestPrefilterBPFContainsAllSyscalls(t *testing.T) {
 	syscalls := tracedSyscallNumbers()
-	prog := buildPrefilterBPF()
+	prog, err := buildPrefilterBPF()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Collect all K values from JEQ instructions.
 	jeqValues := make(map[uint32]bool)
@@ -47,7 +56,10 @@ func TestPrefilterBPFContainsAllSyscalls(t *testing.T) {
 }
 
 func TestPrefilterBPFArchCheck(t *testing.T) {
-	prog := buildPrefilterBPF()
+	prog, err := buildPrefilterBPF()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// First instruction must load the architecture field.
 	if prog[0].Code != bpfLD|bpfW|bpfABS || prog[0].K != offsetArch {

@@ -3,6 +3,7 @@
 package ptrace
 
 import (
+	"fmt"
 	"runtime"
 
 	"golang.org/x/sys/unix"
@@ -32,7 +33,7 @@ const (
 // buildPrefilterBPF generates a seccomp-BPF filter that returns
 // SECCOMP_RET_TRACE for syscalls the tracer handles and
 // SECCOMP_RET_ALLOW for everything else.
-func buildPrefilterBPF() []unix.SockFilter {
+func buildPrefilterBPF() ([]unix.SockFilter, error) {
 	var auditArch uint32
 	switch runtime.GOARCH {
 	case "amd64":
@@ -40,10 +41,7 @@ func buildPrefilterBPF() []unix.SockFilter {
 	case "arm64":
 		auditArch = auditArchAarch64
 	default:
-		// Unsupported architecture: allow everything.
-		return []unix.SockFilter{
-			{Code: bpfRET | bpfK, K: seccompRetAllow},
-		}
+		return nil, fmt.Errorf("seccomp prefilter: unsupported architecture %s", runtime.GOARCH)
 	}
 
 	syscalls := tracedSyscallNumbers()
@@ -91,5 +89,5 @@ func buildPrefilterBPF() []unix.SockFilter {
 	// Matched: trace.
 	prog = append(prog, unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetTrace})
 
-	return prog
+	return prog, nil
 }

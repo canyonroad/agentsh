@@ -168,6 +168,17 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 		}
 	}
 	if err != nil {
+		// Rollback: clean up TraceeState and MemFD on resume failure
+		t.mu.Lock()
+		if s := t.tracees[tid]; s != nil {
+			if s.MemFD >= 0 {
+				unix.Close(s.MemFD)
+			}
+			delete(t.tracees, tid)
+			delete(t.parkedTracees, tid)
+			t.metrics.SetTraceeCount(len(t.tracees))
+		}
+		t.mu.Unlock()
 		unix.PtraceDetach(tid)
 		t.metrics.IncAttachFailure("other")
 		return fmt.Errorf("restart tid %d: %w", tid, err)
