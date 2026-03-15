@@ -694,6 +694,8 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 	// Deferred seccomp prefilter injection: inject on the first syscall stop
 	// (not at attach time, where RIP is arbitrary and injectSyscall would fail).
+	// After injection, fall through to normal syscall handling so the current
+	// syscall is still evaluated by policy (no enforcement gap).
 	t.mu.Lock()
 	state := t.tracees[tid]
 	if state != nil && state.PendingPrefilter {
@@ -709,12 +711,11 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 			}
 			t.mu.Unlock()
 		}
-		// Resume — if injection succeeded, the tracee now has the filter and
-		// will generate PTRACE_EVENT_SECCOMP stops going forward.
-		t.allowSyscall(tid)
-		return
+		// Fall through to normal syscall handling below — do NOT return.
+		// The current syscall still needs policy evaluation.
+	} else {
+		t.mu.Unlock()
 	}
-	t.mu.Unlock()
 
 	t.mu.Lock()
 	state = t.tracees[tid]

@@ -93,6 +93,10 @@ func (t *Tracer) injectSeccompFilter(tid int) error {
 	}
 
 	// Inject prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0).
+	// Note: PR_SET_NO_NEW_PRIVS is irreversible — it persists even if the
+	// subsequent seccomp() call fails. This is acceptable for agentsh
+	// workloads (sandboxed agent commands should not escalate privileges;
+	// the non-ptrace seccomp wrapper path also sets this flag).
 	ret, err := t.injectSyscall(tid, savedRegs, unix.SYS_PRCTL,
 		prSetNoNewPrivs, 1, 0, 0, 0, 0)
 	if err != nil {
