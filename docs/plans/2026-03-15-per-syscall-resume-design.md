@@ -39,9 +39,10 @@ New function, derived from actual exit handlers in the codebase:
 ```go
 func needsExitStop(nr int) bool {
     switch nr {
-    case unix.SYS_READ, unix.SYS_PREAD64,  // handleReadExit (TracerPid masking)
-         unix.SYS_OPENAT, unix.SYS_OPENAT2, // handleOpenatExit (fd tracking)
-         unix.SYS_CONNECT:                   // handleConnectExit (TLS fd watch)
+    case unix.SYS_READ, unix.SYS_PREAD64,      // handleReadExit (TracerPid masking)
+         unix.SYS_OPENAT, unix.SYS_OPENAT2,     // handleOpenatExit (fd tracking)
+         unix.SYS_CONNECT,                       // handleConnectExit (TLS fd watch)
+         unix.SYS_EXECVE, unix.SYS_EXECVEAT:     // exec failure needs exit to reset InSyscall
         return true
     }
     return false
@@ -50,10 +51,11 @@ func needsExitStop(nr int) bool {
 
 Not included:
 - `close` — entry-only handler (`handleClose`)
-- `execve`/`execveat` — uses `PTRACE_EVENT_EXEC` (fires with `PtraceCont`)
 - `write` — entry-only for TLS SNI rewrite
 - `sendto` — entry-only for DNS redirect
 - All file/signal/network syscalls — entry-only policy evaluation
+
+Note on execve: successful exec generates `PTRACE_EVENT_EXEC` (fires with `PtraceCont`, resets state via `handleExecEvent`). Failed exec needs the exit stop to reset `InSyscall` — without it, the next seccomp entry would be misclassified as exit. So execve is in the exit-needing set.
 
 ### `TraceeState`
 
@@ -157,7 +159,7 @@ func (t *Tracer) resumeTracee(tid int, sig int) {
 
 - **Benchmark**: re-run 4-mode bench. Target: ptrace+prefilter within 2-3x of baseline (down from 8-40x)
 - **Integration**: `make ptrace-test` — all 76 tests pass
-- **Regression**: TracerPid masking test (`TestIntegration_TracerPidMasked`) — depends on read exit handler
-- **Regression**: DNS redirect test (`TestIntegration_DNSConnectRedirect`) — depends on connect exit handler
-- **Regression**: File redirect test — depends on openat entry (not exit)
-- **Unit**: verify `needsExitStop` returns true for exactly the 5 syscalls
+- **Regression — exit handlers**: TracerPid masking (`TestIntegration_TracerPidMasked`), DNS redirect (`TestIntegration_DNSConnectRedirect`), connect redirect (`TestIntegration_ConnectRedirect`) — depend on read/connect exit handlers
+- **Regression — deny/redirect**: exec deny (`TestIntegration_ExecveDeny`), file deny (`TestIntegration_FileDeny`), exec redirect — use `denySyscall`/`redirectExec` which bypass `allowSyscall` and always use `PtraceSyscall`
+- **Regression — exec**: successful exec (`TestIntegration_ExecveAllow`) — state alignment after `PTRACE_EVENT_EXEC` with `PtraceSyscall` for exec exit
+- **Unit**: verify `needsExitStop` returns true for exactly the 7 syscalls (read, pread64, openat, openat2, connect, execve, execveat)
