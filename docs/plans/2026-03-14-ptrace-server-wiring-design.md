@@ -25,30 +25,33 @@ Wire the existing `ptrace.Tracer` into the agentsh server so that when `sandbox.
 - `internal/api/wrap_linux.go` — accept PID instead of notify fd
 - `internal/api/ptrace_handlers.go` — new file, adapter handlers
 - `internal/api/process_linux.go` — tracer-aware pause/resume
-- `internal/ptrace/tracer.go` — `WaitAttached`, `ResumePID`, `AttachOption`
-- `internal/ptrace/attach.go` — propagate `attachOpts` to `TraceeState`
-- `internal/config/ptrace.go` — mutual exclusion validation
-- `internal/server/server.go` — plumb `App.Close()` into server shutdown
-- `internal/cli/wrap_linux.go` — ptrace-mode branch in `platformSetupWrap`
+- `internal/ptrace/tracer.go` — `attachQueue` type change, `WaitAttached`, `ResumePID`, `AttachOption`
+- `internal/ptrace/attach.go` — propagate `attachOpts` to `TraceeState`, `keepStopped` support
+- `internal/config/config.go` — mutual exclusion validation in `ApplyDefaults` / validation path
+- `internal/server/server.go` — store `App` reference, plumb `App.Close()` into both `Run()` shutdown and `Close()`
+- `internal/cli/wrap.go` — guard `WrapperBinary == ""` check in `setupWrapInterception()`
+- `internal/cli/wrap_linux.go` — ptrace-mode branch in `platformSetupWrap`, return `wrapLaunchConfig`
 - `pkg/types/sessions.go` — add `PtraceMode` field to `WrapInitResponse`
 
 ---
 
 ## 2. Config Validation
 
-Add mutual exclusion validation in `internal/config/ptrace.go`:
+Add mutual exclusion validation. No `SandboxConfig.Validate()` exists, so add cross-field validation in `internal/config/config.go` in the `ApplyDefaults()` path or a new `ValidateSandbox()` function:
 
 ```go
-// In SandboxConfig.Validate() or a new cross-field validator:
-if c.Ptrace.Enabled && c.Seccomp.Execve.Enabled {
-    return fmt.Errorf("sandbox.ptrace and sandbox.seccomp.execve are mutually exclusive")
-}
-if c.Ptrace.Enabled && c.UnixSockets.Enabled {
-    return fmt.Errorf("sandbox.ptrace and sandbox.unix_sockets are mutually exclusive")
+func (c *SandboxConfig) Validate() error {
+    if c.Ptrace.Enabled && c.Seccomp.Execve.Enabled {
+        return fmt.Errorf("sandbox.ptrace and sandbox.seccomp.execve are mutually exclusive")
+    }
+    if c.Ptrace.Enabled && c.UnixSockets.Enabled != nil && *c.UnixSockets.Enabled {
+        return fmt.Errorf("sandbox.ptrace and sandbox.unix_sockets are mutually exclusive")
+    }
+    return c.Ptrace.Validate()
 }
 ```
 
-This prevents both interception mechanisms from being active simultaneously, which would cause `PTRACE_TRACEME` / `PTRACE_SEIZE` conflicts and duplicate syscall handling.
+Note: `UnixSockets.Enabled` is `*bool` (pointer), so it must be dereferenced.
 
 Note: `MaskTracerPid` config validation currently rejects any value other than `"off"`. The tracer's `MaskTracerPid` field should be set to `false` unconditionally until that validation is relaxed in a future change.
 
@@ -110,13 +113,25 @@ func (a *App) Close() {
 }
 ```
 
-Plumb this into the server lifecycle. `Server` currently does not hold a reference to `App` — it only calls `app.Router()` to get an `http.Handler`. To fix this:
+Plumb this into the server lifecycle. `Server` currently does not hold a reference to `App` — `New()` creates `App` locally and only calls `app.Router()`. To fix:
+
+1. Store the `App` on the `Server` struct:
 
 ```go
-// server.go — add App reference
+// server.go
 type Server struct {
     // ... existing fields ...
     app *api.App  // for lifecycle management
+}
+```
+
+2. Call `App.Close()` in **both** the `Run()` graceful shutdown path (select-based SIGTERM handler, lines ~706-743) **and** the `Server.Close()` method (line ~746). The `Run()` shutdown path calls `httpServer.Shutdown()` directly without going through `Server.Close()`, so both paths need coverage:
+
+```go
+// In Run() shutdown path:
+s.httpServer.Shutdown(shutdownCtx)
+if s.app != nil {
+    s.app.Close()
 }
 
 // In Server.Close():
@@ -152,34 +167,56 @@ This struct implements all four ptrace handler interfaces. On each syscall event
 1. Reads `SessionID` from the event context (set during `AttachPID`)
 2. Looks up the session via `sessions.Get(sessionID)`
 3. Gets the session's policy engine via `s.PolicyEngine()` (returns `*policy.Engine`)
-4. Evaluates the policy using the real API: `pe.CheckCommand()`, `pe.CheckFile()`, `pe.CheckNetwork()`
+4. Evaluates the policy using the actual API: `pe.CheckCommand()` returns `policy.PreCheckResult`
 5. Emits an audit event to the store
 6. Returns allow/deny/redirect to the tracer
 
-Example for exec:
+Example for exec — translating between `policy.PreCheckResult` and `ptrace.ExecResult`:
 
 ```go
 func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecContext) ptrace.ExecResult {
     s, ok := r.sessions.Get(ec.SessionID)
     if !ok {
-        return ptrace.ExecResult{Action: ptrace.Deny}  // unknown session = deny
+        // Unknown session — deny with EACCES
+        return ptrace.ExecResult{Allow: false, Errno: int32(syscall.EACCES)}
     }
     pe := s.PolicyEngine()
-    result := pe.CheckCommand(ec.Filename, ec.Argv)
+    pcr := pe.CheckCommand(ec.Filename, ec.Argv)
     // Emit audit event
     r.store.Record(...)
-    switch result.Decision {
-    case policy.Deny:
-        return ptrace.ExecResult{Action: ptrace.Deny}
-    case policy.Redirect:
-        return ptrace.ExecResult{Action: ptrace.Redirect, RedirectTo: result.RedirectTo}
+
+    // Translate policy decision to ptrace result.
+    // ExecResult fields (from tracer.go lines 35-42):
+    //   Action string    — "allow", "deny", "redirect"
+    //   Allow  bool      — legacy allow flag
+    //   Errno  int32     — errno to return on deny (e.g. EACCES)
+    //   StubPath string  — path to stub binary for redirect
+    //   Rule   string    — matched rule name for audit
+    switch pcr.EffectiveDecision {
+    case "deny":
+        return ptrace.ExecResult{
+            Action: "deny",
+            Allow:  false,
+            Errno:  int32(syscall.EACCES),
+            Rule:   pcr.Rule,
+        }
+    case "redirect":
+        return ptrace.ExecResult{
+            Action:   "redirect",
+            StubPath: pcr.RedirectTo.Command,
+            Rule:     pcr.Rule,
+        }
     default:
-        return ptrace.ExecResult{Action: ptrace.Allow}
+        return ptrace.ExecResult{
+            Action: "allow",
+            Allow:  true,
+            Rule:   pcr.Rule,
+        }
     }
 }
 ```
 
-Same pattern for `HandleFile`, `HandleNetwork`, `HandleSignal`. The redirect case maps to ptrace's syscall injection engine (Phase 4a).
+Same pattern for `HandleFile`, `HandleNetwork`, `HandleSignal` — each translates from the policy engine's result type to the corresponding ptrace result type. The redirect case uses ptrace's syscall injection engine (Phase 4a) via the `StubPath` mechanism.
 
 ---
 
@@ -188,50 +225,58 @@ Same pattern for `HandleFile`, `HandleNetwork`, `HandleSignal`. The redirect cas
 ### 5.1 AttachPID with Options
 
 Current signature: `func (t *Tracer) AttachPID(pid int) error`
+Current `attachQueue`: `chan int`
 
-Extend to accept metadata:
+Both must change. Introduce an `attachRequest` struct and change the channel type:
 
 ```go
-func (t *Tracer) AttachPID(pid int, opts ...AttachOption) error
+type attachRequest struct {
+    pid  int
+    opts attachOpts
+}
 
-type AttachOption func(*attachOpts)
 type attachOpts struct {
     sessionID   string
     commandID   string
-    keepStopped bool  // if true, leave tracee stopped after attach
+    keepStopped bool
 }
 
-func WithSessionID(id string) AttachOption {
-    return func(o *attachOpts) { o.sessionID = id }
-}
+type AttachOption func(*attachOpts)
 
-func WithCommandID(id string) AttachOption {
-    return func(o *attachOpts) { o.commandID = id }
-}
-
-func WithKeepStopped() AttachOption {
-    return func(o *attachOpts) { o.keepStopped = true }
-}
+func WithSessionID(id string) AttachOption { ... }
+func WithCommandID(id string) AttachOption { ... }
+func WithKeepStopped() AttachOption { ... }
 ```
 
-The `attachOpts` are sent through `attachQueue` alongside the PID. In `attachThread()` (`attach.go`), propagate to `TraceeState`:
+Change `attachQueue` from `chan int` to `chan attachRequest`:
+
+```go
+// tracer.go — field change
+attachQueue chan attachRequest  // was: chan int
+```
+
+This requires updating:
+- `AttachPID()` — builds `attachRequest`, sends to channel
+- `drainQueues()` in `Run()` — receives `attachRequest` instead of `int`
+- `attachProcess()` — accepts `attachOpts`, passes to `attachThread()`
+- `attachThread()` — uses `opts` to set `TraceeState` fields and honor `keepStopped`
+
+In `attachThread()` (`attach.go`), propagate metadata to `TraceeState`:
 
 ```go
 t.tracees[tid] = &TraceeState{
     TID:       tid,
     TGID:      tgid,
-    SessionID: opts.sessionID,   // NEW
-    CommandID: opts.commandID,   // NEW
+    SessionID: opts.sessionID,   // already exists on TraceeState, currently unused at attach time
+    CommandID: opts.commandID,   // NEW field to add
     Attached:  time.Now(),
     // ... existing fields ...
 }
 ```
 
-Add `CommandID string` field to `TraceeState`.
+Note: `TraceeState` already has a `SessionID` field (set during child inheritance in `handleNewChild`). Only `CommandID` needs to be added.
 
-When `keepStopped` is true, `attachThread` skips the final `PtraceSyscall`/`PtraceCont` call, leaving the tracee stopped after `PTRACE_SETOPTIONS`. This is needed for the cgroup hook window.
-
-All child processes forked from this PID inherit the same session/command IDs via existing process tree tracking.
+When `keepStopped` is true, `attachThread` skips the final `PtraceSyscall`/`PtraceCont` call (lines 106-115 of attach.go), leaving the tracee in ptrace-stop state after `PTRACE_SETOPTIONS`. The tracee is still registered in `t.tracees` so the event loop knows about it, but no events will arrive from it until `ResumePID` is called. The event loop's `Wait4(-1, WNOHANG)` will simply not see this PID — it's stopped, not delivering events, which is correct. The `WaitAttached` channel signals completion so the caller knows the tracee is ready.
 
 ### 5.2 WaitAttached
 
@@ -239,7 +284,9 @@ All child processes forked from this PID inherit the same session/command IDs vi
 func (t *Tracer) WaitAttached(pid int) error
 ```
 
-Implementation: `AttachPID` creates a per-PID channel stored in a `sync.Map` on the tracer. When `attachThread` completes (after seize + interrupt + set options), it signals this channel. `WaitAttached` blocks on the channel. This is safe because `WaitAttached` runs on the API goroutine, not the tracer's locked OS thread.
+Implementation: `AttachPID` creates a per-PID channel stored in a `sync.Map` on the tracer (`t.attachDone sync.Map`). When `attachThread` completes (after seize + interrupt + set options + tracee state registration), it loads and signals this channel. `WaitAttached` blocks on the channel, then deletes the entry from the map (cleanup). This is safe because `WaitAttached` runs on the API goroutine, not the tracer's locked OS thread.
+
+Error cases: if `attachThread` fails (e.g., process exited before seize), it signals the channel with an error. `WaitAttached` returns this error. If `WaitAttached` is never called, a background sweep (or GC finalizer) cleans up orphaned channels after a timeout.
 
 ### 5.3 ResumePID
 
@@ -247,7 +294,7 @@ Implementation: `AttachPID` creates a per-PID channel stored in a `sync.Map` on 
 func (t *Tracer) ResumePID(pid int) error
 ```
 
-Implementation: sends a resume request through a channel to the tracer's event loop. The event loop calls `PtraceSyscall` (or `PtraceCont`) on the tracee. This must happen on the tracer's locked OS thread, not the caller's goroutine, because ptrace operations must be performed by the thread that owns the tracee.
+Implementation: sends a resume request through the existing `resumeQueue chan resumeRequest` to the tracer's event loop. The `resumeRequest` struct currently has `TID int, Allow bool, Errno int` — this is used by `ParkTracee`/`handleResumeRequest` for policy approval parks. For the keepStopped-resume case, reuse this queue with `Allow: true, Errno: 0`, which causes `handleResumeRequest` to call `PtraceSyscall` on the tracee. This works because the resume-from-park path and resume-from-keepStopped path both need the same operation: `PtraceSyscall(tid, 0)`.
 
 ---
 
@@ -295,7 +342,7 @@ if tracer != nil {
 }
 ```
 
-**Race window note**: Between `cmd.Start()` and `PTRACE_SEIZE`, the process runs briefly untraced. With seccomp prefilter in `children` mode, the tracer auto-attaches to fork children via `PTRACE_O_TRACECLONE`. For the initial `exec` call, this window is typically <1ms and the process hasn't reached `main()` yet. If this proves insufficient, a pipe-based barrier can be added in a follow-up.
+**Race window note**: Between `cmd.Start()` and `PTRACE_SEIZE`, the process runs briefly untraced. Any pre-main file or network activity would be untraced during this window. On a loaded system this could exceed 1ms. Mitigation: a pipe-based barrier can be added in a follow-up — the child blocks on reading from a pipe, the parent seizes it, then closes the pipe to unblock. For Phase 1 wiring, the race is acceptable since the seccomp prefilter (in `children` mode) auto-attaches to fork children, and the initial exec target is typically a known-safe binary path.
 
 ---
 
@@ -329,38 +376,62 @@ The server creates a Unix socket listener. Instead of receiving a seccomp notify
 **Server accept** — new `acceptPtracePID()` in `wrap_linux.go`:
 
 ```go
-func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, sessionID string) {
-    conn, _ := listener.Accept()
-    pid := getPeerPID(conn)
-    a.ptraceTracer.AttachPID(pid, ptrace.WithSessionID(sessionID))
-    a.ptraceTracer.WaitAttached(pid)
+func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, sessionID string) error {
+    conn, err := listener.Accept()
+    if err != nil {
+        return fmt.Errorf("accept ptrace PID: %w", err)
+    }
+    pid, err := getPeerPID(conn)
+    if err != nil || pid <= 0 {
+        conn.Close()
+        return fmt.Errorf("get peer PID: %w", err)
+    }
+    if err := a.ptraceTracer.AttachPID(pid, ptrace.WithSessionID(sessionID)); err != nil {
+        conn.Close()
+        return fmt.Errorf("attach PID %d: %w", pid, err)
+    }
+    if err := a.ptraceTracer.WaitAttached(pid); err != nil {
+        conn.Close()
+        return fmt.Errorf("wait attached PID %d: %w", pid, err)
+    }
     a.ptraceTracer.ResumePID(pid)
     // Keep conn open — when shell exits, connection closes for detection
+    return nil
 }
 ```
 
-**CLI side** — in `internal/cli/wrap_linux.go`, `platformSetupWrap()` branches on ptrace mode:
+**CLI side** — in `internal/cli/wrap_linux.go`, `platformSetupWrap()` branches on ptrace mode. Instead of calling `syscall.Exec` directly (which would replace the process and bypass `runWrap()`'s signal forwarding and exit code handling), return a `wrapLaunchConfig` that launches the shell without the wrapper:
 
 ```go
-func platformSetupWrap(...) {
+func platformSetupWrap(...) (*wrapLaunchConfig, error) {
     if wrapResp.PtraceMode {
-        // Skip agentsh-unixwrap wrapper, socket pair creation, ACK handshake.
         // Connect to server socket for PID handshake via SO_PEERCRED.
-        conn, _ := net.Dial("unix", wrapResp.NotifySocket)
-        defer conn.Close()
-        // Exec the agent shell directly — no wrapper
-        syscall.Exec(shellPath, shellArgs, env)
-        return
+        conn, err := net.Dial("unix", wrapResp.NotifySocket)
+        if err != nil {
+            return nil, fmt.Errorf("ptrace handshake: %w", err)
+        }
+        // Return launch config that runs the shell directly (no wrapper).
+        // runWrap() will Start() this, handle signals, and Wait().
+        // The connection stays open as a keepalive.
+        return &wrapLaunchConfig{
+            command:    shellPath,
+            args:       shellArgs,
+            env:        env,
+            keepAlive:  conn,  // closed when shell exits
+        }, nil
     }
     // ... existing seccomp wrapper path (unchanged) ...
 }
 ```
 
-The existing `runWrap()` in `internal/cli/wrap.go` checks `WrapperBinary == ""` on Linux and errors. With ptrace mode, this check must be guarded:
+Note: `wrapLaunchConfig` (defined in `internal/cli/wrap.go` line ~262) may need a `keepAlive io.Closer` field for the handshake connection.
+
+**WrapperBinary guard** — the existing check in `setupWrapInterception()` (`internal/cli/wrap.go` line ~289) errors if `WrapperBinary == ""` on Linux. This fires *before* `platformSetupWrap` is called. Guard it:
 
 ```go
-if !resp.PtraceMode && runtime.GOOS == "linux" && resp.WrapperBinary == "" {
-    return fmt.Errorf("server did not provide wrapper binary")
+// In setupWrapInterception(), before calling platformSetupWrap:
+if !wrapResp.PtraceMode && runtime.GOOS == "linux" && wrapResp.WrapperBinary == "" {
+    return nil, fmt.Errorf("server returned empty wrapper binary")
 }
 ```
 
@@ -370,7 +441,7 @@ if !resp.PtraceMode && runtime.GOOS == "linux" && resp.WrapperBinary == "" {
 
 **Unit tests** — `internal/api/ptrace_handlers_test.go`:
 - Handler router with mock session manager and policy engine
-- Verify allow/deny/redirect decisions route correctly
+- Verify allow/deny/redirect decisions route correctly per actual `ExecResult`/`FileResult`/etc. field names
 - Verify audit events emitted for each decision
 
 **Integration tests** — extend `internal/ptrace/integration_test.go`:
