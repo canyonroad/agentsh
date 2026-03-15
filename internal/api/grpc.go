@@ -419,6 +419,8 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 		emit,
 		s.app.cgroupHook(req.SessionID, cmdID, limits),
 		extraCfg,
+		s.app.ptraceTracer,
+		req.SessionID,
 	)
 	_ = s.app.store.SaveOutput(stream.Context(), req.SessionID, cmdID, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc)
 

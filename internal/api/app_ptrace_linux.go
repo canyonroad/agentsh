@@ -42,7 +42,12 @@ func (a *App) initPtraceTracer() {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.ptraceTracer = tr
 	a.ptraceCancel = cancel
-	go tr.Run(ctx)
+	go func() {
+		if err := tr.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("ptrace tracer exited unexpectedly, clearing tracer to fail closed", "error", err)
+			a.ptraceTracer = nil
+		}
+	}()
 	slog.Info("ptrace tracer started", "attach_mode", cfg.AttachMode)
 }
 

@@ -312,6 +312,12 @@ func New(cfg *config.Config) (*Server, error) {
 
 	policyLoader := api.NewDefaultPolicyLoader(cfg.Policies.Dir, enforceApprovals, true)
 	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, oidcAuth, approvalsMgr, metricsCollector, policyLoader)
+	appCloser := app.Close // ensure cleanup on error paths below
+	defer func() {
+		if appCloser != nil {
+			appCloser()
+		}
+	}()
 
 	// Initialize package checker (optional).
 	if cfg.PackageChecks.Enabled {
@@ -535,6 +541,7 @@ unixDone:
 		srv.pprofServer = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	}
 
+	appCloser = nil // success — don't close app on defer
 	return srv, nil
 }
 
