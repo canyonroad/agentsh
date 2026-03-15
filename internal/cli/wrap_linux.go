@@ -27,6 +27,18 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 			return nil, fmt.Errorf("ptrace handshake: %w", err)
 		}
 
+		// Wait for server to attach and ACK. The server reads our PID via
+		// SO_PEERCRED, attaches the tracer, then sends 1 (ACK) or 0 (NACK).
+		ack := make([]byte, 1)
+		if _, err := conn.Read(ack); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("ptrace handshake: read ACK: %w", err)
+		}
+		if ack[0] != 1 {
+			conn.Close()
+			return nil, fmt.Errorf("ptrace handshake: server rejected attach")
+		}
+
 		env := os.Environ()
 		env = append(env,
 			fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),

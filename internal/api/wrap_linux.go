@@ -186,6 +186,7 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socket
 
 	pid := getConnPeerPID(unixConn)
 	if pid <= 0 {
+		conn.Write([]byte{0}) // NACK
 		conn.Close()
 		slog.Error("ptrace wrap: invalid peer PID", "pid", pid, "session_id", sessionID)
 		return
@@ -193,15 +194,17 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socket
 
 	_, attachErr := ptraceExecAttach(a.ptraceTracer, pid, sessionID, "", false)
 	if attachErr != nil {
+		conn.Write([]byte{0}) // NACK
 		conn.Close()
 		slog.Error("ptrace wrap: attach failed", "pid", pid, "error", attachErr, "session_id", sessionID)
 		return
 	}
 
+	// ACK: attach succeeded, CLI can proceed
+	conn.Write([]byte{1})
 	slog.Info("ptrace wrap: attached to shell", "pid", pid, "session_id", sessionID)
 
 	// Keep connection open until context is cancelled or shell exits.
-	// When the shell exits, the connection closes and Read returns.
 	go func() {
 		defer conn.Close()
 		buf := make([]byte, 1)
