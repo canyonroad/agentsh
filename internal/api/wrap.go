@@ -66,6 +66,48 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		return types.WrapInitResponse{}, http.StatusBadRequest, errWrapNotSupported
 	}
 
+	// Ptrace mode: skip seccomp wrapper entirely. Create a socket for PID handshake.
+	if a.ptraceTracer != nil {
+		notifyDir, err := os.MkdirTemp("", "agentsh-wrap-*")
+		if err != nil {
+			return types.WrapInitResponse{}, http.StatusInternalServerError, err
+		}
+		if err := os.Chmod(notifyDir, 0700); err != nil {
+			os.RemoveAll(notifyDir)
+			return types.WrapInitResponse{}, http.StatusInternalServerError, err
+		}
+		safeID := filepath.Base(sessionID)
+		notifySocketPath := filepath.Join(notifyDir, "ptrace-"+safeID+".sock")
+
+		listener, err := net.Listen("unix", notifySocketPath)
+		if err != nil {
+			os.RemoveAll(notifyDir)
+			return types.WrapInitResponse{}, http.StatusInternalServerError, err
+		}
+
+		go a.acceptPtracePID(ctx, listener, notifySocketPath, sessionID)
+
+		ev := types.Event{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now().UTC(),
+			Type:      "wrap_init",
+			SessionID: sessionID,
+			Fields: map[string]any{
+				"ptrace_mode":   true,
+				"agent_command": req.AgentCommand,
+				"agent_args":    req.AgentArgs,
+				"notify_socket": notifySocketPath,
+			},
+		}
+		_ = a.store.AppendEvent(ctx, ev)
+		a.broker.Publish(ev)
+
+		return types.WrapInitResponse{
+			PtraceMode:   true,
+			NotifySocket: notifySocketPath,
+		}, http.StatusOK, nil
+	}
+
 	// Resolve wrapper binary
 	wrapperBin := strings.TrimSpace(a.cfg.Sandbox.UnixSockets.WrapperBin)
 	if wrapperBin == "" {

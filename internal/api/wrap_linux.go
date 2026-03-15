@@ -163,3 +163,56 @@ func getConnPeerPID(conn *net.UnixConn) int {
 	})
 	return pid
 }
+
+// acceptPtracePID accepts a connection on the notify socket, extracts the peer
+// PID via SO_PEERCRED, and attaches the ptrace tracer. The connection is kept
+// open as a keepalive — when the shell exits, the connection closes.
+func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string) {
+	defer listener.Close()
+	defer os.RemoveAll(filepath.Dir(socketPath))
+
+	conn, err := listener.Accept()
+	if err != nil {
+		slog.Error("ptrace wrap: accept failed", "error", err, "session_id", sessionID)
+		return
+	}
+
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		conn.Close()
+		slog.Error("ptrace wrap: expected Unix connection", "type", fmt.Sprintf("%T", conn), "session_id", sessionID)
+		return
+	}
+
+	pid := getConnPeerPID(unixConn)
+	if pid <= 0 {
+		conn.Close()
+		slog.Error("ptrace wrap: invalid peer PID", "pid", pid, "session_id", sessionID)
+		return
+	}
+
+	_, attachErr := ptraceExecAttach(a.ptraceTracer, pid, sessionID, "", false)
+	if attachErr != nil {
+		conn.Close()
+		slog.Error("ptrace wrap: attach failed", "pid", pid, "error", attachErr, "session_id", sessionID)
+		return
+	}
+
+	slog.Info("ptrace wrap: attached to shell", "pid", pid, "session_id", sessionID)
+
+	// Keep connection open until context is cancelled or shell exits.
+	// When the shell exits, the connection closes and Read returns.
+	go func() {
+		defer conn.Close()
+		buf := make([]byte, 1)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				conn.Read(buf) // blocks until close or error
+				return
+			}
+		}
+	}()
+}
