@@ -124,7 +124,15 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		return 2, []byte{}, msg, 0, int64(len(msg)), false, false, types.ExecResources{}, nil
 	}
 
-	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
+	// When ptrace is active, use exec.Command (not CommandContext) because we
+	// skip cmd.Wait() — CommandContext starts an internal goroutine that needs
+	// Wait() for cleanup. We handle timeout/cancellation via killProcessGroup.
+	var cmd *exec.Cmd
+	if tracer != nil {
+		cmd = exec.Command(req.Command, req.Args...)
+	} else {
+		cmd = exec.CommandContext(ctx, req.Command, req.Args...)
+	}
 	slog.Debug("exec command created", "command", req.Command, "args", req.Args, "session_id", s.ID)
 	if ns := s.NetNSName(); ns != "" {
 		// Run inside the session network namespace (Linux only; requires iproute2).

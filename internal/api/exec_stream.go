@@ -266,10 +266,19 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		return 2, []byte{}, msg, 0, int64(len(msg)), false, false, types.ExecResources{}, nil
 	}
 
-	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
+	var cmd *exec.Cmd
+	if tracer != nil {
+		cmd = exec.Command(req.Command, req.Args...)
+	} else {
+		cmd = exec.CommandContext(ctx, req.Command, req.Args...)
+	}
 	if ns := s.NetNSName(); ns != "" {
 		allArgs := append([]string{"netns", "exec", ns, req.Command}, req.Args...)
-		cmd = exec.CommandContext(ctx, "ip", allArgs...)
+		if tracer != nil {
+			cmd = exec.Command("ip", allArgs...)
+		} else {
+			cmd = exec.CommandContext(ctx, "ip", allArgs...)
+		}
 	} else if strings.TrimSpace(req.Argv0) != "" && len(cmd.Args) > 0 {
 		cmd.Args[0] = req.Argv0
 	}
