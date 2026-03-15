@@ -110,9 +110,11 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 	if opts.keepStopped {
 		// Leave tracee stopped for cgroup hook; register in parkedTracees
 		// so ResumePID (via handleResumeRequest) can find and resume it.
-	} else if t.prefilterActive {
-		err = unix.PtraceCont(tid, 0)
 	} else {
+		// HasPrefilter is always false for freshly attached threads
+		// (injection hasn't happened yet), so this takes the PtraceSyscall
+		// path. When injection is wired in, HasPrefilter will be set to
+		// true and this will use PtraceCont instead.
 		err = unix.PtraceSyscall(tid, 0)
 	}
 	if err != nil {

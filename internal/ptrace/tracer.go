@@ -160,6 +160,7 @@ type TraceeState struct {
 	PendingReturnOverride int64 // force return value to this on syscall exit
 	HasPendingReturn      bool  // whether PendingReturnOverride is active
 	PendingInterrupt      bool
+	HasPrefilter     bool // true if seccomp prefilter is installed for this tracee
 	IsVforkChild     bool
 	SuppressInitialStop bool // suppress initial SIGSTOP from auto-trace
 	PendingExecStubFD  int // fd injected for exec redirect; cleaned up on exec failure (-1 = none)
@@ -226,7 +227,6 @@ type Tracer struct {
 	cfg             TracerConfig
 	metrics         Metrics
 	processTree     *ProcessTree
-	prefilterActive bool
 
 	attachQueue chan attachRequest
 	resumeQueue chan resumeRequest
@@ -426,20 +426,14 @@ func (t *Tracer) Implementation() string {
 }
 
 func (t *Tracer) ptraceOptions() int {
-	opts := unix.PTRACE_O_TRACECLONE |
+	return unix.PTRACE_O_TRACECLONE |
 		unix.PTRACE_O_TRACEFORK |
 		unix.PTRACE_O_TRACEVFORK |
 		unix.PTRACE_O_TRACEEXEC |
 		unix.PTRACE_O_TRACEEXIT |
-		unix.PTRACE_O_EXITKILL
-
-	if t.prefilterActive {
-		opts |= unix.PTRACE_O_TRACESECCOMP
-	} else {
-		opts |= unix.PTRACE_O_TRACESYSGOOD
-	}
-
-	return opts
+		unix.PTRACE_O_EXITKILL |
+		unix.PTRACE_O_TRACESECCOMP |
+		unix.PTRACE_O_TRACESYSGOOD
 }
 
 func (t *Tracer) getRegs(tid int) (Regs, error) {
@@ -450,16 +444,17 @@ func (t *Tracer) setRegs(tid int, regs Regs) error {
 	return setRegsArch(tid, regs)
 }
 
-// traceSysGood reports whether PTRACE_O_TRACESYSGOOD is active.
-// When true, syscall stops use SIGTRAP|0x80 and plain SIGTRAP is a real signal.
-func (t *Tracer) traceSysGood() bool {
-	return !t.prefilterActive
-}
-
 // allowSyscall resumes the tracee, allowing the syscall to proceed.
 func (t *Tracer) allowSyscall(tid int) {
+	t.mu.Lock()
+	hasPrefilter := false
+	if s := t.tracees[tid]; s != nil {
+		hasPrefilter = s.HasPrefilter
+	}
+	t.mu.Unlock()
+
 	var err error
-	if t.prefilterActive {
+	if hasPrefilter {
 		err = unix.PtraceCont(tid, 0)
 	} else {
 		err = unix.PtraceSyscall(tid, 0)
@@ -515,7 +510,14 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 
 // resumeTracee resumes a tracee with an optional signal to deliver.
 func (t *Tracer) resumeTracee(tid int, sig int) {
-	if t.prefilterActive {
+	t.mu.Lock()
+	hasPrefilter := false
+	if s := t.tracees[tid]; s != nil {
+		hasPrefilter = s.HasPrefilter
+	}
+	t.mu.Unlock()
+
+	if hasPrefilter {
 		unix.PtraceCont(tid, sig)
 	} else {
 		unix.PtraceSyscall(tid, sig)
@@ -950,6 +952,7 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 		existing.TGID = childTGID
 		existing.ParentPID = parent.TGID
 		existing.SessionID = parent.SessionID
+		existing.HasPrefilter = parent.HasPrefilter
 		existing.Attached = time.Now()
 	} else {
 		t.tracees[tid] = &TraceeState{
@@ -957,6 +960,7 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 			TGID:                childTGID,
 			ParentPID:           parent.TGID,
 			SessionID:           parent.SessionID,
+			HasPrefilter:        parent.HasPrefilter,
 			Attached:            time.Now(),
 			LastNr:              -1,
 			MemFD:               -1,

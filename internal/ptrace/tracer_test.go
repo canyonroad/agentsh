@@ -19,31 +19,17 @@ func TestNewTracer(t *testing.T) {
 	}
 }
 
-func TestPtraceOptions_WithPrefilter(t *testing.T) {
-	tr := &Tracer{prefilterActive: true}
+func TestPtraceOptions_AlwaysSetsBoth(t *testing.T) {
+	tr := &Tracer{}
 	opts := tr.ptraceOptions()
 	if opts&unix.PTRACE_O_EXITKILL == 0 {
 		t.Error("PTRACE_O_EXITKILL must always be set")
 	}
 	if opts&unix.PTRACE_O_TRACESECCOMP == 0 {
-		t.Error("PTRACE_O_TRACESECCOMP must be set when prefilter active")
-	}
-	if opts&unix.PTRACE_O_TRACESYSGOOD != 0 {
-		t.Error("PTRACE_O_TRACESYSGOOD must not be set when prefilter active")
-	}
-}
-
-func TestPtraceOptions_WithoutPrefilter(t *testing.T) {
-	tr := &Tracer{prefilterActive: false}
-	opts := tr.ptraceOptions()
-	if opts&unix.PTRACE_O_EXITKILL == 0 {
-		t.Error("PTRACE_O_EXITKILL must always be set")
+		t.Error("PTRACE_O_TRACESECCOMP must always be set")
 	}
 	if opts&unix.PTRACE_O_TRACESYSGOOD == 0 {
-		t.Error("PTRACE_O_TRACESYSGOOD must be set when no prefilter")
-	}
-	if opts&unix.PTRACE_O_TRACESECCOMP != 0 {
-		t.Error("PTRACE_O_TRACESECCOMP must not be set when no prefilter")
+		t.Error("PTRACE_O_TRACESYSGOOD must always be set")
 	}
 }
 
