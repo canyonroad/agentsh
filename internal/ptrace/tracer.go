@@ -696,6 +696,9 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 	} else if state != nil && state.PendingPrefilter && state.InSyscall {
 		// This is a syscall exit — safe to inject now.
 		state.PendingPrefilter = false
+		// Set InSyscall=false before injection so injectSyscall uses the
+		// correct exit-stop protocol (injectFromExit).
+		state.InSyscall = false
 		t.mu.Unlock()
 		if err := t.injectSeccompFilter(tid); err != nil {
 			slog.Warn("seccomp prefilter injection failed, falling back to TRACESYSGOOD",
@@ -977,6 +980,7 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 		existing.ParentPID = parent.TGID
 		existing.SessionID = parent.SessionID
 		existing.HasPrefilter = parent.HasPrefilter
+		existing.PendingPrefilter = parent.PendingPrefilter
 		existing.Attached = time.Now()
 	} else {
 		t.tracees[tid] = &TraceeState{
@@ -985,6 +989,7 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 			ParentPID:           parent.TGID,
 			SessionID:           parent.SessionID,
 			HasPrefilter:        parent.HasPrefilter,
+			PendingPrefilter:    parent.PendingPrefilter,
 			Attached:            time.Now(),
 			LastNr:              -1,
 			MemFD:               -1,
