@@ -536,7 +536,8 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 }
 
 // resumeTracee resumes a tracee with an optional signal to deliver.
-// Always uses PtraceSyscall to catch exit-time stops (see allowSyscall).
+// Uses PtraceCont when prefilter is active and no exit stop is needed,
+// PtraceSyscall otherwise.
 func (t *Tracer) resumeTracee(tid int, sig int) {
 	t.mu.Lock()
 	hasPrefilter := false
