@@ -167,7 +167,7 @@ This struct implements all four ptrace handler interfaces. On each syscall event
 1. Reads `SessionID` from the event context (set during `AttachPID`)
 2. Looks up the session via `sessions.Get(sessionID)`
 3. Gets the session's policy engine via `s.PolicyEngine()` (returns `*policy.Engine`)
-4. Evaluates the policy using the actual API: `pe.CheckCommand()` returns `policy.Decision`
+4. Evaluates the policy using `pe.CheckExecve(filename, argv, depth)` which returns `policy.Decision`. Uses `CheckExecve` (not `CheckCommand`) because ptrace intercepts execve at arbitrary process tree depths — `CheckCommand` hardcodes depth=0
 5. Emits an audit event to the store
 6. Returns allow/deny/redirect to the tracer
 
@@ -181,7 +181,7 @@ func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecCo
         return ptrace.ExecResult{Allow: false, Errno: int32(syscall.EACCES)}
     }
     pe := s.PolicyEngine()
-    decision := pe.CheckCommand(ec.Filename, ec.Argv)
+    decision := pe.CheckExecve(ec.Filename, ec.Argv, ec.Depth)
     // Emit audit event
     r.store.Record(...)
 
@@ -271,9 +271,10 @@ Change `attachQueue` from `chan int` to `chan attachRequest`:
 attachQueue chan attachRequest  // was: chan int
 ```
 
-This requires updating:
-- `AttachPID()` — builds `attachRequest`, sends to channel
+This requires updating all receive sites:
 - `drainQueues()` in `Run()` — receives `attachRequest` instead of `int`
+- `Run()` ECHILD fallback path (tracer.go ~line 1101) — `case req := <-t.attachQueue`
+- `Run()` tid==0 idle path (tracer.go ~line 1119) — `case req := <-t.attachQueue`
 - `attachProcess()` — accepts `attachOpts`, passes to `attachThread()`
 - `attachThread()` — uses `opts` to set `TraceeState` fields and honor `keepStopped`
 
@@ -292,7 +293,9 @@ t.tracees[tid] = &TraceeState{
 
 Note: `TraceeState` already has a `SessionID` field (set during child inheritance in `handleNewChild`). Only `CommandID` needs to be added.
 
-When `keepStopped` is true, `attachThread` skips the final `PtraceSyscall`/`PtraceCont` call (lines 106-115 of attach.go), leaving the tracee in ptrace-stop state after `PTRACE_SETOPTIONS`. The tracee is still registered in `t.tracees` so the event loop knows about it, but no events will arrive from it until `ResumePID` is called. The event loop's `Wait4(-1, WNOHANG)` will simply not see this PID — it's stopped, not delivering events, which is correct. The `WaitAttached` channel signals completion so the caller knows the tracee is ready.
+When `keepStopped` is true, `attachThread` skips the final `PtraceSyscall`/`PtraceCont` call (lines 106-115 of attach.go), leaving the tracee in ptrace-stop state after `PTRACE_SETOPTIONS`. The tracee is still registered in `t.tracees` so the event loop knows about it, but no events will arrive from it until `ResumePID` is called. The tracee is also registered in `t.parkedTracees` so that `handleResumeRequest` can find and resume it. The event loop's `Wait4(-1, WNOHANG)` will simply not see this PID — it's stopped, not delivering events, which is correct. The `WaitAttached` channel signals completion so the caller knows the tracee is ready.
+
+**Multi-thread note**: `attachProcess` iterates all threads in `/proc/<pid>/task/` and calls `attachThread` for each. With `keepStopped`, all threads get stopped and registered in `parkedTracees`. `ResumePID` must resume all threads of the TGID, not just the leader. Implementation: `ResumePID(pid)` sends a resume request for each TID that shares the TGID with `pid`. For the exec path, freshly-started processes are single-threaded, so this is a non-issue. For the wrap path, `keepStopped` is not used (see Section 7), avoiding the multi-thread complexity entirely.
 
 ### 5.2 WaitAttached
 
@@ -318,23 +321,20 @@ For `keepStopped` tracees, `attachThread` must register the tracee in `t.parkedT
 
 ## 6. Exec Path — Tracer Attachment
 
-In `core.go`, `execInSessionCore()` conditionally skips the seccomp wrapper. When ptrace is active, `extraCfg` must be `nil` to suppress all seccomp notify handler goroutines in `runCommandWithResources()`:
+In `core.go`, `execInSessionCore()` conditionally skips the seccomp wrapper. `setupSeccompWrapper` always returns a `*wrapperSetupResult` (never nil). The simplest approach is to short-circuit inside `setupSeccompWrapper` when ptrace is active:
 
 ```go
-var extraCfg *extraProcConfig
-var wrappedReq types.ExecRequest
-
-if a.ptraceTracer != nil {
-    wrappedReq = req   // no wrapper, run command directly
-    extraCfg = nil     // no seccomp notify sockets, no signal filter
-} else {
-    result := a.setupSeccompWrapper(req, id, s)
-    if result != nil {
-        wrappedReq = result.wrappedReq
-        extraCfg = result.extraCfg
+// In setupSeccompWrapper(), add early return:
+func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *session.Session) *wrapperSetupResult {
+    if a.ptraceTracer != nil {
+        // Ptrace mode: no wrapper, no seccomp notify sockets
+        return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
     }
+    // ... existing seccomp setup ...
 }
 ```
+
+This avoids rewriting the caller and keeps `extraCfg` nil, which suppresses all seccomp notify handler goroutines in `runCommandWithResources()`.
 
 In `exec.go`, `runCommandWithResources()` currently has two paths controlled by `startStopped := hook != nil`. With ptrace, this must be refactored into three paths:
 
@@ -429,9 +429,9 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, sessio
         conn.Close()
         return fmt.Errorf("wait attached PID %d: %w", pid, err)
     }
-    if err := a.ptraceTracer.ResumePID(pid); err != nil {
-        log.Printf("warn: ResumePID %d: %v", pid, err)
-    }
+    // No WithKeepStopped() and no ResumePID() — the wrap path has no cgroup hook
+    // to run while the process is stopped. attachThread resumes the tracee
+    // automatically after PTRACE_SETOPTIONS when keepStopped is false (default).
     // Keep conn open — when shell exits, connection closes for detection
     return nil
 }
