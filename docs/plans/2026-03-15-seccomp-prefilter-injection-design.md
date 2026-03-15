@@ -167,3 +167,16 @@ The per-thread approach is simpler and more robust than TSYNC:
 - **Multi-thread target**: attach to already-multithreaded process, verify each thread gets its own filter injection and `HasPrefilter = true`
 - **Partial injection failure**: simulate injection failure on some threads within a TGID, verify mixed-mode (some `PTRACE_EVENT_SECCOMP`, some `SIGTRAP|0x80`) works correctly with per-tracee resume logic
 - **Benchmark**: `make bench` baseline vs ptrace — target <5% overhead
+
+## 7. Benchmark Results (Pre-Optimization)
+
+Measured after seccomp prefilter injection is in place but before per-syscall resume optimization. `PtraceSyscall` is used uniformly, negating the prefilter's entry-filtering benefit.
+
+| Mode | Spawn (30) | File I/O (200) | Nested (10) | Deny (10) |
+|------|-----------|---------------|------------|----------|
+| baseline | 898ms | 138ms | 363ms | 132ms |
+| full (seccomp+FUSE) | 942ms (+5%) | 137ms (-1%) | 331ms (-9%) | 132ms (0%) |
+| ptrace + prefilter | 7136ms (+695%) | 3370ms (+2342%) | 15620ms (+4203%) | 120ms (-9%) |
+| ptrace no prefilter | 7298ms (+713%) | 2736ms (+1882%) | 14726ms (+3956%) | 125ms (-5%) |
+
+**Analysis**: Prefilter vs no-prefilter is nearly identical because `PtraceSyscall` traps all syscall exits regardless of BPF filter. The per-syscall `PtraceCont` optimization (Section 3 follow-up) is needed to realize the prefilter's benefit.
