@@ -32,31 +32,38 @@ Instead of calling `cmd.Wait()` for traced processes, the exec path registers an
 ## 3. Exit Channel API
 
 ```go
+type ExitReason int
+
+const (
+    ExitNormal       ExitReason = iota // process exited or was signaled (Code/Signal valid)
+    ExitVanished                       // ESRCH — process disappeared (ptrace call failed)
+    ExitTracerDown                     // tracer shut down while process was running
+)
+
 type ExitStatus struct {
     PID    int
-    Code   int            // exit code (0-255) or -1 if signaled
+    Code   int            // exit code (0-255) if Reason == ExitNormal
     Signal int            // signal number if killed, 0 otherwise
-    Rusage *unix.Rusage   // resource usage from Wait4 (CPU time, peak memory)
-    Err    error          // non-nil on tracer shutdown or internal failure
+    Reason ExitReason
+    Rusage *unix.Rusage   // resource usage from Wait4 (nil for ExitVanished/ExitTracerDown)
 }
 
 func (t *Tracer) RegisterExitNotify(pid int) <-chan ExitStatus
+func (t *Tracer) UnregisterExitNotify(pid int)
 ```
 
 `RegisterExitNotify` creates a buffered channel (size 1), stores it in `t.exitNotify sync.Map` keyed by PID (TGID), and returns the receive end.
 
 ### Registration Ordering
 
-`RegisterExitNotify` MUST be called before the process is resumed. This guarantees the channel is registered before the process can exit.
-
-For **both** keepStopped and non-keepStopped paths, `ptraceExecAttach` calls `RegisterExitNotify` between `AttachPID` and `WaitAttached`. During this window, the process is stopped by `PTRACE_INTERRUPT` (part of the attach sequence in `attachThread`), so it cannot exit. After `WaitAttached` returns, `attachThread` has already resumed the process (non-keepStopped) or registered it in `parkedTracees` (keepStopped). Either way, registration happened while the process was stopped.
+`RegisterExitNotify` MUST be called before the process can exit. The call is placed **before** `AttachPID` — this is safe because the process hasn't been attached to the tracer yet and therefore can't generate exit events through the tracer's event loop. By the time the tracer thread processes the attach request and resumes the tracee, the exit channel is already registered.
 
 Updated `ptraceExecAttach` pseudocode:
 
 ```go
 func ptraceExecAttach(tracer, pid, sessionID, commandID, keepStopped) (exitCh, resume, err) {
-    tr.AttachPID(pid, opts...)
-    exitCh = tr.RegisterExitNotify(pid)   // ← register while process is stopped
+    exitCh = tr.RegisterExitNotify(pid)   // ← register BEFORE attach (process can't exit via tracer yet)
+    tr.AttachPID(pid, opts...)            // ← enqueue (async)
     if err := tr.WaitAttached(pid); err != nil {
         tr.UnregisterExitNotify(pid)      // ← cleanup on failure
         return err
@@ -67,6 +74,8 @@ func ptraceExecAttach(tracer, pid, sessionID, commandID, keepStopped) (exitCh, r
     return exitCh, func() {}, nil         // already resumed by attachThread
 }
 ```
+
+This ordering is race-free: `RegisterExitNotify` is a simple sync.Map store (no tracer-thread involvement). The tracer thread only sees the PID after processing the `attachQueue` entry. By that time, the exit channel is guaranteed to exist.
 
 ### Cleanup on Failure
 
@@ -90,19 +99,19 @@ var rusage unix.Rusage
 tid, err := unix.Wait4(-1, &status, unix.WALL|unix.WNOHANG, &rusage)
 ```
 
-Pass both `status`, `rusage`, and `abnormalErr` through `handleStop` → `handleExit`:
+Pass both `status`, `rusage`, and `reason` through `handleStop` → `handleExit`:
 
 - `handleStop(ctx, tid, status)` → `handleStop(ctx, tid, status, &rusage)`
-- `handleExit(tid)` → `handleExit(tid int, status unix.WaitStatus, rusage *unix.Rusage, abnormalErr error)`
+- `handleExit(tid)` → `handleExit(tid int, status unix.WaitStatus, rusage *unix.Rusage, reason ExitReason)`
 
-Normal exits from `handleStop` pass `abnormalErr: nil`. ESRCH-triggered exits pass a non-nil error.
+Normal exits from `handleStop` pass `reason: ExitNormal`. ESRCH-triggered exits pass `ExitVanished`.
 
 ### Last-Thread Exit Notification
 
 Notify when the **last thread** of a TGID exits, not when the leader exits. The leader can exit before other threads (via `pthread_exit` or `exec` in a non-leader thread). The existing `lastThread` logic in `handleExit` already computes this:
 
 ```go
-func (t *Tracer) handleExit(tid int, status unix.WaitStatus, rusage *unix.Rusage, abnormalErr error) {
+func (t *Tracer) handleExit(tid int, status unix.WaitStatus, rusage *unix.Rusage, reason ExitReason) {
     t.mu.Lock()
     state := t.tracees[tid]
     var tgid int
@@ -127,8 +136,8 @@ func (t *Tracer) handleExit(tid int, status unix.WaitStatus, rusage *unix.Rusage
                 PID:    tgid,
                 Code:   exitCodeFromStatus(status),
                 Signal: signalFromStatus(status),
+                Reason: reason,
                 Rusage: rusage,
-                Err:    abnormalErr,
             }
         }
         // ... existing fd/scratch cleanup ...
@@ -138,13 +147,13 @@ func (t *Tracer) handleExit(tid int, status unix.WaitStatus, rusage *unix.Rusage
 
 ### ESRCH Call Sites
 
-The ~8 call sites that call `handleExit` on `ESRCH` errors (in `allowSyscall`, `denySyscall`, etc.) don't have a `WaitStatus` or `Rusage`. These are abnormal exits detected via failed ptrace calls, not via `Wait4`. Pass an error to indicate abnormal exit:
+The ~8 call sites that call `handleExit` on `ESRCH` errors (in `allowSyscall`, `denySyscall`, etc.) don't have a `WaitStatus` or `Rusage`. These are abnormal exits — the process vanished mid-operation. Pass `ExitVanished` reason:
 
 ```go
-t.handleExit(tid, unix.WaitStatus(0), nil, fmt.Errorf("process vanished (ESRCH)"))
+t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 ```
 
-Add an `abnormalErr error` parameter to `handleExit`. When non-nil, the exit notification carries `Err` set, which maps to exit code 137 (killed) at the exec layer — matching the behavior of a process killed by an external signal.
+At the exec layer, `ExitVanished` maps to exit code `-1` (matching Go's `ExitCode()` for signaled processes — the process is gone, most likely killed).
 
 ### Tracer Shutdown
 
@@ -155,7 +164,7 @@ func (t *Tracer) cancelPendingExitWaiters() {
     t.exitNotify.Range(func(key, value any) bool {
         ch := value.(chan ExitStatus)
         select {
-        case ch <- ExitStatus{Err: fmt.Errorf("tracer shutting down")}:
+        case ch <- ExitStatus{Reason: ExitTracerDown}:
         default:
         }
         t.exitNotify.Delete(key)
@@ -227,15 +236,26 @@ The `tracer == nil` path continues using `resourcesFromProcessState` unchanged.
 
 Current code derives exit codes from `cmd.Wait()` error:
 - `nil` → exit code 0
-- `*exec.ExitError` → `ee.ExitCode()` (which returns 128+signal for signaled processes on Linux)
+- `*exec.ExitError` → `ee.ExitCode()` (returns `-1` for signaled processes in Go)
 - other error → exit code 127
 
-With tracer-managed wait, derive from `ExitStatus` using the same convention as `exec.ExitError.ExitCode()`:
-- `status.Err != nil` → exit code 137 (abnormal/killed)
-- `status.Signal != 0` → exit code 128 + signal (matches `ee.ExitCode()` behavior)
-- otherwise → `status.Code`
+With tracer-managed wait, derive from `ExitStatus` **preserving exact compatibility**:
 
-This is **compatible** with current behavior because `exec.ExitError.ExitCode()` already returns `128 + signal` for signaled processes on Linux (via `WaitStatus.ExitStatus()` which returns -1, then Go maps it). We explicitly match the same convention.
+```go
+switch status.Reason {
+case ExitNormal:
+    if status.Signal != 0 {
+        return -1  // matches ee.ExitCode() for signaled processes
+    }
+    return status.Code
+case ExitVanished:
+    return -1      // process disappeared, treat like signaled
+case ExitTracerDown:
+    return 127     // infrastructure failure, matches "other error" path
+}
+```
+
+This is **identical** to current behavior: signaled → `-1`, normal → code, infrastructure failure → 127.
 
 Context deadline handling (timeout → kill → exit code 124) remains unchanged — the timeout check happens before reading the exit status.
 
@@ -263,10 +283,12 @@ Context deadline handling (timeout → kill → exit code 124) remains unchanged
 - **Unit**: `RegisterExitNotify` + `handleExit` dispatch with mock status/rusage
 - **Fast-exit**: Process that exits immediately after resume — verify notification delivered
 - **Multi-thread**: Process with multiple threads, leader exits first — verify notification on last thread
-- **ESRCH abnormal**: Trigger ESRCH-based exit — verify `Err != nil` and exit code 137
-- **Shutdown**: Cancel tracer context while exit notify is pending — verify `Err` delivered
-- **Signal exit codes**: Kill process with SIGTERM, SIGKILL, SIGSEGV — verify exit codes match `128 + signal` (same as `exec.ExitError.ExitCode()`)
+- **ESRCH vanished**: Trigger ESRCH-based exit — verify `Reason == ExitVanished` and exit code `-1`
+- **Shutdown**: Cancel tracer context while exit notify is pending — verify `Reason == ExitTracerDown` and exit code `127`
+- **Signal exit codes**: Kill process with SIGTERM, SIGKILL — verify exit code `-1` (matches `ee.ExitCode()`)
+- **Normal exit codes**: Process exits with code 0, 1, 42 — verify exact match
 - **Resource accuracy**: Compare `Rusage` values against `cmd.Wait()` path on CPU-bound workload
-- **Cleanup on failure**: Attach failure after registration — verify no stale sync.Map entry
+- **Cleanup on failure**: Attach failure after registration — verify `UnregisterExitNotify` cleans up
+- **Registration before attach**: Verify exit channel exists in sync.Map before `AttachPID` is called
 - **Regression**: Existing exec tests pass with `tracer == nil` path unchanged
 - **Docker integration**: `make ptrace-test` passes; `make bench` completes ptrace mode
