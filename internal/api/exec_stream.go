@@ -363,8 +363,8 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		stdoutPipeW.Close()
 		stderrPipeW.Close()
 		pipeWG.Add(2)
-		go func() { defer pipeWG.Done(); io.Copy(stdoutW, stdoutPipeR); stdoutPipeR.Close() }()
-		go func() { defer pipeWG.Done(); io.Copy(stderrW, stderrPipeR); stderrPipeR.Close() }()
+		go func() { defer pipeWG.Done(); if _, err := io.Copy(stdoutW, stdoutPipeR); err != nil { slog.Debug("ptrace stdout drain error", "error", err) }; stdoutPipeR.Close() }()
+		go func() { defer pipeWG.Done(); if _, err := io.Copy(stderrW, stderrPipeR); err != nil { slog.Debug("ptrace stderr drain error", "error", err) }; stderrPipeR.Close() }()
 	}
 
 	pgid := 0
@@ -413,6 +413,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			waitStart := time.Now()
 			slog.Debug("exec_stream waiting for command (ptrace)", "command", req.Command, "pid", cmd.Process.Pid)
 			result := waitExit()
+			close(ptraceDone) // stop context watcher immediately after exit
 			waitDuration := time.Since(waitStart)
 			slog.Debug("exec_stream command finished (ptrace)", "command", req.Command, "pid", cmd.Process.Pid, "exit_code", result.exitCode, "wait_duration_ms", waitDuration.Milliseconds())
 			pipeWG.Wait() // drain pipes before reading capture writers
@@ -421,7 +422,6 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
 			resources = result.resources
 			cmd.Process.Release()
-			close(ptraceDone)
 
 			if ctx.Err() != nil {
 				_ = killProcessGroup(pgid)
