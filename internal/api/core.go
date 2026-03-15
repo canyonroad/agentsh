@@ -702,6 +702,9 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 }
 
 func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRequest) (*types.ExecResponse, int, error) {
+	if a.ptraceFailed {
+		return nil, http.StatusServiceUnavailable, errors.New("ptrace tracer exited unexpectedly; refusing to execute commands without enforcement")
+	}
 	s, ok := a.sessions.Get(id)
 	if !ok {
 		return nil, http.StatusNotFound, errors.New("session not found")

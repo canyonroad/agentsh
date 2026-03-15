@@ -24,6 +24,10 @@ import (
 )
 
 func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
+	if a.ptraceFailed {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "ptrace tracer exited unexpectedly; refusing to execute commands without enforcement"})
+		return
+	}
 	id := chi.URLParam(r, "id")
 	s, ok := a.sessions.Get(id)
 	if !ok {

@@ -177,18 +177,21 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socket
 		return
 	}
 
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
+	// Read child PID from client (4-byte little-endian).
+	// The CLI sends the spawned shell's PID explicitly rather than relying
+	// on SO_PEERCRED, which would give the CLI's PID instead.
+	pidBuf := make([]byte, 4)
+	if _, err := conn.Read(pidBuf); err != nil {
+		conn.Write([]byte{0}) // NACK
 		conn.Close()
-		slog.Error("ptrace wrap: expected Unix connection", "type", fmt.Sprintf("%T", conn), "session_id", sessionID)
+		slog.Error("ptrace wrap: failed to read PID", "error", err, "session_id", sessionID)
 		return
 	}
-
-	pid := getConnPeerPID(unixConn)
+	pid := int(pidBuf[0]) | int(pidBuf[1])<<8 | int(pidBuf[2])<<16 | int(pidBuf[3])<<24
 	if pid <= 0 {
 		conn.Write([]byte{0}) // NACK
 		conn.Close()
-		slog.Error("ptrace wrap: invalid peer PID", "pid", pid, "session_id", sessionID)
+		slog.Error("ptrace wrap: invalid PID", "pid", pid, "session_id", sessionID)
 		return
 	}
 

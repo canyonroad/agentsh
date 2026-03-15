@@ -213,11 +213,24 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 	}
 
 	if wrapCfg != nil {
+		// Ptrace handshake: send child PID to server and wait for attach ACK
+		// before allowing the child to proceed. Must happen before postStart.
+		if wrapCfg.ptracePostStart != nil {
+			if err := wrapCfg.ptracePostStart(agentProc.Process.Pid); err != nil {
+				_ = agentProc.Process.Kill()
+				_ = agentProc.Wait()
+				return fmt.Errorf("ptrace handshake failed: %w", err)
+			}
+		}
+
 		mechanism := "seccomp"
 		if runtime.GOOS == "darwin" {
 			mechanism = "ES"
 		} else if runtime.GOOS == "windows" {
 			mechanism = "driver"
+		}
+		if wrapCfg.ptracePostStart != nil {
+			mechanism = "ptrace"
 		}
 		fmt.Fprintf(os.Stderr, "agentsh: agent %s started with %s interception (pid: %d)\n", opts.agentCmd, mechanism, agentProc.Process.Pid)
 		// Forward the notify fd to the server in the background
@@ -273,6 +286,9 @@ type wrapLaunchConfig struct {
 	postStart   func() // Called after the process starts (e.g., to forward notify fd)
 	postWait    func() // Called after the process exits (e.g., to reclaim terminal)
 	keepAlive   io.Closer // Held open during shell lifetime (e.g., ptrace handshake conn)
+	// ptracePostStart is called after the child is started with the child PID.
+	// It performs the ptrace handshake (send PID, wait for ACK).
+	ptracePostStart func(childPID int) error
 }
 
 // setupWrapInterception initializes seccomp interception via the server and returns

@@ -14,6 +14,10 @@ import (
 )
 
 func (t *Tracer) attachProcess(pid int, opts attachOpts) error {
+	// Seed directly-attached processes as roots in the process tree so
+	// depth-based policy rules work correctly (depth 0 for direct attaches).
+	t.processTree.AddRoot(pid)
+
 	taskDir := fmt.Sprintf("/proc/%d/task", pid)
 	entries, err := os.ReadDir(taskDir)
 	if err != nil {

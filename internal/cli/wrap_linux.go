@@ -22,28 +22,16 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 	// Ptrace mode: no wrapper binary needed. Connect to the server's socket
 	// for PID handshake via SO_PEERCRED, then launch the shell directly.
 	if wrapResp.PtraceMode {
-		conn, err := net.Dial("unix", wrapResp.NotifySocket)
-		if err != nil {
-			return nil, fmt.Errorf("ptrace handshake: %w", err)
-		}
-
-		// Wait for server to attach and ACK. The server reads our PID via
-		// SO_PEERCRED, attaches the tracer, then sends 1 (ACK) or 0 (NACK).
-		ack := make([]byte, 1)
-		if _, err := conn.Read(ack); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("ptrace handshake: read ACK: %w", err)
-		}
-		if ack[0] != 1 {
-			conn.Close()
-			return nil, fmt.Errorf("ptrace handshake: server rejected attach")
-		}
+		notifySocket := wrapResp.NotifySocket
 
 		env := os.Environ()
 		env = append(env,
 			fmt.Sprintf("AGENTSH_SESSION_ID=%s", sessID),
 			fmt.Sprintf("AGENTSH_SERVER=%s", cfg.serverAddr),
 		)
+
+		// connHolder stores the keepalive connection set by ptracePostStart.
+		var connHolder net.Conn
 
 		return &wrapLaunchConfig{
 			command: agentPath,
@@ -57,8 +45,43 @@ func platformSetupWrap(ctx context.Context, wrapResp types.WrapInitResponse, ses
 				}
 				return attr
 			}(),
-			keepAlive: conn,
+			ptracePostStart: func(childPID int) error {
+				// Connect after child starts, send the child PID explicitly
+				// (SO_PEERCRED would give our parent PID, not the child's).
+				conn, err := net.Dial("unix", notifySocket)
+				if err != nil {
+					return fmt.Errorf("dial: %w", err)
+				}
+
+				// Send child PID as 4-byte little-endian
+				pidBytes := make([]byte, 4)
+				pidBytes[0] = byte(childPID)
+				pidBytes[1] = byte(childPID >> 8)
+				pidBytes[2] = byte(childPID >> 16)
+				pidBytes[3] = byte(childPID >> 24)
+				if _, err := conn.Write(pidBytes); err != nil {
+					conn.Close()
+					return fmt.Errorf("send PID: %w", err)
+				}
+
+				// Wait for server ACK/NACK
+				ack := make([]byte, 1)
+				if _, err := conn.Read(ack); err != nil {
+					conn.Close()
+					return fmt.Errorf("read ACK: %w", err)
+				}
+				if ack[0] != 1 {
+					conn.Close()
+					return fmt.Errorf("server rejected attach")
+				}
+
+				connHolder = conn
+				return nil
+			},
 			postWait: func() {
+				if connHolder != nil {
+					connHolder.Close()
+				}
 				if isTerminal(os.Stdin.Fd()) {
 					reclaimTerminal()
 				}

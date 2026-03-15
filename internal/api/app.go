@@ -67,6 +67,10 @@ type App struct {
 	// Type is any because ptrace package is Linux-only.
 	ptraceTracer any
 	ptraceCancel context.CancelFunc
+	// ptraceFailed is set when the tracer exits unexpectedly while ptrace mode
+	// is configured. When true, command execution is blocked to prevent running
+	// without syscall enforcement (fail-closed).
+	ptraceFailed bool
 }
 
 func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader) *App {
