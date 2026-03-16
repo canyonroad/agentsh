@@ -46,7 +46,7 @@ func realCheckPtrace() CheckResult {
 	available := checkPtraceCapability()
 	r := CheckResult{Feature: "ptrace", Available: available}
 	if !available {
-		r.Error = fmt.Errorf("SYS_PTRACE capability not available or ptrace blocked by seccomp")
+		r.Error = fmt.Errorf("ptrace not available (PTRACE_SEIZE probe failed — blocked by seccomp, gVisor, or missing CAP_SYS_PTRACE)")
 	}
 	return r
 }
