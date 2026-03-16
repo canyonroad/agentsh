@@ -1682,3 +1682,120 @@ func TestIntegration_DNSConnectRedirect(t *testing.T) {
 		// This is expected in some CI environments where DNS doesn't go through connect()
 	}
 }
+
+func TestIntegration_ConnectExitRetainedTLS(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	netHandler := &mockNetworkHandler{defaultAllow: true}
+
+	exitSkipped := &atomic.Int64{}
+	metrics := &testMetrics{exitStopSkipped: exitSkipped}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceNetwork:     true,
+		SeccompPrefilter: true,
+		ExecHandler:      execHandler,
+		NetworkHandler:   netHandler,
+		MaxHoldMs:        5000,
+		Metrics:          metrics,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; echo | nc -w1 127.0.0.1 443 2>/dev/null || true`,
+		readyFile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+
+	skippedBefore := exitSkipped.Load()
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 10*time.Second)
+	cancel()
+	<-errCh
+
+	calls := netHandler.CallCount()
+	if calls == 0 {
+		t.Fatal("expected network handler to be called for connect to 443")
+	}
+	t.Logf("network handler calls: %d, exit stops skipped: %d (before connect: %d)",
+		calls, exitSkipped.Load(), skippedBefore)
+}
+
+func TestIntegration_ConnectExitSkipDNSRedirect(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	netHandler := &mockNetworkHandler{defaultAllow: true}
+
+	exitSkipped := &atomic.Int64{}
+	metrics := &testMetrics{exitStopSkipped: exitSkipped}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceNetwork:     true,
+		SeccompPrefilter: true,
+		ExecHandler:      execHandler,
+		NetworkHandler:   netHandler,
+		MaxHoldMs:        5000,
+		Metrics:          metrics,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; nslookup example.com 127.0.0.1 2>/dev/null || true`,
+		readyFile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 10*time.Second)
+	cancel()
+	<-errCh
+
+	skipped := exitSkipped.Load()
+	t.Logf("exit stops skipped: %d", skipped)
+	if skipped == 0 {
+		t.Fatalf("expected some exit stops to be skipped, got 0")
+	}
+}
