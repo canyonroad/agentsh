@@ -34,15 +34,11 @@ func parseCapEff(content string) (uint64, error) {
 	return 0, fmt.Errorf("CapEff not found in /proc/self/status")
 }
 
-// checkPtraceCapability checks if ptrace is available and functional.
+// checkPtraceCapability checks if ptrace is available and functional
+// by forking a child and attempting PTRACE_SEIZE. This is more reliable
+// than checking CAP_SYS_PTRACE because some runtimes (e.g. gVisor)
+// report the capability but block the actual syscall.
 func checkPtraceCapability() bool {
-	capEff, err := readCapEff()
-	if err != nil {
-		return false
-	}
-	if capEff&(1<<capSysPtrace) == 0 {
-		return false
-	}
 	return probePtraceAttach()
 }
 
