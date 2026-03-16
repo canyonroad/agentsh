@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/stub"
+	"github.com/agentsh/agentsh/pkg/types"
 	sysunix "golang.org/x/sys/unix"
 )
 
@@ -60,7 +62,7 @@ func createStubSocketPair() (stubRawFD int, srvConn net.Conn, err error) {
 // Parameters:
 //   - filenamePtr: the tracee memory address of the filename string (from execve arg0)
 //   - stubSymlinkPath: short path to a symlink that points to agentsh-stub
-func handleRedirect(notifFD int, reqID uint64, ctx ExecveContext, filenamePtr uint64, stubSymlinkPath string, originalFilenameLen int) error {
+func handleRedirect(notifFD int, reqID uint64, ctx ExecveContext, filenamePtr uint64, stubSymlinkPath string, originalFilenameLen int, redirect *types.RedirectInfo) error {
 	// Validate the stub path fits within the original filename's memory.
 	// The original string at filenamePtr has originalFilenameLen+1 bytes (including null).
 	// We need len(stubSymlinkPath)+1 bytes for the replacement.
@@ -98,14 +100,22 @@ func handleRedirect(notifFD int, reqID uint64, ctx ExecveContext, filenamePtr ui
 
 	// Start server handler in background to run the original command
 	// and proxy I/O to the stub.
+	serveCfg := stub.ServeConfig{
+		Command: ctx.Filename,
+		Args:    ctx.Argv,
+	}
+	if redirect != nil && redirect.Command != "" {
+		serveCfg.Command = redirect.Command
+		serveCfg.Args = append(redirect.Args, redirect.ArgsAppend...)
+	}
+
+	stubCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	go func() {
+		defer cancel()
 		defer srvConn.Close()
-		sErr := stub.ServeStubConnection(context.Background(), srvConn, stub.ServeConfig{
-			Command: ctx.Filename,
-			Args:    ctx.Argv,
-		})
+		sErr := stub.ServeStubConnection(stubCtx, srvConn, serveCfg)
 		if sErr != nil {
-			slog.Error("stub serve error", "pid", ctx.PID, "cmd", ctx.Filename, "error", sErr)
+			slog.Error("stub serve error", "pid", ctx.PID, "cmd", serveCfg.Command, "error", sErr)
 		}
 	}()
 
