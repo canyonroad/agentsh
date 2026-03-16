@@ -399,43 +399,45 @@ Note: In ptrace mode, there is a brief pre-attach window between fork and PTRACE
 
 ## Performance Benchmarks
 
-Measured with `make bench`, which runs a Dockerized workload under each mode (baseline with sandbox disabled, full seccomp+FUSE, ptrace with seccomp prefilter + per-syscall resume + fd-aware exit stops, ptrace without prefilter) using a realistic policy with deny, redirect, and allow rules plus full audit logging. Results are median of 3 runs.
+Measured with `make bench`, which runs a Dockerized workload under each mode (baseline with sandbox disabled, full seccomp+FUSE, ptrace with seccomp prefilter + per-syscall resume + fd-aware exit stops + lazy BPF escalation, ptrace without prefilter) using a realistic policy with deny, redirect, and allow rules plus full audit logging. Results are median of 3 runs.
 
 ### Results
 
 | Phase | Baseline | Full mode | Full overhead | Ptrace | Ptrace overhead | Ptrace (no filter) | No-filter overhead |
 |---|---|---|---|---|---|---|---|
-| Process spawn (120 execs) | 3989ms | 3531ms | -11.5% | 17071ms | +328% | 52575ms | +1218% |
-| File I/O (1000 ops) | 276ms | 527ms | +90.9% | 848ms | +207% | 2820ms | +922% |
-| Git workflow (clone+grep+commit) | 57ms | 64ms | +12.3% | 573ms | +905% | 1721ms | +2919% |
-| Network (10 curl) | 353ms | 353ms | +0.0% | 11347ms | +3114% | 45968ms | +12922% |
-| Deny enforcement (50 blocked) | 616ms | 628ms | +1.9% | 592ms | -3.9% | 637ms | +3.4% |
-| Redirect enforcement (50 redirected) | 1752ms | 1777ms | +1.4% | 5865ms | +235% | 18818ms | +974% |
-| Deep process tree (20x 4-level) | 625ms | 625ms | +0.0% | 12106ms | +1837% | 55179ms | +8729% |
-| Wide process tree (10x 10-fan) | 333ms | 330ms | -0.9% | 1870ms | +462% | 6880ms | +1966% |
-| **Total** | **8001ms** | **7835ms** | **-2.1%** | **50272ms** | **+528%** | **184598ms** | **+2207%** |
+| Process spawn (120 execs) | 3420ms | 3468ms | +1.4% | 16362ms | +378% | 47838ms | +1299% |
+| File I/O (1000 ops) | 272ms | 517ms | +90.1% | 726ms | +167% | 2671ms | +882% |
+| Git workflow (clone+grep+commit) | 50ms | 58ms | +16.0% | 401ms | +702% | 1607ms | +3114% |
+| Network (10 curl) | 341ms | 335ms | -1.8% | 9552ms | +2701% | 45434ms | +13224% |
+| Deny enforcement (50 blocked) | 552ms | 601ms | +8.9% | 577ms | +4.5% | 596ms | +8.0% |
+| Redirect enforcement (50 redirected) | 1699ms | 1769ms | +4.1% | 6125ms | +261% | 16095ms | +847% |
+| Deep process tree (20x 4-level) | 609ms | 617ms | +1.3% | 11055ms | +1715% | 54294ms | +8815% |
+| Wide process tree (10x 10-fan) | 307ms | 318ms | +3.6% | 1847ms | +502% | 6528ms | +2026% |
+| **Total** | **7250ms** | **7683ms** | **+6.0%** | **46645ms** | **+543%** | **175063ms** | **+2315%** |
 
 ### Analysis
 
-**Full mode** (seccomp+FUSE) adds **negligible total overhead**. File I/O through the FUSE overlay adds ~91% to the file-intensive phase, but this is a small absolute cost (251ms) and is amortized across all phases. Non-file phases show no measurable overhead.
+**Full mode** (seccomp+FUSE) adds **~6% total overhead**. File I/O through the FUSE overlay adds ~90% to the file-intensive phase, but this is a small absolute cost (245ms) and is amortized across all phases. Non-file phases show no measurable overhead.
 
-**Ptrace mode** (with seccomp prefilter + fd-aware exit stops) adds **~5.3x total overhead**. This is expected — ptrace intercepts syscalls via context switches rather than kernel-internal notification. Breakdown:
+**Ptrace mode** (with seccomp prefilter + lazy BPF escalation) adds **~5.4x total overhead**. This is expected — ptrace intercepts syscalls via context switches rather than kernel-internal notification. Breakdown:
 
 1. **Per-exec RPC dominates.** Each `agentsh exec` call goes through CLI → HTTP → server → fork/exec (~30ms). The ptrace attach (PTRACE_SEIZE + seccomp BPF injection + WaitAttached) adds ~15ms per exec on top.
 
 2. **Deny enforcement is free.** Policy deny short-circuits before fork, so ptrace overhead is zero for denied commands.
 
-3. **File I/O is moderate (~3x).** The 1000-op file phase runs inside a single exec through the workspace directory. In full mode, FUSE intercepts each file operation for policy evaluation (+91%). Ptrace traps each `openat`/`unlinkat` at entry; only `openat` needs exit processing (fd tracking). The seccomp prefilter skips non-traced syscalls.
+3. **File I/O is moderate (~2.7x).** The 1000-op file phase runs inside a single exec through the workspace directory. In full mode, FUSE intercepts each file operation for policy evaluation (+90%). Ptrace traps each `openat`/`unlinkat` at entry; only `openat` needs exit processing (fd tracking). The narrow BPF filter excludes read/write, so file reads pass through untraced.
 
-4. **Network is expensive (~32x).** `curl` generates hundreds of syscalls (DNS, TLS, connect, read/write). Each traced syscall generates an entry stop. The fd-aware exit stop optimization skips exit stops for reads on non-status fds and connects to non-TLS ports, reducing overhead from ~37x (before the optimization) to ~32x. The remaining overhead is dominated by entry stops, which require the BPF filter to trap into ptrace.
+4. **Network is expensive (~28x).** `curl` generates hundreds of syscalls (DNS, TLS, connect, read/write). The lazy BPF escalation keeps read/write out of the traced set entirely for processes that don't need them — `curl` never opens `/proc/*/status`, so reads are never trapped. Write escalation triggers only after a TLS connect. Combined with fd-aware exit stops, this reduced network overhead from ~37x (original) to ~28x.
 
-5. **Process trees scale with depth (~19x).** Deep nesting (sh→sh→sh→sh→true) multiplies the per-exec attach cost. Wide fan-out (10 parallel children, ~5.6x) is better since children inherit the seccomp filter via fork.
+5. **Git workflow benefits most from lazy escalation (~8x).** Git spawns many short-lived processes that never need read/write tracing. The narrow filter keeps these fast.
 
-6. **Seccomp prefilter provides ~3.7x speedup.** Without the prefilter, ptrace traps on every syscall, bringing total overhead to ~22x. The prefilter restricts tracing to policy-relevant syscalls (execve, openat, connect, etc.), reducing total overhead from 185s to 50s. Biggest wins: deep trees (4.6x), network (4.1x), process spawn (3.1x).
+6. **Process trees scale with depth (~18x).** Deep nesting (sh→sh→sh→sh→true) multiplies the per-exec attach cost. Wide fan-out (10 parallel children, ~6x) is better since children inherit the seccomp filter via fork. The PendingPrefilter skip for auto-traced children avoids redundant BPF re-injection.
 
-7. **Fd-aware exit stops provide ~7% additional speedup.** By checking the fd tracker at syscall entry, reads on non-status fds and connects to non-TLS ports skip the exit stop (resume with `PtraceCont` instead of `PtraceSyscall`). Biggest wins: network (-15%), deep trees (-9%), wide trees (-9%).
+7. **Seccomp prefilter provides ~3.8x speedup.** Without the prefilter, ptrace traps on every syscall, bringing total overhead to ~23x. The prefilter restricts tracing to policy-relevant syscalls (execve, openat, connect, etc.), reducing total overhead from 175s to 47s. Biggest wins: deep trees (4.9x), network (4.8x), process spawn (2.9x).
 
-8. **Ptrace mode is designed for restricted environments** (e.g., AWS Fargate) where seccomp user-notify, eBPF, and FUSE are unavailable. The overhead tradeoff is acceptable for these environments where no alternative enforcement mechanism exists.
+8. **Lazy BPF escalation provides ~14% additional speedup over the prefilter alone.** By excluding read/pread64/write from the initial BPF filter and lazily escalating per-TGID when TracerPid masking or TLS SNI rewrite is needed, most processes avoid read/write entry stops entirely. Combined with fd-aware exit stops, the two optimizations together reduced total ptrace overhead from +621% (original) to +543% (current). Biggest wins: git workflow (-34%), network (-28%), deep trees (-17%).
+
+9. **Ptrace mode is designed for restricted environments** (e.g., AWS Fargate) where seccomp user-notify, eBPF, and FUSE are unavailable. The overhead tradeoff is acceptable for these environments where no alternative enforcement mechanism exists.
 
 ### Reproducing
 
