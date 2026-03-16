@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,6 +58,15 @@ func waitForAttach(t *testing.T, tr *Tracer, timeout time.Duration) bool {
 	}
 	return false
 }
+
+type testMetrics struct {
+	exitStopSkipped *atomic.Int64
+}
+
+func (m *testMetrics) SetTraceeCount(int)     {}
+func (m *testMetrics) IncAttachFailure(string) {}
+func (m *testMetrics) IncTimeout()             {}
+func (m *testMetrics) IncExitStopSkipped()     { m.exitStopSkipped.Add(1) }
 
 // --- Enhanced mockExecHandler with per-filename rules ---
 
@@ -1476,6 +1486,64 @@ func TestIntegration_TracerPidNotMasked(t *testing.T) {
 	if strings.Contains(line, "TracerPid:\t0") {
 		t.Fatalf("expected non-zero TracerPid when masking disabled, got: %q", line)
 	}
+}
+
+func TestIntegration_ReadExitSkipForNonStatusFd(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	fileHandler := &mockFileHandler{defaultAllow: true}
+
+	exitSkipped := &atomic.Int64{}
+	metrics := &testMetrics{exitStopSkipped: exitSkipped}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceFile:        true,
+		SeccompPrefilter: true,
+		MaskTracerPid:    true,
+		ExecHandler:      execHandler,
+		FileHandler:      fileHandler,
+		MaxHoldMs:        5000,
+		Metrics:          metrics,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	// Shell script that reads from /dev/null many times (non-status fd)
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; i=0; while [ $i -lt 50 ]; do cat /dev/null; i=$((i+1)); done`,
+		readyFile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 10*time.Second)
+	cancel()
+	<-errCh
+
+	skipped := exitSkipped.Load()
+	if skipped == 0 {
+		t.Fatalf("expected exit stops to be skipped for non-status fd reads, got 0 skips")
+	}
+	t.Logf("exit stops skipped: %d", skipped)
 }
 
 func TestIntegration_DNSConnectRedirect(t *testing.T) {

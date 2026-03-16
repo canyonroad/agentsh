@@ -892,7 +892,7 @@ func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, regs Regs
 	case isCloseSyscall(nr):
 		t.handleClose(ctx, tid, regs)
 	case isReadSyscall(nr):
-		t.allowSyscall(tid) // read is handled on exit, not entry
+		t.handleReadEntry(tid, regs)
 	default:
 		t.allowSyscall(tid)
 	}
