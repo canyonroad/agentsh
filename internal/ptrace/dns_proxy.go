@@ -3,10 +3,12 @@
 package ptrace
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -15,12 +17,13 @@ import (
 )
 
 type dnsProxy struct {
-	handler  NetworkHandler
-	fds      *fdTracker
-	udpConn4 *net.UDPConn
-	udpConn6 *net.UDPConn
-	port4    int
-	port6    int
+	handler            NetworkHandler
+	fds                *fdTracker
+	udpConn4           *net.UDPConn
+	udpConn6           *net.UDPConn
+	port4              int
+	port6              int
+	upstreamResolvers  []string // from /etc/resolv.conf, "ip:53" format
 }
 
 func newDNSProxy(handler NetworkHandler, fds *fdTracker) (*dnsProxy, error) {
@@ -51,13 +54,17 @@ func newDNSProxy(handler NetworkHandler, fds *fdTracker) (*dnsProxy, error) {
 		slog.Warn("dns_proxy: IPv6 resolve failed, IPv4 only", "error", err)
 	}
 
+	resolvers := parseResolvConf("/etc/resolv.conf")
+	slog.Debug("dns_proxy: upstream resolvers", "resolvers", resolvers)
+
 	return &dnsProxy{
-		handler:  handler,
-		fds:      fds,
-		udpConn4: conn4,
-		udpConn6: conn6,
-		port4:    port4,
-		port6:    port6,
+		handler:           handler,
+		fds:               fds,
+		udpConn4:          conn4,
+		udpConn6:          conn6,
+		port4:             port4,
+		port6:             port6,
+		upstreamResolvers: resolvers,
 	}, nil
 }
 
@@ -142,10 +149,14 @@ func (p *dnsProxy) handleQuery(ctx context.Context, conn *net.UDPConn, raw []byt
 	case result.RedirectUpstream != "":
 		resp, err = p.forwardQuery(raw, result.RedirectUpstream)
 	default:
-		if redirectInfo.originalResolver != "" {
-			resp, err = p.forwardQuery(raw, redirectInfo.originalResolver)
+		upstream := redirectInfo.originalResolver
+		if upstream == "" && len(p.upstreamResolvers) > 0 {
+			upstream = p.upstreamResolvers[0]
+		}
+		if upstream != "" {
+			resp, err = p.forwardQuery(raw, upstream)
 		} else {
-			resp, err = p.buildSERVFAIL(msg) // No resolver known yet (Task 9 wires attribution)
+			resp, err = p.buildSERVFAIL(msg)
 		}
 	}
 
@@ -274,4 +285,34 @@ func (p *dnsProxy) recordResolutions(raw []byte, domain string) {
 			p.fds.recordDNSResolution(net.IP(body.AAAA[:]).String(), domain)
 		}
 	}
+}
+
+// parseResolvConf reads nameserver lines from a resolv.conf file.
+// Returns addresses in "ip:53" format. Skips the proxy's own listen
+// addresses to avoid forwarding loops.
+func parseResolvConf(path string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var resolvers []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "nameserver") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		ip := fields[1]
+		if net.ParseIP(ip) == nil {
+			continue
+		}
+		resolvers = append(resolvers, net.JoinHostPort(ip, "53"))
+	}
+	return resolvers
 }
