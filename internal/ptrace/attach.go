@@ -85,7 +85,7 @@ func (t *Tracer) attachThread(tid int, opts attachOpts) error {
 			t.metrics.IncAttachFailure("other")
 			return fmt.Errorf("wait4 after interrupt tid %d: timed out", tid)
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(100 * time.Microsecond)
 	}
 
 	if !status.Stopped() {

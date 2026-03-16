@@ -491,6 +491,15 @@ func mustCatchExit(s *TraceeState) bool {
 
 // allowSyscall resumes the tracee, allowing the syscall to proceed.
 func (t *Tracer) allowSyscall(tid int) {
+	// Fast path: without seccomp prefilter, hasPrefilter is always false,
+	// so the result is always PtraceSyscall. Skip the mutex entirely.
+	if !t.cfg.SeccompPrefilter {
+		if err := unix.PtraceSyscall(tid, 0); err != nil && errors.Is(err, unix.ESRCH) {
+			t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
+		}
+		return
+	}
+
 	t.mu.Lock()
 	hasPrefilter := false
 	needExit := false
@@ -559,6 +568,12 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 // Uses PtraceCont when prefilter is active and no exit stop is needed,
 // PtraceSyscall otherwise.
 func (t *Tracer) resumeTracee(tid int, sig int) {
+	// Fast path: without seccomp prefilter, always use PtraceSyscall.
+	if !t.cfg.SeccompPrefilter {
+		unix.PtraceSyscall(tid, sig)
+		return
+	}
+
 	t.mu.Lock()
 	hasPrefilter := false
 	needExit := false
@@ -724,107 +739,115 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 
 // handleSyscallStop handles SIGTRAP|0x80 stops (TRACESYSGOOD mode).
 func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
-	// Deferred seccomp prefilter injection: inject on the first syscall EXIT
-	// (not entry — injectFromEntry replaces the current syscall, which would
-	// drop the tracee's first real syscall). At exit, the syscall already
-	// completed, so injection is safe.
-	//
-	// State.InSyscall tracks what the PREVIOUS stop set:
-	//   InSyscall=false → this is an entry stop (first time)
-	//   InSyscall=true  → this is an exit stop (entry was processed)
+	// Deferred seccomp prefilter and escalation injection are only relevant
+	// when SeccompPrefilter is configured. Skip entirely in nofilter mode
+	// to avoid dead-code mutex acquisitions.
+	if t.cfg.SeccompPrefilter {
+		// Deferred seccomp prefilter injection: inject on the first syscall EXIT
+		// (not entry — injectFromEntry replaces the current syscall, which would
+		// drop the tracee's first real syscall). At exit, the syscall already
+		// completed, so injection is safe.
+		//
+		// State.InSyscall tracks what the PREVIOUS stop set:
+		//   InSyscall=false → this is an entry stop (first time)
+		//   InSyscall=true  → this is an exit stop (entry was processed)
+		t.mu.Lock()
+		state := t.tracees[tid]
+		if state != nil && state.PendingPrefilter && !state.InSyscall {
+			// This is a syscall entry. Let normal handling process it.
+			// The next stop will be the exit, where we'll inject.
+			t.mu.Unlock()
+		} else if state != nil && state.PendingPrefilter && state.InSyscall {
+			// This is a syscall exit — safe to inject now.
+			state.PendingPrefilter = false
+			// Set InSyscall=false before injection so injectSyscall uses the
+			// correct exit-stop protocol (injectFromExit).
+			state.InSyscall = false
+			t.mu.Unlock()
+			if err := t.injectSeccompFilter(tid); err != nil {
+				slog.Warn("seccomp prefilter injection failed, falling back to TRACESYSGOOD",
+					"tid", tid, "error", err)
+				t.mu.Lock()
+				if s := t.tracees[tid]; s != nil {
+					s.InSyscall = true
+				}
+				t.mu.Unlock()
+			} else {
+				t.mu.Lock()
+				if s := t.tracees[tid]; s != nil {
+					s.HasPrefilter = true
+					s.InSyscall = true
+				}
+				t.mu.Unlock()
+			}
+			// Fall through to normal exit handling for this syscall.
+			// Do NOT return — the first syscall's exit handlers still need to run.
+			// InSyscall=true restored above so the normal toggle correctly
+			// identifies this as a syscall exit (entering := !state.InSyscall → false).
+		} else {
+			t.mu.Unlock()
+		}
+
+		// Deferred BPF escalation: inject escalation filters at exit stops.
+		// Follows the same pattern as PendingPrefilter above.
+		// Only attempt injection when a seccomp prefilter is installed;
+		// without one, all syscalls are already traced via TRACESYSGOOD.
+		t.mu.Lock()
+		state = t.tracees[tid]
+		if state != nil && state.HasPrefilter && state.InSyscall && state.PendingReadEscalation {
+			state.PendingReadEscalation = false
+			state.InSyscall = false
+			t.mu.Unlock()
+			if err := t.injectEscalationFilter(tid, readEscalationSyscalls); err != nil {
+				slog.Warn("deferred read escalation failed", "tid", tid, "error", err)
+				t.mu.Lock()
+				if s := t.tracees[tid]; s != nil {
+					s.InSyscall = true
+				}
+				t.mu.Unlock()
+			} else {
+				t.mu.Lock()
+				if s := t.tracees[tid]; s != nil {
+					s.ThreadHasReadEscalation = true
+					s.InSyscall = true
+				}
+				t.mu.Unlock()
+			}
+		} else if state != nil && state.HasPrefilter && state.InSyscall && state.PendingWriteEscalation {
+			state.PendingWriteEscalation = false
+			state.InSyscall = false
+			t.mu.Unlock()
+			if err := t.injectEscalationFilter(tid, writeEscalationSyscalls); err != nil {
+				slog.Warn("deferred write escalation failed", "tid", tid, "error", err)
+				t.mu.Lock()
+				if s := t.tracees[tid]; s != nil {
+					s.InSyscall = true
+				}
+				t.mu.Unlock()
+			} else {
+				t.mu.Lock()
+				if s := t.tracees[tid]; s != nil {
+					s.ThreadHasWriteEscalation = true
+					s.InSyscall = true
+				}
+				t.mu.Unlock()
+			}
+		} else if state != nil && state.HasPrefilter && !state.InSyscall {
+			// Entry stop — set pending flags for next exit.
+			if state.NeedsReadEscalation && !state.ThreadHasReadEscalation {
+				state.PendingReadEscalation = true
+			}
+			if state.NeedsWriteEscalation && !state.ThreadHasWriteEscalation {
+				state.PendingWriteEscalation = true
+			}
+			t.mu.Unlock()
+		} else {
+			t.mu.Unlock()
+		}
+	}
+
 	t.mu.Lock()
 	state := t.tracees[tid]
-	if state != nil && state.PendingPrefilter && !state.InSyscall {
-		// This is a syscall entry. Let normal handling process it.
-		// The next stop will be the exit, where we'll inject.
-		t.mu.Unlock()
-	} else if state != nil && state.PendingPrefilter && state.InSyscall {
-		// This is a syscall exit — safe to inject now.
-		state.PendingPrefilter = false
-		// Set InSyscall=false before injection so injectSyscall uses the
-		// correct exit-stop protocol (injectFromExit).
-		state.InSyscall = false
-		t.mu.Unlock()
-		if err := t.injectSeccompFilter(tid); err != nil {
-			slog.Warn("seccomp prefilter injection failed, falling back to TRACESYSGOOD",
-				"tid", tid, "error", err)
-		} else {
-			t.mu.Lock()
-			if s := t.tracees[tid]; s != nil {
-				s.HasPrefilter = true
-			}
-			t.mu.Unlock()
-		}
-		// Fall through to normal exit handling for this syscall.
-		// Do NOT return — the first syscall's exit handlers still need to run.
-		// Restore InSyscall=true so the normal toggle correctly identifies
-		// this as a syscall exit (entering := !state.InSyscall → false).
-		t.mu.Lock()
-		if s := t.tracees[tid]; s != nil {
-			s.InSyscall = true
-		}
-		t.mu.Unlock()
-	} else {
-		t.mu.Unlock()
-	}
-
-	// Deferred BPF escalation: inject escalation filters at exit stops.
-	// Follows the same pattern as PendingPrefilter above.
-	// Only attempt injection when a seccomp prefilter is installed;
-	// without one, all syscalls are already traced via TRACESYSGOOD.
-	t.mu.Lock()
-	state = t.tracees[tid]
-	if state != nil && state.HasPrefilter && state.InSyscall && state.PendingReadEscalation {
-		state.PendingReadEscalation = false
-		state.InSyscall = false
-		t.mu.Unlock()
-		if err := t.injectEscalationFilter(tid, readEscalationSyscalls); err != nil {
-			slog.Warn("deferred read escalation failed", "tid", tid, "error", err)
-		} else {
-			t.mu.Lock()
-			if s := t.tracees[tid]; s != nil {
-				s.ThreadHasReadEscalation = true
-			}
-			t.mu.Unlock()
-		}
-		t.mu.Lock()
-		if s := t.tracees[tid]; s != nil {
-			s.InSyscall = true
-		}
-		t.mu.Unlock()
-	} else if state != nil && state.HasPrefilter && state.InSyscall && state.PendingWriteEscalation {
-		state.PendingWriteEscalation = false
-		state.InSyscall = false
-		t.mu.Unlock()
-		if err := t.injectEscalationFilter(tid, writeEscalationSyscalls); err != nil {
-			slog.Warn("deferred write escalation failed", "tid", tid, "error", err)
-		} else {
-			t.mu.Lock()
-			if s := t.tracees[tid]; s != nil {
-				s.ThreadHasWriteEscalation = true
-			}
-			t.mu.Unlock()
-		}
-		t.mu.Lock()
-		if s := t.tracees[tid]; s != nil {
-			s.InSyscall = true
-		}
-		t.mu.Unlock()
-	} else if state != nil && state.HasPrefilter && !state.InSyscall {
-		// Entry stop — set pending flags for next exit.
-		if state.NeedsReadEscalation && !state.ThreadHasReadEscalation {
-			state.PendingReadEscalation = true
-		}
-		if state.NeedsWriteEscalation && !state.ThreadHasWriteEscalation {
-			state.PendingWriteEscalation = true
-		}
-		t.mu.Unlock()
-	} else {
-		t.mu.Unlock()
-	}
-
-	t.mu.Lock()
-	state = t.tracees[tid]
 	if state == nil {
 		t.mu.Unlock()
 		t.allowSyscall(tid)
@@ -861,15 +884,11 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 			return
 		}
 		nr := regs.SyscallNr()
-		t.mu.Lock()
+		// LastNr, NeedExitStop are only accessed from the event-loop
+		// goroutine (runtime.LockOSThread), no mutex needed. TGID is
+		// immutable after creation.
 		state.LastNr = nr
 		state.NeedExitStop = needsExitStop(nr)
-		tgid := state.TGID
-		t.mu.Unlock()
-
-		// Reset scratch page allocator at each syscall-enter so that
-		// redirect/soft-delete operations always start with a fresh page.
-		t.resetScratchIfPresent(tgid)
 
 		t.dispatchSyscall(ctx, tid, nr, regs)
 	} else {
@@ -892,15 +911,12 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		}
 
 		// Phase 4b: exit-time handlers
-		nr := -1
-		t.mu.Lock()
-		if state != nil {
-			nr = state.LastNr
-			state.NeedExitStop = false
-		}
-		t.mu.Unlock()
+		// LastNr, NeedExitStop are event-loop-only — no mutex needed.
+		nr := state.LastNr
+		needExitHandler := state.NeedExitStop
+		state.NeedExitStop = false
 
-		if nr >= 0 {
+		if needExitHandler && nr >= 0 {
 			exitRegs, err := t.getRegs(tid)
 			if err == nil {
 				t.handleSyscallExit(tid, nr, exitRegs)
@@ -925,9 +941,7 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	// to exit) instead of the two-phase gadget protocol.
 	t.mu.Lock()
 	state := t.tracees[tid]
-	var tgid int
 	if state != nil {
-		tgid = state.TGID
 		state.InSyscall = true
 		state.LastNr = nr
 		state.NeedExitStop = needsExitStop(nr)
@@ -940,9 +954,6 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 		}
 	}
 	t.mu.Unlock()
-	if tgid != 0 {
-		t.resetScratchIfPresent(tgid)
-	}
 
 	t.dispatchSyscall(ctx, tid, nr, regs)
 }
@@ -1424,6 +1435,9 @@ func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
 		sessionID = state.SessionID
 	}
 	t.mu.Unlock()
+
+	// Reset scratch page so exec redirect operations start fresh.
+	t.resetScratchIfPresent(tgid)
 
 	depth := t.processTree.Depth(tgid)
 
