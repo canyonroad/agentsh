@@ -1546,6 +1546,79 @@ func TestIntegration_ReadExitSkipForNonStatusFd(t *testing.T) {
 	t.Logf("exit stops skipped: %d", skipped)
 }
 
+func TestIntegration_ConnectExitSkipNonTLS(t *testing.T) {
+	requirePtrace(t)
+
+	// Start a TCP listener on a non-TLS port
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		conn.Close()
+	}()
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	netHandler := &mockNetworkHandler{defaultAllow: true}
+
+	exitSkipped := &atomic.Int64{}
+	metrics := &testMetrics{exitStopSkipped: exitSkipped}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceNetwork:     true,
+		SeccompPrefilter: true,
+		ExecHandler:      execHandler,
+		NetworkHandler:   netHandler,
+		MaxHoldMs:        5000,
+		Metrics:          metrics,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+
+	// Use nc to connect to the non-TLS port
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; echo hi | nc -q0 127.0.0.1 %d || true`,
+		readyFile, port,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 10*time.Second)
+	cancel()
+	<-errCh
+
+	skipped := exitSkipped.Load()
+	if skipped == 0 {
+		t.Fatalf("expected connect exit stop to be skipped for non-TLS port %d, got 0 skips", port)
+	}
+	t.Logf("exit stops skipped: %d", skipped)
+}
+
 func TestIntegration_DNSConnectRedirect(t *testing.T) {
 	requirePtrace(t)
 
