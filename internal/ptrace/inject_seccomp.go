@@ -30,7 +30,7 @@ const sockFilterSize = 8
 // Returns nil on success. Failure is non-fatal — caller falls back to TRACESYSGOOD.
 func (t *Tracer) injectSeccompFilter(tid int) error {
 	// Build the BPF program.
-	filters, bpfErr := buildPrefilterBPF()
+	filters, bpfErr := buildNarrowPrefilterBPF()
 	if bpfErr != nil {
 		return bpfErr
 	}

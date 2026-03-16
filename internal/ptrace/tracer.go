@@ -163,6 +163,15 @@ type TraceeState struct {
 	HasPrefilter     bool // true if seccomp prefilter is installed for this tracee
 	PendingPrefilter bool // inject seccomp filter on next syscall stop
 	NeedExitStop     bool // resume with PtraceSyscall to catch exit
+	// TGID-level: any thread in this TGID triggered escalation
+	NeedsReadEscalation  bool
+	NeedsWriteEscalation bool
+	// Per-thread: escalation filter installed on this specific thread
+	ThreadHasReadEscalation  bool
+	ThreadHasWriteEscalation bool
+	// Deferred: inject escalation at next exit stop
+	PendingReadEscalation  bool
+	PendingWriteEscalation bool
 	IsVforkChild     bool
 	SuppressInitialStop bool // suppress initial SIGSTOP from auto-trace
 	PendingExecStubFD  int // fd injected for exec redirect; cleaned up on exec failure (-1 = none)
@@ -1025,22 +1034,40 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 		existing.ParentPID = parent.TGID
 		existing.SessionID = parent.SessionID
 		existing.HasPrefilter = parent.HasPrefilter
-		existing.PendingPrefilter = parent.PendingPrefilter
+		// Children inherit parent's kernel filter stack via fork().
+		// Skip PendingPrefilter if parent already has a filter installed.
+		if parent.HasPrefilter {
+			existing.PendingPrefilter = false
+		} else {
+			existing.PendingPrefilter = parent.PendingPrefilter
+		}
+		existing.NeedsReadEscalation = parent.NeedsReadEscalation
+		existing.NeedsWriteEscalation = parent.NeedsWriteEscalation
+		existing.ThreadHasReadEscalation = parent.ThreadHasReadEscalation
+		existing.ThreadHasWriteEscalation = parent.ThreadHasWriteEscalation
 		existing.Attached = time.Now()
 	} else {
+		pendingPrefilter := false
+		if !parent.HasPrefilter {
+			pendingPrefilter = parent.PendingPrefilter
+		}
 		t.tracees[tid] = &TraceeState{
-			TID:                 tid,
-			TGID:                childTGID,
-			ParentPID:           parent.TGID,
-			SessionID:           parent.SessionID,
-			HasPrefilter:        parent.HasPrefilter,
-			PendingPrefilter:    parent.PendingPrefilter,
-			Attached:            time.Now(),
-			LastNr:              -1,
-			MemFD:               -1,
-			PendingExecStubFD:   -1,
-			PendingExecSavedFD:  -1,
-			SuppressInitialStop: true,
+			TID:                      tid,
+			TGID:                     childTGID,
+			ParentPID:                parent.TGID,
+			SessionID:                parent.SessionID,
+			HasPrefilter:             parent.HasPrefilter,
+			PendingPrefilter:         pendingPrefilter,
+			NeedsReadEscalation:      parent.NeedsReadEscalation,
+			NeedsWriteEscalation:     parent.NeedsWriteEscalation,
+			ThreadHasReadEscalation:  parent.ThreadHasReadEscalation,
+			ThreadHasWriteEscalation: parent.ThreadHasWriteEscalation,
+			Attached:                 time.Now(),
+			LastNr:                   -1,
+			MemFD:                    -1,
+			PendingExecStubFD:        -1,
+			PendingExecSavedFD:       -1,
+			SuppressInitialStop:      true,
 		}
 	}
 	t.metrics.SetTraceeCount(len(t.tracees))
