@@ -119,3 +119,81 @@ func (t *Tracer) injectSeccompFilter(tid int) error {
 	slog.Info("seccomp prefilter installed", "tid", tid, "filters", len(filters))
 	return nil
 }
+
+// readEscalationSyscalls are the syscalls added when TracerPid masking is needed.
+var readEscalationSyscalls = []int{unix.SYS_READ, unix.SYS_PREAD64}
+
+// writeEscalationSyscalls are the syscalls added when TLS SNI rewrite is needed.
+var writeEscalationSyscalls = []int{unix.SYS_WRITE}
+
+// injectEscalationFilter installs an additional seccomp-BPF filter that traces
+// the specified syscalls. Stacked on top of the narrow prefilter. Skips
+// prctl(PR_SET_NO_NEW_PRIVS) since the initial filter injection already set it.
+// The tracee must be at a syscall-exit stop.
+func (t *Tracer) injectEscalationFilter(tid int, syscalls []int) error {
+	filters, err := buildEscalationBPF(syscalls)
+	if err != nil {
+		return err
+	}
+	if len(filters) == 0 {
+		return fmt.Errorf("empty escalation BPF")
+	}
+
+	savedRegs, err := t.getRegs(tid)
+	if err != nil {
+		return fmt.Errorf("escalation getRegs: %w", err)
+	}
+
+	t.mu.Lock()
+	state := t.tracees[tid]
+	tgid := tid
+	if state != nil {
+		tgid = state.TGID
+	}
+	t.mu.Unlock()
+
+	sp, err := t.ensureScratchPage(tid, tgid, savedRegs)
+	if err != nil {
+		return fmt.Errorf("escalation scratch page: %w", err)
+	}
+
+	totalSize := sockFprogSize + len(filters)*sockFilterSize
+	scratchAddr, err := sp.allocate(totalSize)
+	if err != nil {
+		return fmt.Errorf("escalation scratch allocate: %w", err)
+	}
+
+	filterBuf := make([]byte, len(filters)*sockFilterSize)
+	for i, f := range filters {
+		off := i * sockFilterSize
+		binary.LittleEndian.PutUint16(filterBuf[off:], f.Code)
+		filterBuf[off+2] = f.Jt
+		filterBuf[off+3] = f.Jf
+		binary.LittleEndian.PutUint32(filterBuf[off+4:], f.K)
+	}
+
+	filterArrayAddr := scratchAddr + sockFprogSize
+	fprogBuf := make([]byte, sockFprogSize)
+	binary.LittleEndian.PutUint16(fprogBuf[0:], uint16(len(filters)))
+	binary.LittleEndian.PutUint64(fprogBuf[8:], filterArrayAddr)
+
+	payload := make([]byte, 0, totalSize)
+	payload = append(payload, fprogBuf...)
+	payload = append(payload, filterBuf...)
+	if err := t.writeBytes(tid, scratchAddr, payload); err != nil {
+		return fmt.Errorf("escalation write BPF: %w", err)
+	}
+
+	// Skip prctl — PR_SET_NO_NEW_PRIVS already set by initial filter.
+	ret, err := t.injectSyscall(tid, savedRegs, unix.SYS_SECCOMP,
+		seccompSetModeFilter, 0, scratchAddr, 0, 0, 0)
+	if err != nil {
+		return fmt.Errorf("escalation inject seccomp: %w", err)
+	}
+	if ret != 0 {
+		return fmt.Errorf("escalation seccomp returned %d (%s)", ret, unix.Errno(-ret))
+	}
+
+	slog.Info("seccomp escalation filter installed", "tid", tid, "syscalls", syscalls)
+	return nil
+}
