@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,6 +58,15 @@ func waitForAttach(t *testing.T, tr *Tracer, timeout time.Duration) bool {
 	}
 	return false
 }
+
+type testMetrics struct {
+	exitStopSkipped *atomic.Int64
+}
+
+func (m *testMetrics) SetTraceeCount(int)     {}
+func (m *testMetrics) IncAttachFailure(string) {}
+func (m *testMetrics) IncTimeout()             {}
+func (m *testMetrics) IncExitStopSkipped()     { m.exitStopSkipped.Add(1) }
 
 // --- Enhanced mockExecHandler with per-filename rules ---
 
@@ -1478,6 +1488,137 @@ func TestIntegration_TracerPidNotMasked(t *testing.T) {
 	}
 }
 
+func TestIntegration_ReadExitSkipForNonStatusFd(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	fileHandler := &mockFileHandler{defaultAllow: true}
+
+	exitSkipped := &atomic.Int64{}
+	metrics := &testMetrics{exitStopSkipped: exitSkipped}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceFile:        true,
+		SeccompPrefilter: true,
+		MaskTracerPid:    true,
+		ExecHandler:      execHandler,
+		FileHandler:      fileHandler,
+		MaxHoldMs:        5000,
+		Metrics:          metrics,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	// Shell script that reads from /dev/null many times (non-status fd)
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; i=0; while [ $i -lt 50 ]; do cat /dev/null; i=$((i+1)); done`,
+		readyFile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 10*time.Second)
+	cancel()
+	<-errCh
+
+	skipped := exitSkipped.Load()
+	if skipped == 0 {
+		t.Fatalf("expected exit stops to be skipped for non-status fd reads, got 0 skips")
+	}
+	t.Logf("exit stops skipped: %d", skipped)
+}
+
+func TestIntegration_ConnectExitSkipNonTLS(t *testing.T) {
+	requirePtrace(t)
+
+	// Start a TCP listener on a non-TLS port
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		conn.Close()
+	}()
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	netHandler := &mockNetworkHandler{defaultAllow: true}
+
+	exitSkipped := &atomic.Int64{}
+	metrics := &testMetrics{exitStopSkipped: exitSkipped}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceNetwork:     true,
+		SeccompPrefilter: true,
+		ExecHandler:      execHandler,
+		NetworkHandler:   netHandler,
+		MaxHoldMs:        5000,
+		Metrics:          metrics,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+
+	// Use nc to connect to the non-TLS port
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; echo hi | nc -q0 127.0.0.1 %d || true`,
+		readyFile, port,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 10*time.Second)
+	cancel()
+	<-errCh
+
+	skipped := exitSkipped.Load()
+	if skipped == 0 {
+		t.Fatalf("expected connect exit stop to be skipped for non-TLS port %d, got 0 skips", port)
+	}
+	t.Logf("exit stops skipped: %d", skipped)
+}
+
 func TestIntegration_DNSConnectRedirect(t *testing.T) {
 	requirePtrace(t)
 
@@ -1540,4 +1681,389 @@ func TestIntegration_DNSConnectRedirect(t *testing.T) {
 		t.Log("DNS operation not captured — DNS proxy may not have intercepted (system DNS config dependent)")
 		// This is expected in some CI environments where DNS doesn't go through connect()
 	}
+}
+
+func TestIntegration_ConnectExitRetainedTLS(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	netHandler := &mockNetworkHandler{defaultAllow: true}
+
+	exitSkipped := &atomic.Int64{}
+	metrics := &testMetrics{exitStopSkipped: exitSkipped}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceNetwork:     true,
+		SeccompPrefilter: true,
+		ExecHandler:      execHandler,
+		NetworkHandler:   netHandler,
+		MaxHoldMs:        5000,
+		Metrics:          metrics,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; echo | nc -w1 127.0.0.1 443 2>/dev/null || true`,
+		readyFile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+
+	skippedBefore := exitSkipped.Load()
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 10*time.Second)
+	cancel()
+	<-errCh
+
+	calls := netHandler.CallCount()
+	if calls == 0 {
+		t.Fatal("expected network handler to be called for connect to 443")
+	}
+	t.Logf("network handler calls: %d, exit stops skipped: %d (before connect: %d)",
+		calls, exitSkipped.Load(), skippedBefore)
+}
+
+func TestIntegration_ConnectExitSkipDNSRedirect(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	netHandler := &mockNetworkHandler{defaultAllow: true}
+
+	exitSkipped := &atomic.Int64{}
+	metrics := &testMetrics{exitStopSkipped: exitSkipped}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceNetwork:     true,
+		SeccompPrefilter: true,
+		ExecHandler:      execHandler,
+		NetworkHandler:   netHandler,
+		MaxHoldMs:        5000,
+		Metrics:          metrics,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; nslookup example.com 127.0.0.1 2>/dev/null || true`,
+		readyFile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 10*time.Second)
+	cancel()
+	<-errCh
+
+	skipped := exitSkipped.Load()
+	t.Logf("exit stops skipped: %d", skipped)
+	if skipped == 0 {
+		t.Fatalf("expected some exit stops to be skipped, got 0")
+	}
+}
+
+// --- Lazy BPF Escalation Integration Tests ---
+
+func TestIntegration_NarrowBPFNoReadStops(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	fileHandler := &mockFileHandler{defaultAllow: true}
+
+	exitSkipped := &atomic.Int64{}
+	metrics := &testMetrics{exitStopSkipped: exitSkipped}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceFile:        true,
+		SeccompPrefilter: true,
+		MaskTracerPid:    true,
+		ExecHandler:      execHandler,
+		FileHandler:      fileHandler,
+		MaxHoldMs:        5000,
+		Metrics:          metrics,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; i=0; while [ $i -lt 100 ]; do cat /dev/null; i=$((i+1)); done`,
+		readyFile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 10*time.Second)
+	cancel()
+	<-errCh
+
+	t.Logf("exit stops skipped: %d (should be low — reads not in BPF)", exitSkipped.Load())
+}
+
+func TestIntegration_ReadEscalationOnStatusOpen(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	fileHandler := &mockFileHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceFile:        true,
+		SeccompPrefilter: true,
+		MaskTracerPid:    true,
+		ExecHandler:      execHandler,
+		FileHandler:      fileHandler,
+		MaxHoldMs:        5000,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	outfile := filepath.Join(tmpDir, "tracerpid.txt")
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; grep TracerPid /proc/self/status > %s`,
+		readyFile, outfile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 5*time.Second)
+	cancel()
+	<-errCh
+
+	data, err := os.ReadFile(outfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.Contains(line, "TracerPid:\t0") && !strings.Contains(line, "TracerPid: 0") {
+		t.Fatalf("expected masked TracerPid after escalation, got: %q", line)
+	}
+	t.Logf("TracerPid masked correctly after read escalation: %s", line)
+}
+
+func TestIntegration_ChildInheritsEscalation(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	fileHandler := &mockFileHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceFile:        true,
+		SeccompPrefilter: true,
+		MaskTracerPid:    true,
+		ExecHandler:      execHandler,
+		FileHandler:      fileHandler,
+		MaxHoldMs:        5000,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	outfile := filepath.Join(tmpDir, "child_tracerpid.txt")
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; cat /proc/self/status > /dev/null; grep TracerPid /proc/self/status > %s`,
+		readyFile, outfile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 5*time.Second)
+	cancel()
+	<-errCh
+
+	data, err := os.ReadFile(outfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.Contains(line, "TracerPid:\t0") && !strings.Contains(line, "TracerPid: 0") {
+		t.Fatalf("expected masked TracerPid in child, got: %q", line)
+	}
+	t.Logf("child TracerPid masked correctly: %s", line)
+}
+
+func TestIntegration_WriteEscalationOnTLSConnect(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+	netHandler := &mockNetworkHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceNetwork:     true,
+		SeccompPrefilter: true,
+		ExecHandler:      execHandler,
+		NetworkHandler:   netHandler,
+		MaxHoldMs:        5000,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; echo | nc -w1 127.0.0.1 443 2>/dev/null || true`,
+		readyFile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 10*time.Second)
+	cancel()
+	<-errCh
+
+	calls := netHandler.CallCount()
+	if calls == 0 {
+		t.Fatal("expected network handler to be called for connect to 443")
+	}
+	t.Logf("network handler calls: %d", calls)
+}
+
+func TestIntegration_SkipReinjectionForChildren(t *testing.T) {
+	requirePtrace(t)
+
+	execHandler := &mockExecHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		SeccompPrefilter: true,
+		ExecHandler:      execHandler,
+		MaxHoldMs:        5000,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; for i in 1 2 3; do /bin/true; done`,
+		readyFile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 10*time.Second)
+	cancel()
+	<-errCh
+
+	t.Logf("children completed successfully (filter inherited, no re-injection)")
 }

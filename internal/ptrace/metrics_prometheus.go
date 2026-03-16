@@ -8,6 +8,7 @@ type PtraceMetricsCollector interface {
 	SetPtraceTraceeCount(n int)
 	IncPtraceAttachFailure(reason string)
 	IncPtraceTimeout()
+	IncPtraceExitStopSkipped()
 }
 
 // prometheusMetrics adapts a PtraceMetricsCollector to the ptrace.Metrics interface.
@@ -27,3 +28,4 @@ func NewPrometheusMetrics(c PtraceMetricsCollector) Metrics {
 func (m *prometheusMetrics) SetTraceeCount(n int)          { m.c.SetPtraceTraceeCount(n) }
 func (m *prometheusMetrics) IncAttachFailure(reason string) { m.c.IncPtraceAttachFailure(reason) }
 func (m *prometheusMetrics) IncTimeout()                    { m.c.IncPtraceTimeout() }
+func (m *prometheusMetrics) IncExitStopSkipped()            { m.c.IncPtraceExitStopSkipped() }

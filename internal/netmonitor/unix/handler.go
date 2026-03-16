@@ -328,7 +328,7 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 			_ = seccomp.NotifRespond(fd, &resp)
 			return
 		}
-		if err := handleRedirect(int(fd), req.ID, ectx, execveArgs.FilenamePtr, h.stubSymlinkPath, originalFilenameLen); err != nil {
+		if err := handleRedirect(int(fd), req.ID, ectx, execveArgs.FilenamePtr, h.stubSymlinkPath, originalFilenameLen, result.Redirect); err != nil {
 			slog.Error("redirect failed, denying", "pid", pid, "error", err)
 			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EPERM)}
 			_ = seccomp.NotifRespond(fd, &resp)

@@ -163,6 +163,15 @@ type TraceeState struct {
 	HasPrefilter     bool // true if seccomp prefilter is installed for this tracee
 	PendingPrefilter bool // inject seccomp filter on next syscall stop
 	NeedExitStop     bool // resume with PtraceSyscall to catch exit
+	// TGID-level: any thread in this TGID triggered escalation
+	NeedsReadEscalation  bool
+	NeedsWriteEscalation bool
+	// Per-thread: escalation filter installed on this specific thread
+	ThreadHasReadEscalation  bool
+	ThreadHasWriteEscalation bool
+	// Deferred: inject escalation at next exit stop
+	PendingReadEscalation  bool
+	PendingWriteEscalation bool
 	IsVforkChild     bool
 	SuppressInitialStop bool // suppress initial SIGSTOP from auto-trace
 	PendingExecStubFD  int // fd injected for exec redirect; cleaned up on exec failure (-1 = none)
@@ -759,6 +768,61 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		t.mu.Unlock()
 	}
 
+	// Deferred BPF escalation: inject escalation filters at exit stops.
+	// Follows the same pattern as PendingPrefilter above.
+	// Only attempt injection when a seccomp prefilter is installed;
+	// without one, all syscalls are already traced via TRACESYSGOOD.
+	t.mu.Lock()
+	state = t.tracees[tid]
+	if state != nil && state.HasPrefilter && state.InSyscall && state.PendingReadEscalation {
+		state.PendingReadEscalation = false
+		state.InSyscall = false
+		t.mu.Unlock()
+		if err := t.injectEscalationFilter(tid, readEscalationSyscalls); err != nil {
+			slog.Warn("deferred read escalation failed", "tid", tid, "error", err)
+		} else {
+			t.mu.Lock()
+			if s := t.tracees[tid]; s != nil {
+				s.ThreadHasReadEscalation = true
+			}
+			t.mu.Unlock()
+		}
+		t.mu.Lock()
+		if s := t.tracees[tid]; s != nil {
+			s.InSyscall = true
+		}
+		t.mu.Unlock()
+	} else if state != nil && state.HasPrefilter && state.InSyscall && state.PendingWriteEscalation {
+		state.PendingWriteEscalation = false
+		state.InSyscall = false
+		t.mu.Unlock()
+		if err := t.injectEscalationFilter(tid, writeEscalationSyscalls); err != nil {
+			slog.Warn("deferred write escalation failed", "tid", tid, "error", err)
+		} else {
+			t.mu.Lock()
+			if s := t.tracees[tid]; s != nil {
+				s.ThreadHasWriteEscalation = true
+			}
+			t.mu.Unlock()
+		}
+		t.mu.Lock()
+		if s := t.tracees[tid]; s != nil {
+			s.InSyscall = true
+		}
+		t.mu.Unlock()
+	} else if state != nil && state.HasPrefilter && !state.InSyscall {
+		// Entry stop — set pending flags for next exit.
+		if state.NeedsReadEscalation && !state.ThreadHasReadEscalation {
+			state.PendingReadEscalation = true
+		}
+		if state.NeedsWriteEscalation && !state.ThreadHasWriteEscalation {
+			state.PendingWriteEscalation = true
+		}
+		t.mu.Unlock()
+	} else {
+		t.mu.Unlock()
+	}
+
 	t.mu.Lock()
 	state = t.tracees[tid]
 	if state == nil {
@@ -867,6 +931,13 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 		state.InSyscall = true
 		state.LastNr = nr
 		state.NeedExitStop = needsExitStop(nr)
+		// Seccomp stops are entry-only. Defer escalation to next exit stop.
+		if state.NeedsReadEscalation && !state.ThreadHasReadEscalation {
+			state.PendingReadEscalation = true
+		}
+		if state.NeedsWriteEscalation && !state.ThreadHasWriteEscalation {
+			state.PendingWriteEscalation = true
+		}
 	}
 	t.mu.Unlock()
 	if tgid != 0 {
@@ -892,7 +963,7 @@ func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, regs Regs
 	case isCloseSyscall(nr):
 		t.handleClose(ctx, tid, regs)
 	case isReadSyscall(nr):
-		t.allowSyscall(tid) // read is handled on exit, not entry
+		t.handleReadEntry(tid, regs)
 	default:
 		t.allowSyscall(tid)
 	}
@@ -938,6 +1009,8 @@ func (t *Tracer) handleOpenatExit(tid int, regs Regs) {
 
 	if isProcStatus(path) {
 		t.fds.trackStatusFd(tgid, fd)
+		// Escalate BPF to trace read/pread64 for this TGID.
+		t.escalateReadForTGID(tgid, tid)
 	}
 }
 
@@ -991,6 +1064,68 @@ func (t *Tracer) handleConnectExit(tid int, regs Regs) {
 		return // No domain known — skip TLS watch to avoid empty SNI rewrite
 	}
 	t.fds.watchTLS(tgid, fd, domain)
+	// Escalate BPF to trace write for this TGID.
+	t.escalateWriteForTGID(tgid, tid)
+}
+
+// escalateReadForTGID marks all threads in the TGID for read/pread64
+// escalation and injects the escalation filter into the triggering thread.
+func (t *Tracer) escalateReadForTGID(tgid int, triggerTID int) {
+	t.mu.Lock()
+	for _, s := range t.tracees {
+		if s.TGID == tgid {
+			s.NeedsReadEscalation = true
+		}
+	}
+	triggerState := t.tracees[triggerTID]
+	alreadyEscalated := triggerState != nil && triggerState.ThreadHasReadEscalation
+	hasPrefilter := triggerState != nil && triggerState.HasPrefilter
+	t.mu.Unlock()
+
+	if alreadyEscalated || !hasPrefilter {
+		return
+	}
+
+	if err := t.injectEscalationFilter(triggerTID, readEscalationSyscalls); err != nil {
+		slog.Warn("read escalation injection failed", "tid", triggerTID, "error", err)
+		return
+	}
+
+	t.mu.Lock()
+	if s := t.tracees[triggerTID]; s != nil {
+		s.ThreadHasReadEscalation = true
+	}
+	t.mu.Unlock()
+}
+
+// escalateWriteForTGID marks all threads in the TGID for write
+// escalation and injects the escalation filter into the triggering thread.
+func (t *Tracer) escalateWriteForTGID(tgid int, triggerTID int) {
+	t.mu.Lock()
+	for _, s := range t.tracees {
+		if s.TGID == tgid {
+			s.NeedsWriteEscalation = true
+		}
+	}
+	triggerState := t.tracees[triggerTID]
+	alreadyEscalated := triggerState != nil && triggerState.ThreadHasWriteEscalation
+	hasPrefilter := triggerState != nil && triggerState.HasPrefilter
+	t.mu.Unlock()
+
+	if alreadyEscalated || !hasPrefilter {
+		return
+	}
+
+	if err := t.injectEscalationFilter(triggerTID, writeEscalationSyscalls); err != nil {
+		slog.Warn("write escalation injection failed", "tid", triggerTID, "error", err)
+		return
+	}
+
+	t.mu.Lock()
+	if s := t.tracees[triggerTID]; s != nil {
+		s.ThreadHasWriteEscalation = true
+	}
+	t.mu.Unlock()
 }
 
 // handleNewChild processes a fork/clone/vfork event.
@@ -1025,22 +1160,40 @@ func (t *Tracer) handleNewChild(parentTID int, event int) {
 		existing.ParentPID = parent.TGID
 		existing.SessionID = parent.SessionID
 		existing.HasPrefilter = parent.HasPrefilter
-		existing.PendingPrefilter = parent.PendingPrefilter
+		// Children inherit parent's kernel filter stack via fork().
+		// Skip PendingPrefilter if parent already has a filter installed.
+		if parent.HasPrefilter {
+			existing.PendingPrefilter = false
+		} else {
+			existing.PendingPrefilter = parent.PendingPrefilter
+		}
+		existing.NeedsReadEscalation = parent.NeedsReadEscalation
+		existing.NeedsWriteEscalation = parent.NeedsWriteEscalation
+		existing.ThreadHasReadEscalation = parent.ThreadHasReadEscalation
+		existing.ThreadHasWriteEscalation = parent.ThreadHasWriteEscalation
 		existing.Attached = time.Now()
 	} else {
+		pendingPrefilter := false
+		if !parent.HasPrefilter {
+			pendingPrefilter = parent.PendingPrefilter
+		}
 		t.tracees[tid] = &TraceeState{
-			TID:                 tid,
-			TGID:                childTGID,
-			ParentPID:           parent.TGID,
-			SessionID:           parent.SessionID,
-			HasPrefilter:        parent.HasPrefilter,
-			PendingPrefilter:    parent.PendingPrefilter,
-			Attached:            time.Now(),
-			LastNr:              -1,
-			MemFD:               -1,
-			PendingExecStubFD:   -1,
-			PendingExecSavedFD:  -1,
-			SuppressInitialStop: true,
+			TID:                      tid,
+			TGID:                     childTGID,
+			ParentPID:                parent.TGID,
+			SessionID:                parent.SessionID,
+			HasPrefilter:             parent.HasPrefilter,
+			PendingPrefilter:         pendingPrefilter,
+			NeedsReadEscalation:      parent.NeedsReadEscalation,
+			NeedsWriteEscalation:     parent.NeedsWriteEscalation,
+			ThreadHasReadEscalation:  parent.ThreadHasReadEscalation,
+			ThreadHasWriteEscalation: parent.ThreadHasWriteEscalation,
+			Attached:                 time.Now(),
+			LastNr:                   -1,
+			MemFD:                    -1,
+			PendingExecStubFD:        -1,
+			PendingExecSavedFD:       -1,
+			SuppressInitialStop:      true,
 		}
 	}
 	t.metrics.SetTraceeCount(len(t.tracees))

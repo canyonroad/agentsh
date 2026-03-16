@@ -189,6 +189,12 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 		// Record redirect info keyed by TGID+fd for proxy PID attribution
 		t.fds.recordDNSRedirect(tgid, fd, tgid, sessionID, originalResolver)
 
+		t.mu.Lock()
+		if s := t.tracees[tid]; s != nil {
+			s.NeedExitStop = false
+		}
+		t.mu.Unlock()
+		t.metrics.IncExitStopSkipped()
 		t.allowSyscall(tid)
 		return
 	}
@@ -232,6 +238,14 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 
 	switch action {
 	case "allow", "continue":
+		if nr == unix.SYS_CONNECT && port != 443 && port != 853 {
+			t.mu.Lock()
+			if s := t.tracees[tid]; s != nil {
+				s.NeedExitStop = false
+			}
+			t.mu.Unlock()
+			t.metrics.IncExitStopSkipped()
+		}
 		t.allowSyscall(tid)
 	case "deny":
 		errno := result.Errno

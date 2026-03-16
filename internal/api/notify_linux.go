@@ -96,6 +96,7 @@ func (w *policyEngineWrapper) CheckExecve(filename string, argv []string, depth 
 		EffectiveDecision: string(dec.EffectiveDecision),
 		Rule:              dec.Rule,
 		Message:           dec.Message,
+		Redirect:          dec.Redirect,
 	}
 }
 

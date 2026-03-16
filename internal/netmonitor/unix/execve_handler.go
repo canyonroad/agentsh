@@ -52,6 +52,7 @@ type ExecveResult struct {
 	Reason   string
 	Errno    int32
 	Decision string // The actual policy decision (allow, deny, audit, redirect, approve)
+	Redirect *types.RedirectInfo
 }
 
 // PolicyChecker interface for policy evaluation
@@ -65,6 +66,7 @@ type PolicyDecision struct {
 	EffectiveDecision string // What actually happens (allow or deny, respects enforcement mode)
 	Rule              string
 	Message           string
+	Redirect          *types.RedirectInfo
 }
 
 // ApprovalRequester requests approval for exec operations.
@@ -332,6 +334,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 				Rule:     chosenDecision.Rule,
 				Reason:   chosenDecision.Message,
 				Decision: chosenDecision.Decision,
+				Redirect: chosenDecision.Redirect,
 			}
 			h.emitEvent(ctx, result, chosenDecision.Rule)
 			return result
@@ -394,6 +397,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 			Rule:     decision.Rule,
 			Reason:   decision.Message,
 			Decision: decision.Decision,
+			Redirect: decision.Redirect,
 		}
 		h.emitEvent(ctx, result, decision.Rule)
 		return result
@@ -406,6 +410,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 			Rule:     decision.Rule,
 			Reason:   decision.Message,
 			Decision: decision.Decision,
+			Redirect: decision.Redirect,
 		}
 		h.emitEvent(ctx, result, decision.Rule)
 		return result

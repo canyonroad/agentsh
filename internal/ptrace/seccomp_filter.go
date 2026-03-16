@@ -30,10 +30,10 @@ const (
 	auditArchAarch64 = 0xC00000B7
 )
 
-// buildPrefilterBPF generates a seccomp-BPF filter that returns
-// SECCOMP_RET_TRACE for syscalls the tracer handles and
-// SECCOMP_RET_ALLOW for everything else.
-func buildPrefilterBPF() ([]unix.SockFilter, error) {
+// buildBPFForSyscalls generates a seccomp-BPF filter that returns
+// SECCOMP_RET_TRACE for the given syscalls and SECCOMP_RET_ALLOW for
+// everything else.
+func buildBPFForSyscalls(syscalls []int) ([]unix.SockFilter, error) {
 	var auditArch uint32
 	switch runtime.GOARCH {
 	case "amd64":
@@ -44,38 +44,17 @@ func buildPrefilterBPF() ([]unix.SockFilter, error) {
 		return nil, fmt.Errorf("seccomp prefilter: unsupported architecture %s", runtime.GOARCH)
 	}
 
-	syscalls := tracedSyscallNumbers()
-
-	// Program layout:
-	//   [0] LD arch
-	//   [1] JEQ auditArch -> skip ALLOW (jt=1), fall through (jf=0)
-	//   [2] RET ALLOW  (wrong arch)
-	//   [3] LD nr
-	//   [4..4+len-1] JEQ for each syscall
-	//   [4+len] RET ALLOW  (default, no match)
-	//   [4+len+1] RET TRACE (matched)
-
 	n := len(syscalls)
 	prog := make([]unix.SockFilter, 0, 4+n+2)
 
-	// Load architecture.
 	prog = append(prog, unix.SockFilter{Code: bpfLD | bpfW | bpfABS, K: offsetArch})
-
-	// Check architecture: if match jump over the ALLOW, otherwise fall through to ALLOW.
 	prog = append(prog, unix.SockFilter{Code: bpfJMP | bpfJEQ | bpfK, Jt: 1, Jf: 0, K: auditArch})
-
-	// Wrong architecture: trace (fail closed). This ensures compat/x32
-	// tracees still generate ptrace stops rather than silently bypassing.
 	prog = append(prog, unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetTrace})
-
-	// Load syscall number.
 	prog = append(prog, unix.SockFilter{Code: bpfLD | bpfW | bpfABS, K: offsetNr})
 
-	// Compare each traced syscall. On match, jump to the RET TRACE
-	// instruction at the end. On mismatch, fall through to the next compare.
 	for i, nr := range syscalls {
-		remaining := n - i - 1 // remaining compare instructions after this one
-		jumpToTrace := uint8(remaining + 1) // +1 for the default RET ALLOW
+		remaining := n - i - 1
+		jumpToTrace := uint8(remaining + 1)
 		prog = append(prog, unix.SockFilter{
 			Code: bpfJMP | bpfJEQ | bpfK,
 			Jt:   jumpToTrace,
@@ -84,11 +63,27 @@ func buildPrefilterBPF() ([]unix.SockFilter, error) {
 		})
 	}
 
-	// Default: allow.
 	prog = append(prog, unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetAllow})
-
-	// Matched: trace.
 	prog = append(prog, unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetTrace})
 
 	return prog, nil
+}
+
+// buildPrefilterBPF generates the full prefilter (all traced syscalls).
+func buildPrefilterBPF() ([]unix.SockFilter, error) {
+	return buildBPFForSyscalls(tracedSyscallNumbers())
+}
+
+// buildNarrowPrefilterBPF generates a BPF filter that excludes read/write
+// syscalls from the traced set. Used as the initial filter; read/write are
+// lazily escalated per-TGID when needed.
+func buildNarrowPrefilterBPF() ([]unix.SockFilter, error) {
+	return buildBPFForSyscalls(narrowTracedSyscallNumbers())
+}
+
+// buildEscalationBPF generates a minimal BPF filter that traces only the
+// specified syscalls. Installed on top of the narrow filter via seccomp
+// stacking to add read/write when needed.
+func buildEscalationBPF(syscalls []int) ([]unix.SockFilter, error) {
+	return buildBPFForSyscalls(syscalls)
 }
