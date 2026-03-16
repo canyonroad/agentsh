@@ -97,15 +97,18 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 					var newDest []byte
 					if destFamily == unix.AF_INET {
 						newDest = buildSockaddrIn4(net.ParseIP("127.0.0.1").To4(), t.dnsProxy.port4)
-					} else {
+					} else if t.dnsProxy.port6 > 0 {
 						newDest = buildSockaddrIn6(net.ParseIP("::1"), t.dnsProxy.port6)
 						regs.SetArg(5, 28) // update addrlen
 						t.setRegs(tid, regs)
 					}
-					if err := t.writeBytes(tid, destAddrPtr, newDest); err == nil {
-						t.allowSyscall(tid)
-						return
+					if newDest != nil {
+						if err := t.writeBytes(tid, destAddrPtr, newDest); err == nil {
+							t.allowSyscall(tid)
+							return
+						}
 					}
+					// No IPv6 proxy or write failed — fall through to normal handling
 				}
 			}
 		}
@@ -172,13 +175,17 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 		var newSockaddr []byte
 		if family == unix.AF_INET {
 			newSockaddr = buildSockaddrIn4(net.ParseIP("127.0.0.1").To4(), t.dnsProxy.port4)
-		} else {
+		} else if t.dnsProxy.port6 > 0 {
 			newSockaddr = buildSockaddrIn6(net.ParseIP("::1"), t.dnsProxy.port6)
 			// Update addrlen register for larger sockaddr_in6
 			regs.SetArg(2, 28)
 			if err := t.setRegs(tid, regs); err != nil {
 				slog.Warn("handleNetwork: DNS redirect setRegs failed", "tid", tid, "error", err)
 			}
+		} else {
+			// No IPv6 proxy — let DNS connect proceed unmodified
+			t.allowSyscall(tid)
+			return
 		}
 		if err := t.writeBytes(tid, addrPtr, newSockaddr); err != nil {
 			slog.Warn("handleNetwork: DNS redirect write failed", "tid", tid, "error", err)

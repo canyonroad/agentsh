@@ -34,17 +34,22 @@ func newDNSProxy(handler NetworkHandler, fds *fdTracker) (*dnsProxy, error) {
 	}
 	port4 := conn4.LocalAddr().(*net.UDPAddr).Port
 
+	// IPv6 listener is best-effort — gVisor and some container runtimes
+	// block UDP6, so we fall back to IPv4-only DNS proxying.
+	var conn6 *net.UDPConn
+	var port6 int
 	udpAddr6, err := net.ResolveUDPAddr("udp6", "[::1]:0")
-	if err != nil {
-		conn4.Close()
-		return nil, fmt.Errorf("resolve UDP6 addr: %w", err)
+	if err == nil {
+		conn6, err = net.ListenUDP("udp6", udpAddr6)
+		if err != nil {
+			slog.Warn("dns_proxy: IPv6 listener unavailable, IPv4 only", "error", err)
+			conn6 = nil
+		} else {
+			port6 = conn6.LocalAddr().(*net.UDPAddr).Port
+		}
+	} else {
+		slog.Warn("dns_proxy: IPv6 resolve failed, IPv4 only", "error", err)
 	}
-	conn6, err := net.ListenUDP("udp6", udpAddr6)
-	if err != nil {
-		conn4.Close()
-		return nil, fmt.Errorf("listen UDP6: %w", err)
-	}
-	port6 := conn6.LocalAddr().(*net.UDPAddr).Port
 
 	return &dnsProxy{
 		handler:  handler,
@@ -57,16 +62,27 @@ func newDNSProxy(handler NetworkHandler, fds *fdTracker) (*dnsProxy, error) {
 }
 
 func (p *dnsProxy) addr4() string { return fmt.Sprintf("127.0.0.1:%d", p.port4) }
-func (p *dnsProxy) addr6() string { return fmt.Sprintf("[::1]:%d", p.port6) }
+func (p *dnsProxy) addr6() string {
+	if p.udpConn6 == nil {
+		return "<disabled>"
+	}
+	return fmt.Sprintf("[::1]:%d", p.port6)
+}
 
 func (p *dnsProxy) run(ctx context.Context) {
 	go func() {
 		<-ctx.Done()
 		p.udpConn4.Close()
-		p.udpConn6.Close()
+		if p.udpConn6 != nil {
+			p.udpConn6.Close()
+		}
 	}()
-	go p.listenUDP(ctx, p.udpConn4, unix.AF_INET)
-	p.listenUDP(ctx, p.udpConn6, unix.AF_INET6)
+	if p.udpConn6 != nil {
+		go p.listenUDP(ctx, p.udpConn4, unix.AF_INET)
+		p.listenUDP(ctx, p.udpConn6, unix.AF_INET6)
+	} else {
+		p.listenUDP(ctx, p.udpConn4, unix.AF_INET)
+	}
 }
 
 func (p *dnsProxy) listenUDP(ctx context.Context, conn *net.UDPConn, family int) {
