@@ -164,6 +164,9 @@ func (t *Tracer) handleFile(ctx context.Context, tid int, regs Regs) {
 	}
 	t.mu.Unlock()
 
+	// Reset scratch page so redirect/soft-delete operations start fresh.
+	t.resetScratchIfPresent(tgid)
+
 	result := t.cfg.FileHandler.HandleFile(ctx, FileContext{
 		PID:       tgid,
 		SessionID: sessionID,

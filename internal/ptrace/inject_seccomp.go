@@ -53,6 +53,9 @@ func (t *Tracer) injectSeccompFilter(tid int) error {
 	}
 	t.mu.Unlock()
 
+	// Reset scratch page so injection starts fresh.
+	t.resetScratchIfPresent(tgid)
+
 	// Get or allocate scratch page.
 	sp, err := t.ensureScratchPage(tid, tgid, savedRegs)
 	if err != nil {
@@ -151,6 +154,9 @@ func (t *Tracer) injectEscalationFilter(tid int, syscalls []int) error {
 		tgid = state.TGID
 	}
 	t.mu.Unlock()
+
+	// Reset scratch page so escalation injection starts fresh.
+	t.resetScratchIfPresent(tgid)
 
 	sp, err := t.ensureScratchPage(tid, tgid, savedRegs)
 	if err != nil {

@@ -24,6 +24,27 @@ func (r *procMemReader) read(addr uint64, buf []byte) error {
 	return err
 }
 
+// vmReader reads via process_vm_readv, falling back to /proc/<tid>/mem pread.
+// process_vm_readv copies directly between address spaces without going through
+// the kernel VFS layer, which is faster for bulk reads.
+type vmReader struct {
+	tid      int
+	fallback procMemReader
+}
+
+func (r *vmReader) read(addr uint64, buf []byte) error {
+	if len(buf) == 0 {
+		return nil
+	}
+	liov := unix.Iovec{Base: &buf[0], Len: uint64(len(buf))}
+	riov := unix.RemoteIovec{Base: uintptr(addr), Len: len(buf)}
+	_, err := unix.ProcessVMReadv(r.tid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil {
+		return r.fallback.read(addr, buf)
+	}
+	return nil
+}
+
 func readBytesFrom(r memReader, addr uint64, buf []byte) error {
 	return r.read(addr, buf)
 }
@@ -101,7 +122,7 @@ func (t *Tracer) getMemReader(tid int) (memReader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &procMemReader{fd: fd}, nil
+	return &vmReader{tid: tid, fallback: procMemReader{fd: fd}}, nil
 }
 
 func (t *Tracer) readBytes(tid int, addr uint64, buf []byte) error {
@@ -121,9 +142,20 @@ func (t *Tracer) readString(tid int, addr uint64, maxLen int) (string, error) {
 }
 
 func (t *Tracer) writeBytes(tid int, addr uint64, buf []byte) error {
-	fd, err := t.ensureMemFD(tid)
-	if err != nil {
-		return err
+	if len(buf) == 0 {
+		return nil
+	}
+	// Try process_vm_writev first (direct address-space copy, no VFS overhead).
+	liov := unix.Iovec{Base: &buf[0], Len: uint64(len(buf))}
+	riov := unix.RemoteIovec{Base: uintptr(addr), Len: len(buf)}
+	_, err := unix.ProcessVMWritev(tid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err == nil {
+		return nil
+	}
+	// Fallback to /proc/<tid>/mem pwrite.
+	fd, ferr := t.ensureMemFD(tid)
+	if ferr != nil {
+		return ferr
 	}
 	_, err = unix.Pwrite(fd, buf, int64(addr))
 	return err

@@ -24,6 +24,9 @@ func (t *Tracer) handleWrite(ctx context.Context, tid int, regs Regs) {
 	}
 	t.mu.Unlock()
 
+	// Reset scratch page so SNI rewrite operations start fresh.
+	t.resetScratchIfPresent(tgid)
+
 	domain, watched := t.fds.getTLSWatch(tgid, fd)
 	if !watched {
 		t.allowSyscall(tid)
