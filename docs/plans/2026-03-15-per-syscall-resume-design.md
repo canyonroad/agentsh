@@ -1,7 +1,7 @@
 # Design: Per-Syscall Resume Optimization for Ptrace Prefilter
 
 **Date:** 2026-03-15
-**Status:** Draft
+**Status:** Implemented
 
 ---
 

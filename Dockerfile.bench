@@ -268,8 +268,17 @@ sandbox:
   ptrace:
     enabled: ${ptrace_enabled}
     attach_mode: "children"
+    mask_tracer_pid: "off"
+    on_attach_failure: fail_open
+    trace:
+      execve: true
+      file: true
+      network: true
+      signal: true
     performance:
       seccomp_prefilter: true
+      max_tracees: 500
+      max_hold_ms: 5000
 YAML
   echo "${dir}/config.yaml"
 }

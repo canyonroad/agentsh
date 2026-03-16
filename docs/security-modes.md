@@ -398,35 +398,39 @@ Note: In ptrace mode, there is a brief pre-attach window between fork and PTRACE
 
 ## Performance Benchmarks
 
-Measured with `make bench`, which runs a Dockerized workload under each mode (baseline with sandbox disabled, full seccomp+FUSE, ptrace) using a realistic policy with deny, redirect, and allow rules plus full audit logging. Results are median of 3 runs.
+Measured with `make bench`, which runs a Dockerized workload under each mode (baseline with sandbox disabled, full seccomp, ptrace with seccomp prefilter + per-syscall resume) using a realistic policy with deny, redirect, and allow rules plus full audit logging. Results are median of 3 runs.
 
 ### Results
 
 | Phase | Baseline | Full mode | Full overhead | Ptrace | Ptrace overhead |
 |---|---|---|---|---|---|
-| Process spawn (120 execs) | 3540ms | 3566ms | +0.7% | 3553ms | +0.4% |
-| File I/O (1000 ops) | 272ms | 273ms | +0.4% | 268ms | -1.5% |
-| Git workflow (clone+grep+commit) | 53ms | 52ms | -1.9% | 53ms | +0.0% |
-| Network (10 curl) | 374ms | 354ms | -5.3% | 354ms | -5.3% |
-| Deny enforcement (50 blocked) | 610ms | 590ms | -3.3% | 594ms | -2.6% |
-| Redirect enforcement (50 redirected) | 1787ms | 1794ms | +0.4% | 1772ms | -0.8% |
-| Deep process tree (20x 4-level) | 624ms | 639ms | +2.4% | 636ms | +1.9% |
-| Wide process tree (10x 10-fan) | 328ms | 331ms | +0.9% | 319ms | -2.7% |
-| **Total** | **7588ms** | **7599ms** | **+0.1%** | **7549ms** | **-0.5%** |
+| Process spawn (120 execs) | 3773ms | 3604ms | -4.5% | 19098ms | +406% |
+| File I/O (1000 ops) | 277ms | 277ms | +0.0% | 948ms | +242% |
+| Git workflow (clone+grep+commit) | 56ms | 55ms | -1.8% | 624ms | +1014% |
+| Network (10 curl) | 389ms | 362ms | -6.9% | 13195ms | +3292% |
+| Deny enforcement (50 blocked) | 655ms | 612ms | -6.6% | 627ms | -4.3% |
+| Redirect enforcement (50 redirected) | 2060ms | 1789ms | -13.2% | 6313ms | +207% |
+| Deep process tree (20x 4-level) | 678ms | 640ms | -5.6% | 13208ms | +1848% |
+| Wide process tree (10x 10-fan) | 328ms | 337ms | +2.7% | 1998ms | +509% |
+| **Total** | **8216ms** | **7676ms** | **-6.6%** | **56011ms** | **+582%** |
 
 ### Analysis
 
-Both full mode and ptrace mode add **less than 3% overhead** across all workload types. The variance between runs (3-5%) exceeds the actual mechanism overhead, making the three modes statistically indistinguishable.
+**Full mode** (seccomp+execve interception) adds **no measurable overhead** — variance between runs exceeds mechanism cost.
 
-**Why overhead is so low:**
+**Ptrace mode** adds **~6x total overhead** with the seccomp prefilter and per-syscall resume optimization. This is expected — ptrace intercepts syscalls via context switches rather than kernel-internal notification. Breakdown:
 
-1. **Per-exec RPC dominates.** Each `agentsh exec` call goes through the CLI → HTTP → server → fork/exec path (~30ms). With 120 flat execs, that alone accounts for ~3.5s. The sandbox mechanism cost (seccomp user-notify dispatch or ptrace SEIZE + syscall traps) is a fraction of a millisecond per exec — invisible against the RPC overhead.
+1. **Per-exec RPC dominates.** Each `agentsh exec` call goes through CLI → HTTP → server → fork/exec (~30ms). The ptrace attach (PTRACE_SEIZE + seccomp BPF injection + WaitAttached) adds ~15ms per exec on top.
 
-2. **Policy evaluation is fast.** Even with a realistic policy (30+ rules with deny, redirect, and allow decisions) and full audit logging (SQLite + JSONL), policy evaluation adds negligible latency. Deny and redirect decisions short-circuit before the command is forked.
+2. **Deny enforcement is free.** Policy deny short-circuits before fork, so ptrace overhead is zero for denied commands.
 
-3. **File I/O is unaffected.** The file I/O phase runs 1000 operations inside a single exec. FUSE intercepts each file operation in full mode, and ptrace traps each `openat`/`unlinkat` syscall — but the per-operation overhead (~1μs) is lost in the noise of the actual I/O.
+3. **File I/O is moderate (~3.4x).** The 1000-op file phase runs inside a single exec. Ptrace traps each `openat`/`unlinkat` at entry; only `openat` needs exit processing (fd tracking). The seccomp prefilter skips non-traced syscalls.
 
-4. **Process tree tracking scales.** Deep trees (4-level sh→sh→sh→sh→true) and wide trees (10 parallel children) show no measurable overhead. Ptrace auto-attaches to fork/clone descendants via `PTRACE_O_TRACECLONE`, and seccomp prefiltering ensures only traced syscalls generate events.
+4. **Network is expensive (~34x).** `curl` generates hundreds of syscalls (DNS, TLS, connect, read/write). Each traced syscall generates an entry stop, and `read`/`connect` need exit stops too. This is the worst case for ptrace.
+
+5. **Process trees scale with depth (~19x).** Deep nesting (sh→sh→sh→sh→true) multiplies the per-exec attach cost. Wide fan-out (10 parallel children, ~6x) is better since children inherit the seccomp filter via fork.
+
+6. **Ptrace mode is designed for restricted environments** (e.g., AWS Fargate) where seccomp user-notify, eBPF, and FUSE are unavailable. The overhead tradeoff is acceptable for these environments where no alternative enforcement mechanism exists.
 
 ### Reproducing
 
@@ -434,7 +438,7 @@ Both full mode and ptrace mode add **less than 3% overhead** across all workload
 make bench
 ```
 
-Requires Docker with `--cap-add SYS_ADMIN --cap-add SYS_PTRACE --device /dev/fuse --security-opt seccomp=unconfined`. Total runtime ~5-10 minutes.
+Requires Docker with `--cap-add SYS_ADMIN --cap-add SYS_PTRACE --device /dev/fuse --security-opt seccomp=unconfined`. Total runtime ~15-20 minutes.
 
 ## Related Documentation
 
