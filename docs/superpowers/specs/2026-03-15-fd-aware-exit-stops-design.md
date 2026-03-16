@@ -121,7 +121,7 @@ case "allow", "continue":
     t.allowSyscall(tid)
 ```
 
-**Redirect path (`case "redirect":`)**: `redirectConnect` rewrites the sockaddr and always needs `PtraceSyscall` for fixup. `NeedExitStop` stays true. No change needed.
+**Redirect path (`case "redirect":`)**: `redirectConnect` (redirect_net.go) rewrites the sockaddr in tracee memory and calls `allowSyscall`. The exit stop is needed because the redirect target port may be 443/853, which would trigger `handleConnectExit` to set up TLS fd watching for SNI rewrite. Since the redirect target isn't known at compile time (it comes from the policy handler's `RedirectPort`), we conservatively keep `NeedExitStop = true`. No change needed.
 
 ### Unchanged
 
@@ -180,9 +180,12 @@ If a status fd is somehow not tracked (fd tracker bug), the entry check would cl
 ## 6. Testing
 
 - **Existing tests**: All 76+ integration tests pass unchanged. No behavioral change for correctly-traced scenarios.
-- **New test**: `TestIntegration_ReadExitSkipForNonStatusFd` — trace a process that does many reads on a socket fd. Verify via timing or metrics that exit stops are not generated.
-- **Regression test**: `TestIntegration_TracerPidMasked` — confirm TracerPid is still masked when reading `/proc/self/status`. The entry check should set `NeedExitStop = true` for status fds.
-- **Benchmark**: Re-run `make bench` network phase. Target: ~37x overhead reduced to ~15-20x. The entry stops still happen (BPF can't filter by fd), but eliminating exit stops cuts context switches roughly in half for read-heavy workloads.
+- **New test — read exit skip**: `TestIntegration_ReadExitSkipForNonStatusFd` — trace a process that does many reads on a socket fd. Assert deterministically via a new `Metrics.ExitStopsSkipped` counter (incremented in `handleReadEntry` when `NeedExitStop` is cleared) that exit stops were skipped. Do not rely on timing.
+- **New test — connect exit skip (non-TLS)**: `TestIntegration_ConnectExitSkipNonTLS` — trace a process that connects to a non-TLS port (e.g., port 80). Assert via the same counter mechanism that the connect exit stop was skipped.
+- **New test — connect exit retained (TLS)**: `TestIntegration_ConnectExitRetainedTLS` — trace a process that connects to port 443. Assert that the exit stop was NOT skipped and `handleConnectExit` ran (verify via TLS fd watch state).
+- **New test — connect exit skip (DNS redirect)**: `TestIntegration_ConnectExitSkipDNSRedirect` — trace a process that connects to port 53 with DNS proxy active. Assert that the exit stop was skipped.
+- **Regression test**: `TestIntegration_TracerPidMasked` (existing) — confirm TracerPid is still masked when reading `/proc/self/status`. The entry check should set `NeedExitStop = true` for status fds.
+- **Benchmark**: Re-run `make bench` network phase. Target: ~37x overhead reduced to ~15-20x.
 
 ## 7. Performance Model
 
