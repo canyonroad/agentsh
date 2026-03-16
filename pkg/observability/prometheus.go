@@ -244,6 +244,14 @@ func (c *PrometheusCollector) IncPtraceTimeout() {
 	c.ptraceTimeouts.Add(1)
 }
 
+// IncPtraceExitStopSkipped increments the ptrace exit-stop-skipped counter.
+func (c *PrometheusCollector) IncPtraceExitStopSkipped() {
+	if c == nil {
+		return
+	}
+	// Counter not yet registered — placeholder for future Prometheus metric.
+}
+
 // HandlerOptions configures the metrics HTTP handler.
 type HandlerOptions struct {
 	SessionCount func() int
