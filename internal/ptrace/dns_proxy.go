@@ -123,9 +123,10 @@ func (p *dnsProxy) handleQuery(ctx context.Context, conn *net.UDPConn, raw []byt
 	q := msg.Questions[0]
 	domain := strings.TrimSuffix(q.Name.String(), ".")
 
-	// TODO(Task 9): Wire proper TGID+fd attribution from the redirected
-	// UDP socket so PID, SessionID, and originalResolver are populated.
-	redirectInfo := dnsRedirectInfo{}
+	// Use the most recently recorded DNS redirect info for session attribution.
+	// This covers the common single-session case; full per-port attribution
+	// (Task 9) can be added later for multi-session scenarios.
+	redirectInfo, _ := p.fds.getLastDNSRedirect()
 
 	result := p.handler.HandleNetwork(ctx, NetworkContext{
 		PID:       redirectInfo.pid,
@@ -162,6 +163,9 @@ func (p *dnsProxy) handleQuery(ctx context.Context, conn *net.UDPConn, raw []byt
 
 	if err != nil {
 		slog.Warn("dns_proxy: failed to build response", "error", err, "domain", domain)
+		if fallback, ferr := p.buildSERVFAIL(msg); ferr == nil {
+			conn.WriteToUDP(fallback, remoteAddr)
+		}
 		return
 	}
 

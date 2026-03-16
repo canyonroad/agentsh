@@ -88,7 +88,7 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 		if destAddrPtr != 0 && destAddrLen > 0 && destAddrLen <= 128 {
 			destBuf := make([]byte, destAddrLen)
 			if err := t.readBytes(tid, destAddrPtr, destBuf); err == nil {
-				destFamily, _, destPort, err := parseSockaddr(destBuf)
+				destFamily, destAddr, destPort, err := parseSockaddr(destBuf)
 				if err == nil && destPort == 53 &&
 					(destFamily == unix.AF_INET || destFamily == unix.AF_INET6) &&
 					((destFamily == unix.AF_INET && destAddrLen >= 16) ||
@@ -104,6 +104,14 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 					}
 					if newDest != nil {
 						if err := t.writeBytes(tid, destAddrPtr, newDest); err == nil {
+							// Record redirect info for DNS proxy session attribution
+							t.mu.Lock()
+							state := t.tracees[tid]
+							if state != nil {
+								fd := int(int32(regs.Arg(0)))
+								t.fds.recordDNSRedirect(state.TGID, fd, state.TGID, state.SessionID, fmt.Sprintf("%s:%d", destAddr, destPort))
+							}
+							t.mu.Unlock()
 							t.allowSyscall(tid)
 							return
 						}

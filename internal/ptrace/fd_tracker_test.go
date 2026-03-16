@@ -117,3 +117,62 @@ func TestFdTracker_NoWatchOnEmptyDomain(t *testing.T) {
 		t.Fatal("TLS watch should not be armed for unknown domain")
 	}
 }
+
+func TestFdTracker_GetLastDNSRedirect_Empty(t *testing.T) {
+	ft := newFdTracker()
+	_, ok := ft.getLastDNSRedirect()
+	if ok {
+		t.Fatal("expected no last redirect on fresh fdTracker")
+	}
+}
+
+func TestFdTracker_GetLastDNSRedirect_Single(t *testing.T) {
+	ft := newFdTracker()
+	ft.recordDNSRedirect(100, 3, 100, "sess-1", "8.8.8.8:53")
+
+	info, ok := ft.getLastDNSRedirect()
+	if !ok {
+		t.Fatal("expected last redirect to be set")
+	}
+	if info.pid != 100 {
+		t.Fatalf("expected pid 100, got %d", info.pid)
+	}
+	if info.sessionID != "sess-1" {
+		t.Fatalf("expected session sess-1, got %q", info.sessionID)
+	}
+	if info.originalResolver != "8.8.8.8:53" {
+		t.Fatalf("expected resolver 8.8.8.8:53, got %q", info.originalResolver)
+	}
+}
+
+func TestFdTracker_GetLastDNSRedirect_Overwrites(t *testing.T) {
+	ft := newFdTracker()
+	ft.recordDNSRedirect(100, 3, 100, "sess-1", "8.8.8.8:53")
+	ft.recordDNSRedirect(200, 5, 200, "sess-2", "1.1.1.1:53")
+
+	info, ok := ft.getLastDNSRedirect()
+	if !ok {
+		t.Fatal("expected last redirect to be set")
+	}
+	if info.sessionID != "sess-2" {
+		t.Fatalf("expected latest session sess-2, got %q", info.sessionID)
+	}
+	if info.pid != 200 {
+		t.Fatalf("expected pid 200, got %d", info.pid)
+	}
+}
+
+func TestFdTracker_GetLastDNSRedirect_SurvivesPerKeyRemoval(t *testing.T) {
+	ft := newFdTracker()
+	ft.recordDNSRedirect(100, 3, 100, "sess-1", "8.8.8.8:53")
+	ft.removeDNSRedirect(100, 3)
+
+	// lastDNSRedirect should still be set even after per-key removal
+	info, ok := ft.getLastDNSRedirect()
+	if !ok {
+		t.Fatal("expected last redirect to survive per-key removal")
+	}
+	if info.sessionID != "sess-1" {
+		t.Fatalf("expected session sess-1, got %q", info.sessionID)
+	}
+}
