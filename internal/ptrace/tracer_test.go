@@ -61,3 +61,28 @@ func TestTracerConfig_HandlerFields(t *testing.T) {
 		t.Error("SignalHandler should be nil by default")
 	}
 }
+
+func TestNeedsExitStop(t *testing.T) {
+	exitNeeded := []int{
+		unix.SYS_READ, unix.SYS_PREAD64,
+		unix.SYS_OPENAT, unix.SYS_OPENAT2,
+		unix.SYS_CONNECT,
+		unix.SYS_EXECVE, unix.SYS_EXECVEAT,
+	}
+	for _, nr := range exitNeeded {
+		if !needsExitStop(nr) {
+			t.Errorf("needsExitStop(%d) = false, want true", nr)
+		}
+	}
+
+	entryOnly := []int{
+		unix.SYS_WRITE, unix.SYS_CLOSE, unix.SYS_KILL,
+		unix.SYS_BIND, unix.SYS_SOCKET, unix.SYS_SENDTO,
+		unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
+	}
+	for _, nr := range entryOnly {
+		if needsExitStop(nr) {
+			t.Errorf("needsExitStop(%d) = true, want false", nr)
+		}
+	}
+}

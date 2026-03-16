@@ -162,6 +162,7 @@ type TraceeState struct {
 	PendingInterrupt      bool
 	HasPrefilter     bool // true if seccomp prefilter is installed for this tracee
 	PendingPrefilter bool // inject seccomp filter on next syscall stop
+	NeedExitStop     bool // resume with PtraceSyscall to catch exit
 	IsVforkChild     bool
 	SuppressInitialStop bool // suppress initial SIGSTOP from auto-trace
 	PendingExecStubFD  int // fd injected for exec redirect; cleaned up on exec failure (-1 = none)
@@ -448,15 +449,54 @@ func (t *Tracer) setRegs(tid int, regs Regs) error {
 	return setRegsArch(tid, regs)
 }
 
+// needsExitStop returns true for syscalls that need exit-time processing.
+// These syscalls must be resumed with PtraceSyscall (not PtraceCont) so the
+// tracer catches the exit stop. All other traced syscalls are entry-only and
+// can use PtraceCont to skip directly to the next seccomp event.
+func needsExitStop(nr int) bool {
+	switch nr {
+	case unix.SYS_READ, unix.SYS_PREAD64: // handleReadExit (TracerPid masking)
+		return true
+	case unix.SYS_OPENAT: // handleOpenatExit (fd tracking)
+		return true
+	case unix.SYS_OPENAT2: // handleOpenatExit (fd tracking)
+		return true
+	case unix.SYS_CONNECT: // handleConnectExit (TLS fd watch)
+		return true
+	case unix.SYS_EXECVE, unix.SYS_EXECVEAT: // failed exec needs exit to reset InSyscall
+		return true
+	}
+	return false
+}
+
+// mustCatchExit returns true if the tracee must be resumed with PtraceSyscall
+// to catch the syscall exit stop. True when NeedExitStop is set or when
+// pending fixups (deny errno, fake zero, return override, exec stub) require
+// exit-time processing.
+func mustCatchExit(s *TraceeState) bool {
+	if s == nil {
+		return false
+	}
+	return s.NeedExitStop || s.PendingDenyErrno != 0 || s.PendingFakeZero || s.HasPendingReturn || s.PendingExecStubFD >= 0
+}
+
 // allowSyscall resumes the tracee, allowing the syscall to proceed.
 func (t *Tracer) allowSyscall(tid int) {
-	// Always use PtraceSyscall to catch syscall-exit stops, which are needed
-	// for exit-time handlers (TracerPid masking, fd tracking, TLS SNI, etc.).
-	// In prefilter mode, the BPF filter ensures only traced syscalls generate
-	// entry stops; PtraceSyscall then catches their exits. Non-traced syscalls
-	// don't stop at all (BPF returns ALLOW), so this is still efficient.
+	t.mu.Lock()
+	hasPrefilter := false
+	needExit := false
+	if s := t.tracees[tid]; s != nil {
+		hasPrefilter = s.HasPrefilter
+		needExit = mustCatchExit(s)
+	}
+	t.mu.Unlock()
+
 	var err error
-	err = unix.PtraceSyscall(tid, 0)
+	if hasPrefilter && !needExit {
+		err = unix.PtraceCont(tid, 0)
+	} else {
+		err = unix.PtraceSyscall(tid, 0)
+	}
 	if err != nil && errors.Is(err, unix.ESRCH) {
 		t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
 	}
@@ -507,9 +547,23 @@ func (t *Tracer) denySyscall(tid int, errno int) error {
 }
 
 // resumeTracee resumes a tracee with an optional signal to deliver.
-// Always uses PtraceSyscall to catch exit-time stops (see allowSyscall).
+// Uses PtraceCont when prefilter is active and no exit stop is needed,
+// PtraceSyscall otherwise.
 func (t *Tracer) resumeTracee(tid int, sig int) {
-	unix.PtraceSyscall(tid, sig)
+	t.mu.Lock()
+	hasPrefilter := false
+	needExit := false
+	if s := t.tracees[tid]; s != nil {
+		hasPrefilter = s.HasPrefilter
+		needExit = mustCatchExit(s)
+	}
+	t.mu.Unlock()
+
+	if hasPrefilter && !needExit {
+		unix.PtraceCont(tid, sig)
+	} else {
+		unix.PtraceSyscall(tid, sig)
+	}
 }
 
 // ptraceListen calls PTRACE_LISTEN on the specified tid. In PTRACE_SEIZE
@@ -552,19 +606,6 @@ func (t *Tracer) applyReturnOverride(tid int, retval int64) {
 	t.setRegs(tid, regs)
 }
 
-// hasPendingSyscallExit returns true if the tracee has a pending deny errno,
-// fake-zero fixup, return override, or exec stub fd cleanup that needs to be
-// applied at syscall exit.
-func (t *Tracer) hasPendingSyscallExit(tid int) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	state := t.tracees[tid]
-	if state == nil {
-		return false
-	}
-	return state.InSyscall && (state.PendingDenyErrno != 0 || state.PendingFakeZero || state.HasPendingReturn || state.PendingExecStubFD >= 0)
-}
-
 // handleStop dispatches a tracee stop event.
 func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus, rusage *unix.Rusage) {
 	switch {
@@ -598,15 +639,10 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 			case unix.PTRACE_EVENT_STOP:
 				t.handleEventStop(tid)
 			default:
-				// In prefilter mode (PTRACE_O_TRACESECCOMP without
-				// TRACESYSGOOD), a plain SIGTRAP with no event can be
-				// a syscall-exit stop if we explicitly used PtraceSyscall
-				// (e.g., after soft-delete). Check for pending fixups.
-				if t.hasPendingSyscallExit(tid) {
-					t.handleSyscallStop(ctx, tid)
-				} else {
-					t.resumeTracee(tid, 0)
-				}
+				// With TRACESYSGOOD always set, syscall stops are SIGTRAP|0x80.
+				// Seccomp entries are PTRACE_EVENT_SECCOMP. A plain SIGTRAP
+				// with no event is always a real signal — reinject it.
+				t.resumeTracee(tid, int(sig))
 			}
 
 		default:
@@ -763,6 +799,7 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		nr := regs.SyscallNr()
 		t.mu.Lock()
 		state.LastNr = nr
+		state.NeedExitStop = needsExitStop(nr)
 		tgid := state.TGID
 		t.mu.Unlock()
 
@@ -795,6 +832,7 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		t.mu.Lock()
 		if state != nil {
 			nr = state.LastNr
+			state.NeedExitStop = false
 		}
 		t.mu.Unlock()
 
@@ -828,6 +866,7 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 		tgid = state.TGID
 		state.InSyscall = true
 		state.LastNr = nr
+		state.NeedExitStop = needsExitStop(nr)
 	}
 	t.mu.Unlock()
 	if tgid != 0 {
