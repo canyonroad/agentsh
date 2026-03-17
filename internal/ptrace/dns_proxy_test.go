@@ -21,6 +21,22 @@ func (m *mockDNSNetworkHandler) HandleNetwork(_ context.Context, nc NetworkConte
 	return m.result
 }
 
+// capturingDNSNetworkHandler captures the NetworkContext for inspection.
+type capturingDNSNetworkHandler struct {
+	result  NetworkResult
+	lastCtx NetworkContext
+	called  chan struct{}
+}
+
+func (h *capturingDNSNetworkHandler) HandleNetwork(_ context.Context, nc NetworkContext) NetworkResult {
+	h.lastCtx = nc
+	select {
+	case h.called <- struct{}{}:
+	default:
+	}
+	return h.result
+}
+
 func buildDNSQuery(t *testing.T, domain string, qtype dnsmessage.Type) []byte {
 	t.Helper()
 	msg := dnsmessage.Message{
@@ -312,5 +328,110 @@ func TestParseResolvConf_Missing(t *testing.T) {
 	got := parseResolvConf("/nonexistent/resolv.conf")
 	if got != nil {
 		t.Fatalf("expected nil for missing file, got %v", got)
+	}
+}
+
+func TestDNSProxy_AllowWithLastRedirect(t *testing.T) {
+	// Start a fake upstream DNS that returns a canned A record
+	upstream, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+
+	go func() {
+		buf := make([]byte, 512)
+		n, addr, err := upstream.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		var msg dnsmessage.Message
+		if err := msg.Unpack(buf[:n]); err != nil {
+			return
+		}
+		msg.Header.Response = true
+		msg.Answers = []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{
+					Name:  msg.Questions[0].Name,
+					Type:  dnsmessage.TypeA,
+					Class: dnsmessage.ClassINET,
+					TTL:   300,
+				},
+				Body: &dnsmessage.AResource{A: [4]byte{140, 82, 112, 4}},
+			},
+		}
+		resp, _ := msg.Pack()
+		upstream.WriteTo(resp, addr)
+	}()
+
+	ft := newFdTracker()
+	// Pre-record a DNS redirect — simulates what ptrace does at connect/sendto time
+	ft.recordDNSRedirect(42, 3, 42, "test-session-123", "8.8.8.8:53")
+
+	handler := &capturingDNSNetworkHandler{
+		result: NetworkResult{
+			Allow:            true,
+			RedirectUpstream: upstream.LocalAddr().String(),
+		},
+		called: make(chan struct{}, 1),
+	}
+
+	proxy, err := newDNSProxy(handler, ft)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go proxy.run(ctx)
+
+	conn, err := net.Dial("udp", proxy.addr4())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	query := buildDNSQuery(t, "github.com", dnsmessage.TypeA)
+	conn.Write(query)
+
+	// Wait for handler to be called
+	select {
+	case <-handler.called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler was not called within timeout")
+	}
+
+	// Verify session attribution was passed through
+	if handler.lastCtx.SessionID != "test-session-123" {
+		t.Fatalf("expected SessionID 'test-session-123', got %q", handler.lastCtx.SessionID)
+	}
+	if handler.lastCtx.PID != 42 {
+		t.Fatalf("expected PID 42, got %d", handler.lastCtx.PID)
+	}
+	if handler.lastCtx.Address != "8.8.8.8:53" {
+		t.Fatalf("expected Address '8.8.8.8:53', got %q", handler.lastCtx.Address)
+	}
+	if handler.lastCtx.Operation != "dns" {
+		t.Fatalf("expected Operation 'dns', got %q", handler.lastCtx.Operation)
+	}
+	if handler.lastCtx.Domain != "github.com" {
+		t.Fatalf("expected Domain 'github.com', got %q", handler.lastCtx.Domain)
+	}
+
+	// Also verify we got a valid response
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	resp := make([]byte, 512)
+	n, err := conn.Read(resp)
+	if err != nil {
+		t.Fatalf("no response from DNS proxy: %v", err)
+	}
+
+	var msg dnsmessage.Message
+	if err := msg.Unpack(resp[:n]); err != nil {
+		t.Fatalf("failed to unpack DNS response: %v", err)
+	}
+	if len(msg.Answers) == 0 {
+		t.Fatal("expected at least one answer")
 	}
 }

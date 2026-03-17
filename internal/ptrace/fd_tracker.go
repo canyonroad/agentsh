@@ -33,6 +33,11 @@ type fdTracker struct {
 
 	// IP -> domain mapping (populated by DNS proxy on resolution)
 	ipToDomain map[string]string
+
+	// Last DNS redirect recorded — fallback for proxy session attribution
+	// when per-port lookup isn't available (covers single-session case).
+	lastDNSRedirect    dnsRedirectInfo
+	hasLastDNSRedirect bool
 }
 
 func newFdTracker() *fdTracker {
@@ -113,11 +118,14 @@ func (ft *fdTracker) clearTGID(tgid int) {
 
 func (ft *fdTracker) recordDNSRedirect(tgid, fd, pid int, sessionID, originalResolver string) {
 	ft.mu.Lock()
-	ft.dnsRedirects[tgidFd{tgid, fd}] = dnsRedirectInfo{
+	info := dnsRedirectInfo{
 		pid:              pid,
 		sessionID:        sessionID,
 		originalResolver: originalResolver,
 	}
+	ft.dnsRedirects[tgidFd{tgid, fd}] = info
+	ft.lastDNSRedirect = info
+	ft.hasLastDNSRedirect = true
 	ft.mu.Unlock()
 }
 
@@ -132,6 +140,12 @@ func (ft *fdTracker) removeDNSRedirect(tgid, fd int) {
 	ft.mu.Lock()
 	delete(ft.dnsRedirects, tgidFd{tgid, fd})
 	ft.mu.Unlock()
+}
+
+func (ft *fdTracker) getLastDNSRedirect() (dnsRedirectInfo, bool) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	return ft.lastDNSRedirect, ft.hasLastDNSRedirect
 }
 
 func (ft *fdTracker) recordDNSResolution(ip, domain string) {
