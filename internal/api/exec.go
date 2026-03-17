@@ -454,11 +454,15 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 
 	// Resolve root symlinks for consistent comparison (macOS /var -> /private/var).
 	// Since workspace paths are canonicalized at session creation, this should
-	// rarely change the path — but if EvalSymlinks fails, fail closed rather
-	// than comparing an unresolved root against a resolved child path.
+	// rarely change the path. On FUSE mounts (E2B/Daytona/Cloudflare), the mount
+	// root is owned by root and EvalSymlinks fails with EACCES — fall back to
+	// rootClean, which is safe because FUSE mount paths have no symlinks at the root.
 	rootResolved, err := filepath.EvalSymlinks(rootClean)
 	if err != nil {
-		return "", fmt.Errorf("resolve workspace mount %q: %w", rootClean, err)
+		if !os.IsPermission(err) {
+			return "", fmt.Errorf("resolve workspace mount %q: %w", rootClean, err)
+		}
+		rootResolved = rootClean
 	}
 
 	// Resolve symlinks to prevent symlink escape (e.g., /workspace/link -> /etc).
