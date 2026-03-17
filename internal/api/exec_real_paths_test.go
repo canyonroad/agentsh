@@ -201,9 +201,9 @@ func TestResolveWorkingDir_SymlinkEscape_RealPathsMode(t *testing.T) {
 	}
 	s.SetRealPaths(true)
 
-	// In real-paths mode: VirtualRoot == ws path
+	// In real-paths mode: VirtualRoot == resolved ws path
 	// A path like <ws>/escape-link is "under root" but resolves outside — should be rejected
-	wsClean := filepath.ToSlash(filepath.Clean(ws))
+	wsClean := filepath.ToSlash(filepath.Clean(s.Workspace))
 	_, err = resolveWorkingDir(s, wsClean+"/escape-link")
 	if err == nil {
 		t.Error("expected error for symlink escape in real_paths mode")
@@ -264,7 +264,7 @@ func TestResolveWorkingDir_DotDotEscape_RealPaths(t *testing.T) {
 	}
 	s.SetRealPaths(true)
 
-	wsClean := filepath.ToSlash(filepath.Clean(ws))
+	wsClean := filepath.ToSlash(filepath.Clean(s.Workspace))
 	// Path with ".." that resolves outside workspace should be treated as
 	// outside-workspace (pass through), not rejected as escape.
 	real, err := resolveWorkingDir(s, wsClean+"/../tmp")
@@ -408,7 +408,7 @@ func TestExec_RealPaths_InWorkspace_UsesRealPath(t *testing.T) {
 
 	// Execute pwd in a workspace subdirectory using the real path.
 	cmd, args := pwdCommand()
-	wsClean := filepath.ToSlash(filepath.Clean(ws))
+	wsClean := filepath.ToSlash(filepath.Clean(sess.Workspace))
 	body, _ := json.Marshal(map[string]any{
 		"command":        cmd,
 		"args":           args,
