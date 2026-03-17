@@ -659,7 +659,7 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 			case unix.PTRACE_EVENT_SECCOMP:
 				t.handleSeccompStop(ctx, tid)
 			case unix.PTRACE_EVENT_EXIT:
-				t.resumeTracee(tid, 0)
+				t.handleExitEvent(tid)
 			case unix.PTRACE_EVENT_STOP:
 				t.handleEventStop(tid)
 			default:
@@ -1286,6 +1286,53 @@ func (t *Tracer) handleExecEvent(tid int) {
 
 	// Exec replaces the process address space, invalidating any scratch page.
 	t.invalidateScratchPage(tgid)
+}
+
+// handleExitEvent decides whether to detach or resume a tracee that hit
+// PTRACE_EVENT_EXIT.  On gVisor, the sentry's two-phase exit notification
+// re-delivery is unreliable: if a traced child exits, the traced parent's
+// wait4 may block forever.  Detaching auto-traced children whose parent is
+// also traced lets the parent reap them directly.
+func (t *Tracer) handleExitEvent(tid int) {
+	t.mu.Lock()
+	state := t.tracees[tid]
+	if state == nil {
+		t.mu.Unlock()
+		t.resumeTracee(tid, 0)
+		return
+	}
+	tgid := state.TGID
+	parentTraced := false
+	if state.ParentPID != 0 {
+		for otherTID, other := range t.tracees {
+			if otherTID != tid && other.TGID == state.ParentPID {
+				parentTraced = true
+				break
+			}
+		}
+	}
+	t.mu.Unlock()
+
+	// Never detach processes with a registered exit notification —
+	// the exec API is blocking on that channel.
+	_, hasExitNotify := t.exitNotify.Load(tgid)
+
+	if parentTraced && !hasExitNotify {
+		// Detach so the traced parent can reap the child directly,
+		// bypassing gVisor's two-phase exit notification re-delivery.
+		// Detach first: if it fails with anything other than ESRCH
+		// (process already gone), fall back to the normal resume path
+		// so the tracee stays tracked.
+		if err := unix.PtraceDetach(tid); err != nil && err != unix.ESRCH {
+			slog.Warn("ptrace: detach on exit failed, resuming instead", "tid", tid, "err", err)
+			t.resumeTracee(tid, 0)
+			return
+		}
+		t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
+		return
+	}
+
+	t.resumeTracee(tid, 0)
 }
 
 func (t *Tracer) handleExit(tid int, status unix.WaitStatus, rusage *unix.Rusage, reason ExitReason) {
