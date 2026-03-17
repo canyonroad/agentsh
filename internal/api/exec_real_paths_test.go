@@ -279,6 +279,56 @@ func TestResolveWorkingDir_DotDotEscape_RealPaths(t *testing.T) {
 	}
 }
 
+// Regression test: FUSE mount roots (E2B/Daytona/Cloudflare) deny lstat access
+// when the FUSE server runs as a different user and allow_other is not set.
+// resolveWorkingDir must succeed by falling back to the lexical path instead
+// of returning a permission error.
+func TestResolveWorkingDir_FUSEMountPermissionDenied(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod test is POSIX-specific")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+
+	m := session.NewManager(10)
+	ws := t.TempDir()
+
+	s, err := m.CreateWithID("test-fuse-perm", ws, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate FUSE: create a mount point inside a parent whose execute bit
+	// is removed, so EvalSymlinks on the mount root fails with EACCES.
+	restrictedParent := t.TempDir()
+	mountPath := filepath.Join(restrictedParent, "workspace-mnt")
+	if err := os.Mkdir(mountPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	subInMount := filepath.Join(mountPath, "sub")
+	if err := os.Mkdir(subInMount, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove execute from restrictedParent → lstat(mountPath) fails with EACCES
+	if err := os.Chmod(restrictedParent, 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Restore before cleanup so t.TempDir() can remove it
+	t.Cleanup(func() { os.Chmod(restrictedParent, 0755) })
+
+	// Point session at the FUSE-like mount
+	s.WorkspaceMount = mountPath
+	s.VirtualRoot = "/workspace"
+
+	// resolveWorkingDir should succeed despite EACCES on the mount root
+	_, err = resolveWorkingDir(s, "/workspace/sub")
+	if err != nil {
+		t.Errorf("resolveWorkingDir failed with FUSE-like mount permission denied: %v", err)
+	}
+}
+
 func TestResolveWorkingDir_DotDotEscape_Default(t *testing.T) {
 	m := session.NewManager(10)
 	ws := t.TempDir()
