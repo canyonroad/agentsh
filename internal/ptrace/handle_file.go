@@ -124,22 +124,71 @@ func resolveToAbsolute(tid int, dirfd int, path string) (string, error) {
 	return base + "/" + path, nil
 }
 
-// resolveViaProc resolves a path through /proc/<tid>/root, then strips
-// the prefix to return the tracee-relative absolute path.
+// resolveViaProc resolves a path through /proc/<tid>/root by walking each
+// component manually.  Unlike filepath.EvalSymlinks, this never resolves the
+// /proc/<tid>/root magic link itself — it uses it only as a prefix for Lstat
+// and Readlink, so symlinks inside the tracee's mount namespace are followed
+// correctly (important on gVisor where the magic link doesn't resolve the
+// same way as on native Linux).
 func resolveViaProc(tid int, path string) (string, error) {
-	procPath := fmt.Sprintf("/proc/%d/root%s", tid, path)
-	resolved, err := filepath.EvalSymlinks(procPath)
-	if err != nil {
-		return "", err
+	procRoot := fmt.Sprintf("/proc/%d/root", tid)
+	const maxLinks = 255
+
+	clean := filepath.Clean(path)
+	parts := strings.Split(clean, "/")
+	var components []string
+	for _, p := range parts {
+		if p != "" {
+			components = append(components, p)
+		}
 	}
-	// Strip /proc/<tid>/root prefix
-	prefix := fmt.Sprintf("/proc/%d/root", tid)
-	if strings.HasPrefix(resolved, prefix) {
-		return resolved[len(prefix):], nil
+
+	resolved := ""
+	linkCount := 0
+
+	for len(components) > 0 {
+		part := components[0]
+		components = components[1:]
+
+		candidate := resolved + "/" + part
+		procPath := procRoot + candidate
+
+		fi, err := os.Lstat(procPath)
+		if err != nil {
+			return "", err
+		}
+
+		if fi.Mode()&os.ModeSymlink != 0 {
+			linkCount++
+			if linkCount > maxLinks {
+				return "", fmt.Errorf("resolveViaProc: too many symlinks resolving %q", path)
+			}
+			target, err := os.Readlink(procPath)
+			if err != nil {
+				return "", err
+			}
+
+			if filepath.IsAbs(target) {
+				resolved = ""
+			}
+			// Prepend target components to remaining work.
+			targetParts := strings.Split(filepath.Clean(target), "/")
+			var newComponents []string
+			for _, p := range targetParts {
+				if p != "" {
+					newComponents = append(newComponents, p)
+				}
+			}
+			components = append(newComponents, components...)
+		} else {
+			resolved = candidate
+		}
 	}
-	// If resolved path doesn't have the prefix (e.g. /proc itself),
-	// return the resolved path as-is since it's already absolute.
-	return resolved, nil
+
+	if resolved == "" {
+		resolved = "/"
+	}
+	return filepath.Clean(resolved), nil
 }
 
 // resolveParentViaProc resolves the parent directory through /proc/<tid>/root

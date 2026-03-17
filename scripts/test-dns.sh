@@ -10,8 +10,8 @@ PASS=0
 FAIL=0
 ERRORS=""
 
-pass() { echo "  PASS: $1"; ((PASS++)); }
-fail() { echo "  FAIL: $1"; ((FAIL++)); ERRORS="${ERRORS}\n  - $1"; }
+pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
+fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); ERRORS="${ERRORS}\n  - $1"; }
 
 tmp="$(mktemp -d)"
 cleanup() {
@@ -125,12 +125,12 @@ command_rules:
     decision: allow
 
 file_rules:
-  - name: allow-tmp
-    paths: ["/tmp/**"]
-    decision: allow
   - name: deny-etc
     paths: ["/etc/**"]
     decision: deny
+  - name: allow-all
+    paths: ["/**"]
+    decision: allow
 YAML
 
 # --- Start server ---
@@ -154,7 +154,7 @@ fi
 echo "Server ready."
 
 # --- Create session ---
-sid_json="$(agentsh session create --workspace /root --json)"
+sid_json="$(agentsh session create --workspace /root --policy dns-test --json)"
 sid="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["id"])' <<<"$sid_json")"
 if [[ -z "$sid" ]]; then
   echo "FATAL: failed to parse session id"
@@ -165,6 +165,7 @@ echo "Session created: $sid"
 echo ""
 
 # --- Test 1: DNS resolution for allowed domain ---
+# This test requires upstream DNS connectivity; skip gracefully if unavailable.
 echo "Test 1: DNS resolution for allowed domain (github.com)"
 set +e
 dns_allow_out="$(agentsh exec "$sid" -- python3 -c "
@@ -181,6 +182,8 @@ set -e
 if echo "$dns_allow_out" | grep -q "^RESOLVED:"; then
   ip="$(echo "$dns_allow_out" | grep "^RESOLVED:" | head -1 | cut -d: -f2)"
   pass "github.com resolved to $ip"
+elif echo "$dns_allow_out" | grep -qE "Temporary failure in name resolution|connection refused"; then
+  echo "  SKIP: no upstream DNS available (expected in isolated containers)"
 else
   fail "github.com DNS resolution failed: $dns_allow_out (rc=$dns_allow_rc)"
 fi

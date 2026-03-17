@@ -655,7 +655,16 @@ func (t *Tracer) handleStop(ctx context.Context, tid int, status unix.WaitStatus
 				t.resumeTracee(tid, 0)
 			case unix.PTRACE_EVENT_EXEC:
 				t.handleExecEvent(tid)
-				t.resumeTracee(tid, 0)
+				if t.shouldDetachAfterExec(tid) {
+					if err := unix.PtraceDetach(tid); err != nil && err != unix.ESRCH {
+						slog.Warn("ptrace: detach after exec failed, resuming instead", "tid", tid, "err", err)
+						t.resumeTracee(tid, 0)
+					} else {
+						t.handleExit(tid, unix.WaitStatus(0), nil, ExitVanished)
+					}
+				} else {
+					t.resumeTracee(tid, 0)
+				}
 			case unix.PTRACE_EVENT_SECCOMP:
 				t.handleSeccompStop(ctx, tid)
 			case unix.PTRACE_EVENT_EXIT:
@@ -1286,6 +1295,40 @@ func (t *Tracer) handleExecEvent(tid int) {
 
 	// Exec replaces the process address space, invalidating any scratch page.
 	t.invalidateScratchPage(tgid)
+}
+
+// shouldDetachAfterExec checks whether a tracee should be detached after exec.
+// Returns true if: parent is traced, no exitNotify registered, no seccomp
+// prefilter.  Without a prefilter the child doesn't inherit a SECCOMP_RET_TRACE
+// filter, so detaching is safe and prevents pipe deadlocks between two ptraced
+// processes on gVisor.
+func (t *Tracer) shouldDetachAfterExec(tid int) bool {
+	t.mu.Lock()
+	state := t.tracees[tid]
+	if state == nil {
+		t.mu.Unlock()
+		return false
+	}
+	// Don't detach if seccomp prefilter is active — child inherits the
+	// SECCOMP_RET_TRACE filter and would get ENOSYS without a tracer.
+	if state.HasPrefilter {
+		t.mu.Unlock()
+		return false
+	}
+	tgid := state.TGID
+	parentTraced := false
+	if state.ParentPID != 0 {
+		for otherTID, other := range t.tracees {
+			if otherTID != tid && other.TGID == state.ParentPID {
+				parentTraced = true
+				break
+			}
+		}
+	}
+	t.mu.Unlock()
+
+	_, hasExitNotify := t.exitNotify.Load(tgid)
+	return parentTraced && !hasExitNotify
 }
 
 // handleExitEvent decides whether to detach or resume a tracee that hit

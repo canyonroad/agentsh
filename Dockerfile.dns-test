@@ -1,4 +1,5 @@
 FROM golang:1.25 AS builder
+RUN apt-get update && apt-get install -y libseccomp-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -6,7 +7,7 @@ COPY . .
 RUN make build
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y python3 curl ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y python3 curl ca-certificates sudo && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/bin/agentsh /usr/local/bin/
 COPY --from=builder /src/bin/agentsh-shell-shim /usr/local/bin/
 COPY scripts/test-dns.sh /test-dns.sh
