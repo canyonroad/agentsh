@@ -238,9 +238,11 @@ func TestResolveWorkingDir_SymlinkedWorkspaceRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Workspace should have been resolved to the real path
-	if s.Workspace != realDir {
-		t.Fatalf("Workspace = %q, want resolved %q", s.Workspace, realDir)
+	// Workspace should have been resolved to the canonical path
+	// (on macOS, t.TempDir() returns /var/... but EvalSymlinks gives /private/var/...)
+	resolvedRealDir, _ := filepath.EvalSymlinks(realDir)
+	if s.Workspace != resolvedRealDir {
+		t.Fatalf("Workspace = %q, want resolved %q", s.Workspace, resolvedRealDir)
 	}
 
 	// resolveWorkingDir should succeed for paths under the workspace
@@ -248,7 +250,7 @@ func TestResolveWorkingDir_SymlinkedWorkspaceRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveWorkingDir through symlinked workspace: %v", err)
 	}
-	want := filepath.Join(realDir, "project")
+	want := filepath.Join(resolvedRealDir, "project")
 	if resolved != want {
 		t.Errorf("resolved = %q, want %q", resolved, want)
 	}
