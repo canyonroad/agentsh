@@ -213,6 +213,47 @@ func TestResolveWorkingDir_SymlinkEscape_RealPathsMode(t *testing.T) {
 	}
 }
 
+func TestResolveWorkingDir_SymlinkedWorkspaceRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test is POSIX-specific")
+	}
+	// Simulate E2B/Daytona: /workspace is a symlink to /home/user.
+	// Session creation should resolve the symlink so boundary checks
+	// compare canonical paths on both sides.
+	realDir := t.TempDir()
+	subdir := filepath.Join(realDir, "project")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a symlink that points to realDir
+	symlinkDir := filepath.Join(t.TempDir(), "workspace-link")
+	if err := os.Symlink(realDir, symlinkDir); err != nil {
+		t.Fatal(err)
+	}
+
+	m := session.NewManager(10)
+	s, err := m.CreateWithID("test-symlink-ws", symlinkDir, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Workspace should have been resolved to the real path
+	if s.Workspace != realDir {
+		t.Fatalf("Workspace = %q, want resolved %q", s.Workspace, realDir)
+	}
+
+	// resolveWorkingDir should succeed for paths under the workspace
+	resolved, err := resolveWorkingDir(s, "/workspace/project")
+	if err != nil {
+		t.Fatalf("resolveWorkingDir through symlinked workspace: %v", err)
+	}
+	want := filepath.Join(realDir, "project")
+	if resolved != want {
+		t.Errorf("resolved = %q, want %q", resolved, want)
+	}
+}
+
 func TestResolveWorkingDir_DotDotEscape_RealPaths(t *testing.T) {
 	m := session.NewManager(10)
 	ws := t.TempDir()
