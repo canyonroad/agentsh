@@ -52,8 +52,9 @@ func TestSyscallToOperation(t *testing.T) {
 func TestResolvePath_NonexistentFile(t *testing.T) {
 	// resolvePath should succeed for a nonexistent file in an existing directory
 	// (e.g. create operations).
+	tid := os.Getpid()
 	dir := t.TempDir()
-	path, err := resolvePath(0, unix.AT_FDCWD, filepath.Join(dir, "newfile"))
+	path, err := resolvePath(tid, unix.AT_FDCWD, filepath.Join(dir, "newfile"))
 	if err != nil {
 		t.Fatalf("resolvePath for nonexistent file: unexpected error: %v", err)
 	}
@@ -65,13 +66,14 @@ func TestResolvePath_NonexistentFile(t *testing.T) {
 func TestResolvePath_SymlinkLoop(t *testing.T) {
 	// resolvePath should return an error for a symlink loop (ELOOP),
 	// not silently fall back to an unresolved path.
+	tid := os.Getpid()
 	dir := t.TempDir()
 	link1 := filepath.Join(dir, "loop1")
 	link2 := filepath.Join(dir, "loop2")
 	os.Symlink(link2, link1)
 	os.Symlink(link1, link2)
 
-	_, err := resolvePath(0, unix.AT_FDCWD, link1)
+	_, err := resolvePath(tid, unix.AT_FDCWD, link1)
 	if err == nil {
 		t.Fatal("resolvePath for symlink loop: expected error, got nil")
 	}
@@ -79,12 +81,13 @@ func TestResolvePath_SymlinkLoop(t *testing.T) {
 
 func TestResolvePath_NotDir(t *testing.T) {
 	// resolvePath should return an error when a path component is not a directory.
+	tid := os.Getpid()
 	dir := t.TempDir()
 	file := filepath.Join(dir, "afile")
 	os.WriteFile(file, []byte("x"), 0o644)
 
 	// Try to resolve a path through a regular file as if it were a directory.
-	_, err := resolvePath(0, unix.AT_FDCWD, filepath.Join(file, "child"))
+	_, err := resolvePath(tid, unix.AT_FDCWD, filepath.Join(file, "child"))
 	if err == nil {
 		t.Fatal("resolvePath through non-directory: expected error, got nil")
 	}
@@ -94,11 +97,12 @@ func TestResolvePath_DanglingSymlink(t *testing.T) {
 	// A dangling symlink should cause resolvePath to fail, not silently
 	// return the symlink path. The kernel would follow the symlink on
 	// O_CREAT, potentially creating a file in a forbidden directory.
+	tid := os.Getpid()
 	dir := t.TempDir()
 	link := filepath.Join(dir, "dangling")
 	os.Symlink("/nonexistent/target/file", link)
 
-	_, err := resolvePath(0, unix.AT_FDCWD, link)
+	_, err := resolvePath(tid, unix.AT_FDCWD, link)
 	if err == nil {
 		t.Fatal("resolvePath for dangling symlink: expected error, got nil")
 	}

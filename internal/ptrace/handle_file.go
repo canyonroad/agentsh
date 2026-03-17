@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -72,7 +73,9 @@ func resolvePath(tid int, dirfd int, path string) (string, error) {
 		return "", err
 	}
 
-	resolved, err := filepath.EvalSymlinks(full)
+	// Resolve through the tracee's filesystem view via /proc/<tid>/root
+	// to correctly handle symlinks visible only to the tracee.
+	resolved, err := resolveViaProc(tid, full)
 	if err == nil {
 		return resolved, nil
 	}
@@ -88,11 +91,12 @@ func resolvePath(tid int, dirfd int, path string) (string, error) {
 	// but its target doesn't, Lstat will succeed. The kernel would follow the
 	// symlink on O_CREAT, potentially creating a file in a forbidden directory.
 	// Fail closed because we can't determine the real target path.
-	if fi, lstatErr := os.Lstat(full); lstatErr == nil && fi.Mode()&os.ModeSymlink != 0 {
+	procPath := fmt.Sprintf("/proc/%d/root%s", tid, full)
+	if fi, lstatErr := os.Lstat(procPath); lstatErr == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("resolve path %q: dangling symlink", full)
 	}
 
-	return resolveParentFallback(full)
+	return resolveParentViaProc(tid, full)
 }
 
 // resolvePathNoFollow resolves a path without following the final symlink
@@ -103,7 +107,7 @@ func resolvePathNoFollow(tid int, dirfd int, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return resolveParentFallback(full)
+	return resolveParentViaProc(tid, full)
 }
 
 // resolveToAbsolute converts a potentially relative path to an absolute path
@@ -120,13 +124,30 @@ func resolveToAbsolute(tid int, dirfd int, path string) (string, error) {
 	return base + "/" + path, nil
 }
 
-// resolveParentFallback resolves the parent directory with EvalSymlinks and
-// joins the leaf basename. This canonicalizes parent components without
-// following the final component.
-func resolveParentFallback(full string) (string, error) {
+// resolveViaProc resolves a path through /proc/<tid>/root, then strips
+// the prefix to return the tracee-relative absolute path.
+func resolveViaProc(tid int, path string) (string, error) {
+	procPath := fmt.Sprintf("/proc/%d/root%s", tid, path)
+	resolved, err := filepath.EvalSymlinks(procPath)
+	if err != nil {
+		return "", err
+	}
+	// Strip /proc/<tid>/root prefix
+	prefix := fmt.Sprintf("/proc/%d/root", tid)
+	if strings.HasPrefix(resolved, prefix) {
+		return resolved[len(prefix):], nil
+	}
+	// If resolved path doesn't have the prefix (e.g. /proc itself),
+	// return the resolved path as-is since it's already absolute.
+	return resolved, nil
+}
+
+// resolveParentViaProc resolves the parent directory through /proc/<tid>/root
+// and joins with the basename.
+func resolveParentViaProc(tid int, full string) (string, error) {
 	dir := filepath.Dir(full)
 	base := filepath.Base(full)
-	resolvedDir, err := filepath.EvalSymlinks(dir)
+	resolvedDir, err := resolveViaProc(tid, dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return full, nil // Parent doesn't exist either; use best-effort path

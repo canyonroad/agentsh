@@ -64,7 +64,7 @@ sandbox:
     attach_mode: children
     trace:
       execve: true
-      file: false
+      file: true
       network: true
       signal: false
     performance:
@@ -123,6 +123,14 @@ command_rules:
     commands:
       - "*"
     decision: allow
+
+file_rules:
+  - name: allow-tmp
+    paths: ["/tmp/**"]
+    decision: allow
+  - name: deny-etc
+    paths: ["/etc/**"]
+    decision: deny
 YAML
 
 # --- Start server ---
@@ -199,6 +207,61 @@ elif echo "$dns_deny_out" | grep -q "^RESOLVED:"; then
   fail "evil.com should have been blocked but resolved: $dns_deny_out"
 else
   fail "evil.com test returned unexpected output: $dns_deny_out (rc=$dns_deny_rc)"
+fi
+
+# --- Test 3: Symlink escape (file policy) ---
+echo "Test 3: Symlink escape (/tmp/escape -> /etc/passwd should be denied)"
+set +e
+ln -sf /etc/passwd /tmp/escape 2>/dev/null || true
+symlink_out="$(agentsh exec "$sid" -- cat /tmp/escape 2>&1)"
+symlink_rc=$?
+rm -f /tmp/escape
+set -e
+
+if [[ $symlink_rc -ne 0 ]]; then
+  pass "symlink escape correctly denied (rc=$symlink_rc)"
+elif echo "$symlink_out" | grep -q "root:"; then
+  fail "symlink escape allowed read of /etc/passwd through /tmp/escape"
+else
+  pass "symlink escape blocked (no /etc/passwd content)"
+fi
+
+# --- Test 4: Python subprocess sudo ---
+echo "Test 4: Python subprocess running sudo (should not hang)"
+set +e
+sudo_out="$(timeout 60 agentsh exec "$sid" -- python3 -c "
+import subprocess
+r = subprocess.run(['sudo','echo','hi'], capture_output=True, timeout=30)
+print('RC:'+str(r.returncode))
+" 2>&1)"
+sudo_rc=$?
+set -e
+
+if [[ $sudo_rc -eq 124 ]]; then
+  fail "python subprocess sudo timed out"
+elif echo "$sudo_out" | grep -q "^RC:"; then
+  pass "python subprocess sudo completed ($(echo "$sudo_out" | grep '^RC:' | head -1))"
+else
+  fail "python subprocess sudo unexpected output: $sudo_out (rc=$sudo_rc)"
+fi
+
+# --- Test 5: Python subprocess ls ---
+echo "Test 5: Python subprocess running ls (should not hang)"
+set +e
+ls_out="$(timeout 60 agentsh exec "$sid" -- python3 -c "
+import subprocess
+r = subprocess.run(['ls','/tmp'], capture_output=True, timeout=30)
+print('OK:'+r.stdout.decode()[:20])
+" 2>&1)"
+ls_rc=$?
+set -e
+
+if [[ $ls_rc -eq 124 ]]; then
+  fail "python subprocess ls timed out"
+elif echo "$ls_out" | grep -q "^OK:"; then
+  pass "python subprocess ls completed"
+else
+  fail "python subprocess ls unexpected output: $ls_out (rc=$ls_rc)"
 fi
 
 # --- Summary ---
