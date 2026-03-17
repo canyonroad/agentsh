@@ -139,8 +139,12 @@ func (m *Manager) CreateWithProfile(id, profile, basePolicy string, mounts []Res
 		return nil, ErrSessionExists
 	}
 
-	// Use first mount as the "primary" workspace for legacy compatibility
+	// Use first mount as the "primary" workspace for legacy compatibility.
+	// Resolve symlinks so boundary checks use the canonical path.
 	primaryWorkspace := mounts[0].Path
+	if resolved, err := filepath.EvalSymlinks(primaryWorkspace); err == nil {
+		primaryWorkspace = resolved
+	}
 
 	now := time.Now().UTC()
 	s := &Session{
@@ -174,6 +178,11 @@ func (m *Manager) CreateWithID(id, workspace, policy string) (*Session, error) {
 	}
 	if !st.IsDir() {
 		return nil, fmt.Errorf("workspace must be a directory")
+	}
+	// Resolve symlinks so the canonical path is used for FUSE mount
+	// source and workspace boundary checks (e.g. /workspace → /home/user).
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
 	}
 
 	m.mu.Lock()

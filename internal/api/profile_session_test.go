@@ -80,9 +80,11 @@ func TestCreateSessionWithProfile(t *testing.T) {
 		t.Errorf("expected profile=test-profile, got %q", out.Profile)
 	}
 
-	// Session should have primary workspace set from first mount
-	if out.Workspace != workspace {
-		t.Errorf("expected workspace=%q, got %q", workspace, out.Workspace)
+	// Session should have primary workspace set from first mount (resolved)
+	// On macOS /var → /private/var, on Windows short names may be expanded.
+	resolvedWorkspace, _ := filepath.EvalSymlinks(workspace)
+	if out.Workspace != resolvedWorkspace {
+		t.Errorf("expected workspace=%q, got %q", resolvedWorkspace, out.Workspace)
 	}
 }
 
@@ -230,9 +232,9 @@ func TestCreateSessionWithProfile_RealPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Profile session with real_paths=true should use workspace as VirtualRoot/Cwd
-	absWs, _ := filepath.Abs(workspace)
-	wantCwd := filepath.ToSlash(filepath.Clean(absWs))
+	// Profile session with real_paths=true should use resolved workspace as VirtualRoot/Cwd
+	resolvedWs, _ := filepath.EvalSymlinks(workspace)
+	wantCwd := filepath.ToSlash(filepath.Clean(resolvedWs))
 	if out.Cwd != wantCwd {
 		t.Errorf("Cwd = %q, want %q (profile + real_paths)", out.Cwd, wantCwd)
 	}

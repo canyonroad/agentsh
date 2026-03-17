@@ -200,7 +200,9 @@ func TestSetRealPaths_Enable(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.SetRealPaths(true)
-	want := filepath.ToSlash(filepath.Clean(ws))
+	// Use s.Workspace (resolved by CreateWithID) for comparison,
+	// since EvalSymlinks may differ from t.TempDir() (macOS /var → /private/var).
+	want := filepath.ToSlash(filepath.Clean(s.Workspace))
 	if s.VirtualRoot != want {
 		t.Errorf("VirtualRoot = %q, want %q", s.VirtualRoot, want)
 	}
@@ -293,8 +295,8 @@ func TestBuiltin_Cd_RealPaths(t *testing.T) {
 		t.Fatalf("cd: handled=%v code=%d", handled, code)
 	}
 	cwd, _, _ := s.GetCwdEnvHistory()
-	// VirtualRoot uses forward slashes; compare accordingly
-	want := filepath.ToSlash(filepath.Clean(ws))
+	// VirtualRoot uses forward slashes; compare against resolved workspace
+	want := filepath.ToSlash(filepath.Clean(s.Workspace))
 	if cwd != want {
 		t.Errorf("after cd: Cwd = %q, want %q", cwd, want)
 	}
@@ -329,14 +331,14 @@ func TestApplyPatch_RealPaths(t *testing.T) {
 	}
 	s.SetRealPaths(true)
 
-	// Patch cwd to subdir under workspace
-	err = s.ApplyPatch(types.SessionPatchRequest{Cwd: ws + "/subdir"})
+	// Patch cwd to subdir under workspace — use resolved workspace path
+	resolvedWs := s.Workspace
+	err = s.ApplyPatch(types.SessionPatchRequest{Cwd: resolvedWs + "/subdir"})
 	if err != nil {
 		t.Fatalf("ApplyPatch: %v", err)
 	}
 	cwd, _, _ := s.GetCwdEnvHistory()
-	// VirtualRoot uses forward slashes; compare accordingly
-	wantCwd := filepath.ToSlash(filepath.Clean(ws)) + "/subdir"
+	wantCwd := filepath.ToSlash(filepath.Clean(resolvedWs)) + "/subdir"
 	if cwd != wantCwd {
 		t.Errorf("Cwd = %q, want %q", cwd, wantCwd)
 	}

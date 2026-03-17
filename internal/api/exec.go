@@ -452,10 +452,13 @@ func resolveWorkingDir(s *session.Session, reqWorkingDir string) (string, error)
 		return "", fmt.Errorf("working_dir escapes workspace mount")
 	}
 
-	// Resolve root symlinks for consistent comparison (macOS /var -> /private/var)
+	// Resolve root symlinks for consistent comparison (macOS /var -> /private/var).
+	// Since workspace paths are canonicalized at session creation, this should
+	// rarely change the path — but if EvalSymlinks fails, fail closed rather
+	// than comparing an unresolved root against a resolved child path.
 	rootResolved, err := filepath.EvalSymlinks(rootClean)
 	if err != nil {
-		rootResolved = rootClean
+		return "", fmt.Errorf("resolve workspace mount %q: %w", rootClean, err)
 	}
 
 	// Resolve symlinks to prevent symlink escape (e.g., /workspace/link -> /etc).

@@ -201,15 +201,58 @@ func TestResolveWorkingDir_SymlinkEscape_RealPathsMode(t *testing.T) {
 	}
 	s.SetRealPaths(true)
 
-	// In real-paths mode: VirtualRoot == ws path
+	// In real-paths mode: VirtualRoot == resolved ws path
 	// A path like <ws>/escape-link is "under root" but resolves outside — should be rejected
-	wsClean := filepath.ToSlash(filepath.Clean(ws))
+	wsClean := filepath.ToSlash(filepath.Clean(s.Workspace))
 	_, err = resolveWorkingDir(s, wsClean+"/escape-link")
 	if err == nil {
 		t.Error("expected error for symlink escape in real_paths mode")
 	}
 	if err != nil && !strings.Contains(err.Error(), "symlink escapes") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveWorkingDir_SymlinkedWorkspaceRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test is POSIX-specific")
+	}
+	// Simulate E2B/Daytona: /workspace is a symlink to /home/user.
+	// Session creation should resolve the symlink so boundary checks
+	// compare canonical paths on both sides.
+	realDir := t.TempDir()
+	subdir := filepath.Join(realDir, "project")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a symlink that points to realDir
+	symlinkDir := filepath.Join(t.TempDir(), "workspace-link")
+	if err := os.Symlink(realDir, symlinkDir); err != nil {
+		t.Fatal(err)
+	}
+
+	m := session.NewManager(10)
+	s, err := m.CreateWithID("test-symlink-ws", symlinkDir, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Workspace should have been resolved to the canonical path
+	// (on macOS, t.TempDir() returns /var/... but EvalSymlinks gives /private/var/...)
+	resolvedRealDir, _ := filepath.EvalSymlinks(realDir)
+	if s.Workspace != resolvedRealDir {
+		t.Fatalf("Workspace = %q, want resolved %q", s.Workspace, resolvedRealDir)
+	}
+
+	// resolveWorkingDir should succeed for paths under the workspace
+	resolved, err := resolveWorkingDir(s, "/workspace/project")
+	if err != nil {
+		t.Fatalf("resolveWorkingDir through symlinked workspace: %v", err)
+	}
+	want := filepath.Join(resolvedRealDir, "project")
+	if resolved != want {
+		t.Errorf("resolved = %q, want %q", resolved, want)
 	}
 }
 
@@ -223,7 +266,7 @@ func TestResolveWorkingDir_DotDotEscape_RealPaths(t *testing.T) {
 	}
 	s.SetRealPaths(true)
 
-	wsClean := filepath.ToSlash(filepath.Clean(ws))
+	wsClean := filepath.ToSlash(filepath.Clean(s.Workspace))
 	// Path with ".." that resolves outside workspace should be treated as
 	// outside-workspace (pass through), not rejected as escape.
 	real, err := resolveWorkingDir(s, wsClean+"/../tmp")
@@ -367,7 +410,7 @@ func TestExec_RealPaths_InWorkspace_UsesRealPath(t *testing.T) {
 
 	// Execute pwd in a workspace subdirectory using the real path.
 	cmd, args := pwdCommand()
-	wsClean := filepath.ToSlash(filepath.Clean(ws))
+	wsClean := filepath.ToSlash(filepath.Clean(sess.Workspace))
 	body, _ := json.Marshal(map[string]any{
 		"command":        cmd,
 		"args":           args,
