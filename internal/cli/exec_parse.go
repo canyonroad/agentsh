@@ -47,10 +47,14 @@ func parseExecInputWithEnv(args []string, jsonStr string, timeoutFlag string, st
 		return sessionID, req, nil
 	}
 
-	// Find "--" separator if present
+	// Find "--" separator if present.
+	// Only check positions 0 and 1: the format is [SESSION_ID] -- COMMAND,
+	// so "--" can only appear at index 0 (no session arg) or index 1 (after
+	// session ID). Any "--" beyond that is part of the child command's
+	// arguments and must be preserved.
 	dashDashIdx := -1
-	for i, arg := range args {
-		if arg == "--" {
+	for i := 0; i < len(args) && i < 2; i++ {
+		if args[i] == "--" {
 			dashDashIdx = i
 			break
 		}
