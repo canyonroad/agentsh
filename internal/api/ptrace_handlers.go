@@ -177,7 +177,16 @@ func (r *ptraceHandlerRouter) HandleNetwork(ctx context.Context, nc ptrace.Netwo
 		return ptrace.NetworkResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES)}
 	}
 
-	decision := pe.CheckNetwork(nc.Address, nc.Port)
+	// For DNS operations, evaluate the domain being queried rather than
+	// the resolver address (which is often a private IP like 172.x.x.x
+	// and would be blocked by private-network rules).
+	checkAddr := nc.Address
+	checkPort := nc.Port
+	if nc.Operation == "dns" && nc.Domain != "" {
+		checkAddr = nc.Domain
+		checkPort = 443 // evaluate as if connecting to the domain on HTTPS
+	}
+	decision := pe.CheckNetwork(checkAddr, checkPort)
 
 	ev := types.Event{
 		ID:        uuid.NewString(),
@@ -189,6 +198,7 @@ func (r *ptraceHandlerRouter) HandleNetwork(ctx context.Context, nc ptrace.Netwo
 			"address":   nc.Address,
 			"port":      nc.Port,
 			"operation": nc.Operation,
+			"domain":    nc.Domain,
 			"decision":  string(decision.EffectiveDecision),
 			"rule":      decision.Rule,
 		},
