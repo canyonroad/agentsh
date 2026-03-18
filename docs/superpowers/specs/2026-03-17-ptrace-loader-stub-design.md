@@ -49,7 +49,8 @@ After:  fork → exec(agentsh-loader, cmd, args...) → loader installs BPF → 
 4. Build `sock_fprog` struct pointing to the filter array
 5. Call `seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog)`
 6. Close fd N
-7. `syscall.Exec(cmd, args, environ)` — replaces the loader with the real command
+7. Resolve `cmd` via PATH lookup if not absolute (`exec.LookPath` equivalent — check `$PATH` dirs)
+8. `syscall.Exec(resolvedPath, args, environ)` — replaces the loader with the real command
 
 **Error handling**: If any step fails, write error to stderr and exit 126 (matching exec failure convention). The tracer will see the process exit and report the error. The fallback (deferred injection) handles the case where the loader binary is missing.
 
@@ -65,13 +66,16 @@ No `sock_fprog` header — the loader builds that itself with the pointer to its
 
 When ptrace is active and `SeccompPrefilter` is enabled:
 
-1. Serialize the narrow BPF filter to a byte buffer (reuse `narrowTracedSyscallNumbers` + `buildBPFForSyscalls` or `buildBPFForActions`)
-2. Create `os.Pipe()` — write end for server, read end inherited by child
-3. Write serialized filter to write end, close write end
-4. Wrap the command: instead of `exec.Command(cmd, args...)`, use `exec.Command("agentsh-loader", "--filter-fd=N", "--", cmd, args...)`
-5. Set read end's fd to be inherited via `cmd.ExtraFiles`
+1. Build the session BPF filter — this must mirror the full `injectSeccompFilter` logic: call `collectStaticDenies()`, merge with `narrowTracedSyscallNumbers(&cfg)`, and use `buildBPFForActions` when denies exist, `buildBPFForSyscalls` otherwise. Extract this into a shared function `buildSessionFilter(cfg *TracerConfig) ([]unix.SockFilter, error)` that both the loader path and `injectSeccompFilter` call.
+2. Serialize the filter to a byte buffer (wire format above)
+3. Create `os.Pipe()` — write end for server, read end inherited by child
+4. Write serialized filter to write end, close write end
+5. Wrap the command: instead of `exec.Command(cmd, args...)`, use `exec.Command(loaderPath, "--filter-fd=N", "--", cmd, args...)`
+6. Append read end to `cmd.ExtraFiles` — the fd number is `3 + len(cmd.ExtraFiles)` at the point of appending (Go assigns ExtraFiles fds starting at 3). Calculate N from this before appending.
 
-The filter is compiled once per session (or per config change) and reused for every exec. The pipe write is ~200-500 bytes — negligible.
+**Network namespace interaction**: When a session has a network namespace (`ns != ""`), the command is rewritten as `ip netns exec <ns> <cmd> <args...>`. The loader wrapping must be applied to the inner command (inside the netns wrapper): `ip netns exec <ns> agentsh-loader --filter-fd=N -- cmd args...`. The loader installs the filter, then execs the real command inside the namespace. The filter persists across exec.
+
+The filter is compiled once per session (or per config change) and cached. The pipe write is ~200-500 bytes — negligible.
 
 **Loader path resolution**: The loader binary path is resolved at server startup (check `/usr/bin/agentsh-loader`, then `$PATH`). If not found, fall back to existing deferred injection. Store the resolved path in a config field.
 
@@ -88,6 +92,12 @@ if opts.prefilterInstalled {
     s.PendingPrefilter = true
 }
 ```
+
+The initial resume in `attachThread` (line 158) must also check `HasPrefilter`: when the prefilter is already installed, resume with `PtraceCont` instead of `PtraceSyscall` — the first stop will be `PTRACE_EVENT_SECCOMP`, not a TRACESYSGOOD syscall stop.
+
+**Exec event**: When the loader calls `syscall.Exec(cmd)`, the tracer sees a `PTRACE_EVENT_EXEC`. This is already handled by existing exec event logic in the tracer. If attachment races with the loader's exec, the tracer may see the loader process or the post-exec process — both cases are handled correctly because the seccomp filter persists across exec and exec events reset thread state.
+
+**Lazy BPF escalation**: The loader installs only the narrow prefilter. Per-TGID read/write escalation via `injectEscalationFilter` is unaffected — it is conditional on runtime behavior and still requires ptrace-based injection via the existing deferred path.
 
 This means:
 - `allowSyscall` will use `PtraceCont` (not `PtraceSyscall`) from the first syscall — no wasted exit stops for deferred injection
@@ -168,7 +178,9 @@ if t.hasSysemu && state.HasPrefilter {
     // Fast path: set return value, resume with SYSEMU (1 stop)
     regs.SetReturnValue(int64(-errno))
     t.setRegs(tid, regs)
-    unix.PtraceSyscall(tid, 0) // TODO: replace with SYSEMU once verified
+    // golang.org/x/sys/unix has PTRACE_SYSEMU = 0x1f but no PtraceSysemu
+    // function — use raw syscall: ptrace(PTRACE_SYSEMU, tid, 0, 0)
+    unix.RawSyscall6(unix.SYS_PTRACE, unix.PTRACE_SYSEMU, uintptr(tid), 0, 0, 0, 0)
 } else {
     // Existing path: nullify + exit fixup (2 stops)
     regs.SetSyscallNr(-1)
