@@ -887,19 +887,19 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 	t.mu.Unlock()
 
 	if entering {
-		regs, err := t.getRegs(tid)
+		sc, err := t.buildSyscallContext(tid)
 		if err != nil {
 			t.allowSyscall(tid)
 			return
 		}
-		nr := regs.SyscallNr()
+		nr := sc.Info.Nr
 		// LastNr, NeedExitStop are only accessed from the event-loop
 		// goroutine (runtime.LockOSThread), no mutex needed. TGID is
 		// immutable after creation.
 		state.LastNr = nr
 		state.NeedExitStop = t.needsExitStop(nr)
 
-		t.dispatchSyscall(ctx, tid, nr, regs)
+		t.dispatchSyscall(ctx, tid, nr, sc)
 	} else {
 		if pendingErrno != 0 {
 			t.applyDenyFixup(tid, pendingErrno)
@@ -938,12 +938,12 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 
 // handleSeccompStop handles PTRACE_EVENT_SECCOMP stops (prefilter mode).
 func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
-	regs, err := t.getRegs(tid)
+	sc, err := t.buildSyscallContext(tid)
 	if err != nil {
 		t.allowSyscall(tid)
 		return
 	}
-	nr := regs.SyscallNr()
+	nr := sc.Info.Nr
 
 	// Mark as syscall-entry so that injection helpers (injectSyscall)
 	// use the single-phase entry protocol (modify ORIG_RAX, one cycle
@@ -964,26 +964,46 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	}
 	t.mu.Unlock()
 
-	t.dispatchSyscall(ctx, tid, nr, regs)
+	t.dispatchSyscall(ctx, tid, nr, sc)
 }
 
 // dispatchSyscall routes a syscall to the appropriate handler.
-func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, regs Regs) {
+func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *SyscallContext) {
 	switch {
 	case isExecveSyscall(nr):
+		regs, err := sc.Regs()
+		if err != nil {
+			t.allowSyscall(tid)
+			return
+		}
 		t.handleExecve(ctx, tid, regs)
 	case isFileSyscall(nr):
+		regs, err := sc.Regs()
+		if err != nil {
+			t.allowSyscall(tid)
+			return
+		}
 		t.handleFile(ctx, tid, regs)
 	case isNetworkSyscall(nr):
+		regs, err := sc.Regs()
+		if err != nil {
+			t.allowSyscall(tid)
+			return
+		}
 		t.handleNetwork(ctx, tid, regs)
 	case isSignalSyscall(nr):
+		regs, err := sc.Regs()
+		if err != nil {
+			t.allowSyscall(tid)
+			return
+		}
 		t.handleSignal(ctx, tid, regs)
 	case isWriteSyscall(nr):
-		t.handleWrite(ctx, tid, regs)
+		t.handleWrite(ctx, tid, sc)
 	case isCloseSyscall(nr):
-		t.handleClose(ctx, tid, regs)
+		t.handleClose(ctx, tid, sc)
 	case isReadSyscall(nr):
-		t.handleReadEntry(tid, regs)
+		t.handleReadEntry(tid, sc)
 	default:
 		t.allowSyscall(tid)
 	}

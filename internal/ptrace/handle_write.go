@@ -8,13 +8,13 @@ import (
 )
 
 // handleWrite intercepts write for SNI rewrite on TLS-watched fds.
-func (t *Tracer) handleWrite(ctx context.Context, tid int, regs Regs) {
+func (t *Tracer) handleWrite(ctx context.Context, tid int, sc *SyscallContext) {
 	if t.fds == nil {
 		t.allowSyscall(tid)
 		return
 	}
 
-	fd := int(int32(regs.Arg(0)))
+	fd := int(int32(sc.Info.Args[0]))
 
 	t.mu.Lock()
 	state := t.tracees[tid]
@@ -34,6 +34,13 @@ func (t *Tracer) handleWrite(ctx context.Context, tid int, regs Regs) {
 	}
 
 	// Read the write buffer to check for ClientHello
+	regs, err := sc.Regs()
+	if err != nil {
+		slog.Warn("handleWrite: cannot load registers", "tid", tid, "error", err)
+		t.fds.unwatchTLS(tgid, fd)
+		t.allowSyscall(tid)
+		return
+	}
 	bufPtr := regs.Arg(1)
 	bufLen := regs.Arg(2)
 
