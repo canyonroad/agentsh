@@ -82,7 +82,7 @@ A directory of trusted public keys (default: `/etc/agentsh/keys/`). Only files m
 }
 ```
 
-The `expires_at` field is optional. If present, the key is rejected after expiry even if still in the trust store — defense-in-depth against forgotten keys.
+The `expires_at` field is optional. If present, the key is rejected after expiry even if still in the trust store — defense-in-depth against forgotten keys. The `trusted_since` field is recorded for audit purposes in v1 and is not enforced during verification.
 
 **Trust store permissions:** The trust store directory and key files should be writable only by root/admin. The verifier should log a warning if the trust store directory or any key file is world-writable, similar to SSH's `StrictModes`.
 
@@ -121,7 +121,7 @@ policies:
 
 **Relationship to existing manifest:** The SHA256 manifest (`policies.sha256`) becomes redundant when signing is in `enforce` mode. In `warn` or `off` mode, the manifest still provides integrity checking as a fallback. Both mechanisms coexist; no removal needed.
 
-**Implementation note:** The `Signing` sub-struct must be added to `PoliciesConfig` in `internal/config/config.go`. The `mode` field must be validated at config load time to be one of `"enforce"`, `"warn"`, or `"off"`.
+**Implementation note:** The `Signing` sub-struct must be added to `PoliciesConfig` in `internal/config/config.go`. The `mode` field must be validated at config load time to be one of `"enforce"`, `"warn"`, or `"off"`. The default mode is `"off"` when the `signing` configuration block is omitted.
 
 ### Scope: Which Policy Loading Paths
 
@@ -136,7 +136,7 @@ agentsh policy keygen --output <dir>
 ```
 
 - Generates an Ed25519 keypair
-- Writes private key to `<dir>/private.key` (mode 0600)
+- Writes private key to `<dir>/private.key.json` (mode 0600)
 - Writes public key in trust store format to `<dir>/public.key.json`
 - Prints the `key_id` to stdout
 
@@ -166,22 +166,25 @@ agentsh policy verify <policy-file> [--key-dir <trust-store>]
 
 ### Verification at Load Time
 
-When `PolicyManager` loads a policy:
+When `policy.Manager` loads a policy:
 
 1. Read policy bytes from disk
-2. Check `policies.signing.mode` — if `"off"`, skip to step 10
+2. Check `policies.signing.mode` — if `"off"`, skip to step 11
 3. Look for `<policy-path>.sig`
 4. **If `.sig` is missing:**
    - `"enforce"` mode: refuse to load, return error `"missing_signature"`
-   - `"warn"` mode: log warning, skip to step 10 (load without verification)
+   - `"warn"` mode: log warning, skip to step 11 (load without verification)
 5. Parse sig JSON and validate: reject if `version` is not `1`, `algorithm` is not `"ed25519"`, or `key_id`/`signature`/`signed_at` are missing/empty. If `cert_chain` is non-empty in v1, reject with `"unsupported_cert_chain"`
 6. Extract `key_id`, find matching public key in `trust_store` directory
 7. Check key expiry if `expires_at` is set
 8. Verify Ed25519 signature over raw policy bytes
-9. On success: log verification event, proceed with loading
+9. On success: log verification event, proceed to step 11
 10. On failure:
     - `"enforce"` mode: refuse to load, return error
-    - `"warn"` mode: log warning, proceed with loading
+    - `"warn"` mode: log warning, proceed to step 11
+11. Load the policy
+
+**Centralization note:** All policy loading call sites (including direct callers of `ResolvePolicyPath` such as session creation in `internal/api/core.go` and `DefaultPolicyLoader.Load` in `internal/api/app.go`) must be refactored to go through a shared verification function. The verification logic should not be duplicated.
 
 ### Watchtower Delivery Flow
 
