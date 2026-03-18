@@ -103,9 +103,9 @@ func (t *Tracer) handleReadExit(tid int, regs Regs) {
 // handleReadEntry is called at syscall-entry for SYS_READ/SYS_PREAD64.
 // If the fd is not a tracked /proc/*/status fd, it clears NeedExitStop
 // so the tracee resumes with PtraceCont (skipping the exit stop).
-func (t *Tracer) handleReadEntry(tid int, regs Regs) {
+func (t *Tracer) handleReadEntry(tid int, sc *SyscallContext) {
 	if t.fds != nil && t.cfg.MaskTracerPid {
-		fd := int(int32(regs.Arg(0)))
+		fd := int(int32(sc.Info.Args[0]))
 		t.mu.Lock()
 		state := t.tracees[tid]
 		var tgid int

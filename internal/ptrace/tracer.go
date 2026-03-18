@@ -256,6 +256,8 @@ type Tracer struct {
 	readyFileWritten  bool
 	readyFileAttempts int
 
+	hasSyscallInfo bool // true if PTRACE_GET_SYSCALL_INFO is supported (Linux 5.3+)
+
 	stopped chan struct{}
 }
 
@@ -462,18 +464,16 @@ func (t *Tracer) setRegs(tid int, regs Regs) error {
 // These syscalls must be resumed with PtraceSyscall (not PtraceCont) so the
 // tracer catches the exit stop. All other traced syscalls are entry-only and
 // can use PtraceCont to skip directly to the next seccomp event.
-func needsExitStop(nr int) bool {
+func (t *Tracer) needsExitStop(nr int) bool {
 	switch nr {
-	case unix.SYS_READ, unix.SYS_PREAD64: // handleReadExit (TracerPid masking)
-		return true
-	case unix.SYS_OPENAT: // handleOpenatExit (fd tracking)
-		return true
-	case unix.SYS_OPENAT2: // handleOpenatExit (fd tracking)
-		return true
-	case unix.SYS_CONNECT: // handleConnectExit (TLS fd watch)
-		return true
-	case unix.SYS_EXECVE, unix.SYS_EXECVEAT: // failed exec needs exit to reset InSyscall
-		return true
+	case unix.SYS_READ, unix.SYS_PREAD64:
+		return true // only traced when escalated — always needs exit
+	case unix.SYS_OPENAT, unix.SYS_OPENAT2:
+		return t.cfg.MaskTracerPid // fd tracking for TracerPid masking
+	case unix.SYS_CONNECT:
+		return t.cfg.TraceNetwork // inline skip in handleNetwork handles port granularity
+	case unix.SYS_EXECVE, unix.SYS_EXECVEAT:
+		return true // exec failure cleanup
 	}
 	return false
 }
@@ -887,19 +887,19 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 	t.mu.Unlock()
 
 	if entering {
-		regs, err := t.getRegs(tid)
+		sc, err := t.buildSyscallContext(tid)
 		if err != nil {
 			t.allowSyscall(tid)
 			return
 		}
-		nr := regs.SyscallNr()
+		nr := sc.Info.Nr
 		// LastNr, NeedExitStop are only accessed from the event-loop
 		// goroutine (runtime.LockOSThread), no mutex needed. TGID is
 		// immutable after creation.
 		state.LastNr = nr
-		state.NeedExitStop = needsExitStop(nr)
+		state.NeedExitStop = t.needsExitStop(nr)
 
-		t.dispatchSyscall(ctx, tid, nr, regs)
+		t.dispatchSyscall(ctx, tid, nr, sc)
 	} else {
 		if pendingErrno != 0 {
 			t.applyDenyFixup(tid, pendingErrno)
@@ -938,12 +938,12 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 
 // handleSeccompStop handles PTRACE_EVENT_SECCOMP stops (prefilter mode).
 func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
-	regs, err := t.getRegs(tid)
+	sc, err := t.buildSyscallContext(tid)
 	if err != nil {
 		t.allowSyscall(tid)
 		return
 	}
-	nr := regs.SyscallNr()
+	nr := sc.Info.Nr
 
 	// Mark as syscall-entry so that injection helpers (injectSyscall)
 	// use the single-phase entry protocol (modify ORIG_RAX, one cycle
@@ -953,7 +953,7 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	if state != nil {
 		state.InSyscall = true
 		state.LastNr = nr
-		state.NeedExitStop = needsExitStop(nr)
+		state.NeedExitStop = t.needsExitStop(nr)
 		// Seccomp stops are entry-only. Defer escalation to next exit stop.
 		if state.NeedsReadEscalation && !state.ThreadHasReadEscalation {
 			state.PendingReadEscalation = true
@@ -964,26 +964,46 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	}
 	t.mu.Unlock()
 
-	t.dispatchSyscall(ctx, tid, nr, regs)
+	t.dispatchSyscall(ctx, tid, nr, sc)
 }
 
 // dispatchSyscall routes a syscall to the appropriate handler.
-func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, regs Regs) {
+func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *SyscallContext) {
 	switch {
 	case isExecveSyscall(nr):
+		regs, err := sc.Regs()
+		if err != nil {
+			t.allowSyscall(tid)
+			return
+		}
 		t.handleExecve(ctx, tid, regs)
 	case isFileSyscall(nr):
+		regs, err := sc.Regs()
+		if err != nil {
+			t.allowSyscall(tid)
+			return
+		}
 		t.handleFile(ctx, tid, regs)
 	case isNetworkSyscall(nr):
+		regs, err := sc.Regs()
+		if err != nil {
+			t.allowSyscall(tid)
+			return
+		}
 		t.handleNetwork(ctx, tid, regs)
 	case isSignalSyscall(nr):
+		regs, err := sc.Regs()
+		if err != nil {
+			t.allowSyscall(tid)
+			return
+		}
 		t.handleSignal(ctx, tid, regs)
 	case isWriteSyscall(nr):
-		t.handleWrite(ctx, tid, regs)
+		t.handleWrite(ctx, tid, sc)
 	case isCloseSyscall(nr):
-		t.handleClose(ctx, tid, regs)
+		t.handleClose(ctx, tid, sc)
 	case isReadSyscall(nr):
-		t.handleReadEntry(tid, regs)
+		t.handleReadEntry(tid, sc)
 	default:
 		t.allowSyscall(tid)
 	}
@@ -1574,6 +1594,11 @@ func (t *Tracer) Run(ctx context.Context) error {
 	defer runtime.UnlockOSThread()
 	defer t.cancelPendingAttachWaiters()
 	defer t.cancelPendingExitWaiters()
+
+	t.hasSyscallInfo = probePtraceSyscallInfo()
+	if t.hasSyscallInfo {
+		slog.Info("ptrace: PTRACE_GET_SYSCALL_INFO supported")
+	}
 
 	t.fds = newFdTracker()
 	if t.cfg.TraceNetwork && t.cfg.NetworkHandler != nil {

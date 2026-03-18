@@ -48,36 +48,46 @@ func isSignalSyscall(nr int) bool {
 	return false
 }
 
-func tracedSyscallNumbers() []int {
-	nums := []int{
-		unix.SYS_EXECVE, unix.SYS_EXECVEAT,
-		unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
-		unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
-		unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2, unix.SYS_FCHOWNAT,
-		unix.SYS_CONNECT, unix.SYS_SOCKET, unix.SYS_BIND,
-		unix.SYS_SENDTO, unix.SYS_LISTEN,
-		unix.SYS_KILL, unix.SYS_TGKILL, unix.SYS_TKILL,
-		unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO,
-		unix.SYS_WRITE, unix.SYS_READ, unix.SYS_PREAD64, unix.SYS_CLOSE,
-	}
-	nums = append(nums, legacyFileSyscalls()...)
+func tracedSyscallNumbers(cfg *TracerConfig) []int {
+	nums := narrowTracedSyscallNumbers(cfg)
+	// Full set includes read/write for TRACESYSGOOD fallback mode
+	nums = append(nums, unix.SYS_READ, unix.SYS_PREAD64, unix.SYS_WRITE)
 	return nums
 }
 
 // narrowTracedSyscallNumbers returns the syscalls for the initial narrow
 // BPF filter, excluding read/pread64/write which are lazily escalated.
-func narrowTracedSyscallNumbers() []int {
-	nums := []int{
-		unix.SYS_EXECVE, unix.SYS_EXECVEAT,
-		unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
-		unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
-		unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2, unix.SYS_FCHOWNAT,
-		unix.SYS_CONNECT, unix.SYS_SOCKET, unix.SYS_BIND,
-		unix.SYS_SENDTO, unix.SYS_LISTEN,
-		unix.SYS_KILL, unix.SYS_TGKILL, unix.SYS_TKILL,
-		unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO,
-		unix.SYS_CLOSE,
+// The set is driven by cfg to avoid tracing syscalls for disabled features.
+func narrowTracedSyscallNumbers(cfg *TracerConfig) []int {
+	var nums []int
+
+	if cfg.TraceExecve {
+		nums = append(nums, unix.SYS_EXECVE, unix.SYS_EXECVEAT)
 	}
-	nums = append(nums, legacyFileSyscalls()...)
+	if cfg.TraceFile {
+		nums = append(nums,
+			unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
+			unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
+			unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2, unix.SYS_FCHOWNAT,
+		)
+		nums = append(nums, legacyFileSyscalls()...)
+	}
+	if cfg.TraceNetwork {
+		nums = append(nums, unix.SYS_CONNECT, unix.SYS_BIND)
+		if cfg.NetworkHandler != nil {
+			nums = append(nums, unix.SYS_SENDTO)
+		}
+		// socket, listen: removed — always allowed by handleNetwork
+	}
+	if cfg.TraceSignal {
+		nums = append(nums,
+			unix.SYS_KILL, unix.SYS_TGKILL, unix.SYS_TKILL,
+			unix.SYS_RT_SIGQUEUEINFO, unix.SYS_RT_TGSIGQUEUEINFO,
+		)
+	}
+	if cfg.MaskTracerPid || (cfg.TraceNetwork && cfg.NetworkHandler != nil) {
+		nums = append(nums, unix.SYS_CLOSE)
+	}
+
 	return nums
 }

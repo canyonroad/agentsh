@@ -399,43 +399,43 @@ Note: In ptrace mode, there is a brief pre-attach window between fork and PTRACE
 
 ## Performance Benchmarks
 
-Measured with `make bench`, which runs a Dockerized workload under each mode (baseline with sandbox disabled, full seccomp+FUSE, ptrace with seccomp prefilter + per-syscall resume + fd-aware exit stops + lazy BPF escalation, ptrace without prefilter) using a realistic policy with deny, redirect, and allow rules plus full audit logging. Results are median of 3 runs.
+Measured with `make bench`, which runs a Dockerized workload under each mode (baseline with sandbox disabled, full seccomp+FUSE, ptrace with seccomp prefilter + config-driven BPF filter + config-aware exit stops + lazy BPF escalation + PTRACE_GET_SYSCALL_INFO) using a realistic policy with deny, redirect, and allow rules plus full audit logging. Results are median of 3 runs.
 
 ### Results
 
-| Phase | Baseline | Full mode | Full overhead | Ptrace | Ptrace overhead | Ptrace (no filter) | No-filter overhead |
-|---|---|---|---|---|---|---|---|
-| Process spawn (120 execs) | 3420ms | 3468ms | +1.4% | 16362ms | +378% | 47838ms | +1299% |
-| File I/O (1000 ops) | 272ms | 517ms | +90.1% | 726ms | +167% | 2671ms | +882% |
-| Git workflow (clone+grep+commit) | 50ms | 58ms | +16.0% | 401ms | +702% | 1607ms | +3114% |
-| Network (10 curl) | 341ms | 335ms | -1.8% | 9552ms | +2701% | 45434ms | +13224% |
-| Deny enforcement (50 blocked) | 552ms | 601ms | +8.9% | 577ms | +4.5% | 596ms | +8.0% |
-| Redirect enforcement (50 redirected) | 1699ms | 1769ms | +4.1% | 6125ms | +261% | 16095ms | +847% |
-| Deep process tree (20x 4-level) | 609ms | 617ms | +1.3% | 11055ms | +1715% | 54294ms | +8815% |
-| Wide process tree (10x 10-fan) | 307ms | 318ms | +3.6% | 1847ms | +502% | 6528ms | +2026% |
-| **Total** | **7250ms** | **7683ms** | **+6.0%** | **46645ms** | **+543%** | **175063ms** | **+2315%** |
+| Phase | Baseline | Full mode | Full overhead | Ptrace | Ptrace overhead |
+|---|---|---|---|---|---|
+| Process spawn (120 execs) | 3423ms | 3458ms | +1.0% | 12633ms | +269% |
+| File I/O (1000 ops) | 277ms | 275ms | -0.7% | 639ms | +131% |
+| Git workflow (clone+grep+commit) | 51ms | 51ms | +0.0% | 369ms | +624% |
+| Network (10 curl) | 346ms | 339ms | -2.0% | 7299ms | +2010% |
+| Deny enforcement (50 blocked) | 555ms | 551ms | -0.7% | 560ms | +0.9% |
+| Redirect enforcement (50 redirected) | 1718ms | 1733ms | +0.9% | 4502ms | +162% |
+| Deep process tree (20x 4-level) | 604ms | 624ms | +3.3% | 8552ms | +1316% |
+| Wide process tree (10x 10-fan) | 320ms | 316ms | -1.2% | 1509ms | +372% |
+| **Total** | **7294ms** | **7347ms** | **+0.7%** | **36063ms** | **+394%** |
 
 ### Analysis
 
-**Full mode** (seccomp+FUSE) adds **~6% total overhead**. File I/O through the FUSE overlay adds ~90% to the file-intensive phase, but this is a small absolute cost (245ms) and is amortized across all phases. Non-file phases show no measurable overhead.
+**Full mode** (seccomp+FUSE) adds **<1% total overhead**. Non-file phases show no measurable overhead.
 
-**Ptrace mode** (with seccomp prefilter + lazy BPF escalation) adds **~5.4x total overhead**. This is expected — ptrace intercepts syscalls via context switches rather than kernel-internal notification. Breakdown:
+**Ptrace mode** adds **~4x total overhead** with all optimizations enabled. This is expected — ptrace intercepts syscalls via context switches rather than kernel-internal notification. Breakdown:
 
 1. **Per-exec RPC dominates.** Each `agentsh exec` call goes through CLI → HTTP → server → fork/exec (~30ms). The ptrace attach (PTRACE_SEIZE + seccomp BPF injection + WaitAttached) adds ~15ms per exec on top.
 
 2. **Deny enforcement is free.** Policy deny short-circuits before fork, so ptrace overhead is zero for denied commands.
 
-3. **File I/O is moderate (~2.7x).** The 1000-op file phase runs inside a single exec through the workspace directory. In full mode, FUSE intercepts each file operation for policy evaluation (+90%). Ptrace traps each `openat`/`unlinkat` at entry; only `openat` needs exit processing (fd tracking). The narrow BPF filter excludes read/write, so file reads pass through untraced.
+3. **File I/O is moderate (~2.3x).** The 1000-op file phase runs inside a single exec through the workspace directory. Ptrace traps each `openat`/`unlinkat` at entry. Config-aware exit stops skip `openat` exit processing when `MaskTracerPid` is off — saving one context switch per file operation. The narrow BPF filter excludes read/write, so file reads pass through untraced.
 
-4. **Network is expensive (~28x).** `curl` generates hundreds of syscalls (DNS, TLS, connect, read/write). The lazy BPF escalation keeps read/write out of the traced set entirely for processes that don't need them — `curl` never opens `/proc/*/status`, so reads are never trapped. Write escalation triggers only after a TLS connect. Combined with fd-aware exit stops, this reduced network overhead from ~37x (original) to ~28x.
+4. **Network is the worst case (~21x).** `curl` generates hundreds of syscalls (DNS, TLS, connect, read/write). The config-driven BPF filter removes `socket`, `listen`, and `close` from the traced set when fd tracking is inactive — saving ~15-25 ptrace stops per curl invocation. Lazy BPF escalation keeps read/write out of the traced set for processes that don't need them.
 
-5. **Git workflow benefits most from lazy escalation (~8x).** Git spawns many short-lived processes that never need read/write tracing. The narrow filter keeps these fast.
+5. **Process trees scale with depth (~14x).** Deep nesting (sh→sh→sh→sh→true) multiplies the per-exec attach cost. Wide fan-out (10 parallel children, ~5x) is better since children inherit the seccomp filter via fork.
 
-6. **Process trees scale with depth (~18x).** Deep nesting (sh→sh→sh→sh→true) multiplies the per-exec attach cost. Wide fan-out (10 parallel children, ~6x) is better since children inherit the seccomp filter via fork. The PendingPrefilter skip for auto-traced children avoids redundant BPF re-injection.
+6. **PTRACE_GET_SYSCALL_INFO** provides a lighter entry path (~96 bytes vs 216 bytes for full register read) for syscall dispatch. Simple handlers (write, close, read) use `SyscallContext.Info.Args` directly without loading full registers.
 
-7. **Seccomp prefilter provides ~3.8x speedup.** Without the prefilter, ptrace traps on every syscall, bringing total overhead to ~23x. The prefilter restricts tracing to policy-relevant syscalls (execve, openat, connect, etc.), reducing total overhead from 175s to 47s. Biggest wins: deep trees (4.9x), network (4.8x), process spawn (2.9x).
+7. **Config-driven BPF filter** removes always-allowed syscalls (`socket`, `listen`) and conditionally-needed syscalls (`sendto`, `close`) from the seccomp filter. This eliminates ptrace stops for syscalls that would always be allowed by the handler.
 
-8. **Lazy BPF escalation provides ~14% additional speedup over the prefilter alone.** By excluding read/pread64/write from the initial BPF filter and lazily escalating per-TGID when TracerPid masking or TLS SNI rewrite is needed, most processes avoid read/write entry stops entirely. Combined with fd-aware exit stops, the two optimizations together reduced total ptrace overhead from +621% (original) to +543% (current). Biggest wins: git workflow (-34%), network (-28%), deep trees (-17%).
+8. **Static deny support** via `SECCOMP_RET_ERRNO` enables BPF-level enforcement for policies that always deny certain syscalls (e.g., all network connections). Denied operations are handled entirely in-kernel without any ptrace stop.
 
 9. **Ptrace mode is designed for restricted environments** (e.g., AWS Fargate) where seccomp user-notify, eBPF, and FUSE are unavailable. The overhead tradeoff is acceptable for these environments where no alternative enforcement mechanism exists.
 
@@ -445,7 +445,7 @@ Measured with `make bench`, which runs a Dockerized workload under each mode (ba
 make bench
 ```
 
-Requires Docker with `--cap-add SYS_ADMIN --cap-add SYS_PTRACE --device /dev/fuse --security-opt seccomp=unconfined`. Total runtime ~20-25 minutes.
+Requires Docker with `--cap-add SYS_ADMIN --cap-add SYS_PTRACE --device /dev/fuse --security-opt seccomp=unconfined`. Total runtime ~15-20 minutes.
 
 ## Related Documentation
 
