@@ -207,15 +207,15 @@ func resolveParentViaProc(tid int, full string) (string, error) {
 }
 
 // handleFile intercepts file syscalls for policy evaluation.
-func (t *Tracer) handleFile(ctx context.Context, tid int, regs Regs) {
+func (t *Tracer) handleFile(ctx context.Context, tid int, sc *SyscallContext) {
 	if t.cfg.FileHandler == nil || !t.cfg.TraceFile {
 		t.allowSyscall(tid)
 		return
 	}
 
-	nr := regs.SyscallNr()
+	nr := sc.Info.Nr
 
-	path, path2, flags, err := t.extractFileArgs(tid, nr, regs)
+	path, path2, flags, err := t.extractFileArgs(tid, nr, sc.Info.Args)
 	if err != nil {
 		slog.Warn("handleFile: cannot extract args, denying", "tid", tid, "nr", nr, "error", err)
 		t.denySyscall(tid, int(unix.EACCES))
@@ -267,8 +267,20 @@ func (t *Tracer) handleFile(ctx context.Context, tid int, regs Regs) {
 		}
 		t.denySyscall(tid, int(errno))
 	case "redirect":
+		regs, err := sc.Regs()
+		if err != nil {
+			slog.Warn("handleFile: cannot load regs for redirect, denying", "tid", tid, "error", err)
+			t.denySyscall(tid, int(unix.EACCES))
+			return
+		}
 		t.redirectFile(ctx, tid, regs, nr, result)
 	case "soft-delete":
+		regs, err := sc.Regs()
+		if err != nil {
+			slog.Warn("handleFile: cannot load regs for soft-delete, denying", "tid", tid, "error", err)
+			t.denySyscall(tid, int(unix.EACCES))
+			return
+		}
 		t.softDeleteFile(ctx, tid, regs, path, result)
 	default:
 		slog.Warn("handleFile: unknown action, denying", "tid", tid, "action", action)
@@ -277,12 +289,12 @@ func (t *Tracer) handleFile(ctx context.Context, tid int, regs Regs) {
 }
 
 // extractFileArgs reads file syscall arguments from registers and tracee memory.
-func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string, flags int, err error) {
+func (t *Tracer) extractFileArgs(tid int, nr int, args [6]uint64) (path, path2 string, flags int, err error) {
 	switch nr {
 	case unix.SYS_OPENAT:
-		dirfd := int(int32(regs.Arg(0)))
-		pathPtr := regs.Arg(1)
-		flags = int(int32(regs.Arg(2)))
+		dirfd := int(int32(args[0]))
+		pathPtr := args[1]
+		flags = int(int32(args[2]))
 		rawPath, err := t.readString(tid, pathPtr, 4096)
 		if err != nil {
 			return "", "", 0, err
@@ -297,10 +309,10 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 	case unix.SYS_OPENAT2:
 		// openat2(dirfd, path, how, size): how is a pointer to struct open_how
 		// struct open_how { __u64 flags; __u64 mode; __u64 resolve; }
-		dirfd := int(int32(regs.Arg(0)))
-		pathPtr := regs.Arg(1)
-		howPtr := regs.Arg(2)
-		howSize := regs.Arg(3)
+		dirfd := int(int32(args[0]))
+		pathPtr := args[1]
+		howPtr := args[2]
+		howSize := args[3]
 		// The kernel requires at least 24 bytes (OPEN_HOW_SIZE_VER0).
 		// Future kernels may extend the struct, so allow larger sizes.
 		if howSize < 24 {
@@ -335,9 +347,9 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		return path, "", flags, err
 
 	case unix.SYS_UNLINKAT, unix.SYS_MKDIRAT:
-		dirfd := int(int32(regs.Arg(0)))
-		pathPtr := regs.Arg(1)
-		flags = int(int32(regs.Arg(2))) // AT_REMOVEDIR for unlinkat
+		dirfd := int(int32(args[0]))
+		pathPtr := args[1]
+		flags = int(int32(args[2])) // AT_REMOVEDIR for unlinkat
 		rawPath, err := t.readString(tid, pathPtr, 4096)
 		if err != nil {
 			return "", "", 0, err
@@ -348,8 +360,8 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 
 	case unix.SYS_FCHMODAT:
 		// fchmodat(dirfd, path, mode) — 3-arg syscall, always follows symlinks.
-		dirfd := int(int32(regs.Arg(0)))
-		pathPtr := regs.Arg(1)
+		dirfd := int(int32(args[0]))
+		pathPtr := args[1]
 		rawPath, err := t.readString(tid, pathPtr, 4096)
 		if err != nil {
 			return "", "", 0, err
@@ -359,9 +371,9 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 
 	case unix.SYS_FCHMODAT2:
 		// fchmodat2(dirfd, path, mode, flags) — 4-arg syscall with flag support.
-		dirfd := int(int32(regs.Arg(0)))
-		pathPtr := regs.Arg(1)
-		atFlags := int(int32(regs.Arg(3)))
+		dirfd := int(int32(args[0]))
+		pathPtr := args[1]
+		atFlags := int(int32(args[3]))
 		rawPath, err := t.readString(tid, pathPtr, 4096)
 		if err != nil {
 			return "", "", 0, err
@@ -378,10 +390,10 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		return path, "", 0, err
 
 	case unix.SYS_FCHOWNAT:
-		dirfd := int(int32(regs.Arg(0)))
-		pathPtr := regs.Arg(1)
+		dirfd := int(int32(args[0]))
+		pathPtr := args[1]
 		// fchownat(dirfd, path, owner, group, flags): flags in arg4
-		atFlags := int(int32(regs.Arg(4)))
+		atFlags := int(int32(args[4]))
 		rawPath, err := t.readString(tid, pathPtr, 4096)
 		if err != nil {
 			return "", "", 0, err
@@ -398,10 +410,10 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		return path, "", 0, err
 
 	case unix.SYS_RENAMEAT2:
-		oldDirfd := int(int32(regs.Arg(0)))
-		oldPathPtr := regs.Arg(1)
-		newDirfd := int(int32(regs.Arg(2)))
-		newPathPtr := regs.Arg(3)
+		oldDirfd := int(int32(args[0]))
+		oldPathPtr := args[1]
+		newDirfd := int(int32(args[2]))
+		newPathPtr := args[3]
 
 		rawOld, err := t.readString(tid, oldPathPtr, 4096)
 		if err != nil {
@@ -420,11 +432,11 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		return path, path2, 0, err
 
 	case unix.SYS_LINKAT:
-		oldDirfd := int(int32(regs.Arg(0)))
-		oldPathPtr := regs.Arg(1)
-		newDirfd := int(int32(regs.Arg(2)))
-		newPathPtr := regs.Arg(3)
-		linkFlags := int(int32(regs.Arg(4)))
+		oldDirfd := int(int32(args[0]))
+		oldPathPtr := args[1]
+		newDirfd := int(int32(args[2]))
+		newPathPtr := args[3]
+		linkFlags := int(int32(args[4]))
 
 		rawOld, err := t.readString(tid, oldPathPtr, 4096)
 		if err != nil {
@@ -450,9 +462,9 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		return path, path2, 0, err
 
 	case unix.SYS_SYMLINKAT:
-		targetPtr := regs.Arg(0)
-		newDirfd := int(int32(regs.Arg(1)))
-		linkPathPtr := regs.Arg(2)
+		targetPtr := args[0]
+		newDirfd := int(int32(args[1]))
+		linkPathPtr := args[2]
 
 		target, err := t.readString(tid, targetPtr, 4096)
 		if err != nil {
@@ -467,23 +479,23 @@ func (t *Tracer) extractFileArgs(tid int, nr int, regs Regs) (path, path2 string
 		return path, target, 0, err
 
 	default:
-		return t.extractLegacyFileArgs(tid, nr, regs)
+		return t.extractLegacyFileArgs(tid, nr, args)
 	}
 }
 
 // extractLegacyFileArgs handles legacy (non-at) file syscalls.
 // On arm64 this is never called because isLegacyFileSyscall returns false.
-func (t *Tracer) extractLegacyFileArgs(tid int, nr int, regs Regs) (path, path2 string, flags int, err error) {
+func (t *Tracer) extractLegacyFileArgs(tid int, nr int, args [6]uint64) (path, path2 string, flags int, err error) {
 	// For symlink(target, linkpath), arg0 is the raw target string which
 	// should NOT be resolved — it can be an arbitrary string including
 	// nonexistent or unresolvable paths. Handle it before resolving arg0.
 	if isLegacySymlinkSyscall(nr) {
-		targetPtr := regs.Arg(0)
+		targetPtr := args[0]
 		target, err := t.readString(tid, targetPtr, 4096)
 		if err != nil {
 			return "", "", 0, err
 		}
-		linkPathPtr := regs.Arg(1)
+		linkPathPtr := args[1]
 		rawLinkPath, err := t.readString(tid, linkPathPtr, 4096)
 		if err != nil {
 			return "", "", 0, err
@@ -496,7 +508,7 @@ func (t *Tracer) extractLegacyFileArgs(tid int, nr int, regs Regs) (path, path2 
 		return linkPath, target, 0, nil
 	}
 
-	pathPtr := regs.Arg(0)
+	pathPtr := args[0]
 	rawPath, err := t.readString(tid, pathPtr, 4096)
 	if err != nil {
 		return "", "", 0, err
@@ -504,7 +516,7 @@ func (t *Tracer) extractLegacyFileArgs(tid int, nr int, regs Regs) (path, path2 
 
 	switch {
 	case isLegacyOpenSyscall(nr):
-		flags = int(int32(regs.Arg(1)))
+		flags = int(int32(args[1]))
 		if flags&unix.O_NOFOLLOW != 0 {
 			path, err = resolvePathNoFollow(tid, unix.AT_FDCWD, rawPath)
 		} else {
@@ -527,7 +539,7 @@ func (t *Tracer) extractLegacyFileArgs(tid int, nr int, regs Regs) (path, path2 
 		if err != nil {
 			return "", "", 0, err
 		}
-		path2Ptr := regs.Arg(1)
+		path2Ptr := args[1]
 		rawPath2, err := t.readString(tid, path2Ptr, 4096)
 		if err != nil {
 			return path, "", 0, err
