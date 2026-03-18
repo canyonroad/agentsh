@@ -63,26 +63,34 @@ func TestTracerConfig_HandlerFields(t *testing.T) {
 }
 
 func TestNeedsExitStop(t *testing.T) {
-	exitNeeded := []int{
-		unix.SYS_READ, unix.SYS_PREAD64,
-		unix.SYS_OPENAT, unix.SYS_OPENAT2,
-		unix.SYS_CONNECT,
-		unix.SYS_EXECVE, unix.SYS_EXECVEAT,
+	tests := []struct {
+		name          string
+		nr            int
+		maskTracerPid bool
+		traceNetwork  bool
+		want          bool
+	}{
+		{"openat with mask on", unix.SYS_OPENAT, true, true, true},
+		{"openat with mask off", unix.SYS_OPENAT, false, true, false},
+		{"openat2 with mask off", unix.SYS_OPENAT2, false, true, false},
+		{"connect with network on", unix.SYS_CONNECT, false, true, true},
+		{"connect with network off", unix.SYS_CONNECT, false, false, false},
+		{"read always true", unix.SYS_READ, false, false, true},
+		{"pread64 always true", unix.SYS_PREAD64, false, false, true},
+		{"execve always true", unix.SYS_EXECVE, false, false, true},
+		{"execveat always true", unix.SYS_EXECVEAT, false, false, true},
+		{"unlinkat never needs exit", unix.SYS_UNLINKAT, true, true, false},
+		{"write never needs exit", unix.SYS_WRITE, true, true, false},
 	}
-	for _, nr := range exitNeeded {
-		if !needsExitStop(nr) {
-			t.Errorf("needsExitStop(%d) = false, want true", nr)
-		}
-	}
-
-	entryOnly := []int{
-		unix.SYS_WRITE, unix.SYS_CLOSE, unix.SYS_KILL,
-		unix.SYS_BIND, unix.SYS_SOCKET, unix.SYS_SENDTO,
-		unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
-	}
-	for _, nr := range entryOnly {
-		if needsExitStop(nr) {
-			t.Errorf("needsExitStop(%d) = true, want false", nr)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := &Tracer{cfg: TracerConfig{
+				MaskTracerPid: tt.maskTracerPid,
+				TraceNetwork:  tt.traceNetwork,
+			}}
+			if got := tr.needsExitStop(tt.nr); got != tt.want {
+				t.Errorf("needsExitStop(%d) = %v, want %v", tt.nr, got, tt.want)
+			}
+		})
 	}
 }

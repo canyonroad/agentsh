@@ -462,18 +462,16 @@ func (t *Tracer) setRegs(tid int, regs Regs) error {
 // These syscalls must be resumed with PtraceSyscall (not PtraceCont) so the
 // tracer catches the exit stop. All other traced syscalls are entry-only and
 // can use PtraceCont to skip directly to the next seccomp event.
-func needsExitStop(nr int) bool {
+func (t *Tracer) needsExitStop(nr int) bool {
 	switch nr {
-	case unix.SYS_READ, unix.SYS_PREAD64: // handleReadExit (TracerPid masking)
-		return true
-	case unix.SYS_OPENAT: // handleOpenatExit (fd tracking)
-		return true
-	case unix.SYS_OPENAT2: // handleOpenatExit (fd tracking)
-		return true
-	case unix.SYS_CONNECT: // handleConnectExit (TLS fd watch)
-		return true
-	case unix.SYS_EXECVE, unix.SYS_EXECVEAT: // failed exec needs exit to reset InSyscall
-		return true
+	case unix.SYS_READ, unix.SYS_PREAD64:
+		return true // only traced when escalated — always needs exit
+	case unix.SYS_OPENAT, unix.SYS_OPENAT2:
+		return t.cfg.MaskTracerPid // fd tracking for TracerPid masking
+	case unix.SYS_CONNECT:
+		return t.cfg.TraceNetwork // inline skip in handleNetwork handles port granularity
+	case unix.SYS_EXECVE, unix.SYS_EXECVEAT:
+		return true // exec failure cleanup
 	}
 	return false
 }
@@ -897,7 +895,7 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		// goroutine (runtime.LockOSThread), no mutex needed. TGID is
 		// immutable after creation.
 		state.LastNr = nr
-		state.NeedExitStop = needsExitStop(nr)
+		state.NeedExitStop = t.needsExitStop(nr)
 
 		t.dispatchSyscall(ctx, tid, nr, regs)
 	} else {
@@ -953,7 +951,7 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	if state != nil {
 		state.InSyscall = true
 		state.LastNr = nr
-		state.NeedExitStop = needsExitStop(nr)
+		state.NeedExitStop = t.needsExitStop(nr)
 		// Seccomp stops are entry-only. Defer escalation to next exit stop.
 		if state.NeedsReadEscalation && !state.ThreadHasReadEscalation {
 			state.PendingReadEscalation = true
