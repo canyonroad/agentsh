@@ -256,6 +256,8 @@ type Tracer struct {
 	readyFileWritten  bool
 	readyFileAttempts int
 
+	hasSyscallInfo bool // true if PTRACE_GET_SYSCALL_INFO is supported (Linux 5.3+)
+
 	stopped chan struct{}
 }
 
@@ -1572,6 +1574,11 @@ func (t *Tracer) Run(ctx context.Context) error {
 	defer runtime.UnlockOSThread()
 	defer t.cancelPendingAttachWaiters()
 	defer t.cancelPendingExitWaiters()
+
+	t.hasSyscallInfo = probePtraceSyscallInfo()
+	if t.hasSyscallInfo {
+		slog.Info("ptrace: PTRACE_GET_SYSCALL_INFO supported")
+	}
 
 	t.fds = newFdTracker()
 	if t.cfg.TraceNetwork && t.cfg.NetworkHandler != nil {
