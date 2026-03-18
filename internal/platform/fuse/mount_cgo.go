@@ -6,6 +6,7 @@ package fuse
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -39,9 +40,14 @@ func Mount(cfg Config) (platform.FSMount, error) {
 	}
 
 	// Create mount point if needed
-	if err := os.MkdirAll(cfg.MountPoint, 0755); err != nil {
+	if err := os.MkdirAll(cfg.MountPoint, 0o755); err != nil {
 		return nil, fmt.Errorf("create mount point: %w", err)
 	}
+	// Explicitly chmod the per-session directory and mount point to 0755
+	// regardless of the process umask, so unprivileged clients (e.g. agentsh
+	// exec running as the agent user) can traverse these root-created paths.
+	_ = os.Chmod(filepath.Dir(cfg.MountPoint), 0o755)
+	_ = os.Chmod(cfg.MountPoint, 0o755)
 
 	// Create the policy-enforcing filesystem
 	fuseFS := newFuseFS(cfg)
@@ -109,6 +115,9 @@ func mountOptions(cfg Config) []string {
 		}
 		return opts
 	default:
-		return nil
+		// On Linux, allow_other lets unprivileged users (the agent user running
+		// agentsh exec) access a FUSE mount created by root. Without it, only
+		// the mounting process can traverse the mount point.
+		return []string{"-o", "allow_other"}
 	}
 }
