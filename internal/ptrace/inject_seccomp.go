@@ -29,8 +29,36 @@ const sockFilterSize = 8
 // The tracee must be in a ptrace-stop (e.g., after PTRACE_INTERRUPT).
 // Returns nil on success. Failure is non-fatal — caller falls back to TRACESYSGOOD.
 func (t *Tracer) injectSeccompFilter(tid int) error {
-	// Build the BPF program.
-	filters, bpfErr := buildNarrowPrefilterBPF(&t.cfg)
+	denies := t.collectStaticDenies()
+	narrowNums := narrowTracedSyscallNumbers(&t.cfg)
+
+	var filters []unix.SockFilter
+	var bpfErr error
+
+	if len(denies) > 0 {
+		denySet := make(map[int]uint32)
+		for _, d := range denies {
+			denySet[d.Nr] = seccompRetErrno(d.Errno)
+		}
+
+		var actions []bpfSyscallAction
+		for _, nr := range narrowNums {
+			if errnoAction, ok := denySet[nr]; ok {
+				actions = append(actions, bpfSyscallAction{Nr: nr, Action: errnoAction})
+				delete(denySet, nr)
+			} else {
+				actions = append(actions, bpfSyscallAction{Nr: nr, Action: seccompRetTrace})
+			}
+		}
+		for nr, action := range denySet {
+			actions = append(actions, bpfSyscallAction{Nr: nr, Action: action})
+		}
+
+		filters, bpfErr = buildBPFForActions(actions)
+	} else {
+		filters, bpfErr = buildNarrowPrefilterBPF(&t.cfg)
+	}
+
 	if bpfErr != nil {
 		return bpfErr
 	}
@@ -120,6 +148,9 @@ func (t *Tracer) injectSeccompFilter(tid int) error {
 	}
 
 	slog.Info("seccomp prefilter installed", "tid", tid, "filters", len(filters))
+	for _, d := range denies {
+		slog.Info("seccomp static deny active", "tid", tid, "nr", d.Nr, "errno", d.Errno)
+	}
 	return nil
 }
 

@@ -2,7 +2,11 @@
 
 package ptrace
 
-import "testing"
+import (
+	"testing"
+
+	"golang.org/x/sys/unix"
+)
 
 func TestPrefilterBPFNonEmpty(t *testing.T) {
 	prog, err := buildPrefilterBPF(allFeaturesConfig())
@@ -75,5 +79,76 @@ func TestPrefilterBPFArchCheck(t *testing.T) {
 	}
 	if prog[1].K != auditArchX86_64 && prog[1].K != auditArchAarch64 {
 		t.Errorf("arch check compares unexpected value 0x%X", prog[1].K)
+	}
+}
+
+func TestBuildBPFForActions(t *testing.T) {
+	actions := []bpfSyscallAction{
+		{Nr: unix.SYS_OPENAT, Action: seccompRetTrace},
+		{Nr: unix.SYS_CONNECT, Action: seccompRetErrno(int(unix.EACCES))},
+	}
+	prog, err := buildBPFForActions(actions)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jeqValues := make(map[uint32]bool)
+	for _, inst := range prog {
+		if inst.Code == bpfJMP|bpfJEQ|bpfK {
+			if inst.K == auditArchX86_64 || inst.K == auditArchAarch64 {
+				continue
+			}
+			jeqValues[inst.K] = true
+		}
+	}
+	if !jeqValues[uint32(unix.SYS_OPENAT)] {
+		t.Error("SYS_OPENAT missing from filter")
+	}
+	if !jeqValues[uint32(unix.SYS_CONNECT)] {
+		t.Error("SYS_CONNECT missing from filter")
+	}
+
+	retInsts := 0
+	for _, inst := range prog {
+		if inst.Code == bpfRET|bpfK {
+			retInsts++
+		}
+	}
+	// Should have: unknown-arch TRACE, default ALLOW, TRACE, ERRNO = 4 ret instructions
+	if retInsts < 3 {
+		t.Errorf("expected at least 3 return instructions, got %d", retInsts)
+	}
+}
+
+func TestBuildBPFForActionsErrnoValue(t *testing.T) {
+	errno := int(unix.EPERM)
+	actions := []bpfSyscallAction{
+		{Nr: unix.SYS_CONNECT, Action: seccompRetErrno(errno)},
+	}
+	prog, err := buildBPFForActions(actions)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, inst := range prog {
+		if inst.Code == bpfRET|bpfK && inst.K != seccompRetAllow && inst.K != seccompRetTrace {
+			want := uint32(0x00050000 | errno)
+			if inst.K != want {
+				t.Errorf("ERRNO return = 0x%x, want 0x%x", inst.K, want)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no ERRNO return instruction found")
+	}
+}
+
+func TestSeccompRetErrnoEncoding(t *testing.T) {
+	got := seccompRetErrno(int(unix.EACCES))
+	want := uint32(0x00050000 | unix.EACCES)
+	if got != want {
+		t.Errorf("seccompRetErrno(EACCES) = 0x%x, want 0x%x", got, want)
 	}
 }
