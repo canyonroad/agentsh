@@ -29,10 +29,12 @@ Four optimizations are implemented in priority order, each building on the previ
 `needsExitStop()` (`tracer.go:465`) unconditionally returns `true` for `openat`, `openat2`, `connect`, `read`, `pread64`, `execve`, and `execveat`. This causes `allowSyscall()` to use `PtraceSyscall` (generating an exit stop) even when the exit handler would immediately return due to config.
 
 Specifically:
-- `handleOpenatExit` returns immediately when `!t.cfg.MaskTracerPid` (`tracer.go:1006`)
-- `handleConnectExit` only does TLS port tracking when `t.fds != nil` and a connection succeeds
+- `handleOpenatExit` returns immediately when `!t.cfg.MaskTracerPid` (`tracer.go:1006`). Note: `t.fds` is unconditionally initialized in `Run()` at `tracer.go:1578` so the `t.fds == nil` guard in `handleOpenatExit` is always false during the tracer's lifetime.
+- `handleConnectExit` does TLS fd watching for SNI rewrite after successful connect to TLS ports
 
-With `MaskTracerPid=off`, every openat/connect generates a wasted exit stop + context switch.
+With `MaskTracerPid=off`, every openat generates a wasted exit stop + context switch.
+
+Note: `handleNetwork` already performs inline exit stop skipping for connect to non-TLS ports at `handle_network.go:256-263` (`s.NeedExitStop = false` when `port != 443 && port != 853`). So the connect case in `needsExitStop` provides marginal additional benefit — only covering the initial default before the handler runs. The primary value of this optimization is for **openat**.
 
 ### Solution
 
@@ -46,7 +48,8 @@ func (t *Tracer) needsExitStop(nr int) bool {
     case unix.SYS_OPENAT, unix.SYS_OPENAT2:
         return t.cfg.MaskTracerPid // fd tracking for TracerPid masking
     case unix.SYS_CONNECT:
-        return t.cfg.TraceNetwork && t.fds != nil // TLS port tracking
+        return t.cfg.TraceNetwork // TLS port tracking; inline skip in handleNetwork
+                                  // handles port-level granularity (443/853 only)
     case unix.SYS_EXECVE, unix.SYS_EXECVEAT:
         return true // exec failure cleanup
     }
@@ -64,13 +67,13 @@ No changes needed to `allowSyscall` — it already checks `mustCatchExit(s)` whi
 
 ### Impact
 
-With `MaskTracerPid=off`: saves 1 context switch per openat and connect syscall. Estimated 15-25% reduction in File I/O overhead, 5-10% in Network overhead.
+With `MaskTracerPid=off`: saves 1 context switch per openat syscall. The connect benefit is marginal since the inline skip in `handleNetwork` already handles most cases. Estimated 15-25% reduction in File I/O overhead.
 
-With `MaskTracerPid=on`: no change — exit stops still fire.
+With `MaskTracerPid=on`: no change — exit stops still fire for openat. Connect exit stops are unchanged (already inline-skipped for non-TLS ports).
 
 ### Risk
 
-Low. The guard conditions exactly match the early-returns already in `handleOpenatExit` and `handleConnectExit`.
+Low. The openat guard condition exactly matches the early-return in `handleOpenatExit`. The connect simplification from `t.cfg.TraceNetwork && t.fds != nil` to `t.cfg.TraceNetwork` is safe because `t.fds` is always non-nil.
 
 ## Optimization 2: Config-driven BPF filter construction
 
@@ -126,7 +129,7 @@ func narrowTracedSyscallNumbers(cfg *TracerConfig) []int {
 }
 ```
 
-Apply the same pattern to `tracedSyscallNumbers` (the full set including read/write).
+Apply the same pattern to `tracedSyscallNumbers` (the full set used as fallback when seccomp prefilter is off, i.e., TRACESYSGOOD mode). That function should also be config-driven, adding the same category-based syscall selection plus `SYS_READ`/`SYS_PREAD64`/`SYS_WRITE` unconditionally (since without a prefilter, all traced syscalls need TRACESYSGOOD handling). The escalation BPF lists (`readEscalationSyscalls`, `writeEscalationSyscalls`) remain unchanged — they are explicit static lists used only when stacking additional filters.
 
 ### Call site changes
 
@@ -152,6 +155,8 @@ Per `curl` invocation: saves ~15-25 wasted ptrace stops (socket, close, sendto).
 
 Low-medium. The removed syscalls have no policy logic. `close` is the only concern: if fd tracking is off at filter install time but somehow needed later, we'd miss close events. However, fd tracking state is determined at startup from config and doesn't change at runtime. Lazy escalation only adds read/write, not close.
 
+Known limitation: if the DNS proxy fails to start (`tracer.go:1581`), `t.dnsProxy` will be nil even though `TraceNetwork && NetworkHandler != nil` are set. In this case, `sendto` would be in the BPF filter but the handler would just `allowSyscall` every sendto — wasted stops, not incorrect behavior.
+
 ## Optimization 3: BPF-level SECCOMP_RET_ERRNO for static denies
 
 ### Problem
@@ -173,7 +178,7 @@ type StaticDeny struct {
 }
 ```
 
-Handlers optionally implement `StaticDenyChecker` to declare syscalls that are always denied regardless of arguments for the lifetime of the session.
+Handlers optionally implement `StaticDenyChecker` to declare syscalls that are always denied regardless of arguments for the lifetime of the session. Errno must be > 0; zero or negative values are rejected at filter install time with a warning log.
 
 #### Extended BPF generation
 
@@ -242,6 +247,8 @@ Medium. The `StaticDenyChecker` interface must be conservative. A wrong declarat
 - Only for session-lifetime static decisions
 - Log at filter install time which syscalls are BPF-denied
 
+**Seccomp stacking invariant**: Static deny syscalls must never overlap with escalation syscall lists (`readEscalationSyscalls`, `writeEscalationSyscalls`). In seccomp filter stacking, the kernel returns the action with the lowest value (most restrictive). `SECCOMP_RET_ERRNO` (0x00050000) is lower than `SECCOMP_RET_TRACE` (0x7FF00000), so a BPF-level ERRNO cannot be overridden by a later TRACE escalation filter. Currently the escalation lists only contain `read`/`pread64`/`write`, which would never be statically denied, so there is no conflict. This non-overlap must be maintained as an invariant — validate at filter install time.
+
 ## Optimization 4: PTRACE_GET_SYSCALL_INFO for faster entry handling
 
 ### Problem
@@ -261,7 +268,7 @@ type SyscallEntryInfo struct {
 func (t *Tracer) getSyscallEntryInfo(tid int) (*SyscallEntryInfo, error) {
     // Uses PTRACE_GET_SYSCALL_INFO (ptrace request 0x420e)
     // Returns ptrace_syscall_info struct with op, nr, args
-    // ~80 bytes vs 216 bytes for full registers
+    // ~96 bytes vs 216 bytes for full registers
 }
 ```
 
@@ -293,6 +300,10 @@ func (sc *SyscallContext) Regs() (Regs, error) {
 
 Handlers receive `*SyscallContext` instead of `Regs`. The allow path reads args from `sc.Info.Args[n]`. The deny/redirect path calls `sc.Regs()` for full register access.
 
+**Exit handlers continue using `getRegs`**: `PTRACE_GET_SYSCALL_INFO` at exit time returns `ptrace_syscall_info.exit` (rval + is_error), NOT the entry args. Exit handlers like `handleConnectExit` and `handleOpenatExit` need entry-time arguments (sockaddr pointer, fd number). Two options:
+- (Recommended) Exit handlers call `getRegs()` directly, since registers still contain argument values at exit time. This preserves current behavior with no refactoring.
+- Store `SyscallEntryInfo` in `TraceeState` alongside `LastNr` and carry it to exit handlers. More complex, marginal benefit.
+
 #### Capability detection at startup
 
 ```go
@@ -305,7 +316,7 @@ Probe at startup, fall back to `getRegs` on older kernels. Linux 5.3+ supports `
 
 ### Impact
 
-Saves one full register read per allowed syscall entry. Estimated 5-10% reduction in per-stop latency. The context switch cost still dominates, so overall improvement is modest (~5% total).
+Saves one full register read per allowed syscall entry. Both `PTRACE_GETREGS` and `PTRACE_GET_SYSCALL_INFO` are single ptrace calls; the difference is ~120 bytes less `copy_to_user`. The context switch and ptrace framework overhead dominate. Estimated 1-3% reduction in per-stop latency. Overall improvement is modest (~2-3% total).
 
 ### Risk
 
@@ -322,18 +333,18 @@ Considered caching `/proc/<tid>/cwd` readlink results per-TGID. Dropped because:
 
 | Optimization | MaskTracerPid=off | MaskTracerPid=on |
 |---|---|---|
-| 1. Config-aware exit stops | 15-25% of File I/O, 5-10% of Network | No change |
+| 1. Config-aware exit stops | 15-25% of File I/O | No change (connect inline skip already exists) |
 | 2. Smarter BPF filter | 10-20% of Network, 5-10% of trees | Same |
 | 3. BPF-level deny | Policy-dependent | Policy-dependent |
-| 4. PTRACE_GET_SYSCALL_INFO | ~5% overall | ~5% overall |
+| 4. PTRACE_GET_SYSCALL_INFO | ~2-3% overall | ~2-3% overall |
 
-These are multiplicative — each reduces the number or cost of remaining stops. Conservative estimate: **30-50% total overhead reduction** for MaskTracerPid=off deployments (621% → ~310-430%). More with deny-heavy policies.
+These are multiplicative — each reduces the number or cost of remaining stops. Conservative estimate: **25-40% total overhead reduction** for MaskTracerPid=off deployments (621% → ~370-465%). More with deny-heavy policies.
 
 ## Implementation order
 
 1. **Optimization 1** (config-aware exit stops) — smallest change, immediate impact
 2. **Optimization 2** (smarter BPF filter) — builds on Opt 1, removes more stops
-3. **Optimization 1** (BPF-level deny) — extends BPF generation from Opt 2
+3. **Optimization 3** (BPF-level deny) — extends BPF generation from Opt 2
 4. **Optimization 4** (PTRACE_GET_SYSCALL_INFO) — independent, can be done in parallel
 
 ## Files affected
@@ -355,5 +366,5 @@ These are multiplicative — each reduces the number or cost of remaining stops.
 - Benchmark before/after each optimization with `make bench`
 - Unit tests for BPF filter generation with mixed actions
 - Unit tests for `needsExitStop` with different config combinations
-- Integration tests for static deny (verify EPERM without ptrace stop)
+- Integration tests for static deny (verify configured errno returned without ptrace stop)
 - Cross-compile check: `GOOS=windows go build ./...`
