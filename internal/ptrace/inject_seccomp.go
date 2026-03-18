@@ -30,7 +30,20 @@ const sockFilterSize = 8
 // Returns nil on success. Failure is non-fatal — caller falls back to TRACESYSGOOD.
 func (t *Tracer) injectSeccompFilter(tid int) error {
 	denies := t.collectStaticDenies()
+	allows := t.collectStaticAllows()
 	narrowNums := narrowTracedSyscallNumbers(&t.cfg)
+
+	// Remove statically allowed syscalls from traced set.
+	// These fall through to the BPF default SECCOMP_RET_ALLOW path.
+	if len(allows) > 0 {
+		filtered := narrowNums[:0]
+		for _, nr := range narrowNums {
+			if !allows[nr] {
+				filtered = append(filtered, nr)
+			}
+		}
+		narrowNums = filtered
+	}
 
 	var filters []unix.SockFilter
 	var bpfErr error
@@ -56,7 +69,7 @@ func (t *Tracer) injectSeccompFilter(tid int) error {
 
 		filters, bpfErr = buildBPFForActions(actions)
 	} else {
-		filters, bpfErr = buildNarrowPrefilterBPF(&t.cfg)
+		filters, bpfErr = buildBPFForSyscalls(narrowNums)
 	}
 
 	if bpfErr != nil {
@@ -150,6 +163,9 @@ func (t *Tracer) injectSeccompFilter(tid int) error {
 	slog.Info("seccomp prefilter installed", "tid", tid, "filters", len(filters))
 	for _, d := range denies {
 		slog.Info("seccomp static deny active", "tid", tid, "nr", d.Nr, "errno", d.Errno)
+	}
+	for nr := range allows {
+		slog.Info("seccomp static allow active", "tid", tid, "nr", nr)
 	}
 	return nil
 }

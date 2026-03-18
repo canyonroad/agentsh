@@ -152,3 +152,57 @@ func TestSeccompRetErrnoEncoding(t *testing.T) {
 		t.Errorf("seccompRetErrno(EACCES) = 0x%x, want 0x%x", got, want)
 	}
 }
+
+func TestStaticAllowsExcludedFromBPF(t *testing.T) {
+	// Simulate the filtering logic from injectSeccompFilter:
+	// narrowNums minus allows should not contain allowed syscalls.
+	cfg := allFeaturesConfig()
+	cfg.FileHandler = allowAllFileHandler{}
+	narrowNums := narrowTracedSyscallNumbers(cfg)
+
+	allows := make(map[int]bool)
+	if checker, ok := cfg.FileHandler.(StaticAllowChecker); ok {
+		for _, nr := range checker.StaticAllowSyscalls() {
+			allows[nr] = true
+		}
+	}
+
+	filtered := make([]int, 0, len(narrowNums))
+	for _, nr := range narrowNums {
+		if !allows[nr] {
+			filtered = append(filtered, nr)
+		}
+	}
+
+	// Build BPF from filtered set.
+	prog, err := buildBPFForSyscalls(filtered)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Collect JEQ syscall numbers from BPF.
+	jeqValues := make(map[uint32]bool)
+	for _, inst := range prog {
+		if inst.Code == bpfJMP|bpfJEQ|bpfK {
+			if inst.K == auditArchX86_64 || inst.K == auditArchAarch64 {
+				continue
+			}
+			jeqValues[inst.K] = true
+		}
+	}
+
+	// Allowed syscalls must NOT appear in BPF.
+	for nr := range allows {
+		if jeqValues[uint32(nr)] {
+			t.Errorf("statically allowed syscall %d should not be in BPF filter", nr)
+		}
+	}
+
+	// Non-allowed syscalls that were in narrowNums MUST appear.
+	if !jeqValues[uint32(unix.SYS_CONNECT)] {
+		t.Error("SYS_CONNECT should still be in BPF filter")
+	}
+	if !jeqValues[uint32(unix.SYS_EXECVE)] {
+		t.Error("SYS_EXECVE should still be in BPF filter")
+	}
+}

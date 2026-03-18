@@ -55,6 +55,80 @@ func TestCollectStaticDeniesNoChecker(t *testing.T) {
 	}
 }
 
+// allowAllNetWithStatic implements both NetworkHandler and StaticAllowChecker.
+type allowAllNetWithStatic struct{}
+
+func (allowAllNetWithStatic) HandleNetwork(_ context.Context, _ NetworkContext) NetworkResult {
+	return NetworkResult{Allow: true}
+}
+
+func (allowAllNetWithStatic) StaticAllowSyscalls() []int {
+	return []int{unix.SYS_CONNECT, unix.SYS_BIND}
+}
+
+// allowAllFileHandler implements FileHandler and StaticAllowChecker.
+type allowAllFileHandler struct{}
+
+func (allowAllFileHandler) HandleFile(_ context.Context, _ FileContext) FileResult {
+	return FileResult{Allow: true}
+}
+
+func (allowAllFileHandler) StaticAllowSyscalls() []int {
+	return []int{unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT}
+}
+
+func TestCollectStaticAllowsWithChecker(t *testing.T) {
+	tr := &Tracer{cfg: TracerConfig{
+		TraceNetwork:   true,
+		NetworkHandler: allowAllNetWithStatic{},
+	}}
+	allows := tr.collectStaticAllows()
+	if len(allows) != 2 {
+		t.Fatalf("expected 2 allows, got %d", len(allows))
+	}
+	if !allows[unix.SYS_CONNECT] || !allows[unix.SYS_BIND] {
+		t.Error("expected connect and bind in allows")
+	}
+}
+
+func TestCollectStaticAllowsNoChecker(t *testing.T) {
+	tr := &Tracer{cfg: TracerConfig{
+		TraceNetwork:   true,
+		NetworkHandler: allowAllNetHandler{},
+	}}
+	allows := tr.collectStaticAllows()
+	if len(allows) != 0 {
+		t.Fatalf("expected 0 allows for non-checker handler, got %d", len(allows))
+	}
+}
+
+func TestCollectStaticAllowsMultipleHandlers(t *testing.T) {
+	tr := &Tracer{cfg: TracerConfig{
+		TraceNetwork:   true,
+		TraceFile:      true,
+		NetworkHandler: allowAllNetWithStatic{},
+		FileHandler:    allowAllFileHandler{},
+	}}
+	allows := tr.collectStaticAllows()
+	// 2 from network + 3 from file = 5
+	if len(allows) != 5 {
+		t.Fatalf("expected 5 allows from both handlers, got %d", len(allows))
+	}
+	for _, nr := range []int{unix.SYS_CONNECT, unix.SYS_BIND, unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT} {
+		if !allows[nr] {
+			t.Errorf("syscall %d missing from allows", nr)
+		}
+	}
+}
+
+func TestCollectStaticAllowsNilHandlers(t *testing.T) {
+	tr := &Tracer{cfg: TracerConfig{}}
+	allows := tr.collectStaticAllows()
+	if len(allows) != 0 {
+		t.Fatalf("expected 0 allows with nil handlers, got %d", len(allows))
+	}
+}
+
 func TestValidateStaticDeniesRejectsZeroErrno(t *testing.T) {
 	denies := validateStaticDenies([]StaticDeny{
 		{Nr: unix.SYS_CONNECT, Errno: int(unix.EACCES)},

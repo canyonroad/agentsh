@@ -23,9 +23,11 @@ type PtraceTraceConfig struct {
 }
 
 type PtracePerformanceConfig struct {
-	SeccompPrefilter bool `yaml:"seccomp_prefilter"`
-	MaxTracees       int  `yaml:"max_tracees"`
-	MaxHoldMs        int  `yaml:"max_hold_ms"`
+	SeccompPrefilter   bool `yaml:"seccomp_prefilter"`
+	MaxTracees         int  `yaml:"max_tracees"`
+	MaxHoldMs          int  `yaml:"max_hold_ms"`
+	StaticAllowFile    bool `yaml:"static_allow_file"`
+	StaticAllowNetwork bool `yaml:"static_allow_network"`
 }
 
 func DefaultPtraceConfig() SandboxPtraceConfig {

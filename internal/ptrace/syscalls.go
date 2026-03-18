@@ -91,3 +91,22 @@ func narrowTracedSyscallNumbers(cfg *TracerConfig) []int {
 
 	return nums
 }
+
+// AllFileSyscalls returns all file-related syscall numbers that the tracer
+// intercepts. Exported for use by StaticAllowChecker implementations.
+func AllFileSyscalls() []int {
+	nums := []int{
+		unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
+		unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
+		unix.SYS_FCHMODAT, unix.SYS_FCHMODAT2, unix.SYS_FCHOWNAT,
+	}
+	nums = append(nums, legacyFileSyscalls()...)
+	return nums
+}
+
+// AllNetworkSyscalls returns all network-related syscall numbers that the
+// tracer intercepts (connect, bind, sendto). Exported for use by
+// StaticAllowChecker implementations.
+func AllNetworkSyscalls() []int {
+	return []int{unix.SYS_CONNECT, unix.SYS_BIND, unix.SYS_SENDTO}
+}

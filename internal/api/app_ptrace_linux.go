@@ -18,9 +18,11 @@ func (a *App) initPtraceTracer() {
 	}
 
 	router := &ptraceHandlerRouter{
-		sessions: a.sessions,
-		store:    a.store,
-		broker:   a.broker,
+		sessions:           a.sessions,
+		store:              a.store,
+		broker:             a.broker,
+		staticAllowFile:    cfg.Performance.StaticAllowFile,
+		staticAllowNetwork: cfg.Performance.StaticAllowNetwork,
 	}
 	tr := ptrace.NewTracer(ptrace.TracerConfig{
 		AttachMode:       cfg.AttachMode,

@@ -19,15 +19,32 @@ import (
 // ptraceHandlerRouter routes ptrace syscall events to session-level policy
 // engines. It implements all four ptrace handler interfaces.
 type ptraceHandlerRouter struct {
-	sessions *session.Manager
-	store    *composite.Store
-	broker   *events.Broker
+	sessions          *session.Manager
+	store             *composite.Store
+	broker            *events.Broker
+	staticAllowFile    bool
+	staticAllowNetwork bool
 }
 
 var _ ptrace.ExecHandler = (*ptraceHandlerRouter)(nil)
 var _ ptrace.FileHandler = (*ptraceHandlerRouter)(nil)
 var _ ptrace.NetworkHandler = (*ptraceHandlerRouter)(nil)
 var _ ptrace.SignalHandler = (*ptraceHandlerRouter)(nil)
+var _ ptrace.StaticAllowChecker = (*ptraceHandlerRouter)(nil)
+
+// StaticAllowSyscalls implements ptrace.StaticAllowChecker.
+// When configured, declares file/network syscalls as always-allowed,
+// skipping ptrace stops entirely for those categories.
+func (r *ptraceHandlerRouter) StaticAllowSyscalls() []int {
+	var syscalls []int
+	if r.staticAllowFile {
+		syscalls = append(syscalls, ptrace.AllFileSyscalls()...)
+	}
+	if r.staticAllowNetwork {
+		syscalls = append(syscalls, ptrace.AllNetworkSyscalls()...)
+	}
+	return syscalls
+}
 
 func (r *ptraceHandlerRouter) HandleExecve(ctx context.Context, ec ptrace.ExecContext) ptrace.ExecResult {
 	s, ok := r.sessions.Get(ec.SessionID)

@@ -337,8 +337,11 @@ Considered caching `/proc/<tid>/cwd` readlink results per-TGID. Dropped because:
 | 2. Smarter BPF filter | 10-20% of Network, 5-10% of trees | Same |
 | 3. BPF-level deny | Policy-dependent | Policy-dependent |
 | 4. PTRACE_GET_SYSCALL_INFO | ~2-3% overall | ~2-3% overall |
+| 5. Static allow categories | **37% total** (permissive policies) | Same |
 
-These are multiplicative — each reduces the number or cost of remaining stops. Conservative estimate: **25-40% total overhead reduction** for MaskTracerPid=off deployments (621% → ~370-465%). More with deny-heavy policies.
+Optimizations 1-4 are multiplicative — each reduces the number or cost of remaining stops. Conservative estimate: **25-40% total overhead reduction** for MaskTracerPid=off deployments (621% → ~370-465%). More with deny-heavy policies.
+
+Optimization 5 is additive on top of 1-4, measured at **+367% → +229%** (after opts 1-3 already applied). Only applies when handler categories are fully permissive.
 
 ## Implementation order
 
@@ -368,3 +371,52 @@ These are multiplicative — each reduces the number or cost of remaining stops.
 - Unit tests for `needsExitStop` with different config combinations
 - Integration tests for static deny (verify configured errno returned without ptrace stop)
 - Cross-compile check: `GOOS=windows go build ./...`
+
+## Optimization 5: Static allow for syscall categories (implemented 2026-03-18)
+
+### Problem
+
+When a handler's policy is fully permissive (allows everything), every intercepted syscall still generates a ptrace stop only to immediately allow it. For file-heavy workloads (curl loading shared libraries, git operations), this produces hundreds of wasted ptrace stops per command.
+
+### Solution
+
+Mirror the existing `StaticDenyChecker` pattern with a `StaticAllowChecker` interface:
+
+```go
+type StaticAllowChecker interface {
+    StaticAllowSyscalls() []int
+}
+```
+
+Handlers implement this to declare syscalls that are always allowed. At filter injection time, these syscalls are removed from the BPF traced set — the default `SECCOMP_RET_ALLOW` handles them in-kernel with zero ptrace overhead.
+
+Config knobs `performance.static_allow_file` and `performance.static_allow_network` control which categories are statically allowed.
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `static_policy.go` | `StaticAllowChecker` interface, `collectStaticAllows()` |
+| `inject_seccomp.go` | Filter allows from `narrowNums` before BPF generation |
+| `syscalls.go` | Exported `AllFileSyscalls()`, `AllNetworkSyscalls()` |
+| `config/ptrace.go` | `StaticAllowFile`, `StaticAllowNetwork` in `PtracePerformanceConfig` |
+| `api/ptrace_handlers.go` | `ptraceHandlerRouter` implements `StaticAllowChecker` |
+| `api/app_ptrace_linux.go` | Wires config to router |
+
+### Bug found during implementation
+
+The initial implementation filtered `narrowNums` but the else branch (no static denies) called `buildNarrowPrefilterBPF(&t.cfg)` which recomputed the syscall list from config, ignoring static allows entirely. Fixed to use `buildBPFForSyscalls(narrowNums)` instead.
+
+### Benchmark results
+
+| Phase | Ptrace | Ptrace-allow | Improvement |
+|---|---|---|---|
+| Process spawn (120) | +231% | +160% | 31% less overhead |
+| File I/O (1000 ops) | +114% | +46% | 60% less overhead |
+| Network (10 curl) | +2073% | +682% | 67% less overhead |
+| Deep tree (20x4-lvl) | +1297% | +708% | 45% less overhead |
+| **Total** | **+367%** | **+229%** | **37% less overhead** |
+
+### Tradeoff
+
+Static allows bypass both policy enforcement AND audit logging for the allowed categories. Only enable when the policy is fully permissive for that category (no deny rules) and audit events for those syscalls are not needed.
