@@ -28,10 +28,10 @@ For a policy file `<name>.yaml`, the detached signature lives at `<name>.yaml.si
 {
   "version": 1,
   "algorithm": "ed25519",
-  "key_id": "a1b2c3d4e5f67890",
+  "key_id": "a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890",
   "signer": "watchtower-prod",
   "signed_at": "2026-03-18T12:00:00Z",
-  "signature": "base64-raw-url-encoded-ed25519-signature",
+  "signature": "standard-base64-ed25519-signature",
   "cert_chain": []
 }
 ```
@@ -40,10 +40,10 @@ For a policy file `<name>.yaml`, the detached signature lives at `<name>.yaml.si
 |-------|-------------|
 | `version` | Schema version, currently `1`. Allows future evolution. |
 | `algorithm` | Always `"ed25519"` for v1. Present for forward-compat. |
-| `key_id` | Identifies which public key to verify against. Derived deterministically: `hex(SHA256(public_key_bytes))[:16]`. |
+| `key_id` | Identifies which public key to verify against. Derived deterministically: full `hex(SHA256(public_key_bytes))` (64 hex chars). |
 | `signer` | Optional human-readable label (e.g., `"watchtower-prod"`). Informational only, not used for verification. |
-| `signed_at` | RFC 3339 timestamp of when the signature was produced. Used for audit trails and optional expiry checks. |
-| `signature` | Ed25519 signature over the raw bytes of the policy file, base64-raw-url encoded. |
+| `signed_at` | RFC 3339 timestamp of when the signature was produced. V1 does not enforce any time-based validation on this field; it is recorded for audit purposes only. Future versions may add signature freshness checks. |
+| `signature` | Ed25519 signature over the raw bytes of the policy file, standard base64 encoded (RFC 4648 section 4, with padding). |
 | `cert_chain` | Empty array in v1. Reserved for future CA hierarchy (intermediate certificates). |
 
 **What gets signed:** The exact bytes of the policy YAML file as read from disk. No normalization, no parsing. Ed25519 handles its own internal hashing.
@@ -62,20 +62,20 @@ For a policy file `<name>.yaml`, the detached signature lives at `<name>.yaml.si
 **Key ID derivation:**
 
 ```
-key_id = hex(SHA256(ed25519_public_key_bytes))[:16]
+key_id = hex(SHA256(ed25519_public_key_bytes))
 ```
 
-Deterministic from the public key. No ambiguity about which key a `key_id` refers to.
+Full 64-character hex SHA256 of the public key bytes. No truncation — avoids collision risks entirely. Deterministic from the public key.
 
 **Trust store:**
 
-A directory of trusted public keys (default: `/etc/agentsh/keys/`). Each file contains one key:
+A directory of trusted public keys (default: `/etc/agentsh/keys/`). Only files matching `*.json` are loaded. Each file contains one key:
 
 ```json
 {
-  "key_id": "a1b2c3d4e5f67890",
+  "key_id": "a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890",
   "algorithm": "ed25519",
-  "public_key": "base64-encoded-32-byte-public-key",
+  "public_key": "standard-base64-encoded-32-byte-public-key",
   "label": "watchtower-prod",
   "trusted_since": "2026-03-18T00:00:00Z",
   "expires_at": "2027-03-18T00:00:00Z"
@@ -84,7 +84,25 @@ A directory of trusted public keys (default: `/etc/agentsh/keys/`). Each file co
 
 The `expires_at` field is optional. If present, the key is rejected after expiry even if still in the trust store — defense-in-depth against forgotten keys.
 
+**Trust store permissions:** The trust store directory and key files should be writable only by root/admin. The verifier should log a warning if the trust store directory or any key file is world-writable, similar to SSH's `StrictModes`.
+
 **Key rotation:** Deploy the new public key to the trust store *before* signing with the new private key. Both old and new keys coexist. The `key_id` in the `.sig` file tells the verifier which key to use. Remove old keys once all policies are re-signed.
+
+**Private key format:**
+
+The private key file is a JSON file containing the Ed25519 seed (mode 0600):
+
+```json
+{
+  "key_id": "a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890",
+  "algorithm": "ed25519",
+  "private_key": "standard-base64-encoded-64-byte-ed25519-private-key",
+  "label": "watchtower-prod",
+  "created_at": "2026-03-18T00:00:00Z"
+}
+```
+
+The `private_key` field contains the full 64-byte Ed25519 private key (seed + public key, as returned by Go's `crypto/ed25519.GenerateKey`), standard base64 encoded.
 
 ### Configuration
 
@@ -102,6 +120,12 @@ policies:
 | `off` | Skip signature verification entirely. |
 
 **Relationship to existing manifest:** The SHA256 manifest (`policies.sha256`) becomes redundant when signing is in `enforce` mode. In `warn` or `off` mode, the manifest still provides integrity checking as a fallback. Both mechanisms coexist; no removal needed.
+
+**Implementation note:** The `Signing` sub-struct must be added to `PoliciesConfig` in `internal/config/config.go`. The `mode` field must be validated at config load time to be one of `"enforce"`, `"warn"`, or `"off"`.
+
+### Scope: Which Policy Loading Paths
+
+Signing applies to the monolithic policy loading path (`internal/policy/Manager` via `ResolvePolicyPath`). The split/directory-based policy loader (`internal/config/LoadPolicyFiles`) is not covered in v1. If split policy loading needs signing in the future, each individual YAML file in the directory would get its own `.sig` file, following the same format.
 
 ### CLI Commands
 
@@ -145,16 +169,19 @@ agentsh policy verify <policy-file> [--key-dir <trust-store>]
 When `PolicyManager` loads a policy:
 
 1. Read policy bytes from disk
-2. Check `policies.signing.mode` — if `"off"`, skip to step 8
+2. Check `policies.signing.mode` — if `"off"`, skip to step 10
 3. Look for `<policy-path>.sig`
-4. Parse sig JSON, extract `key_id`
-5. Find matching public key in `trust_store` directory
-6. Check key expiry if `expires_at` is set
-7. Verify Ed25519 signature over raw policy bytes
-8. On success: log verification event, proceed with loading
-9. On failure:
-   - `"enforce"` mode: refuse to load, return error
-   - `"warn"` mode: log warning, proceed with loading
+4. **If `.sig` is missing:**
+   - `"enforce"` mode: refuse to load, return error `"missing_signature"`
+   - `"warn"` mode: log warning, skip to step 10 (load without verification)
+5. Parse sig JSON and validate: reject if `version` is not `1`, `algorithm` is not `"ed25519"`, or `key_id`/`signature`/`signed_at` are missing/empty. If `cert_chain` is non-empty in v1, reject with `"unsupported_cert_chain"`
+6. Extract `key_id`, find matching public key in `trust_store` directory
+7. Check key expiry if `expires_at` is set
+8. Verify Ed25519 signature over raw policy bytes
+9. On success: log verification event, proceed with loading
+10. On failure:
+    - `"enforce"` mode: refuse to load, return error
+    - `"warn"` mode: log warning, proceed with loading
 
 ### Watchtower Delivery Flow
 
@@ -164,7 +191,7 @@ When watchtower distributes a policy update:
 2. Delivers both files: `<policy>.yaml` + `<policy>.yaml.sig`
 3. Agent writes both to a **staging directory** (`/etc/agentsh/policies/.staging/`) — not directly into the live policy dir
 4. Agent verifies the signature against its trust store
-5. **On success:** atomically moves both files into the live policy directory, logs the update
+5. **On success:** move the `.sig` file first, then the `.yaml` file into the live policy directory. This ordering ensures the policy manager always sees a signature if it sees the policy. Log the update with `key_id`, `signer`, `signed_at`.
 6. **On failure:** rejects the update, logs the failure with details (unknown key, bad signature, missing sig), keeps existing policy
 7. The existing `reload_interval` timer picks up the new policy — or watchtower triggers an immediate reload
 
@@ -180,7 +207,7 @@ Every signature verification produces an audit event:
 {
   "event": "policy.signature.verified",
   "policy": "agent-sandbox",
-  "key_id": "a1b2c3d4e5f67890",
+  "key_id": "a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890",
   "signer": "watchtower-prod",
   "signed_at": "2026-03-18T12:00:00Z",
   "verified_at": "2026-03-18T12:05:00Z",
