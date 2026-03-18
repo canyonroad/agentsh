@@ -5,7 +5,7 @@ package ptrace
 import "testing"
 
 func TestPrefilterBPFNonEmpty(t *testing.T) {
-	prog, err := buildPrefilterBPF()
+	prog, err := buildPrefilterBPF(allFeaturesConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -15,8 +15,9 @@ func TestPrefilterBPFNonEmpty(t *testing.T) {
 }
 
 func TestPrefilterBPFInstructionCount(t *testing.T) {
-	syscalls := tracedSyscallNumbers()
-	prog, err := buildPrefilterBPF()
+	cfg := allFeaturesConfig()
+	syscalls := tracedSyscallNumbers(cfg)
+	prog, err := buildPrefilterBPF(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,8 +31,9 @@ func TestPrefilterBPFInstructionCount(t *testing.T) {
 }
 
 func TestPrefilterBPFContainsAllSyscalls(t *testing.T) {
-	syscalls := tracedSyscallNumbers()
-	prog, err := buildPrefilterBPF()
+	cfg := allFeaturesConfig()
+	syscalls := tracedSyscallNumbers(cfg)
+	prog, err := buildPrefilterBPF(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +58,7 @@ func TestPrefilterBPFContainsAllSyscalls(t *testing.T) {
 }
 
 func TestPrefilterBPFArchCheck(t *testing.T) {
-	prog, err := buildPrefilterBPF()
+	prog, err := buildPrefilterBPF(allFeaturesConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
