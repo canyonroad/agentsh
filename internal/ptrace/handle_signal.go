@@ -31,13 +31,13 @@ func extractSignalArgs(nr int, arg0, arg1, arg2 int) (int, int, int) {
 }
 
 // handleSignal intercepts signal delivery syscalls for policy evaluation.
-func (t *Tracer) handleSignal(ctx context.Context, tid int, regs Regs) {
+func (t *Tracer) handleSignal(ctx context.Context, tid int, sc *SyscallContext) {
 	if t.cfg.SignalHandler == nil || !t.cfg.TraceSignal {
 		t.allowSyscall(tid)
 		return
 	}
 
-	nr := regs.SyscallNr()
+	nr := sc.Info.Nr
 
 	switch nr {
 	case unix.SYS_KILL, unix.SYS_TGKILL, unix.SYS_TKILL,
@@ -48,9 +48,9 @@ func (t *Tracer) handleSignal(ctx context.Context, tid int, regs Regs) {
 		return
 	}
 
-	arg0 := int(int32(regs.Arg(0)))
-	arg1 := int(int32(regs.Arg(1)))
-	arg2 := int(int32(regs.Arg(2)))
+	arg0 := int(int32(sc.Info.Args[0]))
+	arg1 := int(int32(sc.Info.Args[1]))
+	arg2 := int(int32(sc.Info.Args[2]))
 
 	targetPID, signal, sigArgIndex := extractSignalArgs(nr, arg0, arg1, arg2)
 
@@ -86,6 +86,12 @@ func (t *Tracer) handleSignal(ctx context.Context, tid int, regs Regs) {
 		// reliably patch, so deny if redirect is requested for those.
 		switch nr {
 		case unix.SYS_KILL, unix.SYS_TKILL, unix.SYS_TGKILL:
+			regs, err := sc.Regs()
+			if err != nil {
+				slog.Warn("handleSignal: cannot load regs for redirect, denying", "tid", tid, "error", err)
+				t.denySyscall(tid, int(unix.EPERM))
+				return
+			}
 			regs.SetArg(sigArgIndex, uint64(result.RedirectSignal))
 			if err := t.setRegs(tid, regs); err != nil {
 				slog.Warn("handleSignal: cannot rewrite signal register, denying", "tid", tid, "error", err)

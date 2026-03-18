@@ -73,18 +73,19 @@ func parseSockaddr(buf []byte) (family int, address string, port int, err error)
 }
 
 // handleNetwork intercepts network syscalls for policy evaluation.
-func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
+func (t *Tracer) handleNetwork(ctx context.Context, tid int, sc *SyscallContext) {
 	if t.cfg.NetworkHandler == nil || !t.cfg.TraceNetwork {
 		t.allowSyscall(tid)
 		return
 	}
 
-	nr := regs.SyscallNr()
+	nr := sc.Info.Nr
+	args := sc.Info.Args
 
 	// Sendto DNS redirect: if sendto targets port 53, rewrite destination to proxy
 	if t.dnsProxy != nil && nr == unix.SYS_SENDTO {
-		destAddrPtr := regs.Arg(4) // sendto arg4 = dest_addr
-		destAddrLen := int(regs.Arg(5)) // sendto arg5 = addrlen
+		destAddrPtr := args[4] // sendto arg4 = dest_addr
+		destAddrLen := int(args[5]) // sendto arg5 = addrlen
 		if destAddrPtr != 0 && destAddrLen > 0 && destAddrLen <= 128 {
 			destBuf := make([]byte, destAddrLen)
 			if err := t.readBytes(tid, destAddrPtr, destBuf); err == nil {
@@ -99,8 +100,11 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 						newDest = buildSockaddrIn4(net.ParseIP("127.0.0.1").To4(), t.dnsProxy.port4)
 					} else if t.dnsProxy.port6 > 0 {
 						newDest = buildSockaddrIn6(net.ParseIP("::1"), t.dnsProxy.port6)
-						regs.SetArg(5, 28) // update addrlen
-						t.setRegs(tid, regs)
+						regs, err := sc.Regs()
+						if err == nil {
+							regs.SetArg(5, 28) // update addrlen
+							t.setRegs(tid, regs)
+						}
 					}
 					if newDest != nil {
 						if err := t.writeBytes(tid, destAddrPtr, newDest); err == nil {
@@ -108,7 +112,7 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 							t.mu.Lock()
 							state := t.tracees[tid]
 							if state != nil {
-								fd := int(int32(regs.Arg(0)))
+								fd := int(int32(args[0]))
 								t.fds.recordDNSRedirect(state.TGID, fd, state.TGID, state.SessionID, fmt.Sprintf("%s:%d", destAddr, destPort))
 							}
 							t.mu.Unlock()
@@ -129,8 +133,8 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 	}
 
 	// Args: sockfd(arg0), addr(arg1), addrlen(arg2)
-	addrPtr := regs.Arg(1)
-	rawLen := regs.Arg(2)
+	addrPtr := args[1]
+	rawLen := args[2]
 
 	if rawLen == 0 || rawLen > 128 {
 		slog.Warn("handleNetwork: addrlen out of range, denying", "tid", tid, "addrlen", rawLen)
@@ -168,7 +172,7 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 		}
 		t.mu.Unlock()
 
-		fd := int(int32(regs.Arg(0)))
+		fd := int(int32(args[0]))
 		originalResolver := fmt.Sprintf("%s:%d", address, port)
 
 		// Rewrite sockaddr to point to DNS proxy, preserving address family
@@ -186,9 +190,12 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 		} else if t.dnsProxy.port6 > 0 {
 			newSockaddr = buildSockaddrIn6(net.ParseIP("::1"), t.dnsProxy.port6)
 			// Update addrlen register for larger sockaddr_in6
-			regs.SetArg(2, 28)
-			if err := t.setRegs(tid, regs); err != nil {
-				slog.Warn("handleNetwork: DNS redirect setRegs failed", "tid", tid, "error", err)
+			regs, err := sc.Regs()
+			if err == nil {
+				regs.SetArg(2, 28)
+				if err := t.setRegs(tid, regs); err != nil {
+					slog.Warn("handleNetwork: DNS redirect setRegs failed", "tid", tid, "error", err)
+				}
 			}
 		} else {
 			// No IPv6 proxy — let DNS connect proceed unmodified
@@ -272,6 +279,12 @@ func (t *Tracer) handleNetwork(ctx context.Context, tid int, regs Regs) {
 		// Redirect is only supported for connect; deny bind-redirect to
 		// avoid unintentionally mutating bind behavior.
 		if nr == unix.SYS_CONNECT {
+			regs, err := sc.Regs()
+			if err != nil {
+				slog.Warn("handleNetwork: cannot load regs for redirect, denying", "tid", tid, "error", err)
+				t.denySyscall(tid, int(unix.EACCES))
+				return
+			}
 			t.redirectConnect(ctx, tid, regs, result)
 		} else {
 			slog.Warn("handleNetwork: redirect not supported for this syscall, denying",

@@ -971,33 +971,13 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *SyscallContext) {
 	switch {
 	case isExecveSyscall(nr):
-		regs, err := sc.Regs()
-		if err != nil {
-			t.allowSyscall(tid)
-			return
-		}
-		t.handleExecve(ctx, tid, regs)
+		t.handleExecve(ctx, tid, sc)
 	case isFileSyscall(nr):
-		regs, err := sc.Regs()
-		if err != nil {
-			t.allowSyscall(tid)
-			return
-		}
-		t.handleFile(ctx, tid, regs)
+		t.handleFile(ctx, tid, sc)
 	case isNetworkSyscall(nr):
-		regs, err := sc.Regs()
-		if err != nil {
-			t.allowSyscall(tid)
-			return
-		}
-		t.handleNetwork(ctx, tid, regs)
+		t.handleNetwork(ctx, tid, sc)
 	case isSignalSyscall(nr):
-		regs, err := sc.Regs()
-		if err != nil {
-			t.allowSyscall(tid)
-			return
-		}
-		t.handleSignal(ctx, tid, regs)
+		t.handleSignal(ctx, tid, sc)
 	case isWriteSyscall(nr):
 		t.handleWrite(ctx, tid, sc)
 	case isCloseSyscall(nr):
@@ -1500,18 +1480,18 @@ func (t *Tracer) handleEventStop(tid int) {
 }
 
 // handleExecve intercepts execve/execveat syscalls for policy evaluation.
-func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
+func (t *Tracer) handleExecve(ctx context.Context, tid int, sc *SyscallContext) {
 	if t.cfg.ExecHandler == nil || !t.cfg.TraceExecve {
 		t.allowSyscall(tid)
 		return
 	}
 
-	nr := regs.SyscallNr()
+	nr := sc.Info.Nr
 	var filenamePtr uint64
 	if nr == unix.SYS_EXECVEAT {
-		filenamePtr = regs.Arg(1)
+		filenamePtr = sc.Info.Args[1]
 	} else {
-		filenamePtr = regs.Arg(0)
+		filenamePtr = sc.Info.Args[0]
 	}
 
 	filename, err := t.readString(tid, filenamePtr, 4096)
@@ -1523,9 +1503,9 @@ func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
 
 	var argvPtr uint64
 	if nr == unix.SYS_EXECVEAT {
-		argvPtr = regs.Arg(2)
+		argvPtr = sc.Info.Args[2]
 	} else {
-		argvPtr = regs.Arg(1)
+		argvPtr = sc.Info.Args[1]
 	}
 
 	argv, truncated, err := t.readArgv(tid, argvPtr, 1000, 65536)
@@ -1581,6 +1561,12 @@ func (t *Tracer) handleExecve(ctx context.Context, tid int, regs Regs) {
 		}
 		t.denySyscall(tid, int(errno))
 	case "redirect":
+		regs, err := sc.Regs()
+		if err != nil {
+			slog.Warn("handleExecve: cannot load regs for redirect, denying", "tid", tid, "error", err)
+			t.denySyscall(tid, int(unix.EACCES))
+			return
+		}
 		t.redirectExec(ctx, tid, regs, result)
 	default:
 		slog.Warn("handleExecve: unknown action, denying", "tid", tid, "action", action)
@@ -1611,6 +1597,10 @@ func (t *Tracer) Run(ctx context.Context) error {
 			slog.Info("ptrace: DNS proxy started", "addr4", t.dnsProxy.addr4(), "addr6", t.dnsProxy.addr6())
 		}
 	}
+
+	// Reusable idle timer to avoid per-iteration allocation from time.After.
+	idleTimer := time.NewTimer(5 * time.Millisecond)
+	defer idleTimer.Stop()
 
 	for {
 		if err := t.drainQueues(ctx); err != nil {
@@ -1670,8 +1660,15 @@ func (t *Tracer) Run(ctx context.Context) error {
 				}
 			case req := <-t.resumeQueue:
 				t.handleResumeRequest(req)
-			case <-time.After(5 * time.Millisecond):
+			case <-idleTimer.C:
 			}
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(5 * time.Millisecond)
 			continue
 		}
 

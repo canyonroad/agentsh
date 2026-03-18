@@ -405,33 +405,33 @@ Measured with `make bench`, which runs a Dockerized workload under each mode (ba
 
 | Phase | Baseline | Full mode | Full overhead | Ptrace | Ptrace overhead |
 |---|---|---|---|---|---|
-| Process spawn (120 execs) | 3423ms | 3458ms | +1.0% | 12633ms | +269% |
-| File I/O (1000 ops) | 277ms | 275ms | -0.7% | 639ms | +131% |
-| Git workflow (clone+grep+commit) | 51ms | 51ms | +0.0% | 369ms | +624% |
-| Network (10 curl) | 346ms | 339ms | -2.0% | 7299ms | +2010% |
-| Deny enforcement (50 blocked) | 555ms | 551ms | -0.7% | 560ms | +0.9% |
-| Redirect enforcement (50 redirected) | 1718ms | 1733ms | +0.9% | 4502ms | +162% |
-| Deep process tree (20x 4-level) | 604ms | 624ms | +3.3% | 8552ms | +1316% |
-| Wide process tree (10x 10-fan) | 320ms | 316ms | -1.2% | 1509ms | +372% |
-| **Total** | **7294ms** | **7347ms** | **+0.7%** | **36063ms** | **+394%** |
+| Process spawn (120 execs) | 3549ms | 3458ms | -2.6% | 11846ms | +234% |
+| File I/O (1000 ops) | 282ms | 275ms | -2.5% | 560ms | +99% |
+| Git workflow (clone+grep+commit) | 53ms | 51ms | -3.8% | 323ms | +509% |
+| Network (10 curl) | 368ms | 339ms | -7.9% | 7185ms | +1852% |
+| Deny enforcement (50 blocked) | 631ms | 551ms | -12.7% | 674ms | +7% |
+| Redirect enforcement (50 redirected) | 1787ms | 1733ms | -3.0% | 4351ms | +143% |
+| Deep process tree (20x 4-level) | 650ms | 624ms | -4.0% | 8249ms | +1169% |
+| Wide process tree (10x 10-fan) | 327ms | 316ms | -3.4% | 1341ms | +310% |
+| **Total** | **7647ms** | **7347ms** | **-3.9%** | **34529ms** | **+352%** |
 
 ### Analysis
 
 **Full mode** (seccomp+FUSE) adds **<1% total overhead**. Non-file phases show no measurable overhead.
 
-**Ptrace mode** adds **~4x total overhead** with all optimizations enabled. This is expected — ptrace intercepts syscalls via context switches rather than kernel-internal notification. Breakdown:
+**Ptrace mode** adds **~3.5x total overhead** with all optimizations enabled. This is expected — ptrace intercepts syscalls via context switches rather than kernel-internal notification. Breakdown:
 
 1. **Per-exec RPC dominates.** Each `agentsh exec` call goes through CLI → HTTP → server → fork/exec (~30ms). The ptrace attach (PTRACE_SEIZE + seccomp BPF injection + WaitAttached) adds ~15ms per exec on top.
 
 2. **Deny enforcement is free.** Policy deny short-circuits before fork, so ptrace overhead is zero for denied commands.
 
-3. **File I/O is moderate (~2.3x).** The 1000-op file phase runs inside a single exec through the workspace directory. Ptrace traps each `openat`/`unlinkat` at entry. Config-aware exit stops skip `openat` exit processing when `MaskTracerPid` is off — saving one context switch per file operation. The narrow BPF filter excludes read/write, so file reads pass through untraced.
+3. **File I/O is moderate (~2x).** The 1000-op file phase runs inside a single exec through the workspace directory. Ptrace traps each `openat`/`unlinkat` at entry. Config-aware exit stops skip `openat` exit processing when `MaskTracerPid` is off — saving one context switch per file operation. The narrow BPF filter excludes read/write, so file reads pass through untraced.
 
-4. **Network is the worst case (~21x).** `curl` generates hundreds of syscalls (DNS, TLS, connect, read/write). The config-driven BPF filter removes `socket`, `listen`, and `close` from the traced set when fd tracking is inactive — saving ~15-25 ptrace stops per curl invocation. Lazy BPF escalation keeps read/write out of the traced set for processes that don't need them.
+4. **Network is the worst case (~19x).** `curl` generates hundreds of syscalls (DNS, TLS, connect, read/write). The config-driven BPF filter removes `socket`, `listen`, and `close` from the traced set when fd tracking is inactive — saving ~15-25 ptrace stops per curl invocation. Lazy BPF escalation keeps read/write out of the traced set for processes that don't need them.
 
-5. **Process trees scale with depth (~14x).** Deep nesting (sh→sh→sh→sh→true) multiplies the per-exec attach cost. Wide fan-out (10 parallel children, ~5x) is better since children inherit the seccomp filter via fork.
+5. **Process trees scale with depth (~12x).** Deep nesting (sh→sh→sh→sh→true) multiplies the per-exec attach cost. Wide fan-out (10 parallel children, ~4x) is better since children inherit the seccomp filter via fork.
 
-6. **PTRACE_GET_SYSCALL_INFO** provides a lighter entry path (~96 bytes vs 216 bytes for full register read) for syscall dispatch. Simple handlers (write, close, read) use `SyscallContext.Info.Args` directly without loading full registers.
+6. **PTRACE_GET_SYSCALL_INFO** provides a lighter entry path (~96 bytes vs 216 bytes for full register read) for syscall dispatch. All handlers (`handleExecve`, `handleFile`, `handleNetwork`, `handleSignal`) use `SyscallContext.Info.Args` directly on the allow path without loading full registers. `PTRACE_GETREGS` is only called for redirect/rewrite operations.
 
 7. **Config-driven BPF filter** removes always-allowed syscalls (`socket`, `listen`) and conditionally-needed syscalls (`sendto`, `close`) from the seccomp filter. This eliminates ptrace stops for syscalls that would always be allowed by the handler.
 

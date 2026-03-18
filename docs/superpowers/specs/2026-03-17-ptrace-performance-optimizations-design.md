@@ -249,7 +249,7 @@ Medium. The `StaticDenyChecker` interface must be conservative. A wrong declarat
 
 **Seccomp stacking invariant**: Static deny syscalls must never overlap with escalation syscall lists (`readEscalationSyscalls`, `writeEscalationSyscalls`). In seccomp filter stacking, the kernel returns the action with the lowest value (most restrictive). `SECCOMP_RET_ERRNO` (0x00050000) is lower than `SECCOMP_RET_TRACE` (0x7FF00000), so a BPF-level ERRNO cannot be overridden by a later TRACE escalation filter. Currently the escalation lists only contain `read`/`pread64`/`write`, which would never be statically denied, so there is no conflict. This non-overlap must be maintained as an invariant — validate at filter install time.
 
-## Optimization 4: PTRACE_GET_SYSCALL_INFO for faster entry handling
+## Optimization 4: PTRACE_GET_SYSCALL_INFO for faster entry handling (implemented 2026-03-18)
 
 ### Problem
 
@@ -322,6 +322,23 @@ Saves one full register read per allowed syscall entry. Both `PTRACE_GETREGS` an
 
 Low. Full fallback to existing `getRegs` path. `PTRACE_GET_SYSCALL_INFO` is well-supported on Linux 5.3+ (Fargate runs 6.x kernels). The `SyscallContext` refactor changes handler signatures but not logic.
 
+### Implementation (2026-03-18)
+
+All four handlers (`handleExecve`, `handleFile`, `handleNetwork`, `handleSignal`) converted from `Regs` to `*SyscallContext`. `dispatchSyscall` no longer calls `sc.Regs()` before dispatching. Handlers read args from `sc.Info.Args[n]` on the allow path; `sc.Regs()` is only called for redirect/rewrite operations.
+
+Additionally, `extractFileArgs` and `extractLegacyFileArgs` converted from `Regs` to `args [6]uint64`.
+
+Also replaced `time.After(5ms)` in the idle loop with a reusable `time.Timer` to reduce GC pressure.
+
+### Measured results
+
+| Mode | Before | After | Change |
+|---|---|---|---|
+| Ptrace (realistic) | +367% | +352% | -4% total |
+| Ptrace-allow (permissive) | +229% | +208% | -9% total |
+
+Per-phase improvements: File I/O -13%, Network -11%, Deep tree -10% (realistic policy).
+
 ### Dropped: cwd caching
 
 Considered caching `/proc/<tid>/cwd` readlink results per-TGID. Dropped because:
@@ -336,7 +353,7 @@ Considered caching `/proc/<tid>/cwd` readlink results per-TGID. Dropped because:
 | 1. Config-aware exit stops | 15-25% of File I/O | No change (connect inline skip already exists) |
 | 2. Smarter BPF filter | 10-20% of Network, 5-10% of trees | Same |
 | 3. BPF-level deny | Policy-dependent | Policy-dependent |
-| 4. PTRACE_GET_SYSCALL_INFO | ~2-3% overall | ~2-3% overall |
+| 4. PTRACE_GET_SYSCALL_INFO | **~4% total** (measured) | ~4% total (measured) |
 | 5. Static allow categories | **37% total** (permissive policies) | Same |
 
 Optimizations 1-4 are multiplicative — each reduces the number or cost of remaining stops. Conservative estimate: **25-40% total overhead reduction** for MaskTracerPid=off deployments (621% → ~370-465%). More with deny-heavy policies.
