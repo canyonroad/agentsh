@@ -106,6 +106,7 @@ func New(cfg *config.Config) (*Server, error) {
 		cfg.Policies.ManifestPath,
 		os.Getenv("AGENTSH_POLICY_NAME"),
 	)
+	pm.SetSigningConfig(cfg.Policies.Signing.SigningMode(), cfg.Policies.Signing.TrustStore)
 	p, err := pm.Get()
 	if err != nil {
 		return nil, err

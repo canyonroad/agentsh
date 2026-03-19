@@ -1,6 +1,8 @@
 package signing
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -42,6 +44,19 @@ func LoadTrustStore(dir string) (*TrustStore, error) {
 		var kf PublicKeyFile
 		if err := json.Unmarshal(data, &kf); err != nil {
 			return nil, fmt.Errorf("parse key file %s: %w", e.Name(), err)
+		}
+		if kf.KeyID == "" || kf.Algorithm == "" || kf.PublicKey == "" {
+			return nil, fmt.Errorf("key file %s: missing required field (key_id, algorithm, or public_key)", e.Name())
+		}
+		pubBytes, err := base64.StdEncoding.DecodeString(kf.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("key file %s: decode public_key: %w", e.Name(), err)
+		}
+		if len(pubBytes) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("key file %s: invalid public key size %d (expected %d)", e.Name(), len(pubBytes), ed25519.PublicKeySize)
+		}
+		if _, exists := ts.Keys[kf.KeyID]; exists {
+			return nil, fmt.Errorf("key file %s: duplicate key_id %s", e.Name(), kf.KeyID)
 		}
 		ts.Keys[kf.KeyID] = &kf
 	}

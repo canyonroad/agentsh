@@ -38,8 +38,12 @@ func TestPolicySignAndVerify(t *testing.T) {
 	if _, err := os.Stat(policyPath + ".sig"); err != nil {
 		t.Fatal("sig file not created")
 	}
+	// Use a separate trust store dir with only the public key
+	tsDir := t.TempDir()
+	pubData, _ := os.ReadFile(filepath.Join(dir, "public.key.json"))
+	os.WriteFile(filepath.Join(tsDir, "key.json"), pubData, 0o644)
 	cmd = newPolicyCmd()
-	cmd.SetArgs([]string{"verify", policyPath, "--key-dir", dir})
+	cmd.SetArgs([]string{"verify", policyPath, "--key-dir", tsDir})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("verify failed: %v", err)
 	}
