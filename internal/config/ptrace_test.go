@@ -48,6 +48,8 @@ func TestPtraceArgLevelFilterDefaultOnLoad(t *testing.T) {
 sandbox:
   ptrace:
     enabled: true
+  unix_sockets:
+    enabled: false
 `
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
@@ -74,6 +76,8 @@ sandbox:
     enabled: true
     performance:
       arg_level_filter: true
+  unix_sockets:
+    enabled: false
 `
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"

@@ -66,15 +66,16 @@ func (t *Tracer) injectSeccompFilter(tid int) error {
 	var argFilters []bpfArgFilter
 	var nullFilters []bpfNullPtrFilter
 	if t.cfg.ArgLevelFilter {
-		// Openat read-only: skip ptrace for opens without write/create flags.
-		// Disabled when MaskTracerPid is on (needs exit stops for all opens).
-		if !t.cfg.MaskTracerPid {
-			argFilters = append(argFilters, bpfArgFilter{
-				Nr:       unix.SYS_OPENAT,
-				ArgIndex: 2,
-				Mask:     openatWriteMask,
-			})
-		}
+		// NOTE: openat read-only arg filter is NOT wired here yet.
+		// Allowing read-only opens in-kernel would bypass path-based deny
+		// rules for read operations. A future StaticReadAllowChecker interface
+		// will let handlers declare that read-only opens are safe, at which
+		// point the openat arg filter can be enabled here.
+		// The buildBPFWithArgFilters function supports it — just add:
+		//   argFilters = append(argFilters, bpfArgFilter{
+		//       Nr: unix.SYS_OPENAT, ArgIndex: 2, Mask: openatWriteMask,
+		//   })
+
 		// Sendto with NULL dest_addr: connected-socket send, skip ptrace.
 		nullFilters = append(nullFilters, bpfNullPtrFilter{
 			Nr:       unix.SYS_SENDTO,
