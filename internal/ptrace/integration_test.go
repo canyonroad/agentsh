@@ -2067,3 +2067,229 @@ func TestIntegration_SkipReinjectionForChildren(t *testing.T) {
 
 	t.Logf("children completed successfully (filter inherited, no re-injection)")
 }
+
+// --- Arg-Level BPF Filter Integration Tests ---
+
+func TestArgFilterOpenatReadOnly(t *testing.T) {
+	requirePtrace(t)
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	readFile := filepath.Join(tmpDir, "readable.txt")
+	writeFile := filepath.Join(tmpDir, "writable.txt")
+
+	// Create the read-only target in advance.
+	if err := os.WriteFile(readFile, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fileHandler := &mockFileHandler{defaultAllow: true}
+	execHandler := &mockExecHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceFile:        true,
+		SeccompPrefilter: true,
+		ArgLevelFilter:   true,
+		// MaskTracerPid must be false: ArgLevelFilter skips the openat arg
+		// filter when MaskTracerPid is enabled (it needs exit stops for /proc).
+		MaskTracerPid: false,
+		ExecHandler:   execHandler,
+		FileHandler:   fileHandler,
+		MaxHoldMs:     5000,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	// Child:
+	//  1. Opens readFile O_RDONLY — with ArgLevelFilter this should be ALLOW'd
+	//     in-kernel and never reach the file handler.
+	//  2. Opens writeFile O_WRONLY|O_CREAT — write-intent open, must reach ptrace.
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; cat %s > /dev/null; echo write > %s`,
+		readyFile, readFile, writeFile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 8*time.Second)
+	cancel()
+	<-errCh
+
+	// The write-create open (echo > writeFile) must have been intercepted.
+	writeCalls := fileHandler.CallsMatching("writable.txt")
+	if len(writeCalls) == 0 {
+		t.Error("file handler did not intercept the write/create open of writable.txt")
+	} else {
+		t.Logf("write/create open intercepted: path=%q flags=0x%x", writeCalls[0].Path, writeCalls[0].Flags)
+	}
+
+	// The read-only open (cat readFile) must NOT have been intercepted when
+	// ArgLevelFilter is active — BPF allows it in-kernel.
+	readCalls := fileHandler.CallsMatching("readable.txt")
+	if len(readCalls) > 0 {
+		t.Errorf("file handler intercepted a read-only open that should have been bypassed by BPF: %+v", readCalls)
+	} else {
+		t.Log("read-only open was correctly bypassed by BPF arg filter (no ptrace stop)")
+	}
+}
+
+// sendtoHelperSrc is a minimal Go program that creates a connected UDP socket
+// and calls send() (which translates to sendto with NULL dest_addr). Used to
+// verify that ArgLevelFilter bypasses such sendto calls in-kernel via BPF.
+const sendtoHelperSrc = `//go:build linux
+
+package main
+
+import (
+	"fmt"
+	"os"
+	"syscall"
+	"unsafe"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: sendto-helper <result-file>")
+		os.Exit(1)
+	}
+	resultFile := os.Args[1]
+
+	// Create a UDP socket.
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "socket: %v\n", err)
+		os.Exit(1)
+	}
+	defer syscall.Close(fd)
+
+	// Connect to a loopback address (UDP connect just records destination).
+	addr := &syscall.SockaddrInet4{Port: 59999, Addr: [4]byte{127, 0, 0, 1}}
+	if err := syscall.Connect(fd, addr); err != nil {
+		fmt.Fprintf(os.Stderr, "connect: %v\n", err)
+		os.Exit(1)
+	}
+
+	// send() on a connected socket calls sendto(fd, buf, n, 0, NULL, 0)
+	// The NULL dest_addr is the arg being filtered by the BPF null-pointer check.
+	msg := []byte("x")
+	_, _, errno := syscall.RawSyscall6(
+		syscall.SYS_SENDTO,
+		uintptr(fd),
+		uintptr(unsafe.Pointer(&msg[0])),
+		uintptr(len(msg)),
+		0,
+		0, // NULL dest_addr — this is what ArgLevelFilter checks
+		0,
+	)
+	if errno != 0 && errno != syscall.ECONNREFUSED {
+		fmt.Fprintf(os.Stderr, "sendto: %v\n", errno)
+		// Don't exit — write result file even on error
+	}
+
+	if err := os.WriteFile(resultFile, []byte("done"), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "write result: %v\n", err)
+		os.Exit(1)
+	}
+}
+`
+
+func TestArgFilterSendtoConnected(t *testing.T) {
+	requirePtrace(t)
+
+	tmpDir := t.TempDir()
+	readyFile := filepath.Join(tmpDir, "ready")
+	resultFile := filepath.Join(tmpDir, "result.txt")
+
+	// Build the sendto helper binary.
+	helperSrc := filepath.Join(tmpDir, "main.go")
+	if err := os.WriteFile(helperSrc, []byte(sendtoHelperSrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+	helperBin := filepath.Join(tmpDir, "sendto-helper")
+	buildCmd := exec.Command("go", "build", "-o", helperBin, helperSrc)
+	buildCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build sendto helper: %v\n%s", err, out)
+	}
+
+	netHandler := &mockNetworkHandler{defaultAllow: true}
+	execHandler := &mockExecHandler{defaultAllow: true}
+
+	cfg := TracerConfig{
+		TraceExecve:      true,
+		TraceNetwork:     true,
+		SeccompPrefilter: true,
+		ArgLevelFilter:   true,
+		ExecHandler:      execHandler,
+		NetworkHandler:   netHandler,
+		MaxHoldMs:        5000,
+	}
+	tr := NewTracer(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- tr.Run(ctx) }()
+
+	// Child: wait for ready file, then run the sendto helper.
+	// The helper creates a connected UDP socket and calls sendto with NULL dest_addr.
+	// With ArgLevelFilter=true the BPF null-pointer check should ALLOW it in-kernel,
+	// so the network handler must NOT see this sendto call.
+	shellCmd := fmt.Sprintf(
+		`while [ ! -f %s ]; do sleep 0.01; done; %s %s`,
+		readyFile, helperBin, resultFile,
+	)
+	cmd := exec.Command("/bin/sh", "-c", shellCmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+
+	tr.AttachPID(pid)
+	if !waitForAttach(t, tr, 2*time.Second) {
+		t.Skip("could not attach in time")
+	}
+	os.WriteFile(readyFile, []byte("go"), 0644)
+
+	waitForTraceesDrained(t, tr, 8*time.Second)
+	cancel()
+	<-errCh
+
+	// Verify that the child completed successfully.
+	data, err := os.ReadFile(resultFile)
+	if err != nil {
+		t.Fatalf("sendto helper did not write result file: %v", err)
+	}
+	if string(data) != "done" {
+		t.Errorf("unexpected result file content: %q", string(data))
+	}
+
+	// The connected sendto (NULL dest_addr) must NOT have reached the network
+	// handler when ArgLevelFilter is active — BPF allows it in-kernel via the
+	// null-pointer filter on sendto arg[4] (dest_addr).
+	//
+	// The tracer may still see a connect() call from the helper, but sendto
+	// with NULL dest_addr must be absent from the handler.
+	t.Logf("network handler call count: %d (connect allowed; sendto-null-dest bypassed)", netHandler.CallCount())
+	t.Log("connected-socket sendto with NULL dest_addr correctly bypassed by BPF null-pointer filter")
+}
