@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -26,24 +27,29 @@ func LoadTrustStore(dir string, strict bool) (*TrustStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read trust store dir: %w", err)
 	}
-	info, err := os.Stat(dir)
-	if err == nil && info.Mode().Perm()&0o002 != 0 {
-		if strict {
-			return nil, fmt.Errorf("trust store directory %s is world-writable", dir)
+	// Permission checks are Unix-only; Windows mode bits don't reflect ACLs reliably
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(dir)
+		if err == nil && info.Mode().Perm()&0o002 != 0 {
+			if strict {
+				return nil, fmt.Errorf("trust store directory %s is world-writable", dir)
+			}
+			fmt.Fprintf(os.Stderr, "WARNING: trust store directory %s is world-writable\n", dir)
 		}
-		fmt.Fprintf(os.Stderr, "WARNING: trust store directory %s is world-writable\n", dir)
 	}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
-		fi, err := os.Stat(path)
-		if err == nil && fi.Mode().Perm()&0o002 != 0 {
-			if strict {
-				return nil, fmt.Errorf("trust store key file %s is world-writable", path)
+		if runtime.GOOS != "windows" {
+			fi, err := os.Stat(path)
+			if err == nil && fi.Mode().Perm()&0o002 != 0 {
+				if strict {
+					return nil, fmt.Errorf("trust store key file %s is world-writable", path)
+				}
+				fmt.Fprintf(os.Stderr, "WARNING: trust store key file %s is world-writable\n", path)
 			}
-			fmt.Fprintf(os.Stderr, "WARNING: trust store key file %s is world-writable\n", path)
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
