@@ -369,6 +369,15 @@ func TestBPFWithArgFiltersOpenatAndSendto(t *testing.T) {
 				t.Errorf("JSET at %d: Jt=%d lands on instruction 0x%x, expected RET", i, inst.Jt, prog[target].Code)
 			}
 		}
+		// Null-check JEQ 0 with Jf > 0: verify Jf lands on RET TRACE.
+		if inst.Code == bpfJMP|bpfJEQ|bpfK && inst.K == 0 && inst.Jf > 0 {
+			target := i + 1 + int(inst.Jf)
+			if target >= len(prog) {
+				t.Errorf("JEQ 0 at %d: Jf=%d jumps past end (len=%d)", i, inst.Jf, len(prog))
+			} else if prog[target].Code != bpfRET|bpfK {
+				t.Errorf("JEQ 0 at %d: Jf=%d lands on instruction 0x%x, expected RET", i, inst.Jf, prog[target].Code)
+			}
+		}
 	}
 
 	// Verify both arg check blocks exist (JSET + two LD for lo/hi).
@@ -471,7 +480,7 @@ func buildBPFWithArgFilters(
 
 	// Count check blocks to calculate jump offsets.
 	// Each arg filter block: 3 instructions (load + JSET + RET ALLOW)
-	// Each null filter block: 5 instructions (load lo + JEQ + RET TRACE + load hi + JEQ→ALLOW / RET TRACE)
+	// Each null filter block: 5 instructions (load lo + JEQ + load hi + JEQ + RET ALLOW)
 	type checkBlock struct {
 		nr        int
 		argFilter *bpfArgFilter
@@ -629,19 +638,15 @@ func buildBPFWithArgFilters(
 		}
 	}
 
-	// Note: each check block includes its own inline RET ALLOW. The TRACE
-	// return for failed checks falls through to the TRACE action already
-	// emitted in the retActions section above. For arg filter blocks, JSET
-	// Jt=1 skips the inline ALLOW and hits the next block or the end.
-	// We need a trailing RET TRACE to catch the fall-through from JSET Jt
-	// and null-check Jf paths.
+	// Note: each check block includes its own inline RET ALLOW for the safe case.
+	// The unsafe case (write flags set, or non-null pointer) jumps forward to
+	// the trailing RET TRACE below. Jump distances are calculated dynamically
+	// based on block offset within the check section.
 	prog = append(prog, unix.SockFilter{Code: bpfRET | bpfK, K: seccompRetTrace})
 
 	return prog, nil
 }
 ```
-
-**Important implementation note:** The jump offsets in the JSET block are simple: `Jt: 1` skips the inline `RET ALLOW` to hit the trailing `RET TRACE`. `Jf: 0` falls through to `RET ALLOW`. For the null check, `Jf: 3` from the first JEQ skips `(load hi + JEQ + ALLOW)` to hit the trailing `RET TRACE`.
 
 - [ ] **Step 8: Run all tests**
 
