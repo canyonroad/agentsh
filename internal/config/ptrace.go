@@ -28,6 +28,7 @@ type PtracePerformanceConfig struct {
 	MaxHoldMs          int  `yaml:"max_hold_ms"`
 	StaticAllowFile    bool `yaml:"static_allow_file"`
 	StaticAllowNetwork bool `yaml:"static_allow_network"`
+	ArgLevelFilter     bool `yaml:"arg_level_filter"`
 }
 
 func DefaultPtraceConfig() SandboxPtraceConfig {
@@ -44,6 +45,7 @@ func DefaultPtraceConfig() SandboxPtraceConfig {
 			SeccompPrefilter: true,
 			MaxTracees:       500,
 			MaxHoldMs:        5000,
+			ArgLevelFilter:   true,
 		},
 		MaskTracerPid:   "off",
 		OnAttachFailure: "fail_open",

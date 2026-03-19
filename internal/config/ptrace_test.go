@@ -29,6 +29,9 @@ func TestDefaultPtraceConfig(t *testing.T) {
 	if cfg.Performance.MaxHoldMs != 5000 {
 		t.Errorf("max_hold_ms: got %d, want 5000", cfg.Performance.MaxHoldMs)
 	}
+	if !cfg.Performance.ArgLevelFilter {
+		t.Error("arg_level_filter should be enabled by default")
+	}
 	if cfg.MaskTracerPid != "off" {
 		t.Errorf("mask_tracer_pid: got %q, want %q", cfg.MaskTracerPid, "off")
 	}
