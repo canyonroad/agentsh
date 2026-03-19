@@ -13,7 +13,7 @@ Extend the seccomp BPF prefilter to check syscall arguments (flags, pointer valu
 
 ## Patterns
 
-### 1. openat/openat2 read-only detection
+### 1. openat read-only detection (openat only, NOT openat2)
 
 **Condition:** `args[2] & (O_WRONLY|O_RDWR|O_CREAT|__O_TMPFILE) == 0`
 
@@ -21,9 +21,13 @@ Extend the seccomp BPF prefilter to check syscall arguments (flags, pointer valu
 
 **BPF logic:** Single `JSET 0x400043` instruction on the low 32 bits of `args[2]` (offset 32 in `seccomp_data`). If any bit is set → `SECCOMP_RET_TRACE` (write/create needs policy check). If no bits set → `SECCOMP_RET_ALLOW` (read-only, skip ptrace).
 
+**Why not openat2?** `openat2(dirfd, pathname, *open_how, size)` passes a **pointer** to `struct open_how` in `args[2]`, not inline flags. Classic BPF cannot dereference pointers, so applying the bitmask to a pointer value is incorrect. `openat2` remains unconditionally traced. In practice, `openat2` is rare — the vast majority of file opens use `openat`.
+
 **Impact:** Eliminates ptrace stops for the majority of `openat` calls in typical workloads (builds, package installs, most program execution). Expected to substantially reduce the +131% file I/O overhead.
 
 **Trade-off:** No audit events for read-only opens. Accepted per design discussion.
+
+**Edge case — O_RDONLY|O_TRUNC:** A process could call `openat(dirfd, path, O_RDONLY|O_TRUNC)`, which has undefined behavior per POSIX but may truncate on Linux. The mask `0x400043` would allow this through since neither O_WRONLY nor O_RDWR is set. This is consistent with the existing `openatOperation()` handler behavior, which also classifies this as "open" (read-only). Not a regression.
 
 ### 2. sendto with NULL dest_addr
 
@@ -44,7 +48,7 @@ The existing BPF program is a linear scan of syscall numbers. The new structure 
 ```
 Load arch → check → Load nr
   → JEQ SYS_OPENAT   → jump to openat_check
-  → JEQ SYS_OPENAT2  → jump to openat_check
+  → JEQ SYS_OPENAT2  → jump to trace_ret     (pointer arg, cannot filter)
   → JEQ SYS_SENDTO   → jump to sendto_check
   → JEQ SYS_CONNECT  → jump to trace_ret     (unchanged)
   → ...
@@ -78,7 +82,7 @@ New field in `PtracePerformanceConfig`:
 ArgLevelFilter bool `yaml:"arg_level_filter"`
 ```
 
-Default: `true` when `SeccompPrefilter` is enabled. Can be disabled if something breaks in a specific environment.
+Default: `true`. Set in `DefaultPtraceConfig()` alongside the other performance defaults. Only takes effect when `SeccompPrefilter` is also enabled — the wiring code in `injectSeccompFilter` skips arg filter construction when `SeccompPrefilter` is false. Can be set to `false` if something breaks in a specific environment.
 
 ## API
 
@@ -87,6 +91,8 @@ New types in `seccomp_filter.go`:
 ```go
 // bpfArgFilter describes a bitmask check on a syscall argument.
 // If (arg & Mask) != 0 → TRACE, else → ALLOW.
+// Only applicable to arguments that are scalar values (flags, sizes),
+// NOT pointers. Classic BPF cannot dereference pointers.
 type bpfArgFilter struct {
     Nr       int
     ArgIndex int    // 0-5
@@ -127,9 +133,10 @@ else               → buildBPFForSyscalls(narrowNums)
 
 ### Interaction with existing features
 
-- **Escalation filters:** Only apply to read/write syscalls. No overlap with arg-filtered syscalls. No conflict.
+- **Escalation filters:** Only apply to read/write syscalls. No overlap with arg-filtered syscalls. Seccomp stacking uses lowest-value-wins semantics (`SECCOMP_RET_ERRNO` < `SECCOMP_RET_TRACE` < `SECCOMP_RET_ALLOW`), so a stacked escalation filter returning TRACE for read/write would not conflict with the base filter's ALLOW for openat/sendto since they are different syscalls. No conflict.
 - **StaticAllowChecker:** If a handler declares `openat` as statically allowed, it's removed from `narrowNums` before arg filter construction. The arg filter won't be emitted. No conflict.
 - **StaticDenyChecker:** Deny actions (ERRNO) take priority. Arg filter skipped for denied syscalls.
+- **MaskTracerPid:** When enabled, `needsExitStop` returns true for all openat calls so that `handleOpenatExit` can track fds pointing to `/proc/*/status` and trigger read escalation. If the arg-level filter allows read-only opens through without a ptrace stop, fd tracking would never run, breaking TracerPid masking. **Therefore: when `MaskTracerPid` is enabled, the openat arg filter must NOT be applied.** The openat `bpfArgFilter` should only be emitted when `MaskTracerPid` is false. Currently `MaskTracerPid` is disabled, so no conflict exists in practice.
 
 ### Handler behavioral change
 
