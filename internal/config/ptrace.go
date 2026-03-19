@@ -45,7 +45,6 @@ func DefaultPtraceConfig() SandboxPtraceConfig {
 			SeccompPrefilter: true,
 			MaxTracees:       500,
 			MaxHoldMs:        5000,
-			ArgLevelFilter:   true,
 		},
 		MaskTracerPid:   "off",
 		OnAttachFailure: "fail_open",
