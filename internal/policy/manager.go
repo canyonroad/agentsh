@@ -86,7 +86,13 @@ func (m *Manager) Get() (*Policy, error) {
 			}
 		}
 		if m.signingMode != "" && m.signingMode != "off" {
-			if err := m.verifySigning(path, data); err != nil {
+			if m.trustStorePath == "" {
+				if m.signingMode == "enforce" {
+					m.err = fmt.Errorf("signing verification: trust_store not configured")
+					return
+				}
+				fmt.Fprintf(os.Stderr, "WARNING: signing mode is %q but trust_store not configured\n", m.signingMode)
+			} else if err := m.verifySigning(path, data); err != nil {
 				if m.signingMode == "enforce" {
 					m.err = fmt.Errorf("signing verification: %w", err)
 					return
