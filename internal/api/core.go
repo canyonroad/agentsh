@@ -1321,15 +1321,19 @@ func (a *App) ensureFUSEMount(ctx context.Context, s *session.Session) {
 								slog.Error("ensureFUSEMount: trust store load failed", "error", tsErr)
 								return
 							}
+							slog.Warn("ensureFUSEMount: trust store load failed", "error", tsErr)
 						} else if _, vErr := signing.VerifyPolicyBytes(policyData, policyPath+".sig", ts); vErr != nil {
 							if sigMode == "enforce" {
 								slog.Error("ensureFUSEMount: policy signing verification failed", "error", vErr)
 								return
 							}
+							slog.Warn("ensureFUSEMount: policy signing verification failed", "error", vErr)
 						}
 					} else if sigMode == "enforce" {
 						slog.Error("ensureFUSEMount: signing mode is enforce but trust_store not configured")
 						return
+					} else {
+						slog.Warn("ensureFUSEMount: signing mode is set but trust_store not configured", "mode", sigMode)
 					}
 				}
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -62,13 +63,15 @@ func TestGenerateKeypair(t *testing.T) {
 		t.Fatalf("expected %d byte public key, got %d", ed25519.PublicKeySize, len(pubKeyBytes))
 	}
 
-	// Verify private key file permissions
-	info, err := os.Stat(filepath.Join(dir, "private.key.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("expected 0600 permissions, got %o", info.Mode().Perm())
+	// Verify private key file permissions (Unix only)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(filepath.Join(dir, "private.key.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("expected 0600 permissions, got %o", info.Mode().Perm())
+		}
 	}
 }
 
