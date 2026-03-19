@@ -310,7 +310,10 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 	}
 
-	policyLoader := api.NewDefaultPolicyLoader(cfg.Policies.Dir, enforceApprovals, true)
+	policyLoader := api.NewDefaultPolicyLoader(
+		cfg.Policies.Dir, enforceApprovals, true,
+		cfg.Policies.Signing.SigningMode(), cfg.Policies.Signing.TrustStore,
+	)
 	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, oidcAuth, approvalsMgr, metricsCollector, policyLoader)
 	appCloser := app.Close // ensure cleanup on error paths below
 	defer func() {

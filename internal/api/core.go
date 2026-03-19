@@ -23,6 +23,7 @@ import (
 	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/policy/signing"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/signal"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -578,6 +579,31 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		policyPath, err := policy.ResolvePolicyPath(a.cfg.Policies.Dir, policyName)
 		if err != nil {
 			return types.Session{}, http.StatusBadRequest, fmt.Errorf("resolve policy: %w", err)
+		}
+
+		// Read raw bytes for signing verification
+		policyData, err := os.ReadFile(policyPath)
+		if err != nil {
+			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("read policy: %w", err)
+		}
+
+		// Signature verification
+		sigMode := a.cfg.Policies.Signing.SigningMode()
+		if sigMode != "off" && a.cfg.Policies.Signing.TrustStore != "" {
+			ts, tsErr := signing.LoadTrustStore(a.cfg.Policies.Signing.TrustStore)
+			if tsErr != nil {
+				if sigMode == "enforce" {
+					return types.Session{}, http.StatusInternalServerError, fmt.Errorf("load trust store: %w", tsErr)
+				}
+				fmt.Fprintf(os.Stderr, "WARNING: failed to load trust store: %v\n", tsErr)
+			} else {
+				if _, vErr := signing.VerifyPolicyBytes(policyData, policyPath+".sig", ts); vErr != nil {
+					if sigMode == "enforce" {
+						return types.Session{}, http.StatusForbidden, fmt.Errorf("policy signing: %w", vErr)
+					}
+					fmt.Fprintf(os.Stderr, "WARNING: policy signing verification failed: %v\n", vErr)
+				}
+			}
 		}
 
 		pol, err := policy.LoadFromFile(policyPath)

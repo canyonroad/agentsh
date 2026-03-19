@@ -28,6 +28,7 @@ import (
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/pkgcheck"
+	"github.com/agentsh/agentsh/internal/policy/signing"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/internal/trash"
@@ -1409,14 +1410,18 @@ type DefaultPolicyLoader struct {
 	policyDir        string
 	enforceApprovals bool
 	enforceRedirects bool
+	signingMode      string
+	trustStorePath   string
 }
 
 // NewDefaultPolicyLoader creates a policy loader that loads from the given directory.
-func NewDefaultPolicyLoader(policyDir string, enforceApprovals bool, enforceRedirects bool) *DefaultPolicyLoader {
+func NewDefaultPolicyLoader(policyDir string, enforceApprovals, enforceRedirects bool, signingMode, trustStorePath string) *DefaultPolicyLoader {
 	return &DefaultPolicyLoader{
 		policyDir:        policyDir,
 		enforceApprovals: enforceApprovals,
 		enforceRedirects: enforceRedirects,
+		signingMode:      signingMode,
+		trustStorePath:   trustStorePath,
 	}
 }
 
@@ -1433,6 +1438,26 @@ func (l *DefaultPolicyLoader) Load(name string) (*policy.Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load policy %q: %w", name, err)
 	}
+
+	// Signature verification
+	if l.signingMode != "" && l.signingMode != "off" && l.trustStorePath != "" {
+		ts, tsErr := signing.LoadTrustStore(l.trustStorePath)
+		if tsErr != nil {
+			if l.signingMode == "enforce" {
+				return nil, fmt.Errorf("load trust store for %q: %w", name, tsErr)
+			}
+			fmt.Fprintf(os.Stderr, "WARNING: policy %q: failed to load trust store: %v\n", name, tsErr)
+		} else {
+			policyBytes, _ := os.ReadFile(path)
+			if _, vErr := signing.VerifyPolicyBytes(policyBytes, path+".sig", ts); vErr != nil {
+				if l.signingMode == "enforce" {
+					return nil, fmt.Errorf("signing verification for %q: %w", name, vErr)
+				}
+				fmt.Fprintf(os.Stderr, "WARNING: policy %q signing verification failed: %v\n", name, vErr)
+			}
+		}
+	}
+
 	engine, err := policy.NewEngine(p, l.enforceApprovals, l.enforceRedirects)
 	if err != nil {
 		return nil, fmt.Errorf("create policy engine for %q: %w", name, err)
