@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -60,7 +61,17 @@ func GenerateKeypair(dir, label string) (string, error) {
 }
 
 // LoadPrivateKey reads an Ed25519 private key from a JSON key file.
+// On Unix, rejects files readable by group or others.
 func LoadPrivateKey(path string) (ed25519.PrivateKey, error) {
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("stat private key: %w", err)
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			return nil, fmt.Errorf("private key %s has insecure permissions %o (expected 0600)", path, fi.Mode().Perm())
+		}
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read private key: %w", err)

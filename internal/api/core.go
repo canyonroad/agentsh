@@ -1309,15 +1309,40 @@ func (a *App) ensureFUSEMount(ctx context.Context, s *session.Session) {
 	if a.cfg.Policies.Dir != "" {
 		policyPath, pErr := policy.ResolvePolicyPath(a.cfg.Policies.Dir, s.Policy)
 		if pErr == nil {
-			pol, lErr := policy.LoadFromFile(policyPath)
-			if lErr == nil {
-				policyVars := map[string]string{
-					"PROJECT_ROOT": s.Workspace,
-					"GIT_ROOT":     s.Workspace,
-					"HOME":         os.Getenv("HOME"),
+			policyData, rErr := os.ReadFile(policyPath)
+			if rErr == nil {
+				// Signature verification (same flow as session creation)
+				sigMode := a.cfg.Policies.Signing.SigningMode()
+				if sigMode != "off" {
+					if a.cfg.Policies.Signing.TrustStore != "" {
+						ts, tsErr := signing.LoadTrustStore(a.cfg.Policies.Signing.TrustStore, sigMode == "enforce")
+						if tsErr != nil {
+							if sigMode == "enforce" {
+								slog.Error("ensureFUSEMount: trust store load failed", "error", tsErr)
+								return
+							}
+						} else if _, vErr := signing.VerifyPolicyBytes(policyData, policyPath+".sig", ts); vErr != nil {
+							if sigMode == "enforce" {
+								slog.Error("ensureFUSEMount: policy signing verification failed", "error", vErr)
+								return
+							}
+						}
+					} else if sigMode == "enforce" {
+						slog.Error("ensureFUSEMount: signing mode is enforce but trust_store not configured")
+						return
+					}
 				}
-				enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
-				engine, _ = policy.NewEngineWithVariables(pol, enforceApprovals, true, policyVars)
+
+				pol, lErr := policy.LoadFromBytes(policyData)
+				if lErr == nil {
+					policyVars := map[string]string{
+						"PROJECT_ROOT": s.Workspace,
+						"GIT_ROOT":     s.Workspace,
+						"HOME":         os.Getenv("HOME"),
+					}
+					enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
+					engine, _ = policy.NewEngineWithVariables(pol, enforceApprovals, true, policyVars)
+				}
 			}
 		}
 	}
