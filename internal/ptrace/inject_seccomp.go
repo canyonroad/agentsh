@@ -45,28 +45,68 @@ func (t *Tracer) injectSeccompFilter(tid int) error {
 		narrowNums = filtered
 	}
 
-	var filters []unix.SockFilter
-	var bpfErr error
-
-	if len(denies) > 0 {
-		denySet := make(map[int]uint32)
-		for _, d := range denies {
-			denySet[d.Nr] = seccompRetErrno(d.Errno)
+	// Build the action list (used by all filter paths).
+	denySet := make(map[int]uint32)
+	for _, d := range denies {
+		denySet[d.Nr] = seccompRetErrno(d.Errno)
+	}
+	var actions []bpfSyscallAction
+	for _, nr := range narrowNums {
+		if errnoAction, ok := denySet[nr]; ok {
+			actions = append(actions, bpfSyscallAction{Nr: nr, Action: errnoAction})
+			delete(denySet, nr)
+		} else {
+			actions = append(actions, bpfSyscallAction{Nr: nr, Action: seccompRetTrace})
 		}
+	}
+	for nr, action := range denySet {
+		actions = append(actions, bpfSyscallAction{Nr: nr, Action: action})
+	}
 
-		var actions []bpfSyscallAction
-		for _, nr := range narrowNums {
-			if errnoAction, ok := denySet[nr]; ok {
-				actions = append(actions, bpfSyscallAction{Nr: nr, Action: errnoAction})
-				delete(denySet, nr)
-			} else {
-				actions = append(actions, bpfSyscallAction{Nr: nr, Action: seccompRetTrace})
+	var argFilters []bpfArgFilter
+	var nullFilters []bpfNullPtrFilter
+	if t.cfg.ArgLevelFilter {
+		// Openat read-only: skip ptrace for opens without write/create flags.
+		// Disabled when MaskTracerPid is on (needs exit stops for all opens).
+		if !t.cfg.MaskTracerPid {
+			argFilters = append(argFilters, bpfArgFilter{
+				Nr:       unix.SYS_OPENAT,
+				ArgIndex: 2,
+				Mask:     openatWriteMask,
+			})
+		}
+		// Sendto with NULL dest_addr: connected-socket send, skip ptrace.
+		nullFilters = append(nullFilters, bpfNullPtrFilter{
+			Nr:       unix.SYS_SENDTO,
+			ArgIndex: 4,
+		})
+
+		// Remove filters for syscalls not in the traced set.
+		tracedSet := make(map[int]bool)
+		for _, a := range actions {
+			tracedSet[a.Nr] = true
+		}
+		var filteredArg []bpfArgFilter
+		for _, af := range argFilters {
+			if tracedSet[af.Nr] {
+				filteredArg = append(filteredArg, af)
 			}
 		}
-		for nr, action := range denySet {
-			actions = append(actions, bpfSyscallAction{Nr: nr, Action: action})
+		argFilters = filteredArg
+		var filteredNull []bpfNullPtrFilter
+		for _, nf := range nullFilters {
+			if tracedSet[nf.Nr] {
+				filteredNull = append(filteredNull, nf)
+			}
 		}
+		nullFilters = filteredNull
+	}
 
+	var filters []unix.SockFilter
+	var bpfErr error
+	if len(argFilters) > 0 || len(nullFilters) > 0 {
+		filters, bpfErr = buildBPFWithArgFilters(actions, argFilters, nullFilters)
+	} else if len(denies) > 0 || len(denySet) > 0 {
 		filters, bpfErr = buildBPFForActions(actions)
 	} else {
 		filters, bpfErr = buildBPFForSyscalls(narrowNums)
@@ -166,6 +206,14 @@ func (t *Tracer) injectSeccompFilter(tid int) error {
 	}
 	for nr := range allows {
 		slog.Info("seccomp static allow active", "tid", tid, "nr", nr)
+	}
+	if t.cfg.ArgLevelFilter {
+		for _, af := range argFilters {
+			slog.Info("seccomp arg filter active", "tid", tid, "nr", af.Nr, "argIndex", af.ArgIndex, "mask", fmt.Sprintf("0x%x", af.Mask))
+		}
+		for _, nf := range nullFilters {
+			slog.Info("seccomp null filter active", "tid", tid, "nr", nf.Nr, "argIndex", nf.ArgIndex)
+		}
 	}
 	return nil
 }
