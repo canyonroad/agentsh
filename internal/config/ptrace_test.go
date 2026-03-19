@@ -2,6 +2,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -37,6 +38,59 @@ func TestDefaultPtraceConfig(t *testing.T) {
 	}
 	if cfg.OnAttachFailure != "fail_open" {
 		t.Errorf("on_attach_failure: got %q, want %q", cfg.OnAttachFailure, "fail_open")
+	}
+}
+
+func TestPtraceArgLevelFilterDefaultOnLoad(t *testing.T) {
+	// Verify that ArgLevelFilter defaults to true when ptrace is enabled
+	// but arg_level_filter is omitted from YAML. This tests the pre-seed
+	// logic in Load/LoadWithSource.
+	yamlContent := `
+sandbox:
+  ptrace:
+    enabled: true
+`
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Sandbox.Ptrace.Performance.ArgLevelFilter {
+		t.Error("ArgLevelFilter should default to true when omitted from YAML")
+	}
+	if !cfg.Sandbox.Ptrace.Performance.SeccompPrefilter {
+		t.Error("SeccompPrefilter should default to true when omitted from YAML")
+	}
+}
+
+func TestPtraceArgLevelFilterExplicitFalse(t *testing.T) {
+	// Verify that explicitly setting arg_level_filter: false in YAML works.
+	yamlContent := `
+sandbox:
+  ptrace:
+    enabled: true
+    performance:
+      arg_level_filter: false
+`
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sandbox.Ptrace.Performance.ArgLevelFilter {
+		t.Error("ArgLevelFilter should be false when explicitly set in YAML")
+	}
+	// SeccompPrefilter should still be true (not mentioned in YAML).
+	if !cfg.Sandbox.Ptrace.Performance.SeccompPrefilter {
+		t.Error("SeccompPrefilter should remain true when not mentioned in YAML")
 	}
 }
 

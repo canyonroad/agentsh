@@ -2290,6 +2290,12 @@ func TestArgFilterSendtoConnected(t *testing.T) {
 	//
 	// The tracer may still see a connect() call from the helper, but sendto
 	// with NULL dest_addr must be absent from the handler.
+	netHandler.mu.Lock()
+	for _, c := range netHandler.calls {
+		if c.Syscall == unix.SYS_SENDTO {
+			t.Errorf("sendto reached network handler (should have been bypassed by BPF null-pointer filter): family=%d addr=%s port=%d", c.Family, c.Address, c.Port)
+		}
+	}
+	netHandler.mu.Unlock()
 	t.Logf("network handler call count: %d (connect allowed; sendto-null-dest bypassed)", netHandler.CallCount())
-	t.Log("connected-socket sendto with NULL dest_addr correctly bypassed by BPF null-pointer filter")
 }
