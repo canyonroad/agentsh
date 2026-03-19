@@ -1434,9 +1434,10 @@ func (l *DefaultPolicyLoader) Load(name string) (*policy.Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve policy %q: %w", name, err)
 	}
-	p, err := policy.LoadFromFile(path)
+
+	policyBytes, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("load policy %q: %w", name, err)
+		return nil, fmt.Errorf("read policy %q: %w", name, err)
 	}
 
 	// Signature verification
@@ -1448,7 +1449,6 @@ func (l *DefaultPolicyLoader) Load(name string) (*policy.Engine, error) {
 			}
 			fmt.Fprintf(os.Stderr, "WARNING: policy %q: failed to load trust store: %v\n", name, tsErr)
 		} else {
-			policyBytes, _ := os.ReadFile(path)
 			if _, vErr := signing.VerifyPolicyBytes(policyBytes, path+".sig", ts); vErr != nil {
 				if l.signingMode == "enforce" {
 					return nil, fmt.Errorf("signing verification for %q: %w", name, vErr)
@@ -1458,6 +1458,10 @@ func (l *DefaultPolicyLoader) Load(name string) (*policy.Engine, error) {
 		}
 	}
 
+	p, err := policy.LoadFromBytes(policyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("load policy %q: %w", name, err)
+	}
 	engine, err := policy.NewEngine(p, l.enforceApprovals, l.enforceRedirects)
 	if err != nil {
 		return nil, fmt.Errorf("create policy engine for %q: %w", name, err)

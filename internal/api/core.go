@@ -606,7 +606,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 			}
 		}
 
-		pol, err := policy.LoadFromFile(policyPath)
+		pol, err := policy.LoadFromBytes(policyData)
 		if err != nil {
 			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("load policy: %w", err)
 		}

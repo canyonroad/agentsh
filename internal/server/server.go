@@ -95,6 +95,10 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("sandbox config: %w", err)
 	}
 
+	if err := cfg.Policies.Signing.Validate(); err != nil {
+		return nil, fmt.Errorf("signing config: %w", err)
+	}
+
 	pm := policy.NewManager(
 		cfg.Policies.Dir,
 		cfg.Policies.Default,
