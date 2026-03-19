@@ -18,6 +18,7 @@ const (
 	bpfJEQ = 0x10
 	bpfK   = 0x00
 	bpfRET = 0x06
+	bpfJSET = 0x40
 
 	seccompRetAllow = 0x7FFF0000
 	seccompRetTrace = 0x7FF00000
@@ -28,8 +29,22 @@ const (
 	offsetNr   = 0 // offsetof(struct seccomp_data, nr)
 	offsetArch = 4 // offsetof(struct seccomp_data, arch)
 
+	// seccomp_data argument offsets.
+	// struct seccomp_data { int nr; __u32 arch; __u64 ip; __u64 args[6]; }
+	// args[i] is at offset 16 + i*8. Classic BPF loads 32-bit words, so
+	// the low 32 bits of args[i] are at offset 16+i*8, high at 16+i*8+4.
+	offsetArgs0Lo = 16
+	offsetArgs2Lo = 32 // openat flags
+	offsetArgs4Lo = 48 // sendto dest_addr low
+	offsetArgs4Hi = 52 // sendto dest_addr high
+
 	auditArchX86_64  = 0xC000003E
 	auditArchAarch64 = 0xC00000B7
+
+	// openatWriteMask is the bitmask of openat flags that indicate a
+	// non-read-only operation. O_WRONLY|O_RDWR|O_CREAT|__O_TMPFILE.
+	// If (flags & openatWriteMask) == 0, the open is read-only.
+	openatWriteMask = 0x400043
 )
 
 // buildBPFForSyscalls generates a seccomp-BPF filter that returns
@@ -80,6 +95,23 @@ func seccompRetErrno(errno int) uint32 {
 type bpfSyscallAction struct {
 	Nr     int
 	Action uint32 // seccompRetTrace or seccompRetErrno(errno)
+}
+
+// bpfArgFilter describes a bitmask check on a syscall argument.
+// If (arg & Mask) != 0 → TRACE, else → ALLOW.
+// Only applicable to arguments that are scalar values (flags, sizes),
+// NOT pointers — classic BPF cannot dereference pointers.
+type bpfArgFilter struct {
+	Nr       int    // syscall number
+	ArgIndex int    // 0-5
+	Mask     uint32 // bitmask for JSET
+}
+
+// bpfNullPtrFilter describes a NULL-pointer check on a syscall argument.
+// If arg == 0 (both 32-bit halves) → ALLOW, else → TRACE.
+type bpfNullPtrFilter struct {
+	Nr       int // syscall number
+	ArgIndex int // 0-5
 }
 
 // buildBPFForActions generates a seccomp-BPF filter with per-syscall return
