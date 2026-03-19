@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // TrustStore holds trusted public keys indexed by key_id.
@@ -45,8 +46,9 @@ func LoadTrustStore(dir string) (*TrustStore, error) {
 		if err := json.Unmarshal(data, &kf); err != nil {
 			return nil, fmt.Errorf("parse key file %s: %w", e.Name(), err)
 		}
+		// Skip JSON files that aren't public key records
 		if kf.KeyID == "" || kf.Algorithm == "" || kf.PublicKey == "" {
-			return nil, fmt.Errorf("key file %s: missing required field (key_id, algorithm, or public_key)", e.Name())
+			continue
 		}
 		pubBytes, err := base64.StdEncoding.DecodeString(kf.PublicKey)
 		if err != nil {
@@ -54,6 +56,11 @@ func LoadTrustStore(dir string) (*TrustStore, error) {
 		}
 		if len(pubBytes) != ed25519.PublicKeySize {
 			return nil, fmt.Errorf("key file %s: invalid public key size %d (expected %d)", e.Name(), len(pubBytes), ed25519.PublicKeySize)
+		}
+		if kf.ExpiresAt != "" {
+			if _, err := time.Parse(time.RFC3339, kf.ExpiresAt); err != nil {
+				return nil, fmt.Errorf("key file %s: invalid expires_at: %w", e.Name(), err)
+			}
 		}
 		if _, exists := ts.Keys[kf.KeyID]; exists {
 			return nil, fmt.Errorf("key file %s: duplicate key_id %s", e.Name(), kf.KeyID)

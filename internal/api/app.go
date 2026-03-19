@@ -1441,19 +1441,26 @@ func (l *DefaultPolicyLoader) Load(name string) (*policy.Engine, error) {
 	}
 
 	// Signature verification
-	if l.signingMode != "" && l.signingMode != "off" && l.trustStorePath != "" {
-		ts, tsErr := signing.LoadTrustStore(l.trustStorePath)
-		if tsErr != nil {
+	if l.signingMode != "" && l.signingMode != "off" {
+		if l.trustStorePath == "" {
 			if l.signingMode == "enforce" {
-				return nil, fmt.Errorf("load trust store for %q: %w", name, tsErr)
+				return nil, fmt.Errorf("signing verification for %q: trust_store not configured", name)
 			}
-			fmt.Fprintf(os.Stderr, "WARNING: policy %q: failed to load trust store: %v\n", name, tsErr)
+			fmt.Fprintf(os.Stderr, "WARNING: policy %q: signing mode is %q but trust_store not configured\n", name, l.signingMode)
 		} else {
-			if _, vErr := signing.VerifyPolicyBytes(policyBytes, path+".sig", ts); vErr != nil {
+			ts, tsErr := signing.LoadTrustStore(l.trustStorePath)
+			if tsErr != nil {
 				if l.signingMode == "enforce" {
-					return nil, fmt.Errorf("signing verification for %q: %w", name, vErr)
+					return nil, fmt.Errorf("load trust store for %q: %w", name, tsErr)
 				}
-				fmt.Fprintf(os.Stderr, "WARNING: policy %q signing verification failed: %v\n", name, vErr)
+				fmt.Fprintf(os.Stderr, "WARNING: policy %q: failed to load trust store: %v\n", name, tsErr)
+			} else {
+				if _, vErr := signing.VerifyPolicyBytes(policyBytes, path+".sig", ts); vErr != nil {
+					if l.signingMode == "enforce" {
+						return nil, fmt.Errorf("signing verification for %q: %w", name, vErr)
+					}
+					fmt.Fprintf(os.Stderr, "WARNING: policy %q signing verification failed: %v\n", name, vErr)
+				}
 			}
 		}
 	}

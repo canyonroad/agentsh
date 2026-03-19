@@ -589,19 +589,26 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 
 		// Signature verification
 		sigMode := a.cfg.Policies.Signing.SigningMode()
-		if sigMode != "off" && a.cfg.Policies.Signing.TrustStore != "" {
-			ts, tsErr := signing.LoadTrustStore(a.cfg.Policies.Signing.TrustStore)
-			if tsErr != nil {
+		if sigMode != "off" {
+			if a.cfg.Policies.Signing.TrustStore == "" {
 				if sigMode == "enforce" {
-					return types.Session{}, http.StatusInternalServerError, fmt.Errorf("load trust store: %w", tsErr)
+					return types.Session{}, http.StatusInternalServerError, fmt.Errorf("signing mode is enforce but trust_store not configured")
 				}
-				fmt.Fprintf(os.Stderr, "WARNING: failed to load trust store: %v\n", tsErr)
+				fmt.Fprintf(os.Stderr, "WARNING: signing mode is %q but trust_store not configured\n", sigMode)
 			} else {
-				if _, vErr := signing.VerifyPolicyBytes(policyData, policyPath+".sig", ts); vErr != nil {
+				ts, tsErr := signing.LoadTrustStore(a.cfg.Policies.Signing.TrustStore)
+				if tsErr != nil {
 					if sigMode == "enforce" {
-						return types.Session{}, http.StatusForbidden, fmt.Errorf("policy signing: %w", vErr)
+						return types.Session{}, http.StatusInternalServerError, fmt.Errorf("load trust store: %w", tsErr)
 					}
-					fmt.Fprintf(os.Stderr, "WARNING: policy signing verification failed: %v\n", vErr)
+					fmt.Fprintf(os.Stderr, "WARNING: failed to load trust store: %v\n", tsErr)
+				} else {
+					if _, vErr := signing.VerifyPolicyBytes(policyData, policyPath+".sig", ts); vErr != nil {
+						if sigMode == "enforce" {
+							return types.Session{}, http.StatusForbidden, fmt.Errorf("policy signing: %w", vErr)
+						}
+						fmt.Fprintf(os.Stderr, "WARNING: policy signing verification failed: %v\n", vErr)
+					}
 				}
 			}
 		}
