@@ -186,3 +186,106 @@ func TestManager_SigningOff(t *testing.T) {
 		t.Fatalf("expected p, got %s", p.Name)
 	}
 }
+
+// setupSignedPolicyDir creates a policy, signs it, and returns (policyDir, trustStoreDir).
+func setupSignedPolicyDir(t *testing.T, policyName, policyContent string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	writePolicy(t, dir, policyName+".yaml", policyContent)
+	keyDir := t.TempDir()
+	_, err := signing.GenerateKeypair(keyDir, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := signing.SignFile(filepath.Join(dir, policyName+".yaml"), filepath.Join(keyDir, "private.key.json"), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	tsDir := t.TempDir()
+	pubData, _ := os.ReadFile(filepath.Join(keyDir, "public.key.json"))
+	os.WriteFile(filepath.Join(tsDir, "key.json"), pubData, 0o644)
+	return dir, tsDir
+}
+
+func TestManager_SigningEnforce_TamperedPolicy(t *testing.T) {
+	dir, tsDir := setupSignedPolicyDir(t, "p", "version: 1\nname: p\n")
+	// Tamper with the policy after signing
+	os.WriteFile(filepath.Join(dir, "p.yaml"), []byte("version: 1\nname: tampered\n"), 0o644)
+	m := NewManager(dir, "p", []string{"p"}, "", "p")
+	m.SetSigningConfig("enforce", tsDir)
+	_, err := m.Get()
+	if err == nil {
+		t.Fatal("expected error for tampered policy in enforce mode")
+	}
+}
+
+func TestManager_SigningWarn_TamperedPolicy(t *testing.T) {
+	dir, tsDir := setupSignedPolicyDir(t, "p", "version: 1\nname: p\n")
+	// Tamper with the policy after signing
+	os.WriteFile(filepath.Join(dir, "p.yaml"), []byte("version: 1\nname: tampered\n"), 0o644)
+	m := NewManager(dir, "p", []string{"p"}, "", "p")
+	m.SetSigningConfig("warn", tsDir)
+	p, err := m.Get()
+	if err != nil {
+		t.Fatalf("warn mode should still load tampered policy, got %v", err)
+	}
+	if p.Name != "tampered" {
+		t.Fatalf("expected tampered, got %s", p.Name)
+	}
+}
+
+func TestManager_SigningEnforce_WrongKey(t *testing.T) {
+	dir, _ := setupSignedPolicyDir(t, "p", "version: 1\nname: p\n")
+	// Create a different trust store with unrelated key
+	otherKeyDir := t.TempDir()
+	signing.GenerateKeypair(otherKeyDir, "other")
+	otherTsDir := t.TempDir()
+	pubData, _ := os.ReadFile(filepath.Join(otherKeyDir, "public.key.json"))
+	os.WriteFile(filepath.Join(otherTsDir, "key.json"), pubData, 0o644)
+
+	m := NewManager(dir, "p", []string{"p"}, "", "p")
+	m.SetSigningConfig("enforce", otherTsDir)
+	_, err := m.Get()
+	if err == nil {
+		t.Fatal("expected error for wrong key in enforce mode")
+	}
+}
+
+func TestManager_SigningEnforce_EmptyTrustStore(t *testing.T) {
+	dir := t.TempDir()
+	writePolicy(t, dir, "p.yaml", "version: 1\nname: p\n")
+	m := NewManager(dir, "p", []string{"p"}, "", "p")
+	m.SetSigningConfig("enforce", "")
+	_, err := m.Get()
+	if err == nil {
+		t.Fatal("expected error for enforce mode with empty trust store")
+	}
+}
+
+func TestManager_SigningWarn_EmptyTrustStore(t *testing.T) {
+	dir := t.TempDir()
+	writePolicy(t, dir, "p.yaml", "version: 1\nname: p\n")
+	m := NewManager(dir, "p", []string{"p"}, "", "p")
+	m.SetSigningConfig("warn", "")
+	p, err := m.Get()
+	if err != nil {
+		t.Fatalf("warn mode with empty trust store should still load, got %v", err)
+	}
+	if p.Name != "p" {
+		t.Fatalf("expected p, got %s", p.Name)
+	}
+}
+
+func TestManager_SigningOff_UnsignedPolicy(t *testing.T) {
+	dir := t.TempDir()
+	writePolicy(t, dir, "p.yaml", "version: 1\nname: p\n")
+	// No signing, no sig file — off mode should not care
+	m := NewManager(dir, "p", []string{"p"}, "", "p")
+	m.SetSigningConfig("off", "/nonexistent")
+	p, err := m.Get()
+	if err != nil {
+		t.Fatalf("off mode should always load, got %v", err)
+	}
+	if p.Name != "p" {
+		t.Fatalf("expected p, got %s", p.Name)
+	}
+}
