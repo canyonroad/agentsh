@@ -14,7 +14,7 @@ func TestTrustStore_LoadAndFind(t *testing.T) {
 	tsDir := t.TempDir()
 	pubData, _ := os.ReadFile(filepath.Join(dir, "public.key.json"))
 	os.WriteFile(filepath.Join(tsDir, "key1.json"), pubData, 0o644)
-	ts, err := LoadTrustStore(tsDir)
+	ts, err := LoadTrustStore(tsDir, false)
 	if err != nil { t.Fatal(err) }
 	key, err := ts.FindKey(kid)
 	if err != nil { t.Fatalf("expected to find key: %v", err) }
@@ -23,7 +23,7 @@ func TestTrustStore_LoadAndFind(t *testing.T) {
 
 func TestTrustStore_UnknownKey(t *testing.T) {
 	tsDir := t.TempDir()
-	ts, err := LoadTrustStore(tsDir)
+	ts, err := LoadTrustStore(tsDir, false)
 	if err != nil { t.Fatal(err) }
 	_, err = ts.FindKey("nonexistent")
 	if err == nil { t.Fatal("expected error for unknown key") }
@@ -43,7 +43,7 @@ func TestTrustStore_ExpiredKey(t *testing.T) {
 
 	tsDir := t.TempDir()
 	os.WriteFile(filepath.Join(tsDir, "expired.json"), data, 0o644)
-	ts, err := LoadTrustStore(tsDir)
+	ts, err := LoadTrustStore(tsDir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestTrustStore_IgnoresNonJSON(t *testing.T) {
 	tsDir := t.TempDir()
 	os.WriteFile(filepath.Join(tsDir, "README.txt"), []byte("ignore"), 0o644)
 	os.WriteFile(filepath.Join(tsDir, ".gitkeep"), []byte(""), 0o644)
-	ts, _ := LoadTrustStore(tsDir)
+	ts, _ := LoadTrustStore(tsDir, false)
 	if len(ts.Keys) != 0 { t.Fatalf("expected 0 keys, got %d", len(ts.Keys)) }
 }
 
@@ -70,7 +70,7 @@ func TestTrustStore_MultipleKeys(t *testing.T) {
 	pub2, _ := os.ReadFile(filepath.Join(dir2, "public.key.json"))
 	os.WriteFile(filepath.Join(tsDir, "key1.json"), pub1, 0o644)
 	os.WriteFile(filepath.Join(tsDir, "key2.json"), pub2, 0o644)
-	ts, _ := LoadTrustStore(tsDir)
+	ts, _ := LoadTrustStore(tsDir, false)
 	if len(ts.Keys) != 2 { t.Fatalf("expected 2 keys, got %d", len(ts.Keys)) }
 	if _, err := ts.FindKey(kid1); err != nil { t.Fatalf("key1 not found: %v", err) }
 	if _, err := ts.FindKey(kid2); err != nil { t.Fatalf("key2 not found: %v", err) }

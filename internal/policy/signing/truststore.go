@@ -18,8 +18,9 @@ type TrustStore struct {
 
 // LoadTrustStore reads all .json files from dir and populates a TrustStore.
 // Non-JSON files and subdirectories are silently skipped.
-// Emits a warning to stderr if the directory or any key file is world-writable.
-func LoadTrustStore(dir string) (*TrustStore, error) {
+// If strict is true, world-writable directories/files cause an error (for enforce mode).
+// If strict is false, world-writable paths emit a warning to stderr.
+func LoadTrustStore(dir string, strict bool) (*TrustStore, error) {
 	ts := &TrustStore{Keys: make(map[string]*PublicKeyFile)}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -27,6 +28,9 @@ func LoadTrustStore(dir string) (*TrustStore, error) {
 	}
 	info, err := os.Stat(dir)
 	if err == nil && info.Mode().Perm()&0o002 != 0 {
+		if strict {
+			return nil, fmt.Errorf("trust store directory %s is world-writable", dir)
+		}
 		fmt.Fprintf(os.Stderr, "WARNING: trust store directory %s is world-writable\n", dir)
 	}
 	for _, e := range entries {
@@ -36,6 +40,9 @@ func LoadTrustStore(dir string) (*TrustStore, error) {
 		path := filepath.Join(dir, e.Name())
 		fi, err := os.Stat(path)
 		if err == nil && fi.Mode().Perm()&0o002 != 0 {
+			if strict {
+				return nil, fmt.Errorf("trust store key file %s is world-writable", path)
+			}
 			fmt.Fprintf(os.Stderr, "WARNING: trust store key file %s is world-writable\n", path)
 		}
 		data, err := os.ReadFile(path)

@@ -596,7 +596,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 				}
 				fmt.Fprintf(os.Stderr, "WARNING: signing mode is %q but trust_store not configured\n", sigMode)
 			} else {
-				ts, tsErr := signing.LoadTrustStore(a.cfg.Policies.Signing.TrustStore)
+				ts, tsErr := signing.LoadTrustStore(a.cfg.Policies.Signing.TrustStore, sigMode == "enforce")
 				if tsErr != nil {
 					if sigMode == "enforce" {
 						return types.Session{}, http.StatusInternalServerError, fmt.Errorf("load trust store: %w", tsErr)

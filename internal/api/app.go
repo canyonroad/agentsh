@@ -1448,7 +1448,7 @@ func (l *DefaultPolicyLoader) Load(name string) (*policy.Engine, error) {
 			}
 			fmt.Fprintf(os.Stderr, "WARNING: policy %q: signing mode is %q but trust_store not configured\n", name, l.signingMode)
 		} else {
-			ts, tsErr := signing.LoadTrustStore(l.trustStorePath)
+			ts, tsErr := signing.LoadTrustStore(l.trustStorePath, l.signingMode == "enforce")
 			if tsErr != nil {
 				if l.signingMode == "enforce" {
 					return nil, fmt.Errorf("load trust store for %q: %w", name, tsErr)

@@ -256,7 +256,7 @@ Examples:
 			if verifyKeyDir == "" {
 				return fmt.Errorf("--key-dir is required")
 			}
-			ts, err := signing.LoadTrustStore(verifyKeyDir)
+			ts, err := signing.LoadTrustStore(verifyKeyDir, false)
 			if err != nil {
 				return fmt.Errorf("load trust store: %w", err)
 			}

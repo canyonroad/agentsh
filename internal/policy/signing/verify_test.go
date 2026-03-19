@@ -24,7 +24,7 @@ func setupSignedPolicy(t *testing.T) (policyPath, tsDir string) {
 
 func TestVerify_Valid(t *testing.T) {
 	policyPath, tsDir := setupSignedPolicy(t)
-	ts, _ := LoadTrustStore(tsDir)
+	ts, _ := LoadTrustStore(tsDir, false)
 	policyBytes, _ := os.ReadFile(policyPath)
 	sigData, _ := os.ReadFile(policyPath + ".sig")
 	var sig SigFile
@@ -34,7 +34,7 @@ func TestVerify_Valid(t *testing.T) {
 
 func TestVerify_TamperedPolicy(t *testing.T) {
 	policyPath, tsDir := setupSignedPolicy(t)
-	ts, _ := LoadTrustStore(tsDir)
+	ts, _ := LoadTrustStore(tsDir, false)
 	tamperedBytes := []byte("version: 1\nname: TAMPERED\n")
 	sigData, _ := os.ReadFile(policyPath + ".sig")
 	var sig SigFile
@@ -49,7 +49,7 @@ func TestVerify_WrongKey(t *testing.T) {
 	tsDir2 := t.TempDir()
 	pubData, _ := os.ReadFile(filepath.Join(otherDir, "public.key.json"))
 	os.WriteFile(filepath.Join(tsDir2, "other.json"), pubData, 0o644)
-	ts, _ := LoadTrustStore(tsDir2)
+	ts, _ := LoadTrustStore(tsDir2, false)
 	policyBytes, _ := os.ReadFile(policyPath)
 	sigData, _ := os.ReadFile(policyPath + ".sig")
 	var sig SigFile
@@ -59,7 +59,7 @@ func TestVerify_WrongKey(t *testing.T) {
 
 func TestVerifyPolicy_Valid(t *testing.T) {
 	policyPath, tsDir := setupSignedPolicy(t)
-	ts, _ := LoadTrustStore(tsDir)
+	ts, _ := LoadTrustStore(tsDir, false)
 	result, err := VerifyPolicy(policyPath, ts)
 	if err != nil { t.Fatalf("expected valid: %v", err) }
 	if result.KeyID == "" { t.Fatal("expected key_id in result") }
@@ -92,7 +92,7 @@ func TestVerify_KeyRotation(t *testing.T) {
 	pub2, _ := os.ReadFile(filepath.Join(keyDir2, "public.key.json"))
 	os.WriteFile(filepath.Join(tsDir, "key1.json"), pub1, 0o644)
 	os.WriteFile(filepath.Join(tsDir, "key2.json"), pub2, 0o644)
-	ts, _ := LoadTrustStore(tsDir)
+	ts, _ := LoadTrustStore(tsDir, false)
 	result, err := VerifyPolicy(policyPath, ts)
 	if err != nil { t.Fatalf("expected valid with key rotation: %v", err) }
 	if result.KeyID == "" { t.Fatal("expected key_id in result") }

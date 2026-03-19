@@ -111,7 +111,7 @@ func (m *Manager) Get() (*Policy, error) {
 }
 
 func (m *Manager) verifySigning(path string, data []byte) error {
-	ts, err := signing.LoadTrustStore(m.trustStorePath)
+	ts, err := signing.LoadTrustStore(m.trustStorePath, m.signingMode == "enforce")
 	if err != nil {
 		return fmt.Errorf("load trust store: %w", err)
 	}
