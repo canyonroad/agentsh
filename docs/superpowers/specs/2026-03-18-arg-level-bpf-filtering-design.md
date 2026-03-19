@@ -1,7 +1,7 @@
 # Argument-Level BPF Filtering for Ptrace Overhead Reduction
 
 **Date:** 2026-03-18
-**Status:** Approved
+**Status:** Implemented (sendto filter active; openat filter deferred pending StaticReadAllowChecker)
 
 ## Problem
 
@@ -82,7 +82,7 @@ New field in `PtracePerformanceConfig`:
 ArgLevelFilter bool `yaml:"arg_level_filter"`
 ```
 
-Default: `true`. Set in `DefaultPtraceConfig()` alongside the other performance defaults. Only takes effect when `SeccompPrefilter` is also enabled — the wiring code in `injectSeccompFilter` skips arg filter construction when `SeccompPrefilter` is false. Can be set to `false` if something breaks in a specific environment.
+Default: `false` (opt-in). Enabling bypasses ptrace for filtered syscall patterns, which means no audit events and no policy evaluation for those calls. Enable only when policy confirms the bypassed patterns are unconditionally safe. Only takes effect when `SeccompPrefilter` is also enabled.
 
 ## API
 
@@ -173,3 +173,17 @@ When `ArgLevelFilter` is on, the file handler only receives `openat` stops for w
 | `internal/ptrace/seccomp_filter_test.go` | Unit tests for arg-level BPF generation |
 | `internal/ptrace/integration_test.go` | Integration tests for filtered syscalls |
 | `internal/ptrace/benchmark_test.go` | Benchmark with arg-level filtering |
+
+## Implementation Notes
+
+**What shipped:**
+- `buildBPFWithArgFilters` function with full support for arg bitmask (JSET) and null-pointer (JEQ) checks
+- sendto NULL dest_addr filter is wired and active when `arg_level_filter: true`
+- 6 unit tests verifying BPF generation including combined jump-target verification
+- 1 integration test for sendto bypass (TestArgFilterSendtoConnected)
+- Config pre-seeding in `Load`/`LoadWithSource` ensures bool defaults survive YAML unmarshal
+
+**What was deferred:**
+- openat read-only arg filter is NOT wired in `injectSeccompFilter`. Allowing read-only opens in-kernel bypasses path-based deny rules for read operations. A future `StaticReadAllowChecker` interface will let handlers declare that read-only opens are safe, at which point the openat arg filter can be enabled. The BPF generator supports it — it just needs to be wired.
+- TestArgFilterOpenatReadOnly is skipped pending the above.
+- Benchmark test not yet added.
