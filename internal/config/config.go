@@ -815,9 +815,9 @@ func Load(path string) (*Config, error) {
 
 	var cfg Config
 	// Pre-seed ptrace performance defaults before YAML unmarshal.
-	// Bool fields (SeccompPrefilter, ArgLevelFilter) default to true but
-	// YAML unmarshal into a zero-value struct gives false for omitted fields.
-	// Pre-seeding ensures omitted fields keep intended defaults.
+	// Bool fields like SeccompPrefilter default to true but YAML unmarshal
+	// into a zero-value struct gives false for omitted fields. Pre-seeding
+	// ensures omitted fields keep intended defaults.
 	cfg.Sandbox.Ptrace = DefaultPtraceConfig()
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
