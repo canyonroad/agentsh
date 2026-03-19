@@ -134,6 +134,15 @@ sandbox:
       # Phase 3 may add pre-filter injection for pid/sidecar mode.
       seccomp_prefilter: true  # Only effective in children mode for Phase 1
 
+      # Argument-level BPF filtering. When enabled (with seccomp_prefilter),
+      # the BPF filter inspects syscall arguments before triggering ptrace stops:
+      # - sendto: NULL dest_addr (connected-socket sends) → allowed in-kernel
+      # - openat read-only: NOT yet wired (policy bypass risk); requires future
+      #   StaticReadAllowChecker interface to safely enable.
+      # Default: false (opt-in). Enable only when policy semantics confirm
+      # that bypassed syscalls are unconditionally safe.
+      arg_level_filter: false
+
       # Maximum concurrent tracees before warning. 0 = unlimited.
       max_tracees: 500
 
@@ -164,6 +173,7 @@ sandbox:
 | `AGENTSH_PTRACE_TARGET_PID_FILE` | `sandbox.ptrace.target_pid_file` | Path to file containing PID |
 | `AGENTSH_PTRACE_ATTACH_MODE` | `sandbox.ptrace.attach_mode` | `"children"`, `"pid"` (Phase 1); `"sidecar"` (Phase 3) |
 | `AGENTSH_PTRACE_PREFILTER` | `sandbox.ptrace.performance.seccomp_prefilter` | `"true"` / `"false"` (only effective in children mode) |
+| `AGENTSH_PTRACE_ARG_FILTER` | `sandbox.ptrace.performance.arg_level_filter` | `"true"` / `"false"` (requires seccomp_prefilter) |
 
 ### 3.3 Security Mode Integration
 

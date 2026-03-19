@@ -9,10 +9,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// mockNetworkHandler is a minimal NetworkHandler implementation for testing.
-type mockNetworkHandler struct{}
+// minimalNetworkHandler is a minimal NetworkHandler implementation for syscall
+// number tests. The richer mockNetworkHandler is declared in integration_test.go.
+type minimalNetworkHandler struct{}
 
-func (m *mockNetworkHandler) HandleNetwork(_ context.Context, _ NetworkContext) NetworkResult {
+func (m *minimalNetworkHandler) HandleNetwork(_ context.Context, _ NetworkContext) NetworkResult {
 	return NetworkResult{Allow: true}
 }
 
@@ -25,7 +26,7 @@ func allFeaturesConfig() *TracerConfig {
 		TraceNetwork:   true,
 		TraceSignal:    true,
 		MaskTracerPid:  true,
-		NetworkHandler: &mockNetworkHandler{},
+		NetworkHandler: &minimalNetworkHandler{},
 	}
 }
 
@@ -222,7 +223,7 @@ func TestNarrowTracedSyscallNumbers_CloseWithMaskTracerPid(t *testing.T) {
 func TestNarrowTracedSyscallNumbers_CloseWithNetworkHandler(t *testing.T) {
 	cfg := &TracerConfig{
 		TraceNetwork:   true,
-		NetworkHandler: &mockNetworkHandler{},
+		NetworkHandler: &minimalNetworkHandler{},
 		MaskTracerPid:  false,
 	}
 	nums := narrowTracedSyscallNumbers(cfg)

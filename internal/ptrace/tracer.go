@@ -133,6 +133,7 @@ type TracerConfig struct {
 	TraceSignal      bool
 	MaskTracerPid    bool
 	SeccompPrefilter bool
+	ArgLevelFilter   bool
 	MaxTracees       int
 	MaxHoldMs        int
 	OnAttachFailure  string

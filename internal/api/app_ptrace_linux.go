@@ -32,6 +32,7 @@ func (a *App) initPtraceTracer() {
 		TraceSignal:      cfg.Trace.Signal,
 		MaskTracerPid:    false, // validation rejects non-"off" values for now
 		SeccompPrefilter: cfg.Performance.SeccompPrefilter,
+		ArgLevelFilter:   cfg.Performance.ArgLevelFilter,
 		MaxTracees:       cfg.Performance.MaxTracees,
 		MaxHoldMs:        cfg.Performance.MaxHoldMs,
 		OnAttachFailure:  cfg.OnAttachFailure,

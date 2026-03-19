@@ -814,6 +814,11 @@ func Load(path string) (*Config, error) {
 	expanded := os.ExpandEnv(string(b))
 
 	var cfg Config
+	// Pre-seed ptrace performance defaults before YAML unmarshal.
+	// Bool fields like SeccompPrefilter default to true but YAML unmarshal
+	// into a zero-value struct gives false for omitted fields. Pre-seeding
+	// ensures omitted fields keep intended defaults.
+	cfg.Sandbox.Ptrace = DefaultPtraceConfig()
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
@@ -838,6 +843,8 @@ func LoadWithSource(path string, source ConfigSource) (*Config, ConfigSource, er
 	expanded := os.ExpandEnv(string(b))
 
 	var cfg Config
+	// Pre-seed ptrace performance defaults before YAML unmarshal (same as Load).
+	cfg.Sandbox.Ptrace = DefaultPtraceConfig()
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, source, fmt.Errorf("parse config: %w", err)
 	}
