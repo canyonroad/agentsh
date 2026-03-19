@@ -30,18 +30,27 @@ func TestTrustStore_UnknownKey(t *testing.T) {
 }
 
 func TestTrustStore_ExpiredKey(t *testing.T) {
-	tsDir := t.TempDir()
-	pubFile := PublicKeyFile{
-		KeyID: "expired-key-id", Algorithm: "ed25519",
-		PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-		Label: "expired",
-		ExpiresAt: time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339),
-	}
+	// Generate a real keypair to get valid key_id and public_key
+	keyDir := t.TempDir()
+	kid, _ := GenerateKeypair(keyDir, "test")
+	pubData, _ := os.ReadFile(filepath.Join(keyDir, "public.key.json"))
+
+	// Modify the public key file to add an expired timestamp
+	var pubFile PublicKeyFile
+	json.Unmarshal(pubData, &pubFile)
+	pubFile.ExpiresAt = time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
 	data, _ := json.MarshalIndent(pubFile, "", "  ")
+
+	tsDir := t.TempDir()
 	os.WriteFile(filepath.Join(tsDir, "expired.json"), data, 0o644)
-	ts, _ := LoadTrustStore(tsDir)
-	_, err := ts.FindKey("expired-key-id")
-	if err == nil { t.Fatal("expected error for expired key") }
+	ts, err := LoadTrustStore(tsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ts.FindKey(kid)
+	if err == nil {
+		t.Fatal("expected error for expired key")
+	}
 }
 
 func TestTrustStore_IgnoresNonJSON(t *testing.T) {

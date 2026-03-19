@@ -33,8 +33,12 @@ func GenerateKeypair(dir, label string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal private key: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "private.key.json"), privJSON, 0o600); err != nil {
+	privPath := filepath.Join(dir, "private.key.json")
+	if err := os.WriteFile(privPath, privJSON, 0o600); err != nil {
 		return "", fmt.Errorf("write private key: %w", err)
+	}
+	if err := os.Chmod(privPath, 0o600); err != nil {
+		return "", fmt.Errorf("chmod private key: %w", err)
 	}
 
 	pubFile := PublicKeyFile{

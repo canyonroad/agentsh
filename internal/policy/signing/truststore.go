@@ -50,12 +50,19 @@ func LoadTrustStore(dir string) (*TrustStore, error) {
 		if kf.KeyID == "" || kf.Algorithm == "" || kf.PublicKey == "" {
 			continue
 		}
+		if kf.Algorithm != "ed25519" {
+			return nil, fmt.Errorf("key file %s: unsupported algorithm %q", e.Name(), kf.Algorithm)
+		}
 		pubBytes, err := base64.StdEncoding.DecodeString(kf.PublicKey)
 		if err != nil {
 			return nil, fmt.Errorf("key file %s: decode public_key: %w", e.Name(), err)
 		}
 		if len(pubBytes) != ed25519.PublicKeySize {
 			return nil, fmt.Errorf("key file %s: invalid public key size %d (expected %d)", e.Name(), len(pubBytes), ed25519.PublicKeySize)
+		}
+		derivedID := KeyID(ed25519.PublicKey(pubBytes))
+		if kf.KeyID != derivedID {
+			return nil, fmt.Errorf("key file %s: key_id %q does not match derived key_id %q", e.Name(), kf.KeyID, derivedID)
 		}
 		if kf.ExpiresAt != "" {
 			if _, err := time.Parse(time.RFC3339, kf.ExpiresAt); err != nil {
