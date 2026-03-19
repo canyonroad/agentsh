@@ -9,6 +9,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/policygen"
+	"github.com/agentsh/agentsh/internal/policy/signing"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/spf13/cobra"
 )
@@ -192,6 +193,87 @@ Examples:
 	generateCmd.Flags().StringVar(&genDBPath, "db-path", "", "Path to events database")
 
 	cmd.AddCommand(generateCmd)
+
+	// Keygen subcommand
+	var keygenOutput string
+	var keygenLabel string
+	keygenCmd := &cobra.Command{
+		Use:   "keygen",
+		Short: "Generate an Ed25519 signing keypair",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			outDir := keygenOutput
+			if outDir == "" {
+				outDir = "."
+			}
+			kid, err := signing.GenerateKeypair(outDir, keygenLabel)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s\n", kid)
+			fmt.Fprintf(cmd.ErrOrStderr(), "Keypair written to %s/\n", outDir)
+			return nil
+		},
+	}
+	keygenCmd.Flags().StringVar(&keygenOutput, "output", "", "Output directory (default: current dir)")
+	keygenCmd.Flags().StringVar(&keygenLabel, "label", "", "Human-readable label for the key")
+	cmd.AddCommand(keygenCmd)
+
+	// Sign subcommand
+	var signKey string
+	var signOutput string
+	var signSigner string
+	signCmd := &cobra.Command{
+		Use:   "sign POLICY_FILE",
+		Short: "Sign a policy file with an Ed25519 private key",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if signKey == "" {
+				return fmt.Errorf("--key is required")
+			}
+			if err := signing.SignFile(args[0], signKey, signOutput, signSigner); err != nil {
+				return err
+			}
+			dest := signOutput
+			if dest == "" {
+				dest = args[0] + ".sig"
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "Signature written to %s\n", dest)
+			return nil
+		},
+	}
+	signCmd.Flags().StringVar(&signKey, "key", "", "Path to private key file (required)")
+	signCmd.Flags().StringVar(&signOutput, "output", "", "Output path for .sig file (default: <policy>.sig)")
+	signCmd.Flags().StringVar(&signSigner, "signer", "", "Human-readable signer label")
+	cmd.AddCommand(signCmd)
+
+	// Verify subcommand
+	var verifyKeyDir string
+	verifyCmd := &cobra.Command{
+		Use:   "verify POLICY_FILE",
+		Short: "Verify a policy file signature",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if verifyKeyDir == "" {
+				return fmt.Errorf("--key-dir is required")
+			}
+			ts, err := signing.LoadTrustStore(verifyKeyDir, false)
+			if err != nil {
+				return fmt.Errorf("load trust store: %w", err)
+			}
+			result, err := signing.VerifyPolicy(args[0], ts)
+			if err != nil {
+				return fmt.Errorf("verification failed: %w", err)
+			}
+			return printJSON(cmd, map[string]any{
+				"status":    "valid",
+				"key_id":    result.KeyID,
+				"signer":    result.Signer,
+				"signed_at": result.SignedAt,
+			})
+		},
+	}
+	verifyCmd.Flags().StringVar(&verifyKeyDir, "key-dir", "", "Path to trust store directory (required)")
+	cmd.AddCommand(verifyCmd)
 
 	return cmd
 }

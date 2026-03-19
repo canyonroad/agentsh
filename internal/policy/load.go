@@ -14,7 +14,11 @@ func LoadFromFile(path string) (*Policy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read policy: %w", err)
 	}
+	return LoadFromBytes(b)
+}
 
+// LoadFromBytes parses and validates a policy from raw YAML bytes.
+func LoadFromBytes(b []byte) (*Policy, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(b))
 	dec.KnownFields(true)
 	var p Policy

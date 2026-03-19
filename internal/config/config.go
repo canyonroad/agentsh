@@ -687,12 +687,41 @@ type CapabilitiesConfig struct {
 	Allow []string `yaml:"allow"` // Capabilities to keep (empty = drop all droppable)
 }
 
+// SigningConfig configures policy signature verification.
+type SigningConfig struct {
+	TrustStore string `yaml:"trust_store"` // Directory of trusted public keys
+	Mode       string `yaml:"mode"`        // "enforce", "warn", or "off" (default: "off")
+}
+
+// SigningMode returns the effective signing mode, defaulting to "off".
+func (c *SigningConfig) SigningMode() string {
+	if c.Mode == "" {
+		return "off"
+	}
+	return c.Mode
+}
+
+// Validate checks that the signing config has valid values.
+func (c *SigningConfig) Validate() error {
+	switch c.Mode {
+	case "", "off", "warn", "enforce":
+		// valid
+	default:
+		return fmt.Errorf("invalid signing mode %q: must be \"enforce\", \"warn\", or \"off\"", c.Mode)
+	}
+	if (c.Mode == "enforce" || c.Mode == "warn") && c.TrustStore == "" {
+		return fmt.Errorf("signing.trust_store is required when signing.mode is %q", c.Mode)
+	}
+	return nil
+}
+
 // PoliciesConfig configures policy loading.
 type PoliciesConfig struct {
 	Dir               string          `yaml:"dir"`
 	Default           string          `yaml:"default"`
 	Allowed           []string        `yaml:"allowed"`
 	ManifestPath      string          `yaml:"manifest_path"`
+	Signing           SigningConfig   `yaml:"signing"`
 	EnvPolicy         EnvPolicyConfig `yaml:"env_policy"`
 	EnvShimPath       string          `yaml:"env_shim_path"`
 	ReloadInterval    string          `yaml:"reload_interval"`

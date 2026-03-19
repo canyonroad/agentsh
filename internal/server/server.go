@@ -95,6 +95,10 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("sandbox config: %w", err)
 	}
 
+	if err := cfg.Policies.Signing.Validate(); err != nil {
+		return nil, fmt.Errorf("signing config: %w", err)
+	}
+
 	pm := policy.NewManager(
 		cfg.Policies.Dir,
 		cfg.Policies.Default,
@@ -102,6 +106,7 @@ func New(cfg *config.Config) (*Server, error) {
 		cfg.Policies.ManifestPath,
 		os.Getenv("AGENTSH_POLICY_NAME"),
 	)
+	pm.SetSigningConfig(cfg.Policies.Signing.SigningMode(), cfg.Policies.Signing.TrustStore)
 	p, err := pm.Get()
 	if err != nil {
 		return nil, err
@@ -310,7 +315,10 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 	}
 
-	policyLoader := api.NewDefaultPolicyLoader(cfg.Policies.Dir, enforceApprovals, true)
+	policyLoader := api.NewDefaultPolicyLoader(
+		cfg.Policies.Dir, enforceApprovals, true,
+		cfg.Policies.Signing.SigningMode(), cfg.Policies.Signing.TrustStore,
+	)
 	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, oidcAuth, approvalsMgr, metricsCollector, policyLoader)
 	appCloser := app.Close // ensure cleanup on error paths below
 	defer func() {

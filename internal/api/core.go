@@ -23,6 +23,7 @@ import (
 	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/platform"
 	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/policy/signing"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/signal"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -580,7 +581,39 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 			return types.Session{}, http.StatusBadRequest, fmt.Errorf("resolve policy: %w", err)
 		}
 
-		pol, err := policy.LoadFromFile(policyPath)
+		// Read raw bytes for signing verification
+		policyData, err := os.ReadFile(policyPath)
+		if err != nil {
+			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("read policy: %w", err)
+		}
+
+		// Signature verification
+		sigMode := a.cfg.Policies.Signing.SigningMode()
+		if sigMode != "off" {
+			if a.cfg.Policies.Signing.TrustStore == "" {
+				if sigMode == "enforce" {
+					return types.Session{}, http.StatusInternalServerError, fmt.Errorf("signing mode is enforce but trust_store not configured")
+				}
+				fmt.Fprintf(os.Stderr, "WARNING: signing mode is %q but trust_store not configured\n", sigMode)
+			} else {
+				ts, tsErr := signing.LoadTrustStore(a.cfg.Policies.Signing.TrustStore, sigMode == "enforce")
+				if tsErr != nil {
+					if sigMode == "enforce" {
+						return types.Session{}, http.StatusInternalServerError, fmt.Errorf("load trust store: %w", tsErr)
+					}
+					fmt.Fprintf(os.Stderr, "WARNING: failed to load trust store: %v\n", tsErr)
+				} else {
+					if _, vErr := signing.VerifyPolicyBytes(policyData, policyPath+".sig", ts); vErr != nil {
+						if sigMode == "enforce" {
+							return types.Session{}, http.StatusForbidden, fmt.Errorf("policy signing: %w", vErr)
+						}
+						fmt.Fprintf(os.Stderr, "WARNING: policy signing verification failed: %v\n", vErr)
+					}
+				}
+			}
+		}
+
+		pol, err := policy.LoadFromBytes(policyData)
 		if err != nil {
 			return types.Session{}, http.StatusInternalServerError, fmt.Errorf("load policy: %w", err)
 		}
@@ -1276,15 +1309,44 @@ func (a *App) ensureFUSEMount(ctx context.Context, s *session.Session) {
 	if a.cfg.Policies.Dir != "" {
 		policyPath, pErr := policy.ResolvePolicyPath(a.cfg.Policies.Dir, s.Policy)
 		if pErr == nil {
-			pol, lErr := policy.LoadFromFile(policyPath)
-			if lErr == nil {
-				policyVars := map[string]string{
-					"PROJECT_ROOT": s.Workspace,
-					"GIT_ROOT":     s.Workspace,
-					"HOME":         os.Getenv("HOME"),
+			policyData, rErr := os.ReadFile(policyPath)
+			if rErr == nil {
+				// Signature verification (same flow as session creation)
+				sigMode := a.cfg.Policies.Signing.SigningMode()
+				if sigMode != "off" {
+					if a.cfg.Policies.Signing.TrustStore != "" {
+						ts, tsErr := signing.LoadTrustStore(a.cfg.Policies.Signing.TrustStore, sigMode == "enforce")
+						if tsErr != nil {
+							if sigMode == "enforce" {
+								slog.Error("ensureFUSEMount: trust store load failed", "error", tsErr)
+								return
+							}
+							slog.Warn("ensureFUSEMount: trust store load failed", "error", tsErr)
+						} else if _, vErr := signing.VerifyPolicyBytes(policyData, policyPath+".sig", ts); vErr != nil {
+							if sigMode == "enforce" {
+								slog.Error("ensureFUSEMount: policy signing verification failed", "error", vErr)
+								return
+							}
+							slog.Warn("ensureFUSEMount: policy signing verification failed", "error", vErr)
+						}
+					} else if sigMode == "enforce" {
+						slog.Error("ensureFUSEMount: signing mode is enforce but trust_store not configured")
+						return
+					} else {
+						slog.Warn("ensureFUSEMount: signing mode is set but trust_store not configured", "mode", sigMode)
+					}
 				}
-				enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
-				engine, _ = policy.NewEngineWithVariables(pol, enforceApprovals, true, policyVars)
+
+				pol, lErr := policy.LoadFromBytes(policyData)
+				if lErr == nil {
+					policyVars := map[string]string{
+						"PROJECT_ROOT": s.Workspace,
+						"GIT_ROOT":     s.Workspace,
+						"HOME":         os.Getenv("HOME"),
+					}
+					enforceApprovals := a.cfg.Approvals.Enabled && a.cfg.Approvals.Mode != ""
+					engine, _ = policy.NewEngineWithVariables(pol, enforceApprovals, true, policyVars)
+				}
 			}
 		}
 	}

@@ -11,16 +11,20 @@ import (
 	"sync"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/agentsh/agentsh/internal/policy/signing"
 )
 
 // Manager selects and loads a policy once, based on config and env.
 type Manager struct {
-	selectedName string
-	dir          string
-	manifestPath string
-	once         sync.Once
-	policy       *Policy
-	err          error
+	selectedName   string
+	dir            string
+	manifestPath   string
+	signingMode    string
+	trustStorePath string
+	once           sync.Once
+	policy         *Policy
+	err            error
 }
 
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -55,6 +59,13 @@ func (m *Manager) SelectedName() string {
 	return m.selectedName
 }
 
+// SetSigningConfig configures signature verification for this manager.
+// mode is "enforce", "warn", or "off". trustStorePath is a directory of public key JSON files.
+func (m *Manager) SetSigningConfig(mode, trustStorePath string) {
+	m.signingMode = mode
+	m.trustStorePath = trustStorePath
+}
+
 // Get loads and returns the active policy, caching the result.
 func (m *Manager) Get() (*Policy, error) {
 	m.once.Do(func() {
@@ -74,6 +85,21 @@ func (m *Manager) Get() (*Policy, error) {
 				return
 			}
 		}
+		if m.signingMode != "" && m.signingMode != "off" {
+			if m.trustStorePath == "" {
+				if m.signingMode == "enforce" {
+					m.err = fmt.Errorf("signing verification: trust_store not configured")
+					return
+				}
+				fmt.Fprintf(os.Stderr, "WARNING: signing mode is %q but trust_store not configured\n", m.signingMode)
+			} else if err := m.verifySigning(path, data); err != nil {
+				if m.signingMode == "enforce" {
+					m.err = fmt.Errorf("signing verification: %w", err)
+					return
+				}
+				fmt.Fprintf(os.Stderr, "WARNING: policy signing verification failed: %v\n", err)
+			}
+		}
 		dec := yaml.NewDecoder(bytes.NewReader(data))
 		dec.KnownFields(true)
 		var p Policy
@@ -88,6 +114,15 @@ func (m *Manager) Get() (*Policy, error) {
 		m.policy = &p
 	})
 	return m.policy, m.err
+}
+
+func (m *Manager) verifySigning(path string, data []byte) error {
+	ts, err := signing.LoadTrustStore(m.trustStorePath, m.signingMode == "enforce")
+	if err != nil {
+		return fmt.Errorf("load trust store: %w", err)
+	}
+	_, err = signing.VerifyPolicyBytes(data, path+".sig", ts)
+	return err
 }
 
 func verifyHash(path string, data []byte, manifestPath string) error {
