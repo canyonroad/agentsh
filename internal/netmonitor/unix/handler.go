@@ -184,7 +184,7 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		// Route to appropriate handler
 		if IsExecveSyscall(syscallNr) && execveHandler != nil {
 			slog.Debug("ServeNotifyWithExecve: routing to execve handler", "session_id", sessID, "pid", req.Pid)
-			handleExecveNotification(ctx, scmpFD, req, execveHandler)
+			handleExecveNotification(ctx, scmpFD, req, execveHandler, fileHandler, sessID)
 			continue
 		}
 
@@ -242,7 +242,7 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 // handleExecveNotification processes an execve/execveat notification.
 // It reads the filename and argv from the tracee process, builds an ExecveContext,
 // and calls the handler to make a decision.
-func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *ExecveHandler) {
+func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *ExecveHandler, fileHandler *FileHandler, sessID string) {
 	// Extract syscall args
 	args := SyscallArgs{
 		Nr:   int32(req.Data.Syscall),
@@ -322,6 +322,22 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 	}
 
 	result := h.Handle(goCtx, ectx)
+
+	// Evaluate file_rules on the binary path (in addition to command_rules).
+	if result.Action == ActionContinue && fileHandler != nil {
+		fileResult := fileHandler.Handle(FileRequest{
+			PID:       pid,
+			Syscall:   int32(req.Data.Syscall),
+			Path:      filename,
+			Operation: "execute",
+			SessionID: sessID,
+		})
+		if fileResult.Action == ActionDeny {
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -fileResult.Errno}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+	}
 
 	switch result.Action {
 	case ActionRedirect:
