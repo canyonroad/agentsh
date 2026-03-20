@@ -177,6 +177,7 @@ type TraceeState struct {
 	SuppressInitialStop bool // suppress initial SIGSTOP from auto-trace
 	LastOpenFlags    int    // flags from last openat/openat2 entry (event-loop-only)
 	LastOpenOp       string // operation from last openat/openat2 entry (event-loop-only)
+	LastFileAction   string // action from last file entry-time policy check (event-loop-only)
 	PendingExecStubFD  int // fd injected for exec redirect; cleaned up on exec failure (-1 = none)
 	PendingExecSavedFD int // fd that was displaced by stub fd; restored on exec failure (-1 = none)
 	MemFD              int
@@ -1046,10 +1047,12 @@ func (t *Tracer) handleOpenatExit(ctx context.Context, tid int, regs Regs) {
 	nr := unix.SYS_OPENAT
 	openFlags := 0
 	openOp := "open"
+	entryAction := ""
 	if state != nil {
 		nr = state.LastNr
 		openFlags = state.LastOpenFlags
 		openOp = state.LastOpenOp
+		entryAction = state.LastFileAction
 	}
 
 	// Read the real path the kernel opened.
@@ -1072,10 +1075,14 @@ func (t *Tracer) handleOpenatExit(ctx context.Context, tid int, regs Regs) {
 		t.escalateReadForTGID(tgid, tid)
 	}
 
-	// Exit-time path verification: evaluate policy against the real path.
+	// Exit-time path verification: only re-check when entry-time allowed.
+	// If entry denied, the syscall was already blocked. If entry redirected
+	// or soft-deleted, the kernel operated on the modified path — exit-time
+	// readlink reflects that modified path, not a symlink bypass.
 	// No sessionID gate — consistent with entry-time handleFile which also
 	// calls HandleFile regardless of session state.
-	if t.cfg.FileHandler != nil && t.cfg.TraceFile {
+	if t.cfg.FileHandler != nil && t.cfg.TraceFile &&
+		(entryAction == "allow" || entryAction == "continue" || entryAction == "") {
 		result := t.cfg.FileHandler.HandleFile(ctx, FileContext{
 			PID:       tgid,
 			SessionID: sessionID,
