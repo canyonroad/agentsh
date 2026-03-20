@@ -900,6 +900,12 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		state.LastNr = nr
 		state.NeedExitStop = t.needsExitStop(nr)
 
+		// Fast-path vfork children (same logic as handleSeccompStop).
+		if state.IsVforkChild && !isExecveSyscall(nr) {
+			t.allowSyscall(tid)
+			return
+		}
+
 		t.dispatchSyscall(ctx, tid, nr, sc)
 	} else {
 		if pendingErrno != 0 {
