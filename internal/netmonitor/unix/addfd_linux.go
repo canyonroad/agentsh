@@ -42,6 +42,13 @@ type seccompNotifAddFD struct {
 // Computed as _IOW('!', 3, struct seccomp_notif_addfd) = 0x40182103.
 const ioctlNotifAddFD = 0x40182103
 
+// ioctlNotifIDValid ioctl numbers for SECCOMP_IOCTL_NOTIF_ID_VALID.
+// The kernel changed from _IOW to _IOWR in 5.17 (commit 47e33c05f9f07).
+const (
+	ioctlNotifIDValidNew = 0xC0082102 // _IOWR('!', 2, __u64) — kernel 5.17+
+	ioctlNotifIDValidOld = 0x40082102 // _IOW('!', 2, __u64) — pre-5.17
+)
+
 // NotifAddFD injects srcFD from the supervisor process into the trapped
 // process's fd table via the seccomp notify fd.
 //
@@ -83,4 +90,31 @@ func NotifAddFD(notifFD int, notifID uint64, srcFD int, targetFD int, flags uint
 		return -1, fmt.Errorf("SECCOMP_IOCTL_NOTIF_ADDFD: %w", errno)
 	}
 	return int(r1), nil
+}
+
+// NotifIDValid checks whether a seccomp notification ID is still valid
+// (the target process/thread hasn't exited or been killed since the
+// notification was received). Returns nil if valid, ENOENT if stale.
+//
+// Tries the 5.17+ ioctl first, falls back to pre-5.17 on ENOTTY.
+func NotifIDValid(notifFD int, notifID uint64) error {
+	id := notifID
+	_, _, errno := unix.Syscall(
+		unix.SYS_IOCTL,
+		uintptr(notifFD),
+		uintptr(ioctlNotifIDValidNew),
+		uintptr(unsafe.Pointer(&id)),
+	)
+	if errno == unix.ENOTTY {
+		_, _, errno = unix.Syscall(
+			unix.SYS_IOCTL,
+			uintptr(notifFD),
+			uintptr(ioctlNotifIDValidOld),
+			uintptr(unsafe.Pointer(&id)),
+		)
+	}
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }

@@ -50,3 +50,15 @@ func TestAddFD_FlagCombinations(t *testing.T) {
 	// Verify flags are distinct bits.
 	require.Equal(t, uint32(0), uint32(SECCOMP_ADDFD_FLAG_SETFD&SECCOMP_ADDFD_FLAG_SEND), "flags should use distinct bits")
 }
+
+func TestNotifIDValid_Constants(t *testing.T) {
+	require.Equal(t, uintptr(0xC0082102), uintptr(ioctlNotifIDValidNew),
+		"new ioctl should be 0xC0082102 (kernel 5.17+)")
+	require.Equal(t, uintptr(0x40082102), uintptr(ioctlNotifIDValidOld),
+		"old ioctl should be 0x40082102 (pre-5.17)")
+}
+
+func TestNotifIDValid_InvalidFD(t *testing.T) {
+	err := NotifIDValid(-1, 0)
+	require.Error(t, err, "NotifIDValid with invalid fd should fail")
+}
