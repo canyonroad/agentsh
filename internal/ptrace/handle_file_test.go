@@ -93,6 +93,42 @@ func TestResolvePath_NotDir(t *testing.T) {
 	}
 }
 
+func TestResolvePath_FollowsSymlink(t *testing.T) {
+	tid := os.Getpid()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	os.WriteFile(target, []byte("x"), 0o644)
+	link := filepath.Join(dir, "link")
+	os.Symlink(target, link)
+
+	resolved, err := resolvePath(tid, unix.AT_FDCWD, link)
+	if err != nil {
+		t.Fatalf("resolvePath: %v", err)
+	}
+	if resolved != target {
+		t.Errorf("resolvePath(%q) = %q, want %q", link, resolved, target)
+	}
+}
+
+func TestResolvePath_ChainedSymlinks(t *testing.T) {
+	tid := os.Getpid()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "final")
+	os.WriteFile(target, []byte("x"), 0o644)
+	link1 := filepath.Join(dir, "link1")
+	link2 := filepath.Join(dir, "link2")
+	os.Symlink(target, link1)
+	os.Symlink(link1, link2)
+
+	resolved, err := resolvePath(tid, unix.AT_FDCWD, link2)
+	if err != nil {
+		t.Fatalf("resolvePath: %v", err)
+	}
+	if resolved != target {
+		t.Errorf("resolvePath(%q) = %q, want %q (through chain)", link2, resolved, target)
+	}
+}
+
 func TestResolvePath_DanglingSymlink(t *testing.T) {
 	// A dangling symlink should cause resolvePath to fail, not silently
 	// return the symlink path. The kernel would follow the symlink on

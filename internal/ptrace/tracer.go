@@ -929,7 +929,7 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		if needExitHandler && nr >= 0 {
 			exitRegs, err := t.getRegs(tid)
 			if err == nil {
-				t.handleSyscallExit(tid, nr, exitRegs)
+				t.handleSyscallExit(ctx, tid, nr, exitRegs)
 			}
 		}
 
@@ -991,23 +991,20 @@ func (t *Tracer) dispatchSyscall(ctx context.Context, tid int, nr int, sc *Sysca
 }
 
 // handleSyscallExit runs exit-time handlers for syscalls that need post-processing.
-func (t *Tracer) handleSyscallExit(tid int, nr int, regs Regs) {
+func (t *Tracer) handleSyscallExit(ctx context.Context, tid int, nr int, regs Regs) {
 	switch {
 	case isReadSyscall(nr):
 		t.handleReadExit(tid, regs)
 	case nr == unix.SYS_OPENAT || nr == unix.SYS_OPENAT2:
-		t.handleOpenatExit(tid, regs)
+		t.handleOpenatExit(ctx, tid, regs)
 	case nr == unix.SYS_CONNECT:
 		t.handleConnectExit(tid, regs)
 	}
 }
 
-// handleOpenatExit tracks fds opened on /proc/*/status for TracerPid masking.
-func (t *Tracer) handleOpenatExit(tid int, regs Regs) {
-	if t.fds == nil || !t.cfg.MaskTracerPid {
-		return
-	}
-
+// handleOpenatExit verifies the opened path against policy and tracks
+// /proc/*/status fds for TracerPid masking.
+func (t *Tracer) handleOpenatExit(ctx context.Context, tid int, regs Regs) {
 	retVal := regs.ReturnValue()
 	if retVal < 0 {
 		return // open failed
@@ -1017,21 +1014,55 @@ func (t *Tracer) handleOpenatExit(tid int, regs Regs) {
 	t.mu.Lock()
 	state := t.tracees[tid]
 	var tgid int
+	var sessionID string
 	if state != nil {
 		tgid = state.TGID
+		sessionID = state.SessionID
 	}
 	t.mu.Unlock()
 
-	// Read the path from /proc/<tid>/fd/<fd> to check if it's a status file.
+	// Read the real path the kernel opened.
 	path, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%d", tid, fd))
 	if err != nil {
+		// Cannot verify — fail closed. Close the fd and deny.
+		slog.Warn("handleOpenatExit: cannot read fd path, denying",
+			"tid", tid, "fd", fd, "error", err)
+		savedRegs := regs.Clone()
+		t.cleanupInjectedFD(tid, savedRegs, fd, -1)
+		t.applyReturnOverride(tid, -int64(unix.EACCES))
 		return
 	}
 
-	if isProcStatus(path) {
+	// TracerPid masking: track fds opened on /proc/*/status.
+	if t.fds != nil && t.cfg.MaskTracerPid && isProcStatus(path) {
 		t.fds.trackStatusFd(tgid, fd)
-		// Escalate BPF to trace read/pread64 for this TGID.
 		t.escalateReadForTGID(tgid, tid)
+	}
+
+	// Exit-time path verification: evaluate policy against the real path.
+	if t.cfg.FileHandler != nil && t.cfg.TraceFile && sessionID != "" {
+		result := t.cfg.FileHandler.HandleFile(ctx, FileContext{
+			PID:       tgid,
+			SessionID: sessionID,
+			Syscall:   unix.SYS_OPENAT,
+			Path:      path,
+			Operation: "open",
+		})
+		action := result.Action
+		if action == "" {
+			if result.Allow {
+				action = "allow"
+			} else {
+				action = "deny"
+			}
+		}
+		if action == "deny" {
+			slog.Warn("handleOpenatExit: exit-time verification denied",
+				"tid", tid, "fd", fd, "path", path)
+			savedRegs := regs.Clone()
+			t.cleanupInjectedFD(tid, savedRegs, fd, -1)
+			t.applyReturnOverride(tid, -int64(unix.EACCES))
+		}
 	}
 }
 
