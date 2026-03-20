@@ -42,8 +42,9 @@ func (sc *SyscallContext) Regs() (Regs, error) {
 	return sc.regs, nil
 }
 
-// ptraceSyscallInfo mirrors the entry variant of struct ptrace_syscall_info (Linux 5.3+).
-// The kernel struct is a union; we only use the entry fields (op==1).
+// ptraceSyscallInfo mirrors struct ptrace_syscall_info (Linux 5.3+).
+// The kernel struct is a union; we use the entry/seccomp fields (op==1 or op==3).
+// Both variants share the same nr + args[6] layout at the same offset.
 // We request ptraceSyscallInfoSize bytes; the kernel writes min(requested, actual).
 type ptraceSyscallInfo struct {
 	Op                 uint8
@@ -72,8 +73,8 @@ func (t *Tracer) getSyscallEntryInfo(tid int) (*SyscallEntryInfo, error) {
 	if errno != 0 {
 		return nil, fmt.Errorf("PTRACE_GET_SYSCALL_INFO: %w", errno)
 	}
-	if info.Op != 1 {
-		return nil, fmt.Errorf("PTRACE_GET_SYSCALL_INFO: unexpected op %d (want entry=1)", info.Op)
+	if info.Op != 1 && info.Op != 3 {
+		return nil, fmt.Errorf("PTRACE_GET_SYSCALL_INFO: unexpected op %d (want entry=1 or seccomp=3)", info.Op)
 	}
 	return &SyscallEntryInfo{
 		Nr:   int(info.EntryNr),
