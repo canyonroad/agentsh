@@ -71,8 +71,8 @@ func TestNeedsExitStop(t *testing.T) {
 		want          bool
 	}{
 		{"openat with mask on", unix.SYS_OPENAT, true, true, true},
-		{"openat with mask off", unix.SYS_OPENAT, false, true, false},
-		{"openat2 with mask off", unix.SYS_OPENAT2, false, true, false},
+		{"openat with mask off", unix.SYS_OPENAT, false, true, true},
+		{"openat2 with mask off", unix.SYS_OPENAT2, false, true, true},
 		{"connect with network on", unix.SYS_CONNECT, false, true, true},
 		{"connect with network off", unix.SYS_CONNECT, false, false, false},
 		{"read always true", unix.SYS_READ, false, false, true},

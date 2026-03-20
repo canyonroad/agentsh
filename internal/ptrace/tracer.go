@@ -470,7 +470,7 @@ func (t *Tracer) needsExitStop(nr int) bool {
 	case unix.SYS_READ, unix.SYS_PREAD64:
 		return true // only traced when escalated — always needs exit
 	case unix.SYS_OPENAT, unix.SYS_OPENAT2:
-		return t.cfg.MaskTracerPid // fd tracking for TracerPid masking
+		return true // exit-time path verification for symlink defense-in-depth
 	case unix.SYS_CONNECT:
 		return t.cfg.TraceNetwork // inline skip in handleNetwork handles port granularity
 	case unix.SYS_EXECVE, unix.SYS_EXECVEAT:
