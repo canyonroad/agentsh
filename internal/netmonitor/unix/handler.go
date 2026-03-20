@@ -191,7 +191,11 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		// Route file syscalls to file handler
 		if isFileSyscall(syscallNr) && fileHandler != nil {
 			slog.Debug("ServeNotifyWithExecve: routing to file handler", "session_id", sessID, "pid", req.Pid, "syscall", syscallNr)
-			handleFileNotification(ctx, scmpFD, req, fileHandler, sessID)
+			if fileHandler.EmulateOpen() {
+				handleFileNotificationEmulated(ctx, scmpFD, req, fileHandler, sessID)
+			} else {
+				handleFileNotification(ctx, scmpFD, req, fileHandler, sessID)
+			}
 			continue
 		}
 
@@ -426,6 +430,140 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		resp.Flags = seccomp.NotifRespFlagContinue
 	}
 	_ = seccomp.NotifRespond(fd, &resp)
+}
+
+// handleFileNotificationEmulated processes a file syscall notification using
+// AddFD emulation for open-family syscalls. For openat/openat2 (not O_TMPFILE,
+// not RESOLVE_*), the supervisor opens the file via /proc/<pid>/root/<path>
+// and injects the fd via SECCOMP_ADDFD_FLAG_SEND. For non-open syscalls and
+// fallback cases, it uses CONTINUE with two-check NotifIDValid bracketing
+// (spec section 4, steps 2 and 4).
+func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *FileHandler, sessID string) {
+	args := SyscallArgs{
+		Nr:   int32(req.Data.Syscall),
+		Arg0: req.Data.Args[0], Arg1: req.Data.Args[1], Arg2: req.Data.Args[2],
+		Arg3: req.Data.Args[3], Arg4: req.Data.Args[4], Arg5: req.Data.Args[5],
+	}
+
+	pid := int(req.Pid)
+	notifFD := int(fd)
+	fileArgs := extractFileArgs(args)
+
+	// For openat2, resolve actual flags from the open_how struct.
+	var resolveFlags uint64
+	if args.Nr == unix.SYS_OPENAT2 && fileArgs.HowPtr != 0 {
+		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
+		if err != nil {
+			slog.Debug("emulated file handler: failed to read open_how, denying", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		fileArgs.Flags = uint32(howFlags)
+		fileArgs.Mode = uint32(howMode)
+		resolveFlags = readOpenHowResolve(pid, fileArgs.HowPtr)
+	}
+
+	// Resolve primary path — fail-secure in emulation mode.
+	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
+	if err != nil {
+		slog.Debug("emulated file handler: failed to resolve path, denying", "pid", pid, "error", err)
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
+		_ = seccomp.NotifRespond(fd, &resp)
+		return
+	}
+
+	// Resolve second path for rename/link.
+	var path2 string
+	if fileArgs.HasSecondPath {
+		p2, err := resolvePathAt(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+		if err != nil {
+			slog.Debug("emulated file handler: failed to resolve second path, denying", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		path2 = p2
+	}
+
+	operation := syscallToOperation(args.Nr, fileArgs.Flags)
+
+	frequest := FileRequest{
+		PID: pid, Syscall: args.Nr, Path: path, Path2: path2,
+		Operation: operation, Flags: fileArgs.Flags, Mode: fileArgs.Mode, SessionID: sessID,
+	}
+
+	// For non-emulated syscalls (CONTINUE path), do first ID validation
+	// before policy evaluation (spec section 4, step 2).
+	needsContinue := !isOpenSyscall(args.Nr) || shouldFallbackToContinue(args.Nr, fileArgs.Flags, resolveFlags)
+	if needsContinue {
+		if err := NotifIDValid(notifFD, req.ID); err != nil {
+			slog.Debug("emulated file handler: notification stale before policy check", "pid", pid)
+			return
+		}
+	}
+
+	result := h.Handle(frequest)
+
+	// Branch: is this an open syscall that we should emulate via AddFD?
+	if !needsContinue {
+		if result.Action == ActionDeny {
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -result.Errno}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		emulateOpenat(fd, req, pid, path, fileArgs.Flags, fileArgs.Mode)
+		return
+	}
+
+	// CONTINUE path with ID validation bracketing.
+	if result.Action == ActionDeny {
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -result.Errno}
+		_ = seccomp.NotifRespond(fd, &resp)
+		return
+	}
+
+	// Second ID validation check after policy evaluation (spec section 4, step 4).
+	if err := NotifIDValid(notifFD, req.ID); err != nil {
+		slog.Debug("emulated file handler: notification stale after policy check", "pid", pid)
+		return
+	}
+	resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+	_ = seccomp.NotifRespond(fd, &resp)
+}
+
+// emulateOpenat opens a file on behalf of the tracee via /proc/<pid>/root/<path>,
+// then injects the resulting fd into the tracee using SECCOMP_ADDFD_FLAG_SEND.
+// This atomically installs the fd and completes the notification, eliminating
+// TOCTOU races between the policy check and the actual open.
+func emulateOpenat(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, pid int, path string, flags uint32, mode uint32) {
+	procPath := fmt.Sprintf("/proc/%d/root%s", pid, path)
+
+	openFlags := int(flags) & (unix.O_RDONLY | unix.O_WRONLY | unix.O_RDWR |
+		unix.O_APPEND | unix.O_TRUNC | unix.O_CREAT | unix.O_EXCL |
+		unix.O_NOFOLLOW | unix.O_DIRECTORY | unix.O_PATH | unix.O_NOCTTY |
+		unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_SYNC | unix.O_DSYNC)
+
+	supervisorFD, err := unix.Open(procPath, openFlags, uint32(mode))
+	if err != nil {
+		errno, ok := err.(unix.Errno)
+		if !ok {
+			errno = unix.EIO
+		}
+		slog.Debug("emulateOpenat: supervisor open failed", "pid", pid, "path", path, "error", err)
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(errno)}
+		_ = seccomp.NotifRespond(fd, &resp)
+		return
+	}
+
+	_, err = NotifAddFD(int(fd), req.ID, supervisorFD, 0, SECCOMP_ADDFD_FLAG_SEND)
+	_ = unix.Close(supervisorFD)
+	if err != nil {
+		slog.Error("emulateOpenat: AddFD failed", "pid", pid, "path", path, "error", err)
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EIO)}
+		_ = seccomp.NotifRespond(fd, &resp)
+		return
+	}
 }
 
 // getParentPID reads the parent PID from /proc/<pid>/stat.

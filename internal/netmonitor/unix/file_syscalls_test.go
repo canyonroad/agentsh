@@ -400,6 +400,27 @@ func TestResolvePathAt_NullPtr(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestIsOpenSyscall(t *testing.T) {
+	assert.True(t, isOpenSyscall(unix.SYS_OPENAT))
+	assert.True(t, isOpenSyscall(unix.SYS_OPENAT2))
+	assert.False(t, isOpenSyscall(unix.SYS_UNLINKAT))
+	assert.False(t, isOpenSyscall(unix.SYS_STATX))
+	assert.False(t, isOpenSyscall(unix.SYS_MKNODAT))
+}
+
+func TestShouldFallbackToContinue(t *testing.T) {
+	assert.False(t, shouldFallbackToContinue(unix.SYS_OPENAT, unix.O_RDONLY, 0))
+	assert.True(t, shouldFallbackToContinue(unix.SYS_OPENAT, unix.O_TMPFILE, 0))
+	assert.True(t, shouldFallbackToContinue(unix.SYS_OPENAT2, unix.O_RDONLY, 0x01))
+	assert.False(t, shouldFallbackToContinue(unix.SYS_OPENAT2, unix.O_RDONLY, 0))
+}
+
+func TestReadOpenHowResolve_NullPtr(t *testing.T) {
+	// A null howPtr should return 0 without error.
+	result := readOpenHowResolve(os.Getpid(), 0)
+	assert.Equal(t, uint64(0), result)
+}
+
 func TestResolveProcFD(t *testing.T) {
 	pid := os.Getpid()
 

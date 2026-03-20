@@ -13,6 +13,17 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// isOpenSyscall returns true if nr is an open-family syscall that returns a
+// file descriptor. These are the syscalls eligible for AddFD emulation.
+func isOpenSyscall(nr int32) bool {
+	switch nr {
+	case unix.SYS_OPENAT, unix.SYS_OPENAT2:
+		return true
+	default:
+		return isLegacyOpenSyscallNr(nr)
+	}
+}
+
 // isFileSyscall returns true if nr is a file I/O syscall we monitor.
 func isFileSyscall(nr int32) bool {
 	switch nr {
@@ -26,6 +37,21 @@ func isFileSyscall(nr int32) bool {
 	default:
 		return isLegacyFileSyscall(nr)
 	}
+}
+
+// shouldFallbackToContinue returns true when an open-family syscall should
+// use CONTINUE instead of AddFD emulation. This applies when:
+//   - openat2 has non-zero RESOLVE_* flags (the supervisor cannot replicate
+//     these resolution semantics).
+//   - O_TMPFILE is used (file has no path to open via /proc/<pid>/root).
+func shouldFallbackToContinue(nr int32, flags uint32, resolveFlags uint64) bool {
+	if resolveFlags != 0 {
+		return true
+	}
+	if flags&unix.O_TMPFILE == unix.O_TMPFILE {
+		return true
+	}
+	return false
 }
 
 // FileArgs holds parsed file syscall arguments.
@@ -166,6 +192,24 @@ func readOpenHow(pid int, howPtr uint64) (flags uint64, mode uint64, err error) 
 	flags = *(*uint64)(unsafe.Pointer(&buf[0]))
 	mode = *(*uint64)(unsafe.Pointer(&buf[8]))
 	return flags, mode, nil
+}
+
+// readOpenHowResolve reads only the resolve field (offset 16) from the
+// openat2 open_how struct in tracee memory. Returns 0 on any error —
+// the caller treats unknown resolve flags as "no special resolution",
+// which is the safe default (CONTINUE fallback requires resolve != 0).
+func readOpenHowResolve(pid int, howPtr uint64) uint64 {
+	if howPtr == 0 {
+		return 0
+	}
+	var buf [8]byte
+	liov := unix.Iovec{Base: &buf[0], Len: 8}
+	riov := unix.RemoteIovec{Base: uintptr(howPtr + 16), Len: 8}
+	_, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil {
+		return 0
+	}
+	return *(*uint64)(unsafe.Pointer(&buf[0]))
 }
 
 // syscallToOperation maps a file syscall number and flags to a policy operation string.
