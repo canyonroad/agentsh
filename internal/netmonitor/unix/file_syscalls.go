@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -278,4 +280,34 @@ func resolvePathAt(pid int, dirfd int32, pathPtr uint64) (string, error) {
 		return "", fmt.Errorf("resolve fd %d for pid %d: %w", dirfd, pid, err)
 	}
 	return filepath.Clean(filepath.Join(dirPath, path)), nil
+}
+
+// resolveProcFD detects and resolves /proc/self/fd/N, /proc/<pid>/fd/N,
+// and /dev/fd/N paths to their actual targets. This prevents policy bypass
+// by re-deriving paths from file descriptors.
+func resolveProcFD(pid int, path string) (string, bool) {
+	var fdStr string
+
+	if strings.HasPrefix(path, "/proc/self/fd/") {
+		fdStr = path[len("/proc/self/fd/"):]
+	} else if strings.HasPrefix(path, "/dev/fd/") {
+		fdStr = path[len("/dev/fd/"):]
+	} else {
+		prefix := fmt.Sprintf("/proc/%d/fd/", pid)
+		if strings.HasPrefix(path, prefix) {
+			fdStr = path[len(prefix):]
+		} else {
+			return path, false
+		}
+	}
+
+	if _, err := strconv.Atoi(fdStr); err != nil {
+		return path, false
+	}
+
+	target, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, fdStr))
+	if err != nil {
+		return path, false
+	}
+	return target, true
 }

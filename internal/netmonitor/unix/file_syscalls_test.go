@@ -3,6 +3,7 @@
 package unix
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -397,4 +398,31 @@ func TestResolvePathAt_NullPtr(t *testing.T) {
 	pid := os.Getpid()
 	_, err := resolvePathAt(pid, -100, 0)
 	assert.Error(t, err)
+}
+
+func TestResolveProcFD(t *testing.T) {
+	pid := os.Getpid()
+
+	tests := []struct {
+		name      string
+		path      string
+		wasProcFD bool
+	}{
+		{"proc self fd", "/proc/self/fd/0", true},
+		{"proc pid fd", fmt.Sprintf("/proc/%d/fd/0", pid), true},
+		{"dev fd", "/dev/fd/0", true},
+		{"normal path", "/tmp/foo", false},
+		{"proc but not fd", "/proc/self/status", false},
+		{"proc other pid fd", "/proc/1/fd/0", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resolved, wasProcFD := resolveProcFD(pid, tt.path)
+			assert.Equal(t, tt.wasProcFD, wasProcFD, "wasProcFD mismatch for %s", tt.path)
+			if wasProcFD {
+				assert.NotContains(t, resolved, "/proc/")
+			}
+		})
+	}
 }
