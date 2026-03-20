@@ -477,7 +477,15 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 		}
 		fileArgs.Flags = uint32(howFlags)
 		fileArgs.Mode = uint32(howMode)
-		resolveFlags = readOpenHowResolve(pid, fileArgs.HowPtr)
+		var resolveErr error
+		resolveFlags, resolveErr = readOpenHowResolve(pid, fileArgs.HowPtr)
+		if resolveErr != nil {
+			// Cannot read resolve flags — force CONTINUE fallback (never emulate
+			// when resolve flags are unknown, as non-zero RESOLVE_* flags can't
+			// be replicated from the supervisor).
+			slog.Debug("emulated file handler: cannot read resolve flags, forcing CONTINUE", "pid", pid, "error", resolveErr)
+			resolveFlags = 1 // non-zero forces shouldFallbackToContinue → true
+		}
 	}
 
 	// Resolve primary path — fail-secure in emulation mode.
@@ -560,7 +568,20 @@ func emulateOpenat(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, pid int, path s
 		unix.O_NOFOLLOW | unix.O_DIRECTORY | unix.O_PATH | unix.O_NOCTTY |
 		unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_SYNC | unix.O_DSYNC)
 
-	supervisorFD, err := unix.Open(procPath, openFlags, uint32(mode))
+	// When O_CREAT is set, apply the tracee's umask to the mode so that
+	// supervisor-created files have the same permissions the kernel would
+	// produce. The umask is read from /proc/<pid>/status (Umask field).
+	effectiveMode := mode
+	if openFlags&unix.O_CREAT != 0 {
+		if umask, err := readTraceeUmask(pid); err == nil {
+			effectiveMode = mode &^ umask
+		}
+		// On error reading umask, use the raw mode — this is conservative
+		// (may be slightly more permissive than intended, but the file is
+		// inside the sandbox so the blast radius is contained).
+	}
+
+	supervisorFD, err := unix.Open(procPath, openFlags, effectiveMode)
 	if err != nil {
 		errno, ok := err.(unix.Errno)
 		if !ok {
@@ -580,6 +601,29 @@ func emulateOpenat(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, pid int, path s
 		_ = seccomp.NotifRespond(fd, &resp)
 		return
 	}
+}
+
+// readTraceeUmask reads the umask of a tracee process from /proc/<pid>/status.
+// Returns the umask as a uint32 bitmask, or an error if it cannot be read.
+func readTraceeUmask(pid int) (uint32, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "Umask:") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				return 0, fmt.Errorf("malformed Umask line")
+			}
+			val, err := strconv.ParseUint(strings.TrimSpace(fields[1]), 8, 32)
+			if err != nil {
+				return 0, err
+			}
+			return uint32(val), nil
+		}
+	}
+	return 0, fmt.Errorf("Umask not found in /proc/%d/status", pid)
 }
 
 // getParentPID reads the parent PID from /proc/<pid>/stat.

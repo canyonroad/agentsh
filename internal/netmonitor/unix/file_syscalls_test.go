@@ -417,7 +417,8 @@ func TestShouldFallbackToContinue(t *testing.T) {
 
 func TestReadOpenHowResolve_NullPtr(t *testing.T) {
 	// A null howPtr should return 0 without error.
-	result := readOpenHowResolve(os.Getpid(), 0)
+	result, err := readOpenHowResolve(os.Getpid(), 0)
+	assert.NoError(t, err)
 	assert.Equal(t, uint64(0), result)
 }
 
@@ -432,6 +433,10 @@ func TestResolveProcFD(t *testing.T) {
 		{"proc self fd", "/proc/self/fd/0", true},
 		{"proc pid fd", fmt.Sprintf("/proc/%d/fd/0", pid), true},
 		{"dev fd", "/dev/fd/0", true},
+		{"thread-self fd", "/proc/thread-self/fd/0", true},
+		{"dev stdin", "/dev/stdin", true},
+		{"dev stdout", "/dev/stdout", true},
+		{"dev stderr", "/dev/stderr", true},
 		{"normal path", "/tmp/foo", false},
 		{"proc but not fd", "/proc/self/status", false},
 		{"proc other pid fd", "/proc/1/fd/0", false},

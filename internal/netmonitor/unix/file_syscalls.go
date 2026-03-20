@@ -195,21 +195,21 @@ func readOpenHow(pid int, howPtr uint64) (flags uint64, mode uint64, err error) 
 }
 
 // readOpenHowResolve reads only the resolve field (offset 16) from the
-// openat2 open_how struct in tracee memory. Returns 0 on any error —
-// the caller treats unknown resolve flags as "no special resolution",
-// which is the safe default (CONTINUE fallback requires resolve != 0).
-func readOpenHowResolve(pid int, howPtr uint64) uint64 {
+// openat2 open_how struct in tracee memory. Returns the resolve flags and
+// an error. On error, the caller must force CONTINUE fallback — never
+// emulate when resolve flags are unknown.
+func readOpenHowResolve(pid int, howPtr uint64) (uint64, error) {
 	if howPtr == 0 {
-		return 0
+		return 0, nil
 	}
 	var buf [8]byte
 	liov := unix.Iovec{Base: &buf[0], Len: 8}
 	riov := unix.RemoteIovec{Base: uintptr(howPtr + 16), Len: 8}
 	_, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("read open_how resolve: %w", err)
 	}
-	return *(*uint64)(unsafe.Pointer(&buf[0]))
+	return *(*uint64)(unsafe.Pointer(&buf[0])), nil
 }
 
 // syscallToOperation maps a file syscall number and flags to a policy operation string.
@@ -326,17 +326,27 @@ func resolvePathAt(pid int, dirfd int32, pathPtr uint64) (string, error) {
 	return filepath.Clean(filepath.Join(dirPath, path)), nil
 }
 
-// resolveProcFD detects and resolves /proc/self/fd/N, /proc/<pid>/fd/N,
-// and /dev/fd/N paths to their actual targets. This prevents policy bypass
-// by re-deriving paths from file descriptors.
+// resolveProcFD detects and resolves /proc/self/fd/N, /proc/thread-self/fd/N,
+// /proc/<pid>/fd/N, /dev/fd/N, and /dev/stdin|stdout|stderr paths to their
+// actual targets. This prevents policy bypass by re-deriving paths from file
+// descriptors.
 func resolveProcFD(pid int, path string) (string, bool) {
 	var fdStr string
 
-	if strings.HasPrefix(path, "/proc/self/fd/") {
+	switch {
+	case strings.HasPrefix(path, "/proc/self/fd/"):
 		fdStr = path[len("/proc/self/fd/"):]
-	} else if strings.HasPrefix(path, "/dev/fd/") {
+	case strings.HasPrefix(path, "/proc/thread-self/fd/"):
+		fdStr = path[len("/proc/thread-self/fd/"):]
+	case strings.HasPrefix(path, "/dev/fd/"):
 		fdStr = path[len("/dev/fd/"):]
-	} else {
+	case path == "/dev/stdin":
+		fdStr = "0"
+	case path == "/dev/stdout":
+		fdStr = "1"
+	case path == "/dev/stderr":
+		fdStr = "2"
+	default:
 		prefix := fmt.Sprintf("/proc/%d/fd/", pid)
 		if strings.HasPrefix(path, prefix) {
 			fdStr = path[len(prefix):]
