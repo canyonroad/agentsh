@@ -1038,6 +1038,12 @@ func (t *Tracer) handleOpenatExit(ctx context.Context, tid int, regs Regs) {
 	}
 	t.mu.Unlock()
 
+	// LastNr is event-loop-only — no mutex needed.
+	nr := unix.SYS_OPENAT
+	if state != nil {
+		nr = state.LastNr
+	}
+
 	// Read the real path the kernel opened.
 	path, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%d", tid, fd))
 	if err != nil {
@@ -1061,7 +1067,7 @@ func (t *Tracer) handleOpenatExit(ctx context.Context, tid int, regs Regs) {
 		result := t.cfg.FileHandler.HandleFile(ctx, FileContext{
 			PID:       tgid,
 			SessionID: sessionID,
-			Syscall:   unix.SYS_OPENAT,
+			Syscall:   nr,
 			Path:      path,
 			Operation: "open",
 		})
