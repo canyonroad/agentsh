@@ -292,9 +292,9 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	if cfg.BlockIOUring {
 		ioUringBlock := seccomp.ActErrno.SetReturnCode(int16(1)) // EPERM = 1
 		ioUringSyscalls := []seccomp.ScmpSyscall{
-			seccomp.ScmpSyscall(425), // io_uring_setup
-			seccomp.ScmpSyscall(426), // io_uring_enter
-			seccomp.ScmpSyscall(427), // io_uring_register
+			seccomp.ScmpSyscall(unix.SYS_IO_URING_SETUP),
+			seccomp.ScmpSyscall(unix.SYS_IO_URING_ENTER),
+			seccomp.ScmpSyscall(unix.SYS_IO_URING_REGISTER),
 		}
 		for _, sc := range ioUringSyscalls {
 			if err := filt.AddRule(sc, ioUringBlock); err != nil {

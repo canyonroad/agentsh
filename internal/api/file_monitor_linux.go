@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/policy"
@@ -54,15 +53,14 @@ func createFileHandler(cfg config.SandboxSeccompFileMonitorConfig, pol *policy.E
 	enforce := cfg.EnforceWithoutFUSE
 	handler := unixmon.NewFileHandler(policyChecker, registry, emitter, enforce)
 
-	// Enable AddFD emulation when configured and no other backend is primary.
+	// Enable AddFD emulation when configured. The enforce_without_fuse flag
+	// signals that FUSE is not available for this deployment — trust the config
+	// rather than re-detecting global state, which could be affected by
+	// unrelated sessions.
 	defaultVal := cfg.EnforceWithoutFUSE
 	openatEmulation := config.FileMonitorBoolWithDefault(cfg.OpenatEmulation, defaultVal)
 	if openatEmulation && enforce {
-		fuseAvailable := registry.HasAnyMounts()
-		landlockAvailable := capabilities.DetectLandlock().Available
-		if !fuseAvailable && !landlockAvailable {
-			handler.SetEmulateOpen(true)
-		}
+		handler.SetEmulateOpen(true)
 	}
 
 	return handler

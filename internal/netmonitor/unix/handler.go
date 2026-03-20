@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -329,7 +330,7 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 			PID:       pid,
 			Syscall:   int32(req.Data.Syscall),
 			Path:      filename,
-			Operation: "execute",
+			Operation: "open",
 			SessionID: sessID,
 		})
 		if fileResult.Action == ActionDeny {
@@ -593,10 +594,30 @@ func emulateOpenat(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, pid int, path s
 		return
 	}
 
-	_, err = NotifAddFD(int(fd), req.ID, supervisorFD, 0, SECCOMP_ADDFD_FLAG_SEND)
+	// Propagate O_CLOEXEC to the injected fd in the tracee — without this,
+	// the fd could leak across exec boundaries.
+	var addfdFlags uint32 = SECCOMP_ADDFD_FLAG_SEND
+	var newfdFlags uint32
+	if flags&unix.O_CLOEXEC != 0 {
+		newfdFlags = unix.O_CLOEXEC
+	}
+
+	addReq := seccompNotifAddFD{
+		id:         req.ID,
+		flags:      addfdFlags,
+		srcfd:      uint32(supervisorFD),
+		newfd:      0,
+		newfdFlags: newfdFlags,
+	}
+	_, _, addErrno := unix.Syscall(
+		unix.SYS_IOCTL,
+		uintptr(fd),
+		uintptr(ioctlNotifAddFD),
+		uintptr(unsafe.Pointer(&addReq)),
+	)
 	_ = unix.Close(supervisorFD)
-	if err != nil {
-		slog.Error("emulateOpenat: AddFD failed", "pid", pid, "path", path, "error", err)
+	if addErrno != 0 {
+		slog.Error("emulateOpenat: AddFD failed", "pid", pid, "path", path, "error", addErrno)
 		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EIO)}
 		_ = seccomp.NotifRespond(fd, &resp)
 		return

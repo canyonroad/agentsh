@@ -77,7 +77,7 @@ func NotifAddFD(notifFD int, notifID uint64, srcFD int, targetFD int, flags uint
 		flags:      flags,
 		srcfd:      uint32(srcFD),
 		newfd:      newfd,
-		newfdFlags: 0, // fd must survive execve for stub communication
+		newfdFlags: 0, // default: no flags on injected fd
 	}
 
 	r1, _, errno := unix.Syscall(

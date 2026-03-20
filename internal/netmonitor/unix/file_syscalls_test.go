@@ -32,7 +32,7 @@ func TestIsFileSyscall(t *testing.T) {
 		unix.SYS_FCHOWNAT,
 		unix.SYS_STATX,
 		unix.SYS_NEWFSTATAT,
-		439, // SYS_FACCESSAT2
+		unix.SYS_FACCESSAT2,
 		unix.SYS_READLINKAT,
 		unix.SYS_MKNODAT,
 	}
@@ -91,7 +91,7 @@ func TestSyscallToOperation(t *testing.T) {
 		{"fchownat", unix.SYS_FCHOWNAT, 0, "chown"},
 		{"statx", unix.SYS_STATX, 0, "stat"},
 		{"newfstatat", unix.SYS_NEWFSTATAT, 0, "stat"},
-		{"faccessat2", 439, 0, "access"},
+		{"faccessat2", unix.SYS_FACCESSAT2, 0, "access"},
 		{"readlinkat", unix.SYS_READLINKAT, 0, "readlink"},
 		{"mknodat", unix.SYS_MKNODAT, 0, "mknod"},
 
@@ -283,7 +283,7 @@ func TestExtractFileArgs_Newfstatat(t *testing.T) {
 }
 
 func TestExtractFileArgs_Faccessat2(t *testing.T) {
-	args := SyscallArgs{Nr: 439, Arg0: fdcwdUint64(), Arg1: 0x7fff4000}
+	args := SyscallArgs{Nr: unix.SYS_FACCESSAT2, Arg0: fdcwdUint64(), Arg1: 0x7fff4000}
 	fa := extractFileArgs(args)
 	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
 	assert.Equal(t, uint64(0x7fff4000), fa.PathPtr)

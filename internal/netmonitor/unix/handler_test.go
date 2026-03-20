@@ -43,7 +43,7 @@ func TestServeNotify_RoutesFileSyscalls(t *testing.T) {
 func TestServeNotify_RoutesNewFileSyscalls(t *testing.T) {
 	assert.True(t, isFileSyscall(unix.SYS_STATX))
 	assert.True(t, isFileSyscall(unix.SYS_NEWFSTATAT))
-	assert.True(t, isFileSyscall(439)) // faccessat2
+	assert.True(t, isFileSyscall(unix.SYS_FACCESSAT2))
 	assert.True(t, isFileSyscall(unix.SYS_READLINKAT))
 	assert.True(t, isFileSyscall(unix.SYS_MKNODAT))
 }
