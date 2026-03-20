@@ -188,7 +188,8 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 	if cfg.TrashConfig != nil && cfg.TrashConfig.Enabled {
 		hooks.FUSEAudit = &fsmonitor.FUSEAuditHooks{
 			Config: config.FUSEAuditConfig{
-				Mode: "soft_delete",
+				Mode:      "soft_delete",
+				TrashPath: cfg.TrashConfig.TrashDir,
 			},
 			HashLimitBytes:   cfg.TrashConfig.HashLimitBytes,
 			NotifySoftDelete: cfg.NotifySoftDelete,

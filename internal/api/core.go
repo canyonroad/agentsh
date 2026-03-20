@@ -1157,6 +1157,7 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 	if a.cfg.Sandbox.FUSE.Audit.Mode == "soft_delete" {
 		fsCfg.TrashConfig = &platform.TrashConfig{
 			Enabled:        true,
+			TrashDir:       a.cfg.Sandbox.FUSE.Audit.TrashPath,
 			HashLimitBytes: hashLimit,
 		}
 		fsCfg.NotifySoftDelete = func(path, token string) {
