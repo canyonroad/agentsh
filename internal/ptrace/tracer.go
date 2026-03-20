@@ -906,7 +906,9 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		state.NeedExitStop = t.needsExitStop(nr)
 
 		// Fast-path vfork children for known safe setup syscalls.
-		if state.IsVforkChild && !isExecveSyscall(nr) && isVforkSafeSyscall(nr) {
+		// Exclude SYS_CLOSE when fd tracking is active (same as handleSeccompStop).
+		if state.IsVforkChild && !isExecveSyscall(nr) && isVforkSafeSyscall(nr) &&
+			!(nr == unix.SYS_CLOSE && t.fds != nil) {
 			t.allowSyscall(tid)
 			return
 		}
@@ -979,10 +981,13 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 
 	// Fast-path: vfork children skip policy for known safe setup syscalls.
 	// Between vfork and exec, only async-signal-safe operations should occur.
-	// Safe syscalls (close, dup2, sigaction, etc.) are allowed immediately.
+	// Safe syscalls (close, dup3, sigaction, etc.) are allowed immediately.
 	// Execve gets full policy evaluation. Anything else (file, network,
 	// signal) goes through normal dispatch for policy enforcement.
-	if isVfork && !isExecveSyscall(nr) && isVforkSafeSyscall(nr) {
+	// Exception: SYS_CLOSE must go through handleClose when fd tracking
+	// is active (t.fds != nil) to clean up statusFds/dnsRedirects/tlsWatched.
+	if isVfork && !isExecveSyscall(nr) && isVforkSafeSyscall(nr) &&
+		!(nr == unix.SYS_CLOSE && t.fds != nil) {
 		t.allowSyscall(tid)
 		return
 	}
