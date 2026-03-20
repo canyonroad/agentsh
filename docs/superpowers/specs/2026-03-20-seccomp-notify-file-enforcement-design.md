@@ -30,11 +30,14 @@ Add five metadata/create syscalls to `InstallFilterWithConfig` when `FileMonitor
 
 The `intercept_metadata` config flag controls whether `statx`, `newfstatat`, `faccessat2`, and `readlinkat` are added to the filter. When false, only write-affecting syscalls are intercepted.
 
-Add io_uring blocking with `ActErrno(EPERM)` (not notify, not kill):
+Add io_uring blocking. Use `seccomp.ActErrno.SetReturnCode(int16(unix.EPERM))` (not notify, not kill):
 - `io_uring_setup` (425)
 - `io_uring_enter` (426)
+- `io_uring_register` (427) — a process could use this to register fds with an inherited io_uring instance
 
 Controlled by the `block_io_uring` config flag.
+
+**FilterConfig bridge:** Add `InterceptMetadata bool` and `BlockIOUring bool` fields to the `FilterConfig` struct in `seccomp_linux.go`. The `SandboxSeccompFileMonitorConfig` values are mapped to `FilterConfig` in `createFileHandler` / the wrapper setup code.
 
 ### 2. Syscall Routing and Arg Extraction
 
@@ -61,11 +64,11 @@ Routing in `handleFileNotification` is unchanged — all syscalls flow through: 
 
 **File:** `internal/netmonitor/unix/handler.go` — new function `handleFileNotificationEmulated`
 
-When `FileHandler.emulateOpen` is true and the syscall is `openat`/`openat2`, allowed opens are emulated by the supervisor instead of using CONTINUE:
+When `FileHandler.emulateOpen` is true and the syscall is `openat`/`openat2` (or legacy `open`/`creat` on amd64), allowed opens are emulated by the supervisor instead of using CONTINUE:
 
 1. Extract args, resolve path, evaluate policy (same as existing path).
 2. **Denied**: respond with `-EACCES` (unchanged).
-3. **Allowed openat/openat2**:
+3. **Allowed openat/openat2** (and legacy `open`/`creat` on amd64):
    a. Supervisor opens the file via `/proc/<pid>/root/<resolved_path>` using the child's flags. Forwarded flags: `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_APPEND`, `O_TRUNC`, `O_CREAT` (with mode), `O_NOFOLLOW`, `O_DIRECTORY`, `O_PATH`, `O_NOCTTY`, `O_CLOEXEC`, `O_NONBLOCK`.
    b. If supervisor open fails → respond with the errno from the failed open.
    c. If supervisor open succeeds → inject fd via `NotifAddFD(notifFD, reqID, supervisorFD, 0, SECCOMP_ADDFD_FLAG_SEND)`. The `SEND` flag atomically injects the fd AND completes the notification response — no separate `NotifRespond` call.
@@ -75,6 +78,10 @@ When `FileHandler.emulateOpen` is true and the syscall is `openat`/`openat2`, al
 **Fallbacks to CONTINUE + ID validation** (accept residual TOCTOU):
 - `openat2` with non-zero `RESOLVE_*` flags — supervisor cannot replicate `RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH`, `RESOLVE_IN_ROOT`, `RESOLVE_NO_XDEV` from its own namespace.
 - `O_TMPFILE` — supervisor's tmpfile may land on a different filesystem.
+
+**Error handling in emulation mode:** When `emulateOpen` is true and path resolution fails (tracee memory read error, dirfd resolution error), the handler **denies** the syscall with `-EACCES` (fail-secure). This differs from the existing CONTINUE-mode behavior where path resolution failure results in allowing the syscall. Fail-open is acceptable for audit mode; fail-secure is required for enforcement mode.
+
+**Mount namespace assumption:** The supervisor opens files via `/proc/<pid>/root/<path>` which correctly traverses the tracee's mount namespace. This assumes the supervisor has sufficient privileges to access `/proc/<pid>/root` (requires ptrace access or same user). In the Deno Deploy / Firecracker target environment, supervisor and tracee share the same mount namespace, so this is not a concern.
 
 **Activation**: `emulateOpen` is set in `createFileHandler()` when `cfg.OpenatEmulation && !fuseAvailable && !landlockAvailable`. When FUSE or Landlock handles enforcement, seccomp stays in CONTINUE mode.
 
@@ -87,7 +94,7 @@ New helper:
 func NotifIDValid(notifFD int, notifID uint64) error
 ```
 
-Uses `SECCOMP_IOCTL_NOTIF_ID_VALID` (ioctl `0x40082102`). Returns nil if valid, `ENOENT` if stale.
+Uses `SECCOMP_IOCTL_NOTIF_ID_VALID`. The ioctl number changed between kernel versions: `0x40082102` (pre-5.17, `_IOW`) and `0xC0082102` (5.17+, `_IOWR`, after kernel commit 47e33c05f9f07). The implementation should try the newer value first and fall back to the older one on `ENOTTY`. Returns nil if valid, `ENOENT` if stale.
 
 For all syscalls that use `SECCOMP_USER_NOTIF_FLAG_CONTINUE`:
 1. Read path from tracee memory.
@@ -110,6 +117,8 @@ In `FileHandler.Handle()`, before policy evaluation:
 3. Evaluate policy against the **target path**, not the procfs path.
 4. For AddFD emulation: open the target path (not the procfs path).
 
+**TOCTOU note:** A concurrent thread could close fd N and reopen a different file on that fd number between the supervisor's `readlink` and the policy evaluation. For AddFD-emulated opens, this is mitigated because the supervisor opens the resolved target path (not the procfs symlink). For CONTINUE-mode syscalls (e.g., `fstatat` on `/proc/self/fd/N`), this residual race exists but is bounded by the sandbox.
+
 **New helper** in `file_syscalls.go`:
 ```go
 func resolveProcFD(pid int, path string) (resolvedPath string, wasProcFD bool)
@@ -120,7 +129,9 @@ func resolveProcFD(pid int, path string) (resolvedPath string, wasProcFD bool)
 **File:** `internal/netmonitor/unix/handler.go`
 
 In `handleExecveNotification`, after `ExecveHandler.Handle()` returns `ActionContinue`:
-1. Call `fileHandler.Handle(FileRequest{Path: filename, Operation: "execute", ...})`.
+1. Call `fileHandler.Handle(FileRequest{Path: filename, Operation: "execute", PID: pid, SessionID: sessID, Syscall: SYS_EXECVE, ...})`.
+
+`SessionID` is threaded from the `sessID` parameter already passed to `ServeNotifyWithExecve`. This is forwarded to `handleExecveNotification` alongside the `fileHandler` parameter, ensuring the FUSE mount check in `FileHandler.Handle()` correctly identifies paths under FUSE enforcement.
 2. If file policy denies → respond with `-EACCES`.
 3. If file policy allows → proceed with CONTINUE.
 
@@ -209,13 +220,13 @@ sandbox:
 
 | Syscall class | Response strategy | TOCTOU | Rationale |
 |---|---|---|---|
-| openat/openat2 (no RESOLVE_*) | AddFD emulation | Eliminated | Supervisor opens file, injects fd atomically |
+| openat/openat2/open/creat (no RESOLVE_*) | AddFD emulation | Eliminated | Supervisor opens file, injects fd atomically |
 | openat2 with RESOLVE_* | CONTINUE + ID validation | Residual | Can't replicate resolve semantics from supervisor |
 | O_TMPFILE | CONTINUE + ID validation | Residual | Supervisor may hit wrong filesystem |
-| unlinkat, renameat2, mkdirat, etc. | CONTINUE + ID validation | Residual (low severity) | Non-fd syscalls; worst case = wrong file affected within sandbox |
+| unlinkat, renameat2, mkdirat, mknodat, etc. | CONTINUE + ID validation | Residual (low severity) | Non-fd syscalls; worst case = wrong file affected within sandbox |
 | statx, newfstatat, faccessat2, readlinkat | CONTINUE + ID validation | Residual (low severity) | Read-only metadata; information leak bounded by sandbox |
 | execve/execveat | CONTINUE | N/A | Kernel loads binary; no fd returned |
-| io_uring_setup/enter | ERRNO(EPERM) | N/A | Blocked at BPF level |
+| io_uring_setup/enter/register | ERRNO(EPERM) | N/A | Blocked at BPF level |
 
 ## Dependencies
 
