@@ -4,17 +4,18 @@ package capabilities
 
 // SecurityCapabilities holds detected security primitive availability.
 type SecurityCapabilities struct {
-	Seccomp         bool // seccomp-bpf + user-notify
-	SeccompBasic    bool // seccomp-bpf without user-notify
-	Landlock        bool // any Landlock support
-	LandlockABI     int  // 1-5, determines features
-	LandlockNetwork bool // ABI v4+, kernel 6.7+
-	EBPF            bool // network monitoring
-	FUSE            bool // filesystem interception
-	Capabilities    bool // can drop capabilities (always true)
-	PIDNamespace    bool // isolated PID namespace
-	Ptrace          bool // SYS_PTRACE capability available
-	PtraceEnabled   bool // ptrace enforcement enabled in config
+	Seccomp         bool   // seccomp-bpf + user-notify
+	SeccompBasic    bool   // seccomp-bpf without user-notify
+	Landlock        bool   // any Landlock support
+	LandlockABI     int    // 1-5, determines features
+	LandlockNetwork bool   // ABI v4+, kernel 6.7+
+	EBPF            bool   // network monitoring
+	FUSE            bool   // filesystem interception
+	Capabilities    bool   // can drop capabilities (always true)
+	PIDNamespace    bool   // isolated PID namespace
+	Ptrace          bool   // SYS_PTRACE capability available
+	PtraceEnabled   bool   // ptrace enforcement enabled in config
+	FileEnforcement string // "landlock", "fuse", "seccomp-notify", "none"
 }
 
 // SecurityMode represents the security enforcement mode.
