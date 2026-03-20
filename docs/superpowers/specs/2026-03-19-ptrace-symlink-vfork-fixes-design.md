@@ -38,6 +38,8 @@ if info.Op != 1 && info.Op != 3 {
 }
 ```
 
+Also update the `ptraceSyscallInfo` struct comment to document that both Op=1 (entry) and Op=3 (seccomp) share the same `nr + args[6]` layout in the union.
+
 #### 1.2 Always require exit stops for openat/openat2
 
 **File:** `internal/ptrace/tracer.go`
@@ -63,25 +65,24 @@ This ensures the tracer catches the exit stop so `handleOpenatExit` can verify t
 After a successful openat (retVal >= 0):
 
 1. Read the real path: `os.Readlink(fmt.Sprintf("/proc/%d/fd/%d", tid, fd))`
-2. If the path read fails, skip verification (the fd may have been closed already by another thread)
+2. If the path read fails (EBADF, ENOENT, or any error), deny the syscall — fail closed. Override the return value to `-EACCES` and inject `close(fd)`. Rationale: if we cannot verify the opened path, we cannot confirm it's allowed by policy.
 3. Evaluate policy against the real path using `t.cfg.FileHandler.HandleFile(ctx, FileContext{...})`
 4. If denied:
-   a. Inject `close(fd)` into the tracee using existing `injectSyscall` / register manipulation
-   b. Override the return value to `-EACCES` using `setRegs` to modify the return register
+   a. Inject `close(fd)` into the tracee to clean up the leaked fd
+   b. Override the return value to `-EACCES`
 
-The existing `handleOpenatExit` already reads `/proc/<tid>/fd/<fd>` for TracerPid masking. The verification piggybacks on this read.
+The existing `handleOpenatExit` already reads `/proc/<tid>/fd/<fd>` for TracerPid masking. The verification piggybacks on this read — do the Readlink once, use for both TracerPid masking and policy verification.
 
-**Implementation detail for fd cleanup:** The tracer needs to close the fd in the tracee's fd table before overriding the return. The simplest approach:
+**Implementation detail for fd cleanup:** Use the existing `cleanupInjectedFD` pattern (used for exec redirect cleanup at `tracer.go:915-920`). This function:
 
-1. Read current regs
-2. Save current regs
-3. Set syscall nr to `SYS_CLOSE`, arg0 to `fd`
-4. `PtraceSyscall` to execute the close
-5. Wait for exit stop
-6. Restore saved regs with return value set to `-EACCES`
-7. Resume
+1. Reads current regs and saves a clone
+2. Sets syscall nr to `SYS_CLOSE`, arg0 to `fd`
+3. Resumes with `PtraceSyscall` to execute the close
+4. Waits for exit stop (the close completes)
+5. Restores saved regs with return value overridden to `-EACCES`
+6. Resumes
 
-This pattern is already used by `cleanupInjectedFD` for exec redirect cleanup.
+**InSyscall state:** At exit-time, `state.InSyscall` is `false` (the entry/exit toggle already flipped it). The `cleanupInjectedFD` pattern handles this correctly — it injects from the exit state, which uses the entry-phase injection protocol (modify ORIG_RAX, one cycle to exit). Follow the exact same calling convention as the exec redirect cleanup path.
 
 **SessionID for policy evaluation:** The exit-time handler needs the session ID and TGID. These are already available via `t.tracees[tid]` (same as `handleOpenatExit` uses today).
 
@@ -183,7 +184,7 @@ if entering {
 
 ### Security analysis
 
-**What's allowed without policy check:** close, dup2/dup3, sigaction, sigprocmask, setsid, setpgid, chdir, _exit. These are:
+**What's allowed without policy check:** close, dup2/dup3, sigaction, sigprocmask, setsid, setpgid, _exit. These are:
 - fd management (close, dup2) — rearranging already-open fds
 - Signal management — no security implications
 - Process group management — no security implications
@@ -191,7 +192,18 @@ if entering {
 
 **What still gets full policy check:** execve/execveat — the actual security boundary where the child starts a new program. This is where path resolution, argument inspection, and policy evaluation matter.
 
-**Risk:** A malicious vfork child could call `openat()` between vfork and exec, which would be allowed without policy check. However, this is undefined behavior (POSIX only allows async-signal-safe functions after vfork), and the kernel may not support it reliably. Additionally, the exit-time verification from Gap 1 would catch any policy-violating opens.
+**openat between vfork and exec:** A vfork child calling `openat()` is undefined behavior per POSIX (only async-signal-safe functions allowed). However, the fast-path does allow it without entry-time policy evaluation. This is caught by the exit-time verification from Gap 1:
+
+- The fast-path sets `NeedExitStop = true` for openat (via `needsExitStop()` before the vfork check)
+- `allowSyscall()` checks `mustCatchExit()` → true → resumes with `PtraceSyscall`
+- The exit stop is caught → `handleSyscallExit` → `handleOpenatExit` → exit-time path verification runs
+- If the real path is denied by policy, the fd is closed and return overridden to -EACCES
+
+This means the Gap 1 exit-time verification acts as a safety net for any openat calls fast-pathed by Gap 2.
+
+**chdir between vfork and exec:** Python's subprocess module uses `fchdir()` (on a pre-opened fd) rather than `chdir()` for the `cwd` parameter. `fchdir` operates on an already-open fd and doesn't take a path argument, so it doesn't need path-based policy evaluation. A bare `chdir()` call between vfork and exec is both unusual and undefined behavior. It's allowed by the fast-path but has minimal security impact — it only affects the working directory for the subsequent exec, which gets full policy evaluation including path resolution relative to the new cwd.
+
+**Signal delivery during vfork:** Signals to the vfork child are constrained by the kernel (the child shares the parent's signal handlers and stack). This is not a new constraint introduced by the fast-path.
 
 ### Performance impact
 
@@ -223,3 +235,8 @@ Eliminates all policy evaluation overhead between vfork and exec. The ptrace sto
 - vfork child execve: verify full policy evaluation occurs
 - IsVforkChild lifecycle: verify flag set at vfork, cleared at exec
 - Non-vfork child: verify normal policy evaluation for all syscalls
+- vfork child openat to denied path: verify exit-time verification catches the violation (NeedExitStop is set, exit handler runs, fd closed, return overridden)
+
+### Cross-gap interaction tests
+- vfork child openat through symlink to denied path: verify the Gap 1 exit-time verification catches the bypass even though the Gap 2 fast-path skipped entry-time policy evaluation
+- Both prefilter and non-prefilter modes: verify fast-path works correctly with both `handleSeccompStop` and `handleSyscallStop` code paths
