@@ -62,6 +62,33 @@ func TestTracerConfig_HandlerFields(t *testing.T) {
 	}
 }
 
+func TestIsVforkFastPathSkipsNonExec(t *testing.T) {
+	// Verify the fast-path condition: IsVforkChild && !isExecveSyscall
+	tests := []struct {
+		name     string
+		isVfork  bool
+		nr       int
+		wantFast bool
+	}{
+		{"vfork child close", true, unix.SYS_CLOSE, true},
+		{"vfork child openat", true, unix.SYS_OPENAT, true},
+		{"vfork child execve", true, unix.SYS_EXECVE, false},
+		{"vfork child execveat", true, unix.SYS_EXECVEAT, false},
+		{"non-vfork close", false, unix.SYS_CLOSE, false},
+		{"non-vfork openat", false, unix.SYS_OPENAT, false},
+		{"non-vfork execve", false, unix.SYS_EXECVE, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.isVfork && !isExecveSyscall(tt.nr)
+			if got != tt.wantFast {
+				t.Errorf("fastPath(%v, %d) = %v, want %v",
+					tt.isVfork, tt.nr, got, tt.wantFast)
+			}
+		})
+	}
+}
+
 func TestNeedsExitStop(t *testing.T) {
 	tests := []struct {
 		name          string

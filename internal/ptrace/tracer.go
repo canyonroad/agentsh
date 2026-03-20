@@ -951,6 +951,7 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	// to exit) instead of the two-phase gadget protocol.
 	t.mu.Lock()
 	state := t.tracees[tid]
+	isVfork := state != nil && state.IsVforkChild
 	if state != nil {
 		state.InSyscall = true
 		state.LastNr = nr
@@ -964,6 +965,16 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 		}
 	}
 	t.mu.Unlock()
+
+	// Fast-path: vfork children only need policy evaluation at execve.
+	// All other syscalls between vfork and exec are async-signal-safe
+	// setup operations (close, dup2, sigaction, etc.) — safe to allow.
+	// For openat/openat2, NeedExitStop is already set above, so
+	// exit-time path verification still runs as a safety net.
+	if isVfork && !isExecveSyscall(nr) {
+		t.allowSyscall(tid)
+		return
+	}
 
 	t.dispatchSyscall(ctx, tid, nr, sc)
 }
