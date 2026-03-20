@@ -29,6 +29,11 @@ func TestIsFileSyscall(t *testing.T) {
 		unix.SYS_SYMLINKAT,
 		unix.SYS_FCHMODAT,
 		unix.SYS_FCHOWNAT,
+		unix.SYS_STATX,
+		unix.SYS_NEWFSTATAT,
+		439, // SYS_FACCESSAT2
+		unix.SYS_READLINKAT,
+		unix.SYS_MKNODAT,
 	}
 
 	for _, nr := range fileSyscalls {
@@ -83,6 +88,11 @@ func TestSyscallToOperation(t *testing.T) {
 		{"symlinkat", unix.SYS_SYMLINKAT, 0, "symlink"},
 		{"fchmodat", unix.SYS_FCHMODAT, 0, "chmod"},
 		{"fchownat", unix.SYS_FCHOWNAT, 0, "chown"},
+		{"statx", unix.SYS_STATX, 0, "stat"},
+		{"newfstatat", unix.SYS_NEWFSTATAT, 0, "stat"},
+		{"faccessat2", 439, 0, "access"},
+		{"readlinkat", unix.SYS_READLINKAT, 0, "readlink"},
+		{"mknodat", unix.SYS_MKNODAT, 0, "mknod"},
 
 		// Unknown syscall
 		{"unknown", unix.SYS_READ, 0, ""},
@@ -254,6 +264,43 @@ func TestExtractFileArgs_Fchownat(t *testing.T) {
 	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
 	assert.Equal(t, uint64(0x7fffD000), fa.PathPtr)
 	assert.Equal(t, uint32(unix.AT_SYMLINK_NOFOLLOW), fa.Flags)
+}
+
+func TestExtractFileArgs_Statx(t *testing.T) {
+	args := SyscallArgs{Nr: unix.SYS_STATX, Arg0: fdcwdUint64(), Arg1: 0x7fff2000, Arg2: 0}
+	fa := extractFileArgs(args)
+	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
+	assert.Equal(t, uint64(0x7fff2000), fa.PathPtr)
+}
+
+func TestExtractFileArgs_Newfstatat(t *testing.T) {
+	args := SyscallArgs{Nr: unix.SYS_NEWFSTATAT, Arg0: fdcwdUint64(), Arg1: 0x7fff3000, Arg3: uint64(unix.AT_SYMLINK_NOFOLLOW)}
+	fa := extractFileArgs(args)
+	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
+	assert.Equal(t, uint64(0x7fff3000), fa.PathPtr)
+	assert.Equal(t, uint32(unix.AT_SYMLINK_NOFOLLOW), fa.Flags)
+}
+
+func TestExtractFileArgs_Faccessat2(t *testing.T) {
+	args := SyscallArgs{Nr: 439, Arg0: fdcwdUint64(), Arg1: 0x7fff4000}
+	fa := extractFileArgs(args)
+	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
+	assert.Equal(t, uint64(0x7fff4000), fa.PathPtr)
+}
+
+func TestExtractFileArgs_Readlinkat(t *testing.T) {
+	args := SyscallArgs{Nr: unix.SYS_READLINKAT, Arg0: fdcwdUint64(), Arg1: 0x7fff5000}
+	fa := extractFileArgs(args)
+	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
+	assert.Equal(t, uint64(0x7fff5000), fa.PathPtr)
+}
+
+func TestExtractFileArgs_Mknodat(t *testing.T) {
+	args := SyscallArgs{Nr: unix.SYS_MKNODAT, Arg0: fdcwdUint64(), Arg1: 0x7fff6000, Arg2: 0o100644}
+	fa := extractFileArgs(args)
+	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
+	assert.Equal(t, uint64(0x7fff6000), fa.PathPtr)
+	assert.Equal(t, uint32(0o100644), fa.Mode)
 }
 
 func TestFileSyscallName(t *testing.T) {

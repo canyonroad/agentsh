@@ -17,7 +17,9 @@ func isFileSyscall(nr int32) bool {
 	case unix.SYS_OPENAT, unix.SYS_OPENAT2,
 		unix.SYS_UNLINKAT, unix.SYS_MKDIRAT,
 		unix.SYS_RENAMEAT2, unix.SYS_LINKAT, unix.SYS_SYMLINKAT,
-		unix.SYS_FCHMODAT, unix.SYS_FCHOWNAT:
+		unix.SYS_FCHMODAT, unix.SYS_FCHOWNAT,
+		unix.SYS_STATX, unix.SYS_NEWFSTATAT, 439, // faccessat2
+		unix.SYS_READLINKAT, unix.SYS_MKNODAT:
 		return true
 	default:
 		return isLegacyFileSyscall(nr)
@@ -125,6 +127,17 @@ func extractFileArgs(args SyscallArgs) FileArgs {
 			Flags:   uint32(args.Arg4),
 		}
 
+	case unix.SYS_STATX:
+		return FileArgs{Dirfd: int32(args.Arg0), PathPtr: args.Arg1, Flags: uint32(args.Arg2)}
+	case unix.SYS_NEWFSTATAT:
+		return FileArgs{Dirfd: int32(args.Arg0), PathPtr: args.Arg1, Flags: uint32(args.Arg3)}
+	case 439: // SYS_FACCESSAT2
+		return FileArgs{Dirfd: int32(args.Arg0), PathPtr: args.Arg1, Flags: uint32(args.Arg3)}
+	case unix.SYS_READLINKAT:
+		return FileArgs{Dirfd: int32(args.Arg0), PathPtr: args.Arg1}
+	case unix.SYS_MKNODAT:
+		return FileArgs{Dirfd: int32(args.Arg0), PathPtr: args.Arg1, Mode: uint32(args.Arg2)}
+
 	default:
 		return extractLegacyFileArgs(args)
 	}
@@ -184,6 +197,14 @@ func syscallToOperation(nr int32, flags uint32) string {
 		return "chmod"
 	case unix.SYS_FCHOWNAT:
 		return "chown"
+	case unix.SYS_STATX, unix.SYS_NEWFSTATAT:
+		return "stat"
+	case 439: // SYS_FACCESSAT2
+		return "access"
+	case unix.SYS_READLINKAT:
+		return "readlink"
+	case unix.SYS_MKNODAT:
+		return "mknod"
 	default:
 		return legacySyscallToOperation(nr, flags)
 	}
@@ -210,6 +231,16 @@ func fileSyscallName(nr int32) string {
 		return "fchmodat"
 	case unix.SYS_FCHOWNAT:
 		return "fchownat"
+	case unix.SYS_STATX:
+		return "statx"
+	case unix.SYS_NEWFSTATAT:
+		return "newfstatat"
+	case 439:
+		return "faccessat2"
+	case unix.SYS_READLINKAT:
+		return "readlinkat"
+	case unix.SYS_MKNODAT:
+		return "mknodat"
 	default:
 		return legacyFileSyscallName(nr)
 	}
