@@ -231,6 +231,11 @@ func (t *Tracer) handleFile(ctx context.Context, tid int, sc *SyscallContext) {
 	if state != nil {
 		tgid = state.TGID
 		sessionID = state.SessionID
+		// Stash flags/operation for exit-time verification (event-loop-only fields).
+		if nr == unix.SYS_OPENAT || nr == unix.SYS_OPENAT2 {
+			state.LastOpenFlags = flags
+			state.LastOpenOp = operation
+		}
 	}
 	t.mu.Unlock()
 

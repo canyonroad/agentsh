@@ -175,6 +175,8 @@ type TraceeState struct {
 	PendingWriteEscalation bool
 	IsVforkChild     bool
 	SuppressInitialStop bool // suppress initial SIGSTOP from auto-trace
+	LastOpenFlags    int    // flags from last openat/openat2 entry (event-loop-only)
+	LastOpenOp       string // operation from last openat/openat2 entry (event-loop-only)
 	PendingExecStubFD  int // fd injected for exec redirect; cleaned up on exec failure (-1 = none)
 	PendingExecSavedFD int // fd that was displaced by stub fd; restored on exec failure (-1 = none)
 	MemFD              int
@@ -900,8 +902,8 @@ func (t *Tracer) handleSyscallStop(ctx context.Context, tid int) {
 		state.LastNr = nr
 		state.NeedExitStop = t.needsExitStop(nr)
 
-		// Fast-path vfork children (same logic as handleSeccompStop).
-		if state.IsVforkChild && !isExecveSyscall(nr) {
+		// Fast-path vfork children for known safe setup syscalls.
+		if state.IsVforkChild && !isExecveSyscall(nr) && isVforkSafeSyscall(nr) {
 			t.allowSyscall(tid)
 			return
 		}
@@ -972,12 +974,12 @@ func (t *Tracer) handleSeccompStop(ctx context.Context, tid int) {
 	}
 	t.mu.Unlock()
 
-	// Fast-path: vfork children only need policy evaluation at execve.
-	// All other syscalls between vfork and exec are async-signal-safe
-	// setup operations (close, dup2, sigaction, etc.) — safe to allow.
-	// For openat/openat2, NeedExitStop is already set above, so
-	// exit-time path verification still runs as a safety net.
-	if isVfork && !isExecveSyscall(nr) {
+	// Fast-path: vfork children skip policy for known safe setup syscalls.
+	// Between vfork and exec, only async-signal-safe operations should occur.
+	// Safe syscalls (close, dup2, sigaction, etc.) are allowed immediately.
+	// Execve gets full policy evaluation. Anything else (file, network,
+	// signal) goes through normal dispatch for policy enforcement.
+	if isVfork && !isExecveSyscall(nr) && isVforkSafeSyscall(nr) {
 		t.allowSyscall(tid)
 		return
 	}
@@ -1038,21 +1040,27 @@ func (t *Tracer) handleOpenatExit(ctx context.Context, tid int, regs Regs) {
 	}
 	t.mu.Unlock()
 
-	// LastNr is event-loop-only — no mutex needed.
+	// Event-loop-only fields — no mutex needed.
 	nr := unix.SYS_OPENAT
+	openFlags := 0
+	openOp := "open"
 	if state != nil {
 		nr = state.LastNr
+		openFlags = state.LastOpenFlags
+		openOp = state.LastOpenOp
 	}
 
 	// Read the real path the kernel opened.
 	path, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%d", tid, fd))
 	if err != nil {
-		// Cannot verify — fail closed. Close the fd and deny.
-		slog.Warn("handleOpenatExit: cannot read fd path, denying",
-			"tid", tid, "fd", fd, "error", err)
-		savedRegs := regs.Clone()
-		t.cleanupInjectedFD(tid, savedRegs, fd, -1)
-		t.applyReturnOverride(tid, -int64(unix.EACCES))
+		// Cannot verify — fail closed only when file policy is active.
+		if t.cfg.FileHandler != nil && t.cfg.TraceFile {
+			slog.Warn("handleOpenatExit: cannot read fd path, denying",
+				"tid", tid, "fd", fd, "error", err)
+			savedRegs := regs.Clone()
+			t.cleanupInjectedFD(tid, savedRegs, fd, -1)
+			t.applyReturnOverride(tid, -int64(unix.EACCES))
+		}
 		return
 	}
 
@@ -1069,7 +1077,8 @@ func (t *Tracer) handleOpenatExit(ctx context.Context, tid int, regs Regs) {
 			SessionID: sessionID,
 			Syscall:   nr,
 			Path:      path,
-			Operation: "open",
+			Operation: openOp,
+			Flags:     openFlags,
 		})
 		action := result.Action
 		if action == "" {
@@ -1079,12 +1088,18 @@ func (t *Tracer) handleOpenatExit(ctx context.Context, tid int, regs Regs) {
 				action = "deny"
 			}
 		}
-		if action == "deny" {
+		// At exit time, only "allow" and "continue" are valid passes.
+		// Redirect/soft-delete cannot be enforced post-open — treat as deny.
+		if action != "allow" && action != "continue" {
+			errno := result.Errno
+			if errno == 0 {
+				errno = int32(unix.EACCES)
+			}
 			slog.Warn("handleOpenatExit: exit-time verification denied",
-				"tid", tid, "fd", fd, "path", path)
+				"tid", tid, "fd", fd, "path", path, "action", action)
 			savedRegs := regs.Clone()
 			t.cleanupInjectedFD(tid, savedRegs, fd, -1)
-			t.applyReturnOverride(tid, -int64(unix.EACCES))
+			t.applyReturnOverride(tid, -int64(errno))
 		}
 	}
 }

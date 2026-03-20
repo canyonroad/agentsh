@@ -104,6 +104,24 @@ func AllFileSyscalls() []int {
 	return nums
 }
 
+// isVforkSafeSyscall returns true for syscalls that are safe to allow without
+// policy evaluation in a vfork child. These are async-signal-safe operations
+// used by subprocess setup (close, dup2, sigaction, etc.). Anything not in
+// this allowlist goes through normal policy evaluation.
+func isVforkSafeSyscall(nr int) bool {
+	switch nr {
+	case unix.SYS_CLOSE,
+		unix.SYS_DUP2, unix.SYS_DUP3,
+		unix.SYS_FCNTL,
+		unix.SYS_RT_SIGACTION, unix.SYS_RT_SIGPROCMASK, unix.SYS_RT_SIGRETURN,
+		unix.SYS_SETSID, unix.SYS_SETPGID, unix.SYS_GETPID, unix.SYS_GETPPID,
+		unix.SYS_EXIT_GROUP, unix.SYS_EXIT,
+		unix.SYS_CLOSE_RANGE:
+		return true
+	}
+	return false
+}
+
 // AllNetworkSyscalls returns all network-related syscall numbers that the
 // tracer intercepts (connect, bind, sendto). Exported for use by
 // StaticAllowChecker implementations.

@@ -63,7 +63,7 @@ func TestTracerConfig_HandlerFields(t *testing.T) {
 }
 
 func TestIsVforkFastPathSkipsNonExec(t *testing.T) {
-	// Verify the fast-path condition: IsVforkChild && !isExecveSyscall
+	// Verify the fast-path condition: IsVforkChild && !isExecveSyscall && isVforkSafeSyscall
 	tests := []struct {
 		name     string
 		isVfork  bool
@@ -71,16 +71,20 @@ func TestIsVforkFastPathSkipsNonExec(t *testing.T) {
 		wantFast bool
 	}{
 		{"vfork child close", true, unix.SYS_CLOSE, true},
-		{"vfork child openat", true, unix.SYS_OPENAT, true},
-		{"vfork child execve", true, unix.SYS_EXECVE, false},
-		{"vfork child execveat", true, unix.SYS_EXECVEAT, false},
+		{"vfork child dup2", true, unix.SYS_DUP2, true},
+		{"vfork child dup3", true, unix.SYS_DUP3, true},
+		{"vfork child sigaction", true, unix.SYS_RT_SIGACTION, true},
+		{"vfork child exit_group", true, unix.SYS_EXIT_GROUP, true},
+		{"vfork child openat", true, unix.SYS_OPENAT, false},     // not in safe list
+		{"vfork child connect", true, unix.SYS_CONNECT, false},   // not in safe list
+		{"vfork child execve", true, unix.SYS_EXECVE, false},     // exec gets full eval
+		{"vfork child execveat", true, unix.SYS_EXECVEAT, false}, // exec gets full eval
 		{"non-vfork close", false, unix.SYS_CLOSE, false},
 		{"non-vfork openat", false, unix.SYS_OPENAT, false},
-		{"non-vfork execve", false, unix.SYS_EXECVE, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.isVfork && !isExecveSyscall(tt.nr)
+			got := tt.isVfork && !isExecveSyscall(tt.nr) && isVforkSafeSyscall(tt.nr)
 			if got != tt.wantFast {
 				t.Errorf("fastPath(%v, %d) = %v, want %v",
 					tt.isVfork, tt.nr, got, tt.wantFast)
