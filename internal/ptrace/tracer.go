@@ -1069,12 +1069,6 @@ func (t *Tracer) handleOpenatExit(ctx context.Context, tid int, regs Regs) {
 		return
 	}
 
-	// TracerPid masking: track fds opened on /proc/*/status.
-	if t.fds != nil && t.cfg.MaskTracerPid && isProcStatus(path) {
-		t.fds.trackStatusFd(tgid, fd)
-		t.escalateReadForTGID(tgid, tid)
-	}
-
 	// Exit-time path verification: only re-check when entry-time allowed.
 	// If entry denied, the syscall was already blocked. If entry redirected
 	// or soft-deleted, the kernel operated on the modified path — exit-time
@@ -1111,7 +1105,16 @@ func (t *Tracer) handleOpenatExit(ctx context.Context, tid int, regs Regs) {
 			savedRegs := regs.Clone()
 			t.cleanupInjectedFD(tid, savedRegs, fd, -1)
 			t.applyReturnOverride(tid, -int64(errno))
+			return // fd closed — skip TracerPid tracking
 		}
+	}
+
+	// TracerPid masking: track fds opened on /proc/*/status.
+	// Placed after exit-time verification to avoid stale entries if the
+	// fd is denied and closed above.
+	if t.fds != nil && t.cfg.MaskTracerPid && isProcStatus(path) {
+		t.fds.trackStatusFd(tgid, fd)
+		t.escalateReadForTGID(tgid, tid)
 	}
 }
 

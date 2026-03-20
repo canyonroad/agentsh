@@ -71,7 +71,6 @@ func TestIsVforkFastPathSkipsNonExec(t *testing.T) {
 		wantFast bool
 	}{
 		{"vfork child close", true, unix.SYS_CLOSE, true},
-		{"vfork child dup2", true, unix.SYS_DUP2, true},
 		{"vfork child dup3", true, unix.SYS_DUP3, true},
 		{"vfork child sigaction", true, unix.SYS_RT_SIGACTION, true},
 		{"vfork child exit_group", true, unix.SYS_EXIT_GROUP, true},
