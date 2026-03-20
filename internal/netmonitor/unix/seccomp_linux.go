@@ -256,11 +256,50 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 		}
 	}
 
+	// Metadata syscalls via user-notify (when intercept_metadata is enabled)
+	if cfg.InterceptMetadata {
+		trap := seccomp.ActNotify
+		metadataRules := []seccomp.ScmpSyscall{
+			seccomp.ScmpSyscall(unix.SYS_STATX),
+			seccomp.ScmpSyscall(unix.SYS_NEWFSTATAT),
+			seccomp.ScmpSyscall(unix.SYS_FACCESSAT2),
+			seccomp.ScmpSyscall(unix.SYS_READLINKAT),
+		}
+		for _, sc := range metadataRules {
+			if err := filt.AddRule(sc, trap); err != nil {
+				return nil, fmt.Errorf("add metadata rule %v: %w", sc, err)
+			}
+		}
+	}
+
+	// mknodat is always included with file monitoring (create-category)
+	if cfg.FileMonitorEnabled {
+		trap := seccomp.ActNotify
+		if err := filt.AddRule(seccomp.ScmpSyscall(unix.SYS_MKNODAT), trap); err != nil {
+			return nil, fmt.Errorf("add mknodat rule: %w", err)
+		}
+	}
+
 	// Blocked syscalls via kill
 	for _, nr := range cfg.BlockedSyscalls {
 		sc := seccomp.ScmpSyscall(nr)
 		if err := filt.AddRule(sc, seccomp.ActKillProcess); err != nil {
 			return nil, fmt.Errorf("add kill rule %v: %w", sc, err)
+		}
+	}
+
+	// Block io_uring to prevent seccomp bypass
+	if cfg.BlockIOUring {
+		ioUringBlock := seccomp.ActErrno.SetReturnCode(int16(1)) // EPERM = 1
+		ioUringSyscalls := []seccomp.ScmpSyscall{
+			seccomp.ScmpSyscall(425), // io_uring_setup
+			seccomp.ScmpSyscall(426), // io_uring_enter
+			seccomp.ScmpSyscall(427), // io_uring_register
+		}
+		for _, sc := range ioUringSyscalls {
+			if err := filt.AddRule(sc, ioUringBlock); err != nil {
+				return nil, fmt.Errorf("add io_uring block rule %v: %w", sc, err)
+			}
 		}
 	}
 
