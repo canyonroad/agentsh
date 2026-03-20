@@ -2,10 +2,25 @@
 
 package capabilities
 
+// detectFileEnforcementBackend returns the best available file enforcement backend.
+func detectFileEnforcementBackend(caps *SecurityCapabilities) string {
+	if caps.Landlock {
+		return "landlock"
+	}
+	if caps.FUSE {
+		return "fuse"
+	}
+	if caps.Seccomp {
+		return "seccomp-notify"
+	}
+	return "none"
+}
+
 // Detect runs platform-specific detection and returns unified result.
 func Detect() (*DetectResult, error) {
 	// Use existing detection
 	secCaps := DetectSecurityCapabilities()
+	secCaps.FileEnforcement = detectFileEnforcementBackend(secCaps)
 
 	caps := map[string]any{
 		"seccomp":             secCaps.Seccomp,
@@ -20,6 +35,7 @@ func Detect() (*DetectResult, error) {
 		"pid_namespace":       secCaps.PIDNamespace,
 		"capabilities_drop":   secCaps.Capabilities,
 		"ptrace":              secCaps.Ptrace,
+		"file_enforcement":    secCaps.FileEnforcement,
 	}
 
 	mode := secCaps.SelectMode()

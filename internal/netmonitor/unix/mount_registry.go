@@ -54,6 +54,13 @@ func (r *MountRegistry) Deregister(sessionID, mountPoint string) {
 	}
 }
 
+// HasAnyMounts returns true if any FUSE mounts are registered across all sessions.
+func (r *MountRegistry) HasAnyMounts() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.mounts) > 0
+}
+
 // IsUnderFUSEMount returns true if path is equal to or is a child of any
 // registered FUSE mount source path for the given session. The path separator
 // "/" is required after the mount prefix to avoid "/home/user/proj" matching
