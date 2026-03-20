@@ -1071,7 +1071,9 @@ func (t *Tracer) handleOpenatExit(ctx context.Context, tid int, regs Regs) {
 	}
 
 	// Exit-time path verification: evaluate policy against the real path.
-	if t.cfg.FileHandler != nil && t.cfg.TraceFile && sessionID != "" {
+	// No sessionID gate — consistent with entry-time handleFile which also
+	// calls HandleFile regardless of session state.
+	if t.cfg.FileHandler != nil && t.cfg.TraceFile {
 		result := t.cfg.FileHandler.HandleFile(ctx, FileContext{
 			PID:       tgid,
 			SessionID: sessionID,
