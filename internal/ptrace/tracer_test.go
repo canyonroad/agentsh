@@ -62,31 +62,70 @@ func TestTracerConfig_HandlerFields(t *testing.T) {
 	}
 }
 
+func TestIsVforkFastPathSkipsNonExec(t *testing.T) {
+	// Verify the fast-path condition: IsVforkChild && !isExecveSyscall && isVforkSafeSyscall
+	tests := []struct {
+		name     string
+		isVfork  bool
+		nr       int
+		wantFast bool
+	}{
+		{"vfork child close", true, unix.SYS_CLOSE, true},
+		{"vfork child dup3", true, unix.SYS_DUP3, true},
+		{"vfork child sigaction", true, unix.SYS_RT_SIGACTION, true},
+		{"vfork child exit_group", true, unix.SYS_EXIT_GROUP, true},
+		{"vfork child openat", true, unix.SYS_OPENAT, false},     // not in safe list
+		{"vfork child connect", true, unix.SYS_CONNECT, false},   // not in safe list
+		{"vfork child execve", true, unix.SYS_EXECVE, false},     // exec gets full eval
+		{"vfork child execveat", true, unix.SYS_EXECVEAT, false}, // exec gets full eval
+		{"non-vfork close", false, unix.SYS_CLOSE, false},
+		{"non-vfork openat", false, unix.SYS_OPENAT, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.isVfork && !isExecveSyscall(tt.nr) && isVforkSafeSyscall(tt.nr)
+			if got != tt.wantFast {
+				t.Errorf("fastPath(%v, %d) = %v, want %v",
+					tt.isVfork, tt.nr, got, tt.wantFast)
+			}
+		})
+	}
+}
+
 func TestNeedsExitStop(t *testing.T) {
+	// stubFileHandler is a minimal FileHandler for testing needsExitStop.
+	type stubFileHandler struct{ FileHandler }
+
 	tests := []struct {
 		name          string
 		nr            int
 		maskTracerPid bool
 		traceNetwork  bool
+		traceFile     bool
+		fileHandler   FileHandler
 		want          bool
 	}{
-		{"openat with mask on", unix.SYS_OPENAT, true, true, true},
-		{"openat with mask off", unix.SYS_OPENAT, false, true, false},
-		{"openat2 with mask off", unix.SYS_OPENAT2, false, true, false},
-		{"connect with network on", unix.SYS_CONNECT, false, true, true},
-		{"connect with network off", unix.SYS_CONNECT, false, false, false},
-		{"read always true", unix.SYS_READ, false, false, true},
-		{"pread64 always true", unix.SYS_PREAD64, false, false, true},
-		{"execve always true", unix.SYS_EXECVE, false, false, true},
-		{"execveat always true", unix.SYS_EXECVEAT, false, false, true},
-		{"unlinkat never needs exit", unix.SYS_UNLINKAT, true, true, false},
-		{"write never needs exit", unix.SYS_WRITE, true, true, false},
+		{"openat with mask on", unix.SYS_OPENAT, true, true, false, nil, true},
+		{"openat with file policy", unix.SYS_OPENAT, false, true, true, stubFileHandler{}, true},
+		{"openat with neither", unix.SYS_OPENAT, false, true, false, nil, false},
+		{"openat2 with neither", unix.SYS_OPENAT2, false, true, false, nil, false},
+		{"openat2 with mask on", unix.SYS_OPENAT2, true, false, false, nil, true},
+		{"connect with network on", unix.SYS_CONNECT, false, true, false, nil, true},
+		{"connect with network off", unix.SYS_CONNECT, false, false, false, nil, false},
+		{"read always true", unix.SYS_READ, false, false, false, nil, true},
+		{"pread64 always true", unix.SYS_PREAD64, false, false, false, nil, true},
+		{"execve always true", unix.SYS_EXECVE, false, false, false, nil, true},
+		{"execveat always true", unix.SYS_EXECVEAT, false, false, false, nil, true},
+		{"unlinkat never needs exit", unix.SYS_UNLINKAT, true, true, true, stubFileHandler{}, false},
+		{"write never needs exit", unix.SYS_WRITE, true, true, true, stubFileHandler{}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tr := &Tracer{cfg: TracerConfig{
 				MaskTracerPid: tt.maskTracerPid,
 				TraceNetwork:  tt.traceNetwork,
+				TraceFile:     tt.traceFile,
+				FileHandler:   tt.fileHandler,
 			}}
 			if got := tr.needsExitStop(tt.nr); got != tt.want {
 				t.Errorf("needsExitStop(%d) = %v, want %v", tt.nr, got, tt.want)

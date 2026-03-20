@@ -231,6 +231,11 @@ func (t *Tracer) handleFile(ctx context.Context, tid int, sc *SyscallContext) {
 	if state != nil {
 		tgid = state.TGID
 		sessionID = state.SessionID
+		// Stash flags/operation for exit-time verification (event-loop-only fields).
+		if nr == unix.SYS_OPENAT || nr == unix.SYS_OPENAT2 {
+			state.LastOpenFlags = flags
+			state.LastOpenOp = operation
+		}
 	}
 	t.mu.Unlock()
 
@@ -254,6 +259,17 @@ func (t *Tracer) handleFile(ctx context.Context, tid int, sc *SyscallContext) {
 			action = "allow"
 		} else {
 			action = "deny"
+		}
+	}
+
+	// Stash entry-time action for exit-time verification (event-loop-only).
+	// Exit-time verification only re-checks when entry allowed, since
+	// redirect/soft-delete modify the syscall and the exit path reflects
+	// the modified operation, not a symlink bypass.
+	if nr == unix.SYS_OPENAT || nr == unix.SYS_OPENAT2 {
+		// state was read above under mutex; LastFileAction is event-loop-only.
+		if state != nil {
+			state.LastFileAction = action
 		}
 	}
 
