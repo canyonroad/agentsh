@@ -171,10 +171,12 @@ func InstallOrWarn() (*Filter, error) {
 
 // FilterConfig configures the seccomp filter to install.
 type FilterConfig struct {
-	UnixSocketEnabled bool
-	ExecveEnabled     bool
+	UnixSocketEnabled  bool
+	ExecveEnabled      bool
 	FileMonitorEnabled bool
-	BlockedSyscalls   []int // syscall numbers to block with KILL
+	InterceptMetadata  bool  // statx, newfstatat, faccessat2, readlinkat
+	BlockIOUring       bool  // io_uring_setup/enter/register → EPERM
+	BlockedSyscalls    []int // syscall numbers to block with KILL
 }
 
 // DefaultFilterConfig returns config for unix socket monitoring only.

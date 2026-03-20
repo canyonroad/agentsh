@@ -16,8 +16,11 @@ type WrapperConfig struct {
 	FileMonitorEnabled  bool     `json:"file_monitor_enabled"`
 	BlockedSyscalls     []string `json:"blocked_syscalls"`
 
+	InterceptMetadata bool `json:"intercept_metadata,omitempty"`
+	BlockIOUring      bool `json:"block_io_uring,omitempty"`
+
 	// Landlock filesystem restrictions
-	LandlockEnabled bool     `json:"landlock_enabled,omitempty"`
+	LandlockEnabled bool `json:"landlock_enabled,omitempty"`
 	LandlockABI     int      `json:"landlock_abi,omitempty"`
 	Workspace       string   `json:"workspace,omitempty"`
 	AllowExecute    []string `json:"allow_execute,omitempty"`

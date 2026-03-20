@@ -55,6 +55,10 @@ type seccompWrapperConfig struct {
 	FileMonitorEnabled  bool     `json:"file_monitor_enabled"`
 	BlockedSyscalls     []string `json:"blocked_syscalls"`
 
+	// File monitor sub-options
+	InterceptMetadata bool `json:"intercept_metadata,omitempty"`
+	BlockIOUring      bool `json:"block_io_uring,omitempty"`
+
 	// Landlock filesystem restrictions
 	LandlockEnabled bool     `json:"landlock_enabled,omitempty"`
 	LandlockABI     int      `json:"landlock_abi,omitempty"`
@@ -175,6 +179,11 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		ExecveEnabled:       execveEnabled,
 		FileMonitorEnabled:  a.cfg.Sandbox.Seccomp.FileMonitor.Enabled,
 	}
+
+	// Bridge file monitor sub-options using EnforceWithoutFUSE as the default
+	fmDefault := a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE
+	seccompCfg.InterceptMetadata = config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata, fmDefault)
+	seccompCfg.BlockIOUring = config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.BlockIOUring, fmDefault)
 
 	// Add Landlock config if enabled
 	if a.cfg.Landlock.Enabled {

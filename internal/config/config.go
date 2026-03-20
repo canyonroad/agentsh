@@ -496,8 +496,8 @@ type SandboxSeccompFileMonitorConfig struct {
 	BlockIOUring       *bool `yaml:"block_io_uring"`
 }
 
-// fileMonitorBoolWithDefault returns the value of a *bool field, or defaultVal if nil.
-func fileMonitorBoolWithDefault(v *bool, defaultVal bool) bool {
+// FileMonitorBoolWithDefault returns the value of a *bool field, or defaultVal if nil.
+func FileMonitorBoolWithDefault(v *bool, defaultVal bool) bool {
 	if v != nil {
 		return *v
 	}
