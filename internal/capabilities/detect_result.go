@@ -13,12 +13,13 @@ import (
 
 // DetectResult is the unified cross-platform detection result.
 type DetectResult struct {
-	Platform        string         `json:"platform" yaml:"platform"`
-	SecurityMode    string         `json:"security_mode" yaml:"security_mode"`
-	ProtectionScore int            `json:"protection_score" yaml:"protection_score"`
-	Capabilities    map[string]any `json:"capabilities" yaml:"capabilities"`
-	Summary         DetectSummary  `json:"summary" yaml:"summary"`
-	Tips            []Tip          `json:"tips" yaml:"tips"`
+	Platform        string             `json:"platform" yaml:"platform"`
+	SecurityMode    string             `json:"security_mode" yaml:"security_mode"`
+	ProtectionScore int                `json:"protection_score" yaml:"protection_score"`
+	Domains         []ProtectionDomain `json:"domains" yaml:"domains"`
+	Capabilities    map[string]any     `json:"capabilities" yaml:"capabilities"`
+	Summary         DetectSummary      `json:"summary" yaml:"summary"`
+	Tips            []Tip              `json:"tips" yaml:"tips"`
 }
 
 // DetectSummary provides a quick overview of available/unavailable features.
@@ -33,6 +34,61 @@ type Tip struct {
 	Status  string `json:"status" yaml:"status"`
 	Impact  string `json:"impact" yaml:"impact"`
 	Action  string `json:"action" yaml:"action"`
+}
+
+// ProbeResult holds the result of a capability probe.
+type ProbeResult struct {
+	Available bool   `json:"available" yaml:"available"`
+	Detail    string `json:"detail" yaml:"detail"`
+}
+
+// ProtectionDomain groups related security backends by what they protect.
+type ProtectionDomain struct {
+	Name     string            `json:"name" yaml:"name"`
+	Weight   int               `json:"weight" yaml:"weight"`
+	Score    int               `json:"score" yaml:"score"`
+	Backends []DetectedBackend `json:"backends" yaml:"backends"`
+	Active   string            `json:"active" yaml:"active"`
+}
+
+// DetectedBackend represents a single security mechanism within a domain.
+type DetectedBackend struct {
+	Name        string `json:"name" yaml:"name"`
+	Available   bool   `json:"available" yaml:"available"`
+	Detail      string `json:"detail" yaml:"detail"`
+	Description string `json:"description" yaml:"description"`
+	CheckMethod string `json:"check_method" yaml:"check_method"`
+}
+
+// Domain weight constants.
+const (
+	WeightFileProtection = 25
+	WeightCommandControl = 25
+	WeightNetwork        = 20
+	WeightResourceLimits = 15
+	WeightIsolation      = 15
+)
+
+// ComputeScore calculates the protection score from domain availability.
+// Each domain scores its full weight if ANY backend is available, 0 otherwise.
+func ComputeScore(domains []ProtectionDomain) int {
+	score := 0
+	for i := range domains {
+		hasAny := false
+		for _, b := range domains[i].Backends {
+			if b.Available {
+				hasAny = true
+				break
+			}
+		}
+		if hasAny {
+			domains[i].Score = domains[i].Weight
+		} else {
+			domains[i].Score = 0
+		}
+		score += domains[i].Score
+	}
+	return score
 }
 
 // JSON returns the detection result as JSON bytes.
