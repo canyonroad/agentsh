@@ -489,8 +489,19 @@ type SandboxSeccompSyscallConfig struct {
 
 // SandboxSeccompFileMonitorConfig configures file I/O interception via seccomp.
 type SandboxSeccompFileMonitorConfig struct {
-	Enabled            bool `yaml:"enabled"`
-	EnforceWithoutFUSE bool `yaml:"enforce_without_fuse"`
+	Enabled            bool  `yaml:"enabled"`
+	EnforceWithoutFUSE bool  `yaml:"enforce_without_fuse"`
+	InterceptMetadata  *bool `yaml:"intercept_metadata"`
+	OpenatEmulation    *bool `yaml:"openat_emulation"`
+	BlockIOUring       *bool `yaml:"block_io_uring"`
+}
+
+// FileMonitorBoolWithDefault returns the value of a *bool field, or defaultVal if nil.
+func FileMonitorBoolWithDefault(v *bool, defaultVal bool) bool {
+	if v != nil {
+		return *v
+	}
+	return defaultVal
 }
 
 // SandboxXPCConfig configures macOS XPC/Mach IPC control.

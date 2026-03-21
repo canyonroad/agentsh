@@ -4,6 +4,12 @@ package unix
 
 import "golang.org/x/sys/unix"
 
+// isLegacyOpenSyscallNr returns true if nr is a legacy open-family syscall
+// (SYS_OPEN, SYS_CREAT) that returns a file descriptor. Only present on x86_64.
+func isLegacyOpenSyscallNr(nr int32) bool {
+	return nr == unix.SYS_OPEN || nr == unix.SYS_CREAT
+}
+
 // legacyFileSyscallList returns the non-at legacy file syscalls present on x86_64.
 // On x86_64, glibc wrappers for mkdir(), rmdir(), etc. issue these directly
 // rather than the -at variants.

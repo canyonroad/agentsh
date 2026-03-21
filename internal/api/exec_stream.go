@@ -462,7 +462,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		// Start unix socket notify handler if configured (Linux only).
 		// The handler receives the notify fd from the wrapper and runs until ctx is cancelled.
 		if extra != nil && extra.notifyParentSock != nil {
-			startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker, extra.execveHandler, extra.fileMonitorCfg)
+			startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker, extra.execveHandler, extra.fileMonitorCfg, extra.landlockEnabled)
 		}
 
 		// Start signal filter handler if configured (Linux only).

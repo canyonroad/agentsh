@@ -9,6 +9,9 @@ func legacyFileSyscallList() []int32 { return nil }
 // isLegacyFileSyscall returns false on non-amd64 architectures.
 func isLegacyFileSyscall(nr int32) bool { return false }
 
+// isLegacyOpenSyscallNr returns false on non-amd64 architectures.
+func isLegacyOpenSyscallNr(nr int32) bool { return false }
+
 // extractLegacyFileArgs returns empty FileArgs on non-amd64 architectures.
 func extractLegacyFileArgs(args SyscallArgs) FileArgs { return FileArgs{} }
 

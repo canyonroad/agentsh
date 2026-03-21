@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -191,7 +192,11 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		// Route file syscalls to file handler
 		if isFileSyscall(syscallNr) && fileHandler != nil {
 			slog.Debug("ServeNotifyWithExecve: routing to file handler", "session_id", sessID, "pid", req.Pid, "syscall", syscallNr)
-			handleFileNotification(ctx, scmpFD, req, fileHandler, sessID)
+			if fileHandler.EmulateOpen() {
+				handleFileNotificationEmulated(ctx, scmpFD, req, fileHandler, sessID)
+			} else {
+				handleFileNotification(ctx, scmpFD, req, fileHandler, sessID)
+			}
 			continue
 		}
 
@@ -426,6 +431,263 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		resp.Flags = seccomp.NotifRespFlagContinue
 	}
 	_ = seccomp.NotifRespond(fd, &resp)
+}
+
+// handleFileNotificationEmulated processes a file syscall notification using
+// AddFD emulation for open-family syscalls. For openat/openat2 (not O_TMPFILE,
+// not RESOLVE_*), the supervisor opens the file via /proc/<pid>/root/<path>
+// and injects the fd via SECCOMP_ADDFD_FLAG_SEND. For non-open syscalls and
+// fallback cases, it uses CONTINUE with two-check NotifIDValid bracketing
+// (spec section 4, steps 2 and 4).
+func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *FileHandler, sessID string) {
+	args := SyscallArgs{
+		Nr:   int32(req.Data.Syscall),
+		Arg0: req.Data.Args[0], Arg1: req.Data.Args[1], Arg2: req.Data.Args[2],
+		Arg3: req.Data.Args[3], Arg4: req.Data.Args[4], Arg5: req.Data.Args[5],
+	}
+
+	pid := int(req.Pid)
+	notifFD := int(fd)
+	fileArgs := extractFileArgs(args)
+
+	// For openat2, read flags from open_how for policy evaluation.
+	// openat2 is never emulated (shouldFallbackToContinue always returns true
+	// for SYS_OPENAT2), so we don't validate emulation-specific constraints.
+	// Invalid arguments (how_ptr=0, how_size<24) → let kernel handle via CONTINUE.
+	var resolveFlags uint64
+	if args.Nr == unix.SYS_OPENAT2 {
+		if fileArgs.HowPtr == 0 || args.Arg3 < 24 {
+			// Invalid openat2 args — let kernel return the appropriate error.
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
+		if err != nil {
+			slog.Debug("emulated file handler: failed to read open_how, CONTINUE", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		fileArgs.Flags = uint32(howFlags)
+		fileArgs.Mode = uint32(howMode)
+	}
+
+	// Determine early if this will be a CONTINUE-path syscall (non-open,
+	// fallback, or unsupported flags). Used to decide error handling below.
+	forceContinue := !isOpenSyscall(args.Nr) || shouldFallbackToContinue(args.Nr, fileArgs.Flags, resolveFlags)
+
+	// Resolve primary path.
+	// In emulation mode (non-CONTINUE): fail-secure (deny on error).
+	// In CONTINUE mode: fail-open (let kernel handle it) — the kernel will
+	// validate the path itself.
+	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
+	if err != nil {
+		if forceContinue {
+			slog.Debug("emulated file handler: failed to resolve path in CONTINUE mode, allowing", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		slog.Debug("emulated file handler: failed to resolve path, denying", "pid", pid, "error", err)
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
+		_ = seccomp.NotifRespond(fd, &resp)
+		return
+	}
+
+	// Resolve second path for rename/link.
+	var path2 string
+	if fileArgs.HasSecondPath {
+		p2, err := resolvePathAt(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+		if err != nil {
+			if forceContinue {
+				slog.Debug("emulated file handler: failed to resolve second path in CONTINUE mode, allowing", "pid", pid, "error", err)
+				resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+				_ = seccomp.NotifRespond(fd, &resp)
+				return
+			}
+			slog.Debug("emulated file handler: failed to resolve second path, denying", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		path2 = p2
+	}
+
+	operation := syscallToOperation(args.Nr, fileArgs.Flags)
+
+	// Resolve /proc/self/fd/N, /proc/<pid>/fd/N, /dev/fd/N aliases before
+	// both policy evaluation AND emulation. Without this, emulateOpenat would
+	// open /proc/<pid>/root/proc/self/fd/N in the supervisor's context.
+	if resolved, wasProcFD := resolveProcFD(pid, path); wasProcFD {
+		path = resolved
+	}
+	if path2 != "" {
+		if resolved, wasProcFD := resolveProcFD(pid, path2); wasProcFD {
+			path2 = resolved
+		}
+	}
+
+	frequest := FileRequest{
+		PID: pid, Syscall: args.Nr, Path: path, Path2: path2,
+		Operation: operation, Flags: fileArgs.Flags, Mode: fileArgs.Mode, SessionID: sessID,
+	}
+
+	// For non-emulated syscalls (CONTINUE path), do first ID validation
+	// before policy evaluation (spec section 4, step 2).
+	if forceContinue {
+		if err := NotifIDValid(notifFD, req.ID); err != nil {
+			if err == unix.ENOENT {
+				slog.Debug("emulated file handler: notification stale before policy check", "pid", pid)
+				return // notification cancelled, no response needed
+			}
+			// Non-ENOENT error — send CONTINUE to avoid leaving the syscall hanging.
+			slog.Warn("emulated file handler: NotifIDValid error, allowing", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+	}
+
+	result := h.Handle(frequest)
+
+	// Branch: is this an open syscall that we should emulate via AddFD?
+	if !forceContinue {
+		if result.Action == ActionDeny {
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -result.Errno}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		// Verify notification is still live before side-effecting supervisor open.
+		// A stale notification means the tracee exited — don't create/truncate files.
+		if err := NotifIDValid(notifFD, req.ID); err != nil {
+			if err == unix.ENOENT {
+				slog.Debug("emulated file handler: notification stale before emulation", "pid", pid)
+				return
+			}
+			slog.Warn("emulated file handler: NotifIDValid error before emulation, allowing via CONTINUE", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		emulateOpenat(fd, req, pid, path, fileArgs.Flags, fileArgs.Mode)
+		return
+	}
+
+	// CONTINUE path with ID validation bracketing.
+	if result.Action == ActionDeny {
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -result.Errno}
+		_ = seccomp.NotifRespond(fd, &resp)
+		return
+	}
+
+	// Second ID validation check after policy evaluation (spec section 4, step 4).
+	if err := NotifIDValid(notifFD, req.ID); err != nil {
+		if err == unix.ENOENT {
+			slog.Debug("emulated file handler: notification stale after policy check", "pid", pid)
+			return // notification cancelled, no response needed
+		}
+		// Non-ENOENT error — send CONTINUE to avoid leaving the syscall hanging.
+		slog.Warn("emulated file handler: NotifIDValid error after policy, allowing", "pid", pid, "error", err)
+	}
+	resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+	_ = seccomp.NotifRespond(fd, &resp)
+}
+
+// emulateOpenat opens a file on behalf of the tracee via /proc/<pid>/root/<path>,
+// then injects the resulting fd into the tracee using SECCOMP_ADDFD_FLAG_SEND.
+// This atomically installs the fd and completes the notification, eliminating
+// TOCTOU races between the policy check and the actual open.
+func emulateOpenat(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, pid int, path string, flags uint32, mode uint32) {
+	procPath := fmt.Sprintf("/proc/%d/root%s", pid, path)
+
+	openFlags := int(flags) & int(emulableFlagMask)
+
+	// When O_CREAT is set, apply the tracee's umask to the mode so that
+	// supervisor-created files have the same permissions the kernel would
+	// produce. The umask is read from /proc/<pid>/status (Umask field).
+	effectiveMode := mode
+	if openFlags&unix.O_CREAT != 0 {
+		umask, err := readTraceeUmask(pid)
+		if err != nil {
+			// Can't read umask — fall back to CONTINUE to avoid creating
+			// files with potentially over-permissive modes.
+			slog.Debug("emulateOpenat: cannot read umask, falling back to CONTINUE", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		effectiveMode = mode &^ umask
+	}
+
+	supervisorFD, err := unix.Open(procPath, openFlags, effectiveMode)
+	if err != nil {
+		errno, ok := err.(unix.Errno)
+		if !ok {
+			errno = unix.EIO
+		}
+		slog.Debug("emulateOpenat: supervisor open failed", "pid", pid, "path", path, "error", err)
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(errno)}
+		_ = seccomp.NotifRespond(fd, &resp)
+		return
+	}
+
+	// Propagate O_CLOEXEC to the injected fd in the tracee — without this,
+	// the fd could leak across exec boundaries.
+	var addfdFlags uint32 = SECCOMP_ADDFD_FLAG_SEND
+	var newfdFlags uint32
+	if flags&unix.O_CLOEXEC != 0 {
+		newfdFlags = unix.O_CLOEXEC
+	}
+
+	addReq := seccompNotifAddFD{
+		id:         req.ID,
+		flags:      addfdFlags,
+		srcfd:      uint32(supervisorFD),
+		newfd:      0,
+		newfdFlags: newfdFlags,
+	}
+	_, _, addErrno := unix.Syscall(
+		unix.SYS_IOCTL,
+		uintptr(fd),
+		uintptr(ioctlNotifAddFD),
+		uintptr(unsafe.Pointer(&addReq)),
+	)
+	_ = unix.Close(supervisorFD)
+	if addErrno != 0 {
+		slog.Error("emulateOpenat: AddFD failed", "pid", pid, "path", path, "error", addErrno)
+		// ENOENT = notification stale (process exited) — no response needed.
+		if addErrno == unix.ENOENT {
+			return
+		}
+		// Propagate actual errno (e.g., EMFILE) to the tracee.
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(addErrno)}
+		_ = seccomp.NotifRespond(fd, &resp)
+		return
+	}
+}
+
+// readTraceeUmask reads the umask of a tracee process from /proc/<pid>/status.
+// Returns the umask as a uint32 bitmask, or an error if it cannot be read.
+func readTraceeUmask(pid int) (uint32, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "Umask:") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				return 0, fmt.Errorf("malformed Umask line")
+			}
+			val, err := strconv.ParseUint(strings.TrimSpace(fields[1]), 8, 32)
+			if err != nil {
+				return 0, err
+			}
+			return uint32(val), nil
+		}
+	}
+	return 0, fmt.Errorf("Umask not found in /proc/%d/status", pid)
 }
 
 // getParentPID reads the parent PID from /proc/<pid>/stat.

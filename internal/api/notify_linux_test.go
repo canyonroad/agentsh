@@ -32,7 +32,7 @@ func TestStartNotifyHandler_GracefulErrorExit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	startNotifyHandler(ctx, parentSock, "test-graceful", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{})
+	startNotifyHandler(ctx, parentSock, "test-graceful", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{}, false)
 
 	// Poll until the goroutine exits (parentSock gets closed by the deferred Close).
 	deadline := time.After(2 * time.Second)

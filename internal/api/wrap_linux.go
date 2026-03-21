@@ -106,7 +106,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 	}
 
 	// Create file handler if configured
-	fileHandler := createFileHandler(a.cfg.Sandbox.Seccomp.FileMonitor, a.policy, emitter)
+	fileHandler := createFileHandler(a.cfg.Sandbox.Seccomp.FileMonitor, a.policy, emitter, a.cfg.Landlock.Enabled)
 
 	go func() {
 		defer notifyFD.Close()

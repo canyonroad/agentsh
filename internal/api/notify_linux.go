@@ -177,7 +177,7 @@ func notifyHandlerRecover(sessID string, store eventStore, broker eventBroker) {
 // starts the ServeNotify handler in a goroutine. It returns immediately.
 // The handler runs until ctx is cancelled or the fd is closed.
 // If execveHandler is non-nil, uses ServeNotifyWithExecve for execve interception.
-func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string, pol *policy.Engine, store eventStore, broker eventBroker, execveHandler any, fileMonitorCfg config.SandboxSeccompFileMonitorConfig) {
+func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string, pol *policy.Engine, store eventStore, broker eventBroker, execveHandler any, fileMonitorCfg config.SandboxSeccompFileMonitorConfig, landlockEnabled bool) {
 	if parentSock == nil {
 		return
 	}
@@ -226,7 +226,7 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 		emitter := &notifyEmitterAdapter{store: store, broker: broker}
 
 		// Create file handler if configured
-		fileHandler := createFileHandler(fileMonitorCfg, pol, emitter)
+		fileHandler := createFileHandler(fileMonitorCfg, pol, emitter, landlockEnabled)
 
 		// Type-assert and set emitter on execve handler if configured
 		var h *unixmon.ExecveHandler

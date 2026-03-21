@@ -4,6 +4,8 @@ package unix
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -42,6 +44,13 @@ type seccompNotifAddFD struct {
 // Computed as _IOW('!', 3, struct seccomp_notif_addfd) = 0x40182103.
 const ioctlNotifAddFD = 0x40182103
 
+// ioctlNotifIDValid ioctl numbers for SECCOMP_IOCTL_NOTIF_ID_VALID.
+// The kernel changed from _IOW to _IOWR in 5.17 (commit 47e33c05f9f07).
+const (
+	ioctlNotifIDValidNew = 0xC0082102 // _IOWR('!', 2, __u64) — kernel 5.17+
+	ioctlNotifIDValidOld = 0x40082102 // _IOW('!', 2, __u64) — pre-5.17
+)
+
 // NotifAddFD injects srcFD from the supervisor process into the trapped
 // process's fd table via the seccomp notify fd.
 //
@@ -70,7 +79,7 @@ func NotifAddFD(notifFD int, notifID uint64, srcFD int, targetFD int, flags uint
 		flags:      flags,
 		srcfd:      uint32(srcFD),
 		newfd:      newfd,
-		newfdFlags: 0, // fd must survive execve for stub communication
+		newfdFlags: 0, // default: no flags on injected fd
 	}
 
 	r1, _, errno := unix.Syscall(
@@ -83,4 +92,73 @@ func NotifAddFD(notifFD int, notifID uint64, srcFD int, targetFD int, flags uint
 		return -1, fmt.Errorf("SECCOMP_IOCTL_NOTIF_ADDFD: %w", errno)
 	}
 	return int(r1), nil
+}
+
+// ProbeAddFDSupport checks if the kernel supports SECCOMP_IOCTL_NOTIF_ADDFD
+// with SECCOMP_ADDFD_FLAG_SEND (atomic AddFD + respond). This requires
+// Linux 5.14+. Checks kernel version via uname rather than probing the ioctl
+// (ioctl probes with invalid fds are unreliable — EBADF may occur before
+// ioctl command dispatch).
+func ProbeAddFDSupport() bool {
+	var utsname unix.Utsname
+	if err := unix.Uname(&utsname); err != nil {
+		return false
+	}
+	release := unix.ByteSliceToString(utsname.Release[:])
+	major, minor := parseKernelVersion(release)
+	return major > 5 || (major == 5 && minor >= 14)
+}
+
+// parseKernelVersion extracts major.minor from a kernel release string like "5.14.0-1-amd64".
+func parseKernelVersion(release string) (int, int) {
+	// Find first dot
+	dot1 := strings.IndexByte(release, '.')
+	if dot1 < 0 {
+		return 0, 0
+	}
+	major, err := strconv.Atoi(release[:dot1])
+	if err != nil {
+		return 0, 0
+	}
+	rest := release[dot1+1:]
+	// Find second dot or end of numeric portion
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return major, 0
+	}
+	minor, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return major, 0
+	}
+	return major, minor
+}
+
+// NotifIDValid checks whether a seccomp notification ID is still valid
+// (the target process/thread hasn't exited or been killed since the
+// notification was received). Returns nil if valid, ENOENT if stale.
+//
+// Tries the 5.17+ ioctl first, falls back to pre-5.17 on ENOTTY.
+func NotifIDValid(notifFD int, notifID uint64) error {
+	id := notifID
+	_, _, errno := unix.Syscall(
+		unix.SYS_IOCTL,
+		uintptr(notifFD),
+		uintptr(ioctlNotifIDValidNew),
+		uintptr(unsafe.Pointer(&id)),
+	)
+	if errno == unix.ENOTTY {
+		_, _, errno = unix.Syscall(
+			unix.SYS_IOCTL,
+			uintptr(notifFD),
+			uintptr(ioctlNotifIDValidOld),
+			uintptr(unsafe.Pointer(&id)),
+		)
+	}
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }

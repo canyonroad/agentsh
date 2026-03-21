@@ -3,6 +3,7 @@
 package unix
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,6 +30,11 @@ func TestIsFileSyscall(t *testing.T) {
 		unix.SYS_SYMLINKAT,
 		unix.SYS_FCHMODAT,
 		unix.SYS_FCHOWNAT,
+		unix.SYS_STATX,
+		unix.SYS_NEWFSTATAT,
+		unix.SYS_FACCESSAT2,
+		unix.SYS_READLINKAT,
+		unix.SYS_MKNODAT,
 	}
 
 	for _, nr := range fileSyscalls {
@@ -83,6 +89,11 @@ func TestSyscallToOperation(t *testing.T) {
 		{"symlinkat", unix.SYS_SYMLINKAT, 0, "symlink"},
 		{"fchmodat", unix.SYS_FCHMODAT, 0, "chmod"},
 		{"fchownat", unix.SYS_FCHOWNAT, 0, "chown"},
+		{"statx", unix.SYS_STATX, 0, "stat"},
+		{"newfstatat", unix.SYS_NEWFSTATAT, 0, "stat"},
+		{"faccessat2", unix.SYS_FACCESSAT2, 0, "access"},
+		{"readlinkat", unix.SYS_READLINKAT, 0, "readlink"},
+		{"mknodat", unix.SYS_MKNODAT, 0, "mknod"},
 
 		// Unknown syscall
 		{"unknown", unix.SYS_READ, 0, ""},
@@ -256,6 +267,43 @@ func TestExtractFileArgs_Fchownat(t *testing.T) {
 	assert.Equal(t, uint32(unix.AT_SYMLINK_NOFOLLOW), fa.Flags)
 }
 
+func TestExtractFileArgs_Statx(t *testing.T) {
+	args := SyscallArgs{Nr: unix.SYS_STATX, Arg0: fdcwdUint64(), Arg1: 0x7fff2000, Arg2: 0}
+	fa := extractFileArgs(args)
+	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
+	assert.Equal(t, uint64(0x7fff2000), fa.PathPtr)
+}
+
+func TestExtractFileArgs_Newfstatat(t *testing.T) {
+	args := SyscallArgs{Nr: unix.SYS_NEWFSTATAT, Arg0: fdcwdUint64(), Arg1: 0x7fff3000, Arg3: uint64(unix.AT_SYMLINK_NOFOLLOW)}
+	fa := extractFileArgs(args)
+	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
+	assert.Equal(t, uint64(0x7fff3000), fa.PathPtr)
+	assert.Equal(t, uint32(unix.AT_SYMLINK_NOFOLLOW), fa.Flags)
+}
+
+func TestExtractFileArgs_Faccessat2(t *testing.T) {
+	args := SyscallArgs{Nr: unix.SYS_FACCESSAT2, Arg0: fdcwdUint64(), Arg1: 0x7fff4000}
+	fa := extractFileArgs(args)
+	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
+	assert.Equal(t, uint64(0x7fff4000), fa.PathPtr)
+}
+
+func TestExtractFileArgs_Readlinkat(t *testing.T) {
+	args := SyscallArgs{Nr: unix.SYS_READLINKAT, Arg0: fdcwdUint64(), Arg1: 0x7fff5000}
+	fa := extractFileArgs(args)
+	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
+	assert.Equal(t, uint64(0x7fff5000), fa.PathPtr)
+}
+
+func TestExtractFileArgs_Mknodat(t *testing.T) {
+	args := SyscallArgs{Nr: unix.SYS_MKNODAT, Arg0: fdcwdUint64(), Arg1: 0x7fff6000, Arg2: 0o100644}
+	fa := extractFileArgs(args)
+	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
+	assert.Equal(t, uint64(0x7fff6000), fa.PathPtr)
+	assert.Equal(t, uint32(0o100644), fa.Mode)
+}
+
 func TestFileSyscallName(t *testing.T) {
 	tests := []struct {
 		nr       int32
@@ -350,4 +398,120 @@ func TestResolvePathAt_NullPtr(t *testing.T) {
 	pid := os.Getpid()
 	_, err := resolvePathAt(pid, -100, 0)
 	assert.Error(t, err)
+}
+
+func TestIsOpenSyscall(t *testing.T) {
+	assert.True(t, isOpenSyscall(unix.SYS_OPENAT))
+	assert.True(t, isOpenSyscall(unix.SYS_OPENAT2))
+	assert.False(t, isOpenSyscall(unix.SYS_UNLINKAT))
+	assert.False(t, isOpenSyscall(unix.SYS_STATX))
+	assert.False(t, isOpenSyscall(unix.SYS_MKNODAT))
+}
+
+func TestShouldFallbackToContinue(t *testing.T) {
+	assert.False(t, shouldFallbackToContinue(unix.SYS_OPENAT, unix.O_RDONLY, 0))
+	assert.True(t, shouldFallbackToContinue(unix.SYS_OPENAT, unix.O_TMPFILE, 0))
+	// openat2 always falls back to CONTINUE (too many semantic edge cases)
+	assert.True(t, shouldFallbackToContinue(unix.SYS_OPENAT2, unix.O_RDONLY, 0x01))
+	assert.True(t, shouldFallbackToContinue(unix.SYS_OPENAT2, unix.O_RDONLY, 0))
+}
+
+func TestReadOpenHowResolve_NullPtr(t *testing.T) {
+	// A null howPtr should return 0 without error.
+	result, err := readOpenHowResolve(os.Getpid(), 0)
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(0), result)
+}
+
+func TestResolveProcFD(t *testing.T) {
+	pid := os.Getpid()
+
+	tests := []struct {
+		name      string
+		path      string
+		wasProcFD bool
+	}{
+		{"proc self fd", "/proc/self/fd/0", true},
+		{"proc pid fd", fmt.Sprintf("/proc/%d/fd/0", pid), true},
+		{"dev fd", "/dev/fd/0", true},
+		{"thread-self fd", "/proc/thread-self/fd/0", true},
+		{"normal path", "/tmp/foo", false},
+		{"proc but not fd", "/proc/self/status", false},
+		{"proc other pid fd", "/proc/1/fd/0", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resolved, wasProcFD := resolveProcFD(pid, tt.path)
+			assert.Equal(t, tt.wasProcFD, wasProcFD, "wasProcFD mismatch for %s", tt.path)
+			if wasProcFD {
+				assert.NotContains(t, resolved, "/proc/")
+			}
+		})
+	}
+}
+
+func TestResolveProcFD_DevStdio(t *testing.T) {
+	// /dev/stdin, /dev/stdout, /dev/stderr resolve to fd 0/1/2.
+	// Whether resolveProcFD returns true depends on whether the fd
+	// points to a filesystem path (true) or a pipe/socket (false).
+	// In Go test, stderr is typically a pipe, so we test with a
+	// known-filesystem fd instead.
+	tmpFile, err := os.CreateTemp("", "procfd-stdio-test")
+	if err != nil {
+		t.Skip("cannot create temp file")
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	pid := os.Getpid()
+	// Use the temp file's fd via /dev/fd/N
+	devFDPath := fmt.Sprintf("/dev/fd/%d", tmpFile.Fd())
+	resolved, wasProcFD := resolveProcFD(pid, devFDPath)
+	assert.True(t, wasProcFD, "/dev/fd/<N> pointing to a file should resolve")
+	assert.Equal(t, tmpFile.Name(), resolved)
+
+	// /dev/stdin may or may not resolve depending on environment
+	_, stdinResolved := resolveProcFD(pid, "/dev/stdin")
+	// Just verify it doesn't panic — result depends on whether stdin is a file
+	_ = stdinResolved
+}
+
+func TestResolveProcFD_PseudoPath(t *testing.T) {
+	// Verify that fds pointing to pipes/sockets are NOT resolved.
+	// Create a pipe to get an fd that resolves to "pipe:[N]".
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Skip("cannot create pipe")
+	}
+	defer r.Close()
+	defer w.Close()
+
+	pid := os.Getpid()
+	pipePath := fmt.Sprintf("/proc/%d/fd/%d", pid, r.Fd())
+	_, wasProcFD := resolveProcFD(pid, pipePath)
+	assert.False(t, wasProcFD, "pipe fd should not be treated as procfd bypass")
+}
+
+func TestResolveProcFD_WithSuffix(t *testing.T) {
+	// /proc/self/fd/N/subpath should resolve to <target>/subpath
+	tmpDir, err := os.MkdirTemp("", "procfd-suffix-test")
+	if err != nil {
+		t.Skip("cannot create temp dir")
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Open the directory to get an fd
+	dir, err := os.Open(tmpDir)
+	if err != nil {
+		t.Skip("cannot open temp dir")
+	}
+	defer dir.Close()
+
+	pid := os.Getpid()
+	// /proc/self/fd/<dirfd>/subpath
+	suffixPath := fmt.Sprintf("/proc/%d/fd/%d/subpath", pid, dir.Fd())
+	resolved, wasProcFD := resolveProcFD(pid, suffixPath)
+	assert.True(t, wasProcFD, "procfd with suffix should resolve")
+	assert.Equal(t, filepath.Join(tmpDir, "subpath"), resolved)
 }

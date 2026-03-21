@@ -44,10 +44,11 @@ type FileResult struct {
 
 // FileHandler processes file syscall notifications against policy.
 type FileHandler struct {
-	policy   FilePolicyChecker
-	registry *MountRegistry
-	emitter  Emitter
-	enforce  bool
+	policy      FilePolicyChecker
+	registry    *MountRegistry
+	emitter     Emitter
+	enforce     bool
+	emulateOpen bool // When true, supervisor emulates openat via AddFD
 }
 
 // NewFileHandler creates a new FileHandler.
@@ -58,6 +59,16 @@ func NewFileHandler(policy FilePolicyChecker, registry *MountRegistry, emitter E
 		emitter:  emitter,
 		enforce:  enforce,
 	}
+}
+
+// SetEmulateOpen enables or disables openat AddFD emulation.
+func (h *FileHandler) SetEmulateOpen(v bool) {
+	h.emulateOpen = v
+}
+
+// EmulateOpen returns whether AddFD emulation is active.
+func (h *FileHandler) EmulateOpen() bool {
+	return h.emulateOpen
 }
 
 // Handle evaluates a file request against policy and returns the enforcement result.
@@ -76,6 +87,18 @@ func (h *FileHandler) Handle(req FileRequest) FileResult {
 		}
 		h.emitFileEvent(req, dec, false, false)
 		return FileResult{Action: ActionContinue}
+	}
+
+	// Resolve /proc/self/fd/N, /proc/<pid>/fd/N, /dev/fd/N to actual target.
+	// This prevents policy bypass by re-deriving paths from file descriptors.
+	// Normalize both Path and Path2 (for rename/link dual-path syscalls).
+	if resolved, wasProcFD := resolveProcFD(req.PID, req.Path); wasProcFD {
+		req.Path = resolved
+	}
+	if req.Path2 != "" {
+		if resolved, wasProcFD := resolveProcFD(req.PID, req.Path2); wasProcFD {
+			req.Path2 = resolved
+		}
 	}
 
 	// 2. Path under FUSE mount point — audit-only; FUSE handles enforcement.

@@ -53,6 +53,8 @@ func main() {
 		UnixSocketEnabled:  cfg.UnixSocketEnabled,
 		ExecveEnabled:      cfg.ExecveEnabled,
 		FileMonitorEnabled: cfg.FileMonitorEnabled,
+		InterceptMetadata:  cfg.InterceptMetadata,
+		BlockIOUring:       cfg.BlockIOUring,
 		BlockedSyscalls:    blockedNrs,
 	}
 

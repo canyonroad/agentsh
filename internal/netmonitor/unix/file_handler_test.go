@@ -4,6 +4,8 @@ package unix
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/agentsh/agentsh/pkg/types"
@@ -20,12 +22,11 @@ func (m *mockFilePolicy) CheckFile(path, operation string) FilePolicyDecision {
 	if dec, ok := m.decisions[path]; ok {
 		return dec
 	}
-	// Default: deny if path not found
+	// Default: allow if path not found
 	return FilePolicyDecision{
-		Decision:          "deny",
-		EffectiveDecision: "deny",
-		Rule:              "default_deny",
-		Message:           "no matching rule",
+		Decision:          "allow",
+		EffectiveDecision: "allow",
+		Rule:              "default_allow",
 	}
 }
 
@@ -374,7 +375,14 @@ func TestFileHandler_NilEmitter(t *testing.T) {
 
 func TestFileHandler_NilEmitterDeny(t *testing.T) {
 	policy := &mockFilePolicy{
-		decisions: map[string]FilePolicyDecision{}, // default deny
+		decisions: map[string]FilePolicyDecision{
+			"/secret/path": {
+				Decision:          "deny",
+				EffectiveDecision: "deny",
+				Rule:              "deny_secret",
+				Message:           "no matching rule",
+			},
+		},
 	}
 	registry := NewMountRegistry()
 	handler := NewFileHandler(policy, registry, nil, true) // enforce=true, nil emitter
@@ -434,4 +442,49 @@ func TestFileHandler_NilPolicyAndEmitter(t *testing.T) {
 	// Should not panic, should allow
 	result := handler.Handle(req)
 	assert.Equal(t, ActionContinue, result.Action)
+}
+
+func TestFileHandler_ProcSelfFD_ResolvesToTarget(t *testing.T) {
+	policy := &mockFilePolicy{
+		decisions: map[string]FilePolicyDecision{
+			"/root/.ssh/id_rsa": {
+				Decision:          "deny",
+				EffectiveDecision: "deny",
+				Rule:              "deny_ssh_keys",
+				Message:           "access denied",
+			},
+		},
+	}
+	emitter := &mockFileEmitter{}
+	registry := NewMountRegistry()
+	handler := NewFileHandler(policy, registry, emitter, true)
+
+	tmpFile, err := os.CreateTemp("", "procfd-test")
+	if err != nil {
+		t.Skip("cannot create temp file")
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	pid := os.Getpid()
+	procPath := fmt.Sprintf("/proc/%d/fd/%d", pid, tmpFile.Fd())
+	req := FileRequest{
+		PID:       pid,
+		Syscall:   int32(unix.SYS_OPENAT),
+		Path:      procPath,
+		Operation: "open",
+		SessionID: "sess-1",
+	}
+
+	result := handler.Handle(req)
+	// Resolved to temp file path (not in deny list) → allowed
+	assert.Equal(t, ActionContinue, result.Action)
+}
+
+func TestFileHandler_EmulateOpen_Field(t *testing.T) {
+	handler := NewFileHandler(nil, nil, nil, true)
+	assert.False(t, handler.emulateOpen, "emulateOpen should default to false")
+
+	handler.SetEmulateOpen(true)
+	assert.True(t, handler.emulateOpen)
 }

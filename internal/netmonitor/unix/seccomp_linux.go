@@ -171,10 +171,12 @@ func InstallOrWarn() (*Filter, error) {
 
 // FilterConfig configures the seccomp filter to install.
 type FilterConfig struct {
-	UnixSocketEnabled bool
-	ExecveEnabled     bool
+	UnixSocketEnabled  bool
+	ExecveEnabled      bool
 	FileMonitorEnabled bool
-	BlockedSyscalls   []int // syscall numbers to block with KILL
+	InterceptMetadata  bool  // statx, newfstatat, faccessat2, readlinkat
+	BlockIOUring       bool  // io_uring_setup/enter/register → EPERM
+	BlockedSyscalls    []int // syscall numbers to block with KILL
 }
 
 // DefaultFilterConfig returns config for unix socket monitoring only.
@@ -254,11 +256,58 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 		}
 	}
 
+	// Metadata syscalls via user-notify (when intercept_metadata is enabled)
+	if cfg.InterceptMetadata {
+		trap := seccomp.ActNotify
+		metadataRules := []seccomp.ScmpSyscall{
+			seccomp.ScmpSyscall(unix.SYS_STATX),
+			seccomp.ScmpSyscall(unix.SYS_NEWFSTATAT),
+			seccomp.ScmpSyscall(unix.SYS_FACCESSAT2),
+			seccomp.ScmpSyscall(unix.SYS_READLINKAT),
+		}
+		for _, sc := range metadataRules {
+			if err := filt.AddRule(sc, trap); err != nil {
+				return nil, fmt.Errorf("add metadata rule %v: %w", sc, err)
+			}
+		}
+	}
+
+	// mknodat is always included with file monitoring (create-category)
+	if cfg.FileMonitorEnabled {
+		trap := seccomp.ActNotify
+		if err := filt.AddRule(seccomp.ScmpSyscall(unix.SYS_MKNODAT), trap); err != nil {
+			return nil, fmt.Errorf("add mknodat rule: %w", err)
+		}
+	}
+
 	// Blocked syscalls via kill
 	for _, nr := range cfg.BlockedSyscalls {
 		sc := seccomp.ScmpSyscall(nr)
 		if err := filt.AddRule(sc, seccomp.ActKillProcess); err != nil {
 			return nil, fmt.Errorf("add kill rule %v: %w", sc, err)
+		}
+	}
+
+	// Block io_uring to prevent seccomp bypass.
+	// Skip syscalls already in BlockedSyscalls to avoid duplicate rule errors.
+	if cfg.BlockIOUring {
+		blockedSet := make(map[int]bool, len(cfg.BlockedSyscalls))
+		for _, nr := range cfg.BlockedSyscalls {
+			blockedSet[nr] = true
+		}
+		ioUringBlock := seccomp.ActErrno.SetReturnCode(int16(1)) // EPERM = 1
+		ioUringSyscalls := []int{
+			unix.SYS_IO_URING_SETUP,
+			unix.SYS_IO_URING_ENTER,
+			unix.SYS_IO_URING_REGISTER,
+		}
+		for _, nr := range ioUringSyscalls {
+			if blockedSet[nr] {
+				continue // already blocked via BlockedSyscalls
+			}
+			if err := filt.AddRule(seccomp.ScmpSyscall(nr), ioUringBlock); err != nil {
+				return nil, fmt.Errorf("add io_uring block rule %v: %w", nr, err)
+			}
 		}
 	}
 
