@@ -40,7 +40,8 @@ func (w *filePolicyEngineWrapper) CheckFile(path, operation string) unixmon.File
 }
 
 // createFileHandler creates a FileHandler from configuration.
-func createFileHandler(cfg config.SandboxSeccompFileMonitorConfig, pol *policy.Engine, emitter unixmon.Emitter) *unixmon.FileHandler {
+// landlockEnabled indicates whether Landlock enforcement is configured (not just kernel-available).
+func createFileHandler(cfg config.SandboxSeccompFileMonitorConfig, pol *policy.Engine, emitter unixmon.Emitter, landlockEnabled bool) *unixmon.FileHandler {
 	if !cfg.Enabled {
 		return nil
 	}
@@ -61,7 +62,7 @@ func createFileHandler(cfg config.SandboxSeccompFileMonitorConfig, pol *policy.E
 	defaultVal := cfg.EnforceWithoutFUSE
 	openatEmulation := config.FileMonitorBoolWithDefault(cfg.OpenatEmulation, defaultVal)
 	if openatEmulation && enforce && unixmon.ProbeAddFDSupport() {
-		landlockActive := capabilities.DetectLandlock().Available
+		landlockActive := landlockEnabled && capabilities.DetectLandlock().Available
 		fuseActive := registry.HasAnyMounts()
 		if !landlockActive && !fuseActive {
 			handler.SetEmulateOpen(true)

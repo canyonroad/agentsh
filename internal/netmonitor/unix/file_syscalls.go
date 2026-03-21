@@ -50,8 +50,14 @@ const emulableFlagMask = unix.O_RDONLY | unix.O_WRONLY | unix.O_RDWR |
 	unix.O_NOFOLLOW | unix.O_DIRECTORY | unix.O_PATH | unix.O_NOCTTY |
 	unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_SYNC | unix.O_DSYNC
 
+// shouldFallbackToContinue returns true when an open-family syscall should
+// use CONTINUE instead of AddFD emulation. openat2 is ALWAYS routed to
+// CONTINUE because its extended semantics (RESOLVE_* flags, how_size
+// versioning, mode validation) cannot be faithfully replicated by the
+// supervisor. Only plain openat/open/creat are emulated.
 func shouldFallbackToContinue(nr int32, flags uint32, resolveFlags uint64) bool {
-	if resolveFlags != 0 {
+	// openat2: always CONTINUE — too many semantic edge cases to emulate safely.
+	if nr == unix.SYS_OPENAT2 {
 		return true
 	}
 	if flags&unix.O_TMPFILE == unix.O_TMPFILE {

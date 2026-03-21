@@ -21,7 +21,7 @@ import (
 
 func TestCreateFileHandler_Disabled(t *testing.T) {
 	cfg := config.SandboxSeccompFileMonitorConfig{Enabled: false}
-	h := createFileHandler(cfg, nil, nil)
+	h := createFileHandler(cfg, nil, nil, false)
 	assert.Nil(t, h)
 }
 
@@ -30,7 +30,7 @@ func TestCreateFileHandler_Enabled(t *testing.T) {
 		Enabled:            true,
 		EnforceWithoutFUSE: true,
 	}
-	h := createFileHandler(cfg, nil, nil)
+	h := createFileHandler(cfg, nil, nil, false)
 	assert.NotNil(t, h)
 }
 
@@ -39,7 +39,7 @@ func TestCreateFileHandler_NilPolicy(t *testing.T) {
 		Enabled:            true,
 		EnforceWithoutFUSE: true,
 	}
-	h := createFileHandler(cfg, nil, nil)
+	h := createFileHandler(cfg, nil, nil, false)
 	require.NotNil(t, h)
 
 	// With nil policy, Handle should return ActionContinue
@@ -74,7 +74,7 @@ func TestCreateFileHandler_EnforceWithoutFUSE(t *testing.T) {
 			Enabled:            true,
 			EnforceWithoutFUSE: false, // audit-only
 		}
-		h := createFileHandler(cfg, engine, nil)
+		h := createFileHandler(cfg, engine, nil, false)
 		require.NotNil(t, h)
 
 		result := h.Handle(unixmon.FileRequest{
@@ -91,7 +91,7 @@ func TestCreateFileHandler_EnforceWithoutFUSE(t *testing.T) {
 			Enabled:            true,
 			EnforceWithoutFUSE: true, // enforcing
 		}
-		h := createFileHandler(cfg, engine, nil)
+		h := createFileHandler(cfg, engine, nil, false)
 		require.NotNil(t, h)
 
 		result := h.Handle(unixmon.FileRequest{

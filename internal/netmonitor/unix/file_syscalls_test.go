@@ -411,8 +411,9 @@ func TestIsOpenSyscall(t *testing.T) {
 func TestShouldFallbackToContinue(t *testing.T) {
 	assert.False(t, shouldFallbackToContinue(unix.SYS_OPENAT, unix.O_RDONLY, 0))
 	assert.True(t, shouldFallbackToContinue(unix.SYS_OPENAT, unix.O_TMPFILE, 0))
+	// openat2 always falls back to CONTINUE (too many semantic edge cases)
 	assert.True(t, shouldFallbackToContinue(unix.SYS_OPENAT2, unix.O_RDONLY, 0x01))
-	assert.False(t, shouldFallbackToContinue(unix.SYS_OPENAT2, unix.O_RDONLY, 0))
+	assert.True(t, shouldFallbackToContinue(unix.SYS_OPENAT2, unix.O_RDONLY, 0))
 }
 
 func TestReadOpenHowResolve_NullPtr(t *testing.T) {

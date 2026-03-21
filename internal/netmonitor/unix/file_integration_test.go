@@ -308,11 +308,11 @@ func TestEmulatedOpen_FallbackToContinue(t *testing.T) {
 			wantFallback: true,
 		},
 		{
-			name:         "openat2 no RESOLVE — emulatable",
+			name:         "openat2 no RESOLVE — always CONTINUE",
 			nr:           unix.SYS_OPENAT2,
 			flags:        unix.O_RDONLY,
 			resolveFlags: 0,
-			wantFallback: false,
+			wantFallback: true,
 		},
 	}
 

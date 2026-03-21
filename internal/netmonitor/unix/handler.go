@@ -450,61 +450,27 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	notifFD := int(fd)
 	fileArgs := extractFileArgs(args)
 
-	// For openat2, resolve actual flags from the open_how struct.
+	// For openat2, read flags from open_how for policy evaluation.
+	// openat2 is never emulated (shouldFallbackToContinue always returns true
+	// for SYS_OPENAT2), so we don't validate emulation-specific constraints.
+	// Invalid arguments (how_ptr=0, how_size<24) → let kernel handle via CONTINUE.
 	var resolveFlags uint64
 	if args.Nr == unix.SYS_OPENAT2 {
-		// openat2 requires a valid how_ptr and size >= 24 (OPEN_HOW_SIZE_VER0).
-		// If how_ptr is 0 or size is too small, the kernel would return EFAULT/EINVAL.
-		// Don't emulate — return the expected error directly.
-		howSize := args.Arg3
-		if fileArgs.HowPtr == 0 {
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EFAULT)}
-			_ = seccomp.NotifRespond(fd, &resp)
-			return
-		}
-		if howSize < 24 {
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EINVAL)}
-			_ = seccomp.NotifRespond(fd, &resp)
-			return
-		}
-		// Only emulate openat2 when how_size is exactly 24 (OPEN_HOW_SIZE_VER0).
-		// Future kernel versions may extend the struct with new fields that we
-		// can't replicate. Fall back to CONTINUE for larger sizes.
-		if howSize > 24 {
-			slog.Debug("emulated file handler: openat2 how_size > 24, falling back to CONTINUE", "pid", pid, "size", howSize)
+		if fileArgs.HowPtr == 0 || args.Arg3 < 24 {
+			// Invalid openat2 args — let kernel return the appropriate error.
 			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
 			_ = seccomp.NotifRespond(fd, &resp)
 			return
 		}
 		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
 		if err != nil {
-			// Can't read open_how — fall back to CONTINUE so the kernel handles it
-			// with proper error semantics, rather than returning EACCES.
-			slog.Debug("emulated file handler: failed to read open_how, falling back to CONTINUE", "pid", pid, "error", err)
+			slog.Debug("emulated file handler: failed to read open_how, CONTINUE", "pid", pid, "error", err)
 			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
 			_ = seccomp.NotifRespond(fd, &resp)
 			return
 		}
 		fileArgs.Flags = uint32(howFlags)
 		fileArgs.Mode = uint32(howMode)
-		// Validate that upper 32 bits of flags/mode are zero — the emulation
-		// path truncates to uint32. If upper bits are set, fall back to CONTINUE
-		// to let the kernel validate the full values.
-		if howFlags>>32 != 0 || howMode>>32 != 0 {
-			slog.Debug("emulated file handler: openat2 flags/mode upper bits set, falling back to CONTINUE", "pid", pid, "flags", howFlags, "mode", howMode)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-			_ = seccomp.NotifRespond(fd, &resp)
-			return
-		}
-		var resolveErr error
-		resolveFlags, resolveErr = readOpenHowResolve(pid, fileArgs.HowPtr)
-		if resolveErr != nil {
-			// Cannot read resolve flags — force CONTINUE fallback (never emulate
-			// when resolve flags are unknown, as non-zero RESOLVE_* flags can't
-			// be replicated from the supervisor).
-			slog.Debug("emulated file handler: cannot read resolve flags, forcing CONTINUE", "pid", pid, "error", resolveErr)
-			resolveFlags = 1 // non-zero forces shouldFallbackToContinue → true
-		}
 	}
 
 	// Determine early if this will be a CONTINUE-path syscall (non-open,

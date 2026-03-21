@@ -226,7 +226,7 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 		emitter := &notifyEmitterAdapter{store: store, broker: broker}
 
 		// Create file handler if configured
-		fileHandler := createFileHandler(fileMonitorCfg, pol, emitter)
+		fileHandler := createFileHandler(fileMonitorCfg, pol, emitter, false)
 
 		// Type-assert and set emitter on execve handler if configured
 		var h *unixmon.ExecveHandler
