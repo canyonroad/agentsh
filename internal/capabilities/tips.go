@@ -2,6 +2,8 @@
 
 package capabilities
 
+import "fmt"
+
 // tipDefinition defines a tip for a missing capability.
 type tipDefinition struct {
 	Feature  string
@@ -132,5 +134,58 @@ func GenerateTips(platform string, caps map[string]any) []Tip {
 		}
 	}
 
+	return tips
+}
+
+// tipsByBackend maps backend names to tip definitions.
+var tipsByBackend = map[string]Tip{
+	// Linux
+	"fuse":             {Feature: "fuse", Impact: "Fine-grained filesystem control disabled", Action: "Install FUSE3: apt install fuse3 (Debian/Ubuntu), dnf install fuse3 (Fedora)"},
+	"seccomp-execve":   {Feature: "seccomp", Impact: "Syscall filtering disabled (likely nested container)", Action: "Run in privileged container or on host for full seccomp support"},
+	"seccomp-notify":   {Feature: "seccomp-notify", Impact: "Seccomp-based file enforcement disabled", Action: "Run in privileged container or on host for seccomp support"},
+	"landlock-network": {Feature: "landlock-network", Impact: "Kernel-level network restrictions disabled", Action: "Requires kernel 6.7+ (Landlock ABI v4)"},
+	"ebpf":             {Feature: "ebpf", Impact: "Network monitoring disabled", Action: "Requires CAP_BPF and cgroups v2. Run as root or with elevated privileges."},
+	"cgroups-v2":       {Feature: "cgroups-v2", Impact: "Resource limits unavailable", Action: "Enable cgroups v2 in kernel or container runtime"},
+	"ptrace":           {Feature: "ptrace", Impact: "Syscall-level enforcement via ptrace unavailable", Action: "Add SYS_PTRACE capability"},
+	"pid-namespace":    {Feature: "pid-namespace", Impact: "Process isolation unavailable", Action: "Run in a PID namespace (docker run --pid=host or unshare -p)"},
+	"capability-drop":  {Feature: "capability-drop", Impact: "Privilege reduction unavailable", Action: "Run with standard Linux capabilities support"},
+	// Darwin
+	"fuse-t":            {Feature: "fuse-t", Impact: "Filesystem interception unavailable", Action: "Install FUSE-T: brew install fuse-t"},
+	"esf":               {Feature: "esf", Impact: "Endpoint Security Framework unavailable", Action: "Requires system extension entitlement from Apple"},
+	"network-extension": {Feature: "network-extension", Impact: "Network filtering unavailable", Action: "Requires network extension entitlement from Apple"},
+	// Windows
+	"winfsp":     {Feature: "winfsp", Impact: "Filesystem interception unavailable", Action: "Install WinFsp: https://winfsp.dev/"},
+	"minifilter": {Feature: "minifilter", Impact: "Kernel-level file filtering unavailable", Action: "Install agentsh minifilter driver"},
+	"windivert":  {Feature: "windivert", Impact: "Network interception unavailable", Action: "Install WinDivert: https://reqrypt.org/windivert.html"},
+}
+
+func lookupTip(backendName string) *Tip {
+	if tip, ok := tipsByBackend[backendName]; ok {
+		copy := tip // don't modify the map entry
+		return &copy
+	}
+	return nil
+}
+
+// GenerateTipsFromDomains generates tips only for domains that score 0.
+// Domains that already have at least one available backend don't generate tips
+// (additional backends provide redundancy, not extra points).
+func GenerateTipsFromDomains(domains []ProtectionDomain) []Tip {
+	var tips []Tip
+	for _, d := range domains {
+		if d.Score > 0 {
+			continue // domain already covered
+		}
+		for _, b := range d.Backends {
+			if b.Available {
+				continue
+			}
+			tip := lookupTip(b.Name)
+			if tip != nil {
+				tip.Impact = fmt.Sprintf("%s (+%d pts)", tip.Impact, d.Weight)
+				tips = append(tips, *tip)
+			}
+		}
+	}
 	return tips
 }

@@ -165,7 +165,7 @@ func Detect() (*DetectResult, error) {
 		}
 	}
 
-	tips := GenerateTips("linux", caps)
+	tips := GenerateTipsFromDomains(domains)
 
 	return &DetectResult{
 		Platform:        "linux",

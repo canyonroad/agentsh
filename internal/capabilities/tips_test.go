@@ -5,6 +5,8 @@ package capabilities
 import (
 	"runtime"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestGenerateTips_Linux(t *testing.T) {
@@ -89,4 +91,38 @@ func TestGenerateTips_Windows(t *testing.T) {
 	if !hasWinfspTip {
 		t.Error("missing winfsp tip")
 	}
+}
+
+func TestGenerateTipsFromDomains_ZeroScoreOnly(t *testing.T) {
+	domains := []ProtectionDomain{
+		{Name: "File Protection", Weight: 25, Score: 25, Backends: []DetectedBackend{
+			{Name: "fuse", Available: true},
+		}},
+		{Name: "Network", Weight: 20, Score: 0, Backends: []DetectedBackend{
+			{Name: "ebpf", Available: false},
+		}},
+	}
+	tips := GenerateTipsFromDomains(domains)
+	// Only Network (score 0) should generate tips, not File (score 25)
+	assert.Len(t, tips, 1)
+	assert.Equal(t, "ebpf", tips[0].Feature)
+	assert.Contains(t, tips[0].Impact, "+20 pts")
+}
+
+func TestGenerateTipsFromDomains_NoTipsWhenAllScored(t *testing.T) {
+	domains := []ProtectionDomain{
+		{Name: "File Protection", Weight: 25, Score: 25, Backends: []DetectedBackend{{Available: true}}},
+		{Name: "Network", Weight: 20, Score: 20, Backends: []DetectedBackend{{Available: true}}},
+	}
+	tips := GenerateTipsFromDomains(domains)
+	assert.Empty(t, tips)
+}
+
+func TestLookupTip(t *testing.T) {
+	tip := lookupTip("ebpf")
+	assert.NotNil(t, tip)
+	assert.Equal(t, "ebpf", tip.Feature)
+
+	tip2 := lookupTip("nonexistent")
+	assert.Nil(t, tip2)
 }
