@@ -36,22 +36,22 @@ Within each domain, multiple backends can provide coverage. The domain score is 
 
 | Backend | Detection Method | Enables |
 |---------|-----------------|---------|
-| FUSE | Open `/dev/fuse` + fusermount/fsopen/mount probe | Full file interception, soft-delete, redirect |
+| FUSE | Open `/dev/fuse` (O_RDWR, close immediately) + fusermount/fsopen/mount probe. Detail shows method: "fusermount3", "new-api", or "direct" | Full file interception, soft-delete, redirect |
 | Landlock | `landlock_create_ruleset` syscall probe (ABI 1-5) | Kernel-level path restrictions |
-| Seccomp-notify file_monitor | seccomp API >= 6 + config check | openat/stat/unlink interception via user-notify |
+| Seccomp-notify file_monitor | Seccomp user-notify available (libseccomp `GetAPI() >= 6`, which maps to `SECCOMP_FILTER_FLAG_NEW_LISTENER` support) | openat/stat/unlink interception via user-notify |
 
 **Command Control** (25 pts)
 
 | Backend | Detection Method | Enables |
 |---------|-----------------|---------|
-| Seccomp execve | seccomp API >= 6 | execve/execveat interception via user-notify |
-| Ptrace | `PTRACE_SEIZE` on forked child | Syscall-level exec interception + redirect |
+| Seccomp execve | Same seccomp user-notify check as above | execve/execveat interception via user-notify |
+| Ptrace | `PTRACE_SEIZE` on forked child (existing functional probe) | Syscall-level exec interception + redirect |
 
 **Network** (20 pts)
 
 | Backend | Detection Method | Enables |
 |---------|-----------------|---------|
-| eBPF | `BPF_PROG_LOAD` syscall with `BPF_PROG_TYPE_CGROUP_SKB` | cgroup-level network monitoring |
+| eBPF | `BPF_PROG_LOAD` syscall with `BPF_PROG_TYPE_CGROUP_SKB` (see section 3 for details) | cgroup-level network monitoring |
 | Landlock network | Landlock ABI >= 4 (from existing probe) | Kernel-level TCP bind/connect filtering |
 
 **Resource Limits** (15 pts)
@@ -64,20 +64,40 @@ Within each domain, multiple backends can provide coverage. The domain score is 
 
 | Backend | Detection Method | Enables |
 |---------|-----------------|---------|
-| PID namespace | Read `/proc/self/status` NSpid field (multiple entries = namespaced) | Process isolation |
-| Capability drop | `capget()` succeeds | Privilege reduction |
+| PID namespace | Read `/proc/self/status` NSpid field (see section 3) | Process isolation |
+| Capability drop | `capget()` + `prctl(PR_CAPBSET_READ, 0)` both succeed (see section 3) | Privilege reduction |
 
 ### 3. Real Detection Probes
 
 Replace four stubs with actual probes:
 
-**eBPF probe**: Call `unix.Syscall(SYS_BPF, BPF_PROG_LOAD, ...)` with a minimal program (type `BPF_PROG_TYPE_CGROUP_SKB`, single `BPF_EXIT` instruction). Valid fd → works (close immediately). `EPERM` → missing capability. `ENOSYS` → no BPF support. This is a functional test, not a file check.
+**eBPF probe**: Construct a minimal `bpf_attr` struct for `BPF_PROG_LOAD`:
+- `prog_type`: `BPF_PROG_TYPE_CGROUP_SKB` (13)
+- `insns`: pointer to a single `BPF_EXIT` instruction (2 bytes: `0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00`)
+- `insn_cnt`: 1
+- `license`: pointer to `"GPL\0"` (required by kernel for cgroup programs)
 
-**cgroups v2 probe**: `unix.Statfs("/sys/fs/cgroup", &statfs)` and check `statfs.Type == CGROUP2_SUPER_MAGIC` (0x63677270). Then `os.OpenFile("/sys/fs/cgroup/cgroup.procs", O_RDONLY, 0)` to verify readability. Confirms the cgroup2 hierarchy is mounted and accessible.
+Call `unix.Syscall(SYS_BPF, BPF_PROG_LOAD, uintptr(unsafe.Pointer(&attr)), size)`. Classify result:
+- Valid fd → available (close immediately). Detail: `"cgroup_skb"`
+- `EPERM` → unavailable. Detail: `"EPERM (missing CAP_BPF)"`
+- `ENOSYS` → unavailable. Detail: `"ENOSYS (kernel too old)"`
+- Other error → unavailable. Detail: the error string
 
-**PID namespace probe**: Read `/proc/self/status` and find the `NSpid:` line. Multiple tab-separated values (e.g., `NSpid: 1234 1`) → process is in a PID namespace. One value → host namespace. Reliable and doesn't require root.
+**cgroups v2 probe**: `unix.Statfs("/sys/fs/cgroup", &statfs)` and check `statfs.Type == CGROUP2_SUPER_MAGIC` (0x63677270). Then `os.OpenFile("/sys/fs/cgroup/cgroup.procs", O_RDONLY, 0)` to verify readability (close immediately). Classify:
+- Both succeed → available. Detail: `"cgroup2"`
+- Statfs fails or wrong type → unavailable. Detail: `"not mounted"` or `"cgroup v1"`
+- File not readable → unavailable. Detail: `"not readable"`
 
-**Capability drop probe**: Call `unix.Capget()` — success means we can read capabilities (and therefore drop them). Makes the existing assumption explicit.
+**PID namespace probe**: Read `/proc/self/status` and find the `NSpid:` line. Classify:
+- Multiple tab-separated values (e.g., `NSpid:\t1234\t1`) → available. Detail: `"NSpid: <N> levels"`
+- Single value → unavailable. Detail: `"host namespace"`
+- `NSpid` field absent (kernel < 4.1) → unavailable. Detail: `"NSpid not supported"`
+
+**Capability drop probe**: Two checks:
+1. `unix.Capget()` succeeds (can read capabilities)
+2. `unix.Prctl(unix.PR_CAPBSET_READ, 0, 0, 0, 0)` succeeds (can read bounding set, prerequisite for dropping)
+
+If both succeed → available. Detail: `"capget+prctl"`. Otherwise → unavailable with the failing syscall as detail. Note: this is a stronger check than the previous stub (`return true`) because `prctl(PR_CAPBSET_READ)` can fail in some container runtimes.
 
 All probes are fast, side-effect-free, and run at detection time.
 
@@ -120,8 +140,8 @@ TIPS
 Key changes from current output:
 - Grouped by domain with per-domain subtotal
 - Each feature shows: name, status (✓/-), detection detail, what it enables
-- Domain shows which backend is active (from config)
-- Tips show point impact
+- Domain shows which backend is active (derived from `SecurityCapabilities.FileEnforcement`, `SelectMode()`, and related existing fields — detection already computes this)
+- Tips show point impact — only generated for backends in domains that score 0 (domains already scoring full weight don't generate tips since additional backends provide redundancy, not extra points)
 - JSON/YAML output uses the same structure (nested by domain)
 
 ### 5. Cross-Platform Parity
@@ -153,19 +173,27 @@ Same domain model applied to Darwin and Windows with platform-specific backends:
 
 Weight model (25/25/20/15/15) is identical across platforms. Score is always 0-100 computed the same way.
 
-For stubs that can't easily become real probes (e.g., ESF requires entitlements that detection code won't have), keep the stub but mark detection as `"check": "entitlement"` rather than `"check": "probe"` so the output is honest about detection fidelity.
+For stubs that can't easily become real probes (e.g., ESF requires entitlements that detection code won't have), keep the stub but set `CheckMethod: "entitlement"` (not `"probe"`) so the output is honest about detection fidelity. On Darwin, `sandbox-exec` appears under both Command Control (execution sandboxing) and Isolation (process isolation) — these are distinct uses of the same underlying mechanism and both report as available.
+
+On Windows, the existing `os.Stat` check for WinFsp DLL should be upgraded to `syscall.LoadLibrary` to verify the DLL actually loads (not just exists). This is deferred to platform-specific implementation — the spec defines the intent, not the exact Windows API calls.
 
 ### 6. Testing
 
 **Probe tests** (behind platform build tags):
-1. `TestProbeEBPF` — verify BPF syscall runs without panic.
-2. `TestProbeCgroupsV2` — verify statfs check runs.
-3. `TestProbePIDNamespace` — parse NSpid from `/proc/self/status`.
-4. `TestProbeCapabilityDrop` — verify capget succeeds.
+1. `TestProbeEBPF` — verify BPF syscall runs. Classify EPERM vs ENOSYS vs success.
+2. `TestProbeCgroupsV2` — verify statfs check. Test CGROUP2_SUPER_MAGIC match and mismatch.
+3. `TestProbePIDNamespace` — parse NSpid. Test single-value (host), multi-value (namespaced), and absent field (old kernel).
+4. `TestProbeCapabilityDrop` — verify capget + prctl both succeed.
 
 **Score tests** (cross-platform, mock capabilities):
-5. `TestWeightedScore` — all-available (100), none (0), partial combinations.
-6. `TestDomainScoring` — each domain returns weight when any backend available.
+5. `TestWeightedScore_AllAvailable` — all domains score full → 100.
+6. `TestWeightedScore_NoneAvailable` — all domains empty → 0.
+7. `TestWeightedScore_PartialCombinations`:
+   - File + Command only → 50
+   - Network + Resource + Isolation only → 50
+   - Single backend in multi-backend domain (e.g., only Landlock in File) → domain still scores 25
+   - All backends unavailable in one domain, rest available → 100 minus that domain's weight
+8. `TestDomainScoring` — each domain returns weight when any single backend available, 0 when none.
 
 **Format tests** (cross-platform):
 7. `TestTableFormat_Grouped` — domain headers with subtotals.
@@ -194,7 +222,12 @@ type ProtectionDomain struct {
     Weight   int              // 25, 25, 20, 15, 15
     Score    int              // weight if any backend available, else 0
     Backends []DetectedBackend
-    Active   string           // which backend is currently in use
+    Active   string           // which backend is in use, derived from:
+                              // File: SecurityCapabilities.FileEnforcement
+                              // Command: SelectMode() result (seccomp vs ptrace)
+                              // Network: "ebpf" if available, else "landlock-network"
+                              // Resource: "cgroups-v2" if available
+                              // Isolation: first available backend
 }
 
 type DetectedBackend struct {
@@ -206,7 +239,25 @@ type DetectedBackend struct {
 }
 ```
 
-The flat `Capabilities` map is still populated for backward compatibility with JSON consumers. The `Domains` field is the new structured representation.
+The flat `Capabilities` map is still populated for backward compatibility with JSON consumers. Mapping from new to old keys:
+
+| Old key | Populated from |
+|---------|---------------|
+| `seccomp`, `seccomp_user_notify` | seccomp-execve backend available |
+| `seccomp_basic` | same as `seccomp` |
+| `landlock` | landlock backend available |
+| `landlock_abi` | landlock backend detail (ABI version number) |
+| `landlock_network` | landlock-network backend available |
+| `fuse` | fuse backend available |
+| `fuse_mount_method` | fuse backend detail |
+| `ebpf` | ebpf backend available |
+| `cgroups_v2` | cgroups-v2 backend available |
+| `ptrace` | ptrace backend available |
+| `pid_namespace` | pid-namespace backend available |
+| `capabilities_drop` | capability-drop backend available |
+| `file_enforcement` | File Protection domain active backend |
+
+The `Domains` field is the new structured representation.
 
 ## Dependencies
 
