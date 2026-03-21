@@ -284,20 +284,40 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 
 	// Create the FUSE mount using existing fsmonitor with a timeout
 	// to prevent hanging if mount is blocked (e.g., by seccomp)
+	effectiveMountPoint := cfg.MountPoint
+	mountedViaNewAPI := false
+	fuseFD := -1
+
+	if fs.mountMethod == "new-api" {
+		var err error
+		fuseFD, err = mountFUSEViaNewAPI(cfg.MountPoint, true, 0)
+		if err != nil {
+			return nil, fmt.Errorf("new mount API failed: %w", err)
+		}
+		effectiveMountPoint = fmt.Sprintf("/dev/fd/%d", fuseFD)
+		mountedViaNewAPI = true
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fsMount, err := fsmonitor.MountWorkspace(ctx, cfg.SourcePath, cfg.MountPoint, hooks)
+	fsMount, err := fsmonitor.MountWorkspace(ctx, cfg.SourcePath, effectiveMountPoint, hooks)
 	if err != nil {
+		if mountedViaNewAPI {
+			unix.Unmount(cfg.MountPoint, 0)
+			unix.Close(fuseFD)
+		}
 		return nil, fmt.Errorf("failed to mount FUSE filesystem: %w", err)
 	}
 
 	// Wrap in our Mount type
 	mount := &Mount{
-		fsMount:    fsMount,
-		sourcePath: cfg.SourcePath,
-		mountPoint: cfg.MountPoint,
-		mountedAt:  time.Now(),
-		hooks:      hooks,
+		fsMount:          fsMount,
+		sourcePath:       cfg.SourcePath,
+		mountPoint:       cfg.MountPoint, // always real path
+		mountedAt:        time.Now(),
+		hooks:            hooks,
+		mountedViaNewAPI: mountedViaNewAPI,
+		fuseFD:           fuseFD,
 	}
 
 	fs.mounts[cfg.MountPoint] = mount
@@ -317,16 +337,26 @@ func (fs *Filesystem) Unmount(mount platform.FSMount) error {
 
 	delete(fs.mounts, m.mountPoint)
 
+	if m.mountedViaNewAPI {
+		err := unix.Unmount(m.mountPoint, 0)
+		if m.fuseFD >= 0 {
+			unix.Close(m.fuseFD)
+			m.fuseFD = -1
+		}
+		return err
+	}
 	return m.fsMount.Unmount()
 }
 
 // Mount wraps fsmonitor.Mount to implement platform.FSMount.
 type Mount struct {
-	fsMount    *fsmonitor.Mount
-	sourcePath string
-	mountPoint string
-	mountedAt  time.Time
-	hooks      *fsmonitor.Hooks
+	fsMount          *fsmonitor.Mount
+	sourcePath       string
+	mountPoint       string
+	mountedAt        time.Time
+	hooks            *fsmonitor.Hooks
+	mountedViaNewAPI bool // true if mounted via new mount API
+	fuseFD           int  // /dev/fuse fd to close on unmount (new-api only, -1 if unused)
 
 	// Stats tracking
 	mu            sync.Mutex
@@ -366,6 +396,14 @@ func (m *Mount) Stats() platform.FSStats {
 
 // Close unmounts the filesystem.
 func (m *Mount) Close() error {
+	if m.mountedViaNewAPI {
+		err := unix.Unmount(m.mountPoint, 0)
+		if m.fuseFD >= 0 {
+			unix.Close(m.fuseFD)
+			m.fuseFD = -1
+		}
+		return err
+	}
 	return m.fsMount.Unmount()
 }
 

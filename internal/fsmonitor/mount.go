@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -30,11 +31,14 @@ func MountWorkspace(ctx context.Context, backingDir string, mountPoint string, h
 	if mountPoint == "" {
 		return nil, fmt.Errorf("mountPoint is empty")
 	}
-	if err := os.MkdirAll(filepath.Dir(mountPoint), 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir mount parent: %w", err)
-	}
-	if err := os.MkdirAll(mountPoint, 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir mount: %w", err)
+	// Skip MkdirAll for /dev/fd/N magic mountpoints (pre-mounted FUSE fd)
+	if !strings.HasPrefix(mountPoint, "/dev/fd/") {
+		if err := os.MkdirAll(filepath.Dir(mountPoint), 0o755); err != nil {
+			return nil, fmt.Errorf("mkdir mount parent: %w", err)
+		}
+		if err := os.MkdirAll(mountPoint, 0o755); err != nil {
+			return nil, fmt.Errorf("mkdir mount: %w", err)
+		}
 	}
 
 	root, err := NewMonitoredLoopbackRoot(backingDir, hooks)
