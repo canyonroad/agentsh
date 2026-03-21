@@ -467,6 +467,15 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 			_ = seccomp.NotifRespond(fd, &resp)
 			return
 		}
+		// Only emulate openat2 when how_size is exactly 24 (OPEN_HOW_SIZE_VER0).
+		// Future kernel versions may extend the struct with new fields that we
+		// can't replicate. Fall back to CONTINUE for larger sizes.
+		if howSize > 24 {
+			slog.Debug("emulated file handler: openat2 how_size > 24, falling back to CONTINUE", "pid", pid, "size", howSize)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
 		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
 		if err != nil {
 			// Can't read open_how — fall back to CONTINUE so the kernel handles it

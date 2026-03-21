@@ -56,18 +56,18 @@ func createFileHandler(cfg config.SandboxSeccompFileMonitorConfig, pol *policy.E
 
 	// Enable AddFD emulation when configured and the kernel supports it.
 	// IMPORTANT: emulated opens run in the supervisor's context, outside the
-	// tracee's Landlock restrictions. Only enable when seccomp-notify is the
-	// sole enforcement backend (no Landlock, no FUSE).
+	// tracee's Landlock/FUSE restrictions. Only enable when seccomp-notify is
+	// the sole enforcement backend (no Landlock, no FUSE).
 	defaultVal := cfg.EnforceWithoutFUSE
 	openatEmulation := config.FileMonitorBoolWithDefault(cfg.OpenatEmulation, defaultVal)
 	if openatEmulation && enforce && unixmon.ProbeAddFDSupport() {
-		// Defensive check: don't enable emulation if Landlock is active,
-		// since supervisor opens would bypass Landlock restrictions.
-		if !capabilities.DetectLandlock().Available {
+		landlockActive := capabilities.DetectLandlock().Available
+		fuseActive := registry.HasAnyMounts()
+		if !landlockActive && !fuseActive {
 			handler.SetEmulateOpen(true)
 		} else {
-			slog.Info("seccomp openat emulation disabled: Landlock is active",
-				"reason", "emulated opens would bypass Landlock restrictions")
+			slog.Info("seccomp openat emulation disabled: other backend active",
+				"landlock", landlockActive, "fuse_mounts", fuseActive)
 		}
 	}
 
