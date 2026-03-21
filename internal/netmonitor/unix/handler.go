@@ -478,6 +478,15 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 		}
 		fileArgs.Flags = uint32(howFlags)
 		fileArgs.Mode = uint32(howMode)
+		// Validate that upper 32 bits of flags/mode are zero — the emulation
+		// path truncates to uint32. If upper bits are set, fall back to CONTINUE
+		// to let the kernel validate the full values.
+		if howFlags>>32 != 0 || howMode>>32 != 0 {
+			slog.Debug("emulated file handler: openat2 flags/mode upper bits set, falling back to CONTINUE", "pid", pid, "flags", howFlags, "mode", howMode)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
 		var resolveErr error
 		resolveFlags, resolveErr = readOpenHowResolve(pid, fileArgs.HowPtr)
 		if resolveErr != nil {

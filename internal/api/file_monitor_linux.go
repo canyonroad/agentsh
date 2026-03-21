@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/policy"
@@ -54,13 +55,20 @@ func createFileHandler(cfg config.SandboxSeccompFileMonitorConfig, pol *policy.E
 	handler := unixmon.NewFileHandler(policyChecker, registry, emitter, enforce)
 
 	// Enable AddFD emulation when configured and the kernel supports it.
-	// The enforce_without_fuse flag signals that FUSE is not available for
-	// this deployment. AddFD requires SECCOMP_IOCTL_NOTIF_ADDFD (Linux 5.9+)
-	// with SECCOMP_ADDFD_FLAG_SEND (Linux 5.14+). Probe before enabling.
+	// IMPORTANT: emulated opens run in the supervisor's context, outside the
+	// tracee's Landlock restrictions. Only enable when seccomp-notify is the
+	// sole enforcement backend (no Landlock, no FUSE).
 	defaultVal := cfg.EnforceWithoutFUSE
 	openatEmulation := config.FileMonitorBoolWithDefault(cfg.OpenatEmulation, defaultVal)
 	if openatEmulation && enforce && unixmon.ProbeAddFDSupport() {
-		handler.SetEmulateOpen(true)
+		// Defensive check: don't enable emulation if Landlock is active,
+		// since supervisor opens would bypass Landlock restrictions.
+		if !capabilities.DetectLandlock().Available {
+			handler.SetEmulateOpen(true)
+		} else {
+			slog.Info("seccomp openat emulation disabled: Landlock is active",
+				"reason", "emulated opens would bypass Landlock restrictions")
+		}
 	}
 
 	return handler
