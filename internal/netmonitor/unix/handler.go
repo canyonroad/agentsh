@@ -535,17 +535,18 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 
 	// For non-emulated syscalls (CONTINUE path), do first ID validation
 	// before policy evaluation (spec section 4, step 2).
+	// NOTE: ID validation is defense-in-depth (TOCTOU mitigation), NOT a gate
+	// for policy evaluation. If it fails with anything other than ENOENT (stale),
+	// log and proceed — never skip policy evaluation due to an ID check error.
 	if forceContinue {
 		if err := NotifIDValid(notifFD, req.ID); err != nil {
 			if err == unix.ENOENT {
 				slog.Debug("emulated file handler: notification stale before policy check", "pid", pid)
 				return // notification cancelled, no response needed
 			}
-			// Non-ENOENT error — send CONTINUE to avoid leaving the syscall hanging.
-			slog.Warn("emulated file handler: NotifIDValid error, allowing", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-			_ = seccomp.NotifRespond(fd, &resp)
-			return
+			// Non-ENOENT error (e.g., EINVAL on custom kernels) — log but proceed
+			// with policy evaluation. ID validation is optional hardening.
+			slog.Debug("emulated file handler: NotifIDValid pre-check failed, proceeding with policy", "pid", pid, "error", err)
 		}
 	}
 
@@ -560,15 +561,14 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 		}
 		// Verify notification is still live before side-effecting supervisor open.
 		// A stale notification means the tracee exited — don't create/truncate files.
+		// Non-ENOENT errors (e.g., EINVAL) → proceed with emulation. The AddFD
+		// ioctl will fail-safe if the notification is truly gone.
 		if err := NotifIDValid(notifFD, req.ID); err != nil {
 			if err == unix.ENOENT {
 				slog.Debug("emulated file handler: notification stale before emulation", "pid", pid)
 				return
 			}
-			slog.Warn("emulated file handler: NotifIDValid error before emulation, allowing via CONTINUE", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-			_ = seccomp.NotifRespond(fd, &resp)
-			return
+			slog.Debug("emulated file handler: NotifIDValid pre-emulation check failed, proceeding", "pid", pid, "error", err)
 		}
 		emulateOpenat(fd, req, pid, path, fileArgs.Flags, fileArgs.Mode)
 		return
@@ -582,13 +582,13 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	}
 
 	// Second ID validation check after policy evaluation (spec section 4, step 4).
+	// Same principle: ENOENT = stale (skip response), other errors = proceed.
 	if err := NotifIDValid(notifFD, req.ID); err != nil {
 		if err == unix.ENOENT {
 			slog.Debug("emulated file handler: notification stale after policy check", "pid", pid)
 			return // notification cancelled, no response needed
 		}
-		// Non-ENOENT error — send CONTINUE to avoid leaving the syscall hanging.
-		slog.Warn("emulated file handler: NotifIDValid error after policy, allowing", "pid", pid, "error", err)
+		slog.Debug("emulated file handler: NotifIDValid post-check failed, proceeding", "pid", pid, "error", err)
 	}
 	resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
 	_ = seccomp.NotifRespond(fd, &resp)
