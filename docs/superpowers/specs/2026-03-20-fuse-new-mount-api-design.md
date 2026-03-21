@@ -1,7 +1,7 @@
 # FUSE New Mount API Fallback
 
 **Date:** 2026-03-20
-**Status:** Draft
+**Status:** Implemented
 **Scope:** Linux only
 
 ## Background
