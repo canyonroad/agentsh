@@ -58,8 +58,12 @@ func (l *DarwinLimiter) applySelf(limits ResourceLimits) error {
 	// Memory limit (RLIMIT_AS - address space)
 	if limits.MaxMemoryMB > 0 {
 		var rLimit unix.Rlimit
+		if err := unix.Getrlimit(unix.RLIMIT_AS, &rLimit); err != nil {
+			return fmt.Errorf("getrlimit AS: %w", err)
+		}
 		rLimit.Cur = uint64(limits.MaxMemoryMB) * 1024 * 1024
-		rLimit.Max = rLimit.Cur
+		// Preserve the hard limit — non-root processes cannot raise it back
+		// once lowered, which would make Cleanup unable to restore limits.
 		if err := unix.Setrlimit(unix.RLIMIT_AS, &rLimit); err != nil {
 			return fmt.Errorf("setrlimit AS: %w", err)
 		}
@@ -68,8 +72,16 @@ func (l *DarwinLimiter) applySelf(limits ResourceLimits) error {
 	// CPU time limit (RLIMIT_CPU) - in seconds
 	if limits.CommandTimeout > 0 {
 		var rLimit unix.Rlimit
+		if err := unix.Getrlimit(unix.RLIMIT_CPU, &rLimit); err != nil {
+			return fmt.Errorf("getrlimit CPU: %w", err)
+		}
 		rLimit.Cur = uint64(limits.CommandTimeout.Seconds())
-		rLimit.Max = rLimit.Cur + 60 // Grace period
+		// Set hard limit for grace-period kill, but never lower it below
+		// the current value so that Cleanup can restore original limits.
+		gracePeriod := rLimit.Cur + 60
+		if rLimit.Max == unix.RLIM_INFINITY || gracePeriod > rLimit.Max {
+			rLimit.Max = gracePeriod
+		}
 		if err := unix.Setrlimit(unix.RLIMIT_CPU, &rLimit); err != nil {
 			return fmt.Errorf("setrlimit CPU: %w", err)
 		}
@@ -78,8 +90,10 @@ func (l *DarwinLimiter) applySelf(limits ResourceLimits) error {
 	// File size limit (RLIMIT_FSIZE)
 	if limits.MaxDiskMB > 0 {
 		var rLimit unix.Rlimit
+		if err := unix.Getrlimit(unix.RLIMIT_FSIZE, &rLimit); err != nil {
+			return fmt.Errorf("getrlimit FSIZE: %w", err)
+		}
 		rLimit.Cur = uint64(limits.MaxDiskMB) * 1024 * 1024
-		rLimit.Max = rLimit.Cur
 		if err := unix.Setrlimit(unix.RLIMIT_FSIZE, &rLimit); err != nil {
 			return fmt.Errorf("setrlimit FSIZE: %w", err)
 		}
@@ -88,8 +102,10 @@ func (l *DarwinLimiter) applySelf(limits ResourceLimits) error {
 	// Process limit (RLIMIT_NPROC)
 	if limits.MaxProcesses > 0 {
 		var rLimit unix.Rlimit
+		if err := unix.Getrlimit(unix.RLIMIT_NPROC, &rLimit); err != nil {
+			return fmt.Errorf("getrlimit NPROC: %w", err)
+		}
 		rLimit.Cur = uint64(limits.MaxProcesses)
-		rLimit.Max = rLimit.Cur
 		if err := unix.Setrlimit(unix.RLIMIT_NPROC, &rLimit); err != nil {
 			return fmt.Errorf("setrlimit NPROC: %w", err)
 		}

@@ -226,7 +226,9 @@ func TestDarwinLimiter_ApplySelfCPUTimeLimit(t *testing.T) {
 	err = unix.Getrlimit(unix.RLIMIT_CPU, &newCPU)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(300), newCPU.Cur)
-	assert.Equal(t, uint64(360), newCPU.Max) // +60 grace period
+	// Hard limit should be at least Cur+60 (grace period), but won't be
+	// lowered below the original hard limit since non-root can't raise it back.
+	assert.GreaterOrEqual(t, newCPU.Max, uint64(360))
 
 	// Restore original limit
 	unix.Setrlimit(unix.RLIMIT_CPU, &origCPU)

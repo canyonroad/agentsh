@@ -237,8 +237,11 @@ func TestShimPipedStdin_PassesBinaryDataThrough(t *testing.T) {
 	tmp := t.TempDir()
 	shimBin := buildShim(t, tmp)
 
-	// Create sh.real as a copy of /bin/sh so the shim can resolve it.
-	copyFilePath(t, "/bin/sh", filepath.Join(tmp, "sh.real"))
+	// Symlink sh.real to /bin/sh so the shim can resolve it.
+	// A copy would lose the macOS code signature seal and get SIGKILL'd.
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
 
 	// Generate binary data with null bytes, ELF-like header, and full byte range.
 	binaryData := make([]byte, 4096)
@@ -280,7 +283,9 @@ func TestShimPipedStdin_PreservesExitCode(t *testing.T) {
 
 	tmp := t.TempDir()
 	shimBin := buildShim(t, tmp)
-	copyFilePath(t, "/bin/sh", filepath.Join(tmp, "sh.real"))
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
 
 	// Non-interactive: run a command that exits with code 42.
 	cmd := exec.Command(shimBin, "-c", "exit 42")
@@ -310,7 +315,9 @@ func TestShimPipedStdin_StderrNotContaminated(t *testing.T) {
 
 	tmp := t.TempDir()
 	shimBin := buildShim(t, tmp)
-	copyFilePath(t, "/bin/sh", filepath.Join(tmp, "sh.real"))
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
 
 	// Non-interactive: stdout and stderr should contain only what the command produces.
 	cmd := exec.Command(shimBin, "-c", "echo hello && echo err >&2")
