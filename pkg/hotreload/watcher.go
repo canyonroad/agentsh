@@ -286,6 +286,10 @@ func (w *PolicyWatcher) handleStagingFile(policyPath string) {
 
 	// Move policy file
 	if err := moveFile(policyPath, livePolicy); err != nil {
+		// Rollback: move .sig back to staging to avoid orphaned sig in live dir
+		if _, statErr := os.Stat(liveSig); statErr == nil {
+			os.Rename(liveSig, stagingSig) // best-effort
+		}
 		w.recordStagingError(fmt.Sprintf("staging move policy %s: %v", baseName, err))
 		if w.onStaging != nil {
 			w.onStaging(policyPath, err)
