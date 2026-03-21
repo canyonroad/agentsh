@@ -312,8 +312,9 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 	fsMount, err := fsmonitor.MountWorkspace(ctx, cfg.SourcePath, effectiveMountPoint, hooks)
 	if err != nil {
 		if mountedViaNewAPI {
+			// Unmount the VFS mount we created. Don't close fuseFD —
+			// go-fuse may have taken ownership during partial init.
 			unix.Unmount(cfg.MountPoint, 0)
-			unix.Close(fuseFD)
 		}
 		return nil, fmt.Errorf("failed to mount FUSE filesystem: %w", err)
 	}
