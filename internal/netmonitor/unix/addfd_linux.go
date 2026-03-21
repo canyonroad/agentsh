@@ -4,6 +4,8 @@ package unix
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -92,21 +94,46 @@ func NotifAddFD(notifFD int, notifID uint64, srcFD int, targetFD int, flags uint
 	return int(r1), nil
 }
 
-// ProbeAddFDSupport checks if the kernel supports SECCOMP_IOCTL_NOTIF_ADDFD.
-// Returns true if supported (Linux 5.9+ with SEND flag support in 5.14+).
-// This is a best-effort probe: it tries the ioctl with an invalid fd and
-// checks the error. EBADF means the ioctl is recognized; ENOTTY means not.
+// ProbeAddFDSupport checks if the kernel supports SECCOMP_IOCTL_NOTIF_ADDFD
+// with SECCOMP_ADDFD_FLAG_SEND (atomic AddFD + respond). This requires
+// Linux 5.14+. Checks kernel version via uname rather than probing the ioctl
+// (ioctl probes with invalid fds are unreliable — EBADF may occur before
+// ioctl command dispatch).
 func ProbeAddFDSupport() bool {
-	req := seccompNotifAddFD{}
-	_, _, errno := unix.Syscall(
-		unix.SYS_IOCTL,
-		uintptr(0xFFFFFFFF), // invalid fd
-		uintptr(ioctlNotifAddFD),
-		uintptr(unsafe.Pointer(&req)),
-	)
-	// EBADF = kernel knows the ioctl but fd is invalid → supported
-	// ENOTTY = kernel doesn't know this ioctl → not supported
-	return errno != unix.ENOTTY
+	var utsname unix.Utsname
+	if err := unix.Uname(&utsname); err != nil {
+		return false
+	}
+	release := unix.ByteSliceToString(utsname.Release[:])
+	major, minor := parseKernelVersion(release)
+	return major > 5 || (major == 5 && minor >= 14)
+}
+
+// parseKernelVersion extracts major.minor from a kernel release string like "5.14.0-1-amd64".
+func parseKernelVersion(release string) (int, int) {
+	// Find first dot
+	dot1 := strings.IndexByte(release, '.')
+	if dot1 < 0 {
+		return 0, 0
+	}
+	major, err := strconv.Atoi(release[:dot1])
+	if err != nil {
+		return 0, 0
+	}
+	rest := release[dot1+1:]
+	// Find second dot or end of numeric portion
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return major, 0
+	}
+	minor, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return major, 0
+	}
+	return major, minor
 }
 
 // NotifIDValid checks whether a seccomp notification ID is still valid

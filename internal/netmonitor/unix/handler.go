@@ -324,21 +324,11 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 
 	result := h.Handle(goCtx, ectx)
 
-	// Evaluate file_rules on the binary path (in addition to command_rules).
-	if result.Action == ActionContinue && fileHandler != nil {
-		fileResult := fileHandler.Handle(FileRequest{
-			PID:       pid,
-			Syscall:   int32(req.Data.Syscall),
-			Path:      filename,
-			Operation: "execute",
-			SessionID: sessID,
-		})
-		if fileResult.Action == ActionDeny {
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -fileResult.Errno}
-			_ = seccomp.NotifRespond(fd, &resp)
-			return
-		}
-	}
+	// NOTE: file_rules evaluation on execve binary paths was considered but
+	// deferred — existing policies define operations like open/read/write/stat
+	// but not "execute", and adding it risks blocking legitimate binaries
+	// when catch-all deny rules are present. The openat interception already
+	// enforces file_rules when the binary is opened for reading/execution.
 
 	switch result.Action {
 	case ActionRedirect:
@@ -503,9 +493,22 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 		}
 	}
 
-	// Resolve primary path — fail-secure in emulation mode.
+	// Determine early if this will be a CONTINUE-path syscall (non-open,
+	// fallback, or unsupported flags). Used to decide error handling below.
+	forceContinue := !isOpenSyscall(args.Nr) || shouldFallbackToContinue(args.Nr, fileArgs.Flags, resolveFlags)
+
+	// Resolve primary path.
+	// In emulation mode (non-CONTINUE): fail-secure (deny on error).
+	// In CONTINUE mode: fail-open (let kernel handle it) — the kernel will
+	// validate the path itself.
 	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 	if err != nil {
+		if forceContinue {
+			slog.Debug("emulated file handler: failed to resolve path in CONTINUE mode, allowing", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
 		slog.Debug("emulated file handler: failed to resolve path, denying", "pid", pid, "error", err)
 		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
 		_ = seccomp.NotifRespond(fd, &resp)
@@ -517,6 +520,12 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	if fileArgs.HasSecondPath {
 		p2, err := resolvePathAt(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
 		if err != nil {
+			if forceContinue {
+				slog.Debug("emulated file handler: failed to resolve second path in CONTINUE mode, allowing", "pid", pid, "error", err)
+				resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+				_ = seccomp.NotifRespond(fd, &resp)
+				return
+			}
 			slog.Debug("emulated file handler: failed to resolve second path, denying", "pid", pid, "error", err)
 			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
 			_ = seccomp.NotifRespond(fd, &resp)
@@ -534,8 +543,7 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 
 	// For non-emulated syscalls (CONTINUE path), do first ID validation
 	// before policy evaluation (spec section 4, step 2).
-	needsContinue := !isOpenSyscall(args.Nr) || shouldFallbackToContinue(args.Nr, fileArgs.Flags, resolveFlags)
-	if needsContinue {
+	if forceContinue {
 		if err := NotifIDValid(notifFD, req.ID); err != nil {
 			slog.Debug("emulated file handler: notification stale before policy check", "pid", pid)
 			return
@@ -545,7 +553,7 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	result := h.Handle(frequest)
 
 	// Branch: is this an open syscall that we should emulate via AddFD?
-	if !needsContinue {
+	if !forceContinue {
 		if result.Action == ActionDeny {
 			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -result.Errno}
 			_ = seccomp.NotifRespond(fd, &resp)
@@ -578,10 +586,7 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 func emulateOpenat(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, pid int, path string, flags uint32, mode uint32) {
 	procPath := fmt.Sprintf("/proc/%d/root%s", pid, path)
 
-	openFlags := int(flags) & (unix.O_RDONLY | unix.O_WRONLY | unix.O_RDWR |
-		unix.O_APPEND | unix.O_TRUNC | unix.O_CREAT | unix.O_EXCL |
-		unix.O_NOFOLLOW | unix.O_DIRECTORY | unix.O_PATH | unix.O_NOCTTY |
-		unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_SYNC | unix.O_DSYNC)
+	openFlags := int(flags) & int(emulableFlagMask)
 
 	// When O_CREAT is set, apply the tracee's umask to the mode so that
 	// supervisor-created files have the same permissions the kernel would

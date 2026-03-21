@@ -44,11 +44,22 @@ func isFileSyscall(nr int32) bool {
 //   - openat2 has non-zero RESOLVE_* flags (the supervisor cannot replicate
 //     these resolution semantics).
 //   - O_TMPFILE is used (file has no path to open via /proc/<pid>/root).
+// emulableFlagMask is the set of open flags the supervisor can faithfully replicate.
+const emulableFlagMask = unix.O_RDONLY | unix.O_WRONLY | unix.O_RDWR |
+	unix.O_APPEND | unix.O_TRUNC | unix.O_CREAT | unix.O_EXCL |
+	unix.O_NOFOLLOW | unix.O_DIRECTORY | unix.O_PATH | unix.O_NOCTTY |
+	unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_SYNC | unix.O_DSYNC
+
 func shouldFallbackToContinue(nr int32, flags uint32, resolveFlags uint64) bool {
 	if resolveFlags != 0 {
 		return true
 	}
 	if flags&unix.O_TMPFILE == unix.O_TMPFILE {
+		return true
+	}
+	// If the child passed flags the supervisor can't replicate, fall back
+	// to CONTINUE rather than silently dropping bits.
+	if flags & ^uint32(emulableFlagMask) != 0 {
 		return true
 	}
 	return false
