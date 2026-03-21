@@ -56,8 +56,8 @@ New function `mountFUSEViaNewAPI(mountPoint string, opts *fuse.MountOptions) (fu
 7. `unix.FsconfigSetString(fsctx, "max_read", strconv.Itoa(opts.MaxWrite))` — match go-fuse's behavior
 8. If `opts.AllowOther`: `unix.FsconfigSetFlag(fsctx, "allow_other")`
 9. `unix.FsconfigCreate(fsctx)` — finalize the superblock
-10. Close `fsctx` (no longer needed after create)
-11. `unix.Fsmount(fsctx_result, 0, 0)` → `mntFD`
+10. `unix.Fsmount(fsctx, 0, 0)` → `mntFD`
+11. Close `fsctx` (no longer needed after fsmount)
 12. `unix.MoveMount(mntFD, "", unix.AT_FDCWD, mountPoint, unix.MOVE_MOUNT_F_EMPTY_PATH)`
 13. Close `mntFD` (no longer needed after move_mount)
 14. Return `fuseDev` — this is the fd go-fuse will use
