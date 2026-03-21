@@ -1,7 +1,7 @@
 # Seccomp User-Notify Filesystem Enforcement Backend
 
 **Date:** 2026-03-20
-**Status:** Draft
+**Status:** Implemented
 **Scope:** Linux only (seccomp user notification)
 
 ## Background
@@ -64,19 +64,21 @@ Routing in `handleFileNotification` is unchanged — all syscalls flow through: 
 
 **File:** `internal/netmonitor/unix/handler.go` — new function `handleFileNotificationEmulated`
 
-When `FileHandler.emulateOpen` is true and the syscall is `openat`/`openat2` (or legacy `open`/`creat` on amd64), allowed opens are emulated by the supervisor instead of using CONTINUE:
+When `FileHandler.emulateOpen` is true and the syscall is `openat` or legacy `open`/`creat` on amd64, allowed opens are emulated by the supervisor instead of using CONTINUE:
 
 1. Extract args, resolve path, evaluate policy (same as existing path).
 2. **Denied**: respond with `-EACCES` (unchanged).
-3. **Allowed openat/openat2** (and legacy `open`/`creat` on amd64):
+3. **Allowed openat** (and legacy `open`/`creat` on amd64):
    a. Supervisor opens the file via `/proc/<pid>/root/<resolved_path>` using the child's flags. Forwarded flags: `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_APPEND`, `O_TRUNC`, `O_CREAT` (with mode), `O_NOFOLLOW`, `O_DIRECTORY`, `O_PATH`, `O_NOCTTY`, `O_CLOEXEC`, `O_NONBLOCK`.
-   b. If supervisor open fails → respond with the errno from the failed open.
-   c. If supervisor open succeeds → inject fd via `NotifAddFD(notifFD, reqID, supervisorFD, 0, SECCOMP_ADDFD_FLAG_SEND)`. The `SEND` flag atomically injects the fd AND completes the notification response — no separate `NotifRespond` call.
-   d. Close the supervisor's copy of the fd.
+   b. When `O_CREAT` is set, the tracee's umask is read from `/proc/<pid>/status` and applied to `mode` so created files have the same permissions the kernel would produce. If umask cannot be read → fall back to CONTINUE (not raw mode, not error).
+   c. If supervisor open fails → respond with the actual errno from the failed open (not EIO).
+   d. If supervisor open succeeds → inject fd via `seccompNotifAddFD` struct with `SECCOMP_ADDFD_FLAG_SEND`. `O_CLOEXEC` from the original flags is propagated to `newfdFlags` so the injected fd has the correct close-on-exec flag in the tracee. The `SEND` flag atomically injects the fd AND completes the notification response — no separate `NotifRespond` call.
+   e. Close the supervisor's copy of the fd. If AddFD fails with `ENOENT` (notification stale), skip response. Other AddFD failures propagate the actual errno to the tracee.
 4. **Allowed non-openat** (unlinkat, statx, etc.): ID validation bracket + CONTINUE (section 4).
 
-**Fallbacks to CONTINUE + ID validation** (accept residual TOCTOU):
-- `openat2` with non-zero `RESOLVE_*` flags — supervisor cannot replicate `RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH`, `RESOLVE_IN_ROOT`, `RESOLVE_NO_XDEV` from its own namespace.
+**`openat2` is never emulated — always uses CONTINUE + ID validation.** The `open_how` struct's `resolve` field (`RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH`, `RESOLVE_IN_ROOT`, `RESOLVE_NO_XDEV`, etc.) encodes semantics the supervisor cannot replicate from its own namespace. Attempting to emulate even zero-`resolve` `openat2` was rejected to avoid subtle correctness bugs as new `RESOLVE_*` flags are added by future kernels. Invalid `openat2` args (`how_ptr=0` or `how_size<24`) are passed directly to the kernel via CONTINUE.
+
+**Additional CONTINUE fallbacks** (accept residual TOCTOU):
 - `O_TMPFILE` — supervisor's tmpfile may land on a different filesystem.
 
 **Error handling in emulation mode:** When `emulateOpen` is true and path resolution fails (tracee memory read error, dirfd resolution error), the handler **denies** the syscall with `-EACCES` (fail-secure). This differs from the existing CONTINUE-mode behavior where path resolution failure results in allowing the syscall. Fail-open is acceptable for audit mode; fail-secure is required for enforcement mode.
@@ -107,50 +109,57 @@ This narrows but does not eliminate the TOCTOU window for CONTINUE-mode syscalls
 
 ### 5. /proc/self/fd/N Interception
 
-**File:** `internal/netmonitor/unix/file_handler.go`
+**File:** `internal/netmonitor/unix/file_syscalls.go`
 
 A process can bypass path-based policy by opening `/proc/self/fd/<N>` to re-derive a path from an existing fd.
 
-In `FileHandler.Handle()`, before policy evaluation:
-1. Check if the resolved path matches `/proc/self/fd/<N>`, `/proc/<pid>/fd/<N>` (where pid matches the requesting process or thread group), or `/dev/fd/<N>`.
-2. If matched, resolve the actual target via readlink on `/proc/<pid>/fd/<N>`.
-3. Evaluate policy against the **target path**, not the procfs path.
-4. For AddFD emulation: open the target path (not the procfs path).
+In `FileHandler.Handle()` and `handleFileNotificationEmulated()`, before policy evaluation:
+1. Check if the resolved path matches any of the following:
+   - `/proc/self/fd/<N>`
+   - `/proc/thread-self/fd/<N>`
+   - `/proc/<pid>/fd/<N>` where `<pid>` is the requesting TID or TGID (multi-threaded processes may reference either)
+   - `/dev/fd/<N>`
+   - `/dev/stdin`, `/dev/stdout`, `/dev/stderr` (mapped to fd 0, 1, 2 respectively)
+   - `/proc/self/fd/<N>/suffix` and similar paths with trailing path components (with directory check)
+2. If matched, resolve the actual target via `readlink` on `/proc/<pid>/fd/<N>`.
+3. Non-filesystem pseudo-paths (`pipe:[...]`, `socket:[...]`, `anon_inode:[...]`) are **not** substituted — they have no absolute path to enforce against.
+4. For `/fd/N/suffix` paths: verify the fd target is a directory before appending the suffix. If not a directory, leave path unrewritten (kernel will return `ENOTDIR` via CONTINUE).
+5. Evaluate policy against the **target path**, not the procfs path.
+6. For AddFD emulation: open the target path (not the procfs path).
 
 **TOCTOU note:** A concurrent thread could close fd N and reopen a different file on that fd number between the supervisor's `readlink` and the policy evaluation. For AddFD-emulated opens, this is mitigated because the supervisor opens the resolved target path (not the procfs symlink). For CONTINUE-mode syscalls (e.g., `fstatat` on `/proc/self/fd/N`), this residual race exists but is bounded by the sandbox.
 
-**New helper** in `file_syscalls.go`:
+**Helper** in `file_syscalls.go`:
 ```go
 func resolveProcFD(pid int, path string) (resolvedPath string, wasProcFD bool)
 ```
 
 ### 6. execve file_rules Evaluation
 
-**File:** `internal/netmonitor/unix/handler.go`
+**Status: Deferred.** This section was removed from the implementation. `openat` interception already covers access to binary files before execution, making a separate `execve` file_rules check redundant in practice. The `handleExecveNotification` function signature was not changed — no `fileHandler` parameter was added.
 
-In `handleExecveNotification`, after `ExecveHandler.Handle()` returns `ActionContinue`:
-1. Call `fileHandler.Handle(FileRequest{Path: filename, Operation: "execute", PID: pid, SessionID: sessID, Syscall: SYS_EXECVE, ...})`.
+The design below is preserved for reference in case this is revisited:
 
-`SessionID` is threaded from the `sessID` parameter already passed to `ServeNotifyWithExecve`. This is forwarded to `handleExecveNotification` alongside the `fileHandler` parameter, ensuring the FUSE mount check in `FileHandler.Handle()` correctly identifies paths under FUSE enforcement.
-2. If file policy denies → respond with `-EACCES`.
-3. If file policy allows → proceed with CONTINUE.
-
-The `fileHandler` parameter is added to `handleExecveNotification`. `ServeNotifyWithExecve` already has both handlers in scope.
-
-Operation `"execute"` is distinct from `"open"` — policy authors can write rules targeting execution specifically.
-
-No AddFD needed — execve doesn't return an fd. CONTINUE is correct.
+> In `handleExecveNotification`, after `ExecveHandler.Handle()` returns `ActionContinue`, call `fileHandler.Handle(FileRequest{Path: filename, Operation: "execute", ...})`. If file policy denies → respond with `-EACCES`. Operation `"execute"` is distinct from `"open"` — policy authors can write rules targeting execution specifically.
 
 ### 7. Backend Selection and Detection
 
 **File:** `internal/api/file_monitor_linux.go`
 
-`createFileHandler` sets:
+`createFileHandler` enables AddFD emulation when all of the following are true:
+
+1. `cfg.OpenatEmulation` is true (or defaults to true when `enforce_without_fuse` is true)
+2. `cfg.EnforceWithoutFUSE` is true (enforcement mode, not audit mode)
+3. `unixmon.ProbeAddFDSupport()` returns true — kernel is >= 5.14 (checked via `uname`, not ioctl probe; ioctl probes with invalid fds are unreliable as `EBADF` may occur before ioctl command dispatch)
+4. `landlockEnabled` is false OR `capabilities.DetectLandlock().Available` is false — Landlock is not actively enforcing
+5. `registry.HasAnyMounts()` is false — no FUSE mounts are active for this session
+
 ```go
-emulateOpen = cfg.OpenatEmulation && !fuseAvailable && !landlockAvailable
+emulateOpen = openatEmulation && enforce && ProbeAddFDSupport() &&
+              !landlockActive && !fuseActive
 ```
 
-Where `fuseAvailable` = mount registry has active FUSE mounts for this session, `landlockAvailable` = `capabilities.DetectLandlock().Available`.
+The `landlockEnabled` boolean is threaded from `a.cfg.Landlock.Enabled` through `startNotifyHandler` into `createFileHandler`, distinguishing "Landlock configured by the user" from "Landlock kernel-available" (`capabilities.DetectLandlock().Available`). Both must be true for Landlock to be considered active.
 
 **File:** `internal/capabilities/detect_linux.go`
 
@@ -220,17 +229,17 @@ sandbox:
 
 | Syscall class | Response strategy | TOCTOU | Rationale |
 |---|---|---|---|
-| openat/openat2/open/creat (no RESOLVE_*) | AddFD emulation | Eliminated | Supervisor opens file, injects fd atomically |
-| openat2 with RESOLVE_* | CONTINUE + ID validation | Residual | Can't replicate resolve semantics from supervisor |
+| openat/open/creat (no O_TMPFILE) | AddFD emulation | Eliminated | Supervisor opens file, injects fd atomically |
+| openat2 (all cases) | CONTINUE + ID validation | Residual | Never emulated — `resolve` flags encode semantics the supervisor cannot replicate; blanket exclusion avoids correctness bugs as new RESOLVE_* flags are added |
 | O_TMPFILE | CONTINUE + ID validation | Residual | Supervisor may hit wrong filesystem |
 | unlinkat, renameat2, mkdirat, mknodat, etc. | CONTINUE + ID validation | Residual (low severity) | Non-fd syscalls; worst case = wrong file affected within sandbox |
 | statx, newfstatat, faccessat2, readlinkat | CONTINUE + ID validation | Residual (low severity) | Read-only metadata; information leak bounded by sandbox |
-| execve/execveat | CONTINUE | N/A | Kernel loads binary; no fd returned |
+| execve/execveat | CONTINUE | N/A | Kernel loads binary; no fd returned. file_rules check deferred (openat interception covers binary access) |
 | io_uring_setup/enter/register | ERRNO(EPERM) | N/A | Blocked at BPF level |
 
 ## Dependencies
 
-- Linux 5.14+ for `SECCOMP_ADDFD_FLAG_SEND` (atomic AddFD + respond).
+- Linux 5.14+ for `SECCOMP_ADDFD_FLAG_SEND` (atomic AddFD + respond). Detected at runtime via `uname` kernel version check (`ProbeAddFDSupport`), not ioctl probe.
 - Existing `github.com/seccomp/libseccomp-golang` (CGO) — no new dependencies.
 - Existing `NotifAddFD` implementation in `addfd_linux.go`.
 

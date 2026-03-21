@@ -1412,3 +1412,54 @@ git commit -m "test(seccomp): add integration tests for AddFD emulation and io_u
 ### Deferred: End-to-end Deno test suite
 
 The spec (section 9, item 6) calls for compiling a small C binary inside the Deno Deploy sandbox that makes raw syscalls (openat, statx, unlinkat) to verify kernel-level enforcement independent of the exec API. This requires the Deno test infrastructure (`test-template.ts`) and a Firecracker sandbox environment, which is out of scope for this Go-side implementation plan. Track this as a separate follow-up task in the Deno test suite.
+
+---
+
+## Post-Implementation Notes
+
+Key deviations from the original plan discovered during implementation and roborev review:
+
+### openat2 is never emulated
+
+The plan (Task 8) described `openat2` as falling back to CONTINUE only when `RESOLVE_*` flags were non-zero. The final implementation **never emulates `openat2`** regardless of `resolve` flags. The reason: the `open_how.resolve` field encodes kernel-enforced path traversal semantics (`RESOLVE_BENEATH`, `RESOLVE_IN_ROOT`, `RESOLVE_NO_SYMLINKS`, etc.) that the supervisor cannot replicate from its own namespace, and attempting to emulate even zero-`resolve` `openat2` would be fragile as new `RESOLVE_*` flags are added by future kernels. Invalid `openat2` args (`how_ptr=0` or `how_size<24`) are passed directly to the kernel via CONTINUE.
+
+### execve file_rules evaluation deferred
+
+Task 9 was not implemented. `openat` interception already covers access to binary files before execution — the binary must be opened before the kernel can exec it. A separate `file_rules` check on `execve` was deemed redundant and was removed to keep `handleExecveNotification` simple. The `fileHandler` parameter was not added to that function.
+
+### ProbeAddFDSupport uses kernel version check, not ioctl probe
+
+Task 11 described probing the ioctl directly. The final implementation uses `uname(2)` to check the kernel version (`>= 5.14`) instead. Probing with an invalid fd is unreliable: `EBADF` can occur before the kernel dispatches the ioctl command, making it impossible to distinguish "ioctl not supported" from "invalid argument".
+
+### Emulation gating conditions
+
+The original plan gated emulation on `openatEmulation && !fuseAvailable && !landlockAvailable`. The final condition adds two requirements:
+- `enforce` must be true (audit-only mode never emulates)
+- `ProbeAddFDSupport()` must return true (kernel >= 5.14)
+
+The Landlock check also became more precise: `landlockEnabled` (user config) AND `capabilities.DetectLandlock().Available` (kernel support) must both be true to suppress emulation. The `landlockEnabled` boolean is threaded through `startNotifyHandler` → `createFileHandler` from `a.cfg.Landlock.Enabled`.
+
+### resolveProcFD covers more patterns than originally specified
+
+The spec described `/proc/self/fd/N`, `/proc/<pid>/fd/N`, `/dev/fd/N`. The final implementation also handles:
+- `/proc/thread-self/fd/N`
+- `/dev/stdin`, `/dev/stdout`, `/dev/stderr` (mapped to fd 0, 1, 2)
+- `/fd/N/suffix` path forms with a directory check on the target
+- TID vs. TGID: for multi-threaded processes the seccomp TID may differ from the TGID; both are checked via `readTGID`
+- Non-filesystem pseudo-paths (`pipe:[...]`, `socket:[...]`, `anon_inode:[...]`) are explicitly not substituted
+
+### O_CLOEXEC propagated to injected fd
+
+The spec did not mention this explicitly. `emulateOpenat` propagates `O_CLOEXEC` from the tracee's open flags to `seccompNotifAddFD.newfdFlags` so the injected fd has the correct close-on-exec flag.
+
+### umask handling on O_CREAT
+
+The spec did not describe this. When `O_CREAT` is set, the tracee's umask is read from `/proc/<pid>/status` and applied to the mode before the supervisor's `open(2)` call, matching the permissions the kernel would produce. If the umask read fails, the handler falls back to CONTINUE (not fail-secure, not raw mode) to avoid creating files with over-permissive modes.
+
+### AddFD failure error handling
+
+The spec said "respond with EIO" on AddFD failure. The final implementation propagates the actual `errno` from the ioctl (e.g., `EMFILE` if the tracee is out of fds). `ENOENT` from AddFD means the notification became stale (process exited) — in that case no response is sent.
+
+### NotifIDValid error handling
+
+The spec said stale (`ENOENT`) → skip response. The final implementation also handles non-`ENOENT` errors from `NotifIDValid`: these send CONTINUE to avoid leaving the tracee's syscall permanently blocked.
