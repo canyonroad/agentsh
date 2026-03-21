@@ -394,8 +394,14 @@ func resolveProcFD(pid int, path string) (string, bool) {
 	if !strings.HasPrefix(target, "/") {
 		return path, false
 	}
-	// Append any trailing path components after the fd number.
+	// When a suffix exists (e.g., /proc/self/fd/3/subpath), verify that the
+	// fd target is a directory. For non-directory fds, the kernel would return
+	// ENOTDIR — don't rewrite the path (let the kernel handle it via CONTINUE).
 	if suffix != "" {
+		fi, err := os.Stat(target)
+		if err != nil || !fi.IsDir() {
+			return path, false
+		}
 		target = filepath.Clean(target + suffix)
 	}
 	return target, true

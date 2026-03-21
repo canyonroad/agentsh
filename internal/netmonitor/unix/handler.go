@@ -633,12 +633,16 @@ func emulateOpenat(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, pid int, path s
 	// produce. The umask is read from /proc/<pid>/status (Umask field).
 	effectiveMode := mode
 	if openFlags&unix.O_CREAT != 0 {
-		if umask, err := readTraceeUmask(pid); err == nil {
-			effectiveMode = mode &^ umask
+		umask, err := readTraceeUmask(pid)
+		if err != nil {
+			// Can't read umask — fall back to CONTINUE to avoid creating
+			// files with potentially over-permissive modes.
+			slog.Debug("emulateOpenat: cannot read umask, falling back to CONTINUE", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
 		}
-		// On error reading umask, use the raw mode — this is conservative
-		// (may be slightly more permissive than intended, but the file is
-		// inside the sandbox so the blast radius is contained).
+		effectiveMode = mode &^ umask
 	}
 
 	supervisorFD, err := unix.Open(procPath, openFlags, effectiveMode)
@@ -677,7 +681,12 @@ func emulateOpenat(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, pid int, path s
 	_ = unix.Close(supervisorFD)
 	if addErrno != 0 {
 		slog.Error("emulateOpenat: AddFD failed", "pid", pid, "path", path, "error", addErrno)
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EIO)}
+		// ENOENT = notification stale (process exited) — no response needed.
+		if addErrno == unix.ENOENT {
+			return
+		}
+		// Propagate actual errno (e.g., EMFILE) to the tracee.
+		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(addErrno)}
 		_ = seccomp.NotifRespond(fd, &resp)
 		return
 	}
