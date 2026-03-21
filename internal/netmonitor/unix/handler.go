@@ -469,8 +469,10 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 		}
 		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
 		if err != nil {
-			slog.Debug("emulated file handler: failed to read open_how, denying", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
+			// Can't read open_how — fall back to CONTINUE so the kernel handles it
+			// with proper error semantics, rather than returning EACCES.
+			slog.Debug("emulated file handler: failed to read open_how, falling back to CONTINUE", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
 			_ = seccomp.NotifRespond(fd, &resp)
 			return
 		}
@@ -529,6 +531,18 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	}
 
 	operation := syscallToOperation(args.Nr, fileArgs.Flags)
+
+	// Resolve /proc/self/fd/N, /proc/<pid>/fd/N, /dev/fd/N aliases before
+	// both policy evaluation AND emulation. Without this, emulateOpenat would
+	// open /proc/<pid>/root/proc/self/fd/N in the supervisor's context.
+	if resolved, wasProcFD := resolveProcFD(pid, path); wasProcFD {
+		path = resolved
+	}
+	if path2 != "" {
+		if resolved, wasProcFD := resolveProcFD(pid, path2); wasProcFD {
+			path2 = resolved
+		}
+	}
 
 	frequest := FileRequest{
 		PID: pid, Syscall: args.Nr, Path: path, Path2: path2,
