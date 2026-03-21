@@ -185,7 +185,7 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		// Route to appropriate handler
 		if IsExecveSyscall(syscallNr) && execveHandler != nil {
 			slog.Debug("ServeNotifyWithExecve: routing to execve handler", "session_id", sessID, "pid", req.Pid)
-			handleExecveNotification(ctx, scmpFD, req, execveHandler, fileHandler, sessID)
+			handleExecveNotification(ctx, scmpFD, req, execveHandler)
 			continue
 		}
 
@@ -243,7 +243,7 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 // handleExecveNotification processes an execve/execveat notification.
 // It reads the filename and argv from the tracee process, builds an ExecveContext,
 // and calls the handler to make a decision.
-func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *ExecveHandler, fileHandler *FileHandler, sessID string) {
+func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, h *ExecveHandler) {
 	// Extract syscall args
 	args := SyscallArgs{
 		Nr:   int32(req.Data.Syscall),
@@ -323,12 +323,6 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 	}
 
 	result := h.Handle(goCtx, ectx)
-
-	// NOTE: file_rules evaluation on execve binary paths was considered but
-	// deferred — existing policies define operations like open/read/write/stat
-	// but not "execute", and adding it risks blocking legitimate binaries
-	// when catch-all deny rules are present. The openat interception already
-	// enforces file_rules when the binary is opened for reading/execution.
 
 	switch result.Action {
 	case ActionRedirect:
@@ -563,6 +557,18 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	if !forceContinue {
 		if result.Action == ActionDeny {
 			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -result.Errno}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		// Verify notification is still live before side-effecting supervisor open.
+		// A stale notification means the tracee exited — don't create/truncate files.
+		if err := NotifIDValid(notifFD, req.ID); err != nil {
+			if err == unix.ENOENT {
+				slog.Debug("emulated file handler: notification stale before emulation", "pid", pid)
+				return
+			}
+			slog.Warn("emulated file handler: NotifIDValid error before emulation, allowing via CONTINUE", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
 			_ = seccomp.NotifRespond(fd, &resp)
 			return
 		}

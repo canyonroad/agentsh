@@ -288,17 +288,25 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 		}
 	}
 
-	// Block io_uring to prevent seccomp bypass
+	// Block io_uring to prevent seccomp bypass.
+	// Skip syscalls already in BlockedSyscalls to avoid duplicate rule errors.
 	if cfg.BlockIOUring {
-		ioUringBlock := seccomp.ActErrno.SetReturnCode(int16(1)) // EPERM = 1
-		ioUringSyscalls := []seccomp.ScmpSyscall{
-			seccomp.ScmpSyscall(unix.SYS_IO_URING_SETUP),
-			seccomp.ScmpSyscall(unix.SYS_IO_URING_ENTER),
-			seccomp.ScmpSyscall(unix.SYS_IO_URING_REGISTER),
+		blockedSet := make(map[int]bool, len(cfg.BlockedSyscalls))
+		for _, nr := range cfg.BlockedSyscalls {
+			blockedSet[nr] = true
 		}
-		for _, sc := range ioUringSyscalls {
-			if err := filt.AddRule(sc, ioUringBlock); err != nil {
-				return nil, fmt.Errorf("add io_uring block rule %v: %w", sc, err)
+		ioUringBlock := seccomp.ActErrno.SetReturnCode(int16(1)) // EPERM = 1
+		ioUringSyscalls := []int{
+			unix.SYS_IO_URING_SETUP,
+			unix.SYS_IO_URING_ENTER,
+			unix.SYS_IO_URING_REGISTER,
+		}
+		for _, nr := range ioUringSyscalls {
+			if blockedSet[nr] {
+				continue // already blocked via BlockedSyscalls
+			}
+			if err := filt.AddRule(seccomp.ScmpSyscall(nr), ioUringBlock); err != nil {
+				return nil, fmt.Errorf("add io_uring block rule %v: %w", nr, err)
 			}
 		}
 	}
