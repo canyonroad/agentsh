@@ -23,6 +23,12 @@ type SecurityCapabilities struct {
 	Ptrace          bool   // SYS_PTRACE capability available
 	PtraceEnabled   bool   // ptrace enforcement enabled in config
 	FileEnforcement string // "landlock", "fuse", "seccomp-notify", "none"
+
+	// Cached probe results (populated by DetectSecurityCapabilities, reused by buildLinuxDomains)
+	EBPFProbe   ProbeResult
+	CgroupProbe ProbeResult
+	PIDNSProbe  ProbeResult
+	CapProbe    ProbeResult
 }
 
 // SecurityMode represents the security enforcement mode.
@@ -36,9 +42,7 @@ const (
 
 // DetectSecurityCapabilities probes the system for available security primitives.
 func DetectSecurityCapabilities() *SecurityCapabilities {
-	caps := &SecurityCapabilities{
-		Capabilities: true, // Can always drop capabilities
-	}
+	caps := &SecurityCapabilities{}
 
 	// Detect Landlock
 	llResult := DetectLandlock()
@@ -46,13 +50,25 @@ func DetectSecurityCapabilities() *SecurityCapabilities {
 	caps.LandlockABI = llResult.ABI
 	caps.LandlockNetwork = llResult.NetworkSupport
 
-	// Detect other capabilities (use existing checks)
+	// Detect other capabilities via probes
 	caps.Seccomp = checkSeccompUserNotify().Available
 	caps.SeccompBasic = checkSeccompBasic()
-	caps.EBPF = checkeBPF().Available
 	caps.FUSE = checkFUSE()
-	caps.PIDNamespace = checkPIDNamespace()
 	caps.Ptrace = checkPtraceCapability()
+
+	// Run real probes and cache results
+	ebpfProbe := probeEBPF()
+	cgroupProbe := probeCgroupsV2()
+	pidnsProbe := probePIDNamespace()
+	capProbe := probeCapabilityDrop()
+
+	caps.EBPF = ebpfProbe.Available
+	caps.PIDNamespace = pidnsProbe.Available
+	caps.Capabilities = capProbe.Available
+	caps.EBPFProbe = ebpfProbe
+	caps.CgroupProbe = cgroupProbe
+	caps.PIDNSProbe = pidnsProbe
+	caps.CapProbe = capProbe
 
 	return caps
 }
@@ -178,9 +194,3 @@ func probeMountSyscall() bool {
 	}
 }
 
-// checkPIDNamespace checks if we're in a PID namespace (isolated process space).
-func checkPIDNamespace() bool {
-	// Check if PID 1 is not init/systemd (would indicate PID namespace)
-	// For now, return false - we can refine this check later
-	return false
-}

@@ -2,6 +2,8 @@
 
 package capabilities
 
+import "fmt"
+
 // detectFileEnforcementBackend returns the best available file enforcement backend.
 func detectFileEnforcementBackend(caps *SecurityCapabilities) string {
 	if caps.Landlock {
@@ -16,31 +18,10 @@ func detectFileEnforcementBackend(caps *SecurityCapabilities) string {
 	return "none"
 }
 
-// Detect runs platform-specific detection and returns unified result.
-func Detect() (*DetectResult, error) {
-	// Use existing detection
-	secCaps := DetectSecurityCapabilities()
-	secCaps.FileEnforcement = detectFileEnforcementBackend(secCaps)
-
-	caps := map[string]any{
-		"seccomp":             secCaps.Seccomp,
-		"seccomp_user_notify": secCaps.Seccomp,
-		"seccomp_basic":       secCaps.SeccompBasic,
-		"landlock":            secCaps.Landlock,
-		"landlock_abi":        secCaps.LandlockABI,
-		"landlock_network":    secCaps.LandlockNetwork,
-		"ebpf":                secCaps.EBPF,
-		"fuse":                secCaps.FUSE,
-		"cgroups_v2":          checkCgroupsV2().Available,
-		"pid_namespace":       secCaps.PIDNamespace,
-		"capabilities_drop":   secCaps.Capabilities,
-		"ptrace":              secCaps.Ptrace,
-		"file_enforcement":    secCaps.FileEnforcement,
-	}
-
-	// Determine FUSE mount method for observability
+// buildLinuxDomains builds the five protection domains from cached probe results and capability flags.
+func buildLinuxDomains(caps *SecurityCapabilities) []ProtectionDomain {
 	fuseMountMethod := "none"
-	if secCaps.FUSE {
+	if caps.FUSE {
 		if hasFusermount() {
 			fuseMountMethod = "fusermount"
 		} else if checkNewMountAPIAvailable() {
@@ -49,61 +30,150 @@ func Detect() (*DetectResult, error) {
 			fuseMountMethod = "direct"
 		}
 	}
-	caps["fuse_mount_method"] = fuseMountMethod
 
-	mode := secCaps.SelectMode()
-	score := modeToScore(mode)
+	landlockDetail := "not available"
+	if caps.Landlock {
+		landlockDetail = fmt.Sprintf("ABI v%d", caps.LandlockABI)
+	}
 
-	// Build summary
-	var available, unavailable []string
-	for k, v := range caps {
-		if k == "landlock_abi" {
-			continue // Skip ABI version in summary
-		}
-		switch val := v.(type) {
-		case bool:
-			if val {
-				available = append(available, k)
-			} else {
-				unavailable = append(unavailable, k)
+	mode := caps.SelectMode()
+	commandActive := "seccomp-execve"
+	if mode == ModePtrace {
+		commandActive = "ptrace"
+	}
+
+	networkActive := ""
+	if caps.EBPFProbe.Available {
+		networkActive = "ebpf"
+	} else if caps.LandlockNetwork {
+		networkActive = "landlock-network"
+	}
+
+	resourceActive := ""
+	if caps.CgroupProbe.Available {
+		resourceActive = "cgroups-v2"
+	}
+
+	isoActive := ""
+	if caps.CapProbe.Available {
+		isoActive = "capability-drop"
+	}
+	if caps.PIDNSProbe.Available {
+		isoActive = "pid-namespace"
+	}
+
+	return []ProtectionDomain{
+		{
+			Name: "File Protection", Weight: WeightFileProtection,
+			Backends: []DetectedBackend{
+				{Name: "fuse", Available: caps.FUSE, Detail: fuseMountMethod, Description: "file interception, soft-delete, redirect", CheckMethod: "probe"},
+				{Name: "landlock", Available: caps.Landlock, Detail: landlockDetail, Description: "kernel path restrictions", CheckMethod: "syscall"},
+				{Name: "seccomp-notify", Available: caps.Seccomp, Detail: "", Description: "openat/stat enforcement", CheckMethod: "probe"},
+			},
+			Active: caps.FileEnforcement,
+		},
+		{
+			Name: "Command Control", Weight: WeightCommandControl,
+			Backends: []DetectedBackend{
+				{Name: "seccomp-execve", Available: caps.Seccomp, Detail: "", Description: "execve interception", CheckMethod: "probe"},
+				{Name: "ptrace", Available: caps.Ptrace, Detail: "", Description: "syscall tracing", CheckMethod: "probe"},
+			},
+			Active: commandActive,
+		},
+		{
+			Name: "Network", Weight: WeightNetwork,
+			Backends: []DetectedBackend{
+				{Name: "ebpf", Available: caps.EBPFProbe.Available, Detail: caps.EBPFProbe.Detail, Description: "network monitoring", CheckMethod: "probe"},
+				{Name: "landlock-network", Available: caps.LandlockNetwork, Detail: "", Description: "TCP bind/connect filtering", CheckMethod: "syscall"},
+			},
+			Active: networkActive,
+		},
+		{
+			Name: "Resource Limits", Weight: WeightResourceLimits,
+			Backends: []DetectedBackend{
+				{Name: "cgroups-v2", Available: caps.CgroupProbe.Available, Detail: caps.CgroupProbe.Detail, Description: "CPU/memory/process limits", CheckMethod: "probe"},
+			},
+			Active: resourceActive,
+		},
+		{
+			Name: "Isolation", Weight: WeightIsolation,
+			Backends: []DetectedBackend{
+				{Name: "pid-namespace", Available: caps.PIDNSProbe.Available, Detail: caps.PIDNSProbe.Detail, Description: "process isolation", CheckMethod: "probe"},
+				{Name: "capability-drop", Available: caps.CapProbe.Available, Detail: caps.CapProbe.Detail, Description: "privilege reduction", CheckMethod: "probe"},
+			},
+			Active: isoActive,
+		},
+	}
+}
+
+// backwardCompatCaps builds the flat capabilities map for backward compatibility.
+func backwardCompatCaps(caps *SecurityCapabilities, domains []ProtectionDomain) map[string]any {
+	m := map[string]any{
+		"seccomp":             caps.Seccomp,
+		"seccomp_user_notify": caps.Seccomp,
+		"seccomp_basic":       caps.SeccompBasic,
+		"landlock":            caps.Landlock,
+		"landlock_abi":        caps.LandlockABI,
+		"landlock_network":    caps.LandlockNetwork,
+		"fuse":                caps.FUSE,
+		"ptrace":              caps.Ptrace,
+		"file_enforcement":    caps.FileEnforcement,
+	}
+	for _, d := range domains {
+		for _, b := range d.Backends {
+			switch b.Name {
+			case "ebpf":
+				m["ebpf"] = b.Available
+			case "cgroups-v2":
+				m["cgroups_v2"] = b.Available
+			case "pid-namespace":
+				m["pid_namespace"] = b.Available
+			case "capability-drop":
+				m["capabilities_drop"] = b.Available
+			case "fuse":
+				if b.Available {
+					m["fuse_mount_method"] = b.Detail
+				}
 			}
-		case int:
-			if val > 0 {
-				available = append(available, k)
+		}
+	}
+	if _, ok := m["fuse_mount_method"]; !ok {
+		m["fuse_mount_method"] = "none"
+	}
+	return m
+}
+
+// Detect runs platform-specific detection and returns unified result.
+func Detect() (*DetectResult, error) {
+	secCaps := DetectSecurityCapabilities()
+	secCaps.FileEnforcement = detectFileEnforcementBackend(secCaps)
+
+	domains := buildLinuxDomains(secCaps)
+	score := ComputeScore(domains)
+	mode := secCaps.SelectMode()
+
+	caps := backwardCompatCaps(secCaps, domains)
+
+	var available, unavailable []string
+	for _, d := range domains {
+		for _, b := range d.Backends {
+			if b.Available {
+				available = append(available, b.Name)
 			} else {
-				unavailable = append(unavailable, k)
+				unavailable = append(unavailable, b.Name)
 			}
 		}
 	}
 
-	tips := GenerateTips("linux", caps)
+	tips := GenerateTipsFromDomains(domains)
 
 	return &DetectResult{
 		Platform:        "linux",
 		SecurityMode:    mode,
 		ProtectionScore: score,
+		Domains:         domains,
 		Capabilities:    caps,
-		Summary: DetectSummary{
-			Available:   available,
-			Unavailable: unavailable,
-		},
-		Tips: tips,
+		Summary:         DetectSummary{Available: available, Unavailable: unavailable},
+		Tips:            tips,
 	}, nil
-}
-
-func modeToScore(mode string) int {
-	switch mode {
-	case ModeFull:
-		return 100
-	case ModePtrace:
-		return 90
-	case ModeLandlock:
-		return 85
-	case ModeLandlockOnly:
-		return 80
-	case ModeMinimal:
-		return 50
-	default:
-		return 0
-	}
 }

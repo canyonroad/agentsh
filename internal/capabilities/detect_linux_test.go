@@ -18,7 +18,7 @@ func TestDetect_Linux(t *testing.T) {
 
 	// SecurityMode should be one of the valid modes
 	validModes := map[string]bool{
-		"full": true, "landlock": true, "landlock-only": true, "minimal": true,
+		"full": true, "ptrace": true, "landlock": true, "landlock-only": true, "minimal": true,
 	}
 	if !validModes[result.SecurityMode] {
 		t.Errorf("SecurityMode = %q, not a valid mode", result.SecurityMode)

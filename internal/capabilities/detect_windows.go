@@ -9,6 +9,49 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func buildWindowsDomains(caps map[string]any) []ProtectionDomain {
+	appContainer, _ := caps["app_container"].(bool)
+	winfsp, _ := caps["winfsp"].(bool)
+	minifilter, _ := caps["minifilter"].(bool)
+	windivert, _ := caps["windivert"].(bool)
+	jobObjects, _ := caps["job_objects"].(bool)
+
+	return []ProtectionDomain{
+		{
+			Name: "File Protection", Weight: WeightFileProtection,
+			Backends: []DetectedBackend{
+				{Name: "winfsp", Available: winfsp, Detail: "", Description: "filesystem interception", CheckMethod: "binary"},
+				{Name: "minifilter", Available: minifilter, Detail: "", Description: "kernel file filtering", CheckMethod: "probe"},
+			},
+		},
+		{
+			Name: "Command Control", Weight: WeightCommandControl,
+			Backends: []DetectedBackend{
+				{Name: "app-container", Available: appContainer, Detail: "", Description: "AppContainer process isolation", CheckMethod: "probe"},
+			},
+		},
+		{
+			Name: "Network", Weight: WeightNetwork,
+			Backends: []DetectedBackend{
+				{Name: "windivert", Available: windivert, Detail: "", Description: "network interception", CheckMethod: "binary"},
+			},
+		},
+		{
+			Name: "Resource Limits", Weight: WeightResourceLimits,
+			Backends: []DetectedBackend{
+				{Name: "job-objects", Available: jobObjects, Detail: "", Description: "process resource limits", CheckMethod: "builtin"},
+			},
+			Active: "job-objects",
+		},
+		{
+			Name: "Isolation", Weight: WeightIsolation,
+			Backends: []DetectedBackend{
+				{Name: "app-container", Available: appContainer, Detail: "", Description: "AppContainer isolation", CheckMethod: "probe"},
+			},
+		},
+	}
+}
+
 // Detect runs platform-specific detection and returns unified result.
 func Detect() (*DetectResult, error) {
 	caps := map[string]any{
@@ -19,32 +62,31 @@ func Detect() (*DetectResult, error) {
 		"job_objects":   true, // Always available
 	}
 
-	mode, score := selectWindowsMode(caps)
+	mode, _ := selectWindowsMode(caps)
+	domains := buildWindowsDomains(caps)
+	score := ComputeScore(domains)
 
-	// Build summary
 	var available, unavailable []string
-	for k, v := range caps {
-		if val, ok := v.(bool); ok {
-			if val {
-				available = append(available, k)
+	for _, d := range domains {
+		for _, b := range d.Backends {
+			if b.Available {
+				available = append(available, b.Name)
 			} else {
-				unavailable = append(unavailable, k)
+				unavailable = append(unavailable, b.Name)
 			}
 		}
 	}
 
-	tips := GenerateTips("windows", caps)
+	tips := GenerateTipsFromDomains(domains)
 
 	return &DetectResult{
 		Platform:        "windows",
 		SecurityMode:    mode,
 		ProtectionScore: score,
+		Domains:         domains,
 		Capabilities:    caps,
-		Summary: DetectSummary{
-			Available:   available,
-			Unavailable: unavailable,
-		},
-		Tips: tips,
+		Summary:         DetectSummary{Available: available, Unavailable: unavailable},
+		Tips:            tips,
 	}, nil
 }
 
