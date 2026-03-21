@@ -29,11 +29,17 @@ The `Filesystem` struct gets a new field `mountMethod string` recording which mo
 
 1. `/dev/fuse` open check (shared prerequisite — if this fails, all paths fail)
 2. `hasFusermount()` → return `"fusermount"`
-3. `checkNewMountAPI()` → kernel >= 5.2 via uname, then `unix.Fsopen("fuse", 0)` as a probe (close immediately) → return `"new-api"`
+3. `checkNewMountAPI()` → try `unix.Fsopen("fuse", 0)` as a probe (close immediately). If ENOSYS, the kernel doesn't support the new mount API; if ENODEV, the fuse module isn't loaded. On success → return `"new-api"`. No kernel version parsing needed — `fsopen` is the ground truth.
 4. `checkDirectMount()` → existing CAP_SYS_ADMIN + mount probe → return `"direct"`
 5. Return `""` (unavailable)
 
 `MountMethod() string` is exposed on the `Filesystem` struct for `agentsh detect` output.
+
+**Recheck()**: `Recheck()` must also re-detect and store `mountMethod` (not just `available`), since deferred FUSE detection (E2B sandbox case) may discover a new mount method after startup.
+
+**Logging**: `detectMountMethod` logs at info level which method was selected, and at debug level which methods were tried and why they failed. This is critical for debugging Firecracker environments.
+
+**`checkFUSE()` in `security_caps.go`**: The parallel `checkFUSE()` in `internal/capabilities/security_caps.go` must delegate to the same detection logic (or call `Filesystem.MountMethod() != ""`), so that `agentsh detect` correctly reports `fuse: true` when the new-api path is available.
 
 ### 2. New Mount API Implementation
 
@@ -41,20 +47,24 @@ The `Filesystem` struct gets a new field `mountMethod string` recording which mo
 
 New function `mountFUSEViaNewAPI(mountPoint string, opts *fuse.MountOptions) (fuseFD int, err error)`:
 
-1. Open `/dev/fuse` → `fuseDev` fd
+1. Open `/dev/fuse` with `O_RDWR|O_CLOEXEC` → `fuseDev` fd
 2. `unix.Fsopen("fuse", 0)` → `fsctx` fd
 3. `unix.FsconfigSetString(fsctx, "fd", strconv.Itoa(fuseDev))`
 4. `unix.FsconfigSetString(fsctx, "rootmode", "40000")` (directory)
 5. `unix.FsconfigSetString(fsctx, "user_id", strconv.Itoa(os.Geteuid()))`
 6. `unix.FsconfigSetString(fsctx, "group_id", strconv.Itoa(os.Getegid()))`
-7. If `opts.AllowOther`: `unix.FsconfigSetFlag(fsctx, "allow_other")`
-8. `unix.FsconfigCreate(fsctx)` — finalize the superblock
-9. `unix.Fsmount(fsctx, 0, 0)` → `mntFD`
-10. `unix.MoveMount(mntFD, "", unix.AT_FDCWD, mountPoint, unix.MOVE_MOUNT_F_EMPTY_PATH)`
-11. Close `fsctx` and `mntFD` (no longer needed after move_mount)
-12. Return `fuseDev` — this is the fd go-fuse will use
+7. `unix.FsconfigSetString(fsctx, "max_read", strconv.Itoa(opts.MaxWrite))` — match go-fuse's behavior
+8. If `opts.AllowOther`: `unix.FsconfigSetFlag(fsctx, "allow_other")`
+9. `unix.FsconfigCreate(fsctx)` — finalize the superblock
+10. Close `fsctx` (no longer needed after create)
+11. `unix.Fsmount(fsctx_result, 0, 0)` → `mntFD`
+12. `unix.MoveMount(mntFD, "", unix.AT_FDCWD, mountPoint, unix.MOVE_MOUNT_F_EMPTY_PATH)`
+13. Close `mntFD` (no longer needed after move_mount)
+14. Return `fuseDev` — this is the fd go-fuse will use
 
-On any error, close all opened fds and return a descriptive error.
+**Error cleanup sequence**: Each step checks the previous step's error. On failure, close fds in reverse order of opening: `mntFD` (if opened), `fsctx` (if opened), `fuseDev` (if opened). Use `defer` with a success flag to ensure no fd leaks on any partial failure path.
+
+**O_CLOEXEC**: The `fuseDev` fd is opened with `O_CLOEXEC` (Go's `unix.Open` sets this by default). This matches go-fuse's behavior with fusermount. The fd is returned to go-fuse and must survive for the lifetime of the FUSE connection but not leak across exec.
 
 ### 3. go-fuse Integration via /dev/fd/N
 
@@ -63,14 +73,19 @@ On any error, close all opened fds and return a descriptive error.
 When `mountMethod == "new-api"`:
 
 1. Call `mountFUSEViaNewAPI(mountPoint, opts)` → get `fuseFD`
-2. Pass `/dev/fd/<fuseFD>` as the mountpoint to go-fuse's `fs.Mount()` instead of the real mountpoint
-3. go-fuse detects the `/dev/fd/N` magic path, uses the fd directly, skips its own mount logic
+2. Store the real `mountPoint` for later unmount and logging
+3. Pass `/dev/fd/<fuseFD>` as the mountpoint to go-fuse's `fs.Mount()` instead of the real mountpoint
+4. go-fuse detects the `/dev/fd/N` magic path, uses the fd directly, skips its own mount logic
 
 The existing `MountWorkspace` in `internal/fsmonitor/mount.go` receives either the real path (fusermount/direct) or `/dev/fd/N` (new API). From go-fuse's perspective, `/dev/fd/N` is a pre-mounted FUSE connection — it reads/writes the FUSE protocol on it directly.
 
+**Real mountpoint preservation**: The `Mount` struct returned by `MountWorkspace` stores `mountPoint`. When the new-api path is used, the caller must ensure the *real* mountpoint (not `/dev/fd/N`) is stored for display, logging, `/proc/mounts` lookups, and unmount. This is done at the `Filesystem.Mount()` level — it passes `/dev/fd/N` to go-fuse but stores the real path in the returned `FSMount`.
+
 For fusermount and direct mount paths, the flow is unchanged — the real mountpoint is passed through.
 
-**Unmount**: `unix.Unmount(mountPoint, 0)` works normally since `move_mount` created a real VFS mount entry. go-fuse's `server.Unmount()` handles this.
+**Unmount**: go-fuse's `Server.Unmount()` refuses to unmount `/dev/fd/N` magic mountpoints (returns an error). For the new-api path, unmount is performed by calling `unix.Unmount(realMountPoint, 0)` directly, bypassing `Server.Unmount()`. The `Filesystem.Unmount()` method checks the mount method and dispatches accordingly:
+- fusermount/direct: `server.Unmount()` (existing path)
+- new-api: `unix.Unmount(realMountPoint, 0)` + close the FUSE fd
 
 ### 4. Detection Output
 
@@ -91,8 +106,8 @@ Derived from `Filesystem.MountMethod()`. The existing `fuse: true/false` capabil
 **Unit tests** in `internal/platform/linux/filesystem_test.go`:
 
 1. `TestDetectMountMethod` — verify the function returns a valid method string on the current system.
-2. `TestCheckNewMountAPI_KernelVersion` — verify kernel >= 5.2 detection via `parseKernelVersion`.
-3. `TestMountFUSEViaNewAPI_FsopenProbe` — if kernel >= 5.2, verify `unix.Fsopen("fuse", 0)` succeeds. Skip on older kernels.
+2. `TestCheckNewMountAPI_FsopenProbe` — verify `unix.Fsopen("fuse", 0)` succeeds on kernels that support it. Skip if ENOSYS.
+3. `TestMountFUSEViaNewAPI_ErrorCleanup` — verify that partial failures (e.g., fsconfig error) close all fds without leaking.
 
 **Integration test** (requires Docker with `--device /dev/fuse`):
 
@@ -103,14 +118,14 @@ Derived from `Filesystem.MountMethod()`. The existing `fuse: true/false` capabil
 | Priority | Method | Requirements | Works on Firecracker |
 |----------|--------|-------------|---------------------|
 | 1 | fusermount3/fusermount | suid binary in PATH | Yes (if installed) |
-| 2 | New mount API | Kernel >= 5.2, /dev/fuse | Yes |
+| 2 | New mount API | /dev/fuse, fsopen succeeds | Yes |
 | 3 | Direct mount() | CAP_SYS_ADMIN, no seccomp block | No (hangs) |
 
 ## Dependencies
 
 - `golang.org/x/sys v0.40.0` (already in go.mod) — provides `Fsopen`, `FsconfigSetString`, `FsconfigSetFlag`, `FsconfigCreate`, `Fsmount`, `MoveMount`
 - `github.com/hanwen/go-fuse/v2 v2.9.0` (already in go.mod) — `/dev/fd/N` magic mountpoint support
-- Linux 5.2+ for the new mount API syscalls
+- Linux 5.2+ for the new mount API syscalls (detected at runtime via `fsopen` probe, not version parsing)
 
 ## Out of Scope
 
