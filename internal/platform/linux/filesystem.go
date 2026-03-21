@@ -5,6 +5,7 @@ package linux
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -23,6 +24,7 @@ import (
 type Filesystem struct {
 	available      bool
 	implementation string
+	mountMethod    string // "fusermount", "new-api", "direct", ""
 	mu             sync.Mutex
 	mounts         map[string]*Mount
 }
@@ -32,38 +34,62 @@ func NewFilesystem() *Filesystem {
 	fs := &Filesystem{
 		mounts: make(map[string]*Mount),
 	}
-	fs.available = fs.checkAvailable()
+	fs.mountMethod = detectMountMethod()
+	fs.available = fs.mountMethod != ""
 	fs.implementation = fs.detectImplementation()
 	return fs
 }
 
 // checkAvailable checks if FUSE is available and mountable.
 func (fs *Filesystem) checkAvailable() bool {
-	return canMountFUSE()
+	fs.mountMethod = detectMountMethod()
+	return fs.mountMethod != ""
 }
 
-// canMountFUSE checks if FUSE can actually be mounted by verifying:
-// 1. /dev/fuse can be opened with O_RDWR
-// 2. fusermount suid binary is available (preferred), OR
-// 3. The process has CAP_SYS_ADMIN and mount() is not blocked by seccomp (fallback)
-func canMountFUSE() bool {
-	// Check that /dev/fuse can be opened (not just that it exists)
+// detectMountMethod determines which FUSE mount strategy is available.
+// Tries: fusermount → new mount API → direct mount().
+func detectMountMethod() string {
 	fd, err := unix.Open("/dev/fuse", unix.O_RDWR, 0)
+	if err != nil {
+		slog.Debug("fuse: /dev/fuse not available", "error", err)
+		return ""
+	}
+	unix.Close(fd)
+
+	if hasFusermount() {
+		slog.Info("fuse: mount method selected", "method", "fusermount")
+		return "fusermount"
+	}
+	slog.Debug("fuse: fusermount not found, trying new mount API")
+
+	if checkNewMountAPI() {
+		slog.Info("fuse: mount method selected", "method", "new-api")
+		return "new-api"
+	}
+	slog.Debug("fuse: new mount API not available, trying direct mount")
+
+	if checkDirectMount() {
+		slog.Info("fuse: mount method selected", "method", "direct")
+		return "direct"
+	}
+	slog.Debug("fuse: no mount method available")
+
+	return ""
+}
+
+// checkNewMountAPI probes whether the new mount API works for FUSE.
+func checkNewMountAPI() bool {
+	fd, err := unix.Fsopen("fuse", 0)
 	if err != nil {
 		return false
 	}
 	unix.Close(fd)
+	return true
+}
 
-	// Preferred path: check if fusermount is available.
-	// Since agentsh uses go-fuse without DirectMount, it will use the fusermount
-	// suid binary which handles mount() in its own privileged context. This works
-	// even when the calling process lacks CAP_SYS_ADMIN or seccomp blocks mount().
-	if hasFusermount() {
-		return true
-	}
-
-	// Fallback: check for direct mount capability (CAP_SYS_ADMIN + mount probe).
-	return checkDirectMount()
+// MountMethod returns the detected FUSE mount method.
+func (fs *Filesystem) MountMethod() string {
+	return fs.mountMethod
 }
 
 // hasFusermount checks if the fusermount suid binary is available in PATH.
@@ -74,6 +100,66 @@ func hasFusermount() bool {
 		}
 	}
 	return false
+}
+
+// mountFUSEViaNewAPI mounts a FUSE filesystem using the Linux new mount API
+// (fsopen/fsconfig/fsmount/move_mount). Returns the /dev/fuse fd for go-fuse.
+// The caller is responsible for closing the fd when the FUSE server shuts down.
+func mountFUSEViaNewAPI(mountPoint string, allowOther bool, maxRead int) (fuseFD int, err error) {
+	fuseDev, err := unix.Open("/dev/fuse", unix.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("open /dev/fuse: %w", err)
+	}
+
+	success := false
+	defer func() {
+		if !success {
+			unix.Close(fuseDev)
+		}
+	}()
+
+	fsctx, err := unix.Fsopen("fuse", 0)
+	if err != nil {
+		return -1, fmt.Errorf("fsopen fuse: %w", err)
+	}
+	defer unix.Close(fsctx)
+
+	configs := []struct{ key, val string }{
+		{"fd", fmt.Sprintf("%d", fuseDev)},
+		{"rootmode", "40000"},
+		{"user_id", fmt.Sprintf("%d", os.Geteuid())},
+		{"group_id", fmt.Sprintf("%d", os.Getegid())},
+	}
+	if maxRead > 0 {
+		configs = append(configs, struct{ key, val string }{"max_read", fmt.Sprintf("%d", maxRead)})
+	}
+	for _, c := range configs {
+		if err := unix.FsconfigSetString(fsctx, c.key, c.val); err != nil {
+			return -1, fmt.Errorf("fsconfig %s=%s: %w", c.key, c.val, err)
+		}
+	}
+	if allowOther {
+		if err := unix.FsconfigSetFlag(fsctx, "allow_other"); err != nil {
+			return -1, fmt.Errorf("fsconfig allow_other: %w", err)
+		}
+	}
+
+	if err := unix.FsconfigCreate(fsctx); err != nil {
+		return -1, fmt.Errorf("fsconfig create: %w", err)
+	}
+
+	mntFD, err := unix.Fsmount(fsctx, 0, 0)
+	if err != nil {
+		return -1, fmt.Errorf("fsmount: %w", err)
+	}
+	defer unix.Close(mntFD)
+
+	if err := unix.MoveMount(mntFD, "", unix.AT_FDCWD, mountPoint, unix.MOVE_MOUNT_F_EMPTY_PATH); err != nil {
+		return -1, fmt.Errorf("move_mount to %s: %w", mountPoint, err)
+	}
+
+	success = true
+	return fuseDev, nil
 }
 
 // checkDirectMount checks if direct mount() is possible (CAP_SYS_ADMIN + unblocked syscall).
@@ -198,20 +284,50 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 
 	// Create the FUSE mount using existing fsmonitor with a timeout
 	// to prevent hanging if mount is blocked (e.g., by seccomp)
+	effectiveMountPoint := cfg.MountPoint
+	mountedViaNewAPI := false
+	fuseFD := -1
+
+	if fs.mountMethod == "new-api" {
+		// Ensure mountpoint directory exists — MountWorkspace skips MkdirAll
+		// for /dev/fd/N, and move_mount needs the target to exist.
+		if err := os.MkdirAll(cfg.MountPoint, 0o755); err != nil {
+			return nil, fmt.Errorf("mkdir mount point %s: %w", cfg.MountPoint, err)
+		}
+		var err error
+		fuseFD, err = mountFUSEViaNewAPI(cfg.MountPoint, true, 0)
+		if err != nil {
+			// New mount API failed at runtime despite detection passing.
+			// Fall through to let go-fuse try its own mount strategies.
+			slog.Warn("fuse: new mount API failed at mount time, falling back to go-fuse default",
+				"mount_point", cfg.MountPoint, "error", err)
+		} else {
+			effectiveMountPoint = fmt.Sprintf("/dev/fd/%d", fuseFD)
+			mountedViaNewAPI = true
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	fsMount, err := fsmonitor.MountWorkspace(ctx, cfg.SourcePath, cfg.MountPoint, hooks)
+	fsMount, err := fsmonitor.MountWorkspace(ctx, cfg.SourcePath, effectiveMountPoint, hooks)
 	if err != nil {
+		if mountedViaNewAPI {
+			// Unmount the VFS mount we created. Don't close fuseFD —
+			// go-fuse may have taken ownership during partial init.
+			unix.Unmount(cfg.MountPoint, 0)
+		}
 		return nil, fmt.Errorf("failed to mount FUSE filesystem: %w", err)
 	}
 
 	// Wrap in our Mount type
 	mount := &Mount{
-		fsMount:    fsMount,
-		sourcePath: cfg.SourcePath,
-		mountPoint: cfg.MountPoint,
-		mountedAt:  time.Now(),
-		hooks:      hooks,
+		fsMount:          fsMount,
+		sourcePath:       cfg.SourcePath,
+		mountPoint:       cfg.MountPoint, // always real path
+		mountedAt:        time.Now(),
+		hooks:            hooks,
+		mountedViaNewAPI: mountedViaNewAPI,
+		fuseFD:           fuseFD,
 	}
 
 	fs.mounts[cfg.MountPoint] = mount
@@ -231,16 +347,30 @@ func (fs *Filesystem) Unmount(mount platform.FSMount) error {
 
 	delete(fs.mounts, m.mountPoint)
 
+	if m.mountedViaNewAPI {
+		// go-fuse owns the FUSE fd — do NOT close it here.
+		// Unmount the VFS, then wait for go-fuse server to shut down.
+		// After unix.Unmount, go-fuse's Serve() loop will get an error
+		// reading from the FUSE fd and exit, closing the fd and calling
+		// fileSystem.OnUnmount().
+		err := unix.Unmount(m.mountPoint, 0)
+		if err == nil && m.fsMount != nil && m.fsMount.Server != nil {
+			m.fsMount.Server.Wait()
+		}
+		return err
+	}
 	return m.fsMount.Unmount()
 }
 
 // Mount wraps fsmonitor.Mount to implement platform.FSMount.
 type Mount struct {
-	fsMount    *fsmonitor.Mount
-	sourcePath string
-	mountPoint string
-	mountedAt  time.Time
-	hooks      *fsmonitor.Hooks
+	fsMount          *fsmonitor.Mount
+	sourcePath       string
+	mountPoint       string
+	mountedAt        time.Time
+	hooks            *fsmonitor.Hooks
+	mountedViaNewAPI bool // true if mounted via new mount API
+	fuseFD           int  // /dev/fuse fd to close on unmount (new-api only, -1 if unused)
 
 	// Stats tracking
 	mu            sync.Mutex
@@ -280,6 +410,18 @@ func (m *Mount) Stats() platform.FSStats {
 
 // Close unmounts the filesystem.
 func (m *Mount) Close() error {
+	if m.mountedViaNewAPI {
+		// go-fuse owns the FUSE fd — do NOT close it here.
+		// Unmount the VFS, then wait for go-fuse server to shut down.
+		// After unix.Unmount, go-fuse's Serve() loop will get an error
+		// reading from the FUSE fd and exit, closing the fd and calling
+		// fileSystem.OnUnmount().
+		err := unix.Unmount(m.mountPoint, 0)
+		if err == nil && m.fsMount != nil && m.fsMount.Server != nil {
+			m.fsMount.Server.Wait()
+		}
+		return err
+	}
 	return m.fsMount.Unmount()
 }
 

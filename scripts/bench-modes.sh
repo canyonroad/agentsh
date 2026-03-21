@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build and run the agentsh performance benchmark.
-# Compares baseline (no sandbox) vs full mode (seccomp+FUSE) vs ptrace.
+# Compares baseline vs full mode (seccomp+FUSE) vs seccomp-notify vs ptrace.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

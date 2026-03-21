@@ -98,14 +98,29 @@ type wrapperSetupResult struct {
 // Returns the wrapped request and extra process config, or nil extraCfg if wrapping is disabled.
 // Note: agentsh-unixwrap is Linux-only; this function returns early on other platforms.
 func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *session.Session) *wrapperSetupResult {
+	// Helper: return early without seccomp wrapping but with envInject applied.
+	earlyReturn := func() *wrapperSetupResult {
+		sessionPolicy := a.policy
+		if s != nil {
+			if sp := s.PolicyEngine(); sp != nil {
+				sessionPolicy = sp
+			}
+		}
+		envInject := mergeEnvInject(a.cfg, sessionPolicy)
+		if len(envInject) > 0 {
+			return &wrapperSetupResult{wrappedReq: req, extraCfg: &extraProcConfig{envInject: envInject}}
+		}
+		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
+	}
+
 	// agentsh-unixwrap is Linux-only (uses seccomp-bpf)
 	if runtime.GOOS != "linux" {
-		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
+		return earlyReturn()
 	}
 
 	// Ptrace mode: no wrapper, no seccomp notify sockets
 	if a.ptraceTracer != nil {
-		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
+		return earlyReturn()
 	}
 
 	origCommand := req.Command
@@ -113,7 +128,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 
 	unixEnabled := a.cfg.Sandbox.UnixSockets.Enabled != nil && *a.cfg.Sandbox.UnixSockets.Enabled
 	if !unixEnabled {
-		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
+		return earlyReturn()
 	}
 
 	wrapperBin := strings.TrimSpace(a.cfg.Sandbox.UnixSockets.WrapperBin)
@@ -126,7 +141,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		slog.Warn("seccomp wrapper unavailable: wrapper binary not found (running without seccomp enforcement)",
 			"wrapper_bin", wrapperBin,
 			"session_id", sessionID)
-		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
+		return earlyReturn()
 	}
 
 	sp := createUnixSocketPair()
@@ -135,7 +150,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		slog.Warn("seccomp wrapper disabled: failed to create notify socket pair",
 			"session_id", sessionID,
 			"command", origCommand)
-		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
+		return earlyReturn()
 	}
 
 	wrappedReq := req

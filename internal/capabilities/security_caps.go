@@ -90,30 +90,35 @@ func checkSeccompBasic() bool {
 	return checkSeccompUserNotify().Available
 }
 
-// checkFUSE checks if FUSE is usable for filesystem interception.
-// It supports two mount paths:
-//   - fusermount (suid helper): works without CAP_SYS_ADMIN, used by go-fuse by default.
-//     This is the path used in Cloudflare Containers and similar environments.
-//   - direct mount (syscall.Mount): requires CAP_SYS_ADMIN and unblocked mount() syscall.
 func checkFUSE() bool {
-	// Check that /dev/fuse can be opened (not just that it exists)
 	fd, err := unix.Open("/dev/fuse", unix.O_RDWR, 0)
 	if err != nil {
 		return false
 	}
 	unix.Close(fd)
 
-	// Preferred path: check if fusermount is available.
-	// Since agentsh uses go-fuse without DirectMount, it will use the fusermount
-	// suid binary which handles mount() in its own privileged context. This works
-	// even when the calling process lacks CAP_SYS_ADMIN or seccomp blocks mount().
+	// Priority 1: fusermount
 	if hasFusermount() {
 		return true
 	}
 
-	// Fallback: check for direct mount capability (CAP_SYS_ADMIN + mount probe).
-	// This path is only reached if fusermount is not installed.
+	// Priority 2: new mount API (fsopen probe)
+	if checkNewMountAPIAvailable() {
+		return true
+	}
+
+	// Priority 3: direct mount
 	return checkDirectMount()
+}
+
+// checkNewMountAPIAvailable probes for new mount API support via fsopen.
+func checkNewMountAPIAvailable() bool {
+	fd, err := unix.Fsopen("fuse", 0)
+	if err != nil {
+		return false
+	}
+	unix.Close(fd)
+	return true
 }
 
 // hasFusermount checks if the fusermount suid binary is available in PATH.

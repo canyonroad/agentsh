@@ -23,13 +23,11 @@ func TestNewFilesystem(t *testing.T) {
 func TestFilesystem_Available(t *testing.T) {
 	fs := NewFilesystem()
 
-	// Available() now checks both O_RDWR access to /dev/fuse and
-	// CAP_SYS_ADMIN capability via canMountFUSE(), so the expected
-	// value must match that same logic, not just /dev/fuse existence.
-	expectAvailable := canMountFUSE()
+	// Available() checks whether a FUSE mount method was detected.
+	expectAvailable := detectMountMethod() != ""
 
 	if fs.Available() != expectAvailable {
-		t.Errorf("Available() = %v, expected %v from canMountFUSE()", fs.Available(), expectAvailable)
+		t.Errorf("Available() = %v, expected %v from detectMountMethod()", fs.Available(), expectAvailable)
 	}
 }
 

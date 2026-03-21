@@ -1,4 +1,4 @@
-# Performance benchmark: ptrace vs full mode vs baseline.
+# Performance benchmark: ptrace vs full mode vs seccomp-notify vs baseline.
 #
 # Build & run:
 #   make bench
@@ -212,12 +212,19 @@ write_config() {
   local ptrace_enabled=false
   local static_allow_file=false
   local static_allow_network=false
+  local seccomp_file_monitor=false
+  local seccomp_enforce_without_fuse=false
 
   case "$mode" in
     baseline) ;;
     full)
       fuse_enabled=true
       seccomp_execve_enabled=true
+      ;;
+    seccomp-notify)
+      seccomp_execve_enabled=true
+      seccomp_file_monitor=true
+      seccomp_enforce_without_fuse=true
       ;;
     ptrace)
       ptrace_enabled=true
@@ -272,6 +279,9 @@ sandbox:
   seccomp:
     execve:
       enabled: ${seccomp_execve_enabled}
+    file_monitor:
+      enabled: ${seccomp_file_monitor}
+      enforce_without_fuse: ${seccomp_enforce_without_fuse}
   ptrace:
     enabled: ${ptrace_enabled}
     attach_mode: "children"
@@ -374,7 +384,7 @@ sleep 0.3
 
 declare -A results_files
 
-for mode in baseline full ptrace ptrace-allow; do
+for mode in baseline full seccomp-notify ptrace ptrace-allow; do
   echo "bench: running mode=$mode ..."
   results_files[$mode]="$(run_mode "$mode")"
 done
@@ -384,7 +394,7 @@ phases=(spawn fileio git network deny redirect tree_deep tree_wide)
 phase_labels=("Process spawn (120)" "File I/O (1000 ops)" "Git workflow" "Network (10 curl)" "Deny enforcement (50)" "Redirect enforce (50)" "Deep tree (20x4-lvl)" "Wide tree (10x10-fan)")
 
 declare -A medians
-for mode in baseline full ptrace ptrace-allow; do
+for mode in baseline full seccomp-notify ptrace ptrace-allow; do
   for phase in "${phases[@]}"; do
     vals=( $(extract_phase "${results_files[$mode]}" "$phase") )
     if [[ ${#vals[@]} -lt 3 ]]; then
@@ -396,7 +406,7 @@ for mode in baseline full ptrace ptrace-allow; do
 done
 
 # Compute totals
-for mode in baseline full ptrace ptrace-allow; do
+for mode in baseline full seccomp-notify ptrace ptrace-allow; do
   total=0
   for phase in "${phases[@]}"; do
     total=$(( total + ${medians["${mode}_${phase}"]} ))
@@ -417,13 +427,15 @@ overhead() {
 echo ""
 echo "=== agentsh mode benchmark (median of 3 runs) ==="
 echo ""
-printf "| %-22s | %8s | %9s | %13s | %7s | %15s | %12s | %20s |\n" \
-  "Phase" "Baseline" "Full mode" "Full overhead" "Ptrace" "Ptrace overhead" "Ptrace-allow" "Ptrace-allow overhead"
-printf "|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|\n" \
+printf "| %-22s | %8s | %9s | %13s | %14s | %20s | %7s | %15s | %12s | %20s |\n" \
+  "Phase" "Baseline" "Full mode" "Full overhead" "Seccomp-notify" "Seccomp-notify ohead" "Ptrace" "Ptrace overhead" "Ptrace-allow" "Ptrace-allow overhead"
+printf "|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|\n" \
   "$(printf '%0.s-' {1..22})" \
   "$(printf '%0.s-' {1..8})" \
   "$(printf '%0.s-' {1..9})" \
   "$(printf '%0.s-' {1..13})" \
+  "$(printf '%0.s-' {1..14})" \
+  "$(printf '%0.s-' {1..20})" \
   "$(printf '%0.s-' {1..7})" \
   "$(printf '%0.s-' {1..15})" \
   "$(printf '%0.s-' {1..12})" \
@@ -434,25 +446,29 @@ for i in "${!phases[@]}"; do
   label="${phase_labels[$i]}"
   bval="${medians[baseline_${phase}]}"
   fval="${medians[full_${phase}]}"
+  sval="${medians[seccomp-notify_${phase}]}"
   pval="${medians[ptrace_${phase}]}"
   aval="${medians[ptrace-allow_${phase}]}"
   foh="$(overhead "$bval" "$fval")"
+  soh="$(overhead "$bval" "$sval")"
   poh="$(overhead "$bval" "$pval")"
   aoh="$(overhead "$bval" "$aval")"
-  printf "| %-22s | %6sms | %7sms | %13s | %5sms | %15s | %10sms | %20s |\n" \
-    "$label" "$bval" "$fval" "$foh" "$pval" "$poh" "$aval" "$aoh"
+  printf "| %-22s | %6sms | %7sms | %13s | %12sms | %20s | %5sms | %15s | %10sms | %20s |\n" \
+    "$label" "$bval" "$fval" "$foh" "$sval" "$soh" "$pval" "$poh" "$aval" "$aoh"
 done
 
 # Total row
 bval="${medians[baseline_total]}"
 fval="${medians[full_total]}"
+sval="${medians[seccomp-notify_total]}"
 pval="${medians[ptrace_total]}"
 aval="${medians[ptrace-allow_total]}"
 foh="$(overhead "$bval" "$fval")"
+soh="$(overhead "$bval" "$sval")"
 poh="$(overhead "$bval" "$pval")"
 aoh="$(overhead "$bval" "$aval")"
-printf "| %-22s | %6sms | %7sms | %13s | %5sms | %15s | %10sms | %20s |\n" \
-  "**TOTAL**" "$bval" "$fval" "$foh" "$pval" "$poh" "$aval" "$aoh"
+printf "| %-22s | %6sms | %7sms | %13s | %12sms | %20s | %5sms | %15s | %10sms | %20s |\n" \
+  "**TOTAL**" "$bval" "$fval" "$foh" "$sval" "$soh" "$pval" "$poh" "$aval" "$aoh"
 
 echo ""
 echo "bench: done"
