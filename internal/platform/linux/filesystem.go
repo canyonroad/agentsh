@@ -289,13 +289,22 @@ func (fs *Filesystem) Mount(cfg platform.FSConfig) (platform.FSMount, error) {
 	fuseFD := -1
 
 	if fs.mountMethod == "new-api" {
+		// Ensure mountpoint directory exists — MountWorkspace skips MkdirAll
+		// for /dev/fd/N, and move_mount needs the target to exist.
+		if err := os.MkdirAll(cfg.MountPoint, 0o755); err != nil {
+			return nil, fmt.Errorf("mkdir mount point %s: %w", cfg.MountPoint, err)
+		}
 		var err error
 		fuseFD, err = mountFUSEViaNewAPI(cfg.MountPoint, true, 0)
 		if err != nil {
-			return nil, fmt.Errorf("new mount API failed: %w", err)
+			// New mount API failed at runtime despite detection passing.
+			// Fall through to let go-fuse try its own mount strategies.
+			slog.Warn("fuse: new mount API failed at mount time, falling back to go-fuse default",
+				"mount_point", cfg.MountPoint, "error", err)
+		} else {
+			effectiveMountPoint = fmt.Sprintf("/dev/fd/%d", fuseFD)
+			mountedViaNewAPI = true
 		}
-		effectiveMountPoint = fmt.Sprintf("/dev/fd/%d", fuseFD)
-		mountedViaNewAPI = true
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -338,12 +347,9 @@ func (fs *Filesystem) Unmount(mount platform.FSMount) error {
 	delete(fs.mounts, m.mountPoint)
 
 	if m.mountedViaNewAPI {
-		err := unix.Unmount(m.mountPoint, 0)
-		if m.fuseFD >= 0 {
-			unix.Close(m.fuseFD)
-			m.fuseFD = -1
-		}
-		return err
+		// go-fuse owns the FUSE fd — do NOT close it here.
+		// Just unmount the VFS mount.
+		return unix.Unmount(m.mountPoint, 0)
 	}
 	return m.fsMount.Unmount()
 }
@@ -397,12 +403,9 @@ func (m *Mount) Stats() platform.FSStats {
 // Close unmounts the filesystem.
 func (m *Mount) Close() error {
 	if m.mountedViaNewAPI {
-		err := unix.Unmount(m.mountPoint, 0)
-		if m.fuseFD >= 0 {
-			unix.Close(m.fuseFD)
-			m.fuseFD = -1
-		}
-		return err
+		// go-fuse owns the FUSE fd — do NOT close it here.
+		// Just unmount the VFS mount.
+		return unix.Unmount(m.mountPoint, 0)
 	}
 	return m.fsMount.Unmount()
 }
