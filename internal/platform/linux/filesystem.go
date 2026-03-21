@@ -102,6 +102,66 @@ func hasFusermount() bool {
 	return false
 }
 
+// mountFUSEViaNewAPI mounts a FUSE filesystem using the Linux new mount API
+// (fsopen/fsconfig/fsmount/move_mount). Returns the /dev/fuse fd for go-fuse.
+// The caller is responsible for closing the fd when the FUSE server shuts down.
+func mountFUSEViaNewAPI(mountPoint string, allowOther bool, maxRead int) (fuseFD int, err error) {
+	fuseDev, err := unix.Open("/dev/fuse", unix.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("open /dev/fuse: %w", err)
+	}
+
+	success := false
+	defer func() {
+		if !success {
+			unix.Close(fuseDev)
+		}
+	}()
+
+	fsctx, err := unix.Fsopen("fuse", 0)
+	if err != nil {
+		return -1, fmt.Errorf("fsopen fuse: %w", err)
+	}
+	defer unix.Close(fsctx)
+
+	configs := []struct{ key, val string }{
+		{"fd", fmt.Sprintf("%d", fuseDev)},
+		{"rootmode", "40000"},
+		{"user_id", fmt.Sprintf("%d", os.Geteuid())},
+		{"group_id", fmt.Sprintf("%d", os.Getegid())},
+	}
+	if maxRead > 0 {
+		configs = append(configs, struct{ key, val string }{"max_read", fmt.Sprintf("%d", maxRead)})
+	}
+	for _, c := range configs {
+		if err := unix.FsconfigSetString(fsctx, c.key, c.val); err != nil {
+			return -1, fmt.Errorf("fsconfig %s=%s: %w", c.key, c.val, err)
+		}
+	}
+	if allowOther {
+		if err := unix.FsconfigSetFlag(fsctx, "allow_other"); err != nil {
+			return -1, fmt.Errorf("fsconfig allow_other: %w", err)
+		}
+	}
+
+	if err := unix.FsconfigCreate(fsctx); err != nil {
+		return -1, fmt.Errorf("fsconfig create: %w", err)
+	}
+
+	mntFD, err := unix.Fsmount(fsctx, 0, 0)
+	if err != nil {
+		return -1, fmt.Errorf("fsmount: %w", err)
+	}
+	defer unix.Close(mntFD)
+
+	if err := unix.MoveMount(mntFD, "", unix.AT_FDCWD, mountPoint, unix.MOVE_MOUNT_F_EMPTY_PATH); err != nil {
+		return -1, fmt.Errorf("move_mount to %s: %w", mountPoint, err)
+	}
+
+	success = true
+	return fuseDev, nil
+}
+
 // checkDirectMount checks if direct mount() is possible (CAP_SYS_ADMIN + unblocked syscall).
 func checkDirectMount() bool {
 	// Check for CAP_SYS_ADMIN in the effective capability set.

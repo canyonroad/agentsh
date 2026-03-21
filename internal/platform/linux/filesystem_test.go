@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/sys/unix"
 )
 
 func TestDetectMountMethod(t *testing.T) {
@@ -29,4 +30,23 @@ func TestFilesystem_MountMethod(t *testing.T) {
 	} else {
 		assert.Empty(t, fs.MountMethod())
 	}
+}
+
+func TestMountFUSEViaNewAPI_ErrorCleanup(t *testing.T) {
+	if !checkNewMountAPI() {
+		t.Skip("new mount API not available")
+	}
+	_, err := mountFUSEViaNewAPI("/nonexistent/path/that/cannot/exist", true, 0)
+	assert.Error(t, err, "should fail with nonexistent mountpoint")
+}
+
+func TestMountFUSEViaNewAPI_FsopenProbe(t *testing.T) {
+	if !checkNewMountAPI() {
+		t.Skip("new mount API not available")
+	}
+	fd, err := unix.Fsopen("fuse", 0)
+	if err != nil {
+		t.Fatalf("fsopen failed: %v", err)
+	}
+	unix.Close(fd)
 }
