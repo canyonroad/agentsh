@@ -333,6 +333,50 @@ func TestStagingPolicyPath(t *testing.T) {
 	}
 }
 
+func TestPolicyWatcher_StagingFileDoesNotTriggerLiveReload(t *testing.T) {
+	dir := t.TempDir()
+	stagingDir := filepath.Join(dir, ".staging")
+	os.MkdirAll(stagingDir, 0755)
+
+	loader := &mockLoader{}
+	changed := make(chan struct{}, 1)
+
+	watcher, err := NewPolicyWatcher(WatcherConfig{
+		PolicyDir:       dir,
+		Loader:          loader,
+		Debounce:        50 * time.Millisecond,
+		StagingDebounce: 50 * time.Millisecond,
+		OnChange: func(path string, err error) {
+			select {
+			case changed <- struct{}{}:
+			default:
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher.Start(ctx)
+	defer watcher.Stop()
+
+	// Write a policy file to .staging/ — should NOT trigger onChange
+	os.WriteFile(filepath.Join(stagingDir, "test.yaml"), []byte("test: true"), 0644)
+
+	select {
+	case <-changed:
+		t.Error("staging file should not trigger live reload onChange")
+	case <-time.After(300 * time.Millisecond):
+		// Expected: no change event
+	}
+
+	if loader.LoadCount() != 0 {
+		t.Error("loader should not be called for staging files")
+	}
+}
+
 func TestIsPolicyFile(t *testing.T) {
 	tests := []struct {
 		path string

@@ -133,6 +133,7 @@ func (w *PolicyWatcher) addWatchRecursive(dir string) error {
 // processEvents handles fsnotify events.
 func (w *PolicyWatcher) processEvents(ctx context.Context) {
 	pending := make(map[string]time.Time)
+	stagingPending := make(map[string]time.Time)
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -145,7 +146,13 @@ func (w *PolicyWatcher) processEvents(ctx context.Context) {
 
 			// Only process write and create events for policy files
 			if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
-				if isPolicyFile(event.Name) {
+				if isInStagingDir(event.Name, w.policyDir) {
+					// Staging events: track by policy base name
+					if isStagingRelevant(event.Name) {
+						policyPath := stagingPolicyPath(event.Name)
+						stagingPending[policyPath] = time.Now()
+					}
+				} else if isPolicyFile(event.Name) {
 					pending[event.Name] = time.Now()
 				}
 			}
@@ -173,6 +180,17 @@ func (w *PolicyWatcher) processEvents(ctx context.Context) {
 					case w.reloadChan <- path:
 					default:
 						// Channel full, skip
+					}
+				}
+			}
+
+			// Staging debounce
+			for path, lastChange := range stagingPending {
+				if now.Sub(lastChange) >= w.stagingDebounce {
+					delete(stagingPending, path)
+					select {
+					case w.stagingChan <- path:
+					default:
 					}
 				}
 			}
