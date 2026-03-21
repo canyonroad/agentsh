@@ -107,7 +107,7 @@ func (p *Platform) detectCapabilities() platform.Capabilities {
 
 // checkFUSE checks if FUSE is available and mountable.
 func (p *Platform) checkFUSE() bool {
-	return canMountFUSE()
+	return detectMountMethod() != ""
 }
 
 // detectFUSEVersion returns the FUSE implementation version.

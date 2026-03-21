@@ -5,6 +5,7 @@ package linux
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -23,6 +24,7 @@ import (
 type Filesystem struct {
 	available      bool
 	implementation string
+	mountMethod    string // "fusermount", "new-api", "direct", ""
 	mu             sync.Mutex
 	mounts         map[string]*Mount
 }
@@ -32,38 +34,62 @@ func NewFilesystem() *Filesystem {
 	fs := &Filesystem{
 		mounts: make(map[string]*Mount),
 	}
-	fs.available = fs.checkAvailable()
+	fs.mountMethod = detectMountMethod()
+	fs.available = fs.mountMethod != ""
 	fs.implementation = fs.detectImplementation()
 	return fs
 }
 
 // checkAvailable checks if FUSE is available and mountable.
 func (fs *Filesystem) checkAvailable() bool {
-	return canMountFUSE()
+	fs.mountMethod = detectMountMethod()
+	return fs.mountMethod != ""
 }
 
-// canMountFUSE checks if FUSE can actually be mounted by verifying:
-// 1. /dev/fuse can be opened with O_RDWR
-// 2. fusermount suid binary is available (preferred), OR
-// 3. The process has CAP_SYS_ADMIN and mount() is not blocked by seccomp (fallback)
-func canMountFUSE() bool {
-	// Check that /dev/fuse can be opened (not just that it exists)
+// detectMountMethod determines which FUSE mount strategy is available.
+// Tries: fusermount → new mount API → direct mount().
+func detectMountMethod() string {
 	fd, err := unix.Open("/dev/fuse", unix.O_RDWR, 0)
+	if err != nil {
+		slog.Debug("fuse: /dev/fuse not available", "error", err)
+		return ""
+	}
+	unix.Close(fd)
+
+	if hasFusermount() {
+		slog.Info("fuse: mount method selected", "method", "fusermount")
+		return "fusermount"
+	}
+	slog.Debug("fuse: fusermount not found, trying new mount API")
+
+	if checkNewMountAPI() {
+		slog.Info("fuse: mount method selected", "method", "new-api")
+		return "new-api"
+	}
+	slog.Debug("fuse: new mount API not available, trying direct mount")
+
+	if checkDirectMount() {
+		slog.Info("fuse: mount method selected", "method", "direct")
+		return "direct"
+	}
+	slog.Debug("fuse: no mount method available")
+
+	return ""
+}
+
+// checkNewMountAPI probes whether the new mount API works for FUSE.
+func checkNewMountAPI() bool {
+	fd, err := unix.Fsopen("fuse", 0)
 	if err != nil {
 		return false
 	}
 	unix.Close(fd)
+	return true
+}
 
-	// Preferred path: check if fusermount is available.
-	// Since agentsh uses go-fuse without DirectMount, it will use the fusermount
-	// suid binary which handles mount() in its own privileged context. This works
-	// even when the calling process lacks CAP_SYS_ADMIN or seccomp blocks mount().
-	if hasFusermount() {
-		return true
-	}
-
-	// Fallback: check for direct mount capability (CAP_SYS_ADMIN + mount probe).
-	return checkDirectMount()
+// MountMethod returns the detected FUSE mount method.
+func (fs *Filesystem) MountMethod() string {
+	return fs.mountMethod
 }
 
 // hasFusermount checks if the fusermount suid binary is available in PATH.
