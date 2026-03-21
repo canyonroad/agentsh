@@ -339,14 +339,20 @@ func TestPolicyWatcher_StagingFileDoesNotTriggerLiveReload(t *testing.T) {
 	os.MkdirAll(stagingDir, 0755)
 
 	loader := &mockLoader{}
-	changed := make(chan struct{}, 1)
+	var onChangePaths []string
+	var onChangeMu sync.Mutex
+	changed := make(chan struct{}, 10)
 
+	// Use a long staging debounce so promotion doesn't happen during the test window
 	watcher, err := NewPolicyWatcher(WatcherConfig{
 		PolicyDir:       dir,
 		Loader:          loader,
 		Debounce:        50 * time.Millisecond,
-		StagingDebounce: 50 * time.Millisecond,
+		StagingDebounce: 10 * time.Second,
 		OnChange: func(path string, err error) {
+			onChangeMu.Lock()
+			onChangePaths = append(onChangePaths, path)
+			onChangeMu.Unlock()
 			select {
 			case changed <- struct{}{}:
 			default:
@@ -362,14 +368,16 @@ func TestPolicyWatcher_StagingFileDoesNotTriggerLiveReload(t *testing.T) {
 	watcher.Start(ctx)
 	defer watcher.Stop()
 
-	// Write a policy file to .staging/ — should NOT trigger onChange
+	// Write a policy file to .staging/ — should NOT trigger onChange directly
 	os.WriteFile(filepath.Join(stagingDir, "test.yaml"), []byte("test: true"), 0644)
 
 	select {
 	case <-changed:
-		t.Error("staging file should not trigger live reload onChange")
+		onChangeMu.Lock()
+		t.Errorf("staging file should not trigger live reload onChange, got paths: %v", onChangePaths)
+		onChangeMu.Unlock()
 	case <-time.After(300 * time.Millisecond):
-		// Expected: no change event
+		// Expected: no change event within the window (staging debounce is 10s)
 	}
 
 	if loader.LoadCount() != 0 {
@@ -401,6 +409,69 @@ func TestPolicyWatcher_CreatesStagingDirOnStart(t *testing.T) {
 	}
 	if !info.IsDir() {
 		t.Fatal(".staging is not a directory")
+	}
+}
+
+func TestPolicyWatcher_StagingPromotesValidPolicy(t *testing.T) {
+	dir := t.TempDir()
+	stagingDir := filepath.Join(dir, ".staging")
+	os.MkdirAll(stagingDir, 0755)
+
+	loader := &mockLoader{}
+
+	stagingDone := make(chan struct{}, 1)
+	watcher, err := NewPolicyWatcher(WatcherConfig{
+		PolicyDir:       dir,
+		Loader:          loader,
+		Debounce:        50 * time.Millisecond,
+		StagingDebounce: 100 * time.Millisecond,
+		OnStaging: func(path string, err error) {
+			select {
+			case stagingDone <- struct{}{}:
+			default:
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher.Start(ctx)
+	defer watcher.Stop()
+
+	// Write policy to staging
+	os.WriteFile(filepath.Join(stagingDir, "test.yaml"), []byte("test: true"), 0644)
+
+	select {
+	case <-stagingDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for staging processing")
+	}
+
+	// Policy should have been moved to live dir
+	liveFile := filepath.Join(dir, "test.yaml")
+	data, err := os.ReadFile(liveFile)
+	if err != nil {
+		t.Fatalf("policy not promoted to live dir: %v", err)
+	}
+	if string(data) != "test: true" {
+		t.Fatalf("policy content mismatch: %q", data)
+	}
+
+	// Staging file should be gone
+	if _, err := os.Stat(filepath.Join(stagingDir, "test.yaml")); !os.IsNotExist(err) {
+		t.Fatal("staged policy should have been removed after promotion")
+	}
+
+	// Check staging stats
+	stats := watcher.Stats()
+	if stats.StagingTotal == 0 {
+		t.Error("expected StagingTotal > 0")
+	}
+	if stats.StagingSuccess == 0 {
+		t.Error("expected StagingSuccess > 0")
 	}
 }
 

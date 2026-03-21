@@ -44,6 +44,9 @@ type WatcherStats struct {
 	LastReload     time.Time `json:"last_reload,omitempty"`
 	LastError      string    `json:"last_error,omitempty"`
 	LastErrorTime  time.Time `json:"last_error_time,omitempty"`
+	StagingTotal   int64     `json:"staging_total"`
+	StagingSuccess int64     `json:"staging_success"`
+	StagingFailed  int64     `json:"staging_failed"`
 }
 
 // WatcherConfig configures the policy watcher.
@@ -228,12 +231,87 @@ func (w *PolicyWatcher) processReloads(ctx context.Context) {
 func (w *PolicyWatcher) processStagingReloads(ctx context.Context) {
 	for {
 		select {
-		case <-w.stagingChan:
-			// TODO: implement in Task 4
+		case path := <-w.stagingChan:
+			w.handleStagingFile(path)
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// handleStagingFile validates a staged policy and promotes it to the live directory.
+func (w *PolicyWatcher) handleStagingFile(policyPath string) {
+	// Ensure the policy file actually exists (might have been a .sig-only event)
+	if _, err := os.Stat(policyPath); err != nil {
+		return
+	}
+
+	w.stats.mu.Lock()
+	w.stats.StagingTotal++
+	w.stats.mu.Unlock()
+
+	// Validate using the same loader as live reloads — this handles
+	// signature verification based on the signing mode config.
+	// Signing metadata logging (key_id, signer, signed_at) is the
+	// responsibility of the Validate implementation, not the watcher.
+	if err := w.loader.Validate(policyPath); err != nil {
+		w.recordStagingError(fmt.Sprintf("staging validation failed %s: %v", filepath.Base(policyPath), err))
+		if w.onStaging != nil {
+			w.onStaging(policyPath, err)
+		}
+		return
+	}
+
+	// Promote to live directory: move .sig first (per design spec),
+	// then .yaml. This ensures the live watcher always sees a .sig
+	// if it sees the policy.
+	baseName := filepath.Base(policyPath)
+	sigName := baseName + ".sig"
+	stagingDir := filepath.Dir(policyPath)
+
+	stagingSig := filepath.Join(stagingDir, sigName)
+	liveSig := filepath.Join(w.policyDir, sigName)
+	livePolicy := filepath.Join(w.policyDir, baseName)
+
+	// Move .sig first (may not exist in warn/off mode)
+	if _, err := os.Stat(stagingSig); err == nil {
+		if err := moveFile(stagingSig, liveSig); err != nil {
+			w.recordStagingError(fmt.Sprintf("staging move sig %s: %v", sigName, err))
+			if w.onStaging != nil {
+				w.onStaging(policyPath, err)
+			}
+			return
+		}
+	}
+
+	// Move policy file
+	if err := moveFile(policyPath, livePolicy); err != nil {
+		w.recordStagingError(fmt.Sprintf("staging move policy %s: %v", baseName, err))
+		if w.onStaging != nil {
+			w.onStaging(policyPath, err)
+		}
+		return
+	}
+
+	w.stats.mu.Lock()
+	w.stats.StagingSuccess++
+	w.stats.mu.Unlock()
+
+	if w.onStaging != nil {
+		w.onStaging(livePolicy, nil)
+	}
+}
+
+// moveFile renames src to dst, replacing dst if it exists.
+// src and dst must be on the same filesystem (guaranteed when .staging/
+// is a subdirectory of the policy dir).
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err != nil {
+		// Windows: Rename fails if dst exists. Remove and retry.
+		os.Remove(dst)
+		return os.Rename(src, dst)
+	}
+	return nil
 }
 
 // handleReload processes a reload for a specific file.
@@ -279,6 +357,15 @@ func (w *PolicyWatcher) recordError(err string) {
 	w.stats.mu.Unlock()
 }
 
+// recordStagingError records a staging error in stats without incrementing ReloadsFailed.
+func (w *PolicyWatcher) recordStagingError(err string) {
+	w.stats.mu.Lock()
+	w.stats.StagingFailed++
+	w.stats.LastError = err
+	w.stats.LastErrorTime = time.Now()
+	w.stats.mu.Unlock()
+}
+
 // Stop stops the watcher.
 func (w *PolicyWatcher) Stop() error {
 	if !w.running.CompareAndSwap(true, false) {
@@ -302,6 +389,9 @@ func (w *PolicyWatcher) Stats() WatcherStats {
 		LastReload:     w.stats.LastReload,
 		LastError:      w.stats.LastError,
 		LastErrorTime:  w.stats.LastErrorTime,
+		StagingTotal:   w.stats.StagingTotal,
+		StagingSuccess: w.stats.StagingSuccess,
+		StagingFailed:  w.stats.StagingFailed,
 	}
 }
 
