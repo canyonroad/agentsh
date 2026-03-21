@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
@@ -49,4 +50,36 @@ func TestMountFUSEViaNewAPI_FsopenProbe(t *testing.T) {
 		t.Fatalf("fsopen failed: %v", err)
 	}
 	unix.Close(fd)
+}
+
+func TestMountFUSEViaNewAPI_Integration(t *testing.T) {
+	if !checkNewMountAPI() {
+		t.Skip("new mount API not available")
+	}
+	if os.Getuid() != 0 {
+		t.Skip("requires root for FUSE mount")
+	}
+
+	// Create a temp directory as the mount point
+	mountDir, err := os.MkdirTemp("", "fuse-newapi-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(mountDir)
+
+	// Mount FUSE via new API
+	fuseFD, err := mountFUSEViaNewAPI(mountDir, true, 0)
+	require.NoError(t, err)
+	defer unix.Close(fuseFD)
+
+	// Verify mount appears in /proc/mounts
+	mounts, err := os.ReadFile("/proc/mounts")
+	require.NoError(t, err)
+	assert.Contains(t, string(mounts), mountDir, "mount should appear in /proc/mounts")
+
+	// Unmount
+	err = unix.Unmount(mountDir, 0)
+	assert.NoError(t, err)
+
+	// Verify unmounted
+	mounts2, _ := os.ReadFile("/proc/mounts")
+	assert.NotContains(t, string(mounts2), mountDir, "mount should be gone after unmount")
 }
