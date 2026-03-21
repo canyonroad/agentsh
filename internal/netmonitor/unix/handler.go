@@ -545,7 +545,14 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	// before policy evaluation (spec section 4, step 2).
 	if forceContinue {
 		if err := NotifIDValid(notifFD, req.ID); err != nil {
-			slog.Debug("emulated file handler: notification stale before policy check", "pid", pid)
+			if err == unix.ENOENT {
+				slog.Debug("emulated file handler: notification stale before policy check", "pid", pid)
+				return // notification cancelled, no response needed
+			}
+			// Non-ENOENT error — send CONTINUE to avoid leaving the syscall hanging.
+			slog.Warn("emulated file handler: NotifIDValid error, allowing", "pid", pid, "error", err)
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
+			_ = seccomp.NotifRespond(fd, &resp)
 			return
 		}
 	}
@@ -572,8 +579,12 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 
 	// Second ID validation check after policy evaluation (spec section 4, step 4).
 	if err := NotifIDValid(notifFD, req.ID); err != nil {
-		slog.Debug("emulated file handler: notification stale after policy check", "pid", pid)
-		return
+		if err == unix.ENOENT {
+			slog.Debug("emulated file handler: notification stale after policy check", "pid", pid)
+			return // notification cancelled, no response needed
+		}
+		// Non-ENOENT error — send CONTINUE to avoid leaving the syscall hanging.
+		slog.Warn("emulated file handler: NotifIDValid error after policy, allowing", "pid", pid, "error", err)
 	}
 	resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
 	_ = seccomp.NotifRespond(fd, &resp)

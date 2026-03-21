@@ -91,8 +91,14 @@ func (h *FileHandler) Handle(req FileRequest) FileResult {
 
 	// Resolve /proc/self/fd/N, /proc/<pid>/fd/N, /dev/fd/N to actual target.
 	// This prevents policy bypass by re-deriving paths from file descriptors.
+	// Normalize both Path and Path2 (for rename/link dual-path syscalls).
 	if resolved, wasProcFD := resolveProcFD(req.PID, req.Path); wasProcFD {
 		req.Path = resolved
+	}
+	if req.Path2 != "" {
+		if resolved, wasProcFD := resolveProcFD(req.PID, req.Path2); wasProcFD {
+			req.Path2 = resolved
+		}
 	}
 
 	// 2. Path under FUSE mount point — audit-only; FUSE handles enforcement.
