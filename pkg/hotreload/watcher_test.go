@@ -277,6 +277,62 @@ func TestPolicyWatcher_TriggerReload(t *testing.T) {
 	}
 }
 
+func TestIsInStagingDir(t *testing.T) {
+	tests := []struct {
+		path      string
+		policyDir string
+		want      bool
+	}{
+		{"/etc/agentsh/policies/.staging/foo.yaml", "/etc/agentsh/policies", true},
+		{"/etc/agentsh/policies/.staging/foo.yaml.sig", "/etc/agentsh/policies", true},
+		{"/etc/agentsh/policies/foo.yaml", "/etc/agentsh/policies", false},
+		{"/etc/agentsh/policies/subdir/foo.yaml", "/etc/agentsh/policies", false},
+		{"/other/.staging/foo.yaml", "/etc/agentsh/policies", false},
+	}
+	for _, tt := range tests {
+		if got := isInStagingDir(tt.path, tt.policyDir); got != tt.want {
+			t.Errorf("isInStagingDir(%q, %q) = %v, want %v", tt.path, tt.policyDir, got, tt.want)
+		}
+	}
+}
+
+func TestIsStagingRelevant(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"foo.yaml", true},
+		{"foo.yml", true},
+		{"foo.json", true},
+		{"foo.yaml.sig", true},
+		{"foo.yml.sig", true},
+		{"foo.json.sig", true},
+		{"foo.txt", false},
+		{"foo.sig", false},
+	}
+	for _, tt := range tests {
+		if got := isStagingRelevant(tt.path); got != tt.want {
+			t.Errorf("isStagingRelevant(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
+func TestStagingPolicyPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/staging/foo.yaml", "/staging/foo.yaml"},
+		{"/staging/foo.yaml.sig", "/staging/foo.yaml"},
+		{"/staging/foo.yml.sig", "/staging/foo.yml"},
+	}
+	for _, tt := range tests {
+		if got := stagingPolicyPath(tt.path); got != tt.want {
+			t.Errorf("stagingPolicyPath(%q) = %q, want %q", tt.path, got, tt.want)
+		}
+	}
+}
+
 func TestIsPolicyFile(t *testing.T) {
 	tests := []struct {
 		path string

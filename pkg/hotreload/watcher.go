@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,15 +21,18 @@ type PolicyLoader interface {
 
 // PolicyWatcher watches policy files for changes and triggers reloads.
 type PolicyWatcher struct {
-	policyDir  string
-	loader     PolicyLoader
-	watcher    *fsnotify.Watcher
-	debounce   time.Duration
-	onChange   func(path string, err error)
-	mu         sync.RWMutex
-	running    atomic.Bool
-	reloadChan chan string
-	stats      WatcherStats
+	policyDir       string
+	loader          PolicyLoader
+	watcher         *fsnotify.Watcher
+	debounce        time.Duration
+	stagingDebounce time.Duration
+	onChange        func(path string, err error)
+	onStaging       func(path string, err error)
+	mu              sync.RWMutex
+	running         atomic.Bool
+	reloadChan      chan string
+	stagingChan     chan string
+	stats           WatcherStats
 }
 
 // WatcherStats tracks reload statistics.
@@ -44,10 +48,12 @@ type WatcherStats struct {
 
 // WatcherConfig configures the policy watcher.
 type WatcherConfig struct {
-	PolicyDir string
-	Loader    PolicyLoader
-	Debounce  time.Duration // Debounce period for rapid changes
-	OnChange  func(path string, err error)
+	PolicyDir       string
+	Loader          PolicyLoader
+	Debounce        time.Duration // Debounce period for rapid changes
+	StagingDebounce time.Duration // Debounce for staging (longer, to allow .sig to arrive)
+	OnChange        func(path string, err error)
+	OnStaging       func(path string, err error) // Called after staging validation attempt
 }
 
 // NewPolicyWatcher creates a new policy watcher.
@@ -65,12 +71,20 @@ func NewPolicyWatcher(config WatcherConfig) (*PolicyWatcher, error) {
 		debounce = 100 * time.Millisecond
 	}
 
+	stagingDebounce := config.StagingDebounce
+	if stagingDebounce == 0 {
+		stagingDebounce = 2 * time.Second
+	}
+
 	return &PolicyWatcher{
-		policyDir:  config.PolicyDir,
-		loader:     config.Loader,
-		debounce:   debounce,
-		onChange:   config.OnChange,
-		reloadChan: make(chan string, 100),
+		policyDir:       config.PolicyDir,
+		loader:          config.Loader,
+		debounce:        debounce,
+		stagingDebounce: stagingDebounce,
+		onChange:        config.OnChange,
+		onStaging:       config.OnStaging,
+		reloadChan:      make(chan string, 100),
+		stagingChan:     make(chan string, 100),
 	}, nil
 }
 
@@ -270,6 +284,38 @@ func (w *PolicyWatcher) TriggerReload() error {
 		}
 		return nil
 	})
+}
+
+const stagingDirName = ".staging"
+
+// isInStagingDir reports whether path is inside the .staging subdirectory of policyDir.
+func isInStagingDir(path, policyDir string) bool {
+	stagingPrefix := filepath.Join(policyDir, stagingDirName) + string(filepath.Separator)
+	return strings.HasPrefix(path, stagingPrefix)
+}
+
+// isStagingRelevant reports whether a file in .staging/ should trigger staging processing.
+// Matches policy files (.yaml, .yml, .json) and their companion .sig files.
+func isStagingRelevant(path string) bool {
+	if isPolicyFile(path) {
+		return true
+	}
+	if strings.HasSuffix(path, ".sig") {
+		return isPolicyFile(strings.TrimSuffix(path, ".sig"))
+	}
+	return false
+}
+
+// stagingPolicyPath returns the policy file path for a staging event.
+// If path ends in .sig, strips the .sig suffix to get the policy path.
+func stagingPolicyPath(path string) string {
+	if strings.HasSuffix(path, ".sig") {
+		base := strings.TrimSuffix(path, ".sig")
+		if isPolicyFile(base) {
+			return base
+		}
+	}
+	return path
 }
 
 // isPolicyFile checks if a file is a policy file.
