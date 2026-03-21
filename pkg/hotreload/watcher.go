@@ -101,6 +101,14 @@ func (w *PolicyWatcher) Start(ctx context.Context) error {
 	}
 	w.watcher = watcher
 
+	// Ensure .staging directory exists for policy delivery
+	stagingDir := filepath.Join(w.policyDir, stagingDirName)
+	if err := os.MkdirAll(stagingDir, 0755); err != nil {
+		watcher.Close()
+		w.running.Store(false)
+		return fmt.Errorf("creating staging directory: %w", err)
+	}
+
 	// Watch the policy directory
 	if err := w.addWatchRecursive(w.policyDir); err != nil {
 		watcher.Close()
@@ -113,6 +121,9 @@ func (w *PolicyWatcher) Start(ctx context.Context) error {
 
 	// Start the reload goroutine
 	go w.processReloads(ctx)
+
+	// Start the staging reload goroutine
+	go w.processStagingReloads(ctx)
 
 	return nil
 }
@@ -213,6 +224,18 @@ func (w *PolicyWatcher) processReloads(ctx context.Context) {
 	}
 }
 
+// processStagingReloads handles staging reload requests.
+func (w *PolicyWatcher) processStagingReloads(ctx context.Context) {
+	for {
+		select {
+		case <-w.stagingChan:
+			// TODO: implement in Task 4
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 // handleReload processes a reload for a specific file.
 func (w *PolicyWatcher) handleReload(path string) {
 	w.stats.mu.Lock()
@@ -288,10 +311,13 @@ func (w *PolicyWatcher) TriggerReload() error {
 		return fmt.Errorf("watcher not running")
 	}
 
-	// Reload all policy files in the directory
 	return filepath.Walk(w.policyDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
+		}
+		// Skip staging directory
+		if info.IsDir() && info.Name() == stagingDirName {
+			return filepath.SkipDir
 		}
 		if !info.IsDir() && isPolicyFile(path) {
 			select {

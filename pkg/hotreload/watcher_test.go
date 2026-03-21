@@ -377,6 +377,33 @@ func TestPolicyWatcher_StagingFileDoesNotTriggerLiveReload(t *testing.T) {
 	}
 }
 
+func TestPolicyWatcher_CreatesStagingDirOnStart(t *testing.T) {
+	dir := t.TempDir()
+	loader := &mockLoader{}
+
+	watcher, err := NewPolicyWatcher(WatcherConfig{
+		PolicyDir: dir,
+		Loader:    loader,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher.Start(ctx)
+	defer watcher.Stop()
+
+	stagingDir := filepath.Join(dir, ".staging")
+	info, err := os.Stat(stagingDir)
+	if err != nil {
+		t.Fatalf(".staging dir not created: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal(".staging is not a directory")
+	}
+}
+
 func TestIsPolicyFile(t *testing.T) {
 	tests := []struct {
 		path string
