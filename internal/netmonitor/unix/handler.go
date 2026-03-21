@@ -330,7 +330,7 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 			PID:       pid,
 			Syscall:   int32(req.Data.Syscall),
 			Path:      filename,
-			Operation: "open",
+			Operation: "execute",
 			SessionID: sessID,
 		})
 		if fileResult.Action == ActionDeny {

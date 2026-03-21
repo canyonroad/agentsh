@@ -434,9 +434,6 @@ func TestResolveProcFD(t *testing.T) {
 		{"proc pid fd", fmt.Sprintf("/proc/%d/fd/0", pid), true},
 		{"dev fd", "/dev/fd/0", true},
 		{"thread-self fd", "/proc/thread-self/fd/0", true},
-		{"dev stdin", "/dev/stdin", true},
-		{"dev stdout", "/dev/stdout", true},
-		{"dev stderr", "/dev/stderr", true},
 		{"normal path", "/tmp/foo", false},
 		{"proc but not fd", "/proc/self/status", false},
 		{"proc other pid fd", "/proc/1/fd/0", false},
@@ -451,4 +448,46 @@ func TestResolveProcFD(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveProcFD_DevStdio(t *testing.T) {
+	// /dev/stdin, /dev/stdout, /dev/stderr resolve to fd 0/1/2.
+	// Whether resolveProcFD returns true depends on whether the fd
+	// points to a filesystem path (true) or a pipe/socket (false).
+	// In Go test, stderr is typically a pipe, so we test with a
+	// known-filesystem fd instead.
+	tmpFile, err := os.CreateTemp("", "procfd-stdio-test")
+	if err != nil {
+		t.Skip("cannot create temp file")
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	pid := os.Getpid()
+	// Use the temp file's fd via /dev/fd/N
+	devFDPath := fmt.Sprintf("/dev/fd/%d", tmpFile.Fd())
+	resolved, wasProcFD := resolveProcFD(pid, devFDPath)
+	assert.True(t, wasProcFD, "/dev/fd/<N> pointing to a file should resolve")
+	assert.Equal(t, tmpFile.Name(), resolved)
+
+	// /dev/stdin may or may not resolve depending on environment
+	_, stdinResolved := resolveProcFD(pid, "/dev/stdin")
+	// Just verify it doesn't panic — result depends on whether stdin is a file
+	_ = stdinResolved
+}
+
+func TestResolveProcFD_PseudoPath(t *testing.T) {
+	// Verify that fds pointing to pipes/sockets are NOT resolved.
+	// Create a pipe to get an fd that resolves to "pipe:[N]".
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Skip("cannot create pipe")
+	}
+	defer r.Close()
+	defer w.Close()
+
+	pid := os.Getpid()
+	pipePath := fmt.Sprintf("/proc/%d/fd/%d", pid, r.Fd())
+	_, wasProcFD := resolveProcFD(pid, pipePath)
+	assert.False(t, wasProcFD, "pipe fd should not be treated as procfd bypass")
 }

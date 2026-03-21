@@ -330,6 +330,14 @@ func resolvePathAt(pid int, dirfd int32, pathPtr uint64) (string, error) {
 // /proc/<pid>/fd/N, /dev/fd/N, and /dev/stdin|stdout|stderr paths to their
 // actual targets. This prevents policy bypass by re-deriving paths from file
 // descriptors.
+//
+// For /proc/<pid>/fd/N, accepts both the TID (task ID from seccomp notify)
+// and the TGID (thread-group leader PID), since multi-threaded processes may
+// reference either.
+//
+// Only substitutes the path when the resolved target is an absolute filesystem
+// path. Pseudo-paths (pipe:[...], socket:[...], anon_inode:[...]) are left
+// as-is since they are not subject to file policy.
 func resolveProcFD(pid int, path string) (string, bool) {
 	var fdStr string
 
@@ -347,10 +355,7 @@ func resolveProcFD(pid int, path string) (string, bool) {
 	case path == "/dev/stderr":
 		fdStr = "2"
 	default:
-		prefix := fmt.Sprintf("/proc/%d/fd/", pid)
-		if strings.HasPrefix(path, prefix) {
-			fdStr = path[len(prefix):]
-		} else {
+		if !matchesProcPidFD(pid, path, &fdStr) {
 			return path, false
 		}
 	}
@@ -363,5 +368,57 @@ func resolveProcFD(pid int, path string) (string, bool) {
 	if err != nil {
 		return path, false
 	}
+
+	// Only substitute when the resolved target is an absolute filesystem path.
+	// Pseudo-paths like pipe:[12345], socket:[...], anon_inode:[...] are not
+	// subject to file policy evaluation.
+	if !strings.HasPrefix(target, "/") {
+		return path, false
+	}
 	return target, true
+}
+
+// matchesProcPidFD checks if path matches /proc/<N>/fd/<M> where N is either
+// the given pid (TID) or the thread-group leader (TGID) of that pid.
+func matchesProcPidFD(pid int, path string, fdStr *string) bool {
+	// Try exact TID match first.
+	prefix := fmt.Sprintf("/proc/%d/fd/", pid)
+	if strings.HasPrefix(path, prefix) {
+		*fdStr = path[len(prefix):]
+		return true
+	}
+
+	// Try TGID match — in multi-threaded processes, the TID from seccomp
+	// notify may differ from the process-level PID (TGID).
+	tgid := readTGID(pid)
+	if tgid > 0 && tgid != pid {
+		prefix = fmt.Sprintf("/proc/%d/fd/", tgid)
+		if strings.HasPrefix(path, prefix) {
+			*fdStr = path[len(prefix):]
+			return true
+		}
+	}
+
+	return false
+}
+
+// readTGID reads the thread group ID (Tgid) from /proc/<tid>/status.
+func readTGID(tid int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", tid))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "Tgid:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				v, err := strconv.Atoi(fields[1])
+				if err == nil {
+					return v
+				}
+			}
+			break
+		}
+	}
+	return 0
 }
