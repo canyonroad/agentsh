@@ -279,16 +279,17 @@ func TestPolicyWatcher_TriggerReload(t *testing.T) {
 }
 
 func TestIsInStagingDir(t *testing.T) {
+	policyDir := filepath.Join("etc", "agentsh", "policies")
 	tests := []struct {
 		path      string
 		policyDir string
 		want      bool
 	}{
-		{"/etc/agentsh/policies/.staging/foo.yaml", "/etc/agentsh/policies", true},
-		{"/etc/agentsh/policies/.staging/foo.yaml.sig", "/etc/agentsh/policies", true},
-		{"/etc/agentsh/policies/foo.yaml", "/etc/agentsh/policies", false},
-		{"/etc/agentsh/policies/subdir/foo.yaml", "/etc/agentsh/policies", false},
-		{"/other/.staging/foo.yaml", "/etc/agentsh/policies", false},
+		{filepath.Join(policyDir, ".staging", "foo.yaml"), policyDir, true},
+		{filepath.Join(policyDir, ".staging", "foo.yaml.sig"), policyDir, true},
+		{filepath.Join(policyDir, "foo.yaml"), policyDir, false},
+		{filepath.Join(policyDir, "subdir", "foo.yaml"), policyDir, false},
+		{filepath.Join("other", ".staging", "foo.yaml"), policyDir, false},
 	}
 	for _, tt := range tests {
 		if got := isInStagingDir(tt.path, tt.policyDir); got != tt.want {
