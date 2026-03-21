@@ -360,6 +360,14 @@ func resolveProcFD(pid int, path string) (string, bool) {
 		}
 	}
 
+	// Split fd number from any trailing path components.
+	// E.g., "/proc/self/fd/3/subpath" → fdNum="3", suffix="/subpath"
+	var suffix string
+	if slashIdx := strings.IndexByte(fdStr, '/'); slashIdx >= 0 {
+		suffix = fdStr[slashIdx:]
+		fdStr = fdStr[:slashIdx]
+	}
+
 	if _, err := strconv.Atoi(fdStr); err != nil {
 		return path, false
 	}
@@ -374,6 +382,10 @@ func resolveProcFD(pid int, path string) (string, bool) {
 	// subject to file policy evaluation.
 	if !strings.HasPrefix(target, "/") {
 		return path, false
+	}
+	// Append any trailing path components after the fd number.
+	if suffix != "" {
+		target = filepath.Clean(target + suffix)
 	}
 	return target, true
 }

@@ -92,6 +92,23 @@ func NotifAddFD(notifFD int, notifID uint64, srcFD int, targetFD int, flags uint
 	return int(r1), nil
 }
 
+// ProbeAddFDSupport checks if the kernel supports SECCOMP_IOCTL_NOTIF_ADDFD.
+// Returns true if supported (Linux 5.9+ with SEND flag support in 5.14+).
+// This is a best-effort probe: it tries the ioctl with an invalid fd and
+// checks the error. EBADF means the ioctl is recognized; ENOTTY means not.
+func ProbeAddFDSupport() bool {
+	req := seccompNotifAddFD{}
+	_, _, errno := unix.Syscall(
+		unix.SYS_IOCTL,
+		uintptr(0xFFFFFFFF), // invalid fd
+		uintptr(ioctlNotifAddFD),
+		uintptr(unsafe.Pointer(&req)),
+	)
+	// EBADF = kernel knows the ioctl but fd is invalid → supported
+	// ENOTTY = kernel doesn't know this ioctl → not supported
+	return errno != unix.ENOTTY
+}
+
 // NotifIDValid checks whether a seccomp notification ID is still valid
 // (the target process/thread hasn't exited or been killed since the
 // notification was received). Returns nil if valid, ENOENT if stale.

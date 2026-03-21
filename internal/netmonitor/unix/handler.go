@@ -468,7 +468,21 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 
 	// For openat2, resolve actual flags from the open_how struct.
 	var resolveFlags uint64
-	if args.Nr == unix.SYS_OPENAT2 && fileArgs.HowPtr != 0 {
+	if args.Nr == unix.SYS_OPENAT2 {
+		// openat2 requires a valid how_ptr and size >= 24 (OPEN_HOW_SIZE_VER0).
+		// If how_ptr is 0 or size is too small, the kernel would return EFAULT/EINVAL.
+		// Don't emulate — return the expected error directly.
+		howSize := args.Arg3
+		if fileArgs.HowPtr == 0 {
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EFAULT)}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
+		if howSize < 24 {
+			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EINVAL)}
+			_ = seccomp.NotifRespond(fd, &resp)
+			return
+		}
 		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
 		if err != nil {
 			slog.Debug("emulated file handler: failed to read open_how, denying", "pid", pid, "error", err)

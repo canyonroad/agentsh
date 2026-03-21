@@ -53,13 +53,13 @@ func createFileHandler(cfg config.SandboxSeccompFileMonitorConfig, pol *policy.E
 	enforce := cfg.EnforceWithoutFUSE
 	handler := unixmon.NewFileHandler(policyChecker, registry, emitter, enforce)
 
-	// Enable AddFD emulation when configured. The enforce_without_fuse flag
-	// signals that FUSE is not available for this deployment — trust the config
-	// rather than re-detecting global state, which could be affected by
-	// unrelated sessions.
+	// Enable AddFD emulation when configured and the kernel supports it.
+	// The enforce_without_fuse flag signals that FUSE is not available for
+	// this deployment. AddFD requires SECCOMP_IOCTL_NOTIF_ADDFD (Linux 5.9+)
+	// with SECCOMP_ADDFD_FLAG_SEND (Linux 5.14+). Probe before enabling.
 	defaultVal := cfg.EnforceWithoutFUSE
 	openatEmulation := config.FileMonitorBoolWithDefault(cfg.OpenatEmulation, defaultVal)
-	if openatEmulation && enforce {
+	if openatEmulation && enforce && unixmon.ProbeAddFDSupport() {
 		handler.SetEmulateOpen(true)
 	}
 

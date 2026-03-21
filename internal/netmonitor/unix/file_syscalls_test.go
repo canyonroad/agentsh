@@ -491,3 +491,26 @@ func TestResolveProcFD_PseudoPath(t *testing.T) {
 	_, wasProcFD := resolveProcFD(pid, pipePath)
 	assert.False(t, wasProcFD, "pipe fd should not be treated as procfd bypass")
 }
+
+func TestResolveProcFD_WithSuffix(t *testing.T) {
+	// /proc/self/fd/N/subpath should resolve to <target>/subpath
+	tmpDir, err := os.MkdirTemp("", "procfd-suffix-test")
+	if err != nil {
+		t.Skip("cannot create temp dir")
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Open the directory to get an fd
+	dir, err := os.Open(tmpDir)
+	if err != nil {
+		t.Skip("cannot open temp dir")
+	}
+	defer dir.Close()
+
+	pid := os.Getpid()
+	// /proc/self/fd/<dirfd>/subpath
+	suffixPath := fmt.Sprintf("/proc/%d/fd/%d/subpath", pid, dir.Fd())
+	resolved, wasProcFD := resolveProcFD(pid, suffixPath)
+	assert.True(t, wasProcFD, "procfd with suffix should resolve")
+	assert.Equal(t, filepath.Join(tmpDir, "subpath"), resolved)
+}
