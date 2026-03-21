@@ -176,6 +176,48 @@ func TestComputeScore_SetsScoreOnDomains(t *testing.T) {
 	assert.Equal(t, 0, domains[1].Score)
 }
 
+func TestTableFormat_Grouped(t *testing.T) {
+	result := &DetectResult{
+		Platform:        "linux",
+		SecurityMode:    "full",
+		ProtectionScore: 85,
+		Domains: []ProtectionDomain{
+			{Name: "File Protection", Weight: 25, Score: 25, Backends: []DetectedBackend{
+				{Name: "fuse", Available: true, Detail: "fusermount3", Description: "file interception"},
+				{Name: "landlock", Available: false, Detail: "not available", Description: "kernel path restrictions"},
+			}, Active: "fuse"},
+			{Name: "Network", Weight: 20, Score: 0, Backends: []DetectedBackend{
+				{Name: "ebpf", Available: false, Detail: "EPERM", Description: "network monitoring"},
+			}},
+		},
+		Capabilities: map[string]any{"fuse": true},
+	}
+	table := result.Table()
+	assert.Contains(t, table, "FILE PROTECTION")
+	assert.Contains(t, table, "25/25")
+	assert.Contains(t, table, "fuse")
+	assert.Contains(t, table, "✓")
+	assert.Contains(t, table, "fusermount3")
+	assert.Contains(t, table, "active backend:")
+	assert.Contains(t, table, "NETWORK")
+	assert.Contains(t, table, "0/20")
+	assert.Contains(t, table, "EPERM")
+	assert.Contains(t, table, "85/100")
+}
+
+func TestTableFormat_FallbackFlat(t *testing.T) {
+	// No domains → falls back to flat capabilities
+	result := &DetectResult{
+		Platform:        "darwin",
+		SecurityMode:    "sandbox-exec",
+		ProtectionScore: 60,
+		Capabilities:    map[string]any{"sandbox_exec": true, "fuse_t": false},
+	}
+	table := result.Table()
+	assert.Contains(t, table, "CAPABILITIES")
+	assert.Contains(t, table, "sandbox_exec")
+}
+
 func TestDetectResult_JSONContainsDomains(t *testing.T) {
 	result := &DetectResult{
 		Platform:        "linux",

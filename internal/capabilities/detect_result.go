@@ -105,33 +105,50 @@ func (r *DetectResult) YAML() ([]byte, error) {
 func (r *DetectResult) Table() string {
 	var sb strings.Builder
 
-	// Header
-	sb.WriteString(fmt.Sprintf("Platform: %s\n", r.Platform))
-	sb.WriteString(fmt.Sprintf("Security Mode: %s\n", r.SecurityMode))
-	sb.WriteString(fmt.Sprintf("Protection Score: %d%%\n", r.ProtectionScore))
+	sb.WriteString(fmt.Sprintf("Platform:         %s\n", r.Platform))
+	sb.WriteString(fmt.Sprintf("Security Mode:    %s\n", r.SecurityMode))
+	sb.WriteString(fmt.Sprintf("Protection Score: %d/100\n", r.ProtectionScore))
 	sb.WriteString("\n")
 
-	// Capabilities table
-	sb.WriteString("CAPABILITIES\n")
-	sb.WriteString(strings.Repeat("-", 40) + "\n")
-
-	// Sort capability keys for consistent output
-	keys := make([]string, 0, len(r.Capabilities))
-	for k := range r.Capabilities {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for _, k := range keys {
-		v := r.Capabilities[k]
-		status := formatCapabilityValue(v)
-		sb.WriteString(fmt.Sprintf("  %-24s %s\n", k, status))
-	}
-
-	// Tips section
-	if len(r.Tips) > 0 {
-		sb.WriteString("\nTIPS\n")
+	// Render domains if available (new format)
+	if len(r.Domains) > 0 {
+		for _, d := range r.Domains {
+			sb.WriteString(fmt.Sprintf("%-40s %d/%d\n", strings.ToUpper(d.Name), d.Score, d.Weight))
+			for _, b := range d.Backends {
+				status := "-"
+				if b.Available {
+					status = "✓"
+				}
+				detail := b.Detail
+				if detail == "" {
+					detail = " "
+				}
+				sb.WriteString(fmt.Sprintf("  %-20s %s  %-16s %s\n", b.Name, status, detail, b.Description))
+			}
+			if d.Active != "" && d.Active != "none" {
+				sb.WriteString(fmt.Sprintf("  active backend:    %s\n", d.Active))
+			}
+			sb.WriteString("\n")
+		}
+	} else {
+		// Fallback: flat capabilities (backward compat for platforms not yet converted)
+		sb.WriteString("CAPABILITIES\n")
 		sb.WriteString(strings.Repeat("-", 40) + "\n")
+		keys := make([]string, 0, len(r.Capabilities))
+		for k := range r.Capabilities {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := r.Capabilities[k]
+			status := formatCapabilityValue(v)
+			sb.WriteString(fmt.Sprintf("  %-24s %s\n", k, status))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(r.Tips) > 0 {
+		sb.WriteString("TIPS\n")
 		for _, tip := range r.Tips {
 			sb.WriteString(fmt.Sprintf("  %s: %s\n", tip.Feature, tip.Impact))
 			sb.WriteString(fmt.Sprintf("    -> %s\n", tip.Action))
@@ -139,7 +156,6 @@ func (r *DetectResult) Table() string {
 	}
 
 	sb.WriteString("\nRun 'agentsh detect config' to generate an optimized configuration.\n")
-
 	return sb.String()
 }
 
