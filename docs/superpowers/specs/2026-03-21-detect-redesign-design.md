@@ -1,7 +1,7 @@
 # Detect Output Redesign: Feature Inventory + Weighted Score
 
 **Date:** 2026-03-21
-**Status:** Draft
+**Status:** Implemented
 **Scope:** All platforms (Linux, Darwin, Windows)
 
 ## Background
