@@ -38,6 +38,19 @@ func Detect() (*DetectResult, error) {
 		"file_enforcement":    secCaps.FileEnforcement,
 	}
 
+	// Determine FUSE mount method for observability
+	fuseMountMethod := "none"
+	if secCaps.FUSE {
+		if hasFusermount() {
+			fuseMountMethod = "fusermount"
+		} else if checkNewMountAPIAvailable() {
+			fuseMountMethod = "new-api"
+		} else {
+			fuseMountMethod = "direct"
+		}
+	}
+	caps["fuse_mount_method"] = fuseMountMethod
+
 	mode := secCaps.SelectMode()
 	score := modeToScore(mode)
 
