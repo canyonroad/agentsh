@@ -348,8 +348,15 @@ func (fs *Filesystem) Unmount(mount platform.FSMount) error {
 
 	if m.mountedViaNewAPI {
 		// go-fuse owns the FUSE fd — do NOT close it here.
-		// Just unmount the VFS mount.
-		return unix.Unmount(m.mountPoint, 0)
+		// Unmount the VFS, then wait for go-fuse server to shut down.
+		// After unix.Unmount, go-fuse's Serve() loop will get an error
+		// reading from the FUSE fd and exit, closing the fd and calling
+		// fileSystem.OnUnmount().
+		err := unix.Unmount(m.mountPoint, 0)
+		if err == nil && m.fsMount != nil && m.fsMount.Server != nil {
+			m.fsMount.Server.Wait()
+		}
+		return err
 	}
 	return m.fsMount.Unmount()
 }
@@ -404,8 +411,15 @@ func (m *Mount) Stats() platform.FSStats {
 func (m *Mount) Close() error {
 	if m.mountedViaNewAPI {
 		// go-fuse owns the FUSE fd — do NOT close it here.
-		// Just unmount the VFS mount.
-		return unix.Unmount(m.mountPoint, 0)
+		// Unmount the VFS, then wait for go-fuse server to shut down.
+		// After unix.Unmount, go-fuse's Serve() loop will get an error
+		// reading from the FUSE fd and exit, closing the fd and calling
+		// fileSystem.OnUnmount().
+		err := unix.Unmount(m.mountPoint, 0)
+		if err == nil && m.fsMount != nil && m.fsMount.Server != nil {
+			m.fsMount.Server.Wait()
+		}
+		return err
 	}
 	return m.fsMount.Unmount()
 }
