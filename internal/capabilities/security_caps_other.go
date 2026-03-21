@@ -16,6 +16,12 @@ type SecurityCapabilities struct {
 	Ptrace          bool   // SYS_PTRACE capability available
 	PtraceEnabled   bool   // ptrace enforcement enabled in config
 	FileEnforcement string // "landlock", "fuse", "seccomp-notify", "none"
+
+	// Cached probe results (populated by DetectSecurityCapabilities, reused by buildLinuxDomains)
+	EBPFProbe   ProbeResult
+	CgroupProbe ProbeResult
+	PIDNSProbe  ProbeResult
+	CapProbe    ProbeResult
 }
 
 // SecurityMode represents the security enforcement mode.

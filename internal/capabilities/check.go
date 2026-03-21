@@ -52,17 +52,13 @@ func realCheckPtrace() CheckResult {
 }
 
 func realCheckCgroupsV2() CheckResult {
-	return CheckResult{
-		Feature:   "cgroups-v2",
-		Available: true,
-	}
+	probe := probeCgroupsV2()
+	return CheckResult{Feature: "cgroups-v2", Available: probe.Available}
 }
 
 func realCheckeBPF() CheckResult {
-	return CheckResult{
-		Feature:   "ebpf",
-		Available: true,
-	}
+	probe := probeEBPF()
+	return CheckResult{Feature: "ebpf", Available: probe.Available}
 }
 
 func realCheckWrapperBinary(binaryPath string) CheckResult {

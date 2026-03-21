@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestCheckAll_NoConfig(t *testing.T) {
@@ -759,4 +760,24 @@ func TestCheckAll_WrapperBinary_CustomPath(t *testing.T) {
 	if checkedPath != "/custom/path/to/wrapper" {
 		t.Errorf("expected custom path to be checked, got: %q", checkedPath)
 	}
+}
+
+func TestProbeEBPF(t *testing.T) {
+	result := probeEBPF()
+	assert.NotEmpty(t, result.Detail)
+}
+
+func TestProbeCgroupsV2(t *testing.T) {
+	result := probeCgroupsV2()
+	assert.NotEmpty(t, result.Detail)
+}
+
+func TestProbePIDNamespace(t *testing.T) {
+	result := probePIDNamespace()
+	assert.NotEmpty(t, result.Detail)
+}
+
+func TestProbeCapabilityDrop(t *testing.T) {
+	result := probeCapabilityDrop()
+	assert.NotEmpty(t, result.Detail)
 }
