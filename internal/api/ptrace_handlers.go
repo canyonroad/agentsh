@@ -5,7 +5,6 @@ package api
 import (
 	"context"
 	"log/slog"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -157,7 +156,9 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 	// Check PolicyDecision for soft-delete before EffectiveDecision switch.
 	// The policy engine maps soft_delete → EffectiveDecision=allow, so
 	// checking EffectiveDecision alone would miss it.
-	if decision.PolicyDecision == types.DecisionSoftDelete {
+	// Only intercept delete operations — soft_delete on non-delete ops
+	// (e.g. open, stat) should fall through to normal allow handling.
+	if decision.PolicyDecision == types.DecisionSoftDelete && fc.Operation == "delete" {
 		trashDir := r.resolveTrashDir(s)
 		if trashDir != "" {
 			return ptrace.FileResult{
@@ -195,26 +196,8 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 }
 
 // resolveTrashDir resolves the trash directory for a session.
-// Uses the same logic as purgeTrashForSession: relative paths are resolved
-// against the session workspace, so ptrace writes and session purge target
-// the same directory.
 func (r *ptraceHandlerRouter) resolveTrashDir(s *session.Session) string {
-	trashPath := r.trashPath
-	if trashPath == "" {
-		trashPath = ".agentsh_trash" // same default as purgeTrashForSession
-	}
-	if filepath.IsAbs(trashPath) {
-		return trashPath
-	}
-	ws := s.Workspace
-	if ws == "" {
-		return ""
-	}
-	resolved := filepath.Join(ws, trashPath)
-	if abs, err := filepath.Abs(resolved); err == nil {
-		return abs
-	}
-	return "" // fail closed if Abs fails
+	return resolveTrashPath(r.trashPath, s.Workspace)
 }
 
 func (r *ptraceHandlerRouter) HandleNetwork(ctx context.Context, nc ptrace.NetworkContext) ptrace.NetworkResult {

@@ -661,6 +661,26 @@ func (a *App) destroySession(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// resolveTrashPath resolves a trash directory path for a given workspace.
+// Shared between ptrace soft-delete (write) and session purge (cleanup)
+// to ensure both target the same directory.
+func resolveTrashPath(trashPath, workspace string) string {
+	if trashPath == "" {
+		trashPath = ".agentsh_trash"
+	}
+	if filepath.IsAbs(trashPath) {
+		return trashPath
+	}
+	if workspace == "" {
+		return ""
+	}
+	resolved := filepath.Join(workspace, trashPath)
+	if abs, err := filepath.Abs(resolved); err == nil {
+		return abs
+	}
+	return "" // fail closed if Abs fails
+}
+
 func (a *App) purgeTrashForSession(s *session.Session) {
 	if a == nil || a.cfg == nil {
 		return
@@ -669,12 +689,9 @@ func (a *App) purgeTrashForSession(s *session.Session) {
 	if cfg.Enabled != nil && !*cfg.Enabled {
 		return
 	}
-	trashPath := cfg.TrashPath
+	trashPath := resolveTrashPath(cfg.TrashPath, s.Workspace)
 	if trashPath == "" {
-		trashPath = ".agentsh_trash"
-	}
-	if !filepath.IsAbs(trashPath) {
-		trashPath = filepath.Join(s.Workspace, trashPath)
+		return
 	}
 	var ttl time.Duration
 	if cfg.TTL != "" {
