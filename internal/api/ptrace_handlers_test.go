@@ -38,7 +38,7 @@ func newSoftDeleteEngine(t *testing.T, workspace string) *policy.Engine {
 			{
 				Name:       "soft-delete-workspace",
 				Paths:      []string{workspace + "/**"},
-				Operations: []string{"delete", "read", "write"},
+				Operations: []string{"delete", "read", "write", "rmdir"},
 				Decision:   "soft_delete",
 				Message:    "Deletions go to trash",
 			},
@@ -70,6 +70,14 @@ func TestHandleFile_SoftDelete(t *testing.T) {
 			workspace:  workspace,
 			operation:  "delete",
 			path:       workspace + "/file.txt",
+			wantAction: "soft-delete",
+		},
+		{
+			name:       "rmdir with configured trash returns soft-delete",
+			trashPath:  ".agentsh_trash",
+			workspace:  workspace,
+			operation:  "rmdir",
+			path:       workspace + "/subdir",
 			wantAction: "soft-delete",
 		},
 		{

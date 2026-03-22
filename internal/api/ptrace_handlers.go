@@ -156,9 +156,10 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 	// Check PolicyDecision for soft-delete before EffectiveDecision switch.
 	// The policy engine maps soft_delete → EffectiveDecision=allow, so
 	// checking EffectiveDecision alone would miss it.
-	// Only intercept delete operations — soft_delete on non-delete ops
+	// Only intercept destructive operations — soft_delete on non-destructive ops
 	// (e.g. open, stat) should fall through to normal allow handling.
-	if decision.PolicyDecision == types.DecisionSoftDelete && fc.Operation == "delete" {
+	// Both "delete" (unlinkat) and "rmdir" (unlinkat+AT_REMOVEDIR) are destructive.
+	if decision.PolicyDecision == types.DecisionSoftDelete && (fc.Operation == "delete" || fc.Operation == "rmdir") {
 		trashDir := r.resolveTrashDir(s)
 		if trashDir != "" {
 			return ptrace.FileResult{
