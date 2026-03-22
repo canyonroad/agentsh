@@ -1,7 +1,6 @@
 package api
 
 import (
-	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -9,13 +8,11 @@ import (
 
 func TestResolveTrashPath(t *testing.T) {
 	// Use platform-appropriate absolute paths so tests pass on all OSes.
-	var absRoot, absWorkspace, absTrash string
+	var absWorkspace, absTrash string
 	if runtime.GOOS == "windows" {
-		absRoot = `C:\`
 		absWorkspace = `C:\Users\user\project`
 		absTrash = `C:\tmp\trash`
 	} else {
-		absRoot = "/"
 		absWorkspace = "/home/user/project"
 		absTrash = "/tmp/trash"
 	}
@@ -68,11 +65,6 @@ func TestResolveTrashPath(t *testing.T) {
 			workspace: "",
 			want:      absTrash,
 		},
-	}
-
-	// Suppress filepath.Abs influence from CWD by ensuring we're in a known dir.
-	if err := os.Chdir(absRoot); err != nil {
-		t.Logf("chdir to %s failed (non-fatal): %v", absRoot, err)
 	}
 
 	for _, tt := range tests {
