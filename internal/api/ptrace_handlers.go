@@ -19,11 +19,12 @@ import (
 // ptraceHandlerRouter routes ptrace syscall events to session-level policy
 // engines. It implements all four ptrace handler interfaces.
 type ptraceHandlerRouter struct {
-	sessions          *session.Manager
-	store             *composite.Store
-	broker            *events.Broker
+	sessions           *session.Manager
+	store              *composite.Store
+	broker             *events.Broker
 	staticAllowFile    bool
 	staticAllowNetwork bool
+	trashPath          string // raw trash path from config (may be relative)
 }
 
 var _ ptrace.ExecHandler = (*ptraceHandlerRouter)(nil)
@@ -152,6 +153,28 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 	_ = r.store.AppendEvent(ctx, ev)
 	r.broker.Publish(ev)
 
+	// Check PolicyDecision for soft-delete before EffectiveDecision switch.
+	// The policy engine maps soft_delete → EffectiveDecision=allow, so
+	// checking EffectiveDecision alone would miss it.
+	// Only intercept destructive operations — soft_delete on non-destructive ops
+	// (e.g. open, stat) should fall through to normal allow handling.
+	// Both "delete" (unlinkat) and "rmdir" (unlinkat+AT_REMOVEDIR) are destructive.
+	if decision.PolicyDecision == types.DecisionSoftDelete && (fc.Operation == "delete" || fc.Operation == "rmdir") {
+		trashDir := r.resolveTrashDir(s)
+		if trashDir != "" {
+			return ptrace.FileResult{
+				Action:   "soft-delete",
+				TrashDir: trashDir,
+			}
+		}
+		// No trash directory — deny to fail closed.
+		return ptrace.FileResult{
+			Allow:  false,
+			Action: "deny",
+			Errno:  int32(syscall.EACCES),
+		}
+	}
+
 	switch decision.EffectiveDecision {
 	case types.DecisionDeny:
 		return ptrace.FileResult{
@@ -168,17 +191,14 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 		}
 		// Invalid redirect payload — deny to fail closed.
 		return ptrace.FileResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES)}
-	case types.DecisionSoftDelete:
-		// Soft-delete requires a trash directory which is not available in the
-		// ptrace handler context. Deny with audit visibility.
-		return ptrace.FileResult{
-			Allow:  false,
-			Action: "deny",
-			Errno:  int32(syscall.EACCES),
-		}
 	default:
 		return ptrace.FileResult{Allow: true, Action: "allow"}
 	}
+}
+
+// resolveTrashDir resolves the trash directory for a session.
+func (r *ptraceHandlerRouter) resolveTrashDir(s *session.Session) string {
+	return resolveTrashPath(r.trashPath, s.Workspace)
 }
 
 func (r *ptraceHandlerRouter) HandleNetwork(ctx context.Context, nc ptrace.NetworkContext) ptrace.NetworkResult {
