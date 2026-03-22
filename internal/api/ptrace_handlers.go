@@ -196,17 +196,18 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 // against the session workspace, so ptrace writes and session purge target
 // the same directory.
 func (r *ptraceHandlerRouter) resolveTrashDir(s *session.Session) string {
-	if r.trashPath == "" {
-		return ""
+	trashPath := r.trashPath
+	if trashPath == "" {
+		trashPath = ".agentsh_trash" // same default as purgeTrashForSession
 	}
-	if filepath.IsAbs(r.trashPath) {
-		return r.trashPath
+	if filepath.IsAbs(trashPath) {
+		return trashPath
 	}
 	ws := s.Workspace
 	if ws == "" {
 		return ""
 	}
-	return filepath.Join(ws, r.trashPath)
+	return filepath.Join(ws, trashPath)
 }
 
 func (r *ptraceHandlerRouter) HandleNetwork(ctx context.Context, nc ptrace.NetworkContext) ptrace.NetworkResult {
