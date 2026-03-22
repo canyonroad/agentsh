@@ -19,11 +19,12 @@ import (
 // ptraceHandlerRouter routes ptrace syscall events to session-level policy
 // engines. It implements all four ptrace handler interfaces.
 type ptraceHandlerRouter struct {
-	sessions          *session.Manager
-	store             *composite.Store
-	broker            *events.Broker
+	sessions           *session.Manager
+	store              *composite.Store
+	broker             *events.Broker
 	staticAllowFile    bool
 	staticAllowNetwork bool
+	trashDir           string // soft-delete trash directory (from FUSE audit config)
 }
 
 var _ ptrace.ExecHandler = (*ptraceHandlerRouter)(nil)
@@ -169,8 +170,13 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 		// Invalid redirect payload — deny to fail closed.
 		return ptrace.FileResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES)}
 	case types.DecisionSoftDelete:
-		// Soft-delete requires a trash directory which is not available in the
-		// ptrace handler context. Deny with audit visibility.
+		if r.trashDir != "" {
+			return ptrace.FileResult{
+				Action:   "soft-delete",
+				TrashDir: r.trashDir,
+			}
+		}
+		// No trash directory configured — deny to fail closed.
 		return ptrace.FileResult{
 			Allow:  false,
 			Action: "deny",

@@ -1,7 +1,7 @@
 # Ptrace Soft-Delete Wiring
 
 **Date:** 2026-03-22
-**Status:** Draft
+**Status:** Implemented
 **Scope:** Linux only (ptrace enforcement)
 
 ## Background

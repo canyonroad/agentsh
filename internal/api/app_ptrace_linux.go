@@ -23,6 +23,7 @@ func (a *App) initPtraceTracer() {
 		broker:             a.broker,
 		staticAllowFile:    cfg.Performance.StaticAllowFile,
 		staticAllowNetwork: cfg.Performance.StaticAllowNetwork,
+		trashDir:           a.cfg.Sandbox.FUSE.Audit.TrashPath,
 	}
 	tr := ptrace.NewTracer(ptrace.TracerConfig{
 		AttachMode:       cfg.AttachMode,
