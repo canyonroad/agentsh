@@ -26,7 +26,11 @@ func (a *App) initPtraceTracer() {
 		trashDir = filepath.Join(a.cfg.Sessions.BaseDir, trashDir)
 	}
 	if trashDir != "" {
-		if abs, err := filepath.Abs(trashDir); err == nil {
+		abs, err := filepath.Abs(trashDir)
+		if err != nil {
+			slog.Warn("ptrace: cannot resolve trash path, soft-delete disabled", "path", trashDir, "error", err)
+			trashDir = ""
+		} else {
 			trashDir = abs
 		}
 	}
