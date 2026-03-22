@@ -207,7 +207,11 @@ func (r *ptraceHandlerRouter) resolveTrashDir(s *session.Session) string {
 	if ws == "" {
 		return ""
 	}
-	return filepath.Join(ws, trashPath)
+	resolved := filepath.Join(ws, trashPath)
+	if abs, err := filepath.Abs(resolved); err == nil {
+		return abs
+	}
+	return "" // fail closed if Abs fails
 }
 
 func (r *ptraceHandlerRouter) HandleNetwork(ctx context.Context, nc ptrace.NetworkContext) ptrace.NetworkResult {
