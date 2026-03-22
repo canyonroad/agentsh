@@ -25,6 +25,11 @@ func (a *App) initPtraceTracer() {
 	if trashDir != "" && !filepath.IsAbs(trashDir) {
 		trashDir = filepath.Join(a.cfg.Sessions.BaseDir, trashDir)
 	}
+	if trashDir != "" {
+		if abs, err := filepath.Abs(trashDir); err == nil {
+			trashDir = abs
+		}
+	}
 
 	router := &ptraceHandlerRouter{
 		sessions:           a.sessions,
