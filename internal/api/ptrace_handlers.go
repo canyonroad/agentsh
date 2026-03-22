@@ -154,6 +154,25 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 	_ = r.store.AppendEvent(ctx, ev)
 	r.broker.Publish(ev)
 
+	// Check PolicyDecision for soft-delete before EffectiveDecision switch.
+	// The policy engine maps soft_delete → EffectiveDecision=allow, so
+	// checking EffectiveDecision alone would miss it.
+	if decision.PolicyDecision == types.DecisionSoftDelete {
+		trashDir := r.resolveTrashDir(s)
+		if trashDir != "" {
+			return ptrace.FileResult{
+				Action:   "soft-delete",
+				TrashDir: trashDir,
+			}
+		}
+		// No trash directory — deny to fail closed.
+		return ptrace.FileResult{
+			Allow:  false,
+			Action: "deny",
+			Errno:  int32(syscall.EACCES),
+		}
+	}
+
 	switch decision.EffectiveDecision {
 	case types.DecisionDeny:
 		return ptrace.FileResult{
@@ -170,22 +189,6 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 		}
 		// Invalid redirect payload — deny to fail closed.
 		return ptrace.FileResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES)}
-	case types.DecisionSoftDelete:
-		// Resolve trash directory per-session against the workspace,
-		// matching purgeTrashForSession behavior exactly.
-		trashDir := r.resolveTrashDir(s)
-		if trashDir != "" {
-			return ptrace.FileResult{
-				Action:   "soft-delete",
-				TrashDir: trashDir,
-			}
-		}
-		// No trash directory configured — deny to fail closed.
-		return ptrace.FileResult{
-			Allow:  false,
-			Action: "deny",
-			Errno:  int32(syscall.EACCES),
-		}
 	default:
 		return ptrace.FileResult{Allow: true, Action: "allow"}
 	}
