@@ -5,7 +5,6 @@ package api
 import (
 	"context"
 	"log/slog"
-	"path/filepath"
 
 	"github.com/agentsh/agentsh/internal/ptrace"
 )
@@ -18,30 +17,13 @@ func (a *App) initPtraceTracer() {
 		return
 	}
 
-	// Resolve trash directory to absolute path. The config default is relative
-	// (".agentsh_trash") which must be resolved against the sessions base dir,
-	// not the tracee's CWD (which varies per command).
-	trashDir := a.cfg.Sandbox.FUSE.Audit.TrashPath
-	if trashDir != "" && !filepath.IsAbs(trashDir) {
-		trashDir = filepath.Join(a.cfg.Sessions.BaseDir, trashDir)
-	}
-	if trashDir != "" {
-		abs, err := filepath.Abs(trashDir)
-		if err != nil {
-			slog.Warn("ptrace: cannot resolve trash path, soft-delete disabled", "path", trashDir, "error", err)
-			trashDir = ""
-		} else {
-			trashDir = abs
-		}
-	}
-
 	router := &ptraceHandlerRouter{
 		sessions:           a.sessions,
 		store:              a.store,
 		broker:             a.broker,
 		staticAllowFile:    cfg.Performance.StaticAllowFile,
 		staticAllowNetwork: cfg.Performance.StaticAllowNetwork,
-		trashDir:           trashDir,
+		trashPath:          a.cfg.Sandbox.FUSE.Audit.TrashPath,
 	}
 	tr := ptrace.NewTracer(ptrace.TracerConfig{
 		AttachMode:       cfg.AttachMode,

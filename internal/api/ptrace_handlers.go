@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -24,7 +25,7 @@ type ptraceHandlerRouter struct {
 	broker             *events.Broker
 	staticAllowFile    bool
 	staticAllowNetwork bool
-	trashDir           string // soft-delete trash directory (from FUSE audit config)
+	trashPath          string // raw trash path from config (may be relative)
 }
 
 var _ ptrace.ExecHandler = (*ptraceHandlerRouter)(nil)
@@ -170,10 +171,13 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 		// Invalid redirect payload — deny to fail closed.
 		return ptrace.FileResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES)}
 	case types.DecisionSoftDelete:
-		if r.trashDir != "" {
+		// Resolve trash directory per-session against the workspace,
+		// matching purgeTrashForSession behavior exactly.
+		trashDir := r.resolveTrashDir(s)
+		if trashDir != "" {
 			return ptrace.FileResult{
 				Action:   "soft-delete",
-				TrashDir: r.trashDir,
+				TrashDir: trashDir,
 			}
 		}
 		// No trash directory configured — deny to fail closed.
@@ -185,6 +189,24 @@ func (r *ptraceHandlerRouter) HandleFile(ctx context.Context, fc ptrace.FileCont
 	default:
 		return ptrace.FileResult{Allow: true, Action: "allow"}
 	}
+}
+
+// resolveTrashDir resolves the trash directory for a session.
+// Uses the same logic as purgeTrashForSession: relative paths are resolved
+// against the session workspace, so ptrace writes and session purge target
+// the same directory.
+func (r *ptraceHandlerRouter) resolveTrashDir(s *session.Session) string {
+	if r.trashPath == "" {
+		return ""
+	}
+	if filepath.IsAbs(r.trashPath) {
+		return r.trashPath
+	}
+	ws := s.Workspace
+	if ws == "" {
+		return ""
+	}
+	return filepath.Join(ws, r.trashPath)
 }
 
 func (r *ptraceHandlerRouter) HandleNetwork(ctx context.Context, nc ptrace.NetworkContext) ptrace.NetworkResult {
