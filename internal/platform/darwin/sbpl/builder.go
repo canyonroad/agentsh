@@ -75,6 +75,73 @@ func (p *Profile) AllowFileReadWriteIOctl(match PathMatch, path string) {
 	})
 }
 
+// AllowProcessExec adds a rule allowing process-exec for the given path.
+func (p *Profile) AllowProcessExec(match PathMatch, path string) {
+	p.rules = append(p.rules, rule{
+		kind: kindExecAllow,
+		sbpl: fmt.Sprintf("(allow process-exec (%s %s))", matchStr(match), quotePath(path)),
+	})
+}
+
+// DenyProcessExec adds a rule denying process-exec for the given path.
+func (p *Profile) DenyProcessExec(match PathMatch, path string) {
+	p.rules = append(p.rules, rule{
+		kind: kindExecDeny,
+		sbpl: fmt.Sprintf("(deny process-exec (%s %s))", matchStr(match), quotePath(path)),
+	})
+}
+
+// AllowMachLookup adds a rule allowing mach-lookup for the given service name.
+func (p *Profile) AllowMachLookup(serviceName string) {
+	p.rules = append(p.rules, rule{
+		kind: kindMachAllow,
+		sbpl: fmt.Sprintf("(allow mach-lookup (global-name %q))", serviceName),
+	})
+}
+
+// AllowMachLookupPrefix adds a rule allowing mach-lookup for services
+// matching the given prefix.
+func (p *Profile) AllowMachLookupPrefix(prefix string) {
+	p.rules = append(p.rules, rule{
+		kind: kindMachAllow,
+		sbpl: fmt.Sprintf("(allow mach-lookup (global-name-prefix %q))", prefix),
+	})
+}
+
+// DenyMachLookup adds a rule denying mach-lookup for the given service name.
+func (p *Profile) DenyMachLookup(serviceName string) {
+	p.rules = append(p.rules, rule{
+		kind: kindMachDeny,
+		sbpl: fmt.Sprintf("(deny mach-lookup (global-name %q))", serviceName),
+	})
+}
+
+// DenyMachLookupPrefix adds a rule denying mach-lookup for services
+// matching the given prefix.
+func (p *Profile) DenyMachLookupPrefix(prefix string) {
+	p.rules = append(p.rules, rule{
+		kind: kindMachDeny,
+		sbpl: fmt.Sprintf("(deny mach-lookup (global-name-prefix %q))", prefix),
+	})
+}
+
+// AllowNetworkAll adds a rule allowing all network operations.
+func (p *Profile) AllowNetworkAll() {
+	p.rules = append(p.rules, rule{
+		kind: kindNetworkAllow,
+		sbpl: "(allow network*)",
+	})
+}
+
+// AllowNetworkOutbound adds a rule allowing outbound network connections
+// for the given protocol and host:port.
+func (p *Profile) AllowNetworkOutbound(proto, hostPort string) {
+	p.rules = append(p.rules, rule{
+		kind: kindNetworkAllow,
+		sbpl: fmt.Sprintf("(allow network-outbound (remote %s %q))", proto, hostPort),
+	})
+}
+
 // Build renders the accumulated rules into a complete SBPL profile string.
 // It returns an error if any non-regex path is relative.
 func (p *Profile) Build() (string, error) {
@@ -142,10 +209,16 @@ func quotePath(path string) string {
 }
 
 // validateRule checks that non-regex paths in a rule are absolute.
+// Only file and exec rules contain filesystem paths that must be absolute;
+// mach-lookup and network rules use service names / host:port strings.
 func validateRule(r rule) error {
-	// Extract the path from the SBPL string for validation.
-	// Rules follow the pattern: (allow ... (match "path"))
-	// or for regex: (allow ... (regex #"pattern"#))
+	// Only validate path-based rule kinds.
+	switch r.kind {
+	case kindFileAllow, kindFileDeny, kindExecAllow, kindExecDeny:
+		// These contain filesystem paths; validate below.
+	default:
+		return nil
+	}
 
 	// If it's a regex rule, skip validation.
 	if strings.Contains(r.sbpl, "(regex ") {

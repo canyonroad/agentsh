@@ -170,3 +170,134 @@ func TestBuild_MultipleRules(t *testing.T) {
 		t.Error("missing file-read literal rule")
 	}
 }
+
+// --- Process exec tests ---
+
+func TestAllowProcessExec_Subpath(t *testing.T) {
+	p := New()
+	p.AllowProcessExec(Subpath, "/usr/bin")
+	out, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	expected := `(allow process-exec (subpath "/usr/bin"))`
+	if !strings.Contains(out, expected) {
+		t.Errorf("Build() output should contain %q, got:\n%s", expected, out)
+	}
+}
+
+func TestDenyProcessExec_Literal(t *testing.T) {
+	p := New()
+	p.DenyProcessExec(Literal, "/usr/bin/osascript")
+	out, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	expected := `(deny process-exec (literal "/usr/bin/osascript"))`
+	if !strings.Contains(out, expected) {
+		t.Errorf("Build() output should contain %q, got:\n%s", expected, out)
+	}
+}
+
+func TestDenyBeforeAllow_ExecOrdering(t *testing.T) {
+	p := New()
+	p.AllowProcessExec(Subpath, "/usr/bin")
+	p.DenyProcessExec(Literal, "/usr/bin/osascript")
+	out, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	denyIdx := strings.Index(out, `(deny process-exec`)
+	allowIdx := strings.Index(out, `(allow process-exec`)
+	if denyIdx < 0 {
+		t.Fatal("deny process-exec rule not found in output")
+	}
+	if allowIdx < 0 {
+		t.Fatal("allow process-exec rule not found in output")
+	}
+	if denyIdx > allowIdx {
+		t.Errorf("deny exec rules should appear before allow exec rules, deny at %d, allow at %d", denyIdx, allowIdx)
+	}
+}
+
+// --- Mach-lookup tests ---
+
+func TestAllowMachLookup(t *testing.T) {
+	p := New()
+	p.AllowMachLookup("com.apple.system.logger")
+	out, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	expected := `(allow mach-lookup (global-name "com.apple.system.logger"))`
+	if !strings.Contains(out, expected) {
+		t.Errorf("Build() output should contain %q, got:\n%s", expected, out)
+	}
+}
+
+func TestAllowMachLookupPrefix(t *testing.T) {
+	p := New()
+	p.AllowMachLookupPrefix("com.apple.system.")
+	out, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	expected := `(allow mach-lookup (global-name-prefix "com.apple.system."))`
+	if !strings.Contains(out, expected) {
+		t.Errorf("Build() output should contain %q, got:\n%s", expected, out)
+	}
+}
+
+func TestDenyMachLookup(t *testing.T) {
+	p := New()
+	p.DenyMachLookup("com.apple.security.authtrampoline")
+	out, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	expected := `(deny mach-lookup (global-name "com.apple.security.authtrampoline"))`
+	if !strings.Contains(out, expected) {
+		t.Errorf("Build() output should contain %q, got:\n%s", expected, out)
+	}
+}
+
+func TestDenyMachLookupPrefix(t *testing.T) {
+	p := New()
+	p.DenyMachLookupPrefix("com.apple.pasteboard.")
+	out, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	expected := `(deny mach-lookup (global-name-prefix "com.apple.pasteboard."))`
+	if !strings.Contains(out, expected) {
+		t.Errorf("Build() output should contain %q, got:\n%s", expected, out)
+	}
+}
+
+// --- Network tests ---
+
+func TestAllowNetworkAll(t *testing.T) {
+	p := New()
+	p.AllowNetworkAll()
+	out, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	expected := `(allow network*)`
+	if !strings.Contains(out, expected) {
+		t.Errorf("Build() output should contain %q, got:\n%s", expected, out)
+	}
+}
+
+func TestAllowNetworkOutbound(t *testing.T) {
+	p := New()
+	p.AllowNetworkOutbound("tcp", "*:443")
+	out, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	expected := `(allow network-outbound (remote tcp "*:443"))`
+	if !strings.Contains(out, expected) {
+		t.Errorf("Build() output should contain %q, got:\n%s", expected, out)
+	}
+}
