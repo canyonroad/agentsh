@@ -147,7 +147,7 @@ Default (if omitted): all depths (`min_depth: 0`, `max_depth: -1`).
 | name | string | yes | Rule identifier |
 | description | string | yes | Human-readable description |
 | signals | string[] | yes | Signal names, numbers, or groups: `@all`, `@fatal`, `@job`, `@reload` |
-| target | object | yes | `{type, pattern?, min?, max?}`. Types: `self`, `children`, `parent`, `session`, `external`, `system`, `pid_range` |
+| target | object | yes | `{type, pattern?, min?, max?}`. Types: `self`, `children`, `descendants`, `siblings`, `parent`, `session`, `external`, `system`, `user`, `process`, `pid_range` |
 | decision | string | yes | `allow`, `deny`, `audit`, `approve`, `redirect`, `absorb` |
 | fallback | string | no | Fallback decision if platform can't enforce |
 | redirect_to | string | no | Target signal name (for redirect decision) |
@@ -158,8 +158,8 @@ Default (if omitted): all depths (`min_depth: 0`, `max_depth: -1`).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| type | string | `self`, `children`, `parent`, `session`, `external`, `system`, `pid_range` |
-| pattern | string | Process name pattern (optional) |
+| type | string | `self`, `children`, `descendants`, `siblings`, `parent`, `session`, `external`, `system`, `user`, `process`, `pid_range` |
+| pattern | string | Process name pattern (for `process` and `user` types) |
 | min | int | Min PID for pid_range type (optional) |
 | max | int | Max PID for pid_range type (optional) |
 
