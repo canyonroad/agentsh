@@ -399,17 +399,12 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			// 1. Attach ptrace (prefilter injected at first syscall exit)
 			waitExit, resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
 			if attachErr != nil {
-				// Keep cancellation watcher alive for the fallback cmd.Wait() path.
-				// Deferred close ensures the goroutine exits when the function returns.
-				defer close(ptraceDone)
-				slog.Warn("hybrid mode: ptrace attach failed, falling back to wrapper-only",
-					"error", attachErr, "pid", cmd.Process.Pid)
-				if hook != nil {
-					slog.Warn("hybrid mode: cgroup/eBPF hook skipped (process not stopped)",
-						"pid", cmd.Process.Pid)
-				}
-				// Fall through: startWrapperHandlers below will start wrapper-only mode.
-				// Process will use cmd.Wait() path at bottom of function.
+				close(ptraceDone)
+				_ = killProcess(cmd.Process.Pid)
+				_ = killProcessGroup(pgid)
+				pipeWG.Wait()
+				cmd.Process.Release()
+				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("hybrid ptrace attach: %w", attachErr)
 			} else {
 				// 2. Start wrapper handlers (receives FD, sends ACK)
 				startWrapperHandlers(ctx, extra, cmd.Process.Pid, pgid)
