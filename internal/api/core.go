@@ -118,8 +118,10 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		return earlyReturn()
 	}
 
-	// Ptrace mode: no wrapper, no seccomp notify sockets
-	if a.ptraceTracer != nil {
+	// Full ptrace mode: skip wrapper (ptrace handles everything).
+	// Hybrid mode (execve-only ptrace): fall through to use wrapper for
+	// socket/file monitoring and Landlock — ptrace only handles execve.
+	if a.ptraceTracer != nil && !a.cfg.Sandbox.Ptrace.IsExecveOnly() {
 		return earlyReturn()
 	}
 
@@ -187,6 +189,9 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 
 	// Pass seccomp configuration to the wrapper
 	execveEnabled := a.cfg.Sandbox.Seccomp.Execve.Enabled
+	if a.ptraceTracer != nil {
+		execveEnabled = false // ptrace handles execve; don't trap in seccomp USER_NOTIF
+	}
 	seccompCfg := seccompWrapperConfig{
 		UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
 		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
