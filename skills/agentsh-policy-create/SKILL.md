@@ -63,7 +63,7 @@ Create new AgentSH security policies from built-in templates, customized to the 
 
 - Always use `version: 1`
 - Every policy must have `name` and `description`
-- End each rule category with a default-deny catch-all
+- End rule-list categories (file_rules, network_rules, command_rules) with a default-deny catch-all
 - Use descriptive rule names in `verb-noun` format (e.g., `allow-npm`, `deny-ssh-keys`)
 - Include section comment headers matching built-in policy style
 - First match wins — place specific rules before general ones

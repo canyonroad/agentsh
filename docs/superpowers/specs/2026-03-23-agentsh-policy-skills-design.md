@@ -114,7 +114,7 @@ Both skills read this file at invocation time. It contains the YAML-author-facin
 
 ```yaml
 version: 1                    # Required. Always 1.
-name: "policy-name"           # Required. Alphanumeric + hyphens.
+name: "policy-name"           # Required. Alphanumeric, hyphens, underscores.
 description: |                # Required. Multi-line description.
   What this policy does.
 
@@ -146,7 +146,7 @@ transparent_commands: {}      # Override transparent command set
 | description | string | yes | Human-readable description |
 | paths | string[] | yes | Glob patterns. Supports `${PROJECT_ROOT}`, `${HOME}`, `${GIT_ROOT}`, `**`, `*` |
 | operations | string[] | yes | `read`, `write`, `delete`, `stat`, `list`, `open`, `create`, `mkdir`, `chmod`, `rename`, `rmdir`, `readlink`, `*` |
-| decision | string | yes | `allow`, `deny`, `approve`, `soft_delete` |
+| decision | string | yes | `allow`, `deny`, `approve`, `redirect`, `soft_delete` |
 | message | string | no | Template string for approve decisions. Variables: `{{.Path}}` |
 | timeout | duration | no | Approval timeout (e.g., `5m`, `30s`) |
 | redirect_to | string | no | Target directory for redirected file operations |
