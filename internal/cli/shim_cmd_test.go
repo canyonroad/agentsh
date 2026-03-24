@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -134,5 +135,110 @@ func TestShimInstallShell_BashOnlyAndBash_MutuallyExclusive(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("expected mutually exclusive error, got %q", err.Error())
+	}
+}
+
+func TestShimInstallShell_ForceWritesConfig(t *testing.T) {
+	tmp := t.TempDir()
+	rootfs := filepath.Join(tmp, "rootfs")
+	if err := os.MkdirAll(filepath.Join(rootfs, "bin"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootfs, "bin", "sh"), []byte("REAL\n"), 0o755); err != nil {
+		t.Fatalf("write sh: %v", err)
+	}
+	shimPath := filepath.Join(tmp, "shim.bin")
+	if err := os.WriteFile(shimPath, []byte("SHIM\n"), 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	root := NewRoot("test")
+	root.SetArgs([]string{
+		"shim", "install-shell",
+		"--root", rootfs,
+		"--shim", shimPath,
+		"--force",
+	})
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+
+	confPath := filepath.Join(rootfs, "etc", "agentsh", "shim.conf")
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatalf("expected shim.conf to exist: %v", err)
+	}
+	if !strings.Contains(string(data), "force=true") {
+		t.Fatalf("expected force=true in shim.conf, got %q", string(data))
+	}
+}
+
+func TestShimInstallShell_NoForceNoConfig(t *testing.T) {
+	tmp := t.TempDir()
+	rootfs := filepath.Join(tmp, "rootfs")
+	if err := os.MkdirAll(filepath.Join(rootfs, "bin"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootfs, "bin", "sh"), []byte("REAL\n"), 0o755); err != nil {
+		t.Fatalf("write sh: %v", err)
+	}
+	shimPath := filepath.Join(tmp, "shim.bin")
+	if err := os.WriteFile(shimPath, []byte("SHIM\n"), 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	root := NewRoot("test")
+	root.SetArgs([]string{
+		"shim", "install-shell",
+		"--root", rootfs,
+		"--shim", shimPath,
+	})
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+
+	confPath := filepath.Join(rootfs, "etc", "agentsh", "shim.conf")
+	if _, err := os.Stat(confPath); err == nil {
+		t.Fatalf("expected shim.conf NOT to exist without --force")
+	}
+}
+
+func TestShimInstallShell_ForceDryRun(t *testing.T) {
+	tmp := t.TempDir()
+	rootfs := filepath.Join(tmp, "rootfs")
+	if err := os.MkdirAll(filepath.Join(rootfs, "bin"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootfs, "bin", "sh"), []byte("REAL\n"), 0o755); err != nil {
+		t.Fatalf("write sh: %v", err)
+	}
+	shimPath := filepath.Join(tmp, "shim.bin")
+	if err := os.WriteFile(shimPath, []byte("SHIM\n"), 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	root := NewRoot("test")
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetArgs([]string{
+		"shim", "install-shell",
+		"--root", rootfs,
+		"--shim", shimPath,
+		"--force",
+		"--dry-run",
+	})
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+
+	// Dry run should NOT write the file.
+	confPath := filepath.Join(rootfs, "etc", "agentsh", "shim.conf")
+	if _, err := os.Stat(confPath); err == nil {
+		t.Fatalf("dry-run should NOT write shim.conf")
+	}
+
+	// Dry run output should mention the config file path.
+	if !strings.Contains(stdout.String(), "shim.conf") {
+		t.Fatalf("expected dry-run output to mention shim.conf, got %q", stdout.String())
 	}
 }
