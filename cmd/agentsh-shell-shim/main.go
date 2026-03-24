@@ -72,7 +72,12 @@ func main() {
 	}
 	conf, confErr := shim.ReadShimConf(confRoot)
 	if confErr != nil {
-		debugLog("read shim.conf: %v", confErr)
+		// Fail-closed: if the config file exists but can't be read (permission
+		// denied, I/O error), assume force=true. An operator wrote the file for
+		// a reason — silently bypassing policy is worse than over-enforcing.
+		// Only a missing file (ENOENT) is non-fatal (handled inside ReadShimConf).
+		debugLog("read shim.conf: %v (fail-closed: assuming force=true)", confErr)
+		conf.Force = true
 	}
 	forceShim := strings.TrimSpace(os.Getenv("AGENTSH_SHIM_FORCE"))
 	switch {

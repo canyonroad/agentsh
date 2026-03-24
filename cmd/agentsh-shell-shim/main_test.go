@@ -430,6 +430,51 @@ func TestShimConfForce_EnvZeroOverridesConfig(t *testing.T) {
 	}
 }
 
+func TestShimConfForce_UnreadableConfigFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write shim.conf but make it unreadable. The shim should fail-closed:
+	// assume force=true and try to enforce (not bypass).
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(shimBin, "-c", "echo hello")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// Should fail because the shim tried to enforce (fail-closed), not bypass.
+	if err == nil {
+		t.Fatalf("expected error: unreadable config should fail-closed and try to enforce, not bypass")
+	}
+	if !strings.Contains(stderr.String(), "agentsh") {
+		t.Fatalf("expected agentsh-related error (enforce path), got stderr: %s", stderr.String())
+	}
+}
+
 func TestFatalWithHint(t *testing.T) {
 	// Verify formatting and exit code by forking a subprocess.
 	if os.Getenv("AGENTSH_SHIM_FATAL_TEST") == "1" {

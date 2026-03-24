@@ -64,6 +64,17 @@ func InstallShellShim(opts InstallShellShimOptions) error {
 		if err := WriteShimConf(root, conf); err != nil {
 			return fmt.Errorf("write shim.conf: %w", err)
 		}
+	} else {
+		// Clear stale force=true from a prior --force install so the current
+		// flags always define the current state.
+		existing, _ := ReadShimConf(root)
+		if existing.Raw["force"] == "true" || existing.Raw["force"] == "1" {
+			existing.Raw["force"] = "false"
+			existing.Force = false
+			if err := WriteShimConf(root, existing); err != nil {
+				return fmt.Errorf("clear shim.conf force: %w", err)
+			}
+		}
 	}
 	return nil
 }

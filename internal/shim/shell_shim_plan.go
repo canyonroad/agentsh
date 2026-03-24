@@ -46,6 +46,15 @@ func PlanInstallShellShim(opts InstallShellShimOptions) (*ShellShimPlan, error) 
 			Path: ShimConfPath(root),
 			Note: "write shim.conf with force=true",
 		})
+	} else {
+		existing, _ := ReadShimConf(root)
+		if existing.Raw["force"] == "true" || existing.Raw["force"] == "1" {
+			actions = append(actions, ShellShimAction{
+				Op:   "write",
+				Path: ShimConfPath(root),
+				Note: "clear force=true from shim.conf",
+			})
+		}
 	}
 	return &ShellShimPlan{Root: root, Shim: opts.ShimPath, Actions: actions}, nil
 }
