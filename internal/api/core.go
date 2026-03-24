@@ -78,6 +78,10 @@ type macSandboxWrapperConfig struct {
 	AllowedPaths  []string                     `json:"allowed_paths"`
 	AllowNetwork  bool                         `json:"allow_network"`
 	MachServices  macSandboxMachServicesConfig `json:"mach_services"`
+
+	// Dynamic seatbelt fields
+	CompiledProfile string   `json:"compiled_profile,omitempty"`
+	ExtensionTokens []string `json:"extension_tokens,omitempty"`
 }
 
 type macSandboxMachServicesConfig struct {
@@ -1410,9 +1414,7 @@ func (a *App) wrapWithMacSandbox(
 		wrapperBin = "agentsh-macwrap"
 	}
 
-	// Check if wrapper exists
 	if _, err := exec.LookPath(wrapperBin); err != nil {
-		// Wrapper not found, skip sandbox
 		return
 	}
 
@@ -1425,7 +1427,6 @@ func (a *App) wrapWithMacSandbox(
 		BlockPrefixes: a.cfg.Sandbox.XPC.MachServices.BlockPrefixes,
 	}
 
-	// Apply defaults if not configured
 	if machCfg.DefaultAction == "" {
 		machCfg.DefaultAction = "deny"
 	}
@@ -1439,20 +1440,45 @@ func (a *App) wrapWithMacSandbox(
 	cfg := macSandboxWrapperConfig{
 		WorkspacePath: sess.Workspace,
 		AllowedPaths:  []string{os.Getenv("HOME")},
-		AllowNetwork:  true, // Default allow, can be policy-controlled
+		AllowNetwork:  true,
 		MachServices:  machCfg,
+	}
+
+	// Compile policy-driven SBPL profile (darwin+cgo only, no-op on other platforms)
+	compileDarwinSandboxProfile(&cfg, a.policy, sess.Workspace)
+
+	// Write profile artifact for debugging/inspection
+	if cfg.CompiledProfile != "" && sess.ID != "" {
+		artifactDir := filepath.Join(os.Getenv("HOME"), ".agentsh", "sessions", sess.ID)
+		os.MkdirAll(artifactDir, 0700)
+		artifactPath := filepath.Join(artifactDir, "sandbox.sb")
+		if err := os.WriteFile(artifactPath, []byte(cfg.CompiledProfile), 0600); err != nil {
+			slog.Debug("failed to write sandbox profile artifact", "error", err)
+		}
 	}
 
 	cfgJSON, err := json.Marshal(cfg)
 	if err != nil {
-		// Failed to marshal config, skip sandbox
 		return
 	}
 
 	if req.Env == nil {
 		req.Env = map[string]string{}
 	}
-	req.Env["AGENTSH_SANDBOX_CONFIG"] = string(cfgJSON)
+
+	// Use file-based config if payload is too large for env var
+	cfgStr := string(cfgJSON)
+	if len(cfgStr) > 64*1024 {
+		tmpFile := fmt.Sprintf("/tmp/agentsh-sandbox-%s.json", sess.ID)
+		if err := os.WriteFile(tmpFile, cfgJSON, 0600); err != nil {
+			slog.Warn("failed to write sandbox config file", "error", err)
+			return
+		}
+		req.Env["AGENTSH_SANDBOX_CONFIG_FILE"] = tmpFile
+	} else {
+		req.Env["AGENTSH_SANDBOX_CONFIG"] = cfgStr
+	}
+
 	req.Command = wrapperBin
 	req.Args = append([]string{"--", origCommand}, origArgs...)
 }

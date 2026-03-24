@@ -65,3 +65,14 @@ log stream --predicate 'subsystem == "com.apple.sandbox"' --level debug
 ## Audit Events
 
 XPC sandbox violations generate `xpc_sandbox_violation` events in the audit log.
+
+## Dynamic Seatbelt (Policy-Driven Profiles)
+
+Starting with dynamic seatbelt mode, sandbox profiles are no longer generated locally by `agentsh-macwrap`. Instead, they are built server-side from policy YAML using the SBPL builder.
+
+### How It Works
+
+1. **Server-side compilation**: When a session starts, the server reads the active policy and compiles an SBPL profile using the SBPL builder. The profile encodes deny-default rules with specific allows for file paths, exec paths, Mach services, and network access derived from policy.
+2. **Extension tokens**: Runtime file access grants are issued as sandbox extension tokens. These allow the sandboxed process to access paths not in the original profile (e.g., newly created temp files or workspace expansions) without regenerating the full profile.
+3. **Pre-compiled delivery**: The compiled SBPL profile is sent to `agentsh-macwrap` as part of the exec request. macwrap applies the pre-compiled profile via `sandbox_init_with_parameters()` instead of generating one locally.
+4. **Backwards compatibility**: If `CompiledProfile` is empty in the exec request, macwrap falls back to legacy local profile generation. This ensures older servers or configurations continue to work without changes.

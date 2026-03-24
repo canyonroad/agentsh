@@ -88,6 +88,7 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | **macOS + Lima (inside VM)** | 100% | Yes | Yes | Block | Full | Yes | Full |
 | **macOS + Lima (orchestrated)** | 85% | Yes | Yes | Block | Full | Yes | Full |
 | **macOS FUSE-T** | 70% | Yes | Yes | Audit | Minimal | No | None |
+| **macOS Dynamic Seatbelt** | 65-75% | Partial | Best-effort | Audit | Deny-default | Exec paths | None |
 | **Windows Native** | 85% | Yes | Yes | Audit | Partial | No | Partial |
 
 ## Security Feature Coverage
@@ -122,6 +123,10 @@ macOS + Lima (orch)   ███████████████████�
 macOS FUSE-T + pf     ██████████████████████████████████░░░░░░░░░░░░░░░░░░░░░░   70%
                       File✓   Net✓    Sig⚠    Iso⚠      Sys✗     Res✗
                       (Minimal isolation via sandbox-exec, no syscall filter)
+
+macOS Dyn Seatbelt     █████████████████████████████████████░░░░░░░░░░░░░░░░░░░  65-75%
+                       File⚠   Net⚠    Sig⚠    Iso✓      Sys⚠     Res✗
+                       (Policy-driven SBPL; +FUSE-T for file interception → 75%)
 
 Windows Native        ██████████████████████████████████████████░░░░░░░░░░░░░░   85%
                       File✓   Net✓    Sig⚠    Iso⚠      Sys✗     Res⚠
@@ -264,7 +269,7 @@ Lima/virtiofs   █████████████████████�
 | Production - Windows Server | Windows WSL2 | 100% | Full Linux security in VM |
 | Production - macOS | macOS + Lima (inside VM) | 100% | Run agentsh inside Lima = native Linux |
 | Enterprise Security Product | macOS ESF+NE | 90% | ESF requires Apple approval; NE is standard |
-| Development - macOS | macOS FUSE-T | 70% | Easy setup, good monitoring |
+| Development - macOS | macOS Dynamic Seatbelt + FUSE-T | 75% | Policy-driven sandbox with file interception |
 | Development - Windows | Windows Native | 75% | Registry monitoring + WinDivert network |
 | CI/CD Pipeline | Linux Native | 100% | Containers supported |
 | Air-gapped/Offline | Linux Native | 100% | No external dependencies |
@@ -319,6 +324,8 @@ sandbox:
 | Configuration | File Interception | Network | Isolation | Ease of Setup | Security |
 |---------------|:-----------------:|:-------:|:---------:|:-------------:|:--------:|
 | ESF + NE | Endpoint Security | Network Extension | Minimal (sandbox-exec) | Medium (ESF needs approval) | 90% |
+| Dynamic Seatbelt + FUSE-T | FUSE-T (NFS) | Best-effort (SBPL port rules) | Deny-default (dynamic SBPL) | Easy (agentsh-macwrap in PATH) | 75% |
+| Dynamic Seatbelt only | Policy-derived SBPL paths | Best-effort (SBPL port rules) | Deny-default (dynamic SBPL) | Easy (agentsh-macwrap in PATH) | 65% |
 | FUSE-T + pf | FUSE-T (NFS) | pf packet filter | Minimal (sandbox-exec) | Easy (`brew install`) | 70% |
 | Lima VM (inside) | FUSE3 in VM | iptables in VM | Full | Medium | 100% |
 | Lima VM (orchestrated) | FUSE3 in VM | iptables in VM | Full | Medium | 85% |
@@ -327,6 +334,8 @@ sandbox:
 **When to use each:**
 - **ESF + NE**: Building a commercial security product, have Apple Developer relationship
 - **FUSE-T + pf**: Development, testing, personal use - best balance of features/simplicity
+- **Dynamic Seatbelt + FUSE-T**: Default for development — automatic policy-driven sandbox with file interception
+- **Dynamic Seatbelt only**: When FUSE-T isn't installed — still provides exec path restriction, Mach service deny-default, and file path boundaries
 - **Lima VM (inside)**: Production on macOS - run agentsh inside VM for full Linux security
 - **Lima VM (orchestrated)**: When you need macOS-native CLI experience with Lima backend
 - **Degraded**: Quick testing, observation-only use cases
@@ -364,13 +373,14 @@ See [Known Limitations - macOS + Lima](#macos--lima) for detailed comparison.
 - Best option for commercial security products
 
 ### macOS FUSE-T + pf
-- **Minimal process isolation** - sandbox-exec with SBPL profiles provides file/network restrictions
+- **Minimal process isolation** - sandbox-exec with SBPL profiles provides file/network restrictions; when agentsh-macwrap is available, dynamic seatbelt provides deny-default + policy-driven SBPL
 - **No namespace isolation** - macOS has no namespace equivalent; agents can see all processes
 - **No resource limits** - cannot enforce CPU/memory limits
 - **Resource monitoring available** - native Mach API monitoring for memory, CPU, and thread count
 - **No syscall filtering** - cannot block dangerous syscalls
 - **Requires root for pf** - network interception needs sudo
 - **Signal interception**: Audit only via Endpoint Security; cannot block or redirect signals
+- With dynamic seatbelt: policy-driven SBPL profiles provide exec path restriction, Mach service deny-default, and file path boundaries
 - Best option for development and personal use
 
 ### macOS + Lima
