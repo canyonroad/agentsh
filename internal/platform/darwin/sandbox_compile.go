@@ -4,6 +4,7 @@ package darwin
 
 import (
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -58,6 +59,9 @@ var defaultMachBlockPrefixes = []string{
 func CompileDarwinSandbox(pol *policy.Policy, workspacePath string) (*SandboxConfig, error) {
 	p := sbpl.New()
 	mgr := sandboxext.NewManager()
+	// RevokeAll is a safety net. Since we only Issue (never Consume) tokens here,
+	// all handles are -1 and release is a no-op. The opaque token Values are
+	// captured into SandboxConfig before this deferred call runs.
 	defer mgr.RevokeAll()
 
 	// 1. System essentials
@@ -120,7 +124,13 @@ func CompileDarwinSandbox(pol *policy.Policy, workspacePath string) (*SandboxCon
 		if rule.Decision != "allow" {
 			continue
 		}
-		if len(rule.Domains) > 0 || (len(rule.Ports) == 0 && len(rule.CIDRs) == 0) {
+		if len(rule.Domains) > 0 {
+			slog.Warn("domain-based network filtering requires Network Extension; allowing all network at SBPL level",
+				"domains", rule.Domains)
+			p.AllowNetworkAll()
+			break
+		}
+		if len(rule.Ports) == 0 && len(rule.CIDRs) == 0 {
 			p.AllowNetworkAll()
 			break
 		}

@@ -298,7 +298,7 @@ func TestAllowNetworkOutbound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	expected := `(allow network-outbound (remote "tcp" "*:443"))`
+	expected := `(allow network-outbound (remote tcp "*:443"))`
 	if !strings.Contains(out, expected) {
 		t.Errorf("Build() output should contain %q, got:\n%s", expected, out)
 	}

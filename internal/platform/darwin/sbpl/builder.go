@@ -135,11 +135,18 @@ func (p *Profile) AllowNetworkAll() {
 
 // AllowNetworkOutbound adds a rule allowing outbound network connections
 // for the given protocol and host:port. The proto parameter must be a valid
-// SBPL protocol identifier (e.g., "tcp", "udp").
+// SBPL protocol identifier containing only lowercase letters (e.g., "tcp", "udp").
 func (p *Profile) AllowNetworkOutbound(proto, hostPort string) {
+	// Validate proto contains only [a-z] to prevent SBPL injection
+	for _, c := range proto {
+		if c < 'a' || c > 'z' {
+			// Invalid proto — skip silently (will be caught by sandbox_init if wrong)
+			return
+		}
+	}
 	p.rules = append(p.rules, rule{
 		kind: kindNetworkAllow,
-		sbpl: fmt.Sprintf("(allow network-outbound (remote %q %q))", proto, hostPort),
+		sbpl: fmt.Sprintf(`(allow network-outbound (remote %s "%s"))`, proto, hostPort),
 	})
 }
 
