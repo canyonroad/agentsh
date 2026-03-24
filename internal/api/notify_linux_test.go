@@ -452,13 +452,7 @@ func TestNotifyHandler_ContextCancelCleansUpFDs(t *testing.T) {
 	for {
 		select {
 		case <-deadline:
-			// Last resort: cancel context to unblock if handler is stuck.
-			cancel()
-			time.Sleep(100 * time.Millisecond)
-			if int(parentSock.Fd()) != -1 {
-				t.Fatal("timed out: handler didn't clean up parent socket")
-			}
-			return
+			t.Fatal("timed out: handler didn't clean up parent socket")
 		default:
 		}
 		if int(parentSock.Fd()) == -1 {

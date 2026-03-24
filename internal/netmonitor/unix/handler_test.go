@@ -58,12 +58,11 @@ type handlerTestEmitter struct{}
 func (e *handlerTestEmitter) AppendEvent(_ context.Context, _ types.Event) error { return nil }
 func (e *handlerTestEmitter) Publish(_ types.Event)                              {}
 
-func TestServeNotifyWithExecve_ExitsOnCancelledContext(t *testing.T) {
-	// With a pre-cancelled context, the handler should exit promptly.
-	// Note: NotifReceive is a cgo/ioctl call that can't be mocked, so we
-	// can't deterministically prove the exit is via ctx.Done() vs ioctl error.
-	// This test verifies the handler doesn't hang — the ctx.Done() select
-	// path is tested indirectly (it fires before NotifReceive is called).
+func TestServeNotifyWithExecve_DoesNotHangOnCancelledContext(t *testing.T) {
+	// Verify the serve loop does not hang when given a pre-cancelled context.
+	// Note: with pipe FDs, NotifReceive returns an ioctl error immediately,
+	// so this also exits via the error branch. Testing the ctx.Done() select
+	// path specifically requires real seccomp notify FDs (privileged integration test).
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
@@ -88,7 +87,7 @@ func TestServeNotifyWithExecve_ExitsOnCancelledContext(t *testing.T) {
 	}
 }
 
-func TestServeNotifyWithExecve_ExitsOnNonSeccompFD(t *testing.T) {
+func TestServeNotifyWithExecve_DoesNotHangOnNonSeccompFD(t *testing.T) {
 	// When given a pipe FD (not a real seccomp notify FD), NotifReceive
 	// returns an error. The handler should exit via the error branch,
 	// not spin forever.
@@ -116,7 +115,7 @@ func TestServeNotifyWithExecve_ExitsOnNonSeccompFD(t *testing.T) {
 	}
 }
 
-func TestServeNotify_ExitsOnCancelledContext(t *testing.T) {
+func TestServeNotify_DoesNotHangOnCancelledContext(t *testing.T) {
 	// Same as above for the non-execve ServeNotify variant.
 	r, w, err := os.Pipe()
 	if err != nil {
