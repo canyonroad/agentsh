@@ -224,12 +224,17 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 		defer notifyFD.Close()
 
 		// Close the notify FD when context is cancelled to unblock any stuck
-		// NotifReceive ioctl. Without this, the handler goroutine can hang
-		// indefinitely after the monitored process exits if no ENOENT is
-		// delivered by the kernel.
+		// NotifReceive ioctl. The done channel ensures this goroutine exits
+		// if the handler returns early (error/setup failure) while context
+		// is still active.
+		handlerDone := make(chan struct{})
+		defer close(handlerDone)
 		go func() {
-			<-ctx.Done()
-			notifyFD.Close()
+			select {
+			case <-ctx.Done():
+				notifyFD.Close()
+			case <-handlerDone:
+			}
 		}()
 
 		emitter := &notifyEmitterAdapter{store: store, broker: broker}
