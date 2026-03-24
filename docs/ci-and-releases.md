@@ -51,3 +51,4 @@ Open decisions before implementing packages:
   - whether to ship a systemd unit (probably later)
 - Shim activation:
   - do *not* auto-replace `/bin/sh` in packages; provide `agentsh shim install-shell --root /` with explicit `--i-understand-this-modifies-the-host`
+  - for non-interactive enforcement (e.g., sandbox platforms), add `--force` which writes `/etc/agentsh/shim.conf` with `force=true`

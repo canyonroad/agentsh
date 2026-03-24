@@ -40,6 +40,25 @@ func PlanInstallShellShim(opts InstallShellShimOptions) (*ShellShimPlan, error) 
 	if opts.InstallBash {
 		actions = append(actions, planInstallOne(root, "bash", shimBytes)...)
 	}
+	if opts.Force {
+		actions = append(actions, ShellShimAction{
+			Op:   "write",
+			Path: ShimConfPath(root),
+			Note: "set force=true in shim.conf (preserves existing keys)",
+		})
+	} else {
+		existing, readErr := ReadShimConf(root)
+		if readErr != nil {
+			return nil, fmt.Errorf("read shim.conf: %w", readErr)
+		}
+		if existing.Raw["force"] == "true" || existing.Raw["force"] == "1" {
+			actions = append(actions, ShellShimAction{
+				Op:   "write",
+				Path: ShimConfPath(root),
+				Note: "clear force=true from shim.conf",
+			})
+		}
+	}
 	return &ShellShimPlan{Root: root, Shim: opts.ShimPath, Actions: actions}, nil
 }
 

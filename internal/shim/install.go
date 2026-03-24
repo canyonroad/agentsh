@@ -24,6 +24,9 @@ type InstallShellShimOptions struct {
 	// through it (e.g., docker exec -i container sh -c "cat > /file").
 	// When set, InstallBash must also be true.
 	BashOnly bool
+
+	// Force writes /etc/agentsh/shim.conf with force=true after installing.
+	Force bool
 }
 
 // InstallShellShim installs the agentsh shell shim as /bin/sh (and optionally /bin/bash)
@@ -43,6 +46,35 @@ func InstallShellShim(opts InstallShellShimOptions) error {
 		return fmt.Errorf("read shim: %w", err)
 	}
 
+	// Pre-validate config before mutating shell binaries to avoid partial state.
+	// ReadShimConf returns nil error for missing file (ENOENT).
+	existingConf, confReadErr := ReadShimConf(root)
+	if confReadErr != nil && !opts.Force {
+		// Config exists but is unreadable — surface the error before touching
+		// any files so the operator fixes permissions first.
+		return fmt.Errorf("read shim.conf: %w", confReadErr)
+	}
+
+	// Preflight config writability before mutating shell binaries to avoid
+	// partial state. Applies to both --force (writing force=true) and
+	// non-force (may need to clear stale force=true).
+	confPath := ShimConfPath(root)
+	confDir := filepath.Dir(confPath)
+	needsConfigWrite := opts.Force ||
+		existingConf.Raw["force"] == "true" || existingConf.Raw["force"] == "1"
+	if needsConfigWrite {
+		if err := os.MkdirAll(confDir, 0o755); err != nil {
+			return fmt.Errorf("preflight shim.conf dir: %w", err)
+		}
+		// Verify actual write capability with a temp file.
+		tmp, err := os.CreateTemp(confDir, ".shim.conf.preflight-*")
+		if err != nil {
+			return fmt.Errorf("preflight shim.conf write: %w", err)
+		}
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+	}
+
 	if !opts.BashOnly {
 		if err := installOne(root, "sh", shimBytes); err != nil {
 			return err
@@ -51,6 +83,27 @@ func InstallShellShim(opts InstallShellShimOptions) error {
 	if opts.InstallBash {
 		if err := installOne(root, "bash", shimBytes); err != nil {
 			return err
+		}
+	}
+	if opts.Force {
+		// Merge with existing config to preserve unknown keys (forward compat).
+		// ReadShimConf returns partially parsed Raw even on validation errors,
+		// so we preserve those keys. Only on true I/O failure is Raw empty.
+		if existingConf.Raw == nil {
+			existingConf.Raw = make(map[string]string)
+		}
+		existingConf.Raw["force"] = "true"
+		existingConf.Force = true
+		if err := WriteShimConf(root, existingConf); err != nil {
+			return fmt.Errorf("write shim.conf: %w", err)
+		}
+	} else if existingConf.Raw["force"] == "true" || existingConf.Raw["force"] == "1" {
+		// Clear stale force=true from a prior --force install so the current
+		// flags always define the current state.
+		existingConf.Raw["force"] = "false"
+		existingConf.Force = false
+		if err := WriteShimConf(root, existingConf); err != nil {
+			return fmt.Errorf("clear shim.conf force: %w", err)
 		}
 	}
 	return nil
