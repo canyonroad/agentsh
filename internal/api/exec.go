@@ -307,7 +307,10 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 
 				// 3. Run hook while process stopped (cgroup/eBPF setup)
 				if hook != nil {
-					if cleanup, hookErr := hook(cmd.Process.Pid); hookErr == nil && cleanup != nil {
+					if cleanup, hookErr := hook(cmd.Process.Pid); hookErr != nil {
+						slog.Warn("hybrid mode: cgroup/eBPF hook failed (continuing without resource controls)",
+							"error", hookErr, "pid", cmd.Process.Pid)
+					} else if cleanup != nil {
 						defer func() { _ = cleanup() }()
 					}
 				}
