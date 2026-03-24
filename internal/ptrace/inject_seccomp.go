@@ -17,6 +17,12 @@ const prSetNoNewPrivs = 38
 // seccompSetModeFilter is the seccomp operation for installing a BPF filter.
 const seccompSetModeFilter = 1
 
+// seccompFilterFlagTsync synchronizes the filter across all threads in the
+// thread group. Without this, the filter is installed on a single thread,
+// causing libseccomp's TSYNC to fail with ECANCELED when a multi-threaded
+// process (like a Go binary) later installs its own filter.
+const seccompFilterFlagTsync = 1
+
 // sockFprogSize is the size of struct sock_fprog on amd64/arm64 (16 bytes).
 // Layout: { uint16 len; [6]byte pad; uint64 filter; }
 const sockFprogSize = 16
@@ -191,9 +197,13 @@ func (t *Tracer) injectSeccompFilter(tid int) error {
 		return fmt.Errorf("prctl(PR_SET_NO_NEW_PRIVS) returned %d (%s)", ret, unix.Errno(-ret))
 	}
 
-	// Inject seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog).
+	// Inject seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, &prog).
+	// TSYNC ensures all threads in the thread group get the filter. Without it,
+	// only the current thread gets the filter, and multi-threaded Go binaries
+	// (like agentsh-unixwrap) fail when libseccomp later calls seccomp with TSYNC
+	// and finds asymmetric filter chains between threads.
 	ret, err = t.injectSyscall(tid, savedRegs, unix.SYS_SECCOMP,
-		seccompSetModeFilter, 0, scratchAddr, 0, 0, 0)
+		seccompSetModeFilter, seccompFilterFlagTsync, scratchAddr, 0, 0, 0)
 	if err != nil {
 		return fmt.Errorf("inject seccomp: %w", err)
 	}
