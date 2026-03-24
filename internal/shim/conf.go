@@ -46,6 +46,16 @@ func ReadShimConf(root string) (ShimConf, error) {
 		conf.Raw[strings.TrimSpace(k)] = strings.TrimSpace(v)
 	}
 	conf.Force = conf.Raw["force"] == "true" || conf.Raw["force"] == "1"
+	// Strict validation: if "force" key is present but not a recognized value,
+	// return an error to prevent silent fail-open from typos like "force=tru".
+	if v, ok := conf.Raw["force"]; ok {
+		switch v {
+		case "true", "1", "false", "0":
+			// valid
+		default:
+			return conf, fmt.Errorf("shim.conf: invalid force value %q (expected true, 1, false, or 0)", v)
+		}
+	}
 	return conf, nil
 }
 

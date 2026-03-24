@@ -90,6 +90,21 @@ func TestReadShimConf_CommentsAndBlanks(t *testing.T) {
 	}
 }
 
+func TestReadShimConf_InvalidForceValue(t *testing.T) {
+	root := t.TempDir()
+	writeTestConf(t, root, "force=tru\n")
+	conf, err := ReadShimConf(root)
+	if err == nil {
+		t.Fatalf("expected error for invalid force value 'tru'")
+	}
+	if conf.Force {
+		t.Fatalf("expected Force=false on invalid value")
+	}
+	if !strings.Contains(err.Error(), "invalid force value") {
+		t.Fatalf("expected 'invalid force value' in error, got %q", err.Error())
+	}
+}
+
 func TestReadShimConf_Unreadable(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("test requires non-root")

@@ -49,12 +49,9 @@ func PlanInstallShellShim(opts InstallShellShimOptions) (*ShellShimPlan, error) 
 	} else {
 		existing, readErr := ReadShimConf(root)
 		if readErr != nil {
-			actions = append(actions, ShellShimAction{
-				Op:   "note",
-				Path: ShimConfPath(root),
-				Note: fmt.Sprintf("cannot read shim.conf: %v", readErr),
-			})
-		} else if existing.Raw["force"] == "true" || existing.Raw["force"] == "1" {
+			return nil, fmt.Errorf("read shim.conf: %w", readErr)
+		}
+		if existing.Raw["force"] == "true" || existing.Raw["force"] == "1" {
 			actions = append(actions, ShellShimAction{
 				Op:   "write",
 				Path: ShimConfPath(root),

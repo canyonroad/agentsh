@@ -371,6 +371,7 @@ func TestShimConfForce_EnforcesWithoutTTY(t *testing.T) {
 	cmd.Env = []string{
 		"PATH=/usr/bin:/bin",
 		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_DEBUG=1",
 		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
 		// No AGENTSH_SHIM_FORCE — relying on config file.
 		// No AGENTSH_BIN — agentsh not available, so enforce path will fail.
@@ -415,6 +416,7 @@ func TestShimConfForce_EnvZeroOverridesConfig(t *testing.T) {
 	cmd.Env = []string{
 		"PATH=/usr/bin:/bin",
 		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_DEBUG=1",
 		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
 		"AGENTSH_SHIM_FORCE=0",
 	}
@@ -459,6 +461,7 @@ func TestShimConfForce_UnreadableConfigFailsClosed(t *testing.T) {
 	cmd.Env = []string{
 		"PATH=/usr/bin:/bin",
 		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_DEBUG=1",
 		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
 	}
 

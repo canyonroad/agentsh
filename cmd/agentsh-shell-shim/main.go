@@ -67,8 +67,11 @@ func main() {
 	// platforms where env vars cannot be injected (e.g. exe.dev).
 	// Precedence: env var > config file > default (false).
 	confRoot := "/"
-	if v := os.Getenv("AGENTSH_SHIM_CONF_ROOT"); v != "" {
-		confRoot = v
+	if strings.TrimSpace(os.Getenv("AGENTSH_SHIM_DEBUG")) == "1" {
+		if v := os.Getenv("AGENTSH_SHIM_CONF_ROOT"); v != "" {
+			confRoot = v
+			debugLog("AGENTSH_SHIM_CONF_ROOT override: %s", v)
+		}
 	}
 	conf, confErr := shim.ReadShimConf(confRoot)
 	if confErr != nil {
