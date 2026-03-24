@@ -156,7 +156,10 @@ type AuditConfig struct {
 }
 
 type AuditStorageConfig struct {
-	SQLitePath string `yaml:"sqlite_path"`
+	SQLitePath    string        `yaml:"sqlite_path"`
+	BatchSize     int           `yaml:"batch_size"`      // events per batch (default 64)
+	FlushInterval time.Duration `yaml:"flush_interval"`  // max time before flush (default 50ms)
+	ChannelSize   int           `yaml:"channel_size"`    // async buffer capacity (default 4096)
 }
 
 type AuditWebhookConfig struct {

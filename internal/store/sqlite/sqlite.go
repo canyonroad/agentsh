@@ -78,7 +78,33 @@ type MCPServerSummary struct {
 	DetectionCount int       `json:"detection_count"`
 }
 
-func Open(path string) (*Store, error) {
+// BatchConfig controls the async event write behavior.
+type BatchConfig struct {
+	BatchSize     int           // events per flush (default 64)
+	FlushInterval time.Duration // max time before flush (default 50ms)
+	ChannelSize   int           // async buffer capacity (default 4096)
+}
+
+func (c BatchConfig) withDefaults() BatchConfig {
+	if c.BatchSize <= 0 {
+		c.BatchSize = defaultBatchSize
+	}
+	if c.FlushInterval <= 0 {
+		c.FlushInterval = defaultFlushInterval
+	}
+	if c.ChannelSize <= 0 {
+		c.ChannelSize = defaultChannelSize
+	}
+	return c
+}
+
+func Open(path string, opts ...BatchConfig) (*Store, error) {
+	cfg := BatchConfig{}
+	if len(opts) > 0 {
+		cfg = opts[0]
+	}
+	cfg = cfg.withDefaults()
+
 	if path == "" {
 		return nil, fmt.Errorf("sqlite path is empty")
 	}
@@ -94,7 +120,7 @@ func Open(path string) (*Store, error) {
 
 	s := &Store{
 		db:       db,
-		eventCh:  make(chan eventPayload, defaultChannelSize),
+		eventCh:  make(chan eventPayload, cfg.ChannelSize),
 		flushCh:  make(chan chan struct{}, 1),
 		done:     make(chan struct{}),
 		closedCh: make(chan struct{}),
@@ -103,7 +129,7 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	go s.flushLoop(defaultBatchSize, defaultFlushInterval)
+	go s.flushLoop(cfg.BatchSize, cfg.FlushInterval)
 	return s, nil
 }
 
