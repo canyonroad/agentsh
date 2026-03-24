@@ -17,7 +17,7 @@ Add a config file that the shim reads at startup. The file is written during `ag
 
 ### Config file format
 
-Simple `key=value`, one per line. Blank lines and `#` comments allowed. No quoting, no sections, no nested values.
+Simple `key=value`, one per line. Blank lines and lines where the first non-whitespace character is `#` are ignored. Whitespace around keys and values is trimmed (e.g., `force = true` is equivalent to `force=true`). Trailing inline comments are not supported (`force=true # comment` would set `force` to `true # comment`). Keys are case-sensitive. No quoting, no sections, no nested values.
 
 ```
 # /etc/agentsh/shim.conf
@@ -38,11 +38,15 @@ The config parser lives in `internal/shim/` so both the shim binary and the inst
 func ShimConfPath(root string) string
 
 // ReadShimConf reads the config file at ShimConfPath(root).
-// Missing file returns empty conf, not error.
-func ReadShimConf(root string) ShimConf
+// Missing file (ENOENT) returns empty conf with nil error.
+// Other read errors (permission denied, I/O) return empty conf AND the error,
+// so the caller can log it without crashing.
+func ReadShimConf(root string) (ShimConf, error)
 
-// WriteShimConf writes config to ShimConfPath(root).
-// Creates /etc/agentsh/ directory if needed. Atomic write.
+// WriteShimConf writes all keys from conf.Raw as key=value lines, one per line.
+// Prepends a comment header: "# Written by: agentsh shim install-shell".
+// Creates /etc/agentsh/ directory (mode 0o755) if needed.
+// File is written atomically with mode 0o644.
 func WriteShimConf(root string, conf ShimConf) error
 
 // ShimConf is the parsed config.
@@ -52,20 +56,33 @@ type ShimConf struct {
 }
 ```
 
+### Permissions
+
+The config file is security-relevant (`force=true` enables policy enforcement). A world-writable config would let a local attacker set `force=false` to bypass enforcement.
+
+- Directory `/etc/agentsh/`: mode `0o755`, owned by root. Standard `/etc` subdirectory convention.
+- File `shim.conf`: mode `0o644` (readable by all, writable only by root). Consistent with `/etc/ssh/sshd_config` and similar system configs.
+
+`WriteShimConf` enforces these modes in its atomic write.
+
 ### Shim bypass logic (`cmd/agentsh-shell-shim/main.go`)
 
 Precedence: env var > config file > default (false).
 
 ```go
-conf := shim.ReadShimConf("/")
+conf, confErr := shim.ReadShimConf("/")
+if confErr != nil {
+    debugLog("read shim.conf: %v", confErr)
+}
 forceShim := strings.TrimSpace(os.Getenv("AGENTSH_SHIM_FORCE"))
 switch {
 case forceShim == "1":
-    // env says force
+    debugLog("AGENTSH_SHIM_FORCE=1: enforcing policy despite non-interactive stdin")
 case forceShim == "0":
-    // env says don't force — respect it, ignore config
+    debugLog("AGENTSH_SHIM_FORCE=0: config file force overridden by env")
 case conf.Force:
     forceShim = "1"
+    debugLog("shim.conf force=true: enforcing policy despite non-interactive stdin")
 }
 if !term.IsTerminal(int(os.Stdin.Fd())) && forceShim != "1" {
     // bypass as before
@@ -86,6 +103,8 @@ Dry-run support: `--force --dry-run` includes a `write` action in the plan outpu
 
 Uninstall does not touch the config file. The file is inert without the shim and follows the Unix convention that `/etc` configs survive package removal.
 
+The config file is global. `force=true` applies to all shim invocations regardless of which shell is shimmed. It has no effect on shells where the shim is not installed (e.g., if `--bash-only` was used, `force=true` does not affect `/bin/sh` since the shim is not installed there).
+
 ### Performance
 
 Reading a small file adds ~0.1ms. The shim already does `os.Getenv()`, `term.IsTerminal()` (ioctl), and `os.Stat()` for real shell detection. One more `os.ReadFile()` is negligible.
@@ -103,12 +122,13 @@ Reading a small file adds ~0.1ms. The shim already does `os.Getenv()`, `term.IsT
 
 ### Unit tests (`internal/shim/conf_test.go`)
 
-- `ReadShimConf` with missing file returns empty conf
+- `ReadShimConf` with missing file returns empty conf, nil error
 - `ReadShimConf` with `force=true` returns `Force: true`
 - `ReadShimConf` with `force=1` returns `Force: true`
 - `ReadShimConf` with `force=false` returns `Force: false`
 - `ReadShimConf` with malformed lines, comments, blank lines parses correctly
-- `WriteShimConf` creates directory and file atomically
+- `ReadShimConf` with unreadable file (permission denied) returns empty conf and non-nil error
+- `WriteShimConf` creates directory (0o755) and file (0o644) atomically
 - `WriteShimConf` then `ReadShimConf` round-trip preserves values
 - `ShimConfPath` returns expected path for given root
 
