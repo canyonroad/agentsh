@@ -55,6 +55,15 @@ func InstallShellShim(opts InstallShellShimOptions) error {
 		return fmt.Errorf("read shim.conf: %w", confReadErr)
 	}
 
+	// When --force is set, preflight that we can write the config directory
+	// before mutating shell binaries, to avoid partial state.
+	if opts.Force {
+		confDir := filepath.Dir(ShimConfPath(root))
+		if err := os.MkdirAll(confDir, 0o755); err != nil {
+			return fmt.Errorf("preflight shim.conf dir: %w", err)
+		}
+	}
+
 	if !opts.BashOnly {
 		if err := installOne(root, "sh", shimBytes); err != nil {
 			return err

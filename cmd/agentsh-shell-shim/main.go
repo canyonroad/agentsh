@@ -83,12 +83,15 @@ func main() {
 		conf.Force = true
 	}
 	forceShim := strings.TrimSpace(os.Getenv("AGENTSH_SHIM_FORCE"))
+	isDebug := strings.TrimSpace(os.Getenv("AGENTSH_SHIM_DEBUG")) == "1"
 	switch {
 	case forceShim == "1":
 		debugLog("AGENTSH_SHIM_FORCE=1: enforcing policy despite non-interactive stdin")
-	case forceShim == "0":
+	case forceShim == "0" && isDebug:
+		// AGENTSH_SHIM_FORCE=0 can only disable enforcement in debug mode.
+		// In production, the config file cannot be overridden by env.
 		if conf.Force {
-			debugLog("AGENTSH_SHIM_FORCE=0: config file force overridden by env")
+			debugLog("AGENTSH_SHIM_FORCE=0 (debug): config file force overridden by env")
 		}
 	case conf.Force:
 		forceShim = "1"
