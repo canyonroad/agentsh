@@ -82,7 +82,9 @@ The hybrid mode block reorders operations:
 
 The `ptraceReady` channel is `chan error` (not `chan struct{}`), so the notify handler can communicate failure (e.g., wrapper crash, socket error, timeout). The main goroutine checks the error after receiving from the channel.
 
-**Socket FD ownership:** The notify handler goroutine receives `parentSock` but defers its close until `ServeNotifyWithExecve` returns (after exec/process exit). The main goroutine writes the GO byte to `extra.notifyParentSock` after `resume()`. This is safe because the defer close only fires when the goroutine returns, which is after the process exits. The main goroutine's GO write happens long before that.
+**Socket FD ownership:** The notify handler goroutine receives `parentSock` but defers its close until `ServeNotifyWithExecve` returns (after exec/process exit). The main goroutine writes the GO byte to `extra.notifyParentSock` after `resume()`. This is safe because the defer close only fires when the goroutine returns, which is after the process exits. The main goroutine's GO write happens long before that. **Sequencing guarantee:** The main goroutine blocks on `<-ptraceReady` before writing GO. Since the READY read in the notify goroutine completes before sending on `ptraceReady`, the socket is never accessed concurrently by both goroutines.
+
+**Signature change:** `startNotifyHandler` (or `startWrapperHandlers`) gains a new `ptraceReady chan<- error` parameter. In hybrid mode, the caller creates and passes the channel; in non-hybrid mode (and in `exec.go`/`exec_stream.go` non-hybrid call sites), it passes `nil` and the handler skips the READY/GO handshake.
 
 **Notify handler ordering within the goroutine:**
 ```go
@@ -116,7 +118,7 @@ applyLandlock()                  // if Landlock enabled
 // NEW: ptrace sync handshake (only when AGENTSH_PTRACE_SYNC=1)
 if os.Getenv("AGENTSH_PTRACE_SYNC") == "1" {
     sendReadyByte(sockFD)        // all init done, about to exec
-    waitForGO(sockFD)            // server attached ptrace, safe to exec
+    waitForGO(sockFD, 30s)       // server attached ptrace, safe to exec (30s timeout, fatal on timeout)
 }
 
 // NOTE: unix.Close(sockFD) must be moved here (after READY/GO exchange)
@@ -132,7 +134,7 @@ The READY byte is sent AFTER all initialization (seccomp, signals, Landlock) to 
 1. `internal/api/exec.go` — Reorder hybrid mode: move ptrace attach after wrapper ready signal
 2. `internal/api/exec_stream.go` — Identical hybrid mode reordering (parallel copy of exec.go hybrid block)
 3. `internal/api/notify_linux.go` — Start ServeNotifyWithExecve before READY read, read READY byte with timeout, signal ptraceReady channel with error
-4. `internal/api/core.go` — Set `AGENTSH_PTRACE_SYNC=1` in wrapper env when ptrace is active
+4. `internal/api/core.go` — Set `AGENTSH_PTRACE_SYNC=1` in wrapper env when ptrace is active. This is only reachable in hybrid mode because `setupSeccompWrapper` returns early for full ptrace mode (when no wrapper is needed). The env var is set in the existing `if a.ptraceTracer != nil` block.
 5. `cmd/agentsh-unixwrap/main.go` — Send READY byte after all init, wait for GO byte, move socket close after handshake
 
 ## Test plan
