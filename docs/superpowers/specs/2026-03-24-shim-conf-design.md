@@ -70,7 +70,11 @@ The config file is security-relevant (`force=true` enables policy enforcement). 
 Precedence: env var > config file > default (false).
 
 ```go
-conf, confErr := shim.ReadShimConf("/")
+confRoot := "/"
+if v := os.Getenv("AGENTSH_SHIM_CONF_ROOT"); v != "" {
+    confRoot = v
+}
+conf, confErr := shim.ReadShimConf(confRoot)
 if confErr != nil {
     debugLog("read shim.conf: %v", confErr)
 }
@@ -79,7 +83,9 @@ switch {
 case forceShim == "1":
     debugLog("AGENTSH_SHIM_FORCE=1: enforcing policy despite non-interactive stdin")
 case forceShim == "0":
-    debugLog("AGENTSH_SHIM_FORCE=0: config file force overridden by env")
+    if conf.Force {
+        debugLog("AGENTSH_SHIM_FORCE=0: config file force overridden by env")
+    }
 case conf.Force:
     forceShim = "1"
     debugLog("shim.conf force=true: enforcing policy despite non-interactive stdin")
@@ -88,6 +94,8 @@ if !term.IsTerminal(int(os.Stdin.Fd())) && forceShim != "1" {
     // bypass as before
 }
 ```
+
+`AGENTSH_SHIM_CONF_ROOT` is an internal testing hook (not documented for end users) that allows integration tests to point the shim at a temp directory instead of `/`.
 
 `AGENTSH_SHIM_FORCE=0` explicitly overrides `force=true` in the config, giving operators per-process control.
 
