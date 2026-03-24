@@ -12,7 +12,7 @@ Field names and types are verified against `internal/policy/model.go`.
 
 ```yaml
 version: 1                    # Required. Always 1.
-name: "policy-name"           # Required. Alphanumeric + hyphens.
+name: "policy-name"           # Required. Alphanumeric, hyphens, underscores.
 description: |                # Required. Multi-line description.
   What this policy does.
 
@@ -161,7 +161,7 @@ Default (if omitted): all depths (`min_depth: 0`, `max_depth: -1`).
 | type | string | `self`, `children`, `descendants`, `siblings`, `parent`, `session`, `external`, `system`, `user`, `process`, `pid_range` |
 | pattern | string | Process name glob pattern (only for `type: process`) |
 | min | int | Required when `type: pid_range`. Must be > 0, min <= max. |
-| max | int | Required when `type: pid_range`. Must be > 0, min >= min. |
+| max | int | Required when `type: pid_range`. Must be > 0, max >= min. |
 
 ### dns_redirects[]
 

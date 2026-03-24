@@ -210,7 +210,7 @@ transparent_commands: {}      # Override transparent command set
 | name | string | yes | Rule identifier |
 | description | string | yes | Human-readable description |
 | signals | string[] | yes | Signal names, numbers, or groups: `@all`, `@fatal`, `@job`, `@reload` |
-| target | object | yes | `{type, pattern?, min?, max?}`. Types: `self`, `children`, `parent`, `session`, `external`, `system` |
+| target | object | yes | `{type, pattern?, min?, max?}`. Types: `self`, `children`, `descendants`, `siblings`, `parent`, `session`, `external`, `system`, `user`, `process`, `pid_range` |
 | decision | string | yes | `allow`, `deny`, `audit`, `approve`, `redirect`, `absorb` |
 | fallback | string | no | Fallback decision if platform can't enforce |
 | redirect_to | string | no | Target signal name (for redirect decision) |
