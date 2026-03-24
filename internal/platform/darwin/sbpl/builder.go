@@ -53,7 +53,7 @@ func New() *Profile {
 func (p *Profile) AllowFileRead(match PathMatch, path string) {
 	p.rules = append(p.rules, rule{
 		kind: kindFileAllow,
-		sbpl: fmt.Sprintf("(allow file-read* (%s %s))", matchStr(match), quotePath(path)),
+		sbpl: fmt.Sprintf("(allow file-read* (%s %s))", matchStr(match), quotePathForMatch(match, path)),
 	})
 }
 
@@ -62,7 +62,7 @@ func (p *Profile) AllowFileRead(match PathMatch, path string) {
 func (p *Profile) AllowFileReadWrite(match PathMatch, path string) {
 	p.rules = append(p.rules, rule{
 		kind: kindFileAllow,
-		sbpl: fmt.Sprintf("(allow file-read* file-write* (%s %s))", matchStr(match), quotePath(path)),
+		sbpl: fmt.Sprintf("(allow file-read* file-write* (%s %s))", matchStr(match), quotePathForMatch(match, path)),
 	})
 }
 
@@ -71,7 +71,7 @@ func (p *Profile) AllowFileReadWrite(match PathMatch, path string) {
 func (p *Profile) AllowFileReadWriteIOctl(match PathMatch, path string) {
 	p.rules = append(p.rules, rule{
 		kind: kindFileAllow,
-		sbpl: fmt.Sprintf("(allow file-read* file-write* file-ioctl (%s %s))", matchStr(match), quotePath(path)),
+		sbpl: fmt.Sprintf("(allow file-read* file-write* file-ioctl (%s %s))", matchStr(match), quotePathForMatch(match, path)),
 	})
 }
 
@@ -79,7 +79,7 @@ func (p *Profile) AllowFileReadWriteIOctl(match PathMatch, path string) {
 func (p *Profile) AllowProcessExec(match PathMatch, path string) {
 	p.rules = append(p.rules, rule{
 		kind: kindExecAllow,
-		sbpl: fmt.Sprintf("(allow process-exec (%s %s))", matchStr(match), quotePath(path)),
+		sbpl: fmt.Sprintf("(allow process-exec (%s %s))", matchStr(match), quotePathForMatch(match, path)),
 	})
 }
 
@@ -87,7 +87,7 @@ func (p *Profile) AllowProcessExec(match PathMatch, path string) {
 func (p *Profile) DenyProcessExec(match PathMatch, path string) {
 	p.rules = append(p.rules, rule{
 		kind: kindExecDeny,
-		sbpl: fmt.Sprintf("(deny process-exec (%s %s))", matchStr(match), quotePath(path)),
+		sbpl: fmt.Sprintf("(deny process-exec (%s %s))", matchStr(match), quotePathForMatch(match, path)),
 	})
 }
 
@@ -134,11 +134,12 @@ func (p *Profile) AllowNetworkAll() {
 }
 
 // AllowNetworkOutbound adds a rule allowing outbound network connections
-// for the given protocol and host:port.
+// for the given protocol and host:port. The proto parameter must be a valid
+// SBPL protocol identifier (e.g., "tcp", "udp").
 func (p *Profile) AllowNetworkOutbound(proto, hostPort string) {
 	p.rules = append(p.rules, rule{
 		kind: kindNetworkAllow,
-		sbpl: fmt.Sprintf("(allow network-outbound (remote %s %q))", proto, hostPort),
+		sbpl: fmt.Sprintf("(allow network-outbound (remote %q %q))", proto, hostPort),
 	})
 }
 
@@ -260,12 +261,14 @@ func matchStr(m PathMatch) string {
 	}
 }
 
-// quotePath escapes backslashes and quotes in a path and wraps it in
-// double quotes. Regex patterns (starting with #") are passed through
-// unchanged.
-func quotePath(path string) string {
-	if strings.HasPrefix(path, `#"`) {
-		return path // regex pattern, pass through
+// quotePathForMatch escapes and quotes a path based on its PathMatch type.
+// For Regex, the path is passed through unchanged (caller must provide valid
+// SBPL regex syntax like #"pattern"#). For Literal and Subpath, backslashes
+// and quotes are escaped and the result is wrapped in double quotes.
+// This function never content-sniffs — the match type alone determines quoting.
+func quotePathForMatch(match PathMatch, path string) string {
+	if match == Regex {
+		return path
 	}
 	escaped := strings.ReplaceAll(path, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)

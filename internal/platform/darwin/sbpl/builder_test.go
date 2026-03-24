@@ -116,22 +116,24 @@ func TestBuild_RegexPathNotRejected(t *testing.T) {
 	}
 }
 
-func TestQuotePath(t *testing.T) {
+func TestQuotePathForMatch(t *testing.T) {
 	tests := []struct {
 		name     string
+		match    PathMatch
 		input    string
 		expected string
 	}{
-		{"simple path", "/usr/lib", `"/usr/lib"`},
-		{"path with quotes", `/path"quoted`, `"/path\"quoted"`},
-		{"path with backslash", `/path\slash`, `"/path\\slash"`},
-		{"regex passthrough", `#"/pattern"#`, `#"/pattern"#`},
+		{"simple path", Subpath, "/usr/lib", `"/usr/lib"`},
+		{"path with quotes", Literal, `/path"quoted`, `"/path\"quoted"`},
+		{"path with backslash", Literal, `/path\slash`, `"/path\\slash"`},
+		{"regex passthrough", Regex, `#"/pattern"#`, `#"/pattern"#`},
+		{"hash prefix NOT treated as regex when match is Literal", Literal, `#"not-regex`, `"#\"not-regex"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := quotePath(tt.input)
+			got := quotePathForMatch(tt.match, tt.input)
 			if got != tt.expected {
-				t.Errorf("quotePath(%q) = %q, want %q", tt.input, got, tt.expected)
+				t.Errorf("quotePathForMatch(%v, %q) = %q, want %q", tt.match, tt.input, got, tt.expected)
 			}
 		})
 	}
@@ -296,7 +298,7 @@ func TestAllowNetworkOutbound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	expected := `(allow network-outbound (remote tcp "*:443"))`
+	expected := `(allow network-outbound (remote "tcp" "*:443"))`
 	if !strings.Contains(out, expected) {
 		t.Errorf("Build() output should contain %q, got:\n%s", expected, out)
 	}
