@@ -8,7 +8,7 @@
 
 agentsh sits *under* your agent/tooling—intercepting **file**, **network**, **process**, and **signal** activity (including subprocess trees), enforcing the policy you define, and emitting **structured audit events**.
 
-> **Platform note:** Linux provides full enforcement (100% security score). macOS supports two tiers: **ESF+NE** (90% score, requires Apple entitlements) for enterprise deployments, and **FUSE-T** (70% score) as a fallback. Windows supports native enforcement via minifilter driver with **AppContainer** sandbox isolation (85% score). See the [Platform Comparison Matrix](docs/platform-comparison.md) for details.
+> **Platform note:** Linux provides full enforcement (100% security score). macOS supports multiple tiers: **ESF+NE** (90% score, requires Apple entitlements) for enterprise deployments, **Dynamic Seatbelt + FUSE-T** (75% score) for development with automatic policy-driven sandbox profiles, **FUSE-T** (70% score) as a static sandbox fallback, and **Dynamic Seatbelt only** (65% score) without FUSE-T. Windows supports native enforcement via minifilter driver with **AppContainer** sandbox isolation (85% score). See the [Platform Comparison Matrix](docs/platform-comparison.md) for details.
 
 ---
 

@@ -22,6 +22,19 @@ Security enforcement is provided through a combination of:
 | `landlock-only` | Landlock | ~80% | Landlock without FUSE granularity |
 | `minimal` | (none) | ~50% | Capability dropping and shim policy only |
 
+### macOS Modes
+
+| Mode | Requirements | Protection Level | Description |
+|------|--------------|------------------|-------------|
+| `esf` | ESF entitlement (Apple approval) | ~90% | Endpoint Security Framework |
+| `lima` | limactl available | ~85% | Full Linux enforcement inside Lima VM |
+| `dynamic-seatbelt-fuse` | agentsh-macwrap + FUSE-T | ~75% | Policy-driven seatbelt + FUSE-T file interception |
+| `fuse-t` | FUSE-T installed | ~70% | FUSE-T with static sandbox profile |
+| `dynamic-seatbelt` | agentsh-macwrap | ~65% | Policy-driven seatbelt without FUSE-T |
+| `sandbox-exec` | (built-in) | ~60% | Static sandbox profile only |
+
+Dynamic seatbelt modes generate SBPL profiles from policy at session start — replacing blanket allows with deny-default + specific allows for file paths, exec paths, Mach services, and network. Extension tokens provide runtime file access grants. See `docs/superpowers/specs/2026-03-23-dynamic-seatbelt-design.md` for details.
+
 ### Mode Selection
 
 By default, agentsh auto-detects the best available mode at startup.
