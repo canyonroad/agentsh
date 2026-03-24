@@ -15,6 +15,14 @@ type SandboxPtraceConfig struct {
 	OnAttachFailure string                  `yaml:"on_attach_failure"`
 }
 
+// IsExecveOnly returns true when ptrace is enabled and configured to trace
+// only execve syscalls (file, network, signal tracing all disabled).
+// This is the "hybrid mode" where ptrace handles execve and the seccomp
+// wrapper handles everything else.
+func (c SandboxPtraceConfig) IsExecveOnly() bool {
+	return c.Enabled && c.Trace.Execve && !c.Trace.File && !c.Trace.Network && !c.Trace.Signal
+}
+
 type PtraceTraceConfig struct {
 	Execve  bool `yaml:"execve"`
 	File    bool `yaml:"file"`
