@@ -44,7 +44,7 @@ func PlanInstallShellShim(opts InstallShellShimOptions) (*ShellShimPlan, error) 
 		actions = append(actions, ShellShimAction{
 			Op:   "write",
 			Path: ShimConfPath(root),
-			Note: "write shim.conf with force=true",
+			Note: "set force=true in shim.conf (preserves existing keys)",
 		})
 	} else {
 		existing, readErr := ReadShimConf(root)

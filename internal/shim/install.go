@@ -46,6 +46,15 @@ func InstallShellShim(opts InstallShellShimOptions) error {
 		return fmt.Errorf("read shim: %w", err)
 	}
 
+	// Pre-validate config before mutating shell binaries to avoid partial state.
+	// ReadShimConf returns nil error for missing file (ENOENT).
+	existingConf, confReadErr := ReadShimConf(root)
+	if confReadErr != nil && !opts.Force {
+		// Config exists but is unreadable — surface the error before touching
+		// any files so the operator fixes permissions first.
+		return fmt.Errorf("read shim.conf: %w", confReadErr)
+	}
+
 	if !opts.BashOnly {
 		if err := installOne(root, "sh", shimBytes); err != nil {
 			return err
@@ -57,28 +66,23 @@ func InstallShellShim(opts InstallShellShimOptions) error {
 		}
 	}
 	if opts.Force {
-		conf := ShimConf{
-			Force: true,
-			Raw:   map[string]string{"force": "true"},
+		// Merge with existing config to preserve unknown keys (forward compat).
+		if confReadErr != nil {
+			// Can't read existing — start fresh.
+			existingConf = ShimConf{Raw: make(map[string]string)}
 		}
-		if err := WriteShimConf(root, conf); err != nil {
+		existingConf.Raw["force"] = "true"
+		existingConf.Force = true
+		if err := WriteShimConf(root, existingConf); err != nil {
 			return fmt.Errorf("write shim.conf: %w", err)
 		}
-	} else {
+	} else if existingConf.Raw["force"] == "true" || existingConf.Raw["force"] == "1" {
 		// Clear stale force=true from a prior --force install so the current
 		// flags always define the current state.
-		existing, readErr := ReadShimConf(root)
-		if readErr != nil {
-			// Config exists but is unreadable — surface the error so the
-			// operator fixes permissions before reinstalling.
-			return fmt.Errorf("read shim.conf: %w", readErr)
-		}
-		if existing.Raw["force"] == "true" || existing.Raw["force"] == "1" {
-			existing.Raw["force"] = "false"
-			existing.Force = false
-			if err := WriteShimConf(root, existing); err != nil {
-				return fmt.Errorf("clear shim.conf force: %w", err)
-			}
+		existingConf.Raw["force"] = "false"
+		existingConf.Force = false
+		if err := WriteShimConf(root, existingConf); err != nil {
+			return fmt.Errorf("clear shim.conf force: %w", err)
 		}
 	}
 	return nil
