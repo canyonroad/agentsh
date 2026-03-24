@@ -47,12 +47,14 @@ type Store struct {
 	db *sql.DB
 
 	// Async event batching.
-	eventCh  chan eventPayload
-	flushCh  chan chan struct{} // Flush() sends ack channel; flushLoop closes it when done
-	stopCh   chan struct{}      // signals flushLoop to stop (never receives data)
-	done     chan struct{}      // closed when flushLoop exits
-	closed   atomic.Bool        // true after Close() initiates shutdown
+	eventCh   chan eventPayload
+	flushCh   chan chan struct{} // Flush() sends ack channel; flushLoop closes it when done
+	stopCh    chan struct{}      // signals flushLoop to stop (never receives data)
+	done      chan struct{}      // closed when flushLoop exits
+	closed    atomic.Bool        // true after Close() initiates shutdown
 	closeOnce sync.Once
+	inflight  sync.WaitGroup    // tracks in-flight AppendEvent calls for clean shutdown
+	lastErr   atomic.Value      // last batch write error (for Flush/health checks)
 }
 
 // MCPTool represents a registered MCP tool.
@@ -139,8 +141,9 @@ func Open(path string, opts ...BatchConfig) (*Store, error) {
 
 func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
-		s.closed.Store(true)
-		close(s.stopCh) // signal flushLoop to drain and exit
+		s.closed.Store(true)     // reject new AppendEvent calls
+		s.inflight.Wait()        // wait for in-flight appenders to finish enqueuing
+		close(s.stopCh)          // signal flushLoop to drain and exit
 	})
 	<-s.done // wait for flushLoop to finish
 	return s.db.Close()
@@ -155,14 +158,22 @@ func (s *Store) Flush() {
 	ack := make(chan struct{})
 	select {
 	case s.flushCh <- ack:
-		// Wait for flushLoop to acknowledge, or bail if it exits.
 		select {
 		case <-ack:
 		case <-s.done:
 		}
 	case <-s.done:
-		// flushLoop already exited
 	}
+}
+
+// LastWriteError returns the last error from a batch write, or nil.
+// Can be used for health checks.
+func (s *Store) LastWriteError() error {
+	v := s.lastErr.Load()
+	if v == nil {
+		return nil
+	}
+	return v.(error)
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -251,6 +262,12 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	if s.closed.Load() {
 		return fmt.Errorf("store closed")
 	}
+	s.inflight.Add(1)
+	defer s.inflight.Done()
+	// Re-check after registering — Close() waits on inflight after setting closed.
+	if s.closed.Load() {
+		return fmt.Errorf("store closed")
+	}
 	if ev.ID == "" {
 		return fmt.Errorf("event missing id")
 	}
@@ -290,8 +307,9 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	case s.eventCh <- p:
 		return nil
 	case <-s.done:
-		// Flush goroutine has exited — event cannot be persisted.
 		return fmt.Errorf("store closed")
+	case <-ctx.Done():
+		return ctx.Err()
 	default:
 		// Channel full — block briefly to absorb bursts before dropping.
 		select {
@@ -299,6 +317,8 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 			return nil
 		case <-s.done:
 			return fmt.Errorf("store closed")
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-time.After(5 * time.Millisecond):
 			slog.Warn("sqlite: event channel full, dropping event", "event_id", ev.ID, "type", ev.Type)
 			return fmt.Errorf("event channel full")
@@ -364,6 +384,7 @@ func (s *Store) flushBatch(batch []eventPayload) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		slog.Error("sqlite: begin batch tx", "error", err, "count", len(batch))
+		s.lastErr.Store(err)
 		return
 	}
 
@@ -375,6 +396,7 @@ func (s *Store) flushBatch(batch []eventPayload) {
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?);`)
 	if err != nil {
 		slog.Error("sqlite: prepare batch stmt", "error", err)
+		s.lastErr.Store(err)
 		_ = tx.Rollback()
 		return
 	}
@@ -399,11 +421,13 @@ func (s *Store) flushBatch(batch []eventPayload) {
 		)
 		if err != nil {
 			slog.Warn("sqlite: batch insert event", "error", err, "event_id", p.id)
+			s.lastErr.Store(err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
 		slog.Error("sqlite: commit batch tx", "error", err, "count", len(batch))
+		s.lastErr.Store(err)
 	}
 }
 
