@@ -62,14 +62,34 @@ func main() {
 	// AGENTSH_SHIM_FORCE=1 overrides this bypass for environments like sandbox
 	// platforms where commands are always non-interactive but still require
 	// policy enforcement (e.g. Blaxel, E2B sandbox APIs).
+	//
+	// /etc/agentsh/shim.conf with force=true also overrides the bypass, for
+	// platforms where env vars cannot be injected (e.g. exe.dev).
+	// Precedence: env var > config file > default (false).
+	confRoot := "/"
+	if v := os.Getenv("AGENTSH_SHIM_CONF_ROOT"); v != "" {
+		confRoot = v
+	}
+	conf, confErr := shim.ReadShimConf(confRoot)
+	if confErr != nil {
+		debugLog("read shim.conf: %v", confErr)
+	}
 	forceShim := strings.TrimSpace(os.Getenv("AGENTSH_SHIM_FORCE"))
+	switch {
+	case forceShim == "1":
+		debugLog("AGENTSH_SHIM_FORCE=1: enforcing policy despite non-interactive stdin")
+	case forceShim == "0":
+		if conf.Force {
+			debugLog("AGENTSH_SHIM_FORCE=0: config file force overridden by env")
+		}
+	case conf.Force:
+		forceShim = "1"
+		debugLog("shim.conf force=true: enforcing policy despite non-interactive stdin")
+	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) && forceShim != "1" {
 		debugLog("non-interactive bypass: stdin is not a tty, executing real shell %s", realShell)
 		execOrExit(realShell, append([]string{argv0}, os.Args[1:]...), os.Environ())
 		return
-	}
-	if forceShim == "1" {
-		debugLog("AGENTSH_SHIM_FORCE=1: enforcing policy despite non-interactive stdin")
 	}
 
 	agentshBin, err := resolveAgentshBin()
