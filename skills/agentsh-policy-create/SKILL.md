@@ -37,6 +37,7 @@ Create new AgentSH security policies from built-in templates, customized to the 
 
 3. **Select template**
    - Read the matching template from the policy directory (e.g., `configs/policies/default.yaml`)
+   - On Windows, prefer the `-windows` variant if available (e.g., `default-windows.yaml`, `ci-strict-windows.yaml`)
    - If templates are not available locally, use the schema reference to generate a baseline
 
 4. **Customize**

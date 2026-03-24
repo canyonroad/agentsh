@@ -159,9 +159,9 @@ Default (if omitted): all depths (`min_depth: 0`, `max_depth: -1`).
 | Field | Type | Description |
 |-------|------|-------------|
 | type | string | `self`, `children`, `descendants`, `siblings`, `parent`, `session`, `external`, `system`, `user`, `process`, `pid_range` |
-| pattern | string | Process name pattern (for `process` and `user` types) |
-| min | int | Min PID for pid_range type (optional) |
-| max | int | Max PID for pid_range type (optional) |
+| pattern | string | Process name glob pattern (only for `type: process`) |
+| min | int | Required when `type: pid_range`. Must be > 0, min <= max. |
+| max | int | Required when `type: pid_range`. Must be > 0, min >= min. |
 
 ### dns_redirects[]
 
