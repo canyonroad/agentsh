@@ -343,6 +343,93 @@ func TestShimPipedStdin_StderrNotContaminated(t *testing.T) {
 	}
 }
 
+func TestShimConfForce_EnforcesWithoutTTY(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write shim.conf with force=true under a temp root.
+	// AGENTSH_SHIM_CONF_ROOT tells the shim to read config from here.
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No AGENTSH_SHIM_FORCE env var — config file alone should trigger enforce.
+	// The shim will try to find agentsh and fail, proving it didn't bypass.
+	cmd := exec.Command(shimBin, "-c", "echo hello")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		// No AGENTSH_SHIM_FORCE — relying on config file.
+		// No AGENTSH_BIN — agentsh not available, so enforce path will fail.
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// Should fail because agentsh is not available (it tried to enforce, not bypass).
+	if err == nil {
+		t.Fatalf("expected error: shim should try to enforce (find agentsh) and fail, not bypass")
+	}
+	// Confirm it didn't bypass by checking stderr for agentsh resolution error.
+	if !strings.Contains(stderr.String(), "agentsh") {
+		t.Fatalf("expected agentsh-related error, got stderr: %s", stderr.String())
+	}
+}
+
+func TestShimConfForce_EnvZeroOverridesConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write config with force=true, but AGENTSH_SHIM_FORCE=0 should override.
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(shimBin, "-c", "echo bypassed")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SHIM_FORCE=0",
+	}
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("expected bypass, got error: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "bypassed" {
+		t.Fatalf("expected 'bypassed', got %q", got)
+	}
+}
+
 func TestFatalWithHint(t *testing.T) {
 	// Verify formatting and exit code by forking a subprocess.
 	if os.Getenv("AGENTSH_SHIM_FATAL_TEST") == "1" {
