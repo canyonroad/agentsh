@@ -383,7 +383,83 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		s.SetCurrentProcessPID(cmd.Process.Pid)
 		pgid = getProcessGroupID(cmd.Process.Pid)
 
-		if tracer != nil {
+		hasWrapperHandlers := extra != nil && (extra.notifyParentSock != nil || (extra.signalParentSock != nil && extra.signalEngine != nil))
+		if tracer != nil && hasWrapperHandlers {
+			// HYBRID MODE: ptrace for execve interception + seccomp wrapper for sockets/files/Landlock.
+			ptraceDone := make(chan struct{})
+			go func() {
+				select {
+				case <-ctx.Done():
+					_ = killProcessGroup(pgid)
+					_ = killProcess(cmd.Process.Pid)
+				case <-ptraceDone:
+				}
+			}()
+
+			// 1. Attach ptrace (prefilter injected at first syscall exit)
+			waitExit, resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
+			if attachErr != nil {
+				close(ptraceDone)
+				_ = killProcess(cmd.Process.Pid)
+				_ = killProcessGroup(pgid)
+				pipeWG.Wait()
+				cmd.Process.Release()
+				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("hybrid ptrace attach: %w", attachErr)
+			} else {
+				// 2. Start wrapper handlers (receives FD, sends ACK)
+				startWrapperHandlers(ctx, extra, cmd.Process.Pid, pgid)
+
+				// 3. Run hook while process stopped (cgroup/eBPF setup)
+				if hook != nil {
+					if cleanup, hookErr := hook(cmd.Process.Pid); hookErr != nil {
+						slog.Warn("hybrid mode: cgroup/eBPF hook failed (continuing without resource controls)",
+							"error", hookErr, "pid", cmd.Process.Pid)
+					} else if cleanup != nil {
+						defer func() { _ = cleanup() }()
+					}
+				}
+				if resume != nil {
+					if resumeErr := resume(); resumeErr != nil {
+						close(ptraceDone)
+						_ = killProcess(cmd.Process.Pid)
+						_ = killProcessGroup(pgid)
+						pipeWG.Wait()
+						cmd.Process.Release()
+						return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace resume: %w", resumeErr)
+					}
+				}
+
+				// 4. Wait for exit via ptrace exit channel
+				waitStart := time.Now()
+				slog.Debug("exec_stream waiting for command (hybrid)", "command", req.Command, "pid", cmd.Process.Pid)
+				result := waitExit()
+				close(ptraceDone)
+				if result.err != nil {
+					_ = killProcess(cmd.Process.Pid)
+					_ = killProcessGroup(pgid)
+				}
+				waitDuration := time.Since(waitStart)
+				slog.Debug("exec_stream command finished (hybrid)", "command", req.Command, "pid", cmd.Process.Pid, "exit_code", result.exitCode, "wait_duration_ms", waitDuration.Milliseconds())
+				pipeWG.Wait()
+				stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
+				stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
+				stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
+				resources = result.resources
+				cmd.Process.Release()
+
+				if ctx.Err() != nil {
+					_ = killProcessGroup(pgid)
+				}
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
+				}
+				if errors.Is(ctx.Err(), context.Canceled) {
+					return 127, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, ctx.Err()
+				}
+				return result.exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, result.err
+			}
+		} else if tracer != nil {
+			// FULL PTRACE MODE: ptrace handles everything (no seccomp wrapper).
 			// Context cancellation watcher: start BEFORE attach
 			ptraceDone := make(chan struct{})
 			go func() {
@@ -459,23 +535,8 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			}
 		}
 
-		// Start unix socket notify handler if configured (Linux only).
-		// The handler receives the notify fd from the wrapper and runs until ctx is cancelled.
-		if extra != nil && extra.notifyParentSock != nil {
-			startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker, extra.execveHandler, extra.fileMonitorCfg, extra.landlockEnabled)
-		}
-
-		// Start signal filter handler if configured (Linux only).
-		// The handler receives the signal filter fd from the wrapper and runs until ctx is cancelled.
-		if extra != nil && extra.signalParentSock != nil && extra.signalEngine != nil {
-			// Register the spawned process in the signal registry
-			if extra.signalRegistry != nil {
-				extra.signalRegistry.Register(cmd.Process.Pid, pgid, extra.origCommand)
-			}
-			startSignalHandler(ctx, extra.signalParentSock, extra.notifySessionID, cmd.Process.Pid,
-				extra.signalEngine, extra.signalRegistry,
-				extra.notifyStore, extra.notifyBroker, extra.signalCommandID)
-		}
+		// Start wrapper handlers (wrapper-only path + hybrid fallback).
+		startWrapperHandlers(ctx, extra, cmd.Process.Pid, pgid)
 	}
 
 	waitStart := time.Now()

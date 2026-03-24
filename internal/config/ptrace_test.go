@@ -162,7 +162,66 @@ func TestSandboxConfig_Validate_MutualExclusion(t *testing.T) {
 				}(),
 				UnixSockets: SandboxUnixSocketsConfig{Enabled: boolPtr(true)},
 			},
-			wantErr: "mutually exclusive",
+			wantErr: "execve-only tracing",
+		},
+		{
+			name: "ptrace execve-only + unix_sockets is valid (hybrid mode)",
+			cfg: SandboxConfig{
+				Ptrace: SandboxPtraceConfig{
+					Enabled:    true,
+					AttachMode: "children",
+					Trace: PtraceTraceConfig{
+						Execve:  true,
+						File:    false,
+						Network: false,
+						Signal:  false,
+					},
+					Performance:     PtracePerformanceConfig{SeccompPrefilter: true, MaxTracees: 500, MaxHoldMs: 5000},
+					MaskTracerPid:   "off",
+					OnAttachFailure: "fail_open",
+				},
+				UnixSockets: SandboxUnixSocketsConfig{Enabled: boolPtr(true)},
+			},
+		},
+		{
+			name: "ptrace with file tracing + unix_sockets rejected",
+			cfg: SandboxConfig{
+				Ptrace: SandboxPtraceConfig{
+					Enabled:    true,
+					AttachMode: "children",
+					Trace: PtraceTraceConfig{
+						Execve:  true,
+						File:    true,
+						Network: false,
+						Signal:  false,
+					},
+					Performance:     PtracePerformanceConfig{SeccompPrefilter: true, MaxTracees: 500, MaxHoldMs: 5000},
+					MaskTracerPid:   "off",
+					OnAttachFailure: "fail_open",
+				},
+				UnixSockets: SandboxUnixSocketsConfig{Enabled: boolPtr(true)},
+			},
+			wantErr: "execve-only tracing",
+		},
+		{
+			name: "ptrace no-tracing + unix_sockets rejected",
+			cfg: SandboxConfig{
+				Ptrace: SandboxPtraceConfig{
+					Enabled:    true,
+					AttachMode: "children",
+					Trace: PtraceTraceConfig{
+						Execve:  false,
+						File:    false,
+						Network: false,
+						Signal:  false,
+					},
+					Performance:     PtracePerformanceConfig{SeccompPrefilter: true, MaxTracees: 500, MaxHoldMs: 5000},
+					MaskTracerPid:   "off",
+					OnAttachFailure: "fail_open",
+				},
+				UnixSockets: SandboxUnixSocketsConfig{Enabled: boolPtr(true)},
+			},
+			wantErr: "execve-only tracing",
 		},
 		{
 			name: "ptrace + unix_sockets nil is valid",
@@ -255,6 +314,75 @@ func TestPtraceConfig_Validate(t *testing.T) {
 			err := cfg.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSandboxPtraceConfig_IsExecveOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  SandboxPtraceConfig
+		want bool
+	}{
+		{
+			name: "disabled is not execve-only",
+			cfg:  DefaultPtraceConfig(),
+			want: false,
+		},
+		{
+			name: "all tracing enabled is not execve-only",
+			cfg: func() SandboxPtraceConfig {
+				c := DefaultPtraceConfig()
+				c.Enabled = true
+				return c
+			}(),
+			want: false,
+		},
+		{
+			name: "execve-only with file/network/signal disabled",
+			cfg: SandboxPtraceConfig{
+				Enabled: true,
+				Trace: PtraceTraceConfig{
+					Execve:  true,
+					File:    false,
+					Network: false,
+					Signal:  false,
+				},
+			},
+			want: true,
+		},
+		{
+			name: "execve true but file also true",
+			cfg: SandboxPtraceConfig{
+				Enabled: true,
+				Trace: PtraceTraceConfig{
+					Execve:  true,
+					File:    true,
+					Network: false,
+					Signal:  false,
+				},
+			},
+			want: false,
+		},
+		{
+			name: "enabled but execve false",
+			cfg: SandboxPtraceConfig{
+				Enabled: true,
+				Trace: PtraceTraceConfig{
+					Execve:  false,
+					File:    false,
+					Network: false,
+					Signal:  false,
+				},
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.IsExecveOnly(); got != tt.want {
+				t.Errorf("IsExecveOnly() = %v, want %v", got, tt.want)
 			}
 		})
 	}

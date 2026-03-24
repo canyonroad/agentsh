@@ -361,7 +361,11 @@ func (c *SandboxConfig) Validate() error {
 		return fmt.Errorf("sandbox.ptrace and sandbox.seccomp.execve are mutually exclusive (hybrid mode not yet implemented)")
 	}
 	if c.Ptrace.Enabled && c.UnixSockets.Enabled != nil && *c.UnixSockets.Enabled {
-		return fmt.Errorf("sandbox.ptrace and sandbox.unix_sockets are mutually exclusive")
+		// Hybrid mode: ptrace for execve + seccomp wrapper for sockets/files is allowed
+		// only when ptrace traces exactly execve (file/network/signal disabled, execve enabled).
+		if !c.Ptrace.IsExecveOnly() {
+			return fmt.Errorf("sandbox.ptrace with unix_sockets requires execve-only tracing (execve=true, file/network/signal=false)")
+		}
 	}
 	return c.Ptrace.Validate()
 }
