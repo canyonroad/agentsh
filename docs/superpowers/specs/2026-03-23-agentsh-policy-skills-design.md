@@ -386,9 +386,9 @@ transparent_commands: {}      # Override transparent command set
 ```
 skills/
   agentsh-policy-create/
-    agentsh-policy-create.md     # Skill: trigger, flow, guardrails
+    SKILL.md                     # Skill: trigger, flow, guardrails
   agentsh-policy-edit/
-    agentsh-policy-edit.md       # Skill: trigger, flow, guardrails
+    SKILL.md                     # Skill: trigger, flow, guardrails
   agentsh-policy-shared/
     schema-reference.md          # Shared schema (read by both skills)
 ```
