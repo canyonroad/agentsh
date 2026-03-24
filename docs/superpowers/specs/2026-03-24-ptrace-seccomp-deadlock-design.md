@@ -28,10 +28,14 @@ Delay ptrace attachment until after the wrapper has completed all seccomp setup 
 ### New execution order
 
 ```
-spawn wrapper → start notify handlers → [wrapper: seccomp setup, send FD, ACK] →
-[wrapper: READY byte] → ptrace attach + prefilter → resume → [server: GO byte] →
-wrapper exec's → ptrace intercepts exec → waitExit
+spawn wrapper → start notify handlers + ServeNotifyWithExecve →
+[wrapper: seccomp setup, signal filter, Landlock, send FD, ACK] →
+[wrapper: READY byte] → ptrace attach (SEIZE + INTERRUPT) →
+hook (cgroup/eBPF while stopped) → resume → [server: GO byte] →
+wrapper exec's → first syscall exit → prefilter injected → waitExit
 ```
+
+Note: the prefilter is NOT injected at attach time. It is injected at the first syscall exit after resume (when the wrapper calls `exec`). This is the existing ptrace prefilter injection mechanism — attach just does SEIZE + INTERRUPT.
 
 At exec time, ptrace is attached but the wrapper has already finished all seccomp setup. After exec, both filters are active on the actual command: prefilter (execve → TRACE) + wrapper's filter (file ops → USER_NOTIF). These handle different syscalls and don't interfere.
 
@@ -56,52 +60,80 @@ wrapper: closes socket, exec's → ptrace intercepts exec
 
 The wrapper detects hybrid mode via `AGENTSH_PTRACE_SYNC=1` in its environment, set by the server in `setupSeccompWrapper` when ptrace is active.
 
-### Server-side changes (`internal/api/exec.go`)
+### Server-side changes (`internal/api/exec.go` and `internal/api/exec_stream.go`)
+
+Both `exec.go` (lines 283-362) and `exec_stream.go` (lines 386-464) have identical hybrid mode blocks. Both must be updated with the same reordering.
 
 The hybrid mode block reorders operations:
 
 ```
-1. startWrapperHandlers(ctx, extra)  ← starts notify handler
+1. startWrapperHandlers(ctx, extra)  ← starts notify handler goroutine
    └─ receives FD, sends ACK
-   └─ reads READY byte from wrapper
-   └─ signals ptraceReady channel
-2. <-ptraceReady                     ← wait for wrapper ready
-3. ptraceExecAttach(tracer, pid)     ← attach ptrace NOW
-4. hook (cgroup/eBPF)
-5. resume()                          ← resume ptrace-stopped wrapper
-6. write GO byte to socket           ← wrapper can now exec
-7. waitExit()                        ← wrapper exec's, ptrace intercepts
+   └─ starts ServeNotifyWithExecve (before reading READY, so it's ready for notifications)
+   └─ reads READY byte from wrapper (with 10s timeout)
+   └─ sends nil on ptraceReady channel (or error on failure)
+2. <-ptraceReady                     ← wait for wrapper ready (check error)
+3. ptraceExecAttach(tracer, pid)     ← PTRACE_SEIZE + INTERRUPT (no prefilter yet)
+4. hook (cgroup/eBPF while stopped)
+5. resume()                          ← resume wrapper (still blocked on read for GO)
+6. write GO byte to notifyParentSock ← wrapper reads GO, calls exec
+7. waitExit()                        ← exec triggers prefilter injection at first syscall exit
 ```
 
-A `ptraceReady chan struct{}` is passed to `startNotifyHandler` via a new field on `extraProcConfig`. The notify handler closes it after reading the READY byte.
+The `ptraceReady` channel is `chan error` (not `chan struct{}`), so the notify handler can communicate failure (e.g., wrapper crash, socket error, timeout). The main goroutine checks the error after receiving from the channel.
 
-The GO byte is sent by the main goroutine after `resume()`, not by the notify handler (avoids goroutine coordination).
+**Socket FD ownership:** The notify handler goroutine receives `parentSock` but defers its close until `ServeNotifyWithExecve` returns (after exec/process exit). The main goroutine writes the GO byte to `extra.notifyParentSock` after `resume()`. This is safe because the defer close only fires when the goroutine returns, which is after the process exits. The main goroutine's GO write happens long before that.
+
+**Notify handler ordering within the goroutine:**
+```go
+go func() {
+    defer parentSock.Close()
+    notifyFD := recvFD(parentSock)     // receive notify FD
+    sendACK(parentSock)                // wrapper unblocked
+    go ServeNotifyWithExecve(notifyFD) // start handling notifications NOW
+    readREADY(parentSock, 10s timeout) // wait for wrapper to signal ready
+    ptraceReady <- err                 // signal main goroutine
+    // goroutine continues handling notifications until ctx cancelled
+}()
+```
+
+`ServeNotifyWithExecve` is started in a nested goroutine BEFORE reading the READY byte. This eliminates the race between notification handling startup and wrapper exec after GO. By the time the server sends GO and the wrapper calls exec, `ServeNotifyWithExecve` is already running and ready to handle seccomp notifications.
 
 ### Wrapper-side changes (`cmd/agentsh-unixwrap/main.go`)
 
-After the existing ACK wait, when `AGENTSH_PTRACE_SYNC=1`:
+After ALL existing wrapper initialization (seccomp filter, signal filter, Landlock), when `AGENTSH_PTRACE_SYNC=1`:
 
 ```go
-sendFD(sockFD, notifyFD)
-waitForACK(sockFD)         // server has the notify FD
+// Existing initialization (unchanged):
+installSeccompFilter()           // install BPF with USER_NOTIF
+sendFD(sockFD, notifyFD)        // send notify FD to server
+waitForACK(sockFD)               // server has the notify FD
+installSignalFilter()            // if signal filter enabled
+sendFD(signalSockFD, signalFD)  // send signal FD
+waitForACK(signalSockFD)
+applyLandlock()                  // if Landlock enabled
 
+// NEW: ptrace sync handshake (only when AGENTSH_PTRACE_SYNC=1)
 if os.Getenv("AGENTSH_PTRACE_SYNC") == "1" {
-    sendReadyByte(sockFD)  // seccomp done, about to exec
-    waitForGO(sockFD)      // server attached ptrace
+    sendReadyByte(sockFD)        // all init done, about to exec
+    waitForGO(sockFD)            // server attached ptrace, safe to exec
 }
 
-close(sockFD)
+// NOTE: unix.Close(sockFD) must be moved here (after READY/GO exchange)
+// when AGENTSH_PTRACE_SYNC=1. Currently it's at line 91 before exec.
+unix.Close(sockFD)
 syscall.Exec(...)
 ```
 
-Without `AGENTSH_PTRACE_SYNC=1`, the wrapper behaves exactly as before.
+The READY byte is sent AFTER all initialization (seccomp, signals, Landlock) to ensure the wrapper is fully set up before ptrace attaches. Without `AGENTSH_PTRACE_SYNC=1`, the wrapper behaves exactly as before.
 
 ## Files to modify
 
 1. `internal/api/exec.go` — Reorder hybrid mode: move ptrace attach after wrapper ready signal
-2. `internal/api/notify_linux.go` — Read READY byte after ACK, signal ptraceReady channel
-3. `internal/api/core.go` — Set `AGENTSH_PTRACE_SYNC=1` in wrapper env when ptrace is active
-4. `cmd/agentsh-unixwrap/main.go` — Send READY byte, wait for GO byte when sync enabled
+2. `internal/api/exec_stream.go` — Identical hybrid mode reordering (parallel copy of exec.go hybrid block)
+3. `internal/api/notify_linux.go` — Start ServeNotifyWithExecve before READY read, read READY byte with timeout, signal ptraceReady channel with error
+4. `internal/api/core.go` — Set `AGENTSH_PTRACE_SYNC=1` in wrapper env when ptrace is active
+5. `cmd/agentsh-unixwrap/main.go` — Send READY byte after all init, wait for GO byte, move socket close after handshake
 
 ## Test plan
 
