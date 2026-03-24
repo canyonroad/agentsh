@@ -184,6 +184,27 @@ func (s *Store) LastWriteError() error {
 	return v.(errHolder).err
 }
 
+// FlushContext is like Flush but respects context cancellation.
+func (s *Store) FlushContext(ctx context.Context) {
+	s.closeMu.Lock()
+	closed := s.closed
+	s.closeMu.Unlock()
+	if closed {
+		return
+	}
+	ack := make(chan struct{})
+	select {
+	case s.flushCh <- ack:
+		select {
+		case <-ack:
+		case <-s.done:
+		case <-ctx.Done():
+		}
+	case <-s.done:
+	case <-ctx.Done():
+	}
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	stmts := []string{
 		`PRAGMA journal_mode=WAL;`,
@@ -410,6 +431,7 @@ func (s *Store) flushBatch(batch []eventPayload) {
 	}
 	defer stmt.Close()
 
+	var hadRowErr bool
 	for _, p := range batch {
 		_, err := stmt.Exec(
 			p.id,
@@ -430,20 +452,22 @@ func (s *Store) flushBatch(batch []eventPayload) {
 		if err != nil {
 			slog.Warn("sqlite: batch insert event", "error", err, "event_id", p.id)
 			s.lastErr.Store(errHolder{err})
+			hadRowErr = true
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
 		slog.Error("sqlite: commit batch tx", "error", err, "count", len(batch))
 		s.lastErr.Store(errHolder{err})
-	} else {
-		s.lastErr.Store(errHolder{})
+	} else if !hadRowErr {
+		s.lastErr.Store(errHolder{}) // clear only when fully successful
 	}
 }
 
 func (s *Store) QueryEvents(ctx context.Context, q types.EventQuery) ([]types.Event, error) {
 	// Flush pending async writes to ensure read-after-write consistency.
-	s.Flush()
+	// Respect the caller's context to avoid blocking on cancelled queries.
+	s.FlushContext(ctx)
 
 	where := []string{"1=1"}
 	var args []any
