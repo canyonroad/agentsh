@@ -297,6 +297,10 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 				close(ptraceDone)
 				slog.Warn("hybrid mode: ptrace attach failed, falling back to wrapper-only",
 					"error", attachErr, "pid", cmd.Process.Pid)
+				if hook != nil {
+					slog.Warn("hybrid mode: cgroup/eBPF hook skipped (process not stopped)",
+						"pid", cmd.Process.Pid)
+				}
 				// Fall through: startWrapperHandlers below will start wrapper-only mode.
 				// Process will use cmd.Wait() path at bottom of function.
 			} else {
