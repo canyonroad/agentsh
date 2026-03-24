@@ -295,7 +295,9 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 			// 1. Attach ptrace (prefilter injected at first syscall exit)
 			waitExit, resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
 			if attachErr != nil {
-				close(ptraceDone)
+				// Keep cancellation watcher alive for the fallback cmd.Wait() path.
+				// Deferred close ensures the goroutine exits when the function returns.
+				defer close(ptraceDone)
 				slog.Warn("hybrid mode: ptrace attach failed, falling back to wrapper-only",
 					"error", attachErr, "pid", cmd.Process.Pid)
 				if hook != nil {

@@ -359,9 +359,9 @@ func (c *SandboxConfig) Validate() error {
 	}
 	if c.Ptrace.Enabled && c.UnixSockets.Enabled != nil && *c.UnixSockets.Enabled {
 		// Hybrid mode: ptrace for execve + seccomp wrapper for sockets/files is allowed
-		// when ptrace only traces execve (file/network/signal disabled).
-		if c.Ptrace.Trace.File || c.Ptrace.Trace.Network || c.Ptrace.Trace.Signal {
-			return fmt.Errorf("sandbox.ptrace with file/network/signal tracing requires unix_sockets disabled; use ptrace.trace execve-only for hybrid mode")
+		// only when ptrace traces exactly execve (file/network/signal disabled, execve enabled).
+		if !c.Ptrace.IsExecveOnly() {
+			return fmt.Errorf("sandbox.ptrace with unix_sockets requires execve-only tracing (execve=true, file/network/signal=false)")
 		}
 	}
 	return c.Ptrace.Validate()

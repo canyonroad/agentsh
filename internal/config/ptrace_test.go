@@ -162,7 +162,7 @@ func TestSandboxConfig_Validate_MutualExclusion(t *testing.T) {
 				}(),
 				UnixSockets: SandboxUnixSocketsConfig{Enabled: boolPtr(true)},
 			},
-			wantErr: "unix_sockets disabled",
+			wantErr: "execve-only tracing",
 		},
 		{
 			name: "ptrace execve-only + unix_sockets is valid (hybrid mode)",
@@ -201,7 +201,27 @@ func TestSandboxConfig_Validate_MutualExclusion(t *testing.T) {
 				},
 				UnixSockets: SandboxUnixSocketsConfig{Enabled: boolPtr(true)},
 			},
-			wantErr: "unix_sockets disabled",
+			wantErr: "execve-only tracing",
+		},
+		{
+			name: "ptrace no-tracing + unix_sockets rejected",
+			cfg: SandboxConfig{
+				Ptrace: SandboxPtraceConfig{
+					Enabled:    true,
+					AttachMode: "children",
+					Trace: PtraceTraceConfig{
+						Execve:  false,
+						File:    false,
+						Network: false,
+						Signal:  false,
+					},
+					Performance:     PtracePerformanceConfig{SeccompPrefilter: true, MaxTracees: 500, MaxHoldMs: 5000},
+					MaskTracerPid:   "off",
+					OnAttachFailure: "fail_open",
+				},
+				UnixSockets: SandboxUnixSocketsConfig{Enabled: boolPtr(true)},
+			},
+			wantErr: "execve-only tracing",
 		},
 		{
 			name: "ptrace + unix_sockets nil is valid",
