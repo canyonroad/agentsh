@@ -158,7 +158,7 @@ Default (if omitted): all depths (`min_depth: 0`, `max_depth: -1`).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| type | string | `self`, `children`, `parent`, `session`, `external`, `system` |
+| type | string | `self`, `children`, `parent`, `session`, `external`, `system`, `pid_range` |
 | pattern | string | Process name pattern (optional) |
 | min | int | Min PID for pid_range type (optional) |
 | max | int | Max PID for pid_range type (optional) |

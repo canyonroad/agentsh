@@ -31,10 +31,10 @@ Make targeted edits to existing AgentSH security policies — add, remove, or up
 
 3. **Determine insertion position** (for new rules)
    First-match-wins means ordering matters:
-   - Place deny rules before allow rules that match the same or broader pattern — an earlier allow rule would shadow a later deny
+   - Place deny rules before any broader non-deny rules (`allow`, `approve`) that match the same pattern — an earlier permissive rule would shadow a later deny
    - Place allow rules before the default-deny catch-all at the end
    - Place more specific rules before less specific ones
-   - When in doubt: deny rules go before the first allow in that category; allow rules go before the default-deny
+   - When in doubt: deny rules go before the first non-deny rule in that category; allow rules go before the default-deny
 
 4. **Make the edit**
    Use the Edit tool:
@@ -56,10 +56,10 @@ Make targeted edits to existing AgentSH security policies — add, remove, or up
 
 | Scenario | Position |
 |----------|----------|
-| New deny rule | Before allow rules that match the same or broader pattern |
+| New deny rule | Before any non-deny rule (`allow`, `approve`) that matches the same or broader pattern |
 | New allow rule | Before the default-deny catch-all |
 | More specific rule | Before less specific rules matching the same pattern |
-| Uncertain (deny) | Before the first allow rule in that category |
+| Uncertain (deny) | Before the first non-deny rule in that category |
 | Uncertain (allow) | Immediately before the default-deny rule for that category |
 
 ## Guardrails
