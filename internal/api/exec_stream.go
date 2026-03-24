@@ -383,7 +383,8 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		s.SetCurrentProcessPID(cmd.Process.Pid)
 		pgid = getProcessGroupID(cmd.Process.Pid)
 
-		if tracer != nil && extra != nil && extra.notifyParentSock != nil {
+		hasWrapperHandlers := extra != nil && (extra.notifyParentSock != nil || (extra.signalParentSock != nil && extra.signalEngine != nil))
+		if tracer != nil && hasWrapperHandlers {
 			// HYBRID MODE: ptrace for execve interception + seccomp wrapper for sockets/files/Landlock.
 			ptraceDone := make(chan struct{})
 			go func() {

@@ -279,7 +279,8 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 
 		// If we started with ptrace (stopped), run the hook BEFORE resuming.
 		// This ensures eBPF/cgroups are attached before the process executes.
-		if tracer != nil && extra != nil && extra.notifyParentSock != nil {
+		hasWrapperHandlers := extra != nil && (extra.notifyParentSock != nil || (extra.signalParentSock != nil && extra.signalEngine != nil))
+		if tracer != nil && hasWrapperHandlers {
 			// HYBRID MODE: ptrace for execve interception + seccomp wrapper for sockets/files/Landlock.
 			ptraceDone := make(chan struct{})
 			go func() {
