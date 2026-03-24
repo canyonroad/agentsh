@@ -45,8 +45,14 @@ func ServeNotify(ctx context.Context, fd *os.File, sessID string, pol *policy.En
 				continue
 			}
 			if isENOENT(err) {
-				// Target process was killed — non-fatal, continue serving
-				continue
+				// Target process was killed. Check context before retrying.
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					time.Sleep(1 * time.Millisecond)
+					continue
+				}
 			}
 			return
 		}
@@ -169,12 +175,19 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 				continue
 			}
 			if isENOENT(err) {
-				// Target process was killed or notification cancelled — non-fatal.
-				// Sleep briefly to avoid tight spin.
-				time.Sleep(1 * time.Millisecond)
-				continue
+				// Target process was killed or notification cancelled.
+				// Check if context is done; if so, exit immediately.
+				// Otherwise sleep briefly and retry (another process may still be alive).
+				select {
+				case <-ctx.Done():
+					slog.Debug("ServeNotifyWithExecve: ENOENT + context done, exiting", "session_id", sessID, "total_notifications", notifCount)
+					return
+				default:
+					time.Sleep(1 * time.Millisecond)
+					continue
+				}
 			}
-			slog.Error("ServeNotifyWithExecve: NotifReceive error (exiting)", "session_id", sessID, "error", err, "total_notifications", notifCount)
+			slog.Debug("ServeNotifyWithExecve: NotifReceive error (exiting)", "session_id", sessID, "error", err, "total_notifications", notifCount)
 			return
 		}
 		notifCount++

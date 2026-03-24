@@ -302,8 +302,12 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 				cmd.Process.Release()
 				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("hybrid ptrace attach: %w", attachErr)
 			} else {
-				// 2. Start wrapper handlers (receives FD, sends ACK)
-				startWrapperHandlers(ctx, extra, cmd.Process.Pid, pgid)
+				// 2. Start wrapper handlers with a child context that we cancel
+				// immediately after the process exits. This closes the notify FD
+				// (via the cancellation goroutine in startNotifyHandler) and
+				// unblocks any stuck NotifReceive ioctl.
+				handlerCtx, handlerCancel := context.WithCancel(ctx)
+				startWrapperHandlers(handlerCtx, extra, cmd.Process.Pid, pgid)
 
 				// 3. Run hook while process stopped (cgroup/eBPF setup)
 				if hook != nil {
@@ -317,6 +321,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 				if resume != nil {
 					if resumeErr := resume(); resumeErr != nil {
 						close(ptraceDone)
+						handlerCancel()
 						_ = killProcess(cmd.Process.Pid)
 						_ = killProcessGroup(pgid)
 						pipeWG.Wait()
@@ -330,6 +335,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 				slog.Debug("exec waiting for command (hybrid)", "command", req.Command, "pid", cmd.Process.Pid)
 				result := waitExit()
 				close(ptraceDone)
+				handlerCancel() // Signal notify handler to exit immediately
 				if result.err != nil {
 					_ = killProcess(cmd.Process.Pid)
 					_ = killProcessGroup(pgid)

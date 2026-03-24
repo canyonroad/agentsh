@@ -406,8 +406,10 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 				cmd.Process.Release()
 				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("hybrid ptrace attach: %w", attachErr)
 			} else {
-				// 2. Start wrapper handlers (receives FD, sends ACK)
-				startWrapperHandlers(ctx, extra, cmd.Process.Pid, pgid)
+				// 2. Start wrapper handlers with a child context that we cancel
+				// immediately after the process exits.
+				handlerCtx, handlerCancel := context.WithCancel(ctx)
+				startWrapperHandlers(handlerCtx, extra, cmd.Process.Pid, pgid)
 
 				// 3. Run hook while process stopped (cgroup/eBPF setup)
 				if hook != nil {
@@ -421,6 +423,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 				if resume != nil {
 					if resumeErr := resume(); resumeErr != nil {
 						close(ptraceDone)
+						handlerCancel()
 						_ = killProcess(cmd.Process.Pid)
 						_ = killProcessGroup(pgid)
 						pipeWG.Wait()
@@ -434,6 +437,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 				slog.Debug("exec_stream waiting for command (hybrid)", "command", req.Command, "pid", cmd.Process.Pid)
 				result := waitExit()
 				close(ptraceDone)
+				handlerCancel() // Signal notify handler to exit immediately
 				if result.err != nil {
 					_ = killProcess(cmd.Process.Pid)
 					_ = killProcessGroup(pgid)
