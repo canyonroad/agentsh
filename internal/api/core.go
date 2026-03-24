@@ -1447,6 +1447,16 @@ func (a *App) wrapWithMacSandbox(
 	// Compile policy-driven SBPL profile (darwin+cgo only, no-op on other platforms)
 	compileDarwinSandboxProfile(&cfg, a.policy, sess.Workspace)
 
+	// Write profile artifact for debugging/inspection
+	if cfg.CompiledProfile != "" && sess.ID != "" {
+		artifactDir := filepath.Join(os.Getenv("HOME"), ".agentsh", "sessions", sess.ID)
+		os.MkdirAll(artifactDir, 0700)
+		artifactPath := filepath.Join(artifactDir, "sandbox.sb")
+		if err := os.WriteFile(artifactPath, []byte(cfg.CompiledProfile), 0600); err != nil {
+			slog.Debug("failed to write sandbox profile artifact", "error", err)
+		}
+	}
+
 	cfgJSON, err := json.Marshal(cfg)
 	if err != nil {
 		return
