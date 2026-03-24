@@ -31,7 +31,7 @@ The skills must work in environments without access to the AgentSH source code (
 
 ### Flow
 
-1. **Locate policy directory** — Look for `config.yml` to find `policies.dir`. If not found, look for a `configs/policies/` directory. Fall back to asking the user for the target path.
+1. **Locate policy directory** — Look for `config.yml` or `config.yaml` to find `policies.dir`. If not found, look for a `configs/policies/` directory. Fall back to asking the user for the target path.
 
 2. **Understand the use case** — Ask one question: "What will this policy protect?" with options:
    - AI agent doing code tasks → template: `default` or `agent-default`
@@ -73,10 +73,10 @@ The skills must work in environments without access to the AgentSH source code (
 
 ### Flow
 
-1. **Locate & read the policy** — Same auto-detect as `policy-create`. If multiple policies exist, list them and ask which one to edit. Read the full YAML into context.
+1. **Locate & read the policy** — Same auto-detect as `policy-create` (check `config.yml`/`config.yaml` for `policies.dir`). If multiple policies exist, list them and ask which one to edit. Read the full YAML into context.
 
 2. **Understand the intent** — Map the user's natural language request to:
-   - **Rule category** — file_rules, network_rules, command_rules, unix_socket_rules, registry_rules, signal_rules, dns_redirects, connect_redirects, resource_limits, env_policy, audit, mcp_rules, package_rules, process_contexts, transparent_commands
+   - **Rule category** — file_rules, network_rules, command_rules, unix_socket_rules, registry_rules, signal_rules, dns_redirects, connect_redirects, resource_limits, env_policy, audit, mcp_rules, package_rules, process_contexts, process_identities, env_inject, transparent_commands
    - **Operation** — add a new rule, remove an existing rule, or modify an existing rule
    - **Insertion position** — where in the rule order (for new rules)
 
@@ -306,6 +306,11 @@ transparent_commands: {}      # Override transparent command set
 | command_overrides | map | Per-command arg filtering |
 | default_decision | string | `allow`, `deny`, `approve` (default: `deny`) |
 | max_depth | int | Max ancestry depth (0 = unlimited) |
+| stop_at | string[] | Stop taint propagation at these process classes |
+| pass_through | string[] | Classes that inherit context but don't count toward depth |
+| race_policy | object | `{on_missing_parent?, on_pid_mismatch?, on_validation_error?, log_race_conditions?}` |
+
+> **Note:** `stop_at`, `pass_through`, and `race_policy` are advanced ancestry-control fields rarely needed by most policy authors.
 
 **process_identities (map[string]ProcessIdentityConfig):**
 | Field | Type | Description |
