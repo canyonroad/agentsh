@@ -223,6 +223,15 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 		slog.Debug("received notify fd from wrapper", "fd", notifyFD.Fd(), "session_id", sessID)
 		defer notifyFD.Close()
 
+		// Close the notify FD when context is cancelled to unblock any stuck
+		// NotifReceive ioctl. Without this, the handler goroutine can hang
+		// indefinitely after the monitored process exits if no ENOENT is
+		// delivered by the kernel.
+		go func() {
+			<-ctx.Done()
+			notifyFD.Close()
+		}()
+
 		emitter := &notifyEmitterAdapter{store: store, broker: broker}
 
 		// Create file handler if configured
