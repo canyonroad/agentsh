@@ -3,6 +3,7 @@ package shim
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -12,9 +13,9 @@ func TestShimConfPath(t *testing.T) {
 		root string
 		want string
 	}{
-		{"/", "/etc/agentsh/shim.conf"},
-		{"/rootfs", "/rootfs/etc/agentsh/shim.conf"},
-		{"", "/etc/agentsh/shim.conf"},
+		{"/", filepath.Join("/", "etc", "agentsh", "shim.conf")},
+		{"/rootfs", filepath.Join("/rootfs", "etc", "agentsh", "shim.conf")},
+		{"", filepath.Join("/", "etc", "agentsh", "shim.conf")},
 	}
 	for _, tt := range tests {
 		got := ShimConfPath(tt.root)
@@ -106,6 +107,9 @@ func TestReadShimConf_InvalidForceValue(t *testing.T) {
 }
 
 func TestReadShimConf_Unreadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission semantics required")
+	}
 	if os.Getuid() == 0 {
 		t.Skip("test requires non-root")
 	}
@@ -140,22 +144,24 @@ func TestWriteShimConf_CreatesDirectoryAndFile(t *testing.T) {
 		t.Fatalf("WriteShimConf: %v", err)
 	}
 
-	// Check directory permissions.
-	dirInfo, err := os.Stat(filepath.Join(root, "etc", "agentsh"))
-	if err != nil {
-		t.Fatalf("stat dir: %v", err)
-	}
-	if perm := dirInfo.Mode().Perm(); perm != 0o755 {
-		t.Fatalf("expected dir perm 0o755, got %o", perm)
-	}
+	// Check directory permissions (Unix only — Windows doesn't use POSIX modes).
+	if runtime.GOOS != "windows" {
+		dirInfo, err := os.Stat(filepath.Join(root, "etc", "agentsh"))
+		if err != nil {
+			t.Fatalf("stat dir: %v", err)
+		}
+		if perm := dirInfo.Mode().Perm(); perm != 0o755 {
+			t.Fatalf("expected dir perm 0o755, got %o", perm)
+		}
 
-	// Check file permissions.
-	fileInfo, err := os.Stat(ShimConfPath(root))
-	if err != nil {
-		t.Fatalf("stat file: %v", err)
-	}
-	if perm := fileInfo.Mode().Perm(); perm != 0o644 {
-		t.Fatalf("expected file perm 0o644, got %o", perm)
+		// Check file permissions.
+		fileInfo, err := os.Stat(ShimConfPath(root))
+		if err != nil {
+			t.Fatalf("stat file: %v", err)
+		}
+		if perm := fileInfo.Mode().Perm(); perm != 0o644 {
+			t.Fatalf("expected file perm 0o644, got %o", perm)
+		}
 	}
 
 	// Check content contains force=true.

@@ -87,9 +87,10 @@ func InstallShellShim(opts InstallShellShimOptions) error {
 	}
 	if opts.Force {
 		// Merge with existing config to preserve unknown keys (forward compat).
-		if confReadErr != nil {
-			// Can't read existing — start fresh.
-			existingConf = ShimConf{Raw: make(map[string]string)}
+		// ReadShimConf returns partially parsed Raw even on validation errors,
+		// so we preserve those keys. Only on true I/O failure is Raw empty.
+		if existingConf.Raw == nil {
+			existingConf.Raw = make(map[string]string)
 		}
 		existingConf.Raw["force"] = "true"
 		existingConf.Force = true
