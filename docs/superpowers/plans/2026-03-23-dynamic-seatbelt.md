@@ -256,54 +256,6 @@ func matchStr(m PathMatch) string {
 }
 
 func quotePath(path string) string {
-	if strings.HasPrefix(path, "#\"") {
-		// Already a regex pattern
-		return path
-	}
-	escaped := strings.ReplaceAll(path, "\\", "\\\\")
-	escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
-	return fmt.Sprintf("%q", escaped)
-}
-
-func validateRule(r rule) error {
-	// Extract path from the SBPL string for validation
-	// Rules with regex paths use #"..."# syntax and don't need absolute path check
-	sbpl := r.sbpl
-	if strings.Contains(sbpl, "regex") {
-		return nil
-	}
-
-	// Find quoted path in the rule
-	// Format: (allow/deny ... (literal/subpath "path"))
-	start := strings.LastIndex(sbpl, `"`)
-	if start == -1 {
-		return nil // no path to validate
-	}
-	// Find the opening quote
-	pathEnd := start
-	pathStart := strings.LastIndex(sbpl[:pathEnd], `"`)
-	if pathStart == -1 {
-		return nil
-	}
-
-	path := sbpl[pathStart+1 : pathEnd]
-	// Unescape for validation
-	path = strings.ReplaceAll(path, "\\\"", "\"")
-	path = strings.ReplaceAll(path, "\\\\", "\\")
-
-	if path != "" && !strings.HasPrefix(path, "/") {
-		return fmt.Errorf("sbpl: path must be absolute, got %q", path)
-	}
-	return nil
-}
-```
-
-Note: the `quotePath` function double-escapes because `fmt.Sprintf("%q", ...)` adds its own escaping. We need to handle this more carefully. Let me fix that:
-
-Replace the `quotePath` function with:
-
-```go
-func quotePath(path string) string {
 	if strings.HasPrefix(path, `#"`) {
 		// Already a regex pattern like #"^/dev/ttys[0-9]+$"#
 		return path
@@ -312,11 +264,7 @@ func quotePath(path string) string {
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 	return `"` + escaped + `"`
 }
-```
 
-And update `validateRule` to properly extract the path:
-
-```go
 func validateRule(r rule) error {
 	sbpl := r.sbpl
 	if strings.Contains(sbpl, "regex") {
@@ -495,6 +443,14 @@ func (p *Profile) DenyMachLookup(serviceName string) {
 	p.rules = append(p.rules, rule{
 		kind: kindMachDeny,
 		sbpl: fmt.Sprintf("(deny mach-lookup (global-name %q))", serviceName),
+	})
+}
+
+// DenyMachLookupPrefix denies lookup of Mach services by prefix.
+func (p *Profile) DenyMachLookupPrefix(prefix string) {
+	p.rules = append(p.rules, rule{
+		kind: kindMachDeny,
+		sbpl: fmt.Sprintf("(deny mach-lookup (global-name-prefix %q))", prefix),
 	})
 }
 
@@ -1422,10 +1378,17 @@ Expected: FAIL — `CompileDarwinSandbox` not defined.
 
 - [ ] **Step 3: Implement CompileDarwinSandbox**
 
-Add to `internal/platform/darwin/sandbox.go`, after the existing code:
+The `CompileDarwinSandbox` function imports `sandboxext` which requires CGo. Create a new file `internal/platform/darwin/sandbox_compile.go` with `//go:build darwin && cgo` rather than adding to `sandbox.go` (which is `//go:build darwin` without cgo). This keeps the existing `SandboxManager` usable without CGo.
+
+Create `internal/platform/darwin/sandbox_compile.go`:
 
 ```go
+//go:build darwin && cgo
+
+package darwin
+
 import (
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -1569,9 +1532,7 @@ func CompileDarwinSandbox(pol *policy.Policy, workspacePath string) (*SandboxCon
 		p.DenyMachLookup(svc)
 	}
 	for _, prefix := range defaultMachBlockPrefixes {
-		// DenyMachLookup doesn't support prefix — use the builder's deny support
-		// For now, individual deny entries. Prefix deny requires adding DenyMachLookupPrefix.
-		p.DenyMachLookup(prefix + "*") // This won't work in SBPL — see step below
+		p.DenyMachLookupPrefix(prefix)
 	}
 	// Essential allows
 	for _, svc := range defaultMachAllow {
@@ -1628,26 +1589,6 @@ func containsAny(slice []string, values ...string) bool {
 }
 ```
 
-Note: We need to add `DenyMachLookupPrefix` to the builder. Add this quick method to `sbpl/builder.go`:
-
-```go
-// DenyMachLookupPrefix denies lookup of Mach services by prefix.
-func (p *Profile) DenyMachLookupPrefix(prefix string) {
-	p.rules = append(p.rules, rule{
-		kind: kindMachDeny,
-		sbpl: fmt.Sprintf("(deny mach-lookup (global-name-prefix %q))", prefix),
-	})
-}
-```
-
-Then fix the compilation code to use `DenyMachLookupPrefix` instead of the wildcard hack:
-
-```go
-	for _, prefix := range defaultMachBlockPrefixes {
-		p.DenyMachLookupPrefix(prefix)
-	}
-```
-
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/platform/darwin/... -v -run TestCompileDarwinSandbox`
@@ -1671,10 +1612,65 @@ git commit -m "feat(darwin): add CompileDarwinSandbox policy-to-SBPL compiler"
 
 **Files:**
 - Modify: `internal/api/core.go`
+- Create: `internal/api/sandbox_compile_darwin.go`
+- Create: `internal/api/sandbox_compile_other.go`
 
-- [ ] **Step 1: Read current wrapWithMacSandbox to understand the call site**
+**Important context:**
+- `a.policy` is `*policy.Engine` (not `*policy.Policy`). Call `a.policy.Policy()` to get `*policy.Policy`.
+- `core.go` is not build-tagged. Darwin-specific code must be in build-tagged helper files.
+- The helper modifies `macSandboxWrapperConfig` in-place to avoid cross-compilation type mismatches.
 
-Check `internal/api/core.go` lines 1401-1458 for the current implementation. The method modifies a `types.ExecRequest` in place: sets `req.Env["AGENTSH_SANDBOX_CONFIG"]`, replaces `req.Command` with the wrapper binary, and prepends `--` to args.
+- [ ] **Step 1: Create build-tagged helper files**
+
+Create `internal/api/sandbox_compile_darwin.go`:
+
+```go
+//go:build darwin && cgo
+
+package api
+
+import (
+	"log/slog"
+
+	"github.com/agentsh/agentsh/internal/platform/darwin"
+	"github.com/agentsh/agentsh/internal/policy"
+)
+
+// compileDarwinSandboxProfile compiles a policy-driven SBPL profile and populates
+// the wrapper config's CompiledProfile and ExtensionTokens fields.
+// Returns true if compilation succeeded, false to fall back to legacy profile.
+func compileDarwinSandboxProfile(cfg *macSandboxWrapperConfig, engine *policy.Engine, workspace string) bool {
+	pol := engine.Policy()
+	if pol == nil {
+		return false
+	}
+
+	sandboxCfg, err := darwin.CompileDarwinSandbox(pol, workspace)
+	if err != nil {
+		slog.Warn("failed to compile darwin sandbox profile, falling back to legacy",
+			"error", err)
+		return false
+	}
+
+	cfg.CompiledProfile = sandboxCfg.Profile
+	cfg.ExtensionTokens = sandboxCfg.TokenValues
+	return true
+}
+```
+
+Create `internal/api/sandbox_compile_other.go`:
+
+```go
+//go:build !darwin || !cgo
+
+package api
+
+import "github.com/agentsh/agentsh/internal/policy"
+
+func compileDarwinSandboxProfile(cfg *macSandboxWrapperConfig, engine *policy.Engine, workspace string) bool {
+	return false
+}
+```
 
 - [ ] **Step 2: Update macSandboxWrapperConfig with new fields**
 
@@ -1693,9 +1689,9 @@ type macSandboxWrapperConfig struct {
 }
 ```
 
-- [ ] **Step 3: Update wrapWithMacSandbox to compile profile from policy**
+- [ ] **Step 3: Update wrapWithMacSandbox to use the helper**
 
-Replace the body of `wrapWithMacSandbox` (lines 1401-1458) to call `CompileDarwinSandbox`. The method already has access to `sess` (session) which has the workspace path, and `a.policy` which has the loaded policy:
+In `wrapWithMacSandbox`, add the `compileDarwinSandboxProfile` call after building the config and before marshaling:
 
 ```go
 func (a *App) wrapWithMacSandbox(
@@ -1713,44 +1709,34 @@ func (a *App) wrapWithMacSandbox(
 		return
 	}
 
-	// Compile policy-driven SBPL profile
-	sandboxCfg, err := darwin.CompileDarwinSandbox(a.policy, sess.Workspace)
-	if err != nil {
-		slog.Warn("failed to compile darwin sandbox profile, falling back to legacy",
-			"error", err, "session", sess.ID)
-		// Fall back to legacy config (no compiled profile)
-		sandboxCfg = nil
+	// Build mach services config with defaults
+	machCfg := macSandboxMachServicesConfig{
+		DefaultAction: a.cfg.Sandbox.XPC.MachServices.DefaultAction,
+		Allow:         a.cfg.Sandbox.XPC.MachServices.Allow,
+		Block:         a.cfg.Sandbox.XPC.MachServices.Block,
+		AllowPrefixes: a.cfg.Sandbox.XPC.MachServices.AllowPrefixes,
+		BlockPrefixes: a.cfg.Sandbox.XPC.MachServices.BlockPrefixes,
 	}
 
-	// Build wrapper config
+	if machCfg.DefaultAction == "" {
+		machCfg.DefaultAction = "deny"
+	}
+	if len(machCfg.Allow) == 0 && machCfg.DefaultAction == "deny" {
+		machCfg.Allow = DefaultXPCAllowList
+	}
+	if len(machCfg.BlockPrefixes) == 0 && machCfg.DefaultAction == "allow" {
+		machCfg.BlockPrefixes = DefaultXPCBlockPrefixes
+	}
+
 	cfg := macSandboxWrapperConfig{
 		WorkspacePath: sess.Workspace,
 		AllowedPaths:  []string{os.Getenv("HOME")},
 		AllowNetwork:  true,
-		MachServices: macSandboxMachServicesConfig{
-			DefaultAction: a.cfg.Sandbox.XPC.MachServices.DefaultAction,
-			Allow:         a.cfg.Sandbox.XPC.MachServices.Allow,
-			Block:         a.cfg.Sandbox.XPC.MachServices.Block,
-			AllowPrefixes: a.cfg.Sandbox.XPC.MachServices.AllowPrefixes,
-			BlockPrefixes: a.cfg.Sandbox.XPC.MachServices.BlockPrefixes,
-		},
+		MachServices:  machCfg,
 	}
 
-	if sandboxCfg != nil {
-		cfg.CompiledProfile = sandboxCfg.Profile
-		cfg.ExtensionTokens = sandboxCfg.TokenValues
-	}
-
-	// Apply mach defaults if not configured
-	if cfg.MachServices.DefaultAction == "" {
-		cfg.MachServices.DefaultAction = "deny"
-	}
-	if len(cfg.MachServices.Allow) == 0 && cfg.MachServices.DefaultAction == "deny" {
-		cfg.MachServices.Allow = DefaultXPCAllowList
-	}
-	if len(cfg.MachServices.BlockPrefixes) == 0 && cfg.MachServices.DefaultAction == "allow" {
-		cfg.MachServices.BlockPrefixes = DefaultXPCBlockPrefixes
-	}
+	// Compile policy-driven SBPL profile (darwin+cgo only, no-op on other platforms)
+	compileDarwinSandboxProfile(&cfg, a.policy, sess.Workspace)
 
 	cfgJSON, err := json.Marshal(cfg)
 	if err != nil {
@@ -1779,52 +1765,10 @@ func (a *App) wrapWithMacSandbox(
 }
 ```
 
-Note: You'll need to add the import for the darwin package. Since `core.go` is not build-tagged, and `CompileDarwinSandbox` is darwin-only, you'll need to either:
-- Add a build-tagged helper file `internal/api/sandbox_darwin.go` that wraps the call, OR
-- Use a compile-time interface
-
-The cleanest approach: create `internal/api/sandbox_darwin.go` and `internal/api/sandbox_other.go`:
-
-`sandbox_darwin.go`:
-```go
-//go:build darwin
-
-package api
-
-import (
-	"github.com/agentsh/agentsh/internal/platform/darwin"
-	"github.com/agentsh/agentsh/internal/policy"
-)
-
-func compileDarwinSandbox(pol *policy.Policy, workspace string) (*darwin.SandboxConfig, error) {
-	return darwin.CompileDarwinSandbox(pol, workspace)
-}
-```
-
-`sandbox_other.go`:
-```go
-//go:build !darwin
-
-package api
-
-import "github.com/agentsh/agentsh/internal/policy"
-
-type darwinSandboxConfig struct {
-	Profile     string
-	TokenValues []string
-}
-
-func compileDarwinSandbox(pol *policy.Policy, workspace string) (*darwinSandboxConfig, error) {
-	return nil, nil
-}
-```
-
-Then in `wrapWithMacSandbox`, call `compileDarwinSandbox(a.policy, sess.Workspace)`.
-
 - [ ] **Step 4: Verify build compiles on all platforms**
 
 Run: `go build ./...` and `GOOS=linux go build ./...` and `GOOS=windows go build ./...`
-Expected: all pass.
+Expected: all pass. The `sandbox_compile_other.go` stub ensures non-darwin platforms compile.
 
 - [ ] **Step 5: Run existing server tests**
 
@@ -1834,7 +1778,7 @@ Expected: all existing tests PASS (backwards compatible).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add internal/api/core.go internal/api/sandbox_darwin.go internal/api/sandbox_other.go
+git add internal/api/core.go internal/api/sandbox_compile_darwin.go internal/api/sandbox_compile_other.go
 git commit -m "feat(api): wire CompileDarwinSandbox into wrapWithMacSandbox"
 ```
 
