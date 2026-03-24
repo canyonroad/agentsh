@@ -178,6 +178,21 @@ ENV AGENTSH_SERVER=http://127.0.0.1:18080
 
 Now any `/bin/sh -c ...` or `/bin/bash -lc ...` in the container routes through agentsh.
 
+### Non-interactive enforcement
+
+By default, the shim bypasses policy when stdin is not a TTY (preserving binary data for piped commands). On platforms where commands are always non-interactive but still need enforcement (e.g., exe.dev, sandbox APIs), add `--force`:
+
+```bash
+agentsh shim install-shell \
+  --root / \
+  --shim /usr/bin/agentsh-shell-shim \
+  --bash \
+  --force \
+  --i-understand-this-modifies-the-host
+```
+
+This writes `/etc/agentsh/shim.conf` with `force=true`, which the shim reads at startup. The config file works regardless of how the shell is spawned (unlike env vars or profile scripts). `AGENTSH_SHIM_FORCE=1` in the process environment achieves the same effect per-process.
+
 **Recommended pattern:** run agentsh as a sidecar (or PID 1) in the same pod/service and share a workspace volume; the shim ensures every shell hop stays under policy.
 
 ---

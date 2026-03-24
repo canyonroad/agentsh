@@ -105,6 +105,23 @@ ai-agent-task:
 
 When running agentsh in containers, proper startup sequencing is important to avoid race conditions between the daemon and shell shim.
 
+### Non-Interactive Shell Enforcement
+
+By default, the shell shim bypasses policy when stdin is not a TTY. This preserves binary stdin/stdout for piped data (e.g., `docker exec -i container sh -c "cat > /file" < binary`). In CI/CD environments where all commands are non-interactive but still need enforcement, use `--force` during shim installation:
+
+```bash
+agentsh shim install-shell \
+  --root / \
+  --shim /usr/bin/agentsh-shell-shim \
+  --bash \
+  --force \
+  --i-understand-this-modifies-the-host
+```
+
+This writes `/etc/agentsh/shim.conf` with `force=true`. The shim reads this file at startup, so it works regardless of how the shell is spawned (unlike env vars or profile scripts that may not be sourced for non-interactive SSH sessions).
+
+Alternatively, set `AGENTSH_SHIM_FORCE=1` in the process environment for per-process enforcement.
+
 ### Basic Dockerfile
 
 ```dockerfile
