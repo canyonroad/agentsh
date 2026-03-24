@@ -289,10 +289,20 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	select {
 	case s.eventCh <- p:
 		return nil
+	case <-s.done:
+		// Flush goroutine has exited — event cannot be persisted.
+		return fmt.Errorf("store closed")
 	default:
-		// Channel full — drop event to avoid blocking the caller (e.g. ptrace event loop).
-		slog.Warn("sqlite: event channel full, dropping event", "event_id", ev.ID, "type", ev.Type)
-		return fmt.Errorf("event channel full")
+		// Channel full — block briefly to absorb bursts before dropping.
+		select {
+		case s.eventCh <- p:
+			return nil
+		case <-s.done:
+			return fmt.Errorf("store closed")
+		case <-time.After(5 * time.Millisecond):
+			slog.Warn("sqlite: event channel full, dropping event", "event_id", ev.ID, "type", ev.Type)
+			return fmt.Errorf("event channel full")
+		}
 	}
 }
 
