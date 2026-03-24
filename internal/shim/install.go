@@ -67,7 +67,12 @@ func InstallShellShim(opts InstallShellShimOptions) error {
 	} else {
 		// Clear stale force=true from a prior --force install so the current
 		// flags always define the current state.
-		existing, _ := ReadShimConf(root)
+		existing, readErr := ReadShimConf(root)
+		if readErr != nil {
+			// Config exists but is unreadable — surface the error so the
+			// operator fixes permissions before reinstalling.
+			return fmt.Errorf("read shim.conf: %w", readErr)
+		}
 		if existing.Raw["force"] == "true" || existing.Raw["force"] == "1" {
 			existing.Raw["force"] = "false"
 			existing.Force = false
