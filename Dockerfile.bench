@@ -234,7 +234,17 @@ write_config() {
       static_allow_file=true
       static_allow_network=true
       ;;
+    ptrace-seccomp)
+      ptrace_enabled=true
+      ;;
   esac
+
+  # In ptrace-seccomp mode, disable ptrace execve tracing.
+  # This simulates the hybrid approach where seccomp would handle execve.
+  local ptrace_trace_execve=true
+  if [[ "$mode" == "ptrace-seccomp" ]]; then
+    ptrace_trace_execve=false
+  fi
 
   cat >"${dir}/config.yaml" <<YAML
 server:
@@ -288,7 +298,7 @@ sandbox:
     mask_tracer_pid: "off"
     on_attach_failure: fail_open
     trace:
-      execve: true
+      execve: ${ptrace_trace_execve}
       file: true
       network: true
       signal: true
@@ -384,7 +394,7 @@ sleep 0.3
 
 declare -A results_files
 
-for mode in baseline full seccomp-notify ptrace ptrace-allow; do
+for mode in baseline full seccomp-notify ptrace ptrace-allow ptrace-seccomp; do
   echo "bench: running mode=$mode ..."
   results_files[$mode]="$(run_mode "$mode")"
 done
@@ -394,7 +404,14 @@ phases=(spawn fileio git network deny redirect tree_deep tree_wide)
 phase_labels=("Process spawn (120)" "File I/O (1000 ops)" "Git workflow" "Network (10 curl)" "Deny enforcement (50)" "Redirect enforce (50)" "Deep tree (20x4-lvl)" "Wide tree (10x10-fan)")
 
 declare -A medians
-for mode in baseline full seccomp-notify ptrace ptrace-allow; do
+# Initialize all mode+phase combinations to 0 (handles skipped modes).
+for mode in baseline full seccomp-notify ptrace ptrace-allow ptrace-seccomp; do
+  for phase in "${phases[@]}"; do
+    medians["${mode}_${phase}"]=0
+  done
+  medians["${mode}_total"]=0
+done
+for mode in baseline full seccomp-notify ptrace ptrace-allow ptrace-seccomp; do
   for phase in "${phases[@]}"; do
     vals=( $(extract_phase "${results_files[$mode]}" "$phase") )
     if [[ ${#vals[@]} -lt 3 ]]; then
@@ -406,7 +423,7 @@ for mode in baseline full seccomp-notify ptrace ptrace-allow; do
 done
 
 # Compute totals
-for mode in baseline full seccomp-notify ptrace ptrace-allow; do
+for mode in baseline full seccomp-notify ptrace ptrace-allow ptrace-seccomp; do
   total=0
   for phase in "${phases[@]}"; do
     total=$(( total + ${medians["${mode}_${phase}"]} ))
@@ -427,9 +444,9 @@ overhead() {
 echo ""
 echo "=== agentsh mode benchmark (median of 3 runs) ==="
 echo ""
-printf "| %-22s | %8s | %9s | %13s | %14s | %20s | %7s | %15s | %12s | %20s |\n" \
-  "Phase" "Baseline" "Full mode" "Full overhead" "Seccomp-notify" "Seccomp-notify ohead" "Ptrace" "Ptrace overhead" "Ptrace-allow" "Ptrace-allow overhead"
-printf "|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|\n" \
+printf "| %-22s | %8s | %9s | %13s | %14s | %20s | %7s | %15s | %12s | %20s | %14s | %22s |\n" \
+  "Phase" "Baseline" "Full mode" "Full overhead" "Seccomp-notify" "Seccomp-notify ohead" "Ptrace" "Ptrace overhead" "Ptrace-allow" "Ptrace-allow overhead" "Ptrace-seccomp" "Ptrace-seccomp ohead"
+printf "|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|\n" \
   "$(printf '%0.s-' {1..22})" \
   "$(printf '%0.s-' {1..8})" \
   "$(printf '%0.s-' {1..9})" \
@@ -439,7 +456,9 @@ printf "|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|-%s-|\n" \
   "$(printf '%0.s-' {1..7})" \
   "$(printf '%0.s-' {1..15})" \
   "$(printf '%0.s-' {1..12})" \
-  "$(printf '%0.s-' {1..20})"
+  "$(printf '%0.s-' {1..20})" \
+  "$(printf '%0.s-' {1..14})" \
+  "$(printf '%0.s-' {1..22})"
 
 for i in "${!phases[@]}"; do
   phase="${phases[$i]}"
@@ -449,12 +468,14 @@ for i in "${!phases[@]}"; do
   sval="${medians[seccomp-notify_${phase}]}"
   pval="${medians[ptrace_${phase}]}"
   aval="${medians[ptrace-allow_${phase}]}"
+  psval="${medians[ptrace-seccomp_${phase}]}"
   foh="$(overhead "$bval" "$fval")"
   soh="$(overhead "$bval" "$sval")"
   poh="$(overhead "$bval" "$pval")"
   aoh="$(overhead "$bval" "$aval")"
-  printf "| %-22s | %6sms | %7sms | %13s | %12sms | %20s | %5sms | %15s | %10sms | %20s |\n" \
-    "$label" "$bval" "$fval" "$foh" "$sval" "$soh" "$pval" "$poh" "$aval" "$aoh"
+  psoh="$(overhead "$bval" "$psval")"
+  printf "| %-22s | %6sms | %7sms | %13s | %12sms | %20s | %5sms | %15s | %10sms | %20s | %12sms | %22s |\n" \
+    "$label" "$bval" "$fval" "$foh" "$sval" "$soh" "$pval" "$poh" "$aval" "$aoh" "$psval" "$psoh"
 done
 
 # Total row
@@ -463,12 +484,14 @@ fval="${medians[full_total]}"
 sval="${medians[seccomp-notify_total]}"
 pval="${medians[ptrace_total]}"
 aval="${medians[ptrace-allow_total]}"
+psval="${medians[ptrace-seccomp_total]}"
 foh="$(overhead "$bval" "$fval")"
 soh="$(overhead "$bval" "$sval")"
 poh="$(overhead "$bval" "$pval")"
 aoh="$(overhead "$bval" "$aval")"
-printf "| %-22s | %6sms | %7sms | %13s | %12sms | %20s | %5sms | %15s | %10sms | %20s |\n" \
-  "**TOTAL**" "$bval" "$fval" "$foh" "$sval" "$soh" "$pval" "$poh" "$aval" "$aoh"
+psoh="$(overhead "$bval" "$psval")"
+printf "| %-22s | %6sms | %7sms | %13s | %12sms | %20s | %5sms | %15s | %10sms | %20s | %12sms | %22s |\n" \
+  "**TOTAL**" "$bval" "$fval" "$foh" "$sval" "$soh" "$pval" "$poh" "$aval" "$aoh" "$psval" "$psoh"
 
 echo ""
 echo "bench: done"

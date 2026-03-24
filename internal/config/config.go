@@ -354,8 +354,12 @@ type SandboxConfig struct {
 
 // Validate checks cross-field constraints in the sandbox configuration.
 func (c *SandboxConfig) Validate() error {
+	// When both ptrace and seccomp.execve are enabled, seccomp handles execve
+	// via USER_NOTIF while ptrace handles file/network/signal. The seccomp
+	// filter's lower return value (USER_NOTIF < TRACE) ensures proper routing.
+	// Disable ptrace execve tracing so it doesn't conflict.
 	if c.Ptrace.Enabled && c.Seccomp.Execve.Enabled {
-		return fmt.Errorf("sandbox.ptrace and sandbox.seccomp.execve are mutually exclusive")
+		c.Ptrace.Trace.Execve = false
 	}
 	if c.Ptrace.Enabled && c.UnixSockets.Enabled != nil && *c.UnixSockets.Enabled {
 		return fmt.Errorf("sandbox.ptrace and sandbox.unix_sockets are mutually exclusive")

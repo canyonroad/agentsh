@@ -127,6 +127,7 @@ func TestSandboxConfig_Validate_MutualExclusion(t *testing.T) {
 		name    string
 		cfg     SandboxConfig
 		wantErr string
+		after   func(*testing.T, SandboxConfig)
 	}{
 		{
 			name: "ptrace alone is valid",
@@ -139,7 +140,7 @@ func TestSandboxConfig_Validate_MutualExclusion(t *testing.T) {
 			},
 		},
 		{
-			name: "ptrace + seccomp.execve rejected",
+			name: "ptrace + seccomp.execve disables ptrace execve",
 			cfg: SandboxConfig{
 				Ptrace: func() SandboxPtraceConfig {
 					c := DefaultPtraceConfig()
@@ -150,7 +151,11 @@ func TestSandboxConfig_Validate_MutualExclusion(t *testing.T) {
 					Execve: ExecveConfig{Enabled: true},
 				},
 			},
-			wantErr: "mutually exclusive",
+			after: func(t *testing.T, cfg SandboxConfig) {
+				if cfg.Ptrace.Trace.Execve {
+					t.Error("expected ptrace.trace.execve to be disabled when seccomp.execve is enabled")
+				}
+			},
 		},
 		{
 			name: "ptrace + unix_sockets rejected",
@@ -202,6 +207,9 @@ func TestSandboxConfig_Validate_MutualExclusion(t *testing.T) {
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
+				}
+				if tt.after != nil {
+					tt.after(t, tt.cfg)
 				}
 				return
 			}

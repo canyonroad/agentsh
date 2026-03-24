@@ -1338,13 +1338,22 @@ func (t *Tracer) handleExecEvent(tid int) {
 	// The saved fd (if any) was also replaced by exec; discard it.
 	state.PendingExecStubFD = -1
 	state.PendingExecSavedFD = -1
-	// Keep InSyscall = true: the PTRACE_EVENT_EXEC fires between the
-	// execve's syscall-enter and syscall-exit. The next SIGTRAP|0x80
-	// stop will be the execve exit; by leaving InSyscall true, the
-	// tracer correctly treats it as an exit (entering = !true = false)
-	// and subsequent syscalls are dispatched on entry as expected.
-	// Without this, the enter/exit tracking drifts off-by-one and
-	// handlers see syscalls only at exit — too late to intercept.
+	// PTRACE_EVENT_EXEC fires between execve's syscall-enter and exit.
+	// When TraceExecve is true, the seccomp prefilter traps execve at
+	// entry (setting InSyscall=true via handleSeccompStop). The exec
+	// event then fires with InSyscall already true. Keeping it true
+	// ensures the next SIGTRAP|0x80 is correctly identified as an exit.
+	//
+	// When TraceExecve is false (hybrid mode), the prefilter returns
+	// ALLOW for execve — no seccomp entry stop fires. We must
+	// explicitly set InSyscall=true here so the state is consistent.
+	// With PtraceCont resume (prefilter active), the kernel skips the
+	// exit stop entirely, so the next stop will be a fresh seccomp
+	// entry which resets InSyscall=true anyway. But setting it here
+	// keeps the state correct for any code that checks between stops.
+	if state.HasPrefilter && !t.cfg.TraceExecve {
+		state.InSyscall = true
+	}
 
 	formerTID, err := unix.PtraceGetEventMsg(tid)
 	if err == nil && int(formerTID) != tid {
