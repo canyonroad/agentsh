@@ -10,7 +10,9 @@ Replace the static, blanket-allow seatbelt profile in agentsh-macwrap with polic
 
 ## Context
 
-The macOS sandbox implementation (`darwin/sandbox.go`, `agentsh-macwrap`) uses seatbelt via `sandbox_init_with_parameters`. The SBPL profile is generated from a static template with blanket `(allow mach-lookup)`, `(allow process-exec)`, and binary network (`allow network*` or nothing). The policy engine's file/command/network rules are not reflected in the sandbox profile.
+The macOS sandbox implementation (`darwin/sandbox.go`, `agentsh-macwrap`) uses seatbelt via `sandbox_init_with_parameters` (private C API). The SBPL profile is generated from a static template with blanket `(allow mach-lookup)`, `(allow process-exec)`, and binary network (`allow network*` or nothing). The policy engine's file/command/network rules are not reflected in the sandbox profile.
+
+Note: `sandbox-exec` is deprecated by Apple, but `sandbox_init_with_parameters` remains functional on all current macOS versions. The long-term migration path is ESF + Network Extension (Spec B) for enforcement, with seatbelt as a defense-in-depth layer. This spec strengthens seatbelt enforcement while it remains available.
 
 On Linux, seccomp user-notify, ptrace, Landlock, and eBPF provide fine-grained enforcement. This spec brings macOS closer to parity by making the seatbelt profile enforce the same policy rules the rest of the stack uses.
 
@@ -51,9 +53,13 @@ Policy YAML
 └─────────────────────────────┘
 ```
 
-Profile generation moves out of macwrap into the parent Go process where the policy engine lives. Macwrap becomes a thin applier: consume tokens, apply profile, exec.
+Profile generation moves out of macwrap into the **server process** (`internal/api/core.go`), where the policy engine already lives. Today, `wrapWithMacSandbox()` in `core.go` builds a `macSandboxWrapperConfig` and passes it to macwrap via `AGENTSH_SANDBOX_CONFIG`. In the new design, this method calls `CompileDarwinSandbox()` to produce the full SBPL string and extension tokens, then passes both through the same env var. Macwrap becomes a thin applier: consume tokens, apply profile, exec.
 
 The compiled SBPL is also written to `~/.agentsh/sessions/<id>/sandbox.sb` for inspection/debugging. This file is informational — macwrap receives the profile via `WrapperConfig`, never from disk.
+
+**Token issuance:** `sandbox_extension_issue_file()` must be called from an **unsandboxed process**. The server process (which runs unsandboxed) issues all tokens and serializes the opaque token strings into the `WrapperConfig`. Macwrap (which is also unsandboxed at the time of token consumption — it consumes tokens before calling `sandbox_init`) calls `sandbox_extension_consume()` for each token, granting access to itself and its future child process.
+
+**Environment variable size:** The compiled SBPL + serialized tokens will be larger than the current simple JSON config. For policies with many rules, the combined payload could approach shell environment limits (~128KB). If the payload exceeds 64KB, the server writes it to a temp file (`/tmp/agentsh-sandbox-<session>.json`) and passes the file path via `AGENTSH_SANDBOX_CONFIG_FILE` instead. Macwrap reads and deletes the file atomically.
 
 ### Layered Perimeter Model
 
@@ -114,16 +120,21 @@ sbplString, err := p.Build()
 
 ### `AllowSystemEssentials()` includes
 
-- `/dev/null`, `/dev/random`, `/dev/urandom`, `/dev/zero`
-- `/usr/lib`, `/System/Library`, dyld shared cache
-- `process-fork`, `signal (target self)`, `sysctl-read`
-- TTY access (`/dev/ttys*`, `/dev/pty*`)
-- `/tmp`, `/private/tmp`, `/var/folders`
-- `ipc-posix*`
+Mirrors all paths currently in `profile.go`'s `generateProfile()`:
+
+- **Dev files:** `/dev/null`, `/dev/random`, `/dev/urandom`, `/dev/zero`
+- **System libraries:** `/usr/lib`, `/usr/share`, `/System/Library`, `/Library/Frameworks`, `/private/var/db/dyld` (dyld shared cache)
+- **Process operations:** `process-fork`, `signal (target self)`, `sysctl-read`
+- **TTY access:** `/dev/ttys*` (regex), `/dev/pty*` (regex), `/dev/tty` (literal)
+- **Common tool paths (read-only):** `/usr/bin`, `/usr/sbin`, `/bin`, `/sbin`, `/usr/local/bin`, `/opt/homebrew/bin`, `/opt/homebrew/Cellar`
+- **Temp files:** `/tmp`, `/private/tmp`, `/var/folders`
+- **IPC:** `ipc-posix*`, `mach-register` (needed for own XPC services)
 
 ### Rule ordering
 
-SBPL evaluates first-match. Builder enforces deny-before-allow within each category. `DenyProcessExec(osascript)` is emitted before `AllowProcessExec(Subpath, /usr/bin)`.
+SBPL with `(deny default)` denies anything not explicitly allowed. Explicit `(deny ...)` rules override `(allow ...)` rules for the same operation regardless of order, because the sandbox evaluates deny rules with higher priority. However, the builder emits deny rules before allow rules within each category for readability and to make the intent clear when inspecting the profile.
+
+For the exec blocklist, this means `(deny process-exec (literal "/usr/bin/osascript"))` takes precedence over `(allow process-exec (subpath "/usr/bin"))` regardless of emission order — the kernel enforces the deny.
 
 ### Validation in `Build()`
 
@@ -178,38 +189,47 @@ Belt and suspenders. The SBPL `subpath` rule declares structural permission. The
 
 ### File rule mapping
 
-| Policy YAML | SBPL | Extension token |
-|---|---|---|
-| `path: /x, access: read` | `AllowFileRead(Subpath, "/x")` | `Issue("/x", ReadOnly)` |
-| `path: /x, access: write` | `AllowFileReadWrite(Subpath, "/x")` | `Issue("/x", ReadWrite)` |
-| `path: /x/file.txt, access: read` | `AllowFileRead(Literal, "/x/file.txt")` | `Issue("/x/file.txt", ReadOnly)` |
-| No rule for path | Omitted (deny-default) | No token |
+Policy file rules use `FileRule{Paths: []string, Operations: []string, Decision: string}` from `internal/policy/model.go`.
 
-Path type: directory or `/*` suffix → `Subpath`. Specific file → `Literal`.
+| `FileRule` fields | SBPL | Extension token |
+|---|---|---|
+| `Paths: ["/x"], Operations: ["read"], Decision: "allow"` | `AllowFileRead(Subpath, "/x")` | `Issue("/x", ReadOnly)` |
+| `Paths: ["/x"], Operations: ["write", "read"], Decision: "allow"` | `AllowFileReadWrite(Subpath, "/x")` | `Issue("/x", ReadWrite)` |
+| `Paths: ["/x/file.txt"], Operations: ["read"], Decision: "allow"` | `AllowFileRead(Literal, "/x/file.txt")` | `Issue("/x/file.txt", ReadOnly)` |
+| `Paths: ["/x"], Decision: "deny"` | Omitted (deny-default handles it) | No token |
+| No matching rule | Omitted (deny-default) | No token |
+
+Path type detection: glob patterns or directory paths → `Subpath`. Paths with a file extension or no trailing `/` that resolve to a file → `Literal`. The `Operations` field determines read-only vs read-write: if operations include `"write"`, `"*"`, or `"delete"` → `ReadWrite` token and `AllowFileReadWrite`; otherwise → `ReadOnly` and `AllowFileRead`.
 
 ### Command rule mapping
 
-| Policy YAML | SBPL |
+Policy command rules use `CommandRule{Commands: []string, Decision: string}` from `internal/policy/model.go`.
+
+| `CommandRule` fields | SBPL |
 |---|---|
-| `command: /usr/bin/git, action: allow` | `AllowProcessExec(Literal, "/usr/bin/git")` |
-| `command: python*, action: allow` | Resolve to full path, `AllowProcessExec(Literal, resolved)` |
-| `command: osascript, action: deny` | `DenyProcessExec(Literal, "/usr/bin/osascript")` |
+| `Commands: ["/usr/bin/git"], Decision: "allow"` | `AllowProcessExec(Literal, "/usr/bin/git")` |
+| `Commands: ["python*"], Decision: "allow"` | Resolve to full path, `AllowProcessExec(Literal, resolved)` |
+| `Commands: ["osascript"], Decision: "deny"` | `DenyProcessExec(Literal, "/usr/bin/osascript")` |
+| `Decision: "approve"` or `"redirect"` | Not mapped to SBPL (handled by shell shim/ESF) |
 
 Default exec path allowlist (always emitted):
 - `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`, `/usr/local/bin`, `/opt/homebrew/bin`, workspace path
 
-Default exec blocklist (always emitted, deny-before-allow):
+Default exec blocklist (always emitted):
 - `osascript`, `security`, `systemsetup`, `tccutil`, `csrutil`
 
 ### Network rule mapping
 
-| Policy YAML | SBPL |
+Policy network rules use `NetworkRule{Domains: []string, Ports: []int, CIDRs: []string, Decision: string}` from `internal/policy/model.go`.
+
+| `NetworkRule` fields | SBPL |
 |---|---|
-| `ports: [443]` | `AllowNetworkOutbound("tcp", "*:443")` |
-| `allow_all: true` | `(allow network*)` |
+| `Ports: [443], Decision: "allow"` | `(allow network-outbound (remote tcp "*:443"))` |
+| `Decision: "allow"` (no port/domain restriction) | `(allow network*)` |
+| `Domains: ["*.github.com"], Decision: "allow"` | `(allow network*)` + log warning |
 | No network rules | Deny-default blocks all |
 
-SBPL cannot express domain-based rules. Domain filtering requires Network Extension (Spec B). If the policy has domain-specific rules, the port is allowed and a log notes that domain filtering requires NE.
+**Caveat:** SBPL port-level network filtering (`network-outbound` with `remote` filters) has limited reliability on macOS 12+. The primary enforcement model is binary: `(allow network*)` or deny-default. Port-level rules are emitted as best-effort defense-in-depth. Domain-based filtering is not expressible in SBPL and requires Network Extension (Spec B). If the policy has domain-specific rules, network is allowed at the SBPL level and a log notes that domain filtering requires NE.
 
 ### Mach service mapping
 
@@ -287,6 +307,10 @@ Command control and isolation become always-available because dynamic seatbelt p
 
 Scoring is conservative (75 with FUSE-T, 65 without) pending real-world validation.
 
+### Detection criteria
+
+"Dynamic seatbelt" is a code capability, not a system dependency — it's always available when the updated server code is running. Detection in `selectDarwinMode()`: if `agentsh-macwrap` is available in PATH (existing check), select dynamic seatbelt mode. The distinction from the old "sandbox-exec" mode is code-level: the server now sends `CompiledProfile` in the config. No runtime probe needed — the mode is determined by server version, not system capabilities. FUSE-T detection remains unchanged (library file check).
+
 ### Seatbelt-only mode
 
 When FUSE-T is not installed, dynamic seatbelt is a standalone supported mode at score ~65. Provides: kernel-enforced exec path restriction, Mach service restriction, file path boundaries. Does not provide: per-operation file policy, file redirect, soft-delete, dynamic mid-session file grants.
@@ -299,7 +323,7 @@ Pure Go, no CGo, runs on any OS. Tests SBPL string output for given inputs: corr
 
 ### Layer 2: Token manager unit tests (`sandboxext/manager_test.go`)
 
-CGo, darwin-only. Tests real `sandbox_extension_issue/release` calls: issue returns valid token, revoke removes from active set, RevokeAll clears, double-revoke is safe, issue for nonexistent path returns error.
+CGo, darwin-only. Tests real `sandbox_extension_issue/consume/release` calls: issue returns valid token, consume succeeds for valid token, revoke removes from active set, RevokeAll clears, double-revoke is safe, issue for nonexistent path returns error, consume of invalid token string returns -1 handle.
 
 ### Layer 3: Policy compilation integration tests (`darwin/sandbox_test.go`)
 
@@ -319,11 +343,11 @@ Darwin-only, `integration` build tag. Launches macwrap with compiled profile: ex
 | `internal/platform/darwin/sandboxext/manager_test.go` | New — token manager tests |
 | `internal/platform/darwin/sandbox.go` | Add `CompileDarwinSandbox()` method |
 | `internal/platform/darwin/sandbox_test.go` | Add compilation integration tests |
+| `internal/api/core.go` | Update `wrapWithMacSandbox()` to call `CompileDarwinSandbox()`, populate `CompiledProfile` and `ExtensionTokens` in config |
 | `cmd/agentsh-macwrap/main.go` | Add `consumeTokens()`, use `CompiledProfile` |
-| `cmd/agentsh-macwrap/config.go` | Add `CompiledProfile`, `ExtensionTokens` fields |
+| `cmd/agentsh-macwrap/config.go` | Add `CompiledProfile`, `ExtensionTokens` fields to `WrapperConfig` |
 | `cmd/agentsh-macwrap/profile.go` | Keep as legacy fallback |
 | `internal/capabilities/detect_darwin.go` | Add dynamic seatbelt tiers, update domain availability |
-| `internal/cli/wrap_darwin.go` | Call `CompileDarwinSandbox()`, populate new WrapperConfig fields |
 
 ## Out of Scope
 
