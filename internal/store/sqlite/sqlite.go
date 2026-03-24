@@ -5,18 +5,61 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentsh/agentsh/pkg/types"
 	_ "modernc.org/sqlite"
 )
 
+// Default async batch settings.
+const (
+	defaultBatchSize     = 64
+	defaultFlushInterval = 50 * time.Millisecond
+	defaultChannelSize   = 4096
+)
+
+// eventPayload holds pre-extracted fields ready for INSERT, avoiding
+// JSON re-parsing in the flush goroutine.
+type eventPayload struct {
+	id                string
+	tsNanos           int64
+	sessionID         string
+	commandID         string
+	evType            string
+	pid               int
+	policyDecision    string
+	effectiveDecision string
+	policyRule        string
+	path              string
+	domain            string
+	remote            string
+	operation         string
+	payloadJSON       string
+}
+
 type Store struct {
 	db *sql.DB
+
+	// Async event batching.
+	eventCh   chan eventPayload
+	flushCh   chan chan struct{} // Flush() sends ack channel; flushLoop closes it when done
+	stopCh    chan struct{}      // signals flushLoop to stop (never receives data)
+	done      chan struct{}      // closed when flushLoop exits
+	closeMu   sync.Mutex        // serializes Close vs AppendEvent
+	closed    bool               // true after Close() initiates shutdown (guarded by closeMu)
+	closeOnce sync.Once
+	inflight  sync.WaitGroup    // tracks in-flight AppendEvent calls for clean shutdown
+	lastErr   atomic.Value      // stores errHolder for health checks
 }
+
+// errHolder wraps an error for atomic.Value (which cannot store nil interfaces).
+type errHolder struct{ err error }
 
 // MCPTool represents a registered MCP tool.
 type MCPTool struct {
@@ -45,7 +88,33 @@ type MCPServerSummary struct {
 	DetectionCount int       `json:"detection_count"`
 }
 
-func Open(path string) (*Store, error) {
+// BatchConfig controls the async event write behavior.
+type BatchConfig struct {
+	BatchSize     int           // events per flush (default 64)
+	FlushInterval time.Duration // max time before flush (default 50ms)
+	ChannelSize   int           // async buffer capacity (default 4096)
+}
+
+func (c BatchConfig) withDefaults() BatchConfig {
+	if c.BatchSize <= 0 {
+		c.BatchSize = defaultBatchSize
+	}
+	if c.FlushInterval <= 0 {
+		c.FlushInterval = defaultFlushInterval
+	}
+	if c.ChannelSize <= 0 {
+		c.ChannelSize = defaultChannelSize
+	}
+	return c
+}
+
+func Open(path string, opts ...BatchConfig) (*Store, error) {
+	cfg := BatchConfig{}
+	if len(opts) > 0 {
+		cfg = opts[0]
+	}
+	cfg = cfg.withDefaults()
+
 	if path == "" {
 		return nil, fmt.Errorf("sqlite path is empty")
 	}
@@ -59,15 +128,82 @@ func Open(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 
-	s := &Store{db: db}
+	s := &Store{
+		db:      db,
+		eventCh: make(chan eventPayload, cfg.ChannelSize),
+		flushCh: make(chan chan struct{}, 1),
+		stopCh:  make(chan struct{}),
+		done:    make(chan struct{}),
+	}
 	if err := s.migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	go s.flushLoop(cfg.BatchSize, cfg.FlushInterval)
 	return s, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	s.closeOnce.Do(func() {
+		s.closeMu.Lock()
+		s.closed = true
+		s.closeMu.Unlock()
+		s.inflight.Wait()
+		close(s.stopCh)
+	})
+	<-s.done
+	return s.db.Close()
+}
+
+// Flush blocks until all pending events have been written to the database.
+// Safe to call concurrently and during shutdown.
+func (s *Store) Flush() {
+	s.closeMu.Lock()
+	closed := s.closed
+	s.closeMu.Unlock()
+	if closed {
+		return
+	}
+	ack := make(chan struct{})
+	select {
+	case s.flushCh <- ack:
+		select {
+		case <-ack:
+		case <-s.done:
+		}
+	case <-s.done:
+	}
+}
+
+// LastWriteError returns the last error from a batch write, or nil.
+func (s *Store) LastWriteError() error {
+	v := s.lastErr.Load()
+	if v == nil {
+		return nil
+	}
+	return v.(errHolder).err
+}
+
+// FlushContext is like Flush but respects context cancellation.
+func (s *Store) FlushContext(ctx context.Context) {
+	s.closeMu.Lock()
+	closed := s.closed
+	s.closeMu.Unlock()
+	if closed {
+		return
+	}
+	ack := make(chan struct{})
+	select {
+	case s.flushCh <- ack:
+		select {
+		case <-ack:
+		case <-s.done:
+		case <-ctx.Done():
+		}
+	case <-s.done:
+	case <-ctx.Done():
+	}
+}
 
 func (s *Store) migrate(ctx context.Context) error {
 	stmts := []string{
@@ -152,6 +288,15 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
+		return fmt.Errorf("store closed")
+	}
+	s.inflight.Add(1)
+	s.closeMu.Unlock()
+	defer s.inflight.Done()
+
 	if ev.ID == "" {
 		return fmt.Errorf("event missing id")
 	}
@@ -170,34 +315,160 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 		policyRule = ev.Policy.Rule
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	p := eventPayload{
+		id:                ev.ID,
+		tsNanos:           ev.Timestamp.UTC().UnixNano(),
+		sessionID:         ev.SessionID,
+		commandID:         ev.CommandID,
+		evType:            ev.Type,
+		pid:               ev.PID,
+		policyDecision:    policyDecision,
+		effectiveDecision: effectiveDecision,
+		policyRule:        policyRule,
+		path:              ev.Path,
+		domain:            ev.Domain,
+		remote:            ev.Remote,
+		operation:         ev.Operation,
+		payloadJSON:       string(b),
+	}
+
+	select {
+	case s.eventCh <- p:
+		return nil
+	case <-s.done:
+		return fmt.Errorf("store closed")
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		// Channel full — block briefly to absorb bursts before dropping.
+		select {
+		case s.eventCh <- p:
+			return nil
+		case <-s.done:
+			return fmt.Errorf("store closed")
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+			slog.Warn("sqlite: event channel full, dropping event", "event_id", ev.ID, "type", ev.Type)
+			return fmt.Errorf("event channel full")
+		}
+	}
+}
+
+// flushLoop drains events from the channel and writes them in batched transactions.
+// It exits when stopCh is closed, after draining any remaining events from eventCh.
+func (s *Store) flushLoop(batchSize int, flushInterval time.Duration) {
+	defer close(s.done)
+
+	batch := make([]eventPayload, 0, batchSize)
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case p := <-s.eventCh:
+			batch = append(batch, p)
+			if len(batch) >= batchSize {
+				s.flushBatch(batch)
+				batch = batch[:0]
+			}
+		case ack := <-s.flushCh:
+			// Drain all pending events from the channel.
+			s.drainInto(&batch)
+			if len(batch) > 0 {
+				s.flushBatch(batch)
+				batch = batch[:0]
+			}
+			close(ack)
+		case <-ticker.C:
+			if len(batch) > 0 {
+				s.flushBatch(batch)
+				batch = batch[:0]
+			}
+		case <-s.stopCh:
+			// Shutdown: drain remaining events and exit.
+			s.drainInto(&batch)
+			if len(batch) > 0 {
+				s.flushBatch(batch)
+			}
+			return
+		}
+	}
+}
+
+// drainInto non-blockingly moves all pending events from eventCh into batch.
+func (s *Store) drainInto(batch *[]eventPayload) {
+	for {
+		select {
+		case p := <-s.eventCh:
+			*batch = append(*batch, p)
+		default:
+			return
+		}
+	}
+}
+
+// flushBatch writes a batch of events in a single transaction.
+func (s *Store) flushBatch(batch []eventPayload) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		slog.Error("sqlite: begin batch tx", "error", err, "count", len(batch))
+		s.lastErr.Store(errHolder{err})
+		return
+	}
+
+	stmt, err := tx.Prepare(`
 		INSERT INTO events(
 			event_id, ts_unix_ns, session_id, command_id, type, pid,
 			policy_decision, effective_decision, policy_rule,
 			path, domain, remote, operation, payload_json
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?);`,
-		ev.ID,
-		ev.Timestamp.UTC().UnixNano(),
-		ev.SessionID,
-		nullable(ev.CommandID),
-		ev.Type,
-		nullableInt(ev.PID),
-		nullable(policyDecision),
-		nullable(effectiveDecision),
-		nullable(policyRule),
-		nullable(ev.Path),
-		nullable(ev.Domain),
-		nullable(ev.Remote),
-		nullable(ev.Operation),
-		string(b),
-	)
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?);`)
 	if err != nil {
-		return fmt.Errorf("insert event: %w", err)
+		slog.Error("sqlite: prepare batch stmt", "error", err)
+		s.lastErr.Store(errHolder{err})
+		_ = tx.Rollback()
+		return
 	}
-	return nil
+	defer stmt.Close()
+
+	var hadRowErr bool
+	for _, p := range batch {
+		_, err := stmt.Exec(
+			p.id,
+			p.tsNanos,
+			p.sessionID,
+			nullable(p.commandID),
+			p.evType,
+			nullableInt(p.pid),
+			nullable(p.policyDecision),
+			nullable(p.effectiveDecision),
+			nullable(p.policyRule),
+			nullable(p.path),
+			nullable(p.domain),
+			nullable(p.remote),
+			nullable(p.operation),
+			p.payloadJSON,
+		)
+		if err != nil {
+			slog.Warn("sqlite: batch insert event", "error", err, "event_id", p.id)
+			s.lastErr.Store(errHolder{err})
+			hadRowErr = true
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		slog.Error("sqlite: commit batch tx", "error", err, "count", len(batch))
+		s.lastErr.Store(errHolder{err})
+	} else if !hadRowErr {
+		s.lastErr.Store(errHolder{}) // clear only when fully successful
+	}
 }
 
 func (s *Store) QueryEvents(ctx context.Context, q types.EventQuery) ([]types.Event, error) {
+	// Flush pending async writes to ensure read-after-write consistency.
+	// Respect the caller's context to avoid blocking on cancelled queries.
+	s.FlushContext(ctx)
+
 	where := []string{"1=1"}
 	var args []any
 

@@ -143,7 +143,11 @@ func New(cfg *config.Config) (*Server, error) {
 	if sqlitePath == "" {
 		sqlitePath = filepath.Join(filepath.Dir(cfg.Sessions.BaseDir), "events.db")
 	}
-	db, err := sqlite.Open(sqlitePath)
+	db, err := sqlite.Open(sqlitePath, sqlite.BatchConfig{
+		BatchSize:     cfg.Audit.Storage.BatchSize,
+		FlushInterval: cfg.Audit.Storage.FlushInterval,
+		ChannelSize:   cfg.Audit.Storage.ChannelSize,
+	})
 	if err != nil {
 		return nil, err
 	}

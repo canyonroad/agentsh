@@ -156,7 +156,10 @@ type AuditConfig struct {
 }
 
 type AuditStorageConfig struct {
-	SQLitePath string `yaml:"sqlite_path"`
+	SQLitePath    string        `yaml:"sqlite_path"`
+	BatchSize     int           `yaml:"batch_size"`      // events per batch (default 64)
+	FlushInterval time.Duration `yaml:"flush_interval"`  // max time before flush (default 50ms)
+	ChannelSize   int           `yaml:"channel_size"`    // async buffer capacity (default 4096)
 }
 
 type AuditWebhookConfig struct {
@@ -355,7 +358,7 @@ type SandboxConfig struct {
 // Validate checks cross-field constraints in the sandbox configuration.
 func (c *SandboxConfig) Validate() error {
 	if c.Ptrace.Enabled && c.Seccomp.Execve.Enabled {
-		return fmt.Errorf("sandbox.ptrace and sandbox.seccomp.execve are mutually exclusive")
+		return fmt.Errorf("sandbox.ptrace and sandbox.seccomp.execve are mutually exclusive (hybrid mode not yet implemented)")
 	}
 	if c.Ptrace.Enabled && c.UnixSockets.Enabled != nil && *c.UnixSockets.Enabled {
 		return fmt.Errorf("sandbox.ptrace and sandbox.unix_sockets are mutually exclusive")
