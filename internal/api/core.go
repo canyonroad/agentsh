@@ -118,11 +118,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		return earlyReturn()
 	}
 
-	// Ptrace mode: skip wrapper, ptrace handles everything directly.
-	// Even in hybrid mode (ptrace + seccomp.execve), the wrapper is not used
-	// because ptrace and the wrapper cannot safely co-manage the same process.
-	// Instead, Validate() disables ptrace execve tracing so execve is unmonitored
-	// by ptrace; a future integration could add seccomp execve via a different path.
+	// Ptrace mode: no wrapper, no seccomp notify sockets
 	if a.ptraceTracer != nil {
 		return earlyReturn()
 	}

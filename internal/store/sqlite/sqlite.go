@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agentsh/agentsh/pkg/types"
@@ -46,9 +48,11 @@ type Store struct {
 
 	// Async event batching.
 	eventCh  chan eventPayload
-	flushCh  chan chan struct{} // send a channel to request flush; goroutine closes it when done
-	done     chan struct{}      // closed when flush goroutine exits
-	closedCh chan struct{}      // closed on first Close() call to prevent double-close
+	flushCh  chan chan struct{} // Flush() sends ack channel; flushLoop closes it when done
+	stopCh   chan struct{}      // signals flushLoop to stop (never receives data)
+	done     chan struct{}      // closed when flushLoop exits
+	closed   atomic.Bool        // true after Close() initiates shutdown
+	closeOnce sync.Once
 }
 
 // MCPTool represents a registered MCP tool.
@@ -119,11 +123,11 @@ func Open(path string, opts ...BatchConfig) (*Store, error) {
 	db.SetMaxOpenConns(1)
 
 	s := &Store{
-		db:       db,
-		eventCh:  make(chan eventPayload, cfg.ChannelSize),
-		flushCh:  make(chan chan struct{}, 1),
-		done:     make(chan struct{}),
-		closedCh: make(chan struct{}),
+		db:      db,
+		eventCh: make(chan eventPayload, cfg.ChannelSize),
+		flushCh: make(chan chan struct{}, 1),
+		stopCh:  make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 	if err := s.migrate(context.Background()); err != nil {
 		_ = db.Close()
@@ -134,29 +138,31 @@ func Open(path string, opts ...BatchConfig) (*Store, error) {
 }
 
 func (s *Store) Close() error {
-	select {
-	case <-s.closedCh:
-		// Already closed — just wait for goroutine and close db.
-		<-s.done
-		return s.db.Close()
-	default:
-		close(s.closedCh)
-	}
-	close(s.eventCh)
-	<-s.done // wait for flush goroutine to drain and exit
+	s.closeOnce.Do(func() {
+		s.closed.Store(true)
+		close(s.stopCh) // signal flushLoop to drain and exit
+	})
+	<-s.done // wait for flushLoop to finish
 	return s.db.Close()
 }
 
 // Flush blocks until all pending events have been written to the database.
+// Safe to call concurrently and during shutdown.
 func (s *Store) Flush() {
-	select {
-	case <-s.closedCh:
-		return // already closed
-	default:
+	if s.closed.Load() {
+		return
 	}
 	ack := make(chan struct{})
-	s.flushCh <- ack
-	<-ack
+	select {
+	case s.flushCh <- ack:
+		// Wait for flushLoop to acknowledge, or bail if it exits.
+		select {
+		case <-ack:
+		case <-s.done:
+		}
+	case <-s.done:
+		// flushLoop already exited
+	}
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -242,6 +248,9 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
+	if s.closed.Load() {
+		return fmt.Errorf("store closed")
+	}
 	if ev.ID == "" {
 		return fmt.Errorf("event missing id")
 	}
@@ -278,8 +287,6 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	}
 
 	select {
-	case <-s.closedCh:
-		return fmt.Errorf("store closed")
 	case s.eventCh <- p:
 		return nil
 	default:
@@ -290,6 +297,7 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 }
 
 // flushLoop drains events from the channel and writes them in batched transactions.
+// It exits when stopCh is closed, after draining any remaining events from eventCh.
 func (s *Store) flushLoop(batchSize int, flushInterval time.Duration) {
 	defer close(s.done)
 
@@ -299,37 +307,15 @@ func (s *Store) flushLoop(batchSize int, flushInterval time.Duration) {
 
 	for {
 		select {
-		case p, ok := <-s.eventCh:
-			if !ok {
-				// Channel closed — flush remaining and exit.
-				if len(batch) > 0 {
-					s.flushBatch(batch)
-				}
-				return
-			}
+		case p := <-s.eventCh:
 			batch = append(batch, p)
 			if len(batch) >= batchSize {
 				s.flushBatch(batch)
 				batch = batch[:0]
 			}
 		case ack := <-s.flushCh:
-			// Drain all pending events from the channel first.
-		drain:
-			for {
-				select {
-				case p, ok := <-s.eventCh:
-					if !ok {
-						if len(batch) > 0 {
-							s.flushBatch(batch)
-						}
-						close(ack)
-						return
-					}
-					batch = append(batch, p)
-				default:
-					break drain
-				}
-			}
+			// Drain all pending events from the channel.
+			s.drainInto(&batch)
 			if len(batch) > 0 {
 				s.flushBatch(batch)
 				batch = batch[:0]
@@ -340,6 +326,25 @@ func (s *Store) flushLoop(batchSize int, flushInterval time.Duration) {
 				s.flushBatch(batch)
 				batch = batch[:0]
 			}
+		case <-s.stopCh:
+			// Shutdown: drain remaining events and exit.
+			s.drainInto(&batch)
+			if len(batch) > 0 {
+				s.flushBatch(batch)
+			}
+			return
+		}
+	}
+}
+
+// drainInto non-blockingly moves all pending events from eventCh into batch.
+func (s *Store) drainInto(batch *[]eventPayload) {
+	for {
+		select {
+		case p := <-s.eventCh:
+			*batch = append(*batch, p)
+		default:
+			return
 		}
 	}
 }
