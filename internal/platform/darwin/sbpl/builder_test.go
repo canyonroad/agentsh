@@ -201,6 +201,33 @@ func TestDenyProcessExec_Literal(t *testing.T) {
 	}
 }
 
+func TestAllowNetworkOutbound_InvalidProto_Dropped(t *testing.T) {
+	p := New()
+	p.AllowNetworkOutbound("TCP", "*:443")  // uppercase = invalid
+	p.AllowNetworkOutbound("t1p", "*:80")   // digit = invalid
+	p.AllowNetworkOutbound("tcp)", "*:80")  // paren = invalid
+	out, _ := p.Build()
+	if strings.Contains(out, "network-outbound") {
+		t.Error("invalid proto should be silently dropped, but found network-outbound rule")
+	}
+}
+
+func TestAllowFileRead_LiteralWithHashQuotePrefix(t *testing.T) {
+	p := New()
+	p.AllowFileRead(Literal, `/#"not-a-regex`)
+	out, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// Should be escaped, not passed through as regex
+	if strings.Contains(out, `(literal #"`) {
+		t.Error("literal path starting with #\" should be quoted, not passed through as regex")
+	}
+	if !strings.Contains(out, `(literal "`) {
+		t.Error("literal path should be properly quoted with double quotes")
+	}
+}
+
 func TestDenyBeforeAllow_ExecOrdering(t *testing.T) {
 	p := New()
 	p.AllowProcessExec(Subpath, "/usr/bin")

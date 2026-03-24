@@ -138,6 +138,72 @@ func TestConsumeToken_ValidToken(t *testing.T) {
 	}
 }
 
+func TestConsumeToken_InvalidToken(t *testing.T) {
+	_, err := ConsumeToken("this-is-not-a-valid-token")
+	if err == nil {
+		t.Error("ConsumeToken with invalid token should return error")
+	}
+}
+
+func TestConsumeToken_EmptyString(t *testing.T) {
+	_, err := ConsumeToken("")
+	if err == nil {
+		t.Error("ConsumeToken with empty string should return error")
+	}
+}
+
+func TestIssue_Consume_Revoke_FullLifecycle(t *testing.T) {
+	mgr := NewManager()
+	defer mgr.RevokeAll()
+
+	dir := t.TempDir()
+
+	// Issue
+	tok, err := mgr.Issue(dir, ReadOnly)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// Consume the token
+	handle, err := ConsumeToken(tok.Value)
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	if handle < 0 {
+		t.Fatalf("handle should be >= 0, got %d", handle)
+	}
+
+	// Revoke should still work (manager tracks by path, not by consumption)
+	if err := mgr.Revoke(dir); err != nil {
+		t.Fatalf("Revoke after consume: %v", err)
+	}
+
+	// Should be removed
+	if len(mgr.ActiveTokens()) != 0 {
+		t.Error("token should be removed after revoke")
+	}
+}
+
+func TestTokenValues_ExcludesRevokedTokens(t *testing.T) {
+	mgr := NewManager()
+	defer mgr.RevokeAll()
+
+	d1 := t.TempDir()
+	d2 := t.TempDir()
+	mgr.Issue(d1, ReadOnly)
+	mgr.Issue(d2, ReadWrite)
+
+	if len(mgr.TokenValues()) != 2 {
+		t.Fatalf("expected 2 token values, got %d", len(mgr.TokenValues()))
+	}
+
+	mgr.Revoke(d1)
+	values := mgr.TokenValues()
+	if len(values) != 1 {
+		t.Errorf("after revoking one, expected 1 token value, got %d", len(values))
+	}
+}
+
 func TestTokenValues_ReturnsStrings(t *testing.T) {
 	m := NewManager()
 	dir1 := t.TempDir()

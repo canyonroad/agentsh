@@ -201,6 +201,124 @@ func TestCompileDarwinSandbox_MachEssentials(t *testing.T) {
 	}
 }
 
+func TestCompileDarwinSandbox_NetworkWithSpecificPorts(t *testing.T) {
+	pol := &policy.Policy{
+		NetworkRules: []policy.NetworkRule{
+			{Decision: "allow", Ports: []int{443, 8080}},
+		},
+	}
+	cfg, err := CompileDarwinSandbox(pol, "/workspace")
+	if err != nil {
+		t.Fatalf("CompileDarwinSandbox: %v", err)
+	}
+	if !strings.Contains(cfg.Profile, "443") {
+		t.Error("should contain port 443 rule")
+	}
+	if !strings.Contains(cfg.Profile, "8080") {
+		t.Error("should contain port 8080 rule")
+	}
+	if strings.Contains(cfg.Profile, "(allow network*)") {
+		t.Error("should NOT have blanket network allow when specific ports given")
+	}
+}
+
+func TestCompileDarwinSandbox_NetworkWithDomains(t *testing.T) {
+	pol := &policy.Policy{
+		NetworkRules: []policy.NetworkRule{
+			{Decision: "allow", Domains: []string{"github.com"}},
+		},
+	}
+	cfg, err := CompileDarwinSandbox(pol, "/workspace")
+	if err != nil {
+		t.Fatalf("CompileDarwinSandbox: %v", err)
+	}
+	// Domain rules should fall back to allow-all (SBPL can't filter by domain)
+	if !strings.Contains(cfg.Profile, "(allow network*)") {
+		t.Error("domain rules should trigger allow-all network")
+	}
+}
+
+func TestCompileDarwinSandbox_MixedAllowDenyFileRules(t *testing.T) {
+	pol := &policy.Policy{
+		FileRules: []policy.FileRule{
+			{Paths: []string{"/allowed"}, Operations: []string{"read"}, Decision: "allow"},
+			{Paths: []string{"/denied"}, Operations: []string{"read"}, Decision: "deny"},
+		},
+	}
+	cfg, err := CompileDarwinSandbox(pol, "/workspace")
+	if err != nil {
+		t.Fatalf("CompileDarwinSandbox: %v", err)
+	}
+	if !strings.Contains(cfg.Profile, "/allowed") {
+		t.Error("allow rule should be in profile")
+	}
+	if strings.Contains(cfg.Profile, "/denied") {
+		t.Error("deny rule should NOT be in profile (handled by deny-default)")
+	}
+}
+
+func TestClassifyPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want string // "subpath" or "literal"
+	}{
+		{"/dir/*", "subpath"},
+		{"/dir/", "subpath"},
+		{"/dir/subdir", "subpath"},       // no extension = directory
+		{"/dir/file.txt", "literal"},
+		{"/dir/file.tar.gz", "literal"},
+		{"/usr/bin/python3", "subpath"},   // no extension = directory heuristic
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := classifyPath(tt.path)
+			// sbpl.Subpath == 1, sbpl.Literal == 0
+			if tt.want == "subpath" && got != 1 {
+				t.Errorf("classifyPath(%q) = %d, want Subpath (1)", tt.path, got)
+			}
+			if tt.want == "literal" && got != 0 {
+				t.Errorf("classifyPath(%q) = %d, want Literal (0)", tt.path, got)
+			}
+		})
+	}
+}
+
+func TestResolveCommand_AbsolutePath(t *testing.T) {
+	got := resolveCommand("/usr/bin/git")
+	if got != "/usr/bin/git" {
+		t.Errorf("resolveCommand(/usr/bin/git) = %q, want /usr/bin/git", got)
+	}
+}
+
+func TestResolveCommand_NotFound_Fallback(t *testing.T) {
+	got := resolveCommand("nonexistent-binary-xyz-12345")
+	if got != "/usr/bin/nonexistent-binary-xyz-12345" {
+		t.Errorf("resolveCommand(nonexistent) = %q, want /usr/bin/ prefix fallback", got)
+	}
+}
+
+func TestContainsAny(t *testing.T) {
+	tests := []struct {
+		name   string
+		slice  []string
+		values []string
+		want   bool
+	}{
+		{"match", []string{"read", "write"}, []string{"write", "*"}, true},
+		{"no match", []string{"read"}, []string{"write", "*"}, false},
+		{"wildcard match", []string{"*"}, []string{"write", "*"}, true},
+		{"empty slice", []string{}, []string{"write"}, false},
+		{"empty values", []string{"read"}, []string{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containsAny(tt.slice, tt.values...); got != tt.want {
+				t.Errorf("containsAny(%v, %v...) = %v, want %v", tt.slice, tt.values, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCompileDarwinSandbox_DenyFileRuleOmitted(t *testing.T) {
 	pol := &policy.Policy{
 		FileRules: []policy.FileRule{
