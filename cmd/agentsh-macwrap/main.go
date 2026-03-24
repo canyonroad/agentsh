@@ -27,6 +27,9 @@ void free_error(char *errorbuf) {
     // The error buffer is just malloc'd memory, so free() works
     free(errorbuf);
 }
+
+// sandbox_extension_consume consumes an extension token.
+extern int64_t sandbox_extension_consume(const char *token);
 */
 import "C"
 
@@ -51,7 +54,16 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	profile := generateProfile(cfg)
+	// Consume extension tokens before sandbox_init
+	if len(cfg.ExtensionTokens) > 0 {
+		consumeTokens(cfg.ExtensionTokens)
+	}
+
+	// Use compiled profile if provided, otherwise fall back to legacy generation
+	profile := cfg.CompiledProfile
+	if profile == "" {
+		profile = generateProfile(cfg)
+	}
 
 	if err := applySandbox(profile); err != nil {
 		log.Fatalf("apply sandbox: %v", err)
@@ -78,4 +90,17 @@ func applySandbox(profile string) error {
 		return fmt.Errorf("sandbox_init failed (rc=%d): %s", rc, errMsg)
 	}
 	return nil
+}
+
+// consumeTokens consumes sandbox extension tokens before sandbox_init
+// so the child process inherits the consumed extensions through exec().
+func consumeTokens(tokens []string) {
+	for _, token := range tokens {
+		cToken := C.CString(token)
+		handle := C.sandbox_extension_consume(cToken)
+		C.free(unsafe.Pointer(cToken))
+		if handle == -1 {
+			log.Printf("warning: failed to consume extension token (continuing)")
+		}
+	}
 }
