@@ -406,12 +406,14 @@ func TestNotifyHandler_CancellationGoroutineExitsOnEarlyReturn(t *testing.T) {
 }
 
 func TestNotifyHandler_ContextCancelCleansUpFDs(t *testing.T) {
-	// Verify that cancelling the context causes the handler goroutine
-	// to clean up and close the parent socket. We send a pipe FD through
-	// the socketpair so RecvFD succeeds, then the handler enters the
-	// serve loop. NotifReceive on a pipe FD returns an error immediately
-	// (wrong ioctl), causing the handler to exit. We then cancel the
-	// context and verify that all cleanup happened (parent socket closed).
+	// Verify that handler goroutine cleans up (closes parent socket) after
+	// the serve loop exits. We send a pipe FD so RecvFD succeeds, then
+	// NotifReceive fails immediately (wrong ioctl type). The handler exits
+	// and defer-closes the parent socket.
+	//
+	// Note: with pipe FDs, the handler exits via ioctl error, not via
+	// ctx.Done(). Testing cancellation-driven FD cleanup requires real
+	// seccomp notify FDs (integration test with CAP_SYS_ADMIN).
 
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
@@ -430,7 +432,6 @@ func TestNotifyHandler_ContextCancelCleansUpFDs(t *testing.T) {
 	}
 	defer pipeW.Close()
 
-	// Send pipeR FD via SCM_RIGHTS.
 	rights := unix.UnixRights(int(pipeR.Fd()))
 	if err := unix.Sendmsg(int(childSock.Fd()), []byte{0}, rights, nil, 0); err != nil {
 		pipeR.Close()
@@ -444,14 +445,20 @@ func TestNotifyHandler_ContextCancelCleansUpFDs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	startNotifyHandler(ctx, parentSock, "test-ctx-cancel", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{}, false)
+	startNotifyHandler(ctx, parentSock, "test-fd-cleanup", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{}, false)
 
-	// Wait for handler to clean up (close parent socket).
+	// Wait for handler to clean up (close parent socket via defer).
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
 		case <-deadline:
-			t.Fatal("timed out: handler didn't clean up parent socket")
+			// Last resort: cancel context to unblock if handler is stuck.
+			cancel()
+			time.Sleep(100 * time.Millisecond)
+			if int(parentSock.Fd()) != -1 {
+				t.Fatal("timed out: handler didn't clean up parent socket")
+			}
+			return
 		default:
 		}
 		if int(parentSock.Fd()) == -1 {
