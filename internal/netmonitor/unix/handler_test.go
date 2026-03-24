@@ -59,8 +59,10 @@ func (e *handlerTestEmitter) AppendEvent(_ context.Context, _ types.Event) error
 func (e *handlerTestEmitter) Publish(_ types.Event)                              {}
 
 func TestServeNotifyWithExecve_ExitsOnCancelledContext(t *testing.T) {
-	// ServeNotifyWithExecve should exit immediately when given an
-	// already-cancelled context, even with a valid FD.
+	// With a pre-cancelled context, the select { case <-ctx.Done(): return }
+	// at the top of the first loop iteration should fire immediately,
+	// BEFORE NotifReceive is ever called. We verify this by checking the
+	// function returns in < 50ms (the EAGAIN retry path sleeps 10ms).
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
@@ -71,6 +73,7 @@ func TestServeNotifyWithExecve_ExitsOnCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel before calling
 
+	start := time.Now()
 	done := make(chan struct{})
 	go func() {
 		ServeNotifyWithExecve(ctx, r, "test-cancelled", nil, &handlerTestEmitter{}, nil, nil)
@@ -79,7 +82,10 @@ func TestServeNotifyWithExecve_ExitsOnCancelledContext(t *testing.T) {
 
 	select {
 	case <-done:
-		// Good — exited promptly.
+		elapsed := time.Since(start)
+		if elapsed > 50*time.Millisecond {
+			t.Errorf("took %v — likely went through NotifReceive instead of ctx.Done() path", elapsed)
+		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("ServeNotifyWithExecve did not exit with cancelled context")
 	}
@@ -93,6 +99,7 @@ func TestServeNotifyWithExecve_ExitsOnNonSeccompFD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
 	}
+	defer r.Close()
 	defer w.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -113,7 +120,7 @@ func TestServeNotifyWithExecve_ExitsOnNonSeccompFD(t *testing.T) {
 }
 
 func TestServeNotify_ExitsOnCancelledContext(t *testing.T) {
-	// Same test for the non-execve ServeNotify variant.
+	// Same pre-cancelled context test for the non-execve ServeNotify variant.
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
@@ -124,6 +131,7 @@ func TestServeNotify_ExitsOnCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
+	start := time.Now()
 	done := make(chan struct{})
 	go func() {
 		ServeNotify(ctx, r, "test-cancelled", nil, &handlerTestEmitter{})
@@ -132,6 +140,10 @@ func TestServeNotify_ExitsOnCancelledContext(t *testing.T) {
 
 	select {
 	case <-done:
+		elapsed := time.Since(start)
+		if elapsed > 50*time.Millisecond {
+			t.Errorf("took %v — likely went through NotifReceive instead of ctx.Done() path", elapsed)
+		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("ServeNotify did not exit with cancelled context")
 	}

@@ -406,9 +406,12 @@ func TestNotifyHandler_CancellationGoroutineExitsOnEarlyReturn(t *testing.T) {
 }
 
 func TestNotifyHandler_ContextCancelCleansUpFDs(t *testing.T) {
-	// Verify that cancelling the context causes the handler to clean up
-	// (close parent socket). This tests the path where RecvFD succeeds
-	// but the serve loop exits due to a non-seccomp FD.
+	// Verify that cancelling the context causes the handler goroutine
+	// to clean up and close the parent socket. We send a pipe FD through
+	// the socketpair so RecvFD succeeds, then the handler enters the
+	// serve loop. NotifReceive on a pipe FD returns an error immediately
+	// (wrong ioctl), causing the handler to exit. We then cancel the
+	// context and verify that all cleanup happened (parent socket closed).
 
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
@@ -421,8 +424,6 @@ func TestNotifyHandler_ContextCancelCleansUpFDs(t *testing.T) {
 	broker := &notifyMockEventBroker{}
 
 	// Send a pipe FD through the socketpair so RecvFD succeeds.
-	// The handler will try NotifReceive on the pipe, which fails (wrong ioctl)
-	// and exits the serve loop.
 	pipeR, pipeW, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
@@ -441,25 +442,19 @@ func TestNotifyHandler_ContextCancelCleansUpFDs(t *testing.T) {
 	childSock.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	startNotifyHandler(ctx, parentSock, "test-ctx-cancel", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{}, false)
 
-	// Wait for handler to exit (NotifReceive on pipe FD fails immediately).
+	// Wait for handler to clean up (close parent socket).
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
 		case <-deadline:
-			// Handler might be waiting — cancel context to unblock.
-			cancel()
-			time.Sleep(100 * time.Millisecond)
-			if int(parentSock.Fd()) != -1 {
-				t.Fatal("timed out: handler didn't clean up after context cancel")
-			}
-			return
+			t.Fatal("timed out: handler didn't clean up parent socket")
 		default:
 		}
 		if int(parentSock.Fd()) == -1 {
-			cancel()
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
