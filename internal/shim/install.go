@@ -24,6 +24,9 @@ type InstallShellShimOptions struct {
 	// through it (e.g., docker exec -i container sh -c "cat > /file").
 	// When set, InstallBash must also be true.
 	BashOnly bool
+
+	// Force writes /etc/agentsh/shim.conf with force=true after installing.
+	Force bool
 }
 
 // InstallShellShim installs the agentsh shell shim as /bin/sh (and optionally /bin/bash)
@@ -51,6 +54,15 @@ func InstallShellShim(opts InstallShellShimOptions) error {
 	if opts.InstallBash {
 		if err := installOne(root, "bash", shimBytes); err != nil {
 			return err
+		}
+	}
+	if opts.Force {
+		conf := ShimConf{
+			Force: true,
+			Raw:   map[string]string{"force": "true"},
+		}
+		if err := WriteShimConf(root, conf); err != nil {
+			return fmt.Errorf("write shim.conf: %w", err)
 		}
 	}
 	return nil

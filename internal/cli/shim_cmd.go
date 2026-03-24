@@ -29,6 +29,7 @@ func newShimInstallShellCmd() *cobra.Command {
 	var iUnderstand bool
 	var dryRun bool
 	var output string
+	var force bool
 
 	c := &cobra.Command{
 		Use:   "install-shell",
@@ -48,6 +49,7 @@ func newShimInstallShellCmd() *cobra.Command {
 				ShimPath:    shimPath,
 				InstallBash: bash || bashOnly,
 				BashOnly:    bashOnly,
+				Force:       force,
 			}
 			if dryRun {
 				p, err := shim.PlanInstallShellShim(opts)
@@ -68,6 +70,7 @@ func newShimInstallShellCmd() *cobra.Command {
 	c.Flags().BoolVar(&iUnderstand, "i-understand-this-modifies-the-host", false, "Allow modifying the host filesystem when --root=/")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "Show planned actions without modifying the filesystem")
 	c.Flags().StringVar(&output, "output", "shell", "Output format: shell|json")
+	c.Flags().BoolVar(&force, "force", false, "Write /etc/agentsh/shim.conf with force=true (enforces policy for non-interactive shells)")
 	return c
 }
 

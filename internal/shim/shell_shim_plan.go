@@ -40,6 +40,13 @@ func PlanInstallShellShim(opts InstallShellShimOptions) (*ShellShimPlan, error) 
 	if opts.InstallBash {
 		actions = append(actions, planInstallOne(root, "bash", shimBytes)...)
 	}
+	if opts.Force {
+		actions = append(actions, ShellShimAction{
+			Op:   "write",
+			Path: ShimConfPath(root),
+			Note: "write shim.conf with force=true",
+		})
+	}
 	return &ShellShimPlan{Root: root, Shim: opts.ShimPath, Actions: actions}, nil
 }
 
