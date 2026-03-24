@@ -142,6 +142,70 @@ func (p *Profile) AllowNetworkOutbound(proto, hostPort string) {
 	})
 }
 
+// AllowSystemEssentials adds all rules needed for basic macOS process
+// operation: process ops, system libraries, dev files, common tool paths,
+// TTY access, temp files, and IPC.
+func (p *Profile) AllowSystemEssentials() {
+	// Process operations
+	p.rules = append(p.rules,
+		rule{kind: kindOther, sbpl: "(allow process-fork)"},
+		rule{kind: kindOther, sbpl: "(allow signal (target self))"},
+		rule{kind: kindOther, sbpl: "(allow sysctl-read)"},
+	)
+
+	// Dev files + system libraries (combined file-read* rule)
+	p.rules = append(p.rules, rule{
+		kind: kindFileAllow,
+		sbpl: "(allow file-read*\n" +
+			"    (subpath \"/usr/lib\")\n" +
+			"    (subpath \"/usr/share\")\n" +
+			"    (subpath \"/System/Library\")\n" +
+			"    (subpath \"/Library/Frameworks\")\n" +
+			"    (subpath \"/private/var/db/dyld\")\n" +
+			"    (literal \"/dev/null\")\n" +
+			"    (literal \"/dev/random\")\n" +
+			"    (literal \"/dev/urandom\")\n" +
+			"    (literal \"/dev/zero\"))",
+	})
+
+	// Common tool paths (read-only)
+	p.rules = append(p.rules, rule{
+		kind: kindFileAllow,
+		sbpl: "(allow file-read*\n" +
+			"    (subpath \"/usr/bin\")\n" +
+			"    (subpath \"/usr/sbin\")\n" +
+			"    (subpath \"/bin\")\n" +
+			"    (subpath \"/sbin\")\n" +
+			"    (subpath \"/usr/local/bin\")\n" +
+			"    (subpath \"/opt/homebrew/bin\")\n" +
+			"    (subpath \"/opt/homebrew/Cellar\"))",
+	})
+
+	// TTY access
+	p.rules = append(p.rules, rule{
+		kind: kindFileAllow,
+		sbpl: "(allow file-read* file-write*\n" +
+			"    (regex #\"^/dev/ttys[0-9]+$\"#)\n" +
+			"    (regex #\"^/dev/pty[pqrs][0-9a-f]$\"#)\n" +
+			"    (literal \"/dev/tty\"))",
+	})
+
+	// Temp files
+	p.rules = append(p.rules, rule{
+		kind: kindFileAllow,
+		sbpl: "(allow file-read* file-write*\n" +
+			"    (subpath \"/private/tmp\")\n" +
+			"    (subpath \"/tmp\")\n" +
+			"    (subpath \"/var/folders\"))",
+	})
+
+	// IPC
+	p.rules = append(p.rules,
+		rule{kind: kindOther, sbpl: "(allow ipc-posix*)"},
+		rule{kind: kindOther, sbpl: "(allow mach-register)"},
+	)
+}
+
 // Build renders the accumulated rules into a complete SBPL profile string.
 // It returns an error if any non-regex path is relative.
 func (p *Profile) Build() (string, error) {

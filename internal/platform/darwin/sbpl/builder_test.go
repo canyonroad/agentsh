@@ -301,3 +301,75 @@ func TestAllowNetworkOutbound(t *testing.T) {
 		t.Errorf("Build() output should contain %q, got:\n%s", expected, out)
 	}
 }
+
+// --- AllowSystemEssentials tests ---
+
+func TestAllowSystemEssentials_ContainsRequiredPaths(t *testing.T) {
+	p := New()
+	p.AllowSystemEssentials()
+	out, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	required := []string{
+		// Dev files
+		`(literal "/dev/null")`,
+		`(literal "/dev/random")`,
+		`(literal "/dev/urandom")`,
+		`(literal "/dev/zero")`,
+		// System libs
+		`(subpath "/usr/lib")`,
+		`(subpath "/usr/share")`,
+		`(subpath "/System/Library")`,
+		`(subpath "/Library/Frameworks")`,
+		`(subpath "/private/var/db/dyld")`,
+		// Process ops
+		`(allow process-fork)`,
+		`(allow signal (target self))`,
+		`(allow sysctl-read)`,
+		// TTY
+		`(literal "/dev/tty")`,
+		// Tool paths
+		`(subpath "/usr/bin")`,
+		`(subpath "/usr/sbin")`,
+		`(subpath "/bin")`,
+		`(subpath "/sbin")`,
+		`(subpath "/usr/local/bin")`,
+		`(subpath "/opt/homebrew/bin")`,
+		`(subpath "/opt/homebrew/Cellar")`,
+		// Temp
+		`(subpath "/tmp")`,
+		`(subpath "/private/tmp")`,
+		`(subpath "/var/folders")`,
+		// IPC
+		`(allow ipc-posix*)`,
+		`(allow mach-register)`,
+	}
+
+	for _, s := range required {
+		if !strings.Contains(out, s) {
+			t.Errorf("AllowSystemEssentials output missing %q", s)
+		}
+	}
+}
+
+func TestAllowSystemEssentials_ContainsTTYRegex(t *testing.T) {
+	p := New()
+	p.AllowSystemEssentials()
+	out, err := p.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	ttyPatterns := []string{
+		`^/dev/ttys[0-9]+$`,
+		`^/dev/pty[pqrs][0-9a-f]$`,
+	}
+
+	for _, pat := range ttyPatterns {
+		if !strings.Contains(out, pat) {
+			t.Errorf("AllowSystemEssentials output missing TTY regex %q", pat)
+		}
+	}
+}
