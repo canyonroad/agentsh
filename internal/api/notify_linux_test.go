@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -347,6 +348,119 @@ func TestNotifyHandlerRecover_BlockingBroker_BoundedReturn(t *testing.T) {
 		case <-deadline:
 			t.Fatal("timed out waiting for store event")
 		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestNotifyHandler_CancellationGoroutineExitsOnEarlyReturn(t *testing.T) {
+	// Verify that the cancellation goroutine (which closes the notify FD on
+	// ctx.Done) doesn't leak when the handler exits early (e.g., RecvFD fails).
+	// The handlerDone channel should signal the cancellation goroutine to exit
+	// even though the context is never cancelled.
+
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	parentSock := os.NewFile(uintptr(fds[0]), "parent")
+	writeSock := os.NewFile(uintptr(fds[1]), "child")
+
+	store := &notifyMockEventStore{}
+	broker := &notifyMockEventBroker{}
+
+	// Close write end immediately so RecvFD fails → handler exits early.
+	writeSock.Close()
+
+	// Use a context that is NEVER cancelled — the cancellation goroutine
+	// must exit via the handlerDone channel, not ctx.Done().
+	ctx := context.Background()
+
+	goroutinesBefore := runtime.NumGoroutine()
+
+	startNotifyHandler(ctx, parentSock, "test-cancel-goroutine", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{}, false)
+
+	// Wait for handler goroutine to exit.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for handler goroutine to exit")
+		default:
+		}
+		if int(parentSock.Fd()) == -1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Allow goroutines to settle.
+	time.Sleep(50 * time.Millisecond)
+
+	goroutinesAfter := runtime.NumGoroutine()
+	// Tolerate ±2 for GC/runtime goroutines.
+	if goroutinesAfter > goroutinesBefore+2 {
+		t.Errorf("goroutine leak: before=%d after=%d (expected ≤%d)",
+			goroutinesBefore, goroutinesAfter, goroutinesBefore+2)
+	}
+}
+
+func TestNotifyHandler_ContextCancelCleansUpFDs(t *testing.T) {
+	// Verify that cancelling the context causes the handler to clean up
+	// (close parent socket). This tests the path where RecvFD succeeds
+	// but the serve loop exits due to a non-seccomp FD.
+
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	parentSock := os.NewFile(uintptr(fds[0]), "parent")
+	childSock := os.NewFile(uintptr(fds[1]), "child")
+
+	store := &notifyMockEventStore{}
+	broker := &notifyMockEventBroker{}
+
+	// Send a pipe FD through the socketpair so RecvFD succeeds.
+	// The handler will try NotifReceive on the pipe, which fails (wrong ioctl)
+	// and exits the serve loop.
+	pipeR, pipeW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer pipeW.Close()
+
+	// Send pipeR FD via SCM_RIGHTS.
+	rights := unix.UnixRights(int(pipeR.Fd()))
+	if err := unix.Sendmsg(int(childSock.Fd()), []byte{0}, rights, nil, 0); err != nil {
+		pipeR.Close()
+		childSock.Close()
+		parentSock.Close()
+		t.Fatalf("sendmsg: %v", err)
+	}
+	pipeR.Close()
+	childSock.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	startNotifyHandler(ctx, parentSock, "test-ctx-cancel", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{}, false)
+
+	// Wait for handler to exit (NotifReceive on pipe FD fails immediately).
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			// Handler might be waiting — cancel context to unblock.
+			cancel()
+			time.Sleep(100 * time.Millisecond)
+			if int(parentSock.Fd()) != -1 {
+				t.Fatal("timed out: handler didn't clean up after context cancel")
+			}
+			return
+		default:
+		}
+		if int(parentSock.Fd()) == -1 {
+			cancel()
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

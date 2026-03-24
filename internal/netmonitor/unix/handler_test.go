@@ -3,8 +3,12 @@
 package unix
 
 import (
+	"context"
+	"os"
 	"testing"
+	"time"
 
+	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
 )
@@ -46,4 +50,89 @@ func TestServeNotify_RoutesNewFileSyscalls(t *testing.T) {
 	assert.True(t, isFileSyscall(unix.SYS_FACCESSAT2))
 	assert.True(t, isFileSyscall(unix.SYS_READLINKAT))
 	assert.True(t, isFileSyscall(unix.SYS_MKNODAT))
+}
+
+// handlerTestEmitter is a no-op emitter for handler lifecycle tests.
+type handlerTestEmitter struct{}
+
+func (e *handlerTestEmitter) AppendEvent(_ context.Context, _ types.Event) error { return nil }
+func (e *handlerTestEmitter) Publish(_ types.Event)                              {}
+
+func TestServeNotifyWithExecve_ExitsOnCancelledContext(t *testing.T) {
+	// ServeNotifyWithExecve should exit immediately when given an
+	// already-cancelled context, even with a valid FD.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel before calling
+
+	done := make(chan struct{})
+	go func() {
+		ServeNotifyWithExecve(ctx, r, "test-cancelled", nil, &handlerTestEmitter{}, nil, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good — exited promptly.
+	case <-time.After(1 * time.Second):
+		t.Fatal("ServeNotifyWithExecve did not exit with cancelled context")
+	}
+}
+
+func TestServeNotifyWithExecve_ExitsOnNonSeccompFD(t *testing.T) {
+	// When given a pipe FD (not a real seccomp notify FD), NotifReceive
+	// returns an error. The handler should exit via the error branch,
+	// not spin forever.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer w.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		ServeNotifyWithExecve(ctx, r, "test-bad-fd", nil, &handlerTestEmitter{}, nil, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good — exited on ioctl error.
+	case <-time.After(1 * time.Second):
+		t.Fatal("ServeNotifyWithExecve did not exit with non-seccomp FD")
+	}
+}
+
+func TestServeNotify_ExitsOnCancelledContext(t *testing.T) {
+	// Same test for the non-execve ServeNotify variant.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		ServeNotify(ctx, r, "test-cancelled", nil, &handlerTestEmitter{})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("ServeNotify did not exit with cancelled context")
+	}
 }
