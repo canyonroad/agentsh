@@ -55,13 +55,24 @@ func InstallShellShim(opts InstallShellShimOptions) error {
 		return fmt.Errorf("read shim.conf: %w", confReadErr)
 	}
 
-	// When --force is set, preflight that we can write the config directory
-	// before mutating shell binaries, to avoid partial state.
-	if opts.Force {
-		confDir := filepath.Dir(ShimConfPath(root))
+	// Preflight config writability before mutating shell binaries to avoid
+	// partial state. Applies to both --force (writing force=true) and
+	// non-force (may need to clear stale force=true).
+	confPath := ShimConfPath(root)
+	confDir := filepath.Dir(confPath)
+	needsConfigWrite := opts.Force ||
+		existingConf.Raw["force"] == "true" || existingConf.Raw["force"] == "1"
+	if needsConfigWrite {
 		if err := os.MkdirAll(confDir, 0o755); err != nil {
 			return fmt.Errorf("preflight shim.conf dir: %w", err)
 		}
+		// Verify actual write capability with a temp file.
+		tmp, err := os.CreateTemp(confDir, ".shim.conf.preflight-*")
+		if err != nil {
+			return fmt.Errorf("preflight shim.conf write: %w", err)
+		}
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 	}
 
 	if !opts.BashOnly {

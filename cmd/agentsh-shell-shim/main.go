@@ -65,15 +65,9 @@ func main() {
 	//
 	// /etc/agentsh/shim.conf with force=true also overrides the bypass, for
 	// platforms where env vars cannot be injected (e.g. exe.dev).
-	// Precedence: env var > config file > default (false).
-	confRoot := "/"
-	if strings.TrimSpace(os.Getenv("AGENTSH_SHIM_DEBUG")) == "1" {
-		if v := os.Getenv("AGENTSH_SHIM_CONF_ROOT"); v != "" {
-			confRoot = v
-			debugLog("AGENTSH_SHIM_CONF_ROOT override: %s", v)
-		}
-	}
-	conf, confErr := shim.ReadShimConf(confRoot)
+	// Precedence: AGENTSH_SHIM_FORCE=1 (env) > config file > default (false).
+	// Note: env can only ADD enforcement, never remove it.
+	conf, confErr := shim.ReadShimConf(shimConfRoot())
 	if confErr != nil {
 		// Fail-closed: if the config file exists but can't be read (permission
 		// denied, I/O error), assume force=true. An operator wrote the file for
@@ -83,16 +77,9 @@ func main() {
 		conf.Force = true
 	}
 	forceShim := strings.TrimSpace(os.Getenv("AGENTSH_SHIM_FORCE"))
-	isDebug := strings.TrimSpace(os.Getenv("AGENTSH_SHIM_DEBUG")) == "1"
 	switch {
 	case forceShim == "1":
 		debugLog("AGENTSH_SHIM_FORCE=1: enforcing policy despite non-interactive stdin")
-	case forceShim == "0" && isDebug:
-		// AGENTSH_SHIM_FORCE=0 can only disable enforcement in debug mode.
-		// In production, the config file cannot be overridden by env.
-		if conf.Force {
-			debugLog("AGENTSH_SHIM_FORCE=0 (debug): config file force overridden by env")
-		}
 	case conf.Force:
 		forceShim = "1"
 		debugLog("shim.conf force=true: enforcing policy despite non-interactive stdin")
