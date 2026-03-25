@@ -506,7 +506,7 @@ func TestIsAgentshCommand(t *testing.T) {
 		{"command agentsh", []string{"-c", "command agentsh detect"}, true},
 		// -lc and -l -c are intentionally NOT handled (login shell PATH risk).
 		{"-lc flag", []string{"-lc", "agentsh detect"}, false},
-		{"-l -c split", []string{"-l", "-c", "agentsh detect"}, true},
+		{"-l -c split", []string{"-l", "-c", "agentsh detect"}, false},
 		{"echo hello", []string{"-c", "echo hello"}, false},
 		{"sudo agentsh", []string{"-c", "sudo agentsh detect"}, false},
 		// env and VAR=VAL prefixes are NOT skipped (they can modify PATH).
@@ -516,6 +516,15 @@ func TestIsAgentshCommand(t *testing.T) {
 		{"bare VAR=VAL prefix", []string{"-c", "FOO=1 agentsh detect"}, false},
 		{"PATH override", []string{"-c", "PATH=/tmp agentsh detect"}, false},
 		{"--norc -c", []string{"--norc", "-c", "agentsh detect"}, true},
+		// Login shell flags — bypass disabled (PATH can change via startup files).
+		{"-l -c login", []string{"-l", "-c", "agentsh detect"}, false},
+		{"--login -c", []string{"--login", "-c", "agentsh detect"}, false},
+		// Compound commands — bypass disabled (could bypass enforcement for chained commands).
+		{"semicolon chain", []string{"-c", "agentsh detect; echo done"}, false},
+		{"and chain", []string{"-c", "agentsh detect && echo done"}, false},
+		{"pipe", []string{"-c", "agentsh detect | grep ok"}, false},
+		{"subshell", []string{"-c", "$(agentsh detect)"}, false},
+		{"backtick", []string{"-c", "`agentsh detect`"}, false},
 		{"no -c flag", []string{"agentsh", "detect"}, false},
 		{"empty command", []string{"-c", ""}, false},
 		{"just -c", []string{"-c"}, false},
