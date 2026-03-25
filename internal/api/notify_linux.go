@@ -177,7 +177,7 @@ func notifyHandlerRecover(sessID string, store eventStore, broker eventBroker) {
 // starts the ServeNotify handler in a goroutine. It returns immediately.
 // The handler runs until ctx is cancelled or the fd is closed.
 // If execveHandler is non-nil, uses ServeNotifyWithExecve for execve interception.
-func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string, pol *policy.Engine, store eventStore, broker eventBroker, execveHandler any, fileMonitorCfg config.SandboxSeccompFileMonitorConfig, landlockEnabled bool) {
+func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string, pol *policy.Engine, store eventStore, broker eventBroker, execveHandler any, fileMonitorCfg config.SandboxSeccompFileMonitorConfig, landlockEnabled bool, ptraceReady chan<- error) {
 	if parentSock == nil {
 		return
 	}
@@ -277,12 +277,35 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 			}
 		}
 		// Send ACK to wrapper so it knows the notify handler is ready before exec.
-		// This mirrors the ACK in internal/cli/wrap_linux.go:133.
 		if _, err := parentSock.Write([]byte{1}); err != nil {
 			slog.Debug("notify: ACK write to wrapper failed", "error", err, "session_id", sessID)
 		}
-		slog.Debug("starting ServeNotifyWithExecve", "session_id", sessID, "has_execve_handler", h != nil, "has_file_handler", fileHandler != nil, "has_policy", pol != nil)
-		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h, fileHandler)
-		slog.Debug("ServeNotifyWithExecve returned", "session_id", sessID)
+
+		// Start ServeNotifyWithExecve BEFORE reading READY to ensure notifications
+		// can be processed by the time the wrapper exec's after receiving GO.
+		serveDone := make(chan struct{})
+		go func() {
+			defer close(serveDone)
+			slog.Debug("starting ServeNotifyWithExecve", "session_id", sessID, "has_execve_handler", h != nil, "has_file_handler", fileHandler != nil, "has_policy", pol != nil)
+			unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h, fileHandler)
+			slog.Debug("ServeNotifyWithExecve returned", "session_id", sessID)
+		}()
+
+		// If ptrace sync is enabled, read the READY byte from the wrapper
+		// and signal the main goroutine that ptrace can now be attached.
+		if ptraceReady != nil {
+			_ = parentSock.SetReadDeadline(time.Time{}) // clear FD-receive deadline
+			_ = parentSock.SetReadDeadline(time.Now().Add(recvFDTimeout))
+			readyBuf := make([]byte, 1)
+			_, readyErr := parentSock.Read(readyBuf)
+			if readyErr != nil {
+				ptraceReady <- fmt.Errorf("read READY byte: %w", readyErr)
+			} else {
+				ptraceReady <- nil
+			}
+			_ = parentSock.SetReadDeadline(time.Time{}) // clear for GO byte
+		}
+
+		<-serveDone // wait for ServeNotifyWithExecve to finish
 	}()
 }

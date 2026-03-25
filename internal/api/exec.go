@@ -307,7 +307,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 				// (via the cancellation goroutine in startNotifyHandler) and
 				// unblocks any stuck NotifReceive ioctl.
 				handlerCtx, handlerCancel := context.WithCancel(ctx)
-				startWrapperHandlers(handlerCtx, extra, cmd.Process.Pid, pgid)
+				startWrapperHandlers(handlerCtx, extra, cmd.Process.Pid, pgid, nil)
 
 				// 3. Run hook while process stopped (cgroup/eBPF setup)
 				if hook != nil {
@@ -444,7 +444,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		}
 
 		// Start wrapper handlers (wrapper-only path + hybrid fallback).
-		startWrapperHandlers(ctx, extra, cmd.Process.Pid, pgid)
+		startWrapperHandlers(ctx, extra, cmd.Process.Pid, pgid, nil)
 	}
 
 	waitStart := time.Now()
@@ -678,12 +678,12 @@ func mergeEnv(base []string, s *session.Session, overrides map[string]string) []
 
 // startWrapperHandlers starts the seccomp notify handler and signal filter handler
 // if configured. Used by both regular exec and hybrid ptrace+wrapper mode.
-func startWrapperHandlers(ctx context.Context, extra *extraProcConfig, pid, pgid int) {
+func startWrapperHandlers(ctx context.Context, extra *extraProcConfig, pid, pgid int, ptraceReady chan<- error) {
 	if extra == nil {
 		return
 	}
 	if extra.notifyParentSock != nil {
-		startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker, extra.execveHandler, extra.fileMonitorCfg, extra.landlockEnabled)
+		startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker, extra.execveHandler, extra.fileMonitorCfg, extra.landlockEnabled, ptraceReady)
 	}
 	if extra.signalParentSock != nil && extra.signalEngine != nil {
 		if extra.signalRegistry != nil {

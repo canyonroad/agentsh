@@ -409,7 +409,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 				// 2. Start wrapper handlers with a child context that we cancel
 				// immediately after the process exits.
 				handlerCtx, handlerCancel := context.WithCancel(ctx)
-				startWrapperHandlers(handlerCtx, extra, cmd.Process.Pid, pgid)
+				startWrapperHandlers(handlerCtx, extra, cmd.Process.Pid, pgid, nil)
 
 				// 3. Run hook while process stopped (cgroup/eBPF setup)
 				if hook != nil {
@@ -540,7 +540,7 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		}
 
 		// Start wrapper handlers (wrapper-only path + hybrid fallback).
-		startWrapperHandlers(ctx, extra, cmd.Process.Pid, pgid)
+		startWrapperHandlers(ctx, extra, cmd.Process.Pid, pgid, nil)
 	}
 
 	waitStart := time.Now()
