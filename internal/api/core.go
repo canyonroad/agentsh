@@ -254,6 +254,9 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	wrappedReq.Args = append([]string{"--", origCommand}, origArgs...)
 
 	extraEnv := map[string]string{"AGENTSH_NOTIFY_SOCK_FD": strconv.Itoa(envFD)}
+	if a.ptraceTracer != nil {
+		extraEnv["AGENTSH_PTRACE_SYNC"] = "1"
+	}
 	if seccompJSON, ok := wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"]; ok {
 		extraEnv["AGENTSH_SECCOMP_CONFIG"] = seccompJSON
 	}
