@@ -166,8 +166,8 @@ func isAgentshCommand(args []string) bool {
 			cmdStr = args[i+1]
 			break
 		}
-		if strings.HasSuffix(a, "c") && strings.HasPrefix(a, "-") && !strings.Contains(a, "=") && i+1 < len(args) {
-			// Combined flags like -lc, -ic, etc.
+		// Combined short flags like -lc, -ic (NOT long options like --norc).
+		if len(a) > 2 && a[0] == '-' && a[1] != '-' && a[len(a)-1] == 'c' && i+1 < len(args) {
 			cmdStr = args[i+1]
 			break
 		}
@@ -208,40 +208,17 @@ func isAgentshCommand(args []string) bool {
 	return cmdResolved == agentshResolved
 }
 
-// extractCommand skips common shell prefixes (exec, env, nice, etc.) and
-// VAR=VAL assignments to find the actual executable name from a list of
-// command parts. Note: uses strings.Fields tokenization which is not
-// shell-aware (doesn't handle quoting). This is acceptable because the
-// fail-safe direction is false (no bypass = existing deadlock, not a
-// security bypass).
+// extractCommand skips shell builtins that don't affect command resolution
+// (exec, nice, nohup, command) to find the actual executable name.
+// Does NOT skip env or VAR=VAL prefixes because those can modify PATH and
+// change which binary is resolved — skipping them would be a security bypass.
 func extractCommand(parts []string) string {
 	i := 0
 	for i < len(parts) {
 		word := parts[i]
-		switch {
-		case word == "exec" || word == "nice" || word == "nohup" || word == "command":
-			// Shell builtins/wrappers: skip and check next word.
-			i++
-		case word == "env":
-			// env can have flags (-i, -u VAR) and VAR=VAL assignments before the command.
-			i++
-			for i < len(parts) {
-				w := parts[i]
-				if strings.HasPrefix(w, "-") {
-					// env flag (e.g., -i, -u). -u takes an argument.
-					if w == "-u" && i+1 < len(parts) {
-						i++ // skip the argument to -u
-					}
-					i++
-				} else if isShellAssignment(w) {
-					// VAR=VAL assignment
-					i++
-				} else {
-					break // found the command
-				}
-			}
-		case isShellAssignment(word):
-			// Bare VAR=VAL assignment prefix (e.g., "FOO=1 agentsh detect")
+		switch word {
+		case "exec", "nice", "nohup", "command":
+			// Shell builtins/wrappers that don't affect command resolution.
 			i++
 		default:
 			return word
