@@ -156,33 +156,27 @@ func isMCPCommand(argv0 string, args []string) bool {
 // the server, and the CLI connects back to the same blocked server.
 // Fail-safe: returns false on any error (worst case is existing deadlock, not a bypass).
 func isAgentshCommand(args []string) bool {
-	// Skip bypass if login shell flags are present — login shells can modify
-	// PATH via startup files, making pre-shell PATH resolution unreliable.
-	for _, a := range args {
-		if a == "-l" || a == "--login" {
-			return false
-		}
-		if a == "-c" || a == "--" {
-			break // stop scanning flags once we hit -c or --
-		}
+	// Only match when -c is the first argument. Scanning further into args
+	// could misinterpret script arguments as shell flags (e.g., "sh script.sh -c ...").
+	// Also reject login shell flags in the first position.
+	if len(args) < 2 {
+		return false
 	}
-
-	// Only match exact "-c" flag (not combined flags like -lc).
-	cmdStr := ""
-	for i, a := range args {
-		if a == "-c" && i+1 < len(args) {
-			cmdStr = args[i+1]
-			break
-		}
+	if args[0] == "-l" || args[0] == "--login" {
+		return false
 	}
+	if args[0] != "-c" {
+		return false
+	}
+	cmdStr := args[1]
 	if cmdStr == "" {
 		return false
 	}
 
-	// Reject compound commands (shell metacharacters). Only bypass for
-	// simple single-command invocations to prevent enforcement bypass
-	// for chained commands like "agentsh detect; rm -rf /".
-	if strings.ContainsAny(cmdStr, ";|&`$()") {
+	// Reject compound commands (shell metacharacters and newlines). Only
+	// bypass for simple single-command invocations to prevent enforcement
+	// bypass for chained commands like "agentsh detect; rm -rf /".
+	if strings.ContainsAny(cmdStr, ";|&`$()\n\r") {
 		return false
 	}
 
