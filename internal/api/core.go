@@ -277,6 +277,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		origCommand:      origCommand, // Store original command for signal registry
 		fileMonitorCfg:   a.cfg.Sandbox.Seccomp.FileMonitor,
 		landlockEnabled:  a.cfg.Landlock.Enabled,
+		ptraceSync:       a.ptraceTracer != nil && hasNotifyFeatures,
 	}
 
 	// Create execve handler if enabled (Linux-specific, will be nil on other platforms)

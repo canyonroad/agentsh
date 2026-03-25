@@ -48,6 +48,10 @@ type extraProcConfig struct {
 
 	// Original command name (before wrapping) for signal registry
 	origCommand string
+
+	// ptraceSync indicates the READY/GO handshake is enabled for hybrid mode.
+	// Only true when ptrace is active AND seccomp notify features are enabled.
+	ptraceSync bool
 }
 
 // eventStore is the interface for storing events.
@@ -297,24 +301,29 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 			// 1. Start wrapper handlers — notify handler receives FD, sends ACK,
 			// starts ServeNotifyWithExecve, then reads READY byte from wrapper.
 			handlerCtx, handlerCancel := context.WithCancel(ctx)
-			ptraceReady := make(chan error, 1)
+			var ptraceReady chan error
+			if extra.ptraceSync {
+				ptraceReady = make(chan error, 1)
+			}
 			startWrapperHandlers(handlerCtx, extra, cmd.Process.Pid, pgid, ptraceReady)
 
-			// 2. Wait for wrapper to signal READY (seccomp setup complete).
-			var readyErr error
-			select {
-			case readyErr = <-ptraceReady:
-			case <-ctx.Done():
-				readyErr = ctx.Err()
-			}
-			if readyErr != nil {
-				close(ptraceDone)
-				handlerCancel()
-				_ = killProcess(cmd.Process.Pid)
-				_ = killProcessGroup(pgid)
-				pipeWG.Wait()
-				cmd.Process.Release()
-				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("hybrid wrapper ready: %w", readyErr)
+			// 2. Wait for wrapper to signal READY (only when ptrace sync is enabled).
+			if extra.ptraceSync {
+				var readyErr error
+				select {
+				case readyErr = <-ptraceReady:
+				case <-ctx.Done():
+					readyErr = ctx.Err()
+				}
+				if readyErr != nil {
+					close(ptraceDone)
+					handlerCancel()
+					_ = killProcess(cmd.Process.Pid)
+					_ = killProcessGroup(pgid)
+					pipeWG.Wait()
+					cmd.Process.Release()
+					return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("hybrid wrapper ready: %w", readyErr)
+				}
 			}
 
 			// 3. Attach ptrace NOW — wrapper is idle, waiting for GO byte.
@@ -352,11 +361,11 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 				}
 			}
 
-			// 6. Send GO byte — wrapper reads it and calls exec.
-			// Socket access is safe: main goroutine blocked on <-ptraceReady before this,
-			// so notify goroutine's READY read is complete. No concurrent socket access.
-			if _, err := extra.notifyParentSock.Write([]byte{'G'}); err != nil {
-				slog.Warn("hybrid mode: GO byte write failed", "error", err, "pid", cmd.Process.Pid)
+			// 6. Send GO byte (only when ptrace sync is enabled).
+			if extra.ptraceSync {
+				if _, err := extra.notifyParentSock.Write([]byte{'G'}); err != nil {
+					slog.Warn("hybrid mode: GO byte write failed", "error", err, "pid", cmd.Process.Pid)
+				}
 			}
 
 			// 7. Wait for exit via ptrace exit channel

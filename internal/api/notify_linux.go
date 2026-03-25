@@ -310,6 +310,8 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 			_, readyErr := parentSock.Read(readyBuf)
 			if readyErr != nil {
 				ptraceReady <- fmt.Errorf("read READY byte: %w", readyErr)
+			} else if readyBuf[0] != 'R' {
+				ptraceReady <- fmt.Errorf("unexpected READY byte: got 0x%02x, expected 'R'", readyBuf[0])
 			} else {
 				ptraceReady <- nil
 			}

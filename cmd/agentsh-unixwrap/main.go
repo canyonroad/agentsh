@@ -121,9 +121,19 @@ func main() {
 		if _, err := unix.Write(sockFD, []byte{'R'}); err != nil {
 			log.Fatalf("send READY byte: %v", err)
 		}
-		// Wait for GO byte, retrying on EINTR.
-		if err := waitForACK(func(b []byte) (int, error) { return unix.Read(sockFD, b) }); err != nil {
+		// Wait for GO byte, retrying on EINTR. Validate the byte value.
+		goBuf := make([]byte, 1)
+		if err := waitForACK(func(b []byte) (int, error) {
+			n, err := unix.Read(sockFD, b)
+			if n == 1 {
+				goBuf[0] = b[0]
+			}
+			return n, err
+		}); err != nil {
 			log.Fatalf("wait for GO byte: %v", err)
+		}
+		if goBuf[0] != 'G' {
+			log.Fatalf("unexpected GO byte: got 0x%02x, expected 'G'", goBuf[0])
 		}
 	}
 
