@@ -186,6 +186,16 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 	go func() {
 		defer notifyHandlerRecover(sessID, store, broker)
 		defer parentSock.Close()
+		// Ensure ptraceReady is always signaled on all exit paths to prevent
+		// the main goroutine from blocking forever in hybrid mode.
+		defer func() {
+			if ptraceReady != nil {
+				select {
+				case ptraceReady <- fmt.Errorf("notify handler exited without signaling READY"):
+				default: // already signaled
+				}
+			}
+		}()
 		slog.Debug("notify handler started", "session_id", sessID)
 
 		// Get the wrapper's PID from socket credentials for session tracking

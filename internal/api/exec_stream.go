@@ -405,7 +405,13 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			startWrapperHandlers(handlerCtx, extra, cmd.Process.Pid, pgid, ptraceReady)
 
 			// 2. Wait for wrapper to signal READY (seccomp setup complete).
-			if readyErr := <-ptraceReady; readyErr != nil {
+			var readyErr error
+			select {
+			case readyErr = <-ptraceReady:
+			case <-ctx.Done():
+				readyErr = ctx.Err()
+			}
+			if readyErr != nil {
 				close(ptraceDone)
 				handlerCancel()
 				_ = killProcess(cmd.Process.Pid)
