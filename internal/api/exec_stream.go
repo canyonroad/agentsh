@@ -386,6 +386,8 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 		hasWrapperHandlers := extra != nil && (extra.notifyParentSock != nil || (extra.signalParentSock != nil && extra.signalEngine != nil))
 		if tracer != nil && hasWrapperHandlers {
 			// HYBRID MODE: ptrace for execve interception + seccomp wrapper for sockets/files/Landlock.
+			// The wrapper must complete seccomp setup BEFORE ptrace attaches to prevent deadlock.
+			// Protocol: wrapper does seccomp init → READY byte → server attaches ptrace → GO byte → wrapper exec's.
 			ptraceDone := make(chan struct{})
 			go func() {
 				select {
@@ -396,72 +398,94 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 				}
 			}()
 
-			// 1. Attach ptrace (prefilter injected at first syscall exit)
+			// 1. Start wrapper handlers — notify handler receives FD, sends ACK,
+			// starts ServeNotifyWithExecve, then reads READY byte from wrapper.
+			handlerCtx, handlerCancel := context.WithCancel(ctx)
+			ptraceReady := make(chan error, 1)
+			startWrapperHandlers(handlerCtx, extra, cmd.Process.Pid, pgid, ptraceReady)
+
+			// 2. Wait for wrapper to signal READY (seccomp setup complete).
+			if readyErr := <-ptraceReady; readyErr != nil {
+				close(ptraceDone)
+				handlerCancel()
+				_ = killProcess(cmd.Process.Pid)
+				_ = killProcessGroup(pgid)
+				pipeWG.Wait()
+				cmd.Process.Release()
+				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("hybrid wrapper ready: %w", readyErr)
+			}
+
+			// 3. Attach ptrace NOW — wrapper is idle, waiting for GO byte.
 			waitExit, resume, attachErr := ptraceExecAttach(tracer, cmd.Process.Pid, sessionID, cmdID, hook != nil)
 			if attachErr != nil {
 				close(ptraceDone)
+				handlerCancel()
 				_ = killProcess(cmd.Process.Pid)
 				_ = killProcessGroup(pgid)
 				pipeWG.Wait()
 				cmd.Process.Release()
 				return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("hybrid ptrace attach: %w", attachErr)
-			} else {
-				// 2. Start wrapper handlers with a child context that we cancel
-				// immediately after the process exits.
-				handlerCtx, handlerCancel := context.WithCancel(ctx)
-				startWrapperHandlers(handlerCtx, extra, cmd.Process.Pid, pgid, nil)
+			}
 
-				// 3. Run hook while process stopped (cgroup/eBPF setup)
-				if hook != nil {
-					if cleanup, hookErr := hook(cmd.Process.Pid); hookErr != nil {
-						slog.Warn("hybrid mode: cgroup/eBPF hook failed (continuing without resource controls)",
-							"error", hookErr, "pid", cmd.Process.Pid)
-					} else if cleanup != nil {
-						defer func() { _ = cleanup() }()
-					}
+			// 4. Run hook while process stopped (cgroup/eBPF setup)
+			if hook != nil {
+				if cleanup, hookErr := hook(cmd.Process.Pid); hookErr != nil {
+					slog.Warn("hybrid mode: cgroup/eBPF hook failed (continuing without resource controls)",
+						"error", hookErr, "pid", cmd.Process.Pid)
+				} else if cleanup != nil {
+					defer func() { _ = cleanup() }()
 				}
-				if resume != nil {
-					if resumeErr := resume(); resumeErr != nil {
-						close(ptraceDone)
-						handlerCancel()
-						_ = killProcess(cmd.Process.Pid)
-						_ = killProcessGroup(pgid)
-						pipeWG.Wait()
-						cmd.Process.Release()
-						return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace resume: %w", resumeErr)
-					}
-				}
+			}
 
-				// 4. Wait for exit via ptrace exit channel
-				waitStart := time.Now()
-				slog.Debug("exec_stream waiting for command (hybrid)", "command", req.Command, "pid", cmd.Process.Pid)
-				result := waitExit()
-				close(ptraceDone)
-				handlerCancel() // Signal notify handler to exit immediately
-				if result.err != nil {
+			// 5. Resume wrapper and send GO byte.
+			if resume != nil {
+				if resumeErr := resume(); resumeErr != nil {
+					close(ptraceDone)
+					handlerCancel()
 					_ = killProcess(cmd.Process.Pid)
 					_ = killProcessGroup(pgid)
+					pipeWG.Wait()
+					cmd.Process.Release()
+					return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("ptrace resume: %w", resumeErr)
 				}
-				waitDuration := time.Since(waitStart)
-				slog.Debug("exec_stream command finished (hybrid)", "command", req.Command, "pid", cmd.Process.Pid, "exit_code", result.exitCode, "wait_duration_ms", waitDuration.Milliseconds())
-				pipeWG.Wait()
-				stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
-				stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
-				stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
-				resources = result.resources
-				cmd.Process.Release()
-
-				if ctx.Err() != nil {
-					_ = killProcessGroup(pgid)
-				}
-				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
-				}
-				if errors.Is(ctx.Err(), context.Canceled) {
-					return 127, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, ctx.Err()
-				}
-				return result.exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, result.err
 			}
+
+			// 6. Send GO byte — wrapper reads it and calls exec.
+			// Socket access is safe: main goroutine blocked on <-ptraceReady before this,
+			// so notify goroutine's READY read is complete. No concurrent socket access.
+			if _, err := extra.notifyParentSock.Write([]byte{'G'}); err != nil {
+				slog.Warn("hybrid mode: GO byte write failed", "error", err, "pid", cmd.Process.Pid)
+			}
+
+			// 7. Wait for exit via ptrace exit channel
+			waitStart := time.Now()
+			slog.Debug("exec_stream waiting for command (hybrid)", "command", req.Command, "pid", cmd.Process.Pid)
+			result := waitExit()
+			close(ptraceDone)
+			handlerCancel()
+			if result.err != nil {
+				_ = killProcess(cmd.Process.Pid)
+				_ = killProcessGroup(pgid)
+			}
+			waitDuration := time.Since(waitStart)
+			slog.Debug("exec_stream command finished (hybrid)", "command", req.Command, "pid", cmd.Process.Pid, "exit_code", result.exitCode, "wait_duration_ms", waitDuration.Milliseconds())
+			pipeWG.Wait()
+			stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
+			stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
+			stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
+			resources = result.resources
+			cmd.Process.Release()
+
+			if ctx.Err() != nil {
+				_ = killProcessGroup(pgid)
+			}
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return 124, stdout, append(stderr, []byte("command timed out\n")...), stdoutTotal, stderrTotal + int64(len("command timed out\n")), true, true, resources, ctx.Err()
+			}
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return 127, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, ctx.Err()
+			}
+			return result.exitCode, stdout, stderr, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, result.err
 		} else if tracer != nil {
 			// FULL PTRACE MODE: ptrace handles everything (no seccomp wrapper).
 			// Context cancellation watcher: start BEFORE attach
