@@ -232,28 +232,6 @@ func extractCommand(parts []string) string {
 	return ""
 }
 
-// isShellAssignment checks if a token is a valid shell variable assignment (VAR=VAL).
-// The variable name must match [A-Za-z_][A-Za-z0-9_]* per POSIX shell grammar.
-func isShellAssignment(s string) bool {
-	idx := strings.IndexByte(s, '=')
-	if idx <= 0 {
-		return false
-	}
-	name := s[:idx]
-	for i, c := range name {
-		if i == 0 {
-			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
-				return false
-			}
-		} else {
-			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 func resolveAgentshBin() (string, error) {
 	if v := strings.TrimSpace(os.Getenv("AGENTSH_BIN")); v != "" {
 		return exec.LookPath(v)
