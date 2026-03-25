@@ -53,6 +53,17 @@ func main() {
 		)
 	}
 
+	// Agentsh CLI bypass: if the command being run IS the agentsh binary,
+	// exec the real shell directly. The agentsh CLI connects back to the
+	// server, which would deadlock if the server is handling this shim's
+	// exec request. This applies to: agentsh detect, agentsh --version,
+	// agentsh debug policy-test, agentsh trash list, etc.
+	if isAgentshCommand(os.Args[1:]) {
+		debugLog("agentsh CLI bypass: command is agentsh itself, executing real shell %s", realShell)
+		execOrExit(realShell, append([]string{argv0}, os.Args[1:]...), os.Environ())
+		return
+	}
+
 	// Non-interactive bypass: when stdin is not a terminal (piped data, e.g.
 	// docker exec -i container sh -c "cat > /file" < binary), exec the real
 	// shell directly. This preserves binary stdin/stdout integrity — the shim
@@ -138,6 +149,39 @@ func isMCPCommand(argv0 string, args []string) bool {
 
 	// Direct command execution
 	return shim.IsMCPServer(argv0, args, nil)
+}
+
+// isAgentshCommand checks if the command being executed is the agentsh binary.
+// This prevents a deadlock where the shim routes agentsh CLI commands through
+// the server, and the CLI connects back to the same blocked server.
+// Fail-safe: returns false on any error (worst case is existing deadlock, not a bypass).
+func isAgentshCommand(args []string) bool {
+	if len(args) < 2 || args[0] != "-c" {
+		return false
+	}
+	cmdParts := strings.Fields(args[1])
+	if len(cmdParts) == 0 {
+		return false
+	}
+	cmdPath, err := exec.LookPath(cmdParts[0])
+	if err != nil {
+		return false
+	}
+	agentshPath, err := resolveAgentshBin()
+	if err != nil {
+		return false
+	}
+	// Resolve symlinks to handle installations where agentsh is symlinked
+	// (e.g., /usr/local/bin/agentsh -> /opt/agentsh/bin/agentsh).
+	cmdResolved, err := filepath.EvalSymlinks(cmdPath)
+	if err != nil {
+		cmdResolved = cmdPath
+	}
+	agentshResolved, err := filepath.EvalSymlinks(agentshPath)
+	if err != nil {
+		agentshResolved = agentshPath
+	}
+	return cmdResolved == agentshResolved
 }
 
 func resolveAgentshBin() (string, error) {

@@ -478,6 +478,82 @@ func TestShimConfForce_UnreadableConfigFailsClosed(t *testing.T) {
 	}
 }
 
+func TestIsAgentshCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	// Create a fake agentsh binary in a temp dir.
+	tmp := t.TempDir()
+	agentshBin := filepath.Join(tmp, "agentsh")
+	if err := os.WriteFile(agentshBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTSH_BIN", agentshBin)
+	t.Setenv("PATH", tmp+":"+os.Getenv("PATH"))
+
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"agentsh detect", []string{"-c", "agentsh detect"}, true},
+		{"agentsh --version", []string{"-c", "agentsh --version"}, true},
+		{"agentsh trash list", []string{"-c", "agentsh trash list"}, true},
+		{"absolute path", []string{"-c", agentshBin + " detect"}, true},
+		{"echo hello", []string{"-c", "echo hello"}, false},
+		{"sudo agentsh", []string{"-c", "sudo agentsh detect"}, false},
+		{"no -c flag", []string{"agentsh", "detect"}, false},
+		{"empty command", []string{"-c", ""}, false},
+		{"just -c", []string{"-c"}, false},
+		{"no args", []string{}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isAgentshCommand(tt.args)
+			if got != tt.want {
+				t.Errorf("isAgentshCommand(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsAgentshCommand_Symlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	// Real binary in a subdirectory.
+	realDir := filepath.Join(tmp, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realBin := filepath.Join(realDir, "agentsh")
+	if err := os.WriteFile(realBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink in PATH.
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realBin, filepath.Join(binDir, "agentsh")); err != nil {
+		t.Fatal(err)
+	}
+
+	// AGENTSH_BIN points to real binary, PATH has symlink.
+	t.Setenv("AGENTSH_BIN", realBin)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	// Should detect agentsh even though PATH resolves to a symlink.
+	if !isAgentshCommand([]string{"-c", "agentsh detect"}) {
+		t.Fatalf("expected true: symlinked agentsh should be detected")
+	}
+}
+
 func TestFatalWithHint(t *testing.T) {
 	// Verify formatting and exit code by forking a subprocess.
 	if os.Getenv("AGENTSH_SHIM_FATAL_TEST") == "1" {
