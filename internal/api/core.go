@@ -254,7 +254,11 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	wrappedReq.Args = append([]string{"--", origCommand}, origArgs...)
 
 	extraEnv := map[string]string{"AGENTSH_NOTIFY_SOCK_FD": strconv.Itoa(envFD)}
-	if a.ptraceTracer != nil {
+	// Only enable ptrace sync handshake when the wrapper will produce a notify FD.
+	// If no seccomp features need USER_NOTIF, the wrapper skips the FD send and
+	// the READY/GO handshake has nothing to synchronize on.
+	hasNotifyFeatures := seccompCfg.UnixSocketEnabled || seccompCfg.ExecveEnabled || seccompCfg.FileMonitorEnabled
+	if a.ptraceTracer != nil && hasNotifyFeatures {
 		extraEnv["AGENTSH_PTRACE_SYNC"] = "1"
 	}
 	if seccompJSON, ok := wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"]; ok {
