@@ -305,7 +305,8 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 		// and signal the main goroutine that ptrace can now be attached.
 		if ptraceReady != nil {
 			_ = parentSock.SetReadDeadline(time.Time{}) // clear FD-receive deadline
-			_ = parentSock.SetReadDeadline(time.Now().Add(recvFDTimeout))
+			// Use 30s timeout for READY (wrapper does signal filter + Landlock setup after ACK).
+			_ = parentSock.SetReadDeadline(time.Now().Add(30 * time.Second))
 			readyBuf := make([]byte, 1)
 			_, readyErr := parentSock.Read(readyBuf)
 			if readyErr != nil {
