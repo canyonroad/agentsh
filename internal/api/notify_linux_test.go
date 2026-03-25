@@ -33,7 +33,7 @@ func TestStartNotifyHandler_GracefulErrorExit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	startNotifyHandler(ctx, parentSock, "test-graceful", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{}, false)
+	startNotifyHandler(ctx, parentSock, "test-graceful", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{}, false, nil)
 
 	// Poll until the goroutine exits (parentSock gets closed by the deferred Close).
 	deadline := time.After(2 * time.Second)
@@ -378,7 +378,7 @@ func TestNotifyHandler_CancellationGoroutineExitsOnEarlyReturn(t *testing.T) {
 
 	goroutinesBefore := runtime.NumGoroutine()
 
-	startNotifyHandler(ctx, parentSock, "test-cancel-goroutine", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{}, false)
+	startNotifyHandler(ctx, parentSock, "test-cancel-goroutine", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{}, false, nil)
 
 	// Wait for handler goroutine to exit.
 	deadline := time.After(2 * time.Second)
@@ -445,7 +445,7 @@ func TestNotifyHandler_ContextCancelCleansUpFDs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	startNotifyHandler(ctx, parentSock, "test-fd-cleanup", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{}, false)
+	startNotifyHandler(ctx, parentSock, "test-fd-cleanup", nil, store, broker, nil, config.SandboxSeccompFileMonitorConfig{}, false, nil)
 
 	// Wait for handler to clean up (close parent socket via defer).
 	deadline := time.After(2 * time.Second)

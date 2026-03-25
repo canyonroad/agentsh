@@ -4,12 +4,14 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"syscall"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
@@ -177,7 +179,7 @@ func notifyHandlerRecover(sessID string, store eventStore, broker eventBroker) {
 // starts the ServeNotify handler in a goroutine. It returns immediately.
 // The handler runs until ctx is cancelled or the fd is closed.
 // If execveHandler is non-nil, uses ServeNotifyWithExecve for execve interception.
-func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string, pol *policy.Engine, store eventStore, broker eventBroker, execveHandler any, fileMonitorCfg config.SandboxSeccompFileMonitorConfig, landlockEnabled bool) {
+func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string, pol *policy.Engine, store eventStore, broker eventBroker, execveHandler any, fileMonitorCfg config.SandboxSeccompFileMonitorConfig, landlockEnabled bool, ptraceReady chan<- error) {
 	if parentSock == nil {
 		return
 	}
@@ -186,6 +188,16 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 	go func() {
 		defer notifyHandlerRecover(sessID, store, broker)
 		defer parentSock.Close()
+		// Ensure ptraceReady is always signaled on all exit paths to prevent
+		// the main goroutine from blocking forever in hybrid mode.
+		defer func() {
+			if ptraceReady != nil {
+				select {
+				case ptraceReady <- fmt.Errorf("notify handler exited without signaling READY"):
+				default: // already signaled
+				}
+			}
+		}()
 		slog.Debug("notify handler started", "session_id", sessID)
 
 		// Get the wrapper's PID from socket credentials for session tracking
@@ -277,12 +289,46 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 			}
 		}
 		// Send ACK to wrapper so it knows the notify handler is ready before exec.
-		// This mirrors the ACK in internal/cli/wrap_linux.go:133.
 		if _, err := parentSock.Write([]byte{1}); err != nil {
 			slog.Debug("notify: ACK write to wrapper failed", "error", err, "session_id", sessID)
 		}
-		slog.Debug("starting ServeNotifyWithExecve", "session_id", sessID, "has_execve_handler", h != nil, "has_file_handler", fileHandler != nil, "has_policy", pol != nil)
-		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h, fileHandler)
-		slog.Debug("ServeNotifyWithExecve returned", "session_id", sessID)
+
+		// Start ServeNotifyWithExecve BEFORE reading READY to ensure notifications
+		// can be processed by the time the wrapper exec's after receiving GO.
+		serveDone := make(chan struct{})
+		go func() {
+			defer close(serveDone)
+			slog.Debug("starting ServeNotifyWithExecve", "session_id", sessID, "has_execve_handler", h != nil, "has_file_handler", fileHandler != nil, "has_policy", pol != nil)
+			unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h, fileHandler)
+			slog.Debug("ServeNotifyWithExecve returned", "session_id", sessID)
+		}()
+
+		// If ptrace sync is enabled, read the READY byte from the wrapper
+		// and signal the main goroutine that ptrace can now be attached.
+		if ptraceReady != nil {
+			_ = parentSock.SetReadDeadline(time.Time{}) // clear FD-receive deadline
+			// Use 30s timeout for READY (wrapper does signal filter + Landlock setup after ACK).
+			_ = parentSock.SetReadDeadline(time.Now().Add(30 * time.Second))
+			readyBuf := make([]byte, 1)
+			// Retry on EINTR (signal interruption during read).
+			var readyErr error
+			for {
+				_, readyErr = parentSock.Read(readyBuf)
+				if readyErr != nil && errors.Is(readyErr, syscall.EINTR) {
+					continue
+				}
+				break
+			}
+			if readyErr != nil {
+				ptraceReady <- fmt.Errorf("read READY byte: %w", readyErr)
+			} else if readyBuf[0] != 'R' {
+				ptraceReady <- fmt.Errorf("unexpected READY byte: got 0x%02x, expected 'R'", readyBuf[0])
+			} else {
+				ptraceReady <- nil
+			}
+			_ = parentSock.SetReadDeadline(time.Time{}) // clear for GO byte
+		}
+
+		<-serveDone // wait for ServeNotifyWithExecve to finish
 	}()
 }
