@@ -121,6 +121,8 @@ func main() {
 		if _, err := unix.Write(sockFD, []byte{'R'}); err != nil {
 			log.Fatalf("send READY byte: %v", err)
 		}
+		// Set 30s receive timeout to prevent hanging if server crashes.
+		_ = unix.SetsockoptTimeval(sockFD, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Sec: 30})
 		// Wait for GO byte, retrying on EINTR. Validate the byte value.
 		goBuf := make([]byte, 1)
 		if err := waitForACK(func(b []byte) (int, error) {
@@ -130,7 +132,7 @@ func main() {
 			}
 			return n, err
 		}); err != nil {
-			log.Fatalf("wait for GO byte: %v", err)
+			log.Fatalf("wait for GO byte (30s timeout): %v", err)
 		}
 		if goBuf[0] != 'G' {
 			log.Fatalf("unexpected GO byte: got 0x%02x, expected 'G'", goBuf[0])

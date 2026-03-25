@@ -464,7 +464,13 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			// 6. Send GO byte (only when ptrace sync is enabled).
 			if extra.ptraceSync {
 				if _, err := extra.notifyParentSock.Write([]byte{'G'}); err != nil {
-					slog.Warn("hybrid mode: GO byte write failed", "error", err, "pid", cmd.Process.Pid)
+					close(ptraceDone)
+					handlerCancel()
+					_ = killProcess(cmd.Process.Pid)
+					_ = killProcessGroup(pgid)
+					pipeWG.Wait()
+					cmd.Process.Release()
+					return 127, nil, nil, 0, 0, false, false, types.ExecResources{}, fmt.Errorf("hybrid GO byte write: %w", err)
 				}
 			}
 
