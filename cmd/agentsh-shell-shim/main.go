@@ -53,6 +53,17 @@ func main() {
 		)
 	}
 
+	// Agentsh CLI bypass: if the command being run IS the agentsh binary,
+	// exec the real shell directly. The agentsh CLI connects back to the
+	// server, which would deadlock if the server is handling this shim's
+	// exec request. This applies to: agentsh detect, agentsh --version,
+	// agentsh debug policy-test, agentsh trash list, etc.
+	if isAgentshCommand(os.Args[1:]) {
+		debugLog("agentsh CLI bypass: command is agentsh itself, executing real shell %s", realShell)
+		execOrExit(realShell, append([]string{argv0}, os.Args[1:]...), os.Environ())
+		return
+	}
+
 	// Non-interactive bypass: when stdin is not a terminal (piped data, e.g.
 	// docker exec -i container sh -c "cat > /file" < binary), exec the real
 	// shell directly. This preserves binary stdin/stdout integrity — the shim
@@ -138,6 +149,87 @@ func isMCPCommand(argv0 string, args []string) bool {
 
 	// Direct command execution
 	return shim.IsMCPServer(argv0, args, nil)
+}
+
+// isAgentshCommand checks if the command being executed is the agentsh binary.
+// This prevents a deadlock where the shim routes agentsh CLI commands through
+// the server, and the CLI connects back to the same blocked server.
+// Fail-safe: returns false on any error (worst case is existing deadlock, not a bypass).
+func isAgentshCommand(args []string) bool {
+	// Only match when -c is the first argument. Scanning further into args
+	// could misinterpret script arguments as shell flags (e.g., "sh script.sh -c ...").
+	// Also reject login shell flags in the first position.
+	if len(args) < 2 {
+		return false
+	}
+	if args[0] == "-l" || args[0] == "--login" {
+		return false
+	}
+	if args[0] != "-c" {
+		return false
+	}
+	cmdStr := args[1]
+	if cmdStr == "" {
+		return false
+	}
+
+	// Reject compound commands (shell metacharacters and newlines). Only
+	// bypass for simple single-command invocations to prevent enforcement
+	// bypass for chained commands like "agentsh detect; rm -rf /".
+	if strings.ContainsAny(cmdStr, ";|&`$()\n\r") {
+		return false
+	}
+
+	cmdParts := strings.Fields(cmdStr)
+	if len(cmdParts) == 0 {
+		return false
+	}
+	// Skip common shell prefixes to find the actual command:
+	// - "exec agentsh detect" → "agentsh"
+	// - "env FOO=1 agentsh detect" → "agentsh"
+	// - "env -i agentsh detect" → "agentsh"
+	cmd := extractCommand(cmdParts)
+	if cmd == "" {
+		return false
+	}
+	cmdPath, err := exec.LookPath(cmd)
+	if err != nil {
+		return false
+	}
+	agentshPath, err := resolveAgentshBin()
+	if err != nil {
+		return false
+	}
+	// Resolve symlinks to handle installations where agentsh is symlinked
+	// (e.g., /usr/local/bin/agentsh -> /opt/agentsh/bin/agentsh).
+	cmdResolved, err := filepath.EvalSymlinks(cmdPath)
+	if err != nil {
+		cmdResolved = cmdPath
+	}
+	agentshResolved, err := filepath.EvalSymlinks(agentshPath)
+	if err != nil {
+		agentshResolved = agentshPath
+	}
+	return cmdResolved == agentshResolved
+}
+
+// extractCommand skips shell builtins that don't affect command resolution
+// (exec, nice, nohup, command) to find the actual executable name.
+// Does NOT skip env or VAR=VAL prefixes because those can modify PATH and
+// change which binary is resolved — skipping them would be a security bypass.
+func extractCommand(parts []string) string {
+	i := 0
+	for i < len(parts) {
+		word := parts[i]
+		switch word {
+		case "exec", "nice", "nohup", "command":
+			// Shell builtins/wrappers that don't affect command resolution.
+			i++
+		default:
+			return word
+		}
+	}
+	return ""
 }
 
 func resolveAgentshBin() (string, error) {
