@@ -173,10 +173,12 @@ func isAgentshCommand(args []string) bool {
 		return false
 	}
 
-	// Reject compound commands (shell metacharacters and newlines). Only
-	// bypass for simple single-command invocations to prevent enforcement
+	// Reject compound commands (shell operators that chain multiple commands).
+	// Only bypass for simple single-command invocations to prevent enforcement
 	// bypass for chained commands like "agentsh detect; rm -rf /".
-	if strings.ContainsAny(cmdStr, ";|&`$()\n\r") {
+	// We check for compound OPERATORS, not individual characters, because
+	// characters like & and > appear in legitimate redirections (2>&1).
+	if containsCompoundOperator(cmdStr) {
 		return false
 	}
 
@@ -211,6 +213,32 @@ func isAgentshCommand(args []string) bool {
 		agentshResolved = agentshPath
 	}
 	return cmdResolved == agentshResolved
+}
+
+// containsCompoundOperator checks if a shell command string contains operators
+// that chain multiple commands. Returns false for simple redirections like 2>&1.
+func containsCompoundOperator(s string) bool {
+	// These always indicate compound commands or subshells.
+	if strings.ContainsAny(s, ";`\n\r") {
+		return true
+	}
+	if strings.Contains(s, "&&") || strings.Contains(s, "||") || strings.Contains(s, "$(") {
+		return true
+	}
+	// Check for pipe: | that is NOT preceded by > (which would be >| clobber
+	// or part of a >&| redirect). A bare | chains commands.
+	for i, c := range s {
+		if c == '|' {
+			if i > 0 && s[i-1] == '>' {
+				continue // part of >| or >&| redirect
+			}
+			if i+1 < len(s) && s[i+1] == '|' {
+				continue // || already handled above
+			}
+			return true // bare pipe
+		}
+	}
+	return false
 }
 
 // extractCommand skips shell builtins that don't affect command resolution
