@@ -14,11 +14,11 @@ Add an agentsh binary bypass to the shim. Before the force/config logic, check i
 
 The shim is invoked as `sh -c "agentsh detect"`. The detection:
 
-1. Check if args contain `-c` followed by a command string
-2. Extract the first word from the command string
-3. Resolve it via `exec.LookPath` to get the absolute path
-4. Compare against `resolveAgentshBin()` (existing function that finds the agentsh binary)
-5. If they match, bypass to real shell
+1. Check if args contain `-c` followed by a command string (same pattern as existing `isMCPCommand`)
+2. Extract the first word from the command string via `strings.Fields`
+3. Resolve it via `exec.LookPath` to get a path
+4. Resolve symlinks via `filepath.EvalSymlinks` on both the command path and the agentsh binary path
+5. Compare the resolved paths — if they match, bypass to real shell
 
 ```go
 if isAgentshCommand(os.Args[1:]) {
@@ -30,7 +30,7 @@ if isAgentshCommand(os.Args[1:]) {
 
 ### Placement in main.go
 
-The check goes AFTER the `AGENTSH_IN_SESSION` recursion guard (line 31) and AFTER `resolveRealShell` (line 48), but BEFORE the config read and force/bypass logic (line 66). This ensures agentsh CLI commands are always bypassed regardless of `force=true`.
+The check goes after the `AGENTSH_IN_SESSION` recursion guard and after the `realShell, err := resolveRealShell(shellName)` block, but before the `conf, confErr := shim.ReadShimConf(...)` call. This ensures agentsh CLI commands are always bypassed regardless of `force=true`.
 
 ### `isAgentshCommand` implementation
 
@@ -51,16 +51,33 @@ func isAgentshCommand(args []string) bool {
     if err != nil {
         return false
     }
-    return cmdPath == agentshPath
+    // Resolve symlinks to handle installations where agentsh is symlinked
+    // (e.g., /usr/local/bin/agentsh -> /opt/agentsh/bin/agentsh).
+    cmdResolved, err := filepath.EvalSymlinks(cmdPath)
+    if err != nil {
+        cmdResolved = cmdPath
+    }
+    agentshResolved, err := filepath.EvalSymlinks(agentshPath)
+    if err != nil {
+        agentshResolved = agentshPath
+    }
+    return cmdResolved == agentshResolved
 }
 ```
 
-If either `LookPath` or `resolveAgentshBin` fails, the check returns false (no bypass — command proceeds normally through the server, where it'll fail on its own).
+**Fail-safe direction:** If either `LookPath`, `resolveAgentshBin`, or symlink resolution fails, the check returns false (no bypass). The worst case is the existing deadlock behavior — never a security bypass. This is the correct fail-safe direction: over-enforce rather than under-enforce.
+
+**Relationship to `isMCPCommand`:** The existing `isMCPCommand` function (main.go:110-123) uses the same `-c` parsing pattern. Both extract the command from shell args. A shared helper `extractCommandFromShellArgs` could reduce duplication, but is not required for this fix.
+
+### Known limitations
+
+- **Wrapper commands:** `sudo agentsh detect`, `env agentsh detect`, `nice agentsh detect` will NOT be bypassed (first word is the wrapper, not agentsh). Operators should run agentsh diagnostics without wrappers in shim-enforced environments. This is acceptable because sudo changes the security context anyway, and the workaround is trivial.
+- **Shell quoting:** `'agentsh' detect` (quoted binary name) will not be detected because `LookPath("'agentsh'")` fails. This is an unlikely invocation pattern.
 
 ## Files to modify
 
 1. `cmd/agentsh-shell-shim/main.go` — Add `isAgentshCommand` function and bypass check
-2. `cmd/agentsh-shell-shim/main_test.go` — Unit tests for `isAgentshCommand` and integration test
+2. `cmd/agentsh-shell-shim/main_test.go` — Unit tests and integration test
 
 ## Test plan
 
@@ -68,11 +85,13 @@ If either `LookPath` or `resolveAgentshBin` fails, the check returns false (no b
 - `-c "agentsh detect"` → true
 - `-c "agentsh --version"` → true
 - `-c "echo hello"` → false
-- `-c "/usr/bin/agentsh trash list"` → true (absolute path)
+- `-c "/usr/bin/agentsh trash list"` → true (absolute path resolves to agentsh)
 - `-c "sudo agentsh detect"` → false (first word is sudo)
 - No `-c` flag → false
 - Empty command string → false
+- Agentsh binary is a symlink → true (symlinks resolved before comparison)
+- `AGENTSH_BIN` override points to custom path → true (resolveAgentshBin uses it)
 
 **Integration tests (build shim, run as subprocess):**
-- Shim with `force=true` + `agentsh` command → bypasses (no server needed)
-- Shim with `force=true` + non-agentsh command → enforces (tries server)
+- Shim with `force=true` + `agentsh` command → bypasses (exits via real shell, no server needed)
+- Shim with `force=true` + non-agentsh command → enforces (tries to find agentsh server)
