@@ -163,7 +163,15 @@ func isAgentshCommand(args []string) bool {
 	if len(cmdParts) == 0 {
 		return false
 	}
-	cmdPath, err := exec.LookPath(cmdParts[0])
+	// Skip common shell prefixes to find the actual command:
+	// - "exec agentsh detect" → "agentsh"
+	// - "env FOO=1 agentsh detect" → "agentsh"
+	// - "env -i agentsh detect" → "agentsh"
+	cmd := extractCommand(cmdParts)
+	if cmd == "" {
+		return false
+	}
+	cmdPath, err := exec.LookPath(cmd)
 	if err != nil {
 		return false
 	}
@@ -182,6 +190,41 @@ func isAgentshCommand(args []string) bool {
 		agentshResolved = agentshPath
 	}
 	return cmdResolved == agentshResolved
+}
+
+// extractCommand skips common shell prefixes (exec, env, nice, etc.) to find
+// the actual executable name from a list of command parts.
+func extractCommand(parts []string) string {
+	i := 0
+	for i < len(parts) {
+		word := parts[i]
+		switch {
+		case word == "exec" || word == "nice" || word == "nohup" || word == "command":
+			// Shell builtins/wrappers: skip and check next word.
+			i++
+		case word == "env":
+			// env can have flags (-i, -u VAR) and VAR=VAL assignments before the command.
+			i++
+			for i < len(parts) {
+				w := parts[i]
+				if strings.HasPrefix(w, "-") {
+					// env flag (e.g., -i, -u). -u takes an argument.
+					if w == "-u" && i+1 < len(parts) {
+						i++ // skip the argument to -u
+					}
+					i++
+				} else if strings.Contains(w, "=") {
+					// VAR=VAL assignment
+					i++
+				} else {
+					break // found the command
+				}
+			}
+		default:
+			return word
+		}
+	}
+	return ""
 }
 
 func resolveAgentshBin() (string, error) {
