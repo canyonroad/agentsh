@@ -258,21 +258,26 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	// If no seccomp features need USER_NOTIF, the wrapper skips the FD send and
 	// the READY/GO handshake has nothing to synchronize on.
 	hasNotifyFeatures := seccompCfg.UnixSocketEnabled || seccompCfg.ExecveEnabled || seccompCfg.FileMonitorEnabled || seccompCfg.InterceptMetadata
+	// AGENTSH_PTRACE_SYNC goes into envInject (not env) so it overrides any
+	// user-supplied value. envInject deduplicates keys before appending.
+	ptraceSyncValue := "0"
 	if a.ptraceTracer != nil && hasNotifyFeatures {
-		extraEnv["AGENTSH_PTRACE_SYNC"] = "1"
-	} else {
-		// Explicitly clear to prevent user-injected values from activating
-		// the handshake in non-hybrid mode (would cause a 30s hang).
-		extraEnv["AGENTSH_PTRACE_SYNC"] = "0"
+		ptraceSyncValue = "1"
 	}
 	if seccompJSON, ok := wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"]; ok {
 		extraEnv["AGENTSH_SECCOMP_CONFIG"] = seccompJSON
 	}
 
+	envInject := mergeEnvInject(a.cfg, sessionPolicy)
+	if envInject == nil {
+		envInject = make(map[string]string)
+	}
+	envInject["AGENTSH_PTRACE_SYNC"] = ptraceSyncValue
+
 	extraCfg := &extraProcConfig{
 		extraFiles:       []*os.File{sp.child},
 		env:              extraEnv,
-		envInject:        mergeEnvInject(a.cfg, sessionPolicy),
+		envInject:        envInject,
 		notifyParentSock: sp.parent,
 		notifySessionID:  sessionID,
 		notifyPolicy:     sessionPolicy,
