@@ -156,18 +156,12 @@ func isMCPCommand(argv0 string, args []string) bool {
 // the server, and the CLI connects back to the same blocked server.
 // Fail-safe: returns false on any error (worst case is existing deadlock, not a bypass).
 func isAgentshCommand(args []string) bool {
-	// Find the -c command string. Shell args can be:
-	// -c "cmd"    (most common)
-	// -lc "cmd"   (login + command, combined flag)
-	// -l -c "cmd" (login + command, split flags)
+	// Only match exact "-c" flag. We intentionally do NOT handle combined
+	// flags like -lc because login shells can modify PATH via startup files,
+	// making the pre-shell PATH resolution unreliable for bypass decisions.
 	cmdStr := ""
 	for i, a := range args {
 		if a == "-c" && i+1 < len(args) {
-			cmdStr = args[i+1]
-			break
-		}
-		// Combined short flags like -lc, -ic (NOT long options like --norc).
-		if len(a) > 2 && a[0] == '-' && a[1] != '-' && a[len(a)-1] == 'c' && i+1 < len(args) {
 			cmdStr = args[i+1]
 			break
 		}

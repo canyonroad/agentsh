@@ -504,7 +504,8 @@ func TestIsAgentshCommand(t *testing.T) {
 		{"exec agentsh", []string{"-c", "exec agentsh detect"}, true},
 		{"nice agentsh", []string{"-c", "nice agentsh detect"}, true},
 		{"command agentsh", []string{"-c", "command agentsh detect"}, true},
-		{"-lc flag", []string{"-lc", "agentsh detect"}, true},
+		// -lc and -l -c are intentionally NOT handled (login shell PATH risk).
+		{"-lc flag", []string{"-lc", "agentsh detect"}, false},
 		{"-l -c split", []string{"-l", "-c", "agentsh detect"}, true},
 		{"echo hello", []string{"-c", "echo hello"}, false},
 		{"sudo agentsh", []string{"-c", "sudo agentsh detect"}, false},
