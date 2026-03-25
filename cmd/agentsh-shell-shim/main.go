@@ -156,10 +156,26 @@ func isMCPCommand(argv0 string, args []string) bool {
 // the server, and the CLI connects back to the same blocked server.
 // Fail-safe: returns false on any error (worst case is existing deadlock, not a bypass).
 func isAgentshCommand(args []string) bool {
-	if len(args) < 2 || args[0] != "-c" {
+	// Find the -c command string. Shell args can be:
+	// -c "cmd"    (most common)
+	// -lc "cmd"   (login + command, combined flag)
+	// -l -c "cmd" (login + command, split flags)
+	cmdStr := ""
+	for i, a := range args {
+		if a == "-c" && i+1 < len(args) {
+			cmdStr = args[i+1]
+			break
+		}
+		if strings.HasSuffix(a, "c") && strings.HasPrefix(a, "-") && !strings.Contains(a, "=") && i+1 < len(args) {
+			// Combined flags like -lc, -ic, etc.
+			cmdStr = args[i+1]
+			break
+		}
+	}
+	if cmdStr == "" {
 		return false
 	}
-	cmdParts := strings.Fields(args[1])
+	cmdParts := strings.Fields(cmdStr)
 	if len(cmdParts) == 0 {
 		return false
 	}
@@ -217,14 +233,14 @@ func extractCommand(parts []string) string {
 						i++ // skip the argument to -u
 					}
 					i++
-				} else if strings.Contains(w, "=") {
+				} else if isShellAssignment(w) {
 					// VAR=VAL assignment
 					i++
 				} else {
 					break // found the command
 				}
 			}
-		case strings.Contains(word, "=") && !strings.HasPrefix(word, "="):
+		case isShellAssignment(word):
 			// Bare VAR=VAL assignment prefix (e.g., "FOO=1 agentsh detect")
 			i++
 		default:
@@ -232,6 +248,28 @@ func extractCommand(parts []string) string {
 		}
 	}
 	return ""
+}
+
+// isShellAssignment checks if a token is a valid shell variable assignment (VAR=VAL).
+// The variable name must match [A-Za-z_][A-Za-z0-9_]* per POSIX shell grammar.
+func isShellAssignment(s string) bool {
+	idx := strings.IndexByte(s, '=')
+	if idx <= 0 {
+		return false
+	}
+	name := s[:idx]
+	for i, c := range name {
+		if i == 0 {
+			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
+				return false
+			}
+		} else {
+			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func resolveAgentshBin() (string, error) {

@@ -507,6 +507,8 @@ func TestIsAgentshCommand(t *testing.T) {
 		{"env -i agentsh", []string{"-c", "env -i agentsh detect"}, true},
 		{"nice agentsh", []string{"-c", "nice agentsh detect"}, true},
 		{"command agentsh", []string{"-c", "command agentsh detect"}, true},
+		{"-lc flag", []string{"-lc", "agentsh detect"}, true},
+		{"-l -c split", []string{"-l", "-c", "agentsh detect"}, true},
 		{"bare VAR=VAL prefix", []string{"-c", "FOO=1 agentsh detect"}, true},
 		{"multiple VAR=VAL", []string{"-c", "FOO=1 BAR=2 agentsh detect"}, true},
 		{"echo hello", []string{"-c", "echo hello"}, false},
