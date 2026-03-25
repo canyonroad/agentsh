@@ -87,9 +87,6 @@ func main() {
 		}
 	}
 
-	// Close notify socket - we're done with it
-	_ = unix.Close(sockFD)
-
 	// Install signal filter if enabled and we have a signal socket
 	sigSockFD, _ := signalSockFD()
 	if cfg.SignalFilterEnabled && sigSockFD >= 0 {
@@ -110,12 +107,28 @@ func main() {
 	}
 
 	// Apply Landlock filesystem restrictions before exec.
-	// Landlock enforces kernel-level filesystem access control that works even for root.
 	if cfg.LandlockEnabled && cfg.LandlockABI > 0 {
 		if err := applyLandlock(cfg); err != nil {
 			log.Printf("landlock: %v (continuing without)", err)
 		}
 	}
+
+	// Ptrace sync handshake: when the server will attach ptrace after our
+	// seccomp setup, we signal READY and wait for GO before exec. This
+	// prevents ptrace from interfering with seccomp filter installation.
+	// Only runs when notifFD >= 0 (seccomp is active) and AGENTSH_PTRACE_SYNC=1.
+	if notifFD >= 0 && os.Getenv("AGENTSH_PTRACE_SYNC") == "1" {
+		if _, err := unix.Write(sockFD, []byte{'R'}); err != nil {
+			log.Fatalf("send READY byte: %v", err)
+		}
+		// Wait for GO byte, retrying on EINTR.
+		if err := waitForACK(func(b []byte) (int, error) { return unix.Read(sockFD, b) }); err != nil {
+			log.Fatalf("wait for GO byte: %v", err)
+		}
+	}
+
+	// Close notify socket - done with all handshakes
+	_ = unix.Close(sockFD)
 
 	// Exec the real command.
 	cmd := os.Args[2]
