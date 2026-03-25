@@ -523,10 +523,15 @@ func TestIsAgentshCommand(t *testing.T) {
 		// Compound commands — bypass disabled (could bypass enforcement for chained commands).
 		{"semicolon chain", []string{"-c", "agentsh detect; echo done"}, false},
 		{"and chain", []string{"-c", "agentsh detect && echo done"}, false},
+		{"or chain", []string{"-c", "agentsh detect || echo done"}, false},
 		{"pipe", []string{"-c", "agentsh detect | grep ok"}, false},
 		{"subshell", []string{"-c", "$(agentsh detect)"}, false},
 		{"backtick", []string{"-c", "`agentsh detect`"}, false},
 		{"newline separator", []string{"-c", "agentsh detect\nother-cmd"}, false},
+		// Redirections are NOT compound — they're single commands.
+		{"stderr redirect", []string{"-c", "agentsh detect 2>&1"}, true},
+		{"stdout redirect", []string{"-c", "agentsh detect > /dev/null"}, true},
+		{"stderr to file", []string{"-c", "agentsh detect 2>/dev/null"}, true},
 		{"script with -c arg", []string{"script.sh", "-c", "agentsh detect"}, false},
 		{"no -c flag", []string{"agentsh", "detect"}, false},
 		{"empty command", []string{"-c", ""}, false},
