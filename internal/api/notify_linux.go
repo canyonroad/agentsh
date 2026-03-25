@@ -4,12 +4,14 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"syscall"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/approvals"
@@ -308,7 +310,15 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 			// Use 30s timeout for READY (wrapper does signal filter + Landlock setup after ACK).
 			_ = parentSock.SetReadDeadline(time.Now().Add(30 * time.Second))
 			readyBuf := make([]byte, 1)
-			_, readyErr := parentSock.Read(readyBuf)
+			// Retry on EINTR (signal interruption during read).
+			var readyErr error
+			for {
+				_, readyErr = parentSock.Read(readyBuf)
+				if readyErr != nil && errors.Is(readyErr, syscall.EINTR) {
+					continue
+				}
+				break
+			}
 			if readyErr != nil {
 				ptraceReady <- fmt.Errorf("read READY byte: %w", readyErr)
 			} else if readyBuf[0] != 'R' {
