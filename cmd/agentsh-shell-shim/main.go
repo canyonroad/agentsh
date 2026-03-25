@@ -192,8 +192,12 @@ func isAgentshCommand(args []string) bool {
 	return cmdResolved == agentshResolved
 }
 
-// extractCommand skips common shell prefixes (exec, env, nice, etc.) to find
-// the actual executable name from a list of command parts.
+// extractCommand skips common shell prefixes (exec, env, nice, etc.) and
+// VAR=VAL assignments to find the actual executable name from a list of
+// command parts. Note: uses strings.Fields tokenization which is not
+// shell-aware (doesn't handle quoting). This is acceptable because the
+// fail-safe direction is false (no bypass = existing deadlock, not a
+// security bypass).
 func extractCommand(parts []string) string {
 	i := 0
 	for i < len(parts) {
@@ -220,6 +224,9 @@ func extractCommand(parts []string) string {
 					break // found the command
 				}
 			}
+		case strings.Contains(word, "=") && !strings.HasPrefix(word, "="):
+			// Bare VAR=VAL assignment prefix (e.g., "FOO=1 agentsh detect")
+			i++
 		default:
 			return word
 		}
