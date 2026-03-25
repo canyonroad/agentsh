@@ -260,6 +260,10 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	hasNotifyFeatures := seccompCfg.UnixSocketEnabled || seccompCfg.ExecveEnabled || seccompCfg.FileMonitorEnabled || seccompCfg.InterceptMetadata
 	if a.ptraceTracer != nil && hasNotifyFeatures {
 		extraEnv["AGENTSH_PTRACE_SYNC"] = "1"
+	} else {
+		// Explicitly clear to prevent user-injected values from activating
+		// the handshake in non-hybrid mode (would cause a 30s hang).
+		extraEnv["AGENTSH_PTRACE_SYNC"] = "0"
 	}
 	if seccompJSON, ok := wrappedReq.Env["AGENTSH_SECCOMP_CONFIG"]; ok {
 		extraEnv["AGENTSH_SECCOMP_CONFIG"] = seccompJSON
