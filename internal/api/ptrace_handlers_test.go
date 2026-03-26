@@ -121,6 +121,80 @@ func TestHandleFile_SoftDelete(t *testing.T) {
 	}
 }
 
+func newDnsRedirectEngine(t *testing.T) *policy.Engine {
+	t.Helper()
+	p := &policy.Policy{
+		Version: 1,
+		Name:    "test-dns-redirect",
+		DnsRedirectRules: []policy.DnsRedirectRule{
+			{
+				Name:       "redirect-test",
+				Match:      `redirectme\.example\.com`,
+				ResolveTo:  "127.0.0.1",
+				Visibility: "audit_only",
+				OnFailure:  "fail_closed",
+			},
+		},
+		NetworkRules: []policy.NetworkRule{
+			{
+				Name:     "allow-all",
+				Domains:  []string{"*"},
+				Decision: "allow",
+			},
+		},
+	}
+	engine, err := policy.NewEngine(p, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	return engine
+}
+
+func TestHandleNetwork_DnsRedirect(t *testing.T) {
+	router, mgr := newTestRouter(t, "")
+	sess, err := mgr.CreateWithID("test-dns-redirect", t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("CreateWithID: %v", err)
+	}
+	sess.SetPolicyEngine(newDnsRedirectEngine(t))
+
+	// Matching domain should return synthetic records.
+	result := router.HandleNetwork(context.Background(), ptrace.NetworkContext{
+		SessionID: sess.ID,
+		PID:       1234,
+		Operation: "dns",
+		Domain:    "redirectme.example.com",
+		Port:      53,
+	})
+	if result.Action != "redirect" {
+		t.Errorf("Action = %q, want %q", result.Action, "redirect")
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Records len = %d, want 1", len(result.Records))
+	}
+	if result.Records[0].Type != 1 {
+		t.Errorf("Record type = %d, want 1 (A)", result.Records[0].Type)
+	}
+	if result.Records[0].Value != "127.0.0.1" {
+		t.Errorf("Record value = %q, want %q", result.Records[0].Value, "127.0.0.1")
+	}
+
+	// Non-matching domain should fall through to normal network policy (no synthetic records).
+	result = router.HandleNetwork(context.Background(), ptrace.NetworkContext{
+		SessionID: sess.ID,
+		PID:       1234,
+		Operation: "dns",
+		Domain:    "github.com",
+		Port:      53,
+	})
+	if result.Action == "redirect" {
+		t.Errorf("non-matching: Action = %q, should not be redirect", result.Action)
+	}
+	if len(result.Records) != 0 {
+		t.Errorf("non-matching: Records len = %d, want 0", len(result.Records))
+	}
+}
+
 func TestHandleFile_SoftDeleteNoTrashDir(t *testing.T) {
 	// When trash path resolves to empty (no workspace), soft-delete denies.
 	router, mgr := newTestRouter(t, "")

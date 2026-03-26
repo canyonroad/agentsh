@@ -214,6 +214,37 @@ func (r *ptraceHandlerRouter) HandleNetwork(ctx context.Context, nc ptrace.Netwo
 		return ptrace.NetworkResult{Allow: false, Action: "deny", Errno: int32(syscall.EACCES)}
 	}
 
+	// For DNS operations, check redirect rules first, then allow/deny.
+	if nc.Operation == "dns" && nc.Domain != "" {
+		redirectResult := pe.EvaluateDnsRedirect(nc.Domain)
+		if redirectResult.Matched {
+			ev := types.Event{
+				ID:        uuid.NewString(),
+				Timestamp: time.Now().UTC(),
+				Type:      "dns_redirect",
+				SessionID: nc.SessionID,
+				Fields: map[string]any{
+					"pid":           nc.PID,
+					"original_host": nc.Domain,
+					"resolved_to":   redirectResult.ResolveTo,
+					"rule":          redirectResult.Rule,
+					"visibility":    redirectResult.Visibility,
+				},
+			}
+			if redirectResult.Visibility != "silent" {
+				_ = r.store.AppendEvent(ctx, ev)
+				r.broker.Publish(ev)
+			}
+			return ptrace.NetworkResult{
+				Allow:  true,
+				Action: "redirect",
+				Records: []ptrace.DNSRecord{
+					{Type: 1, Value: redirectResult.ResolveTo, TTL: 60},
+				},
+			}
+		}
+	}
+
 	// For DNS operations, evaluate the domain being queried rather than
 	// the resolver address (which is often a private IP like 172.x.x.x
 	// and would be blocked by private-network rules).
