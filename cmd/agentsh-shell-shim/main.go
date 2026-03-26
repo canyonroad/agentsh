@@ -133,7 +133,18 @@ func main() {
 	args = append(args, "--argv0", argv0, sessID, "--", realShell)
 	args = append(args, os.Args[1:]...)
 
-	execOrExit(agentshBin, args, os.Environ())
+	if tty {
+		// Interactive/PTY mode: replace the process entirely so terminal
+		// semantics (job control, signals, resize) work naturally.
+		execOrExit(agentshBin, args, os.Environ())
+	} else {
+		// Non-PTY mode (Daytona, E2B, programmatic APIs): run agentsh exec
+		// as a child process and wait for it. Using syscall.Exec here causes
+		// output capture issues in sandbox toolboxes — the toolbox may not
+		// see output written by the exec'd process before it exits. Running
+		// as a child keeps the shim's pipes alive until all output is read.
+		runAndExit(agentshBin, args[1:], os.Environ())
+	}
 }
 
 // isMCPCommand checks if the command being executed is an MCP server.
@@ -359,6 +370,30 @@ func execOrExit(path string, argv []string, env []string) {
 			"If you see 'permission denied' in a container, check that the shim and agentsh binaries are executable.",
 		)
 	}
+}
+
+// runAndExit runs a command as a child process, waits for it, and exits with
+// its exit code. Used for non-PTY mode where syscall.Exec causes output capture
+// issues in sandbox toolboxes (Daytona, E2B). The shim stays alive as the parent,
+// keeping the toolbox's pipes connected to a living process until all output is
+// written and the child exits.
+func runAndExit(path string, args []string, env []string) {
+	cmd := exec.Command(path, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = env
+	debugLog("runAndExit: %s %v", path, args)
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			os.Exit(ee.ExitCode())
+		}
+		fatalWithHint(127,
+			fmt.Sprintf("agentsh-shell-shim: run %s: %v", path, err),
+			"If you see 'permission denied' in a container, check that the shim and agentsh binaries are executable.",
+		)
+	}
+	os.Exit(0)
 }
 
 func fatalWithHint(code int, msg string, hint string) {

@@ -95,9 +95,19 @@ func ensureServerRunning(ctx context.Context, serverAddr string, log io.Writer) 
 	}
 	fmt.Fprintf(log, "agentsh: auto-starting server (config %s)\n", configPath)
 
+	// Open /dev/null for the daemon's stdout and stderr. The daemon must NOT
+	// inherit the CLI's stdio fds — in sandboxes like Daytona, the CLI's fds
+	// are pipes that the toolbox waits for EOF on. A long-running daemon holding
+	// these pipes open blocks the toolbox indefinitely.
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("open %s for daemon: %w", os.DevNull, err)
+	}
+	defer devNull.Close()
+
 	cmd := exec.Command(os.Args[0], "server", "--config", configPath)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = log
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("auto-start server: %w", err)
 	}

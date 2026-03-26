@@ -604,3 +604,112 @@ func TestFatalWithHint(t *testing.T) {
 		}
 	})
 }
+
+// TestShimForced_NonPTY_CapturesOutput verifies the fix for Bug 3:
+// in forced non-PTY mode (Daytona pattern), the shim must capture all output
+// from the agentsh exec child process. With syscall.Exec, the output was lost
+// because the toolbox didn't see data written by the exec'd process. With
+// exec.Command (the fix), the shim stays alive as a parent, piping output through.
+//
+// This simulates the Daytona toolbox pattern: start the shim with pipes for
+// stdout/stderr, force non-interactive enforcement, and verify output arrives.
+func TestShimForced_NonPTY_CapturesOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a fake agentsh binary that simulates "agentsh exec":
+	// skip args until "--", then run the remaining args as a command.
+	// This mimics the real CLI connecting to the server and printing output.
+	fakeAgentsh := filepath.Join(tmp, "agentsh")
+	fakeScript := `#!/bin/sh
+# Simulate agentsh exec: skip flags until --, then exec the command
+while [ "$1" != "--" ] && [ $# -gt 0 ]; do shift; done
+shift  # skip the --
+exec "$@"
+`
+	if err := os.WriteFile(fakeAgentsh, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run the shim in forced non-PTY mode (simulating Daytona).
+	// Stdin is a pipe (non-TTY), AGENTSH_SHIM_FORCE=1 prevents bypass.
+	cmd := exec.Command(shimBin, "-c", "echo daytona-capture-test && echo stderr-test >&2")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=" + tmp + ":/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_FORCE=1",
+		"AGENTSH_BIN=" + fakeAgentsh,
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("shim exited with error: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+
+	// Verify stdout was captured (this is what failed with syscall.Exec in Daytona).
+	gotOut := strings.TrimSpace(stdout.String())
+	if gotOut != "daytona-capture-test" {
+		t.Errorf("stdout = %q, want %q (Bug 3: output not captured in non-PTY forced mode)", gotOut, "daytona-capture-test")
+	}
+
+	// Verify stderr was also captured.
+	if !strings.Contains(stderr.String(), "stderr-test") {
+		t.Errorf("stderr missing expected content; got: %q", stderr.String())
+	}
+}
+
+// TestShimForced_NonPTY_PropagatesExitCode verifies that in forced non-PTY mode,
+// the shim correctly propagates the child's exit code.
+func TestShimForced_NonPTY_PropagatesExitCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeAgentsh := filepath.Join(tmp, "agentsh")
+	fakeScript := `#!/bin/sh
+while [ "$1" != "--" ] && [ $# -gt 0 ]; do shift; done
+shift
+exec "$@"
+`
+	if err := os.WriteFile(fakeAgentsh, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(shimBin, "-c", "exit 42")
+	cmd.Stdin = strings.NewReader("")
+	cmd.Env = []string{
+		"PATH=" + tmp + ":/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_FORCE=1",
+		"AGENTSH_BIN=" + fakeAgentsh,
+	}
+
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected non-zero exit code")
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected ExitError, got %T: %v", err, err)
+	}
+	if ee.ExitCode() != 42 {
+		t.Fatalf("exit code = %d, want 42", ee.ExitCode())
+	}
+}
