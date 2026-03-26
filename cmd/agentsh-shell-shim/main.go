@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/agentsh/agentsh/internal/shim"
@@ -367,24 +369,53 @@ func execOrExit(path string, argv []string, env []string) {
 	}
 }
 
-// runAndExit runs a command as a child process, waits for it, and exits with
-// its exit code. Used for non-PTY mode where syscall.Exec causes output capture
-// issues in sandbox toolboxes (Daytona, E2B). The shim stays alive as the parent,
-// keeping the toolbox's pipes connected to a living process until all output is
-// written and the child exits.
+// runAndExit runs a command as a child process, copies its stdout/stderr
+// through the shim process, and exits with the child's exit code.
+//
+// Critical: the shim must read the child's output via pipes and re-write it
+// to its own stdout/stderr. Direct fd pass-through (cmd.Stdout = os.Stdout)
+// doesn't work in sandbox toolboxes like Daytona because the toolbox captures
+// output per-process — writes from a child PID aren't attributed to the shim
+// PID that the toolbox started. By piping through, all output flows through
+// the shim process that the toolbox is monitoring.
 func runAndExit(path string, args []string, env []string) {
 	cmd := exec.Command(path, args...)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	cmd.Env = env
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		fatalWithHint(127, fmt.Sprintf("agentsh-shell-shim: stdout pipe: %v", err), "")
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		fatalWithHint(127, fmt.Sprintf("agentsh-shell-shim: stderr pipe: %v", err), "")
+	}
+
 	debugLog("runAndExit: %s %v", path, args)
-	if err := cmd.Run(); err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
+	if err := cmd.Start(); err != nil {
+		fatalWithHint(127,
+			fmt.Sprintf("agentsh-shell-shim: run %s: %v", path, err),
+			"If you see 'permission denied' in a container, check that the shim and agentsh binaries are executable.",
+		)
+	}
+
+	// Copy child stdout/stderr through the shim process concurrently.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = io.Copy(os.Stdout, stdoutPipe) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(os.Stderr, stderrPipe) }()
+
+	// Wait for pipes to drain, then wait for process exit.
+	wg.Wait()
+	waitErr := cmd.Wait()
+
+	if waitErr != nil {
+		if ee, ok := waitErr.(*exec.ExitError); ok {
 			os.Exit(ee.ExitCode())
 		}
 		fatalWithHint(127,
-			fmt.Sprintf("agentsh-shell-shim: run %s: %v", path, err),
+			fmt.Sprintf("agentsh-shell-shim: run %s: %v", path, waitErr),
 			"If you see 'permission denied' in a container, check that the shim and agentsh binaries are executable.",
 		)
 	}
