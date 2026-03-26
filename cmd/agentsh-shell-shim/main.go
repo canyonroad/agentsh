@@ -46,7 +46,7 @@ func main() {
 			}
 		}
 		debugLog("recursion guard: executing real shell %s", realShell)
-		runAndExit(realShell, os.Args[1:], os.Environ())
+		runAndExit(realShell, argv0, os.Args[1:], os.Environ())
 		return
 	}
 
@@ -65,7 +65,7 @@ func main() {
 	// agentsh debug policy-test, agentsh trash list, etc.
 	if isAgentshCommand(os.Args[1:]) {
 		debugLog("agentsh CLI bypass: command is agentsh itself, executing real shell %s", realShell)
-		runAndExit(realShell, os.Args[1:], os.Environ())
+		runAndExit(realShell, argv0, os.Args[1:], os.Environ())
 		return
 	}
 
@@ -102,7 +102,7 @@ func main() {
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) && forceShim != "1" {
 		debugLog("non-interactive bypass: stdin is not a tty, executing real shell %s", realShell)
-		runAndExit(realShell, os.Args[1:], os.Environ())
+		runAndExit(realShell, argv0, os.Args[1:], os.Environ())
 		return
 	}
 
@@ -144,7 +144,7 @@ func main() {
 	// With syscall.Exec, the toolbox may not see output written by the exec'd
 	// process. Running as a child keeps the shim's pipes alive and the parent
 	// process visible to the toolbox until all output is written.
-	runAndExit(agentshBin, args[1:], os.Environ())
+	runAndExit(agentshBin, "", args[1:], os.Environ())
 }
 
 // isMCPCommand checks if the command being executed is an MCP server.
@@ -381,8 +381,15 @@ func execOrExit(path string, argv []string, env []string) {
 // output per-process — writes from a child PID aren't attributed to the shim
 // PID that the toolbox started. By piping through, all output flows through
 // the shim process that the toolbox is monitoring.
-func runAndExit(path string, args []string, env []string) {
+//
+// argv0 overrides the child's argv[0] if non-empty. This is needed because
+// busybox (Alpine) uses argv[0] to determine which applet to run — if the
+// binary is "/bin/sh.real" but argv[0] must be "sh" for busybox to work.
+func runAndExit(path string, argv0 string, args []string, env []string) {
 	cmd := exec.Command(path, args...)
+	if argv0 != "" && len(cmd.Args) > 0 {
+		cmd.Args[0] = argv0
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Env = env
 
@@ -395,7 +402,7 @@ func runAndExit(path string, args []string, env []string) {
 		fatalWithHint(127, fmt.Sprintf("agentsh-shell-shim: stderr pipe: %v", err), "")
 	}
 
-	debugLog("runAndExit: %s %v", path, args)
+	debugLog("runAndExit: path=%s argv0=%s args=%v", path, argv0, args)
 	if err := cmd.Start(); err != nil {
 		fatalWithHint(127,
 			fmt.Sprintf("agentsh-shell-shim: run %s: %v", path, err),
