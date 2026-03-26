@@ -133,18 +133,13 @@ func main() {
 	args = append(args, "--argv0", argv0, sessID, "--", realShell)
 	args = append(args, os.Args[1:]...)
 
-	if tty {
-		// Interactive/PTY mode: replace the process entirely so terminal
-		// semantics (job control, signals, resize) work naturally.
-		execOrExit(agentshBin, args, os.Environ())
-	} else {
-		// Non-PTY mode (Daytona, E2B, programmatic APIs): run agentsh exec
-		// as a child process and wait for it. Using syscall.Exec here causes
-		// output capture issues in sandbox toolboxes — the toolbox may not
-		// see output written by the exec'd process before it exits. Running
-		// as a child keeps the shim's pipes alive until all output is read.
-		runAndExit(agentshBin, args[1:], os.Environ())
-	}
+	// Run agentsh exec as a child process rather than replacing the shim via
+	// syscall.Exec. In sandbox toolboxes (Daytona, E2B), the toolbox captures
+	// output by reading pipes attached to the process it started (the shim).
+	// With syscall.Exec, the toolbox may not see output written by the exec'd
+	// process. Running as a child keeps the shim's pipes alive and the parent
+	// process visible to the toolbox until all output is written.
+	runAndExit(agentshBin, args[1:], os.Environ())
 }
 
 // isMCPCommand checks if the command being executed is an MCP server.
