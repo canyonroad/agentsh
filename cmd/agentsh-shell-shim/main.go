@@ -18,6 +18,9 @@ func main() {
 	argv0 := os.Args[0]
 	invoked := filepath.Base(argv0)
 
+	// Version stamp — always log when debug is on so we can verify which binary is deployed.
+	debugLog("shim v0.16.8+167 (pipe-through mode) invoked=%s argv=%v", invoked, os.Args)
+
 	shellName := strings.TrimLeft(invoked, "-")
 	if shellName != "sh" && shellName != "bash" {
 		// Default to sh semantics for unknown names.
@@ -43,7 +46,7 @@ func main() {
 			}
 		}
 		debugLog("recursion guard: executing real shell %s", realShell)
-		execOrExit(realShell, append([]string{argv0}, os.Args[1:]...), os.Environ())
+		runAndExit(realShell, os.Args[1:], os.Environ())
 		return
 	}
 
@@ -62,7 +65,7 @@ func main() {
 	// agentsh debug policy-test, agentsh trash list, etc.
 	if isAgentshCommand(os.Args[1:]) {
 		debugLog("agentsh CLI bypass: command is agentsh itself, executing real shell %s", realShell)
-		execOrExit(realShell, append([]string{argv0}, os.Args[1:]...), os.Environ())
+		runAndExit(realShell, os.Args[1:], os.Environ())
 		return
 	}
 
@@ -99,7 +102,7 @@ func main() {
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) && forceShim != "1" {
 		debugLog("non-interactive bypass: stdin is not a tty, executing real shell %s", realShell)
-		execOrExit(realShell, append([]string{argv0}, os.Args[1:]...), os.Environ())
+		runAndExit(realShell, os.Args[1:], os.Environ())
 		return
 	}
 
