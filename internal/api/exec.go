@@ -210,6 +210,7 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		}
 	}
 	cmd.Env = env
+	slog.Debug("exec env final", "command", req.Command, "env_count", len(env), "has_extra", extra != nil, "envInject_count", func() int { if extra != nil { return len(extra.envInject) }; return 0 }())
 	if extra != nil && len(extra.extraFiles) > 0 {
 		cmd.ExtraFiles = append(cmd.ExtraFiles, extra.extraFiles...)
 	}
@@ -491,12 +492,12 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	}
 
 	waitStart := time.Now()
-	slog.Debug("exec waiting for command", "command", req.Command, "pid", cmd.Process.Pid)
+	slog.Debug("exec waiting for command", "command", req.Command, "pid", cmd.Process.Pid, "tracer_nil", tracer == nil, "hook_nil", hook == nil, "extra_nil", extra == nil)
 	waitErr := cmd.Wait()
 	waitDuration := time.Since(waitStart)
-	slog.Debug("exec command finished", "command", req.Command, "pid", cmd.Process.Pid, "wait_error", waitErr, "ctx_err", ctx.Err(), "wait_duration_ms", waitDuration.Milliseconds())
 	stdout, stderr = stdoutW.Bytes(), stderrW.Bytes()
 	stdoutTotal, stderrTotal = stdoutW.total, stderrW.total
+	slog.Debug("exec command finished", "command", req.Command, "pid", cmd.Process.Pid, "wait_error", waitErr, "ctx_err", ctx.Err(), "wait_duration_ms", waitDuration.Milliseconds(), "stdout_len", len(stdout), "stdout_total", stdoutW.total, "stderr_len", len(stderr), "stderr_total", stderrW.total, "stdout_truncated", stdoutW.truncated)
 	stdoutTrunc, stderrTrunc = stdoutW.truncated, stderrW.truncated
 
 	resources = resourcesFromProcessState(cmd.ProcessState)
