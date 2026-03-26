@@ -605,6 +605,147 @@ func TestFatalWithHint(t *testing.T) {
 	})
 }
 
+// TestShimForced_StdinMode_CapturesOutput verifies the Daytona stdin-mode fix:
+// Daytona invokes bare /bin/bash (no args) and sends commands via stdin.
+// The shim must detect this, read stdin, convert to -c, and route through
+// agentsh exec for policy enforcement. Output must be captured.
+func TestShimForced_StdinMode_CapturesOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeAgentsh := filepath.Join(tmp, "agentsh")
+	fakeScript := `#!/bin/sh
+# Simulate agentsh exec: skip flags until --, then exec the command
+while [ "$1" != "--" ] && [ $# -gt 0 ]; do shift; done
+shift  # skip the --
+exec "$@"
+`
+	if err := os.WriteFile(fakeAgentsh, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate Daytona: invoke bare /bin/bash (no args), send command on stdin.
+	cmd := exec.Command(shimBin) // no -c, no args — bare invocation
+	cmd.Stdin = strings.NewReader("echo stdin-mode-works\n")
+	cmd.Env = []string{
+		"PATH=" + tmp + ":/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_FORCE=1",
+		"AGENTSH_BIN=" + fakeAgentsh,
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("shim exited with error: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+
+	gotOut := strings.TrimSpace(stdout.String())
+	if gotOut != "stdin-mode-works" {
+		t.Errorf("stdout = %q, want %q (stdin-mode: command from stdin not executed)", gotOut, "stdin-mode-works")
+	}
+}
+
+// TestShimForced_StdinMode_MultiLine verifies that multi-line stdin commands
+// are correctly converted to -c and executed.
+func TestShimForced_StdinMode_MultiLine(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeAgentsh := filepath.Join(tmp, "agentsh")
+	fakeScript := `#!/bin/sh
+while [ "$1" != "--" ] && [ $# -gt 0 ]; do shift; done
+shift
+exec "$@"
+`
+	if err := os.WriteFile(fakeAgentsh, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Multi-line script on stdin.
+	cmd := exec.Command(shimBin)
+	cmd.Stdin = strings.NewReader("echo line1\necho line2\n")
+	cmd.Env = []string{
+		"PATH=" + tmp + ":/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_FORCE=1",
+		"AGENTSH_BIN=" + fakeAgentsh,
+	}
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("shim exited with error: %v", err)
+	}
+
+	got := stdout.String()
+	if !strings.Contains(got, "line1") || !strings.Contains(got, "line2") {
+		t.Errorf("stdout = %q, want both line1 and line2", got)
+	}
+}
+
+// TestShimForced_StdinMode_PropagatesExitCode verifies exit code propagation
+// when using stdin-mode.
+func TestShimForced_StdinMode_PropagatesExitCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeAgentsh := filepath.Join(tmp, "agentsh")
+	fakeScript := `#!/bin/sh
+while [ "$1" != "--" ] && [ $# -gt 0 ]; do shift; done
+shift
+exec "$@"
+`
+	if err := os.WriteFile(fakeAgentsh, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(shimBin)
+	cmd.Stdin = strings.NewReader("exit 77\n")
+	cmd.Env = []string{
+		"PATH=" + tmp + ":/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_FORCE=1",
+		"AGENTSH_BIN=" + fakeAgentsh,
+	}
+
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected non-zero exit code")
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected ExitError, got %T: %v", err, err)
+	}
+	if ee.ExitCode() != 77 {
+		t.Fatalf("exit code = %d, want 77", ee.ExitCode())
+	}
+}
+
 // TestShimForced_NonPTY_CapturesOutput verifies the fix for Bug 3:
 // in forced non-PTY mode (Daytona pattern), the shim must capture all output
 // from the agentsh exec child process. With syscall.Exec, the output was lost

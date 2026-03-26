@@ -19,7 +19,7 @@ func main() {
 	invoked := filepath.Base(argv0)
 
 	// Version stamp — always log when debug is on so we can verify which binary is deployed.
-	debugLog("shim v0.16.8+167 (pipe-through mode) invoked=%s argv=%v", invoked, os.Args)
+	debugLog("shim v0.16.8+170 (pipe-through mode) invoked=%s argv=%v", invoked, os.Args)
 
 	shellName := strings.TrimLeft(invoked, "-")
 	if shellName != "sh" && shellName != "bash" {
@@ -127,6 +127,23 @@ func main() {
 	}
 	debugLog("resolved session: id=%s file=%s wd=%s", sessID, sessFile, wd)
 
+	// Stdin-mode detection: when the shim is invoked with no command args
+	// (bare /bin/bash, no -c) and stdin is a pipe, the caller is sending
+	// the command via stdin (e.g. Daytona toolbox). Read stdin and convert
+	// to -c so the command goes through agentsh policy enforcement.
+	shellArgs := os.Args[1:]
+	if len(shellArgs) == 0 && !term.IsTerminal(int(os.Stdin.Fd())) {
+		debugLog("stdin-mode: no shell args, stdin is pipe — reading command from stdin")
+		stdinData, err := io.ReadAll(os.Stdin)
+		if err == nil {
+			cmd := strings.TrimSpace(string(stdinData))
+			if cmd != "" {
+				debugLog("stdin-mode: read %d bytes, converting to -c", len(stdinData))
+				shellArgs = []string{"-c", cmd}
+			}
+		}
+	}
+
 	tty := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 	args := []string{agentshBin, "exec"}
 	if tty {
@@ -136,7 +153,7 @@ func main() {
 		args = append(args, "--session-file", sessFile)
 	}
 	args = append(args, "--argv0", argv0, sessID, "--", realShell)
-	args = append(args, os.Args[1:]...)
+	args = append(args, shellArgs...)
 
 	// Run agentsh exec as a child process rather than replacing the shim via
 	// syscall.Exec. In sandbox toolboxes (Daytona, E2B), the toolbox captures
