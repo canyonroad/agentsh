@@ -42,9 +42,9 @@ const (
 	auditArchAarch64 = 0xC00000B7
 
 	// openatWriteMask is the bitmask of openat flags that indicate a
-	// non-read-only operation. O_WRONLY|O_RDWR|O_CREAT|__O_TMPFILE.
+	// non-read-only operation. O_WRONLY|O_RDWR|O_TRUNC|O_APPEND|O_CREAT|__O_TMPFILE.
 	// If (flags & openatWriteMask) == 0, the open is read-only.
-	openatWriteMask = 0x400043
+	openatWriteMask = 0x400643
 )
 
 // buildBPFForSyscalls generates a seccomp-BPF filter that returns

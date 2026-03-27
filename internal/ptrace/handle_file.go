@@ -48,7 +48,7 @@ func openatOperation(flags int) string {
 	if flags&unix.O_TMPFILE == unix.O_TMPFILE {
 		return "create"
 	}
-	if flags&(unix.O_WRONLY|unix.O_RDWR) != 0 {
+	if flags&(unix.O_WRONLY|unix.O_RDWR|unix.O_APPEND|unix.O_TRUNC) != 0 {
 		return "write"
 	}
 	return "open"
