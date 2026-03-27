@@ -5,6 +5,7 @@ package unix
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/agentsh/agentsh/pkg/types"
@@ -78,6 +79,14 @@ func (h *FileHandler) EmulateOpen() bool {
 //  2. Path under FUSE mount -> audit-only (FUSE handles enforcement).
 //  3. Otherwise -> full enforcement based on policy decision and enforce flag.
 func (h *FileHandler) Handle(req FileRequest) FileResult {
+	// 0. Pseudo-paths (pipe:[...], socket:[...], anon_inode:[...]) resolve
+	//    from /proc/<pid>/fd/<N> for non-filesystem fds. They are not
+	//    filesystem objects and cannot match path-based policy rules —
+	//    allow unconditionally to avoid spurious denials.
+	if req.Path != "" && !strings.HasPrefix(req.Path, "/") {
+		return FileResult{Action: ActionContinue}
+	}
+
 	// 1. No policy configured — allow everything.
 	if h.policy == nil {
 		dec := FilePolicyDecision{

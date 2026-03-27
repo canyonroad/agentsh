@@ -488,3 +488,37 @@ func TestFileHandler_EmulateOpen_Field(t *testing.T) {
 	handler.SetEmulateOpen(true)
 	assert.True(t, handler.emulateOpen)
 }
+
+func TestFileHandler_PseudoPath_AllowedUnconditionally(t *testing.T) {
+	// Even if a pseudo-path somehow ended up in the deny map,
+	// Handle should short-circuit before reaching policy evaluation.
+	policy := &mockFilePolicy{
+		decisions: map[string]FilePolicyDecision{
+			"pipe:[12345]": {
+				Decision:          "deny",
+				EffectiveDecision: "deny",
+				Rule:              "deny_all",
+			},
+		},
+	}
+	emitter := &mockFileEmitter{}
+	registry := NewMountRegistry()
+	handler := NewFileHandler(policy, registry, emitter, true)
+
+	pseudoPaths := []string{
+		"pipe:[12345]",
+		"socket:[67890]",
+		"anon_inode:[eventpoll]",
+	}
+	for _, pp := range pseudoPaths {
+		req := FileRequest{
+			PID:       1234,
+			Syscall:   int32(unix.SYS_NEWFSTATAT),
+			Path:      pp,
+			Operation: "stat",
+			SessionID: "sess-1",
+		}
+		result := handler.Handle(req)
+		assert.Equal(t, ActionContinue, result.Action, "pseudo-path %q should be allowed", pp)
+	}
+}
