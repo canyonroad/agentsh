@@ -132,6 +132,9 @@ func (f *Filter) Respond(reqID uint64, allow bool, errno int32) error {
 	if allow {
 		return NotifRespondContinue(int(f.fd), reqID)
 	}
+	if errno <= 0 {
+		errno = int32(unix.EPERM) // normalize invalid errno to avoid unanswered notification
+	}
 	return NotifRespondDeny(int(f.fd), reqID, errno)
 }
 
