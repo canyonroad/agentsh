@@ -58,7 +58,9 @@ func ServeNotify(ctx context.Context, fd *os.File, sessID string, pol *policy.En
 		}
 		ctxReq := ExtractContext(req)
 		if !isUnixSocketSyscall(ctxReq.Syscall) {
-			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue})
+			if err := NotifRespondContinue(int(scmpFD), req.ID); err != nil {
+				slog.Debug("notify loop: continue response failed", "error", err)
+			}
 			continue
 		}
 		allow := true
@@ -77,13 +79,15 @@ func ServeNotify(ctx context.Context, fd *os.File, sessID string, pol *policy.En
 				}
 			}
 		}
-		resp := seccomp.ScmpNotifResp{ID: req.ID}
 		if allow {
-			resp.Flags = seccomp.NotifRespFlagContinue
+			if err := NotifRespondContinue(int(scmpFD), req.ID); err != nil {
+				slog.Debug("unix socket: continue response failed", "error", err)
+			}
 		} else {
-			resp.Error = -errno
+			if err := NotifRespondDeny(int(scmpFD), req.ID, errno); err != nil {
+				slog.Error("unix socket: deny response failed", "path", path, "error", err)
+			}
 		}
-		_ = seccomp.NotifRespond(scmpFD, &resp)
 	}
 }
 
@@ -217,13 +221,17 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		ctxReq := ExtractContext(req)
 		if !isUnixSocketSyscall(ctxReq.Syscall) {
 			slog.Debug("ServeNotifyWithExecve: non-unix syscall, allowing", "session_id", sessID, "syscall", ctxReq.Syscall)
-			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue})
+			if err := NotifRespondContinue(int(scmpFD), req.ID); err != nil {
+				slog.Debug("notify loop: continue response failed", "error", err)
+			}
 			continue
 		}
 
 		// Skip policy check if pol is nil - just allow
 		if pol == nil {
-			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue})
+			if err := NotifRespondContinue(int(scmpFD), req.ID); err != nil {
+				slog.Debug("notify loop: continue response failed", "error", err)
+			}
 			continue
 		}
 
@@ -243,13 +251,15 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 				}
 			}
 		}
-		resp := seccomp.ScmpNotifResp{ID: req.ID}
 		if allow {
-			resp.Flags = seccomp.NotifRespFlagContinue
+			if err := NotifRespondContinue(int(scmpFD), req.ID); err != nil {
+				slog.Debug("unix socket: continue response failed", "error", err)
+			}
 		} else {
-			resp.Error = -errno
+			if err := NotifRespondDeny(int(scmpFD), req.ID, errno); err != nil {
+				slog.Error("unix socket: deny response failed", "path", path, "error", err)
+			}
 		}
-		_ = seccomp.NotifRespond(scmpFD, &resp)
 	}
 }
 
@@ -284,8 +294,9 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 		// For execveat with AT_EMPTY_PATH, we can resolve from fd
 		if !execveArgs.IsExecveat || (execveArgs.Flags&AT_EMPTY_PATH == 0) {
 			// Can't read filename - deny (fail-secure)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
+				slog.Error("execve handler: deny response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		// AT_EMPTY_PATH case: filename is ignored, will resolve from fd
@@ -301,8 +312,9 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 		filename, err = resolveExecveatPath(pid, execveArgs, filename)
 		if err != nil {
 			// Can't resolve path - deny (fail-secure)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
+				slog.Error("execve handler: deny response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 	}
@@ -318,8 +330,9 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 	argv, truncated, err := ReadArgv(pid, execveArgs.ArgvPtr, cfg)
 	if err != nil {
 		// Can't read argv - deny (fail-secure)
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
+			slog.Error("execve handler: deny response failed", "pid", pid, "error", err)
+		}
 		return
 	}
 
@@ -342,30 +355,35 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 		if h.stubSymlinkPath == "" {
 			slog.Error("redirect requested but no stub symlink configured, denying",
 				"pid", pid, "cmd", ectx.Filename)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EPERM)}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EPERM)); err != nil {
+				slog.Error("execve handler: deny response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		if err := handleRedirect(int(fd), req.ID, ectx, execveArgs.FilenamePtr, h.stubSymlinkPath, originalFilenameLen, result.Redirect); err != nil {
 			slog.Error("redirect failed, denying", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EPERM)}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EPERM)); err != nil {
+				slog.Error("execve handler: deny response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		// handleRedirect succeeded — respond with CONTINUE to re-execute
 		// the modified execve (filename now points to agentsh-stub symlink).
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+			slog.Debug("execve handler: continue response failed", "pid", pid, "error", err)
+		}
 		return
 
 	case ActionDeny:
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -result.Errno}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondDeny(int(fd), req.ID, result.Errno); err != nil {
+			slog.Error("execve handler: deny response failed", "pid", pid, "cmd", ectx.Filename, "error", err)
+		}
 		return
 
 	default: // ActionContinue
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+			slog.Debug("execve handler: continue response failed", "pid", pid, "error", err)
+		}
 		return
 	}
 }
