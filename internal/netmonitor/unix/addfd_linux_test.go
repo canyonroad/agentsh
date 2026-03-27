@@ -86,6 +86,13 @@ func TestNotifRespondDeny_InvalidFD(t *testing.T) {
 	require.Error(t, err, "NotifRespondDeny with invalid fd should fail")
 }
 
+func TestNotifRespondDeny_InvalidErrno(t *testing.T) {
+	err := NotifRespondDeny(3, 0, 0)
+	require.ErrorContains(t, err, "errno must be positive")
+	err = NotifRespondDeny(3, 0, -13)
+	require.ErrorContains(t, err, "errno must be positive")
+}
+
 func TestNotifRespondContinue_InvalidFD(t *testing.T) {
 	err := NotifRespondContinue(-1, 0)
 	require.Error(t, err, "NotifRespondContinue with invalid fd should fail")

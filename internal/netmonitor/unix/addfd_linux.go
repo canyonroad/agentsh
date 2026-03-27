@@ -180,7 +180,12 @@ type seccompNotifResp struct {
 }
 
 // ioctlNotifSend is SECCOMP_IOCTL_NOTIF_SEND.
-// Computed as _IOWR('!', 1, struct seccomp_notif_resp) = 0xC0182101.
+// Derived from _IOWR('!', 1, struct seccomp_notif_resp):
+//
+//	_IOC(dir=3, type=0x21, nr=1, size=24) = (3<<30)|(24<<16)|(0x21<<8)|1 = 0xC0182101
+//
+// Linux _IOC encoding is architecture-invariant; this matches the pattern
+// used by ioctlNotifIDValidNew and ioctlNotifAddFD above.
 const ioctlNotifSend = 0xC0182101
 
 // seccompUserNotifFlagContinue tells the kernel to execute the syscall
@@ -189,9 +194,12 @@ const seccompUserNotifFlagContinue = 0x1
 
 // NotifRespondDeny responds to a seccomp notification with an error,
 // causing the trapped syscall to fail with the given errno.
-// The errno parameter should be a positive value (e.g., unix.EACCES = 13);
+// The errno parameter must be a positive value (e.g., unix.EACCES = 13);
 // this function negates it for the kernel.
 func NotifRespondDeny(notifFD int, id uint64, errno int32) error {
+	if errno <= 0 {
+		return fmt.Errorf("NotifRespondDeny: errno must be positive, got %d", errno)
+	}
 	resp := seccompNotifResp{
 		id:  id,
 		err: -errno, // kernel expects negative errno
