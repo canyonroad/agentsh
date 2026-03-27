@@ -162,3 +162,67 @@ func NotifIDValid(notifFD int, notifID uint64) error {
 	}
 	return nil
 }
+
+// seccompNotifResp matches struct seccomp_notif_resp from <linux/seccomp.h>.
+// Layout must exactly mirror the kernel struct:
+//
+//	struct seccomp_notif_resp {
+//	    __u64 id;
+//	    __s64 val;
+//	    __s32 error;
+//	    __u32 flags;
+//	};
+type seccompNotifResp struct {
+	id    uint64 // notification ID from seccomp_notif_req
+	val   int64  // syscall return value (__s64, not uint64)
+	err   int32  // negative errno (e.g., -EACCES = -13)
+	flags uint32 // SECCOMP_USER_NOTIF_FLAG_CONTINUE
+}
+
+// ioctlNotifSend is SECCOMP_IOCTL_NOTIF_SEND.
+// Computed as _IOWR('!', 1, struct seccomp_notif_resp) = 0xC0182101.
+const ioctlNotifSend = 0xC0182101
+
+// seccompUserNotifFlagContinue tells the kernel to execute the syscall
+// as if seccomp were not installed.
+const seccompUserNotifFlagContinue = 0x1
+
+// NotifRespondDeny responds to a seccomp notification with an error,
+// causing the trapped syscall to fail with the given errno.
+// The errno parameter should be a positive value (e.g., unix.EACCES = 13);
+// this function negates it for the kernel.
+func NotifRespondDeny(notifFD int, id uint64, errno int32) error {
+	resp := seccompNotifResp{
+		id:  id,
+		err: -errno, // kernel expects negative errno
+	}
+	_, _, e := unix.Syscall(
+		unix.SYS_IOCTL,
+		uintptr(notifFD),
+		uintptr(ioctlNotifSend),
+		uintptr(unsafe.Pointer(&resp)),
+	)
+	if e != 0 {
+		return e
+	}
+	return nil
+}
+
+// NotifRespondContinue responds to a seccomp notification with CONTINUE,
+// allowing the trapped syscall to proceed as if seccomp were not installed.
+func NotifRespondContinue(notifFD int, id uint64) error {
+	resp := seccompNotifResp{
+		id:    id,
+		flags: seccompUserNotifFlagContinue,
+	}
+	_, _, e := unix.Syscall(
+		unix.SYS_IOCTL,
+		uintptr(notifFD),
+		uintptr(ioctlNotifSend),
+		uintptr(unsafe.Pointer(&resp)),
+	)
+	if e != 0 {
+		return e
+	}
+	return nil
+}
