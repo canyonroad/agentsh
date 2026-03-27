@@ -1101,6 +1101,13 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		}
 	}
 
+	// When file_monitor is not explicitly configured but seccomp is enabled,
+	// enable it by default so openat(O_WRONLY) and other file syscalls are
+	// intercepted and policy-enforced (not just audited).
+	if cfg.Sandbox.Seccomp.Enabled && !cfg.Sandbox.Seccomp.FileMonitor.Enabled {
+		cfg.Sandbox.Seccomp.FileMonitor.Enabled = true
+	}
+
 	// When file_monitor is enabled, default to enforcing policy decisions.
 	// Without this, the file_monitor only audits violations without blocking them,
 	// allowing writes to sensitive files like /etc/hostname or ~/.bashrc.
