@@ -1065,6 +1065,13 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.Sandbox.Seccomp.Mode == "" {
 		cfg.Sandbox.Seccomp.Mode = "enforce"
 	}
+
+	// seccompActive is true when the seccomp wrapper will run — either because
+	// seccomp is explicitly enabled, or because unix_sockets wrapping is on
+	// (which runs agentsh-unixwrap that installs the BPF filter).
+	wrapperEnabled := cfg.Sandbox.UnixSockets.Enabled != nil && *cfg.Sandbox.UnixSockets.Enabled
+	seccompActive := cfg.Sandbox.Seccomp.Enabled || wrapperEnabled
+
 	if cfg.Sandbox.Seccomp.Enabled && !cfg.Sandbox.Seccomp.UnixSocket.Enabled {
 		// Enable unix socket monitoring by default if seccomp is enabled
 		// AND the user hasn't explicitly disabled it via sandbox.unix_sockets.enabled=false.
@@ -1082,7 +1089,7 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		cfg.Sandbox.Seccomp.Syscalls.OnBlock = "kill"
 	}
 	// Default blocked syscalls (dangerous operations)
-	if len(cfg.Sandbox.Seccomp.Syscalls.Block) == 0 && cfg.Sandbox.Seccomp.Enabled {
+	if len(cfg.Sandbox.Seccomp.Syscalls.Block) == 0 && seccompActive {
 		cfg.Sandbox.Seccomp.Syscalls.Block = []string{
 			"ptrace",
 			"process_vm_readv",
@@ -1101,10 +1108,11 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		}
 	}
 
-	// When file_monitor is not explicitly configured but seccomp is enabled,
-	// enable it by default so openat(O_WRONLY) and other file syscalls are
-	// intercepted and policy-enforced (not just audited).
-	if cfg.Sandbox.Seccomp.Enabled && !cfg.Sandbox.Seccomp.FileMonitor.Enabled {
+	// Enable file_monitor by default when the seccomp wrapper will run,
+	// so openat(O_WRONLY) and other file syscalls are intercepted and
+	// policy-enforced. Without this, only O_CREAT (new file creation)
+	// gets caught by Landlock — writes to existing files pass through.
+	if seccompActive && !cfg.Sandbox.Seccomp.FileMonitor.Enabled {
 		cfg.Sandbox.Seccomp.FileMonitor.Enabled = true
 	}
 
