@@ -9,21 +9,29 @@ Evidence from the AST probe on Blaxel:
 - `openat("/etc/ast-probe-write-test", O_WRONLY|O_CREAT|O_TRUNC)` — correctly blocked (Landlock)
 - `openat("/root/.bashrc", O_WRONLY|O_APPEND)` — event log says blocked, but probe sees success
 
-## Root Cause Analysis
+## Root Cause
 
-The code path from policy evaluation to seccomp response is logically correct:
+**Double-negation bug in libseccomp-golang's `toNative` method.**
 
-1. `FileHandler.Handle()` returns `FileResult{Action: ActionDeny, Errno: EACCES}` (correct)
-2. `handleFileNotification()` constructs `ScmpNotifResp{Error: -13}` (correct)
-3. `seccomp.NotifRespond(fd, &resp)` is called — but the **error is discarded** with `_`
+The handler code sets `resp.Error = -int32(unix.EACCES)` (i.e., `-13`, pre-negated). The libseccomp-golang binding's `toNative` method then negates it again:
 
-The response delivery goes through the libseccomp-golang binding's `NotifRespond` function, which is the ONLY seccomp ioctl in the codebase that uses the Go binding rather than a direct `unix.Syscall(SYS_IOCTL, ...)` call. The existing `NotifIDValid` and `NotifAddFD` functions both use direct ioctls (in `addfd_linux.go`).
+```go
+// seccomp_internal.go:737 in libseccomp-golang
+resp.error = (C.__s32(scmpResp.Error) * -1) // "kernel requires a negated value"
+```
 
-If `NotifRespond` silently fails (binding serialization issue, stale notification, fd issue), the event still says "blocked" (emitted before the response) but the tracee continues with success because no valid response was delivered.
+Result: `(-13) * -1 = +13`. The kernel receives `+13` in the error field, which is not a valid negative errno. The kernel treats it as no error and the syscall succeeds.
+
+This explains the full pattern:
+- **CONTINUE works**: `flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE`, `error = 0`. `toNative` negates: `0 * -1 = 0`. Kernel sees flags + zero error → continues syscall.
+- **DENY fails**: `error = -13`. `toNative` negates: `(-13) * -1 = +13`. Kernel sees positive error → treats as success.
+- **O_CREAT blocked**: Landlock enforces independently — seccomp denial also fails silently, but Landlock catches it.
+
+The libseccomp-golang binding's contract is that `ScmpNotifResp.Error` should be a **positive** errno (e.g., `13`), and `toNative` negates it for the kernel. The handler code passes a pre-negated value, triggering the double-negation.
 
 ## Solution
 
-Replace all `seccomp.NotifRespond()` calls with direct ioctl wrappers, matching the pattern already established for `NotifIDValid` and `NotifAddFD`. Check and log all response errors.
+Replace all `seccomp.NotifRespond()` calls with direct ioctl wrappers, matching the pattern already established for `NotifIDValid` and `NotifAddFD` in `addfd_linux.go`. This bypasses the double-negation entirely and gives direct error visibility.
 
 ## Design
 
@@ -42,7 +50,9 @@ type seccompNotifResp struct {
 
 Note: the kernel defines `val` as `__s64` (signed). The libseccomp-golang binding uses `uint64` (unsigned). Matching the kernel layout is correct.
 
-**Ioctl constant**: `ioctlNotifSend = 0xC0182101` — `_IOWR('!', 1, struct seccomp_notif_resp)`
+**Constants**:
+- `ioctlNotifSend = 0xC0182101` — `_IOWR('!', 1, struct seccomp_notif_resp)`
+- `seccompUserNotifFlagContinue = 0x1` — `SECCOMP_USER_NOTIF_FLAG_CONTINUE`
 
 **Helper functions**:
 
@@ -51,9 +61,14 @@ func NotifRespondDeny(notifFD int, id uint64, errno int32) error
 func NotifRespondContinue(notifFD int, id uint64) error
 ```
 
-Both call `unix.Syscall(SYS_IOCTL, fd, ioctlNotifSend, &resp)` and return the error.
+Both call `unix.Syscall(SYS_IOCTL, fd, ioctlNotifSend, &resp)` directly and return any error. `NotifRespondDeny` sets `error = -errno` (correctly negated once). `NotifRespondContinue` sets `flags = seccompUserNotifFlagContinue`.
 
-### 2. Replace all seccomp.NotifRespond calls in handler.go
+**Expected ioctl errors**:
+- `ENOENT` — notification stale (process exited/killed). Non-critical.
+- `EINVAL` — invalid notification ID or malformed response.
+- `EBADF` — notify fd closed (handler shutting down). Non-critical.
+
+### 2. Replace all seccomp.NotifRespond calls
 
 Every `_ = seccomp.NotifRespond(fd, &resp)` is replaced with the appropriate direct ioctl call.
 
@@ -62,7 +77,9 @@ Every `_ = seccomp.NotifRespond(fd, &resp)` is replaced with the appropriate dir
 - Continue response failures: `slog.Debug` (non-critical, usually stale notification)
 - No retry — if the ioctl fails, the notification is likely stale (ENOENT)
 
-**Scope**: ALL handler paths — file (4 calls in non-emulated, ~13 in emulated), execve (~7 calls), unix socket (~5 calls). This removes the runtime dependency on `seccomp.NotifRespond` entirely.
+**Scope**: ALL handler paths in `handler.go` — file (~17 calls across emulated and non-emulated), execve (~7 calls), unix socket (~5 calls). Also replace `Filter.Respond()` in `seccomp_linux.go` which has the same double-negation bug.
+
+Signal filter calls in `internal/signal/seccomp_linux.go` are **out of scope** — the signal filter uses its own dedicated `SignalFilter.Respond()` method and is not part of the file enforcement path. It has the same double-negation bug but will be addressed separately.
 
 After this change, `seccomp.NotifReceive` is the only remaining libseccomp call in the notify loop.
 
@@ -70,13 +87,15 @@ After this change, `seccomp.NotifReceive` is the only remaining libseccomp call 
 
 - **Struct layout test**: Verify `seccompNotifResp` is 24 bytes with correct field offsets via `unsafe.Sizeof`/`unsafe.Offsetof`
 - **Ioctl constant test**: Verify `ioctlNotifSend` matches `_IOWR('!', 1, 24)` computation
+- **Invalid-fd test**: Call `NotifRespondDeny(-1, 0, EACCES)` and verify it returns an error (matching existing `TestAddFD_InvalidFD` pattern)
 - **Integration coverage**: Existing file handler integration tests cover policy evaluation. The AST probe serves as end-to-end validation.
 
 ## Files Changed
 
-1. `internal/netmonitor/unix/addfd_linux.go` — new struct, ioctl constant, `NotifRespondDeny`, `NotifRespondContinue`
-2. `internal/netmonitor/unix/handler.go` — replace all `seccomp.NotifRespond` calls
-3. `internal/netmonitor/unix/addfd_linux_test.go` — struct layout and ioctl constant tests
+1. `internal/netmonitor/unix/addfd_linux.go` — new struct, constants, `NotifRespondDeny`, `NotifRespondContinue`
+2. `internal/netmonitor/unix/handler.go` — replace all `seccomp.NotifRespond` calls (~29 sites)
+3. `internal/netmonitor/unix/seccomp_linux.go` — replace `Filter.Respond()` to use direct ioctl
+4. `internal/netmonitor/unix/addfd_linux_test.go` — struct layout, ioctl constant, and invalid-fd tests
 
 ## Impact
 
