@@ -1108,11 +1108,15 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		}
 	}
 
-	// Enable file_monitor by default when the seccomp wrapper will run,
+	// Enable file_monitor by default when seccomp is explicitly enabled,
 	// so openat(O_WRONLY) and other file syscalls are intercepted and
 	// policy-enforced. Without this, only O_CREAT (new file creation)
 	// gets caught by Landlock — writes to existing files pass through.
-	if seccompActive && !cfg.Sandbox.Seccomp.FileMonitor.Enabled {
+	// Note: we gate on Seccomp.Enabled, NOT seccompActive, because
+	// unix_sockets-only mode shouldn't auto-enable full file monitoring
+	// (the policy's allow-etc-read rules may not cover all paths the
+	// dynamic linker needs, causing spurious EACCES on program startup).
+	if cfg.Sandbox.Seccomp.Enabled && !cfg.Sandbox.Seccomp.FileMonitor.Enabled {
 		cfg.Sandbox.Seccomp.FileMonitor.Enabled = true
 	}
 

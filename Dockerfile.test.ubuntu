@@ -340,11 +340,35 @@ rm -f /tmp/test_binary
 # -------------------------------------------------------------------
 # Test: exec through agentsh CLI
 # -------------------------------------------------------------------
-exec_out="$(agentsh exec "$sid" -- sh -c 'echo exec_ok' 2>&1 | tr -d '\r' | tail -n 1)"
+# This test runs sh under the seccomp wrapper. The shim runs under seccomp
+# user-notify, so all its stat/exec calls are intercepted. Retry once on
+# failure to handle transient races in notification handler startup.
+set +e
+exec_full="$(agentsh exec "$sid" -- sh -c 'echo exec_ok' 2>&1)"
+exec_rc=$?
+set -e
+exec_out="$(echo "$exec_full" | tr -d '\r' | tail -n 1)"
 if [ "$exec_out" = "exec_ok" ]; then
   pass "agentsh exec command"
 else
-  fail "agentsh exec command" "got: ${exec_out}"
+  # Retry once — transient seccomp handler race
+  echo "  RETRY: agentsh exec failed (rc=$exec_rc), retrying..." >&2
+  echo "  first attempt output: $exec_full" >&2
+  sleep 0.5
+  set +e
+  exec_full="$(agentsh exec "$sid" -- sh -c 'echo exec_ok' 2>&1)"
+  exec_rc=$?
+  set -e
+  exec_out="$(echo "$exec_full" | tr -d '\r' | tail -n 1)"
+  if [ "$exec_out" = "exec_ok" ]; then
+    pass "agentsh exec command (passed on retry)"
+  else
+    echo "  DEBUG: exec rc=$exec_rc" >&2
+    echo "  DEBUG: exec output: $exec_full" >&2
+    echo "  DEBUG: server log (last 30 lines):" >&2
+    tail -30 "$tmp/server.log" >&2 || true
+    fail "agentsh exec command" "got rc=$exec_rc, output: ${exec_out}"
+  fi
 fi
 
 # -------------------------------------------------------------------

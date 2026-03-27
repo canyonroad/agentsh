@@ -293,6 +293,14 @@ file_rules:
       - "/etc/protocols"
       - "/etc/services"
       - "/etc/agentsh/**"
+      # Dynamic linker and libc runtime files
+      - "/etc/ld.so.cache"
+      - "/etc/ld.so.preload"
+      - "/etc/ld.so.conf"
+      - "/etc/ld.so.conf.d/**"
+      - "/etc/nsswitch.conf"
+      - "/etc/group"
+      - "/etc/gai.conf"
     operations:
       - read
       - open

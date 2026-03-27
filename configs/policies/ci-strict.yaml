@@ -70,6 +70,14 @@ file_rules:
       - "/etc/localtime"
       - "/etc/timezone"
       - "/etc/passwd"  # Required by some tools for uid lookup
+      # Dynamic linker and libc runtime files
+      - "/etc/ld.so.cache"
+      - "/etc/ld.so.preload"
+      - "/etc/ld.so.conf"
+      - "/etc/ld.so.conf.d/**"
+      - "/etc/nsswitch.conf"
+      - "/etc/group"
+      - "/etc/gai.conf"
     operations:
       - read
       - open
