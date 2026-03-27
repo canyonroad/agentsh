@@ -1096,7 +1096,16 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 			"init_module",
 			"finit_module",
 			"delete_module",
+			"sethostname",
+			"setdomainname",
 		}
+	}
+
+	// When file_monitor is enabled, default to enforcing policy decisions.
+	// Without this, the file_monitor only audits violations without blocking them,
+	// allowing writes to sensitive files like /etc/hostname or ~/.bashrc.
+	if cfg.Sandbox.Seccomp.FileMonitor.Enabled && !cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE {
+		cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE = true
 	}
 
 	// Execve interception defaults - apply when enabled but not fully configured

@@ -215,6 +215,41 @@ file_rules:
       - "*"
     decision: deny
 
+  - name: deny-hostname-config
+    description: Block writes to hostname configuration
+    paths:
+      - "/etc/hostname"
+      - "/etc/hosts"
+    operations:
+      - write
+      - create
+    decision: deny
+
+  - name: deny-docker-socket
+    description: Block access to Docker socket
+    paths:
+      - "/var/run/docker.sock"
+      - "/run/docker.sock"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-shell-rc
+    description: Block writes to shell config files
+    paths:
+      - "${HOME}/.bashrc"
+      - "${HOME}/.bash_profile"
+      - "${HOME}/.profile"
+      - "${HOME}/.zshrc"
+      - "/root/.bashrc"
+      - "/root/.bash_profile"
+      - "/root/.profile"
+      - "/root/.zshrc"
+    operations:
+      - write
+      - create
+    decision: deny
+
   # ---------------------------------------------------------------------------
   # Default deny
   # ---------------------------------------------------------------------------
