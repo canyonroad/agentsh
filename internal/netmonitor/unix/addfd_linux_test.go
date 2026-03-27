@@ -62,3 +62,38 @@ func TestNotifIDValid_InvalidFD(t *testing.T) {
 	err := NotifIDValid(-1, 0)
 	require.Error(t, err, "NotifIDValid with invalid fd should fail")
 }
+
+func TestNotifSend_StructLayout(t *testing.T) {
+	var s seccompNotifResp
+	require.Equal(t, uintptr(24), unsafe.Sizeof(s), "seccompNotifResp should be 24 bytes")
+	require.Equal(t, uintptr(0), unsafe.Offsetof(s.id), "id at offset 0")
+	require.Equal(t, uintptr(8), unsafe.Offsetof(s.val), "val at offset 8")
+	require.Equal(t, uintptr(16), unsafe.Offsetof(s.err), "err at offset 16")
+	require.Equal(t, uintptr(20), unsafe.Offsetof(s.flags), "flags at offset 20")
+}
+
+func TestNotifSend_IoctlNumber(t *testing.T) {
+	// _IOWR('!', 1, struct seccomp_notif_resp) = 0xC0182101
+	require.Equal(t, uintptr(0xC0182101), uintptr(ioctlNotifSend))
+}
+
+func TestNotifSend_ContinueFlag(t *testing.T) {
+	require.Equal(t, uint32(0x1), uint32(seccompUserNotifFlagContinue))
+}
+
+func TestNotifRespondDeny_InvalidFD(t *testing.T) {
+	err := NotifRespondDeny(-1, 0, 13)
+	require.Error(t, err, "NotifRespondDeny with invalid fd should fail")
+}
+
+func TestNotifRespondDeny_InvalidErrno(t *testing.T) {
+	err := NotifRespondDeny(3, 0, 0)
+	require.ErrorContains(t, err, "errno must be positive")
+	err = NotifRespondDeny(3, 0, -13)
+	require.ErrorContains(t, err, "errno must be positive")
+}
+
+func TestNotifRespondContinue_InvalidFD(t *testing.T) {
+	err := NotifRespondContinue(-1, 0)
+	require.Error(t, err, "NotifRespondContinue with invalid fd should fail")
+}

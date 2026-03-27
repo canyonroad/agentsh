@@ -58,7 +58,9 @@ func ServeNotify(ctx context.Context, fd *os.File, sessID string, pol *policy.En
 		}
 		ctxReq := ExtractContext(req)
 		if !isUnixSocketSyscall(ctxReq.Syscall) {
-			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue})
+			if err := NotifRespondContinue(int(scmpFD), req.ID); err != nil {
+				slog.Debug("notify loop: continue response failed", "error", err)
+			}
 			continue
 		}
 		allow := true
@@ -77,13 +79,15 @@ func ServeNotify(ctx context.Context, fd *os.File, sessID string, pol *policy.En
 				}
 			}
 		}
-		resp := seccomp.ScmpNotifResp{ID: req.ID}
 		if allow {
-			resp.Flags = seccomp.NotifRespFlagContinue
+			if err := NotifRespondContinue(int(scmpFD), req.ID); err != nil {
+				slog.Debug("unix socket: continue response failed", "error", err)
+			}
 		} else {
-			resp.Error = -errno
+			if err := NotifRespondDeny(int(scmpFD), req.ID, errno); err != nil {
+				slog.Error("unix socket: deny response failed", "path", path, "error", err)
+			}
 		}
-		_ = seccomp.NotifRespond(scmpFD, &resp)
 	}
 }
 
@@ -217,13 +221,17 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		ctxReq := ExtractContext(req)
 		if !isUnixSocketSyscall(ctxReq.Syscall) {
 			slog.Debug("ServeNotifyWithExecve: non-unix syscall, allowing", "session_id", sessID, "syscall", ctxReq.Syscall)
-			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue})
+			if err := NotifRespondContinue(int(scmpFD), req.ID); err != nil {
+				slog.Debug("notify loop: continue response failed", "error", err)
+			}
 			continue
 		}
 
 		// Skip policy check if pol is nil - just allow
 		if pol == nil {
-			_ = seccomp.NotifRespond(scmpFD, &seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue})
+			if err := NotifRespondContinue(int(scmpFD), req.ID); err != nil {
+				slog.Debug("notify loop: continue response failed", "error", err)
+			}
 			continue
 		}
 
@@ -243,13 +251,15 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 				}
 			}
 		}
-		resp := seccomp.ScmpNotifResp{ID: req.ID}
 		if allow {
-			resp.Flags = seccomp.NotifRespFlagContinue
+			if err := NotifRespondContinue(int(scmpFD), req.ID); err != nil {
+				slog.Debug("unix socket: continue response failed", "error", err)
+			}
 		} else {
-			resp.Error = -errno
+			if err := NotifRespondDeny(int(scmpFD), req.ID, errno); err != nil {
+				slog.Error("unix socket: deny response failed", "path", path, "error", err)
+			}
 		}
-		_ = seccomp.NotifRespond(scmpFD, &resp)
 	}
 }
 
@@ -284,8 +294,9 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 		// For execveat with AT_EMPTY_PATH, we can resolve from fd
 		if !execveArgs.IsExecveat || (execveArgs.Flags&AT_EMPTY_PATH == 0) {
 			// Can't read filename - deny (fail-secure)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
+				slog.Error("execve handler: deny response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		// AT_EMPTY_PATH case: filename is ignored, will resolve from fd
@@ -301,8 +312,9 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 		filename, err = resolveExecveatPath(pid, execveArgs, filename)
 		if err != nil {
 			// Can't resolve path - deny (fail-secure)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
+				slog.Error("execve handler: deny response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 	}
@@ -318,8 +330,9 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 	argv, truncated, err := ReadArgv(pid, execveArgs.ArgvPtr, cfg)
 	if err != nil {
 		// Can't read argv - deny (fail-secure)
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
+			slog.Error("execve handler: deny response failed", "pid", pid, "error", err)
+		}
 		return
 	}
 
@@ -342,30 +355,35 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 		if h.stubSymlinkPath == "" {
 			slog.Error("redirect requested but no stub symlink configured, denying",
 				"pid", pid, "cmd", ectx.Filename)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EPERM)}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EPERM)); err != nil {
+				slog.Error("execve handler: deny response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		if err := handleRedirect(int(fd), req.ID, ectx, execveArgs.FilenamePtr, h.stubSymlinkPath, originalFilenameLen, result.Redirect); err != nil {
 			slog.Error("redirect failed, denying", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EPERM)}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EPERM)); err != nil {
+				slog.Error("execve handler: deny response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		// handleRedirect succeeded — respond with CONTINUE to re-execute
 		// the modified execve (filename now points to agentsh-stub symlink).
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+			slog.Debug("execve handler: continue response failed", "pid", pid, "error", err)
+		}
 		return
 
 	case ActionDeny:
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -result.Errno}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondDeny(int(fd), req.ID, result.Errno); err != nil {
+			slog.Error("execve handler: deny response failed", "pid", pid, "cmd", ectx.Filename, "error", err)
+		}
 		return
 
 	default: // ActionContinue
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+			slog.Debug("execve handler: continue response failed", "pid", pid, "error", err)
+		}
 		return
 	}
 }
@@ -392,8 +410,9 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
 		if err != nil {
 			slog.Debug("file handler: failed to read open_how, allowing", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		fileArgs.Flags = uint32(howFlags)
@@ -404,8 +423,9 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 	if err != nil {
 		slog.Debug("file handler: failed to resolve path, allowing", "pid", pid, "error", err)
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+			slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
+		}
 		return
 	}
 
@@ -415,8 +435,9 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		p2, err := resolvePathAt(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
 		if err != nil {
 			slog.Debug("file handler: failed to resolve second path, allowing", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		path2 = p2
@@ -437,13 +458,15 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 
 	result := h.Handle(frequest)
 
-	resp := seccomp.ScmpNotifResp{ID: req.ID}
 	if result.Action == ActionDeny {
-		resp.Error = -result.Errno
+		if err := NotifRespondDeny(int(fd), req.ID, result.Errno); err != nil {
+			slog.Error("file handler: deny response failed", "pid", pid, "path", path, "error", err)
+		}
 	} else {
-		resp.Flags = seccomp.NotifRespFlagContinue
+		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+			slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
+		}
 	}
-	_ = seccomp.NotifRespond(fd, &resp)
 }
 
 // handleFileNotificationEmulated processes a file syscall notification using
@@ -471,15 +494,17 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	if args.Nr == unix.SYS_OPENAT2 {
 		if fileArgs.HowPtr == 0 || args.Arg3 < 24 {
 			// Invalid openat2 args — let kernel return the appropriate error.
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
 		if err != nil {
 			slog.Debug("emulated file handler: failed to read open_how, CONTINUE", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		fileArgs.Flags = uint32(howFlags)
@@ -498,13 +523,15 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	if err != nil {
 		if forceContinue {
 			slog.Debug("emulated file handler: failed to resolve path in CONTINUE mode, allowing", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		slog.Debug("emulated file handler: failed to resolve path, denying", "pid", pid, "error", err)
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
+			slog.Error("emulated file handler: deny response failed", "pid", pid, "error", err)
+		}
 		return
 	}
 
@@ -515,13 +542,15 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 		if err != nil {
 			if forceContinue {
 				slog.Debug("emulated file handler: failed to resolve second path in CONTINUE mode, allowing", "pid", pid, "error", err)
-				resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-				_ = seccomp.NotifRespond(fd, &resp)
+				if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+					slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
+				}
 				return
 			}
 			slog.Debug("emulated file handler: failed to resolve second path, denying", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(unix.EACCES)}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
+				slog.Error("emulated file handler: deny response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		path2 = p2
@@ -568,8 +597,9 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	// Branch: is this an open syscall that we should emulate via AddFD?
 	if !forceContinue {
 		if result.Action == ActionDeny {
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -result.Errno}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondDeny(int(fd), req.ID, result.Errno); err != nil {
+				slog.Error("emulated file handler: deny response failed", "pid", pid, "path", path, "error", err)
+			}
 			return
 		}
 		// Verify notification is still live before side-effecting supervisor open.
@@ -589,8 +619,9 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 
 	// CONTINUE path with ID validation bracketing.
 	if result.Action == ActionDeny {
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -result.Errno}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondDeny(int(fd), req.ID, result.Errno); err != nil {
+			slog.Error("emulated file handler: deny response failed", "pid", pid, "path", path, "error", err)
+		}
 		return
 	}
 
@@ -603,8 +634,9 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 		}
 		slog.Debug("emulated file handler: NotifIDValid post-check failed, proceeding", "pid", pid, "error", err)
 	}
-	resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-	_ = seccomp.NotifRespond(fd, &resp)
+	if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+		slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
+	}
 }
 
 // emulateOpenat opens a file on behalf of the tracee via /proc/<pid>/root/<path>,
@@ -626,8 +658,9 @@ func emulateOpenat(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, pid int, path s
 			// Can't read umask — fall back to CONTINUE to avoid creating
 			// files with potentially over-permissive modes.
 			slog.Debug("emulateOpenat: cannot read umask, falling back to CONTINUE", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("emulateOpenat: continue response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		effectiveMode = mode &^ umask
@@ -640,8 +673,9 @@ func emulateOpenat(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, pid int, path s
 			errno = unix.EIO
 		}
 		slog.Debug("emulateOpenat: supervisor open failed", "pid", pid, "path", path, "error", err)
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(errno)}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondDeny(int(fd), req.ID, int32(errno)); err != nil {
+			slog.Debug("emulateOpenat: deny response failed", "pid", pid, "error", err)
+		}
 		return
 	}
 
@@ -674,8 +708,9 @@ func emulateOpenat(fd seccomp.ScmpFd, req *seccomp.ScmpNotifReq, pid int, path s
 			return
 		}
 		// Propagate actual errno (e.g., EMFILE) to the tracee.
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Error: -int32(addErrno)}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondDeny(int(fd), req.ID, int32(addErrno)); err != nil {
+			slog.Debug("emulateOpenat: deny response failed", "pid", pid, "error", err)
+		}
 		return
 	}
 }

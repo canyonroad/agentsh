@@ -129,15 +129,13 @@ func (f *Filter) Receive() (*seccomp.ScmpNotifReq, error) {
 
 // Respond replies to a notification.
 func (f *Filter) Respond(reqID uint64, allow bool, errno int32) error {
-	resp := seccomp.ScmpNotifResp{ID: reqID}
 	if allow {
-		resp.Error = 0
-		resp.Val = 0
-		resp.Flags = seccomp.NotifRespFlagContinue
-	} else {
-		resp.Error = -errno
+		return NotifRespondContinue(int(f.fd), reqID)
 	}
-	return seccomp.NotifRespond(f.fd, &resp)
+	if errno <= 0 {
+		errno = int32(unix.EPERM) // normalize invalid errno to avoid unanswered notification
+	}
+	return NotifRespondDeny(int(f.fd), reqID, errno)
 }
 
 // Context holds the data needed to evaluate a trapped syscall.
