@@ -392,8 +392,9 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
 		if err != nil {
 			slog.Debug("file handler: failed to read open_how, allowing", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		fileArgs.Flags = uint32(howFlags)
@@ -404,8 +405,9 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 	if err != nil {
 		slog.Debug("file handler: failed to resolve path, allowing", "pid", pid, "error", err)
-		resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-		_ = seccomp.NotifRespond(fd, &resp)
+		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+			slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
+		}
 		return
 	}
 
@@ -415,8 +417,9 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		p2, err := resolvePathAt(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
 		if err != nil {
 			slog.Debug("file handler: failed to resolve second path, allowing", "pid", pid, "error", err)
-			resp := seccomp.ScmpNotifResp{ID: req.ID, Flags: seccomp.NotifRespFlagContinue}
-			_ = seccomp.NotifRespond(fd, &resp)
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
+			}
 			return
 		}
 		path2 = p2
@@ -437,13 +440,15 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 
 	result := h.Handle(frequest)
 
-	resp := seccomp.ScmpNotifResp{ID: req.ID}
 	if result.Action == ActionDeny {
-		resp.Error = -result.Errno
+		if err := NotifRespondDeny(int(fd), req.ID, result.Errno); err != nil {
+			slog.Error("file handler: deny response failed", "pid", pid, "path", path, "error", err)
+		}
 	} else {
-		resp.Flags = seccomp.NotifRespFlagContinue
+		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+			slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
+		}
 	}
-	_ = seccomp.NotifRespond(fd, &resp)
 }
 
 // handleFileNotificationEmulated processes a file syscall notification using
