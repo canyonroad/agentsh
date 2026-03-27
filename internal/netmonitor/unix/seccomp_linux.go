@@ -280,11 +280,14 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 		}
 	}
 
-	// Blocked syscalls via kill
+	// Blocked syscalls — return EPERM instead of killing the process.
+	// The syscall is still denied at the kernel level, but the calling
+	// process can handle the error gracefully instead of being killed.
+	blockedAction := seccomp.ActErrno.SetReturnCode(int16(unix.EPERM))
 	for _, nr := range cfg.BlockedSyscalls {
 		sc := seccomp.ScmpSyscall(nr)
-		if err := filt.AddRule(sc, seccomp.ActKillProcess); err != nil {
-			return nil, fmt.Errorf("add kill rule %v: %w", sc, err)
+		if err := filt.AddRule(sc, blockedAction); err != nil {
+			return nil, fmt.Errorf("add blocked rule %v: %w", sc, err)
 		}
 	}
 
