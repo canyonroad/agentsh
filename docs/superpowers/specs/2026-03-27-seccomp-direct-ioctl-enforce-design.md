@@ -43,7 +43,7 @@ Replace all `seccomp.NotifRespond()` calls with direct ioctl wrappers, matching 
 type seccompNotifResp struct {
     id    uint64  // notification ID
     val   int64   // syscall return value (__s64 in kernel, not uint64)
-    error int32   // negative errno (e.g., -13 for EACCES)
+    err   int32   // negative errno (e.g., -13 for EACCES)
     flags uint32  // SECCOMP_USER_NOTIF_FLAG_CONTINUE
 }
 ```
