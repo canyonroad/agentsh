@@ -43,8 +43,12 @@ func TestNewEngineWithVariables(t *testing.T) {
 	decision = engine.CheckFile("/home/user/.config/app/settings.json", "read")
 	assert.Equal(t, "allow", string(decision.PolicyDecision))
 
-	// Should deny files outside
+	// Should allow reads outside (no deny rule, engine defaults reads to allow)
 	decision = engine.CheckFile("/etc/passwd", "read")
+	assert.Equal(t, "allow", string(decision.PolicyDecision))
+
+	// Should deny writes outside (engine defaults writes to deny)
+	decision = engine.CheckFile("/etc/passwd", "write")
 	assert.Equal(t, "deny", string(decision.PolicyDecision))
 }
 

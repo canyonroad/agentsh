@@ -121,6 +121,14 @@ file_rules:
       - delete
     decision: deny
 
+  - name: default-deny-files
+    description: Deny all other file operations
+    paths:
+      - "/**"
+    operations:
+      - "*"
+    decision: deny
+
 # =============================================================================
 # NETWORK OPERATION RULES
 # =============================================================================

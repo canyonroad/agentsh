@@ -519,21 +519,63 @@ file_rules:
   # Deny — sensitive system paths and default
   # ---------------------------------------------------------------------------
 
-  - name: deny-proc-sys
-    description: Block /proc and /sys
+  - name: deny-passwd-shadow
+    description: Block access to password/shadow files
     paths:
-      - "/proc/**"
-      - "/sys/**"
+      - "/etc/shadow"
+      - "/etc/gshadow"
     operations:
       - "*"
     decision: deny
 
+  - name: deny-proc-sensitive
+    description: Block reading sensitive /proc entries (environ, mem, kcore)
+    paths:
+      - "/proc/self/environ"
+      - "/proc/thread-self/environ"
+      - "/proc/*/environ"
+      - "/proc/*/task/*/environ"
+      - "/proc/*/mem"
+      - "/proc/kcore"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-proc-sys
+    description: Block writes to /proc and /sys
+    paths:
+      - "/proc/**"
+      - "/sys/**"
+    operations:
+      - write
+      - create
+      - chmod
+      - chown
+      - delete
+      - rename
+      - mkdir
+      - link
+      - symlink
+      - mknod
+      - rmdir
+    decision: deny
+
   - name: default-deny-files
-    description: Deny all other file operations
+    description: Deny all other file write operations
     paths:
       - "**"
     operations:
-      - "*"
+      - write
+      - create
+      - chmod
+      - chown
+      - delete
+      - rename
+      - mkdir
+      - link
+      - symlink
+      - mknod
+      - rmdir
     decision: deny
 
 # =============================================================================
