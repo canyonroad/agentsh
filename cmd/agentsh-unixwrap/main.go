@@ -42,6 +42,17 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
+	// Authorize the server process to read our memory via ProcessVMReadv.
+	// Under Yama ptrace_scope=1 (Ubuntu/Debian default), only ancestor
+	// processes can use ProcessVMReadv. In the wrap path the server is NOT
+	// our ancestor, so this prctl authorizes it specifically.
+	// Must run before any seccomp notifications can be processed.
+	if cfg.ServerPID > 0 {
+		if err := unix.Prctl(unix.PR_SET_PTRACER, uintptr(cfg.ServerPID), 0, 0, 0); err != nil {
+			log.Printf("PR_SET_PTRACER(%d): %v (ProcessVMReadv may fail under Yama)", cfg.ServerPID, err)
+		}
+	}
+
 	// Resolve syscall names to numbers.
 	blockedNrs, skipped := seccompkg.ResolveSyscalls(cfg.BlockedSyscalls)
 	if len(skipped) > 0 {

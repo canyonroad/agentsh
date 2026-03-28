@@ -69,6 +69,9 @@ type seccompWrapperConfig struct {
 	DenyPaths       []string `json:"deny_paths,omitempty"`
 	AllowNetwork    bool     `json:"allow_network,omitempty"`
 	AllowBind       bool     `json:"allow_bind,omitempty"`
+
+	// Server PID for PR_SET_PTRACER (Yama ptrace_scope=1 workaround)
+	ServerPID int `json:"server_pid,omitempty"`
 }
 
 // macSandboxWrapperConfig is passed to agentsh-macwrap via
@@ -202,6 +205,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		SignalFilterEnabled: signalFilterEnabled, // Only true if signal socket succeeded
 		ExecveEnabled:       execveEnabled,
 		FileMonitorEnabled:  config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.Enabled, false),
+		ServerPID:           os.Getpid(),
 	}
 
 	// Bridge file monitor sub-options using EnforceWithoutFUSE as the default
