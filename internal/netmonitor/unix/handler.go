@@ -521,9 +521,16 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	// tracee memory — e.g., Yama ptrace_scope=1 blocks ProcessVMReadv for
 	// child processes in the `agentsh wrap` path because PR_SET_PTRACER
 	// does not inherit across fork(). When we can't resolve the path we
-	// also can't evaluate policy, so the only consistent choice is to let
-	// the kernel handle the syscall. Other enforcement layers (Landlock,
-	// FUSE) still protect against malicious writes.
+	// also can't evaluate policy (neither allow NOR deny rules), so the
+	// only consistent choice is to let the kernel handle the syscall.
+	//
+	// NOTE: this IS an intentional tradeoff. Emulation mode is enabled when
+	// seccomp-notify is the sole enforcement backend, so falling back to
+	// CONTINUE means no file policy enforcement for affected operations.
+	// The alternative — denying ALL writes from ALL child processes — makes
+	// the sandboxed environment completely unusable (can't write to /tmp,
+	// workspace, /dev/null, etc.). A working environment with degraded
+	// monitoring is strictly better than a non-functional one.
 	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 	if err != nil {
 		if !isReadOnlyOpen(fileArgs.Flags) {
