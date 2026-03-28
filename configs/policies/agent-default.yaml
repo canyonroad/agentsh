@@ -452,12 +452,29 @@ file_rules:
       - "/bin/**"
       - "/sbin/**"
       - "/opt/**"
+      - "/dev/**"
     operations:
       - read
       - open
       - stat
       - list
       - readlink
+    decision: allow
+
+  - name: allow-dev-write
+    description: Allow writes to safe device nodes
+    paths:
+      - "/dev/null"
+      - "/dev/zero"
+      - "/dev/tty"
+      - "/dev/pts/**"
+      - "/dev/urandom"
+      - "/dev/random"
+      - "/dev/shm/**"
+    operations:
+      - write
+      - create
+      - open
     decision: allow
 
   - name: allow-etc-read
@@ -519,21 +536,63 @@ file_rules:
   # Deny — sensitive system paths and default
   # ---------------------------------------------------------------------------
 
-  - name: deny-proc-sys
-    description: Block /proc and /sys
+  - name: deny-passwd-shadow
+    description: Block access to password/shadow files
     paths:
-      - "/proc/**"
-      - "/sys/**"
+      - "/etc/shadow"
+      - "/etc/gshadow"
     operations:
       - "*"
     decision: deny
 
+  - name: deny-proc-sensitive
+    description: Block reading sensitive /proc entries (environ, mem, kcore)
+    paths:
+      - "/proc/self/environ"
+      - "/proc/thread-self/environ"
+      - "/proc/*/environ"
+      - "/proc/*/task/*/environ"
+      - "/proc/*/mem"
+      - "/proc/kcore"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-proc-sys
+    description: Block writes to /proc and /sys
+    paths:
+      - "/proc/**"
+      - "/sys/**"
+    operations:
+      - write
+      - create
+      - chmod
+      - chown
+      - delete
+      - rename
+      - mkdir
+      - link
+      - symlink
+      - mknod
+      - rmdir
+    decision: deny
+
   - name: default-deny-files
-    description: Deny all other file operations
+    description: Deny all other file write operations
     paths:
       - "**"
     operations:
-      - "*"
+      - write
+      - create
+      - chmod
+      - chown
+      - delete
+      - rename
+      - mkdir
+      - link
+      - symlink
+      - mknod
+      - rmdir
     decision: deny
 
 # =============================================================================

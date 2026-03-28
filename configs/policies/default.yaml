@@ -81,12 +81,29 @@ file_rules:
       - "/bin/**"
       - "/sbin/**"
       - "/opt/**"
+      - "/dev/**"
     operations:
       - read
       - open
       - stat
       - list
       - readlink
+    decision: allow
+
+  - name: allow-dev-write
+    description: Allow writes to safe device nodes
+    paths:
+      - "/dev/null"
+      - "/dev/zero"
+      - "/dev/tty"
+      - "/dev/pts/**"
+      - "/dev/urandom"
+      - "/dev/random"
+      - "/dev/shm/**"
+    operations:
+      - write
+      - create
+      - open
     decision: allow
 
   - name: allow-etc-read-safe
@@ -213,8 +230,21 @@ file_rules:
       - "*"
     decision: deny
     
+  - name: deny-proc-sensitive
+    description: Block reading sensitive /proc entries (environ, mem, kcore)
+    paths:
+      - "/proc/self/environ"
+      - "/proc/thread-self/environ"
+      - "/proc/*/environ"
+      - "/proc/*/task/*/environ"
+      - "/proc/*/mem"
+      - "/proc/kcore"
+    operations:
+      - "*"
+    decision: deny
+
   - name: deny-system-sensitive
-    description: Block sensitive system files
+    description: Block writes to sensitive system files
     paths:
       - "/etc/sudoers"
       - "/etc/sudoers.d/**"
@@ -222,7 +252,17 @@ file_rules:
       - "/proc/**"
       - "/sys/**"
     operations:
-      - "*"
+      - write
+      - create
+      - chmod
+      - chown
+      - delete
+      - rename
+      - mkdir
+      - link
+      - symlink
+      - mknod
+      - rmdir
     decision: deny
 
   - name: deny-hostname-config
@@ -265,11 +305,21 @@ file_rules:
   # ---------------------------------------------------------------------------
   
   - name: default-deny-files
-    description: Deny all other file operations
+    description: Deny all other file write operations
     paths:
       - "**"
     operations:
-      - "*"
+      - write
+      - create
+      - chmod
+      - chown
+      - delete
+      - rename
+      - mkdir
+      - link
+      - symlink
+      - mknod
+      - rmdir
     decision: deny
 
 # =============================================================================

@@ -43,14 +43,14 @@ func TestAgentPolicies(t *testing.T) {
 			file:             "agent-default.yaml",
 			name:             "agent-default",
 			wantCommandRules: 21,
-			wantFileRules:    12,
+			wantFileRules:    15,
 			wantNetworkRules: 15,
 		},
 		{
 			file:             "agent-strict.yaml",
 			name:             "agent-strict",
 			wantCommandRules: 3,
-			wantFileRules:    3,
+			wantFileRules:    4,
 			wantNetworkRules: 1,
 		},
 		{
@@ -156,15 +156,22 @@ func TestAgentPolicies_DefaultRuleDetails(t *testing.T) {
 	assert.Contains(t, p.FileRules[2].Paths, "${PROJECT_ROOT}/**")
 
 	// Credential paths require approval
-	assert.Equal(t, "approve-ssh-keys", p.FileRules[8].Name)
-	assert.Equal(t, "approve", p.FileRules[8].Decision)
-
-	assert.Equal(t, "approve-cloud-credentials", p.FileRules[9].Name)
+	assert.Equal(t, "approve-ssh-keys", p.FileRules[9].Name)
 	assert.Equal(t, "approve", p.FileRules[9].Decision)
 
-	// Default deny at the end
-	assert.Equal(t, "default-deny-files", p.FileRules[11].Name)
+	assert.Equal(t, "approve-cloud-credentials", p.FileRules[10].Name)
+	assert.Equal(t, "approve", p.FileRules[10].Decision)
+
+	// Deny rules
+	assert.Equal(t, "deny-passwd-shadow", p.FileRules[11].Name)
 	assert.Equal(t, "deny", p.FileRules[11].Decision)
+
+	assert.Equal(t, "deny-proc-sensitive", p.FileRules[12].Name)
+	assert.Equal(t, "deny", p.FileRules[12].Decision)
+
+	// Default deny at the end
+	assert.Equal(t, "default-deny-files", p.FileRules[14].Name)
+	assert.Equal(t, "deny", p.FileRules[14].Decision)
 
 	// --- Network rules ---
 
@@ -645,25 +652,115 @@ func TestAgentDefault_FileDecisions(t *testing.T) {
 
 		// Denied paths
 		{
-			name:     "read /proc denied",
+			name:     "read /etc/shadow denied",
+			path:     "/etc/shadow",
+			op:       "read",
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-passwd-shadow",
+		},
+		{
+			name:     "read /etc/gshadow denied",
+			path:     "/etc/gshadow",
+			op:       "open",
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-passwd-shadow",
+		},
+		{
+			name:     "read /proc/self/environ denied (secrets)",
 			path:     "/proc/self/environ",
 			op:       "read",
 			wantDec:  types.DecisionDeny,
-			wantRule: "deny-proc-sys",
+			wantRule: "deny-proc-sensitive",
 		},
 		{
-			name:     "read /sys denied",
+			name:     "read /sys allowed (reads not blocked)",
 			path:     "/sys/class/net/eth0/address",
 			op:       "read",
-			wantDec:  types.DecisionDeny,
-			wantRule: "deny-proc-sys",
+			wantDec:  types.DecisionAllow,
+			wantRule: "default-allow-reads",
 		},
 		{
-			name:     "read random home path denied",
+			name:     "read random home path allowed (reads not blocked)",
 			path:     "/home/user/.bashrc",
 			op:       "read",
+			wantDec:  types.DecisionAllow,
+			wantRule: "default-allow-reads",
+		},
+
+		// Read-allow defaults (new behavior)
+		{
+			name:     "read unknown path defaults to allow",
+			path:     "/some/unknown/path",
+			op:       "open",
+			wantDec:  types.DecisionAllow,
+			wantRule: "default-allow-reads",
+		},
+		{
+			name:     "write unknown path defaults to deny",
+			path:     "/some/unknown/path",
+			op:       "write",
 			wantDec:  types.DecisionDeny,
 			wantRule: "default-deny-files",
+		},
+
+		// /dev access
+		{
+			name:     "read /dev/null via allow-system-read",
+			path:     "/dev/null",
+			op:       "open",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-system-read",
+		},
+		{
+			name:     "write /dev/null via allow-dev-write",
+			path:     "/dev/null",
+			op:       "write",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-dev-write",
+		},
+		{
+			name:     "write /dev/tty via allow-dev-write",
+			path:     "/dev/tty",
+			op:       "write",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-dev-write",
+		},
+		{
+			name:     "write /dev/pts/0 via allow-dev-write",
+			path:     "/dev/pts/0",
+			op:       "write",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-dev-write",
+		},
+		{
+			name:     "write /dev/fuse denied (not in allow-dev-write)",
+			path:     "/dev/fuse",
+			op:       "write",
+			wantDec:  types.DecisionDeny,
+			wantRule: "default-deny-files",
+		},
+
+		// /proc read/write behavior after narrowing
+		{
+			name:     "open /proc/self/environ denied (secrets)",
+			path:     "/proc/self/environ",
+			op:       "open",
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-proc-sensitive",
+		},
+		{
+			name:     "read /proc/self/status allowed",
+			path:     "/proc/self/status",
+			op:       "open",
+			wantDec:  types.DecisionAllow,
+			wantRule: "default-allow-reads",
+		},
+		{
+			name:     "write /proc/self/status denied",
+			path:     "/proc/self/status",
+			op:       "write",
+			wantDec:  types.DecisionDeny,
+			wantRule: "deny-proc-sys",
 		},
 	}
 
