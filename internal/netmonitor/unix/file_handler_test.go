@@ -579,15 +579,17 @@ func TestEmulationPath_ReadOnlyOpenat_CaughtByGuard(t *testing.T) {
 }
 
 func TestEmulationPath_ResolvePathAtFailure_ReadVsWrite(t *testing.T) {
-	// Validates the fix for the file_monitor read-blocking bug:
-	// When resolvePathAt fails (e.g., Yama ptrace_scope=1, server is not
-	// an ancestor of the tracee — common in `agentsh wrap` path), the
-	// emulated handler should:
-	//   - Read-only opens: CONTINUE (fail-open, let kernel handle)
-	//   - Write opens: EACCES (fail-secure, preserve write enforcement)
+	// Validates behavior when resolvePathAt fails (e.g., Yama ptrace_scope=1,
+	// server is not an ancestor of the tracee — common in `agentsh wrap` path
+	// because PR_SET_PTRACER does not inherit across fork()).
 	//
-	// Without this fix, ALL operations (including reads) get EACCES when
-	// resolvePathAt fails, blocking shared library loads and file reads.
+	// When resolution fails, the emulated handler falls back to CONTINUE for
+	// ALL operations. If we can't resolve the path, we can't evaluate policy
+	// either way. Reads are obviously safe; writes are also allowed because
+	// the alternative (denying ALL child-process writes) makes the environment
+	// unusable while providing no real enforcement (reads are equally
+	// unmonitored). Other layers (Landlock, FUSE) handle enforcement when
+	// seccomp path resolution is unavailable.
 
 	t.Run("read_only_flags_fail_open", func(t *testing.T) {
 		// Typical read-only flags from dynamic linker / cat / ls
@@ -599,16 +601,17 @@ func TestEmulationPath_ResolvePathAtFailure_ReadVsWrite(t *testing.T) {
 		}
 		for _, flags := range readFlags {
 			assert.True(t, isReadOnlyOpen(flags),
-				"flags 0x%x should be read-only (fail-open on resolvePathAt error)", flags)
+				"flags 0x%x should be read-only", flags)
 			// forceContinue is false for these (not O_TMPFILE, emulable flags)
 			assert.False(t, shouldFallbackToContinue(unix.SYS_OPENAT, flags, 0),
 				"flags 0x%x: forceContinue should be false (enters emulation branch)", flags)
-			// The fix: isReadOnlyOpen check in the error path → CONTINUE
 		}
 	})
 
-	t.Run("write_flags_fail_secure", func(t *testing.T) {
-		// Write-flagged opens should still be denied on resolvePathAt failure
+	t.Run("write_flags_detected", func(t *testing.T) {
+		// Write-flagged opens are correctly classified as non-read-only.
+		// On resolvePathAt failure these also fall back to CONTINUE (not deny),
+		// because the handler can't evaluate policy without a resolved path.
 		writeFlags := []uint32{
 			uint32(unix.O_WRONLY),                            // write only
 			uint32(unix.O_RDWR),                              // read-write
@@ -617,7 +620,7 @@ func TestEmulationPath_ResolvePathAtFailure_ReadVsWrite(t *testing.T) {
 		}
 		for _, flags := range writeFlags {
 			assert.False(t, isReadOnlyOpen(flags),
-				"flags 0x%x should NOT be read-only (fail-secure on resolvePathAt error)", flags)
+				"flags 0x%x should NOT be read-only", flags)
 		}
 	})
 }
