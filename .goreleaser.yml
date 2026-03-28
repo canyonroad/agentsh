@@ -5,6 +5,7 @@ before:
   hooks:
     - go mod download
     - ./scripts/build-envshim.sh
+    - ./scripts/build-ptracer.sh
 
 builds:
   # Linux amd64: CGO enabled for full seccomp user-notify support
@@ -167,6 +168,9 @@ archives:
       - src: build/envshim/linux_{{ .Arch }}/*
         dst: .
         strip_parent: true
+      - src: build/ptracer/linux_{{ .Arch }}/*
+        dst: .
+        strip_parent: true
       - packaging/bash_startup.sh
     builds_info:
       mode: 0755
@@ -262,6 +266,9 @@ nfpms:
           mode: 0644
       # Envshim library (Linux only) - uses glob to skip if not built
       - src: build/envshim/linux_{{ .Arch }}/*.so
+        dst: /usr/lib/agentsh/
+      # Ptracer LD_PRELOAD library (Linux only) - Yama ptrace_scope workaround
+      - src: build/ptracer/linux_{{ .Arch }}/*.so
         dst: /usr/lib/agentsh/
       # Bash startup script for environment injection
       - src: packaging/bash_startup.sh
