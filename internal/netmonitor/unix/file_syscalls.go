@@ -50,6 +50,18 @@ const emulableFlagMask = unix.O_RDONLY | unix.O_WRONLY | unix.O_RDWR |
 	unix.O_NOFOLLOW | unix.O_DIRECTORY | unix.O_PATH | unix.O_NOCTTY |
 	unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_SYNC | unix.O_DSYNC
 
+// openatWriteMask defines flags that indicate a write/create operation.
+// Built from unix constants for cross-architecture correctness.
+// __O_TMPFILE is O_TMPFILE without O_DIRECTORY (O_TMPFILE = __O_TMPFILE|O_DIRECTORY).
+const openatWriteMask = unix.O_WRONLY | unix.O_RDWR | unix.O_CREAT |
+	unix.O_TRUNC | unix.O_APPEND | (unix.O_TMPFILE &^ unix.O_DIRECTORY)
+
+// isReadOnlyOpen returns true if the flags indicate a read-only open
+// (no write, create, truncate, append, or tmpfile flags set).
+func isReadOnlyOpen(flags uint32) bool {
+	return flags&openatWriteMask == 0
+}
+
 // shouldFallbackToContinue returns true when an open-family syscall should
 // use CONTINUE instead of AddFD emulation. openat2 is ALWAYS routed to
 // CONTINUE because its extended semantics (RESOLVE_* flags, how_size

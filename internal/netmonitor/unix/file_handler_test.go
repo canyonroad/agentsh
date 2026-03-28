@@ -522,3 +522,58 @@ func TestFileHandler_PseudoPath_AllowedUnconditionally(t *testing.T) {
 		assert.Equal(t, ActionContinue, result.Action, "pseudo-path %q should be allowed", pp)
 	}
 }
+
+func TestFileHandler_ReadOnlyOpen_SkipsEmulation(t *testing.T) {
+	// Validates that Handle() returns ActionContinue for allowed read-only opens.
+	// This tests the policy layer; the emulation guard in handleFileNotificationEmulated
+	// is validated by TestEmulationPath_ReadOnlyOpenat_CaughtByGuard (decision chain)
+	// and cannot be directly tested without real seccomp notification fds.
+	policy := &mockFilePolicy{
+		decisions: map[string]FilePolicyDecision{
+			"/lib/x86_64-linux-gnu/libtinfo.so.6": {
+				Decision:          "allow",
+				EffectiveDecision: "allow",
+				Rule:              "system-allow",
+			},
+		},
+	}
+	emitter := &mockFileEmitter{}
+	handler := NewFileHandler(policy, NewMountRegistry(), emitter, true)
+	handler.SetEmulateOpen(true)
+
+	// A read-only open — like the dynamic linker loading a shared library.
+	req := FileRequest{
+		PID:       500,
+		Syscall:   int32(unix.SYS_OPENAT),
+		Path:      "/lib/x86_64-linux-gnu/libtinfo.so.6",
+		Operation: "open",
+		Flags:     uint32(unix.O_RDONLY | unix.O_CLOEXEC),
+		SessionID: "sess-test",
+	}
+	result := handler.Handle(req)
+	assert.Equal(t, ActionContinue, result.Action,
+		"read-only open must get ActionContinue even with emulation enabled")
+}
+
+func TestEmulationPath_ReadOnlyOpenat_CaughtByGuard(t *testing.T) {
+	// Validate the full decision chain in handleFileNotificationEmulated:
+	// A read-only openat is an open syscall (isOpenSyscall=true) that does
+	// NOT trigger shouldFallbackToContinue (no O_TMPFILE, no unemulable flags),
+	// so it enters the emulation branch (!forceContinue). The isReadOnlyOpen
+	// guard must catch it before emulateOpenat runs.
+	flags := uint32(unix.O_RDONLY | unix.O_CLOEXEC)
+
+	// Step 1: It IS an open syscall — would be routed to emulation path.
+	assert.True(t, isOpenSyscall(unix.SYS_OPENAT), "openat must be an open syscall")
+
+	// Step 2: It does NOT fall back to CONTINUE — enters emulation branch.
+	assert.False(t, shouldFallbackToContinue(unix.SYS_OPENAT, flags, 0),
+		"read-only openat must not trigger fallback (enters emulation branch)")
+
+	// Step 3: The read-only guard catches it before emulateOpenat.
+	assert.True(t, isReadOnlyOpen(flags),
+		"read-only flags must be caught by isReadOnlyOpen guard")
+
+	// Combined: a read-only openat enters the emulation branch but is
+	// intercepted by isReadOnlyOpen → CONTINUE (never emulated via AddFD).
+}

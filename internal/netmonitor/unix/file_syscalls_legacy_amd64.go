@@ -55,10 +55,12 @@ func extractLegacyFileArgs(args SyscallArgs) FileArgs {
 		}
 
 	case unix.SYS_CREAT:
-		// creat(path, mode)
+		// creat(path, mode) — equivalent to open(path, O_WRONLY|O_CREAT|O_TRUNC, mode).
+		// Set implicit flags so isReadOnlyOpen and other flag checks work correctly.
 		return FileArgs{
 			Dirfd:   int32(unix.AT_FDCWD),
 			PathPtr: args.Arg0,
+			Flags:   uint32(unix.O_WRONLY | unix.O_CREAT | unix.O_TRUNC),
 			Mode:    uint32(args.Arg1),
 		}
 

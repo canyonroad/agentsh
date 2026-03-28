@@ -515,3 +515,29 @@ func TestResolveProcFD_WithSuffix(t *testing.T) {
 	assert.True(t, wasProcFD, "procfd with suffix should resolve")
 	assert.Equal(t, filepath.Join(tmpDir, "subpath"), resolved)
 }
+
+func TestIsReadOnlyOpen(t *testing.T) {
+	tests := []struct {
+		name     string
+		flags    uint32
+		expected bool
+	}{
+		{"O_RDONLY", unix.O_RDONLY, true},
+		{"O_RDONLY|O_CLOEXEC", unix.O_RDONLY | unix.O_CLOEXEC, true},
+		{"O_RDONLY|O_NOFOLLOW", unix.O_RDONLY | unix.O_NOFOLLOW, true},
+		{"O_RDONLY|O_DIRECTORY", unix.O_RDONLY | unix.O_DIRECTORY, true},
+		{"O_RDONLY|O_NONBLOCK", unix.O_RDONLY | unix.O_NONBLOCK, true},
+		{"O_WRONLY", unix.O_WRONLY, false},
+		{"O_RDWR", unix.O_RDWR, false},
+		{"O_RDONLY|O_CREAT", unix.O_RDONLY | unix.O_CREAT, false},
+		{"O_RDONLY|O_TRUNC", unix.O_RDONLY | unix.O_TRUNC, false},
+		{"O_RDONLY|O_APPEND", unix.O_RDONLY | unix.O_APPEND, false},
+		{"O_TMPFILE", unix.O_TMPFILE, false},
+		{"O_WRONLY|O_CREAT|O_TRUNC", unix.O_WRONLY | unix.O_CREAT | unix.O_TRUNC, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isReadOnlyOpen(tt.flags), "flags=0x%x", tt.flags)
+		})
+	}
+}

@@ -120,6 +120,11 @@ func TestExtractLegacyFileArgs_Creat(t *testing.T) {
 	assert.Equal(t, int32(unix.AT_FDCWD), fa.Dirfd)
 	assert.Equal(t, uint64(0x7fff2000), fa.PathPtr)
 	assert.Equal(t, uint32(0644), fa.Mode)
+	// creat is O_WRONLY|O_CREAT|O_TRUNC — must NOT be classified as read-only.
+	assert.Equal(t, uint32(unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC), fa.Flags,
+		"creat must have implicit write flags set")
+	assert.False(t, isReadOnlyOpen(fa.Flags),
+		"creat must not be classified as read-only")
 }
 
 func TestExtractLegacyFileArgs_Mkdir(t *testing.T) {
