@@ -156,7 +156,10 @@ func main() {
 	// Set up LD_PRELOAD for the ptracer library so that child processes
 	// call PR_SET_PTRACER(server_pid). Without this, ProcessVMReadv fails
 	// for children under Yama ptrace_scope=1, breaking seccomp path resolution.
-	setupPtracerPreload(cfg.ServerPID)
+	// Only needed when seccomp notify is active (notifFD >= 0).
+	if notifFD >= 0 {
+		setupPtracerPreload(cfg.ServerPID)
+	}
 
 	// Exec the real command.
 	cmd := os.Args[2]
