@@ -526,8 +526,13 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	// FUSE) still protect against malicious writes.
 	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 	if err != nil {
-		slog.Debug("emulated file handler: failed to resolve path, falling back to CONTINUE",
-			"pid", pid, "error", err, "flags", fileArgs.Flags)
+		if !isReadOnlyOpen(fileArgs.Flags) {
+			slog.Warn("emulated file handler: path resolution failed for write, file policy not enforced",
+				"pid", pid, "error", err, "session_id", sessID)
+		} else {
+			slog.Debug("emulated file handler: path resolution failed for read, falling back to CONTINUE",
+				"pid", pid, "error", err)
+		}
 		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
 			slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
 		}
