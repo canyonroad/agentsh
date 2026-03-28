@@ -201,11 +201,11 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
 		SignalFilterEnabled: signalFilterEnabled, // Only true if signal socket succeeded
 		ExecveEnabled:       execveEnabled,
-		FileMonitorEnabled:  a.cfg.Sandbox.Seccomp.FileMonitor.Enabled,
+		FileMonitorEnabled:  config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.Enabled, false),
 	}
 
 	// Bridge file monitor sub-options using EnforceWithoutFUSE as the default
-	fmDefault := a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE
+	fmDefault := config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE, false)
 	seccompCfg.InterceptMetadata = config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata, fmDefault)
 	seccompCfg.BlockIOUring = config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.BlockIOUring, fmDefault)
 
@@ -1606,7 +1606,7 @@ func (a *App) applyRealPaths(s *session.Session, reqRealPaths *bool) {
 				"session_id", s.ID)
 			return
 		}
-		if !a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE {
+		if !config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE, false) {
 			slog.Warn("session created with real_paths but enforce_without_fuse is false: outside-workspace file access will be audit-only",
 				"session_id", s.ID)
 		}

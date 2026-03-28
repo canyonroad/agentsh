@@ -496,8 +496,8 @@ type SandboxSeccompSyscallConfig struct {
 
 // SandboxSeccompFileMonitorConfig configures file I/O interception via seccomp.
 type SandboxSeccompFileMonitorConfig struct {
-	Enabled            bool  `yaml:"enabled"`
-	EnforceWithoutFUSE bool  `yaml:"enforce_without_fuse"`
+	Enabled            *bool `yaml:"enabled"`
+	EnforceWithoutFUSE *bool `yaml:"enforce_without_fuse"`
 	InterceptMetadata  *bool `yaml:"intercept_metadata"`
 	OpenatEmulation    *bool `yaml:"openat_emulation"`
 	BlockIOUring       *bool `yaml:"block_io_uring"`
@@ -510,6 +510,9 @@ func FileMonitorBoolWithDefault(v *bool, defaultVal bool) bool {
 	}
 	return defaultVal
 }
+
+// boolPtr returns a pointer to the given bool value.
+func boolPtr(v bool) *bool { return &v }
 
 // SandboxXPCConfig configures macOS XPC/Mach IPC control.
 type SandboxXPCConfig struct {
@@ -1116,15 +1119,20 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	// unix_sockets-only mode shouldn't auto-enable full file monitoring
 	// (the policy's allow-etc-read rules may not cover all paths the
 	// dynamic linker needs, causing spurious EACCES on program startup).
-	if cfg.Sandbox.Seccomp.Enabled && !cfg.Sandbox.Seccomp.FileMonitor.Enabled {
-		cfg.Sandbox.Seccomp.FileMonitor.Enabled = true
+	// Only auto-enable file_monitor when user didn't explicitly set it (nil).
+	// If user set enabled: false, respect that — forcing it on causes EACCES
+	// on shared library opens because the handler denies read-only opens
+	// that don't match policy paths.
+	if cfg.Sandbox.Seccomp.Enabled && cfg.Sandbox.Seccomp.FileMonitor.Enabled == nil {
+		cfg.Sandbox.Seccomp.FileMonitor.Enabled = boolPtr(true)
 	}
 
 	// When file_monitor is enabled, default to enforcing policy decisions.
 	// Without this, the file_monitor only audits violations without blocking them,
 	// allowing writes to sensitive files like /etc/hostname or ~/.bashrc.
-	if cfg.Sandbox.Seccomp.FileMonitor.Enabled && !cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE {
-		cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE = true
+	if FileMonitorBoolWithDefault(cfg.Sandbox.Seccomp.FileMonitor.Enabled, false) &&
+		cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE == nil {
+		cfg.Sandbox.Seccomp.FileMonitor.EnforceWithoutFUSE = boolPtr(true)
 	}
 
 	// Execve interception defaults - apply when enabled but not fully configured
