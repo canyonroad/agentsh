@@ -13,6 +13,12 @@ build_one() {
   echo "[ptracer] building for linux/${arch} with CC=${cc}" >&2
   if ! command -v "$cc" >/dev/null 2>&1; then
     echo "[ptracer] skipping linux/${arch}: compiler $cc not found" >&2
+    # Create stub for packaging so archives always include the expected file.
+    # At runtime findPtracerLib() finds this but dlopen will fail harmlessly;
+    # the log message from setupPtracerPreload already warns about missing lib.
+    echo '#!/bin/sh' > "$target_dir/libagentsh-ptracer.so"
+    echo 'echo "ptracer: stub library - rebuild with $cc for full functionality" >&2' >> "$target_dir/libagentsh-ptracer.so"
+    chmod 644 "$target_dir/libagentsh-ptracer.so"
     return 0
   fi
   make -C "$SRC" clean >/dev/null 2>&1 || true

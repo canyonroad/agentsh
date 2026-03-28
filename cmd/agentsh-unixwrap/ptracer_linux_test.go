@@ -27,26 +27,23 @@ func TestSetupPtracerPreload_NegativePID(t *testing.T) {
 }
 
 func TestSetupPtracerPreload_SetsEnvWhenLibExists(t *testing.T) {
-	// Create a fake .so in a temp dir
-	dir := t.TempDir()
-	soPath := filepath.Join(dir, ptracerLibName)
+	// Place a fake .so next to the test binary so findPtracerLib discovers it.
+	self, err := os.Executable()
+	require.NoError(t, err)
+
+	soPath := filepath.Join(filepath.Dir(self), ptracerLibName)
 	require.NoError(t, os.WriteFile(soPath, []byte("fake"), 0755))
+	defer os.Remove(soPath)
 
-	// Make os.Executable return a path in our temp dir
-	fakeExe := filepath.Join(dir, "agentsh-unixwrap")
-	require.NoError(t, os.WriteFile(fakeExe, []byte("fake"), 0755))
-
-	// Since we can't override os.Executable, test findPtracerLib directly
-	// by placing the .so in /usr/lib/agentsh/ (not practical in tests).
-	// Instead, verify the env-setting logic with a direct call.
 	os.Unsetenv("LD_PRELOAD")
 	os.Unsetenv("AGENTSH_SERVER_PID")
+	defer os.Unsetenv("LD_PRELOAD")
+	defer os.Unsetenv("AGENTSH_SERVER_PID")
 
-	// setupPtracerPreload won't find the lib (not next to real binary),
-	// but verify it doesn't crash and logs gracefully.
 	setupPtracerPreload(12345)
-	// LD_PRELOAD may or may not be set depending on whether lib is found.
-	// At minimum, verify no panic.
+
+	assert.Equal(t, soPath, os.Getenv("LD_PRELOAD"), "should set LD_PRELOAD to ptracer lib path")
+	assert.Equal(t, "12345", os.Getenv("AGENTSH_SERVER_PID"), "should set AGENTSH_SERVER_PID")
 }
 
 func TestSetupPtracerPreload_PreservesExistingLDPreload(t *testing.T) {
