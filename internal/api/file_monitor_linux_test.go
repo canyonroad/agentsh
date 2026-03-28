@@ -19,16 +19,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func boolPtr(v bool) *bool { return &v }
+
 func TestCreateFileHandler_Disabled(t *testing.T) {
-	cfg := config.SandboxSeccompFileMonitorConfig{Enabled: false}
+	cfg := config.SandboxSeccompFileMonitorConfig{Enabled: boolPtr(false)}
 	h := createFileHandler(cfg, nil, nil, false)
 	assert.Nil(t, h)
 }
 
 func TestCreateFileHandler_Enabled(t *testing.T) {
 	cfg := config.SandboxSeccompFileMonitorConfig{
-		Enabled:            true,
-		EnforceWithoutFUSE: true,
+		Enabled:            boolPtr(true),
+		EnforceWithoutFUSE: boolPtr(true),
 	}
 	h := createFileHandler(cfg, nil, nil, false)
 	assert.NotNil(t, h)
@@ -36,8 +38,8 @@ func TestCreateFileHandler_Enabled(t *testing.T) {
 
 func TestCreateFileHandler_NilPolicy(t *testing.T) {
 	cfg := config.SandboxSeccompFileMonitorConfig{
-		Enabled:            true,
-		EnforceWithoutFUSE: true,
+		Enabled:            boolPtr(true),
+		EnforceWithoutFUSE: boolPtr(true),
 	}
 	h := createFileHandler(cfg, nil, nil, false)
 	require.NotNil(t, h)
@@ -71,8 +73,8 @@ func TestCreateFileHandler_EnforceWithoutFUSE(t *testing.T) {
 
 	t.Run("enforce_false_allows_denied", func(t *testing.T) {
 		cfg := config.SandboxSeccompFileMonitorConfig{
-			Enabled:            true,
-			EnforceWithoutFUSE: false, // audit-only
+			Enabled:            boolPtr(true),
+			EnforceWithoutFUSE: boolPtr(false), // audit-only
 		}
 		h := createFileHandler(cfg, engine, nil, false)
 		require.NotNil(t, h)
@@ -88,8 +90,8 @@ func TestCreateFileHandler_EnforceWithoutFUSE(t *testing.T) {
 
 	t.Run("enforce_true_denies", func(t *testing.T) {
 		cfg := config.SandboxSeccompFileMonitorConfig{
-			Enabled:            true,
-			EnforceWithoutFUSE: true, // enforcing
+			Enabled:            boolPtr(true),
+			EnforceWithoutFUSE: boolPtr(true), // enforcing
 		}
 		h := createFileHandler(cfg, engine, nil, false)
 		require.NotNil(t, h)
