@@ -551,8 +551,8 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	if fileArgs.HasSecondPath {
 		p2, err := resolvePathAt(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
 		if err != nil {
-			slog.Debug("emulated file handler: failed to resolve second path, falling back to CONTINUE",
-				"pid", pid, "error", err)
+			slog.Warn("emulated file handler: second path resolution failed for mutating op, file policy not enforced",
+				"pid", pid, "error", err, "syscall", args.Nr, "session_id", sessID)
 			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
 				slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
 			}
