@@ -516,19 +516,26 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	forceContinue := !isOpenSyscall(args.Nr) || shouldFallbackToContinue(args.Nr, fileArgs.Flags, resolveFlags)
 
 	// Resolve primary path.
-	// In emulation mode (non-CONTINUE): fail-secure (deny on error).
+	// In emulation mode (non-CONTINUE): fail-secure for writes (deny on error),
+	// but fail-open for read-only opens (no TOCTOU risk for reads).
 	// In CONTINUE mode: fail-open (let kernel handle it) — the kernel will
 	// validate the path itself.
+	//
+	// Path resolution can fail when the supervisor cannot read tracee memory
+	// (e.g., Yama ptrace_scope=1 and the supervisor is not an ancestor of the
+	// tracee — common in the `agentsh wrap` path where the CLI spawns the
+	// sandboxed process independently of the server).
 	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 	if err != nil {
-		if forceContinue {
-			slog.Debug("emulated file handler: failed to resolve path in CONTINUE mode, allowing", "pid", pid, "error", err)
+		if forceContinue || isReadOnlyOpen(fileArgs.Flags) {
+			slog.Debug("emulated file handler: failed to resolve path, allowing",
+				"pid", pid, "error", err, "force_continue", forceContinue, "read_only", isReadOnlyOpen(fileArgs.Flags))
 			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
 				slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
 			}
 			return
 		}
-		slog.Debug("emulated file handler: failed to resolve path, denying", "pid", pid, "error", err)
+		slog.Debug("emulated file handler: failed to resolve path, denying write", "pid", pid, "error", err)
 		if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
 			slog.Error("emulated file handler: deny response failed", "pid", pid, "error", err)
 		}
