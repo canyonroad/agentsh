@@ -13,12 +13,9 @@ build_one() {
   echo "[ptracer] building for linux/${arch} with CC=${cc}" >&2
   if ! command -v "$cc" >/dev/null 2>&1; then
     echo "[ptracer] skipping linux/${arch}: compiler $cc not found" >&2
-    # Create stub for packaging so archives always include the expected file.
-    # At runtime findPtracerLib() finds this but dlopen will fail harmlessly;
-    # the log message from setupPtracerPreload already warns about missing lib.
-    echo '#!/bin/sh' > "$target_dir/libagentsh-ptracer.so"
-    echo 'echo "ptracer: stub library - rebuild with $cc for full functionality" >&2' >> "$target_dir/libagentsh-ptracer.so"
-    chmod 644 "$target_dir/libagentsh-ptracer.so"
+    # No stub: LD_PRELOAD requires a valid ELF shared object; a non-ELF stub
+    # would cause dynamic linker errors on every exec. findPtracerLib() handles
+    # the missing file gracefully with a log warning.
     return 0
   fi
   make -C "$SRC" clean >/dev/null 2>&1 || true
@@ -28,8 +25,8 @@ build_one() {
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
-# amd64 using native gcc
-build_one amd64 gcc || true
+# amd64 using native gcc (mandatory — primary Linux target)
+build_one amd64 gcc
 
-# arm64 using cross-compiler if available
+# arm64 using cross-compiler if available (optional — graceful degradation)
 build_one arm64 aarch64-linux-gnu-gcc || true
