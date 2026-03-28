@@ -343,7 +343,7 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 	slog.Info("wrap: received notify fd", "session_id", sessionID, "fd", notifyFD.Fd())
 
 	// Start the notify handler using existing infrastructure
-	startNotifyHandlerForWrap(ctx, notifyFD, sessionID, a, execveEnabled, wrapperPID)
+	startNotifyHandlerForWrap(ctx, notifyFD, sessionID, a, execveEnabled, wrapperPID, s)
 }
 
 // acceptSignalFD listens on the Unix socket for a single connection from the CLI,

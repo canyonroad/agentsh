@@ -58,14 +58,23 @@ func recvFDFromConn(sock *os.File) (*os.File, error) {
 // startNotifyHandlerForWrap starts the seccomp notify handler for a wrap session.
 // Unlike the exec path where the notify fd comes from a socketpair, here it comes
 // from the CLI via a Unix socket connection.
-func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int) {
+func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session) {
 	emitter := &notifyEmitterAdapter{store: a.store, broker: a.broker}
+
+	// Prefer session-specific policy engine (has expanded ${PROJECT_ROOT} etc.)
+	// over app-level engine, matching the exec path pattern in core.go.
+	sessionPolicy := a.policy
+	if s != nil {
+		if sp := s.PolicyEngine(); sp != nil {
+			sessionPolicy = sp
+		}
+	}
 
 	// Create execve handler if enabled
 	var execveHandler *unixmon.ExecveHandler
 	var cleanupSymlink func()
 	if execveEnabled {
-		if h := createExecveHandler(a.cfg.Sandbox.Seccomp.Execve, a.policy, a.approvals); h != nil {
+		if h := createExecveHandler(a.cfg.Sandbox.Seccomp.Execve, sessionPolicy, a.approvals); h != nil {
 			execveHandler, _ = h.(*unixmon.ExecveHandler)
 			if execveHandler != nil {
 				execveHandler.SetEmitter(emitter)
@@ -106,7 +115,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 	}
 
 	// Create file handler if configured
-	fileHandler := createFileHandler(a.cfg.Sandbox.Seccomp.FileMonitor, a.policy, emitter, a.cfg.Landlock.Enabled)
+	fileHandler := createFileHandler(a.cfg.Sandbox.Seccomp.FileMonitor, sessionPolicy, emitter, a.cfg.Landlock.Enabled)
 
 	go func() {
 		defer notifyFD.Close()
@@ -114,7 +123,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 			defer cleanupSymlink()
 		}
 		slog.Info("wrap: starting notify handler", "session_id", sessionID, "has_execve", execveHandler != nil, "has_file_handler", fileHandler != nil)
-		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessionID, a.policy, emitter, execveHandler, fileHandler)
+		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessionID, sessionPolicy, emitter, execveHandler, fileHandler)
 		slog.Info("wrap: notify handler returned", "session_id", sessionID)
 	}()
 }

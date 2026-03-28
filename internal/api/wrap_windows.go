@@ -35,7 +35,7 @@ func recvFDFromConn(sock *os.File) (*os.File, error) {
 	return nil, fmt.Errorf("SCM_RIGHTS not available on Windows")
 }
 
-func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int) {
+func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session) {
 	// Not used on Windows — the driver handles exec interception directly.
 }
 
