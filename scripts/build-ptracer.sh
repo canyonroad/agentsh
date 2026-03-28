@@ -16,7 +16,7 @@ build_one() {
     # No stub: LD_PRELOAD requires a valid ELF shared object; a non-ELF stub
     # would cause dynamic linker errors on every exec. findPtracerLib() handles
     # the missing file gracefully with a log warning.
-    return 0
+    return 1
   fi
   make -C "$SRC" clean >/dev/null 2>&1 || true
   CC="$cc" TARGET="$target_dir/libagentsh-ptracer.so" make -C "$SRC" all
