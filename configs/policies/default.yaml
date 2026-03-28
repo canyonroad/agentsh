@@ -81,12 +81,29 @@ file_rules:
       - "/bin/**"
       - "/sbin/**"
       - "/opt/**"
+      - "/dev/**"
     operations:
       - read
       - open
       - stat
       - list
       - readlink
+    decision: allow
+
+  - name: allow-dev-write
+    description: Allow writes to safe device nodes
+    paths:
+      - "/dev/null"
+      - "/dev/zero"
+      - "/dev/tty"
+      - "/dev/pts/**"
+      - "/dev/urandom"
+      - "/dev/random"
+      - "/dev/shm/**"
+    operations:
+      - write
+      - create
+      - open
     decision: allow
 
   - name: allow-etc-read-safe

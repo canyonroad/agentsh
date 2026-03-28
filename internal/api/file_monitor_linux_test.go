@@ -146,8 +146,15 @@ func TestFilePolicyEngineWrapper_CheckFile(t *testing.T) {
 		assert.Equal(t, "etc is off limits", dec.Message)
 	})
 
-	t.Run("default_deny_for_unmatched", func(t *testing.T) {
+	t.Run("default_allow_for_unmatched_read", func(t *testing.T) {
 		dec := w.CheckFile("/var/log/syslog", "open")
+		assert.Equal(t, "allow", dec.Decision)
+		assert.Equal(t, "allow", dec.EffectiveDecision)
+		assert.Equal(t, "default-allow-reads", dec.Rule)
+	})
+
+	t.Run("default_deny_for_unmatched_write", func(t *testing.T) {
+		dec := w.CheckFile("/var/log/syslog", "write")
 		assert.Equal(t, "deny", dec.Decision)
 		assert.Equal(t, "deny", dec.EffectiveDecision)
 		assert.Equal(t, "default-deny-files", dec.Rule)

@@ -43,7 +43,7 @@ func TestAgentPolicies(t *testing.T) {
 			file:             "agent-default.yaml",
 			name:             "agent-default",
 			wantCommandRules: 21,
-			wantFileRules:    14,
+			wantFileRules:    15,
 			wantNetworkRules: 15,
 		},
 		{
@@ -156,21 +156,22 @@ func TestAgentPolicies_DefaultRuleDetails(t *testing.T) {
 	assert.Contains(t, p.FileRules[2].Paths, "${PROJECT_ROOT}/**")
 
 	// Credential paths require approval
-	assert.Equal(t, "approve-ssh-keys", p.FileRules[8].Name)
-	assert.Equal(t, "approve", p.FileRules[8].Decision)
-
-	assert.Equal(t, "approve-cloud-credentials", p.FileRules[9].Name)
+	assert.Equal(t, "approve-ssh-keys", p.FileRules[9].Name)
 	assert.Equal(t, "approve", p.FileRules[9].Decision)
 
-	// Default deny at the end
-	assert.Equal(t, "deny-passwd-shadow", p.FileRules[10].Name)
-	assert.Equal(t, "deny", p.FileRules[10].Decision)
+	assert.Equal(t, "approve-cloud-credentials", p.FileRules[10].Name)
+	assert.Equal(t, "approve", p.FileRules[10].Decision)
 
-	assert.Equal(t, "deny-proc-sensitive", p.FileRules[11].Name)
+	// Deny rules
+	assert.Equal(t, "deny-passwd-shadow", p.FileRules[11].Name)
 	assert.Equal(t, "deny", p.FileRules[11].Decision)
 
-	assert.Equal(t, "default-deny-files", p.FileRules[13].Name)
-	assert.Equal(t, "deny", p.FileRules[13].Decision)
+	assert.Equal(t, "deny-proc-sensitive", p.FileRules[12].Name)
+	assert.Equal(t, "deny", p.FileRules[12].Decision)
+
+	// Default deny at the end
+	assert.Equal(t, "default-deny-files", p.FileRules[14].Name)
+	assert.Equal(t, "deny", p.FileRules[14].Decision)
 
 	// --- Network rules ---
 
@@ -697,6 +698,43 @@ func TestAgentDefault_FileDecisions(t *testing.T) {
 		{
 			name:     "write unknown path defaults to deny",
 			path:     "/some/unknown/path",
+			op:       "write",
+			wantDec:  types.DecisionDeny,
+			wantRule: "default-deny-files",
+		},
+
+		// /dev access
+		{
+			name:     "read /dev/null via allow-system-read",
+			path:     "/dev/null",
+			op:       "open",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-system-read",
+		},
+		{
+			name:     "write /dev/null via allow-dev-write",
+			path:     "/dev/null",
+			op:       "write",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-dev-write",
+		},
+		{
+			name:     "write /dev/tty via allow-dev-write",
+			path:     "/dev/tty",
+			op:       "write",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-dev-write",
+		},
+		{
+			name:     "write /dev/pts/0 via allow-dev-write",
+			path:     "/dev/pts/0",
+			op:       "write",
+			wantDec:  types.DecisionAllow,
+			wantRule: "allow-dev-write",
+		},
+		{
+			name:     "write /dev/fuse denied (not in allow-dev-write)",
+			path:     "/dev/fuse",
 			op:       "write",
 			wantDec:  types.DecisionDeny,
 			wantRule: "default-deny-files",
