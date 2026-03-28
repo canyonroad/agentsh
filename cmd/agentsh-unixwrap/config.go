@@ -29,6 +29,9 @@ type WrapperConfig struct {
 	DenyPaths       []string `json:"deny_paths,omitempty"`
 	AllowNetwork    bool     `json:"allow_network,omitempty"`
 	AllowBind       bool     `json:"allow_bind,omitempty"`
+
+	// Server PID for PR_SET_PTRACER (Yama ptrace_scope=1 workaround)
+	ServerPID int `json:"server_pid,omitempty"`
 }
 
 // loadConfig reads the wrapper config from environment.

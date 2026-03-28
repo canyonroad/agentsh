@@ -152,6 +152,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		UnixSocketEnabled: a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
 		BlockedSyscalls:   a.cfg.Sandbox.Seccomp.Syscalls.Block,
 		ExecveEnabled:     execveEnabled,
+		ServerPID:         os.Getpid(),
 	}
 
 	// Add Landlock config if enabled
