@@ -602,6 +602,16 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 			}
 			return
 		}
+		// Defense-in-depth: never emulate read-only opens.
+		// With BPF flag filtering, reads should not reach here.
+		// But if they do (openat2 fallback, future filter changes),
+		// CONTINUE is always safe for reads — no TOCTOU risk.
+		if isReadOnlyOpen(fileArgs.Flags) {
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("emulated file handler: read-only continue failed", "pid", pid, "error", err)
+			}
+			return
+		}
 		// Verify notification is still live before side-effecting supervisor open.
 		// A stale notification means the tracee exited — don't create/truncate files.
 		// Non-ENOENT errors (e.g., EINVAL) → proceed with emulation. The AddFD
