@@ -14,9 +14,73 @@ description: |
 
 file_rules:
   # ---------------------------------------------------------------------------
+  # Deny sensitive paths FIRST - these take priority over workspace allows.
+  # Because rules use first-match-wins and HOME often equals PROJECT_ROOT,
+  # deny rules for ${HOME} paths MUST come before workspace allow rules.
+  # ---------------------------------------------------------------------------
+
+  - name: deny-shell-rc
+    description: Block modifications to shell config files
+    paths:
+      - "${HOME}/.bashrc"
+      - "${HOME}/.bash_profile"
+      - "${HOME}/.profile"
+      - "${HOME}/.zshrc"
+      - "/root/.bashrc"
+      - "/root/.bash_profile"
+      - "/root/.profile"
+      - "/root/.zshrc"
+    operations:
+      - write
+      - create
+      - rename
+      - delete
+      - chmod
+      - link
+      - symlink
+    decision: deny
+
+  - name: deny-ssh-keys
+    description: Block access to SSH keys
+    paths:
+      - "${HOME}/.ssh/**"
+      - "/root/.ssh/**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-aws-credentials
+    description: Block AWS credentials
+    paths:
+      - "${HOME}/.aws/**"
+      - "/root/.aws/**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-cloud-credentials
+    description: Block cloud provider credentials
+    paths:
+      - "${HOME}/.gcloud/**"
+      - "${HOME}/.azure/**"
+      - "${HOME}/.config/gcloud/**"
+    operations:
+      - "*"
+    decision: deny
+
+  - name: deny-git-credentials
+    description: Block git credentials in home directory
+    paths:
+      - "${HOME}/.git-credentials"
+      - "${HOME}/.gitconfig"
+    operations:
+      - "*"
+    decision: deny
+
+  # ---------------------------------------------------------------------------
   # Workspace - where agents do their work
   # ---------------------------------------------------------------------------
-  
+
   - name: allow-workspace-read
     description: Allow reading any file in workspace
     paths:
@@ -166,37 +230,11 @@ file_rules:
     decision: allow
 
   # ---------------------------------------------------------------------------
-  # Blocked - sensitive paths
+  # Blocked - sensitive paths (after workspace allows)
+  # These use ** wildcards that would over-block workspace files if placed
+  # before workspace allows. ${HOME}-specific denies are above.
   # ---------------------------------------------------------------------------
-  
-  - name: deny-ssh-keys
-    description: Block access to SSH keys
-    paths:
-      - "${HOME}/.ssh/**"
-      - "/root/.ssh/**"
-    operations:
-      - "*"
-    decision: deny
-    
-  - name: deny-aws-credentials
-    description: Block AWS credentials
-    paths:
-      - "${HOME}/.aws/**"
-      - "/root/.aws/**"
-    operations:
-      - "*"
-    decision: deny
-    
-  - name: deny-cloud-credentials
-    description: Block cloud provider credentials
-    paths:
-      - "${HOME}/.gcloud/**"
-      - "${HOME}/.azure/**"
-      - "${HOME}/.config/gcloud/**"
-    operations:
-      - "*"
-    decision: deny
-    
+
   - name: deny-env-files
     description: Block .env files which often contain secrets
     paths:
@@ -206,17 +244,6 @@ file_rules:
       - "**/credentials/**"
     operations:
       - "*"
-    decision: deny
-    
-  - name: deny-git-credentials
-    description: Block git credentials
-    paths:
-      - "${HOME}/.git-credentials"
-      - "${HOME}/.gitconfig"
-      - "**/.git/config"
-    operations:
-      - read
-      - write
     decision: deny
 
   - name: deny-passwd-shadow
@@ -282,22 +309,6 @@ file_rules:
       - "/run/docker.sock"
     operations:
       - "*"
-    decision: deny
-
-  - name: deny-shell-rc
-    description: Block writes to shell config files
-    paths:
-      - "${HOME}/.bashrc"
-      - "${HOME}/.bash_profile"
-      - "${HOME}/.profile"
-      - "${HOME}/.zshrc"
-      - "/root/.bashrc"
-      - "/root/.bash_profile"
-      - "/root/.profile"
-      - "/root/.zshrc"
-    operations:
-      - write
-      - create
     decision: deny
 
   # ---------------------------------------------------------------------------
