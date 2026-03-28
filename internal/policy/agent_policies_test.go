@@ -665,6 +665,22 @@ func TestAgentDefault_FileDecisions(t *testing.T) {
 			wantDec:  types.DecisionDeny,
 			wantRule: "default-deny-files",
 		},
+
+		// Read-allow defaults (new behavior)
+		{
+			name:     "read unknown path defaults to allow",
+			path:     "/some/unknown/path",
+			op:       "open",
+			wantDec:  types.DecisionAllow,
+			wantRule: "default-allow-reads",
+		},
+		{
+			name:     "write unknown path defaults to deny",
+			path:     "/some/unknown/path",
+			op:       "write",
+			wantDec:  types.DecisionDeny,
+			wantRule: "default-deny-files",
+		},
 	}
 
 	for _, tt := range tests {

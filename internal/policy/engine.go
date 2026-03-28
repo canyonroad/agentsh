@@ -612,6 +612,26 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 	return dec
 }
 
+// isReadOperation returns true for non-mutating file operations.
+// These default to allow when no policy rule matches, because:
+//   - Reads cannot modify the filesystem
+//   - Sensitive reads are caught by explicit deny rules
+//   - The policy was designed for write enforcement; reads hit many uncovered paths
+//
+// Note: "read" and "list" are included for completeness with policy rule
+// operation names but are not currently produced by the Linux seccomp
+// syscallToOperation() mapper. The Linux path produces: open, stat,
+// readlink, access (read-like) and write, create, delete, rmdir, mkdir,
+// rename, link, symlink, chmod, chown, mknod (write-like).
+func isReadOperation(op string) bool {
+	switch op {
+	case "open", "read", "stat", "list", "readlink", "access":
+		return true
+	default:
+		return false
+	}
+}
+
 func (e *Engine) CheckFile(p string, operation string) Decision {
 	operation = strings.ToLower(operation)
 	for _, r := range e.compiledFileRules {
@@ -631,7 +651,13 @@ func (e *Engine) CheckFile(p string, operation string) Decision {
 			}
 		}
 	}
-	// Default deny (policy files typically include an explicit default deny, but we enforce it here too).
+	// No rule matched — use operation-aware default.
+	// Write operations default to deny (safety net for unrecognized paths).
+	// Read operations default to allow (reads can't modify files;
+	// sensitive reads are caught by explicit deny rules above).
+	if isReadOperation(operation) {
+		return e.wrapDecision(string(types.DecisionAllow), "default-allow-reads", "", nil)
+	}
 	return e.wrapDecision(string(types.DecisionDeny), "default-deny-files", "", nil)
 }
 
