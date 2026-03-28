@@ -181,6 +181,60 @@ func TestFileMonitor_ReadAllowed(t *testing.T) {
 		}
 	})
 
+	// Test 5: write to workspace should succeed (allowed by allow-workspace rule)
+	t.Run("write_workspace_file", func(t *testing.T) {
+		execCtx, cancel := context.WithTimeout(ctx, execTimeout)
+		defer cancel()
+
+		result, err := cli.Exec(execCtx, sess.ID, types.ExecRequest{
+			Command:    "sh",
+			Args:       []string{"-c", "echo test_content > /workspace/write_test.txt && cat /workspace/write_test.txt"},
+			WorkingDir: "/workspace",
+		})
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				t.Skip("command timeout")
+			}
+			t.Fatalf("Exec write workspace: %v", err)
+		}
+		if result.Result.ExitCode != 0 {
+			t.Errorf("write to /workspace should succeed: exit=%d stderr=%q",
+				result.Result.ExitCode, result.Result.Stderr)
+		} else {
+			stdout := strings.TrimSpace(result.Result.Stdout)
+			if stdout != "test_content" {
+				t.Errorf("expected 'test_content', got %q", stdout)
+			}
+		}
+	})
+
+	// Test 6: write to /tmp should succeed (allowed by allow-tmp rule)
+	t.Run("write_tmp_file", func(t *testing.T) {
+		execCtx, cancel := context.WithTimeout(ctx, execTimeout)
+		defer cancel()
+
+		result, err := cli.Exec(execCtx, sess.ID, types.ExecRequest{
+			Command:    "sh",
+			Args:       []string{"-c", "echo tmp_content > /tmp/write_test.txt && cat /tmp/write_test.txt"},
+			WorkingDir: "/workspace",
+		})
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				t.Skip("command timeout")
+			}
+			t.Fatalf("Exec write tmp: %v", err)
+		}
+		if result.Result.ExitCode != 0 {
+			t.Errorf("write to /tmp should succeed: exit=%d stderr=%q",
+				result.Result.ExitCode, result.Result.Stderr)
+		} else {
+			stdout := strings.TrimSpace(result.Result.Stdout)
+			if stdout != "tmp_content" {
+				t.Errorf("expected 'tmp_content', got %q", stdout)
+			}
+		}
+	})
+
 	if err := cli.DestroySession(ctx, sess.ID); err != nil {
 		t.Logf("DestroySession: %v (non-fatal)", err)
 	}
