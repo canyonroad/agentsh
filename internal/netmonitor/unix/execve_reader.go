@@ -123,9 +123,12 @@ func readPointer(pid int, ptr uint64) (uint64, error) {
 	liov := unix.Iovec{Base: &buf[0], Len: 8}
 	riov := unix.RemoteIovec{Base: uintptr(ptr), Len: 8}
 
-	_, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
 	if err != nil {
 		return 0, fmt.Errorf("%w: %v", ErrReadMemory, err)
+	}
+	if n != 8 {
+		return 0, fmt.Errorf("%w: short read (%d/8 bytes)", ErrReadMemory, n)
 	}
 	return val, nil
 }

@@ -535,11 +535,11 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	if err != nil {
 		// For writes, retry with /proc/<pid>/mem fallback — deny rules
 		// must be evaluated even when ProcessVMReadv is blocked by Yama.
-		if !isReadOnlyOpen(fileArgs.Flags) {
+		if !isReadOnlyFileOp(args.Nr, fileArgs.Flags) {
 			path, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 		}
 		if err != nil {
-			if !isReadOnlyOpen(fileArgs.Flags) {
+			if !isReadOnlyFileOp(args.Nr, fileArgs.Flags) {
 				slog.Warn("emulated file handler: path resolution failed for write, file policy not enforced",
 					"pid", pid, "error", err, "session_id", sessID)
 			} else {

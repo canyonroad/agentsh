@@ -62,6 +62,27 @@ func isReadOnlyOpen(flags uint32) bool {
 	return flags&openatWriteMask == 0
 }
 
+// isReadOnlyFileOp returns true if the syscall+flags combination represents
+// a read-only file operation. For open-family syscalls this checks the open
+// flags; for non-open syscalls it checks whether the syscall itself is
+// inherently read-only (stat, access, readlink) vs mutating.
+func isReadOnlyFileOp(nr int32, flags uint32) bool {
+	switch nr {
+	case unix.SYS_OPENAT, unix.SYS_OPENAT2:
+		return isReadOnlyOpen(flags)
+	case unix.SYS_STATX, unix.SYS_NEWFSTATAT, unix.SYS_FACCESSAT2, unix.SYS_READLINKAT:
+		return true
+	default:
+		if isLegacyOpenSyscallNr(nr) {
+			return isReadOnlyOpen(flags)
+		}
+		// All other file syscalls (unlinkat, mkdirat, renameat2, linkat,
+		// symlinkat, fchmodat, fchownat, mknodat, and legacy equivalents)
+		// are mutating operations.
+		return false
+	}
+}
+
 // shouldFallbackToContinue returns true when an open-family syscall should
 // use CONTINUE instead of AddFD emulation. openat2 is ALWAYS routed to
 // CONTINUE because its extended semantics (RESOLVE_* flags, how_size
