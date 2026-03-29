@@ -1238,7 +1238,12 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 					"restore_hint": fmt.Sprintf("agentsh trash restore %s", token),
 				},
 			}
-			_ = a.store.AppendEvent(ctx, ev)
+			persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := a.store.AppendEvent(persistCtx, ev)
+			cancel()
+			if err != nil {
+				slog.Error("persist fuse soft-delete event", "error", err, "event_type", ev.Type, "path", path)
+			}
 			a.broker.Publish(ev)
 		}
 	}
