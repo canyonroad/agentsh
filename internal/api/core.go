@@ -392,7 +392,7 @@ func (a *App) setupProfileMounts(ctx context.Context, s *session.Session, profil
 			fs := a.platform.Filesystem()
 			if fs != nil && fs.Available() {
 				eventChan := make(chan platform.IOEvent, 1000)
-				go a.processIOEvents(ctx, eventChan)
+				go a.processIOEvents(eventChan)
 
 				fsCfg := platform.FSConfig{
 					SourcePath: mountPath,
@@ -1200,7 +1200,7 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 	eventChan := make(chan platform.IOEvent, 1000)
 
 	// Start goroutine to process events from the channel
-	go a.processIOEvents(ctx, eventChan)
+	go a.processIOEvents(eventChan)
 
 	// Build platform FSConfig
 	fsCfg := platform.FSConfig{
@@ -1300,7 +1300,9 @@ func (a *App) mountFUSEForSession(ctx context.Context, p fuseMountParams) bool {
 
 // processIOEvents reads events from the platform event channel and forwards
 // them to the event store and broker. It runs until the channel is closed.
-func (a *App) processIOEvents(ctx context.Context, eventChan <-chan platform.IOEvent) {
+// Uses a per-event background context instead of a caller-provided context
+// to avoid silent event drops when the HTTP request context is canceled.
+func (a *App) processIOEvents(eventChan <-chan platform.IOEvent) {
 	for ioEvent := range eventChan {
 		// Convert platform.IOEvent to types.Event
 		ev := ioEvent.ToEvent()
@@ -1312,7 +1314,12 @@ func (a *App) processIOEvents(ctx context.Context, eventChan <-chan platform.IOE
 		}
 
 		// Store and publish the event
-		_ = a.store.AppendEvent(ctx, ev)
+		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := a.store.AppendEvent(persistCtx, ev)
+		cancel()
+		if err != nil {
+			slog.Error("persist fuse io event", "error", err, "event_type", ev.Type, "event_id", ev.ID)
+		}
 		a.broker.Publish(ev)
 	}
 }
