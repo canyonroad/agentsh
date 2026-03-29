@@ -91,3 +91,12 @@ func getenvDefault(k, def string) string {
 	}
 	return def
 }
+
+// userHomeDir returns the user's home directory, preferring os.UserHomeDir()
+// with a fallback to $HOME for platforms where it may be unset.
+func userHomeDir() string {
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
+	return os.Getenv("HOME")
+}

@@ -628,6 +628,16 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 		policyVars["GIT_ROOT"] = policyVars["PROJECT_ROOT"]
 	}
 
+	// Set HOME for policy variable expansion (deny rules use ${HOME}/.bashrc etc.).
+	// Prefer the CLI-provided value (the session user's HOME) over the server's
+	// os.Getenv("HOME") which may differ when the server runs as a different user.
+	// Trust model: HOME is trusted from authenticated clients, same as workspace/policy.
+	if req.Home != "" {
+		policyVars["HOME"] = req.Home
+	} else if home := os.Getenv("HOME"); home != "" {
+		policyVars["HOME"] = home
+	}
+
 	// Load and expand policy (or use global policy if no policy dir configured)
 	var engine *policy.Engine
 	if a.cfg.Policies.Dir != "" {
