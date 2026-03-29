@@ -533,23 +533,34 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	// monitoring is strictly better than a non-functional one.
 	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 	if err != nil {
+		// For writes, retry with /proc/<pid>/mem fallback — deny rules
+		// must be evaluated even when ProcessVMReadv is blocked by Yama.
 		if !isReadOnlyOpen(fileArgs.Flags) {
-			slog.Warn("emulated file handler: path resolution failed for write, file policy not enforced",
-				"pid", pid, "error", err, "session_id", sessID)
-		} else {
-			slog.Debug("emulated file handler: path resolution failed for read, falling back to CONTINUE",
-				"pid", pid, "error", err)
+			path, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 		}
-		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
-			slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
+		if err != nil {
+			if !isReadOnlyOpen(fileArgs.Flags) {
+				slog.Warn("emulated file handler: path resolution failed for write, file policy not enforced",
+					"pid", pid, "error", err, "session_id", sessID)
+			} else {
+				slog.Debug("emulated file handler: path resolution failed for read, falling back to CONTINUE",
+					"pid", pid, "error", err)
+			}
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
+			}
+			return
 		}
-		return
 	}
 
 	// Resolve second path for rename/link.
 	var path2 string
 	if fileArgs.HasSecondPath {
 		p2, err := resolvePathAt(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+		if err != nil {
+			// Rename/link are always mutating — retry with fallback.
+			p2, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+		}
 		if err != nil {
 			slog.Warn("emulated file handler: second path resolution failed for mutating op, file policy not enforced",
 				"pid", pid, "error", err, "syscall", args.Nr, "session_id", sessID)

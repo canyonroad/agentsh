@@ -327,7 +327,24 @@ func fileSyscallName(nr int32) string {
 //   - /proc/<pid>/cwd when dirfd == AT_FDCWD (-100)
 //   - /proc/<pid>/fd/<dirfd> otherwise
 func resolvePathAt(pid int, dirfd int32, pathPtr uint64) (string, error) {
-	path, err := readString(pid, pathPtr, 4096)
+	return resolvePathAtImpl(pid, dirfd, pathPtr, false)
+}
+
+// resolvePathAtWithFallback is like resolvePathAt but uses /proc/<pid>/mem
+// as a fallback when ProcessVMReadv fails. Use this only for write operations
+// where the path must be resolved to evaluate deny rules.
+func resolvePathAtWithFallback(pid int, dirfd int32, pathPtr uint64) (string, error) {
+	return resolvePathAtImpl(pid, dirfd, pathPtr, true)
+}
+
+func resolvePathAtImpl(pid int, dirfd int32, pathPtr uint64, useFallback bool) (string, error) {
+	var path string
+	var err error
+	if useFallback {
+		path, err = readStringWithFallback(pid, pathPtr, 4096)
+	} else {
+		path, err = readString(pid, pathPtr, 4096)
+	}
 	if err != nil {
 		return "", fmt.Errorf("read path from tracee: %w", err)
 	}

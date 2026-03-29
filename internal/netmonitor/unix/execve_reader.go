@@ -62,9 +62,8 @@ func IsExecveSyscall(nr int32) bool {
 	return nr == unix.SYS_EXECVE || nr == unix.SYS_EXECVEAT
 }
 
-// readString reads a null-terminated string from the tracee's memory.
-// Tries ProcessVMReadv first, then falls back to /proc/<pid>/mem pread
-// (which may succeed under different Yama ptrace_scope configurations).
+// readString reads a null-terminated string from the tracee's memory
+// using ProcessVMReadv. Returns ErrReadMemory if the read fails.
 func readString(pid int, ptr uint64, maxLen int) (string, error) {
 	if ptr == 0 {
 		return "", ErrNullPtr
@@ -76,9 +75,30 @@ func readString(pid int, ptr uint64, maxLen int) (string, error) {
 
 	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
 	if err != nil {
-		// Fallback: read via /proc/<pid>/mem. This uses a different kernel
-		// permission check (PTRACE_MODE_ATTACH_FSCREDS vs _REALCREDS) and
-		// may succeed when ProcessVMReadv is blocked by Yama ptrace_scope.
+		return "", fmt.Errorf("%w: %v", ErrReadMemory, err)
+	}
+
+	// Find null terminator
+	if idx := bytes.IndexByte(buf[:n], 0); idx >= 0 {
+		return string(buf[:idx]), nil
+	}
+	return string(buf[:n]), nil
+}
+
+// readStringWithFallback is like readString but falls back to /proc/<pid>/mem
+// when ProcessVMReadv fails. Use this only for write operations where failing
+// to resolve the path means deny rules cannot be evaluated.
+func readStringWithFallback(pid int, ptr uint64, maxLen int) (string, error) {
+	if ptr == 0 {
+		return "", ErrNullPtr
+	}
+
+	buf := make([]byte, maxLen)
+	liov := unix.Iovec{Base: &buf[0], Len: uint64(maxLen)}
+	riov := unix.RemoteIovec{Base: uintptr(ptr), Len: maxLen}
+
+	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil {
 		n, err = readProcMem(pid, ptr, buf)
 		if err != nil {
 			return "", fmt.Errorf("%w: %v", ErrReadMemory, err)
@@ -103,15 +123,9 @@ func readPointer(pid int, ptr uint64) (uint64, error) {
 	liov := unix.Iovec{Base: &buf[0], Len: 8}
 	riov := unix.RemoteIovec{Base: uintptr(ptr), Len: 8}
 
-	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
-	if err != nil || n != 8 {
-		n, ferr := readProcMemStrict(pid, ptr, buf)
-		if ferr != nil {
-			return 0, fmt.Errorf("%w: process_vm_readv: %v, /proc/mem: %v", ErrReadMemory, err, ferr)
-		}
-		if n != 8 {
-			return 0, fmt.Errorf("%w: short read from /proc/mem (%d/8 bytes)", ErrReadMemory, n)
-		}
+	_, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrReadMemory, err)
 	}
 	return val, nil
 }
