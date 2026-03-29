@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -61,6 +63,8 @@ func IsExecveSyscall(nr int32) bool {
 }
 
 // readString reads a null-terminated string from the tracee's memory.
+// Tries ProcessVMReadv first, then falls back to /proc/<pid>/mem pread
+// (which may succeed under different Yama ptrace_scope configurations).
 func readString(pid int, ptr uint64, maxLen int) (string, error) {
 	if ptr == 0 {
 		return "", ErrNullPtr
@@ -72,7 +76,13 @@ func readString(pid int, ptr uint64, maxLen int) (string, error) {
 
 	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrReadMemory, err)
+		// Fallback: read via /proc/<pid>/mem. This uses a different kernel
+		// permission check (PTRACE_MODE_ATTACH_FSCREDS vs _REALCREDS) and
+		// may succeed when ProcessVMReadv is blocked by Yama ptrace_scope.
+		n, err = readProcMem(pid, ptr, buf)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", ErrReadMemory, err)
+		}
 	}
 
 	// Find null terminator
@@ -93,11 +103,45 @@ func readPointer(pid int, ptr uint64) (uint64, error) {
 	liov := unix.Iovec{Base: &buf[0], Len: 8}
 	riov := unix.RemoteIovec{Base: uintptr(ptr), Len: 8}
 
-	_, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
-	if err != nil {
-		return 0, fmt.Errorf("%w: %v", ErrReadMemory, err)
+	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil || n != 8 {
+		n, ferr := readProcMemStrict(pid, ptr, buf)
+		if ferr != nil {
+			return 0, fmt.Errorf("%w: process_vm_readv: %v, /proc/mem: %v", ErrReadMemory, err, ferr)
+		}
+		if n != 8 {
+			return 0, fmt.Errorf("%w: short read from /proc/mem (%d/8 bytes)", ErrReadMemory, n)
+		}
 	}
 	return val, nil
+}
+
+// readProcMem reads from /proc/<pid>/mem at the given offset.
+// Partial reads are accepted — callers reading strings find the NUL terminator.
+func readProcMem(pid int, offset uint64, buf []byte) (int, error) {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/mem", pid))
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	n, err := f.ReadAt(buf, int64(offset))
+	if err != nil && n > 0 {
+		// Partial read is OK for strings — caller finds the NUL terminator.
+		slog.Debug("readProcMem: partial read", "pid", pid, "offset", offset, "n", n, "err", err)
+		return n, nil
+	}
+	return n, err
+}
+
+// readProcMemStrict reads from /proc/<pid>/mem requiring all bytes.
+// Used for fixed-size reads (pointers, structs) where partial reads are invalid.
+func readProcMemStrict(pid int, offset uint64, buf []byte) (int, error) {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/mem", pid))
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return f.ReadAt(buf, int64(offset))
 }
 
 // writeString writes a null-terminated string to the tracee's memory at the given address.

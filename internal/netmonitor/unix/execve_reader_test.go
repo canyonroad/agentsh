@@ -178,3 +178,48 @@ func TestIsExecveSyscall(t *testing.T) {
 	assert.False(t, IsExecveSyscall(unix.SYS_CONNECT))
 	assert.False(t, IsExecveSyscall(unix.SYS_SOCKET))
 }
+
+func TestReadProcMem_String(t *testing.T) {
+	testStr := "/home/user/.bashrc"
+	strBytes := []byte(testStr + "\x00")
+	strPtr := uintptr(unsafe.Pointer(&strBytes[0]))
+
+	buf := make([]byte, 4096)
+	n, err := readProcMem(os.Getpid(), uint64(strPtr), buf)
+	require.NoError(t, err)
+	require.Greater(t, n, 0)
+
+	idx := 0
+	for idx < n && buf[idx] != 0 {
+		idx++
+	}
+	assert.Equal(t, testStr, string(buf[:idx]))
+}
+
+func TestReadProcMemStrict_Pointer(t *testing.T) {
+	var val uint64 = 0xDEADBEEFCAFE1234
+	buf := (*[8]byte)(unsafe.Pointer(&val))[:]
+	ptr := uintptr(unsafe.Pointer(&val))
+
+	out := make([]byte, 8)
+	n, err := readProcMemStrict(os.Getpid(), uint64(ptr), out)
+	require.NoError(t, err)
+	assert.Equal(t, 8, n)
+	assert.Equal(t, buf[:], out)
+}
+
+func TestReadProcMem_InvalidPID(t *testing.T) {
+	buf := make([]byte, 8)
+	_, err := readProcMem(999999999, 0x1000, buf)
+	require.Error(t, err)
+}
+
+func TestReadPointer_NullPtr(t *testing.T) {
+	_, err := readPointer(os.Getpid(), 0)
+	assert.ErrorIs(t, err, ErrNullPtr)
+}
+
+func TestReadString_NullPtr(t *testing.T) {
+	_, err := readString(os.Getpid(), 0, 4096)
+	assert.ErrorIs(t, err, ErrNullPtr)
+}
