@@ -105,17 +105,19 @@ func readPointer(pid int, ptr uint64) (uint64, error) {
 
 	_, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
 	if err != nil {
-		if _, ferr := readProcMem(pid, ptr, buf); ferr != nil {
-			return 0, fmt.Errorf("%w: %v", ErrReadMemory, err)
+		n, ferr := readProcMemStrict(pid, ptr, buf)
+		if ferr != nil {
+			return 0, fmt.Errorf("%w: process_vm_readv: %v, /proc/mem: %v", ErrReadMemory, err, ferr)
+		}
+		if n != 8 {
+			return 0, fmt.Errorf("%w: short read from /proc/mem (%d/8 bytes)", ErrReadMemory, n)
 		}
 	}
 	return val, nil
 }
 
 // readProcMem reads from /proc/<pid>/mem at the given offset.
-// This is a fallback for ProcessVMReadv and uses a different kernel permission
-// path (PTRACE_MODE_ATTACH_FSCREDS) which may succeed under Yama ptrace_scope
-// configurations where ProcessVMReadv (PTRACE_MODE_ATTACH_REALCREDS) is blocked.
+// Partial reads are accepted — callers reading strings find the NUL terminator.
 func readProcMem(pid int, offset uint64, buf []byte) (int, error) {
 	f, err := os.Open(fmt.Sprintf("/proc/%d/mem", pid))
 	if err != nil {
@@ -124,12 +126,22 @@ func readProcMem(pid int, offset uint64, buf []byte) (int, error) {
 	defer f.Close()
 	n, err := f.ReadAt(buf, int64(offset))
 	if err != nil && n > 0 {
-		// Partial read is OK — we got some data (common for reads near
-		// page boundaries or EOF). The caller finds the NUL terminator.
+		// Partial read is OK for strings — caller finds the NUL terminator.
 		slog.Debug("readProcMem: partial read", "pid", pid, "offset", offset, "n", n, "err", err)
 		return n, nil
 	}
 	return n, err
+}
+
+// readProcMemStrict reads from /proc/<pid>/mem requiring all bytes.
+// Used for fixed-size reads (pointers, structs) where partial reads are invalid.
+func readProcMemStrict(pid int, offset uint64, buf []byte) (int, error) {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/mem", pid))
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return f.ReadAt(buf, int64(offset))
 }
 
 // writeString writes a null-terminated string to the tracee's memory at the given address.
