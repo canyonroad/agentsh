@@ -101,7 +101,11 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 		workspaceMount = sess.WorkspaceMount
 		llmProxyURL = sess.LLMProxyURL
 	} else {
-		sess, err := c.CreateSession(ctx, workspace, opts.policy)
+		sess, err := c.CreateSessionWithRequest(ctx, types.CreateSessionRequest{
+			Workspace: workspace,
+			Policy:    opts.policy,
+			Home:      userHomeDir(),
+		})
 		if err != nil {
 			return fmt.Errorf("create session: %w", err)
 		}

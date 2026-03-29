@@ -163,7 +163,7 @@ func execPTYWithDeps(ctx context.Context, cfg *clientConfig, sessionID string, r
 				createReq := types.CreateSessionRequest{
 					ID:        sessionID,
 					Workspace: autoCreateRoot,
-					Home:      os.Getenv("HOME"),
+					Home:      userHomeDir(),
 				}
 				if req.NoDetectRoot {
 					falseVal := false

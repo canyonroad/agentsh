@@ -88,7 +88,7 @@ Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_RO
 			createReq := types.CreateSessionRequest{
 				ID:        sessionID,
 				Workspace: autoCreateRoot,
-				Home:      os.Getenv("HOME"),
+				Home:      userHomeDir(),
 			}
 			if noDetectRoot {
 				falseVal := false

@@ -3,7 +3,6 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/agentsh/agentsh/internal/client"
@@ -42,7 +41,7 @@ func newSessionCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			req := types.CreateSessionRequest{Workspace: workspace, Policy: policy, Home: os.Getenv("HOME")}
+			req := types.CreateSessionRequest{Workspace: workspace, Policy: policy, Home: userHomeDir()}
 			if cmd.Flags().Changed("real-paths") {
 				req.RealPaths = &realPaths
 			}
