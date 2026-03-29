@@ -233,9 +233,12 @@ func readOpenHow(pid int, howPtr uint64) (flags uint64, mode uint64, err error) 
 	liov := unix.Iovec{Base: &buf[0], Len: 24}
 	riov := unix.RemoteIovec{Base: uintptr(howPtr), Len: 24}
 
-	_, err = unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
-	if err != nil {
-		return 0, 0, fmt.Errorf("%w: open_how: %v", ErrReadMemory, err)
+	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil || n != 24 {
+		if err != nil {
+			return 0, 0, fmt.Errorf("%w: open_how: %v", ErrReadMemory, err)
+		}
+		return 0, 0, fmt.Errorf("%w: open_how: short read (%d/24 bytes)", ErrReadMemory, n)
 	}
 
 	// Parse little-endian uint64s
@@ -256,8 +259,8 @@ func readOpenHowWithFallback(pid int, howPtr uint64) (flags uint64, mode uint64,
 	liov := unix.Iovec{Base: &buf[0], Len: 24}
 	riov := unix.RemoteIovec{Base: uintptr(howPtr), Len: 24}
 
-	_, err = unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
-	if err != nil {
+	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil || n != 24 {
 		n, ferr := readProcMemStrict(pid, howPtr, buf[:])
 		if ferr != nil || n != 24 {
 			return 0, 0, fmt.Errorf("%w: open_how: process_vm_readv: %v, /proc/mem: %v", ErrReadMemory, err, ferr)
