@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -61,6 +63,8 @@ func IsExecveSyscall(nr int32) bool {
 }
 
 // readString reads a null-terminated string from the tracee's memory.
+// Tries ProcessVMReadv first, then falls back to /proc/<pid>/mem pread
+// (which may succeed under different Yama ptrace_scope configurations).
 func readString(pid int, ptr uint64, maxLen int) (string, error) {
 	if ptr == 0 {
 		return "", ErrNullPtr
@@ -72,7 +76,13 @@ func readString(pid int, ptr uint64, maxLen int) (string, error) {
 
 	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrReadMemory, err)
+		// Fallback: read via /proc/<pid>/mem. This uses a different kernel
+		// permission check (PTRACE_MODE_ATTACH_FSCREDS vs _REALCREDS) and
+		// may succeed when ProcessVMReadv is blocked by Yama ptrace_scope.
+		n, err = readProcMem(pid, ptr, buf)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", ErrReadMemory, err)
+		}
 	}
 
 	// Find null terminator
@@ -95,9 +105,31 @@ func readPointer(pid int, ptr uint64) (uint64, error) {
 
 	_, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
 	if err != nil {
-		return 0, fmt.Errorf("%w: %v", ErrReadMemory, err)
+		if _, ferr := readProcMem(pid, ptr, buf); ferr != nil {
+			return 0, fmt.Errorf("%w: %v", ErrReadMemory, err)
+		}
 	}
 	return val, nil
+}
+
+// readProcMem reads from /proc/<pid>/mem at the given offset.
+// This is a fallback for ProcessVMReadv and uses a different kernel permission
+// path (PTRACE_MODE_ATTACH_FSCREDS) which may succeed under Yama ptrace_scope
+// configurations where ProcessVMReadv (PTRACE_MODE_ATTACH_REALCREDS) is blocked.
+func readProcMem(pid int, offset uint64, buf []byte) (int, error) {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/mem", pid))
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	n, err := f.ReadAt(buf, int64(offset))
+	if err != nil && n > 0 {
+		// Partial read is OK — we got some data (common for reads near
+		// page boundaries or EOF). The caller finds the NUL terminator.
+		slog.Debug("readProcMem: partial read", "pid", pid, "offset", offset, "n", n, "err", err)
+		return n, nil
+	}
+	return n, err
 }
 
 // writeString writes a null-terminated string to the tracee's memory at the given address.
