@@ -631,6 +631,7 @@ func (a *App) createSessionCore(ctx context.Context, req types.CreateSessionRequ
 	// Set HOME for policy variable expansion (deny rules use ${HOME}/.bashrc etc.).
 	// Prefer the CLI-provided value (the session user's HOME) over the server's
 	// os.Getenv("HOME") which may differ when the server runs as a different user.
+	// Trust model: HOME is trusted from authenticated clients, same as workspace/policy.
 	if req.Home != "" {
 		policyVars["HOME"] = req.Home
 	} else if home := os.Getenv("HOME"); home != "" {
