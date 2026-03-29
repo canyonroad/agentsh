@@ -22,6 +22,7 @@
 #define MAX_PATTERN_LEN 256
 #define SOCKET_PATH_ENV "AGENTSH_ENV_SOCKET"
 #define POLICY_FILE_ENV "AGENTSH_ENV_POLICY_FILE"
+#define BLOCK_ITERATION_ENV "AGENTSH_ENV_BLOCK_ITERATION"
 #define DEFAULT_SOCKET "/run/agentsh/env.sock"
 #define DEFAULT_POLICY_FILE "/etc/agentsh/env-policy.conf"
 
@@ -46,7 +47,16 @@ static int policy_loaded = 0;
 static int policy_mode_allowlist = 1;  // Default to allowlist mode (more secure)
 static int log_access = 1;
 static int initialized = 0;
+static int initializing = 0;  // Re-entry guard for init
+static int block_iteration_mode = 0;  // When true, just replace environ and passthrough
 static pthread_mutex_t init_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Blocked (empty) environ for block_iteration mode
+static char *empty_environ[] = { NULL };
+static char **real_environ_saved = NULL;
+
+// Refer to libc's environ.
+extern char **environ;
 
 // Logging socket
 static int log_socket = -1;
@@ -61,6 +71,7 @@ static int is_allowed(const char* name);
 static int is_sensitive(const char* name);
 static void emit_event(const char* var, const char* op, int allowed, int sensitive);
 static void init_logging(void);
+static char* search_environ(const char* name);  // Search saved environ directly
 
 // String helper: uppercase
 static void to_upper(char* dest, const char* src, size_t len) {
@@ -292,17 +303,48 @@ static void load_real_functions(void) {
     real_secure_getenv = dlsym(RTLD_NEXT, "secure_getenv");
 }
 
+// Search saved real environ directly. Used in block_iteration mode where
+// the global environ has been replaced with an empty array but getenv()
+// must still return real values.
+static char* search_environ(const char* name) {
+    if (!real_environ_saved || !name) return NULL;
+    size_t len = strlen(name);
+    for (char **env = real_environ_saved; *env; env++) {
+        if (strncmp(*env, name, len) == 0 && (*env)[len] == '=') {
+            return *env + len + 1;
+        }
+    }
+    return NULL;
+}
+
 // Initialization (called on library load)
 __attribute__((constructor))
 static void shim_init(void) {
     pthread_mutex_lock(&init_mutex);
-    if (!initialized) {
-        load_real_functions();
-        load_policy();
-        init_logging();
-        initialized = 1;
+    if (initialized || initializing) {
+        pthread_mutex_unlock(&init_mutex);
+        return;
     }
+    initializing = 1;  // Re-entry guard: prevents deadlock if dlsym/fopen call getenv
     pthread_mutex_unlock(&init_mutex);
+
+    load_real_functions();
+
+    // Check block_iteration mode BEFORE loading policy (avoids fopen/socket overhead).
+    const char *block_flag = real_getenv ? real_getenv(BLOCK_ITERATION_ENV) : NULL;
+    if (block_flag && strcmp(block_flag, "1") == 0) {
+        block_iteration_mode = 1;
+        // Save real environ, then replace with empty array.
+        real_environ_saved = environ;
+        environ = empty_environ;
+        // Skip policy loading and socket logging entirely.
+        initialized = 1;
+        return;
+    }
+
+    load_policy();
+    init_logging();
+    initialized = 1;
 }
 
 // Cleanup
@@ -317,8 +359,14 @@ static void shim_cleanup(void) {
 // === Intercepted functions ===
 
 char* getenv(const char* name) {
-    if (!initialized) shim_init();
+    if (!initialized && !initializing) shim_init();
     if (!name) return NULL;
+
+    // In block_iteration mode, search saved environ directly (not real_getenv,
+    // which would search the now-empty global environ).
+    if (block_iteration_mode) {
+        return search_environ(name);
+    }
 
     int sensitive = is_sensitive(name);
     int allowed = is_allowed(name);
@@ -333,8 +381,13 @@ char* getenv(const char* name) {
 }
 
 char* secure_getenv(const char* name) {
-    if (!initialized) shim_init();
+    if (!initialized && !initializing) shim_init();
     if (!name) return NULL;
+
+    // In block_iteration mode, search saved environ directly.
+    if (block_iteration_mode) {
+        return search_environ(name);
+    }
 
     int sensitive = is_sensitive(name);
     int allowed = is_allowed(name);
@@ -353,10 +406,20 @@ char* secure_getenv(const char* name) {
 }
 
 int setenv(const char* name, const char* value, int overwrite) {
-    if (!initialized) shim_init();
+    if (!initialized && !initializing) shim_init();
     if (!name) {
         errno = EINVAL;
         return -1;
+    }
+
+    // In block_iteration mode, temporarily restore real environ for the write,
+    // then re-hide it. This ensures real_setenv updates the actual environment.
+    if (block_iteration_mode) {
+        environ = real_environ_saved;
+        int rc = real_setenv ? real_setenv(name, value, overwrite) : -1;
+        real_environ_saved = environ;  // setenv may have reallocated
+        environ = empty_environ;
+        return rc;
     }
 
     int sensitive = is_sensitive(name);
@@ -373,10 +436,19 @@ int setenv(const char* name, const char* value, int overwrite) {
 }
 
 int putenv(char* string) {
-    if (!initialized) shim_init();
+    if (!initialized && !initializing) shim_init();
     if (!string) {
         errno = EINVAL;
         return -1;
+    }
+
+    // In block_iteration mode, temporarily restore real environ for the write.
+    if (block_iteration_mode) {
+        environ = real_environ_saved;
+        int rc = real_putenv ? real_putenv(string) : -1;
+        real_environ_saved = environ;
+        environ = empty_environ;
+        return rc;
     }
 
     // Extract variable name
@@ -406,10 +478,19 @@ int putenv(char* string) {
 }
 
 int unsetenv(const char* name) {
-    if (!initialized) shim_init();
+    if (!initialized && !initializing) shim_init();
     if (!name) {
         errno = EINVAL;
         return -1;
+    }
+
+    // In block_iteration mode, temporarily restore real environ for the write.
+    if (block_iteration_mode) {
+        environ = real_environ_saved;
+        int rc = real_unsetenv ? real_unsetenv(name) : -1;
+        real_environ_saved = environ;
+        environ = empty_environ;
+        return rc;
     }
 
     int sensitive = is_sensitive(name);
