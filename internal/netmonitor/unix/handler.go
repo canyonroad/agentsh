@@ -419,20 +419,29 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		fileArgs.Mode = uint32(howMode)
 	}
 
-	// Resolve primary path
+	// Resolve primary path. For mutating operations, retry with /proc/<pid>/mem
+	// fallback when ProcessVMReadv fails (Yama ptrace_scope).
 	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 	if err != nil {
-		slog.Debug("file handler: failed to resolve path, allowing", "pid", pid, "error", err)
-		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
-			slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
+		if !isReadOnlyFileOp(args.Nr, fileArgs.Flags) {
+			path, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 		}
-		return
+		if err != nil {
+			slog.Debug("file handler: failed to resolve path, allowing", "pid", pid, "error", err)
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
+			}
+			return
+		}
 	}
 
 	// Resolve second path for rename/link
 	var path2 string
 	if fileArgs.HasSecondPath {
 		p2, err := resolvePathAt(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+		if err != nil {
+			p2, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+		}
 		if err != nil {
 			slog.Debug("file handler: failed to resolve second path, allowing", "pid", pid, "error", err)
 			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
