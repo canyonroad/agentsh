@@ -73,6 +73,81 @@ func TestNewEngineWithVariables_UndefinedError(t *testing.T) {
 	assert.Contains(t, err.Error(), "undefined variable")
 }
 
+// TestDenyPrecedenceWhenHomeEqualsProjectRoot verifies that deny rules for
+// ${HOME} paths take priority over workspace allow rules when HOME and
+// PROJECT_ROOT resolve to the same directory (common in containers/devboxes).
+func TestDenyPrecedenceWhenHomeEqualsProjectRoot(t *testing.T) {
+	// Simulate the default policy rule ordering: denies for ${HOME} first,
+	// then workspace allows for ${PROJECT_ROOT}.
+	p := &Policy{
+		Version: 1,
+		Name:    "test-deny-precedence",
+		FileRules: []FileRule{
+			// Deny sensitive HOME paths (must come first)
+			{
+				Name:       "deny-shell-rc",
+				Paths:      []string{"${HOME}/.bashrc", "${HOME}/.profile"},
+				Operations: []string{"write", "create", "rename"},
+				Decision:   "deny",
+			},
+			{
+				Name:       "deny-ssh-keys",
+				Paths:      []string{"${HOME}/.ssh/**"},
+				Operations: []string{"*"},
+				Decision:   "deny",
+			},
+			{
+				Name:       "deny-git-credentials",
+				Paths:      []string{"${HOME}/.gitconfig"},
+				Operations: []string{"*"},
+				Decision:   "deny",
+			},
+			// Workspace allow (comes after denies)
+			{
+				Name:       "allow-workspace-write",
+				Paths:      []string{"${PROJECT_ROOT}/**"},
+				Operations: []string{"write", "create", "rename"},
+				Decision:   "allow",
+			},
+		},
+	}
+
+	// HOME == PROJECT_ROOT — the case that was broken before reordering
+	vars := map[string]string{
+		"PROJECT_ROOT": "/home/user",
+		"HOME":         "/home/user",
+	}
+
+	engine, err := NewEngineWithVariables(p, false, true, vars)
+	require.NoError(t, err)
+
+	tests := []struct {
+		path      string
+		operation string
+		wantDeny  bool
+		desc      string
+	}{
+		{"/home/user/.bashrc", "write", true, "shell rc write denied"},
+		{"/home/user/.bashrc", "rename", true, "shell rc rename denied"},
+		{"/home/user/.profile", "create", true, "shell profile create denied"},
+		{"/home/user/.ssh/id_rsa", "read", true, "ssh key read denied"},
+		{"/home/user/.gitconfig", "write", true, "gitconfig write denied"},
+		{"/home/user/project/main.go", "write", false, "workspace write allowed"},
+		{"/home/user/project/main.go", "create", false, "workspace create allowed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			dec := engine.CheckFile(tt.path, tt.operation)
+			if tt.wantDeny {
+				assert.Equal(t, "deny", string(dec.PolicyDecision), "expected deny for %s %s", tt.operation, tt.path)
+			} else {
+				assert.Equal(t, "allow", string(dec.PolicyDecision), "expected allow for %s %s", tt.operation, tt.path)
+			}
+		})
+	}
+}
+
 func TestNewEngineWithVariables_NetworkRulesDomainExpansion(t *testing.T) {
 	p := &Policy{
 		Version: 1,
