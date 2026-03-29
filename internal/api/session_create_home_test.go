@@ -52,22 +52,9 @@ func TestCreateSession_HomeFieldPropagated(t *testing.T) {
 	if out.ID != "sess_home" {
 		t.Fatalf("expected id sess_home, got %q", out.ID)
 	}
-
-	// Verify HOME was used in policy expansion by executing a command that
-	// touches ${HOME}/.bashrc — it should be denied by the default policy.
-	execBody := map[string]any{
-		"command": "touch",
-		"args":    []string{"/home/testuser/.bashrc"},
-	}
-	execBytes, _ := json.Marshal(execBody)
-	execReq := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/sess_home/exec", strings.NewReader(string(execBytes)))
-	execRR := httptest.NewRecorder()
-	h.ServeHTTP(execRR, execReq)
-
-	// The command should either be blocked (403/200 with non-zero exit) or
-	// succeed only if the file monitor is not active. Either way, session
-	// creation must accept the home field without error — that's the core
-	// assertion. The deny behavior depends on runtime enforcement mode.
+	// HOME expansion correctness is verified by policy engine tests in
+	// internal/policy/engine_vars_test.go (TestDenyPrecedenceWhenHomeEqualsProjectRoot).
+	// This test verifies the HTTP plumbing accepts and propagates the field.
 }
 
 func TestCreateSessionRequestCompat_HomePropagated(t *testing.T) {
