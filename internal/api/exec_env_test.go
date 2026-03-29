@@ -113,8 +113,9 @@ func TestMaybeAddShimEnv_AddsShimAndFlag(t *testing.T) {
 	out := maybeAddShimEnv(in, policy.ResolvedEnvPolicy{BlockIteration: true}, cfg)
 	m := envSliceToMap(out)
 
-	if m["AGENTSH_ENV_BLOCK_ITERATION"] != "1" {
-		t.Fatalf("expected AGENTSH_ENV_BLOCK_ITERATION=1, got %q", m["AGENTSH_ENV_BLOCK_ITERATION"])
+	// AGENTSH_ENV_BLOCK_ITERATION should NOT be set (environ replacement breaks shells)
+	if _, ok := m["AGENTSH_ENV_BLOCK_ITERATION"]; ok {
+		t.Fatalf("AGENTSH_ENV_BLOCK_ITERATION should not be set, got %q", m["AGENTSH_ENV_BLOCK_ITERATION"])
 	}
 	if got := m["LD_PRELOAD"]; got != shimPath {
 		t.Fatalf("expected LD_PRELOAD to be shim path, got %q", got)

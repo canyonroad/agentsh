@@ -671,22 +671,26 @@ func mapToEnvSlice(m map[string]string) []string {
 	return out
 }
 
-// maybeAddShimEnv injects the env-iteration blocking shim (LD_PRELOAD) and flag
-// when block_iteration is enabled. It tolerates missing/invalid shim path to
+// maybeAddShimEnv injects the env policy shim (LD_PRELOAD) for getenv
+// interception and logging. It tolerates missing/invalid shim path to
 // avoid breaking command execution, but emits a warning.
+//
+// Note: AGENTSH_ENV_BLOCK_ITERATION is intentionally NOT set. Replacing
+// environ with an empty array is incompatible with shells (bash reads
+// environ directly during startup, not via getenv). Server-side
+// buildPolicyEnv filtering is the real security boundary.
 func maybeAddShimEnv(env []string, pol policy.ResolvedEnvPolicy, cfg *config.Config) []string {
 	_ = pol
 	out := append([]string{}, env...)
-	out = append(out, "AGENTSH_ENV_BLOCK_ITERATION=1")
 
 	shim := strings.TrimSpace(cfg.Policies.EnvShimPath)
 	if shim == "" {
-		slog.Warn("block_iteration enabled but policies.env_shim_path is not set")
+		slog.Warn("env shim enabled but policies.env_shim_path is not set")
 		return out
 	}
 	info, err := os.Stat(shim)
 	if err != nil || info.IsDir() {
-		slog.Warn("block_iteration enabled but env shim missing", "path", shim, "err", err)
+		slog.Warn("env shim enabled but shim binary missing", "path", shim, "err", err)
 		return out
 	}
 
