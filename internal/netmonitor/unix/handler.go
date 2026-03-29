@@ -407,7 +407,7 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 
 	// For openat2, resolve actual flags from the open_how struct in tracee memory.
 	if args.Nr == unix.SYS_OPENAT2 && fileArgs.HowPtr != 0 {
-		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
+		howFlags, howMode, err := readOpenHowWithFallback(pid, fileArgs.HowPtr)
 		if err != nil {
 			slog.Debug("file handler: failed to read open_how, allowing", "pid", pid, "error", err)
 			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
@@ -508,7 +508,7 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 			}
 			return
 		}
-		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
+		howFlags, howMode, err := readOpenHowWithFallback(pid, fileArgs.HowPtr)
 		if err != nil {
 			slog.Debug("emulated file handler: failed to read open_how, CONTINUE", "pid", pid, "error", err)
 			if err := NotifRespondContinue(int(fd), req.ID); err != nil {

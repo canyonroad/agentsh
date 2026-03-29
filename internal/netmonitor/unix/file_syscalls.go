@@ -244,6 +244,31 @@ func readOpenHow(pid int, howPtr uint64) (flags uint64, mode uint64, err error) 
 	return flags, mode, nil
 }
 
+// readOpenHowWithFallback is like readOpenHow but falls back to /proc/<pid>/mem
+// when ProcessVMReadv fails. Use when openat2 flag parsing must succeed to
+// evaluate file policy (deny rules cannot be checked without knowing the flags).
+func readOpenHowWithFallback(pid int, howPtr uint64) (flags uint64, mode uint64, err error) {
+	if howPtr == 0 {
+		return 0, 0, ErrNullPtr
+	}
+
+	var buf [24]byte
+	liov := unix.Iovec{Base: &buf[0], Len: 24}
+	riov := unix.RemoteIovec{Base: uintptr(howPtr), Len: 24}
+
+	_, err = unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil {
+		n, ferr := readProcMemStrict(pid, howPtr, buf[:])
+		if ferr != nil || n != 24 {
+			return 0, 0, fmt.Errorf("%w: open_how: process_vm_readv: %v, /proc/mem: %v", ErrReadMemory, err, ferr)
+		}
+	}
+
+	flags = *(*uint64)(unsafe.Pointer(&buf[0]))
+	mode = *(*uint64)(unsafe.Pointer(&buf[8]))
+	return flags, mode, nil
+}
+
 // readOpenHowResolve reads only the resolve field (offset 16) from the
 // openat2 open_how struct in tracee memory. Returns the resolve flags and
 // an error. On error, the caller must force CONTINUE fallback — never
