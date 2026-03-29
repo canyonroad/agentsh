@@ -287,7 +287,7 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 		MaxArgvBytes: h.cfg.MaxArgvBytes,
 	}
 
-	filename, err := readString(pid, execveArgs.FilenamePtr, 4096)
+	filename, err := readStringWithFallback(pid, execveArgs.FilenamePtr, 4096)
 	if err != nil {
 		const AT_EMPTY_PATH = 0x1000
 		// For execve, always fail-secure if we can't read the filename
@@ -327,7 +327,7 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 	}
 	// rawFilename preserved for audit; filename is now canonical
 
-	argv, truncated, err := ReadArgv(pid, execveArgs.ArgvPtr, cfg)
+	argv, truncated, err := ReadArgvWithFallback(pid, execveArgs.ArgvPtr, cfg)
 	if err != nil {
 		// Can't read argv - deny (fail-secure)
 		if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
@@ -407,7 +407,7 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 
 	// For openat2, resolve actual flags from the open_how struct in tracee memory.
 	if args.Nr == unix.SYS_OPENAT2 && fileArgs.HowPtr != 0 {
-		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
+		howFlags, howMode, err := readOpenHowWithFallback(pid, fileArgs.HowPtr)
 		if err != nil {
 			slog.Debug("file handler: failed to read open_how, allowing", "pid", pid, "error", err)
 			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
@@ -419,20 +419,29 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		fileArgs.Mode = uint32(howMode)
 	}
 
-	// Resolve primary path
+	// Resolve primary path. For mutating operations, retry with /proc/<pid>/mem
+	// fallback when ProcessVMReadv fails (Yama ptrace_scope).
 	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 	if err != nil {
-		slog.Debug("file handler: failed to resolve path, allowing", "pid", pid, "error", err)
-		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
-			slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
+		if !isReadOnlyFileOp(args.Nr, fileArgs.Flags) {
+			path, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 		}
-		return
+		if err != nil {
+			slog.Debug("file handler: failed to resolve path, allowing", "pid", pid, "error", err)
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
+			}
+			return
+		}
 	}
 
 	// Resolve second path for rename/link
 	var path2 string
 	if fileArgs.HasSecondPath {
 		p2, err := resolvePathAt(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+		if err != nil {
+			p2, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+		}
 		if err != nil {
 			slog.Debug("file handler: failed to resolve second path, allowing", "pid", pid, "error", err)
 			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
@@ -499,7 +508,7 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 			}
 			return
 		}
-		howFlags, howMode, err := readOpenHow(pid, fileArgs.HowPtr)
+		howFlags, howMode, err := readOpenHowWithFallback(pid, fileArgs.HowPtr)
 		if err != nil {
 			slog.Debug("emulated file handler: failed to read open_how, CONTINUE", "pid", pid, "error", err)
 			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
@@ -516,40 +525,49 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 	forceContinue := !isOpenSyscall(args.Nr) || shouldFallbackToContinue(args.Nr, fileArgs.Flags, resolveFlags)
 
 	// Resolve primary path.
-	// Fall back to CONTINUE on resolution failure for ALL operations (reads
-	// AND writes). Path resolution fails when the supervisor cannot read
-	// tracee memory — e.g., Yama ptrace_scope=1 blocks ProcessVMReadv for
-	// child processes in the `agentsh wrap` path because PR_SET_PTRACER
-	// does not inherit across fork(). When we can't resolve the path we
-	// also can't evaluate policy (neither allow NOR deny rules), so the
-	// only consistent choice is to let the kernel handle the syscall.
+	// Path resolution uses ProcessVMReadv which may fail under Yama
+	// ptrace_scope=1 for child processes in the `agentsh wrap` path
+	// (PR_SET_PTRACER does not inherit across fork()).
 	//
-	// NOTE: this IS an intentional tradeoff. Emulation mode is enabled when
-	// seccomp-notify is the sole enforcement backend, so falling back to
-	// CONTINUE means no file policy enforcement for affected operations.
-	// The alternative — denying ALL writes from ALL child processes — makes
-	// the sandboxed environment completely unusable (can't write to /tmp,
-	// workspace, /dev/null, etc.). A working environment with degraded
-	// monitoring is strictly better than a non-functional one.
+	// For mutating operations (writes, deletes, mkdir, etc.), we retry
+	// with /proc/<pid>/mem which uses PTRACE_MODE_ATTACH_FSCREDS and may
+	// succeed where ProcessVMReadv (PTRACE_MODE_ATTACH_REALCREDS) fails.
+	// This ensures deny rules are evaluated for writes even under Yama.
+	//
+	// For read-only operations (open O_RDONLY, stat, access, readlink),
+	// resolution failure falls back to CONTINUE — the kernel handles the
+	// syscall without policy evaluation. This is safe because reads cannot
+	// mutate the filesystem.
 	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 	if err != nil {
-		if !isReadOnlyOpen(fileArgs.Flags) {
-			slog.Warn("emulated file handler: path resolution failed for write, file policy not enforced",
-				"pid", pid, "error", err, "session_id", sessID)
-		} else {
-			slog.Debug("emulated file handler: path resolution failed for read, falling back to CONTINUE",
-				"pid", pid, "error", err)
+		// For writes, retry with /proc/<pid>/mem fallback — deny rules
+		// must be evaluated even when ProcessVMReadv is blocked by Yama.
+		if !isReadOnlyFileOp(args.Nr, fileArgs.Flags) {
+			path, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd, fileArgs.PathPtr)
 		}
-		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
-			slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
+		if err != nil {
+			if !isReadOnlyFileOp(args.Nr, fileArgs.Flags) {
+				slog.Warn("emulated file handler: path resolution failed for write, file policy not enforced",
+					"pid", pid, "error", err, "session_id", sessID)
+			} else {
+				slog.Debug("emulated file handler: path resolution failed for read, falling back to CONTINUE",
+					"pid", pid, "error", err)
+			}
+			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+				slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
+			}
+			return
 		}
-		return
 	}
 
 	// Resolve second path for rename/link.
 	var path2 string
 	if fileArgs.HasSecondPath {
 		p2, err := resolvePathAt(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+		if err != nil {
+			// Rename/link are always mutating — retry with fallback.
+			p2, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+		}
 		if err != nil {
 			slog.Warn("emulated file handler: second path resolution failed for mutating op, file policy not enforced",
 				"pid", pid, "error", err, "syscall", args.Nr, "session_id", sessID)

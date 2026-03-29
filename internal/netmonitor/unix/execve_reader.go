@@ -62,9 +62,8 @@ func IsExecveSyscall(nr int32) bool {
 	return nr == unix.SYS_EXECVE || nr == unix.SYS_EXECVEAT
 }
 
-// readString reads a null-terminated string from the tracee's memory.
-// Tries ProcessVMReadv first, then falls back to /proc/<pid>/mem pread
-// (which may succeed under different Yama ptrace_scope configurations).
+// readString reads a null-terminated string from the tracee's memory
+// using ProcessVMReadv. Returns ErrReadMemory if the read fails.
 func readString(pid int, ptr uint64, maxLen int) (string, error) {
 	if ptr == 0 {
 		return "", ErrNullPtr
@@ -76,9 +75,30 @@ func readString(pid int, ptr uint64, maxLen int) (string, error) {
 
 	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
 	if err != nil {
-		// Fallback: read via /proc/<pid>/mem. This uses a different kernel
-		// permission check (PTRACE_MODE_ATTACH_FSCREDS vs _REALCREDS) and
-		// may succeed when ProcessVMReadv is blocked by Yama ptrace_scope.
+		return "", fmt.Errorf("%w: %v", ErrReadMemory, err)
+	}
+
+	// Find null terminator
+	if idx := bytes.IndexByte(buf[:n], 0); idx >= 0 {
+		return string(buf[:idx]), nil
+	}
+	return string(buf[:n]), nil
+}
+
+// readStringWithFallback is like readString but falls back to /proc/<pid>/mem
+// when ProcessVMReadv fails. Use this only for write operations where failing
+// to resolve the path means deny rules cannot be evaluated.
+func readStringWithFallback(pid int, ptr uint64, maxLen int) (string, error) {
+	if ptr == 0 {
+		return "", ErrNullPtr
+	}
+
+	buf := make([]byte, maxLen)
+	liov := unix.Iovec{Base: &buf[0], Len: uint64(maxLen)}
+	riov := unix.RemoteIovec{Base: uintptr(ptr), Len: maxLen}
+
+	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil {
 		n, err = readProcMem(pid, ptr, buf)
 		if err != nil {
 			return "", fmt.Errorf("%w: %v", ErrReadMemory, err)
@@ -94,6 +114,29 @@ func readString(pid int, ptr uint64, maxLen int) (string, error) {
 
 // readPointer reads a pointer (8 bytes on amd64) from tracee memory.
 func readPointer(pid int, ptr uint64) (uint64, error) {
+	if ptr == 0 {
+		return 0, ErrNullPtr
+	}
+
+	var val uint64
+	buf := (*[8]byte)(unsafe.Pointer(&val))[:]
+	liov := unix.Iovec{Base: &buf[0], Len: 8}
+	riov := unix.RemoteIovec{Base: uintptr(ptr), Len: 8}
+
+	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrReadMemory, err)
+	}
+	if n != 8 {
+		return 0, fmt.Errorf("%w: short read (%d/8 bytes)", ErrReadMemory, n)
+	}
+	return val, nil
+}
+
+// readPointerWithFallback is like readPointer but falls back to /proc/<pid>/mem
+// when ProcessVMReadv fails. Use for execve argv parsing where failure means
+// denying legitimate exec calls.
+func readPointerWithFallback(pid int, ptr uint64) (uint64, error) {
 	if ptr == 0 {
 		return 0, ErrNullPtr
 	}
@@ -174,6 +217,20 @@ type ExecveReaderConfig struct {
 // ReadArgv reads the argv array from tracee memory.
 // Returns the arguments, whether truncation occurred, and any error.
 func ReadArgv(pid int, argvPtr uint64, cfg ExecveReaderConfig) ([]string, bool, error) {
+	return readArgvImpl(pid, argvPtr, cfg, readPointer, readString)
+}
+
+// ReadArgvWithFallback is like ReadArgv but uses /proc/<pid>/mem fallback
+// when ProcessVMReadv fails. Use for execve handling where failure means
+// denying legitimate exec calls.
+func ReadArgvWithFallback(pid int, argvPtr uint64, cfg ExecveReaderConfig) ([]string, bool, error) {
+	return readArgvImpl(pid, argvPtr, cfg, readPointerWithFallback, readStringWithFallback)
+}
+
+func readArgvImpl(pid int, argvPtr uint64, cfg ExecveReaderConfig,
+	ptrReader func(int, uint64) (uint64, error),
+	strReader func(int, uint64, int) (string, error),
+) ([]string, bool, error) {
 	if argvPtr == 0 {
 		return nil, false, ErrNullPtr
 	}
@@ -184,7 +241,7 @@ func ReadArgv(pid int, argvPtr uint64, cfg ExecveReaderConfig) ([]string, bool, 
 
 	for i := 0; i < cfg.MaxArgc; i++ {
 		// Read pointer at argvPtr + i*8
-		ptr, err := readPointer(pid, argvPtr+uint64(i*8))
+		ptr, err := ptrReader(pid, argvPtr+uint64(i*8))
 		if err != nil {
 			return args, truncated, err
 		}
@@ -200,7 +257,7 @@ func ReadArgv(pid int, argvPtr uint64, cfg ExecveReaderConfig) ([]string, bool, 
 			break
 		}
 
-		arg, err := readString(pid, ptr, remaining)
+		arg, err := strReader(pid, ptr, remaining)
 		if err != nil {
 			return args, truncated, err
 		}
@@ -217,7 +274,7 @@ func ReadArgv(pid int, argvPtr uint64, cfg ExecveReaderConfig) ([]string, bool, 
 	// Check if we hit MaxArgc limit
 	if len(args) >= cfg.MaxArgc {
 		// Check if there are more args
-		ptr, _ := readPointer(pid, argvPtr+uint64(cfg.MaxArgc*8))
+		ptr, _ := ptrReader(pid, argvPtr+uint64(cfg.MaxArgc*8))
 		if ptr != 0 {
 			truncated = true
 		}

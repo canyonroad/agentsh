@@ -541,3 +541,42 @@ func TestIsReadOnlyOpen(t *testing.T) {
 		})
 	}
 }
+
+func TestIsReadOnlyFileOp(t *testing.T) {
+	tests := []struct {
+		name     string
+		nr       int32
+		flags    uint32
+		expected bool
+	}{
+		// Open-family: delegates to isReadOnlyOpen
+		{"openat O_RDONLY", unix.SYS_OPENAT, unix.O_RDONLY, true},
+		{"openat O_WRONLY", unix.SYS_OPENAT, unix.O_WRONLY, false},
+		{"openat O_CREAT", unix.SYS_OPENAT, unix.O_RDONLY | unix.O_CREAT, false},
+		{"openat2 O_RDONLY", unix.SYS_OPENAT2, unix.O_RDONLY, true},
+		{"openat2 O_RDWR", unix.SYS_OPENAT2, unix.O_RDWR, false},
+
+		// Read-only metadata syscalls
+		{"statx", unix.SYS_STATX, 0, true},
+		{"newfstatat", unix.SYS_NEWFSTATAT, 0, true},
+		{"faccessat2", unix.SYS_FACCESSAT2, 0, true},
+		{"readlinkat", unix.SYS_READLINKAT, 0, true},
+
+		// Mutating syscalls (flags=0, still mutating)
+		{"unlinkat", unix.SYS_UNLINKAT, 0, false},
+		{"unlinkat AT_REMOVEDIR", unix.SYS_UNLINKAT, unix.AT_REMOVEDIR, false},
+		{"mkdirat", unix.SYS_MKDIRAT, 0, false},
+		{"renameat2", unix.SYS_RENAMEAT2, 0, false},
+		{"linkat", unix.SYS_LINKAT, 0, false},
+		{"symlinkat", unix.SYS_SYMLINKAT, 0, false},
+		{"fchmodat", unix.SYS_FCHMODAT, 0, false},
+		{"fchownat", unix.SYS_FCHOWNAT, 0, false},
+		{"mknodat", unix.SYS_MKNODAT, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isReadOnlyFileOp(tt.nr, tt.flags),
+				"nr=%d flags=0x%x", tt.nr, tt.flags)
+		})
+	}
+}

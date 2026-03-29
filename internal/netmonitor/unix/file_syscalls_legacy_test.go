@@ -241,3 +241,34 @@ func TestLegacyFileSyscallList(t *testing.T) {
 		assert.True(t, isFileSyscall(nr), "syscall %d from list not recognized by isFileSyscall", nr)
 	}
 }
+
+func TestIsReadOnlyFileOp_Legacy(t *testing.T) {
+	tests := []struct {
+		name     string
+		nr       int32
+		flags    uint32
+		expected bool
+	}{
+		// Legacy open: delegates to isReadOnlyOpen via isLegacyOpenSyscallNr
+		{"open O_RDONLY", unix.SYS_OPEN, unix.O_RDONLY, true},
+		{"open O_WRONLY", unix.SYS_OPEN, unix.O_WRONLY, false},
+		{"open O_CREAT", unix.SYS_OPEN, unix.O_RDONLY | unix.O_CREAT, false},
+		{"creat (implicit write flags)", unix.SYS_CREAT, unix.O_WRONLY | unix.O_CREAT | unix.O_TRUNC, false},
+
+		// Legacy mutating syscalls (flags=0, still mutating)
+		{"mkdir", unix.SYS_MKDIR, 0, false},
+		{"rmdir", unix.SYS_RMDIR, 0, false},
+		{"unlink", unix.SYS_UNLINK, 0, false},
+		{"rename", unix.SYS_RENAME, 0, false},
+		{"link", unix.SYS_LINK, 0, false},
+		{"symlink", unix.SYS_SYMLINK, 0, false},
+		{"chmod", unix.SYS_CHMOD, 0, false},
+		{"chown", unix.SYS_CHOWN, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isReadOnlyFileOp(tt.nr, tt.flags),
+				"nr=%d flags=0x%x", tt.nr, tt.flags)
+		})
+	}
+}

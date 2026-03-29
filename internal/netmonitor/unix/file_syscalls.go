@@ -62,6 +62,27 @@ func isReadOnlyOpen(flags uint32) bool {
 	return flags&openatWriteMask == 0
 }
 
+// isReadOnlyFileOp returns true if the syscall+flags combination represents
+// a read-only file operation. For open-family syscalls this checks the open
+// flags; for non-open syscalls it checks whether the syscall itself is
+// inherently read-only (stat, access, readlink) vs mutating.
+func isReadOnlyFileOp(nr int32, flags uint32) bool {
+	switch nr {
+	case unix.SYS_OPENAT, unix.SYS_OPENAT2:
+		return isReadOnlyOpen(flags)
+	case unix.SYS_STATX, unix.SYS_NEWFSTATAT, unix.SYS_FACCESSAT2, unix.SYS_READLINKAT:
+		return true
+	default:
+		if isLegacyOpenSyscallNr(nr) {
+			return isReadOnlyOpen(flags)
+		}
+		// All other file syscalls (unlinkat, mkdirat, renameat2, linkat,
+		// symlinkat, fchmodat, fchownat, mknodat, and legacy equivalents)
+		// are mutating operations.
+		return false
+	}
+}
+
 // shouldFallbackToContinue returns true when an open-family syscall should
 // use CONTINUE instead of AddFD emulation. openat2 is ALWAYS routed to
 // CONTINUE because its extended semantics (RESOLVE_* flags, how_size
@@ -212,12 +233,40 @@ func readOpenHow(pid int, howPtr uint64) (flags uint64, mode uint64, err error) 
 	liov := unix.Iovec{Base: &buf[0], Len: 24}
 	riov := unix.RemoteIovec{Base: uintptr(howPtr), Len: 24}
 
-	_, err = unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
-	if err != nil {
-		return 0, 0, fmt.Errorf("%w: open_how: %v", ErrReadMemory, err)
+	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil || n != 24 {
+		if err != nil {
+			return 0, 0, fmt.Errorf("%w: open_how: %v", ErrReadMemory, err)
+		}
+		return 0, 0, fmt.Errorf("%w: open_how: short read (%d/24 bytes)", ErrReadMemory, n)
 	}
 
 	// Parse little-endian uint64s
+	flags = *(*uint64)(unsafe.Pointer(&buf[0]))
+	mode = *(*uint64)(unsafe.Pointer(&buf[8]))
+	return flags, mode, nil
+}
+
+// readOpenHowWithFallback is like readOpenHow but falls back to /proc/<pid>/mem
+// when ProcessVMReadv fails. Use when openat2 flag parsing must succeed to
+// evaluate file policy (deny rules cannot be checked without knowing the flags).
+func readOpenHowWithFallback(pid int, howPtr uint64) (flags uint64, mode uint64, err error) {
+	if howPtr == 0 {
+		return 0, 0, ErrNullPtr
+	}
+
+	var buf [24]byte
+	liov := unix.Iovec{Base: &buf[0], Len: 24}
+	riov := unix.RemoteIovec{Base: uintptr(howPtr), Len: 24}
+
+	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil || n != 24 {
+		n, ferr := readProcMemStrict(pid, howPtr, buf[:])
+		if ferr != nil || n != 24 {
+			return 0, 0, fmt.Errorf("%w: open_how: process_vm_readv: %v, /proc/mem: %v", ErrReadMemory, err, ferr)
+		}
+	}
+
 	flags = *(*uint64)(unsafe.Pointer(&buf[0]))
 	mode = *(*uint64)(unsafe.Pointer(&buf[8]))
 	return flags, mode, nil
@@ -327,7 +376,24 @@ func fileSyscallName(nr int32) string {
 //   - /proc/<pid>/cwd when dirfd == AT_FDCWD (-100)
 //   - /proc/<pid>/fd/<dirfd> otherwise
 func resolvePathAt(pid int, dirfd int32, pathPtr uint64) (string, error) {
-	path, err := readString(pid, pathPtr, 4096)
+	return resolvePathAtImpl(pid, dirfd, pathPtr, false)
+}
+
+// resolvePathAtWithFallback is like resolvePathAt but uses /proc/<pid>/mem
+// as a fallback when ProcessVMReadv fails. Use this only for write operations
+// where the path must be resolved to evaluate deny rules.
+func resolvePathAtWithFallback(pid int, dirfd int32, pathPtr uint64) (string, error) {
+	return resolvePathAtImpl(pid, dirfd, pathPtr, true)
+}
+
+func resolvePathAtImpl(pid int, dirfd int32, pathPtr uint64, useFallback bool) (string, error) {
+	var path string
+	var err error
+	if useFallback {
+		path, err = readStringWithFallback(pid, pathPtr, 4096)
+	} else {
+		path, err = readString(pid, pathPtr, 4096)
+	}
 	if err != nil {
 		return "", fmt.Errorf("read path from tracee: %w", err)
 	}
