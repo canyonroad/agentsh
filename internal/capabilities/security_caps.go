@@ -101,9 +101,7 @@ func (c *SecurityCapabilities) SelectMode() string {
 
 // checkSeccompBasic checks if basic seccomp-bpf is available (without user-notify).
 func checkSeccompBasic() bool {
-	// For now, assume basic seccomp is available if full seccomp is available
-	// A more thorough check could probe for SECCOMP_SET_MODE_FILTER
-	return checkSeccompUserNotify().Available
+	return probeSeccompBasic().Available
 }
 
 func checkFUSE() bool {

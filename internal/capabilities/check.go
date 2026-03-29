@@ -33,13 +33,13 @@ var (
 	checkWrapperBinary     = realCheckWrapperBinary
 )
 
-// Stub implementations - real implementations will be in separate files.
-
 func realCheckSeccompUserNotify() CheckResult {
-	return CheckResult{
-		Feature:   "seccomp-user-notify",
-		Available: true,
+	probe := probeSeccompUserNotify()
+	r := CheckResult{Feature: "seccomp-user-notify", Available: probe.Available}
+	if !probe.Available {
+		r.Error = fmt.Errorf("kernel does not support SECCOMP_RET_USER_NOTIF: %s", probe.Detail)
 	}
+	return r
 }
 
 func realCheckPtrace() CheckResult {

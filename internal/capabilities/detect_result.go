@@ -130,10 +130,11 @@ func (r *DetectResult) Table() string {
 			}
 			sb.WriteString("\n")
 		}
-	} else {
-		// Fallback: flat capabilities (backward compat for platforms not yet converted)
+	}
+
+	// Always render flat capabilities for scripting/grep compatibility.
+	if len(r.Capabilities) > 0 {
 		sb.WriteString("CAPABILITIES\n")
-		sb.WriteString(strings.Repeat("-", 40) + "\n")
 		keys := make([]string, 0, len(r.Capabilities))
 		for k := range r.Capabilities {
 			keys = append(keys, k)
