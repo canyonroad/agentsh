@@ -287,7 +287,7 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 		MaxArgvBytes: h.cfg.MaxArgvBytes,
 	}
 
-	filename, err := readString(pid, execveArgs.FilenamePtr, 4096)
+	filename, err := readStringWithFallback(pid, execveArgs.FilenamePtr, 4096)
 	if err != nil {
 		const AT_EMPTY_PATH = 0x1000
 		// For execve, always fail-secure if we can't read the filename
@@ -327,7 +327,7 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 	}
 	// rawFilename preserved for audit; filename is now canonical
 
-	argv, truncated, err := ReadArgv(pid, execveArgs.ArgvPtr, cfg)
+	argv, truncated, err := ReadArgvWithFallback(pid, execveArgs.ArgvPtr, cfg)
 	if err != nil {
 		// Can't read argv - deny (fail-secure)
 		if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {

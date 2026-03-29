@@ -133,6 +133,32 @@ func readPointer(pid int, ptr uint64) (uint64, error) {
 	return val, nil
 }
 
+// readPointerWithFallback is like readPointer but falls back to /proc/<pid>/mem
+// when ProcessVMReadv fails. Use for execve argv parsing where failure means
+// denying legitimate exec calls.
+func readPointerWithFallback(pid int, ptr uint64) (uint64, error) {
+	if ptr == 0 {
+		return 0, ErrNullPtr
+	}
+
+	var val uint64
+	buf := (*[8]byte)(unsafe.Pointer(&val))[:]
+	liov := unix.Iovec{Base: &buf[0], Len: 8}
+	riov := unix.RemoteIovec{Base: uintptr(ptr), Len: 8}
+
+	n, err := unix.ProcessVMReadv(pid, []unix.Iovec{liov}, []unix.RemoteIovec{riov}, 0)
+	if err != nil || n != 8 {
+		n, ferr := readProcMemStrict(pid, ptr, buf)
+		if ferr != nil {
+			return 0, fmt.Errorf("%w: process_vm_readv: %v, /proc/mem: %v", ErrReadMemory, err, ferr)
+		}
+		if n != 8 {
+			return 0, fmt.Errorf("%w: short read from /proc/mem (%d/8 bytes)", ErrReadMemory, n)
+		}
+	}
+	return val, nil
+}
+
 // readProcMem reads from /proc/<pid>/mem at the given offset.
 // Partial reads are accepted — callers reading strings find the NUL terminator.
 func readProcMem(pid int, offset uint64, buf []byte) (int, error) {
@@ -191,6 +217,20 @@ type ExecveReaderConfig struct {
 // ReadArgv reads the argv array from tracee memory.
 // Returns the arguments, whether truncation occurred, and any error.
 func ReadArgv(pid int, argvPtr uint64, cfg ExecveReaderConfig) ([]string, bool, error) {
+	return readArgvImpl(pid, argvPtr, cfg, readPointer, readString)
+}
+
+// ReadArgvWithFallback is like ReadArgv but uses /proc/<pid>/mem fallback
+// when ProcessVMReadv fails. Use for execve handling where failure means
+// denying legitimate exec calls.
+func ReadArgvWithFallback(pid int, argvPtr uint64, cfg ExecveReaderConfig) ([]string, bool, error) {
+	return readArgvImpl(pid, argvPtr, cfg, readPointerWithFallback, readStringWithFallback)
+}
+
+func readArgvImpl(pid int, argvPtr uint64, cfg ExecveReaderConfig,
+	ptrReader func(int, uint64) (uint64, error),
+	strReader func(int, uint64, int) (string, error),
+) ([]string, bool, error) {
 	if argvPtr == 0 {
 		return nil, false, ErrNullPtr
 	}
@@ -201,7 +241,7 @@ func ReadArgv(pid int, argvPtr uint64, cfg ExecveReaderConfig) ([]string, bool, 
 
 	for i := 0; i < cfg.MaxArgc; i++ {
 		// Read pointer at argvPtr + i*8
-		ptr, err := readPointer(pid, argvPtr+uint64(i*8))
+		ptr, err := ptrReader(pid, argvPtr+uint64(i*8))
 		if err != nil {
 			return args, truncated, err
 		}
@@ -217,7 +257,7 @@ func ReadArgv(pid int, argvPtr uint64, cfg ExecveReaderConfig) ([]string, bool, 
 			break
 		}
 
-		arg, err := readString(pid, ptr, remaining)
+		arg, err := strReader(pid, ptr, remaining)
 		if err != nil {
 			return args, truncated, err
 		}
@@ -234,7 +274,7 @@ func ReadArgv(pid int, argvPtr uint64, cfg ExecveReaderConfig) ([]string, bool, 
 	// Check if we hit MaxArgc limit
 	if len(args) >= cfg.MaxArgc {
 		// Check if there are more args
-		ptr, _ := readPointer(pid, argvPtr+uint64(cfg.MaxArgc*8))
+		ptr, _ := ptrReader(pid, argvPtr+uint64(cfg.MaxArgc*8))
 		if ptr != 0 {
 			truncated = true
 		}
