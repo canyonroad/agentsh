@@ -2,10 +2,10 @@
 # Build the environment variable interception shim for Linux
 
 CC ?= gcc
-CFLAGS = -shared -fPIC -Wall -Wextra -O2 -D_GNU_SOURCE
+CFLAGS = -shared -fPIC -Wall -Wextra -O2
 LDFLAGS = -ldl -lpthread
 
-TARGET = libenvshim.so
+TARGET ?= libenvshim.so
 SRC = envshim.c
 
 .PHONY: all clean install test
