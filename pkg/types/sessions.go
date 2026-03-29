@@ -110,6 +110,7 @@ type CreateSessionRequest struct {
 	Workspace         string `json:"workspace,omitempty"`
 	Policy            string `json:"policy,omitempty"`
 	Profile           string `json:"profile,omitempty"`
+	Home              string `json:"home,omitempty"`                 // User's home directory for ${HOME} policy expansion
 	DetectProjectRoot *bool  `json:"detect_project_root,omitempty"` // Override server default
 	ProjectRoot       string `json:"project_root,omitempty"`        // Explicit override
 	RealPaths         *bool  `json:"real_paths,omitempty"`          // Use actual host paths instead of /workspace
