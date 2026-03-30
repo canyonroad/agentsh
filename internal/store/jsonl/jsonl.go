@@ -11,6 +11,23 @@ import (
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
+// PartialWriteError indicates a write failed and partial data may remain
+// on disk because truncate also failed. Callers must NOT assume rollback
+// is safe when they receive this error. Use IsPartialWrite() to detect.
+type PartialWriteError struct {
+	WriteErr    error
+	TruncateErr error
+}
+
+func (e *PartialWriteError) Error() string {
+	return "partial write: " + e.WriteErr.Error() + " (truncate failed: " + e.TruncateErr.Error() + ")"
+}
+
+func (e *PartialWriteError) Unwrap() error { return e.WriteErr }
+
+// IsPartialWrite implements the interface checked by IntegrityStore.
+func (e *PartialWriteError) IsPartialWrite() bool { return true }
+
 type Store struct {
 	path       string
 	maxBytes   int64
@@ -62,6 +79,45 @@ func (s *Store) AppendEvent(_ context.Context, ev types.Event) error {
 	}
 	if _, err := s.file.Write(append(b, '\n')); err != nil {
 		return fmt.Errorf("write jsonl: %w", err)
+	}
+	return nil
+}
+
+// WriteRaw writes pre-serialized bytes as a single JSONL line.
+// It uses the same locking and rotation logic as AppendEvent.
+// On write failure, it attempts to truncate back to the pre-write size.
+// If truncate succeeds, a normal error is returned and callers may safely
+// roll back chain state. If truncate fails, a PartialWriteError is returned
+// and callers must NOT roll back (partial data may be on disk).
+func (s *Store) WriteRaw(_ context.Context, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.rotateIfNeededLocked(); err != nil {
+		return err
+	}
+
+	// Record file size before write so we can truncate on failure.
+	// We use Stat rather than Seek because the file is opened with O_APPEND.
+	st, err := s.file.Stat()
+	if err != nil {
+		return fmt.Errorf("write jsonl raw stat: %w", err)
+	}
+	preSize := st.Size()
+
+	buf := make([]byte, len(data)+1)
+	copy(buf, data)
+	buf[len(data)] = '\n'
+	n, writeErr := s.file.Write(buf)
+	if writeErr != nil || n != len(buf) {
+		if writeErr == nil {
+			writeErr = fmt.Errorf("short write (%d/%d bytes)", n, len(buf))
+		}
+		// Truncate back to remove any partial data.
+		if truncErr := s.file.Truncate(preSize); truncErr != nil {
+			return &PartialWriteError{WriteErr: writeErr, TruncateErr: truncErr}
+		}
+		return fmt.Errorf("write jsonl raw: %w", writeErr)
 	}
 	return nil
 }

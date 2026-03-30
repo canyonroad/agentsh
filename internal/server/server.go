@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/api"
 	"github.com/agentsh/agentsh/internal/approvals"
+	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/internal/auth"
 	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
@@ -69,9 +71,14 @@ type Server struct {
 	threatStore  *threatfeed.Store
 
 	app *api.App // for lifecycle management (ptrace tracer shutdown)
+
+	kmsProvider io.Closer // audit/kms.Provider for HMAC key lifecycle
 }
 
 func New(cfg *config.Config) (*Server, error) {
+	var kmsProvider io.Closer
+	var kmsCloser func() error
+
 	if cfg == nil {
 		return nil, fmt.Errorf("config is nil")
 	}
@@ -161,6 +168,30 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 	}
 
+	var jsonlEventStore storepkg.EventStore
+	if jsonlStore != nil {
+		jsonlEventStore = jsonlStore
+	}
+	if jsonlStore != nil && cfg.Audit.Integrity.Enabled {
+		chain, provider, err := audit.NewIntegrityChainFromConfig(
+			context.Background(), cfg.Audit.Integrity)
+		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
+			}
+			_ = db.Close()
+			return nil, fmt.Errorf("audit integrity chain: %w", err)
+		}
+		kmsProvider = provider
+		kmsCloser = provider.Close
+		defer func() {
+			if kmsCloser != nil {
+				kmsCloser()
+			}
+		}()
+		jsonlEventStore = storepkg.NewIntegrityStore(jsonlStore, chain)
+	}
+
 	var webhookStore *webhook.Store
 	if cfg.Audit.Webhook.URL != "" {
 		flushEvery, err := time.ParseDuration(cfg.Audit.Webhook.FlushInterval)
@@ -230,8 +261,8 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	var eventStores []storepkg.EventStore
-	if jsonlStore != nil {
-		eventStores = append(eventStores, jsonlStore)
+	if jsonlEventStore != nil {
+		eventStores = append(eventStores, jsonlEventStore)
 	}
 	if webhookStore != nil {
 		eventStores = append(eventStores, webhookStore)
@@ -436,6 +467,7 @@ func New(cfg *config.Config) (*Server, error) {
 		threatSyncer:   threatSyncer,
 		threatStore:    threatStore,
 		app:            app,
+		kmsProvider:    kmsProvider,
 	}
 
 	ln, err := listenHTTP(cfg)
@@ -554,6 +586,7 @@ unixDone:
 	}
 
 	appCloser = nil // success — don't close app on defer
+	kmsCloser = nil
 	return srv, nil
 }
 
@@ -809,6 +842,9 @@ func (s *Server) Close() error {
 	}
 	if s.store != nil {
 		_ = s.store.Close()
+	}
+	if s.kmsProvider != nil {
+		_ = s.kmsProvider.Close()
 	}
 	return nil
 }

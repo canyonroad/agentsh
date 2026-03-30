@@ -39,6 +39,57 @@ func TestAppendAndRotate(t *testing.T) {
 	}
 }
 
+func TestWriteRaw(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.log")
+
+	store, err := New(path, 1, 2)
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	raw := []byte(`{"id":"1","type":"test","integrity":{"sequence":1,"prev_hash":"","entry_hash":"abc123"}}`)
+	if err := store.WriteRaw(context.Background(), raw); err != nil {
+		t.Fatalf("WriteRaw: %v", err)
+	}
+
+	// Read back the file and verify exact bytes + newline
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	expected := string(raw) + "\n"
+	if string(data) != expected {
+		t.Errorf("file content = %q, want %q", string(data), expected)
+	}
+}
+
+func TestWriteRaw_TriggersRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.log")
+
+	store, err := New(path, 1, 2) // 1 MB limit
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Write >1MB via WriteRaw to trigger rotation
+	big := []byte(strings.Repeat("x", 2<<20))
+	if err := store.WriteRaw(context.Background(), big); err != nil {
+		t.Fatalf("WriteRaw large: %v", err)
+	}
+	// Next write should trigger rotation
+	if err := store.WriteRaw(context.Background(), []byte(`{"after":"rotate"}`)); err != nil {
+		t.Fatalf("WriteRaw post-rotate: %v", err)
+	}
+
+	if _, err := os.Stat(path + ".1"); err != nil {
+		t.Fatalf("expected rotated backup .1, got err: %v", err)
+	}
+}
+
 func TestQueryNotSupported(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.log")
