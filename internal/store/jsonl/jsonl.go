@@ -85,8 +85,10 @@ func (s *Store) AppendEvent(_ context.Context, ev types.Event) error {
 
 // WriteRaw writes pre-serialized bytes as a single JSONL line.
 // It uses the same locking and rotation logic as AppendEvent.
-// On partial write or error, the file is truncated back to the
-// pre-write size so callers can safely roll back chain state.
+// On write failure, it attempts to truncate back to the pre-write size.
+// If truncate succeeds, a normal error is returned and callers may safely
+// roll back chain state. If truncate fails, a PartialWriteError is returned
+// and callers must NOT roll back (partial data may be on disk).
 func (s *Store) WriteRaw(_ context.Context, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

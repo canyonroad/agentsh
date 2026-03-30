@@ -98,6 +98,34 @@ func (m *mockFailingRawWriter) QueryEvents(_ context.Context, _ types.EventQuery
 
 func (m *mockFailingRawWriter) Close() error { return nil }
 
+// mockPartialFailRawWriter returns a partial-write error (truncate failed).
+type mockPartialFailRawWriter struct {
+	mu       sync.Mutex
+	rawCalls int
+}
+
+type testPartialWriteError struct{ msg string }
+
+func (e *testPartialWriteError) Error() string      { return e.msg }
+func (e *testPartialWriteError) IsPartialWrite() bool { return true }
+
+func (m *mockPartialFailRawWriter) WriteRaw(_ context.Context, _ []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rawCalls++
+	return &testPartialWriteError{msg: "partial write: disk full (truncate failed: read-only fs)"}
+}
+
+func (m *mockPartialFailRawWriter) AppendEvent(_ context.Context, _ types.Event) error {
+	return nil
+}
+
+func (m *mockPartialFailRawWriter) QueryEvents(_ context.Context, _ types.EventQuery) ([]types.Event, error) {
+	return nil, nil
+}
+
+func (m *mockPartialFailRawWriter) Close() error { return nil }
+
 func TestIntegrityChain_StateAdvances(t *testing.T) {
 	chain, err := audit.NewIntegrityChain(testKey)
 	if err != nil {
@@ -319,6 +347,33 @@ func TestIntegrityStore_AppendEvent_WriteFailureRollsBackChain(t *testing.T) {
 	seq := int64(integrity["sequence"].(float64))
 	if seq != 1 {
 		t.Errorf("sequence after retry = %d, want 1", seq)
+	}
+}
+
+func TestIntegrityStore_PartialWriteDoesNotRollBack(t *testing.T) {
+	chain, err := audit.NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("create chain: %v", err)
+	}
+
+	mock := &mockPartialFailRawWriter{}
+	s := NewIntegrityStore(mock, chain)
+
+	ev := types.Event{ID: "ev-1", Type: "test"}
+
+	err = s.AppendEvent(context.Background(), ev)
+	if err == nil {
+		t.Fatal("expected error from partial-write failure")
+	}
+
+	// Chain state should NOT be rolled back because partial data
+	// may be on disk (truncate failed).
+	state := chain.State()
+	if state.Sequence != 1 {
+		t.Errorf("chain sequence = %d after partial write, want 1 (NOT rolled back)", state.Sequence)
+	}
+	if state.PrevHash == "" {
+		t.Error("chain prev_hash should be non-empty after partial write (NOT rolled back)")
 	}
 }
 
