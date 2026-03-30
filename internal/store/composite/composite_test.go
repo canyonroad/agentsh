@@ -115,3 +115,39 @@ func TestUpsertMCPToolFromEvent_SkipsNonSQLiteStore(t *testing.T) {
 		t.Fatalf("expected nil error for non-SQLite store, got %v", err)
 	}
 }
+
+func TestComposite_NilPrimary_AppendEvent(t *testing.T) {
+	other := &fakeEventStore{}
+	s := New(nil, nil, other)
+
+	if err := s.AppendEvent(context.Background(), types.Event{ID: "1"}); err != nil {
+		t.Fatalf("AppendEvent with nil primary: %v", err)
+	}
+	if other.appended != 1 {
+		t.Fatalf("expected other store to receive event, got %d appends", other.appended)
+	}
+}
+
+func TestComposite_NilPrimary_QueryEvents(t *testing.T) {
+	s := New(nil, nil)
+
+	events, err := s.QueryEvents(context.Background(), types.EventQuery{})
+	if err != nil {
+		t.Fatalf("QueryEvents with nil primary: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected empty results, got %d", len(events))
+	}
+}
+
+func TestComposite_NilPrimary_Close(t *testing.T) {
+	other := &fakeEventStore{}
+	s := New(nil, nil, other)
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close with nil primary: %v", err)
+	}
+	if !other.closed {
+		t.Fatal("expected other store to be closed")
+	}
+}
