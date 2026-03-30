@@ -22,8 +22,10 @@ func New(primary store.EventStore, output store.OutputStore, others ...store.Eve
 
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	var firstErr error
-	if err := s.primary.AppendEvent(ctx, ev); err != nil && firstErr == nil {
-		firstErr = err
+	if s.primary != nil {
+		if err := s.primary.AppendEvent(ctx, ev); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	for _, o := range s.others {
 		if err := o.AppendEvent(ctx, ev); err != nil && firstErr == nil {
@@ -34,6 +36,9 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 }
 
 func (s *Store) QueryEvents(ctx context.Context, q types.EventQuery) ([]types.Event, error) {
+	if s.primary == nil {
+		return nil, nil
+	}
 	return s.primary.QueryEvents(ctx, q)
 }
 
@@ -53,8 +58,10 @@ func (s *Store) ReadOutputChunk(ctx context.Context, commandID string, stream st
 
 func (s *Store) Close() error {
 	var firstErr error
-	if err := s.primary.Close(); err != nil && firstErr == nil {
-		firstErr = err
+	if s.primary != nil {
+		if err := s.primary.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	for _, o := range s.others {
 		if err := o.Close(); err != nil && firstErr == nil {

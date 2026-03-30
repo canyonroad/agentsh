@@ -156,6 +156,7 @@ type AuditConfig struct {
 }
 
 type AuditStorageConfig struct {
+	Enabled       *bool         `yaml:"enabled"`         // defaults to true; set false to skip SQLite
 	SQLitePath    string        `yaml:"sqlite_path"`
 	BatchSize     int           `yaml:"batch_size"`      // events per batch (default 64)
 	FlushInterval time.Duration `yaml:"flush_interval"`  // max time before flush (default 50ms)
@@ -1218,6 +1219,9 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	}
 
 	// Use source-aware data directory for SQLite
+	if cfg.Audit.Storage.Enabled == nil {
+		cfg.Audit.Storage.Enabled = boolPtr(true)
+	}
 	if cfg.Audit.Storage.SQLitePath == "" {
 		cfg.Audit.Storage.SQLitePath = filepath.Join(dataDir, "events.db")
 	}
