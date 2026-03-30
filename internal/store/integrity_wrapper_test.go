@@ -2,13 +2,21 @@ package store
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
+	"github.com/agentsh/agentsh/internal/store/jsonl"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -236,4 +244,90 @@ func TestIntegrityStore_ChainContinuity(t *testing.T) {
 		}
 		prevEntryHash = entryHash
 	}
+}
+
+func TestIntegrityStore_EndToEnd_VerifyWithAuditVerify(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+
+	// Create JSONL store → wrap with IntegrityStore
+	jsonlStore, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New: %v", err)
+	}
+
+	chain, err := audit.NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain: %v", err)
+	}
+	wrapped := NewIntegrityStore(jsonlStore, chain)
+
+	// Append events
+	events := []types.Event{
+		{ID: "1", Type: "session_start", SessionID: "s1", Timestamp: time.Now()},
+		{ID: "2", Type: "command_executed", SessionID: "s1", Timestamp: time.Now(), Fields: map[string]any{"command": "ls"}},
+		{ID: "3", Type: "file_read", SessionID: "s1", Timestamp: time.Now(), Fields: map[string]any{"path": "/etc/hosts"}},
+	}
+	for _, ev := range events {
+		if err := wrapped.AppendEvent(context.Background(), ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+	if err := wrapped.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Verify by reading back and checking the integrity chain manually.
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d", len(lines))
+	}
+
+	var prevEntryHash string
+	for i, line := range lines {
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("line %d unmarshal: %v", i, err)
+		}
+
+		integrity, ok := entry["integrity"].(map[string]any)
+		if !ok {
+			t.Fatalf("line %d: missing integrity field", i)
+		}
+
+		prevHash := integrity["prev_hash"].(string)
+		entryHash := integrity["entry_hash"].(string)
+
+		if prevHash != prevEntryHash {
+			t.Errorf("line %d: prev_hash = %q, want %q", i, prevHash, prevEntryHash)
+		}
+
+		// Verify HMAC by recomputing
+		delete(entry, "integrity")
+		canonical, _ := json.Marshal(entry)
+		seq := int64(integrity["sequence"].(float64))
+		computed := computeHMAC(testKey, seq, prevHash, canonical)
+		if computed != entryHash {
+			t.Errorf("line %d: entry_hash mismatch: computed %q, got %q", i, computed, entryHash)
+		}
+
+		prevEntryHash = entryHash
+	}
+}
+
+// computeHMAC replicates the HMAC computation from audit.IntegrityChain.computeHash
+// for verification in tests.
+func computeHMAC(key []byte, sequence int64, prevHash string, payload []byte) string {
+	h := hmac.New(sha256.New, key)
+	h.Write([]byte(strconv.FormatInt(sequence, 10)))
+	h.Write([]byte("|"))
+	h.Write([]byte(prevHash))
+	h.Write([]byte("|"))
+	h.Write(payload)
+	return hex.EncodeToString(h.Sum(nil))
 }
