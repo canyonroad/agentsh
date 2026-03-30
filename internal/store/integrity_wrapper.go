@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -20,8 +22,25 @@ func NewIntegrityStore(inner EventStore, chain *audit.IntegrityChain) *Integrity
 	return &IntegrityStore{inner: inner, chain: chain}
 }
 
-// AppendEvent delegates to the inner store. Integrity wrapping is handled at the serialization layer.
+// AppendEvent marshals the event, wraps it with HMAC integrity metadata,
+// and writes the signed bytes via RawWriter if the inner store supports it.
+// Falls back to unsigned inner.AppendEvent otherwise.
 func (s *IntegrityStore) AppendEvent(ctx context.Context, ev types.Event) error {
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("integrity marshal: %w", err)
+	}
+
+	wrapped, err := s.chain.Wrap(payload)
+	if err != nil {
+		return fmt.Errorf("integrity wrap: %w", err)
+	}
+
+	if rw, ok := s.inner.(RawWriter); ok {
+		return rw.WriteRaw(ctx, wrapped)
+	}
+
+	// Fallback: delegate unsigned
 	return s.inner.AppendEvent(ctx, ev)
 }
 
