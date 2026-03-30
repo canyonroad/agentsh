@@ -146,24 +146,31 @@ func New(cfg *config.Config) (*Server, error) {
 
 	metricsCollector := metrics.New()
 
-	sqlitePath := cfg.Audit.Storage.SQLitePath
-	if sqlitePath == "" {
-		sqlitePath = filepath.Join(filepath.Dir(cfg.Sessions.BaseDir), "events.db")
-	}
-	db, err := sqlite.Open(sqlitePath, sqlite.BatchConfig{
-		BatchSize:     cfg.Audit.Storage.BatchSize,
-		FlushInterval: cfg.Audit.Storage.FlushInterval,
-		ChannelSize:   cfg.Audit.Storage.ChannelSize,
-	})
-	if err != nil {
-		return nil, err
+	var db *sqlite.Store
+	if cfg.Audit.Storage.Enabled == nil || *cfg.Audit.Storage.Enabled {
+		sqlitePath := cfg.Audit.Storage.SQLitePath
+		if sqlitePath == "" {
+			sqlitePath = filepath.Join(filepath.Dir(cfg.Sessions.BaseDir), "events.db")
+		}
+		db, err = sqlite.Open(sqlitePath, sqlite.BatchConfig{
+			BatchSize:     cfg.Audit.Storage.BatchSize,
+			FlushInterval: cfg.Audit.Storage.FlushInterval,
+			ChannelSize:   cfg.Audit.Storage.ChannelSize,
+		})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		slog.Warn("SQLite audit storage disabled; event queries, output storage, and MCP tool tracking are unavailable")
 	}
 
 	var jsonlStore *jsonl.Store
 	if cfg.Audit.Output != "" {
 		jsonlStore, err = jsonl.New(cfg.Audit.Output, cfg.Audit.Rotation.MaxSizeMB, cfg.Audit.Rotation.MaxBackups)
 		if err != nil {
-			_ = db.Close()
+			if db != nil {
+				_ = db.Close()
+			}
 			return nil, err
 		}
 	}
@@ -179,7 +186,9 @@ func New(cfg *config.Config) (*Server, error) {
 			if jsonlStore != nil {
 				_ = jsonlStore.Close()
 			}
-			_ = db.Close()
+			if db != nil {
+				_ = db.Close()
+			}
 			return nil, fmt.Errorf("audit integrity chain: %w", err)
 		}
 		kmsProvider = provider
@@ -196,17 +205,23 @@ func New(cfg *config.Config) (*Server, error) {
 	if cfg.Audit.Webhook.URL != "" {
 		flushEvery, err := time.ParseDuration(cfg.Audit.Webhook.FlushInterval)
 		if err != nil {
-			_ = db.Close()
+			if db != nil {
+				_ = db.Close()
+			}
 			return nil, fmt.Errorf("parse audit.webhook.flush_interval: %w", err)
 		}
 		timeout, err := time.ParseDuration(cfg.Audit.Webhook.Timeout)
 		if err != nil {
-			_ = db.Close()
+			if db != nil {
+				_ = db.Close()
+			}
 			return nil, fmt.Errorf("parse audit.webhook.timeout: %w", err)
 		}
 		webhookStore, err = webhook.New(cfg.Audit.Webhook.URL, cfg.Audit.Webhook.BatchSize, flushEvery, timeout, cfg.Audit.Webhook.Headers)
 		if err != nil {
-			_ = db.Close()
+			if db != nil {
+				_ = db.Close()
+			}
 			return nil, err
 		}
 	}
@@ -218,12 +233,16 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 		otelTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Timeout)
 		if err != nil {
-			_ = db.Close()
+			if db != nil {
+				_ = db.Close()
+			}
 			return nil, fmt.Errorf("parse audit.otel.timeout: %w", err)
 		}
 		otelBatchTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Batch.Timeout)
 		if err != nil {
-			_ = db.Close()
+			if db != nil {
+				_ = db.Close()
+			}
 			return nil, fmt.Errorf("parse audit.otel.batch.timeout: %w", err)
 		}
 		otelStore, err = otelstore.New(context.Background(), otelstore.Config{
@@ -270,9 +289,13 @@ func New(cfg *config.Config) (*Server, error) {
 	if otelStore != nil {
 		eventStores = append(eventStores, otelStore)
 	}
-	// Wrap primary event store so metrics count each event exactly once.
-	primary := metrics.WrapEventStore(db, metricsCollector)
-	store := composite.New(primary, db, eventStores...)
+	var primary storepkg.EventStore
+	var output storepkg.OutputStore
+	if db != nil {
+		primary = metrics.WrapEventStore(db, metricsCollector)
+		output = db
+	}
+	store := composite.New(primary, output, eventStores...)
 
 	sessions := session.NewManager(cfg.Sessions.MaxSessions)
 	broker := events.NewBroker()
