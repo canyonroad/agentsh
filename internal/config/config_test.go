@@ -1562,3 +1562,43 @@ sandbox:
 		})
 	}
 }
+
+func TestAuditStorageEnabledDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Audit.Storage.Enabled == nil {
+		t.Fatal("Audit.Storage.Enabled should not be nil after defaults")
+	}
+	if !*cfg.Audit.Storage.Enabled {
+		t.Error("Audit.Storage.Enabled should default to true")
+	}
+}
+
+func TestAuditStorageDisabled(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(cfgPath, []byte(`
+audit:
+  storage:
+    enabled: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Audit.Storage.Enabled == nil {
+		t.Fatal("Audit.Storage.Enabled should not be nil")
+	}
+	if *cfg.Audit.Storage.Enabled {
+		t.Error("Audit.Storage.Enabled should be false when explicitly set")
+	}
+}
