@@ -50,8 +50,13 @@ func (s *IntegrityStore) AppendEvent(ctx context.Context, ev types.Event) error 
 	}
 
 	if writeErr := rw.WriteRaw(ctx, wrapped); writeErr != nil {
-		// Roll back chain state so the next call can retry cleanly.
-		s.chain.Restore(prevState.Sequence, prevState.PrevHash)
+		// Only roll back chain state if the write was fully rolled back
+		// (no partial data on disk). A PartialWriteError means truncate
+		// failed and data may be on disk — we must NOT restore.
+		type partialWriter interface{ IsPartialWrite() bool }
+		if pw, ok := writeErr.(partialWriter); !ok || !pw.IsPartialWrite() {
+			s.chain.Restore(prevState.Sequence, prevState.PrevHash)
+		}
 		s.mu.Unlock()
 		return writeErr
 	}

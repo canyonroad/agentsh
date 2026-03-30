@@ -11,6 +11,23 @@ import (
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
+// PartialWriteError indicates a write failed and partial data may remain
+// on disk because truncate also failed. Callers must NOT assume rollback
+// is safe when they receive this error. Use IsPartialWrite() to detect.
+type PartialWriteError struct {
+	WriteErr    error
+	TruncateErr error
+}
+
+func (e *PartialWriteError) Error() string {
+	return "partial write: " + e.WriteErr.Error() + " (truncate failed: " + e.TruncateErr.Error() + ")"
+}
+
+func (e *PartialWriteError) Unwrap() error { return e.WriteErr }
+
+// IsPartialWrite implements the interface checked by IntegrityStore.
+func (e *PartialWriteError) IsPartialWrite() bool { return true }
+
 type Store struct {
 	path       string
 	maxBytes   int64
@@ -91,12 +108,14 @@ func (s *Store) WriteRaw(_ context.Context, data []byte) error {
 	buf[len(data)] = '\n'
 	n, writeErr := s.file.Write(buf)
 	if writeErr != nil || n != len(buf) {
-		// Truncate back to remove any partial data.
-		_ = s.file.Truncate(preSize)
-		if writeErr != nil {
-			return fmt.Errorf("write jsonl raw: %w", writeErr)
+		if writeErr == nil {
+			writeErr = fmt.Errorf("short write (%d/%d bytes)", n, len(buf))
 		}
-		return fmt.Errorf("write jsonl raw: short write (%d/%d bytes)", n, len(buf))
+		// Truncate back to remove any partial data.
+		if truncErr := s.file.Truncate(preSize); truncErr != nil {
+			return &PartialWriteError{WriteErr: writeErr, TruncateErr: truncErr}
+		}
+		return fmt.Errorf("write jsonl raw: %w", writeErr)
 	}
 	return nil
 }
