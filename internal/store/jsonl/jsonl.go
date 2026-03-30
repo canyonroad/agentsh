@@ -76,8 +76,11 @@ func (s *Store) WriteRaw(_ context.Context, data []byte) error {
 		return err
 	}
 
-	if _, err := s.file.Write(append(data, '\n')); err != nil {
+	if _, err := s.file.Write(data); err != nil {
 		return fmt.Errorf("write jsonl raw: %w", err)
+	}
+	if _, err := s.file.Write([]byte{'\n'}); err != nil {
+		return fmt.Errorf("write jsonl raw newline: %w", err)
 	}
 	return nil
 }
