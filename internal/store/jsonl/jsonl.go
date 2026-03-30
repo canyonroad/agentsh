@@ -68,8 +68,8 @@ func (s *Store) AppendEvent(_ context.Context, ev types.Event) error {
 
 // WriteRaw writes pre-serialized bytes as a single JSONL line.
 // It uses the same locking and rotation logic as AppendEvent.
-// The write is performed as a single os.File.Write call so that
-// failure means no partial data was committed.
+// On partial write or error, the file is truncated back to the
+// pre-write size so callers can safely roll back chain state.
 func (s *Store) WriteRaw(_ context.Context, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -78,13 +78,25 @@ func (s *Store) WriteRaw(_ context.Context, data []byte) error {
 		return err
 	}
 
-	// Allocate a new buffer to avoid mutating the caller's slice
-	// and to ensure a single atomic write of data + newline.
+	// Record file size before write so we can truncate on failure.
+	// We use Stat rather than Seek because the file is opened with O_APPEND.
+	st, err := s.file.Stat()
+	if err != nil {
+		return fmt.Errorf("write jsonl raw stat: %w", err)
+	}
+	preSize := st.Size()
+
 	buf := make([]byte, len(data)+1)
 	copy(buf, data)
 	buf[len(data)] = '\n'
-	if _, err := s.file.Write(buf); err != nil {
-		return fmt.Errorf("write jsonl raw: %w", err)
+	n, writeErr := s.file.Write(buf)
+	if writeErr != nil || n != len(buf) {
+		// Truncate back to remove any partial data.
+		_ = s.file.Truncate(preSize)
+		if writeErr != nil {
+			return fmt.Errorf("write jsonl raw: %w", writeErr)
+		}
+		return fmt.Errorf("write jsonl raw: short write (%d/%d bytes)", n, len(buf))
 	}
 	return nil
 }
