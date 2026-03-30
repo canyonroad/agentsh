@@ -68,6 +68,8 @@ func (s *Store) AppendEvent(_ context.Context, ev types.Event) error {
 
 // WriteRaw writes pre-serialized bytes as a single JSONL line.
 // It uses the same locking and rotation logic as AppendEvent.
+// The write is performed as a single os.File.Write call so that
+// failure means no partial data was committed.
 func (s *Store) WriteRaw(_ context.Context, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -76,11 +78,13 @@ func (s *Store) WriteRaw(_ context.Context, data []byte) error {
 		return err
 	}
 
-	if _, err := s.file.Write(data); err != nil {
+	// Allocate a new buffer to avoid mutating the caller's slice
+	// and to ensure a single atomic write of data + newline.
+	buf := make([]byte, len(data)+1)
+	copy(buf, data)
+	buf[len(data)] = '\n'
+	if _, err := s.file.Write(buf); err != nil {
 		return fmt.Errorf("write jsonl raw: %w", err)
-	}
-	if _, err := s.file.Write([]byte{'\n'}); err != nil {
-		return fmt.Errorf("write jsonl raw newline: %w", err)
 	}
 	return nil
 }
