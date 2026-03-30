@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -13,6 +14,7 @@ var _ EventStore = (*IntegrityStore)(nil)
 
 // IntegrityStore wraps an EventStore and adds integrity metadata to events.
 type IntegrityStore struct {
+	mu    sync.Mutex
 	inner EventStore
 	chain *audit.IntegrityChain
 }
@@ -26,22 +28,35 @@ func NewIntegrityStore(inner EventStore, chain *audit.IntegrityChain) *Integrity
 // and writes the signed bytes via RawWriter if the inner store supports it.
 // Falls back to unsigned inner.AppendEvent otherwise.
 func (s *IntegrityStore) AppendEvent(ctx context.Context, ev types.Event) error {
+	rw, ok := s.inner.(RawWriter)
+	if !ok {
+		// Inner store does not support raw writes; delegate unsigned
+		// without advancing chain state.
+		return s.inner.AppendEvent(ctx, ev)
+	}
+
 	payload, err := json.Marshal(ev)
 	if err != nil {
 		return fmt.Errorf("integrity marshal: %w", err)
 	}
 
+	// Serialize wrap+write so chain state stays consistent with on-disk order.
+	s.mu.Lock()
+	prevState := s.chain.State()
 	wrapped, err := s.chain.Wrap(payload)
 	if err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("integrity wrap: %w", err)
 	}
 
-	if rw, ok := s.inner.(RawWriter); ok {
-		return rw.WriteRaw(ctx, wrapped)
+	if writeErr := rw.WriteRaw(ctx, wrapped); writeErr != nil {
+		// Roll back chain state so the next call can retry cleanly.
+		s.chain.Restore(prevState.Sequence, prevState.PrevHash)
+		s.mu.Unlock()
+		return writeErr
 	}
-
-	// Fallback: delegate unsigned
-	return s.inner.AppendEvent(ctx, ev)
+	s.mu.Unlock()
+	return nil
 }
 
 // QueryEvents delegates to the inner store.

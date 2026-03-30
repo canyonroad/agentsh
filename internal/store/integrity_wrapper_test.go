@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -69,6 +70,33 @@ func (m *mockPlainStore) QueryEvents(_ context.Context, _ types.EventQuery) ([]t
 }
 
 func (m *mockPlainStore) Close() error { return nil }
+
+// mockFailingRawWriter implements RawWriter but always fails on WriteRaw.
+type mockFailingRawWriter struct {
+	mu       sync.Mutex
+	rawCalls int
+	events   []types.Event
+}
+
+func (m *mockFailingRawWriter) WriteRaw(_ context.Context, _ []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rawCalls++
+	return errors.New("disk full")
+}
+
+func (m *mockFailingRawWriter) AppendEvent(_ context.Context, ev types.Event) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, ev)
+	return nil
+}
+
+func (m *mockFailingRawWriter) QueryEvents(_ context.Context, _ types.EventQuery) ([]types.Event, error) {
+	return nil, nil
+}
+
+func (m *mockFailingRawWriter) Close() error { return nil }
 
 func TestIntegrityChain_StateAdvances(t *testing.T) {
 	chain, err := audit.NewIntegrityChain(testKey)
@@ -243,6 +271,54 @@ func TestIntegrityStore_ChainContinuity(t *testing.T) {
 			t.Errorf("entry %d: prev_hash = %q, want %q", i, prevHash, prevEntryHash)
 		}
 		prevEntryHash = entryHash
+	}
+}
+
+func TestIntegrityStore_AppendEvent_WriteFailureRollsBackChain(t *testing.T) {
+	chain, err := audit.NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("create chain: %v", err)
+	}
+
+	mock := &mockFailingRawWriter{}
+	s := NewIntegrityStore(mock, chain)
+
+	ev := types.Event{ID: "ev-1", Type: "test"}
+
+	// First call should fail
+	err = s.AppendEvent(context.Background(), ev)
+	if err == nil {
+		t.Fatal("expected error from failing WriteRaw")
+	}
+
+	// Chain state should be rolled back to initial (sequence=0)
+	state := chain.State()
+	if state.Sequence != 0 {
+		t.Errorf("chain sequence = %d after failed write, want 0 (rolled back)", state.Sequence)
+	}
+	if state.PrevHash != "" {
+		t.Errorf("chain prev_hash = %q after failed write, want empty", state.PrevHash)
+	}
+
+	// Now retry with a working mock — chain should start fresh at sequence 1
+	goodMock := &mockRawWriter{}
+	s2 := NewIntegrityStore(goodMock, chain)
+	if err := s2.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatalf("retry AppendEvent: %v", err)
+	}
+
+	if len(goodMock.rawCalls) != 1 {
+		t.Fatalf("expected 1 WriteRaw call, got %d", len(goodMock.rawCalls))
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(goodMock.rawCalls[0], &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	integrity := result["integrity"].(map[string]any)
+	seq := int64(integrity["sequence"].(float64))
+	if seq != 1 {
+		t.Errorf("sequence after retry = %d, want 1", seq)
 	}
 }
 
