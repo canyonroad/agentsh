@@ -66,6 +66,22 @@ func (s *Store) AppendEvent(_ context.Context, ev types.Event) error {
 	return nil
 }
 
+// WriteRaw writes pre-serialized bytes as a single JSONL line.
+// It uses the same locking and rotation logic as AppendEvent.
+func (s *Store) WriteRaw(_ context.Context, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.rotateIfNeededLocked(); err != nil {
+		return err
+	}
+
+	if _, err := s.file.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("write jsonl raw: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) QueryEvents(_ context.Context, _ types.EventQuery) ([]types.Event, error) {
 	return nil, fmt.Errorf("jsonl store does not support queries")
 }
