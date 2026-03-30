@@ -176,6 +176,9 @@ func New(cfg *config.Config) (*Server, error) {
 		chain, provider, err := audit.NewIntegrityChainFromConfig(
 			context.Background(), cfg.Audit.Integrity)
 		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
+			}
 			_ = db.Close()
 			return nil, fmt.Errorf("audit integrity chain: %w", err)
 		}
