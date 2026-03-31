@@ -1,5 +1,4 @@
-// internal/platform/darwin/notify_test.go
-//go:build darwin
+//go:build darwin && cgo
 
 package darwin
 

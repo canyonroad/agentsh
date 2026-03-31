@@ -1,4 +1,3 @@
-// internal/platform/darwin/xpc/version.go
 package xpc
 
 import "sync"

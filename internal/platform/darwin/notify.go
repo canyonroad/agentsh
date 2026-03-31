@@ -1,5 +1,4 @@
-// internal/platform/darwin/notify.go
-//go:build darwin
+//go:build darwin && cgo
 
 package darwin
 
@@ -8,7 +7,11 @@ package darwin
 #include <stdlib.h>
 */
 import "C"
-import "unsafe"
+
+import (
+	"log/slog"
+	"unsafe"
+)
 
 // PolicyUpdatedNotification is the Darwin notification name posted when
 // policy changes. The Swift SysExt listens for this to refresh its cache.
@@ -20,5 +23,9 @@ const PolicyUpdatedNotification = "ai.canyonroad.agentsh.policy-updated"
 func NotifyPolicyUpdated() {
 	cname := C.CString(PolicyUpdatedNotification)
 	defer C.free(unsafe.Pointer(cname))
-	C.notify_post(cname)
+	status := C.notify_post(cname)
+	if status != 0 {
+		// notify_post returns non-zero on failure (NOTIFY_STATUS_FAILED, etc.)
+		slog.Warn("notify_post failed", "status", int(status), "name", PolicyUpdatedNotification)
+	}
 }
