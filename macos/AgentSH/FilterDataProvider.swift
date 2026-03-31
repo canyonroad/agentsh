@@ -173,7 +173,8 @@ class FilterDataProvider: NEFilterDataProvider {
             bundleID: processInfo.bundleID,
             executablePath: processInfo.executablePath,
             processName: processInfo.processName,
-            parentPID: parentPID
+            parentPID: parentPID,
+            sessionID: nil
         ) { [weak self] (decision: String, ruleID: String?) in
             // Log the decision for audit purposes
             self?.logPNACLDecision(
@@ -238,7 +239,8 @@ class FilterDataProvider: NEFilterDataProvider {
             bundleID: processInfo.bundleID,
             executablePath: processInfo.executablePath,
             processName: processInfo.processName,
-            parentPID: parentPID
+            parentPID: parentPID,
+            sessionID: nil
         ) { (decision: String, ruleID: String?) in
             policyDecision = decision
             policyRuleID = ruleID

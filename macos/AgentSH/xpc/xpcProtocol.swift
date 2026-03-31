@@ -75,6 +75,7 @@ import Foundation
         executablePath: String?,
         processName: String?,
         parentPID: pid_t,
+        sessionID: String?,
         reply: @escaping (String, String?) -> Void  // (decision, ruleID)
     )
 
@@ -141,6 +142,19 @@ import Foundation
     /// Mute a process to prevent ES event delivery (recursion guard).
     /// Called from Go side when the server spawns a command for the exec pipeline.
     func muteProcess(pid: pid_t, reply: @escaping (Bool) -> Void)
+
+    // MARK: - Policy Snapshot
+
+    /// Fetch a policy snapshot for incremental sync.
+    /// - Parameters:
+    ///   - sessionID: The session to fetch policy for
+    ///   - version: The last known version (fetch changes since this version)
+    ///   - reply: Called with the policy snapshot dictionary
+    func fetchPolicySnapshot(
+        sessionID: String,
+        version: UInt64,
+        reply: @escaping ([String: Any]) -> Void
+    )
 }
 
 /// XPC Service identifier.

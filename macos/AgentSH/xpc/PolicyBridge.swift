@@ -174,6 +174,7 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
         executablePath: String?,
         processName: String?,
         parentPID: pid_t,
+        sessionID: String?,
         reply: @escaping (String, String?) -> Void
     ) {
         let request: [String: Any] = [
@@ -186,7 +187,8 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
             "bundle_id": bundleID ?? "",
             "executable_path": executablePath ?? "",
             "process_name": processName ?? "",
-            "parent_pid": parentPID
+            "parent_pid": parentPID,
+            "session_id": sessionID ?? ""
         ]
         sendRequest(request) { [weak self] response in
             // Check if this was an error response - respect fail behavior for PNACL
@@ -340,6 +342,23 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
         reply: @escaping (Bool, Double, Bool) -> Void
     ) {
         reply(pnaclBlockingEnabled, pnaclDecisionTimeout, pnaclFailOpen)
+    }
+
+    // MARK: - Policy Snapshot
+
+    func fetchPolicySnapshot(
+        sessionID: String,
+        version: UInt64,
+        reply: @escaping ([String: Any]) -> Void
+    ) {
+        let request: [String: Any] = [
+            "type": "fetch_policy_snapshot",
+            "session_id": sessionID,
+            "version": version
+        ]
+        sendRequest(request) { response in
+            reply(response)
+        }
     }
 
     // MARK: - Socket Communication
