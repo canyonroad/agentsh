@@ -125,6 +125,9 @@ func (a *PolicyAdapter) BuildPolicySnapshot(sessionID string, clientVersion uint
 	}
 
 	p := a.engine.Policy()
+	if p == nil {
+		return PolicyResponse{Allow: true}
+	}
 	// Version comparison will be handled when we add SessionVersions in Task 4.
 	// For now, always return the full snapshot.
 
@@ -148,6 +151,13 @@ func (a *PolicyAdapter) BuildPolicySnapshot(sessionID string, clientVersion uint
 				Action:  r.Decision,
 			})
 		}
+		for _, cidr := range r.CIDRs {
+			networkRules = append(networkRules, SnapshotNetworkRule{
+				Pattern: cidr,
+				Ports:   r.Ports,
+				Action:  r.Decision,
+			})
+		}
 	}
 
 	// DNS rules are derived from network rules with domain patterns.
@@ -155,9 +165,9 @@ func (a *PolicyAdapter) BuildPolicySnapshot(sessionID string, clientVersion uint
 	var dnsRules []SnapshotDNSRule
 
 	defaults := SnapshotDefaults{
-		File:    "allow",
-		Network: "allow",
-		DNS:     "allow",
+		File:    string(types.DecisionAllow),
+		Network: string(types.DecisionAllow),
+		DNS:     string(types.DecisionAllow),
 	}
 
 	return PolicyResponse{

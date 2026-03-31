@@ -1,14 +1,16 @@
 package xpc
 
-// PolicySnapshotResponse carries a full snapshot of the policy engine's rules
-// in a flat, cache-friendly format for Swift-side local evaluation.
+// PolicySnapshotResponse is the internal representation of a policy snapshot.
+// BuildPolicySnapshot returns a PolicyResponse (the wire type) directly,
+// embedding snapshot data in its optional fields. This type documents the
+// snapshot schema and is used in tests for JSON round-trip validation.
 type PolicySnapshotResponse struct {
-	Version      uint64               `json:"version"`
-	SessionID    string               `json:"session_id"`
-	FileRules    []SnapshotFileRule   `json:"file_rules"`
+	Version      uint64                `json:"version"`
+	SessionID    string                `json:"session_id"`
+	FileRules    []SnapshotFileRule    `json:"file_rules"`
 	NetworkRules []SnapshotNetworkRule `json:"network_rules"`
-	DNSRules     []SnapshotDNSRule    `json:"dns_rules"`
-	Defaults     SnapshotDefaults     `json:"defaults"`
+	DNSRules     []SnapshotDNSRule     `json:"dns_rules"`
+	Defaults     *SnapshotDefaults     `json:"defaults"`
 }
 
 // SnapshotFileRule represents a single file-access rule in the snapshot.

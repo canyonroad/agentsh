@@ -19,7 +19,7 @@ func TestPolicySnapshotResponse_JSON(t *testing.T) {
 		DNSRules: []SnapshotDNSRule{
 			{Pattern: "*.evil.com", Action: "nxdomain"},
 		},
-		Defaults: SnapshotDefaults{File: "allow", Network: "allow", DNS: "allow"},
+		Defaults: &SnapshotDefaults{File: "allow", Network: "allow", DNS: "allow"},
 	}
 	data, err := json.Marshal(snap)
 	if err != nil {
@@ -38,8 +38,8 @@ func TestPolicySnapshotResponse_JSON(t *testing.T) {
 	if decoded.FileRules[1].Action != "deny" {
 		t.Fatalf("expected deny, got %s", decoded.FileRules[1].Action)
 	}
-	if decoded.Defaults.DNS != "allow" {
-		t.Fatalf("expected allow, got %s", decoded.Defaults.DNS)
+	if decoded.Defaults == nil || decoded.Defaults.DNS != "allow" {
+		t.Fatalf("expected allow, got %v", decoded.Defaults)
 	}
 }
 
