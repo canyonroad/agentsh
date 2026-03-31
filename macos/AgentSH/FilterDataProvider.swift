@@ -214,7 +214,7 @@ class FilterDataProvider: NEFilterDataProvider {
                 ip: ip,
                 port: port,
                 protocol: protocolType,
-                domain: hostname,
+                domain: domain,
                 pid: pid,
                 bundleID: processInfo.bundleID,
                 decision: decision,
