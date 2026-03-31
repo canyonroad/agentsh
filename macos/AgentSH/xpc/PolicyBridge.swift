@@ -103,7 +103,7 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
             "tty_path": ttyPath ?? "",
             "cwd_path": cwdPath ?? ""
         ]
-        sendRequest(request) { [weak self] response in
+        sendRequest(request) { response in
             // Check if this was an error response from sendRequest.
             // On error, sendRequest returns {"allow": bool, "rule": "error-fail*"}.
             // For exec pipeline, we must respect failBehavior for the action too.

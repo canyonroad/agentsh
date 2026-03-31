@@ -16,7 +16,7 @@ struct ApprovalRequestData {
     let executablePath: String?
 
     /// Creates an ApprovalRequestData from a JSON dictionary (from Go server).
-    static func from(json: [String: Any]) -> ApprovalRequestData? {
+    nonisolated static func from(json: [String: Any]) -> ApprovalRequestData? {
         // Validate required fields with detailed logging for debugging
         guard let requestID = json["request_id"] as? String else {
             NSLog("ApprovalRequestData: Missing or invalid 'request_id' in JSON")

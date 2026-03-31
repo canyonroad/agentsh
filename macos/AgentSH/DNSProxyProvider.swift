@@ -1,5 +1,6 @@
 // macos/SysExt/DNSProxyProvider.swift
 import NetworkExtension
+import Network
 
 class DNSProxyProvider: NEDNSProxyProvider {
     private var xpc: NSXPCConnection?
@@ -40,7 +41,7 @@ class DNSProxyProvider: NEDNSProxyProvider {
     }
 
     private func handleDNSFlow(_ flow: NEAppProxyUDPFlow) {
-        flow.open(withLocalEndpoint: nil) { [weak self] error in
+        flow.open(withLocalFlowEndpoint: nil) { [weak self] error in
             if let error = error {
                 NSLog("DNS flow open error: \(error)")
                 return
@@ -50,20 +51,17 @@ class DNSProxyProvider: NEDNSProxyProvider {
     }
 
     private func readAndProcessDNS(_ flow: NEAppProxyUDPFlow) {
-        flow.readDatagrams { [weak self] datagrams, endpoints, error in
+        flow.readDatagrams { [weak self] tuples, error in
             guard let self = self else { return }
 
-            guard let datagrams = datagrams, let endpoints = endpoints, error == nil else {
+            guard let tuples = tuples, error == nil else {
                 if let error = error {
                     NSLog("DNS read error: \(error)")
                 }
                 return
             }
 
-            for (datagram, endpoint) in zip(datagrams, endpoints) {
-                // Parse DNS query, extract domain
-                // Check policy
-                // Forward or block
+            for (datagram, endpoint) in tuples {
                 self.forwardDNS(datagram, to: endpoint, via: flow)
             }
 
@@ -72,9 +70,9 @@ class DNSProxyProvider: NEDNSProxyProvider {
         }
     }
 
-    private func forwardDNS(_ datagram: Data, to endpoint: NWEndpoint, via flow: NEAppProxyUDPFlow) {
+    private func forwardDNS(_ datagram: Data, to endpoint: Network.NWEndpoint, via flow: NEAppProxyUDPFlow) {
         // In production: parse query, check policy, forward to upstream or return NXDOMAIN
-        flow.writeDatagrams([datagram], sentBy: [endpoint]) { error in
+        flow.writeDatagrams([(datagram, endpoint)]) { error in
             if let error = error {
                 NSLog("DNS write error: \(error)")
             }
