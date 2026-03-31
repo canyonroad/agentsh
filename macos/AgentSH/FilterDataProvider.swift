@@ -113,6 +113,27 @@ class FilterDataProvider: NEFilterDataProvider {
         // Get parent PID from hierarchy (may use cached fork events or sysctl fallback)
         let parentPID = ProcessHierarchy.shared.getParent(pid: pid) ?? 0
 
+        // Session scoping: auto-allow if PID is not in any active session
+        guard let sessionID = SessionPolicyCache.shared.sessionForPID(pid) else {
+            return .allow()
+        }
+
+        // Extract domain from flow if available (SNI/hostname)
+        let hostname = socketFlow.remoteHostname
+
+        // Cache fast-path: check network rules
+        let (cacheDecision, _) = SessionPolicyCache.shared.evaluateNetwork(
+            host: hostname ?? ip, port: port, pid: pid)
+
+        switch cacheDecision {
+        case .allow:
+            return .allow()
+        case .deny:
+            return .drop()
+        case .fallthrough_:
+            break  // Continue to XPC check
+        }
+
         // Determine protocol (TCP vs UDP)
         let protocolType: String
         switch socketFlow.socketType {
@@ -124,18 +145,16 @@ class FilterDataProvider: NEFilterDataProvider {
             protocolType = "tcp"  // Default to TCP for unknown types
         }
 
-        // Extract domain from flow if available (SNI/hostname)
-        let domain = socketFlow.remoteHostname
-
         // Route to appropriate handler based on blocking mode
         if blockingEnabled {
             return handleNewFlowBlocking(
                 ip: ip,
                 port: port,
                 protocolType: protocolType,
-                domain: domain,
+                domain: hostname,
                 pid: pid,
                 parentPID: parentPID,
+                sessionID: sessionID,
                 processInfo: processInfo
             )
         } else {
@@ -143,9 +162,10 @@ class FilterDataProvider: NEFilterDataProvider {
                 ip: ip,
                 port: port,
                 protocolType: protocolType,
-                domain: domain,
+                domain: hostname,
                 pid: pid,
                 parentPID: parentPID,
+                sessionID: sessionID,
                 processInfo: processInfo
             )
         }
@@ -161,6 +181,7 @@ class FilterDataProvider: NEFilterDataProvider {
         domain: String?,
         pid: pid_t,
         parentPID: pid_t,
+        sessionID: String,
         processInfo: ProcessInfo
     ) -> NEFilterNewFlowVerdict {
         // Make async PNACL check - allow the flow and log decisions
@@ -174,7 +195,7 @@ class FilterDataProvider: NEFilterDataProvider {
             executablePath: processInfo.executablePath,
             processName: processInfo.processName,
             parentPID: parentPID,
-            sessionID: nil
+            sessionID: sessionID
         ) { [weak self] (decision: String, ruleID: String?) in
             // Log the decision for audit purposes
             self?.logPNACLDecision(
@@ -193,7 +214,7 @@ class FilterDataProvider: NEFilterDataProvider {
                 ip: ip,
                 port: port,
                 protocol: protocolType,
-                domain: domain,
+                domain: hostname,
                 pid: pid,
                 bundleID: processInfo.bundleID,
                 decision: decision,
@@ -214,6 +235,7 @@ class FilterDataProvider: NEFilterDataProvider {
         domain: String?,
         pid: pid_t,
         parentPID: pid_t,
+        sessionID: String,
         processInfo: ProcessInfo
     ) -> NEFilterNewFlowVerdict {
         let semaphore = DispatchSemaphore(value: 0)
@@ -240,7 +262,7 @@ class FilterDataProvider: NEFilterDataProvider {
             executablePath: processInfo.executablePath,
             processName: processInfo.processName,
             parentPID: parentPID,
-            sessionID: nil
+            sessionID: sessionID
         ) { (decision: String, ruleID: String?) in
             policyDecision = decision
             policyRuleID = ruleID
