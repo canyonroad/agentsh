@@ -1,5 +1,4 @@
 import Foundation
-import notify
 
 /// Darwin notification name posted by Go server when policy changes.
 let policyUpdatedNotification = "ai.canyonroad.agentsh.policy-updated"
@@ -66,8 +65,6 @@ class SessionPolicyCache {
     private var execDepths: [pid_t: Int] = [:]
     private let queue = DispatchQueue(label: "ai.canyonroad.agentsh.policycache",
                                        attributes: .concurrent)
-
-    private var notifyToken: Int32 = 0
 
     private init() {
         startListeningForNotifications()
@@ -268,13 +265,20 @@ class SessionPolicyCache {
     // MARK: - Darwin Notification Listener
 
     private func startListeningForNotifications() {
-        notify_register_dispatch(
-            policyUpdatedNotification,
-            &notifyToken,
-            DispatchQueue.global(qos: .utility)
-        ) { [weak self] _ in
-            self?.handlePolicyUpdateNotification()
-        }
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let name = CFNotificationName(policyUpdatedNotification as CFString)
+        CFNotificationCenterAddObserver(
+            center,
+            Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let cache = Unmanaged<SessionPolicyCache>.fromOpaque(observer).takeUnretainedValue()
+                cache.handlePolicyUpdateNotification()
+            },
+            name.rawValue,
+            nil,
+            .deliverImmediately
+        )
     }
 
     private func handlePolicyUpdateNotification() {
