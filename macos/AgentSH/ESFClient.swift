@@ -15,10 +15,6 @@ class ESFClient {
     private var auditTokenCache: [pid_t: audit_token_t] = [:]
     private let cacheQueue = DispatchQueue(label: "ai.canyonroad.agentsh.audittokencache")
 
-    /// Active wrap sessions: maps session root PID to session ID
-    private var activeSessions: [pid_t: String] = [:]
-    private let sessionQueue = DispatchQueue(label: "ai.canyonroad.agentsh.sessions")
-
     init() {
         // Connect to XPC Service
         xpc = NSXPCConnection(serviceName: xpcServiceIdentifier)
@@ -61,7 +57,6 @@ class ESFClient {
 
         // Subscribe to NOTIFY events (observation)
         let notifyEvents: [es_event_type_t] = [
-            ES_EVENT_TYPE_NOTIFY_WRITE,
             ES_EVENT_TYPE_NOTIFY_CLOSE,
             ES_EVENT_TYPE_NOTIFY_EXIT,
             ES_EVENT_TYPE_NOTIFY_FORK
@@ -158,37 +153,15 @@ class ESFClient {
     // MARK: - Session Management
 
     /// Register a wrap session — called when agentsh wrap starts an agent
-    func registerSession(rootPID: pid_t, sessionID: String) {
-        sessionQueue.sync {
-            activeSessions[rootPID] = sessionID
-        }
+    func registerSession(rootPID: pid_t, sessionID: String, snapshot: SessionCache) {
+        SessionPolicyCache.shared.registerSession(sessionID: sessionID, rootPID: rootPID, snapshot: snapshot)
         NSLog("ESFClient: registered session \(sessionID) for root PID \(rootPID)")
     }
 
     /// Unregister a wrap session — called when the agent exits
-    func unregisterSession(rootPID: pid_t) {
-        sessionQueue.sync {
-            _ = activeSessions.removeValue(forKey: rootPID)
-        }
-        NSLog("ESFClient: unregistered session for root PID \(rootPID)")
-    }
-
-    /// Find which session (if any) a process belongs to by walking its ancestry.
-    private func findSession(forPID pid: pid_t) -> (rootPID: pid_t, sessionID: String)? {
-        return sessionQueue.sync {
-            // Check if pid is directly a session root
-            if let sid = activeSessions[pid] {
-                return (pid, sid)
-            }
-            // Walk ancestors to find session root
-            let ancestors = ProcessHierarchy.shared.getAncestors(pid: pid)
-            for ancestor in ancestors {
-                if let sid = activeSessions[ancestor] {
-                    return (ancestor, sid)
-                }
-            }
-            return nil
-        }
+    func unregisterSession(sessionID: String) {
+        SessionPolicyCache.shared.unregisterSession(sessionID: sessionID)
+        NSLog("ESFClient: unregistered session \(sessionID)")
     }
 
     private func handleEvent(_ event: UnsafePointer<es_message_t>) {
@@ -209,8 +182,6 @@ class ESFClient {
             handleAuthExec(event, pid: pid)
 
         // NOTIFY events - no response needed
-        case ES_EVENT_TYPE_NOTIFY_WRITE:
-            handleNotifyWrite(message, pid: pid)
         case ES_EVENT_TYPE_NOTIFY_CLOSE:
             handleNotifyClose(message, pid: pid)
         case ES_EVENT_TYPE_NOTIFY_FORK:
@@ -225,34 +196,138 @@ class ESFClient {
     // MARK: - AUTH Handlers
 
     private func handleAuthOpen(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
-        guard getClient() != nil else { return }
-
-        // Retain message for async callback - message only valid during sync callback
-        es_retain_message(event)
+        guard let client = getClient() else { return }
 
         let path = String(cString: event.pointee.event.open.file.pointee.path.data)
 
-        xpcProxy?.checkFile(path: path, operation: "read", pid: pid, sessionID: nil) { [weak self] allow, _ in
-            defer { es_release_message(event) }
-            guard let client = self?.getClient() else { return }
-            let result: es_auth_result_t = allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
-            es_respond_auth_result(client, event, result, false)
+        // Cache fast-path
+        let (decision, sessionID) = SessionPolicyCache.shared.evaluateFile(
+            path: path, operation: "read", pid: pid)
+
+        switch decision {
+        case .allow:
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+        case .deny:
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_DENY, false)
+        case .fallthrough_:
+            // XPC round-trip
+            es_retain_message(event)
+            xpcProxy?.checkFile(path: path, operation: "read", pid: pid, sessionID: sessionID) {
+                [weak self] allow, _ in
+                defer { es_release_message(event) }
+                guard let client = self?.getClient() else { return }
+                let result: es_auth_result_t = allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
+                es_respond_auth_result(client, event, result, false)
+            }
         }
     }
 
     private func handleAuthCreate(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
         guard let client = getClient() else { return }
-        es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+
+        // Extract path based on destination_type
+        let create = event.pointee.event.create
+        let path: String
+        if create.destination_type == ES_DESTINATION_TYPE_EXISTING_FILE {
+            path = String(cString: create.destination.existing_file.pointee.path.data)
+        } else {
+            let dir = String(cString: create.destination.new_path.dir.pointee.path.data)
+            let filename = String(cString: create.destination.new_path.filename.data)
+            path = dir + "/" + filename
+        }
+
+        let (decision, sessionID) = SessionPolicyCache.shared.evaluateFile(
+            path: path, operation: "create", pid: pid)
+
+        switch decision {
+        case .allow:
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+        case .deny:
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_DENY, false)
+        case .fallthrough_:
+            es_retain_message(event)
+            xpcProxy?.checkFile(path: path, operation: "create", pid: pid, sessionID: sessionID) {
+                [weak self] allow, _ in
+                defer { es_release_message(event) }
+                guard let client = self?.getClient() else { return }
+                let result: es_auth_result_t = allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
+                es_respond_auth_result(client, event, result, false)
+            }
+        }
     }
 
     private func handleAuthUnlink(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
         guard let client = getClient() else { return }
-        es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+        let path = String(cString: event.pointee.event.unlink.target.pointee.path.data)
+
+        let (decision, sessionID) = SessionPolicyCache.shared.evaluateFile(
+            path: path, operation: "delete", pid: pid)
+
+        switch decision {
+        case .allow:
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+        case .deny:
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_DENY, false)
+        case .fallthrough_:
+            es_retain_message(event)
+            xpcProxy?.checkFile(path: path, operation: "delete", pid: pid, sessionID: sessionID) {
+                [weak self] allow, _ in
+                defer { es_release_message(event) }
+                guard let client = self?.getClient() else { return }
+                let result: es_auth_result_t = allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
+                es_respond_auth_result(client, event, result, false)
+            }
+        }
     }
 
     private func handleAuthRename(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
         guard let client = getClient() else { return }
-        es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+        let sourcePath = String(cString: event.pointee.event.rename.source.pointee.path.data)
+
+        let rename = event.pointee.event.rename
+        let destPath: String
+        if rename.destination_type == ES_DESTINATION_TYPE_EXISTING_FILE {
+            destPath = String(cString: rename.destination.existing_file.pointee.path.data)
+        } else {
+            let dir = String(cString: rename.destination.new_path.dir.pointee.path.data)
+            let filename = String(cString: rename.destination.new_path.filename.data)
+            destPath = dir + "/" + filename
+        }
+
+        // Evaluate both paths
+        let (srcDecision, sessionID) = SessionPolicyCache.shared.evaluateFile(
+            path: sourcePath, operation: "rename", pid: pid)
+        let (dstDecision, _) = SessionPolicyCache.shared.evaluateFile(
+            path: destPath, operation: "create", pid: pid)
+
+        // If either is denied by cache, deny immediately
+        if srcDecision == .deny || dstDecision == .deny {
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_DENY, false)
+            return
+        }
+        if srcDecision == .allow && dstDecision == .allow {
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+            return
+        }
+
+        // Fallthrough — XPC for source then dest
+        es_retain_message(event)
+        xpcProxy?.checkFile(path: sourcePath, operation: "rename", pid: pid, sessionID: sessionID) {
+            [weak self] srcAllow, _ in
+            guard srcAllow else {
+                defer { es_release_message(event) }
+                guard let client = self?.getClient() else { return }
+                es_respond_auth_result(client, event, ES_AUTH_RESULT_DENY, false)
+                return
+            }
+            self?.xpcProxy?.checkFile(path: destPath, operation: "create", pid: pid, sessionID: sessionID) {
+                [weak self] dstAllow, _ in
+                defer { es_release_message(event) }
+                guard let client = self?.getClient() else { return }
+                let result: es_auth_result_t = dstAllow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
+                es_respond_auth_result(client, event, result, false)
+            }
+        }
     }
 
     private func handleAuthExec(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
@@ -271,16 +346,15 @@ class ESFClient {
         // Go server through the register_session XPC request when agentsh wrap starts.
         // Until at least one session is registered, all AUTH_EXEC events pass through
         // without policy checks — this is by design (no wrapping = no interception).
-        let hasActiveSessions = sessionQueue.sync { !activeSessions.isEmpty }
+        let hasActiveSessions = SessionPolicyCache.shared.hasActiveSessions
         if !hasActiveSessions {
             es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
             return
         }
 
         // Check if this process is in any active session tree
-        let sessionInfo = findSession(forPID: pid)
-        if sessionInfo == nil {
-            // Not in any active session — allow immediately, no policy check
+        let sessionID = SessionPolicyCache.shared.sessionForPID(pid)
+        if sessionID == nil {
             es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
             return
         }
@@ -326,12 +400,14 @@ class ESFClient {
         }
         let cwdPath = String(cString: execPtr.pointee.cwd.pointee.path.data)
 
+        let depth = SessionPolicyCache.shared.recordExecDepth(pid: pid, parentPID: parentPID)
+
         xpcProxy?.checkExecPipeline(
             executable: execPath,
             args: args,
             pid: pid,
             parentPID: parentPID,
-            sessionID: sessionInfo?.sessionID,
+            sessionID: sessionID,
             ttyPath: ttyPath,
             cwdPath: cwdPath
         ) { [weak self] decision, action, rule in
@@ -372,6 +448,7 @@ class ESFClient {
         }
 
         ProcessHierarchy.shared.recordFork(parentPID: pid, childPID: childPid)
+        SessionPolicyCache.shared.addPID(childPid, parentPID: pid)
         NSLog("Fork: \(pid) -> \(childPid)")
     }
 
@@ -381,10 +458,7 @@ class ESFClient {
             _ = auditTokenCache.removeValue(forKey: pid)
         }
 
-        // Clean up session registration if this was a session root
-        sessionQueue.sync {
-            _ = activeSessions.removeValue(forKey: pid)
-        }
+        SessionPolicyCache.shared.removePID(pid)
 
         // Clean up hierarchy tracking and invalidate process info cache
         ProcessHierarchy.shared.recordExit(pid: pid)
@@ -392,13 +466,7 @@ class ESFClient {
         NSLog("Exit: \(pid)")
     }
 
-    private func handleNotifyWrite(_ message: es_message_t, pid: pid_t) {
-        // Log write completions (high volume, observation only)
-        // In production, would emit event to agentsh server
-    }
-
     private func handleNotifyClose(_ message: es_message_t, pid: pid_t) {
-        // Log file close with write flag (observation only)
-        // In production, would emit event to agentsh server
+        // Implemented in Task 8
     }
 }
