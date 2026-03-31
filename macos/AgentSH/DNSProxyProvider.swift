@@ -63,15 +63,17 @@ class DNSProxyProvider: NEDNSProxyProvider {
 
             for (datagram, endpoint) in tuples {
                 if let domain = self.parseDNSQueryDomain(datagram),
-                   let _ = SessionPolicyCache.shared.evaluateDNS(domain: domain) {
-                    // Policy says deny or nxdomain — synthesize NXDOMAIN
-                    if let nxdomain = self.synthesizeNXDOMAIN(datagram) {
+                   let action = SessionPolicyCache.shared.evaluateDNS(domain: domain) {
+                    // "nxdomain" — synthesize NXDOMAIN response
+                    // "deny" — silent drop (no response, client will timeout)
+                    if action == "nxdomain", let nxdomain = self.synthesizeNXDOMAIN(datagram) {
                         flow.writeDatagrams([(nxdomain, endpoint)]) { error in
                             if let error = error {
                                 NSLog("DNS NXDOMAIN write error: \(error)")
                             }
                         }
                     }
+                    // For "deny", do nothing — packet is silently dropped
                 } else {
                     // Allow — forward unchanged
                     self.forwardDNS(datagram, to: endpoint, via: flow)
@@ -104,12 +106,13 @@ class DNSProxyProvider: NEDNSProxyProvider {
         while offset < datagram.count {
             let length = Int(datagram[offset])
             if length == 0 { break }  // Root label = end
+            if length & 0xC0 == 0xC0 { return nil }  // Pointer compression — bail
+            guard length <= 63 else { return nil }  // RFC 1035: max label length
             offset += 1
             guard offset + length <= datagram.count else { return nil }
             let label = datagram[offset..<offset+length]
-            if let str = String(bytes: label, encoding: .ascii) {
-                labels.append(str)
-            }
+            guard let str = String(bytes: label, encoding: .ascii) else { return nil }
+            labels.append(str)
             offset += length
         }
 
@@ -136,6 +139,7 @@ class DNSProxyProvider: NEDNSProxyProvider {
             if length == 0 { offset += 1; break }
             offset += 1 + length
         }
+        guard offset + 4 <= response.count else { return nil }
         offset += 4  // QTYPE (2) + QCLASS (2)
         return response.prefix(offset)
     }
