@@ -102,6 +102,14 @@ type PolicyResponse struct {
 	RuleID    string             `json:"rule_id,omitempty"`   // Matched rule identifier
 	Success   bool               `json:"success,omitempty"`   // For operations that return success/fail
 	Approvals []ApprovalResponse `json:"approvals,omitempty"` // Pending approval requests
+
+	// Policy snapshot fields (returned by fetch_policy_snapshot)
+	SnapshotVersion   uint64               `json:"snapshot_version,omitempty"`
+	SnapshotSessionID string               `json:"snapshot_session_id,omitempty"`
+	FileRules         []SnapshotFileRule   `json:"file_rules,omitempty"`
+	NetworkRules      []SnapshotNetworkRule `json:"network_rules,omitempty"`
+	DNSRules          []SnapshotDNSRule    `json:"dns_rules,omitempty"`
+	Defaults          *SnapshotDefaults    `json:"defaults,omitempty"`
 }
 
 // ExecContext carries process context from the ESF event for exec redirect.
