@@ -27,6 +27,16 @@ class ESFClient {
         xpcProxy = xpc.remoteObjectProxyWithErrorHandler { error in
             NSLog("XPC error: \(error)")
         } as? AgentshXPCProtocol
+
+        // Listen for Darwin notification-triggered cache refresh
+        NotificationCenter.default.addObserver(
+            forName: .policyCacheNeedsRefresh,
+            object: nil,
+            queue: nil
+        ) { [weak self] notification in
+            guard let sessionID = notification.userInfo?["session_id"] as? String else { return }
+            self?.refreshCacheForSession(sessionID)
+        }
     }
 
     deinit {
@@ -156,16 +166,46 @@ class ESFClient {
 
     // MARK: - Session Management
 
-    /// Register a wrap session — called when agentsh wrap starts an agent
-    func registerSession(rootPID: pid_t, sessionID: String, snapshot: SessionCache) {
-        SessionPolicyCache.shared.registerSession(sessionID: sessionID, rootPID: rootPID, snapshot: snapshot)
-        NSLog("ESFClient: registered session \(sessionID) for root PID \(rootPID)")
+    /// Register a wrap session — called when agentsh wrap starts an agent.
+    /// Fetches initial policy snapshot asynchronously; registers with empty cache if fetch fails.
+    func registerSession(rootPID: pid_t, sessionID: String) {
+        xpcProxy?.fetchPolicySnapshot(sessionID: sessionID, version: 0) { response in
+            guard let snapshot = SessionCache.from(json: response, sessionID: sessionID, rootPID: rootPID) else {
+                NSLog("ESFClient: failed to fetch initial snapshot for session \(sessionID)")
+                let emptySnapshot = SessionCache(
+                    sessionID: sessionID, rootPID: rootPID, version: 0,
+                    fileRules: [], networkRules: [], dnsRules: [],
+                    defaults: PolicyDefaults(file: "allow", network: "allow", dns: "allow"))
+                SessionPolicyCache.shared.registerSession(
+                    sessionID: sessionID, rootPID: rootPID, snapshot: emptySnapshot)
+                return
+            }
+            SessionPolicyCache.shared.registerSession(
+                sessionID: sessionID, rootPID: rootPID, snapshot: snapshot)
+            NSLog("ESFClient: registered session \(sessionID) with policy version \(snapshot.version)")
+        }
     }
 
     /// Unregister a wrap session — called when the agent exits
     func unregisterSession(sessionID: String) {
         SessionPolicyCache.shared.unregisterSession(sessionID: sessionID)
         NSLog("ESFClient: unregistered session \(sessionID)")
+    }
+
+    /// Refresh the policy cache for a session after a Darwin notification
+    private func refreshCacheForSession(_ sessionID: String) {
+        let currentVersion = SessionPolicyCache.shared.versionForSession(sessionID)
+        xpcProxy?.fetchPolicySnapshot(sessionID: sessionID, version: currentVersion) { response in
+            guard let version = response["version"] as? UInt64 ?? (response["version"] as? Int).map({ UInt64($0) }),
+                  version > 0 else { return }
+            guard let rootPID = response["root_pid"] as? Int32 ?? (response["root_pid"] as? Int).map({ Int32($0) }) else { return }
+            guard let snapshot = SessionCache.from(json: response, sessionID: sessionID, rootPID: rootPID) else {
+                NSLog("ESFClient: failed to parse policy snapshot for session \(sessionID)")
+                return
+            }
+            SessionPolicyCache.shared.updateSession(sessionID, snapshot: snapshot)
+            NSLog("ESFClient: updated cache for session \(sessionID) to version \(version)")
+        }
     }
 
     private func handleEvent(_ event: UnsafePointer<es_message_t>) {
