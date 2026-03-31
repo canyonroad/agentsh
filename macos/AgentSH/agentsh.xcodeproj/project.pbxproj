@@ -18,6 +18,7 @@
 		A018265F2F5AA207000B0164 /* SysExt.systemextension in CopyFiles */ = {isa = PBXBuildFile; fileRef = A018260B2F5A9D11000B0164 /* SysExt.systemextension */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		A01826632F5AA234000B0164 /* approval-dialog.app in CopyFiles */ = {isa = PBXBuildFile; fileRef = A01826482F5AA0A5000B0164 /* approval-dialog.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A01826642F5AA300000B0164 /* ESFClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01826652F5AA300000B0164 /* ESFClient.swift */; };
+		95183ED75FC044CD9B03464F /* SessionPolicyCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2B8B1A81E224239B20A1D58 /* SessionPolicyCache.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -79,6 +80,7 @@
 		A01826272F5A9FEB000B0164 /* xpc.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = xpc.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
 		A01826482F5AA0A5000B0164 /* approval-dialog.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "approval-dialog.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A01826652F5AA300000B0164 /* ESFClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ESFClient.swift; sourceTree = "<group>"; };
+		E2B8B1A81E224239B20A1D58 /* SessionPolicyCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionPolicyCache.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -187,6 +189,7 @@
 				A01826192F5A9E28000B0164 /* ProcessHierarchy.swift */,
 				A018261A2F5A9E28000B0164 /* ProcessIdentifier.swift */,
 				A01826652F5AA300000B0164 /* ESFClient.swift */,
+				E2B8B1A81E224239B20A1D58 /* SessionPolicyCache.swift */,
 				A018261B2F5A9E28000B0164 /* SysExt.entitlements */,
 				A01826122F5A9DE2000B0164 /* SystemExtensions.framework */,
 				A01826102F5A9DD8000B0164 /* NetworkExtension.framework */,
@@ -378,6 +381,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A01826642F5AA300000B0164 /* ESFClient.swift in Sources */,
+				95183ED75FC044CD9B03464F /* SessionPolicyCache.swift in Sources */,
 				A018261D2F5A9E28000B0164 /* ProcessIdentifier.swift in Sources */,
 				A018261E2F5A9E28000B0164 /* FilterDataProvider.swift in Sources */,
 				A018261F2F5A9E28000B0164 /* DNSProxyProvider.swift in Sources */,
