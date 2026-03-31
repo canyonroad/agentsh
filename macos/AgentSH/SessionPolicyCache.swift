@@ -1,7 +1,7 @@
 import Foundation
 
 /// Darwin notification name posted by Go server when policy changes.
-let policyUpdatedNotification = "ai.canyonroad.agentsh.policy-updated"
+private let policyUpdatedNotification = "ai.canyonroad.agentsh.policy-updated"
 
 // MARK: - Rule Types
 
@@ -163,7 +163,7 @@ class SessionPolicyCache {
             }
 
             // Rules requiring server-side logic -> XPC fallthrough
-            for rule in cache.fileRules {
+            for rule in cache.fileRules where rule.action != "deny" {
                 if rule.operations.contains(operation) && globMatch(pattern: rule.pattern, path: path) {
                     if rule.action == "approve" || rule.action == "redirect" || rule.action == "soft_delete" {
                         return (.fallthrough_, sid)
@@ -198,7 +198,7 @@ class SessionPolicyCache {
                 }
             }
 
-            for rule in cache.networkRules {
+            for rule in cache.networkRules where rule.action != "deny" {
                 if globMatch(pattern: rule.pattern, path: host) &&
                    (rule.ports.isEmpty || rule.ports.contains(port)) {
                     if rule.action == "approve" {
@@ -223,10 +223,20 @@ class SessionPolicyCache {
         return queue.sync {
             if sessions.isEmpty { return nil }  // No sessions = passthrough
 
+            // Check deny rules first (stricter than nxdomain — drops entirely)
             for (_, cache) in sessions {
-                for rule in cache.dnsRules where rule.action == "deny" || rule.action == "nxdomain" {
+                for rule in cache.dnsRules where rule.action == "deny" {
                     if globMatch(pattern: rule.pattern, path: domain) {
-                        return rule.action
+                        return "deny"
+                    }
+                }
+            }
+
+            // Then check nxdomain rules
+            for (_, cache) in sessions {
+                for rule in cache.dnsRules where rule.action == "nxdomain" {
+                    if globMatch(pattern: rule.pattern, path: domain) {
+                        return "nxdomain"
                     }
                 }
             }
