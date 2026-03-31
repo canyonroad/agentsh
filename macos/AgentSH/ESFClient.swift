@@ -18,6 +18,9 @@ class ESFClient {
     private var auditTokenCache: [pid_t: audit_token_t] = [:]
     private let cacheQueue = DispatchQueue(label: "ai.canyonroad.agentsh.audittokencache")
 
+    /// Observer token for policy cache refresh notifications
+    private var notificationObserver: NSObjectProtocol?
+
     init() {
         // Connect to XPC Service
         xpc = NSXPCConnection(serviceName: xpcServiceIdentifier)
@@ -29,7 +32,7 @@ class ESFClient {
         } as? AgentshXPCProtocol
 
         // Listen for Darwin notification-triggered cache refresh
-        NotificationCenter.default.addObserver(
+        notificationObserver = NotificationCenter.default.addObserver(
             forName: .policyCacheNeedsRefresh,
             object: nil,
             queue: nil
@@ -40,6 +43,9 @@ class ESFClient {
     }
 
     deinit {
+        if let observer = notificationObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
         stop()
     }
 
@@ -197,7 +203,7 @@ class ESFClient {
         let currentVersion = SessionPolicyCache.shared.versionForSession(sessionID)
         xpcProxy?.fetchPolicySnapshot(sessionID: sessionID, version: currentVersion) { response in
             guard let version = response["version"] as? UInt64 ?? (response["version"] as? Int).map({ UInt64($0) }),
-                  version > 0 else { return }
+                  version > 0 else { return }  // version 0 = no update available
             guard let rootPID = response["root_pid"] as? Int32 ?? (response["root_pid"] as? Int).map({ Int32($0) }) else { return }
             guard let snapshot = SessionCache.from(json: response, sessionID: sessionID, rootPID: rootPID) else {
                 NSLog("ESFClient: failed to parse policy snapshot for session \(sessionID)")
