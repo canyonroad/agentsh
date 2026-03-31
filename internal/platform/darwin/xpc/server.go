@@ -294,10 +294,13 @@ func (s *Server) handleRequest(req *PolicyRequest) PolicyResponse {
 		return PolicyResponse{Allow: sessionID != "", SessionID: sessionID}
 
 	case RequestTypeEvent:
-		if s.eventHandler != nil && req.EventData != nil {
+		s.mu.Lock()
+		eh := s.eventHandler
+		s.mu.Unlock()
+		if eh != nil && req.EventData != nil {
 			// EventData is []byte — Go's json.Unmarshal already base64-decoded
 			// the JSON string value, so req.EventData contains raw JSON bytes.
-			_ = s.eventHandler.HandleESFEvent(context.Background(), req.EventData)
+			_ = eh.HandleESFEvent(context.Background(), req.EventData)
 		}
 		return PolicyResponse{Allow: true}
 
