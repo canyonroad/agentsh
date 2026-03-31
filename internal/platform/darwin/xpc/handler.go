@@ -171,10 +171,10 @@ func (a *PolicyAdapter) BuildPolicySnapshot(sessionID string, clientVersion uint
 	}
 
 	return PolicyResponse{
-		Allow:             true,
-		SnapshotVersion:   1, // Will be replaced by SessionVersions counter in Task 4
-		SnapshotSessionID: sessionID,
-		FileRules:         fileRules,
+		Allow:           true,
+		SessionID:       sessionID,
+		SnapshotVersion: 1, // Will be replaced by SessionVersions counter in Task 4
+		FileRules:       fileRules,
 		NetworkRules:      networkRules,
 		DNSRules:          dnsRules,
 		Defaults:          &defaults,

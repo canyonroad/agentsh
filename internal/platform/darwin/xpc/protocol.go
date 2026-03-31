@@ -104,9 +104,8 @@ type PolicyResponse struct {
 	Approvals []ApprovalResponse `json:"approvals,omitempty"` // Pending approval requests
 
 	// Policy snapshot fields (returned by fetch_policy_snapshot)
-	SnapshotVersion   uint64               `json:"snapshot_version,omitempty"`
-	SnapshotSessionID string               `json:"snapshot_session_id,omitempty"`
-	FileRules         []SnapshotFileRule   `json:"file_rules,omitempty"`
+	SnapshotVersion uint64               `json:"version,omitempty"`
+	FileRules       []SnapshotFileRule   `json:"file_rules,omitempty"`
 	NetworkRules      []SnapshotNetworkRule `json:"network_rules,omitempty"`
 	DNSRules          []SnapshotDNSRule    `json:"dns_rules,omitempty"`
 	Defaults          *SnapshotDefaults    `json:"defaults,omitempty"`
