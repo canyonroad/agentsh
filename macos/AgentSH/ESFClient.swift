@@ -59,7 +59,8 @@ class ESFClient {
         let notifyEvents: [es_event_type_t] = [
             ES_EVENT_TYPE_NOTIFY_CLOSE,
             ES_EVENT_TYPE_NOTIFY_EXIT,
-            ES_EVENT_TYPE_NOTIFY_FORK
+            ES_EVENT_TYPE_NOTIFY_FORK,
+            ES_EVENT_TYPE_NOTIFY_SETATTR
         ]
 
         let allEvents = authEvents + notifyEvents
@@ -188,6 +189,8 @@ class ESFClient {
             handleNotifyFork(message, pid: pid)
         case ES_EVENT_TYPE_NOTIFY_EXIT:
             handleNotifyExit(message, pid: pid)
+        case ES_EVENT_TYPE_NOTIFY_SETATTR:
+            handleNotifySetattr(message, pid: pid)
         default:
             break
         }
@@ -467,6 +470,51 @@ class ESFClient {
     }
 
     private func handleNotifyClose(_ message: es_message_t, pid: pid_t) {
-        // Implemented in Task 8
+        guard message.event.close.modified else { return }
+        guard let sessionID = SessionPolicyCache.shared.sessionForPID(pid) else { return }
+
+        let path = String(cString: message.event.close.target.pointee.path.data)
+
+        let payload: [String: Any] = [
+            "type": "file_write",
+            "path": path,
+            "operation": "close_modified",
+            "pid": Int(pid),
+            "session_id": sessionID,
+            "timestamp": ISO8601DateFormatter().string(from: Date())
+        ]
+
+        if let data = try? JSONSerialization.data(withJSONObject: payload) {
+            xpcProxy?.emitEvent(event: data) { _ in }
+        }
+    }
+
+    private func handleNotifySetattr(_ message: es_message_t, pid: pid_t) {
+        guard let sessionID = SessionPolicyCache.shared.sessionForPID(pid) else { return }
+
+        let path = String(cString: message.event.setattr.target.pointee.path.data)
+
+        // Determine what changed
+        let attrList = message.event.setattr.attrlist
+        let operation: String
+        if attrList.commonattr & UInt32(ATTR_CMN_OWNERID) != 0 ||
+           attrList.commonattr & UInt32(ATTR_CMN_GRPID) != 0 {
+            operation = "chown"
+        } else {
+            operation = "chmod"
+        }
+
+        let payload: [String: Any] = [
+            "type": "file_\(operation)",
+            "path": path,
+            "operation": operation,
+            "pid": Int(pid),
+            "session_id": sessionID,
+            "timestamp": ISO8601DateFormatter().string(from: Date())
+        ]
+
+        if let data = try? JSONSerialization.data(withJSONObject: payload) {
+            xpcProxy?.emitEvent(event: data) { _ in }
+        }
     }
 }
