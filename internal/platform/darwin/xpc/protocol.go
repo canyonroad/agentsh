@@ -27,6 +27,9 @@ const (
 
 	// Path muting request type (for es_mute_path_literal)
 	RequestTypeMutePath RequestType = "mute_path"
+
+	// Policy snapshot request type (Swift side caches rules locally)
+	RequestTypeFetchPolicySnapshot RequestType = "fetch_policy_snapshot"
 )
 
 // PolicyRequest is sent from the XPC bridge to the Go policy server.
@@ -75,6 +78,12 @@ type PolicyRequest struct {
 	// Exec context fields (from ESF event)
 	TTYPath string `json:"tty_path,omitempty"` // Controlling terminal path
 	CWDPath string `json:"cwd_path,omitempty"` // Working directory of the exec'ing process
+
+	// Exec depth tracking (matches Linux seccomp depth)
+	Depth int `json:"depth,omitempty"`
+
+	// Policy snapshot versioning (for cache comparison)
+	Version uint64 `json:"version,omitempty"`
 }
 
 // PolicyResponse is returned from the Go policy server.

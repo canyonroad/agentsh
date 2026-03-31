@@ -450,6 +450,50 @@ func TestPolicyResponse_PNACL_Marshal(t *testing.T) {
 	}
 }
 
+func TestRequestTypeFetchPolicySnapshot(t *testing.T) {
+	if RequestTypeFetchPolicySnapshot != "fetch_policy_snapshot" {
+		t.Fatalf("expected fetch_policy_snapshot, got %s", RequestTypeFetchPolicySnapshot)
+	}
+}
+
+func TestPolicyRequestDepthField(t *testing.T) {
+	req := PolicyRequest{
+		Type:  RequestTypeExecCheck,
+		Path:  "/usr/bin/curl",
+		Depth: 3,
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded PolicyRequest
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Depth != 3 {
+		t.Fatalf("expected depth 3, got %d", decoded.Depth)
+	}
+}
+
+func TestPolicyRequestVersionField(t *testing.T) {
+	req := PolicyRequest{
+		Type:      RequestTypeFetchPolicySnapshot,
+		SessionID: "session-abc",
+		Version:   42,
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded PolicyRequest
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Version != 42 {
+		t.Fatalf("expected version 42, got %d", decoded.Version)
+	}
+}
+
 func TestApprovalResponse_Marshal(t *testing.T) {
 	approval := ApprovalResponse{
 		RequestID:      "req-abc-123",
