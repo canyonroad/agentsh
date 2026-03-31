@@ -357,6 +357,11 @@ class PolicyBridge: NSObject, AgentshXPCProtocol {
             "version": version
         ]
         sendRequest(request) { response in
+            let rule = response["rule"] as? String ?? ""
+            if rule == "error-failclosed" || rule == "error-failopen" {
+                reply(["error": rule])
+                return
+            }
             reply(response)
         }
     }
