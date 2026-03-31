@@ -11,6 +11,9 @@ class ESFClient {
     // Serial queue for thread-safe access to client
     private let clientQueue = DispatchQueue(label: "ai.canyonroad.agentsh.esfclient")
 
+    /// Shared ISO8601 formatter for event timestamps (thread-safe)
+    private static let isoFormatter = ISO8601DateFormatter()
+
     /// Cache of PID -> audit_token_t for muting
     private var auditTokenCache: [pid_t: audit_token_t] = [:]
     private let cacheQueue = DispatchQueue(label: "ai.canyonroad.agentsh.audittokencache")
@@ -481,7 +484,7 @@ class ESFClient {
             "operation": "close_modified",
             "pid": Int(pid),
             "session_id": sessionID,
-            "timestamp": ISO8601DateFormatter().string(from: Date())
+            "timestamp": Self.isoFormatter.string(from: Date())
         ]
 
         if let data = try? JSONSerialization.data(withJSONObject: payload) {
@@ -510,7 +513,7 @@ class ESFClient {
             "operation": operation,
             "pid": Int(pid),
             "session_id": sessionID,
-            "timestamp": ISO8601DateFormatter().string(from: Date())
+            "timestamp": Self.isoFormatter.string(from: Date())
         ]
 
         if let data = try? JSONSerialization.data(withJSONObject: payload) {
