@@ -400,7 +400,7 @@ class ESFClient {
         }
         let cwdPath = String(cString: execPtr.pointee.cwd.pointee.path.data)
 
-        let depth = SessionPolicyCache.shared.recordExecDepth(pid: pid, parentPID: parentPID)
+        let _ = SessionPolicyCache.shared.recordExecDepth(pid: pid, parentPID: parentPID)
 
         xpcProxy?.checkExecPipeline(
             executable: execPath,
