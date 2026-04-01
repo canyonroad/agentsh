@@ -145,7 +145,7 @@ jobs:
 
   # Build, sign, and notarize macOS app bundle with system extension.
   build-macos-app:
-    runs-on: macos-15
+    runs-on: macos-latest
     needs: goreleaser
     environment: build
     timeout-minutes: 45

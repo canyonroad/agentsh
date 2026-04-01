@@ -75,12 +75,14 @@ class ESFClient {
         ]
 
         // Subscribe to NOTIFY events (observation)
-        let notifyEvents: [es_event_type_t] = [
+        var notifyEvents: [es_event_type_t] = [
             ES_EVENT_TYPE_NOTIFY_CLOSE,
             ES_EVENT_TYPE_NOTIFY_EXIT,
             ES_EVENT_TYPE_NOTIFY_FORK,
-            ES_EVENT_TYPE_NOTIFY_SETATTR
         ]
+        if #available(macOS 26.0, *) {
+            notifyEvents.append(ES_EVENT_TYPE_NOTIFY_SETATTR)
+        }
 
         let allEvents = authEvents + notifyEvents
         let subscribeResult = es_subscribe(newClient, allEvents, UInt32(allEvents.count))
@@ -238,10 +240,10 @@ class ESFClient {
             handleNotifyFork(message, pid: pid)
         case ES_EVENT_TYPE_NOTIFY_EXIT:
             handleNotifyExit(message, pid: pid)
-        case ES_EVENT_TYPE_NOTIFY_SETATTR:
-            handleNotifySetattr(message, pid: pid)
         default:
-            break
+            if #available(macOS 26.0, *), message.event_type == ES_EVENT_TYPE_NOTIFY_SETATTR {
+                handleNotifySetattr(message, pid: pid)
+            }
         }
     }
 
@@ -538,6 +540,7 @@ class ESFClient {
         }
     }
 
+    @available(macOS 26.0, *)
     private func handleNotifySetattr(_ message: es_message_t, pid: pid_t) {
         guard let sessionID = SessionPolicyCache.shared.sessionForPID(pid) else { return }
 

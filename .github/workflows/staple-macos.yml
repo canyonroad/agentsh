@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   notarize-and-staple:
-    runs-on: macos-15
+    runs-on: macos-latest
     environment: build
     timeout-minutes: 45
     steps:
