@@ -75,14 +75,12 @@ class ESFClient {
         ]
 
         // Subscribe to NOTIFY events (observation)
-        var notifyEvents: [es_event_type_t] = [
+        // TODO: Add ES_EVENT_TYPE_NOTIFY_SETATTR when macOS 26 SDK is available in CI
+        let notifyEvents: [es_event_type_t] = [
             ES_EVENT_TYPE_NOTIFY_CLOSE,
             ES_EVENT_TYPE_NOTIFY_EXIT,
             ES_EVENT_TYPE_NOTIFY_FORK,
         ]
-        if #available(macOS 26.0, *) {
-            notifyEvents.append(ES_EVENT_TYPE_NOTIFY_SETATTR)
-        }
 
         let allEvents = authEvents + notifyEvents
         let subscribeResult = es_subscribe(newClient, allEvents, UInt32(allEvents.count))
@@ -241,9 +239,7 @@ class ESFClient {
         case ES_EVENT_TYPE_NOTIFY_EXIT:
             handleNotifyExit(message, pid: pid)
         default:
-            if #available(macOS 26.0, *), message.event_type == ES_EVENT_TYPE_NOTIFY_SETATTR {
-                handleNotifySetattr(message, pid: pid)
-            }
+            break
         }
     }
 
@@ -540,33 +536,6 @@ class ESFClient {
         }
     }
 
-    @available(macOS 26.0, *)
-    private func handleNotifySetattr(_ message: es_message_t, pid: pid_t) {
-        guard let sessionID = SessionPolicyCache.shared.sessionForPID(pid) else { return }
-
-        let path = String(cString: message.event.setattr.target.pointee.path.data)
-
-        // Determine what changed
-        let attrList = message.event.setattr.attrlist
-        let operation: String
-        if attrList.commonattr & UInt32(ATTR_CMN_OWNERID) != 0 ||
-           attrList.commonattr & UInt32(ATTR_CMN_GRPID) != 0 {
-            operation = "chown"
-        } else {
-            operation = "chmod"
-        }
-
-        let payload: [String: Any] = [
-            "type": "file_\(operation)",
-            "path": path,
-            "operation": operation,
-            "pid": Int(pid),
-            "session_id": sessionID,
-            "timestamp": Self.isoFormatter.string(from: Date())
-        ]
-
-        if let data = try? JSONSerialization.data(withJSONObject: payload) {
-            xpcProxy?.emitEvent(event: data) { _ in }
-        }
-    }
+    // TODO: Add handleNotifySetattr when macOS 26 SDK is available in CI.
+    // It should subscribe to ES_EVENT_TYPE_NOTIFY_SETATTR and emit file_chown/file_chmod events.
 }

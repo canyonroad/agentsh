@@ -41,56 +41,103 @@ class DNSProxyProvider: NEDNSProxyProvider {
     }
 
     private func handleDNSFlow(_ flow: NEAppProxyUDPFlow) {
-        flow.open(withLocalFlowEndpoint: nil) { [weak self] error in
-            if let error = error {
-                NSLog("DNS flow open error: \(error)")
-                return
+        if #available(macOS 15.0, *) {
+            flow.open(withLocalFlowEndpoint: nil) { [weak self] error in
+                if let error = error {
+                    NSLog("DNS flow open error: \(error)")
+                    return
+                }
+                self?.readAndProcessDNS(flow)
             }
-            self?.readAndProcessDNS(flow)
+        } else {
+            flow.open(withLocalEndpoint: nil) { [weak self] error in
+                if let error = error {
+                    NSLog("DNS flow open error: \(error)")
+                    return
+                }
+                self?.readAndProcessDNS(flow)
+            }
         }
     }
 
     private func readAndProcessDNS(_ flow: NEAppProxyUDPFlow) {
+        if #available(macOS 15.0, *) {
+            readAndProcessDNSModern(flow)
+        } else {
+            readAndProcessDNSLegacy(flow)
+        }
+    }
+
+    @available(macOS 15.0, *)
+    private func readAndProcessDNSModern(_ flow: NEAppProxyUDPFlow) {
         flow.readDatagrams { [weak self] tuples, error in
             guard let self = self else { return }
 
             guard let tuples = tuples, error == nil else {
-                if let error = error {
-                    NSLog("DNS read error: \(error)")
-                }
+                if let error = error { NSLog("DNS read error: \(error)") }
                 return
             }
 
             for (datagram, endpoint) in tuples {
-                if let domain = self.parseDNSQueryDomain(datagram),
-                   let action = SessionPolicyCache.shared.evaluateDNS(domain: domain) {
-                    // "nxdomain" — synthesize NXDOMAIN response
-                    // "deny" — silent drop (no response, client will timeout)
-                    if action == "nxdomain", let nxdomain = self.synthesizeNXDOMAIN(datagram) {
-                        flow.writeDatagrams([(nxdomain, endpoint)]) { error in
-                            if let error = error {
-                                NSLog("DNS NXDOMAIN write error: \(error)")
-                            }
-                        }
+                if let response = self.processQuery(datagram) {
+                    flow.writeDatagrams([(response, endpoint)]) { error in
+                        if let error = error { NSLog("DNS write error: \(error)") }
                     }
-                    // For "deny", do nothing — packet is silently dropped
-                } else {
-                    // Allow — forward unchanged
-                    self.forwardDNS(datagram, to: endpoint, via: flow)
+                } else if self.shouldForward(datagram) {
+                    flow.writeDatagrams([(datagram, endpoint)]) { error in
+                        if let error = error { NSLog("DNS write error: \(error)") }
+                    }
                 }
             }
 
-            // Continue reading
-            self.readAndProcessDNS(flow)
+            self.readAndProcessDNSModern(flow)
         }
     }
 
-    private func forwardDNS(_ datagram: Data, to endpoint: Network.NWEndpoint, via flow: NEAppProxyUDPFlow) {
-        flow.writeDatagrams([(datagram, endpoint)]) { error in
-            if let error = error {
-                NSLog("DNS write error: \(error)")
+    private func readAndProcessDNSLegacy(_ flow: NEAppProxyUDPFlow) {
+        flow.readDatagrams(completionHandler: { [weak self] datagrams, endpoints, error in
+            guard let self = self else { return }
+
+            guard let datagrams = datagrams, let endpoints = endpoints, error == nil else {
+                if let error = error { NSLog("DNS read error: \(error)") }
+                return
             }
+
+            for (datagram, endpoint) in zip(datagrams, endpoints) {
+                if let response = self.processQuery(datagram) {
+                    flow.writeDatagrams([response], sentBy: [endpoint]) { error in
+                        if let error = error { NSLog("DNS write error: \(error)") }
+                    }
+                } else if self.shouldForward(datagram) {
+                    flow.writeDatagrams([datagram], sentBy: [endpoint]) { error in
+                        if let error = error { NSLog("DNS write error: \(error)") }
+                    }
+                }
+            }
+
+            self.readAndProcessDNSLegacy(flow)
+        })
+    }
+
+    /// Returns an NXDOMAIN response if the query should be blocked, nil otherwise.
+    private func processQuery(_ datagram: Data) -> Data? {
+        guard let domain = parseDNSQueryDomain(datagram),
+              let action = SessionPolicyCache.shared.evaluateDNS(domain: domain) else {
+            return nil
         }
+        if action == "nxdomain" {
+            return synthesizeNXDOMAIN(datagram)
+        }
+        return nil
+    }
+
+    /// Returns true if the datagram should be forwarded (not blocked by policy).
+    private func shouldForward(_ datagram: Data) -> Bool {
+        guard let domain = parseDNSQueryDomain(datagram),
+              let _ = SessionPolicyCache.shared.evaluateDNS(domain: domain) else {
+            return true  // No policy match — forward
+        }
+        return false  // Policy matched (deny/nxdomain) — don't forward
     }
 
     // MARK: - DNS Wire Format Helpers

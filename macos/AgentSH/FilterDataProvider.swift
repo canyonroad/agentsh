@@ -70,7 +70,7 @@ class FilterDataProvider: NEFilterDataProvider {
         let ip: String
         let port: Int
 
-        if #available(macOS 14.0, *) {
+        if #available(macOS 15.0, *) {
             guard let endpoint = socketFlow.remoteFlowEndpoint else {
                 return .allow()
             }
