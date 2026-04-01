@@ -11,6 +11,10 @@ cask "agentsh" do
 
   app "AgentSH.app"
 
+  binary "#{appdir}/AgentSH.app/Contents/MacOS/agentsh"
+  binary "#{appdir}/AgentSH.app/Contents/MacOS/agentsh-shell-shim"
+  binary "#{appdir}/AgentSH.app/Contents/MacOS/agentsh-stub"
+
   uninstall quit:      "ai.canyonroad.agentsh",
             signal:    ["TERM", "agentsh"],
             launchctl: "ai.canyonroad.agentsh.daemon"
