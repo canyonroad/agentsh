@@ -872,11 +872,32 @@ func LoadWithSource(path string, source ConfigSource) (*Config, ConfigSource, er
 	}
 
 	applyDefaultsWithSource(&cfg, source, path)
+	if source == ConfigSourceBundle {
+		resolveRelativePaths(&cfg, GetUserDataDir())
+	}
 	applyEnvOverrides(&cfg)
 	if err := validateConfig(&cfg); err != nil {
 		return nil, source, err
 	}
 	return &cfg, source, nil
+}
+
+// resolveRelativePaths rewrites relative file paths in the config to be
+// relative to baseDir instead of the current working directory. This is
+// needed when loading config from the macOS app bundle, where the CWD is
+// unpredictable.
+func resolveRelativePaths(cfg *Config, baseDir string) {
+	resolve := func(p string) string {
+		if p == "" || p == "stdout" || p == "stderr" || filepath.IsAbs(p) {
+			return p
+		}
+		return filepath.Join(baseDir, p)
+	}
+	cfg.Server.UnixSocket.Path = resolve(cfg.Server.UnixSocket.Path)
+	cfg.Logging.Output = resolve(cfg.Logging.Output)
+	cfg.Audit.Output = resolve(cfg.Audit.Output)
+	cfg.Audit.Storage.SQLitePath = resolve(cfg.Audit.Storage.SQLitePath)
+	cfg.Sessions.BaseDir = resolve(cfg.Sessions.BaseDir)
 }
 
 // getDefaultDataDir returns the appropriate data directory based on config source.
@@ -889,6 +910,8 @@ func getDefaultDataDir(source ConfigSource, configPath string) string {
 		}
 		return GetUserDataDir()
 	case ConfigSourceUser:
+		return GetUserDataDir()
+	case ConfigSourceBundle:
 		return GetUserDataDir()
 	case ConfigSourceSystem:
 		return GetDataDir()
