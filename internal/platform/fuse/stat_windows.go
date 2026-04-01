@@ -1,5 +1,5 @@
 // internal/platform/fuse/stat_windows.go
-//go:build windows && cgo
+//go:build windows && cgo && !nofuse
 
 package fuse
 

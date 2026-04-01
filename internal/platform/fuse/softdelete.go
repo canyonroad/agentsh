@@ -1,5 +1,5 @@
 // internal/platform/fuse/softdelete.go
-//go:build cgo
+//go:build cgo && !nofuse
 
 package fuse
 

@@ -1,5 +1,5 @@
 // internal/platform/fuse/stat_darwin.go
-//go:build darwin && cgo
+//go:build darwin && cgo && !nofuse
 
 package fuse
 

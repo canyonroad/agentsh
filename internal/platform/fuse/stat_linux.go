@@ -1,5 +1,5 @@
 // internal/platform/fuse/stat_linux.go
-//go:build linux && cgo
+//go:build linux && cgo && !nofuse
 
 package fuse
 

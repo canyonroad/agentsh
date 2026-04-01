@@ -196,10 +196,10 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           LDFLAGS="-s -w -X main.version=${VERSION#v} -X main.commit=$(git rev-parse --short HEAD)"
-          # Build for both architectures with CGO enabled
-          CGO_ENABLED=1 GOARCH=arm64 go build -ldflags "$LDFLAGS" \
+          # Build for both architectures with CGO enabled (nofuse: macFUSE headers not available on CI)
+          CGO_ENABLED=1 GOARCH=arm64 go build -tags nofuse -ldflags "$LDFLAGS" \
             -o build/agentsh-arm64 ./cmd/agentsh
-          CGO_ENABLED=1 GOARCH=amd64 go build -ldflags "$LDFLAGS" \
+          CGO_ENABLED=1 GOARCH=amd64 go build -tags nofuse -ldflags "$LDFLAGS" \
             -o build/agentsh-amd64 ./cmd/agentsh
           # Replace goreleaser-built agentsh with CGO-enabled build
           lipo -create -output unsigned-arm64/agentsh \

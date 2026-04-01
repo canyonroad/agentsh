@@ -1,5 +1,5 @@
 // internal/platform/fuse/stat_unix.go
-//go:build (darwin || linux) && cgo
+//go:build (darwin || linux) && cgo && !nofuse
 
 package fuse
 
