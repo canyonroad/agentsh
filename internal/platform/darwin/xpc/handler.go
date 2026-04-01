@@ -117,6 +117,70 @@ func (a *PolicyAdapter) CheckExec(executable string, args []string, pid int32, p
 	}
 }
 
+// BuildPolicySnapshot projects the policy engine's rules into a flat snapshot
+// format suitable for Swift-side local caching and evaluation.
+func (a *PolicyAdapter) BuildPolicySnapshot(sessionID string, clientVersion uint64) PolicyResponse {
+	if a.engine == nil {
+		return PolicyResponse{Allow: true}
+	}
+
+	p := a.engine.Policy()
+	if p == nil {
+		return PolicyResponse{Allow: true}
+	}
+	// Version comparison will be handled when we add SessionVersions in Task 4.
+	// For now, always return the full snapshot.
+
+	var fileRules []SnapshotFileRule
+	for _, r := range p.FileRules {
+		for _, path := range r.Paths {
+			fileRules = append(fileRules, SnapshotFileRule{
+				Pattern:    path,
+				Operations: r.Operations,
+				Action:     r.Decision,
+			})
+		}
+	}
+
+	var networkRules []SnapshotNetworkRule
+	for _, r := range p.NetworkRules {
+		for _, domain := range r.Domains {
+			networkRules = append(networkRules, SnapshotNetworkRule{
+				Pattern: domain,
+				Ports:   r.Ports,
+				Action:  r.Decision,
+			})
+		}
+		for _, cidr := range r.CIDRs {
+			networkRules = append(networkRules, SnapshotNetworkRule{
+				Pattern: cidr,
+				Ports:   r.Ports,
+				Action:  r.Decision,
+			})
+		}
+	}
+
+	// DNS rules are derived from network rules with domain patterns.
+	// The current policy model does not have separate DNS rules.
+	var dnsRules []SnapshotDNSRule
+
+	defaults := SnapshotDefaults{
+		File:    string(types.DecisionAllow),
+		Network: string(types.DecisionAllow),
+		DNS:     string(types.DecisionAllow),
+	}
+
+	return PolicyResponse{
+		Allow:           true,
+		SessionID:       sessionID,
+		SnapshotVersion: 1, // Will be replaced by SessionVersions counter in Task 4
+		FileRules:       fileRules,
+		NetworkRules:      networkRules,
+		DNSRules:          dnsRules,
+		Defaults:          &defaults,
+	}
+}
+
 // Compile-time interface checks
 var _ PolicyHandler = (*PolicyAdapter)(nil)
 var _ ExecHandler = (*PolicyAdapter)(nil)

@@ -51,6 +51,16 @@ type SessionRegistrar interface {
 	MutePath(path string)
 }
 
+// EventHandler processes events emitted by the SysExt (ESF NOTIFY handlers).
+type EventHandler interface {
+	HandleESFEvent(ctx context.Context, payload []byte) error
+}
+
+// SnapshotBuilder projects the policy engine's rules into the flat cache format.
+type SnapshotBuilder interface {
+	BuildPolicySnapshot(sessionID string, clientVersion uint64) PolicyResponse
+}
+
 // ExecCheckResult contains the full exec pipeline decision.
 type ExecCheckResult struct {
 	Decision string // "allow", "deny", "approve", "redirect", "audit"
@@ -70,6 +80,7 @@ type PNACLCheckRequest struct {
 	ExecutablePath string
 	ProcessName    string
 	ParentPID      int32
+	SessionID      string
 }
 
 // PNACLEventRequest contains fields for a PNACL event report.
@@ -92,6 +103,8 @@ type Server struct {
 	pnaclHandler       PNACLHandler
 	execHandler        ExecHandler
 	sessionRegistrar   SessionRegistrar
+	eventHandler       EventHandler
+	snapshotBuilder    SnapshotBuilder
 	listener           net.Listener
 	mu                 sync.Mutex
 	wg                 sync.WaitGroup
@@ -133,6 +146,22 @@ func (s *Server) SetSessionRegistrar(r SessionRegistrar) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessionRegistrar = r
+}
+
+// SetEventHandler sets the handler for ESF NOTIFY events.
+// If not set, event requests are acknowledged but no-op.
+func (s *Server) SetEventHandler(h EventHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.eventHandler = h
+}
+
+// SetSnapshotBuilder sets the builder for policy snapshots.
+// If not set, fetch_policy_snapshot requests return an empty allow response.
+func (s *Server) SetSnapshotBuilder(b SnapshotBuilder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshotBuilder = b
 }
 
 // Ready returns a channel that is closed when server startup completes.
@@ -265,7 +294,14 @@ func (s *Server) handleRequest(req *PolicyRequest) PolicyResponse {
 		return PolicyResponse{Allow: sessionID != "", SessionID: sessionID}
 
 	case RequestTypeEvent:
-		// Events are fire-and-forget, always acknowledge
+		s.mu.Lock()
+		eh := s.eventHandler
+		s.mu.Unlock()
+		if eh != nil && req.EventData != nil {
+			// EventData is []byte — Go's json.Unmarshal already base64-decoded
+			// the JSON string value, so req.EventData contains raw JSON bytes.
+			_ = eh.HandleESFEvent(context.Background(), req.EventData)
+		}
 		return PolicyResponse{Allow: true}
 
 	case RequestTypeExecCheck:
@@ -299,6 +335,15 @@ func (s *Server) handleRequest(req *PolicyRequest) PolicyResponse {
 
 	case RequestTypeMutePath:
 		return s.handleMutePath(req)
+
+	case RequestTypeFetchPolicySnapshot:
+		s.mu.Lock()
+		sb := s.snapshotBuilder
+		s.mu.Unlock()
+		if sb != nil {
+			return sb.BuildPolicySnapshot(req.SessionID, req.Version)
+		}
+		return PolicyResponse{Allow: true}
 
 	default:
 		return PolicyResponse{Allow: false, Message: "unknown request type"}
@@ -365,6 +410,7 @@ func (s *Server) handlePNACLCheck(req *PolicyRequest) PolicyResponse {
 		ExecutablePath: req.ExecutablePath,
 		ProcessName:    req.ProcessName,
 		ParentPID:      req.ParentPID,
+		SessionID:      req.SessionID,
 	}
 
 	decision, ruleID := h.CheckNetwork(checkReq)
