@@ -201,10 +201,9 @@ jobs:
             -o build/agentsh-arm64 ./cmd/agentsh
           CGO_ENABLED=1 GOARCH=amd64 go build -tags nofuse -ldflags "$LDFLAGS" \
             -o build/agentsh-amd64 ./cmd/agentsh
-          # Replace goreleaser-built agentsh with CGO-enabled build
-          lipo -create -output unsigned-arm64/agentsh \
-            build/agentsh-arm64 build/agentsh-amd64
-          cp unsigned-arm64/agentsh unsigned-amd64/agentsh
+          # Replace goreleaser-built agentsh with CGO-enabled builds
+          cp build/agentsh-arm64 unsigned-arm64/agentsh
+          cp build/agentsh-amd64 unsigned-amd64/agentsh
 
       - name: Create and sign universal Go binaries
         env:
