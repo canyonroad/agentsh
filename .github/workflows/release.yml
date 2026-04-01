@@ -154,9 +154,12 @@ jobs:
 
       - name: Select Xcode
         run: |
-          # Use latest available Xcode on the runner
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
 
       - name: Import signing certificate
         env:
@@ -187,6 +190,21 @@ jobs:
             mkdir -p "unsigned-${arch}"
             tar -xzf "$ARCHIVE" -C "unsigned-${arch}"
           done
+
+      - name: Rebuild agentsh with CGO for system extension support
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          LDFLAGS="-s -w -X main.version=${VERSION#v} -X main.commit=$(git rev-parse --short HEAD)"
+          # Build for both architectures with CGO enabled
+          CGO_ENABLED=1 GOARCH=arm64 go build -ldflags "$LDFLAGS" \
+            -o build/agentsh-arm64 ./cmd/agentsh
+          CGO_ENABLED=1 GOARCH=amd64 go build -ldflags "$LDFLAGS" \
+            -o build/agentsh-amd64 ./cmd/agentsh
+          # Replace goreleaser-built agentsh with CGO-enabled build
+          lipo -create -output unsigned-arm64/agentsh \
+            build/agentsh-arm64 build/agentsh-amd64
+          cp unsigned-arm64/agentsh unsigned-amd64/agentsh
 
       - name: Create and sign universal Go binaries
         env:
@@ -246,19 +264,6 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
 
-      - name: Build activate-extension helper (universal)
-        run: |
-          swiftc macos/AgentSH/activate-extension/main.swift \
-            -framework SystemExtensions -framework SwiftUI -framework AppKit \
-            -o build/activate-extension-arm64 \
-            -target arm64-apple-macos14.0 -O
-          swiftc macos/AgentSH/activate-extension/main.swift \
-            -framework SystemExtensions -framework SwiftUI -framework AppKit \
-            -o build/activate-extension-x86_64 \
-            -target x86_64-apple-macos14.0 -O
-          lipo -create -output build/activate-extension \
-            build/activate-extension-arm64 build/activate-extension-x86_64
-
       - name: Assemble app bundle
         run: |
           # Copy signed Go binaries
@@ -285,9 +290,6 @@ jobs:
           mkdir -p "build/AgentSH.app/Contents/Resources"
           cp -R "${PRODUCTS}/approval-dialog.app" \
             "build/AgentSH.app/Contents/Resources/"
-
-          # Activate-extension helper (compiled with swiftc, not part of Xcode project)
-          cp build/activate-extension "build/AgentSH.app/Contents/MacOS/"
 
           # Provisioning profile (required for restricted entitlements like system-extension.install)
           cp macos/AgentSH/AgentSH_Distribution.provisionprofile \
@@ -323,13 +325,7 @@ jobs:
             --options runtime --timestamp \
             "build/AgentSH.app/Contents/Resources/approval-dialog.app"
 
-          # 4. Activate-extension helper (uses host app entitlements + provisioning profile)
-          codesign --force --sign "$SIGNING_IDENTITY" \
-            --entitlements macos/AgentSH/agentsh/agentsh.entitlements \
-            --options runtime --timestamp \
-            "build/AgentSH.app/Contents/MacOS/activate-extension"
-
-          # 6. Main app bundle
+          # 4. Main app bundle
           codesign --force --sign "$SIGNING_IDENTITY" \
             --entitlements macos/AgentSH/agentsh/agentsh.entitlements \
             --options runtime --timestamp \

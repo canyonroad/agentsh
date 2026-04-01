@@ -28,9 +28,23 @@ func (m *SysExtManager) Status() (*SysExtStatus, error) {
 	return &SysExtStatus{Error: "System Extensions are only available on macOS"}, nil
 }
 
+// ActivateResult represents the outcome of a system extension activation request.
+type ActivateResult int
+
+const (
+	ActivateOK            ActivateResult = 0
+	ActivateNeedsApproval ActivateResult = 1
+	ActivateFailed        ActivateResult = -1
+)
+
 // Install requests installation of the System Extension.
 func (m *SysExtManager) Install() error {
 	return fmt.Errorf("System Extensions are only available on macOS")
+}
+
+// Activate submits an activation request for the system extension.
+func (m *SysExtManager) Activate() (ActivateResult, error) {
+	return ActivateFailed, fmt.Errorf("System Extensions are only available on macOS")
 }
 
 // Uninstall removes the System Extension.

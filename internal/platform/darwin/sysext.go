@@ -98,8 +98,6 @@ func (m *SysExtManager) Install() error {
 		return fmt.Errorf("AgentSH.app bundle not found; install it first")
 	}
 
-	// The actual installation is triggered by OSSystemExtensionManager in Swift
-	// This Go code just validates prerequisites
 	extPath := filepath.Join(m.bundlePath, "Contents", "Library", "SystemExtensions",
 		m.bundleID+".systemextension")
 
@@ -107,12 +105,17 @@ func (m *SysExtManager) Install() error {
 		return fmt.Errorf("System Extension not found at %s", extPath)
 	}
 
-	fmt.Println("System Extension installation will require user approval.")
-	fmt.Println("A system dialog will appear asking for permission.")
+	return fmt.Errorf("not implemented: use Activate() instead")
+}
 
-	// In the real implementation, this would use NSWorkspace to launch
-	// the app with an argument that triggers the Swift installation code
-	return fmt.Errorf("not implemented: requires Swift integration")
+// Activate submits an activation request for the system extension via
+// OSSystemExtensionManager. Requires CGO and the system-extension.install
+// entitlement on the calling binary.
+func (m *SysExtManager) Activate() (ActivateResult, error) {
+	if m.bundlePath == "" {
+		return ActivateFailed, fmt.Errorf("AgentSH.app bundle not found; install it first")
+	}
+	return activateExtension()
 }
 
 // Uninstall removes the System Extension.

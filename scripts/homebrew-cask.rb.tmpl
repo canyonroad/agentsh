@@ -27,7 +27,7 @@ cask "agentsh" do
   ]
 
   postflight do
-    system "#{appdir}/AgentSH.app/Contents/MacOS/activate-extension"
+    system "#{appdir}/AgentSH.app/Contents/MacOS/agentsh", "activate-extension"
   end
 
   caveats <<~EOS
