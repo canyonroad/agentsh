@@ -932,15 +932,45 @@ func getDefaultPoliciesDir(source ConfigSource, configPath string) string {
 	case ConfigSourceUser:
 		return filepath.Join(GetUserConfigDir(), "policies")
 	case ConfigSourceBundle:
-		// Use policies subdir inside the app bundle Resources
+		// Use user-writable policies dir; seed from bundle on first run
+		userPolicies := filepath.Join(GetUserConfigDir(), "policies")
 		if configPath != "" {
-			return filepath.Join(filepath.Dir(configPath), "policies")
+			bundlePolicies := filepath.Join(filepath.Dir(configPath), "policies")
+			seedPoliciesFromBundle(bundlePolicies, userPolicies)
 		}
-		return GetPoliciesDir()
+		return userPolicies
 	case ConfigSourceSystem:
 		return GetPoliciesDir()
 	default:
 		return GetPoliciesDir()
+	}
+}
+
+// seedPoliciesFromBundle copies bundled policy files to the user's config
+// directory if it doesn't exist yet, giving users a writable starting point.
+func seedPoliciesFromBundle(bundleDir, userDir string) {
+	// Only seed if user dir doesn't exist
+	if _, err := os.Stat(userDir); err == nil {
+		return
+	}
+	entries, err := os.ReadDir(bundleDir)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+	if err := os.MkdirAll(userDir, 0o755); err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		src := filepath.Join(bundleDir, e.Name())
+		dst := filepath.Join(userDir, e.Name())
+		data, err := os.ReadFile(src)
+		if err != nil {
+			continue
+		}
+		_ = os.WriteFile(dst, data, 0o644)
 	}
 }
 
