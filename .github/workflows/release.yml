@@ -273,6 +273,10 @@ jobs:
           cp -R "${PRODUCTS}/approval-dialog.app" \
             "build/AgentSH.app/Contents/Resources/"
 
+          # Provisioning profile (required for restricted entitlements like system-extension.install)
+          cp macos/agentsh/AgentSH_Distribution.provisionprofile \
+            "build/AgentSH.app/Contents/embedded.provisionprofile"
+
           # Default config and policies (used as fallback when no user/system config exists)
           cp config.yml "build/AgentSH.app/Contents/Resources/"
           cp default-policy.yml "build/AgentSH.app/Contents/Resources/"
