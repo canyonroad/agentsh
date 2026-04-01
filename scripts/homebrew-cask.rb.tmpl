@@ -26,9 +26,12 @@ cask "agentsh" do
     "~/Library/LaunchAgents/ai.canyonroad.agentsh.daemon.plist",
   ]
 
+  postflight do
+    system "open", "#{appdir}/AgentSH.app"
+  end
+
   caveats <<~EOS
-    After installation, open AgentSH.app to activate the system extension:
-      open /Applications/AgentSH.app
-    You will be prompted in System Settings to approve the extension.
+    AgentSH.app will open automatically after installation.
+    You will be prompted in System Settings to approve the system extension.
   EOS
 end
