@@ -1,0 +1,30 @@
+cask "agentsh" do
+  version "__VERSION__"
+  sha256 "__SHA256__"
+
+  url "https://github.com/canyonroad/agentsh/releases/download/v#{version}/AgentSH-v#{version}.dmg"
+  name "AgentSH"
+  desc "Secure sandboxed shell for AI agents"
+  homepage "https://github.com/canyonroad/agentsh"
+
+  depends_on macos: ">= :sonoma"
+
+  app "AgentSH.app"
+
+  uninstall quit:      "ai.canyonroad.agentsh",
+            signal:    ["TERM", "agentsh"],
+            launchctl: "ai.canyonroad.agentsh.daemon"
+
+  zap trash: [
+    "~/Library/Application Support/agentsh",
+    "~/Library/Preferences/ai.canyonroad.agentsh.plist",
+    "~/Library/Caches/ai.canyonroad.agentsh",
+    "~/Library/LaunchAgents/ai.canyonroad.agentsh.daemon.plist",
+  ]
+
+  caveats <<~EOS
+    After installation, open AgentSH.app to activate the system extension:
+      open /Applications/AgentSH.app
+    You will be prompted in System Settings to approve the extension.
+  EOS
+end

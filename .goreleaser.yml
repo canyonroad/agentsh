@@ -303,44 +303,5 @@ release:
   draft: false
   prerelease: auto
 
-homebrew_casks:
-  - name: agentsh
-    ids:
-      - agentsh-darwin
-      - shim-darwin
-      - stub-darwin
-      # macwrap-darwin excluded - requires native macOS build
-    # Repository to push the cask to
-    repository:
-      owner: agentsh
-      name: homebrew-tap
-      branch: main
-      # Use index to safely get env var (empty string if not set)
-      token: '{{ index .Env "HOMEBREW_TAP_GITHUB_TOKEN" }}'
-    # Skip if no token (allows local builds without pushing)
-    skip_upload: true  # Temporarily disabled - no homebrew tap set up yet
-    # Cask metadata
-    homepage: "https://github.com/agentsh/agentsh"
-    description: "Secure sandboxed shell for AI agents"
-    # Binaries to symlink
-    binaries:
-      - agentsh
-      - agentsh-shell-shim
-      - agentsh-stub
-      # agentsh-macwrap excluded - requires native macOS build
-    # Post-install hook to remove quarantine (unsigned binary)
-    hooks:
-      post:
-        install: |
-          system_command "/usr/bin/xattr",
-            args: ["-dr", "com.apple.quarantine", "#{staged_path}"]
-    # Caveats shown after installation
-    caveats: |
-      To start using agentsh:
-        agentsh server &
-        agentsh session create --workspace .
-
-      To create a config file:
-        mkdir -p /usr/local/etc/agentsh
-        agentsh config init > /usr/local/etc/agentsh/config.yaml
-
+# Homebrew cask is published by the publish-homebrew-cask job in release.yml
+# (not managed by GoReleaser — the cask installs the signed DMG, not raw binaries)
