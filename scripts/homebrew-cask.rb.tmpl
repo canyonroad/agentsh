@@ -27,11 +27,11 @@ cask "agentsh" do
   ]
 
   postflight do
-    system "open", "#{appdir}/AgentSH.app"
+    system "#{appdir}/AgentSH.app/Contents/MacOS/activate-extension"
   end
 
   caveats <<~EOS
-    AgentSH.app will open automatically after installation.
-    You will be prompted in System Settings to approve the system extension.
+    After installation you will be prompted to approve the AgentSH system extension.
+    Go to System Settings -> General -> Login Items & Extensions to allow it.
   EOS
 end

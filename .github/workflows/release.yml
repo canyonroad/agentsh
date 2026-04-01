@@ -246,6 +246,19 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
 
+      - name: Build activate-extension helper (universal)
+        run: |
+          swiftc macos/AgentSH/activate-extension/main.swift \
+            -framework SystemExtensions -framework SwiftUI -framework AppKit \
+            -o build/activate-extension-arm64 \
+            -target arm64-apple-macos14.0 -O
+          swiftc macos/AgentSH/activate-extension/main.swift \
+            -framework SystemExtensions -framework SwiftUI -framework AppKit \
+            -o build/activate-extension-x86_64 \
+            -target x86_64-apple-macos14.0 -O
+          lipo -create -output build/activate-extension \
+            build/activate-extension-arm64 build/activate-extension-x86_64
+
       - name: Assemble app bundle
         run: |
           # Copy signed Go binaries
@@ -273,8 +286,11 @@ jobs:
           cp -R "${PRODUCTS}/approval-dialog.app" \
             "build/AgentSH.app/Contents/Resources/"
 
+          # Activate-extension helper (compiled with swiftc, not part of Xcode project)
+          cp build/activate-extension "build/AgentSH.app/Contents/MacOS/"
+
           # Provisioning profile (required for restricted entitlements like system-extension.install)
-          cp macos/agentsh/AgentSH_Distribution.provisionprofile \
+          cp macos/AgentSH/AgentSH_Distribution.provisionprofile \
             "build/AgentSH.app/Contents/embedded.provisionprofile"
 
           # Default config and policies (used as fallback when no user/system config exists)
@@ -292,7 +308,7 @@ jobs:
         run: |
           # 1. System Extension
           codesign --force --sign "$SIGNING_IDENTITY" \
-            --entitlements macos/agentsh/SysExt.entitlements \
+            --entitlements macos/AgentSH/SysExt.entitlements \
             --options runtime --timestamp \
             "build/AgentSH.app/Contents/Library/SystemExtensions/SysExt.systemextension"
 
@@ -303,13 +319,19 @@ jobs:
 
           # 3. Approval Dialog
           codesign --force --sign "$SIGNING_IDENTITY" \
-            --entitlements macos/agentsh/approval-dialog/approval-dialog.entitlements \
+            --entitlements macos/AgentSH/approval-dialog/approval-dialog.entitlements \
             --options runtime --timestamp \
             "build/AgentSH.app/Contents/Resources/approval-dialog.app"
 
-          # 4. Main app bundle
+          # 4. Activate-extension helper (uses host app entitlements + provisioning profile)
           codesign --force --sign "$SIGNING_IDENTITY" \
-            --entitlements macos/agentsh/agentsh/agentsh.entitlements \
+            --entitlements macos/AgentSH/agentsh/agentsh.entitlements \
+            --options runtime --timestamp \
+            "build/AgentSH.app/Contents/MacOS/activate-extension"
+
+          # 6. Main app bundle
+          codesign --force --sign "$SIGNING_IDENTITY" \
+            --entitlements macos/AgentSH/agentsh/agentsh.entitlements \
             --options runtime --timestamp \
             "build/AgentSH.app"
 
