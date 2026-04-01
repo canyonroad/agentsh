@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/agentsh/agentsh/internal/platform"
 )
@@ -18,6 +20,8 @@ const (
 	ConfigSourceUser
 	// ConfigSourceSystem means config was loaded from system-wide directory.
 	ConfigSourceSystem
+	// ConfigSourceBundle means config was loaded from the macOS .app bundle Resources.
+	ConfigSourceBundle
 )
 
 // String returns a human-readable name for the config source.
@@ -29,6 +33,8 @@ func (s ConfigSource) String() string {
 		return "user"
 	case ConfigSourceSystem:
 		return "system"
+	case ConfigSourceBundle:
+		return "bundle"
 	default:
 		return "unknown"
 	}
@@ -122,6 +128,27 @@ func GetConfigDir() string {
 // GetPoliciesDir returns the platform-appropriate policies directory.
 func GetPoliciesDir() string {
 	return GetConfigDir() + string(os.PathSeparator) + "policies"
+}
+
+// GetBundleResourcesDir returns the Resources directory inside the macOS .app bundle,
+// or empty string if not running from a bundle or not on macOS.
+func GetBundleResourcesDir() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	execPath, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	execPath, err = filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return ""
+	}
+	// Check if running from inside a .app bundle (e.g. /Applications/AgentSH.app/Contents/MacOS/agentsh)
+	if idx := strings.Index(execPath, ".app/"); idx >= 0 {
+		return filepath.Join(execPath[:idx+4], "Contents", "Resources")
+	}
+	return ""
 }
 
 // GetUserConfigDir returns the user-specific config directory.

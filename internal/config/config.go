@@ -908,6 +908,12 @@ func getDefaultPoliciesDir(source ConfigSource, configPath string) string {
 		return filepath.Join(GetUserConfigDir(), "policies")
 	case ConfigSourceUser:
 		return filepath.Join(GetUserConfigDir(), "policies")
+	case ConfigSourceBundle:
+		// Use policies subdir inside the app bundle Resources
+		if configPath != "" {
+			return filepath.Join(filepath.Dir(configPath), "policies")
+		}
+		return GetPoliciesDir()
 	case ConfigSourceSystem:
 		return GetPoliciesDir()
 	default:

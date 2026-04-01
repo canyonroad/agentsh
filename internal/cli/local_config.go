@@ -13,6 +13,7 @@ import (
 // 1. AGENTSH_CONFIG env var
 // 2. User-local config (~/.config/agentsh/config.yaml or platform equivalent)
 // 3. System-wide config (/etc/agentsh/config.yaml or platform equivalent)
+// 4. macOS app bundle Resources (fallback for Homebrew Cask installs)
 func findConfigPath() (string, config.ConfigSource) {
 	// 1. Check env var first
 	if v := os.Getenv("AGENTSH_CONFIG"); v != "" {
@@ -37,7 +38,17 @@ func findConfigPath() (string, config.ConfigSource) {
 		}
 	}
 
-	// 4. Fall back to system default (even if doesn't exist)
+	// 4. Check macOS app bundle Resources
+	if bundleDir := config.GetBundleResourcesDir(); bundleDir != "" {
+		for _, name := range []string{"config.yaml", "config.yml"} {
+			bundleConfig := filepath.Join(bundleDir, name)
+			if _, err := os.Stat(bundleConfig); err == nil {
+				return bundleConfig, config.ConfigSourceBundle
+			}
+		}
+	}
+
+	// 5. Fall back to system default (even if doesn't exist)
 	return filepath.Join(systemConfigDir, "config.yaml"), config.ConfigSourceSystem
 }
 

@@ -273,6 +273,12 @@ jobs:
           cp -R "${PRODUCTS}/approval-dialog.app" \
             "build/AgentSH.app/Contents/Resources/"
 
+          # Default config and policies (used as fallback when no user/system config exists)
+          cp config.yml "build/AgentSH.app/Contents/Resources/"
+          cp default-policy.yml "build/AgentSH.app/Contents/Resources/"
+          mkdir -p "build/AgentSH.app/Contents/Resources/policies"
+          cp configs/policies/*.yaml "build/AgentSH.app/Contents/Resources/policies/"
+
           echo "=== App bundle structure ==="
           find build/AgentSH.app -type f | sort
 
