@@ -95,25 +95,43 @@ func ensureServerRunning(ctx context.Context, serverAddr string, log io.Writer) 
 	}
 	fmt.Fprintf(log, "agentsh: auto-starting server (config %s)\n", configPath)
 
-	// Open /dev/null for the daemon's stdout and stderr. The daemon must NOT
-	// inherit the CLI's stdio fds — in sandboxes like Daytona, the CLI's fds
-	// are pipes that the toolbox waits for EOF on. A long-running daemon holding
-	// these pipes open blocks the toolbox indefinitely.
+	// Capture stderr to a temp file so we can report errors if the server
+	// fails to start. Stdout goes to /dev/null. The daemon must NOT inherit
+	// the CLI's stdio fds — in sandboxes like Daytona, the CLI's fds are
+	// pipes that the toolbox waits for EOF on.
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("open %s for daemon: %w", os.DevNull, err)
 	}
 	defer devNull.Close()
 
+	stderrFile, err := os.CreateTemp("", "agentsh-server-*.log")
+	if err != nil {
+		return fmt.Errorf("create stderr capture file: %w", err)
+	}
+	stderrPath := stderrFile.Name()
+	defer os.Remove(stderrPath)
+
 	cmd := exec.Command(os.Args[0], "server", "--config", configPath)
 	cmd.Stdout = devNull
-	cmd.Stderr = devNull
+	cmd.Stderr = stderrFile
 	if err := cmd.Start(); err != nil {
+		_ = stderrFile.Close()
 		return fmt.Errorf("auto-start server: %w", err)
 	}
+	_ = stderrFile.Close()
 	_ = cmd.Process.Release()
 
 	if err := waitForHealth(ctx, serverAddr, 5*time.Second); err != nil {
+		// Read captured stderr to surface the real error
+		if stderr, readErr := os.ReadFile(stderrPath); readErr == nil && len(stderr) > 0 {
+			// Truncate long output
+			msg := strings.TrimSpace(string(stderr))
+			if len(msg) > 500 {
+				msg = msg[:500] + "..."
+			}
+			return fmt.Errorf("server did not become ready: %s", msg)
+		}
 		return fmt.Errorf("server did not become ready: %w", err)
 	}
 	return nil

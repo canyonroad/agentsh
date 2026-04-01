@@ -98,6 +98,21 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, err
 	}
 
+	// Ensure data directories exist before opening stores/listeners.
+	for _, dir := range []string{
+		filepath.Dir(cfg.Server.UnixSocket.Path),
+		cfg.Sessions.BaseDir,
+		filepath.Dir(cfg.Audit.Output),
+		filepath.Dir(cfg.Audit.Storage.SQLitePath),
+		filepath.Dir(cfg.Logging.Output),
+	} {
+		if dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return nil, fmt.Errorf("create data directory %s: %w", dir, err)
+			}
+		}
+	}
+
 	if err := cfg.Sandbox.Validate(); err != nil {
 		return nil, fmt.Errorf("sandbox config: %w", err)
 	}
