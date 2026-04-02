@@ -105,6 +105,7 @@ type Server struct {
 	sessionRegistrar   SessionRegistrar
 	eventHandler       EventHandler
 	snapshotBuilder    SnapshotBuilder
+	teamID             string
 	listener           net.Listener
 	mu                 sync.Mutex
 	wg                 sync.WaitGroup
@@ -164,6 +165,14 @@ func (s *Server) SetSnapshotBuilder(b SnapshotBuilder) {
 	s.snapshotBuilder = b
 }
 
+// SetTeamID sets the team ID for peer code signing validation.
+// If not set, peer validation is skipped.
+func (s *Server) SetTeamID(teamID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.teamID = teamID
+}
+
 // Ready returns a channel that is closed when server startup completes.
 // After Ready() fires, check StartErr() to see if startup succeeded.
 func (s *Server) Ready() <-chan struct{} {
@@ -193,15 +202,10 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 
-	// Set socket permissions to allow user-space access.
-	// The ApprovalDialog.app runs as user and needs to connect to fetch/submit approvals.
-	// Security note: The socket is only accessible locally (Unix domain socket).
-	// TODO(security): The world-writable socket allows any local process to send
-	// state-changing requests (register_session, unregister_session). Consider:
-	//   1. A separate approval-only socket with restricted operations
-	//   2. Routing approval operations through the XPC service for better isolation
-	//   3. Using SO_PEERCRED/getpeereid to authenticate peers for state-changing ops
-	if err := os.Chmod(s.sockPath, 0666); err != nil {
+	// Policy socket: root-only access (0600). Approval operations have been
+	// separated to the main HTTP API socket (data/agentsh.sock) which remains
+	// user-accessible. The ApprovalDialog.app should use the HTTP API instead.
+	if err := os.Chmod(s.sockPath, 0600); err != nil {
 		ln.Close()
 		err = fmt.Errorf("chmod: %w", err)
 		s.mu.Lock()
@@ -228,18 +232,28 @@ func (s *Server) Run(ctx context.Context) error {
 		s.mu.Unlock()
 	}()
 
+	unixLn := ln.(*net.UnixListener)
 	for {
-		conn, err := ln.Accept()
+		conn, err := unixLn.AcceptUnix()
 		if err != nil {
 			select {
 			case <-ctx.Done():
-				// Wait for active connections to finish
 				s.wg.Wait()
 				return nil
 			default:
 				continue
 			}
 		}
+
+		// Validate peer identity (UID + code signing)
+		if s.teamID != "" {
+			if err := ValidatePeer(conn, s.teamID); err != nil {
+				slog.Warn("rejected policy socket connection", "error", err)
+				conn.Close()
+				continue
+			}
+		}
+
 		s.wg.Add(1)
 		go s.handleConn(conn)
 	}
