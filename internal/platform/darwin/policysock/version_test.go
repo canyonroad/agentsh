@@ -1,4 +1,4 @@
-package xpc
+package policysock
 
 import "testing"
 

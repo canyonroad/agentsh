@@ -1,4 +1,4 @@
-package xpc
+package policysock
 
 // PolicySnapshotResponse is the internal representation of a policy snapshot.
 // BuildPolicySnapshot returns a PolicyResponse (the wire type) directly,

@@ -1,4 +1,4 @@
-package xpc
+package policysock
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"sync"
 )
 
-// PolicyHandler handles policy queries from the XPC bridge.
+// PolicyHandler handles policy queries from the policy socket bridge.
 type PolicyHandler interface {
 	CheckFile(path, op string) (allow bool, rule string)
 	CheckNetwork(ip string, port int, domain string) (allow bool, rule string)
@@ -115,7 +115,7 @@ type Server struct {
 // NewServer creates a new policy socket server.
 func NewServer(sockPath string, handler PolicyHandler) *Server {
 	if handler == nil {
-		panic("xpc: handler must not be nil")
+		panic("policysock: handler must not be nil")
 	}
 	return &Server{
 		sockPath: sockPath,
@@ -527,7 +527,7 @@ func (s *Server) handleMuteProcess(req *PolicyRequest) PolicyResponse {
 	// Process muting requires the ESFClient to call es_mute_process(), which can
 	// only be done from the System Extension process. The request is forwarded
 	// to the session registrar which bridges to the ESF client.
-	slog.Info("xpc: mute_process request received",
+	slog.Info("policysock: mute_process request received",
 		"pid", req.PID,
 	)
 	return PolicyResponse{Allow: true, Success: true}
@@ -538,7 +538,7 @@ func (s *Server) handleMutePath(req *PolicyRequest) PolicyResponse {
 	if r != nil && req.Path != "" {
 		r.MutePath(req.Path)
 	}
-	slog.Info("xpc: mute_path request handled",
+	slog.Info("policysock: mute_path request handled",
 		"path", req.Path,
 	)
 	return PolicyResponse{Allow: true, Success: true}

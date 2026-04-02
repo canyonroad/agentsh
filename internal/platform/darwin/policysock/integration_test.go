@@ -1,6 +1,6 @@
 //go:build integration
 
-package xpc
+package policysock
 
 import (
 	"context"

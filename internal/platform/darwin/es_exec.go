@@ -11,13 +11,13 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/agentsh/agentsh/internal/platform/darwin/xpc"
+	"github.com/agentsh/agentsh/internal/platform/darwin/policysock"
 	"github.com/agentsh/agentsh/internal/stub"
 	"golang.org/x/sys/unix"
 )
 
 // ESExecPolicyChecker evaluates exec commands against policy.
-// This is a richer interface than xpc.PolicyHandler.CheckCommand because it
+// This is a richer interface than policysock.PolicyHandler.CheckCommand because it
 // returns the full policy decision (including shadow-mode effective decisions),
 // not just allow/deny.
 type ESExecPolicyChecker interface {
@@ -54,10 +54,10 @@ func NewESExecHandler(checker ESExecPolicyChecker, stubBinary string) *ESExecHan
 }
 
 // CheckExec evaluates an exec request and returns the pipeline decision.
-// Implements the xpc.ExecHandler interface.
-func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string, execCtx xpc.ExecContext) xpc.ExecCheckResult {
+// Implements the policysock.ExecHandler interface.
+func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string, execCtx policysock.ExecContext) policysock.ExecCheckResult {
 	if h.policyChecker == nil {
-		return xpc.ExecCheckResult{
+		return policysock.ExecCheckResult{
 			Decision: "allow",
 			Action:   "continue",
 			Rule:     "no_policy",
@@ -75,7 +75,7 @@ func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, p
 
 	switch effectiveDecision {
 	case "allow", "audit":
-		return xpc.ExecCheckResult{
+		return policysock.ExecCheckResult{
 			Decision: result.Decision,
 			Action:   "continue",
 			Rule:     result.Rule,
@@ -83,7 +83,7 @@ func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, p
 		}
 
 	case "deny":
-		return xpc.ExecCheckResult{
+		return policysock.ExecCheckResult{
 			Decision: result.Decision,
 			Action:   "deny",
 			Rule:     result.Rule,
@@ -95,7 +95,7 @@ func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, p
 		// The ESF client will deny the exec (process gets EPERM), and we run
 		// the command independently through the stub protocol.
 		go h.spawnStubServer(executable, args, pid, parentPID, sessionID, execCtx)
-		return xpc.ExecCheckResult{
+		return policysock.ExecCheckResult{
 			Decision: result.Decision,
 			Action:   "redirect",
 			Rule:     result.Rule,
@@ -109,7 +109,7 @@ func (h *ESExecHandler) CheckExec(executable string, args []string, pid int32, p
 			"effective", effectiveDecision,
 			"cmd", executable,
 		)
-		return xpc.ExecCheckResult{
+		return policysock.ExecCheckResult{
 			Decision: result.Decision,
 			Action:   "deny",
 			Rule:     "unknown",
@@ -154,7 +154,7 @@ func createSocketPair() (stubFile *os.File, srvConn net.Conn, err error) {
 // This creates a Unix socketpair: one end is passed to the agentsh-stub
 // subprocess as fd 3 (via AGENTSH_STUB_FD=3), and the other end is used by
 // ServeStubConnection to execute the command and proxy its I/O.
-func (h *ESExecHandler) spawnStubServer(executable string, args []string, pid int32, parentPID int32, sessionID string, execCtx xpc.ExecContext) {
+func (h *ESExecHandler) spawnStubServer(executable string, args []string, pid int32, parentPID int32, sessionID string, execCtx policysock.ExecContext) {
 	if h.stubBinary == "" {
 		slog.Error("es_exec: stub binary path not configured, cannot redirect exec",
 			"cmd", executable,
@@ -209,7 +209,7 @@ func (h *ESExecHandler) spawnStubServer(executable string, args []string, pid in
 // On macOS this is fundamentally different from Linux:
 //   - Linux: stub is injected INTO the trapped process via SECCOMP_ADDFD
 //   - macOS: original exec is denied (EPERM), stub is spawned as a new process
-func (h *ESExecHandler) launchStub(stubFile *os.File, originalCmd string, originalPID int32, execCtx xpc.ExecContext) {
+func (h *ESExecHandler) launchStub(stubFile *os.File, originalCmd string, originalPID int32, execCtx policysock.ExecContext) {
 	defer stubFile.Close()
 
 	if h.stubBinary == "" {
@@ -281,5 +281,5 @@ func (h *ESExecHandler) launchStub(stubFile *os.File, originalCmd string, origin
 	}
 }
 
-// Compile-time interface check: ESExecHandler must implement xpc.ExecHandler.
-var _ xpc.ExecHandler = (*ESExecHandler)(nil)
+// Compile-time interface check: ESExecHandler must implement policysock.ExecHandler.
+var _ policysock.ExecHandler = (*ESExecHandler)(nil)

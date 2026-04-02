@@ -1,4 +1,4 @@
-package xpc
+package policysock
 
 import (
 	"log/slog"
@@ -101,7 +101,7 @@ func (a *PolicyAdapter) CheckExec(executable string, args []string, pid int32, p
 		action = "continue"
 	default:
 		// Unknown decisions fail-closed to prevent accidental allows.
-		slog.Warn("xpc: unknown effective decision in CheckExec, denying",
+		slog.Warn("policysock: unknown effective decision in CheckExec, denying",
 			"effective_decision", string(effectiveDecision),
 			"policy_decision", decision,
 			"cmd", executable,

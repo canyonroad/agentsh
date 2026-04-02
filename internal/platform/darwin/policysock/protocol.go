@@ -1,4 +1,4 @@
-package xpc
+package policysock
 
 // RequestType identifies the type of policy check.
 type RequestType string
@@ -35,7 +35,7 @@ const (
 	RequestTypeExecRedirectNotify RequestType = "exec_redirect_notify"
 )
 
-// PolicyRequest is sent from the XPC bridge to the Go policy server.
+// PolicyRequest is sent from the policy socket to the Go policy server.
 type PolicyRequest struct {
 	Type      RequestType `json:"type"`
 	Path      string      `json:"path,omitempty"`      // file path or command path

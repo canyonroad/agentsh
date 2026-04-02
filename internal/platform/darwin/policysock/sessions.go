@@ -1,5 +1,5 @@
-// internal/platform/darwin/xpc/sessions.go
-package xpc
+// internal/platform/darwin/policysock/sessions.go
+package policysock
 
 import (
 	"sync"
