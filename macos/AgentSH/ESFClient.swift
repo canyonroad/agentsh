@@ -167,7 +167,7 @@ class ESFClient {
 
     // MARK: - NOTIFY Handlers
 
-    private func handleNotifyFork(_ message: es_message_t, pid: pid_t) {
+    fileprivate func handleNotifyFork(_ message: es_message_t, pid: pid_t) {
         // Fast-path: skip all work if no active sessions
         guard SessionPolicyCache.shared.hasActiveSessions else { return }
 
@@ -186,7 +186,7 @@ class ESFClient {
         SessionPolicyCache.shared.addPID(childPid, parentPID: pid)
     }
 
-    private func handleNotifyExit(_ message: es_message_t, pid: pid_t) {
+    fileprivate func handleNotifyExit(_ message: es_message_t, pid: pid_t) {
         // Fast-path: skip all work if no active sessions
         guard SessionPolicyCache.shared.hasActiveSessions else { return }
 
@@ -205,7 +205,7 @@ class ESFClient {
         ProcessIdentifier.invalidate(pid: pid)
     }
 
-    private func handleNotifyClose(_ message: es_message_t, pid: pid_t) {
+    fileprivate func handleNotifyClose(_ message: es_message_t, pid: pid_t) {
         guard message.event.close.modified else { return }
         guard let sessionID = SessionPolicyCache.shared.sessionForPID(pid) else { return }
 
