@@ -2,6 +2,7 @@ import Foundation
 
 /// Darwin notification name posted by Go server when policy changes.
 private let policyUpdatedNotification = "ai.canyonroad.agentsh.policy-updated"
+private let sessionRegisteredNotification = "ai.canyonroad.agentsh.session-registered"
 
 // MARK: - Rule Types
 
@@ -350,9 +351,25 @@ class SessionPolicyCache {
             nil,
             .deliverImmediately
         )
+
+        let sessionName = CFNotificationName(sessionRegisteredNotification as CFString)
+        CFNotificationCenterAddObserver(
+            center,
+            Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let cache = Unmanaged<SessionPolicyCache>.fromOpaque(observer).takeUnretainedValue()
+                cache.handleSessionRegisteredNotification()
+            },
+            sessionName.rawValue,
+            nil,
+            .deliverImmediately
+        )
     }
 
     private func handlePolicyUpdateNotification() {
+        PolicySocketClient.shared.onServerNotification()
+
         let sessionIDs = allSessionIDs()
         for sessionID in sessionIDs {
             NotificationCenter.default.post(
@@ -360,6 +377,28 @@ class SessionPolicyCache {
                 object: nil,
                 userInfo: ["session_id": sessionID]
             )
+        }
+    }
+
+    private func handleSessionRegisteredNotification() {
+        PolicySocketClient.shared.onServerNotification()
+
+        PolicySocketClient.shared.request([
+            "type": "fetch_policy_snapshot",
+            "session_id": "",
+            "version": 0
+        ]) { response in
+            guard let response = response,
+                  let sessionID = response["session_id"] as? String,
+                  !sessionID.isEmpty else { return }
+            guard let rootPID = response["root_pid"] as? Int32 ?? (response["root_pid"] as? Int).map({ Int32($0) }) else { return }
+            guard let snapshot = SessionCache.from(json: response, sessionID: sessionID, rootPID: rootPID) else {
+                NSLog("SessionPolicyCache: failed to parse session snapshot")
+                return
+            }
+            SessionPolicyCache.shared.registerSession(
+                sessionID: sessionID, rootPID: rootPID, snapshot: snapshot)
+            NSLog("SessionPolicyCache: registered session \(sessionID) from notification")
         }
     }
 
