@@ -14,14 +14,10 @@ import (
 type PermissionTier int
 
 const (
-	// TierEnterprise requires Apple entitlements (ESF + Network Extension).
+	// TierEnterprise requires the agentsh system extension (ESF + Network Extension).
 	TierEnterprise PermissionTier = iota
-	// TierFull uses FUSE-T + pf (most common for open-source deployment).
-	TierFull
-	// TierNetworkOnly has pf but no FUSE (file monitoring is observation-only).
-	TierNetworkOnly
-	// TierMonitorOnly observes via FSEvents/pcap but cannot block.
-	TierMonitorOnly
+	// TierStandard uses root + pf, no system extension.
+	TierStandard
 	// TierMinimal provides only command execution logging.
 	TierMinimal
 )
@@ -31,12 +27,8 @@ func (t PermissionTier) String() string {
 	switch t {
 	case TierEnterprise:
 		return "enterprise"
-	case TierFull:
-		return "full"
-	case TierNetworkOnly:
-		return "network-only"
-	case TierMonitorOnly:
-		return "monitor-only"
+	case TierStandard:
+		return "standard"
 	case TierMinimal:
 		return "minimal"
 	default:
@@ -49,12 +41,8 @@ func (t PermissionTier) SecurityScore() int {
 	switch t {
 	case TierEnterprise:
 		return 95
-	case TierFull:
-		return 75
-	case TierNetworkOnly:
+	case TierStandard:
 		return 50
-	case TierMonitorOnly:
-		return 25
 	case TierMinimal:
 		return 10
 	default:
@@ -64,23 +52,16 @@ func (t PermissionTier) SecurityScore() int {
 
 // Permissions holds detected macOS permission state.
 type Permissions struct {
-	// Apple Entitlements (Tier 0 - Enterprise)
-	HasEndpointSecurity bool
-	HasNetworkExtension bool
-
-	// FUSE Options (Tier 1)
-	HasFuseT     bool
-	FuseTVersion string
-	HasMacFUSE   bool // Deprecated but may be present
+	HasSystemExtension bool
 
 	// Basic Permissions
 	HasRootAccess     bool
 	HasFullDiskAccess bool
 
 	// Fallbacks
-	CanUsePF     bool
-	HasFSEvents  bool // Always true on macOS
-	HasLibpcap   bool
+	CanUsePF    bool
+	HasFSEvents bool // Always true on macOS
+	HasLibpcap  bool
 
 	// Computed
 	Tier               PermissionTier
@@ -104,13 +85,8 @@ func DetectPermissions() *Permissions {
 		DetectedAt:  time.Now(),
 	}
 
-	// Check Apple entitlements (Tier 0)
-	p.HasEndpointSecurity = checkEntitlement("endpoint-security.client")
-	p.HasNetworkExtension = checkEntitlement("networking.networkextension")
-
-	// Check FUSE options (Tier 1)
-	p.HasFuseT, p.FuseTVersion = checkFuseT()
-	p.HasMacFUSE = checkMacFUSE()
+	// Check system extension
+	p.HasSystemExtension = CheckSysExtInstalled()
 
 	// Check basic permissions
 	p.HasRootAccess = os.Geteuid() == 0
@@ -125,50 +101,15 @@ func DetectPermissions() *Permissions {
 	return p
 }
 
-// checkEntitlement checks if the running binary has a specific Apple entitlement.
-func checkEntitlement(name string) bool {
-	cmd := exec.Command("codesign", "-d", "--entitlements", "-", os.Args[0])
+// CheckSysExtInstalled checks if the agentsh system extension is installed and activated.
+func CheckSysExtInstalled() bool {
+	cmd := exec.Command("systemextensionsctl", "list")
 	output, err := cmd.Output()
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(output), name)
-}
-
-// checkFuseT checks for FUSE-T installation.
-func checkFuseT() (bool, string) {
-	paths := []string{
-		"/opt/homebrew/lib/libfuse-t.dylib",  // Apple Silicon Homebrew
-		"/usr/local/lib/libfuse-t.dylib",     // Intel Homebrew
-		"/Library/Frameworks/FUSE-T.framework",
-	}
-
-	for _, path := range paths {
-		if _, err := os.Stat(path); err == nil {
-			// Try to get version via brew
-			cmd := exec.Command("brew", "info", "fuse-t", "--json")
-			if output, err := cmd.Output(); err == nil && len(output) > 0 {
-				// Parse version from brew info JSON if needed
-				return true, "installed"
-			}
-			return true, "installed"
-		}
-	}
-	return false, ""
-}
-
-// checkMacFUSE checks for deprecated macFUSE installation.
-func checkMacFUSE() bool {
-	paths := []string{
-		"/Library/Filesystems/macfuse.fs",
-		"/Library/Frameworks/macFUSE.framework",
-	}
-	for _, path := range paths {
-		if _, err := os.Stat(path); err == nil {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(string(output), "ai.canyonroad.agentsh.SysExt") &&
+		strings.Contains(string(output), "activated enabled")
 }
 
 // checkFullDiskAccess tests if we can access protected directories.
@@ -197,14 +138,10 @@ func checkLibpcapAvailable() bool {
 // computeTier determines the operating tier based on available permissions.
 func (p *Permissions) computeTier() {
 	switch {
-	case p.HasEndpointSecurity && p.HasNetworkExtension:
+	case p.HasSystemExtension:
 		p.Tier = TierEnterprise
-	case p.HasFuseT && p.HasRootAccess && p.CanUsePF:
-		p.Tier = TierFull
 	case p.HasRootAccess && p.CanUsePF:
-		p.Tier = TierNetworkOnly
-	case p.HasFSEvents && (p.HasLibpcap || p.HasRootAccess):
-		p.Tier = TierMonitorOnly
+		p.Tier = TierStandard
 	default:
 		p.Tier = TierMinimal
 	}
@@ -214,13 +151,14 @@ func (p *Permissions) computeTier() {
 func (p *Permissions) computeMissingPermissions() {
 	p.MissingPermissions = []MissingPermission{}
 
-	if !p.HasFuseT {
+	if !p.HasSystemExtension {
 		p.MissingPermissions = append(p.MissingPermissions, MissingPermission{
-			Name:        "FUSE-T",
-			Description: "Userspace filesystem for file interception (no kernel extension needed)",
-			Impact:      "Cannot intercept or block file operations. File monitoring will be observation-only via FSEvents.",
-			HowToEnable: "Install via Homebrew:\n  brew install fuse-t\n\nNo restart or security approval required!",
-			Required:    false,
+			Name:        "System Extension",
+			Description: "ESF-based file/process monitoring and Network Extension filtering",
+			Impact:      "Cannot intercept or block file operations. File monitoring unavailable.",
+			HowToEnable: "Install the agentsh macOS app bundle which includes the system extension.\n" +
+				"After installation, approve it in System Settings > Privacy & Security.",
+			Required: false,
 		})
 	}
 
@@ -245,19 +183,6 @@ func (p *Permissions) computeMissingPermissions() {
 			Required: false,
 		})
 	}
-
-	if !p.HasEndpointSecurity {
-		p.MissingPermissions = append(p.MissingPermissions, MissingPermission{
-			Name:        "Endpoint Security Framework",
-			Description: "Apple's official security monitoring API with full system visibility",
-			Impact:      "Not using Apple's most comprehensive security API. Current tier provides good coverage.",
-			HowToEnable: "Requires Apple Developer Program membership and approval:\n" +
-				"1. Apply for com.apple.developer.endpoint-security.client entitlement\n" +
-				"2. Provide business justification to Apple\n" +
-				"3. Build and notarize with approved provisioning profile",
-			Required: false,
-		})
-	}
 }
 
 // AvailableFeatures returns the list of features enabled at this tier.
@@ -275,27 +200,12 @@ func (p *Permissions) AvailableFeatures() []string {
 			"kernel_event_monitoring",
 			"command_logging",
 		}
-	case TierFull:
-		return []string{
-			"file_read_interception (FUSE - can block)",
-			"file_write_interception (FUSE - can block)",
-			"network_interception (pf - can block)",
-			"dns_interception",
-			"tls_inspection",
-			"command_logging",
-		}
-	case TierNetworkOnly:
+	case TierStandard:
 		return []string{
 			"file_monitoring (FSEvents - observe only)",
 			"network_interception (pf - can block)",
 			"dns_interception",
 			"tls_inspection",
-			"command_logging",
-		}
-	case TierMonitorOnly:
-		return []string{
-			"file_monitoring (FSEvents - observe only)",
-			"network_monitoring (pcap - observe only)",
 			"command_logging",
 		}
 	case TierMinimal:
@@ -312,12 +222,8 @@ func (p *Permissions) DisabledFeatures() []string {
 	switch p.Tier {
 	case TierEnterprise:
 		return []string{}
-	case TierFull:
-		return []string{"process_blocking", "per_app_filtering", "kernel_events"}
-	case TierNetworkOnly:
+	case TierStandard:
 		return []string{"file_blocking", "process_blocking", "per_app_filtering", "kernel_events"}
-	case TierMonitorOnly:
-		return []string{"file_blocking", "network_blocking", "process_blocking", "per_app_filtering", "kernel_events"}
 	case TierMinimal:
 		return []string{"file_monitoring", "file_blocking", "network_monitoring", "network_blocking", "process_blocking", "per_app_filtering", "kernel_events"}
 	default:
@@ -336,18 +242,9 @@ func (p *Permissions) LogStatus() string {
 	sb.WriteString(fmt.Sprintf("Operating Tier: %d (%s) - Security Score: %d%%\n\n",
 		p.Tier, p.Tier.String(), p.Tier.SecurityScore()))
 
-	// Apple Entitlements
-	sb.WriteString("Apple Entitlements (Tier 0 - Enterprise):\n")
-	sb.WriteString(formatPermission("Endpoint Security", p.HasEndpointSecurity, "System-wide file/process monitoring"))
-	sb.WriteString(formatPermission("Network Extension", p.HasNetworkExtension, "Deep network inspection"))
-	sb.WriteString("\n")
-
-	// FUSE Options
-	sb.WriteString("Filesystem Interception (Tier 1):\n")
-	sb.WriteString(formatPermission("FUSE-T", p.HasFuseT, "NFS-based FUSE (recommended, no kext)"))
-	if p.HasMacFUSE {
-		sb.WriteString("  ⚠️  macFUSE (deprecated, requires kext)\n")
-	}
+	// System Extension
+	sb.WriteString("System Extension:\n")
+	sb.WriteString(formatPermission("System Extension", p.HasSystemExtension, "ESF-based file/process monitoring and Network Extension filtering"))
 	sb.WriteString("\n")
 
 	// Basic Permissions
@@ -372,7 +269,7 @@ func (p *Permissions) LogStatus() string {
 	if len(p.MissingPermissions) > 0 && p.Tier > TierEnterprise {
 		sb.WriteString("To enable more features:\n")
 		for i, mp := range p.MissingPermissions {
-			if mp.Required || p.Tier > TierFull {
+			if mp.Required || p.Tier > TierStandard {
 				sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, mp.Name))
 				sb.WriteString(fmt.Sprintf("     %s\n", mp.HowToEnable))
 			}

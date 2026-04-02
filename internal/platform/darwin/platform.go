@@ -1,7 +1,8 @@
 //go:build darwin
 
 // Package darwin provides the macOS platform implementation for agentsh.
-// It uses FUSE-T for filesystem interception and pf for network redirection.
+// It uses the agentsh system extension (ESF + Network Extension) for full interception,
+// or pf for network redirection at the standard tier.
 // Note: macOS lacks namespace isolation and cgroups, so those features are unavailable.
 package darwin
 
@@ -79,8 +80,8 @@ func (p *Platform) detectCapabilities() platform.Capabilities {
 		CanLimitProcessCount: false,
 
 		// macOS-specific frameworks
-		HasEndpointSecurity: p.permissions.HasEndpointSecurity,
-		HasNetworkExtension: p.permissions.HasNetworkExtension,
+		HasEndpointSecurity: p.permissions.HasSystemExtension,
+		HasNetworkExtension: p.permissions.HasSystemExtension,
 	}
 
 	// Set capabilities based on tier
@@ -93,29 +94,13 @@ func (p *Platform) detectCapabilities() platform.Capabilities {
 		caps.CanRedirectTraffic = true
 		caps.CanInspectTLS = true
 
-	case TierFull:
-		caps.HasFUSE = true
-		caps.FUSEImplementation = "fuse-t"
-		caps.HasNetworkIntercept = true
-		caps.NetworkImplementation = "pf"
-		caps.CanRedirectTraffic = true
-		caps.CanInspectTLS = true
-
-	case TierNetworkOnly:
+	case TierStandard:
 		caps.HasFUSE = false
 		caps.FUSEImplementation = "fsevents-observe"
 		caps.HasNetworkIntercept = true
 		caps.NetworkImplementation = "pf"
 		caps.CanRedirectTraffic = true
 		caps.CanInspectTLS = true
-
-	case TierMonitorOnly:
-		caps.HasFUSE = false
-		caps.FUSEImplementation = "fsevents-observe"
-		caps.HasNetworkIntercept = false
-		caps.NetworkImplementation = "pcap-observe"
-		caps.CanRedirectTraffic = false
-		caps.CanInspectTLS = false
 
 	case TierMinimal:
 		caps.HasFUSE = false

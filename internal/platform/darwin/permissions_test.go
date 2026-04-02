@@ -13,9 +13,7 @@ func TestPermissionTier_String(t *testing.T) {
 		want string
 	}{
 		{TierEnterprise, "enterprise"},
-		{TierFull, "full"},
-		{TierNetworkOnly, "network-only"},
-		{TierMonitorOnly, "monitor-only"},
+		{TierStandard, "standard"},
 		{TierMinimal, "minimal"},
 		{PermissionTier(99), "unknown"},
 	}
@@ -35,9 +33,7 @@ func TestPermissionTier_SecurityScore(t *testing.T) {
 		want int
 	}{
 		{TierEnterprise, 95},
-		{TierFull, 75},
-		{TierNetworkOnly, 50},
-		{TierMonitorOnly, 25},
+		{TierStandard, 50},
 		{TierMinimal, 10},
 		{PermissionTier(99), 0},
 	}
@@ -58,45 +54,19 @@ func TestPermissions_computeTier(t *testing.T) {
 		want PermissionTier
 	}{
 		{
-			name: "enterprise with both entitlements",
+			name: "enterprise with system extension",
 			perm: Permissions{
-				HasEndpointSecurity: true,
-				HasNetworkExtension: true,
+				HasSystemExtension: true,
 			},
 			want: TierEnterprise,
 		},
 		{
-			name: "full with fuse-t and root",
-			perm: Permissions{
-				HasFuseT:      true,
-				HasRootAccess: true,
-				CanUsePF:      true,
-			},
-			want: TierFull,
-		},
-		{
-			name: "network only with root and pf",
+			name: "standard with root and pf",
 			perm: Permissions{
 				HasRootAccess: true,
 				CanUsePF:      true,
 			},
-			want: TierNetworkOnly,
-		},
-		{
-			name: "monitor only with fsevents and libpcap",
-			perm: Permissions{
-				HasFSEvents: true,
-				HasLibpcap:  true,
-			},
-			want: TierMonitorOnly,
-		},
-		{
-			name: "monitor only with fsevents and root",
-			perm: Permissions{
-				HasFSEvents:   true,
-				HasRootAccess: true,
-			},
-			want: TierMonitorOnly,
+			want: TierStandard,
 		},
 		{
 			name: "minimal with nothing",
@@ -125,16 +95,8 @@ func TestPermissions_AvailableFeatures(t *testing.T) {
 			wantContains: []string{"ESF", "NE", "tls_inspection"},
 		},
 		{
-			tier:         TierFull,
-			wantContains: []string{"FUSE", "pf", "tls_inspection"},
-		},
-		{
-			tier:         TierNetworkOnly,
+			tier:         TierStandard,
 			wantContains: []string{"FSEvents", "pf"},
-		},
-		{
-			tier:         TierMonitorOnly,
-			wantContains: []string{"FSEvents", "pcap"},
 		},
 		{
 			tier:         TierMinimal,
@@ -162,9 +124,7 @@ func TestPermissions_DisabledFeatures(t *testing.T) {
 		wantEmpty bool
 	}{
 		{TierEnterprise, true},
-		{TierFull, false},
-		{TierNetworkOnly, false},
-		{TierMonitorOnly, false},
+		{TierStandard, false},
 		{TierMinimal, false},
 	}
 
@@ -184,10 +144,9 @@ func TestPermissions_DisabledFeatures(t *testing.T) {
 
 func TestPermissions_computeMissingPermissions(t *testing.T) {
 	p := &Permissions{
-		HasFuseT:            false,
-		HasRootAccess:       false,
-		HasFullDiskAccess:   false,
-		HasEndpointSecurity: false,
+		HasSystemExtension: false,
+		HasRootAccess:      false,
+		HasFullDiskAccess:  false,
 	}
 	p.computeMissingPermissions()
 
@@ -200,21 +159,30 @@ func TestPermissions_computeMissingPermissions(t *testing.T) {
 		names[mp.Name] = true
 	}
 
-	expected := []string{"FUSE-T", "Root Access", "Full Disk Access", "Endpoint Security Framework"}
+	expected := []string{"System Extension", "Root Access", "Full Disk Access"}
 	for _, name := range expected {
 		if !names[name] {
 			t.Errorf("Missing expected permission: %s", name)
+		}
+	}
+
+	// Verify system extension tip mentions the app bundle
+	for _, mp := range p.MissingPermissions {
+		if mp.Name == "System Extension" {
+			if !strings.Contains(mp.HowToEnable, "app bundle") {
+				t.Errorf("System Extension HowToEnable should mention app bundle, got: %s", mp.HowToEnable)
+			}
 		}
 	}
 }
 
 func TestPermissions_LogStatus(t *testing.T) {
 	p := &Permissions{
-		HasFuseT:      true,
-		HasRootAccess: true,
-		CanUsePF:      true,
-		HasFSEvents:   true,
-		Tier:          TierFull,
+		HasSystemExtension: false,
+		HasRootAccess:      true,
+		CanUsePF:           true,
+		HasFSEvents:        true,
+		Tier:               TierStandard,
 	}
 	p.computeMissingPermissions()
 
@@ -229,5 +197,8 @@ func TestPermissions_LogStatus(t *testing.T) {
 	}
 	if !strings.Contains(status, "Feature Availability") {
 		t.Error("LogStatus() missing feature availability")
+	}
+	if !strings.Contains(status, "System Extension") {
+		t.Error("LogStatus() missing System Extension section")
 	}
 }

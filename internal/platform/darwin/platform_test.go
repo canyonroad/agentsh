@@ -38,7 +38,7 @@ func TestPlatform_Name(t *testing.T) {
 	}
 
 	// Check it contains a valid tier name
-	tiers := []string{"enterprise", "full", "network-only", "monitor-only", "minimal"}
+	tiers := []string{"enterprise", "standard", "minimal"}
 	found := false
 	for _, tier := range tiers {
 		if strings.Contains(name, tier) {
@@ -85,11 +85,11 @@ func TestPlatform_Capabilities(t *testing.T) {
 
 func TestPlatform_detectCapabilities_ByTier(t *testing.T) {
 	tests := []struct {
-		tier                  PermissionTier
-		wantFUSE              bool
-		wantFUSEImpl          string
-		wantNetworkIntercept  bool
-		wantNetworkImpl       string
+		tier                   PermissionTier
+		wantFUSE               bool
+		wantFUSEImpl           string
+		wantNetworkIntercept   bool
+		wantNetworkImpl        string
 		wantCanRedirectTraffic bool
 	}{
 		{
@@ -101,28 +101,12 @@ func TestPlatform_detectCapabilities_ByTier(t *testing.T) {
 			wantCanRedirectTraffic: true,
 		},
 		{
-			tier:                   TierFull,
-			wantFUSE:               true,
-			wantFUSEImpl:           "fuse-t",
-			wantNetworkIntercept:   true,
-			wantNetworkImpl:        "pf",
-			wantCanRedirectTraffic: true,
-		},
-		{
-			tier:                   TierNetworkOnly,
+			tier:                   TierStandard,
 			wantFUSE:               false,
 			wantFUSEImpl:           "fsevents-observe",
 			wantNetworkIntercept:   true,
 			wantNetworkImpl:        "pf",
 			wantCanRedirectTraffic: true,
-		},
-		{
-			tier:                   TierMonitorOnly,
-			wantFUSE:               false,
-			wantFUSEImpl:           "fsevents-observe",
-			wantNetworkIntercept:   false,
-			wantNetworkImpl:        "pcap-observe",
-			wantCanRedirectTraffic: false,
 		},
 		{
 			tier:                   TierMinimal,
