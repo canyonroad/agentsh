@@ -1,3 +1,5 @@
+//go:build darwin
+
 package policysock
 
 // DirectAllow defines an entry in the proxy bypass allowlist.

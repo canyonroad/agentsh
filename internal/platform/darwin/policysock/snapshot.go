@@ -1,3 +1,5 @@
+//go:build darwin
+
 package policysock
 
 // PolicySnapshotResponse is the internal representation of a policy snapshot.
