@@ -1,5 +1,13 @@
 package policysock
 
+// DirectAllow defines an entry in the proxy bypass allowlist.
+// Host can be an IP, hostname, or "*" (any host).
+// Port 0 means any port.
+type DirectAllow struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
 // RequestType identifies the type of policy check.
 type RequestType string
 

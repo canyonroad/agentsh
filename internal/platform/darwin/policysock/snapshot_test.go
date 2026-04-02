@@ -3,6 +3,8 @@ package policysock
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestPolicySnapshotResponse_JSON(t *testing.T) {
@@ -58,6 +60,41 @@ func TestPolicySnapshotResponse_JSON(t *testing.T) {
 	if decoded.Defaults == nil || decoded.Defaults.Exec != "allow" {
 		t.Fatalf("expected exec default allow, got %v", decoded.Defaults)
 	}
+}
+
+func TestPolicySnapshotResponse_ProxyFields(t *testing.T) {
+	snap := PolicySnapshotResponse{
+		SessionID: "test-session",
+		ProxyAddr: "127.0.0.1:50382",
+		DirectAllow: []DirectAllow{
+			{Host: "127.0.0.1", Port: 0},
+			{Host: "::1", Port: 0},
+			{Host: "*", Port: 53},
+		},
+	}
+
+	data, err := json.Marshal(snap)
+	assert.NoError(t, err)
+	assert.Contains(t, string(data), `"proxy_addr":"127.0.0.1:50382"`)
+
+	var decoded PolicySnapshotResponse
+	err = json.Unmarshal(data, &decoded)
+	assert.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:50382", decoded.ProxyAddr)
+	assert.Len(t, decoded.DirectAllow, 3)
+	assert.Equal(t, "*", decoded.DirectAllow[2].Host)
+	assert.Equal(t, 53, decoded.DirectAllow[2].Port)
+}
+
+func TestPolicySnapshotResponse_ProxyFieldsOmitEmpty(t *testing.T) {
+	snap := PolicySnapshotResponse{
+		SessionID: "test-session",
+	}
+
+	data, err := json.Marshal(snap)
+	assert.NoError(t, err)
+	assert.NotContains(t, string(data), "proxy_addr")
+	assert.NotContains(t, string(data), "direct_allow")
 }
 
 func TestPolicySnapshotResponse_EmptyForMatchingVersion(t *testing.T) {
