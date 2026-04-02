@@ -23,10 +23,16 @@ struct DNSRule {
     let action: String  // "allow", "deny", "nxdomain"
 }
 
+struct ExecRule {
+    let pattern: String   // glob pattern for executable path
+    let action: String    // "allow", "deny", "redirect"
+}
+
 struct PolicyDefaults {
     let file: String     // "allow" or "deny"
     let network: String
     let dns: String
+    let exec: String     // "allow" or "deny"
 }
 
 // MARK: - Per-Session Cache Entry
@@ -39,11 +45,13 @@ class SessionCache {
     var fileRules: [FileRule]
     var networkRules: [NetworkRule]
     var dnsRules: [DNSRule]
+    var execRules: [ExecRule]
     var defaults: PolicyDefaults
 
     init(sessionID: String, rootPID: pid_t, version: UInt64,
          fileRules: [FileRule], networkRules: [NetworkRule],
-         dnsRules: [DNSRule], defaults: PolicyDefaults) {
+         dnsRules: [DNSRule], execRules: [ExecRule],
+         defaults: PolicyDefaults) {
         self.sessionID = sessionID
         self.rootPID = rootPID
         self.version = version
@@ -51,6 +59,7 @@ class SessionCache {
         self.fileRules = fileRules
         self.networkRules = networkRules
         self.dnsRules = dnsRules
+        self.execRules = execRules
         self.defaults = defaults
     }
 }
@@ -66,6 +75,10 @@ class SessionPolicyCache {
     private let queue = DispatchQueue(label: "ai.canyonroad.agentsh.policycache",
                                        attributes: .concurrent)
 
+    /// Lock-free flag for the hot path. Updated under barrier writes.
+    /// Avoids queue.sync for the most common check (no sessions = allow all).
+    private var _hasActiveSessions: Int32 = 0
+
     private init() {
         startListeningForNotifications()
     }
@@ -76,6 +89,7 @@ class SessionPolicyCache {
         queue.async(flags: .barrier) {
             self.sessions[sessionID] = snapshot
             self.pidToSession[rootPID] = sessionID
+            OSAtomicCompareAndSwap32(0, 1, &self._hasActiveSessions)
         }
     }
 
@@ -87,11 +101,14 @@ class SessionPolicyCache {
                 self.execDepths.removeValue(forKey: pid)
             }
             self.sessions.removeValue(forKey: sessionID)
+            if self.sessions.isEmpty {
+                OSAtomicCompareAndSwap32(1, 0, &self._hasActiveSessions)
+            }
         }
     }
 
     var hasActiveSessions: Bool {
-        queue.sync { !sessions.isEmpty }
+        _hasActiveSessions != 0
     }
 
     // MARK: - PID Tracking (called from NOTIFY_FORK/EXIT)
@@ -162,11 +179,11 @@ class SessionPolicyCache {
                 }
             }
 
-            // Rules requiring server-side logic -> XPC fallthrough
+            // Rules requiring server-side logic -> deny locally
             for rule in cache.fileRules where rule.action != "deny" {
                 if rule.operations.contains(operation) && globMatch(pattern: rule.pattern, path: path) {
                     if rule.action == "approve" || rule.action == "redirect" || rule.action == "soft_delete" {
-                        return (.fallthrough_, sid)
+                        return (.deny, sid)
                     }
                     if rule.action == "allow" {
                         return (.allow, sid)
@@ -211,6 +228,50 @@ class SessionPolicyCache {
             }
 
             if cache.defaults.network == "deny" {
+                return (.deny, sid)
+            }
+            return (.allow, sid)
+        }
+    }
+
+    // MARK: - Exec Policy Evaluation
+
+    enum ExecDecision {
+        case allow
+        case deny
+        case redirect  // deny the exec + async notify Go server to spawn stub
+    }
+
+    func evaluateExec(path: String, pid: pid_t) -> (ExecDecision, String?) {
+        return queue.sync {
+            guard let sid = pidToSession[pid],
+                  let cache = sessions[sid] else {
+                return (.allow, nil)
+            }
+
+            // Deny rules first (highest precedence)
+            for rule in cache.execRules where rule.action == "deny" {
+                if globMatch(pattern: rule.pattern, path: path) {
+                    return (.deny, sid)
+                }
+            }
+
+            // Redirect rules -- deny the exec locally; async notify triggers stub
+            for rule in cache.execRules where rule.action == "redirect" {
+                if globMatch(pattern: rule.pattern, path: path) {
+                    return (.redirect, sid)
+                }
+            }
+
+            // Explicit allow rules
+            for rule in cache.execRules where rule.action == "allow" {
+                if globMatch(pattern: rule.pattern, path: path) {
+                    return (.allow, sid)
+                }
+            }
+
+            // Default
+            if cache.defaults.exec == "deny" {
                 return (.deny, sid)
             }
             return (.allow, sid)
@@ -361,17 +422,27 @@ extension SessionCache {
             }
         }
 
+        var execRules: [ExecRule] = []
+        if let rules = json["exec_rules"] as? [[String: Any]] {
+            for r in rules {
+                guard let pattern = r["pattern"] as? String,
+                      let action = r["action"] as? String else { continue }
+                execRules.append(ExecRule(pattern: pattern, action: action))
+            }
+        }
+
         let defs = json["defaults"] as? [String: String] ?? [:]
         let defaults = PolicyDefaults(
             file: defs["file"] ?? "allow",
             network: defs["network"] ?? "allow",
-            dns: defs["dns"] ?? "allow"
+            dns: defs["dns"] ?? "allow",
+            exec: defs["exec"] ?? "allow"
         )
 
         return SessionCache(
             sessionID: sessionID, rootPID: rootPID, version: version,
             fileRules: fileRules, networkRules: networkRules,
-            dnsRules: dnsRules, defaults: defaults
+            dnsRules: dnsRules, execRules: execRules, defaults: defaults
         )
     }
 }

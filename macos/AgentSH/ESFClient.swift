@@ -4,12 +4,11 @@ import EndpointSecurity
 
 /// Handles Endpoint Security Framework events.
 class ESFClient {
+    /// The ES client pointer. Written once in start(), read on every event.
+    /// No lock needed — set once, only cleared in stop()/deinit.
     private var client: OpaquePointer?
     private let xpc: NSXPCConnection
     private var xpcProxy: AgentshXPCProtocol?
-
-    // Serial queue for thread-safe access to client
-    private let clientQueue = DispatchQueue(label: "ai.canyonroad.agentsh.esfclient")
 
     /// Shared ISO8601 formatter for event timestamps (thread-safe)
     private static let isoFormatter = ISO8601DateFormatter()
@@ -61,9 +60,7 @@ class ESFClient {
             return false
         }
 
-        clientQueue.sync {
-            self.client = newClient
-        }
+        self.client = newClient
 
         // Subscribe to AUTH events (blocking)
         let authEvents: [es_event_type_t] = [
@@ -87,10 +84,8 @@ class ESFClient {
 
         guard subscribeResult == ES_RETURN_SUCCESS else {
             NSLog("Failed to subscribe: \(subscribeResult.rawValue)")
-            clientQueue.sync {
-                es_delete_client(newClient)
-                self.client = nil
-            }
+            es_delete_client(newClient)
+            self.client = nil
             return false
         }
 
@@ -110,17 +105,11 @@ class ESFClient {
     }
 
     func stop() {
-        clientQueue.sync {
-            if let client = client {
-                es_delete_client(client)
-                self.client = nil
-            }
+        if let client = client {
+            es_delete_client(client)
+            self.client = nil
         }
         xpc.invalidate()
-    }
-
-    private func getClient() -> OpaquePointer? {
-        return clientQueue.sync { client }
     }
 
     // MARK: - Process Muting (Recursion Guard)
@@ -130,7 +119,7 @@ class ESFClient {
     /// stub binary path during wrap initialization.
     @available(macOS 12.0, *)
     func mutePath(_ path: String) {
-        guard let client = getClient() else { return }
+        guard let client = client else { return }
         let result = es_mute_path(client, path, ES_MUTE_PATH_TYPE_TARGET_LITERAL)
         if result != ES_RETURN_SUCCESS {
             NSLog("ESFClient: failed to mute path \(path): \(result.rawValue)")
@@ -142,7 +131,7 @@ class ESFClient {
     /// Mute a process and all its descendants so ES events are not delivered for them.
     /// Used for recursion prevention — agentsh-spawned commands must not be re-intercepted.
     func muteProcess(auditToken: audit_token_t) {
-        guard let client = getClient() else { return }
+        guard let client = client else { return }
         var token = auditToken
         let result = es_mute_process(client, &token)
         if result != ES_RETURN_SUCCESS {
@@ -180,8 +169,8 @@ class ESFClient {
                 NSLog("ESFClient: failed to fetch initial snapshot for session \(sessionID)")
                 let emptySnapshot = SessionCache(
                     sessionID: sessionID, rootPID: rootPID, version: 0,
-                    fileRules: [], networkRules: [], dnsRules: [],
-                    defaults: PolicyDefaults(file: "allow", network: "allow", dns: "allow"))
+                    fileRules: [], networkRules: [], dnsRules: [], execRules: [],
+                    defaults: PolicyDefaults(file: "allow", network: "allow", dns: "allow", exec: "allow"))
                 SessionPolicyCache.shared.registerSession(
                     sessionID: sessionID, rootPID: rootPID, snapshot: emptySnapshot)
                 return
@@ -246,7 +235,13 @@ class ESFClient {
     // MARK: - AUTH Handlers
 
     private func handleAuthOpen(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
-        guard let client = getClient() else { return }
+        guard let client = client else { return }
+
+        // Fast-path: no active sessions means no policy to enforce
+        if !SessionPolicyCache.shared.hasActiveSessions {
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+            return
+        }
 
         let path = String(cString: event.pointee.event.open.file.pointee.path.data)
 
@@ -265,7 +260,7 @@ class ESFClient {
             xpcProxy?.checkFile(path: path, operation: "read", pid: pid, sessionID: sessionID) {
                 [weak self] allow, _ in
                 defer { es_release_message(event) }
-                guard let client = self?.getClient() else { return }
+                guard let client = self?.client else { return }
                 let result: es_auth_result_t = allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
                 es_respond_auth_result(client, event, result, false)
             }
@@ -273,7 +268,13 @@ class ESFClient {
     }
 
     private func handleAuthCreate(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
-        guard let client = getClient() else { return }
+        guard let client = client else { return }
+
+        // Fast-path: no active sessions means no policy to enforce
+        if !SessionPolicyCache.shared.hasActiveSessions {
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+            return
+        }
 
         // Extract path based on destination_type
         let create = event.pointee.event.create
@@ -299,7 +300,7 @@ class ESFClient {
             xpcProxy?.checkFile(path: path, operation: "create", pid: pid, sessionID: sessionID) {
                 [weak self] allow, _ in
                 defer { es_release_message(event) }
-                guard let client = self?.getClient() else { return }
+                guard let client = self?.client else { return }
                 let result: es_auth_result_t = allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
                 es_respond_auth_result(client, event, result, false)
             }
@@ -307,7 +308,14 @@ class ESFClient {
     }
 
     private func handleAuthUnlink(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
-        guard let client = getClient() else { return }
+        guard let client = client else { return }
+
+        // Fast-path: no active sessions means no policy to enforce
+        if !SessionPolicyCache.shared.hasActiveSessions {
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+            return
+        }
+
         let path = String(cString: event.pointee.event.unlink.target.pointee.path.data)
 
         let (decision, sessionID) = SessionPolicyCache.shared.evaluateFile(
@@ -323,7 +331,7 @@ class ESFClient {
             xpcProxy?.checkFile(path: path, operation: "delete", pid: pid, sessionID: sessionID) {
                 [weak self] allow, _ in
                 defer { es_release_message(event) }
-                guard let client = self?.getClient() else { return }
+                guard let client = self?.client else { return }
                 let result: es_auth_result_t = allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
                 es_respond_auth_result(client, event, result, false)
             }
@@ -331,7 +339,14 @@ class ESFClient {
     }
 
     private func handleAuthRename(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
-        guard let client = getClient() else { return }
+        guard let client = client else { return }
+
+        // Fast-path: no active sessions means no policy to enforce
+        if !SessionPolicyCache.shared.hasActiveSessions {
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+            return
+        }
+
         let sourcePath = String(cString: event.pointee.event.rename.source.pointee.path.data)
 
         let rename = event.pointee.event.rename
@@ -366,14 +381,14 @@ class ESFClient {
             [weak self] srcAllow, _ in
             guard srcAllow else {
                 defer { es_release_message(event) }
-                guard let client = self?.getClient() else { return }
+                guard let client = self?.client else { return }
                 es_respond_auth_result(client, event, ES_AUTH_RESULT_DENY, false)
                 return
             }
             self?.xpcProxy?.checkFile(path: destPath, operation: "create", pid: pid, sessionID: sessionID) {
                 [weak self] dstAllow, _ in
                 defer { es_release_message(event) }
-                guard let client = self?.getClient() else { return }
+                guard let client = self?.client else { return }
                 let result: es_auth_result_t = dstAllow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
                 es_respond_auth_result(client, event, result, false)
             }
@@ -381,23 +396,11 @@ class ESFClient {
     }
 
     private func handleAuthExec(_ event: UnsafePointer<es_message_t>, pid: pid_t) {
-        guard let client = getClient() else { return }
-
-        // Fast-path: allow agentsh-stub execs to prevent recursion on macOS < 12.0
-        // where es_mute_path_literal is unavailable.
-        let targetPath = String(cString: event.pointee.event.exec.target.pointee.executable.pointee.path.data)
-        if targetPath.hasSuffix("/agentsh-stub") || targetPath.hasSuffix("/agentsh") {
-            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
-            return
-        }
+        guard let client = client else { return }
 
         // Fast path: if no active sessions, allow everything immediately.
-        // Sessions are populated via registerSession() which is called from the
-        // Go server through the register_session XPC request when agentsh wrap starts.
-        // Until at least one session is registered, all AUTH_EXEC events pass through
-        // without policy checks — this is by design (no wrapping = no interception).
-        let hasActiveSessions = SessionPolicyCache.shared.hasActiveSessions
-        if !hasActiveSessions {
+        // This is the hot path — lock-free atomic read, no allocations.
+        if !SessionPolicyCache.shared.hasActiveSessions {
             es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
             return
         }
@@ -462,7 +465,7 @@ class ESFClient {
             cwdPath: cwdPath
         ) { [weak self] decision, action, rule in
             defer { es_release_message(event) }
-            guard let client = self?.getClient() else { return }
+            guard let client = self?.client else { return }
 
             switch action {
             case "continue":
@@ -488,7 +491,12 @@ class ESFClient {
     // MARK: - NOTIFY Handlers
 
     private func handleNotifyFork(_ message: es_message_t, pid: pid_t) {
-        // Track parent-child relationship for session scoping and PNACL inheritance
+        // Fast-path: skip all work if no active sessions
+        guard SessionPolicyCache.shared.hasActiveSessions else { return }
+
+        // Only track forks from processes in active sessions
+        guard SessionPolicyCache.shared.sessionForPID(pid) != nil else { return }
+
         let childToken = message.event.fork.child.pointee.audit_token
         let childPid = audit_token_to_pid(childToken)
 
@@ -499,10 +507,15 @@ class ESFClient {
 
         ProcessHierarchy.shared.recordFork(parentPID: pid, childPID: childPid)
         SessionPolicyCache.shared.addPID(childPid, parentPID: pid)
-        NSLog("Fork: \(pid) -> \(childPid)")
     }
 
     private func handleNotifyExit(_ message: es_message_t, pid: pid_t) {
+        // Fast-path: skip all work if no active sessions
+        guard SessionPolicyCache.shared.hasActiveSessions else { return }
+
+        // Only clean up PIDs that are in active sessions
+        guard SessionPolicyCache.shared.sessionForPID(pid) != nil else { return }
+
         // Clean up audit token cache
         cacheQueue.sync {
             _ = auditTokenCache.removeValue(forKey: pid)
@@ -513,7 +526,6 @@ class ESFClient {
         // Clean up hierarchy tracking and invalidate process info cache
         ProcessHierarchy.shared.recordExit(pid: pid)
         ProcessIdentifier.invalidate(pid: pid)
-        NSLog("Exit: \(pid)")
     }
 
     private func handleNotifyClose(_ message: es_message_t, pid: pid_t) {
