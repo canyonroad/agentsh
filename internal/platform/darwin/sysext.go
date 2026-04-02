@@ -35,7 +35,7 @@ func NewSysExtManager() *SysExtManager {
 
 	return &SysExtManager{
 		bundlePath: bundlePath,
-		bundleID:   "ai.canyonroad.agentsh.sysext",
+		bundleID:   "ai.canyonroad.agentsh.SysExt",
 	}
 }
 

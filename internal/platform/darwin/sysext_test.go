@@ -11,8 +11,8 @@ func TestNewSysExtManager(t *testing.T) {
 	if m == nil {
 		t.Fatal("NewSysExtManager() returned nil")
 	}
-	if m.bundleID != "ai.canyonroad.agentsh.sysext" {
-		t.Errorf("bundleID = %q, want %q", m.bundleID, "ai.canyonroad.agentsh.sysext")
+	if m.bundleID != "ai.canyonroad.agentsh.SysExt" {
+		t.Errorf("bundleID = %q, want %q", m.bundleID, "ai.canyonroad.agentsh.SysExt")
 	}
 }
 
@@ -26,8 +26,8 @@ func TestSysExtManager_Status(t *testing.T) {
 	if status == nil {
 		t.Fatal("Status() returned nil status")
 	}
-	if status.BundleID != "ai.canyonroad.agentsh.sysext" {
-		t.Errorf("BundleID = %q, want %q", status.BundleID, "ai.canyonroad.agentsh.sysext")
+	if status.BundleID != "ai.canyonroad.agentsh.SysExt" {
+		t.Errorf("BundleID = %q, want %q", status.BundleID, "ai.canyonroad.agentsh.SysExt")
 	}
 }
 
@@ -35,7 +35,7 @@ func TestSysExtManager_Status_NeverReturnsError(t *testing.T) {
 	// The Status method should never return an error - errors go in status.Error field
 	m := &SysExtManager{
 		bundlePath: "",
-		bundleID:   "ai.canyonroad.agentsh.sysext",
+		bundleID:   "ai.canyonroad.agentsh.SysExt",
 	}
 
 	status, err := m.Status()
@@ -50,7 +50,7 @@ func TestSysExtManager_Status_NeverReturnsError(t *testing.T) {
 func TestSysExtManager_Install_NoBundleError(t *testing.T) {
 	m := &SysExtManager{
 		bundlePath: "",
-		bundleID:   "ai.canyonroad.agentsh.sysext",
+		bundleID:   "ai.canyonroad.agentsh.SysExt",
 	}
 
 	err := m.Install()
@@ -159,13 +159,13 @@ func TestContains(t *testing.T) {
 		},
 		{
 			name:   "real systemextensionsctl output with bundle ID",
-			s:      "1 extension(s)\n--- com.apple.system_extension.endpoint_security\nai.canyonroad.agentsh.sysext	team_id	activated enabled",
-			substr: "ai.canyonroad.agentsh.sysext",
+			s:      "1 extension(s)\n--- com.apple.system_extension.endpoint_security\nai.canyonroad.agentsh.SysExt	team_id	activated enabled",
+			substr: "ai.canyonroad.agentsh.SysExt",
 			want:   true,
 		},
 		{
 			name:   "real systemextensionsctl output check running state",
-			s:      "ai.canyonroad.agentsh.sysext	team_id	activated enabled",
+			s:      "ai.canyonroad.agentsh.SysExt	team_id	activated enabled",
 			substr: "activated enabled",
 			want:   true,
 		},
@@ -187,7 +187,7 @@ func TestSysExtStatus_JSONTags(t *testing.T) {
 		Installed:   true,
 		Running:     true,
 		Version:     "1.0.0",
-		BundleID:    "ai.canyonroad.agentsh.sysext",
+		BundleID:    "ai.canyonroad.agentsh.SysExt",
 		ExtensionID: "ext-123",
 		Error:       "",
 	}
@@ -202,7 +202,7 @@ func TestSysExtStatus_JSONTags(t *testing.T) {
 	if status.Version != "1.0.0" {
 		t.Error("Version mismatch")
 	}
-	if status.BundleID != "ai.canyonroad.agentsh.sysext" {
+	if status.BundleID != "ai.canyonroad.agentsh.SysExt" {
 		t.Error("BundleID mismatch")
 	}
 	if status.ExtensionID != "ext-123" {
