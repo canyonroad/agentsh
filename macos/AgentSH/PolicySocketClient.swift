@@ -7,7 +7,7 @@ import Security
 class PolicySocketClient {
     static let shared = PolicySocketClient()
 
-    private let socketPath = "/Library/Application Support/agentsh/policy.sock"
+    private let socketPath = "/tmp/agentsh-policy.sock"
     private let sendQueue = DispatchQueue(label: "ai.canyonroad.agentsh.policysocket")
     private let timeout: TimeInterval = 5.0
 

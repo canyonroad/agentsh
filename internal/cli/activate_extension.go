@@ -4,7 +4,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"time"
 
@@ -19,11 +18,6 @@ func newActivateExtensionCmd() *cobra.Command {
 		Long:  "Submits an activation request for the AgentSH system extension. Requires user approval in System Settings.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mgr := darwin.NewSysExtManager()
-
-			// Pre-create the policy socket directory so the server doesn't
-			// need root at runtime. Uses root:staff 0775 — all normal macOS
-			// users are in the staff group and can create the socket file.
-			ensurePolicySocketDir()
 
 			fmt.Println("Activating AgentSH system extension...")
 			result, err := mgr.Activate()
@@ -50,22 +44,6 @@ func newActivateExtensionCmd() *cobra.Command {
 				return fmt.Errorf("activation failed")
 			}
 		},
-	}
-}
-
-// ensurePolicySocketDir creates /Library/Application Support/agentsh/ with
-// group-writable permissions so the server can create the policy socket
-// without running as root. Uses osascript to prompt for admin privileges
-// since /Library/Application Support/ is root-owned.
-func ensurePolicySocketDir() {
-	dir := "/Library/Application Support/agentsh"
-	if info, err := os.Stat(dir); err == nil && info.IsDir() {
-		return // already exists
-	}
-	fmt.Println("Creating policy socket directory (may prompt for password)...")
-	script := `do shell script "mkdir -p '/Library/Application Support/agentsh' && chown root:staff '/Library/Application Support/agentsh' && chmod 775 '/Library/Application Support/agentsh'" with administrator privileges`
-	if err := exec.Command("osascript", "-e", script).Run(); err != nil {
-		fmt.Printf("Warning: could not create %s: %v\n", dir, err)
 	}
 }
 
