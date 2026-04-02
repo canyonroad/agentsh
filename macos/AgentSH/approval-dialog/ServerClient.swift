@@ -4,7 +4,7 @@ import Foundation
 /// Client for communicating with the Go policy server via Unix socket.
 /// Provides async/await API for fetching approvals and submitting decisions.
 actor ServerClient {
-    private let socketPath = "/var/run/agentsh/policy.sock"
+    private let socketPath = "/Library/Application Support/agentsh/policy.sock"
     private let timeout: TimeInterval = 5.0
 
     /// Errors that can occur during server communication.

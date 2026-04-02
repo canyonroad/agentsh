@@ -490,5 +490,5 @@ development:
 # =============================================================================
 
 policy_socket:
-  path: "/var/run/agentsh/policy.sock"
+  path: "/Library/Application Support/agentsh/policy.sock"
   team_id: "WCKWMMKJ35"

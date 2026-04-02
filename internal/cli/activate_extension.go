@@ -52,10 +52,11 @@ func newActivateExtensionCmd() *cobra.Command {
 	}
 }
 
-// ensurePolicySocketDir creates /var/run/agentsh/ with group-writable permissions
-// so the server can create the policy socket without running as root.
+// ensurePolicySocketDir creates /Library/Application Support/agentsh/ with
+// group-writable permissions so the server can create the policy socket
+// without running as root. This path persists across reboots (unlike /var/run).
 func ensurePolicySocketDir() {
-	dir := "/var/run/agentsh"
+	dir := "/Library/Application Support/agentsh"
 	if err := exec.Command("mkdir", "-p", dir).Run(); err != nil {
 		fmt.Printf("Warning: could not create %s: %v\n", dir, err)
 		return

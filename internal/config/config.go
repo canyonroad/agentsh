@@ -1432,7 +1432,7 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 
 	// Policy socket defaults (macOS system extension IPC)
 	if cfg.PolicySocket.Path == "" {
-		cfg.PolicySocket.Path = "/var/run/agentsh/policy.sock"
+		cfg.PolicySocket.Path = "/Library/Application Support/agentsh/policy.sock"
 	}
 	if cfg.PolicySocket.TeamID == "" {
 		cfg.PolicySocket.TeamID = "WCKWMMKJ35"

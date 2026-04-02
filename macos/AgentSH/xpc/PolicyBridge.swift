@@ -9,7 +9,7 @@ enum FailBehavior {
 
 /// Bridges XPC calls to the Go policy server via Unix socket.
 class PolicyBridge: NSObject, AgentshXPCProtocol {
-    private let socketPath = "/var/run/agentsh/policy.sock"
+    private let socketPath = "/Library/Application Support/agentsh/policy.sock"
     private let timeout: TimeInterval = 5.0
 
     /// Configurable fail behavior. Default is failOpen for availability.
