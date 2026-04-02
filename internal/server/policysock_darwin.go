@@ -22,12 +22,17 @@ func (s *Server) startPolicySocket(cfg *config.Config, engine *policy.Engine) {
 		return
 	}
 
-	// Create socket directory if needed.
+	// The policy socket directory (/var/run/agentsh/) is normally pre-created
+	// by 'activate-extension' with root:staff 0775, so the server doesn't need
+	// root. If it's missing (e.g. after reboot clears /var/run), try to create
+	// it — this will work if running as root, otherwise log guidance.
 	if dir := filepath.Dir(sockPath); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			slog.Warn("policy socket disabled: cannot create directory",
-				"dir", dir, "error", err)
-			return
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			if mkErr := os.MkdirAll(dir, 0o775); mkErr != nil {
+				slog.Warn("policy socket disabled: directory missing and cannot create it (run 'agentsh activate-extension' or create it manually with: sudo mkdir -p /var/run/agentsh && sudo chown root:staff /var/run/agentsh && sudo chmod 775 /var/run/agentsh)",
+					"dir", dir, "error", mkErr)
+				return
+			}
 		}
 	}
 
