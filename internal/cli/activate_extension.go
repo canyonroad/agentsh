@@ -4,6 +4,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"time"
 
@@ -54,16 +55,18 @@ func newActivateExtensionCmd() *cobra.Command {
 
 // ensurePolicySocketDir creates /Library/Application Support/agentsh/ with
 // group-writable permissions so the server can create the policy socket
-// without running as root. This path persists across reboots (unlike /var/run).
+// without running as root. Uses osascript to prompt for admin privileges
+// since /Library/Application Support/ is root-owned.
 func ensurePolicySocketDir() {
 	dir := "/Library/Application Support/agentsh"
-	if err := exec.Command("mkdir", "-p", dir).Run(); err != nil {
-		fmt.Printf("Warning: could not create %s: %v\n", dir, err)
-		return
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return // already exists
 	}
-	// root:staff 0775 — any user in staff group can create the socket
-	exec.Command("chown", "root:staff", dir).Run()
-	exec.Command("chmod", "775", dir).Run()
+	fmt.Println("Creating policy socket directory (may prompt for password)...")
+	script := `do shell script "mkdir -p '/Library/Application Support/agentsh' && chown root:staff '/Library/Application Support/agentsh' && chmod 775 '/Library/Application Support/agentsh'" with administrator privileges`
+	if err := exec.Command("osascript", "-e", script).Run(); err != nil {
+		fmt.Printf("Warning: could not create %s: %v\n", dir, err)
+	}
 }
 
 // openFullDiskAccessSettings opens System Settings to the Full Disk Access pane.
