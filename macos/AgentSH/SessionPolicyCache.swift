@@ -29,6 +29,11 @@ struct ExecRule {
     let action: String    // "allow", "deny", "redirect"
 }
 
+struct DirectAllowEntry {
+    let host: String  // IP, hostname, or "*"
+    let port: Int     // 0 = any port
+}
+
 struct PolicyDefaults {
     let file: String     // "allow" or "deny"
     let network: String
@@ -48,11 +53,14 @@ class SessionCache {
     var dnsRules: [DNSRule]
     var execRules: [ExecRule]
     var defaults: PolicyDefaults
+    var proxyAddr: String?
+    var directAllow: [DirectAllowEntry] = []
 
     init(sessionID: String, rootPID: pid_t, version: UInt64,
          fileRules: [FileRule], networkRules: [NetworkRule],
          dnsRules: [DNSRule], execRules: [ExecRule],
-         defaults: PolicyDefaults) {
+         defaults: PolicyDefaults,
+         proxyAddr: String? = nil, directAllow: [DirectAllowEntry] = []) {
         self.sessionID = sessionID
         self.rootPID = rootPID
         self.version = version
@@ -62,6 +70,8 @@ class SessionCache {
         self.dnsRules = dnsRules
         self.execRules = execRules
         self.defaults = defaults
+        self.proxyAddr = proxyAddr
+        self.directAllow = directAllow
     }
 }
 
@@ -145,6 +155,11 @@ class SessionPolicyCache {
             guard let sid = pidToSession[pid] else { return nil }
             return sessions[sid]
         }
+    }
+
+    /// Returns the SessionCache for a session ID, or nil if not found.
+    func cacheForSession(_ sessionID: String) -> SessionCache? {
+        queue.sync { sessions[sessionID] }
     }
 
     // MARK: - Exec Depth
@@ -478,11 +493,27 @@ extension SessionCache {
             exec: defs["exec"] ?? "allow"
         )
 
-        return SessionCache(
+        var proxyAddr: String? = nil
+        if let pa = json["proxy_addr"] as? String, !pa.isEmpty {
+            proxyAddr = pa
+        }
+
+        var directAllow: [DirectAllowEntry] = []
+        if let directAllowArr = json["direct_allow"] as? [[String: Any]] {
+            directAllow = directAllowArr.compactMap { entry in
+                guard let host = entry["host"] as? String else { return nil }
+                let port = entry["port"] as? Int ?? 0
+                return DirectAllowEntry(host: host, port: port)
+            }
+        }
+
+        let cache = SessionCache(
             sessionID: sessionID, rootPID: rootPID, version: version,
             fileRules: fileRules, networkRules: networkRules,
-            dnsRules: dnsRules, execRules: execRules, defaults: defaults
+            dnsRules: dnsRules, execRules: execRules, defaults: defaults,
+            proxyAddr: proxyAddr, directAllow: directAllow
         )
+        return cache
     }
 }
 

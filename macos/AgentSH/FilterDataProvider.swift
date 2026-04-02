@@ -88,6 +88,39 @@ class FilterDataProvider: NEFilterDataProvider {
             return .allow()
         }
 
+        // Proxy enforcement: ensure session PIDs connect through the proxy
+        if blockingEnabled,
+           let cache = SessionPolicyCache.shared.cacheForSession(sessionID),
+           cache.proxyAddr != nil {
+
+            // Allow localhost connections (always pass through)
+            if !isLocalhost(ip) {
+                // Allow connections to the session's proxy
+                if let proxyAddr = cache.proxyAddr, isProxyAddr(ip, port, proxyAddr: proxyAddr) {
+                    return .allow()
+                }
+                // Allow direct-connect allowlist entries
+                else if cache.directAllow.contains(where: { matchesDirectAllow(ip: ip, port: port, entry: $0) }) {
+                    return .allow()
+                }
+                // Block direct external connections (proxy bypass)
+                else {
+                    NSLog("PROXY_BYPASS_BLOCKED: \(ip):\(port) from pid \(pid) (session \(sessionID))")
+                    PolicySocketClient.shared.send([
+                        "type": "proxy_bypass_blocked",
+                        "session_id": sessionID,
+                        "pid": Int(pid),
+                        "destination_ip": ip,
+                        "destination_port": port,
+                        "destination_host": socketFlow.remoteHostname ?? "",
+                        "process_name": processInfo.processName ?? "",
+                        "bundle_id": processInfo.bundleID ?? ""
+                    ])
+                    return .drop()
+                }
+            }
+        }
+
         // Extract domain from flow if available (SNI/hostname)
         let hostname = socketFlow.remoteHostname
 
@@ -139,6 +172,28 @@ class FilterDataProvider: NEFilterDataProvider {
                 processInfo: processInfo
             )
         }
+    }
+
+    // MARK: - Proxy Enforcement Helpers
+
+    /// Check if an IP address is localhost.
+    private func isLocalhost(_ ip: String) -> Bool {
+        return ip == "127.0.0.1" || ip == "::1" || ip == "0.0.0.0" || ip == "localhost"
+    }
+
+    /// Check if destination matches a DirectAllowEntry.
+    private func matchesDirectAllow(ip: String, port: Int, entry: DirectAllowEntry) -> Bool {
+        let hostMatch = entry.host == "*" || entry.host == ip
+        let portMatch = entry.port == 0 || entry.port == port
+        return hostMatch && portMatch
+    }
+
+    /// Check if destination is the session's proxy address.
+    private func isProxyAddr(_ ip: String, _ port: Int, proxyAddr: String) -> Bool {
+        let parts = proxyAddr.split(separator: ":")
+        guard parts.count == 2,
+              let proxyPort = Int(parts[1]) else { return false }
+        return ip == String(parts[0]) && port == proxyPort
     }
 
     // MARK: - Audit-Only Mode (Async)
