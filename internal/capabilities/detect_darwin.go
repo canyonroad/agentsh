@@ -3,20 +3,14 @@
 package capabilities
 
 import (
-	"os"
 	"os/exec"
+	"strings"
 )
 
 func buildDarwinDomains(caps map[string]any) []ProtectionDomain {
-	fuseT, _ := caps["fuse_t"].(bool)
 	esf, _ := caps["esf"].(bool)
 	networkExt, _ := caps["network_extension"].(bool)
 	hasMacwrap := checkMacwrap()
-
-	fuseDetail := "not installed"
-	if fuseT {
-		fuseDetail = "FUSE-T"
-	}
 
 	macwrapDetail := "not found"
 	if hasMacwrap {
@@ -27,8 +21,7 @@ func buildDarwinDomains(caps map[string]any) []ProtectionDomain {
 		{
 			Name: "File Protection", Weight: WeightFileProtection,
 			Backends: []DetectedBackend{
-				{Name: "fuse-t", Available: fuseT, Detail: fuseDetail, Description: "filesystem interception", CheckMethod: "binary"},
-				{Name: "esf", Available: esf, Detail: "", Description: "Endpoint Security Framework", CheckMethod: "entitlement"},
+				{Name: "esf", Available: esf, Detail: "", Description: "Endpoint Security Framework", CheckMethod: "sysext"},
 			},
 		},
 		{
@@ -81,8 +74,7 @@ func buildDarwinDomains(caps map[string]any) []ProtectionDomain {
 func Detect() (*DetectResult, error) {
 	caps := map[string]any{
 		"sandbox_exec":      true,
-		"fuse_t":            checkFuseT(),
-		"esf":               checkESF(),
+		"esf":               checkSysExtInstalled(),
 		"network_extension": checkNetworkExtension(),
 		"lima_available":    checkLima(),
 	}
@@ -115,21 +107,18 @@ func Detect() (*DetectResult, error) {
 	}, nil
 }
 
-func checkFuseT() bool {
-	// Check if FUSE-T is installed via Homebrew
-	_, err := os.Stat("/usr/local/lib/libfuse-t.dylib")
-	if err == nil {
-		return true
+// checkSysExtInstalled checks if the agentsh system extension is activated.
+// Delegates to the darwin package's exported function.
+func checkSysExtInstalled() bool {
+	// Call the shared detection function from the darwin package
+	cmd := exec.Command("systemextensionsctl", "list")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
 	}
-	// Also check ARM64 Homebrew path
-	_, err = os.Stat("/opt/homebrew/lib/libfuse-t.dylib")
-	return err == nil
-}
-
-func checkESF() bool {
-	// ESF requires entitlement - check if we're running as entitled app
-	// For now, return false as most CLI tools won't have ESF
-	return false
+	outputStr := string(output)
+	return strings.Contains(outputStr, "ai.canyonroad.agentsh.SysExt") &&
+		strings.Contains(outputStr, "activated enabled")
 }
 
 func checkNetworkExtension() bool {
@@ -156,16 +145,7 @@ func selectDarwinMode(caps map[string]any) (string, int) {
 	if lima, _ := caps["lima_available"].(bool); lima {
 		return "lima", 85
 	}
-
 	hasMacwrap := checkMacwrap()
-	fuset, _ := caps["fuse_t"].(bool)
-
-	if hasMacwrap && fuset {
-		return "dynamic-seatbelt-fuse", 75
-	}
-	if fuset {
-		return "fuse-t", 70
-	}
 	if hasMacwrap {
 		return "dynamic-seatbelt", 65
 	}
