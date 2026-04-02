@@ -73,6 +73,11 @@ type Server struct {
 	app *api.App // for lifecycle management (ptrace tracer shutdown)
 
 	kmsProvider io.Closer // audit/kms.Provider for HMAC key lifecycle
+
+	// policySockCancel cancels the policy socket server context (macOS only).
+	policySockCancel context.CancelFunc
+	// policySockDone is closed when the policy socket server goroutine exits.
+	policySockDone chan struct{}
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -508,6 +513,9 @@ func New(cfg *config.Config) (*Server, error) {
 		kmsProvider:    kmsProvider,
 	}
 
+	// Start the policy socket server (macOS only; no-op on other platforms).
+	srv.startPolicySocket(cfg, engine)
+
 	ln, err := listenHTTP(cfg)
 	if err != nil {
 		_ = store.Close()
@@ -813,12 +821,19 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.grpcServer != nil {
 			s.grpcServer.GracefulStop()
 		}
+		// Stop the policy socket server (macOS only).
+		if s.policySockCancel != nil {
+			s.policySockCancel()
+		}
 		httpErr := s.httpServer.Shutdown(shutdownCtx)
 		if s.app != nil {
 			s.app.Close()
 		}
 		if syncerDone != nil {
 			<-syncerDone
+		}
+		if s.policySockDone != nil {
+			<-s.policySockDone
 		}
 		return httpErr
 	case err := <-errCh:
@@ -836,8 +851,15 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.grpcServer != nil {
 			s.grpcServer.Stop()
 		}
+		// Stop the policy socket server (macOS only).
+		if s.policySockCancel != nil {
+			s.policySockCancel()
+		}
 		if syncerDone != nil {
 			<-syncerDone
+		}
+		if s.policySockDone != nil {
+			<-s.policySockDone
 		}
 		return fmt.Errorf("server: %w", err)
 	}
@@ -883,6 +905,13 @@ func (s *Server) Close() error {
 	}
 	if s.kmsProvider != nil {
 		_ = s.kmsProvider.Close()
+	}
+	// Shut down the policy socket server (macOS only).
+	if s.policySockCancel != nil {
+		s.policySockCancel()
+		if s.policySockDone != nil {
+			<-s.policySockDone
+		}
 	}
 	return nil
 }

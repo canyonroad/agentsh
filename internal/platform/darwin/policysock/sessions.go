@@ -129,5 +129,28 @@ func (t *SessionTracker) SessionForPID(pid int32) string {
 	return ""
 }
 
-// Compile-time interface check
+// RegisterSession implements SessionRegistrar by registering the root PID
+// for a session. This is called when the system extension registers a session.
+func (t *SessionTracker) RegisterSession(rootPID int32, sessionID string) {
+	t.RegisterProcess(sessionID, rootPID, 0)
+}
+
+// UnregisterSession implements SessionRegistrar by ending the session
+// associated with the given root PID.
+func (t *SessionTracker) UnregisterSession(rootPID int32) {
+	t.mu.Lock()
+	sessionID := t.pidToSession[rootPID]
+	t.mu.Unlock()
+
+	if sessionID != "" {
+		t.EndSession(sessionID)
+	}
+}
+
+// MutePath implements SessionRegistrar. It is a no-op in the daemon; the
+// actual es_mute_path call must happen in the system extension process.
+func (t *SessionTracker) MutePath(_ string) {}
+
+// Compile-time interface checks
 var _ SessionResolver = (*SessionTracker)(nil)
+var _ SessionRegistrar = (*SessionTracker)(nil)
