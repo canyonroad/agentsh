@@ -1,6 +1,9 @@
 // macos/SysExt/ESFClient.swift
 import Foundation
 import EndpointSecurity
+import os.log
+
+private let esLog = OSLog(subsystem: "ai.canyonroad.agentsh.SysExt", category: "ESF")
 
 /// Handles Endpoint Security Framework events.
 class ESFClient {
@@ -239,7 +242,10 @@ class ESFClient {
 /// NOTIFY handlers delegate to ESFClient.shared (best-effort).
 private func handleESEvent(client: OpaquePointer, event: UnsafePointer<es_message_t>) {
     let message = event.pointee
+    let eventType = message.event_type.rawValue
     let pid = audit_token_to_pid(message.process.pointee.audit_token)
+
+    os_log(.debug, log: esLog, "handleESEvent: type=%{public}d pid=%{public}d", eventType, pid)
 
     switch message.event_type {
     // AUTH events -- MUST always respond via es_respond_auth_result
@@ -262,13 +268,20 @@ private func handleESEvent(client: OpaquePointer, event: UnsafePointer<es_messag
     case ES_EVENT_TYPE_NOTIFY_CLOSE:
         ESFClient.shared?.handleNotifyClose(message, pid: pid)
     default:
-        break
+        // Safety: respond to any unexpected AUTH event to prevent deadline kill
+        if event.pointee.action_type == ES_ACTION_TYPE_AUTH {
+            es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+            os_log(.error, log: esLog, "UNHANDLED AUTH event type=%{public}d pid=%{public}d — allowed as safety fallback", eventType, pid)
+        }
     }
 }
 
 private func handleAuthOpen(client: OpaquePointer, event: UnsafePointer<es_message_t>, pid: pid_t) {
+    // AUTH_OPEN requires es_respond_flags_result, NOT es_respond_auth_result.
+    // Using the wrong function returns ES_RESPOND_RESULT_ERR_EVENT_TYPE and
+    // leaves the event unanswered, causing the deadline kill.
     if !SessionPolicyCache.shared.hasActiveSessions {
-        es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+        es_respond_flags_result(client, event, 0x7FFFFFFF, false)
         return
     }
 
@@ -276,9 +289,9 @@ private func handleAuthOpen(client: OpaquePointer, event: UnsafePointer<es_messa
     let (decision, _) = SessionPolicyCache.shared.evaluateFile(path: path, operation: "read", pid: pid)
 
     if decision == .deny {
-        es_respond_auth_result(client, event, ES_AUTH_RESULT_DENY, false)
+        es_respond_flags_result(client, event, 0, false)
     } else {
-        es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+        es_respond_flags_result(client, event, 0x7FFFFFFF, false)
     }
 }
 
