@@ -1,44 +1,39 @@
 // macos/SysExt/main.swift
 import Foundation
-import NetworkExtension
 import SystemExtensions
 
-class ExtensionMain: NSObject, OSSystemExtensionRequestDelegate {
-    private var filterProvider: FilterDataProvider?
-    private var dnsProvider: DNSProxyProvider?
+// 1. Initialize policy cache BEFORE ES client (avoid lazy init on ES thread)
+_ = SessionPolicyCache.shared
 
-    override init() {
-        super.init()
-        // Network Extension providers are started by the system
+// 2. Create ES client (calls es_new_client but does NOT subscribe yet)
+var esfClient: ESFClient?
+for attempt in 1...3 {
+    if let client = ESFClient.create() {
+        NSLog("AgentSH SysExt: ES client created on attempt \(attempt)")
+        esfClient = client
+        break
     }
-
-    func request(
-        _ request: OSSystemExtensionRequest,
-        didFinishWithResult result: OSSystemExtensionRequest.Result
-    ) {
-        NSLog("Extension request finished: \(result.rawValue)")
-    }
-
-    func request(
-        _ request: OSSystemExtensionRequest,
-        didFailWithError error: Error
-    ) {
-        NSLog("Extension request failed: \(error)")
-    }
-
-    func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
-        NSLog("Extension needs user approval")
-    }
-
-    func request(
-        _ request: OSSystemExtensionRequest,
-        actionForReplacingExtension existing: OSSystemExtensionProperties,
-        withExtension ext: OSSystemExtensionProperties
-    ) -> OSSystemExtensionRequest.ReplacementAction {
-        return .replace
+    if attempt < 3 {
+        NSLog("AgentSH SysExt: ES client creation attempt \(attempt) failed, retrying in 2s")
+        Thread.sleep(forTimeInterval: 2)
     }
 }
 
-// Entry point
-let main = ExtensionMain()
+guard let esfClient = esfClient else {
+    NSLog("AgentSH SysExt: ES client failed to start -- exiting (grant Full Disk Access to enable)")
+    exit(1)
+}
+
+// 3. Store strong reference BEFORE subscribing
+ESFClient.shared = esfClient
+
+// 4. Subscribe to events -- ESFClient.shared is now set, safe for NOTIFY handlers
+guard esfClient.subscribe() else {
+    NSLog("AgentSH SysExt: Failed to subscribe to ES events -- exiting")
+    exit(1)
+}
+
+// 5. Start async socket connection (lazy, non-blocking)
+PolicySocketClient.shared.connectWhenReady()
+
 dispatchMain()
