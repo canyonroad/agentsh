@@ -29,3 +29,19 @@ func NotifyPolicyUpdated() {
 		slog.Warn("notify_post failed", "status", int(status), "name", PolicyUpdatedNotification)
 	}
 }
+
+// SessionRegisteredNotification is the Darwin notification name posted when
+// a new session is registered. The Swift SysExt listens for this to know
+// a session is active and ready.
+const SessionRegisteredNotification = "ai.canyonroad.agentsh.session-registered"
+
+// NotifySessionRegistered posts a Darwin notification to signal the SysExt
+// that a new session has been registered and is ready.
+func NotifySessionRegistered() {
+	cname := C.CString(SessionRegisteredNotification)
+	defer C.free(unsafe.Pointer(cname))
+	status := C.notify_post(cname)
+	if status != 0 {
+		slog.Warn("notify_post failed", "status", int(status), "name", SessionRegisteredNotification)
+	}
+}

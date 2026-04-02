@@ -9,6 +9,7 @@ func TestPolicySnapshotResponse_JSON(t *testing.T) {
 	snap := PolicySnapshotResponse{
 		Version:   1,
 		SessionID: "session-abc",
+		RootPID:   1234,
 		FileRules: []SnapshotFileRule{
 			{Pattern: "/home/user/project/**", Operations: []string{"read", "write", "create"}, Action: "allow"},
 			{Pattern: "/etc/shadow", Operations: []string{"read"}, Action: "deny"},
@@ -19,7 +20,11 @@ func TestPolicySnapshotResponse_JSON(t *testing.T) {
 		DNSRules: []SnapshotDNSRule{
 			{Pattern: "*.evil.com", Action: "nxdomain"},
 		},
-		Defaults: &SnapshotDefaults{File: "allow", Network: "allow", DNS: "allow"},
+		ExecRules: []SnapshotExecRule{
+			{Pattern: "/usr/bin/git", Action: "redirect"},
+			{Pattern: "/usr/bin/rm", Action: "deny"},
+		},
+		Defaults: &SnapshotDefaults{File: "allow", Network: "allow", DNS: "allow", Exec: "allow"},
 	}
 	data, err := json.Marshal(snap)
 	if err != nil {
@@ -38,8 +43,20 @@ func TestPolicySnapshotResponse_JSON(t *testing.T) {
 	if decoded.FileRules[1].Action != "deny" {
 		t.Fatalf("expected deny, got %s", decoded.FileRules[1].Action)
 	}
+	if len(decoded.ExecRules) != 2 {
+		t.Fatalf("expected 2 exec rules, got %d", len(decoded.ExecRules))
+	}
+	if decoded.ExecRules[0].Action != "redirect" {
+		t.Fatalf("expected redirect, got %s", decoded.ExecRules[0].Action)
+	}
+	if decoded.RootPID != 1234 {
+		t.Fatalf("expected root_pid 1234, got %d", decoded.RootPID)
+	}
 	if decoded.Defaults == nil || decoded.Defaults.DNS != "allow" {
 		t.Fatalf("expected allow, got %v", decoded.Defaults)
+	}
+	if decoded.Defaults == nil || decoded.Defaults.Exec != "allow" {
+		t.Fatalf("expected exec default allow, got %v", decoded.Defaults)
 	}
 }
 

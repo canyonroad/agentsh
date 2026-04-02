@@ -7,9 +7,11 @@ package xpc
 type PolicySnapshotResponse struct {
 	Version      uint64                `json:"version"`
 	SessionID    string                `json:"session_id"`
+	RootPID      int32                 `json:"root_pid"`
 	FileRules    []SnapshotFileRule    `json:"file_rules"`
 	NetworkRules []SnapshotNetworkRule `json:"network_rules"`
 	DNSRules     []SnapshotDNSRule     `json:"dns_rules"`
+	ExecRules    []SnapshotExecRule    `json:"exec_rules"`
 	Defaults     *SnapshotDefaults     `json:"defaults"`
 }
 
@@ -34,9 +36,16 @@ type SnapshotDNSRule struct {
 	Action  string `json:"action"`
 }
 
+// SnapshotExecRule represents a single exec rule in the snapshot.
+type SnapshotExecRule struct {
+	Pattern string `json:"pattern"`
+	Action  string `json:"action"` // "allow", "deny", "redirect"
+}
+
 // SnapshotDefaults holds the default decision for each resource category.
 type SnapshotDefaults struct {
 	File    string `json:"file"`
 	Network string `json:"network"`
 	DNS     string `json:"dns"`
+	Exec    string `json:"exec"`
 }

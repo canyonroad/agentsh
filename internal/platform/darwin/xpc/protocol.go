@@ -30,6 +30,9 @@ const (
 
 	// Policy snapshot request type (Swift side caches rules locally)
 	RequestTypeFetchPolicySnapshot RequestType = "fetch_policy_snapshot"
+
+	// Exec redirect notification (fire-and-forget from SysExt)
+	RequestTypeExecRedirectNotify RequestType = "exec_redirect_notify"
 )
 
 // PolicyRequest is sent from the XPC bridge to the Go policy server.
@@ -104,11 +107,13 @@ type PolicyResponse struct {
 	Approvals []ApprovalResponse `json:"approvals,omitempty"` // Pending approval requests
 
 	// Policy snapshot fields (returned by fetch_policy_snapshot)
-	SnapshotVersion uint64               `json:"version,omitempty"`
-	FileRules       []SnapshotFileRule   `json:"file_rules,omitempty"`
-	NetworkRules      []SnapshotNetworkRule `json:"network_rules,omitempty"`
-	DNSRules          []SnapshotDNSRule    `json:"dns_rules,omitempty"`
-	Defaults          *SnapshotDefaults    `json:"defaults,omitempty"`
+	SnapshotVersion uint64                `json:"version,omitempty"`
+	RootPID         int32                 `json:"root_pid,omitempty"`
+	FileRules       []SnapshotFileRule    `json:"file_rules,omitempty"`
+	NetworkRules    []SnapshotNetworkRule `json:"network_rules,omitempty"`
+	DNSRules        []SnapshotDNSRule     `json:"dns_rules,omitempty"`
+	ExecRules       []SnapshotExecRule    `json:"exec_rules,omitempty"`
+	Defaults        *SnapshotDefaults     `json:"defaults,omitempty"`
 }
 
 // ExecContext carries process context from the ESF event for exec redirect.

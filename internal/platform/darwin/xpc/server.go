@@ -345,6 +345,9 @@ func (s *Server) handleRequest(req *PolicyRequest) PolicyResponse {
 		}
 		return PolicyResponse{Allow: true}
 
+	case RequestTypeExecRedirectNotify:
+		return s.handleExecRedirectNotify(req)
+
 	default:
 		return PolicyResponse{Allow: false, Message: "unknown request type"}
 	}
@@ -387,6 +390,19 @@ func (s *Server) handleExecCheck(req *PolicyRequest) PolicyResponse {
 		ExecDecision: result.Decision,
 		Message:      result.Message,
 	}
+}
+
+func (s *Server) handleExecRedirectNotify(req *PolicyRequest) PolicyResponse {
+	s.mu.Lock()
+	h := s.execHandler
+	s.mu.Unlock()
+	if h != nil {
+		go func() {
+			h.CheckExec(req.Path, req.Args, req.PID, req.ParentPID, req.SessionID,
+				ExecContext{TTYPath: req.TTYPath, CWDPath: req.CWDPath})
+		}()
+	}
+	return PolicyResponse{Allow: true}
 }
 
 func (s *Server) handlePNACLCheck(req *PolicyRequest) PolicyResponse {
