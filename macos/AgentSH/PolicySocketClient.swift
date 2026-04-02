@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// Async Unix socket client for communicating with the Go policy server.
 /// Replaces the dead XPC Service connection for the SysExt.
@@ -114,6 +115,11 @@ class PolicySocketClient {
         }
         guard connectResult == 0 else { throw SocketError.connectionFailed }
 
+        // Validate the server's code signing
+        guard validateServer(fd: fd) else {
+            throw SocketError.connectionFailed
+        }
+
         // Timeouts
         var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
@@ -155,6 +161,45 @@ class PolicySocketClient {
         // Mark as connected on success
         OSAtomicCompareAndSwap32(0, 1, &_connected)
         return response
+    }
+
+    /// Validates that the server process at the other end of the socket is signed
+    /// by the expected team ID.
+    private func validateServer(fd: Int32) -> Bool {
+        // Get peer PID via LOCAL_PEERPID
+        var peerPID: pid_t = 0
+        var peerPIDLen = socklen_t(MemoryLayout<pid_t>.size)
+        let result = getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &peerPID, &peerPIDLen)
+        guard result == 0, peerPID > 0 else {
+            NSLog("PolicySocketClient: Failed to get peer PID")
+            return false
+        }
+
+        // Create SecCode for the peer process
+        let attributes = [kSecGuestAttributePid: peerPID] as CFDictionary
+        var code: SecCode?
+        let status = SecCodeCopyGuestWithAttributes(nil, attributes, [], &code)
+        guard status == errSecSuccess, let code = code else {
+            NSLog("PolicySocketClient: Failed to get SecCode for pid %d: %d", peerPID, status)
+            return false
+        }
+
+        // Validate code signing against our team ID
+        let requirementStr = "anchor apple generic and certificate leaf[subject.OU] = \"WCKWMMKJ35\""
+        var requirement: SecRequirement?
+        let reqStatus = SecRequirementCreateWithString(requirementStr as CFString, [], &requirement)
+        guard reqStatus == errSecSuccess, let requirement = requirement else {
+            NSLog("PolicySocketClient: Failed to create requirement: %d", reqStatus)
+            return false
+        }
+
+        let checkStatus = SecCodeCheckValidityWithErrors(code, [], requirement, nil)
+        if checkStatus != errSecSuccess {
+            NSLog("PolicySocketClient: Server code signing validation FAILED for pid %d: %d", peerPID, checkStatus)
+            return false
+        }
+
+        return true
     }
 
     enum SocketError: Error {
