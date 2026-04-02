@@ -3,45 +3,13 @@
 
 package fuse
 
-import "os"
-
-// FUSE-T detection paths
-var fuseTpaths = []string{
-	"/usr/local/lib/libfuse-t.dylib",
-	"/opt/homebrew/lib/libfuse-t.dylib",
-	"/Library/Frameworks/FUSE-T.framework",
-}
-
-// macFUSE detection paths (fallback)
-var macFUSEpaths = []string{
-	"/Library/Filesystems/macfuse.fs",
-	"/Library/Frameworks/macFUSE.framework",
-}
+// macOS uses the Endpoint Security Framework (via system extension) for file
+// monitoring instead of FUSE. FUSE mounting is not used on macOS.
 
 func checkAvailable() bool {
-	for _, path := range fuseTpaths {
-		if _, err := os.Stat(path); err == nil {
-			return true
-		}
-	}
-	for _, path := range macFUSEpaths {
-		if _, err := os.Stat(path); err == nil {
-			return true
-		}
-	}
 	return false
 }
 
 func detectImplementation() string {
-	for _, path := range fuseTpaths {
-		if _, err := os.Stat(path); err == nil {
-			return "fuse-t"
-		}
-	}
-	for _, path := range macFUSEpaths {
-		if _, err := os.Stat(path); err == nil {
-			return "macfuse"
-		}
-	}
 	return "none"
 }
