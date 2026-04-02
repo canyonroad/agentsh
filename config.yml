@@ -484,11 +484,3 @@ development:
   pprof:
     enabled: false
     addr: "localhost:6060"
-
-# =============================================================================
-# POLICY SOCKET (macOS System Extension IPC)
-# =============================================================================
-
-policy_socket:
-  path: "/Library/Application Support/agentsh/policy.sock"
-  team_id: "WCKWMMKJ35"
