@@ -311,7 +311,7 @@ jobs:
           codesign --force --sign "$SIGNING_IDENTITY" \
             --entitlements macos/AgentSH/SysExt.entitlements \
             --options runtime --timestamp \
-            "build/AgentSH.app/Contents/Library/SystemExtensions/SysExt.systemextension"
+            "build/AgentSH.app/Contents/Library/SystemExtensions/ai.canyonroad.agentsh.SysExt.systemextension"
 
           # 2. XPC Service
           codesign --force --sign "$SIGNING_IDENTITY" \
