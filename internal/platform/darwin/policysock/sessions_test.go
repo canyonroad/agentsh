@@ -1,3 +1,5 @@
+//go:build darwin
+
 // internal/platform/darwin/policysock/sessions_test.go
 package policysock
 
