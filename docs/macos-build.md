@@ -1,57 +1,36 @@
 # macOS Build Guide
 
-This guide covers building agentsh for macOS, including both FUSE-T (standard) and ESF+NE (enterprise) modes.
+> **Alpha:** The ESF+NE build path is in Alpha. Build steps, signing requirements, and bundle structure may change between releases.
+
+This guide covers building agentsh for macOS using ESF (Endpoint Security Framework) + NE (Network Extension).
+
+## Install via Homebrew
+
+The easiest way to install on macOS:
+
+```bash
+brew tap canyonroad/tap
+brew install --cask agentsh
+```
+
+After installation, approve the system extension in **System Settings > General > Login Items & Extensions**.
 
 ## Build Modes
 
 | Mode | Security Score | Requirements | Use Case |
 |------|:-------------:|--------------|----------|
-| **ESF+NE** | 90% | ESF entitlement (Apple approval) + NE (standard), Xcode 15+ | Enterprise/commercial products |
-| **FUSE-T** | 70% | `brew install fuse-t`, CGO | Development, personal use |
+| **ESF+NE** | 90% | Xcode 15+ | Full enforcement (Alpha) |
 | **Observation** | 25% | None | Testing, audit-only |
 
-## FUSE-T Build (Standard)
+## ESF+NE Build (Enterprise — Alpha)
 
-FUSE-T provides file policy enforcement without requiring Apple entitlements.
-
-### Prerequisites
-
-```bash
-# Install FUSE-T
-brew install fuse-t
-
-# Verify installation
-ls /usr/local/lib/libfuse-t.dylib
-```
-
-### Build
-
-```bash
-# Build with CGO (required for FUSE-T)
-CGO_ENABLED=1 go build -o bin/agentsh ./cmd/agentsh
-
-# Build shell shim
-go build -o bin/agentsh-shell-shim ./cmd/agentsh-shell-shim
-```
-
-### Verify
-
-```bash
-./bin/agentsh --version
-./bin/agentsh server --help
-```
-
-## ESF+NE Build (Enterprise)
-
-ESF+NE provides near-Linux-level enforcement using Apple's Endpoint Security Framework and Network Extension.
+ESF+NE provides near-Linux-level enforcement using Apple's Endpoint Security Framework and Network Extension. This build path is in Alpha — expect manual setup steps and breaking changes between releases.
 
 ### Prerequisites
 
-1. **Apple Developer Program membership** - Required for entitlements
-2. **ESF entitlement** - Requires Apple approval with business justification
-3. **Network Extension entitlement** - Standard capability (enable in Xcode, no approval needed since Nov 2016)
-4. **Xcode 15+** - For building Swift components
-5. **Code signing identity** - Developer ID or Apple Development certificate
+1. **Xcode 15+** - For building Swift components
+2. **Code signing identity** - Developer ID or Apple Development certificate
+3. **Provisioning profile** - With ESF and Network Extension entitlements
 
 ### Verify Prerequisites
 
@@ -155,8 +134,7 @@ This is a one-time approval per machine.
 The ESF+NE binary automatically detects available entitlements:
 
 1. **With ESF + NE entitlements** - Uses ESF for file/process, Network Extension for network
-2. **Without ESF entitlement** - Falls back to FUSE-T mode (NE alone not sufficient)
-3. **Without FUSE-T** - Falls back to observation-only mode
+2. **Without entitlements** - Falls back to observation-only mode
 
 No code changes required - fallback is automatic at runtime.
 
@@ -180,8 +158,8 @@ SIGNING_IDENTITY="Apple Development: you@email.com (TEAMID)" make sign-bundle
 ```
 
 **"Entitlement not allowed"**
-- ESF entitlement requires Apple approval - apply at developer.apple.com with business justification
-- Network Extension is a standard capability - enable in Xcode Signing & Capabilities (no approval needed)
+- Verify the provisioning profile is embedded in the app bundle
+- Network Extension is a standard capability - enable in Xcode Signing & Capabilities
 
 ### Runtime Errors
 
@@ -193,7 +171,7 @@ SIGNING_IDENTITY="Apple Development: you@email.com (TEAMID)" make sign-bundle
 - Check Console.app for XPC errors
 
 **"ESF client initialization failed"**
-- App must be signed with valid ESF entitlement (requires Apple approval)
+- App must be signed with valid ESF entitlement and provisioning profile
 - Check code signing: `codesign -dv --entitlements - AgentSH.app`
 
 ## Cross-Compilation
@@ -208,7 +186,7 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o agentsh-darwin-arm64 ./cmd/ag
 GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o agentsh-darwin-amd64 ./cmd/agentsh
 ```
 
-**Note:** CGO_ENABLED=0 means no FUSE-T support. The binary will run in observation-only mode. Swift components (ESF+NE) must be built on macOS.
+**Note:** CGO_ENABLED=0 means no ESF support. The binary will run in observation-only mode. Swift components (ESF+NE) must be built on macOS.
 
 ## See Also
 

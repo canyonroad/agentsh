@@ -26,12 +26,9 @@ Security enforcement is provided through a combination of:
 
 | Mode | Requirements | Protection Level | Description |
 |------|--------------|------------------|-------------|
-| `esf` | ESF entitlement (Apple approval) | ~90% | Endpoint Security Framework |
+| `esf` | System extension approved | ~90% | Endpoint Security Framework (Alpha) |
 | `lima` | limactl available | ~85% | Full Linux enforcement inside Lima VM |
-| `dynamic-seatbelt-fuse` | agentsh-macwrap + FUSE-T | ~75% | Policy-driven seatbelt + FUSE-T file interception |
-| `fuse-t` | FUSE-T installed | ~70% | FUSE-T with static sandbox profile |
-| `dynamic-seatbelt` | agentsh-macwrap | ~65% | Policy-driven seatbelt without FUSE-T |
-| `sandbox-exec` | (built-in) | ~60% | Static sandbox profile only |
+| `observation` | None | ~25% | Observation-only, no enforcement |
 
 Dynamic seatbelt modes generate SBPL profiles from policy at session start — replacing blanket allows with deny-default + specific allows for file paths, exec paths, Mach services, and network. Extension tokens provide runtime file access grants. See `docs/superpowers/specs/2026-03-23-dynamic-seatbelt-design.md` for details.
 

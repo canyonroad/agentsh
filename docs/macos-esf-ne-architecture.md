@@ -1,5 +1,7 @@
 # macOS ESF+NE Architecture
 
+> **Alpha Status:** The ESF+NE implementation is in active development and should be considered Alpha-quality. The architecture described here is functional end-to-end but expect rough edges, manual setup steps, and breaking changes between releases.
+
 This document describes the technical architecture of the macOS ESF (Endpoint Security Framework) + NE (Network Extension) implementation.
 
 ## Overview
@@ -306,10 +308,7 @@ At startup, the Go binary detects available enforcement mechanisms:
 // Check if ESF+NE is available
 if sysext.IsAvailable() && sysext.IsApproved() {
     // Use ESF+NE for full enforcement
-    startXPCServer()
-} else if fusetAvailable() {
-    // Fall back to FUSE-T
-    mountFUSE()
+    startPolicySocketServer()
 } else {
     // Observation only
     startFSEvents()

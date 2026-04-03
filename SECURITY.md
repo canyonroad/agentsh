@@ -569,11 +569,13 @@ If an approval request times out, the operation is denied. However, a patient at
 
 ### macOS (darwin)
 
+> **Alpha:** Native macOS enforcement via ESF+NE is in Alpha. It is functional end-to-end but not production-ready. For production macOS deployments, use Lima VM mode or Linux.
+
 macOS has significantly reduced security enforcement compared to Linux due to platform limitations:
 
 | Component | Linux | macOS | Impact |
 |-----------|-------|-------|--------|
-| File blocking | FUSE (enforced) | FUSE-T (enforced with CGO) | **Enforced when built with CGO** |
+| File blocking | FUSE (enforced) | ESF (enforced via sysext) | **Enforced with system extension** |
 | Network blocking | eBPF/iptables | pf (loopback only) | **Network policies incomplete** |
 | Process isolation | Namespaces | sandbox-exec (minimal) | **Minimal isolation via SBPL profiles** |
 | Resource limits | cgroups v2 | None | Memory/CPU limits not enforced |
@@ -584,25 +586,18 @@ macOS has significantly reduced security enforcement compared to Linux due to pl
 
 | Tier | Score | Requirements | Capabilities |
 |------|-------|--------------|--------------|
-| Enterprise | 95% | ESF (Apple approval) + Network Extension | Full enforcement |
-| Full | 75% | FUSE-T + root | File + network blocking |
+| Enterprise | 90% | ESF + Network Extension (Alpha) | Full enforcement |
 | Network Only | 50% | pf + root | Network only, file observation |
 | Monitor Only | 25% | None | Observation only |
 | Minimal | 10% | None | Command logging only |
 
-**Entitlement requirements:**
-- **ESF (Endpoint Security):** Requires Apple approval - submit business justification via Developer Portal
-- **Network Extension:** Standard capability since November 2016 - enable in Xcode, no Apple approval needed
-
 **Current implementation status:**
-- FUSE-T mounting: **Implemented** (requires CGO + FUSE-T: `brew install fuse-t`)
-- FSEvents fallback: **Observation only** (cannot block, used when CGO unavailable)
-- pf network rules: **Loopback only** (real interfaces not intercepted)
-- Endpoint Security Framework: **Implemented** (requires Apple approval for ESF entitlement)
-- Network Extension: **Implemented** (standard capability - no Apple approval needed)
+- Endpoint Security Framework: **Implemented** (Alpha — file and process monitoring via AUTH/NOTIFY events)
+- Network Extension: **Implemented** (FilterDataProvider + DNSProxyProvider)
 - sandbox-exec: **Implemented** (SBPL-based process sandboxing, deprecated but functional)
+- FSEvents fallback: **Observation only** (used when sysext is not installed)
 
-**ESF+NE Enterprise Mode:**
+**ESF+NE Enterprise Mode (Alpha):**
 
 When running with ESF entitlements (requires Apple approval) and Network Extension (standard capability), agentsh provides near-Linux-level enforcement:
 - ESF (Endpoint Security Framework) intercepts file and process events with AUTH mode blocking
@@ -704,13 +699,10 @@ sandbox:
 Default allow list includes essential services: system logger, CoreServices, launch services, SecurityServer, and cfprefsd. See [macOS XPC Sandbox](docs/macos-xpc-sandbox.md) for full documentation.
 
 **Recommendations for macOS deployments:**
-- **Enterprise:** Use ESF+NE mode for full enforcement (ESF requires Apple approval; NE is standard capability)
-- **Standard:** Install FUSE-T (`brew install fuse-t`) for file policy enforcement
-- Build with CGO enabled for FUSE-T support: `CGO_ENABLED=1 go build`
-- ESF+NE mode automatically falls back to FUSE-T if entitlements are unavailable
-- Use containers (Docker/Podman) with Linux for full enforcement if entitlements unavailable
-- Without FUSE-T or ESF, treat macOS as audit/observation mode only
-- Do not rely on network policy enforcement without ESF+NE or pf configuration
+- **ESF+NE (Alpha):** Install via `brew tap canyonroad/tap && brew install --cask agentsh` for full enforcement
+- Use containers (Docker/Podman) with Linux or Lima VM for production workloads
+- Without the system extension, macOS operates in observation-only mode
+- Do not rely on network policy enforcement without ESF+NE
 - Consider the security score when evaluating risk
 
 ### macOS + Lima VM
@@ -719,7 +711,7 @@ For production macOS deployments requiring full Linux-level security, agentsh su
 
 | Component | macOS Native | macOS + Lima | Impact |
 |-----------|--------------|--------------|--------|
-| File blocking | FUSE-T | FUSE3 in VM | ✅ **Full enforcement** |
+| File blocking | ESF (sysext) | FUSE3 in VM | ✅ **Full enforcement** |
 | Network blocking | pf (limited) | iptables DNAT | ✅ **Full enforcement** |
 | Process isolation | None | Linux namespaces | ✅ **Full isolation** |
 | Resource limits | None | cgroups v2 | ✅ **Full enforcement** |
@@ -829,7 +821,7 @@ WinFsp provides FUSE-style filesystem mounting on Windows using the shared `inte
 
 | Feature | Description |
 |---------|-------------|
-| Cross-platform code | Same FUSE implementation works on macOS (FUSE-T) and Windows (WinFsp) |
+| Cross-platform code | Same FUSE implementation works on Linux (FUSE3) and Windows (WinFsp) |
 | Soft-delete | Files moved to trash instead of permanent deletion |
 | Policy enforcement | Same policy engine as minifilter with file operation checks |
 | Minifilter coexistence | Process exclusion prevents double-interception when both are active |

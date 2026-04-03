@@ -1,6 +1,6 @@
 # agentsh
 
-> **macOS note:** We are currently working with Apple to obtain the Endpoint Security Framework entitlements required for full enforcement on macOS. Until then, the macOS binary has limited security capabilities (FUSE-T file monitoring only, no process or network enforcement). For production use, we recommend Linux.
+> **macOS note:** Native macOS enforcement via ESF (Endpoint Security Framework) + NE (Network Extension) is in **Alpha**. It works end-to-end — file, process, and network events flow through the system extension to the Go policy engine — but expect rough edges and breaking changes between releases. For production use today, we recommend Linux.
 >
 > **Windows note:** We are working to get the minifilter drivers signed. Until then, only Windows WSL2 mode is fully supported for production use.
 
@@ -8,7 +8,7 @@
 
 agentsh sits *under* your agent/tooling—intercepting **file**, **network**, **process**, and **signal** activity (including subprocess trees), enforcing the policy you define, and emitting **structured audit events**.
 
-> **Platform note:** Linux provides full enforcement (100% security score). macOS supports multiple tiers: **ESF+NE** (90% score, requires Apple entitlements) for enterprise deployments, **Dynamic Seatbelt + FUSE-T** (75% score) for development with automatic policy-driven sandbox profiles, **FUSE-T** (70% score) as a static sandbox fallback, and **Dynamic Seatbelt only** (65% score) without FUSE-T. Windows supports native enforcement via minifilter driver with **AppContainer** sandbox isolation (85% score). See the [Platform Comparison Matrix](docs/platform-comparison.md) for details.
+> **Platform note:** Linux provides full enforcement (100% security score). macOS **ESF+NE** (90% score) is in **Alpha** — functional but not production-ready. Windows **WSL2** provides full Linux-equivalent enforcement (100% score); native Windows via minifilter driver + **AppContainer** (85% score) is pending driver signing. See the [Platform Comparison Matrix](docs/platform-comparison.md) for details.
 
 ---
 
@@ -87,7 +87,16 @@ Containers isolate the host surface; agentsh adds **in-container runtime visibil
 
 ### Install
 
-**From a GitHub Release**
+**macOS (Homebrew)**
+
+```bash
+brew tap canyonroad/tap
+brew install --cask agentsh
+```
+
+This installs the AgentSH app bundle with the ESF+NE system extension. After installation you'll be prompted to approve the system extension in **System Settings > General > Login Items & Extensions**.
+
+**Linux (from a GitHub Release)**
 
 Download the `.deb`, `.rpm`, or `.apk` for your platform from the [releases page](https://github.com/erans/agentsh/releases).
 
@@ -106,10 +115,7 @@ sudo install -m 0755 bin/agentsh bin/agentsh-shell-shim /usr/local/bin
 **From source (macOS)**
 
 ```bash
-# FUSE-T mode (standard, requires brew install fuse-t)
-CGO_ENABLED=1 go build -o bin/agentsh ./cmd/agentsh
-
-# ESF+NE enterprise mode (requires Xcode 15+, Apple entitlements)
+# ESF+NE mode (full enforcement — Alpha, requires Xcode 15+)
 make build-macos-enterprise
 ```
 
@@ -676,7 +682,7 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 * **Platform comparison:** [`docs/platform-comparison.md`](docs/platform-comparison.md) - feature support, security scores, performance by platform
 * **Bubblewrap vs agentsh:** [`docs/bubblewrap-vs-agentsh-comparison.md`](docs/bubblewrap-vs-agentsh-comparison.md) - comparison with Bubblewrap for Linux container sandboxing
 * **LLM Proxy & DLP:** [`docs/llm-proxy.md`](docs/llm-proxy.md) - embedded proxy configuration, DLP patterns, usage tracking
-* **macOS build guide:** [`docs/macos-build.md`](docs/macos-build.md) - FUSE-T and ESF+NE build instructions
+* **macOS build guide:** [`docs/macos-build.md`](docs/macos-build.md) - ESF+NE build instructions
 * **macOS ESF+NE architecture:** [`docs/macos-esf-ne-architecture.md`](docs/macos-esf-ne-architecture.md) - System Extension, XPC, and deployment details
 * **macOS XPC sandbox:** [`docs/macos-xpc-sandbox.md`](docs/macos-xpc-sandbox.md) - XPC/Mach IPC control for sandboxed processes
 * Environment variables (all `AGENTSH_*` overrides, auto-start toggles, transport selection): [`docs/spec.md` &sect;15.3 "Environment Variables"](docs/spec.md#153-environment-variables)

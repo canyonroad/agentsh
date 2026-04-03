@@ -1,8 +1,8 @@
 # macOS FSKit Evaluation
 
 **Date:** 2026-01-14
-**Status:** Not Adopted
-**Decision:** Continue using FUSE-T for macOS filesystem enforcement
+**Status:** Superseded
+**Decision:** ~~Continue using FUSE-T for macOS filesystem enforcement~~ — FUSE-T was subsequently removed in favor of ESF (Endpoint Security Framework) for all macOS file monitoring. This document is retained for historical context.
 
 ## Summary
 
