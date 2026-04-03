@@ -5,8 +5,9 @@ package darwin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
-	"path/filepath"
+	"os"
 	"runtime"
 	"testing"
 	"time"
@@ -36,6 +37,19 @@ func (c *integrationPolicyChecker) CheckCommand(cmd string, args []string) ESExe
 		Rule:              dec.Rule,
 		Message:           dec.Message,
 	}
+}
+
+// shortSockPath returns a short Unix socket path under /tmp to avoid the
+// 104-character limit on macOS. t.TempDir() paths are too long.
+func shortSockPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "estest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := fmt.Sprintf("%s/p.sock", dir)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return sock
 }
 
 // waitForIntegrationServer waits for the XPC server to be ready.
@@ -74,7 +88,7 @@ func TestESExecHandler_XPCIntegration(t *testing.T) {
 
 	// Create XPC server with PolicyAdapter as PolicyHandler
 	// and ESExecHandler as ExecHandler.
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	sockPath := shortSockPath(t)
 	adapter := policysock.NewPolicyAdapter(engine, nil)
 	srv := policysock.NewServer(sockPath, adapter)
 	srv.SetExecHandler(execHandler)
@@ -194,7 +208,7 @@ func TestESExecHandler_XPCIntegration_EnforcedApprove(t *testing.T) {
 	checker := &integrationPolicyChecker{engine: engine}
 	execHandler := NewESExecHandler(checker, "")
 
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	sockPath := shortSockPath(t)
 	adapter := policysock.NewPolicyAdapter(engine, nil)
 	srv := policysock.NewServer(sockPath, adapter)
 	srv.SetExecHandler(execHandler)
@@ -253,7 +267,7 @@ func TestESExecHandler_XPCIntegration_ShadowMode(t *testing.T) {
 	checker := &integrationPolicyChecker{engine: engine}
 	execHandler := NewESExecHandler(checker, "")
 
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	sockPath := shortSockPath(t)
 	adapter := policysock.NewPolicyAdapter(engine, nil)
 	srv := policysock.NewServer(sockPath, adapter)
 	srv.SetExecHandler(execHandler)
@@ -304,7 +318,7 @@ func TestESExecHandler_XPCIntegration_NilPolicyChecker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	sockPath := shortSockPath(t)
 	adapter := policysock.NewPolicyAdapter(engine, nil)
 	srv := policysock.NewServer(sockPath, adapter)
 	srv.SetExecHandler(execHandler)

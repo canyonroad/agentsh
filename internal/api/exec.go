@@ -295,8 +295,11 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 			extra.cmdResolver.RegisterCommand(int32(cmd.Process.Pid), cmdID)
 		}
 		// Register PID→session for ESF event attribution and notify sysext.
+		// Register the server PID first so the sysext can track all children
+		// via FORK events (the server is the parent of all command processes).
 		if extra != nil && extra.sessionTracker != nil {
-			extra.sessionTracker.RegisterProcess(s.ID, int32(cmd.Process.Pid), int32(os.Getppid()))
+			extra.sessionTracker.RegisterProcess(s.ID, int32(os.Getpid()), 0)
+			extra.sessionTracker.RegisterProcess(s.ID, int32(cmd.Process.Pid), int32(os.Getpid()))
 			notifySessionRegistered()
 		}
 		pgid = getProcessGroupID(cmd.Process.Pid)
