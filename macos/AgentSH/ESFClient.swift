@@ -228,9 +228,6 @@ class ESFClient {
 
 // MARK: - Free Function Helpers
 
-/// ISO8601 formatter for event timestamps (shared across free functions)
-private let eventISOFormatter = ISO8601DateFormatter()
-
 /// Build and send a file event dict via the persistent event stream.
 /// This is a free function (not a method on ESFClient) so AUTH handlers can call it.
 private func sendFileEvent(
@@ -253,7 +250,7 @@ private func sendFileEvent(
         "session_id": sessionID ?? "",
         "decision": decision,
         "rule": rule ?? "",
-        "timestamp": eventISOFormatter.string(from: Date())
+        "timestamp": ISO8601DateFormatter().string(from: Date())
     ]
     if let action = action {
         dict["action"] = action
