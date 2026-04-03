@@ -21,9 +21,6 @@ class ESFClient {
     private var auditTokenCache: [pid_t: audit_token_t] = [:]
     private let cacheQueue = DispatchQueue(label: "ai.canyonroad.agentsh.audittokencache")
 
-    /// Shared ISO8601 formatter for event timestamps (thread-safe)
-    private static let isoFormatter = ISO8601DateFormatter()
-
     private init(client: OpaquePointer) {
         self.client = client
 
@@ -214,25 +211,59 @@ class ESFClient {
 
         let path = String(cString: message.event.close.target.pointee.path.data)
 
-        // Build event payload and base64-encode it to match Go's PolicyRequest.EventData ([]byte)
-        let eventPayload: [String: Any] = [
-            "type": "file_write",
-            "path": path,
-            "operation": "close_modified",
-            "pid": Int(pid),
-            "session_id": sessionID,
-            "timestamp": Self.isoFormatter.string(from: Date())
-        ]
-        if let data = try? JSONSerialization.data(withJSONObject: eventPayload) {
-            PolicySocketClient.shared.send([
-                "type": "event",
-                "event_data": data.base64EncodedString()
-            ])
-        }
+        sendFileEvent(
+            eventType: "file_write",
+            path: path,
+            operation: "close_modified",
+            pid: pid,
+            sessionID: sessionID,
+            decision: "observed",
+            rule: nil
+        )
     }
 
     // TODO: Add handleNotifySetattr when macOS 26 SDK is available in CI.
     // It should subscribe to ES_EVENT_TYPE_NOTIFY_SETATTR and emit file_chown/file_chmod events.
+}
+
+// MARK: - Free Function Helpers
+
+/// ISO8601 formatter for event timestamps (shared across free functions)
+private let eventISOFormatter = ISO8601DateFormatter()
+
+/// Build and send a file event dict via the persistent event stream.
+/// This is a free function (not a method on ESFClient) so AUTH handlers can call it.
+private func sendFileEvent(
+    eventType: String,
+    path: String,
+    operation: String,
+    pid: pid_t,
+    sessionID: String?,
+    decision: String,
+    rule: String?,
+    action: String? = nil,
+    extraFields: [String: Any]? = nil
+) {
+    var dict: [String: Any] = [
+        "type": "file_event",
+        "event_type": eventType,
+        "path": path,
+        "operation": operation,
+        "pid": Int(pid),
+        "session_id": sessionID ?? "",
+        "decision": decision,
+        "rule": rule ?? "",
+        "timestamp": eventISOFormatter.string(from: Date())
+    ]
+    if let action = action {
+        dict["action"] = action
+    }
+    if let extra = extraFields {
+        for (k, v) in extra {
+            dict[k] = v
+        }
+    }
+    PolicySocketClient.shared.sendEvent(dict)
 }
 
 // MARK: - Free Function Event Handlers (AUTH)
@@ -286,12 +317,35 @@ private func handleAuthOpen(client: OpaquePointer, event: UnsafePointer<es_messa
     }
 
     let path = String(cString: event.pointee.event.open.file.pointee.path.data)
-    let (decision, _) = SessionPolicyCache.shared.evaluateFile(path: path, operation: "read", pid: pid)
+
+    // Determine operation from open flags
+    let fflag = event.pointee.event.open.fflag
+    let operation: String
+    if (fflag & UInt32(FWRITE)) != 0 {
+        operation = "write"
+    } else {
+        operation = "read"
+    }
+
+    let (decision, sessionID) = SessionPolicyCache.shared.evaluateFile(path: path, operation: operation, pid: pid)
 
     if decision == .deny {
         es_respond_flags_result(client, event, 0, false)
     } else {
         es_respond_flags_result(client, event, 0x7FFFFFFF, false)
+    }
+
+    // Forward event for PIDs in active sessions
+    if let sessionID = sessionID {
+        sendFileEvent(
+            eventType: "file_open",
+            path: path,
+            operation: operation,
+            pid: pid,
+            sessionID: sessionID,
+            decision: decision == .deny ? "deny" : "allow",
+            rule: nil
+        )
     }
 }
 
@@ -311,11 +365,24 @@ private func handleAuthCreate(client: OpaquePointer, event: UnsafePointer<es_mes
         path = dir + "/" + filename
     }
 
-    let (decision, _) = SessionPolicyCache.shared.evaluateFile(path: path, operation: "create", pid: pid)
+    let (decision, sessionID) = SessionPolicyCache.shared.evaluateFile(path: path, operation: "create", pid: pid)
     if decision == .deny {
         es_respond_auth_result(client, event, ES_AUTH_RESULT_DENY, false)
     } else {
         es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+    }
+
+    // Forward event for PIDs in active sessions
+    if let sessionID = sessionID {
+        sendFileEvent(
+            eventType: "file_create",
+            path: path,
+            operation: "create",
+            pid: pid,
+            sessionID: sessionID,
+            decision: decision == .deny ? "deny" : "allow",
+            rule: nil
+        )
     }
 }
 
@@ -326,12 +393,25 @@ private func handleAuthUnlink(client: OpaquePointer, event: UnsafePointer<es_mes
     }
 
     let path = String(cString: event.pointee.event.unlink.target.pointee.path.data)
-    let (decision, _) = SessionPolicyCache.shared.evaluateFile(path: path, operation: "delete", pid: pid)
+    let (decision, sessionID) = SessionPolicyCache.shared.evaluateFile(path: path, operation: "delete", pid: pid)
 
     if decision == .deny {
         es_respond_auth_result(client, event, ES_AUTH_RESULT_DENY, false)
     } else {
         es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+    }
+
+    // Forward event for PIDs in active sessions
+    if let sessionID = sessionID {
+        sendFileEvent(
+            eventType: "file_delete",
+            path: path,
+            operation: "delete",
+            pid: pid,
+            sessionID: sessionID,
+            decision: decision == .deny ? "deny" : "allow",
+            rule: nil
+        )
     }
 }
 
@@ -352,13 +432,28 @@ private func handleAuthRename(client: OpaquePointer, event: UnsafePointer<es_mes
         destPath = dir + "/" + filename
     }
 
-    let (srcDecision, _) = SessionPolicyCache.shared.evaluateFile(path: sourcePath, operation: "rename", pid: pid)
+    let (srcDecision, sessionID) = SessionPolicyCache.shared.evaluateFile(path: sourcePath, operation: "rename", pid: pid)
     let (dstDecision, _) = SessionPolicyCache.shared.evaluateFile(path: destPath, operation: "create", pid: pid)
 
-    if srcDecision == .deny || dstDecision == .deny {
+    let denied = srcDecision == .deny || dstDecision == .deny
+    if denied {
         es_respond_auth_result(client, event, ES_AUTH_RESULT_DENY, false)
     } else {
         es_respond_auth_result(client, event, ES_AUTH_RESULT_ALLOW, false)
+    }
+
+    // Forward event for PIDs in active sessions
+    if let sessionID = sessionID {
+        sendFileEvent(
+            eventType: "file_rename",
+            path: sourcePath,
+            operation: "rename",
+            pid: pid,
+            sessionID: sessionID,
+            decision: denied ? "deny" : "allow",
+            rule: nil,
+            extraFields: ["path2": destPath]
+        )
     }
 }
 
