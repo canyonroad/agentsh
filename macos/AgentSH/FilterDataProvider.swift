@@ -2,13 +2,7 @@
 import NetworkExtension
 import Foundation
 
-// Note: AgentshXPCProtocol and xpcServiceIdentifier are defined in Shared/XPCProtocol.swift
-// Ensure that file is included in the SysExt target in Xcode.
-
 class FilterDataProvider: NEFilterDataProvider {
-    private var xpc: NSXPCConnection?
-    private var xpcProxy: AgentshXPCProtocol?
-    private let queue = DispatchQueue(label: "ai.canyonroad.agentsh.filterprovider")
 
     // MARK: - Blocking Configuration
 
@@ -20,27 +14,13 @@ class FilterDataProvider: NEFilterDataProvider {
     /// Default is 100ms to minimize latency impact.
     var decisionTimeout: TimeInterval = 0.1
 
-    /// Behavior when timeout occurs or XPC call fails.
+    /// Behavior when timeout occurs or policy check fails.
     /// true (default) = allow on timeout/error (fail-open)
     /// false = deny on timeout/error (fail-closed)
     var failOpen: Bool = true
 
     override func startFilter(completionHandler: @escaping (Error?) -> Void) {
-        queue.sync {
-            // Connect to XPC Service
-            xpc = NSXPCConnection(serviceName: xpcServiceIdentifier)
-            xpc?.remoteObjectInterface = NSXPCInterface(with: AgentshXPCProtocol.self)
-            xpc?.resume()
-
-            xpcProxy = xpc?.remoteObjectProxyWithErrorHandler { error in
-                NSLog("XPC error: \(error)")
-            } as? AgentshXPCProtocol
-        }
-
-        // ProcessHierarchy is a singleton that receives fork/exit events from ESFClient.
-        // We just ensure it's initialized here; actual tracking happens via ESF events.
         _ = ProcessHierarchy.shared
-
         completionHandler(nil)
     }
 
@@ -48,17 +28,7 @@ class FilterDataProvider: NEFilterDataProvider {
         with reason: NEProviderStopReason,
         completionHandler: @escaping () -> Void
     ) {
-        queue.sync {
-            xpc?.invalidate()
-            xpc = nil
-            xpcProxy = nil
-        }
-
         completionHandler()
-    }
-
-    private func getProxy() -> AgentshXPCProtocol? {
-        return queue.sync { xpcProxy }
     }
 
     override func handleNewFlow(_ flow: NEFilterFlow) -> NEFilterNewFlowVerdict {
@@ -118,6 +88,39 @@ class FilterDataProvider: NEFilterDataProvider {
             return .allow()
         }
 
+        // Proxy enforcement: ensure session PIDs connect through the proxy
+        if blockingEnabled,
+           let cache = SessionPolicyCache.shared.cacheForSession(sessionID),
+           cache.proxyAddr != nil {
+
+            // Allow localhost connections (always pass through)
+            if !isLocalhost(ip) {
+                // Allow connections to the session's proxy
+                if let proxyAddr = cache.proxyAddr, isProxyAddr(ip, port, proxyAddr: proxyAddr) {
+                    return .allow()
+                }
+                // Allow direct-connect allowlist entries
+                else if cache.directAllow.contains(where: { matchesDirectAllow(ip: ip, port: port, entry: $0) }) {
+                    return .allow()
+                }
+                // Block direct external connections (proxy bypass)
+                else {
+                    NSLog("PROXY_BYPASS_BLOCKED: \(ip):\(port) from pid \(pid) (session \(sessionID))")
+                    PolicySocketClient.shared.send([
+                        "type": "proxy_bypass_blocked",
+                        "session_id": sessionID,
+                        "pid": Int(pid),
+                        "destination_ip": ip,
+                        "destination_port": port,
+                        "destination_host": socketFlow.remoteHostname ?? "",
+                        "process_name": processInfo.processName ?? "",
+                        "bundle_id": processInfo.bundleID ?? ""
+                    ])
+                    return .drop()
+                }
+            }
+        }
+
         // Extract domain from flow if available (SNI/hostname)
         let hostname = socketFlow.remoteHostname
 
@@ -131,7 +134,7 @@ class FilterDataProvider: NEFilterDataProvider {
         case .deny:
             return .drop()
         case .fallthrough_:
-            break  // Continue to XPC check
+            break  // Continue to PolicySocketClient check
         }
 
         // Determine protocol (TCP vs UDP)
@@ -171,200 +174,130 @@ class FilterDataProvider: NEFilterDataProvider {
         }
     }
 
+    // MARK: - Proxy Enforcement Helpers
+
+    /// Check if an IP address is localhost.
+    private func isLocalhost(_ ip: String) -> Bool {
+        return ip == "127.0.0.1" || ip == "::1" || ip == "0.0.0.0" || ip == "localhost"
+    }
+
+    /// Check if destination matches a DirectAllowEntry.
+    private func matchesDirectAllow(ip: String, port: Int, entry: DirectAllowEntry) -> Bool {
+        let hostMatch = entry.host == "*" || entry.host == ip
+        let portMatch = entry.port == 0 || entry.port == port
+        return hostMatch && portMatch
+    }
+
+    /// Check if destination is the session's proxy address.
+    private func isProxyAddr(_ ip: String, _ port: Int, proxyAddr: String) -> Bool {
+        let parts = proxyAddr.split(separator: ":")
+        guard parts.count == 2,
+              let proxyPort = Int(parts[1]) else { return false }
+        return ip == String(parts[0]) && port == proxyPort
+    }
+
     // MARK: - Audit-Only Mode (Async)
 
-    /// Original async audit-only behavior - always allows flows but logs decisions.
     private func handleNewFlowAuditOnly(
-        ip: String,
-        port: Int,
-        protocolType: String,
-        domain: String?,
-        pid: pid_t,
-        parentPID: pid_t,
-        sessionID: String,
-        processInfo: ProcessInfo
+        ip: String, port: Int, protocolType: String, domain: String?,
+        pid: pid_t, parentPID: pid_t, sessionID: String, processInfo: ProcessInfo
     ) -> NEFilterNewFlowVerdict {
-        // Make async PNACL check - allow the flow and log decisions
-        getProxy()?.checkNetworkPNACL(
-            ip: ip,
-            port: port,
-            protocol: protocolType,
-            domain: domain,
-            pid: pid,
-            bundleID: processInfo.bundleID,
-            executablePath: processInfo.executablePath,
-            processName: processInfo.processName,
-            parentPID: parentPID,
-            sessionID: sessionID
-        ) { [weak self] (decision: String, ruleID: String?) in
-            // Log the decision for audit purposes
-            self?.logPNACLDecision(
-                decision: decision,
-                ruleID: ruleID,
-                ip: ip,
-                port: port,
-                pid: pid,
-                bundleID: processInfo.bundleID,
-                blocked: false  // Audit mode never blocks
-            )
-
-            // Report event to server
-            self?.getProxy()?.reportPNACLEvent(
-                eventType: "connection_\(decision)",
-                ip: ip,
-                port: port,
-                protocol: protocolType,
-                domain: domain,
-                pid: pid,
-                bundleID: processInfo.bundleID,
-                decision: decision,
-                ruleID: ruleID
-            ) { _ in }
-        }
-
+        PolicySocketClient.shared.send([
+            "type": "pnacl_check",
+            "ip": ip,
+            "port": port,
+            "protocol": protocolType,
+            "domain": domain ?? "",
+            "pid": Int(pid),
+            "bundle_id": processInfo.bundleID ?? "",
+            "executable_path": processInfo.executablePath ?? "",
+            "process_name": processInfo.processName ?? "",
+            "parent_pid": Int(parentPID),
+            "session_id": sessionID
+        ])
         return .allow()
     }
 
     // MARK: - Blocking Mode (Synchronous)
 
-    /// Synchronous blocking mode - waits for policy decision and returns actual verdict.
     private func handleNewFlowBlocking(
-        ip: String,
-        port: Int,
-        protocolType: String,
-        domain: String?,
-        pid: pid_t,
-        parentPID: pid_t,
-        sessionID: String,
-        processInfo: ProcessInfo
+        ip: String, port: Int, protocolType: String, domain: String?,
+        pid: pid_t, parentPID: pid_t, sessionID: String, processInfo: ProcessInfo
     ) -> NEFilterNewFlowVerdict {
         let semaphore = DispatchSemaphore(value: 0)
-
-        // Variables to capture the result from callback
         var policyDecision: String?
         var policyRuleID: String?
-        var xpcError: Bool = false
 
-        // Get proxy once to avoid race conditions
-        guard let proxy = getProxy() else {
-            NSLog("PNACL: XPC proxy unavailable for \(ip):\(port) pid=\(pid)")
-            return failOpen ? .allow() : .drop()
-        }
-
-        // Make synchronous XPC call with semaphore
-        proxy.checkNetworkPNACL(
-            ip: ip,
-            port: port,
-            protocol: protocolType,
-            domain: domain,
-            pid: pid,
-            bundleID: processInfo.bundleID,
-            executablePath: processInfo.executablePath,
-            processName: processInfo.processName,
-            parentPID: parentPID,
-            sessionID: sessionID
-        ) { (decision: String, ruleID: String?) in
-            policyDecision = decision
-            policyRuleID = ruleID
+        PolicySocketClient.shared.request([
+            "type": "pnacl_check",
+            "ip": ip,
+            "port": port,
+            "protocol": protocolType,
+            "domain": domain ?? "",
+            "pid": Int(pid),
+            "bundle_id": processInfo.bundleID ?? "",
+            "executable_path": processInfo.executablePath ?? "",
+            "process_name": processInfo.processName ?? "",
+            "parent_pid": Int(parentPID),
+            "session_id": sessionID
+        ]) { response in
+            policyDecision = response?["decision"] as? String
+            policyRuleID = response?["rule_id"] as? String
             semaphore.signal()
         }
 
-        // Wait for response with timeout
         let result = semaphore.wait(timeout: .now() + decisionTimeout)
 
-        // Determine verdict based on result
         let verdict: NEFilterNewFlowVerdict
-        let finalDecision: String
         let wasBlocked: Bool
 
         switch result {
         case .success:
-            // Got response in time - use policy decision
             if let decision = policyDecision {
-                finalDecision = decision
                 switch decision {
                 case "allow", "allow_once", "allow_permanent":
-                    // Explicit allow decisions
-                    verdict = .allow()
-                    wasBlocked = false
+                    verdict = .allow(); wasBlocked = false
                 case "deny", "deny_once", "deny_forever":
-                    // Explicit deny decisions
-                    verdict = .drop()
-                    wasBlocked = true
+                    verdict = .drop(); wasBlocked = true
                 case "audit":
-                    // Audit-only mode - log but always allow
-                    verdict = .allow()
-                    wasBlocked = false
+                    verdict = .allow(); wasBlocked = false
                 case "approve", "allow_once_then_approve":
-                    // Pending approval - use fail behavior
-                    // allow_once_then_approve: allow this connection but queue for approval
                     if failOpen || decision == "allow_once_then_approve" {
-                        verdict = .allow()
-                        wasBlocked = false
+                        verdict = .allow(); wasBlocked = false
                     } else {
-                        verdict = .drop()
-                        wasBlocked = true
+                        verdict = .drop(); wasBlocked = true
                     }
-                case "needRules":
-                    // No rules configured - use fail behavior
-                    NSLog("PNACL: No rules for \(ip):\(port) pid=\(pid), failOpen=\(failOpen)")
-                    verdict = failOpen ? .allow() : .drop()
-                    wasBlocked = !failOpen
                 default:
-                    // Unknown decision - use fail behavior
-                    NSLog("PNACL: Unknown decision '\(decision)' for \(ip):\(port) pid=\(pid)")
                     verdict = failOpen ? .allow() : .drop()
                     wasBlocked = !failOpen
                 }
             } else {
-                // Nil decision (shouldn't happen) - use fail behavior
-                NSLog("PNACL: Nil decision for \(ip):\(port) pid=\(pid)")
-                finalDecision = failOpen ? "allow_nil" : "deny_nil"
                 verdict = failOpen ? .allow() : .drop()
                 wasBlocked = !failOpen
-                xpcError = true
             }
-
         case .timedOut:
-            // Timeout - use fail behavior
-            let timeoutMs = Int(decisionTimeout * 1000)
-            NSLog("PNACL: Timeout (\(timeoutMs)ms) for \(ip):\(port) pid=\(pid), failOpen=\(failOpen)")
-            finalDecision = failOpen ? "allow_timeout" : "deny_timeout"
             verdict = failOpen ? .allow() : .drop()
             wasBlocked = !failOpen
-            xpcError = true
         }
 
-        // Log the decision
         logPNACLDecision(
-            decision: policyDecision ?? finalDecision,
-            ruleID: policyRuleID,
-            ip: ip,
-            port: port,
-            pid: pid,
-            bundleID: processInfo.bundleID,
-            blocked: wasBlocked
-        )
+            decision: policyDecision ?? (failOpen ? "allow_fallback" : "deny_fallback"),
+            ruleID: policyRuleID, ip: ip, port: port, pid: pid,
+            bundleID: processInfo.bundleID, blocked: wasBlocked)
 
-        // Report event to server asynchronously (don't block on this)
-        let eventType: String
-        if xpcError {
-            eventType = "connection_\(finalDecision)"
-        } else {
-            eventType = "connection_\(policyDecision ?? "unknown")"
-        }
-
-        proxy.reportPNACLEvent(
-            eventType: eventType,
-            ip: ip,
-            port: port,
-            protocol: protocolType,
-            domain: domain,
-            pid: pid,
-            bundleID: processInfo.bundleID,
-            decision: wasBlocked ? "blocked" : "allowed",
-            ruleID: policyRuleID
-        ) { _ in }
+        // Report event to server asynchronously (fire-and-forget)
+        PolicySocketClient.shared.send([
+            "type": "pnacl_event",
+            "event_type": "connection_\(policyDecision ?? "unknown")",
+            "ip": ip,
+            "port": port,
+            "protocol": protocolType,
+            "domain": domain ?? "",
+            "pid": Int(pid),
+            "bundle_id": processInfo.bundleID ?? "",
+            "decision": wasBlocked ? "blocked" : "allowed",
+            "rule_id": policyRuleID ?? ""
+        ])
 
         return verdict
     }

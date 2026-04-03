@@ -50,25 +50,27 @@ func TestGenerateTips_Linux(t *testing.T) {
 
 func TestGenerateTips_Darwin(t *testing.T) {
 	caps := map[string]any{
-		"fuse_t":       false,
 		"sandbox_exec": true,
 		"esf":          false,
 	}
 
 	tips := GenerateTips("darwin", caps)
 
-	hasFuseTTip := false
+	hasESFTip := false
 	for _, tip := range tips {
-		if tip.Feature == "fuse_t" {
-			hasFuseTTip = true
+		if tip.Feature == "esf" {
+			hasESFTip = true
 			if tip.Action == "" {
-				t.Error("fuse_t tip missing action")
+				t.Error("esf tip missing action")
 			}
+		}
+		if tip.Feature == "fuse_t" {
+			t.Error("unexpected fuse_t tip — FUSE-T support was removed")
 		}
 	}
 
-	if !hasFuseTTip {
-		t.Error("missing fuse_t tip")
+	if !hasESFTip {
+		t.Error("missing esf tip")
 	}
 }
 

@@ -33,6 +33,7 @@ type Config struct {
 	LinuxCapabilities CapabilitiesConfig      `yaml:"capabilities"`
 	ThreatFeeds       ThreatFeedsConfig       `yaml:"threat_feeds"`
 	PackageChecks     PackageChecksConfig     `yaml:"package_checks"`
+	PolicySocket      PolicySocketConfig      `yaml:"policy_socket"`
 }
 
 // PlatformConfig configures cross-platform selection and fallback behavior.
@@ -536,6 +537,13 @@ type SandboxXPCMachConfig struct {
 // SandboxXPCESFConfig configures ESF-based XPC monitoring.
 type SandboxXPCESFConfig struct {
 	Enabled bool `yaml:"enabled"`
+}
+
+// PolicySocketConfig configures the macOS policy socket server (IPC bridge
+// between the agentsh daemon and the system extension).
+type PolicySocketConfig struct {
+	Path   string `yaml:"path" json:"path"`
+	TeamID string `yaml:"team_id" json:"team_id"`
 }
 
 // SandboxMCPConfig configures MCP security policies.
@@ -1420,6 +1428,14 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	}
 	if cfg.PackageChecks.Providers == nil {
 		cfg.PackageChecks.Providers = pkgDefaults.Providers
+	}
+
+	// Policy socket defaults (macOS system extension IPC)
+	if cfg.PolicySocket.Path == "" {
+		cfg.PolicySocket.Path = "/tmp/agentsh-policy.sock"
+	}
+	if cfg.PolicySocket.TeamID == "" {
+		cfg.PolicySocket.TeamID = "WCKWMMKJ35"
 	}
 }
 

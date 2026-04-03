@@ -1,5 +1,7 @@
 # macOS ESF+NE Architecture
 
+> **Alpha Status:** The ESF+NE implementation is in active development and should be considered Alpha-quality. The architecture described here is functional end-to-end but expect rough edges, manual setup steps, and breaking changes between releases.
+
 This document describes the technical architecture of the macOS ESF (Endpoint Security Framework) + NE (Network Extension) implementation.
 
 ## Overview
@@ -306,10 +308,7 @@ At startup, the Go binary detects available enforcement mechanisms:
 // Check if ESF+NE is available
 if sysext.IsAvailable() && sysext.IsApproved() {
     // Use ESF+NE for full enforcement
-    startXPCServer()
-} else if fusetAvailable() {
-    // Fall back to FUSE-T
-    mountFUSE()
+    startPolicySocketServer()
 } else {
     // Observation only
     startFSEvents()
@@ -326,6 +325,117 @@ if sysext.IsAvailable() && sysext.IsApproved() {
 6. [ ] System Extension approved by user
 7. [ ] Network Extension activated
 8. [ ] Go server running and accepting XPC connections
+
+## Event Stream
+
+In addition to the request-response connection used for policy queries, the system extension maintains a persistent **event stream** connection to the Go server. This stream delivers file and process events for audit, attribution, and real-time monitoring.
+
+### Connection Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                  System Extension (Swift)                            │
+│                                                                      │
+│  PolicySocketClient                                                  │
+│  ┌──────────────────────────┐  ┌──────────────────────────────────┐ │
+│  │  Request-Response Conn   │  │  Event Stream Conn (persistent)  │ │
+│  │  (short-lived per query) │  │  (fire-and-forget, one-way)      │ │
+│  │                          │  │                                   │ │
+│  │  file/command/network    │  │  file_event, process_fork,       │ │
+│  │  policy queries          │  │  process_exit notifications      │ │
+│  └────────────┬─────────────┘  └──────────────┬───────────────────┘ │
+│               │                                │                     │
+└───────────────┼────────────────────────────────┼─────────────────────┘
+                │                                │
+    ────────────┼────────────────────────────────┼─── Unix Socket ───
+                │  /tmp/agentsh-policy.sock      │
+                ▼                                ▼
+┌───────────────┼────────────────────────────────┼─────────────────────┐
+│               │                                │                     │
+│  ┌────────────┴─────────────┐  ┌──────────────┴───────────────────┐ │
+│  │  handlePolicyQuery()     │  │  handleEventStream()             │ │
+│  │  (per-request goroutine) │  │  (long-lived goroutine)          │ │
+│  └──────────────────────────┘  └──────────────┬───────────────────┘ │
+│                                                │                     │
+│                                                ▼                     │
+│                                   ┌────────────────────────┐        │
+│                                   │  ESFEventHandler       │        │
+│                                   │  .HandleESFEvent()     │        │
+│                                   └────────────┬───────────┘        │
+│                                                │                     │
+│                              ┌─────────────────┼──────────────┐     │
+│                              ▼                 ▼              ▼     │
+│                   ┌──────────────┐  ┌──────────────┐  ┌──────────┐ │
+│                   │ Command      │  │ Session      │  │ Event    │ │
+│                   │ Resolver     │  │ Tracker      │  │ Store    │ │
+│                   │ PID→cmd_id   │  │ PID→sess_id  │  │ (SQLite) │ │
+│                   └──────────────┘  └──────────────┘  └──────────┘ │
+│                                                                      │
+│                         Go Policy Server (policysock)                │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Two Connection Types
+
+1. **Request-response** (existing): Short-lived connections for policy queries. The Swift client sends a JSON request (file, command, or network query), the Go server evaluates policy and responds with allow/deny. One connection per query.
+
+2. **Event stream** (persistent): A long-lived connection for delivering events. The client writes newline-delimited JSON events in one direction (fire-and-forget). The server reads and processes them but does not send responses per event.
+
+### Event Stream Lifecycle
+
+1. The Swift `PolicySocketClient` connects to `/tmp/agentsh-policy.sock`
+2. Client sends `{"type":"event_stream_init"}` to identify this as an event stream connection
+3. Server acknowledges with `{"status":"ok"}`
+4. Client writes events as newline-delimited JSON, one event per line:
+   ```json
+   {"type":"file_event","event_type":"file_open","path":"/workspace/main.go","pid":1234,"access":"read","timestamp":"..."}\n
+   {"type":"file_event","event_type":"file_create","path":"/workspace/out.bin","pid":1234,"timestamp":"..."}\n
+   {"type":"file_event","event_type":"file_delete","path":"/workspace/tmp.log","pid":1235,"timestamp":"..."}\n
+   ```
+5. Events flow one-directionally from Swift to Go (fire-and-forget)
+
+### Ring Buffer and Reconnection
+
+When the event stream connection is unavailable, events are buffered in a ring buffer:
+
+- **Buffer size:** 1024 events maximum
+- **Overflow policy:** Drop-oldest -- when the buffer is full, the oldest event is discarded to make room for the newest
+- **Reconnection:** Exponential backoff starting at 1 second, doubling on each failed attempt, capped at 30 seconds maximum
+- **On reconnect:** Buffered events are drained and sent before new events
+
+### ESF Event Types
+
+The system extension subscribes to the following ESF events for file I/O monitoring:
+
+| ESF Event | agentsh Event Type | Mode | Description |
+|-----------|-------------------|------|-------------|
+| `AUTH_OPEN` | `file_open` | AUTH | File open with read/write determined from fflag |
+| `AUTH_CREATE` | `file_create` | AUTH | New file creation |
+| `AUTH_UNLINK` | `file_delete` | AUTH | File deletion |
+| `AUTH_RENAME` | `file_rename` | AUTH | File rename (includes destination path as path2) |
+| `NOTIFY_CLOSE` (modified) | `file_write` | NOTIFY | File write (detected on close when file was modified) |
+| `NOTIFY_FORK` | `process_fork` | NOTIFY | Process fork (for command_id propagation) |
+| `NOTIFY_EXIT` | `process_exit` | NOTIFY | Process exit (cleanup) |
+| `NOTIFY_SETATTRLIST` | `file_chmod` / `file_chown` | NOTIFY | Attribute changes (macOS 26+) |
+
+### Event Processing Pipeline
+
+Events flow through the following pipeline on the Go server side:
+
+1. **policysock.Server.handleEventStream()** -- reads newline-delimited JSON from the event stream connection
+2. **ESFEventHandler.HandleESFEvent()** -- processes each raw event, enriching it with session and command context
+3. **CommandResolver** -- maps PID to `command_id`. PIDs are registered when exec starts. Fork events propagate the parent's `command_id` to the child PID. Exit events clean up the mapping.
+4. **SessionTracker** -- maps PID to `session_id` by walking the process parent chain
+5. The enriched event is built as a `types.Event` and stored in the **SQLite event store**
+
+### PID-to-Command Resolution
+
+The Go server maintains a `CommandResolver` that tracks the relationship between PIDs and command IDs:
+
+- **Registration:** When a command execution starts (via `agentsh exec`), the PID is registered with its `command_id`
+- **Fork propagation:** When `NOTIFY_FORK` is received, the parent's `command_id` is copied to the child PID. This ensures subprocesses inherit attribution.
+- **Exit cleanup:** When `NOTIFY_EXIT` is received, the PID entry is removed from the resolver to prevent stale mappings
+- **Lookup:** For every file event, the resolver is queried with the event's PID to attach the correct `command_id`
 
 ## See Also
 

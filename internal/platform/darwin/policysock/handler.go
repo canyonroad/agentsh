@@ -1,4 +1,6 @@
-package xpc
+//go:build darwin
+
+package policysock
 
 import (
 	"log/slog"
@@ -10,6 +12,8 @@ import (
 // SessionResolver looks up session ID for a process.
 type SessionResolver interface {
 	SessionForPID(pid int32) string
+	LatestSession() (sessionID string, rootPID int32)
+	RootPIDForSession(sessionID string) int32
 }
 
 // PolicyAdapter adapts the policy.Engine to the PolicyHandler interface.
@@ -101,7 +105,7 @@ func (a *PolicyAdapter) CheckExec(executable string, args []string, pid int32, p
 		action = "continue"
 	default:
 		// Unknown decisions fail-closed to prevent accidental allows.
-		slog.Warn("xpc: unknown effective decision in CheckExec, denying",
+		slog.Warn("policysock: unknown effective decision in CheckExec, denying",
 			"effective_decision", string(effectiveDecision),
 			"policy_decision", decision,
 			"cmd", executable,
@@ -128,8 +132,17 @@ func (a *PolicyAdapter) BuildPolicySnapshot(sessionID string, clientVersion uint
 	if p == nil {
 		return PolicyResponse{Allow: true}
 	}
-	// Version comparison will be handled when we add SessionVersions in Task 4.
-	// For now, always return the full snapshot.
+
+	// If no session_id provided, look up the latest registered session.
+	var rootPID int32
+	if sessionID == "" && a.sessions != nil {
+		sessionID, rootPID = a.sessions.LatestSession()
+		if sessionID == "" {
+			return PolicyResponse{Allow: true}
+		}
+	} else if a.sessions != nil {
+		rootPID = a.sessions.RootPIDForSession(sessionID)
+	}
 
 	var fileRules []SnapshotFileRule
 	for _, r := range p.FileRules {
@@ -173,6 +186,7 @@ func (a *PolicyAdapter) BuildPolicySnapshot(sessionID string, clientVersion uint
 	return PolicyResponse{
 		Allow:           true,
 		SessionID:       sessionID,
+		RootPID:         rootPID,
 		SnapshotVersion: 1, // Will be replaced by SessionVersions counter in Task 4
 		FileRules:       fileRules,
 		NetworkRules:      networkRules,

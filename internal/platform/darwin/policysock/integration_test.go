@@ -1,17 +1,30 @@
 //go:build integration
 
-package xpc
+package policysock
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/policy"
 )
+
+// shortSockPath returns a short Unix socket path under /tmp to avoid the
+// 104-character limit on macOS. t.TempDir() paths are too long.
+func shortSockPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "pstest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := fmt.Sprintf("%s/p.sock", dir)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return sock
+}
 
 func TestIntegration_FullPolicyFlow(t *testing.T) {
 	if os.Getenv("AGENTSH_INTEGRATION") != "1" {
@@ -37,7 +50,7 @@ func TestIntegration_FullPolicyFlow(t *testing.T) {
 	}
 
 	// Start server
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	sockPath := shortSockPath(t)
 	tracker := NewSessionTracker()
 	tracker.RegisterProcess("session-test", 12345, 0)
 
@@ -170,7 +183,7 @@ func TestIntegration_PNACLFlow(t *testing.T) {
 	}
 
 	// Start server with PNACL handler
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	sockPath := shortSockPath(t)
 	tracker := NewSessionTracker()
 	adapter := NewPolicyAdapter(engine, tracker)
 	srv := NewServer(sockPath, adapter)
@@ -331,7 +344,7 @@ func TestIntegration_ExecCheckWithHandler(t *testing.T) {
 	}
 
 	// Start server with a mock exec handler
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	sockPath := shortSockPath(t)
 	tracker := NewSessionTracker()
 	adapter := NewPolicyAdapter(engine, tracker)
 	srv := NewServer(sockPath, adapter)
@@ -455,7 +468,7 @@ func TestIntegration_ExecCheckAllDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	sockPath := shortSockPath(t)
 	tracker := NewSessionTracker()
 	adapter := NewPolicyAdapter(engine, tracker)
 	srv := NewServer(sockPath, adapter)
@@ -530,7 +543,7 @@ func TestIntegration_ExecCheckFallbackToCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	sockPath := shortSockPath(t)
 	tracker := NewSessionTracker()
 	adapter := NewPolicyAdapter(engine, tracker)
 	srv := NewServer(sockPath, adapter)
@@ -589,7 +602,7 @@ type mockExecHandler struct {
 	result ExecCheckResult
 }
 
-func (h *mockExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string) ExecCheckResult {
+func (h *mockExecHandler) CheckExec(executable string, args []string, pid int32, parentPID int32, sessionID string, execCtx ExecContext) ExecCheckResult {
 	return h.result
 }
 
@@ -605,7 +618,7 @@ func TestIntegration_PNACLNoHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
+	sockPath := shortSockPath(t)
 	tracker := NewSessionTracker()
 	adapter := NewPolicyAdapter(engine, tracker)
 	srv := NewServer(sockPath, adapter)

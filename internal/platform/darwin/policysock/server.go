@@ -1,4 +1,6 @@
-package xpc
+//go:build darwin
+
+package policysock
 
 import (
 	"context"
@@ -10,7 +12,7 @@ import (
 	"sync"
 )
 
-// PolicyHandler handles policy queries from the XPC bridge.
+// PolicyHandler handles policy queries from the policy socket bridge.
 type PolicyHandler interface {
 	CheckFile(path, op string) (allow bool, rule string)
 	CheckNetwork(ip string, port int, domain string) (allow bool, rule string)
@@ -105,6 +107,7 @@ type Server struct {
 	sessionRegistrar   SessionRegistrar
 	eventHandler       EventHandler
 	snapshotBuilder    SnapshotBuilder
+	teamID             string
 	listener           net.Listener
 	mu                 sync.Mutex
 	wg                 sync.WaitGroup
@@ -115,7 +118,7 @@ type Server struct {
 // NewServer creates a new policy socket server.
 func NewServer(sockPath string, handler PolicyHandler) *Server {
 	if handler == nil {
-		panic("xpc: handler must not be nil")
+		panic("policysock: handler must not be nil")
 	}
 	return &Server{
 		sockPath: sockPath,
@@ -164,6 +167,14 @@ func (s *Server) SetSnapshotBuilder(b SnapshotBuilder) {
 	s.snapshotBuilder = b
 }
 
+// SetTeamID sets the team ID for peer code signing validation.
+// If not set, peer validation is skipped.
+func (s *Server) SetTeamID(teamID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.teamID = teamID
+}
+
 // Ready returns a channel that is closed when server startup completes.
 // After Ready() fires, check StartErr() to see if startup succeeded.
 func (s *Server) Ready() <-chan struct{} {
@@ -193,14 +204,9 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 
-	// Set socket permissions to allow user-space access.
-	// The ApprovalDialog.app runs as user and needs to connect to fetch/submit approvals.
-	// Security note: The socket is only accessible locally (Unix domain socket).
-	// TODO(security): The world-writable socket allows any local process to send
-	// state-changing requests (register_session, unregister_session). Consider:
-	//   1. A separate approval-only socket with restricted operations
-	//   2. Routing approval operations through the XPC service for better isolation
-	//   3. Using SO_PEERCRED/getpeereid to authenticate peers for state-changing ops
+	// Policy socket: allow root access (0666) so the system extension
+	// (running as root in a sandbox) can connect. Security is enforced
+	// by ValidatePeer which checks UID and code signing, not file perms.
 	if err := os.Chmod(s.sockPath, 0666); err != nil {
 		ln.Close()
 		err = fmt.Errorf("chmod: %w", err)
@@ -228,18 +234,28 @@ func (s *Server) Run(ctx context.Context) error {
 		s.mu.Unlock()
 	}()
 
+	unixLn := ln.(*net.UnixListener)
 	for {
-		conn, err := ln.Accept()
+		conn, err := unixLn.AcceptUnix()
 		if err != nil {
 			select {
 			case <-ctx.Done():
-				// Wait for active connections to finish
 				s.wg.Wait()
 				return nil
 			default:
 				continue
 			}
 		}
+
+		// Validate peer identity (UID + code signing)
+		if s.teamID != "" {
+			if err := ValidatePeer(conn, s.teamID); err != nil {
+				slog.Warn("rejected policy socket connection", "error", err)
+				conn.Close()
+				continue
+			}
+		}
+
 		s.wg.Add(1)
 		go s.handleConn(conn)
 	}
@@ -262,15 +278,51 @@ func (s *Server) handleConn(conn net.Conn) {
 	decoder := json.NewDecoder(conn)
 	encoder := json.NewEncoder(conn)
 
-	for {
-		var req PolicyRequest
-		if err := decoder.Decode(&req); err != nil {
-			return // Connection closed or error
-		}
+	// Read first request to determine connection mode.
+	var req PolicyRequest
+	if err := decoder.Decode(&req); err != nil {
+		return
+	}
 
-		resp := s.handleRequest(&req)
+	// Event stream mode: persistent read-only connection.
+	if req.Type == RequestTypeEventStreamInit {
+		encoder.Encode(map[string]any{"status": "ok"})
+		s.handleEventStream(decoder)
+		return
+	}
+
+	// Normal request-response mode.
+	resp := s.handleRequest(&req)
+	if err := encoder.Encode(resp); err != nil {
+		return
+	}
+
+	for {
+		var next PolicyRequest
+		if err := decoder.Decode(&next); err != nil {
+			return
+		}
+		resp := s.handleRequest(&next)
 		if err := encoder.Encode(resp); err != nil {
 			return
+		}
+	}
+}
+
+func (s *Server) handleEventStream(dec *json.Decoder) {
+	s.mu.Lock()
+	eh := s.eventHandler
+	s.mu.Unlock()
+
+	for {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return // EOF or error — stream closed
+		}
+		if eh != nil {
+			if err := eh.HandleESFEvent(context.Background(), []byte(raw)); err != nil {
+				slog.Warn("event stream: handler error", "error", err)
+			}
 		}
 	}
 }
@@ -345,6 +397,9 @@ func (s *Server) handleRequest(req *PolicyRequest) PolicyResponse {
 		}
 		return PolicyResponse{Allow: true}
 
+	case RequestTypeExecRedirectNotify:
+		return s.handleExecRedirectNotify(req)
+
 	default:
 		return PolicyResponse{Allow: false, Message: "unknown request type"}
 	}
@@ -387,6 +442,19 @@ func (s *Server) handleExecCheck(req *PolicyRequest) PolicyResponse {
 		ExecDecision: result.Decision,
 		Message:      result.Message,
 	}
+}
+
+func (s *Server) handleExecRedirectNotify(req *PolicyRequest) PolicyResponse {
+	s.mu.Lock()
+	h := s.execHandler
+	s.mu.Unlock()
+	if h != nil {
+		go func() {
+			h.CheckExec(req.Path, req.Args, req.PID, req.ParentPID, req.SessionID,
+				ExecContext{TTYPath: req.TTYPath, CWDPath: req.CWDPath})
+		}()
+	}
+	return PolicyResponse{Allow: true}
 }
 
 func (s *Server) handlePNACLCheck(req *PolicyRequest) PolicyResponse {
@@ -511,7 +579,7 @@ func (s *Server) handleMuteProcess(req *PolicyRequest) PolicyResponse {
 	// Process muting requires the ESFClient to call es_mute_process(), which can
 	// only be done from the System Extension process. The request is forwarded
 	// to the session registrar which bridges to the ESF client.
-	slog.Info("xpc: mute_process request received",
+	slog.Info("policysock: mute_process request received",
 		"pid", req.PID,
 	)
 	return PolicyResponse{Allow: true, Success: true}
@@ -522,7 +590,7 @@ func (s *Server) handleMutePath(req *PolicyRequest) PolicyResponse {
 	if r != nil && req.Path != "" {
 		r.MutePath(req.Path)
 	}
-	slog.Info("xpc: mute_path request handled",
+	slog.Info("policysock: mute_path request handled",
 		"path", req.Path,
 	)
 	return PolicyResponse{Allow: true, Success: true}

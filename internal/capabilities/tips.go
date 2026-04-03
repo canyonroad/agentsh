@@ -53,16 +53,10 @@ var linuxTips = []tipDefinition{
 
 var darwinTips = []tipDefinition{
 	{
-		Feature:  "fuse_t",
-		CheckKey: "fuse_t",
-		Impact:   "File policy enforcement limited to observation-only",
-		Action:   "Install FUSE-T: brew install fuse-t",
-	},
-	{
 		Feature:  "esf",
 		CheckKey: "esf",
 		Impact:   "Using sandbox-exec instead of Endpoint Security",
-		Action:   "ESF requires Apple developer approval. Submit business justification to Apple.",
+		Action:   "Install the agentsh macOS app bundle which includes the system extension.",
 	},
 	{
 		Feature:  "lima_available",
@@ -150,8 +144,7 @@ var tipsByBackend = map[string]Tip{
 	"pid-namespace":    {Feature: "pid-namespace", Impact: "Process isolation unavailable", Action: "Run in a PID namespace (docker run --pid=host or unshare -p)"},
 	"capability-drop":  {Feature: "capability-drop", Impact: "Privilege reduction unavailable", Action: "Run with standard Linux capabilities support"},
 	// Darwin
-	"fuse-t":            {Feature: "fuse-t", Impact: "Filesystem interception unavailable", Action: "Install FUSE-T: brew install fuse-t"},
-	"esf":               {Feature: "esf", Impact: "Endpoint Security Framework unavailable", Action: "Requires system extension entitlement from Apple"},
+	"esf":               {Feature: "esf", Impact: "Endpoint Security Framework unavailable", Action: "Install the agentsh macOS app bundle with system extension"},
 	"network-extension": {Feature: "network-extension", Impact: "Network filtering unavailable", Action: "Requires network extension entitlement from Apple"},
 	// Windows
 	"winfsp":     {Feature: "winfsp", Impact: "Filesystem interception unavailable", Action: "Install WinFsp: https://winfsp.dev/"},

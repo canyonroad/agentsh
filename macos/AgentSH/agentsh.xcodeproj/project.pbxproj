@@ -19,6 +19,7 @@
 		A01826632F5AA234000B0164 /* approval-dialog.app in CopyFiles */ = {isa = PBXBuildFile; fileRef = A01826482F5AA0A5000B0164 /* approval-dialog.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A01826642F5AA300000B0164 /* ESFClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01826652F5AA300000B0164 /* ESFClient.swift */; };
 		95183ED75FC044CD9B03464F /* SessionPolicyCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2B8B1A81E224239B20A1D58 /* SessionPolicyCache.swift */; };
+		7A3D4E0B2C8F19A4D5E6F710 /* PolicySocketClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B9C1F5A4D7E28B6A0C3E812 /* PolicySocketClient.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -81,6 +82,7 @@
 		A01826482F5AA0A5000B0164 /* approval-dialog.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "approval-dialog.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A01826652F5AA300000B0164 /* ESFClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ESFClient.swift; sourceTree = "<group>"; };
 		E2B8B1A81E224239B20A1D58 /* SessionPolicyCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionPolicyCache.swift; sourceTree = "<group>"; };
+		3B9C1F5A4D7E28B6A0C3E812 /* PolicySocketClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolicySocketClient.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -190,6 +192,7 @@
 				A018261A2F5A9E28000B0164 /* ProcessIdentifier.swift */,
 				A01826652F5AA300000B0164 /* ESFClient.swift */,
 				E2B8B1A81E224239B20A1D58 /* SessionPolicyCache.swift */,
+				3B9C1F5A4D7E28B6A0C3E812 /* PolicySocketClient.swift */,
 				A018261B2F5A9E28000B0164 /* SysExt.entitlements */,
 				A01826122F5A9DE2000B0164 /* SystemExtensions.framework */,
 				A01826102F5A9DD8000B0164 /* NetworkExtension.framework */,
@@ -382,6 +385,7 @@
 			files = (
 				A01826642F5AA300000B0164 /* ESFClient.swift in Sources */,
 				95183ED75FC044CD9B03464F /* SessionPolicyCache.swift in Sources */,
+				7A3D4E0B2C8F19A4D5E6F710 /* PolicySocketClient.swift in Sources */,
 				A018261D2F5A9E28000B0164 /* ProcessIdentifier.swift in Sources */,
 				A018261E2F5A9E28000B0164 /* FilterDataProvider.swift in Sources */,
 				A018261F2F5A9E28000B0164 /* DNSProxyProvider.swift in Sources */,
@@ -608,7 +612,7 @@
 				CODE_SIGN_ENTITLEMENTS = SysExt.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 14;
 				DEVELOPMENT_TEAM = WCKWMMKJ35;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
@@ -621,7 +625,7 @@
 					"-lEndpointSecurity",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = ai.canyonroad.agentsh.SysExt;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "$(PRODUCT_BUNDLE_IDENTIFIER)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -639,7 +643,7 @@
 				CODE_SIGN_ENTITLEMENTS = SysExt.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 14;
 				DEVELOPMENT_TEAM = WCKWMMKJ35;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
@@ -652,7 +656,7 @@
 					"-lEndpointSecurity",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = ai.canyonroad.agentsh.SysExt;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "$(PRODUCT_BUNDLE_IDENTIFIER)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;

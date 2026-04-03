@@ -1,12 +1,10 @@
 # agentsh Cross-Platform Notes
 
-**Last updated:** January 2026
+**Last updated:** April 2026
 
-agentsh supports **Linux** and **macOS** natively. Linux provides the most complete feature set. macOS supports two enforcement tiers: **ESF+NE** (90% security score) and **FUSE-T** (70% score, easy setup).
+agentsh supports **Linux** and **macOS** natively. Linux provides the most complete feature set. macOS uses **ESF+NE** (90% security score, **Alpha**) for file, process, and network enforcement. The ESF+NE tier is functional end-to-end but should not be considered production-ready — expect rough edges and breaking changes.
 
-**Entitlement requirements for macOS ESF+NE:**
-- **ESF (Endpoint Security):** Requires Apple approval - submit business justification
-- **Network Extension:** Standard capability since November 2016 - enable in Xcode, no approval needed
+**macOS ESF+NE entitlements:** agentsh ships with the required ESF and Network Extension entitlements. No separate Apple approval is needed to use the pre-built binary.
 
 If you're on Windows, the recommended approach is to run agentsh inside WSL2 or a Linux container. Unix socket enforcement (seccomp user-notify) is Linux-only.
 
@@ -131,14 +129,13 @@ See [Security Modes](security-modes.md) for detailed mode configuration.
 ## What works today
 
 - **Linux (native):** primary supported platform with tiered security (full → landlock → landlock-only → minimal depending on environment). See [Linux Security Levels](#linux-security-levels) above.
-- **macOS ESF+NE (enterprise):** Endpoint Security Framework + Network Extension for near-Linux enforcement (ESF needs Apple approval; NE is standard).
-- **macOS FUSE-T (standard):** FUSE-T support for file policy enforcement (requires `brew install fuse-t` and CGO).
+- **macOS ESF+NE (Alpha):** Endpoint Security Framework + Network Extension for near-Linux enforcement. Install via `brew tap canyonroad/tap && brew install --cask agentsh`.
 - **Windows:** run in **WSL2** (recommended) or a Linux container.
 - **gRPC (optional):** if enabled, clients connect to `server.grpc.addr` (default `127.0.0.1:9090`). The CLI can prefer gRPC via `AGENTSH_TRANSPORT=grpc`.
 
 ## Feature availability (current implementation)
 
-- **FUSE workspace view:** Linux (FUSE3), macOS (FUSE-T), and Windows (WinFsp). In containers requires `/dev/fuse` + `SYS_ADMIN`.
+- **FUSE workspace view:** Linux (FUSE3) and Windows (WinFsp). In containers requires `/dev/fuse` + `SYS_ADMIN`. macOS uses ESF for file monitoring.
 - **FUSE event emission:** File operation events (open, read, write, create, delete, rename) are emitted to the configured EventChannel for audit logging and monitoring.
 - **Process sandboxing:** Linux (namespaces via unshare), macOS (sandbox-exec with SBPL profiles), Windows (AppContainer).
 - **Network visibility + policy enforcement:** works via the per-session proxy (DNS/connect/HTTP events).
@@ -162,44 +159,22 @@ See [Security Modes](security-modes.md) for detailed mode configuration.
 agentsh server
 ```
 
-### macOS (FUSE-T - Standard)
+### macOS (ESF+NE — Alpha)
 
 ```bash
-# Install FUSE-T (required for file policy enforcement)
-brew install fuse-t
-
-# Build with CGO enabled (default on macOS)
-CGO_ENABLED=1 go build -o agentsh ./cmd/agentsh
-
-# Run the server
-agentsh server
+brew tap canyonroad/tap
+brew install --cask agentsh
 ```
 
-**Note:** Without FUSE-T or CGO, agentsh falls back to observation-only mode using FSEvents.
+After installation, approve the system extension in **System Settings > General > Login Items & Extensions**.
 
-### macOS (ESF+NE - Enterprise)
-
-For enterprise deployments:
+**From source** (requires Xcode 15+):
 
 ```bash
-# Build the enterprise bundle (requires Xcode 15+)
 make build-macos-enterprise
-
-# Sign the bundle (requires code signing identity)
-SIGNING_IDENTITY="Developer ID Application" make sign-bundle
-
-# The app bundle includes System Extension + XPC Service
-# User must approve System Extension in System Settings
 ```
 
-**Requirements:**
-- Apple Developer Program membership
-- ESF entitlement from Apple (requires approval with business justification)
-- Network Extension entitlement (standard capability - enable in Xcode)
-- Xcode 15+ and Swift 5.9+
-- Code signing identity
-
-**Note:** ESF+NE mode automatically falls back to FUSE-T if ESF entitlement is unavailable. See [macOS Build Guide](macos-build.md) for detailed instructions.
+See [macOS Build Guide](macos-build.md) for detailed build instructions.
 
 ### macOS (Lima VM - Full Isolation)
 
@@ -300,7 +275,7 @@ Inside the VM, both modes use standard Linux primitives:
 
 ### macOS (sandbox-exec - Process Sandboxing)
 
-For all macOS deployments (ESF+NE, FUSE-T, or Lima), agentsh uses `sandbox-exec` with SBPL (Sandbox Profile Language) profiles to provide process-level file and network restrictions:
+For all macOS deployments (ESF+NE or Lima), agentsh uses `sandbox-exec` with SBPL (Sandbox Profile Language) profiles to provide process-level file and network restrictions:
 
 ```bash
 # sandbox-exec is used automatically when executing commands
@@ -423,7 +398,7 @@ CGO_ENABLED=1 go build -o agentsh.exe ./cmd/agentsh
 agentsh server
 ```
 
-WinFsp provides the same FUSE-style mounting as macOS FUSE-T, using a shared `internal/platform/fuse/` package. Features include:
+WinFsp provides FUSE-style mounting on Windows, using a shared `internal/platform/fuse/` package. Features include:
 - Policy-enforced file operations (read, write, create, delete)
 - Soft-delete (files moved to trash instead of permanent deletion)
 - Automatic minifilter process exclusion to prevent double-interception
@@ -558,7 +533,7 @@ The generated config includes only security-related sections (`security:`, `land
 ## Troubleshooting
 
 - **FUSE mount fails (Linux):** ensure FUSE3 is installed (host/VM) and, in Docker, `/dev/fuse` is present and `SYS_ADMIN` is allowed.
-- **FUSE-T mount fails (macOS):** ensure FUSE-T is installed (`brew install fuse-t`) and the binary was built with CGO enabled.
+- **No file events on macOS:** ensure the system extension is approved in System Settings > General > Login Items & Extensions.
 - **bindfs mount fails (Lima/WSL2):** ensure bindfs is installed in the VM (`sudo apt install bindfs`) and `/dev/fuse` is available.
 - **System Extension not loading (macOS ESF+NE):** check System Settings > General > Login Items & Extensions. User must approve the System Extension.
 - **XPC connection fails (macOS ESF+NE):** verify the System Extension is approved and running. Check Console.app for XPC errors.

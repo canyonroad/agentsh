@@ -5,13 +5,14 @@ package darwin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
-	"path/filepath"
+	"os"
 	"runtime"
 	"testing"
 	"time"
 
-	"github.com/agentsh/agentsh/internal/platform/darwin/xpc"
+	"github.com/agentsh/agentsh/internal/platform/darwin/policysock"
 	"github.com/agentsh/agentsh/internal/policy"
 )
 
@@ -38,8 +39,21 @@ func (c *integrationPolicyChecker) CheckCommand(cmd string, args []string) ESExe
 	}
 }
 
+// shortSockPath returns a short Unix socket path under /tmp to avoid the
+// 104-character limit on macOS. t.TempDir() paths are too long.
+func shortSockPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "estest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := fmt.Sprintf("%s/p.sock", dir)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return sock
+}
+
 // waitForIntegrationServer waits for the XPC server to be ready.
-func waitForIntegrationServer(t *testing.T, srv *xpc.Server) {
+func waitForIntegrationServer(t *testing.T, srv *policysock.Server) {
 	t.Helper()
 	select {
 	case <-srv.Ready():
@@ -74,9 +88,9 @@ func TestESExecHandler_XPCIntegration(t *testing.T) {
 
 	// Create XPC server with PolicyAdapter as PolicyHandler
 	// and ESExecHandler as ExecHandler.
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
-	adapter := xpc.NewPolicyAdapter(engine, nil)
-	srv := xpc.NewServer(sockPath, adapter)
+	sockPath := shortSockPath(t)
+	adapter := policysock.NewPolicyAdapter(engine, nil)
+	srv := policysock.NewServer(sockPath, adapter)
 	srv.SetExecHandler(execHandler)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -87,8 +101,8 @@ func TestESExecHandler_XPCIntegration(t *testing.T) {
 
 	// Test: allowed command flows through ESExecHandler
 	t.Run("allow_through_pipeline", func(t *testing.T) {
-		resp := sendExecRequest(t, sockPath, xpc.PolicyRequest{
-			Type:      xpc.RequestTypeExecCheck,
+		resp := sendExecRequest(t, sockPath, policysock.PolicyRequest{
+			Type:      policysock.RequestTypeExecCheck,
 			Path:      "/usr/bin/ls",
 			Args:      []string{"-la"},
 			PID:       1234,
@@ -111,8 +125,8 @@ func TestESExecHandler_XPCIntegration(t *testing.T) {
 
 	// Test: denied command flows through ESExecHandler
 	t.Run("deny_through_pipeline", func(t *testing.T) {
-		resp := sendExecRequest(t, sockPath, xpc.PolicyRequest{
-			Type:      xpc.RequestTypeExecCheck,
+		resp := sendExecRequest(t, sockPath, policysock.PolicyRequest{
+			Type:      policysock.RequestTypeExecCheck,
 			Path:      "rm",
 			Args:      []string{"-rf", "/"},
 			PID:       5678,
@@ -135,8 +149,8 @@ func TestESExecHandler_XPCIntegration(t *testing.T) {
 
 	// Test: audit decision continues but records the decision
 	t.Run("audit_through_pipeline", func(t *testing.T) {
-		resp := sendExecRequest(t, sockPath, xpc.PolicyRequest{
-			Type:      xpc.RequestTypeExecCheck,
+		resp := sendExecRequest(t, sockPath, policysock.PolicyRequest{
+			Type:      policysock.RequestTypeExecCheck,
 			Path:      "curl",
 			Args:      []string{"https://example.com"},
 			PID:       2222,
@@ -159,8 +173,8 @@ func TestESExecHandler_XPCIntegration(t *testing.T) {
 
 	// Test: regular file/command requests still work alongside exec handler
 	t.Run("command_request_still_works", func(t *testing.T) {
-		resp := sendExecRequest(t, sockPath, xpc.PolicyRequest{
-			Type: xpc.RequestTypeCommand,
+		resp := sendExecRequest(t, sockPath, policysock.PolicyRequest{
+			Type: policysock.RequestTypeCommand,
 			Path: "/usr/bin/ls",
 			Args: []string{"-la"},
 			PID:  1234,
@@ -194,9 +208,9 @@ func TestESExecHandler_XPCIntegration_EnforcedApprove(t *testing.T) {
 	checker := &integrationPolicyChecker{engine: engine}
 	execHandler := NewESExecHandler(checker, "")
 
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
-	adapter := xpc.NewPolicyAdapter(engine, nil)
-	srv := xpc.NewServer(sockPath, adapter)
+	sockPath := shortSockPath(t)
+	adapter := policysock.NewPolicyAdapter(engine, nil)
+	srv := policysock.NewServer(sockPath, adapter)
 	srv.SetExecHandler(execHandler)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -207,8 +221,8 @@ func TestESExecHandler_XPCIntegration_EnforcedApprove(t *testing.T) {
 
 	// In enforced mode, approve decision should trigger redirect action
 	t.Run("approve_enforced_redirects", func(t *testing.T) {
-		resp := sendExecRequest(t, sockPath, xpc.PolicyRequest{
-			Type:      xpc.RequestTypeExecCheck,
+		resp := sendExecRequest(t, sockPath, policysock.PolicyRequest{
+			Type:      policysock.RequestTypeExecCheck,
 			Path:      "sudo",
 			Args:      []string{"ls"},
 			PID:       3333,
@@ -253,9 +267,9 @@ func TestESExecHandler_XPCIntegration_ShadowMode(t *testing.T) {
 	checker := &integrationPolicyChecker{engine: engine}
 	execHandler := NewESExecHandler(checker, "")
 
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
-	adapter := xpc.NewPolicyAdapter(engine, nil)
-	srv := xpc.NewServer(sockPath, adapter)
+	sockPath := shortSockPath(t)
+	adapter := policysock.NewPolicyAdapter(engine, nil)
+	srv := policysock.NewServer(sockPath, adapter)
 	srv.SetExecHandler(execHandler)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -266,8 +280,8 @@ func TestESExecHandler_XPCIntegration_ShadowMode(t *testing.T) {
 
 	// In shadow mode, approve should log the intent but allow through
 	t.Run("approve_shadow_continues", func(t *testing.T) {
-		resp := sendExecRequest(t, sockPath, xpc.PolicyRequest{
-			Type:      xpc.RequestTypeExecCheck,
+		resp := sendExecRequest(t, sockPath, policysock.PolicyRequest{
+			Type:      policysock.RequestTypeExecCheck,
 			Path:      "sudo",
 			Args:      []string{"ls"},
 			PID:       3333,
@@ -304,9 +318,9 @@ func TestESExecHandler_XPCIntegration_NilPolicyChecker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sockPath := filepath.Join(t.TempDir(), "policy.sock")
-	adapter := xpc.NewPolicyAdapter(engine, nil)
-	srv := xpc.NewServer(sockPath, adapter)
+	sockPath := shortSockPath(t)
+	adapter := policysock.NewPolicyAdapter(engine, nil)
+	srv := policysock.NewServer(sockPath, adapter)
 	srv.SetExecHandler(execHandler)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -316,8 +330,8 @@ func TestESExecHandler_XPCIntegration_NilPolicyChecker(t *testing.T) {
 	waitForIntegrationServer(t, srv)
 
 	t.Run("nil_checker_allows_all", func(t *testing.T) {
-		resp := sendExecRequest(t, sockPath, xpc.PolicyRequest{
-			Type:      xpc.RequestTypeExecCheck,
+		resp := sendExecRequest(t, sockPath, policysock.PolicyRequest{
+			Type:      policysock.RequestTypeExecCheck,
 			Path:      "/bin/rm",
 			Args:      []string{"-rf", "/"},
 			PID:       9999,
@@ -339,7 +353,7 @@ func TestESExecHandler_XPCIntegration_NilPolicyChecker(t *testing.T) {
 }
 
 // sendExecRequest sends a PolicyRequest to the XPC server and returns the response.
-func sendExecRequest(t *testing.T, sockPath string, req xpc.PolicyRequest) xpc.PolicyResponse {
+func sendExecRequest(t *testing.T, sockPath string, req policysock.PolicyRequest) policysock.PolicyResponse {
 	t.Helper()
 
 	conn, err := net.Dial("unix", sockPath)
@@ -352,7 +366,7 @@ func sendExecRequest(t *testing.T, sockPath string, req xpc.PolicyRequest) xpc.P
 		t.Fatalf("encode: %v", err)
 	}
 
-	var resp xpc.PolicyResponse
+	var resp policysock.PolicyResponse
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}

@@ -16,5 +16,7 @@
     <string>11.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>NSSystemExtensionUsageDescription</key>
+    <string>AgentSH uses a system extension to monitor file access, network connections, and process execution for policy enforcement.</string>
 </dict>
 </plist>

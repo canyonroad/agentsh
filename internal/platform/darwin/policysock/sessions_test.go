@@ -1,5 +1,7 @@
-// internal/platform/darwin/xpc/sessions_test.go
-package xpc
+//go:build darwin
+
+// internal/platform/darwin/policysock/sessions_test.go
+package policysock
 
 import (
 	"testing"

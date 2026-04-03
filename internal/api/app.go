@@ -73,6 +73,18 @@ type App struct {
 	// is configured. When true, command execution is blocked to prevent running
 	// without syscall enforcement (fail-closed).
 	ptraceFailed atomic.Bool
+
+	// cmdResolver registers PID→command_id for ESF file event attribution (darwin).
+	// Nil on non-darwin platforms or when policy socket is not configured.
+	cmdResolver interface {
+		RegisterCommand(pid int32, commandID string)
+	}
+
+	// sessionTracker registers PIDs with sessions for ESF event attribution (darwin).
+	// Nil on non-darwin platforms or when policy socket is not configured.
+	sessionTracker interface {
+		RegisterProcess(sessionID string, pid, ppid int32)
+	}
 }
 
 func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader) *App {
@@ -121,6 +133,22 @@ func (a *App) SetPlatformForTest(p platform.Platform) {
 // SetPackageChecker attaches a package install checker to the app.
 func (a *App) SetPackageChecker(c *pkgcheck.Checker) {
 	a.pkgChecker = c
+}
+
+// SetCmdResolver attaches a PID→command_id resolver for ESF file event attribution.
+// Called on darwin after the policy socket server is started. No-op on other platforms.
+func (a *App) SetCmdResolver(r interface {
+	RegisterCommand(pid int32, commandID string)
+}) {
+	a.cmdResolver = r
+}
+
+// SetSessionTracker attaches a session tracker for ESF PID→session registration.
+// Called on darwin after the policy socket server is started. No-op on other platforms.
+func (a *App) SetSessionTracker(t interface {
+	RegisterProcess(sessionID string, pid, ppid int32)
+}) {
+	a.sessionTracker = t
 }
 
 // Close releases resources held by the app (e.g., ptrace tracer).

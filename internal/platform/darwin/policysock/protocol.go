@@ -1,4 +1,14 @@
-package xpc
+//go:build darwin
+
+package policysock
+
+// DirectAllow defines an entry in the proxy bypass allowlist.
+// Host can be an IP, hostname, or "*" (any host).
+// Port 0 means any port.
+type DirectAllow struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
 
 // RequestType identifies the type of policy check.
 type RequestType string
@@ -30,9 +40,15 @@ const (
 
 	// Policy snapshot request type (Swift side caches rules locally)
 	RequestTypeFetchPolicySnapshot RequestType = "fetch_policy_snapshot"
+
+	// Exec redirect notification (fire-and-forget from SysExt)
+	RequestTypeExecRedirectNotify RequestType = "exec_redirect_notify"
+
+	// Event stream connection type (persistent, fire-and-forget)
+	RequestTypeEventStreamInit RequestType = "event_stream_init"
 )
 
-// PolicyRequest is sent from the XPC bridge to the Go policy server.
+// PolicyRequest is sent from the policy socket to the Go policy server.
 type PolicyRequest struct {
 	Type      RequestType `json:"type"`
 	Path      string      `json:"path,omitempty"`      // file path or command path
@@ -104,11 +120,13 @@ type PolicyResponse struct {
 	Approvals []ApprovalResponse `json:"approvals,omitempty"` // Pending approval requests
 
 	// Policy snapshot fields (returned by fetch_policy_snapshot)
-	SnapshotVersion uint64               `json:"version,omitempty"`
-	FileRules       []SnapshotFileRule   `json:"file_rules,omitempty"`
-	NetworkRules      []SnapshotNetworkRule `json:"network_rules,omitempty"`
-	DNSRules          []SnapshotDNSRule    `json:"dns_rules,omitempty"`
-	Defaults          *SnapshotDefaults    `json:"defaults,omitempty"`
+	SnapshotVersion uint64                `json:"version,omitempty"`
+	RootPID         int32                 `json:"root_pid,omitempty"`
+	FileRules       []SnapshotFileRule    `json:"file_rules,omitempty"`
+	NetworkRules    []SnapshotNetworkRule `json:"network_rules,omitempty"`
+	DNSRules        []SnapshotDNSRule     `json:"dns_rules,omitempty"`
+	ExecRules       []SnapshotExecRule    `json:"exec_rules,omitempty"`
+	Defaults        *SnapshotDefaults     `json:"defaults,omitempty"`
 }
 
 // ExecContext carries process context from the ESF event for exec redirect.

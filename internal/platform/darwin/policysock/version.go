@@ -1,4 +1,6 @@
-package xpc
+//go:build darwin
+
+package policysock
 
 import "sync"
 

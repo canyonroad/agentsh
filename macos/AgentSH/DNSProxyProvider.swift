@@ -3,31 +3,11 @@ import NetworkExtension
 import Network
 
 class DNSProxyProvider: NEDNSProxyProvider {
-    private var xpc: NSXPCConnection?
-    private var xpcProxy: AgentshXPCProtocol?
-    private let queue = DispatchQueue(label: "ai.canyonroad.agentsh.dnsproxyprovider")
-
     override func startProxy(options: [String: Any]? = nil, completionHandler: @escaping (Error?) -> Void) {
-        queue.sync {
-            // Connect to XPC Service
-            xpc = NSXPCConnection(serviceName: xpcServiceIdentifier)
-            xpc?.remoteObjectInterface = NSXPCInterface(with: AgentshXPCProtocol.self)
-            xpc?.resume()
-
-            xpcProxy = xpc?.remoteObjectProxyWithErrorHandler { error in
-                NSLog("XPC error: \(error)")
-            } as? AgentshXPCProtocol
-        }
-
         completionHandler(nil)
     }
 
     override func stopProxy(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
-        queue.sync {
-            xpc?.invalidate()
-            xpc = nil
-            xpcProxy = nil
-        }
         completionHandler()
     }
 

@@ -6,8 +6,8 @@
     <true/>
     <key>com.apple.developer.networking.networkextension</key>
     <array>
-        <string>content-filter-provider</string>
-        <string>dns-proxy</string>
+        <string>content-filter-provider-systemextension</string>
+        <string>dns-proxy-systemextension</string>
     </array>
 </dict>
 </plist>

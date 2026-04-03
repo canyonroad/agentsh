@@ -7,7 +7,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/agentsh/agentsh/internal/platform/darwin/xpc"
+	"github.com/agentsh/agentsh/internal/platform/darwin/policysock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,7 +70,7 @@ func TestESExecHandler_PolicyMapping(t *testing.T) {
 				message:           "test message",
 			}
 			handler := NewESExecHandler(checker, "")
-			result := handler.CheckExec("/usr/bin/test", []string{"/usr/bin/test", "-f", "foo"}, 1234, 1233, "sess-1", xpc.ExecContext{})
+			result := handler.CheckExec("/usr/bin/test", []string{"/usr/bin/test", "-f", "foo"}, 1234, 1233, "sess-1", policysock.ExecContext{})
 
 			assert.Equal(t, tt.wantAction, result.Action, "action mismatch")
 			assert.Equal(t, tt.wantDecision, result.Decision, "decision mismatch")
@@ -82,7 +82,7 @@ func TestESExecHandler_PolicyMapping(t *testing.T) {
 
 func TestESExecHandler_NilPolicyChecker(t *testing.T) {
 	handler := NewESExecHandler(nil, "")
-	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1", xpc.ExecContext{})
+	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1", policysock.ExecContext{})
 
 	assert.Equal(t, "continue", result.Action)
 	assert.Equal(t, "allow", result.Decision)
@@ -97,7 +97,7 @@ func TestESExecHandler_UnknownDecision(t *testing.T) {
 		rule:              "weird-rule",
 		message:           "weird message",
 	}, "")
-	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1", xpc.ExecContext{})
+	result := handler.CheckExec("/usr/bin/test", nil, 1234, 1233, "sess-1", policysock.ExecContext{})
 
 	// Unknown decisions should fail-secure (deny).
 	assert.Equal(t, "deny", result.Action)
@@ -113,7 +113,7 @@ func TestESExecHandler_EffectiveDecisionFallback(t *testing.T) {
 		effectiveDecision: "", // empty
 		rule:              "fallback-rule",
 	}, "")
-	result := handler.CheckExec("/usr/bin/ls", nil, 100, 99, "sess-2", xpc.ExecContext{})
+	result := handler.CheckExec("/usr/bin/ls", nil, 100, 99, "sess-2", policysock.ExecContext{})
 
 	assert.Equal(t, "continue", result.Action)
 	assert.Equal(t, "allow", result.Decision)
@@ -129,7 +129,7 @@ func TestESExecHandler_PassesArgsToChecker(t *testing.T) {
 	handler := NewESExecHandler(checker, "")
 
 	args := []string{"/usr/bin/curl", "-s", "https://example.com"}
-	handler.CheckExec("/usr/bin/curl", args, 5678, 5677, "sess-3", xpc.ExecContext{})
+	handler.CheckExec("/usr/bin/curl", args, 5678, 5677, "sess-3", policysock.ExecContext{})
 
 	assert.Equal(t, "/usr/bin/curl", checker.lastCmd)
 	assert.Equal(t, args, checker.lastArgs)
@@ -146,7 +146,7 @@ func TestESExecHandler_RedirectSpawnsStub(t *testing.T) {
 		message:           "redirecting",
 	}, "/usr/local/bin/agentsh-stub")
 
-	result := handler.CheckExec("/usr/bin/git", []string{"/usr/bin/git", "push"}, 9999, 9998, "sess-4", xpc.ExecContext{})
+	result := handler.CheckExec("/usr/bin/git", []string{"/usr/bin/git", "push"}, 9999, 9998, "sess-4", policysock.ExecContext{})
 
 	assert.Equal(t, "redirect", result.Action)
 	assert.Equal(t, "redirect", result.Decision)
@@ -162,7 +162,7 @@ func TestESExecHandler_ApproveSpawnsStub(t *testing.T) {
 		message:           "needs approval",
 	}, "/usr/local/bin/agentsh-stub")
 
-	result := handler.CheckExec("/usr/bin/rm", []string{"/usr/bin/rm", "-rf", "/"}, 1111, 1110, "sess-5", xpc.ExecContext{})
+	result := handler.CheckExec("/usr/bin/rm", []string{"/usr/bin/rm", "-rf", "/"}, 1111, 1110, "sess-5", policysock.ExecContext{})
 
 	assert.Equal(t, "redirect", result.Action)
 	assert.Equal(t, "approve", result.Decision)
@@ -222,7 +222,7 @@ func TestLaunchStub_NoTTY(t *testing.T) {
 	defer os.Remove(tmpFile.Name())
 
 	// Should not panic, even with empty TTY and missing binary.
-	handler.launchStub(tmpFile, "/usr/bin/test", 1234, xpc.ExecContext{
+	handler.launchStub(tmpFile, "/usr/bin/test", 1234, policysock.ExecContext{
 		CWDPath: "/tmp",
 	})
 }
@@ -238,7 +238,7 @@ func TestLaunchStub_MissingBinary(t *testing.T) {
 	defer os.Remove(tmpFile.Name())
 
 	// Should return early without panic when stub binary is empty.
-	handler.launchStub(tmpFile, "/usr/bin/test", 1234, xpc.ExecContext{})
+	handler.launchStub(tmpFile, "/usr/bin/test", 1234, policysock.ExecContext{})
 }
 
 func TestSpawnStubServer_NoStubBinary(t *testing.T) {
@@ -249,8 +249,8 @@ func TestSpawnStubServer_NoStubBinary(t *testing.T) {
 	}, "") // empty stub binary
 
 	// Should not panic.
-	handler.spawnStubServer("/usr/bin/test", []string{"/usr/bin/test"}, 1234, 1233, "sess-1", xpc.ExecContext{})
+	handler.spawnStubServer("/usr/bin/test", []string{"/usr/bin/test"}, 1234, 1233, "sess-1", policysock.ExecContext{})
 }
 
-// Compile-time interface check: ESExecHandler must implement xpc.ExecHandler.
-var _ xpc.ExecHandler = (*ESExecHandler)(nil)
+// Compile-time interface check: ESExecHandler must implement policysock.ExecHandler.
+var _ policysock.ExecHandler = (*ESExecHandler)(nil)

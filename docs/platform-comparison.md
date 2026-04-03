@@ -1,15 +1,17 @@
 # Platform Comparison Matrix
 
+> **macOS ESF+NE is Alpha.** The feature matrix below reflects design-target capabilities. The ESF+NE column is functional end-to-end but not yet production-ready.
+
 This document provides a comprehensive comparison of agentsh capabilities across all supported platforms.
 
 ## Feature Support Matrix
 
 > **Note on macOS Lima:** The "macOS Lima" column applies to both deployment modes. When running agentsh **inside** the Lima VM, you get 100% Linux-equivalent security. When running agentsh on macOS **orchestrating** the Lima VM, you get 85% due to VM boundary overhead. See [Lima Deployment Modes](#lima-deployment-modes) for details.
 
-| Feature | Linux | macOS ESF+NE | macOS FUSE-T | macOS Lima | Win Native | Win WSL2 |
-|---------|:-----:|:------------:|:------------:|:----------:|:----------:|:--------:|
-| **Filesystem Interception** | | | | | | |
-| Implementation | FUSE3 | Endpoint Security | FUSE-T (NFS) | FUSE3 | Mini Filter + WinFsp | FUSE3 |
+| Feature | Linux | macOS ESF+NE | macOS Lima | Win Native | Win WSL2 |
+|---------|:-----:|:------------:|:----------:|:----------:|:--------:|
+| **Filesystem Interception** | | | | | |
+| Implementation | FUSE3 | Endpoint Security | FUSE3 | Mini Filter + WinFsp | FUSE3 |
 | File read monitoring | Block | Block | Block | Block | Block | Block |
 | File write monitoring | Block | Block | Block | Block | Block | Block |
 | File create/delete | Block | Block | Block | Block | Block | Block |
@@ -87,8 +89,7 @@ This document provides a comprehensive comparison of agentsh capabilities across
 | **macOS ESF+NE** | 90% | Yes | Yes | Audit | Minimal | Exec only | None |
 | **macOS + Lima (inside VM)** | 100% | Yes | Yes | Block | Full | Yes | Full |
 | **macOS + Lima (orchestrated)** | 85% | Yes | Yes | Block | Full | Yes | Full |
-| **macOS FUSE-T** | 70% | Yes | Yes | Audit | Minimal | No | None |
-| **macOS Dynamic Seatbelt** | 65-75% | Partial | Best-effort | Audit | Deny-default | Exec paths | None |
+| **macOS (observation)** | 25% | Observation | No | No | None | No | None |
 | **Windows Native** | 85% | Yes | Yes | Audit | Partial | No | Partial |
 
 ## Security Feature Coverage
@@ -110,7 +111,7 @@ Windows WSL2          ███████████████████�
 
 macOS ESF+NE          ████████████████████████████████████████████░░░░░░░░░░░░   90%
                       File✓   Net✓    Sig⚠    Iso⚠      Sys⚠     Res✗
-                      (ESF requires Apple approval; NE is standard capability)
+                      (Alpha — system extension required)
 
 macOS + Lima (in VM)  ████████████████████████████████████████████████████████  100%
                       File✓   Net✓    Sig✓    Iso✓      Sys✓     Res✓
@@ -120,13 +121,9 @@ macOS + Lima (orch)   ███████████████████�
                       File✓   Net✓    Sig✓    Iso✓      Sys✓     Res✓
                       (agentsh on macOS orchestrating Lima VM)
 
-macOS FUSE-T + pf     ██████████████████████████████████░░░░░░░░░░░░░░░░░░░░░░   70%
-                      File✓   Net✓    Sig⚠    Iso⚠      Sys✗     Res✗
-                      (Minimal isolation via sandbox-exec, no syscall filter)
-
-macOS Dyn Seatbelt     █████████████████████████████████████░░░░░░░░░░░░░░░░░░░  65-75%
-                       File⚠   Net⚠    Sig⚠    Iso✓      Sys⚠     Res✗
-                       (Policy-driven SBPL; +FUSE-T for file interception → 75%)
+macOS (observation)   ██████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   25%
+                      File⚠   Net✗    Sig✗    Iso✗      Sys✗     Res✗
+                      (FSEvents observation only, no enforcement)
 
 Windows Native        ██████████████████████████████████████████░░░░░░░░░░░░░░   85%
                       File✓   Net✓    Sig⚠    Iso⚠      Sys✗     Res⚠
@@ -142,7 +139,7 @@ Legend: ✓ = Full support (Block+Audit)  ⚠ = Partial support (Audit only)  �
 | Mechanism | Overhead | Latency Added | Throughput Impact | Notes |
 |-----------|:--------:|:-------------:|:-----------------:|-------|
 | FUSE3 (Linux) | Low | 5-20µs | 3-8% | Kernel-userspace context switch |
-| FUSE-T (macOS) | Medium | 50-200µs | 10-25% | NFS protocol overhead |
+| ESF (macOS) | Very Low | 1-5µs | <2% | In-kernel, no context switch for observe |
 | ESF (macOS) | Very Low | 1-5µs | <2% | In-kernel, no context switch for observe |
 | Mini Filter (Windows) | Very Low | 1-5µs | <3% | In-kernel, no userspace IPC for cached |
 | WinFsp (Windows) | Low | 10-50µs | 5-15% | Kernel-userspace via FUSE protocol |
@@ -155,7 +152,6 @@ Sequential Read (large files):
 Native          ████████████████████████████████████████  100% baseline
 FUSE3           ████████████████████████████████████░░░░   92%
 ESF             ████████████████████████████████████████   98%
-FUSE-T          ████████████████████████████████░░░░░░░░   80%
 MiniFilter      ████████████████████████████████████████   98%
 WinFsp          ████████████████████████████████████░░░░   90%
 Lima/virtiofs   ████████████████████████████░░░░░░░░░░░░   70%
@@ -164,7 +160,6 @@ Random I/O (many small files):
 Native          ████████████████████████████████████████  100% baseline
 FUSE3           ████████████████████████████████░░░░░░░░   85%
 ESF             ████████████████████████████████████████   99%
-FUSE-T          ████████████████████████████░░░░░░░░░░░░   75%
 MiniFilter      ████████████████████████████████████████   97%
 WinFsp          ████████████████████████████████░░░░░░░░   85%
 Lima/virtiofs   ██████████████████████████░░░░░░░░░░░░░░   65%
@@ -203,7 +198,7 @@ Lima/virtiofs   █████████████████████�
 | Workload | Recommended Config | Expected Overhead |
 |----------|-------------------|:-----------------:|
 | CI/CD builds | FUSE3 + iptables, no TLS inspection | 5-10% |
-| Development | FUSE-T + pf (macOS) or FUSE3 | 10-15% |
+| Development | ESF+NE (macOS) or FUSE3 (Linux) | 2-10% |
 | AI agent tasks | Full interception, TLS inspection | 15-25% |
 | Data processing | Lima with virtiofs batch mode | 15-30% |
 | Security-critical | ESF + NE (macOS) or full Linux | 2-10% |
@@ -244,20 +239,14 @@ Lima/virtiofs   █████████████████████�
                                   │ If Lima not acceptable
                                   ▼
                     ┌─────────────────────┐
-                    │ Have Apple          │
-                    │ entitlements?       │
-                    └──────────┬──────────┘
-                          Yes  │  No
-                               │
-              ┌────────────────┴────────────────┐
-              ▼                                 ▼
-┌─────────────────────┐           ┌─────────────────────┐
-│   macOS ESF+NE      │           │   macOS FUSE-T      │
-│   90% - Best native │           │   70% - Easy setup  │
-│   (ESF needs Apple  │           │   brew install      │
-│    approval; NE     │           │   fuse-t            │
-│    is standard)     │           │                     │
-└─────────────────────┘           └─────────────────────┘
+                                  │ If Lima not acceptable
+                                  ▼
+                    ┌─────────────────────┐
+                    │   macOS ESF+NE      │
+                    │   90% - Alpha       │
+                    │   brew install      │
+                    │   --cask agentsh    │
+                    └─────────────────────┘
 ```
 
 ## Recommended Configuration by Use Case
@@ -268,8 +257,8 @@ Lima/virtiofs   █████████████████████�
 | Production - AWS Fargate | Linux (ptrace mode) | 95% | Full enforcement with steering via ptrace + E2E tested on Fargate |
 | Production - Windows Server | Windows WSL2 | 100% | Full Linux security in VM |
 | Production - macOS | macOS + Lima (inside VM) | 100% | Run agentsh inside Lima = native Linux |
-| Enterprise Security Product | macOS ESF+NE | 90% | ESF requires Apple approval; NE is standard |
-| Development - macOS | macOS Dynamic Seatbelt + FUSE-T | 75% | Policy-driven sandbox with file interception |
+| Enterprise Security Product | macOS ESF+NE | 90% | Alpha — install via Homebrew cask |
+| Development - macOS | macOS ESF+NE | 90% | Alpha — `brew install --cask agentsh` |
 | Development - Windows | Windows Native | 75% | Registry monitoring + WinDivert network |
 | CI/CD Pipeline | Linux Native | 100% | Containers supported |
 | Air-gapped/Offline | Linux Native | 100% | No external dependencies |
@@ -323,22 +312,16 @@ sandbox:
 
 | Configuration | File Interception | Network | Isolation | Ease of Setup | Security |
 |---------------|:-----------------:|:-------:|:---------:|:-------------:|:--------:|
-| ESF + NE | Endpoint Security | Network Extension | Minimal (sandbox-exec) | Medium (ESF needs approval) | 90% |
-| Dynamic Seatbelt + FUSE-T | FUSE-T (NFS) | Best-effort (SBPL port rules) | Deny-default (dynamic SBPL) | Easy (agentsh-macwrap in PATH) | 75% |
-| Dynamic Seatbelt only | Policy-derived SBPL paths | Best-effort (SBPL port rules) | Deny-default (dynamic SBPL) | Easy (agentsh-macwrap in PATH) | 65% |
-| FUSE-T + pf | FUSE-T (NFS) | pf packet filter | Minimal (sandbox-exec) | Easy (`brew install`) | 70% |
+| ESF + NE | Endpoint Security | Network Extension | Minimal (sandbox-exec) | Easy (`brew install --cask`) | 90% |
 | Lima VM (inside) | FUSE3 in VM | iptables in VM | Full | Medium | 100% |
 | Lima VM (orchestrated) | FUSE3 in VM | iptables in VM | Full | Medium | 85% |
-| Degraded | FSEvents (observe) | pcap (observe) | None | None required | 25% |
+| Observation | FSEvents (observe) | pcap (observe) | None | None required | 25% |
 
 **When to use each:**
-- **ESF + NE**: Building a commercial security product, have Apple Developer relationship
-- **FUSE-T + pf**: Development, testing, personal use - best balance of features/simplicity
-- **Dynamic Seatbelt + FUSE-T**: Default for development — automatic policy-driven sandbox with file interception
-- **Dynamic Seatbelt only**: When FUSE-T isn't installed — still provides exec path restriction, Mach service deny-default, and file path boundaries
+- **ESF + NE (Alpha)**: Development and production on macOS — install via `brew install --cask agentsh`
 - **Lima VM (inside)**: Production on macOS - run agentsh inside VM for full Linux security
 - **Lima VM (orchestrated)**: When you need macOS-native CLI experience with Lima backend
-- **Degraded**: Quick testing, observation-only use cases
+- **Observation**: Quick testing, observation-only use cases
 
 ## Lima Deployment Modes
 
@@ -362,26 +345,14 @@ See [Known Limitations - macOS + Lima](#macos--lima) for detailed comparison.
 - **Signal interception**: Full blocking and redirect via seccomp user-notify
 - **ptrace mode**: Available in restricted containers (e.g. AWS Fargate) with `SYS_PTRACE` capability; provides full syscall enforcement with steering (exec/file/network redirect, DNS redirect, SNI rewrite, TracerPid masking). E2E tested on Fargate with CI integration.
 
-### macOS ESF+NE
-- **ESF requires Apple approval** - must apply for ESF entitlement with business justification
-- **Network Extension is standard** - enable in Xcode, no approval needed (since Nov 2016)
+### macOS ESF+NE (Alpha)
+- **Alpha status** - functional end-to-end but expect rough edges and breaking changes
 - **No process isolation** - macOS has no namespace equivalent
 - **No resource limits** - no cgroups equivalent (cannot enforce limits)
 - **Resource monitoring available** - native Mach API monitoring for memory, CPU, and thread count
 - **No syscall filtering** - except exec blocking via ESF
 - **Signal interception**: Audit only via Endpoint Security; cannot block or redirect signals
-- Best option for commercial security products
-
-### macOS FUSE-T + pf
-- **Minimal process isolation** - sandbox-exec with SBPL profiles provides file/network restrictions; when agentsh-macwrap is available, dynamic seatbelt provides deny-default + policy-driven SBPL
-- **No namespace isolation** - macOS has no namespace equivalent; agents can see all processes
-- **No resource limits** - cannot enforce CPU/memory limits
-- **Resource monitoring available** - native Mach API monitoring for memory, CPU, and thread count
-- **No syscall filtering** - cannot block dangerous syscalls
-- **Requires root for pf** - network interception needs sudo
-- **Signal interception**: Audit only via Endpoint Security; cannot block or redirect signals
-- With dynamic seatbelt: policy-driven SBPL profiles provide exec path restriction, Mach service deny-default, and file path boundaries
-- Best option for development and personal use
+- Install via `brew tap canyonroad/tap && brew install --cask agentsh`
 
 ### macOS + Lima
 
@@ -513,8 +484,7 @@ Inside the VM, both modes use standard Linux primitives:
 | Platform | Command | Requirements |
 |----------|---------|--------------|
 | Linux | `curl -fsSL https://get.agentsh.dev \| bash` | root for full features |
-| macOS ESF+NE | `make build-macos-enterprise` | Xcode 15+, ESF entitlement (Apple approval), code signing |
-| macOS FUSE-T | `brew install fuse-t && brew install agentsh` | root for pf network |
+| macOS ESF+NE | `brew tap canyonroad/tap && brew install --cask agentsh` | Approve sysext in System Settings |
 | macOS Lima | `brew install lima && limactl start agentsh` | Lima VM |
 | Windows Native | `sc create agentsh type=filesys` | Admin, test signing (dev) or EV cert (prod) |
 | Windows WSL2 | `wsl --install -d Ubuntu && ...` | WSL2 enabled |

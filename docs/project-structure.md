@@ -35,7 +35,7 @@ agentsh/
 - `internal/auth/` — API key auth implementation.
 - `internal/approvals/` — Approval manager (shadow/enforced modes).
 - `internal/platform/` — Platform abstraction layer for cross-platform support.
-- `internal/platform/fuse/` — Shared FUSE package for macOS (FUSE-T) and Windows (WinFsp) filesystem mounting.
+- `internal/platform/fuse/` — Shared FUSE package for Linux (FUSE3) and Windows (WinFsp) filesystem mounting.
 - `internal/platform/lima/` — Lima VM platform for macOS with full Linux isolation (cgroups v2, iptables, namespaces).
 - `internal/platform/wsl2/` — WSL2 platform for Windows with full Linux isolation (cgroups v2, iptables, namespaces).
 

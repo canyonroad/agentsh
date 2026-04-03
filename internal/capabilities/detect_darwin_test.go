@@ -16,14 +16,10 @@ func TestSelectDarwinMode(t *testing.T) {
 		wantScore    int
 		needsMacwrap bool
 	}{
-		{"esf wins", map[string]any{"esf": true, "fuse_t": true, "lima_available": true}, "esf", 90, false},
-		{"lima second", map[string]any{"esf": false, "fuse_t": true, "lima_available": true}, "lima", 85, false},
-		// These depend on macwrap availability
-		{"dynamic seatbelt + fuse", map[string]any{"esf": false, "fuse_t": true, "lima_available": false}, "dynamic-seatbelt-fuse", 75, true},
-		{"dynamic seatbelt only", map[string]any{"esf": false, "fuse_t": false, "lima_available": false}, "dynamic-seatbelt", 65, true},
-		// These only apply when macwrap is NOT available
-		{"fuse-t only", map[string]any{"esf": false, "fuse_t": true, "lima_available": false}, "fuse-t", 70, false},
-		{"sandbox-exec fallback", map[string]any{"esf": false, "fuse_t": false, "lima_available": false}, "sandbox-exec", 60, false},
+		{"esf wins", map[string]any{"esf": true, "lima_available": true}, "esf", 90, false},
+		{"lima second", map[string]any{"esf": false, "lima_available": true}, "lima", 85, false},
+		{"dynamic seatbelt", map[string]any{"esf": false, "lima_available": false}, "dynamic-seatbelt", 65, true},
+		{"sandbox-exec fallback", map[string]any{"esf": false, "lima_available": false}, "sandbox-exec", 60, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -31,10 +27,7 @@ func TestSelectDarwinMode(t *testing.T) {
 				t.Skip("agentsh-macwrap not in PATH")
 			}
 			if !tt.needsMacwrap && hasMacwrap {
-				// When macwrap IS available, "fuse-t only" becomes "dynamic-seatbelt-fuse"
-				// and "sandbox-exec fallback" becomes "dynamic-seatbelt"
-				// Skip these as they test the no-macwrap path
-				if tt.wantMode == "fuse-t" || tt.wantMode == "sandbox-exec" {
+				if tt.wantMode == "sandbox-exec" {
 					t.Skip("macwrap is in PATH, this tests the no-macwrap path")
 				}
 			}
@@ -60,7 +53,7 @@ func TestDetect_Darwin(t *testing.T) {
 	}
 
 	// Should have macOS-specific capability keys
-	expectedKeys := []string{"sandbox_exec", "fuse_t", "esf"}
+	expectedKeys := []string{"sandbox_exec", "esf", "network_extension"}
 	for _, key := range expectedKeys {
 		if _, exists := result.Capabilities[key]; !exists {
 			t.Errorf("Capabilities missing key %q", key)
