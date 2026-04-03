@@ -619,6 +619,14 @@ See [Policy Documentation](docs/operations/policies.md#signal-rules) for full co
 
 ---
 
+## macOS File I/O Monitoring
+
+On macOS, agentsh monitors file I/O using the Endpoint Security Framework (ESF), subscribing to both AUTH and NOTIFY events. Tracked operations include file open, create, delete, rename, write (detected via close-modified), and on macOS 26+, chmod and chown via attribute change events. Every file event is attributed to the originating session and command through PID-based resolution, providing full audit trails across subprocess trees.
+
+ESF provides kernel-level allow/deny enforcement but does not support transparent file interception like Linux FUSE. Policy actions that require interception -- such as `redirect` (path rewriting) and `soft_delete` (quarantine) -- are implemented as deny + guidance: the operation is blocked at the ESF level and the agent receives instructions to retry with the correct path or to acknowledge that the file is protected. See the [macOS ESF+NE architecture doc](docs/macos-esf-ne-architecture.md) for event stream details and the [policy documentation](docs/operations/policies.md#file-rule-actions-on-macos-esf) for per-action behavior.
+
+---
+
 ## Starter policy packs
 
 You already have a default policy (`configs/policies/default.yaml`). These opinionated packs are available as separate files so teams can pick one:

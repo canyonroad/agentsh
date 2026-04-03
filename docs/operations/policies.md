@@ -161,6 +161,20 @@ Windows policies include:
 - Windows-specific commands (`dir`, `type`, `findstr`, `msbuild`)
 - NuGet package registry access
 
+## File Rule Actions on macOS (ESF)
+
+On macOS, file I/O enforcement uses the Endpoint Security Framework (ESF) instead of Linux FUSE. ESF AUTH events are binary allow/deny -- there is no transparent file interception. This means actions that rely on interception on Linux are implemented as deny + async guidance on macOS. The end results are equivalent, but the mechanism differs.
+
+| Action | Linux (FUSE) | macOS (ESF) |
+|--------|-------------|-------------|
+| `allow` | Operation permitted, event logged | Same -- operation permitted via `es_respond_auth_result(ALLOW)`, event logged |
+| `deny` | Operation blocked, event logged | Same -- operation blocked via `es_respond_auth_result(DENY)`, event logged |
+| `redirect` | FUSE transparently rewrites the path; the process sees the alternative path as if it were the original | Operation **denied** at the ESF level. The agent receives guidance indicating the alternative path to use. This is a "deny + guidance" approach -- the agent must retry using the suggested path. |
+| `soft_delete` | FUSE intercepts the unlink and preserves the file transparently; the process believes the delete succeeded | Deletion **denied** via ESF and the file is preserved. The agent receives guidance explaining the file is protected. Same end result (file preserved) but via denial instead of transparent interception. |
+| `approve` | Operation held pending human approval; the process blocks until approved or denied | Operation **denied** via ESF and an approval flow is triggered asynchronously. If approved, the agent must retry the operation. |
+
+**Key takeaway:** On Linux, FUSE can transparently intercept and modify file operations mid-flight. On macOS, ESF can only allow or deny. Actions that require interception (`redirect`, `soft_delete`, `approve`) are implemented as deny + async notification/guidance, and the agent is expected to act on that guidance (e.g., retry with the redirected path, or retry after approval is granted).
+
 ## Signal Rules
 
 Signal rules control how signals (kill, terminate, stop, etc.) can be sent between processes within an agentsh session. This provides protection against runaway processes, accidental signal delivery to critical services, and enables graceful shutdown patterns.
