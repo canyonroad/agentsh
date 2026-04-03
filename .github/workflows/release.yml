@@ -275,9 +275,9 @@ jobs:
           # Copy Swift build products from DerivedData
           PRODUCTS="build/DerivedData/Build/Products/Release"
 
-          # System Extension
+          # System Extension (Xcode names the product with the full bundle ID)
           mkdir -p "build/AgentSH.app/Contents/Library/SystemExtensions"
-          cp -R "${PRODUCTS}/SysExt.systemextension" \
+          cp -R "${PRODUCTS}/ai.canyonroad.agentsh.SysExt.systemextension" \
             "build/AgentSH.app/Contents/Library/SystemExtensions/"
 
           # XPC Service
