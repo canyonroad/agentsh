@@ -49,6 +49,11 @@ type extraProcConfig struct {
 	// Original command name (before wrapping) for signal registry
 	origCommand string
 
+	// cmdResolver registers PID→command_id for ESF file event attribution (darwin).
+	cmdResolver interface {
+		RegisterCommand(pid int32, commandID string)
+	}
+
 	// ptraceSync indicates the READY/GO handshake is enabled for hybrid mode.
 	// Only true when ptrace is active AND seccomp notify features are enabled.
 	ptraceSync bool
@@ -280,6 +285,10 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 	pgid := 0
 	if cmd.Process != nil {
 		s.SetCurrentProcessPID(cmd.Process.Pid)
+		// Register PID→command_id for ESF event attribution.
+		if extra != nil && extra.cmdResolver != nil {
+			extra.cmdResolver.RegisterCommand(int32(cmd.Process.Pid), cmdID)
+		}
 		pgid = getProcessGroupID(cmd.Process.Pid)
 
 		// If we started with ptrace (stopped), run the hook BEFORE resuming.

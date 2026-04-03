@@ -114,8 +114,8 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 			}
 		}
 		envInject := mergeEnvInject(a.cfg, sessionPolicy)
-		if len(envInject) > 0 {
-			return &wrapperSetupResult{wrappedReq: req, extraCfg: &extraProcConfig{envInject: envInject}}
+		if len(envInject) > 0 || a.cmdResolver != nil {
+			return &wrapperSetupResult{wrappedReq: req, extraCfg: &extraProcConfig{envInject: envInject, cmdResolver: a.cmdResolver}}
 		}
 		return &wrapperSetupResult{wrappedReq: req, extraCfg: nil}
 	}
@@ -291,6 +291,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		fileMonitorCfg:   a.cfg.Sandbox.Seccomp.FileMonitor,
 		landlockEnabled:  a.cfg.Landlock.Enabled,
 		ptraceSync:       a.ptraceTracer != nil && hasNotifyFeatures,
+		cmdResolver:      a.cmdResolver,
 	}
 
 	// Create execve handler if enabled (Linux-specific, will be nil on other platforms)

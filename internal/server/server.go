@@ -521,6 +521,10 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Start the policy socket server (macOS only; no-op on other platforms).
 	srv.startPolicySocket(cfg, engine)
+	// Wire cmdResolver into the app so exec handler can register PIDs (darwin only).
+	if srv.cmdResolver != nil {
+		app.SetCmdResolver(srv.cmdResolver)
+	}
 
 	ln, err := listenHTTP(cfg)
 	if err != nil {
