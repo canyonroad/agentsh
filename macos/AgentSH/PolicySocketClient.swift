@@ -15,6 +15,15 @@ class PolicySocketClient {
     private var _connected: Int32 = 0
     var isConnected: Bool { _connected != 0 }
 
+    // MARK: - Event Stream
+    private var streamFD: Int32 = -1
+    private let streamQueue = DispatchQueue(label: "ai.canyonroad.agentsh.eventstream")
+    private var eventBuffer: [[String: Any]] = []
+    private let maxBufferSize = 1024
+    private var reconnectDelay: TimeInterval = 1.0
+    private let maxReconnectDelay: TimeInterval = 30.0
+    private var streamConnected = false
+
     private init() {}
 
     // MARK: - Connection Lifecycle
@@ -26,12 +35,18 @@ class PolicySocketClient {
         sendQueue.async {
             self.testConnection()
         }
+        connectEventStream()
     }
 
     /// Called when a Darwin notification arrives, signaling the Go server may be alive.
     func onServerNotification() {
         sendQueue.async {
             self.testConnection()
+        }
+        streamQueue.async {
+            if !self.streamConnected {
+                self.doConnectEventStream()
+            }
         }
     }
 
@@ -91,6 +106,148 @@ class PolicySocketClient {
                 OSAtomicCompareAndSwap32(1, 0, &self._connected)
                 completion(nil)
             }
+        }
+    }
+
+    // MARK: - Event Stream (persistent connection for file events)
+
+    /// Opens a persistent connection for event streaming.
+    func connectEventStream() {
+        streamQueue.async {
+            self.doConnectEventStream()
+        }
+    }
+
+    private func doConnectEventStream() {
+        // Close existing connection if any
+        if streamFD >= 0 {
+            close(streamFD)
+            streamFD = -1
+        }
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            scheduleReconnect()
+            return
+        }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        _ = withUnsafeMutablePointer(to: &addr.sun_path.0) { ptr in
+            socketPath.withCString { cstr in strcpy(ptr, cstr) }
+        }
+        let addrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let connectResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                connect(fd, sockPtr, addrLen)
+            }
+        }
+        guard connectResult == 0 else {
+            close(fd)
+            scheduleReconnect()
+            return
+        }
+
+        // Validate server code signing
+        guard validateServer(fd: fd) else {
+            close(fd)
+            scheduleReconnect()
+            return
+        }
+
+        // Set write timeout
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        // Send init message
+        let initMsg: [String: Any] = ["type": "event_stream_init"]
+        guard let initData = try? JSONSerialization.data(withJSONObject: initMsg) else {
+            close(fd)
+            scheduleReconnect()
+            return
+        }
+        var dataWithNewline = initData
+        dataWithNewline.append(0x0A)
+
+        let written = dataWithNewline.withUnsafeBytes { ptr in
+            write(fd, ptr.baseAddress!, ptr.count)
+        }
+        guard written == dataWithNewline.count else {
+            close(fd)
+            scheduleReconnect()
+            return
+        }
+
+        // Read ack
+        var ackBuf = [UInt8](repeating: 0, count: 256)
+        let ackRead = read(fd, &ackBuf, ackBuf.count)
+        guard ackRead > 0 else {
+            close(fd)
+            scheduleReconnect()
+            return
+        }
+
+        streamFD = fd
+        streamConnected = true
+        reconnectDelay = 1.0
+        NSLog("PolicySocketClient: event stream connected")
+
+        // Flush buffered events
+        flushBuffer()
+    }
+
+    /// Write a file event to the persistent stream. Fire-and-forget.
+    /// If disconnected, buffer up to maxBufferSize events.
+    func sendEvent(_ event: [String: Any]) {
+        streamQueue.async {
+            if self.streamConnected {
+                self.writeEvent(event)
+            } else {
+                self.eventBuffer.append(event)
+                if self.eventBuffer.count > self.maxBufferSize {
+                    let dropped = self.eventBuffer.count - self.maxBufferSize
+                    self.eventBuffer.removeFirst(dropped)
+                    NSLog("PolicySocketClient: dropped %d events (buffer full)", dropped)
+                }
+            }
+        }
+    }
+
+    private func writeEvent(_ event: [String: Any]) {
+        guard streamFD >= 0,
+              let data = try? JSONSerialization.data(withJSONObject: event) else {
+            return
+        }
+        var payload = data
+        payload.append(0x0A)
+
+        let written = payload.withUnsafeBytes { ptr in
+            write(streamFD, ptr.baseAddress!, ptr.count)
+        }
+        if written <= 0 {
+            NSLog("PolicySocketClient: event stream write failed, reconnecting")
+            close(streamFD)
+            streamFD = -1
+            streamConnected = false
+            eventBuffer.append(event)
+            scheduleReconnect()
+        }
+    }
+
+    private func flushBuffer() {
+        let buffered = eventBuffer
+        eventBuffer.removeAll()
+        for event in buffered {
+            writeEvent(event)
+        }
+    }
+
+    private func scheduleReconnect() {
+        let delay = reconnectDelay
+        reconnectDelay = min(reconnectDelay * 2, maxReconnectDelay)
+        streamQueue.asyncAfter(deadline: .now() + delay) {
+            self.doConnectEventStream()
         }
     }
 
