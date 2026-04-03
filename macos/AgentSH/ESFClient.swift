@@ -184,6 +184,15 @@ class ESFClient {
 
         ProcessHierarchy.shared.recordFork(parentPID: pid, childPID: childPid)
         SessionPolicyCache.shared.addPID(childPid, parentPID: pid)
+
+        PolicySocketClient.shared.sendEvent([
+            "type": "file_event",
+            "event_type": "process_fork",
+            "pid": Int(pid),
+            "child_pid": Int(childPid),
+            "session_id": SessionPolicyCache.shared.sessionForPID(pid) ?? "",
+            "timestamp": ISO8601DateFormatter().string(from: Date())
+        ])
     }
 
     fileprivate func handleNotifyExit(_ message: es_message_t, pid: pid_t) {
@@ -197,6 +206,14 @@ class ESFClient {
         cacheQueue.sync {
             _ = auditTokenCache.removeValue(forKey: pid)
         }
+
+        PolicySocketClient.shared.sendEvent([
+            "type": "file_event",
+            "event_type": "process_exit",
+            "pid": Int(pid),
+            "session_id": SessionPolicyCache.shared.sessionForPID(pid) ?? "",
+            "timestamp": ISO8601DateFormatter().string(from: Date())
+        ])
 
         SessionPolicyCache.shared.removePID(pid)
 
