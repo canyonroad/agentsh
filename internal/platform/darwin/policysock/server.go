@@ -278,15 +278,51 @@ func (s *Server) handleConn(conn net.Conn) {
 	decoder := json.NewDecoder(conn)
 	encoder := json.NewEncoder(conn)
 
-	for {
-		var req PolicyRequest
-		if err := decoder.Decode(&req); err != nil {
-			return // Connection closed or error
-		}
+	// Read first request to determine connection mode.
+	var req PolicyRequest
+	if err := decoder.Decode(&req); err != nil {
+		return
+	}
 
-		resp := s.handleRequest(&req)
+	// Event stream mode: persistent read-only connection.
+	if req.Type == RequestTypeEventStreamInit {
+		encoder.Encode(map[string]any{"status": "ok"})
+		s.handleEventStream(decoder)
+		return
+	}
+
+	// Normal request-response mode.
+	resp := s.handleRequest(&req)
+	if err := encoder.Encode(resp); err != nil {
+		return
+	}
+
+	for {
+		var next PolicyRequest
+		if err := decoder.Decode(&next); err != nil {
+			return
+		}
+		resp := s.handleRequest(&next)
 		if err := encoder.Encode(resp); err != nil {
 			return
+		}
+	}
+}
+
+func (s *Server) handleEventStream(dec *json.Decoder) {
+	s.mu.Lock()
+	eh := s.eventHandler
+	s.mu.Unlock()
+
+	for {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return // EOF or error — stream closed
+		}
+		if eh != nil {
+			if err := eh.HandleESFEvent(context.Background(), []byte(raw)); err != nil {
+				slog.Warn("event stream: handler error", "error", err)
+			}
 		}
 	}
 }

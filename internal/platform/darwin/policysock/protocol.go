@@ -43,6 +43,9 @@ const (
 
 	// Exec redirect notification (fire-and-forget from SysExt)
 	RequestTypeExecRedirectNotify RequestType = "exec_redirect_notify"
+
+	// Event stream connection type (persistent, fire-and-forget)
+	RequestTypeEventStreamInit RequestType = "event_stream_init"
 )
 
 // PolicyRequest is sent from the policy socket to the Go policy server.
