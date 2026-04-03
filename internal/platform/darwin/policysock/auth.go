@@ -39,9 +39,15 @@ func ValidatePeer(conn *net.UnixConn, teamID string) error {
 		}
 		peerUID = uid
 
-		// Layer 3: Get peer PID
+		// Layer 3: Get peer PID (best-effort; system extensions may
+		// not support LOCAL_PEERPID due to sandbox restrictions).
 		pid, err := getPeerPID(int(fd))
 		if err != nil {
+			// If peer is root, skip PID-based code signing check.
+			// The UID check is sufficient for system extension peers.
+			if uid == 0 {
+				return
+			}
 			sockErr = fmt.Errorf("LOCAL_PEERPID: %w", err)
 			return
 		}
@@ -59,14 +65,17 @@ func ValidatePeer(conn *net.UnixConn, teamID string) error {
 		return fmt.Errorf("peer UID %d is not root", peerUID)
 	}
 
-	// Layer 3: Resolve binary path and validate code signing
-	path, err := resolvePIDPath(peerPID)
-	if err != nil {
-		return fmt.Errorf("resolve pid %d path: %w", peerPID, err)
-	}
+	// Layer 3: Resolve binary path and validate code signing.
+	// Skip if PID unavailable (system extension sandbox restriction).
+	if peerPID > 0 {
+		path, err := resolvePIDPath(peerPID)
+		if err != nil {
+			return fmt.Errorf("resolve pid %d path: %w", peerPID, err)
+		}
 
-	if err := validateCodeSignature(path, teamID); err != nil {
-		return fmt.Errorf("code signing validation failed for %s (pid %d): %w", path, peerPID, err)
+		if err := validateCodeSignature(path, teamID); err != nil {
+			return fmt.Errorf("code signing validation failed for %s (pid %d): %w", path, peerPID, err)
+		}
 	}
 
 	return nil

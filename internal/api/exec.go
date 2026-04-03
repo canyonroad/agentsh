@@ -54,6 +54,11 @@ type extraProcConfig struct {
 		RegisterCommand(pid int32, commandID string)
 	}
 
+	// sessionTracker registers PIDs with sessions for ESF event attribution (darwin).
+	sessionTracker interface {
+		RegisterProcess(sessionID string, pid, ppid int32)
+	}
+
 	// ptraceSync indicates the READY/GO handshake is enabled for hybrid mode.
 	// Only true when ptrace is active AND seccomp notify features are enabled.
 	ptraceSync bool
@@ -288,6 +293,11 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 		// Register PID→command_id for ESF event attribution.
 		if extra != nil && extra.cmdResolver != nil {
 			extra.cmdResolver.RegisterCommand(int32(cmd.Process.Pid), cmdID)
+		}
+		// Register PID→session for ESF event attribution and notify sysext.
+		if extra != nil && extra.sessionTracker != nil {
+			extra.sessionTracker.RegisterProcess(s.ID, int32(cmd.Process.Pid), int32(os.Getppid()))
+			notifySessionRegistered()
 		}
 		pgid = getProcessGroupID(cmd.Process.Pid)
 

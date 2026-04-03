@@ -68,7 +68,7 @@ static int activateSysExt(const char *bundleID, char **errOut) {
 		NSString *identifier = [NSString stringWithUTF8String:bundleID];
 
 		OSSystemExtensionRequest *request = [OSSystemExtensionRequest
-			activationRequestForExtensionWithIdentifier:identifier
+			activationRequestForExtension:identifier
 			queue:dispatch_get_main_queue()];
 		request.delegate = activator;
 		[[OSSystemExtensionManager sharedManager] submitRequest:request];

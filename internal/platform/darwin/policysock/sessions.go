@@ -21,14 +21,18 @@ type SessionTracker struct {
 
 	// sessionID -> set of pids (for cleanup on session end)
 	sessionToPids map[string]map[int32]struct{}
+
+	// sessionID -> root PID (first PID registered for the session)
+	sessionRootPID map[string]int32
 }
 
 // NewSessionTracker creates a new session tracker.
 func NewSessionTracker() *SessionTracker {
 	return &SessionTracker{
-		pidToSession:  make(map[int32]string),
-		pidToParent:   make(map[int32]int32),
-		sessionToPids: make(map[string]map[int32]struct{}),
+		pidToSession:   make(map[int32]string),
+		pidToParent:    make(map[int32]int32),
+		sessionToPids:  make(map[string]map[int32]struct{}),
+		sessionRootPID: make(map[string]int32),
 	}
 }
 
@@ -46,6 +50,11 @@ func (t *SessionTracker) RegisterProcess(sessionID string, pid, ppid int32) {
 		t.sessionToPids[sessionID] = make(map[int32]struct{})
 	}
 	t.sessionToPids[sessionID][pid] = struct{}{}
+
+	// Track root PID (first PID registered for this session)
+	if _, exists := t.sessionRootPID[sessionID]; !exists {
+		t.sessionRootPID[sessionID] = pid
+	}
 }
 
 // SetParent records a parent-child relationship (from fork events).
@@ -129,6 +138,25 @@ func (t *SessionTracker) SessionForPID(pid int32) string {
 	}
 
 	return ""
+}
+
+// LatestSession returns the most recently registered session ID and its root PID.
+// Returns empty string and 0 if no sessions are registered.
+func (t *SessionTracker) LatestSession() (sessionID string, rootPID int32) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for sid, pid := range t.sessionRootPID {
+		sessionID = sid
+		rootPID = pid
+	}
+	return
+}
+
+// RootPIDForSession returns the root PID for a session ID.
+func (t *SessionTracker) RootPIDForSession(sessionID string) int32 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.sessionRootPID[sessionID]
 }
 
 // RegisterSession implements SessionRegistrar by registering the root PID

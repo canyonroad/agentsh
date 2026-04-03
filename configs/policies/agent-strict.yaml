@@ -103,6 +103,7 @@ file_rules:
       - "/etc/**"
       - "/usr/**"
       - "/tmp/**"
+      - "/private/tmp/**"
     operations:
       - read
     decision: allow

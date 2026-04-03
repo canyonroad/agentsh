@@ -49,8 +49,9 @@ func (s *Server) startPolicySocket(cfg *config.Config, engine *policy.Engine) {
 	psrv.SetSessionRegistrar(tracker)
 	psrv.SetEventHandler(eventHandler)
 
-	// Store resolver so exec handler can register PIDs.
+	// Store resolver and tracker so exec handler can register PIDs and sessions.
 	s.cmdResolver = cmdResolver
+	s.sessionTracker = tracker
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.policySockCancel = cancel

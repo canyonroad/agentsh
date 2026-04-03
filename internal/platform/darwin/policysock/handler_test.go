@@ -368,6 +368,22 @@ func (m *mockSessionResolver) SessionForPID(pid int32) string {
 	return m.sessions[pid]
 }
 
+func (m *mockSessionResolver) LatestSession() (string, int32) {
+	for pid, sid := range m.sessions {
+		return sid, pid
+	}
+	return "", 0
+}
+
+func (m *mockSessionResolver) RootPIDForSession(sessionID string) int32 {
+	for pid, sid := range m.sessions {
+		if sid == sessionID {
+			return pid
+		}
+	}
+	return 0
+}
+
 func TestPolicyAdapter_ResolveSession(t *testing.T) {
 	t.Run("nil resolver returns empty", func(t *testing.T) {
 		adapter := NewPolicyAdapter(nil, nil)

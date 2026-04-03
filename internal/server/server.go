@@ -84,6 +84,12 @@ type Server struct {
 	cmdResolver interface {
 		RegisterCommand(pid int32, commandID string)
 	}
+
+	// sessionTracker is set on darwin to register PIDs with sessions for ESF.
+	// Nil on non-darwin platforms.
+	sessionTracker interface {
+		RegisterProcess(sessionID string, pid, ppid int32)
+	}
 }
 
 func New(cfg *config.Config) (*Server, error) {
@@ -521,9 +527,12 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Start the policy socket server (macOS only; no-op on other platforms).
 	srv.startPolicySocket(cfg, engine)
-	// Wire cmdResolver into the app so exec handler can register PIDs (darwin only).
+	// Wire cmdResolver and sessionTracker into the app (darwin only).
 	if srv.cmdResolver != nil {
 		app.SetCmdResolver(srv.cmdResolver)
+	}
+	if srv.sessionTracker != nil {
+		app.SetSessionTracker(srv.sessionTracker)
 	}
 
 	ln, err := listenHTTP(cfg)

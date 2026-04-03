@@ -39,14 +39,13 @@ class PolicySocketClient {
     }
 
     /// Called when a Darwin notification arrives, signaling the Go server may be alive.
+    /// Always reconnects the event stream — the old connection may be dead after a server restart.
     func onServerNotification() {
         sendQueue.async {
             self.testConnection()
         }
         streamQueue.async {
-            if !self.streamConnected {
-                self.doConnectEventStream()
-            }
+            self.doConnectEventStream()
         }
     }
 

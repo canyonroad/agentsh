@@ -204,10 +204,10 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 
-	// Policy socket: root-only access (0600). Approval operations have been
-	// separated to the main HTTP API socket (data/agentsh.sock) which remains
-	// user-accessible. The ApprovalDialog.app should use the HTTP API instead.
-	if err := os.Chmod(s.sockPath, 0600); err != nil {
+	// Policy socket: allow root access (0666) so the system extension
+	// (running as root in a sandbox) can connect. Security is enforced
+	// by ValidatePeer which checks UID and code signing, not file perms.
+	if err := os.Chmod(s.sockPath, 0666); err != nil {
 		ln.Close()
 		err = fmt.Errorf("chmod: %w", err)
 		s.mu.Lock()

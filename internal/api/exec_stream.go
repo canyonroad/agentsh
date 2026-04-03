@@ -381,6 +381,15 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 	pgid := 0
 	if cmd.Process != nil {
 		s.SetCurrentProcessPID(cmd.Process.Pid)
+		// Register PID→command_id for ESF event attribution.
+		if extra != nil && extra.cmdResolver != nil {
+			extra.cmdResolver.RegisterCommand(int32(cmd.Process.Pid), cmdID)
+		}
+		// Register PID→session for ESF event attribution and notify sysext.
+		if extra != nil && extra.sessionTracker != nil {
+			extra.sessionTracker.RegisterProcess(s.ID, int32(cmd.Process.Pid), int32(os.Getppid()))
+			notifySessionRegistered()
+		}
 		pgid = getProcessGroupID(cmd.Process.Pid)
 
 		hasWrapperHandlers := extra != nil && (extra.notifyParentSock != nil || (extra.signalParentSock != nil && extra.signalEngine != nil))

@@ -79,6 +79,12 @@ type App struct {
 	cmdResolver interface {
 		RegisterCommand(pid int32, commandID string)
 	}
+
+	// sessionTracker registers PIDs with sessions for ESF event attribution (darwin).
+	// Nil on non-darwin platforms or when policy socket is not configured.
+	sessionTracker interface {
+		RegisterProcess(sessionID string, pid, ppid int32)
+	}
 }
 
 func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader) *App {
@@ -135,6 +141,14 @@ func (a *App) SetCmdResolver(r interface {
 	RegisterCommand(pid int32, commandID string)
 }) {
 	a.cmdResolver = r
+}
+
+// SetSessionTracker attaches a session tracker for ESF PID→session registration.
+// Called on darwin after the policy socket server is started. No-op on other platforms.
+func (a *App) SetSessionTracker(t interface {
+	RegisterProcess(sessionID string, pid, ppid int32)
+}) {
+	a.sessionTracker = t
 }
 
 // Close releases resources held by the app (e.g., ptrace tracer).

@@ -12,6 +12,10 @@
     <string>1.0.0</string>
     <key>CFBundlePackageType</key>
     <string>SYSX</string>
+    <key>NSSystemExtensionUsageDescription</key>
+    <string>AgentSH uses a system extension to monitor file access, network connections, and process execution for policy enforcement.</string>
+    <key>NSEndpointSecurityMachServiceName</key>
+    <string>ai.canyonroad.agentsh.SysExt</string>
     <key>LSMinimumSystemVersion</key>
     <string>26.2</string>
     <key>NetworkExtension</key>
