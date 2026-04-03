@@ -79,6 +79,12 @@ class ESFClient {
         }
         NSLog("ESF client subscribed successfully")
 
+        // Subscribe to SETATTRLIST events for chmod/chown tracking (macOS 26+)
+        if #available(macOS 26.0, *) {
+            let setAttrEvents: [es_event_type_t] = [ES_EVENT_TYPE_NOTIFY_SETATTRLIST]
+            es_subscribe(client, setAttrEvents, UInt32(setAttrEvents.count))
+        }
+
         // Mute agentsh binaries to prevent recursion
         if #available(macOS 12.0, *) {
             for path in ["/usr/local/bin/agentsh-stub", "/usr/local/bin/agentsh"] {
@@ -239,8 +245,25 @@ class ESFClient {
         )
     }
 
-    // TODO: Add handleNotifySetattr when macOS 26 SDK is available in CI.
-    // It should subscribe to ES_EVENT_TYPE_NOTIFY_SETATTR and emit file_chown/file_chmod events.
+    @available(macOS 26.0, *)
+    fileprivate func handleNotifySetattr(_ message: es_message_t, pid: pid_t) {
+        let sessionID = SessionPolicyCache.shared.sessionForPID(pid)
+        guard let sessionID = sessionID else { return }
+
+        let path = String(cString: message.event.setattrlist.target.pointee.path.data)
+        let attr = message.event.setattrlist.attrlist
+
+        if attr.commonattr & attrgroup_t(ATTR_CMN_OWNERID) != 0 ||
+           attr.commonattr & attrgroup_t(ATTR_CMN_GRPID) != 0 {
+            sendFileEvent(eventType: "file_chown", path: path, operation: "chown",
+                          pid: pid, sessionID: sessionID, decision: "observed", rule: nil)
+        }
+
+        if attr.commonattr & attrgroup_t(ATTR_CMN_ACCESSMASK) != 0 {
+            sendFileEvent(eventType: "file_chmod", path: path, operation: "chmod",
+                          pid: pid, sessionID: sessionID, decision: "observed", rule: nil)
+        }
+    }
 }
 
 // MARK: - Free Function Helpers
@@ -312,6 +335,10 @@ private func handleESEvent(client: OpaquePointer, event: UnsafePointer<es_messag
         ESFClient.shared?.handleNotifyExit(message, pid: pid)
     case ES_EVENT_TYPE_NOTIFY_CLOSE:
         ESFClient.shared?.handleNotifyClose(message, pid: pid)
+    case ES_EVENT_TYPE_NOTIFY_SETATTRLIST:
+        if #available(macOS 26.0, *) {
+            ESFClient.shared?.handleNotifySetattr(message, pid: pid)
+        }
     default:
         // Safety: respond to any unexpected AUTH event to prevent deadline kill
         if event.pointee.action_type == ES_ACTION_TYPE_AUTH {
@@ -335,7 +362,7 @@ private func handleAuthOpen(client: OpaquePointer, event: UnsafePointer<es_messa
     // Determine operation from open flags
     let fflag = event.pointee.event.open.fflag
     let operation: String
-    if (fflag & UInt32(FWRITE)) != 0 {
+    if (Int32(fflag) & FWRITE) != 0 {
         operation = "write"
     } else {
         operation = "read"
