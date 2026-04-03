@@ -38,11 +38,19 @@ func (s *Server) startPolicySocket(cfg *config.Config, engine *policy.Engine) {
 	tracker := policysock.NewSessionTracker()
 	adapter := policysock.NewPolicyAdapter(engine, tracker)
 
+	// Create command resolver and event handler.
+	cmdResolver := policysock.NewCommandResolver()
+	eventHandler := policysock.NewESFEventHandler(s.store, cmdResolver, tracker)
+
 	psrv := policysock.NewServer(sockPath, adapter)
 	psrv.SetTeamID(cfg.PolicySocket.TeamID)
 	psrv.SetExecHandler(adapter)
 	psrv.SetSnapshotBuilder(adapter)
 	psrv.SetSessionRegistrar(tracker)
+	psrv.SetEventHandler(eventHandler)
+
+	// Store resolver so exec handler can register PIDs.
+	s.cmdResolver = cmdResolver
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.policySockCancel = cancel

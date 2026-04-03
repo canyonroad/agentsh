@@ -78,6 +78,12 @@ type Server struct {
 	policySockCancel context.CancelFunc
 	// policySockDone is closed when the policy socket server goroutine exits.
 	policySockDone chan struct{}
+
+	// cmdResolver is set on darwin to resolve PID→command_id for ESF events.
+	// Nil on non-darwin platforms.
+	cmdResolver interface {
+		RegisterCommand(pid int32, commandID string)
+	}
 }
 
 func New(cfg *config.Config) (*Server, error) {
