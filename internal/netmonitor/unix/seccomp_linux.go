@@ -164,32 +164,19 @@ var ErrUnsupported = fmt.Errorf("seccomp user-notify unsupported")
 // AppArmor), making the notification handler unable to operate.
 var ErrNotifyBlocked = fmt.Errorf("seccomp notification ioctl blocked")
 
-// ProbeNotifReceive tests whether SECCOMP_IOCTL_NOTIF_RECV is usable on a
+// ProbeNotifReceive tests whether seccomp notification ioctls are usable on a
 // seccomp notify fd. Some container runtimes (e.g., AppArmor's
 // containers-default profile) allow installing seccomp filters but block the
-// notification receive ioctl, causing all intercepted syscalls to fail.
+// notification ioctls, causing all intercepted syscalls to fail.
 //
-// The probe sets the fd to non-blocking, attempts a receive (expecting EAGAIN
-// when no notifications are pending), and restores the original fd flags.
-// Returns nil if the ioctl is usable, or ErrNotifyBlocked if it is not.
+// Uses SECCOMP_IOCTL_NOTIF_ID_VALID as a lightweight probe — this is a pure
+// syscall (no CGo) that returns ENOENT when the ioctl works (ID 0 is never
+// valid), or EPERM when blocked by a security policy.
+// Returns nil if ioctls are usable, or ErrNotifyBlocked if not.
 func ProbeNotifReceive(notifFD int) error {
-	// Save original flags.
-	flags, _, errno := unix.Syscall(unix.SYS_FCNTL, uintptr(notifFD), unix.F_GETFL, 0)
-	if errno != 0 {
-		return fmt.Errorf("probe: fcntl F_GETFL: %w", errno)
-	}
-	// Set non-blocking so the ioctl returns immediately instead of blocking.
-	if _, _, errno = unix.Syscall(unix.SYS_FCNTL, uintptr(notifFD), unix.F_SETFL, flags|unix.O_NONBLOCK); errno != 0 {
-		return fmt.Errorf("probe: fcntl F_SETFL: %w", errno)
-	}
-	defer unix.Syscall(unix.SYS_FCNTL, uintptr(notifFD), unix.F_SETFL, flags) //nolint:errcheck
-
-	// Attempt to receive a notification. With no pending notifications and
-	// O_NONBLOCK, a working ioctl returns EAGAIN. If the container's security
-	// policy (e.g., AppArmor) blocks the ioctl, we get EPERM or similar.
-	_, err := seccomp.NotifReceive(seccomp.ScmpFd(notifFD))
-	if err == nil || isEAGAIN(err) {
-		return nil // ioctl works
+	err := NotifIDValid(notifFD, 0)
+	if err == nil || err == unix.ENOENT {
+		return nil // ioctl works (ENOENT = ID 0 not valid, expected)
 	}
 	return fmt.Errorf("%w: %v", ErrNotifyBlocked, err)
 }
