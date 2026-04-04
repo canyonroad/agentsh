@@ -175,8 +175,15 @@ var ErrNotifyBlocked = fmt.Errorf("seccomp notification ioctl blocked")
 // Returns nil if ioctls are usable, or ErrNotifyBlocked if not.
 func ProbeNotifReceive(notifFD int) error {
 	err := NotifIDValid(notifFD, 0)
-	if err == nil || err == unix.ENOENT {
-		return nil // ioctl works (ENOENT = ID 0 not valid, expected)
+	if err == nil {
+		return nil // unexpected but means ioctl works
+	}
+	// ENOENT: ID 0 not valid — expected, ioctl works.
+	// EINVAL: kernel doesn't recognize this ioctl variant — ioctl
+	//         dispatch itself works (AppArmor would return EPERM before
+	//         the kernel reaches argument validation).
+	if err == unix.ENOENT || err == unix.EINVAL {
+		return nil
 	}
 	return fmt.Errorf("%w: %v", ErrNotifyBlocked, err)
 }
