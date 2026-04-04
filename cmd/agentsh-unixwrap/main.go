@@ -89,13 +89,23 @@ func main() {
 	// early and fail with a clear error instead of silently breaking.
 	if notifFD >= 0 {
 		if err := unixmon.ProbeNotifReceive(notifFD); err != nil {
-			filt.Close()
-			log.Fatalf("seccomp notify handler cannot operate: %v\n"+
-				"The seccomp filter was installed but the notification receive ioctl is\n"+
-				"blocked (likely by AppArmor or container security policy). Without a\n"+
-				"working notification handler, all intercepted syscalls will fail.\n"+
-				"Fix: set 'sandbox.seccomp.file_monitor.enabled: false' in your config,\n"+
-				"or adjust the container's security profile to allow seccomp notify ioctls.", err)
+			if cfg.FileMonitorEnabled || cfg.ExecveEnabled {
+				// These features trap critical syscalls (openat, execve).
+				// Without a working notification handler, the command cannot
+				// function at all — fail fast with a clear error.
+				filt.Close()
+				log.Fatalf("seccomp notify handler cannot operate: %v\n"+
+					"The seccomp filter was installed but the notification receive ioctl is\n"+
+					"blocked (likely by AppArmor or container security policy). Without a\n"+
+					"working notification handler, all intercepted syscalls will fail.\n"+
+					"Fix: set 'sandbox.seccomp.file_monitor.enabled: false' in your config,\n"+
+					"or adjust the container's security profile to allow seccomp notify ioctls.", err)
+			}
+			// Only unix_sockets / metadata monitoring is enabled. The intercepted
+			// syscalls (socket, connect, bind, etc.) are not critical for most
+			// commands. Warn and proceed — socket monitoring will be degraded but
+			// the command can still run.
+			log.Printf("WARNING: seccomp notify probe failed (%v); unix socket monitoring degraded", err)
 		}
 	}
 
