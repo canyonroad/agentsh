@@ -54,6 +54,9 @@ func ServeNotify(ctx context.Context, fd *os.File, sessID string, pol *policy.En
 					continue
 				}
 			}
+			slog.Warn("ServeNotify: NotifReceive error, exiting notify loop",
+				"session_id", sessID, "error", err,
+				"hint", "if EPERM, seccomp notify ioctl may be blocked by container security policy (e.g., AppArmor)")
 			return
 		}
 		ctxReq := ExtractContext(req)
@@ -191,7 +194,9 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 					continue
 				}
 			}
-			slog.Debug("ServeNotifyWithExecve: NotifReceive error (exiting)", "session_id", sessID, "error", err, "total_notifications", notifCount)
+			slog.Warn("ServeNotifyWithExecve: NotifReceive error, exiting notify loop",
+				"session_id", sessID, "error", err, "total_notifications", notifCount,
+				"hint", "if EPERM, seccomp notify ioctl may be blocked by container security policy (e.g., AppArmor)")
 			return
 		}
 		notifCount++

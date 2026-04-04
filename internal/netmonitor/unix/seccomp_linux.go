@@ -159,6 +159,35 @@ func ExtractContext(req *seccomp.ScmpNotifReq) Context {
 // ErrUnsupported indicates user-notify not available.
 var ErrUnsupported = fmt.Errorf("seccomp user-notify unsupported")
 
+// ErrNotifyBlocked indicates that seccomp filter installation succeeded but the
+// notification receive ioctl is blocked by a container security policy (e.g.,
+// AppArmor), making the notification handler unable to operate.
+var ErrNotifyBlocked = fmt.Errorf("seccomp notification ioctl blocked")
+
+// ProbeNotifReceive tests whether seccomp notification ioctls are usable on a
+// seccomp notify fd. Some container runtimes (e.g., AppArmor's
+// containers-default profile) allow installing seccomp filters but block the
+// notification ioctls, causing all intercepted syscalls to fail.
+//
+// Uses SECCOMP_IOCTL_NOTIF_ID_VALID as a lightweight probe — this is a pure
+// syscall (no CGo) that returns ENOENT when the ioctl works (ID 0 is never
+// valid), or EPERM when blocked by a security policy.
+// Returns nil if ioctls are usable, or ErrNotifyBlocked if not.
+func ProbeNotifReceive(notifFD int) error {
+	err := NotifIDValid(notifFD, 0)
+	if err == nil {
+		return nil // unexpected but means ioctl works
+	}
+	// ENOENT: ID 0 not valid — expected, ioctl works.
+	// EINVAL: kernel doesn't recognize this ioctl variant — ioctl
+	//         dispatch itself works (AppArmor would return EPERM before
+	//         the kernel reaches argument validation).
+	if err == unix.ENOENT || err == unix.EINVAL {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", ErrNotifyBlocked, err)
+}
+
 // InstallOrWarn installs filter or returns ErrUnsupported.
 func InstallOrWarn() (*Filter, error) {
 	if err := DetectSupport(); err != nil {
