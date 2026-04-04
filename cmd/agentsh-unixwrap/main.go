@@ -82,6 +82,23 @@ func main() {
 
 	notifFD := filt.NotifFD()
 
+	// Probe that SECCOMP_IOCTL_NOTIF_RECV works on the notify fd.
+	// Some container runtimes (e.g., AppArmor's containers-default profile)
+	// allow filter installation but block the notification ioctl, causing all
+	// intercepted syscalls to fail once the command is exec'd. Detect this
+	// early and fail with a clear error instead of silently breaking.
+	if notifFD >= 0 {
+		if err := unixmon.ProbeNotifReceive(notifFD); err != nil {
+			filt.Close()
+			log.Fatalf("seccomp notify handler cannot operate: %v\n"+
+				"The seccomp filter was installed but the notification receive ioctl is\n"+
+				"blocked (likely by AppArmor or container security policy). Without a\n"+
+				"working notification handler, all intercepted syscalls will fail.\n"+
+				"Fix: set 'sandbox.seccomp.file_monitor.enabled: false' in your config,\n"+
+				"or adjust the container's security profile to allow seccomp notify ioctls.", err)
+		}
+	}
+
 	// Send notify fd to server over socketpair and wait for ACK (only if we
 	// actually have a notify fd to send). When all seccomp features are disabled
 	// the filter returns fd=-1 and there is nothing to hand off.
