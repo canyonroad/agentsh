@@ -290,7 +290,7 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 		}
 	}
 
-	pre := s.app.policy.CheckCommand(execReq.Command, execReq.Args)
+	pre := s.app.policyEngineFor(sess).CheckCommand(execReq.Command, execReq.Args)
 	redirected, originalCmd, originalArgs := applyCommandRedirect(&execReq.Command, &execReq.Args, pre)
 	approvalErr := error(nil)
 	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && s.app.approvals != nil {

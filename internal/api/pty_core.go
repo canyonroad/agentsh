@@ -57,7 +57,7 @@ func (a *App) startPTY(ctx context.Context, sessionID string, req ptyStartParams
 	unlock := sess.LockExec()
 	sess.SetCurrentCommandID(cmdID)
 
-	pre := a.policy.CheckCommand(req.Command, req.Args)
+	pre := a.policyEngineFor(sess).CheckCommand(req.Command, req.Args)
 	redirected, originalCmd, originalArgs := applyCommandRedirect(&req.Command, &req.Args, pre)
 	approvalErr := error(nil)
 	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && a.approvals != nil {

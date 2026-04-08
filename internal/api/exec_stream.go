@@ -57,7 +57,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	pre := a.policy.CheckCommand(req.Command, req.Args)
+	pre := a.policyEngineFor(s).CheckCommand(req.Command, req.Args)
 	redirected, originalCmd, originalArgs := applyCommandRedirect(&req.Command, &req.Args, pre)
 	approvalErr := error(nil)
 	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && a.approvals != nil {
