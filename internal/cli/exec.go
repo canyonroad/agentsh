@@ -37,7 +37,12 @@ func newExecCmd() *cobra.Command {
 		Long: `Execute a command in a session.
 
 Session ID can be provided as argument or via AGENTSH_SESSION_ID env var.
-Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_ROOT env var.`,
+Root directory for auto-creating sessions uses --root flag or AGENTSH_SESSION_ROOT env var.
+
+Every command passes through a policy pre-check. If you see
+"blocked by policy (rule=default-deny-commands)", no rule in your policy
+matched the binary — see docs/cookbook/command-policies.md for how to allow
+it, or how to launch a long-lived agent under "agentsh wrap" instead.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Get session ID from env var if not in args
