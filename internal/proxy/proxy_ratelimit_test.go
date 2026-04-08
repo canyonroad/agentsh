@@ -1,4 +1,4 @@
-package llmproxy
+package proxy
 
 import (
 	"context"

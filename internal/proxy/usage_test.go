@@ -1,5 +1,5 @@
-// internal/llmproxy/usage_test.go
-package llmproxy
+// internal/proxy/usage_test.go
+package proxy
 
 import (
 	"testing"

@@ -1,4 +1,4 @@
-package llmproxy
+package proxy
 
 import (
 	"github.com/agentsh/agentsh/internal/config"

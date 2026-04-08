@@ -1,5 +1,5 @@
-// internal/llmproxy/dialect_test.go
-package llmproxy
+// internal/proxy/dialect_test.go
+package proxy
 
 import (
 	"net/http"

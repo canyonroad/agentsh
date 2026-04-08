@@ -18,7 +18,7 @@ import (
 	"github.com/agentsh/agentsh/internal/auth"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
-	"github.com/agentsh/agentsh/internal/llmproxy"
+	"github.com/agentsh/agentsh/internal/proxy"
 	"github.com/agentsh/agentsh/internal/mcpinspect"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 	"github.com/agentsh/agentsh/internal/metrics"
@@ -500,9 +500,9 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 
 	// Wire MCP intercept event callback so events are persisted and published.
 	if proxyInst := s.ProxyInstance(); proxyInst != nil {
-		if proxy, ok := proxyInst.(*llmproxy.Proxy); ok {
+		if p, ok := proxyInst.(*proxy.Proxy); ok {
 			store, broker := a.store, a.broker
-			proxy.SetEventCallback(func(ev mcpinspect.MCPToolCallInterceptedEvent) {
+			p.SetEventCallback(func(ev mcpinspect.MCPToolCallInterceptedEvent) {
 				go func() {
 					typesEv := mcpInterceptedToEvent(ev)
 					persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -535,7 +535,7 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 
 			// Wire cross-server pattern detection analyzer.
 			analyzer := mcpinspect.NewSessionAnalyzer(s.ID, a.cfg.Sandbox.MCP.CrossServer)
-			proxy.SetSessionAnalyzer(analyzer)
+			p.SetSessionAnalyzer(analyzer)
 
 			// Set registry callbacks so the analyzer is activated when multiple
 			// servers register and notified on tool name collisions (shadow tools).
@@ -1208,7 +1208,7 @@ func (a *App) getProxyStatus(w http.ResponseWriter, r *http.Request) {
 	proxyInst := s.ProxyInstance()
 
 	// Default response when no proxy is configured
-	status := llmproxy.ProxyStatus{
+	status := proxy.ProxyStatus{
 		State:   "not configured",
 		Address: "",
 		Mode:    "embedded",
@@ -1221,9 +1221,9 @@ func (a *App) getProxyStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// If we have the proxy instance, get detailed stats
-	if proxy, ok := proxyInst.(*llmproxy.Proxy); ok && proxy != nil {
+	if p, ok := proxyInst.(*proxy.Proxy); ok && p != nil {
 		var err error
-		status, err = proxy.Stats()
+		status, err = p.Stats()
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return

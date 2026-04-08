@@ -1,6 +1,6 @@
 //go:build integration
 
-package llmproxy
+package proxy
 
 import (
 	"context"

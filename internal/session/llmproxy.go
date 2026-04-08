@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
-	"github.com/agentsh/agentsh/internal/llmproxy"
+	"github.com/agentsh/agentsh/internal/proxy"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 )
 
@@ -39,7 +39,7 @@ func StartLLMProxy(
 	}
 
 	// Build the proxy config
-	cfg := llmproxy.Config{
+	cfg := proxy.Config{
 		SessionID: sess.ID,
 		Proxy:     proxyCfg,
 		DLP:       dlpCfg,
@@ -48,7 +48,7 @@ func StartLLMProxy(
 	}
 
 	// Create the proxy
-	proxy, err := llmproxy.New(cfg, storagePath, logger)
+	p, err := proxy.New(cfg, storagePath, logger)
 	if err != nil {
 		return "", nil, fmt.Errorf("create llm proxy: %w", err)
 	}
@@ -69,21 +69,21 @@ func StartLLMProxy(
 				registry.Register(srv.ID, srv.Type, addr, nil)
 			}
 		}
-		proxy.SetRegistry(registry)
+		p.SetRegistry(registry)
 		sess.SetMCPRegistry(registry)
 	}
 
 	// Start the proxy
 	ctx := context.Background()
-	if err := proxy.Start(ctx); err != nil {
+	if err := p.Start(ctx); err != nil {
 		return "", nil, fmt.Errorf("start llm proxy: %w", err)
 	}
 
 	// Build the proxy URL
-	addr := proxy.Addr()
+	addr := p.Addr()
 	if addr == nil {
 		// This shouldn't happen after successful Start, but handle it gracefully
-		_ = proxy.Stop(ctx)
+		_ = p.Stop(ctx)
 		return "", nil, fmt.Errorf("proxy address is nil after start")
 	}
 	proxyURL := fmt.Sprintf("http://%s", addr.String())
@@ -92,12 +92,12 @@ func StartLLMProxy(
 	closeFn := func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return proxy.Stop(ctx)
+		return p.Stop(ctx)
 	}
 
 	// Store in session
 	sess.SetLLMProxy(proxyURL, closeFn)
-	sess.SetProxyInstance(proxy)
+	sess.SetProxyInstance(p)
 
 	return proxyURL, closeFn, nil
 }
