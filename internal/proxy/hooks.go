@@ -93,10 +93,38 @@ func NewRegistry() *Registry {
 // registered multiple times under different service names; a single
 // service may have multiple hooks registered. Use the empty string as
 // the service name to register a hook that runs for every request.
+//
+// Register panics if h is nil — all hooks must be non-nil interface
+// values. This catches programmer errors at registration time rather
+// than producing a confusing nil pointer dereference later inside
+// ApplyPreHooks or ApplyPostHooks.
 func (r *Registry) Register(serviceName string, h Hook) {
+	if h == nil {
+		panic("proxy: Registry.Register called with nil hook")
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.hooks[serviceName] = append(r.hooks[serviceName], h)
+}
+
+// snapshot returns defensive copies of the global and service-scoped
+// hook slices under a single read lock acquisition. Callers invoke
+// hooks on the returned slices AFTER releasing the lock to avoid
+// holding the mutex during user-supplied callbacks.
+func (r *Registry) snapshot(serviceName string) (global, scoped []Hook) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if g := r.hooks[""]; len(g) > 0 {
+		global = make([]Hook, len(g))
+		copy(global, g)
+	}
+	if serviceName != "" {
+		if s := r.hooks[serviceName]; len(s) > 0 {
+			scoped = make([]Hook, len(s))
+			copy(scoped, s)
+		}
+	}
+	return global, scoped
 }
 
 // ApplyPreHooks invokes PreHook on each hook registered under the empty
@@ -104,18 +132,15 @@ func (r *Registry) Register(serviceName string, h Hook) {
 // registration order. It stops at the first non-nil error and returns
 // it. Hooks that have not been reached are not invoked.
 func (r *Registry) ApplyPreHooks(serviceName string, req *http.Request, ctx *RequestContext) error {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, h := range r.hooks[""] {
+	globalHooks, scopedHooks := r.snapshot(serviceName)
+	for _, h := range globalHooks {
 		if err := h.PreHook(req, ctx); err != nil {
 			return err
 		}
 	}
-	if serviceName != "" {
-		for _, h := range r.hooks[serviceName] {
-			if err := h.PreHook(req, ctx); err != nil {
-				return err
-			}
+	for _, h := range scopedHooks {
+		if err := h.PreHook(req, ctx); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -128,19 +153,16 @@ func (r *Registry) ApplyPreHooks(serviceName string, req *http.Request, ctx *Req
 // subsequent errors are silently dropped (hooks that need their own
 // error reporting should log internally).
 func (r *Registry) ApplyPostHooks(serviceName string, resp *http.Response, ctx *RequestContext) error {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	globalHooks, scopedHooks := r.snapshot(serviceName)
 	var firstErr error
-	for _, h := range r.hooks[""] {
+	for _, h := range globalHooks {
 		if err := h.PostHook(resp, ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	if serviceName != "" {
-		for _, h := range r.hooks[serviceName] {
-			if err := h.PostHook(resp, ctx); err != nil && firstErr == nil {
-				firstErr = err
-			}
+	for _, h := range scopedHooks {
+		if err := h.PostHook(resp, ctx); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 	return firstErr

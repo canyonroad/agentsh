@@ -10,10 +10,10 @@ import (
 // fakeHook is a test double that records every call and can be configured
 // to return an error on PreHook or PostHook.
 type fakeHook struct {
-	name     string
-	preErr   error
-	postErr  error
-	preCalls int
+	name      string
+	preErr    error
+	postErr   error
+	preCalls  int
 	postCalls int
 }
 
@@ -135,3 +135,67 @@ func TestRegistry_PostHookErrorsCollected(t *testing.T) {
 		t.Errorf("both post hooks should run even on error, got h1=%d h2=%d", h1.postCalls, h2.postCalls)
 	}
 }
+
+func TestRegistry_RegisterNilHookPanics(t *testing.T) {
+	r := NewRegistry()
+	defer func() {
+		if recover() == nil {
+			t.Errorf("expected Register(nil) to panic, but it did not")
+		}
+	}()
+	r.Register("svc", nil)
+}
+
+func TestRegistry_HookCanRegisterDuringApply(t *testing.T) {
+	r := NewRegistry()
+	var called int
+	inner := &fakeHook{name: "inner"}
+	outer := &callbackHook{
+		name: "outer",
+		onPre: func() {
+			called++
+			r.Register("svc", inner)
+		},
+	}
+	r.Register("svc", outer)
+
+	req := httptest.NewRequest(http.MethodPost, "http://example/", nil)
+	ctx := &RequestContext{RequestID: "r1", ServiceName: "svc"}
+
+	// First Apply: only outer is registered at the time snapshot is taken.
+	// outer's PreHook calls Register("svc", inner) — that MUST NOT deadlock.
+	if err := r.ApplyPreHooks("svc", req, ctx); err != nil {
+		t.Fatalf("ApplyPreHooks first call: %v", err)
+	}
+	if called != 1 {
+		t.Errorf("expected outer to run once on first call, got %d", called)
+	}
+	if inner.preCalls != 0 {
+		t.Errorf("inner should NOT run on first call (registered mid-apply), got %d", inner.preCalls)
+	}
+
+	// Second Apply: both outer and inner are now in the registry.
+	if err := r.ApplyPreHooks("svc", req, ctx); err != nil {
+		t.Fatalf("ApplyPreHooks second call: %v", err)
+	}
+	if inner.preCalls != 1 {
+		t.Errorf("inner should run once on second call, got %d", inner.preCalls)
+	}
+}
+
+// callbackHook is a test double that invokes an arbitrary function on PreHook.
+type callbackHook struct {
+	name  string
+	onPre func()
+}
+
+func (h *callbackHook) Name() string { return h.name }
+
+func (h *callbackHook) PreHook(_ *http.Request, _ *RequestContext) error {
+	if h.onPre != nil {
+		h.onPre()
+	}
+	return nil
+}
+
+func (h *callbackHook) PostHook(_ *http.Response, _ *RequestContext) error { return nil }
