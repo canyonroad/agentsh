@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
-	"github.com/agentsh/agentsh/internal/proxy"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
+	"github.com/agentsh/agentsh/internal/proxy"
 )
 
 // StartLLMProxy creates and starts an embedded LLM proxy for the session.
