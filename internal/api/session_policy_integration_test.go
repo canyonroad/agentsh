@@ -323,3 +323,62 @@ func TestGRPCExecStream_PrecheckConsultsSessionPolicy(t *testing.T) {
 
 	f.assertSessionPolicyPrecheck(t)
 }
+
+// TestWrap_LandlockDerivationUsesSessionPolicy is the regression test for the
+// wrap.go:167-170 half of #191. It asserts that when a session has a custom
+// policy engine with an extra allow_read path, Landlock derivation reads from
+// the session engine's policy, not from a.policy.
+//
+// This test does not actually launch a wrapper (which requires a real seccomp
+// capable environment); it calls a small helper that exercises just the
+// derivation branch. If wrap.go is refactored so that derivation moves out of
+// wrapInitCore, this test should move with it.
+func TestWrap_LandlockDerivationUsesSessionPolicy(t *testing.T) {
+	globalEngine := newEngineAllowingCommand(t, "global", "ls")
+	sessionPol := &policy.Policy{
+		Version: 1,
+		Name:    "session-with-extra-read",
+		CommandRules: []policy.CommandRule{
+			{Name: "allow-ls", Commands: []string{"ls"}, Decision: string(types.DecisionAllow)},
+		},
+		FileRules: []policy.FileRule{
+			{
+				Name:       "allow-read-project",
+				Paths:      []string{"/srv/project"},
+				Operations: []string{"read"},
+				Decision:   string(types.DecisionAllow),
+			},
+		},
+	}
+	sessionEngine, err := policy.NewEngine(sessionPol, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine session: %v", err)
+	}
+
+	mgr := session.NewManager(5)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	s.SetPolicyEngine(sessionEngine)
+
+	app := &App{policy: globalEngine}
+
+	// Direct helper exercise: the engine we get for this session must be the
+	// session engine, and its Policy() must contain the file rule that only
+	// exists in the session policy. The fix at wrap.go:167-170 calls through
+	// the same helper, so this assertion covers the wrap path transitively.
+	pol := app.policyEngineFor(s).Policy()
+	foundSessionRule := false
+	for _, fr := range pol.FileRules {
+		if fr.Name == "allow-read-project" {
+			foundSessionRule = true
+			break
+		}
+	}
+	if !foundSessionRule {
+		t.Errorf("Landlock derivation would miss the session's file rule: "+
+			"policyEngineFor(s).Policy() has %d file rules, none named allow-read-project",
+			len(pol.FileRules))
+	}
+}

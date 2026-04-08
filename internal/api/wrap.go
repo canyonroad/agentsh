@@ -164,10 +164,10 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			seccompCfg.LandlockABI = llResult.ABI
 			seccompCfg.Workspace = workspace
 
-			if a.policy != nil {
-				seccompCfg.AllowExecute = landlock.DeriveExecutePathsFromPolicy(a.policy.Policy())
-				seccompCfg.AllowRead = landlock.DeriveReadPathsFromPolicy(a.policy.Policy())
-				seccompCfg.AllowWrite = landlock.DeriveWritePathsFromPolicy(a.policy.Policy())
+			if engine := a.policyEngineFor(s); engine != nil {
+				seccompCfg.AllowExecute = landlock.DeriveExecutePathsFromPolicy(engine.Policy())
+				seccompCfg.AllowRead = landlock.DeriveReadPathsFromPolicy(engine.Policy())
+				seccompCfg.AllowWrite = landlock.DeriveWritePathsFromPolicy(engine.Policy())
 			}
 
 			seccompCfg.AllowExecute = append(seccompCfg.AllowExecute, a.cfg.Landlock.AllowExecute...)
