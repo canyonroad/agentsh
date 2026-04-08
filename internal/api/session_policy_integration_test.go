@@ -619,6 +619,104 @@ func TestPolicyTest_HonorsSessionID(t *testing.T) {
 	})
 }
 
+// TestGRPCPolicyTest_HonorsSessionID is the #191 regression test for the
+// gRPC PolicyTest RPC. Before this fix, the handler read s.app.policy
+// directly and ignored session_id, so per-session policy overrides were
+// invisible to gRPC callers (even though the HTTP path honored session_id).
+//
+// Mirrors the engine setup from TestPolicyTest_HonorsSessionID (disjoint
+// write rules: global has no rules and defaults to deny; session has an
+// explicit allow-write for /only-session/*) but drives through
+// grpcServer.PolicyTest with a structpb request and parses the returned
+// *structpb.Struct to extract the "decision" field.
+func TestGRPCPolicyTest_HonorsSessionID(t *testing.T) {
+	globalPol := &policy.Policy{
+		Version: 1,
+		Name:    "global-no-rules",
+	}
+	globalEngine, err := policy.NewEngine(globalPol, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine global: %v", err)
+	}
+
+	sessionPol := &policy.Policy{
+		Version: 1,
+		Name:    "session-allow-write",
+		FileRules: []policy.FileRule{
+			{
+				Name:       "allow-write-only-session",
+				Paths:      []string{"/only-session/*"},
+				Operations: []string{"write"},
+				Decision:   string(types.DecisionAllow),
+			},
+		},
+	}
+	sessionEngine, err := policy.NewEngine(sessionPol, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine session: %v", err)
+	}
+
+	mgr := session.NewManager(5)
+	captured := &capturingEventStore{}
+	store := composite.New(captured, nil)
+	broker := events.NewBroker()
+	cfg := &config.Config{}
+	app := NewApp(cfg, mgr, store, globalEngine, broker, nil, nil, nil, nil, nil)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	s.SetPolicyEngine(sessionEngine)
+
+	gs := &grpcServer{app: app}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Helper to build a structpb request, call PolicyTest, and return
+	// the parsed "decision" string.
+	doRequest := func(t *testing.T, body map[string]any) string {
+		t.Helper()
+		in, err := structpb.NewStruct(body)
+		if err != nil {
+			t.Fatalf("NewStruct: %v", err)
+		}
+		out, err := gs.PolicyTest(ctx, in)
+		if err != nil {
+			t.Fatalf("PolicyTest: %v", err)
+		}
+		m := out.AsMap()
+		dec, _ := m["decision"].(string)
+		return dec
+	}
+
+	t.Run("with_session_id_allows", func(t *testing.T) {
+		dec := doRequest(t, map[string]any{
+			"session_id": s.ID,
+			"operation":  "file_write",
+			"path":       "/only-session/secret",
+		})
+		if dec != string(types.DecisionAllow) {
+			t.Errorf("decision = %q, want %q. The gRPC handler did not "+
+				"consult the session engine — it still reads s.app.policy "+
+				"directly and ignores session_id.",
+				dec, types.DecisionAllow)
+		}
+	})
+
+	t.Run("without_session_id_denies", func(t *testing.T) {
+		dec := doRequest(t, map[string]any{
+			"operation": "file_write",
+			"path":      "/only-session/secret",
+		})
+		if dec == string(types.DecisionAllow) {
+			t.Errorf("decision = %q: global engine unexpectedly allowed "+
+				"write to /only-session/secret — test fixture is not "+
+				"discriminating.", dec)
+		}
+	})
+}
+
 // TestWrap_SignalFilterUsesSessionPolicy is the #191 regression test for
 // wrap.go's signal-filter gate and startSignalHandlerForWrap. Before this
 // fix, the gate read a.policy.SignalEngine() directly, so a session with a

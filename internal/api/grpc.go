@@ -792,7 +792,16 @@ func (s *grpcServer) PolicyTest(ctx context.Context, in *structpb.Struct) (*stru
 		return nil, status.Error(codes.InvalidArgument, "path is required")
 	}
 
+	// Honor session_id: route through policyEngineFor so per-session policy overrides are reflected.
+	sessionID, _ := reqMap["session_id"].(string)
+	sessionID = strings.TrimSpace(sessionID)
+
 	engine := s.app.policy
+	if sessionID != "" {
+		if sess, ok := s.app.sessions.Get(sessionID); ok {
+			engine = s.app.policyEngineFor(sess)
+		}
+	}
 	if engine == nil {
 		return nil, status.Error(codes.Unavailable, "policy engine not available")
 	}
