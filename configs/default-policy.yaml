@@ -1,5 +1,10 @@
 # Default Policy for agentsh
 # This policy provides a balanced security posture for typical AI agent workloads
+#
+# For a recipe-first guide to `command_rules` (how to allow a new binary,
+# how to gate it behind an approval, when to use `agentsh wrap` instead of
+# `agentsh exec`, and how to debug a denial), see:
+#   docs/cookbook/command-policies.md
 
 version: 1
 name: default

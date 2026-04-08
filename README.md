@@ -678,6 +678,7 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 * Default policy: [`configs/policies/default.yaml`](configs/policies/default.yaml)
 * Example Dockerfile (with shim): [`Dockerfile.example`](Dockerfile.example)
 * **Policy documentation:** [`docs/operations/policies.md`](docs/operations/policies.md) - policy variables, signal rules, network redirect
+* **Command policies cookbook:** [`docs/cookbook/command-policies.md`](docs/cookbook/command-policies.md) - how to allow a new binary, when to use `wrap` instead of `exec`, and how to debug a denial
 * **Policy authoring skills:** [`skills/`](skills/) - AI-assistant skills for creating and editing policies in Claude Code, NanoClaw, etc.
 * **Platform comparison:** [`docs/platform-comparison.md`](docs/platform-comparison.md) - feature support, security scores, performance by platform
 * **Bubblewrap vs agentsh:** [`docs/bubblewrap-vs-agentsh-comparison.md`](docs/bubblewrap-vs-agentsh-comparison.md) - comparison with Bubblewrap for Linux container sandboxing
