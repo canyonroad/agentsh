@@ -146,6 +146,17 @@ func TestRegistry_RegisterNilHookPanics(t *testing.T) {
 	r.Register("svc", nil)
 }
 
+func TestRegistry_RegisterTypedNilHookPanics(t *testing.T) {
+	r := NewRegistry()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected Register of typed-nil hook to panic, but it did not")
+		}
+	}()
+	var h *fakeHook // typed nil: non-nil interface type info, nil underlying value
+	r.Register("svc", h)
+}
+
 func TestRegistry_HookCanRegisterDuringApply(t *testing.T) {
 	r := NewRegistry()
 	var called int

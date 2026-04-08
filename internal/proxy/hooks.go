@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -97,10 +98,19 @@ func NewRegistry() *Registry {
 // Register panics if h is nil — all hooks must be non-nil interface
 // values. This catches programmer errors at registration time rather
 // than producing a confusing nil pointer dereference later inside
-// ApplyPreHooks or ApplyPostHooks.
+// ApplyPreHooks or ApplyPostHooks. Both bare nil (an untyped nil
+// interface) and typed-nil hooks (e.g. a nil *concreteHook assigned
+// to a Hook variable) are rejected.
 func (r *Registry) Register(serviceName string, h Hook) {
 	if h == nil {
 		panic("proxy: Registry.Register called with nil hook")
+	}
+	rv := reflect.ValueOf(h)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Slice:
+		if rv.IsNil() {
+			panic("proxy: Registry.Register called with nil hook")
+		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
