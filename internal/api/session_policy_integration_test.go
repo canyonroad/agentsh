@@ -53,7 +53,10 @@ func TestExecInSessionCore_PrecheckConsultsSessionPolicy(t *testing.T) {
 	// cannot possibly exist/block on the runner, regardless of what's
 	// installed on PATH. Lowercased to match the engine's internal
 	// normalization in CheckCommand (see internal/policy/engine.go).
-	cmdPath := strings.ToLower(filepath.Join(t.TempDir(), "agentsh191-nonexistent"))
+	// filepath.ToSlash normalizes backslashes to forward slashes on
+	// Windows so the policy engine compiles the rule as a full path
+	// (it only treats "/" as a path separator — see engine.go ~line 196).
+	cmdPath := strings.ToLower(filepath.ToSlash(filepath.Join(t.TempDir(), "agentsh191-nonexistent")))
 
 	globalEngine := newEngineDenyingOnly(t, cmdPath)
 	sessionEngine := newEngineAllowingCommand(t, "session-allow-widget", cmdPath)
