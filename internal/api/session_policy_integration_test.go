@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -508,4 +509,111 @@ func TestExecInSessionCore_LimitsHonorSessionPolicy(t *testing.T) {
 		t.Errorf("policyEngineFor(nil).Limits().CommandTimeout = %s, want 7s "+
 			"(global fallback)", fallback.CommandTimeout)
 	}
+}
+
+// TestPolicyTest_HonorsSessionID is the #191 regression test for the
+// /v1/policy/test HTTP endpoint. Before this fix, policyTest read
+// a.policy directly and ignored req.SessionID, which meant per-session
+// policy overrides were invisible to the test endpoint.
+//
+// The two engines consulted here have disjoint write rules:
+//
+//   - globalEngine has no rules; unrecognized writes default to deny
+//     (see engine.CheckFile: "default-deny-files").
+//   - sessionEngine has an explicit allow-write rule for /only-session/*
+//
+// With session_id supplied, the handler must consult the session
+// engine and return allow. Without it, the handler must fall through
+// to the global engine and return deny.
+func TestPolicyTest_HonorsSessionID(t *testing.T) {
+	globalPol := &policy.Policy{
+		Version: 1,
+		Name:    "global-no-rules",
+	}
+	globalEngine, err := policy.NewEngine(globalPol, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine global: %v", err)
+	}
+
+	sessionPol := &policy.Policy{
+		Version: 1,
+		Name:    "session-allow-write",
+		FileRules: []policy.FileRule{
+			{
+				Name:       "allow-write-only-session",
+				Paths:      []string{"/only-session/*"},
+				Operations: []string{"write"},
+				Decision:   string(types.DecisionAllow),
+			},
+		},
+	}
+	sessionEngine, err := policy.NewEngine(sessionPol, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine session: %v", err)
+	}
+
+	mgr := session.NewManager(5)
+	captured := &capturingEventStore{}
+	store := composite.New(captured, nil)
+	broker := events.NewBroker()
+	cfg := &config.Config{}
+	app := NewApp(cfg, mgr, store, globalEngine, broker, nil, nil, nil, nil, nil)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	s.SetPolicyEngine(sessionEngine)
+
+	// Helper to POST a policy-test request and return the parsed
+	// "decision" string and the HTTP status code.
+	doRequest := func(t *testing.T, body map[string]any) (string, int) {
+		t.Helper()
+		buf, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		req := httptest.NewRequest("POST", "/api/v1/policy/test", bytes.NewReader(buf))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		app.policyTest(rr, req)
+
+		var resp map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal response: %v (body=%s)", err, rr.Body.String())
+		}
+		dec, _ := resp["decision"].(string)
+		return dec, rr.Code
+	}
+
+	t.Run("with_session_id_allows", func(t *testing.T) {
+		dec, code := doRequest(t, map[string]any{
+			"session_id": s.ID,
+			"operation":  "file_write",
+			"path":       "/only-session/secret",
+		})
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", code)
+		}
+		if dec != string(types.DecisionAllow) {
+			t.Errorf("decision = %q, want %q. The handler did not consult the "+
+				"session engine — it still reads a.policy directly.",
+				dec, types.DecisionAllow)
+		}
+	})
+
+	t.Run("without_session_id_denies", func(t *testing.T) {
+		dec, code := doRequest(t, map[string]any{
+			"operation": "file_write",
+			"path":      "/only-session/secret",
+		})
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", code)
+		}
+		if dec == string(types.DecisionAllow) {
+			t.Errorf("decision = %q: global engine unexpectedly allowed "+
+				"write to /only-session/secret — test fixture is not discriminating.",
+				dec)
+		}
+	})
 }
