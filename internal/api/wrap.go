@@ -231,7 +231,11 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// stacking two seccomp USER_NOTIF filters causes notification delivery failures
 	// (the signal filter's semaphore interferes with execve notification reception).
 	var signalSocketPath string
-	signalFilterEnabled := a.policy != nil && a.policy.SignalEngine() != nil && !execveEnabled
+	// Use the session's effective engine so per-session signal rules are
+	// honored (see canyonroad/agentsh#191 — previously we read a.policy
+	// directly, which silently ignored non-default policy files).
+	sessionEngine := a.policyEngineFor(s)
+	signalFilterEnabled := sessionEngine != nil && sessionEngine.SignalEngine() != nil && !execveEnabled
 	if signalFilterEnabled {
 		signalSocketPath = filepath.Join(notifyDir, "signal-"+safeID+".sock")
 		signalListener, err := net.Listen("unix", signalSocketPath)
@@ -241,7 +245,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			signalSocketPath = ""
 			signalFilterEnabled = false
 		} else {
-			go a.acceptSignalFD(ctx, signalListener, signalSocketPath, sessionID)
+			go a.acceptSignalFD(ctx, signalListener, signalSocketPath, sessionID, s)
 		}
 	}
 	seccompCfg.SignalFilterEnabled = signalFilterEnabled
@@ -369,7 +373,7 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 
 // acceptSignalFD listens on the Unix socket for a single connection from the CLI,
 // receives the signal filter notify fd, and starts the signal handler.
-func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketPath string, sessionID string) {
+func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketPath string, sessionID string, s *session.Session) {
 	defer listener.Close()
 	// Note: do NOT remove the parent directory here — acceptNotifyFD owns that cleanup.
 
@@ -405,5 +409,5 @@ func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketP
 	}
 
 	slog.Info("wrap: received signal fd", "session_id", sessionID, "fd", signalFD.Fd())
-	startSignalHandlerForWrap(ctx, signalFD, sessionID, a)
+	startSignalHandlerForWrap(ctx, signalFD, sessionID, a, s)
 }

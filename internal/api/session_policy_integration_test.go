@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -614,6 +615,99 @@ func TestPolicyTest_HonorsSessionID(t *testing.T) {
 			t.Errorf("decision = %q: global engine unexpectedly allowed "+
 				"write to /only-session/secret — test fixture is not discriminating.",
 				dec)
+		}
+	})
+}
+
+// TestWrap_SignalFilterUsesSessionPolicy is the #191 regression test for
+// wrap.go's signal-filter gate and startSignalHandlerForWrap. Before this
+// fix, the gate read a.policy.SignalEngine() directly, so a session with a
+// custom policy file that defined signal rules could not enable signal
+// filtering under the wrap path.
+//
+// The test builds two engines:
+//   - globalEngine has no signal rules (SignalEngine() == nil)
+//   - sessionEngine has one signal rule (SignalEngine() != nil)
+//
+// It then asserts that app.policyEngineFor(s).SignalEngine() is non-nil
+// when the session engine is installed, and that the fallback through a
+// nil session returns the global engine's (nil) signal engine. This
+// directly exercises the helper wire-up used by both the gate in
+// wrapInitCore and startSignalHandlerForWrap.
+//
+// Skipped on Windows because compileSignalRules is a stub there and
+// always returns a nil signal engine.
+func TestWrap_SignalFilterUsesSessionPolicy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signal handling not supported on Windows")
+	}
+
+	globalPol := &policy.Policy{
+		Version: 1,
+		Name:    "global-no-signals",
+	}
+	globalEngine, err := policy.NewEngine(globalPol, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine global: %v", err)
+	}
+	if globalEngine.SignalEngine() != nil {
+		t.Fatalf("global engine unexpectedly has a signal engine — test "+
+			"fixture is not discriminating. Got %v", globalEngine.SignalEngine())
+	}
+
+	sessionPol := &policy.Policy{
+		Version: 1,
+		Name:    "session-with-signals",
+		SignalRules: []policy.SignalRule{
+			{
+				Name:     "deny-kill-external",
+				Signals:  []string{"SIGKILL"},
+				Target:   policy.SignalTargetSpec{Type: "external"},
+				Decision: "deny",
+			},
+		},
+	}
+	sessionEngine, err := policy.NewEngine(sessionPol, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine session: %v", err)
+	}
+	if sessionEngine.SignalEngine() == nil {
+		t.Fatalf("session engine has nil signal engine despite having a " +
+			"signal rule — cannot discriminate between global and session.")
+	}
+
+	app := &App{policy: globalEngine}
+	mgr := session.NewManager(5)
+
+	t.Run("uses_session_engine", func(t *testing.T) {
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		s.SetPolicyEngine(sessionEngine)
+
+		engine := app.policyEngineFor(s)
+		if engine == nil {
+			t.Fatal("policyEngineFor returned nil for a session with an engine set")
+		}
+		if engine.SignalEngine() == nil {
+			t.Errorf("policyEngineFor(s).SignalEngine() = nil; expected non-nil " +
+				"because the session engine defines a signal rule. This means " +
+				"wrap.go / startSignalHandlerForWrap would still regress to " +
+				"a.policy.SignalEngine() and miss per-session signal rules.")
+		}
+	})
+
+	t.Run("falls_back_to_global", func(t *testing.T) {
+		// nil session → policyEngineFor returns the global engine, which
+		// has no signal rules → SignalEngine() is nil.
+		engine := app.policyEngineFor(nil)
+		if engine == nil {
+			t.Fatal("policyEngineFor(nil) returned nil; expected global engine")
+		}
+		if engine.SignalEngine() != nil {
+			t.Errorf("policyEngineFor(nil).SignalEngine() = %v; expected nil "+
+				"because the global engine has no signal rules", engine.SignalEngine())
 		}
 	})
 }
