@@ -215,6 +215,95 @@ resource_limits:
   idle_timeout: 30m
 `
 
+// TestPolicyNonDefaultNameHonored is the regression test for #191. It writes
+// a custom policy to a file NAMED OTHER THAN default.yaml, creates a session
+// that selects it by name, and verifies that a rule defined only in that
+// custom policy actually fires at the command precheck layer.
+//
+// Before #191 was fixed, the exec precheck consulted a.policy (the default
+// policy) rather than the session's engine, so a rule defined only in a
+// non-default policy file was silently ignored.
+func TestPolicyNonDefaultNameHonored(t *testing.T) {
+	ctx := context.Background()
+
+	bin := buildAgentshBinary(t)
+	temp := t.TempDir()
+
+	policiesDir := filepath.Join(temp, "policies")
+	mustMkdir(t, policiesDir)
+	// Default policy: does NOT allow "echo".
+	writeFile(t, filepath.Join(policiesDir, "default.yaml"), testDefaultPolicyForNonDefaultTest)
+	// Custom policy: allows "echo" only.
+	writeFile(t, filepath.Join(policiesDir, "custom.yaml"), testCustomPolicyForNonDefaultTest)
+
+	keysPath := filepath.Join(temp, "keys.yaml")
+	writeFile(t, keysPath, testAPIKeysYAML)
+
+	configPath := filepath.Join(temp, "config.yaml")
+	writeFile(t, configPath, testConfigTemplate)
+
+	workspace := filepath.Join(temp, "workspace")
+	mustMkdir(t, workspace)
+
+	endpoint, cleanup := startServerContainer(t, ctx, bin, configPath, policiesDir, workspace)
+	t.Cleanup(func() { cleanup() })
+
+	cli := client.New(endpoint, "test-key")
+
+	// Create a session that selects the CUSTOM policy by name.
+	sess, err := cli.CreateSession(ctx, "/workspace", "custom")
+	if err != nil {
+		t.Fatalf("CreateSession(custom): %v", err)
+	}
+
+	// echo is allowed ONLY by the custom policy. If #191 regresses, the
+	// precheck will consult the default policy and deny this with
+	// E_POLICY_DENIED.
+	allowResp, err := cli.Exec(ctx, sess.ID, types.ExecRequest{
+		Command: "echo",
+		Args:    []string{"ok"},
+	})
+	if err != nil {
+		t.Fatalf("Exec(echo) under custom policy: %v — this is the #191 regression signature", err)
+	}
+	if allowResp.Result.ExitCode != 0 || allowResp.Result.Stdout != "ok\n" {
+		t.Fatalf("echo under custom policy unexpected result: %+v", allowResp.Result)
+	}
+
+	if err := cli.DestroySession(ctx, sess.ID); err != nil {
+		t.Fatalf("DestroySession: %v", err)
+	}
+}
+
+const testDefaultPolicyForNonDefaultTest = `
+version: 1
+name: default
+description: integration test default policy (no echo)
+command_rules:
+  - name: deny-all-explicit
+    commands: ["echo"]
+    decision: deny
+    message: "denied by default policy"
+resource_limits:
+  command_timeout: 30s
+  session_timeout: 1h
+  idle_timeout: 30m
+`
+
+const testCustomPolicyForNonDefaultTest = `
+version: 1
+name: custom
+description: integration test custom policy (allows echo)
+command_rules:
+  - name: allow-echo
+    commands: ["echo"]
+    decision: allow
+resource_limits:
+  command_timeout: 30s
+  session_timeout: 1h
+  idle_timeout: 30m
+`
+
 const testAPIKeysYAML = `
 - id: test
   key: test-key
