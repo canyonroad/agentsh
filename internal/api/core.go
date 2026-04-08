@@ -1480,7 +1480,7 @@ func (a *App) wrapWithMacSandbox(
 	}
 
 	// Compile policy-driven SBPL profile (darwin+cgo only, no-op on other platforms)
-	compileDarwinSandboxProfile(&cfg, a.policy, sess.Workspace)
+	compileDarwinSandboxProfile(&cfg, a.policyEngineFor(sess), sess.Workspace)
 
 	// Write profile artifact for debugging/inspection
 	if cfg.CompiledProfile != "" && sess.ID != "" {
