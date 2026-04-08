@@ -198,7 +198,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 	wrappedReq := wrapperResult.wrappedReq
 	extraCfg := wrapperResult.extraCfg
 
-	limits := a.policy.Limits()
+	limits := a.policyEngineFor(s).Limits()
 	emit := func(event string, payload map[string]any) error {
 		return writeSSE(w, flusher, event, payload)
 	}

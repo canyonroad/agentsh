@@ -445,3 +445,67 @@ func containsPath(paths []string, s string) bool {
 	}
 	return false
 }
+
+// newEngineWithCommandTimeout builds a *policy.Engine whose
+// ResourceLimits.CommandTimeout equals the given duration. Uses
+// policy.LoadFromBytes because the underlying `duration` wrapper on
+// ResourceLimits is unexported, so callers cannot construct one directly
+// from another package.
+func newEngineWithCommandTimeout(t *testing.T, name string, timeout time.Duration) *policy.Engine {
+	t.Helper()
+	yamlDoc := []byte(
+		"version: 1\n" +
+			"name: " + name + "\n" +
+			"resource_limits:\n" +
+			"  command_timeout: " + timeout.String() + "\n",
+	)
+	p, err := policy.LoadFromBytes(yamlDoc)
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	engine, err := policy.NewEngine(p, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	return engine
+}
+
+// TestExecInSessionCore_LimitsHonorSessionPolicy is a helper-level
+// characterization test for the Limits() regression in #191. Both
+// core.go and exec_stream.go call a.policyEngineFor(s).Limits() to
+// derive a command timeout; this test builds two engines whose
+// CommandTimeout values differ, installs the session engine on the
+// session, and asserts that app.policyEngineFor(s).Limits() returns the
+// session engine's value — not the global engine's.
+//
+// The production call sites go through the same helper, so routing
+// them via policyEngineFor is enough to guarantee the per-session
+// timeout is honored. Invoking execInSessionCore directly and
+// observing a real timeout would be flaky and slow.
+func TestExecInSessionCore_LimitsHonorSessionPolicy(t *testing.T) {
+	globalEngine := newEngineWithCommandTimeout(t, "global-limits", 7*time.Second)
+	sessionEngine := newEngineWithCommandTimeout(t, "session-limits", 13*time.Second)
+
+	mgr := session.NewManager(5)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	s.SetPolicyEngine(sessionEngine)
+
+	app := &App{policy: globalEngine}
+
+	limits := app.policyEngineFor(s).Limits()
+	if limits.CommandTimeout != 13*time.Second {
+		t.Errorf("policyEngineFor(s).Limits().CommandTimeout = %s, want 13s. "+
+			"This means core.go / exec_stream.go regressed to reading "+
+			"a.policy.Limits() instead of policyEngineFor(s).Limits().",
+			limits.CommandTimeout)
+	}
+
+	fallback := app.policyEngineFor(nil).Limits()
+	if fallback.CommandTimeout != 7*time.Second {
+		t.Errorf("policyEngineFor(nil).Limits().CommandTimeout = %s, want 7s "+
+			"(global fallback)", fallback.CommandTimeout)
+	}
+}
