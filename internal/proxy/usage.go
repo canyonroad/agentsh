@@ -1,5 +1,5 @@
-// internal/llmproxy/usage.go
-package llmproxy
+// internal/proxy/usage.go
+package proxy
 
 import (
 	"bytes"

@@ -1,7 +1,9 @@
-// Package llmproxy provides an embedded HTTP proxy for intercepting LLM API requests.
-// It supports multiple LLM providers (Anthropic, OpenAI) in passthrough mode with
-// optional DLP (Data Loss Prevention) processing.
-package llmproxy
+// Package proxy provides an embedded HTTP proxy for intercepting outbound
+// requests from the sandboxed agent. It supports multiple LLM providers
+// (Anthropic, OpenAI) in passthrough mode with optional DLP (Data Loss
+// Prevention) processing. In later releases it will also host generic
+// egress substitution for non-LLM services.
+package proxy
 
 import (
 	"net/http"

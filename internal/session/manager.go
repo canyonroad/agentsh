@@ -59,7 +59,7 @@ type Session struct {
 
 	llmProxyURL   string        // LLM proxy URL (for ANTHROPIC_BASE_URL, OPENAI_BASE_URL)
 	llmProxyClose func() error
-	llmProxy      interface{}   // *llmproxy.Proxy - stored as interface to avoid import cycle
+	llmProxy      interface{}   // *proxy.Proxy - stored as interface to avoid import cycle
 
 	mcpRegistry interface{} // *mcpregistry.Registry — stored as interface to avoid import cycle
 
