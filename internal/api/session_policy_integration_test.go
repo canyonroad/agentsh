@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
@@ -46,8 +49,14 @@ func newEngineDenyingOnly(t *testing.T, cmdName string) *policy.Engine {
 //
 // newEngineAllowingCommand comes from session_policy_test.go (same package).
 func TestExecInSessionCore_PrecheckConsultsSessionPolicy(t *testing.T) {
-	globalEngine := newEngineDenyingOnly(t, "widget")
-	sessionEngine := newEngineAllowingCommand(t, "session-allow-widget", "widget")
+	// Use a guaranteed-missing path under t.TempDir() so the command
+	// cannot possibly exist/block on the runner, regardless of what's
+	// installed on PATH. Lowercased to match the engine's internal
+	// normalization in CheckCommand (see internal/policy/engine.go).
+	cmdPath := strings.ToLower(filepath.Join(t.TempDir(), "agentsh191-nonexistent"))
+
+	globalEngine := newEngineDenyingOnly(t, cmdPath)
+	sessionEngine := newEngineAllowingCommand(t, "session-allow-widget", cmdPath)
 
 	mgr := session.NewManager(5)
 	captured := &capturingEventStore{}
@@ -67,9 +76,12 @@ func TestExecInSessionCore_PrecheckConsultsSessionPolicy(t *testing.T) {
 	// engine the precheck consulted. The precheck event is emitted BEFORE
 	// the command would be run, so even if runCommandWithResources errors
 	// later (no ptrace tracer, binary doesn't exist), the captured event
-	// tells us what we need.
-	_, _, _ = app.execInSessionCore(context.Background(), s.ID, types.ExecRequest{
-		Command: "widget",
+	// tells us what we need. A bounded context is used as a safety net so
+	// this test can never hang if something downstream were to block.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _, _ = app.execInSessionCore(ctx, s.ID, types.ExecRequest{
+		Command: cmdPath,
 	})
 
 	ev := captured.firstCommandPrecheck()
