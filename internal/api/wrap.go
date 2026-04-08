@@ -231,11 +231,10 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// stacking two seccomp USER_NOTIF filters causes notification delivery failures
 	// (the signal filter's semaphore interferes with execve notification reception).
 	var signalSocketPath string
-	// Use the session's effective engine so per-session signal rules are
-	// honored (see canyonroad/agentsh#191 — previously we read a.policy
-	// directly, which silently ignored non-default policy files).
-	sessionEngine := a.policyEngineFor(s)
-	signalFilterEnabled := sessionEngine != nil && sessionEngine.SignalEngine() != nil && !execveEnabled
+	// signalFilterEnabled routes through a helper so the gate can be
+	// exercised in tests end-to-end without standing up seccomp (see
+	// TestWrap_SignalFilterUsesSessionPolicy).
+	signalFilterEnabled := a.signalFilterEnabled(s, execveEnabled)
 	if signalFilterEnabled {
 		signalSocketPath = filepath.Join(notifyDir, "signal-"+safeID+".sock")
 		signalListener, err := net.Listen("unix", signalSocketPath)
@@ -312,6 +311,32 @@ func (a *App) deriveLandlockAllowPaths(s *session.Session) (execute, read, write
 	return landlock.DeriveExecutePathsFromPolicy(pol),
 		landlock.DeriveReadPathsFromPolicy(pol),
 		landlock.DeriveWritePathsFromPolicy(pol)
+}
+
+// signalFilterEnabled reports whether wrap-init should create a signal
+// filter socket for this session. It consults the session's effective
+// policy engine (per-session engine if set, otherwise the global engine)
+// so per-session signal rules are honored — reading a.policy directly
+// silently ignores non-default policy files (canyonroad/agentsh#191).
+//
+// Signal filtering is disabled when execve interception is enabled
+// because stacking two seccomp USER_NOTIF filters causes notification
+// delivery failures (the signal filter's semaphore interferes with
+// execve notification reception).
+//
+// This helper is the regression boundary for #191's signal-filter half:
+// it was extracted from wrapInitCore specifically so the gate can be
+// tested end-to-end without standing up seccomp. See
+// TestWrap_SignalFilterUsesSessionPolicy.
+func (a *App) signalFilterEnabled(s *session.Session, execveEnabled bool) bool {
+	if execveEnabled {
+		return false
+	}
+	engine := a.policyEngineFor(s)
+	if engine == nil {
+		return false
+	}
+	return engine.SignalEngine() != nil
 }
 
 // acceptNotifyFD listens on the Unix socket for a single connection from the CLI,

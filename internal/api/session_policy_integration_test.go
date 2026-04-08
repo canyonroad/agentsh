@@ -727,11 +727,12 @@ func TestGRPCPolicyTest_HonorsSessionID(t *testing.T) {
 //   - globalEngine has no signal rules (SignalEngine() == nil)
 //   - sessionEngine has one signal rule (SignalEngine() != nil)
 //
-// It then asserts that app.policyEngineFor(s).SignalEngine() is non-nil
-// when the session engine is installed, and that the fallback through a
-// nil session returns the global engine's (nil) signal engine. This
-// directly exercises the helper wire-up used by both the gate in
-// wrapInitCore and startSignalHandlerForWrap.
+// It then exercises (*App).signalFilterEnabled directly — the same helper
+// wrapInitCore calls — and asserts that the gate reflects the session
+// engine's rules (not the global engine's). Going through the helper
+// catches a regression where wrap.go reads a.policy.SignalEngine() again
+// instead of routing via policyEngineFor, because the helper IS the
+// routing boundary.
 //
 // Skipped on Windows because compileSignalRules is a stub there and
 // always returns a nil signal engine.
@@ -784,28 +785,44 @@ func TestWrap_SignalFilterUsesSessionPolicy(t *testing.T) {
 		}
 		s.SetPolicyEngine(sessionEngine)
 
-		engine := app.policyEngineFor(s)
-		if engine == nil {
-			t.Fatal("policyEngineFor returned nil for a session with an engine set")
-		}
-		if engine.SignalEngine() == nil {
-			t.Errorf("policyEngineFor(s).SignalEngine() = nil; expected non-nil " +
-				"because the session engine defines a signal rule. This means " +
-				"wrap.go / startSignalHandlerForWrap would still regress to " +
-				"a.policy.SignalEngine() and miss per-session signal rules.")
+		if !app.signalFilterEnabled(s, false) {
+			t.Error("signalFilterEnabled(s, false) = false; expected true " +
+				"because the session engine defines a signal rule. This " +
+				"means wrap.go regressed to reading a.policy.SignalEngine() " +
+				"instead of routing through policyEngineFor(s).")
 		}
 	})
 
-	t.Run("falls_back_to_global", func(t *testing.T) {
-		// nil session → policyEngineFor returns the global engine, which
-		// has no signal rules → SignalEngine() is nil.
-		engine := app.policyEngineFor(nil)
-		if engine == nil {
-			t.Fatal("policyEngineFor(nil) returned nil; expected global engine")
+	t.Run("falls_back_to_global_no_rules", func(t *testing.T) {
+		// Session has no engine attached — helper falls back to the global
+		// engine, which has no signal rules, so the gate must be closed.
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
 		}
-		if engine.SignalEngine() != nil {
-			t.Errorf("policyEngineFor(nil).SignalEngine() = %v; expected nil "+
-				"because the global engine has no signal rules", engine.SignalEngine())
+
+		if app.signalFilterEnabled(s, false) {
+			t.Error("signalFilterEnabled(s, false) = true for a session " +
+				"with no engine attached and a global engine that has no " +
+				"signal rules; expected false.")
+		}
+	})
+
+	t.Run("disabled_by_execve", func(t *testing.T) {
+		// Even when the session engine has signal rules, execve
+		// interception must override the gate (stacking USER_NOTIF
+		// filters breaks notification delivery — see comment in
+		// wrapInitCore).
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		s.SetPolicyEngine(sessionEngine)
+
+		if app.signalFilterEnabled(s, true) {
+			t.Error("signalFilterEnabled(s, true) = true; expected false " +
+				"because execveEnabled must always disable the signal " +
+				"filter gate (seccomp USER_NOTIF filter stacking).")
 		}
 	})
 }
