@@ -63,12 +63,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 
 	// Prefer session-specific policy engine (has expanded ${PROJECT_ROOT} etc.)
 	// over app-level engine, matching the exec path pattern in core.go.
-	sessionPolicy := a.policy
-	if s != nil {
-		if sp := s.PolicyEngine(); sp != nil {
-			sessionPolicy = sp
-		}
-	}
+	sessionPolicy := a.policyEngineFor(s)
 
 	// Create execve handler if enabled
 	var execveHandler *unixmon.ExecveHandler
