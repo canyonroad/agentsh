@@ -411,7 +411,7 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 		return stream.SendMsg(out)
 	}
 
-	limits := s.app.policy.Limits()
+	limits := s.app.policyEngineFor(sess).Limits()
 	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResourcesStreamingEmit(
 		stream.Context(),
 		sess,
