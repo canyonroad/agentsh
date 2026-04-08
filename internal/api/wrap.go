@@ -164,11 +164,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			seccompCfg.LandlockABI = llResult.ABI
 			seccompCfg.Workspace = workspace
 
-			if engine := a.policyEngineFor(s); engine != nil {
-				seccompCfg.AllowExecute = landlock.DeriveExecutePathsFromPolicy(engine.Policy())
-				seccompCfg.AllowRead = landlock.DeriveReadPathsFromPolicy(engine.Policy())
-				seccompCfg.AllowWrite = landlock.DeriveWritePathsFromPolicy(engine.Policy())
-			}
+			seccompCfg.AllowExecute, seccompCfg.AllowRead, seccompCfg.AllowWrite = a.deriveLandlockAllowPaths(s)
 
 			seccompCfg.AllowExecute = append(seccompCfg.AllowExecute, a.cfg.Landlock.AllowExecute...)
 			seccompCfg.AllowRead = append(seccompCfg.AllowRead, a.cfg.Landlock.AllowRead...)
@@ -287,6 +283,31 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		SignalSocket:  signalSocketPath,
 		WrapperEnv:    wrapperEnv,
 	}, http.StatusOK, nil
+}
+
+// deriveLandlockAllowPaths returns the execute/read/write allow-path lists
+// that wrap-init should hand to the Landlock ruleset for this session. It
+// reads from the session's effective policy engine (per-session engine if
+// set, otherwise the global engine) so that per-session allow_* rules are
+// reflected in the Landlock configuration applied to wrapped agents.
+//
+// Returns three nil slices when no engine is available (test configs).
+// nil slices are safe to append() to, so callers can unconditionally tack
+// on config-derived paths afterwards.
+//
+// This helper is the regression boundary for canyonroad/agentsh#191: it
+// was extracted from wrapInitCore specifically so the derivation path can
+// be tested end-to-end without standing up seccomp. See
+// TestWrap_LandlockDerivationUsesSessionPolicy.
+func (a *App) deriveLandlockAllowPaths(s *session.Session) (execute, read, write []string) {
+	engine := a.policyEngineFor(s)
+	if engine == nil {
+		return nil, nil, nil
+	}
+	pol := engine.Policy()
+	return landlock.DeriveExecutePathsFromPolicy(pol),
+		landlock.DeriveReadPathsFromPolicy(pol),
+		landlock.DeriveWritePathsFromPolicy(pol)
 }
 
 // acceptNotifyFD listens on the Unix socket for a single connection from the CLI,

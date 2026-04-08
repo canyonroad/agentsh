@@ -325,26 +325,56 @@ func TestGRPCExecStream_PrecheckConsultsSessionPolicy(t *testing.T) {
 }
 
 // TestWrap_LandlockDerivationUsesSessionPolicy is the regression test for the
-// wrap.go:167-170 half of #191. It asserts that when a session has a custom
-// policy engine with an extra allow_read path, Landlock derivation reads from
-// the session engine's policy, not from a.policy.
+// wrap.go Landlock derivation half of #191. It exercises
+// (*App).deriveLandlockAllowPaths directly — the same helper wrapInitCore
+// calls — and asserts that the derived allow-path lists come from the
+// session's policy engine (not the global engine) when one is attached.
 //
-// This test does not actually launch a wrapper (which requires a real seccomp
-// capable environment); it calls a small helper that exercises just the
-// derivation branch. If wrap.go is refactored so that derivation moves out of
-// wrapInitCore, this test should move with it.
+// The two engines are built with DISJOINT file rules:
+//
+//   - global engine has an allow-read rule for /global-only/*
+//   - session engine has an allow-read rule for /session-only/*
+//
+// If the helper consults the session engine, the derived read paths will
+// contain /session-only and NOT /global-only. If the helper regresses back
+// to reading a.policy.Policy() (the #191 bug), the assertion inverts and
+// the test fails loudly. Distinguishing by disjoint content is what the
+// previous characterization test lacked — it only re-asserted that
+// policyEngineFor returned the session engine, which is already covered by
+// TestPolicyEngineFor_* in session_policy_test.go.
+//
+// A sub-test also exercises the fallback path: when no per-session engine
+// is set, the helper must return paths derived from the global engine.
 func TestWrap_LandlockDerivationUsesSessionPolicy(t *testing.T) {
-	globalEngine := newEngineAllowingCommand(t, "global", "ls")
-	sessionPol := &policy.Policy{
+	// extractBaseDir strips everything from the first glob char onward and
+	// trims the trailing slash, so "/global-only/*" -> "/global-only" and
+	// "/session-only/*" -> "/session-only". Using a glob keeps the derived
+	// path equal to the rule's intent rather than filepath.Dir(path), which
+	// would land one directory above the intended mount point.
+	globalPol := &policy.Policy{
 		Version: 1,
-		Name:    "session-with-extra-read",
-		CommandRules: []policy.CommandRule{
-			{Name: "allow-ls", Commands: []string{"ls"}, Decision: string(types.DecisionAllow)},
-		},
+		Name:    "global-with-read",
 		FileRules: []policy.FileRule{
 			{
-				Name:       "allow-read-project",
-				Paths:      []string{"/srv/project"},
+				Name:       "allow-read-global",
+				Paths:      []string{"/global-only/*"},
+				Operations: []string{"read"},
+				Decision:   string(types.DecisionAllow),
+			},
+		},
+	}
+	globalEngine, err := policy.NewEngine(globalPol, false, true)
+	if err != nil {
+		t.Fatalf("NewEngine global: %v", err)
+	}
+
+	sessionPol := &policy.Policy{
+		Version: 1,
+		Name:    "session-with-read",
+		FileRules: []policy.FileRule{
+			{
+				Name:       "allow-read-session",
+				Paths:      []string{"/session-only/*"},
 				Operations: []string{"read"},
 				Decision:   string(types.DecisionAllow),
 			},
@@ -355,30 +385,63 @@ func TestWrap_LandlockDerivationUsesSessionPolicy(t *testing.T) {
 		t.Fatalf("NewEngine session: %v", err)
 	}
 
-	mgr := session.NewManager(5)
-	s, err := mgr.Create(t.TempDir(), "default")
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	s.SetPolicyEngine(sessionEngine)
-
 	app := &App{policy: globalEngine}
+	mgr := session.NewManager(5)
 
-	// Direct helper exercise: the engine we get for this session must be the
-	// session engine, and its Policy() must contain the file rule that only
-	// exists in the session policy. The fix at wrap.go:167-170 calls through
-	// the same helper, so this assertion covers the wrap path transitively.
-	pol := app.policyEngineFor(s).Policy()
-	foundSessionRule := false
-	for _, fr := range pol.FileRules {
-		if fr.Name == "allow-read-project" {
-			foundSessionRule = true
-			break
+	t.Run("uses_session_engine", func(t *testing.T) {
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		s.SetPolicyEngine(sessionEngine)
+
+		_, read, _ := app.deriveLandlockAllowPaths(s)
+
+		if !containsPath(read, "/session-only") {
+			t.Errorf("deriveLandlockAllowPaths did not include the session engine's "+
+				"/session-only read path; got read=%v. This means wrap.go regressed "+
+				"to reading a.policy.Policy() instead of policyEngineFor(s).Policy().",
+				read)
+		}
+		if containsPath(read, "/global-only") {
+			t.Errorf("deriveLandlockAllowPaths leaked the global engine's /global-only "+
+				"read path when a session engine was set; got read=%v. This means "+
+				"wrap.go is consulting a.policy instead of the session engine.",
+				read)
+		}
+	})
+
+	t.Run("falls_back_to_global", func(t *testing.T) {
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		// Intentionally do NOT call SetPolicyEngine — the helper must fall
+		// back to app.policy (the global engine).
+
+		_, read, _ := app.deriveLandlockAllowPaths(s)
+
+		if !containsPath(read, "/global-only") {
+			t.Errorf("deriveLandlockAllowPaths did not include the global engine's "+
+				"/global-only read path when the session had no engine set; got read=%v",
+				read)
+		}
+		if containsPath(read, "/session-only") {
+			t.Errorf("deriveLandlockAllowPaths leaked the session engine's "+
+				"/session-only read path when no session engine was set; got read=%v",
+				read)
+		}
+	})
+}
+
+// containsPath reports whether s appears in paths. Used by the Landlock
+// derivation regression test to assert set membership without requiring a
+// stable slice order (DeriveReadPathsFromPolicy iterates a map).
+func containsPath(paths []string, s string) bool {
+	for _, p := range paths {
+		if p == s {
+			return true
 		}
 	}
-	if !foundSessionRule {
-		t.Errorf("Landlock derivation would miss the session's file rule: "+
-			"policyEngineFor(s).Policy() has %d file rules, none named allow-read-project",
-			len(pol.FileRules))
-	}
+	return false
 }
