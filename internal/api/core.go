@@ -107,12 +107,7 @@ type wrapperSetupResult struct {
 func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *session.Session) *wrapperSetupResult {
 	// Helper: return early without seccomp wrapping but with envInject applied.
 	earlyReturn := func() *wrapperSetupResult {
-		sessionPolicy := a.policy
-		if s != nil {
-			if sp := s.PolicyEngine(); sp != nil {
-				sessionPolicy = sp
-			}
-		}
+		sessionPolicy := a.policyEngineFor(s)
 		envInject := mergeEnvInject(a.cfg, sessionPolicy)
 		if len(envInject) > 0 || a.cmdResolver != nil || a.sessionTracker != nil {
 			return &wrapperSetupResult{wrappedReq: req, extraCfg: &extraProcConfig{envInject: envInject, cmdResolver: a.cmdResolver, sessionTracker: a.sessionTracker}}
@@ -169,12 +164,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 
 	// Use session-specific policy engine (with expanded ${PROJECT_ROOT} etc.)
 	// for seccomp handlers, falling back to global policy if unavailable.
-	sessionPolicy := a.policy
-	if s != nil {
-		if sp := s.PolicyEngine(); sp != nil {
-			sessionPolicy = sp
-		}
-	}
+	sessionPolicy := a.policyEngineFor(s)
 
 	envFD := 3 // first ExtraFile
 	wrappedReq.Env["AGENTSH_NOTIFY_SOCK_FD"] = strconv.Itoa(envFD)
@@ -842,7 +832,7 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 		includeEvents = "all"
 	}
 
-	pre := a.policy.CheckCommand(req.Command, req.Args)
+	pre := a.policyEngineFor(s).CheckCommand(req.Command, req.Args)
 	redirected, originalCmd, originalArgs := applyCommandRedirect(&req.Command, &req.Args, pre)
 	approvalErr := error(nil)
 	pkgApprovalDenied := false
@@ -1049,8 +1039,8 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
 	_ = a.store.AppendEvent(ctx, startEv)
 	a.broker.Publish(startEv)
 
-	limits := a.policy.Limits()
-	cmdDecision := a.policy.CheckCommand(wrappedReq.Command, wrappedReq.Args)
+	limits := a.policyEngineFor(s).Limits()
+	cmdDecision := a.policyEngineFor(s).CheckCommand(wrappedReq.Command, wrappedReq.Args)
 	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResources(ctx, s, cmdID, wrappedReq, a.cfg, cmdDecision.EnvPolicy, limits.CommandTimeout, a.cgroupHook(id, cmdID, limits), extraCfg, a.ptraceTracer, id)
 
 	// Check if process was killed by seccomp (SIGSYS) and emit event
@@ -1490,7 +1480,7 @@ func (a *App) wrapWithMacSandbox(
 	}
 
 	// Compile policy-driven SBPL profile (darwin+cgo only, no-op on other platforms)
-	compileDarwinSandboxProfile(&cfg, a.policy, sess.Workspace)
+	compileDarwinSandboxProfile(&cfg, a.policyEngineFor(sess), sess.Workspace)
 
 	// Write profile artifact for debugging/inspection
 	if cfg.CompiledProfile != "" && sess.ID != "" {

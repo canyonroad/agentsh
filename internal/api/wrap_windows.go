@@ -47,7 +47,7 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socket
 	listener.Close()
 }
 
-func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID string, a *App) {
+func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID string, a *App, s *session.Session) {
 	if signalFD != nil {
 		signalFD.Close()
 	}

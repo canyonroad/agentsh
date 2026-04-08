@@ -63,12 +63,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 
 	// Prefer session-specific policy engine (has expanded ${PROJECT_ROOT} etc.)
 	// over app-level engine, matching the exec path pattern in core.go.
-	sessionPolicy := a.policy
-	if s != nil {
-		if sp := s.PolicyEngine(); sp != nil {
-			sessionPolicy = sp
-		}
-	}
+	sessionPolicy := a.policyEngineFor(s)
 
 	// Create execve handler if enabled
 	var execveHandler *unixmon.ExecveHandler
@@ -129,8 +124,18 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 }
 
 // startSignalHandlerForWrap starts the signal filter handler for a wrap session.
-func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID string, a *App) {
-	if a.policy == nil || a.policy.SignalEngine() == nil {
+func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID string, a *App, s *session.Session) {
+	// Route through the session's effective policy engine so per-session
+	// signal rules are honored (canyonroad/agentsh#191). Previously this
+	// function read a.policy directly, which silently ignored rules
+	// authored in any non-default policy file.
+	engine := a.policyEngineFor(s)
+	if engine == nil {
+		signalFD.Close()
+		return
+	}
+	sigEngine := engine.SignalEngine()
+	if sigEngine == nil {
 		signalFD.Close()
 		return
 	}
@@ -142,7 +147,7 @@ func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID
 		commandID: func() string { return "" },
 	}
 	registry := signal.NewPIDRegistry(sessionID, os.Getpid())
-	handler := signal.NewHandler(a.policy.SignalEngine(), registry, emitter)
+	handler := signal.NewHandler(sigEngine, registry, emitter)
 
 	go func() {
 		defer signalFD.Close()

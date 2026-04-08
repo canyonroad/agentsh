@@ -26,7 +26,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 	// No-op on non-Linux platforms
 }
 
-func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID string, a *App) {
+func startSignalHandlerForWrap(ctx context.Context, signalFD *os.File, sessionID string, a *App, s *session.Session) {
 	if signalFD != nil {
 		signalFD.Close()
 	}

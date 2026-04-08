@@ -164,11 +164,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			seccompCfg.LandlockABI = llResult.ABI
 			seccompCfg.Workspace = workspace
 
-			if a.policy != nil {
-				seccompCfg.AllowExecute = landlock.DeriveExecutePathsFromPolicy(a.policy.Policy())
-				seccompCfg.AllowRead = landlock.DeriveReadPathsFromPolicy(a.policy.Policy())
-				seccompCfg.AllowWrite = landlock.DeriveWritePathsFromPolicy(a.policy.Policy())
-			}
+			seccompCfg.AllowExecute, seccompCfg.AllowRead, seccompCfg.AllowWrite = a.deriveLandlockAllowPaths(s)
 
 			seccompCfg.AllowExecute = append(seccompCfg.AllowExecute, a.cfg.Landlock.AllowExecute...)
 			seccompCfg.AllowRead = append(seccompCfg.AllowRead, a.cfg.Landlock.AllowRead...)
@@ -235,7 +231,10 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// stacking two seccomp USER_NOTIF filters causes notification delivery failures
 	// (the signal filter's semaphore interferes with execve notification reception).
 	var signalSocketPath string
-	signalFilterEnabled := a.policy != nil && a.policy.SignalEngine() != nil && !execveEnabled
+	// signalFilterEnabled routes through a helper so the gate can be
+	// exercised in tests end-to-end without standing up seccomp (see
+	// TestWrap_SignalFilterUsesSessionPolicy).
+	signalFilterEnabled := a.signalFilterEnabled(s, execveEnabled)
 	if signalFilterEnabled {
 		signalSocketPath = filepath.Join(notifyDir, "signal-"+safeID+".sock")
 		signalListener, err := net.Listen("unix", signalSocketPath)
@@ -245,7 +244,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			signalSocketPath = ""
 			signalFilterEnabled = false
 		} else {
-			go a.acceptSignalFD(ctx, signalListener, signalSocketPath, sessionID)
+			go a.acceptSignalFD(ctx, signalListener, signalSocketPath, sessionID, s)
 		}
 	}
 	seccompCfg.SignalFilterEnabled = signalFilterEnabled
@@ -287,6 +286,57 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		SignalSocket:  signalSocketPath,
 		WrapperEnv:    wrapperEnv,
 	}, http.StatusOK, nil
+}
+
+// deriveLandlockAllowPaths returns the execute/read/write allow-path lists
+// that wrap-init should hand to the Landlock ruleset for this session. It
+// reads from the session's effective policy engine (per-session engine if
+// set, otherwise the global engine) so that per-session allow_* rules are
+// reflected in the Landlock configuration applied to wrapped agents.
+//
+// Returns three nil slices when no engine is available (test configs).
+// nil slices are safe to append() to, so callers can unconditionally tack
+// on config-derived paths afterwards.
+//
+// This helper is the regression boundary for canyonroad/agentsh#191: it
+// was extracted from wrapInitCore specifically so the derivation path can
+// be tested end-to-end without standing up seccomp. See
+// TestWrap_LandlockDerivationUsesSessionPolicy.
+func (a *App) deriveLandlockAllowPaths(s *session.Session) (execute, read, write []string) {
+	engine := a.policyEngineFor(s)
+	if engine == nil {
+		return nil, nil, nil
+	}
+	pol := engine.Policy()
+	return landlock.DeriveExecutePathsFromPolicy(pol),
+		landlock.DeriveReadPathsFromPolicy(pol),
+		landlock.DeriveWritePathsFromPolicy(pol)
+}
+
+// signalFilterEnabled reports whether wrap-init should create a signal
+// filter socket for this session. It consults the session's effective
+// policy engine (per-session engine if set, otherwise the global engine)
+// so per-session signal rules are honored — reading a.policy directly
+// silently ignores non-default policy files (canyonroad/agentsh#191).
+//
+// Signal filtering is disabled when execve interception is enabled
+// because stacking two seccomp USER_NOTIF filters causes notification
+// delivery failures (the signal filter's semaphore interferes with
+// execve notification reception).
+//
+// This helper is the regression boundary for #191's signal-filter half:
+// it was extracted from wrapInitCore specifically so the gate can be
+// tested end-to-end without standing up seccomp. See
+// TestWrap_SignalFilterUsesSessionPolicy.
+func (a *App) signalFilterEnabled(s *session.Session, execveEnabled bool) bool {
+	if execveEnabled {
+		return false
+	}
+	engine := a.policyEngineFor(s)
+	if engine == nil {
+		return false
+	}
+	return engine.SignalEngine() != nil
 }
 
 // acceptNotifyFD listens on the Unix socket for a single connection from the CLI,
@@ -348,7 +398,7 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 
 // acceptSignalFD listens on the Unix socket for a single connection from the CLI,
 // receives the signal filter notify fd, and starts the signal handler.
-func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketPath string, sessionID string) {
+func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketPath string, sessionID string, s *session.Session) {
 	defer listener.Close()
 	// Note: do NOT remove the parent directory here — acceptNotifyFD owns that cleanup.
 
@@ -384,5 +434,5 @@ func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketP
 	}
 
 	slog.Info("wrap: received signal fd", "session_id", sessionID, "fd", signalFD.Fd())
-	startSignalHandlerForWrap(ctx, signalFD, sessionID, a)
+	startSignalHandlerForWrap(ctx, signalFD, sessionID, a, s)
 }

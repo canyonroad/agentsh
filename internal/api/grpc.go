@@ -290,7 +290,7 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 		}
 	}
 
-	pre := s.app.policy.CheckCommand(execReq.Command, execReq.Args)
+	pre := s.app.policyEngineFor(sess).CheckCommand(execReq.Command, execReq.Args)
 	redirected, originalCmd, originalArgs := applyCommandRedirect(&execReq.Command, &execReq.Args, pre)
 	approvalErr := error(nil)
 	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && s.app.approvals != nil {
@@ -411,7 +411,7 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
 		return stream.SendMsg(out)
 	}
 
-	limits := s.app.policy.Limits()
+	limits := s.app.policyEngineFor(sess).Limits()
 	exitCode, stdoutB, stderrB, stdoutTotal, stderrTotal, stdoutTrunc, stderrTrunc, resources, execErr := runCommandWithResourcesStreamingEmit(
 		stream.Context(),
 		sess,
@@ -792,7 +792,16 @@ func (s *grpcServer) PolicyTest(ctx context.Context, in *structpb.Struct) (*stru
 		return nil, status.Error(codes.InvalidArgument, "path is required")
 	}
 
+	// Honor session_id: route through policyEngineFor so per-session policy overrides are reflected.
+	sessionID, _ := reqMap["session_id"].(string)
+	sessionID = strings.TrimSpace(sessionID)
+
 	engine := s.app.policy
+	if sessionID != "" {
+		if sess, ok := s.app.sessions.Get(sessionID); ok {
+			engine = s.app.policyEngineFor(sess)
+		}
+	}
 	if engine == nil {
 		return nil, status.Error(codes.Unavailable, "policy engine not available")
 	}

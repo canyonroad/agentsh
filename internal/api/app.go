@@ -1390,9 +1390,13 @@ func (a *App) policyTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use session's policy if session_id provided, otherwise use default
-	// Note: Currently all sessions use the same policy engine from the app
+	// Honor session_id: route through policyEngineFor so per-session policy overrides are reflected.
 	engine := a.policy
+	if req.SessionID != "" {
+		if s, ok := a.sessions.Get(req.SessionID); ok {
+			engine = a.policyEngineFor(s)
+		}
+	}
 
 	if engine == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "policy engine not available"})

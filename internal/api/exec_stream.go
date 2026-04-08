@@ -57,7 +57,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	pre := a.policy.CheckCommand(req.Command, req.Args)
+	pre := a.policyEngineFor(s).CheckCommand(req.Command, req.Args)
 	redirected, originalCmd, originalArgs := applyCommandRedirect(&req.Command, &req.Args, pre)
 	approvalErr := error(nil)
 	if pre.PolicyDecision == types.DecisionApprove && pre.EffectiveDecision == types.DecisionApprove && a.approvals != nil {
@@ -198,7 +198,7 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
 	wrappedReq := wrapperResult.wrappedReq
 	extraCfg := wrapperResult.extraCfg
 
-	limits := a.policy.Limits()
+	limits := a.policyEngineFor(s).Limits()
 	emit := func(event string, payload map[string]any) error {
 		return writeSSE(w, flusher, event, payload)
 	}
