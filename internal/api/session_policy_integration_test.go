@@ -1,7 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +16,10 @@ import (
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/go-chi/chi/v5"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // newEngineDenyingOnly returns a *policy.Engine with a single explicit
@@ -130,4 +137,189 @@ func (c *capturingEventStore) firstCommandPrecheck() *types.Event {
 		}
 	}
 	return nil
+}
+
+// sessionPolicyFixture bundles the common per-entry-point regression test
+// fixture: a global-deny engine, a session-allow engine, an App wired up
+// with a capturing event store, and a session whose PolicyEngine has been
+// set to the session-allow engine. Consumed by every
+// Test*_PrecheckConsultsSessionPolicy case so they share the exact same
+// setup and only differ in how they invoke the exec entry point.
+type sessionPolicyFixture struct {
+	cmdPath  string
+	app      *App
+	session  *session.Session
+	captured *capturingEventStore
+}
+
+func newSessionPolicyFixture(t *testing.T) *sessionPolicyFixture {
+	t.Helper()
+
+	// Same pattern as TestExecInSessionCore_PrecheckConsultsSessionPolicy:
+	// lowercased forward-slash TempDir path so the policy engine normalises
+	// the rule as a full path on both Linux and Windows, and so the command
+	// is guaranteed-missing on any runner.
+	cmdPath := strings.ToLower(filepath.ToSlash(filepath.Join(t.TempDir(), "agentsh191-nonexistent")))
+
+	globalEngine := newEngineDenyingOnly(t, cmdPath)
+	sessionEngine := newEngineAllowingCommand(t, "session-allow-widget", cmdPath)
+
+	mgr := session.NewManager(5)
+	captured := &capturingEventStore{}
+	store := composite.New(captured, nil)
+	broker := events.NewBroker()
+
+	cfg := &config.Config{}
+	app := NewApp(cfg, mgr, store, globalEngine, broker, nil, nil, nil, nil, nil)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	s.SetPolicyEngine(sessionEngine)
+
+	return &sessionPolicyFixture{
+		cmdPath:  cmdPath,
+		app:      app,
+		session:  s,
+		captured: captured,
+	}
+}
+
+// assertSessionPolicyPrecheck asserts that the first captured
+// command_precheck event came from the session-allow engine (by rule
+// name) and produced an allow decision. This is the shared oracle for
+// every per-entry-point regression test.
+func (f *sessionPolicyFixture) assertSessionPolicyPrecheck(t *testing.T) {
+	t.Helper()
+	ev := f.captured.firstCommandPrecheck()
+	if ev == nil {
+		t.Fatal("no command_precheck event was emitted")
+	}
+	if ev.Policy == nil {
+		t.Fatal("command_precheck event has nil Policy")
+	}
+	if ev.Policy.Rule != "session-allow-widget" {
+		t.Errorf("precheck consulted the wrong engine: event rule = %q, want %q. "+
+			"This means the precheck is still using a.policy instead of the session engine.",
+			ev.Policy.Rule, "session-allow-widget")
+	}
+	if ev.Policy.EffectiveDecision != types.DecisionAllow {
+		t.Errorf("precheck should have returned allow, got %v", ev.Policy.EffectiveDecision)
+	}
+}
+
+// TestExecInSessionStream_PrecheckConsultsSessionPolicy is the #191
+// regression test for the HTTP streaming exec entry point. It calls
+// execInSessionStream directly with a chi URL param set, then asserts
+// the captured command_precheck event came from the session engine's
+// allow rule — proving the handler routes through policyEngineFor(sess)
+// rather than hitting a.policy directly.
+func TestExecInSessionStream_PrecheckConsultsSessionPolicy(t *testing.T) {
+	f := newSessionPolicyFixture(t)
+
+	body, err := json.Marshal(types.ExecRequest{Command: f.cmdPath})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequestWithContext(ctx, "POST", "/api/v1/sessions/"+f.session.ID+"/exec/stream", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", f.session.ID)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	rr := httptest.NewRecorder()
+
+	// The precheck event is emitted before any command execution, so even
+	// though the downstream exec will fail (missing binary), the captured
+	// event already tells us which engine was consulted. The bounded
+	// context is a safety net against anything downstream hanging.
+	f.app.execInSessionStream(rr, req)
+
+	f.assertSessionPolicyPrecheck(t)
+}
+
+// TestStartPTY_PrecheckConsultsSessionPolicy is the #191 regression
+// test for the PTY start entry point. It calls startPTY directly — the
+// precheck event fires before PTY creation, so even though pty.New().Start
+// will fail on a missing binary, the captured event proves the handler
+// consulted policyEngineFor(sess) rather than a.policy.
+func TestStartPTY_PrecheckConsultsSessionPolicy(t *testing.T) {
+	f := newSessionPolicyFixture(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Return values are intentionally discarded: PTY creation will fail
+	// (the binary does not exist), but the precheck event is already
+	// emitted and captured before the PTY.Start call.
+	_, _, _ = f.app.startPTY(ctx, f.session.ID, ptyStartParams{Command: f.cmdPath})
+
+	f.assertSessionPolicyPrecheck(t)
+}
+
+// captureServerStream is a minimal grpc.ServerStream test double. It
+// supplies a context (needed by the grpc ExecStream handler for event
+// storage and downstream calls) and no-ops every other method. SendMsg
+// returns an error so the handler bails out of the streaming loop
+// quickly — the precheck event is already captured before any Send is
+// attempted.
+type captureServerStream struct {
+	ctx context.Context
+}
+
+func (s *captureServerStream) Context() context.Context { return s.ctx }
+func (s *captureServerStream) SetHeader(metadata.MD) error {
+	return nil
+}
+func (s *captureServerStream) SendHeader(metadata.MD) error {
+	return nil
+}
+func (s *captureServerStream) SetTrailer(metadata.MD) {}
+func (s *captureServerStream) SendMsg(m interface{}) error {
+	// Return nil — the ExecStream handler only calls SendMsg from its
+	// emit func after runCommandWithResourcesStreamingEmit starts the
+	// process. By then, the precheck event is long since captured.
+	return nil
+}
+func (s *captureServerStream) RecvMsg(m interface{}) error {
+	return nil
+}
+
+var _ grpc.ServerStream = (*captureServerStream)(nil)
+
+// TestGRPCExecStream_PrecheckConsultsSessionPolicy is the #191
+// regression test for the gRPC ExecStream entry point. It builds a
+// grpcServer wrapping the App, hands it a structpb request, and calls
+// ExecStream directly with a captureServerStream double. The precheck
+// fires and emits its event before setupSeccompWrapper runs, so even
+// though the downstream command will fail with a missing binary, the
+// captured event proves the handler consulted policyEngineFor(sess).
+func TestGRPCExecStream_PrecheckConsultsSessionPolicy(t *testing.T) {
+	f := newSessionPolicyFixture(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	in, err := structpb.NewStruct(map[string]any{
+		"session_id": f.session.ID,
+		"command":    f.cmdPath,
+	})
+	if err != nil {
+		t.Fatalf("NewStruct: %v", err)
+	}
+
+	stream := &captureServerStream{ctx: ctx}
+	gs := &grpcServer{app: f.app}
+
+	// The handler may return a non-nil error (the command doesn't exist,
+	// so runCommandWithResourcesStreamingEmit will fail with exit 127),
+	// but we only care about the captured precheck event.
+	_ = gs.ExecStream(in, stream)
+
+	f.assertSessionPolicyPrecheck(t)
 }
