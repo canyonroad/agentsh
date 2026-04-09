@@ -1430,7 +1430,7 @@ func TestConcurrentAccess_NoRaces(t *testing.T) {
 			defer wg.Done()
 			body := []byte("request fakeAAAAAAAAAAAA fakeBBBBBBBBBBBB end")
 			for j := 0; j < iterations; j++ {
-				_ = tb.FakeForService("svc-a")
+				_, _ = tb.FakeForService("svc-a")
 				_, _ = tb.Contains([]byte("fakeAAAAAAAAAAAA"))
 				_ = tb.ReplaceFakeToReal(body)
 				_ = tb.ReplaceRealToFake(body)
