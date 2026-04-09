@@ -51,12 +51,15 @@ func TestSecretValue_Zero_OnZeroValue(t *testing.T) {
 	sv.Zero() // must not panic on zero-value SecretValue
 }
 
-// Compile-time check: ProviderConfig is a sealed interface. Any
-// struct intended as a provider config must implement it by having
-// a providerConfig() method. This test does not exercise runtime
-// behavior — the compiler enforces it.
-type testConfig struct{}
-
-func (testConfig) providerConfig() {}
+// Compile-time check: ProviderConfig is satisfied by embedding
+// ProviderConfigMarker. A type that does NOT embed the marker
+// cannot declare a matching providerConfig() method from outside
+// package secrets, so this pattern is the only cross-package
+// path to the interface. This test runs inside package secrets,
+// but it deliberately uses the embedding pattern to mirror how
+// sibling packages like keyring will satisfy ProviderConfig.
+type testConfig struct {
+	ProviderConfigMarker
+}
 
 var _ ProviderConfig = testConfig{}

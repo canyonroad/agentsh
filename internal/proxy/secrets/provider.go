@@ -109,15 +109,40 @@ func (sv *SecretValue) Zero() {
 	sv.Version = ""
 }
 
-// ProviderConfig is a sealed marker interface implemented by each
-// provider's config struct (Config in the keyring package, and
-// later VaultConfig, AWSSMConfig, etc.). The registry — to be
-// added in a later plan — uses ProviderConfig to dispatch to the
+// ProviderConfig is the marker interface that every provider's
+// config struct must satisfy. The registry — to be added in a
+// later plan — type-switches on ProviderConfig to dispatch to the
 // right constructor at policy-load time.
 //
-// The private method prevents external packages from implementing
-// ProviderConfig by accident. Only types inside known provider
-// packages can satisfy it.
+// Types outside package secrets satisfy ProviderConfig by
+// embedding ProviderConfigMarker. Embedding is required because
+// Go's unexported-method sealing does not work across package
+// boundaries: an unexported method's identity is qualified by
+// the declaring package, so a type in another package cannot
+// directly implement a sealed interface from this one. Embedding
+// ProviderConfigMarker gives the outer type a promoted
+// providerConfig() method whose identity lives in package
+// secrets, which is what satisfies the interface.
+//
+// The seal is strong-by-convention: anyone can embed
+// ProviderConfigMarker, but doing so is a deliberate opt-in, and
+// the registry only dispatches on config types it already knows
+// about.
 type ProviderConfig interface {
 	providerConfig()
 }
+
+// ProviderConfigMarker is a zero-size struct that provider config
+// types embed to satisfy ProviderConfig. Example usage:
+//
+//	type Config struct {
+//	    secrets.ProviderConfigMarker
+//	    // provider-specific fields...
+//	}
+//
+// Do not remove providerConfig() even if a linter flags it
+// "unused" — its sole purpose is to seal ProviderConfig through
+// method promotion to embedders of ProviderConfigMarker.
+type ProviderConfigMarker struct{}
+
+func (ProviderConfigMarker) providerConfig() {}
