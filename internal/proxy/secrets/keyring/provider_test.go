@@ -154,3 +154,25 @@ func TestFetch_NotFound(t *testing.T) {
 		t.Errorf("Fetch of missing key = %v, want wrapping ErrNotFound", err)
 	}
 }
+
+// TestFetch_AfterCloseReturnsError is the regression test for
+// the close-vs-fetch race. It does NOT attempt to prove timing
+// of an in-flight race — that would be flaky and platform-
+// dependent. Instead it verifies the stable behavioral contract:
+// after Close returns, any subsequent Fetch returns a wrapped
+// ErrKeyringUnavailable. RWMutex guarantees the invariant
+// regardless of goroutine scheduling.
+func TestFetch_AfterCloseReturnsError(t *testing.T) {
+	p := &Provider{}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	ref := secrets.SecretRef{Scheme: "keyring", Host: "agentsh", Path: "x"}
+	_, err := p.Fetch(context.Background(), ref)
+	if err == nil {
+		t.Fatal("Fetch after Close returned nil error")
+	}
+	if !errors.Is(err, secrets.ErrKeyringUnavailable) {
+		t.Errorf("Fetch after Close = %v, want wrapping ErrKeyringUnavailable", err)
+	}
+}

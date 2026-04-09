@@ -19,9 +19,12 @@ import (
 // Credential Manager syscalls. All three backends are pure Go —
 // no cgo linkage.
 //
-// Provider is safe for concurrent Fetch and Close.
+// Provider is safe for concurrent Fetch and Close. Close waits
+// for any in-flight Fetch to finish before returning, so the
+// contract "after Close returns, Fetch returns an error" holds
+// even under concurrent access.
 type Provider struct {
-	mu     sync.Mutex
+	mu     sync.RWMutex
 	closed bool
 }
 
@@ -71,12 +74,15 @@ func (p *Provider) Name() string { return "keyring" }
 // call against ctx would leak on cancel.
 //
 // A Fetch on a closed Provider returns a wrapped
-// secrets.ErrKeyringUnavailable.
+// secrets.ErrKeyringUnavailable. Close waits for any in-flight
+// Fetch to complete before returning, so a Fetch that began
+// before Close can still succeed — what is guaranteed is that
+// any Fetch attempted AFTER Close returns will see the closed
+// flag and return the error.
 func (p *Provider) Fetch(ctx context.Context, ref secrets.SecretRef) (secrets.SecretValue, error) {
-	p.mu.Lock()
-	closed := p.closed
-	p.mu.Unlock()
-	if closed {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.closed {
 		return secrets.SecretValue{}, fmt.Errorf("%w: provider closed", secrets.ErrKeyringUnavailable)
 	}
 
