@@ -52,6 +52,9 @@ func CurrentCgroupDir() (string, error) {
 	return filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(p, "/")), nil
 }
 
+// Deprecated: Use CgroupManager.Apply instead. ApplyCgroupV2 does not probe the
+// cgroup hierarchy and silently discards enableControllers errors. It is retained
+// only for callers that have not yet migrated (limiter_linux.go, platform/linux).
 func ApplyCgroupV2(parentDir string, name string, pid int, lim CgroupV2Limits) (*CgroupV2, error) {
 	if pid <= 0 {
 		return nil, fmt.Errorf("invalid pid %d", pid)
