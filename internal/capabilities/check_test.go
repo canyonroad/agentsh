@@ -771,13 +771,14 @@ func TestProbeEBPF(t *testing.T) {
 // a single BPF_EXIT instruction with uninitialized r0, which the BPF verifier
 // rejects with EACCES even on systems where eBPF is fully functional. It also
 // used progType=13 with a comment claiming BPF_PROG_TYPE_CGROUP_SKB, but
-// value 13 is actually BPF_PROG_TYPE_SOCK_OPS — and both of those types need
-// more privileges than BPF_PROG_TYPE_SOCKET_FILTER. This test locks in the
-// corrected canary so the bug cannot be reintroduced.
+// value 13 is actually BPF_PROG_TYPE_SOCK_OPS. This test locks in the
+// corrected canary (progType 8 = CGROUP_SKB, 2 instructions: r0=0; exit;) so
+// the bug cannot be reintroduced.
 func TestProbeEBPFCanary(t *testing.T) {
-	// BPF_PROG_TYPE_SOCKET_FILTER = 1 — the lowest-privilege program type.
-	assert.Equal(t, uint32(1), probeEBPFCanaryProgType,
-		"canary must use BPF_PROG_TYPE_SOCKET_FILTER (1), not a higher-privilege type")
+	// BPF_PROG_TYPE_CGROUP_SKB = 8 — matches the program type the real
+	// netmonitor attaches, so the canary answers the same question.
+	assert.Equal(t, uint32(8), probeEBPFCanaryProgType,
+		"canary must use BPF_PROG_TYPE_CGROUP_SKB (8), not SOCK_OPS (13)")
 
 	// Two 8-byte instructions: r0=0, exit.
 	assert.Equal(t, uint32(2), probeEBPFCanaryInsnCnt,
@@ -794,10 +795,12 @@ func TestProbeEBPFCanary(t *testing.T) {
 		"second instruction opcode must be 0x95 (exit)")
 
 	// On systems where the probe succeeds, the detail must identify the
-	// canary program type (not "cgroup_skb", which was the buggy label).
+	// canary program type. probeEBPF gates the canary behind ebpf.CheckSupport,
+	// so on environments where the check fails, Available is false and the
+	// detail is the reason from CheckSupport rather than "cgroup_skb".
 	result := probeEBPF()
 	if result.Available {
-		assert.Equal(t, "socket_filter", result.Detail)
+		assert.Equal(t, "cgroup_skb", result.Detail)
 	}
 }
 

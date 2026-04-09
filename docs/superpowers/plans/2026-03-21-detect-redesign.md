@@ -235,12 +235,24 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/agentsh/agentsh/internal/netmonitor/ebpf"
 )
 
-// probeEBPF checks if BPF socket_filter programs can be loaded.
+// probeEBPF checks whether the process can use cgroup-attached eBPF
+// network tracing. It first verifies runtime prerequisites via
+// ebpf.CheckSupport so capability reporting stays aligned with what the
+// real netmonitor actually needs, then runs a minimal BPF_PROG_LOAD
+// canary to confirm BPF_PROG_LOAD is not blocked.
 func probeEBPF() ProbeResult {
+	if status := ebpf.CheckSupport(); !status.Supported {
+		return ProbeResult{Available: false, Detail: status.Reason}
+	}
+
 	// Minimal verifier-accepted BPF program: r0 = 0; exit;
-	// A lone BPF_EXIT is rejected by the verifier because r0 is uninitialized.
+	// For BPF_PROG_TYPE_CGROUP_SKB, r0 is the packet verdict (0 = drop, 1 = allow)
+	// so r0 = 0 is a valid return. A lone BPF_EXIT is rejected by the
+	// verifier because r0 is uninitialized.
 	insn := [16]byte{
 		0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r0 = 0
 		0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
@@ -260,7 +272,7 @@ func probeEBPF() ProbeResult {
 	}
 
 	attr := bpfProgLoadAttr{
-		progType: 1, // BPF_PROG_TYPE_SOCKET_FILTER (lowest-privilege canary)
+		progType: 8, // BPF_PROG_TYPE_CGROUP_SKB (NOTE: value 13 is SOCK_OPS, not CGROUP_SKB)
 		insnCnt:  2,
 		insns:    uint64(uintptr(unsafe.Pointer(&insn[0]))),
 		license:  uint64(uintptr(unsafe.Pointer(&license[0]))),
@@ -274,11 +286,11 @@ func probeEBPF() ProbeResult {
 	)
 	if errno == 0 {
 		unix.Close(int(fd))
-		return ProbeResult{Available: true, Detail: "socket_filter"}
+		return ProbeResult{Available: true, Detail: "cgroup_skb"}
 	}
 	switch errno {
 	case unix.EPERM:
-		return ProbeResult{Available: false, Detail: "EPERM (missing CAP_BPF/CAP_SYS_ADMIN or unprivileged_bpf_disabled)"}
+		return ProbeResult{Available: false, Detail: "EPERM (BPF_PROG_LOAD denied)"}
 	case unix.EACCES:
 		return ProbeResult{Available: false, Detail: "EACCES (BPF verifier rejected canary)"}
 	case unix.ENOSYS:
