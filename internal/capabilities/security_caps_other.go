@@ -3,19 +3,29 @@
 package capabilities
 
 // SecurityCapabilities holds detected security primitive availability.
+//
+// Capabilities and CapabilitiesActive mirror the Linux split: Capabilities
+// is the mechanism flag (always true where the platform conceptually
+// supports capability-style privilege reduction) and CapabilitiesActive is
+// the behavioural flag indicating the process itself has durably reduced
+// its capability set. Non-Linux platforms do not have a real capability
+// probe, so CapabilitiesActive defaults to false until a platform probe
+// populates it — callers asking "is privilege reduction protecting this
+// process" must use CapabilitiesActive to stay honest about that.
 type SecurityCapabilities struct {
-	Seccomp         bool   // seccomp-bpf + user-notify
-	SeccompBasic    bool   // seccomp-bpf without user-notify
-	Landlock        bool   // any Landlock support
-	LandlockABI     int    // 1-5, determines features
-	LandlockNetwork bool   // ABI v4+, kernel 6.7+
-	EBPF            bool   // network monitoring
-	FUSE            bool   // filesystem interception
-	Capabilities    bool   // can drop capabilities (always true)
-	PIDNamespace    bool   // isolated PID namespace
-	Ptrace          bool   // SYS_PTRACE capability available
-	PtraceEnabled   bool   // ptrace enforcement enabled in config
-	FileEnforcement string // "landlock", "fuse", "seccomp-notify", "none"
+	Seccomp            bool   // seccomp-bpf + user-notify
+	SeccompBasic       bool   // seccomp-bpf without user-notify
+	Landlock           bool   // any Landlock support
+	LandlockABI        int    // 1-5, determines features
+	LandlockNetwork    bool   // ABI v4+, kernel 6.7+
+	EBPF               bool   // network monitoring
+	FUSE               bool   // filesystem interception
+	Capabilities       bool   // capability-drop mechanism available (always true)
+	CapabilitiesActive bool   // capability-drop probe reports this process has durably reduced its capability set
+	PIDNamespace       bool   // isolated PID namespace
+	Ptrace             bool   // SYS_PTRACE capability available
+	PtraceEnabled      bool   // ptrace enforcement enabled in config
+	FileEnforcement    string // "landlock", "fuse", "seccomp-notify", "none"
 
 	// Cached probe results (populated by DetectSecurityCapabilities, reused by buildLinuxDomains)
 	EBPFProbe   ProbeResult

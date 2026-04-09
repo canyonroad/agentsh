@@ -118,6 +118,10 @@ Fallbacks:
 
 This is a behavioural check, not an infrastructure check: it answers "is capability-drop actually protecting this process?" rather than "does capability-drop exist on this kernel?". Issue #198 reported the previous infrastructure-only probe marking the backend active for a server running as root with `CapEff=0x1ffffffffff` (all 41 caps) — a false positive that the behavioural check eliminates. Bits above `cap_last_cap` are ignored so that kernel quirks (phantom high bits) cannot mask a genuine drop of a low capability.
 
+**Mechanism vs. active — separate fields:** Because `SecurityCapabilities.Capabilities` is historically the *mechanism* flag ("can this platform drop caps at all" — always true on Linux) and is read by mode selection, configuration generation, and the startup log, the behavioural signal lives on a second field `SecurityCapabilities.CapabilitiesActive`. Detect output and the legacy `capabilities_drop` flat-map key use `CapabilitiesActive` / `CapProbe.Available` so `detect` reports whether the running process is actually protected, while the mechanism flag remains backward compatible for existing callers. Mode selection does NOT consult either field (the `minimal` mode is the fallback regardless), so splitting the two does not affect mode behaviour. The `LogSecurityCapabilities` log line records both under the keys `capabilities` (mechanism, legacy) and `capabilities_active` (behavioural, new).
+
+**Tip guidance:** The remediation text points operators at startup-time mechanisms that actually lower `CapPrm`/`CapEff`: `systemd CapabilityBoundingSet= + User=`, `docker run --cap-drop=ALL`, or running under an unprivileged user. `capabilities.DropCapabilities()` is deliberately NOT recommended because it only calls `PR_CAPBSET_DROP` and leaves the current process's permitted/effective sets untouched — following that advice would satisfy the bounding-set half of the probe while leaving the process still able to use its existing caps, yielding a half-dropped state that is more misleading than helpful.
+
 All probes are fast, side-effect-free, and run at detection time.
 
 ### 4. Output Format

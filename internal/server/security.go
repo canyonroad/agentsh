@@ -64,6 +64,13 @@ func LogSecurityCapabilities(caps *capabilities.SecurityCapabilities, mode strin
 		"landlock_network", caps.LandlockNetwork,
 		"ebpf", caps.EBPF,
 		"fuse", caps.FUSE,
+		// "capabilities" is the mechanism flag (kept for log-field
+		// backward compatibility) — always true on Linux. The
+		// behavioural "is this process actually running with a reduced
+		// capability set" signal is logged separately as
+		// "capabilities_active" so operators can distinguish the two
+		// after #198 split them.
 		"capabilities", caps.Capabilities,
+		"capabilities_active", caps.CapabilitiesActive,
 	)
 }

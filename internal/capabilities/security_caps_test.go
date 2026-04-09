@@ -7,9 +7,19 @@ import (
 func TestDetectSecurityCapabilities(t *testing.T) {
 	caps := DetectSecurityCapabilities()
 
-	// Should always have Capabilities (can always drop caps)
+	// Should always have Capabilities (can always drop caps — this is
+	// the mechanism flag, not the behavioural "have we dropped" flag).
+	// The behavioural signal lives on CapabilitiesActive and CapProbe
+	// after the #198 split; see security_caps.go for the rationale.
 	if !caps.Capabilities {
 		t.Error("Capabilities should always be true")
+	}
+
+	// CapabilitiesActive must match the cached CapProbe result — the
+	// two are populated from the same probe call and must stay in sync.
+	if caps.CapabilitiesActive != caps.CapProbe.Available {
+		t.Errorf("CapabilitiesActive = %v; want CapProbe.Available = %v",
+			caps.CapabilitiesActive, caps.CapProbe.Available)
 	}
 
 	// Landlock network requires Landlock available

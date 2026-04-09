@@ -136,7 +136,11 @@ func TestLookupTip(t *testing.T) {
 // capabilities support" — both wrong under the new probe semantics, where
 // the backend is reported inactive when the process retains full
 // privileges. The correct remediation is to constrain the process's
-// capabilities at startup.
+// capabilities at startup via a mechanism that lowers both CapBnd AND
+// CapPrm/CapEff. capabilities.DropCapabilities() is deliberately NOT
+// recommended because it only narrows the bounding set via
+// PR_CAPBSET_DROP; following that advice would leave the process able to
+// use its existing permitted set while still tripping the probe.
 func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
 	tip := lookupTip("capability-drop")
 	if tip == nil {
@@ -148,9 +152,10 @@ func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
 	if strings.Contains(tip.Action, "standard Linux capabilities support") {
 		t.Errorf("capability-drop Action still references the old misleading text: %q", tip.Action)
 	}
-	// The new action must mention at least one concrete mechanism for
-	// narrowing the capability set so operators know what to do.
-	wantAny := []string{"CapabilityBoundingSet", "--cap-drop", "DropCapabilities"}
+	// The new action must mention at least one concrete mechanism that
+	// lowers the running process's permitted/effective sets at startup
+	// so operators get actionable advice.
+	wantAny := []string{"CapabilityBoundingSet", "--cap-drop", "unprivileged user"}
 	var matched bool
 	for _, s := range wantAny {
 		if strings.Contains(tip.Action, s) {
@@ -159,6 +164,13 @@ func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
 		}
 	}
 	if !matched {
-		t.Errorf("capability-drop Action should reference a drop mechanism, got %q", tip.Action)
+		t.Errorf("capability-drop Action should reference a startup drop mechanism, got %q", tip.Action)
+	}
+	// capabilities.DropCapabilities() only narrows the bounding set, so
+	// it must NOT appear as a standalone recommendation. It may be
+	// mentioned as a cautionary note (explaining why it's insufficient)
+	// but not as a remediation step.
+	if strings.Contains(tip.Action, "call capabilities.DropCapabilities") {
+		t.Errorf("capability-drop Action recommends DropCapabilities() which only narrows CapBnd: %q", tip.Action)
 	}
 }

@@ -10,19 +10,32 @@ import (
 )
 
 // SecurityCapabilities holds detected security primitive availability.
+//
+// Capabilities and CapabilitiesActive answer two different questions and must
+// not be collapsed. Capabilities is the *mechanism* flag — "this platform
+// exposes capability dropping as an enforcement primitive" — and is always
+// true on Linux. CapabilitiesActive is the *behavioural* flag — "this
+// process has durably reduced its own capability set" — populated from the
+// CapProbe result so detect output reflects whether privilege reduction is
+// actually protecting the running server (the #198 regression). Consumers
+// that want to know "is capability drop protecting this process" must read
+// CapabilitiesActive; consumers that want "can this platform drop caps at
+// all" (mode selection, configuration generation) continue to read
+// Capabilities.
 type SecurityCapabilities struct {
-	Seccomp         bool   // seccomp-bpf + user-notify
-	SeccompBasic    bool   // seccomp-bpf without user-notify
-	Landlock        bool   // any Landlock support
-	LandlockABI     int    // 1-5, determines features
-	LandlockNetwork bool   // ABI v4+, kernel 6.7+
-	EBPF            bool   // network monitoring
-	FUSE            bool   // filesystem interception
-	Capabilities    bool   // can drop capabilities (always true)
-	PIDNamespace    bool   // isolated PID namespace
-	Ptrace          bool   // SYS_PTRACE capability available
-	PtraceEnabled   bool   // ptrace enforcement enabled in config
-	FileEnforcement string // "landlock", "fuse", "seccomp-notify", "none"
+	Seccomp            bool   // seccomp-bpf + user-notify
+	SeccompBasic       bool   // seccomp-bpf without user-notify
+	Landlock           bool   // any Landlock support
+	LandlockABI        int    // 1-5, determines features
+	LandlockNetwork    bool   // ABI v4+, kernel 6.7+
+	EBPF               bool   // network monitoring
+	FUSE               bool   // filesystem interception
+	Capabilities       bool   // capability-drop mechanism available (always true on Linux)
+	CapabilitiesActive bool   // capability-drop probe reports this process has durably reduced its capability set
+	PIDNamespace       bool   // isolated PID namespace
+	Ptrace             bool   // SYS_PTRACE capability available
+	PtraceEnabled      bool   // ptrace enforcement enabled in config
+	FileEnforcement    string // "landlock", "fuse", "seccomp-notify", "none"
 
 	// Cached probe results (populated by DetectSecurityCapabilities, reused by buildLinuxDomains)
 	EBPFProbe   ProbeResult
@@ -64,7 +77,17 @@ func DetectSecurityCapabilities() *SecurityCapabilities {
 
 	caps.EBPF = ebpfProbe.Available
 	caps.PIDNamespace = pidnsProbe.Available
-	caps.Capabilities = capProbe.Available
+	// Capabilities is the mechanism flag — always true on Linux because
+	// the kernel exposes capget/capset/PR_CAPBSET_DROP. Mode selection and
+	// legacy consumers that ask "can this platform drop caps" read this.
+	// CapabilitiesActive is the behavioural flag — populated from CapProbe
+	// so detect output reports whether the process itself has durably
+	// reduced its capability set. Splitting the two preserves the old
+	// "mechanism available" contract that SelectMode and config generation
+	// rely on while still letting the #198 behavioural check surface
+	// through the detect backend and log fields.
+	caps.Capabilities = true
+	caps.CapabilitiesActive = capProbe.Available
 	caps.EBPFProbe = ebpfProbe
 	caps.CgroupProbe = cgroupProbe
 	caps.PIDNSProbe = pidnsProbe
