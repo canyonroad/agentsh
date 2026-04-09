@@ -1,6 +1,7 @@
 // Package keyring implements secrets.SecretProvider using the OS
-// keyring: macOS Keychain, Linux Secret Service (via libsecret and
-// D-Bus), or Windows Credential Manager. It wraps
+// keyring: macOS Keychain (via /usr/bin/security), Linux Secret
+// Service (via D-Bus), or Windows Credential Manager. All three
+// backends are pure Go with no cgo linkage. It wraps
 // github.com/zalando/go-keyring.
 //
 // Keyring URIs take the form

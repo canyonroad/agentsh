@@ -13,9 +13,10 @@ import (
 
 // Provider is an OS-keyring-backed secrets.SecretProvider.
 //
-// On macOS this uses the system Keychain (via cgo against the
-// Security framework). On Linux it uses the Secret Service D-Bus
-// API. On Windows it uses Credential Manager.
+// On macOS this shells out to /usr/bin/security. On Linux it
+// uses the Secret Service D-Bus API. On Windows it uses the
+// Credential Manager syscalls. All three backends are pure Go —
+// no cgo linkage.
 //
 // Provider is safe for concurrent Fetch and Close.
 type Provider struct {
@@ -60,11 +61,17 @@ func (p *Provider) Close() error {
 	return nil
 }
 
-// Fetch is the stub implementation — Task 6 replaces the body with
-// the real validation and round-trip logic. The signature matches
-// secrets.SecretProvider so the compile-time assertion in
-// config.go (var _ secrets.SecretProvider = (*Provider)(nil))
+// Fetch is the stub implementation — Task 6 replaces the body
+// with the real validation and round-trip logic. The signature
+// matches secrets.SecretProvider so the compile-time assertion
+// in config.go (var _ secrets.SecretProvider = (*Provider)(nil))
 // passes from this task onward.
-func (p *Provider) Fetch(ctx context.Context, ref secrets.SecretRef) (secrets.SecretValue, error) {
-	return secrets.SecretValue{}, errors.New("keyring: Fetch not yet implemented")
+//
+// Calling the stub is a programming error: it means the provider
+// was wired into a live flow before Task 6 landed. Panicking
+// makes that failure loud instead of propagating a string-compared
+// error that violates the wrappable-sentinel contract in
+// secrets.SecretProvider.
+func (p *Provider) Fetch(_ context.Context, _ secrets.SecretRef) (secrets.SecretValue, error) {
+	panic("keyring: Fetch not yet implemented — Task 6 replaces this stub")
 }
