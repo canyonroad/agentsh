@@ -45,6 +45,31 @@ func TestProxy_PreHookAbortError_Returns403(t *testing.T) {
 	}
 }
 
+func TestProxy_PreHookAbortError_InvalidStatusCode_Falls502(t *testing.T) {
+	cfg := Config{SessionID: "test-session"}
+	p, err := New(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	abortHook := &fakeHook{
+		name:   "bad-status",
+		preErr: &HookAbortError{StatusCode: 0, Message: "invalid"},
+	}
+	p.HookRegistry().Register("", abortHook)
+
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/v1/messages", bytes.NewReader([]byte(`{"test":"data"}`)))
+	req.Header.Set("x-api-key", "sk-ant-test")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	w := httptest.NewRecorder()
+
+	p.ServeHTTP(w, req)
+
+	if w.Code != 502 {
+		t.Errorf("status = %d, want 502 for invalid status code", w.Code)
+	}
+}
+
 func TestProxy_PreHookPlainError_Returns502(t *testing.T) {
 	cfg := Config{SessionID: "test-session"}
 	p, err := New(cfg, "", nil)

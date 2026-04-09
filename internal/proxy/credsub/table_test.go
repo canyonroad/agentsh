@@ -624,12 +624,12 @@ func TestContainsFake_FoundInBody(t *testing.T) {
 	}
 
 	body := []byte(`{"token": "ghp_fake1234567890abcdef", "other": "data"}`)
-	entry, found := tb.ContainsFake(body)
+	serviceName, found := tb.ContainsFake(body)
 	if !found {
 		t.Fatal("ContainsFake should find fake in body")
 	}
-	if entry.ServiceName != "github" {
-		t.Errorf("ServiceName = %q, want %q", entry.ServiceName, "github")
+	if serviceName != "github" {
+		t.Errorf("ServiceName = %q, want %q", serviceName, "github")
 	}
 }
 
@@ -682,28 +682,12 @@ func TestContainsFake_MultipleEntries_FindsFirst(t *testing.T) {
 	}
 
 	body := []byte(`both: ghp_fake1234567890abcdef and sk-fake567890abcdef123456`)
-	entry, found := tb.ContainsFake(body)
+	serviceName, found := tb.ContainsFake(body)
 	if !found {
 		t.Fatal("ContainsFake should find a fake")
 	}
-	if entry.ServiceName != "github" {
-		t.Errorf("ServiceName = %q, want %q", entry.ServiceName, "github")
-	}
-}
-
-func TestContainsFake_ReturnsCopy(t *testing.T) {
-	tb := New()
-	if err := tb.Add("github", []byte("ghp_fake1234567890abcdef"), []byte("ghp_real1234567890abcdef")); err != nil {
-		t.Fatal(err)
-	}
-
-	body := []byte("ghp_fake1234567890abcdef")
-	entry, _ := tb.ContainsFake(body)
-
-	entry.Fake[0] = 'X'
-	entry2, _ := tb.ContainsFake(body)
-	if entry2.Fake[0] == 'X' {
-		t.Error("ContainsFake should return deep copies")
+	if serviceName != "github" {
+		t.Errorf("ServiceName = %q, want %q", serviceName, "github")
 	}
 }
 

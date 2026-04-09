@@ -371,7 +371,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err := p.hookRegistry.ApplyPreHooks("", r, reqCtx); err != nil {
 			var abortErr *HookAbortError
 			if errors.As(err, &abortErr) {
-				http.Error(w, abortErr.Message, abortErr.StatusCode)
+				code := abortErr.StatusCode
+				if code < 100 || code > 599 {
+					code = http.StatusBadGateway
+				}
+				http.Error(w, abortErr.Message, code)
 			} else {
 				p.logger.Error("pre-hook failed", "error", err, "request_id", requestID)
 				http.Error(w, "hook error", http.StatusBadGateway)

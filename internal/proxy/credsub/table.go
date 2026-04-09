@@ -156,12 +156,16 @@ func (t *Table) Contains(fake []byte) (Entry, bool) {
 // uses bytes.Contains to detect fakes embedded in larger payloads
 // such as JSON request bodies.
 //
-// Returns the first matching entry (deep-copied) and true if a fake
-// is found; returns a zero Entry and false otherwise. When multiple
-// entries match, the first one registered wins.
-func (t *Table) ContainsFake(data []byte) (Entry, bool) {
+// Returns the service name of the first matching entry and true if a
+// fake is found; returns "" and false otherwise. When multiple entries
+// match, the first one registered wins.
+//
+// Only the service name is returned so that callers never receive a
+// copy of the Real credential bytes, which Zero() would be unable to
+// wipe.
+func (t *Table) ContainsFake(data []byte) (string, bool) {
 	if len(data) == 0 {
-		return Entry{}, false
+		return "", false
 	}
 
 	t.mu.RLock()
@@ -169,19 +173,10 @@ func (t *Table) ContainsFake(data []byte) (Entry, bool) {
 
 	for _, e := range t.entries {
 		if bytes.Contains(data, e.Fake) {
-			fakeCopy := make([]byte, len(e.Fake))
-			copy(fakeCopy, e.Fake)
-			realCopy := make([]byte, len(e.Real))
-			copy(realCopy, e.Real)
-			return Entry{
-				ServiceName: e.ServiceName,
-				Fake:        fakeCopy,
-				Real:        realCopy,
-				AddedAt:     e.AddedAt,
-			}, true
+			return e.ServiceName, true
 		}
 	}
-	return Entry{}, false
+	return "", false
 }
 
 // ReplaceFakeToReal returns a copy of body with every occurrence of
