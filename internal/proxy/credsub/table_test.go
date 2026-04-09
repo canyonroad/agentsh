@@ -3,6 +3,7 @@ package credsub
 import (
 	"bytes"
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -614,4 +615,71 @@ func TestZero_AllowsReuse(t *testing.T) {
 	if !ok || !bytes.Equal(got, []byte("sk_fake000000000")) {
 		t.Errorf("FakeForService after reuse = (%q, %v), want (%q, true)", got, ok, "sk_fake000000000")
 	}
+}
+
+func TestConcurrentAccess_NoRaces(t *testing.T) {
+	// This test is primarily for `go test -race` to detect data
+	// races. It exercises Add, FakeForService, Contains,
+	// ReplaceFakeToReal, ReplaceRealToFake, and Zero concurrently.
+	tb := New()
+
+	// Pre-seed a few entries so readers always have something to
+	// find.
+	seed := []struct {
+		name, fake, real string
+	}{
+		{"svc-a", "fakeAAAAAAAAAAAA", "realAAAAAAAAAAAA"},
+		{"svc-b", "fakeBBBBBBBBBBBB", "realBBBBBBBBBBBB"},
+		{"svc-c", "fakeCCCCCCCCCCCC", "realCCCCCCCCCCCC"},
+	}
+	for _, s := range seed {
+		if err := tb.Add(s.name, []byte(s.fake), []byte(s.real)); err != nil {
+			t.Fatalf("seed Add(%s) failed: %v", s.name, err)
+		}
+	}
+
+	const readers = 8
+	const iterations = 200
+	var wg sync.WaitGroup
+
+	// Readers.
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			body := []byte("request fakeAAAAAAAAAAAA fakeBBBBBBBBBBBB end")
+			for j := 0; j < iterations; j++ {
+				_, _ = tb.FakeForService("svc-a")
+				_, _ = tb.Contains([]byte("fakeAAAAAAAAAAAA"))
+				_ = tb.ReplaceFakeToReal(body)
+				_ = tb.ReplaceRealToFake(body)
+				_ = tb.Len()
+			}
+		}()
+	}
+
+	// One writer adding and removing entries.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < iterations; j++ {
+			name := "transient"
+			// Add may fail if we just added and haven't zeroed — ignore.
+			_ = tb.Add(name,
+				[]byte("fakeTTTTTTTTTTTT"),
+				[]byte("realTTTTTTTTTTTT"),
+			)
+			// Zero entire table occasionally to exercise the write
+			// path alongside readers.
+			if j%50 == 0 {
+				tb.Zero()
+				// Re-seed after Zero so readers keep finding stuff.
+				for _, s := range seed {
+					_ = tb.Add(s.name, []byte(s.fake), []byte(s.real))
+				}
+			}
+		}
+	}()
+
+	wg.Wait()
 }
