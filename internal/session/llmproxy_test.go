@@ -57,7 +57,7 @@ func TestStartLLMProxy(t *testing.T) {
 
 	// Start the proxy
 	mcpCfg := config.SandboxMCPConfig{}
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, storagePath, logger)
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, storagePath, logger, nil, nil)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestStartLLMProxy_NilSession(t *testing.T) {
 	storageCfg := config.DefaultLLMStorageConfig()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	_, _, err := StartLLMProxy(nil, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger)
+	_, _, err := StartLLMProxy(nil, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger, nil, nil)
 	if err == nil {
 		t.Error("expected error for nil session")
 	}
@@ -213,7 +213,7 @@ func TestSession_LLMProxyEnvVars_Integration(t *testing.T) {
 	storageCfg := config.DefaultLLMStorageConfig()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger)
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger, nil, nil)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestSession_CloseProxy(t *testing.T) {
 	storageCfg := config.DefaultLLMStorageConfig()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, _, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger)
+	proxyURL, _, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger, nil, nil)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestStartLLMProxy_WithDLP(t *testing.T) {
 	storageCfg := config.DefaultLLMStorageConfig()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger)
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger, nil, nil)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestStartLLMProxy_SessionIDInEnvVars(t *testing.T) {
 	storageCfg := config.DefaultLLMStorageConfig()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	_, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger)
+	_, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, config.SandboxMCPConfig{}, t.TempDir(), logger, nil, nil)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -518,7 +518,7 @@ func TestStartLLMProxy_MCPOnlyMode(t *testing.T) {
 	storagePath := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, storagePath, logger)
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, storagePath, logger, nil, nil)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -604,7 +604,7 @@ func TestStartLLMProxy_MCPConfigPassedThrough(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger, nil, nil)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -669,7 +669,7 @@ func TestStartLLMProxy_CreatesRegistry(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger, nil, nil)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -769,7 +769,7 @@ func TestStartLLMProxy_MCPOnlyWithoutPolicy(t *testing.T) {
 			storageCfg := config.DefaultLLMStorageConfig()
 			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-			proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, tt.mcpCfg, t.TempDir(), logger)
+			proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, tt.mcpCfg, t.TempDir(), logger, nil, nil)
 			if err != nil {
 				t.Fatalf("StartLLMProxy failed: %v", err)
 			}
@@ -836,7 +836,7 @@ func TestStartLLMProxy_NoRegistryWhenPolicyDisabled(t *testing.T) {
 	mcpCfg := config.SandboxMCPConfig{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger, nil, nil)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -887,7 +887,7 @@ func TestSession_MCPRegistryClearedOnClose(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	_, _, err = StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	_, _, err = StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger, nil, nil)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -1017,7 +1017,7 @@ func TestStartLLMProxy_NetworkServerDeclarations(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger, nil, nil)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}
@@ -1097,7 +1097,7 @@ func TestStartLLMProxy_StdioPreRegistrationNoMultiServerCallback(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger)
+	proxyURL, closeFn, err := StartLLMProxy(sess, proxyCfg, dlpCfg, storageCfg, mcpCfg, t.TempDir(), logger, nil, nil)
 	if err != nil {
 		t.Fatalf("StartLLMProxy failed: %v", err)
 	}

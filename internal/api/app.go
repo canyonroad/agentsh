@@ -471,6 +471,7 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 		a.cfg.Sandbox.MCP,
 		storagePath,
 		slog.Default(),
+		nil, nil,
 	)
 	if err != nil {
 		fail := types.Event{

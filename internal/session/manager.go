@@ -14,6 +14,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/pathutil"
 	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/proxy/credsub"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 )
@@ -81,6 +82,13 @@ type Session struct {
 	// Used by seccomp file_monitor and execve handler for accurate path matching.
 	// Falls back to the global policy if nil.
 	policyEngine *policy.Engine
+
+	// credsTable is the per-session credential substitution table.
+	// Nil if no secrets are configured.
+	credsTable *credsub.Table
+
+	// secretsClose zeros the credsTable on session close. Nil if no secrets.
+	secretsClose func()
 }
 
 // SetPolicyEngine stores the session-specific policy engine with expanded variables.
@@ -95,6 +103,23 @@ func (s *Session) PolicyEngine() *policy.Engine {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.policyEngine
+}
+
+// CredsTable returns the per-session credential substitution table,
+// or nil if no secrets are configured.
+func (s *Session) CredsTable() *credsub.Table {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.credsTable
+}
+
+// SetCredsTable stores the credential table and cleanup function on
+// the session. Called by StartLLMProxy after BootstrapCredentials.
+func (s *Session) SetCredsTable(t *credsub.Table, closeFn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.credsTable = t
+	s.secretsClose = closeFn
 }
 
 type Manager struct {
@@ -497,18 +522,29 @@ func (s *Session) LLMProxyURL() string {
 }
 
 // CloseLLMProxy closes the LLM proxy.
+// Stops the proxy first (waiting for in-flight requests to drain),
+// then zeros the credential table. This ordering ensures hooks see
+// a populated table for the duration of any in-flight request.
 func (s *Session) CloseLLMProxy() error {
 	s.mu.Lock()
 	fn := s.llmProxyClose
+	secretsFn := s.secretsClose
 	s.llmProxyClose = nil
 	s.llmProxyURL = ""
 	s.llmProxy = nil
 	s.mcpRegistry = nil
+	s.credsTable = nil
+	s.secretsClose = nil
 	s.mu.Unlock()
+	// Stop proxy first so in-flight requests finish with a populated table.
+	var proxyErr error
 	if fn != nil {
-		return fn()
+		proxyErr = fn()
 	}
-	return nil
+	if secretsFn != nil {
+		secretsFn()
+	}
+	return proxyErr
 }
 
 func (s *Session) SetNetNS(name string, closeFn func() error) {
