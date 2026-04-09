@@ -120,3 +120,33 @@ func (t *Table) FakeForService(serviceName string) ([]byte, bool) {
 	}
 	return nil, false
 }
+
+// Contains reports whether a byte sequence is a registered fake in
+// the table. It performs an EXACT match (not a substring search). If
+// found, it returns a deep-copied Entry (Fake and Real are fresh
+// slices the caller may freely retain or mutate) and true; otherwise
+// it returns a zero Entry and false.
+func (t *Table) Contains(fake []byte) (Entry, bool) {
+	if len(fake) == 0 {
+		return Entry{}, false
+	}
+
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	for _, e := range t.entries {
+		if bytes.Equal(e.Fake, fake) {
+			fakeCopy := make([]byte, len(e.Fake))
+			copy(fakeCopy, e.Fake)
+			realCopy := make([]byte, len(e.Real))
+			copy(realCopy, e.Real)
+			return Entry{
+				ServiceName: e.ServiceName,
+				Fake:        fakeCopy,
+				Real:        realCopy,
+				AddedAt:     e.AddedAt,
+			}, true
+		}
+	}
+	return Entry{}, false
+}

@@ -199,3 +199,82 @@ func TestFakeForService_ReturnsCopy(t *testing.T) {
 		t.Errorf("second lookup = %q, want %q (Table leaked internal slice)", again, "ghp_fake00000000")
 	}
 }
+
+func TestContains_Found(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	entry, ok := tb.Contains([]byte("ghp_fake00000000"))
+	if !ok {
+		t.Fatal("Contains returned ok=false for registered fake")
+	}
+	if entry.ServiceName != "github" {
+		t.Errorf("Contains returned ServiceName=%q, want %q", entry.ServiceName, "github")
+	}
+}
+
+func TestContains_NotFound(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	_, ok := tb.Contains([]byte("ghp_something000"))
+	if ok {
+		t.Error("Contains returned ok=true for unknown fake")
+	}
+}
+
+func TestContains_ExactMatchOnly(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	// Substring of a registered fake — Contains is exact match,
+	// so this must NOT match.
+	_, ok := tb.Contains([]byte("fake0000"))
+	if ok {
+		t.Error("Contains returned ok=true for substring lookup; must be exact match")
+	}
+}
+
+func TestContains_EmptyInput(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	_, ok := tb.Contains(nil)
+	if ok {
+		t.Error("Contains(nil) returned ok=true")
+	}
+	_, ok = tb.Contains([]byte{})
+	if ok {
+		t.Error("Contains(empty) returned ok=true")
+	}
+}
+
+func TestContains_ReturnsCopy(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	entry, ok := tb.Contains([]byte("ghp_fake00000000"))
+	if !ok {
+		t.Fatal("Contains returned ok=false for registered fake")
+	}
+	// Mutate the returned entry's byte slices; the Table's copies
+	// must not change.
+	for i := range entry.Fake {
+		entry.Fake[i] = 0
+	}
+	for i := range entry.Real {
+		entry.Real[i] = 0
+	}
+	again, _ := tb.Contains([]byte("ghp_fake00000000"))
+	if !bytes.Equal(again.Fake, []byte("ghp_fake00000000")) {
+		t.Errorf("second lookup Fake = %q, want %q (Contains leaked internal slice)", again.Fake, "ghp_fake00000000")
+	}
+	if !bytes.Equal(again.Real, []byte("ghp_real00000000")) {
+		t.Errorf("second lookup Real = %q, want %q (Contains leaked internal slice)", again.Real, "ghp_real00000000")
+	}
+}
