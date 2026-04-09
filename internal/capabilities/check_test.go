@@ -767,18 +767,25 @@ func TestProbeEBPF(t *testing.T) {
 	assert.NotEmpty(t, result.Detail)
 }
 
-// TestProbeEBPFCanary is a regression test for #196. The original probe used
-// a single BPF_EXIT instruction with uninitialized r0, which the BPF verifier
-// rejects with EACCES even on systems where eBPF is fully functional. It also
-// used progType=13 with a comment claiming BPF_PROG_TYPE_CGROUP_SKB, but
-// value 13 is actually BPF_PROG_TYPE_SOCK_OPS. This test locks in the
-// corrected canary (progType 8 = CGROUP_SKB, 2 instructions: r0=0; exit;) so
-// the bug cannot be reintroduced.
+// TestProbeEBPFCanary is a regression test for #196. The original probe
+// used a single BPF_EXIT instruction with uninitialized r0, which the BPF
+// verifier rejects with EACCES even on systems where eBPF is fully
+// functional. It also used progType=13 with a comment claiming
+// BPF_PROG_TYPE_CGROUP_SKB, but value 13 is BPF_PROG_TYPE_SOCK_OPS and the
+// real netmonitor loads CGROUP_SOCK_ADDR programs (cgroup/connect*,
+// cgroup/sendmsg*), not skb programs. This test locks in the corrected
+// canary so the bug cannot be reintroduced.
 func TestProbeEBPFCanary(t *testing.T) {
-	// BPF_PROG_TYPE_CGROUP_SKB = 8 — matches the program type the real
-	// netmonitor attaches, so the canary answers the same question.
-	assert.Equal(t, uint32(8), probeEBPFCanaryProgType,
-		"canary must use BPF_PROG_TYPE_CGROUP_SKB (8), not SOCK_OPS (13)")
+	// BPF_PROG_TYPE_CGROUP_SOCK_ADDR = 18 — matches the program family the
+	// real netmonitor attaches (cgroup/connect*, cgroup/sendmsg*).
+	assert.Equal(t, uint32(18), probeEBPFCanaryProgType,
+		"canary must use BPF_PROG_TYPE_CGROUP_SOCK_ADDR (18), not SOCK_OPS (13), CGROUP_SKB (8), or SOCKET_FILTER (1)")
+
+	// expected_attach_type is required for CGROUP_SOCK_ADDR — without it
+	// the kernel rejects the load with EINVAL. BPF_CGROUP_INET4_CONNECT is
+	// one of the valid attach types the real netmonitor uses.
+	assert.Equal(t, uint32(10), probeEBPFCanaryExpectedAttachType,
+		"canary must set expected_attach_type to BPF_CGROUP_INET4_CONNECT (10)")
 
 	// Two 8-byte instructions: r0=0, exit.
 	assert.Equal(t, uint32(2), probeEBPFCanaryInsnCnt,
@@ -795,12 +802,13 @@ func TestProbeEBPFCanary(t *testing.T) {
 		"second instruction opcode must be 0x95 (exit)")
 
 	// On systems where the probe succeeds, the detail must identify the
-	// canary program type. probeEBPF gates the canary behind ebpf.CheckSupport,
-	// so on environments where the check fails, Available is false and the
-	// detail is the reason from CheckSupport rather than "cgroup_skb".
+	// canary program family. probeEBPF gates the canary behind
+	// ebpf.CheckSupport, so on environments where the check fails,
+	// Available is false and the detail is the reason from CheckSupport
+	// rather than "cgroup_sock_addr".
 	result := probeEBPF()
 	if result.Available {
-		assert.Equal(t, "cgroup_skb", result.Detail)
+		assert.Equal(t, "cgroup_sock_addr", result.Detail)
 	}
 }
 

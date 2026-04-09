@@ -57,22 +57,27 @@ func CheckSupport() SupportStatus {
 	return SupportStatus{Supported: true}
 }
 
+// hasCap reports whether the effective capability set contains cap. It
+// handles the full 64-bit V3 capability mask — earlier revisions of this
+// helper only read the low 32 bits of Effective, which always returned
+// false for CAP_BPF (bit 39), CAP_PERFMON (bit 38), and any other high
+// capability. LINUX_CAPABILITY_VERSION_3 requires a two-element
+// CapUserData array; passing a single struct is the Go footgun tracked
+// in golang/go#44312 and writes past the end of the user-allocated
+// buffer (the kernel copies 2 * sizeof(CapUserData) regardless).
 func hasCap(cap int) bool {
+	if cap < 0 || cap >= 64 {
+		return false
+	}
 	hdr := &unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
-	data := &unix.CapUserData{}
-	if err := unix.Capget(hdr, data); err != nil {
+	var data [2]unix.CapUserData
+	if err := unix.Capget(hdr, &data[0]); err != nil {
 		return false
 	}
-	// Effective set check
-	switch {
-	case cap < 0 || cap >= 64:
-		return false
-	case cap < 32:
-		return data.Effective&(1<<uint(cap)) != 0
-	default:
-		// Version 3 supports up to 63; beyond that we treat as unsupported.
-		return false
+	if cap < 32 {
+		return data[0].Effective&(1<<uint(cap)) != 0
 	}
+	return data[1].Effective&(1<<uint(cap-32)) != 0
 }
 
 func kernelVersion() (int, int, error) {

@@ -243,39 +243,49 @@ import (
 // network tracing. It first verifies runtime prerequisites via
 // ebpf.CheckSupport so capability reporting stays aligned with what the
 // real netmonitor actually needs, then runs a minimal BPF_PROG_LOAD
-// canary to confirm BPF_PROG_LOAD is not blocked.
+// canary to confirm BPF_PROG_LOAD for the netmonitor's program family
+// is not blocked.
 func probeEBPF() ProbeResult {
 	if status := ebpf.CheckSupport(); !status.Supported {
 		return ProbeResult{Available: false, Detail: status.Reason}
 	}
 
 	// Minimal verifier-accepted BPF program: r0 = 0; exit;
-	// For BPF_PROG_TYPE_CGROUP_SKB, r0 is the packet verdict (0 = drop, 1 = allow)
-	// so r0 = 0 is a valid return. A lone BPF_EXIT is rejected by the
-	// verifier because r0 is uninitialized.
+	// For BPF_PROG_TYPE_CGROUP_SOCK_ADDR, r0 is the verdict
+	// (0 = deny, 1 = allow), so r0 = 0 is a valid return.
+	// A lone BPF_EXIT is rejected by the verifier because r0 is
+	// uninitialized.
 	insn := [16]byte{
 		0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r0 = 0
 		0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
 	}
 	license := [4]byte{'G', 'P', 'L', 0}
 
-	// bpf_attr for BPF_PROG_LOAD
+	// bpf_attr for BPF_PROG_LOAD, extended through expected_attach_type
+	// because CGROUP_SOCK_ADDR requires it — the kernel rejects loads
+	// with EINVAL if expected_attach_type is not one of the valid
+	// bind/connect/sendmsg/recvmsg attach types.
 	type bpfProgLoadAttr struct {
-		progType    uint32
-		insnCnt     uint32
-		insns       uint64
-		license     uint64
-		logLevel    uint32
-		logSize     uint32
-		logBuf      uint64
-		kernVersion uint32
+		progType           uint32
+		insnCnt            uint32
+		insns              uint64
+		license            uint64
+		logLevel           uint32
+		logSize            uint32
+		logBuf             uint64
+		kernVersion        uint32
+		progFlags          uint32
+		progName           [16]byte
+		progIfindex        uint32
+		expectedAttachType uint32
 	}
 
 	attr := bpfProgLoadAttr{
-		progType: 8, // BPF_PROG_TYPE_CGROUP_SKB (NOTE: value 13 is SOCK_OPS, not CGROUP_SKB)
-		insnCnt:  2,
-		insns:    uint64(uintptr(unsafe.Pointer(&insn[0]))),
-		license:  uint64(uintptr(unsafe.Pointer(&license[0]))),
+		progType:           18, // BPF_PROG_TYPE_CGROUP_SOCK_ADDR (NOTE: 13 is SOCK_OPS, 8 is CGROUP_SKB)
+		insnCnt:            2,
+		insns:              uint64(uintptr(unsafe.Pointer(&insn[0]))),
+		license:            uint64(uintptr(unsafe.Pointer(&license[0]))),
+		expectedAttachType: 10, // BPF_CGROUP_INET4_CONNECT
 	}
 
 	fd, _, errno := unix.Syscall(
@@ -286,7 +296,7 @@ func probeEBPF() ProbeResult {
 	)
 	if errno == 0 {
 		unix.Close(int(fd))
-		return ProbeResult{Available: true, Detail: "cgroup_skb"}
+		return ProbeResult{Available: true, Detail: "cgroup_sock_addr"}
 	}
 	switch errno {
 	case unix.EPERM:

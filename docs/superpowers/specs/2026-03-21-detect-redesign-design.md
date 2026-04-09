@@ -51,7 +51,7 @@ Within each domain, multiple backends can provide coverage. The domain score is 
 
 | Backend | Detection Method | Enables |
 |---------|-----------------|---------|
-| eBPF | `ebpf.CheckSupport()` prerequisites + `BPF_PROG_LOAD` canary with `BPF_PROG_TYPE_CGROUP_SKB` (see section 3 for details) | cgroup-level network monitoring |
+| eBPF | `ebpf.CheckSupport()` prerequisites + `BPF_PROG_LOAD` canary with `BPF_PROG_TYPE_CGROUP_SOCK_ADDR` (see section 3 for details) | cgroup-level network monitoring |
 | Landlock network | Landlock ABI >= 4 (from existing probe) | Kernel-level TCP bind/connect filtering |
 
 **Resource Limits** (15 pts)
@@ -74,13 +74,15 @@ Replace four stubs with actual probes:
 **eBPF probe**: First call `internal/netmonitor/ebpf.CheckSupport()` to verify the runtime prerequisites that the real cgroup netmonitor depends on (cgroup v2, cgroup `bpf` controller, BTF present, `CAP_BPF` or `CAP_SYS_ADMIN`, kernel ≥ 5.8). If any of those fail, return the reason from `SupportStatus` without running the canary. Aligning with `CheckSupport()` keeps capability reporting consistent with runtime behavior — otherwise the probe can claim eBPF is available on hosts where the actual attach path will fail.
 
 Only if `CheckSupport()` passes, construct a minimal `bpf_attr` struct for `BPF_PROG_LOAD` and load it as a final sanity check that `BPF_PROG_LOAD` itself is not blocked by seccomp, lockdown, or an LSM:
-- `prog_type`: `BPF_PROG_TYPE_CGROUP_SKB` (8) — matches the program type the real netmonitor attaches. NOTE: value 13 is `BPF_PROG_TYPE_SOCK_OPS`, not `CGROUP_SKB`.
-- `insns`: pointer to a 2-instruction canary: `r0 = 0; exit;` (16 bytes: `0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00`). For `CGROUP_SKB`, r0 is the packet verdict (0 = drop, 1 = allow); both are valid return values, so `r0 = 0` satisfies the verifier. A lone `BPF_EXIT` is rejected because r0 is uninitialized.
+- `prog_type`: `BPF_PROG_TYPE_CGROUP_SOCK_ADDR` (18) — matches the program family the real netmonitor attaches (`cgroup/connect4`, `cgroup/sendmsg4`, etc.). NOTE: value 13 is `BPF_PROG_TYPE_SOCK_OPS`, and value 8 is `BPF_PROG_TYPE_CGROUP_SKB` — neither matches the runtime path.
+- `expected_attach_type`: `BPF_CGROUP_INET4_CONNECT` (10) — required for `CGROUP_SOCK_ADDR`; the kernel rejects loads with `EINVAL` if `expected_attach_type` is not one of the valid bind/connect/sendmsg/recvmsg/getpeername/getsockname attach types.
+- `insns`: pointer to a 2-instruction canary: `r0 = 0; exit;` (16 bytes: `0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00`). For `CGROUP_SOCK_ADDR`, r0 is the verdict (0 = deny, 1 = allow); both are valid return values, so `r0 = 0` satisfies the verifier. A lone `BPF_EXIT` is rejected because r0 is uninitialized.
 - `insn_cnt`: 2
 - `license`: pointer to `"GPL\0"`
+- The `bpf_attr` struct must be extended through `expected_attach_type` (72 bytes on amd64), not the 48-byte variant that stops at `kern_version`.
 
 Call `unix.Syscall(SYS_BPF, BPF_PROG_LOAD, uintptr(unsafe.Pointer(&attr)), size)`. Classify result:
-- Valid fd → available (close immediately). Detail: `"cgroup_skb"`
+- Valid fd → available (close immediately). Detail: `"cgroup_sock_addr"`
 - `EPERM` → unavailable. Detail: `"EPERM (BPF_PROG_LOAD denied)"`
 - `EACCES` → unavailable. Detail: `"EACCES (BPF verifier rejected canary)"`
 - `ENOSYS` → unavailable. Detail: `"ENOSYS (kernel too old)"`
@@ -125,7 +127,7 @@ COMMAND CONTROL                                    25/25
   active backend:    seccomp-execve
 
 NETWORK                                            20/20
-  ebpf               ✓  cgroup_skb       network monitoring
+  ebpf               ✓  cgroup_sock_addr network monitoring
   landlock-network   ✓  ABI v4+          TCP bind/connect filtering
 
 RESOURCE LIMITS                                    0/15
