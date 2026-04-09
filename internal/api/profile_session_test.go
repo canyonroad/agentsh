@@ -59,7 +59,7 @@ func TestCreateSessionWithProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
 	h := app.Router()
 
 	body := `{"profile":"test-profile"}`
@@ -108,7 +108,7 @@ func TestCreateSessionWithProfile_ProfileNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
 	h := app.Router()
 
 	body := `{"profile":"nonexistent-profile"}`
@@ -155,7 +155,7 @@ func TestCreateSessionWithProfile_MissingMountPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
 	h := app.Router()
 
 	body := `{"profile":"bad-path-profile"}`
@@ -215,7 +215,7 @@ func TestCreateSessionWithProfile_RealPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
 	h := app.Router()
 
 	body := `{"profile":"test-profile","real_paths":true}`
@@ -275,7 +275,7 @@ func TestCreateSessionWithProfile_RealPathsDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
 	h := app.Router()
 
 	// Request with real_paths=false overrides config default

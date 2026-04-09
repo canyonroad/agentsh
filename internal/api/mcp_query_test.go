@@ -25,7 +25,7 @@ func newMCPTestApp(t *testing.T, st *sqlite.Store) http.Handler {
 	cfg.Metrics.Enabled = false
 	cfg.Health.Path = "/health"
 	cfg.Health.ReadinessPath = "/ready"
-	app := NewApp(cfg, sessions, store, nil, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, sessions, store, nil, events.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
 	return app.Router()
 }
 

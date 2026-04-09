@@ -199,7 +199,7 @@ func TestMountFUSEForSession_RegistersMountPointNotSourcePath(t *testing.T) {
 	}, false, true)
 	require.NoError(t, err)
 
-	app := NewApp(cfg, mgr, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil)
+	app := NewApp(cfg, mgr, store, engine, events.NewBroker(), nil, nil, nil, metrics.New(), nil, nil)
 
 	mfs := &mockFilesystem{}
 	mfs.available.Store(true)

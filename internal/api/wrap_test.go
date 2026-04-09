@@ -21,7 +21,7 @@ func newTestAppForWrap(t *testing.T, cfg *config.Config) (*App, *session.Manager
 	mgr := session.NewManager(5)
 	store := composite.New(mockEventStore{}, nil)
 	broker := events.NewBroker()
-	app := NewApp(cfg, mgr, store, nil, broker, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, nil, broker, nil, nil, nil, nil, nil, nil)
 	return app, mgr
 }
 
@@ -304,7 +304,7 @@ func newTestAppForWrapWithSignalPolicy(t *testing.T, cfg *config.Config) (*App, 
 	if err != nil {
 		t.Fatalf("create policy engine: %v", err)
 	}
-	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, engine, broker, nil, nil, nil, nil, nil, nil)
 	return app, mgr
 }
 
