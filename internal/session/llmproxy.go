@@ -27,6 +27,8 @@ func StartLLMProxy(
 	mcpCfg config.SandboxMCPConfig,
 	storagePath string,
 	logger *slog.Logger,
+	secretsFetcher SecretFetcher,
+	services []ServiceConfig,
 ) (string, func() error, error) {
 	if sess == nil {
 		return "", nil, fmt.Errorf("session is nil")
@@ -98,6 +100,24 @@ func StartLLMProxy(
 	// Store in session
 	sess.SetLLMProxy(proxyURL, closeFn)
 	sess.SetProxyInstance(p)
+
+	// Bootstrap credentials and register hooks if services are configured.
+	if len(services) > 0 && secretsFetcher != nil {
+		table, secretsCleanup, err := BootstrapCredentials(ctx, secretsFetcher, services)
+		if err != nil {
+			_ = p.Stop(ctx)
+			return "", nil, fmt.Errorf("bootstrap credentials: %w", err)
+		}
+
+		// Register hooks: leak guard first, then creds substitution.
+		leakGuard := proxy.NewLeakGuardHook(table, logger)
+		credsSub := proxy.NewCredsSubHook(table)
+		p.HookRegistry().Register("", leakGuard)
+		p.HookRegistry().Register("", credsSub)
+
+		sess.SetCredsTable(table, secretsCleanup)
+		LogSecretsInitialized(logger, sess.ID, len(services))
+	}
 
 	return proxyURL, closeFn, nil
 }
