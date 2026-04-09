@@ -80,6 +80,14 @@ func (p *Provider) Name() string { return "keyring" }
 // any Fetch attempted AFTER Close returns will see the closed
 // flag and return the error.
 func (p *Provider) Fetch(ctx context.Context, ref secrets.SecretRef) (secrets.SecretValue, error) {
+	// Honor an already-canceled context before we try to acquire
+	// the mutex. If Close is pending behind a slow keyringlib.Get,
+	// waiters for RLock may queue behind the exclusive writer; a
+	// canceled caller should fail fast rather than block on that.
+	if err := ctx.Err(); err != nil {
+		return secrets.SecretValue{}, err
+	}
+
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.closed {
@@ -99,6 +107,9 @@ func (p *Provider) Fetch(ctx context.Context, ref secrets.SecretRef) (secrets.Se
 		return secrets.SecretValue{}, fmt.Errorf("%w: keyring entries are scalar", secrets.ErrFieldNotSupported)
 	}
 
+	// Re-check ctx in case cancellation happened while we were
+	// waiting for RLock — don't start an uncancellable backend call
+	// for a caller that has already given up.
 	if err := ctx.Err(); err != nil {
 		return secrets.SecretValue{}, err
 	}
