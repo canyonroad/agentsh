@@ -70,6 +70,16 @@ func (m *MemoryProvider) Fetch(ctx context.Context, ref secrets.SecretRef) (secr
 	if err := ctx.Err(); err != nil {
 		return secrets.SecretValue{}, err
 	}
+	// Check closed before validation so a closed provider always
+	// returns errClosed, regardless of whether the ref is well-
+	// formed. This preserves the documented "after Close, Fetch
+	// returns errClosed" contract and mirrors the keyring
+	// provider's closed-beats-everything precedence.
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.closed {
+		return secrets.SecretValue{}, errClosed
+	}
 	// Validate and canonicalize by round-tripping through ParseRef.
 	// Hand-built SecretRefs are common in tests; a malformed one
 	// must produce a URI error here, not ErrNotFound, so tests that
@@ -78,11 +88,6 @@ func (m *MemoryProvider) Fetch(ctx context.Context, ref secrets.SecretRef) (secr
 	parsed, err := secrets.ParseRef(ref.String())
 	if err != nil {
 		return secrets.SecretValue{}, err
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if m.closed {
-		return secrets.SecretValue{}, errClosed
 	}
 	val, ok := m.entries[parsed.String()]
 	if !ok {

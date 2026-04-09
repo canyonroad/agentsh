@@ -116,6 +116,28 @@ func TestFetch_MalformedRef_UnsupportedScheme(t *testing.T) {
 	}
 }
 
+// TestFetch_MalformedAfterClose verifies that closed-state takes
+// precedence over URI validation. After Close, Fetch must always
+// return errClosed, even for a malformed ref that would otherwise
+// produce ErrInvalidURI.
+func TestFetch_MalformedAfterClose(t *testing.T) {
+	mp := NewMemoryProvider("test", nil)
+	if err := mp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Malformed: empty host would normally trigger ErrInvalidURI.
+	_, err := mp.Fetch(context.Background(), secrets.SecretRef{
+		Scheme: "keyring", Host: "", Path: "token",
+	})
+	if err == nil {
+		t.Fatal("Fetch after Close with malformed ref returned nil error")
+	}
+	// Must NOT be ErrInvalidURI — closed state takes priority.
+	if errors.Is(err, secrets.ErrInvalidURI) {
+		t.Errorf("Fetch after Close returned ErrInvalidURI; closed-state should take precedence")
+	}
+}
+
 func TestAdd_ThenFetch(t *testing.T) {
 	mp := NewMemoryProvider("test", nil)
 	if err := mp.Add("keyring://agentsh/added", []byte("value")); err != nil {
