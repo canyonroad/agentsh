@@ -58,14 +58,18 @@ import (
 //
 // See golang/go#44312 for why the V3 capget buffer must be a two-element
 // CapUserData array even when callers only care about bits 0..31.
+// readCapBoundingSet is the package-level hook used by probeCapabilityDrop
+// to read the current bounding set. Tests override it to simulate
+// environments where PR_CAPBSET_READ is blocked by seccomp/lockdown so
+// the degraded-mode fallback can be exercised without affecting any
+// other code paths.
+var readCapBoundingSet = realReadCapBoundingSet
+
 func probeCapabilityDrop() ProbeResult {
 	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
 	var data [2]unix.CapUserData
 	if err := unix.Capget(&hdr, &data[0]); err != nil {
 		return ProbeResult{Available: false, Detail: "capget failed: " + err.Error()}
-	}
-	if _, _, errno := unix.Syscall6(unix.SYS_PRCTL, unix.PR_CAPBSET_READ, 0, 0, 0, 0, 0); errno != 0 {
-		return ProbeResult{Available: false, Detail: "prctl failed: " + errno.Error()}
 	}
 
 	lastCap, err := readCapLastCap()
@@ -80,6 +84,11 @@ func probeCapabilityDrop() ProbeResult {
 		}
 	}
 
+	// Note: we deliberately do NOT short-circuit on PR_CAPBSET_READ errors.
+	// Environments that block the extended prctl (seccomp, lockdown) must
+	// still get a useful answer from the permitted-only fallback below —
+	// the second roborev review caught an earlier version of this function
+	// that hard-failed here before the fallback could fire.
 	bndLow, bndHigh, bndErr := readCapBoundingSet(lastCap)
 
 	report := capsDropped(data, bndLow, bndHigh, bndErr != nil, lastCap)
@@ -258,11 +267,13 @@ func readCapLastCap() (int, error) {
 	return n, nil
 }
 
-// readCapBoundingSet walks the process's bounding set with PR_CAPBSET_READ
-// and returns it as (low, high) uint32 halves matching the layout of
-// CapUserData.Permitted. capget(2) deliberately does not expose the
-// bounding set, so a bit-by-bit walk is the canonical way to read it.
-func readCapBoundingSet(lastCap int) (low, high uint32, err error) {
+// realReadCapBoundingSet walks the process's bounding set with
+// PR_CAPBSET_READ and returns it as (low, high) uint32 halves matching
+// the layout of CapUserData.Permitted. capget(2) deliberately does not
+// expose the bounding set, so a bit-by-bit walk is the canonical way to
+// read it. Exposed for probeCapabilityDrop via the readCapBoundingSet
+// package-level hook so tests can substitute a stub.
+func realReadCapBoundingSet(lastCap int) (low, high uint32, err error) {
 	if lastCap < 0 {
 		return 0, 0, nil
 	}
