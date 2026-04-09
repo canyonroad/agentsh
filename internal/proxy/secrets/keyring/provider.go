@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	keyringlib "github.com/zalando/go-keyring"
 
@@ -24,10 +25,10 @@ type Provider struct {
 	closed bool
 }
 
-// probeService is the keyring service name used by New's
-// availability probe. Operators will never see this in a real
-// keyring — it exists only to verify that keyring.Get can reach
-// the backend at all.
+// probeService and probeAccount name the sentinel entry the
+// availability probe looks up. Operators will never see this in a
+// real keyring — it exists only to verify that keyring.Get can
+// reach the backend at all.
 const (
 	probeService = "agentsh-probe"
 	probeAccount = "agentsh-keyring-availability-probe"
@@ -51,25 +52,75 @@ func New(_ Config) (*Provider, error) {
 // Name returns "keyring". Used in audit events.
 func (p *Provider) Name() string { return "keyring" }
 
+// Fetch retrieves a secret from the OS keyring.
+//
+// The SecretRef must have:
+//   - Scheme == "keyring"
+//   - Host    (the OS keyring service name)
+//   - Path    (the OS keyring account name)
+//   - Field   empty (keyring entries are scalar)
+//
+// Wrong-scheme, missing-host, and missing-path each return a
+// wrapped secrets.ErrInvalidURI. A non-empty Field returns a
+// wrapped secrets.ErrFieldNotSupported. A missing entry returns
+// a wrapped secrets.ErrNotFound. Any other library error is
+// treated as a transport failure and wrapped verbatim.
+//
+// Fetch honors ctx only as a pre-call check. The zalando library
+// does not accept a context, and spawning a goroutine to race the
+// call against ctx would leak on cancel.
+//
+// A Fetch on a closed Provider returns a wrapped
+// secrets.ErrKeyringUnavailable.
+func (p *Provider) Fetch(ctx context.Context, ref secrets.SecretRef) (secrets.SecretValue, error) {
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
+		return secrets.SecretValue{}, fmt.Errorf("%w: provider closed", secrets.ErrKeyringUnavailable)
+	}
+
+	if ref.Scheme != "keyring" {
+		return secrets.SecretValue{}, fmt.Errorf("%w: wrong scheme %q", secrets.ErrInvalidURI, ref.Scheme)
+	}
+	if ref.Host == "" {
+		return secrets.SecretValue{}, fmt.Errorf("%w: keyring URI missing service (host)", secrets.ErrInvalidURI)
+	}
+	if ref.Path == "" {
+		return secrets.SecretValue{}, fmt.Errorf("%w: keyring URI missing user (path)", secrets.ErrInvalidURI)
+	}
+	if ref.Field != "" {
+		return secrets.SecretValue{}, fmt.Errorf("%w: keyring entries are scalar", secrets.ErrFieldNotSupported)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return secrets.SecretValue{}, err
+	}
+
+	val, err := keyringlib.Get(ref.Host, ref.Path)
+	if err != nil {
+		if errors.Is(err, keyringlib.ErrNotFound) {
+			return secrets.SecretValue{}, fmt.Errorf("%w: %s", secrets.ErrNotFound, ref.String())
+		}
+		// We cannot distinguish "auth rejected" from "backend
+		// disappeared mid-session" from the zalando API, so we
+		// do not synthesize ErrUnauthorized here. Wrap the raw
+		// error so callers can see the original cause.
+		return secrets.SecretValue{}, fmt.Errorf("keyring fetch %s: %w", ref.String(), err)
+	}
+
+	return secrets.SecretValue{
+		Value:     []byte(val),
+		FetchedAt: time.Now(),
+	}, nil
+}
+
 // Close marks the provider closed. Subsequent Fetch calls return a
-// non-nil error. Idempotent. The OS keyring has no per-connection
-// state to release.
+// wrapped secrets.ErrKeyringUnavailable. Idempotent. The OS keyring
+// has no per-connection state to release.
 func (p *Provider) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.closed = true
 	return nil
-}
-
-// Fetch is the stub implementation — Task 6 replaces the body
-// with the real validation and round-trip logic. Until then the
-// stub returns ErrKeyringUnavailable wrapped with a descriptive
-// message, so callers get a wrappable sentinel per the
-// SecretProvider contract rather than a raw string error.
-//
-// The signature matches secrets.SecretProvider so the
-// compile-time assertion in config.go (var _ secrets.SecretProvider
-// = (*Provider)(nil)) passes from this task onward.
-func (p *Provider) Fetch(_ context.Context, _ secrets.SecretRef) (secrets.SecretValue, error) {
-	return secrets.SecretValue{}, fmt.Errorf("%w: Fetch not yet implemented (Task 6)", secrets.ErrKeyringUnavailable)
 }
