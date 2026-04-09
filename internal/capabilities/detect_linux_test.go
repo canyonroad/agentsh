@@ -37,9 +37,14 @@ func TestDetect_Linux(t *testing.T) {
 		}
 	}
 
-	// capabilities_drop should always be true
-	if cd, ok := result.Capabilities["capabilities_drop"].(bool); !ok || !cd {
-		t.Error("capabilities_drop should be true")
+	// capabilities_drop must be a bool. Its value depends on whether the
+	// process is running with the kernel's full capability set: a root
+	// process with CapEff == full mask reports false (nothing dropped),
+	// anything less reports true. Prior to the #198 fix this field was
+	// hard-coded to true regardless of CapEff, so we only assert the
+	// type here and leave value verification to the probe-level tests.
+	if _, ok := result.Capabilities["capabilities_drop"].(bool); !ok {
+		t.Errorf("capabilities_drop missing or not bool: %T", result.Capabilities["capabilities_drop"])
 	}
 }
 

@@ -98,11 +98,14 @@ Call `unix.Syscall(SYS_BPF, BPF_PROG_LOAD, uintptr(unsafe.Pointer(&attr)), size)
 - Single value → unavailable. Detail: `"host namespace"`
 - `NSpid` field absent (kernel < 4.1) → unavailable. Detail: `"NSpid not supported"`
 
-**Capability drop probe**: Two checks:
-1. `unix.Capget()` succeeds (can read capabilities)
-2. `unix.Prctl(unix.PR_CAPBSET_READ, 0, 0, 0, 0)` succeeds (can read bounding set, prerequisite for dropping)
+**Capability drop probe**: Three steps:
+1. `unix.Capget()` with `LINUX_CAPABILITY_VERSION_3` succeeds (the V3 buffer is a two-element `CapUserData` array per golang/go#44312; a single-element buffer under-allocates and the kernel writes past the end).
+2. `prctl(PR_CAPBSET_READ, 0)` succeeds (the mechanism for reading/dropping the bounding set is accessible).
+3. The effective capability set from step 1 is compared against the full mask derived from `/proc/sys/kernel/cap_last_cap`. The backend is reported *available* only when at least one capability within `[0, cap_last_cap]` is **cleared** — i.e. the process is running with fewer privileges than the kernel maximum.
 
-If both succeed → available. Detail: `"capget+prctl"`. Otherwise → unavailable with the failing syscall as detail. Note: this is a stronger check than the previous stub (`return true`) because `prctl(PR_CAPBSET_READ)` can fail in some container runtimes.
+Detail: `"N/M caps dropped"` when active, `"process retains full CapEff (M/M caps)"` when a root-equivalent process has not dropped anything. If `/proc/sys/kernel/cap_last_cap` cannot be read (pre-2.6.25 kernels, restricted procfs), the probe falls back to the previous permissive behaviour (syscall check only) with detail `"cap_last_cap unavailable; mechanism check only"` so those environments do not silently regress.
+
+This is a behavioural check, not an infrastructure check: it answers "is capability-drop actually protecting this process?" rather than "does capability-drop exist on this kernel?". Issue #198 reported the previous infrastructure-only probe marking the backend active for a server running as root with `CapEff=0x1ffffffffff` (all 41 caps) — a false positive that the behavioural check eliminates. Bits above `cap_last_cap` are ignored so that kernel quirks (phantom high bits) cannot mask a genuine drop of a low capability.
 
 All probes are fast, side-effect-free, and run at detection time.
 
@@ -259,7 +262,7 @@ The flat `Capabilities` map is still populated for backward compatibility with J
 | `cgroups_v2` | cgroups-v2 backend available |
 | `ptrace` | ptrace backend available |
 | `pid_namespace` | pid-namespace backend available |
-| `capabilities_drop` | capability-drop backend available |
+| `capabilities_drop` | capability-drop backend active (process has dropped ≥1 capability) |
 | `file_enforcement` | File Protection domain active backend |
 
 The `Domains` field is the new structured representation.
