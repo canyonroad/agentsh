@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	keyringlib "github.com/zalando/go-keyring"
@@ -23,9 +24,19 @@ import (
 // for any in-flight Fetch to finish before returning, so the
 // contract "after Close returns, Fetch returns an error" holds
 // even under concurrent access.
+//
+// Concurrency design:
+//   - closed is an atomic flag checked lock-free on the Fetch
+//     fast path. This preserves closed-provider error precedence
+//     over context cancellation even while Close is queued behind
+//     an in-flight Fetch on the RWMutex.
+//   - mu is an RWMutex held for read by Fetch for its entire
+//     duration (including the backend call) and for write by
+//     Close. The write lock ensures Close waits for any in-flight
+//     Fetch to finish before returning.
 type Provider struct {
 	mu     sync.RWMutex
-	closed bool
+	closed atomic.Bool
 }
 
 // probeService and probeAccount name the sentinel entry the
@@ -80,6 +91,14 @@ func (p *Provider) Name() string { return "keyring" }
 // any Fetch attempted AFTER Close returns will see the closed
 // flag and return the error.
 func (p *Provider) Fetch(ctx context.Context, ref secrets.SecretRef) (secrets.SecretValue, error) {
+	// Lock-free closed check first, so a closed provider always
+	// reports ErrKeyringUnavailable regardless of the caller's
+	// context state. This preserves the documented precedence:
+	// closed beats canceled.
+	if p.closed.Load() {
+		return secrets.SecretValue{}, fmt.Errorf("%w: provider closed", secrets.ErrKeyringUnavailable)
+	}
+
 	// Honor an already-canceled context before we try to acquire
 	// the mutex. If Close is pending behind a slow keyringlib.Get,
 	// waiters for RLock may queue behind the exclusive writer; a
@@ -90,9 +109,6 @@ func (p *Provider) Fetch(ctx context.Context, ref secrets.SecretRef) (secrets.Se
 
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if p.closed {
-		return secrets.SecretValue{}, fmt.Errorf("%w: provider closed", secrets.ErrKeyringUnavailable)
-	}
 
 	if ref.Scheme != "keyring" {
 		return secrets.SecretValue{}, fmt.Errorf("%w: wrong scheme %q", secrets.ErrInvalidURI, ref.Scheme)
@@ -135,9 +151,15 @@ func (p *Provider) Fetch(ctx context.Context, ref secrets.SecretRef) (secrets.Se
 // Close marks the provider closed. Subsequent Fetch calls return a
 // wrapped secrets.ErrKeyringUnavailable. Idempotent. The OS keyring
 // has no per-connection state to release.
+//
+// Close sets the atomic closed flag before acquiring the exclusive
+// write lock. The flag makes new fast-path Fetch calls fail
+// immediately; the write lock then blocks until every in-flight
+// Fetch (holding an RLock) has finished, so the caller of Close
+// sees a fully quiesced provider on return.
 func (p *Provider) Close() error {
+	p.closed.Store(true)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.closed = true
 	return nil
 }
