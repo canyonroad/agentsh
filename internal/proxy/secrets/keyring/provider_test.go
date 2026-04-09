@@ -270,3 +270,57 @@ func TestProvider_ConcurrentFetch_NoRaces(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestProvider_ConcurrentFetchAndClose_NoRaces drives the
+// Fetch-vs-Close contention path that TestProvider_ConcurrentFetch_NoRaces
+// does not exercise: that test only races readers against readers.
+// This one races several Fetch goroutines against one Close call
+// so the race detector can observe the RWMutex writer-vs-readers
+// transition. After the wait, the provider is fully closed, and
+// any subsequent Fetch must report wrapped ErrKeyringUnavailable.
+//
+// The Close goroutine waits briefly so some fetches are already
+// in flight, but we do NOT assert which fetches returned what —
+// any given Fetch may have completed before Close, been rejected
+// by the atomic fast path, or raced Close to the RWMutex. The
+// only load-bearing post-condition is that Fetch after the wait
+// reports the closed sentinel.
+func TestProvider_ConcurrentFetchAndClose_NoRaces(t *testing.T) {
+	p := skipIfUnavailable(t)
+	ref := secrets.SecretRef{
+		Scheme: "keyring",
+		Host:   testServiceName(t),
+		Path:   "nonexistent-user",
+	}
+
+	var wg sync.WaitGroup
+	const goroutines = 8
+	const iterations = 100
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_, _ = p.Fetch(context.Background(), ref)
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Small delay so some fetches are in flight before we
+		// start shutdown. Exact ordering is not load-bearing —
+		// the race detector is what we care about.
+		time.Sleep(time.Millisecond)
+		_ = p.Close()
+	}()
+
+	wg.Wait()
+
+	_, err := p.Fetch(context.Background(), ref)
+	if !errors.Is(err, secrets.ErrKeyringUnavailable) {
+		t.Errorf("post-Close Fetch = %v, want wrapping ErrKeyringUnavailable", err)
+	}
+}
