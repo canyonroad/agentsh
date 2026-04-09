@@ -945,15 +945,19 @@ import secrets "github.com/agentsh/agentsh/internal/proxy/secrets"
 
 // Config configures the keyring provider.
 //
-// Currently empty: every keyring entry is identified entirely by
-// its SecretRef (host = service, path = user). A later plan may
-// add fields like a default service prefix or a per-OS backend
-// selector.
-type Config struct{}
-
-// providerConfig implements the sealed secrets.ProviderConfig
-// marker interface.
-func (Config) providerConfig() {}
+// Config satisfies secrets.ProviderConfig by embedding
+// secrets.ProviderConfigMarker. The marker embedding is the only
+// way for a type outside package secrets to satisfy the sealed
+// ProviderConfig interface, because Go qualifies unexported method
+// identities by their declaring package.
+//
+// Apart from the embedded marker, Config is currently empty: every
+// keyring entry is identified entirely by its SecretRef (host =
+// service, path = user). A later plan may add fields like a default
+// service prefix or a per-OS backend selector.
+type Config struct {
+	secrets.ProviderConfigMarker
+}
 
 // Compile-time assertions. These fail to build if Provider or
 // Config ever drift away from the interfaces they're expected to
@@ -963,6 +967,8 @@ var (
 	_ secrets.SecretProvider = (*Provider)(nil)
 )
 ```
+
+**Note on the marker embedding:** `secrets.ProviderConfigMarker` is an exported zero-size struct defined in the parent `secrets` package. It has a method `providerConfig()` whose identity lives in package `secrets`; embedding promotes that method onto `Config` with the correct package identity, which is what satisfies the sealed `secrets.ProviderConfig` interface. Do NOT declare a `providerConfig()` method directly on `Config` — it would belong to package `keyring`, not `secrets`, and would not satisfy the interface.
 
 - [ ] **Step 3: Write the failing test for `New`**
 
@@ -2162,7 +2168,7 @@ Run through this list after Task 10 completes:
 
 4. **The test helper lives in `secretstest`, not in `secrets`.** Functions defined in `secrets/provider_test.go` (a `_test.go` file) are not visible from the `keyring` subpackage. The `ProviderContract` helper MUST live in `secretstest/contract.go` (non-`_test.go`) so it can be imported from `keyring/provider_test.go`. This plan does it right; do not "helpfully" move it later.
 
-5. **The sealed `ProviderConfig` marker interface uses a lowercase method.** If you make `providerConfig()` uppercase to silence a linter, you have broken the seal — any package can now implement it. Keep it lowercase.
+5. **`secrets.ProviderConfig` is satisfied via `secrets.ProviderConfigMarker` embedding, not by declaring a local `providerConfig()` method.** Go qualifies unexported method identities by their declaring package, so `func (keyring.Config) providerConfig() {}` creates a method whose identity lives in package `keyring`, not `secrets` — it will NOT satisfy `secrets.ProviderConfig`. The correct pattern is to embed `secrets.ProviderConfigMarker` inside your Config struct; method promotion gives you a `providerConfig()` method anchored in package `secrets`. If a linter flags `ProviderConfigMarker`'s embedded zero-size field as "unused", do NOT remove it — the embedding IS what satisfies the interface.
 
 6. **The URI parser rejects query strings by design.** `keyring://agentsh/token?version=2` returns `ErrInvalidURI`. A future version may accept a query string for some providers — that change is non-breaking. Accepting them now and removing support later WOULD be breaking.
 
