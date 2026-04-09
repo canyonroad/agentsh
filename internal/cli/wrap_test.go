@@ -133,6 +133,8 @@ type mockWrapClient struct {
 	wrapInitErr     error
 	createSessCalled bool
 	getSessionCalled bool
+	getSessionFn     func(ctx context.Context, id string) (types.Session, error)
+	createSessionFn  func(ctx context.Context, req types.CreateSessionRequest) (types.Session, error)
 }
 
 // Ensure mockWrapClient implements CLIClient at compile time.
@@ -153,6 +155,10 @@ func (m *mockWrapClient) CreateSessionWithID(ctx context.Context, id, workspace,
 	return types.Session{ID: id}, nil
 }
 func (m *mockWrapClient) CreateSessionWithRequest(ctx context.Context, req types.CreateSessionRequest) (types.Session, error) {
+	m.createSessCalled = true
+	if m.createSessionFn != nil {
+		return m.createSessionFn(ctx, req)
+	}
 	return types.Session{}, nil
 }
 func (m *mockWrapClient) ListSessions(ctx context.Context) ([]types.Session, error) {
@@ -160,6 +166,9 @@ func (m *mockWrapClient) ListSessions(ctx context.Context) ([]types.Session, err
 }
 func (m *mockWrapClient) GetSession(ctx context.Context, id string) (types.Session, error) {
 	m.getSessionCalled = true
+	if m.getSessionFn != nil {
+		return m.getSessionFn(ctx, id)
+	}
 	return types.Session{ID: id}, nil
 }
 func (m *mockWrapClient) DestroySession(ctx context.Context, id string) error    { return nil }
