@@ -22,6 +22,38 @@ func TestCheckSupport_ReturnsStatus(t *testing.T) {
 	}
 }
 
+// TestCheckSupport_DoesNotRejectMissingBpfInControllers is a regression
+// test for a pre-existing bug where CheckSupport called
+// strings.Contains(cgroup.controllers, "bpf") and returned
+// "cgroup bpf controller not available" on any system — because BPF is
+// not a cgroup v2 resource controller (cgroup.controllers lists cpuset,
+// cpu, io, memory, pids, rdma, …; "bpf" never appears). This caused
+// detect to report eBPF as unavailable everywhere and silently skipped
+// the integration tests that would have caught #196.
+//
+// We assert the fix by reading the live cgroup.controllers file (on any
+// Linux host it will NOT contain "bpf"), and then verifying that the
+// Reason returned by CheckSupport is not the broken one. On this host,
+// CheckSupport may still return a different unsupported reason
+// (e.g. missing CAP_BPF, missing BTF) — that's fine; we only guard
+// against the regression where the bogus controller check reappears.
+func TestCheckSupport_DoesNotRejectMissingBpfInControllers(t *testing.T) {
+	data, err := os.ReadFile("/sys/fs/cgroup/cgroup.controllers")
+	if err != nil {
+		t.Skipf("cgroup v2 not available: %v", err)
+	}
+	if strings.Contains(string(data), "bpf") {
+		// Extremely unlikely — no known Linux kernel lists "bpf" as a
+		// cgroup v2 resource controller. If this ever becomes true, the
+		// regression this test guards against no longer applies.
+		t.Skipf("cgroup.controllers contains %q on this host: %q", "bpf", string(data))
+	}
+	status := CheckSupport()
+	if !status.Supported && status.Reason == "cgroup bpf controller not available" {
+		t.Fatalf("CheckSupport regressed: reported %q on a host whose cgroup.controllers=%q — BPF is not a cgroup v2 resource controller, so that check must not gate eBPF support", status.Reason, strings.TrimSpace(string(data)))
+	}
+}
+
 // TestCapBitSet is a regression test for a bug where the word-selection
 // logic in hasCap only read the low 32 bits of the effective capability
 // mask and returned false for any capability >= bit 32. That includes

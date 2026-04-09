@@ -24,12 +24,25 @@ func CheckSupport() SupportStatus {
 		return SupportStatus{Supported: false, Reason: "not linux"}
 	}
 
+	// cgroup v2 must be mounted. cgroup.controllers is the canonical marker
+	// — cgroup v1 hierarchies do not expose it at the unified mount point.
+	//
+	// We intentionally do NOT grep this file for "bpf": BPF is not a
+	// cgroup v2 resource controller. cgroup.controllers enumerates
+	// resource controllers (cpu, memory, io, pids, cpuset, …) as defined
+	// in include/linux/cgroup_subsys.h; none of them is "bpf". cgroup BPF
+	// programs are attached via BPF_PROG_ATTACH/BPF_LINK_CREATE, gated by
+	// the CONFIG_CGROUP_BPF kernel build option. There is no runtime file
+	// that directly advertises CONFIG_CGROUP_BPF, so callers rely on the
+	// BPF_PROG_LOAD canary in probeEBPF — loading a
+	// BPF_PROG_TYPE_CGROUP_SOCK_ADDR program implicitly fails on kernels
+	// without CGROUP_BPF support. The previous "strings.Contains(…, \"bpf\")"
+	// check was a dead-man's switch: it never passed on any Linux system
+	// (including CI runners), which caused CheckSupport to report
+	// "cgroup bpf controller not available" universally and silently
+	// skipped the integration tests that would have caught #196.
 	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err != nil {
 		return SupportStatus{Supported: false, Reason: "cgroup v2 not available"}
-	}
-	controllers, _ := os.ReadFile("/sys/fs/cgroup/cgroup.controllers")
-	if !strings.Contains(string(controllers), "bpf") {
-		return SupportStatus{Supported: false, Reason: "cgroup bpf controller not available"}
 	}
 
 	if _, err := os.Stat("/sys/kernel/btf/vmlinux"); err != nil {
