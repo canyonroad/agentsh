@@ -51,7 +51,7 @@ Within each domain, multiple backends can provide coverage. The domain score is 
 
 | Backend | Detection Method | Enables |
 |---------|-----------------|---------|
-| eBPF | `BPF_PROG_LOAD` syscall with `BPF_PROG_TYPE_CGROUP_SKB` (see section 3 for details) | cgroup-level network monitoring |
+| eBPF | `BPF_PROG_LOAD` syscall with `BPF_PROG_TYPE_SOCKET_FILTER` (see section 3 for details) | cgroup-level network monitoring |
 | Landlock network | Landlock ABI >= 4 (from existing probe) | Kernel-level TCP bind/connect filtering |
 
 **Resource Limits** (15 pts)
@@ -72,14 +72,15 @@ Within each domain, multiple backends can provide coverage. The domain score is 
 Replace four stubs with actual probes:
 
 **eBPF probe**: Construct a minimal `bpf_attr` struct for `BPF_PROG_LOAD`:
-- `prog_type`: `BPF_PROG_TYPE_CGROUP_SKB` (13)
-- `insns`: pointer to a single `BPF_EXIT` instruction (2 bytes: `0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00`)
-- `insn_cnt`: 1
-- `license`: pointer to `"GPL\0"` (required by kernel for cgroup programs)
+- `prog_type`: `BPF_PROG_TYPE_SOCKET_FILTER` (1) — the lowest-privilege program type
+- `insns`: pointer to a 2-instruction canary: `r0 = 0; exit;` (16 bytes: `0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00`). A lone `BPF_EXIT` is rejected by the verifier with `EACCES` because r0 (the return-value register) is uninitialized.
+- `insn_cnt`: 2
+- `license`: pointer to `"GPL\0"`
 
 Call `unix.Syscall(SYS_BPF, BPF_PROG_LOAD, uintptr(unsafe.Pointer(&attr)), size)`. Classify result:
-- Valid fd → available (close immediately). Detail: `"cgroup_skb"`
-- `EPERM` → unavailable. Detail: `"EPERM (missing CAP_BPF)"`
+- Valid fd → available (close immediately). Detail: `"socket_filter"`
+- `EPERM` → unavailable. Detail: `"EPERM (missing CAP_BPF/CAP_SYS_ADMIN or unprivileged_bpf_disabled)"`
+- `EACCES` → unavailable. Detail: `"EACCES (BPF verifier rejected canary)"`
 - `ENOSYS` → unavailable. Detail: `"ENOSYS (kernel too old)"`
 - Other error → unavailable. Detail: the error string
 
@@ -122,7 +123,7 @@ COMMAND CONTROL                                    25/25
   active backend:    seccomp-execve
 
 NETWORK                                            20/20
-  ebpf               ✓  cgroup_skb       network monitoring
+  ebpf               ✓  socket_filter    network monitoring
   landlock-network   ✓  ABI v4+          TCP bind/connect filtering
 
 RESOURCE LIMITS                                    0/15

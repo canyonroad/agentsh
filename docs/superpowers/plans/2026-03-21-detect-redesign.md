@@ -237,10 +237,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// probeEBPF checks if BPF cgroup_skb programs can be loaded.
+// probeEBPF checks if BPF socket_filter programs can be loaded.
 func probeEBPF() ProbeResult {
-	// Minimal BPF program: single BPF_EXIT instruction
-	insn := [8]byte{0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	// Minimal verifier-accepted BPF program: r0 = 0; exit;
+	// A lone BPF_EXIT is rejected by the verifier because r0 is uninitialized.
+	insn := [16]byte{
+		0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r0 = 0
+		0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
+	}
 	license := [4]byte{'G', 'P', 'L', 0}
 
 	// bpf_attr for BPF_PROG_LOAD
@@ -256,8 +260,8 @@ func probeEBPF() ProbeResult {
 	}
 
 	attr := bpfProgLoadAttr{
-		progType: 13, // BPF_PROG_TYPE_CGROUP_SKB
-		insnCnt:  1,
+		progType: 1, // BPF_PROG_TYPE_SOCKET_FILTER (lowest-privilege canary)
+		insnCnt:  2,
 		insns:    uint64(uintptr(unsafe.Pointer(&insn[0]))),
 		license:  uint64(uintptr(unsafe.Pointer(&license[0]))),
 	}
@@ -270,11 +274,13 @@ func probeEBPF() ProbeResult {
 	)
 	if errno == 0 {
 		unix.Close(int(fd))
-		return ProbeResult{Available: true, Detail: "cgroup_skb"}
+		return ProbeResult{Available: true, Detail: "socket_filter"}
 	}
 	switch errno {
 	case unix.EPERM:
-		return ProbeResult{Available: false, Detail: "EPERM (missing CAP_BPF)"}
+		return ProbeResult{Available: false, Detail: "EPERM (missing CAP_BPF/CAP_SYS_ADMIN or unprivileged_bpf_disabled)"}
+	case unix.EACCES:
+		return ProbeResult{Available: false, Detail: "EACCES (BPF verifier rejected canary)"}
 	case unix.ENOSYS:
 		return ProbeResult{Available: false, Detail: "ENOSYS (kernel too old)"}
 	default:

@@ -767,6 +767,40 @@ func TestProbeEBPF(t *testing.T) {
 	assert.NotEmpty(t, result.Detail)
 }
 
+// TestProbeEBPFCanary is a regression test for #196. The original probe used
+// a single BPF_EXIT instruction with uninitialized r0, which the BPF verifier
+// rejects with EACCES even on systems where eBPF is fully functional. It also
+// used progType=13 with a comment claiming BPF_PROG_TYPE_CGROUP_SKB, but
+// value 13 is actually BPF_PROG_TYPE_SOCK_OPS — and both of those types need
+// more privileges than BPF_PROG_TYPE_SOCKET_FILTER. This test locks in the
+// corrected canary so the bug cannot be reintroduced.
+func TestProbeEBPFCanary(t *testing.T) {
+	// BPF_PROG_TYPE_SOCKET_FILTER = 1 — the lowest-privilege program type.
+	assert.Equal(t, uint32(1), probeEBPFCanaryProgType,
+		"canary must use BPF_PROG_TYPE_SOCKET_FILTER (1), not a higher-privilege type")
+
+	// Two 8-byte instructions: r0=0, exit.
+	assert.Equal(t, uint32(2), probeEBPFCanaryInsnCnt,
+		"canary must be 2 instructions (r0=0; exit) — a lone BPF_EXIT is rejected by the verifier")
+	assert.Len(t, probeEBPFCanaryInsns, 16,
+		"canary must be 16 bytes (2 instructions * 8 bytes each)")
+
+	// First instruction: BPF_ALU64 | BPF_MOV | BPF_K, dst=r0, imm=0 → opcode 0xb7.
+	assert.Equal(t, byte(0xb7), probeEBPFCanaryInsns[0],
+		"first instruction opcode must be 0xb7 (r0 = 0)")
+
+	// Second instruction: BPF_JMP | BPF_EXIT → opcode 0x95.
+	assert.Equal(t, byte(0x95), probeEBPFCanaryInsns[8],
+		"second instruction opcode must be 0x95 (exit)")
+
+	// On systems where the probe succeeds, the detail must identify the
+	// canary program type (not "cgroup_skb", which was the buggy label).
+	result := probeEBPF()
+	if result.Available {
+		assert.Equal(t, "socket_filter", result.Detail)
+	}
+}
+
 func TestProbeCgroupsV2(t *testing.T) {
 	result := probeCgroupsV2()
 	assert.NotEmpty(t, result.Detail)
