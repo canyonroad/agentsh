@@ -617,6 +617,96 @@ func TestZero_AllowsReuse(t *testing.T) {
 	}
 }
 
+func TestContainsFake_FoundInBody(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake1234567890abcdef"), []byte("ghp_real1234567890abcdef")); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"token": "ghp_fake1234567890abcdef", "other": "data"}`)
+	entry, found := tb.ContainsFake(body)
+	if !found {
+		t.Fatal("ContainsFake should find fake in body")
+	}
+	if entry.ServiceName != "github" {
+		t.Errorf("ServiceName = %q, want %q", entry.ServiceName, "github")
+	}
+}
+
+func TestContainsFake_NotFound(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake1234567890abcdef"), []byte("ghp_real1234567890abcdef")); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"token": "something_else_entirely!!"}`)
+	_, found := tb.ContainsFake(body)
+	if found {
+		t.Error("ContainsFake should not find fake in unrelated body")
+	}
+}
+
+func TestContainsFake_EmptyBody(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake1234567890abcdef"), []byte("ghp_real1234567890abcdef")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, found := tb.ContainsFake(nil)
+	if found {
+		t.Error("ContainsFake on nil body should return false")
+	}
+
+	_, found = tb.ContainsFake([]byte{})
+	if found {
+		t.Error("ContainsFake on empty body should return false")
+	}
+}
+
+func TestContainsFake_EmptyTable(t *testing.T) {
+	tb := New()
+	body := []byte("ghp_fake1234567890abcdef")
+	_, found := tb.ContainsFake(body)
+	if found {
+		t.Error("ContainsFake on empty table should return false")
+	}
+}
+
+func TestContainsFake_MultipleEntries_FindsFirst(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake1234567890abcdef"), []byte("ghp_real1234567890abcdef")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tb.Add("openai", []byte("sk-fake567890abcdef123456"), []byte("sk-real567890abcdef123456")); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`both: ghp_fake1234567890abcdef and sk-fake567890abcdef123456`)
+	entry, found := tb.ContainsFake(body)
+	if !found {
+		t.Fatal("ContainsFake should find a fake")
+	}
+	if entry.ServiceName != "github" {
+		t.Errorf("ServiceName = %q, want %q", entry.ServiceName, "github")
+	}
+}
+
+func TestContainsFake_ReturnsCopy(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake1234567890abcdef"), []byte("ghp_real1234567890abcdef")); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte("ghp_fake1234567890abcdef")
+	entry, _ := tb.ContainsFake(body)
+
+	entry.Fake[0] = 'X'
+	entry2, _ := tb.ContainsFake(body)
+	if entry2.Fake[0] == 'X' {
+		t.Error("ContainsFake should return deep copies")
+	}
+}
+
 func TestConcurrentAccess_NoRaces(t *testing.T) {
 	// This test is primarily for `go test -race` to detect data
 	// races. It exercises Add, FakeForService, Contains,

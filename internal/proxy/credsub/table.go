@@ -151,6 +151,39 @@ func (t *Table) Contains(fake []byte) (Entry, bool) {
 	return Entry{}, false
 }
 
+// ContainsFake scans data for any registered fake as a substring.
+// Unlike Contains (which requires an exact match), ContainsFake
+// uses bytes.Contains to detect fakes embedded in larger payloads
+// such as JSON request bodies.
+//
+// Returns the first matching entry (deep-copied) and true if a fake
+// is found; returns a zero Entry and false otherwise. When multiple
+// entries match, the first one registered wins.
+func (t *Table) ContainsFake(data []byte) (Entry, bool) {
+	if len(data) == 0 {
+		return Entry{}, false
+	}
+
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	for _, e := range t.entries {
+		if bytes.Contains(data, e.Fake) {
+			fakeCopy := make([]byte, len(e.Fake))
+			copy(fakeCopy, e.Fake)
+			realCopy := make([]byte, len(e.Real))
+			copy(realCopy, e.Real)
+			return Entry{
+				ServiceName: e.ServiceName,
+				Fake:        fakeCopy,
+				Real:        realCopy,
+				AddedAt:     e.AddedAt,
+			}, true
+		}
+	}
+	return Entry{}, false
+}
+
 // ReplaceFakeToReal returns a copy of body with every occurrence of
 // every registered fake replaced by its matching real. If body
 // contains no registered fake, the original slice is returned
