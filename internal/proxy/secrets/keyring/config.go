@@ -18,6 +18,10 @@ type Config struct {
 	secrets.ProviderConfigMarker
 }
 
+// TypeName returns "keyring". Used by the registry to map
+// keyring:// URI scheme refs to this provider.
+func (Config) TypeName() string { return "keyring" }
+
 // Compile-time assertions. These fail to build if Provider or
 // Config ever drift away from the interfaces they're expected to
 // satisfy.

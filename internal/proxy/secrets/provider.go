@@ -112,9 +112,19 @@ func (sv *SecretValue) Zero() {
 }
 
 // ProviderConfig is the marker interface that every provider's
-// config struct must satisfy. The registry — to be added in a
-// later plan — type-switches on ProviderConfig to dispatch to the
-// right constructor at policy-load time.
+// config struct must satisfy. The registry type-switches on
+// ProviderConfig to dispatch to the right constructor at
+// policy-load time.
+//
+// TypeName returns the provider type name, which doubles as the
+// URI scheme this provider handles (e.g. "vault", "keyring").
+// Each config MUST implement TypeName explicitly — there is no
+// default on ProviderConfigMarker.
+//
+// Dependencies returns the SecretRefs that must be resolved from
+// other providers before this provider can be constructed (auth
+// chaining). Providers with no dependencies inherit the default
+// nil return from ProviderConfigMarker.
 //
 // Types outside package secrets satisfy ProviderConfig by
 // embedding ProviderConfigMarker. Embedding is required because
@@ -132,6 +142,8 @@ func (sv *SecretValue) Zero() {
 // about.
 type ProviderConfig interface {
 	providerConfig()
+	TypeName() string
+	Dependencies() []SecretRef
 }
 
 // ProviderConfigMarker is a zero-size struct that provider config
@@ -148,3 +160,9 @@ type ProviderConfig interface {
 type ProviderConfigMarker struct{}
 
 func (ProviderConfigMarker) providerConfig() {}
+
+// Dependencies returns nil. Providers with no auth chaining
+// inherit this default. Providers that need auth chaining (e.g.
+// Vault with a keyring-backed token) override this method on
+// their own Config type.
+func (ProviderConfigMarker) Dependencies() []SecretRef { return nil }

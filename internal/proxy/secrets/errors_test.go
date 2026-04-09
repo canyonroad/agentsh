@@ -14,6 +14,7 @@ func TestSentinelErrors_AreDistinct(t *testing.T) {
 		ErrUnsupportedScheme,
 		ErrFieldNotSupported,
 		ErrKeyringUnavailable,
+		ErrCyclicDependency,
 	}
 	for i, a := range sentinels {
 		for j, b := range sentinels {
@@ -35,6 +36,7 @@ func TestSentinelErrors_AreWrappable(t *testing.T) {
 		"ErrUnsupportedScheme":  ErrUnsupportedScheme,
 		"ErrFieldNotSupported":  ErrFieldNotSupported,
 		"ErrKeyringUnavailable": ErrKeyringUnavailable,
+		"ErrCyclicDependency":   ErrCyclicDependency,
 	}
 	for name, sentinel := range sentinels {
 		wrapped := fmt.Errorf("%w: context detail", sentinel)
@@ -52,6 +54,7 @@ func TestSentinelErrors_MessagesStartWithPrefix(t *testing.T) {
 		ErrUnsupportedScheme,
 		ErrFieldNotSupported,
 		ErrKeyringUnavailable,
+		ErrCyclicDependency,
 	}
 	const prefix = "secrets:"
 	for _, s := range sentinels {

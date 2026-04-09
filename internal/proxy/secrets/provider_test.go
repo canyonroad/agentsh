@@ -62,4 +62,6 @@ type testConfig struct {
 	ProviderConfigMarker
 }
 
+func (testConfig) TypeName() string { return "test" }
+
 var _ ProviderConfig = testConfig{}
