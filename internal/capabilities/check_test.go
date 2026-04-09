@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/stretchr/testify/assert"
@@ -765,6 +766,63 @@ func TestCheckAll_WrapperBinary_CustomPath(t *testing.T) {
 func TestProbeEBPF(t *testing.T) {
 	result := probeEBPF()
 	assert.NotEmpty(t, result.Detail)
+}
+
+// TestProbeEBPFCanary is a regression test for #196. The original probe
+// used a single BPF_EXIT instruction with uninitialized r0, which the BPF
+// verifier rejects with EACCES even on systems where eBPF is fully
+// functional. It also used progType=13 with a comment claiming
+// BPF_PROG_TYPE_CGROUP_SKB, but value 13 is BPF_PROG_TYPE_SOCK_OPS and the
+// real netmonitor loads CGROUP_SOCK_ADDR programs (cgroup/connect*,
+// cgroup/sendmsg*), not skb programs. This test locks in the corrected
+// canary so the bug cannot be reintroduced.
+func TestProbeEBPFCanary(t *testing.T) {
+	// BPF_PROG_TYPE_CGROUP_SOCK_ADDR = 18 — matches the program family the
+	// real netmonitor attaches (cgroup/connect*, cgroup/sendmsg*).
+	assert.Equal(t, uint32(18), probeEBPFCanaryProgType,
+		"canary must use BPF_PROG_TYPE_CGROUP_SOCK_ADDR (18), not SOCK_OPS (13), CGROUP_SKB (8), or SOCKET_FILTER (1)")
+
+	// expected_attach_type is required for CGROUP_SOCK_ADDR — without it
+	// the kernel rejects the load with EINVAL. BPF_CGROUP_INET4_CONNECT is
+	// one of the valid attach types the real netmonitor uses.
+	assert.Equal(t, uint32(10), probeEBPFCanaryExpectedAttachType,
+		"canary must set expected_attach_type to BPF_CGROUP_INET4_CONNECT (10)")
+
+	// Two 8-byte instructions: r0=0, exit.
+	assert.Equal(t, uint32(2), probeEBPFCanaryInsnCnt,
+		"canary must be 2 instructions (r0=0; exit) — a lone BPF_EXIT is rejected by the verifier")
+	assert.Len(t, probeEBPFCanaryInsns, 16,
+		"canary must be 16 bytes (2 instructions * 8 bytes each)")
+
+	// First instruction: BPF_ALU64 | BPF_MOV | BPF_K, dst=r0, imm=0 → opcode 0xb7.
+	assert.Equal(t, byte(0xb7), probeEBPFCanaryInsns[0],
+		"first instruction opcode must be 0xb7 (r0 = 0)")
+
+	// Second instruction: BPF_JMP | BPF_EXIT → opcode 0x95.
+	assert.Equal(t, byte(0x95), probeEBPFCanaryInsns[8],
+		"second instruction opcode must be 0x95 (exit)")
+
+	// Lock in the bpf_attr layout so a future truncation or field reorder
+	// is caught even on hosts where eBPF support is unavailable and the
+	// probeEBPF() call below is short-circuited by ebpf.CheckSupport. The
+	// kernel reads attr_size bytes from userspace; for CGROUP_SOCK_ADDR the
+	// struct MUST extend through expected_attach_type (offset 68, total
+	// size 72). Truncating back to the 48-byte variant reintroduces the
+	// EINVAL failure mode described in the commit message.
+	assert.Equal(t, uintptr(72), unsafe.Sizeof(bpfProgLoadAttr{}),
+		"bpfProgLoadAttr must be 72 bytes — the kernel rejects CGROUP_SOCK_ADDR loads with attr_size < expected_attach_type offset+4")
+	assert.Equal(t, uintptr(68), unsafe.Offsetof(bpfProgLoadAttr{}.expectedAttachType),
+		"expectedAttachType must be at offset 68 — do not reorder fields or add fields before it")
+
+	// On systems where the probe succeeds, the detail must identify the
+	// canary program family. probeEBPF gates the canary behind
+	// ebpf.CheckSupport, so on environments where the check fails,
+	// Available is false and the detail is the reason from CheckSupport
+	// rather than "cgroup_sock_addr".
+	result := probeEBPF()
+	if result.Available {
+		assert.Equal(t, "cgroup_sock_addr", result.Detail)
+	}
 }
 
 func TestProbeCgroupsV2(t *testing.T) {
