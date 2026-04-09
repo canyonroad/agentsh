@@ -38,3 +38,9 @@ var ErrFieldNotSupported = errors.New("secrets: field not supported")
 // error; the operator must either set up the keyring or use a
 // different provider.
 var ErrKeyringUnavailable = errors.New("secrets: keyring unavailable")
+
+// ErrCyclicDependency is returned by NewRegistry when the provider
+// dependency graph contains a cycle. The error message lists all
+// configs that could not be resolved (cycle members and their
+// downstream dependents).
+var ErrCyclicDependency = errors.New("secrets: cyclic provider dependency")
