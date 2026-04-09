@@ -278,3 +278,93 @@ func TestContains_ReturnsCopy(t *testing.T) {
 		t.Errorf("second lookup Real = %q, want %q (Contains leaked internal slice)", again.Real, "ghp_real00000000")
 	}
 }
+
+func TestReplaceFakeToReal_SingleEntryMatches(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	body := []byte(`{"token":"ghp_fake00000000"}`)
+	got := tb.ReplaceFakeToReal(body)
+	want := []byte(`{"token":"ghp_real00000000"}`)
+	if !bytes.Equal(got, want) {
+		t.Errorf("ReplaceFakeToReal = %q, want %q", got, want)
+	}
+}
+
+func TestReplaceFakeToReal_MultipleEntries(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add github failed: %v", err)
+	}
+	if err := tb.Add("stripe", []byte("sk_fake000000000"), []byte("sk_real000000000")); err != nil {
+		t.Fatalf("Add stripe failed: %v", err)
+	}
+	body := []byte(`gh=ghp_fake00000000 stripe=sk_fake000000000`)
+	got := tb.ReplaceFakeToReal(body)
+	want := []byte(`gh=ghp_real00000000 stripe=sk_real000000000`)
+	if !bytes.Equal(got, want) {
+		t.Errorf("ReplaceFakeToReal = %q, want %q", got, want)
+	}
+}
+
+func TestReplaceFakeToReal_MultipleOccurrencesOfSameFake(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	body := []byte(`a=ghp_fake00000000 b=ghp_fake00000000`)
+	got := tb.ReplaceFakeToReal(body)
+	want := []byte(`a=ghp_real00000000 b=ghp_real00000000`)
+	if !bytes.Equal(got, want) {
+		t.Errorf("ReplaceFakeToReal = %q, want %q", got, want)
+	}
+}
+
+func TestReplaceFakeToReal_NoMatch(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	body := []byte(`nothing to substitute here`)
+	got := tb.ReplaceFakeToReal(body)
+	if !bytes.Equal(got, body) {
+		t.Errorf("ReplaceFakeToReal with no match = %q, want %q (unchanged)", got, body)
+	}
+}
+
+func TestReplaceFakeToReal_EmptyBody(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	got := tb.ReplaceFakeToReal(nil)
+	if len(got) != 0 {
+		t.Errorf("ReplaceFakeToReal(nil) = %q, want empty", got)
+	}
+	got = tb.ReplaceFakeToReal([]byte{})
+	if len(got) != 0 {
+		t.Errorf("ReplaceFakeToReal(empty) = %q, want empty", got)
+	}
+}
+
+func TestReplaceFakeToReal_EmptyTable(t *testing.T) {
+	tb := New()
+	body := []byte(`ghp_fake00000000`)
+	got := tb.ReplaceFakeToReal(body)
+	if !bytes.Equal(got, body) {
+		t.Errorf("ReplaceFakeToReal on empty table = %q, want %q (unchanged)", got, body)
+	}
+}
+
+func TestReplaceFakeToReal_PreservesLength(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	body := []byte(`{"a":"ghp_fake00000000","b":"x"}`)
+	got := tb.ReplaceFakeToReal(body)
+	if len(got) != len(body) {
+		t.Errorf("ReplaceFakeToReal changed body length: got %d want %d", len(got), len(body))
+	}
+}

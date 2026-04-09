@@ -150,3 +150,33 @@ func (t *Table) Contains(fake []byte) (Entry, bool) {
 	}
 	return Entry{}, false
 }
+
+// ReplaceFakeToReal returns a copy of body with every occurrence of
+// every registered fake replaced by its matching real. The returned
+// slice may or may not alias body; callers must treat it as the
+// authoritative result.
+//
+// Substitution is done per-entry using bytes.ReplaceAll. Order of
+// entries is not semantically meaningful because Add enforces that no
+// entry's fake or real can exactly equal any other entry's fake or
+// real, so no double-substitution can occur across entries.
+//
+// Complexity: O(N · |body|) where N is the number of entries.
+func (t *Table) ReplaceFakeToReal(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	if len(t.entries) == 0 {
+		return body
+	}
+
+	result := body
+	for _, e := range t.entries {
+		result = bytes.ReplaceAll(result, e.Fake, e.Real)
+	}
+	return result
+}
