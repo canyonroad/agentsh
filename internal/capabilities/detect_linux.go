@@ -152,6 +152,18 @@ func backwardCompatCaps(caps *SecurityCapabilities, domains []ProtectionDomain) 
 	if _, ok := m["fuse_mount_method"]; !ok {
 		m["fuse_mount_method"] = "none"
 	}
+
+	// Enrich the cgroups_v2 view with probe details (issue #197).
+	if p := LastCgroupProbe(); p != nil {
+		m["cgroups_v2_mode"] = string(p.Mode)
+		m["cgroups_v2_reason"] = p.Reason
+		m["cgroups_v2_own_cgroup"] = p.OwnCgroup
+		if p.SliceDir != "" {
+			m["cgroups_v2_slice_dir"] = p.SliceDir
+		}
+		m["cgroups_v2_io_available"] = p.IOAvailable
+	}
+
 	return m
 }
 

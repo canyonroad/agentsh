@@ -52,6 +52,9 @@ func CurrentCgroupDir() (string, error) {
 	return filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(p, "/")), nil
 }
 
+// Deprecated: Use CgroupManager.Apply instead. ApplyCgroupV2 does not probe the
+// cgroup hierarchy and silently discards enableControllers errors. It is retained
+// only for callers that have not yet migrated (limiter_linux.go, platform/linux).
 func ApplyCgroupV2(parentDir string, name string, pid int, lim CgroupV2Limits) (*CgroupV2, error) {
 	if pid <= 0 {
 		return nil, fmt.Errorf("invalid pid %d", pid)
@@ -168,17 +171,33 @@ func sanitizeCgroupName(s string) string {
 	return out
 }
 
+// enableControllers writes "+<ctrl>" to parentDir/cgroup.subtree_control for each
+// controller in ctrls. On the first write failure it returns a wrapped
+// *EnableControllersError; on success it returns nil. This is a change from
+// prior behavior, which silently continued past per-controller errors and
+// masked delegation issues (issue #197).
 func enableControllers(parentDir string, ctrls []string) error {
+	return enableControllersFS(osCgroupFS{}, parentDir, ctrls)
+}
+
+func enableControllersFS(fsys cgroupFS, parentDir string, ctrls []string) error {
 	path := filepath.Join(parentDir, "cgroup.subtree_control")
-	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	f, err := fsys.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
-		return err
+		return &EnableControllersError{
+			ParentDir:  parentDir,
+			Controller: "*",
+			Err:        err,
+		}
 	}
 	defer f.Close()
 	for _, c := range ctrls {
 		if _, err := f.WriteString("+" + c); err != nil {
-			// Ignore EBUSY etc; best effort.
-			continue
+			return &EnableControllersError{
+				ParentDir:  parentDir,
+				Controller: c,
+				Err:        err,
+			}
 		}
 	}
 	return nil

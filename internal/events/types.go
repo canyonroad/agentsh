@@ -129,6 +129,13 @@ const (
 	EventPolicyChanged EventType = "policy_changed"
 )
 
+// Cgroup v2 probe and enforcement events (see issue #197).
+const (
+	EventCgroupMode               EventType = "cgroup_mode"
+	EventCgroupOrphansReaped      EventType = "cgroup_orphans_reaped"
+	EventCgroupUnavailableRefusal EventType = "cgroup_unavailable_refusal"
+)
+
 // PolicyLoadedEvent is emitted when a policy is loaded.
 type PolicyLoadedEvent struct {
 	PolicyName    string `json:"policy_name"`
@@ -245,6 +252,11 @@ var EventCategory = map[EventType]string{
 	// Policy
 	EventPolicyLoaded:  "policy",
 	EventPolicyChanged: "policy",
+
+	// Cgroup
+	EventCgroupMode:               "cgroup",
+	EventCgroupOrphansReaped:      "cgroup",
+	EventCgroupUnavailableRefusal: "cgroup",
 }
 
 // AllEventTypes lists all event types.
@@ -285,4 +297,6 @@ var AllEventTypes = []EventType{
 	EventPackageApproved, EventPackageWarning, EventProviderError,
 	// Policy
 	EventPolicyLoaded, EventPolicyChanged,
+	// Cgroup
+	EventCgroupMode, EventCgroupOrphansReaped, EventCgroupUnavailableRefusal,
 }

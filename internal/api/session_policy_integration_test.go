@@ -76,7 +76,7 @@ func TestExecInSessionCore_PrecheckConsultsSessionPolicy(t *testing.T) {
 	broker := events.NewBroker()
 
 	cfg := &config.Config{}
-	app := NewApp(cfg, mgr, store, globalEngine, broker, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, globalEngine, broker, nil, nil, nil, nil, nil, nil)
 
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
@@ -172,7 +172,7 @@ func newSessionPolicyFixture(t *testing.T) *sessionPolicyFixture {
 	broker := events.NewBroker()
 
 	cfg := &config.Config{}
-	app := NewApp(cfg, mgr, store, globalEngine, broker, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, globalEngine, broker, nil, nil, nil, nil, nil, nil)
 
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
@@ -558,7 +558,7 @@ func TestPolicyTest_HonorsSessionID(t *testing.T) {
 	store := composite.New(captured, nil)
 	broker := events.NewBroker()
 	cfg := &config.Config{}
-	app := NewApp(cfg, mgr, store, globalEngine, broker, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, globalEngine, broker, nil, nil, nil, nil, nil, nil)
 
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {
@@ -661,7 +661,7 @@ func TestGRPCPolicyTest_HonorsSessionID(t *testing.T) {
 	store := composite.New(captured, nil)
 	broker := events.NewBroker()
 	cfg := &config.Config{}
-	app := NewApp(cfg, mgr, store, globalEngine, broker, nil, nil, nil, nil, nil)
+	app := NewApp(cfg, mgr, store, globalEngine, broker, nil, nil, nil, nil, nil, nil)
 
 	s, err := mgr.Create(t.TempDir(), "default")
 	if err != nil {

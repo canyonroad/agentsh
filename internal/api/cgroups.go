@@ -2,14 +2,14 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/cilium/ebpf"
 
-	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/limits"
 	"github.com/agentsh/agentsh/internal/metrics"
 	ebpftrace "github.com/agentsh/agentsh/internal/netmonitor/ebpf"
@@ -18,7 +18,8 @@ import (
 	"github.com/google/uuid"
 )
 
-func applyCgroupV2(ctx context.Context, emit storeEmitter, cfg *config.Config, sessionID, cmdID string, pid int, lim policy.Limits, m *metrics.Collector, pol *policy.Engine) (func() error, error) {
+func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, cmdID string, pid int, lim policy.Limits, m *metrics.Collector, pol *policy.Engine) (func() error, error) {
+	cfg := app.cfg
 	if cfg == nil || !cfg.Sandbox.Cgroups.Enabled {
 		return nil, nil
 	}
@@ -28,23 +29,47 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, cfg *config.Config, s
 	ebpfEnforce := cfg.Sandbox.Network.EBPF.Enforce
 	enforceNoDNS := cfg.Sandbox.Network.EBPF.EnforceWithoutDNS
 
-	parent := strings.TrimSpace(cfg.Sandbox.Cgroups.BasePath)
-	if parent != "" && !filepath.IsAbs(parent) {
-		if cur, err := limits.CurrentCgroupDir(); err == nil {
-			parent = filepath.Join(cur, parent)
-		}
-	}
-
 	memBytes := int64(0)
 	if lim.MaxMemoryMB > 0 {
 		memBytes = int64(lim.MaxMemoryMB) * 1024 * 1024
 	}
-	cg, err := limits.ApplyCgroupV2(parent, "agentsh-"+sanitizeCgroupTag(sessionID)+"-"+sanitizeCgroupTag(cmdID), pid, limits.CgroupV2Limits{
+	cgLimits := limits.CgroupV2Limits{
 		MaxMemoryBytes: memBytes,
 		CPUQuotaPct:    lim.CPUQuotaPercent,
 		PidsMax:        lim.PidsMax,
-	})
+	}
+
+	if app.cgroupMgr == nil {
+		if cgLimits.IsEmpty() {
+			return func() error { return nil }, nil
+		}
+		return nil, &limits.CgroupUnavailableError{
+			Reason: "cgroup manager not initialized",
+			Limits: cgLimits,
+		}
+	}
+
+	cg, err := app.cgroupMgr.Apply("agentsh-"+sanitizeCgroupTag(sessionID)+"-"+sanitizeCgroupTag(cmdID), pid, cgLimits)
 	if err != nil {
+		var ue *limits.CgroupUnavailableError
+		if errors.As(err, &ue) {
+			ev := types.Event{
+				ID:        uuid.NewString(),
+				Timestamp: time.Now().UTC(),
+				Type:      string(events.EventCgroupUnavailableRefusal),
+				SessionID: sessionID,
+				CommandID: cmdID,
+				Fields: map[string]any{
+					"reason":        ue.Reason,
+					"max_memory_mb": lim.MaxMemoryMB,
+					"cpu_quota_pct": lim.CPUQuotaPercent,
+					"pids_max":      lim.PidsMax,
+				},
+			}
+			_ = emit.AppendEvent(ctx, ev)
+			emit.Publish(ev)
+			return nil, err
+		}
 		ev := types.Event{
 			ID:        uuid.NewString(),
 			Timestamp: time.Now().UTC(),
@@ -60,6 +85,11 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, cfg *config.Config, s
 		return nil, err
 	}
 
+	// If unavailable mode allowed us (empty limits), cg is nil. Treat as no-op.
+	if cg == nil {
+		return func() error { return nil }, nil
+	}
+
 	ev := types.Event{
 		ID:        uuid.NewString(),
 		Timestamp: time.Now().UTC(),
@@ -67,11 +97,11 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, cfg *config.Config, s
 		SessionID: sessionID,
 		CommandID: cmdID,
 		Fields: map[string]any{
-			"path":           cg.Path,
-			"max_memory_mb":  lim.MaxMemoryMB,
-			"cpu_quota_pct":  lim.CPUQuotaPercent,
-			"pids_max":       lim.PidsMax,
-			"base_path_used": parent,
+			"path":          cg.Path,
+			"mode":          string(app.cgroupMgr.Probe().Mode),
+			"max_memory_mb": lim.MaxMemoryMB,
+			"cpu_quota_pct": lim.CPUQuotaPercent,
+			"pids_max":      lim.PidsMax,
 		},
 	}
 	_ = emit.AppendEvent(ctx, ev)

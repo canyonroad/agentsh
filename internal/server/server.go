@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -25,6 +26,7 @@ import (
 	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
+	limitspkg "github.com/agentsh/agentsh/internal/limits"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/pkgcheck"
@@ -409,7 +411,45 @@ func New(cfg *config.Config) (*Server, error) {
 		cfg.Policies.Dir, enforceApprovals, true,
 		cfg.Policies.Signing.SigningMode(), cfg.Policies.Signing.TrustStore,
 	)
-	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, oidcAuth, approvalsMgr, metricsCollector, policyLoader)
+
+	var cgroupMgr *limitspkg.CgroupManager
+	if runtime.GOOS == "linux" {
+		mgr, err := limitspkg.NewCgroupManager(context.Background(), cfg.Sandbox.Cgroups.BasePath)
+		if err != nil {
+			slog.Warn("cgroup v2 probe failed; per-command limits unavailable", "error", err)
+		} else {
+			cgroupMgr = mgr
+			modeEvent := types.Event{
+				ID:        uuid.NewString(),
+				Timestamp: time.Now().UTC(),
+				Type:      string(events.EventCgroupMode),
+				Fields: map[string]any{
+					"mode":         string(mgr.Probe().Mode),
+					"reason":       mgr.Probe().Reason,
+					"own_cgroup":   mgr.Probe().OwnCgroup,
+					"slice_dir":    mgr.Probe().SliceDir,
+					"io_available": mgr.Probe().IOAvailable,
+				},
+			}
+			_ = store.AppendEvent(context.Background(), modeEvent)
+			broker.Publish(modeEvent)
+			if reaped := mgr.Probe().OrphansReaped; len(reaped) > 0 {
+				reapEvent := types.Event{
+					ID:        uuid.NewString(),
+					Timestamp: time.Now().UTC(),
+					Type:      string(events.EventCgroupOrphansReaped),
+					Fields: map[string]any{
+						"count": len(reaped),
+						"names": reaped,
+					},
+				}
+				_ = store.AppendEvent(context.Background(), reapEvent)
+				broker.Publish(reapEvent)
+			}
+		}
+	}
+
+	app := api.NewApp(cfg, sessions, store, engine, broker, apiKeyAuth, oidcAuth, approvalsMgr, metricsCollector, policyLoader, cgroupMgr)
 	appCloser := app.Close // ensure cleanup on error paths below
 	defer func() {
 		if appCloser != nil {

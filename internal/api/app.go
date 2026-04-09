@@ -18,6 +18,7 @@ import (
 	"github.com/agentsh/agentsh/internal/auth"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
+	"github.com/agentsh/agentsh/internal/limits"
 	"github.com/agentsh/agentsh/internal/mcpinspect"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 	"github.com/agentsh/agentsh/internal/metrics"
@@ -48,6 +49,8 @@ type App struct {
 	store    *composite.Store
 	policy   *policy.Engine
 	broker   *events.Broker
+
+	cgroupMgr *limits.CgroupManager // issue #197: per-process cgroup manager, nil on non-Linux
 
 	apiKeyAuth *auth.APIKeyAuth
 	oidcAuth   *auth.OIDCAuth
@@ -87,7 +90,7 @@ type App struct {
 	}
 }
 
-func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader) *App {
+func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Store, engine *policy.Engine, broker *events.Broker, apiKeyAuth *auth.APIKeyAuth, oidcAuth *auth.OIDCAuth, approvalsMgr *approvals.Manager, metricsCollector *metrics.Collector, policyLoader PolicyLoader, cgroupMgr *limits.CgroupManager) *App {
 	// Apply EBPF map size overrides once per process (global maps); no-op if zero values.
 	ebpftrace.SetMapSizeOverrides(
 		uint32(cfg.Sandbox.Network.EBPF.MapAllowEntries),
@@ -114,6 +117,7 @@ func NewApp(cfg *config.Config, sessions *session.Manager, store *composite.Stor
 		store:        store,
 		policy:       engine,
 		broker:       broker,
+		cgroupMgr:    cgroupMgr,
 		apiKeyAuth:   apiKeyAuth,
 		oidcAuth:     oidcAuth,
 		approvals:    approvalsMgr,
@@ -824,7 +828,7 @@ func (a *App) cgroupHook(sessionID string, cmdID string, limits policy.Limits) p
 	}
 	return func(pid int) (func() error, error) {
 		em := storeEmitter{store: a.store, broker: a.broker}
-		return applyCgroupV2(context.Background(), em, a.cfg, sessionID, cmdID, pid, limits, a.metrics, a.policy)
+		return applyCgroupV2(context.Background(), em, a, sessionID, cmdID, pid, limits, a.metrics, a.policy)
 	}
 }
 
