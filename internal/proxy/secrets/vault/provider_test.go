@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -444,6 +445,96 @@ func TestClose_Idempotent(t *testing.T) {
 	}
 	if err := p.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Auth error mapping tests (HTTP 400 → ErrUnauthorized)
+// ---------------------------------------------------------------------------
+
+func TestNew_TokenAuth_LookupSelf_400(t *testing.T) {
+	// Server returns 400 on lookup-self to simulate an invalid token.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/token/lookup-self" {
+			writeVaultError(w, http.StatusBadRequest, "missing client token")
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	cfg := Config{
+		Address: srv.URL,
+		Auth:    AuthConfig{Method: "token", Token: "bad-token"},
+	}
+	_, err := New(context.Background(), cfg, noopResolver)
+	if err == nil {
+		t.Fatal("expected error for 400 lookup-self")
+	}
+	if !errors.Is(err, secrets.ErrUnauthorized) {
+		t.Errorf("error = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestNew_AppRoleAuth_400(t *testing.T) {
+	// Server returns 400 on approle login (bad role_id/secret_id).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/approle/login" {
+			writeVaultError(w, http.StatusBadRequest, "invalid role or secret ID")
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	cfg := Config{
+		Address: srv.URL,
+		Auth: AuthConfig{
+			Method:   "approle",
+			RoleID:   "bad-role",
+			SecretID: "bad-secret",
+		},
+	}
+	_, err := New(context.Background(), cfg, noopResolver)
+	if err == nil {
+		t.Fatal("expected error for 400 approle login")
+	}
+	if !errors.Is(err, secrets.ErrUnauthorized) {
+		t.Errorf("error = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestNew_KubernetesAuth_400(t *testing.T) {
+	// Server returns 400 on kubernetes login (bad JWT).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/kubernetes/login" {
+			writeVaultError(w, http.StatusBadRequest, "invalid JWT")
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	// Create a temp file for the service account token.
+	tokenFile := t.TempDir() + "/token"
+	if err := os.WriteFile(tokenFile, []byte("fake-jwt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{
+		Address: srv.URL,
+		Auth: AuthConfig{
+			Method:        "kubernetes",
+			KubeRole:      "my-role",
+			KubeTokenPath: tokenFile,
+		},
+	}
+	_, err := New(context.Background(), cfg, noopResolver)
+	if err == nil {
+		t.Fatal("expected error for 400 kubernetes login")
+	}
+	if !errors.Is(err, secrets.ErrUnauthorized) {
+		t.Errorf("error = %v, want ErrUnauthorized", err)
 	}
 }
 
