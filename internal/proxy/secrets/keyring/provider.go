@@ -62,16 +62,14 @@ func (p *Provider) Close() error {
 }
 
 // Fetch is the stub implementation — Task 6 replaces the body
-// with the real validation and round-trip logic. The signature
-// matches secrets.SecretProvider so the compile-time assertion
-// in config.go (var _ secrets.SecretProvider = (*Provider)(nil))
-// passes from this task onward.
+// with the real validation and round-trip logic. Until then the
+// stub returns ErrKeyringUnavailable wrapped with a descriptive
+// message, so callers get a wrappable sentinel per the
+// SecretProvider contract rather than a raw string error.
 //
-// Calling the stub is a programming error: it means the provider
-// was wired into a live flow before Task 6 landed. Panicking
-// makes that failure loud instead of propagating a string-compared
-// error that violates the wrappable-sentinel contract in
-// secrets.SecretProvider.
+// The signature matches secrets.SecretProvider so the
+// compile-time assertion in config.go (var _ secrets.SecretProvider
+// = (*Provider)(nil)) passes from this task onward.
 func (p *Provider) Fetch(_ context.Context, _ secrets.SecretRef) (secrets.SecretValue, error) {
-	panic("keyring: Fetch not yet implemented — Task 6 replaces this stub")
+	return secrets.SecretValue{}, fmt.Errorf("%w: Fetch not yet implemented (Task 6)", secrets.ErrKeyringUnavailable)
 }

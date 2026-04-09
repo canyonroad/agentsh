@@ -1,6 +1,7 @@
 package keyring
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -37,5 +38,16 @@ func TestName_ReturnsKeyring(t *testing.T) {
 	p := &Provider{}
 	if got := p.Name(); got != "keyring" {
 		t.Errorf("Name() = %q, want %q", got, "keyring")
+	}
+}
+
+func TestFetch_StubReturnsWrappedSentinel(t *testing.T) {
+	p := &Provider{}
+	_, err := p.Fetch(context.Background(), secrets.SecretRef{})
+	if err == nil {
+		t.Fatal("Fetch stub returned nil error; expected a sentinel-wrapped error")
+	}
+	if !errors.Is(err, secrets.ErrKeyringUnavailable) {
+		t.Errorf("Fetch stub error not wrappable to ErrKeyringUnavailable: %v", err)
 	}
 }
