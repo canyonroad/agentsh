@@ -97,11 +97,8 @@ func StartLLMProxy(
 		return p.Stop(ctx)
 	}
 
-	// Store in session
-	sess.SetLLMProxy(proxyURL, closeFn)
-	sess.SetProxyInstance(p)
-
 	// Bootstrap credentials and register hooks if services are configured.
+	// Done BEFORE storing on session so a failure leaves no stale state.
 	if len(services) > 0 && secretsFetcher != nil {
 		table, secretsCleanup, err := BootstrapCredentials(ctx, secretsFetcher, services)
 		if err != nil {
@@ -118,6 +115,10 @@ func StartLLMProxy(
 		sess.SetCredsTable(table, secretsCleanup)
 		LogSecretsInitialized(logger, sess.ID, len(services))
 	}
+
+	// Store in session only after all setup (including bootstrap) succeeds.
+	sess.SetLLMProxy(proxyURL, closeFn)
+	sess.SetProxyInstance(p)
 
 	return proxyURL, closeFn, nil
 }

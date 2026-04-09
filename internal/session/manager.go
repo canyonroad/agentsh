@@ -522,6 +522,9 @@ func (s *Session) LLMProxyURL() string {
 }
 
 // CloseLLMProxy closes the LLM proxy.
+// Stops the proxy first (waiting for in-flight requests to drain),
+// then zeros the credential table. This ordering ensures hooks see
+// a populated table for the duration of any in-flight request.
 func (s *Session) CloseLLMProxy() error {
 	s.mu.Lock()
 	fn := s.llmProxyClose
@@ -533,13 +536,15 @@ func (s *Session) CloseLLMProxy() error {
 	s.credsTable = nil
 	s.secretsClose = nil
 	s.mu.Unlock()
+	// Stop proxy first so in-flight requests finish with a populated table.
+	var proxyErr error
+	if fn != nil {
+		proxyErr = fn()
+	}
 	if secretsFn != nil {
 		secretsFn()
 	}
-	if fn != nil {
-		return fn()
-	}
-	return nil
+	return proxyErr
 }
 
 func (s *Session) SetNetNS(name string, closeFn func() error) {
