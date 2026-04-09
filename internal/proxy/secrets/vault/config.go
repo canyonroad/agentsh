@@ -76,5 +76,5 @@ type AuthConfig struct {
 // Compile-time assertion that Config satisfies ProviderConfig.
 var _ secrets.ProviderConfig = Config{}
 
-// Note: The SecretProvider compile-time assertion for *Provider will be
-// added in Task 5 when Provider is defined.
+// Compile-time assertion that *Provider satisfies SecretProvider.
+var _ secrets.SecretProvider = (*Provider)(nil)

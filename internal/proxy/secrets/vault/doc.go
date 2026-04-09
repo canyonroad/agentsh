@@ -10,9 +10,9 @@
 // the KV data map.
 //
 // The vault/api KV v2 helper adds the "data/" prefix internally.
-// If a URI path starts with "data/", the provider strips it and
-// logs a warning (common mistake when copying from the raw Vault
-// HTTP API).
+// If a URI path starts with "data/", the provider strips it for
+// compatibility with the parent spec format (e.g.
+// vault://kv/data/github → vault://kv/github).
 //
 // OpenBao is a wire-compatible Vault fork. This provider works
 // with OpenBao by pointing Address at the OpenBao server. No code
