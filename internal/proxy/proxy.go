@@ -372,7 +372,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			var abortErr *HookAbortError
 			if errors.As(err, &abortErr) {
 				code := abortErr.StatusCode
-				if code < 100 || code > 599 {
+				if code < 400 || code > 599 {
 					code = http.StatusBadGateway
 				}
 				http.Error(w, abortErr.Message, code)
