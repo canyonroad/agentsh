@@ -21,8 +21,10 @@
 1. **Length preservation:** `len(fake) == len(real)`. This is required for the future Mechanism B in-place `bpf_probe_write_user` rewrite, and it keeps the proxy from having to recompute Content-Length on every substitution. Violation → `ErrLengthMismatch`.
 2. **Nonempty:** neither `fake` nor `real` may be zero-length. A zero-length pattern would match every position in any body. Violation → `ErrEmptyValue`.
 3. **Unique service name:** a service name may be registered only once per Table. Violation → `ErrServiceExists`.
-4. **Unique fake:** the same fake byte sequence may not appear twice in the table. Violation → `ErrFakeCollision`.
-5. **No fake↔real crossover:** the new fake must not exactly equal any existing entry's real, and the new real must not exactly equal any existing entry's fake. Otherwise substitution would double-swap. Violation → `ErrFakeCollision`.
+4. **Fake ≠ real within the same call:** the new fake must not equal the new real. If they were equal the agent would see the real credential as its fake — exactly the leak the table is supposed to prevent. Violation → `ErrFakeCollision`.
+5. **Unique fake:** the same fake byte sequence may not appear twice in the table. Violation → `ErrFakeCollision`.
+6. **Unique real:** the same real byte sequence may not appear twice in the table. Two services sharing the same upstream credential would make `ReplaceRealToFake` ambiguous (the real value would always be rewritten to whichever fake was registered first, returning the wrong service token to the agent). Violation → `ErrFakeCollision`.
+7. **No fake↔real crossover:** the new fake must not exactly equal any existing entry's real, and the new real must not exactly equal any existing entry's fake. Otherwise substitution would double-swap. Violation → `ErrFakeCollision`.
 
 We do NOT enforce "no substring containment" at Add time. The caller (future session-start flow) is responsible for generating fakes with enough entropy (spec mandates ≥24 random base62 chars) that accidental substring collisions are astronomically unlikely. Document this in the package doc comment.
 
@@ -308,11 +310,12 @@ Append to `internal/proxy/credsub/table.go`:
 ```go
 // Add registers a (fake, real) substitution pair for a named service.
 //
-// Add enforces these invariants:
-//   - len(fake) == len(real) (see ErrLengthMismatch)
+// In this task Add enforces only the basic shape invariants:
 //   - both slices are nonempty (see ErrEmptyValue)
-//   - serviceName is not already registered (see ErrServiceExists)
-//   - fake does not collide with any existing entry (see ErrFakeCollision)
+//   - len(fake) == len(real) (see ErrLengthMismatch)
+//
+// Collision detection (service uniqueness, fake/real collisions, and
+// fake==real same-call) is added in the next task.
 //
 // Add COPIES the input slices. Callers may mutate or zero their
 // copies after Add returns.
@@ -416,6 +419,38 @@ func TestAdd_RealEqualsExistingFake(t *testing.T) {
 	}
 }
 
+func TestAdd_FakeEqualsRealSameCall(t *testing.T) {
+	// If a single Add call passes the same bytes for both fake and
+	// real, the agent would see the real credential as its fake —
+	// exactly the leak the table is supposed to prevent.
+	tb := New()
+	err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_fake00000000"))
+	if !errors.Is(err, ErrFakeCollision) {
+		t.Errorf("fake==real same-call Add returned %v, want ErrFakeCollision", err)
+	}
+	if got := tb.Len(); got != 0 {
+		t.Errorf("Len() = %d, want 0 (self-collision must not be appended)", got)
+	}
+}
+
+func TestAdd_DuplicateReal(t *testing.T) {
+	// Two services with the same real credential makes
+	// ReplaceRealToFake ambiguous: the real value would always be
+	// rewritten to whichever fake was registered first, returning the
+	// wrong service token to the agent.
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("aaaaaaaaaaaaaaaa")); err != nil {
+		t.Fatalf("first Add failed: %v", err)
+	}
+	err := tb.Add("gitlab", []byte("glpat_fake000000"), []byte("aaaaaaaaaaaaaaaa"))
+	if !errors.Is(err, ErrFakeCollision) {
+		t.Errorf("duplicate real Add returned %v, want ErrFakeCollision", err)
+	}
+	if got := tb.Len(); got != 1 {
+		t.Errorf("Len() = %d, want 1 (duplicate real must not be appended)", got)
+	}
+}
+
 func TestAdd_CallerMutationDoesNotAffectTable(t *testing.T) {
 	tb := New()
 	fake := []byte("ghp_fake00000000")
@@ -467,8 +502,10 @@ Replace the `Add` method body in `internal/proxy/credsub/table.go` with:
 // Add enforces these invariants:
 //   - len(fake) == len(real) (see ErrLengthMismatch)
 //   - both slices are nonempty (see ErrEmptyValue)
+//   - fake != real within the same call (see ErrFakeCollision)
 //   - serviceName is not already registered (see ErrServiceExists)
-//   - fake does not collide with any existing entry (see ErrFakeCollision)
+//   - fake or real does not collide with any existing entry's fake or
+//     real (see ErrFakeCollision)
 //
 // Add COPIES the input slices. Callers may mutate or zero their
 // copies after Add returns.
@@ -478,6 +515,9 @@ func (t *Table) Add(serviceName string, fake, real []byte) error {
 	}
 	if len(fake) != len(real) {
 		return ErrLengthMismatch
+	}
+	if bytes.Equal(fake, real) {
+		return ErrFakeCollision
 	}
 
 	t.mu.Lock()
@@ -494,6 +534,9 @@ func (t *Table) Add(serviceName string, fake, real []byte) error {
 			return ErrFakeCollision
 		}
 		if bytes.Equal(e.Fake, real) {
+			return ErrFakeCollision
+		}
+		if bytes.Equal(e.Real, real) {
 			return ErrFakeCollision
 		}
 	}
@@ -1358,7 +1401,7 @@ After all tasks complete, confirm the package satisfies the Section 4 spec:
 - [ ] `credsub.Table` has `New`, `Add`, `FakeForService`, `Contains`, `ReplaceFakeToReal`, `ReplaceRealToFake`, `Zero`.
 - [ ] `Entry` has `ServiceName`, `Fake`, `Real`, `AddedAt`.
 - [ ] Length preservation enforced at `Add` → `ErrLengthMismatch`.
-- [ ] Collision detection at `Add` → `ErrFakeCollision` for duplicate fake, fake=real, real=fake cases.
+- [ ] Collision detection at `Add` → `ErrFakeCollision` for: fake==real same call, duplicate fake, duplicate real, fake==existing real, real==existing fake.
 - [ ] Service name uniqueness enforced → `ErrServiceExists`.
 - [ ] `Add` copies input slices (caller mutation test passes).
 - [ ] `Zero` wipes byte buffers (verified via retained slice reference).
