@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/stretchr/testify/assert"
@@ -800,6 +801,18 @@ func TestProbeEBPFCanary(t *testing.T) {
 	// Second instruction: BPF_JMP | BPF_EXIT → opcode 0x95.
 	assert.Equal(t, byte(0x95), probeEBPFCanaryInsns[8],
 		"second instruction opcode must be 0x95 (exit)")
+
+	// Lock in the bpf_attr layout so a future truncation or field reorder
+	// is caught even on hosts where eBPF support is unavailable and the
+	// probeEBPF() call below is short-circuited by ebpf.CheckSupport. The
+	// kernel reads attr_size bytes from userspace; for CGROUP_SOCK_ADDR the
+	// struct MUST extend through expected_attach_type (offset 68, total
+	// size 72). Truncating back to the 48-byte variant reintroduces the
+	// EINVAL failure mode described in the commit message.
+	assert.Equal(t, uintptr(72), unsafe.Sizeof(bpfProgLoadAttr{}),
+		"bpfProgLoadAttr must be 72 bytes — the kernel rejects CGROUP_SOCK_ADDR loads with attr_size < expected_attach_type offset+4")
+	assert.Equal(t, uintptr(68), unsafe.Offsetof(bpfProgLoadAttr{}.expectedAttachType),
+		"expectedAttachType must be at offset 68 — do not reorder fields or add fields before it")
 
 	// On systems where the probe succeeds, the detail must identify the
 	// canary program family. probeEBPF gates the canary behind

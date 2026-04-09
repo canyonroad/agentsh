@@ -66,12 +66,20 @@ func CheckSupport() SupportStatus {
 // in golang/go#44312 and writes past the end of the user-allocated
 // buffer (the kernel copies 2 * sizeof(CapUserData) regardless).
 func hasCap(cap int) bool {
-	if cap < 0 || cap >= 64 {
-		return false
-	}
 	hdr := &unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
 	var data [2]unix.CapUserData
 	if err := unix.Capget(hdr, &data[0]); err != nil {
+		return false
+	}
+	return capBitSet(data, cap)
+}
+
+// capBitSet is a pure helper that returns whether the given capability bit
+// is set in the V3 effective mask. Split out from hasCap so regression tests
+// can assert the word-selection logic with synthetic data, independent of
+// the current process's capabilities.
+func capBitSet(data [2]unix.CapUserData, cap int) bool {
+	if cap < 0 || cap >= 64 {
 		return false
 	}
 	if cap < 32 {

@@ -22,18 +22,97 @@ func TestCheckSupport_ReturnsStatus(t *testing.T) {
 	}
 }
 
-// TestHasCap_HighBitsMatchProcStatus is a regression test for a bug where
-// hasCap only read the low 32 bits of the effective capability mask and
-// returned false for any capability >= bit 32. That includes CAP_BPF (39)
-// and CAP_PERFMON (38) — which meant CheckSupport could never accept a
-// CAP_BPF-only environment and always fell back to CAP_SYS_ADMIN.
+// TestCapBitSet is a regression test for a bug where the word-selection
+// logic in hasCap only read the low 32 bits of the effective capability
+// mask and returned false for any capability >= bit 32. That includes
+// CAP_PERFMON (38) and CAP_BPF (39) — which meant CheckSupport could never
+// accept a CAP_BPF-only environment and always fell back to CAP_SYS_ADMIN.
 //
-// The source of truth for this process's effective capabilities is
-// /proc/self/status CapEff (a 64-bit hex value). This test asserts that
-// hasCap agrees with CapEff for the specific bits we care about in the
-// eBPF capability check. On distros where the test binary has neither
-// capability, both sides are false — still a valid consistency check.
-func TestHasCap_HighBitsMatchProcStatus(t *testing.T) {
+// Unlike an integration test against /proc/self/status, this test uses
+// synthetic CapUserData values so it reliably exercises the high-word
+// branch on every platform, including CI hosts where CAP_BPF is absent
+// (the buggy version also returned false for absent caps, so such tests
+// couldn't distinguish the fix from the bug).
+func TestCapBitSet(t *testing.T) {
+	cases := []struct {
+		name string
+		data [2]unix.CapUserData
+		cap  int
+		want bool
+	}{
+		{
+			name: "CAP_SYS_ADMIN set in low word",
+			data: [2]unix.CapUserData{{Effective: 1 << uint(unix.CAP_SYS_ADMIN)}, {}},
+			cap:  unix.CAP_SYS_ADMIN,
+			want: true,
+		},
+		{
+			name: "CAP_SYS_ADMIN unset in low word",
+			data: [2]unix.CapUserData{{}, {}},
+			cap:  unix.CAP_SYS_ADMIN,
+			want: false,
+		},
+		{
+			// The buggy pre-fix version read data[0].Effective only and
+			// computed bit (39 & 31) = 7 → returned true when low word had
+			// bit 7 set even though CAP_BPF (39) was absent. Drive all low
+			// bits to force that bug to light up.
+			name: "CAP_BPF unset with all low bits set",
+			data: [2]unix.CapUserData{{Effective: 0xffffffff}, {Effective: 0}},
+			cap:  unix.CAP_BPF,
+			want: false,
+		},
+		{
+			// This is the case the buggy version couldn't represent at all:
+			// the high word is where CAP_BPF lives, and the buggy code
+			// never looked there.
+			name: "CAP_BPF set in high word",
+			data: [2]unix.CapUserData{{}, {Effective: 1 << uint(unix.CAP_BPF-32)}},
+			cap:  unix.CAP_BPF,
+			want: true,
+		},
+		{
+			name: "CAP_PERFMON set in high word",
+			data: [2]unix.CapUserData{{}, {Effective: 1 << uint(unix.CAP_PERFMON-32)}},
+			cap:  unix.CAP_PERFMON,
+			want: true,
+		},
+		{
+			name: "CAP_PERFMON unset with CAP_BPF set in high word",
+			data: [2]unix.CapUserData{{}, {Effective: 1 << uint(unix.CAP_BPF-32)}},
+			cap:  unix.CAP_PERFMON,
+			want: false,
+		},
+		{
+			name: "out-of-range cap (negative)",
+			data: [2]unix.CapUserData{{Effective: 0xffffffff}, {Effective: 0xffffffff}},
+			cap:  -1,
+			want: false,
+		},
+		{
+			name: "out-of-range cap (>= 64)",
+			data: [2]unix.CapUserData{{Effective: 0xffffffff}, {Effective: 0xffffffff}},
+			cap:  64,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := capBitSet(tc.data, tc.cap)
+			if got != tc.want {
+				t.Errorf("capBitSet(%+v, %d) = %v, want %v", tc.data, tc.cap, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHasCap_MatchesProcStatus is a secondary integration check: it verifies
+// hasCap agrees with /proc/self/status CapEff on this host. It cannot
+// distinguish the fixed code from the buggy version (when CAP_BPF is absent
+// both report false), so the deterministic regression lives in
+// TestCapBitSet — this test just confirms the capget syscall path stays
+// consistent with the kernel's own reporting.
+func TestHasCap_MatchesProcStatus(t *testing.T) {
 	capEff, err := readProcCapEff()
 	if err != nil {
 		t.Fatalf("read CapEff: %v", err)
