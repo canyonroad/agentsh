@@ -43,3 +43,39 @@ func (t *Table) Len() int {
 	defer t.mu.RUnlock()
 	return len(t.entries)
 }
+
+// Add registers a (fake, real) substitution pair for a named service.
+//
+// In this task Add enforces only the basic shape invariants:
+//   - both slices are nonempty (see ErrEmptyValue)
+//   - len(fake) == len(real) (see ErrLengthMismatch)
+//
+// Collision detection (service uniqueness, fake/real collisions, and
+// fake==real same-call) is added in the next task.
+//
+// Add COPIES the input slices. Callers may mutate or zero their
+// copies after Add returns.
+func (t *Table) Add(serviceName string, fake, real []byte) error {
+	if len(fake) == 0 || len(real) == 0 {
+		return ErrEmptyValue
+	}
+	if len(fake) != len(real) {
+		return ErrLengthMismatch
+	}
+
+	fakeCopy := make([]byte, len(fake))
+	copy(fakeCopy, fake)
+	realCopy := make([]byte, len(real))
+	copy(realCopy, real)
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.entries = append(t.entries, Entry{
+		ServiceName: serviceName,
+		Fake:        fakeCopy,
+		Real:        realCopy,
+		AddedAt:     time.Now(),
+	})
+	return nil
+}
