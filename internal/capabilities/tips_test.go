@@ -4,6 +4,7 @@ package capabilities
 
 import (
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -127,4 +128,37 @@ func TestLookupTip(t *testing.T) {
 
 	tip2 := lookupTip("nonexistent")
 	assert.Nil(t, tip2)
+}
+
+// TestLookupTip_CapabilityDropSemanticsChanged guards against regressing the
+// capability-drop tip to the pre-#198 text. The old tip said the backend
+// was "unavailable" and told the user to "Run with standard Linux
+// capabilities support" — both wrong under the new probe semantics, where
+// the backend is reported inactive when the process retains full
+// privileges. The correct remediation is to constrain the process's
+// capabilities at startup.
+func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
+	tip := lookupTip("capability-drop")
+	if tip == nil {
+		t.Fatal("capability-drop tip missing")
+	}
+	if strings.Contains(strings.ToLower(tip.Impact), "unavailable") {
+		t.Errorf("capability-drop Impact still says 'unavailable': %q", tip.Impact)
+	}
+	if strings.Contains(tip.Action, "standard Linux capabilities support") {
+		t.Errorf("capability-drop Action still references the old misleading text: %q", tip.Action)
+	}
+	// The new action must mention at least one concrete mechanism for
+	// narrowing the capability set so operators know what to do.
+	wantAny := []string{"CapabilityBoundingSet", "--cap-drop", "DropCapabilities"}
+	var matched bool
+	for _, s := range wantAny {
+		if strings.Contains(tip.Action, s) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		t.Errorf("capability-drop Action should reference a drop mechanism, got %q", tip.Action)
+	}
 }
