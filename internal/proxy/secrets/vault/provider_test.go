@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -516,7 +517,7 @@ func TestNew_KubernetesAuth_400(t *testing.T) {
 	defer srv.Close()
 
 	// Create a temp file for the service account token.
-	tokenFile := t.TempDir() + "/token"
+	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte("fake-jwt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
