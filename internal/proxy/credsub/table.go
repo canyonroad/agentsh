@@ -1,6 +1,7 @@
 package credsub
 
 import (
+	"bytes"
 	"sync"
 	"time"
 )
@@ -46,12 +47,13 @@ func (t *Table) Len() int {
 
 // Add registers a (fake, real) substitution pair for a named service.
 //
-// In this task Add enforces only the basic shape invariants:
-//   - both slices are nonempty (see ErrEmptyValue)
+// Add enforces these invariants:
 //   - len(fake) == len(real) (see ErrLengthMismatch)
-//
-// Collision detection (service uniqueness, fake/real collisions, and
-// fake==real same-call) is added in the next task.
+//   - both slices are nonempty (see ErrEmptyValue)
+//   - fake != real within the same call (see ErrFakeCollision)
+//   - serviceName is not already registered (see ErrServiceExists)
+//   - fake or real does not collide with any existing entry's fake or
+//     real (see ErrFakeCollision)
 //
 // Add COPIES the input slices. Callers may mutate or zero their
 // copies after Add returns.
@@ -62,14 +64,35 @@ func (t *Table) Add(serviceName string, fake, real []byte) error {
 	if len(fake) != len(real) {
 		return ErrLengthMismatch
 	}
+	if bytes.Equal(fake, real) {
+		return ErrFakeCollision
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for _, e := range t.entries {
+		if e.ServiceName == serviceName {
+			return ErrServiceExists
+		}
+		if bytes.Equal(e.Fake, fake) {
+			return ErrFakeCollision
+		}
+		if bytes.Equal(e.Real, fake) {
+			return ErrFakeCollision
+		}
+		if bytes.Equal(e.Fake, real) {
+			return ErrFakeCollision
+		}
+		if bytes.Equal(e.Real, real) {
+			return ErrFakeCollision
+		}
+	}
 
 	fakeCopy := make([]byte, len(fake))
 	copy(fakeCopy, fake)
 	realCopy := make([]byte, len(real))
 	copy(realCopy, real)
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	t.entries = append(t.entries, Entry{
 		ServiceName: serviceName,
