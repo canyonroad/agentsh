@@ -162,16 +162,19 @@ func (w *fakeWriter) WriteString(s string) (int, error) {
 	}
 	w.buf.WriteString(s)
 	// Append to the underlying file content on every write, mimicking
-	// cgroup subtree_control semantics (each write appends a token).
+	// cgroup subtree_control semantics: the kernel stores the controller
+	// name without the leading "+"/"-" prefix.
 	e := w.fs.files[w.path]
 	if e == nil {
 		return 0, &fs.PathError{Op: "write", Path: w.path, Err: syscall.ENOENT}
 	}
+	token := strings.TrimPrefix(s, "+")
+	token = strings.TrimPrefix(token, "-")
 	sep := ""
 	if len(e.content) > 0 && !bytes.HasSuffix(e.content, []byte(" ")) {
 		sep = " "
 	}
-	e.content = append(e.content, []byte(sep+s)...)
+	e.content = append(e.content, []byte(sep+token)...)
 	return len(s), nil
 }
 

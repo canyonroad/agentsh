@@ -40,7 +40,13 @@ func applyCgroupV2(ctx context.Context, emit storeEmitter, app *App, sessionID, 
 	}
 
 	if app.cgroupMgr == nil {
-		return nil, fmt.Errorf("cgroup manager not initialized")
+		if cgLimits.IsEmpty() {
+			return func() error { return nil }, nil
+		}
+		return nil, &limits.CgroupUnavailableError{
+			Reason: "cgroup manager not initialized",
+			Limits: cgLimits,
+		}
 	}
 
 	cg, err := app.cgroupMgr.Apply("agentsh-"+sanitizeCgroupTag(sessionID)+"-"+sanitizeCgroupTag(cmdID), pid, cgLimits)

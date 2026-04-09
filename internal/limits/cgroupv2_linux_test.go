@@ -72,6 +72,29 @@ func TestEnableControllers_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestEnableControllers_OpenFileFailure(t *testing.T) {
+	// When OpenFile itself fails (subtree_control doesn't exist or is inaccessible),
+	// the error should use Controller:"*" and wrap the OS error.
+	f := newFakeCgroupFS()
+	f.seedDir("/sys/fs/cgroup/system.slice/agentsh.service")
+	// Do NOT seed cgroup.subtree_control — OpenFile will return ENOENT.
+
+	err := enableControllersFS(f, "/sys/fs/cgroup/system.slice/agentsh.service", []string{"cpu", "memory", "pids"})
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	var ece *EnableControllersError
+	if !errors.As(err, &ece) {
+		t.Fatalf("expected *EnableControllersError, got %T: %v", err, err)
+	}
+	if ece.Controller != "*" {
+		t.Fatalf("expected Controller='*' for open failure, got %q", ece.Controller)
+	}
+	if !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("expected wrapped ENOENT, got %v", err)
+	}
+}
+
 func TestManagerApply_CreatesAndCleansUp_Integration(t *testing.T) {
 	if !DetectCgroupV2() {
 		t.Skip("cgroup v2 not available")

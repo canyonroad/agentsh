@@ -199,3 +199,34 @@ func TestProbe_IOControllerOptional(t *testing.T) {
 		t.Fatalf("expected io_available=false")
 	}
 }
+
+func TestProbe_AllOrphansPopulated(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
+	// All orphans are populated (active) — none should be reaped.
+	f.seedFile("/sys/fs/cgroup/agentsh.slice/child-A/cgroup.events", "populated 1\nfrozen 0\n")
+	f.seedFile("/sys/fs/cgroup/agentsh.slice/child-B/cgroup.events", "populated 1\nfrozen 0\n")
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeTopLevel {
+		t.Fatalf("mode: got %q, want top-level", res.Mode)
+	}
+	if len(res.OrphansReaped) != 0 {
+		t.Fatalf("expected no orphans reaped, got %v", res.OrphansReaped)
+	}
+	// Both children should still exist.
+	if _, err := f.Stat("/sys/fs/cgroup/agentsh.slice/child-A"); err != nil {
+		t.Fatalf("child-A should still exist: %v", err)
+	}
+	if _, err := f.Stat("/sys/fs/cgroup/agentsh.slice/child-B"); err != nil {
+		t.Fatalf("child-B should still exist: %v", err)
+	}
+}
