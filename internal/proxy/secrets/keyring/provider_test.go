@@ -176,3 +176,43 @@ func TestFetch_AfterCloseReturnsError(t *testing.T) {
 		t.Errorf("Fetch after Close = %v, want wrapping ErrKeyringUnavailable", err)
 	}
 }
+
+// TestFetch_ClosedBetweenLoadAndRLock is the deterministic
+// regression test for the Load()-to-RLock() TOCTOU race. Fetch's
+// fast-path closed check happens before RLock, so a Fetch could
+// see closed=false, be preempted while Close ran to completion
+// (store=true, exclusive Lock/Unlock, return), then resume and
+// acquire RLock cleanly. Without the post-RLock re-check, that
+// stalled Fetch would proceed to the backend while Close had
+// already returned.
+//
+// This test drives the race window directly with testFetchPreLockHook:
+// between the fast-path Load and RLock, the hook calls Close,
+// which runs to completion because no reader holds the mutex.
+// Fetch then proceeds, acquires RLock, and must see closed=true
+// in the re-check and fail with ErrKeyringUnavailable.
+func TestFetch_ClosedBetweenLoadAndRLock(t *testing.T) {
+	p := &Provider{}
+
+	hookRan := false
+	t.Cleanup(func() { testFetchPreLockHook = nil })
+	testFetchPreLockHook = func() {
+		hookRan = true
+		if err := p.Close(); err != nil {
+			t.Errorf("hook Close: %v", err)
+		}
+	}
+
+	ref := secrets.SecretRef{Scheme: "keyring", Host: "agentsh", Path: "x"}
+	_, err := p.Fetch(context.Background(), ref)
+
+	if !hookRan {
+		t.Fatal("testFetchPreLockHook never fired")
+	}
+	if err == nil {
+		t.Fatal("Fetch succeeded despite Close between Load and RLock")
+	}
+	if !errors.Is(err, secrets.ErrKeyringUnavailable) {
+		t.Errorf("Fetch = %v, want wrapping ErrKeyringUnavailable", err)
+	}
+}

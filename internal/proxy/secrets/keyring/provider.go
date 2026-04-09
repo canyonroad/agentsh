@@ -48,6 +48,13 @@ const (
 	probeAccount = "agentsh-keyring-availability-probe"
 )
 
+// testFetchPreLockHook is a test-only seam invoked (when non-nil)
+// between Fetch's fast-path closed check and its RLock acquisition.
+// Tests use it to deterministically simulate the Load()-to-RLock()
+// race by closing the provider at that precise instant. It has no
+// production callers and adds one nil check to the hot path.
+var testFetchPreLockHook func()
+
 // New constructs a keyring Provider.
 //
 // New verifies the OS keyring backend is reachable by issuing one
@@ -107,8 +114,25 @@ func (p *Provider) Fetch(ctx context.Context, ref secrets.SecretRef) (secrets.Se
 		return secrets.SecretValue{}, err
 	}
 
+	// Test seam: see testFetchPreLockHook. Nil in production.
+	if hook := testFetchPreLockHook; hook != nil {
+		hook()
+	}
+
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+
+	// Re-check closed AFTER acquiring RLock to close the
+	// Load()-to-RLock() TOCTOU: a Fetch can see closed=false,
+	// be preempted while Close stores true and runs to completion
+	// (including releasing its exclusive Lock), and then resume
+	// and acquire RLock cleanly. Without this re-check, Close
+	// could return while a stalled Fetch later proceeds to call
+	// the backend. The atomic load after RLock sees the Store,
+	// so we reject the stale Fetch here instead.
+	if p.closed.Load() {
+		return secrets.SecretValue{}, fmt.Errorf("%w: provider closed", secrets.ErrKeyringUnavailable)
+	}
 
 	if ref.Scheme != "keyring" {
 		return secrets.SecretValue{}, fmt.Errorf("%w: wrong scheme %q", secrets.ErrInvalidURI, ref.Scheme)
