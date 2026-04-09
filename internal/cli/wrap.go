@@ -94,29 +94,14 @@ func runWrap(ctx context.Context, cfg *clientConfig, opts wrapOptions) error {
 		}
 	}
 
-	var sessID string
-	var workspaceMount string
-	var llmProxyURL string
-	if opts.sessionID != "" {
-		sess, err := c.GetSession(ctx, opts.sessionID)
-		if err != nil {
-			return fmt.Errorf("get session %s: %w", opts.sessionID, err)
-		}
-		sessID = sess.ID
-		workspaceMount = sess.WorkspaceMount
-		llmProxyURL = sess.LLMProxyURL
-	} else {
-		sess, err := c.CreateSessionWithRequest(ctx, types.CreateSessionRequest{
-			Workspace: workspace,
-			Policy:    opts.policy,
-			Home:      userHomeDir(),
-		})
-		if err != nil {
-			return fmt.Errorf("create session: %w", err)
-		}
-		sessID = sess.ID
-		workspaceMount = sess.WorkspaceMount
-		llmProxyURL = sess.LLMProxyURL
+	sess, err := fetchSessionForWrap(ctx, c, cfg, opts, workspace)
+	if err != nil {
+		return err
+	}
+	sessID := sess.ID
+	workspaceMount := sess.WorkspaceMount
+	llmProxyURL := sess.LLMProxyURL
+	if opts.sessionID == "" {
 		fmt.Fprintf(os.Stderr, "agentsh: session %s created (policy: %s)\n", sessID, opts.policy)
 	}
 
