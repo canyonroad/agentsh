@@ -55,7 +55,9 @@ type SecretRef struct {
 	Host string
 
 	// Path is the URI path with its leading slash trimmed.
-	// Interpreted per-provider.
+	// Interpreted per-provider. Path must not contain a leading
+	// slash; callers that construct SecretRef by hand are
+	// responsible for stripping it.
 	Path string
 
 	// Field is the optional URI fragment (everything after "#").

@@ -57,6 +57,14 @@ func ParseRef(uri string) (SecretRef, error) {
 		return SecretRef{}, fmt.Errorf("%w: userinfo not allowed", ErrInvalidURI)
 	}
 
+	// Reject %2F in the path. RawPath is only populated when the original
+	// path contained escape sequences; if it contains %2F, we cannot
+	// distinguish a literal '/' in a segment name from a path separator,
+	// so we refuse it.
+	if u.RawPath != "" && strings.Contains(strings.ToLower(u.RawPath), "%2f") {
+		return SecretRef{}, fmt.Errorf("%w: literal '/' in path segment (%%2F) not supported", ErrInvalidURI)
+	}
+
 	return SecretRef{
 		Scheme: u.Scheme,
 		Host:   u.Host,
@@ -65,21 +73,28 @@ func ParseRef(uri string) (SecretRef, error) {
 	}, nil
 }
 
-// String renders a SecretRef back to its canonical URI form.
-// ParseRef(r.String()) round-trips for any SecretRef that ParseRef
-// accepts.
+// String renders a SecretRef back to its URI form. It uses net/url's
+// own escaping, so characters that would normally need percent-encoding
+// in the path or fragment (e.g. spaces) are escaped on output.
+//
+// Round-trip property: for any SecretRef produced by ParseRef,
+// ParseRef(r.String()) returns a ref that is semantically equal to r.
+// The literal bytes of r.String() may differ from the original URI
+// (for example, capitalization of hex escapes may change, or an empty
+// fragment may be dropped), but the parsed fields will match.
+//
+// String does not validate the ref: constructing an invalid SecretRef
+// by hand and calling String may produce a URI that ParseRef rejects.
 func (r SecretRef) String() string {
-	var b strings.Builder
-	b.WriteString(r.Scheme)
-	b.WriteString("://")
-	b.WriteString(r.Host)
+	u := url.URL{
+		Scheme: r.Scheme,
+		Host:   r.Host,
+	}
 	if r.Path != "" {
-		b.WriteByte('/')
-		b.WriteString(r.Path)
+		u.Path = "/" + strings.TrimPrefix(r.Path, "/")
 	}
 	if r.Field != "" {
-		b.WriteByte('#')
-		b.WriteString(r.Field)
+		u.Fragment = r.Field
 	}
-	return b.String()
+	return u.String()
 }

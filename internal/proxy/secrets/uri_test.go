@@ -136,25 +136,53 @@ func TestParseRef_PathWithEncodedChars(t *testing.T) {
 	if ref.Path != "data/team a" {
 		t.Errorf("Path = %q, want %q (net/url should have decoded %%20 to space)", ref.Path, "data/team a")
 	}
+	// Round-trip: String() must re-escape the space so ParseRef can
+	// consume its own output and produce the same Path.
+	rendered := ref.String()
+	ref2, err := ParseRef(rendered)
+	if err != nil {
+		t.Fatalf("re-parse of %q error: %v", rendered, err)
+	}
+	if ref2.Path != ref.Path {
+		t.Errorf("round-trip Path mismatch: got %q, want %q", ref2.Path, ref.Path)
+	}
 }
 
-func TestSecretRef_String_RoundTrip(t *testing.T) {
+func TestParseRef_EncodedSlashRejected(t *testing.T) {
 	cases := []string{
-		"keyring://agentsh/vault_token",
-		"vault://kv/data/github#token",
-		"aws-sm://prod/api-keys/anthropic",
-		"op://Personal/Stripe/credential",
+		"vault://kv/data%2Fsecret",
+		"vault://kv/data%2fsecret",
 	}
 	for _, uri := range cases {
 		t.Run(uri, func(t *testing.T) {
-			ref, err := ParseRef(uri)
+			_, err := ParseRef(uri)
+			if !errors.Is(err, ErrInvalidURI) {
+				t.Errorf("ParseRef(%q) = %v, want wrapping ErrInvalidURI", uri, err)
+			}
+		})
+	}
+}
+
+func TestSecretRef_String_RoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		uri  string
+	}{
+		{name: "keyring", uri: "keyring://agentsh/vault_token"},
+		{name: "vault with field", uri: "vault://kv/data/github#token"},
+		{name: "aws-sm", uri: "aws-sm://prod/api-keys/anthropic"},
+		{name: "op", uri: "op://Personal/Stripe/credential"},
+		{name: "ipv6 host with port", uri: "vault://[::1]:8200/data/github#token"},
+		{name: "host with port", uri: "vault://kv:8200/data/github"},
+		{name: "path with space via %20", uri: "vault://kv/data/team%20a#token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ref, err := ParseRef(tc.uri)
 			if err != nil {
-				t.Fatalf("ParseRef(%q) error: %v", uri, err)
+				t.Fatalf("ParseRef(%q) error: %v", tc.uri, err)
 			}
 			got := ref.String()
-			if got != uri {
-				t.Errorf("String() = %q, want %q", got, uri)
-			}
 			// Parse the re-rendered URI and verify field-by-field
 			// equality. SecretRef has a Metadata map[string]string
 			// field which makes the struct not comparable with ==
