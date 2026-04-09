@@ -135,6 +135,11 @@ func mockVaultServer(t *testing.T, expectedToken string, kvData map[string]map[s
 
 		// AppRole login
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/auth/approle/login":
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["role_id"] == "" || body["secret_id"] == "" {
+				writeVaultError(w, http.StatusBadRequest, "missing role_id or secret_id")
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]interface{}{
 				"auth": map[string]interface{}{
 					"client_token": expectedToken,
