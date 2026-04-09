@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"reflect"
 	"sync"
@@ -73,6 +74,20 @@ type Hook interface {
 	// PostHook is called after the upstream response arrives and before
 	// it is returned to the agent.
 	PostHook(*http.Response, *RequestContext) error
+}
+
+// HookAbortError is returned by a PreHook to abort the request with
+// a specific HTTP status code. When the proxy receives this error
+// from ApplyPreHooks, it responds with the given status code and
+// message instead of forwarding the request. Any other error type
+// results in a 502 Bad Gateway.
+type HookAbortError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *HookAbortError) Error() string {
+	return fmt.Sprintf("hook abort %d: %s", e.StatusCode, e.Message)
 }
 
 // Registry stores hooks keyed by service name. It is safe for concurrent

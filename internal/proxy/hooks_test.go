@@ -210,3 +210,22 @@ func (h *callbackHook) PreHook(_ *http.Request, _ *RequestContext) error {
 }
 
 func (h *callbackHook) PostHook(_ *http.Response, _ *RequestContext) error { return nil }
+
+func TestHookAbortError_ErrorString(t *testing.T) {
+	err := &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
+	want := "hook abort 403: credential leak blocked"
+	if got := err.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestHookAbortError_Is(t *testing.T) {
+	var err error = &HookAbortError{StatusCode: 403, Message: "test"}
+	var target *HookAbortError
+	if !errors.As(err, &target) {
+		t.Error("errors.As should match *HookAbortError")
+	}
+	if target.StatusCode != 403 {
+		t.Errorf("StatusCode = %d, want 403", target.StatusCode)
+	}
+}
