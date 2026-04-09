@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -215,4 +216,57 @@ func TestFetch_ClosedBetweenLoadAndRLock(t *testing.T) {
 	if !errors.Is(err, secrets.ErrKeyringUnavailable) {
 		t.Errorf("Fetch = %v, want wrapping ErrKeyringUnavailable", err)
 	}
+}
+
+func TestClose_Idempotent(t *testing.T) {
+	p := &Provider{}
+	if err := p.Close(); err != nil {
+		t.Errorf("first Close error: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Errorf("second Close error: %v", err)
+	}
+}
+
+func TestFetch_AfterClose(t *testing.T) {
+	p := &Provider{}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ref := secrets.SecretRef{Scheme: "keyring", Host: "agentsh", Path: "x"}
+	_, err := p.Fetch(context.Background(), ref)
+	if err == nil {
+		t.Fatal("Fetch after Close returned nil error")
+	}
+}
+
+func TestProvider_ConcurrentFetch_NoRaces(t *testing.T) {
+	// This test skips on headless hosts. Without a reachable OS
+	// keyring, each Fetch would block on the D-Bus timeout and
+	// 800 sequential timeouts would take many minutes. On a host
+	// with a keyring, each Get returns in milliseconds.
+	p := skipIfUnavailable(t)
+	// Use an intentionally absent key so Fetch always exercises
+	// the "ErrNotFound" path. We care about the race detector,
+	// not about the result.
+	ref := secrets.SecretRef{
+		Scheme: "keyring",
+		Host:   testServiceName(t),
+		Path:   "nonexistent-user",
+	}
+
+	var wg sync.WaitGroup
+	const goroutines = 8
+	const iterations = 100
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_, _ = p.Fetch(context.Background(), ref)
+			}
+		}()
+	}
+	wg.Wait()
 }
