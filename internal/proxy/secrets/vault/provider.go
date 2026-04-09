@@ -85,7 +85,7 @@ func New(ctx context.Context, cfg Config, resolver secrets.RefResolver) (*Provid
 		}
 		authSecret, authErr := client.Auth().Login(ctx, appRoleAuth)
 		if authErr != nil {
-			return nil, fmt.Errorf("approle login: %w", mapVaultError(authErr))
+			return nil, fmt.Errorf("approle login: %w", mapAuthError(authErr))
 		}
 		if authSecret == nil || authSecret.Auth == nil {
 			return nil, fmt.Errorf("%w: approle login returned nil auth", secrets.ErrUnauthorized)
@@ -115,7 +115,7 @@ func New(ctx context.Context, cfg Config, resolver secrets.RefResolver) (*Provid
 		}
 		authSecret, authErr := client.Auth().Login(ctx, kubeAuth)
 		if authErr != nil {
-			return nil, fmt.Errorf("kubernetes login: %w", mapVaultError(authErr))
+			return nil, fmt.Errorf("kubernetes login: %w", mapAuthError(authErr))
 		}
 		if authSecret == nil || authSecret.Auth == nil {
 			return nil, fmt.Errorf("%w: kubernetes login returned nil auth", secrets.ErrUnauthorized)
@@ -133,7 +133,7 @@ func New(ctx context.Context, cfg Config, resolver secrets.RefResolver) (*Provid
 		if ownedToken {
 			_ = client.Auth().Token().RevokeSelf("")
 		}
-		return nil, fmt.Errorf("token lookup-self: %w", mapVaultError(err))
+		return nil, fmt.Errorf("token lookup-self: %w", mapAuthError(err))
 	}
 
 	// Clear resolved credential variables. Note: Go strings are immutable,
@@ -395,6 +395,20 @@ func mapVaultError(err error) error {
 		case http.StatusNotFound:
 			return fmt.Errorf("%w: %s", secrets.ErrNotFound, respErr.Error())
 		case http.StatusForbidden:
+			return fmt.Errorf("%w: %s", secrets.ErrUnauthorized, respErr.Error())
+		}
+	}
+	return fmt.Errorf("vault: %w", err)
+}
+
+// mapAuthError is like mapVaultError but also treats HTTP 400 as
+// ErrUnauthorized, since Vault auth endpoints return 400 for bad
+// credentials (e.g. invalid AppRole role_id/secret_id).
+func mapAuthError(err error) error {
+	var respErr *vaultapi.ResponseError
+	if errors.As(err, &respErr) {
+		switch respErr.StatusCode {
+		case http.StatusBadRequest, http.StatusForbidden:
 			return fmt.Errorf("%w: %s", secrets.ErrUnauthorized, respErr.Error())
 		}
 	}
