@@ -68,6 +68,9 @@ type Proxy struct {
 	rateLimiter *mcpinspect.RateLimiterRegistry
 	// llmRateLimiter enforces RPM and TPM limits on LLM API calls.
 	llmRateLimiter *LLMRateLimiter
+	// hookRegistry dispatches pre/post hooks for credential
+	// substitution, leak detection, and other per-request extensions.
+	hookRegistry *Registry
 
 	server   *http.Server
 	listener net.Listener
@@ -131,6 +134,7 @@ func New(cfg Config, storagePath string, logger *slog.Logger) (*Proxy, error) {
 		policy:          newPolicyEvaluator(cfg.MCP),
 		rateLimiter:     newRateLimiter(cfg.MCP),
 		llmRateLimiter:  llmRL,
+		hookRegistry:    NewRegistry(),
 	}, nil
 }
 
@@ -169,6 +173,12 @@ func (p *Proxy) SetRegistry(r *mcpregistry.Registry) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.registry = r
+}
+
+// HookRegistry returns the proxy's hook registry. Callers use this to
+// register Hook implementations that participate in the request pipeline.
+func (p *Proxy) HookRegistry() *Registry {
+	return p.hookRegistry
 }
 
 // SetEventCallback sets a callback that is invoked for each MCP tool call
@@ -347,6 +357,38 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.ContentLength = int64(len(reqBody))
 	}
 
+	// reqCtx is declared here so the ModifyResponse closure captures it.
+	var reqCtx *RequestContext
+
+	// Apply pre-hooks (leak guard, credential substitution).
+	if p.hookRegistry != nil {
+		reqCtx = &RequestContext{
+			RequestID: requestID,
+			SessionID: sessionID,
+			StartTime: startTime,
+			Attrs:     make(map[string]any),
+		}
+		if err := p.hookRegistry.ApplyPreHooks("", r, reqCtx); err != nil {
+			var abortErr *HookAbortError
+			if errors.As(err, &abortErr) {
+				http.Error(w, abortErr.Message, abortErr.StatusCode)
+			} else {
+				p.logger.Error("pre-hook failed", "error", err, "request_id", requestID)
+				http.Error(w, "hook error", http.StatusBadGateway)
+			}
+			return
+		}
+		// Update reqBody to reflect any substitution by hooks.
+		if r.Body != nil {
+			hookBody, readErr := io.ReadAll(r.Body)
+			if readErr == nil {
+				reqBody = hookBody
+				r.Body = io.NopCloser(bytes.NewReader(reqBody))
+				r.ContentLength = int64(len(reqBody))
+			}
+		}
+	}
+
 	// Get upstream URL (may route to ChatGPT for OAuth tokens)
 	upstream := p.getUpstreamForRequest(r, dialect)
 
@@ -405,6 +447,25 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return nil
 				}
 				respBody = body
+			}
+
+			// Apply post-hooks (credential scrubbing).
+			if p.hookRegistry != nil && reqCtx != nil {
+				// Put body back so hooks can read/modify it.
+				resp.Body = io.NopCloser(bytes.NewReader(respBody))
+				resp.ContentLength = int64(len(respBody))
+				if hookErr := p.hookRegistry.ApplyPostHooks("", resp, reqCtx); hookErr != nil {
+					p.logger.Warn("post-hook error", "error", hookErr, "request_id", requestID)
+				}
+				// Re-read body in case a hook replaced it.
+				if resp.Body != nil {
+					hookBody, readErr := io.ReadAll(resp.Body)
+					if readErr == nil {
+						respBody = hookBody
+						resp.Body = io.NopCloser(bytes.NewReader(respBody))
+						resp.ContentLength = int64(len(respBody))
+					}
+				}
 			}
 
 			// MCP tool call interception (non-SSE only; SSE handled by SSEInterceptor).
