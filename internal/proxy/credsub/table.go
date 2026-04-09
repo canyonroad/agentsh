@@ -102,3 +102,21 @@ func (t *Table) Add(serviceName string, fake, real []byte) error {
 	})
 	return nil
 }
+
+// FakeForService returns the fake byte sequence registered for a
+// service. The returned slice is a copy; the caller may retain or
+// mutate it without affecting the Table. Returns (nil, false) if no
+// entry is registered for the given service name.
+func (t *Table) FakeForService(serviceName string) ([]byte, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	for _, e := range t.entries {
+		if e.ServiceName == serviceName {
+			out := make([]byte, len(e.Fake))
+			copy(out, e.Fake)
+			return out, true
+		}
+	}
+	return nil, false
+}

@@ -158,3 +158,44 @@ func TestAdd_CallerMutationDoesNotAffectTable(t *testing.T) {
 		t.Errorf("Table's Real was mutated by caller: got %q", tb.entries[0].Real)
 	}
 }
+
+func TestFakeForService_Found(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	got, ok := tb.FakeForService("github")
+	if !ok {
+		t.Fatal("FakeForService returned ok=false for registered service")
+	}
+	if !bytes.Equal(got, []byte("ghp_fake00000000")) {
+		t.Errorf("FakeForService = %q, want %q", got, "ghp_fake00000000")
+	}
+}
+
+func TestFakeForService_NotFound(t *testing.T) {
+	tb := New()
+	got, ok := tb.FakeForService("nope")
+	if ok {
+		t.Errorf("FakeForService returned ok=true for unknown service, got %q", got)
+	}
+	if got != nil {
+		t.Errorf("FakeForService returned %v, want nil for unknown service", got)
+	}
+}
+
+func TestFakeForService_ReturnsCopy(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	got, _ := tb.FakeForService("github")
+	// Mutate the returned slice; the Table's copy must not change.
+	for i := range got {
+		got[i] = 0
+	}
+	again, _ := tb.FakeForService("github")
+	if !bytes.Equal(again, []byte("ghp_fake00000000")) {
+		t.Errorf("second lookup = %q, want %q (Table leaked internal slice)", again, "ghp_fake00000000")
+	}
+}
