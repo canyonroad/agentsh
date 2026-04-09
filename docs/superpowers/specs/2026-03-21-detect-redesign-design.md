@@ -98,11 +98,31 @@ Call `unix.Syscall(SYS_BPF, BPF_PROG_LOAD, uintptr(unsafe.Pointer(&attr)), size)
 - Single value → unavailable. Detail: `"host namespace"`
 - `NSpid` field absent (kernel < 4.1) → unavailable. Detail: `"NSpid not supported"`
 
-**Capability drop probe**: Two checks:
-1. `unix.Capget()` succeeds (can read capabilities)
-2. `unix.Prctl(unix.PR_CAPBSET_READ, 0, 0, 0, 0)` succeeds (can read bounding set, prerequisite for dropping)
+**Capability drop probe**: Four steps:
+1. `unix.Capget()` with `LINUX_CAPABILITY_VERSION_3` succeeds (the V3 buffer is a two-element `CapUserData` array per golang/go#44312; a single-element buffer under-allocates and the kernel writes past the end).
+2. `prctl(PR_CAPBSET_READ, 0)` succeeds (the mechanism for reading/dropping the bounding set is accessible).
+3. The **permitted** capability set from step 1 is compared against the full mask derived from `/proc/sys/kernel/cap_last_cap`.
+4. The **bounding** set is read bit-by-bit via `PR_CAPBSET_READ` and compared against the same mask. The backend is reported *available* only when either `CapPrm` or `CapBnd` has at least one bit cleared within `[0, cap_last_cap]`.
 
-If both succeed → available. Detail: `"capget+prctl"`. Otherwise → unavailable with the failing syscall as detail. Note: this is a stronger check than the previous stub (`return true`) because `prctl(PR_CAPBSET_READ)` can fail in some container runtimes.
+The `CapEff` set is intentionally **not** consulted: a process can do `capset(eff=0, prm=full)` and instantly restore its effective set on the next syscall, so "CapEff reduced but CapPrm full" is a transient state, not a durable privilege drop. Tracking only the permitted and bounding sets matches the drop mechanisms actually used in the codebase (`PR_CAPBSET_DROP` in `capabilities.DropCapabilities`, systemd `CapabilityBoundingSet=`, `docker --cap-drop=...`).
+
+Detail text:
+- Permitted reduced: `"N/M caps dropped from permitted"`
+- Bounding reduced: `"N/M caps dropped from bounding"`
+- Both reduced: `"N/M dropped (prm) + X/M dropped (bnd)"`
+- Neither reduced: `"process retains full CapPrm and CapBnd (M/M caps)"` → Available=false
+
+Fallbacks:
+1. If `/proc/sys/kernel/cap_last_cap` is unreadable (pre-2.6.25 kernels, restricted procfs), the probe reports Available=true with an explicit caveat so deployments on those environments do not silently regress.
+2. If `PR_CAPBSET_READ` fails during the bit walk (uncommon; some lockdown or seccomp profiles block extended `prctl` args), the probe falls back to the permitted-set check and flags the bounding status as "unknown" in the detail text. This preserves correct reporting in environments where the process dropped its permitted set but bounding reads are blocked.
+
+This is a behavioural check, not an infrastructure check: it answers "is capability-drop actually protecting this process?" rather than "does capability-drop exist on this kernel?". Issue #198 reported the previous infrastructure-only probe marking the backend active for a server running as root with `CapEff=0x1ffffffffff` (all 41 caps) — a false positive that the behavioural check eliminates. Bits above `cap_last_cap` are ignored so that kernel quirks (phantom high bits) cannot mask a genuine drop of a low capability.
+
+**Mechanism vs. active — separate fields:** Because `SecurityCapabilities.Capabilities` is historically the *mechanism* flag ("can this platform drop caps at all" — always true on Linux) and is read by mode selection, configuration generation, and the startup log, the behavioural signal lives on a second field `SecurityCapabilities.CapabilitiesActive`. `CapabilitiesActive` is the single behavioural source of truth: detect output (`buildLinuxDomains`), the backward-compat `capabilities_drop` flat-map key, and the new `capabilities_active` log field all read this one field, and the raw `CapProbe` result is only consulted for human-readable detail text. Mode selection does NOT consult either field (the `minimal` mode is the fallback regardless), so splitting the two does not affect mode behaviour. The `LogSecurityCapabilities` log line records both under the keys `capabilities` (mechanism, legacy) and `capabilities_active` (behavioural, new).
+
+**Mode description honesty:** Pre-#198 the `minimal` mode description always read "capability dropping only (~50% policy enforcement)", which contradicted a root server with `CapabilitiesActive=false`. A new `ModeDescriptionWithCaps(mode, caps)` is gated on the behavioural flag: `minimal + active` yields the old "capability dropping only" wording, `minimal + inactive` yields "no active enforcement primitives (privilege reduction inactive — process retains full Linux capabilities)", and `minimal + nil caps` falls back to "fallback mode" for callers that don't have a caps handle. Non-minimal modes bypass the caps-aware branch entirely. `LogSecurityCapabilities` and the degraded-mode warning both use the new form so operators no longer see contradictory startup lines.
+
+**Tip guidance:** The remediation text points operators at startup-time mechanisms that actually lower `CapPrm`/`CapEff`: `systemd CapabilityBoundingSet= + User=`, `docker run --cap-drop=ALL`, or running under an unprivileged user. `capabilities.DropCapabilities()` is deliberately NOT recommended because it only calls `PR_CAPBSET_DROP` and leaves the current process's permitted/effective sets untouched — following that advice would satisfy the bounding-set half of the probe while leaving the process still able to use its existing caps, yielding a half-dropped state that is more misleading than helpful. The tip Action is structured as `"<recommendation sentence>. Note: <cautionary sentence>"` so `DropCapabilities` can be explained in the cautionary half without appearing as a primary recommendation.
 
 All probes are fast, side-effect-free, and run at detection time.
 
@@ -259,7 +279,7 @@ The flat `Capabilities` map is still populated for backward compatibility with J
 | `cgroups_v2` | cgroups-v2 backend available |
 | `ptrace` | ptrace backend available |
 | `pid_namespace` | pid-namespace backend available |
-| `capabilities_drop` | capability-drop backend available |
+| `capabilities_drop` | capability-drop backend active (process has dropped ≥1 capability) |
 | `file_enforcement` | File Protection domain active backend |
 
 The `Domains` field is the new structured representation.

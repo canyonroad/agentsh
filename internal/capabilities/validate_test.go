@@ -1,6 +1,7 @@
 package capabilities
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -236,4 +237,157 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TestModeDescriptionWithCaps covers the minimal-mode honesty fix from
+// the branch-level roborev review on #198. Before the split, a root
+// process running in minimal mode always got the log/startup string
+// "capability dropping only (~50% policy enforcement)" even when the
+// behavioural probe reported no caps had been dropped. The resulting
+// startup line was internally contradictory (description claimed
+// dropping was active; capabilities_active=false contradicted it).
+//
+// ModeDescriptionWithCaps now gates the "capability dropping only"
+// wording on CapabilitiesActive so the no-drop root case gets an
+// honest "no active enforcement primitives" description instead.
+// Other modes are unchanged regardless of the caps handle (fast path
+// back to ModeDescription).
+func TestModeDescriptionWithCaps(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     string
+		caps     *SecurityCapabilities
+		wantSub  string
+		denySub  string // substring that must NOT appear
+	}{
+		{
+			name:    "minimal with active capability drop",
+			mode:    ModeMinimal,
+			caps:    &SecurityCapabilities{CapabilitiesActive: true},
+			wantSub: "capability dropping only",
+		},
+		{
+			name:    "minimal with no capability drop (root/full caps)",
+			mode:    ModeMinimal,
+			caps:    &SecurityCapabilities{CapabilitiesActive: false},
+			wantSub: "no active enforcement primitives",
+			denySub: "capability dropping only",
+		},
+		{
+			name:    "minimal with nil caps falls back to generic wording",
+			mode:    ModeMinimal,
+			caps:    nil,
+			wantSub: "fallback mode",
+			denySub: "capability dropping only",
+		},
+		{
+			name:    "full mode ignores caps",
+			mode:    ModeFull,
+			caps:    &SecurityCapabilities{CapabilitiesActive: false},
+			wantSub: "Full security",
+		},
+		{
+			name:    "landlock mode ignores caps",
+			mode:    ModeLandlock,
+			caps:    &SecurityCapabilities{CapabilitiesActive: false},
+			wantSub: "Landlock security",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ModeDescriptionWithCaps(tt.mode, tt.caps)
+			if !contains(got, tt.wantSub) {
+				t.Errorf("ModeDescriptionWithCaps(%q, %+v) = %q; want substring %q",
+					tt.mode, tt.caps, got, tt.wantSub)
+			}
+			if tt.denySub != "" && contains(got, tt.denySub) {
+				t.Errorf("ModeDescriptionWithCaps(%q, %+v) = %q; must NOT contain %q",
+					tt.mode, tt.caps, got, tt.denySub)
+			}
+		})
+	}
+}
+
+// TestModeDescriptionWithCapsGOOS exercises the GOOS-parameterized
+// helper underneath ModeDescriptionWithCaps. The second roborev review
+// on #198 flagged that the Linux-specific "retains full Linux
+// capabilities" wording must not leak into darwin/windows startup logs
+// because those platforms don't expose a capability-drop probe today
+// and CapabilitiesActive=false on them means "nothing measured", not
+// "full Linux capabilities retained". A pure helper taking goos as a
+// parameter lets a Linux CI machine verify BOTH the linux and
+// darwin/windows branches without needing cross-platform test runs.
+func TestModeDescriptionWithCapsGOOS(t *testing.T) {
+	inactive := &SecurityCapabilities{CapabilitiesActive: false}
+	active := &SecurityCapabilities{CapabilitiesActive: true}
+
+	tests := []struct {
+		name    string
+		mode    string
+		caps    *SecurityCapabilities
+		goos    string
+		wantSub string
+		denySub string
+	}{
+		{
+			name:    "linux minimal inactive mentions Linux capabilities",
+			mode:    ModeMinimal,
+			caps:    inactive,
+			goos:    "linux",
+			wantSub: "retains full Linux capabilities",
+		},
+		{
+			name:    "darwin minimal inactive does NOT mention Linux capabilities",
+			mode:    ModeMinimal,
+			caps:    inactive,
+			goos:    "darwin",
+			wantSub: "no active enforcement primitives",
+			denySub: "Linux capabilities",
+		},
+		{
+			name:    "windows minimal inactive does NOT mention Linux capabilities",
+			mode:    ModeMinimal,
+			caps:    inactive,
+			goos:    "windows",
+			wantSub: "no active enforcement primitives",
+			denySub: "Linux capabilities",
+		},
+		{
+			name:    "darwin minimal active uses the capability-dropping wording",
+			mode:    ModeMinimal,
+			caps:    active,
+			goos:    "darwin",
+			wantSub: "capability dropping only",
+			denySub: "Linux capabilities",
+		},
+		{
+			name:    "windows minimal active uses the capability-dropping wording",
+			mode:    ModeMinimal,
+			caps:    active,
+			goos:    "windows",
+			wantSub: "capability dropping only",
+			denySub: "Linux capabilities",
+		},
+		{
+			name:    "darwin full mode falls through to generic description",
+			mode:    ModeFull,
+			caps:    inactive,
+			goos:    "darwin",
+			wantSub: "Full security",
+			denySub: "Linux capabilities",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := modeDescriptionWithCapsGOOS(tt.mode, tt.caps, tt.goos)
+			if !strings.Contains(got, tt.wantSub) {
+				t.Errorf("modeDescriptionWithCapsGOOS(%q, %+v, %q) = %q; want substring %q",
+					tt.mode, tt.caps, tt.goos, got, tt.wantSub)
+			}
+			if tt.denySub != "" && strings.Contains(got, tt.denySub) {
+				t.Errorf("modeDescriptionWithCapsGOOS(%q, %+v, %q) = %q; must NOT contain %q",
+					tt.mode, tt.caps, tt.goos, got, tt.denySub)
+			}
+		})
+	}
 }

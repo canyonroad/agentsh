@@ -142,7 +142,7 @@ var tipsByBackend = map[string]Tip{
 	"cgroups-v2":       {Feature: "cgroups-v2", Impact: "Resource limits unavailable", Action: "Enable cgroups v2 in kernel or container runtime"},
 	"ptrace":           {Feature: "ptrace", Impact: "Syscall-level enforcement via ptrace unavailable", Action: "Add SYS_PTRACE capability"},
 	"pid-namespace":    {Feature: "pid-namespace", Impact: "Process isolation unavailable", Action: "Run in a PID namespace (docker run --pid=host or unshare -p)"},
-	"capability-drop":  {Feature: "capability-drop", Impact: "Privilege reduction unavailable", Action: "Run with standard Linux capabilities support"},
+	"capability-drop":  {Feature: "capability-drop", Impact: "Process retains full Linux capabilities (privilege reduction inactive)", Action: "Start the process with a reduced capability set using systemd CapabilityBoundingSet= + User=, docker run --cap-drop=ALL, or an unprivileged user. Note: capabilities.DropCapabilities() only narrows the bounding set for exec'd children via PR_CAPBSET_DROP and does not lower the running process's permitted/effective sets, so calling it from inside the server is not a substitute for the startup-time mechanisms above."},
 	// Darwin
 	"esf":               {Feature: "esf", Impact: "Endpoint Security Framework unavailable", Action: "Install the agentsh macOS app bundle with system extension"},
 	"network-extension": {Feature: "network-extension", Impact: "Network filtering unavailable", Action: "Requires network extension entitlement from Apple"},

@@ -55,7 +55,15 @@ func buildLinuxDomains(caps *SecurityCapabilities) []ProtectionDomain {
 	}
 
 	isoActive := ""
-	if caps.CapProbe.Available {
+	// CapabilitiesActive is the single behavioural source of truth
+	// after the #198 mechanism/active split. CapProbe.Detail is still
+	// read below for the explanatory text ("0/42 caps dropped", etc.)
+	// but the available flag must not come from CapProbe.Available
+	// directly — otherwise a caller that synthesises a
+	// SecurityCapabilities (tests, future callers) could set
+	// CapabilitiesActive to a value that disagrees with what the
+	// detect domains report.
+	if caps.CapabilitiesActive {
 		isoActive = "capability-drop"
 	}
 	if caps.PIDNSProbe.Available {
@@ -99,7 +107,11 @@ func buildLinuxDomains(caps *SecurityCapabilities) []ProtectionDomain {
 			Name: "Isolation", Weight: WeightIsolation,
 			Backends: []DetectedBackend{
 				{Name: "pid-namespace", Available: caps.PIDNSProbe.Available, Detail: caps.PIDNSProbe.Detail, Description: "process isolation", CheckMethod: "probe"},
-				{Name: "capability-drop", Available: caps.CapProbe.Available, Detail: caps.CapProbe.Detail, Description: "privilege reduction", CheckMethod: "probe"},
+				// Available reads CapabilitiesActive (the single
+				// behavioural source of truth); Detail still pulls
+				// the human-readable text from CapProbe for
+				// "0/42 caps dropped" etc.
+				{Name: "capability-drop", Available: caps.CapabilitiesActive, Detail: caps.CapProbe.Detail, Description: "privilege reduction", CheckMethod: "probe"},
 			},
 			Active: isoActive,
 		},
