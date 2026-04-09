@@ -546,3 +546,72 @@ func TestReplaceRealToFake_LeftmostLongestMatch(t *testing.T) {
 		t.Errorf("ReplaceRealToFake leftmost-longest: got %q, want %q", got, want)
 	}
 }
+
+func TestZero_EmptiesTable(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	if err := tb.Add("stripe", []byte("sk_fake000000000"), []byte("sk_real000000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	tb.Zero()
+	if got := tb.Len(); got != 0 {
+		t.Errorf("Len() after Zero = %d, want 0", got)
+	}
+	if _, ok := tb.FakeForService("github"); ok {
+		t.Error("FakeForService returned ok=true after Zero")
+	}
+}
+
+func TestZero_WipesByteBuffers(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	// Capture the internal byte slices before Zero so we can verify
+	// they were actually wiped (not just dropped).
+	tb.mu.RLock()
+	fakeBuf := tb.entries[0].Fake
+	realBuf := tb.entries[0].Real
+	tb.mu.RUnlock()
+
+	tb.Zero()
+
+	for i, b := range fakeBuf {
+		if b != 0 {
+			t.Errorf("fakeBuf[%d] = 0x%x after Zero, want 0x00", i, b)
+		}
+	}
+	for i, b := range realBuf {
+		if b != 0 {
+			t.Errorf("realBuf[%d] = 0x%x after Zero, want 0x00", i, b)
+		}
+	}
+}
+
+func TestZero_IdempotentOnEmptyTable(t *testing.T) {
+	tb := New()
+	tb.Zero() // Must not panic.
+	tb.Zero() // Still must not panic.
+	if got := tb.Len(); got != 0 {
+		t.Errorf("Len() after double Zero = %d, want 0", got)
+	}
+}
+
+func TestZero_AllowsReuse(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	tb.Zero()
+	// Table should be usable again after Zero.
+	if err := tb.Add("stripe", []byte("sk_fake000000000"), []byte("sk_real000000000")); err != nil {
+		t.Fatalf("Add after Zero failed: %v", err)
+	}
+	got, ok := tb.FakeForService("stripe")
+	if !ok || !bytes.Equal(got, []byte("sk_fake000000000")) {
+		t.Errorf("FakeForService after reuse = (%q, %v), want (%q, true)", got, ok, "sk_fake000000000")
+	}
+}

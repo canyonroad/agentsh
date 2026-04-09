@@ -306,3 +306,26 @@ func (t *Table) ReplaceRealToFake(body []byte) []byte {
 	}
 	return out
 }
+
+// Zero wipes every Fake and Real byte buffer owned by the table
+// (overwriting them with 0x00) and drops all entries. It is intended
+// to be called on session close so credential material does not linger
+// in process memory after the session ends.
+//
+// Zero is safe to call multiple times and on an empty table. After
+// Zero returns, the Table is empty and may be reused (though in
+// practice Tables are one-per-session and discarded after Zero).
+func (t *Table) Zero() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for i := range t.entries {
+		for j := range t.entries[i].Fake {
+			t.entries[i].Fake[j] = 0
+		}
+		for j := range t.entries[i].Real {
+			t.entries[i].Real[j] = 0
+		}
+	}
+	t.entries = nil
+}
