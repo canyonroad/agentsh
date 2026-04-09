@@ -168,17 +168,33 @@ func sanitizeCgroupName(s string) string {
 	return out
 }
 
+// enableControllers writes "+<ctrl>" to parentDir/cgroup.subtree_control for each
+// controller in ctrls. On the first write failure it returns a wrapped
+// *EnableControllersError; on success it returns nil. This is a change from
+// prior behavior, which silently continued past per-controller errors and
+// masked delegation issues (issue #197).
 func enableControllers(parentDir string, ctrls []string) error {
+	return enableControllersFS(osCgroupFS{}, parentDir, ctrls)
+}
+
+func enableControllersFS(fsys cgroupFS, parentDir string, ctrls []string) error {
 	path := filepath.Join(parentDir, "cgroup.subtree_control")
-	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	f, err := fsys.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
-		return err
+		return &EnableControllersError{
+			ParentDir:  parentDir,
+			Controller: "*",
+			Err:        err,
+		}
 	}
 	defer f.Close()
 	for _, c := range ctrls {
 		if _, err := f.WriteString("+" + c); err != nil {
-			// Ignore EBUSY etc; best effort.
-			continue
+			return &EnableControllersError{
+				ParentDir:  parentDir,
+				Controller: c,
+				Err:        err,
+			}
 		}
 	}
 	return nil

@@ -4,9 +4,11 @@ package limits
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -45,5 +47,27 @@ func TestApplyCgroupV2_CreatesAndCleansUp(t *testing.T) {
 	defer cancel()
 	if err := cg.Close(ctx); err != nil {
 		t.Fatalf("close cgroup: %v", err)
+	}
+}
+
+func TestEnableControllers_ReturnsError(t *testing.T) {
+	// Create a fake FS where subtree_control exists but WriteString injects EBUSY.
+	f := newFakeCgroupFS()
+	f.seedFile("/sys/fs/cgroup/system.slice/agentsh.service/cgroup.subtree_control", "")
+	f.openErrs["/sys/fs/cgroup/system.slice/agentsh.service/cgroup.subtree_control:write"] = syscall.EBUSY
+
+	err := enableControllersFS(f, "/sys/fs/cgroup/system.slice/agentsh.service", []string{"cpu", "memory", "pids"})
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	var ece *EnableControllersError
+	if !errors.As(err, &ece) {
+		t.Fatalf("expected *EnableControllersError, got %T: %v", err, err)
+	}
+	if ece.Controller != "cpu" {
+		t.Fatalf("expected first failing controller to be 'cpu', got %q", ece.Controller)
+	}
+	if !errors.Is(err, syscall.EBUSY) {
+		t.Fatalf("expected wrapped EBUSY, got %v", err)
 	}
 }
