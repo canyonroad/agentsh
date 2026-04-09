@@ -141,6 +141,11 @@ func TestLookupTip(t *testing.T) {
 // recommended because it only narrows the bounding set via
 // PR_CAPBSET_DROP; following that advice would leave the process able to
 // use its existing permitted set while still tripping the probe.
+//
+// The tip Action is structured as "<recommendation sentence>. Note:
+// <cautionary sentence>" so tests can assert that DropCapabilities only
+// appears in the cautionary sentence (not as a standalone remediation)
+// without needing a brittle exact-phrase match.
 func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
 	tip := lookupTip("capability-drop")
 	if tip == nil {
@@ -152,25 +157,45 @@ func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
 	if strings.Contains(tip.Action, "standard Linux capabilities support") {
 		t.Errorf("capability-drop Action still references the old misleading text: %q", tip.Action)
 	}
-	// The new action must mention at least one concrete mechanism that
-	// lowers the running process's permitted/effective sets at startup
-	// so operators get actionable advice.
+
+	// Split the Action into the recommendation sentence and the
+	// cautionary note. The recommendation is everything before the
+	// first "Note:" marker; if the marker is missing the full Action
+	// counts as the recommendation (so a regression that drops the
+	// Note: separator still fails the checks below).
+	recommendation := tip.Action
+	caution := ""
+	if idx := strings.Index(tip.Action, "Note:"); idx >= 0 {
+		recommendation = strings.TrimSpace(tip.Action[:idx])
+		caution = strings.TrimSpace(tip.Action[idx:])
+	}
+
+	// The recommendation sentence must mention at least one concrete
+	// mechanism that lowers the running process's permitted/effective
+	// sets at startup.
 	wantAny := []string{"CapabilityBoundingSet", "--cap-drop", "unprivileged user"}
 	var matched bool
 	for _, s := range wantAny {
-		if strings.Contains(tip.Action, s) {
+		if strings.Contains(recommendation, s) {
 			matched = true
 			break
 		}
 	}
 	if !matched {
-		t.Errorf("capability-drop Action should reference a startup drop mechanism, got %q", tip.Action)
+		t.Errorf("capability-drop Action recommendation sentence should reference a startup drop mechanism, got %q", recommendation)
 	}
-	// capabilities.DropCapabilities() only narrows the bounding set, so
-	// it must NOT appear as a standalone recommendation. It may be
-	// mentioned as a cautionary note (explaining why it's insufficient)
-	// but not as a remediation step.
-	if strings.Contains(tip.Action, "call capabilities.DropCapabilities") {
-		t.Errorf("capability-drop Action recommends DropCapabilities() which only narrows CapBnd: %q", tip.Action)
+
+	// DropCapabilities must NOT appear in the recommendation sentence
+	// under any wording ("call DropCapabilities", "use DropCapabilities",
+	// or just "DropCapabilities" as a bullet). It may only appear in
+	// the cautionary note explaining why it is not a substitute.
+	if strings.Contains(recommendation, "DropCapabilities") {
+		t.Errorf("capability-drop Action recommendation sentence must not mention DropCapabilities as a remediation: %q", recommendation)
+	}
+	// The cautionary note, if present, must still explain why
+	// DropCapabilities is insufficient — otherwise operators who
+	// already know about it will keep trying to use it.
+	if caution != "" && !strings.Contains(caution, "DropCapabilities") {
+		t.Errorf("capability-drop cautionary note should explain why DropCapabilities is not a substitute, got %q", caution)
 	}
 }

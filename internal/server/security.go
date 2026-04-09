@@ -40,12 +40,13 @@ func DetectAndValidateSecurityMode(cfg *config.Config) (string, *capabilities.Se
 	if cfg != nil && cfg.Security.WarnDegraded && mode != capabilities.ModeFull {
 		slog.Warn("running in degraded security mode",
 			"mode", mode,
-			"description", capabilities.ModeDescription(mode),
+			"description", capabilities.ModeDescriptionWithCaps(mode, caps),
 			"seccomp", caps.Seccomp,
 			"landlock", caps.Landlock,
 			"landlock_abi", caps.LandlockABI,
 			"ebpf", caps.EBPF,
 			"fuse", caps.FUSE,
+			"capabilities_active", caps.CapabilitiesActive,
 		)
 	}
 
@@ -56,7 +57,7 @@ func DetectAndValidateSecurityMode(cfg *config.Config) (string, *capabilities.Se
 func LogSecurityCapabilities(caps *capabilities.SecurityCapabilities, mode string) {
 	slog.Info("security capabilities detected",
 		"mode", mode,
-		"description", capabilities.ModeDescription(mode),
+		"description", capabilities.ModeDescriptionWithCaps(mode, caps),
 		"seccomp", caps.Seccomp,
 		"seccomp_basic", caps.SeccompBasic,
 		"landlock", caps.Landlock,

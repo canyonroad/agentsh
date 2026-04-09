@@ -237,3 +237,72 @@ func containsHelper(s, substr string) bool {
 	}
 	return false
 }
+
+// TestModeDescriptionWithCaps covers the minimal-mode honesty fix from
+// the branch-level roborev review on #198. Before the split, a root
+// process running in minimal mode always got the log/startup string
+// "capability dropping only (~50% policy enforcement)" even when the
+// behavioural probe reported no caps had been dropped. The resulting
+// startup line was internally contradictory (description claimed
+// dropping was active; capabilities_active=false contradicted it).
+//
+// ModeDescriptionWithCaps now gates the "capability dropping only"
+// wording on CapabilitiesActive so the no-drop root case gets an
+// honest "no active enforcement primitives" description instead.
+// Other modes are unchanged regardless of the caps handle (fast path
+// back to ModeDescription).
+func TestModeDescriptionWithCaps(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     string
+		caps     *SecurityCapabilities
+		wantSub  string
+		denySub  string // substring that must NOT appear
+	}{
+		{
+			name:    "minimal with active capability drop",
+			mode:    ModeMinimal,
+			caps:    &SecurityCapabilities{CapabilitiesActive: true},
+			wantSub: "capability dropping only",
+		},
+		{
+			name:    "minimal with no capability drop (root/full caps)",
+			mode:    ModeMinimal,
+			caps:    &SecurityCapabilities{CapabilitiesActive: false},
+			wantSub: "no active enforcement primitives",
+			denySub: "capability dropping only",
+		},
+		{
+			name:    "minimal with nil caps falls back to generic wording",
+			mode:    ModeMinimal,
+			caps:    nil,
+			wantSub: "fallback mode",
+			denySub: "capability dropping only",
+		},
+		{
+			name:    "full mode ignores caps",
+			mode:    ModeFull,
+			caps:    &SecurityCapabilities{CapabilitiesActive: false},
+			wantSub: "Full security",
+		},
+		{
+			name:    "landlock mode ignores caps",
+			mode:    ModeLandlock,
+			caps:    &SecurityCapabilities{CapabilitiesActive: false},
+			wantSub: "Landlock security",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ModeDescriptionWithCaps(tt.mode, tt.caps)
+			if !contains(got, tt.wantSub) {
+				t.Errorf("ModeDescriptionWithCaps(%q, %+v) = %q; want substring %q",
+					tt.mode, tt.caps, got, tt.wantSub)
+			}
+			if tt.denySub != "" && contains(got, tt.denySub) {
+				t.Errorf("ModeDescriptionWithCaps(%q, %+v) = %q; must NOT contain %q",
+					tt.mode, tt.caps, got, tt.denySub)
+			}
+		})
+	}
+}

@@ -107,6 +107,11 @@ func ValidatePolicyForMode(caps *SecurityCapabilities, hasUnixSocketRules, hasSi
 }
 
 // ModeDescription returns a human-readable description of the security mode.
+//
+// This form is kept for callers that do not have a SecurityCapabilities
+// handy (e.g. config tooling). When a caps pointer is available, prefer
+// ModeDescriptionWithCaps so the minimal-mode wording can reflect the
+// behavioural capability-drop probe result.
 func ModeDescription(mode string) string {
 	switch mode {
 	case ModeFull:
@@ -116,8 +121,36 @@ func ModeDescription(mode string) string {
 	case ModeLandlockOnly:
 		return "Landlock-only security: Landlock (~80% policy enforcement)"
 	case ModeMinimal:
-		return "Minimal security: capability dropping only (~50% policy enforcement)"
+		// Generic wording used when the caller has no caps handle.
+		// ModeDescriptionWithCaps below returns a more honest string
+		// when the behavioural probe is available.
+		return "Minimal security: fallback mode (~50% policy enforcement)"
 	default:
 		return "Unknown security mode"
 	}
+}
+
+// ModeDescriptionWithCaps returns a human-readable description of the
+// security mode that reflects the behavioural capability-drop probe.
+//
+// Before #198 the minimal mode was always described as "capability
+// dropping only", which claimed privilege reduction was happening even
+// on a root server that had never dropped anything. After the mechanism
+// vs. active split, the minimal description is now gated on
+// CapabilitiesActive so a root/no-drop process no longer gets a
+// contradictory startup line (description says "capability dropping
+// only" while the new capabilities_active=false log field says nothing
+// is being dropped).
+//
+// Callers with access to the detected SecurityCapabilities (server
+// startup logging, agentsh detect) should use this form; pure mode
+// string consumers fall back to ModeDescription.
+func ModeDescriptionWithCaps(mode string, caps *SecurityCapabilities) string {
+	if mode != ModeMinimal || caps == nil {
+		return ModeDescription(mode)
+	}
+	if caps.CapabilitiesActive {
+		return "Minimal security: capability dropping only (~50% policy enforcement)"
+	}
+	return "Minimal security: fallback mode, no active enforcement primitives (privilege reduction inactive — process retains full Linux capabilities)"
 }
