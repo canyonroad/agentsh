@@ -15,33 +15,46 @@ import (
 // reduced Linux capability set compared to the kernel's maximum. It answers
 // the question "is the capability-drop backend actually active for this
 // process?" — not "is the capability-drop mechanism available on this
-// kernel?". A server running with the full effective and bounding sets
+// kernel?". A server running with the full permitted and bounding sets
 // (e.g. started as root without any drop) is reported as unavailable,
 // because capability-drop is not protecting it even though the syscall
 // machinery works.
 //
-// The probe checks two capability sets:
+// The probe checks two capability sets that represent *durable* privilege
+// reduction:
 //
-//   - Effective: the set from capget(2). A process whose effective bits are
-//     all set can use every kernel capability right now. Clearing bits here
-//     reflects runtime privilege reduction via capset(2) or analogous paths.
+//   - Permitted (capget): the upper bound the process can reinstate into
+//     Effective via capset(2). A reduced Permitted set means the process
+//     genuinely cannot regain those capabilities without exec+file-caps.
 //
-//   - Bounding: the set read bit-by-bit via prctl(PR_CAPBSET_READ). This is
-//     the ceiling the process can never regain (even across exec) and is
-//     what capabilities.DropCapabilities() narrows via PR_CAPBSET_DROP.
-//     Checking Effective alone would miss a process that dropped its
-//     bounding set but kept Effective intact (a genuine privilege drop that
-//     constrains exec'd children).
+//   - Bounding (PR_CAPBSET_READ): the hard ceiling. A bit cleared here
+//     cannot be regained at all, even across exec. This is what
+//     capabilities.DropCapabilities() narrows via PR_CAPBSET_DROP, so
+//     omitting it would miss agentsh's own drop mechanism.
 //
-// If either set has fewer bits set than the full [0, cap_last_cap] mask,
-// the probe reports the backend as active. The Detail string names the
-// reduced set (effective, bounding, or both) and the drop count so
-// operators can see at a glance which lever is in use.
+// The Effective set is deliberately excluded from the drop signal even
+// though capget returns it: a process can do capset(eff=0, prm=full) and
+// instantly restore Effective on the next syscall, so "CapEff reduced but
+// CapPrm full" is a transient state, not a privilege drop. Reporting it
+// as dropped would recreate the false positive cluster that #198 is
+// trying to close.
 //
-// When /proc/sys/kernel/cap_last_cap cannot be read (pre-2.6.25 kernels,
-// restricted procfs), the probe falls back to the previous permissive
-// behaviour: Available=true with an explicit caveat in Detail, so
-// deployments on those environments do not silently regress.
+// Detail text names which sets are reduced (permitted, bounding, or both)
+// and the drop count so operators can see at a glance which lever is in
+// use.
+//
+// Fallbacks:
+//
+//  1. If /proc/sys/kernel/cap_last_cap is unreadable (pre-2.6.25 kernels,
+//     restricted procfs), the probe reports Available=true with an
+//     explicit caveat in Detail — preserving pre-#198 permissive
+//     behaviour on those platforms.
+//  2. If PR_CAPBSET_READ fails during the bit walk (uncommon; some
+//     lockdown or seccomp profiles block the extended prctl args), the
+//     probe falls back to the Permitted-only check and notes the
+//     bounding-set status as unknown in Detail. This preserves the
+//     behaviour expected by environments where the process has dropped
+//     its permitted set but bounding reads are blocked.
 //
 // See golang/go#44312 for why the V3 capget buffer must be a two-element
 // CapUserData array even when callers only care about bits 0..31.
@@ -57,9 +70,9 @@ func probeCapabilityDrop() ProbeResult {
 
 	lastCap, err := readCapLastCap()
 	if err != nil {
-		// Very old kernels or unusual procfs restrictions: we can't measure
-		// the full mask, so fall back to reporting the mechanism as
-		// available with an explicit caveat. This preserves pre-#198
+		// Very old kernels or unusual procfs restrictions: we can't
+		// measure the full mask, so fall back to reporting the mechanism
+		// as available with an explicit caveat. This preserves pre-#198
 		// behaviour on platforms that genuinely lack the procfs entry.
 		return ProbeResult{
 			Available: true,
@@ -67,19 +80,17 @@ func probeCapabilityDrop() ProbeResult {
 		}
 	}
 
-	bndLow, bndHigh, err := readCapBoundingSet(lastCap)
-	if err != nil {
-		return ProbeResult{
-			Available: false,
-			Detail:    "prctl(PR_CAPBSET_READ) failed: " + err.Error(),
-		}
+	bndLow, bndHigh, bndErr := readCapBoundingSet(lastCap)
+
+	report := capsDropped(data, bndLow, bndHigh, bndErr != nil, lastCap)
+	if bndErr != nil {
+		report.bndErr = bndErr
 	}
 
-	report := capsDropped(data, bndLow, bndHigh, lastCap)
 	if !report.anyDropped() {
 		return ProbeResult{
 			Available: false,
-			Detail:    fmt.Sprintf("process retains full CapEff and CapBnd (%d/%d caps)", report.total, report.total),
+			Detail:    report.detailNotDropped(),
 		}
 	}
 	return ProbeResult{
@@ -91,8 +102,9 @@ func probeCapabilityDrop() ProbeResult {
 // capFullMask returns the two halves of the V3 effective-capability bitmap
 // that has every bit 0..lastCap set. Values outside [0, 63] are clamped:
 // negative lastCap yields a zero mask (no caps) and lastCap ≥ 63 yields the
-// full 64-bit mask. The layout mirrors unix.CapUserData.Effective so callers
-// can compare the return value directly against a capget result.
+// full 64-bit mask. The layout mirrors unix.CapUserData.Permitted /
+// Effective so callers can compare the return value directly against a
+// capget result.
 func capFullMask(lastCap int) (low, high uint32) {
 	if lastCap < 0 {
 		return 0, 0
@@ -112,25 +124,35 @@ func capFullMask(lastCap int) (low, high uint32) {
 
 // capDropReport holds the per-set drop counts computed by capsDropped. It
 // exists so callers can format a single detail string that names which
-// capability sets have been narrowed (effective, bounding, or both) without
-// the probe function having to juggle four return values.
+// capability sets have been narrowed (permitted, bounding, or both)
+// without the probe function having to juggle five return values.
+//
+// bndUnknown is true when the bounding set could not be read (fallback
+// path); in that case bndMissing is 0 and the detail text flags the
+// unknown status explicitly so operators know the probe ran in
+// degraded mode.
 type capDropReport struct {
-	effMissing int
+	prmMissing int
 	bndMissing int
 	total      int
+	bndUnknown bool
+	bndErr     error // populated only when bndUnknown is true; used for detail text
 }
 
 func (r capDropReport) anyDropped() bool {
-	return r.effMissing > 0 || r.bndMissing > 0
+	return r.prmMissing > 0 || r.bndMissing > 0
 }
 
 func (r capDropReport) detail() string {
 	switch {
-	case r.effMissing > 0 && r.bndMissing > 0:
-		return fmt.Sprintf("%d/%d dropped (eff) + %d/%d dropped (bnd)",
-			r.effMissing, r.total, r.bndMissing, r.total)
-	case r.effMissing > 0:
-		return fmt.Sprintf("%d/%d caps dropped from effective", r.effMissing, r.total)
+	case r.prmMissing > 0 && r.bndMissing > 0:
+		return fmt.Sprintf("%d/%d dropped (prm) + %d/%d dropped (bnd)",
+			r.prmMissing, r.total, r.bndMissing, r.total)
+	case r.prmMissing > 0 && r.bndUnknown:
+		return fmt.Sprintf("%d/%d caps dropped from permitted; bounding unknown (%v)",
+			r.prmMissing, r.total, r.bndErr)
+	case r.prmMissing > 0:
+		return fmt.Sprintf("%d/%d caps dropped from permitted", r.prmMissing, r.total)
 	case r.bndMissing > 0:
 		return fmt.Sprintf("%d/%d caps dropped from bounding", r.bndMissing, r.total)
 	default:
@@ -138,11 +160,27 @@ func (r capDropReport) detail() string {
 	}
 }
 
-// capsDropped compares the process's effective and bounding capability sets
-// against the kernel's full mask for lastCap. The effective set is passed
-// as the V3 CapUserData array returned by capget(2); the bounding set is
-// passed as its (low, high) halves — captured by the caller via
+// detailNotDropped produces the detail text for the Available=false case.
+// When bounding reads failed we include that caveat so the reader knows
+// the conclusion is based on the permitted set alone.
+func (r capDropReport) detailNotDropped() string {
+	if r.bndUnknown {
+		return fmt.Sprintf("process retains full CapPrm (%d/%d caps); bounding unknown (%v)",
+			r.total, r.total, r.bndErr)
+	}
+	return fmt.Sprintf("process retains full CapPrm and CapBnd (%d/%d caps)",
+		r.total, r.total)
+}
+
+// capsDropped compares the process's permitted and bounding capability
+// sets against the kernel's full mask for lastCap. The permitted set is
+// passed as the V3 CapUserData array returned by capget(2); the bounding
+// set is passed as its (low, high) halves — captured by the caller via
 // PR_CAPBSET_READ since capget does not populate it.
+//
+// When bndUnknown is true, the bounding inputs are ignored and the caller
+// must also populate bndErr in the returned report so detail text can
+// surface the degraded-mode status.
 //
 // Bits above lastCap are deliberately ignored: the kernel should not set
 // them, but if it does we must not let that hide a genuine drop of a low
@@ -150,12 +188,11 @@ func (r capDropReport) detail() string {
 // "dropped". The helper is pure so it can be unit-tested with synthetic
 // CapUserData.
 //
-// A process whose CapEff is fully reduced but CapBnd is still full (e.g.
-// during a transient capset) counts as "dropped" because privilege has
-// been reduced; likewise a process that called PR_CAPBSET_DROP without
-// touching Effective counts as "dropped" because future transitions are
-// constrained. Both are the common agentsh drop patterns.
-func capsDropped(data [2]unix.CapUserData, bndLow, bndHigh uint32, lastCap int) capDropReport {
+// Effective is *not* consulted: a process with CapEff reduced but CapPrm
+// still full can restore its effective set via capset(2) on the next
+// syscall, so counting that as a drop would produce the same false
+// positives #198 is trying to eliminate.
+func capsDropped(data [2]unix.CapUserData, bndLow, bndHigh uint32, bndUnknown bool, lastCap int) capDropReport {
 	if lastCap < 0 {
 		return capDropReport{}
 	}
@@ -166,21 +203,27 @@ func capsDropped(data [2]unix.CapUserData, bndLow, bndHigh uint32, lastCap int) 
 
 	fullLow, fullHigh := capFullMask(lastCap)
 
-	effLow := data[0].Effective & fullLow
-	effHigh := data[1].Effective & fullHigh
-	missingEffLow := fullLow &^ effLow
-	missingEffHigh := fullHigh &^ effHigh
+	prmLow := data[0].Permitted & fullLow
+	prmHigh := data[1].Permitted & fullHigh
+	missingPrmLow := fullLow &^ prmLow
+	missingPrmHigh := fullHigh &^ prmHigh
+	prmMissing := popcount32(missingPrmLow) + popcount32(missingPrmHigh)
+
+	rep := capDropReport{
+		prmMissing: prmMissing,
+		total:      total,
+		bndUnknown: bndUnknown,
+	}
+	if bndUnknown {
+		return rep
+	}
 
 	bndLowMasked := bndLow & fullLow
 	bndHighMasked := bndHigh & fullHigh
 	missingBndLow := fullLow &^ bndLowMasked
 	missingBndHigh := fullHigh &^ bndHighMasked
-
-	return capDropReport{
-		effMissing: popcount32(missingEffLow) + popcount32(missingEffHigh),
-		bndMissing: popcount32(missingBndLow) + popcount32(missingBndHigh),
-		total:      total,
-	}
+	rep.bndMissing = popcount32(missingBndLow) + popcount32(missingBndHigh)
+	return rep
 }
 
 // popcount32 returns the number of set bits in x. The capabilities package
@@ -217,7 +260,7 @@ func readCapLastCap() (int, error) {
 
 // readCapBoundingSet walks the process's bounding set with PR_CAPBSET_READ
 // and returns it as (low, high) uint32 halves matching the layout of
-// CapUserData.Effective. capget(2) deliberately does not expose the
+// CapUserData.Permitted. capget(2) deliberately does not expose the
 // bounding set, so a bit-by-bit walk is the canonical way to read it.
 func readCapBoundingSet(lastCap int) (low, high uint32, err error) {
 	if lastCap < 0 {

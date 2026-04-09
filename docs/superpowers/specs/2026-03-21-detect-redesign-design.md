@@ -98,12 +98,23 @@ Call `unix.Syscall(SYS_BPF, BPF_PROG_LOAD, uintptr(unsafe.Pointer(&attr)), size)
 - Single value → unavailable. Detail: `"host namespace"`
 - `NSpid` field absent (kernel < 4.1) → unavailable. Detail: `"NSpid not supported"`
 
-**Capability drop probe**: Three steps:
+**Capability drop probe**: Four steps:
 1. `unix.Capget()` with `LINUX_CAPABILITY_VERSION_3` succeeds (the V3 buffer is a two-element `CapUserData` array per golang/go#44312; a single-element buffer under-allocates and the kernel writes past the end).
 2. `prctl(PR_CAPBSET_READ, 0)` succeeds (the mechanism for reading/dropping the bounding set is accessible).
-3. The effective capability set from step 1 is compared against the full mask derived from `/proc/sys/kernel/cap_last_cap`. The backend is reported *available* only when at least one capability within `[0, cap_last_cap]` is **cleared** — i.e. the process is running with fewer privileges than the kernel maximum.
+3. The **permitted** capability set from step 1 is compared against the full mask derived from `/proc/sys/kernel/cap_last_cap`.
+4. The **bounding** set is read bit-by-bit via `PR_CAPBSET_READ` and compared against the same mask. The backend is reported *available* only when either `CapPrm` or `CapBnd` has at least one bit cleared within `[0, cap_last_cap]`.
 
-Detail: `"N/M caps dropped"` when active, `"process retains full CapEff (M/M caps)"` when a root-equivalent process has not dropped anything. If `/proc/sys/kernel/cap_last_cap` cannot be read (pre-2.6.25 kernels, restricted procfs), the probe falls back to the previous permissive behaviour (syscall check only) with detail `"cap_last_cap unavailable; mechanism check only"` so those environments do not silently regress.
+The `CapEff` set is intentionally **not** consulted: a process can do `capset(eff=0, prm=full)` and instantly restore its effective set on the next syscall, so "CapEff reduced but CapPrm full" is a transient state, not a durable privilege drop. Tracking only the permitted and bounding sets matches the drop mechanisms actually used in the codebase (`PR_CAPBSET_DROP` in `capabilities.DropCapabilities`, systemd `CapabilityBoundingSet=`, `docker --cap-drop=...`).
+
+Detail text:
+- Permitted reduced: `"N/M caps dropped from permitted"`
+- Bounding reduced: `"N/M caps dropped from bounding"`
+- Both reduced: `"N/M dropped (prm) + X/M dropped (bnd)"`
+- Neither reduced: `"process retains full CapPrm and CapBnd (M/M caps)"` → Available=false
+
+Fallbacks:
+1. If `/proc/sys/kernel/cap_last_cap` is unreadable (pre-2.6.25 kernels, restricted procfs), the probe reports Available=true with an explicit caveat so deployments on those environments do not silently regress.
+2. If `PR_CAPBSET_READ` fails during the bit walk (uncommon; some lockdown or seccomp profiles block extended `prctl` args), the probe falls back to the permitted-set check and flags the bounding status as "unknown" in the detail text. This preserves correct reporting in environments where the process dropped its permitted set but bounding reads are blocked.
 
 This is a behavioural check, not an infrastructure check: it answers "is capability-drop actually protecting this process?" rather than "does capability-drop exist on this kernel?". Issue #198 reported the previous infrastructure-only probe marking the backend active for a server running as root with `CapEff=0x1ffffffffff` (all 41 caps) — a false positive that the behavioural check eliminates. Bits above `cap_last_cap` are ignored so that kernel quirks (phantom high bits) cannot mask a genuine drop of a low capability.
 
