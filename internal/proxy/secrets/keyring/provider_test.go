@@ -11,6 +11,7 @@ import (
 	keyringlib "github.com/zalando/go-keyring"
 
 	secrets "github.com/agentsh/agentsh/internal/proxy/secrets"
+	"github.com/agentsh/agentsh/internal/proxy/secrets/secretstest"
 )
 
 // skipIfUnavailable constructs a Provider and skips the test if
@@ -387,4 +388,13 @@ func TestProvider_CloseWaitsForInFlightFetch(t *testing.T) {
 	if !errors.Is(err, secrets.ErrKeyringUnavailable) {
 		t.Errorf("post-Close Fetch = %v, want wrapping ErrKeyringUnavailable", err)
 	}
+}
+
+func TestProviderContract_AppliedToKeyringProvider(t *testing.T) {
+	p := skipIfUnavailable(t)
+
+	// skipIfUnavailable already registered a Cleanup to Close p.
+	// ProviderContract also Closes p inside its own Cleanup.
+	// Close is idempotent, so both cleanups run safely.
+	secretstest.ProviderContract(t, "keyring", p)
 }
