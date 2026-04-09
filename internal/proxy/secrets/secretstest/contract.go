@@ -18,15 +18,13 @@ import (
 // Callers must not call Close themselves after passing the
 // provider to ProviderContract.
 //
-// The URI used to exercise Fetch (a well-known "never-exists"
-// keyring URI) is chosen to be valid per ParseRef but extremely
-// unlikely to hit any real secret: `keyring://agentsh-contract-probe/unset`.
-// A real keyring provider that happened to have this entry set
-// would fail the NotFound assertion — which is acceptable because
-// the service name is obviously test-only. The keyring provider's
-// test suite avoids this by scoping tests to a per-run unique
-// service name.
-func ProviderContract(t *testing.T, name string, p secrets.SecretProvider) {
+// probeRef must be a valid SecretRef whose scheme the provider
+// accepts and that is guaranteed NOT to exist in the backend.
+// Each provider test supplies its own probe ref so the contract
+// helper is scheme-agnostic and avoids collisions with real
+// secrets. For example, the keyring tests pass a per-run unique
+// service name via testServiceName(t).
+func ProviderContract(t *testing.T, name string, p secrets.SecretProvider, probeRef secrets.SecretRef) {
 	t.Helper()
 
 	t.Cleanup(func() { _ = p.Close() })
@@ -38,12 +36,7 @@ func ProviderContract(t *testing.T, name string, p secrets.SecretProvider) {
 	})
 
 	t.Run(name+"/FetchNotFound", func(t *testing.T) {
-		ref := secrets.SecretRef{
-			Scheme: "keyring",
-			Host:   "agentsh-contract-probe",
-			Path:   "unset",
-		}
-		_, err := p.Fetch(context.Background(), ref)
+		_, err := p.Fetch(context.Background(), probeRef)
 		if err == nil {
 			t.Fatal("Fetch of unset ref returned nil error")
 		}
@@ -64,12 +57,7 @@ func ProviderContract(t *testing.T, name string, p secrets.SecretProvider) {
 	t.Run(name+"/FetchAfterClose", func(t *testing.T) {
 		// Close was called above; provider should be in a closed
 		// state here because t.Run subtests run sequentially.
-		ref := secrets.SecretRef{
-			Scheme: "keyring",
-			Host:   "agentsh-contract-probe",
-			Path:   "unset",
-		}
-		_, err := p.Fetch(context.Background(), ref)
+		_, err := p.Fetch(context.Background(), probeRef)
 		if err == nil {
 			t.Fatal("Fetch after Close returned nil error")
 		}

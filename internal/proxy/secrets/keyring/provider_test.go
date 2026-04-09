@@ -393,8 +393,16 @@ func TestProvider_CloseWaitsForInFlightFetch(t *testing.T) {
 func TestProviderContract_AppliedToKeyringProvider(t *testing.T) {
 	p := skipIfUnavailable(t)
 
+	// Use a per-run unique service name to avoid collisions with
+	// real keyring entries.
+	probeRef := secrets.SecretRef{
+		Scheme: "keyring",
+		Host:   testServiceName(t),
+		Path:   "contract-probe-unset",
+	}
+
 	// skipIfUnavailable already registered a Cleanup to Close p.
 	// ProviderContract also Closes p inside its own Cleanup.
 	// Close is idempotent, so both cleanups run safely.
-	secretstest.ProviderContract(t, "keyring", p)
+	secretstest.ProviderContract(t, "keyring", p, probeRef)
 }
