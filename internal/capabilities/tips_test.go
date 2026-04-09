@@ -167,12 +167,19 @@ func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
 	// explanation. A regression that removes the marker — for example,
 	// by dropping the cautionary section entirely — must fail this test
 	// rather than silently passing the remaining checks.
-	noteIdx := strings.Index(tip.Action, "Note:")
+	const noteMarker = "Note:"
+	noteIdx := strings.Index(tip.Action, noteMarker)
 	if noteIdx < 0 {
 		t.Fatalf("capability-drop Action missing required 'Note:' marker separating recommendation from cautionary section: %q", tip.Action)
 	}
 	recommendation := strings.TrimSpace(tip.Action[:noteIdx])
-	caution := strings.TrimSpace(tip.Action[noteIdx:])
+	// The body of the caution is everything AFTER the "Note:" marker,
+	// not starting at the marker itself. Slicing at noteIdx would leave
+	// the literal "Note:" in the string, so the "non-empty" check below
+	// would pass even when the cautionary body is missing — the whole
+	// point of this assertion. Slice at noteIdx+len(noteMarker) so the
+	// trimmed result is the actual body text.
+	cautionBody := strings.TrimSpace(tip.Action[noteIdx+len(noteMarker):])
 
 	// The recommendation sentence must mention at least one concrete
 	// mechanism that lowers the running process's permitted/effective
@@ -196,15 +203,16 @@ func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
 	if strings.Contains(recommendation, "DropCapabilities") {
 		t.Errorf("capability-drop Action recommendation sentence must not mention DropCapabilities as a remediation: %q", recommendation)
 	}
-	// The cautionary note must be non-empty and explicitly explain
-	// why DropCapabilities is insufficient — otherwise operators who
-	// already know about it will keep trying to use it. These checks
-	// are unconditional (not gated on caution != "") so that removing
-	// the cautionary section fails the test instead of skipping it.
-	if caution == "" {
-		t.Errorf("capability-drop Action cautionary section after 'Note:' must be non-empty: %q", tip.Action)
+	// The cautionary body (text AFTER the "Note:" marker) must be
+	// non-empty and explicitly explain why DropCapabilities is
+	// insufficient — otherwise operators who already know about it
+	// will keep trying to use it. These checks are unconditional so
+	// that removing the cautionary body fails the test instead of
+	// skipping it.
+	if cautionBody == "" {
+		t.Errorf("capability-drop Action cautionary body after 'Note:' must be non-empty: %q", tip.Action)
 	}
-	if !strings.Contains(caution, "DropCapabilities") {
-		t.Errorf("capability-drop cautionary note must explain why DropCapabilities is not a substitute, got %q", caution)
+	if !strings.Contains(cautionBody, "DropCapabilities") {
+		t.Errorf("capability-drop cautionary body must explain why DropCapabilities is not a substitute, got %q", cautionBody)
 	}
 }
