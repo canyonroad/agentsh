@@ -271,54 +271,86 @@ func TestProvider_ConcurrentFetch_NoRaces(t *testing.T) {
 	wg.Wait()
 }
 
-// TestProvider_ConcurrentFetchAndClose_NoRaces drives the
-// Fetch-vs-Close contention path that TestProvider_ConcurrentFetch_NoRaces
-// does not exercise: that test only races readers against readers.
-// This one races several Fetch goroutines against one Close call
-// so the race detector can observe the RWMutex writer-vs-readers
-// transition. After the wait, the provider is fully closed, and
-// any subsequent Fetch must report wrapped ErrKeyringUnavailable.
+// TestProvider_CloseWaitsForInFlightFetch drives the
+// Fetch-vs-Close contention path deterministically. The post-
+// RLock test seam holds one Fetch inside the mutex's read
+// critical section; a second goroutine then calls Close, which
+// must block on the exclusive Lock until the in-flight Fetch
+// releases its RLock. The test asserts both that Close does NOT
+// return while the reader is still held, and that Close DOES
+// return once the reader is released, and that any further
+// Fetch reports wrapped ErrKeyringUnavailable.
 //
-// The Close goroutine waits briefly so some fetches are already
-// in flight, but we do NOT assert which fetches returned what —
-// any given Fetch may have completed before Close, been rejected
-// by the atomic fast path, or raced Close to the RWMutex. The
-// only load-bearing post-condition is that Fetch after the wait
-// reports the closed sentinel.
-func TestProvider_ConcurrentFetchAndClose_NoRaces(t *testing.T) {
+// Unlike a time.Sleep-based overlap, this is a real barrier:
+// the hook guarantees a reader is in the critical section at
+// the moment Close starts, so the race detector (and the
+// behavioral assertions) observe the writer-vs-reader
+// transition every run, on every platform.
+func TestProvider_CloseWaitsForInFlightFetch(t *testing.T) {
 	p := skipIfUnavailable(t)
+
+	inFlight := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+
+	t.Cleanup(func() { testFetchPostRLockHook = nil })
+	testFetchPostRLockHook = func() {
+		once.Do(func() {
+			close(inFlight)
+			<-release
+		})
+	}
+
 	ref := secrets.SecretRef{
 		Scheme: "keyring",
 		Host:   testServiceName(t),
 		Path:   "nonexistent-user",
 	}
 
-	var wg sync.WaitGroup
-	const goroutines = 8
-	const iterations = 100
-
-	wg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
-		go func() {
-			defer wg.Done()
-			for j := 0; j < iterations; j++ {
-				_, _ = p.Fetch(context.Background(), ref)
-			}
-		}()
-	}
-
-	wg.Add(1)
+	fetchDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		// Small delay so some fetches are in flight before we
-		// start shutdown. Exact ordering is not load-bearing —
-		// the race detector is what we care about.
-		time.Sleep(time.Millisecond)
+		defer close(fetchDone)
+		_, _ = p.Fetch(context.Background(), ref)
+	}()
+
+	// Wait until the Fetch goroutine is guaranteed to hold RLock.
+	<-inFlight
+
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
 		_ = p.Close()
 	}()
 
-	wg.Wait()
+	// Close must be blocked on Lock while the Fetch goroutine
+	// still holds RLock. This short probe is not a timing
+	// assumption about Close's speed — it is a negative
+	// assertion that Close has not finished yet, which is true
+	// by construction as long as we have not released the
+	// hook.
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned while an in-flight Fetch still held the read lock")
+	case <-time.After(50 * time.Millisecond):
+		// expected: Close is still waiting
+	}
 
+	// Release the in-flight Fetch; it will finish, drop RLock,
+	// and let Close acquire the exclusive Lock.
+	close(release)
+
+	select {
+	case <-closeDone:
+		// expected
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the in-flight Fetch was released")
+	}
+	<-fetchDone
+
+	// After Close returns, any subsequent Fetch must report the
+	// closed sentinel. This goes through the fast path and never
+	// reaches testFetchPostRLockHook, so it does not re-trigger
+	// the once.Do gate.
 	_, err := p.Fetch(context.Background(), ref)
 	if !errors.Is(err, secrets.ErrKeyringUnavailable) {
 		t.Errorf("post-Close Fetch = %v, want wrapping ErrKeyringUnavailable", err)

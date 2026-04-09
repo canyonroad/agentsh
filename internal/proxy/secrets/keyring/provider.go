@@ -55,6 +55,14 @@ const (
 // production callers and adds one nil check to the hot path.
 var testFetchPreLockHook func()
 
+// testFetchPostRLockHook is a test-only seam invoked (when non-nil)
+// immediately after Fetch has acquired its RLock and re-verified
+// closed. Tests use it to hold a Fetch in the mutex's read critical
+// section so another goroutine can race Close against a
+// guaranteed-in-flight reader. It has no production callers and
+// adds one nil check to the hot path.
+var testFetchPostRLockHook func()
+
 // New constructs a keyring Provider.
 //
 // New verifies the OS keyring backend is reachable by issuing one
@@ -132,6 +140,11 @@ func (p *Provider) Fetch(ctx context.Context, ref secrets.SecretRef) (secrets.Se
 	// so we reject the stale Fetch here instead.
 	if p.closed.Load() {
 		return secrets.SecretValue{}, fmt.Errorf("%w: provider closed", secrets.ErrKeyringUnavailable)
+	}
+
+	// Test seam: see testFetchPostRLockHook. Nil in production.
+	if hook := testFetchPostRLockHook; hook != nil {
+		hook()
 	}
 
 	if ref.Scheme != "keyring" {
