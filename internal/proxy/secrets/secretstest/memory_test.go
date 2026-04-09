@@ -90,6 +90,32 @@ func TestFetch_AfterClose(t *testing.T) {
 	}
 }
 
+// TestFetch_MalformedRef verifies that a hand-built SecretRef the
+// real providers would reject up front (empty host, unsupported
+// scheme) surfaces a URI error from the fake rather than silently
+// falling through as ErrNotFound. Without this, a test using the
+// fake could pass while the same code would fail against a real
+// provider.
+func TestFetch_MalformedRef_MissingHost(t *testing.T) {
+	mp := NewMemoryProvider("test", nil)
+	_, err := mp.Fetch(context.Background(), secrets.SecretRef{
+		Scheme: "keyring", Host: "", Path: "token",
+	})
+	if !errors.Is(err, secrets.ErrInvalidURI) {
+		t.Errorf("Fetch missing host = %v, want wrapping ErrInvalidURI", err)
+	}
+}
+
+func TestFetch_MalformedRef_UnsupportedScheme(t *testing.T) {
+	mp := NewMemoryProvider("test", nil)
+	_, err := mp.Fetch(context.Background(), secrets.SecretRef{
+		Scheme: "bogus", Host: "agentsh", Path: "token",
+	})
+	if !errors.Is(err, secrets.ErrUnsupportedScheme) {
+		t.Errorf("Fetch bogus scheme = %v, want wrapping ErrUnsupportedScheme", err)
+	}
+}
+
 func TestAdd_ThenFetch(t *testing.T) {
 	mp := NewMemoryProvider("test", nil)
 	if err := mp.Add("keyring://agentsh/added", []byte("value")); err != nil {

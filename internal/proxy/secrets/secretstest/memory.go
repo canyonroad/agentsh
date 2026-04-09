@@ -57,10 +57,26 @@ func (m *MemoryProvider) Name() string { return m.name }
 // Fetch returns the secret seeded under ref.String(), or
 // secrets.ErrNotFound. After Close, Fetch returns errClosed.
 //
+// A malformed SecretRef (e.g. missing host, unsupported scheme)
+// returns the wrapped ParseRef error — typically
+// secrets.ErrInvalidURI or secrets.ErrUnsupportedScheme. This
+// matches the real provider contract: hand-built refs that real
+// providers would reject up front must not silently fall through
+// as ErrNotFound against the fake.
+//
 // The returned SecretValue's Value buffer is a fresh copy. Tests
 // may mutate it without affecting the provider's internal state.
 func (m *MemoryProvider) Fetch(ctx context.Context, ref secrets.SecretRef) (secrets.SecretValue, error) {
 	if err := ctx.Err(); err != nil {
+		return secrets.SecretValue{}, err
+	}
+	// Validate and canonicalize by round-tripping through ParseRef.
+	// Hand-built SecretRefs are common in tests; a malformed one
+	// must produce a URI error here, not ErrNotFound, so tests that
+	// accidentally build bad refs fail the same way against the
+	// fake as they would against a real provider.
+	parsed, err := secrets.ParseRef(ref.String())
+	if err != nil {
 		return secrets.SecretValue{}, err
 	}
 	m.mu.RLock()
@@ -68,7 +84,7 @@ func (m *MemoryProvider) Fetch(ctx context.Context, ref secrets.SecretRef) (secr
 	if m.closed {
 		return secrets.SecretValue{}, errClosed
 	}
-	val, ok := m.entries[ref.String()]
+	val, ok := m.entries[parsed.String()]
 	if !ok {
 		return secrets.SecretValue{}, secrets.ErrNotFound
 	}
