@@ -2,6 +2,7 @@ package capabilities
 
 import (
 	"fmt"
+	"runtime"
 )
 
 // modeRank defines the security strength of each mode (higher = stronger).
@@ -142,15 +143,41 @@ func ModeDescription(mode string) string {
 // only" while the new capabilities_active=false log field says nothing
 // is being dropped).
 //
+// The Linux-specific "retains full Linux capabilities" phrasing is
+// gated on runtime.GOOS so the darwin/windows startup log doesn't
+// claim a Linux concept that doesn't apply. On non-Linux platforms
+// CapabilitiesActive is always false today (there's no probe), so
+// without this gate every darwin/windows minimal-mode startup would
+// log that the process "retains full Linux capabilities", which is
+// nonsense. The second roborev review on #198 flagged this as a
+// Medium platform regression.
+//
 // Callers with access to the detected SecurityCapabilities (server
 // startup logging, agentsh detect) should use this form; pure mode
 // string consumers fall back to ModeDescription.
 func ModeDescriptionWithCaps(mode string, caps *SecurityCapabilities) string {
+	return modeDescriptionWithCapsGOOS(mode, caps, runtime.GOOS)
+}
+
+// modeDescriptionWithCapsGOOS is the testable pure helper underneath
+// ModeDescriptionWithCaps. Taking goos as a parameter lets unit tests
+// exercise both the Linux and non-Linux branches regardless of the
+// platform the test binary is actually running on — otherwise a Linux
+// CI machine could never verify that the darwin/windows startup log
+// avoids the "retains full Linux capabilities" wording.
+func modeDescriptionWithCapsGOOS(mode string, caps *SecurityCapabilities, goos string) string {
 	if mode != ModeMinimal || caps == nil {
 		return ModeDescription(mode)
 	}
 	if caps.CapabilitiesActive {
 		return "Minimal security: capability dropping only (~50% policy enforcement)"
 	}
-	return "Minimal security: fallback mode, no active enforcement primitives (privilege reduction inactive — process retains full Linux capabilities)"
+	if goos == "linux" {
+		return "Minimal security: fallback mode, no active enforcement primitives (privilege reduction inactive — process retains full Linux capabilities)"
+	}
+	// Non-Linux platforms do not expose a real capability-drop probe
+	// today, so "CapabilitiesActive=false" there just means "nothing
+	// measured", not "full Linux capabilities retained". Use the
+	// generic wording instead of a Linux-specific claim.
+	return "Minimal security: fallback mode, no active enforcement primitives"
 }

@@ -145,7 +145,11 @@ func TestLookupTip(t *testing.T) {
 // The tip Action is structured as "<recommendation sentence>. Note:
 // <cautionary sentence>" so tests can assert that DropCapabilities only
 // appears in the cautionary sentence (not as a standalone remediation)
-// without needing a brittle exact-phrase match.
+// without needing a brittle exact-phrase match. The Note: marker MUST
+// exist — a regression that drops the DropCapabilities warning entirely
+// would silently pass if the marker were optional, so the test below
+// asserts all three: the marker exists, the cautionary section is
+// non-empty, and it mentions DropCapabilities.
 func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
 	tip := lookupTip("capability-drop")
 	if tip == nil {
@@ -158,17 +162,17 @@ func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
 		t.Errorf("capability-drop Action still references the old misleading text: %q", tip.Action)
 	}
 
-	// Split the Action into the recommendation sentence and the
-	// cautionary note. The recommendation is everything before the
-	// first "Note:" marker; if the marker is missing the full Action
-	// counts as the recommendation (so a regression that drops the
-	// Note: separator still fails the checks below).
-	recommendation := tip.Action
-	caution := ""
-	if idx := strings.Index(tip.Action, "Note:"); idx >= 0 {
-		recommendation = strings.TrimSpace(tip.Action[:idx])
-		caution = strings.TrimSpace(tip.Action[idx:])
+	// The "Note:" marker must exist so the recommendation sentence
+	// can be unambiguously separated from the cautionary DropCapabilities
+	// explanation. A regression that removes the marker — for example,
+	// by dropping the cautionary section entirely — must fail this test
+	// rather than silently passing the remaining checks.
+	noteIdx := strings.Index(tip.Action, "Note:")
+	if noteIdx < 0 {
+		t.Fatalf("capability-drop Action missing required 'Note:' marker separating recommendation from cautionary section: %q", tip.Action)
 	}
+	recommendation := strings.TrimSpace(tip.Action[:noteIdx])
+	caution := strings.TrimSpace(tip.Action[noteIdx:])
 
 	// The recommendation sentence must mention at least one concrete
 	// mechanism that lowers the running process's permitted/effective
@@ -192,10 +196,15 @@ func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
 	if strings.Contains(recommendation, "DropCapabilities") {
 		t.Errorf("capability-drop Action recommendation sentence must not mention DropCapabilities as a remediation: %q", recommendation)
 	}
-	// The cautionary note, if present, must still explain why
-	// DropCapabilities is insufficient — otherwise operators who
-	// already know about it will keep trying to use it.
-	if caution != "" && !strings.Contains(caution, "DropCapabilities") {
-		t.Errorf("capability-drop cautionary note should explain why DropCapabilities is not a substitute, got %q", caution)
+	// The cautionary note must be non-empty and explicitly explain
+	// why DropCapabilities is insufficient — otherwise operators who
+	// already know about it will keep trying to use it. These checks
+	// are unconditional (not gated on caution != "") so that removing
+	// the cautionary section fails the test instead of skipping it.
+	if caution == "" {
+		t.Errorf("capability-drop Action cautionary section after 'Note:' must be non-empty: %q", tip.Action)
+	}
+	if !strings.Contains(caution, "DropCapabilities") {
+		t.Errorf("capability-drop cautionary note must explain why DropCapabilities is not a substitute, got %q", caution)
 	}
 }
