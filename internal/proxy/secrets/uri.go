@@ -50,7 +50,7 @@ func ParseRef(uri string) (SecretRef, error) {
 	if u.Host == "" {
 		return SecretRef{}, fmt.Errorf("%w: missing host", ErrInvalidURI)
 	}
-	if u.RawQuery != "" {
+	if u.RawQuery != "" || u.ForceQuery {
 		return SecretRef{}, fmt.Errorf("%w: query strings not allowed", ErrInvalidURI)
 	}
 	if u.User != nil {

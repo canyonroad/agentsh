@@ -101,6 +101,13 @@ func TestParseRef_QueryStringRejected(t *testing.T) {
 	}
 }
 
+func TestParseRef_BareTrailingQuestionMarkRejected(t *testing.T) {
+	_, err := ParseRef("keyring://agentsh/token?")
+	if !errors.Is(err, ErrInvalidURI) {
+		t.Errorf("ParseRef with trailing ? = %v, want wrapping ErrInvalidURI", err)
+	}
+}
+
 func TestParseRef_UserInfoRejected(t *testing.T) {
 	_, err := ParseRef("keyring://user:pass@host/path")
 	if !errors.Is(err, ErrInvalidURI) {
