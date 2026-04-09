@@ -429,3 +429,120 @@ func TestReplaceFakeToReal_LeftmostLongestRegOrderInvariant(t *testing.T) {
 		t.Errorf("ReplaceFakeToReal order invariance: got %q, want %q", got, want)
 	}
 }
+
+func TestReplaceRealToFake_SingleEntryMatches(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	body := []byte(`{"echo":"ghp_real00000000"}`)
+	got := tb.ReplaceRealToFake(body)
+	want := []byte(`{"echo":"ghp_fake00000000"}`)
+	if !bytes.Equal(got, want) {
+		t.Errorf("ReplaceRealToFake = %q, want %q", got, want)
+	}
+}
+
+func TestReplaceRealToFake_MultipleEntries(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add github failed: %v", err)
+	}
+	if err := tb.Add("stripe", []byte("sk_fake000000000"), []byte("sk_real000000000")); err != nil {
+		t.Fatalf("Add stripe failed: %v", err)
+	}
+	body := []byte(`gh=ghp_real00000000 stripe=sk_real000000000`)
+	got := tb.ReplaceRealToFake(body)
+	want := []byte(`gh=ghp_fake00000000 stripe=sk_fake000000000`)
+	if !bytes.Equal(got, want) {
+		t.Errorf("ReplaceRealToFake = %q, want %q", got, want)
+	}
+}
+
+func TestReplaceRealToFake_NoMatch(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	body := []byte(`nothing here to substitute`)
+	got := tb.ReplaceRealToFake(body)
+	if !bytes.Equal(got, body) {
+		t.Errorf("ReplaceRealToFake with no match = %q, want %q", got, body)
+	}
+}
+
+func TestReplaceRealToFake_EmptyBody(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	got := tb.ReplaceRealToFake(nil)
+	if len(got) != 0 {
+		t.Errorf("ReplaceRealToFake(nil) = %q, want empty", got)
+	}
+}
+
+func TestReplaceRealToFake_EmptyTable(t *testing.T) {
+	tb := New()
+	body := []byte(`ghp_real00000000`)
+	got := tb.ReplaceRealToFake(body)
+	if !bytes.Equal(got, body) {
+		t.Errorf("ReplaceRealToFake on empty table = %q, want %q", got, body)
+	}
+}
+
+func TestReplaceRealToFake_RoundTrip(t *testing.T) {
+	tb := New()
+	if err := tb.Add("github", []byte("ghp_fake00000000"), []byte("ghp_real00000000")); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	original := []byte(`agent sees ghp_fake00000000 here`)
+	// Agent → upstream: fake → real.
+	upstream := tb.ReplaceFakeToReal(original)
+	// Upstream echoes it back → agent: real → fake.
+	backToAgent := tb.ReplaceRealToFake(upstream)
+	if !bytes.Equal(backToAgent, original) {
+		t.Errorf("round trip: got %q, want %q", backToAgent, original)
+	}
+}
+
+// TestReplaceRealToFake_NoCascadingRewrite asserts the same
+// single-pass-scan property as the matching ReplaceFakeToReal test:
+// with two entries fake1=B,real1=A and fake2=DE,real2=BC, the input
+// "AC" must NOT become "fake2 cascade", because the original body
+// never contained the real "BC".
+func TestReplaceRealToFake_NoCascadingRewrite(t *testing.T) {
+	tb := New()
+	if err := tb.Add("a", []byte("B"), []byte("A")); err != nil {
+		t.Fatalf("Add a failed: %v", err)
+	}
+	if err := tb.Add("bc", []byte("DE"), []byte("BC")); err != nil {
+		t.Fatalf("Add bc failed: %v", err)
+	}
+	body := []byte("AC")
+	got := tb.ReplaceRealToFake(body)
+	want := []byte("BC")
+	if !bytes.Equal(got, want) {
+		t.Errorf("ReplaceRealToFake cascading rewrite: got %q, want %q", got, want)
+	}
+}
+
+// TestReplaceRealToFake_LeftmostLongestMatch asserts that when two
+// reals both match at the same position (one is a prefix of the
+// other), the longer match wins. This makes the result independent
+// of registration order.
+func TestReplaceRealToFake_LeftmostLongestMatch(t *testing.T) {
+	tb := New()
+	if err := tb.Add("short", []byte("XY"), []byte("AB")); err != nil {
+		t.Fatalf("Add short failed: %v", err)
+	}
+	if err := tb.Add("long", []byte("WXYZ"), []byte("ABCD")); err != nil {
+		t.Fatalf("Add long failed: %v", err)
+	}
+	body := []byte("ABCD")
+	got := tb.ReplaceRealToFake(body)
+	want := []byte("WXYZ")
+	if !bytes.Equal(got, want) {
+		t.Errorf("ReplaceRealToFake leftmost-longest: got %q, want %q", got, want)
+	}
+}

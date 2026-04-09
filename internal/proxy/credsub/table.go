@@ -229,3 +229,80 @@ func (t *Table) ReplaceFakeToReal(body []byte) []byte {
 	}
 	return out
 }
+
+// ReplaceRealToFake returns a copy of body with every occurrence of
+// every registered real replaced by its matching fake. This is used
+// by the egress flow when a service has scrub_response: true and the
+// proxy needs to rewrite a response body before returning it to the
+// agent, ensuring the agent never sees the real credential even if
+// the upstream echoed it back.
+//
+// As with ReplaceFakeToReal, the scan walks the ORIGINAL body once
+// and uses leftmost-longest matching to avoid cascading rewrites and
+// to make the result independent of registration order. See the
+// ReplaceFakeToReal doc comment for the reasoning.
+//
+// If body contains no registered real, the original slice is
+// returned unchanged (the result may alias body in that case);
+// otherwise a freshly allocated slice is returned. Callers must
+// treat the result as authoritative and not assume aliasing either
+// way.
+//
+// Length-preservation: because Add enforces len(fake) == len(real),
+// the output length always equals len(body).
+//
+// Complexity: O(N · |body|) where N is the number of entries.
+func (t *Table) ReplaceRealToFake(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	if len(t.entries) == 0 {
+		return body
+	}
+
+	var out []byte
+	i := 0
+	for i < len(body) {
+		// Find the longest real that matches at position i.
+		bestLen := 0
+		var bestFake []byte
+		for j := range t.entries {
+			e := &t.entries[j]
+			n := len(e.Real)
+			if n <= bestLen {
+				continue
+			}
+			if i+n > len(body) {
+				continue
+			}
+			if bytes.Equal(body[i:i+n], e.Real) {
+				bestLen = n
+				bestFake = e.Fake
+			}
+		}
+
+		if bestLen > 0 {
+			if out == nil {
+				out = make([]byte, 0, len(body))
+				out = append(out, body[:i]...)
+			}
+			out = append(out, bestFake...)
+			i += bestLen
+			continue
+		}
+
+		if out != nil {
+			out = append(out, body[i])
+		}
+		i++
+	}
+
+	if out == nil {
+		return body
+	}
+	return out
+}
