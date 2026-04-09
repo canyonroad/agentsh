@@ -368,3 +368,64 @@ func TestReplaceFakeToReal_PreservesLength(t *testing.T) {
 		t.Errorf("ReplaceFakeToReal changed body length: got %d want %d", len(got), len(body))
 	}
 }
+
+// TestReplaceFakeToReal_NoCascadingRewrite asserts the bug fixed in
+// the single-pass scan: with two entries A->B and BC->DE, the input
+// "AC" must NOT become "DE". A naive sequential bytes.ReplaceAll
+// would first turn "AC" into "BC" (entry 1), then turn that "BC"
+// into "DE" (entry 2), even though the original body never contained
+// the fake "BC" at all.
+func TestReplaceFakeToReal_NoCascadingRewrite(t *testing.T) {
+	tb := New()
+	if err := tb.Add("a", []byte("A"), []byte("B")); err != nil {
+		t.Fatalf("Add a failed: %v", err)
+	}
+	if err := tb.Add("bc", []byte("BC"), []byte("DE")); err != nil {
+		t.Fatalf("Add bc failed: %v", err)
+	}
+	body := []byte("AC")
+	got := tb.ReplaceFakeToReal(body)
+	want := []byte("BC")
+	if !bytes.Equal(got, want) {
+		t.Errorf("ReplaceFakeToReal cascading rewrite: got %q, want %q", got, want)
+	}
+}
+
+// TestReplaceFakeToReal_LeftmostLongestMatch asserts that when two
+// fakes both match at the same position (one is a prefix of the
+// other), the longer match wins. This makes the result independent
+// of registration order.
+func TestReplaceFakeToReal_LeftmostLongestMatch(t *testing.T) {
+	tb := New()
+	if err := tb.Add("short", []byte("AB"), []byte("XY")); err != nil {
+		t.Fatalf("Add short failed: %v", err)
+	}
+	if err := tb.Add("long", []byte("ABCD"), []byte("WXYZ")); err != nil {
+		t.Fatalf("Add long failed: %v", err)
+	}
+	body := []byte("ABCD")
+	got := tb.ReplaceFakeToReal(body)
+	want := []byte("WXYZ")
+	if !bytes.Equal(got, want) {
+		t.Errorf("ReplaceFakeToReal leftmost-longest: got %q, want %q", got, want)
+	}
+}
+
+// TestReplaceFakeToReal_LeftmostLongestRegOrderInvariant repeats the
+// previous test with the registrations swapped to prove the result
+// does not depend on insertion order.
+func TestReplaceFakeToReal_LeftmostLongestRegOrderInvariant(t *testing.T) {
+	tb := New()
+	if err := tb.Add("long", []byte("ABCD"), []byte("WXYZ")); err != nil {
+		t.Fatalf("Add long failed: %v", err)
+	}
+	if err := tb.Add("short", []byte("AB"), []byte("XY")); err != nil {
+		t.Fatalf("Add short failed: %v", err)
+	}
+	body := []byte("ABCD")
+	got := tb.ReplaceFakeToReal(body)
+	want := []byte("WXYZ")
+	if !bytes.Equal(got, want) {
+		t.Errorf("ReplaceFakeToReal order invariance: got %q, want %q", got, want)
+	}
+}

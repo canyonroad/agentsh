@@ -152,14 +152,27 @@ func (t *Table) Contains(fake []byte) (Entry, bool) {
 }
 
 // ReplaceFakeToReal returns a copy of body with every occurrence of
-// every registered fake replaced by its matching real. The returned
-// slice may or may not alias body; callers must treat it as the
-// authoritative result.
+// every registered fake replaced by its matching real. If body
+// contains no registered fake, the original slice is returned
+// unchanged (the result may alias body in that case); otherwise a
+// freshly allocated slice is returned. Callers must treat the result
+// as authoritative and not assume aliasing either way.
 //
-// Substitution is done per-entry using bytes.ReplaceAll. Order of
-// entries is not semantically meaningful because Add enforces that no
-// entry's fake or real can exactly equal any other entry's fake or
-// real, so no double-substitution can occur across entries.
+// The scan walks the ORIGINAL body once, checking at each position
+// whether any entry's fake starts there, and emitting the matching
+// real if so. This is critical: applying entry replacements
+// sequentially with bytes.ReplaceAll on the evolving output would
+// cascade — bytes produced by an earlier replacement could match a
+// later entry's fake even though those bytes were not in the original
+// body. The single-pass scan over the original body prevents this.
+//
+// When two entries' fakes both match at the same position (one is a
+// prefix of the other), the longer match wins. Add does not prevent
+// such substring overlaps, so this rule makes the output independent
+// of registration order.
+//
+// Length-preservation: because Add enforces len(fake) == len(real),
+// the output length always equals len(body).
 //
 // Complexity: O(N · |body|) where N is the number of entries.
 func (t *Table) ReplaceFakeToReal(body []byte) []byte {
@@ -174,9 +187,45 @@ func (t *Table) ReplaceFakeToReal(body []byte) []byte {
 		return body
 	}
 
-	result := body
-	for _, e := range t.entries {
-		result = bytes.ReplaceAll(result, e.Fake, e.Real)
+	var out []byte
+	i := 0
+	for i < len(body) {
+		// Find the longest fake that matches at position i.
+		bestLen := 0
+		var bestReal []byte
+		for j := range t.entries {
+			e := &t.entries[j]
+			n := len(e.Fake)
+			if n <= bestLen {
+				continue
+			}
+			if i+n > len(body) {
+				continue
+			}
+			if bytes.Equal(body[i:i+n], e.Fake) {
+				bestLen = n
+				bestReal = e.Real
+			}
+		}
+
+		if bestLen > 0 {
+			if out == nil {
+				out = make([]byte, 0, len(body))
+				out = append(out, body[:i]...)
+			}
+			out = append(out, bestReal...)
+			i += bestLen
+			continue
+		}
+
+		if out != nil {
+			out = append(out, body[i])
+		}
+		i++
 	}
-	return result
+
+	if out == nil {
+		return body
+	}
+	return out
 }
