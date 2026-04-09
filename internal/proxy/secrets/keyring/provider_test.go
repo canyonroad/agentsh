@@ -276,30 +276,59 @@ func TestProvider_ConcurrentFetch_NoRaces(t *testing.T) {
 // RLock test seam holds one Fetch inside the mutex's read
 // critical section; a second goroutine then calls Close, which
 // must block on the exclusive Lock until the in-flight Fetch
-// releases its RLock. The test asserts both that Close does NOT
-// return while the reader is still held, and that Close DOES
-// return once the reader is released, and that any further
-// Fetch reports wrapped ErrKeyringUnavailable.
+// releases its RLock.
 //
-// Unlike a time.Sleep-based overlap, this is a real barrier:
-// the hook guarantees a reader is in the critical section at
-// the moment Close starts, so the race detector (and the
-// behavioral assertions) observe the writer-vs-reader
-// transition every run, on every platform.
+// The test uses two test seams to get true determinism:
+//
+//   - testFetchPostRLockHook fires inside Fetch AFTER it has
+//     acquired RLock, so we know exactly when a reader is in
+//     the critical section.
+//   - testClosePreLockHook fires inside Close AFTER the closed
+//     flag store and BEFORE the exclusive Lock, so we know
+//     exactly when Close is about to wait for that reader.
+//
+// With both signals in hand the test can assert without timing
+// heuristics:
+//
+//  1. Wait for Fetch to enter the hook → reader is holding RLock.
+//  2. Start Close goroutine.
+//  3. Wait for Close hook → Close has stored closed=true and is
+//     about to call Lock.
+//  4. Assert closeDone is not yet closed (non-blocking select).
+//     Close cannot have returned at this point because RWMutex
+//     guarantees Lock waits for all existing RLockers to RUnlock.
+//  5. Release the Fetch hook.
+//  6. Assert closeDone closes (Close returned).
+//  7. Assert post-Close Fetch reports wrapped ErrKeyringUnavailable.
+//
+// The release channel is closed through a t.Cleanup-registered
+// idempotent helper so a t.Fatal mid-test never leaves the Fetch
+// goroutine blocked in the hook (which would deadlock the
+// skipIfUnavailable cleanup's own p.Close call).
 func TestProvider_CloseWaitsForInFlightFetch(t *testing.T) {
 	p := skipIfUnavailable(t)
 
 	inFlight := make(chan struct{})
 	release := make(chan struct{})
-	var once sync.Once
+	var fetchHookOnce sync.Once
+	var releaseOnce sync.Once
+	releaseHook := func() { releaseOnce.Do(func() { close(release) }) }
+	// Register release BEFORE the hook so a mid-test t.Fatal
+	// unblocks the Fetch goroutine before skipIfUnavailable's
+	// own cleanup tries to Close the provider.
+	t.Cleanup(releaseHook)
 
 	t.Cleanup(func() { testFetchPostRLockHook = nil })
 	testFetchPostRLockHook = func() {
-		once.Do(func() {
+		fetchHookOnce.Do(func() {
 			close(inFlight)
 			<-release
 		})
 	}
+
+	closeAtLock := make(chan struct{})
+	t.Cleanup(func() { testClosePreLockHook = nil })
+	testClosePreLockHook = func() { close(closeAtLock) }
 
 	ref := secrets.SecretRef{
 		Scheme: "keyring",
@@ -322,22 +351,25 @@ func TestProvider_CloseWaitsForInFlightFetch(t *testing.T) {
 		_ = p.Close()
 	}()
 
-	// Close must be blocked on Lock while the Fetch goroutine
-	// still holds RLock. This short probe is not a timing
-	// assumption about Close's speed — it is a negative
-	// assertion that Close has not finished yet, which is true
-	// by construction as long as we have not released the
-	// hook.
+	// Wait until the Close goroutine has stored closed=true and
+	// is about to call Lock. After this point, Close cannot have
+	// returned: RWMutex.Lock blocks until every existing RLocker
+	// has RUnlocked, and the Fetch goroutine still holds RLock.
+	<-closeAtLock
+
+	// Non-blocking assertion that Close has not returned. This
+	// is true by construction — RWMutex guarantees it — so no
+	// timing heuristic is needed.
 	select {
 	case <-closeDone:
 		t.Fatal("Close returned while an in-flight Fetch still held the read lock")
-	case <-time.After(50 * time.Millisecond):
-		// expected: Close is still waiting
+	default:
+		// expected: Close is blocked on Lock
 	}
 
-	// Release the in-flight Fetch; it will finish, drop RLock,
-	// and let Close acquire the exclusive Lock.
-	close(release)
+	// Release the in-flight Fetch; it will finish and drop RLock,
+	// which lets Close acquire the exclusive Lock.
+	releaseHook()
 
 	select {
 	case <-closeDone:
@@ -350,7 +382,7 @@ func TestProvider_CloseWaitsForInFlightFetch(t *testing.T) {
 	// After Close returns, any subsequent Fetch must report the
 	// closed sentinel. This goes through the fast path and never
 	// reaches testFetchPostRLockHook, so it does not re-trigger
-	// the once.Do gate.
+	// the fetchHookOnce gate.
 	_, err := p.Fetch(context.Background(), ref)
 	if !errors.Is(err, secrets.ErrKeyringUnavailable) {
 		t.Errorf("post-Close Fetch = %v, want wrapping ErrKeyringUnavailable", err)

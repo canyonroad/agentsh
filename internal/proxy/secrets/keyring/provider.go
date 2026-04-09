@@ -63,6 +63,16 @@ var testFetchPreLockHook func()
 // adds one nil check to the hot path.
 var testFetchPostRLockHook func()
 
+// testClosePreLockHook is a test-only seam invoked (when non-nil)
+// after Close has stored the closed flag and immediately before it
+// tries to acquire the exclusive Lock. Tests use it to synchronize
+// with "Close has entered the function and is about to wait for
+// in-flight Fetches". Without this seam there is no observable
+// point where a test can assert that Close is definitely past its
+// store and on its way to the mutex; a time-based probe is not a
+// proof. Nil in production; one extra nil check per Close.
+var testClosePreLockHook func()
+
 // New constructs a keyring Provider.
 //
 // New verifies the OS keyring backend is reachable by issuing one
@@ -196,6 +206,10 @@ func (p *Provider) Fetch(ctx context.Context, ref secrets.SecretRef) (secrets.Se
 // sees a fully quiesced provider on return.
 func (p *Provider) Close() error {
 	p.closed.Store(true)
+	// Test seam: see testClosePreLockHook. Nil in production.
+	if hook := testClosePreLockHook; hook != nil {
+		hook()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return nil
