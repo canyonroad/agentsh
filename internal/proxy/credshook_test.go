@@ -240,3 +240,26 @@ func TestLeakGuardHook_PostHook_IsNoOp(t *testing.T) {
 		t.Fatalf("PostHook should be no-op, got: %v", err)
 	}
 }
+
+func TestLeakGuardHook_DuplicateHeaders_Returns403(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	req := httptest.NewRequest(http.MethodPost, "http://evil.com/api", nil)
+	// First header value is clean, second contains the fake.
+	req.Header.Set("Authorization", "Bearer clean-token-here!!!!!")
+	req.Header.Add("Authorization", "Bearer ghp_FAKE1234567890abcdef")
+
+	err := h.PreHook(req, &RequestContext{RequestID: "r1", SessionID: "s1"})
+	if err == nil {
+		t.Fatal("expected error — fake is in second Authorization header value")
+	}
+
+	var abortErr *HookAbortError
+	if !errors.As(err, &abortErr) {
+		t.Fatalf("expected HookAbortError, got: %T", err)
+	}
+	if abortErr.StatusCode != 403 {
+		t.Errorf("StatusCode = %d, want 403", abortErr.StatusCode)
+	}
+}

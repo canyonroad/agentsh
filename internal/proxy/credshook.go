@@ -97,9 +97,9 @@ func (h *LeakGuardHook) PreHook(r *http.Request, ctx *RequestContext) error {
 		}
 	}
 
-	// Scan select headers.
+	// Scan select headers (all values, not just the first).
 	for _, hdr := range scanHeaders {
-		if val := r.Header.Get(hdr); val != "" {
+		for _, val := range r.Header.Values(hdr) {
 			if serviceName, found := h.table.ContainsFake([]byte(val)); found {
 				h.logLeak(ctx, serviceName, r.Host)
 				return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
