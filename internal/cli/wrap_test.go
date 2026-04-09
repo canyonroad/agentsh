@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/url"
 	"runtime"
+	"syscall"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/client"
@@ -347,4 +348,41 @@ func TestWrapLaunchConfig_EnvContainsSessionAndWrapper(t *testing.T) {
 			f.Close()
 		}
 	}
+}
+
+func TestFetchSessionForWrap_AutoStartsServerOnConnRefused(t *testing.T) {
+	// Mock client: first GetSession returns ECONNREFUSED, second succeeds.
+	var calls int
+	mc := &mockWrapClient{
+		getSessionFn: func(ctx context.Context, id string) (types.Session, error) {
+			calls++
+			if calls == 1 {
+				return types.Session{}, syscall.ECONNREFUSED
+			}
+			return types.Session{ID: id}, nil
+		},
+	}
+
+	// Stub the auto-start hook so no real subprocess is forked.
+	var autoStartCalls int
+	var autoStartAddr string
+
+	origEnsureFn := ensureServerRunningFn
+	t.Cleanup(func() { ensureServerRunningFn = origEnsureFn })
+	ensureServerRunningFn = func(ctx context.Context, addr string, log io.Writer) error {
+		autoStartCalls++
+		autoStartAddr = addr
+		return nil
+	}
+
+	cfg := &clientConfig{serverAddr: "http://127.0.0.1:18080"}
+	opts := wrapOptions{sessionID: "existing-sess"}
+
+	sess, err := fetchSessionForWrap(context.Background(), mc, cfg, opts, "/tmp/work")
+
+	require.NoError(t, err)
+	assert.Equal(t, "existing-sess", sess.ID)
+	assert.Equal(t, 2, calls, "GetSession should be retried after auto-start")
+	assert.Equal(t, 1, autoStartCalls, "ensureServerRunningFn should be called exactly once")
+	assert.Equal(t, "http://127.0.0.1:18080", autoStartAddr)
 }

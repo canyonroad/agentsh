@@ -15,6 +15,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// ensureServerRunningFn is the auto-start hook used by fetchSessionForWrap.
+// Defaults to the real ensureServerRunning helper from auto.go; tests
+// override it to avoid forking a real agentsh server subprocess.
+var ensureServerRunningFn = ensureServerRunning
+
 func newWrapCmd() *cobra.Command {
 	var sessionID string
 	var policy string
@@ -321,4 +326,45 @@ func setupWrapInterception(ctx context.Context, c client.CLIClient, sessID strin
 
 	// Delegate to platform-specific code for socket pair creation and fd management
 	return platformSetupWrap(ctx, wrapResp, sessID, agentPath, agentArgs, cfg)
+}
+
+// fetchSessionForWrap resolves the session for runWrap, either by reusing
+// opts.sessionID (GetSession) or by creating a new session
+// (CreateSessionWithRequest). If the first server call fails with a
+// connection error and auto-start is enabled, it forks the local agentsh
+// server via ensureServerRunningFn and retries once. The behaviour mirrors
+// the auto-start blocks already present in exec.go and exec_pty.go.
+func fetchSessionForWrap(
+	ctx context.Context,
+	c client.CLIClient,
+	cfg *clientConfig,
+	opts wrapOptions,
+	workspace string,
+) (types.Session, error) {
+	fetch := func() (types.Session, error) {
+		if opts.sessionID != "" {
+			return c.GetSession(ctx, opts.sessionID)
+		}
+		return c.CreateSessionWithRequest(ctx, types.CreateSessionRequest{
+			Workspace: workspace,
+			Policy:    opts.policy,
+			Home:      userHomeDir(),
+		})
+	}
+
+	sess, err := fetch()
+	if err != nil && !autoDisabled() && isConnectionError(err) {
+		if startErr := ensureServerRunningFn(ctx, cfg.serverAddr, os.Stderr); startErr == nil {
+			sess, err = fetch()
+		} else {
+			return types.Session{}, fmt.Errorf("server unreachable (%v); auto-start failed: %w", err, startErr)
+		}
+	}
+	if err != nil {
+		if opts.sessionID != "" {
+			return types.Session{}, fmt.Errorf("get session %s: %w", opts.sessionID, err)
+		}
+		return types.Session{}, fmt.Errorf("create session: %w", err)
+	}
+	return sess, nil
 }
