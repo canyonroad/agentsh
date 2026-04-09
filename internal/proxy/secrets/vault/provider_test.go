@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	secrets "github.com/agentsh/agentsh/internal/proxy/secrets"
+	secretstest "github.com/agentsh/agentsh/internal/proxy/secrets/secretstest"
 )
 
 func TestConfig_TypeName(t *testing.T) {
@@ -231,6 +232,89 @@ func TestNew_TokenAuth_HappyPath(t *testing.T) {
 	}
 	if p.ownedToken {
 		t.Error("ownedToken should be false for token auth")
+	}
+}
+
+func TestNew_AuthChaining_TokenFromResolver(t *testing.T) {
+	const testToken = "hvs.chained-token-67890"
+	srv := mockVaultServer(t, testToken, nil)
+	defer srv.Close()
+
+	tokenRef := secrets.SecretRef{Scheme: "keyring", Host: "agentsh", Path: "vault-token"}
+	memProvider := secretstest.NewMemoryProvider("keyring", map[string][]byte{
+		"keyring://agentsh/vault-token": []byte(testToken),
+	})
+	resolver := func(ctx context.Context, ref secrets.SecretRef) (secrets.SecretValue, error) {
+		return memProvider.Fetch(ctx, ref)
+	}
+
+	cfg := Config{
+		Address: srv.URL,
+		Auth: AuthConfig{
+			Method:   "token",
+			TokenRef: &tokenRef,
+		},
+	}
+	p, err := New(context.Background(), cfg, resolver)
+	if err != nil {
+		t.Fatalf("New with chained token: %v", err)
+	}
+	defer p.Close()
+}
+
+func TestNew_AppRoleAuth(t *testing.T) {
+	const testToken = "hvs.approle-token"
+	srv := mockVaultServer(t, testToken, nil)
+	defer srv.Close()
+
+	cfg := Config{
+		Address: srv.URL,
+		Auth: AuthConfig{
+			Method:   "approle",
+			RoleID:   "my-role-id",
+			SecretID: "my-secret-id",
+		},
+	}
+	p, err := New(context.Background(), cfg, noopResolver)
+	if err != nil {
+		t.Fatalf("New with approle: %v", err)
+	}
+	defer p.Close()
+	if !p.ownedToken {
+		t.Error("ownedToken should be true for approle auth")
+	}
+}
+
+func TestNew_AppRoleAuth_ChainedRefs(t *testing.T) {
+	const testToken = "hvs.approle-chained"
+	srv := mockVaultServer(t, testToken, nil)
+	defer srv.Close()
+
+	roleRef := secrets.SecretRef{Scheme: "keyring", Host: "agentsh", Path: "vault-role"}
+	secretRef := secrets.SecretRef{Scheme: "keyring", Host: "agentsh", Path: "vault-secret"}
+	memProvider := secretstest.NewMemoryProvider("keyring", map[string][]byte{
+		"keyring://agentsh/vault-role":   []byte("my-role-id"),
+		"keyring://agentsh/vault-secret": []byte("my-secret-id"),
+	})
+	resolver := func(ctx context.Context, ref secrets.SecretRef) (secrets.SecretValue, error) {
+		return memProvider.Fetch(ctx, ref)
+	}
+
+	cfg := Config{
+		Address: srv.URL,
+		Auth: AuthConfig{
+			Method:      "approle",
+			RoleIDRef:   &roleRef,
+			SecretIDRef: &secretRef,
+		},
+	}
+	p, err := New(context.Background(), cfg, resolver)
+	if err != nil {
+		t.Fatalf("New with chained approle: %v", err)
+	}
+	defer p.Close()
+	if !p.ownedToken {
+		t.Error("ownedToken should be true for approle auth")
 	}
 }
 
@@ -576,6 +660,94 @@ func TestValidateConfig_TokenNeitherLiteralNorRef(t *testing.T) {
 	if err := validateConfig(cfg); err == nil {
 		t.Fatal("expected error for missing token and token_ref")
 	}
+}
+
+func TestNew_MissingAddress(t *testing.T) {
+	cfg := Config{Auth: AuthConfig{Method: "token", Token: "x"}}
+	_, err := New(context.Background(), cfg, noopResolver)
+	if err == nil {
+		t.Fatal("expected error for missing address")
+	}
+}
+
+func TestNew_BadAuthMethod(t *testing.T) {
+	cfg := Config{Address: "http://localhost", Auth: AuthConfig{Method: "ldap"}}
+	_, err := New(context.Background(), cfg, noopResolver)
+	if err == nil {
+		t.Fatal("expected error for bad auth method")
+	}
+}
+
+func TestNew_TokenAuth_BothLiteralAndRef(t *testing.T) {
+	ref := secrets.SecretRef{Scheme: "keyring", Host: "a", Path: "b"}
+	cfg := Config{
+		Address: "http://localhost",
+		Auth:    AuthConfig{Method: "token", Token: "x", TokenRef: &ref},
+	}
+	_, err := New(context.Background(), cfg, noopResolver)
+	if err == nil {
+		t.Fatal("expected error for both Token and TokenRef")
+	}
+}
+
+func TestNew_TokenAuth_NeitherLiteralNorRef(t *testing.T) {
+	cfg := Config{
+		Address: "http://localhost",
+		Auth:    AuthConfig{Method: "token"},
+	}
+	_, err := New(context.Background(), cfg, noopResolver)
+	if err == nil {
+		t.Fatal("expected error for neither Token nor TokenRef")
+	}
+}
+
+func TestNew_AppRole_MissingSecretID(t *testing.T) {
+	cfg := Config{
+		Address: "http://localhost",
+		Auth:    AuthConfig{Method: "approle", RoleID: "x"},
+	}
+	_, err := New(context.Background(), cfg, noopResolver)
+	if err == nil {
+		t.Fatal("expected error for missing SecretID")
+	}
+}
+
+func TestNew_Kubernetes_MissingRole(t *testing.T) {
+	cfg := Config{
+		Address: "http://localhost",
+		Auth:    AuthConfig{Method: "kubernetes"},
+	}
+	_, err := New(context.Background(), cfg, noopResolver)
+	if err == nil {
+		t.Fatal("expected error for missing KubeRole")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Contract test
+// ---------------------------------------------------------------------------
+
+func TestProviderContract_AppliedToVaultProvider(t *testing.T) {
+	const testToken = "hvs.contract-test-token"
+	srv := mockVaultServer(t, testToken, nil)
+	defer srv.Close()
+
+	cfg := Config{
+		Address: srv.URL,
+		Auth:    AuthConfig{Method: "token", Token: testToken},
+	}
+	p, err := New(context.Background(), cfg, noopResolver)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	probeRef := secrets.SecretRef{
+		Scheme: "vault",
+		Host:   "kv",
+		Path:   "definitely-does-not-exist-contract-probe",
+		Field:  "x",
+	}
+	secretstest.ProviderContract(t, "vault", p, probeRef)
 }
 
 // ---------------------------------------------------------------------------
