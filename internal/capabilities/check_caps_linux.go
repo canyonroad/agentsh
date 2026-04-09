@@ -86,16 +86,26 @@ func probeCapabilityDrop() ProbeResult {
 
 	// Note: we deliberately do NOT short-circuit on PR_CAPBSET_READ errors.
 	// Environments that block the extended prctl (seccomp, lockdown) must
-	// still get a useful answer from the permitted-only fallback below —
-	// the second roborev review caught an earlier version of this function
-	// that hard-failed here before the fallback could fire.
+	// still get a useful answer from the permitted-only fallback inside
+	// probeCapabilityDropFrom — the second roborev review caught an
+	// earlier version of this function that hard-failed here before the
+	// fallback could fire.
 	bndLow, bndHigh, bndErr := readCapBoundingSet(lastCap)
+	return probeCapabilityDropFrom(data, bndLow, bndHigh, bndErr, lastCap)
+}
 
+// probeCapabilityDropFrom is the pure decision layer of the capability
+// drop probe: given the capget result, bounding-set read, and lastCap,
+// it returns the ProbeResult that callers would see. Split out from
+// probeCapabilityDrop so tests can inject synthetic capget and bounding
+// inputs and assert the exact Available/Detail combinations for each
+// branch (full permitted + bounding unknown, reduced permitted, etc.)
+// without depending on the live process's capability state.
+func probeCapabilityDropFrom(data [2]unix.CapUserData, bndLow, bndHigh uint32, bndErr error, lastCap int) ProbeResult {
 	report := capsDropped(data, bndLow, bndHigh, bndErr != nil, lastCap)
 	if bndErr != nil {
 		report.bndErr = bndErr
 	}
-
 	if !report.anyDropped() {
 		return ProbeResult{
 			Available: false,

@@ -438,26 +438,50 @@ func TestProbeCapabilityDrop_BoundingReadBlocked(t *testing.T) {
 // TestProbeCapabilityDrop_BoundingReadBlockedFullPermitted exercises the
 // not-dropped branch of the degraded-mode fallback: when bounding reads
 // are blocked AND permitted is full (root without drop), the probe must
-// still report Available=false (no evidence of drop), with detail text
-// that flags the bounding status so operators know the conclusion was
-// reached in degraded mode.
+// report Available=false (no evidence of drop) with detail text that
+// flags the bounding status so operators know the conclusion was reached
+// in degraded mode.
+//
+// This test injects synthetic capget data via probeCapabilityDropFrom so
+// it exercises the full-permitted branch regardless of the test
+// process's real capability state. An earlier version sampled the live
+// process and only asserted that the detail contained either "bounding
+// unknown" or "permitted" — on unprivileged test runs the probe took
+// the dropped branch and the assertion never reached the branch it
+// claimed to cover. Regression guard for the fourth roborev review.
 func TestProbeCapabilityDrop_BoundingReadBlockedFullPermitted(t *testing.T) {
-	origRead := readCapBoundingSet
-	defer func() { readCapBoundingSet = origRead }()
+	data := fullCapData(41)
+	simulatedErr := errors.New("simulated blocked")
 
-	// Fake a reader that returns an error so the probe takes the
-	// fallback path. We also need full permitted, but the running test
-	// process may have a reduced CapPrm. Instead of mucking with real
-	// capget state, drive the decision by checking the probe's detail
-	// text: if bndUnknown surfaced AND the text says "not dropped",
-	// the fallback worked correctly regardless of Available value.
-	readCapBoundingSet = func(int) (uint32, uint32, error) {
-		return 0, 0, errors.New("blocked")
+	r := probeCapabilityDropFrom(data, 0, 0, simulatedErr, 41)
+	if r.Available {
+		t.Errorf("expected Available=false when CapPrm full and bounding unknown, got Available=true (detail: %q)", r.Detail)
 	}
+	want := "process retains full CapPrm (42/42 caps); bounding unknown (simulated blocked)"
+	if r.Detail != want {
+		t.Errorf("Detail = %q; want %q", r.Detail, want)
+	}
+}
 
-	r := probeCapabilityDrop()
-	if !strings.Contains(r.Detail, "bounding unknown") && !strings.Contains(r.Detail, "permitted") {
-		t.Errorf("detail did not reach degraded-mode path: %q", r.Detail)
+// TestProbeCapabilityDropFrom_PermittedDroppedBoundingUnknown is the
+// mirror of the test above: if CapPrm is reduced AND bounding reads
+// are blocked, probeCapabilityDropFrom must still flag the backend as
+// available via the permitted-only fallback. The synthetic-input form
+// lets us assert the exact degraded-mode detail string without the
+// live-process dependency that made the earlier hook-based test skip
+// on full-capability runs.
+func TestProbeCapabilityDropFrom_PermittedDroppedBoundingUnknown(t *testing.T) {
+	data := fullCapData(41)
+	data[0].Permitted &^= 1 << 21 // clear CAP_SYS_ADMIN
+	simulatedErr := errors.New("simulated blocked")
+
+	r := probeCapabilityDropFrom(data, 0, 0, simulatedErr, 41)
+	if !r.Available {
+		t.Errorf("expected Available=true via permitted-only fallback, got Available=false (detail: %q)", r.Detail)
+	}
+	want := "1/42 caps dropped from permitted; bounding unknown (simulated blocked)"
+	if r.Detail != want {
+		t.Errorf("Detail = %q; want %q", r.Detail, want)
 	}
 }
 
