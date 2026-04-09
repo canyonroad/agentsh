@@ -163,6 +163,24 @@ func TestParseRef_EncodedSlashRejected(t *testing.T) {
 	}
 }
 
+func TestParseRef_EmptyLeadingPathSegmentRejected(t *testing.T) {
+	cases := []string{
+		"vault://kv//secret",
+		"vault://kv///triple",
+	}
+	for _, uri := range cases {
+		t.Run(uri, func(t *testing.T) {
+			_, err := ParseRef(uri)
+			if err == nil {
+				t.Fatalf("ParseRef(%q): expected error, got nil", uri)
+			}
+			if !errors.Is(err, ErrInvalidURI) {
+				t.Fatalf("ParseRef(%q): want ErrInvalidURI, got %v", uri, err)
+			}
+		})
+	}
+}
+
 func TestSecretRef_String_RoundTrip(t *testing.T) {
 	cases := []struct {
 		name string

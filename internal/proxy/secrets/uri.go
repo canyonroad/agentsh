@@ -65,10 +65,15 @@ func ParseRef(uri string) (SecretRef, error) {
 		return SecretRef{}, fmt.Errorf("%w: literal '/' in path segment (%%2F) not supported", ErrInvalidURI)
 	}
 
+	trimmedPath := strings.TrimPrefix(u.Path, "/")
+	if strings.HasPrefix(trimmedPath, "/") {
+		return SecretRef{}, fmt.Errorf("%w: empty leading path segment not allowed", ErrInvalidURI)
+	}
+
 	return SecretRef{
 		Scheme: u.Scheme,
 		Host:   u.Host,
-		Path:   strings.TrimPrefix(u.Path, "/"),
+		Path:   trimmedPath,
 		Field:  u.Fragment,
 	}, nil
 }
