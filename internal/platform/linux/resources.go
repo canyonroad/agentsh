@@ -33,11 +33,16 @@ func (r *cgroupResourceLimiter) SupportedLimits() []platform.ResourceType {
 	if !r.Available() {
 		return nil
 	}
-	return []platform.ResourceType{
+	supported := []platform.ResourceType{
 		platform.ResourceCPU,
 		platform.ResourceMemory,
 		platform.ResourceProcessCount,
 	}
+	// io controller is optional — check if the probe detected it.
+	if mgr, err := r.ensureManager(); err == nil && mgr.Probe().IOAvailable {
+		supported = append(supported, platform.ResourceDiskIO)
+	}
+	return supported
 }
 
 func (r *cgroupResourceLimiter) ensureManager() (*limits.CgroupManager, error) {
@@ -52,9 +57,6 @@ func (r *cgroupResourceLimiter) ensureManager() (*limits.CgroupManager, error) {
 }
 
 func (r *cgroupResourceLimiter) Apply(config platform.ResourceConfig) (platform.ResourceHandle, error) {
-	if config.MaxDiskReadMBps > 0 || config.MaxDiskWriteMBps > 0 {
-		return nil, fmt.Errorf("disk IO limiting not supported (no io controller in CgroupV2Limits)")
-	}
 	if config.MaxNetworkMbps > 0 {
 		return nil, fmt.Errorf("network bandwidth limiting not supported (requires tc/qdisc)")
 	}
@@ -69,6 +71,10 @@ func (r *cgroupResourceLimiter) Apply(config platform.ResourceConfig) (platform.
 		CPUQuotaPct:    int(config.MaxCPUPercent),
 		PidsMax:        int(config.MaxProcesses),
 	}
+	// Note: MaxDiskReadMBps/MaxDiskWriteMBps are not mapped because
+	// CgroupV2Limits does not carry IO fields. io.stat is still read
+	// in Stats() for telemetry. A future extension could write io.max
+	// via CgroupManager when the io controller is available.
 
 	return &cgroupResourceHandle{
 		mgr:  mgr,
@@ -133,6 +139,23 @@ func (h *cgroupResourceHandle) Stats() platform.ResourceStats {
 	if b, err := os.ReadFile(filepath.Join(cg.Path, "pids.current")); err == nil {
 		if v, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
 			stats.ProcessCount = v
+		}
+	}
+
+	if b, err := os.ReadFile(filepath.Join(cg.Path, "io.stat")); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			for _, field := range strings.Fields(line) {
+				if strings.HasPrefix(field, "rbytes=") {
+					if v, err := strconv.ParseInt(strings.TrimPrefix(field, "rbytes="), 10, 64); err == nil {
+						stats.DiskReadMB += v / (1024 * 1024)
+					}
+				}
+				if strings.HasPrefix(field, "wbytes=") {
+					if v, err := strconv.ParseInt(strings.TrimPrefix(field, "wbytes="), 10, 64); err == nil {
+						stats.DiskWriteMB += v / (1024 * 1024)
+					}
+				}
+			}
 		}
 	}
 

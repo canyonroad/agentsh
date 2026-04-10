@@ -100,6 +100,15 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 		} else {
 			own = filepath.Join(cur, own)
 		}
+	} else {
+		// Absolute ownHint: check if the process actually resides in the
+		// leaf sub-cgroup for accurate LeafMoved telemetry, but don't
+		// alter the provided own path.
+		if cur, err := CurrentCgroupDir(); err == nil {
+			if cur == filepath.Join(own, "agentsh.leaf") {
+				leafResident = true
+			}
+		}
 	}
 
 	// Step 2: does the own cgroup even expose the required controllers?

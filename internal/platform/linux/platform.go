@@ -102,7 +102,7 @@ func (p *Platform) detectCapabilities() platform.Capabilities {
 		HasCgroups:           hasCgroups,
 		CanLimitCPU:          hasCgroups,
 		CanLimitMemory:       hasCgroups,
-		CanLimitDiskIO:       false, // CgroupV2Limits has no disk IO fields
+		CanLimitDiskIO:       hasCgroups, // io controller; availability checked at probe time
 		CanLimitNetworkBW:    false, // network BW is tc/qdisc, not cgroup v2
 		CanLimitProcessCount: hasCgroups,
 	}
