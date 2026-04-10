@@ -331,6 +331,8 @@ func TestMapAWSError_AuthCodes(t *testing.T) {
 		"AccessDeniedException",
 		"UnrecognizedClientException",
 		"InvalidSignatureException",
+		"InvalidClientTokenId",
+		"SignatureDoesNotMatch",
 		"ExpiredTokenException",
 		"IncompleteSignature",
 	}

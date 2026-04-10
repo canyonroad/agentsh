@@ -82,15 +82,14 @@ func New(ctx context.Context, cfg Config, _ secrets.RefResolver) (*Provider, err
 
 	// Probe connectivity: STS GetCallerIdentity is permission-neutral —
 	// it verifies credentials are valid without requiring access to any
-	// specific Secrets Manager resource. This works even in least-privilege
-	// IAM setups that restrict GetSecretValue to specific ARN prefixes.
+	// specific Secrets Manager resource. Auth failures are fatal (bad
+	// credentials will never self-heal). Non-auth failures (e.g. STS
+	// endpoint unreachable in a VPC-endpoint-only deployment) are
+	// non-fatal — the SM endpoint may still work.
 	stsClient := sts.NewFromConfig(awsCfg)
 	_, probeErr := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-	if probeErr != nil {
-		if isAuthError(probeErr) {
-			return nil, fmt.Errorf("%w: aws-sm connectivity probe: %s", secrets.ErrUnauthorized, probeErr.Error())
-		}
-		return nil, fmt.Errorf("aws-sm: connectivity probe failed: %w", probeErr)
+	if probeErr != nil && isAuthError(probeErr) {
+		return nil, fmt.Errorf("%w: aws-sm connectivity probe: %s", secrets.ErrUnauthorized, probeErr.Error())
 	}
 
 	return &Provider{client: client}, nil
@@ -261,6 +260,8 @@ func isAuthError(err error) bool {
 		case "AccessDeniedException",
 			"UnrecognizedClientException",
 			"InvalidSignatureException",
+			"InvalidClientTokenId",
+			"SignatureDoesNotMatch",
 			"ExpiredTokenException",
 			"IncompleteSignature":
 			return true
