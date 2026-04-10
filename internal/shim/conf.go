@@ -10,8 +10,9 @@ import (
 
 // ShimConf is the parsed shim configuration.
 type ShimConf struct {
-	Force bool              // force=true|1
-	Raw   map[string]string // all key=value pairs for forward compat
+	Force     bool              // force=true|1
+	ReadyGate bool              // ready_gate=true|1
+	Raw       map[string]string // all key=value pairs for forward compat
 }
 
 // ShimConfPath returns the config file path under root.
@@ -46,6 +47,7 @@ func ReadShimConf(root string) (ShimConf, error) {
 		conf.Raw[strings.TrimSpace(k)] = strings.TrimSpace(v)
 	}
 	conf.Force = conf.Raw["force"] == "true" || conf.Raw["force"] == "1"
+	conf.ReadyGate = conf.Raw["ready_gate"] == "true" || conf.Raw["ready_gate"] == "1"
 	// Strict validation: if "force" key is present but not a recognized value,
 	// return an error to prevent silent fail-open from typos like "force=tru".
 	if v, ok := conf.Raw["force"]; ok {
@@ -54,6 +56,14 @@ func ReadShimConf(root string) (ShimConf, error) {
 			// valid
 		default:
 			return conf, fmt.Errorf("shim.conf: invalid force value %q (expected true, 1, false, or 0)", v)
+		}
+	}
+	if v, ok := conf.Raw["ready_gate"]; ok {
+		switch v {
+		case "true", "1", "false", "0":
+			// valid
+		default:
+			return conf, fmt.Errorf("shim.conf: invalid ready_gate value %q (expected true, 1, false, or 0)", v)
 		}
 	}
 	return conf, nil

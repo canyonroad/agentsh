@@ -5,6 +5,8 @@ package shim_test
 
 import (
 	"bytes"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,6 +49,9 @@ func TestShellShim_UsesAgentshBinAndForwardsArgs(t *testing.T) {
 	defer func() { _ = pty.Close() }()
 	defer func() { _ = tty.Close() }()
 
+	// Start a fake listener so the readiness gate passes.
+	srvURL := startFakeListener(t)
+
 	cmd := exec.Command(shimPath, "-lc", "echo hi")
 	cmd.Stdin = tty
 	cmd.Stdout = tty
@@ -54,7 +59,7 @@ func TestShellShim_UsesAgentshBinAndForwardsArgs(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"AGENTSH_BIN="+fakeAgentsh,
 		"AGENTSH_SESSION_ID=session-test",
-		"AGENTSH_SERVER=http://127.0.0.1:1",
+		"AGENTSH_SERVER="+srvURL,
 		"FAKE_AGENTSH_LOG="+logPath,
 	)
 	if err := cmd.Start(); err != nil {
@@ -110,6 +115,9 @@ func TestShellShim_UsesPATHWhenAgentshBinUnset(t *testing.T) {
 	defer func() { _ = pty.Close() }()
 	defer func() { _ = tty.Close() }()
 
+	// Start a fake listener so the readiness gate passes.
+	srvURL := startFakeListener(t)
+
 	cmd := exec.Command(shimPath, "-lc", "echo hi")
 	cmd.Stdin = tty
 	cmd.Stdout = tty
@@ -117,6 +125,7 @@ func TestShellShim_UsesPATHWhenAgentshBinUnset(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"AGENTSH_SESSION_ID=session-test",
+		"AGENTSH_SERVER="+srvURL,
 		"FAKE_AGENTSH_LOG="+logPath,
 	)
 	if err := cmd.Start(); err != nil {
@@ -226,6 +235,9 @@ func TestShellShim_RespectsCustomArgv0(t *testing.T) {
 	defer func() { _ = pty.Close() }()
 	defer func() { _ = tty.Close() }()
 
+	// Start a fake listener so the readiness gate passes.
+	srvURL := startFakeListener(t)
+
 	cmd := exec.Command(shimPath, "-lc", "echo hi")
 	// Override argv0 to simulate a harness exec'ing /bin/sh but pointing to our shim.
 	cmd.Args[0] = "/bin/sh"
@@ -235,6 +247,7 @@ func TestShellShim_RespectsCustomArgv0(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"AGENTSH_BIN="+fakeAgentsh,
 		"AGENTSH_SESSION_ID=session-test",
+		"AGENTSH_SERVER="+srvURL,
 		"FAKE_AGENTSH_LOG="+logPath,
 	)
 	if err := cmd.Start(); err != nil {
@@ -282,6 +295,9 @@ func TestShellShim_LoginArgv0SelectsBash(t *testing.T) {
 	defer func() { _ = pty.Close() }()
 	defer func() { _ = tty.Close() }()
 
+	// Start a fake listener so the readiness gate passes.
+	srvURL := startFakeListener(t)
+
 	cmd := exec.Command(shimPath, "-lc", "echo hi")
 	// Simulate login shell argv0 ("-bash").
 	cmd.Args[0] = "-bash"
@@ -291,6 +307,7 @@ func TestShellShim_LoginArgv0SelectsBash(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"AGENTSH_BIN="+fakeAgentsh,
 		"AGENTSH_SESSION_ID=session-test",
+		"AGENTSH_SERVER="+srvURL,
 		"FAKE_AGENTSH_LOG="+logPath,
 	)
 	if err := cmd.Start(); err != nil {
@@ -337,10 +354,14 @@ func TestShellShim_AddsPTYWhenTTY(t *testing.T) {
 	defer func() { _ = pty.Close() }()
 	defer func() { _ = tty.Close() }()
 
+	// Start a fake listener so the readiness gate passes.
+	srvURL := startFakeListener(t)
+
 	cmd := exec.Command(shimPath, "-lc", "echo hi")
 	cmd.Env = append(os.Environ(),
 		"AGENTSH_BIN="+fakeAgentsh,
 		"AGENTSH_SESSION_ID=session-test",
+		"AGENTSH_SERVER="+srvURL,
 		"FAKE_AGENTSH_LOG="+logPath,
 	)
 	cmd.Stdin = tty
@@ -459,6 +480,27 @@ func TestShellShim_NonInteractiveBypass_ExecRealShellNotAgentsh(t *testing.T) {
 		content, _ := os.ReadFile(logPath)
 		t.Fatalf("agentsh should NOT have been invoked for non-interactive use; log: %s", content)
 	}
+}
+
+// startFakeListener starts a TCP listener on a random port and returns the
+// AGENTSH_SERVER URL. Satisfies the shim's server readiness gate.
+func startFakeListener(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start fake listener: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	return fmt.Sprintf("http://%s", ln.Addr().String())
 }
 
 func repoRootOrSkip(t *testing.T) string {

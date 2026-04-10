@@ -2,14 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestResolveAgentshBin(t *testing.T) {
@@ -229,6 +234,29 @@ func copyFilePath(t *testing.T, src, dst string) {
 	}
 }
 
+// startFakeServer starts a TCP listener on a random port and returns the
+// AGENTSH_SERVER URL. The listener is closed when the test ends. This
+// satisfies the shim's server readiness gate so enforcement proceeds.
+func startFakeServer(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start fake server: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	// Accept (and discard) connections so the dial doesn't hang.
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	return fmt.Sprintf("http://%s", ln.Addr().String())
+}
+
 func TestShimPipedStdin_PassesBinaryDataThrough(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-shim tests require Unix")
@@ -364,6 +392,9 @@ func TestShimConfForce_EnforcesWithoutTTY(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Start a fake server so the readiness gate passes.
+	srvURL := startFakeServer(t)
+
 	// No AGENTSH_SHIM_FORCE env var — config file alone should trigger enforce.
 	// The shim will try to find agentsh and fail, proving it didn't bypass.
 	cmd := exec.Command(shimBin, "-c", "echo hello")
@@ -372,6 +403,7 @@ func TestShimConfForce_EnforcesWithoutTTY(t *testing.T) {
 		"PATH=/usr/bin:/bin",
 		"AGENTSH_SESSION_ID=test-session",
 		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SERVER=" + srvURL,
 		// No AGENTSH_SHIM_FORCE — relying on config file.
 		// No AGENTSH_BIN — agentsh not available, so enforce path will fail.
 	}
@@ -411,6 +443,9 @@ func TestShimConfForce_EnvZeroCannotOverrideConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Start a fake server so the readiness gate passes.
+	srvURL := startFakeServer(t)
+
 	cmd := exec.Command(shimBin, "-c", "echo hello")
 	cmd.Stdin = strings.NewReader("") // non-TTY
 	cmd.Env = []string{
@@ -418,6 +453,7 @@ func TestShimConfForce_EnvZeroCannotOverrideConfig(t *testing.T) {
 		"AGENTSH_SESSION_ID=test-session",
 		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
 		"AGENTSH_SHIM_FORCE=0",
+		"AGENTSH_SERVER=" + srvURL,
 	}
 
 	var stderr bytes.Buffer
@@ -457,12 +493,16 @@ func TestShimConfForce_UnreadableConfigFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Start a fake server so the readiness gate passes.
+	srvURL := startFakeServer(t)
+
 	cmd := exec.Command(shimBin, "-c", "echo hello")
 	cmd.Stdin = strings.NewReader("") // non-TTY
 	cmd.Env = []string{
 		"PATH=/usr/bin:/bin",
 		"AGENTSH_SESSION_ID=test-session",
 		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SERVER=" + srvURL,
 	}
 
 	var stderr bytes.Buffer
@@ -475,6 +515,641 @@ func TestShimConfForce_UnreadableConfigFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "agentsh") {
 		t.Fatalf("expected agentsh-related error (enforce path), got stderr: %s", stderr.String())
+	}
+}
+
+// TestShimReadinessGate_ServerUnreachable_ForceFallsThrough verifies that
+// when force=true, ready_gate=true, and the server is not reachable, the
+// shim falls through to bash.real instead of failing. This is the boot-time safety fix.
+func TestShimReadinessGate_ServerUnreachable_ForceFallsThrough(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\nready_gate=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Point AGENTSH_SERVER at a port where nothing is listening.
+	// The readiness gate should fail, causing fallthrough to sh.real.
+	cmd := exec.Command(shimBin, "-c", "echo readiness-fallthrough")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SERVER=http://127.0.0.1:1", // nothing listens on port 1
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// Should succeed: fell through to sh.real which ran "echo readiness-fallthrough".
+	if err != nil {
+		t.Fatalf("expected success (fallthrough to sh.real), got error: %v\nstderr: %s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "readiness-fallthrough" {
+		t.Fatalf("stdout = %q, want %q", got, "readiness-fallthrough")
+	}
+}
+
+// TestShimReadinessGate_NoReadyGate_FailsClosed verifies that without
+// ready_gate=true, the shim does NOT fall through when the local server
+// is unreachable — it tries to enforce and fails (fail-closed default).
+func TestShimReadinessGate_NoReadyGate_FailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// force=true but NO ready_gate — should fail-closed.
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SERVER=http://127.0.0.1:1", // unreachable
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// Should FAIL: no ready_gate, so shim tries to enforce (find agentsh) and fails.
+	if err == nil {
+		t.Fatalf("expected error: without ready_gate, shim should try to enforce and fail")
+	}
+	if !strings.Contains(stderr.String(), "agentsh") {
+		t.Fatalf("expected agentsh-related error, got stderr: %s", stderr.String())
+	}
+}
+
+// TestShimReadinessGate_ServerReachable_ForceEnforces verifies that when
+// force=true, ready_gate=true, and the server IS reachable, the shim
+// proceeds to enforcement (gate passes, enforcement kicks in).
+func TestShimReadinessGate_ServerReachable_ForceEnforces(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\nready_gate=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start a real TCP listener so the readiness gate passes.
+	srvURL := startFakeServer(t)
+
+	cmd := exec.Command(shimBin, "-c", "echo hello")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SERVER=" + srvURL,
+		// No AGENTSH_BIN — agentsh not available, so enforce will fail.
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// Should FAIL: readiness gate passed, shim tried to enforce, couldn't find agentsh.
+	if err == nil {
+		t.Fatalf("expected error: server reachable, shim should enforce and fail (no agentsh)")
+	}
+	if !strings.Contains(stderr.String(), "agentsh") {
+		t.Fatalf("expected agentsh-related error, got stderr: %s", stderr.String())
+	}
+}
+
+// TestShimReadinessGate_ServerUnreachable_NonInteractiveBypass verifies that
+// the non-interactive bypass still works when the server is unreachable
+// and force is not set (default path — no regression).
+func TestShimReadinessGate_ServerUnreachable_NonInteractiveBypass(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	// No shim.conf, no AGENTSH_SHIM_FORCE — default non-interactive bypass.
+	cmd := exec.Command(shimBin, "-c", "echo non-interactive-ok")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SERVER=http://127.0.0.1:1", // unreachable
+	}
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	err := cmd.Run()
+	if err != nil {
+		t.Fatalf("expected success (non-interactive bypass), got error: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "non-interactive-ok" {
+		t.Fatalf("stdout = %q, want %q", got, "non-interactive-ok")
+	}
+}
+
+// TestShimReadinessGate_EnvForce_SkipsGate verifies that AGENTSH_SHIM_FORCE=1
+// (env-driven) skips the readiness gate even when ready_gate=true. The env var
+// signals explicit operator intent to enforce unconditionally — the gate's
+// fail-open behavior would contradict that intent.
+func TestShimReadinessGate_EnvForce_SkipsGate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("ready_gate=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// AGENTSH_SHIM_FORCE=1 + ready_gate=true + unreachable local server.
+	// The env-forced enforcement should skip the gate and try to enforce.
+	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SHIM_FORCE=1",
+		"AGENTSH_SERVER=http://127.0.0.1:1", // unreachable
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// Should FAIL: env-forced enforcement skips the gate, tries to find
+	// agentsh, and fails (no agentsh binary available).
+	if err == nil {
+		t.Fatalf("expected error: AGENTSH_SHIM_FORCE=1 should skip ready_gate and enforce")
+	}
+	if !strings.Contains(stderr.String(), "agentsh") {
+		t.Fatalf("expected agentsh-related error (enforce path), got stderr: %s", stderr.String())
+	}
+}
+
+// TestShimReadinessGate_RemoteUnreachable_FailsClosed verifies that when the
+// server is remote (non-loopback) and unreachable, the shim fails closed
+// even with ready_gate=true. Only local servers get fail-open behavior.
+func TestShimReadinessGate_RemoteUnreachable_FailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\nready_gate=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Point at a remote (non-loopback) address that won't respond.
+	// Use a non-routable IP so dial fails quickly (ENETUNREACH or timeout).
+	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SERVER=http://192.0.2.1:18080", // TEST-NET-1: non-routable
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// Should FAIL (fail-closed for remote servers).
+	if err == nil {
+		t.Fatalf("expected error: remote unreachable should fail-closed, not fall through")
+	}
+	if !strings.Contains(stderr.String(), "remote server not reachable") {
+		t.Fatalf("expected remote-specific error, got stderr: %s", stderr.String())
+	}
+}
+
+// TestShimReadinessGate_GRPCTransport_ProbesGRPCAddr verifies that when
+// AGENTSH_TRANSPORT=grpc, the readiness gate probes AGENTSH_GRPC_ADDR instead
+// of AGENTSH_SERVER. With a reachable gRPC listener, the shim should proceed
+// to enforcement even if AGENTSH_SERVER points at nothing.
+func TestShimReadinessGate_GRPCTransport_ProbesGRPCAddr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\nready_gate=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start a fake gRPC listener and track connections.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	probed := make(chan struct{}, 1)
+	go func() {
+		for {
+			c, e := ln.Accept()
+			if e != nil {
+				return
+			}
+			c.Close()
+			select {
+			case probed <- struct{}{}:
+			default:
+			}
+		}
+	}()
+
+	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_TRANSPORT=grpc",
+		"AGENTSH_GRPC_ADDR=" + ln.Addr().String(),
+		"AGENTSH_SERVER=http://127.0.0.1:1", // unreachable — should be ignored
+		"AGENTSH_BIN=/nonexistent/agentsh",   // known-bad so enforcement fails deterministically
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	// Should FAIL: readiness gate passed (gRPC endpoint is reachable),
+	// shim tried to enforce but couldn't find agentsh.
+	if err == nil {
+		t.Fatalf("expected error: readiness gate should have passed and enforcement should fail (no agentsh)")
+	}
+	if !strings.Contains(stderr.String(), "agentsh") {
+		t.Fatalf("expected agentsh-related error (enforce path), got stderr: %s", stderr.String())
+	}
+	// Verify the readiness gate actually probed the gRPC endpoint.
+	select {
+	case <-probed:
+		// ok — listener received at least one connection
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected readiness gate to probe AGENTSH_GRPC_ADDR, but no connections were received")
+	}
+}
+
+// TestShimReadinessGate_UnixSocketEACCES_FailsClosed verifies that a
+// permission-denied error on a unix socket fails closed (not fail-open).
+// EACCES is a hard error indicating bad permissions, not "server not started."
+func TestShimReadinessGate_UnixSocketEACCES_FailsClosed(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("unix socket permission checks via chmod are only reliable on Linux")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root (root bypasses permission checks)")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\nready_gate=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a unix socket, then change permissions to trigger EACCES.
+	sockPath := filepath.Join(tmp, "agentsh.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	if err := os.Chmod(sockPath, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SERVER=unix://" + sockPath,
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	// Should FAIL (fail-closed on EACCES, not fall through to sh.real).
+	if err == nil {
+		t.Fatalf("expected error: EACCES on unix socket should fail-closed, not fall through")
+	}
+	if !strings.Contains(stderr.String(), "local server dial error") {
+		t.Fatalf("expected local dial error message, got stderr: %s", stderr.String())
+	}
+}
+
+func TestServerAddrFromEnv(t *testing.T) {
+	tests := []struct {
+		name        string
+		env         string
+		wantNetwork string
+		wantAddr    string
+		wantErr     bool
+	}{
+		{"empty", "", "tcp", "127.0.0.1:18080", false},
+		{"default URL", "http://127.0.0.1:18080", "tcp", "127.0.0.1:18080", false},
+		{"custom port", "http://127.0.0.1:9999", "tcp", "127.0.0.1:9999", false},
+		{"localhost", "http://localhost:18080", "tcp", "localhost:18080", false},
+		{"remote host", "http://10.0.0.5:18080", "tcp", "10.0.0.5:18080", false},
+		{"https with port", "https://agent.example.com:443", "tcp", "agent.example.com:443", false},
+		{"https no port", "https://agent.example.com", "tcp", "agent.example.com:443", false},
+		{"http no port", "http://127.0.0.1", "tcp", "127.0.0.1:80", false},
+		{"garbage", "://bad", "", "", true},
+		{"unix socket", "unix:///var/run/agentsh.sock", "unix", "/var/run/agentsh.sock", false},
+		{"unix socket no triple slash", "unix:/var/run/agentsh.sock", "unix", "/var/run/agentsh.sock", false},
+		{"unix socket host+path", "unix://host/path/to/sock", "unix", "host/path/to/sock", false},
+		// Schemeless values that url.Parse accepts as path-only — must be rejected.
+		{"schemeless hostname", "localhost", "", "", true},
+		{"schemeless path", "/tmp/agentsh.sock", "", "", true},
+		// Empty host with path — must be rejected.
+		{"http empty host", "http:///bad", "", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AGENTSH_SERVER", tt.env)
+			gotNet, gotAddr, gotErr := serverAddrFromEnv()
+			if (gotErr != nil) != tt.wantErr {
+				t.Errorf("serverAddrFromEnv() error = %v, wantErr %v", gotErr, tt.wantErr)
+				return
+			}
+			if gotErr != nil {
+				return
+			}
+			if gotNet != tt.wantNetwork || gotAddr != tt.wantAddr {
+				t.Errorf("serverAddrFromEnv() = (%q, %q), want (%q, %q)", gotNet, gotAddr, tt.wantNetwork, tt.wantAddr)
+			}
+		})
+	}
+}
+
+func TestServerAddrFromEnv_GRPCTransport(t *testing.T) {
+	t.Run("grpc default addr", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "grpc")
+		t.Setenv("AGENTSH_GRPC_ADDR", "")
+		t.Setenv("AGENTSH_SERVER", "http://ignored:18080")
+		gotNet, gotAddr, gotErr := serverAddrFromEnv()
+		if gotErr != nil {
+			t.Fatalf("unexpected error: %v", gotErr)
+		}
+		if gotNet != "tcp" || gotAddr != "127.0.0.1:9090" {
+			t.Errorf("got (%q, %q), want (tcp, 127.0.0.1:9090)", gotNet, gotAddr)
+		}
+	})
+	t.Run("grpc custom addr", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "grpc")
+		t.Setenv("AGENTSH_GRPC_ADDR", "10.0.0.5:9090")
+		gotNet, gotAddr, gotErr := serverAddrFromEnv()
+		if gotErr != nil {
+			t.Fatalf("unexpected error: %v", gotErr)
+		}
+		if gotNet != "tcp" || gotAddr != "10.0.0.5:9090" {
+			t.Errorf("got (%q, %q), want (tcp, 10.0.0.5:9090)", gotNet, gotAddr)
+		}
+	})
+	t.Run("grpc invalid addr", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "grpc")
+		t.Setenv("AGENTSH_GRPC_ADDR", "not-a-host-port")
+		_, _, gotErr := serverAddrFromEnv()
+		if gotErr == nil {
+			t.Fatal("expected error for invalid AGENTSH_GRPC_ADDR")
+		}
+	})
+	t.Run("grpc uppercase transport", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "GRPC")
+		t.Setenv("AGENTSH_GRPC_ADDR", "")
+		t.Setenv("AGENTSH_SERVER", "http://ignored:18080")
+		gotNet, gotAddr, gotErr := serverAddrFromEnv()
+		if gotErr != nil {
+			t.Fatalf("unexpected error: %v", gotErr)
+		}
+		if gotNet != "tcp" || gotAddr != "127.0.0.1:9090" {
+			t.Errorf("got (%q, %q), want (tcp, 127.0.0.1:9090)", gotNet, gotAddr)
+		}
+	})
+	t.Run("grpc scheme-bearing addr", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "grpc")
+		t.Setenv("AGENTSH_GRPC_ADDR", "grpc://10.0.0.5:9090")
+		gotNet, gotAddr, gotErr := serverAddrFromEnv()
+		if gotErr != nil {
+			t.Fatalf("unexpected error: %v", gotErr)
+		}
+		if gotNet != "tcp" || gotAddr != "10.0.0.5:9090" {
+			t.Errorf("got (%q, %q), want (tcp, 10.0.0.5:9090)", gotNet, gotAddr)
+		}
+	})
+	t.Run("invalid transport typo", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "grcp") // typo
+		_, _, gotErr := serverAddrFromEnv()
+		if gotErr == nil {
+			t.Fatal("expected error for invalid AGENTSH_TRANSPORT")
+		}
+		if !strings.Contains(gotErr.Error(), "AGENTSH_TRANSPORT") {
+			t.Fatalf("error should mention AGENTSH_TRANSPORT: %v", gotErr)
+		}
+	})
+	t.Run("http transport explicit", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "http")
+		t.Setenv("AGENTSH_SERVER", "http://127.0.0.1:18080")
+		gotNet, gotAddr, gotErr := serverAddrFromEnv()
+		if gotErr != nil {
+			t.Fatalf("unexpected error: %v", gotErr)
+		}
+		if gotNet != "tcp" || gotAddr != "127.0.0.1:18080" {
+			t.Errorf("got (%q, %q), want (tcp, 127.0.0.1:18080)", gotNet, gotAddr)
+		}
+	})
+}
+
+func TestIsTransientDialError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"ECONNREFUSED", syscall.ECONNREFUSED, true},
+		{"ENOENT", syscall.ENOENT, true},
+		{"EACCES", syscall.EACCES, false},
+		{"other errno", syscall.EPERM, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isTransientDialError(tt.err)
+			if got != tt.want {
+				t.Errorf("isTransientDialError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerIsLocal(t *testing.T) {
+	tests := []struct {
+		name    string
+		network string
+		addr    string
+		want    bool
+	}{
+		{"loopback", "tcp", "127.0.0.1:18080", true},
+		{"localhost", "tcp", "localhost:18080", true},
+		{"loopback ipv6", "tcp", "[::1]:18080", true},
+		{"remote ip", "tcp", "10.0.0.5:18080", false},
+		{"remote hostname", "tcp", "agent.example.com:443", false},
+		{"unix socket", "unix", "/var/run/agentsh.sock", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := serverIsLocal(tt.network, tt.addr)
+			if got != tt.want {
+				t.Errorf("serverIsLocal(%q, %q) = %v, want %v", tt.network, tt.addr, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerIsLocal_HostnameResolution(t *testing.T) {
+	tests := []struct {
+		name   string
+		addr   string
+		addrs  []string
+		err    error
+		want   bool
+	}{
+		{
+			name:  "loopback alias",
+			addr:  "myhost:18080",
+			addrs: []string{"127.0.0.1"},
+			want:  true,
+		},
+		{
+			name:  "loopback alias ipv6",
+			addr:  "myhost:18080",
+			addrs: []string{"::1"},
+			want:  true,
+		},
+		{
+			name:  "remote hostname",
+			addr:  "remote:18080",
+			addrs: []string{"10.0.0.5"},
+			want:  false,
+		},
+		{
+			name:  "mixed loopback and remote",
+			addr:  "mixed:18080",
+			addrs: []string{"127.0.0.1", "10.0.0.5"},
+			want:  false,
+		},
+		{
+			name:  "lookup failure",
+			addr:  "nohost:18080",
+			addrs: nil,
+			err:   fmt.Errorf("no such host"),
+			want:  false,
+		},
+		{
+			name:  "empty result",
+			addr:  "empty:18080",
+			addrs: []string{},
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origLookup := lookupHost
+			lookupHost = func(_ context.Context, _ string) ([]string, error) {
+				return tt.addrs, tt.err
+			}
+			t.Cleanup(func() { lookupHost = origLookup })
+
+			got := serverIsLocal("tcp", tt.addr)
+			if got != tt.want {
+				t.Errorf("serverIsLocal(tcp, %q) = %v, want %v", tt.addr, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -581,6 +1256,52 @@ func TestIsAgentshCommand_Symlink(t *testing.T) {
 	// Should detect agentsh even though PATH resolves to a symlink.
 	if !isAgentshCommand([]string{"-c", "agentsh detect"}) {
 		t.Fatalf("expected true: symlinked agentsh should be detected")
+	}
+}
+
+// TestShimConfValidationError_FailsWithMessage verifies that a typo in
+// shim.conf (e.g. ready_gate=tru) fails with a clear error message instead
+// of being silently swallowed into the fail-closed force=true path. Without
+// this, a typo disabling the readiness gate would leave operators in the
+// exact boot-loop the gate is meant to prevent.
+func TestShimConfValidationError_FailsWithMessage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Typo: "tru" instead of "true".
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("ready_gate=tru\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected error for typo in shim.conf, but shim succeeded")
+	}
+	// Must mention the invalid value, not just "agentsh" resolve errors.
+	if !strings.Contains(stderr.String(), "invalid ready_gate") {
+		t.Fatalf("expected validation error message, got stderr: %s", stderr.String())
 	}
 }
 

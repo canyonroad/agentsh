@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/shim"
 	"golang.org/x/term"
@@ -85,16 +90,25 @@ func main() {
 	// Note: env can only ADD enforcement, never remove it.
 	conf, confErr := shim.ReadShimConf(shimConfRoot())
 	if confErr != nil {
-		// Fail-closed: if the config file exists but can't be read (permission
-		// denied, I/O error), assume force=true. An operator wrote the file for
-		// a reason — silently bypassing policy is worse than over-enforcing.
-		// Only a missing file (ENOENT) is non-fatal (handled inside ReadShimConf).
+		// Distinguish validation errors (typos like force=tru, ready_gate=tru)
+		// from I/O errors (permission denied). Validation errors must fail
+		// visibly — a typo in ready_gate silently disabling the boot-safety
+		// gate would leave operators in the exact boot-loop this code prevents.
+		// I/O errors → fail-closed (assume force=true) because the operator
+		// wrote the file for a reason.
+		if strings.HasPrefix(confErr.Error(), "shim.conf:") {
+			fatalWithHint(127,
+				fmt.Sprintf("agentsh-shell-shim: %v", confErr),
+				"Fix the value in "+shim.ShimConfPath(shimConfRoot())+" or remove the invalid line.",
+			)
+		}
 		debugLog("read shim.conf: %v (fail-closed: assuming force=true)", confErr)
 		conf.Force = true
 	}
 	forceShim := strings.TrimSpace(os.Getenv("AGENTSH_SHIM_FORCE"))
+	forceFromEnv := forceShim == "1"
 	switch {
-	case forceShim == "1":
+	case forceFromEnv:
 		debugLog("AGENTSH_SHIM_FORCE=1: enforcing policy despite non-interactive stdin")
 	case conf.Force:
 		forceShim = "1"
@@ -104,6 +118,69 @@ func main() {
 		debugLog("non-interactive bypass: stdin is not a tty, executing real shell %s", realShell)
 		runAndExit(realShell, argv0, os.Args[1:], os.Environ())
 		return
+	}
+
+	// Server readiness gate: when ready_gate=true in shim.conf, verify the
+	// agentsh server is listening before attempting enforcement. If the local
+	// server isn't reachable, fall through to the real shell instead of
+	// failing. This prevents boot loops when force=true is baked into the
+	// image and the shim is root's login shell — agentsh.service may not be
+	// ready yet during early boot.
+	//
+	// The gate is opt-in (ready_gate=true) because fail-open on a local
+	// server being down is a security tradeoff: it enables boot safety but
+	// also means a crashed server temporarily disables enforcement. Operators
+	// enable it when boot reliability outweighs the crash-window risk.
+	//
+	// When AGENTSH_SHIM_FORCE=1 is set via env (not config file), the gate
+	// is skipped entirely. The env var signals explicit operator intent to
+	// enforce unconditionally — the operator can remove the env var if there
+	// is a boot issue, unlike config-file force=true which is harder to
+	// change at boot time.
+	//
+	// Remote servers always fail-closed regardless of ready_gate.
+	if conf.ReadyGate && !forceFromEnv {
+		srvNetwork, srvAddr, srvErr := serverAddrFromEnv()
+		if srvErr != nil {
+			// Non-empty but invalid server address — fail-closed.
+			hint := "Fix the AGENTSH_SERVER value or unset it to use the default (http://127.0.0.1:18080)."
+			if strings.ToLower(strings.TrimSpace(os.Getenv("AGENTSH_TRANSPORT"))) == "grpc" {
+				hint = "Fix the AGENTSH_GRPC_ADDR value or unset it to use the default (127.0.0.1:9090)."
+			}
+			fatalWithHint(127,
+				fmt.Sprintf("agentsh-shell-shim: ready_gate: %v", srvErr),
+				hint,
+			)
+		}
+		local := serverIsLocal(srvNetwork, srvAddr)
+		// Local probes complete in <1ms (ECONNREFUSED is immediate on
+		// loopback/unix). Remote probes need a longer timeout to avoid
+		// false negatives on VPN or higher-latency links.
+		probeTimeout := 200 * time.Millisecond
+		if !local {
+			probeTimeout = 2 * time.Second
+		}
+		reachable, dialErr := serverReachable(srvNetwork, srvAddr, probeTimeout)
+		if !reachable {
+			if local && isTransientDialError(dialErr) {
+				// Transient error (ECONNREFUSED, ENOENT, timeout) on a local
+				// server — likely "not started yet" during boot. Fall through.
+				debugLog("ready_gate: local server not reachable at %s:%s (%v), falling through to real shell %s", srvNetwork, srvAddr, dialErr, realShell)
+				runAndExit(realShell, argv0, os.Args[1:], os.Environ())
+				return
+			}
+			if local {
+				// Hard error (EACCES, etc.) on a local endpoint — fail-closed.
+				fatalWithHint(127,
+					fmt.Sprintf("agentsh-shell-shim: local server dial error at %s: %v", srvAddr, dialErr),
+					"Check unix socket permissions or server configuration.",
+				)
+			}
+			fatalWithHint(127,
+				fmt.Sprintf("agentsh-shell-shim: remote server not reachable at %s", srvAddr),
+				"The agentsh server is configured as a remote endpoint and is not responding. Check server availability.",
+			)
+		}
 	}
 
 	agentshBin, err := resolveAgentshBin()
@@ -467,4 +544,177 @@ func debugLog(format string, args ...any) {
 	if strings.TrimSpace(os.Getenv("AGENTSH_SHIM_DEBUG")) == "1" {
 		_, _ = fmt.Fprintf(os.Stderr, "agentsh-shell-shim: "+format+"\n", args...)
 	}
+}
+
+// serverAddrFromEnv returns the network type and address of the agentsh server
+// for a readiness probe. It follows the same transport selection as the agentsh
+// CLI: when AGENTSH_TRANSPORT=grpc, probes AGENTSH_GRPC_ADDR instead of
+// AGENTSH_SERVER. For HTTP transport (the default), reads AGENTSH_SERVER
+// (default http://127.0.0.1:18080) and returns ("tcp", "host:port") or
+// ("unix", "/path/to/socket").
+//
+// Returns an error for non-empty but unparseable values so the caller can
+// fail-closed instead of silently falling back to a local address.
+func serverAddrFromEnv() (network, addr string, err error) {
+	// gRPC transport: probe the gRPC address, not the HTTP server.
+	// Normalize the same way the CLI does: lowercase transport, strip
+	// scheme prefix from address (client.NewGRPC accepts "grpc://host:port").
+	transport := strings.ToLower(strings.TrimSpace(os.Getenv("AGENTSH_TRANSPORT")))
+	if transport != "" && transport != "http" && transport != "grpc" {
+		return "", "", fmt.Errorf("invalid AGENTSH_TRANSPORT value %q (expected http or grpc)", transport)
+	}
+	if transport == "grpc" {
+		grpcAddr := strings.TrimSpace(os.Getenv("AGENTSH_GRPC_ADDR"))
+		if grpcAddr == "" {
+			grpcAddr = "127.0.0.1:9090"
+		}
+		// Strip scheme prefix to match client.NewGRPC normalization.
+		if strings.Contains(grpcAddr, "://") {
+			if u, parseErr := url.Parse(grpcAddr); parseErr == nil && u.Host != "" {
+				grpcAddr = u.Host
+			}
+		}
+		// Validate it looks like host:port.
+		if _, _, splitErr := net.SplitHostPort(grpcAddr); splitErr != nil {
+			return "", "", fmt.Errorf("invalid AGENTSH_GRPC_ADDR value %q: %w", grpcAddr, splitErr)
+		}
+		return "tcp", grpcAddr, nil
+	}
+
+	raw := strings.TrimSpace(os.Getenv("AGENTSH_SERVER"))
+	if raw == "" {
+		return "tcp", "127.0.0.1:18080", nil
+	}
+	u, parseErr := url.Parse(raw)
+	if parseErr != nil {
+		return "", "", fmt.Errorf("invalid AGENTSH_SERVER value %q: %w", raw, parseErr)
+	}
+	switch u.Scheme {
+	case "unix":
+		// Match the client transport logic in internal/client/client.go:
+		// u.Path when Host is empty, u.Host+u.Path when both are present.
+		sockPath := u.Path
+		if sockPath == "" {
+			sockPath = u.Host
+		} else if u.Host != "" {
+			sockPath = u.Host + u.Path
+		}
+		sockPath = strings.TrimSpace(sockPath)
+		if sockPath == "" {
+			return "", "", fmt.Errorf("invalid AGENTSH_SERVER: unix URL with empty socket path %q", raw)
+		}
+		return "unix", sockPath, nil
+	case "http", "https":
+		host := u.Hostname()
+		if host == "" {
+			return "", "", fmt.Errorf("invalid AGENTSH_SERVER: %s URL with empty host %q", u.Scheme, raw)
+		}
+		port := u.Port()
+		if port == "" {
+			switch u.Scheme {
+			case "https":
+				port = "443"
+			default:
+				port = "80"
+			}
+		}
+		return "tcp", net.JoinHostPort(host, port), nil
+	default:
+		return "", "", fmt.Errorf("invalid AGENTSH_SERVER: unsupported scheme %q in %q (expected http, https, or unix)", u.Scheme, raw)
+	}
+}
+
+// serverReachable does a fast dial to check if the agentsh server is
+// listening. Supports both TCP and unix socket addresses. On loopback
+// this completes in <1ms when the server is up, or returns ECONNREFUSED
+// immediately when it's not. The timeout parameter should be short for
+// local probes (~200ms) and longer for remote probes (~2s) to avoid
+// false negatives on higher-latency links.
+//
+// Design: uses a raw TCP/unix dial rather than an HTTP health check.
+// This is intentional for a boot-time login shell: the shim must be
+// minimal (no HTTP client imports), fast, and resilient to partial
+// server startup. If a non-agentsh service occupies the port, the
+// subsequent agentsh exec call fails with a clear error.
+//
+// Returns the dial error so the caller can distinguish transient errors
+// (ECONNREFUSED, ENOENT — server not started) from hard errors
+// (EACCES — permission denied on unix socket).
+func serverReachable(network, addr string, timeout time.Duration) (bool, error) {
+	conn, err := net.DialTimeout(network, addr, timeout)
+	if err != nil {
+		return false, err
+	}
+	_ = conn.Close()
+	return true, nil
+}
+
+// isTransientDialError returns true for errors that indicate the server is
+// not yet started (ECONNREFUSED, ENOENT, timeout). These are safe for
+// fail-open in the readiness gate. Hard errors like EACCES (bad socket
+// permissions) return false — they should fail-closed.
+func isTransientDialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case syscall.ECONNREFUSED, syscall.ENOENT:
+			return true
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return false
+}
+
+// lookupHost is the hostname resolver used by serverIsLocal. Package-level
+// variable so tests can inject a fake resolver without DNS dependencies.
+var lookupHost = net.DefaultResolver.LookupHost
+
+// serverIsLocal returns true if the server address is a local endpoint
+// (loopback TCP or unix socket). Fail-open on probe failure is only safe
+// for local servers where "not reachable" means "not started yet."
+// Remote servers use fail-closed to prevent network issues from silently
+// disabling enforcement.
+//
+// For non-IP hostnames (e.g. custom /etc/hosts aliases), attempts DNS
+// resolution with a short timeout. A hostname is only considered local if
+// ALL resolved addresses are loopback — mixed-resolution names (loopback +
+// remote) are treated as remote to preserve the fail-closed guarantee.
+// If resolution fails, treats as remote (fail-closed) which is the safe default.
+func serverIsLocal(network, addr string) bool {
+	if network == "unix" {
+		return true
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip != nil {
+		return ip.IsLoopback()
+	}
+	// Hostname that isn't a literal IP — resolve and check if ALL addresses
+	// are loopback. Short timeout avoids hanging during early boot when
+	// DNS/nsswitch may not be ready.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	addrs, err := lookupHost(ctx, host)
+	if err != nil || len(addrs) == 0 {
+		return false
+	}
+	for _, a := range addrs {
+		resolved := net.ParseIP(a)
+		if resolved == nil || !resolved.IsLoopback() {
+			return false
+		}
+	}
+	return true
 }
