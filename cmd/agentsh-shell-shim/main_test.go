@@ -12,9 +12,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestResolveAgentshBin(t *testing.T) {
@@ -817,7 +817,7 @@ func TestShimReadinessGate_GRPCTransport_ProbesGRPCAddr(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	var probed int32
+	probed := make(chan struct{}, 1)
 	go func() {
 		for {
 			c, e := ln.Accept()
@@ -825,7 +825,10 @@ func TestShimReadinessGate_GRPCTransport_ProbesGRPCAddr(t *testing.T) {
 				return
 			}
 			c.Close()
-			atomic.AddInt32(&probed, 1)
+			select {
+			case probed <- struct{}{}:
+			default:
+			}
 		}
 	}()
 
@@ -854,7 +857,10 @@ func TestShimReadinessGate_GRPCTransport_ProbesGRPCAddr(t *testing.T) {
 		t.Fatalf("expected agentsh-related error (enforce path), got stderr: %s", stderr.String())
 	}
 	// Verify the readiness gate actually probed the gRPC endpoint.
-	if atomic.LoadInt32(&probed) == 0 {
+	select {
+	case <-probed:
+		// ok — listener received at least one connection
+	case <-time.After(2 * time.Second):
 		t.Fatal("expected readiness gate to probe AGENTSH_GRPC_ADDR, but no connections were received")
 	}
 }
