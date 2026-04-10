@@ -690,6 +690,55 @@ func TestShimReadinessGate_ServerUnreachable_NonInteractiveBypass(t *testing.T) 
 	}
 }
 
+// TestShimReadinessGate_EnvForce_SkipsGate verifies that AGENTSH_SHIM_FORCE=1
+// (env-driven) skips the readiness gate even when ready_gate=true. The env var
+// signals explicit operator intent to enforce unconditionally — the gate's
+// fail-open behavior would contradict that intent.
+func TestShimReadinessGate_EnvForce_SkipsGate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("ready_gate=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// AGENTSH_SHIM_FORCE=1 + ready_gate=true + unreachable local server.
+	// The env-forced enforcement should skip the gate and try to enforce.
+	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SHIM_FORCE=1",
+		"AGENTSH_SERVER=http://127.0.0.1:1", // unreachable
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// Should FAIL: env-forced enforcement skips the gate, tries to find
+	// agentsh, and fails (no agentsh binary available).
+	if err == nil {
+		t.Fatalf("expected error: AGENTSH_SHIM_FORCE=1 should skip ready_gate and enforce")
+	}
+	if !strings.Contains(stderr.String(), "agentsh") {
+		t.Fatalf("expected agentsh-related error (enforce path), got stderr: %s", stderr.String())
+	}
+}
+
 // TestShimReadinessGate_RemoteUnreachable_FailsClosed verifies that when the
 // server is remote (non-loopback) and unreachable, the shim fails closed
 // even with ready_gate=true. Only local servers get fail-open behavior.

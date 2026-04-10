@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -104,8 +105,9 @@ func main() {
 		conf.Force = true
 	}
 	forceShim := strings.TrimSpace(os.Getenv("AGENTSH_SHIM_FORCE"))
+	forceFromEnv := forceShim == "1"
 	switch {
-	case forceShim == "1":
+	case forceFromEnv:
 		debugLog("AGENTSH_SHIM_FORCE=1: enforcing policy despite non-interactive stdin")
 	case conf.Force:
 		forceShim = "1"
@@ -129,8 +131,14 @@ func main() {
 	// also means a crashed server temporarily disables enforcement. Operators
 	// enable it when boot reliability outweighs the crash-window risk.
 	//
+	// When AGENTSH_SHIM_FORCE=1 is set via env (not config file), the gate
+	// is skipped entirely. The env var signals explicit operator intent to
+	// enforce unconditionally — the operator can remove the env var if there
+	// is a boot issue, unlike config-file force=true which is harder to
+	// change at boot time.
+	//
 	// Remote servers always fail-closed regardless of ready_gate.
-	if conf.ReadyGate {
+	if conf.ReadyGate && !forceFromEnv {
 		srvNetwork, srvAddr, srvErr := serverAddrFromEnv()
 		if srvErr != nil {
 			// Non-empty but invalid AGENTSH_SERVER — fail-closed.
@@ -593,6 +601,10 @@ func serverReachable(network, addr string, timeout time.Duration) bool {
 // for local servers where "not reachable" means "not started yet."
 // Remote servers use fail-closed to prevent network issues from silently
 // disabling enforcement.
+//
+// For non-IP hostnames (e.g. custom /etc/hosts aliases), attempts DNS
+// resolution with a short timeout. If resolution fails, treats as remote
+// (fail-closed) which is the safe default.
 func serverIsLocal(network, addr string) bool {
 	if network == "unix" {
 		return true
@@ -605,5 +617,22 @@ func serverIsLocal(network, addr string) bool {
 		return true
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip != nil {
+		return ip.IsLoopback()
+	}
+	// Hostname that isn't a literal IP — resolve and check if any address
+	// is loopback. Short timeout avoids hanging during early boot when
+	// DNS/nsswitch may not be ready.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if resolved := net.ParseIP(a); resolved != nil && resolved.IsLoopback() {
+			return true
+		}
+	}
+	return false
 }
