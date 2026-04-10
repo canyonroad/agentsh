@@ -82,14 +82,21 @@ func New(ctx context.Context, cfg Config, _ secrets.RefResolver) (*Provider, err
 
 	// Probe connectivity: STS GetCallerIdentity is permission-neutral —
 	// it verifies credentials are valid without requiring access to any
-	// specific Secrets Manager resource. Auth failures are fatal (bad
-	// credentials will never self-heal). Non-auth failures (e.g. STS
-	// endpoint unreachable in a VPC-endpoint-only deployment) are
-	// non-fatal — the SM endpoint may still work.
+	// specific Secrets Manager resource. Auth failures and context
+	// cancellation are fatal. Non-auth failures (e.g. STS endpoint
+	// unreachable in a VPC-endpoint-only deployment) are non-fatal —
+	// the SM endpoint may still work.
 	stsClient := sts.NewFromConfig(awsCfg)
 	_, probeErr := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-	if probeErr != nil && isAuthError(probeErr) {
-		return nil, fmt.Errorf("%w: aws-sm connectivity probe: %s", secrets.ErrUnauthorized, probeErr.Error())
+	if probeErr != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if isAuthError(probeErr) {
+			return nil, fmt.Errorf("%w: aws-sm connectivity probe: %s", secrets.ErrUnauthorized, probeErr.Error())
+		}
+		// Non-auth, non-context failure (e.g. STS endpoint unreachable):
+		// swallow — the SM endpoint may still work.
 	}
 
 	return &Provider{client: client}, nil
