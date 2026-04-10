@@ -345,3 +345,46 @@ func TestProbe_EACCES_NoLeafMove(t *testing.T) {
 		t.Fatalf("expected LeafMoved=false for EACCES")
 	}
 }
+
+func TestProbe_LeafMove_IdempotentSecondProbe(t *testing.T) {
+	// Regression: after a successful leaf-move the process is in own/leaf.
+	// A second probe (e.g. NewCgroupManager after CheckAll) should normalize
+	// back to the parent and NOT create own/leaf/leaf.
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.openWriteErrsOnce[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	f.seedFile(own+"/cgroup.procs", "1234")
+
+	// First probe: triggers leaf-move.
+	res1, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe 1: %v", err)
+	}
+	if !res1.LeafMoved || res1.Mode != ModeNested {
+		t.Fatalf("probe 1: expected leaf-moved nested, got mode=%q leaf=%v", res1.Mode, res1.LeafMoved)
+	}
+
+	// Second probe: pass own/leaf as ownHint (simulates /proc/self/cgroup
+	// returning the leaf path). Should normalize back to own.
+	leafOwn := own + "/leaf"
+	// own/leaf has no subtree_control, but the parent's is already set from probe 1.
+	f.seedFile(leafOwn+"/cgroup.controllers", "cpu memory pids")
+
+	res2, err := ProbeCgroupsV2(context.Background(), f, leafOwn)
+	if err != nil {
+		t.Fatalf("probe 2: %v", err)
+	}
+	if res2.Mode != ModeNested {
+		t.Fatalf("probe 2: expected nested, got %q", res2.Mode)
+	}
+	if res2.OwnCgroup != own {
+		t.Fatalf("probe 2: OwnCgroup should be %q (parent), got %q", own, res2.OwnCgroup)
+	}
+	// Verify no leaf/leaf was created.
+	if _, err := f.Stat(own + "/leaf/leaf"); err == nil {
+		t.Fatalf("leaf/leaf should NOT exist — probe should be idempotent")
+	}
+}

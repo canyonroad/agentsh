@@ -81,6 +81,14 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 		own = filepath.Join(cur, own)
 	}
 
+	// Normalize: if the process is inside a "leaf" cgroup created by a prior
+	// probe's leaf-move, use the parent as the enforcement root. This makes
+	// the probe idempotent — calling it twice in the same process (e.g.
+	// capabilities.CheckAll then NewCgroupManager) won't create leaf/leaf.
+	if filepath.Base(own) == "leaf" {
+		own = filepath.Dir(own)
+	}
+
 	// Step 2: does the own cgroup even expose the required controllers?
 	ownAvailable, err := readControllerSet(fs, filepath.Join(own, "cgroup.controllers"))
 	if err != nil {

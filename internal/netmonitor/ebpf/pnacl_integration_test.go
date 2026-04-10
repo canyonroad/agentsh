@@ -67,6 +67,7 @@ func TestIntegration_PNACLMonitor_BasicOperation(t *testing.T) {
 	tmp := filepath.Join(os.TempDir(), "agentsh-pnacl-test")
 	_ = os.RemoveAll(tmp)
 	cgDir := filepath.Join("/sys/fs/cgroup", filepath.Base(tmp))
+	_ = os.Remove(cgDir) // clean up from interrupted prior runs
 	if err := os.Mkdir(cgDir, 0o755); err != nil {
 		t.Skipf("cgroup mkdir failed: %v", err)
 	}
@@ -146,6 +147,7 @@ func TestIntegration_ProcessFilter_WithRealEvents(t *testing.T) {
 	tmp := filepath.Join(os.TempDir(), "agentsh-pnacl-filter-test")
 	_ = os.RemoveAll(tmp)
 	cgDir := filepath.Join("/sys/fs/cgroup", filepath.Base(tmp))
+	_ = os.Remove(cgDir) // clean up from interrupted prior runs
 	if err := os.Mkdir(cgDir, 0o755); err != nil {
 		t.Skipf("cgroup mkdir failed: %v", err)
 	}
@@ -249,6 +251,7 @@ func TestIntegration_ConnectionHolder_ApprovalFlow(t *testing.T) {
 	tmp := filepath.Join(os.TempDir(), "agentsh-pnacl-approval-test")
 	_ = os.RemoveAll(tmp)
 	cgDir := filepath.Join("/sys/fs/cgroup", filepath.Base(tmp))
+	_ = os.Remove(cgDir) // clean up from interrupted prior runs
 	if err := os.Mkdir(cgDir, 0o755); err != nil {
 		t.Skipf("cgroup mkdir failed: %v", err)
 	}

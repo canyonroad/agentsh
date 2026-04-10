@@ -25,8 +25,8 @@ func TestIntegration_AttachAndEnforce(t *testing.T) {
 
 	// Create a temp cgroup and move self into it.
 	tmp := filepath.Join(os.TempDir(), "agentsh-ebpf-test")
-	_ = os.RemoveAll(tmp)
 	cgDir := filepath.Join("/sys/fs/cgroup", filepath.Base(tmp))
+	_ = os.Remove(cgDir) // clean up from interrupted prior runs
 	if err := os.Mkdir(cgDir, 0o755); err != nil {
 		t.Skipf("cgroup mkdir failed: %v", err)
 	}
@@ -71,8 +71,8 @@ func TestIntegration_DenyWithoutDefaultDeny(t *testing.T) {
 	}
 
 	tmp := filepath.Join(os.TempDir(), "agentsh-ebpf-deny-test")
-	_ = os.RemoveAll(tmp)
 	cgDir := filepath.Join("/sys/fs/cgroup", filepath.Base(tmp))
+	_ = os.Remove(cgDir) // clean up from interrupted prior runs
 	if err := os.Mkdir(cgDir, 0o755); err != nil {
 		t.Skipf("cgroup mkdir failed: %v", err)
 	}
