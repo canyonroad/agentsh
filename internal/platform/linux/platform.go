@@ -28,7 +28,6 @@ type Platform struct {
 	fs          *Filesystem
 	net         *Network
 	sandbox     *SandboxManager
-	resources   *ResourceLimiter
 	caps        platform.Capabilities
 	initialized bool
 }
@@ -188,12 +187,9 @@ func (p *Platform) Sandbox() platform.SandboxManager {
 	return p.sandbox
 }
 
-// Resources returns the resource limiter.
+// Resources returns nil — cgroup enforcement is handled by CgroupManager in the server, not the platform ResourceLimiter interface.
 func (p *Platform) Resources() platform.ResourceLimiter {
-	if p.resources == nil {
-		p.resources = NewResourceLimiter()
-	}
-	return p.resources
+	return nil
 }
 
 // Initialize sets up the platform with the given configuration.
