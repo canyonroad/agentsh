@@ -24,6 +24,10 @@ type fakeCgroupFS struct {
 	writeErrs map[string]error
 	// openErrs mirrors writeErrs but for OpenFile (subtree_control writes).
 	openErrs map[string]error
+	// openErrsOnce is like openErrs but the entry is deleted after the first hit, allowing
+	// subsequent calls to the same path to succeed. Used for leaf-move tests where the first
+	// enableControllers call fails with EBUSY and the retry after leaf-move succeeds.
+	openErrsOnce map[string]error
 }
 
 type fakeEntry struct {
@@ -33,9 +37,10 @@ type fakeEntry struct {
 
 func newFakeCgroupFS() *fakeCgroupFS {
 	return &fakeCgroupFS{
-		files:     map[string]*fakeEntry{"/sys/fs/cgroup": {isDir: true}},
-		writeErrs: map[string]error{},
-		openErrs:  map[string]error{},
+		files:        map[string]*fakeEntry{"/sys/fs/cgroup": {isDir: true}},
+		writeErrs:    map[string]error{},
+		openErrs:     map[string]error{},
+		openErrsOnce: map[string]error{},
 	}
 }
 
@@ -157,7 +162,12 @@ type fakeWriter struct {
 }
 
 func (w *fakeWriter) WriteString(s string) (int, error) {
-	if err, ok := w.fs.openErrs[w.path+":write"]; ok {
+	key := w.path + ":write"
+	if err, ok := w.fs.openErrsOnce[key]; ok {
+		delete(w.fs.openErrsOnce, key)
+		return 0, &fs.PathError{Op: "write", Path: w.path, Err: err}
+	}
+	if err, ok := w.fs.openErrs[key]; ok {
 		return 0, &fs.PathError{Op: "write", Path: w.path, Err: err}
 	}
 	w.buf.WriteString(s)
