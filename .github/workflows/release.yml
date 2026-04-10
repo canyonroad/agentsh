@@ -42,9 +42,11 @@ jobs:
 
       - name: Install build deps (envshim, fuse, seccomp)
         run: |
+          sudo dpkg --add-architecture arm64
           sudo apt-get update
           sudo apt-get install -y \
             libseccomp-dev \
+            libseccomp-dev:arm64 \
             libfuse-dev \
             pkg-config \
             gcc-aarch64-linux-gnu \
