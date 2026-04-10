@@ -32,6 +32,7 @@ func StartLLMProxy(
 	logger *slog.Logger,
 	providers map[string]yaml.Node,
 	policyServices []policy.ServiceYAML,
+	envInject map[string]string,
 ) (string, func() error, error) {
 	if sess == nil {
 		return "", nil, fmt.Errorf("session is nil")
@@ -128,9 +129,25 @@ func StartLLMProxy(
 			return "", nil, fmt.Errorf("bootstrap credentials: %w", bsErr)
 		}
 
+		// Build and validate service env vars.
+		svcEnv, envErr := BuildServiceEnvVars(resolved.EnvVars, table)
+		if envErr != nil {
+			secretsCleanup()
+			_ = registry.Close()
+			_ = p.Stop(ctx)
+			return "", nil, fmt.Errorf("build service env vars: %w", envErr)
+		}
+		if err := CheckEnvCollisions(svcEnv, envInject); err != nil {
+			secretsCleanup()
+			_ = registry.Close()
+			_ = p.Stop(ctx)
+			return "", nil, fmt.Errorf("service env collision: %w", err)
+		}
+		sess.SetServiceEnvVars(svcEnv)
+
 		// Register hooks: leak guard first, then creds substitution (both global).
 		leakGuard := proxy.NewLeakGuardHook(table, logger)
-		credsSub := proxy.NewCredsSubHook(table)
+		credsSub := proxy.NewCredsSubHook(table, resolved.ScrubServices)
 		p.HookRegistry().Register("", leakGuard)
 		p.HookRegistry().Register("", credsSub)
 

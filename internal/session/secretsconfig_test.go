@@ -108,3 +108,82 @@ func TestResolveServiceConfigs_Empty(t *testing.T) {
 		t.Error("expected nil")
 	}
 }
+
+func TestResolveServiceConfigs_InjectEnv(t *testing.T) {
+	svcs := []policy.ServiceYAML{
+		{
+			Name:   "github",
+			Match:  policy.ServiceMatchYAML{Hosts: []string{"api.github.com"}},
+			Secret: policy.ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
+			Fake:   policy.ServiceFakeYAML{Format: "ghp_{rand:36}"},
+			Inject: policy.ServiceInjectYAML{
+				Env: []policy.ServiceInjectEnvYAML{{Name: "GITHUB_TOKEN"}},
+			},
+		},
+	}
+	result, err := ResolveServiceConfigs(svcs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.EnvVars) != 1 {
+		t.Fatalf("expected 1 env var, got %d", len(result.EnvVars))
+	}
+	if result.EnvVars[0].ServiceName != "github" {
+		t.Errorf("ServiceName = %q, want github", result.EnvVars[0].ServiceName)
+	}
+	if result.EnvVars[0].VarName != "GITHUB_TOKEN" {
+		t.Errorf("VarName = %q, want GITHUB_TOKEN", result.EnvVars[0].VarName)
+	}
+}
+
+func TestResolveServiceConfigs_ScrubResponse_NoneEnabled(t *testing.T) {
+	svcs := []policy.ServiceYAML{
+		{
+			Name:   "github",
+			Match:  policy.ServiceMatchYAML{Hosts: []string{"api.github.com"}},
+			Secret: policy.ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
+			Fake:   policy.ServiceFakeYAML{Format: "ghp_{rand:36}"},
+			// ScrubResponse intentionally NOT set (defaults to false)
+		},
+	}
+	result, err := ResolveServiceConfigs(svcs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// ScrubServices must be non-nil (empty map), NOT nil.
+	// nil would mean "scrub all" in CredsSubHook.
+	if result.ScrubServices == nil {
+		t.Fatal("ScrubServices should be non-nil empty map, got nil")
+	}
+	if len(result.ScrubServices) != 0 {
+		t.Errorf("ScrubServices should be empty, got %v", result.ScrubServices)
+	}
+}
+
+func TestResolveServiceConfigs_ScrubResponse(t *testing.T) {
+	svcs := []policy.ServiceYAML{
+		{
+			Name:          "github",
+			Match:         policy.ServiceMatchYAML{Hosts: []string{"api.github.com"}},
+			Secret:        policy.ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
+			Fake:          policy.ServiceFakeYAML{Format: "ghp_{rand:36}"},
+			ScrubResponse: true,
+		},
+		{
+			Name:   "stripe",
+			Match:  policy.ServiceMatchYAML{Hosts: []string{"api.stripe.com"}},
+			Secret: policy.ServiceSecretYAML{Ref: "keyring://agentsh/stripe"},
+			Fake:   policy.ServiceFakeYAML{Format: "xk_test_{rand:24}"},
+		},
+	}
+	result, err := ResolveServiceConfigs(svcs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.ScrubServices["github"] {
+		t.Error("expected github in ScrubServices")
+	}
+	if result.ScrubServices["stripe"] {
+		t.Error("stripe should not be in ScrubServices")
+	}
+}

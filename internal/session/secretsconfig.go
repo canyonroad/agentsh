@@ -19,11 +19,20 @@ type InjectHeaderConfig struct {
 	Template    string
 }
 
+// ServiceEnvVar maps a service name to an env var that should receive
+// the service's fake credential.
+type ServiceEnvVar struct {
+	ServiceName string
+	VarName     string
+}
+
 // ResolvedServices holds the parsed outputs needed by the bootstrap flow.
 type ResolvedServices struct {
 	ServiceConfigs []ServiceConfig
 	Patterns       []services.ServicePattern
 	InjectHeaders  []InjectHeaderConfig
+	EnvVars        []ServiceEnvVar // inject.env entries
+	ScrubServices  map[string]bool // service name -> scrub_response flag
 }
 
 // ResolveProviderConfigs decodes policy YAML provider nodes into
@@ -53,6 +62,7 @@ func ResolveServiceConfigs(svcs []policy.ServiceYAML) (*ResolvedServices, error)
 	result := &ResolvedServices{
 		ServiceConfigs: make([]ServiceConfig, 0, len(svcs)),
 		Patterns:       make([]services.ServicePattern, 0, len(svcs)),
+		ScrubServices:  make(map[string]bool),
 	}
 	for _, svc := range svcs {
 		ref, err := secrets.ParseRef(svc.Secret.Ref)
@@ -74,6 +84,15 @@ func ResolveServiceConfigs(svcs []policy.ServiceYAML) (*ResolvedServices, error)
 				HeaderName:  svc.Inject.Header.Name,
 				Template:    svc.Inject.Header.Template,
 			})
+		}
+		for _, ev := range svc.Inject.Env {
+			result.EnvVars = append(result.EnvVars, ServiceEnvVar{
+				ServiceName: svc.Name,
+				VarName:     ev.Name,
+			})
+		}
+		if svc.ScrubResponse {
+			result.ScrubServices[svc.Name] = true
 		}
 	}
 	return result, nil

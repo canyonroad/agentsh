@@ -89,6 +89,11 @@ type Session struct {
 
 	// secretsClose zeros the credsTable on session close. Nil if no secrets.
 	secretsClose func()
+
+	// serviceEnvVars holds fake credentials keyed by env var name.
+	// Injected into spawned processes bypassing policy filtering.
+	// Nil if no services declare inject.env.
+	serviceEnvVars map[string]string
 }
 
 // SetPolicyEngine stores the session-specific policy engine with expanded variables.
@@ -120,6 +125,28 @@ func (s *Session) SetCredsTable(t *credsub.Table, closeFn func()) {
 	defer s.mu.Unlock()
 	s.credsTable = t
 	s.secretsClose = closeFn
+}
+
+// SetServiceEnvVars stores the service env var map on the session.
+func (s *Session) SetServiceEnvVars(env map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.serviceEnvVars = env
+}
+
+// ServiceEnvVars returns a copy of the service env var map.
+// Returns nil if no services declare inject.env.
+func (s *Session) ServiceEnvVars() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.serviceEnvVars == nil {
+		return nil
+	}
+	out := make(map[string]string, len(s.serviceEnvVars))
+	for k, v := range s.serviceEnvVars {
+		out[k] = v
+	}
+	return out
 }
 
 type Manager struct {
@@ -535,6 +562,7 @@ func (s *Session) CloseLLMProxy() error {
 	s.mcpRegistry = nil
 	s.credsTable = nil
 	s.secretsClose = nil
+	s.serviceEnvVars = nil
 	s.mu.Unlock()
 	// Stop proxy first so in-flight requests finish with a populated table.
 	var proxyErr error

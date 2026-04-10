@@ -219,6 +219,25 @@ func runCommandWithResources(ctx context.Context, s *session.Session, cmdID stri
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
 		}
 	}
+	// Add service env vars (fake credentials, bypass policy filtering).
+	// These must come after env_inject; collisions are caught at session start.
+	if svcEnv := s.ServiceEnvVars(); len(svcEnv) > 0 {
+		svcKeys := make(map[string]bool, len(svcEnv))
+		for k := range svcEnv {
+			svcKeys[k] = true
+		}
+		filtered := env[:0]
+		for _, e := range env {
+			if k, _, ok := strings.Cut(e, "="); ok && svcKeys[k] {
+				continue
+			}
+			filtered = append(filtered, e)
+		}
+		env = filtered
+		for k, v := range svcEnv {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
 	cmd.Env = env
 	slog.Debug("exec env final", "command", req.Command, "env_count", len(env), "has_extra", extra != nil, "envInject_count", func() int { if extra != nil { return len(extra.envInject) }; return 0 }())
 	if extra != nil && len(extra.extraFiles) > 0 {

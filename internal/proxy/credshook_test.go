@@ -26,7 +26,7 @@ func newTestTable(t *testing.T) *credsub.Table {
 }
 
 func TestCredsSubHook_Name(t *testing.T) {
-	h := NewCredsSubHook(credsub.New())
+	h := NewCredsSubHook(credsub.New(), nil)
 	if h.Name() != "creds-sub" {
 		t.Errorf("Name() = %q, want %q", h.Name(), "creds-sub")
 	}
@@ -34,7 +34,7 @@ func TestCredsSubHook_Name(t *testing.T) {
 
 func TestCredsSubHook_PreHook_ReplacesFakeToReal(t *testing.T) {
 	tbl := newTestTable(t)
-	h := NewCredsSubHook(tbl)
+	h := NewCredsSubHook(tbl, nil)
 
 	body := []byte(`{"token":"ghp_FAKE1234567890abcdef"}`)
 	req := httptest.NewRequest(http.MethodPost, "http://api.example.com/v1/test", bytes.NewReader(body))
@@ -57,7 +57,7 @@ func TestCredsSubHook_PreHook_ReplacesFakeToReal(t *testing.T) {
 
 func TestCredsSubHook_PostHook_ReplacesRealToFake(t *testing.T) {
 	tbl := newTestTable(t)
-	h := NewCredsSubHook(tbl)
+	h := NewCredsSubHook(tbl, nil)
 
 	body := []byte(`{"echoed":"ghp_REAL1234567890abcdef"}`)
 	resp := &http.Response{
@@ -83,7 +83,7 @@ func TestCredsSubHook_PostHook_ReplacesRealToFake(t *testing.T) {
 
 func TestCredsSubHook_PreHook_NoFakes_BodyUnchanged(t *testing.T) {
 	tbl := newTestTable(t)
-	h := NewCredsSubHook(tbl)
+	h := NewCredsSubHook(tbl, nil)
 
 	body := []byte(`{"query":"hello world"}`)
 	req := httptest.NewRequest(http.MethodPost, "http://api.example.com/v1/test", bytes.NewReader(body))
@@ -101,7 +101,7 @@ func TestCredsSubHook_PreHook_NoFakes_BodyUnchanged(t *testing.T) {
 
 func TestCredsSubHook_NilBody(t *testing.T) {
 	tbl := newTestTable(t)
-	h := NewCredsSubHook(tbl)
+	h := NewCredsSubHook(tbl, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "http://api.example.com/", nil)
 	if err := h.PreHook(req, &RequestContext{}); err != nil {
@@ -340,7 +340,7 @@ func TestHeaderInjectionHook_PostHook_IsNoOp(t *testing.T) {
 
 func TestCredsSubHook_PreHook_ReplacesInHeaders(t *testing.T) {
 	tbl := newTestTable(t)
-	h := NewCredsSubHook(tbl)
+	h := NewCredsSubHook(tbl, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "http://api.example.com/v1/test", nil)
 	req.Header.Set("Authorization", "Bearer ghp_FAKE1234567890abcdef")
@@ -359,7 +359,7 @@ func TestCredsSubHook_PreHook_ReplacesInHeaders(t *testing.T) {
 
 func TestCredsSubHook_PreHook_ReplacesInQuery(t *testing.T) {
 	tbl := newTestTable(t)
-	h := NewCredsSubHook(tbl)
+	h := NewCredsSubHook(tbl, nil)
 
 	req := httptest.NewRequest(http.MethodGet,
 		"http://api.example.com/v1/test?key=ghp_FAKE1234567890abcdef", nil)
@@ -378,7 +378,7 @@ func TestCredsSubHook_PreHook_ReplacesInQuery(t *testing.T) {
 
 func TestCredsSubHook_PreHook_ReplacesInPath(t *testing.T) {
 	tbl := newTestTable(t)
-	h := NewCredsSubHook(tbl)
+	h := NewCredsSubHook(tbl, nil)
 
 	req := httptest.NewRequest(http.MethodGet,
 		"http://api.example.com/v1/ghp_FAKE1234567890abcdef/info", nil)
@@ -468,6 +468,74 @@ func TestLeakGuardHook_FakeInPath_Returns403(t *testing.T) {
 	var abortErr *HookAbortError
 	if !errors.As(err, &abortErr) || abortErr.StatusCode != 403 {
 		t.Errorf("expected HookAbortError 403, got: %v", err)
+	}
+}
+
+func TestCredsSubHook_PostHook_ScrubDisabled(t *testing.T) {
+	tbl := newTestTable(t) // has "github" -> fake/real pair
+	// scrubServices does not include "github" -> PostHook should be a no-op
+	hook := NewCredsSubHook(tbl, map[string]bool{"other": true})
+
+	body := []byte(`{"key":"ghp_REAL1234567890abcdef"}`)
+	resp := &http.Response{
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
+	ctx := &RequestContext{ServiceName: "github"}
+
+	err := hook.PostHook(resp, ctx)
+	if err != nil {
+		t.Fatalf("PostHook error: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(got, []byte("ghp_REAL1234567890abcdef")) {
+		t.Error("expected real credential to remain (scrub disabled for this service)")
+	}
+}
+
+func TestCredsSubHook_PostHook_ScrubEnabled(t *testing.T) {
+	tbl := newTestTable(t)
+	hook := NewCredsSubHook(tbl, map[string]bool{"github": true})
+
+	body := []byte(`{"key":"ghp_REAL1234567890abcdef"}`)
+	resp := &http.Response{
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
+	ctx := &RequestContext{ServiceName: "github"}
+
+	err := hook.PostHook(resp, ctx)
+	if err != nil {
+		t.Fatalf("PostHook error: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if bytes.Contains(got, []byte("ghp_REAL1234567890abcdef")) {
+		t.Error("expected real credential to be scrubbed")
+	}
+	if !bytes.Contains(got, []byte("ghp_FAKE1234567890abcdef")) {
+		t.Error("expected fake credential in scrubbed output")
+	}
+}
+
+func TestCredsSubHook_PostHook_NilScrubMap_ScrubsAll(t *testing.T) {
+	tbl := newTestTable(t)
+	// nil scrubServices = backward compat, scrub everything
+	hook := NewCredsSubHook(tbl, nil)
+
+	body := []byte(`{"key":"ghp_REAL1234567890abcdef"}`)
+	resp := &http.Response{
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
+	ctx := &RequestContext{ServiceName: "github"}
+
+	err := hook.PostHook(resp, ctx)
+	if err != nil {
+		t.Fatalf("PostHook error: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if bytes.Contains(got, []byte("ghp_REAL1234567890abcdef")) {
+		t.Error("expected real credential to be scrubbed (nil map = scrub all)")
 	}
 }
 

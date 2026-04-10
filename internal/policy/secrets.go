@@ -3,6 +3,7 @@ package policy
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/agentsh/agentsh/internal/proxy/secrets"
@@ -83,6 +84,7 @@ func ValidateSecrets(providers map[string]yaml.Node, services []ServiceYAML) (wa
 	// Validate services.
 	seen := make(map[string]bool)
 	hostOwner := make(map[string]string) // host pattern -> first service name (for overlap warnings)
+	envOwner := make(map[string]string)  // env var name -> first service name
 	for i, svc := range services {
 		if svc.Name == "" {
 			return nil, fmt.Errorf("services[%d]: name is required", i)
@@ -138,9 +140,35 @@ func ValidateSecrets(providers map[string]yaml.Node, services []ServiceYAML) (wa
 				return nil, fmt.Errorf("services[%d] %q: inject.header.template must contain {{secret}}", i, svc.Name)
 			}
 		}
+
+		// inject.env validation
+		for j, ev := range svc.Inject.Env {
+			if ev.Name == "" {
+				return nil, fmt.Errorf("services[%d] %q: inject.env[%d].name is required", i, svc.Name, j)
+			}
+			if strings.ContainsAny(ev.Name, "=\x00") {
+				return nil, fmt.Errorf("services[%d] %q: inject.env[%d].name %q contains invalid character", i, svc.Name, j, ev.Name)
+			}
+			if strings.HasPrefix(strings.ToUpper(ev.Name), "AGENTSH_") {
+				return nil, fmt.Errorf("services[%d] %q: inject.env[%d].name %q uses reserved AGENTSH_ prefix", i, svc.Name, j, ev.Name)
+			}
+			if prev, dup := envOwner[envVarNormalizedKey(ev.Name)]; dup {
+				return nil, fmt.Errorf("services[%d] %q: inject.env name %q already declared by service %q", i, svc.Name, ev.Name, prev)
+			}
+			envOwner[envVarNormalizedKey(ev.Name)] = svc.Name
+		}
 	}
 
 	return warnings, nil
+}
+
+// envVarNormalizedKey returns the env var name normalized for duplicate
+// detection. On Windows env vars are case-insensitive, so fold to upper.
+func envVarNormalizedKey(name string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(name)
+	}
+	return name
 }
 
 // extractProviderType decodes just the "type" field from a provider yaml.Node.

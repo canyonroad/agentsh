@@ -4,10 +4,23 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime"
+	"strings"
 
 	"github.com/agentsh/agentsh/internal/proxy/credsub"
 	"github.com/agentsh/agentsh/internal/proxy/secrets"
 )
+
+// envVarKey returns the map key for duplicate env-var detection.
+// On Windows, environment variable names are case-insensitive,
+// so we fold to upper-case. On POSIX systems, names are
+// case-sensitive and used as-is.
+func envVarKey(name string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(name)
+	}
+	return name
+}
 
 // ServiceConfig describes one secret-backed service for credential
 // substitution. Plan 5 uses this struct directly; future plans will
@@ -85,4 +98,45 @@ func LogSecretsInitialized(logger *slog.Logger, sessionID string, serviceCount i
 		"session_id", sessionID,
 		"service_count", serviceCount,
 	)
+}
+
+// BuildServiceEnvVars builds a map of env var name -> fake credential
+// for services that declare inject.env. Looks up each service's fake
+// from the table; services not found in the table are silently skipped.
+// Returns an error if two different services declare the same env var name.
+func BuildServiceEnvVars(envVars []ServiceEnvVar, table *credsub.Table) (map[string]string, error) {
+	if len(envVars) == 0 {
+		return nil, nil
+	}
+
+	// Validate names and detect duplicates first (no table access needed).
+	owner := make(map[string]string, len(envVars))
+	for _, ev := range envVars {
+		if ev.VarName == "" || strings.ContainsAny(ev.VarName, "=\x00") {
+			return nil, fmt.Errorf("invalid service env var name %q for service %q", ev.VarName, ev.ServiceName)
+		}
+		key := envVarKey(ev.VarName)
+		if prev, dup := owner[key]; dup {
+			return nil, fmt.Errorf("duplicate service env var %q (services %q and %q)", ev.VarName, prev, ev.ServiceName)
+		}
+		owner[key] = ev.ServiceName
+	}
+
+	if table == nil {
+		return nil, nil
+	}
+
+	// Build the env var map from table lookups.
+	result := make(map[string]string, len(envVars))
+	for _, ev := range envVars {
+		fake, ok := table.FakeForService(ev.ServiceName)
+		if !ok {
+			continue
+		}
+		result[ev.VarName] = string(fake)
+	}
+	if len(result) == 0 {
+		return nil, nil
+	}
+	return result, nil
 }
