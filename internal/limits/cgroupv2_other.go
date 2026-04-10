@@ -21,10 +21,6 @@ func DetectCgroupV2() bool { return false }
 
 func CurrentCgroupDir() (string, error) { return "", fmt.Errorf("cgroups not supported") }
 
-func ApplyCgroupV2(parentDir string, name string, pid int, lim CgroupV2Limits) (*CgroupV2, error) {
-	return nil, fmt.Errorf("cgroups not supported")
-}
-
 func (c *CgroupV2) Close(ctx context.Context) error { return nil }
 
 // CgroupMode names an operating mode for cgroup v2 enforcement.
