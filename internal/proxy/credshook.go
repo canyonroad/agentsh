@@ -81,14 +81,6 @@ func (h *CredsSubHook) PostHook(resp *http.Response, _ *RequestContext) error {
 	return nil
 }
 
-// scanHeaders lists HTTP headers that LeakGuardHook scans for fakes.
-var scanHeaders = []string{
-	"Authorization",
-	"X-Api-Key",
-	"Api-Key",
-	"X-Auth-Token",
-}
-
 // LeakGuardHook blocks requests that contain known fake credentials.
 type LeakGuardHook struct {
 	table  *credsub.Table
@@ -109,8 +101,10 @@ func (h *LeakGuardHook) PreHook(r *http.Request, ctx *RequestContext) error {
 		if err == nil {
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			if serviceName, found := h.table.ContainsFake(body); found {
-				h.logLeak(ctx, serviceName, r.Host)
-				return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
+				if serviceName != ctx.ServiceName {
+					h.logLeak(ctx, serviceName, r.Host)
+					return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
+				}
 			}
 		}
 	}
@@ -118,15 +112,29 @@ func (h *LeakGuardHook) PreHook(r *http.Request, ctx *RequestContext) error {
 	// Scan URL query string.
 	if rawQuery := r.URL.RawQuery; rawQuery != "" {
 		if serviceName, found := h.table.ContainsFake([]byte(rawQuery)); found {
-			h.logLeak(ctx, serviceName, r.Host)
-			return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
+			if serviceName != ctx.ServiceName {
+				h.logLeak(ctx, serviceName, r.Host)
+				return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
+			}
 		}
 	}
 
-	// Scan select headers (all values, not just the first).
-	for _, hdr := range scanHeaders {
-		for _, val := range r.Header.Values(hdr) {
+	// Scan ALL header values.
+	for _, vals := range r.Header {
+		for _, val := range vals {
 			if serviceName, found := h.table.ContainsFake([]byte(val)); found {
+				if serviceName != ctx.ServiceName {
+					h.logLeak(ctx, serviceName, r.Host)
+					return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
+				}
+			}
+		}
+	}
+
+	// Scan URL path.
+	if p := r.URL.Path; p != "" {
+		if serviceName, found := h.table.ContainsFake([]byte(p)); found {
+			if serviceName != ctx.ServiceName {
 				h.logLeak(ctx, serviceName, r.Host)
 				return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
 			}

