@@ -33,16 +33,15 @@ func (r *cgroupResourceLimiter) SupportedLimits() []platform.ResourceType {
 	if !r.Available() {
 		return nil
 	}
-	supported := []platform.ResourceType{
+	mgr, err := r.ensureManager()
+	if err != nil || mgr.Probe().Mode == limits.ModeUnavailable {
+		return nil
+	}
+	return []platform.ResourceType{
 		platform.ResourceCPU,
 		platform.ResourceMemory,
 		platform.ResourceProcessCount,
 	}
-	// io controller is optional — check if the probe detected it.
-	if mgr, err := r.ensureManager(); err == nil && mgr.Probe().IOAvailable {
-		supported = append(supported, platform.ResourceDiskIO)
-	}
-	return supported
 }
 
 func (r *cgroupResourceLimiter) ensureManager() (*limits.CgroupManager, error) {
