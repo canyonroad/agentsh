@@ -285,6 +285,9 @@ func TestProbe_LeafMove_MkdirFails_FallbackTopLevel(t *testing.T) {
 	if res.Mode != ModeTopLevel {
 		t.Fatalf("mode: got %q, want top-level", res.Mode)
 	}
+	if !strings.Contains(res.Reason, "leaf-move failed") {
+		t.Fatalf("reason should contain leaf-move failure: %q", res.Reason)
+	}
 	if res.LeafMoved {
 		t.Fatalf("expected LeafMoved=false")
 	}

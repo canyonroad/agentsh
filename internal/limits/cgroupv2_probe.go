@@ -29,9 +29,13 @@ var requiredControllers = []string{"cpu", "memory", "pids"}
 // CgroupProbeResult is the output of ProbeCgroupsV2. Callers store it on
 // a CgroupManager or pass it to the detect command.
 type CgroupProbeResult struct {
-	Mode        CgroupMode
-	Reason      string
-	OwnCgroup   string // absolute path to the process's own cgroup dir
+	Mode   CgroupMode
+	Reason string
+	// OwnCgroup is the cgroup directory used as the enforcement root for nested
+	// mode — child cgroups for sessions are created under this path. When
+	// LeafMoved is true, the process itself resides in OwnCgroup/leaf, but the
+	// parent remains the correct place to create children.
+	OwnCgroup   string
 	SliceDir    string // absolute path to /sys/fs/cgroup/agentsh.slice (top-level mode only; empty otherwise)
 	IOAvailable bool   // true if the io controller is usable in the chosen mode
 	// OrphansReaped is populated in top-level mode when the probe removed
@@ -138,6 +142,10 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 			}
 			return res, err
 		}
+		// Leaf-move itself failed; include the failure in the reason
+		// alongside the original EBUSY.
+		reason := fmt.Sprintf("EBUSY; leaf-move failed: %v", retryErr)
+		return tryTopLevel(ctx, fs, own, reason)
 	}
 
 	// Step 5: classify the enable failure and fall through to top-level.
@@ -166,14 +174,14 @@ func tryLeafMove(fs cgroupFS, own string) (moved, enabled bool, retryErr error) 
 	leafDir := filepath.Join(own, "leaf")
 	if err := fs.Mkdir(leafDir, 0o755); err != nil {
 		if !errors.Is(err, syscall.EEXIST) {
-			return false, false, nil
+			return false, false, fmt.Errorf("mkdir leaf: %w", err)
 		}
 	}
 
 	// Move the current process into the leaf cgroup.
 	pid := []byte(strconv.Itoa(os.Getpid()))
 	if err := fs.WriteFile(filepath.Join(leafDir, "cgroup.procs"), pid, 0o644); err != nil {
-		return false, false, nil
+		return false, false, fmt.Errorf("move to leaf: %w", err)
 	}
 
 	// Retry enabling controllers now that the parent has no internal processes.
