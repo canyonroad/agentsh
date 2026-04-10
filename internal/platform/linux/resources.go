@@ -23,6 +23,7 @@ type cgroupResourceLimiter struct {
 	mgr     *limits.CgroupManager
 	initErr error
 	inited  bool
+	handles map[string]*cgroupResourceHandle
 }
 
 func (r *cgroupResourceLimiter) Available() bool {
@@ -44,8 +45,6 @@ func (r *cgroupResourceLimiter) SupportedLimits() []platform.ResourceType {
 }
 
 func (r *cgroupResourceLimiter) ensureManager() (*limits.CgroupManager, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.inited {
 		return r.mgr, r.initErr
 	}
@@ -65,6 +64,15 @@ func (r *cgroupResourceLimiter) Apply(config platform.ResourceConfig) (platform.
 		return nil, fmt.Errorf("CPU affinity not implemented")
 	}
 
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.handles != nil {
+		if _, exists := r.handles[config.Name]; exists {
+			return nil, fmt.Errorf("resource handle %q already active", config.Name)
+		}
+	}
+
 	mgr, err := r.ensureManager()
 	if err != nil {
 		return nil, fmt.Errorf("cgroup manager init: %w", err)
@@ -76,17 +84,31 @@ func (r *cgroupResourceLimiter) Apply(config platform.ResourceConfig) (platform.
 		PidsMax:        int(config.MaxProcesses),
 	}
 
-	return &cgroupResourceHandle{
-		mgr:  mgr,
-		name: config.Name,
-		lim:  lim,
-	}, nil
+	h := &cgroupResourceHandle{
+		limiter: r,
+		mgr:     mgr,
+		name:    config.Name,
+		lim:     lim,
+	}
+
+	if r.handles == nil {
+		r.handles = make(map[string]*cgroupResourceHandle)
+	}
+	r.handles[config.Name] = h
+	return h, nil
+}
+
+func (r *cgroupResourceLimiter) removeHandle(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.handles, name)
 }
 
 // cgroupResourceHandle implements platform.ResourceHandle by wrapping a
 // CgroupManager and a lazily-created CgroupV2.
 type cgroupResourceHandle struct {
 	mu       sync.Mutex
+	limiter  *cgroupResourceLimiter
 	mgr      *limits.CgroupManager
 	name     string
 	lim      limits.CgroupV2Limits
@@ -141,6 +163,10 @@ func (h *cgroupResourceHandle) Stats() platform.ResourceStats {
 		}
 	}
 
+	// cpu.stat provides total usage_usec but computing a percentage requires
+	// sampling over a time interval — not feasible in a point-in-time Stats call.
+	// CPUPercent stays at 0 (same as prior implementation).
+
 	if b, err := os.ReadFile(filepath.Join(cg.Path, "pids.current")); err == nil {
 		if v, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
 			stats.ProcessCount = v
@@ -170,11 +196,23 @@ func (h *cgroupResourceHandle) Stats() platform.ResourceStats {
 func (h *cgroupResourceHandle) Release() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.released = true
-	if h.cg == nil {
+
+	if h.released {
 		return nil
 	}
+
+	if h.cg == nil {
+		h.released = true
+		h.limiter.removeHandle(h.name)
+		return nil
+	}
+
 	err := h.cg.Close(context.Background())
+	if err != nil {
+		return err // don't mark released — allow retry
+	}
 	h.cg = nil
-	return err
+	h.released = true
+	h.limiter.removeHandle(h.name)
+	return nil
 }
