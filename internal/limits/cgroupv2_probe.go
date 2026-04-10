@@ -92,17 +92,8 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 		if filepath.Base(cur) == "agentsh.leaf" {
 			cur = filepath.Dir(cur)
 			leafResident = true
-			// Check if cur already includes the relative hint (prior probe
-			// with the same hint). If not, the leaf was placed under the
-			// service cgroup by a hint-less probe — still need to append.
-			if filepath.Base(cur) == own {
-				own = cur
-			} else {
-				own = filepath.Join(cur, own)
-			}
-		} else {
-			own = filepath.Join(cur, own)
 		}
+		own = filepath.Join(cur, own)
 	} else {
 		// Absolute ownHint: check if the process actually resides in the
 		// leaf sub-cgroup for accurate LeafMoved telemetry, but don't

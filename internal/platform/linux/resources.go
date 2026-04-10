@@ -33,10 +33,9 @@ func (r *cgroupResourceLimiter) SupportedLimits() []platform.ResourceType {
 	if !r.Available() {
 		return nil
 	}
-	mgr, err := r.ensureManager()
-	if err != nil || mgr.Probe().Mode == limits.ModeUnavailable {
-		return nil
-	}
+	// Static list based on DetectCgroupV2(). Do not call ensureManager()
+	// here — the full probe has side effects (leaf-move, controller writes).
+	// Actual enforceability is determined at Apply time.
 	return []platform.ResourceType{
 		platform.ResourceCPU,
 		platform.ResourceMemory,
