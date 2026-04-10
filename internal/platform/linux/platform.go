@@ -187,10 +187,20 @@ func (p *Platform) Sandbox() platform.SandboxManager {
 	return p.sandbox
 }
 
-// Resources returns nil — cgroup enforcement is handled by CgroupManager in the server, not the platform ResourceLimiter interface.
+// Resources returns a no-op ResourceLimiter. Per-command cgroup enforcement
+// is handled by CgroupManager in the server, not the platform interface.
 func (p *Platform) Resources() platform.ResourceLimiter {
-	return nil
+	return noopResourceLimiter{}
 }
+
+// noopResourceLimiter satisfies platform.ResourceLimiter without doing anything.
+type noopResourceLimiter struct{}
+
+func (noopResourceLimiter) Apply(config platform.ResourceConfig) (platform.ResourceHandle, error) {
+	return nil, fmt.Errorf("resource limiting handled by CgroupManager, not platform interface")
+}
+func (noopResourceLimiter) Available() bool                       { return false }
+func (noopResourceLimiter) SupportedLimits() []platform.ResourceType { return nil }
 
 // Initialize sets up the platform with the given configuration.
 func (p *Platform) Initialize(ctx context.Context, config platform.Config) error {

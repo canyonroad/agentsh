@@ -311,6 +311,11 @@ func TestProbe_LeafMove_RetryEnableFails_FallbackTopLevel(t *testing.T) {
 	if !strings.Contains(res.Reason, "EBUSY") {
 		t.Fatalf("reason should contain EBUSY: %q", res.Reason)
 	}
+	// Process was moved to own/leaf even though enable retry failed —
+	// LeafMoved should reflect the side-effect.
+	if !res.LeafMoved {
+		t.Fatalf("expected LeafMoved=true (process was moved even though enable retry failed)")
+	}
 }
 
 func TestProbe_EACCES_NoLeafMove(t *testing.T) {
