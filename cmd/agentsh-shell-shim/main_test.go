@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 )
@@ -810,13 +811,23 @@ func TestShimReadinessGate_GRPCTransport_ProbesGRPCAddr(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Start a fake gRPC listener.
+	// Start a fake gRPC listener and track connections.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	go func() { for { c, e := ln.Accept(); if e != nil { return }; c.Close() } }()
+	var probed int32
+	go func() {
+		for {
+			c, e := ln.Accept()
+			if e != nil {
+				return
+			}
+			c.Close()
+			atomic.AddInt32(&probed, 1)
+		}
+	}()
 
 	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
 	cmd.Stdin = strings.NewReader("") // non-TTY
@@ -827,6 +838,7 @@ func TestShimReadinessGate_GRPCTransport_ProbesGRPCAddr(t *testing.T) {
 		"AGENTSH_TRANSPORT=grpc",
 		"AGENTSH_GRPC_ADDR=" + ln.Addr().String(),
 		"AGENTSH_SERVER=http://127.0.0.1:1", // unreachable — should be ignored
+		"AGENTSH_BIN=/nonexistent/agentsh",   // known-bad so enforcement fails deterministically
 	}
 
 	var stderr bytes.Buffer
@@ -841,14 +853,18 @@ func TestShimReadinessGate_GRPCTransport_ProbesGRPCAddr(t *testing.T) {
 	if !strings.Contains(stderr.String(), "agentsh") {
 		t.Fatalf("expected agentsh-related error (enforce path), got stderr: %s", stderr.String())
 	}
+	// Verify the readiness gate actually probed the gRPC endpoint.
+	if atomic.LoadInt32(&probed) == 0 {
+		t.Fatal("expected readiness gate to probe AGENTSH_GRPC_ADDR, but no connections were received")
+	}
 }
 
 // TestShimReadinessGate_UnixSocketEACCES_FailsClosed verifies that a
 // permission-denied error on a unix socket fails closed (not fail-open).
 // EACCES is a hard error indicating bad permissions, not "server not started."
 func TestShimReadinessGate_UnixSocketEACCES_FailsClosed(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-shim tests require Unix")
+	if runtime.GOOS != "linux" {
+		t.Skip("unix socket permission checks via chmod are only reliable on Linux")
 	}
 	if os.Getuid() == 0 {
 		t.Skip("test requires non-root (root bypasses permission checks)")
