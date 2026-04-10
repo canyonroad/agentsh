@@ -86,17 +86,22 @@ func (r *cgroupResourceLimiter) Apply(config platform.ResourceConfig) (platform.
 // cgroupResourceHandle implements platform.ResourceHandle by wrapping a
 // CgroupManager and a lazily-created CgroupV2.
 type cgroupResourceHandle struct {
-	mu      sync.Mutex
-	mgr     *limits.CgroupManager
-	name    string
-	lim     limits.CgroupV2Limits
-	cg      *limits.CgroupV2
-	created bool
+	mu       sync.Mutex
+	mgr      *limits.CgroupManager
+	name     string
+	lim      limits.CgroupV2Limits
+	cg       *limits.CgroupV2
+	created  bool
+	released bool
 }
 
 func (h *cgroupResourceHandle) AssignProcess(pid int) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if h.released {
+		return fmt.Errorf("resource handle already released")
+	}
 
 	if !h.created {
 		cg, err := h.mgr.Apply(h.name, pid, h.lim)
@@ -165,6 +170,7 @@ func (h *cgroupResourceHandle) Stats() platform.ResourceStats {
 func (h *cgroupResourceHandle) Release() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.released = true
 	if h.cg == nil {
 		return nil
 	}
