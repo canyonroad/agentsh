@@ -560,6 +560,9 @@ func serverAddrFromEnv() (network, addr string, err error) {
 	// Normalize the same way the CLI does: lowercase transport, strip
 	// scheme prefix from address (client.NewGRPC accepts "grpc://host:port").
 	transport := strings.ToLower(strings.TrimSpace(os.Getenv("AGENTSH_TRANSPORT")))
+	if transport != "" && transport != "http" && transport != "grpc" {
+		return "", "", fmt.Errorf("invalid AGENTSH_TRANSPORT value %q (expected http or grpc)", transport)
+	}
 	if transport == "grpc" {
 		grpcAddr := strings.TrimSpace(os.Getenv("AGENTSH_GRPC_ADDR"))
 		if grpcAddr == "" {
@@ -627,6 +630,12 @@ func serverAddrFromEnv() (network, addr string, err error) {
 // immediately when it's not. The timeout parameter should be short for
 // local probes (~200ms) and longer for remote probes (~2s) to avoid
 // false negatives on higher-latency links.
+//
+// Design: uses a raw TCP/unix dial rather than an HTTP health check.
+// This is intentional for a boot-time login shell: the shim must be
+// minimal (no HTTP client imports), fast, and resilient to partial
+// server startup. If a non-agentsh service occupies the port, the
+// subsequent agentsh exec call fails with a clear error.
 //
 // Returns the dial error so the caller can distinguish transient errors
 // (ECONNREFUSED, ENOENT — server not started) from hard errors

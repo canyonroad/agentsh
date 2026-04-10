@@ -1022,6 +1022,27 @@ func TestServerAddrFromEnv_GRPCTransport(t *testing.T) {
 			t.Errorf("got (%q, %q), want (tcp, 10.0.0.5:9090)", gotNet, gotAddr)
 		}
 	})
+	t.Run("invalid transport typo", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "grcp") // typo
+		_, _, gotErr := serverAddrFromEnv()
+		if gotErr == nil {
+			t.Fatal("expected error for invalid AGENTSH_TRANSPORT")
+		}
+		if !strings.Contains(gotErr.Error(), "AGENTSH_TRANSPORT") {
+			t.Fatalf("error should mention AGENTSH_TRANSPORT: %v", gotErr)
+		}
+	})
+	t.Run("http transport explicit", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "http")
+		t.Setenv("AGENTSH_SERVER", "http://127.0.0.1:18080")
+		gotNet, gotAddr, gotErr := serverAddrFromEnv()
+		if gotErr != nil {
+			t.Fatalf("unexpected error: %v", gotErr)
+		}
+		if gotNet != "tcp" || gotAddr != "127.0.0.1:18080" {
+			t.Errorf("got (%q, %q), want (tcp, 127.0.0.1:18080)", gotNet, gotAddr)
+		}
+	})
 }
 
 func TestIsTransientDialError(t *testing.T) {
