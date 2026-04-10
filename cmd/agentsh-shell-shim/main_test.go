@@ -787,6 +787,120 @@ func TestShimReadinessGate_RemoteUnreachable_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestShimReadinessGate_GRPCTransport_ProbesGRPCAddr verifies that when
+// AGENTSH_TRANSPORT=grpc, the readiness gate probes AGENTSH_GRPC_ADDR instead
+// of AGENTSH_SERVER. With a reachable gRPC listener, the shim should proceed
+// to enforcement even if AGENTSH_SERVER points at nothing.
+func TestShimReadinessGate_GRPCTransport_ProbesGRPCAddr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\nready_gate=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start a fake gRPC listener.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() { for { c, e := ln.Accept(); if e != nil { return }; c.Close() } }()
+
+	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_TRANSPORT=grpc",
+		"AGENTSH_GRPC_ADDR=" + ln.Addr().String(),
+		"AGENTSH_SERVER=http://127.0.0.1:1", // unreachable — should be ignored
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	// Should FAIL: readiness gate passed (gRPC endpoint is reachable),
+	// shim tried to enforce but couldn't find agentsh.
+	if err == nil {
+		t.Fatalf("expected error: readiness gate should have passed and enforcement should fail (no agentsh)")
+	}
+	if !strings.Contains(stderr.String(), "agentsh") {
+		t.Fatalf("expected agentsh-related error (enforce path), got stderr: %s", stderr.String())
+	}
+}
+
+// TestShimReadinessGate_UnixSocketEACCES_FailsClosed verifies that a
+// permission-denied error on a unix socket fails closed (not fail-open).
+// EACCES is a hard error indicating bad permissions, not "server not started."
+func TestShimReadinessGate_UnixSocketEACCES_FailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root (root bypasses permission checks)")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\nready_gate=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a unix socket, then change permissions to trigger EACCES.
+	sockPath := filepath.Join(tmp, "agentsh.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	if err := os.Chmod(sockPath, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SERVER=unix://" + sockPath,
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	// Should FAIL (fail-closed on EACCES, not fall through to sh.real).
+	if err == nil {
+		t.Fatalf("expected error: EACCES on unix socket should fail-closed, not fall through")
+	}
+	if !strings.Contains(stderr.String(), "local server dial error") {
+		t.Fatalf("expected local dial error message, got stderr: %s", stderr.String())
+	}
+}
+
 func TestServerAddrFromEnv(t *testing.T) {
 	tests := []struct {
 		name        string

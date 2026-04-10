@@ -142,10 +142,14 @@ func main() {
 	if conf.ReadyGate && !forceFromEnv {
 		srvNetwork, srvAddr, srvErr := serverAddrFromEnv()
 		if srvErr != nil {
-			// Non-empty but invalid AGENTSH_SERVER — fail-closed.
+			// Non-empty but invalid server address — fail-closed.
+			hint := "Fix the AGENTSH_SERVER value or unset it to use the default (http://127.0.0.1:18080)."
+			if strings.TrimSpace(os.Getenv("AGENTSH_TRANSPORT")) == "grpc" {
+				hint = "Fix the AGENTSH_GRPC_ADDR value or unset it to use the default (127.0.0.1:9090)."
+			}
 			fatalWithHint(127,
 				fmt.Sprintf("agentsh-shell-shim: ready_gate: %v", srvErr),
-				"Fix the AGENTSH_SERVER value or unset it to use the default (http://127.0.0.1:18080).",
+				hint,
 			)
 		}
 		local := serverIsLocal(srvNetwork, srvAddr)
