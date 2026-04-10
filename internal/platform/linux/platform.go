@@ -53,13 +53,13 @@ func (p *Platform) Capabilities() platform.Capabilities {
 // Expensive checks (FUSE, iptables) run concurrently to reduce startup latency.
 func (p *Platform) detectCapabilities() platform.Capabilities {
 	var (
-		hasFUSE, hasIptables bool
-		fuseVersion          string
-		wg                   sync.WaitGroup
+		hasFUSE, hasIptables, hasCgroups bool
+		fuseVersion                      string
+		wg                               sync.WaitGroup
 	)
 
-	// Run expensive checks (PATH lookups, /dev/fuse probe) concurrently.
-	wg.Add(2)
+	// Run expensive checks (PATH lookups, /dev/fuse probe, /proc reads) concurrently.
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		hasFUSE = p.checkFUSE()
@@ -68,6 +68,10 @@ func (p *Platform) detectCapabilities() platform.Capabilities {
 	go func() {
 		defer wg.Done()
 		hasIptables = p.checkIptables()
+	}()
+	go func() {
+		defer wg.Done()
+		hasCgroups = p.checkCgroups()
 	}()
 	wg.Wait()
 
@@ -92,13 +96,14 @@ func (p *Platform) detectCapabilities() platform.Capabilities {
 		// Syscall filtering
 		HasSeccomp: p.checkSeccomp(),
 
-		// Resource control
-		HasCgroups:           p.checkCgroups(),
-		CanLimitCPU:          true,
-		CanLimitMemory:       true,
-		CanLimitDiskIO:       true,
-		CanLimitNetworkBW:    true,
-		CanLimitProcessCount: true,
+		// Resource control — CanLimit* mirrors HasCgroups because actual
+		// enforcement is done by CgroupManager, not the platform ResourceLimiter.
+		HasCgroups:           hasCgroups,
+		CanLimitCPU:          hasCgroups,
+		CanLimitMemory:       hasCgroups,
+		CanLimitDiskIO:       hasCgroups,
+		CanLimitNetworkBW:    hasCgroups,
+		CanLimitProcessCount: hasCgroups,
 	}
 
 	return caps

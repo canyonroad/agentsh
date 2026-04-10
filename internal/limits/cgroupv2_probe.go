@@ -116,7 +116,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 	// Step 4b: if EBUSY, try leaf-move — create own/leaf, move self there,
 	// retry enabling controllers on the now-empty parent.
 	if errors.Is(enableErr, syscall.EBUSY) {
-		moved, enabled := tryLeafMove(fs, own)
+		moved, enabled, retryErr := tryLeafMove(fs, own)
 		if enabled {
 			delegatedNow, _ := readControllerSet(fs, filepath.Join(own, "cgroup.subtree_control"))
 			return &CgroupProbeResult{
@@ -129,8 +129,9 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 		}
 		if moved {
 			// Process was relocated to own/leaf but controllers could not
-			// be enabled. Record the side-effect so telemetry is accurate.
-			reason := classifyEnableError(enableErr)
+			// be enabled. Classify the retry error (not the original EBUSY)
+			// so telemetry reflects the actual failure.
+			reason := classifyEnableError(retryErr)
 			res, err := tryTopLevel(ctx, fs, own, reason)
 			if err == nil && res != nil {
 				res.LeafMoved = true
@@ -157,28 +158,29 @@ func ProbeCgroupsV2Default(ctx context.Context) (*CgroupProbeResult, error) {
 // controllers on the parent. This is the standard pattern for systemd services
 // that need to manage child cgroups.
 //
-// Returns (moved, enabled): moved is true if the process was relocated to
-// own/leaf; enabled is true if controllers were successfully enabled on the
-// parent after the move.
-func tryLeafMove(fs cgroupFS, own string) (moved, enabled bool) {
+// Returns (moved, enabled, retryErr): moved is true if the process was
+// relocated to own/leaf; enabled is true if controllers were successfully
+// enabled on the parent after the move; retryErr is the error from the
+// enable retry (nil when enabled is true).
+func tryLeafMove(fs cgroupFS, own string) (moved, enabled bool, retryErr error) {
 	leafDir := filepath.Join(own, "leaf")
 	if err := fs.Mkdir(leafDir, 0o755); err != nil {
 		if !errors.Is(err, syscall.EEXIST) {
-			return false, false
+			return false, false, nil
 		}
 	}
 
 	// Move the current process into the leaf cgroup.
 	pid := []byte(strconv.Itoa(os.Getpid()))
 	if err := fs.WriteFile(filepath.Join(leafDir, "cgroup.procs"), pid, 0o644); err != nil {
-		return false, false
+		return false, false, nil
 	}
 
 	// Retry enabling controllers now that the parent has no internal processes.
 	if err := enableControllersFS(fs, own, requiredControllers); err != nil {
-		return true, false // moved but enable failed
+		return true, false, err // moved but enable failed
 	}
-	return true, true
+	return true, true, nil
 }
 
 // tryTopLevel runs steps 5b through 5f of the decision tree.

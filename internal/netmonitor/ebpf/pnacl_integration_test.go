@@ -74,11 +74,11 @@ func TestIntegration_PNACLMonitor_BasicOperation(t *testing.T) {
 		_ = os.Remove(cgDir)
 		t.Skipf("cgroup attach failed: %v", err)
 	}
-	defer os.RemoveAll(tmp)
+	defer os.RemoveAll(cgDir)
 
 	// Create monitor
 	monitorConfig := &PNACLMonitorConfig{
-		CgroupPath:   tmp,
+		CgroupPath:   cgDir,
 		HolderConfig: DefaultConnectionHolderConfig(),
 	}
 
@@ -153,10 +153,10 @@ func TestIntegration_ProcessFilter_WithRealEvents(t *testing.T) {
 		_ = os.Remove(cgDir)
 		t.Skipf("cgroup attach failed: %v", err)
 	}
-	defer os.RemoveAll(tmp)
+	defer os.RemoveAll(cgDir)
 
 	// Attach eBPF
-	coll, detach, err := AttachConnectToCgroup(tmp)
+	coll, detach, err := AttachConnectToCgroup(cgDir)
 	require.NoError(t, err)
 	defer detach()
 	defer coll.Close()
@@ -256,8 +256,7 @@ func TestIntegration_ConnectionHolder_ApprovalFlow(t *testing.T) {
 		_ = os.Remove(cgDir)
 		t.Skipf("cgroup attach failed: %v", err)
 	}
-	defer os.RemoveAll(tmp)
-
+	defer os.RemoveAll(cgDir)
 	// Policy that requires approval
 	config := &pnacl.Config{
 		Default: "deny",
@@ -296,7 +295,7 @@ func TestIntegration_ConnectionHolder_ApprovalFlow(t *testing.T) {
 	})
 
 	// Attach eBPF
-	coll, detach, err := AttachConnectToCgroup(tmp)
+	coll, detach, err := AttachConnectToCgroup(cgDir)
 	require.NoError(t, err)
 	defer detach()
 	defer coll.Close()

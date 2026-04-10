@@ -34,16 +34,16 @@ func TestIntegration_AttachAndEnforce(t *testing.T) {
 		_ = os.Remove(cgDir)
 		t.Skipf("cgroup attach failed: %v", err)
 	}
-	defer os.RemoveAll(tmp)
+	defer os.RemoveAll(cgDir)
 
-	coll, detach, err := ebpf.AttachConnectToCgroup(tmp)
+	coll, detach, err := ebpf.AttachConnectToCgroup(cgDir)
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	defer detach()
 	defer coll.Close()
 
-	cgid, err := ebpf.CgroupID(tmp)
+	cgid, err := ebpf.CgroupID(cgDir)
 	if err != nil {
 		t.Fatalf("cgroup id: %v", err)
 	}
@@ -80,16 +80,16 @@ func TestIntegration_DenyWithoutDefaultDeny(t *testing.T) {
 		_ = os.Remove(cgDir)
 		t.Skipf("cgroup attach failed: %v", err)
 	}
-	defer os.RemoveAll(tmp)
+	defer os.RemoveAll(cgDir)
 
-	coll, detach, err := ebpf.AttachConnectToCgroup(tmp)
+	coll, detach, err := ebpf.AttachConnectToCgroup(cgDir)
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	defer detach()
 	defer coll.Close()
 
-	cgid, err := ebpf.CgroupID(tmp)
+	cgid, err := ebpf.CgroupID(cgDir)
 	if err != nil {
 		t.Fatalf("cgroup id: %v", err)
 	}
