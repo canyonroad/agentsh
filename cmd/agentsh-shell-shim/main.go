@@ -88,10 +88,18 @@ func main() {
 	// Note: env can only ADD enforcement, never remove it.
 	conf, confErr := shim.ReadShimConf(shimConfRoot())
 	if confErr != nil {
-		// Fail-closed: if the config file exists but can't be read (permission
-		// denied, I/O error), assume force=true. An operator wrote the file for
-		// a reason — silently bypassing policy is worse than over-enforcing.
-		// Only a missing file (ENOENT) is non-fatal (handled inside ReadShimConf).
+		// Distinguish validation errors (typos like force=tru, ready_gate=tru)
+		// from I/O errors (permission denied). Validation errors must fail
+		// visibly — a typo in ready_gate silently disabling the boot-safety
+		// gate would leave operators in the exact boot-loop this code prevents.
+		// I/O errors → fail-closed (assume force=true) because the operator
+		// wrote the file for a reason.
+		if strings.HasPrefix(confErr.Error(), "shim.conf:") {
+			fatalWithHint(127,
+				fmt.Sprintf("agentsh-shell-shim: %v", confErr),
+				"Fix the value in "+shim.ShimConfPath(shimConfRoot())+" or remove the invalid line.",
+			)
+		}
 		debugLog("read shim.conf: %v (fail-closed: assuming force=true)", confErr)
 		conf.Force = true
 	}
@@ -131,8 +139,16 @@ func main() {
 				"Fix the AGENTSH_SERVER value or unset it to use the default (http://127.0.0.1:18080).",
 			)
 		}
-		if !serverReachable(srvNetwork, srvAddr) {
-			if serverIsLocal(srvNetwork, srvAddr) {
+		local := serverIsLocal(srvNetwork, srvAddr)
+		// Local probes complete in <1ms (ECONNREFUSED is immediate on
+		// loopback/unix). Remote probes need a longer timeout to avoid
+		// false negatives on VPN or higher-latency links.
+		probeTimeout := 200 * time.Millisecond
+		if !local {
+			probeTimeout = 2 * time.Second
+		}
+		if !serverReachable(srvNetwork, srvAddr, probeTimeout) {
+			if local {
 				debugLog("ready_gate: local server not reachable at %s:%s, falling through to real shell %s", srvNetwork, srvAddr, realShell)
 				runAndExit(realShell, argv0, os.Args[1:], os.Environ())
 				return
@@ -560,10 +576,11 @@ func serverAddrFromEnv() (network, addr string, err error) {
 // serverReachable does a fast dial to check if the agentsh server is
 // listening. Supports both TCP and unix socket addresses. On loopback
 // this completes in <1ms when the server is up, or returns ECONNREFUSED
-// immediately when it's not. The timeout is a safety net for firewalled
-// or remote hosts.
-func serverReachable(network, addr string) bool {
-	conn, err := net.DialTimeout(network, addr, 200*time.Millisecond)
+// immediately when it's not. The timeout parameter should be short for
+// local probes (~200ms) and longer for remote probes (~2s) to avoid
+// false negatives on higher-latency links.
+func serverReachable(network, addr string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout(network, addr, timeout)
 	if err != nil {
 		return false
 	}

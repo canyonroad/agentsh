@@ -910,6 +910,52 @@ func TestIsAgentshCommand_Symlink(t *testing.T) {
 	}
 }
 
+// TestShimConfValidationError_FailsWithMessage verifies that a typo in
+// shim.conf (e.g. ready_gate=tru) fails with a clear error message instead
+// of being silently swallowed into the fail-closed force=true path. Without
+// this, a typo disabling the readiness gate would leave operators in the
+// exact boot-loop the gate is meant to prevent.
+func TestShimConfValidationError_FailsWithMessage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Typo: "tru" instead of "true".
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("ready_gate=tru\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected error for typo in shim.conf, but shim succeeded")
+	}
+	// Must mention the invalid value, not just "agentsh" resolve errors.
+	if !strings.Contains(stderr.String(), "invalid ready_gate") {
+		t.Fatalf("expected validation error message, got stderr: %s", stderr.String())
+	}
+}
+
 func TestFatalWithHint(t *testing.T) {
 	// Verify formatting and exit code by forking a subprocess.
 	if os.Getenv("AGENTSH_SHIM_FATAL_TEST") == "1" {
