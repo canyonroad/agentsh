@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/limits"
@@ -25,8 +26,13 @@ func TestIntegration_AttachAndEnforce(t *testing.T) {
 	// Create a temp cgroup and move self into it.
 	tmp := filepath.Join(os.TempDir(), "agentsh-ebpf-test")
 	_ = os.RemoveAll(tmp)
-	if _, err := limits.ApplyCgroupV2("/sys/fs/cgroup", filepath.Base(tmp), os.Getpid(), limits.CgroupV2Limits{}); err != nil {
-		t.Skipf("cgroup create failed: %v", err)
+	cgDir := filepath.Join("/sys/fs/cgroup", filepath.Base(tmp))
+	if err := os.Mkdir(cgDir, 0o755); err != nil {
+		t.Skipf("cgroup mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cgDir, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		_ = os.Remove(cgDir)
+		t.Skipf("cgroup attach failed: %v", err)
 	}
 	defer os.RemoveAll(tmp)
 
@@ -66,8 +72,13 @@ func TestIntegration_DenyWithoutDefaultDeny(t *testing.T) {
 
 	tmp := filepath.Join(os.TempDir(), "agentsh-ebpf-deny-test")
 	_ = os.RemoveAll(tmp)
-	if _, err := limits.ApplyCgroupV2("/sys/fs/cgroup", filepath.Base(tmp), os.Getpid(), limits.CgroupV2Limits{}); err != nil {
-		t.Skipf("cgroup create failed: %v", err)
+	cgDir := filepath.Join("/sys/fs/cgroup", filepath.Base(tmp))
+	if err := os.Mkdir(cgDir, 0o755); err != nil {
+		t.Skipf("cgroup mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cgDir, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		_ = os.Remove(cgDir)
+		t.Skipf("cgroup attach failed: %v", err)
 	}
 	defer os.RemoveAll(tmp)
 
