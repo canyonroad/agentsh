@@ -8,121 +8,186 @@ import (
 	"github.com/agentsh/agentsh/internal/platform"
 )
 
-func TestNewResourceLimiter(t *testing.T) {
-	r := NewResourceLimiter()
-	if r == nil {
-		t.Fatal("NewResourceLimiter returned nil")
-	}
-
-	available := r.Available()
-	t.Logf("Resource limiter available: %v", available)
-
-	limits := r.SupportedLimits()
-	t.Logf("Supported limits: %v", limits)
+func TestCgroupResourceLimiter_Available(t *testing.T) {
+	r := &cgroupResourceLimiter{}
+	// On a Linux system with cgroup v2, Available should return true.
+	// We don't assert the value since it depends on the host, just verify no panic.
+	_ = r.Available()
 }
 
-func TestResourceLimiter_SupportedLimits(t *testing.T) {
-	r := NewResourceLimiter()
-	if !r.Available() {
-		t.Skip("Cgroups v2 not available")
-	}
-
+func TestCgroupResourceLimiter_SupportedLimits(t *testing.T) {
+	r := &cgroupResourceLimiter{}
 	limits := r.SupportedLimits()
-	if len(limits) == 0 {
-		t.Error("No supported limits detected on cgroups v2 system")
-	}
-
-	// Check for expected limits
-	hasMemory := false
-	hasCPU := false
-	for _, l := range limits {
-		if l == platform.ResourceMemory {
-			hasMemory = true
+	if r.Available() {
+		if len(limits) != 3 {
+			t.Fatalf("expected 3 supported limits, got %d", len(limits))
 		}
-		if l == platform.ResourceCPU {
-			hasCPU = true
+		expected := map[platform.ResourceType]bool{
+			platform.ResourceCPU:          true,
+			platform.ResourceMemory:       true,
+			platform.ResourceProcessCount: true,
+		}
+		for _, l := range limits {
+			if !expected[l] {
+				t.Errorf("unexpected supported limit: %v", l)
+			}
+		}
+	} else {
+		if limits != nil {
+			t.Fatalf("expected nil when unavailable, got %v", limits)
 		}
 	}
-
-	t.Logf("Has memory limit: %v, Has CPU limit: %v", hasMemory, hasCPU)
 }
 
-func TestResourceLimiter_Apply(t *testing.T) {
-	r := NewResourceLimiter()
+func TestCgroupResourceLimiter_RejectUnsupportedLimits(t *testing.T) {
+	r := &cgroupResourceLimiter{}
 	if !r.Available() {
-		t.Skip("Cgroups v2 not available")
+		t.Skip("cgroup v2 not available")
+	}
+
+	tests := []struct {
+		name   string
+		config platform.ResourceConfig
+	}{
+		{
+			name: "disk read",
+			config: platform.ResourceConfig{
+				Name:            "test-disk-read",
+				MaxDiskReadMBps: 100,
+			},
+		},
+		{
+			name: "disk write",
+			config: platform.ResourceConfig{
+				Name:             "test-disk-write",
+				MaxDiskWriteMBps: 50,
+			},
+		},
+		{
+			name: "network",
+			config: platform.ResourceConfig{
+				Name:           "test-net",
+				MaxNetworkMbps: 100,
+			},
+		},
+		{
+			name: "cpu affinity",
+			config: platform.ResourceConfig{
+				Name:        "test-affinity",
+				CPUAffinity: []int{0, 1},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := r.Apply(tt.config)
+			if err == nil {
+				t.Fatalf("expected error for unsupported limit %q", tt.name)
+			}
+		})
+	}
+}
+
+func TestCgroupResourceLimiter_DuplicateHandleName(t *testing.T) {
+	r := &cgroupResourceLimiter{}
+	if !r.Available() {
+		t.Skip("cgroup v2 not available")
 	}
 
 	config := platform.ResourceConfig{
-		Name:          "test-limits",
-		MaxMemoryMB:   512,
+		Name:          "test-dup",
+		MaxMemoryMB:   64,
 		MaxCPUPercent: 50,
-		MaxProcesses:  100,
 	}
 
-	handle, err := r.Apply(config)
+	h1, err := r.Apply(config)
 	if err != nil {
-		t.Fatalf("Apply() error = %v", err)
+		t.Fatalf("first Apply: %v", err)
 	}
-	defer handle.Release()
 
-	if handle == nil {
-		t.Error("Apply() returned nil handle")
+	_, err = r.Apply(config)
+	if err == nil {
+		t.Fatalf("expected error for duplicate handle name")
+	}
+
+	// After releasing, the name should be available again.
+	_ = h1.Release()
+
+	_, err = r.Apply(config)
+	if err != nil {
+		t.Fatalf("Apply after release should succeed: %v", err)
 	}
 }
 
-func TestResourceHandle_Stats(t *testing.T) {
-	r := NewResourceLimiter()
+func TestCgroupResourceHandle_AssignAfterRelease(t *testing.T) {
+	r := &cgroupResourceLimiter{}
 	if !r.Available() {
-		t.Skip("Cgroups v2 not available")
+		t.Skip("cgroup v2 not available")
 	}
 
 	config := platform.ResourceConfig{
-		Name:          "stats-test",
-		MaxMemoryMB:   256,
-		MaxCPUPercent: 25,
+		Name:          "test-release",
+		MaxMemoryMB:   64,
+		MaxCPUPercent: 50,
 	}
 
-	handle, err := r.Apply(config)
+	h, err := r.Apply(config)
 	if err != nil {
-		t.Fatalf("Apply() error = %v", err)
+		t.Fatalf("Apply: %v", err)
 	}
-	defer handle.Release()
 
-	// Stats should work even without processes assigned
-	stats := handle.Stats()
-	t.Logf("Stats: MemoryMB=%d, CPUPercent=%.2f, ProcessCount=%d",
-		stats.MemoryMB, stats.CPUPercent, stats.ProcessCount)
+	if err := h.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	if err := h.AssignProcess(1234); err == nil {
+		t.Fatalf("expected error on AssignProcess after Release")
+	}
 }
 
-func TestResourceHandle_Release(t *testing.T) {
-	r := NewResourceLimiter()
+func TestCgroupResourceHandle_ReleaseIdempotent(t *testing.T) {
+	r := &cgroupResourceLimiter{}
 	if !r.Available() {
-		t.Skip("Cgroups v2 not available")
+		t.Skip("cgroup v2 not available")
 	}
 
 	config := platform.ResourceConfig{
-		Name: "release-test",
+		Name: "test-idem",
 	}
 
-	handle, err := r.Apply(config)
+	h, err := r.Apply(config)
 	if err != nil {
-		t.Fatalf("Apply() error = %v", err)
+		t.Fatalf("Apply: %v", err)
 	}
 
-	// Release should succeed
-	if err := handle.Release(); err != nil {
-		t.Errorf("Release() error = %v", err)
+	if err := h.Release(); err != nil {
+		t.Fatalf("first Release: %v", err)
 	}
-
-	// Second release should also succeed (idempotent)
-	if err := handle.Release(); err != nil {
-		t.Errorf("Second Release() error = %v", err)
+	if err := h.Release(); err != nil {
+		t.Fatalf("second Release should be idempotent: %v", err)
 	}
 }
 
-// Compile-time interface checks
-var (
-	_ platform.ResourceLimiter = (*ResourceLimiter)(nil)
-	_ platform.ResourceHandle  = (*ResourceHandle)(nil)
-)
+func TestCgroupResourceHandle_StatsBeforeAssign(t *testing.T) {
+	r := &cgroupResourceLimiter{}
+	if !r.Available() {
+		t.Skip("cgroup v2 not available")
+	}
+
+	config := platform.ResourceConfig{
+		Name: "test-stats",
+	}
+
+	h, err := r.Apply(config)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	defer h.Release()
+
+	// Stats before AssignProcess should return zero values (no cgroup yet).
+	stats := h.Stats()
+	if stats.MemoryMB != 0 || stats.ProcessCount != 0 {
+		t.Fatalf("expected zero stats before AssignProcess, got %+v", stats)
+	}
+}

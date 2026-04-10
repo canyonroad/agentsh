@@ -230,3 +230,179 @@ func TestProbe_AllOrphansPopulated(t *testing.T) {
 		t.Fatalf("child-B should still exist: %v", err)
 	}
 }
+
+func TestProbe_LeafMove_EBUSYSucceeds(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	// First enableControllers call fails with EBUSY (process in cgroup);
+	// after leaf-move, the retry succeeds.
+	f.openWriteErrsOnce[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	// Seed cgroup.procs so the leaf-move write (WriteFile) succeeds.
+	f.seedFile(own+"/cgroup.procs", "1234")
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeNested {
+		t.Fatalf("mode: got %q, want nested", res.Mode)
+	}
+	if !res.LeafMoved {
+		t.Fatalf("expected LeafMoved=true")
+	}
+	if !strings.Contains(res.Reason, "leaf-moved") {
+		t.Fatalf("reason should contain 'leaf-moved': %q", res.Reason)
+	}
+	if res.OwnCgroup != own {
+		t.Fatalf("OwnCgroup should be %q, got %q", own, res.OwnCgroup)
+	}
+	// Verify the leaf directory was created.
+	if _, err := f.Stat(own + "/agentsh.leaf"); err != nil {
+		t.Fatalf("leaf dir should exist: %v", err)
+	}
+}
+
+func TestProbe_LeafMove_MkdirFails_FallbackTopLevel(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.openWriteErrsOnce[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	// Pre-create own/leaf so mkdir returns EEXIST (tolerated),
+	// then block the cgroup.procs write to simulate permission failure.
+	f.seedDir(own + "/agentsh.leaf")
+	f.writeErrs[own+"/agentsh.leaf/cgroup.procs"] = syscall.EACCES
+	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeTopLevel {
+		t.Fatalf("mode: got %q, want top-level", res.Mode)
+	}
+	if !strings.Contains(res.Reason, "leaf-move failed") {
+		t.Fatalf("reason should contain leaf-move failure: %q", res.Reason)
+	}
+	if res.LeafMoved {
+		t.Fatalf("expected LeafMoved=false")
+	}
+}
+
+func TestProbe_LeafMove_RetryEnableFails_FallbackTopLevel(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	// Use permanent openErrs — both the first and retry calls fail.
+	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	f.seedFile(own+"/cgroup.procs", "1234")
+	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeTopLevel {
+		t.Fatalf("mode: got %q, want top-level", res.Mode)
+	}
+	if !strings.Contains(res.Reason, "EBUSY") {
+		t.Fatalf("reason should contain EBUSY: %q", res.Reason)
+	}
+	// Process was moved to own/leaf even though enable retry failed —
+	// LeafMoved should reflect the side-effect.
+	if !res.LeafMoved {
+		t.Fatalf("expected LeafMoved=true (process was moved even though enable retry failed)")
+	}
+}
+
+func TestProbe_EACCES_NoLeafMove(t *testing.T) {
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.openErrs[own+"/cgroup.subtree_control:write"] = syscall.EACCES
+	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
+
+	res, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.Mode != ModeTopLevel {
+		t.Fatalf("mode: got %q, want top-level", res.Mode)
+	}
+	// Verify no leaf directory was created.
+	if _, err := f.Stat(own + "/agentsh.leaf"); err == nil {
+		t.Fatalf("leaf dir should NOT exist for EACCES — leaf-move is EBUSY-only")
+	}
+	if res.LeafMoved {
+		t.Fatalf("expected LeafMoved=false for EACCES")
+	}
+}
+
+func TestProbe_LeafMove_IdempotentSecondProbe(t *testing.T) {
+	// Regression: after a successful leaf-move, a second probe with the same
+	// ownHint (e.g. NewCgroupManager after CheckAll both using the service
+	// cgroup path) should find subtree_control already delegated and NOT
+	// attempt another leaf-move.
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	own := "/sys/fs/cgroup/system.slice/agentsh.service"
+	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(own+"/cgroup.subtree_control", "")
+	f.openWriteErrsOnce[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	f.seedFile(own+"/cgroup.procs", "1234")
+
+	// First probe: triggers leaf-move.
+	res1, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe 1: %v", err)
+	}
+	if !res1.LeafMoved || res1.Mode != ModeNested {
+		t.Fatalf("probe 1: expected leaf-moved nested, got mode=%q leaf=%v", res1.Mode, res1.LeafMoved)
+	}
+
+	// Second probe: same ownHint (parent). Subtree_control was enabled by
+	// probe 1, so this should see "already delegated" immediately.
+	res2, err := ProbeCgroupsV2(context.Background(), f, own)
+	if err != nil {
+		t.Fatalf("probe 2: %v", err)
+	}
+	if res2.Mode != ModeNested {
+		t.Fatalf("probe 2: expected nested, got %q", res2.Mode)
+	}
+	if res2.OwnCgroup != own {
+		t.Fatalf("probe 2: OwnCgroup should be %q, got %q", own, res2.OwnCgroup)
+	}
+	if res2.Reason != "already delegated" {
+		t.Fatalf("probe 2: expected 'already delegated', got %q", res2.Reason)
+	}
+	// Verify no leaf/leaf was created.
+	if _, err := f.Stat(own + "/agentsh.leaf/agentsh.leaf"); err == nil {
+		t.Fatalf("leaf/leaf should NOT exist — probe should be idempotent")
+	}
+}
+
+func TestProbe_ExplicitLeafHintNotStripped(t *testing.T) {
+	// Verify that an explicit absolute ownHint ending in "leaf" is NOT
+	// rewritten — normalization only applies to auto-discovered paths.
+	f := newFakeCgroupFS()
+	seedHealthyRoot(f)
+	leafPath := "/sys/fs/cgroup/system.slice/agentsh.service/agentsh.leaf"
+	f.seedFile(leafPath+"/cgroup.controllers", "cpu memory pids")
+	f.seedFile(leafPath+"/cgroup.subtree_control", "cpu memory pids")
+
+	res, err := ProbeCgroupsV2(context.Background(), f, leafPath)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if res.OwnCgroup != leafPath {
+		t.Fatalf("explicit leaf hint should NOT be stripped: got %q, want %q", res.OwnCgroup, leafPath)
+	}
+}

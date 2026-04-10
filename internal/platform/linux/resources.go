@@ -4,6 +4,7 @@ package linux
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,194 +15,174 @@ import (
 	"github.com/agentsh/agentsh/internal/platform"
 )
 
-// ResourceLimiter implements platform.ResourceLimiter for Linux using cgroups v2.
-type ResourceLimiter struct {
-	available       bool
-	supportedLimits []platform.ResourceType
-	mu              sync.Mutex
-	handles         map[string]*ResourceHandle
+// cgroupResourceLimiter implements platform.ResourceLimiter by delegating to
+// limits.CgroupManager. The CgroupManager is created lazily on the first
+// Apply() call because the platform is constructed before the cgroup probe runs.
+type cgroupResourceLimiter struct {
+	mu      sync.Mutex
+	mgr     *limits.CgroupManager
+	initErr error
+	inited  bool
+	handles map[string]*cgroupResourceHandle
 }
 
-// NewResourceLimiter creates a new Linux resource limiter.
-func NewResourceLimiter() *ResourceLimiter {
-	r := &ResourceLimiter{
-		handles: make(map[string]*ResourceHandle),
-	}
-	r.available = r.checkAvailable()
-	r.supportedLimits = r.detectSupportedLimits()
-	return r
-}
-
-// checkAvailable checks if cgroups v2 is available.
-func (r *ResourceLimiter) checkAvailable() bool {
+func (r *cgroupResourceLimiter) Available() bool {
 	return limits.DetectCgroupV2()
 }
 
-// detectSupportedLimits determines which resource limits are available.
-func (r *ResourceLimiter) detectSupportedLimits() []platform.ResourceType {
-	if !r.available {
+func (r *cgroupResourceLimiter) SupportedLimits() []platform.ResourceType {
+	if !r.Available() {
 		return nil
 	}
-
-	var supported []platform.ResourceType
-
-	// Check which controllers are available
-	cgDir, err := limits.CurrentCgroupDir()
-	if err != nil {
-		return nil
+	// Static list based on DetectCgroupV2(). Do not call ensureManager()
+	// here — the full probe has side effects (leaf-move, controller writes).
+	// Actual enforceability is determined at Apply time.
+	return []platform.ResourceType{
+		platform.ResourceCPU,
+		platform.ResourceMemory,
+		platform.ResourceProcessCount,
 	}
-
-	controllers, err := os.ReadFile(filepath.Join(cgDir, "cgroup.controllers"))
-	if err != nil {
-		return nil
-	}
-
-	ctrlList := strings.Fields(string(controllers))
-	ctrlSet := make(map[string]bool)
-	for _, c := range ctrlList {
-		ctrlSet[c] = true
-	}
-
-	// Map controllers to resource types
-	if ctrlSet["cpu"] {
-		supported = append(supported, platform.ResourceCPU)
-		supported = append(supported, platform.ResourceCPUAffinity)
-	}
-	if ctrlSet["memory"] {
-		supported = append(supported, platform.ResourceMemory)
-	}
-	if ctrlSet["pids"] {
-		supported = append(supported, platform.ResourceProcessCount)
-	}
-	if ctrlSet["io"] {
-		supported = append(supported, platform.ResourceDiskIO)
-	}
-	// Network bandwidth limiting requires tc/eBPF, not cgroups
-	// We don't claim support for it here
-
-	return supported
 }
 
-// Available returns whether resource limiting is available.
-func (r *ResourceLimiter) Available() bool {
-	return r.available
+func (r *cgroupResourceLimiter) ensureManager() (*limits.CgroupManager, error) {
+	if r.inited {
+		return r.mgr, r.initErr
+	}
+	r.inited = true
+	r.mgr, r.initErr = limits.NewCgroupManager(context.Background(), "")
+	return r.mgr, r.initErr
 }
 
-// SupportedLimits returns which resource types can be limited.
-func (r *ResourceLimiter) SupportedLimits() []platform.ResourceType {
-	return r.supportedLimits
-}
+func (r *cgroupResourceLimiter) Apply(config platform.ResourceConfig) (platform.ResourceHandle, error) {
+	if config.MaxDiskReadMBps > 0 || config.MaxDiskWriteMBps > 0 {
+		return nil, fmt.Errorf("disk IO limiting not implemented (io.max not written)")
+	}
+	if config.MaxNetworkMbps > 0 {
+		return nil, fmt.Errorf("network bandwidth limiting not supported (requires tc/qdisc)")
+	}
+	if len(config.CPUAffinity) > 0 {
+		return nil, fmt.Errorf("CPU affinity not implemented")
+	}
 
-// Apply applies resource limits using cgroups v2.
-func (r *ResourceLimiter) Apply(config platform.ResourceConfig) (platform.ResourceHandle, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Convert platform config to limits package config
-	lim := limits.CgroupV2Limits{}
-
-	if config.MaxMemoryMB > 0 {
-		lim.MaxMemoryBytes = int64(config.MaxMemoryMB) * 1024 * 1024
-	}
-	if config.MaxCPUPercent > 0 {
-		lim.CPUQuotaPct = int(config.MaxCPUPercent)
-	}
-	if config.MaxProcesses > 0 {
-		lim.PidsMax = int(config.MaxProcesses)
+	if r.handles != nil {
+		if _, exists := r.handles[config.Name]; exists {
+			return nil, fmt.Errorf("resource handle %q already active", config.Name)
+		}
 	}
 
-	// Create handle with config stored (we'll apply when a process is assigned)
-	handle := &ResourceHandle{
-		name:   config.Name,
-		config: config,
-		limits: lim,
+	mgr, err := r.ensureManager()
+	if err != nil {
+		return nil, fmt.Errorf("cgroup manager init: %w", err)
 	}
 
-	r.handles[config.Name] = handle
-	return handle, nil
+	lim := limits.CgroupV2Limits{
+		MaxMemoryBytes: int64(config.MaxMemoryMB) * 1024 * 1024,
+		CPUQuotaPct:    int(config.MaxCPUPercent),
+		PidsMax:        int(config.MaxProcesses),
+	}
+
+	h := &cgroupResourceHandle{
+		limiter: r,
+		mgr:     mgr,
+		name:    config.Name,
+		lim:     lim,
+	}
+
+	if r.handles == nil {
+		r.handles = make(map[string]*cgroupResourceHandle)
+	}
+	r.handles[config.Name] = h
+	return h, nil
 }
 
-// ResourceHandle implements platform.ResourceHandle for Linux cgroups.
-type ResourceHandle struct {
-	name   string
-	config platform.ResourceConfig
-	limits limits.CgroupV2Limits
-	cgroup *limits.CgroupV2
-	mu     sync.Mutex
+func (r *cgroupResourceLimiter) removeHandle(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.handles, name)
 }
 
-// AssignProcess adds a process to this cgroup.
-func (h *ResourceHandle) AssignProcess(pid int) error {
+// cgroupResourceHandle implements platform.ResourceHandle by wrapping a
+// CgroupManager and a lazily-created CgroupV2.
+type cgroupResourceHandle struct {
+	mu       sync.Mutex
+	limiter  *cgroupResourceLimiter
+	mgr      *limits.CgroupManager
+	name     string
+	lim      limits.CgroupV2Limits
+	cg       *limits.CgroupV2
+	created  bool
+	released bool
+}
+
+func (h *cgroupResourceHandle) AssignProcess(pid int) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Create or reuse cgroup
-	if h.cgroup == nil {
-		cg, err := limits.ApplyCgroupV2("", h.name, pid, h.limits)
+	if h.released {
+		return fmt.Errorf("resource handle already released")
+	}
+
+	if !h.created {
+		cg, err := h.mgr.Apply(h.name, pid, h.lim)
 		if err != nil {
 			return err
 		}
-		h.cgroup = cg
-	} else {
-		// Add to existing cgroup
-		procsPath := filepath.Join(h.cgroup.Path, "cgroup.procs")
-		if err := os.WriteFile(procsPath, []byte(strconv.Itoa(pid)), 0o644); err != nil {
-			return err
-		}
+		h.cg = cg // may be nil if mode is unavailable with empty limits
+		h.created = true
+		return nil
 	}
 
-	return nil
+	if h.cg == nil {
+		return nil
+	}
+
+	return os.WriteFile(
+		filepath.Join(h.cg.Path, "cgroup.procs"),
+		[]byte(strconv.Itoa(pid)),
+		0o644,
+	)
 }
 
-// Stats returns current resource usage from the cgroup.
-func (h *ResourceHandle) Stats() platform.ResourceStats {
+func (h *cgroupResourceHandle) Stats() platform.ResourceStats {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	cg := h.cg
+	h.mu.Unlock()
 
-	stats := platform.ResourceStats{}
-
-	if h.cgroup == nil {
-		return stats
+	if cg == nil {
+		return platform.ResourceStats{}
 	}
 
-	// Read memory usage
-	if data, err := os.ReadFile(filepath.Join(h.cgroup.Path, "memory.current")); err == nil {
-		if bytes, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); err == nil {
-			stats.MemoryMB = uint64(bytes / (1024 * 1024))
+	var stats platform.ResourceStats
+
+	if b, err := os.ReadFile(filepath.Join(cg.Path, "memory.current")); err == nil {
+		if v, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); err == nil {
+			stats.MemoryMB = v / (1024 * 1024)
 		}
 	}
 
-	// Read CPU usage (requires calculating delta, simplified here)
-	if data, err := os.ReadFile(filepath.Join(h.cgroup.Path, "cpu.stat")); err == nil {
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(line, "usage_usec ") {
-				// This is total CPU time, not percentage
-				// Would need sampling to calculate percentage
-			}
+	// cpu.stat provides total usage_usec but computing a percentage requires
+	// sampling over a time interval — not feasible in a point-in-time Stats call.
+	// CPUPercent stays at 0 (same as prior implementation).
+
+	if b, err := os.ReadFile(filepath.Join(cg.Path, "pids.current")); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+			stats.ProcessCount = v
 		}
 	}
 
-	// Read process count
-	if data, err := os.ReadFile(filepath.Join(h.cgroup.Path, "pids.current")); err == nil {
-		if count, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
-			stats.ProcessCount = count
-		}
-	}
-
-	// Read IO stats
-	if data, err := os.ReadFile(filepath.Join(h.cgroup.Path, "io.stat")); err == nil {
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			fields := strings.Fields(line)
-			for _, f := range fields {
-				if strings.HasPrefix(f, "rbytes=") {
-					if v, err := strconv.ParseInt(strings.TrimPrefix(f, "rbytes="), 10, 64); err == nil {
+	if b, err := os.ReadFile(filepath.Join(cg.Path, "io.stat")); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			for _, field := range strings.Fields(line) {
+				if strings.HasPrefix(field, "rbytes=") {
+					if v, err := strconv.ParseInt(strings.TrimPrefix(field, "rbytes="), 10, 64); err == nil {
 						stats.DiskReadMB += v / (1024 * 1024)
 					}
 				}
-				if strings.HasPrefix(f, "wbytes=") {
-					if v, err := strconv.ParseInt(strings.TrimPrefix(f, "wbytes="), 10, 64); err == nil {
+				if strings.HasPrefix(field, "wbytes=") {
+					if v, err := strconv.ParseInt(strings.TrimPrefix(field, "wbytes="), 10, 64); err == nil {
 						stats.DiskWriteMB += v / (1024 * 1024)
 					}
 				}
@@ -212,25 +193,26 @@ func (h *ResourceHandle) Stats() platform.ResourceStats {
 	return stats
 }
 
-// Release removes the cgroup.
-func (h *ResourceHandle) Release() error {
+func (h *cgroupResourceHandle) Release() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.cgroup == nil {
+	if h.released {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5)
-	defer cancel()
+	if h.cg == nil {
+		h.released = true
+		h.limiter.removeHandle(h.name)
+		return nil
+	}
 
-	err := h.cgroup.Close(ctx)
-	h.cgroup = nil
-	return err
+	err := h.cg.Close(context.Background())
+	if err != nil {
+		return err // don't mark released — allow retry
+	}
+	h.cg = nil
+	h.released = true
+	h.limiter.removeHandle(h.name)
+	return nil
 }
-
-// Compile-time interface checks
-var (
-	_ platform.ResourceLimiter = (*ResourceLimiter)(nil)
-	_ platform.ResourceHandle  = (*ResourceHandle)(nil)
-)

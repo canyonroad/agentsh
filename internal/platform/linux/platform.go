@@ -28,7 +28,7 @@ type Platform struct {
 	fs          *Filesystem
 	net         *Network
 	sandbox     *SandboxManager
-	resources   *ResourceLimiter
+	resources   *cgroupResourceLimiter
 	caps        platform.Capabilities
 	initialized bool
 }
@@ -54,13 +54,13 @@ func (p *Platform) Capabilities() platform.Capabilities {
 // Expensive checks (FUSE, iptables) run concurrently to reduce startup latency.
 func (p *Platform) detectCapabilities() platform.Capabilities {
 	var (
-		hasFUSE, hasIptables bool
-		fuseVersion          string
-		wg                   sync.WaitGroup
+		hasFUSE, hasIptables, hasCgroups bool
+		fuseVersion                      string
+		wg                               sync.WaitGroup
 	)
 
-	// Run expensive checks (PATH lookups, /dev/fuse probe) concurrently.
-	wg.Add(2)
+	// Run expensive checks (PATH lookups, /dev/fuse probe, /proc reads) concurrently.
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		hasFUSE = p.checkFUSE()
@@ -69,6 +69,10 @@ func (p *Platform) detectCapabilities() platform.Capabilities {
 	go func() {
 		defer wg.Done()
 		hasIptables = p.checkIptables()
+	}()
+	go func() {
+		defer wg.Done()
+		hasCgroups = p.checkCgroups()
 	}()
 	wg.Wait()
 
@@ -93,13 +97,14 @@ func (p *Platform) detectCapabilities() platform.Capabilities {
 		// Syscall filtering
 		HasSeccomp: p.checkSeccomp(),
 
-		// Resource control
-		HasCgroups:           p.checkCgroups(),
-		CanLimitCPU:          true,
-		CanLimitMemory:       true,
-		CanLimitDiskIO:       true,
-		CanLimitNetworkBW:    true,
-		CanLimitProcessCount: true,
+		// Resource control — capabilities describe what the OS supports.
+		// CgroupManager handles actual enforcement at the server level.
+		HasCgroups:           hasCgroups,
+		CanLimitCPU:          hasCgroups,
+		CanLimitMemory:       hasCgroups,
+		CanLimitDiskIO:       false, // io.max not implemented; io.stat read-only in Stats()
+		CanLimitNetworkBW:    false, // network BW is tc/qdisc, not cgroup v2
+		CanLimitProcessCount: hasCgroups,
 	}
 
 	return caps
@@ -188,10 +193,11 @@ func (p *Platform) Sandbox() platform.SandboxManager {
 	return p.sandbox
 }
 
-// Resources returns the resource limiter.
+// Resources returns a ResourceLimiter backed by CgroupManager. The manager is
+// created lazily on the first Apply() call.
 func (p *Platform) Resources() platform.ResourceLimiter {
 	if p.resources == nil {
-		p.resources = NewResourceLimiter()
+		p.resources = &cgroupResourceLimiter{}
 	}
 	return p.resources
 }

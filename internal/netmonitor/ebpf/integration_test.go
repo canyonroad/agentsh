@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/limits"
@@ -24,20 +25,36 @@ func TestIntegration_AttachAndEnforce(t *testing.T) {
 
 	// Create a temp cgroup and move self into it.
 	tmp := filepath.Join(os.TempDir(), "agentsh-ebpf-test")
-	_ = os.RemoveAll(tmp)
-	if _, err := limits.ApplyCgroupV2("/sys/fs/cgroup", filepath.Base(tmp), os.Getpid(), limits.CgroupV2Limits{}); err != nil {
-		t.Skipf("cgroup create failed: %v", err)
+	cgDir := filepath.Join("/sys/fs/cgroup", filepath.Base(tmp))
+	_ = os.Remove(cgDir) // clean up from interrupted prior runs
+	if err := os.Mkdir(cgDir, 0o755); err != nil {
+		t.Skipf("cgroup mkdir failed: %v", err)
 	}
-	defer os.RemoveAll(tmp)
+	origCgroup, _ := limits.CurrentCgroupDir()
+	if err := os.WriteFile(filepath.Join(cgDir, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		_ = os.Remove(cgDir)
+		t.Skipf("cgroup attach failed: %v", err)
+	}
+	defer func() {
+		// Move process back so the cgroup can be removed.
+		if origCgroup != "" {
+			if err := os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+				t.Errorf("restore cgroup: %v", err)
+			}
+		}
+		if err := os.Remove(cgDir); err != nil {
+			t.Errorf("remove cgroup: %v", err)
+		}
+	}()
 
-	coll, detach, err := ebpf.AttachConnectToCgroup(tmp)
+	coll, detach, err := ebpf.AttachConnectToCgroup(cgDir)
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	defer detach()
 	defer coll.Close()
 
-	cgid, err := ebpf.CgroupID(tmp)
+	cgid, err := ebpf.CgroupID(cgDir)
 	if err != nil {
 		t.Fatalf("cgroup id: %v", err)
 	}
@@ -65,20 +82,35 @@ func TestIntegration_DenyWithoutDefaultDeny(t *testing.T) {
 	}
 
 	tmp := filepath.Join(os.TempDir(), "agentsh-ebpf-deny-test")
-	_ = os.RemoveAll(tmp)
-	if _, err := limits.ApplyCgroupV2("/sys/fs/cgroup", filepath.Base(tmp), os.Getpid(), limits.CgroupV2Limits{}); err != nil {
-		t.Skipf("cgroup create failed: %v", err)
+	cgDir := filepath.Join("/sys/fs/cgroup", filepath.Base(tmp))
+	_ = os.Remove(cgDir) // clean up from interrupted prior runs
+	if err := os.Mkdir(cgDir, 0o755); err != nil {
+		t.Skipf("cgroup mkdir failed: %v", err)
 	}
-	defer os.RemoveAll(tmp)
+	origCgroup, _ := limits.CurrentCgroupDir()
+	if err := os.WriteFile(filepath.Join(cgDir, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		_ = os.Remove(cgDir)
+		t.Skipf("cgroup attach failed: %v", err)
+	}
+	defer func() {
+		if origCgroup != "" {
+			if err := os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+				t.Errorf("restore cgroup: %v", err)
+			}
+		}
+		if err := os.Remove(cgDir); err != nil {
+			t.Errorf("remove cgroup: %v", err)
+		}
+	}()
 
-	coll, detach, err := ebpf.AttachConnectToCgroup(tmp)
+	coll, detach, err := ebpf.AttachConnectToCgroup(cgDir)
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	defer detach()
 	defer coll.Close()
 
-	cgid, err := ebpf.CgroupID(tmp)
+	cgid, err := ebpf.CgroupID(cgDir)
 	if err != nil {
 		t.Fatalf("cgroup id: %v", err)
 	}

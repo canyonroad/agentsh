@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -52,59 +51,6 @@ func CurrentCgroupDir() (string, error) {
 	return filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(p, "/")), nil
 }
 
-// Deprecated: Use CgroupManager.Apply instead. ApplyCgroupV2 does not probe the
-// cgroup hierarchy and silently discards enableControllers errors. It is retained
-// only for callers that have not yet migrated (limiter_linux.go, platform/linux).
-func ApplyCgroupV2(parentDir string, name string, pid int, lim CgroupV2Limits) (*CgroupV2, error) {
-	if pid <= 0 {
-		return nil, fmt.Errorf("invalid pid %d", pid)
-	}
-	if !DetectCgroupV2() {
-		return nil, fmt.Errorf("cgroup v2 not detected")
-	}
-
-	if parentDir == "" {
-		cg, err := CurrentCgroupDir()
-		if err != nil {
-			return nil, fmt.Errorf("current cgroup: %w", err)
-		}
-		parentDir = cg
-	}
-
-	safe := sanitizeCgroupName(name)
-	dir := filepath.Join(parentDir, safe)
-
-	// Best-effort: enable controllers for children at the parent.
-	_ = enableControllers(parentDir, []string{"cpu", "memory", "pids"})
-
-	if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, syscall.EEXIST) {
-		return nil, fmt.Errorf("mkdir cgroup: %w", err)
-	}
-
-	// Apply limits before moving tasks.
-	if lim.MaxMemoryBytes > 0 {
-		if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte(strconv.FormatInt(lim.MaxMemoryBytes, 10)), 0o644); err != nil {
-			return nil, fmt.Errorf("set memory.max: %w", err)
-		}
-	}
-	if lim.PidsMax > 0 {
-		if err := os.WriteFile(filepath.Join(dir, "pids.max"), []byte(strconv.Itoa(lim.PidsMax)), 0o644); err != nil {
-			return nil, fmt.Errorf("set pids.max: %w", err)
-		}
-	}
-	if lim.CPUQuotaPct > 0 {
-		q, p := cpuMaxFromPct(lim.CPUQuotaPct)
-		if err := os.WriteFile(filepath.Join(dir, "cpu.max"), []byte(fmt.Sprintf("%d %d", q, p)), 0o644); err != nil {
-			return nil, fmt.Errorf("set cpu.max: %w", err)
-		}
-	}
-
-	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0o644); err != nil {
-		return nil, fmt.Errorf("attach pid: %w", err)
-	}
-
-	return &CgroupV2{Path: dir}, nil
-}
 
 func (c *CgroupV2) Close(ctx context.Context) error {
 	if c == nil || c.Path == "" {

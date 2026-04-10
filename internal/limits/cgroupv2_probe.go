@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -28,14 +29,22 @@ var requiredControllers = []string{"cpu", "memory", "pids"}
 // CgroupProbeResult is the output of ProbeCgroupsV2. Callers store it on
 // a CgroupManager or pass it to the detect command.
 type CgroupProbeResult struct {
-	Mode        CgroupMode
-	Reason      string
-	OwnCgroup   string // absolute path to the process's own cgroup dir
+	Mode   CgroupMode
+	Reason string
+	// OwnCgroup is the cgroup directory used as the enforcement root for nested
+	// mode — child cgroups for sessions are created under this path. When
+	// LeafMoved is true, the process itself resides in OwnCgroup/agentsh.leaf, but the
+	// parent remains the correct place to create children.
+	OwnCgroup   string
 	SliceDir    string // absolute path to /sys/fs/cgroup/agentsh.slice (top-level mode only; empty otherwise)
 	IOAvailable bool   // true if the io controller is usable in the chosen mode
 	// OrphansReaped is populated in top-level mode when the probe removed
 	// leftover unpopulated child cgroups from a prior agentsh run.
 	OrphansReaped []string
+	// LeafMoved is true if the process resides in OwnCgroup/agentsh.leaf — either
+	// because this probe performed a leaf-move or because a prior probe
+	// already moved the process there.
+	LeafMoved bool
 }
 
 // DefaultSliceDir is the stable top-level parent used when nested enforcement
@@ -58,12 +67,21 @@ const DefaultSliceDir = "/sys/fs/cgroup/agentsh.slice"
 // (intended to honor cfg.Sandbox.Cgroups.BasePath). Empty means "discover via /proc/self/cgroup".
 func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupProbeResult, error) {
 	own := ownHint
+	leafResident := false // true if the process was already in a leaf from a prior probe
+
 	if own == "" {
 		discovered, err := CurrentCgroupDir()
 		if err != nil {
 			return nil, fmt.Errorf("discover own cgroup: %w", err)
 		}
 		own = discovered
+		// Normalize auto-discovered path: if the process is in a "agentsh.leaf"
+		// sub-cgroup created by a prior probe, use the parent as the
+		// enforcement root. Not applied to caller-provided ownHint.
+		if filepath.Base(own) == "agentsh.leaf" {
+			own = filepath.Dir(own)
+			leafResident = true
+		}
 	} else if !filepath.IsAbs(own) {
 		// Relative paths are joined with the process's current cgroup dir, matching
 		// the prior behavior of internal/api/cgroups.go.
@@ -71,19 +89,40 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 		if err != nil {
 			return nil, fmt.Errorf("discover own cgroup for relative base path: %w", err)
 		}
+		if filepath.Base(cur) == "agentsh.leaf" {
+			cur = filepath.Dir(cur)
+			leafResident = true
+		}
 		own = filepath.Join(cur, own)
+	} else {
+		// Absolute ownHint: check if the process actually resides in the
+		// leaf sub-cgroup for accurate LeafMoved telemetry, but don't
+		// alter the provided own path.
+		if cur, err := CurrentCgroupDir(); err == nil {
+			if cur == filepath.Join(own, "agentsh.leaf") {
+				leafResident = true
+			}
+		}
 	}
 
 	// Step 2: does the own cgroup even expose the required controllers?
 	ownAvailable, err := readControllerSet(fs, filepath.Join(own, "cgroup.controllers"))
 	if err != nil {
 		// If we cannot read own controllers, fall through to top-level as a defensive measure.
-		return tryTopLevel(ctx, fs, own, fmt.Sprintf("read own cgroup.controllers: %v", err))
+		res, err := tryTopLevel(ctx, fs, own, fmt.Sprintf("read own cgroup.controllers: %v", err))
+		if err == nil && res != nil {
+			res.LeafMoved = res.LeafMoved || leafResident
+		}
+		return res, err
 	}
 	if !containsAll(ownAvailable, requiredControllers) {
 		missing := missingControllers(ownAvailable, requiredControllers)
-		return tryTopLevel(ctx, fs, own,
+		res, err := tryTopLevel(ctx, fs, own,
 			fmt.Sprintf("own cgroup missing controllers %v", missing))
+		if err == nil && res != nil {
+			res.LeafMoved = res.LeafMoved || leafResident
+		}
+		return res, err
 	}
 
 	// Step 3: already delegated?
@@ -94,6 +133,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 			Reason:      "already delegated",
 			OwnCgroup:   own,
 			IOAvailable: contains(ownDelegated, "io"),
+			LeafMoved:   leafResident,
 		}, nil
 	}
 
@@ -107,12 +147,52 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 			Reason:      "enabled by probe",
 			OwnCgroup:   own,
 			IOAvailable: contains(delegatedNow, "io"),
+			LeafMoved:   leafResident,
 		}, nil
+	}
+
+	// Step 4b: if EBUSY, try leaf-move — create own/agentsh.leaf, move self there,
+	// retry enabling controllers on the now-empty parent.
+	if errors.Is(enableErr, syscall.EBUSY) {
+		moved, enabled, retryErr := tryLeafMove(fs, own)
+		if enabled {
+			delegatedNow, _ := readControllerSet(fs, filepath.Join(own, "cgroup.subtree_control"))
+			return &CgroupProbeResult{
+				Mode:        ModeNested,
+				Reason:      "leaf-moved; enabled by probe",
+				OwnCgroup:   own,
+				IOAvailable: contains(delegatedNow, "io"),
+				LeafMoved:   true,
+			}, nil
+		}
+		if moved {
+			// Process was relocated to own/leaf but controllers could not
+			// be enabled. Classify the retry error (not the original EBUSY)
+			// so telemetry reflects the actual failure.
+			reason := classifyEnableError(retryErr)
+			res, err := tryTopLevel(ctx, fs, own, reason)
+			if err == nil && res != nil {
+				res.LeafMoved = true
+			}
+			return res, err
+		}
+		// Leaf-move itself failed; include the failure in the reason
+		// alongside the original EBUSY.
+		reason := fmt.Sprintf("EBUSY; leaf-move failed: %v", retryErr)
+		res, err := tryTopLevel(ctx, fs, own, reason)
+		if err == nil && res != nil {
+			res.LeafMoved = res.LeafMoved || leafResident
+		}
+		return res, err
 	}
 
 	// Step 5: classify the enable failure and fall through to top-level.
 	reason := classifyEnableError(enableErr)
-	return tryTopLevel(ctx, fs, own, reason)
+	res, err := tryTopLevel(ctx, fs, own, reason)
+	if err == nil && res != nil {
+		res.LeafMoved = res.LeafMoved || leafResident
+	}
+	return res, err
 }
 
 // ProbeCgroupsV2Default is a convenience wrapper that runs ProbeCgroupsV2 with
@@ -120,6 +200,37 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 // the limits package (e.g. the capabilities probe).
 func ProbeCgroupsV2Default(ctx context.Context) (*CgroupProbeResult, error) {
 	return ProbeCgroupsV2(ctx, osCgroupFS{}, "")
+}
+
+// tryLeafMove handles the EBUSY case: the own cgroup has internal processes
+// (including agentsh itself), preventing subtree_control writes. We create a
+// "agentsh.leaf" child cgroup, move the current process into it, and retry enabling
+// controllers on the parent. This is the standard pattern for systemd services
+// that need to manage child cgroups.
+//
+// Returns (moved, enabled, retryErr): moved is true if the process was
+// relocated to own/leaf; enabled is true if controllers were successfully
+// enabled on the parent after the move; retryErr is the error from the
+// enable retry (nil when enabled is true).
+func tryLeafMove(fs cgroupFS, own string) (moved, enabled bool, retryErr error) {
+	leafDir := filepath.Join(own, "agentsh.leaf")
+	if err := fs.Mkdir(leafDir, 0o755); err != nil {
+		if !errors.Is(err, syscall.EEXIST) {
+			return false, false, fmt.Errorf("mkdir leaf: %w", err)
+		}
+	}
+
+	// Move the current process into the leaf cgroup.
+	pid := []byte(strconv.Itoa(os.Getpid()))
+	if err := fs.WriteFile(filepath.Join(leafDir, "cgroup.procs"), pid, 0o644); err != nil {
+		return false, false, fmt.Errorf("move to leaf: %w", err)
+	}
+
+	// Retry enabling controllers now that the parent has no internal processes.
+	if err := enableControllersFS(fs, own, requiredControllers); err != nil {
+		return true, false, err // moved but enable failed
+	}
+	return true, true, nil
 }
 
 // tryTopLevel runs steps 5b through 5f of the decision tree.
