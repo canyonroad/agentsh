@@ -300,6 +300,24 @@ func runCommandWithResourcesStreamingEmit(ctx context.Context, s *session.Sessio
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
 		}
 	}
+	// Add service env vars (fake credentials, bypass policy filtering).
+	if svcEnv := s.ServiceEnvVars(); len(svcEnv) > 0 {
+		svcKeys := make(map[string]bool, len(svcEnv))
+		for k := range svcEnv {
+			svcKeys[k] = true
+		}
+		filtered := env[:0]
+		for _, e := range env {
+			if k, _, ok := strings.Cut(e, "="); ok && svcKeys[k] {
+				continue
+			}
+			filtered = append(filtered, e)
+		}
+		env = filtered
+		for k, v := range svcEnv {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
 	cmd.Env = env
 
 	// Add extra files (socket fds for seccomp notify/signal)

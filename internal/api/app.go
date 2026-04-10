@@ -36,6 +36,7 @@ import (
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"gopkg.in/yaml.v3"
 )
 
 // PolicyLoader loads a policy by name and returns a policy engine.
@@ -463,6 +464,19 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 	// Pass the sessions base directory - NewStorage will create <base>/<session-id>/llm-requests.jsonl
 	storagePath := a.cfg.Sessions.BaseDir
 
+	// Resolve policy-driven providers, services, and env injection.
+	pol := a.policyEngineFor(s)
+	var providers map[string]yaml.Node
+	var policyServices []policy.ServiceYAML
+	var envInject map[string]string
+	if pol != nil {
+		if p := pol.Policy(); p != nil {
+			providers = p.Providers
+			policyServices = p.Services
+		}
+		envInject = mergeEnvInject(a.cfg, pol)
+	}
+
 	proxyURL, closeFn, err := session.StartLLMProxy(
 		s,
 		a.cfg.Proxy,
@@ -471,7 +485,7 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 		a.cfg.Sandbox.MCP,
 		storagePath,
 		slog.Default(),
-		nil, nil,
+		providers, policyServices, envInject,
 	)
 	if err != nil {
 		fail := types.Event{

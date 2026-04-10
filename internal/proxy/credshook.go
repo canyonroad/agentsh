@@ -14,12 +14,15 @@ import (
 // PreHook replaces fake credentials with real ones in request bodies.
 // PostHook replaces real credentials with fakes in response bodies.
 type CredsSubHook struct {
-	table *credsub.Table
+	table         *credsub.Table
+	scrubServices map[string]bool
 }
 
 // NewCredsSubHook returns a CredsSubHook that uses the given table.
-func NewCredsSubHook(table *credsub.Table) *CredsSubHook {
-	return &CredsSubHook{table: table}
+// scrubServices controls which services have response scrubbing enabled.
+// Pass nil to scrub all responses (backward-compatible default).
+func NewCredsSubHook(table *credsub.Table, scrubServices map[string]bool) *CredsSubHook {
+	return &CredsSubHook{table: table, scrubServices: scrubServices}
 }
 
 func (h *CredsSubHook) Name() string { return "creds-sub" }
@@ -66,8 +69,13 @@ func (h *CredsSubHook) PreHook(r *http.Request, _ *RequestContext) error {
 }
 
 // PostHook replaces real credentials with fakes in the response body.
-func (h *CredsSubHook) PostHook(resp *http.Response, _ *RequestContext) error {
+// When scrubServices is non-nil, scrubbing is skipped for services not in the map.
+func (h *CredsSubHook) PostHook(resp *http.Response, ctx *RequestContext) error {
 	if resp.Body == nil {
+		return nil
+	}
+	// Check per-service scrub config.
+	if h.scrubServices != nil && !h.scrubServices[ctx.ServiceName] {
 		return nil
 	}
 	body, err := io.ReadAll(resp.Body)

@@ -184,3 +184,143 @@ func TestValidateSecrets_NoProviders_ServiceNeedsProvider(t *testing.T) {
 		t.Errorf("expected no matching provider error, got: %v", err)
 	}
 }
+
+func TestValidateSecrets_InjectEnvEmptyName(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"kr": mustNode(t, "type: keyring"),
+	}
+	services := []ServiceYAML{
+		{
+			Name:   "github",
+			Match:  ServiceMatchYAML{Hosts: []string{"api.github.com"}},
+			Secret: ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
+			Fake:   ServiceFakeYAML{Format: "ghp_{rand:36}"},
+			Inject: ServiceInjectYAML{
+				Env: []ServiceInjectEnvYAML{{Name: ""}},
+			},
+		},
+	}
+	_, err := ValidateSecrets(providers, services)
+	if err == nil {
+		t.Fatal("expected error for empty inject.env name")
+	}
+}
+
+func TestValidateSecrets_InjectEnvInvalidChar(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"kr": mustNode(t, "type: keyring"),
+	}
+	services := []ServiceYAML{
+		{
+			Name:   "github",
+			Match:  ServiceMatchYAML{Hosts: []string{"api.github.com"}},
+			Secret: ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
+			Fake:   ServiceFakeYAML{Format: "ghp_{rand:36}"},
+			Inject: ServiceInjectYAML{
+				Env: []ServiceInjectEnvYAML{{Name: "PATH=/tmp"}},
+			},
+		},
+	}
+	_, err := ValidateSecrets(providers, services)
+	if err == nil {
+		t.Fatal("expected error for name containing =")
+	}
+}
+
+func TestValidateSecrets_InjectEnvDuplicateAcrossServices(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"kr": mustNode(t, "type: keyring"),
+	}
+	services := []ServiceYAML{
+		{
+			Name:   "github",
+			Match:  ServiceMatchYAML{Hosts: []string{"api.github.com"}},
+			Secret: ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
+			Fake:   ServiceFakeYAML{Format: "ghp_{rand:36}"},
+			Inject: ServiceInjectYAML{
+				Env: []ServiceInjectEnvYAML{{Name: "MY_TOKEN"}},
+			},
+		},
+		{
+			Name:   "stripe",
+			Match:  ServiceMatchYAML{Hosts: []string{"api.stripe.com"}},
+			Secret: ServiceSecretYAML{Ref: "keyring://agentsh/stripe"},
+			Fake:   ServiceFakeYAML{Format: "xk_test_{rand:24}"},
+			Inject: ServiceInjectYAML{
+				Env: []ServiceInjectEnvYAML{{Name: "MY_TOKEN"}},
+			},
+		},
+	}
+	_, err := ValidateSecrets(providers, services)
+	if err == nil {
+		t.Fatal("expected error for duplicate env var name across services")
+	}
+}
+
+func TestValidateSecrets_InjectEnvValid(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"kr": mustNode(t, "type: keyring"),
+	}
+	services := []ServiceYAML{
+		{
+			Name:   "github",
+			Match:  ServiceMatchYAML{Hosts: []string{"api.github.com"}},
+			Secret: ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
+			Fake:   ServiceFakeYAML{Format: "ghp_{rand:36}"},
+			Inject: ServiceInjectYAML{
+				Env: []ServiceInjectEnvYAML{{Name: "GITHUB_TOKEN"}},
+			},
+		},
+	}
+	_, err := ValidateSecrets(providers, services)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateSecrets_InjectEnvReservedPrefixCaseInsensitive(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"kr": mustNode(t, "type: keyring"),
+	}
+	for _, name := range []string{"agentsh_foo", "Agentsh_Bar", "AGENTSH_BAZ"} {
+		services := []ServiceYAML{
+			{
+				Name:   "github",
+				Match:  ServiceMatchYAML{Hosts: []string{"api.github.com"}},
+				Secret: ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
+				Fake:   ServiceFakeYAML{Format: "ghp_{rand:36}"},
+				Inject: ServiceInjectYAML{
+					Env: []ServiceInjectEnvYAML{{Name: name}},
+				},
+			},
+		}
+		_, err := ValidateSecrets(providers, services)
+		if err == nil {
+			t.Errorf("expected error for reserved prefix in name %q", name)
+		}
+	}
+}
+
+func TestValidateSecrets_InjectEnvReservedPrefix(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"kr": mustNode(t, "type: keyring"),
+	}
+	services := []ServiceYAML{
+		{
+			Name:   "github",
+			Match:  ServiceMatchYAML{Hosts: []string{"api.github.com"}},
+			Secret: ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
+			Fake:   ServiceFakeYAML{Format: "ghp_{rand:36}"},
+			Inject: ServiceInjectYAML{
+				Env: []ServiceInjectEnvYAML{{Name: "AGENTSH_SESSION_ID"}},
+			},
+		},
+	}
+	_, err := ValidateSecrets(providers, services)
+	if err == nil {
+		t.Fatal("expected error for reserved AGENTSH_ prefix")
+	}
+	if !strings.Contains(err.Error(), "reserved AGENTSH_ prefix") {
+		t.Errorf("error should mention reserved prefix, got: %v", err)
+	}
+}
