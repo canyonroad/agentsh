@@ -3,12 +3,15 @@ package main
 import (
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/shim"
 	"golang.org/x/term"
@@ -102,6 +105,19 @@ func main() {
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) && forceShim != "1" {
 		debugLog("non-interactive bypass: stdin is not a tty, executing real shell %s", realShell)
+		runAndExit(realShell, argv0, os.Args[1:], os.Environ())
+		return
+	}
+
+	// Server readiness gate: verify the agentsh server is listening before
+	// attempting enforcement. If the server isn't reachable, fall through to
+	// the real shell. This prevents boot loops when force=true is baked into
+	// the image and the shim is root's login shell — agentsh.service may not
+	// be ready yet during early boot. Once the server is up, all subsequent
+	// sessions (interactive and non-interactive with force=true) get enforced.
+	srvAddr := serverAddrFromEnv()
+	if !serverReachable(srvAddr) {
+		debugLog("server not reachable at %s, falling through to real shell %s", srvAddr, realShell)
 		runAndExit(realShell, argv0, os.Args[1:], os.Environ())
 		return
 	}
@@ -467,4 +483,40 @@ func debugLog(format string, args ...any) {
 	if strings.TrimSpace(os.Getenv("AGENTSH_SHIM_DEBUG")) == "1" {
 		_, _ = fmt.Fprintf(os.Stderr, "agentsh-shell-shim: "+format+"\n", args...)
 	}
+}
+
+// serverAddrFromEnv returns the host:port of the agentsh server for a TCP
+// readiness probe. It reads AGENTSH_SERVER (default http://127.0.0.1:18080),
+// parses the URL, and returns the network address.
+func serverAddrFromEnv() string {
+	raw := strings.TrimSpace(os.Getenv("AGENTSH_SERVER"))
+	if raw == "" {
+		return "127.0.0.1:18080"
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "127.0.0.1:18080"
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if port == "" {
+		port = "18080"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// serverReachable does a fast TCP dial to check if the agentsh server is
+// listening. On loopback this completes in <1ms when the server is up, or
+// returns ECONNREFUSED immediately when it's not. The timeout is a safety
+// net for firewalled or remote hosts.
+func serverReachable(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
