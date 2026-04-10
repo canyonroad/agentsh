@@ -999,6 +999,29 @@ func TestServerAddrFromEnv_GRPCTransport(t *testing.T) {
 			t.Fatal("expected error for invalid AGENTSH_GRPC_ADDR")
 		}
 	})
+	t.Run("grpc uppercase transport", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "GRPC")
+		t.Setenv("AGENTSH_GRPC_ADDR", "")
+		t.Setenv("AGENTSH_SERVER", "http://ignored:18080")
+		gotNet, gotAddr, gotErr := serverAddrFromEnv()
+		if gotErr != nil {
+			t.Fatalf("unexpected error: %v", gotErr)
+		}
+		if gotNet != "tcp" || gotAddr != "127.0.0.1:9090" {
+			t.Errorf("got (%q, %q), want (tcp, 127.0.0.1:9090)", gotNet, gotAddr)
+		}
+	})
+	t.Run("grpc scheme-bearing addr", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "grpc")
+		t.Setenv("AGENTSH_GRPC_ADDR", "grpc://10.0.0.5:9090")
+		gotNet, gotAddr, gotErr := serverAddrFromEnv()
+		if gotErr != nil {
+			t.Fatalf("unexpected error: %v", gotErr)
+		}
+		if gotNet != "tcp" || gotAddr != "10.0.0.5:9090" {
+			t.Errorf("got (%q, %q), want (tcp, 10.0.0.5:9090)", gotNet, gotAddr)
+		}
+	})
 }
 
 func TestIsTransientDialError(t *testing.T) {

@@ -144,7 +144,7 @@ func main() {
 		if srvErr != nil {
 			// Non-empty but invalid server address — fail-closed.
 			hint := "Fix the AGENTSH_SERVER value or unset it to use the default (http://127.0.0.1:18080)."
-			if strings.TrimSpace(os.Getenv("AGENTSH_TRANSPORT")) == "grpc" {
+			if strings.ToLower(strings.TrimSpace(os.Getenv("AGENTSH_TRANSPORT"))) == "grpc" {
 				hint = "Fix the AGENTSH_GRPC_ADDR value or unset it to use the default (127.0.0.1:9090)."
 			}
 			fatalWithHint(127,
@@ -557,11 +557,19 @@ func debugLog(format string, args ...any) {
 // fail-closed instead of silently falling back to a local address.
 func serverAddrFromEnv() (network, addr string, err error) {
 	// gRPC transport: probe the gRPC address, not the HTTP server.
-	transport := strings.TrimSpace(os.Getenv("AGENTSH_TRANSPORT"))
+	// Normalize the same way the CLI does: lowercase transport, strip
+	// scheme prefix from address (client.NewGRPC accepts "grpc://host:port").
+	transport := strings.ToLower(strings.TrimSpace(os.Getenv("AGENTSH_TRANSPORT")))
 	if transport == "grpc" {
 		grpcAddr := strings.TrimSpace(os.Getenv("AGENTSH_GRPC_ADDR"))
 		if grpcAddr == "" {
 			grpcAddr = "127.0.0.1:9090"
+		}
+		// Strip scheme prefix to match client.NewGRPC normalization.
+		if strings.Contains(grpcAddr, "://") {
+			if u, parseErr := url.Parse(grpcAddr); parseErr == nil && u.Host != "" {
+				grpcAddr = u.Host
+			}
 		}
 		// Validate it looks like host:port.
 		if _, _, splitErr := net.SplitHostPort(grpcAddr); splitErr != nil {
