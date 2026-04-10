@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -112,6 +113,21 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 		}, nil
 	}
 
+	// Step 4b: if EBUSY, try leaf-move — create own/leaf, move self there,
+	// retry enabling controllers on the now-empty parent.
+	if errors.Is(enableErr, syscall.EBUSY) {
+		if tryLeafMove(fs, own) {
+			delegatedNow, _ := readControllerSet(fs, filepath.Join(own, "cgroup.subtree_control"))
+			return &CgroupProbeResult{
+				Mode:        ModeNested,
+				Reason:      "leaf-moved; enabled by probe",
+				OwnCgroup:   own,
+				IOAvailable: contains(delegatedNow, "io"),
+				LeafMoved:   true,
+			}, nil
+		}
+	}
+
 	// Step 5: classify the enable failure and fall through to top-level.
 	reason := classifyEnableError(enableErr)
 	return tryTopLevel(ctx, fs, own, reason)
@@ -122,6 +138,35 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 // the limits package (e.g. the capabilities probe).
 func ProbeCgroupsV2Default(ctx context.Context) (*CgroupProbeResult, error) {
 	return ProbeCgroupsV2(ctx, osCgroupFS{}, "")
+}
+
+// tryLeafMove handles the EBUSY case: the own cgroup has internal processes
+// (including agentsh itself), preventing subtree_control writes. We create a
+// "leaf" child cgroup, move the current process into it, and retry enabling
+// controllers on the parent. This is the standard pattern for systemd services
+// that need to manage child cgroups.
+//
+// Returns true if the move succeeded and controllers were enabled. On any
+// failure, returns false and leaves the caller to try top-level fallback.
+func tryLeafMove(fs cgroupFS, own string) bool {
+	leafDir := filepath.Join(own, "leaf")
+	if err := fs.Mkdir(leafDir, 0o755); err != nil {
+		if !errors.Is(err, syscall.EEXIST) {
+			return false
+		}
+	}
+
+	// Move the current process into the leaf cgroup.
+	pid := []byte(strconv.Itoa(os.Getpid()))
+	if err := fs.WriteFile(filepath.Join(leafDir, "cgroup.procs"), pid, 0o644); err != nil {
+		return false
+	}
+
+	// Retry enabling controllers now that the parent has no internal processes.
+	if err := enableControllersFS(fs, own, requiredControllers); err != nil {
+		return false
+	}
+	return true
 }
 
 // tryTopLevel runs steps 5b through 5f of the decision tree.
