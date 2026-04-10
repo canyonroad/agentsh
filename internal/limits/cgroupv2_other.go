@@ -44,6 +44,8 @@ type CgroupProbeResult struct {
 	SliceDir      string
 	IOAvailable   bool
 	OrphansReaped []string
+	// LeafMoved is true if the probe moved the process to OwnCgroup/leaf to resolve EBUSY
+	LeafMoved bool
 }
 
 // CgroupManager is the per-process cgroup v2 enforcement manager.

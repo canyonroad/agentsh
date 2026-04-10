@@ -36,6 +36,8 @@ type CgroupProbeResult struct {
 	// OrphansReaped is populated in top-level mode when the probe removed
 	// leftover unpopulated child cgroups from a prior agentsh run.
 	OrphansReaped []string
+	// LeafMoved is true if the probe moved the process to OwnCgroup/leaf to resolve EBUSY
+	LeafMoved bool
 }
 
 // DefaultSliceDir is the stable top-level parent used when nested enforcement
