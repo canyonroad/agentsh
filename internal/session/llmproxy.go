@@ -10,7 +10,10 @@ import (
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/proxy"
+	"github.com/agentsh/agentsh/internal/proxy/services"
+	"gopkg.in/yaml.v3"
 )
 
 // StartLLMProxy creates and starts an embedded LLM proxy for the session.
@@ -27,8 +30,8 @@ func StartLLMProxy(
 	mcpCfg config.SandboxMCPConfig,
 	storagePath string,
 	logger *slog.Logger,
-	secretsFetcher SecretFetcher,
-	services []ServiceConfig,
+	providers map[string]yaml.Node,
+	policyServices []policy.ServiceYAML,
 ) (string, func() error, error) {
 	if sess == nil {
 		return "", nil, fmt.Errorf("session is nil")
@@ -99,21 +102,56 @@ func StartLLMProxy(
 
 	// Bootstrap credentials and register hooks if services are configured.
 	// Done BEFORE storing on session so a failure leaves no stale state.
-	if len(services) > 0 && secretsFetcher != nil {
-		table, secretsCleanup, err := BootstrapCredentials(ctx, secretsFetcher, services)
-		if err != nil {
+	if len(policyServices) > 0 {
+		resolved, resolveErr := ResolveServiceConfigs(policyServices)
+		if resolveErr != nil {
 			_ = p.Stop(ctx)
-			return "", nil, fmt.Errorf("bootstrap credentials: %w", err)
+			return "", nil, fmt.Errorf("resolve services: %w", resolveErr)
 		}
 
-		// Register hooks: leak guard first, then creds substitution.
+		providerConfigs, provErr := ResolveProviderConfigs(providers)
+		if provErr != nil {
+			_ = p.Stop(ctx)
+			return "", nil, fmt.Errorf("resolve providers: %w", provErr)
+		}
+
+		registry, regErr := BuildSecretsRegistry(ctx, providerConfigs)
+		if regErr != nil {
+			_ = p.Stop(ctx)
+			return "", nil, fmt.Errorf("build secrets registry: %w", regErr)
+		}
+
+		table, secretsCleanup, bsErr := BootstrapCredentials(ctx, registry, resolved.ServiceConfigs)
+		if bsErr != nil {
+			_ = registry.Close()
+			_ = p.Stop(ctx)
+			return "", nil, fmt.Errorf("bootstrap credentials: %w", bsErr)
+		}
+
+		// Register hooks: leak guard first, then creds substitution (both global).
 		leakGuard := proxy.NewLeakGuardHook(table, logger)
 		credsSub := proxy.NewCredsSubHook(table)
 		p.HookRegistry().Register("", leakGuard)
 		p.HookRegistry().Register("", credsSub)
 
-		sess.SetCredsTable(table, secretsCleanup)
-		LogSecretsInitialized(logger, sess.ID, len(services))
+		// Register per-service header injection hooks.
+		for _, ih := range resolved.InjectHeaders {
+			hook := proxy.NewHeaderInjectionHook(ih.ServiceName, ih.HeaderName, ih.Template, table)
+			p.HookRegistry().Register(ih.ServiceName, hook)
+		}
+
+		// Build and set matcher.
+		matcher := services.NewMatcher(resolved.Patterns)
+		p.SetMatcher(matcher)
+
+		// Wrap registry close into the secrets cleanup.
+		origCleanup := secretsCleanup
+		combinedCleanup := func() {
+			origCleanup()
+			_ = registry.Close()
+		}
+		sess.SetCredsTable(table, combinedCleanup)
+		LogSecretsInitialized(logger, sess.ID, len(resolved.ServiceConfigs))
 	}
 
 	// Store in session only after all setup (including bootstrap) succeeds.

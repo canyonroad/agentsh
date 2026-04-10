@@ -121,6 +121,27 @@ func (t *Table) FakeForService(serviceName string) ([]byte, bool) {
 	return nil, false
 }
 
+// RealForService returns the real byte sequence registered for a
+// service. The returned slice is a deep copy; the caller may retain
+// or mutate it. Callers should zero the returned slice when done to
+// avoid leaving credential material in memory.
+//
+// This method is intended for internal proxy use only (e.g. header
+// injection). Returns (nil, false) if no entry is registered.
+func (t *Table) RealForService(serviceName string) ([]byte, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	for _, e := range t.entries {
+		if e.ServiceName == serviceName {
+			out := make([]byte, len(e.Real))
+			copy(out, e.Real)
+			return out, true
+		}
+	}
+	return nil, false
+}
+
 // Contains reports whether a byte sequence is a registered fake in
 // the table. It performs an EXACT match (not a substring search). If
 // found, it returns a deep-copied Entry (Fake and Real are fresh

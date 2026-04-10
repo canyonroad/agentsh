@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/agentsh/agentsh/internal/proxy/credsub"
 )
@@ -23,19 +24,44 @@ func NewCredsSubHook(table *credsub.Table) *CredsSubHook {
 
 func (h *CredsSubHook) Name() string { return "creds-sub" }
 
-// PreHook replaces fake credentials with real ones in the request body.
+// PreHook replaces fake credentials with real ones in the request
+// body, header values, URL query string, and URL path.
 func (h *CredsSubHook) PreHook(r *http.Request, _ *RequestContext) error {
-	if r.Body == nil {
-		return nil
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil // best-effort
+	// Body substitution.
+	if r.Body != nil {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil // best-effort
+		}
+		replaced := h.table.ReplaceFakeToReal(body)
+		r.Body = io.NopCloser(bytes.NewReader(replaced))
+		r.ContentLength = int64(len(replaced))
 	}
 
-	replaced := h.table.ReplaceFakeToReal(body)
-	r.Body = io.NopCloser(bytes.NewReader(replaced))
-	r.ContentLength = int64(len(replaced))
+	// Header value substitution.
+	for key, vals := range r.Header {
+		for i, v := range vals {
+			replaced := h.table.ReplaceFakeToReal([]byte(v))
+			r.Header[key][i] = string(replaced)
+		}
+	}
+
+	// URL query substitution.
+	if rq := r.URL.RawQuery; rq != "" {
+		replaced := string(h.table.ReplaceFakeToReal([]byte(rq)))
+		r.URL.RawQuery = replaced
+	}
+
+	// URL path substitution.
+	if p := r.URL.Path; p != "" {
+		replaced := string(h.table.ReplaceFakeToReal([]byte(p)))
+		r.URL.Path = replaced
+	}
+	if rp := r.URL.RawPath; rp != "" {
+		replaced := string(h.table.ReplaceFakeToReal([]byte(rp)))
+		r.URL.RawPath = replaced
+	}
+
 	return nil
 }
 
@@ -53,14 +79,6 @@ func (h *CredsSubHook) PostHook(resp *http.Response, _ *RequestContext) error {
 	resp.Body = io.NopCloser(bytes.NewReader(replaced))
 	resp.ContentLength = int64(len(replaced))
 	return nil
-}
-
-// scanHeaders lists HTTP headers that LeakGuardHook scans for fakes.
-var scanHeaders = []string{
-	"Authorization",
-	"X-Api-Key",
-	"Api-Key",
-	"X-Auth-Token",
 }
 
 // LeakGuardHook blocks requests that contain known fake credentials.
@@ -83,8 +101,10 @@ func (h *LeakGuardHook) PreHook(r *http.Request, ctx *RequestContext) error {
 		if err == nil {
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			if serviceName, found := h.table.ContainsFake(body); found {
-				h.logLeak(ctx, serviceName, r.Host)
-				return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
+				if serviceName != ctx.ServiceName {
+					h.logLeak(ctx, serviceName, r.Host)
+					return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
+				}
 			}
 		}
 	}
@@ -92,15 +112,29 @@ func (h *LeakGuardHook) PreHook(r *http.Request, ctx *RequestContext) error {
 	// Scan URL query string.
 	if rawQuery := r.URL.RawQuery; rawQuery != "" {
 		if serviceName, found := h.table.ContainsFake([]byte(rawQuery)); found {
-			h.logLeak(ctx, serviceName, r.Host)
-			return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
+			if serviceName != ctx.ServiceName {
+				h.logLeak(ctx, serviceName, r.Host)
+				return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
+			}
 		}
 	}
 
-	// Scan select headers (all values, not just the first).
-	for _, hdr := range scanHeaders {
-		for _, val := range r.Header.Values(hdr) {
+	// Scan ALL header values.
+	for _, vals := range r.Header {
+		for _, val := range vals {
 			if serviceName, found := h.table.ContainsFake([]byte(val)); found {
+				if serviceName != ctx.ServiceName {
+					h.logLeak(ctx, serviceName, r.Host)
+					return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
+				}
+			}
+		}
+	}
+
+	// Scan URL path.
+	if p := r.URL.Path; p != "" {
+		if serviceName, found := h.table.ContainsFake([]byte(p)); found {
+			if serviceName != ctx.ServiceName {
 				h.logLeak(ctx, serviceName, r.Host)
 				return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
 			}
@@ -121,4 +155,49 @@ func (h *LeakGuardHook) logLeak(ctx *RequestContext, serviceName, requestHost st
 		"service_name", serviceName,
 		"request_host", requestHost,
 	)
+}
+
+// HeaderInjectionHook injects the real credential into a request header.
+// Registered per service name so it only fires for matched requests.
+type HeaderInjectionHook struct {
+	serviceName string
+	headerName  string
+	template    string
+	table       *credsub.Table
+}
+
+// NewHeaderInjectionHook creates a hook that injects the real credential
+// for serviceName into the header specified by headerName using template.
+// The template must contain "{{secret}}" which is replaced with the real
+// credential at request time.
+func NewHeaderInjectionHook(serviceName, headerName, template string, table *credsub.Table) *HeaderInjectionHook {
+	return &HeaderInjectionHook{
+		serviceName: serviceName,
+		headerName:  headerName,
+		template:    template,
+		table:       table,
+	}
+}
+
+func (h *HeaderInjectionHook) Name() string { return "header-inject" }
+
+func (h *HeaderInjectionHook) PreHook(r *http.Request, _ *RequestContext) error {
+	real, ok := h.table.RealForService(h.serviceName)
+	if !ok {
+		return nil // service not in table, skip
+	}
+	defer func() {
+		for i := range real {
+			real[i] = 0
+		}
+	}()
+
+	value := strings.Replace(h.template, "{{secret}}", string(real), 1)
+	r.Header.Del(h.headerName)
+	r.Header.Set(h.headerName, value)
+	return nil
+}
+
+func (h *HeaderInjectionHook) PostHook(_ *http.Response, _ *RequestContext) error {
+	return nil
 }
