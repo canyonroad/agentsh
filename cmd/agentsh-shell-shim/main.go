@@ -524,7 +524,14 @@ func serverAddrFromEnv() (network, addr string) {
 		host = "127.0.0.1"
 	}
 	if port == "" {
-		port = "18080"
+		switch u.Scheme {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		default:
+			port = "18080"
+		}
 	}
 	return "tcp", net.JoinHostPort(host, port)
 }
