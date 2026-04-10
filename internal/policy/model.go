@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"regexp"
 	"time"
@@ -41,6 +42,11 @@ type Policy struct {
 
 	// Transparent command overrides (add/remove from built-in defaults)
 	TransparentCommands *TransparentCommandsConfig `yaml:"transparent_commands,omitempty"`
+
+	// External secrets: provider definitions and service declarations.
+	// Parsed from YAML but validated by ValidateSecrets in secrets.go.
+	Providers map[string]yaml.Node `yaml:"providers,omitempty"`
+	Services  []ServiceYAML        `yaml:"services,omitempty"`
 }
 
 type FileRule struct {
@@ -501,6 +507,15 @@ func (p Policy) Validate() error {
 		}
 		if r.OnFailure != "" && r.OnFailure != "fail_closed" && r.OnFailure != "fail_open" && r.OnFailure != "retry_original" {
 			return fmt.Errorf("connect_redirects[%d]: on_failure must be fail_closed, fail_open, or retry_original", i)
+		}
+	}
+
+	// Validate external secrets config.
+	if warnings, err := ValidateSecrets(p.Providers, p.Services); err != nil {
+		return fmt.Errorf("secrets: %w", err)
+	} else {
+		for _, w := range warnings {
+			slog.Warn("policy validation", "warning", w)
 		}
 	}
 
