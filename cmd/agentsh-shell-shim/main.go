@@ -109,27 +109,32 @@ func main() {
 		return
 	}
 
-	// Server readiness gate: verify the agentsh server is listening before
-	// attempting enforcement. This prevents boot loops when force=true is
-	// baked into the image and the shim is root's login shell —
-	// agentsh.service may not be ready yet during early boot.
+	// Server readiness gate: when ready_gate=true in shim.conf, verify the
+	// agentsh server is listening before attempting enforcement. If the local
+	// server isn't reachable, fall through to the real shell instead of
+	// failing. This prevents boot loops when force=true is baked into the
+	// image and the shim is root's login shell — agentsh.service may not be
+	// ready yet during early boot.
 	//
-	// Fail-open behavior is restricted to local servers (loopback TCP or
-	// unix sockets) where "not reachable" almost certainly means "not
-	// started yet." For remote servers, an unreachable probe is treated
-	// as fail-closed to prevent a network issue from silently disabling
-	// enforcement.
-	srvNetwork, srvAddr := serverAddrFromEnv()
-	if !serverReachable(srvNetwork, srvAddr) {
-		if serverIsLocal(srvNetwork, srvAddr) {
-			debugLog("local server not reachable at %s:%s, falling through to real shell %s", srvNetwork, srvAddr, realShell)
-			runAndExit(realShell, argv0, os.Args[1:], os.Environ())
-			return
+	// The gate is opt-in (ready_gate=true) because fail-open on a local
+	// server being down is a security tradeoff: it enables boot safety but
+	// also means a crashed server temporarily disables enforcement. Operators
+	// enable it when boot reliability outweighs the crash-window risk.
+	//
+	// Remote servers always fail-closed regardless of ready_gate.
+	if conf.ReadyGate {
+		srvNetwork, srvAddr := serverAddrFromEnv()
+		if !serverReachable(srvNetwork, srvAddr) {
+			if serverIsLocal(srvNetwork, srvAddr) {
+				debugLog("ready_gate: local server not reachable at %s:%s, falling through to real shell %s", srvNetwork, srvAddr, realShell)
+				runAndExit(realShell, argv0, os.Args[1:], os.Environ())
+				return
+			}
+			fatalWithHint(127,
+				fmt.Sprintf("agentsh-shell-shim: remote server not reachable at %s", srvAddr),
+				"The agentsh server is configured as a remote endpoint and is not responding. Check server availability.",
+			)
 		}
-		fatalWithHint(127,
-			fmt.Sprintf("agentsh-shell-shim: remote server not reachable at %s", srvAddr),
-			"The agentsh server is configured as a remote endpoint and is not responding. Check server availability.",
-		)
 	}
 
 	agentshBin, err := resolveAgentshBin()
@@ -508,11 +513,16 @@ func serverAddrFromEnv() (network, addr string) {
 		return "tcp", "127.0.0.1:18080"
 	}
 	// Unix socket: unix:///path/to/sock or unix:/path/to/sock
+	// Match the client transport logic in internal/client/client.go:
+	// u.Path when Host is empty, u.Host+u.Path when both are present.
 	if u.Scheme == "unix" {
 		sockPath := u.Path
 		if sockPath == "" {
-			sockPath = u.Host // handle unix://path without leading slash
+			sockPath = u.Host
+		} else if u.Host != "" {
+			sockPath = u.Host + u.Path
 		}
+		sockPath = strings.TrimSpace(sockPath)
 		if sockPath == "" {
 			return "tcp", "127.0.0.1:18080"
 		}

@@ -516,8 +516,8 @@ func TestShimConfForce_UnreadableConfigFailsClosed(t *testing.T) {
 }
 
 // TestShimReadinessGate_ServerUnreachable_ForceFallsThrough verifies that
-// when force=true but the server is not reachable, the shim falls through
-// to bash.real instead of failing. This is the boot-time safety fix.
+// when force=true, ready_gate=true, and the server is not reachable, the
+// shim falls through to bash.real instead of failing. This is the boot-time safety fix.
 func TestShimReadinessGate_ServerUnreachable_ForceFallsThrough(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-shim tests require Unix")
@@ -533,7 +533,7 @@ func TestShimReadinessGate_ServerUnreachable_ForceFallsThrough(t *testing.T) {
 	if err := os.MkdirAll(confDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\nready_gate=true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -559,6 +559,51 @@ func TestShimReadinessGate_ServerUnreachable_ForceFallsThrough(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "readiness-fallthrough" {
 		t.Fatalf("stdout = %q, want %q", got, "readiness-fallthrough")
+	}
+}
+
+// TestShimReadinessGate_NoReadyGate_FailsClosed verifies that without
+// ready_gate=true, the shim does NOT fall through when the local server
+// is unreachable — it tries to enforce and fails (fail-closed default).
+func TestShimReadinessGate_NoReadyGate_FailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// force=true but NO ready_gate — should fail-closed.
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SERVER=http://127.0.0.1:1", // unreachable
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// Should FAIL: no ready_gate, so shim tries to enforce (find agentsh) and fails.
+	if err == nil {
+		t.Fatalf("expected error: without ready_gate, shim should try to enforce and fail")
+	}
+	if !strings.Contains(stderr.String(), "agentsh") {
+		t.Fatalf("expected agentsh-related error, got stderr: %s", stderr.String())
 	}
 }
 
@@ -646,7 +691,7 @@ func TestShimReadinessGate_ServerUnreachable_NonInteractiveBypass(t *testing.T) 
 
 // TestShimReadinessGate_RemoteUnreachable_FailsClosed verifies that when the
 // server is remote (non-loopback) and unreachable, the shim fails closed
-// instead of falling through. Only local servers get fail-open behavior.
+// even with ready_gate=true. Only local servers get fail-open behavior.
 func TestShimReadinessGate_RemoteUnreachable_FailsClosed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-shim tests require Unix")
@@ -662,7 +707,7 @@ func TestShimReadinessGate_RemoteUnreachable_FailsClosed(t *testing.T) {
 	if err := os.MkdirAll(confDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\nready_gate=true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -708,6 +753,7 @@ func TestServerAddrFromEnv(t *testing.T) {
 		{"garbage", "://bad", "tcp", "127.0.0.1:18080"},
 		{"unix socket", "unix:///var/run/agentsh.sock", "unix", "/var/run/agentsh.sock"},
 		{"unix socket no triple slash", "unix:/var/run/agentsh.sock", "unix", "/var/run/agentsh.sock"},
+		{"unix socket host+path", "unix://host/path/to/sock", "unix", "host/path/to/sock"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
