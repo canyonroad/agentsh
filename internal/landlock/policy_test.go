@@ -98,6 +98,75 @@ func TestDeriveExecutePathsFromGlobs(t *testing.T) {
 	}
 }
 
+func TestDeriveReadPaths_WildcardOps(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("landlock tests use Unix paths")
+	}
+	// The agent-default policy uses operations: ["*"] for rules like allow-tmp.
+	// DeriveReadPathsFromPolicy must recognize "*" as including "read".
+	p := &policy.Policy{
+		FileRules: []policy.FileRule{
+			{
+				Name:       "allow-tmp",
+				Paths:      []string{"/tmp/**"},
+				Operations: []string{"*"},
+				Decision:   "allow",
+			},
+			{
+				Name:       "allow-package-caches",
+				Paths:      []string{"/home/user/.cache/**"},
+				Operations: []string{"*"},
+				Decision:   "allow",
+			},
+		},
+	}
+
+	paths := DeriveReadPathsFromPolicy(p)
+
+	found := make(map[string]bool)
+	for _, p := range paths {
+		found[p] = true
+	}
+
+	if !found["/tmp"] {
+		t.Error("expected /tmp from allow-tmp rule with operations: [*]")
+	}
+	if !found["/home/user/.cache"] {
+		t.Error("expected /home/user/.cache from rule with operations: [*]")
+	}
+}
+
+func TestDeriveWritePaths_WildcardOps(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("landlock tests use Unix paths")
+	}
+	// Same bug: DeriveWritePathsFromPolicy must recognize "*" as including "write".
+	p := &policy.Policy{
+		FileRules: []policy.FileRule{
+			{
+				Name:       "allow-tmp",
+				Paths:      []string{"/tmp/**", "/var/tmp/**"},
+				Operations: []string{"*"},
+				Decision:   "allow",
+			},
+		},
+	}
+
+	paths := DeriveWritePathsFromPolicy(p)
+
+	found := make(map[string]bool)
+	for _, p := range paths {
+		found[p] = true
+	}
+
+	if !found["/tmp"] {
+		t.Error("expected /tmp from allow-tmp rule with operations: [*]")
+	}
+	if !found["/var/tmp"] {
+		t.Error("expected /var/tmp from allow-tmp rule with operations: [*]")
+	}
+}
+
 func TestDeriveReadPaths(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("landlock tests use Unix paths")
