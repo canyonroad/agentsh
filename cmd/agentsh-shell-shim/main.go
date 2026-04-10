@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -155,11 +156,21 @@ func main() {
 		if !local {
 			probeTimeout = 2 * time.Second
 		}
-		if !serverReachable(srvNetwork, srvAddr, probeTimeout) {
-			if local {
-				debugLog("ready_gate: local server not reachable at %s:%s, falling through to real shell %s", srvNetwork, srvAddr, realShell)
+		reachable, dialErr := serverReachable(srvNetwork, srvAddr, probeTimeout)
+		if !reachable {
+			if local && isTransientDialError(dialErr) {
+				// Transient error (ECONNREFUSED, ENOENT, timeout) on a local
+				// server — likely "not started yet" during boot. Fall through.
+				debugLog("ready_gate: local server not reachable at %s:%s (%v), falling through to real shell %s", srvNetwork, srvAddr, dialErr, realShell)
 				runAndExit(realShell, argv0, os.Args[1:], os.Environ())
 				return
+			}
+			if local {
+				// Hard error (EACCES, etc.) on a local endpoint — fail-closed.
+				fatalWithHint(127,
+					fmt.Sprintf("agentsh-shell-shim: local server dial error at %s: %v", srvAddr, dialErr),
+					"Check unix socket permissions or server configuration.",
+				)
 			}
 			fatalWithHint(127,
 				fmt.Sprintf("agentsh-shell-shim: remote server not reachable at %s", srvAddr),
@@ -532,12 +543,29 @@ func debugLog(format string, args ...any) {
 }
 
 // serverAddrFromEnv returns the network type and address of the agentsh server
-// for a readiness probe. It reads AGENTSH_SERVER (default http://127.0.0.1:18080)
-// and returns ("tcp", "host:port") or ("unix", "/path/to/socket").
+// for a readiness probe. It follows the same transport selection as the agentsh
+// CLI: when AGENTSH_TRANSPORT=grpc, probes AGENTSH_GRPC_ADDR instead of
+// AGENTSH_SERVER. For HTTP transport (the default), reads AGENTSH_SERVER
+// (default http://127.0.0.1:18080) and returns ("tcp", "host:port") or
+// ("unix", "/path/to/socket").
 //
-// Returns an error for non-empty but unparseable AGENTSH_SERVER values so the
-// caller can fail-closed instead of silently falling back to a local address.
+// Returns an error for non-empty but unparseable values so the caller can
+// fail-closed instead of silently falling back to a local address.
 func serverAddrFromEnv() (network, addr string, err error) {
+	// gRPC transport: probe the gRPC address, not the HTTP server.
+	transport := strings.TrimSpace(os.Getenv("AGENTSH_TRANSPORT"))
+	if transport == "grpc" {
+		grpcAddr := strings.TrimSpace(os.Getenv("AGENTSH_GRPC_ADDR"))
+		if grpcAddr == "" {
+			grpcAddr = "127.0.0.1:9090"
+		}
+		// Validate it looks like host:port.
+		if _, _, splitErr := net.SplitHostPort(grpcAddr); splitErr != nil {
+			return "", "", fmt.Errorf("invalid AGENTSH_GRPC_ADDR value %q: %w", grpcAddr, splitErr)
+		}
+		return "tcp", grpcAddr, nil
+	}
+
 	raw := strings.TrimSpace(os.Getenv("AGENTSH_SERVER"))
 	if raw == "" {
 		return "tcp", "127.0.0.1:18080", nil
@@ -587,13 +615,39 @@ func serverAddrFromEnv() (network, addr string, err error) {
 // immediately when it's not. The timeout parameter should be short for
 // local probes (~200ms) and longer for remote probes (~2s) to avoid
 // false negatives on higher-latency links.
-func serverReachable(network, addr string, timeout time.Duration) bool {
+//
+// Returns the dial error so the caller can distinguish transient errors
+// (ECONNREFUSED, ENOENT — server not started) from hard errors
+// (EACCES — permission denied on unix socket).
+func serverReachable(network, addr string, timeout time.Duration) (bool, error) {
 	conn, err := net.DialTimeout(network, addr, timeout)
 	if err != nil {
-		return false
+		return false, err
 	}
 	_ = conn.Close()
-	return true
+	return true, nil
+}
+
+// isTransientDialError returns true for errors that indicate the server is
+// not yet started (ECONNREFUSED, ENOENT, timeout). These are safe for
+// fail-open in the readiness gate. Hard errors like EACCES (bad socket
+// permissions) return false — they should fail-closed.
+func isTransientDialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case syscall.ECONNREFUSED, syscall.ENOENT:
+			return true
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return false
 }
 
 // lookupHost is the hostname resolver used by serverIsLocal. Package-level

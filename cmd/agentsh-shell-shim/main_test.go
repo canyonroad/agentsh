@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -825,6 +826,62 @@ func TestServerAddrFromEnv(t *testing.T) {
 			}
 			if gotNet != tt.wantNetwork || gotAddr != tt.wantAddr {
 				t.Errorf("serverAddrFromEnv() = (%q, %q), want (%q, %q)", gotNet, gotAddr, tt.wantNetwork, tt.wantAddr)
+			}
+		})
+	}
+}
+
+func TestServerAddrFromEnv_GRPCTransport(t *testing.T) {
+	t.Run("grpc default addr", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "grpc")
+		t.Setenv("AGENTSH_GRPC_ADDR", "")
+		t.Setenv("AGENTSH_SERVER", "http://ignored:18080")
+		gotNet, gotAddr, gotErr := serverAddrFromEnv()
+		if gotErr != nil {
+			t.Fatalf("unexpected error: %v", gotErr)
+		}
+		if gotNet != "tcp" || gotAddr != "127.0.0.1:9090" {
+			t.Errorf("got (%q, %q), want (tcp, 127.0.0.1:9090)", gotNet, gotAddr)
+		}
+	})
+	t.Run("grpc custom addr", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "grpc")
+		t.Setenv("AGENTSH_GRPC_ADDR", "10.0.0.5:9090")
+		gotNet, gotAddr, gotErr := serverAddrFromEnv()
+		if gotErr != nil {
+			t.Fatalf("unexpected error: %v", gotErr)
+		}
+		if gotNet != "tcp" || gotAddr != "10.0.0.5:9090" {
+			t.Errorf("got (%q, %q), want (tcp, 10.0.0.5:9090)", gotNet, gotAddr)
+		}
+	})
+	t.Run("grpc invalid addr", func(t *testing.T) {
+		t.Setenv("AGENTSH_TRANSPORT", "grpc")
+		t.Setenv("AGENTSH_GRPC_ADDR", "not-a-host-port")
+		_, _, gotErr := serverAddrFromEnv()
+		if gotErr == nil {
+			t.Fatal("expected error for invalid AGENTSH_GRPC_ADDR")
+		}
+	})
+}
+
+func TestIsTransientDialError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"ECONNREFUSED", syscall.ECONNREFUSED, true},
+		{"ENOENT", syscall.ENOENT, true},
+		{"EACCES", syscall.EACCES, false},
+		{"other errno", syscall.EPERM, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isTransientDialError(tt.err)
+			if got != tt.want {
+				t.Errorf("isTransientDialError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}
