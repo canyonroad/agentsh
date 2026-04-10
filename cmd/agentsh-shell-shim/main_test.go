@@ -608,7 +608,8 @@ func TestShimReadinessGate_NoReadyGate_FailsClosed(t *testing.T) {
 }
 
 // TestShimReadinessGate_ServerReachable_ForceEnforces verifies that when
-// force=true and the server IS reachable, the shim proceeds to enforcement.
+// force=true, ready_gate=true, and the server IS reachable, the shim
+// proceeds to enforcement (gate passes, enforcement kicks in).
 func TestShimReadinessGate_ServerReachable_ForceEnforces(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-shim tests require Unix")
@@ -624,7 +625,7 @@ func TestShimReadinessGate_ServerReachable_ForceEnforces(t *testing.T) {
 	if err := os.MkdirAll(confDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\nready_gate=true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -741,24 +742,32 @@ func TestServerAddrFromEnv(t *testing.T) {
 		env         string
 		wantNetwork string
 		wantAddr    string
+		wantErr     bool
 	}{
-		{"empty", "", "tcp", "127.0.0.1:18080"},
-		{"default URL", "http://127.0.0.1:18080", "tcp", "127.0.0.1:18080"},
-		{"custom port", "http://127.0.0.1:9999", "tcp", "127.0.0.1:9999"},
-		{"localhost", "http://localhost:18080", "tcp", "localhost:18080"},
-		{"remote host", "http://10.0.0.5:18080", "tcp", "10.0.0.5:18080"},
-		{"https with port", "https://agent.example.com:443", "tcp", "agent.example.com:443"},
-		{"https no port", "https://agent.example.com", "tcp", "agent.example.com:443"},
-		{"http no port", "http://127.0.0.1", "tcp", "127.0.0.1:80"},
-		{"garbage", "://bad", "tcp", "127.0.0.1:18080"},
-		{"unix socket", "unix:///var/run/agentsh.sock", "unix", "/var/run/agentsh.sock"},
-		{"unix socket no triple slash", "unix:/var/run/agentsh.sock", "unix", "/var/run/agentsh.sock"},
-		{"unix socket host+path", "unix://host/path/to/sock", "unix", "host/path/to/sock"},
+		{"empty", "", "tcp", "127.0.0.1:18080", false},
+		{"default URL", "http://127.0.0.1:18080", "tcp", "127.0.0.1:18080", false},
+		{"custom port", "http://127.0.0.1:9999", "tcp", "127.0.0.1:9999", false},
+		{"localhost", "http://localhost:18080", "tcp", "localhost:18080", false},
+		{"remote host", "http://10.0.0.5:18080", "tcp", "10.0.0.5:18080", false},
+		{"https with port", "https://agent.example.com:443", "tcp", "agent.example.com:443", false},
+		{"https no port", "https://agent.example.com", "tcp", "agent.example.com:443", false},
+		{"http no port", "http://127.0.0.1", "tcp", "127.0.0.1:80", false},
+		{"garbage", "://bad", "", "", true},
+		{"unix socket", "unix:///var/run/agentsh.sock", "unix", "/var/run/agentsh.sock", false},
+		{"unix socket no triple slash", "unix:/var/run/agentsh.sock", "unix", "/var/run/agentsh.sock", false},
+		{"unix socket host+path", "unix://host/path/to/sock", "unix", "host/path/to/sock", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("AGENTSH_SERVER", tt.env)
-			gotNet, gotAddr := serverAddrFromEnv()
+			gotNet, gotAddr, gotErr := serverAddrFromEnv()
+			if (gotErr != nil) != tt.wantErr {
+				t.Errorf("serverAddrFromEnv() error = %v, wantErr %v", gotErr, tt.wantErr)
+				return
+			}
+			if gotErr != nil {
+				return
+			}
 			if gotNet != tt.wantNetwork || gotAddr != tt.wantAddr {
 				t.Errorf("serverAddrFromEnv() = (%q, %q), want (%q, %q)", gotNet, gotAddr, tt.wantNetwork, tt.wantAddr)
 			}

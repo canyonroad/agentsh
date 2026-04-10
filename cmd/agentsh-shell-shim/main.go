@@ -123,7 +123,14 @@ func main() {
 	//
 	// Remote servers always fail-closed regardless of ready_gate.
 	if conf.ReadyGate {
-		srvNetwork, srvAddr := serverAddrFromEnv()
+		srvNetwork, srvAddr, srvErr := serverAddrFromEnv()
+		if srvErr != nil {
+			// Non-empty but invalid AGENTSH_SERVER — fail-closed.
+			fatalWithHint(127,
+				fmt.Sprintf("agentsh-shell-shim: ready_gate: %v", srvErr),
+				"Fix the AGENTSH_SERVER value or unset it to use the default (http://127.0.0.1:18080).",
+			)
+		}
 		if !serverReachable(srvNetwork, srvAddr) {
 			if serverIsLocal(srvNetwork, srvAddr) {
 				debugLog("ready_gate: local server not reachable at %s:%s, falling through to real shell %s", srvNetwork, srvAddr, realShell)
@@ -503,14 +510,17 @@ func debugLog(format string, args ...any) {
 // serverAddrFromEnv returns the network type and address of the agentsh server
 // for a readiness probe. It reads AGENTSH_SERVER (default http://127.0.0.1:18080)
 // and returns ("tcp", "host:port") or ("unix", "/path/to/socket").
-func serverAddrFromEnv() (network, addr string) {
+//
+// Returns an error for non-empty but unparseable AGENTSH_SERVER values so the
+// caller can fail-closed instead of silently falling back to a local address.
+func serverAddrFromEnv() (network, addr string, err error) {
 	raw := strings.TrimSpace(os.Getenv("AGENTSH_SERVER"))
 	if raw == "" {
-		return "tcp", "127.0.0.1:18080"
+		return "tcp", "127.0.0.1:18080", nil
 	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "tcp", "127.0.0.1:18080"
+	u, parseErr := url.Parse(raw)
+	if parseErr != nil || u.Host == "" && u.Path == "" {
+		return "", "", fmt.Errorf("invalid AGENTSH_SERVER value %q", raw)
 	}
 	// Unix socket: unix:///path/to/sock or unix:/path/to/sock
 	// Match the client transport logic in internal/client/client.go:
@@ -524,9 +534,9 @@ func serverAddrFromEnv() (network, addr string) {
 		}
 		sockPath = strings.TrimSpace(sockPath)
 		if sockPath == "" {
-			return "tcp", "127.0.0.1:18080"
+			return "", "", fmt.Errorf("invalid unix socket AGENTSH_SERVER value %q", raw)
 		}
-		return "unix", sockPath
+		return "unix", sockPath, nil
 	}
 	host := u.Hostname()
 	port := u.Port()
@@ -543,7 +553,7 @@ func serverAddrFromEnv() (network, addr string) {
 			port = "18080"
 		}
 	}
-	return "tcp", net.JoinHostPort(host, port)
+	return "tcp", net.JoinHostPort(host, port), nil
 }
 
 // serverReachable does a fast dial to check if the agentsh server is
