@@ -96,15 +96,15 @@ func (p *Platform) detectCapabilities() platform.Capabilities {
 		// Syscall filtering
 		HasSeccomp: p.checkSeccomp(),
 
-		// Resource control — HasCgroups reports system availability; CanLimit*
-		// is false because the platform ResourceLimiter is a no-op on Linux.
-		// Actual resource limiting is handled by CgroupManager at the server level.
+		// Resource control — HasCgroups and CanLimit* report system-level
+		// capability (cgroup v2 availability). Per-command enforcement is
+		// handled by CgroupManager, not the platform ResourceLimiter.
 		HasCgroups:           hasCgroups,
-		CanLimitCPU:          false,
-		CanLimitMemory:       false,
-		CanLimitDiskIO:       false,
-		CanLimitNetworkBW:    false,
-		CanLimitProcessCount: false,
+		CanLimitCPU:          hasCgroups,
+		CanLimitMemory:       hasCgroups,
+		CanLimitDiskIO:       hasCgroups,
+		CanLimitNetworkBW:    hasCgroups,
+		CanLimitProcessCount: hasCgroups,
 	}
 
 	return caps

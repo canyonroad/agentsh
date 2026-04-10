@@ -30,11 +30,18 @@ func TestIntegration_AttachAndEnforce(t *testing.T) {
 	if err := os.Mkdir(cgDir, 0o755); err != nil {
 		t.Skipf("cgroup mkdir failed: %v", err)
 	}
+	origCgroup, _ := limits.CurrentCgroupDir()
 	if err := os.WriteFile(filepath.Join(cgDir, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
 		_ = os.Remove(cgDir)
 		t.Skipf("cgroup attach failed: %v", err)
 	}
-	defer os.RemoveAll(cgDir)
+	defer func() {
+		// Move process back so the cgroup can be removed.
+		if origCgroup != "" {
+			_ = os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+		}
+		_ = os.Remove(cgDir)
+	}()
 
 	coll, detach, err := ebpf.AttachConnectToCgroup(cgDir)
 	if err != nil {
@@ -76,11 +83,17 @@ func TestIntegration_DenyWithoutDefaultDeny(t *testing.T) {
 	if err := os.Mkdir(cgDir, 0o755); err != nil {
 		t.Skipf("cgroup mkdir failed: %v", err)
 	}
+	origCgroup, _ := limits.CurrentCgroupDir()
 	if err := os.WriteFile(filepath.Join(cgDir, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
 		_ = os.Remove(cgDir)
 		t.Skipf("cgroup attach failed: %v", err)
 	}
-	defer os.RemoveAll(cgDir)
+	defer func() {
+		if origCgroup != "" {
+			_ = os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+		}
+		_ = os.Remove(cgDir)
+	}()
 
 	coll, detach, err := ebpf.AttachConnectToCgroup(cgDir)
 	if err != nil {

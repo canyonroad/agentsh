@@ -75,6 +75,13 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 			return nil, fmt.Errorf("discover own cgroup: %w", err)
 		}
 		own = discovered
+		// Normalize auto-discovered path: if the process is in a "leaf"
+		// sub-cgroup created by a prior probe, use the parent as the
+		// enforcement root. Not applied to caller-provided ownHint.
+		if filepath.Base(own) == "leaf" {
+			own = filepath.Dir(own)
+			leafResident = true
+		}
 	} else if !filepath.IsAbs(own) {
 		// Relative paths are joined with the process's current cgroup dir, matching
 		// the prior behavior of internal/api/cgroups.go.
@@ -82,17 +89,13 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 		if err != nil {
 			return nil, fmt.Errorf("discover own cgroup for relative base path: %w", err)
 		}
+		// Normalize auto-discovered current cgroup before joining so
+		// the relative path resolves under the service cgroup, not the leaf.
+		if filepath.Base(cur) == "leaf" {
+			cur = filepath.Dir(cur)
+			leafResident = true
+		}
 		own = filepath.Join(cur, own)
-	}
-
-	// Normalize: if the resolved path ends in "/leaf", strip the suffix.
-	// "leaf" is exclusively our synthetic sub-cgroup name (see tryLeafMove);
-	// the kernel never creates cgroup directories named "leaf". Stripping it
-	// makes the probe idempotent: calling it twice in the same process (e.g.
-	// capabilities.CheckAll then NewCgroupManager) won't create leaf/leaf.
-	if filepath.Base(own) == "leaf" {
-		own = filepath.Dir(own)
-		leafResident = true
 	}
 
 	// Step 2: does the own cgroup even expose the required controllers?

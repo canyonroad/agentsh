@@ -71,11 +71,17 @@ func TestIntegration_PNACLMonitor_BasicOperation(t *testing.T) {
 	if err := os.Mkdir(cgDir, 0o755); err != nil {
 		t.Skipf("cgroup mkdir failed: %v", err)
 	}
+	origCgroup, _ := limits.CurrentCgroupDir()
 	if err := os.WriteFile(filepath.Join(cgDir, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
 		_ = os.Remove(cgDir)
 		t.Skipf("cgroup attach failed: %v", err)
 	}
-	defer os.RemoveAll(cgDir)
+	defer func() {
+		if origCgroup != "" {
+			_ = os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+		}
+		_ = os.Remove(cgDir)
+	}()
 
 	// Create monitor
 	monitorConfig := &PNACLMonitorConfig{
@@ -151,11 +157,17 @@ func TestIntegration_ProcessFilter_WithRealEvents(t *testing.T) {
 	if err := os.Mkdir(cgDir, 0o755); err != nil {
 		t.Skipf("cgroup mkdir failed: %v", err)
 	}
+	origCgroup, _ := limits.CurrentCgroupDir()
 	if err := os.WriteFile(filepath.Join(cgDir, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
 		_ = os.Remove(cgDir)
 		t.Skipf("cgroup attach failed: %v", err)
 	}
-	defer os.RemoveAll(cgDir)
+	defer func() {
+		if origCgroup != "" {
+			_ = os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+		}
+		_ = os.Remove(cgDir)
+	}()
 
 	// Attach eBPF
 	coll, detach, err := AttachConnectToCgroup(cgDir)
@@ -255,11 +267,17 @@ func TestIntegration_ConnectionHolder_ApprovalFlow(t *testing.T) {
 	if err := os.Mkdir(cgDir, 0o755); err != nil {
 		t.Skipf("cgroup mkdir failed: %v", err)
 	}
+	origCgroup, _ := limits.CurrentCgroupDir()
 	if err := os.WriteFile(filepath.Join(cgDir, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
 		_ = os.Remove(cgDir)
 		t.Skipf("cgroup attach failed: %v", err)
 	}
-	defer os.RemoveAll(cgDir)
+	defer func() {
+		if origCgroup != "" {
+			_ = os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+		}
+		_ = os.Remove(cgDir)
+	}()
 	// Policy that requires approval
 	config := &pnacl.Config{
 		Default: "deny",
