@@ -519,13 +519,13 @@ func serverAddrFromEnv() (network, addr string, err error) {
 		return "tcp", "127.0.0.1:18080", nil
 	}
 	u, parseErr := url.Parse(raw)
-	if parseErr != nil || u.Host == "" && u.Path == "" {
-		return "", "", fmt.Errorf("invalid AGENTSH_SERVER value %q", raw)
+	if parseErr != nil {
+		return "", "", fmt.Errorf("invalid AGENTSH_SERVER value %q: %w", raw, parseErr)
 	}
-	// Unix socket: unix:///path/to/sock or unix:/path/to/sock
-	// Match the client transport logic in internal/client/client.go:
-	// u.Path when Host is empty, u.Host+u.Path when both are present.
-	if u.Scheme == "unix" {
+	switch u.Scheme {
+	case "unix":
+		// Match the client transport logic in internal/client/client.go:
+		// u.Path when Host is empty, u.Host+u.Path when both are present.
 		sockPath := u.Path
 		if sockPath == "" {
 			sockPath = u.Host
@@ -534,26 +534,27 @@ func serverAddrFromEnv() (network, addr string, err error) {
 		}
 		sockPath = strings.TrimSpace(sockPath)
 		if sockPath == "" {
-			return "", "", fmt.Errorf("invalid unix socket AGENTSH_SERVER value %q", raw)
+			return "", "", fmt.Errorf("invalid AGENTSH_SERVER: unix URL with empty socket path %q", raw)
 		}
 		return "unix", sockPath, nil
-	}
-	host := u.Hostname()
-	port := u.Port()
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	if port == "" {
-		switch u.Scheme {
-		case "https":
-			port = "443"
-		case "http":
-			port = "80"
-		default:
-			port = "18080"
+	case "http", "https":
+		host := u.Hostname()
+		if host == "" {
+			return "", "", fmt.Errorf("invalid AGENTSH_SERVER: %s URL with empty host %q", u.Scheme, raw)
 		}
+		port := u.Port()
+		if port == "" {
+			switch u.Scheme {
+			case "https":
+				port = "443"
+			default:
+				port = "80"
+			}
+		}
+		return "tcp", net.JoinHostPort(host, port), nil
+	default:
+		return "", "", fmt.Errorf("invalid AGENTSH_SERVER: unsupported scheme %q in %q (expected http, https, or unix)", u.Scheme, raw)
 	}
-	return "tcp", net.JoinHostPort(host, port), nil
 }
 
 // serverReachable does a fast dial to check if the agentsh server is

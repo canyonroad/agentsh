@@ -756,6 +756,11 @@ func TestServerAddrFromEnv(t *testing.T) {
 		{"unix socket", "unix:///var/run/agentsh.sock", "unix", "/var/run/agentsh.sock", false},
 		{"unix socket no triple slash", "unix:/var/run/agentsh.sock", "unix", "/var/run/agentsh.sock", false},
 		{"unix socket host+path", "unix://host/path/to/sock", "unix", "host/path/to/sock", false},
+		// Schemeless values that url.Parse accepts as path-only — must be rejected.
+		{"schemeless hostname", "localhost", "", "", true},
+		{"schemeless path", "/tmp/agentsh.sock", "", "", true},
+		// Empty host with path — must be rejected.
+		{"http empty host", "http:///bad", "", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
