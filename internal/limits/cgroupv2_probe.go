@@ -33,7 +33,7 @@ type CgroupProbeResult struct {
 	Reason string
 	// OwnCgroup is the cgroup directory used as the enforcement root for nested
 	// mode — child cgroups for sessions are created under this path. When
-	// LeafMoved is true, the process itself resides in OwnCgroup/leaf, but the
+	// LeafMoved is true, the process itself resides in OwnCgroup/agentsh.leaf, but the
 	// parent remains the correct place to create children.
 	OwnCgroup   string
 	SliceDir    string // absolute path to /sys/fs/cgroup/agentsh.slice (top-level mode only; empty otherwise)
@@ -41,7 +41,7 @@ type CgroupProbeResult struct {
 	// OrphansReaped is populated in top-level mode when the probe removed
 	// leftover unpopulated child cgroups from a prior agentsh run.
 	OrphansReaped []string
-	// LeafMoved is true if the process resides in OwnCgroup/leaf — either
+	// LeafMoved is true if the process resides in OwnCgroup/agentsh.leaf — either
 	// because this probe performed a leaf-move or because a prior probe
 	// already moved the process there.
 	LeafMoved bool
@@ -75,10 +75,10 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 			return nil, fmt.Errorf("discover own cgroup: %w", err)
 		}
 		own = discovered
-		// Normalize auto-discovered path: if the process is in a "leaf"
+		// Normalize auto-discovered path: if the process is in a "agentsh.leaf"
 		// sub-cgroup created by a prior probe, use the parent as the
 		// enforcement root. Not applied to caller-provided ownHint.
-		if filepath.Base(own) == "leaf" {
+		if filepath.Base(own) == "agentsh.leaf" {
 			own = filepath.Dir(own)
 			leafResident = true
 		}
@@ -91,7 +91,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 		}
 		// Normalize auto-discovered current cgroup before joining so
 		// the relative path resolves under the service cgroup, not the leaf.
-		if filepath.Base(cur) == "leaf" {
+		if filepath.Base(cur) == "agentsh.leaf" {
 			cur = filepath.Dir(cur)
 			leafResident = true
 		}
@@ -144,7 +144,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 		}, nil
 	}
 
-	// Step 4b: if EBUSY, try leaf-move — create own/leaf, move self there,
+	// Step 4b: if EBUSY, try leaf-move — create own/agentsh.leaf, move self there,
 	// retry enabling controllers on the now-empty parent.
 	if errors.Is(enableErr, syscall.EBUSY) {
 		moved, enabled, retryErr := tryLeafMove(fs, own)
@@ -197,7 +197,7 @@ func ProbeCgroupsV2Default(ctx context.Context) (*CgroupProbeResult, error) {
 
 // tryLeafMove handles the EBUSY case: the own cgroup has internal processes
 // (including agentsh itself), preventing subtree_control writes. We create a
-// "leaf" child cgroup, move the current process into it, and retry enabling
+// "agentsh.leaf" child cgroup, move the current process into it, and retry enabling
 // controllers on the parent. This is the standard pattern for systemd services
 // that need to manage child cgroups.
 //
@@ -206,7 +206,7 @@ func ProbeCgroupsV2Default(ctx context.Context) (*CgroupProbeResult, error) {
 // enabled on the parent after the move; retryErr is the error from the
 // enable retry (nil when enabled is true).
 func tryLeafMove(fs cgroupFS, own string) (moved, enabled bool, retryErr error) {
-	leafDir := filepath.Join(own, "leaf")
+	leafDir := filepath.Join(own, "agentsh.leaf")
 	if err := fs.Mkdir(leafDir, 0o755); err != nil {
 		if !errors.Is(err, syscall.EEXIST) {
 			return false, false, fmt.Errorf("mkdir leaf: %w", err)

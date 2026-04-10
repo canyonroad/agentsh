@@ -193,20 +193,34 @@ func (p *Platform) Sandbox() platform.SandboxManager {
 	return p.sandbox
 }
 
-// Resources returns a no-op ResourceLimiter. Per-command cgroup enforcement
-// is handled by CgroupManager in the server, not the platform interface.
+// Resources returns a cgroupResourceLimiter that reports availability based on
+// cgroup v2 presence. Per-command enforcement is handled by CgroupManager in
+// the server; Apply() directs callers there.
 func (p *Platform) Resources() platform.ResourceLimiter {
-	return noopResourceLimiter{}
+	return cgroupResourceLimiter{hasCgroups: p.caps.HasCgroups}
 }
 
-// noopResourceLimiter satisfies platform.ResourceLimiter without doing anything.
-type noopResourceLimiter struct{}
-
-func (noopResourceLimiter) Apply(config platform.ResourceConfig) (platform.ResourceHandle, error) {
-	return nil, fmt.Errorf("resource limiting handled by CgroupManager, not platform interface")
+// cgroupResourceLimiter reports cgroup v2 availability but does not apply limits
+// itself — that's CgroupManager's job. This keeps Capabilities() and
+// Resources().Available() consistent.
+type cgroupResourceLimiter struct {
+	hasCgroups bool
 }
-func (noopResourceLimiter) Available() bool                       { return false }
-func (noopResourceLimiter) SupportedLimits() []platform.ResourceType { return nil }
+
+func (c cgroupResourceLimiter) Apply(config platform.ResourceConfig) (platform.ResourceHandle, error) {
+	return nil, fmt.Errorf("use CgroupManager.Apply() for per-command resource limits")
+}
+func (c cgroupResourceLimiter) Available() bool { return c.hasCgroups }
+func (c cgroupResourceLimiter) SupportedLimits() []platform.ResourceType {
+	if !c.hasCgroups {
+		return nil
+	}
+	return []platform.ResourceType{
+		platform.ResourceCPU,
+		platform.ResourceMemory,
+		platform.ResourceProcessCount,
+	}
+}
 
 // Initialize sets up the platform with the given configuration.
 func (p *Platform) Initialize(ctx context.Context, config platform.Config) error {

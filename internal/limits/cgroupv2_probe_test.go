@@ -260,7 +260,7 @@ func TestProbe_LeafMove_EBUSYSucceeds(t *testing.T) {
 		t.Fatalf("OwnCgroup should be %q, got %q", own, res.OwnCgroup)
 	}
 	// Verify the leaf directory was created.
-	if _, err := f.Stat(own + "/leaf"); err != nil {
+	if _, err := f.Stat(own + "/agentsh.leaf"); err != nil {
 		t.Fatalf("leaf dir should exist: %v", err)
 	}
 }
@@ -274,8 +274,8 @@ func TestProbe_LeafMove_MkdirFails_FallbackTopLevel(t *testing.T) {
 	f.openWriteErrsOnce[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
 	// Pre-create own/leaf so mkdir returns EEXIST (tolerated),
 	// then block the cgroup.procs write to simulate permission failure.
-	f.seedDir(own + "/leaf")
-	f.writeErrs[own+"/leaf/cgroup.procs"] = syscall.EACCES
+	f.seedDir(own + "/agentsh.leaf")
+	f.writeErrs[own+"/agentsh.leaf/cgroup.procs"] = syscall.EACCES
 	f.seedFile("/sys/fs/cgroup/agentsh.slice/memory.max", "max")
 
 	res, err := ProbeCgroupsV2(context.Background(), f, own)
@@ -338,7 +338,7 @@ func TestProbe_EACCES_NoLeafMove(t *testing.T) {
 		t.Fatalf("mode: got %q, want top-level", res.Mode)
 	}
 	// Verify no leaf directory was created.
-	if _, err := f.Stat(own + "/leaf"); err == nil {
+	if _, err := f.Stat(own + "/agentsh.leaf"); err == nil {
 		t.Fatalf("leaf dir should NOT exist for EACCES — leaf-move is EBUSY-only")
 	}
 	if res.LeafMoved {
@@ -384,7 +384,7 @@ func TestProbe_LeafMove_IdempotentSecondProbe(t *testing.T) {
 		t.Fatalf("probe 2: expected 'already delegated', got %q", res2.Reason)
 	}
 	// Verify no leaf/leaf was created.
-	if _, err := f.Stat(own + "/leaf/leaf"); err == nil {
+	if _, err := f.Stat(own + "/agentsh.leaf/agentsh.leaf"); err == nil {
 		t.Fatalf("leaf/leaf should NOT exist — probe should be idempotent")
 	}
 }
@@ -394,7 +394,7 @@ func TestProbe_ExplicitLeafHintNotStripped(t *testing.T) {
 	// rewritten — normalization only applies to auto-discovered paths.
 	f := newFakeCgroupFS()
 	seedHealthyRoot(f)
-	leafPath := "/sys/fs/cgroup/system.slice/agentsh.service/leaf"
+	leafPath := "/sys/fs/cgroup/system.slice/agentsh.service/agentsh.leaf"
 	f.seedFile(leafPath+"/cgroup.controllers", "cpu memory pids")
 	f.seedFile(leafPath+"/cgroup.subtree_control", "cpu memory pids")
 
