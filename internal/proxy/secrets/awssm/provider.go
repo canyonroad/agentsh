@@ -13,6 +13,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	smithy "github.com/aws/smithy-go"
 
 	secrets "github.com/agentsh/agentsh/internal/proxy/secrets"
@@ -46,12 +47,6 @@ type Provider struct {
 	client smClient
 }
 
-// probeSecretID is the sentinel secret name used by New to verify
-// that AWS credentials are valid and the endpoint is reachable. A
-// GetSecretValue that returns ResourceNotFoundException proves auth
-// and connectivity work. Any other error means credentials are
-// invalid or the endpoint is unreachable.
-const probeSecretID = "agentsh-probe-nonexistent"
 
 // testFetchPreLockHook is a test-only seam invoked (when non-nil)
 // between Fetch's fast-path closed check and its RLock acquisition.
@@ -72,7 +67,7 @@ var testClosePreLockHook func()
 //  1. Validate the config (region required).
 //  2. Load default AWS config with the specified region.
 //  3. Create the Secrets Manager client.
-//  4. Probe connectivity via GetSecretValue of a nonexistent secret.
+//  4. Probe connectivity via STS GetCallerIdentity.
 func New(ctx context.Context, cfg Config, _ secrets.RefResolver) (*Provider, error) {
 	if cfg.Region == "" {
 		return nil, fmt.Errorf("aws-sm: region is required")
@@ -85,17 +80,14 @@ func New(ctx context.Context, cfg Config, _ secrets.RefResolver) (*Provider, err
 
 	client := secretsmanager.NewFromConfig(awsCfg)
 
-	// Probe connectivity: a ResourceNotFoundException proves auth
-	// and endpoint work. Any other error fails construction.
-	_, probeErr := client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
-		SecretId: aws.String(probeSecretID),
-	})
+	// Probe connectivity: STS GetCallerIdentity is permission-neutral —
+	// it verifies credentials are valid without requiring access to any
+	// specific Secrets Manager resource. This works even in least-privilege
+	// IAM setups that restrict GetSecretValue to specific ARN prefixes.
+	stsClient := sts.NewFromConfig(awsCfg)
+	_, probeErr := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if probeErr != nil {
-		var rnf *types.ResourceNotFoundException
-		if !errors.As(probeErr, &rnf) {
-			return nil, fmt.Errorf("aws-sm: connectivity probe failed: %w", probeErr)
-		}
-		// ResourceNotFoundException is success — backend is reachable.
+		return nil, fmt.Errorf("aws-sm: connectivity probe failed: %w", probeErr)
 	}
 
 	return &Provider{client: client}, nil
@@ -266,8 +258,15 @@ func mapAWSError(err error) error {
 	}
 
 	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "AccessDeniedException" {
-		return fmt.Errorf("%w: %s", secrets.ErrUnauthorized, err.Error())
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "AccessDeniedException",
+			"UnrecognizedClientException",
+			"InvalidSignatureException",
+			"ExpiredTokenException",
+			"IncompleteSignature":
+			return fmt.Errorf("%w: %s", secrets.ErrUnauthorized, err.Error())
+		}
 	}
 
 	var ire *types.InvalidRequestException
