@@ -89,13 +89,17 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 		if err != nil {
 			return nil, fmt.Errorf("discover own cgroup for relative base path: %w", err)
 		}
-		// Normalize auto-discovered current cgroup before joining so
-		// the relative path resolves under the service cgroup, not the leaf.
 		if filepath.Base(cur) == "agentsh.leaf" {
+			// A prior probe already leaf-moved the process into
+			// <service>/<relative_hint>/agentsh.leaf. The parent is the
+			// resolved own cgroup — re-appending the relative hint would
+			// double it (e.g. .../sessions/sessions).
 			cur = filepath.Dir(cur)
 			leafResident = true
+			own = cur
+		} else {
+			own = filepath.Join(cur, own)
 		}
-		own = filepath.Join(cur, own)
 	}
 
 	// Step 2: does the own cgroup even expose the required controllers?
