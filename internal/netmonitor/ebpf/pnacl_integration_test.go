@@ -78,9 +78,13 @@ func TestIntegration_PNACLMonitor_BasicOperation(t *testing.T) {
 	}
 	defer func() {
 		if origCgroup != "" {
-			_ = os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+			if err := os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+				t.Errorf("restore cgroup: %v", err)
+			}
 		}
-		_ = os.Remove(cgDir)
+		if err := os.Remove(cgDir); err != nil {
+			t.Errorf("remove cgroup: %v", err)
+		}
 	}()
 
 	// Create monitor
@@ -164,9 +168,13 @@ func TestIntegration_ProcessFilter_WithRealEvents(t *testing.T) {
 	}
 	defer func() {
 		if origCgroup != "" {
-			_ = os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+			if err := os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+				t.Errorf("restore cgroup: %v", err)
+			}
 		}
-		_ = os.Remove(cgDir)
+		if err := os.Remove(cgDir); err != nil {
+			t.Errorf("remove cgroup: %v", err)
+		}
 	}()
 
 	// Attach eBPF
@@ -274,9 +282,13 @@ func TestIntegration_ConnectionHolder_ApprovalFlow(t *testing.T) {
 	}
 	defer func() {
 		if origCgroup != "" {
-			_ = os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+			if err := os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+				t.Errorf("restore cgroup: %v", err)
+			}
 		}
-		_ = os.Remove(cgDir)
+		if err := os.Remove(cgDir); err != nil {
+			t.Errorf("remove cgroup: %v", err)
+		}
 	}()
 	// Policy that requires approval
 	config := &pnacl.Config{

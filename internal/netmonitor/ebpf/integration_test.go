@@ -38,9 +38,13 @@ func TestIntegration_AttachAndEnforce(t *testing.T) {
 	defer func() {
 		// Move process back so the cgroup can be removed.
 		if origCgroup != "" {
-			_ = os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+			if err := os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+				t.Errorf("restore cgroup: %v", err)
+			}
 		}
-		_ = os.Remove(cgDir)
+		if err := os.Remove(cgDir); err != nil {
+			t.Errorf("remove cgroup: %v", err)
+		}
 	}()
 
 	coll, detach, err := ebpf.AttachConnectToCgroup(cgDir)
@@ -90,9 +94,13 @@ func TestIntegration_DenyWithoutDefaultDeny(t *testing.T) {
 	}
 	defer func() {
 		if origCgroup != "" {
-			_ = os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+			if err := os.WriteFile(filepath.Join(origCgroup, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+				t.Errorf("restore cgroup: %v", err)
+			}
 		}
-		_ = os.Remove(cgDir)
+		if err := os.Remove(cgDir); err != nil {
+			t.Errorf("remove cgroup: %v", err)
+		}
 	}()
 
 	coll, detach, err := ebpf.AttachConnectToCgroup(cgDir)
