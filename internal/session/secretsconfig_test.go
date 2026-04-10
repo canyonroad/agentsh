@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/proxy/secrets/awssm"
 	"github.com/agentsh/agentsh/internal/proxy/secrets/vault"
 	"gopkg.in/yaml.v3"
 )
@@ -185,5 +186,28 @@ func TestResolveServiceConfigs_ScrubResponse(t *testing.T) {
 	}
 	if result.ScrubServices["stripe"] {
 		t.Error("stripe should not be in ScrubServices")
+	}
+}
+
+func TestResolveProviderConfigs_AWSSM(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"aws": mustYAMLNode(t, "type: aws-sm\nregion: us-west-2"),
+	}
+	configs, err := ResolveProviderConfigs(providers)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(configs) != 1 {
+		t.Fatalf("expected 1 config, got %d", len(configs))
+	}
+	if configs["aws"].TypeName() != "aws-sm" {
+		t.Errorf("TypeName = %q, want aws-sm", configs["aws"].TypeName())
+	}
+	ac, ok := configs["aws"].(awssm.Config)
+	if !ok {
+		t.Fatalf("expected awssm.Config, got %T", configs["aws"])
+	}
+	if ac.Region != "us-west-2" {
+		t.Errorf("Region = %q, want us-west-2", ac.Region)
 	}
 }

@@ -59,6 +59,7 @@ type ServiceInjectEnvYAML struct {
 var knownProviderTypes = map[string]bool{
 	"keyring": true,
 	"vault":   true,
+	"aws-sm":  true,
 }
 
 // ValidateSecrets validates the providers and services sections of a Policy.
