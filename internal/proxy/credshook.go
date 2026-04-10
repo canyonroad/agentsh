@@ -24,19 +24,44 @@ func NewCredsSubHook(table *credsub.Table) *CredsSubHook {
 
 func (h *CredsSubHook) Name() string { return "creds-sub" }
 
-// PreHook replaces fake credentials with real ones in the request body.
+// PreHook replaces fake credentials with real ones in the request
+// body, header values, URL query string, and URL path.
 func (h *CredsSubHook) PreHook(r *http.Request, _ *RequestContext) error {
-	if r.Body == nil {
-		return nil
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil // best-effort
+	// Body substitution.
+	if r.Body != nil {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil // best-effort
+		}
+		replaced := h.table.ReplaceFakeToReal(body)
+		r.Body = io.NopCloser(bytes.NewReader(replaced))
+		r.ContentLength = int64(len(replaced))
 	}
 
-	replaced := h.table.ReplaceFakeToReal(body)
-	r.Body = io.NopCloser(bytes.NewReader(replaced))
-	r.ContentLength = int64(len(replaced))
+	// Header value substitution.
+	for key, vals := range r.Header {
+		for i, v := range vals {
+			replaced := h.table.ReplaceFakeToReal([]byte(v))
+			r.Header[key][i] = string(replaced)
+		}
+	}
+
+	// URL query substitution.
+	if rq := r.URL.RawQuery; rq != "" {
+		replaced := string(h.table.ReplaceFakeToReal([]byte(rq)))
+		r.URL.RawQuery = replaced
+	}
+
+	// URL path substitution.
+	if p := r.URL.Path; p != "" {
+		replaced := string(h.table.ReplaceFakeToReal([]byte(p)))
+		r.URL.Path = replaced
+	}
+	if rp := r.URL.RawPath; rp != "" {
+		replaced := string(h.table.ReplaceFakeToReal([]byte(rp)))
+		r.URL.RawPath = replaced
+	}
+
 	return nil
 }
 

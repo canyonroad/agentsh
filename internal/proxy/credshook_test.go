@@ -337,3 +337,60 @@ func TestHeaderInjectionHook_PostHook_IsNoOp(t *testing.T) {
 		t.Fatalf("PostHook should be no-op: %v", err)
 	}
 }
+
+func TestCredsSubHook_PreHook_ReplacesInHeaders(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewCredsSubHook(tbl)
+
+	req := httptest.NewRequest(http.MethodPost, "http://api.example.com/v1/test", nil)
+	req.Header.Set("Authorization", "Bearer ghp_FAKE1234567890abcdef")
+
+	err := h.PreHook(req, &RequestContext{})
+	if err != nil {
+		t.Fatalf("PreHook error: %v", err)
+	}
+
+	got := req.Header.Get("Authorization")
+	want := "Bearer ghp_REAL1234567890abcdef"
+	if got != want {
+		t.Errorf("Authorization = %q, want %q", got, want)
+	}
+}
+
+func TestCredsSubHook_PreHook_ReplacesInQuery(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewCredsSubHook(tbl)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"http://api.example.com/v1/test?key=ghp_FAKE1234567890abcdef", nil)
+
+	err := h.PreHook(req, &RequestContext{})
+	if err != nil {
+		t.Fatalf("PreHook error: %v", err)
+	}
+
+	got := req.URL.RawQuery
+	want := "key=ghp_REAL1234567890abcdef"
+	if got != want {
+		t.Errorf("RawQuery = %q, want %q", got, want)
+	}
+}
+
+func TestCredsSubHook_PreHook_ReplacesInPath(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewCredsSubHook(tbl)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"http://api.example.com/v1/ghp_FAKE1234567890abcdef/info", nil)
+
+	err := h.PreHook(req, &RequestContext{})
+	if err != nil {
+		t.Fatalf("PreHook error: %v", err)
+	}
+
+	got := req.URL.Path
+	want := "/v1/ghp_REAL1234567890abcdef/info"
+	if got != want {
+		t.Errorf("Path = %q, want %q", got, want)
+	}
+}
