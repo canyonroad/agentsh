@@ -2,7 +2,14 @@
 
 package capabilities
 
-import "fmt"
+import (
+	"fmt"
+	"os/exec"
+)
+
+// wrapperLookPath is the function used to check if the wrapper binary exists.
+// Package-level var for testability (matches checkPtrace pattern in check.go).
+var wrapperLookPath = exec.LookPath
 
 // detectFileEnforcementBackend returns the best available file enforcement backend.
 func detectFileEnforcementBackend(caps *SecurityCapabilities) string {
@@ -118,6 +125,94 @@ func buildLinuxDomains(caps *SecurityCapabilities) []ProtectionDomain {
 	}
 }
 
+// wrapperDependentBackends lists backends that require agentsh-unixwrap.
+// These are marked unavailable when the wrapper binary is not on PATH.
+var wrapperDependentBackends = map[string]bool{
+	"seccomp-notify":  true,
+	"landlock":        true,
+	"seccomp-execve":  true,
+	"landlock-network": true,
+}
+
+// applyWrapperAvailability checks if agentsh-unixwrap is on PATH and marks
+// wrapper-dependent backends as unavailable if it's missing. Also updates
+// secCaps.FileEnforcement and domain Active fields for consistency.
+// Returns true if the wrapper was found.
+//
+// Note: this checks the default wrapper binary name. The server config allows
+// overriding via sandbox.unix_sockets.wrapper_bin, but Detect() is intentionally
+// config-agnostic — it probes system capabilities, not config state. Config-aware
+// validation lives in CheckConfig().
+func applyWrapperAvailability(domains []ProtectionDomain, secCaps *SecurityCapabilities) bool {
+	_, err := wrapperLookPath("agentsh-unixwrap")
+	if err == nil {
+		return true
+	}
+
+	// Wrapper missing — clear secCaps fields for wrapper-dependent capabilities
+	// so SelectMode() and backwardCompatCaps() reflect the real state.
+	// These must be cleared before the domain loop because SelectMode() and
+	// the Active derivation read from secCaps.
+	secCaps.Seccomp = false
+	secCaps.Landlock = false
+	secCaps.LandlockNetwork = false
+
+	// Update FileEnforcement before the domain loop since File Protection
+	// reads it for Active derivation.
+	switch secCaps.FileEnforcement {
+	case "landlock", "seccomp-notify":
+		if secCaps.FUSE {
+			secCaps.FileEnforcement = "fuse"
+		} else {
+			secCaps.FileEnforcement = "none"
+		}
+	}
+
+	// Disable dependent backends in domains and re-derive Active
+	for i := range domains {
+		activeDisabled := false
+		for j := range domains[i].Backends {
+			if wrapperDependentBackends[domains[i].Backends[j].Name] {
+				if domains[i].Backends[j].Name == domains[i].Active {
+					activeDisabled = true
+				}
+				domains[i].Backends[j].Available = false
+			}
+		}
+		if activeDisabled {
+			domains[i].Active = ""
+			// Re-derive Active using capability-aware logic rather than
+			// blindly picking first available (e.g., ptrace should only
+			// be active when PtraceEnabled is true and mode selects it).
+			mode := secCaps.SelectMode()
+			switch domains[i].Name {
+			case "File Protection":
+				domains[i].Active = secCaps.FileEnforcement
+			case "Command Control":
+				if mode == ModePtrace {
+					domains[i].Active = "ptrace"
+				}
+				// otherwise remains "" — no active command control
+			case "Network":
+				if secCaps.EBPFProbe.Available {
+					domains[i].Active = "ebpf"
+				}
+				// landlock-network disabled, so no fallback
+			default:
+				// Other domains: pick first available
+				for _, b := range domains[i].Backends {
+					if b.Available {
+						domains[i].Active = b.Name
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return false
+}
+
 // backwardCompatCaps builds the flat capabilities map for backward compatibility.
 func backwardCompatCaps(caps *SecurityCapabilities, domains []ProtectionDomain) map[string]any {
 	m := map[string]any{
@@ -173,6 +268,18 @@ func Detect() (*DetectResult, error) {
 	secCaps.FileEnforcement = detectFileEnforcementBackend(secCaps)
 
 	domains := buildLinuxDomains(secCaps)
+
+	// Check wrapper availability before scoring — marks seccomp/landlock
+	// backends unavailable if agentsh-unixwrap is not on PATH.
+	//
+	// This check lives in Detect() rather than DetectSecurityCapabilities()
+	// because the server already handles wrapper absence at runtime via
+	// setupSeccompWrapper() in core.go (its own LookPath + graceful
+	// degradation). Moving it into DetectSecurityCapabilities() would change
+	// the contract for all callers. Detect() is the user-facing capability
+	// report where accuracy matters most.
+	wrapperFound := applyWrapperAvailability(domains, secCaps)
+
 	score := ComputeScore(domains)
 	mode := secCaps.SelectMode()
 
@@ -190,6 +297,39 @@ func Detect() (*DetectResult, error) {
 	}
 
 	tips := GenerateTipsFromDomains(domains)
+
+	// When the wrapper is missing, suppress generic backend tips for
+	// wrapper-dependent backends (e.g., "run privileged" for seccomp).
+	// The wrapper-specific tip below is the actionable remediation.
+	//
+	// We build the suppress set from tipsByBackend because tip.Feature
+	// doesn't always match the backend name (e.g., seccomp-execve backend
+	// emits a tip with Feature "seccomp").
+	if !wrapperFound {
+		suppressFeatures := make(map[string]bool)
+		for name := range wrapperDependentBackends {
+			if tip, ok := tipsByBackend[name]; ok {
+				suppressFeatures[tip.Feature] = true
+			}
+		}
+
+		filtered := tips[:0]
+		for _, tip := range tips {
+			if !suppressFeatures[tip.Feature] {
+				filtered = append(filtered, tip)
+			}
+		}
+		tips = filtered
+
+		// Add wrapper-specific tip regardless of domain score (FUSE may keep
+		// File Protection scored, but the missing wrapper is still actionable).
+		tips = append(tips, Tip{
+			Feature: "seccomp-wrapper",
+			Status:  "missing",
+			Impact:  "seccomp and Landlock enforcement disabled — processes run without kernel-level interception",
+			Action:  "install agentsh-unixwrap or rebuild the package with CGO_ENABLED=1",
+		})
+	}
 
 	return &DetectResult{
 		Platform:        "linux",

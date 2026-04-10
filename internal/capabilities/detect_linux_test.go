@@ -3,6 +3,7 @@
 package capabilities
 
 import (
+	"os/exec"
 	"testing"
 )
 
@@ -63,5 +64,201 @@ func TestDetect_Linux_Summary(t *testing.T) {
 		if availSet[u] {
 			t.Errorf("Feature %q in both Available and Unavailable", u)
 		}
+	}
+}
+
+func TestApplyWrapperAvailability_Missing(t *testing.T) {
+	// Override LookPath to simulate missing wrapper
+	orig := wrapperLookPath
+	wrapperLookPath = func(file string) (string, error) {
+		return "", exec.ErrNotFound
+	}
+	defer func() { wrapperLookPath = orig }()
+
+	// Build domains with all backends available
+	caps := &SecurityCapabilities{
+		Seccomp:         true,
+		Landlock:        true,
+		LandlockABI:     5,
+		LandlockNetwork: true,
+		FUSE:            true,
+		Ptrace:          true,
+	}
+	caps.FileEnforcement = detectFileEnforcementBackend(caps)
+	domains := buildLinuxDomains(caps)
+
+	// Wrapper not found
+	found := applyWrapperAvailability(domains, caps)
+	if found {
+		t.Fatal("applyWrapperAvailability returned true, want false")
+	}
+
+	// Check affected backends are unavailable
+	for _, d := range domains {
+		for _, b := range d.Backends {
+			switch b.Name {
+			case "seccomp-notify", "landlock", "seccomp-execve", "landlock-network":
+				if b.Available {
+					t.Errorf("backend %q should be unavailable when wrapper missing", b.Name)
+				}
+			case "fuse", "ptrace":
+				if !b.Available {
+					t.Errorf("backend %q should remain available when wrapper missing", b.Name)
+				}
+			}
+		}
+	}
+
+	// secCaps fields should be cleared for wrapper-dependent capabilities
+	if caps.Seccomp {
+		t.Error("Seccomp should be false when wrapper missing")
+	}
+	if caps.Landlock {
+		t.Error("Landlock should be false when wrapper missing")
+	}
+	if caps.LandlockNetwork {
+		t.Error("LandlockNetwork should be false when wrapper missing")
+	}
+
+	// FileEnforcement should fall back to fuse
+	if caps.FileEnforcement != "fuse" {
+		t.Errorf("FileEnforcement = %q, want 'fuse'", caps.FileEnforcement)
+	}
+}
+
+func TestApplyWrapperAvailability_Missing_NoFUSE(t *testing.T) {
+	// Override LookPath to simulate missing wrapper
+	orig := wrapperLookPath
+	wrapperLookPath = func(file string) (string, error) {
+		return "", exec.ErrNotFound
+	}
+	defer func() { wrapperLookPath = orig }()
+
+	caps := &SecurityCapabilities{
+		Seccomp:     true,
+		Landlock:    true,
+		LandlockABI: 5,
+		FUSE:        false,
+		Ptrace:      true,
+	}
+	caps.FileEnforcement = detectFileEnforcementBackend(caps)
+	domains := buildLinuxDomains(caps)
+
+	found := applyWrapperAvailability(domains, caps)
+	if found {
+		t.Fatal("applyWrapperAvailability returned true, want false")
+	}
+
+	// FileEnforcement should fall back to none
+	if caps.FileEnforcement != "none" {
+		t.Errorf("FileEnforcement = %q, want 'none'", caps.FileEnforcement)
+	}
+
+	// secCaps fields should be cleared for wrapper-dependent capabilities
+	if caps.Seccomp {
+		t.Error("Seccomp should be false when wrapper missing")
+	}
+	if caps.Landlock {
+		t.Error("Landlock should be false when wrapper missing")
+	}
+	if caps.LandlockNetwork {
+		t.Error("LandlockNetwork should be false when wrapper missing")
+	}
+}
+
+func TestApplyWrapperAvailability_Present(t *testing.T) {
+	orig := wrapperLookPath
+	wrapperLookPath = func(file string) (string, error) {
+		return "/usr/local/bin/" + file, nil
+	}
+	defer func() { wrapperLookPath = orig }()
+
+	caps := &SecurityCapabilities{
+		Seccomp:     true,
+		Landlock:    true,
+		LandlockABI: 5,
+		FUSE:        true,
+		Ptrace:      true,
+	}
+	caps.FileEnforcement = detectFileEnforcementBackend(caps)
+	domains := buildLinuxDomains(caps)
+
+	found := applyWrapperAvailability(domains, caps)
+	if !found {
+		t.Fatal("applyWrapperAvailability returned false, want true")
+	}
+
+	// All backends should remain as probed
+	for _, d := range domains {
+		for _, b := range d.Backends {
+			switch b.Name {
+			case "seccomp-notify", "seccomp-execve", "landlock":
+				if !b.Available {
+					t.Errorf("backend %q should be available when wrapper present", b.Name)
+				}
+			}
+		}
+	}
+
+	// FileEnforcement should be unchanged
+	if caps.FileEnforcement != "landlock" {
+		t.Errorf("FileEnforcement = %q, want 'landlock'", caps.FileEnforcement)
+	}
+}
+
+func TestDetect_WrapperMissing_Tip(t *testing.T) {
+	// Override LookPath to simulate missing wrapper
+	orig := wrapperLookPath
+	wrapperLookPath = func(file string) (string, error) {
+		if file == "agentsh-unixwrap" {
+			return "", exec.ErrNotFound
+		}
+		return exec.LookPath(file)
+	}
+	defer func() { wrapperLookPath = orig }()
+
+	result, err := Detect()
+	if err != nil {
+		t.Fatalf("Detect() error: %v", err)
+	}
+
+	// seccomp-notify, landlock, seccomp-execve, landlock-network should be unavailable
+	for _, d := range result.Domains {
+		for _, b := range d.Backends {
+			switch b.Name {
+			case "seccomp-notify", "landlock", "seccomp-execve", "landlock-network":
+				if b.Available {
+					t.Errorf("backend %q should be unavailable when wrapper missing", b.Name)
+				}
+			}
+		}
+	}
+
+	// Wrapper tip should be present
+	found := false
+	for _, tip := range result.Tips {
+		if tip.Feature == "seccomp-wrapper" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected seccomp-wrapper tip when wrapper missing")
+	}
+
+	// Flat capabilities should reflect wrapper absence
+	if seccomp, ok := result.Capabilities["seccomp"].(bool); ok && seccomp {
+		t.Error("capabilities.seccomp should be false when wrapper missing")
+	}
+	if landlock, ok := result.Capabilities["landlock"].(bool); ok && landlock {
+		t.Error("capabilities.landlock should be false when wrapper missing")
+	}
+	if landlockNet, ok := result.Capabilities["landlock_network"].(bool); ok && landlockNet {
+		t.Error("capabilities.landlock_network should be false when wrapper missing")
+	}
+
+	// SecurityMode should not be "full" or "landlock*" without wrapper
+	if result.SecurityMode == "full" || result.SecurityMode == "landlock" {
+		t.Errorf("SecurityMode = %q, should not report full/landlock without wrapper", result.SecurityMode)
 	}
 }
