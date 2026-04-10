@@ -429,6 +429,7 @@ func New(cfg *config.Config) (*Server, error) {
 					"own_cgroup":   mgr.Probe().OwnCgroup,
 					"slice_dir":    mgr.Probe().SliceDir,
 					"io_available": mgr.Probe().IOAvailable,
+					"leaf_moved":   mgr.Probe().LeafMoved,
 				},
 			}
 			_ = store.AppendEvent(context.Background(), modeEvent)
