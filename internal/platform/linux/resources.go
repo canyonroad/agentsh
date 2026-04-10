@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/agentsh/agentsh/internal/limits"
@@ -92,12 +93,12 @@ func (h *cgroupResourceHandle) AssignProcess(pid int) error {
 	defer h.mu.Unlock()
 
 	if !h.created {
-		h.created = true
 		cg, err := h.mgr.Apply(h.name, pid, h.lim)
 		if err != nil {
 			return err
 		}
 		h.cg = cg // may be nil if mode is unavailable with empty limits
+		h.created = true
 		return nil
 	}
 
@@ -113,7 +114,29 @@ func (h *cgroupResourceHandle) AssignProcess(pid int) error {
 }
 
 func (h *cgroupResourceHandle) Stats() platform.ResourceStats {
-	return platform.ResourceStats{}
+	h.mu.Lock()
+	cg := h.cg
+	h.mu.Unlock()
+
+	if cg == nil {
+		return platform.ResourceStats{}
+	}
+
+	var stats platform.ResourceStats
+
+	if b, err := os.ReadFile(filepath.Join(cg.Path, "memory.current")); err == nil {
+		if v, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); err == nil {
+			stats.MemoryMB = v / (1024 * 1024)
+		}
+	}
+
+	if b, err := os.ReadFile(filepath.Join(cg.Path, "pids.current")); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+			stats.ProcessCount = v
+		}
+	}
+
+	return stats
 }
 
 func (h *cgroupResourceHandle) Release() error {
