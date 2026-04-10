@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/agentsh/agentsh/internal/proxy/credsub"
 )
@@ -121,4 +122,49 @@ func (h *LeakGuardHook) logLeak(ctx *RequestContext, serviceName, requestHost st
 		"service_name", serviceName,
 		"request_host", requestHost,
 	)
+}
+
+// HeaderInjectionHook injects the real credential into a request header.
+// Registered per service name so it only fires for matched requests.
+type HeaderInjectionHook struct {
+	serviceName string
+	headerName  string
+	template    string
+	table       *credsub.Table
+}
+
+// NewHeaderInjectionHook creates a hook that injects the real credential
+// for serviceName into the header specified by headerName using template.
+// The template must contain "{{secret}}" which is replaced with the real
+// credential at request time.
+func NewHeaderInjectionHook(serviceName, headerName, template string, table *credsub.Table) *HeaderInjectionHook {
+	return &HeaderInjectionHook{
+		serviceName: serviceName,
+		headerName:  headerName,
+		template:    template,
+		table:       table,
+	}
+}
+
+func (h *HeaderInjectionHook) Name() string { return "header-inject" }
+
+func (h *HeaderInjectionHook) PreHook(r *http.Request, _ *RequestContext) error {
+	real, ok := h.table.RealForService(h.serviceName)
+	if !ok {
+		return nil // service not in table, skip
+	}
+	defer func() {
+		for i := range real {
+			real[i] = 0
+		}
+	}()
+
+	value := strings.Replace(h.template, "{{secret}}", string(real), 1)
+	r.Header.Del(h.headerName)
+	r.Header.Set(h.headerName, value)
+	return nil
+}
+
+func (h *HeaderInjectionHook) PostHook(_ *http.Response, _ *RequestContext) error {
+	return nil
 }

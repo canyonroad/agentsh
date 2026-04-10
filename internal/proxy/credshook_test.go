@@ -263,3 +263,77 @@ func TestLeakGuardHook_DuplicateHeaders_Returns403(t *testing.T) {
 		t.Errorf("StatusCode = %d, want 403", abortErr.StatusCode)
 	}
 }
+
+func TestHeaderInjectionHook_Name(t *testing.T) {
+	tbl := credsub.New()
+	h := NewHeaderInjectionHook("github", "Authorization", "Bearer {{secret}}", tbl)
+	if h.Name() != "header-inject" {
+		t.Errorf("Name() = %q, want %q", h.Name(), "header-inject")
+	}
+}
+
+func TestHeaderInjectionHook_PreHook_InjectsHeader(t *testing.T) {
+	tbl := newTestTable(t) // has "github" → fake/real pair
+	h := NewHeaderInjectionHook("github", "Authorization", "Bearer {{secret}}", tbl)
+
+	req := httptest.NewRequest(http.MethodPost, "http://api.github.com/repos", nil)
+	req.Header.Set("Authorization", "Bearer ghp_FAKE1234567890abcdef")
+
+	err := h.PreHook(req, &RequestContext{ServiceName: "github"})
+	if err != nil {
+		t.Fatalf("PreHook error: %v", err)
+	}
+
+	got := req.Header.Get("Authorization")
+	want := "Bearer ghp_REAL1234567890abcdef"
+	if got != want {
+		t.Errorf("Authorization = %q, want %q", got, want)
+	}
+}
+
+func TestHeaderInjectionHook_PreHook_StripsExistingHeader(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewHeaderInjectionHook("github", "Authorization", "Bearer {{secret}}", tbl)
+
+	req := httptest.NewRequest(http.MethodPost, "http://api.github.com/repos", nil)
+	req.Header.Set("Authorization", "Bearer something-wrong")
+	req.Header.Add("Authorization", "Bearer also-wrong")
+
+	err := h.PreHook(req, &RequestContext{ServiceName: "github"})
+	if err != nil {
+		t.Fatalf("PreHook error: %v", err)
+	}
+
+	// Should have exactly one Authorization header.
+	vals := req.Header.Values("Authorization")
+	if len(vals) != 1 {
+		t.Errorf("expected 1 Authorization value, got %d", len(vals))
+	}
+}
+
+func TestHeaderInjectionHook_PreHook_ServiceNotInTable(t *testing.T) {
+	tbl := credsub.New()
+	h := NewHeaderInjectionHook("nonexistent", "Authorization", "Bearer {{secret}}", tbl)
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com", nil)
+
+	err := h.PreHook(req, &RequestContext{})
+	if err != nil {
+		t.Fatalf("PreHook should be no-op when service not in table: %v", err)
+	}
+
+	if req.Header.Get("Authorization") != "" {
+		t.Error("header should not be set when service is not in table")
+	}
+}
+
+func TestHeaderInjectionHook_PostHook_IsNoOp(t *testing.T) {
+	tbl := newTestTable(t)
+	h := NewHeaderInjectionHook("github", "Authorization", "Bearer {{secret}}", tbl)
+
+	resp := &http.Response{StatusCode: 200, Body: nil}
+	err := h.PostHook(resp, &RequestContext{})
+	if err != nil {
+		t.Fatalf("PostHook should be no-op: %v", err)
+	}
+}
