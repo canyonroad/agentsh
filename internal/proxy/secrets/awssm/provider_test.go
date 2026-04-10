@@ -356,18 +356,30 @@ func TestMapAWSError_AuthCodes(t *testing.T) {
 }
 
 func TestFetch_InvalidRequest(t *testing.T) {
+	// InvalidRequestException (e.g. secret pending deletion) is a
+	// resource-state error, not a malformed URI. It falls through
+	// to the generic aws-sm wrapper, NOT ErrInvalidURI.
 	mock := &mockSMClient{
 		GetSecretValueFunc: func(_ context.Context, _ *secretsmanager.GetSecretValueInput,
 			_ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
-			return nil, &types.InvalidRequestException{Message: aws.String("bad id")}
+			return nil, &types.InvalidRequestException{Message: aws.String("secret pending deletion")}
 		},
 	}
 	p := newFromClient(mock)
 
-	ref := secrets.SecretRef{Scheme: "aws-sm", Host: "bad"}
+	ref := secrets.SecretRef{Scheme: "aws-sm", Host: "pending-delete"}
 	_, err := p.Fetch(context.Background(), ref)
-	if !errors.Is(err, secrets.ErrInvalidURI) {
-		t.Errorf("Fetch invalid request = %v, want wrapping ErrInvalidURI", err)
+	if err == nil {
+		t.Fatal("Fetch with InvalidRequestException returned nil error")
+	}
+	if errors.Is(err, secrets.ErrInvalidURI) {
+		t.Error("InvalidRequestException should NOT map to ErrInvalidURI")
+	}
+	if errors.Is(err, secrets.ErrNotFound) {
+		t.Error("InvalidRequestException should NOT map to ErrNotFound")
+	}
+	if errors.Is(err, secrets.ErrUnauthorized) {
+		t.Error("InvalidRequestException should NOT map to ErrUnauthorized")
 	}
 }
 

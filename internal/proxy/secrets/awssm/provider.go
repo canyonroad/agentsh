@@ -87,6 +87,9 @@ func New(ctx context.Context, cfg Config, _ secrets.RefResolver) (*Provider, err
 	stsClient := sts.NewFromConfig(awsCfg)
 	_, probeErr := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if probeErr != nil {
+		if isAuthError(probeErr) {
+			return nil, fmt.Errorf("%w: aws-sm connectivity probe: %s", secrets.ErrUnauthorized, probeErr.Error())
+		}
 		return nil, fmt.Errorf("aws-sm: connectivity probe failed: %w", probeErr)
 	}
 
@@ -249,14 +252,9 @@ func toBytes(v interface{}) []byte {
 	return b
 }
 
-// mapAWSError translates AWS SDK errors to the appropriate secrets
-// sentinel errors.
-func mapAWSError(err error) error {
-	var rnf *types.ResourceNotFoundException
-	if errors.As(err, &rnf) {
-		return fmt.Errorf("%w: %s", secrets.ErrNotFound, err.Error())
-	}
-
+// isAuthError reports whether err is an AWS auth/credential error.
+// Used by both the constructor's STS probe and Fetch's error mapper.
+func isAuthError(err error) bool {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.ErrorCode() {
@@ -265,13 +263,22 @@ func mapAWSError(err error) error {
 			"InvalidSignatureException",
 			"ExpiredTokenException",
 			"IncompleteSignature":
-			return fmt.Errorf("%w: %s", secrets.ErrUnauthorized, err.Error())
+			return true
 		}
 	}
+	return false
+}
 
-	var ire *types.InvalidRequestException
-	if errors.As(err, &ire) {
-		return fmt.Errorf("%w: %s", secrets.ErrInvalidURI, err.Error())
+// mapAWSError translates AWS SDK errors to the appropriate secrets
+// sentinel errors.
+func mapAWSError(err error) error {
+	var rnf *types.ResourceNotFoundException
+	if errors.As(err, &rnf) {
+		return fmt.Errorf("%w: %s", secrets.ErrNotFound, err.Error())
+	}
+
+	if isAuthError(err) {
+		return fmt.Errorf("%w: %s", secrets.ErrUnauthorized, err.Error())
 	}
 
 	return fmt.Errorf("aws-sm: %w", err)
