@@ -67,7 +67,8 @@ func DeriveReadPathsFromPolicy(p *policy.Policy) []string {
 		// Only include rules that allow read operations
 		hasRead := false
 		for _, op := range rule.Operations {
-			if strings.ToLower(op) == "read" {
+			op = strings.ToLower(op)
+			if op == "read" || op == "*" {
 				hasRead = true
 				break
 			}
@@ -117,7 +118,7 @@ func DeriveWritePathsFromPolicy(p *policy.Policy) []string {
 		hasWrite := false
 		for _, op := range rule.Operations {
 			op = strings.ToLower(op)
-			if op == "write" || op == "create" || op == "delete" || op == "rename" {
+			if op == "write" || op == "create" || op == "delete" || op == "rename" || op == "*" {
 				hasWrite = true
 				break
 			}

@@ -57,6 +57,32 @@ func TestRulesetBuilder_NetworkAccess(t *testing.T) {
 	}
 }
 
+func TestRulesetBuilder_WriteAccessMask_IncludesMakeSock(t *testing.T) {
+	// Write-allowed paths must support Unix domain socket creation (MAKE_SOCK).
+	// Without this, bind() for Unix sockets in /tmp etc. fails with EACCES
+	// even when the path is in the Landlock write list.
+	b := NewRulesetBuilder(3)
+	mask := b.buildWriteAccessMask()
+
+	if mask&LANDLOCK_ACCESS_FS_MAKE_SOCK == 0 {
+		t.Error("writeAccessMask missing MAKE_SOCK — Unix socket creation blocked in write-allowed paths")
+	}
+	// Sanity: verify other expected bits are present
+	if mask&LANDLOCK_ACCESS_FS_WRITE_FILE == 0 {
+		t.Error("writeAccessMask missing WRITE_FILE")
+	}
+	if mask&LANDLOCK_ACCESS_FS_MAKE_REG == 0 {
+		t.Error("writeAccessMask missing MAKE_REG")
+	}
+	if mask&LANDLOCK_ACCESS_FS_MAKE_DIR == 0 {
+		t.Error("writeAccessMask missing MAKE_DIR")
+	}
+	// TRUNCATE should be present for ABI >= 3
+	if mask&LANDLOCK_ACCESS_FS_TRUNCATE == 0 {
+		t.Error("writeAccessMask missing TRUNCATE for ABI v3")
+	}
+}
+
 func TestRulesetBuilder_IsDenied(t *testing.T) {
 	b := NewRulesetBuilder(3)
 	b.AddDenyPath("/var/run/docker.sock")
