@@ -348,3 +348,76 @@ func TestValidateSecrets_AWSProvider(t *testing.T) {
 		t.Errorf("unexpected warnings: %v", warnings)
 	}
 }
+
+func TestValidateSecrets_GCPProvider(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"gcp_sm": mustNode(t, "type: gcp-sm\nproject_id: my-project"),
+	}
+	services := []ServiceYAML{
+		{
+			Name:   "myservice",
+			Match:  ServiceMatchYAML{Hosts: []string{"api.example.com"}},
+			Secret: ServiceSecretYAML{Ref: "gcp-sm://my-secret#token"},
+			Fake:   ServiceFakeYAML{Format: "tok_{rand:36}"},
+			Inject: ServiceInjectYAML{Header: &ServiceInjectHeaderYAML{
+				Name: "Authorization", Template: "Bearer {{secret}}",
+			}},
+		},
+	}
+	warnings, err := ValidateSecrets(providers, services)
+	if err != nil {
+		t.Fatalf("ValidateSecrets error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+}
+
+func TestValidateSecrets_AzureProvider(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"azure_kv": mustNode(t, "type: azure-kv\nvault_url: https://myvault.vault.azure.net/"),
+	}
+	services := []ServiceYAML{
+		{
+			Name:   "myservice",
+			Match:  ServiceMatchYAML{Hosts: []string{"api.example.com"}},
+			Secret: ServiceSecretYAML{Ref: "azure-kv://my-secret#token"},
+			Fake:   ServiceFakeYAML{Format: "tok_{rand:36}"},
+			Inject: ServiceInjectYAML{Header: &ServiceInjectHeaderYAML{
+				Name: "Authorization", Template: "Bearer {{secret}}",
+			}},
+		},
+	}
+	warnings, err := ValidateSecrets(providers, services)
+	if err != nil {
+		t.Fatalf("ValidateSecrets error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+}
+
+func TestValidateSecrets_OPProvider(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"keyring":     mustNode(t, "type: keyring"),
+		"onepassword": mustNode(t, "type: op\nserver_url: https://op.internal\napi_key_ref: keyring://agentsh/op_key"),
+	}
+	services := []ServiceYAML{
+		{
+			Name:   "myservice",
+			Match:  ServiceMatchYAML{Hosts: []string{"api.example.com"}},
+			Secret: ServiceSecretYAML{Ref: "op://Work/Stripe#credential"},
+			Fake:   ServiceFakeYAML{Format: "sk_live_{rand:24}"},
+			Inject: ServiceInjectYAML{Header: &ServiceInjectHeaderYAML{
+				Name: "Authorization", Template: "Bearer {{secret}}",
+			}},
+		},
+	}
+	warnings, err := ValidateSecrets(providers, services)
+	if err != nil {
+		t.Fatalf("ValidateSecrets error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+}

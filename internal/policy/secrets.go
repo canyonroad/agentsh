@@ -57,9 +57,12 @@ type ServiceInjectEnvYAML struct {
 // knownProviderTypes lists the provider type names (URI schemes) that
 // Plan 6 supports. Extended as new providers land.
 var knownProviderTypes = map[string]bool{
-	"keyring": true,
-	"vault":   true,
-	"aws-sm":  true,
+	"keyring":  true,
+	"vault":    true,
+	"aws-sm":   true,
+	"gcp-sm":   true,
+	"azure-kv": true,
+	"op":       true,
 }
 
 // ValidateSecrets validates the providers and services sections of a Policy.

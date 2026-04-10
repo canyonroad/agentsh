@@ -5,6 +5,9 @@ import (
 
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/proxy/secrets/awssm"
+	"github.com/agentsh/agentsh/internal/proxy/secrets/azurekv"
+	"github.com/agentsh/agentsh/internal/proxy/secrets/gcpsm"
+	"github.com/agentsh/agentsh/internal/proxy/secrets/onepassword"
 	"github.com/agentsh/agentsh/internal/proxy/secrets/vault"
 	"gopkg.in/yaml.v3"
 )
@@ -209,5 +212,103 @@ func TestResolveProviderConfigs_AWSSM(t *testing.T) {
 	}
 	if ac.Region != "us-west-2" {
 		t.Errorf("Region = %q, want us-west-2", ac.Region)
+	}
+}
+
+func TestResolveProviderConfigs_GCPSM(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"gcp": mustYAMLNode(t, "type: gcp-sm\nproject_id: my-gcp-project-123"),
+	}
+	configs, err := ResolveProviderConfigs(providers)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(configs) != 1 {
+		t.Fatalf("expected 1 config, got %d", len(configs))
+	}
+	if configs["gcp"].TypeName() != "gcp-sm" {
+		t.Errorf("TypeName = %q, want gcp-sm", configs["gcp"].TypeName())
+	}
+	gc, ok := configs["gcp"].(gcpsm.Config)
+	if !ok {
+		t.Fatalf("expected gcpsm.Config, got %T", configs["gcp"])
+	}
+	if gc.ProjectID != "my-gcp-project-123" {
+		t.Errorf("ProjectID = %q, want my-gcp-project-123", gc.ProjectID)
+	}
+}
+
+func TestResolveProviderConfigs_AzureKV(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"azure": mustYAMLNode(t, "type: azure-kv\nvault_url: https://myvault.vault.azure.net/"),
+	}
+	configs, err := ResolveProviderConfigs(providers)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(configs) != 1 {
+		t.Fatalf("expected 1 config, got %d", len(configs))
+	}
+	if configs["azure"].TypeName() != "azure-kv" {
+		t.Errorf("TypeName = %q, want azure-kv", configs["azure"].TypeName())
+	}
+	ac, ok := configs["azure"].(azurekv.Config)
+	if !ok {
+		t.Fatalf("expected azurekv.Config, got %T", configs["azure"])
+	}
+	if ac.VaultURL != "https://myvault.vault.azure.net/" {
+		t.Errorf("VaultURL = %q, want https://myvault.vault.azure.net/", ac.VaultURL)
+	}
+}
+
+func TestResolveProviderConfigs_OP_LiteralKey(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"op": mustYAMLNode(t, "type: op\nserver_url: https://op.internal\napi_key: eyJhbGciOiJFUz"),
+	}
+	configs, err := ResolveProviderConfigs(providers)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(configs) != 1 {
+		t.Fatalf("expected 1 config, got %d", len(configs))
+	}
+	if configs["op"].TypeName() != "op" {
+		t.Errorf("TypeName = %q, want op", configs["op"].TypeName())
+	}
+	oc, ok := configs["op"].(onepassword.Config)
+	if !ok {
+		t.Fatalf("expected onepassword.Config, got %T", configs["op"])
+	}
+	if oc.ServerURL != "https://op.internal" {
+		t.Errorf("ServerURL = %q", oc.ServerURL)
+	}
+	if oc.APIKey != "eyJhbGciOiJFUz" {
+		t.Errorf("APIKey = %q", oc.APIKey)
+	}
+	if oc.APIKeyRef != nil {
+		t.Error("APIKeyRef should be nil")
+	}
+}
+
+func TestResolveProviderConfigs_OP_RefKey(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"op": mustYAMLNode(t, "type: op\nserver_url: https://op.internal\napi_key_ref: keyring://agentsh/op_key"),
+	}
+	configs, err := ResolveProviderConfigs(providers)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	oc, ok := configs["op"].(onepassword.Config)
+	if !ok {
+		t.Fatalf("expected onepassword.Config, got %T", configs["op"])
+	}
+	if oc.APIKey != "" {
+		t.Error("APIKey should be empty")
+	}
+	if oc.APIKeyRef == nil {
+		t.Fatal("APIKeyRef should be set")
+	}
+	if oc.APIKeyRef.Scheme != "keyring" {
+		t.Errorf("APIKeyRef.Scheme = %q, want keyring", oc.APIKeyRef.Scheme)
 	}
 }

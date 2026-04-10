@@ -7,7 +7,10 @@ import (
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/proxy/secrets"
 	"github.com/agentsh/agentsh/internal/proxy/secrets/awssm"
+	"github.com/agentsh/agentsh/internal/proxy/secrets/azurekv"
+	"github.com/agentsh/agentsh/internal/proxy/secrets/gcpsm"
 	"github.com/agentsh/agentsh/internal/proxy/secrets/keyring"
+	"github.com/agentsh/agentsh/internal/proxy/secrets/onepassword"
 	"github.com/agentsh/agentsh/internal/proxy/secrets/vault"
 	"github.com/agentsh/agentsh/internal/proxy/services"
 	"gopkg.in/yaml.v3"
@@ -124,6 +127,27 @@ func DefaultConstructors() map[string]secrets.ConstructorFunc {
 			}
 			return awssm.New(ctx, ac, nil)
 		},
+		"gcp-sm": func(ctx context.Context, cfg secrets.ProviderConfig, _ secrets.RefResolver) (secrets.SecretProvider, error) {
+			gc, ok := cfg.(gcpsm.Config)
+			if !ok {
+				return nil, fmt.Errorf("expected gcpsm.Config, got %T", cfg)
+			}
+			return gcpsm.New(ctx, gc, nil)
+		},
+		"azure-kv": func(ctx context.Context, cfg secrets.ProviderConfig, _ secrets.RefResolver) (secrets.SecretProvider, error) {
+			ac, ok := cfg.(azurekv.Config)
+			if !ok {
+				return nil, fmt.Errorf("expected azurekv.Config, got %T", cfg)
+			}
+			return azurekv.New(ctx, ac, nil)
+		},
+		"op": func(ctx context.Context, cfg secrets.ProviderConfig, resolver secrets.RefResolver) (secrets.SecretProvider, error) {
+			oc, ok := cfg.(onepassword.Config)
+			if !ok {
+				return nil, fmt.Errorf("expected onepassword.Config, got %T", cfg)
+			}
+			return onepassword.New(ctx, oc, resolver)
+		},
 	}
 }
 
@@ -143,6 +167,12 @@ func decodeProviderConfig(_ string, node yaml.Node) (secrets.ProviderConfig, err
 		return decodeVaultConfig(node)
 	case "aws-sm":
 		return decodeAWSConfig(node)
+	case "gcp-sm":
+		return decodeGCPSMConfig(node)
+	case "azure-kv":
+		return decodeAzureKVConfig(node)
+	case "op":
+		return decodeOPConfig(node)
 	default:
 		return nil, fmt.Errorf("unknown provider type %q", base.Type)
 	}
@@ -226,6 +256,65 @@ func decodeAWSConfig(node yaml.Node) (secrets.ProviderConfig, error) {
 	return awssm.Config{
 		Region: raw.Region,
 	}, nil
+}
+
+// gcpsmYAML is the YAML representation of a GCP SM provider config.
+type gcpsmYAML struct {
+	Type      string `yaml:"type"`
+	ProjectID string `yaml:"project_id"`
+}
+
+func decodeGCPSMConfig(node yaml.Node) (secrets.ProviderConfig, error) {
+	var raw gcpsmYAML
+	if err := node.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("decode gcp-sm config: %w", err)
+	}
+	return gcpsm.Config{
+		ProjectID: raw.ProjectID,
+	}, nil
+}
+
+// azurekvYAML is the YAML representation of an Azure KV provider config.
+type azurekvYAML struct {
+	Type     string `yaml:"type"`
+	VaultURL string `yaml:"vault_url"`
+}
+
+func decodeAzureKVConfig(node yaml.Node) (secrets.ProviderConfig, error) {
+	var raw azurekvYAML
+	if err := node.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("decode azure-kv config: %w", err)
+	}
+	return azurekv.Config{
+		VaultURL: raw.VaultURL,
+	}, nil
+}
+
+// opYAML is the YAML representation of a 1Password provider config.
+type opYAML struct {
+	Type      string `yaml:"type"`
+	ServerURL string `yaml:"server_url"`
+	APIKey    string `yaml:"api_key,omitempty"`
+	APIKeyRef string `yaml:"api_key_ref,omitempty"`
+}
+
+func decodeOPConfig(node yaml.Node) (secrets.ProviderConfig, error) {
+	var raw opYAML
+	if err := node.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("decode op config: %w", err)
+	}
+	cfg := onepassword.Config{
+		ServerURL: raw.ServerURL,
+		APIKey:    raw.APIKey,
+	}
+	if raw.APIKeyRef != "" {
+		ref, err := secrets.ParseRef(raw.APIKeyRef)
+		if err != nil {
+			return nil, fmt.Errorf("api_key_ref: %w", err)
+		}
+		cfg.APIKeyRef = &ref
+	}
+	return cfg, nil
 }
 
 // BuildSecretsRegistry creates a provider registry from the resolved
