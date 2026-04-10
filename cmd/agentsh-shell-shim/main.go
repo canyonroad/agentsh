@@ -110,16 +110,26 @@ func main() {
 	}
 
 	// Server readiness gate: verify the agentsh server is listening before
-	// attempting enforcement. If the server isn't reachable, fall through to
-	// the real shell. This prevents boot loops when force=true is baked into
-	// the image and the shim is root's login shell — agentsh.service may not
-	// be ready yet during early boot. Once the server is up, all subsequent
-	// sessions (interactive and non-interactive with force=true) get enforced.
-	srvAddr := serverAddrFromEnv()
-	if !serverReachable(srvAddr) {
-		debugLog("server not reachable at %s, falling through to real shell %s", srvAddr, realShell)
-		runAndExit(realShell, argv0, os.Args[1:], os.Environ())
-		return
+	// attempting enforcement. This prevents boot loops when force=true is
+	// baked into the image and the shim is root's login shell —
+	// agentsh.service may not be ready yet during early boot.
+	//
+	// Fail-open behavior is restricted to local servers (loopback TCP or
+	// unix sockets) where "not reachable" almost certainly means "not
+	// started yet." For remote servers, an unreachable probe is treated
+	// as fail-closed to prevent a network issue from silently disabling
+	// enforcement.
+	srvNetwork, srvAddr := serverAddrFromEnv()
+	if !serverReachable(srvNetwork, srvAddr) {
+		if serverIsLocal(srvNetwork, srvAddr) {
+			debugLog("local server not reachable at %s:%s, falling through to real shell %s", srvNetwork, srvAddr, realShell)
+			runAndExit(realShell, argv0, os.Args[1:], os.Environ())
+			return
+		}
+		fatalWithHint(127,
+			fmt.Sprintf("agentsh-shell-shim: remote server not reachable at %s", srvAddr),
+			"The agentsh server is configured as a remote endpoint and is not responding. Check server availability.",
+		)
 	}
 
 	agentshBin, err := resolveAgentshBin()
@@ -485,17 +495,28 @@ func debugLog(format string, args ...any) {
 	}
 }
 
-// serverAddrFromEnv returns the host:port of the agentsh server for a TCP
-// readiness probe. It reads AGENTSH_SERVER (default http://127.0.0.1:18080),
-// parses the URL, and returns the network address.
-func serverAddrFromEnv() string {
+// serverAddrFromEnv returns the network type and address of the agentsh server
+// for a readiness probe. It reads AGENTSH_SERVER (default http://127.0.0.1:18080)
+// and returns ("tcp", "host:port") or ("unix", "/path/to/socket").
+func serverAddrFromEnv() (network, addr string) {
 	raw := strings.TrimSpace(os.Getenv("AGENTSH_SERVER"))
 	if raw == "" {
-		return "127.0.0.1:18080"
+		return "tcp", "127.0.0.1:18080"
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "127.0.0.1:18080"
+		return "tcp", "127.0.0.1:18080"
+	}
+	// Unix socket: unix:///path/to/sock or unix:/path/to/sock
+	if u.Scheme == "unix" {
+		sockPath := u.Path
+		if sockPath == "" {
+			sockPath = u.Host // handle unix://path without leading slash
+		}
+		if sockPath == "" {
+			return "tcp", "127.0.0.1:18080"
+		}
+		return "unix", sockPath
 	}
 	host := u.Hostname()
 	port := u.Port()
@@ -505,18 +526,39 @@ func serverAddrFromEnv() string {
 	if port == "" {
 		port = "18080"
 	}
-	return net.JoinHostPort(host, port)
+	return "tcp", net.JoinHostPort(host, port)
 }
 
-// serverReachable does a fast TCP dial to check if the agentsh server is
-// listening. On loopback this completes in <1ms when the server is up, or
-// returns ECONNREFUSED immediately when it's not. The timeout is a safety
-// net for firewalled or remote hosts.
-func serverReachable(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+// serverReachable does a fast dial to check if the agentsh server is
+// listening. Supports both TCP and unix socket addresses. On loopback
+// this completes in <1ms when the server is up, or returns ECONNREFUSED
+// immediately when it's not. The timeout is a safety net for firewalled
+// or remote hosts.
+func serverReachable(network, addr string) bool {
+	conn, err := net.DialTimeout(network, addr, 200*time.Millisecond)
 	if err != nil {
 		return false
 	}
 	_ = conn.Close()
 	return true
+}
+
+// serverIsLocal returns true if the server address is a local endpoint
+// (loopback TCP or unix socket). Fail-open on probe failure is only safe
+// for local servers where "not reachable" means "not started yet."
+// Remote servers use fail-closed to prevent network issues from silently
+// disabling enforcement.
+func serverIsLocal(network, addr string) bool {
+	if network == "unix" {
+		return true
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -644,27 +644,100 @@ func TestShimReadinessGate_ServerUnreachable_NonInteractiveBypass(t *testing.T) 
 	}
 }
 
+// TestShimReadinessGate_RemoteUnreachable_FailsClosed verifies that when the
+// server is remote (non-loopback) and unreachable, the shim fails closed
+// instead of falling through. Only local servers get fail-open behavior.
+func TestShimReadinessGate_RemoteUnreachable_FailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-shim tests require Unix")
+	}
+
+	tmp := t.TempDir()
+	shimBin := buildShim(t, tmp)
+	if err := os.Symlink("/bin/sh", filepath.Join(tmp, "sh.real")); err != nil {
+		t.Fatal(err)
+	}
+
+	confDir := filepath.Join(tmp, "etc", "agentsh")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "shim.conf"), []byte("force=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Point at a remote (non-loopback) address that won't respond.
+	// Use a non-routable IP so dial fails quickly (ENETUNREACH or timeout).
+	cmd := exec.Command(shimBin, "-c", "echo should-not-run")
+	cmd.Stdin = strings.NewReader("") // non-TTY
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"AGENTSH_SESSION_ID=test-session",
+		"AGENTSH_SHIM_CONF_ROOT=" + tmp,
+		"AGENTSH_SERVER=http://192.0.2.1:18080", // TEST-NET-1: non-routable
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// Should FAIL (fail-closed for remote servers).
+	if err == nil {
+		t.Fatalf("expected error: remote unreachable should fail-closed, not fall through")
+	}
+	if !strings.Contains(stderr.String(), "remote server not reachable") {
+		t.Fatalf("expected remote-specific error, got stderr: %s", stderr.String())
+	}
+}
+
 func TestServerAddrFromEnv(t *testing.T) {
 	tests := []struct {
-		name string
-		env  string
-		want string
+		name        string
+		env         string
+		wantNetwork string
+		wantAddr    string
 	}{
-		{"empty", "", "127.0.0.1:18080"},
-		{"default URL", "http://127.0.0.1:18080", "127.0.0.1:18080"},
-		{"custom port", "http://127.0.0.1:9999", "127.0.0.1:9999"},
-		{"localhost", "http://localhost:18080", "localhost:18080"},
-		{"remote host", "http://10.0.0.5:18080", "10.0.0.5:18080"},
-		{"https", "https://agent.example.com:443", "agent.example.com:443"},
-		{"no port", "http://127.0.0.1", "127.0.0.1:18080"},
-		{"garbage", "://bad", "127.0.0.1:18080"},
+		{"empty", "", "tcp", "127.0.0.1:18080"},
+		{"default URL", "http://127.0.0.1:18080", "tcp", "127.0.0.1:18080"},
+		{"custom port", "http://127.0.0.1:9999", "tcp", "127.0.0.1:9999"},
+		{"localhost", "http://localhost:18080", "tcp", "localhost:18080"},
+		{"remote host", "http://10.0.0.5:18080", "tcp", "10.0.0.5:18080"},
+		{"https", "https://agent.example.com:443", "tcp", "agent.example.com:443"},
+		{"no port", "http://127.0.0.1", "tcp", "127.0.0.1:18080"},
+		{"garbage", "://bad", "tcp", "127.0.0.1:18080"},
+		{"unix socket", "unix:///var/run/agentsh.sock", "unix", "/var/run/agentsh.sock"},
+		{"unix socket no triple slash", "unix:/var/run/agentsh.sock", "unix", "/var/run/agentsh.sock"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("AGENTSH_SERVER", tt.env)
-			got := serverAddrFromEnv()
+			gotNet, gotAddr := serverAddrFromEnv()
+			if gotNet != tt.wantNetwork || gotAddr != tt.wantAddr {
+				t.Errorf("serverAddrFromEnv() = (%q, %q), want (%q, %q)", gotNet, gotAddr, tt.wantNetwork, tt.wantAddr)
+			}
+		})
+	}
+}
+
+func TestServerIsLocal(t *testing.T) {
+	tests := []struct {
+		name    string
+		network string
+		addr    string
+		want    bool
+	}{
+		{"loopback", "tcp", "127.0.0.1:18080", true},
+		{"localhost", "tcp", "localhost:18080", true},
+		{"loopback ipv6", "tcp", "[::1]:18080", true},
+		{"remote ip", "tcp", "10.0.0.5:18080", false},
+		{"remote hostname", "tcp", "agent.example.com:443", false},
+		{"unix socket", "unix", "/var/run/agentsh.sock", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := serverIsLocal(tt.network, tt.addr)
 			if got != tt.want {
-				t.Errorf("serverAddrFromEnv() = %q, want %q", got, tt.want)
+				t.Errorf("serverIsLocal(%q, %q) = %v, want %v", tt.network, tt.addr, got, tt.want)
 			}
 		})
 	}
