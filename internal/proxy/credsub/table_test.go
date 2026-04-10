@@ -691,6 +691,53 @@ func TestContainsFake_MultipleEntries_FindsFirst(t *testing.T) {
 	}
 }
 
+func TestTable_RealForService(t *testing.T) {
+	tbl := New()
+	fake := []byte("FAKE_CREDENTIAL_24CHARS!")
+	real := []byte("REAL_CREDENTIAL_24CHARS!")
+	if err := tbl.Add("github", fake, real); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := tbl.RealForService("github")
+	if !ok {
+		t.Fatal("RealForService(github) returned false")
+	}
+	if !bytes.Equal(got, real) {
+		t.Errorf("got %q, want %q", got, real)
+	}
+
+	// Returned slice must be a copy — mutating it must not affect table.
+	got[0] = 'X'
+	got2, _ := tbl.RealForService("github")
+	if got2[0] == 'X' {
+		t.Error("RealForService returned aliased slice, not a copy")
+	}
+}
+
+func TestTable_RealForService_UnknownService(t *testing.T) {
+	tbl := New()
+	_, ok := tbl.RealForService("nonexistent")
+	if ok {
+		t.Error("RealForService should return false for unknown service")
+	}
+}
+
+func TestTable_RealForService_AfterZero(t *testing.T) {
+	tbl := New()
+	if err := tbl.Add("github",
+		[]byte("FAKE_CREDENTIAL_24CHARS!"),
+		[]byte("REAL_CREDENTIAL_24CHARS!"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	tbl.Zero()
+	_, ok := tbl.RealForService("github")
+	if ok {
+		t.Error("RealForService should return false after Zero()")
+	}
+}
+
 func TestConcurrentAccess_NoRaces(t *testing.T) {
 	// This test is primarily for `go test -race` to detect data
 	// races. It exercises Add, FakeForService, Contains,
