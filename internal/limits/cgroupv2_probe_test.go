@@ -239,7 +239,7 @@ func TestProbe_LeafMove_EBUSYSucceeds(t *testing.T) {
 	f.seedFile(own+"/cgroup.subtree_control", "")
 	// First enableControllers call fails with EBUSY (process in cgroup);
 	// after leaf-move, the retry succeeds.
-	f.openErrsOnce[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	f.openWriteErrsOnce[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
 	// Seed cgroup.procs so the leaf-move write (WriteFile) succeeds.
 	f.seedFile(own+"/cgroup.procs", "1234")
 
@@ -271,7 +271,7 @@ func TestProbe_LeafMove_MkdirFails_FallbackTopLevel(t *testing.T) {
 	own := "/sys/fs/cgroup/system.slice/agentsh.service"
 	f.seedFile(own+"/cgroup.controllers", "cpu memory pids")
 	f.seedFile(own+"/cgroup.subtree_control", "")
-	f.openErrsOnce[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
+	f.openWriteErrsOnce[own+"/cgroup.subtree_control:write"] = syscall.EBUSY
 	// Pre-create own/leaf so mkdir returns EEXIST (tolerated),
 	// then block the cgroup.procs write to simulate permission failure.
 	f.seedDir(own + "/leaf")
