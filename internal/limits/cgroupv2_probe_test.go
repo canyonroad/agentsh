@@ -383,6 +383,9 @@ func TestProbe_LeafMove_IdempotentSecondProbe(t *testing.T) {
 	if res2.OwnCgroup != own {
 		t.Fatalf("probe 2: OwnCgroup should be %q (parent), got %q", own, res2.OwnCgroup)
 	}
+	if !res2.LeafMoved {
+		t.Fatalf("probe 2: expected LeafMoved=true (process is already in leaf)")
+	}
 	// Verify no leaf/leaf was created.
 	if _, err := f.Stat(own + "/leaf/leaf"); err == nil {
 		t.Fatalf("leaf/leaf should NOT exist — probe should be idempotent")

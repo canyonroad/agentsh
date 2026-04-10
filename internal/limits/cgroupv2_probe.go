@@ -41,7 +41,9 @@ type CgroupProbeResult struct {
 	// OrphansReaped is populated in top-level mode when the probe removed
 	// leftover unpopulated child cgroups from a prior agentsh run.
 	OrphansReaped []string
-	// LeafMoved is true if the probe moved the process to OwnCgroup/leaf to resolve EBUSY
+	// LeafMoved is true if the process resides in OwnCgroup/leaf — either
+	// because this probe performed a leaf-move or because a prior probe
+	// already moved the process there.
 	LeafMoved bool
 }
 
@@ -65,6 +67,8 @@ const DefaultSliceDir = "/sys/fs/cgroup/agentsh.slice"
 // (intended to honor cfg.Sandbox.Cgroups.BasePath). Empty means "discover via /proc/self/cgroup".
 func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupProbeResult, error) {
 	own := ownHint
+	leafResident := false // true if the process was already in a leaf from a prior probe
+
 	if own == "" {
 		discovered, err := CurrentCgroupDir()
 		if err != nil {
@@ -81,24 +85,34 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 		own = filepath.Join(cur, own)
 	}
 
-	// Normalize: if the process is inside a "leaf" cgroup created by a prior
-	// probe's leaf-move, use the parent as the enforcement root. This makes
-	// the probe idempotent — calling it twice in the same process (e.g.
+	// Normalize: if the resolved path ends in "/leaf", strip the suffix.
+	// "leaf" is exclusively our synthetic sub-cgroup name (see tryLeafMove);
+	// the kernel never creates cgroup directories named "leaf". Stripping it
+	// makes the probe idempotent: calling it twice in the same process (e.g.
 	// capabilities.CheckAll then NewCgroupManager) won't create leaf/leaf.
 	if filepath.Base(own) == "leaf" {
 		own = filepath.Dir(own)
+		leafResident = true
 	}
 
 	// Step 2: does the own cgroup even expose the required controllers?
 	ownAvailable, err := readControllerSet(fs, filepath.Join(own, "cgroup.controllers"))
 	if err != nil {
 		// If we cannot read own controllers, fall through to top-level as a defensive measure.
-		return tryTopLevel(ctx, fs, own, fmt.Sprintf("read own cgroup.controllers: %v", err))
+		res, err := tryTopLevel(ctx, fs, own, fmt.Sprintf("read own cgroup.controllers: %v", err))
+		if err == nil && res != nil {
+			res.LeafMoved = res.LeafMoved || leafResident
+		}
+		return res, err
 	}
 	if !containsAll(ownAvailable, requiredControllers) {
 		missing := missingControllers(ownAvailable, requiredControllers)
-		return tryTopLevel(ctx, fs, own,
+		res, err := tryTopLevel(ctx, fs, own,
 			fmt.Sprintf("own cgroup missing controllers %v", missing))
+		if err == nil && res != nil {
+			res.LeafMoved = res.LeafMoved || leafResident
+		}
+		return res, err
 	}
 
 	// Step 3: already delegated?
@@ -109,6 +123,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 			Reason:      "already delegated",
 			OwnCgroup:   own,
 			IOAvailable: contains(ownDelegated, "io"),
+			LeafMoved:   leafResident,
 		}, nil
 	}
 
@@ -122,6 +137,7 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 			Reason:      "enabled by probe",
 			OwnCgroup:   own,
 			IOAvailable: contains(delegatedNow, "io"),
+			LeafMoved:   leafResident,
 		}, nil
 	}
 
@@ -153,12 +169,20 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 		// Leaf-move itself failed; include the failure in the reason
 		// alongside the original EBUSY.
 		reason := fmt.Sprintf("EBUSY; leaf-move failed: %v", retryErr)
-		return tryTopLevel(ctx, fs, own, reason)
+		res, err := tryTopLevel(ctx, fs, own, reason)
+		if err == nil && res != nil {
+			res.LeafMoved = res.LeafMoved || leafResident
+		}
+		return res, err
 	}
 
 	// Step 5: classify the enable failure and fall through to top-level.
 	reason := classifyEnableError(enableErr)
-	return tryTopLevel(ctx, fs, own, reason)
+	res, err := tryTopLevel(ctx, fs, own, reason)
+	if err == nil && res != nil {
+		res.LeafMoved = res.LeafMoved || leafResident
+	}
+	return res, err
 }
 
 // ProbeCgroupsV2Default is a convenience wrapper that runs ProbeCgroupsV2 with

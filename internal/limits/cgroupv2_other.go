@@ -40,7 +40,7 @@ type CgroupProbeResult struct {
 	SliceDir      string
 	IOAvailable   bool
 	OrphansReaped []string
-	// LeafMoved is true if the probe moved the process to OwnCgroup/leaf to resolve EBUSY
+	// LeafMoved is true if the process resides in OwnCgroup/leaf
 	LeafMoved bool
 }
 
