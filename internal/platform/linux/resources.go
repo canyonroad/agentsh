@@ -51,6 +51,13 @@ func (r *cgroupResourceLimiter) ensureManager() (*limits.CgroupManager, error) {
 }
 
 func (r *cgroupResourceLimiter) Apply(config platform.ResourceConfig) (platform.ResourceHandle, error) {
+	if config.MaxDiskReadMBps > 0 || config.MaxDiskWriteMBps > 0 {
+		return nil, fmt.Errorf("disk IO limiting not supported (no io controller in CgroupV2Limits)")
+	}
+	if config.MaxNetworkMbps > 0 {
+		return nil, fmt.Errorf("network bandwidth limiting not supported (requires tc/qdisc)")
+	}
+
 	mgr, err := r.ensureManager()
 	if err != nil {
 		return nil, fmt.Errorf("cgroup manager init: %w", err)
@@ -115,5 +122,7 @@ func (h *cgroupResourceHandle) Release() error {
 	if h.cg == nil {
 		return nil
 	}
-	return h.cg.Close(context.Background())
+	err := h.cg.Close(context.Background())
+	h.cg = nil
+	return err
 }

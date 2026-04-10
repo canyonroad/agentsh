@@ -28,6 +28,7 @@ type Platform struct {
 	fs          *Filesystem
 	net         *Network
 	sandbox     *SandboxManager
+	resources   *cgroupResourceLimiter
 	caps        platform.Capabilities
 	initialized bool
 }
@@ -195,7 +196,10 @@ func (p *Platform) Sandbox() platform.SandboxManager {
 // Resources returns a ResourceLimiter backed by CgroupManager. The manager is
 // created lazily on the first Apply() call.
 func (p *Platform) Resources() platform.ResourceLimiter {
-	return &cgroupResourceLimiter{}
+	if p.resources == nil {
+		p.resources = &cgroupResourceLimiter{}
+	}
+	return p.resources
 }
 
 // Initialize sets up the platform with the given configuration.
