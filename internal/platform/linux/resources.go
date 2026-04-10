@@ -56,8 +56,14 @@ func (r *cgroupResourceLimiter) ensureManager() (*limits.CgroupManager, error) {
 }
 
 func (r *cgroupResourceLimiter) Apply(config platform.ResourceConfig) (platform.ResourceHandle, error) {
+	if config.MaxDiskReadMBps > 0 || config.MaxDiskWriteMBps > 0 {
+		return nil, fmt.Errorf("disk IO limiting not implemented (io.max not written)")
+	}
 	if config.MaxNetworkMbps > 0 {
 		return nil, fmt.Errorf("network bandwidth limiting not supported (requires tc/qdisc)")
+	}
+	if len(config.CPUAffinity) > 0 {
+		return nil, fmt.Errorf("CPU affinity not implemented")
 	}
 
 	mgr, err := r.ensureManager()
@@ -70,10 +76,6 @@ func (r *cgroupResourceLimiter) Apply(config platform.ResourceConfig) (platform.
 		CPUQuotaPct:    int(config.MaxCPUPercent),
 		PidsMax:        int(config.MaxProcesses),
 	}
-	// Note: MaxDiskReadMBps/MaxDiskWriteMBps are not mapped because
-	// CgroupV2Limits does not carry IO fields. io.stat is still read
-	// in Stats() for telemetry. A future extension could write io.max
-	// via CgroupManager when the io controller is available.
 
 	return &cgroupResourceHandle{
 		mgr:  mgr,

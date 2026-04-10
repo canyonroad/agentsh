@@ -90,13 +90,16 @@ func ProbeCgroupsV2(ctx context.Context, fs cgroupFS, ownHint string) (*CgroupPr
 			return nil, fmt.Errorf("discover own cgroup for relative base path: %w", err)
 		}
 		if filepath.Base(cur) == "agentsh.leaf" {
-			// A prior probe already leaf-moved the process into
-			// <service>/<relative_hint>/agentsh.leaf. The parent is the
-			// resolved own cgroup — re-appending the relative hint would
-			// double it (e.g. .../sessions/sessions).
 			cur = filepath.Dir(cur)
 			leafResident = true
-			own = cur
+			// Check if cur already includes the relative hint (prior probe
+			// with the same hint). If not, the leaf was placed under the
+			// service cgroup by a hint-less probe — still need to append.
+			if filepath.Base(cur) == own {
+				own = cur
+			} else {
+				own = filepath.Join(cur, own)
+			}
 		} else {
 			own = filepath.Join(cur, own)
 		}
