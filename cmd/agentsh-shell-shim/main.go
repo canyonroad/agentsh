@@ -596,6 +596,10 @@ func serverReachable(network, addr string, timeout time.Duration) bool {
 	return true
 }
 
+// lookupHost is the hostname resolver used by serverIsLocal. Package-level
+// variable so tests can inject a fake resolver without DNS dependencies.
+var lookupHost = net.DefaultResolver.LookupHost
+
 // serverIsLocal returns true if the server address is a local endpoint
 // (loopback TCP or unix socket). Fail-open on probe failure is only safe
 // for local servers where "not reachable" means "not started yet."
@@ -603,8 +607,10 @@ func serverReachable(network, addr string, timeout time.Duration) bool {
 // disabling enforcement.
 //
 // For non-IP hostnames (e.g. custom /etc/hosts aliases), attempts DNS
-// resolution with a short timeout. If resolution fails, treats as remote
-// (fail-closed) which is the safe default.
+// resolution with a short timeout. A hostname is only considered local if
+// ALL resolved addresses are loopback — mixed-resolution names (loopback +
+// remote) are treated as remote to preserve the fail-closed guarantee.
+// If resolution fails, treats as remote (fail-closed) which is the safe default.
 func serverIsLocal(network, addr string) bool {
 	if network == "unix" {
 		return true
@@ -620,19 +626,20 @@ func serverIsLocal(network, addr string) bool {
 	if ip != nil {
 		return ip.IsLoopback()
 	}
-	// Hostname that isn't a literal IP — resolve and check if any address
-	// is loopback. Short timeout avoids hanging during early boot when
+	// Hostname that isn't a literal IP — resolve and check if ALL addresses
+	// are loopback. Short timeout avoids hanging during early boot when
 	// DNS/nsswitch may not be ready.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
-	if err != nil {
+	addrs, err := lookupHost(ctx, host)
+	if err != nil || len(addrs) == 0 {
 		return false
 	}
 	for _, a := range addrs {
-		if resolved := net.ParseIP(a); resolved != nil && resolved.IsLoopback() {
-			return true
+		resolved := net.ParseIP(a)
+		if resolved == nil || !resolved.IsLoopback() {
+			return false
 		}
 	}
-	return false
+	return true
 }

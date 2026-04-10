@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -848,6 +849,68 @@ func TestServerIsLocal(t *testing.T) {
 			got := serverIsLocal(tt.network, tt.addr)
 			if got != tt.want {
 				t.Errorf("serverIsLocal(%q, %q) = %v, want %v", tt.network, tt.addr, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerIsLocal_HostnameResolution(t *testing.T) {
+	tests := []struct {
+		name   string
+		addr   string
+		addrs  []string
+		err    error
+		want   bool
+	}{
+		{
+			name:  "loopback alias",
+			addr:  "myhost:18080",
+			addrs: []string{"127.0.0.1"},
+			want:  true,
+		},
+		{
+			name:  "loopback alias ipv6",
+			addr:  "myhost:18080",
+			addrs: []string{"::1"},
+			want:  true,
+		},
+		{
+			name:  "remote hostname",
+			addr:  "remote:18080",
+			addrs: []string{"10.0.0.5"},
+			want:  false,
+		},
+		{
+			name:  "mixed loopback and remote",
+			addr:  "mixed:18080",
+			addrs: []string{"127.0.0.1", "10.0.0.5"},
+			want:  false,
+		},
+		{
+			name:  "lookup failure",
+			addr:  "nohost:18080",
+			addrs: nil,
+			err:   fmt.Errorf("no such host"),
+			want:  false,
+		},
+		{
+			name:  "empty result",
+			addr:  "empty:18080",
+			addrs: []string{},
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origLookup := lookupHost
+			lookupHost = func(_ context.Context, _ string) ([]string, error) {
+				return tt.addrs, tt.err
+			}
+			t.Cleanup(func() { lookupHost = origLookup })
+
+			got := serverIsLocal("tcp", tt.addr)
+			if got != tt.want {
+				t.Errorf("serverIsLocal(tcp, %q) = %v, want %v", tt.addr, got, tt.want)
 			}
 		})
 	}
