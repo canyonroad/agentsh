@@ -324,3 +324,27 @@ func TestValidateSecrets_InjectEnvReservedPrefix(t *testing.T) {
 		t.Errorf("error should mention reserved prefix, got: %v", err)
 	}
 }
+
+func TestValidateSecrets_AWSProvider(t *testing.T) {
+	providers := map[string]yaml.Node{
+		"aws_sm": mustNode(t, "type: aws-sm\nregion: us-east-1"),
+	}
+	services := []ServiceYAML{
+		{
+			Name:   "myservice",
+			Match:  ServiceMatchYAML{Hosts: []string{"api.example.com"}},
+			Secret: ServiceSecretYAML{Ref: "aws-sm://prod/my-secret#token"},
+			Fake:   ServiceFakeYAML{Format: "tok_{rand:36}"},
+			Inject: ServiceInjectYAML{Header: &ServiceInjectHeaderYAML{
+				Name: "Authorization", Template: "Bearer {{secret}}",
+			}},
+		},
+	}
+	warnings, err := ValidateSecrets(providers, services)
+	if err != nil {
+		t.Fatalf("ValidateSecrets error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+}

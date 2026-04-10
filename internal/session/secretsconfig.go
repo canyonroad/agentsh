@@ -6,6 +6,7 @@ import (
 
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/proxy/secrets"
+	"github.com/agentsh/agentsh/internal/proxy/secrets/awssm"
 	"github.com/agentsh/agentsh/internal/proxy/secrets/keyring"
 	"github.com/agentsh/agentsh/internal/proxy/secrets/vault"
 	"github.com/agentsh/agentsh/internal/proxy/services"
@@ -116,6 +117,13 @@ func DefaultConstructors() map[string]secrets.ConstructorFunc {
 			}
 			return vault.New(ctx, vc, resolver)
 		},
+		"aws-sm": func(ctx context.Context, cfg secrets.ProviderConfig, _ secrets.RefResolver) (secrets.SecretProvider, error) {
+			ac, ok := cfg.(awssm.Config)
+			if !ok {
+				return nil, fmt.Errorf("expected awssm.Config, got %T", cfg)
+			}
+			return awssm.New(ctx, ac, nil)
+		},
 	}
 }
 
@@ -133,6 +141,8 @@ func decodeProviderConfig(_ string, node yaml.Node) (secrets.ProviderConfig, err
 		return keyring.Config{}, nil
 	case "vault":
 		return decodeVaultConfig(node)
+	case "aws-sm":
+		return decodeAWSConfig(node)
 	default:
 		return nil, fmt.Errorf("unknown provider type %q", base.Type)
 	}
@@ -200,6 +210,22 @@ func decodeVaultConfig(node yaml.Node) (secrets.ProviderConfig, error) {
 		cfg.Auth.SecretIDRef = &ref
 	}
 	return cfg, nil
+}
+
+// awssmYAML is the YAML representation of an AWS SM provider config.
+type awssmYAML struct {
+	Type   string `yaml:"type"`
+	Region string `yaml:"region"`
+}
+
+func decodeAWSConfig(node yaml.Node) (secrets.ProviderConfig, error) {
+	var raw awssmYAML
+	if err := node.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("decode aws-sm config: %w", err)
+	}
+	return awssm.Config{
+		Region: raw.Region,
+	}, nil
 }
 
 // BuildSecretsRegistry creates a provider registry from the resolved
