@@ -125,6 +125,13 @@ jobs:
           set -eux
           apk add --no-cache gcc musl-dev libseccomp-dev libseccomp-static make git file
 
+          # The repo is mounted from the host runner at /workspace. Files are
+          # owned by the host uid (e.g. 1001) but this container runs as root,
+          # so git refuses to operate on it (safe.directory check). Go's build
+          # VCS stamping invokes git and fails with "exit status 128". Mark
+          # the workspace as safe before any go build commands.
+          git config --global --add safe.directory /workspace
+
           CGO_ENABLED=1 \
           CGO_LDFLAGS="-static -lseccomp" \
           go build -ldflags='-s -w -extldflags "-static"' \
