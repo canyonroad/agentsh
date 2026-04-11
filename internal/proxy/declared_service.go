@@ -21,8 +21,16 @@ func (p *Proxy) SetPolicyEngine(e *policy.Engine) {
 }
 
 // declaredService resolves a request path to a compiled http_service entry
-// if the path starts with /svc/<name>/. Returns the service name, the
-// remaining path (starting with '/'), and ok=true when resolved.
+// if the path starts with /svc/<name>/. Returns the service name AS IT
+// APPEARED IN THE REQUEST (preserving the caller's case), the remaining
+// path (starting with '/'), and ok=true when resolved.
+//
+// The name is deliberately returned in the request's case (not the
+// configured canonical form) so downstream callers can strip the exact
+// prefix from r.URL.EscapedPath() — a case-insensitive lookup here paired
+// with a case-sensitive strip later would corrupt requests whose service
+// name case differs from the declared one. Downstream lookups
+// (CheckHTTPService, findHTTPService) are themselves case-insensitive.
 //
 // A path that starts with /svc/ but names a service that does not exist
 // returns ok=false with name != "". Callers use the name vs "" distinction
@@ -54,7 +62,9 @@ func (p *Proxy) declaredService(reqPath string) (name, rest string, ok bool) {
 	}
 	for _, svc := range eng.HTTPServices() {
 		if strings.EqualFold(svc.Name, name) {
-			return svc.Name, rest, true
+			// Return the request's segment (case-preserved), not svc.Name.
+			// See doc comment for why.
+			return name, rest, true
 		}
 	}
 	return name, rest, false
@@ -148,7 +158,9 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svc
 	// Copy response headers and status, then body. Strip hop-by-hop headers
 	// (RFC 7230 §6.1) plus any headers named in the upstream's Connection
 	// header — real reverse proxies never forward these end-to-end.
-	respDenylist := connectionNominatedDenylist(resp.Header.Get("Connection"))
+	// RFC 7230 §3.2.2 allows repeated Connection header lines, so merge all
+	// values (Header.Values) rather than reading only the first.
+	respDenylist := connectionNominatedDenylist(resp.Header.Values("Connection"))
 	for k, vs := range resp.Header {
 		if isHopByHopHeader(k) {
 			continue
@@ -210,8 +222,10 @@ func (p *Proxy) buildUpstreamRequest(r *http.Request, svcUpstream, reqPath, esca
 	// Copy headers, excluding hop-by-hop and any headers nominated as
 	// connection-scoped by the client's Connection header (RFC 7230 §6.1).
 	// Without this, a client could smuggle arbitrary headers upstream by
-	// declaring them in Connection.
-	reqDenylist := connectionNominatedDenylist(r.Header.Get("Connection"))
+	// declaring them in Connection. RFC 7230 §3.2.2 allows repeated
+	// Connection header lines, so merge all values (Header.Values) rather
+	// than reading only the first.
+	reqDenylist := connectionNominatedDenylist(r.Header.Values("Connection"))
 	for k, vs := range r.Header {
 		if isHopByHopHeader(k) {
 			continue
@@ -249,33 +263,37 @@ func isHopByHopHeader(h string) bool {
 	return false
 }
 
-// connectionNominatedDenylist parses the value of a Connection header into
-// a set of canonicalized header names that this hop must not forward.
-// RFC 7230 §6.1 defines any token listed in Connection as hop-by-hop for
-// this hop — in addition to the fixed hop-by-hop set returned by
-// isHopByHopHeader. Empty tokens and the literal "close" / "keep-alive"
-// control directives are skipped.
+// connectionNominatedDenylist parses the values of one or more Connection
+// header lines into a set of canonicalized header names that this hop must
+// not forward. RFC 7230 §6.1 defines any token listed in Connection as
+// hop-by-hop for this hop — in addition to the fixed hop-by-hop set
+// returned by isHopByHopHeader. RFC 7230 §3.2.2 allows a field to appear
+// on multiple lines, so callers pass Header.Values("Connection") and this
+// function merges tokens across all lines. Empty tokens and the literal
+// "close" / "keep-alive" control directives are skipped.
 //
-// Returns an empty (non-nil) map when the header is absent so callers can
-// use set lookup without nil-checks.
-func connectionNominatedDenylist(connectionHeader string) map[string]struct{} {
+// Returns an empty (non-nil) map when there are no header lines so callers
+// can use set lookup without nil-checks.
+func connectionNominatedDenylist(connectionHeaders []string) map[string]struct{} {
 	out := make(map[string]struct{})
-	if connectionHeader == "" {
-		return out
-	}
-	for _, tok := range strings.Split(connectionHeader, ",") {
-		tok = strings.TrimSpace(tok)
-		if tok == "" {
+	for _, line := range connectionHeaders {
+		if line == "" {
 			continue
 		}
-		// "close" and "keep-alive" are control directives, not header
-		// names — drop them from the denylist so they don't accidentally
-		// match a legitimate request header.
-		switch strings.ToLower(tok) {
-		case "close", "keep-alive":
-			continue
+		for _, tok := range strings.Split(line, ",") {
+			tok = strings.TrimSpace(tok)
+			if tok == "" {
+				continue
+			}
+			// "close" and "keep-alive" are control directives, not header
+			// names — drop them from the denylist so they don't accidentally
+			// match a legitimate request header.
+			switch strings.ToLower(tok) {
+			case "close", "keep-alive":
+				continue
+			}
+			out[http.CanonicalHeaderKey(tok)] = struct{}{}
 		}
-		out[http.CanonicalHeaderKey(tok)] = struct{}{}
 	}
 	return out
 }

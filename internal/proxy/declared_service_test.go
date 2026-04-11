@@ -16,13 +16,21 @@ func init() {
 
 func newTestProxyWithHTTPService(t *testing.T, upstream string, rules []policy.HTTPServiceRule) *Proxy {
 	t.Helper()
+	return newTestProxyWithNamedHTTPService(t, "github", upstream, rules)
+}
+
+// newTestProxyWithNamedHTTPService is like newTestProxyWithHTTPService but
+// lets the caller pin the declared service name (for tests that deliberately
+// exercise case-mismatched URLs).
+func newTestProxyWithNamedHTTPService(t *testing.T, name, upstream string, rules []policy.HTTPServiceRule) *Proxy {
+	t.Helper()
 	cfg := Config{SessionID: "test-session"}
 	p, err := New(cfg, "", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	svcs := []policy.HTTPService{{
-		Name: "github", Upstream: upstream, Default: "deny", Rules: rules,
+		Name: name, Upstream: upstream, Default: "deny", Rules: rules,
 	}}
 	if err := policy.ValidateHTTPServices(svcs); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -239,5 +247,134 @@ func TestServeDeclaredService_StripsHopByHopResponseHeaders(t *testing.T) {
 	}
 	if v := w.Header().Get("Connection"); v != "" {
 		t.Errorf("response Connection = %q, want empty (hop-by-hop)", v)
+	}
+}
+
+// TestServeDeclaredService_PreservesEscapedPath_MixedCaseServiceName pins
+// down that percent-encoded bytes survive case-mismatched service names.
+// The declared service is "GitHub" (mixed case) but the request uses
+// "/svc/github/..." (lowercase). declaredService must return the request's
+// segment so serveDeclaredService can strip it from EscapedPath() with a
+// case-sensitive HasPrefix — otherwise the fallback decodes %2F to /.
+func TestServeDeclaredService_PreservesEscapedPath_MixedCaseServiceName(t *testing.T) {
+	var gotEscaped string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscaped = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	// Declared name "GitHub" — request uses "github".
+	p := newTestProxyWithNamedHTTPService(t, "GitHub", upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-items", Paths: []string{"/items/**"}, Decision: "allow"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/items/a%2Fb", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if gotEscaped != "/items/a%2Fb" {
+		t.Errorf("upstream EscapedPath = %q, want /items/a%%2Fb", gotEscaped)
+	}
+}
+
+// TestServeDeclaredService_PreservesEscapedPath_UppercaseRequest is the
+// reverse: declared service is lowercase "github", request uses uppercase
+// "/svc/GITHUB/...". Same invariant must hold.
+func TestServeDeclaredService_PreservesEscapedPath_UppercaseRequest(t *testing.T) {
+	var gotEscaped string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscaped = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithNamedHTTPService(t, "github", upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-items", Paths: []string{"/items/**"}, Decision: "allow"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/GITHUB/items/a%2Fb", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if gotEscaped != "/items/a%2Fb" {
+		t.Errorf("upstream EscapedPath = %q, want /items/a%%2Fb", gotEscaped)
+	}
+}
+
+// TestServeDeclaredService_StripsMultipleConnectionRequestHeaders pins down
+// RFC 7230 §3.2.2: a client sending Connection on multiple lines must have
+// ALL nominated headers stripped, not just the first line's tokens.
+// Header.Get returns only the first value — connectionNominatedDenylist
+// must merge via Header.Values.
+func TestServeDeclaredService_StripsMultipleConnectionRequestHeaders(t *testing.T) {
+	var gotHeaders http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-foo", Paths: []string{"/foo"}, Decision: "allow"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/foo", nil)
+	// Two separate Connection header lines.
+	req.Header.Add("Connection", "X-Custom-Req")
+	req.Header.Add("Connection", "X-Other-Req")
+	req.Header.Set("X-Custom-Req", "one")
+	req.Header.Set("X-Other-Req", "two")
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if v := gotHeaders.Get("X-Custom-Req"); v != "" {
+		t.Errorf("upstream X-Custom-Req = %q, want empty (first Connection line)", v)
+	}
+	if v := gotHeaders.Get("X-Other-Req"); v != "" {
+		t.Errorf("upstream X-Other-Req = %q, want empty (second Connection line)", v)
+	}
+}
+
+// TestServeDeclaredService_StripsMultipleConnectionResponseHeaders is the
+// response-side equivalent: when the upstream sends Connection on two
+// lines, both lines' nominated headers must be dropped before copying
+// headers back to the client.
+func TestServeDeclaredService_StripsMultipleConnectionResponseHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Two separate Connection header lines.
+		w.Header().Add("Connection", "X-Custom-Resp")
+		w.Header().Add("Connection", "X-Other-Resp")
+		w.Header().Set("X-Custom-Resp", "one")
+		w.Header().Set("X-Other-Resp", "two")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-foo", Paths: []string{"/foo"}, Decision: "allow"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/foo", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if v := w.Header().Get("X-Custom-Resp"); v != "" {
+		t.Errorf("response X-Custom-Resp = %q, want empty (first Connection line)", v)
+	}
+	if v := w.Header().Get("X-Other-Resp"); v != "" {
+		t.Errorf("response X-Other-Resp = %q, want empty (second Connection line)", v)
 	}
 }
