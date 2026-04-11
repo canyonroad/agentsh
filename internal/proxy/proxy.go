@@ -86,6 +86,10 @@ type Proxy struct {
 	// EnvVars to emit one <NAME>_API_URL env var per entry. Replaced whole
 	// by SetHTTPServices — never appended in place.
 	httpServices []policy.HTTPService
+	// policyEngine is wired by SetPolicyEngine during startup and is the
+	// source of truth for http_services dispatch in ServeHTTP. Reads are
+	// serialized with mu so dispatch cannot race with a late configure.
+	policyEngine *policy.Engine
 	mu           sync.Mutex
 }
 
@@ -310,6 +314,18 @@ func (p *Proxy) Addr() net.Addr {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID := generateRequestID()
 	startTime := time.Now()
+
+	// Declared HTTP service dispatch — check before LLM dialect detection.
+	if name, rest, ok := p.declaredService(r.URL.Path); ok {
+		p.serveDeclaredService(w, r, name, rest, requestID, startTime)
+		return
+	} else if name != "" {
+		// Path starts with /svc/<name>/ but the service is not declared.
+		// Return a dedicated 404 instead of falling through to dialect
+		// detection, so operators aren't confused by "unknown LLM dialect".
+		http.Error(w, "no such service", http.StatusNotFound)
+		return
+	}
 
 	// Detect dialect
 	dialect := p.detector.Detect(r)
