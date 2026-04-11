@@ -1463,6 +1463,149 @@ func TestServeDeclaredService_HookNilsBody_LogsZeroAndStoresNothing(t *testing.T
 	}
 }
 
+// TestServeDeclaredService_HookNilsBodyLeavesStaleContentLength_Normalized
+// pins down that the proxy normalizes empty-body hooks so that a hook
+// which sets r.Body = nil but forgets to zero r.ContentLength does NOT
+// leak a stale positive Content-Length upstream. Relying on hook authors
+// to zero ContentLength themselves is brittle; the proxy must normalize.
+func TestServeDeclaredService_HookNilsBodyLeavesStaleContentLength_Normalized(t *testing.T) {
+	var upstreamGotLen int64
+	var upstreamGotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamGotLen = r.ContentLength
+		b, _ := io.ReadAll(r.Body)
+		upstreamGotBody = b
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	tmpDir := t.TempDir()
+	storage, err := NewStorage(tmpDir, "test-session", true)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-upload", Methods: []string{"POST"}, Paths: []string{"/upload"}, Decision: "allow"},
+	})
+	p.SetStorageForTest(storage)
+
+	// Hook nils the body but deliberately leaves ContentLength stale.
+	// The proxy must still normalize so Content-Length doesn't leak
+	// upstream.
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "body-nil-stale-clen",
+		preFn: func(r *http.Request, _ *RequestContext) error {
+			r.Body = nil
+			// intentionally do NOT touch r.ContentLength
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github/upload", strings.NewReader("PAYLOAD_WITH_LENGTH"))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+
+	if upstreamGotLen != 0 {
+		t.Errorf("upstream ContentLength = %d, want 0 (hook dropped body)", upstreamGotLen)
+	}
+	if len(upstreamGotBody) != 0 {
+		t.Errorf("upstream received body %q, want empty (hook dropped body)", upstreamGotBody)
+	}
+
+	entries := readAllRequestLogEntries(t, tmpDir, "test-session")
+	if len(entries) != 1 {
+		t.Fatalf("got %d request log entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Request.BodySize != 0 {
+		t.Errorf("BodySize = %d, want 0 (hook dropped body)", e.Request.BodySize)
+	}
+	if e.Request.BodyHash != "" {
+		t.Errorf("BodyHash = %q, want empty (hook dropped body)", e.Request.BodyHash)
+	}
+
+	bodyPath := filepath.Join(tmpDir, "test-session", "llm-bodies", e.ID+".json")
+	if _, statErr := os.Stat(bodyPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected no stored body file at %q, got err=%v", bodyPath, statErr)
+	}
+}
+
+// TestServeDeclaredService_HookSetsHttpNoBody_Normalized pins down that a
+// hook which uses the idiomatic http.NoBody sentinel is treated the same
+// as r.Body = nil: nothing is forwarded upstream, nothing lands on disk,
+// and the audit record shows BodySize=0/BodyHash="". The current code
+// reads empty bytes into forwardedBody but does NOT zero storedBody, so
+// the agent's pre-hook input still lands on disk even though nothing was
+// actually forwarded.
+func TestServeDeclaredService_HookSetsHttpNoBody_Normalized(t *testing.T) {
+	var upstreamGotLen int64
+	var upstreamGotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamGotLen = r.ContentLength
+		b, _ := io.ReadAll(r.Body)
+		upstreamGotBody = b
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	tmpDir := t.TempDir()
+	storage, err := NewStorage(tmpDir, "test-session", true)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-upload", Methods: []string{"POST"}, Paths: []string{"/upload"}, Decision: "allow"},
+	})
+	p.SetStorageForTest(storage)
+
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "body-no-body",
+		preFn: func(r *http.Request, _ *RequestContext) error {
+			r.Body = http.NoBody
+			r.ContentLength = 0
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github/upload", strings.NewReader("PAYLOAD_WITH_LENGTH"))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+
+	if upstreamGotLen != 0 {
+		t.Errorf("upstream ContentLength = %d, want 0 (hook used http.NoBody)", upstreamGotLen)
+	}
+	if len(upstreamGotBody) != 0 {
+		t.Errorf("upstream received body %q, want empty (hook used http.NoBody)", upstreamGotBody)
+	}
+
+	entries := readAllRequestLogEntries(t, tmpDir, "test-session")
+	if len(entries) != 1 {
+		t.Fatalf("got %d request log entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Request.BodySize != 0 {
+		t.Errorf("BodySize = %d, want 0 (hook used http.NoBody)", e.Request.BodySize)
+	}
+	if e.Request.BodyHash != "" {
+		t.Errorf("BodyHash = %q, want empty (hook used http.NoBody)", e.Request.BodyHash)
+	}
+
+	bodyPath := filepath.Join(tmpDir, "test-session", "llm-bodies", e.ID+".json")
+	if _, statErr := os.Stat(bodyPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected no stored body file at %q, got err=%v", bodyPath, statErr)
+	}
+}
+
 // readAllRequestLogEntries reads the request JSONL file for a session and
 // returns every RequestLogEntry. Lives next to the test so it can inspect
 // unexported storage internals if needed.

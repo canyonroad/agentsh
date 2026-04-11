@@ -404,21 +404,31 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 	//     record so the integrity stamp describes the forwarded
 	//     request, not the agent's typed input.
 	//
-	// Special case: a pre-hook may drop the body entirely by setting
-	// r.Body = nil. In that situation neither view is meaningful —
-	// nothing was forwarded, so the audit record should show
-	// BodySize=0/BodyHash="" and nothing should land on disk under
-	// this request ID. Zero both slices to make that explicit.
+	// Empty-body normalization: pre-hooks may drop the body via
+	// r.Body = nil, r.Body = http.NoBody, or by replacing it with a
+	// zero-byte reader. All three mean "nothing forwarded". When we
+	// detect any of them we:
+	//   - Zero storedBody so no on-disk copy is written
+	//   - Leave forwardedBody nil so BodySize/BodyHash describe "empty"
+	//   - Reset r.Body = http.NoBody and r.ContentLength = 0 so
+	//     buildUpstreamRequest does not forward a stale Content-Length
+	//     header to the upstream. Relying on hook authors to zero
+	//     ContentLength themselves is brittle and fails silently.
 	var forwardedBody []byte
-	if r.Body == nil {
-		storedBody = nil
-	} else {
+	if r.Body != nil && r.Body != http.NoBody {
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "re-read request body: "+err.Error(), http.StatusBadGateway)
 			return
 		}
 		forwardedBody = b
+	}
+	if len(forwardedBody) == 0 {
+		storedBody = nil
+		forwardedBody = nil
+		r.Body = http.NoBody
+		r.ContentLength = 0
+	} else {
 		r.Body = io.NopCloser(bytes.NewReader(forwardedBody))
 		r.ContentLength = int64(len(forwardedBody))
 	}
