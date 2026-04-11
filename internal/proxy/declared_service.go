@@ -53,6 +53,16 @@ func (p *Proxy) SetPolicyEngine(e *policy.Engine) {
 	p.policyEngine = e
 }
 
+// SetStorageForTest installs a Storage instance for the declared-service
+// logging path. Production uses the same Storage that the LLM path uses;
+// tests point it at a temp dir. Test-only setter to keep the dependency
+// visible.
+func (p *Proxy) SetStorageForTest(s *Storage) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.storage = s
+}
+
 // declaredService resolves a request path to a compiled http_service entry
 // if the path starts with /svc/<name>/. Returns the service name AS IT
 // APPEARED IN THE REQUEST (preserving the caller's case), the remaining
@@ -279,12 +289,19 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 	// hooks return. On read error we must fail closed: io.ReadAll may
 	// have already drained part of the stream, so leaving r.Body in
 	// place would hand hooks and the upstream a truncated request.
+	//
+	// body is hoisted to function scope so it remains accessible to
+	// logDeclaredServiceRequest below after the hook dispatch block.
+	// When r.Body is nil we pass a nil slice to the logger — HashBody
+	// handles that by returning an empty string.
+	var body []byte
 	if r.Body != nil {
-		body, err := io.ReadAll(r.Body)
+		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		body = b
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
 	}
@@ -373,6 +390,12 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 	// before hooks ran is still valid (case 1), or the hook explicitly
 	// owns the encoding (cases 3 and 4).
 
+	// Audit the request AFTER hooks have run and after the RawPath
+	// reconciliation, so the logged path reflects any hook-driven
+	// rewrites. dec.Rule is the name of the matched rule (empty when
+	// the decision came from the service default).
+	p.logDeclaredServiceRequest(requestID, sessionID, canonicalName, dec.Rule, r, body)
+
 	outReq, err := p.buildUpstreamRequest(r, svc.Upstream)
 	if err != nil {
 		http.Error(w, "rewrite failed: "+err.Error(), http.StatusInternalServerError)
@@ -385,6 +408,18 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 		return
 	}
 	defer resp.Body.Close()
+
+	// Buffer the response body so we can log it and still write it
+	// back. Unlike the LLM path, declared-service bodies are bounded
+	// by real API responses (not model streams), so buffering is
+	// acceptable. Spec §6 explicitly requires the body be logged,
+	// which rules out pass-through streaming in v1.
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		http.Error(w, "read upstream response: "+readErr.Error(), http.StatusBadGateway)
+		return
+	}
+	p.logDeclaredServiceResponse(requestID, sessionID, resp, respBody, startTime)
 
 	// Copy response headers and status, then body. Strip hop-by-hop headers
 	// (RFC 7230 §6.1) plus any headers named in the upstream's Connection
@@ -404,7 +439,7 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	_, _ = w.Write(respBody)
 }
 
 // findHTTPService looks up a service by name from the engine's enumeration.
@@ -559,4 +594,66 @@ func (p *Proxy) SetHTTPServiceTransportForTest(rt http.RoundTripper) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.httpSvcTransport = rt
+}
+
+// logDeclaredServiceRequest writes a RequestLogEntry for a declared-service
+// request to p.storage, mirroring how logRequest works for the LLM path but
+// without a Dialect and with ServiceKind/ServiceName/RuleName set.
+//
+// Matches the logRequest signature so future refactors can consolidate the
+// two. ruleName is the name of the rule that matched; if the decision came
+// from the service default (no rule matched), ruleName is the empty string.
+func (p *Proxy) logDeclaredServiceRequest(requestID, sessionID, svcName, ruleName string, r *http.Request, body []byte) {
+	if p.storage == nil {
+		return
+	}
+	entry := &RequestLogEntry{
+		ID:          requestID,
+		SessionID:   sessionID,
+		Timestamp:   time.Now().UTC(),
+		ServiceKind: "http_service",
+		ServiceName: svcName,
+		RuleName:    ruleName,
+		Request: RequestInfo{
+			Method:   r.Method,
+			Path:     r.URL.Path,
+			Headers:  sanitizeHeaders(r.Header),
+			BodySize: len(body),
+			BodyHash: HashBody(body),
+		},
+	}
+	if err := p.storage.LogRequest(entry); err != nil {
+		p.logger.Error("log declared-service request", "error", err, "request_id", requestID)
+	}
+	if err := p.storage.StoreRequestBody(requestID, body); err != nil {
+		p.logger.Error("store declared-service request body", "error", err, "request_id", requestID)
+	}
+}
+
+// logDeclaredServiceResponse mirrors logResponseDirect for the declared-
+// service path. resp.Body must already be drained into respBody; the
+// caller is responsible for restoring resp.Body before writing it back
+// to the client.
+func (p *Proxy) logDeclaredServiceResponse(requestID, sessionID string, resp *http.Response, respBody []byte, startTime time.Time) {
+	if p.storage == nil {
+		return
+	}
+	entry := &ResponseLogEntry{
+		RequestID:  requestID,
+		SessionID:  sessionID,
+		Timestamp:  time.Now().UTC(),
+		DurationMs: time.Since(startTime).Milliseconds(),
+		Response: ResponseInfo{
+			Status:   resp.StatusCode,
+			Headers:  sanitizeHeaders(resp.Header),
+			BodySize: len(respBody),
+			BodyHash: HashBody(respBody),
+		},
+	}
+	if err := p.storage.LogResponse(entry); err != nil {
+		p.logger.Error("log declared-service response", "error", err, "request_id", requestID)
+	}
+	if err := p.storage.StoreResponseBody(requestID, respBody); err != nil {
+		p.logger.Error("store declared-service response body", "error", err, "request_id", requestID)
+	}
 }

@@ -1,11 +1,15 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1093,4 +1097,132 @@ func TestServeDeclaredService_HookRewritesOnlyRawPath(t *testing.T) {
 	if gotEscaped != "/items/%61b" {
 		t.Errorf("upstream EscapedPath = %q, want /items/%%61b (hook-written RawPath clobbered?)", gotEscaped)
 	}
+}
+
+func TestServeDeclaredService_LogsRequestAndResponseToStorage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"login":"octocat"}`)
+	}))
+	defer upstream.Close()
+
+	// Point storage at a temp dir so we can read back the JSONL.
+	tmpDir := t.TempDir()
+	storage, err := NewStorage(tmpDir, "test-session", false)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "read-user", Methods: []string{"GET"}, Paths: []string{"/user"}, Decision: "allow"},
+	})
+	p.SetStorageForTest(storage)
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/user", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	entries := readAllRequestLogEntries(t, tmpDir, "test-session")
+	if len(entries) != 1 {
+		t.Fatalf("got %d log entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.ServiceKind != "http_service" {
+		t.Errorf("ServiceKind = %q, want http_service", e.ServiceKind)
+	}
+	if e.ServiceName != "github" {
+		t.Errorf("ServiceName = %q, want github", e.ServiceName)
+	}
+	if e.RuleName != "read-user" {
+		t.Errorf("RuleName = %q, want read-user", e.RuleName)
+	}
+	if e.Request.Method != "GET" || e.Request.Path != "/user" {
+		t.Errorf("Request = %+v, want GET /user", e.Request)
+	}
+	if e.Dialect != "" {
+		t.Errorf("Dialect = %q, want empty for http_service", e.Dialect)
+	}
+
+	resps := readAllResponseLogEntries(t, tmpDir, "test-session")
+	if len(resps) != 1 {
+		t.Fatalf("got %d response entries, want 1", len(resps))
+	}
+	if resps[0].Response.Status != http.StatusOK {
+		t.Errorf("response status = %d, want 200", resps[0].Response.Status)
+	}
+}
+
+// readAllRequestLogEntries reads the request JSONL file for a session and
+// returns every RequestLogEntry. Lives next to the test so it can inspect
+// unexported storage internals if needed.
+//
+// Note: Storage writes requests AND responses to the same file
+// (llm-requests.jsonl — see internal/proxy/storage.go). We discriminate by
+// looking at which JSON fields are populated: RequestLogEntry has the
+// "request" object, ResponseLogEntry has the "response" object and a
+// "request_id" field.
+func readAllRequestLogEntries(t *testing.T, basePath, sessionID string) []RequestLogEntry {
+	t.Helper()
+	lines := readLogLines(t, basePath, sessionID)
+	var out []RequestLogEntry
+	for _, line := range lines {
+		// Skip response entries by peeking at field names.
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(line, &probe); err != nil {
+			t.Fatalf("unmarshal probe: %v", err)
+		}
+		if _, isResponse := probe["request_id"]; isResponse {
+			continue
+		}
+		var e RequestLogEntry
+		if err := json.Unmarshal(line, &e); err != nil {
+			t.Fatalf("decode request log: %v", err)
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+func readAllResponseLogEntries(t *testing.T, basePath, sessionID string) []ResponseLogEntry {
+	t.Helper()
+	lines := readLogLines(t, basePath, sessionID)
+	var out []ResponseLogEntry
+	for _, line := range lines {
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(line, &probe); err != nil {
+			t.Fatalf("unmarshal probe: %v", err)
+		}
+		if _, isResponse := probe["request_id"]; !isResponse {
+			continue
+		}
+		var e ResponseLogEntry
+		if err := json.Unmarshal(line, &e); err != nil {
+			t.Fatalf("decode response log: %v", err)
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// readLogLines reads the shared JSONL log file line-by-line.
+func readLogLines(t *testing.T, basePath, sessionID string) [][]byte {
+	t.Helper()
+	path := filepath.Join(basePath, sessionID, "llm-requests.jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	var lines [][]byte
+	for _, l := range bytes.Split(data, []byte("\n")) {
+		if len(l) == 0 {
+			continue
+		}
+		lines = append(lines, l)
+	}
+	return lines
 }
