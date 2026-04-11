@@ -250,6 +250,46 @@ func TestServeDeclaredService_Approve_TargetPreservesEncodedPath(t *testing.T) {
 	}
 }
 
+// TestServeDeclaredService_Approve_TargetFallsBackWhenNextByteIsEncoded
+// pins down that the escaped-path prefix strip requires a '/' boundary
+// immediately after the /svc/<name> prefix. When a client percent-encodes
+// the slash after the service segment (e.g. /svc/github%2Fitems), the
+// dispatcher decodes it to /svc/github/items and routes the request to
+// service "github" with rest "/items". The approval Target must match
+// the decoded "/items" that policy evaluation used — NOT the literal
+// strip "%2Fitems" that a naive HasPrefix+TrimPrefix would produce,
+// which would diverge from what the upstream actually receives and
+// mislead the approver about what they're authorizing.
+func TestServeDeclaredService_Approve_TargetFallsBackWhenNextByteIsEncoded(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "require-approval", Methods: []string{"POST"}, Paths: []string{"/items"}, Decision: "approve"},
+	})
+	appr := &fakeApprovalsManager{approve: true}
+	p.SetApprovalsForTest(appr)
+
+	// %2F immediately after the service name. Decoded form is
+	// /svc/github/items so the dispatcher routes to service "github"
+	// with rest "/items", and the POST /items rule evaluates as approve.
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github%2Fitems?force=true", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	// The target MUST use the decoded-and-re-escaped fallback form
+	// ("/items") — not the literal-strip result ("%2Fitems") that a
+	// naive HasPrefix+TrimPrefix would produce.
+	if got, want := appr.gotReq.Target, "github POST /items?force=true"; got != want {
+		t.Errorf("approval Target = %q, want %q", got, want)
+	}
+}
+
 // TestServeDeclaredService_Approve_Denied pins down that when an approvals
 // manager is wired and returns Approved=false, the handler must deny with
 // 403 Forbidden and MUST NOT forward the request to the upstream.

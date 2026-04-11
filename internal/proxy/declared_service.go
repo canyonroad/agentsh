@@ -158,10 +158,21 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 	prefix := declaredServicePathPrefix + rawSegment
 	escaped := r.URL.EscapedPath()
 	var escapedPath string
-	if strings.HasPrefix(escaped, prefix) {
+	// The literal strip is only safe when the byte immediately after the
+	// prefix is '/' (the unencoded separator) or the prefix is the entire
+	// escaped path. Otherwise the prefix "matches" a name whose trailing
+	// bytes are percent-encoded into the next segment (e.g.
+	// "/svc/github%2Fitems" has prefix "/svc/github" with a '%' next byte),
+	// and stripping the prefix would leave "%2Fitems" — diverging from
+	// the decoded rest ("/items") that policy evaluation and upstream
+	// forwarding use. Fall back to re-escaping the decoded rest in that
+	// case so the approval Target stays aligned with what the rest of
+	// the pipeline sees.
+	if strings.HasPrefix(escaped, prefix) && (len(escaped) == len(prefix) || escaped[len(prefix)] == '/') {
 		escapedPath = strings.TrimPrefix(escaped, prefix)
 	} else {
-		// Name was encoded or case-differs — re-escape the decoded rest.
+		// Name was encoded, case-differs, or bled into the next segment
+		// via an encoded slash — re-escape the decoded rest.
 		escapedPath = (&url.URL{Path: reqPath}).EscapedPath()
 	}
 	if escapedPath == "" {
