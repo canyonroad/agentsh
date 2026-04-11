@@ -55,10 +55,12 @@ func startSignalHandler(ctx context.Context, parentSock *os.File, sessID string,
 	go func() {
 		defer parentSock.Close()
 
-		// Set a read deadline to prevent blocking forever if wrapper fails
+		// Set a read deadline to prevent blocking forever if wrapper fails.
+		// Note: This may fail on os.NewFile-wrapped socketpair fds (not registered
+		// with Go's network poller), but we should still continue to RecvFD.
 		if err := parentSock.SetReadDeadline(time.Now().Add(recvFDTimeout)); err != nil {
-			slog.Debug("failed to set read deadline on signal socket", "error", err)
-			return
+			slog.Debug("failed to set read deadline on signal socket (continuing)", "error", err)
+			// Don't return - continue to RecvFD
 		}
 
 		// Receive the signal filter fd from the wrapper process
