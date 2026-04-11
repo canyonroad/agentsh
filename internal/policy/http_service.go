@@ -36,43 +36,53 @@ type HTTPServiceRule struct {
 
 var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// canonicalizeHost normalizes a host string for duplicate-detection and
-// matching. It handles three forms:
+// canonicalizeHost returns the canonical host form for duplicate-detection.
+// It accepts bracketed IPv6 "[::1]" / "[::1]:443", hostnames, and
+// "host:port" in any case with an optional trailing dot. It REJECTS
+// bare (unbracketed) IPv6 literals because HTTP Host headers require
+// IPv6 to be bracketed; treating bare forms as equivalent would create
+// configs whose duplicate detection differs from runtime host matching
+// (internal/proxy/services/matcher.go preserves brackets and matches
+// "[::1]" literally — bare "::1" never matches).
 //
-//  1. bracketed IPv6 with optional port: "[::1]", "[::1]:443"
-//  2. bare IPv6 literal (no brackets, no port): "::1", "fe80::1"
-//  3. hostname with optional port: "api.github.com", "api.github.com:443"
+// Returns (canonical, true) on success, ("", false) on reject.
 //
-// Rules: strip any port, strip IPv6 brackets, lowercase, and trim a single
-// trailing dot. After canonicalization, "[::1]" and "::1" both become "::1"
-// so bracketed upstreams and bare aliases compare equal.
-//
-// This helper lives in the policy package by design: the policy package must
-// not import proxy-layer packages, so the normalization logic is duplicated
-// here (with both sites anchored to the same documented rules).
-func canonicalizeHost(s string) string {
+// This helper lives in the policy package by design: the policy package
+// must not import proxy-layer packages, so the normalization logic is
+// duplicated here (with both sites anchored to the same documented rules).
+func canonicalizeHost(s string) (string, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return ""
+		return "", false
 	}
 	if strings.HasPrefix(s, "[") {
-		// Bracketed IPv6: look for "]:" to find the port separator. Keep the
-		// closing bracket, drop ":port".
-		if i := strings.Index(s, "]:"); i != -1 {
-			s = s[:i+1]
+		end := strings.Index(s, "]")
+		if end == -1 {
+			return "", false // unterminated bracket
 		}
-		// Strip the brackets themselves for canonical form.
-		if strings.HasSuffix(s, "]") {
-			s = s[1 : len(s)-1]
+		inner := s[1:end]
+		rest := s[end+1:]
+		if rest != "" && !strings.HasPrefix(rest, ":") {
+			return "", false // junk after closing bracket
 		}
-	} else if strings.Count(s, ":") >= 2 {
-		// Bare IPv6 literal (e.g. "::1", "fe80::1") — no port possible.
-		// Leave as-is apart from lowercase + trailing-dot trim below.
-	} else if i := strings.LastIndex(s, ":"); i != -1 {
-		// host:port
+		if inner == "" {
+			return "", false // "[]"
+		}
+		return strings.TrimSuffix(strings.ToLower(inner), "."), true
+	}
+	// Not bracketed. If there are 2+ colons, it's a bare IPv6 literal — reject.
+	if strings.Count(s, ":") >= 2 {
+		return "", false
+	}
+	// hostname or host:port
+	if i := strings.LastIndex(s, ":"); i != -1 {
 		s = s[:i]
 	}
-	return strings.TrimSuffix(strings.ToLower(s), ".")
+	s = strings.TrimSuffix(strings.ToLower(s), ".")
+	if s == "" {
+		return "", false
+	}
+	return s, true
 }
 
 // ValidateHTTPServices checks an HTTPServices list for well-formedness.
@@ -100,20 +110,20 @@ func ValidateHTTPServices(svcs []HTTPService) error {
 			return fmt.Errorf("http_services[%q]: upstream must be https (got %q)", s.Name, u.Scheme)
 		}
 
-		host := canonicalizeHost(u.Host)
+		// u.Host (not u.Hostname()) preserves brackets for IPv6 literals so
+		// the canonicalizer can distinguish bracketed from bare forms.
+		host, ok := canonicalizeHost(u.Host)
+		if !ok {
+			return fmt.Errorf("http_services[%q]: invalid upstream host %q (IPv6 literals must be bracketed)", s.Name, u.Host)
+		}
 		if other, dup := hostSeen[host]; dup {
 			return fmt.Errorf("http_services[%q]: duplicate upstream host %q (also claimed by %q)", s.Name, host, other)
 		}
 		hostSeen[host] = s.Name
 		for _, alias := range s.Aliases {
-			trimmed := strings.TrimSpace(alias)
-			if trimmed == "" {
-				return fmt.Errorf("http_services[%q]: empty alias", s.Name)
-			}
-			a := canonicalizeHost(trimmed)
-			if a == "" {
-				// canonicalizeHost stripped everything (e.g. ":443").
-				return fmt.Errorf("http_services[%q]: empty alias", s.Name)
+			a, ok := canonicalizeHost(alias)
+			if !ok {
+				return fmt.Errorf("http_services[%q]: invalid alias %q (IPv6 literals must be bracketed, hostnames must be non-empty)", s.Name, alias)
 			}
 			if other, dup := hostSeen[a]; dup {
 				return fmt.Errorf("http_services[%q]: duplicate upstream host %q via alias (also claimed by %q)", s.Name, a, other)

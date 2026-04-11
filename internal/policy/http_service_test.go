@@ -298,7 +298,7 @@ func TestValidateHTTPServices(t *testing.T) {
 					Rules:    []HTTPServiceRule{validRule},
 				},
 			},
-			wantErr: "empty alias",
+			wantErr: "invalid alias",
 		},
 		{
 			name: "invalid default value",
@@ -506,25 +506,6 @@ func TestValidateHTTPServices(t *testing.T) {
 			wantErr: "duplicate upstream host",
 		},
 		{
-			name: "IPv6 upstream collides with bare alias on another service",
-			svcs: []HTTPService{
-				{
-					Name:     "svc1",
-					Upstream: "https://[::1]",
-					ExposeAs: "SVC1_API_URL",
-					Rules:    []HTTPServiceRule{validRule},
-				},
-				{
-					Name:     "svc2",
-					Upstream: "https://api2.example.com",
-					ExposeAs: "SVC2_API_URL",
-					Aliases:  []string{"::1"},
-					Rules:    []HTTPServiceRule{validRule},
-				},
-			},
-			wantErr: "duplicate upstream host",
-		},
-		{
 			name: "IPv6 upstream with port collides with bracketed alias with port on another service",
 			svcs: []HTTPService{
 				{
@@ -544,7 +525,7 @@ func TestValidateHTTPServices(t *testing.T) {
 			wantErr: "duplicate upstream host",
 		},
 		{
-			name: "IPv6 upstream collides with mixed-case bare alias on another service",
+			name: "IPv6 upstream collides with mixed-case bracketed alias on another service",
 			svcs: []HTTPService{
 				{
 					Name:     "svc1",
@@ -556,11 +537,62 @@ func TestValidateHTTPServices(t *testing.T) {
 					Name:     "svc2",
 					Upstream: "https://api2.example.com",
 					ExposeAs: "SVC2_API_URL",
-					Aliases:  []string{"FE80::1"},
+					Aliases:  []string{"[FE80::1]"},
 					Rules:    []HTTPServiceRule{validRule},
 				},
 			},
 			wantErr: "duplicate upstream host",
+		},
+		{
+			name: "bare IPv6 alias rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://[::1]",
+					ExposeAs: "SVC1_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://api2.example.com",
+					ExposeAs: "SVC2_API_URL",
+					Aliases:  []string{"::1"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "IPv6 literals must be bracketed",
+		},
+		{
+			name: "bare IPv6 alias with different address rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://[::1]",
+					ExposeAs: "SVC1_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://api2.example.com",
+					ExposeAs: "SVC2_API_URL",
+					Aliases:  []string{"fe80::1"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "IPv6 literals must be bracketed",
+		},
+		{
+			name: "bracketed IPv6 alias accepted when no upstream conflict",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://api.github.com",
+					ExposeAs: "SVC1_API_URL",
+					Aliases:  []string{"[::1]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "",
 		},
 		{
 			name: "distinct IPv6 upstreams both accepted",
@@ -579,6 +611,30 @@ func TestValidateHTTPServices(t *testing.T) {
 				},
 			},
 			wantErr: "",
+		},
+		{
+			name: "unterminated bracket alias rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Aliases:  []string{"[::1"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "IPv6 literals must be bracketed",
+		},
+		{
+			name: "empty brackets alias rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Aliases:  []string{"[]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "IPv6 literals must be bracketed",
 		},
 		{
 			name: "empty http_services list is valid",
