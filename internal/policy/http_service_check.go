@@ -109,6 +109,30 @@ func (e *Engine) DeclaredHTTPServiceHost(host string) (serviceName, envVar strin
 	return cs.cfg.Name, cs.envVar, true
 }
 
+// DeclaredHTTPServiceAllowsDirect returns true when the declared service
+// matching host has allow_direct: true set in its YAML. Callers of
+// DeclaredHTTPServiceHost should query this before denying direct access
+// in the fail-closed netmonitor path — a true result means the service
+// opted out of the gateway-only constraint.
+//
+// host follows the same canonicalization rules as DeclaredHTTPServiceHost
+// (case, trailing dot, bracketed or bare IPv6, optional port). Returns
+// false for unknown hosts — the caller already gated on DeclaredHTTPServiceHost.
+func (e *Engine) DeclaredHTTPServiceAllowsDirect(host string) bool {
+	if !strings.HasPrefix(host, "[") && strings.Count(host, ":") >= 2 {
+		host = "[" + host + "]"
+	}
+	h, good := canonicalizeHost(host)
+	if !good {
+		return false
+	}
+	cs, found := e.httpServiceHosts[h]
+	if !found {
+		return false
+	}
+	return cs.cfg.AllowDirect
+}
+
 // HTTPServices returns a deep copy of the source HTTPService list.
 // Used by the proxy to enumerate declared services for EnvVars()
 // injection and by tests. Callers may mutate the returned slice and

@@ -140,6 +140,18 @@ func (p *Proxy) handleConnect(client net.Conn, req *http.Request) error {
 
 	ctx := req.Context()
 	dec := p.checkNetwork(ctx, host, port)
+	// Fail-closed check: if the target host is declared as an http_services
+	// upstream, deny direct HTTPS regardless of the CheckNetworkCtx decision.
+	// The only way to reach the upstream is through the gateway via
+	// /svc/<name>/. Services opt out by setting allow_direct: true.
+	if p.policy != nil {
+		if svcName, envVar, ok := p.policy.DeclaredHTTPServiceHost(host); ok && !p.policy.DeclaredHTTPServiceAllowsDirect(host) {
+			msg := "direct HTTPS to " + host + " is blocked; use " + envVar + " to route through the gateway"
+			_, _ = io.WriteString(client, "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: "+strconv.Itoa(len(msg))+"\r\n\r\n"+msg)
+			p.emitHTTPServiceDeniedDirect(context.Background(), commandID, svcName, envVar, host, resolvedIP, "CONNECT")
+			return nil
+		}
+	}
 	dec = p.maybeApprove(ctx, commandID, dec, "network", hostPort)
 	eventFields := map[string]any{
 		"method":      "CONNECT",
@@ -272,6 +284,18 @@ func (p *Proxy) handleHTTP(client net.Conn, req *http.Request) error {
 
 	ctx := req.Context()
 	dec := p.checkNetwork(ctx, host, port)
+	// Fail-closed check: if the target host is declared as an http_services
+	// upstream, deny direct HTTP regardless of the CheckNetworkCtx decision.
+	// Matches the analogous block in handleConnect. Services opt out by
+	// setting allow_direct: true.
+	if p.policy != nil {
+		if svcName, envVar, ok := p.policy.DeclaredHTTPServiceHost(host); ok && !p.policy.DeclaredHTTPServiceAllowsDirect(host) {
+			msg := "direct HTTP to " + host + " is blocked; use " + envVar + " to route through the gateway"
+			_, _ = io.WriteString(client, "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: "+strconv.Itoa(len(msg))+"\r\n\r\n"+msg)
+			p.emitHTTPServiceDeniedDirect(context.Background(), commandID, svcName, envVar, host, resolvedIP, req.Method)
+			return nil
+		}
+	}
 	dec = p.maybeApprove(ctx, commandID, dec, "network", host)
 	connectEv := p.emitNetEvent(context.Background(), "net_connect", commandID, host, host, port, dec, map[string]any{
 		"method":      req.Method,
@@ -452,6 +476,35 @@ func emitMCPConnectionIfMatched(ctx context.Context, sess *session.Session, emit
 	}
 	_ = emit.AppendEvent(ctx, ev)
 	emit.Publish(ev)
+}
+
+// emitHTTPServiceDeniedDirect records an audit event when the fail-closed
+// check in handleConnect or handleHTTP refuses a direct request to a
+// declared http_services upstream. These events give operators an
+// observable signal that a child process attempted to bypass the
+// gateway, even though they can take no corrective action in-band.
+func (p *Proxy) emitHTTPServiceDeniedDirect(ctx context.Context, commandID, svcName, envVar, host, resolvedIP, method string) {
+	if p.emit == nil {
+		return
+	}
+	ev := types.Event{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now().UTC(),
+		Type:      "http_service_denied_direct",
+		SessionID: p.sessionID,
+		CommandID: commandID,
+		Domain:    strings.ToLower(host),
+		Remote:    host,
+		Fields: map[string]any{
+			"service_name": svcName,
+			"env_var":      envVar,
+			"request_host": host,
+			"resolved_ip":  resolvedIP,
+			"method":       method,
+		},
+	}
+	_ = p.emit.AppendEvent(ctx, ev)
+	p.emit.Publish(ev)
 }
 
 func (p *Proxy) resolveAndEmitDNS(ctx context.Context, commandID string, host string) string {
