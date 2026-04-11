@@ -169,14 +169,29 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	envFD := 3 // first ExtraFile
 	wrappedReq.Env["AGENTSH_NOTIFY_SOCK_FD"] = strconv.Itoa(envFD)
 
-	// Check if signal filtering is available - only enable if socket pair succeeds
-	hasSignalEngine := sessionPolicy != nil && sessionPolicy.SignalEngine() != nil
-	signalFilterEnabled := false
+	// execveEnabled must be computed before the signal-filter gate: the
+	// signal filter stacks a second SECCOMP_RET_USER_NOTIF filter on top
+	// of the main wrapper filter, which breaks notification delivery
+	// whenever the main filter is already using USER_NOTIF. Under
+	// hybrid-ptrace mode execve is handled by ptrace, so the wrapper
+	// does NOT install execve notify rules — reflect that here so the
+	// signal-filter gate sees the runtime configuration, not the static
+	// config value.
+	execveEnabled := a.cfg.Sandbox.Seccomp.Execve.Enabled
+	if a.ptraceTracer != nil {
+		execveEnabled = false // ptrace handles execve; don't trap in seccomp USER_NOTIF
+	}
+
+	// Signal filter: installed only when the session has signal rules
+	// AND the main seccomp filter will not itself be using USER_NOTIF.
+	// Stacking two USER_NOTIF filters breaks notification delivery — see
+	// (*App).signalFilterEnabled for the full rationale and reproducer.
+	signalFilterActive := false
 	var sigSP *unixSocketPair
-	if hasSignalEngine {
+	if a.signalFilterEnabled(s, execveEnabled) {
 		sigSP = createUnixSocketPair()
 		if sigSP != nil {
-			signalFilterEnabled = true
+			signalFilterActive = true
 		} else {
 			slog.Warn("signal filter disabled: failed to create signal socket pair",
 				"session_id", sessionID,
@@ -185,14 +200,10 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	}
 
 	// Pass seccomp configuration to the wrapper
-	execveEnabled := a.cfg.Sandbox.Seccomp.Execve.Enabled
-	if a.ptraceTracer != nil {
-		execveEnabled = false // ptrace handles execve; don't trap in seccomp USER_NOTIF
-	}
 	seccompCfg := seccompWrapperConfig{
 		UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
 		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
-		SignalFilterEnabled: signalFilterEnabled, // Only true if signal socket succeeded
+		SignalFilterEnabled: signalFilterActive, // Only true if signal socket succeeded
 		ExecveEnabled:       execveEnabled,
 		FileMonitorEnabled:  config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.Enabled, false),
 		ServerPID:           os.Getpid(),
@@ -291,7 +302,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	}
 
 	// Add signal filter config if socket pair succeeded
-	if signalFilterEnabled && sigSP != nil {
+	if signalFilterActive && sigSP != nil {
 		signalFD := 4 // second ExtraFile (after notify socket at FD 3)
 		wrappedReq.Env["AGENTSH_SIGNAL_SOCK_FD"] = strconv.Itoa(signalFD)
 		extraCfg.env["AGENTSH_SIGNAL_SOCK_FD"] = strconv.Itoa(signalFD)
