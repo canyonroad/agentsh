@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -455,5 +456,183 @@ func TestServeDeclaredService_StripsMultipleConnectionResponseHeaders(t *testing
 	}
 	if v := w.Header().Get("X-Other-Resp"); v != "" {
 		t.Errorf("response X-Other-Resp = %q, want empty (second Connection line)", v)
+	}
+}
+
+// TestServeDeclaredService_HooksRunForMixedCaseRequest pins down that
+// pre-hooks registered under a declared service's canonical name fire
+// even when the request URL's service segment uses a different case.
+// Hook registration is keyed on the canonical name from the policy
+// config (e.g. "github") — before the fix, serveDeclaredService passed
+// the raw request segment ("GITHUB") to ApplyPreHooks, so the lookup
+// missed the service-scoped hook and the Authorization header was
+// never injected.
+func TestServeDeclaredService_HooksRunForMixedCaseRequest(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	// Canonical name is lowercase "github"; request URL is uppercase.
+	p := newTestProxyWithNamedHTTPService(t, "github", upstream.URL, []policy.HTTPServiceRule{
+		{Name: "get", Methods: []string{"GET"}, Paths: []string{"/**"}, Decision: "allow"},
+	})
+
+	hookCalled := false
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "fake-injector",
+		preFn: func(r *http.Request, ctx *RequestContext) error {
+			hookCalled = true
+			if ctx.ServiceName != "github" {
+				t.Errorf("ctx.ServiceName = %q, want github (canonical)", ctx.ServiceName)
+			}
+			r.Header.Set("Authorization", "Bearer real-token")
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/GITHUB/user", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if !hookCalled {
+		t.Error("service-scoped hook was not called for mixed-case request")
+	}
+	if gotAuth != "Bearer real-token" {
+		t.Errorf("upstream Authorization = %q, want 'Bearer real-token'", gotAuth)
+	}
+}
+
+// TestServeDeclaredService_HooksRunForMixedCaseRequest_MixedCaseCanonical
+// is the mirror case: canonical name is mixed case "GitHub" and the
+// request uses lowercase "github". The hook is registered under the
+// canonical name "GitHub" and must still fire.
+func TestServeDeclaredService_HooksRunForMixedCaseRequest_MixedCaseCanonical(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithNamedHTTPService(t, "GitHub", upstream.URL, []policy.HTTPServiceRule{
+		{Name: "get", Methods: []string{"GET"}, Paths: []string{"/**"}, Decision: "allow"},
+	})
+
+	hookCalled := false
+	p.HookRegistry().Register("GitHub", &serviceRecorderHook{
+		name: "fake-injector",
+		preFn: func(r *http.Request, ctx *RequestContext) error {
+			hookCalled = true
+			if ctx.ServiceName != "GitHub" {
+				t.Errorf("ctx.ServiceName = %q, want GitHub (canonical)", ctx.ServiceName)
+			}
+			r.Header.Set("Authorization", "Bearer real-token")
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/user", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if !hookCalled {
+		t.Error("service-scoped hook was not called for case-mismatched request")
+	}
+	if gotAuth != "Bearer real-token" {
+		t.Errorf("upstream Authorization = %q, want 'Bearer real-token'", gotAuth)
+	}
+}
+
+// TestServeDeclaredService_PreHookCanRewritePath pins down that pre-hook
+// URL mutations (e.g. CredsSubHook substituting credentials in the URL
+// path) reach the upstream. Before the fix, serveDeclaredService captured
+// reqPath/escapedPath BEFORE running hooks and passed those stale values
+// to buildUpstreamRequest, so any hook rewrites of r.URL.Path/RawPath
+// were silently dropped.
+func TestServeDeclaredService_PreHookCanRewritePath(t *testing.T) {
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		// Policy rule is written against the *original* path, because
+		// CheckHTTPService runs before hooks. The hook then rewrites
+		// the URL to something the upstream serves.
+		{Name: "allow-original", Paths: []string{"/original"}, Decision: "allow"},
+	})
+
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "path-rewriter",
+		preFn: func(r *http.Request, _ *RequestContext) error {
+			r.URL.Path = "/rewritten"
+			r.URL.RawPath = "/rewritten"
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/original", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if gotPath != "/rewritten" {
+		t.Errorf("upstream path = %q, want /rewritten (hook rewrite dropped?)", gotPath)
+	}
+}
+
+// failingReader is an io.Reader that always returns an error. Used to
+// simulate a client whose request body stream fails mid-read.
+type failingReader struct{}
+
+func (failingReader) Read(_ []byte) (int, error) { return 0, errors.New("boom") }
+
+// TestServeDeclaredService_BodyReadError_Returns400 pins down that a
+// failure to read the request body returns an HTTP 400 and does NOT
+// forward the request upstream. Before the fix, io.ReadAll errors were
+// silently swallowed and the (partially-drained) body was handed to
+// hooks and the upstream, yielding a truncated forwarded request.
+func TestServeDeclaredService_BodyReadError_Returns400(t *testing.T) {
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-all", Methods: []string{"POST"}, Paths: []string{"/**"}, Decision: "allow"},
+	})
+
+	// httptest.NewRequest requires an io.Reader. The failing reader's
+	// Read always errors, simulating a mid-stream failure.
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github/foo", failingReader{})
+	// ContentLength > 0 so net/http doesn't helpfully short-circuit to
+	// http.NoBody before the handler ever calls Read.
+	req.ContentLength = 10
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if upstreamCalled {
+		t.Error("upstream should not be called when request body read fails")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%q", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); !strings.Contains(body, "read request body") {
+		t.Errorf("body = %q, want 'read request body' prefix", body)
 	}
 }

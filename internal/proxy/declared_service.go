@@ -75,7 +75,15 @@ func (p *Proxy) declaredService(reqPath string) (name, rest string, ok bool) {
 // serveDeclaredService handles a request routed to a declared http_service.
 // deny returns 403, approve returns 501 (wired in Task 10), allow/audit
 // forward to the configured upstream after running per-service pre-hooks.
-func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svcName, reqPath, requestID string, startTime time.Time) {
+//
+// rawSegment is the service name AS IT APPEARED IN THE REQUEST URL (with
+// its original case preserved). It is used only for the literal
+// escaped-path prefix strip below — the canonical name from the policy
+// config (svc.Name) is used for everything else, including hook dispatch
+// and RequestContext. This split exists because /svc matching is
+// case-insensitive but the byte-level prefix strip against
+// r.URL.EscapedPath() needs the exact request bytes.
+func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, rawSegment, reqPath, requestID string, startTime time.Time) {
 	p.mu.Lock()
 	eng := p.policyEngine
 	p.mu.Unlock()
@@ -90,7 +98,11 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svc
 		pathForEval = pathForEval[:idx]
 	}
 
-	dec := eng.CheckHTTPService(svcName, r.Method, pathForEval)
+	// CheckHTTPService MUST run against the path-below-/svc/<name> that
+	// the policy author wrote their rules against. It runs BEFORE any
+	// pre-hook URL mutation so hooks cannot inadvertently (or
+	// deliberately) sidestep the decision by rewriting the path.
+	dec := eng.CheckHTTPService(rawSegment, r.Method, pathForEval)
 
 	switch dec.EffectiveDecision {
 	case "deny":
@@ -113,11 +125,15 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svc
 		return
 	}
 
-	svc := p.findHTTPService(eng, svcName)
+	svc := p.findHTTPService(eng, rawSegment)
 	if svc == nil {
 		http.Error(w, "service vanished", http.StatusInternalServerError)
 		return
 	}
+	// canonicalName is the service name as written in the policy config.
+	// Hook registration is keyed on this canonical form, so ApplyPreHooks
+	// must use it — not the raw request segment, whose case may differ.
+	canonicalName := svc.Name
 
 	// Recover the original escaped path tail so encoded bytes (e.g. %2F)
 	// reach the upstream unchanged. http.Request.URL.Path has already been
@@ -127,11 +143,13 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svc
 	// re-escaping of Path). The "/svc/<name>" prefix contains no characters
 	// that would be percent-encoded (service names are validated against
 	// ^[A-Za-z0-9._-]+$ in policy.ValidateHTTPServices), so in the common
-	// case a literal prefix strip works. If the client sent percent-encoded
+	// case a literal prefix strip works. The literal strip uses rawSegment
+	// (case-preserved from the request) rather than canonicalName so the
+	// byte-level prefix matches exactly. If the client sent percent-encoded
 	// bytes in the name portion (which decode to the same unencoded name),
 	// fall back to re-escaping the decoded rest — that preserves safety
 	// without preserving the caller's idiosyncratic encoding of the name.
-	prefix := declaredServicePathPrefix + svcName
+	prefix := declaredServicePathPrefix + rawSegment
 	escaped := r.URL.EscapedPath()
 	var escapedPath string
 	if strings.HasPrefix(escaped, prefix) {
@@ -144,9 +162,35 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svc
 		escapedPath = "/"
 	}
 
+	// Buffer the request body before dispatching hooks so they can
+	// inspect it without exhausting the stream. PreHooks may replace
+	// r.Body — buildUpstreamRequest reads whatever body is set after
+	// hooks return. On read error we must fail closed: io.ReadAll may
+	// have already drained part of the stream, so leaving r.Body in
+	// place would hand hooks and the upstream a truncated request.
+	if r.Body != nil {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+	}
+
+	// Rewrite r.URL to the upstream-bound form BEFORE running hooks so
+	// that any hook-driven URL mutations (e.g. CredsSubHook substituting
+	// credentials in the URL path) are visible to buildUpstreamRequest,
+	// which now reads from r.URL directly rather than captured copies.
+	// The policy decision already ran against the pre-mutation path.
+	r.URL.Path = reqPath
+	r.URL.RawPath = escapedPath
+
 	// Build RequestContext for hook dispatch. The /svc/ path pins
-	// ServiceName to the declared service name so per-service hooks
-	// (e.g. HeaderInjectionHook keyed on the service) fire.
+	// ServiceName to the canonical service name (as written in the
+	// policy config) so per-service hooks registered under that key —
+	// e.g. HeaderInjectionHook — fire even when the caller used a
+	// different case in the URL.
 	sessionID := r.Header.Get("X-Session-ID")
 	if sessionID == "" {
 		sessionID = p.cfg.SessionID
@@ -154,25 +198,13 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svc
 	reqCtx := &RequestContext{
 		RequestID:   requestID,
 		SessionID:   sessionID,
-		ServiceName: svcName,
+		ServiceName: canonicalName,
 		StartTime:   startTime,
 		Attrs:       make(map[string]any),
 	}
 
-	// Buffer the request body before dispatching hooks so they can
-	// inspect it without exhausting the stream. PreHooks may replace
-	// r.Body — buildUpstreamRequest reads whatever body is set after
-	// hooks return.
-	if r.Body != nil {
-		body, err := io.ReadAll(r.Body)
-		if err == nil {
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			r.ContentLength = int64(len(body))
-		}
-	}
-
 	if p.hookRegistry != nil {
-		if err := p.hookRegistry.ApplyPreHooks(svcName, r, reqCtx); err != nil {
+		if err := p.hookRegistry.ApplyPreHooks(canonicalName, r, reqCtx); err != nil {
 			var abortErr *HookAbortError
 			if errors.As(err, &abortErr) {
 				code := abortErr.StatusCode
@@ -187,7 +219,7 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svc
 		}
 	}
 
-	outReq, err := p.buildUpstreamRequest(r, svc.Upstream, reqPath, escapedPath)
+	outReq, err := p.buildUpstreamRequest(r, svc.Upstream)
 	if err != nil {
 		http.Error(w, "rewrite failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -235,22 +267,35 @@ func (p *Proxy) findHTTPService(eng *policy.Engine, name string) *policy.HTTPSer
 }
 
 // buildUpstreamRequest clones the inbound request and retargets it at
-// svcUpstream + reqPath + (optional query string). Preserves method, body,
-// and headers. Does NOT apply hooks — hooks are wired in Task 9.
+// svcUpstream + the current r.URL.Path (decoded) and r.URL.RawPath
+// (escaped). Preserves method, body, and headers. Does NOT apply hooks —
+// serveDeclaredService runs pre-hooks before invoking this function, so
+// any hook-driven URL mutation is reflected here.
 //
-// reqPath is the decoded path tail (starting with '/') and escapedPath is
-// the original escaped form with the same meaning. Both are provided so
-// the outbound URL can carry percent-encoded bytes (e.g. %2F) through to
-// the upstream unchanged: Go preserves URL.RawPath only when it differs
-// from URL.Path after decoding, and prefers RawPath in URL.String() when
-// present — so we unconditionally populate both.
-func (p *Proxy) buildUpstreamRequest(r *http.Request, svcUpstream, reqPath, escapedPath string) (*http.Request, error) {
+// The caller is responsible for rewriting r.URL to the upstream-bound
+// form (stripping /svc/<name>) before calling. This function does not
+// take reqPath/escapedPath parameters so it cannot be called with stale
+// captured-before-hooks values — the only source of truth for the path
+// is r.URL at the moment the request is about to be forwarded.
+//
+// Go preserves URL.RawPath only when it differs from URL.Path after
+// decoding, and prefers RawPath in URL.String() when present — so we
+// unconditionally populate both on the outbound URL.
+func (p *Proxy) buildUpstreamRequest(r *http.Request, svcUpstream string) (*http.Request, error) {
 	u, err := url.Parse(svcUpstream)
 	if err != nil {
 		return nil, err
 	}
 	// Preserve query string if present on the inbound request.
 	rawQuery := r.URL.RawQuery
+	// Read the decoded and escaped forms directly from r.URL so any
+	// mutation pre-hooks performed (e.g. CredsSubHook substituting
+	// credentials into the URL path) is carried through to the upstream.
+	reqPath := r.URL.Path
+	escapedPath := r.URL.EscapedPath()
+	if escapedPath == "" {
+		escapedPath = reqPath
+	}
 	// Build the decoded and escaped forms of the joined path. Go prefers
 	// URL.RawPath in String() when it is a valid encoding of Path, so we
 	// populate both: Path carries the decoded form, RawPath carries the
