@@ -1121,6 +1121,7 @@ func TestServeDeclaredService_LogRedactsInjectedAndCookieHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStorage: %v", err)
 	}
+	defer storage.Close()
 
 	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
 		{Name: "allow-user", Methods: []string{"GET"}, Paths: []string{"/user"}, Decision: "allow"},
@@ -1217,6 +1218,7 @@ func TestServeDeclaredService_LogReflectsPostHookBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStorage: %v", err)
 	}
+	defer storage.Close()
 
 	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
 		{Name: "allow-upload", Methods: []string{"POST"}, Paths: []string{"/upload"}, Decision: "allow"},
@@ -1271,6 +1273,7 @@ func TestServeDeclaredService_LogsRequestAndResponseToStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStorage: %v", err)
 	}
+	defer storage.Close()
 
 	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
 		{Name: "read-user", Methods: []string{"GET"}, Paths: []string{"/user"}, Decision: "allow"},
@@ -1344,6 +1347,7 @@ func TestServeDeclaredService_StoresPreHookBodyDespitePostHookSubstitution(t *te
 	if err != nil {
 		t.Fatalf("NewStorage: %v", err)
 	}
+	defer storage.Close()
 
 	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
 		{Name: "allow-upload", Methods: []string{"POST"}, Paths: []string{"/upload"}, Decision: "allow"},
@@ -1420,6 +1424,7 @@ func TestServeDeclaredService_HookNilsBody_LogsZeroAndStoresNothing(t *testing.T
 	if err != nil {
 		t.Fatalf("NewStorage: %v", err)
 	}
+	defer storage.Close()
 
 	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
 		{Name: "allow-upload", Methods: []string{"POST"}, Paths: []string{"/upload"}, Decision: "allow"},
@@ -1484,6 +1489,7 @@ func TestServeDeclaredService_HookNilsBodyLeavesStaleContentLength_Normalized(t 
 	if err != nil {
 		t.Fatalf("NewStorage: %v", err)
 	}
+	defer storage.Close()
 
 	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
 		{Name: "allow-upload", Methods: []string{"POST"}, Paths: []string{"/upload"}, Decision: "allow"},
@@ -1558,6 +1564,7 @@ func TestServeDeclaredService_HookSetsHttpNoBody_Normalized(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStorage: %v", err)
 	}
+	defer storage.Close()
 
 	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
 		{Name: "allow-upload", Methods: []string{"POST"}, Paths: []string{"/upload"}, Decision: "allow"},
