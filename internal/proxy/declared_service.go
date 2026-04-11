@@ -138,6 +138,36 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 		pathForEval = pathForEval[:idx]
 	}
 
+	// Recover the original escaped path tail so encoded bytes (e.g. %2F)
+	// are visible downstream unchanged — both for the approval Target (so
+	// approvers see exactly what the client sent, including %2F/%3F) and
+	// for the upstream forwarding path below. http.Request.URL.Path has
+	// already been decoded — deriving either use from it would lose
+	// distinctions like "/items/a%2Fb" vs "/items/a/b". EscapedPath()
+	// returns the canonical escaped form (RawPath if set and valid,
+	// otherwise the re-escaping of Path). The "/svc/<name>" prefix
+	// contains no characters that would be percent-encoded (service names
+	// are validated against ^[A-Za-z0-9._-]+$ in policy.ValidateHTTPServices),
+	// so in the common case a literal prefix strip works. The literal
+	// strip uses rawSegment (case-preserved from the request) rather than
+	// a canonical name so the byte-level prefix matches exactly. If the
+	// client sent percent-encoded bytes in the name portion (which decode
+	// to the same unencoded name), fall back to re-escaping the decoded
+	// rest — that preserves safety without preserving the caller's
+	// idiosyncratic encoding of the name.
+	prefix := declaredServicePathPrefix + rawSegment
+	escaped := r.URL.EscapedPath()
+	var escapedPath string
+	if strings.HasPrefix(escaped, prefix) {
+		escapedPath = strings.TrimPrefix(escaped, prefix)
+	} else {
+		// Name was encoded or case-differs — re-escape the decoded rest.
+		escapedPath = (&url.URL{Path: reqPath}).EscapedPath()
+	}
+	if escapedPath == "" {
+		escapedPath = "/"
+	}
+
 	// CheckHTTPService MUST run against the path-below-/svc/<name> that
 	// the policy author wrote their rules against. It runs BEFORE any
 	// pre-hook URL mutation so hooks cannot inadvertently (or
@@ -158,11 +188,14 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 		appr := p.httpSvcApprovals
 		p.mu.Unlock()
 		if appr != nil {
-			// Target includes the raw query string (unparsed, as
-			// received from the client) when present so approvers see
-			// the full request — hiding ?force=true or similar would
-			// obscure material details about what's being approved.
-			target := rawSegment + " " + r.Method + " " + pathForEval
+			// Target uses the escaped-form path tail and the raw query
+			// string (unparsed, as received from the client) when
+			// present, so approvers see exactly what the client sent —
+			// including encoded bytes like %2F/%3F that would otherwise
+			// collapse to their decoded characters and misrepresent the
+			// resource being approved. Hiding the query string would
+			// similarly obscure material details (e.g. ?force=true).
+			target := rawSegment + " " + r.Method + " " + escapedPath
 			if r.URL.RawQuery != "" {
 				target += "?" + r.URL.RawQuery
 			}
@@ -228,33 +261,6 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 	// Hook registration is keyed on this canonical form, so ApplyPreHooks
 	// must use it — not the raw request segment, whose case may differ.
 	canonicalName := svc.Name
-
-	// Recover the original escaped path tail so encoded bytes (e.g. %2F)
-	// reach the upstream unchanged. http.Request.URL.Path has already been
-	// decoded — rebuilding the upstream URL from it would lose distinctions
-	// like "/items/a%2Fb" vs "/items/a/b". EscapedPath() returns the
-	// canonical escaped form (RawPath if set and valid, otherwise the
-	// re-escaping of Path). The "/svc/<name>" prefix contains no characters
-	// that would be percent-encoded (service names are validated against
-	// ^[A-Za-z0-9._-]+$ in policy.ValidateHTTPServices), so in the common
-	// case a literal prefix strip works. The literal strip uses rawSegment
-	// (case-preserved from the request) rather than canonicalName so the
-	// byte-level prefix matches exactly. If the client sent percent-encoded
-	// bytes in the name portion (which decode to the same unencoded name),
-	// fall back to re-escaping the decoded rest — that preserves safety
-	// without preserving the caller's idiosyncratic encoding of the name.
-	prefix := declaredServicePathPrefix + rawSegment
-	escaped := r.URL.EscapedPath()
-	var escapedPath string
-	if strings.HasPrefix(escaped, prefix) {
-		escapedPath = strings.TrimPrefix(escaped, prefix)
-	} else {
-		// Name was encoded or case-differs — re-escape the decoded rest.
-		escapedPath = (&url.URL{Path: reqPath}).EscapedPath()
-	}
-	if escapedPath == "" {
-		escapedPath = "/"
-	}
 
 	// Buffer the request body before dispatching hooks so they can
 	// inspect it without exhausting the stream. PreHooks may replace

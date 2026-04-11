@@ -217,6 +217,39 @@ func TestServeDeclaredService_Approve_TargetIncludesQueryString(t *testing.T) {
 	}
 }
 
+// TestServeDeclaredService_Approve_TargetPreservesEncodedPath pins down
+// that the approval Target shows the approver the exact escaped bytes
+// the client sent — not the decoded form. Before the fix, Target was
+// built from r.URL.Path (decoded by net/http), so percent-encoded bytes
+// like %2F collapsed to their literal characters and approvers saw a
+// different or ambiguous path from what the client actually requested.
+// The service rule matches the decoded form (/items/a/b) because
+// CheckHTTPService runs against the decoded path; the Target string is
+// human-facing and must preserve the original encoding.
+func TestServeDeclaredService_Approve_TargetPreservesEncodedPath(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "require-approval", Methods: []string{"POST"}, Paths: []string{"/items/a/b"}, Decision: "approve"},
+	})
+	appr := &fakeApprovalsManager{approve: true}
+	p.SetApprovalsForTest(appr)
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github/items/a%2Fb?force=true", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if got, want := appr.gotReq.Target, "github POST /items/a%2Fb?force=true"; got != want {
+		t.Errorf("approval Target = %q, want %q", got, want)
+	}
+}
+
 // TestServeDeclaredService_Approve_Denied pins down that when an approvals
 // manager is wired and returns Approved=false, the handler must deny with
 // 403 Forbidden and MUST NOT forward the request to the upstream.
