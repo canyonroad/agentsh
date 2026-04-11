@@ -183,8 +183,29 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 	// credentials in the URL path) are visible to buildUpstreamRequest,
 	// which now reads from r.URL directly rather than captured copies.
 	// The policy decision already ran against the pre-mutation path.
+	//
+	// Path/RawPath contract with hooks:
+	//   - r.URL.Path is set to the decoded tail.
+	//   - r.URL.RawPath is INTENTIONALLY LEFT EMPTY across the hook
+	//     dispatch to avoid the stale-pre-seed footgun: if we pre-seeded
+	//     RawPath with the escaped tail and a hook mutated r.URL.Path,
+	//     the RawPath left behind would no longer match the new Path
+	//     and Go's url.URL.EscapedPath() would silently fall back to
+	//     re-escaping Path — dropping any %2F (or similar) bytes that
+	//     lived in segments the hook didn't touch.
+	//   - After hooks return, if r.URL.Path is byte-identical to the
+	//     snapshot, we know the hook did not touch the path and it is
+	//     safe to re-apply the original escaped tail so encoded bytes
+	//     reach the upstream unchanged.
+	//   - If the hook DID mutate r.URL.Path, the hook owns the
+	//     encoding: Go will re-escape from r.URL.Path and any percent-
+	//     encoded bytes in untouched segments are lost. Hooks that want
+	//     to rewrite Path while preserving encoded bytes elsewhere
+	//     MUST set both r.URL.Path and r.URL.RawPath consistently —
+	//     this is Go's standard contract for url.URL.
 	r.URL.Path = reqPath
-	r.URL.RawPath = escapedPath
+	r.URL.RawPath = ""
+	preHookPath := r.URL.Path
 
 	// Build RequestContext for hook dispatch. The /svc/ path pins
 	// ServiceName to the canonical service name (as written in the
@@ -217,6 +238,17 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 			http.Error(w, "hook error: "+err.Error(), http.StatusBadGateway)
 			return
 		}
+	}
+
+	// Re-apply the original escaped tail only if the hook left r.URL.Path
+	// untouched. If the hook mutated Path, leave r.URL.RawPath empty so
+	// Go's url.URL.EscapedPath() re-escapes r.URL.Path from scratch —
+	// that's the hook's responsibility per the contract documented
+	// above. Skip the re-apply when the escaped and decoded forms are
+	// identical: setting RawPath equal to Path would be a redundant
+	// string write and Go would treat it identically to the empty case.
+	if r.URL.Path == preHookPath && escapedPath != preHookPath {
+		r.URL.RawPath = escapedPath
 	}
 
 	outReq, err := p.buildUpstreamRequest(r, svc.Upstream)

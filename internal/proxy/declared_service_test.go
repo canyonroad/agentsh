@@ -636,3 +636,131 @@ func TestServeDeclaredService_BodyReadError_Returns400(t *testing.T) {
 		t.Errorf("body = %q, want 'read request body' prefix", body)
 	}
 }
+
+// TestServeDeclaredService_PreservesEscapedPath_WhenHookDoesNotTouchPath
+// pins down that percent-encoded bytes in the request path reach the
+// upstream unchanged even when a pre-hook runs — so long as the hook
+// does not mutate r.URL.Path. The hook here injects a header (the common
+// case for per-service hooks) and leaves the URL alone; the %2F must
+// still survive to the upstream.
+func TestServeDeclaredService_PreservesEscapedPath_WhenHookDoesNotTouchPath(t *testing.T) {
+	var gotEscaped string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscaped = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-repos", Paths: []string{"/repos/**"}, Decision: "allow"},
+	})
+
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "header-only",
+		preFn: func(r *http.Request, _ *RequestContext) error {
+			// Hook leaves r.URL.Path and r.URL.RawPath alone.
+			r.Header.Set("Authorization", "Bearer real-token")
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/repos/a%2Fb/issues", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if gotEscaped != "/repos/a%2Fb/issues" {
+		t.Errorf("upstream EscapedPath = %q, want /repos/a%%2Fb/issues", gotEscaped)
+	}
+}
+
+// TestServeDeclaredService_HookPathRewrite_DropsEncodedBytes documents
+// the intentional limitation of the Path/RawPath contract: when a pre-hook
+// mutates only r.URL.Path (not RawPath), percent-encoded bytes in other
+// segments are LOST because Go's url.URL.EscapedPath() re-escapes from
+// the decoded Path when RawPath is stale or empty.
+//
+// Hooks that want to rewrite Path while preserving encoded bytes in
+// untouched segments must set both Path and RawPath together. See
+// TestServeDeclaredService_HookRewritesBothPathAndRawPath below for the
+// opt-in pattern.
+func TestServeDeclaredService_HookPathRewrite_DropsEncodedBytes(t *testing.T) {
+	var gotEscaped string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscaped = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-repos", Paths: []string{"/repos/**"}, Decision: "allow"},
+	})
+
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "path-suffix-rewrite",
+		preFn: func(r *http.Request, _ *RequestContext) error {
+			// Hook mutates only Path, leaving RawPath untouched. This
+			// is the "common but wrong" pattern documented in the
+			// fix's follow-up comment.
+			r.URL.Path = strings.Replace(r.URL.Path, "/issues", "/pulls", 1)
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/repos/a%2Fb/issues", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	// The hook owns the re-escaping because it mutated Path without
+	// updating RawPath. %2F is re-encoded from the decoded '/' to a
+	// literal '/' in the upstream path. This is INTENTIONAL — it
+	// documents the hook contract, not a regression.
+	if gotEscaped != "/repos/a/b/pulls" {
+		t.Errorf("upstream EscapedPath = %q, want /repos/a/b/pulls (hook owns encoding when mutating Path)", gotEscaped)
+	}
+}
+
+// TestServeDeclaredService_HookRewritesBothPathAndRawPath pins down the
+// opt-in path for hooks that need to rewrite the URL while preserving
+// encoded bytes: set BOTH r.URL.Path and r.URL.RawPath. When RawPath is
+// a valid encoding of Path, Go's EscapedPath() returns RawPath verbatim
+// and the upstream receives exactly what the hook produced.
+func TestServeDeclaredService_HookRewritesBothPathAndRawPath(t *testing.T) {
+	var gotEscaped string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscaped = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-repos", Paths: []string{"/repos/**"}, Decision: "allow"},
+	})
+
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "path-suffix-rewrite-encoded",
+		preFn: func(r *http.Request, _ *RequestContext) error {
+			// Hook rewrites the suffix AND keeps the encoded byte in
+			// the untouched prefix by updating both fields.
+			r.URL.Path = "/repos/a/b/pulls"
+			r.URL.RawPath = "/repos/a%2Fb/pulls"
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/repos/a%2Fb/issues", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if gotEscaped != "/repos/a%2Fb/pulls" {
+		t.Errorf("upstream EscapedPath = %q, want /repos/a%%2Fb/pulls", gotEscaped)
+	}
+}
