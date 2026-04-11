@@ -68,6 +68,12 @@ func TestCheckHTTPService(t *testing.T) {
 		{"dot segment rejected", "github", "GET", "/repos/./a/b/issues", types.DecisionDeny, ""},
 		{"case sensitive path no match", "github", "GET", "/REPOS/a/b/issues", types.DecisionDeny, "default"},
 		{"query string ignored", "github", "GET", "/repos/a/b/issues?state=open", types.DecisionAllow, "read-issues"},
+		{"trailing slash allowed", "github", "GET", "/repos/a/b/issues/", types.DecisionAllow, "read-issues"},
+		{"trailing slash any-method", "github", "POST", "/public/thing/", types.DecisionAllow, "any-method"},
+		{"trailing slash wildcard-subtree", "github", "GET", "/orgs/acme/members/", types.DecisionAllow, "wildcard-subtree"},
+		{"root slash open service", "open", "GET", "/", types.DecisionAllow, "default"},
+		{"double slash at root", "github", "GET", "//", types.DecisionDeny, ""},
+		{"trailing double slash", "github", "GET", "/repos/a/b/issues//", types.DecisionDeny, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
