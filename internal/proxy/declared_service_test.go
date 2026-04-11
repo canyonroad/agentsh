@@ -345,6 +345,85 @@ func TestServeDeclaredService_StripsMultipleConnectionRequestHeaders(t *testing.
 	}
 }
 
+// TestServeDeclaredService_HooksRunPerService pins down that pre-hooks
+// registered under a declared service's name are invoked in the /svc/
+// forwarding path, and that the RequestContext is populated with the
+// correct ServiceName. This is the knob that makes per-service header
+// injection (HeaderInjectionHook) actually take effect at runtime.
+func TestServeDeclaredService_HooksRunPerService(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "get", Methods: []string{"GET"}, Paths: []string{"/**"}, Decision: "allow"},
+	})
+
+	// Register a hook under "github" that sets the Authorization header.
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "fake-injector",
+		preFn: func(r *http.Request, ctx *RequestContext) error {
+			r.Header.Set("Authorization", "Bearer real-token")
+			if ctx.ServiceName != "github" {
+				t.Errorf("ctx.ServiceName = %q, want github", ctx.ServiceName)
+			}
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/user", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if gotAuth != "Bearer real-token" {
+		t.Errorf("upstream Authorization = %q, want 'Bearer real-token'", gotAuth)
+	}
+}
+
+// TestServeDeclaredService_HookAbortError_ReturnsStatusCode pins down that
+// returning a *HookAbortError from a pre-hook in the /svc/ path causes the
+// proxy to respond with the error's StatusCode and Message instead of
+// forwarding the request upstream.
+func TestServeDeclaredService_HookAbortError_ReturnsStatusCode(t *testing.T) {
+	var upstreamCalled bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "get", Methods: []string{"GET"}, Paths: []string{"/**"}, Decision: "allow"},
+	})
+
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "abort",
+		preFn: func(r *http.Request, ctx *RequestContext) error {
+			return &HookAbortError{StatusCode: http.StatusForbidden, Message: "blocked by hook"}
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/user", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if upstreamCalled {
+		t.Error("upstream should not have been called after hook abort")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%q", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); !strings.Contains(body, "blocked by hook") {
+		t.Errorf("body = %q, want 'blocked by hook'", body)
+	}
+}
+
 // TestServeDeclaredService_StripsMultipleConnectionResponseHeaders is the
 // response-side equivalent: when the upstream sends Connection on two
 // lines, both lines' nominated headers must be dropped before copying

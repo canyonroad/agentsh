@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -72,7 +74,7 @@ func (p *Proxy) declaredService(reqPath string) (name, rest string, ok bool) {
 
 // serveDeclaredService handles a request routed to a declared http_service.
 // deny returns 403, approve returns 501 (wired in Task 10), allow/audit
-// forward to the configured upstream. Hooks are wired in Task 9.
+// forward to the configured upstream after running per-service pre-hooks.
 func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svcName, reqPath, requestID string, startTime time.Time) {
 	p.mu.Lock()
 	eng := p.policyEngine
@@ -140,6 +142,49 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svc
 	}
 	if escapedPath == "" {
 		escapedPath = "/"
+	}
+
+	// Build RequestContext for hook dispatch. The /svc/ path pins
+	// ServiceName to the declared service name so per-service hooks
+	// (e.g. HeaderInjectionHook keyed on the service) fire.
+	sessionID := r.Header.Get("X-Session-ID")
+	if sessionID == "" {
+		sessionID = p.cfg.SessionID
+	}
+	reqCtx := &RequestContext{
+		RequestID:   requestID,
+		SessionID:   sessionID,
+		ServiceName: svcName,
+		StartTime:   startTime,
+		Attrs:       make(map[string]any),
+	}
+
+	// Buffer the request body before dispatching hooks so they can
+	// inspect it without exhausting the stream. PreHooks may replace
+	// r.Body — buildUpstreamRequest reads whatever body is set after
+	// hooks return.
+	if r.Body != nil {
+		body, err := io.ReadAll(r.Body)
+		if err == nil {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+		}
+	}
+
+	if p.hookRegistry != nil {
+		if err := p.hookRegistry.ApplyPreHooks(svcName, r, reqCtx); err != nil {
+			var abortErr *HookAbortError
+			if errors.As(err, &abortErr) {
+				code := abortErr.StatusCode
+				if code < 400 || code > 599 {
+					code = http.StatusBadGateway
+				}
+				http.Error(w, abortErr.Message, code)
+				return
+			}
+			http.Error(w, "hook error: "+err.Error(), http.StatusBadGateway)
+			return
+		}
 	}
 
 	outReq, err := p.buildUpstreamRequest(r, svc.Upstream, reqPath, escapedPath)
