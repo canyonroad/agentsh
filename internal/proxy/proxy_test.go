@@ -18,6 +18,7 @@ import (
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/mcpinspect"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
+	"github.com/agentsh/agentsh/internal/policy"
 )
 
 // TestProxy_AnthropicPassthrough tests that requests are correctly
@@ -1962,5 +1963,35 @@ func TestProxyRateLimitBlocksToolCall(t *testing.T) {
 	}
 	if ev.SessionID != "test-ratelimit-block" {
 		t.Errorf("session_id: got %q, want %q", ev.SessionID, "test-ratelimit-block")
+	}
+}
+
+// TestEnvVars_IncludesDeclaredServices verifies that EnvVars emits one
+// <NAME>_API_URL entry per declared http_service, pointing at the
+// /svc/<name> path prefix on the proxy listener. The existing LLM base
+// URLs must continue to be set.
+func TestEnvVars_IncludesDeclaredServices(t *testing.T) {
+	cfg := Config{SessionID: "test-session"}
+	p, err := New(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	// Simulate the proxy having started with a bound listener.
+	p.setAddrForTest("127.0.0.1:12345")
+
+	p.SetHTTPServices([]policy.HTTPService{
+		{Name: "github", Upstream: "https://api.github.com", ExposeAs: "GITHUB_API_URL"},
+		{Name: "stripe", Upstream: "https://api.stripe.com"},
+	})
+
+	env := p.EnvVars()
+	if got := env["GITHUB_API_URL"]; got != "http://127.0.0.1:12345/svc/github" {
+		t.Errorf("GITHUB_API_URL = %q", got)
+	}
+	if got := env["STRIPE_API_URL"]; got != "http://127.0.0.1:12345/svc/stripe" {
+		t.Errorf("STRIPE_API_URL = %q", got)
+	}
+	if _, ok := env["ANTHROPIC_BASE_URL"]; !ok {
+		t.Error("ANTHROPIC_BASE_URL should still be set")
 	}
 }
