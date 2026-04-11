@@ -37,6 +37,10 @@ type Engine struct {
 	compiledUnixRules     []compiledUnixRule
 	compiledRegistryRules []compiledRegistryRule
 
+	// HTTP service compiled lookup maps
+	httpServices     map[string]*compiledHTTPService // keyed by lowercased name
+	httpServiceHosts map[string]*compiledHTTPService // keyed by canonicalized host
+
 	// Compiled redirect rules for DNS and connect interception
 	dnsRedirectRules     []compiledDnsRedirectRule
 	connectRedirectRules []compiledConnectRedirectRule
@@ -321,6 +325,14 @@ func NewEngine(p *Policy, enforceApprovals bool, enforceRedirects bool) (*Engine
 		return nil, err
 	}
 	e.signalEngine = sigEngine
+
+	// Compile HTTP services (after validation has run in Policy.Validate).
+	byName, byHost, err := compileHTTPServices(p.HTTPServices)
+	if err != nil {
+		return nil, fmt.Errorf("compile http_services: %w", err)
+	}
+	e.httpServices = byName
+	e.httpServiceHosts = byHost
 
 	return e, nil
 }

@@ -821,3 +821,82 @@ func TestValidateHTTPServices(t *testing.T) {
 		})
 	}
 }
+
+func TestCompileHTTPServices_Smoke(t *testing.T) {
+	svcs := []HTTPService{{
+		Name: "github", Upstream: "https://api.github.com",
+		Default: "deny",
+		Rules: []HTTPServiceRule{{
+			Name: "read", Methods: []string{"GET"},
+			Paths: []string{"/repos/*/*/issues"}, Decision: "allow",
+		}},
+	}}
+	if err := ValidateHTTPServices(svcs); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	byName, byHost, err := compileHTTPServices(svcs)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	cs, ok := byName["github"]
+	if !ok {
+		t.Fatal("github not in byName map")
+	}
+	if cs.envVar != "GITHUB_API_URL" {
+		t.Errorf("envVar = %q, want GITHUB_API_URL", cs.envVar)
+	}
+	if cs.upstreamHost != "api.github.com" {
+		t.Errorf("upstreamHost = %q", cs.upstreamHost)
+	}
+	if cs.defaultDecision != "deny" {
+		t.Errorf("defaultDecision = %q", cs.defaultDecision)
+	}
+	if len(cs.rules) != 1 {
+		t.Fatalf("rules = %d, want 1", len(cs.rules))
+	}
+	if _, ok := cs.rules[0].methods["GET"]; !ok {
+		t.Errorf("method GET not compiled")
+	}
+	if len(cs.rules[0].paths) != 1 {
+		t.Errorf("paths not compiled")
+	}
+	if _, ok := byHost["api.github.com"]; !ok {
+		t.Error("api.github.com not in byHost map")
+	}
+}
+
+func TestCompileHTTPServices_AliasesIndexedByCanonicalHost(t *testing.T) {
+	svcs := []HTTPService{{
+		Name: "github", Upstream: "https://api.github.com",
+		Aliases: []string{"UPLOADS.GitHub.COM", "raw.githubusercontent.com", "[::1]:443"},
+		Default: "deny",
+		Rules: []HTTPServiceRule{{
+			Name: "any", Paths: []string{"/**"}, Decision: "allow",
+		}},
+	}}
+	if err := ValidateHTTPServices(svcs); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	_, byHost, err := compileHTTPServices(svcs)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	for _, want := range []string{
+		"api.github.com",            // upstream host
+		"uploads.github.com",        // mixed-case alias canonicalizes to lowercase
+		"raw.githubusercontent.com", // plain alias
+		"::1",                       // bracketed IPv6 alias canonicalizes without brackets
+	} {
+		if _, ok := byHost[want]; !ok {
+			t.Errorf("byHost missing %q (keys: %v)", want, keysOf(byHost))
+		}
+	}
+}
+
+func keysOf(m map[string]*compiledHTTPService) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
