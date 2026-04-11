@@ -78,3 +78,62 @@ func FuzzCheckHTTPServicePath(f *testing.F) {
 		}
 	})
 }
+
+// FuzzCheckHTTPServiceDefaultAllow exercises a service whose Default is
+// "allow" and no rules, verifying the traversal guard still rejects path
+// traversal attempts. If a future refactor reorders the guard behind the
+// default decision, default-allow services would start forwarding "..",
+// "." and "//" paths upstream — this target will catch that regression.
+func FuzzCheckHTTPServiceDefaultAllow(f *testing.F) {
+	svcs := []HTTPService{{
+		Name: "open", Upstream: "https://open.example.com",
+		Default: "allow",
+	}}
+	if err := ValidateHTTPServices(svcs); err != nil {
+		f.Fatal(err)
+	}
+	byName, byHost, err := compileHTTPServices(svcs)
+	if err != nil {
+		f.Fatal(err)
+	}
+	e := &Engine{
+		policy:           &Policy{HTTPServices: svcs},
+		httpServices:     byName,
+		httpServiceHosts: byHost,
+		enforceApprovals: true,
+	}
+
+	f.Add("GET", "/")
+	f.Add("GET", "/foo/bar")
+	f.Add("GET", "/foo/../bar")
+	f.Add("POST", "/foo//bar")
+	f.Add("DELETE", "/./foo")
+	f.Add("PUT", "/foo/.")
+	f.Add("HEAD", "/foo/..")
+
+	f.Fuzz(func(t *testing.T, method, reqPath string) {
+		if strings.ContainsRune(method, 0) {
+			return
+		}
+		dec := e.CheckHTTPService("open", method, reqPath)
+		if dec.EffectiveDecision != types.DecisionAllow {
+			return
+		}
+		// Mirror the evaluator's own rejection logic. An allow decision
+		// is only correct if reqPath (after the evaluator's "" -> "/"
+		// remap) has neither "//" nor any "." / ".." segment.
+		p := reqPath
+		if p == "" {
+			p = "/"
+		}
+		if strings.Contains(p, "//") {
+			t.Errorf("default-allow leaked path %q containing //", reqPath)
+		}
+		for _, seg := range strings.Split(strings.TrimPrefix(p, "/"), "/") {
+			if seg == "." || seg == ".." {
+				t.Errorf("default-allow leaked path %q with segment %q", reqPath, seg)
+				break
+			}
+		}
+	})
+}
