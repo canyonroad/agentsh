@@ -84,11 +84,20 @@ func pathMatchesHTTPRule(r compiledHTTPServiceRule, reqPath string) bool {
 }
 
 // DeclaredHTTPServiceHost reports whether host belongs to a declared
-// http_services entry. host may include a port (stripped via
-// canonicalizeHost), be in any case, or be a bracketed IPv6 literal.
-// Returns the canonical service name and the env var name used by the
-// gateway, for inclusion in guidance messages.
+// http_services entry. host may include a port (bracket-aware strip),
+// be in any case, end in a trailing dot, or be a bracketed IPv6 literal.
+// It also accepts a bare IPv6 literal (e.g. from net.SplitHostPort on
+// a bracketed authority), which callers may produce when dealing with
+// post-parsed HTTP Host headers. Returns the canonical service name
+// and the env var name used by the gateway.
 func (e *Engine) DeclaredHTTPServiceHost(host string) (serviceName, envVar string, ok bool) {
+	// Rewrap bare IPv6 literals so canonicalizeHost can see them.
+	// A hostname never contains a colon, and host:port has exactly
+	// one, so >= 2 colons on an unbracketed string unambiguously
+	// indicates a bare IPv6 literal.
+	if !strings.HasPrefix(host, "[") && strings.Count(host, ":") >= 2 {
+		host = "[" + host + "]"
+	}
 	h, good := canonicalizeHost(host)
 	if !good {
 		return "", "", false
@@ -100,15 +109,34 @@ func (e *Engine) DeclaredHTTPServiceHost(host string) (serviceName, envVar strin
 	return cs.cfg.Name, cs.envVar, true
 }
 
-// HTTPServices returns a shallow copy of the source HTTPService list.
+// HTTPServices returns a deep copy of the source HTTPService list.
 // Used by the proxy to enumerate declared services for EnvVars()
-// injection and by tests. Callers may mutate the returned slice without
-// affecting engine state.
+// injection and by tests. Callers may mutate the returned slice and
+// its contents without affecting engine state.
 func (e *Engine) HTTPServices() []HTTPService {
 	if e == nil || e.policy == nil || len(e.policy.HTTPServices) == 0 {
 		return nil
 	}
 	out := make([]HTTPService, len(e.policy.HTTPServices))
-	copy(out, e.policy.HTTPServices)
+	for i, src := range e.policy.HTTPServices {
+		dst := src // copies scalar fields
+		if len(src.Aliases) > 0 {
+			dst.Aliases = append([]string(nil), src.Aliases...)
+		}
+		if len(src.Rules) > 0 {
+			dst.Rules = make([]HTTPServiceRule, len(src.Rules))
+			for j, r := range src.Rules {
+				rc := r // copies scalar fields
+				if len(r.Methods) > 0 {
+					rc.Methods = append([]string(nil), r.Methods...)
+				}
+				if len(r.Paths) > 0 {
+					rc.Paths = append([]string(nil), r.Paths...)
+				}
+				dst.Rules[j] = rc
+			}
+		}
+		out[i] = dst
+	}
 	return out
 }

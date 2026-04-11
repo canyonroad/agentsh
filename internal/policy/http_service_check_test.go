@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"net"
 	"strings"
 	"testing"
 
@@ -156,11 +157,56 @@ func TestDeclaredHTTPServiceHost_BracketedIPv6(t *testing.T) {
 	}
 }
 
+func TestDeclaredHTTPServiceHost_BareIPv6FromSplitHostPort(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "local",
+		Upstream: "https://[::1]",
+		Rules: []HTTPServiceRule{{
+			Name: "any", Paths: []string{"/**"}, Decision: "allow",
+		}},
+	}}
+	e := newTestEngineForHTTP(t, svcs)
+
+	// Simulate net.SplitHostPort("[::1]:443") → host="::1", port="443".
+	host, port, err := net.SplitHostPort("[::1]:443")
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	if port != "443" || host != "::1" {
+		t.Fatalf("unexpected SplitHostPort result: host=%q port=%q", host, port)
+	}
+	svc, _, ok := e.DeclaredHTTPServiceHost(host)
+	if !ok || svc != "local" {
+		t.Errorf("DeclaredHTTPServiceHost(%q) = (%q, ok=%v), want (local, ok=true)", host, svc, ok)
+	}
+
+	// Bare IPv6 with different spelling must also resolve.
+	for _, h := range []string{"::1", "fe80::x"} {
+		svc, _, ok := e.DeclaredHTTPServiceHost(h)
+		if h == "::1" {
+			if !ok || svc != "local" {
+				t.Errorf("%q → (%q, ok=%v), want (local, ok=true)", h, svc, ok)
+			}
+		} else {
+			// Invalid IPv6 — must not resolve, must not panic.
+			if ok {
+				t.Errorf("%q unexpectedly resolved to %q", h, svc)
+			}
+		}
+	}
+}
+
 func TestHTTPServicesEnumeration(t *testing.T) {
 	svcs := []HTTPService{
 		{
 			Name: "a", Upstream: "https://a.example.com",
-			Rules: []HTTPServiceRule{{Name: "r", Paths: []string{"/**"}, Decision: "allow"}},
+			Aliases: []string{"a-alt.example.com"},
+			Rules: []HTTPServiceRule{{
+				Name:     "r",
+				Methods:  []string{"GET", "POST"},
+				Paths:    []string{"/**", "/v1/**"},
+				Decision: "allow",
+			}},
 		},
 		{
 			Name: "b", Upstream: "https://b.example.com",
@@ -176,10 +222,29 @@ func TestHTTPServicesEnumeration(t *testing.T) {
 		t.Errorf("ordering not preserved: %+v", got)
 	}
 
-	// Returned slice must be an independent copy — mutating it should
-	// not affect the engine's stored policy.
+	// Top-level mutation must not leak.
 	got[0].Name = "MUTATED"
 	if again := e.HTTPServices(); again[0].Name == "MUTATED" {
-		t.Error("HTTPServices() returned a view, not a copy")
+		t.Error("HTTPServices(): top-level mutation leaked through")
+	}
+
+	// Nested slice mutations must not leak either.
+	got[0].Aliases[0] = "mutated-alias.example.com"
+	got[0].Rules[0].Name = "MUTATED_RULE"
+	got[0].Rules[0].Methods[0] = "DELETE"
+	got[0].Rules[0].Paths[0] = "/mutated/**"
+
+	again := e.HTTPServices()
+	if again[0].Aliases[0] != "a-alt.example.com" {
+		t.Errorf("Aliases nested mutation leaked: got %q", again[0].Aliases[0])
+	}
+	if again[0].Rules[0].Name != "r" {
+		t.Errorf("Rules nested mutation leaked: got Name=%q", again[0].Rules[0].Name)
+	}
+	if again[0].Rules[0].Methods[0] != "GET" {
+		t.Errorf("Rules[0].Methods nested mutation leaked: got %v", again[0].Rules[0].Methods)
+	}
+	if again[0].Rules[0].Paths[0] != "/**" {
+		t.Errorf("Rules[0].Paths nested mutation leaked: got %v", again[0].Rules[0].Paths)
 	}
 }
