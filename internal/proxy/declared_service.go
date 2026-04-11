@@ -107,7 +107,32 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svc
 		return
 	}
 
-	outReq, err := p.buildUpstreamRequest(r, svc.Upstream, reqPath)
+	// Recover the original escaped path tail so encoded bytes (e.g. %2F)
+	// reach the upstream unchanged. http.Request.URL.Path has already been
+	// decoded — rebuilding the upstream URL from it would lose distinctions
+	// like "/items/a%2Fb" vs "/items/a/b". EscapedPath() returns the
+	// canonical escaped form (RawPath if set and valid, otherwise the
+	// re-escaping of Path). The "/svc/<name>" prefix contains no characters
+	// that would be percent-encoded (service names are validated against
+	// ^[A-Za-z0-9._-]+$ in policy.ValidateHTTPServices), so in the common
+	// case a literal prefix strip works. If the client sent percent-encoded
+	// bytes in the name portion (which decode to the same unencoded name),
+	// fall back to re-escaping the decoded rest — that preserves safety
+	// without preserving the caller's idiosyncratic encoding of the name.
+	prefix := declaredServicePathPrefix + svcName
+	escaped := r.URL.EscapedPath()
+	var escapedPath string
+	if strings.HasPrefix(escaped, prefix) {
+		escapedPath = strings.TrimPrefix(escaped, prefix)
+	} else {
+		// Name was encoded or case-differs — re-escape the decoded rest.
+		escapedPath = (&url.URL{Path: reqPath}).EscapedPath()
+	}
+	if escapedPath == "" {
+		escapedPath = "/"
+	}
+
+	outReq, err := p.buildUpstreamRequest(r, svc.Upstream, reqPath, escapedPath)
 	if err != nil {
 		http.Error(w, "rewrite failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -120,8 +145,17 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svc
 	}
 	defer resp.Body.Close()
 
-	// Copy response headers and status, then body.
+	// Copy response headers and status, then body. Strip hop-by-hop headers
+	// (RFC 7230 §6.1) plus any headers named in the upstream's Connection
+	// header — real reverse proxies never forward these end-to-end.
+	respDenylist := connectionNominatedDenylist(resp.Header.Get("Connection"))
 	for k, vs := range resp.Header {
+		if isHopByHopHeader(k) {
+			continue
+		}
+		if _, nominated := respDenylist[http.CanonicalHeaderKey(k)]; nominated {
+			continue
+		}
 		for _, v := range vs {
 			w.Header().Add(k, v)
 		}
@@ -146,13 +180,26 @@ func (p *Proxy) findHTTPService(eng *policy.Engine, name string) *policy.HTTPSer
 // buildUpstreamRequest clones the inbound request and retargets it at
 // svcUpstream + reqPath + (optional query string). Preserves method, body,
 // and headers. Does NOT apply hooks — hooks are wired in Task 9.
-func (p *Proxy) buildUpstreamRequest(r *http.Request, svcUpstream, reqPath string) (*http.Request, error) {
+//
+// reqPath is the decoded path tail (starting with '/') and escapedPath is
+// the original escaped form with the same meaning. Both are provided so
+// the outbound URL can carry percent-encoded bytes (e.g. %2F) through to
+// the upstream unchanged: Go preserves URL.RawPath only when it differs
+// from URL.Path after decoding, and prefers RawPath in URL.String() when
+// present — so we unconditionally populate both.
+func (p *Proxy) buildUpstreamRequest(r *http.Request, svcUpstream, reqPath, escapedPath string) (*http.Request, error) {
 	u, err := url.Parse(svcUpstream)
 	if err != nil {
 		return nil, err
 	}
 	// Preserve query string if present on the inbound request.
 	rawQuery := r.URL.RawQuery
+	// Build the decoded and escaped forms of the joined path. Go prefers
+	// URL.RawPath in String() when it is a valid encoding of Path, so we
+	// populate both: Path carries the decoded form, RawPath carries the
+	// original escaped bytes. Use u.EscapedPath() for the upstream side
+	// because the parsed URL may itself contain percent-encoded segments.
+	u.RawPath = singleSlashJoin(u.EscapedPath(), escapedPath)
 	u.Path = singleSlashJoin(u.Path, reqPath)
 	u.RawQuery = rawQuery
 
@@ -160,9 +207,16 @@ func (p *Proxy) buildUpstreamRequest(r *http.Request, svcUpstream, reqPath strin
 	if err != nil {
 		return nil, err
 	}
-	// Copy headers, excluding hop-by-hop.
+	// Copy headers, excluding hop-by-hop and any headers nominated as
+	// connection-scoped by the client's Connection header (RFC 7230 §6.1).
+	// Without this, a client could smuggle arbitrary headers upstream by
+	// declaring them in Connection.
+	reqDenylist := connectionNominatedDenylist(r.Header.Get("Connection"))
 	for k, vs := range r.Header {
 		if isHopByHopHeader(k) {
+			continue
+		}
+		if _, nominated := reqDenylist[http.CanonicalHeaderKey(k)]; nominated {
 			continue
 		}
 		for _, v := range vs {
@@ -193,6 +247,37 @@ func isHopByHopHeader(h string) bool {
 		return true
 	}
 	return false
+}
+
+// connectionNominatedDenylist parses the value of a Connection header into
+// a set of canonicalized header names that this hop must not forward.
+// RFC 7230 §6.1 defines any token listed in Connection as hop-by-hop for
+// this hop — in addition to the fixed hop-by-hop set returned by
+// isHopByHopHeader. Empty tokens and the literal "close" / "keep-alive"
+// control directives are skipped.
+//
+// Returns an empty (non-nil) map when the header is absent so callers can
+// use set lookup without nil-checks.
+func connectionNominatedDenylist(connectionHeader string) map[string]struct{} {
+	out := make(map[string]struct{})
+	if connectionHeader == "" {
+		return out
+	}
+	for _, tok := range strings.Split(connectionHeader, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		// "close" and "keep-alive" are control directives, not header
+		// names — drop them from the denylist so they don't accidentally
+		// match a legitimate request header.
+		switch strings.ToLower(tok) {
+		case "close", "keep-alive":
+			continue
+		}
+		out[http.CanonicalHeaderKey(tok)] = struct{}{}
+	}
+	return out
 }
 
 // httpServiceTransport returns the transport used to forward declared-service

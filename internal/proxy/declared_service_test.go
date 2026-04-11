@@ -133,3 +133,111 @@ func TestServeDeclaredService_Allow_Forwards(t *testing.T) {
 		t.Errorf("response Content-Type = %q, want application/json", ct)
 	}
 }
+
+// TestServeDeclaredService_PreservesEscapedPath pins down that percent-encoded
+// bytes in the request path reach the upstream unchanged. Before the fix,
+// /svc/github/items/a%2Fb was reconstructed from the decoded URL.Path as
+// /items/a/b — a different resource.
+func TestServeDeclaredService_PreservesEscapedPath(t *testing.T) {
+	var gotEscaped, gotDecoded string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscaped = r.URL.EscapedPath()
+		gotDecoded = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-items", Paths: []string{"/items/**"}, Decision: "allow"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/items/a%2Fb", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if gotEscaped != "/items/a%2Fb" {
+		t.Errorf("upstream EscapedPath = %q, want /items/a%%2Fb", gotEscaped)
+	}
+	if gotDecoded != "/items/a/b" {
+		t.Errorf("upstream Path = %q, want /items/a/b", gotDecoded)
+	}
+}
+
+// TestServeDeclaredService_StripsConnectionNominatedRequestHeaders pins down
+// that headers listed in the client's Connection header are dropped before
+// forwarding upstream, in addition to the fixed hop-by-hop set.
+// RFC 7230 §6.1: any token in Connection is hop-by-hop for this hop.
+func TestServeDeclaredService_StripsConnectionNominatedRequestHeaders(t *testing.T) {
+	var gotHeaders http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-foo", Paths: []string{"/foo"}, Decision: "allow"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/foo", nil)
+	req.Header.Set("Connection", "X-Sensitive, close")
+	req.Header.Set("X-Sensitive", "secret")
+	req.Header.Set("X-Allowed", "ok")
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if v := gotHeaders.Get("X-Sensitive"); v != "" {
+		t.Errorf("upstream X-Sensitive = %q, want empty (stripped by Connection)", v)
+	}
+	if v := gotHeaders.Get("Connection"); v != "" {
+		t.Errorf("upstream Connection = %q, want empty (hop-by-hop)", v)
+	}
+	if v := gotHeaders.Get("X-Allowed"); v != "ok" {
+		t.Errorf("upstream X-Allowed = %q, want ok (end-to-end header dropped)", v)
+	}
+}
+
+// TestServeDeclaredService_StripsHopByHopResponseHeaders pins down that
+// hop-by-hop headers and headers nominated by the upstream's Connection
+// header are stripped from the response copied back to the caller. Real
+// headers like X-Request-Id must pass through.
+func TestServeDeclaredService_StripsHopByHopResponseHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "X-Upstream-Secret")
+		w.Header().Set("X-Upstream-Secret", "shh")
+		w.Header().Set("Keep-Alive", "timeout=5")
+		w.Header().Set("X-Request-Id", "abc")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-foo", Paths: []string{"/foo"}, Decision: "allow"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/foo", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if v := w.Header().Get("X-Request-Id"); v != "abc" {
+		t.Errorf("response X-Request-Id = %q, want abc (end-to-end header dropped)", v)
+	}
+	if v := w.Header().Get("X-Upstream-Secret"); v != "" {
+		t.Errorf("response X-Upstream-Secret = %q, want empty (Connection-nominated)", v)
+	}
+	if v := w.Header().Get("Keep-Alive"); v != "" {
+		t.Errorf("response Keep-Alive = %q, want empty (hop-by-hop)", v)
+	}
+	if v := w.Header().Get("Connection"); v != "" {
+		t.Errorf("response Connection = %q, want empty (hop-by-hop)", v)
+	}
+}
