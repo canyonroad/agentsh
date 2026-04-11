@@ -65,10 +65,11 @@ func canonicalizeHost(s string) (string, bool) {
 		if rest != "" && !strings.HasPrefix(rest, ":") {
 			return "", false // junk after closing bracket
 		}
-		if inner == "" {
-			return "", false // "[]"
+		canonical := strings.TrimSuffix(strings.ToLower(inner), ".")
+		if canonical == "" {
+			return "", false // "[]" or "[.]"
 		}
-		return strings.TrimSuffix(strings.ToLower(inner), "."), true
+		return canonical, true
 	}
 	// Not bracketed. If there are 2+ colons, it's a bare IPv6 literal — reject.
 	if strings.Count(s, ":") >= 2 {

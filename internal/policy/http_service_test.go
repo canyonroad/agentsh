@@ -637,6 +637,18 @@ func TestValidateHTTPServices(t *testing.T) {
 			wantErr: "IPv6 literals must be bracketed",
 		},
 		{
+			name: "bracketed dot alias canonicalizes to empty and is rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Aliases:  []string{"[.]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "invalid alias",
+		},
+		{
 			name: "empty http_services list is valid",
 			svcs: []HTTPService{},
 			wantErr: "",
