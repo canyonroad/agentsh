@@ -173,6 +173,83 @@ func TestSession_LLMProxyEnvVars(t *testing.T) {
 	}
 }
 
+// fakeProxyEnvVarer is a test double that satisfies the local proxyEnvVarer
+// interface without pulling in the real proxy package (which would import
+// half the world into this test).
+type fakeProxyEnvVarer struct {
+	env map[string]string
+}
+
+func (f *fakeProxyEnvVarer) EnvVars() map[string]string {
+	return f.env
+}
+
+func TestSession_LLMProxyEnvVars_DelegatesToProxy(t *testing.T) {
+	mgr := NewManager(10)
+	sess, err := mgr.CreateWithID("sess-123", t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+	sess.SetLLMProxy("http://127.0.0.1:9999", nil)
+	sess.SetProxyInstance(&fakeProxyEnvVarer{
+		env: map[string]string{
+			"ANTHROPIC_BASE_URL": "http://127.0.0.1:9999",
+			"OPENAI_BASE_URL":    "http://127.0.0.1:9999",
+			"AGENTSH_SESSION_ID": "sess-123",
+			"GITHUB_API_URL":     "http://127.0.0.1:9999/svc/github",
+			"STRIPE_API_URL":     "http://127.0.0.1:9999/svc/stripe",
+		},
+	})
+
+	envVars := sess.LLMProxyEnvVars()
+	if envVars == nil {
+		t.Fatal("LLMProxyEnvVars returned nil")
+	}
+
+	wantKeys := []string{
+		"ANTHROPIC_BASE_URL",
+		"OPENAI_BASE_URL",
+		"AGENTSH_SESSION_ID",
+		"GITHUB_API_URL",
+		"STRIPE_API_URL",
+	}
+	for _, k := range wantKeys {
+		if _, ok := envVars[k]; !ok {
+			t.Errorf("missing key %q in env: %v", k, envVars)
+		}
+	}
+	if got := envVars["GITHUB_API_URL"]; got != "http://127.0.0.1:9999/svc/github" {
+		t.Errorf("GITHUB_API_URL = %q", got)
+	}
+}
+
+func TestSession_LLMProxyEnvVars_FallbackWhenNoProxyInstance(t *testing.T) {
+	mgr := NewManager(10)
+	sess, err := mgr.CreateWithID("sess-456", t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+	sess.SetLLMProxy("http://127.0.0.1:8888", nil)
+	// Do NOT call SetProxyInstance — simulate the legacy test path.
+
+	envVars := sess.LLMProxyEnvVars()
+	if envVars == nil {
+		t.Fatal("LLMProxyEnvVars returned nil")
+	}
+	if got := envVars["ANTHROPIC_BASE_URL"]; got != "http://127.0.0.1:8888" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q", got)
+	}
+	if got := envVars["OPENAI_BASE_URL"]; got != "http://127.0.0.1:8888" {
+		t.Errorf("OPENAI_BASE_URL = %q", got)
+	}
+	if got := envVars["AGENTSH_SESSION_ID"]; got != "sess-456" {
+		t.Errorf("AGENTSH_SESSION_ID = %q", got)
+	}
+	if _, ok := envVars["GITHUB_API_URL"]; ok {
+		t.Errorf("unexpected GITHUB_API_URL in fallback: %v", envVars)
+	}
+}
+
 func TestSession_LLMProxyEnvVars_Integration(t *testing.T) {
 	// Create a mock upstream server
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

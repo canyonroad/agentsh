@@ -178,22 +178,48 @@ func StartLLMProxy(
 	return proxyURL, closeFn, nil
 }
 
+// proxyEnvVarer is the minimal interface that Session uses to fetch
+// env vars from the proxy instance. The concrete type is *proxy.Proxy;
+// Session holds it as interface{} to avoid an import cycle, so we
+// type-assert against this local interface at read time.
+type proxyEnvVarer interface {
+	EnvVars() map[string]string
+}
+
 // LLMProxyEnvVars returns the environment variables that should be set for
 // the agent process to use the embedded LLM proxy.
 //
-// Returns nil if no LLM proxy is configured for the session.
+// When a proxy instance is attached to the session, this delegates to the
+// proxy's EnvVars() so declared http_services (*_API_URL) are included.
+// Falls back to the three legacy LLM base URLs when no proxy instance is
+// attached (shouldn't happen in production, preserved for test paths that
+// call SetLLMProxy without SetProxyInstance).
+//
+// Returns nil if no LLM proxy URL is configured for the session.
 func (s *Session) LLMProxyEnvVars() map[string]string {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	proxyURL := s.llmProxyURL
+	proxyInst := s.llmProxy
+	sessID := s.ID
+	s.mu.Unlock()
 
-	if s.llmProxyURL == "" {
+	if proxyURL == "" {
 		return nil
 	}
 
+	// Prefer the proxy's own env var builder — it includes the legacy
+	// LLM URLs plus the declared http_services URLs.
+	if p, ok := proxyInst.(proxyEnvVarer); ok {
+		if env := p.EnvVars(); env != nil {
+			return env
+		}
+	}
+
+	// Fallback for sessions with a URL but no attached proxy instance.
 	return map[string]string{
-		"ANTHROPIC_BASE_URL": s.llmProxyURL,
-		"OPENAI_BASE_URL":    s.llmProxyURL,
-		"AGENTSH_SESSION_ID": s.ID,
+		"ANTHROPIC_BASE_URL": proxyURL,
+		"OPENAI_BASE_URL":    proxyURL,
+		"AGENTSH_SESSION_ID": sessID,
 	}
 }
 
