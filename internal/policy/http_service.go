@@ -37,6 +37,14 @@ type HTTPServiceRule struct {
 
 var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// httpServiceNameRe restricts http_service.name to URL-safe path segment
+// characters. Routing depends on the name appearing in /svc/<name>/ URLs,
+// so any character the URL parser treats as a segment terminator (/, ?, #)
+// or otherwise reserves must be rejected up front — otherwise the derived
+// *_API_URL would be ambiguous and /svc/<name>/ dispatch would fall through
+// to a 404 or match the wrong service.
+var httpServiceNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
 // reservedEnvVarNames is the set of env var names that http_services must
 // not claim via ExposeAs or via the derived <NAME>_API_URL form, because
 // they are already emitted by Proxy.EnvVars() for the LLM proxy. Allowing
@@ -128,6 +136,9 @@ func ValidateHTTPServices(svcs []HTTPService) error {
 		s := &svcs[i]
 		if strings.TrimSpace(s.Name) == "" {
 			return fmt.Errorf("http_services[%d]: name is required", i)
+		}
+		if !httpServiceNameRe.MatchString(s.Name) {
+			return fmt.Errorf("http_services[%d]: name %q must match %s (URL-safe segment)", i, s.Name, httpServiceNameRe)
 		}
 		lower := strings.ToLower(s.Name)
 		if nameSeen[lower] {

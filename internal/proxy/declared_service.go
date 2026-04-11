@@ -90,6 +90,12 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, svc
 		// Forwarding implemented in Task 8.
 		http.Error(w, "forwarding not implemented", http.StatusNotImplemented)
 		return
+	case "approve":
+		// Task 10 wires the real approval manager. Until then, fail closed
+		// with a controlled 501 so callers get a semantically correct error
+		// instead of a 500 "unsupported decision".
+		http.Error(w, "approval not yet implemented", http.StatusNotImplemented)
+		return
 	default:
 		http.Error(w, "unsupported decision", http.StatusInternalServerError)
 		return

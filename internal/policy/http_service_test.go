@@ -124,6 +124,66 @@ func TestValidateHTTPServices(t *testing.T) {
 			wantErr: "name is required",
 		},
 		{
+			name: "name with slash rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "foo/bar",
+					Upstream: "https://api.example.com",
+					ExposeAs: "FOO_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "URL-safe segment",
+		},
+		{
+			name: "name with question mark rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "foo?bar",
+					Upstream: "https://api.example.com",
+					ExposeAs: "FOO_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "URL-safe segment",
+		},
+		{
+			name: "name with hash rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "foo#bar",
+					Upstream: "https://api.example.com",
+					ExposeAs: "FOO_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "URL-safe segment",
+		},
+		{
+			name: "name with space rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "foo bar",
+					Upstream: "https://api.example.com",
+					ExposeAs: "FOO_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "URL-safe segment",
+		},
+		{
+			name: "name with valid chars accepted",
+			svcs: []HTTPService{
+				{
+					Name:     "foo.bar-baz_123",
+					Upstream: "https://api.example.com",
+					ExposeAs: "FOO_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "",
+		},
+		{
 			name: "duplicate name rejected",
 			svcs: []HTTPService{
 				{
