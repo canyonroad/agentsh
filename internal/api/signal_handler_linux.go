@@ -13,6 +13,7 @@ import (
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/signal"
 	"github.com/agentsh/agentsh/pkg/types"
+	"golang.org/x/sys/unix"
 )
 
 // signalEmitterAdapter adapts the API's event store/broker to the signal handler's EventEmitter interface.
@@ -55,12 +56,14 @@ func startSignalHandler(ctx context.Context, parentSock *os.File, sessID string,
 	go func() {
 		defer parentSock.Close()
 
-		// Set a read deadline to prevent blocking forever if wrapper fails.
-		// Note: This may fail on os.NewFile-wrapped socketpair fds (not registered
-		// with Go's network poller), but we should still continue to RecvFD.
-		if err := parentSock.SetReadDeadline(time.Now().Add(recvFDTimeout)); err != nil {
-			slog.Debug("failed to set read deadline on signal socket (continuing)", "error", err)
-			// Don't return - continue to RecvFD
+		// Set SO_RCVTIMEO directly on the socket. unixmon.RecvFD calls recvmsg
+		// on the raw fd, bypassing Go's netpoll — so SetReadDeadline wouldn't
+		// apply. SO_RCVTIMEO is a kernel-level timeout that works with raw
+		// blocking recvmsg.
+		tv := unix.NsecToTimeval(recvFDTimeout.Nanoseconds())
+		if err := unix.SetsockoptTimeval(int(parentSock.Fd()), unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+			slog.Debug("failed to set SO_RCVTIMEO on signal socket", "error", err)
+			// Don't return - RecvFD will still work, just without a timeout
 		}
 
 		// Receive the signal filter fd from the wrapper process
