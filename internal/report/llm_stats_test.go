@@ -231,6 +231,51 @@ func TestParseLLMRequestsFile(t *testing.T) {
 	})
 }
 
+// TestParseLLMRequestsFile_SkipsHTTPServiceEntries pins down that
+// entries with service_kind="http_service" are ignored by the session
+// report reader. Declared-service traffic shares the llm-requests.jsonl
+// file with real LLM traffic but must not appear as an "Unknown"
+// provider row or contribute to LLM totals.
+func TestParseLLMRequestsFile_SkipsHTTPServiceEntries(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "llm-requests.jsonl")
+
+	// One LLM pair (anthropic) and one http_service pair (github).
+	testData := `{"id":"req_001","session_id":"sess_123","dialect":"anthropic","request":{"method":"POST","path":"/v1/messages"}}
+{"request_id":"req_001","session_id":"sess_123","duration_ms":1500,"response":{"status":200},"usage":{"input_tokens":150,"output_tokens":892}}
+{"id":"req_http_1","session_id":"sess_123","service_kind":"http_service","service_name":"github","request":{"method":"GET","path":"/user"}}
+{"request_id":"req_http_1","session_id":"sess_123","duration_ms":500,"response":{"status":200}}
+`
+	if err := os.WriteFile(logPath, []byte(testData), 0600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	llmStats, _, err := ParseLLMRequestsFile(logPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if llmStats == nil {
+		t.Fatal("expected llmStats to be populated")
+	}
+
+	if llmStats.Total.Requests != 1 {
+		t.Errorf("Total.Requests = %d, want 1 (http_service skipped)", llmStats.Total.Requests)
+	}
+	if len(llmStats.Providers) != 1 {
+		t.Fatalf("Providers = %+v, want exactly 1 entry", llmStats.Providers)
+	}
+	if llmStats.Providers[0].Provider != "Anthropic" {
+		t.Errorf("Providers[0] = %q, want Anthropic", llmStats.Providers[0].Provider)
+	}
+	// Explicitly: no "Unknown" bucket from the http_service orphan.
+	for _, p := range llmStats.Providers {
+		if p.Provider == "Unknown" {
+			t.Errorf("found Unknown provider from http_service traffic: %+v", p)
+		}
+	}
+}
+
 func TestFormatProviderName(t *testing.T) {
 	tests := []struct {
 		dialect string

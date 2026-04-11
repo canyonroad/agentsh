@@ -192,3 +192,28 @@ func (r *Registry) ApplyPostHooks(serviceName string, resp *http.Response, ctx *
 	}
 	return firstErr
 }
+
+// InjectedHeaderNamesForService returns the set of header names that
+// HeaderInjectionHook entries registered for serviceName will write.
+// Declared-service request/response logging consults this list so the
+// audit sanitizer can redact the injected values even when the header
+// name is not in the fixed auth denylist. Includes hooks registered
+// under the empty service name (which run globally).
+func (r *Registry) InjectedHeaderNamesForService(serviceName string) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []string
+	for _, h := range r.hooks[""] {
+		if hi, ok := h.(*HeaderInjectionHook); ok {
+			out = append(out, hi.HeaderName())
+		}
+	}
+	if serviceName != "" {
+		for _, h := range r.hooks[serviceName] {
+			if hi, ok := h.(*HeaderInjectionHook); ok {
+				out = append(out, hi.HeaderName())
+			}
+		}
+	}
+	return out
+}

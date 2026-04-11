@@ -23,6 +23,7 @@ agentsh sits *under* your agent/tooling—intercepting **file**, **network**, **
   - PTY activity
   - LLM API requests with DLP and usage tracking
   - signal send/block (Linux enforced, macOS/Windows audit)
+  - Route outbound HTTP API calls through declared services (**http_services**) with per-method, per-path rules, approval gating, and fail-closed host enforcement
 - **Two output modes**:
   - human-friendly shell output
   - compact JSON responses for agents/tools
@@ -221,6 +222,7 @@ This writes `/etc/agentsh/shim.conf` with `force=true`, which the shim reads at 
 * environment vars
 * network (DNS/connect)
 * PTY/session settings
+* declared HTTP services
 
 ### Evaluation
 
@@ -466,6 +468,8 @@ dlp:
 
 See [LLM Proxy Documentation](docs/llm-proxy.md) for full configuration options.
 
+The same proxy also dispatches declared `http_services` entries — named API upstreams with per-method, per-path rules. See [Declared HTTP Services](docs/llm-proxy.md#declared-http-services) and the [HTTP Services Cookbook](docs/cookbook/http-services.md) for details.
+
 ---
 
 ### Policy Generation
@@ -679,6 +683,7 @@ Ready-to-use snippets for configuring AI coding assistants to use agentsh:
 * Example Dockerfile (with shim): [`Dockerfile.example`](Dockerfile.example)
 * **Policy documentation:** [`docs/operations/policies.md`](docs/operations/policies.md) - policy variables, signal rules, network redirect
 * **Command policies cookbook:** [`docs/cookbook/command-policies.md`](docs/cookbook/command-policies.md) - how to allow a new binary, when to use `wrap` instead of `exec`, and how to debug a denial
+* **HTTP services cookbook:** [`docs/cookbook/http-services.md`](docs/cookbook/http-services.md) - recipes for routing outbound HTTP API calls through declared services with rules and approval gating
 * **Policy authoring skills:** [`skills/`](skills/) - AI-assistant skills for creating and editing policies in Claude Code, NanoClaw, etc.
 * **Platform comparison:** [`docs/platform-comparison.md`](docs/platform-comparison.md) - feature support, security scores, performance by platform
 * **Bubblewrap vs agentsh:** [`docs/bubblewrap-vs-agentsh-comparison.md`](docs/bubblewrap-vs-agentsh-comparison.md) - comparison with Bubblewrap for Linux container sandboxing

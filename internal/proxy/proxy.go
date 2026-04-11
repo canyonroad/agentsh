@@ -14,12 +14,14 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/mcpinspect"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
+	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/proxy/services"
 )
 
@@ -77,7 +79,27 @@ type Proxy struct {
 
 	server   *http.Server
 	listener net.Listener
-	mu       sync.Mutex
+	// listenerAddr is the bound address of listener as a string. Captured
+	// once in Start so EnvVars can build base URLs without racing Stop.
+	listenerAddr string
+	// httpServices holds the declared http_services from policy. Used by
+	// EnvVars to emit one <NAME>_API_URL env var per entry. Replaced whole
+	// by SetHTTPServices — never appended in place.
+	httpServices []policy.HTTPService
+	// policyEngine is wired by SetPolicyEngine during startup and is the
+	// source of truth for http_services dispatch in ServeHTTP. Reads are
+	// serialized with mu so dispatch cannot race with a late configure.
+	policyEngine *policy.Engine
+	// httpSvcTransport is the RoundTripper used to forward declared-service
+	// requests to their upstreams. nil means use http.DefaultTransport.
+	// Tests inject a fake via SetHTTPServiceTransportForTest.
+	httpSvcTransport http.RoundTripper
+	// httpSvcApprovals gates the `approve` decision in the declared-service
+	// forwarding path. When nil, approve falls through to a 501 (operator
+	// hasn't wired a real manager yet). Wired in production from app.go via
+	// SetHTTPServiceApprovals. Tests install a fake via SetApprovalsForTest.
+	httpSvcApprovals HTTPServiceApprovalsManager
+	mu               sync.Mutex
 }
 
 // New creates a new LLM proxy.
@@ -249,6 +271,7 @@ func (p *Proxy) Start(ctx context.Context) error {
 		return fmt.Errorf("listen: %w", err)
 	}
 	p.listener = listener
+	p.listenerAddr = listener.Addr().String()
 
 	p.server = &http.Server{
 		Handler:      p,
@@ -300,6 +323,18 @@ func (p *Proxy) Addr() net.Addr {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID := generateRequestID()
 	startTime := time.Now()
+
+	// Declared HTTP service dispatch — check before LLM dialect detection.
+	if name, rest, ok := p.declaredService(r.URL.Path); ok {
+		p.serveDeclaredService(w, r, name, rest, requestID, startTime)
+		return
+	} else if name != "" {
+		// Path starts with /svc/<name>/ but the service is not declared.
+		// Return a dedicated 404 instead of falling through to dialect
+		// detection, so operators aren't confused by "unknown LLM dialect".
+		http.Error(w, "no such service", http.StatusNotFound)
+		return
+	}
 
 	// Detect dialect
 	dialect := p.detector.Detect(r)
@@ -668,21 +703,55 @@ func parseURL(s string) (*url.URL, error) {
 	return url.Parse(s)
 }
 
+// SetHTTPServices stores the declared HTTP services for env var injection.
+// Called once during proxy startup in app.go. Thread-safe. The slice is
+// stored as-is — SetHTTPServices replaces it whole on each call and
+// EnvVars snapshots it under lock, so no in-place mutation is safe.
+func (p *Proxy) SetHTTPServices(svcs []policy.HTTPService) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.httpServices = svcs
+}
+
+// setAddrForTest lets tests populate the listener address without
+// actually binding a socket. Unexported to keep it out of the public API.
+func (p *Proxy) setAddrForTest(addr string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.listenerAddr = addr
+}
+
 // EnvVars returns the environment variables to set for the agent process.
+// In addition to the LLM base URLs, this includes one <NAME>_API_URL entry
+// per declared http_services entry, each pointing at /svc/<name> on the
+// proxy listener so cooperating child processes can route through the
+// gateway via a base URL override.
 func (p *Proxy) EnvVars() map[string]string {
-	addr := p.Addr()
-	if addr == nil {
+	p.mu.Lock()
+	addr := p.listenerAddr
+	svcs := p.httpServices
+	p.mu.Unlock()
+
+	if addr == "" {
 		return nil
 	}
 
-	baseURL := fmt.Sprintf("http://%s", addr.String())
-	return map[string]string{
+	baseURL := "http://" + addr
+	env := map[string]string{
 		"ANTHROPIC_BASE_URL": baseURL,
 		"OPENAI_BASE_URL":    baseURL,
 		// Session ID is passed so agent can include it in headers
 		// for correlation when using external proxy
 		"AGENTSH_SESSION_ID": p.cfg.SessionID,
 	}
+	for _, svc := range svcs {
+		name := svc.ExposeAs
+		if name == "" {
+			name = strings.ToUpper(svc.Name) + "_API_URL"
+		}
+		env[name] = baseURL + "/svc/" + svc.Name
+	}
+	return env
 }
 
 // ProxyStatus contains the complete status of the proxy.
