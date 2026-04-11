@@ -186,26 +186,35 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 	//
 	// Path/RawPath contract with hooks:
 	//   - r.URL.Path is set to the decoded tail.
-	//   - r.URL.RawPath is INTENTIONALLY LEFT EMPTY across the hook
-	//     dispatch to avoid the stale-pre-seed footgun: if we pre-seeded
-	//     RawPath with the escaped tail and a hook mutated r.URL.Path,
-	//     the RawPath left behind would no longer match the new Path
-	//     and Go's url.URL.EscapedPath() would silently fall back to
-	//     re-escaping Path — dropping any %2F (or similar) bytes that
-	//     lived in segments the hook didn't touch.
-	//   - After hooks return, if r.URL.Path is byte-identical to the
-	//     snapshot, we know the hook did not touch the path and it is
-	//     safe to re-apply the original escaped tail so encoded bytes
-	//     reach the upstream unchanged.
-	//   - If the hook DID mutate r.URL.Path, the hook owns the
-	//     encoding: Go will re-escape from r.URL.Path and any percent-
-	//     encoded bytes in untouched segments are lost. Hooks that want
-	//     to rewrite Path while preserving encoded bytes elsewhere
-	//     MUST set both r.URL.Path and r.URL.RawPath consistently —
-	//     this is Go's standard contract for url.URL.
+	//   - r.URL.RawPath is SEEDED with the escaped tail so built-in
+	//     hooks like CredsSubHook — whose RawPath substitution branch
+	//     is gated on RawPath != "" — fire and update both fields in
+	//     lockstep. Because CredsSubHook's substitution is length-
+	//     preserving and leaves non-substituted bytes intact, encoded
+	//     bytes in untouched segments (e.g. %2F) survive the rewrite.
+	//   - After hooks return, four cases are possible:
+	//       1. Neither Path nor RawPath changed: the seeded escapedTail
+	//          is still correct. Nothing to do.
+	//       2. Only Path changed (hook rewrote the decoded Path but
+	//          didn't touch RawPath): the seeded RawPath is now stale
+	//          and no longer a valid encoding of Path. Clear it so
+	//          Go's url.URL.EscapedPath() re-escapes from Path from
+	//          scratch. This loses encoded bytes in segments the hook
+	//          didn't touch — a documented limitation. Hooks that need
+	//          to preserve encoded bytes while rewriting Path must
+	//          update BOTH fields (the CredsSubHook pattern).
+	//          TODO(future): a common-prefix splice could preserve the
+	//          untouched prefix's encoding when only Path changes,
+	//          but that's out of scope for this commit.
+	//       3. Only RawPath changed (hook explicitly rewrote the
+	//          escaping without changing the decoded Path): trust the
+	//          hook and leave its RawPath in place.
+	//       4. Both Path and RawPath changed (CredsSubHook's path):
+	//          trust the hook and leave both in place.
 	r.URL.Path = reqPath
-	r.URL.RawPath = ""
+	r.URL.RawPath = escapedPath
 	preHookPath := r.URL.Path
+	preHookRawPath := r.URL.RawPath
 
 	// Build RequestContext for hook dispatch. The /svc/ path pins
 	// ServiceName to the canonical service name (as written in the
@@ -240,16 +249,21 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 		}
 	}
 
-	// Re-apply the original escaped tail only if the hook left r.URL.Path
-	// untouched. If the hook mutated Path, leave r.URL.RawPath empty so
-	// Go's url.URL.EscapedPath() re-escapes r.URL.Path from scratch —
-	// that's the hook's responsibility per the contract documented
-	// above. Skip the re-apply when the escaped and decoded forms are
-	// identical: setting RawPath equal to Path would be a redundant
-	// string write and Go would treat it identically to the empty case.
-	if r.URL.Path == preHookPath && escapedPath != preHookPath {
-		r.URL.RawPath = escapedPath
+	// Post-hook RawPath reconciliation. See the four-case table in the
+	// pre-hook comment above for the rationale.
+	pathChanged := r.URL.Path != preHookPath
+	rawChanged := r.URL.RawPath != preHookRawPath
+	if pathChanged && !rawChanged {
+		// Case 2: hook rewrote Path without updating RawPath, so the
+		// seeded RawPath is now stale. Clearing it lets Go re-escape
+		// Path from scratch. Encoded bytes in untouched segments are
+		// lost — documented limitation; hooks that care must update
+		// both fields.
+		r.URL.RawPath = ""
 	}
+	// Cases 1, 3, 4: leave r.URL as-is. The seeded escapedPath from
+	// before hooks ran is still valid (case 1), or the hook explicitly
+	// owns the encoding (cases 3 and 4).
 
 	outReq, err := p.buildUpstreamRequest(r, svc.Upstream)
 	if err != nil {

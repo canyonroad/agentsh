@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/internal/proxy/credsub"
 )
 
 func init() {
@@ -679,13 +680,20 @@ func TestServeDeclaredService_PreservesEscapedPath_WhenHookDoesNotTouchPath(t *t
 // TestServeDeclaredService_HookPathRewrite_DropsEncodedBytes documents
 // the intentional limitation of the Path/RawPath contract: when a pre-hook
 // mutates only r.URL.Path (not RawPath), percent-encoded bytes in other
-// segments are LOST because Go's url.URL.EscapedPath() re-escapes from
-// the decoded Path when RawPath is stale or empty.
+// segments are LOST. The handler seeds r.URL.RawPath with the original
+// escaped tail before running hooks (so built-in hooks like CredsSubHook,
+// which update Path and RawPath in lockstep, can preserve encoded bytes),
+// but a hook that only touches Path leaves a stale RawPath behind. The
+// handler detects this post-hook and clears RawPath so Go's
+// url.URL.EscapedPath() re-escapes from the mutated Path — which turns
+// %2F in untouched segments into a literal '/'.
 //
 // Hooks that want to rewrite Path while preserving encoded bytes in
-// untouched segments must set both Path and RawPath together. See
-// TestServeDeclaredService_HookRewritesBothPathAndRawPath below for the
-// opt-in pattern.
+// untouched segments must update BOTH Path and RawPath together (see
+// TestServeDeclaredService_HookRewritesBothPathAndRawPath). This matches
+// what CredsSubHook does — see
+// TestServeDeclaredService_CredsSubHook_PreservesEncodedSlash for the
+// real-hook regression test.
 func TestServeDeclaredService_HookPathRewrite_DropsEncodedBytes(t *testing.T) {
 	var gotEscaped string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -762,5 +770,117 @@ func TestServeDeclaredService_HookRewritesBothPathAndRawPath(t *testing.T) {
 	}
 	if gotEscaped != "/repos/a%2Fb/pulls" {
 		t.Errorf("upstream EscapedPath = %q, want /repos/a%%2Fb/pulls", gotEscaped)
+	}
+}
+
+// TestServeDeclaredService_CredsSubHook_PreservesEncodedSlash is the
+// real-hook regression test for the CredsSubHook path-rewriting branch.
+// CredsSubHook updates r.URL.RawPath ONLY when RawPath is already set
+// (see internal/proxy/credshook.go PreHook). If the declared-service
+// handler clears RawPath before running hooks, CredsSubHook only
+// rewrites Path and any encoded bytes elsewhere in the path (e.g. a
+// %2F in a different segment) are lost when Go re-escapes Path from
+// scratch.
+//
+// The handler must seed r.URL.RawPath with the escaped tail BEFORE
+// running hooks so CredsSubHook's dual-update branch fires. Because
+// the substitution is length-preserving and leaves non-substituted
+// bytes intact, the %2F survives all the way to the upstream.
+func TestServeDeclaredService_CredsSubHook_PreservesEncodedSlash(t *testing.T) {
+	var gotEscaped string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscaped = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		// Policy rule is written against the original decoded path.
+		{Name: "allow-repos", Paths: []string{"/repos/**"}, Decision: "allow"},
+	})
+
+	// Build a credsub table with a fake/real pair of the same length
+	// (24 chars — the table enforces length equality). The fake is
+	// what the agent types; the real is what the upstream receives.
+	tbl := credsub.New()
+	if err := tbl.Add("github",
+		[]byte("FAKE_PLACEHOLDER_12345678"),
+		[]byte("REAL_CREDENTIAL_abcdef012"),
+	); err != nil {
+		t.Fatalf("credsub.Add: %v", err)
+	}
+	// Mirror llmproxy.go: register globally (empty service name) so
+	// the hook fires for every declared service — including "github".
+	p.HookRegistry().Register("", NewCredsSubHook(tbl, nil))
+
+	// The request path contains BOTH:
+	//   - an encoded slash (%2F) in one segment that CredsSubHook must
+	//     not touch, and
+	//   - a placeholder credential in another segment that CredsSubHook
+	//     must substitute.
+	req := httptest.NewRequest(http.MethodGet,
+		"http://127.0.0.1/svc/github/repos/owner%2Fname/tokens/FAKE_PLACEHOLDER_12345678", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	// Upstream must see the substitution applied AND the encoded slash
+	// preserved in the untouched segment.
+	want := "/repos/owner%2Fname/tokens/REAL_CREDENTIAL_abcdef012"
+	if gotEscaped != want {
+		t.Errorf("upstream EscapedPath = %q, want %q", gotEscaped, want)
+	}
+}
+
+// TestServeDeclaredService_HookRewritesOnlyRawPath pins down that a hook
+// which mutates only r.URL.RawPath (leaving r.URL.Path unchanged) has
+// its RawPath propagated to the upstream. Before the fix, the post-hook
+// restore logic checked only Path and silently overwrote any
+// hook-written RawPath with the original escaped tail, so hooks could
+// not adjust escaping without also changing Path.
+//
+// The request URL uses an encoded byte (%62) so that the original
+// escaped tail differs from the decoded Path — that's what triggered
+// the old restore logic's "RawPath := escapedPath" branch. The hook
+// then rewrites RawPath to a third (different) valid encoding, and
+// the upstream must see exactly the hook's encoding.
+func TestServeDeclaredService_HookRewritesOnlyRawPath(t *testing.T) {
+	var gotEscaped string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscaped = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-items", Paths: []string{"/items/**"}, Decision: "allow"},
+	})
+
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "rawpath-only",
+		preFn: func(r *http.Request, _ *RequestContext) error {
+			// Leave r.URL.Path alone; rewrite only RawPath to a
+			// different valid encoding of the same decoded Path.
+			// The handler must trust the hook's RawPath.
+			r.URL.RawPath = "/items/%61b"
+			return nil
+		},
+	})
+
+	// Encoded %62 ("b") — makes the original escapedPath "/items/a%62"
+	// differ from the decoded Path "/items/ab". The old restore logic
+	// saw Path unchanged and blindly re-applied "/items/a%62",
+	// clobbering the hook's "/items/%61b".
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/items/a%62", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if gotEscaped != "/items/%61b" {
+		t.Errorf("upstream EscapedPath = %q, want /items/%%61b (hook-written RawPath clobbered?)", gotEscaped)
 	}
 }
