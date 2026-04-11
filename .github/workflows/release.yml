@@ -91,9 +91,17 @@ jobs:
 
   # Build Alpine/musl binaries separately (requires different libc)
   alpine-build:
-    runs-on: ubuntu-latest
     needs: goreleaser  # Wait for release to be created
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-latest
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
     container:
       image: golang:1.25.7-alpine
     steps:
@@ -139,9 +147,10 @@ jobs:
       - name: Create Alpine tarball
         env:
           VERSION: ${{ github.ref_name }}
+          ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p dist
-          tar -czvf "dist/agentsh_${VERSION}_linux_amd64_musl.tar.gz" \
+          tar -czvf "dist/agentsh_${VERSION}_linux_${ARCH}_musl.tar.gz" \
             agentsh \
             agentsh-unixwrap \
             agentsh-shell-shim \
@@ -155,12 +164,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ github.ref_name }}
+          ARCH: ${{ matrix.arch }}
         run: |
           # Install gh CLI in Alpine
           apk add --no-cache github-cli
 
           gh release upload "$VERSION" \
-            "dist/agentsh_${VERSION}_linux_amd64_musl.tar.gz" \
+            "dist/agentsh_${VERSION}_linux_${ARCH}_musl.tar.gz" \
             --repo "${{ github.repository }}" \
             --clobber
 
