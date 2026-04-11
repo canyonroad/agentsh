@@ -685,7 +685,7 @@ func TestValidateHTTPServices(t *testing.T) {
 			wantErr: "invalid alias",
 		},
 		{
-			name: "bracketed IPv4-in-IPv6 alias rejected",
+			name: "bracketed IPv4-in-IPv6 alias accepted",
 			svcs: []HTTPService{
 				{
 					Name:     "github",
@@ -694,7 +694,27 @@ func TestValidateHTTPServices(t *testing.T) {
 					Rules:    []HTTPServiceRule{validRule},
 				},
 			},
-			wantErr: "invalid alias",
+			wantErr: "",
+		},
+		{
+			name: "duplicate bracketed IPv4-in-IPv6 alias across services rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://api1.example.com",
+					ExposeAs: "SVC1_API_URL",
+					Aliases:  []string{"[::ffff:192.168.1.1]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://api2.example.com",
+					ExposeAs: "SVC2_API_URL",
+					Aliases:  []string{"[::ffff:192.168.1.1]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate upstream host",
 		},
 		{
 			name: "bracketed invalid hex IPv6 alias rejected",
@@ -721,7 +741,7 @@ func TestValidateHTTPServices(t *testing.T) {
 			wantErr: "invalid alias",
 		},
 		{
-			name: "bracketed IPv6 leading-zero alias canonicalizes to ::1",
+			name: "bracketed IPv6 leading-zero alias treated as distinct textual form",
 			svcs: []HTTPService{
 				{
 					Name:     "svc1",
@@ -737,10 +757,10 @@ func TestValidateHTTPServices(t *testing.T) {
 					Rules:    []HTTPServiceRule{validRule},
 				},
 			},
-			wantErr: "duplicate upstream host",
+			wantErr: "",
 		},
 		{
-			name: "bracketed IPv6 expanded form alias canonicalizes to ::1",
+			name: "bracketed IPv6 expanded form alias treated as distinct textual form",
 			svcs: []HTTPService{
 				{
 					Name:     "svc1",
@@ -756,7 +776,7 @@ func TestValidateHTTPServices(t *testing.T) {
 					Rules:    []HTTPServiceRule{validRule},
 				},
 			},
-			wantErr: "duplicate upstream host",
+			wantErr: "",
 		},
 		{
 			name: "bracketed IPv6 with various spellings all accepted when distinct",

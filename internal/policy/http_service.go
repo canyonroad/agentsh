@@ -38,6 +38,10 @@ type HTTPServiceRule struct {
 var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // canonicalizeHost returns the canonical host form for duplicate-detection.
+// It validates bracket contents as IPv6 literals via netip.ParseAddr but
+// uses the lowercased textual form (not addr.String()) so that duplicate
+// detection matches what the runtime host matcher would see.
+//
 // It accepts bracketed IPv6 "[::1]" / "[::1]:443", hostnames, and
 // "host:port" in any case with an optional trailing dot. It REJECTS
 // bare (unbracketed) IPv6 literals because HTTP Host headers require
@@ -46,11 +50,11 @@ var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // (internal/proxy/services/matcher.go preserves brackets and matches
 // "[::1]" literally — bare "::1" never matches).
 //
-// Bracketed payloads MUST be valid IPv6 literals per RFC 3986 §3.2.2;
-// any other content (hostnames, IPv4, IPv4-in-IPv6, or malformed text)
-// is rejected. IPv6 literals are canonicalized via netip.Addr.String()
-// so "[::1]", "[::0001]", "[0:0:0:0:0:0:0:1]", and "[FE80::1]" compare
-// equal to their canonical forms.
+// Bracketed payloads MUST parse as valid IPv6 literals per RFC 3986
+// §3.2.2; hostnames, malformed hex, embedded whitespace, "[..]",
+// "[example.com]", and similar garbage are rejected. IPv4-in-IPv6
+// forms like "[::ffff:192.168.1.1]" are syntactically valid IPv6 and
+// accepted (the runtime matcher accepts them too).
 //
 // Returns (canonical, true) on success, ("", false) on reject.
 //
@@ -72,18 +76,19 @@ func canonicalizeHost(s string) (string, bool) {
 		if rest != "" && !strings.HasPrefix(rest, ":") {
 			return "", false // junk after closing bracket
 		}
-		// Bracketed hosts must be IPv6 literals per RFC 3986 §3.2.2.
-		// netip.ParseAddr rejects empty strings, "[.]", "[..]", hostnames,
-		// invalid hex, embedded whitespace, etc. We additionally reject
-		// IPv4 (should never be bracketed in HTTP URLs) and IPv4-in-IPv6
-		// forms like "::ffff:192.168.1.1" to keep semantics crisp.
+		// Validate that the bracket payload is a real IPv6 literal per
+		// RFC 3986 §3.2.2, but don't canonicalize its spelling — the
+		// runtime host matcher compares bracketed literals textually
+		// (only lowercase + port-strip), so we need validation to use
+		// the same domain of equality. IPv4-in-IPv6 forms like
+		// ::ffff:192.168.1.1 are syntactically valid IPv6 and accepted
+		// by the runtime matcher — accept them too.
 		addr, err := netip.ParseAddr(inner)
-		if err != nil || !addr.Is6() || addr.Is4In6() {
+		if err != nil || !addr.Is6() {
 			return "", false
 		}
-		// addr.String() returns the canonical form, so "[::0001]" and
-		// "[::1]" both canonicalize to "::1".
-		return addr.String(), true
+		_ = addr
+		return strings.ToLower(inner), true
 	}
 	// Not bracketed. If there are 2+ colons, it's a bare IPv6 literal — reject.
 	if strings.Count(s, ":") >= 2 {
