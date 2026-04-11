@@ -94,6 +94,11 @@ type Proxy struct {
 	// requests to their upstreams. nil means use http.DefaultTransport.
 	// Tests inject a fake via SetHTTPServiceTransportForTest.
 	httpSvcTransport http.RoundTripper
+	// httpSvcApprovals gates the `approve` decision in the declared-service
+	// forwarding path. When nil, approve falls through to a 501 (operator
+	// hasn't wired a real manager yet). Wired in production from app.go via
+	// SetHTTPServiceApprovals. Tests install a fake via SetApprovalsForTest.
+	httpSvcApprovals HTTPServiceApprovalsManager
 	mu               sync.Mutex
 }
 

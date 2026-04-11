@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -9,10 +10,40 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/policy"
+	"github.com/agentsh/agentsh/pkg/types"
+	"github.com/google/uuid"
 )
 
 const declaredServicePathPrefix = "/svc/"
+
+// HTTPServiceApprovalsManager is the subset of approvals.Manager needed by
+// the declared-service path. Declared here as a local interface to keep
+// the import surface narrow and to simplify testing — tests install a
+// fake implementation via SetApprovalsForTest and don't have to spin up a
+// real approvals.Manager with its TTY/TOTP/WebAuthn machinery.
+type HTTPServiceApprovalsManager interface {
+	RequestApproval(ctx context.Context, req approvals.Request) (approvals.Resolution, error)
+}
+
+// SetHTTPServiceApprovals wires the approvals manager consulted for
+// `approve` decisions on declared services. Called once during startup
+// from app.go alongside SetPolicyEngine and SetHTTPServices.
+func (p *Proxy) SetHTTPServiceApprovals(m HTTPServiceApprovalsManager) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.httpSvcApprovals = m
+}
+
+// SetApprovalsForTest installs an approvals manager for the declared-
+// service path. Test-only; production wiring goes through
+// SetHTTPServiceApprovals.
+func (p *Proxy) SetApprovalsForTest(m HTTPServiceApprovalsManager) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.httpSvcApprovals = m
+}
 
 // SetPolicyEngine wires the policy engine for http_services dispatch.
 // Called once during startup.
@@ -73,8 +104,9 @@ func (p *Proxy) declaredService(reqPath string) (name, rest string, ok bool) {
 }
 
 // serveDeclaredService handles a request routed to a declared http_service.
-// deny returns 403, approve returns 501 (wired in Task 10), allow/audit
-// forward to the configured upstream after running per-service pre-hooks.
+// deny returns 403, approve consults the wired approvals manager (falling
+// through to 501 when none is configured), and allow/audit forward to the
+// configured upstream after running per-service pre-hooks.
 //
 // rawSegment is the service name AS IT APPEARED IN THE REQUEST URL (with
 // its original case preserved). It is used only for the literal
@@ -92,6 +124,14 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 		return
 	}
 
+	// Resolve sessionID up front so it is available to the approvals
+	// request if the decision turns out to be `approve`. The same value
+	// is reused later when constructing RequestContext for hook dispatch.
+	sessionID := r.Header.Get("X-Session-ID")
+	if sessionID == "" {
+		sessionID = p.cfg.SessionID
+	}
+
 	// Strip query string before evaluation — the evaluator does not look at it.
 	pathForEval := reqPath
 	if idx := strings.IndexByte(pathForEval, '?'); idx != -1 {
@@ -104,21 +144,57 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 	// deliberately) sidestep the decision by rewriting the path.
 	dec := eng.CheckHTTPService(rawSegment, r.Method, pathForEval)
 
+	// Gate approve decisions on an interactive approval. This mirrors the
+	// logic in internal/netmonitor/proxy.go maybeApprove; the two call
+	// sites are deliberately duplicated for minimal blast radius. A
+	// follow-up refactor can consolidate them into a shared helper.
+	//
+	// When the manager is nil (operator hasn't wired one yet), the
+	// decision is left untouched and falls through to the 501 branch in
+	// the switch below — so the existing "approval not yet implemented"
+	// contract still holds for un-wired tests and deployments.
+	if dec.PolicyDecision == types.DecisionApprove && dec.EffectiveDecision == types.DecisionApprove {
+		p.mu.Lock()
+		appr := p.httpSvcApprovals
+		p.mu.Unlock()
+		if appr != nil {
+			req := approvals.Request{
+				ID:        "approval-" + uuid.NewString(),
+				SessionID: sessionID,
+				CommandID: requestID,
+				Kind:      "http_service",
+				Target:    rawSegment + " " + r.Method + " " + pathForEval,
+				Rule:      dec.Rule,
+				Message:   dec.Message,
+			}
+			res, err := appr.RequestApproval(r.Context(), req)
+			if dec.Approval != nil {
+				dec.Approval.ID = req.ID
+			}
+			if err != nil || !res.Approved {
+				dec.EffectiveDecision = types.DecisionDeny
+			} else {
+				dec.EffectiveDecision = types.DecisionAllow
+			}
+		}
+	}
+
 	switch dec.EffectiveDecision {
-	case "deny":
+	case types.DecisionDeny:
 		msg := dec.Message
 		if msg == "" {
 			msg = "blocked by http_services rule"
 		}
 		http.Error(w, msg, http.StatusForbidden)
 		return
-	case "approve":
-		// Task 10 wires the real approval manager. Until then, fail closed
-		// with a controlled 501 so callers get a semantically correct error
-		// instead of a 500 "unsupported decision".
+	case types.DecisionApprove:
+		// Only reached when the decision was `approve` but no approvals
+		// manager has been wired. Fail closed with a semantically distinct
+		// 501 so operators can tell the difference between "approvals not
+		// configured" and "policy returned an unsupported decision".
 		http.Error(w, "approval not yet implemented", http.StatusNotImplemented)
 		return
-	case "allow", "audit":
+	case types.DecisionAllow, types.DecisionAudit:
 		// Proceed to forwarding below.
 	default:
 		http.Error(w, "unsupported decision", http.StatusInternalServerError)
@@ -220,11 +296,8 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 	// ServiceName to the canonical service name (as written in the
 	// policy config) so per-service hooks registered under that key —
 	// e.g. HeaderInjectionHook — fire even when the caller used a
-	// different case in the URL.
-	sessionID := r.Header.Get("X-Session-ID")
-	if sessionID == "" {
-		sessionID = p.cfg.SessionID
-	}
+	// different case in the URL. sessionID was resolved near the top of
+	// this function so it was available for the approvals request.
 	reqCtx := &RequestContext{
 		RequestID:   requestID,
 		SessionID:   sessionID,

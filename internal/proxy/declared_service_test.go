@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -8,9 +9,24 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/approvals"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/proxy/credsub"
 )
+
+// fakeApprovalsManager is a deterministic HTTPServiceApprovalsManager used
+// by the approval-gating tests for the /svc/ path. It short-circuits the
+// full approvals.Manager pipeline (TTY prompt, TOTP, WebAuthn) and returns
+// a fixed Resolution so tests can pin down the approved/denied branches.
+type fakeApprovalsManager struct {
+	approve bool
+	gotReq  approvals.Request
+}
+
+func (f *fakeApprovalsManager) RequestApproval(ctx context.Context, req approvals.Request) (approvals.Resolution, error) {
+	f.gotReq = req
+	return approvals.Resolution{Approved: f.approve}, nil
+}
 
 func init() {
 	policy.SetAllowInsecureHTTPServiceUpstreamForTest(true)
@@ -82,9 +98,11 @@ func TestServeDeclaredService_Deny(t *testing.T) {
 }
 
 // TestServeDeclaredService_Approve_Returns501 pins down the interim behavior
-// for `approve` rules. Task 10 will replace this stub with the real approval
-// flow; until then, an approve match must return 501 (not 500) so callers
-// can distinguish "not yet implemented" from an internal error.
+// for `approve` rules when no approvals manager is wired. Task 10 replaces
+// the always-501 stub with approvals.Manager consultation, but leaves the
+// manager optional: when the manager is nil (e.g. in a test proxy that
+// never calls SetHTTPServiceApprovals), the handler must still return 501
+// so operators can distinguish "no approval wired" from an internal error.
 func TestServeDeclaredService_Approve_Returns501(t *testing.T) {
 	p := newTestProxyWithHTTPService(t, "https://api.github.com", []policy.HTTPServiceRule{
 		{Name: "approve-foo", Paths: []string{"/foo"}, Decision: "approve"},
@@ -100,6 +118,64 @@ func TestServeDeclaredService_Approve_Returns501(t *testing.T) {
 	body, _ := io.ReadAll(w.Body)
 	if !strings.Contains(string(body), "approval not yet implemented") {
 		t.Errorf("body = %q, want 'approval not yet implemented'", body)
+	}
+}
+
+// TestServeDeclaredService_Approve_Approved pins down that when an
+// approvals manager is wired and returns Approved=true, the request
+// proceeds to the forwarding path and the upstream response is
+// returned to the caller.
+func TestServeDeclaredService_Approve_Approved(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "require-approval", Methods: []string{"POST"}, Paths: []string{"/issues"}, Decision: "approve"},
+	})
+	appr := &fakeApprovalsManager{approve: true}
+	p.SetApprovalsForTest(appr)
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github/issues", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if appr.gotReq.Kind != "http_service" {
+		t.Errorf("approval Kind = %q, want http_service", appr.gotReq.Kind)
+	}
+	if !strings.Contains(appr.gotReq.Target, "github") || !strings.Contains(appr.gotReq.Target, "POST") {
+		t.Errorf("approval Target = %q, want to contain service name and method", appr.gotReq.Target)
+	}
+	if appr.gotReq.SessionID != "test-session" {
+		t.Errorf("approval SessionID = %q, want test-session", appr.gotReq.SessionID)
+	}
+}
+
+// TestServeDeclaredService_Approve_Denied pins down that when an approvals
+// manager is wired and returns Approved=false, the handler must deny with
+// 403 Forbidden and MUST NOT forward the request to the upstream.
+func TestServeDeclaredService_Approve_Denied(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("upstream should not be reached when approval denies")
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "require-approval", Methods: []string{"POST"}, Paths: []string{"/issues"}, Decision: "approve"},
+	})
+	p.SetApprovalsForTest(&fakeApprovalsManager{approve: false})
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github/issues", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%q", w.Code, w.Body.String())
 	}
 }
 
