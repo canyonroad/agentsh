@@ -290,20 +290,23 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 	// have already drained part of the stream, so leaving r.Body in
 	// place would hand hooks and the upstream a truncated request.
 	//
-	// body is hoisted to function scope so it remains accessible to
-	// logDeclaredServiceRequest below after the hook dispatch block.
-	// When r.Body is nil we pass a nil slice to the logger — HashBody
-	// handles that by returning an empty string.
-	var body []byte
+	// storedBody is hoisted to function scope because it feeds the
+	// on-disk copy written by StoreRequestBody below. It captures the
+	// PRE-hook bytes — i.e. what the agent actually typed — so real
+	// credentials that CredsSubHook substitutes in during PreHook never
+	// land in llm-bodies. The post-hook (forwarded) view is captured
+	// separately after the hook dispatch block, and only feeds the
+	// audit BodySize/BodyHash integrity stamp.
+	var storedBody []byte
 	if r.Body != nil {
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		body = b
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		r.ContentLength = int64(len(body))
+		storedBody = b
+		r.Body = io.NopCloser(bytes.NewReader(storedBody))
+		r.ContentLength = int64(len(storedBody))
 	}
 
 	// Rewrite r.URL to the upstream-bound form BEFORE running hooks so
@@ -390,26 +393,41 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 	// before hooks ran is still valid (case 1), or the hook explicitly
 	// owns the encoding (cases 3 and 4).
 
-	// Re-read the request body after hooks: declared-service hooks (e.g.
-	// CredsSubHook) may replace r.Body with post-substitution bytes. The
-	// audit record must reflect what is actually forwarded upstream, not
-	// the pre-hook contents.
-	if r.Body != nil {
-		postHookBody, err := io.ReadAll(r.Body)
+	// Compute the two views of the request body:
+	//   - storedBody (captured pre-hook, above): what the agent sent.
+	//     Passed to StoreRequestBody so the on-disk copy in
+	//     <session>/llm-bodies/<request_id>.json reflects the agent's
+	//     original bytes — NOT the post-hook bytes, which for
+	//     CredsSubHook contain real upstream credentials.
+	//   - forwardedBody (captured here, post-hook): what actually
+	//     goes upstream. Feeds BodySize and BodyHash in the audit
+	//     record so the integrity stamp describes the forwarded
+	//     request, not the agent's typed input.
+	//
+	// Special case: a pre-hook may drop the body entirely by setting
+	// r.Body = nil. In that situation neither view is meaningful —
+	// nothing was forwarded, so the audit record should show
+	// BodySize=0/BodyHash="" and nothing should land on disk under
+	// this request ID. Zero both slices to make that explicit.
+	var forwardedBody []byte
+	if r.Body == nil {
+		storedBody = nil
+	} else {
+		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "re-read request body: "+err.Error(), http.StatusBadGateway)
 			return
 		}
-		body = postHookBody
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		r.ContentLength = int64(len(body))
+		forwardedBody = b
+		r.Body = io.NopCloser(bytes.NewReader(forwardedBody))
+		r.ContentLength = int64(len(forwardedBody))
 	}
 
 	// Audit the request AFTER hooks have run and after the RawPath
 	// reconciliation, so the logged path reflects any hook-driven
 	// rewrites. dec.Rule is the name of the matched rule (empty when
 	// the decision came from the service default).
-	p.logDeclaredServiceRequest(requestID, sessionID, canonicalName, dec.Rule, r, body)
+	p.logDeclaredServiceRequest(requestID, sessionID, canonicalName, dec.Rule, r, forwardedBody, storedBody)
 
 	outReq, err := p.buildUpstreamRequest(r, svc.Upstream)
 	if err != nil {
@@ -656,7 +674,15 @@ func sanitizeHeadersForDeclaredService(h http.Header, injectedNames []string) ma
 // Matches the logRequest signature so future refactors can consolidate the
 // two. ruleName is the name of the rule that matched; if the decision came
 // from the service default (no rule matched), ruleName is the empty string.
-func (p *Proxy) logDeclaredServiceRequest(requestID, sessionID, svcName, ruleName string, r *http.Request, body []byte) {
+//
+// forwardedBody is the post-hook payload that will be sent upstream;
+// BodySize and BodyHash describe THIS slice so the audit record
+// describes what was actually forwarded. storedBody is the pre-hook
+// payload (agent's original input); it is passed to StoreRequestBody
+// so the on-disk copy never captures post-substitution credentials.
+// When a hook drops the request body entirely, both are nil and
+// StoreRequestBody no-ops (it already handles len(body) == 0).
+func (p *Proxy) logDeclaredServiceRequest(requestID, sessionID, svcName, ruleName string, r *http.Request, forwardedBody, storedBody []byte) {
 	if p.storage == nil {
 		return
 	}
@@ -675,14 +701,14 @@ func (p *Proxy) logDeclaredServiceRequest(requestID, sessionID, svcName, ruleNam
 			Method:   r.Method,
 			Path:     r.URL.Path,
 			Headers:  sanitizeHeadersForDeclaredService(r.Header, injected),
-			BodySize: len(body),
-			BodyHash: HashBody(body),
+			BodySize: len(forwardedBody),
+			BodyHash: HashBody(forwardedBody),
 		},
 	}
 	if err := p.storage.LogRequest(entry); err != nil {
 		p.logger.Error("log declared-service request", "error", err, "request_id", requestID)
 	}
-	if err := p.storage.StoreRequestBody(requestID, body); err != nil {
+	if err := p.storage.StoreRequestBody(requestID, storedBody); err != nil {
 		p.logger.Error("store declared-service request body", "error", err, "request_id", requestID)
 	}
 }

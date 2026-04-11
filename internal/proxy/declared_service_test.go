@@ -1315,6 +1315,154 @@ func TestServeDeclaredService_LogsRequestAndResponseToStorage(t *testing.T) {
 	}
 }
 
+// TestServeDeclaredService_StoresPreHookBodyDespitePostHookSubstitution
+// pins down that on-disk body storage reflects the PRE-hook body (what
+// the agent originally sent) while the audit record's BodySize/BodyHash
+// reflect the POST-hook body (what was actually forwarded upstream).
+//
+// The split matters for CredsSubHook, which replaces fake-credential
+// placeholders in the agent's request with the real upstream secret.
+// If on-disk storage captured the post-hook bytes, every llm-bodies file
+// would leak the real credential to disk — exactly what credsub exists
+// to prevent. Conversely, the audit BodyHash must cover what was
+// forwarded so provenance/integrity stamps describe the actual upstream
+// payload, not the agent's typed input.
+func TestServeDeclaredService_StoresPreHookBodyDespitePostHookSubstitution(t *testing.T) {
+	// Upstream echoes the body it receives so we can sanity-check that
+	// the hook's replacement really did reach the wire.
+	var upstreamGot []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamGot, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(upstreamGot)
+	}))
+	defer upstream.Close()
+
+	// storeBodies: true so StoreRequestBody actually writes to disk.
+	tmpDir := t.TempDir()
+	storage, err := NewStorage(tmpDir, "test-session", true)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-upload", Methods: []string{"POST"}, Paths: []string{"/upload"}, Decision: "allow"},
+	})
+	p.SetStorageForTest(storage)
+
+	const preHookBody = "FAKE_PLACEHOLDER"
+	const postHookBody = "REAL_SECRET_XYZ"
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "body-replace",
+		preFn: func(r *http.Request, _ *RequestContext) error {
+			r.Body = io.NopCloser(bytes.NewReader([]byte(postHookBody)))
+			r.ContentLength = int64(len(postHookBody))
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github/upload", strings.NewReader(preHookBody))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	// Sanity: upstream really did see the post-hook body.
+	if string(upstreamGot) != postHookBody {
+		t.Fatalf("upstream received %q, want %q (hook did not take effect)", upstreamGot, postHookBody)
+	}
+
+	// Audit record must describe the FORWARDED body (post-hook).
+	entries := readAllRequestLogEntries(t, tmpDir, "test-session")
+	if len(entries) != 1 {
+		t.Fatalf("got %d request log entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Request.BodySize != len(postHookBody) {
+		t.Errorf("BodySize = %d, want %d (post-hook body length)", e.Request.BodySize, len(postHookBody))
+	}
+	wantHash := HashBody([]byte(postHookBody))
+	if e.Request.BodyHash != wantHash {
+		t.Errorf("BodyHash = %q, want %q (hash of post-hook body)", e.Request.BodyHash, wantHash)
+	}
+
+	// On-disk stored body must reflect the PRE-hook bytes. We pull the
+	// request ID out of the audit entry (storage writes the body file
+	// keyed on that ID).
+	bodyPath := filepath.Join(tmpDir, "test-session", "llm-bodies", e.ID+".json")
+	stored, err := os.ReadFile(bodyPath)
+	if err != nil {
+		t.Fatalf("read stored body %q: %v", bodyPath, err)
+	}
+	if string(stored) != preHookBody {
+		t.Errorf("stored body = %q, want %q (pre-hook body)", stored, preHookBody)
+	}
+	if bytes.Contains(stored, []byte(postHookBody)) {
+		t.Errorf("stored body leaked post-hook content %q: got %q", postHookBody, stored)
+	}
+}
+
+// TestServeDeclaredService_HookNilsBody_LogsZeroAndStoresNothing pins
+// down what happens when a pre-hook drops the request body entirely by
+// setting r.Body = nil. In that case nothing is forwarded upstream, so
+// the audit record must show BodySize=0/BodyHash="" and no file must
+// land on disk under this request ID — otherwise the audit record and
+// the on-disk copy describe a body that never actually went anywhere.
+func TestServeDeclaredService_HookNilsBody_LogsZeroAndStoresNothing(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	tmpDir := t.TempDir()
+	storage, err := NewStorage(tmpDir, "test-session", true)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-upload", Methods: []string{"POST"}, Paths: []string{"/upload"}, Decision: "allow"},
+	})
+	p.SetStorageForTest(storage)
+
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "body-drop",
+		preFn: func(r *http.Request, _ *RequestContext) error {
+			r.Body = nil
+			r.ContentLength = 0
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github/upload", strings.NewReader("PAYLOAD"))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+
+	entries := readAllRequestLogEntries(t, tmpDir, "test-session")
+	if len(entries) != 1 {
+		t.Fatalf("got %d request log entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Request.BodySize != 0 {
+		t.Errorf("BodySize = %d, want 0 (hook dropped body)", e.Request.BodySize)
+	}
+	if e.Request.BodyHash != "" {
+		t.Errorf("BodyHash = %q, want empty (hook dropped body)", e.Request.BodyHash)
+	}
+
+	// No file should exist in llm-bodies for this request ID — the hook
+	// dropped the body, so there is nothing to persist.
+	bodyPath := filepath.Join(tmpDir, "test-session", "llm-bodies", e.ID+".json")
+	if _, statErr := os.Stat(bodyPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected no stored body file at %q, got err=%v", bodyPath, statErr)
+	}
+}
+
 // readAllRequestLogEntries reads the request JSONL file for a session and
 // returns every RequestLogEntry. Lives next to the test so it can inspect
 // unexported storage internals if needed.
