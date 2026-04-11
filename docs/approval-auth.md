@@ -957,6 +957,16 @@ func (a *agentsh) verifyApprovalToken(token *ApprovalToken, request *ApprovalReq
 
 ---
 
+## HTTP Service Approvals
+
+Rules in `http_services:` support `decision: approve` the same way `file_rules`, `command_rules`, and `network_rules` do. When a request to a declared service matches a rule with `decision: approve`, the request is held and the approvals manager presents it to the human approver through the configured channel (terminal prompt, TOTP, WebAuthn, or API).
+
+The target shown to the approver is the request path including the query string — for example, `POST /repos/owner/repo/issues?state=open`. This is the path after the `/svc/<name>/` prefix has been stripped. The `message` field from the rule is also displayed, so it is worth writing a human-readable message that explains the operation in context.
+
+All the anti-self-approval protections described in this document apply equally to `http_services` approvals: the agent key cannot access the approval endpoint, and the credential separation model prevents the agent from granting its own approval.
+
+---
+
 ## 7. Configuration
 
 ```yaml

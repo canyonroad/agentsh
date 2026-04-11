@@ -24,10 +24,10 @@ agentsh/
 - `internal/cli/` — Cobra CLI commands (`agentsh exec`, `agentsh session …`, `agentsh events …`).
 - `internal/client/` — HTTP + gRPC clients used by the CLI (and tests) to call the server API.
 - `internal/config/` — Config structs, load/validate helpers.
-- `internal/policy/` — Policy parsing + evaluation and derived limits/timeouts.
+- `internal/policy/` — Policy parsing + evaluation and derived limits/timeouts. New in this release: `http_service.go` (YAML types, validation, host canonicalization for declared HTTP services), `http_service_check.go` (the `CheckHTTPService` evaluator with traversal guard and `DeclaredHTTPServiceHost`/`DeclaredHTTPServiceAllowsDirect` helpers used by the netmonitor fail-closed path), `http_service_compile.go` (`compileHTTPServices` builds the name and host lookup tables consumed by the engine), and `http_service_fuzz_test.go` (fuzz targets for the evaluator).
 - `internal/session/` — Session manager and built-in commands (`cd`, `export`, `aenv`, `als`, `acat`, `astat`).
 - `internal/fsmonitor/` — FUSE workspace view + file operation capture.
-- `internal/netmonitor/` — Network proxy + DNS cache/resolver and optional netns/transparent plumbing.
+- `internal/netmonitor/` — Network proxy + DNS cache/resolver and optional netns/transparent plumbing. The netmonitor's fail-closed check calls `DeclaredHTTPServiceHost` and `DeclaredHTTPServiceAllowsDirect` from the policy engine to block direct connections to declared `http_services` upstream hosts.
 - `internal/limits/` — Optional cgroups v2 enforcement (Linux-only; wired from exec hooks).
 - `internal/ptrace/` — Ptrace-based syscall tracer for restricted containers (Linux-only, requires SYS_PTRACE). Intercepts exec, file, network, and signal syscalls via PTRACE_SEIZE. Architecture-specific register access (amd64, arm64). Wired into the server via `internal/api/` for both exec and wrap paths. Includes `AttachOption` functional options for session/command association and keepStopped control, `WaitAttached`/`ResumePID` for synchronous attach flow. Seccomp prefilter injection (`inject_seccomp.go`, `seccomp_filter.go`) for reduced overhead. `Metrics` interface with Prometheus adapter (`metrics.go`, `metrics_prometheus.go`) and overhead benchmarks (`benchmark_test.go`).
 - `internal/events/` — In-memory event broker for SSE.
@@ -43,6 +43,7 @@ agentsh/
 
 - `pkg/types/` is the “schema” layer: keep it stable and versioned when changing API responses.
 - Tests live next to code (`*_test.go`) in `internal/*`.
+- `internal/proxy/proxy.go` dispatches `/svc/<name>/` requests to declared `http_services` entries. It reuses the existing session storage helpers (`StoreRequestBody`, `StoreResponseBody`) and per-service hook plumbing (header injection, credential substitution, URL rewrites) that the LLM proxy path uses, so logging and hook behavior are consistent across both kinds of proxy traffic.
 
 For gRPC:
 - `proto/agentsh/v1/agentsh.proto` defines the service (Struct-based, no codegen required).

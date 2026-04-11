@@ -188,9 +188,12 @@ Ptrace mode exposes Prometheus metrics at the `/metrics` endpoint:
 | Signal interception | seccomp | ptrace | No* | No* | No* |
 | Network (kernel) | eBPF | ptrace | Landlock** | Landlock** | No |
 | Resource limits | cgroups | cgroups | cgroups | cgroups | cgroups |
+| Declared HTTP services | Yes | Yes | Yes | Yes | Yes |
 
 *Relies on PID namespace isolation + dropped CAP_KILL
 **Requires kernel 6.7+ (Landlock ABI v4)
+
+`http_services` enforcement runs entirely in the userspace proxy layer. It is not tied to any kernel primitive and applies identically on macOS, Linux, and Windows regardless of the active security mode.
 
 ### Landlock ABI Versions
 
