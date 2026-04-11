@@ -502,6 +502,24 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 		return
 	}
 
+	// Wire declared http_services into the freshly started proxy so
+	// /svc/<name>/ requests route through the policy engine. The session
+	// stores the proxy instance as interface{} to avoid a cycle; the
+	// concrete type is *proxy.Proxy in every production path. policyEngineFor
+	// already returned `pol` above, so reuse it directly. This runs BEFORE
+	// any child process can make requests to /svc/<name>/ because
+	// startLLMProxy is called from session creation, before execInSessionCore
+	// spawns the agent child — no race.
+	if pol != nil {
+		if p, ok := s.ProxyInstance().(*proxy.Proxy); ok {
+			p.SetPolicyEngine(pol)
+			p.SetHTTPServices(pol.HTTPServices())
+			if a.approvals != nil {
+				p.SetHTTPServiceApprovals(a.approvals)
+			}
+		}
+	}
+
 	// Store cleanup function (the proxy URL is already set by StartLLMProxy)
 	_ = closeFn // closeFn is stored by StartLLMProxy via sess.SetProxy
 

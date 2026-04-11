@@ -17,8 +17,13 @@ type LLMLogEntry struct {
 	ID        string       `json:"id,omitempty"`
 	Timestamp time.Time    `json:"timestamp"`
 	Dialect   string       `json:"dialect,omitempty"`
-	Request   *LLMRequest  `json:"request,omitempty"`
-	DLP       *LLMDLPInfo  `json:"dlp,omitempty"`
+	// ServiceKind discriminates LLM traffic from declared-service
+	// (http_service) traffic sharing the same JSONL file. Entries with
+	// ServiceKind=="http_service" are skipped by this reader so they
+	// don't show up as "unknown" LLM rows in session reports.
+	ServiceKind string       `json:"service_kind,omitempty"`
+	Request     *LLMRequest  `json:"request,omitempty"`
+	DLP         *LLMDLPInfo  `json:"dlp,omitempty"`
 
 	// Response-specific fields
 	RequestID  string       `json:"request_id,omitempty"`
@@ -133,6 +138,10 @@ func ReadLLMLogsFromFile(path string) ([]LLMLogRow, error) {
 func ReadLLMLogs(r io.Reader) ([]LLMLogRow, error) {
 	// Track requests by ID to correlate with responses
 	requests := make(map[string]*LLMLogEntry)
+	// Track IDs whose request entry was skipped (service_kind=
+	// "http_service"), so the correlated response — which has no
+	// service_kind field of its own — can also be skipped.
+	skipIDs := make(map[string]bool)
 	var rows []LLMLogRow
 
 	scanner := bufio.NewScanner(r)
@@ -147,9 +156,19 @@ func ReadLLMLogs(r io.Reader) ([]LLMLogRow, error) {
 		}
 
 		if entry.isRequest() {
+			// Declared-service traffic is logged to the same file but
+			// must not appear as an LLM row. Record the ID so we can
+			// skip its correlated response below.
+			if entry.ServiceKind == "http_service" {
+				skipIDs[entry.ID] = true
+				continue
+			}
 			// Store request for later correlation
 			requests[entry.ID] = &entry
 		} else if entry.isResponse() {
+			if skipIDs[entry.RequestID] {
+				continue
+			}
 			// Find matching request
 			req, ok := requests[entry.RequestID]
 			if !ok {

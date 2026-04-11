@@ -284,6 +284,76 @@ The proxy sets these environment variables for agent processes:
 | `ANTHROPIC_BASE_URL` | `http://127.0.0.1:<port>` | Route Anthropic SDK through proxy |
 | `OPENAI_BASE_URL` | `http://127.0.0.1:<port>` | Route OpenAI SDK through proxy |
 | `AGENTSH_SESSION_ID` | Session ID | Correlate agent requests with session |
+| `<NAME>_API_URL` (or `expose_as`) | `http://127.0.0.1:<port>/svc/<name>/` | Route child code to a declared `http_services` upstream; one variable per service. Names must not collide with the three reserved names above. |
+
+## Declared HTTP Services
+
+`http_services:` is a top-level YAML policy block that lets operators declare named HTTP upstream services a child process can reach through the proxy gateway. Each entry gives a service a URL-safe name, binds it to an upstream HTTPS URL, and defines per-method, per-path rules — so an agent can be allowed to read GitHub issues but blocked from creating them, or gated behind an approval prompt for any write.
+
+The gateway exposes each declared service as a path prefix `/svc/<name>/`. Child processes receive an env var (`<NAME>_API_URL` by default, or the name set in `expose_as`) pointing at that prefix — they treat it as the base URL and append their own paths. The proxy strips the prefix, evaluates the remaining path and method against the rules, and forwards to the upstream on allow.
+
+### Configuration example
+
+```yaml
+http_services:
+  - name: github                          # URL-safe identifier; used in /svc/github/
+    upstream: https://api.github.com      # must be https unless allow_direct is set
+    expose_as: GITHUB_API_URL             # optional; default is GITHUB_API_URL here too
+    aliases: [api.github.com]             # extra hostnames for the fail-closed host check
+    allow_direct: false                   # if false (default), direct calls to the host are blocked
+    default: deny                         # allow | deny; applied when no rule matches
+
+    rules:
+      - name: read-issues
+        methods: [GET]                    # empty or "*" means any method
+        paths:
+          - /repos/*/*/issues
+          - /repos/*/*/issues/*
+        decision: allow
+        message: "reading issues is allowed"
+
+      - name: create-issue-needs-approval
+        methods: [POST]
+        paths:
+          - /repos/*/*/issues
+        decision: approve
+        message: "Agent wants to create an issue: approve?"
+        timeout: 5m
+```
+
+### Env var contract
+
+When the proxy starts, it injects one env var per declared service into the child process environment:
+
+- The name is `<NAME>_API_URL` where `<NAME>` is the uppercased `name` field.
+- If `expose_as` is set, that exact string is used instead.
+- The value is the proxy base URL with the service prefix appended, e.g. `http://127.0.0.1:PORT/svc/github/`.
+- Child code should treat this as the new base URL and append its own path segments — e.g. `/repos/owner/repo/issues` becomes `http://127.0.0.1:PORT/svc/github/repos/owner/repo/issues`.
+- Env var names must match `[A-Za-z_][A-Za-z0-9_]*`, must not be `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, or `AGENTSH_SESSION_ID`, and must be unique across all declared services (comparison is case-insensitive on Windows).
+
+### Decision flow
+
+For each request arriving at `/svc/<name>/...`:
+
+1. The service is looked up by name from the path prefix.
+2. The remaining path is checked for traversal: `//`, `.`, and `..` segments are rejected with 403 before any rule runs. A single trailing slash is stripped before matching.
+3. Rules are evaluated in declaration order. The first rule whose `methods` and `paths` both match wins.
+4. If no rule matches, the service's `default` applies (`deny` if not set).
+5. `allow` forwards the request to the upstream; `deny` returns 403; `approve` gates on the approvals manager; `audit` logs and forwards.
+
+### Fail-closed host enforcement
+
+When a service is declared with `allow_direct: false` (the default), the netmonitor blocks direct HTTP/HTTPS connections to the upstream hostname and all aliases. The child process can only reach that host through the gateway prefix. This ensures all traffic is subject to the declared rules.
+
+When a direct attempt is blocked, an `http_service_denied_direct` event is emitted in the audit stream. Setting `allow_direct: true` opts a single service out of this constraint — use it only as an escape hatch, for example when a third-party SDK cannot be configured to use a custom base URL.
+
+### Logging
+
+HTTP service requests are logged to the same JSONL file as LLM requests (`~/.agentsh/sessions/<session-id>/llm-requests.jsonl`). Log entries carry a `service_kind` discriminator: `"llm"` for LLM proxy traffic and `"http_service"` for declared service traffic. The same storage helpers (`StoreRequestBody`, `StoreResponseBody`) and body-hash recording that apply to LLM entries apply here, so requests and responses are stored and retrievable through the same session-log commands.
+
+### When to use http_services
+
+Use `http_services` when you want to expose a specific, audited surface of a third-party API to an agent, while blocking everything else on that host. If you only need to allow the agent to reach a host without per-path rule enforcement, a `network_rules` allow is simpler. If you need to allow a host but do not want the per-method/path audit trail, use network rules. `http_services` is the right tool when you need the combination of: specific allowed paths, block-everything-else on that host, approval gating for sensitive operations, and a full request/response audit log.
 
 ## Security Considerations
 

@@ -14,12 +14,15 @@ import (
 
 // RequestLogEntry represents a logged request.
 type RequestLogEntry struct {
-	ID        string      `json:"id"`
-	SessionID string      `json:"session_id"`
-	Timestamp time.Time   `json:"timestamp"`
-	Dialect   Dialect     `json:"dialect"`
-	Request   RequestInfo `json:"request"`
-	DLP       *DLPInfo    `json:"dlp,omitempty"`
+	ID          string      `json:"id"`
+	SessionID   string      `json:"session_id"`
+	Timestamp   time.Time   `json:"timestamp"`
+	Dialect     Dialect     `json:"dialect,omitempty"`
+	ServiceKind string      `json:"service_kind,omitempty"` // "llm" or "http_service"
+	ServiceName string      `json:"service_name,omitempty"` // e.g. "github"
+	RuleName    string      `json:"rule_name,omitempty"`    // e.g. "read-issues"
+	Request     RequestInfo `json:"request"`
+	DLP         *DLPInfo    `json:"dlp,omitempty"`
 }
 
 // RequestInfo contains request details.

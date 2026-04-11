@@ -47,6 +47,11 @@ type Policy struct {
 	// Parsed from YAML but validated by ValidateSecrets in secrets.go.
 	Providers map[string]yaml.Node `yaml:"providers,omitempty"`
 	Services  []ServiceYAML        `yaml:"services,omitempty"`
+
+	// HTTP services for path/verb filtering. Orthogonal to `services:` (Plan 6).
+	// See internal/policy/http_service.go and
+	// docs/superpowers/specs/2026-04-10-http-path-verb-filtering-design.md
+	HTTPServices []HTTPService `yaml:"http_services,omitempty"`
 }
 
 type FileRule struct {
@@ -517,6 +522,10 @@ func (p Policy) Validate() error {
 		for _, w := range warnings {
 			slog.Warn("policy validation", "warning", w)
 		}
+	}
+
+	if err := ValidateHTTPServices(p.HTTPServices); err != nil {
+		return err
 	}
 
 	return nil

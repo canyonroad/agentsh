@@ -433,6 +433,65 @@ When transparent unwrapping occurs, audit events include additional fields:
 
 These fields help detect bypass attempts in audit logs.
 
+## HTTP Services
+
+`http_services:` declares named HTTP upstreams that child processes can reach through the proxy gateway. Declaring a service also blocks direct HTTP/HTTPS connections to its upstream host (and any aliases) from the child process — traffic must flow through the gateway where the declared rules are enforced.
+
+### Complete policy example
+
+```yaml
+version: 1
+name: agent-with-github
+
+# Allow agents to use tools
+command_rules:
+  - name: allow-git
+    commands: [git]
+    decision: allow
+
+# Declare one HTTP service: GitHub API read access, approve on writes
+http_services:
+  - name: github
+    upstream: https://api.github.com
+    expose_as: GITHUB_API_URL
+    aliases: [api.github.com]
+    allow_direct: false    # default; blocks direct calls to api.github.com
+    default: deny
+
+    rules:
+      - name: read-issues
+        methods: [GET]
+        paths:
+          - /repos/*/*/issues
+          - /repos/*/*/issues/*
+        decision: allow
+        message: "reading issues is allowed"
+
+      - name: create-issue-needs-approval
+        methods: [POST]
+        paths:
+          - /repos/*/*/issues
+        decision: approve
+        message: "Agent wants to create an issue: approve?"
+        timeout: 5m
+```
+
+Child processes receive `GITHUB_API_URL=http://127.0.0.1:PORT/svc/github/` in their environment. Code that calls the GitHub API should use that variable as its base URL.
+
+### Fail-closed host guard
+
+When `allow_direct: false` is set (the default), any direct outbound connection to the upstream host or its aliases is blocked at the network layer and logged as an `http_service_denied_direct` event. The agent can only reach the service through the `/svc/<name>/` gateway.
+
+Set `allow_direct: true` only as an escape hatch when a third-party SDK cannot be configured to use a custom base URL.
+
+### Approval gating
+
+Rules with `decision: approve` use the same approvals manager as other approve rules in agentsh. The target shown to the approver is the request path including the query string. See [`docs/approval-auth.md`](../approval-auth.md) for approval channel configuration and anti-self-approval protections.
+
+### Rule evaluation order
+
+Rules are evaluated in declaration order. The first rule whose `methods` and `paths` both match wins. If no rule matches, the service's `default` applies (`deny` when not set). `paths` are compiled as glob patterns with `/` as the separator — `*` matches within a single path segment, not across segments; use `**` for multi-segment matches.
+
 ## Troubleshooting
 
 ### Variable Not Expanding
