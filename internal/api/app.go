@@ -514,6 +514,9 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 		if p, ok := s.ProxyInstance().(*proxy.Proxy); ok {
 			p.SetPolicyEngine(pol)
 			p.SetHTTPServices(pol.HTTPServices())
+			if a.approvals != nil {
+				p.SetHTTPServiceApprovals(a.approvals)
+			}
 		}
 	}
 
