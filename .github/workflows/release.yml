@@ -89,7 +89,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Build Alpine/musl binaries separately (requires different libc)
+  # Build Alpine/musl binaries separately (requires different libc).
+  #
+  # We intentionally do NOT use `container: golang:1.25.7-alpine` at the job
+  # level, because on arm64 GitHub runners this breaks JavaScript actions
+  # (actions/checkout@v4): Node.js is not shipped for the Alpine-on-arm64
+  # combo. Instead, the job runs on a plain ubuntu-* host, checkout happens
+  # there, and the actual musl/CGO compile is delegated to `docker run`
+  # against the multi-arch golang:alpine image. Docker pulls the matching
+  # arch variant natively on each runner (no QEMU needed).
   alpine-build:
     needs: goreleaser  # Wait for release to be created
     timeout-minutes: 20
@@ -102,53 +110,37 @@ jobs:
           - arch: arm64
             runs-on: ubuntu-24.04-arm
     runs-on: ${{ matrix.runs-on }}
-    container:
-      image: golang:1.25.7-alpine
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Alpine build dependencies
-        run: |
-          apk add --no-cache \
-            gcc \
-            musl-dev \
-            libseccomp-dev \
-            libseccomp-static \
-            make \
-            git \
-            file
-
-      - name: Build agentsh (Alpine/musl static)
-        run: |
-          CGO_ENABLED=1 \
-          CGO_LDFLAGS="-static -lseccomp" \
-          go build -ldflags='-s -w -extldflags "-static"' \
-            -o agentsh ./cmd/agentsh
-
-          # Verify it's statically linked
-          file agentsh
-
-      - name: Build agentsh-unixwrap (Alpine/musl static)
-        run: |
-          CGO_ENABLED=1 \
-          CGO_LDFLAGS="-static -lseccomp" \
-          go build -ldflags='-s -w -extldflags "-static"' \
-            -o agentsh-unixwrap ./cmd/agentsh-unixwrap
-
-          # Verify it's statically linked
-          file agentsh-unixwrap
-
-      - name: Build agentsh-shell-shim (Alpine/musl)
-        run: |
-          CGO_ENABLED=0 \
-          go build -ldflags='-s -w' \
-            -o agentsh-shell-shim ./cmd/agentsh-shell-shim
-
-      - name: Create Alpine tarball
+      - name: Build musl-static binaries in Alpine container
         env:
           VERSION: ${{ github.ref_name }}
           ARCH: ${{ matrix.arch }}
         run: |
+          # Keep the build script in a temp file so we avoid quoting hell
+          # around -ldflags='-s -w -extldflags "-static"' inside docker run.
+          cat > /tmp/alpine-build.sh <<'SCRIPT'
+          #!/bin/sh
+          set -eux
+          apk add --no-cache gcc musl-dev libseccomp-dev libseccomp-static make git file
+
+          CGO_ENABLED=1 \
+          CGO_LDFLAGS="-static -lseccomp" \
+          go build -ldflags='-s -w -extldflags "-static"' \
+            -o agentsh ./cmd/agentsh
+          file agentsh
+
+          CGO_ENABLED=1 \
+          CGO_LDFLAGS="-static -lseccomp" \
+          go build -ldflags='-s -w -extldflags "-static"' \
+            -o agentsh-unixwrap ./cmd/agentsh-unixwrap
+          file agentsh-unixwrap
+
+          CGO_ENABLED=0 \
+          go build -ldflags='-s -w' \
+            -o agentsh-shell-shim ./cmd/agentsh-shell-shim
+
           mkdir -p dist
           tar -czvf "dist/agentsh_${VERSION}_linux_${ARCH}_musl.tar.gz" \
             agentsh \
@@ -159,6 +151,21 @@ jobs:
             LICENSE \
             config.yml \
             default-policy.yml
+          SCRIPT
+          chmod +x /tmp/alpine-build.sh
+
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -v "/tmp/alpine-build.sh:/alpine-build.sh:ro" \
+            -w /workspace \
+            -e VERSION \
+            -e ARCH \
+            golang:1.25.7-alpine \
+            /alpine-build.sh
+
+          # Files created inside the container are root-owned on the host.
+          # Chown them back so subsequent host-side steps can read them.
+          sudo chown -R "$(id -u):$(id -g)" dist agentsh agentsh-unixwrap agentsh-shell-shim 2>/dev/null || true
 
       - name: Upload Alpine binaries to release
         env:
@@ -166,9 +173,6 @@ jobs:
           VERSION: ${{ github.ref_name }}
           ARCH: ${{ matrix.arch }}
         run: |
-          # Install gh CLI in Alpine
-          apk add --no-cache github-cli
-
           gh release upload "$VERSION" \
             "dist/agentsh_${VERSION}_linux_${ARCH}_musl.tar.gz" \
             --repo "${{ github.repository }}" \
