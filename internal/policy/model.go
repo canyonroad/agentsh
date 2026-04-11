@@ -524,5 +524,13 @@ func (p Policy) Validate() error {
 		}
 	}
 
+	// http_services: temporary gate. The real validator lands in Task 2 of
+	// the http_services plan (docs/superpowers/specs/2026-04-10-http-path-
+	// verb-filtering-design.md). Until then, reject non-empty http_services
+	// so an in-progress build cannot fail-open on unconsumed rules.
+	if len(p.HTTPServices) > 0 {
+		return fmt.Errorf("http_services: not yet supported in this build (feature under active development)")
+	}
+
 	return nil
 }

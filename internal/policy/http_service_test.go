@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -53,5 +54,22 @@ http_services:
 	}
 	if len(r.Paths) != 1 || r.Paths[0] != "/repos/*/*/issues" {
 		t.Errorf("Paths = %v, want [/repos/*/*/issues]", r.Paths)
+	}
+}
+
+func TestHTTPServicesRejectedDuringLoad(t *testing.T) {
+	src := []byte(`
+version: 1
+name: test-policy
+http_services:
+  - name: github
+    upstream: https://api.github.com
+`)
+	_, err := LoadFromBytes(src)
+	if err == nil {
+		t.Fatal("expected http_services to be rejected, got nil")
+	}
+	if !strings.Contains(err.Error(), "http_services") {
+		t.Errorf("error = %v, want mention of http_services", err)
 	}
 }
