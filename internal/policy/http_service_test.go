@@ -797,6 +797,94 @@ func TestValidateHTTPServices(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name: "duplicate ExposeAs rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://api1.example.com",
+					ExposeAs: "MY_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://api2.example.com",
+					ExposeAs: "MY_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate env var name",
+		},
+		{
+			name: "duplicate derived name rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "other",
+					Upstream: "https://api.other.example.com",
+					ExposeAs: "GITHUB_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate env var name",
+		},
+		{
+			name: "reserved ANTHROPIC_BASE_URL rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "svc",
+					Upstream: "https://api.example.com",
+					ExposeAs: "ANTHROPIC_BASE_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "reserved env var name",
+		},
+		{
+			name: "reserved OPENAI_BASE_URL rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "svc",
+					Upstream: "https://api.example.com",
+					ExposeAs: "OPENAI_BASE_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "reserved env var name",
+		},
+		{
+			name: "reserved AGENTSH_SESSION_ID rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "svc",
+					Upstream: "https://api.example.com",
+					ExposeAs: "AGENTSH_SESSION_ID",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "reserved env var name",
+		},
+		{
+			name: "non-colliding multiple services accepted",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "other",
+					Upstream: "https://api.other.example.com",
+					ExposeAs: "OTHER_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "",
+		},
+		{
 			name: "empty http_services list is valid",
 			svcs: []HTTPService{},
 			wantErr: "",

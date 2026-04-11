@@ -37,6 +37,18 @@ type HTTPServiceRule struct {
 
 var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// reservedEnvVarNames is the set of env var names that http_services must
+// not claim via ExposeAs or via the derived <NAME>_API_URL form, because
+// they are already emitted by Proxy.EnvVars() for the LLM proxy. Allowing
+// collisions would silently overwrite one of the sides in the returned
+// map. Keep additions here conservative — each entry shrinks the space of
+// valid http_service configurations.
+var reservedEnvVarNames = map[string]struct{}{
+	"ANTHROPIC_BASE_URL": {},
+	"OPENAI_BASE_URL":    {},
+	"AGENTSH_SESSION_ID": {},
+}
+
 // canonicalizeHost returns the canonical host form for duplicate-detection.
 // It validates bracket contents as IPv6 literals via netip.ParseAddr but
 // uses the lowercased textual form (not addr.String()) so that duplicate
@@ -110,7 +122,8 @@ func canonicalizeHost(s string) (string, bool) {
 // name (and rule name, when applicable) to aid debugging.
 func ValidateHTTPServices(svcs []HTTPService) error {
 	nameSeen := make(map[string]bool, len(svcs))
-	hostSeen := make(map[string]string, len(svcs)) // host -> owning service name
+	hostSeen := make(map[string]string, len(svcs))   // host -> owning service name
+	envVarSeen := make(map[string]string, len(svcs)) // env var name -> owning service name
 	for i := range svcs {
 		s := &svcs[i]
 		if strings.TrimSpace(s.Name) == "" {
@@ -158,6 +171,11 @@ func ValidateHTTPServices(svcs []HTTPService) error {
 			return fmt.Errorf("http_services[%q]: invalid default %q (want allow|deny)", s.Name, s.Default)
 		}
 
+		// Derive the effective env var name once and use it for both the
+		// regex check and the reserved/duplicate collision checks. This
+		// matches what Proxy.EnvVars() will emit at runtime, so validation
+		// rejects misconfigurations that would cause silent overwrites of
+		// LLM proxy envs or of another http_service's entry.
 		exposeAs := s.ExposeAs
 		if exposeAs == "" {
 			exposeAs = strings.ToUpper(s.Name) + "_API_URL"
@@ -167,6 +185,13 @@ func ValidateHTTPServices(svcs []HTTPService) error {
 		} else if !envVarNameRe.MatchString(exposeAs) {
 			return fmt.Errorf("http_services[%q]: invalid expose_as %q", s.Name, exposeAs)
 		}
+		if _, reserved := reservedEnvVarNames[exposeAs]; reserved {
+			return fmt.Errorf("http_services[%q]: reserved env var name %q (used by LLM proxy)", s.Name, exposeAs)
+		}
+		if other, dup := envVarSeen[exposeAs]; dup {
+			return fmt.Errorf("http_services[%q]: duplicate env var name %q (also claimed by %q)", s.Name, exposeAs, other)
+		}
+		envVarSeen[exposeAs] = s.Name
 
 		for j := range s.Rules {
 			r := &s.Rules[j]
