@@ -134,6 +134,34 @@ func TestReadLLMLogs(t *testing.T) {
 	})
 }
 
+// TestReadLLMLogs_SkipsHTTPServiceEntries pins down that the llm-logs
+// CLI reader skips entries whose service_kind is "http_service".
+// Declared-service traffic is logged to the same JSONL file as LLM
+// traffic but is not "LLM" — including it as an "unknown" dialect
+// row confuses session reporting.
+func TestReadLLMLogs_SkipsHTTPServiceEntries(t *testing.T) {
+	// One LLM pair (anthropic) and one http_service pair (github).
+	input := `{"id":"req_001","timestamp":"2026-01-04T10:30:01Z","dialect":"anthropic","request":{"method":"POST","path":"/v1/messages"}}
+{"request_id":"req_001","timestamp":"2026-01-04T10:30:02Z","duration_ms":1200,"response":{"status":200},"usage":{"input_tokens":150,"output_tokens":892}}
+{"id":"req_http_1","timestamp":"2026-01-04T10:31:00Z","service_kind":"http_service","service_name":"github","request":{"method":"GET","path":"/user"}}
+{"request_id":"req_http_1","timestamp":"2026-01-04T10:31:01Z","duration_ms":500,"response":{"status":200}}
+`
+	rows, err := ReadLLMLogs(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row (LLM only), got %d: %+v", len(rows), rows)
+	}
+	if rows[0].ID != "req_001" {
+		t.Errorf("row ID = %q, want req_001", rows[0].ID)
+	}
+	if rows[0].Dialect != "anthropic" {
+		t.Errorf("row Dialect = %q, want anthropic", rows[0].Dialect)
+	}
+}
+
 func TestFormatLLMLogRow(t *testing.T) {
 	ts, _ := time.Parse(time.RFC3339, "2026-01-04T10:30:01Z")
 

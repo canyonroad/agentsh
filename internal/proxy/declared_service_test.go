@@ -1099,6 +1099,164 @@ func TestServeDeclaredService_HookRewritesOnlyRawPath(t *testing.T) {
 	}
 }
 
+// TestServeDeclaredService_LogRedactsInjectedAndCookieHeaders pins down
+// that the declared-service audit log redacts session cookies,
+// upstream-proxy credentials, and HeaderInjectionHook-registered
+// headers — not just the three fixed LLM-path auth headers. Upstream
+// Set-Cookie and Authorization values echoed in responses are also
+// redacted so audit records cannot leak live credentials.
+func TestServeDeclaredService_LogRedactsInjectedAndCookieHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Set-Cookie", "sid=abc123; Path=/")
+		w.Header().Set("Authorization", "Bearer upstream-leak")
+		w.Header().Set("Proxy-Authenticate", "Basic realm=\"upstream\"")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer upstream.Close()
+
+	tmpDir := t.TempDir()
+	storage, err := NewStorage(tmpDir, "test-session", false)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-user", Methods: []string{"GET"}, Paths: []string{"/user"}, Decision: "allow"},
+	})
+	p.SetStorageForTest(storage)
+
+	// Build a credsub table and register a HeaderInjectionHook under
+	// "github" that injects an arbitrary header name (X-Hub-Token) —
+	// must be redacted in logs even though it is not in the shared LLM
+	// auth denylist.
+	tbl := credsub.New()
+	if err := tbl.Add("github",
+		[]byte("FAKE_PLACEHOLDER_12345678"),
+		[]byte("REAL_CREDENTIAL_abcdef012"),
+	); err != nil {
+		t.Fatalf("credsub.Add: %v", err)
+	}
+	p.HookRegistry().Register("github", NewHeaderInjectionHook("github", "X-Hub-Token", "Bearer {{secret}}", tbl))
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/svc/github/user", nil)
+	req.Header.Set("Cookie", "session=secret123")
+	req.Header.Set("X-Hub-Token", "will-be-replaced")
+	req.Header.Set("Authorization", "Bearer real-key")
+	req.Header.Set("Proxy-Authorization", "Basic abc")
+	req.Header.Set("User-Agent", "test-agent")
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+
+	// Validate request entry redactions.
+	reqEntries := readAllRequestLogEntries(t, tmpDir, "test-session")
+	if len(reqEntries) != 1 {
+		t.Fatalf("got %d request log entries, want 1", len(reqEntries))
+	}
+	reqE := reqEntries[0]
+
+	assertRedacted := func(m map[string][]string, key string) {
+		t.Helper()
+		v, ok := m[key]
+		if !ok {
+			// Try canonical form fallback.
+			v, ok = m[http.CanonicalHeaderKey(key)]
+		}
+		if !ok {
+			t.Errorf("expected header %q in log, not present", key)
+			return
+		}
+		if len(v) == 0 || v[0] != "[REDACTED]" {
+			t.Errorf("header %q = %v, want [REDACTED]", key, v)
+		}
+	}
+
+	assertRedacted(reqE.Request.Headers, "Authorization")
+	assertRedacted(reqE.Request.Headers, "Cookie")
+	assertRedacted(reqE.Request.Headers, "X-Hub-Token")
+	assertRedacted(reqE.Request.Headers, "Proxy-Authorization")
+
+	// Non-sensitive header passes through.
+	if ua, ok := reqE.Request.Headers["User-Agent"]; !ok || len(ua) == 0 || ua[0] != "test-agent" {
+		t.Errorf("User-Agent = %v, want [test-agent]", ua)
+	}
+
+	// Validate response entry redactions: upstream-echoed Authorization
+	// and Set-Cookie must be redacted.
+	respEntries := readAllResponseLogEntries(t, tmpDir, "test-session")
+	if len(respEntries) != 1 {
+		t.Fatalf("got %d response log entries, want 1", len(respEntries))
+	}
+	respE := respEntries[0]
+
+	assertRedacted(respE.Response.Headers, "Set-Cookie")
+	assertRedacted(respE.Response.Headers, "Authorization")
+	assertRedacted(respE.Response.Headers, "Proxy-Authenticate")
+}
+
+// TestServeDeclaredService_LogReflectsPostHookBody pins down that the
+// request audit log records the body AFTER pre-hooks have run. Hooks
+// (notably CredsSubHook) may replace r.Body with post-substitution
+// bytes, and the audit entry must reflect what is actually forwarded
+// upstream — not the pre-substitution bytes the agent originally sent.
+// Otherwise BodySize / BodyHash silently diverge from the upstream
+// request, breaking provenance and audit integrity.
+func TestServeDeclaredService_LogReflectsPostHookBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	tmpDir := t.TempDir()
+	storage, err := NewStorage(tmpDir, "test-session", false)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-upload", Methods: []string{"POST"}, Paths: []string{"/upload"}, Decision: "allow"},
+	})
+	p.SetStorageForTest(storage)
+
+	// Hook that replaces r.Body with different-length bytes, to prove
+	// the audit log reflects the post-hook value not the pre-hook value.
+	const postHookBody = "POST_HOOK_BODY"
+	p.HookRegistry().Register("github", &serviceRecorderHook{
+		name: "body-rewriter",
+		preFn: func(r *http.Request, _ *RequestContext) error {
+			r.Body = io.NopCloser(bytes.NewReader([]byte(postHookBody)))
+			r.ContentLength = int64(len(postHookBody))
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github/upload", strings.NewReader("PRE_HOOK_BODY"))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+
+	entries := readAllRequestLogEntries(t, tmpDir, "test-session")
+	if len(entries) != 1 {
+		t.Fatalf("got %d request log entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Request.BodySize != len(postHookBody) {
+		t.Errorf("BodySize = %d, want %d (post-hook body length)", e.Request.BodySize, len(postHookBody))
+	}
+	wantHash := HashBody([]byte(postHookBody))
+	if e.Request.BodyHash != wantHash {
+		t.Errorf("BodyHash = %q, want %q (hash of post-hook body)", e.Request.BodyHash, wantHash)
+	}
+}
+
 func TestServeDeclaredService_LogsRequestAndResponseToStorage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -189,6 +189,11 @@ func NewHeaderInjectionHook(serviceName, headerName, template string, table *cre
 
 func (h *HeaderInjectionHook) Name() string { return "header-inject" }
 
+// HeaderName returns the header that this hook injects. Used by the
+// declared-service log path to redact the injected value from audit
+// records.
+func (h *HeaderInjectionHook) HeaderName() string { return h.headerName }
+
 func (h *HeaderInjectionHook) PreHook(r *http.Request, _ *RequestContext) error {
 	real, ok := h.table.RealForService(h.serviceName)
 	if !ok {

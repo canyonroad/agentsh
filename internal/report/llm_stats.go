@@ -15,16 +15,21 @@ type LLMLogEntry struct {
 	SessionID string `json:"session_id"`
 
 	// Request-specific fields
-	ID      string         `json:"id,omitempty"`
-	Dialect string         `json:"dialect,omitempty"`
-	Request *LLMRequestInfo `json:"request,omitempty"`
-	DLP     *LLMDLPInfo    `json:"dlp,omitempty"`
+	ID      string          `json:"id,omitempty"`
+	Dialect string          `json:"dialect,omitempty"`
+	// ServiceKind discriminates LLM traffic from declared-service
+	// (http_service) traffic sharing the same JSONL file. Entries with
+	// ServiceKind=="http_service" are skipped by this parser so they
+	// don't show up as "Unknown" provider rows in session reports.
+	ServiceKind string          `json:"service_kind,omitempty"`
+	Request     *LLMRequestInfo `json:"request,omitempty"`
+	DLP         *LLMDLPInfo     `json:"dlp,omitempty"`
 
 	// Response-specific fields
-	RequestID  string          `json:"request_id,omitempty"`
-	DurationMs int64           `json:"duration_ms,omitempty"`
+	RequestID  string           `json:"request_id,omitempty"`
+	DurationMs int64            `json:"duration_ms,omitempty"`
 	Response   *LLMResponseInfo `json:"response,omitempty"`
-	Usage      *LLMUsage       `json:"usage,omitempty"`
+	Usage      *LLMUsage        `json:"usage,omitempty"`
 }
 
 // LLMRequestInfo contains request details from the log.
@@ -92,6 +97,10 @@ func ParseLLMRequestsFile(path string) (*LLMUsageStats, *DLPEventStats, error) {
 
 	// Track request dialects for correlating responses
 	requestDialects := make(map[string]string)
+	// Track request IDs whose request-side entry was skipped because
+	// it was declared-service (http_service) traffic, so their
+	// correlated responses can also be skipped.
+	skipIDs := make(map[string]bool)
 
 	scanner := bufio.NewScanner(file)
 	// Set a larger buffer for potentially large log lines
@@ -105,6 +114,13 @@ func ParseLLMRequestsFile(path string) (*LLMUsageStats, *DLPEventStats, error) {
 		}
 
 		if entry.isRequest() {
+			// Declared-service traffic shares this file but is NOT
+			// LLM — skip it so it doesn't show up as an "Unknown"
+			// provider and inflate LLM totals.
+			if entry.ServiceKind == "http_service" {
+				skipIDs[entry.ID] = true
+				continue
+			}
 			// Store dialect for this request
 			requestDialects[entry.ID] = entry.Dialect
 
@@ -115,6 +131,9 @@ func ParseLLMRequestsFile(path string) (*LLMUsageStats, *DLPEventStats, error) {
 				}
 			}
 		} else if entry.isResponse() {
+			if skipIDs[entry.RequestID] {
+				continue
+			}
 			// Look up the dialect from the original request
 			dialect := requestDialects[entry.RequestID]
 			if dialect == "" {

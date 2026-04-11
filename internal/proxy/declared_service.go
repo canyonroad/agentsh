@@ -390,6 +390,21 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 	// before hooks ran is still valid (case 1), or the hook explicitly
 	// owns the encoding (cases 3 and 4).
 
+	// Re-read the request body after hooks: declared-service hooks (e.g.
+	// CredsSubHook) may replace r.Body with post-substitution bytes. The
+	// audit record must reflect what is actually forwarded upstream, not
+	// the pre-hook contents.
+	if r.Body != nil {
+		postHookBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "re-read request body: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		body = postHookBody
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+	}
+
 	// Audit the request AFTER hooks have run and after the RawPath
 	// reconciliation, so the logged path reflects any hook-driven
 	// rewrites. dec.Rule is the name of the matched rule (empty when
@@ -419,7 +434,7 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 		http.Error(w, "read upstream response: "+readErr.Error(), http.StatusBadGateway)
 		return
 	}
-	p.logDeclaredServiceResponse(requestID, sessionID, resp, respBody, startTime)
+	p.logDeclaredServiceResponse(requestID, sessionID, canonicalName, resp, respBody, startTime)
 
 	// Copy response headers and status, then body. Strip hop-by-hop headers
 	// (RFC 7230 §6.1) plus any headers named in the upstream's Connection
@@ -596,6 +611,44 @@ func (p *Proxy) SetHTTPServiceTransportForTest(rt http.RoundTripper) {
 	p.httpSvcTransport = rt
 }
 
+// sanitizeHeadersForDeclaredService redacts headers that may carry
+// credentials on the declared-service path. In addition to the fixed
+// auth denylist shared with the LLM path (Authorization, X-Api-Key,
+// Api-Key), it redacts:
+//
+//   - Cookie / Set-Cookie (session tokens)
+//   - Proxy-Authorization / Proxy-Authenticate (upstream proxy creds)
+//   - Any header name listed in injectedNames, which the caller
+//     populates from Registry.InjectedHeaderNamesForService so
+//     per-service HeaderInjectionHook credentials never hit disk.
+//
+// Comparison is case-insensitive via http.CanonicalHeaderKey. The
+// returned map uses the original header key casing as received, to
+// keep logs readable.
+func sanitizeHeadersForDeclaredService(h http.Header, injectedNames []string) map[string][]string {
+	denylist := map[string]struct{}{
+		"Authorization":       {},
+		"X-Api-Key":           {},
+		"Api-Key":             {},
+		"Cookie":              {},
+		"Set-Cookie":          {},
+		"Proxy-Authorization": {},
+		"Proxy-Authenticate":  {},
+	}
+	for _, n := range injectedNames {
+		denylist[http.CanonicalHeaderKey(n)] = struct{}{}
+	}
+	result := make(map[string][]string, len(h))
+	for k, v := range h {
+		if _, redacted := denylist[http.CanonicalHeaderKey(k)]; redacted {
+			result[k] = []string{"[REDACTED]"}
+			continue
+		}
+		result[k] = v
+	}
+	return result
+}
+
 // logDeclaredServiceRequest writes a RequestLogEntry for a declared-service
 // request to p.storage, mirroring how logRequest works for the LLM path but
 // without a Dialect and with ServiceKind/ServiceName/RuleName set.
@@ -607,6 +660,10 @@ func (p *Proxy) logDeclaredServiceRequest(requestID, sessionID, svcName, ruleNam
 	if p.storage == nil {
 		return
 	}
+	var injected []string
+	if p.hookRegistry != nil {
+		injected = p.hookRegistry.InjectedHeaderNamesForService(svcName)
+	}
 	entry := &RequestLogEntry{
 		ID:          requestID,
 		SessionID:   sessionID,
@@ -617,7 +674,7 @@ func (p *Proxy) logDeclaredServiceRequest(requestID, sessionID, svcName, ruleNam
 		Request: RequestInfo{
 			Method:   r.Method,
 			Path:     r.URL.Path,
-			Headers:  sanitizeHeaders(r.Header),
+			Headers:  sanitizeHeadersForDeclaredService(r.Header, injected),
 			BodySize: len(body),
 			BodyHash: HashBody(body),
 		},
@@ -633,10 +690,16 @@ func (p *Proxy) logDeclaredServiceRequest(requestID, sessionID, svcName, ruleNam
 // logDeclaredServiceResponse mirrors logResponseDirect for the declared-
 // service path. resp.Body must already be drained into respBody; the
 // caller is responsible for restoring resp.Body before writing it back
-// to the client.
-func (p *Proxy) logDeclaredServiceResponse(requestID, sessionID string, resp *http.Response, respBody []byte, startTime time.Time) {
+// to the client. svcName is the canonical service name so the response
+// sanitizer can redact any HeaderInjectionHook-registered header names
+// the upstream echoed back.
+func (p *Proxy) logDeclaredServiceResponse(requestID, sessionID, svcName string, resp *http.Response, respBody []byte, startTime time.Time) {
 	if p.storage == nil {
 		return
+	}
+	var injected []string
+	if p.hookRegistry != nil {
+		injected = p.hookRegistry.InjectedHeaderNamesForService(svcName)
 	}
 	entry := &ResponseLogEntry{
 		RequestID:  requestID,
@@ -645,7 +708,7 @@ func (p *Proxy) logDeclaredServiceResponse(requestID, sessionID string, resp *ht
 		DurationMs: time.Since(startTime).Milliseconds(),
 		Response: ResponseInfo{
 			Status:   resp.StatusCode,
-			Headers:  sanitizeHeaders(resp.Header),
+			Headers:  sanitizeHeadersForDeclaredService(resp.Header, injected),
 			BodySize: len(respBody),
 			BodyHash: HashBody(respBody),
 		},
