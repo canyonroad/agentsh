@@ -900,3 +900,79 @@ func keysOf(m map[string]*compiledHTTPService) []string {
 	}
 	return out
 }
+
+func TestCompileHTTPServices_RejectsDuplicateName(t *testing.T) {
+	svcs := []HTTPService{
+		{
+			Name: "svc", Upstream: "https://api.example.com",
+			Rules: []HTTPServiceRule{{Name: "r", Paths: []string{"/**"}, Decision: "allow"}},
+		},
+		{
+			Name: "svc", Upstream: "https://api.other.example.com",
+			Rules: []HTTPServiceRule{{Name: "r", Paths: []string{"/**"}, Decision: "allow"}},
+		},
+	}
+	if _, _, err := compileHTTPServices(svcs); err == nil || !strings.Contains(err.Error(), "duplicate service name") {
+		t.Fatalf("want duplicate service name error, got %v", err)
+	}
+}
+
+func TestCompileHTTPServices_RejectsDuplicateUpstreamHost(t *testing.T) {
+	svcs := []HTTPService{
+		{
+			Name: "a", Upstream: "https://api.example.com",
+			Rules: []HTTPServiceRule{{Name: "r", Paths: []string{"/**"}, Decision: "allow"}},
+		},
+		{
+			Name: "b", Upstream: "https://api.example.com",
+			Rules: []HTTPServiceRule{{Name: "r", Paths: []string{"/**"}, Decision: "allow"}},
+		},
+	}
+	if _, _, err := compileHTTPServices(svcs); err == nil || !strings.Contains(err.Error(), "duplicate upstream host") {
+		t.Fatalf("want duplicate upstream host error, got %v", err)
+	}
+}
+
+func TestCompileHTTPServices_RejectsDuplicateAliasHost(t *testing.T) {
+	svcs := []HTTPService{
+		{
+			Name: "a", Upstream: "https://api.a.example.com",
+			Aliases: []string{"shared.example.com"},
+			Rules:   []HTTPServiceRule{{Name: "r", Paths: []string{"/**"}, Decision: "allow"}},
+		},
+		{
+			Name: "b", Upstream: "https://api.b.example.com",
+			Aliases: []string{"shared.example.com"},
+			Rules:   []HTTPServiceRule{{Name: "r", Paths: []string{"/**"}, Decision: "allow"}},
+		},
+	}
+	if _, _, err := compileHTTPServices(svcs); err == nil || !strings.Contains(err.Error(), "via alias") {
+		t.Fatalf("want alias collision error, got %v", err)
+	}
+}
+
+func TestNewEngine_PopulatesHTTPServiceMaps(t *testing.T) {
+	p := &Policy{
+		Version: 1,
+		Name:    "test",
+		HTTPServices: []HTTPService{{
+			Name: "github", Upstream: "https://api.github.com",
+			Rules: []HTTPServiceRule{{
+				Name: "read", Paths: []string{"/repos/**"}, Decision: "allow",
+			}},
+		}},
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	e, err := NewEngine(p, false, false)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	if _, ok := e.httpServices["github"]; !ok {
+		t.Error("e.httpServices missing github")
+	}
+	if _, ok := e.httpServiceHosts["api.github.com"]; !ok {
+		t.Error("e.httpServiceHosts missing api.github.com")
+	}
+}

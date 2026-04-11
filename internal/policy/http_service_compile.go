@@ -28,9 +28,10 @@ type compiledHTTPService struct {
 
 // compileHTTPServices transforms validated HTTPService entries into the
 // compiled form used by CheckHTTPService and the netmonitor host check.
-// Callers MUST call ValidateHTTPServices first; this function assumes
-// invariants established there (valid URL, non-empty name, canonicalizable
-// aliases, compilable globs).
+// In the normal policy-load path, ValidateHTTPServices runs first and
+// errors are caught there; this compiler is also hardened against
+// duplicate names/hosts and bad aliases so it remains safe if a caller
+// bypasses validation (e.g. constructing a Policy in-memory for tests).
 func compileHTTPServices(svcs []HTTPService) (byName, byHost map[string]*compiledHTTPService, err error) {
 	byName = make(map[string]*compiledHTTPService, len(svcs))
 	byHost = make(map[string]*compiledHTTPService, len(svcs))
@@ -84,13 +85,23 @@ func compileHTTPServices(svcs []HTTPService) (byName, byHost map[string]*compile
 			cs.rules = append(cs.rules, cr)
 		}
 
-		byName[strings.ToLower(s.Name)] = cs
+		nameKey := strings.ToLower(s.Name)
+		if _, exists := byName[nameKey]; exists {
+			return nil, nil, fmt.Errorf("http_services: duplicate service name %q", s.Name)
+		}
+		byName[nameKey] = cs
+		if other, exists := byHost[host]; exists {
+			return nil, nil, fmt.Errorf("http_services[%q]: duplicate upstream host %q (also claimed by %q)", s.Name, host, other.cfg.Name)
+		}
 		byHost[host] = cs
 		for _, alias := range s.Aliases {
 			a, ok := canonicalizeHost(alias)
 			if !ok {
 				// Validation should have rejected this. Treat as invariant break.
 				return nil, nil, fmt.Errorf("http_services[%q]: canonicalize alias %q", s.Name, alias)
+			}
+			if other, exists := byHost[a]; exists {
+				return nil, nil, fmt.Errorf("http_services[%q]: duplicate upstream host %q via alias %q (also claimed by %q)", s.Name, a, alias, other.cfg.Name)
 			}
 			byHost[a] = cs
 		}
