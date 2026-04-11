@@ -649,6 +649,134 @@ func TestValidateHTTPServices(t *testing.T) {
 			wantErr: "invalid alias",
 		},
 		{
+			name: "bracketed double-dot alias rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Aliases:  []string{"[..]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "invalid alias",
+		},
+		{
+			name: "bracketed hostname alias rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Aliases:  []string{"[example.com]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "invalid alias",
+		},
+		{
+			name: "bracketed IPv4 alias rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Aliases:  []string{"[192.168.1.1]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "invalid alias",
+		},
+		{
+			name: "bracketed IPv4-in-IPv6 alias rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Aliases:  []string{"[::ffff:192.168.1.1]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "invalid alias",
+		},
+		{
+			name: "bracketed invalid hex IPv6 alias rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Aliases:  []string{"[gggg::1]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "invalid alias",
+		},
+		{
+			name: "bracketed IPv6 with trailing space inside brackets rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Aliases:  []string{"[::1 ]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "invalid alias",
+		},
+		{
+			name: "bracketed IPv6 leading-zero alias canonicalizes to ::1",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://[::1]",
+					ExposeAs: "SVC1_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://api2.example.com",
+					ExposeAs: "SVC2_API_URL",
+					Aliases:  []string{"[::0001]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate upstream host",
+		},
+		{
+			name: "bracketed IPv6 expanded form alias canonicalizes to ::1",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://[::1]",
+					ExposeAs: "SVC1_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://api2.example.com",
+					ExposeAs: "SVC2_API_URL",
+					Aliases:  []string{"[0:0:0:0:0:0:0:1]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate upstream host",
+		},
+		{
+			name: "bracketed IPv6 with various spellings all accepted when distinct",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://[fe80::1]",
+					ExposeAs: "SVC1_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://[::2]",
+					ExposeAs: "SVC2_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "",
+		},
+		{
 			name: "empty http_services list is valid",
 			svcs: []HTTPService{},
 			wantErr: "",

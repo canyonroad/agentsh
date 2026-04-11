@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -45,6 +46,12 @@ var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // (internal/proxy/services/matcher.go preserves brackets and matches
 // "[::1]" literally — bare "::1" never matches).
 //
+// Bracketed payloads MUST be valid IPv6 literals per RFC 3986 §3.2.2;
+// any other content (hostnames, IPv4, IPv4-in-IPv6, or malformed text)
+// is rejected. IPv6 literals are canonicalized via netip.Addr.String()
+// so "[::1]", "[::0001]", "[0:0:0:0:0:0:0:1]", and "[FE80::1]" compare
+// equal to their canonical forms.
+//
 // Returns (canonical, true) on success, ("", false) on reject.
 //
 // This helper lives in the policy package by design: the policy package
@@ -65,11 +72,18 @@ func canonicalizeHost(s string) (string, bool) {
 		if rest != "" && !strings.HasPrefix(rest, ":") {
 			return "", false // junk after closing bracket
 		}
-		canonical := strings.TrimSuffix(strings.ToLower(inner), ".")
-		if canonical == "" {
-			return "", false // "[]" or "[.]"
+		// Bracketed hosts must be IPv6 literals per RFC 3986 §3.2.2.
+		// netip.ParseAddr rejects empty strings, "[.]", "[..]", hostnames,
+		// invalid hex, embedded whitespace, etc. We additionally reject
+		// IPv4 (should never be bracketed in HTTP URLs) and IPv4-in-IPv6
+		// forms like "::ffff:192.168.1.1" to keep semantics crisp.
+		addr, err := netip.ParseAddr(inner)
+		if err != nil || !addr.Is6() || addr.Is4In6() {
+			return "", false
 		}
-		return canonical, true
+		// addr.String() returns the canonical form, so "[::0001]" and
+		// "[::1]" both canonicalize to "::1".
+		return addr.String(), true
 	}
 	// Not bracketed. If there are 2+ colons, it's a bare IPv6 literal — reject.
 	if strings.Count(s, ":") >= 2 {
