@@ -57,6 +57,20 @@ var reservedEnvVarNames = map[string]struct{}{
 	"AGENTSH_SESSION_ID": {},
 }
 
+// httpServiceAllowInsecureUpstreamForTest, when true, lets ValidateHTTPServices
+// accept http:// upstreams. Set from test init() functions only. Never set in
+// production code.
+var httpServiceAllowInsecureUpstreamForTest bool
+
+// SetAllowInsecureHTTPServiceUpstreamForTest enables the test-only relaxation
+// of the upstream scheme check so tests can point declared services at an
+// httptest.Server listening on http://. This function exists so test files
+// in other packages can flip the toggle without touching package-private
+// state. Not thread-safe. Never call from production code.
+func SetAllowInsecureHTTPServiceUpstreamForTest(v bool) {
+	httpServiceAllowInsecureUpstreamForTest = v
+}
+
 // canonicalizeHost returns the canonical host form for duplicate-detection.
 // It validates bracket contents as IPv6 literals via netip.ParseAddr but
 // uses the lowercased textual form (not addr.String()) so that duplicate
@@ -150,7 +164,7 @@ func ValidateHTTPServices(svcs []HTTPService) error {
 		if err != nil || u == nil || u.Host == "" {
 			return fmt.Errorf("http_services[%q]: invalid upstream URL %q", s.Name, s.Upstream)
 		}
-		if u.Scheme != "https" {
+		if u.Scheme != "https" && !(httpServiceAllowInsecureUpstreamForTest && u.Scheme == "http") {
 			return fmt.Errorf("http_services[%q]: upstream must be https (got %q)", s.Name, u.Scheme)
 		}
 

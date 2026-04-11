@@ -90,7 +90,11 @@ type Proxy struct {
 	// source of truth for http_services dispatch in ServeHTTP. Reads are
 	// serialized with mu so dispatch cannot race with a late configure.
 	policyEngine *policy.Engine
-	mu           sync.Mutex
+	// httpSvcTransport is the RoundTripper used to forward declared-service
+	// requests to their upstreams. nil means use http.DefaultTransport.
+	// Tests inject a fake via SetHTTPServiceTransportForTest.
+	httpSvcTransport http.RoundTripper
+	mu               sync.Mutex
 }
 
 // New creates a new LLM proxy.

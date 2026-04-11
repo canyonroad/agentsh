@@ -10,6 +10,10 @@ import (
 	"github.com/agentsh/agentsh/internal/policy"
 )
 
+func init() {
+	policy.SetAllowInsecureHTTPServiceUpstreamForTest(true)
+}
+
 func newTestProxyWithHTTPService(t *testing.T, upstream string, rules []policy.HTTPServiceRule) *Proxy {
 	t.Helper()
 	cfg := Config{SessionID: "test-session"}
@@ -86,5 +90,46 @@ func TestServeDeclaredService_Approve_Returns501(t *testing.T) {
 	body, _ := io.ReadAll(w.Body)
 	if !strings.Contains(string(body), "approval not yet implemented") {
 		t.Errorf("body = %q, want 'approval not yet implemented'", body)
+	}
+}
+
+func TestServeDeclaredService_Allow_Forwards(t *testing.T) {
+	// Fake upstream that records the incoming request.
+	var gotMethod, gotPath string
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "post-issues", Methods: []string{"POST"}, Paths: []string{"/repos/*/*/issues"}, Decision: "allow"},
+	})
+
+	body := strings.NewReader(`{"title":"bug"}`)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github/repos/anthropics/claude-code/issues", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", w.Code)
+	}
+	if gotMethod != "POST" {
+		t.Errorf("upstream method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/repos/anthropics/claude-code/issues" {
+		t.Errorf("upstream path = %q, want /repos/anthropics/claude-code/issues", gotPath)
+	}
+	if string(gotBody) != `{"title":"bug"}` {
+		t.Errorf("upstream body = %q", gotBody)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("response Content-Type = %q, want application/json", ct)
 	}
 }
