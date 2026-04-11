@@ -36,30 +36,41 @@ type HTTPServiceRule struct {
 
 var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// canonicalizeHost normalizes a hostname for comparison against HTTP Host
-// headers. The rules mirror internal/proxy/services.Matcher.Match so that
-// policy-time duplicate-host detection catches aliases that the proxy layer
-// would treat as identical at request-routing time:
+// canonicalizeHost normalizes a host string for duplicate-detection and
+// matching. It handles three forms:
 //
-//  1. Strip any trailing ":port". IPv6 bracketed forms like "[::1]:443" keep
-//     the closing bracket; non-bracketed forms use the last colon.
-//  2. Lowercase.
-//  3. Strip a trailing "." (FQDN form).
+//  1. bracketed IPv6 with optional port: "[::1]", "[::1]:443"
+//  2. bare IPv6 literal (no brackets, no port): "::1", "fe80::1"
+//  3. hostname with optional port: "api.github.com", "api.github.com:443"
+//
+// Rules: strip any port, strip IPv6 brackets, lowercase, and trim a single
+// trailing dot. After canonicalization, "[::1]" and "::1" both become "::1"
+// so bracketed upstreams and bare aliases compare equal.
 //
 // This helper lives in the policy package by design: the policy package must
 // not import proxy-layer packages, so the normalization logic is duplicated
 // here (with both sites anchored to the same documented rules).
 func canonicalizeHost(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
 	if strings.HasPrefix(s, "[") {
 		// Bracketed IPv6: look for "]:" to find the port separator. Keep the
 		// closing bracket, drop ":port".
 		if i := strings.Index(s, "]:"); i != -1 {
 			s = s[:i+1]
 		}
-	} else {
-		if i := strings.LastIndex(s, ":"); i != -1 {
-			s = s[:i]
+		// Strip the brackets themselves for canonical form.
+		if strings.HasSuffix(s, "]") {
+			s = s[1 : len(s)-1]
 		}
+	} else if strings.Count(s, ":") >= 2 {
+		// Bare IPv6 literal (e.g. "::1", "fe80::1") — no port possible.
+		// Leave as-is apart from lowercase + trailing-dot trim below.
+	} else if i := strings.LastIndex(s, ":"); i != -1 {
+		// host:port
+		s = s[:i]
 	}
 	return strings.TrimSuffix(strings.ToLower(s), ".")
 }
@@ -89,7 +100,7 @@ func ValidateHTTPServices(svcs []HTTPService) error {
 			return fmt.Errorf("http_services[%q]: upstream must be https (got %q)", s.Name, u.Scheme)
 		}
 
-		host := canonicalizeHost(u.Hostname())
+		host := canonicalizeHost(u.Host)
 		if other, dup := hostSeen[host]; dup {
 			return fmt.Errorf("http_services[%q]: duplicate upstream host %q (also claimed by %q)", s.Name, host, other)
 		}

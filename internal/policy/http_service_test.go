@@ -487,6 +487,100 @@ func TestValidateHTTPServices(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name: "IPv6 upstream collides with bracketed alias on another service",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://[::1]",
+					ExposeAs: "SVC1_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://api2.example.com",
+					ExposeAs: "SVC2_API_URL",
+					Aliases:  []string{"[::1]"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate upstream host",
+		},
+		{
+			name: "IPv6 upstream collides with bare alias on another service",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://[::1]",
+					ExposeAs: "SVC1_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://api2.example.com",
+					ExposeAs: "SVC2_API_URL",
+					Aliases:  []string{"::1"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate upstream host",
+		},
+		{
+			name: "IPv6 upstream with port collides with bracketed alias with port on another service",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://[::1]:8443",
+					ExposeAs: "SVC1_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://api2.example.com",
+					ExposeAs: "SVC2_API_URL",
+					Aliases:  []string{"[::1]:443"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate upstream host",
+		},
+		{
+			name: "IPv6 upstream collides with mixed-case bare alias on another service",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://[fe80::1]",
+					ExposeAs: "SVC1_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://api2.example.com",
+					ExposeAs: "SVC2_API_URL",
+					Aliases:  []string{"FE80::1"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate upstream host",
+		},
+		{
+			name: "distinct IPv6 upstreams both accepted",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://[::1]",
+					ExposeAs: "SVC1_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://[::2]",
+					ExposeAs: "SVC2_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "",
+		},
+		{
 			name: "empty http_services list is valid",
 			svcs: []HTTPService{},
 			wantErr: "",
