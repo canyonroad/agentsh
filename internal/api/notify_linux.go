@@ -211,13 +211,14 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 			slog.Debug("got wrapper PID from socket credentials", "wrapper_pid", wrapperPID, "session_id", sessID)
 		}
 
-		// Set a read deadline to prevent blocking forever if wrapper fails.
-		// Note: This may fail on some file types (e.g., socketpairs in Docker/containers),
-		// but we should still continue and try to receive the FD. RecvFD will block until
-		// it receives the FD or the socket is closed by the wrapper.
-		if err := parentSock.SetReadDeadline(time.Now().Add(recvFDTimeout)); err != nil {
-			slog.Debug("failed to set read deadline on notify socket (continuing)", "error", err)
-			// Don't return - continue to RecvFD
+		// Set SO_RCVTIMEO directly on the socket. unixmon.RecvFD calls recvmsg
+		// on the raw fd, bypassing Go's netpoll — so SetReadDeadline wouldn't
+		// apply. SO_RCVTIMEO is a kernel-level timeout that works with raw
+		// blocking recvmsg.
+		tv := unix.NsecToTimeval(recvFDTimeout.Nanoseconds())
+		if err := unix.SetsockoptTimeval(int(parentSock.Fd()), unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+			slog.Debug("failed to set SO_RCVTIMEO on notify socket", "error", err, "session_id", sessID)
+			// Don't return - RecvFD will still work, just without a timeout
 		}
 
 		// Receive the notify fd from the wrapper process
@@ -234,6 +235,13 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 		}
 		slog.Debug("received notify fd from wrapper", "fd", notifyFD.Fd(), "session_id", sessID)
 		defer notifyFD.Close()
+
+		// Clear SO_RCVTIMEO now that FD handoff is complete. Otherwise the
+		// 10s timeout we set for RecvFD would persist on the socket and
+		// shorten the later READY byte read below (which expects 30s).
+		if err := unix.SetsockoptTimeval(int(parentSock.Fd()), unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{}); err != nil {
+			slog.Debug("failed to clear SO_RCVTIMEO on notify socket", "error", err, "session_id", sessID)
+		}
 
 		// Close the notify FD when context is cancelled to unblock any stuck
 		// NotifReceive ioctl. The done channel ensures this goroutine exits
@@ -306,9 +314,14 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 		// If ptrace sync is enabled, read the READY byte from the wrapper
 		// and signal the main goroutine that ptrace can now be attached.
 		if ptraceReady != nil {
-			_ = parentSock.SetReadDeadline(time.Time{}) // clear FD-receive deadline
-			// Use 30s timeout for READY (wrapper does signal filter + Landlock setup after ACK).
-			_ = parentSock.SetReadDeadline(time.Now().Add(30 * time.Second))
+			// Use 30s timeout for READY (wrapper does signal filter + Landlock
+			// setup after ACK). SO_RCVTIMEO is used instead of SetReadDeadline
+			// because parentSock wraps a raw socketpair fd that isn't
+			// registered with Go's netpoll, so deadlines are a silent no-op.
+			readyTv := unix.NsecToTimeval((30 * time.Second).Nanoseconds())
+			if err := unix.SetsockoptTimeval(int(parentSock.Fd()), unix.SOL_SOCKET, unix.SO_RCVTIMEO, &readyTv); err != nil {
+				slog.Debug("failed to set SO_RCVTIMEO for READY read", "error", err, "session_id", sessID)
+			}
 			readyBuf := make([]byte, 1)
 			// Retry on EINTR (signal interruption during read).
 			var readyErr error
@@ -319,6 +332,8 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 				}
 				break
 			}
+			// Clear SO_RCVTIMEO so it doesn't leak to any later reads.
+			_ = unix.SetsockoptTimeval(int(parentSock.Fd()), unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{})
 			if readyErr != nil {
 				ptraceReady <- fmt.Errorf("read READY byte: %w", readyErr)
 			} else if readyBuf[0] != 'R' {
@@ -326,7 +341,6 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 			} else {
 				ptraceReady <- nil
 			}
-			_ = parentSock.SetReadDeadline(time.Time{}) // clear for GO byte
 		}
 
 		<-serveDone // wait for ServeNotifyWithExecve to finish

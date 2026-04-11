@@ -776,7 +776,7 @@ func TestWrap_SignalFilterUsesSessionPolicy(t *testing.T) {
 	}
 
 	app := &App{policy: globalEngine}
-	mgr := session.NewManager(5)
+	mgr := session.NewManager(16)
 
 	t.Run("uses_session_engine", func(t *testing.T) {
 		s, err := mgr.Create(t.TempDir(), "default")
@@ -823,6 +823,124 @@ func TestWrap_SignalFilterUsesSessionPolicy(t *testing.T) {
 			t.Error("signalFilterEnabled(s, true) = true; expected false " +
 				"because execveEnabled must always disable the signal " +
 				"filter gate (seccomp USER_NOTIF filter stacking).")
+		}
+	})
+
+	t.Run("disabled_by_unix_socket_monitor", func(t *testing.T) {
+		// Unix socket monitoring installs ActNotify rules in the main
+		// seccomp filter. Stacking the signal filter on top causes the
+		// same USER_NOTIF delivery failure observed with execve — see
+		// TestAlpineEnvInject_BashBuiltinDisabled for the reproducer.
+		cfgApp := &App{
+			policy: globalEngine,
+			cfg: &config.Config{
+				Sandbox: config.SandboxConfig{
+					Seccomp: config.SandboxSeccompConfig{
+						UnixSocket: config.SandboxSeccompUnixConfig{Enabled: true},
+					},
+				},
+			},
+		}
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		s.SetPolicyEngine(sessionEngine)
+
+		if cfgApp.signalFilterEnabled(s, false) {
+			t.Error("signalFilterEnabled(s, false) = true with unix socket " +
+				"monitoring enabled; expected false because stacking two " +
+				"USER_NOTIF filters breaks notification delivery.")
+		}
+	})
+
+	t.Run("disabled_by_file_monitor", func(t *testing.T) {
+		// file_monitor traps openat/unlinkat/etc. via ActNotify. Same
+		// stacking hazard as unix sockets.
+		trueVal := true
+		cfgApp := &App{
+			policy: globalEngine,
+			cfg: &config.Config{
+				Sandbox: config.SandboxConfig{
+					Seccomp: config.SandboxSeccompConfig{
+						FileMonitor: config.SandboxSeccompFileMonitorConfig{
+							Enabled: &trueVal,
+						},
+					},
+				},
+			},
+		}
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		s.SetPolicyEngine(sessionEngine)
+
+		if cfgApp.signalFilterEnabled(s, false) {
+			t.Error("signalFilterEnabled(s, false) = true with file_monitor " +
+				"enabled; expected false because stacking two USER_NOTIF " +
+				"filters breaks notification delivery.")
+		}
+	})
+
+	t.Run("disabled_by_intercept_metadata", func(t *testing.T) {
+		// intercept_metadata traps stat-family syscalls via ActNotify.
+		// Same stacking hazard as the other notify features.
+		trueVal := true
+		cfgApp := &App{
+			policy: globalEngine,
+			cfg: &config.Config{
+				Sandbox: config.SandboxConfig{
+					Seccomp: config.SandboxSeccompConfig{
+						FileMonitor: config.SandboxSeccompFileMonitorConfig{
+							InterceptMetadata: &trueVal,
+						},
+					},
+				},
+			},
+		}
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		s.SetPolicyEngine(sessionEngine)
+
+		if cfgApp.signalFilterEnabled(s, false) {
+			t.Error("signalFilterEnabled(s, false) = true with " +
+				"intercept_metadata enabled; expected false because " +
+				"stacking two USER_NOTIF filters breaks notification delivery.")
+		}
+	})
+
+	t.Run("enabled_when_no_main_notify", func(t *testing.T) {
+		// With no USER_NOTIF features on the main filter, the signal
+		// filter can be installed safely. This is the happy path: a
+		// session with signal rules and a wrapper that only does
+		// Landlock / blocked-syscalls without notify.
+		falseVal := false
+		cfgApp := &App{
+			policy: globalEngine,
+			cfg: &config.Config{
+				Sandbox: config.SandboxConfig{
+					Seccomp: config.SandboxSeccompConfig{
+						UnixSocket: config.SandboxSeccompUnixConfig{Enabled: false},
+						FileMonitor: config.SandboxSeccompFileMonitorConfig{
+							Enabled:           &falseVal,
+							InterceptMetadata: &falseVal,
+						},
+					},
+				},
+			},
+		}
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		s.SetPolicyEngine(sessionEngine)
+
+		if !cfgApp.signalFilterEnabled(s, false) {
+			t.Error("signalFilterEnabled(s, false) = false with no main " +
+				"filter notify features; expected true (happy path).")
 		}
 	})
 }

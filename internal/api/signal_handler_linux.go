@@ -13,7 +13,15 @@ import (
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
 	"github.com/agentsh/agentsh/internal/signal"
 	"github.com/agentsh/agentsh/pkg/types"
+	"golang.org/x/sys/unix"
 )
+
+// Note on libseccomp-golang error semantics:
+// notifReceive internally retries EINTR, so any non-nil error from
+// filter.Receive() indicates either ENOENT (filter destroyed because the
+// tracee exited) or a permanent failure. In both cases, the goroutine must
+// exit to release the fd and avoid a hot loop; the next exec installs a
+// fresh filter and handler.
 
 // signalEmitterAdapter adapts the API's event store/broker to the signal handler's EventEmitter interface.
 type signalEmitterAdapter struct {
@@ -55,10 +63,14 @@ func startSignalHandler(ctx context.Context, parentSock *os.File, sessID string,
 	go func() {
 		defer parentSock.Close()
 
-		// Set a read deadline to prevent blocking forever if wrapper fails
-		if err := parentSock.SetReadDeadline(time.Now().Add(recvFDTimeout)); err != nil {
-			slog.Debug("failed to set read deadline on signal socket", "error", err)
-			return
+		// Set SO_RCVTIMEO directly on the socket. unixmon.RecvFD calls recvmsg
+		// on the raw fd, bypassing Go's netpoll — so SetReadDeadline wouldn't
+		// apply. SO_RCVTIMEO is a kernel-level timeout that works with raw
+		// blocking recvmsg.
+		tv := unix.NsecToTimeval(recvFDTimeout.Nanoseconds())
+		if err := unix.SetsockoptTimeval(int(parentSock.Fd()), unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+			slog.Debug("failed to set SO_RCVTIMEO on signal socket", "error", err)
+			// Don't return - RecvFD will still work, just without a timeout
 		}
 
 		// Receive the signal filter fd from the wrapper process
@@ -72,6 +84,20 @@ func startSignalHandler(ctx context.Context, parentSock *os.File, sessID string,
 			return
 		}
 		defer signalFD.Close()
+
+		// Close the signal FD when context is cancelled to unblock any stuck
+		// NotifReceive ioctl. The done channel ensures this watchdog goroutine
+		// exits if serveSignalNotify returns early (error/setup failure) while
+		// context is still active. Mirrors the pattern used in notify_linux.go.
+		handlerDone := make(chan struct{})
+		defer close(handlerDone)
+		go func() {
+			select {
+			case <-ctx.Done():
+				signalFD.Close()
+			case <-handlerDone:
+			}
+		}()
 
 		emitter := &signalEmitterAdapter{
 			store:     store,
@@ -101,15 +127,15 @@ func serveSignalNotify(ctx context.Context, fd *os.File, handler *signal.Handler
 
 		req, err := filter.Receive()
 		if err != nil {
-			// Check for context cancellation
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			// Transient error - continue
-			slog.Debug("signal filter receive", "error", err)
-			continue
+			// libseccomp auto-retries EINTR internally, so any error here is
+			// permanent: ENOENT (filter destroyed because the tracee exited),
+			// EBADF (watchdog closed the fd on ctx cancellation), or a real
+			// failure. Exit to release the fd — the next exec will install a
+			// fresh filter. Looping here would hot-spin on ENOENT until ctx
+			// eventually cancels, burning CPU and potentially interfering
+			// with cleanup of the next exec's setup.
+			slog.Debug("signal filter exiting on error", "error", err)
+			return
 		}
 
 		sigCtx := signal.ExtractSignalContext(req)

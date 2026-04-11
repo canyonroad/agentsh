@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build linux
 
 package api
 
@@ -17,7 +17,7 @@ type unixSocketPair struct {
 // createUnixSocketPair creates a Unix socket pair for IPC.
 // Returns nil if socket pair creation fails.
 func createUnixSocketPair() *unixSocketPair {
-	sp, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET, 0)
+	sp, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil
 	}

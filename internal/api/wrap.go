@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/capabilities"
+	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/landlock"
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -319,17 +320,21 @@ func (a *App) deriveLandlockAllowPaths(s *session.Session) (execute, read, write
 // so per-session signal rules are honored — reading a.policy directly
 // silently ignores non-default policy files (canyonroad/agentsh#191).
 //
-// Signal filtering is disabled when execve interception is enabled
-// because stacking two seccomp USER_NOTIF filters causes notification
-// delivery failures (the signal filter's semaphore interferes with
-// execve notification reception).
+// Signal filtering is disabled whenever the main seccomp filter already
+// uses SECCOMP_RET_USER_NOTIF (for execve interception, unix socket
+// monitoring, file monitoring, or metadata interception). Stacking two
+// USER_NOTIF filters on the same thread causes notification delivery
+// failures that break the agent: on Alpine/musl we observed libreadline
+// EBADF loops because the signal filter's listener interferes with the
+// main filter's openat notifications. See
+// TestAlpineEnvInject_BashBuiltinDisabled for the reproducer.
 //
 // This helper is the regression boundary for #191's signal-filter half:
 // it was extracted from wrapInitCore specifically so the gate can be
 // tested end-to-end without standing up seccomp. See
 // TestWrap_SignalFilterUsesSessionPolicy.
 func (a *App) signalFilterEnabled(s *session.Session, execveEnabled bool) bool {
-	if execveEnabled {
+	if a.mainFilterUsesUserNotify(execveEnabled) {
 		return false
 	}
 	engine := a.policyEngineFor(s)
@@ -337,6 +342,40 @@ func (a *App) signalFilterEnabled(s *session.Session, execveEnabled bool) bool {
 		return false
 	}
 	return engine.SignalEngine() != nil
+}
+
+// mainFilterUsesUserNotify reports whether the main seccomp filter
+// installed by agentsh-unixwrap will use SECCOMP_RET_USER_NOTIF for any
+// reason. This mirrors the feature gates in
+// unixmon.InstallFilterWithConfig: each of these flags causes the
+// wrapper to register ActNotify rules in the main filter. Callers use
+// this to avoid stacking a second USER_NOTIF filter (the signal filter)
+// on top of one that is already in use, which breaks notification
+// delivery on real workloads.
+//
+// execveEnabled is passed in rather than read from a.cfg because core.go
+// overrides it to false in hybrid-ptrace mode — the wrapper will not
+// install execve notify rules in that case.
+//
+// Returns false when a.cfg is nil: tests construct bare Apps without
+// a config, and in that case no wrapper-installed filter exists.
+func (a *App) mainFilterUsesUserNotify(execveEnabled bool) bool {
+	if execveEnabled {
+		return true
+	}
+	if a.cfg == nil {
+		return false
+	}
+	if a.cfg.Sandbox.Seccomp.UnixSocket.Enabled {
+		return true
+	}
+	if config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.Enabled, false) {
+		return true
+	}
+	if config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata, false) {
+		return true
+	}
+	return false
 }
 
 // acceptNotifyFD listens on the Unix socket for a single connection from the CLI,
