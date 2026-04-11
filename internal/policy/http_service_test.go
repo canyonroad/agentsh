@@ -868,6 +868,66 @@ func TestValidateHTTPServices(t *testing.T) {
 			wantErr: "reserved env var name",
 		},
 		{
+			name: "reserved ANTHROPIC_BASE_URL case-insensitive",
+			svcs: []HTTPService{
+				{
+					Name:     "svc",
+					Upstream: "https://api.example.com",
+					ExposeAs: "anthropic_base_url",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "reserved env var name",
+		},
+		{
+			name: "reserved OPENAI_BASE_URL mixed case",
+			svcs: []HTTPService{
+				{
+					Name:     "svc",
+					Upstream: "https://api.example.com",
+					ExposeAs: "Openai_Base_Url",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "reserved env var name",
+		},
+		{
+			name: "duplicate ExposeAs case-insensitive",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://api1.example.com",
+					ExposeAs: "MY_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://api2.example.com",
+					ExposeAs: "my_api_url",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate env var name",
+		},
+		{
+			name: "duplicate ExposeAs mixed case",
+			svcs: []HTTPService{
+				{
+					Name:     "svc1",
+					Upstream: "https://api1.example.com",
+					ExposeAs: "Foo_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "svc2",
+					Upstream: "https://api2.example.com",
+					ExposeAs: "FOO_API_URL",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate env var name",
+		},
+		{
 			name: "non-colliding multiple services accepted",
 			svcs: []HTTPService{
 				{

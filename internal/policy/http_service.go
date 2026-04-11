@@ -176,6 +176,13 @@ func ValidateHTTPServices(svcs []HTTPService) error {
 		// matches what Proxy.EnvVars() will emit at runtime, so validation
 		// rejects misconfigurations that would cause silent overwrites of
 		// LLM proxy envs or of another http_service's entry.
+		//
+		// Windows treats environment variables as case-insensitive, so the
+		// reserved-name and duplicate-detection keys are upper-cased before
+		// comparison. The raw form is preserved in error messages so users
+		// see the exact value they wrote in their YAML. The regex check
+		// still runs on the raw name since env var names may be lowercase
+		// on Linux (the regex allows [A-Za-z_]).
 		exposeAs := s.ExposeAs
 		if exposeAs == "" {
 			exposeAs = strings.ToUpper(s.Name) + "_API_URL"
@@ -185,13 +192,14 @@ func ValidateHTTPServices(svcs []HTTPService) error {
 		} else if !envVarNameRe.MatchString(exposeAs) {
 			return fmt.Errorf("http_services[%q]: invalid expose_as %q", s.Name, exposeAs)
 		}
-		if _, reserved := reservedEnvVarNames[exposeAs]; reserved {
+		exposeAsKey := strings.ToUpper(exposeAs)
+		if _, reserved := reservedEnvVarNames[exposeAsKey]; reserved {
 			return fmt.Errorf("http_services[%q]: reserved env var name %q (used by LLM proxy)", s.Name, exposeAs)
 		}
-		if other, dup := envVarSeen[exposeAs]; dup {
+		if other, dup := envVarSeen[exposeAsKey]; dup {
 			return fmt.Errorf("http_services[%q]: duplicate env var name %q (also claimed by %q)", s.Name, exposeAs, other)
 		}
-		envVarSeen[exposeAs] = s.Name
+		envVarSeen[exposeAsKey] = s.Name
 
 		for j := range s.Rules {
 			r := &s.Rules[j]
