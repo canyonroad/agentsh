@@ -156,6 +156,67 @@ func TestServeDeclaredService_Approve_Approved(t *testing.T) {
 	}
 }
 
+// TestServeDeclaredService_Approve_DoesNotSetBogusCommandID pins down that
+// the approval request's CommandID is NOT populated with the proxy's
+// per-request UUID. Declared-service requests do not originate from a
+// single session command — they come from arbitrary HTTP calls the agent
+// makes — so there is no real command to attach, and populating the field
+// with the proxy's internal request ID corrupts downstream command-level
+// correlation. The field must be left empty until a real session command
+// ID can be plumbed through.
+func TestServeDeclaredService_Approve_DoesNotSetBogusCommandID(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "require-approval", Methods: []string{"POST"}, Paths: []string{"/issues"}, Decision: "approve"},
+	})
+	appr := &fakeApprovalsManager{approve: true}
+	p.SetApprovalsForTest(appr)
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github/issues", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if appr.gotReq.CommandID != "" {
+		t.Errorf("approval CommandID = %q, want empty (declared-service requests have no session command)", appr.gotReq.CommandID)
+	}
+}
+
+// TestServeDeclaredService_Approve_TargetIncludesQueryString pins down that
+// the approval Target includes the raw query string when present, so the
+// approver sees the full request the client is making — not just the path
+// segment. Hiding the query string would obscure material details about
+// what's being approved (e.g. a ?force=true override).
+func TestServeDeclaredService_Approve_TargetIncludesQueryString(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "require-approval", Methods: []string{"POST"}, Paths: []string{"/issues"}, Decision: "approve"},
+	})
+	appr := &fakeApprovalsManager{approve: true}
+	p.SetApprovalsForTest(appr)
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/svc/github/issues?force=true", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	if !strings.Contains(appr.gotReq.Target, "?force=true") {
+		t.Errorf("approval Target = %q, want to contain '?force=true'", appr.gotReq.Target)
+	}
+}
+
 // TestServeDeclaredService_Approve_Denied pins down that when an approvals
 // manager is wired and returns Approved=false, the handler must deny with
 // 403 Forbidden and MUST NOT forward the request to the upstream.

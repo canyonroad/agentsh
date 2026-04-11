@@ -158,12 +158,30 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 		appr := p.httpSvcApprovals
 		p.mu.Unlock()
 		if appr != nil {
+			// Target includes the raw query string (unparsed, as
+			// received from the client) when present so approvers see
+			// the full request — hiding ?force=true or similar would
+			// obscure material details about what's being approved.
+			target := rawSegment + " " + r.Method + " " + pathForEval
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			// CommandID is intentionally left empty. Declared-service
+			// requests aren't tied to a specific session command —
+			// they come from arbitrary HTTP calls the agent makes, not
+			// from a single tracked command. Populating this field
+			// with the proxy's per-request UUID (which is NOT a real
+			// session command ID) corrupts downstream command-level
+			// correlation and indexes approval events under a command
+			// ID that doesn't correspond to any real command. A future
+			// improvement could attach a command ID if agentsh tracks
+			// an "active command" per session.
 			req := approvals.Request{
 				ID:        "approval-" + uuid.NewString(),
 				SessionID: sessionID,
-				CommandID: requestID,
+				CommandID: "",
 				Kind:      "http_service",
-				Target:    rawSegment + " " + r.Method + " " + pathForEval,
+				Target:    target,
 				Rule:      dec.Rule,
 				Message:   dec.Message,
 			}
