@@ -82,3 +82,33 @@ func pathMatchesHTTPRule(r compiledHTTPServiceRule, reqPath string) bool {
 	}
 	return false
 }
+
+// DeclaredHTTPServiceHost reports whether host belongs to a declared
+// http_services entry. host may include a port (stripped via
+// canonicalizeHost), be in any case, or be a bracketed IPv6 literal.
+// Returns the canonical service name and the env var name used by the
+// gateway, for inclusion in guidance messages.
+func (e *Engine) DeclaredHTTPServiceHost(host string) (serviceName, envVar string, ok bool) {
+	h, good := canonicalizeHost(host)
+	if !good {
+		return "", "", false
+	}
+	cs, found := e.httpServiceHosts[h]
+	if !found {
+		return "", "", false
+	}
+	return cs.cfg.Name, cs.envVar, true
+}
+
+// HTTPServices returns a shallow copy of the source HTTPService list.
+// Used by the proxy to enumerate declared services for EnvVars()
+// injection and by tests. Callers may mutate the returned slice without
+// affecting engine state.
+func (e *Engine) HTTPServices() []HTTPService {
+	if e == nil || e.policy == nil || len(e.policy.HTTPServices) == 0 {
+		return nil
+	}
+	out := make([]HTTPService, len(e.policy.HTTPServices))
+	copy(out, e.policy.HTTPServices)
+	return out
+}

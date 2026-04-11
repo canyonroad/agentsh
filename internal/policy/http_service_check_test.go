@@ -93,3 +93,93 @@ func TestCheckHTTPService(t *testing.T) {
 		})
 	}
 }
+
+func TestDeclaredHTTPServiceHost(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+		ExposeAs: "GITHUB_API_URL",
+		Aliases:  []string{"api.github.example"},
+		Rules: []HTTPServiceRule{{
+			Name: "any", Paths: []string{"/**"}, Decision: "allow",
+		}},
+	}}
+	e := newTestEngineForHTTP(t, svcs)
+
+	tests := []struct {
+		host    string
+		wantOK  bool
+		wantSvc string
+		wantEnv string
+	}{
+		{"api.github.com", true, "github", "GITHUB_API_URL"},
+		{"API.GITHUB.COM", true, "github", "GITHUB_API_URL"},
+		{"api.github.com:443", true, "github", "GITHUB_API_URL"},
+		{"api.github.com.", true, "github", "GITHUB_API_URL"},
+		{"api.github.example", true, "github", "GITHUB_API_URL"},
+		{"example.com", false, "", ""},
+		{"", false, "", ""},
+		{"::1", false, "", ""}, // bare IPv6 never resolves
+	}
+	for _, tc := range tests {
+		t.Run(tc.host, func(t *testing.T) {
+			svc, env, ok := e.DeclaredHTTPServiceHost(tc.host)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if svc != tc.wantSvc || env != tc.wantEnv {
+				t.Errorf("got (%q, %q), want (%q, %q)", svc, env, tc.wantSvc, tc.wantEnv)
+			}
+		})
+	}
+}
+
+func TestDeclaredHTTPServiceHost_BracketedIPv6(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "local",
+		Upstream: "https://[::1]",
+		Rules: []HTTPServiceRule{{
+			Name: "any", Paths: []string{"/**"}, Decision: "allow",
+		}},
+	}}
+	e := newTestEngineForHTTP(t, svcs)
+
+	// All of these should resolve to "local" because canonicalizeHost
+	// strips brackets/ports and the compiler stored the canonical form.
+	for _, h := range []string{"[::1]", "[::1]:443", "[::1]:9999"} {
+		t.Run(h, func(t *testing.T) {
+			svc, _, ok := e.DeclaredHTTPServiceHost(h)
+			if !ok || svc != "local" {
+				t.Errorf("%q → (%q, ok=%v), want (local, ok=true)", h, svc, ok)
+			}
+		})
+	}
+}
+
+func TestHTTPServicesEnumeration(t *testing.T) {
+	svcs := []HTTPService{
+		{
+			Name: "a", Upstream: "https://a.example.com",
+			Rules: []HTTPServiceRule{{Name: "r", Paths: []string{"/**"}, Decision: "allow"}},
+		},
+		{
+			Name: "b", Upstream: "https://b.example.com",
+			Rules: []HTTPServiceRule{{Name: "r", Paths: []string{"/**"}, Decision: "allow"}},
+		},
+	}
+	e := newTestEngineForHTTP(t, svcs)
+	got := e.HTTPServices()
+	if len(got) != 2 {
+		t.Fatalf("got %d, want 2", len(got))
+	}
+	if got[0].Name != "a" || got[1].Name != "b" {
+		t.Errorf("ordering not preserved: %+v", got)
+	}
+
+	// Returned slice must be an independent copy — mutating it should
+	// not affect the engine's stored policy.
+	got[0].Name = "MUTATED"
+	if again := e.HTTPServices(); again[0].Name == "MUTATED" {
+		t.Error("HTTPServices() returned a view, not a copy")
+	}
+}
