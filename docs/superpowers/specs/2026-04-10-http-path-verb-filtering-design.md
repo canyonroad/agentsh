@@ -37,7 +37,7 @@ Cooperation is by base-URL env var injection, not by DNS rerouting. There is no 
 - New top-level `http_services:` policy YAML section
 - New `policy.Engine` methods: `CheckHTTPService`, `HTTPServices`, `DeclaredHTTPServiceHost`
 - Extend `internal/proxy/proxy.go` `ServeHTTP` with a path-prefix dispatch to declared services, bypassing LLM dialect detection when the request targets `/svc/<name>/...`
-- New `serveDeclaredService` handler that reuses `hookRegistry`, `RequestRewriter`, DLP, storage, redaction
+- New `serveDeclaredService` handler that reuses `hookRegistry`, DLP, storage, redaction (not `RequestRewriter` — see §2)
 - Extend `Proxy.EnvVars()` to emit per-service `<NAME>_API_URL` entries
 - Fail-closed CONNECT and plain-HTTP checks in `internal/netmonitor/proxy.go`
 - New event types: `http_service_request`, `http_service_denied_direct`, `http_service_approve`
@@ -142,7 +142,7 @@ Semantics:
 
 ## Section 2 — Component: Generalized Service Gateway
 
-Extend `internal/proxy/proxy.go` rather than building a new proxy. Rationale: reuse `hookRegistry`, `RequestRewriter`, DLP, storage, request logging, redaction, and the existing listener — all of which already do what a declared-service gateway needs.
+Extend `internal/proxy/proxy.go` rather than building a new proxy. Rationale: reuse `hookRegistry`, DLP, storage, request logging, redaction, and the existing listener — most of what a declared-service gateway needs already exists there. `RequestRewriter` is **not** reused (it is LLM-dialect-specific); a small request-clone helper is added instead (see step 5 below).
 
 ### Dispatch changes in `ServeHTTP`
 
@@ -170,12 +170,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 1. Read and buffer the request body (same as the LLM path).
 2. Build `RequestContext{ServiceName: svc.Name, ...}` and assign a `request_id`.
-3. Validate the path: reject with 400 if `path.Clean(rest) != rest` (traversal guard, see §3).
-4. Call `p.policy.CheckHTTPService(svc.Name, r.Method, rest)`. Apply `maybeApprove`-style approval semantics, reusing the pattern from `netmonitor/proxy.go`.
-5. Dispatch hooks via `hookRegistry.ApplyPreHooks(svc.Name, r, ctx)` — service-scoped, so `HeaderInjectionHook` for this service fires and injects the real credential. Plan 6's `LeakGuardHook` already skips when `ServiceName != ""`.
-6. Rewrite the outbound request to `svc.Upstream + rest` (keeping query string, headers), using `RequestRewriter`.
-7. Forward via the existing upstream transport. Capture response into storage. Apply post-hooks. Emit `http_service_request` event.
-8. Stream the response back to the caller.
+3. Call `p.policy.CheckHTTPService(svc.Name, r.Method, rest)`. The evaluator handles traversal rejection and empty-path coercion (see §3) — the gateway does not duplicate those checks. Apply `maybeApprove`-style approval semantics, reusing the pattern from `netmonitor/proxy.go`.
+4. Dispatch hooks via `hookRegistry.ApplyPreHooks(svc.Name, r, ctx)` — service-scoped, so `HeaderInjectionHook` for this service fires and injects the real credential. Plan 6's `LeakGuardHook` already skips when `ServiceName != ""`.
+5. Build a fresh outbound `*http.Request` for `svc.Upstream + rest` (preserving query string, headers, method, body). Do **not** reuse the LLM-side `RequestRewriter` — it takes a `Dialect` parameter and its rewrite logic (auth header swapping, OpenAI OAuth routing) is LLM-specific. A small helper on `Proxy` that clones the request and retargets it to the upstream URL is sufficient.
+6. Forward via the existing upstream transport (`http.DefaultTransport` or whatever the LLM path uses — decide in the implementation plan). Capture response into storage. Apply post-hooks. Emit `http_service_request` event.
+7. Stream the response back to the caller.
 
 ### Env var plumbing
 
@@ -225,7 +224,7 @@ type compiledHTTPService struct {
 
 // On Engine:
 httpServices     map[string]*compiledHTTPService // keyed by lowercase name
-httpServiceHosts map[string]string               // upstream host -> service name
+httpServiceHosts map[string]*compiledHTTPService // upstream host -> compiled service
 ```
 
 Built in `NewEngine` alongside `compiledNetworkRule`, `compiledFileRule`, etc.
@@ -233,20 +232,20 @@ Built in `NewEngine` alongside `compiledNetworkRule`, `compiledFileRule`, etc.
 ### Check method
 
 ```go
-// CheckHTTPService evaluates method+path against the rules for service.
-// path is the path portion AFTER the /svc/<name> prefix has been stripped.
+// CheckHTTPService evaluates method+reqPath against the rules for service.
+// reqPath is the path portion AFTER the /svc/<name> prefix has been stripped.
 // Returns a wrapped Decision in the same shape as CheckNetworkCtx.
-func (e *Engine) CheckHTTPService(service, method, path string) Decision {
+func (e *Engine) CheckHTTPService(service, method, reqPath string) Decision {
     cs, ok := e.httpServices[strings.ToLower(service)]
     if !ok {
         return e.wrapDecision("deny", "", "unknown http_service", 0)
     }
 
     // Traversal guard: reject any path that doesn't survive path.Clean unchanged.
-    if path == "" {
-        path = "/"
+    if reqPath == "" {
+        reqPath = "/"
     }
-    if path.Clean(path) != path {
+    if path.Clean(reqPath) != reqPath {
         return e.wrapDecision("deny", "", "path traversal rejected", 0)
     }
 
@@ -256,7 +255,7 @@ func (e *Engine) CheckHTTPService(service, method, path string) Decision {
         if !methodMatches(r, method) {
             continue
         }
-        if !pathMatches(r, path) {
+        if !pathMatches(r, reqPath) {
             continue
         }
         return e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, r.rule.Timeout)
@@ -572,7 +571,7 @@ Path handling is the attack surface most likely to grow subtle bugs — the fuzz
 ### What NOT to retest
 
 - `gobwas/glob` — upstream tested
-- `storage`, `redaction`, `RequestRewriter`, `hookRegistry` — existing LLM-proxy tests cover these; reuse without duplication
+- `storage`, `redaction`, `hookRegistry` — existing LLM-proxy tests cover these; reuse without duplication
 - Network policy layer (`CheckNetworkCtx`, seccomp) — §7 layering is architectural, no new code in those paths
 - Plan 6's existing `services:` matcher — untouched by this design
 
