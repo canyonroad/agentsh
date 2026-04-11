@@ -36,6 +36,34 @@ type HTTPServiceRule struct {
 
 var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// canonicalizeHost normalizes a hostname for comparison against HTTP Host
+// headers. The rules mirror internal/proxy/services.Matcher.Match so that
+// policy-time duplicate-host detection catches aliases that the proxy layer
+// would treat as identical at request-routing time:
+//
+//  1. Strip any trailing ":port". IPv6 bracketed forms like "[::1]:443" keep
+//     the closing bracket; non-bracketed forms use the last colon.
+//  2. Lowercase.
+//  3. Strip a trailing "." (FQDN form).
+//
+// This helper lives in the policy package by design: the policy package must
+// not import proxy-layer packages, so the normalization logic is duplicated
+// here (with both sites anchored to the same documented rules).
+func canonicalizeHost(s string) string {
+	if strings.HasPrefix(s, "[") {
+		// Bracketed IPv6: look for "]:" to find the port separator. Keep the
+		// closing bracket, drop ":port".
+		if i := strings.Index(s, "]:"); i != -1 {
+			s = s[:i+1]
+		}
+	} else {
+		if i := strings.LastIndex(s, ":"); i != -1 {
+			s = s[:i]
+		}
+	}
+	return strings.TrimSuffix(strings.ToLower(s), ".")
+}
+
 // ValidateHTTPServices checks an HTTPServices list for well-formedness.
 // It is called from Policy.Validate. Errors include the offending service
 // name (and rule name, when applicable) to aid debugging.
@@ -61,14 +89,19 @@ func ValidateHTTPServices(svcs []HTTPService) error {
 			return fmt.Errorf("http_services[%q]: upstream must be https (got %q)", s.Name, u.Scheme)
 		}
 
-		host := strings.ToLower(u.Hostname())
+		host := canonicalizeHost(u.Hostname())
 		if other, dup := hostSeen[host]; dup {
 			return fmt.Errorf("http_services[%q]: duplicate upstream host %q (also claimed by %q)", s.Name, host, other)
 		}
 		hostSeen[host] = s.Name
 		for _, alias := range s.Aliases {
-			a := strings.ToLower(strings.TrimSpace(alias))
+			trimmed := strings.TrimSpace(alias)
+			if trimmed == "" {
+				return fmt.Errorf("http_services[%q]: empty alias", s.Name)
+			}
+			a := canonicalizeHost(trimmed)
 			if a == "" {
+				// canonicalizeHost stripped everything (e.g. ":443").
 				return fmt.Errorf("http_services[%q]: empty alias", s.Name)
 			}
 			if other, dup := hostSeen[a]; dup {
@@ -116,6 +149,9 @@ func validateHTTPServiceRule(svc string, idx int, r *HTTPServiceRule) error {
 		return fmt.Errorf("%s: rule must have at least one path", label)
 	}
 	for _, pat := range r.Paths {
+		if strings.TrimSpace(pat) == "" {
+			return fmt.Errorf("%s: empty path in rule", label)
+		}
 		if _, err := glob.Compile(pat, '/'); err != nil {
 			return fmt.Errorf("%s: invalid path glob %q: %w", label, pat, err)
 		}

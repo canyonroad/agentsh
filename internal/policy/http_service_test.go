@@ -222,6 +222,85 @@ func TestValidateHTTPServices(t *testing.T) {
 			wantErr: "duplicate upstream host",
 		},
 		{
+			name: "alias with trailing dot collides with upstream",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "github2",
+					Upstream: "https://api2.github.com",
+					Aliases:  []string{"api.github.com."},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate upstream host",
+		},
+		{
+			name: "alias with port collides with upstream",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "github2",
+					Upstream: "https://api2.github.com",
+					Aliases:  []string{"api.github.com:443"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate upstream host",
+		},
+		{
+			name: "alias with mixed case collides with upstream",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "github2",
+					Upstream: "https://api2.github.com",
+					Aliases:  []string{"API.GitHub.COM"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate upstream host",
+		},
+		{
+			name: "upstream with trailing dot collides with plain upstream",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+				{
+					Name:     "github2",
+					Upstream: "https://api.github.com./",
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "duplicate upstream host",
+		},
+		{
+			name: "alias that becomes empty after port strip rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Aliases:  []string{":443"},
+					Rules:    []HTTPServiceRule{validRule},
+				},
+			},
+			wantErr: "empty alias",
+		},
+		{
 			name: "invalid default value",
 			svcs: []HTTPService{
 				{
@@ -283,6 +362,57 @@ func TestValidateHTTPServices(t *testing.T) {
 				},
 			},
 			wantErr: "rule must have at least one path",
+		},
+		{
+			name: "blank path entry rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Rules: []HTTPServiceRule{
+						{
+							Name:     "blank-path",
+							Paths:    []string{""},
+							Decision: "allow",
+						},
+					},
+				},
+			},
+			wantErr: "empty path",
+		},
+		{
+			name: "whitespace-only path entry rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Rules: []HTTPServiceRule{
+						{
+							Name:     "whitespace-path",
+							Paths:    []string{"   "},
+							Decision: "allow",
+						},
+					},
+				},
+			},
+			wantErr: "empty path",
+		},
+		{
+			name: "mixed valid and blank path entries rejected",
+			svcs: []HTTPService{
+				{
+					Name:     "github",
+					Upstream: "https://api.github.com",
+					Rules: []HTTPServiceRule{
+						{
+							Name:     "mixed-paths",
+							Paths:    []string{"/api/*", ""},
+							Decision: "allow",
+						},
+					},
+				},
+			},
+			wantErr: "empty path",
 		},
 		{
 			name: "invalid expose_as",
