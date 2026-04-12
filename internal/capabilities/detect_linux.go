@@ -308,11 +308,10 @@ func Detect() (*DetectResult, error) {
 	if !wrapperFound {
 		suppressFeatures := make(map[string]bool)
 		for name := range wrapperDependentBackends {
-			if tip, ok := tipsByBackend[name]; ok {
+			if tip := lookupTip(name, ""); tip != nil {
 				suppressFeatures[tip.Feature] = true
 			}
 		}
-
 		filtered := tips[:0]
 		for _, tip := range tips {
 			if !suppressFeatures[tip.Feature] {

@@ -42,25 +42,25 @@ func CheckSupport() SupportStatus {
 	// "cgroup bpf controller not available" universally and silently
 	// skipped the integration tests that would have caught #196.
 	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err != nil {
-		return SupportStatus{Supported: false, Reason: "cgroup v2 not available"}
+		return SupportStatus{Supported: false, Reason: ReasonCgroupV2NotAvail}
 	}
 
 	if _, err := os.Stat("/sys/kernel/btf/vmlinux"); err != nil {
 		if _, dirErr := os.Stat("/sys/kernel/btf"); dirErr != nil {
-			return SupportStatus{Supported: false, Reason: "btf not present (missing /sys/kernel/btf/vmlinux)"}
+			return SupportStatus{Supported: false, Reason: ReasonBTFNotPresent + " (missing /sys/kernel/btf/vmlinux)"}
 		}
 	}
 
 	if !hasCap(unix.CAP_BPF) && !hasCap(unix.CAP_SYS_ADMIN) {
-		return SupportStatus{Supported: false, Reason: "missing CAP_BPF or CAP_SYS_ADMIN"}
+		return SupportStatus{Supported: false, Reason: ReasonMissingCap}
 	}
 
 	major, minor, err := kernelVersion()
 	if err != nil {
-		return SupportStatus{Supported: false, Reason: "kernel version unknown"}
+		return SupportStatus{Supported: false, Reason: ReasonKernelVersionUnknown}
 	}
 	if major < 5 || (major == 5 && minor < 8) {
-		return SupportStatus{Supported: false, Reason: fmt.Sprintf("kernel %d.%d < 5.8", major, minor)}
+		return SupportStatus{Supported: false, Reason: fmt.Sprintf("%s %d.%d < 5.8", ReasonKernelTooOld, major, minor)}
 	}
 
 	// Warn (but do not fail) on potential lockdown/LSM restrictions; attach may still fail.

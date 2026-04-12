@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/netmonitor/ebpf"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -102,7 +103,7 @@ func TestGenerateTipsFromDomains_ZeroScoreOnly(t *testing.T) {
 			{Name: "fuse", Available: true},
 		}},
 		{Name: "Network", Weight: 20, Score: 0, Backends: []DetectedBackend{
-			{Name: "ebpf", Available: false},
+			{Name: "ebpf", Available: false, Detail: ebpf.ReasonBTFNotPresent + " (missing /sys/kernel/btf/vmlinux)"},
 		}},
 	}
 	tips := GenerateTipsFromDomains(domains)
@@ -110,6 +111,7 @@ func TestGenerateTipsFromDomains_ZeroScoreOnly(t *testing.T) {
 	assert.Len(t, tips, 1)
 	assert.Equal(t, "ebpf", tips[0].Feature)
 	assert.Contains(t, tips[0].Impact, "+20 pts")
+	assert.Contains(t, tips[0].Action, "CONFIG_DEBUG_INFO_BTF")
 }
 
 func TestGenerateTipsFromDomains_NoTipsWhenAllScored(t *testing.T) {
@@ -122,11 +124,11 @@ func TestGenerateTipsFromDomains_NoTipsWhenAllScored(t *testing.T) {
 }
 
 func TestLookupTip(t *testing.T) {
-	tip := lookupTip("ebpf")
+	tip := lookupTip("ebpf", "")
 	assert.NotNil(t, tip)
 	assert.Equal(t, "ebpf", tip.Feature)
 
-	tip2 := lookupTip("nonexistent")
+	tip2 := lookupTip("nonexistent", "")
 	assert.Nil(t, tip2)
 }
 
@@ -151,7 +153,7 @@ func TestLookupTip(t *testing.T) {
 // asserts all three: the marker exists, the cautionary section is
 // non-empty, and it mentions DropCapabilities.
 func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
-	tip := lookupTip("capability-drop")
+	tip := lookupTip("capability-drop", "")
 	if tip == nil {
 		t.Fatal("capability-drop tip missing")
 	}
@@ -215,4 +217,66 @@ func TestLookupTip_CapabilityDropSemanticsChanged(t *testing.T) {
 	if !strings.Contains(cautionBody, "DropCapabilities") {
 		t.Errorf("capability-drop cautionary body must explain why DropCapabilities is not a substitute, got %q", cautionBody)
 	}
+}
+
+func TestLookupTip_EBPFReasonSensitive(t *testing.T) {
+	tests := []struct {
+		name       string
+		detail     string
+		wantAction string
+	}{
+		{
+			name:       "btf not present",
+			detail:     ebpf.ReasonBTFNotPresent + " (missing /sys/kernel/btf/vmlinux)",
+			wantAction: "CONFIG_DEBUG_INFO_BTF=y",
+		},
+		{
+			name:       "cgroup v2 not available",
+			detail:     ebpf.ReasonCgroupV2NotAvail,
+			wantAction: "cgroups v2",
+		},
+		{
+			name:       "kernel version unknown",
+			detail:     ebpf.ReasonKernelVersionUnknown,
+			wantAction: "Could not determine kernel version",
+		},
+		{
+			name:       "kernel too old",
+			detail:     ebpf.ReasonKernelTooOld + " 5.4 < 5.8",
+			wantAction: "kernel 5.8+",
+		},
+		{
+			name:       "missing caps falls to fallback",
+			detail:     ebpf.ReasonMissingCap,
+			wantAction: "CAP_BPF",
+		},
+		{
+			name:       "empty detail falls to fallback",
+			detail:     "",
+			wantAction: "CAP_BPF",
+		},
+		{
+			name:       "unknown detail falls to fallback",
+			detail:     "something completely new",
+			wantAction: "CAP_BPF",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tip := lookupTip("ebpf", tt.detail)
+			if tip == nil {
+				t.Fatal("expected tip, got nil")
+			}
+			assert.Contains(t, tip.Action, tt.wantAction)
+		})
+	}
+}
+
+func TestLookupTip_NonEBPFUnchanged(t *testing.T) {
+	// Backends with only a fallback entry should return their tip
+	// regardless of detail content.
+	tip := lookupTip("fuse", "any detail string")
+	assert.NotNil(t, tip)
+	assert.Equal(t, "fuse", tip.Feature)
+	assert.Contains(t, tip.Action, "FUSE3")
 }
