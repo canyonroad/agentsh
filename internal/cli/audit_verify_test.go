@@ -27,6 +27,22 @@ audit:
 	}
 }
 
+func writeAuditVerifyConfigWithEnabled(t *testing.T, path, logPath string, enabled bool) {
+	t.Helper()
+
+	content := fmt.Sprintf(`
+audit:
+  output: %s
+  integrity:
+    enabled: %t
+    key_source: env
+    key_env: AGENTSH_AUDIT_TEST_KEY
+`, logPath, enabled)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", path, err)
+	}
+}
+
 func TestAuditVerifyCmd_StrictRejectsUnsignedLines(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
@@ -93,6 +109,39 @@ func TestAuditVerifyCmd_WalksRotationSetOldestFirst(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, "verified 3 entries across 2 files") {
 		t.Fatalf("output = %q, want rotation-set summary", got)
+	}
+}
+
+func TestAuditVerifyCmd_DoesNotSkipExplicitLogWhenConfigDisabled(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	line, err := chain.Wrap([]byte(`{"type":"signed"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	if err := os.WriteFile(logPath, append(line, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+	writeAuditVerifyConfigWithEnabled(t, cfgPath, logPath, false)
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, logPath})
+
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "verified 1 entries across 1 files") {
+		t.Fatalf("output = %q, want signed verification summary", got)
 	}
 }
 

@@ -58,10 +58,6 @@ func newAuditVerifyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if !cfg.Audit.Integrity.Enabled {
-				fmt.Fprintln(cmd.OutOrStdout(), "integrity not enabled in this log; nothing to verify")
-				return nil
-			}
 
 			key, err := audit.LoadKey(cfg.Audit.Integrity.KeyFile, cfg.Audit.Integrity.KeyEnv)
 			if err != nil {

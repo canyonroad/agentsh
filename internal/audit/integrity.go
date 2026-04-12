@@ -293,7 +293,7 @@ func (c *IntegrityChain) VerifyWrapped(wrapped []byte) (bool, error) {
 
 // VerifyHash recomputes an entry hash using canonical JSON payload encoding.
 func VerifyHash(key []byte, algorithm string, formatVersion int, sequence int64, prevHash string, payload []byte, expectedHash string) (bool, error) {
-	data, err := parseIntegrityPayload(payload)
+	data, err := parseIntegrityPayloadUseNumber(payload)
 	if err != nil {
 		return false, err
 	}
