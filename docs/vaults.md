@@ -81,6 +81,36 @@ where that key comes from.
 Design reference:
 [`docs/superpowers/specs/2026-03-30-wire-hmac-integrity-chain-design.md`](superpowers/specs/2026-03-30-wire-hmac-integrity-chain-design.md).
 
+### 1.1.1 Sidecar-backed chain continuity
+
+The audit integrity chain now persists its last durable state in a sidecar file
+next to the JSONL log:
+
+- `<audit.output>.chain`
+
+That sidecar stores the last sequence, the last entry hash, and a fingerprint of
+the configured HMAC key. agentsh uses it at startup to resume the chain across
+process restarts and rotated `audit.jsonl`, `audit.jsonl.1`, `audit.jsonl.2`, …
+files.
+
+If the sidecar is missing but the log contains v2 entries, agentsh writes an
+`integrity_chain_rotated` event with `reason_code=sidecar_missing` and starts a
+fresh chain. If the sidecar and log disagree, agentsh refuses to start and
+points the operator at an explicit archival reset flow:
+
+```bash
+agentsh audit chain reset --reason "rotated audit integrity key" --reason-code key_rotated --legacy-archive
+```
+
+Changing the audit HMAC key or `audit.integrity.algorithm` requires
+`--legacy-archive`. The current verifier and startup path replay the visible log
+with one key and one algorithm, so in-place resets are only safe when the
+existing visible entries still verify under the current signing parameters.
+
+For envelope providers, losing the encrypted DEK or changing KMS config now
+surfaces as a key-fingerprint mismatch on startup instead of silently forking
+the chain.
+
 ### 1.2 YAML config shape
 
 All KMS providers for the audit integrity chain are configured under

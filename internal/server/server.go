@@ -32,13 +32,13 @@ import (
 	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
-	"github.com/agentsh/agentsh/internal/threatfeed"
 	storepkg "github.com/agentsh/agentsh/internal/store"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/internal/store/jsonl"
 	otelstore "github.com/agentsh/agentsh/internal/store/otel"
 	"github.com/agentsh/agentsh/internal/store/sqlite"
 	"github.com/agentsh/agentsh/internal/store/webhook"
+	"github.com/agentsh/agentsh/internal/threatfeed"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
@@ -61,6 +61,8 @@ type Server struct {
 	store    *composite.Store
 	broker   *events.Broker
 	sessions *session.Manager
+
+	fatalAuditErr chan error
 
 	sessionTimeout time.Duration
 	idleTimeout    time.Duration
@@ -232,13 +234,29 @@ func New(cfg *config.Config) (*Server, error) {
 				kmsCloser()
 			}
 		}()
-		jsonlEventStore = storepkg.NewIntegrityStore(jsonlStore, chain)
+		jsonlEventStore, err = storepkg.NewIntegrityStore(jsonlStore, chain, storepkg.IntegrityOptions{
+			LogPath:        cfg.Audit.Output,
+			Algorithm:      cfg.Audit.Integrity.Algorithm,
+			KeyFingerprint: chain.KeyFingerprint(),
+		})
+		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
+			}
+			if db != nil {
+				_ = db.Close()
+			}
+			return nil, fmt.Errorf("audit integrity chain: %w", err)
+		}
 	}
 
 	var webhookStore *webhook.Store
 	if cfg.Audit.Webhook.URL != "" {
 		flushEvery, err := time.ParseDuration(cfg.Audit.Webhook.FlushInterval)
 		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
+			}
 			if db != nil {
 				_ = db.Close()
 			}
@@ -246,6 +264,9 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 		timeout, err := time.ParseDuration(cfg.Audit.Webhook.Timeout)
 		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
+			}
 			if db != nil {
 				_ = db.Close()
 			}
@@ -253,6 +274,9 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 		webhookStore, err = webhook.New(cfg.Audit.Webhook.URL, cfg.Audit.Webhook.BatchSize, flushEvery, timeout, cfg.Audit.Webhook.Headers)
 		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
+			}
 			if db != nil {
 				_ = db.Close()
 			}
@@ -267,6 +291,9 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 		otelTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Timeout)
 		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
+			}
 			if db != nil {
 				_ = db.Close()
 			}
@@ -274,6 +301,9 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 		otelBatchTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Batch.Timeout)
 		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
+			}
 			if db != nil {
 				_ = db.Close()
 			}
@@ -330,6 +360,16 @@ func New(cfg *config.Config) (*Server, error) {
 		output = db
 	}
 	store := composite.New(primary, output, eventStores...)
+	fatalAuditErr := make(chan error, 1)
+	store.SetAppendErrorHook(func(err error) {
+		var fatal *storepkg.FatalIntegrityError
+		if errors.As(err, &fatal) {
+			select {
+			case fatalAuditErr <- err:
+			default:
+			}
+		}
+	})
 
 	sessions := session.NewManager(cfg.Sessions.MaxSessions)
 	broker := events.NewBroker()
@@ -557,6 +597,7 @@ func New(cfg *config.Config) (*Server, error) {
 		store:          store,
 		broker:         broker,
 		sessions:       sessions,
+		fatalAuditErr:  fatalAuditErr,
 		sessionTimeout: sessionTimeout,
 		idleTimeout:    idleTimeout,
 		reapInterval:   reapInterval,
@@ -813,8 +854,26 @@ func (s *Server) Run(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if s.pprofLn != nil && s.pprofServer != nil {
-		go func() { _ = s.pprofServer.Serve(s.pprofLn) }()
+	httpServer := s.httpServer
+	httpLn := s.httpLn
+	if httpServer == nil {
+		return errors.New("server http server is nil")
+	}
+	if httpLn == nil {
+		return errors.New("server http listener is nil")
+	}
+	pprofServer := s.pprofServer
+	pprofLn := s.pprofLn
+	unixServer := s.unixServer
+	unixLn := s.unixLn
+	grpcServer := s.grpcServer
+	grpcLn := s.grpcLn
+	app := s.app
+	policySockCancel := s.policySockCancel
+	policySockDone := s.policySockDone
+
+	if pprofLn != nil && pprofServer != nil {
+		go func() { _ = pprofServer.Serve(pprofLn) }()
 	}
 
 	if s.sessionTimeout > 0 || s.idleTimeout > 0 {
@@ -848,78 +907,72 @@ func (s *Server) Run(ctx context.Context) error {
 
 	errCh := make(chan error, 3)
 	go func() {
-		if err := s.httpServer.Serve(s.httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpServer.Serve(httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
-	if s.unixServer != nil && s.unixLn != nil {
+	if unixServer != nil && unixLn != nil {
 		go func() {
-			if err := s.unixServer.Serve(s.unixLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := unixServer.Serve(unixLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- err
 			}
 		}()
 	}
-	if s.grpcServer != nil && s.grpcLn != nil {
+	if grpcServer != nil && grpcLn != nil {
 		go func() {
-			if err := s.grpcServer.Serve(s.grpcLn); err != nil {
+			if err := grpcServer.Serve(grpcLn); err != nil {
 				errCh <- err
 			}
 		}()
 	}
 
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdown := func(timeout time.Duration, graceful bool) error {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		// Shut down listeners immediately; don't wait for syncer first.
-		if s.pprofServer != nil {
-			_ = s.pprofServer.Shutdown(shutdownCtx)
+
+		if pprofServer != nil {
+			_ = pprofServer.Shutdown(shutdownCtx)
 		}
-		if s.unixServer != nil {
-			_ = s.unixServer.Shutdown(shutdownCtx)
+		if unixServer != nil {
+			_ = unixServer.Shutdown(shutdownCtx)
 		}
-		if s.grpcServer != nil {
-			s.grpcServer.GracefulStop()
+		if grpcServer != nil {
+			if graceful {
+				grpcServer.GracefulStop()
+			} else {
+				grpcServer.Stop()
+			}
 		}
-		// Stop the policy socket server (macOS only).
-		if s.policySockCancel != nil {
-			s.policySockCancel()
+		if policySockCancel != nil {
+			policySockCancel()
 		}
-		httpErr := s.httpServer.Shutdown(shutdownCtx)
-		if s.app != nil {
-			s.app.Close()
+		httpErr := httpServer.Shutdown(shutdownCtx)
+		if app != nil {
+			app.Close()
 		}
 		if syncerDone != nil {
 			<-syncerDone
 		}
-		if s.policySockDone != nil {
-			<-s.policySockDone
+		if policySockDone != nil {
+			<-policySockDone
 		}
 		return httpErr
+	}
+
+	select {
+	case <-ctx.Done():
+		return shutdown(10*time.Second, true)
+	case err := <-s.fatalAuditErr:
+		slog.Error("fatal audit integrity error", "error", err)
+		stop()
+		if shutdownErr := shutdown(10*time.Second, true); shutdownErr != nil {
+			return errors.Join(err, shutdownErr)
+		}
+		return err
 	case err := <-errCh:
 		stop() // cancel context so syncer can exit
-		if s.pprofServer != nil {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = s.pprofServer.Shutdown(shutdownCtx)
-		}
-		if s.unixServer != nil {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = s.unixServer.Shutdown(shutdownCtx)
-		}
-		if s.grpcServer != nil {
-			s.grpcServer.Stop()
-		}
-		// Stop the policy socket server (macOS only).
-		if s.policySockCancel != nil {
-			s.policySockCancel()
-		}
-		if syncerDone != nil {
-			<-syncerDone
-		}
-		if s.policySockDone != nil {
-			<-s.policySockDone
+		if shutdownErr := shutdown(2*time.Second, false); shutdownErr != nil {
+			return errors.Join(fmt.Errorf("server: %w", err), shutdownErr)
 		}
 		return fmt.Errorf("server: %w", err)
 	}

@@ -60,7 +60,7 @@ The following table defines recovery targets by scenario:
 
 5. **Verify audit chain integrity**
    ```bash
-   agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /var/log/agentsh/audit.jsonl
+   agentsh audit verify --config /etc/agentsh/config.yaml /var/log/agentsh/audit.jsonl
    ```
 
 6. **Start service**
@@ -114,7 +114,7 @@ The following table defines recovery targets by scenario:
    # Extract and verify audit chain
    mkdir -p /tmp/verify
    tar -xzf /tmp/20260105.tar.gz -C /tmp/verify/
-   agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /tmp/verify/audit.jsonl
+   agentsh audit verify --config /etc/agentsh/config.yaml /tmp/verify/audit.jsonl
 
    # If verification passes, proceed with restore
    ```
@@ -124,6 +124,7 @@ The following table defines recovery targets by scenario:
    cp /tmp/verify/events.db /var/lib/agentsh/
    cp /tmp/verify/config.yaml /etc/agentsh/
    cp -r /tmp/verify/policies/ /etc/agentsh/
+   cp /tmp/verify/audit.jsonl* /var/log/agentsh/ 2>/dev/null || true
    ```
 
 6. **Investigate corruption cause before resuming**
@@ -210,7 +211,8 @@ The following table defines recovery targets by scenario:
 
 3. **If integrity key compromised**:
    - Historical audit logs may have been tampered
-   - Create checkpoint marking key rotation
+   - Preserve the current `audit.jsonl*` set and `audit.jsonl.chain` before any reset
+   - Start a fresh chain explicitly after rotating the integrity key
    - Consider audit log forensic analysis
 
 4. **If encryption key compromised**:
@@ -220,6 +222,11 @@ The following table defines recovery targets by scenario:
    ```bash
    mv /etc/agentsh/audit-integrity.key.new /etc/agentsh/audit-integrity.key
    mv /etc/agentsh/audit.key.new /etc/agentsh/audit.key
+
+   agentsh audit chain reset --config /etc/agentsh/config.yaml \
+     --legacy-archive \
+     --reason "rotated compromised audit integrity key" \
+     --reason-code key_rotated
 
    systemctl restart agentsh
    ```
@@ -250,10 +257,32 @@ After any recovery, complete this checklist before declaring recovery successful
 
 - [ ] Audit log integrity verified:
   ```bash
-  agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /var/log/agentsh/audit.jsonl
+  agentsh audit verify --config /etc/agentsh/config.yaml /var/log/agentsh/audit.jsonl
   ```
 - [ ] Recent events are present and readable
 - [ ] Encryption/decryption working (if enabled)
+
+Always restore the audit log rotation set and the matching sidecar together:
+
+- `audit.jsonl`, `audit.jsonl.1`, `audit.jsonl.2`, ...
+- `audit.jsonl.chain`
+
+If startup refuses because the sidecar and log no longer match, preserve the
+old files for review before reset:
+
+```bash
+recovery_dir=/var/log/agentsh/recovery-$(date +%Y%m%d%H%M%S)
+mkdir -p "$recovery_dir"
+cp /var/log/agentsh/audit.jsonl* "$recovery_dir"/ 2>/dev/null || true
+```
+
+Then start a fresh chain explicitly:
+
+```bash
+agentsh audit chain reset --config /etc/agentsh/config.yaml \
+  --reason "restored audit log from backup after host failure" \
+  --reason-code post_tamper_recovery
+```
 
 ### Policy and Configuration
 
@@ -372,7 +401,7 @@ BACKUP=$(ls -t /backup/agentsh-*.tar.gz | head -1)
 TEMP_DIR=$(mktemp -d)
 
 tar -xzf "$BACKUP" -C "$TEMP_DIR"
-agentsh audit verify --key-file /etc/agentsh/audit-integrity.key "$TEMP_DIR/audit.jsonl"
+agentsh audit verify --config /etc/agentsh/config.yaml "$TEMP_DIR/audit.jsonl"
 RESULT=$?
 
 rm -rf "$TEMP_DIR"

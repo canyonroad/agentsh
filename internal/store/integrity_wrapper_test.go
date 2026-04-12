@@ -7,9 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +23,6 @@ import (
 
 var testKey = []byte("test-key-32-bytes-for-hmac-sha!!")
 
-// mockRawWriter implements both EventStore and RawWriter.
 type mockRawWriter struct {
 	mu       sync.Mutex
 	rawCalls [][]byte
@@ -52,7 +51,6 @@ func (m *mockRawWriter) QueryEvents(_ context.Context, _ types.EventQuery) ([]ty
 
 func (m *mockRawWriter) Close() error { return nil }
 
-// mockPlainStore implements EventStore only (no RawWriter).
 type mockPlainStore struct {
 	mu     sync.Mutex
 	events []types.Event
@@ -71,24 +69,13 @@ func (m *mockPlainStore) QueryEvents(_ context.Context, _ types.EventQuery) ([]t
 
 func (m *mockPlainStore) Close() error { return nil }
 
-// mockFailingRawWriter implements RawWriter but always fails on WriteRaw.
-type mockFailingRawWriter struct {
-	mu       sync.Mutex
-	rawCalls int
-	events   []types.Event
-}
+type mockFailingRawWriter struct{}
 
 func (m *mockFailingRawWriter) WriteRaw(_ context.Context, _ []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.rawCalls++
 	return errors.New("disk full")
 }
 
-func (m *mockFailingRawWriter) AppendEvent(_ context.Context, ev types.Event) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.events = append(m.events, ev)
+func (m *mockFailingRawWriter) AppendEvent(_ context.Context, _ types.Event) error {
 	return nil
 }
 
@@ -98,21 +85,14 @@ func (m *mockFailingRawWriter) QueryEvents(_ context.Context, _ types.EventQuery
 
 func (m *mockFailingRawWriter) Close() error { return nil }
 
-// mockPartialFailRawWriter returns a partial-write error (truncate failed).
-type mockPartialFailRawWriter struct {
-	mu       sync.Mutex
-	rawCalls int
-}
+type mockPartialFailRawWriter struct{}
 
 type testPartialWriteError struct{ msg string }
 
-func (e *testPartialWriteError) Error() string      { return e.msg }
+func (e *testPartialWriteError) Error() string        { return e.msg }
 func (e *testPartialWriteError) IsPartialWrite() bool { return true }
 
 func (m *mockPartialFailRawWriter) WriteRaw(_ context.Context, _ []byte) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.rawCalls++
 	return &testPartialWriteError{msg: "partial write: disk full (truncate failed: read-only fs)"}
 }
 
@@ -126,54 +106,25 @@ func (m *mockPartialFailRawWriter) QueryEvents(_ context.Context, _ types.EventQ
 
 func (m *mockPartialFailRawWriter) Close() error { return nil }
 
-func TestIntegrityChain_StateAdvances(t *testing.T) {
-	chain, err := audit.NewIntegrityChain(testKey)
+func newBootstrappedRawIntegrityStore(t *testing.T, inner EventStore) (*IntegrityStore, *audit.IntegrityChain, string, audit.ChainState) {
+	t.Helper()
+
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	expectedState := writeResumableIntegrityState(t, logPath)
+	chain := mustNewIntegrityChain(t)
+	store, err := NewIntegrityStore(inner, chain, testIntegrityOptions(logPath))
 	if err != nil {
-		t.Fatalf("failed to create chain: %v", err)
+		t.Fatalf("NewIntegrityStore() error = %v", err)
 	}
-
-	state1 := chain.State()
-	if state1.Sequence != 0 {
-		t.Errorf("initial sequence should be 0, got %d", state1.Sequence)
+	if state := chain.State(); state != expectedState {
+		t.Fatalf("chain.State() = %+v, want %+v", state, expectedState)
 	}
-
-	_, err = chain.Wrap([]byte(`{"test": true}`))
-	if err != nil {
-		t.Fatalf("failed to wrap: %v", err)
-	}
-
-	state2 := chain.State()
-	if state2.Sequence != 1 {
-		t.Errorf("sequence should be 1, got %d", state2.Sequence)
-	}
-	if state1.PrevHash == state2.PrevHash {
-		t.Error("hash should have changed")
-	}
-}
-
-func TestNewIntegrityStore(t *testing.T) {
-	chain, err := audit.NewIntegrityChain(testKey)
-	if err != nil {
-		t.Fatalf("failed to create chain: %v", err)
-	}
-
-	wrapper := NewIntegrityStore(nil, chain)
-	if wrapper == nil {
-		t.Fatal("expected non-nil wrapper")
-	}
-	if wrapper.Chain() != chain {
-		t.Error("Chain() should return the same chain")
-	}
+	return store, chain, logPath, expectedState
 }
 
 func TestIntegrityStore_AppendEvent_WrapsPayload(t *testing.T) {
-	chain, err := audit.NewIntegrityChain(testKey)
-	if err != nil {
-		t.Fatalf("create chain: %v", err)
-	}
-
 	mock := &mockRawWriter{}
-	s := NewIntegrityStore(mock, chain)
+	store, _, _, initialState := newBootstrappedRawIntegrityStore(t, mock)
 
 	ev := types.Event{
 		ID:        "ev-1",
@@ -182,279 +133,311 @@ func TestIntegrityStore_AppendEvent_WrapsPayload(t *testing.T) {
 		SessionID: "sess-1",
 	}
 
-	if err := s.AppendEvent(context.Background(), ev); err != nil {
-		t.Fatalf("AppendEvent: %v", err)
+	if err := store.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
 	}
 
-	// Should have called WriteRaw, not AppendEvent
 	if len(mock.rawCalls) != 1 {
-		t.Fatalf("expected 1 WriteRaw call, got %d", len(mock.rawCalls))
+		t.Fatalf("len(mock.rawCalls) = %d, want 1", len(mock.rawCalls))
 	}
 	if len(mock.events) != 0 {
-		t.Fatalf("expected 0 AppendEvent calls, got %d", len(mock.events))
+		t.Fatalf("len(mock.events) = %d, want 0", len(mock.events))
 	}
 
-	// Parse the raw bytes and verify integrity field
 	var result map[string]any
 	if err := json.Unmarshal(mock.rawCalls[0], &result); err != nil {
-		t.Fatalf("unmarshal raw: %v", err)
+		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	integrity, ok := result["integrity"].(map[string]any)
-	if !ok {
-		t.Fatal("integrity field missing")
+	integrity := result["integrity"].(map[string]any)
+	if got := int64(integrity["sequence"].(float64)); got != initialState.Sequence+1 {
+		t.Fatalf("sequence = %d, want %d", got, initialState.Sequence+1)
 	}
-
-	seq, _ := integrity["sequence"].(float64)
-	if seq != 1 {
-		t.Errorf("sequence = %v, want 1", seq)
+	if got := integrity["prev_hash"].(string); got != initialState.PrevHash {
+		t.Fatalf("prev_hash = %q, want %q", got, initialState.PrevHash)
 	}
-
-	prevHash, _ := integrity["prev_hash"].(string)
-	if prevHash != "" {
-		t.Errorf("prev_hash = %q, want empty (first entry)", prevHash)
+	if got := integrity["entry_hash"].(string); got == "" {
+		t.Fatal("entry_hash is empty")
 	}
-
-	entryHash, _ := integrity["entry_hash"].(string)
-	if entryHash == "" {
-		t.Error("entry_hash should not be empty")
-	}
-
-	// Verify original event fields are preserved
 	if result["id"] != "ev-1" {
-		t.Errorf("id = %v, want ev-1", result["id"])
+		t.Fatalf("id = %v, want ev-1", result["id"])
 	}
 	if result["type"] != "test_event" {
-		t.Errorf("type = %v, want test_event", result["type"])
+		t.Fatalf("type = %v, want test_event", result["type"])
 	}
 }
 
 func TestIntegrityStore_AppendEvent_FallbackWithoutRawWriter(t *testing.T) {
-	chain, err := audit.NewIntegrityChain(testKey)
-	if err != nil {
-		t.Fatalf("create chain: %v", err)
-	}
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	expectedState := writeResumableIntegrityState(t, logPath)
 
+	chain := mustNewIntegrityChain(t)
 	mock := &mockPlainStore{}
-	s := NewIntegrityStore(mock, chain)
-
-	ev := types.Event{
-		ID:   "ev-1",
-		Type: "test_event",
+	store, err := NewIntegrityStore(mock, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatalf("NewIntegrityStore() error = %v", err)
 	}
 
-	if err := s.AppendEvent(context.Background(), ev); err != nil {
-		t.Fatalf("AppendEvent: %v", err)
+	if state := chain.State(); state != expectedState {
+		t.Fatalf("chain.State() = %+v, want %+v", state, expectedState)
 	}
 
-	// Should have called AppendEvent on the inner store (unsigned fallback)
+	ev := types.Event{ID: "ev-1", Type: "test_event"}
+	if err := store.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
 	if len(mock.events) != 1 {
-		t.Fatalf("expected 1 AppendEvent call, got %d", len(mock.events))
+		t.Fatalf("len(mock.events) = %d, want 1", len(mock.events))
 	}
-	if mock.events[0].ID != "ev-1" {
-		t.Errorf("event ID = %q, want ev-1", mock.events[0].ID)
+	if state := chain.State(); state != expectedState {
+		t.Fatalf("chain.State() after fallback append = %+v, want %+v", state, expectedState)
 	}
 }
 
 func TestIntegrityStore_ChainContinuity(t *testing.T) {
-	chain, err := audit.NewIntegrityChain(testKey)
-	if err != nil {
-		t.Fatalf("create chain: %v", err)
-	}
-
 	mock := &mockRawWriter{}
-	s := NewIntegrityStore(mock, chain)
+	store, _, _, prevState := newBootstrappedRawIntegrityStore(t, mock)
 
-	// Append 3 events
 	for i := 0; i < 3; i++ {
-		ev := types.Event{
-			ID:   fmt.Sprintf("ev-%d", i),
+		if err := store.AppendEvent(context.Background(), types.Event{
+			ID:   strconv.Itoa(i),
 			Type: "test",
-		}
-		if err := s.AppendEvent(context.Background(), ev); err != nil {
-			t.Fatalf("AppendEvent %d: %v", i, err)
+		}); err != nil {
+			t.Fatalf("AppendEvent(%d) error = %v", i, err)
 		}
 	}
 
 	if len(mock.rawCalls) != 3 {
-		t.Fatalf("expected 3 WriteRaw calls, got %d", len(mock.rawCalls))
+		t.Fatalf("len(mock.rawCalls) = %d, want 3", len(mock.rawCalls))
 	}
 
-	// Verify chain links
-	var prevEntryHash string
+	expectedPrevHash := prevState.PrevHash
 	for i, raw := range mock.rawCalls {
 		var result map[string]any
 		if err := json.Unmarshal(raw, &result); err != nil {
-			t.Fatalf("unmarshal %d: %v", i, err)
+			t.Fatalf("json.Unmarshal(%d) error = %v", i, err)
 		}
-		integrity := result["integrity"].(map[string]any)
-		prevHash := integrity["prev_hash"].(string)
-		entryHash := integrity["entry_hash"].(string)
-		seq := int64(integrity["sequence"].(float64))
 
-		if seq != int64(i+1) {
-			t.Errorf("entry %d: sequence = %d, want %d", i, seq, i+1)
+		integrity := result["integrity"].(map[string]any)
+		if got := int64(integrity["sequence"].(float64)); got != int64(i+1) {
+			t.Fatalf("entry %d sequence = %d, want %d", i, got, i+1)
 		}
-		if prevHash != prevEntryHash {
-			t.Errorf("entry %d: prev_hash = %q, want %q", i, prevHash, prevEntryHash)
+		if got := integrity["prev_hash"].(string); got != expectedPrevHash {
+			t.Fatalf("entry %d prev_hash = %q, want %q", i, got, expectedPrevHash)
 		}
-		prevEntryHash = entryHash
+		expectedPrevHash = integrity["entry_hash"].(string)
 	}
 }
 
 func TestIntegrityStore_AppendEvent_WriteFailureRollsBackChain(t *testing.T) {
-	chain, err := audit.NewIntegrityChain(testKey)
-	if err != nil {
-		t.Fatalf("create chain: %v", err)
-	}
+	store, chain, _, initialState := newBootstrappedRawIntegrityStore(t, &mockFailingRawWriter{})
 
-	mock := &mockFailingRawWriter{}
-	s := NewIntegrityStore(mock, chain)
-
-	ev := types.Event{ID: "ev-1", Type: "test"}
-
-	// First call should fail
-	err = s.AppendEvent(context.Background(), ev)
+	err := store.AppendEvent(context.Background(), types.Event{ID: "ev-1", Type: "test"})
 	if err == nil {
-		t.Fatal("expected error from failing WriteRaw")
+		t.Fatal("AppendEvent() error = nil, want write failure")
 	}
 
-	// Chain state should be rolled back to initial (sequence=0)
-	state := chain.State()
-	if state.Sequence != 0 {
-		t.Errorf("chain sequence = %d after failed write, want 0 (rolled back)", state.Sequence)
-	}
-	if state.PrevHash != "" {
-		t.Errorf("chain prev_hash = %q after failed write, want empty", state.PrevHash)
-	}
-
-	// Now retry with a working mock — chain should start fresh at sequence 1
-	goodMock := &mockRawWriter{}
-	s2 := NewIntegrityStore(goodMock, chain)
-	if err := s2.AppendEvent(context.Background(), ev); err != nil {
-		t.Fatalf("retry AppendEvent: %v", err)
-	}
-
-	if len(goodMock.rawCalls) != 1 {
-		t.Fatalf("expected 1 WriteRaw call, got %d", len(goodMock.rawCalls))
-	}
-
-	var result map[string]any
-	if err := json.Unmarshal(goodMock.rawCalls[0], &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	integrity := result["integrity"].(map[string]any)
-	seq := int64(integrity["sequence"].(float64))
-	if seq != 1 {
-		t.Errorf("sequence after retry = %d, want 1", seq)
+	if state := chain.State(); state != initialState {
+		t.Fatalf("chain.State() = %+v, want %+v", state, initialState)
 	}
 }
 
-func TestIntegrityStore_PartialWriteDoesNotRollBack(t *testing.T) {
-	chain, err := audit.NewIntegrityChain(testKey)
-	if err != nil {
-		t.Fatalf("create chain: %v", err)
+func TestIntegrityStore_FatalSidecarFailureRecoversOnRestart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission failure is not reliable on Windows")
 	}
 
-	mock := &mockPartialFailRawWriter{}
-	s := NewIntegrityStore(mock, chain)
-
-	ev := types.Event{ID: "ev-1", Type: "test"}
-
-	err = s.AppendEvent(context.Background(), ev)
-	if err == nil {
-		t.Fatal("expected error from partial-write failure")
-	}
-
-	// Chain state should NOT be rolled back because partial data
-	// may be on disk (truncate failed).
-	state := chain.State()
-	if state.Sequence != 1 {
-		t.Errorf("chain sequence = %d after partial write, want 1 (NOT rolled back)", state.Sequence)
-	}
-	if state.PrevHash == "" {
-		t.Error("chain prev_hash should be non-empty after partial write (NOT rolled back)")
-	}
-}
-
-func TestIntegrityStore_EndToEnd_VerifyWithAuditVerify(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
 
-	// Create JSONL store → wrap with IntegrityStore
 	jsonlStore, err := jsonl.New(logPath, 100, 3)
 	if err != nil {
-		t.Fatalf("jsonl.New: %v", err)
+		t.Fatalf("jsonl.New() error = %v", err)
 	}
 
-	chain, err := audit.NewIntegrityChain(testKey)
+	chain := mustNewIntegrityChain(t)
+	store, err := NewIntegrityStore(jsonlStore, chain, testIntegrityOptions(logPath))
 	if err != nil {
-		t.Fatalf("NewIntegrityChain: %v", err)
-	}
-	wrapped := NewIntegrityStore(jsonlStore, chain)
-
-	// Append events
-	events := []types.Event{
-		{ID: "1", Type: "session_start", SessionID: "s1", Timestamp: time.Now()},
-		{ID: "2", Type: "command_executed", SessionID: "s1", Timestamp: time.Now(), Fields: map[string]any{"command": "ls"}},
-		{ID: "3", Type: "file_read", SessionID: "s1", Timestamp: time.Now(), Fields: map[string]any{"path": "/etc/hosts"}},
-	}
-	for _, ev := range events {
-		if err := wrapped.AppendEvent(context.Background(), ev); err != nil {
-			t.Fatalf("AppendEvent: %v", err)
-		}
-	}
-	if err := wrapped.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+		t.Fatalf("NewIntegrityStore() error = %v", err)
 	}
 
-	// Verify by reading back and checking the integrity chain manually.
+	if err := store.AppendEvent(context.Background(), types.Event{ID: "1", Type: "ok"}); err != nil {
+		t.Fatalf("AppendEvent(first) error = %v", err)
+	}
+
+	sidecarPath := audit.SidecarPath(logPath)
+	beforeFailure, err := audit.ReadSidecar(sidecarPath)
+	if err != nil {
+		t.Fatalf("audit.ReadSidecar() before failure error = %v", err)
+	}
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("os.Chmod(%q, 0500) error = %v", dir, err)
+	}
+	fatalErr := store.AppendEvent(context.Background(), types.Event{ID: "2", Type: "fatal_sidecar"})
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("os.Chmod(%q, 0700) error = %v", dir, err)
+	}
+	if fatalErr == nil {
+		_ = store.Close()
+		t.Skip("directory permissions did not block sidecar rewrite in this environment")
+	}
+
+	var fatal *FatalIntegrityError
+	if !errors.As(fatalErr, &fatal) {
+		t.Fatalf("AppendEvent(second) error = %v, want FatalIntegrityError", fatalErr)
+	}
+
+	afterFailure, err := audit.ReadSidecar(sidecarPath)
+	if err != nil {
+		t.Fatalf("audit.ReadSidecar() after failure error = %v", err)
+	}
+	if afterFailure.Sequence != beforeFailure.Sequence || afterFailure.PrevHash != beforeFailure.PrevHash {
+		t.Fatalf("sidecar advanced after fatal failure: before=%+v after=%+v", beforeFailure, afterFailure)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("store.Close() error = %v", err)
+	}
+
 	data, err := os.ReadFile(logPath)
 	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+		t.Fatalf("os.ReadFile(%q) error = %v", logPath, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("line count = %d, want 3 after durable fatal write", len(lines))
+	}
+
+	reopen, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New(reopen) error = %v", err)
+	}
+	t.Cleanup(func() { _ = reopen.Close() })
+
+	resumeChain := mustNewIntegrityChain(t)
+	resumed, err := NewIntegrityStore(reopen, resumeChain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatalf("NewIntegrityStore(reopen) error = %v", err)
+	}
+	t.Cleanup(func() { _ = resumed.Close() })
+
+	if got := resumeChain.State().Sequence; got != beforeFailure.Sequence+1 {
+		t.Fatalf("recovered sequence = %d, want %d", got, beforeFailure.Sequence+1)
+	}
+}
+
+func TestIntegrityStore_PartialWriteReturnsFatalErrorAndDoesNotRollBack(t *testing.T) {
+	store, chain, _, initialState := newBootstrappedRawIntegrityStore(t, &mockPartialFailRawWriter{})
+
+	err := store.AppendEvent(context.Background(), types.Event{ID: "ev-1", Type: "test"})
+	if err == nil {
+		t.Fatal("AppendEvent() error = nil, want partial write failure")
+	}
+	var fatal *FatalIntegrityError
+	if !errors.As(err, &fatal) {
+		t.Fatalf("AppendEvent() error = %v, want FatalIntegrityError", err)
+	}
+
+	state := chain.State()
+	if state.Sequence != initialState.Sequence+1 {
+		t.Fatalf("chain sequence = %d, want %d", state.Sequence, initialState.Sequence+1)
+	}
+	if state.PrevHash == initialState.PrevHash {
+		t.Fatal("prev_hash did not advance after partial write")
+	}
+}
+
+func TestIntegrityStore_StickyFatalRejectsSubsequentAppends(t *testing.T) {
+	store, _, _, _ := newBootstrappedRawIntegrityStore(t, &mockPartialFailRawWriter{})
+
+	// First append triggers a partial write → FatalIntegrityError.
+	err := store.AppendEvent(context.Background(), types.Event{ID: "ev-1", Type: "test"})
+	var fatal *FatalIntegrityError
+	if !errors.As(err, &fatal) {
+		t.Fatalf("first AppendEvent() error = %v, want FatalIntegrityError", err)
+	}
+
+	// Second append must be rejected immediately without touching the chain or log.
+	err = store.AppendEvent(context.Background(), types.Event{ID: "ev-2", Type: "test"})
+	if !errors.Is(err, ErrIntegrityFatal) {
+		t.Fatalf("second AppendEvent() error = %v, want ErrIntegrityFatal", err)
+	}
+}
+
+func TestIntegrityStore_EndToEnd_VerifyWithAuditHelpers(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	jsonlStore, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+
+	chain := mustNewIntegrityChain(t)
+	store, err := NewIntegrityStore(jsonlStore, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatalf("NewIntegrityStore() error = %v", err)
+	}
+
+	events := []types.Event{
+		{ID: "1", Type: "session_start", SessionID: "s1", Timestamp: time.Now().UTC()},
+		{ID: "2", Type: "command_executed", SessionID: "s1", Timestamp: time.Now().UTC(), Fields: map[string]any{"command": "ls"}},
+		{ID: "3", Type: "file_read", SessionID: "s1", Timestamp: time.Now().UTC(), Fields: map[string]any{"path": "/etc/hosts"}},
+	}
+	for _, ev := range events {
+		if err := store.AppendEvent(context.Background(), ev); err != nil {
+			t.Fatalf("AppendEvent() error = %v", err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("expected 3 lines, got %d", len(lines))
+	if len(lines) != len(events)+1 {
+		t.Fatalf("line count = %d, want %d", len(lines), len(events)+1)
 	}
 
 	var prevEntryHash string
 	for i, line := range lines {
 		var entry map[string]any
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			t.Fatalf("line %d unmarshal: %v", i, err)
+			t.Fatalf("json.Unmarshal(line %d) error = %v", i, err)
 		}
 
-		integrity, ok := entry["integrity"].(map[string]any)
-		if !ok {
-			t.Fatalf("line %d: missing integrity field", i)
-		}
-
+		integrity := entry["integrity"].(map[string]any)
+		formatVersion := int(integrity["format_version"].(float64))
+		sequence := int64(integrity["sequence"].(float64))
 		prevHash := integrity["prev_hash"].(string)
 		entryHash := integrity["entry_hash"].(string)
 
 		if prevHash != prevEntryHash {
-			t.Errorf("line %d: prev_hash = %q, want %q", i, prevHash, prevEntryHash)
+			t.Fatalf("line %d prev_hash = %q, want %q", i, prevHash, prevEntryHash)
 		}
 
-		// Verify HMAC by recomputing
 		delete(entry, "integrity")
-		canonical, _ := json.Marshal(entry)
-		seq := int64(integrity["sequence"].(float64))
-		computed := computeHMAC(testKey, seq, prevHash, canonical)
-		if computed != entryHash {
-			t.Errorf("line %d: entry_hash mismatch: computed %q, got %q", i, computed, entryHash)
+		canonicalPayload, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatalf("json.Marshal(line %d payload) error = %v", i, err)
+		}
+		if got := computeHMAC(testKey, formatVersion, sequence, prevHash, canonicalPayload); got != entryHash {
+			t.Fatalf("line %d entry_hash = %q, want %q", i, entryHash, got)
 		}
 
 		prevEntryHash = entryHash
 	}
 }
 
-// computeHMAC replicates the HMAC computation from audit.IntegrityChain.computeHash
-// for verification in tests.
-func computeHMAC(key []byte, sequence int64, prevHash string, payload []byte) string {
+func computeHMAC(key []byte, formatVersion int, sequence int64, prevHash string, payload []byte) string {
 	h := hmac.New(sha256.New, key)
+	h.Write([]byte(strconv.Itoa(formatVersion)))
+	h.Write([]byte("|"))
 	h.Write([]byte(strconv.FormatInt(sequence, 10)))
 	h.Write([]byte("|"))
 	h.Write([]byte(prevHash))

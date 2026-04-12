@@ -28,18 +28,45 @@ func (e *PartialWriteError) Unwrap() error { return e.WriteErr }
 // IsPartialWrite implements the interface checked by IntegrityStore.
 func (e *PartialWriteError) IsPartialWrite() bool { return true }
 
+// DurabilityError indicates bytes were appended but could not be confirmed
+// durable, so callers must treat the write as potentially visible on disk.
+type DurabilityError struct {
+	Err error
+}
+
+func (e *DurabilityError) Error() string { return "durability error: " + e.Err.Error() }
+func (e *DurabilityError) Unwrap() error { return e.Err }
+func (e *DurabilityError) IsPartialWrite() bool { return true }
+
 type Store struct {
 	path       string
 	maxBytes   int64
 	maxBackups int
 
-	mu   sync.Mutex
-	file *os.File
+	mu       sync.Mutex
+	file     *os.File
+	lockFile *os.File
 }
 
 func New(path string, maxSizeMB int, maxBackups int) (*Store, error) {
+	lockFile, err := AcquireLock(path)
+	if err != nil {
+		return nil, fmt.Errorf("lock jsonl: %w", err)
+	}
+	store, err := NewWithLock(path, maxSizeMB, maxBackups, lockFile)
+	if err != nil {
+		_ = ReleaseLock(lockFile)
+		return nil, err
+	}
+	return store, nil
+}
+
+func NewWithLock(path string, maxSizeMB int, maxBackups int, lockFile *os.File) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("jsonl path is empty")
+	}
+	if lockFile == nil {
+		return nil, fmt.Errorf("jsonl lock file is nil")
 	}
 	if maxSizeMB <= 0 {
 		maxSizeMB = 100
@@ -62,6 +89,7 @@ func New(path string, maxSizeMB int, maxBackups int) (*Store, error) {
 		maxBytes:   int64(maxSizeMB) * 1024 * 1024,
 		maxBackups: maxBackups,
 		file:       f,
+		lockFile:   lockFile,
 	}, nil
 }
 
@@ -119,6 +147,9 @@ func (s *Store) WriteRaw(_ context.Context, data []byte) error {
 		}
 		return fmt.Errorf("write jsonl raw: %w", writeErr)
 	}
+	if err := s.file.Sync(); err != nil {
+		return &DurabilityError{Err: fmt.Errorf("sync jsonl raw: %w", err)}
+	}
 	return nil
 }
 
@@ -129,10 +160,20 @@ func (s *Store) QueryEvents(_ context.Context, _ types.EventQuery) ([]types.Even
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var firstErr error
 	if s.file != nil {
-		return s.file.Close()
+		if err := s.file.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.file = nil
 	}
-	return nil
+	if s.lockFile != nil {
+		if err := ReleaseLock(s.lockFile); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.lockFile = nil
+	}
+	return firstErr
 }
 
 func (s *Store) rotateIfNeededLocked() error {

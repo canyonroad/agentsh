@@ -2,6 +2,7 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -11,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"io"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -22,9 +25,10 @@ import (
 
 // IntegrityMetadata contains the tamper-proof chain fields for an audit entry.
 type IntegrityMetadata struct {
-	Sequence  int64  `json:"sequence"`
-	PrevHash  string `json:"prev_hash"`
-	EntryHash string `json:"entry_hash"`
+	FormatVersion int    `json:"format_version"`
+	Sequence      int64  `json:"sequence"`
+	PrevHash      string `json:"prev_hash"`
+	EntryHash     string `json:"entry_hash"`
 }
 
 // IntegrityChain maintains HMAC chain state for tamper-proof audit logging.
@@ -40,7 +44,13 @@ type IntegrityChain struct {
 // MinKeyLength is the minimum recommended key length for HMAC-SHA256.
 const MinKeyLength = 32
 
-// ChainState represents the current state of the integrity chain for persistence.
+// IntegrityFormatVersion is the JSON metadata format version emitted by Wrap.
+const IntegrityFormatVersion = 2
+
+// ErrSequenceOverflow indicates that the chain cannot advance past MaxInt64.
+var ErrSequenceOverflow = errors.New("integrity sequence overflow")
+
+// ChainState represents the last written entry in the integrity chain for persistence.
 type ChainState struct {
 	Sequence int64  `json:"sequence"`
 	PrevHash string `json:"prev_hash"`
@@ -75,7 +85,7 @@ func NewIntegrityChainWithAlgorithm(key []byte, algorithm string) (*IntegrityCha
 	return &IntegrityChain{
 		key:       key,
 		algorithm: algorithm,
-		sequence:  0,
+		sequence:  -1,
 		prevHash:  "",
 	}, nil
 }
@@ -193,29 +203,35 @@ func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
 	defer c.mu.Unlock()
 
 	// Parse existing payload
-	var data map[string]any
-	if err := json.Unmarshal(payload, &data); err != nil {
-		return nil, fmt.Errorf("parse payload: %w", err)
+	data, err := parseIntegrityPayloadUseNumber(payload)
+	if err != nil {
+		return nil, err
 	}
 
 	// Use canonical JSON (re-marshaled) for HMAC to ensure verifiability.
 	// Go's json.Marshal produces deterministic output with sorted keys.
-	canonicalPayload, err := json.Marshal(data)
+	canonicalPayload, err := marshalCanonicalPayload(data)
 	if err != nil {
-		return nil, fmt.Errorf("canonical marshal: %w", err)
+		return nil, err
 	}
 
-	// Increment sequence
-	c.sequence++
+	if c.sequence == math.MaxInt64 {
+		return nil, ErrSequenceOverflow
+	}
+	nextSequence := c.sequence + 1
 
-	// Compute HMAC of: sequence || prev_hash || canonical_payload
-	entryHash := c.computeHash(c.sequence, c.prevHash, canonicalPayload)
+	// Compute HMAC of: format_version || sequence || prev_hash || canonical_payload
+	entryHash, err := c.computeHash(IntegrityFormatVersion, nextSequence, c.prevHash, canonicalPayload)
+	if err != nil {
+		return nil, err
+	}
 
 	// Create integrity metadata
 	meta := IntegrityMetadata{
-		Sequence:  c.sequence,
-		PrevHash:  c.prevHash,
-		EntryHash: entryHash,
+		FormatVersion: IntegrityFormatVersion,
+		Sequence:      nextSequence,
+		PrevHash:      c.prevHash,
+		EntryHash:     entryHash,
 	}
 
 	// Add integrity field to payload
@@ -227,13 +243,15 @@ func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
 		return nil, fmt.Errorf("marshal wrapped payload: %w", err)
 	}
 
-	// Update prevHash for next entry
+	// Record the most recent wrapped entry. State() reflects the last durable
+	// entry once callers persist or explicitly Restore after a failed write.
+	c.sequence = nextSequence
 	c.prevHash = entryHash
 
 	return result, nil
 }
 
-// State returns the current chain state for persistence.
+// State returns the last written chain state for persistence.
 func (c *IntegrityChain) State() ChainState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -244,7 +262,7 @@ func (c *IntegrityChain) State() ChainState {
 }
 
 // Restore restores the chain state after a restart.
-// This should be called before processing new events to continue the chain.
+// The sequence must be the last written entry so the next Wrap continues at sequence+1.
 func (c *IntegrityChain) Restore(sequence int64, prevHash string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -252,16 +270,117 @@ func (c *IntegrityChain) Restore(sequence int64, prevHash string) {
 	c.prevHash = prevHash
 }
 
-// computeHash computes the HMAC of: sequence || prev_hash || payload
-func (c *IntegrityChain) computeHash(sequence int64, prevHash string, payload []byte) string {
-	var h hash.Hash
-	switch c.algorithm {
-	case "hmac-sha512":
-		h = hmac.New(sha512.New, c.key)
-	default: // hmac-sha256
-		h = hmac.New(sha256.New, c.key)
+// KeyFingerprint returns a stable SHA-256 fingerprint prefix for an HMAC key.
+func KeyFingerprint(key []byte) string {
+	sum := sha256.Sum256(key)
+	return "sha256:" + hex.EncodeToString(sum[:16])
+}
+
+// KeyFingerprint returns a stable SHA-256 fingerprint prefix for the chain key.
+func (c *IntegrityChain) KeyFingerprint() string {
+	return KeyFingerprint(c.key)
+}
+
+// VerifyHash recomputes the canonical payload hash using the chain key and format version.
+func (c *IntegrityChain) VerifyHash(formatVersion int, sequence int64, prevHash string, payload []byte, expectedHash string) (bool, error) {
+	return VerifyHash(c.key, c.algorithm, formatVersion, sequence, prevHash, payload, expectedHash)
+}
+
+// VerifyWrapped verifies a wrapped payload, including integrity metadata.
+func (c *IntegrityChain) VerifyWrapped(wrapped []byte) (bool, error) {
+	return VerifyWrapped(c.key, c.algorithm, wrapped)
+}
+
+// VerifyHash recomputes an entry hash using canonical JSON payload encoding.
+func VerifyHash(key []byte, algorithm string, formatVersion int, sequence int64, prevHash string, payload []byte, expectedHash string) (bool, error) {
+	data, err := parseIntegrityPayloadUseNumber(payload)
+	if err != nil {
+		return false, err
+	}
+	delete(data, "integrity")
+	canonicalPayload, err := marshalCanonicalPayload(data)
+	if err != nil {
+		return false, err
+	}
+	actualHash, err := computeIntegrityHash(key, algorithm, formatVersion, sequence, prevHash, canonicalPayload)
+	if err != nil {
+		return false, err
+	}
+	return hmac.Equal([]byte(actualHash), []byte(expectedHash)), nil
+}
+
+// VerifyWrapped verifies the integrity metadata and payload in a wrapped audit entry.
+func VerifyWrapped(key []byte, algorithm string, wrapped []byte) (bool, error) {
+	data, err := parseIntegrityPayloadUseNumber(wrapped)
+	if err != nil {
+		return false, err
 	}
 
+	meta, ok := integrityMetadataFromMap(data["integrity"])
+	if !ok {
+		return false, nil
+	}
+
+	delete(data, "integrity")
+	canonicalPayload, err := marshalCanonicalPayload(data)
+	if err != nil {
+		return false, err
+	}
+	actualHash, err := computeIntegrityHash(key, algorithm, meta.FormatVersion, meta.Sequence, meta.PrevHash, canonicalPayload)
+	if err != nil {
+		return false, err
+	}
+	return hmac.Equal([]byte(actualHash), []byte(meta.EntryHash)), nil
+}
+
+// computeHash computes the HMAC of: format_version || sequence || prev_hash || payload
+func (c *IntegrityChain) computeHash(formatVersion int, sequence int64, prevHash string, payload []byte) (string, error) {
+	return computeIntegrityHash(c.key, c.algorithm, formatVersion, sequence, prevHash, payload)
+}
+
+func parseIntegrityPayloadUseNumber(payload []byte) (map[string]any, error) {
+	var data map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if err := decoder.Decode(&data); err != nil {
+		return nil, fmt.Errorf("parse payload: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("parse payload: trailing data after JSON object")
+		}
+		return nil, fmt.Errorf("parse payload: %w", err)
+	}
+	return data, nil
+}
+
+func marshalCanonicalPayload(data map[string]any) ([]byte, error) {
+	canonicalPayload, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("canonical marshal: %w", err)
+	}
+	return canonicalPayload, nil
+}
+
+func computeIntegrityHash(key []byte, algorithm string, formatVersion int, sequence int64, prevHash string, payload []byte) (string, error) {
+	var h hash.Hash
+	switch algorithm {
+	case "":
+		h = hmac.New(sha256.New, key)
+	case "hmac-sha512":
+		h = hmac.New(sha512.New, key)
+	default: // hmac-sha256
+		if algorithm != "hmac-sha256" {
+			return "", fmt.Errorf("unsupported algorithm %q: use hmac-sha256 or hmac-sha512", algorithm)
+		}
+		h = hmac.New(sha256.New, key)
+	}
+
+	// Write format version as string
+	h.Write([]byte(strconv.Itoa(formatVersion)))
+	// Write separator
+	h.Write([]byte("|"))
 	// Write sequence as string
 	h.Write([]byte(strconv.FormatInt(sequence, 10)))
 	// Write separator
@@ -273,5 +392,66 @@ func (c *IntegrityChain) computeHash(sequence int64, prevHash string, payload []
 	// Write payload
 	h.Write(payload)
 
-	return hex.EncodeToString(h.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func integrityMetadataFromMap(v any) (IntegrityMetadata, bool) {
+	integrity, ok := v.(map[string]any)
+	if !ok {
+		return IntegrityMetadata{}, false
+	}
+
+	formatVersion, ok := jsonInt(integrity["format_version"])
+	if !ok {
+		return IntegrityMetadata{}, false
+	}
+	sequence, ok := jsonInt64(integrity["sequence"])
+	if !ok {
+		return IntegrityMetadata{}, false
+	}
+	prevHash, ok := integrity["prev_hash"].(string)
+	if !ok {
+		return IntegrityMetadata{}, false
+	}
+	entryHash, ok := integrity["entry_hash"].(string)
+	if !ok {
+		return IntegrityMetadata{}, false
+	}
+
+	return IntegrityMetadata{
+		FormatVersion: formatVersion,
+		Sequence:      sequence,
+		PrevHash:      prevHash,
+		EntryHash:     entryHash,
+	}, true
+}
+
+func jsonInt(v any) (int, bool) {
+	n, ok := jsonInt64(v)
+	if !ok {
+		return 0, false
+	}
+	return int(n), true
+}
+
+func jsonInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case json.Number:
+		value, err := n.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return value, true
+	case float64:
+		if n != math.Trunc(n) {
+			return 0, false
+		}
+		return int64(n), true
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	default:
+		return 0, false
+	}
 }

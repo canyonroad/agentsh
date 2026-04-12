@@ -2,6 +2,7 @@ package jsonl
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,5 +101,33 @@ func TestQueryNotSupported(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	if _, err := store.QueryEvents(context.Background(), types.EventQuery{}); err == nil {
 		t.Fatal("expected query error")
+	}
+}
+
+func TestJSONLStore_RotationKeepsAuditLockHeld(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.log")
+
+	store, err := New(path, 1, 2)
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	payload := strings.Repeat("x", 2<<20)
+	if err := store.AppendEvent(context.Background(), types.Event{ID: "1", Type: payload}); err != nil {
+		t.Fatalf("AppendEvent large: %v", err)
+	}
+	if err := store.AppendEvent(context.Background(), types.Event{ID: "2", Type: "rotate"}); err != nil {
+		t.Fatalf("AppendEvent rotate: %v", err)
+	}
+
+	lockFile, err := AcquireLock(path)
+	if err == nil {
+		_ = ReleaseLock(lockFile)
+		t.Fatal("AcquireLock() error = nil, want lock contention while store is open")
+	}
+	if !errors.Is(err, ErrLocked) {
+		t.Fatalf("AcquireLock() error = %v, want ErrLocked", err)
 	}
 }

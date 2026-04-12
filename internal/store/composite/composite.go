@@ -2,6 +2,7 @@ package composite
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,26 +12,53 @@ import (
 )
 
 type Store struct {
-	primary store.EventStore
-	output  store.OutputStore
-	others  []store.EventStore
+	primary       store.EventStore
+	output        store.OutputStore
+	others        []store.EventStore
+	onAppendError func(error)
 }
 
 func New(primary store.EventStore, output store.OutputStore, others ...store.EventStore) *Store {
 	return &Store{primary: primary, output: output, others: others}
 }
 
+func (s *Store) SetAppendErrorHook(fn func(error)) {
+	s.onAppendError = fn
+}
+
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	var firstErr error
+	var hookErr error
 	if s.primary != nil {
-		if err := s.primary.AppendEvent(ctx, ev); err != nil && firstErr == nil {
-			firstErr = err
+		if err := s.primary.AppendEvent(ctx, ev); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			if hookErr == nil {
+				hookErr = err
+			}
+			var fatal *store.FatalIntegrityError
+			if errors.As(err, &fatal) {
+				hookErr = fatal
+			}
 		}
 	}
 	for _, o := range s.others {
-		if err := o.AppendEvent(ctx, ev); err != nil && firstErr == nil {
-			firstErr = err
+		if err := o.AppendEvent(ctx, ev); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			if hookErr == nil {
+				hookErr = err
+			}
+			var fatal *store.FatalIntegrityError
+			if errors.As(err, &fatal) {
+				hookErr = fatal
+			}
 		}
+	}
+	if hookErr != nil && s.onAppendError != nil {
+		s.onAppendError(hookErr)
 	}
 	return firstErr
 }
