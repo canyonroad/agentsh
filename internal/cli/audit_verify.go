@@ -37,6 +37,12 @@ type verifySummary struct {
 	rotationCount   int
 }
 
+type verifyStart struct {
+	fileIndex int
+	lineNo    int
+	sequence  int64
+}
+
 type rotationVerifyPayload struct {
 	Fields struct {
 		ReasonCode         string `json:"reason_code"`
@@ -225,6 +231,17 @@ func hasTopLevelIntegrityField(line []byte) bool {
 func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, opts verifyOptions) (*verifySummary, error) {
 	summary := &verifySummary{fileCount: len(files)}
 	state := verifyState{}
+	var start *verifyStart
+	if opts.fromSequence > 0 {
+		var err error
+		start, err = locateVerifyStart(files, opts.fromSequence)
+		if err != nil {
+			return nil, err
+		}
+		if start == nil {
+			return nil, fmt.Errorf("sequence mismatch: expected starting sequence %d, got end of log", opts.fromSequence)
+		}
+	}
 
 	record := func(filePath string, lineNo int, meta audit.IntegrityMetadata, eventType string) {
 		if summary.verifiedEntries == 0 {
@@ -266,6 +283,14 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 				}
 				continue
 			}
+			if start != nil {
+				if fileIndex < start.fileIndex || (fileIndex == start.fileIndex && lineNo < start.lineNo) {
+					if errors.Is(readErr, io.EOF) {
+						break
+					}
+					continue
+				}
+			}
 
 			entry, err := audit.ParseIntegrityEntry(line)
 			if err != nil {
@@ -295,10 +320,7 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 				return nil, fmt.Errorf("unsupported audit integrity format_version %d at %s:%d", entry.Integrity.FormatVersion, file.Path, lineNo)
 			}
 
-			if opts.fromSequence > 0 && !state.seeded {
-				if entry.Integrity.Sequence < opts.fromSequence {
-					continue
-				}
+			if opts.fromSequence > 0 && summary.verifiedEntries == 0 {
 				if entry.Integrity.Sequence != opts.fromSequence {
 					_ = f.Close()
 					return nil, fmt.Errorf("sequence mismatch at %s:%d: expected starting sequence %d, got %d", file.Path, lineNo, opts.fromSequence, entry.Integrity.Sequence)
@@ -306,8 +328,7 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 				state.expectedSequence = entry.Integrity.Sequence
 				state.expectedPrevHash = entry.Integrity.PrevHash
 				state.seeded = true
-			}
-			if !state.seeded && file.IsBackup && summary.verifiedEntries == 0 {
+			} else if !state.seeded && file.IsBackup && summary.verifiedEntries == 0 {
 				state.expectedSequence = entry.Integrity.Sequence
 				state.expectedPrevHash = entry.Integrity.PrevHash
 				state.seeded = true
@@ -368,6 +389,55 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 	}
 
 	return summary, nil
+}
+
+func locateVerifyStart(files []audit.LogFile, fromSequence int64) (*verifyStart, error) {
+	for fileIndex, file := range files {
+		f, err := os.Open(file.Path)
+		if err != nil {
+			return nil, fmt.Errorf("open %s: %w", file.Path, err)
+		}
+
+		reader := bufio.NewReader(f)
+		lineNo := 0
+		for {
+			rawLine, readErr := reader.ReadBytes('\n')
+			if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
+				break
+			}
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				_ = f.Close()
+				return nil, fmt.Errorf("scan %s: %w", file.Path, readErr)
+			}
+
+			lineNo++
+			line := bytes.TrimSpace(rawLine)
+			if len(line) == 0 {
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
+				continue
+			}
+
+			entry, err := audit.ParseIntegrityEntry(line)
+			if err == nil && entry.Integrity != nil && entry.Integrity.Sequence >= fromSequence {
+				_ = f.Close()
+				return &verifyStart{
+					fileIndex: fileIndex,
+					lineNo:    lineNo,
+					sequence:  entry.Integrity.Sequence,
+				}, nil
+			}
+
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+		}
+
+		_ = f.Close()
+	}
+
+	return nil, nil
 }
 
 func verifyRotationBoundary(payload []byte, summary *verifySummary, state verifyState, visibleOriginIsBackup bool) error {

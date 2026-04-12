@@ -467,15 +467,15 @@ func visibleRotationSetSupportsInPlaceReset(files []audit.LogFile) (bool, error)
 }
 
 func archiveRotationSet(logPath, stamp string) error {
-	files, err := existingRotationFiles(logPath)
+	files, err := archiveableRotationFiles(logPath)
 	if err != nil {
 		return err
 	}
 
 	for _, file := range files {
 		target := logPath + ".legacy." + stamp
-		if file.IsBackup {
-			target = logPath + ".legacy." + stamp + "." + strconv.Itoa(file.Index)
+		if file.Suffix != "" {
+			target = logPath + ".legacy." + stamp + "." + file.Suffix
 		}
 		if err := os.Rename(file.Path, target); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("archive legacy audit log %s: %w", file.Path, err)
@@ -487,6 +487,59 @@ func archiveRotationSet(logPath, stamp string) error {
 		return fmt.Errorf("archive legacy audit sidecar: %w", err)
 	}
 	return nil
+}
+
+type archiveableAuditFile struct {
+	Path   string
+	Suffix string
+}
+
+func archiveableRotationFiles(logPath string) ([]archiveableAuditFile, error) {
+	dir := filepath.Dir(logPath)
+	baseName := filepath.Base(logPath)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read audit rotation dir: %w", err)
+	}
+
+	files := make([]archiveableAuditFile, 0, len(entries)+1)
+	if _, err := os.Stat(logPath); err == nil {
+		files = append(files, archiveableAuditFile{Path: logPath})
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, baseName+".") {
+			continue
+		}
+		suffix := strings.TrimPrefix(name, baseName+".")
+		if _, err := strconv.Atoi(suffix); err != nil {
+			continue
+		}
+		files = append(files, archiveableAuditFile{
+			Path:   filepath.Join(dir, name),
+			Suffix: suffix,
+		})
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].Suffix == "" || files[j].Suffix == "" {
+			return files[i].Suffix == ""
+		}
+		left, _ := strconv.Atoi(files[i].Suffix)
+		right, _ := strconv.Atoi(files[j].Suffix)
+		return left > right
+	})
+	return files, nil
 }
 
 func existingRotationFiles(logPath string) ([]audit.LogFile, error) {

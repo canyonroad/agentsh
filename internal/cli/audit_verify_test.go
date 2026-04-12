@@ -899,6 +899,51 @@ func TestAuditVerifyCmd_TolerateTruncationRejectsMalformedFinalLineWithTrailingN
 	}
 }
 
+func TestAuditVerifyCmd_FromSequenceSkipsEarlierMalformedLines(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	first, err := chain.Wrap([]byte(`{"type":"before_corruption"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	second, err := chain.Wrap([]byte(`{"type":"after_corruption"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	data := append([]byte{}, first...)
+	data = append(data, '\n')
+	data = append(data, []byte(`{"type":"broken"`)...)
+	data = append(data, '\n')
+	data = append(data, second...)
+	data = append(data, '\n')
+	if err := os.WriteFile(logPath, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--from-sequence", "1", logPath})
+
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "verified 1 entries across 1 files") {
+		t.Fatalf("output = %q, want from-sequence summary", got)
+	}
+}
+
 func joinAuditVerifyLines(lines ...[]byte) []byte {
 	var out []byte
 	for _, line := range lines {
