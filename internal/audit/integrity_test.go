@@ -309,6 +309,33 @@ func TestIntegrityChain_SHA512VerifyWrapped(t *testing.T) {
 	}
 }
 
+func TestIntegrityChain_VerifyWrapped_PreservesLargeSequencePrecision(t *testing.T) {
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+
+	const lastWrittenSequence int64 = 9007199254740992
+	chain.Restore(lastWrittenSequence, "prev-hash")
+
+	wrapped, err := chain.Wrap([]byte(`{"event":"high_sequence"}`))
+	if err != nil {
+		t.Fatalf("Wrap() error = %v", err)
+	}
+
+	if state := chain.State(); state.Sequence != lastWrittenSequence+1 {
+		t.Fatalf("State().Sequence = %d, want %d", state.Sequence, lastWrittenSequence+1)
+	}
+
+	ok, err := chain.VerifyWrapped(wrapped)
+	if err != nil {
+		t.Fatalf("VerifyWrapped() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("VerifyWrapped() = false, want true for untouched wrapped entry")
+	}
+}
+
 func TestIntegrityChain_ChainContinuity(t *testing.T) {
 	chain, err := NewIntegrityChain(testKey)
 	if err != nil {

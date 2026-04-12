@@ -2,6 +2,7 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -308,7 +309,7 @@ func VerifyHash(key []byte, algorithm string, formatVersion int, sequence int64,
 
 // VerifyWrapped verifies the integrity metadata and payload in a wrapped audit entry.
 func VerifyWrapped(key []byte, algorithm string, wrapped []byte) (bool, error) {
-	data, err := parseIntegrityPayload(wrapped)
+	data, err := parseIntegrityPayloadUseNumber(wrapped)
 	if err != nil {
 		return false, err
 	}
@@ -338,6 +339,16 @@ func (c *IntegrityChain) computeHash(formatVersion int, sequence int64, prevHash
 func parseIntegrityPayload(payload []byte) (map[string]any, error) {
 	var data map[string]any
 	if err := json.Unmarshal(payload, &data); err != nil {
+		return nil, fmt.Errorf("parse payload: %w", err)
+	}
+	return data, nil
+}
+
+func parseIntegrityPayloadUseNumber(payload []byte) (map[string]any, error) {
+	var data map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if err := decoder.Decode(&data); err != nil {
 		return nil, fmt.Errorf("parse payload: %w", err)
 	}
 	return data, nil
@@ -423,9 +434,23 @@ func jsonInt(v any) (int, bool) {
 }
 
 func jsonInt64(v any) (int64, bool) {
-	n, ok := v.(float64)
-	if !ok || n != math.Trunc(n) {
+	switch n := v.(type) {
+	case json.Number:
+		value, err := n.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return value, true
+	case float64:
+		if n != math.Trunc(n) {
+			return 0, false
+		}
+		return int64(n), true
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	default:
 		return 0, false
 	}
-	return int64(n), true
 }
