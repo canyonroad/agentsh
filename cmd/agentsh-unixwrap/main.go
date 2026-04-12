@@ -46,10 +46,15 @@ func main() {
 	// Under Yama ptrace_scope=1 (Ubuntu/Debian default), only ancestor
 	// processes can use ProcessVMReadv. In the wrap path the server is NOT
 	// our ancestor, so this prctl authorizes it specifically.
-	// Must run before any seccomp notifications can be processed.
+	// On kernels without Yama, PR_SET_PTRACER returns EINVAL — but it's
+	// also unnecessary because standard Unix DAC governs ptrace.
 	if cfg.ServerPID > 0 {
-		if err := unix.Prctl(unix.PR_SET_PTRACER, uintptr(cfg.ServerPID), 0, 0, 0); err != nil {
-			log.Printf("PR_SET_PTRACER(%d): %v (ProcessVMReadv may fail under Yama)", cfg.ServerPID, err)
+		if isYamaActive() {
+			if err := unix.Prctl(unix.PR_SET_PTRACER, uintptr(cfg.ServerPID), 0, 0, 0); err != nil {
+				log.Printf("PR_SET_PTRACER(%d): %v (Yama active, ProcessVMReadv may fail)", cfg.ServerPID, err)
+			}
+		} else {
+			log.Printf("yama: not active, skipping PR_SET_PTRACER (standard DAC governs ptrace)")
 		}
 	}
 
