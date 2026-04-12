@@ -504,10 +504,15 @@ func verifyTargetContainsIntegrityMetadataFromSequence(files []audit.LogFile, in
 				}
 				continue
 			}
-			if entry.Integrity != nil {
-				seenIntegrity = true
-				pendingMalformed = nil
+			if entry.Integrity == nil {
+				pendingMalformed = fmt.Errorf("unsigned line at %s:%d", file.Path, lineNo)
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
+				continue
 			}
+			seenIntegrity = true
+			pendingMalformed = nil
 
 			if errors.Is(readErr, io.EOF) {
 				break

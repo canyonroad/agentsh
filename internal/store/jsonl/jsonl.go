@@ -28,6 +28,16 @@ func (e *PartialWriteError) Unwrap() error { return e.WriteErr }
 // IsPartialWrite implements the interface checked by IntegrityStore.
 func (e *PartialWriteError) IsPartialWrite() bool { return true }
 
+// DurabilityError indicates bytes were appended but could not be confirmed
+// durable, so callers must treat the write as potentially visible on disk.
+type DurabilityError struct {
+	Err error
+}
+
+func (e *DurabilityError) Error() string { return "durability error: " + e.Err.Error() }
+func (e *DurabilityError) Unwrap() error { return e.Err }
+func (e *DurabilityError) IsPartialWrite() bool { return true }
+
 type Store struct {
 	path       string
 	maxBytes   int64
@@ -136,6 +146,9 @@ func (s *Store) WriteRaw(_ context.Context, data []byte) error {
 			return &PartialWriteError{WriteErr: writeErr, TruncateErr: truncErr}
 		}
 		return fmt.Errorf("write jsonl raw: %w", writeErr)
+	}
+	if err := s.file.Sync(); err != nil {
+		return &DurabilityError{Err: fmt.Errorf("sync jsonl raw: %w", err)}
 	}
 	return nil
 }
