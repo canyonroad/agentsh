@@ -296,7 +296,7 @@ func currentChainSummary(logPath string) (map[string]any, bool, error) {
 }
 
 func visibleRotationSetVerifiesWith(logPath string, key []byte, algorithm string) (bool, error) {
-	files, err := existingRotationFiles(logPath)
+	files, err := audit.DiscoverRotationSet(logPath)
 	if err != nil {
 		return false, err
 	}

@@ -208,6 +208,125 @@ func TestAuditChainResetCmd_RequiresLegacyArchiveWhenBackupUsesDifferentAlgorith
 	}
 }
 
+func TestAuditChainResetCmd_AllowsInPlaceResetAcrossMultipleBackups(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	oldest, err := chain.Wrap([]byte(`{"type":"oldest"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap(oldest) error = %v", err)
+	}
+	middle, err := chain.Wrap([]byte(`{"type":"middle"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap(middle) error = %v", err)
+	}
+	current, err := chain.Wrap([]byte(`{"type":"current"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap(current) error = %v", err)
+	}
+
+	if err := os.WriteFile(logPath+".2", append(oldest, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath+".2", err)
+	}
+	if err := os.WriteFile(logPath+".1", append(middle, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath+".1", err)
+	}
+	if err := os.WriteFile(logPath, append(current, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditChainResetCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--reason", "manual", "--force"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestAuditChainResetCmd_UsesNewestBackupWhenActiveFileEmpty(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	oldest, err := chain.Wrap([]byte(`{"type":"oldest"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap(oldest) error = %v", err)
+	}
+	newestBackup, err := chain.Wrap([]byte(`{"type":"newest_backup"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap(newestBackup) error = %v", err)
+	}
+
+	if err := os.WriteFile(logPath+".2", append(oldest, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath+".2", err)
+	}
+	if err := os.WriteFile(logPath+".1", append(newestBackup, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath+".1", err)
+	}
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditChainResetCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--reason", "manual", "--force"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%q) error = %v", logPath, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("line count = %d, want 1", len(lines))
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	fields := entry["fields"].(map[string]any)
+	prior := fields["prior_chain_summary"].(map[string]any)
+	if got := int64(prior["last_sequence_seen_in_log"].(float64)); got != 1 {
+		t.Fatalf("last_sequence_seen_in_log = %d, want 1 from newest backup", got)
+	}
+}
+
+func TestAuditChainResetCmd_CreatesFreshLogWhenAuditDirMissing(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "missing", "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	cmd := newAuditChainResetCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--reason", "manual", "--force"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%q) error = %v", logPath, err)
+	}
+	if !strings.Contains(string(data), `"type":"integrity_chain_rotated"`) {
+		t.Fatalf("log = %q, want integrity_chain_rotated event", string(data))
+	}
+}
+
 func TestAuditChainResetCmd_LegacyArchiveRenamesLog(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")

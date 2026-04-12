@@ -152,7 +152,7 @@ func verifyTargetContainsIntegrityMetadata(files []audit.LogFile, integrityEnabl
 					break
 				}
 				if !integrityEnabled {
-					if bytes.Contains(line, []byte(`"integrity"`)) {
+					if hasTopLevelIntegrityField(line) {
 						_ = f.Close()
 						return true, nil
 					}
@@ -176,6 +176,38 @@ func verifyTargetContainsIntegrityMetadata(files []audit.LogFile, integrityEnabl
 	}
 
 	return false, nil
+}
+
+func hasTopLevelIntegrityField(line []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(line))
+	tok, err := dec.Token()
+	if err != nil {
+		return false
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return false
+	}
+
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return false
+		}
+		if key == "integrity" {
+			return true
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return false
+		}
+	}
+
+	return false
 }
 
 func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, opts verifyOptions) (*verifySummary, error) {
