@@ -1242,6 +1242,59 @@ http_services:
 	}
 }
 
+func TestHTTPServices_DeepCopyPointerFields(t *testing.T) {
+	scrub := true
+	p := &Policy{
+		Version: 1,
+		Name:    "test",
+		HTTPServices: []HTTPService{{
+			Name: "github", Upstream: "https://api.github.com",
+			Secret: &HTTPServiceSecret{
+				Ref:    "vault://kv/data/github#token",
+				Format: "ghp_{rand:36}",
+			},
+			Inject: &HTTPServiceInject{
+				Header: &HTTPServiceInjectHeader{
+					Name:     "Authorization",
+					Template: "Bearer {{secret}}",
+				},
+			},
+			ScrubResponse: &scrub,
+			Rules: []HTTPServiceRule{{
+				Name: "read", Paths: []string{"/repos/**"}, Decision: "allow",
+			}},
+		}},
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	e, err := NewEngine(p, false, false)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	// First call — grab the returned copy and mutate every pointer field.
+	got := e.HTTPServices()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(got))
+	}
+	got[0].Secret.Ref = "MUTATED"
+	got[0].Inject.Header.Name = "MUTATED"
+	*got[0].ScrubResponse = false
+
+	// Second call — values must be the originals, not the mutations.
+	got2 := e.HTTPServices()
+	if got2[0].Secret.Ref != "vault://kv/data/github#token" {
+		t.Errorf("Secret.Ref = %q, want original (shallow-copy leak)", got2[0].Secret.Ref)
+	}
+	if got2[0].Inject.Header.Name != "Authorization" {
+		t.Errorf("Inject.Header.Name = %q, want original (shallow-copy leak)", got2[0].Inject.Header.Name)
+	}
+	if got2[0].ScrubResponse == nil || !*got2[0].ScrubResponse {
+		t.Errorf("ScrubResponse = %v, want true (shallow-copy leak)", got2[0].ScrubResponse)
+	}
+}
+
 func TestNewEngine_PopulatesHTTPServiceMaps(t *testing.T) {
 	p := &Policy{
 		Version: 1,
