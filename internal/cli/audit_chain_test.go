@@ -71,6 +71,20 @@ func TestAuditChainResetCmd_RejectsUnknownReasonCode(t *testing.T) {
 	}
 }
 
+func TestConfirmReset_EmptyInputDefaultsToNo(t *testing.T) {
+	var out bytes.Buffer
+	confirmed, err := confirmReset(strings.NewReader("\n"), &out, "manual", false, "/tmp/audit.jsonl")
+	if err != nil {
+		t.Fatalf("confirmReset() error = %v", err)
+	}
+	if confirmed {
+		t.Fatal("confirmReset() = true, want false for empty input")
+	}
+	if got := out.String(); !strings.Contains(got, "[y/N]") {
+		t.Fatalf("prompt = %q, want confirmation prompt", got)
+	}
+}
+
 func TestAuditChainResetCmd_RequiresLegacyArchiveForKeyRotated(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")

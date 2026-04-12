@@ -154,8 +154,9 @@ func confirmReset(in io.Reader, out io.Writer, reason string, legacyArchive bool
 		return false, err
 	}
 
-	var answer string
-	if _, err := fmt.Fscanln(in, &answer); err != nil && !errors.Is(err, io.EOF) {
+	reader := bufio.NewReader(in)
+	answer, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
 		return false, err
 	}
 	answer = strings.ToLower(strings.TrimSpace(answer))
@@ -614,14 +615,30 @@ func discoverRotationSetForVerify(logPath string) ([]audit.LogFile, error) {
 	}
 
 	sort.Ints(indexes)
-	for i := 1; i < len(indexes); i++ {
-		want := indexes[i-1] + 1
-		if indexes[i] != want {
-			return nil, fmt.Errorf("missing audit log file %s.%d", logPath, want)
+	files := make([]audit.LogFile, 0, len(indexes)+1)
+	baseExists := false
+	if _, err := os.Stat(logPath); err == nil {
+		baseExists = true
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("stat %s: %w", logPath, err)
+	}
+
+	if baseExists {
+		for i, index := range indexes {
+			want := i + 1
+			if index != want {
+				return nil, fmt.Errorf("missing audit log file %s.%d", logPath, want)
+			}
+		}
+	} else {
+		for i := 1; i < len(indexes); i++ {
+			want := indexes[i-1] + 1
+			if indexes[i] != want {
+				return nil, fmt.Errorf("missing audit log file %s.%d", logPath, want)
+			}
 		}
 	}
 
-	files := make([]audit.LogFile, 0, len(indexes)+1)
 	for i := len(indexes) - 1; i >= 0; i-- {
 		files = append(files, audit.LogFile{
 			Path:     logPath + "." + strconv.Itoa(indexes[i]),
@@ -629,14 +646,12 @@ func discoverRotationSetForVerify(logPath string) ([]audit.LogFile, error) {
 			IsBackup: true,
 		})
 	}
-	if _, err := os.Stat(logPath); err == nil {
+	if baseExists {
 		files = append(files, audit.LogFile{
 			Path:     logPath,
 			Index:    0,
 			IsBackup: false,
 		})
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("stat %s: %w", logPath, err)
 	}
 
 	return files, nil

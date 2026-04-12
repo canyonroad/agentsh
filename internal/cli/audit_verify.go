@@ -507,7 +507,7 @@ func verifyTargetContainsIntegrityMetadataFromSequence(files []audit.LogFile, in
 				continue
 			}
 			if entry.Integrity == nil {
-				if seenIntegrity && pendingCorruption == nil {
+				if seenIntegrity && pendingCorruption == nil && !opts.tolerateUnsigned {
 					pendingCorruption = fmt.Errorf("unsigned line at %s:%d", file.Path, lineNo)
 				}
 				if errors.Is(readErr, io.EOF) {

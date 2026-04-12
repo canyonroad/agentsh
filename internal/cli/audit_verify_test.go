@@ -606,6 +606,26 @@ func TestDiscoverRotationSetForVerify_IgnoresNonPositiveSuffixes(t *testing.T) {
 	}
 }
 
+func TestDiscoverRotationSetForVerify_RejectsMissingDotOneWhenBaseExists(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "audit.jsonl")
+
+	if err := os.WriteFile(base, []byte("base\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base, err)
+	}
+	if err := os.WriteFile(base+".2", []byte("backup\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base+".2", err)
+	}
+
+	_, err := discoverRotationSetForVerify(base)
+	if err == nil {
+		t.Fatal("discoverRotationSetForVerify() error = nil, want missing .1 rejection")
+	}
+	if !strings.Contains(err.Error(), "missing audit log file") {
+		t.Fatalf("discoverRotationSetForVerify() error = %v, want missing-file message", err)
+	}
+}
+
 func TestAuditVerifyCmd_RejectsLegacyFormatEntry(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
@@ -1180,6 +1200,48 @@ func TestAuditVerifyCmd_FromSequenceMissingStartRejectsUnsignedSuffix(t *testing
 	}
 	if !strings.Contains(err.Error(), "unsigned line") {
 		t.Fatalf("Execute() error = %v, want unsigned line message", err)
+	}
+}
+
+func TestAuditVerifyCmd_FromSequenceMissingStartToleratesUnsignedSuffix(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	first, err := chain.Wrap([]byte(`{"type":"first_signed"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	second, err := chain.Wrap([]byte(`{"type":"second_signed"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	data := append([]byte{}, first...)
+	data = append(data, '\n')
+	data = append(data, second...)
+	data = append(data, '\n')
+	data = append(data, []byte(`{"type":"unsigned_suffix"}`)...)
+	data = append(data, '\n')
+	if err := os.WriteFile(logPath, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--from-sequence", "5", "--tolerate-unsigned", logPath})
+
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want missing-start sequence mismatch")
+	}
+	if !strings.Contains(err.Error(), "sequence mismatch: expected starting sequence 5, got end of log") {
+		t.Fatalf("Execute() error = %v, want missing-start sequence mismatch", err)
 	}
 }
 
