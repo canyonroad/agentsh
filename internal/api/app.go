@@ -467,12 +467,12 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 	// Resolve policy-driven providers, services, and env injection.
 	pol := a.policyEngineFor(s)
 	var providers map[string]yaml.Node
-	var policyServices []policy.ServiceYAML
+	var httpServices []policy.HTTPService
 	var envInject map[string]string
 	if pol != nil {
 		if p := pol.Policy(); p != nil {
 			providers = p.Providers
-			policyServices = p.Services
+			httpServices = p.HTTPServices
 		}
 		envInject = mergeEnvInject(a.cfg, pol)
 	}
@@ -485,7 +485,7 @@ func (a *App) startLLMProxy(ctx context.Context, s *session.Session) {
 		a.cfg.Sandbox.MCP,
 		storagePath,
 		slog.Default(),
-		providers, policyServices, envInject,
+		providers, httpServices, envInject,
 	)
 	if err != nil {
 		fail := types.Event{

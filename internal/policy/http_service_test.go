@@ -1247,6 +1247,9 @@ func TestHTTPServices_DeepCopyPointerFields(t *testing.T) {
 	p := &Policy{
 		Version: 1,
 		Name:    "test",
+		Providers: map[string]yaml.Node{
+			"v": mustYAMLNode(t, `type: vault`),
+		},
 		HTTPServices: []HTTPService{{
 			Name: "github", Upstream: "https://api.github.com",
 			Secret: &HTTPServiceSecret{
@@ -1671,5 +1674,29 @@ func TestNewEngine_PopulatesHTTPServiceMaps(t *testing.T) {
 	}
 	if _, ok := e.httpServiceHosts["api.github.com"]; !ok {
 		t.Error("e.httpServiceHosts missing api.github.com")
+	}
+}
+
+func TestPolicyValidate_OldServicesKeyRejected(t *testing.T) {
+	input := `
+version: 1
+name: test-tripwire
+services:
+  - name: github
+    match:
+      hosts: ["api.github.com"]
+    secret:
+      ref: keyring://agentsh/github_token
+`
+	var p Policy
+	if err := yaml.Unmarshal([]byte(input), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	err := p.Validate()
+	if err == nil {
+		t.Fatal("expected error for old services: key")
+	}
+	if !strings.Contains(err.Error(), "'services:' key has been replaced") {
+		t.Errorf("want migration error, got: %v", err)
 	}
 }

@@ -12,7 +12,6 @@ import (
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/proxy"
-	"github.com/agentsh/agentsh/internal/proxy/services"
 	"gopkg.in/yaml.v3"
 )
 
@@ -31,7 +30,7 @@ func StartLLMProxy(
 	storagePath string,
 	logger *slog.Logger,
 	providers map[string]yaml.Node,
-	policyServices []policy.ServiceYAML,
+	httpServices []policy.HTTPService,
 	envInject map[string]string,
 ) (string, func() error, error) {
 	if sess == nil {
@@ -103,72 +102,54 @@ func StartLLMProxy(
 
 	// Bootstrap credentials and register hooks if services are configured.
 	// Done BEFORE storing on session so a failure leaves no stale state.
-	if len(policyServices) > 0 {
-		resolved, resolveErr := ResolveServiceConfigs(policyServices)
+	if len(httpServices) > 0 {
+		resolved, resolveErr := ResolveServiceConfigs(httpServices)
 		if resolveErr != nil {
 			_ = p.Stop(ctx)
 			return "", nil, fmt.Errorf("resolve services: %w", resolveErr)
 		}
 
-		providerConfigs, provErr := ResolveProviderConfigs(providers)
-		if provErr != nil {
-			_ = p.Stop(ctx)
-			return "", nil, fmt.Errorf("resolve providers: %w", provErr)
-		}
+		if resolved != nil {
+			providerConfigs, provErr := ResolveProviderConfigs(providers)
+			if provErr != nil {
+				_ = p.Stop(ctx)
+				return "", nil, fmt.Errorf("resolve providers: %w", provErr)
+			}
 
-		registry, regErr := BuildSecretsRegistry(ctx, providerConfigs)
-		if regErr != nil {
-			_ = p.Stop(ctx)
-			return "", nil, fmt.Errorf("build secrets registry: %w", regErr)
-		}
+			registry, regErr := BuildSecretsRegistry(ctx, providerConfigs)
+			if regErr != nil {
+				_ = p.Stop(ctx)
+				return "", nil, fmt.Errorf("build secrets registry: %w", regErr)
+			}
 
-		table, secretsCleanup, bsErr := BootstrapCredentials(ctx, registry, resolved.ServiceConfigs)
-		if bsErr != nil {
-			_ = registry.Close()
-			_ = p.Stop(ctx)
-			return "", nil, fmt.Errorf("bootstrap credentials: %w", bsErr)
-		}
+			table, secretsCleanup, bsErr := BootstrapCredentials(ctx, registry, resolved.ServiceConfigs)
+			if bsErr != nil {
+				_ = registry.Close()
+				_ = p.Stop(ctx)
+				return "", nil, fmt.Errorf("bootstrap credentials: %w", bsErr)
+			}
 
-		// Build and validate service env vars.
-		svcEnv, envErr := BuildServiceEnvVars(resolved.EnvVars, table)
-		if envErr != nil {
-			secretsCleanup()
-			_ = registry.Close()
-			_ = p.Stop(ctx)
-			return "", nil, fmt.Errorf("build service env vars: %w", envErr)
-		}
-		if err := CheckEnvCollisions(svcEnv, envInject); err != nil {
-			secretsCleanup()
-			_ = registry.Close()
-			_ = p.Stop(ctx)
-			return "", nil, fmt.Errorf("service env collision: %w", err)
-		}
-		sess.SetServiceEnvVars(svcEnv)
+			// Register hooks: leak guard first, then creds substitution (both global).
+			leakGuard := proxy.NewLeakGuardHook(table, logger)
+			credsSub := proxy.NewCredsSubHook(table, resolved.ScrubServices)
+			p.HookRegistry().Register("", leakGuard)
+			p.HookRegistry().Register("", credsSub)
 
-		// Register hooks: leak guard first, then creds substitution (both global).
-		leakGuard := proxy.NewLeakGuardHook(table, logger)
-		credsSub := proxy.NewCredsSubHook(table, resolved.ScrubServices)
-		p.HookRegistry().Register("", leakGuard)
-		p.HookRegistry().Register("", credsSub)
+			// Register per-service header injection hooks.
+			for _, ih := range resolved.InjectHeaders {
+				hook := proxy.NewHeaderInjectionHook(ih.ServiceName, ih.HeaderName, ih.Template, table)
+				p.HookRegistry().Register(ih.ServiceName, hook)
+			}
 
-		// Register per-service header injection hooks.
-		for _, ih := range resolved.InjectHeaders {
-			hook := proxy.NewHeaderInjectionHook(ih.ServiceName, ih.HeaderName, ih.Template, table)
-			p.HookRegistry().Register(ih.ServiceName, hook)
+			// Wrap registry close into the secrets cleanup.
+			origCleanup := secretsCleanup
+			combinedCleanup := func() {
+				origCleanup()
+				_ = registry.Close()
+			}
+			sess.SetCredsTable(table, combinedCleanup)
+			LogSecretsInitialized(logger, sess.ID, len(resolved.ServiceConfigs))
 		}
-
-		// Build and set matcher.
-		matcher := services.NewMatcher(resolved.Patterns)
-		p.SetMatcher(matcher)
-
-		// Wrap registry close into the secrets cleanup.
-		origCleanup := secretsCleanup
-		combinedCleanup := func() {
-			origCleanup()
-			_ = registry.Close()
-		}
-		sess.SetCredsTable(table, combinedCleanup)
-		LogSecretsInitialized(logger, sess.ID, len(resolved.ServiceConfigs))
 	}
 
 	// Store in session only after all setup (including bootstrap) succeeds.
