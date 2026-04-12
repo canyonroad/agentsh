@@ -22,7 +22,6 @@ import (
 	"github.com/agentsh/agentsh/internal/mcpinspect"
 	"github.com/agentsh/agentsh/internal/mcpregistry"
 	"github.com/agentsh/agentsh/internal/policy"
-	"github.com/agentsh/agentsh/internal/proxy/services"
 )
 
 // tpmFallbackTokenCharge is the conservative token charge applied when TPM
@@ -74,8 +73,6 @@ type Proxy struct {
 	// hookRegistry dispatches pre/post hooks for credential
 	// substitution, leak detection, and other per-request extensions.
 	hookRegistry *Registry
-	// matcher resolves Host headers to service names.
-	matcher *services.Matcher
 
 	server   *http.Server
 	listener net.Listener
@@ -204,20 +201,6 @@ func (p *Proxy) SetRegistry(r *mcpregistry.Registry) {
 // register Hook implementations that participate in the request pipeline.
 func (p *Proxy) HookRegistry() *Registry {
 	return p.hookRegistry
-}
-
-// SetMatcher sets the service matcher on the proxy. It is safe for
-// concurrent use and is called after credential bootstrap completes.
-func (p *Proxy) SetMatcher(m *services.Matcher) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.matcher = m
-}
-
-func (p *Proxy) getMatcher() *services.Matcher {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.matcher
 }
 
 // SetEventCallback sets a callback that is invoked for each MCP tool call
@@ -414,21 +397,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Apply pre-hooks (leak guard, credential substitution).
 	if p.hookRegistry != nil {
-		// Resolve service name from host.
-		serviceName := ""
-		if m := p.getMatcher(); m != nil {
-			if name, ok := m.Match(r.Host); ok {
-				serviceName = name
-			}
-		}
 		reqCtx = &RequestContext{
 			RequestID:   requestID,
 			SessionID:   sessionID,
-			ServiceName: serviceName,
+			ServiceName: "",
 			StartTime:   startTime,
 			Attrs:       make(map[string]any),
 		}
-		if err := p.hookRegistry.ApplyPreHooks(serviceName, r, reqCtx); err != nil {
+		if err := p.hookRegistry.ApplyPreHooks("", r, reqCtx); err != nil {
 			var abortErr *HookAbortError
 			if errors.As(err, &abortErr) {
 				code := abortErr.StatusCode
