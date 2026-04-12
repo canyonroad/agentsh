@@ -96,11 +96,16 @@ files.
 If the sidecar is missing but the log contains v2 entries, agentsh writes an
 `integrity_chain_rotated` event with `reason_code=sidecar_missing` and starts a
 fresh chain. If the sidecar and log disagree, agentsh refuses to start and
-points the operator at an explicit reset flow:
+points the operator at an explicit archival reset flow:
 
 ```bash
-agentsh audit chain reset --reason "rotated audit integrity key" --reason-code key_rotated
+agentsh audit chain reset --reason "rotated audit integrity key" --reason-code key_rotated --legacy-archive
 ```
+
+Changing the audit HMAC key or `audit.integrity.algorithm` requires
+`--legacy-archive`. The current verifier and startup path replay the visible log
+with one key and one algorithm, so in-place resets are only safe when the
+existing visible entries still verify under the current signing parameters.
 
 For envelope providers, losing the encrypted DEK or changing KMS config now
 surfaces as a key-fingerprint mismatch on startup instead of silently forking

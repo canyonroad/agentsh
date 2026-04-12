@@ -110,8 +110,10 @@ func (s *IntegrityStore) bootstrap() error {
 			return err
 		}
 		return s.resumeFromSidecar(sidecar, lastFile, lastLine, lastErr)
-	case errors.Is(sidecarErr, audit.ErrSidecarNotFound), errors.Is(sidecarErr, audit.ErrSidecarCorrupt):
-		return s.bootstrapWithoutSidecar(files, lastFile, lastLine, lastErr)
+	case errors.Is(sidecarErr, audit.ErrSidecarNotFound):
+		return s.bootstrapWithoutSidecar(files, lastFile, lastLine, lastErr, "sidecar_missing", "sidecar missing; starting fresh chain")
+	case errors.Is(sidecarErr, audit.ErrSidecarCorrupt):
+		return s.bootstrapWithoutSidecar(files, lastFile, lastLine, lastErr, "sidecar_corrupt", "sidecar corrupt; starting fresh chain")
 	default:
 		return fmt.Errorf("read audit integrity sidecar: %w", sidecarErr)
 	}
@@ -306,7 +308,7 @@ func (s *IntegrityStore) resumeFromSidecar(sidecar audit.SidecarState, lastFile 
 	return fmt.Errorf("audit integrity chain mismatch: sidecar does not match %s", lastFile.Path)
 }
 
-func (s *IntegrityStore) bootstrapWithoutSidecar(files []audit.LogFile, lastFile audit.LogFile, lastLine []byte, lastErr error) error {
+func (s *IntegrityStore) bootstrapWithoutSidecar(files []audit.LogFile, lastFile audit.LogFile, lastLine []byte, lastErr error, reasonCode, reason string) error {
 	if errors.Is(lastErr, os.ErrNotExist) {
 		return s.appendRotationBoundary("initial", "initial chain creation", nil)
 	}
@@ -338,7 +340,7 @@ func (s *IntegrityStore) bootstrapWithoutSidecar(files []audit.LogFile, lastFile
 		return err
 	}
 
-	return s.appendRotationBoundary("sidecar_missing", "sidecar missing; starting fresh chain", map[string]any{
+	return s.appendRotationBoundary(reasonCode, reason, map[string]any{
 		"last_sequence_seen_in_log":   entry.Integrity.Sequence,
 		"last_entry_hash_seen_in_log": entry.Integrity.EntryHash,
 	})

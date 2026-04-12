@@ -168,6 +168,10 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 		now = time.Now
 	}
 	var archivedTo string
+	algorithm := cfg.Audit.Integrity.Algorithm
+	if algorithm == "" {
+		algorithm = "hmac-sha256"
+	}
 
 	if !opts.LegacyArchive {
 		if _, err := audit.DiscoverRotationSet(logPath); err != nil {
@@ -181,6 +185,18 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 	}
 	if !opts.LegacyArchive && hasPriorData && priorSummary == nil {
 		return fmt.Errorf("cannot capture prior chain summary for in-place reset; retry with --legacy-archive")
+	}
+	if !opts.LegacyArchive && hasPriorData && opts.ReasonCode == "key_rotated" {
+		return fmt.Errorf("cannot acknowledge key rotation with an in-place reset; retry with --legacy-archive")
+	}
+	if !opts.LegacyArchive && hasPriorData {
+		ok, err := currentChainTailVerifiesWith(logPath, key, algorithm)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("cannot perform in-place reset with the current audit integrity key/algorithm; retry with --legacy-archive")
+		}
 	}
 
 	if opts.LegacyArchive {
@@ -197,10 +213,6 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 	}
 	defer inner.Close()
 
-	algorithm := cfg.Audit.Integrity.Algorithm
-	if algorithm == "" {
-		algorithm = "hmac-sha256"
-	}
 	chain, err := audit.NewIntegrityChainWithAlgorithm(key, algorithm)
 	if err != nil {
 		return err
@@ -271,6 +283,35 @@ func currentChainSummary(logPath string) (map[string]any, bool, error) {
 		"last_sequence_seen_in_log":   entry.Integrity.Sequence,
 		"last_entry_hash_seen_in_log": entry.Integrity.EntryHash,
 	}, true, nil
+}
+
+func currentChainTailVerifiesWith(logPath string, key []byte, algorithm string) (bool, error) {
+	files, err := existingRotationFiles(logPath)
+	if err != nil {
+		return false, err
+	}
+
+	_, lastLine, err := readLastNonEmptyLineBestEffort(files)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	entry, err := audit.ParseIntegrityEntry(lastLine)
+	if err != nil || entry.Integrity == nil {
+		return false, nil
+	}
+	return audit.VerifyHash(
+		key,
+		algorithm,
+		entry.Integrity.FormatVersion,
+		entry.Integrity.Sequence,
+		entry.Integrity.PrevHash,
+		entry.CanonicalPayload,
+		entry.Integrity.EntryHash,
+	)
 }
 
 func archiveRotationSet(logPath, stamp string) error {

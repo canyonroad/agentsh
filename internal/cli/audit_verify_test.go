@@ -48,6 +48,23 @@ audit:
 	}
 }
 
+func writeAuditVerifyConfigWithAlgorithm(t *testing.T, path, logPath, algorithm string) {
+	t.Helper()
+
+	content := fmt.Sprintf(`
+audit:
+  output: %s
+  integrity:
+    enabled: true
+    key_source: env
+    key_env: AGENTSH_AUDIT_TEST_KEY
+    algorithm: %s
+`, logPath, algorithm)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", path, err)
+	}
+}
+
 func writeAuditVerifyConfigDisabledWithoutKey(t *testing.T, path, logPath string) {
 	t.Helper()
 

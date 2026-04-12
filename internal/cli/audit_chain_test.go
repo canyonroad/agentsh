@@ -71,6 +71,66 @@ func TestAuditChainResetCmd_RejectsUnknownReasonCode(t *testing.T) {
 	}
 }
 
+func TestAuditChainResetCmd_RequiresLegacyArchiveForKeyRotated(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	line, err := chain.Wrap([]byte(`{"type":"before_reset"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	if err := os.WriteFile(logPath, append(line, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditChainResetCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--reason", "rotated key", "--reason-code", "key_rotated", "--force"})
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want legacy-archive requirement")
+	}
+	if !strings.Contains(err.Error(), "--legacy-archive") {
+		t.Fatalf("Execute() error = %v, want legacy-archive guidance", err)
+	}
+}
+
+func TestAuditChainResetCmd_RequiresLegacyArchiveWhenCurrentAlgorithmCannotVerifyTail(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeAuditVerifyConfigWithAlgorithm(t, cfgPath, logPath, "hmac-sha512")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	line, err := chain.Wrap([]byte(`{"type":"before_reset"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	if err := os.WriteFile(logPath, append(line, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditChainResetCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--reason", "changed algorithm", "--force"})
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want legacy-archive requirement")
+	}
+	if !strings.Contains(err.Error(), "--legacy-archive") {
+		t.Fatalf("Execute() error = %v, want legacy-archive guidance", err)
+	}
+}
+
 func TestAuditChainResetCmd_LegacyArchiveRenamesLog(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")

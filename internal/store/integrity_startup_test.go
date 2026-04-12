@@ -576,8 +576,8 @@ func TestNewIntegrityStore_CorruptSidecarFallsThroughToMissingHandling(t *testin
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	fields := last["fields"].(map[string]any)
-	if got := fields["reason_code"]; got != "sidecar_missing" {
-		t.Fatalf("reason_code = %v, want sidecar_missing", got)
+	if got := fields["reason_code"]; got != "sidecar_corrupt" {
+		t.Fatalf("reason_code = %v, want sidecar_corrupt", got)
 	}
 }
 
