@@ -30,6 +30,10 @@ These files should be backed up but require special handling:
   - Without these, encrypted audit logs cannot be decrypted
   - Without integrity key, audit chain cannot be verified
 
+- **Audit log rotation set and sidecar**: `audit.jsonl`, `audit.jsonl.1`, `audit.jsonl.2`, ..., and `audit.jsonl.chain`
+  - The `.chain` sidecar stores the last durable integrity state
+  - Back up the sidecar together with the log files or startup verification will fail
+
 - **MCP tool pins**: `~/.agentsh/mcp-pins.json`
   - Pinned tool versions for reproducibility
   - Loss means tools may update unexpectedly
@@ -63,8 +67,8 @@ mkdir -p "$BACKUP_DIR"
 # Backup audit database (most critical)
 cp /var/lib/agentsh/events.db "$BACKUP_DIR/"
 
-# Backup audit log file
-cp /var/log/agentsh/audit.jsonl "$BACKUP_DIR/" 2>/dev/null || true
+# Backup audit log rotation set and sidecar
+cp /var/log/agentsh/audit.jsonl* "$BACKUP_DIR/" 2>/dev/null || true
 
 # Backup configuration
 cp /etc/agentsh/config.yaml "$BACKUP_DIR/"
@@ -156,7 +160,7 @@ rm -rf /tmp/restore
 systemctl start agentsh
 
 # Verify audit chain integrity
-agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /var/log/agentsh/audit.jsonl
+agentsh audit verify --config /etc/agentsh/config.yaml /var/log/agentsh/audit.jsonl
 ```
 
 ### Using agentsh CLI
@@ -312,5 +316,13 @@ If the audit chain fails verification after restore:
 
 1. This may indicate tampering or a partial restore
 2. Compare the restored database with other backup copies
-3. If using replication, compare with replicas
-4. Document the incident and investigate the cause
+3. Make sure `audit.jsonl.chain` was restored together with the log rotation set
+4. If the sidecar and log cannot be reconciled, preserve the restored files and reset explicitly:
+
+```bash
+agentsh audit chain reset --config /etc/agentsh/config.yaml \
+  --reason "restored audit log from backup after host failure" \
+  --reason-code post_tamper_recovery
+```
+5. If using replication, compare with replicas
+6. Document the incident and investigate the cause

@@ -60,7 +60,7 @@ The following table defines recovery targets by scenario:
 
 5. **Verify audit chain integrity**
    ```bash
-   agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /var/log/agentsh/audit.jsonl
+   agentsh audit verify --config /etc/agentsh/config.yaml /var/log/agentsh/audit.jsonl
    ```
 
 6. **Start service**
@@ -114,7 +114,7 @@ The following table defines recovery targets by scenario:
    # Extract and verify audit chain
    mkdir -p /tmp/verify
    tar -xzf /tmp/20260105.tar.gz -C /tmp/verify/
-   agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /tmp/verify/audit.jsonl
+   agentsh audit verify --config /etc/agentsh/config.yaml /tmp/verify/audit.jsonl
 
    # If verification passes, proceed with restore
    ```
@@ -250,10 +250,24 @@ After any recovery, complete this checklist before declaring recovery successful
 
 - [ ] Audit log integrity verified:
   ```bash
-  agentsh audit verify --key-file /etc/agentsh/audit-integrity.key /var/log/agentsh/audit.jsonl
+  agentsh audit verify --config /etc/agentsh/config.yaml /var/log/agentsh/audit.jsonl
   ```
 - [ ] Recent events are present and readable
 - [ ] Encryption/decryption working (if enabled)
+
+Always restore the audit log rotation set and the matching sidecar together:
+
+- `audit.jsonl`, `audit.jsonl.1`, `audit.jsonl.2`, ...
+- `audit.jsonl.chain`
+
+If startup refuses because the sidecar and log no longer match, preserve the
+old files for review and start a fresh chain explicitly:
+
+```bash
+agentsh audit chain reset --config /etc/agentsh/config.yaml \
+  --reason "restored audit log from backup after host failure" \
+  --reason-code post_tamper_recovery
+```
 
 ### Policy and Configuration
 
@@ -372,7 +386,7 @@ BACKUP=$(ls -t /backup/agentsh-*.tar.gz | head -1)
 TEMP_DIR=$(mktemp -d)
 
 tar -xzf "$BACKUP" -C "$TEMP_DIR"
-agentsh audit verify --key-file /etc/agentsh/audit-integrity.key "$TEMP_DIR/audit.jsonl"
+agentsh audit verify --config /etc/agentsh/config.yaml "$TEMP_DIR/audit.jsonl"
 RESULT=$?
 
 rm -rf "$TEMP_DIR"
