@@ -52,6 +52,42 @@ func TestAppendEventCollectsFirstError(t *testing.T) {
 	}
 }
 
+func TestAppendEventErrorHookReceivesFirstError(t *testing.T) {
+	primaryErr := errors.New("primary")
+	primary := &fakeEventStore{appendErr: primaryErr}
+	secondary := &fakeEventStore{appendErr: errors.New("secondary")}
+	s := New(primary, nil, secondary)
+
+	var got error
+	s.SetAppendErrorHook(func(err error) {
+		got = err
+	})
+
+	err := s.AppendEvent(context.Background(), types.Event{ID: "1"})
+	if !errors.Is(err, primaryErr) {
+		t.Fatalf("AppendEvent() error = %v, want %v", err, primaryErr)
+	}
+	if !errors.Is(got, primaryErr) {
+		t.Fatalf("hook error = %v, want %v", got, primaryErr)
+	}
+}
+
+func TestAppendEventErrorHookNotCalledOnSuccess(t *testing.T) {
+	s := New(&fakeEventStore{}, nil, &fakeEventStore{})
+
+	called := false
+	s.SetAppendErrorHook(func(error) {
+		called = true
+	})
+
+	if err := s.AppendEvent(context.Background(), types.Event{ID: "1"}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+	if called {
+		t.Fatal("append error hook called on success")
+	}
+}
+
 func TestOutputDelegationAndErrors(t *testing.T) {
 	out := &fakeOutputStore{}
 	s := New(&fakeEventStore{}, out)

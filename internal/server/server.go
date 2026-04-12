@@ -32,13 +32,13 @@ import (
 	"github.com/agentsh/agentsh/internal/pkgcheck"
 	"github.com/agentsh/agentsh/internal/policy"
 	"github.com/agentsh/agentsh/internal/session"
-	"github.com/agentsh/agentsh/internal/threatfeed"
 	storepkg "github.com/agentsh/agentsh/internal/store"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/internal/store/jsonl"
 	otelstore "github.com/agentsh/agentsh/internal/store/otel"
 	"github.com/agentsh/agentsh/internal/store/sqlite"
 	"github.com/agentsh/agentsh/internal/store/webhook"
+	"github.com/agentsh/agentsh/internal/threatfeed"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
@@ -61,6 +61,8 @@ type Server struct {
 	store    *composite.Store
 	broker   *events.Broker
 	sessions *session.Manager
+
+	fatalAuditErr chan error
 
 	sessionTimeout time.Duration
 	idleTimeout    time.Duration
@@ -232,7 +234,20 @@ func New(cfg *config.Config) (*Server, error) {
 				kmsCloser()
 			}
 		}()
-		jsonlEventStore = storepkg.NewIntegrityStore(jsonlStore, chain)
+		jsonlEventStore, err = storepkg.NewIntegrityStore(jsonlStore, chain, storepkg.IntegrityOptions{
+			LogPath:        cfg.Audit.Output,
+			Algorithm:      cfg.Audit.Integrity.Algorithm,
+			KeyFingerprint: chain.KeyFingerprint(),
+		})
+		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
+			}
+			if db != nil {
+				_ = db.Close()
+			}
+			return nil, fmt.Errorf("audit integrity chain: %w", err)
+		}
 	}
 
 	var webhookStore *webhook.Store
@@ -330,6 +345,16 @@ func New(cfg *config.Config) (*Server, error) {
 		output = db
 	}
 	store := composite.New(primary, output, eventStores...)
+	fatalAuditErr := make(chan error, 1)
+	store.SetAppendErrorHook(func(err error) {
+		var fatal *storepkg.FatalIntegrityError
+		if errors.As(err, &fatal) {
+			select {
+			case fatalAuditErr <- err:
+			default:
+			}
+		}
+	})
 
 	sessions := session.NewManager(cfg.Sessions.MaxSessions)
 	broker := events.NewBroker()
@@ -557,6 +582,7 @@ func New(cfg *config.Config) (*Server, error) {
 		store:          store,
 		broker:         broker,
 		sessions:       sessions,
+		fatalAuditErr:  fatalAuditErr,
 		sessionTimeout: sessionTimeout,
 		idleTimeout:    idleTimeout,
 		reapInterval:   reapInterval,
@@ -812,6 +838,17 @@ func (e serverEmitter) Publish(ev types.Event) { e.broker.Publish(ev) }
 func (s *Server) Run(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if s.fatalAuditErr != nil {
+		go func() {
+			select {
+			case err := <-s.fatalAuditErr:
+				slog.Error("fatal audit integrity error", "error", err)
+				stop()
+			case <-ctx.Done():
+			}
+		}()
+	}
 
 	if s.pprofLn != nil && s.pprofServer != nil {
 		go func() { _ = s.pprofServer.Serve(s.pprofLn) }()

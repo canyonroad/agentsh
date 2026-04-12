@@ -11,13 +11,18 @@ import (
 )
 
 type Store struct {
-	primary store.EventStore
-	output  store.OutputStore
-	others  []store.EventStore
+	primary       store.EventStore
+	output        store.OutputStore
+	others        []store.EventStore
+	onAppendError func(error)
 }
 
 func New(primary store.EventStore, output store.OutputStore, others ...store.EventStore) *Store {
 	return &Store{primary: primary, output: output, others: others}
+}
+
+func (s *Store) SetAppendErrorHook(fn func(error)) {
+	s.onAppendError = fn
 }
 
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
@@ -31,6 +36,9 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 		if err := o.AppendEvent(ctx, ev); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if firstErr != nil && s.onAppendError != nil {
+		s.onAppendError(firstErr)
 	}
 	return firstErr
 }
