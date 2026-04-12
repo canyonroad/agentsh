@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"io"
 	"math"
 	"os"
 	"strconv"
@@ -349,6 +350,13 @@ func parseIntegrityPayloadUseNumber(payload []byte) (map[string]any, error) {
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.UseNumber()
 	if err := decoder.Decode(&data); err != nil {
+		return nil, fmt.Errorf("parse payload: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("parse payload: trailing data after JSON object")
+		}
 		return nil, fmt.Errorf("parse payload: %w", err)
 	}
 	return data, nil

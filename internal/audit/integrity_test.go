@@ -336,6 +336,41 @@ func TestIntegrityChain_VerifyWrapped_PreservesLargeSequencePrecision(t *testing
 	}
 }
 
+func TestIntegrityChain_VerifyWrapped_RejectsTrailingData(t *testing.T) {
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+
+	wrapped, err := chain.Wrap([]byte(`{"event":"trailing_data"}`))
+	if err != nil {
+		t.Fatalf("Wrap() error = %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{
+			name:    "garbage",
+			payload: append(append([]byte{}, wrapped...), []byte("garbage")...),
+		},
+		{
+			name:    "second_object",
+			payload: append(append([]byte{}, wrapped...), []byte(` {"extra":true}`)...),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ok, err := chain.VerifyWrapped(tt.payload)
+			if err == nil {
+				t.Fatalf("VerifyWrapped() error = nil, want rejection, ok = %v", ok)
+			}
+		})
+	}
+}
+
 func TestIntegrityChain_ChainContinuity(t *testing.T) {
 	chain, err := NewIntegrityChain(testKey)
 	if err != nil {
