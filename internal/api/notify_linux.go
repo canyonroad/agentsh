@@ -296,6 +296,39 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 				}
 			}
 		}
+
+		// Probe: verify ProcessVMReadv (or /proc/mem fallback) works against
+		// the wrapper before starting. Catches Yama, missing CAP_SYS_PTRACE,
+		// or other LSM restrictions at startup instead of on first notification.
+		if wrapperPID > 0 {
+			pvrErr, memErr := probeMemoryAccess(wrapperPID)
+			if pvrErr != nil && memErr != nil {
+				if fileHandler != nil || h != nil || pol != nil {
+					slog.Error("seccomp notify: ProcessVMReadv and /proc/mem both failed — "+
+						"handler cannot read tracee memory for path resolution",
+						"wrapper_pid", wrapperPID,
+						"pvr_error", pvrErr, "mem_error", memErr,
+						"session_id", sessID,
+						"hint", "check kernel.yama.ptrace_scope, ensure CAP_SYS_PTRACE, "+
+							"or set sandbox.seccomp.file_monitor.enabled: false")
+					return // Don't send ACK — wrapper fails with clear handshake error
+				}
+				slog.Warn("ProcessVMReadv probe failed, monitoring may be degraded",
+					"wrapper_pid", wrapperPID, "pvr_error", pvrErr, "mem_error", memErr)
+			} else if pvrErr != nil {
+				// /proc/mem fallback works for file monitoring, but socket monitoring
+				// uses ProcessVMReadv directly (ReadSockaddr has no /proc/mem fallback).
+				if pol != nil {
+					slog.Warn("ProcessVMReadv failed — socket monitoring will be degraded "+
+						"(ReadSockaddr requires ProcessVMReadv), /proc/mem fallback works for file monitoring",
+						"wrapper_pid", wrapperPID, "pvr_error", pvrErr)
+				} else {
+					slog.Debug("ProcessVMReadv failed but /proc/mem fallback works",
+						"wrapper_pid", wrapperPID, "pvr_error", pvrErr)
+				}
+			}
+		}
+
 		// Send ACK to wrapper so it knows the notify handler is ready before exec.
 		if _, err := parentSock.Write([]byte{1}); err != nil {
 			slog.Debug("notify: ACK write to wrapper failed", "error", err, "session_id", sessID)
