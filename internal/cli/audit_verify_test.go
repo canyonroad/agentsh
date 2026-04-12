@@ -277,6 +277,32 @@ func TestAuditVerifyCmd_RejectsMalformedJSONObjectContainingIntegrityValueWhenCo
 	}
 }
 
+func TestAuditVerifyCmd_FromSequenceRejectsMalformedJSONObjectWhenConfigDisabled(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	if err := os.WriteFile(logPath, []byte(`{"type":"unsigned","message":"broken"`+"\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+	writeAuditVerifyConfigDisabledWithoutKey(t, cfgPath, logPath)
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--from-sequence", "1", logPath})
+
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want malformed JSON failure")
+	}
+	if !strings.Contains(err.Error(), "malformed JSON") {
+		t.Fatalf("Execute() error = %v, want malformed JSON message", err)
+	}
+}
+
 func TestAuditVerifyCmd_RejectsUnsignedTruncatedJSONObjectWhenConfigDisabled(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
