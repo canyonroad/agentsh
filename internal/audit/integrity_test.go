@@ -1,6 +1,8 @@
 package audit
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math"
@@ -131,6 +133,14 @@ func TestKeyFingerprint_IsDeterministic(t *testing.T) {
 	if !strings.HasPrefix(got, "sha256:") {
 		t.Fatalf("KeyFingerprint() = %q, want sha256: prefix", got)
 	}
+	if len(got) != len("sha256:")+32 {
+		t.Fatalf("KeyFingerprint() length = %d, want %d", len(got), len("sha256:")+32)
+	}
+	sum := sha256.Sum256(testKey)
+	want := "sha256:" + hex.EncodeToString(sum[:16])
+	if got != want {
+		t.Fatalf("KeyFingerprint() = %q, want %q", got, want)
+	}
 	if got != KeyFingerprint(testKey) {
 		t.Fatalf("KeyFingerprint() should be deterministic, got %q then %q", got, KeyFingerprint(testKey))
 	}
@@ -183,11 +193,12 @@ func TestIntegrityChain_VerifyHash_UsesOwnKeyAndCanonicalPayload(t *testing.T) {
 	}
 
 	integrity := result["integrity"].(map[string]any)
+	formatVersion := int(integrity["format_version"].(float64))
 	sequence := int64(integrity["sequence"].(float64))
 	prevHash := integrity["prev_hash"].(string)
 	entryHash := integrity["entry_hash"].(string)
 
-	ok, err := chain.VerifyHash(sequence, prevHash, []byte(`{"b":2,"a":1}`), entryHash)
+	ok, err := chain.VerifyHash(formatVersion, sequence, prevHash, []byte(`{"b":2,"a":1}`), entryHash)
 	if err != nil {
 		t.Fatalf("VerifyHash() error = %v", err)
 	}
@@ -195,12 +206,106 @@ func TestIntegrityChain_VerifyHash_UsesOwnKeyAndCanonicalPayload(t *testing.T) {
 		t.Fatal("VerifyHash() = false, want true")
 	}
 
-	ok, err = chain.VerifyHash(sequence, prevHash, []byte(`{"b":3,"a":1}`), entryHash)
+	ok, err = chain.VerifyHash(formatVersion, sequence, prevHash, []byte(`{"b":3,"a":1}`), entryHash)
 	if err != nil {
 		t.Fatalf("VerifyHash() tampered error = %v", err)
 	}
 	if ok {
 		t.Fatal("VerifyHash() = true for tampered payload, want false")
+	}
+}
+
+func TestIntegrityChain_VerifyWrapped_FailsWhenFormatVersionMutates(t *testing.T) {
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+
+	wrapped, err := chain.Wrap([]byte(`{"event":"format_version"}`))
+	if err != nil {
+		t.Fatalf("Wrap() error = %v", err)
+	}
+
+	ok, err := chain.VerifyWrapped(wrapped)
+	if err != nil {
+		t.Fatalf("VerifyWrapped() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("VerifyWrapped() = false, want true for original payload")
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(wrapped, &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	integrity := result["integrity"].(map[string]any)
+	integrity["format_version"] = float64(IntegrityFormatVersion + 1)
+
+	mutated, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	ok, err = chain.VerifyWrapped(mutated)
+	if err != nil {
+		t.Fatalf("VerifyWrapped() mutated error = %v", err)
+	}
+	if ok {
+		t.Fatal("VerifyWrapped() = true after format_version mutation, want false")
+	}
+}
+
+func TestIntegrityChain_VerifyWrapped_FailsWhenFormatVersionMissing(t *testing.T) {
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+
+	wrapped, err := chain.Wrap([]byte(`{"event":"missing_format_version"}`))
+	if err != nil {
+		t.Fatalf("Wrap() error = %v", err)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(wrapped, &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	integrity := result["integrity"].(map[string]any)
+	delete(integrity, "format_version")
+
+	mutated, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	ok, err := chain.VerifyWrapped(mutated)
+	if err != nil {
+		t.Fatalf("VerifyWrapped() missing format_version error = %v", err)
+	}
+	if ok {
+		t.Fatal("VerifyWrapped() = true after removing format_version, want false")
+	}
+}
+
+func TestIntegrityChain_SHA512VerifyWrapped(t *testing.T) {
+	chain, err := NewIntegrityChainWithAlgorithm(testKey, "hmac-sha512")
+	if err != nil {
+		t.Fatalf("NewIntegrityChainWithAlgorithm() error = %v", err)
+	}
+
+	wrapped, err := chain.Wrap([]byte(`{"event":"sha512_verify"}`))
+	if err != nil {
+		t.Fatalf("Wrap() error = %v", err)
+	}
+
+	ok, err := chain.VerifyWrapped(wrapped)
+	if err != nil {
+		t.Fatalf("VerifyWrapped() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("VerifyWrapped() = false, want true")
 	}
 }
 

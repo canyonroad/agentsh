@@ -218,8 +218,8 @@ func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
 	}
 	nextSequence := c.sequence + 1
 
-	// Compute HMAC of: sequence || prev_hash || canonical_payload
-	entryHash, err := c.computeHash(nextSequence, c.prevHash, canonicalPayload)
+	// Compute HMAC of: format_version || sequence || prev_hash || canonical_payload
+	entryHash, err := c.computeHash(IntegrityFormatVersion, nextSequence, c.prevHash, canonicalPayload)
 	if err != nil {
 		return nil, err
 	}
@@ -268,24 +268,29 @@ func (c *IntegrityChain) Restore(sequence int64, prevHash string) {
 	c.prevHash = prevHash
 }
 
-// KeyFingerprint returns a stable SHA-256 fingerprint for an HMAC key.
+// KeyFingerprint returns a stable SHA-256 fingerprint prefix for an HMAC key.
 func KeyFingerprint(key []byte) string {
 	sum := sha256.Sum256(key)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return "sha256:" + hex.EncodeToString(sum[:16])
 }
 
-// KeyFingerprint returns a stable SHA-256 fingerprint for the chain key.
+// KeyFingerprint returns a stable SHA-256 fingerprint prefix for the chain key.
 func (c *IntegrityChain) KeyFingerprint() string {
 	return KeyFingerprint(c.key)
 }
 
-// VerifyHash recomputes the canonical payload hash using the chain key.
-func (c *IntegrityChain) VerifyHash(sequence int64, prevHash string, payload []byte, expectedHash string) (bool, error) {
-	return VerifyHash(c.key, c.algorithm, sequence, prevHash, payload, expectedHash)
+// VerifyHash recomputes the canonical payload hash using the chain key and format version.
+func (c *IntegrityChain) VerifyHash(formatVersion int, sequence int64, prevHash string, payload []byte, expectedHash string) (bool, error) {
+	return VerifyHash(c.key, c.algorithm, formatVersion, sequence, prevHash, payload, expectedHash)
+}
+
+// VerifyWrapped verifies a wrapped payload, including integrity metadata.
+func (c *IntegrityChain) VerifyWrapped(wrapped []byte) (bool, error) {
+	return VerifyWrapped(c.key, c.algorithm, wrapped)
 }
 
 // VerifyHash recomputes an entry hash using canonical JSON payload encoding.
-func VerifyHash(key []byte, algorithm string, sequence int64, prevHash string, payload []byte, expectedHash string) (bool, error) {
+func VerifyHash(key []byte, algorithm string, formatVersion int, sequence int64, prevHash string, payload []byte, expectedHash string) (bool, error) {
 	data, err := parseIntegrityPayload(payload)
 	if err != nil {
 		return false, err
@@ -294,16 +299,40 @@ func VerifyHash(key []byte, algorithm string, sequence int64, prevHash string, p
 	if err != nil {
 		return false, err
 	}
-	actualHash, err := computeIntegrityHash(key, algorithm, sequence, prevHash, canonicalPayload)
+	actualHash, err := computeIntegrityHash(key, algorithm, formatVersion, sequence, prevHash, canonicalPayload)
 	if err != nil {
 		return false, err
 	}
 	return hmac.Equal([]byte(actualHash), []byte(expectedHash)), nil
 }
 
-// computeHash computes the HMAC of: sequence || prev_hash || payload
-func (c *IntegrityChain) computeHash(sequence int64, prevHash string, payload []byte) (string, error) {
-	return computeIntegrityHash(c.key, c.algorithm, sequence, prevHash, payload)
+// VerifyWrapped verifies the integrity metadata and payload in a wrapped audit entry.
+func VerifyWrapped(key []byte, algorithm string, wrapped []byte) (bool, error) {
+	data, err := parseIntegrityPayload(wrapped)
+	if err != nil {
+		return false, err
+	}
+
+	meta, ok := integrityMetadataFromMap(data["integrity"])
+	if !ok {
+		return false, nil
+	}
+
+	delete(data, "integrity")
+	canonicalPayload, err := marshalCanonicalPayload(data)
+	if err != nil {
+		return false, err
+	}
+	actualHash, err := computeIntegrityHash(key, algorithm, meta.FormatVersion, meta.Sequence, meta.PrevHash, canonicalPayload)
+	if err != nil {
+		return false, err
+	}
+	return hmac.Equal([]byte(actualHash), []byte(meta.EntryHash)), nil
+}
+
+// computeHash computes the HMAC of: format_version || sequence || prev_hash || payload
+func (c *IntegrityChain) computeHash(formatVersion int, sequence int64, prevHash string, payload []byte) (string, error) {
+	return computeIntegrityHash(c.key, c.algorithm, formatVersion, sequence, prevHash, payload)
 }
 
 func parseIntegrityPayload(payload []byte) (map[string]any, error) {
@@ -322,7 +351,7 @@ func marshalCanonicalPayload(data map[string]any) ([]byte, error) {
 	return canonicalPayload, nil
 }
 
-func computeIntegrityHash(key []byte, algorithm string, sequence int64, prevHash string, payload []byte) (string, error) {
+func computeIntegrityHash(key []byte, algorithm string, formatVersion int, sequence int64, prevHash string, payload []byte) (string, error) {
 	var h hash.Hash
 	switch algorithm {
 	case "":
@@ -336,6 +365,10 @@ func computeIntegrityHash(key []byte, algorithm string, sequence int64, prevHash
 		h = hmac.New(sha256.New, key)
 	}
 
+	// Write format version as string
+	h.Write([]byte(strconv.Itoa(formatVersion)))
+	// Write separator
+	h.Write([]byte("|"))
 	// Write sequence as string
 	h.Write([]byte(strconv.FormatInt(sequence, 10)))
 	// Write separator
@@ -348,4 +381,51 @@ func computeIntegrityHash(key []byte, algorithm string, sequence int64, prevHash
 	h.Write(payload)
 
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func integrityMetadataFromMap(v any) (IntegrityMetadata, bool) {
+	integrity, ok := v.(map[string]any)
+	if !ok {
+		return IntegrityMetadata{}, false
+	}
+
+	formatVersion, ok := jsonInt(integrity["format_version"])
+	if !ok {
+		return IntegrityMetadata{}, false
+	}
+	sequence, ok := jsonInt64(integrity["sequence"])
+	if !ok {
+		return IntegrityMetadata{}, false
+	}
+	prevHash, ok := integrity["prev_hash"].(string)
+	if !ok {
+		return IntegrityMetadata{}, false
+	}
+	entryHash, ok := integrity["entry_hash"].(string)
+	if !ok {
+		return IntegrityMetadata{}, false
+	}
+
+	return IntegrityMetadata{
+		FormatVersion: formatVersion,
+		Sequence:      sequence,
+		PrevHash:      prevHash,
+		EntryHash:     entryHash,
+	}, true
+}
+
+func jsonInt(v any) (int, bool) {
+	n, ok := jsonInt64(v)
+	if !ok {
+		return 0, false
+	}
+	return int(n), true
+}
+
+func jsonInt64(v any) (int64, bool) {
+	n, ok := v.(float64)
+	if !ok || n != math.Trunc(n) {
+		return 0, false
+	}
+	return int64(n), true
 }
