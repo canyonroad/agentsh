@@ -55,6 +55,19 @@ func TestDiscoverRotationSet_RejectsMissingIntermediateBackup(t *testing.T) {
 	}
 }
 
+func TestDiscoverRotationSet_RejectsMissingBaseWithBackups(t *testing.T) {
+	t.Parallel()
+
+	base := filepath.Join(t.TempDir(), "audit.log")
+	if err := os.WriteFile(base+".1", []byte("backup-only\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base+".1", err)
+	}
+
+	if _, err := DiscoverRotationSet(base); err == nil {
+		t.Fatal("DiscoverRotationSet() error = nil, want error when base file is missing")
+	}
+}
+
 func TestReadLastNonEmptyLine_SearchesNewestFirst(t *testing.T) {
 	t.Parallel()
 
@@ -82,6 +95,36 @@ func TestReadLastNonEmptyLine_SearchesNewestFirst(t *testing.T) {
 	}
 	if string(gotLine) != "newest-entry" {
 		t.Fatalf("ReadLastNonEmptyLine() line = %q, want %q", gotLine, "newest-entry")
+	}
+}
+
+func TestReadFirstNonEmptyLine_SearchesOldestFirst(t *testing.T) {
+	t.Parallel()
+
+	base := filepath.Join(t.TempDir(), "audit.log")
+	backup := base + ".1"
+	if err := os.WriteFile(backup, []byte("\noldest-entry\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", backup, err)
+	}
+	if err := os.WriteFile(base, []byte("newer-entry\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base, err)
+	}
+
+	files := []LogFile{
+		{Path: backup, Index: 1, IsBackup: true},
+		{Path: base, Index: 0, IsBackup: false},
+	}
+
+	gotFile, gotLine, err := ReadFirstNonEmptyLine(files)
+	if err != nil {
+		t.Fatalf("ReadFirstNonEmptyLine() error = %v", err)
+	}
+
+	if gotFile.Path != backup {
+		t.Fatalf("ReadFirstNonEmptyLine() file = %+v, want backup file", gotFile)
+	}
+	if string(gotLine) != "oldest-entry" {
+		t.Fatalf("ReadFirstNonEmptyLine() line = %q, want %q", gotLine, "oldest-entry")
 	}
 }
 

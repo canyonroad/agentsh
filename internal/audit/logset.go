@@ -60,6 +60,7 @@ func DiscoverRotationSet(base string) ([]LogFile, error) {
 	}
 
 	files := make([]LogFile, 0, len(indexes)+1)
+	baseExists := false
 	for i := len(indexes) - 1; i >= 0; i-- {
 		files = append(files, LogFile{
 			Path:     base + "." + strconv.Itoa(indexes[i]),
@@ -68,6 +69,7 @@ func DiscoverRotationSet(base string) ([]LogFile, error) {
 		})
 	}
 	if _, err := os.Stat(base); err == nil {
+		baseExists = true
 		files = append(files, LogFile{
 			Path:     base,
 			Index:    0,
@@ -75,6 +77,9 @@ func DiscoverRotationSet(base string) ([]LogFile, error) {
 		})
 	} else if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("stat %s: %w", base, err)
+	}
+	if len(indexes) > 0 && !baseExists {
+		return nil, fmt.Errorf("missing audit log file %s", base)
 	}
 
 	return files, nil
@@ -91,6 +96,22 @@ func ReadLastNonEmptyLine(files []LogFile) (LogFile, []byte, error) {
 			return LogFile{}, nil, fmt.Errorf("read %s: %w", files[i].Path, err)
 		}
 		return files[i], line, nil
+	}
+
+	return LogFile{}, nil, os.ErrNotExist
+}
+
+// ReadFirstNonEmptyLine returns the oldest visible non-empty line across a rotation set.
+func ReadFirstNonEmptyLine(files []LogFile) (LogFile, []byte, error) {
+	for _, file := range files {
+		line, err := readFirstNonEmptyLineFromFile(file.Path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return LogFile{}, nil, fmt.Errorf("read %s: %w", file.Path, err)
+		}
+		return file, line, nil
 	}
 
 	return LogFile{}, nil, os.ErrNotExist
@@ -154,6 +175,27 @@ func readLastNonEmptyLineFromFile(path string) ([]byte, error) {
 		return nil, os.ErrNotExist
 	}
 	return bytes.Clone(line), nil
+}
+
+func readFirstNonEmptyLineFromFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	scanner := NewScanner(file)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		return bytes.Clone(line), nil
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return nil, os.ErrNotExist
 }
 
 // NewScanner returns a scanner sized for large JSONL audit entries.

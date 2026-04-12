@@ -77,6 +77,9 @@ func (s *IntegrityStore) bootstrap() error {
 	if err != nil {
 		return err
 	}
+	if err := s.validateVisibleOrigin(files); err != nil {
+		return err
+	}
 
 	sidecar, sidecarErr := audit.ReadSidecar(s.sidecarPath)
 	lastFile, lastLine, lastErr := audit.ReadLastNonEmptyLine(files)
@@ -92,6 +95,42 @@ func (s *IntegrityStore) bootstrap() error {
 	default:
 		return fmt.Errorf("read audit integrity sidecar: %w", sidecarErr)
 	}
+}
+
+func (s *IntegrityStore) validateVisibleOrigin(files []audit.LogFile) error {
+	file, line, err := audit.ReadFirstNonEmptyLine(files)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	entry, err := audit.ParseIntegrityEntry(line)
+	if err != nil || entry.Integrity == nil {
+		return fmt.Errorf("audit log corrupted at first line in %s", file.Path)
+	}
+
+	ok, err := s.chain.VerifyHash(
+		entry.Integrity.FormatVersion,
+		entry.Integrity.Sequence,
+		entry.Integrity.PrevHash,
+		entry.CanonicalPayload,
+		entry.Integrity.EntryHash,
+	)
+	if err != nil {
+		return fmt.Errorf("audit integrity chain mismatch: verify first entry: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("audit integrity chain mismatch: invalid first entry in %s", file.Path)
+	}
+	// The oldest visible backup may start mid-chain after normal retention rolls
+	// the true origin out of the local rotation window. The bare base file must
+	// still begin at a chain origin or an explicit reset boundary.
+	if !file.IsBackup && (entry.Integrity.Sequence != 0 || entry.Integrity.PrevHash != "") {
+		return fmt.Errorf("audit integrity chain mismatch: visible log begins mid-chain at %s", file.Path)
+	}
+	return nil
 }
 
 func (s *IntegrityStore) resumeFromSidecar(sidecar audit.SidecarState, lastFile audit.LogFile, lastLine []byte, lastErr error) error {
