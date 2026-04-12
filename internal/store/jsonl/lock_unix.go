@@ -3,6 +3,7 @@
 package jsonl
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,7 +22,10 @@ func AcquireLock(path string) (*os.File, error) {
 	}
 	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("%w: %v", ErrLocked, err)
+		if isLockContention(err) {
+			return nil, fmt.Errorf("%w: %v", ErrLocked, err)
+		}
+		return nil, err
 	}
 	return file, nil
 }
@@ -32,4 +36,8 @@ func ReleaseLock(file *os.File) error {
 	}
 	defer file.Close()
 	return unix.Flock(int(file.Fd()), unix.LOCK_UN)
+}
+
+func isLockContention(err error) bool {
+	return errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN)
 }

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,6 +46,22 @@ type IntegrityStore struct {
 	now            func() time.Time
 }
 
+type visibleChainState struct {
+	expectedSequence int64
+	expectedPrevHash string
+	seeded           bool
+	verifiedEntries  int
+}
+
+type rotationBoundaryPayload struct {
+	Fields struct {
+		PriorChainSummary *struct {
+			LastSequence  int64  `json:"last_sequence_seen_in_log"`
+			LastEntryHash string `json:"last_entry_hash_seen_in_log"`
+		} `json:"prior_chain_summary"`
+	} `json:"fields"`
+}
+
 // NewIntegrityStore wraps an existing store with integrity chain persistence.
 func NewIntegrityStore(inner EventStore, chain *audit.IntegrityChain, opts IntegrityOptions) (*IntegrityStore, error) {
 	if opts.Now == nil {
@@ -77,9 +94,6 @@ func (s *IntegrityStore) bootstrap() error {
 	if err != nil {
 		return err
 	}
-	if err := s.validateVisibleOrigin(files); err != nil {
-		return err
-	}
 
 	sidecar, sidecarErr := audit.ReadSidecar(s.sidecarPath)
 	lastFile, lastLine, lastErr := audit.ReadLastNonEmptyLine(files)
@@ -89,46 +103,132 @@ func (s *IntegrityStore) bootstrap() error {
 		if sidecar.KeyFingerprint != s.keyFingerprint {
 			return fmt.Errorf("audit integrity chain: key fingerprint mismatch")
 		}
+		if err := s.validateVisibleChain(files); err != nil {
+			return err
+		}
 		return s.resumeFromSidecar(sidecar, lastFile, lastLine, lastErr)
 	case errors.Is(sidecarErr, audit.ErrSidecarNotFound):
-		return s.bootstrapWithoutSidecar(lastFile, lastLine, lastErr)
+		return s.bootstrapWithoutSidecar(files, lastFile, lastLine, lastErr)
 	default:
 		return fmt.Errorf("read audit integrity sidecar: %w", sidecarErr)
 	}
 }
 
-func (s *IntegrityStore) validateVisibleOrigin(files []audit.LogFile) error {
-	file, line, err := audit.ReadFirstNonEmptyLine(files)
-	if errors.Is(err, os.ErrNotExist) {
+func (s *IntegrityStore) validateVisibleChain(files []audit.LogFile) error {
+	state := visibleChainState{}
+
+	for _, file := range files {
+		f, err := os.Open(file.Path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("open %s: %w", file.Path, err)
+		}
+
+		scanner := audit.NewScanner(f)
+		lineNo := 0
+		for scanner.Scan() {
+			lineNo++
+			line := bytes.TrimSpace(scanner.Bytes())
+			if len(line) == 0 {
+				continue
+			}
+
+			entry, err := audit.ParseIntegrityEntry(line)
+			if err != nil {
+				_ = f.Close()
+				return fmt.Errorf("audit log corrupted at %s:%d: %w", file.Path, lineNo, err)
+			}
+			if entry.Integrity == nil {
+				_ = f.Close()
+				return fmt.Errorf("unsigned line at %s:%d", file.Path, lineNo)
+			}
+			if entry.Integrity.FormatVersion < audit.IntegrityFormatVersion {
+				_ = f.Close()
+				return fmt.Errorf("legacy audit log detected in %s", file.Path)
+			}
+
+			rotationBoundary := entry.Type == "integrity_chain_rotated" &&
+				entry.Integrity.Sequence == 0 &&
+				entry.Integrity.PrevHash == ""
+
+			if rotationBoundary {
+				if err := validateRotationBoundary(entry.CanonicalPayload, state); err != nil {
+					_ = f.Close()
+					return fmt.Errorf("rotation boundary at %s:%d: %w", file.Path, lineNo, err)
+				}
+			} else {
+				if !state.seeded {
+					if file.IsBackup && state.verifiedEntries == 0 {
+						state.expectedSequence = entry.Integrity.Sequence
+						state.expectedPrevHash = entry.Integrity.PrevHash
+					} else {
+						state.expectedSequence = 0
+						state.expectedPrevHash = ""
+					}
+					state.seeded = true
+				}
+				if entry.Integrity.Sequence != state.expectedSequence {
+					_ = f.Close()
+					return fmt.Errorf("audit integrity chain mismatch: sequence mismatch at %s:%d: expected %d, got %d", file.Path, lineNo, state.expectedSequence, entry.Integrity.Sequence)
+				}
+				if entry.Integrity.PrevHash != state.expectedPrevHash {
+					_ = f.Close()
+					return fmt.Errorf("audit integrity chain mismatch: chain broken at %s:%d: expected prev_hash %q, got %q", file.Path, lineNo, state.expectedPrevHash, entry.Integrity.PrevHash)
+				}
+			}
+
+			ok, err := s.chain.VerifyHash(
+				entry.Integrity.FormatVersion,
+				entry.Integrity.Sequence,
+				entry.Integrity.PrevHash,
+				entry.CanonicalPayload,
+				entry.Integrity.EntryHash,
+			)
+			if err != nil {
+				_ = f.Close()
+				return fmt.Errorf("audit integrity chain mismatch: verify entry at %s:%d: %w", file.Path, lineNo, err)
+			}
+			if !ok {
+				_ = f.Close()
+				return fmt.Errorf("audit integrity chain mismatch: invalid entry at %s:%d", file.Path, lineNo)
+			}
+
+			state.expectedSequence = entry.Integrity.Sequence + 1
+			state.expectedPrevHash = entry.Integrity.EntryHash
+			state.seeded = true
+			state.verifiedEntries++
+		}
+		scanErr := scanner.Err()
+		_ = f.Close()
+		if scanErr != nil {
+			return fmt.Errorf("scan %s: %w", file.Path, scanErr)
+		}
+	}
+
+	return nil
+}
+
+func validateRotationBoundary(payload []byte, state visibleChainState) error {
+	var event rotationBoundaryPayload
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return fmt.Errorf("parse rotation payload: %w", err)
+	}
+
+	if state.verifiedEntries == 0 {
 		return nil
 	}
-	if err != nil {
-		return err
+	if event.Fields.PriorChainSummary == nil {
+		return fmt.Errorf("missing prior_chain_summary")
 	}
 
-	entry, err := audit.ParseIntegrityEntry(line)
-	if err != nil || entry.Integrity == nil {
-		return fmt.Errorf("audit log corrupted at first line in %s", file.Path)
+	wantSequence := state.expectedSequence - 1
+	if got := event.Fields.PriorChainSummary.LastSequence; got != wantSequence {
+		return fmt.Errorf("prior_chain_summary.last_sequence_seen_in_log = %d, want %d", got, wantSequence)
 	}
-
-	ok, err := s.chain.VerifyHash(
-		entry.Integrity.FormatVersion,
-		entry.Integrity.Sequence,
-		entry.Integrity.PrevHash,
-		entry.CanonicalPayload,
-		entry.Integrity.EntryHash,
-	)
-	if err != nil {
-		return fmt.Errorf("audit integrity chain mismatch: verify first entry: %w", err)
-	}
-	if !ok {
-		return fmt.Errorf("audit integrity chain mismatch: invalid first entry in %s", file.Path)
-	}
-	// The oldest visible backup may start mid-chain after normal retention rolls
-	// the true origin out of the local rotation window. The bare base file must
-	// still begin at a chain origin or an explicit reset boundary.
-	if !file.IsBackup && (entry.Integrity.Sequence != 0 || entry.Integrity.PrevHash != "") {
-		return fmt.Errorf("audit integrity chain mismatch: visible log begins mid-chain at %s", file.Path)
+	if got := event.Fields.PriorChainSummary.LastEntryHash; got != state.expectedPrevHash {
+		return fmt.Errorf("prior_chain_summary.last_entry_hash_seen_in_log = %q, want %q", got, state.expectedPrevHash)
 	}
 	return nil
 }
@@ -187,7 +287,7 @@ func (s *IntegrityStore) resumeFromSidecar(sidecar audit.SidecarState, lastFile 
 	return fmt.Errorf("audit integrity chain mismatch: sidecar does not match %s", lastFile.Path)
 }
 
-func (s *IntegrityStore) bootstrapWithoutSidecar(lastFile audit.LogFile, lastLine []byte, lastErr error) error {
+func (s *IntegrityStore) bootstrapWithoutSidecar(files []audit.LogFile, lastFile audit.LogFile, lastLine []byte, lastErr error) error {
 	if errors.Is(lastErr, os.ErrNotExist) {
 		return s.appendRotationBoundary("initial", "initial chain creation", nil)
 	}
@@ -214,6 +314,9 @@ func (s *IntegrityStore) bootstrapWithoutSidecar(lastFile audit.LogFile, lastLin
 	}
 	if !ok {
 		return fmt.Errorf("audit integrity chain mismatch: invalid last entry in %s", lastFile.Path)
+	}
+	if err := s.validateVisibleChain(files); err != nil {
+		return err
 	}
 
 	return s.appendRotationBoundary("sidecar_missing", "sidecar missing; starting fresh chain", map[string]any{

@@ -162,6 +162,12 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 		now = time.Now
 	}
 
+	if !opts.LegacyArchive {
+		if _, err := audit.DiscoverRotationSet(logPath); err != nil {
+			return fmt.Errorf("cannot perform in-place reset on incomplete audit rotation set: %w; retry with --legacy-archive", err)
+		}
+	}
+
 	priorSummary, hasPriorData, err := currentChainSummary(logPath)
 	if err != nil {
 		return err

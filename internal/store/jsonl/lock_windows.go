@@ -3,6 +3,7 @@
 package jsonl
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,7 +30,10 @@ func AcquireLock(path string) (*os.File, error) {
 		&overlapped,
 	); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("%w: %v", ErrLocked, err)
+		if isLockContention(err) {
+			return nil, fmt.Errorf("%w: %v", ErrLocked, err)
+		}
+		return nil, err
 	}
 	return file, nil
 }
@@ -41,4 +45,8 @@ func ReleaseLock(file *os.File) error {
 	defer file.Close()
 	var overlapped windows.Overlapped
 	return windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, &overlapped)
+}
+
+func isLockContention(err error) bool {
+	return errors.Is(err, windows.ERROR_LOCK_VIOLATION)
 }
