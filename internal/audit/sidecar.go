@@ -91,7 +91,7 @@ func WriteSidecar(path string, state SidecarState) error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temp sidecar: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := replaceFile(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename sidecar: %w", err)
 	}

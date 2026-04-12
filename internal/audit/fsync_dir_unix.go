@@ -12,3 +12,7 @@ func syncDir(path string) error {
 	defer file.Close()
 	return file.Sync()
 }
+
+func replaceFile(from, to string) error {
+	return os.Rename(from, to)
+}
