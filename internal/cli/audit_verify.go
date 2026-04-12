@@ -78,9 +78,20 @@ func newAuditVerifyCmd() *cobra.Command {
 				files = append(files, audit.LogFile{Path: args[0], Index: 0, IsBackup: false})
 			}
 
-			hasIntegrityMetadata, err := verifyTargetContainsIntegrityMetadata(files, cfg.Audit.Integrity.Enabled, opts)
-			if err != nil {
-				return err
+			hasIntegrityMetadata := false
+			if opts.fromSequence > 0 {
+				start, err := locateVerifyStart(files, opts.fromSequence)
+				if err != nil {
+					return err
+				}
+				hasIntegrityMetadata = start != nil
+			}
+			if !hasIntegrityMetadata {
+				var err error
+				hasIntegrityMetadata, err = verifyTargetContainsIntegrityMetadata(files, cfg.Audit.Integrity.Enabled, opts)
+				if err != nil {
+					return err
+				}
 			}
 			if !cfg.Audit.Integrity.Enabled && !hasIntegrityMetadata {
 				fmt.Fprintln(cmd.OutOrStdout(), "integrity not enabled in this log; nothing to verify")
