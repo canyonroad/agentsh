@@ -87,9 +87,15 @@ func newAuditVerifyCmd() *cobra.Command {
 				if start != nil {
 					hasIntegrityMetadata = true
 				} else {
-					hasIntegrityMetadata, err = verifyTargetContainsIntegrityMetadata(files, cfg.Audit.Integrity.Enabled, opts)
+					hasIntegrityMetadata, err = containsIntegrityMetadataIgnoringMalformed(files)
 					if err != nil {
 						return err
+					}
+					if !hasIntegrityMetadata {
+						hasIntegrityMetadata, err = verifyTargetContainsIntegrityMetadata(files, cfg.Audit.Integrity.Enabled, opts)
+						if err != nil {
+							return err
+						}
 					}
 				}
 			} else {
@@ -455,6 +461,49 @@ func locateVerifyStart(files []audit.LogFile, fromSequence int64) (*verifyStart,
 	}
 
 	return nil, nil
+}
+
+func containsIntegrityMetadataIgnoringMalformed(files []audit.LogFile) (bool, error) {
+	for _, file := range files {
+		f, err := os.Open(file.Path)
+		if err != nil {
+			return false, fmt.Errorf("open %s: %w", file.Path, err)
+		}
+
+		reader := bufio.NewReader(f)
+		for {
+			rawLine, readErr := reader.ReadBytes('\n')
+			if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
+				break
+			}
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				_ = f.Close()
+				return false, fmt.Errorf("scan %s: %w", file.Path, readErr)
+			}
+
+			line := bytes.TrimSpace(rawLine)
+			if len(line) == 0 {
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
+				continue
+			}
+
+			entry, err := audit.ParseIntegrityEntry(line)
+			if err == nil && entry.Integrity != nil {
+				_ = f.Close()
+				return true, nil
+			}
+
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+		}
+
+		_ = f.Close()
+	}
+
+	return false, nil
 }
 
 func verifyRotationBoundary(payload []byte, summary *verifySummary, state verifyState, visibleOriginIsBackup bool) error {
