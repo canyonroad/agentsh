@@ -2,6 +2,8 @@ package audit
 
 import (
 	"encoding/json"
+	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,8 +47,13 @@ func TestIntegrityChain_Wrap(t *testing.T) {
 
 	// Check sequence
 	seq, ok := integrity["sequence"].(float64) // JSON numbers are float64
-	if !ok || seq != 1 {
-		t.Errorf("integrity.sequence = %v, want 1", integrity["sequence"])
+	if !ok || seq != 0 {
+		t.Errorf("integrity.sequence = %v, want 0", integrity["sequence"])
+	}
+
+	formatVersion, ok := integrity["format_version"].(float64)
+	if !ok || int(formatVersion) != IntegrityFormatVersion {
+		t.Errorf("integrity.format_version = %v, want %d", integrity["format_version"], IntegrityFormatVersion)
 	}
 
 	// Check prev_hash (should be empty for first entry)
@@ -59,6 +66,141 @@ func TestIntegrityChain_Wrap(t *testing.T) {
 	entryHash, ok := integrity["entry_hash"].(string)
 	if !ok || entryHash == "" {
 		t.Errorf("integrity.entry_hash is missing or empty")
+	}
+}
+
+func TestIntegrityChain_Wrap_StartsAtSequenceZeroAndAddsFormatVersion(t *testing.T) {
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+
+	wrapped, err := chain.Wrap([]byte(`{"event":"first"}`))
+	if err != nil {
+		t.Fatalf("Wrap() error = %v", err)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(wrapped, &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	integrity := result["integrity"].(map[string]any)
+	if got := int64(integrity["sequence"].(float64)); got != 0 {
+		t.Fatalf("sequence = %d, want 0", got)
+	}
+	if got := int(integrity["format_version"].(float64)); got != IntegrityFormatVersion {
+		t.Fatalf("format_version = %d, want %d", got, IntegrityFormatVersion)
+	}
+	if got := integrity["prev_hash"].(string); got != "" {
+		t.Fatalf("prev_hash = %q, want empty", got)
+	}
+}
+
+func TestIntegrityChain_Restore_ContinuesFromLastWrittenSequence(t *testing.T) {
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+	chain.Restore(41, "prev-hash")
+
+	wrapped, err := chain.Wrap([]byte(`{"event":"after_restore"}`))
+	if err != nil {
+		t.Fatalf("Wrap() error = %v", err)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(wrapped, &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	integrity := result["integrity"].(map[string]any)
+	if got := int64(integrity["sequence"].(float64)); got != 42 {
+		t.Fatalf("sequence = %d, want 42", got)
+	}
+	if got := integrity["prev_hash"].(string); got != "prev-hash" {
+		t.Fatalf("prev_hash = %q, want prev-hash", got)
+	}
+}
+
+func TestKeyFingerprint_IsDeterministic(t *testing.T) {
+	got := KeyFingerprint(testKey)
+	if got == "" {
+		t.Fatal("KeyFingerprint() returned empty string")
+	}
+	if !strings.HasPrefix(got, "sha256:") {
+		t.Fatalf("KeyFingerprint() = %q, want sha256: prefix", got)
+	}
+	if got != KeyFingerprint(testKey) {
+		t.Fatalf("KeyFingerprint() should be deterministic, got %q then %q", got, KeyFingerprint(testKey))
+	}
+
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+	if chain.KeyFingerprint() != got {
+		t.Fatalf("chain.KeyFingerprint() = %q, want %q", chain.KeyFingerprint(), got)
+	}
+}
+
+func TestIntegrityChain_Wrap_ReturnsSequenceOverflowAtMaxInt64(t *testing.T) {
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+
+	chain.Restore(math.MaxInt64, "prev-hash")
+
+	_, err = chain.Wrap([]byte(`{"event":"overflow"}`))
+	if !errors.Is(err, ErrSequenceOverflow) {
+		t.Fatalf("Wrap() error = %v, want %v", err, ErrSequenceOverflow)
+	}
+
+	state := chain.State()
+	if state.Sequence != math.MaxInt64 {
+		t.Fatalf("State().Sequence = %d, want %d", state.Sequence, int64(math.MaxInt64))
+	}
+	if state.PrevHash != "prev-hash" {
+		t.Fatalf("State().PrevHash = %q, want %q", state.PrevHash, "prev-hash")
+	}
+}
+
+func TestIntegrityChain_VerifyHash_UsesOwnKeyAndCanonicalPayload(t *testing.T) {
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+
+	wrapped, err := chain.Wrap([]byte(`{"b":2,"a":1}`))
+	if err != nil {
+		t.Fatalf("Wrap() error = %v", err)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(wrapped, &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	integrity := result["integrity"].(map[string]any)
+	sequence := int64(integrity["sequence"].(float64))
+	prevHash := integrity["prev_hash"].(string)
+	entryHash := integrity["entry_hash"].(string)
+
+	ok, err := chain.VerifyHash(sequence, prevHash, []byte(`{"b":2,"a":1}`), entryHash)
+	if err != nil {
+		t.Fatalf("VerifyHash() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("VerifyHash() = false, want true")
+	}
+
+	ok, err = chain.VerifyHash(sequence, prevHash, []byte(`{"b":3,"a":1}`), entryHash)
+	if err != nil {
+		t.Fatalf("VerifyHash() tampered error = %v", err)
+	}
+	if ok {
+		t.Fatal("VerifyHash() = true for tampered payload, want false")
 	}
 }
 
@@ -93,8 +235,8 @@ func TestIntegrityChain_ChainContinuity(t *testing.T) {
 		entryHash := integrity["entry_hash"].(string)
 
 		// Verify sequence increments
-		if seq != int64(i+1) {
-			t.Errorf("entry %d: sequence = %d, want %d", i, seq, i+1)
+		if seq != int64(i) {
+			t.Errorf("entry %d: sequence = %d, want %d", i, seq, i)
 		}
 
 		// Verify prev_hash equals previous entry_hash
@@ -123,8 +265,8 @@ func TestIntegrityChain_Restore(t *testing.T) {
 
 	// Get current state
 	state := chain.State()
-	if state.Sequence != 3 {
-		t.Errorf("State().Sequence = %d, want 3", state.Sequence)
+	if state.Sequence != 2 {
+		t.Errorf("State().Sequence = %d, want 2", state.Sequence)
 	}
 
 	// Create new chain and restore state
@@ -147,9 +289,9 @@ func TestIntegrityChain_Restore(t *testing.T) {
 
 	integrity := result["integrity"].(map[string]any)
 
-	// Should continue from sequence 4
-	if seq := int64(integrity["sequence"].(float64)); seq != 4 {
-		t.Errorf("sequence after restore = %d, want 4", seq)
+	// Should continue from sequence 3
+	if seq := int64(integrity["sequence"].(float64)); seq != 3 {
+		t.Errorf("sequence after restore = %d, want 3", seq)
 	}
 
 	// prev_hash should match the state we restored
