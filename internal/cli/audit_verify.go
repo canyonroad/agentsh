@@ -144,22 +144,34 @@ func verifyTargetContainsIntegrityMetadata(files []audit.LogFile, integrityEnabl
 
 			entry, err := audit.ParseIntegrityEntry(line)
 			if err != nil {
+				if !integrityEnabled {
+					if hasTopLevelIntegrityField(line) {
+						_ = f.Close()
+						return true, nil
+					}
+					trimmed := bytes.TrimSpace(line)
+					if len(trimmed) > 0 && trimmed[0] == '{' {
+						_ = f.Close()
+						return false, fmt.Errorf("malformed JSON at %s:%d: %w", file.Path, lineNo, err)
+					}
+					if opts.tolerateTruncation &&
+						file.Path == files[len(files)-1].Path &&
+						errors.Is(readErr, io.EOF) &&
+						!hadNewline &&
+						isTolerableTruncation(err) {
+						break
+					}
+					if errors.Is(readErr, io.EOF) {
+						break
+					}
+					continue
+				}
 				if opts.tolerateTruncation &&
 					file.Path == files[len(files)-1].Path &&
 					errors.Is(readErr, io.EOF) &&
 					!hadNewline &&
 					isTolerableTruncation(err) {
 					break
-				}
-				if !integrityEnabled {
-					if hasTopLevelIntegrityField(line) {
-						_ = f.Close()
-						return true, nil
-					}
-					if errors.Is(readErr, io.EOF) {
-						break
-					}
-					continue
 				}
 				_ = f.Close()
 				return false, fmt.Errorf("malformed JSON at %s:%d: %w", file.Path, lineNo, err)

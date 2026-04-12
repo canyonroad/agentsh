@@ -251,7 +251,7 @@ func TestAuditVerifyCmd_DoesNotRequireKeyForMalformedUnsignedLogWhenConfigDisabl
 	}
 }
 
-func TestAuditVerifyCmd_DoesNotRequireKeyForMalformedUnsignedLogContainingIntegrityValueWhenConfigDisabled(t *testing.T) {
+func TestAuditVerifyCmd_RejectsMalformedJSONObjectContainingIntegrityValueWhenConfigDisabled(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -268,15 +268,16 @@ func TestAuditVerifyCmd_DoesNotRequireKeyForMalformedUnsignedLogContainingIntegr
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want malformed JSON failure")
 	}
-	if got := out.String(); !strings.Contains(got, "integrity not enabled in this log; nothing to verify") {
-		t.Fatalf("output = %q, want unsigned disabled-config no-op message", got)
+	if !strings.Contains(err.Error(), "malformed JSON") {
+		t.Fatalf("Execute() error = %v, want malformed JSON message", err)
 	}
 }
 
-func TestAuditVerifyCmd_DoesNotRequireKeyForUnsignedTruncatedLogWhenConfigDisabled(t *testing.T) {
+func TestAuditVerifyCmd_RejectsUnsignedTruncatedJSONObjectWhenConfigDisabled(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -293,11 +294,12 @@ func TestAuditVerifyCmd_DoesNotRequireKeyForUnsignedTruncatedLogWhenConfigDisabl
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want malformed JSON failure")
 	}
-	if got := out.String(); !strings.Contains(got, "integrity not enabled in this log; nothing to verify") {
-		t.Fatalf("output = %q, want unsigned disabled-config no-op message", got)
+	if !strings.Contains(err.Error(), "malformed JSON") {
+		t.Fatalf("Execute() error = %v, want malformed JSON message", err)
 	}
 }
 
