@@ -211,7 +211,7 @@ func TestAuditChainResetCmd_SucceedsAfterAuditWriterCloses(t *testing.T) {
 	}
 }
 
-func TestAuditChainResetCmd_AllowsResetWhenRotationSetIsIncomplete(t *testing.T) {
+func TestAuditChainResetCmd_RequiresLegacyArchiveWhenPriorSummaryUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -227,6 +227,31 @@ func TestAuditChainResetCmd_AllowsResetWhenRotationSetIsIncomplete(t *testing.T)
 
 	cmd := newAuditChainResetCmd()
 	cmd.SetArgs([]string{"--config", cfgPath, "--reason", "manual", "--force"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want legacy-archive requirement")
+	}
+	if !strings.Contains(err.Error(), "--legacy-archive") {
+		t.Fatalf("Execute() error = %v, want legacy-archive guidance", err)
+	}
+}
+
+func TestAuditChainResetCmd_LegacyArchiveAllowsResetWhenPriorSummaryUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	if err := os.WriteFile(logPath, []byte(`{"type":"current"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+	if err := os.WriteFile(logPath+".2", []byte(`{"type":"orphan-backup"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath+".2", err)
+	}
+
+	cmd := newAuditChainResetCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--reason", "manual", "--legacy-archive", "--force"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}

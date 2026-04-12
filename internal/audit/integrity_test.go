@@ -215,6 +215,40 @@ func TestIntegrityChain_VerifyHash_UsesOwnKeyAndCanonicalPayload(t *testing.T) {
 	}
 }
 
+func TestVerifyHash_AcceptsPersistedWrappedEntry(t *testing.T) {
+	chain, err := NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatalf("NewIntegrityChain() error = %v", err)
+	}
+
+	wrapped, err := chain.Wrap([]byte(`{"type":"persisted","fields":{"value":"ok"}}`))
+	if err != nil {
+		t.Fatalf("Wrap() error = %v", err)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(wrapped, &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	integrity := result["integrity"].(map[string]any)
+	ok, err := VerifyHash(
+		testKey,
+		"hmac-sha256",
+		int(integrity["format_version"].(float64)),
+		int64(integrity["sequence"].(float64)),
+		integrity["prev_hash"].(string),
+		wrapped,
+		integrity["entry_hash"].(string),
+	)
+	if err != nil {
+		t.Fatalf("VerifyHash() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("VerifyHash() = false, want true for persisted wrapped entry")
+	}
+}
+
 func TestIntegrityChain_VerifyWrapped_FailsWhenFormatVersionMutates(t *testing.T) {
 	chain, err := NewIntegrityChain(testKey)
 	if err != nil {

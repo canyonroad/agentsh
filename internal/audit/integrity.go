@@ -297,6 +297,7 @@ func VerifyHash(key []byte, algorithm string, formatVersion int, sequence int64,
 	if err != nil {
 		return false, err
 	}
+	delete(data, "integrity")
 	canonicalPayload, err := marshalCanonicalPayload(data)
 	if err != nil {
 		return false, err

@@ -16,7 +16,7 @@ func openAndLockAuditFile(path string) (*os.File, error) {
 		if errors.Is(err, jsonl.ErrLocked) {
 			return nil, fmt.Errorf("agentsh server is running; stop it before resetting the chain")
 		}
-		return nil, fmt.Errorf("agentsh server is running; stop it before resetting the chain")
+		return nil, fmt.Errorf("acquire audit reset lock: %w", err)
 	}
 	return file, nil
 }

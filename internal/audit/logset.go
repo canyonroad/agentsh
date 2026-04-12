@@ -3,7 +3,9 @@ package audit
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -81,22 +83,77 @@ func DiscoverRotationSet(base string) ([]LogFile, error) {
 // ReadLastNonEmptyLine returns the newest non-empty line across a rotation set.
 func ReadLastNonEmptyLine(files []LogFile) (LogFile, []byte, error) {
 	for i := len(files) - 1; i >= 0; i-- {
-		data, err := os.ReadFile(files[i].Path)
+		line, err := readLastNonEmptyLineFromFile(files[i].Path)
 		if err != nil {
-			return LogFile{}, nil, fmt.Errorf("read %s: %w", files[i].Path, err)
-		}
-
-		lines := bytes.Split(data, []byte{'\n'})
-		for j := len(lines) - 1; j >= 0; j-- {
-			line := bytes.TrimSpace(lines[j])
-			if len(line) == 0 {
+			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return files[i], bytes.Clone(line), nil
+			return LogFile{}, nil, fmt.Errorf("read %s: %w", files[i].Path, err)
 		}
+		return files[i], line, nil
 	}
 
 	return LogFile{}, nil, os.ErrNotExist
+}
+
+func readLastNonEmptyLineFromFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() == 0 {
+		return nil, os.ErrNotExist
+	}
+
+	const chunkSize = 64 * 1024
+	buf := make([]byte, chunkSize)
+	tail := make([]byte, 0, chunkSize)
+	end := info.Size()
+
+	for end > 0 {
+		readSize := int64(chunkSize)
+		if end < readSize {
+			readSize = end
+		}
+		start := end - readSize
+		if _, err := file.ReadAt(buf[:readSize], start); err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+
+		data := make([]byte, 0, int(readSize)+len(tail))
+		data = append(data, buf[:readSize]...)
+		data = append(data, tail...)
+
+		scanEnd := len(data)
+		if end == info.Size() && scanEnd > 0 && data[scanEnd-1] == '\n' {
+			scanEnd--
+		}
+		for i := scanEnd - 1; i >= 0; i-- {
+			if data[i] != '\n' {
+				continue
+			}
+			line := bytes.TrimSpace(data[i+1 : scanEnd])
+			if len(line) > 0 {
+				return bytes.Clone(line), nil
+			}
+			scanEnd = i
+		}
+
+		tail = append(tail[:0], data[:scanEnd]...)
+		end = start
+	}
+
+	line := bytes.TrimSpace(tail)
+	if len(line) == 0 {
+		return nil, os.ErrNotExist
+	}
+	return bytes.Clone(line), nil
 }
 
 // NewScanner returns a scanner sized for large JSONL audit entries.

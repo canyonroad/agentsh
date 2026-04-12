@@ -162,9 +162,12 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 		now = time.Now
 	}
 
-	priorSummary, err := currentChainSummary(logPath)
+	priorSummary, hasPriorData, err := currentChainSummary(logPath)
 	if err != nil {
 		return err
+	}
+	if !opts.LegacyArchive && hasPriorData && priorSummary == nil {
+		return fmt.Errorf("cannot capture prior chain summary for in-place reset; retry with --legacy-archive")
 	}
 
 	if opts.LegacyArchive {
@@ -228,29 +231,29 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 	})
 }
 
-func currentChainSummary(logPath string) (map[string]any, error) {
+func currentChainSummary(logPath string) (map[string]any, bool, error) {
 	files, err := existingRotationFiles(logPath)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	_, lastLine, err := readLastNonEmptyLineBestEffort(files)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, nil
+		return nil, len(files) > 0, err
 	}
 
 	entry, err := audit.ParseIntegrityEntry(lastLine)
 	if err != nil || entry.Integrity == nil {
-		return nil, nil
+		return nil, true, nil
 	}
 
 	return map[string]any{
 		"last_sequence_seen_in_log":   entry.Integrity.Sequence,
 		"last_entry_hash_seen_in_log": entry.Integrity.EntryHash,
-	}, nil
+	}, true, nil
 }
 
 func archiveRotationSet(logPath, stamp string) error {
