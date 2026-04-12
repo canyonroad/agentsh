@@ -328,12 +328,16 @@ func TestIntegrityStore_FatalSidecarFailureRecoversOnRestart(t *testing.T) {
 	}
 }
 
-func TestIntegrityStore_PartialWriteDoesNotRollBack(t *testing.T) {
+func TestIntegrityStore_PartialWriteReturnsFatalErrorAndDoesNotRollBack(t *testing.T) {
 	store, chain, _, initialState := newBootstrappedRawIntegrityStore(t, &mockPartialFailRawWriter{})
 
 	err := store.AppendEvent(context.Background(), types.Event{ID: "ev-1", Type: "test"})
 	if err == nil {
 		t.Fatal("AppendEvent() error = nil, want partial write failure")
+	}
+	var fatal *FatalIntegrityError
+	if !errors.As(err, &fatal) {
+		t.Fatalf("AppendEvent() error = %v, want FatalIntegrityError", err)
 	}
 
 	state := chain.State()

@@ -459,7 +459,7 @@ func locateVerifyStart(files []audit.LogFile, fromSequence int64) (*verifyStart,
 
 func verifyTargetContainsIntegrityMetadataFromSequence(files []audit.LogFile, integrityEnabled bool, opts verifyOptions) (bool, error) {
 	seenIntegrity := false
-	var pendingMalformed error
+	var pendingCorruption error
 
 	for fileIndex, file := range files {
 		f, err := os.Open(file.Path)
@@ -498,21 +498,24 @@ func verifyTargetContainsIntegrityMetadataFromSequence(files []audit.LogFile, in
 					isTolerableTruncation(err) {
 					break
 				}
-				pendingMalformed = fmt.Errorf("malformed JSON at %s:%d: %w", file.Path, lineNo, err)
+				if seenIntegrity && pendingCorruption == nil {
+					pendingCorruption = fmt.Errorf("malformed JSON at %s:%d: %w", file.Path, lineNo, err)
+				}
 				if errors.Is(readErr, io.EOF) {
 					break
 				}
 				continue
 			}
 			if entry.Integrity == nil {
-				pendingMalformed = fmt.Errorf("unsigned line at %s:%d", file.Path, lineNo)
+				if seenIntegrity && pendingCorruption == nil {
+					pendingCorruption = fmt.Errorf("unsigned line at %s:%d", file.Path, lineNo)
+				}
 				if errors.Is(readErr, io.EOF) {
 					break
 				}
 				continue
 			}
 			seenIntegrity = true
-			pendingMalformed = nil
 
 			if errors.Is(readErr, io.EOF) {
 				break
@@ -523,8 +526,8 @@ func verifyTargetContainsIntegrityMetadataFromSequence(files []audit.LogFile, in
 	}
 
 	if seenIntegrity {
-		if pendingMalformed != nil {
-			return false, pendingMalformed
+		if pendingCorruption != nil {
+			return false, pendingCorruption
 		}
 		return true, nil
 	}

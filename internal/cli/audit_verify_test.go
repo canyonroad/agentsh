@@ -1099,7 +1099,7 @@ func TestAuditVerifyCmd_FromSequenceMissingStartRejectsMalformedSuffix(t *testin
 	}
 }
 
-func TestAuditVerifyCmd_FromSequenceMissingStartIgnoresMalformedPreStartLine(t *testing.T) {
+func TestAuditVerifyCmd_FromSequenceMissingStartRejectsMalformedMidLogLine(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -1134,10 +1134,10 @@ func TestAuditVerifyCmd_FromSequenceMissingStartIgnoresMalformedPreStartLine(t *
 
 	err = cmd.Execute()
 	if err == nil {
-		t.Fatal("Execute() error = nil, want missing start failure")
+		t.Fatal("Execute() error = nil, want malformed JSON failure")
 	}
-	if !strings.Contains(err.Error(), "sequence mismatch: expected starting sequence 5, got end of log") {
-		t.Fatalf("Execute() error = %v, want missing start sequence mismatch", err)
+	if !strings.Contains(err.Error(), "malformed JSON") {
+		t.Fatalf("Execute() error = %v, want malformed JSON message", err)
 	}
 }
 
@@ -1177,6 +1177,48 @@ func TestAuditVerifyCmd_FromSequenceMissingStartRejectsUnsignedSuffix(t *testing
 	err = cmd.Execute()
 	if err == nil {
 		t.Fatal("Execute() error = nil, want unsigned suffix failure")
+	}
+	if !strings.Contains(err.Error(), "unsigned line") {
+		t.Fatalf("Execute() error = %v, want unsigned line message", err)
+	}
+}
+
+func TestAuditVerifyCmd_FromSequenceMissingStartRejectsUnsignedMidLogLine(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	first, err := chain.Wrap([]byte(`{"type":"first_signed"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	second, err := chain.Wrap([]byte(`{"type":"second_signed"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	data := append([]byte{}, first...)
+	data = append(data, '\n')
+	data = append(data, []byte(`{"type":"unsigned_mid_log"}`)...)
+	data = append(data, '\n')
+	data = append(data, second...)
+	data = append(data, '\n')
+	if err := os.WriteFile(logPath, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--from-sequence", "5", logPath})
+
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want unsigned line failure")
 	}
 	if !strings.Contains(err.Error(), "unsigned line") {
 		t.Fatalf("Execute() error = %v, want unsigned line message", err)

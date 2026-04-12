@@ -422,6 +422,9 @@ func (s *IntegrityStore) AppendEvent(ctx context.Context, ev types.Event) error 
 	}
 	if err := rw.WriteRaw(ctx, wrapped); err != nil {
 		type partialWriter interface{ IsPartialWrite() bool }
+		if pw, ok := err.(partialWriter); ok && pw.IsPartialWrite() {
+			return &FatalIntegrityError{Op: "write audit log", Err: err}
+		}
 		if pw, ok := err.(partialWriter); !ok || !pw.IsPartialWrite() {
 			s.chain.Restore(prevState.Sequence, prevState.PrevHash)
 		}
