@@ -325,6 +325,88 @@ func mustYAMLNode(t *testing.T, s string) yaml.Node {
 	}
 	return n
 }
+
+func TestValidateHTTPServices_InjectNoHeader_Rejected(t *testing.T) {
+	// inject is set but has no header → useless config, reject.
+	svcs := []policy.HTTPService{{
+		Name: "bad", Upstream: "https://api.example.com",
+		Secret: &policy.HTTPServiceSecret{Ref: "keyring://agentsh/key", Format: "ghp_{rand:36}"},
+		Inject: &policy.HTTPServiceInject{}, // no Header
+	}}
+	providers := map[string]yaml.Node{"keyring": mustYAMLNode(t, "type: keyring")}
+	err := policy.ValidateHTTPServicesWithProviders(svcs, providers)
+	if err == nil || !strings.Contains(err.Error(), "inject.header is required") {
+		t.Fatalf("want 'inject.header is required' error, got: %v", err)
+	}
+}
+
+func TestValidateHTTPServices_InjectHeaderNameEmpty_Rejected(t *testing.T) {
+	svcs := []policy.HTTPService{{
+		Name: "bad", Upstream: "https://api.example.com",
+		Secret: &policy.HTTPServiceSecret{Ref: "keyring://agentsh/key", Format: "ghp_{rand:36}"},
+		Inject: &policy.HTTPServiceInject{Header: &policy.HTTPServiceInjectHeader{Name: "", Template: "{{secret}}"}},
+	}}
+	providers := map[string]yaml.Node{"keyring": mustYAMLNode(t, "type: keyring")}
+	err := policy.ValidateHTTPServicesWithProviders(svcs, providers)
+	if err == nil || !strings.Contains(err.Error(), "header name is required") {
+		t.Fatalf("want 'header name is required' error, got: %v", err)
+	}
+}
+
+func TestValidateHTTPServices_MultipleServicesMultipleProviders(t *testing.T) {
+	svcs := []policy.HTTPService{
+		{
+			Name: "github", Upstream: "https://api.github.com",
+			Secret: &policy.HTTPServiceSecret{Ref: "vault://kv/data/github#token", Format: "ghp_{rand:36}"},
+			Inject: &policy.HTTPServiceInject{Header: &policy.HTTPServiceInjectHeader{Name: "Authorization", Template: "Bearer {{secret}}"}},
+		},
+		{
+			Name: "anthropic", Upstream: "https://api.anthropic.com",
+			Secret: &policy.HTTPServiceSecret{Ref: "keyring://agentsh/anthropic_key", Format: "sk-ant-{rand:93}"},
+			Inject: &policy.HTTPServiceInject{Header: &policy.HTTPServiceInjectHeader{Name: "x-api-key", Template: "{{secret}}"}},
+		},
+	}
+	providers := map[string]yaml.Node{
+		"vault":   mustYAMLNode(t, "type: vault\naddress: https://vault.example.com"),
+		"keyring": mustYAMLNode(t, "type: keyring"),
+	}
+	if err := policy.ValidateHTTPServicesWithProviders(svcs, providers); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPolicyValidate_ProvidersNoHTTPServices(t *testing.T) {
+	// Policy with providers but no http_services should load fine.
+	input := `
+version: 1
+providers:
+  keyring:
+    type: keyring
+`
+	var p policy.Policy
+	if err := yaml.Unmarshal([]byte(input), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("expected no error for providers-only policy, got: %v", err)
+	}
+}
+
+func TestValidateHTTPServices_SecretRefWithFragment(t *testing.T) {
+	// Verify that secret.ref with a #fragment (e.g. vault://kv/data/github#token)
+	// parses correctly.
+	svcs := []policy.HTTPService{{
+		Name: "github", Upstream: "https://api.github.com",
+		Secret: &policy.HTTPServiceSecret{Ref: "vault://kv/data/github#token", Format: "ghp_{rand:36}"},
+		Inject: &policy.HTTPServiceInject{Header: &policy.HTTPServiceInjectHeader{Name: "Authorization", Template: "Bearer {{secret}}"}},
+	}}
+	providers := map[string]yaml.Node{
+		"vault": mustYAMLNode(t, "type: vault\naddress: https://vault.example.com"),
+	}
+	if err := policy.ValidateHTTPServicesWithProviders(svcs, providers); err != nil {
+		t.Fatalf("secret.ref with fragment should be valid, got: %v", err)
+	}
+}
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -416,6 +498,12 @@ func ValidateHTTPServicesWithProviders(svcs []HTTPService, providers map[string]
 			if !strings.Contains(s.Inject.Header.Template, "{{secret}}") {
 				return fmt.Errorf("http_services[%q]: inject.header.template must contain {{secret}}", s.Name)
 			}
+			if strings.TrimSpace(s.Inject.Header.Name) == "" {
+				return fmt.Errorf("http_services[%q]: inject.header name is required", s.Name)
+			}
+		}
+		if s.Inject != nil && s.Inject.Header == nil {
+			return fmt.Errorf("http_services[%q]: inject.header is required when inject is set", s.Name)
 		}
 	}
 	return nil
@@ -580,7 +668,7 @@ git commit -m "feat(policy): default to allow for credentials-only http_services
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `internal/session/secretsconfig_test.go`:
+Add to `internal/session/secretsconfig_test.go`. **Note:** the existing tests `TestResolveServiceConfigs`, `TestResolveServiceConfigs_InjectEnv`, and `TestResolveServiceConfigs_ScrubResponse` use the deleted `policy.ServiceYAML` type. Delete those tests and replace with the new ones below.
 
 ```go
 func TestResolveServiceConfigs_FromHTTPService(t *testing.T) {
@@ -1115,7 +1203,412 @@ git commit -m "feat(proxy): differentiate secret_cross_service_use audit event"
 
 ---
 
-### Task 8: Documentation
+### Task 8: Integration Tests — Proxy Credential Substitution and Edge Cases
+
+This task adds the integration tests that verify credential substitution works end-to-end through the proxy's `ServeHTTP` path, plus edge cases not covered by earlier unit tests. These tests go in `internal/proxy/declared_service_test.go` alongside the existing declared-service tests.
+
+**Files:**
+- Modify: `internal/proxy/declared_service_test.go`
+
+- [ ] **Step 1: Write the credential substitution end-to-end test**
+
+Add to `internal/proxy/declared_service_test.go`:
+
+```go
+func TestServeDeclaredService_CredentialSubstitution_EndToEnd(t *testing.T) {
+	// Upstream records what it receives and echoes back a response
+	// containing the real credential (to verify response scrubbing).
+	var upstreamAuthHeader string
+	var upstreamBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamAuthHeader = r.Header.Get("Authorization")
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		// Response deliberately contains the real credential.
+		fmt.Fprintf(w, `{"echoed":"ghp_REAL1234567890abcdef"}`)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{{
+		Name: "allow-repos", Methods: []string{"POST"}, Paths: []string{"/repos/**"}, Decision: "allow",
+	}})
+
+	// Set up credential table and hooks.
+	tbl := credsub.New()
+	if err := tbl.Add("github",
+		[]byte("ghp_FAKE1234567890abcdef"),
+		[]byte("ghp_REAL1234567890abcdef"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	scrubServices := map[string]bool{"github": true}
+	p.HookRegistry().Register("", NewLeakGuardHook(tbl, slog.Default()))
+	p.HookRegistry().Register("", NewCredsSubHook(tbl, scrubServices))
+	p.HookRegistry().Register("github", NewHeaderInjectionHook(
+		"github", "Authorization", "Bearer {{secret}}", tbl))
+
+	// Client sends fake credential in body.
+	body := []byte(`{"token":"ghp_FAKE1234567890abcdef"}`)
+	req := httptest.NewRequest(http.MethodPost,
+		"http://127.0.0.1/svc/github/repos/owner/repo/issues", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	// Upstream should have received REAL credential in header.
+	if upstreamAuthHeader != "Bearer ghp_REAL1234567890abcdef" {
+		t.Errorf("upstream Auth = %q, want real credential injected", upstreamAuthHeader)
+	}
+	// Upstream body should have REAL credential (substituted from fake).
+	if !bytes.Contains(upstreamBody, []byte("ghp_REAL1234567890abcdef")) {
+		t.Errorf("upstream body = %q, want real credential in body", upstreamBody)
+	}
+	// Client response should have FAKE credential (scrubbed from real).
+	respBody := w.Body.String()
+	if strings.Contains(respBody, "ghp_REAL1234567890abcdef") {
+		t.Error("response body contains real credential — scrubbing failed")
+	}
+	if !strings.Contains(respBody, "ghp_FAKE1234567890abcdef") {
+		t.Error("response body should contain fake credential (scrubbed)")
+	}
+}
+```
+
+- [ ] **Step 2: Write the deny-with-credentials test (upstream not contacted)**
+
+```go
+func TestServeDeclaredService_CredentialsDeny_UpstreamNotContacted(t *testing.T) {
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "read", Methods: []string{"GET"}, Paths: []string{"/repos/**"}, Decision: "allow"},
+	})
+	// Default is "deny" from the helper, so DELETE won't match any rule → denied.
+	tbl := credsub.New()
+	if err := tbl.Add("github",
+		[]byte("ghp_FAKE1234567890abcdef"),
+		[]byte("ghp_REAL1234567890abcdef"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	p.HookRegistry().Register("", NewLeakGuardHook(tbl, slog.Default()))
+	p.HookRegistry().Register("", NewCredsSubHook(tbl, nil))
+	p.HookRegistry().Register("github", NewHeaderInjectionHook(
+		"github", "Authorization", "Bearer {{secret}}", tbl))
+
+	req := httptest.NewRequest(http.MethodDelete,
+		"http://127.0.0.1/svc/github/repos/a/b", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	if upstreamCalled {
+		t.Error("upstream should NOT have been contacted for denied request")
+	}
+}
+```
+
+- [ ] **Step 3: Write the credentials-only service test (all requests allowed)**
+
+```go
+func TestServeDeclaredService_CredentialsOnly_AllRequestsAllowed(t *testing.T) {
+	var upstreamApiKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamApiKey = r.Header.Get("X-Api-Key")
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	// Build proxy manually — credentials-only service (no rules, no explicit
+	// default). After Task 3, empty Default + no Rules → allow.
+	cfg := Config{SessionID: "test-session"}
+	p, err := New(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	svcs := []policy.HTTPService{{
+		Name: "anthropic", Upstream: upstream.URL,
+		// No Default, no Rules → credentials-only.
+	}}
+	if err := policy.ValidateHTTPServices(svcs); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	pol := &policy.Policy{HTTPServices: svcs}
+	eng, err := policy.NewEngine(pol, true, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	p.SetPolicyEngine(eng)
+	p.SetHTTPServices(svcs)
+
+	tbl := credsub.New()
+	if err := tbl.Add("anthropic",
+		[]byte("sk-ant-FAKE567890abcdef12"),
+		[]byte("sk-ant-REAL567890abcdef12"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	p.HookRegistry().Register("", NewCredsSubHook(tbl, nil))
+	p.HookRegistry().Register("anthropic", NewHeaderInjectionHook(
+		"anthropic", "X-Api-Key", "{{secret}}", tbl))
+
+	// Any method/path should be allowed.
+	req := httptest.NewRequest(http.MethodPost,
+		"http://127.0.0.1/svc/anthropic/v1/messages", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (credentials-only allows all)", w.Code)
+	}
+	if upstreamApiKey != "sk-ant-REAL567890abcdef12" {
+		t.Errorf("upstream X-Api-Key = %q, want real credential", upstreamApiKey)
+	}
+}
+```
+
+- [ ] **Step 4: Write the `scrub_response: false` functional test**
+
+```go
+func TestServeDeclaredService_ScrubResponseFalse_RealsNotScrubbed(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Response contains real credential.
+		fmt.Fprintf(w, `{"key":"ghp_REAL1234567890abcdef"}`)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-all", Paths: []string{"/**"}, Decision: "allow"},
+	})
+
+	tbl := credsub.New()
+	if err := tbl.Add("github",
+		[]byte("ghp_FAKE1234567890abcdef"),
+		[]byte("ghp_REAL1234567890abcdef"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	// scrub_response=false: "github" is NOT in the scrub map.
+	scrubServices := map[string]bool{} // empty = no services scrubbed
+	p.HookRegistry().Register("", NewCredsSubHook(tbl, scrubServices))
+
+	req := httptest.NewRequest(http.MethodGet,
+		"http://127.0.0.1/svc/github/repos/owner/repo", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	// Real credential should remain in response (scrubbing disabled).
+	respBody := w.Body.String()
+	if !strings.Contains(respBody, "ghp_REAL1234567890abcdef") {
+		t.Error("response should contain real credential (scrub disabled)")
+	}
+}
+```
+
+- [ ] **Step 5: Write the emergency lockdown test (credentials-only + explicit deny)**
+
+```go
+func TestServeDeclaredService_CredentialsOnly_ExplicitDeny_BlocksAll(t *testing.T) {
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	// Credentials-only service with explicit default: deny (emergency lockdown).
+	cfg := Config{SessionID: "test-session"}
+	p, err := New(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	svcs := []policy.HTTPService{{
+		Name: "locked", Upstream: upstream.URL, Default: "deny",
+		// No Rules — the explicit deny blocks everything.
+	}}
+	if err := policy.ValidateHTTPServices(svcs); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	pol := &policy.Policy{HTTPServices: svcs}
+	eng, err := policy.NewEngine(pol, true, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	p.SetPolicyEngine(eng)
+	p.SetHTTPServices(svcs)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"http://127.0.0.1/svc/locked/anything", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (emergency lockdown)", w.Code)
+	}
+	if upstreamCalled {
+		t.Error("upstream should NOT have been contacted during lockdown")
+	}
+}
+```
+
+- [ ] **Step 6: Write the cross-service leak detection through proxy test**
+
+```go
+func TestServeDeclaredService_CrossServiceLeak_BlockedWith403(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream should not have been contacted")
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	// Two declared services.
+	cfg := Config{SessionID: "test-session"}
+	p, err := New(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	svcs := []policy.HTTPService{
+		{Name: "github", Upstream: upstream.URL, Default: "allow"},
+		{Name: "stripe", Upstream: "https://api.stripe.com", Default: "allow"},
+	}
+	if err := policy.ValidateHTTPServices(svcs); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	pol := &policy.Policy{HTTPServices: svcs}
+	eng, err := policy.NewEngine(pol, true, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	p.SetPolicyEngine(eng)
+	p.SetHTTPServices(svcs)
+
+	// Credential table with fakes for both services.
+	tbl := credsub.New()
+	if err := tbl.Add("github",
+		[]byte("ghp_FAKE1234567890abcdef"),
+		[]byte("ghp_REAL1234567890abcdef"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := tbl.Add("stripe",
+		[]byte("sk_live_FAKE567890abcdef12"),
+		[]byte("sk_live_REAL567890abcdef12"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	p.HookRegistry().Register("", NewLeakGuardHook(tbl, slog.Default()))
+	p.HookRegistry().Register("", NewCredsSubHook(tbl, nil))
+
+	// Send github's fake credential to stripe's service → cross-service leak.
+	body := []byte(`{"token":"ghp_FAKE1234567890abcdef"}`)
+	req := httptest.NewRequest(http.MethodPost,
+		"http://127.0.0.1/svc/stripe/v1/charges", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (cross-service leak)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "credential leak blocked") {
+		t.Errorf("body = %q, want 'credential leak blocked'", w.Body.String())
+	}
+}
+```
+
+- [ ] **Step 7: Write the filtering-only test (no hooks, no credential injection)**
+
+```go
+func TestServeDeclaredService_FilteringOnly_NoCredentialHooks(t *testing.T) {
+	var upstreamAuthHeader string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamAuthHeader = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	// Filtering-only service — no credential hooks registered.
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-read", Methods: []string{"GET"}, Paths: []string{"/**"}, Decision: "allow"},
+	})
+	// Deliberately do NOT register any credential hooks.
+
+	req := httptest.NewRequest(http.MethodGet,
+		"http://127.0.0.1/svc/github/repos/owner/repo", nil)
+	req.Header.Set("Authorization", "Bearer user-provided-token")
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	// Upstream should receive the header as-is (no substitution).
+	if upstreamAuthHeader != "Bearer user-provided-token" {
+		t.Errorf("upstream Auth = %q, want original token (no hook)", upstreamAuthHeader)
+	}
+}
+```
+
+- [ ] **Step 8: Write the matcher removal regression test**
+
+```go
+func TestServeHTTP_HostHeaderOnly_DoesNotRouteToDeclaredService(t *testing.T) {
+	// After matcher removal, a request with Host: api.github.com but no
+	// /svc/github/ prefix should NOT route to the declared service. It
+	// should fall through to the LLM dialect detection path.
+	p := newTestProxyWithHTTPService(t, "https://api.github.com", []policy.HTTPServiceRule{
+		{Name: "allow-all", Paths: []string{"/**"}, Decision: "allow"},
+	})
+
+	// Request uses Host header matching the upstream, but the URL path
+	// does NOT start with /svc/github/.
+	req := httptest.NewRequest(http.MethodGet, "http://api.github.com/repos/owner/repo", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	// Should NOT be 200 from the declared service — it should go to the
+	// LLM path (which will likely fail with 400/404 since it's not a valid
+	// LLM request). The key assertion is that it's NOT routed as a
+	// declared service (which would return 200 with the upstream response).
+	// If a Matcher were still active, it would route based on Host header.
+	if w.Code == http.StatusOK {
+		t.Error("Host-only request should NOT route to declared service (matcher removed)")
+	}
+}
+```
+
+- [ ] **Step 9: Run all tests**
+
+Run: `go test ./internal/proxy/... -run "TestServeDeclaredService_(CredentialSub|CredentialsDeny|CredentialsOnly|ScrubResponse|ExplicitDeny|CrossService|FilteringOnly)|TestServeHTTP_HostHeaderOnly" -v -count=1`
+Expected: PASS
+
+- [ ] **Step 10: Run full proxy test suite for regressions**
+
+Run: `go test ./internal/proxy/... -count=1`
+Expected: PASS
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add internal/proxy/declared_service_test.go
+git commit -m "test(proxy): integration tests for credential substitution through declared services"
+```
+
+---
+
+### Task 9: Documentation
 
 **Files:**
 - Modify: `docs/cookbook/http-services.md`
@@ -1292,7 +1785,7 @@ git commit -m "docs: credential substitution recipes and reference for unified h
 
 ---
 
-### Task 9: Cross-Compile Gate and Final Verification
+### Task 10: Cross-Compile Gate and Final Verification
 
 **Files:** None (verification only)
 
