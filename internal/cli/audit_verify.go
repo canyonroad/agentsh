@@ -43,6 +43,11 @@ type verifyStart struct {
 	sequence  int64
 }
 
+type integrityProbe struct {
+	hasIntegrity bool
+	ambiguous    bool
+}
+
 type rotationVerifyPayload struct {
 	Fields struct {
 		ReasonCode         string `json:"reason_code"`
@@ -84,9 +89,16 @@ func newAuditVerifyCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				hasIntegrityMetadata = start != nil
-			}
-			if !hasIntegrityMetadata {
+				if start != nil {
+					hasIntegrityMetadata = true
+				} else {
+					probe, err := probeIntegrityMetadata(files)
+					if err != nil {
+						return err
+					}
+					hasIntegrityMetadata = probe.hasIntegrity || probe.ambiguous
+				}
+			} else {
 				var err error
 				hasIntegrityMetadata, err = verifyTargetContainsIntegrityMetadata(files, cfg.Audit.Integrity.Enabled, opts)
 				if err != nil {
@@ -449,6 +461,56 @@ func locateVerifyStart(files []audit.LogFile, fromSequence int64) (*verifyStart,
 	}
 
 	return nil, nil
+}
+
+func probeIntegrityMetadata(files []audit.LogFile) (integrityProbe, error) {
+	probe := integrityProbe{}
+	for _, file := range files {
+		f, err := os.Open(file.Path)
+		if err != nil {
+			return integrityProbe{}, fmt.Errorf("open %s: %w", file.Path, err)
+		}
+
+		reader := bufio.NewReader(f)
+		for {
+			rawLine, readErr := reader.ReadBytes('\n')
+			if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
+				break
+			}
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				_ = f.Close()
+				return integrityProbe{}, fmt.Errorf("scan %s: %w", file.Path, readErr)
+			}
+
+			line := bytes.TrimSpace(rawLine)
+			if len(line) == 0 {
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
+				continue
+			}
+
+			entry, err := audit.ParseIntegrityEntry(line)
+			if err == nil && entry.Integrity != nil {
+				_ = f.Close()
+				return integrityProbe{hasIntegrity: true}, nil
+			}
+			if err != nil {
+				trimmed := bytes.TrimSpace(line)
+				if len(trimmed) > 0 && trimmed[0] == '{' {
+					probe.ambiguous = true
+				}
+			}
+
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+		}
+
+		_ = f.Close()
+	}
+
+	return probe, nil
 }
 
 func verifyRotationBoundary(payload []byte, summary *verifySummary, state verifyState, visibleOriginIsBackup bool) error {
