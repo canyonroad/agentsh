@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -333,6 +334,58 @@ func existingRotationFiles(logPath string) ([]audit.LogFile, error) {
 	return files, nil
 }
 
+func discoverRotationSetForVerify(logPath string) ([]audit.LogFile, error) {
+	dir := filepath.Dir(logPath)
+	baseName := filepath.Base(logPath)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read audit rotation dir: %w", err)
+	}
+
+	indexes := make([]int, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, baseName+".") {
+			continue
+		}
+		suffix := strings.TrimPrefix(name, baseName+".")
+		index, err := strconv.Atoi(suffix)
+		if err != nil {
+			continue
+		}
+		indexes = append(indexes, index)
+	}
+
+	sort.Ints(indexes)
+	for i, index := range indexes {
+		want := i + 1
+		if index != want {
+			return nil, fmt.Errorf("missing audit log file %s.%d", logPath, want)
+		}
+	}
+
+	files := make([]audit.LogFile, 0, len(indexes)+1)
+	for i := len(indexes) - 1; i >= 0; i-- {
+		files = append(files, audit.LogFile{
+			Path:     logPath + "." + strconv.Itoa(indexes[i]),
+			Index:    indexes[i],
+			IsBackup: true,
+		})
+	}
+	if _, err := os.Stat(logPath); err == nil {
+		files = append(files, audit.LogFile{
+			Path:     logPath,
+			Index:    0,
+			IsBackup: false,
+		})
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("stat %s: %w", logPath, err)
+	}
+
+	return files, nil
+}
+
 func readLastNonEmptyLineBestEffort(files []audit.LogFile) (audit.LogFile, []byte, error) {
 	if len(files) == 0 {
 		return audit.LogFile{}, nil, os.ErrNotExist
@@ -365,20 +418,31 @@ func readLastNonEmptyLineBestEffort(files []audit.LogFile) (audit.LogFile, []byt
 			return audit.LogFile{}, nil, fmt.Errorf("open %s: %w", file.Path, err)
 		}
 
+		reader := bufio.NewReader(f)
 		var last []byte
-		scanner := audit.NewScanner(f)
-		for scanner.Scan() {
-			line := bytes.TrimSpace(scanner.Bytes())
+		for {
+			rawLine, readErr := reader.ReadBytes('\n')
+			if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
+				break
+			}
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				_ = f.Close()
+				return audit.LogFile{}, nil, fmt.Errorf("scan %s: %w", file.Path, readErr)
+			}
+
+			line := bytes.TrimSpace(rawLine)
 			if len(line) == 0 {
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
 				continue
 			}
 			last = bytes.Clone(line)
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
 		}
-		scanErr := scanner.Err()
 		_ = f.Close()
-		if scanErr != nil {
-			return audit.LogFile{}, nil, fmt.Errorf("scan %s: %w", file.Path, scanErr)
-		}
 		if len(last) > 0 {
 			return file, last, nil
 		}

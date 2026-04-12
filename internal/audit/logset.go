@@ -184,16 +184,24 @@ func readFirstNonEmptyLineFromFile(path string) ([]byte, error) {
 	}
 	defer file.Close()
 
-	scanner := NewScanner(file)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
+	reader := bufio.NewReader(file)
+	for {
+		rawLine, readErr := reader.ReadBytes('\n')
+		if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
+			break
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, readErr
+		}
+
+		line := bytes.TrimSpace(rawLine)
 		if len(line) == 0 {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
 			continue
 		}
 		return bytes.Clone(line), nil
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
 	}
 	return nil, os.ErrNotExist
 }

@@ -289,3 +289,33 @@ func TestAuditChainResetCmd_LegacyArchiveAllowsResetWhenPriorSummaryUnavailable(
 		t.Fatalf("Execute() error = %v", err)
 	}
 }
+
+func TestReadLastNonEmptyLineBestEffort_AllowsVeryLargeEntry(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "audit.jsonl")
+	backup := base + ".1"
+
+	if err := os.WriteFile(backup, []byte("older\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", backup, err)
+	}
+	line := bytes.Repeat([]byte("x"), 9*1024*1024)
+	if err := os.WriteFile(base, append(line, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base, err)
+	}
+
+	files := []audit.LogFile{
+		{Path: backup, Index: 1, IsBackup: true},
+		{Path: base, Index: 0, IsBackup: false},
+	}
+
+	gotFile, gotLine, err := readLastNonEmptyLineBestEffort(files)
+	if err != nil {
+		t.Fatalf("readLastNonEmptyLineBestEffort() error = %v", err)
+	}
+	if gotFile.Path != base {
+		t.Fatalf("readLastNonEmptyLineBestEffort() file = %+v, want base file", gotFile)
+	}
+	if len(gotLine) != len(line) {
+		t.Fatalf("len(readLastNonEmptyLineBestEffort()) = %d, want %d", len(gotLine), len(line))
+	}
+}

@@ -1,11 +1,13 @@
 package store
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -126,12 +128,24 @@ func (s *IntegrityStore) validateVisibleChain(files []audit.LogFile) error {
 			return fmt.Errorf("open %s: %w", file.Path, err)
 		}
 
-		scanner := audit.NewScanner(f)
 		lineNo := 0
-		for scanner.Scan() {
+		reader := bufio.NewReader(f)
+		for {
+			rawLine, readErr := reader.ReadBytes('\n')
+			if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
+				break
+			}
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				_ = f.Close()
+				return fmt.Errorf("scan %s: %w", file.Path, readErr)
+			}
+
 			lineNo++
-			line := bytes.TrimSpace(scanner.Bytes())
+			line := bytes.TrimSpace(rawLine)
 			if len(line) == 0 {
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
 				continue
 			}
 
@@ -199,12 +213,11 @@ func (s *IntegrityStore) validateVisibleChain(files []audit.LogFile) error {
 			state.expectedPrevHash = entry.Integrity.EntryHash
 			state.seeded = true
 			state.verifiedEntries++
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
 		}
-		scanErr := scanner.Err()
 		_ = f.Close()
-		if scanErr != nil {
-			return fmt.Errorf("scan %s: %w", file.Path, scanErr)
-		}
 	}
 
 	return nil

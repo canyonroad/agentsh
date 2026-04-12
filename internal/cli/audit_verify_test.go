@@ -96,6 +96,48 @@ func TestAuditVerifyCmd_WalksRotationSetOldestFirst(t *testing.T) {
 	}
 }
 
+func TestAuditVerifyCmd_AllowsBackupOnlyRetainedWindow(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+
+	lines := make([][]byte, 0, 4)
+	for _, payload := range []string{`{"type":"a"}`, `{"type":"b"}`, `{"type":"c"}`, `{"type":"d"}`} {
+		line, err := chain.Wrap([]byte(payload))
+		if err != nil {
+			t.Fatalf("chain.Wrap() error = %v", err)
+		}
+		lines = append(lines, line)
+	}
+
+	if err := os.WriteFile(base+".2", joinAuditVerifyLines(lines[0], lines[1]), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base+".2", err)
+	}
+	if err := os.WriteFile(base+".1", joinAuditVerifyLines(lines[2], lines[3]), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base+".1", err)
+	}
+	writeAuditVerifyConfig(t, cfgPath, base)
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, base})
+
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "verified 4 entries across 2 files") {
+		t.Fatalf("output = %q, want backup-only rotation-set summary", got)
+	}
+}
+
 func TestAuditVerifyCmd_RejectsLegacyFormatEntry(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
@@ -340,4 +382,13 @@ func TestAuditVerifyCmd_TolerateTruncationRejectsMalformedFinalLineWithTrailingN
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("Execute() error = nil, want malformed newline-terminated tail failure")
 	}
+}
+
+func joinAuditVerifyLines(lines ...[]byte) []byte {
+	var out []byte
+	for _, line := range lines {
+		out = append(out, line...)
+		out = append(out, '\n')
+	}
+	return out
 }

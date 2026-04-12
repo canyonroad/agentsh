@@ -72,7 +72,7 @@ func newAuditVerifyCmd() *cobra.Command {
 				algorithm = "hmac-sha256"
 			}
 
-			files, err := audit.DiscoverRotationSet(args[0])
+			files, err := discoverRotationSetForVerify(args[0])
 			if err != nil {
 				return err
 			}

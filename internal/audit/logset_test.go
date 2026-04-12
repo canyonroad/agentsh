@@ -128,6 +128,27 @@ func TestReadFirstNonEmptyLine_SearchesOldestFirst(t *testing.T) {
 	}
 }
 
+func TestReadFirstNonEmptyLine_AllowsVeryLargeEntry(t *testing.T) {
+	t.Parallel()
+
+	base := filepath.Join(t.TempDir(), "audit.log")
+	line := bytes.Repeat([]byte("x"), 9*1024*1024)
+	if err := os.WriteFile(base, append(line, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base, err)
+	}
+
+	gotFile, gotLine, err := ReadFirstNonEmptyLine([]LogFile{{Path: base}})
+	if err != nil {
+		t.Fatalf("ReadFirstNonEmptyLine() error = %v", err)
+	}
+	if gotFile.Path != base {
+		t.Fatalf("ReadFirstNonEmptyLine() file = %+v, want base file", gotFile)
+	}
+	if len(gotLine) != len(line) {
+		t.Fatalf("len(ReadFirstNonEmptyLine()) = %d, want %d", len(gotLine), len(line))
+	}
+}
+
 func TestNewScanner_AllowsLargeTokens(t *testing.T) {
 	t.Parallel()
 
