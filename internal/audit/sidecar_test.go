@@ -109,6 +109,26 @@ func TestReadSidecar_RejectsInvalidState(t *testing.T) {
 			wantSubstr: "key_fingerprint",
 		},
 		{
+			name: "missing_sequence",
+			state: map[string]any{
+				"format_version":  IntegrityFormatVersion,
+				"prev_hash":       "abcd1234",
+				"key_fingerprint": "sha256:00112233445566778899aabbccddeeff",
+				"updated_at":      updatedAt,
+			},
+			wantSubstr: "sequence",
+		},
+		{
+			name: "missing_prev_hash",
+			state: map[string]any{
+				"format_version":  IntegrityFormatVersion,
+				"sequence":        int64(17),
+				"key_fingerprint": "sha256:00112233445566778899aabbccddeeff",
+				"updated_at":      updatedAt,
+			},
+			wantSubstr: "prev_hash",
+		},
+		{
 			name: "negative_sequence_with_prev_hash",
 			state: map[string]any{
 				"format_version":  IntegrityFormatVersion,
@@ -124,6 +144,7 @@ func TestReadSidecar_RejectsInvalidState(t *testing.T) {
 			state: map[string]any{
 				"format_version":  IntegrityFormatVersion,
 				"sequence":        int64(-2),
+				"prev_hash":       "",
 				"key_fingerprint": "sha256:00112233445566778899aabbccddeeff",
 				"updated_at":      updatedAt,
 			},
@@ -135,6 +156,17 @@ func TestReadSidecar_RejectsInvalidState(t *testing.T) {
 				"format_version":  IntegrityFormatVersion,
 				"sequence":        int64(2),
 				"prev_hash":       "",
+				"key_fingerprint": "sha256:00112233445566778899aabbccddeeff",
+				"updated_at":      updatedAt,
+			},
+			wantSubstr: "prev_hash",
+		},
+		{
+			name: "invalid_prev_hash",
+			state: map[string]any{
+				"format_version":  IntegrityFormatVersion,
+				"sequence":        int64(2),
+				"prev_hash":       "not-hex!!!",
 				"key_fingerprint": "sha256:00112233445566778899aabbccddeeff",
 				"updated_at":      updatedAt,
 			},
@@ -188,5 +220,68 @@ func TestWriteSidecar_FillsDefaults(t *testing.T) {
 	}
 	if got.UpdatedAt.IsZero() {
 		t.Fatal("UpdatedAt is zero, want auto-filled timestamp")
+	}
+}
+
+func TestWriteSidecar_CleansUpTempFileOnRenameFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log.chain")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("os.Mkdir(%q) error = %v", path, err)
+	}
+
+	err := WriteSidecar(path, SidecarState{
+		Sequence:       0,
+		PrevHash:       "",
+		KeyFingerprint: "sha256:00112233445566778899aabbccddeeff",
+	})
+	if err == nil {
+		t.Fatal("WriteSidecar() error = nil, want rename failure")
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, "audit.log.chain.tmp.*"))
+	if err != nil {
+		t.Fatalf("filepath.Glob() error = %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temp sidecar files = %v, want none", matches)
+	}
+}
+
+func TestWriteSidecar_OverwritesExistingFile(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "audit.log.chain")
+	first := SidecarState{
+		Sequence:       0,
+		PrevHash:       "",
+		KeyFingerprint: "sha256:00112233445566778899aabbccddeeff",
+		UpdatedAt:      time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC),
+	}
+	second := SidecarState{
+		Sequence:       3,
+		PrevHash:       "abcdef0123456789",
+		KeyFingerprint: "sha256:00112233445566778899aabbccddeeff",
+		UpdatedAt:      time.Date(2026, time.January, 2, 4, 5, 6, 0, time.UTC),
+	}
+
+	if err := WriteSidecar(path, first); err != nil {
+		t.Fatalf("WriteSidecar(first) error = %v", err)
+	}
+	if err := WriteSidecar(path, second); err != nil {
+		t.Fatalf("WriteSidecar(second) error = %v", err)
+	}
+
+	got, err := ReadSidecar(path)
+	if err != nil {
+		t.Fatalf("ReadSidecar() error = %v", err)
+	}
+	if got.Sequence != second.Sequence {
+		t.Fatalf("Sequence = %d, want %d", got.Sequence, second.Sequence)
+	}
+	if got.PrevHash != second.PrevHash {
+		t.Fatalf("PrevHash = %q, want %q", got.PrevHash, second.PrevHash)
 	}
 }
