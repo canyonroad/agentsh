@@ -249,32 +249,6 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 		return err
 	}
 
-	// Check for a prior partial reset: if the last line is already a
-	// verifiable rotation boundary at sequence 0 from this key, the previous
-	// attempt wrote the log entry but failed on the sidecar. Resume from it.
-	if lastLine, readErr := readLastLogLine(logPath); readErr == nil && len(lastLine) > 0 {
-		if entry, parseErr := audit.ParseIntegrityEntry(lastLine); parseErr == nil &&
-			entry.Type == "integrity_chain_rotated" &&
-			entry.Integrity != nil &&
-			entry.Integrity.Sequence == 0 {
-			ok, verifyErr := chain.VerifyHash(
-				entry.Integrity.FormatVersion,
-				entry.Integrity.Sequence,
-				entry.Integrity.PrevHash,
-				entry.CanonicalPayload,
-				entry.Integrity.EntryHash,
-			)
-			if verifyErr == nil && ok {
-				return audit.WriteSidecar(audit.SidecarPath(logPath), audit.SidecarState{
-					Sequence:       entry.Integrity.Sequence,
-					PrevHash:       entry.Integrity.EntryHash,
-					KeyFingerprint: chain.KeyFingerprint(),
-					UpdatedAt:      now().UTC(),
-				})
-			}
-		}
-	}
-
 	if err := inner.WriteRaw(ctx, wrapped); err != nil {
 		return err
 	}
@@ -696,21 +670,6 @@ func discoverRotationSetForVerify(logPath string) ([]audit.LogFile, error) {
 	}
 
 	return files, nil
-}
-
-// readLastLogLine returns the last non-empty line from the base log file.
-func readLastLogLine(logPath string) ([]byte, error) {
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		return nil, err
-	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if line := strings.TrimSpace(lines[i]); line != "" {
-			return []byte(line), nil
-		}
-	}
-	return nil, os.ErrNotExist
 }
 
 func readLastNonEmptyLineBestEffort(files []audit.LogFile) (audit.LogFile, []byte, error) {

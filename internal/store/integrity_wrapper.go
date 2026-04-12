@@ -341,8 +341,8 @@ func (s *IntegrityStore) bootstrapWithoutSidecar(files []audit.LogFile, lastFile
 
 	// If the last entry is already a rotation boundary we wrote (verifiable
 	// with our key, at sequence 0), the previous bootstrap attempt wrote the
-	// log entry but failed to persist the sidecar. Resume from it instead of
-	// appending a duplicate.
+	// log entry but failed to persist the sidecar. Validate the visible chain
+	// first, then resume from it instead of appending a duplicate.
 	if entry.Type == "integrity_chain_rotated" && entry.Integrity.Sequence == 0 {
 		ok, verifyErr := s.chain.VerifyHash(
 			entry.Integrity.FormatVersion,
@@ -352,6 +352,9 @@ func (s *IntegrityStore) bootstrapWithoutSidecar(files []audit.LogFile, lastFile
 			entry.Integrity.EntryHash,
 		)
 		if verifyErr == nil && ok {
+			if err := s.validateVisibleChain(files); err != nil {
+				return err
+			}
 			s.chain.Restore(entry.Integrity.Sequence, entry.Integrity.EntryHash)
 			return audit.WriteSidecar(s.sidecarPath, audit.SidecarState{
 				Sequence:       entry.Integrity.Sequence,
