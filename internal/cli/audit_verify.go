@@ -87,15 +87,9 @@ func newAuditVerifyCmd() *cobra.Command {
 				if start != nil {
 					hasIntegrityMetadata = true
 				} else {
-					hasIntegrityMetadata, err = containsIntegrityMetadataIgnoringMalformed(files)
+					hasIntegrityMetadata, err = verifyTargetContainsIntegrityMetadataFromSequence(files, cfg.Audit.Integrity.Enabled, opts)
 					if err != nil {
 						return err
-					}
-					if !hasIntegrityMetadata {
-						hasIntegrityMetadata, err = verifyTargetContainsIntegrityMetadata(files, cfg.Audit.Integrity.Enabled, opts)
-						if err != nil {
-							return err
-						}
 					}
 				}
 			} else {
@@ -463,14 +457,17 @@ func locateVerifyStart(files []audit.LogFile, fromSequence int64) (*verifyStart,
 	return nil, nil
 }
 
-func containsIntegrityMetadataIgnoringMalformed(files []audit.LogFile) (bool, error) {
-	for _, file := range files {
+func verifyTargetContainsIntegrityMetadataFromSequence(files []audit.LogFile, integrityEnabled bool, opts verifyOptions) (bool, error) {
+	seenIntegrity := false
+
+	for fileIndex, file := range files {
 		f, err := os.Open(file.Path)
 		if err != nil {
 			return false, fmt.Errorf("open %s: %w", file.Path, err)
 		}
 
 		reader := bufio.NewReader(f)
+		lineNo := 0
 		for {
 			rawLine, readErr := reader.ReadBytes('\n')
 			if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
@@ -481,6 +478,8 @@ func containsIntegrityMetadataIgnoringMalformed(files []audit.LogFile) (bool, er
 				return false, fmt.Errorf("scan %s: %w", file.Path, readErr)
 			}
 
+			lineNo++
+			hadNewline := len(rawLine) > 0 && rawLine[len(rawLine)-1] == '\n'
 			line := bytes.TrimSpace(rawLine)
 			if len(line) == 0 {
 				if errors.Is(readErr, io.EOF) {
@@ -490,9 +489,25 @@ func containsIntegrityMetadataIgnoringMalformed(files []audit.LogFile) (bool, er
 			}
 
 			entry, err := audit.ParseIntegrityEntry(line)
-			if err == nil && entry.Integrity != nil {
-				_ = f.Close()
-				return true, nil
+			if err != nil {
+				if opts.tolerateTruncation &&
+					fileIndex == len(files)-1 &&
+					errors.Is(readErr, io.EOF) &&
+					!hadNewline &&
+					isTolerableTruncation(err) {
+					break
+				}
+				if seenIntegrity {
+					_ = f.Close()
+					return false, fmt.Errorf("malformed JSON at %s:%d: %w", file.Path, lineNo, err)
+				}
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
+				continue
+			}
+			if entry.Integrity != nil {
+				seenIntegrity = true
 			}
 
 			if errors.Is(readErr, io.EOF) {
@@ -503,7 +518,11 @@ func containsIntegrityMetadataIgnoringMalformed(files []audit.LogFile) (bool, er
 		_ = f.Close()
 	}
 
-	return false, nil
+	if seenIntegrity {
+		return true, nil
+	}
+
+	return verifyTargetContainsIntegrityMetadata(files, integrityEnabled, opts)
 }
 
 func verifyRotationBoundary(payload []byte, summary *verifySummary, state verifyState, visibleOriginIsBackup bool) error {

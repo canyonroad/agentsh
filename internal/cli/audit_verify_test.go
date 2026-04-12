@@ -1057,6 +1057,48 @@ func TestAuditVerifyCmd_FromSequenceMissingStartIgnoresMalformedPrefix(t *testin
 	}
 }
 
+func TestAuditVerifyCmd_FromSequenceMissingStartRejectsMalformedSuffix(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	first, err := chain.Wrap([]byte(`{"type":"first_signed"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	second, err := chain.Wrap([]byte(`{"type":"second_signed"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	data := append([]byte{}, first...)
+	data = append(data, '\n')
+	data = append(data, second...)
+	data = append(data, '\n')
+	data = append(data, []byte(`{"type":"broken_suffix"`)...)
+	data = append(data, '\n')
+	if err := os.WriteFile(logPath, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--from-sequence", "5", logPath})
+
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want malformed JSON failure")
+	}
+	if !strings.Contains(err.Error(), "malformed JSON") {
+		t.Fatalf("Execute() error = %v, want malformed JSON message", err)
+	}
+}
+
 func joinAuditVerifyLines(lines ...[]byte) []byte {
 	var out []byte
 	for _, line := range lines {
