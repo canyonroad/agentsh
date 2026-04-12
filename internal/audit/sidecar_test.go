@@ -88,6 +88,17 @@ func TestReadSidecar_RejectsInvalidState(t *testing.T) {
 			wantSubstr: "format_version",
 		},
 		{
+			name: "negative_format_version",
+			state: map[string]any{
+				"format_version":  -1,
+				"sequence":        int64(17),
+				"prev_hash":       "abcd1234",
+				"key_fingerprint": "sha256:00112233445566778899aabbccddeeff",
+				"updated_at":      updatedAt,
+			},
+			wantSubstr: "format_version",
+		},
+		{
 			name: "missing_key_fingerprint",
 			state: map[string]any{
 				"format_version": IntegrityFormatVersion,
@@ -107,6 +118,27 @@ func TestReadSidecar_RejectsInvalidState(t *testing.T) {
 				"updated_at":      updatedAt,
 			},
 			wantSubstr: "sequence",
+		},
+		{
+			name: "sequence_below_minus_one",
+			state: map[string]any{
+				"format_version":  IntegrityFormatVersion,
+				"sequence":        int64(-2),
+				"key_fingerprint": "sha256:00112233445566778899aabbccddeeff",
+				"updated_at":      updatedAt,
+			},
+			wantSubstr: "sequence",
+		},
+		{
+			name: "positive_sequence_with_empty_prev_hash",
+			state: map[string]any{
+				"format_version":  IntegrityFormatVersion,
+				"sequence":        int64(2),
+				"prev_hash":       "",
+				"key_fingerprint": "sha256:00112233445566778899aabbccddeeff",
+				"updated_at":      updatedAt,
+			},
+			wantSubstr: "prev_hash",
 		},
 	}
 

@@ -27,14 +27,21 @@ type ParsedEntry struct {
 
 // DiscoverRotationSet returns audit log siblings in oldest-first order.
 func DiscoverRotationSet(base string) ([]LogFile, error) {
-	matches, err := filepath.Glob(base + ".*")
+	dir := filepath.Dir(base)
+	baseName := filepath.Base(base)
+
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("glob audit rotation set: %w", err)
+		return nil, fmt.Errorf("read audit rotation dir: %w", err)
 	}
 
-	indexes := make([]int, 0, len(matches))
-	for _, match := range matches {
-		suffix := strings.TrimPrefix(match, base+".")
+	indexes := make([]int, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, baseName+".") {
+			continue
+		}
+		suffix := strings.TrimPrefix(name, baseName+".")
 		index, err := strconv.Atoi(suffix)
 		if err != nil {
 			continue

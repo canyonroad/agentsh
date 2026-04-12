@@ -42,14 +42,18 @@ func ReadSidecar(path string) (SidecarState, error) {
 	}
 
 	switch {
-	case state.FormatVersion == 0:
-		return SidecarState{}, errors.New("parse sidecar: missing format_version")
+	case state.FormatVersion <= 0:
+		return SidecarState{}, errors.New("parse sidecar: missing or invalid format_version")
 	case state.FormatVersion > IntegrityFormatVersion:
 		return SidecarState{}, fmt.Errorf("parse sidecar: unsupported format_version %d", state.FormatVersion)
 	case state.KeyFingerprint == "":
 		return SidecarState{}, errors.New("parse sidecar: missing key_fingerprint")
+	case state.Sequence < -1:
+		return SidecarState{}, errors.New("parse sidecar: invalid sequence")
 	case state.Sequence < 0 && state.PrevHash != "":
 		return SidecarState{}, errors.New("parse sidecar: negative sequence with non-empty prev_hash")
+	case state.Sequence > 0 && state.PrevHash == "":
+		return SidecarState{}, errors.New("parse sidecar: positive sequence with empty prev_hash")
 	}
 
 	return state, nil
