@@ -13,6 +13,9 @@ import (
 // ErrSidecarNotFound indicates that no persisted integrity state exists yet.
 var ErrSidecarNotFound = errors.New("integrity sidecar not found")
 
+// ErrSidecarCorrupt indicates that the persisted sidecar exists but is malformed.
+var ErrSidecarCorrupt = errors.New("integrity sidecar corrupt")
+
 // SidecarState stores the last durable audit chain state alongside the log.
 type SidecarState struct {
 	FormatVersion  int       `json:"format_version"`
@@ -47,17 +50,17 @@ func ReadSidecar(path string) (SidecarState, error) {
 
 	var disk sidecarStateDisk
 	if err := json.Unmarshal(data, &disk); err != nil {
-		return SidecarState{}, fmt.Errorf("parse sidecar: %w", err)
+		return SidecarState{}, wrapSidecarCorrupt(fmt.Errorf("parse sidecar: %w", err))
 	}
 	switch {
 	case disk.FormatVersion == nil || *disk.FormatVersion <= 0:
-		return SidecarState{}, errors.New("parse sidecar: missing or invalid format_version")
+		return SidecarState{}, wrapSidecarCorrupt(errors.New("parse sidecar: missing or invalid format_version"))
 	case disk.Sequence == nil:
-		return SidecarState{}, errors.New("parse sidecar: missing sequence")
+		return SidecarState{}, wrapSidecarCorrupt(errors.New("parse sidecar: missing sequence"))
 	case disk.PrevHash == nil:
-		return SidecarState{}, errors.New("parse sidecar: missing prev_hash")
+		return SidecarState{}, wrapSidecarCorrupt(errors.New("parse sidecar: missing prev_hash"))
 	case disk.KeyFingerprint == nil || *disk.KeyFingerprint == "":
-		return SidecarState{}, errors.New("parse sidecar: missing key_fingerprint")
+		return SidecarState{}, wrapSidecarCorrupt(errors.New("parse sidecar: missing key_fingerprint"))
 	}
 
 	state := SidecarState{
@@ -72,20 +75,24 @@ func ReadSidecar(path string) (SidecarState, error) {
 
 	switch {
 	case state.FormatVersion > IntegrityFormatVersion:
-		return SidecarState{}, fmt.Errorf("parse sidecar: unsupported format_version %d", state.FormatVersion)
+		return SidecarState{}, wrapSidecarCorrupt(fmt.Errorf("parse sidecar: unsupported format_version %d", state.FormatVersion))
 	case state.Sequence < -1:
-		return SidecarState{}, errors.New("parse sidecar: invalid sequence")
+		return SidecarState{}, wrapSidecarCorrupt(errors.New("parse sidecar: invalid sequence"))
 	case state.Sequence < 0 && state.PrevHash != "":
-		return SidecarState{}, errors.New("parse sidecar: negative sequence with non-empty prev_hash")
+		return SidecarState{}, wrapSidecarCorrupt(errors.New("parse sidecar: negative sequence with non-empty prev_hash"))
 	case state.Sequence >= 0 && state.PrevHash == "":
-		return SidecarState{}, errors.New("parse sidecar: persisted sequence requires non-empty prev_hash")
+		return SidecarState{}, wrapSidecarCorrupt(errors.New("parse sidecar: persisted sequence requires non-empty prev_hash"))
 	case state.PrevHash != "":
 		if _, err := hex.DecodeString(state.PrevHash); err != nil {
-			return SidecarState{}, errors.New("parse sidecar: invalid prev_hash")
+			return SidecarState{}, wrapSidecarCorrupt(errors.New("parse sidecar: invalid prev_hash"))
 		}
 	}
 
 	return state, nil
+}
+
+func wrapSidecarCorrupt(err error) error {
+	return fmt.Errorf("%w: %v", ErrSidecarCorrupt, err)
 }
 
 // WriteSidecar atomically persists integrity state next to the audit log.

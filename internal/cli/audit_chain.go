@@ -79,10 +79,15 @@ func newAuditChainResetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			key, err := audit.LoadKey(cfg.Audit.Integrity.KeyFile, cfg.Audit.Integrity.KeyEnv)
+			resolvedReasonCode, err := resolveResetReasonCode(reasonCode, legacyArchive)
 			if err != nil {
 				return err
 			}
+			key, closeKey, err := loadAuditIntegrityKey(cmd.Context(), cfg.Audit.Integrity)
+			if err != nil {
+				return fmt.Errorf("load audit integrity key: %w", err)
+			}
+			defer func() { _ = closeKey() }()
 
 			logPath := cfg.Audit.Output
 			lockFile, err := openAndLockAuditFile(logPath)
@@ -107,7 +112,7 @@ func newAuditChainResetCmd() *cobra.Command {
 
 			if err := resetIntegrityChain(cmd.Context(), cfg, key, logPath, lockFile, resetOptions{
 				Reason:        reason,
-				ReasonCode:    reasonCode,
+				ReasonCode:    resolvedReasonCode,
 				LegacyArchive: legacyArchive,
 				Now:           time.Now,
 			}); err != nil {
@@ -120,7 +125,7 @@ func newAuditChainResetCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&configPath, "config", "", "Path to agentsh config YAML (default: auto-discover)")
 	cmd.Flags().StringVar(&reason, "reason", "", "Required free-form reason stored in the integrity_chain_rotated event")
-	cmd.Flags().StringVar(&reasonCode, "reason-code", "manual_reset", "Structured reset reason code")
+	cmd.Flags().StringVar(&reasonCode, "reason-code", "", "Structured reset reason code (sidecar_missing, sidecar_corrupt, key_rotated, legacy_archived, manual_reset, post_tamper_recovery)")
 	cmd.Flags().BoolVar(&legacyArchive, "legacy-archive", false, "Rename the current log to audit.jsonl.legacy.<timestamp> before starting fresh")
 	cmd.Flags().BoolVar(&force, "force", false, "Skip the confirmation prompt")
 	return cmd

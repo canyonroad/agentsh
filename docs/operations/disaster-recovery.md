@@ -271,7 +271,9 @@ If startup refuses because the sidecar and log no longer match, preserve the
 old files for review before reset:
 
 ```bash
-cp /var/log/agentsh/audit.jsonl* /var/log/agentsh/recovery-$(date +%Y%m%d%H%M%S)/ 2>/dev/null || true
+recovery_dir=/var/log/agentsh/recovery-$(date +%Y%m%d%H%M%S)
+mkdir -p "$recovery_dir"
+cp /var/log/agentsh/audit.jsonl* "$recovery_dir"/ 2>/dev/null || true
 ```
 
 Then start a fresh chain explicitly:

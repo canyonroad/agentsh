@@ -110,7 +110,7 @@ func (s *IntegrityStore) bootstrap() error {
 			return err
 		}
 		return s.resumeFromSidecar(sidecar, lastFile, lastLine, lastErr)
-	case errors.Is(sidecarErr, audit.ErrSidecarNotFound):
+	case errors.Is(sidecarErr, audit.ErrSidecarNotFound), errors.Is(sidecarErr, audit.ErrSidecarCorrupt):
 		return s.bootstrapWithoutSidecar(files, lastFile, lastLine, lastErr)
 	default:
 		return fmt.Errorf("read audit integrity sidecar: %w", sidecarErr)

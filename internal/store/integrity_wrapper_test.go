@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -239,6 +240,91 @@ func TestIntegrityStore_AppendEvent_WriteFailureRollsBackChain(t *testing.T) {
 
 	if state := chain.State(); state != initialState {
 		t.Fatalf("chain.State() = %+v, want %+v", state, initialState)
+	}
+}
+
+func TestIntegrityStore_FatalSidecarFailureRecoversOnRestart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission failure is not reliable on Windows")
+	}
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+
+	jsonlStore, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+
+	chain := mustNewIntegrityChain(t)
+	store, err := NewIntegrityStore(jsonlStore, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatalf("NewIntegrityStore() error = %v", err)
+	}
+
+	if err := store.AppendEvent(context.Background(), types.Event{ID: "1", Type: "ok"}); err != nil {
+		t.Fatalf("AppendEvent(first) error = %v", err)
+	}
+
+	sidecarPath := audit.SidecarPath(logPath)
+	beforeFailure, err := audit.ReadSidecar(sidecarPath)
+	if err != nil {
+		t.Fatalf("audit.ReadSidecar() before failure error = %v", err)
+	}
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("os.Chmod(%q, 0500) error = %v", dir, err)
+	}
+	fatalErr := store.AppendEvent(context.Background(), types.Event{ID: "2", Type: "fatal_sidecar"})
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("os.Chmod(%q, 0700) error = %v", dir, err)
+	}
+	if fatalErr == nil {
+		_ = store.Close()
+		t.Skip("directory permissions did not block sidecar rewrite in this environment")
+	}
+
+	var fatal *FatalIntegrityError
+	if !errors.As(fatalErr, &fatal) {
+		t.Fatalf("AppendEvent(second) error = %v, want FatalIntegrityError", fatalErr)
+	}
+
+	afterFailure, err := audit.ReadSidecar(sidecarPath)
+	if err != nil {
+		t.Fatalf("audit.ReadSidecar() after failure error = %v", err)
+	}
+	if afterFailure.Sequence != beforeFailure.Sequence || afterFailure.PrevHash != beforeFailure.PrevHash {
+		t.Fatalf("sidecar advanced after fatal failure: before=%+v after=%+v", beforeFailure, afterFailure)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("store.Close() error = %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%q) error = %v", logPath, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("line count = %d, want 3 after durable fatal write", len(lines))
+	}
+
+	reopen, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New(reopen) error = %v", err)
+	}
+	t.Cleanup(func() { _ = reopen.Close() })
+
+	resumeChain := mustNewIntegrityChain(t)
+	resumed, err := NewIntegrityStore(reopen, resumeChain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatalf("NewIntegrityStore(reopen) error = %v", err)
+	}
+	t.Cleanup(func() { _ = resumed.Close() })
+
+	if got := resumeChain.State().Sequence; got != beforeFailure.Sequence+1 {
+		t.Fatalf("recovered sequence = %d, want %d", got, beforeFailure.Sequence+1)
 	}
 }
 

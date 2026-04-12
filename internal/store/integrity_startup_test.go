@@ -26,6 +26,19 @@ func testIntegrityOptions(logPath string) IntegrityOptions {
 	}
 }
 
+func writeSidecarForState(t *testing.T, logPath string, state audit.ChainState) {
+	t.Helper()
+
+	if err := audit.WriteSidecar(audit.SidecarPath(logPath), audit.SidecarState{
+		Sequence:       state.Sequence,
+		PrevHash:       state.PrevHash,
+		KeyFingerprint: audit.KeyFingerprint(testKey),
+		UpdatedAt:      time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("audit.WriteSidecar() error = %v", err)
+	}
+}
+
 func mustNewIntegrityChain(t *testing.T) *audit.IntegrityChain {
 	t.Helper()
 
@@ -517,7 +530,7 @@ func TestNewIntegrityStore_SidecarMissingStartsFreshRotation(t *testing.T) {
 	}
 }
 
-func TestNewIntegrityStore_RejectsCorruptSidecar(t *testing.T) {
+func TestNewIntegrityStore_CorruptSidecarFallsThroughToMissingHandling(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
 
 	previousChain := mustNewIntegrityChain(t)
@@ -538,8 +551,119 @@ func TestNewIntegrityStore_RejectsCorruptSidecar(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = inner.Close() })
 
-	if _, err := NewIntegrityStore(inner, mustNewIntegrityChain(t), testIntegrityOptions(logPath)); err == nil {
-		t.Fatal("NewIntegrityStore() error = nil, want corrupt sidecar rejection")
+	chain := mustNewIntegrityChain(t)
+	store, err := NewIntegrityStore(inner, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatalf("NewIntegrityStore() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if state := chain.State(); state.Sequence != 0 {
+		t.Fatalf("chain sequence = %d, want 0 after corrupt-sidecar rotation", state.Sequence)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%q) error = %v", logPath, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("line count = %d, want 2", len(lines))
+	}
+
+	var last map[string]any
+	if err := json.Unmarshal([]byte(lines[1]), &last); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	fields := last["fields"].(map[string]any)
+	if got := fields["reason_code"]; got != "sidecar_missing" {
+		t.Fatalf("reason_code = %v, want sidecar_missing", got)
+	}
+}
+
+func TestNewIntegrityStore_ResumesFromMatchingBackupWhenActiveFileEmpty(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	chain := mustNewIntegrityChain(t)
+	first, err := chain.Wrap([]byte(`{"type":"first"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	second, err := chain.Wrap([]byte(`{"type":"second"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	if err := os.WriteFile(logPath+".1", joinLines(first, second), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath+".1", err)
+	}
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	expected := chain.State()
+	writeSidecarForState(t, logPath, expected)
+
+	inner, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = inner.Close() })
+
+	resumeChain := mustNewIntegrityChain(t)
+	store, err := NewIntegrityStore(inner, resumeChain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatalf("NewIntegrityStore() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if got := resumeChain.State(); got != expected {
+		t.Fatalf("chain.State() = %+v, want %+v", got, expected)
+	}
+}
+
+func TestNewIntegrityStore_RecoversWhenLastEntryAheadOfSidecarByOne(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	chain := mustNewIntegrityChain(t)
+	first, err := chain.Wrap([]byte(`{"type":"first"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	firstState := chain.State()
+	second, err := chain.Wrap([]byte(`{"type":"second"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	if err := os.WriteFile(logPath, joinLines(first, second), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+	writeSidecarForState(t, logPath, firstState)
+
+	inner, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = inner.Close() })
+
+	resumeChain := mustNewIntegrityChain(t)
+	store, err := NewIntegrityStore(inner, resumeChain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatalf("NewIntegrityStore() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	expected := chain.State()
+	if got := resumeChain.State(); got != expected {
+		t.Fatalf("chain.State() = %+v, want %+v", got, expected)
+	}
+
+	sidecar, err := audit.ReadSidecar(audit.SidecarPath(logPath))
+	if err != nil {
+		t.Fatalf("audit.ReadSidecar() error = %v", err)
+	}
+	if sidecar.Sequence != expected.Sequence || sidecar.PrevHash != expected.PrevHash {
+		t.Fatalf("sidecar = %+v, want sequence=%d prev_hash=%q", sidecar, expected.Sequence, expected.PrevHash)
 	}
 }
 

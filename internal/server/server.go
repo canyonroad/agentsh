@@ -251,49 +251,64 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	var webhookStore *webhook.Store
-	if cfg.Audit.Webhook.URL != "" {
-		flushEvery, err := time.ParseDuration(cfg.Audit.Webhook.FlushInterval)
-		if err != nil {
-			if db != nil {
-				_ = db.Close()
+		if cfg.Audit.Webhook.URL != "" {
+			flushEvery, err := time.ParseDuration(cfg.Audit.Webhook.FlushInterval)
+			if err != nil {
+				if jsonlStore != nil {
+					_ = jsonlStore.Close()
+				}
+				if db != nil {
+					_ = db.Close()
+				}
+				return nil, fmt.Errorf("parse audit.webhook.flush_interval: %w", err)
 			}
-			return nil, fmt.Errorf("parse audit.webhook.flush_interval: %w", err)
-		}
-		timeout, err := time.ParseDuration(cfg.Audit.Webhook.Timeout)
-		if err != nil {
-			if db != nil {
-				_ = db.Close()
+			timeout, err := time.ParseDuration(cfg.Audit.Webhook.Timeout)
+			if err != nil {
+				if jsonlStore != nil {
+					_ = jsonlStore.Close()
+				}
+				if db != nil {
+					_ = db.Close()
+				}
+				return nil, fmt.Errorf("parse audit.webhook.timeout: %w", err)
 			}
-			return nil, fmt.Errorf("parse audit.webhook.timeout: %w", err)
-		}
-		webhookStore, err = webhook.New(cfg.Audit.Webhook.URL, cfg.Audit.Webhook.BatchSize, flushEvery, timeout, cfg.Audit.Webhook.Headers)
-		if err != nil {
-			if db != nil {
-				_ = db.Close()
+			webhookStore, err = webhook.New(cfg.Audit.Webhook.URL, cfg.Audit.Webhook.BatchSize, flushEvery, timeout, cfg.Audit.Webhook.Headers)
+			if err != nil {
+				if jsonlStore != nil {
+					_ = jsonlStore.Close()
+				}
+				if db != nil {
+					_ = db.Close()
+				}
+				return nil, err
 			}
-			return nil, err
-		}
 	}
 
 	var otelStore *otelstore.Store
 	if cfg.Audit.OTEL.Enabled {
-		if !cfg.Audit.OTEL.TLS.Enabled {
-			slog.Warn("OTEL export is configured without TLS; event data will be sent in plaintext")
-		}
-		otelTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Timeout)
-		if err != nil {
-			if db != nil {
-				_ = db.Close()
+			if !cfg.Audit.OTEL.TLS.Enabled {
+				slog.Warn("OTEL export is configured without TLS; event data will be sent in plaintext")
 			}
-			return nil, fmt.Errorf("parse audit.otel.timeout: %w", err)
-		}
-		otelBatchTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Batch.Timeout)
-		if err != nil {
-			if db != nil {
-				_ = db.Close()
+			otelTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Timeout)
+			if err != nil {
+				if jsonlStore != nil {
+					_ = jsonlStore.Close()
+				}
+				if db != nil {
+					_ = db.Close()
+				}
+				return nil, fmt.Errorf("parse audit.otel.timeout: %w", err)
 			}
-			return nil, fmt.Errorf("parse audit.otel.batch.timeout: %w", err)
-		}
+			otelBatchTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Batch.Timeout)
+			if err != nil {
+				if jsonlStore != nil {
+					_ = jsonlStore.Close()
+				}
+				if db != nil {
+					_ = db.Close()
+				}
+				return nil, fmt.Errorf("parse audit.otel.batch.timeout: %w", err)
+			}
 		otelStore, err = otelstore.New(context.Background(), otelstore.Config{
 			Endpoint:     cfg.Audit.OTEL.Endpoint,
 			Protocol:     cfg.Audit.OTEL.Protocol,

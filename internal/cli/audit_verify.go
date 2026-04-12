@@ -81,10 +81,11 @@ func newAuditVerifyCmd() *cobra.Command {
 				return nil
 			}
 
-			key, err := audit.LoadKey(cfg.Audit.Integrity.KeyFile, cfg.Audit.Integrity.KeyEnv)
+			key, closeKey, err := loadAuditIntegrityKey(cmd.Context(), cfg.Audit.Integrity)
 			if err != nil {
 				return fmt.Errorf("load audit integrity key: %w", err)
 			}
+			defer func() { _ = closeKey() }()
 			algorithm := cfg.Audit.Integrity.Algorithm
 			if algorithm == "" {
 				algorithm = "hmac-sha256"

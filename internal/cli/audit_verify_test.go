@@ -2,13 +2,18 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
+	auditstore "github.com/agentsh/agentsh/internal/store"
+	"github.com/agentsh/agentsh/internal/store/jsonl"
+	"github.com/agentsh/agentsh/pkg/types"
 )
 
 func writeAuditVerifyConfig(t *testing.T, path, logPath string) {
@@ -51,6 +56,21 @@ audit:
   output: %s
   integrity:
     enabled: false
+`, logPath)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", path, err)
+	}
+}
+
+func writeAuditVerifyKMSConfig(t *testing.T, path, logPath string) {
+	t.Helper()
+
+	content := fmt.Sprintf(`
+audit:
+  output: %s
+  integrity:
+    enabled: true
+    key_source: aws_kms
 `, logPath)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("os.WriteFile(%q) error = %v", path, err)
@@ -206,6 +226,100 @@ func TestAuditVerifyCmd_DoesNotRequireKeyForUnsignedTruncatedLogWhenConfigDisabl
 	}
 	if got := out.String(); !strings.Contains(got, "integrity not enabled in this log; nothing to verify") {
 		t.Fatalf("output = %q, want unsigned disabled-config no-op message", got)
+	}
+}
+
+func TestAuditVerifyCmd_UsesConfiguredKeyProvider(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	line, err := chain.Wrap([]byte(`{"type":"signed"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	if err := os.WriteFile(logPath, append(line, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+	writeAuditVerifyKMSConfig(t, cfgPath, logPath)
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, logPath})
+
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want KMS provider configuration failure")
+	}
+	if !strings.Contains(err.Error(), "create KMS provider") {
+		t.Fatalf("Execute() error = %v, want KMS provider error", err)
+	}
+}
+
+func TestAuditVerifyCmd_VerifiesRealRotatedIntegrityStore(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	inner, err := jsonl.New(logPath, 1, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	store, err := auditstore.NewIntegrityStore(inner, chain, auditstore.IntegrityOptions{
+		LogPath:        logPath,
+		Algorithm:      "hmac-sha256",
+		KeyFingerprint: audit.KeyFingerprint(testAuditKey),
+		Now: func() time.Time {
+			return time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("auditstore.NewIntegrityStore() error = %v", err)
+	}
+
+	if err := store.AppendEvent(context.Background(), types.Event{
+		ID:     "big",
+		Type:   "big_event",
+		Fields: map[string]any{"blob": strings.Repeat("x", 2<<20)},
+	}); err != nil {
+		t.Fatalf("AppendEvent(big) error = %v", err)
+	}
+	if err := store.AppendEvent(context.Background(), types.Event{
+		ID:   "after",
+		Type: "after_rotate",
+	}); err != nil {
+		t.Fatalf("AppendEvent(after) error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("store.Close() error = %v", err)
+	}
+
+	if _, err := os.Stat(logPath + ".1"); err != nil {
+		t.Fatalf("os.Stat(%q) error = %v", logPath+".1", err)
+	}
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, logPath})
+
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "verified 3 entries across 2 files") {
+		t.Fatalf("output = %q, want rotated verification summary", got)
 	}
 }
 

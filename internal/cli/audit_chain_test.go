@@ -53,6 +53,24 @@ func TestAuditChainResetCmd_RequiresReason(t *testing.T) {
 	}
 }
 
+func TestAuditChainResetCmd_RejectsUnknownReasonCode(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	cmd := newAuditChainResetCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--reason", "manual", "--reason-code", "bogus", "--force"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want invalid reason-code rejection")
+	}
+	if !strings.Contains(err.Error(), "invalid --reason-code") {
+		t.Fatalf("Execute() error = %v, want invalid reason-code message", err)
+	}
+}
+
 func TestAuditChainResetCmd_LegacyArchiveRenamesLog(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
@@ -159,6 +177,9 @@ func TestAuditChainResetCmd_LegacyArchiveResultVerifiesAndReopens(t *testing.T) 
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	fields := entry["fields"].(map[string]any)
+	if got := fields["reason_code"]; got != "legacy_archived" {
+		t.Fatalf("reason_code = %v, want legacy_archived", got)
+	}
 	archivedTo, ok := fields["prior_log_archived_to"].(string)
 	if !ok || archivedTo == "" {
 		t.Fatalf("prior_log_archived_to = %v, want archived path", fields["prior_log_archived_to"])
@@ -239,6 +260,9 @@ func TestAuditChainResetCmd_AppendsPriorChainSummary(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	fields := entry["fields"].(map[string]any)
+	if got := fields["reason_code"]; got != "manual_reset" {
+		t.Fatalf("reason_code = %v, want manual_reset", got)
+	}
 	prior, ok := fields["prior_chain_summary"].(map[string]any)
 	if !ok {
 		t.Fatalf("prior_chain_summary missing from reset event: %v", fields)
@@ -298,6 +322,24 @@ func TestAuditChainResetCmd_SucceedsAfterAuditWriterCloses(t *testing.T) {
 	cmd.SetArgs([]string{"--config", cfgPath, "--reason", "manual", "--force"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestAuditChainResetCmd_UsesConfiguredKeyProvider(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeAuditVerifyKMSConfig(t, cfgPath, logPath)
+
+	cmd := newAuditChainResetCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--reason", "manual", "--force"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want KMS provider configuration failure")
+	}
+	if !strings.Contains(err.Error(), "create KMS provider") {
+		t.Fatalf("Execute() error = %v, want KMS provider error", err)
 	}
 }
 

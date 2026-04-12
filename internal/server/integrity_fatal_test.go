@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/store/jsonl"
 )
 
 func testServerConfig(t *testing.T) *config.Config {
@@ -83,4 +84,25 @@ func TestServer_Run_ReturnsFatalAuditError(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not exit after fatal audit error")
 	}
+}
+
+func TestServer_New_ReleasesJSONLLockWhenWebhookConfigInvalid(t *testing.T) {
+	cfg := testServerConfig(t)
+	cfg.Audit.Output = filepath.Join(filepath.Dir(cfg.Sessions.BaseDir), "audit.jsonl")
+	cfg.Audit.Webhook.URL = "https://example.com"
+	cfg.Audit.Webhook.FlushInterval = "not-a-duration"
+
+	_, err := New(cfg)
+	if err == nil {
+		t.Fatal("New() error = nil, want webhook config failure")
+	}
+	if !strings.Contains(err.Error(), "parse audit.webhook.flush_interval") {
+		t.Fatalf("New() error = %v, want webhook parse failure", err)
+	}
+
+	store, err := jsonl.New(cfg.Audit.Output, 1, 1)
+	if err != nil {
+		t.Fatalf("jsonl.New() after failed New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
 }
