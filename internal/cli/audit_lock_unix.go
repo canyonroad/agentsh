@@ -3,25 +3,24 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
-	"golang.org/x/sys/unix"
+	"github.com/agentsh/agentsh/internal/store/jsonl"
 )
 
 func openAndLockAuditFile(path string) (*os.File, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := jsonl.AcquireLock(path)
 	if err != nil {
-		return nil, err
-	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		_ = file.Close()
+		if errors.Is(err, jsonl.ErrLocked) {
+			return nil, fmt.Errorf("agentsh server is running; stop it before resetting the chain")
+		}
 		return nil, fmt.Errorf("agentsh server is running; stop it before resetting the chain")
 	}
 	return file, nil
 }
 
 func closeAndUnlockAuditFile(file *os.File) error {
-	defer file.Close()
-	return unix.Flock(int(file.Fd()), unix.LOCK_UN)
+	return jsonl.ReleaseLock(file)
 }

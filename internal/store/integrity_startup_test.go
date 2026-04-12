@@ -116,6 +116,49 @@ func TestNewIntegrityStore_ResumesFromMatchingSidecar(t *testing.T) {
 	}
 }
 
+func TestNewIntegrityStore_RejectsTamperedLastEntryEvenWhenSidecarMatches(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	chain := mustNewIntegrityChain(t)
+	line, err := chain.Wrap([]byte(`{"type":"existing","timestamp":"2026-04-11T12:00:00Z","fields":{"value":"ok"}}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(line, &entry); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	entry["fields"] = map[string]any{"value": "tampered"}
+	tampered, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(logPath, append(tampered, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	state := chain.State()
+	if err := audit.WriteSidecar(audit.SidecarPath(logPath), audit.SidecarState{
+		Sequence:       state.Sequence,
+		PrevHash:       state.PrevHash,
+		KeyFingerprint: audit.KeyFingerprint(testKey),
+		UpdatedAt:      time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("audit.WriteSidecar() error = %v", err)
+	}
+
+	inner, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = inner.Close() })
+
+	if _, err := NewIntegrityStore(inner, mustNewIntegrityChain(t), testIntegrityOptions(logPath)); err == nil {
+		t.Fatal("NewIntegrityStore() error = nil, want tampered exact-match resume rejection")
+	}
+}
+
 func writeResumableIntegrityState(t *testing.T, logPath string) audit.ChainState {
 	t.Helper()
 

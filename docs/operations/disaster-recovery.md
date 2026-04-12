@@ -124,6 +124,7 @@ The following table defines recovery targets by scenario:
    cp /tmp/verify/events.db /var/lib/agentsh/
    cp /tmp/verify/config.yaml /etc/agentsh/
    cp -r /tmp/verify/policies/ /etc/agentsh/
+   cp /tmp/verify/audit.jsonl* /var/log/agentsh/ 2>/dev/null || true
    ```
 
 6. **Investigate corruption cause before resuming**
@@ -210,7 +211,8 @@ The following table defines recovery targets by scenario:
 
 3. **If integrity key compromised**:
    - Historical audit logs may have been tampered
-   - Create checkpoint marking key rotation
+   - Preserve the current `audit.jsonl*` set and `audit.jsonl.chain` before any reset
+   - Start a fresh chain explicitly after rotating the integrity key
    - Consider audit log forensic analysis
 
 4. **If encryption key compromised**:
@@ -220,6 +222,11 @@ The following table defines recovery targets by scenario:
    ```bash
    mv /etc/agentsh/audit-integrity.key.new /etc/agentsh/audit-integrity.key
    mv /etc/agentsh/audit.key.new /etc/agentsh/audit.key
+
+   agentsh audit chain reset --config /etc/agentsh/config.yaml \
+     --legacy-archive \
+     --reason "rotated compromised audit integrity key" \
+     --reason-code key_rotated
 
    systemctl restart agentsh
    ```
@@ -261,7 +268,13 @@ Always restore the audit log rotation set and the matching sidecar together:
 - `audit.jsonl.chain`
 
 If startup refuses because the sidecar and log no longer match, preserve the
-old files for review and start a fresh chain explicitly:
+old files for review before reset:
+
+```bash
+cp /var/log/agentsh/audit.jsonl* /var/log/agentsh/recovery-$(date +%Y%m%d%H%M%S)/ 2>/dev/null || true
+```
+
+Then start a fresh chain explicitly:
 
 ```bash
 agentsh audit chain reset --config /etc/agentsh/config.yaml \

@@ -84,7 +84,11 @@ func newAuditChainResetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer func() { _ = closeAndUnlockAuditFile(lockFile) }()
+			defer func() {
+				if lockFile != nil {
+					_ = closeAndUnlockAuditFile(lockFile)
+				}
+			}()
 
 			if !force {
 				confirmed, err := confirmReset(cmd.InOrStdin(), cmd.OutOrStdout(), reason, legacyArchive, logPath)
@@ -96,12 +100,16 @@ func newAuditChainResetCmd() *cobra.Command {
 				}
 			}
 
-			return resetIntegrityChain(cmd.Context(), cfg, key, logPath, resetOptions{
+			if err := resetIntegrityChain(cmd.Context(), cfg, key, logPath, lockFile, resetOptions{
 				Reason:        reason,
 				ReasonCode:    reasonCode,
 				LegacyArchive: legacyArchive,
 				Now:           time.Now,
-			})
+			}); err != nil {
+				return err
+			}
+			lockFile = nil
+			return nil
 		},
 	}
 
@@ -144,10 +152,15 @@ func confirmReset(in io.Reader, out io.Writer, reason string, legacyArchive bool
 	return answer == "y" || answer == "yes", nil
 }
 
-func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, logPath string, opts resetOptions) error {
+func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, logPath string, lockFile *os.File, opts resetOptions) error {
 	now := opts.Now
 	if now == nil {
 		now = time.Now
+	}
+
+	priorSummary, err := currentChainSummary(logPath)
+	if err != nil {
+		return err
 	}
 
 	if opts.LegacyArchive {
@@ -157,7 +170,7 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 		}
 	}
 
-	inner, err := jsonl.New(logPath, cfg.Audit.Rotation.MaxSizeMB, cfg.Audit.Rotation.MaxBackups)
+	inner, err := jsonl.NewWithLock(logPath, cfg.Audit.Rotation.MaxSizeMB, cfg.Audit.Rotation.MaxBackups, lockFile)
 	if err != nil {
 		return err
 	}
@@ -172,18 +185,23 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 		return err
 	}
 
+	fields := map[string]any{
+		"reason":      opts.Reason,
+		"reason_code": opts.ReasonCode,
+		"new_chain": map[string]any{
+			"format_version":  audit.IntegrityFormatVersion,
+			"sequence":        0,
+			"key_fingerprint": chain.KeyFingerprint(),
+		},
+	}
+	if priorSummary != nil {
+		fields["prior_chain_summary"] = priorSummary
+	}
+
 	payload, err := json.Marshal(types.Event{
 		Type:      "integrity_chain_rotated",
 		Timestamp: now().UTC(),
-		Fields: map[string]any{
-			"reason":      opts.Reason,
-			"reason_code": opts.ReasonCode,
-			"new_chain": map[string]any{
-				"format_version":  audit.IntegrityFormatVersion,
-				"sequence":        0,
-				"key_fingerprint": chain.KeyFingerprint(),
-			},
-		},
+		Fields:    fields,
 	})
 	if err != nil {
 		return err
@@ -204,4 +222,29 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 		KeyFingerprint: chain.KeyFingerprint(),
 		UpdatedAt:      now().UTC(),
 	})
+}
+
+func currentChainSummary(logPath string) (map[string]any, error) {
+	files, err := audit.DiscoverRotationSet(logPath)
+	if err != nil {
+		return nil, err
+	}
+
+	_, lastLine, err := audit.ReadLastNonEmptyLine(files)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, nil
+	}
+
+	entry, err := audit.ParseIntegrityEntry(lastLine)
+	if err != nil || entry.Integrity == nil {
+		return nil, nil
+	}
+
+	return map[string]any{
+		"last_sequence_seen_in_log":   entry.Integrity.Sequence,
+		"last_entry_hash_seen_in_log": entry.Integrity.EntryHash,
+	}, nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	storepkg "github.com/agentsh/agentsh/internal/store"
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
@@ -85,6 +86,36 @@ func TestAppendEventErrorHookNotCalledOnSuccess(t *testing.T) {
 	}
 	if called {
 		t.Fatal("append error hook called on success")
+	}
+}
+
+func TestAppendEventErrorHookReceivesLaterFatalIntegrityError(t *testing.T) {
+	primaryErr := errors.New("primary")
+	fatalErr := &storepkg.FatalIntegrityError{Op: "write audit integrity sidecar", Err: errors.New("disk full")}
+
+	primary := &fakeEventStore{appendErr: primaryErr}
+	secondary := &fakeEventStore{appendErr: fatalErr}
+	s := New(primary, nil, secondary)
+
+	var got []error
+	s.SetAppendErrorHook(func(err error) {
+		got = append(got, err)
+	})
+
+	err := s.AppendEvent(context.Background(), types.Event{ID: "1"})
+	if !errors.Is(err, primaryErr) {
+		t.Fatalf("AppendEvent() error = %v, want %v", err, primaryErr)
+	}
+
+	foundFatal := false
+	for _, err := range got {
+		if errors.As(err, &fatalErr) {
+			foundFatal = true
+			break
+		}
+	}
+	if !foundFatal {
+		t.Fatalf("hook errors = %v, want fatal integrity error included", got)
 	}
 }
 

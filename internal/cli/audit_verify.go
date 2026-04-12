@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -33,6 +34,16 @@ type verifySummary struct {
 	firstLocation   string
 	lastLocation    string
 	rotationCount   int
+}
+
+type rotationVerifyPayload struct {
+	Fields struct {
+		ReasonCode        string `json:"reason_code"`
+		PriorChainSummary *struct {
+			LastSequence  int64  `json:"last_sequence_seen_in_log"`
+			LastEntryHash string `json:"last_entry_hash_seen_in_log"`
+		} `json:"prior_chain_summary"`
+	} `json:"fields"`
 }
 
 func newAuditVerifyCmd() *cobra.Command {
@@ -117,18 +128,35 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 			return nil, fmt.Errorf("open %s: %w", file.Path, err)
 		}
 
-		scanner := audit.NewScanner(f)
+		reader := bufio.NewReader(f)
 		lineNo := 0
-		for scanner.Scan() {
+		for {
+			rawLine, readErr := reader.ReadBytes('\n')
+			if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
+				break
+			}
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				_ = f.Close()
+				return nil, fmt.Errorf("scan %s: %w", file.Path, readErr)
+			}
+
 			lineNo++
-			line := bytes.TrimSpace(scanner.Bytes())
+			hadNewline := len(rawLine) > 0 && rawLine[len(rawLine)-1] == '\n'
+			line := bytes.TrimSpace(rawLine)
 			if len(line) == 0 {
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
 				continue
 			}
 
 			entry, err := audit.ParseIntegrityEntry(line)
 			if err != nil {
-				if opts.tolerateTruncation && fileIndex == len(files)-1 && isLikelyTruncation(err) {
+				if opts.tolerateTruncation &&
+					fileIndex == len(files)-1 &&
+					errors.Is(readErr, io.EOF) &&
+					!hadNewline &&
+					isTolerableTruncation(err) {
 					break
 				}
 				_ = f.Close()
@@ -164,12 +192,16 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 				state.seeded = true
 			}
 
-			rotationBoundary := summary.verifiedEntries > 0 &&
-				entry.Type == "integrity_chain_rotated" &&
+			rotationBoundary := entry.Type == "integrity_chain_rotated" &&
 				entry.Integrity.Sequence == 0 &&
 				entry.Integrity.PrevHash == ""
 
-			if !rotationBoundary {
+			if rotationBoundary {
+				if err := verifyRotationBoundary(entry.CanonicalPayload, summary, state); err != nil {
+					_ = f.Close()
+					return nil, fmt.Errorf("rotation boundary at %s:%d: %w", file.Path, lineNo, err)
+				}
+			} else {
 				if !state.seeded {
 					state.expectedSequence = 0
 					state.expectedPrevHash = ""
@@ -207,10 +239,9 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 			state.expectedSequence = entry.Integrity.Sequence + 1
 			state.expectedPrevHash = entry.Integrity.EntryHash
 			state.seeded = true
-		}
-		if err := scanner.Err(); err != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("scan %s: %w", file.Path, err)
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
 		}
 		_ = f.Close()
 	}
@@ -218,13 +249,33 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 	return summary, nil
 }
 
-func isLikelyTruncation(err error) bool {
+func verifyRotationBoundary(payload []byte, summary *verifySummary, state verifyState) error {
+	var event rotationVerifyPayload
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return fmt.Errorf("parse rotation payload: %w", err)
+	}
+
+	if summary.verifiedEntries == 0 {
+		return nil
+	}
+
+	if event.Fields.PriorChainSummary == nil {
+		return fmt.Errorf("missing prior_chain_summary")
+	}
+	wantSequence := state.expectedSequence - 1
+	if got := event.Fields.PriorChainSummary.LastSequence; got != wantSequence {
+		return fmt.Errorf("prior_chain_summary.last_sequence_seen_in_log = %d, want %d", got, wantSequence)
+	}
+	if got := event.Fields.PriorChainSummary.LastEntryHash; got != state.expectedPrevHash {
+		return fmt.Errorf("prior_chain_summary.last_entry_hash_seen_in_log = %q, want %q", got, state.expectedPrevHash)
+	}
+	return nil
+}
+
+func isTolerableTruncation(err error) bool {
 	if errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 	var syntaxErr *json.SyntaxError
-	if errors.As(err, &syntaxErr) {
-		return true
-	}
-	return false
+	return errors.As(err, &syntaxErr)
 }

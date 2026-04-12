@@ -105,6 +105,19 @@ func (s *IntegrityStore) resumeFromSidecar(sidecar audit.SidecarState, lastFile 
 	}
 
 	if sidecar.Sequence == entry.Integrity.Sequence && sidecar.PrevHash == entry.Integrity.EntryHash {
+		ok, err := s.chain.VerifyHash(
+			entry.Integrity.FormatVersion,
+			entry.Integrity.Sequence,
+			entry.Integrity.PrevHash,
+			entry.CanonicalPayload,
+			entry.Integrity.EntryHash,
+		)
+		if err != nil {
+			return fmt.Errorf("audit integrity chain mismatch: verify last entry: %w", err)
+		}
+		if !ok {
+			return fmt.Errorf("audit integrity chain mismatch: invalid last entry in %s", lastFile.Path)
+		}
 		s.chain.Restore(sidecar.Sequence, sidecar.PrevHash)
 		return nil
 	}

@@ -114,3 +114,230 @@ func TestAuditVerifyCmd_RejectsLegacyFormatEntry(t *testing.T) {
 		t.Fatal("Execute() error = nil, want legacy-format failure")
 	}
 }
+
+func TestAuditVerifyCmd_RejectsMidHistoryRotationWithoutMatchingPriorSummary(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	chainA, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	first, err := chainA.Wrap([]byte(`{"type":"before_reset"}`))
+	if err != nil {
+		t.Fatalf("chainA.Wrap() error = %v", err)
+	}
+
+	chainB, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	reset, err := chainB.Wrap([]byte(`{"type":"integrity_chain_rotated","fields":{"reason":"manual reset","reason_code":"manual_reset","new_chain":{"format_version":2,"sequence":0}}}`))
+	if err != nil {
+		t.Fatalf("chainB.Wrap() error = %v", err)
+	}
+	after, err := chainB.Wrap([]byte(`{"type":"after_reset"}`))
+	if err != nil {
+		t.Fatalf("chainB.Wrap() error = %v", err)
+	}
+
+	data := append([]byte{}, first...)
+	data = append(data, '\n')
+	data = append(data, reset...)
+	data = append(data, '\n')
+	data = append(data, after...)
+	data = append(data, '\n')
+	if err := os.WriteFile(logPath, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, logPath})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("Execute() error = nil, want mid-history reset rejection")
+	}
+}
+
+func TestAuditVerifyCmd_AcceptsMidHistoryRotationWithMatchingPriorSummary(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	chainA, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	first, err := chainA.Wrap([]byte(`{"type":"before_reset"}`))
+	if err != nil {
+		t.Fatalf("chainA.Wrap() error = %v", err)
+	}
+
+	previousState := chainA.State()
+	resetPayload := fmt.Sprintf(`{"type":"integrity_chain_rotated","fields":{"reason":"manual reset","reason_code":"manual_reset","prior_chain_summary":{"last_sequence_seen_in_log":%d,"last_entry_hash_seen_in_log":"%s"},"new_chain":{"format_version":2,"sequence":0}}}`, previousState.Sequence, previousState.PrevHash)
+	chainB, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	reset, err := chainB.Wrap([]byte(resetPayload))
+	if err != nil {
+		t.Fatalf("chainB.Wrap() error = %v", err)
+	}
+	after, err := chainB.Wrap([]byte(`{"type":"after_reset"}`))
+	if err != nil {
+		t.Fatalf("chainB.Wrap() error = %v", err)
+	}
+
+	data := append([]byte{}, first...)
+	data = append(data, '\n')
+	data = append(data, reset...)
+	data = append(data, '\n')
+	data = append(data, after...)
+	data = append(data, '\n')
+	if err := os.WriteFile(logPath, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, logPath})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestAuditVerifyCmd_AcceptsRotationAsFirstVisibleEntry(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	reset, err := chain.Wrap([]byte(`{"type":"integrity_chain_rotated","fields":{"reason":"fresh start","reason_code":"manual_reset","new_chain":{"format_version":2,"sequence":0}}}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	after, err := chain.Wrap([]byte(`{"type":"after_reset"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	data := append([]byte{}, reset...)
+	data = append(data, '\n')
+	data = append(data, after...)
+	data = append(data, '\n')
+	if err := os.WriteFile(logPath, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, logPath})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestAuditVerifyCmd_TolerateTruncationDoesNotHideMalformedEarlierLine(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	first, err := chain.Wrap([]byte(`{"type":"before_bad_line"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	second, err := chain.Wrap([]byte(`{"type":"after_bad_line"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	data := append([]byte{}, first...)
+	data = append(data, '\n')
+	data = append(data, []byte(`{"type":"broken"`)...)
+	data = append(data, '\n')
+	data = append(data, second...)
+	data = append(data, '\n')
+	if err := os.WriteFile(logPath, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--tolerate-truncation", logPath})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("Execute() error = nil, want malformed non-final line failure")
+	}
+}
+
+func TestAuditVerifyCmd_TolerateTruncationAcceptsIncompleteFinalLine(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	first, err := chain.Wrap([]byte(`{"type":"before_truncated_tail"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	data := append([]byte{}, first...)
+	data = append(data, '\n')
+	data = append(data, []byte(`{"type":"truncated_tail"`)...)
+	if err := os.WriteFile(logPath, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--tolerate-truncation", logPath})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestAuditVerifyCmd_TolerateTruncationRejectsMalformedFinalLineWithTrailingNewline(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	first, err := chain.Wrap([]byte(`{"type":"before_bad_tail"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	data := append([]byte{}, first...)
+	data = append(data, '\n')
+	data = append(data, []byte(`{"type":"bad_tail"`)...)
+	data = append(data, '\n')
+	if err := os.WriteFile(logPath, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--tolerate-truncation", logPath})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("Execute() error = nil, want malformed newline-terminated tail failure")
+	}
+}

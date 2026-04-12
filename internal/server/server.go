@@ -839,17 +839,6 @@ func (s *Server) Run(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if s.fatalAuditErr != nil {
-		go func() {
-			select {
-			case err := <-s.fatalAuditErr:
-				slog.Error("fatal audit integrity error", "error", err)
-				stop()
-			case <-ctx.Done():
-			}
-		}()
-	}
-
 	if s.pprofLn != nil && s.pprofServer != nil {
 		go func() { _ = s.pprofServer.Serve(s.pprofLn) }()
 	}
@@ -904,11 +893,10 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdown := func(timeout time.Duration, graceful bool) error {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		// Shut down listeners immediately; don't wait for syncer first.
+
 		if s.pprofServer != nil {
 			_ = s.pprofServer.Shutdown(shutdownCtx)
 		}
@@ -916,9 +904,12 @@ func (s *Server) Run(ctx context.Context) error {
 			_ = s.unixServer.Shutdown(shutdownCtx)
 		}
 		if s.grpcServer != nil {
-			s.grpcServer.GracefulStop()
+			if graceful {
+				s.grpcServer.GracefulStop()
+			} else {
+				s.grpcServer.Stop()
+			}
 		}
-		// Stop the policy socket server (macOS only).
 		if s.policySockCancel != nil {
 			s.policySockCancel()
 		}
@@ -933,30 +924,22 @@ func (s *Server) Run(ctx context.Context) error {
 			<-s.policySockDone
 		}
 		return httpErr
+	}
+
+	select {
+	case <-ctx.Done():
+		return shutdown(10*time.Second, true)
+	case err := <-s.fatalAuditErr:
+		slog.Error("fatal audit integrity error", "error", err)
+		stop()
+		if shutdownErr := shutdown(10*time.Second, true); shutdownErr != nil {
+			return errors.Join(err, shutdownErr)
+		}
+		return err
 	case err := <-errCh:
 		stop() // cancel context so syncer can exit
-		if s.pprofServer != nil {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = s.pprofServer.Shutdown(shutdownCtx)
-		}
-		if s.unixServer != nil {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = s.unixServer.Shutdown(shutdownCtx)
-		}
-		if s.grpcServer != nil {
-			s.grpcServer.Stop()
-		}
-		// Stop the policy socket server (macOS only).
-		if s.policySockCancel != nil {
-			s.policySockCancel()
-		}
-		if syncerDone != nil {
-			<-syncerDone
-		}
-		if s.policySockDone != nil {
-			<-s.policySockDone
+		if shutdownErr := shutdown(2*time.Second, false); shutdownErr != nil {
+			return errors.Join(fmt.Errorf("server: %w", err), shutdownErr)
 		}
 		return fmt.Errorf("server: %w", err)
 	}

@@ -32,7 +32,9 @@ These files should be backed up but require special handling:
 
 - **Audit log rotation set and sidecar**: `audit.jsonl`, `audit.jsonl.1`, `audit.jsonl.2`, ..., and `audit.jsonl.chain`
   - The `.chain` sidecar stores the last durable integrity state
-  - Back up the sidecar together with the log files or startup verification will fail
+  - Back up the sidecar together with the log files to preserve chain continuity across restart
+  - If the sidecar is missing, agentsh starts a fresh chain only when the last retained v2 entry still verifies
+  - If the sidecar and log disagree, startup fails until the files are reconciled or the chain is reset
 
 - **MCP tool pins**: `~/.agentsh/mcp-pins.json`
   - Pinned tool versions for reproducibility
@@ -147,6 +149,9 @@ cp /tmp/restore/config.yaml /etc/agentsh/
 
 # Restore policies
 cp -r /tmp/restore/policies/ /etc/agentsh/
+
+# Restore audit log rotation set and sidecar
+cp /tmp/restore/audit.jsonl* /var/log/agentsh/ 2>/dev/null || true
 
 # Fix permissions
 chown -R agentsh:agentsh /var/lib/agentsh/
@@ -317,12 +322,18 @@ If the audit chain fails verification after restore:
 1. This may indicate tampering or a partial restore
 2. Compare the restored database with other backup copies
 3. Make sure `audit.jsonl.chain` was restored together with the log rotation set
-4. If the sidecar and log cannot be reconciled, preserve the restored files and reset explicitly:
+4. Before resetting, copy the full recovered audit set somewhere safe for review:
+
+```bash
+cp /var/log/agentsh/audit.jsonl* /var/log/agentsh/recovery-$(date +%Y%m%d%H%M%S)/ 2>/dev/null || true
+```
+
+5. If the sidecar and log cannot be reconciled, reset explicitly:
 
 ```bash
 agentsh audit chain reset --config /etc/agentsh/config.yaml \
   --reason "restored audit log from backup after host failure" \
   --reason-code post_tamper_recovery
 ```
-5. If using replication, compare with replicas
-6. Document the incident and investigate the cause
+6. If using replication, compare with replicas
+7. Document the incident and investigate the cause
