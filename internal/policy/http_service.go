@@ -7,7 +7,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/agentsh/agentsh/internal/proxy/secrets"
 	"github.com/gobwas/glob"
+	"gopkg.in/yaml.v3"
 )
 
 // HTTPService declares an HTTP service that a cooperating child process
@@ -280,6 +282,65 @@ func validateHTTPServiceRule(svc string, idx int, r *HTTPServiceRule) error {
 	for _, m := range r.Methods {
 		if strings.TrimSpace(m) == "" {
 			return fmt.Errorf("%s: empty method", label)
+		}
+	}
+	return nil
+}
+
+// ValidateHTTPServicesWithProviders runs structural validation via
+// ValidateHTTPServices, then validates credential-related fields against
+// the declared providers. It checks that secret refs parse, reference a
+// declared provider scheme, use a valid fake format, and that inject
+// templates contain the {{secret}} placeholder.
+func ValidateHTTPServicesWithProviders(svcs []HTTPService, providers map[string]yaml.Node) error {
+	// Run structural validation first.
+	if err := ValidateHTTPServices(svcs); err != nil {
+		return err
+	}
+
+	// Build provider scheme set.
+	providerSchemes := make(map[string]bool)
+	for _, node := range providers {
+		var base struct {
+			Type string `yaml:"type"`
+		}
+		if err := node.Decode(&base); err == nil && base.Type != "" {
+			providerSchemes[base.Type] = true
+		}
+	}
+
+	for _, s := range svcs {
+		if s.Secret == nil && len(s.Rules) == 0 {
+			return fmt.Errorf("http_services[%q]: service has no secret and no rules", s.Name)
+		}
+		if s.Inject != nil && s.Secret == nil {
+			return fmt.Errorf("http_services[%q]: inject requires secret", s.Name)
+		}
+		if s.Secret != nil {
+			ref, err := secrets.ParseRef(s.Secret.Ref)
+			if err != nil {
+				return fmt.Errorf("http_services[%q]: invalid secret ref: %w", s.Name, err)
+			}
+			if len(providerSchemes) > 0 && !providerSchemes[ref.Scheme] {
+				return fmt.Errorf("http_services[%q]: secret ref scheme %q has no matching provider", s.Name, ref.Scheme)
+			}
+			if len(providerSchemes) == 0 {
+				return fmt.Errorf("http_services[%q]: secret ref scheme %q has no matching provider (no providers declared)", s.Name, ref.Scheme)
+			}
+			if _, _, err := secrets.ParseFormat(s.Secret.Format); err != nil {
+				return fmt.Errorf("http_services[%q]: invalid fake format: %w", s.Name, err)
+			}
+		}
+		if s.Inject != nil && s.Inject.Header != nil {
+			if !strings.Contains(s.Inject.Header.Template, "{{secret}}") {
+				return fmt.Errorf("http_services[%q]: inject.header.template must contain {{secret}}", s.Name)
+			}
+			if strings.TrimSpace(s.Inject.Header.Name) == "" {
+				return fmt.Errorf("http_services[%q]: inject.header name is required", s.Name)
+			}
+		}
+		if s.Inject != nil && s.Inject.Header == nil {
+			return fmt.Errorf("http_services[%q]: inject.header is required when inject is set", s.Name)
 		}
 	}
 	return nil
