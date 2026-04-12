@@ -2,7 +2,10 @@
 
 package capabilities
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // tipDefinition defines a tip for a missing capability.
 type tipDefinition struct {
@@ -10,6 +13,14 @@ type tipDefinition struct {
 	Impact   string
 	Action   string
 	CheckKey string // capability key to check
+}
+
+// reasonTip pairs a substring filter with a tip. When looking up a tip for
+// a backend, the first entry whose Contains is a non-empty substring of
+// DetectedBackend.Detail wins. An entry with Contains == "" is the fallback.
+type reasonTip struct {
+	Contains string
+	Tip      Tip
 }
 
 var linuxTips = []tipDefinition{
@@ -131,31 +142,54 @@ func GenerateTips(platform string, caps map[string]any) []Tip {
 	return tips
 }
 
-// tipsByBackend maps backend names to tip definitions.
-var tipsByBackend = map[string]Tip{
+// tipsByBackend maps backend names to an ordered slice of reason-sensitive
+// tips. Entries are scanned in order; the first whose Contains is a
+// non-empty substring of DetectedBackend.Detail wins. An entry with
+// Contains == "" acts as the fallback. Place more-specific substrings
+// before less-specific ones (e.g. "kernel version unknown" before "kernel").
+var tipsByBackend = map[string][]reasonTip{
 	// Linux
-	"fuse":             {Feature: "fuse", Impact: "Fine-grained filesystem control disabled", Action: "Install FUSE3: apt install fuse3 (Debian/Ubuntu), dnf install fuse3 (Fedora)"},
-	"seccomp-execve":   {Feature: "seccomp", Impact: "Syscall filtering disabled (likely nested container)", Action: "Run in privileged container or on host for full seccomp support"},
-	"seccomp-notify":   {Feature: "seccomp-notify", Impact: "Seccomp-based file enforcement disabled", Action: "Run in privileged container or on host for seccomp support"},
-	"landlock-network": {Feature: "landlock-network", Impact: "Kernel-level network restrictions disabled", Action: "Requires kernel 6.7+ (Landlock ABI v4)"},
-	"ebpf":             {Feature: "ebpf", Impact: "Network monitoring disabled", Action: "Requires CAP_BPF and cgroups v2. Run as root or with elevated privileges."},
-	"cgroups-v2":       {Feature: "cgroups-v2", Impact: "Resource limits unavailable", Action: "Enable cgroups v2 in kernel or container runtime"},
-	"ptrace":           {Feature: "ptrace", Impact: "Syscall-level enforcement via ptrace unavailable", Action: "Add SYS_PTRACE capability"},
-	"pid-namespace":    {Feature: "pid-namespace", Impact: "Process isolation unavailable", Action: "Run in a PID namespace (docker run --pid=host or unshare -p)"},
-	"capability-drop":  {Feature: "capability-drop", Impact: "Process retains full Linux capabilities (privilege reduction inactive)", Action: "Start the process with a reduced capability set using systemd CapabilityBoundingSet= + User=, docker run --cap-drop=ALL, or an unprivileged user. Note: capabilities.DropCapabilities() only narrows the bounding set for exec'd children via PR_CAPBSET_DROP and does not lower the running process's permitted/effective sets, so calling it from inside the server is not a substitute for the startup-time mechanisms above."},
+	"fuse":           {{Tip: Tip{Feature: "fuse", Impact: "Fine-grained filesystem control disabled", Action: "Install FUSE3: apt install fuse3 (Debian/Ubuntu), dnf install fuse3 (Fedora)"}}},
+	"seccomp-execve": {{Tip: Tip{Feature: "seccomp", Impact: "Syscall filtering disabled (likely nested container)", Action: "Run in privileged container or on host for full seccomp support"}}},
+	"seccomp-notify": {{Tip: Tip{Feature: "seccomp-notify", Impact: "Seccomp-based file enforcement disabled", Action: "Run in privileged container or on host for seccomp support"}}},
+	"landlock-network": {{Tip: Tip{Feature: "landlock-network", Impact: "Kernel-level network restrictions disabled", Action: "Requires kernel 6.7+ (Landlock ABI v4)"}}},
+	"ebpf": {
+		{Contains: "btf not present", Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "Kernel was built without CONFIG_DEBUG_INFO_BTF=y; cilium/ebpf CO-RE programs cannot relocate types without BTF. Rebuild the kernel with CONFIG_DEBUG_INFO_BTF=y (and ideally CONFIG_DEBUG_INFO_BTF_MODULES=y)."}},
+		{Contains: "cgroup v2 not available", Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "eBPF socket association requires cgroups v2. Mount a unified cgroup hierarchy or switch to a systemd-based init."}},
+		{Contains: "kernel version unknown", Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "Could not determine kernel version. eBPF network monitoring requires kernel 5.8+."}},
+		{Contains: "kernel", Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "eBPF network monitoring requires kernel 5.8+ for BPF ring buffer and CO-RE support. Upgrade your kernel."}},
+		{Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "Requires CAP_BPF (or CAP_SYS_ADMIN) and cgroups v2. Run as root or with elevated privileges."}},
+	},
+	"cgroups-v2":      {{Tip: Tip{Feature: "cgroups-v2", Impact: "Resource limits unavailable", Action: "Enable cgroups v2 in kernel or container runtime"}}},
+	"ptrace":          {{Tip: Tip{Feature: "ptrace", Impact: "Syscall-level enforcement via ptrace unavailable", Action: "Add SYS_PTRACE capability"}}},
+	"pid-namespace":   {{Tip: Tip{Feature: "pid-namespace", Impact: "Process isolation unavailable", Action: "Run in a PID namespace (docker run --pid=host or unshare -p)"}}},
+	"capability-drop": {{Tip: Tip{Feature: "capability-drop", Impact: "Process retains full Linux capabilities (privilege reduction inactive)", Action: "Start the process with a reduced capability set using systemd CapabilityBoundingSet= + User=, docker run --cap-drop=ALL, or an unprivileged user. Note: capabilities.DropCapabilities() only narrows the bounding set for exec'd children via PR_CAPBSET_DROP and does not lower the running process's permitted/effective sets, so calling it from inside the server is not a substitute for the startup-time mechanisms above."}}},
 	// Darwin
-	"esf":               {Feature: "esf", Impact: "Endpoint Security Framework unavailable", Action: "Install the agentsh macOS app bundle with system extension"},
-	"network-extension": {Feature: "network-extension", Impact: "Network filtering unavailable", Action: "Requires network extension entitlement from Apple"},
+	"esf":               {{Tip: Tip{Feature: "esf", Impact: "Endpoint Security Framework unavailable", Action: "Install the agentsh macOS app bundle with system extension"}}},
+	"network-extension": {{Tip: Tip{Feature: "network-extension", Impact: "Network filtering unavailable", Action: "Requires network extension entitlement from Apple"}}},
 	// Windows
-	"winfsp":     {Feature: "winfsp", Impact: "Filesystem interception unavailable", Action: "Install WinFsp: https://winfsp.dev/"},
-	"minifilter": {Feature: "minifilter", Impact: "Kernel-level file filtering unavailable", Action: "Install agentsh minifilter driver"},
-	"windivert":  {Feature: "windivert", Impact: "Network interception unavailable", Action: "Install WinDivert: https://reqrypt.org/windivert.html"},
+	"winfsp":     {{Tip: Tip{Feature: "winfsp", Impact: "Filesystem interception unavailable", Action: "Install WinFsp: https://winfsp.dev/"}}},
+	"minifilter": {{Tip: Tip{Feature: "minifilter", Impact: "Kernel-level file filtering unavailable", Action: "Install agentsh minifilter driver"}}},
+	"windivert":  {{Tip: Tip{Feature: "windivert", Impact: "Network interception unavailable", Action: "Install WinDivert: https://reqrypt.org/windivert.html"}}},
 }
 
-func lookupTip(backendName string) *Tip {
-	if tip, ok := tipsByBackend[backendName]; ok {
-		copy := tip // don't modify the map entry
-		return &copy
+func lookupTip(backendName, detail string) *Tip {
+	reasons, ok := tipsByBackend[backendName]
+	if !ok {
+		return nil
+	}
+	for _, r := range reasons {
+		if r.Contains != "" && strings.Contains(detail, r.Contains) {
+			copy := r.Tip
+			return &copy
+		}
+	}
+	// Fallback: first entry with empty Contains.
+	for _, r := range reasons {
+		if r.Contains == "" {
+			copy := r.Tip
+			return &copy
+		}
 	}
 	return nil
 }
@@ -173,7 +207,7 @@ func GenerateTipsFromDomains(domains []ProtectionDomain) []Tip {
 			if b.Available {
 				continue
 			}
-			tip := lookupTip(b.Name)
+			tip := lookupTip(b.Name, b.Detail)
 			if tip != nil {
 				tip.Impact = fmt.Sprintf("%s (+%d pts)", tip.Impact, d.Weight)
 				tips = append(tips, *tip)
