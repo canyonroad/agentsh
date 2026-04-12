@@ -22,6 +22,14 @@ func TestAuditCmd_HasSubcommands(t *testing.T) {
 	if verifyCmd == nil || verifyCmd.Use != "verify <log-file>" {
 		t.Fatalf("verify subcommand not found or wrong Use")
 	}
+
+	chainCmd, _, err := cmd.Find([]string{"chain"})
+	if err != nil {
+		t.Fatalf("Find(chain) error = %v", err)
+	}
+	if chainCmd == nil || chainCmd.Use != "chain" {
+		t.Fatalf("chain subcommand not found or wrong Use")
+	}
 }
 
 func TestAuditVerifyCmd_Help(t *testing.T) {

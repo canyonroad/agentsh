@@ -9,5 +9,6 @@ func newAuditCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newAuditVerifyCmd())
+	cmd.AddCommand(newAuditChainCmd())
 	return cmd
 }
