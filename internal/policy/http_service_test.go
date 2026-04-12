@@ -1159,6 +1159,89 @@ func TestCompileHTTPServices_RejectsDuplicateAliasHost(t *testing.T) {
 	}
 }
 
+func TestHTTPServiceYAMLUnmarshal_WithSecret(t *testing.T) {
+	input := `
+http_services:
+  - name: github
+    upstream: https://api.github.com
+    default: deny
+    secret:
+      ref: "vault://kv/data/github#token"
+      format: "ghp_{rand:36}"
+    inject:
+      header:
+        name: Authorization
+        template: "Bearer {{secret}}"
+    scrub_response: true
+    rules:
+      - name: read-issues
+        methods: [GET]
+        paths: ["/repos/*/*/issues"]
+        decision: allow
+`
+	var p struct {
+		HTTPServices []HTTPService `yaml:"http_services"`
+	}
+	if err := yaml.Unmarshal([]byte(input), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(p.HTTPServices) != 1 {
+		t.Fatalf("want 1 service, got %d", len(p.HTTPServices))
+	}
+	s := p.HTTPServices[0]
+	if s.Secret == nil {
+		t.Fatal("secret is nil")
+	}
+	if s.Secret.Ref != "vault://kv/data/github#token" {
+		t.Errorf("secret.ref = %q", s.Secret.Ref)
+	}
+	if s.Secret.Format != "ghp_{rand:36}" {
+		t.Errorf("secret.format = %q", s.Secret.Format)
+	}
+	if s.Inject == nil || s.Inject.Header == nil {
+		t.Fatal("inject.header is nil")
+	}
+	if s.Inject.Header.Name != "Authorization" {
+		t.Errorf("inject.header.name = %q", s.Inject.Header.Name)
+	}
+	if s.Inject.Header.Template != "Bearer {{secret}}" {
+		t.Errorf("inject.header.template = %q", s.Inject.Header.Template)
+	}
+	if s.ScrubResponse == nil || !*s.ScrubResponse {
+		t.Error("scrub_response should be true")
+	}
+}
+
+func TestHTTPServiceYAMLUnmarshal_WithoutSecret(t *testing.T) {
+	input := `
+http_services:
+  - name: stripe
+    upstream: https://api.stripe.com
+    default: deny
+    rules:
+      - name: read
+        methods: [GET]
+        paths: ["/v1/customers"]
+        decision: allow
+`
+	var p struct {
+		HTTPServices []HTTPService `yaml:"http_services"`
+	}
+	if err := yaml.Unmarshal([]byte(input), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	s := p.HTTPServices[0]
+	if s.Secret != nil {
+		t.Error("secret should be nil for filtering-only service")
+	}
+	if s.Inject != nil {
+		t.Error("inject should be nil for filtering-only service")
+	}
+	if s.ScrubResponse != nil {
+		t.Error("scrub_response should be nil when not set")
+	}
+}
+
 func TestNewEngine_PopulatesHTTPServiceMaps(t *testing.T) {
 	p := &Policy{
 		Version: 1,

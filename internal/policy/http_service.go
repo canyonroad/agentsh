@@ -21,8 +21,30 @@ type HTTPService struct {
 	ExposeAs    string            `yaml:"expose_as,omitempty"`    // env var name; derived from Name if empty
 	Aliases     []string          `yaml:"aliases,omitempty"`      // extra hostnames for the fail-closed check
 	AllowDirect bool              `yaml:"allow_direct,omitempty"` // escape hatch; default false
-	Default     string            `yaml:"default,omitempty"`      // allow | deny; default deny
+	Default     string            `yaml:"default,omitempty"`      // allow | deny; default depends on Rules presence
 	Rules       []HTTPServiceRule `yaml:"rules,omitempty"`
+
+	// Credential substitution (unified from old services: section).
+	Secret        *HTTPServiceSecret `yaml:"secret,omitempty"`
+	Inject        *HTTPServiceInject `yaml:"inject,omitempty"`
+	ScrubResponse *bool              `yaml:"scrub_response,omitempty"` // nil = default based on Secret presence
+}
+
+// HTTPServiceSecret defines how to fetch and fake a credential.
+type HTTPServiceSecret struct {
+	Ref    string `yaml:"ref"`    // e.g. "vault://kv/data/github#token"
+	Format string `yaml:"format"` // e.g. "ghp_{rand:36}"
+}
+
+// HTTPServiceInject defines how the credential is injected into requests.
+type HTTPServiceInject struct {
+	Header *HTTPServiceInjectHeader `yaml:"header,omitempty"`
+}
+
+// HTTPServiceInjectHeader defines header injection config.
+type HTTPServiceInjectHeader struct {
+	Name     string `yaml:"name"`     // e.g. "Authorization"
+	Template string `yaml:"template"` // e.g. "Bearer {{secret}}"
 }
 
 // HTTPServiceRule is a single method+path matching rule for an HTTP service.
