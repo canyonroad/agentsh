@@ -5,6 +5,8 @@ package capabilities
 import (
 	"fmt"
 	"strings"
+
+	"github.com/agentsh/agentsh/internal/netmonitor/ebpf"
 )
 
 // tipDefinition defines a tip for a missing capability.
@@ -154,10 +156,10 @@ var tipsByBackend = map[string][]reasonTip{
 	"seccomp-notify": {{Tip: Tip{Feature: "seccomp-notify", Impact: "Seccomp-based file enforcement disabled", Action: "Run in privileged container or on host for seccomp support"}}},
 	"landlock-network": {{Tip: Tip{Feature: "landlock-network", Impact: "Kernel-level network restrictions disabled", Action: "Requires kernel 6.7+ (Landlock ABI v4)"}}},
 	"ebpf": {
-		{Contains: "btf not present", Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "Kernel was built without CONFIG_DEBUG_INFO_BTF=y; cilium/ebpf CO-RE programs cannot relocate types without BTF. Rebuild the kernel with CONFIG_DEBUG_INFO_BTF=y (and ideally CONFIG_DEBUG_INFO_BTF_MODULES=y)."}},
-		{Contains: "cgroup v2 not available", Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "eBPF socket association requires cgroups v2. Mount a unified cgroup hierarchy or switch to a systemd-based init."}},
-		{Contains: "kernel version unknown", Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "Could not determine kernel version. eBPF network monitoring requires kernel 5.8+."}},
-		{Contains: "kernel", Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "eBPF network monitoring requires kernel 5.8+ for BPF ring buffer and CO-RE support. Upgrade your kernel."}},
+		{Contains: ebpf.ReasonBTFNotPresent, Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "Kernel was built without CONFIG_DEBUG_INFO_BTF=y; cilium/ebpf CO-RE programs cannot relocate types without BTF. Rebuild the kernel with CONFIG_DEBUG_INFO_BTF=y (and ideally CONFIG_DEBUG_INFO_BTF_MODULES=y)."}},
+		{Contains: ebpf.ReasonCgroupV2NotAvail, Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "eBPF socket association requires cgroups v2. Mount a unified cgroup hierarchy or switch to a systemd-based init."}},
+		{Contains: ebpf.ReasonKernelVersionUnknown, Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "Could not determine kernel version. eBPF network monitoring requires kernel 5.8+."}},
+		{Contains: ebpf.ReasonKernelTooOld, Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "eBPF network monitoring requires kernel 5.8+ for BPF ring buffer and CO-RE support. Upgrade your kernel."}},
 		{Tip: Tip{Feature: "ebpf", Impact: "Network monitoring disabled", Action: "Requires CAP_BPF (or CAP_SYS_ADMIN) and cgroups v2. Run as root or with elevated privileges."}},
 	},
 	"cgroups-v2":      {{Tip: Tip{Feature: "cgroups-v2", Impact: "Resource limits unavailable", Action: "Enable cgroups v2 in kernel or container runtime"}}},

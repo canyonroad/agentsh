@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/netmonitor/ebpf"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -102,7 +103,7 @@ func TestGenerateTipsFromDomains_ZeroScoreOnly(t *testing.T) {
 			{Name: "fuse", Available: true},
 		}},
 		{Name: "Network", Weight: 20, Score: 0, Backends: []DetectedBackend{
-			{Name: "ebpf", Available: false, Detail: "btf not present (missing /sys/kernel/btf/vmlinux)"},
+			{Name: "ebpf", Available: false, Detail: ebpf.ReasonBTFNotPresent + " (missing /sys/kernel/btf/vmlinux)"},
 		}},
 	}
 	tips := GenerateTipsFromDomains(domains)
@@ -226,27 +227,27 @@ func TestLookupTip_EBPFReasonSensitive(t *testing.T) {
 	}{
 		{
 			name:       "btf not present",
-			detail:     "btf not present (missing /sys/kernel/btf/vmlinux)",
+			detail:     ebpf.ReasonBTFNotPresent + " (missing /sys/kernel/btf/vmlinux)",
 			wantAction: "CONFIG_DEBUG_INFO_BTF=y",
 		},
 		{
 			name:       "cgroup v2 not available",
-			detail:     "cgroup v2 not available",
+			detail:     ebpf.ReasonCgroupV2NotAvail,
 			wantAction: "cgroups v2",
 		},
 		{
 			name:       "kernel version unknown",
-			detail:     "kernel version unknown",
+			detail:     ebpf.ReasonKernelVersionUnknown,
 			wantAction: "Could not determine kernel version",
 		},
 		{
 			name:       "kernel too old",
-			detail:     "kernel 5.4 < 5.8",
+			detail:     ebpf.ReasonKernelTooOld + " 5.4 < 5.8",
 			wantAction: "kernel 5.8+",
 		},
 		{
 			name:       "missing caps falls to fallback",
-			detail:     "missing CAP_BPF or CAP_SYS_ADMIN",
+			detail:     ebpf.ReasonMissingCap,
 			wantAction: "CAP_BPF",
 		},
 		{
