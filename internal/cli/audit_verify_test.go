@@ -43,6 +43,20 @@ audit:
 	}
 }
 
+func writeAuditVerifyConfigDisabledWithoutKey(t *testing.T, path, logPath string) {
+	t.Helper()
+
+	content := fmt.Sprintf(`
+audit:
+  output: %s
+  integrity:
+    enabled: false
+`, logPath)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", path, err)
+	}
+}
+
 func TestAuditVerifyCmd_StrictRejectsUnsignedLines(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
@@ -142,6 +156,31 @@ func TestAuditVerifyCmd_DoesNotSkipExplicitLogWhenConfigDisabled(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, "verified 1 entries across 1 files") {
 		t.Fatalf("output = %q, want signed verification summary", got)
+	}
+}
+
+func TestAuditVerifyCmd_DoesNotRequireKeyForUnsignedLogWhenConfigDisabled(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	if err := os.WriteFile(logPath, []byte(`{"type":"unsigned"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+	writeAuditVerifyConfigDisabledWithoutKey(t, cfgPath, logPath)
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, logPath})
+
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "integrity not enabled in this log; nothing to verify") {
+		t.Fatalf("output = %q, want unsigned disabled-config no-op message", got)
 	}
 }
 

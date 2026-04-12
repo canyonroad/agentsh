@@ -60,15 +60,6 @@ func newAuditVerifyCmd() *cobra.Command {
 				return err
 			}
 
-			key, err := audit.LoadKey(cfg.Audit.Integrity.KeyFile, cfg.Audit.Integrity.KeyEnv)
-			if err != nil {
-				return fmt.Errorf("load audit integrity key: %w", err)
-			}
-			algorithm := cfg.Audit.Integrity.Algorithm
-			if algorithm == "" {
-				algorithm = "hmac-sha256"
-			}
-
 			files, err := discoverRotationSetForVerify(args[0])
 			if err != nil {
 				return err
@@ -78,6 +69,24 @@ func newAuditVerifyCmd() *cobra.Command {
 					return fmt.Errorf("open %s: %w", args[0], err)
 				}
 				files = append(files, audit.LogFile{Path: args[0], Index: 0, IsBackup: false})
+			}
+
+			hasIntegrityMetadata, err := verifyTargetContainsIntegrityMetadata(files)
+			if err != nil {
+				return err
+			}
+			if !cfg.Audit.Integrity.Enabled && !hasIntegrityMetadata {
+				fmt.Fprintln(cmd.OutOrStdout(), "integrity not enabled in this log; nothing to verify")
+				return nil
+			}
+
+			key, err := audit.LoadKey(cfg.Audit.Integrity.KeyFile, cfg.Audit.Integrity.KeyEnv)
+			if err != nil {
+				return fmt.Errorf("load audit integrity key: %w", err)
+			}
+			algorithm := cfg.Audit.Integrity.Algorithm
+			if algorithm == "" {
+				algorithm = "hmac-sha256"
 			}
 
 			summary, err := verifyIntegrityChain(files, key, algorithm, opts)
@@ -100,6 +109,51 @@ func newAuditVerifyCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&opts.fromSequence, "from-sequence", 0, "Start verification from this sequence instead of the visible chain origin")
 
 	return cmd
+}
+
+func verifyTargetContainsIntegrityMetadata(files []audit.LogFile) (bool, error) {
+	for _, file := range files {
+		f, err := os.Open(file.Path)
+		if err != nil {
+			return false, fmt.Errorf("open %s: %w", file.Path, err)
+		}
+
+		reader := bufio.NewReader(f)
+		for {
+			rawLine, readErr := reader.ReadBytes('\n')
+			if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
+				break
+			}
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				_ = f.Close()
+				return false, fmt.Errorf("scan %s: %w", file.Path, readErr)
+			}
+
+			line := bytes.TrimSpace(rawLine)
+			if len(line) == 0 {
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
+				continue
+			}
+
+			entry, err := audit.ParseIntegrityEntry(line)
+			if err != nil {
+				_ = f.Close()
+				return false, fmt.Errorf("malformed JSON at %s: %w", file.Path, err)
+			}
+			if entry.Integrity != nil {
+				_ = f.Close()
+				return true, nil
+			}
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+		}
+		_ = f.Close()
+	}
+
+	return false, nil
 }
 
 func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, opts verifyOptions) (*verifySummary, error) {

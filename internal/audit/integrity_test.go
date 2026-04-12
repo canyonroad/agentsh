@@ -283,6 +283,48 @@ func TestVerifyHash_PreservesLargePayloadIntegers(t *testing.T) {
 	}
 }
 
+func TestVerifyHash_PreservesNumericLexemes(t *testing.T) {
+	for _, payload := range []string{
+		`{"type":"persisted","fields":{"value":1.0}}`,
+		`{"type":"persisted","fields":{"value":1e0}}`,
+		`{"type":"persisted","fields":{"value":-0}}`,
+	} {
+		t.Run(payload, func(t *testing.T) {
+			chain, err := NewIntegrityChain(testKey)
+			if err != nil {
+				t.Fatalf("NewIntegrityChain() error = %v", err)
+			}
+
+			wrapped, err := chain.Wrap([]byte(payload))
+			if err != nil {
+				t.Fatalf("Wrap() error = %v", err)
+			}
+
+			var result map[string]any
+			if err := json.Unmarshal(wrapped, &result); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+
+			integrity := result["integrity"].(map[string]any)
+			ok, err := VerifyHash(
+				testKey,
+				"hmac-sha256",
+				int(integrity["format_version"].(float64)),
+				int64(integrity["sequence"].(float64)),
+				integrity["prev_hash"].(string),
+				wrapped,
+				integrity["entry_hash"].(string),
+			)
+			if err != nil {
+				t.Fatalf("VerifyHash() error = %v", err)
+			}
+			if !ok {
+				t.Fatalf("VerifyHash() = false, want true for payload %s", payload)
+			}
+		})
+	}
+}
+
 func TestIntegrityChain_VerifyWrapped_FailsWhenFormatVersionMutates(t *testing.T) {
 	chain, err := NewIntegrityChain(testKey)
 	if err != nil {

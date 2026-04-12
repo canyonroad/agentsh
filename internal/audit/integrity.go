@@ -203,7 +203,7 @@ func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
 	defer c.mu.Unlock()
 
 	// Parse existing payload
-	data, err := parseIntegrityPayload(payload)
+	data, err := parseIntegrityPayloadUseNumber(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -336,14 +336,6 @@ func VerifyWrapped(key []byte, algorithm string, wrapped []byte) (bool, error) {
 // computeHash computes the HMAC of: format_version || sequence || prev_hash || payload
 func (c *IntegrityChain) computeHash(formatVersion int, sequence int64, prevHash string, payload []byte) (string, error) {
 	return computeIntegrityHash(c.key, c.algorithm, formatVersion, sequence, prevHash, payload)
-}
-
-func parseIntegrityPayload(payload []byte) (map[string]any, error) {
-	var data map[string]any
-	if err := json.Unmarshal(payload, &data); err != nil {
-		return nil, fmt.Errorf("parse payload: %w", err)
-	}
-	return data, nil
 }
 
 func parseIntegrityPayloadUseNumber(payload []byte) (map[string]any, error) {
