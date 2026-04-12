@@ -358,9 +358,9 @@ func discoverRotationSetForVerify(logPath string) ([]audit.LogFile, error) {
 	}
 
 	sort.Ints(indexes)
-	for i, index := range indexes {
-		want := i + 1
-		if index != want {
+	for i := 1; i < len(indexes); i++ {
+		want := indexes[i-1] + 1
+		if indexes[i] != want {
 			return nil, fmt.Errorf("missing audit log file %s.%d", logPath, want)
 		}
 	}

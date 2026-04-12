@@ -187,6 +187,48 @@ func TestAuditVerifyCmd_AllowsBackupOnlyRetainedWindow(t *testing.T) {
 	}
 }
 
+func TestAuditVerifyCmd_AllowsBackupOnlyHighSuffixWindow(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+
+	lines := make([][]byte, 0, 4)
+	for _, payload := range []string{`{"type":"a"}`, `{"type":"b"}`, `{"type":"c"}`, `{"type":"d"}`} {
+		line, err := chain.Wrap([]byte(payload))
+		if err != nil {
+			t.Fatalf("chain.Wrap() error = %v", err)
+		}
+		lines = append(lines, line)
+	}
+
+	if err := os.WriteFile(base+".8", joinAuditVerifyLines(lines[0], lines[1]), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base+".8", err)
+	}
+	if err := os.WriteFile(base+".7", joinAuditVerifyLines(lines[2], lines[3]), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base+".7", err)
+	}
+	writeAuditVerifyConfig(t, cfgPath, base)
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, base})
+
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "verified 4 entries across 2 files") {
+		t.Fatalf("output = %q, want high-suffix backup-only rotation-set summary", got)
+	}
+}
+
 func TestAuditVerifyCmd_RejectsLegacyFormatEntry(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
@@ -399,6 +441,36 @@ func TestAuditVerifyCmd_TolerateTruncationAcceptsIncompleteFinalLine(t *testing.
 	cmd.SetArgs([]string{"--config", cfgPath, "--tolerate-truncation", logPath})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestAuditVerifyCmd_TolerateTruncationRejectsMalformedFinalLineWithoutNewline(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	first, err := chain.Wrap([]byte(`{"type":"before_bad_tail"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	data := append([]byte{}, first...)
+	data = append(data, '\n')
+	data = append(data, []byte(`{"type":"bad",}`)...)
+	if err := os.WriteFile(logPath, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--tolerate-truncation", logPath})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("Execute() error = nil, want malformed EOF tail failure")
 	}
 }
 

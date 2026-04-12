@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/spf13/cobra"
@@ -273,5 +274,9 @@ func isTolerableTruncation(err error) bool {
 		return true
 	}
 	var syntaxErr *json.SyntaxError
-	return errors.As(err, &syntaxErr)
+	if !errors.As(err, &syntaxErr) {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "unexpected EOF") || strings.Contains(message, "unexpected end of JSON input")
 }
