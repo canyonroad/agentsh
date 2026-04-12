@@ -79,7 +79,7 @@ func newAuditVerifyCmd() *cobra.Command {
 			}
 
 			hasIntegrityMetadata := false
-			if opts.fromSequence > 0 {
+			if opts.fromSequence >= 0 {
 				start, err := locateVerifyStart(files, opts.fromSequence)
 				if err != nil {
 					return err
@@ -131,7 +131,7 @@ func newAuditVerifyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.configPath, "config", "", "Path to agentsh config YAML (default: auto-discover)")
 	cmd.Flags().BoolVar(&opts.tolerateUnsigned, "tolerate-unsigned", false, "Warn and skip unsigned lines instead of failing")
 	cmd.Flags().BoolVar(&opts.tolerateTruncation, "tolerate-truncation", false, "Accept a truncated final line as end-of-chain")
-	cmd.Flags().Int64Var(&opts.fromSequence, "from-sequence", 0, "Start verification from this sequence instead of the visible chain origin")
+	cmd.Flags().Int64Var(&opts.fromSequence, "from-sequence", -1, "Start verification from this sequence instead of the visible chain origin")
 
 	return cmd
 }
@@ -249,7 +249,7 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 	summary := &verifySummary{fileCount: len(files)}
 	state := verifyState{}
 	var start *verifyStart
-	if opts.fromSequence > 0 {
+	if opts.fromSequence >= 0 {
 		var err error
 		start, err = locateVerifyStart(files, opts.fromSequence)
 		if err != nil {
@@ -337,7 +337,7 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 				return nil, fmt.Errorf("unsupported audit integrity format_version %d at %s:%d", entry.Integrity.FormatVersion, file.Path, lineNo)
 			}
 
-			if opts.fromSequence > 0 && summary.verifiedEntries == 0 {
+			if opts.fromSequence >= 0 && summary.verifiedEntries == 0 {
 				if entry.Integrity.Sequence != opts.fromSequence {
 					_ = f.Close()
 					return nil, fmt.Errorf("sequence mismatch at %s:%d: expected starting sequence %d, got %d", file.Path, lineNo, opts.fromSequence, entry.Integrity.Sequence)

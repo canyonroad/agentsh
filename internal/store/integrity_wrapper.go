@@ -338,6 +338,30 @@ func (s *IntegrityStore) bootstrapWithoutSidecar(files []audit.LogFile, lastFile
 	if entry.Integrity.FormatVersion > audit.IntegrityFormatVersion {
 		return fmt.Errorf("unsupported audit integrity format_version %d in %s", entry.Integrity.FormatVersion, lastFile.Path)
 	}
+
+	// If the last entry is already a rotation boundary we wrote (verifiable
+	// with our key, at sequence 0), the previous bootstrap attempt wrote the
+	// log entry but failed to persist the sidecar. Resume from it instead of
+	// appending a duplicate.
+	if entry.Type == "integrity_chain_rotated" && entry.Integrity.Sequence == 0 {
+		ok, verifyErr := s.chain.VerifyHash(
+			entry.Integrity.FormatVersion,
+			entry.Integrity.Sequence,
+			entry.Integrity.PrevHash,
+			entry.CanonicalPayload,
+			entry.Integrity.EntryHash,
+		)
+		if verifyErr == nil && ok {
+			s.chain.Restore(entry.Integrity.Sequence, entry.Integrity.EntryHash)
+			return audit.WriteSidecar(s.sidecarPath, audit.SidecarState{
+				Sequence:       entry.Integrity.Sequence,
+				PrevHash:       entry.Integrity.EntryHash,
+				KeyFingerprint: s.keyFingerprint,
+				UpdatedAt:      s.now().UTC(),
+			})
+		}
+	}
+
 	ok, err := s.chain.VerifyHash(
 		entry.Integrity.FormatVersion,
 		entry.Integrity.Sequence,
