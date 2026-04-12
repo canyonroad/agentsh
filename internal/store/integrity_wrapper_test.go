@@ -349,6 +349,23 @@ func TestIntegrityStore_PartialWriteReturnsFatalErrorAndDoesNotRollBack(t *testi
 	}
 }
 
+func TestIntegrityStore_StickyFatalRejectsSubsequentAppends(t *testing.T) {
+	store, _, _, _ := newBootstrappedRawIntegrityStore(t, &mockPartialFailRawWriter{})
+
+	// First append triggers a partial write → FatalIntegrityError.
+	err := store.AppendEvent(context.Background(), types.Event{ID: "ev-1", Type: "test"})
+	var fatal *FatalIntegrityError
+	if !errors.As(err, &fatal) {
+		t.Fatalf("first AppendEvent() error = %v, want FatalIntegrityError", err)
+	}
+
+	// Second append must be rejected immediately without touching the chain or log.
+	err = store.AppendEvent(context.Background(), types.Event{ID: "ev-2", Type: "test"})
+	if !errors.Is(err, ErrIntegrityFatal) {
+		t.Fatalf("second AppendEvent() error = %v, want ErrIntegrityFatal", err)
+	}
+}
+
 func TestIntegrityStore_EndToEnd_VerifyWithAuditHelpers(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
 

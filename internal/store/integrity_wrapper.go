@@ -36,6 +36,10 @@ type FatalIntegrityError struct {
 func (e *FatalIntegrityError) Error() string { return e.Op + ": " + e.Err.Error() }
 func (e *FatalIntegrityError) Unwrap() error { return e.Err }
 
+// ErrIntegrityFatal is returned by AppendEvent after a prior fatal integrity
+// error has been latched. Once set, no further writes are allowed.
+var ErrIntegrityFatal = errors.New("integrity store is in fatal state; no further writes allowed")
+
 // IntegrityStore wraps an EventStore and adds integrity metadata to events.
 type IntegrityStore struct {
 	mu             sync.Mutex
@@ -46,6 +50,7 @@ type IntegrityStore struct {
 	algorithm      string
 	keyFingerprint string
 	now            func() time.Time
+	fatal          bool // sticky; set on first FatalIntegrityError
 }
 
 type visibleChainState struct {
@@ -415,6 +420,10 @@ func (s *IntegrityStore) AppendEvent(ctx context.Context, ev types.Event) error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.fatal {
+		return ErrIntegrityFatal
+	}
+
 	prevState := s.chain.State()
 	wrapped, err := s.chain.Wrap(payload)
 	if err != nil {
@@ -424,6 +433,7 @@ func (s *IntegrityStore) AppendEvent(ctx context.Context, ev types.Event) error 
 		type partialWriter interface{ IsPartialWrite() bool }
 		if pw, ok := err.(partialWriter); ok && pw.IsPartialWrite() {
 			// Data may be partially on disk — chain state is now ambiguous.
+			s.fatal = true
 			return &FatalIntegrityError{Op: "write audit log", Err: err}
 		}
 		// Clean failure: no bytes hit disk, safe to roll back chain state.
@@ -438,6 +448,7 @@ func (s *IntegrityStore) AppendEvent(ctx context.Context, ev types.Event) error 
 		KeyFingerprint: s.keyFingerprint,
 		UpdatedAt:      s.now().UTC(),
 	}); err != nil {
+		s.fatal = true
 		return &FatalIntegrityError{Op: "write audit integrity sidecar", Err: err}
 	}
 	return nil

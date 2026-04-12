@@ -473,19 +473,33 @@ func archiveRotationSet(logPath, stamp string) error {
 		return err
 	}
 
+	// Build the full move set (source → target) including the sidecar.
+	type moveOp struct{ src, dst string }
+	moves := make([]moveOp, 0, len(files)+1)
 	for _, file := range files {
 		target := logPath + ".legacy." + stamp
 		if file.Suffix != "" {
 			target = logPath + ".legacy." + stamp + "." + file.Suffix
 		}
-		if err := os.Rename(file.Path, target); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("archive legacy audit log %s: %w", file.Path, err)
-		}
+		moves = append(moves, moveOp{src: file.Path, dst: target})
 	}
-
 	sidecarPath := audit.SidecarPath(logPath)
-	if err := os.Rename(sidecarPath, logPath+".legacy."+stamp+".chain"); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("archive legacy audit sidecar: %w", err)
+	moves = append(moves, moveOp{src: sidecarPath, dst: logPath + ".legacy." + stamp + ".chain"})
+
+	// Execute moves, rolling back on failure.
+	var completed []moveOp
+	for _, m := range moves {
+		if err := os.Rename(m.src, m.dst); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			// Roll back already-moved files.
+			for _, done := range completed {
+				_ = os.Rename(done.dst, done.src)
+			}
+			return fmt.Errorf("archive legacy audit log %s: %w", m.src, err)
+		}
+		completed = append(completed, m)
 	}
 	return nil
 }
