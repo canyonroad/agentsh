@@ -278,6 +278,9 @@ func currentChainSummary(logPath string) (map[string]any, bool, error) {
 	if err != nil || entry.Integrity == nil {
 		return nil, true, nil
 	}
+	if entry.Integrity.FormatVersion != audit.IntegrityFormatVersion {
+		return nil, true, nil
+	}
 
 	return map[string]any{
 		"last_sequence_seen_in_log":   entry.Integrity.Sequence,
@@ -301,6 +304,9 @@ func currentChainTailVerifiesWith(logPath string, key []byte, algorithm string) 
 
 	entry, err := audit.ParseIntegrityEntry(lastLine)
 	if err != nil || entry.Integrity == nil {
+		return false, nil
+	}
+	if entry.Integrity.FormatVersion != audit.IntegrityFormatVersion {
 		return false, nil
 	}
 	return audit.VerifyHash(

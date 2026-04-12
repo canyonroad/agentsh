@@ -165,6 +165,10 @@ func (s *IntegrityStore) validateVisibleChain(files []audit.LogFile) error {
 				_ = f.Close()
 				return fmt.Errorf("legacy audit log detected in %s", file.Path)
 			}
+			if entry.Integrity.FormatVersion > audit.IntegrityFormatVersion {
+				_ = f.Close()
+				return fmt.Errorf("unsupported audit integrity format_version %d in %s", entry.Integrity.FormatVersion, file.Path)
+			}
 
 			rotationBoundary := entry.Type == "integrity_chain_rotated" &&
 				entry.Integrity.Sequence == 0 &&
@@ -322,6 +326,9 @@ func (s *IntegrityStore) bootstrapWithoutSidecar(files []audit.LogFile, lastFile
 	}
 	if entry.Integrity == nil || entry.Integrity.FormatVersion < audit.IntegrityFormatVersion {
 		return fmt.Errorf("legacy audit log detected in %s", lastFile.Path)
+	}
+	if entry.Integrity.FormatVersion > audit.IntegrityFormatVersion {
+		return fmt.Errorf("unsupported audit integrity format_version %d in %s", entry.Integrity.FormatVersion, lastFile.Path)
 	}
 	ok, err := s.chain.VerifyHash(
 		entry.Integrity.FormatVersion,

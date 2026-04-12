@@ -16,6 +16,9 @@ var ErrSidecarNotFound = errors.New("integrity sidecar not found")
 // ErrSidecarCorrupt indicates that the persisted sidecar exists but is malformed.
 var ErrSidecarCorrupt = errors.New("integrity sidecar corrupt")
 
+// ErrSidecarUnsupportedFormat indicates that the sidecar format is newer than this binary supports.
+var ErrSidecarUnsupportedFormat = errors.New("integrity sidecar unsupported format")
+
 // SidecarState stores the last durable audit chain state alongside the log.
 type SidecarState struct {
 	FormatVersion  int       `json:"format_version"`
@@ -75,7 +78,7 @@ func ReadSidecar(path string) (SidecarState, error) {
 
 	switch {
 	case state.FormatVersion > IntegrityFormatVersion:
-		return SidecarState{}, wrapSidecarCorrupt(fmt.Errorf("parse sidecar: unsupported format_version %d", state.FormatVersion))
+		return SidecarState{}, wrapSidecarUnsupported(fmt.Errorf("parse sidecar: unsupported format_version %d", state.FormatVersion))
 	case state.Sequence < -1:
 		return SidecarState{}, wrapSidecarCorrupt(errors.New("parse sidecar: invalid sequence"))
 	case state.Sequence < 0 && state.PrevHash != "":
@@ -93,6 +96,10 @@ func ReadSidecar(path string) (SidecarState, error) {
 
 func wrapSidecarCorrupt(err error) error {
 	return fmt.Errorf("%w: %v", ErrSidecarCorrupt, err)
+}
+
+func wrapSidecarUnsupported(err error) error {
+	return fmt.Errorf("%w: %v", ErrSidecarUnsupportedFormat, err)
 }
 
 // WriteSidecar atomically persists integrity state next to the audit log.

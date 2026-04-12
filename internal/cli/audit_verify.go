@@ -236,6 +236,10 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 				_ = f.Close()
 				return nil, fmt.Errorf("legacy-format entry at %s:%d", file.Path, lineNo)
 			}
+			if entry.Integrity.FormatVersion > audit.IntegrityFormatVersion {
+				_ = f.Close()
+				return nil, fmt.Errorf("unsupported audit integrity format_version %d at %s:%d", entry.Integrity.FormatVersion, file.Path, lineNo)
+			}
 
 			if opts.fromSequence > 0 && !state.seeded {
 				if entry.Integrity.Sequence < opts.fromSequence {

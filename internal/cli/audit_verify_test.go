@@ -3,9 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -338,6 +343,76 @@ func TestAuditVerifyCmd_VerifiesRealRotatedIntegrityStore(t *testing.T) {
 	if got := out.String(); !strings.Contains(got, "verified 3 entries across 2 files") {
 		t.Fatalf("output = %q, want rotated verification summary", got)
 	}
+}
+
+func TestAuditVerifyCmd_RejectsFutureFormatEntry(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	line := mustWrapFutureFormatVerifyEntry(t, testAuditKey, `{"type":"future_format"}`)
+	if err := os.WriteFile(logPath, append(line, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, logPath})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want unsupported future-format rejection")
+	}
+	if !strings.Contains(err.Error(), "unsupported audit integrity format_version") {
+		t.Fatalf("Execute() error = %v, want unsupported future-format message", err)
+	}
+}
+
+func mustWrapFutureFormatVerifyEntry(t *testing.T, key []byte, payload string) []byte {
+	t.Helper()
+
+	chain, err := audit.NewIntegrityChain(key)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	line, err := chain.Wrap([]byte(payload))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(line, &entry); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	integrity := entry["integrity"].(map[string]any)
+	sequence := int64(integrity["sequence"].(float64))
+	prevHash := integrity["prev_hash"].(string)
+	delete(entry, "integrity")
+	canonicalPayload, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	integrity["format_version"] = float64(audit.IntegrityFormatVersion + 1)
+	integrity["entry_hash"] = computeVerifyFutureFormatHash(key, audit.IntegrityFormatVersion+1, sequence, prevHash, canonicalPayload)
+	entry["integrity"] = integrity
+	line, err = json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	return line
+}
+
+func computeVerifyFutureFormatHash(key []byte, formatVersion int, sequence int64, prevHash string, payload []byte) string {
+	h := hmac.New(sha256.New, key)
+	h.Write([]byte(strconv.Itoa(formatVersion)))
+	h.Write([]byte("|"))
+	h.Write([]byte(strconv.FormatInt(sequence, 10)))
+	h.Write([]byte("|"))
+	h.Write([]byte(prevHash))
+	h.Write([]byte("|"))
+	h.Write(payload)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func TestAuditVerifyCmd_AllowsBackupOnlyRetainedWindow(t *testing.T) {

@@ -2,10 +2,14 @@ package store
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -581,6 +585,59 @@ func TestNewIntegrityStore_CorruptSidecarFallsThroughToMissingHandling(t *testin
 	}
 }
 
+func TestNewIntegrityStore_RejectsUnsupportedSidecarFormat(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	chain := mustNewIntegrityChain(t)
+	line, err := chain.Wrap([]byte(`{"type":"existing"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	if err := os.WriteFile(logPath, append(line, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+	if err := os.WriteFile(audit.SidecarPath(logPath), []byte(`{"format_version":3,"sequence":0,"prev_hash":"`+chain.State().PrevHash+`","key_fingerprint":"`+audit.KeyFingerprint(testKey)+`"}`), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(sidecar) error = %v", err)
+	}
+
+	inner, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = inner.Close() })
+
+	_, err = NewIntegrityStore(inner, mustNewIntegrityChain(t), testIntegrityOptions(logPath))
+	if err == nil {
+		t.Fatal("NewIntegrityStore() error = nil, want unsupported sidecar format rejection")
+	}
+	if !strings.Contains(err.Error(), "unsupported format_version") {
+		t.Fatalf("NewIntegrityStore() error = %v, want unsupported format_version", err)
+	}
+}
+
+func TestNewIntegrityStore_RejectsFutureFormatLogWithoutSidecar(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	line := mustWrapFutureFormatEntry(t, testKey, `{"type":"future_format"}`)
+	if err := os.WriteFile(logPath, append(line, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	inner, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = inner.Close() })
+
+	_, err = NewIntegrityStore(inner, mustNewIntegrityChain(t), testIntegrityOptions(logPath))
+	if err == nil {
+		t.Fatal("NewIntegrityStore() error = nil, want unsupported future-format log rejection")
+	}
+	if !strings.Contains(err.Error(), "unsupported audit integrity format_version") {
+		t.Fatalf("NewIntegrityStore() error = %v, want unsupported audit integrity format_version", err)
+	}
+}
+
 func TestNewIntegrityStore_ResumesFromMatchingBackupWhenActiveFileEmpty(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
 
@@ -782,4 +839,50 @@ func TestIntegrityStore_AppendEvent_WritesSidecarAfterRawWrite(t *testing.T) {
 	if sidecar.Sequence != chain.State().Sequence {
 		t.Fatalf("sidecar sequence = %d, want %d", sidecar.Sequence, chain.State().Sequence)
 	}
+}
+
+func mustWrapFutureFormatEntry(t *testing.T, key []byte, payload string) []byte {
+	t.Helper()
+
+	chain, err := audit.NewIntegrityChain(key)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	line, err := chain.Wrap([]byte(payload))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(line, &entry); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	integrity := entry["integrity"].(map[string]any)
+	sequence := int64(integrity["sequence"].(float64))
+	prevHash := integrity["prev_hash"].(string)
+	delete(entry, "integrity")
+	canonicalPayload, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	integrity["format_version"] = float64(audit.IntegrityFormatVersion + 1)
+	integrity["entry_hash"] = computeFutureFormatHash(key, audit.IntegrityFormatVersion+1, sequence, prevHash, canonicalPayload)
+	entry["integrity"] = integrity
+	line, err = json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	return line
+}
+
+func computeFutureFormatHash(key []byte, formatVersion int, sequence int64, prevHash string, payload []byte) string {
+	h := hmac.New(sha256.New, key)
+	h.Write([]byte(strconv.Itoa(formatVersion)))
+	h.Write([]byte("|"))
+	h.Write([]byte(strconv.FormatInt(sequence, 10)))
+	h.Write([]byte("|"))
+	h.Write([]byte(prevHash))
+	h.Write([]byte("|"))
+	h.Write(payload)
+	return hex.EncodeToString(h.Sum(nil))
 }
