@@ -54,16 +54,7 @@ type ServiceInjectEnvYAML struct {
 	Name string `yaml:"name"`
 }
 
-// knownProviderTypes lists the provider type names (URI schemes) that
-// Plan 6 supports. Extended as new providers land.
-var knownProviderTypes = map[string]bool{
-	"keyring":  true,
-	"vault":    true,
-	"aws-sm":   true,
-	"gcp-sm":   true,
-	"azure-kv": true,
-	"op":       true,
-}
+// knownProviderTypes is now defined in http_service.go.
 
 // ValidateSecrets validates the providers and services sections of a Policy.
 // It checks structural rules only -- provider constructability and secret

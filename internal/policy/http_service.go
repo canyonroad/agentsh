@@ -61,6 +61,19 @@ type HTTPServiceRule struct {
 
 var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// knownProviderTypes lists the provider type names (URI schemes) that
+// are supported. Ported from secrets.go for use by
+// ValidateHTTPServicesWithProviders; will be the sole copy after
+// secrets.go is deleted.
+var knownProviderTypes = map[string]bool{
+	"keyring":  true,
+	"vault":    true,
+	"aws-sm":   true,
+	"gcp-sm":   true,
+	"azure-kv": true,
+	"op":       true,
+}
+
 // httpServiceNameRe restricts http_service.name to URL-safe path segment
 // characters. Routing depends on the name appearing in /svc/<name>/ URLs,
 // so any character the URL parser treats as a segment terminator (/, ?, #)
@@ -298,15 +311,27 @@ func ValidateHTTPServicesWithProviders(svcs []HTTPService, providers map[string]
 		return err
 	}
 
-	// Build provider scheme set.
-	providerSchemes := make(map[string]bool)
-	for _, node := range providers {
+	// Build provider scheme set with duplicate-type detection.
+	// Mirrors the validation from ValidateSecrets so the rules carry
+	// over when secrets.go is deleted.
+	providerSchemes := make(map[string]string) // scheme -> provider name
+	for name, node := range providers {
 		var base struct {
 			Type string `yaml:"type"`
 		}
-		if err := node.Decode(&base); err == nil && base.Type != "" {
-			providerSchemes[base.Type] = true
+		if err := node.Decode(&base); err != nil {
+			return fmt.Errorf("providers.%s: cannot decode type: %w", name, err)
 		}
+		if base.Type == "" {
+			return fmt.Errorf("providers.%s: type is required", name)
+		}
+		if !knownProviderTypes[base.Type] {
+			return fmt.Errorf("providers.%s: unknown type %q", name, base.Type)
+		}
+		if prev, dup := providerSchemes[base.Type]; dup {
+			return fmt.Errorf("providers.%s: duplicate type %q (already declared by %q)", name, base.Type, prev)
+		}
+		providerSchemes[base.Type] = name
 	}
 
 	for _, s := range svcs {
@@ -321,10 +346,12 @@ func ValidateHTTPServicesWithProviders(svcs []HTTPService, providers map[string]
 			if err != nil {
 				return fmt.Errorf("http_services[%q]: invalid secret ref: %w", s.Name, err)
 			}
-			if len(providerSchemes) > 0 && !providerSchemes[ref.Scheme] {
-				return fmt.Errorf("http_services[%q]: secret ref scheme %q has no matching provider", s.Name, ref.Scheme)
+			if len(providerSchemes) > 0 {
+				if _, ok := providerSchemes[ref.Scheme]; !ok {
+					return fmt.Errorf("http_services[%q]: secret ref scheme %q has no matching provider", s.Name, ref.Scheme)
+				}
 			}
-			if len(providerSchemes) == 0 {
+			if len(providerSchemes) == 0 && s.Secret != nil {
 				return fmt.Errorf("http_services[%q]: secret ref scheme %q has no matching provider (no providers declared)", s.Name, ref.Scheme)
 			}
 			if _, _, err := secrets.ParseFormat(s.Secret.Format); err != nil {
