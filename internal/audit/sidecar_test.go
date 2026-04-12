@@ -154,7 +154,7 @@ func TestReadSidecar_RejectsInvalidState(t *testing.T) {
 			name: "positive_sequence_with_empty_prev_hash",
 			state: map[string]any{
 				"format_version":  IntegrityFormatVersion,
-				"sequence":        int64(2),
+				"sequence":        int64(0),
 				"prev_hash":       "",
 				"key_fingerprint": "sha256:00112233445566778899aabbccddeeff",
 				"updated_at":      updatedAt,

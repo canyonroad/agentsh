@@ -192,6 +192,40 @@ func TestNewIntegrityStore_SidecarMissingStartsFreshRotation(t *testing.T) {
 	}
 }
 
+func TestNewIntegrityStore_SidecarMissingRejectsTamperedV2Log(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	previousChain := mustNewIntegrityChain(t)
+	line, err := previousChain.Wrap([]byte(`{"type":"existing","timestamp":"2026-04-11T12:00:00Z","fields":{"value":"ok"}}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(line, &entry); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	entry["fields"] = map[string]any{"value": "tampered"}
+	tampered, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(logPath, append(tampered, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	inner, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = inner.Close() })
+
+	chain := mustNewIntegrityChain(t)
+	if _, err := NewIntegrityStore(inner, chain, testIntegrityOptions(logPath)); err == nil {
+		t.Fatal("NewIntegrityStore() error = nil, want tampered v2 log rejection")
+	}
+}
+
 func TestIntegrityStore_AppendEvent_WritesSidecarAfterRawWrite(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")

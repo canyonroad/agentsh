@@ -150,6 +150,19 @@ func (s *IntegrityStore) bootstrapWithoutSidecar(lastFile audit.LogFile, lastLin
 	if entry.Integrity == nil || entry.Integrity.FormatVersion < audit.IntegrityFormatVersion {
 		return fmt.Errorf("legacy audit log detected in %s", lastFile.Path)
 	}
+	ok, err := s.chain.VerifyHash(
+		entry.Integrity.FormatVersion,
+		entry.Integrity.Sequence,
+		entry.Integrity.PrevHash,
+		entry.CanonicalPayload,
+		entry.Integrity.EntryHash,
+	)
+	if err != nil {
+		return fmt.Errorf("audit integrity chain mismatch: verify last entry: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("audit integrity chain mismatch: invalid last entry in %s", lastFile.Path)
+	}
 
 	return s.appendRotationBoundary("sidecar_missing", "sidecar missing; starting fresh chain", map[string]any{
 		"last_sequence_seen_in_log":   entry.Integrity.Sequence,

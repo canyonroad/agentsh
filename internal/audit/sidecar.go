@@ -77,8 +77,8 @@ func ReadSidecar(path string) (SidecarState, error) {
 		return SidecarState{}, errors.New("parse sidecar: invalid sequence")
 	case state.Sequence < 0 && state.PrevHash != "":
 		return SidecarState{}, errors.New("parse sidecar: negative sequence with non-empty prev_hash")
-	case state.Sequence > 0 && state.PrevHash == "":
-		return SidecarState{}, errors.New("parse sidecar: positive sequence with empty prev_hash")
+	case state.Sequence >= 0 && state.PrevHash == "":
+		return SidecarState{}, errors.New("parse sidecar: persisted sequence requires non-empty prev_hash")
 	case state.PrevHash != "":
 		if _, err := hex.DecodeString(state.PrevHash); err != nil {
 			return SidecarState{}, errors.New("parse sidecar: invalid prev_hash")
