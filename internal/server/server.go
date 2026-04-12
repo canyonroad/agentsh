@@ -251,64 +251,64 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	var webhookStore *webhook.Store
-		if cfg.Audit.Webhook.URL != "" {
-			flushEvery, err := time.ParseDuration(cfg.Audit.Webhook.FlushInterval)
-			if err != nil {
-				if jsonlStore != nil {
-					_ = jsonlStore.Close()
-				}
-				if db != nil {
-					_ = db.Close()
-				}
-				return nil, fmt.Errorf("parse audit.webhook.flush_interval: %w", err)
+	if cfg.Audit.Webhook.URL != "" {
+		flushEvery, err := time.ParseDuration(cfg.Audit.Webhook.FlushInterval)
+		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
 			}
-			timeout, err := time.ParseDuration(cfg.Audit.Webhook.Timeout)
-			if err != nil {
-				if jsonlStore != nil {
-					_ = jsonlStore.Close()
-				}
-				if db != nil {
-					_ = db.Close()
-				}
-				return nil, fmt.Errorf("parse audit.webhook.timeout: %w", err)
+			if db != nil {
+				_ = db.Close()
 			}
-			webhookStore, err = webhook.New(cfg.Audit.Webhook.URL, cfg.Audit.Webhook.BatchSize, flushEvery, timeout, cfg.Audit.Webhook.Headers)
-			if err != nil {
-				if jsonlStore != nil {
-					_ = jsonlStore.Close()
-				}
-				if db != nil {
-					_ = db.Close()
-				}
-				return nil, err
+			return nil, fmt.Errorf("parse audit.webhook.flush_interval: %w", err)
+		}
+		timeout, err := time.ParseDuration(cfg.Audit.Webhook.Timeout)
+		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
 			}
+			if db != nil {
+				_ = db.Close()
+			}
+			return nil, fmt.Errorf("parse audit.webhook.timeout: %w", err)
+		}
+		webhookStore, err = webhook.New(cfg.Audit.Webhook.URL, cfg.Audit.Webhook.BatchSize, flushEvery, timeout, cfg.Audit.Webhook.Headers)
+		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
+			}
+			if db != nil {
+				_ = db.Close()
+			}
+			return nil, err
+		}
 	}
 
 	var otelStore *otelstore.Store
 	if cfg.Audit.OTEL.Enabled {
-			if !cfg.Audit.OTEL.TLS.Enabled {
-				slog.Warn("OTEL export is configured without TLS; event data will be sent in plaintext")
+		if !cfg.Audit.OTEL.TLS.Enabled {
+			slog.Warn("OTEL export is configured without TLS; event data will be sent in plaintext")
+		}
+		otelTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Timeout)
+		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
 			}
-			otelTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Timeout)
-			if err != nil {
-				if jsonlStore != nil {
-					_ = jsonlStore.Close()
-				}
-				if db != nil {
-					_ = db.Close()
-				}
-				return nil, fmt.Errorf("parse audit.otel.timeout: %w", err)
+			if db != nil {
+				_ = db.Close()
 			}
-			otelBatchTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Batch.Timeout)
-			if err != nil {
-				if jsonlStore != nil {
-					_ = jsonlStore.Close()
-				}
-				if db != nil {
-					_ = db.Close()
-				}
-				return nil, fmt.Errorf("parse audit.otel.batch.timeout: %w", err)
+			return nil, fmt.Errorf("parse audit.otel.timeout: %w", err)
+		}
+		otelBatchTimeout, err := time.ParseDuration(cfg.Audit.OTEL.Batch.Timeout)
+		if err != nil {
+			if jsonlStore != nil {
+				_ = jsonlStore.Close()
 			}
+			if db != nil {
+				_ = db.Close()
+			}
+			return nil, fmt.Errorf("parse audit.otel.batch.timeout: %w", err)
+		}
 		otelStore, err = otelstore.New(context.Background(), otelstore.Config{
 			Endpoint:     cfg.Audit.OTEL.Endpoint,
 			Protocol:     cfg.Audit.OTEL.Protocol,
@@ -854,8 +854,26 @@ func (s *Server) Run(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if s.pprofLn != nil && s.pprofServer != nil {
-		go func() { _ = s.pprofServer.Serve(s.pprofLn) }()
+	httpServer := s.httpServer
+	httpLn := s.httpLn
+	if httpServer == nil {
+		return errors.New("server http server is nil")
+	}
+	if httpLn == nil {
+		return errors.New("server http listener is nil")
+	}
+	pprofServer := s.pprofServer
+	pprofLn := s.pprofLn
+	unixServer := s.unixServer
+	unixLn := s.unixLn
+	grpcServer := s.grpcServer
+	grpcLn := s.grpcLn
+	app := s.app
+	policySockCancel := s.policySockCancel
+	policySockDone := s.policySockDone
+
+	if pprofLn != nil && pprofServer != nil {
+		go func() { _ = pprofServer.Serve(pprofLn) }()
 	}
 
 	if s.sessionTimeout > 0 || s.idleTimeout > 0 {
@@ -889,20 +907,20 @@ func (s *Server) Run(ctx context.Context) error {
 
 	errCh := make(chan error, 3)
 	go func() {
-		if err := s.httpServer.Serve(s.httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpServer.Serve(httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
-	if s.unixServer != nil && s.unixLn != nil {
+	if unixServer != nil && unixLn != nil {
 		go func() {
-			if err := s.unixServer.Serve(s.unixLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := unixServer.Serve(unixLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- err
 			}
 		}()
 	}
-	if s.grpcServer != nil && s.grpcLn != nil {
+	if grpcServer != nil && grpcLn != nil {
 		go func() {
-			if err := s.grpcServer.Serve(s.grpcLn); err != nil {
+			if err := grpcServer.Serve(grpcLn); err != nil {
 				errCh <- err
 			}
 		}()
@@ -912,31 +930,31 @@ func (s *Server) Run(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		if s.pprofServer != nil {
-			_ = s.pprofServer.Shutdown(shutdownCtx)
+		if pprofServer != nil {
+			_ = pprofServer.Shutdown(shutdownCtx)
 		}
-		if s.unixServer != nil {
-			_ = s.unixServer.Shutdown(shutdownCtx)
+		if unixServer != nil {
+			_ = unixServer.Shutdown(shutdownCtx)
 		}
-		if s.grpcServer != nil {
+		if grpcServer != nil {
 			if graceful {
-				s.grpcServer.GracefulStop()
+				grpcServer.GracefulStop()
 			} else {
-				s.grpcServer.Stop()
+				grpcServer.Stop()
 			}
 		}
-		if s.policySockCancel != nil {
-			s.policySockCancel()
+		if policySockCancel != nil {
+			policySockCancel()
 		}
-		httpErr := s.httpServer.Shutdown(shutdownCtx)
-		if s.app != nil {
-			s.app.Close()
+		httpErr := httpServer.Shutdown(shutdownCtx)
+		if app != nil {
+			app.Close()
 		}
 		if syncerDone != nil {
 			<-syncerDone
 		}
-		if s.policySockDone != nil {
-			<-s.policySockDone
+		if policySockDone != nil {
+			<-policySockDone
 		}
 		return httpErr
 	}

@@ -190,7 +190,7 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 		return fmt.Errorf("cannot acknowledge key rotation with an in-place reset; retry with --legacy-archive")
 	}
 	if !opts.LegacyArchive && hasPriorData {
-		ok, err := currentChainTailVerifiesWith(logPath, key, algorithm)
+		ok, err := visibleRotationSetVerifiesWith(logPath, key, algorithm)
 		if err != nil {
 			return err
 		}
@@ -273,6 +273,13 @@ func currentChainSummary(logPath string) (map[string]any, bool, error) {
 	if err != nil {
 		return nil, len(files) > 0, err
 	}
+	supported, err := visibleRotationSetSupportsInPlaceReset(files)
+	if err != nil {
+		return nil, len(files) > 0, err
+	}
+	if !supported {
+		return nil, true, nil
+	}
 
 	entry, err := audit.ParseIntegrityEntry(lastLine)
 	if err != nil || entry.Integrity == nil {
@@ -288,36 +295,175 @@ func currentChainSummary(logPath string) (map[string]any, bool, error) {
 	}, true, nil
 }
 
-func currentChainTailVerifiesWith(logPath string, key []byte, algorithm string) (bool, error) {
+func visibleRotationSetVerifiesWith(logPath string, key []byte, algorithm string) (bool, error) {
 	files, err := existingRotationFiles(logPath)
 	if err != nil {
 		return false, err
 	}
-
-	_, lastLine, err := readLastNonEmptyLineBestEffort(files)
-	if errors.Is(err, os.ErrNotExist) {
+	if len(files) == 0 {
 		return true, nil
 	}
-	if err != nil {
-		return false, err
+
+	summary := &verifySummary{fileCount: len(files)}
+	state := verifyState{}
+
+	for _, file := range files {
+		f, err := os.Open(file.Path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return false, fmt.Errorf("open %s: %w", file.Path, err)
+		}
+
+		reader := bufio.NewReader(f)
+		lineNo := 0
+		for {
+			rawLine, readErr := reader.ReadBytes('\n')
+			if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
+				break
+			}
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				_ = f.Close()
+				return false, fmt.Errorf("scan %s: %w", file.Path, readErr)
+			}
+
+			lineNo++
+			line := bytes.TrimSpace(rawLine)
+			if len(line) == 0 {
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
+				continue
+			}
+
+			entry, err := audit.ParseIntegrityEntry(line)
+			if err != nil || entry.Integrity == nil {
+				_ = f.Close()
+				return false, nil
+			}
+			if entry.Integrity.FormatVersion != audit.IntegrityFormatVersion {
+				_ = f.Close()
+				return false, nil
+			}
+
+			rotationBoundary := entry.Type == "integrity_chain_rotated" &&
+				entry.Integrity.Sequence == 0 &&
+				entry.Integrity.PrevHash == ""
+
+			if !state.seeded && file.IsBackup && summary.verifiedEntries == 0 {
+				state.expectedSequence = entry.Integrity.Sequence
+				state.expectedPrevHash = entry.Integrity.PrevHash
+				state.seeded = true
+			}
+
+			if rotationBoundary {
+				if err := verifyRotationBoundary(entry.CanonicalPayload, summary, state, file.IsBackup); err != nil {
+					_ = f.Close()
+					return false, nil
+				}
+			} else {
+				if !state.seeded {
+					state.expectedSequence = 0
+					state.expectedPrevHash = ""
+					state.seeded = true
+				}
+				if entry.Integrity.Sequence != state.expectedSequence {
+					_ = f.Close()
+					return false, nil
+				}
+				if entry.Integrity.PrevHash != state.expectedPrevHash {
+					_ = f.Close()
+					return false, nil
+				}
+			}
+
+			ok, err := audit.VerifyHash(
+				key,
+				algorithm,
+				entry.Integrity.FormatVersion,
+				entry.Integrity.Sequence,
+				entry.Integrity.PrevHash,
+				entry.CanonicalPayload,
+				entry.Integrity.EntryHash,
+			)
+			if err != nil {
+				_ = f.Close()
+				return false, err
+			}
+			if !ok {
+				_ = f.Close()
+				return false, nil
+			}
+
+			summary.verifiedEntries++
+			state.expectedSequence = entry.Integrity.Sequence + 1
+			state.expectedPrevHash = entry.Integrity.EntryHash
+			state.seeded = true
+
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+		}
+
+		if err := f.Close(); err != nil {
+			return false, err
+		}
 	}
 
-	entry, err := audit.ParseIntegrityEntry(lastLine)
-	if err != nil || entry.Integrity == nil {
-		return false, nil
+	return true, nil
+}
+
+func visibleRotationSetSupportsInPlaceReset(files []audit.LogFile) (bool, error) {
+	for _, file := range files {
+		f, err := os.Open(file.Path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return false, fmt.Errorf("open %s: %w", file.Path, err)
+		}
+
+		reader := bufio.NewReader(f)
+		for {
+			rawLine, readErr := reader.ReadBytes('\n')
+			if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
+				break
+			}
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				_ = f.Close()
+				return false, fmt.Errorf("scan %s: %w", file.Path, readErr)
+			}
+
+			line := bytes.TrimSpace(rawLine)
+			if len(line) == 0 {
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
+				continue
+			}
+
+			entry, err := audit.ParseIntegrityEntry(line)
+			if err != nil || entry.Integrity == nil {
+				_ = f.Close()
+				return false, nil
+			}
+			if entry.Integrity.FormatVersion != audit.IntegrityFormatVersion {
+				_ = f.Close()
+				return false, nil
+			}
+
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+		}
+
+		if err := f.Close(); err != nil {
+			return false, err
+		}
 	}
-	if entry.Integrity.FormatVersion != audit.IntegrityFormatVersion {
-		return false, nil
-	}
-	return audit.VerifyHash(
-		key,
-		algorithm,
-		entry.Integrity.FormatVersion,
-		entry.Integrity.Sequence,
-		entry.Integrity.PrevHash,
-		entry.CanonicalPayload,
-		entry.Integrity.EntryHash,
-	)
+
+	return true, nil
 }
 
 func archiveRotationSet(logPath, stamp string) error {

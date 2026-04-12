@@ -72,7 +72,7 @@ func newAuditVerifyCmd() *cobra.Command {
 				files = append(files, audit.LogFile{Path: args[0], Index: 0, IsBackup: false})
 			}
 
-			hasIntegrityMetadata, err := verifyTargetContainsIntegrityMetadata(files, opts)
+			hasIntegrityMetadata, err := verifyTargetContainsIntegrityMetadata(files, cfg.Audit.Integrity.Enabled, opts)
 			if err != nil {
 				return err
 			}
@@ -113,7 +113,7 @@ func newAuditVerifyCmd() *cobra.Command {
 	return cmd
 }
 
-func verifyTargetContainsIntegrityMetadata(files []audit.LogFile, opts verifyOptions) (bool, error) {
+func verifyTargetContainsIntegrityMetadata(files []audit.LogFile, integrityEnabled bool, opts verifyOptions) (bool, error) {
 	for _, file := range files {
 		f, err := os.Open(file.Path)
 		if err != nil {
@@ -150,6 +150,16 @@ func verifyTargetContainsIntegrityMetadata(files []audit.LogFile, opts verifyOpt
 					!hadNewline &&
 					isTolerableTruncation(err) {
 					break
+				}
+				if !integrityEnabled {
+					if bytes.Contains(line, []byte(`"integrity"`)) {
+						_ = f.Close()
+						return true, nil
+					}
+					if errors.Is(readErr, io.EOF) {
+						break
+					}
+					continue
 				}
 				_ = f.Close()
 				return false, fmt.Errorf("malformed JSON at %s:%d: %w", file.Path, lineNo, err)

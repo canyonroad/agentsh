@@ -86,6 +86,36 @@ func TestServer_Run_ReturnsFatalAuditError(t *testing.T) {
 	}
 }
 
+func TestServer_Run_RejectsMissingHTTPListener(t *testing.T) {
+	s, err := New(testServerConfig(t))
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("listening not permitted in this environment: %v", err)
+		}
+		t.Fatal(err)
+	}
+
+	httpLn := s.httpLn
+	s.httpLn = nil
+	defer func() {
+		if httpLn != nil {
+			_ = httpLn.Close()
+		}
+		_ = s.Close()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err = s.Run(ctx)
+	if err == nil {
+		t.Fatal("Run() error = nil, want missing-listener rejection")
+	}
+	if !strings.Contains(err.Error(), "http listener is nil") {
+		t.Fatalf("Run() error = %v, want missing-listener message", err)
+	}
+}
+
 func TestServer_New_ReleasesJSONLLockWhenWebhookConfigInvalid(t *testing.T) {
 	cfg := testServerConfig(t)
 	cfg.Audit.Output = filepath.Join(filepath.Dir(cfg.Sessions.BaseDir), "audit.jsonl")

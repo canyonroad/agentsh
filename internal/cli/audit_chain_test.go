@@ -131,6 +131,83 @@ func TestAuditChainResetCmd_RequiresLegacyArchiveWhenCurrentAlgorithmCannotVerif
 	}
 }
 
+func TestAuditChainResetCmd_RequiresLegacyArchiveWhenBackupContainsFutureFormat(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	backup := mustWrapFutureFormatVerifyEntry(t, testAuditKey, `{"type":"future_backup"}`)
+	if err := os.WriteFile(logPath+".1", append(backup, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath+".1", err)
+	}
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	current, err := chain.Wrap([]byte(`{"type":"current"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	if err := os.WriteFile(logPath, append(current, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditChainResetCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--reason", "manual", "--force"})
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want legacy-archive requirement")
+	}
+	if !strings.Contains(err.Error(), "--legacy-archive") {
+		t.Fatalf("Execute() error = %v, want legacy-archive guidance", err)
+	}
+}
+
+func TestAuditChainResetCmd_RequiresLegacyArchiveWhenBackupUsesDifferentAlgorithm(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	backupChain, err := audit.NewIntegrityChainWithAlgorithm(testAuditKey, "hmac-sha512")
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChainWithAlgorithm() error = %v", err)
+	}
+	backup, err := backupChain.Wrap([]byte(`{"type":"old_algorithm_backup"}`))
+	if err != nil {
+		t.Fatalf("backupChain.Wrap() error = %v", err)
+	}
+	if err := os.WriteFile(logPath+".1", append(backup, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath+".1", err)
+	}
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	current, err := chain.Wrap([]byte(`{"type":"current"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	if err := os.WriteFile(logPath, append(current, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditChainResetCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--reason", "manual", "--force"})
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want legacy-archive requirement")
+	}
+	if !strings.Contains(err.Error(), "--legacy-archive") {
+		t.Fatalf("Execute() error = %v, want legacy-archive guidance", err)
+	}
+}
+
 func TestAuditChainResetCmd_LegacyArchiveRenamesLog(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
