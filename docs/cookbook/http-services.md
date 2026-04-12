@@ -33,13 +33,16 @@ substitution so the agent never sees the real credential:
 
 1. **At session start**, agentsh fetches the real secret from the provider declared
    in `providers:` (Vault, keyring, AWS SM, etc.).
-2. **A fake credential** with the same format and length is generated using `secret.format`.
-3. **The agent receives** `<NAME>_API_URL=http://127.0.0.1:PORT/svc/<name>/` and interacts
-   with the gateway using the fake credential — it never sees the real one.
-4. **On egress**, the gateway replaces fakes with reals in the request body, headers,
-   query string, and URL path. If `inject.header` is configured, the real credential is
-   injected into the specified header from scratch.
-5. **On response**, the gateway replaces any reals in the response body with fakes before
+2. **A length-matched fake credential** is generated using `secret.format` for internal
+   substitution and leak-guard use.
+3. **The agent receives** `<NAME>_API_URL=http://127.0.0.1:PORT/svc/<name>/` — the gateway
+   URL for the service. The agent makes requests to this URL; it never sees the real
+   credential.
+4. **On egress**, the gateway performs fake-to-real substitution in the request body,
+   headers, query string, and URL path. If `inject.header` is configured, the real
+   credential is injected into the specified header from scratch.
+5. **On response**, when `scrub_response` is enabled (the default when `secret` is present),
+   the gateway replaces any real credentials in the response body with fakes before
    returning to the agent.
 6. **Leak guard** blocks requests that carry a fake credential to the wrong service (cross-
    service use) or to an unmatched host (exfiltration attempt), returning 403.

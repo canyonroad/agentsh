@@ -338,9 +338,9 @@ so the agent never sees the real credential. The following fields control this b
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `secret.ref` | No | Secret store URI, e.g. `vault://kv/data/github#token`. Scheme must match a declared `providers:` entry. |
-| `secret.format` | With `secret.ref` | Fake credential template, e.g. `ghp_{rand:36}`. Must have `{rand:N}` with N >= 24. |
-| `inject.header.name` | No | Header to inject the real credential into, e.g. `Authorization`. Requires `secret`. |
+| `secret.ref` | Yes (when `secret:` present) | Secret store URI, e.g. `vault://kv/data/github#token`. Scheme must match a declared `providers:` entry. |
+| `secret.format` | Yes (when `secret:` present) | Fake credential template, e.g. `ghp_{rand:36}`. Must have `{rand:N}` with N >= 24. |
+| `inject.header.name` | No | Header to inject the real credential into, e.g. `Authorization`. Only valid when `secret` is configured. |
 | `inject.header.template` | With `inject.header.name` | Template string, must contain `{{secret}}`. E.g. `Bearer {{secret}}`. |
 | `scrub_response` | No | Replace real credentials in response bodies with fakes. Defaults to `true` when `secret` is present, `false` otherwise. |
 
