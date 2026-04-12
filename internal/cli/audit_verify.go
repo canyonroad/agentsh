@@ -248,7 +248,7 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 				entry.Integrity.PrevHash == ""
 
 			if rotationBoundary {
-				if err := verifyRotationBoundary(entry.CanonicalPayload, summary, state); err != nil {
+				if err := verifyRotationBoundary(entry.CanonicalPayload, summary, state, file.IsBackup); err != nil {
 					_ = f.Close()
 					return nil, fmt.Errorf("rotation boundary at %s:%d: %w", file.Path, lineNo, err)
 				}
@@ -300,13 +300,16 @@ func verifyIntegrityChain(files []audit.LogFile, key []byte, algorithm string, o
 	return summary, nil
 }
 
-func verifyRotationBoundary(payload []byte, summary *verifySummary, state verifyState) error {
+func verifyRotationBoundary(payload []byte, summary *verifySummary, state verifyState, visibleOriginIsBackup bool) error {
 	var event rotationVerifyPayload
 	if err := json.Unmarshal(payload, &event); err != nil {
 		return fmt.Errorf("parse rotation payload: %w", err)
 	}
 
 	if summary.verifiedEntries == 0 {
+		if !visibleOriginIsBackup && event.Fields.PriorChainSummary != nil {
+			return errors.New("visible origin omits prior history before rotation boundary")
+		}
 		return nil
 	}
 

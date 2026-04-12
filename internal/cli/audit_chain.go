@@ -351,7 +351,7 @@ func discoverRotationSetForVerify(logPath string) ([]audit.LogFile, error) {
 		}
 		suffix := strings.TrimPrefix(name, baseName+".")
 		index, err := strconv.Atoi(suffix)
-		if err != nil {
+		if err != nil || index <= 0 {
 			continue
 		}
 		indexes = append(indexes, index)

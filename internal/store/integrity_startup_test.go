@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -260,6 +261,53 @@ func TestNewIntegrityStore_AcceptsRetainedBackupStartingMidChain(t *testing.T) {
 
 	if got := resumeChain.State(); got != state {
 		t.Fatalf("chain.State() = %+v, want %+v", got, state)
+	}
+}
+
+func TestNewIntegrityStore_RejectsBaseVisibleRotationBoundaryWithPriorHistory(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	previousChain := mustNewIntegrityChain(t)
+	first, err := previousChain.Wrap([]byte(`{"type":"before_reset"}`))
+	if err != nil {
+		t.Fatalf("previousChain.Wrap() error = %v", err)
+	}
+
+	previousState := previousChain.State()
+	resetPayload := fmt.Sprintf(`{"type":"integrity_chain_rotated","fields":{"reason":"manual reset","reason_code":"manual_reset","prior_chain_summary":{"last_sequence_seen_in_log":%d,"last_entry_hash_seen_in_log":"%s"},"new_chain":{"format_version":2,"sequence":0}}}`, previousState.Sequence, previousState.PrevHash)
+	currentChain := mustNewIntegrityChain(t)
+	reset, err := currentChain.Wrap([]byte(resetPayload))
+	if err != nil {
+		t.Fatalf("currentChain.Wrap() reset error = %v", err)
+	}
+	after, err := currentChain.Wrap([]byte(`{"type":"after_reset"}`))
+	if err != nil {
+		t.Fatalf("currentChain.Wrap() after error = %v", err)
+	}
+
+	_ = first
+	if err := os.WriteFile(logPath, joinLines(reset, after), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	state := currentChain.State()
+	if err := audit.WriteSidecar(audit.SidecarPath(logPath), audit.SidecarState{
+		Sequence:       state.Sequence,
+		PrevHash:       state.PrevHash,
+		KeyFingerprint: audit.KeyFingerprint(testKey),
+		UpdatedAt:      time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("audit.WriteSidecar() error = %v", err)
+	}
+
+	inner, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = inner.Close() })
+
+	if _, err := NewIntegrityStore(inner, mustNewIntegrityChain(t), testIntegrityOptions(logPath)); err == nil {
+		t.Fatal("NewIntegrityStore() error = nil, want missing prior history rejection")
 	}
 }
 

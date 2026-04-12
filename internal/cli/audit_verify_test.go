@@ -268,6 +268,35 @@ func TestAuditVerifyCmd_AllowsBackupOnlyHighSuffixWindow(t *testing.T) {
 	}
 }
 
+func TestDiscoverRotationSetForVerify_IgnoresNonPositiveSuffixes(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "audit.jsonl")
+
+	if err := os.WriteFile(base, []byte("base\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base, err)
+	}
+	if err := os.WriteFile(base+".0", []byte("zero\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base+".0", err)
+	}
+	if err := os.WriteFile(base+".-1", []byte("negative\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", base+".-1", err)
+	}
+
+	files, err := discoverRotationSetForVerify(base)
+	if err != nil {
+		t.Fatalf("discoverRotationSetForVerify() error = %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("discoverRotationSetForVerify() returned %d files, want 1", len(files))
+	}
+	if files[0].Path != base {
+		t.Fatalf("discoverRotationSetForVerify() returned base path %q, want %q", files[0].Path, base)
+	}
+	if files[0].IsBackup {
+		t.Fatal("discoverRotationSetForVerify() marked base log as backup")
+	}
+}
+
 func TestAuditVerifyCmd_RejectsLegacyFormatEntry(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "audit.jsonl")
@@ -413,6 +442,49 @@ func TestAuditVerifyCmd_AcceptsRotationAsFirstVisibleEntry(t *testing.T) {
 	cmd.SetArgs([]string{"--config", cfgPath, logPath})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestAuditVerifyCmd_RejectsBaseVisibleRotationBoundaryWithPriorHistory(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+
+	previousChain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	first, err := previousChain.Wrap([]byte(`{"type":"before_reset"}`))
+	if err != nil {
+		t.Fatalf("previousChain.Wrap() error = %v", err)
+	}
+
+	previousState := previousChain.State()
+	resetPayload := fmt.Sprintf(`{"type":"integrity_chain_rotated","fields":{"reason":"manual reset","reason_code":"manual_reset","prior_chain_summary":{"last_sequence_seen_in_log":%d,"last_entry_hash_seen_in_log":"%s"},"new_chain":{"format_version":2,"sequence":0}}}`, previousState.Sequence, previousState.PrevHash)
+	currentChain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	reset, err := currentChain.Wrap([]byte(resetPayload))
+	if err != nil {
+		t.Fatalf("currentChain.Wrap() reset error = %v", err)
+	}
+	after, err := currentChain.Wrap([]byte(`{"type":"after_reset"}`))
+	if err != nil {
+		t.Fatalf("currentChain.Wrap() after error = %v", err)
+	}
+
+	_ = first
+	if err := os.WriteFile(logPath, joinAuditVerifyLines(reset, after), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, logPath})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("Execute() error = nil, want missing prior history rejection")
 	}
 }
 
