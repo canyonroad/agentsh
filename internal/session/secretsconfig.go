@@ -12,7 +12,6 @@ import (
 	"github.com/agentsh/agentsh/internal/proxy/secrets/keyring"
 	"github.com/agentsh/agentsh/internal/proxy/secrets/onepassword"
 	"github.com/agentsh/agentsh/internal/proxy/secrets/vault"
-	"github.com/agentsh/agentsh/internal/proxy/services"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,9 +32,7 @@ type ServiceEnvVar struct {
 // ResolvedServices holds the parsed outputs needed by the bootstrap flow.
 type ResolvedServices struct {
 	ServiceConfigs []ServiceConfig
-	Patterns       []services.ServicePattern
 	InjectHeaders  []InjectHeaderConfig
-	EnvVars        []ServiceEnvVar // inject.env entries
 	ScrubServices  map[string]bool // service name -> scrub_response flag
 }
 
@@ -56,19 +53,34 @@ func ResolveProviderConfigs(providers map[string]yaml.Node) (map[string]secrets.
 	return configs, nil
 }
 
-// ResolveServiceConfigs converts policy YAML service declarations into
-// ServiceConfigs for BootstrapCredentials plus ServicePatterns for the
-// matcher and InjectHeaderConfigs for hook registration.
-func ResolveServiceConfigs(svcs []policy.ServiceYAML) (*ResolvedServices, error) {
+// ResolveServiceConfigs converts HTTPService declarations into
+// ServiceConfigs for BootstrapCredentials, InjectHeaderConfigs for hook
+// registration, and ScrubServices for response scrubbing.
+// Returns nil when no service carries a secret (filtering-only).
+func ResolveServiceConfigs(svcs []policy.HTTPService) (*ResolvedServices, error) {
 	if len(svcs) == 0 {
 		return nil, nil
 	}
+
+	// Filter to services with credentials.
+	var hasSecret bool
+	for _, svc := range svcs {
+		if svc.Secret != nil {
+			hasSecret = true
+			break
+		}
+	}
+	if !hasSecret {
+		return nil, nil
+	}
+
 	result := &ResolvedServices{
-		ServiceConfigs: make([]ServiceConfig, 0, len(svcs)),
-		Patterns:       make([]services.ServicePattern, 0, len(svcs)),
-		ScrubServices:  make(map[string]bool),
+		ScrubServices: make(map[string]bool),
 	}
 	for _, svc := range svcs {
+		if svc.Secret == nil {
+			continue
+		}
 		ref, err := secrets.ParseRef(svc.Secret.Ref)
 		if err != nil {
 			return nil, fmt.Errorf("service %q: %w", svc.Name, err)
@@ -76,26 +88,19 @@ func ResolveServiceConfigs(svcs []policy.ServiceYAML) (*ResolvedServices, error)
 		result.ServiceConfigs = append(result.ServiceConfigs, ServiceConfig{
 			Name:       svc.Name,
 			SecretRef:  ref,
-			FakeFormat: svc.Fake.Format,
+			FakeFormat: svc.Secret.Format,
 		})
-		result.Patterns = append(result.Patterns, services.ServicePattern{
-			Name:  svc.Name,
-			Hosts: svc.Match.Hosts,
-		})
-		if svc.Inject.Header != nil {
+		if svc.Inject != nil && svc.Inject.Header != nil {
 			result.InjectHeaders = append(result.InjectHeaders, InjectHeaderConfig{
 				ServiceName: svc.Name,
 				HeaderName:  svc.Inject.Header.Name,
 				Template:    svc.Inject.Header.Template,
 			})
 		}
-		for _, ev := range svc.Inject.Env {
-			result.EnvVars = append(result.EnvVars, ServiceEnvVar{
-				ServiceName: svc.Name,
-				VarName:     ev.Name,
-			})
-		}
-		if svc.ScrubResponse {
+		// Resolve scrub_response default: nil → true when secret present.
+		if svc.ScrubResponse != nil {
+			result.ScrubServices[svc.Name] = *svc.ScrubResponse
+		} else {
 			result.ScrubServices[svc.Name] = true
 		}
 	}

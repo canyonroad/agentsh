@@ -2,7 +2,6 @@ package policy
 
 import (
 	"fmt"
-	"log/slog"
 	"net"
 	"regexp"
 	"time"
@@ -43,14 +42,15 @@ type Policy struct {
 	// Transparent command overrides (add/remove from built-in defaults)
 	TransparentCommands *TransparentCommandsConfig `yaml:"transparent_commands,omitempty"`
 
-	// External secrets: provider definitions and service declarations.
-	// Parsed from YAML but validated by ValidateSecrets in secrets.go.
+	// External secrets: provider definitions.
 	Providers map[string]yaml.Node `yaml:"providers,omitempty"`
-	Services  []ServiceYAML        `yaml:"services,omitempty"`
 
-	// HTTP services for path/verb filtering. Orthogonal to `services:` (Plan 6).
-	// See internal/policy/http_service.go and
-	// docs/superpowers/specs/2026-04-10-http-path-verb-filtering-design.md
+	// Services is a migration tripwire. The old "services:" key has been
+	// replaced by "http_services:". If this field is non-zero after YAML
+	// parsing, Validate emits a clear migration error.
+	Services yaml.Node `yaml:"services,omitempty"`
+
+	// HTTP services: unified path/verb filtering + credential substitution.
 	HTTPServices []HTTPService `yaml:"http_services,omitempty"`
 }
 
@@ -515,16 +515,12 @@ func (p Policy) Validate() error {
 		}
 	}
 
-	// Validate external secrets config.
-	if warnings, err := ValidateSecrets(p.Providers, p.Services); err != nil {
-		return fmt.Errorf("secrets: %w", err)
-	} else {
-		for _, w := range warnings {
-			slog.Warn("policy validation", "warning", w)
-		}
+	// Reject old services: key with migration guidance.
+	if p.Services.Kind != 0 {
+		return fmt.Errorf("the 'services:' key has been replaced by 'http_services:' — move secret, inject, and scrub_response fields into your http_services entries")
 	}
 
-	if err := ValidateHTTPServices(p.HTTPServices); err != nil {
+	if err := ValidateHTTPServicesWithProviders(p.HTTPServices, p.Providers); err != nil {
 		return err
 	}
 

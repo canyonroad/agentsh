@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1610,6 +1612,342 @@ func TestServeDeclaredService_HookSetsHttpNoBody_Normalized(t *testing.T) {
 	bodyPath := filepath.Join(tmpDir, "test-session", "llm-bodies", e.ID+".json")
 	if _, statErr := os.Stat(bodyPath); !os.IsNotExist(statErr) {
 		t.Errorf("expected no stored body file at %q, got err=%v", bodyPath, statErr)
+	}
+}
+
+// TestServeDeclaredService_CredentialSubstitution_EndToEnd is a full e2e
+// test: client sends fake in body -> upstream receives real (in body +
+// injected header) -> response with real is scrubbed to fake.
+func TestServeDeclaredService_CredentialSubstitution_EndToEnd(t *testing.T) {
+	var upstreamAuthHeader string
+	var upstreamBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamAuthHeader = r.Header.Get("Authorization")
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"echoed":"ghp_REAL1234567890abcdef"}`)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{{
+		Name: "allow-repos", Methods: []string{"POST"}, Paths: []string{"/repos/**"}, Decision: "allow",
+	}})
+
+	tbl := credsub.New()
+	if err := tbl.Add("github",
+		[]byte("ghp_FAKE1234567890abcdef"),
+		[]byte("ghp_REAL1234567890abcdef"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	scrubServices := map[string]bool{"github": true}
+	p.HookRegistry().Register("", NewLeakGuardHook(tbl, slog.Default()))
+	p.HookRegistry().Register("", NewCredsSubHook(tbl, scrubServices))
+	p.HookRegistry().Register("github", NewHeaderInjectionHook(
+		"github", "Authorization", "Bearer {{secret}}", tbl))
+
+	body := []byte(`{"token":"ghp_FAKE1234567890abcdef"}`)
+	req := httptest.NewRequest(http.MethodPost,
+		"http://127.0.0.1/svc/github/repos/owner/repo/issues", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if upstreamAuthHeader != "Bearer ghp_REAL1234567890abcdef" {
+		t.Errorf("upstream Auth = %q, want real credential injected", upstreamAuthHeader)
+	}
+	if !bytes.Contains(upstreamBody, []byte("ghp_REAL1234567890abcdef")) {
+		t.Errorf("upstream body = %q, want real credential in body", upstreamBody)
+	}
+	respBody := w.Body.String()
+	if strings.Contains(respBody, "ghp_REAL1234567890abcdef") {
+		t.Error("response body contains real credential — scrubbing failed")
+	}
+	if !strings.Contains(respBody, "ghp_FAKE1234567890abcdef") {
+		t.Error("response body should contain fake credential (scrubbed)")
+	}
+}
+
+// TestServeDeclaredService_CredentialsDeny_UpstreamNotContacted pins down
+// that when rules deny a request, the upstream is NOT contacted even though
+// credentials are configured.
+func TestServeDeclaredService_CredentialsDeny_UpstreamNotContacted(t *testing.T) {
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "read", Methods: []string{"GET"}, Paths: []string{"/repos/**"}, Decision: "allow"},
+	})
+	tbl := credsub.New()
+	if err := tbl.Add("github",
+		[]byte("ghp_FAKE1234567890abcdef"),
+		[]byte("ghp_REAL1234567890abcdef"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	p.HookRegistry().Register("", NewLeakGuardHook(tbl, slog.Default()))
+	p.HookRegistry().Register("", NewCredsSubHook(tbl, nil))
+	p.HookRegistry().Register("github", NewHeaderInjectionHook(
+		"github", "Authorization", "Bearer {{secret}}", tbl))
+
+	req := httptest.NewRequest(http.MethodDelete,
+		"http://127.0.0.1/svc/github/repos/a/b", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	if upstreamCalled {
+		t.Error("upstream should NOT have been contacted for denied request")
+	}
+}
+
+// TestServeDeclaredService_CredentialsOnly_AllRequestsAllowed pins down
+// that a credentials-only service (no rules, has Secret) allows all
+// methods/paths.
+func TestServeDeclaredService_CredentialsOnly_AllRequestsAllowed(t *testing.T) {
+	var upstreamApiKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamApiKey = r.Header.Get("X-Api-Key")
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{SessionID: "test-session"}
+	p, err := New(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	svcs := []policy.HTTPService{{
+		Name: "anthropic", Upstream: upstream.URL,
+		Secret: &policy.HTTPServiceSecret{Ref: "keyring://test#k", Format: "sk-ant_{rand:22}"},
+		// No Default, no Rules -> credentials-only, defaults to allow.
+	}}
+	if err := policy.ValidateHTTPServices(svcs); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	pol := &policy.Policy{HTTPServices: svcs}
+	eng, err := policy.NewEngine(pol, true, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	p.SetPolicyEngine(eng)
+	p.SetHTTPServices(svcs)
+
+	tbl := credsub.New()
+	if err := tbl.Add("anthropic",
+		[]byte("sk-ant-FAKE567890abcdef12"),
+		[]byte("sk-ant-REAL567890abcdef12"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	p.HookRegistry().Register("", NewCredsSubHook(tbl, nil))
+	p.HookRegistry().Register("anthropic", NewHeaderInjectionHook(
+		"anthropic", "X-Api-Key", "{{secret}}", tbl))
+
+	req := httptest.NewRequest(http.MethodPost,
+		"http://127.0.0.1/svc/anthropic/v1/messages", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (credentials-only allows all)", w.Code)
+	}
+	if upstreamApiKey != "sk-ant-REAL567890abcdef12" {
+		t.Errorf("upstream X-Api-Key = %q, want real credential", upstreamApiKey)
+	}
+}
+
+// TestServeDeclaredService_ScrubResponseFalse_RealsNotScrubbed pins down
+// that when scrub_response is false, reals pass through in responses.
+func TestServeDeclaredService_ScrubResponseFalse_RealsNotScrubbed(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"key":"ghp_REAL1234567890abcdef"}`)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-all", Paths: []string{"/**"}, Decision: "allow"},
+	})
+
+	tbl := credsub.New()
+	if err := tbl.Add("github",
+		[]byte("ghp_FAKE1234567890abcdef"),
+		[]byte("ghp_REAL1234567890abcdef"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	scrubServices := map[string]bool{} // empty = no services scrubbed
+	p.HookRegistry().Register("", NewCredsSubHook(tbl, scrubServices))
+
+	req := httptest.NewRequest(http.MethodGet,
+		"http://127.0.0.1/svc/github/repos/owner/repo", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	respBody := w.Body.String()
+	if !strings.Contains(respBody, "ghp_REAL1234567890abcdef") {
+		t.Error("response should contain real credential (scrub disabled)")
+	}
+}
+
+// TestServeDeclaredService_CredentialsOnly_ExplicitDeny_BlocksAll pins
+// down emergency lockdown: credentials-only with explicit deny blocks
+// everything.
+func TestServeDeclaredService_CredentialsOnly_ExplicitDeny_BlocksAll(t *testing.T) {
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{SessionID: "test-session"}
+	p, err := New(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	svcs := []policy.HTTPService{{
+		Name: "locked", Upstream: upstream.URL, Default: "deny",
+	}}
+	if err := policy.ValidateHTTPServices(svcs); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	pol := &policy.Policy{HTTPServices: svcs}
+	eng, err := policy.NewEngine(pol, true, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	p.SetPolicyEngine(eng)
+	p.SetHTTPServices(svcs)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"http://127.0.0.1/svc/locked/anything", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (emergency lockdown)", w.Code)
+	}
+	if upstreamCalled {
+		t.Error("upstream should NOT have been contacted during lockdown")
+	}
+}
+
+// TestServeDeclaredService_CrossServiceLeak_BlockedWith403 pins down that
+// cross-service leak is blocked: github's fake sent to stripe's service
+// endpoint returns 403.
+func TestServeDeclaredService_CrossServiceLeak_BlockedWith403(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream should not have been contacted")
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{SessionID: "test-session"}
+	p, err := New(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	svcs := []policy.HTTPService{
+		{Name: "github", Upstream: upstream.URL, Default: "allow"},
+		{Name: "stripe", Upstream: "https://api.stripe.com", Default: "allow"},
+	}
+	if err := policy.ValidateHTTPServices(svcs); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	pol := &policy.Policy{HTTPServices: svcs}
+	eng, err := policy.NewEngine(pol, true, true)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	p.SetPolicyEngine(eng)
+	p.SetHTTPServices(svcs)
+
+	tbl := credsub.New()
+	if err := tbl.Add("github",
+		[]byte("ghp_FAKE1234567890abcdef"),
+		[]byte("ghp_REAL1234567890abcdef"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := tbl.Add("stripe",
+		[]byte("sk_live_FAKE567890abcdef12"),
+		[]byte("sk_live_REAL567890abcdef12"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	p.HookRegistry().Register("", NewLeakGuardHook(tbl, slog.Default()))
+	p.HookRegistry().Register("", NewCredsSubHook(tbl, nil))
+
+	body := []byte(`{"token":"ghp_FAKE1234567890abcdef"}`)
+	req := httptest.NewRequest(http.MethodPost,
+		"http://127.0.0.1/svc/stripe/v1/charges", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (cross-service leak)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "credential leak blocked") {
+		t.Errorf("body = %q, want 'credential leak blocked'", w.Body.String())
+	}
+}
+
+// TestServeDeclaredService_FilteringOnly_NoCredentialHooks pins down that
+// filtering-only (no credential hooks) passes the user-provided
+// Authorization header through to the upstream.
+func TestServeDeclaredService_FilteringOnly_NoCredentialHooks(t *testing.T) {
+	var upstreamAuthHeader string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamAuthHeader = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxyWithHTTPService(t, upstream.URL, []policy.HTTPServiceRule{
+		{Name: "allow-read", Methods: []string{"GET"}, Paths: []string{"/**"}, Decision: "allow"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet,
+		"http://127.0.0.1/svc/github/repos/owner/repo", nil)
+	req.Header.Set("Authorization", "Bearer user-provided-token")
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if upstreamAuthHeader != "Bearer user-provided-token" {
+		t.Errorf("upstream Auth = %q, want original token (no hook)", upstreamAuthHeader)
+	}
+}
+
+// TestServeHTTP_HostHeaderOnly_DoesNotRouteToDeclaredService is a
+// regression test: after matcher removal, Host header alone does NOT
+// route to declared service.
+func TestServeHTTP_HostHeaderOnly_DoesNotRouteToDeclaredService(t *testing.T) {
+	p := newTestProxyWithHTTPService(t, "https://api.github.com", []policy.HTTPServiceRule{
+		{Name: "allow-all", Paths: []string{"/**"}, Decision: "allow"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://api.github.com/repos/owner/repo", nil)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code == http.StatusOK {
+		t.Error("Host-only request should NOT route to declared service (matcher removed)")
 	}
 }
 

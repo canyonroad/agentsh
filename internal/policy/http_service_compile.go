@@ -48,7 +48,11 @@ func compileHTTPServices(svcs []HTTPService) (byName, byHost map[string]*compile
 		}
 		defDec := s.Default
 		if defDec == "" {
-			defDec = "deny"
+			if len(s.Rules) == 0 && s.Secret != nil {
+				defDec = "allow" // credentials-only service: no path filtering needed
+			} else {
+				defDec = "deny" // has rules or no secret: fail-closed
+			}
 		}
 
 		// Canonicalize the upstream host the SAME WAY ValidateHTTPServices

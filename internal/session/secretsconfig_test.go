@@ -73,122 +73,103 @@ func TestResolveProviderConfigs_Empty(t *testing.T) {
 	}
 }
 
-func TestResolveServiceConfigs(t *testing.T) {
-	svcs := []policy.ServiceYAML{
+func TestResolveServiceConfigs_FromHTTPService(t *testing.T) {
+	scrubTrue := true
+	svcs := []policy.HTTPService{
 		{
-			Name:   "github",
-			Match:  policy.ServiceMatchYAML{Hosts: []string{"api.github.com"}},
-			Secret: policy.ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
-			Fake:   policy.ServiceFakeYAML{Format: "ghp_{rand:36}"},
-			Inject: policy.ServiceInjectYAML{Header: &policy.ServiceInjectHeaderYAML{
-				Name: "Authorization", Template: "Bearer {{secret}}",
-			}},
+			Name:     "github",
+			Upstream: "https://api.github.com",
+			Secret:   &policy.HTTPServiceSecret{Ref: "keyring://agentsh/github_token", Format: "ghp_{rand:36}"},
+			Inject:   &policy.HTTPServiceInject{Header: &policy.HTTPServiceInjectHeader{Name: "Authorization", Template: "Bearer {{secret}}"}},
+			ScrubResponse: &scrubTrue,
+		},
+		{
+			Name:     "stripe",
+			Upstream: "https://api.stripe.com",
+			Default:  "deny",
+			Rules:    []policy.HTTPServiceRule{{Name: "r", Paths: []string{"/**"}, Decision: "allow"}},
+			// No secret — filtering-only.
 		},
 	}
-	result, err := ResolveServiceConfigs(svcs)
+	resolved, err := ResolveServiceConfigs(svcs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(result.ServiceConfigs) != 1 {
-		t.Fatalf("expected 1 config, got %d", len(result.ServiceConfigs))
+	// Only github has a secret; stripe should be skipped.
+	if len(resolved.ServiceConfigs) != 1 {
+		t.Fatalf("want 1 ServiceConfig, got %d", len(resolved.ServiceConfigs))
 	}
-	if result.ServiceConfigs[0].Name != "github" {
-		t.Errorf("Name = %q", result.ServiceConfigs[0].Name)
+	if resolved.ServiceConfigs[0].Name != "github" {
+		t.Errorf("want github, got %q", resolved.ServiceConfigs[0].Name)
 	}
-	if len(result.Patterns) != 1 || result.Patterns[0].Name != "github" {
-		t.Error("patterns not populated")
+	if len(resolved.InjectHeaders) != 1 {
+		t.Fatalf("want 1 InjectHeader, got %d", len(resolved.InjectHeaders))
 	}
-	if len(result.InjectHeaders) != 1 || result.InjectHeaders[0].HeaderName != "Authorization" {
-		t.Error("inject headers not populated")
+	if resolved.InjectHeaders[0].HeaderName != "Authorization" {
+		t.Errorf("want Authorization, got %q", resolved.InjectHeaders[0].HeaderName)
+	}
+	if !resolved.ScrubServices["github"] {
+		t.Error("github should have scrub_response=true")
 	}
 }
 
-func TestResolveServiceConfigs_Empty(t *testing.T) {
-	result, err := ResolveServiceConfigs(nil)
+func TestResolveServiceConfigs_EmptyList(t *testing.T) {
+	resolved, err := ResolveServiceConfigs(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result != nil {
-		t.Error("expected nil")
+	if resolved != nil {
+		t.Error("nil input should return nil")
 	}
 }
 
-func TestResolveServiceConfigs_InjectEnv(t *testing.T) {
-	svcs := []policy.ServiceYAML{
-		{
-			Name:   "github",
-			Match:  policy.ServiceMatchYAML{Hosts: []string{"api.github.com"}},
-			Secret: policy.ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
-			Fake:   policy.ServiceFakeYAML{Format: "ghp_{rand:36}"},
-			Inject: policy.ServiceInjectYAML{
-				Env: []policy.ServiceInjectEnvYAML{{Name: "GITHUB_TOKEN"}},
-			},
-		},
-	}
-	result, err := ResolveServiceConfigs(svcs)
+func TestResolveServiceConfigs_ScrubResponseDefault(t *testing.T) {
+	// Secret present, no explicit scrub_response → should default to true.
+	svcs := []policy.HTTPService{{
+		Name:     "svc",
+		Upstream: "https://api.example.com",
+		Secret:   &policy.HTTPServiceSecret{Ref: "keyring://agentsh/key", Format: "ghp_{rand:36}"},
+	}}
+	resolved, err := ResolveServiceConfigs(svcs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(result.EnvVars) != 1 {
-		t.Fatalf("expected 1 env var, got %d", len(result.EnvVars))
-	}
-	if result.EnvVars[0].ServiceName != "github" {
-		t.Errorf("ServiceName = %q, want github", result.EnvVars[0].ServiceName)
-	}
-	if result.EnvVars[0].VarName != "GITHUB_TOKEN" {
-		t.Errorf("VarName = %q, want GITHUB_TOKEN", result.EnvVars[0].VarName)
+	if !resolved.ScrubServices["svc"] {
+		t.Error("secret present with no explicit scrub_response should default to true")
 	}
 }
 
-func TestResolveServiceConfigs_ScrubResponse_NoneEnabled(t *testing.T) {
-	svcs := []policy.ServiceYAML{
-		{
-			Name:   "github",
-			Match:  policy.ServiceMatchYAML{Hosts: []string{"api.github.com"}},
-			Secret: policy.ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
-			Fake:   policy.ServiceFakeYAML{Format: "ghp_{rand:36}"},
-			// ScrubResponse intentionally NOT set (defaults to false)
-		},
-	}
-	result, err := ResolveServiceConfigs(svcs)
+func TestResolveServiceConfigs_ScrubResponseExplicitFalse(t *testing.T) {
+	scrubFalse := false
+	svcs := []policy.HTTPService{{
+		Name:          "svc",
+		Upstream:      "https://api.example.com",
+		Secret:        &policy.HTTPServiceSecret{Ref: "keyring://agentsh/key", Format: "ghp_{rand:36}"},
+		ScrubResponse: &scrubFalse,
+	}}
+	resolved, err := ResolveServiceConfigs(svcs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// ScrubServices must be non-nil (empty map), NOT nil.
-	// nil would mean "scrub all" in CredsSubHook.
-	if result.ScrubServices == nil {
-		t.Fatal("ScrubServices should be non-nil empty map, got nil")
-	}
-	if len(result.ScrubServices) != 0 {
-		t.Errorf("ScrubServices should be empty, got %v", result.ScrubServices)
+	if resolved.ScrubServices["svc"] {
+		t.Error("explicit scrub_response=false should be honored")
 	}
 }
 
-func TestResolveServiceConfigs_ScrubResponse(t *testing.T) {
-	svcs := []policy.ServiceYAML{
-		{
-			Name:          "github",
-			Match:         policy.ServiceMatchYAML{Hosts: []string{"api.github.com"}},
-			Secret:        policy.ServiceSecretYAML{Ref: "keyring://agentsh/gh"},
-			Fake:          policy.ServiceFakeYAML{Format: "ghp_{rand:36}"},
-			ScrubResponse: true,
-		},
-		{
-			Name:   "stripe",
-			Match:  policy.ServiceMatchYAML{Hosts: []string{"api.stripe.com"}},
-			Secret: policy.ServiceSecretYAML{Ref: "keyring://agentsh/stripe"},
-			Fake:   policy.ServiceFakeYAML{Format: "xk_test_{rand:24}"},
-		},
-	}
-	result, err := ResolveServiceConfigs(svcs)
+func TestResolveServiceConfigs_AllFilteringOnly(t *testing.T) {
+	// No service has a secret → nil result.
+	svcs := []policy.HTTPService{{
+		Name:     "filter",
+		Upstream: "https://api.example.com",
+		Default:  "deny",
+		Rules:    []policy.HTTPServiceRule{{Name: "r", Paths: []string{"/**"}, Decision: "allow"}},
+	}}
+	resolved, err := ResolveServiceConfigs(svcs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !result.ScrubServices["github"] {
-		t.Error("expected github in ScrubServices")
-	}
-	if result.ScrubServices["stripe"] {
-		t.Error("stripe should not be in ScrubServices")
+	if resolved != nil {
+		t.Error("all-filtering services should return nil")
 	}
 }
 

@@ -462,6 +462,26 @@ func (p *Proxy) serveDeclaredService(w http.ResponseWriter, r *http.Request, raw
 		http.Error(w, "read upstream response: "+readErr.Error(), http.StatusBadGateway)
 		return
 	}
+
+	// Apply post-hooks (e.g. credential scrubbing) before logging or
+	// writing the response back to the client. This mirrors the LLM
+	// path's post-hook dispatch so CredsSubHook.PostHook can replace
+	// real credentials with fakes in the response body.
+	if p.hookRegistry != nil && reqCtx != nil {
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+		resp.ContentLength = int64(len(respBody))
+		if hookErr := p.hookRegistry.ApplyPostHooks(reqCtx.ServiceName, resp, reqCtx); hookErr != nil {
+			p.logger.Warn("post-hook error", "error", hookErr, "request_id", requestID)
+		}
+		// Re-read body in case a hook replaced it.
+		if resp.Body != nil {
+			hookBody, rErr := io.ReadAll(resp.Body)
+			if rErr == nil {
+				respBody = hookBody
+			}
+		}
+	}
+
 	p.logDeclaredServiceResponse(requestID, sessionID, canonicalName, resp, respBody, startTime)
 
 	// Copy response headers and status, then body. Strip hop-by-hop headers

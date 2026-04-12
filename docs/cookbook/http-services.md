@@ -26,6 +26,31 @@ Declaring a service in `http_services:` does two things at once:
 Rules are evaluated in declaration order; the first rule whose `methods` and `paths` both
 match wins. If no rule matches, the service's `default` applies (`deny` when not set).
 
+## How credential substitution works
+
+When an `http_services` entry includes a `secret:` block, agentsh performs credential
+substitution so the agent never sees the real credential:
+
+1. **At session start**, agentsh fetches the real secret from the provider declared
+   in `providers:` (Vault, keyring, AWS SM, etc.).
+2. **A length-matched fake credential** is generated using `secret.format` for internal
+   substitution and leak-guard use.
+3. **The agent receives** `<NAME>_API_URL=http://127.0.0.1:PORT/svc/<name>/` — the gateway
+   URL for the service. The agent makes requests to this URL; it never sees the real
+   credential.
+4. **On egress**, the gateway performs fake-to-real substitution in the request body,
+   headers, query string, and URL path. If `inject.header` is configured, the real
+   credential is injected into the specified header from scratch.
+5. **On response**, when `scrub_response` is enabled (the default when `secret` is present),
+   the gateway replaces any real credentials in the response body with fakes before
+   returning to the agent.
+6. **Leak guard** blocks requests that carry a fake credential to the wrong service (cross-
+   service use) or to an unmatched host (exfiltration attempt), returning 403.
+
+Credential substitution composes with path/verb rules: a service can have both `secret:`
+and `rules:` — the gateway evaluates rules first, then performs substitution on allowed
+requests.
+
 ## Recipe: allow an agent to read but not write a GitHub repo
 
 An agent that needs to read issues but must not be allowed to create or modify them:
@@ -173,6 +198,113 @@ http_services:
 with `"service_kind": "http_service"`. Paths not matched by any rule fall through to
 `default: allow` and are still logged (without the explicit `audit` tag), because the
 gateway records every proxied request.
+
+## Recipe: route GitHub through the gateway with a Vault-backed token
+
+Declare a Vault provider and a GitHub service with credential injection and read-only
+rules:
+
+```yaml
+providers:
+  vault:
+    type: vault
+    address: https://vault.corp.internal
+    auth:
+      method: token
+      token_ref: keyring://agentsh/vault_token
+  keyring:
+    type: keyring
+
+http_services:
+  - name: github
+    upstream: https://api.github.com
+    aliases: [api.github.com]
+    default: deny
+
+    secret:
+      ref: vault://kv/data/github#token
+      format: "ghp_{rand:36}"
+    inject:
+      header:
+        name: Authorization
+        template: "Bearer {{secret}}"
+
+    rules:
+      - name: read-issues
+        methods: [GET]
+        paths:
+          - /repos/*/*/issues
+          - /repos/*/*/issues/*
+        decision: allow
+```
+
+The agent receives `GITHUB_API_URL=http://127.0.0.1:PORT/svc/github/`. When it reads
+issues, the gateway evaluates the allow rule, substitutes the fake token with the real
+Vault-sourced token, and forwards to `api.github.com` over TLS. The real token never
+enters the agent's address space.
+
+## Recipe: use OS keyring for a simple API key
+
+For a service that only needs credential injection without path filtering:
+
+```yaml
+providers:
+  keyring:
+    type: keyring
+
+http_services:
+  - name: anthropic
+    upstream: https://api.anthropic.com
+    secret:
+      ref: keyring://agentsh/anthropic_key
+      format: "sk-ant-{rand:93}"
+    inject:
+      header:
+        name: x-api-key
+        template: "{{secret}}"
+```
+
+No `rules:` or `default:` — the service allows all requests (credentials-only mode).
+The gateway injects the real API key on every request and scrubs it from responses.
+
+## Recipe: credentials and filtering combined
+
+A service with both credential injection and per-path rules:
+
+```yaml
+http_services:
+  - name: stripe
+    upstream: https://api.stripe.com
+    aliases: [api.stripe.com]
+    default: deny
+
+    secret:
+      ref: vault://kv/data/stripe#api_key
+      format: "sk_live_{rand:48}"
+    inject:
+      header:
+        name: Authorization
+        template: "Bearer {{secret}}"
+
+    rules:
+      - name: read-customers
+        methods: [GET]
+        paths:
+          - /v1/customers
+          - /v1/customers/*
+        decision: allow
+
+      - name: create-charge-needs-approval
+        methods: [POST]
+        paths:
+          - /v1/charges
+        decision: approve
+        message: "Agent wants to create a Stripe charge. Approve?"
+        timeout: 2m
+```
+
+The agent can read customers freely. Creating charges requires operator approval.
+The real Stripe API key is injected on allowed requests and never visible to the agent.
 
 ## Gotchas
 

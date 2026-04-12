@@ -7,7 +7,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/agentsh/agentsh/internal/proxy/secrets"
 	"github.com/gobwas/glob"
+	"gopkg.in/yaml.v3"
 )
 
 // HTTPService declares an HTTP service that a cooperating child process
@@ -21,8 +23,30 @@ type HTTPService struct {
 	ExposeAs    string            `yaml:"expose_as,omitempty"`    // env var name; derived from Name if empty
 	Aliases     []string          `yaml:"aliases,omitempty"`      // extra hostnames for the fail-closed check
 	AllowDirect bool              `yaml:"allow_direct,omitempty"` // escape hatch; default false
-	Default     string            `yaml:"default,omitempty"`      // allow | deny; default deny
+	Default     string            `yaml:"default,omitempty"`      // allow | deny; default depends on Rules presence
 	Rules       []HTTPServiceRule `yaml:"rules,omitempty"`
+
+	// Credential substitution (unified from old services: section).
+	Secret        *HTTPServiceSecret `yaml:"secret,omitempty"`
+	Inject        *HTTPServiceInject `yaml:"inject,omitempty"`
+	ScrubResponse *bool              `yaml:"scrub_response,omitempty"` // nil = default based on Secret presence
+}
+
+// HTTPServiceSecret defines how to fetch and fake a credential.
+type HTTPServiceSecret struct {
+	Ref    string `yaml:"ref"`    // e.g. "vault://kv/data/github#token"
+	Format string `yaml:"format"` // e.g. "ghp_{rand:36}"
+}
+
+// HTTPServiceInject defines how the credential is injected into requests.
+type HTTPServiceInject struct {
+	Header *HTTPServiceInjectHeader `yaml:"header,omitempty"`
+}
+
+// HTTPServiceInjectHeader defines header injection config.
+type HTTPServiceInjectHeader struct {
+	Name     string `yaml:"name"`     // e.g. "Authorization"
+	Template string `yaml:"template"` // e.g. "Bearer {{secret}}"
 }
 
 // HTTPServiceRule is a single method+path matching rule for an HTTP service.
@@ -36,6 +60,19 @@ type HTTPServiceRule struct {
 }
 
 var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// knownProviderTypes lists the provider type names (URI schemes) that
+// are supported. Ported from secrets.go for use by
+// ValidateHTTPServicesWithProviders; will be the sole copy after
+// secrets.go is deleted.
+var knownProviderTypes = map[string]bool{
+	"keyring":  true,
+	"vault":    true,
+	"aws-sm":   true,
+	"gcp-sm":   true,
+	"azure-kv": true,
+	"op":       true,
+}
 
 // httpServiceNameRe restricts http_service.name to URL-safe path segment
 // characters. Routing depends on the name appearing in /svc/<name>/ URLs,
@@ -258,6 +295,79 @@ func validateHTTPServiceRule(svc string, idx int, r *HTTPServiceRule) error {
 	for _, m := range r.Methods {
 		if strings.TrimSpace(m) == "" {
 			return fmt.Errorf("%s: empty method", label)
+		}
+	}
+	return nil
+}
+
+// ValidateHTTPServicesWithProviders runs structural validation via
+// ValidateHTTPServices, then validates credential-related fields against
+// the declared providers. It checks that secret refs parse, reference a
+// declared provider scheme, use a valid fake format, and that inject
+// templates contain the {{secret}} placeholder.
+func ValidateHTTPServicesWithProviders(svcs []HTTPService, providers map[string]yaml.Node) error {
+	// Run structural validation first.
+	if err := ValidateHTTPServices(svcs); err != nil {
+		return err
+	}
+
+	// Build provider scheme set with duplicate-type detection.
+	// Mirrors the validation from ValidateSecrets so the rules carry
+	// over when secrets.go is deleted.
+	providerSchemes := make(map[string]string) // scheme -> provider name
+	for name, node := range providers {
+		var base struct {
+			Type string `yaml:"type"`
+		}
+		if err := node.Decode(&base); err != nil {
+			return fmt.Errorf("providers.%s: cannot decode type: %w", name, err)
+		}
+		if base.Type == "" {
+			return fmt.Errorf("providers.%s: type is required", name)
+		}
+		if !knownProviderTypes[base.Type] {
+			return fmt.Errorf("providers.%s: unknown type %q", name, base.Type)
+		}
+		if prev, dup := providerSchemes[base.Type]; dup {
+			return fmt.Errorf("providers.%s: duplicate type %q (already declared by %q)", name, base.Type, prev)
+		}
+		providerSchemes[base.Type] = name
+	}
+
+	for _, s := range svcs {
+		if s.Secret == nil && len(s.Rules) == 0 {
+			return fmt.Errorf("http_services[%q]: service has no secret and no rules", s.Name)
+		}
+		if s.Inject != nil && s.Secret == nil {
+			return fmt.Errorf("http_services[%q]: inject requires secret", s.Name)
+		}
+		if s.Secret != nil {
+			ref, err := secrets.ParseRef(s.Secret.Ref)
+			if err != nil {
+				return fmt.Errorf("http_services[%q]: invalid secret ref: %w", s.Name, err)
+			}
+			if len(providerSchemes) > 0 {
+				if _, ok := providerSchemes[ref.Scheme]; !ok {
+					return fmt.Errorf("http_services[%q]: secret ref scheme %q has no matching provider", s.Name, ref.Scheme)
+				}
+			}
+			if len(providerSchemes) == 0 && s.Secret != nil {
+				return fmt.Errorf("http_services[%q]: secret ref scheme %q has no matching provider (no providers declared)", s.Name, ref.Scheme)
+			}
+			if _, _, err := secrets.ParseFormat(s.Secret.Format); err != nil {
+				return fmt.Errorf("http_services[%q]: invalid fake format: %w", s.Name, err)
+			}
+		}
+		if s.Inject != nil && s.Inject.Header != nil {
+			if !strings.Contains(s.Inject.Header.Template, "{{secret}}") {
+				return fmt.Errorf("http_services[%q]: inject.header.template must contain {{secret}}", s.Name)
+			}
+			if strings.TrimSpace(s.Inject.Header.Name) == "" {
+				return fmt.Errorf("http_services[%q]: inject.header name is required", s.Name)
+			}
+		}
+		if s.Inject != nil && s.Inject.Header == nil {
+			return fmt.Errorf("http_services[%q]: inject.header is required when inject is set", s.Name)
 		}
 	}
 	return nil

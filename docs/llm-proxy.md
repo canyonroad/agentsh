@@ -331,6 +331,19 @@ When the proxy starts, it injects one env var per declared service into the chil
 - Child code should treat this as the new base URL and append its own path segments — e.g. `/repos/owner/repo/issues` becomes `http://127.0.0.1:PORT/svc/github/repos/owner/repo/issues`.
 - Env var names must match `[A-Za-z_][A-Za-z0-9_]*`, must not be `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, or `AGENTSH_SESSION_ID`, and must be unique across all declared services (comparison is case-insensitive on Windows).
 
+### Credential substitution fields
+
+When a service entry includes a `secret:` block, agentsh performs credential substitution
+so the agent never sees the real credential. The following fields control this behaviour:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `secret.ref` | Yes (when `secret:` present) | Secret store URI, e.g. `vault://kv/data/github#token`. Scheme must match a declared `providers:` entry. |
+| `secret.format` | Yes (when `secret:` present) | Fake credential template, e.g. `ghp_{rand:36}`. Must have `{rand:N}` with N >= 24. |
+| `inject.header.name` | No | Header to inject the real credential into, e.g. `Authorization`. Only valid when `secret` is configured. |
+| `inject.header.template` | With `inject.header.name` | Template string, must contain `{{secret}}`. E.g. `Bearer {{secret}}`. |
+| `scrub_response` | No | Replace real credentials in response bodies with fakes. Defaults to `true` when `secret` is present, `false` otherwise. |
+
 ### Decision flow
 
 For each request arriving at `/svc/<name>/...`:
@@ -354,6 +367,11 @@ HTTP service requests are logged to the same JSONL file as LLM requests (`~/.age
 ### When to use http_services
 
 Use `http_services` when you want to expose a specific, audited surface of a third-party API to an agent, while blocking everything else on that host. If you only need to allow the agent to reach a host without per-path rule enforcement, a `network_rules` allow is simpler. If you need to allow a host but do not want the per-method/path audit trail, use network rules. `http_services` is the right tool when you need the combination of: specific allowed paths, block-everything-else on that host, approval gating for sensitive operations, and a full request/response audit log.
+
+Use `http_services` with `secret:` when you want the gateway to manage credentials on
+behalf of the agent — the agent never sees the real credential, and the gateway injects
+it on allowed requests. This is the recommended pattern for any service where the agent
+needs to authenticate but should not hold the credential directly.
 
 ## Security Considerations
 

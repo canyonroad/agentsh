@@ -1159,6 +1159,498 @@ func TestCompileHTTPServices_RejectsDuplicateAliasHost(t *testing.T) {
 	}
 }
 
+func TestHTTPServiceYAMLUnmarshal_WithSecret(t *testing.T) {
+	input := `
+http_services:
+  - name: github
+    upstream: https://api.github.com
+    default: deny
+    secret:
+      ref: "vault://kv/data/github#token"
+      format: "ghp_{rand:36}"
+    inject:
+      header:
+        name: Authorization
+        template: "Bearer {{secret}}"
+    scrub_response: true
+    rules:
+      - name: read-issues
+        methods: [GET]
+        paths: ["/repos/*/*/issues"]
+        decision: allow
+`
+	var p struct {
+		HTTPServices []HTTPService `yaml:"http_services"`
+	}
+	if err := yaml.Unmarshal([]byte(input), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(p.HTTPServices) != 1 {
+		t.Fatalf("want 1 service, got %d", len(p.HTTPServices))
+	}
+	s := p.HTTPServices[0]
+	if s.Secret == nil {
+		t.Fatal("secret is nil")
+	}
+	if s.Secret.Ref != "vault://kv/data/github#token" {
+		t.Errorf("secret.ref = %q", s.Secret.Ref)
+	}
+	if s.Secret.Format != "ghp_{rand:36}" {
+		t.Errorf("secret.format = %q", s.Secret.Format)
+	}
+	if s.Inject == nil || s.Inject.Header == nil {
+		t.Fatal("inject.header is nil")
+	}
+	if s.Inject.Header.Name != "Authorization" {
+		t.Errorf("inject.header.name = %q", s.Inject.Header.Name)
+	}
+	if s.Inject.Header.Template != "Bearer {{secret}}" {
+		t.Errorf("inject.header.template = %q", s.Inject.Header.Template)
+	}
+	if s.ScrubResponse == nil || !*s.ScrubResponse {
+		t.Error("scrub_response should be true")
+	}
+}
+
+func TestHTTPServiceYAMLUnmarshal_WithoutSecret(t *testing.T) {
+	input := `
+http_services:
+  - name: stripe
+    upstream: https://api.stripe.com
+    default: deny
+    rules:
+      - name: read
+        methods: [GET]
+        paths: ["/v1/customers"]
+        decision: allow
+`
+	var p struct {
+		HTTPServices []HTTPService `yaml:"http_services"`
+	}
+	if err := yaml.Unmarshal([]byte(input), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	s := p.HTTPServices[0]
+	if s.Secret != nil {
+		t.Error("secret should be nil for filtering-only service")
+	}
+	if s.Inject != nil {
+		t.Error("inject should be nil for filtering-only service")
+	}
+	if s.ScrubResponse != nil {
+		t.Error("scrub_response should be nil when not set")
+	}
+}
+
+func TestHTTPServices_DeepCopyPointerFields(t *testing.T) {
+	scrub := true
+	p := &Policy{
+		Version: 1,
+		Name:    "test",
+		Providers: map[string]yaml.Node{
+			"v": mustYAMLNode(t, `type: vault`),
+		},
+		HTTPServices: []HTTPService{{
+			Name: "github", Upstream: "https://api.github.com",
+			Secret: &HTTPServiceSecret{
+				Ref:    "vault://kv/data/github#token",
+				Format: "ghp_{rand:36}",
+			},
+			Inject: &HTTPServiceInject{
+				Header: &HTTPServiceInjectHeader{
+					Name:     "Authorization",
+					Template: "Bearer {{secret}}",
+				},
+			},
+			ScrubResponse: &scrub,
+			Rules: []HTTPServiceRule{{
+				Name: "read", Paths: []string{"/repos/**"}, Decision: "allow",
+			}},
+		}},
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	e, err := NewEngine(p, false, false)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	// First call — grab the returned copy and mutate every pointer field.
+	got := e.HTTPServices()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(got))
+	}
+	got[0].Secret.Ref = "MUTATED"
+	got[0].Inject.Header.Name = "MUTATED"
+	*got[0].ScrubResponse = false
+
+	// Second call — values must be the originals, not the mutations.
+	got2 := e.HTTPServices()
+	if got2[0].Secret.Ref != "vault://kv/data/github#token" {
+		t.Errorf("Secret.Ref = %q, want original (shallow-copy leak)", got2[0].Secret.Ref)
+	}
+	if got2[0].Inject.Header.Name != "Authorization" {
+		t.Errorf("Inject.Header.Name = %q, want original (shallow-copy leak)", got2[0].Inject.Header.Name)
+	}
+	if got2[0].ScrubResponse == nil || !*got2[0].ScrubResponse {
+		t.Errorf("ScrubResponse = %v, want true (shallow-copy leak)", got2[0].ScrubResponse)
+	}
+}
+
+// mustYAMLNode is a test helper that unmarshals a YAML string into a yaml.Node.
+// It unwraps the document node if present, returning the inner mapping/scalar.
+func mustYAMLNode(t *testing.T, s string) yaml.Node {
+	t.Helper()
+	var n yaml.Node
+	if err := yaml.Unmarshal([]byte(s), &n); err != nil {
+		t.Fatalf("mustYAMLNode: %v", err)
+	}
+	if n.Kind == yaml.DocumentNode && len(n.Content) > 0 {
+		return *n.Content[0]
+	}
+	return n
+}
+
+// --- ValidateHTTPServicesWithProviders tests ---
+
+func TestValidateHTTPServices_SecretAndRules(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+		Default:  "deny",
+		Secret: &HTTPServiceSecret{
+			Ref:    "vault://kv/data/github#token",
+			Format: "ghp_{rand:36}",
+		},
+		Inject: &HTTPServiceInject{
+			Header: &HTTPServiceInjectHeader{
+				Name:     "Authorization",
+				Template: "Bearer {{secret}}",
+			},
+		},
+		Rules: []HTTPServiceRule{{
+			Name: "read", Methods: []string{"GET"}, Paths: []string{"/repos/**"}, Decision: "allow",
+		}},
+	}}
+	providers := map[string]yaml.Node{
+		"myvault": mustYAMLNode(t, `type: vault`),
+	}
+	if err := ValidateHTTPServicesWithProviders(svcs, providers); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateHTTPServices_SecretOnly(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+		Secret: &HTTPServiceSecret{
+			Ref:    "keyring://agentsh/github-token",
+			Format: "ghp_{rand:36}",
+		},
+		Inject: &HTTPServiceInject{
+			Header: &HTTPServiceInjectHeader{
+				Name:     "Authorization",
+				Template: "Bearer {{secret}}",
+			},
+		},
+	}}
+	providers := map[string]yaml.Node{
+		"kr": mustYAMLNode(t, `type: keyring`),
+	}
+	if err := ValidateHTTPServicesWithProviders(svcs, providers); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateHTTPServices_RulesOnly(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+		Default:  "deny",
+		Rules: []HTTPServiceRule{{
+			Name: "read", Methods: []string{"GET"}, Paths: []string{"/repos/**"}, Decision: "allow",
+		}},
+	}}
+	if err := ValidateHTTPServicesWithProviders(svcs, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateHTTPServices_MultipleServicesMultipleProviders(t *testing.T) {
+	svcs := []HTTPService{
+		{
+			Name:     "github",
+			Upstream: "https://api.github.com",
+			Secret: &HTTPServiceSecret{
+				Ref:    "vault://kv/data/github#token",
+				Format: "ghp_{rand:36}",
+			},
+			Inject: &HTTPServiceInject{
+				Header: &HTTPServiceInjectHeader{
+					Name:     "Authorization",
+					Template: "token {{secret}}",
+				},
+			},
+			Rules: []HTTPServiceRule{{
+				Name: "read", Paths: []string{"/repos/**"}, Decision: "allow",
+			}},
+		},
+		{
+			Name:     "stripe",
+			Upstream: "https://api.stripe.com",
+			Secret: &HTTPServiceSecret{
+				Ref:    "keyring://agentsh/stripe-key",
+				Format: "sk_live_{rand:24}",
+			},
+			Inject: &HTTPServiceInject{
+				Header: &HTTPServiceInjectHeader{
+					Name:     "Authorization",
+					Template: "Bearer {{secret}}",
+				},
+			},
+			Rules: []HTTPServiceRule{{
+				Name: "read", Paths: []string{"/v1/**"}, Decision: "allow",
+			}},
+		},
+	}
+	providers := map[string]yaml.Node{
+		"myvault": mustYAMLNode(t, `type: vault`),
+		"mykr":    mustYAMLNode(t, `type: keyring`),
+	}
+	if err := ValidateHTTPServicesWithProviders(svcs, providers); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateHTTPServices_SecretRefWithFragment(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+		Secret: &HTTPServiceSecret{
+			Ref:    "vault://kv/data/github#token",
+			Format: "ghp_{rand:36}",
+		},
+		Inject: &HTTPServiceInject{
+			Header: &HTTPServiceInjectHeader{
+				Name:     "Authorization",
+				Template: "Bearer {{secret}}",
+			},
+		},
+	}}
+	providers := map[string]yaml.Node{
+		"v": mustYAMLNode(t, `type: vault`),
+	}
+	if err := ValidateHTTPServicesWithProviders(svcs, providers); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPolicyValidate_ProvidersNoHTTPServices(t *testing.T) {
+	p := Policy{
+		Version: 1,
+		Name:    "test",
+		Providers: map[string]yaml.Node{
+			"kr": mustYAMLNode(t, `type: keyring`),
+		},
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateHTTPServices_NoSecretNoRules(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+	}}
+	err := ValidateHTTPServicesWithProviders(svcs, nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "has no secret and no rules") {
+		t.Fatalf("error = %q, want substring %q", err.Error(), "has no secret and no rules")
+	}
+}
+
+func TestValidateHTTPServices_InjectWithoutSecret(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+		Inject: &HTTPServiceInject{
+			Header: &HTTPServiceInjectHeader{
+				Name:     "Authorization",
+				Template: "Bearer {{secret}}",
+			},
+		},
+		Rules: []HTTPServiceRule{{
+			Name: "read", Paths: []string{"/repos/**"}, Decision: "allow",
+		}},
+	}}
+	err := ValidateHTTPServicesWithProviders(svcs, nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "inject requires secret") {
+		t.Fatalf("error = %q, want substring %q", err.Error(), "inject requires secret")
+	}
+}
+
+func TestValidateHTTPServices_InvalidSecretRef(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+		Secret: &HTTPServiceSecret{
+			Ref:    "not-a-valid-ref",
+			Format: "ghp_{rand:36}",
+		},
+		Inject: &HTTPServiceInject{
+			Header: &HTTPServiceInjectHeader{
+				Name:     "Authorization",
+				Template: "Bearer {{secret}}",
+			},
+		},
+	}}
+	err := ValidateHTTPServicesWithProviders(svcs, nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid secret ref") {
+		t.Fatalf("error = %q, want substring %q", err.Error(), "invalid secret ref")
+	}
+}
+
+func TestValidateHTTPServices_SecretRefUndeclaredProvider(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+		Secret: &HTTPServiceSecret{
+			Ref:    "vault://kv/data/github#token",
+			Format: "ghp_{rand:36}",
+		},
+		Inject: &HTTPServiceInject{
+			Header: &HTTPServiceInjectHeader{
+				Name:     "Authorization",
+				Template: "Bearer {{secret}}",
+			},
+		},
+	}}
+	providers := map[string]yaml.Node{
+		"kr": mustYAMLNode(t, `type: keyring`),
+	}
+	err := ValidateHTTPServicesWithProviders(svcs, providers)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no matching provider") {
+		t.Fatalf("error = %q, want substring %q", err.Error(), "no matching provider")
+	}
+}
+
+func TestValidateHTTPServices_InvalidFakeFormat(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+		Secret: &HTTPServiceSecret{
+			Ref:    "keyring://agentsh/github-token",
+			Format: "short{rand:5}",
+		},
+		Inject: &HTTPServiceInject{
+			Header: &HTTPServiceInjectHeader{
+				Name:     "Authorization",
+				Template: "Bearer {{secret}}",
+			},
+		},
+	}}
+	providers := map[string]yaml.Node{
+		"kr": mustYAMLNode(t, `type: keyring`),
+	}
+	err := ValidateHTTPServicesWithProviders(svcs, providers)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid fake format") {
+		t.Fatalf("error = %q, want substring %q", err.Error(), "invalid fake format")
+	}
+}
+
+func TestValidateHTTPServices_MissingSecretPlaceholder(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+		Secret: &HTTPServiceSecret{
+			Ref:    "keyring://agentsh/github-token",
+			Format: "ghp_{rand:36}",
+		},
+		Inject: &HTTPServiceInject{
+			Header: &HTTPServiceInjectHeader{
+				Name:     "Authorization",
+				Template: "Bearer MISSING",
+			},
+		},
+	}}
+	providers := map[string]yaml.Node{
+		"kr": mustYAMLNode(t, `type: keyring`),
+	}
+	err := ValidateHTTPServicesWithProviders(svcs, providers)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "must contain {{secret}}") {
+		t.Fatalf("error = %q, want substring %q", err.Error(), "must contain {{secret}}")
+	}
+}
+
+func TestValidateHTTPServices_InjectNoHeader_Rejected(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+		Secret: &HTTPServiceSecret{
+			Ref:    "keyring://agentsh/github-token",
+			Format: "ghp_{rand:36}",
+		},
+		Inject: &HTTPServiceInject{},
+	}}
+	providers := map[string]yaml.Node{
+		"kr": mustYAMLNode(t, `type: keyring`),
+	}
+	err := ValidateHTTPServicesWithProviders(svcs, providers)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "inject.header is required") {
+		t.Fatalf("error = %q, want substring %q", err.Error(), "inject.header is required")
+	}
+}
+
+func TestValidateHTTPServices_InjectHeaderNameEmpty_Rejected(t *testing.T) {
+	svcs := []HTTPService{{
+		Name:     "github",
+		Upstream: "https://api.github.com",
+		Secret: &HTTPServiceSecret{
+			Ref:    "keyring://agentsh/github-token",
+			Format: "ghp_{rand:36}",
+		},
+		Inject: &HTTPServiceInject{
+			Header: &HTTPServiceInjectHeader{
+				Name:     "",
+				Template: "Bearer {{secret}}",
+			},
+		},
+	}}
+	providers := map[string]yaml.Node{
+		"kr": mustYAMLNode(t, `type: keyring`),
+	}
+	err := ValidateHTTPServicesWithProviders(svcs, providers)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "header name is required") {
+		t.Fatalf("error = %q, want substring %q", err.Error(), "header name is required")
+	}
+}
+
 func TestNewEngine_PopulatesHTTPServiceMaps(t *testing.T) {
 	p := &Policy{
 		Version: 1,
@@ -1182,5 +1674,29 @@ func TestNewEngine_PopulatesHTTPServiceMaps(t *testing.T) {
 	}
 	if _, ok := e.httpServiceHosts["api.github.com"]; !ok {
 		t.Error("e.httpServiceHosts missing api.github.com")
+	}
+}
+
+func TestPolicyValidate_OldServicesKeyRejected(t *testing.T) {
+	input := `
+version: 1
+name: test-tripwire
+services:
+  - name: github
+    match:
+      hosts: ["api.github.com"]
+    secret:
+      ref: keyring://agentsh/github_token
+`
+	var p Policy
+	if err := yaml.Unmarshal([]byte(input), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	err := p.Validate()
+	if err == nil {
+		t.Fatal("expected error for old services: key")
+	}
+	if !strings.Contains(err.Error(), "'services:' key has been replaced") {
+		t.Errorf("want migration error, got: %v", err)
 	}
 }

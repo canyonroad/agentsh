@@ -147,6 +147,22 @@ func (e *Engine) HTTPServices() []HTTPService {
 		if len(src.Aliases) > 0 {
 			dst.Aliases = append([]string(nil), src.Aliases...)
 		}
+		if src.Secret != nil {
+			cp := *src.Secret
+			dst.Secret = &cp
+		}
+		if src.Inject != nil {
+			cp := *src.Inject
+			if cp.Header != nil {
+				hdr := *cp.Header
+				cp.Header = &hdr
+			}
+			dst.Inject = &cp
+		}
+		if src.ScrubResponse != nil {
+			cp := *src.ScrubResponse
+			dst.ScrubResponse = &cp
+		}
 		if len(src.Rules) > 0 {
 			dst.Rules = make([]HTTPServiceRule, len(src.Rules))
 			for j, r := range src.Rules {
