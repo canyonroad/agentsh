@@ -184,6 +184,31 @@ func TestAuditVerifyCmd_DoesNotRequireKeyForUnsignedLogWhenConfigDisabled(t *tes
 	}
 }
 
+func TestAuditVerifyCmd_DoesNotRequireKeyForUnsignedTruncatedLogWhenConfigDisabled(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	if err := os.WriteFile(logPath, []byte(`{"type":"unsigned"`), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+	writeAuditVerifyConfigDisabledWithoutKey(t, cfgPath, logPath)
+
+	cmd := newAuditVerifyCmd()
+	cmd.SetArgs([]string{"--config", cfgPath, "--tolerate-truncation", logPath})
+
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "integrity not enabled in this log; nothing to verify") {
+		t.Fatalf("output = %q, want unsigned disabled-config no-op message", got)
+	}
+}
+
 func TestAuditVerifyCmd_AllowsBackupOnlyRetainedWindow(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "audit.jsonl")

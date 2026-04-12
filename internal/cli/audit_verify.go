@@ -39,8 +39,9 @@ type verifySummary struct {
 
 type rotationVerifyPayload struct {
 	Fields struct {
-		ReasonCode        string `json:"reason_code"`
-		PriorChainSummary *struct {
+		ReasonCode         string `json:"reason_code"`
+		PriorLogArchivedTo string `json:"prior_log_archived_to"`
+		PriorChainSummary  *struct {
 			LastSequence  int64  `json:"last_sequence_seen_in_log"`
 			LastEntryHash string `json:"last_entry_hash_seen_in_log"`
 		} `json:"prior_chain_summary"`
@@ -71,7 +72,7 @@ func newAuditVerifyCmd() *cobra.Command {
 				files = append(files, audit.LogFile{Path: args[0], Index: 0, IsBackup: false})
 			}
 
-			hasIntegrityMetadata, err := verifyTargetContainsIntegrityMetadata(files)
+			hasIntegrityMetadata, err := verifyTargetContainsIntegrityMetadata(files, opts)
 			if err != nil {
 				return err
 			}
@@ -111,7 +112,7 @@ func newAuditVerifyCmd() *cobra.Command {
 	return cmd
 }
 
-func verifyTargetContainsIntegrityMetadata(files []audit.LogFile) (bool, error) {
+func verifyTargetContainsIntegrityMetadata(files []audit.LogFile, opts verifyOptions) (bool, error) {
 	for _, file := range files {
 		f, err := os.Open(file.Path)
 		if err != nil {
@@ -119,6 +120,7 @@ func verifyTargetContainsIntegrityMetadata(files []audit.LogFile) (bool, error) 
 		}
 
 		reader := bufio.NewReader(f)
+		lineNo := 0
 		for {
 			rawLine, readErr := reader.ReadBytes('\n')
 			if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
@@ -129,6 +131,8 @@ func verifyTargetContainsIntegrityMetadata(files []audit.LogFile) (bool, error) 
 				return false, fmt.Errorf("scan %s: %w", file.Path, readErr)
 			}
 
+			lineNo++
+			hadNewline := len(rawLine) > 0 && rawLine[len(rawLine)-1] == '\n'
 			line := bytes.TrimSpace(rawLine)
 			if len(line) == 0 {
 				if errors.Is(readErr, io.EOF) {
@@ -139,8 +143,15 @@ func verifyTargetContainsIntegrityMetadata(files []audit.LogFile) (bool, error) 
 
 			entry, err := audit.ParseIntegrityEntry(line)
 			if err != nil {
+				if opts.tolerateTruncation &&
+					file.Path == files[len(files)-1].Path &&
+					errors.Is(readErr, io.EOF) &&
+					!hadNewline &&
+					isTolerableTruncation(err) {
+					break
+				}
 				_ = f.Close()
-				return false, fmt.Errorf("malformed JSON at %s: %w", file.Path, err)
+				return false, fmt.Errorf("malformed JSON at %s:%d: %w", file.Path, lineNo, err)
 			}
 			if entry.Integrity != nil {
 				_ = f.Close()
@@ -307,7 +318,9 @@ func verifyRotationBoundary(payload []byte, summary *verifySummary, state verify
 	}
 
 	if summary.verifiedEntries == 0 {
-		if !visibleOriginIsBackup && event.Fields.PriorChainSummary != nil {
+		if !visibleOriginIsBackup &&
+			event.Fields.PriorChainSummary != nil &&
+			event.Fields.PriorLogArchivedTo == "" {
 			return errors.New("visible origin omits prior history before rotation boundary")
 		}
 		return nil

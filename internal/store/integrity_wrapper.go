@@ -57,7 +57,8 @@ type visibleChainState struct {
 
 type rotationBoundaryPayload struct {
 	Fields struct {
-		PriorChainSummary *struct {
+		PriorLogArchivedTo string `json:"prior_log_archived_to"`
+		PriorChainSummary  *struct {
 			LastSequence  int64  `json:"last_sequence_seen_in_log"`
 			LastEntryHash string `json:"last_entry_hash_seen_in_log"`
 		} `json:"prior_chain_summary"`
@@ -230,7 +231,9 @@ func validateRotationBoundary(payload []byte, state visibleChainState, visibleOr
 	}
 
 	if state.verifiedEntries == 0 {
-		if !visibleOriginIsBackup && event.Fields.PriorChainSummary != nil {
+		if !visibleOriginIsBackup &&
+			event.Fields.PriorChainSummary != nil &&
+			event.Fields.PriorLogArchivedTo == "" {
 			return errors.New("visible origin omits prior history before rotation boundary")
 		}
 		return nil

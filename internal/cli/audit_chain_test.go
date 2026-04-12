@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
+	auditstore "github.com/agentsh/agentsh/internal/store"
 	"github.com/agentsh/agentsh/internal/store/jsonl"
 	"github.com/agentsh/agentsh/pkg/types"
 )
@@ -108,6 +109,95 @@ func TestAuditChainResetCmd_LegacyArchiveMovesEntireRotationSet(t *testing.T) {
 	if len(matches) < 2 {
 		t.Fatalf("legacy archive matches = %v, want archived base and backups", matches)
 	}
+}
+
+func TestAuditChainResetCmd_LegacyArchiveResultVerifiesAndReopens(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeAuditVerifyConfig(t, cfgPath, logPath)
+	t.Setenv("AGENTSH_AUDIT_TEST_KEY", string(testAuditKey))
+
+	chain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	first, err := chain.Wrap([]byte(`{"type":"before_reset"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	if err := os.WriteFile(logPath, append(first, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+	state := chain.State()
+	if err := audit.WriteSidecar(audit.SidecarPath(logPath), audit.SidecarState{
+		Sequence:       state.Sequence,
+		PrevHash:       state.PrevHash,
+		KeyFingerprint: audit.KeyFingerprint(testAuditKey),
+		UpdatedAt:      time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("audit.WriteSidecar() error = %v", err)
+	}
+
+	resetCmd := newAuditChainResetCmd()
+	resetCmd.SetArgs([]string{"--config", cfgPath, "--reason", "archive", "--legacy-archive", "--force"})
+	if err := resetCmd.Execute(); err != nil {
+		t.Fatalf("reset Execute() error = %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%q) error = %v", logPath, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("line count = %d, want 1", len(lines))
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	fields := entry["fields"].(map[string]any)
+	archivedTo, ok := fields["prior_log_archived_to"].(string)
+	if !ok || archivedTo == "" {
+		t.Fatalf("prior_log_archived_to = %v, want archived path", fields["prior_log_archived_to"])
+	}
+	if !strings.Contains(archivedTo, logPath+".legacy.") {
+		t.Fatalf("prior_log_archived_to = %q, want legacy archive path", archivedTo)
+	}
+	if _, err := os.Stat(archivedTo); err != nil {
+		t.Fatalf("os.Stat(%q) error = %v", archivedTo, err)
+	}
+
+	verifyCmd := newAuditVerifyCmd()
+	verifyCmd.SetArgs([]string{"--config", cfgPath, logPath})
+	if err := verifyCmd.Execute(); err != nil {
+		t.Fatalf("verify Execute() error = %v", err)
+	}
+
+	inner, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = inner.Close() })
+
+	resumeChain, err := audit.NewIntegrityChain(testAuditKey)
+	if err != nil {
+		t.Fatalf("audit.NewIntegrityChain() error = %v", err)
+	}
+	store, err := auditstore.NewIntegrityStore(inner, resumeChain, auditstore.IntegrityOptions{
+		LogPath:        logPath,
+		Algorithm:      "hmac-sha256",
+		KeyFingerprint: audit.KeyFingerprint(testAuditKey),
+		Now: func() time.Time {
+			return time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("auditstore.NewIntegrityStore() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
 }
 
 func TestAuditChainResetCmd_AppendsPriorChainSummary(t *testing.T) {

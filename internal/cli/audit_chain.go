@@ -162,6 +162,7 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 	if now == nil {
 		now = time.Now
 	}
+	var archivedTo string
 
 	if !opts.LegacyArchive {
 		if _, err := audit.DiscoverRotationSet(logPath); err != nil {
@@ -179,6 +180,7 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 
 	if opts.LegacyArchive {
 		stamp := now().UTC().Format("20060102T150405Z")
+		archivedTo = logPath + ".legacy." + stamp
 		if err := archiveRotationSet(logPath, stamp); err != nil {
 			return err
 		}
@@ -210,6 +212,9 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 	}
 	if priorSummary != nil {
 		fields["prior_chain_summary"] = priorSummary
+	}
+	if archivedTo != "" {
+		fields["prior_log_archived_to"] = archivedTo
 	}
 
 	payload, err := json.Marshal(types.Event{
