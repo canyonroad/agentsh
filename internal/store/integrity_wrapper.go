@@ -90,7 +90,7 @@ func (s *IntegrityStore) bootstrap() error {
 	case errors.Is(sidecarErr, audit.ErrSidecarNotFound):
 		return s.bootstrapWithoutSidecar(lastFile, lastLine, lastErr)
 	default:
-		return s.bootstrapWithoutSidecar(lastFile, lastLine, lastErr)
+		return fmt.Errorf("read audit integrity sidecar: %w", sidecarErr)
 	}
 }
 

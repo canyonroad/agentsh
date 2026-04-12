@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -164,9 +168,9 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 	}
 
 	if opts.LegacyArchive {
-		archivePath := logPath + ".legacy." + now().UTC().Format("20060102T150405Z")
-		if err := os.Rename(logPath, archivePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("archive legacy audit log: %w", err)
+		stamp := now().UTC().Format("20060102T150405Z")
+		if err := archiveRotationSet(logPath, stamp); err != nil {
+			return err
 		}
 	}
 
@@ -225,12 +229,12 @@ func resetIntegrityChain(ctx context.Context, cfg *config.Config, key []byte, lo
 }
 
 func currentChainSummary(logPath string) (map[string]any, error) {
-	files, err := audit.DiscoverRotationSet(logPath)
+	files, err := existingRotationFiles(logPath)
 	if err != nil {
 		return nil, err
 	}
 
-	_, lastLine, err := audit.ReadLastNonEmptyLine(files)
+	_, lastLine, err := readLastNonEmptyLineBestEffort(files)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -247,4 +251,129 @@ func currentChainSummary(logPath string) (map[string]any, error) {
 		"last_sequence_seen_in_log":   entry.Integrity.Sequence,
 		"last_entry_hash_seen_in_log": entry.Integrity.EntryHash,
 	}, nil
+}
+
+func archiveRotationSet(logPath, stamp string) error {
+	files, err := existingRotationFiles(logPath)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		target := logPath + ".legacy." + stamp
+		if file.IsBackup {
+			target = logPath + ".legacy." + stamp + "." + strconv.Itoa(file.Index)
+		}
+		if err := os.Rename(file.Path, target); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("archive legacy audit log %s: %w", file.Path, err)
+		}
+	}
+
+	sidecarPath := audit.SidecarPath(logPath)
+	if err := os.Rename(sidecarPath, logPath+".legacy."+stamp+".chain"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("archive legacy audit sidecar: %w", err)
+	}
+	return nil
+}
+
+func existingRotationFiles(logPath string) ([]audit.LogFile, error) {
+	dir := filepath.Dir(logPath)
+	baseName := filepath.Base(logPath)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read audit rotation dir: %w", err)
+	}
+
+	files := make([]audit.LogFile, 0, len(entries)+1)
+	if _, err := os.Stat(logPath); err == nil {
+		files = append(files, audit.LogFile{Path: logPath})
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, baseName+".") {
+			continue
+		}
+		suffix := strings.TrimPrefix(name, baseName+".")
+		index, err := strconv.Atoi(suffix)
+		if err != nil || index <= 0 {
+			continue
+		}
+		files = append(files, audit.LogFile{
+			Path:     filepath.Join(dir, name),
+			Index:    index,
+			IsBackup: true,
+		})
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].IsBackup != files[j].IsBackup {
+			return files[i].IsBackup
+		}
+		if files[i].IsBackup {
+			return files[i].Index < files[j].Index
+		}
+		return files[i].Path < files[j].Path
+	})
+	return files, nil
+}
+
+func readLastNonEmptyLineBestEffort(files []audit.LogFile) (audit.LogFile, []byte, error) {
+	if len(files) == 0 {
+		return audit.LogFile{}, nil, os.ErrNotExist
+	}
+
+	newest := make([]audit.LogFile, 0, len(files))
+	var baseFile *audit.LogFile
+	for i := range files {
+		file := files[i]
+		if file.IsBackup {
+			newest = append(newest, file)
+			continue
+		}
+		copy := file
+		baseFile = &copy
+	}
+	sort.Slice(newest, func(i, j int) bool {
+		return newest[i].Index < newest[j].Index
+	})
+	if baseFile != nil {
+		newest = append([]audit.LogFile{*baseFile}, newest...)
+	}
+
+	for _, file := range newest {
+		f, err := os.Open(file.Path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return audit.LogFile{}, nil, fmt.Errorf("open %s: %w", file.Path, err)
+		}
+
+		var last []byte
+		scanner := audit.NewScanner(f)
+		for scanner.Scan() {
+			line := bytes.TrimSpace(scanner.Bytes())
+			if len(line) == 0 {
+				continue
+			}
+			last = bytes.Clone(line)
+		}
+		scanErr := scanner.Err()
+		_ = f.Close()
+		if scanErr != nil {
+			return audit.LogFile{}, nil, fmt.Errorf("scan %s: %w", file.Path, scanErr)
+		}
+		if len(last) > 0 {
+			return file, last, nil
+		}
+	}
+
+	return audit.LogFile{}, nil, os.ErrNotExist
 }

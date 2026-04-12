@@ -235,6 +235,32 @@ func TestNewIntegrityStore_SidecarMissingStartsFreshRotation(t *testing.T) {
 	}
 }
 
+func TestNewIntegrityStore_RejectsCorruptSidecar(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	previousChain := mustNewIntegrityChain(t)
+	line, err := previousChain.Wrap([]byte(`{"type":"existing","timestamp":"2026-04-11T12:00:00Z"}`))
+	if err != nil {
+		t.Fatalf("chain.Wrap() error = %v", err)
+	}
+	if err := os.WriteFile(logPath, append(line, '\n'), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", logPath, err)
+	}
+	if err := os.WriteFile(audit.SidecarPath(logPath), []byte(`{"format_version":2,"sequence":0,"prev_hash":`), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(sidecar) error = %v", err)
+	}
+
+	inner, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = inner.Close() })
+
+	if _, err := NewIntegrityStore(inner, mustNewIntegrityChain(t), testIntegrityOptions(logPath)); err == nil {
+		t.Fatal("NewIntegrityStore() error = nil, want corrupt sidecar rejection")
+	}
+}
+
 func TestNewIntegrityStore_SidecarMissingRejectsTamperedV2Log(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
 
