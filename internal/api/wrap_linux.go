@@ -112,6 +112,35 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 	// Create file handler if configured
 	fileHandler := createFileHandler(a.cfg.Sandbox.Seccomp.FileMonitor, sessionPolicy, emitter, a.cfg.Landlock.Enabled)
 
+	// Probe: verify ProcessVMReadv (or /proc/mem fallback) works against
+	// the wrapper before starting. Same logic as the exec path probe in
+	// notify_linux.go — catches broken memory access at startup.
+	if wrapperPID > 0 {
+		pvrErr, memErr := probeMemoryAccess(wrapperPID)
+		if pvrErr != nil && memErr != nil {
+			if fileHandler != nil || execveHandler != nil {
+				slog.Error("wrap: ProcessVMReadv and /proc/mem both failed — "+
+					"handler cannot read tracee memory for path resolution",
+					"wrapper_pid", wrapperPID,
+					"pvr_error", pvrErr, "mem_error", memErr,
+					"session_id", sessionID,
+					"hint", "check kernel.yama.ptrace_scope, ensure CAP_SYS_PTRACE, "+
+						"or set sandbox.seccomp.file_monitor.enabled: false")
+				// Clean up resources that would normally be handled by the goroutine.
+				notifyFD.Close()
+				if cleanupSymlink != nil {
+					cleanupSymlink()
+				}
+				return
+			}
+			slog.Warn("wrap: ProcessVMReadv probe failed, socket monitoring may be degraded",
+				"wrapper_pid", wrapperPID, "pvr_error", pvrErr, "mem_error", memErr)
+		} else if pvrErr != nil {
+			slog.Debug("wrap: ProcessVMReadv failed but /proc/mem fallback works",
+				"wrapper_pid", wrapperPID, "pvr_error", pvrErr)
+		}
+	}
+
 	go func() {
 		defer notifyFD.Close()
 		if cleanupSymlink != nil {
