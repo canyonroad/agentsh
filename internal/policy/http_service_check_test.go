@@ -196,6 +196,49 @@ func TestDeclaredHTTPServiceHost_BareIPv6FromSplitHostPort(t *testing.T) {
 	}
 }
 
+func TestCheckHTTPService_CredentialsOnlyDefaultAllow(t *testing.T) {
+	svcs := []HTTPService{{
+		Name: "credsonly", Upstream: "https://api.example.com",
+		// No Rules, no explicit Default → should default to "allow"
+	}}
+	e := newTestEngineForHTTP(t, svcs)
+	dec := e.CheckHTTPService("credsonly", "POST", "/anything")
+	if dec.EffectiveDecision != types.DecisionAllow {
+		t.Errorf("credentials-only service should default allow, got %q", dec.EffectiveDecision)
+	}
+	if dec.Rule != "default" {
+		t.Errorf("rule = %q, want default", dec.Rule)
+	}
+}
+
+func TestCheckHTTPService_RulesDefaultDeny(t *testing.T) {
+	svcs := []HTTPService{{
+		Name: "withrules", Upstream: "https://api.example.com",
+		Rules: []HTTPServiceRule{
+			{Name: "read", Methods: []string{"GET"}, Paths: []string{"/data/**"}, Decision: "allow"},
+		},
+		// No explicit Default → should default to "deny" because rules exist
+	}}
+	e := newTestEngineForHTTP(t, svcs)
+	dec := e.CheckHTTPService("withrules", "POST", "/unmatched")
+	if dec.EffectiveDecision != types.DecisionDeny {
+		t.Errorf("service with rules should default deny, got %q", dec.EffectiveDecision)
+	}
+}
+
+func TestCheckHTTPService_ExplicitDenyOnCredentialsOnly(t *testing.T) {
+	svcs := []HTTPService{{
+		Name: "locked", Upstream: "https://api.example.com",
+		Default: "deny",
+		// No rules, but explicit deny
+	}}
+	e := newTestEngineForHTTP(t, svcs)
+	dec := e.CheckHTTPService("locked", "GET", "/anything")
+	if dec.EffectiveDecision != types.DecisionDeny {
+		t.Errorf("explicit deny must be honored, got %q", dec.EffectiveDecision)
+	}
+}
+
 func TestHTTPServicesEnumeration(t *testing.T) {
 	svcs := []HTTPService{
 		{
