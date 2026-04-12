@@ -113,6 +113,9 @@ func (s *IntegrityStore) bootstrap() error {
 	case errors.Is(sidecarErr, audit.ErrSidecarNotFound):
 		return s.bootstrapWithoutSidecar(files, lastFile, lastLine, lastErr, "sidecar_missing", "sidecar missing; starting fresh chain")
 	case errors.Is(sidecarErr, audit.ErrSidecarCorrupt):
+		if errors.Is(lastErr, os.ErrNotExist) {
+			return fmt.Errorf("audit integrity chain mismatch: sidecar corrupt with no visible audit log")
+		}
 		return s.bootstrapWithoutSidecar(files, lastFile, lastLine, lastErr, "sidecar_corrupt", "sidecar corrupt; starting fresh chain")
 	default:
 		return fmt.Errorf("read audit integrity sidecar: %w", sidecarErr)

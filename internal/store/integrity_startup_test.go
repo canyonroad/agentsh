@@ -585,6 +585,36 @@ func TestNewIntegrityStore_CorruptSidecarFallsThroughToMissingHandling(t *testin
 	}
 }
 
+func TestNewIntegrityStore_RejectsCorruptSidecarWhenVisibleLogMissing(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	if err := os.WriteFile(audit.SidecarPath(logPath), []byte(`{"format_version":2,"sequence":0,"prev_hash":`), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(sidecar) error = %v", err)
+	}
+
+	inner, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		t.Fatalf("jsonl.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = inner.Close() })
+
+	_, err = NewIntegrityStore(inner, mustNewIntegrityChain(t), testIntegrityOptions(logPath))
+	if err == nil {
+		t.Fatal("NewIntegrityStore() error = nil, want corrupt sidecar rejection")
+	}
+	if !strings.Contains(err.Error(), "sidecar corrupt") {
+		t.Fatalf("NewIntegrityStore() error = %v, want sidecar corrupt rejection", err)
+	}
+
+	data, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("os.ReadFile(%q) error = %v", logPath, readErr)
+	}
+	if len(data) != 0 {
+		t.Fatalf("audit log = %q, want empty log after rejection", data)
+	}
+}
+
 func TestNewIntegrityStore_RejectsUnsupportedSidecarFormat(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
 
