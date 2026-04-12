@@ -303,7 +303,7 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 		if wrapperPID > 0 {
 			pvrErr, memErr := probeMemoryAccess(wrapperPID)
 			if pvrErr != nil && memErr != nil {
-				if fileHandler != nil || h != nil {
+				if fileHandler != nil || h != nil || pol != nil {
 					slog.Error("seccomp notify: ProcessVMReadv and /proc/mem both failed — "+
 						"handler cannot read tracee memory for path resolution",
 						"wrapper_pid", wrapperPID,
@@ -313,11 +313,19 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 							"or set sandbox.seccomp.file_monitor.enabled: false")
 					return // Don't send ACK — wrapper fails with clear handshake error
 				}
-				slog.Warn("ProcessVMReadv probe failed, socket monitoring may be degraded",
+				slog.Warn("ProcessVMReadv probe failed, monitoring may be degraded",
 					"wrapper_pid", wrapperPID, "pvr_error", pvrErr, "mem_error", memErr)
 			} else if pvrErr != nil {
-				slog.Debug("ProcessVMReadv failed but /proc/mem fallback works",
-					"wrapper_pid", wrapperPID, "pvr_error", pvrErr)
+				// /proc/mem fallback works for file monitoring, but socket monitoring
+				// uses ProcessVMReadv directly (ReadSockaddr has no /proc/mem fallback).
+				if pol != nil {
+					slog.Warn("ProcessVMReadv failed — socket monitoring will be degraded "+
+						"(ReadSockaddr requires ProcessVMReadv), /proc/mem fallback works for file monitoring",
+						"wrapper_pid", wrapperPID, "pvr_error", pvrErr)
+				} else {
+					slog.Debug("ProcessVMReadv failed but /proc/mem fallback works",
+						"wrapper_pid", wrapperPID, "pvr_error", pvrErr)
+				}
 			}
 		}
 

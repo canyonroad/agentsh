@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strconv"
@@ -51,18 +52,18 @@ func probeProcMemAt(pid int, addr uint64) error {
 }
 
 // findReadableAddr parses /proc/<pid>/maps to find the start address of the
-// first readable mapping. Scans at most 20 lines.
+// first readable mapping. Scans all lines (no artificial cap) using a
+// streaming reader to avoid loading the entire maps file into memory.
 func findReadableAddr(pid int) (uint64, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/maps", pid))
+	f, err := os.Open(fmt.Sprintf("/proc/%d/maps", pid))
 	if err != nil {
-		return 0, fmt.Errorf("read /proc/%d/maps: %w", pid, err)
+		return 0, fmt.Errorf("open /proc/%d/maps: %w", pid, err)
 	}
-	lines := strings.Split(string(data), "\n")
-	limit := 20
-	if len(lines) < limit {
-		limit = len(lines)
-	}
-	for _, line := range lines[:limit] {
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
@@ -81,5 +82,8 @@ func findReadableAddr(pid int) (uint64, error) {
 		}
 		return addr, nil
 	}
-	return 0, fmt.Errorf("no readable mapping found in /proc/%d/maps (scanned %d lines)", pid, limit)
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("scan /proc/%d/maps: %w", pid, err)
+	}
+	return 0, fmt.Errorf("no readable mapping found in /proc/%d/maps", pid)
 }

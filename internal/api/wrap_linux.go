@@ -118,7 +118,7 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 	if wrapperPID > 0 {
 		pvrErr, memErr := probeMemoryAccess(wrapperPID)
 		if pvrErr != nil && memErr != nil {
-			if fileHandler != nil || execveHandler != nil {
+			if fileHandler != nil || execveHandler != nil || sessionPolicy != nil {
 				slog.Error("wrap: ProcessVMReadv and /proc/mem both failed — "+
 					"handler cannot read tracee memory for path resolution",
 					"wrapper_pid", wrapperPID,
@@ -133,11 +133,19 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 				}
 				return
 			}
-			slog.Warn("wrap: ProcessVMReadv probe failed, socket monitoring may be degraded",
+			slog.Warn("wrap: ProcessVMReadv probe failed, monitoring may be degraded",
 				"wrapper_pid", wrapperPID, "pvr_error", pvrErr, "mem_error", memErr)
 		} else if pvrErr != nil {
-			slog.Debug("wrap: ProcessVMReadv failed but /proc/mem fallback works",
-				"wrapper_pid", wrapperPID, "pvr_error", pvrErr)
+			// /proc/mem fallback works for file monitoring, but socket monitoring
+			// uses ProcessVMReadv directly (ReadSockaddr has no /proc/mem fallback).
+			if sessionPolicy != nil {
+				slog.Warn("wrap: ProcessVMReadv failed — socket monitoring will be degraded "+
+					"(ReadSockaddr requires ProcessVMReadv), /proc/mem fallback works for file monitoring",
+					"wrapper_pid", wrapperPID, "pvr_error", pvrErr)
+			} else {
+				slog.Debug("wrap: ProcessVMReadv failed but /proc/mem fallback works",
+					"wrapper_pid", wrapperPID, "pvr_error", pvrErr)
+			}
 		}
 	}
 
