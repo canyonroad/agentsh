@@ -44,6 +44,9 @@ func newAuditChainStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if cfg.Audit.Output == "" {
+				return fmt.Errorf("audit log output is not configured")
+			}
 			state, err := audit.ReadSidecar(audit.SidecarPath(cfg.Audit.Output))
 			if err != nil {
 				return err
@@ -78,6 +81,9 @@ func newAuditChainResetCmd() *cobra.Command {
 			cfg, _, err := loadLocalConfig(configPath)
 			if err != nil {
 				return err
+			}
+			if cfg.Audit.Output == "" {
+				return fmt.Errorf("audit log output is not configured")
 			}
 			resolvedReasonCode, err := resolveResetReasonCode(reasonCode, legacyArchive)
 			if err != nil {
