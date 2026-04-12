@@ -110,7 +110,11 @@ func (h *LeakGuardHook) PreHook(r *http.Request, ctx *RequestContext) error {
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			if serviceName, found := h.table.ContainsFake(body); found {
 				if serviceName != ctx.ServiceName {
-					h.logLeak(ctx, serviceName, r.Host)
+					if ctx.ServiceName == "" {
+						h.logLeak(ctx, serviceName, r.Host)
+					} else {
+						h.logCrossService(ctx, serviceName, ctx.ServiceName, r.Host)
+					}
 					return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
 				}
 			}
@@ -121,7 +125,11 @@ func (h *LeakGuardHook) PreHook(r *http.Request, ctx *RequestContext) error {
 	if rawQuery := r.URL.RawQuery; rawQuery != "" {
 		if serviceName, found := h.table.ContainsFake([]byte(rawQuery)); found {
 			if serviceName != ctx.ServiceName {
-				h.logLeak(ctx, serviceName, r.Host)
+				if ctx.ServiceName == "" {
+					h.logLeak(ctx, serviceName, r.Host)
+				} else {
+					h.logCrossService(ctx, serviceName, ctx.ServiceName, r.Host)
+				}
 				return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
 			}
 		}
@@ -132,7 +140,11 @@ func (h *LeakGuardHook) PreHook(r *http.Request, ctx *RequestContext) error {
 		for _, val := range vals {
 			if serviceName, found := h.table.ContainsFake([]byte(val)); found {
 				if serviceName != ctx.ServiceName {
-					h.logLeak(ctx, serviceName, r.Host)
+					if ctx.ServiceName == "" {
+						h.logLeak(ctx, serviceName, r.Host)
+					} else {
+						h.logCrossService(ctx, serviceName, ctx.ServiceName, r.Host)
+					}
 					return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
 				}
 			}
@@ -143,7 +155,11 @@ func (h *LeakGuardHook) PreHook(r *http.Request, ctx *RequestContext) error {
 	if p := r.URL.Path; p != "" {
 		if serviceName, found := h.table.ContainsFake([]byte(p)); found {
 			if serviceName != ctx.ServiceName {
-				h.logLeak(ctx, serviceName, r.Host)
+				if ctx.ServiceName == "" {
+					h.logLeak(ctx, serviceName, r.Host)
+				} else {
+					h.logCrossService(ctx, serviceName, ctx.ServiceName, r.Host)
+				}
 				return &HookAbortError{StatusCode: 403, Message: "credential leak blocked"}
 			}
 		}
@@ -161,6 +177,16 @@ func (h *LeakGuardHook) logLeak(ctx *RequestContext, serviceName, requestHost st
 		"session_id", ctx.SessionID,
 		"request_id", ctx.RequestID,
 		"service_name", serviceName,
+		"request_host", requestHost,
+	)
+}
+
+func (h *LeakGuardHook) logCrossService(ctx *RequestContext, sourceService, targetService, requestHost string) {
+	h.logger.Warn("secret_cross_service_use",
+		"session_id", ctx.SessionID,
+		"request_id", ctx.RequestID,
+		"source_service", sourceService,
+		"target_service", targetService,
 		"request_host", requestHost,
 	)
 }
