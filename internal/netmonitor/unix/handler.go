@@ -353,7 +353,18 @@ func handleExecveNotification(goCtx context.Context, fd seccomp.ScmpFd, req *sec
 		Truncated:   truncated,
 	}
 
-	result := h.Handle(goCtx, ectx)
+	result, ev := h.Handle(goCtx, ectx)
+
+	// Defer event emission so it runs after the seccomp notify response.
+	// This ensures the tracee is unblocked before any fsync I/O from the
+	// audit store. Use context.Background() because the event should be
+	// emitted even if the request context was cancelled.
+	defer func() {
+		if ev != nil && h.emitter != nil {
+			_ = h.emitter.AppendEvent(context.Background(), *ev)
+			h.emitter.Publish(*ev)
+		}
+	}()
 
 	switch result.Action {
 	case ActionRedirect:
