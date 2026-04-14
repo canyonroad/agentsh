@@ -23,15 +23,26 @@ SIG_URL="${SRC_URL}.asc"
 # Fingerprint pinned to block key-substitution attacks. Verify upstream at
 # https://github.com/seccomp/libseccomp — README lists the signing key.
 GPG_FPR="7100AADFAE6E6E940D2E0AD655E45A5AE8CA7C8A"
+# Bundled signing key — committed alongside this script so the release
+# build does not depend on a keyserver being reachable at build time.
+# The pinned fingerprint above is checked after import, so swapping the
+# bundled key without updating the fingerprint will fail the build.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KEY_FILE="${SCRIPT_DIR}/libseccomp-signing-key.asc"
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 echo "=== libseccomp ${VERSION} static build for ${TARGET} → ${PREFIX} ==="
 
-# Skip rebuild if artifact already present (CI caching).
-if [ -f "${PREFIX}/lib/libseccomp.a" ] && [ -f "${PREFIX}/lib/pkgconfig/libseccomp.pc" ]; then
-    echo "Already installed at ${PREFIX}; skipping."
+# Skip rebuild if artifact already present AND the installed version
+# matches the requested VERSION. Checking .pc's Version: line prevents
+# silent reuse of a stale install after a version bump or a partial
+# previous run.
+if [ -f "${PREFIX}/lib/libseccomp.a" ] \
+   && [ -f "${PREFIX}/lib/pkgconfig/libseccomp.pc" ] \
+   && grep -qx "Version: ${VERSION}" "${PREFIX}/lib/pkgconfig/libseccomp.pc"; then
+    echo "Already installed at ${PREFIX} (version ${VERSION}); skipping."
     exit 0
 fi
 
@@ -45,7 +56,11 @@ curl -fsSL "$SIG_URL" -o "libseccomp-${VERSION}.tar.gz.asc"
 export GNUPGHOME="${WORKDIR}/gnupg"
 mkdir -p "$GNUPGHOME"
 chmod 700 "$GNUPGHOME"
-gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$GPG_FPR"
+test -f "$KEY_FILE" || { echo "ERROR: missing bundled signing key at ${KEY_FILE}" >&2; exit 1; }
+gpg --batch --import "$KEY_FILE"
+# Re-assert the pinned fingerprint is present in our temp keyring before trusting any signature.
+gpg --batch --list-keys --with-colons "$GPG_FPR" >/dev/null \
+    || { echo "ERROR: bundled key does not contain pinned fingerprint ${GPG_FPR}" >&2; exit 1; }
 gpg --batch --verify "libseccomp-${VERSION}.tar.gz.asc" "libseccomp-${VERSION}.tar.gz"
 
 tar -xzf "libseccomp-${VERSION}.tar.gz"
