@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -51,6 +52,11 @@ type IntegrityStore struct {
 	keyFingerprint string
 	now            func() time.Time
 	fatal          bool // sticky; set on first FatalIntegrityError
+	pendingFlush   bool
+	flushTick      *time.Ticker
+	stopFlush      chan struct{}
+	flushDone      chan struct{}
+	closeOnce      sync.Once
 }
 
 type visibleChainState struct {
@@ -94,6 +100,18 @@ func NewIntegrityStore(inner EventStore, chain *audit.IntegrityChain, opts Integ
 	if err := store.bootstrap(); err != nil {
 		return nil, err
 	}
+
+	// Disable per-write sync on inner store — FlushSync handles it.
+	type syncController interface{ SetSyncOnWrite(bool) }
+	if sc, ok := inner.(syncController); ok {
+		sc.SetSyncOnWrite(false)
+	}
+
+	store.stopFlush = make(chan struct{})
+	store.flushDone = make(chan struct{})
+	store.flushTick = time.NewTicker(100 * time.Millisecond)
+	go store.runFlushLoop()
+
 	return store, nil
 }
 
@@ -468,17 +486,59 @@ func (s *IntegrityStore) AppendEvent(ctx context.Context, ev types.Event) error 
 		return err
 	}
 
+	s.pendingFlush = true
+	return nil
+}
+
+// FlushSync flushes buffered writes to durable storage and updates the sidecar.
+// Safe to call concurrently with AppendEvent — the chain mutex is held only
+// briefly to snapshot state, then released before slow I/O.
+func (s *IntegrityStore) FlushSync() error {
+	s.mu.Lock()
+	if !s.pendingFlush || s.fatal {
+		s.mu.Unlock()
+		return nil
+	}
 	state := s.chain.State()
+	s.pendingFlush = false
+	s.mu.Unlock()
+
+	if syncer, ok := s.inner.(Syncer); ok {
+		if err := syncer.Sync(); err != nil {
+			s.mu.Lock()
+			s.fatal = true
+			s.mu.Unlock()
+			return &FatalIntegrityError{Op: "sync audit log", Err: err}
+		}
+	}
+
 	if err := audit.WriteSidecar(s.sidecarPath, audit.SidecarState{
 		Sequence:       state.Sequence,
 		PrevHash:       state.PrevHash,
 		KeyFingerprint: s.keyFingerprint,
 		UpdatedAt:      s.now().UTC(),
 	}); err != nil {
+		s.mu.Lock()
 		s.fatal = true
+		s.mu.Unlock()
 		return &FatalIntegrityError{Op: "write audit integrity sidecar", Err: err}
 	}
 	return nil
+}
+
+func (s *IntegrityStore) runFlushLoop() {
+	defer close(s.flushDone)
+	for {
+		select {
+		case <-s.flushTick.C:
+			if err := s.FlushSync(); err != nil {
+				slog.Error("audit flush failed", "error", err)
+			}
+		case <-s.stopFlush:
+			s.flushTick.Stop()
+			return
+		}
+	}
 }
 
 // QueryEvents delegates to the inner store.
@@ -486,9 +546,21 @@ func (s *IntegrityStore) QueryEvents(ctx context.Context, q types.EventQuery) ([
 	return s.inner.QueryEvents(ctx, q)
 }
 
-// Close closes the inner store.
+// Close stops the flush loop, performs a final flush, and closes the inner store.
+// Safe to call multiple times.
 func (s *IntegrityStore) Close() error {
-	return s.inner.Close()
+	var closeErr error
+	s.closeOnce.Do(func() {
+		if s.stopFlush != nil {
+			close(s.stopFlush)
+			<-s.flushDone
+		}
+		if err := s.FlushSync(); err != nil {
+			slog.Error("final audit flush failed", "error", err)
+		}
+		closeErr = s.inner.Close()
+	})
+	return closeErr
 }
 
 // Chain returns the integrity chain for state management.

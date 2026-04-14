@@ -1,12 +1,14 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -125,6 +127,7 @@ func newBootstrappedRawIntegrityStore(t *testing.T, inner EventStore) (*Integrit
 func TestIntegrityStore_AppendEvent_WrapsPayload(t *testing.T) {
 	mock := &mockRawWriter{}
 	store, _, _, initialState := newBootstrappedRawIntegrityStore(t, mock)
+	t.Cleanup(func() { _ = store.Close() })
 
 	ev := types.Event{
 		ID:        "ev-1",
@@ -198,6 +201,7 @@ func TestIntegrityStore_AppendEvent_FallbackWithoutRawWriter(t *testing.T) {
 func TestIntegrityStore_ChainContinuity(t *testing.T) {
 	mock := &mockRawWriter{}
 	store, _, _, prevState := newBootstrappedRawIntegrityStore(t, mock)
+	t.Cleanup(func() { _ = store.Close() })
 
 	for i := 0; i < 3; i++ {
 		if err := store.AppendEvent(context.Background(), types.Event{
@@ -232,6 +236,7 @@ func TestIntegrityStore_ChainContinuity(t *testing.T) {
 
 func TestIntegrityStore_AppendEvent_WriteFailureRollsBackChain(t *testing.T) {
 	store, chain, _, initialState := newBootstrappedRawIntegrityStore(t, &mockFailingRawWriter{})
+	t.Cleanup(func() { _ = store.Close() })
 
 	err := store.AppendEvent(context.Background(), types.Event{ID: "ev-1", Type: "test"})
 	if err == nil {
@@ -265,6 +270,9 @@ func TestIntegrityStore_FatalSidecarFailureRecoversOnRestart(t *testing.T) {
 	if err := store.AppendEvent(context.Background(), types.Event{ID: "1", Type: "ok"}); err != nil {
 		t.Fatalf("AppendEvent(first) error = %v", err)
 	}
+	if err := store.FlushSync(); err != nil {
+		t.Fatalf("FlushSync(first) error = %v", err)
+	}
 
 	sidecarPath := audit.SidecarPath(logPath)
 	beforeFailure, err := audit.ReadSidecar(sidecarPath)
@@ -272,10 +280,14 @@ func TestIntegrityStore_FatalSidecarFailureRecoversOnRestart(t *testing.T) {
 		t.Fatalf("audit.ReadSidecar() before failure error = %v", err)
 	}
 
+	if err := store.AppendEvent(context.Background(), types.Event{ID: "2", Type: "fatal_sidecar"}); err != nil {
+		t.Fatalf("AppendEvent(second) error = %v", err)
+	}
+
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatalf("os.Chmod(%q, 0500) error = %v", dir, err)
 	}
-	fatalErr := store.AppendEvent(context.Background(), types.Event{ID: "2", Type: "fatal_sidecar"})
+	fatalErr := store.FlushSync()
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatalf("os.Chmod(%q, 0700) error = %v", dir, err)
 	}
@@ -286,7 +298,7 @@ func TestIntegrityStore_FatalSidecarFailureRecoversOnRestart(t *testing.T) {
 
 	var fatal *FatalIntegrityError
 	if !errors.As(fatalErr, &fatal) {
-		t.Fatalf("AppendEvent(second) error = %v, want FatalIntegrityError", fatalErr)
+		t.Fatalf("FlushSync(second) error = %v, want FatalIntegrityError", fatalErr)
 	}
 
 	afterFailure, err := audit.ReadSidecar(sidecarPath)
@@ -330,6 +342,7 @@ func TestIntegrityStore_FatalSidecarFailureRecoversOnRestart(t *testing.T) {
 
 func TestIntegrityStore_PartialWriteReturnsFatalErrorAndDoesNotRollBack(t *testing.T) {
 	store, chain, _, initialState := newBootstrappedRawIntegrityStore(t, &mockPartialFailRawWriter{})
+	t.Cleanup(func() { _ = store.Close() })
 
 	err := store.AppendEvent(context.Background(), types.Event{ID: "ev-1", Type: "test"})
 	if err == nil {
@@ -351,6 +364,7 @@ func TestIntegrityStore_PartialWriteReturnsFatalErrorAndDoesNotRollBack(t *testi
 
 func TestIntegrityStore_StickyFatalRejectsSubsequentAppends(t *testing.T) {
 	store, _, _, _ := newBootstrappedRawIntegrityStore(t, &mockPartialFailRawWriter{})
+	t.Cleanup(func() { _ = store.Close() })
 
 	// First append triggers a partial write → FatalIntegrityError.
 	err := store.AppendEvent(context.Background(), types.Event{ID: "ev-1", Type: "test"})
@@ -444,4 +458,440 @@ func computeHMAC(key []byte, formatVersion int, sequence int64, prevHash string,
 	h.Write([]byte("|"))
 	h.Write(payload)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func TestFlushSync_WritesSidecar(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	expectedState := writeResumableIntegrityState(t, logPath)
+	chain := mustNewIntegrityChain(t)
+
+	inner := &mockRawWriter{}
+	store, err := NewIntegrityStore(inner, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ev := types.Event{ID: "ev-flush-1", Timestamp: time.Now().UTC(), Type: "test", SessionID: "s1"}
+	if err := store.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+
+	sidecar, err := audit.ReadSidecar(audit.SidecarPath(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sidecar.Sequence != expectedState.Sequence {
+		t.Fatalf("pre-flush sidecar.Sequence = %d, want %d", sidecar.Sequence, expectedState.Sequence)
+	}
+
+	if err := store.FlushSync(); err != nil {
+		t.Fatal(err)
+	}
+
+	sidecar, err = audit.ReadSidecar(audit.SidecarPath(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sidecar.Sequence != expectedState.Sequence+1 {
+		t.Fatalf("post-flush sidecar.Sequence = %d, want %d", sidecar.Sequence, expectedState.Sequence+1)
+	}
+}
+
+func TestFlushSync_Noop_WhenNoPending(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeResumableIntegrityState(t, logPath)
+	chain := mustNewIntegrityChain(t)
+
+	inner := &mockRawWriter{}
+	store, err := NewIntegrityStore(inner, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	sidecarBefore, err := audit.ReadSidecar(audit.SidecarPath(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.FlushSync(); err != nil {
+		t.Fatal(err)
+	}
+
+	sidecarAfter, err := audit.ReadSidecar(audit.SidecarPath(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sidecarAfter.Sequence != sidecarBefore.Sequence {
+		t.Fatalf("sidecar changed without pending events: %d -> %d", sidecarBefore.Sequence, sidecarAfter.Sequence)
+	}
+}
+
+func TestAppendEvent_NoSidecarWrite(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	initialState := writeResumableIntegrityState(t, logPath)
+	chain := mustNewIntegrityChain(t)
+
+	inner := &mockRawWriter{}
+	store, err := NewIntegrityStore(inner, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Stop the background timer so only AppendEvent's behavior is tested.
+	close(store.stopFlush)
+	<-store.flushDone
+	store.stopFlush = nil // prevent double-close in Close()
+
+	sidecarPath := audit.SidecarPath(logPath)
+
+	ev := types.Event{ID: "ev-no-sidecar", Timestamp: time.Now().UTC(), Type: "test", SessionID: "s1"}
+	if err := store.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+
+	sidecar, _ := audit.ReadSidecar(sidecarPath)
+	if sidecar.Sequence != initialState.Sequence {
+		t.Fatalf("sidecar.Sequence = %d, want %d (AppendEvent should not write sidecar)", sidecar.Sequence, initialState.Sequence)
+	}
+}
+
+type mockSyncerWriter struct {
+	mockRawWriter
+	syncErr error
+}
+
+func (m *mockSyncerWriter) Sync() error {
+	return m.syncErr
+}
+
+func TestFlushSync_SetsFatal_OnSyncError(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeResumableIntegrityState(t, logPath)
+	chain := mustNewIntegrityChain(t)
+
+	inner := &mockSyncerWriter{syncErr: errors.New("disk failure")}
+	store, err := NewIntegrityStore(inner, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ev := types.Event{ID: "ev-fatal", Timestamp: time.Now().UTC(), Type: "test", SessionID: "s1"}
+	if err := store.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+
+	err = store.FlushSync()
+	if err == nil {
+		t.Fatal("FlushSync() should have returned error")
+	}
+	var fatal *FatalIntegrityError
+	if !errors.As(err, &fatal) {
+		t.Fatalf("expected FatalIntegrityError, got %T: %v", err, err)
+	}
+
+	ev2 := types.Event{ID: "ev-after-fatal", Timestamp: time.Now().UTC(), Type: "test", SessionID: "s1"}
+	if err := store.AppendEvent(context.Background(), ev2); !errors.Is(err, ErrIntegrityFatal) {
+		t.Fatalf("AppendEvent after fatal = %v, want ErrIntegrityFatal", err)
+	}
+}
+
+func TestFlushSync_SetsFatal_OnSidecarError(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeResumableIntegrityState(t, logPath)
+	chain := mustNewIntegrityChain(t)
+
+	inner := &mockRawWriter{}
+	store, err := NewIntegrityStore(inner, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	store.sidecarPath = "/proc/nonexistent/sidecar.json"
+
+	ev := types.Event{ID: "ev-sidecar-fail", Timestamp: time.Now().UTC(), Type: "test", SessionID: "s1"}
+	if err := store.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+
+	err = store.FlushSync()
+	if err == nil {
+		t.Fatal("FlushSync() should have returned error for unwritable sidecar")
+	}
+	var fatal *FatalIntegrityError
+	if !errors.As(err, &fatal) {
+		t.Fatalf("expected FatalIntegrityError, got %T: %v", err, err)
+	}
+
+	ev2 := types.Event{ID: "ev-after-sidecar-fatal", Timestamp: time.Now().UTC(), Type: "test", SessionID: "s1"}
+	if err := store.AppendEvent(context.Background(), ev2); !errors.Is(err, ErrIntegrityFatal) {
+		t.Fatalf("AppendEvent after sidecar fatal = %v, want ErrIntegrityFatal", err)
+	}
+}
+
+func TestAppendEvent_Then_FlushSync_ChainContinuity(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	writeResumableIntegrityState(t, logPath)
+
+	chain := mustNewIntegrityChain(t)
+	jstore, err := jsonl.New(logPath, 10*1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jstore.SetSyncOnWrite(false)
+	defer jstore.Close()
+
+	store, err := NewIntegrityStore(jstore, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for batch := 0; batch < 2; batch++ {
+		for i := 0; i < 10; i++ {
+			ev := types.Event{
+				ID:        fmt.Sprintf("ev-%d-%d", batch, i),
+				Timestamp: time.Now().UTC(),
+				Type:      "test",
+				SessionID: "s1",
+			}
+			if err := store.AppendEvent(context.Background(), ev); err != nil {
+				t.Fatalf("batch %d event %d: %v", batch, i, err)
+			}
+		}
+		if err := store.FlushSync(); err != nil {
+			t.Fatalf("FlushSync batch %d: %v", batch, err)
+		}
+	}
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(content), []byte("\n"))
+
+	var prevHash string
+	for i, line := range lines {
+		entry, err := audit.ParseIntegrityEntry(line)
+		if err != nil {
+			t.Fatalf("line %d: parse error: %v", i, err)
+		}
+		if entry.Integrity == nil {
+			t.Fatalf("line %d: no integrity metadata", i)
+		}
+		if entry.Type == "integrity_chain_rotated" {
+			prevHash = entry.Integrity.EntryHash
+			continue
+		}
+		if entry.Integrity.PrevHash != prevHash {
+			t.Fatalf("line %d: chain broken: prev_hash=%q, want %q", i, entry.Integrity.PrevHash, prevHash)
+		}
+		ok, err := chain.VerifyHash(
+			entry.Integrity.FormatVersion, entry.Integrity.Sequence,
+			entry.Integrity.PrevHash, entry.CanonicalPayload, entry.Integrity.EntryHash,
+		)
+		if err != nil {
+			t.Fatalf("line %d: verify error: %v", i, err)
+		}
+		if !ok {
+			t.Fatalf("line %d: HMAC verification failed", i)
+		}
+		prevHash = entry.Integrity.EntryHash
+	}
+}
+
+func TestConcurrent_AppendEvent_And_FlushSync(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	writeResumableIntegrityState(t, logPath)
+
+	chain := mustNewIntegrityChain(t)
+	jstore, err := jsonl.New(logPath, 10*1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jstore.SetSyncOnWrite(false)
+	defer jstore.Close()
+
+	store, err := NewIntegrityStore(jstore, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const numEvents = 100
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < numEvents; i++ {
+			ev := types.Event{
+				ID:        "ev-concurrent-" + strconv.Itoa(i),
+				Timestamp: time.Now().UTC(),
+				Type:      "test",
+				SessionID: "s1",
+			}
+			if err := store.AppendEvent(context.Background(), ev); err != nil {
+				t.Errorf("AppendEvent %d: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	stop := make(chan struct{})
+	var flushWg sync.WaitGroup
+	flushWg.Add(1)
+	go func() {
+		defer flushWg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = store.FlushSync()
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(stop)
+	flushWg.Wait()
+
+	if err := store.FlushSync(); err != nil {
+		t.Fatal(err)
+	}
+
+	verifyChain := mustNewIntegrityChain(t)
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(content), []byte("\n"))
+
+	var prevHash string
+	for i, line := range lines {
+		entry, err := audit.ParseIntegrityEntry(line)
+		if err != nil {
+			t.Fatalf("line %d: parse: %v", i, err)
+		}
+		if entry.Integrity == nil {
+			t.Fatalf("line %d: no integrity", i)
+		}
+		if entry.Type == "integrity_chain_rotated" {
+			prevHash = entry.Integrity.EntryHash
+			continue
+		}
+		if entry.Integrity.PrevHash != prevHash {
+			t.Fatalf("line %d: chain broken", i)
+		}
+		ok, err := verifyChain.VerifyHash(
+			entry.Integrity.FormatVersion, entry.Integrity.Sequence,
+			entry.Integrity.PrevHash, entry.CanonicalPayload, entry.Integrity.EntryHash,
+		)
+		if err != nil || !ok {
+			t.Fatalf("line %d: HMAC verify failed", i)
+		}
+		prevHash = entry.Integrity.EntryHash
+	}
+}
+
+func TestFlushLoop_PeriodicSync(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	writeResumableIntegrityState(t, logPath)
+
+	chain := mustNewIntegrityChain(t)
+	jstore, err := jsonl.New(logPath, 10*1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jstore.Close()
+
+	store, err := NewIntegrityStore(jstore, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ev := types.Event{ID: "ev-timer", Timestamp: time.Now().UTC(), Type: "test", SessionID: "s1"}
+	if err := store.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(250 * time.Millisecond)
+
+	sidecar, err := audit.ReadSidecar(audit.SidecarPath(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chainState := chain.State()
+	if sidecar.Sequence != chainState.Sequence {
+		t.Fatalf("sidecar.Sequence = %d, want %d (timer should have flushed)", sidecar.Sequence, chainState.Sequence)
+	}
+}
+
+func TestClose_FinalFlush(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	initialState := writeResumableIntegrityState(t, logPath)
+
+	chain := mustNewIntegrityChain(t)
+	jstore, err := jsonl.New(logPath, 10*1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewIntegrityStore(jstore, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ev := types.Event{ID: "ev-close", Timestamp: time.Now().UTC(), Type: "test", SessionID: "s1"}
+	if err := store.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	sidecar, err := audit.ReadSidecar(audit.SidecarPath(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sidecar.Sequence != initialState.Sequence+1 {
+		t.Fatalf("sidecar.Sequence = %d, want %d (Close should have flushed)", sidecar.Sequence, initialState.Sequence+1)
+	}
+}
+
+func TestFlushLoop_StopsOnClose(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	writeResumableIntegrityState(t, logPath)
+
+	chain := mustNewIntegrityChain(t)
+	jstore, err := jsonl.New(logPath, 10*1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewIntegrityStore(jstore, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-store.flushDone:
+	default:
+		t.Fatal("flushDone channel not closed after Close()")
+	}
 }
