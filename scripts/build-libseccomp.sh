@@ -16,6 +16,13 @@ set -euo pipefail
 
 VERSION="${LIBSECCOMP_VERSION:-2.6.0}"
 TARGET="${TARGET:-amd64}"
+case "${TARGET}" in
+    amd64|arm64) ;;
+    *)
+        echo "ERROR: unknown TARGET=${TARGET} (expected amd64 or arm64)" >&2
+        exit 1
+        ;;
+esac
 PREFIX="/opt/libseccomp/${TARGET}"
 SRC_URL="https://github.com/seccomp/libseccomp/releases/download/v${VERSION}/libseccomp-${VERSION}.tar.gz"
 SIG_URL="${SRC_URL}.asc"
