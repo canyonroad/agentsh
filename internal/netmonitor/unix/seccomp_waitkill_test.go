@@ -3,6 +3,10 @@
 package unix
 
 import (
+	"bytes"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 
 	seccomp "github.com/seccomp/libseccomp-golang"
@@ -45,27 +49,92 @@ func TestInstallFilterWithConfig_WaitKillEnabled(t *testing.T) {
 	}
 }
 
-// TestInstallFilterWithConfig_WaitKillLoadsCleanly verifies that a
-// filter built via InstallFilterWithConfig actually loads with the
-// WaitKill flag on kernels >=6.0 (no retry-without-WaitKill fallback
-// triggered). This is an end-to-end smoke that the production path
-// engages Layer 1.
+// TestInstallFilterWithConfig_WaitKillLoadsCleanly verifies end-to-end
+// that InstallFilterWithConfig loads a user-notify filter with
+// WaitKill intact on a kernel ≥6.0 — i.e., the
+// retry-without-WaitKill fallback in loadWithRetryOnWaitKillFailure
+// did NOT trigger. Together with
+// TestInstallFilterWithConfig_WaitKillEnabled (in-memory
+// SetWaitKill/GetWaitKill round-trip) and the unit tests in
+// seccomp_retry_test.go (retry logic with an injected loadFn), this
+// closes the regression surface for Layer 1 of the SIGURG fix:
+//   - headers regression           → caught by #error guard +
+//                                    TestInstallFilterWithConfig_WaitKillEnabled
+//   - retry-logic regression       → caught by seccomp_retry_test.go
+//   - silent-runtime-fallback      → caught here (a Load() that quietly
+//                                    takes the retry path on a kernel
+//                                    that should accept WaitKill)
+//
+// Because Load() permanently installs a seccomp filter in the
+// calling process and Go's test runner shares process state across
+// tests, we re-exec the test binary to run InstallFilterWithConfig
+// in a throwaway subprocess, capture its stderr, and assert that
+// neither WaitKill-fallback slog.Warn line was emitted.
 func TestInstallFilterWithConfig_WaitKillLoadsCleanly(t *testing.T) {
+	if os.Getenv(waitKillHelperEnv) == "1" {
+		// We've been re-exec'd as the helper by the parent invocation
+		// below. Install the filter and exit — the parent inspects
+		// our stderr for WaitKill-fallback slog.Warn lines. Keep the
+		// notify surface minimal (ExecveEnabled only) so no trapped
+		// syscall is hit during normal test-runner exit.
+		cfg := FilterConfig{ExecveEnabled: true}
+		if _, err := InstallFilterWithConfig(cfg); err != nil {
+			t.Fatalf("InstallFilterWithConfig: %v", err)
+		}
+		return
+	}
+
 	if !ProbeWaitKillable() {
 		t.Skip("kernel <6.0: WAIT_KILLABLE_RECV not supported")
 	}
 
-	// InstallFilterWithConfig loads a filter into THIS process. Run it
-	// in a subtest with a fresh subprocess to avoid polluting the test
-	// process's filter state. The Go test runner shares process state
-	// across tests, so once a seccomp filter is installed it cannot be
-	// removed.
-	//
-	// Keep this test minimal — the fact that InstallFilterWithConfig
-	// returns a non-nil Filter on a >=6.0 kernel is sufficient: if the
-	// initial load had failed with WaitKill set, the retry path (tested
-	// separately in seccomp_retry_test.go) would have cleared WaitKill
-	// and produced a Filter we can't distinguish from a no-WaitKill
-	// filter. For a definitive end-to-end check, use the Docker matrix.
-	t.Skip("skipped to avoid polluting test process filter state; see docker-test matrix for end-to-end verification")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	// -test.run pins the child to this same test; the
+	// waitKillHelperEnv guard at the top of the function routes the
+	// child to the install path instead of re-spawning.
+	cmd := exec.Command(exe, "-test.run=^TestInstallFilterWithConfig_WaitKillLoadsCleanly$")
+	cmd.Env = append(os.Environ(), waitKillHelperEnv+"=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	out := stderr.String()
+
+	// Distinguish environmental failures (no permission to install a
+	// seccomp filter, no libseccomp support in this binary) from a
+	// real Layer 1 regression. "seccomp not supported" is the literal
+	// error from DetectSupport on a non-cgo/non-Linux build; the
+	// EPERM/no_new_privs cases surface as "permission denied" /
+	// "operation not permitted" from libseccomp.
+	if runErr != nil {
+		lower := strings.ToLower(out)
+		if strings.Contains(lower, "permission denied") ||
+			strings.Contains(lower, "operation not permitted") ||
+			strings.Contains(lower, "seccomp not supported") ||
+			strings.Contains(lower, "lacks user notify") {
+			t.Skipf("host cannot install seccomp filter in this environment; skipping end-to-end check.\nhelper stderr:\n%s", out)
+		}
+		t.Fatalf("WaitKill helper subprocess failed: %v\nstderr:\n%s", runErr, out)
+	}
+
+	// The two fallback paths in seccomp_linux.go each emit a
+	// slog.Warn containing "WaitKillable" plus a distinguishing
+	// clause. Match on the specific clause so an unrelated future
+	// log line containing "WaitKillable" doesn't silently flip this
+	// test green.
+	if strings.Contains(out, "WaitKillable rejected at filter load time") {
+		t.Fatalf("Layer 1 fell back at Load() time on a kernel ≥6.0 — SIGURG fix degraded.\nstderr:\n%s", out)
+	}
+	if strings.Contains(out, "WaitKillable unexpectedly unavailable") {
+		t.Fatalf("SetWaitKill failed despite ProbeWaitKillable=true.\nstderr:\n%s", out)
+	}
 }
+
+// waitKillHelperEnv gates the re-exec body of
+// TestInstallFilterWithConfig_WaitKillLoadsCleanly. Setting it
+// outside of that test's parent→child dispatch is unsupported and
+// would install a seccomp filter into whatever process reads this
+// env var.
+const waitKillHelperEnv = "AGENTSH_TEST_WAITKILL_HELPER"
