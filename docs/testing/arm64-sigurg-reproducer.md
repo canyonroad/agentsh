@@ -41,38 +41,65 @@ same image.
      --i-understand-this-modifies-the-host
    ```
 
-3. Start a server with seccomp execve enabled:
+3. Start a server with seccomp execve enabled, capturing stderr to a
+   file so we can inspect it for warnings:
 
    ```bash
-   sudo agentsh server --config /etc/agentsh/config.yaml &
+   sudo agentsh server --config /etc/agentsh/config.yaml \
+     >/tmp/agentsh-server.log 2>&1 &
    ```
 
-4. Create a session and run a Go workload that stresses preemption:
+   (The server is backgrounded from an interactive shell here, not
+   managed by systemd, so `journalctl` will not see it — the captured
+   log file is the source of truth.)
+
+4. Create a session and run a Go workload that stresses preemption.
+   The packaged `agentsh` binary is itself a Go program with async
+   preemption enabled, so invoking it inside the sandbox exercises the
+   same SIGURG + seccomp-notify interaction as the PR #225 repro. No
+   Go toolchain or source checkout is needed:
 
    ```bash
    sid=$(agentsh session create --workspace /tmp --json | jq -r .id)
-   agentsh exec "$sid" -- go run -gcflags=all=-N ./cmd/agentsh --help
+   agentsh exec "$sid" -- agentsh --help >/dev/null
    ```
 
    Expected: completes in well under 10 seconds with exit code 0.
 
-5. Repeat step 4 in a tight loop for 100 iterations:
+5. Repeat the same stressed invocation in a tight loop for 100
+   iterations — this is the release gate, so the loop must run the
+   Go-binary workload from step 4, not a C builtin like `/bin/true`:
 
    ```bash
    for i in $(seq 1 100); do
-     agentsh exec "$sid" -- /bin/true >/dev/null || { echo "FAIL iter $i"; exit 1; }
+     agentsh exec "$sid" -- agentsh --help >/dev/null \
+       || { echo "FAIL iter $i"; exit 1; }
    done
    echo "PASS: 100 iterations"
    ```
 
-   Expected: 100 PASS. A hang or high failure rate indicates Layer 1 is
-   not engaged and Layer 2 alone is insufficient — investigate which
-   layer is broken (check `journalctl` for the
-   `WaitKillable unexpectedly unavailable` warning).
+   Expected: 100 PASS. A hang or high failure rate indicates Layer 1
+   is not engaged and Layer 2 alone is insufficient.
+
+6. Confirm Layer 1 actually engaged. The fallback path logs a WARN
+   line; its absence is the success signal. Check the captured server
+   log:
+
+   ```bash
+   if grep -q "WaitKillable unexpectedly unavailable" /tmp/agentsh-server.log; then
+     echo "FAIL: Layer 1 fell back to SIGURG signal mask (Layer 2) only" >&2
+     grep "WaitKillable" /tmp/agentsh-server.log >&2
+     exit 1
+   fi
+   echo "PASS: no Layer 1 fallback warnings"
+   ```
+
+   Expected: `PASS: no Layer 1 fallback warnings`. If step 5 PASSed but
+   this step FAILs, Layer 2 was silently masking a Layer 1 regression.
 
 ## Recording results
 
 Paste the output of `uname -a`, `dpkg -l libseccomp2 | tail -1` (on the
-host — note we do not depend on this but it's useful context), and the
-PASS line from step 5 into the release PR description under a
-`### arm64 SIGURG reproducer` heading.
+host — note we do not depend on this but it's useful context), the
+PASS line from step 5, and the PASS line from step 6 into the release
+PR description under a `### arm64 SIGURG reproducer` heading.
