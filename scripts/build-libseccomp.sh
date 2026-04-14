@@ -38,16 +38,17 @@ GPG_FPR="7100AADFAE6E6E940D2E0AD655E45A5AE8CA7C8A"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY_FILE="${SCRIPT_DIR}/libseccomp-signing-key.asc"
 
-# Cache-hit fast path: if the requested version is already installed
-# at PREFIX and the install is static-only (no libseccomp.so* present),
-# exit 0 immediately — with NO side effects, so direct callers don't
-# need any build prerequisite installed for the idempotent "second run
-# no-ops" contract to hold. A stale shared object in the prefix makes
-# us fall through to the full build path, which wipes and rebuilds.
-if [ -f "${PREFIX}/lib/libseccomp.a" ] \
-   && [ -f "${PREFIX}/lib/pkgconfig/libseccomp.pc" ] \
-   && [ -f "${PREFIX}/include/seccomp.h" ] \
-   && grep -qx "Version: ${VERSION}" "${PREFIX}/lib/pkgconfig/libseccomp.pc"; then
+# check_installed: returns 0 when PREFIX already holds a clean
+# static-only install of the requested VERSION, non-zero otherwise.
+# Callable more than once — we run it twice: before acquiring the
+# per-arch flock (cheap early exit) and again after acquiring it
+# (the flock winner may have populated the prefix while we waited).
+check_installed() {
+    [ -f "${PREFIX}/lib/libseccomp.a" ] \
+        && [ -f "${PREFIX}/lib/pkgconfig/libseccomp.pc" ] \
+        && [ -f "${PREFIX}/include/seccomp.h" ] \
+        && grep -qx "Version: ${VERSION}" "${PREFIX}/lib/pkgconfig/libseccomp.pc" \
+        || return 1
     # Portable stale-.so probe — bash glob expansion, no `find` so we
     # don't depend on GNU `find -maxdepth` (BSD find on macOS rejects
     # it). When no file matches, bash leaves the glob literal, so both
@@ -55,18 +56,29 @@ if [ -f "${PREFIX}/lib/libseccomp.a" ] \
     # symlinks (misses dangling ones), so we also test `-L` to catch
     # symlinks — live or dangling — as stale artifacts. Any real file
     # or any symlink falls through to rebuild.
-    CACHED_SO=("${PREFIX}"/lib/libseccomp.so*)
-    if [ ! -e "${CACHED_SO[0]}" ] && [ ! -L "${CACHED_SO[0]}" ]; then
-        echo "Already installed at ${PREFIX} (version ${VERSION}); skipping."
-        exit 0
+    local cached_so=("${PREFIX}"/lib/libseccomp.so*)
+    if [ ! -e "${cached_so[0]}" ] && [ ! -L "${cached_so[0]}" ]; then
+        return 0
     fi
+    return 1
+}
+
+# Cache-hit fast path: if the requested version is already installed
+# at PREFIX and the install is static-only (no libseccomp.so* present),
+# exit 0 immediately — with NO side effects, so direct callers don't
+# need any build prerequisite installed for the idempotent "second run
+# no-ops" contract to hold. A stale shared object in the prefix makes
+# us fall through to the full build path, which wipes and rebuilds.
+if check_installed; then
+    echo "Already installed at ${PREFIX} (version ${VERSION}); skipping."
+    exit 0
 fi
 
 # Host-OS gate: this script builds a Linux static library via
 # ./configure + make, so it cannot run on darwin/windows. The
 # default is fail-closed (exit 1) so direct callers — CI jobs,
 # operators invoking the script manually — see a clear error when
-# the host is wrong. GoReleaser's before.hooks set
+# the host is wrong. GoReleaser's per-build hooks.pre set
 # SKIP_IF_UNSUPPORTED=1 so filtered runs (e.g. darwin-only snapshot
 # from a macOS dev machine) succeed without us, since the sysroot is
 # irrelevant to the selected targets. Reached only when the cache-hit
@@ -82,8 +94,8 @@ fi
 
 # Cross-compiler gate (arm64 only): fail-closed when
 # aarch64-linux-gnu-gcc is absent, so direct callers see the real
-# problem. GoReleaser's before.hooks set SKIP_IF_UNSUPPORTED=1 so
-# amd64-only dev hosts don't break filtered runs that never touch
+# problem. GoReleaser's per-build hooks.pre set SKIP_IF_UNSUPPORTED=1
+# so amd64-only dev hosts don't break filtered runs that never touch
 # linux/arm64. Reached only when the cache-hit fast path above did not
 # apply, so a rebuild is actually needed.
 if [ "${TARGET}" = "arm64" ] && ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
@@ -93,6 +105,37 @@ if [ "${TARGET}" = "arm64" ] && ! command -v aarch64-linux-gnu-gcc >/dev/null 2>
     fi
     echo "ERROR: TARGET=arm64 requires aarch64-linux-gnu-gcc in PATH. Install gcc-aarch64-linux-gnu or set SKIP_IF_UNSUPPORTED=1 to no-op." >&2
     exit 1
+fi
+
+# Per-arch concurrency lock. GoReleaser runs per-build hooks in
+# parallel with the build itself, and multiple Linux CGO builds share
+# the same sysroot dependency (agentsh-linux-<arch> and
+# unixwrap-linux-<arch>). Without a lock two instances could both
+# race past the cache-hit fast path above, both `sudo rm -rf` the
+# prefix, and both `sudo make install` into the same directory —
+# nondeterministic failure. flock serializes the work per arch; the
+# loser blocks until the winner finishes, then re-checks the cache
+# below and exits 0 without repeating it.
+#
+# Placed after the host and cross-compiler gates so macOS invocations
+# (which don't ship flock in util-linux by default) never reach it —
+# they've already exited via SKIP_IF_UNSUPPORTED. flock is standard
+# on every Linux distro we target (util-linux on glibc distros,
+# busybox applet on Alpine).
+#
+# Lock file is per-UID to avoid permission collisions if a different
+# user runs the script on the same host — `exec 9>FILE` truncates,
+# which needs write access. Same-user concurrency (goreleaser
+# parallel builds) is what we actually need to serialize.
+LOCK_FILE="/tmp/agentsh-build-libseccomp-${TARGET}-$(id -u).lock"
+exec 9>"${LOCK_FILE}"
+flock -x 9
+
+# Second cache-hit check, after the flock. If we lost the race, the
+# winner installed while we waited — skip the rebuild.
+if check_installed; then
+    echo "Already installed at ${PREFIX} (version ${VERSION}) after lock wait; skipping."
+    exit 0
 fi
 
 WORKDIR="$(mktemp -d)"
