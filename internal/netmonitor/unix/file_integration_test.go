@@ -3,6 +3,7 @@
 package unix
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,24 +37,27 @@ func TestFileHandler_FullPipeline(t *testing.T) {
 			SessionID: "sess-1",
 		}
 
-		result := handler.Handle(req)
+		result, ev := handler.Handle(req)
+		if ev != nil {
+			_ = emit.AppendEvent(context.Background(), *ev)
+		}
 
 		assert.Equal(t, ActionContinue, result.Action)
 		assert.Equal(t, int32(0), result.Errno)
 
 		require.Len(t, emit.events, 1)
-		ev := emit.events[0]
-		assert.Equal(t, "seccomp", ev.Source, "Source must always be seccomp")
-		assert.Equal(t, "file_open", ev.Type)
-		assert.Equal(t, "/workspace/src/main.go", ev.Path)
-		assert.Equal(t, "sess-1", ev.SessionID)
-		assert.Equal(t, 100, ev.PID)
-		assert.Equal(t, "allowed", ev.EffectiveAction)
+		ev0 := emit.events[0]
+		assert.Equal(t, "seccomp", ev0.Source, "Source must always be seccomp")
+		assert.Equal(t, "file_open", ev0.Type)
+		assert.Equal(t, "/workspace/src/main.go", ev0.Path)
+		assert.Equal(t, "sess-1", ev0.SessionID)
+		assert.Equal(t, 100, ev0.PID)
+		assert.Equal(t, "allowed", ev0.EffectiveAction)
 
-		require.NotNil(t, ev.Policy)
-		assert.Equal(t, "allow", string(ev.Policy.Decision))
-		assert.Equal(t, "allow", string(ev.Policy.EffectiveDecision))
-		assert.Equal(t, "workspace-allow", ev.Policy.Rule)
+		require.NotNil(t, ev0.Policy)
+		assert.Equal(t, "allow", string(ev0.Policy.Decision))
+		assert.Equal(t, "allow", string(ev0.Policy.EffectiveDecision))
+		assert.Equal(t, "workspace-allow", ev0.Policy.Rule)
 	})
 
 	// ── Test 2: Denied open ───────────────────────────────────────────
@@ -68,21 +72,24 @@ func TestFileHandler_FullPipeline(t *testing.T) {
 			SessionID: "sess-1",
 		}
 
-		result := handler.Handle(req)
+		result, ev := handler.Handle(req)
+		if ev != nil {
+			_ = emit.AppendEvent(context.Background(), *ev)
+		}
 
 		assert.Equal(t, ActionDeny, result.Action)
 		assert.Equal(t, int32(unix.EACCES), result.Errno)
 
 		require.Len(t, emit.events, 1)
-		ev := emit.events[0]
-		assert.Equal(t, "seccomp", ev.Source)
-		assert.Equal(t, "file_open", ev.Type)
-		assert.Equal(t, "blocked", ev.EffectiveAction)
+		ev0 := emit.events[0]
+		assert.Equal(t, "seccomp", ev0.Source)
+		assert.Equal(t, "file_open", ev0.Type)
+		assert.Equal(t, "blocked", ev0.EffectiveAction)
 
-		require.NotNil(t, ev.Policy)
-		assert.Equal(t, "deny", string(ev.Policy.Decision))
-		assert.Equal(t, "deny", string(ev.Policy.EffectiveDecision))
-		assert.Equal(t, "system-deny", ev.Policy.Rule)
+		require.NotNil(t, ev0.Policy)
+		assert.Equal(t, "deny", string(ev0.Policy.Decision))
+		assert.Equal(t, "deny", string(ev0.Policy.EffectiveDecision))
+		assert.Equal(t, "system-deny", ev0.Policy.Rule)
 	})
 
 	// ── Test 3: FUSE overlap — audit-only ─────────────────────────────
@@ -103,16 +110,19 @@ func TestFileHandler_FullPipeline(t *testing.T) {
 			SessionID: "sess-1",
 		}
 
-		result := handler.Handle(req)
+		result, ev := handler.Handle(req)
+		if ev != nil {
+			_ = emit.AppendEvent(context.Background(), *ev)
+		}
 
 		assert.Equal(t, ActionContinue, result.Action,
 			"FUSE overlap must always allow — FUSE handles enforcement")
 		assert.Equal(t, int32(0), result.Errno)
 
 		require.Len(t, emit.events, 1)
-		ev := emit.events[0]
-		assert.Equal(t, "seccomp", ev.Source)
-		assert.Equal(t, "file_open", ev.Type)
+		ev0 := emit.events[0]
+		assert.Equal(t, "seccomp", ev0.Source)
+		assert.Equal(t, "file_open", ev0.Type)
 	})
 
 	// ── Test 4: Non-FUSE path still enforces after FUSE registration ──
@@ -132,16 +142,19 @@ func TestFileHandler_FullPipeline(t *testing.T) {
 			SessionID: "sess-1",
 		}
 
-		result := handler.Handle(req)
+		result, ev := handler.Handle(req)
+		if ev != nil {
+			_ = emit.AppendEvent(context.Background(), *ev)
+		}
 
 		assert.Equal(t, ActionDeny, result.Action,
 			"/etc/shadow is not under FUSE mount — must enforce deny")
 		assert.Equal(t, int32(unix.EACCES), result.Errno)
 
 		require.Len(t, emit.events, 1)
-		ev := emit.events[0]
-		assert.Equal(t, "seccomp", ev.Source)
-		assert.Equal(t, "blocked", ev.EffectiveAction)
+		ev0 := emit.events[0]
+		assert.Equal(t, "seccomp", ev0.Source)
+		assert.Equal(t, "blocked", ev0.EffectiveAction)
 	})
 
 	// ── Test 5: FUSE overlap with would-deny path — shadow deny ───────
@@ -161,19 +174,22 @@ func TestFileHandler_FullPipeline(t *testing.T) {
 			SessionID: "sess-1",
 		}
 
-		result := handler.Handle(req)
+		result, ev := handler.Handle(req)
+		if ev != nil {
+			_ = emit.AppendEvent(context.Background(), *ev)
+		}
 
 		assert.Equal(t, ActionContinue, result.Action,
 			"under FUSE mount — must allow even when policy says deny")
 		assert.Equal(t, int32(0), result.Errno)
 
 		require.Len(t, emit.events, 1)
-		ev := emit.events[0]
-		assert.Equal(t, "seccomp", ev.Source)
+		ev0 := emit.events[0]
+		assert.Equal(t, "seccomp", ev0.Source)
 
 		// shadow_deny should be set because policy would deny but FUSE overrides.
-		require.NotNil(t, ev.Fields)
-		shadowDeny, ok := ev.Fields["shadow_deny"]
+		require.NotNil(t, ev0.Fields)
+		shadowDeny, ok := ev0.Fields["shadow_deny"]
 		require.True(t, ok, "expected shadow_deny field")
 		assert.Equal(t, true, shadowDeny)
 	})
@@ -205,7 +221,10 @@ func TestEmulatedOpen_AllowRoutesToAddFD(t *testing.T) {
 		SessionID: "sess-emu",
 	}
 
-	result := handler.Handle(req)
+	result, ev := handler.Handle(req)
+	if ev != nil {
+		_ = emit.AppendEvent(context.Background(), *ev)
+	}
 
 	assert.Equal(t, ActionContinue, result.Action,
 		"allowed open must produce ActionContinue (triggers AddFD in emulated path)")
@@ -213,17 +232,17 @@ func TestEmulatedOpen_AllowRoutesToAddFD(t *testing.T) {
 
 	// Verify the event was emitted with correct metadata.
 	require.Len(t, emit.events, 1)
-	ev := emit.events[0]
-	assert.Equal(t, "seccomp", ev.Source)
-	assert.Equal(t, "file_open", ev.Type)
-	assert.Equal(t, "allowed", ev.EffectiveAction)
-	assert.Equal(t, "/workspace/data.txt", ev.Path)
-	assert.Equal(t, 300, ev.PID)
-	assert.Equal(t, "sess-emu", ev.SessionID)
+	ev0 := emit.events[0]
+	assert.Equal(t, "seccomp", ev0.Source)
+	assert.Equal(t, "file_open", ev0.Type)
+	assert.Equal(t, "allowed", ev0.EffectiveAction)
+	assert.Equal(t, "/workspace/data.txt", ev0.Path)
+	assert.Equal(t, 300, ev0.PID)
+	assert.Equal(t, "sess-emu", ev0.SessionID)
 
-	require.NotNil(t, ev.Policy)
-	assert.Equal(t, "allow", string(ev.Policy.Decision))
-	assert.Equal(t, "workspace-rw", ev.Policy.Rule)
+	require.NotNil(t, ev0.Policy)
+	assert.Equal(t, "allow", string(ev0.Policy.Decision))
+	assert.Equal(t, "workspace-rw", ev0.Policy.Rule)
 
 	// Verify that isOpenSyscall agrees this is an emulatable open.
 	assert.True(t, isOpenSyscall(unix.SYS_OPENAT), "SYS_OPENAT must be an open syscall")
@@ -253,7 +272,10 @@ func TestEmulatedOpen_DenyReturnsEACCES(t *testing.T) {
 		SessionID: "sess-emu",
 	}
 
-	result := handler.Handle(req)
+	result, ev := handler.Handle(req)
+	if ev != nil {
+		_ = emit.AppendEvent(context.Background(), *ev)
+	}
 
 	assert.Equal(t, ActionDeny, result.Action,
 		"denied open must produce ActionDeny even with emulateOpen")
@@ -261,14 +283,14 @@ func TestEmulatedOpen_DenyReturnsEACCES(t *testing.T) {
 		"denied open must return EACCES")
 
 	require.Len(t, emit.events, 1)
-	ev := emit.events[0]
-	assert.Equal(t, "seccomp", ev.Source)
-	assert.Equal(t, "blocked", ev.EffectiveAction)
-	assert.Equal(t, "/etc/shadow", ev.Path)
+	ev0 := emit.events[0]
+	assert.Equal(t, "seccomp", ev0.Source)
+	assert.Equal(t, "blocked", ev0.EffectiveAction)
+	assert.Equal(t, "/etc/shadow", ev0.Path)
 
-	require.NotNil(t, ev.Policy)
-	assert.Equal(t, "deny", string(ev.Policy.EffectiveDecision))
-	assert.Equal(t, "system-deny", ev.Policy.Rule)
+	require.NotNil(t, ev0.Policy)
+	assert.Equal(t, "deny", string(ev0.Policy.EffectiveDecision))
+	assert.Equal(t, "system-deny", ev0.Policy.Rule)
 }
 
 // TestEmulatedOpen_FallbackToContinue verifies that open syscalls with
@@ -383,7 +405,10 @@ func TestEmulatedOpen_WriteOperation(t *testing.T) {
 		SessionID: "sess-emu",
 	}
 
-	result := handler.Handle(req)
+	result, ev := handler.Handle(req)
+	if ev != nil {
+		_ = emit.AppendEvent(context.Background(), *ev)
+	}
 	assert.Equal(t, ActionContinue, result.Action)
 
 	require.Len(t, emit.events, 1)
@@ -462,7 +487,10 @@ func TestEmulatedOpen_CreateOperation(t *testing.T) {
 		SessionID: "sess-emu",
 	}
 
-	result := handler.Handle(req)
+	result, ev := handler.Handle(req)
+	if ev != nil {
+		_ = emit.AppendEvent(context.Background(), *ev)
+	}
 	assert.Equal(t, ActionContinue, result.Action)
 
 	require.Len(t, emit.events, 1)
@@ -563,7 +591,7 @@ func TestEmulatedOpen_FullDecisionMatrix(t *testing.T) {
 				SessionID: "sess-matrix",
 			}
 
-			result := handler.Handle(req)
+			result, _ := handler.Handle(req)
 			assert.Equal(t, tt.wantAction, result.Action, "action mismatch")
 			assert.Equal(t, tt.wantErrno, result.Errno, "errno mismatch")
 		})
@@ -712,21 +740,24 @@ func TestFileHandler_OperationMapping(t *testing.T) {
 				SessionID: "sess-op",
 			}
 
-			result := handler.Handle(req)
+			result, ev := handler.Handle(req)
+			if ev != nil {
+				_ = emit.AppendEvent(context.Background(), *ev)
+			}
 			assert.Equal(t, ActionContinue, result.Action)
 
 			require.Len(t, emit.events, 1)
-			ev := emit.events[0]
-			assert.Equal(t, tt.wantType, ev.Type,
+			ev0 := emit.events[0]
+			assert.Equal(t, tt.wantType, ev0.Type,
 				"event Type must be file_<operation>")
-			assert.Equal(t, "seccomp", ev.Source,
+			assert.Equal(t, "seccomp", ev0.Source,
 				"Source must always be seccomp")
-			assert.Equal(t, gotOp, ev.Operation,
+			assert.Equal(t, gotOp, ev0.Operation,
 				"event Operation must match mapped operation")
 
 			// Verify syscall name is in Fields
-			require.NotNil(t, ev.Fields)
-			assert.Equal(t, tt.wantSysc, ev.Fields["syscall"],
+			require.NotNil(t, ev0.Fields)
+			assert.Equal(t, tt.wantSysc, ev0.Fields["syscall"],
 				"Fields[syscall] must be the syscall name")
 		})
 	}

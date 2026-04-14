@@ -64,7 +64,10 @@ func TestFileHandler_AllowWithoutFUSE(t *testing.T) {
 		SessionID: "sess-1",
 	}
 
-	result := handler.Handle(req)
+	result, ev := handler.Handle(req)
+	if ev != nil {
+		_ = emitter.AppendEvent(context.Background(), *ev)
+	}
 
 	if result.Action != ActionContinue {
 		t.Errorf("expected ActionContinue, got %s", result.Action)
@@ -75,24 +78,24 @@ func TestFileHandler_AllowWithoutFUSE(t *testing.T) {
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(emitter.events))
 	}
-	ev := emitter.events[0]
-	if ev.Source != "seccomp" {
-		t.Errorf("expected Source 'seccomp', got %q", ev.Source)
+	ev0 := emitter.events[0]
+	if ev0.Source != "seccomp" {
+		t.Errorf("expected Source 'seccomp', got %q", ev0.Source)
 	}
-	if ev.Type != "file_open" {
-		t.Errorf("expected Type 'file_open', got %q", ev.Type)
+	if ev0.Type != "file_open" {
+		t.Errorf("expected Type 'file_open', got %q", ev0.Type)
 	}
-	if ev.Path != "/home/user/file.txt" {
-		t.Errorf("expected Path '/home/user/file.txt', got %q", ev.Path)
+	if ev0.Path != "/home/user/file.txt" {
+		t.Errorf("expected Path '/home/user/file.txt', got %q", ev0.Path)
 	}
-	if ev.SessionID != "sess-1" {
-		t.Errorf("expected SessionID 'sess-1', got %q", ev.SessionID)
+	if ev0.SessionID != "sess-1" {
+		t.Errorf("expected SessionID 'sess-1', got %q", ev0.SessionID)
 	}
-	if ev.Policy == nil {
+	if ev0.Policy == nil {
 		t.Fatal("expected non-nil Policy")
 	}
-	if ev.Policy.Decision != "allow" {
-		t.Errorf("expected policy decision 'allow', got %q", ev.Policy.Decision)
+	if ev0.Policy.Decision != "allow" {
+		t.Errorf("expected policy decision 'allow', got %q", ev0.Policy.Decision)
 	}
 }
 
@@ -119,7 +122,10 @@ func TestFileHandler_DenyWithoutFUSE(t *testing.T) {
 		SessionID: "sess-1",
 	}
 
-	result := handler.Handle(req)
+	result, ev := handler.Handle(req)
+	if ev != nil {
+		_ = emitter.AppendEvent(context.Background(), *ev)
+	}
 
 	if result.Action != ActionDeny {
 		t.Errorf("expected ActionDeny, got %s", result.Action)
@@ -130,9 +136,9 @@ func TestFileHandler_DenyWithoutFUSE(t *testing.T) {
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(emitter.events))
 	}
-	ev := emitter.events[0]
-	if ev.EffectiveAction != "blocked" {
-		t.Errorf("expected EffectiveAction 'blocked', got %q", ev.EffectiveAction)
+	ev0 := emitter.events[0]
+	if ev0.EffectiveAction != "blocked" {
+		t.Errorf("expected EffectiveAction 'blocked', got %q", ev0.EffectiveAction)
 	}
 }
 
@@ -160,7 +166,10 @@ func TestFileHandler_AuditOnlyUnderFUSE(t *testing.T) {
 		SessionID: "sess-1",
 	}
 
-	result := handler.Handle(req)
+	result, ev := handler.Handle(req)
+	if ev != nil {
+		_ = emitter.AppendEvent(context.Background(), *ev)
+	}
 
 	// Under FUSE: always continue, let FUSE handle enforcement
 	if result.Action != ActionContinue {
@@ -172,12 +181,12 @@ func TestFileHandler_AuditOnlyUnderFUSE(t *testing.T) {
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(emitter.events))
 	}
-	ev := emitter.events[0]
+	ev0 := emitter.events[0]
 	// Should have shadow_deny=true in Fields
-	if ev.Fields == nil {
+	if ev0.Fields == nil {
 		t.Fatal("expected non-nil Fields")
 	}
-	shadowDeny, ok := ev.Fields["shadow_deny"]
+	shadowDeny, ok := ev0.Fields["shadow_deny"]
 	if !ok {
 		t.Fatal("expected shadow_deny in Fields")
 	}
@@ -209,7 +218,10 @@ func TestFileHandler_EnforceDisabled(t *testing.T) {
 		SessionID: "sess-1",
 	}
 
-	result := handler.Handle(req)
+	result, ev := handler.Handle(req)
+	if ev != nil {
+		_ = emitter.AppendEvent(context.Background(), *ev)
+	}
 
 	// Audit-only: allow even though policy says deny
 	if result.Action != ActionContinue {
@@ -221,10 +233,10 @@ func TestFileHandler_EnforceDisabled(t *testing.T) {
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(emitter.events))
 	}
-	ev := emitter.events[0]
+	ev0 := emitter.events[0]
 	// Event should still reflect the deny decision
-	if ev.Policy == nil || ev.Policy.Decision != "deny" {
-		t.Errorf("expected policy decision 'deny' in audit-only event, got %v", ev.Policy)
+	if ev0.Policy == nil || ev0.Policy.Decision != "deny" {
+		t.Errorf("expected policy decision 'deny' in audit-only event, got %v", ev0.Policy)
 	}
 }
 
@@ -256,7 +268,10 @@ func TestFileHandler_Rename(t *testing.T) {
 		SessionID: "sess-1",
 	}
 
-	result := handler.Handle(req)
+	result, ev := handler.Handle(req)
+	if ev != nil {
+		_ = emitter.AppendEvent(context.Background(), *ev)
+	}
 
 	if result.Action != ActionContinue {
 		t.Errorf("expected ActionContinue, got %s", result.Action)
@@ -264,16 +279,16 @@ func TestFileHandler_Rename(t *testing.T) {
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(emitter.events))
 	}
-	ev := emitter.events[0]
-	if ev.Type != "file_rename" {
-		t.Errorf("expected Type 'file_rename', got %q", ev.Type)
+	ev0 := emitter.events[0]
+	if ev0.Type != "file_rename" {
+		t.Errorf("expected Type 'file_rename', got %q", ev0.Type)
 	}
 	// Check path2 is in Fields
-	if ev.Fields == nil {
+	if ev0.Fields == nil {
 		t.Fatal("expected non-nil Fields for rename")
 	}
-	if p2, ok := ev.Fields["path2"]; !ok || p2 != "/home/user/new.txt" {
-		t.Errorf("expected Fields[path2]='/home/user/new.txt', got %v", ev.Fields["path2"])
+	if p2, ok := ev0.Fields["path2"]; !ok || p2 != "/home/user/new.txt" {
+		t.Errorf("expected Fields[path2]='/home/user/new.txt', got %v", ev0.Fields["path2"])
 	}
 }
 
@@ -306,7 +321,7 @@ func TestFileHandler_RenameDenyOnSecondPath(t *testing.T) {
 		SessionID: "sess-1",
 	}
 
-	result := handler.Handle(req)
+	result, _ := handler.Handle(req)
 
 	if result.Action != ActionDeny {
 		t.Errorf("expected ActionDeny (second path denied), got %s", result.Action)
@@ -329,7 +344,10 @@ func TestFileHandler_NilPolicy(t *testing.T) {
 		SessionID: "sess-1",
 	}
 
-	result := handler.Handle(req)
+	result, ev := handler.Handle(req)
+	if ev != nil {
+		_ = emitter.AppendEvent(context.Background(), *ev)
+	}
 
 	if result.Action != ActionContinue {
 		t.Errorf("expected ActionContinue (nil policy), got %s", result.Action)
@@ -337,12 +355,12 @@ func TestFileHandler_NilPolicy(t *testing.T) {
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(emitter.events))
 	}
-	ev := emitter.events[0]
-	if ev.Policy == nil {
+	ev0 := emitter.events[0]
+	if ev0.Policy == nil {
 		t.Fatal("expected non-nil Policy in event")
 	}
-	if ev.Policy.Rule != "no_policy" {
-		t.Errorf("expected rule 'no_policy', got %q", ev.Policy.Rule)
+	if ev0.Policy.Rule != "no_policy" {
+		t.Errorf("expected rule 'no_policy', got %q", ev0.Policy.Rule)
 	}
 }
 
@@ -369,7 +387,7 @@ func TestFileHandler_NilEmitter(t *testing.T) {
 	}
 
 	// Should not panic
-	result := handler.Handle(req)
+	result, _ := handler.Handle(req)
 	assert.Equal(t, ActionContinue, result.Action)
 }
 
@@ -395,7 +413,7 @@ func TestFileHandler_NilEmitterDeny(t *testing.T) {
 		SessionID: "sess-1",
 	}
 
-	result := handler.Handle(req)
+	result, _ := handler.Handle(req)
 	assert.Equal(t, ActionDeny, result.Action)
 	assert.Equal(t, int32(unix.EACCES), result.Errno)
 }
@@ -422,7 +440,7 @@ func TestFileHandler_NilRegistry(t *testing.T) {
 		SessionID: "sess-1",
 	}
 
-	result := handler.Handle(req)
+	result, _ := handler.Handle(req)
 	// Should deny (not treated as FUSE path)
 	assert.Equal(t, ActionDeny, result.Action)
 	assert.Equal(t, int32(unix.EACCES), result.Errno)
@@ -440,7 +458,7 @@ func TestFileHandler_NilPolicyAndEmitter(t *testing.T) {
 	}
 
 	// Should not panic, should allow
-	result := handler.Handle(req)
+	result, _ := handler.Handle(req)
 	assert.Equal(t, ActionContinue, result.Action)
 }
 
@@ -476,7 +494,7 @@ func TestFileHandler_ProcSelfFD_ResolvesToTarget(t *testing.T) {
 		SessionID: "sess-1",
 	}
 
-	result := handler.Handle(req)
+	result, _ := handler.Handle(req)
 	// Resolved to temp file path (not in deny list) → allowed
 	assert.Equal(t, ActionContinue, result.Action)
 }
@@ -518,7 +536,7 @@ func TestFileHandler_PseudoPath_AllowedUnconditionally(t *testing.T) {
 			Operation: "stat",
 			SessionID: "sess-1",
 		}
-		result := handler.Handle(req)
+		result, _ := handler.Handle(req)
 		assert.Equal(t, ActionContinue, result.Action, "pseudo-path %q should be allowed", pp)
 	}
 }
@@ -550,7 +568,7 @@ func TestFileHandler_ReadOnlyOpen_SkipsEmulation(t *testing.T) {
 		Flags:     uint32(unix.O_RDONLY | unix.O_CLOEXEC),
 		SessionID: "sess-test",
 	}
-	result := handler.Handle(req)
+	result, _ := handler.Handle(req)
 	assert.Equal(t, ActionContinue, result.Action,
 		"read-only open must get ActionContinue even with emulation enabled")
 }

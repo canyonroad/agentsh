@@ -481,7 +481,7 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		SessionID: sessID,
 	}
 
-	result := h.Handle(frequest)
+	result, ev := h.Handle(frequest)
 
 	if result.Action == ActionDeny {
 		if err := NotifRespondDeny(int(fd), req.ID, result.Errno); err != nil {
@@ -491,6 +491,14 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
 		if err := NotifRespondContinue(int(fd), req.ID); err != nil {
 			slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
 		}
+	}
+
+	// Emit the audit event after the notify response to avoid blocking the
+	// traced process on audit I/O. Uses context.Background() because the
+	// event should be emitted even if the request context was cancelled.
+	if ev != nil && h.emitter != nil {
+		_ = h.emitter.AppendEvent(context.Background(), *ev)
+		h.emitter.Publish(*ev)
 	}
 }
 
@@ -631,7 +639,16 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
 		}
 	}
 
-	result := h.Handle(frequest)
+	result, ev := h.Handle(frequest)
+
+	// Defer event emission so it runs after the notify response, avoiding
+	// blocking the traced process on audit I/O.
+	defer func() {
+		if ev != nil && h.emitter != nil {
+			_ = h.emitter.AppendEvent(context.Background(), *ev)
+			h.emitter.Publish(*ev)
+		}
+	}()
 
 	// Branch: is this an open syscall that we should emulate via AddFD?
 	if !forceContinue {
