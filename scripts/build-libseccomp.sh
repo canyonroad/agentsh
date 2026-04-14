@@ -57,10 +57,39 @@ check_installed() {
     # symlinks — live or dangling — as stale artifacts. Any real file
     # or any symlink falls through to rebuild.
     local cached_so=("${PREFIX}"/lib/libseccomp.so*)
-    if [ ! -e "${cached_so[0]}" ] && [ ! -L "${cached_so[0]}" ]; then
-        return 0
+    if [ -e "${cached_so[0]}" ] || [ -L "${cached_so[0]}" ]; then
+        return 1
     fi
-    return 1
+    # Arch-match probe. The compiler-target gates below stop a
+    # wrong-arch build before it happens, but a cache written by the
+    # pre-gate behavior (e.g. an arm64 host that once ran
+    # TARGET=amd64 and deposited an arm64 libseccomp.a in the amd64
+    # prefix) must be invalidated, not accepted. objdump reports a
+    # `file format elf64-*` line per archive member; compare the
+    # first to the format we expect for TARGET.
+    #
+    # Fail-open when objdump is missing — the gates + Go CGO link
+    # step catch arch mismatch downstream, and binutils isn't
+    # strictly a build prereq (the native compiler is). Better to
+    # cache-hit with an extra rebuild trigger elsewhere than to
+    # block builds on a host that happens to lack objdump.
+    if command -v objdump >/dev/null 2>&1; then
+        local expected_fmt cache_fmt
+        case "$TARGET" in
+            amd64) expected_fmt="elf64-x86-64" ;;
+            arm64) expected_fmt="elf64-littleaarch64" ;;
+            *)     expected_fmt="" ;;
+        esac
+        if [ -n "$expected_fmt" ]; then
+            cache_fmt="$(objdump -f "${PREFIX}/lib/libseccomp.a" 2>/dev/null \
+                | awk '/file format/ {print $NF; exit}')"
+            if [ -n "$cache_fmt" ] && [ "$cache_fmt" != "$expected_fmt" ]; then
+                echo "WARN: ${PREFIX}/lib/libseccomp.a has file format '${cache_fmt}', expected '${expected_fmt}' for TARGET=${TARGET} — invalidating cache (likely written by a pre-gate run on the wrong host)." >&2
+                return 1
+            fi
+        fi
+    fi
+    return 0
 }
 
 # Cache-hit fast path: if the requested version is already installed
@@ -98,35 +127,64 @@ fi
 # so amd64-only dev hosts don't break filtered runs that never touch
 # linux/arm64. Reached only when the cache-hit fast path above did not
 # apply, so a rebuild is actually needed.
-if [ "${TARGET}" = "arm64" ] && ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
-    if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
-        echo "build-libseccomp: aarch64-linux-gnu-gcc not found; SKIP_IF_UNSUPPORTED=1, skipping arm64 sysroot." >&2
-        exit 0
+if [ "${TARGET}" = "arm64" ]; then
+    if ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+        if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
+            echo "build-libseccomp: aarch64-linux-gnu-gcc not found; SKIP_IF_UNSUPPORTED=1, skipping arm64 sysroot." >&2
+            exit 0
+        fi
+        echo "ERROR: TARGET=arm64 requires aarch64-linux-gnu-gcc in PATH. Install gcc-aarch64-linux-gnu or set SKIP_IF_UNSUPPORTED=1 to no-op." >&2
+        exit 1
     fi
-    echo "ERROR: TARGET=arm64 requires aarch64-linux-gnu-gcc in PATH. Install gcc-aarch64-linux-gnu or set SKIP_IF_UNSUPPORTED=1 to no-op." >&2
-    exit 1
+    # Defense-in-depth: verify aarch64-linux-gnu-gcc actually targets
+    # aarch64. A mis-symlinked toolchain (rare but possible in cross-
+    # compile setups) could leave a wrong-target binary at this name,
+    # and without this probe we'd silently produce the wrong arch.
+    arm64_triplet="$(aarch64-linux-gnu-gcc -dumpmachine 2>/dev/null || true)"
+    case "$arm64_triplet" in
+        aarch64-*) : ;;
+        *)
+            echo "ERROR: aarch64-linux-gnu-gcc -dumpmachine returned '${arm64_triplet:-<empty>}', not aarch64-*. Your toolchain is mis-configured; remove and reinstall gcc-aarch64-linux-gnu." >&2
+            exit 1
+            ;;
+    esac
 fi
 
-# Host-arch gate (amd64): the amd64 case below runs `./configure`
-# with no --host/CC, so it native-builds for whatever arch the host
-# CPU is. On an arm64 host that silently produces an arm64
-# libseccomp.a labeled as amd64, which the linker would happily pick
-# up and then fail in a confusing way ("file in wrong format") — or
-# worse, produce a broken binary if a multi-arch toolchain is
-# involved. Fail-closed when the host isn't x86_64, symmetric with
-# the arm64 cross-compiler gate above. GoReleaser's per-build
-# hooks.pre set SKIP_IF_UNSUPPORTED=1 so an arm64-only dev host
-# doesn't break filtered runs that never touch linux/amd64. `uname
-# -m` is the portable host-arch probe (x86_64 on Linux, amd64 not
-# used). Reached only when the cache-hit fast path above did not
-# apply, so a rebuild is actually needed.
-if [ "${TARGET}" = "amd64" ] && [ "$(uname -m)" != "x86_64" ]; then
-    if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
-        echo "build-libseccomp: host is $(uname -m); SKIP_IF_UNSUPPORTED=1, skipping amd64 sysroot." >&2
-        exit 0
+# Compiler-target gate (amd64): the amd64 case below runs `./configure`
+# with no --host/CC, so it native-builds with whatever ${CC:-cc}
+# resolves to. On a non-x86_64 host — or on an x86_64 host with a
+# non-default CC (e.g. inherited from a cross-compile env) — that
+# silently produces the wrong arch. Probing -dumpmachine on the
+# effective compiler is the authoritative check (kernel-only probes
+# like `uname -m` miss the CC-override case). Symmetric with the
+# arm64 cross-compiler gate above.
+#
+# GoReleaser's per-build hooks.pre set SKIP_IF_UNSUPPORTED=1 so an
+# arm64-only dev host doesn't break filtered runs that never touch
+# linux/amd64. Reached only when the cache-hit fast path above did
+# not apply, so a rebuild is actually needed.
+if [ "${TARGET}" = "amd64" ]; then
+    amd64_cc="${CC:-cc}"
+    if ! command -v "$amd64_cc" >/dev/null 2>&1; then
+        if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
+            echo "build-libseccomp: compiler ${amd64_cc} not found; SKIP_IF_UNSUPPORTED=1, skipping amd64 sysroot." >&2
+            exit 0
+        fi
+        echo "ERROR: TARGET=amd64 requires ${amd64_cc} in PATH. Install a native C compiler or set SKIP_IF_UNSUPPORTED=1 to no-op." >&2
+        exit 1
     fi
-    echo "ERROR: TARGET=amd64 requires an x86_64 host (got $(uname -m)). The amd64 path uses a native ./configure (no cross-compiler), so a non-x86_64 host would silently build for the wrong arch. Set SKIP_IF_UNSUPPORTED=1 to no-op, or run on an x86_64 host." >&2
-    exit 1
+    amd64_triplet="$("$amd64_cc" -dumpmachine 2>/dev/null || true)"
+    case "$amd64_triplet" in
+        x86_64-*) : ;;
+        *)
+            if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
+                echo "build-libseccomp: ${amd64_cc} -dumpmachine = '${amd64_triplet:-<empty>}'; SKIP_IF_UNSUPPORTED=1, skipping amd64 sysroot." >&2
+                exit 0
+            fi
+            echo "ERROR: TARGET=amd64: ${amd64_cc} -dumpmachine returned '${amd64_triplet:-<empty>}', not x86_64-*. The amd64 path uses a native ./configure and would produce the wrong arch. Unset CC, install a native x86_64 compiler, or set SKIP_IF_UNSUPPORTED=1." >&2
+            exit 1
+            ;;
+    esac
 fi
 
 # Per-arch concurrency lock. GoReleaser runs per-build hooks in
