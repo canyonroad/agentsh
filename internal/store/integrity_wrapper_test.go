@@ -1037,3 +1037,90 @@ func TestStartup_TruncatedLastLine(t *testing.T) {
 		t.Fatalf("sidecar.Sequence = %d, want 5 (should recover up to last valid)", sidecar.Sequence)
 	}
 }
+
+// benchmarkIntegritySetup creates a bootstrapped IntegrityStore with deferred sync
+// suitable for both tests and benchmarks.
+func benchmarkIntegritySetup(tb testing.TB) (*IntegrityStore, func()) {
+	tb.Helper()
+	dir := tb.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+
+	chain, err := audit.NewIntegrityChain(testKey)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	f, err := os.Create(logPath)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	rotEv := types.Event{ID: "init", Timestamp: time.Now().UTC(), Type: "integrity_chain_rotated", SessionID: "bench"}
+	payload, _ := json.Marshal(rotEv)
+	wrapped, _ := chain.Wrap(payload)
+	f.Write(append(wrapped, '\n'))
+	f.Close()
+
+	state := chain.State()
+	if err := audit.WriteSidecar(audit.SidecarPath(logPath), audit.SidecarState{
+		Sequence:       state.Sequence,
+		PrevHash:       state.PrevHash,
+		KeyFingerprint: chain.KeyFingerprint(),
+		UpdatedAt:      time.Now().UTC(),
+	}); err != nil {
+		tb.Fatal(err)
+	}
+
+	chain2, err := audit.NewIntegrityChain(testKey)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	jstore, err := jsonl.New(logPath, 100, 3)
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	store, err := NewIntegrityStore(jstore, chain2, IntegrityOptions{
+		LogPath: logPath, Now: time.Now,
+	})
+	if err != nil {
+		jstore.Close()
+		tb.Fatal(err)
+	}
+
+	cleanup := func() {
+		store.Close()
+	}
+	return store, cleanup
+}
+
+func BenchmarkAppendEvent_DeferredSync(b *testing.B) {
+	store, cleanup := benchmarkIntegritySetup(b)
+	defer cleanup()
+
+	ev := types.Event{
+		ID: "bench-ev", Timestamp: time.Now().UTC(), Type: "execve",
+		SessionID: "bench", Filename: "/usr/bin/ls",
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ev.ID = "bench-" + strconv.Itoa(i)
+		_ = store.AppendEvent(context.Background(), ev)
+	}
+}
+
+func BenchmarkFlushSync(b *testing.B) {
+	store, cleanup := benchmarkIntegritySetup(b)
+	defer cleanup()
+
+	ev := types.Event{
+		ID: "bench-ev", Timestamp: time.Now().UTC(), Type: "execve",
+		SessionID: "bench",
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ev.ID = "bench-" + strconv.Itoa(i)
+		_ = store.AppendEvent(context.Background(), ev)
+		_ = store.FlushSync()
+	}
+}
