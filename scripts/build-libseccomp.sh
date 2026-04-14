@@ -123,11 +123,18 @@ fi
 # on every Linux distro we target (util-linux on glibc distros,
 # busybox applet on Alpine).
 #
-# Lock file is per-UID to avoid permission collisions if a different
-# user runs the script on the same host — `exec 9>FILE` truncates,
-# which needs write access. Same-user concurrency (goreleaser
-# parallel builds) is what we actually need to serialize.
-LOCK_FILE="/tmp/agentsh-build-libseccomp-${TARGET}-$(id -u).lock"
+# Lock file is cross-user shared — the protected resource is
+# /opt/libseccomp/${TARGET}, which is a single system-wide path, so
+# the lock must be too. `exec 9>FILE` truncates the file (requires
+# write access), so we create it mode 0666 on first use via install(1)
+# so any user on the host can subsequently acquire the lock. If the
+# file already exists with tighter perms (upgrade from an older version
+# of this script), operator remediation is `rm -f` of the lock file —
+# locks in /tmp are transient state, not data.
+LOCK_FILE="/tmp/agentsh-build-libseccomp-${TARGET}.lock"
+if [ ! -e "${LOCK_FILE}" ]; then
+    install -m 0666 /dev/null "${LOCK_FILE}" 2>/dev/null || true
+fi
 exec 9>"${LOCK_FILE}"
 flock -x 9
 
