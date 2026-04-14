@@ -42,34 +42,21 @@ jobs:
 
       - name: Install build deps (envshim, fuse, seccomp)
         run: |
-          # Restrict default Ubuntu mirrors to amd64 so apt doesn't try to
-          # fetch arm64 package indexes from archive/security.ubuntu.com
-          # (which only host amd64/i386). Arm64 lives on ports.ubuntu.com.
-          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-            sudo sed -i 's|^Components:|Architectures: amd64\nComponents:|' \
-              /etc/apt/sources.list.d/ubuntu.sources
-          fi
-          if [ -f /etc/apt/sources.list ]; then
-            sudo sed -i 's|^deb http|deb [arch=amd64] http|' /etc/apt/sources.list || true
-          fi
-
-          # Add arm64 ports source so libseccomp-dev:arm64 can be fetched.
-          CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-          sudo tee /etc/apt/sources.list.d/arm64-ports.list > /dev/null <<EOF
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $CODENAME main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $CODENAME-updates main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $CODENAME-security main restricted universe multiverse
-          EOF
-
-          sudo dpkg --add-architecture arm64
           sudo apt-get update
           sudo apt-get install -y \
-            libseccomp-dev \
-            libseccomp-dev:arm64 \
             libfuse-dev \
             pkg-config \
             gcc-aarch64-linux-gnu \
-            make
+            make \
+            gpg \
+            gperf
+
+      - name: Build static libseccomp 2.6 (amd64 + arm64)
+        run: |
+          TARGET=amd64 ./scripts/build-libseccomp.sh
+          TARGET=arm64 ./scripts/build-libseccomp.sh
+          echo "=== libseccomp artifacts ==="
+          ls -la /opt/libseccomp/amd64/lib/libseccomp.a /opt/libseccomp/arm64/lib/libseccomp.a
 
       - name: Test
         run: |
@@ -77,6 +64,7 @@ jobs:
           go test -p=1 ./...
         env:
           GOTMPDIR: ${{ runner.temp }}/go-tmp
+          PKG_CONFIG_LIBDIR: /opt/libseccomp/amd64/lib/pkgconfig
 
       - name: Smoke
         run: make smoke
