@@ -86,12 +86,20 @@ else
   fail "/bin/bash.real exists" "file not found"
 fi
 
-if [ -f /bin/sh ] && [ /bin/sh -ef /usr/bin/agentsh-shell-shim ]; then
-  pass "/bin/sh points to the shim"
-elif [ -f /bin/sh ]; then
-  pass "/bin/sh exists (shim installed)"
+# Strict: /bin/sh and /bin/bash must both be the shim. An earlier
+# version of this check accepted any file at /bin/sh, which let a
+# broken `agentsh shim install-shell` pass silently. The -ef primary
+# requires same device+inode as /usr/bin/agentsh-shell-shim.
+if [ -e /bin/sh ] && [ /bin/sh -ef /usr/bin/agentsh-shell-shim ]; then
+  pass "/bin/sh is the shim"
 else
-  fail "/bin/sh is the shim" "/bin/sh not found"
+  fail "/bin/sh is the shim" "/bin/sh does not resolve to /usr/bin/agentsh-shell-shim"
+fi
+
+if [ -e /bin/bash ] && [ /bin/bash -ef /usr/bin/agentsh-shell-shim ]; then
+  pass "/bin/bash is the shim"
+else
+  fail "/bin/bash is the shim" "/bin/bash does not resolve to /usr/bin/agentsh-shell-shim"
 fi
 
 # -------------------------------------------------------------------
@@ -246,6 +254,59 @@ else
   echo ""
   echo "=== Results: ${passed} passed, ${failed} failed, ${tests_run} total ==="
   exit 1
+fi
+
+# -------------------------------------------------------------------
+# Full-mode engagement: when /dev/fuse is accessible, seccomp and FUSE
+# must both be active. This catches silent degraded fallback where the
+# server starts but user-notify seccomp or FUSE init regressed on the
+# older 22.04 userspace. Without /dev/fuse (manual debug mode), skip
+# this assertion — the image intentionally supports the degraded path.
+# -------------------------------------------------------------------
+if [ -c /dev/fuse ]; then
+  echo ""
+  echo "=== Full-mode engagement ==="
+
+  # The "security capabilities detected" line is always logged once at
+  # startup. Extract mode/seccomp/fuse values.
+  cap_line="$(grep -m1 'security capabilities detected' "$tmp/server.log" || true)"
+  if [ -z "$cap_line" ]; then
+    fail "server logged capabilities" "no 'security capabilities detected' line in server.log"
+    echo "--- server log ---" >&2
+    head -100 "$tmp/server.log" >&2 || true
+    echo "--- end server log ---" >&2
+  else
+    pass "server logged capabilities"
+
+    # Fields are key=value (go slog text handler). Match mode=full,
+    # seccomp=true, fuse=true exactly; reject anything else.
+    if echo "$cap_line" | grep -qE '(^| )mode=full( |$)'; then
+      pass "mode=full"
+    else
+      fail "mode=full" "capabilities line: $cap_line"
+    fi
+
+    if echo "$cap_line" | grep -qE '(^| )seccomp=true( |$)'; then
+      pass "seccomp=true"
+    else
+      fail "seccomp=true" "capabilities line: $cap_line"
+    fi
+
+    if echo "$cap_line" | grep -qE '(^| )fuse=true( |$)'; then
+      pass "fuse=true"
+    else
+      fail "fuse=true" "capabilities line: $cap_line"
+    fi
+
+    # An explicit "running in degraded security mode" WARN is the
+    # smoking gun for silent fallback. It should not appear.
+    if grep -q 'running in degraded security mode' "$tmp/server.log"; then
+      fail "no degraded-mode warning" "found in server.log"
+      grep 'running in degraded security mode' "$tmp/server.log" >&2 || true
+    else
+      pass "no degraded-mode warning"
+    fi
+  fi
 fi
 
 # -------------------------------------------------------------------
