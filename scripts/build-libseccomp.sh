@@ -51,18 +51,31 @@ KEY_FILE="${SCRIPT_DIR}/libseccomp-signing-key.asc"
 #   - amd64 compile-probe (below): validates that the full $CC command
 #     actually emits x86_64 objects, catching driver flags like -m32
 #     that -dumpmachine misses.
+#
+# readelf -h reports Machine *and* Class separately — ELF32 vs ELF64
+# is not encoded in Machine, so an x32 compile (CC='gcc -mx32')
+# produces an ELF32 object with Machine="Advanced Micro Devices X86-64"
+# that must not be confused with elf64-x86-64. Parse both fields and
+# assemble the BFD format string accordingly. objdump -f already emits
+# the combined "elf32-x86-64" / "elf64-x86-64" string directly.
 detect_object_fmt() {
     local path="$1" fmt=""
     if command -v objdump >/dev/null 2>&1; then
         fmt="$(objdump -f "$path" 2>/dev/null | awk '/file format/ {print $NF; exit}')"
     fi
     if [ -z "$fmt" ] && command -v readelf >/dev/null 2>&1; then
-        local machine
-        machine="$(readelf -h "$path" 2>/dev/null \
-            | awk -F: '/Machine:/ {sub(/^ +/, "", $2); print $2; exit}')"
-        case "$machine" in
-            "Advanced Micro Devices X86-64") fmt="elf64-x86-64" ;;
-            "AArch64")                        fmt="elf64-littleaarch64" ;;
+        local header class machine
+        header="$(readelf -h "$path" 2>/dev/null || true)"
+        class="$(printf '%s\n' "$header" \
+            | awk -F: '/^ *Class:/ {sub(/^ +/, "", $2); print $2; exit}')"
+        machine="$(printf '%s\n' "$header" \
+            | awk -F: '/^ *Machine:/ {sub(/^ +/, "", $2); print $2; exit}')"
+        case "$class|$machine" in
+            "ELF64|Advanced Micro Devices X86-64") fmt="elf64-x86-64" ;;
+            "ELF32|Advanced Micro Devices X86-64") fmt="elf32-x86-64" ;;
+            "ELF64|AArch64")                        fmt="elf64-littleaarch64" ;;
+            "ELF32|AArch64")                        fmt="elf32-littleaarch64" ;;
+            "ELF32|Intel 80386")                    fmt="elf32-i386" ;;
         esac
     fi
     [ -n "$fmt" ] || return 1
