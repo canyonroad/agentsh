@@ -311,14 +311,24 @@ else
 fi
 
 # -------------------------------------------------------------------
-# agentsh-unixwrap: no dynamic libseccomp dep
+# CGO Linux binaries: no dynamic libseccomp dep
 #
-# Verifies that the release build kept libseccomp statically linked.
-# If ldd lists libseccomp.so* as a runtime dep on this Ubuntu 22.04
-# image, the installed binary picked up the distro's 2.5.3 at load
-# time and silently lost SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (Layer
-# 1 of the SIGURG fix) regardless of which header version was used at
-# compile time.
+# Verifies that the release build kept libseccomp statically linked
+# for every shipped CGO Linux binary. On this Ubuntu 22.04 image the
+# distro's system libseccomp is 2.5.3, which lacks
+# SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (Layer 1 of the SIGURG fix),
+# so any binary that picks up libseccomp.so* as a dynamic dep at load
+# time silently loses Layer 1 — independent of which header version
+# was used at compile time.
+#
+# Both /usr/bin/agentsh (server/CLI) and /usr/bin/agentsh-unixwrap
+# (the seccomp wrapper) link libseccomp via cgo through
+# libseccomp-golang. A regression in either's build stanza
+# (PKG_CONFIG_LIBDIR, -static flags, goreleaser env block) would
+# silently flip that binary from static to dynamic libseccomp and the
+# agentsh server could still appear to run fine against 2.5.3 while
+# losing the guarantee. Check both binaries; checking only unixwrap
+# leaves the agentsh stanza unguarded.
 #
 # What this does NOT verify:
 # - That the statically linked libseccomp is version >= 2.6. That
@@ -332,17 +342,35 @@ fi
 #   with AGENTSH_TAG <= v0.10.1), only the link-type property is
 #   checked here; version is the operator's responsibility.
 # -------------------------------------------------------------------
-if [ -x /usr/bin/agentsh-unixwrap ]; then
-  echo ""
-  echo "=== agentsh-unixwrap: no dynamic libseccomp dep ==="
+echo ""
+echo "=== CGO Linux binaries: no dynamic libseccomp dep ==="
 
-  ldd_out="$(ldd /usr/bin/agentsh-unixwrap 2>&1 || true)"
+check_libseccomp_link() {
+  local bin="$1"
+  if [ ! -x "$bin" ]; then
+    fail "$bin: present for ldd check" "$bin not found or not executable"
+    return
+  fi
+  local ldd_out
+  ldd_out="$(ldd "$bin" 2>&1 || true)"
   if echo "$ldd_out" | grep -q libseccomp; then
-    fail "unixwrap: libseccomp is not a dynamic dep" "ldd lists libseccomp — static link regressed"
+    fail "$bin: libseccomp is not a dynamic dep" "ldd lists libseccomp — static link regressed"
     echo "$ldd_out" | grep libseccomp >&2 || true
   else
-    pass "unixwrap: libseccomp is not a dynamic dep"
+    pass "$bin: libseccomp is not a dynamic dep"
   fi
+}
+
+# agentsh is shipped on every Linux arch we release, so check it
+# unconditionally — absence is a packaging regression.
+check_libseccomp_link /usr/bin/agentsh
+
+# unixwrap shipping depends on arch + tag (amd64 always, arm64 from
+# v0.18.0). Reuse $expect_unixwrap which was computed above from
+# /etc/agentsh-test-expect-unixwrap so we honour the same gate as the
+# "agentsh-unixwrap exists" check.
+if [ "$expect_unixwrap" = "yes" ]; then
+  check_libseccomp_link /usr/bin/agentsh-unixwrap
 fi
 
 # -------------------------------------------------------------------
