@@ -148,6 +148,8 @@ Expected: both files exist.
 
 If the script fails because `gcc-aarch64-linux-gnu` is not installed on your local machine, note: you only need to test amd64 locally. arm64 cross-build runs in CI where the cross-toolchain is installed.
 
+**Host prerequisites:** Also `gperf` must be installed on the build host (libseccomp 2.6 uses it at `./configure` time for hash-table generation). On Arch: `sudo pacman -S gperf`. On Debian/Ubuntu: `sudo apt-get install -y gperf`. Task 9 adds `gperf` to the CI apt-install list.
+
 - [ ] **Step 4: Commit**
 
 ```bash
@@ -808,10 +810,11 @@ Edit `.github/workflows/release.yml`. Current step (around line 43–72) install
             pkg-config \
             gcc-aarch64-linux-gnu \
             make \
-            gpg
+            gpg \
+            gperf
 ```
 
-(Dropped `libseccomp-dev` and `libseccomp-dev:arm64`; added `gpg` for tarball signature verification.)
+(Dropped `libseccomp-dev` and `libseccomp-dev:arm64`; added `gpg` for tarball signature verification and `gperf` which libseccomp 2.6 requires at configure time.)
 
 - [ ] **Step 2: Add a new step "Build static libseccomp 2.6 (amd64 + arm64)" right after the build-deps step**
 
