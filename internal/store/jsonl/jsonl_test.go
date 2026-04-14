@@ -1,12 +1,17 @@
 package jsonl
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/agentsh/agentsh/pkg/types"
 )
@@ -129,5 +134,136 @@ func TestJSONLStore_RotationKeepsAuditLockHeld(t *testing.T) {
 	}
 	if !errors.Is(err, ErrLocked) {
 		t.Fatalf("AcquireLock() error = %v, want ErrLocked", err)
+	}
+}
+
+func TestSync_FlushesToDisk(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(filepath.Join(dir, "audit.jsonl"), 10*1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	data := []byte(`{"type":"test","id":"1"}`)
+	if err := s.WriteRaw(context.Background(), data); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Sync(); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(content, data) {
+		t.Fatalf("file does not contain written data")
+	}
+}
+
+func TestSync_NilFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(filepath.Join(dir, "audit.jsonl"), 10*1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	if err := s.Sync(); err != nil {
+		t.Fatalf("Sync() on closed store should return nil, got %v", err)
+	}
+}
+
+func TestWriteRaw_NoSyncWhenDisabled(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(filepath.Join(dir, "audit.jsonl"), 10*1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.SetSyncOnWrite(false)
+
+	data := []byte(`{"type":"test","id":"nosync"}`)
+	if err := s.WriteRaw(context.Background(), data); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(content, data) {
+		t.Fatalf("file does not contain written data")
+	}
+}
+
+func TestWriteRaw_And_Sync_Concurrent(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(filepath.Join(dir, "audit.jsonl"), 10*1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.SetSyncOnWrite(false)
+
+	const numWriters = 4
+	const eventsPerWriter = 50
+
+	var wg sync.WaitGroup
+
+	for w := 0; w < numWriters; w++ {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+			for i := 0; i < eventsPerWriter; i++ {
+				data := []byte(fmt.Sprintf(`{"writer":%d,"seq":%d}`, writerID, i))
+				if err := s.WriteRaw(context.Background(), data); err != nil {
+					t.Errorf("WriteRaw error: %v", err)
+				}
+			}
+		}(w)
+	}
+
+	stopSync := make(chan struct{})
+	var syncerWg sync.WaitGroup
+	syncerWg.Add(1)
+	go func() {
+		defer syncerWg.Done()
+		for {
+			select {
+			case <-stopSync:
+				return
+			default:
+				_ = s.Sync()
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(stopSync)
+	syncerWg.Wait()
+
+	if err := s.Sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(content), []byte("\n"))
+	if len(lines) != numWriters*eventsPerWriter {
+		t.Fatalf("got %d lines, want %d", len(lines), numWriters*eventsPerWriter)
+	}
+	for i, line := range lines {
+		var obj map[string]any
+		if err := json.Unmarshal(line, &obj); err != nil {
+			t.Fatalf("line %d: invalid JSON: %v", i, err)
+		}
 	}
 }
