@@ -230,12 +230,18 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	// Enable SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (kernel 6.0+).
 	// When active, non-fatal signals (including Go's ~10ms SIGURG preemption)
 	// cannot interrupt seccomp_do_user_notification, preventing ERESTARTSYS loops.
-	// Probes kernel version first as an optimization; the Load() fallback below
-	// handles custom kernels that report 6.x but lack the flag.
+	// The compile-time #error in seccomp_version_check.go guarantees the
+	// libseccomp headers are >=2.6 and SetWaitKill is not a silent no-op.
+	// If ProbeWaitKillable reports the kernel supports it but SetWaitKill
+	// still fails, something is unexpected — warn loudly so operators can
+	// investigate. Load() retry at the end of this function handles the
+	// case where SetWaitKill succeeds but the kernel rejects the flag at
+	// load time (custom/vendor kernels).
 	waitKillSet := false
 	if ProbeWaitKillable() {
 		if err := filt.SetWaitKill(true); err != nil {
-			slog.Debug("seccomp: SetWaitKill failed", "error", err)
+			slog.Warn("seccomp: WaitKillable unexpectedly unavailable despite kernel 6.0+; falling back to SIGURG signal mask only",
+				"error", err)
 		} else {
 			waitKillSet = true
 		}
