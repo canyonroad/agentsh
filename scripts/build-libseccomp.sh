@@ -41,6 +41,7 @@ echo "=== libseccomp ${VERSION} static build for ${TARGET} → ${PREFIX} ==="
 # previous run.
 if [ -f "${PREFIX}/lib/libseccomp.a" ] \
    && [ -f "${PREFIX}/lib/pkgconfig/libseccomp.pc" ] \
+   && [ -f "${PREFIX}/include/seccomp.h" ] \
    && grep -qx "Version: ${VERSION}" "${PREFIX}/lib/pkgconfig/libseccomp.pc"; then
     echo "Already installed at ${PREFIX} (version ${VERSION}); skipping."
     exit 0
@@ -53,6 +54,11 @@ curl -fsSL "$SRC_URL" -o "libseccomp-${VERSION}.tar.gz"
 curl -fsSL "$SIG_URL" -o "libseccomp-${VERSION}.tar.gz.asc"
 
 # Verify signature — fail the build rather than risk a supply-chain compromise.
+# We use --status-fd to parse gpg's machine-readable output and assert the
+# tarball was signed by exactly the pinned fingerprint. A membership check on
+# the keyring is not enough: gpg --verify would accept a signature from ANY
+# key in the keyring, so if the bundled key file were ever extended with a
+# second key the guarantee would silently degrade.
 export GNUPGHOME="${WORKDIR}/gnupg"
 mkdir -p "$GNUPGHOME"
 chmod 700 "$GNUPGHOME"
@@ -61,7 +67,15 @@ gpg --batch --import "$KEY_FILE"
 # Re-assert the pinned fingerprint is present in our temp keyring before trusting any signature.
 gpg --batch --list-keys --with-colons "$GPG_FPR" >/dev/null \
     || { echo "ERROR: bundled key does not contain pinned fingerprint ${GPG_FPR}" >&2; exit 1; }
-gpg --batch --verify "libseccomp-${VERSION}.tar.gz.asc" "libseccomp-${VERSION}.tar.gz"
+# Capture gpg's status output (machine-readable) and assert VALIDSIG reports
+# the pinned primary-key fingerprint. Status line layout:
+#   [GNUPG:] VALIDSIG <signing-key-fpr> <date> ... <primary-key-fpr>
+# The primary-key fingerprint (last field) is what we pin — the signing key
+# is a subkey that may rotate without the primary changing.
+GPG_STATUS="${WORKDIR}/gpg-status"
+gpg --batch --status-fd 3 --verify "libseccomp-${VERSION}.tar.gz.asc" "libseccomp-${VERSION}.tar.gz" 3>"$GPG_STATUS"
+grep -qE "^\[GNUPG:\] VALIDSIG [0-9A-F]{40} .* ${GPG_FPR}\$" "$GPG_STATUS" \
+    || { echo "ERROR: signature did not verify against pinned fingerprint ${GPG_FPR}" >&2; cat "$GPG_STATUS" >&2; exit 1; }
 
 tar -xzf "libseccomp-${VERSION}.tar.gz"
 cd "libseccomp-${VERSION}"
@@ -94,4 +108,5 @@ sudo make install
 # Sanity check the install.
 test -f "${PREFIX}/lib/libseccomp.a" || { echo "missing libseccomp.a"; exit 1; }
 test -f "${PREFIX}/lib/pkgconfig/libseccomp.pc" || { echo "missing pkgconfig"; exit 1; }
+test -f "${PREFIX}/include/seccomp.h" || { echo "missing headers"; exit 1; }
 echo "=== OK: ${PREFIX}/lib/libseccomp.a ($(stat -c %s "${PREFIX}/lib/libseccomp.a") bytes) ==="
