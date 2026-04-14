@@ -15,8 +15,10 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"syscall"
+	"unsafe"
 
 	"github.com/agentsh/agentsh/internal/landlock"
 	unixmon "github.com/agentsh/agentsh/internal/netmonitor/unix"
@@ -193,6 +195,22 @@ func main() {
 		setupPtracerPreload(cfg.ServerPID)
 	}
 
+	// Block SIGURG on this OS thread to prevent Go's ~10ms async preemption
+	// from interrupting seccomp_do_user_notification during execve.
+	// Only needed when seccomp user-notify is active — without a filter,
+	// there is no notification wait to protect.
+	//
+	// Note: the blocked SIGURG mask is inherited across execve. For most
+	// programs this is harmless (SIGURG is rarely used). For wrapped Go
+	// binaries, async preemption degrades to cooperative preemption — a
+	// minor performance trade-off vs. the 0% success rate caused by the
+	// ERESTARTSYS loop this prevents. On kernel 6.0+ the SetWaitKill flag
+	// (Layer 1) handles this at the kernel level without signal mask changes.
+	if notifFD >= 0 {
+		runtime.LockOSThread()
+		blockSIGURG()
+	}
+
 	// Exec the real command.
 	cmd := os.Args[2]
 	// syscall.Exec requires an absolute path — resolve via PATH lookup.
@@ -254,6 +272,30 @@ func waitForACK(readFn func([]byte) (int, error)) error {
 			return fmt.Errorf("expected 1 ACK byte, got %d (server may have closed connection)", n)
 		}
 		return nil
+	}
+}
+
+// blockSIGURG blocks SIGURG on the current OS thread via rt_sigprocmask.
+// Go's runtime sends SIGURG every ~10ms for goroutine preemption. When execve
+// is trapped by seccomp user-notify, the kernel waits in
+// wait_for_completion_interruptible(), which is woken by ANY signal. SIGURG
+// causes ERESTARTSYS → stale notification ID → infinite retry loop.
+//
+// Must be called after runtime.LockOSThread() to ensure the mask change
+// applies to the thread that will call syscall.Exec().
+func blockSIGURG() {
+	var set [1]uint64
+	set[0] = 1 << (unix.SIGURG - 1)
+	_, _, errno := unix.RawSyscall6(
+		unix.SYS_RT_SIGPROCMASK,
+		uintptr(unix.SIG_BLOCK),
+		uintptr(unsafe.Pointer(&set[0])),
+		0, // oldset = nil
+		8, // sizeof(sigset_t)
+		0, 0,
+	)
+	if errno != 0 {
+		log.Printf("warning: blockSIGURG: rt_sigprocmask: %v", errno)
 	}
 }
 

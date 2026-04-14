@@ -97,3 +97,28 @@ func TestNotifRespondContinue_InvalidFD(t *testing.T) {
 	err := NotifRespondContinue(-1, 0)
 	require.Error(t, err, "NotifRespondContinue with invalid fd should fail")
 }
+
+func TestProbeWaitKillable_DoesNotPanic(t *testing.T) {
+	// ProbeWaitKillable checks kernel version >= 6.0.
+	// On any kernel it must return a bool without panicking.
+	result := ProbeWaitKillable()
+	t.Logf("ProbeWaitKillable() = %v", result)
+}
+
+func TestParseKernelVersion_WaitKillable(t *testing.T) {
+	tests := []struct {
+		release string
+		want    bool // major >= 6
+	}{
+		{"6.0.0-1-arm64", true},
+		{"6.8.0-45-generic", true},
+		{"5.15.0-1-amd64", false},
+		{"5.19.17", false},
+		{"7.0.0", true},
+	}
+	for _, tt := range tests {
+		major, _ := parseKernelVersion(tt.release)
+		got := major >= 6
+		require.Equal(t, tt.want, got, "release=%s major=%d", tt.release, major)
+	}
+}

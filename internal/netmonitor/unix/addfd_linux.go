@@ -109,6 +109,21 @@ func ProbeAddFDSupport() bool {
 	return major > 5 || (major == 5 && minor >= 14)
 }
 
+// ProbeWaitKillable checks if the kernel supports
+// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (kernel 6.0+).
+// When supported, seccomp user notification waits use
+// wait_for_completion_killable() instead of wait_for_completion_interruptible(),
+// preventing non-fatal signals (like Go's SIGURG) from causing ERESTARTSYS.
+func ProbeWaitKillable() bool {
+	var utsname unix.Utsname
+	if err := unix.Uname(&utsname); err != nil {
+		return false
+	}
+	release := unix.ByteSliceToString(utsname.Release[:])
+	major, _ := parseKernelVersion(release)
+	return major >= 6
+}
+
 // parseKernelVersion extracts major.minor from a kernel release string like "5.14.0-1-amd64".
 func parseKernelVersion(release string) (int, int) {
 	// Find first dot
