@@ -86,20 +86,22 @@ else
   fail "/bin/bash.real exists" "file not found"
 fi
 
-# Strict: /bin/sh and /bin/bash must both be the shim. An earlier
-# version of this check accepted any file at /bin/sh, which let a
-# broken `agentsh shim install-shell` pass silently. The -ef primary
-# requires same device+inode as /usr/bin/agentsh-shell-shim.
-if [ -e /bin/sh ] && [ /bin/sh -ef /usr/bin/agentsh-shell-shim ]; then
+# Strict: /bin/sh and /bin/bash must both be byte-identical to the
+# shim. An earlier version of this check accepted any file at /bin/sh,
+# which let a broken `agentsh shim install-shell` pass silently.
+# `agentsh shim install-shell` writes a fresh copy of the shim bytes
+# (internal/shim/install.go writeFileAtomic), so we compare content
+# with cmp -s rather than inode equivalence.
+if [ -f /bin/sh ] && cmp -s /bin/sh /usr/bin/agentsh-shell-shim; then
   pass "/bin/sh is the shim"
 else
-  fail "/bin/sh is the shim" "/bin/sh does not resolve to /usr/bin/agentsh-shell-shim"
+  fail "/bin/sh is the shim" "/bin/sh content does not match /usr/bin/agentsh-shell-shim"
 fi
 
-if [ -e /bin/bash ] && [ /bin/bash -ef /usr/bin/agentsh-shell-shim ]; then
+if [ -f /bin/bash ] && cmp -s /bin/bash /usr/bin/agentsh-shell-shim; then
   pass "/bin/bash is the shim"
 else
-  fail "/bin/bash is the shim" "/bin/bash does not resolve to /usr/bin/agentsh-shell-shim"
+  fail "/bin/bash is the shim" "/bin/bash content does not match /usr/bin/agentsh-shell-shim"
 fi
 
 # -------------------------------------------------------------------
