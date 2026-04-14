@@ -895,3 +895,145 @@ func TestFlushLoop_StopsOnClose(t *testing.T) {
 		t.Fatal("flushDone channel not closed after Close()")
 	}
 }
+
+// writeIntegrityStateWithGap writes a JSONL file with totalEvents events
+// (seq 0..totalEvents-1) and a sidecar pointing to sidecarSeq.
+// Simulates a crash where the sidecar is behind by N unflushed events.
+func writeIntegrityStateWithGap(t testing.TB, logPath string, totalEvents, sidecarSeq int) {
+	t.Helper()
+
+	chain, err := audit.NewIntegrityChain(testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var sidecarState audit.ChainState
+	for i := 0; i < totalEvents; i++ {
+		ev := types.Event{
+			ID:        "gap-ev-" + strconv.Itoa(i),
+			Timestamp: time.Now().UTC(),
+			Type:      "test",
+			SessionID: "s1",
+		}
+		payload, _ := json.Marshal(ev)
+		wrapped, _ := chain.Wrap(payload)
+		f.Write(append(wrapped, '\n'))
+
+		if chain.State().Sequence == int64(sidecarSeq) {
+			sidecarState = chain.State()
+		}
+	}
+	f.Close()
+
+	if err := audit.WriteSidecar(audit.SidecarPath(logPath), audit.SidecarState{
+		Sequence:       sidecarState.Sequence,
+		PrevHash:       sidecarState.PrevHash,
+		KeyFingerprint: chain.KeyFingerprint(),
+		UpdatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStartup_SidecarBehindByN(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	// 11 events (seq 0..10), sidecar at seq 7 — behind by 3
+	writeIntegrityStateWithGap(t, logPath, 11, 7)
+
+	chain := mustNewIntegrityChain(t)
+	jstore, err := jsonl.New(logPath, 10*1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jstore.Close()
+
+	store, err := NewIntegrityStore(jstore, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatalf("NewIntegrityStore should recover from seq+N gap, got: %v", err)
+	}
+	defer store.Close()
+
+	sidecar, err := audit.ReadSidecar(audit.SidecarPath(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sidecar.Sequence != 10 {
+		t.Fatalf("sidecar.Sequence = %d, want 10 (should have recovered)", sidecar.Sequence)
+	}
+
+	state := chain.State()
+	if state.Sequence != 10 {
+		t.Fatalf("chain.State().Sequence = %d, want 10", state.Sequence)
+	}
+}
+
+func TestStartup_SidecarBehindByN_InvalidChain(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	writeIntegrityStateWithGap(t, logPath, 11, 7)
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(content), []byte("\n"))
+	// Corrupt line 9 (an event after sidecar seq 7)
+	if len(lines) > 9 {
+		lines[9] = bytes.Replace(lines[9], []byte(`"test"`), []byte(`"tampered"`), 1)
+	}
+	os.WriteFile(logPath, append(bytes.Join(lines, []byte("\n")), '\n'), 0o644)
+
+	chain := mustNewIntegrityChain(t)
+	jstore, err := jsonl.New(logPath, 10*1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jstore.Close()
+
+	_, err = NewIntegrityStore(jstore, chain, testIntegrityOptions(logPath))
+	if err == nil {
+		t.Fatal("expected error for tampered chain, got nil")
+	}
+	if !strings.Contains(err.Error(), "chain mismatch") && !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestStartup_TruncatedLastLine(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	// Write 6 events, sidecar at seq 3 (behind by 2)
+	writeIntegrityStateWithGap(t, logPath, 6, 3)
+
+	// Append a truncated line (incomplete JSON)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"integrity":{"sequence":6,"prev_hash":"abc","entry_hash":`)
+	f.Close()
+
+	chain := mustNewIntegrityChain(t)
+	jstore, err := jsonl.New(logPath, 10*1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jstore.Close()
+
+	store, err := NewIntegrityStore(jstore, chain, testIntegrityOptions(logPath))
+	if err != nil {
+		t.Fatalf("should recover from truncated last line, got: %v", err)
+	}
+	defer store.Close()
+
+	sidecar, err := audit.ReadSidecar(audit.SidecarPath(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sidecar.Sequence != 5 {
+		t.Fatalf("sidecar.Sequence = %d, want 5 (should recover up to last valid)", sidecar.Sequence)
+	}
+}
