@@ -6,30 +6,35 @@ before:
     - go mod download
     - ./scripts/build-envshim.sh
     - ./scripts/build-ptracer.sh
-    # Provision /opt/libseccomp/{amd64,arm64} sysroots for the Linux CGO
-    # builds. SKIP_IF_UNSUPPORTED=1 makes the script no-op gracefully on
-    # non-Linux hosts and when the arm64 cross-compiler is missing, so
-    # filtered runs (darwin/windows-only snapshots, single-target builds
-    # from macOS dev machines) are not blocked by a sysroot that the
-    # selected targets don't need. Without that opt-in, direct callers
-    # of the script (release.yml, ci.yml, manual invocations) still get
-    # strict fail-closed behavior. The script is idempotent, so these
-    # hooks no-op on the second run when a matching install already
-    # exists.
-    - cmd: ./scripts/build-libseccomp.sh
-      env:
-        - TARGET=amd64
-        - SKIP_IF_UNSUPPORTED=1
-    - cmd: ./scripts/build-libseccomp.sh
-      env:
-        - TARGET=arm64
-        - SKIP_IF_UNSUPPORTED=1
+    # Note: /opt/libseccomp/{amd64,arm64} sysroots are provisioned by
+    # per-build hooks.pre on the Linux CGO build definitions below
+    # (agentsh-linux-amd64, agentsh-linux-arm64, unixwrap-linux-amd64,
+    # unixwrap-linux-arm64). Running them per-build rather than as a
+    # global before hook means a Linux dev host invoking a
+    # darwin-only or windows-only single-target build doesn't need to
+    # satisfy the Linux-sysroot build prerequisites. The script is
+    # idempotent — the cache-hit fast path exits 0 with no side
+    # effects when a matching install already exists — so the second
+    # linux/amd64 build (unixwrap) runs the hook for free.
 
 builds:
   # Linux amd64: CGO enabled for full seccomp user-notify support
   - id: agentsh-linux-amd64
     main: ./cmd/agentsh
     binary: agentsh
+    # Provision the amd64 libseccomp sysroot just-in-time. Per-build
+    # (not global before.hooks) so filtered runs that don't select a
+    # linux/amd64 target — e.g. darwin-only snapshots from a Linux
+    # dev laptop — don't have to satisfy the Linux-sysroot build
+    # prerequisites. SKIP_IF_UNSUPPORTED=1 covers the macOS case,
+    # where this build wouldn't be selected anyway; on Linux amd64
+    # hosts the script builds or hits its idempotent fast path.
+    hooks:
+      pre:
+        - cmd: ./scripts/build-libseccomp.sh
+          env:
+            - TARGET=amd64
+            - SKIP_IF_UNSUPPORTED=1
     env:
       - CGO_ENABLED=1
       # Fail-closed: PKG_CONFIG_LIBDIR REPLACES the default search path
@@ -49,6 +54,16 @@ builds:
   - id: agentsh-linux-arm64
     main: ./cmd/agentsh
     binary: agentsh
+    # Per-build arm64 sysroot provisioning — see amd64 comment above.
+    # SKIP_IF_UNSUPPORTED=1 also covers the "no aarch64 cross-compiler
+    # on this host" case so amd64-only dev boxes aren't blocked from
+    # running a darwin-only or windows-only filtered build.
+    hooks:
+      pre:
+        - cmd: ./scripts/build-libseccomp.sh
+          env:
+            - TARGET=arm64
+            - SKIP_IF_UNSUPPORTED=1
     env:
       - CGO_ENABLED=1
       - CC=aarch64-linux-gnu-gcc
@@ -119,6 +134,19 @@ builds:
   - id: unixwrap-linux-amd64
     main: ./cmd/agentsh-unixwrap
     binary: agentsh-unixwrap
+    # Per-build amd64 sysroot provisioning. Safe to duplicate with
+    # agentsh-linux-amd64: build-libseccomp.sh's cache-hit fast path
+    # exits 0 with no side effects when the install is already there,
+    # so the second invocation is free. Listed here (rather than
+    # assumed from agentsh-linux-amd64) so the dependency is explicit
+    # and a future build-matrix change can't drop this hook by
+    # accident.
+    hooks:
+      pre:
+        - cmd: ./scripts/build-libseccomp.sh
+          env:
+            - TARGET=amd64
+            - SKIP_IF_UNSUPPORTED=1
     env:
       - CGO_ENABLED=1
       # Link the static libseccomp 2.6 built by scripts/build-libseccomp.sh.
@@ -140,6 +168,13 @@ builds:
   - id: unixwrap-linux-arm64
     main: ./cmd/agentsh-unixwrap
     binary: agentsh-unixwrap
+    # Per-build arm64 sysroot provisioning — see amd64 comment above.
+    hooks:
+      pre:
+        - cmd: ./scripts/build-libseccomp.sh
+          env:
+            - TARGET=arm64
+            - SKIP_IF_UNSUPPORTED=1
     env:
       - CGO_ENABLED=1
       - CC=aarch64-linux-gnu-gcc
