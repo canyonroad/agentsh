@@ -230,11 +230,14 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	// Enable SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (kernel 6.0+).
 	// When active, non-fatal signals (including Go's ~10ms SIGURG preemption)
 	// cannot interrupt seccomp_do_user_notification, preventing ERESTARTSYS loops.
-	// Must probe kernel version first: on older kernels, the flag causes Load() to
-	// fail with EINVAL. The wrapper also blocks SIGURG before exec as a fallback.
+	// Probes kernel version first as an optimization; the Load() fallback below
+	// handles custom kernels that report 6.x but lack the flag.
+	waitKillSet := false
 	if ProbeWaitKillable() {
 		if err := filt.SetWaitKill(true); err != nil {
 			slog.Debug("seccomp: SetWaitKill failed", "error", err)
+		} else {
+			waitKillSet = true
 		}
 	}
 
@@ -354,7 +357,21 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	}
 
 	if err := filt.Load(); err != nil {
-		return nil, err
+		// If Load failed and WaitKill was set, the kernel may not support
+		// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV despite reporting version >= 6.0
+		// (custom/vendor kernels). Retry without the flag — the wrapper's SIGURG
+		// block before exec provides equivalent protection.
+		if waitKillSet {
+			slog.Debug("seccomp: Load with WaitKill failed, retrying without", "error", err)
+			if clearErr := filt.SetWaitKill(false); clearErr != nil {
+				return nil, err
+			}
+			if retryErr := filt.Load(); retryErr != nil {
+				return nil, retryErr
+			}
+		} else {
+			return nil, err
+		}
 	}
 	fd, err := filt.GetNotifFd()
 	if err != nil {
