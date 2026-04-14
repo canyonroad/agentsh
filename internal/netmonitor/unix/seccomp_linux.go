@@ -5,6 +5,7 @@ package unix
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"unsafe"
 
 	seccomp "github.com/seccomp/libseccomp-golang"
@@ -224,6 +225,17 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	filt, err := seccomp.NewFilter(seccomp.ActAllow)
 	if err != nil {
 		return nil, err
+	}
+
+	// Enable SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (kernel 6.0+).
+	// When active, non-fatal signals (including Go's ~10ms SIGURG preemption)
+	// cannot interrupt seccomp_do_user_notification, preventing ERESTARTSYS loops.
+	// Must probe kernel version first: on older kernels, the flag causes Load() to
+	// fail with EINVAL. The wrapper also blocks SIGURG before exec as a fallback.
+	if ProbeWaitKillable() {
+		if err := filt.SetWaitKill(true); err != nil {
+			slog.Debug("seccomp: SetWaitKill failed", "error", err)
+		}
 	}
 
 	// Unix socket monitoring via user-notify
