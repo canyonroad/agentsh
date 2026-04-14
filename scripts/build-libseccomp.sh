@@ -48,8 +48,14 @@ if [ -f "${PREFIX}/lib/libseccomp.a" ] \
    && [ -f "${PREFIX}/lib/pkgconfig/libseccomp.pc" ] \
    && [ -f "${PREFIX}/include/seccomp.h" ] \
    && grep -qx "Version: ${VERSION}" "${PREFIX}/lib/pkgconfig/libseccomp.pc"; then
-    CACHED_SO="$(find "${PREFIX}" -maxdepth 3 -name 'libseccomp.so*' -print 2>/dev/null || true)"
-    if [ -z "${CACHED_SO}" ]; then
+    # Portable stale-.so probe — bash glob expansion, no `find` so we
+    # don't depend on GNU `find -maxdepth` (BSD find on macOS rejects
+    # it). When no file matches, bash leaves the glob literal, so
+    # `[ -e ... ]` on the first element returns false. Any match makes
+    # us fall through to the rebuild path, which re-establishes the
+    # static-only invariant.
+    CACHED_SO=("${PREFIX}"/lib/libseccomp.so*)
+    if [ ! -e "${CACHED_SO[0]}" ]; then
         echo "Already installed at ${PREFIX} (version ${VERSION}); skipping."
         exit 0
     fi
