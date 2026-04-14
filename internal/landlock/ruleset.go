@@ -4,6 +4,7 @@ package landlock
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +74,25 @@ type landlockNetPortAttr struct {
 	Port          uint64
 }
 
+// stripGlobPrefix returns the non-glob prefix of a path. If the path contains
+// glob characters (*, ?, [), returns everything before the first one with the
+// trailing slash trimmed. If no glob characters are present, returns the path
+// unchanged. Defense-in-depth: glob patterns should be stripped on the server
+// side, but if they leak through, this prevents unix.Open from receiving a
+// literal "/bin/**".
+func stripGlobPrefix(path string) string {
+	for i, c := range path {
+		if c == '*' || c == '?' || c == '[' {
+			prefix := strings.TrimSuffix(path[:i], "/")
+			if prefix == "" {
+				return "/"
+			}
+			return prefix
+		}
+	}
+	return path
+}
+
 // RulesetBuilder constructs a Landlock ruleset from paths.
 type RulesetBuilder struct {
 	abi          int
@@ -103,7 +123,12 @@ func (b *RulesetBuilder) SetWorkspace(path string) {
 
 // AddExecutePath adds a path where execution is allowed.
 func (b *RulesetBuilder) AddExecutePath(path string) error {
-	absPath, err := filepath.Abs(path)
+	cleaned := stripGlobPrefix(path)
+	if cleaned != path {
+		slog.Warn("landlock: glob pattern in execute path, stripped to base dir",
+			"original", path, "cleaned", cleaned)
+	}
+	absPath, err := filepath.Abs(cleaned)
 	if err != nil {
 		return fmt.Errorf("invalid path %s: %w", path, err)
 	}
@@ -113,7 +138,12 @@ func (b *RulesetBuilder) AddExecutePath(path string) error {
 
 // AddReadPath adds a path where reading is allowed.
 func (b *RulesetBuilder) AddReadPath(path string) error {
-	absPath, err := filepath.Abs(path)
+	cleaned := stripGlobPrefix(path)
+	if cleaned != path {
+		slog.Warn("landlock: glob pattern in read path, stripped to base dir",
+			"original", path, "cleaned", cleaned)
+	}
+	absPath, err := filepath.Abs(cleaned)
 	if err != nil {
 		return fmt.Errorf("invalid path %s: %w", path, err)
 	}
@@ -123,7 +153,12 @@ func (b *RulesetBuilder) AddReadPath(path string) error {
 
 // AddWritePath adds a path where writing is allowed.
 func (b *RulesetBuilder) AddWritePath(path string) error {
-	absPath, err := filepath.Abs(path)
+	cleaned := stripGlobPrefix(path)
+	if cleaned != path {
+		slog.Warn("landlock: glob pattern in write path, stripped to base dir",
+			"original", path, "cleaned", cleaned)
+	}
+	absPath, err := filepath.Abs(cleaned)
 	if err != nil {
 		return fmt.Errorf("invalid path %s: %w", path, err)
 	}
@@ -300,6 +335,8 @@ const accessFile = LANDLOCK_ACCESS_FS_EXECUTE |
 func (b *RulesetBuilder) addPathRule(rulesetFd int, path string, access uint64) error {
 	fd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC, 0)
 	if err != nil {
+		slog.Debug("landlock: addPathRule open failed",
+			"path", path, "error", err)
 		return fmt.Errorf("open %s: %w", path, err)
 	}
 	defer unix.Close(fd)
