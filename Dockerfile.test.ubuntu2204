@@ -33,6 +33,12 @@ ARG AGENTSH_REPO=canyonroad/agentsh
 ARG AGENTSH_TAG=v0.10.1
 ARG DEB_ARCH=amd64
 
+# Expose the tag to the embedded test script so it can decide
+# whether agentsh-unixwrap is expected to be present (amd64 always,
+# arm64 only for v0.18.0+). ENV persists into the runtime image;
+# ARG alone would be erased after the build RUNs.
+ENV AGENTSH_TAG=${AGENTSH_TAG}
+
 # Install dependencies: curl for downloading, bash for shim tests, jq for JSON parsing,
 # libseccomp2 + fuse3 for production sandbox path.
 RUN set -eux; \
@@ -130,25 +136,36 @@ for bin in /usr/bin/agentsh /usr/bin/agentsh-shell-shim; do
   fi
 done
 
-# agentsh-unixwrap is packaged on both amd64 and arm64 from the
-# release that re-enabled arm64 cross-compile (PR #212). Older arm64
-# artifacts (notably the default AGENTSH_TAG=v0.10.1 example in the
-# file header) intentionally shipped without it — arm64 users on
-# those releases got graceful degradation via the non-seccomp path.
+# agentsh-unixwrap shipped on amd64 from the start. arm64 was
+# re-enabled in v0.18.0 (PR #212 / commit 6e6890d6); v0.17.0 and
+# earlier arm64 debs intentionally lacked it — those arm64 users
+# got graceful degradation via the non-seccomp path.
 #
-# Gate the presence check on what's actually in the deb manifest so
-# the test asserts "packaged implies on disk" without failing the
-# older-release examples. Avoid `grep -q`: the script runs under
-# `set -euo pipefail`, and a quiet grep exiting early on first match
-# can SIGPIPE the dpkg producer, flipping the pipeline exit code.
-if dpkg -L agentsh 2>/dev/null | grep -xF '/usr/bin/agentsh-unixwrap' > /dev/null; then
+# Derive the expected-present decision from (DEB_ARCH, AGENTSH_TAG)
+# rather than from the installed package manifest, so a modern deb
+# that accidentally drops the binary FAILS here instead of being
+# waved through. AGENTSH_TAG is injected into the image via ENV at
+# build time (see the `ENV AGENTSH_TAG=…` line at the top). Use
+# `dpkg --compare-versions` for proper Debian version ordering.
+#
+# Strip the `v` prefix and any `-rcN`/`-alphaN` pre-release suffix:
+# Debian version rules treat `0.18.0-rc1` as newer than `0.18.0`
+# (the hyphen introduces a debian_revision that sorts non-empty >
+# empty), which inverts semver's "rc1 < release". Comparing on the
+# stripped major.minor.patch means an rc of 0.18.0 gets the same
+# expectation as 0.18.0 itself, which matches intent: rcs are meant
+# to validate the eventual release's contents.
+arch="$(dpkg --print-architecture)"
+tag_base="${AGENTSH_TAG#v}"
+tag_base="${tag_base%%-*}"
+if [ "$arch" = "amd64" ] || dpkg --compare-versions "$tag_base" ge "0.18.0"; then
   if [ -x /usr/bin/agentsh-unixwrap ]; then
     pass "/usr/bin/agentsh-unixwrap exists"
   else
-    fail "/usr/bin/agentsh-unixwrap exists" "listed in deb manifest but missing on disk"
+    fail "/usr/bin/agentsh-unixwrap exists" "not found or not executable (packaging regression for $arch $AGENTSH_TAG)"
   fi
 else
-  echo "  INFO: /usr/bin/agentsh-unixwrap not in deb manifest — graceful degradation (e.g. v0.10.1 arm64)"
+  echo "  INFO: arm64 tag $AGENTSH_TAG pre-dates v0.18.0 unixwrap re-enable; skipping presence check"
 fi
 
 # Config
