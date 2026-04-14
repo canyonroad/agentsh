@@ -167,6 +167,113 @@ func TestDeriveWritePaths_WildcardOps(t *testing.T) {
 	}
 }
 
+func TestCouldContainBinaries(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("landlock tests use Unix paths")
+	}
+	tests := []struct {
+		dir  string
+		want bool
+	}{
+		{"/bin", true},
+		{"/sbin", true},
+		{"/usr", true},          // parent of /usr/bin
+		{"/usr/bin", true},
+		{"/usr/sbin", true},
+		{"/usr/local", true},    // parent of /usr/local/bin
+		{"/usr/local/bin", true},
+		{"/usr/local/sbin", true},
+		{"/lib", false},
+		{"/lib64", false},
+		{"/dev", false},
+		{"/etc", false},
+		{"/opt", false},
+		{"/tmp", false},
+		{"/home/user", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dir, func(t *testing.T) {
+			if got := couldContainBinaries(tt.dir); got != tt.want {
+				t.Errorf("couldContainBinaries(%q) = %v, want %v", tt.dir, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeriveExecutePathsFromFileRules(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("landlock tests use Unix paths")
+	}
+	p := &policy.Policy{
+		FileRules: []policy.FileRule{
+			{
+				Name:       "allow-system-read",
+				Paths:      []string{"/usr/**", "/lib/**", "/lib64/**", "/bin/**", "/sbin/**", "/opt/**", "/dev/**"},
+				Operations: []string{"read", "open", "stat", "list", "readlink"},
+				Decision:   "allow",
+			},
+			{
+				Name:       "allow-tmp",
+				Paths:      []string{"/tmp/**", "/var/tmp/**"},
+				Operations: []string{"*"},
+				Decision:   "allow",
+			},
+			{
+				Name:       "deny-sensitive",
+				Paths:      []string{"/usr/bin/secret"},
+				Operations: []string{"read"},
+				Decision:   "deny",
+			},
+		},
+	}
+
+	paths := DeriveExecutePathsFromFileRules(p)
+	found := make(map[string]bool)
+	for _, p := range paths {
+		found[p] = true
+	}
+
+	for _, want := range []string{"/usr", "/bin", "/sbin"} {
+		if !found[want] {
+			t.Errorf("expected %q in result, got %v", want, paths)
+		}
+	}
+
+	for _, reject := range []string{"/lib", "/lib64", "/opt", "/dev", "/tmp", "/var/tmp"} {
+		if found[reject] {
+			t.Errorf("unexpected %q in result", reject)
+		}
+	}
+}
+
+func TestDeriveExecutePathsFromFileRules_NilPolicy(t *testing.T) {
+	paths := DeriveExecutePathsFromFileRules(nil)
+	if paths != nil {
+		t.Errorf("expected nil for nil policy, got %v", paths)
+	}
+}
+
+func TestDeriveExecutePathsFromFileRules_NoReadOps(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("landlock tests use Unix paths")
+	}
+	p := &policy.Policy{
+		FileRules: []policy.FileRule{
+			{
+				Name:       "write-only",
+				Paths:      []string{"/usr/bin/**"},
+				Operations: []string{"write"},
+				Decision:   "allow",
+			},
+		},
+	}
+
+	paths := DeriveExecutePathsFromFileRules(p)
+	if len(paths) != 0 {
+		t.Errorf("expected empty for write-only rule, got %v", paths)
+	}
+}
+
 func TestDeriveReadPaths(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("landlock tests use Unix paths")
