@@ -67,12 +67,19 @@ same image.
    Expected: completes in well under 10 seconds with exit code 0.
 
 5. Repeat the same stressed invocation in a tight loop for 100
-   iterations — this is the release gate, so the loop must run the
-   Go-binary workload from step 4, not a C builtin like `/bin/true`:
+   iterations — this is the release gate, so the loop must run a
+   longer-lived Go-binary workload with several trap points per call,
+   not `agentsh --help` (which can finish before Go's ~10 ms
+   async-preemption SIGURG fires). `session list` opens an HTTP
+   connection to the server, which keeps the wrapped Go runtime alive
+   across several seccomp-trapped syscalls — `connect`, `sendto`,
+   `recvfrom` — each of which can land inside a ~10 ms
+   async-preemption window, so 100 iterations gives many real chances
+   to catch a Layer 1 regression:
 
    ```bash
    for i in $(seq 1 100); do
-     agentsh exec "$sid" -- agentsh --help >/dev/null \
+     agentsh exec "$sid" -- agentsh session list >/dev/null \
        || { echo "FAIL iter $i"; exit 1; }
    done
    echo "PASS: 100 iterations"

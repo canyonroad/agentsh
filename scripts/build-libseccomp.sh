@@ -35,6 +35,20 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 echo "=== libseccomp ${VERSION} static build for ${TARGET} → ${PREFIX} ==="
 
+# Detect any stale libseccomp.so* left by a previous install — if the
+# prefix is not static-only the later `-lseccomp` link could silently
+# prefer the shared object and undo the "static libseccomp 2.6"
+# guarantee. Wipe the prefix so the cache-hit check falls through to a
+# clean rebuild.
+if [ -d "${PREFIX}" ]; then
+    STALE_SO="$(find "${PREFIX}" -maxdepth 3 -name 'libseccomp.so*' -print 2>/dev/null || true)"
+    if [ -n "${STALE_SO}" ]; then
+        echo "WARN: stale shared libseccomp found in ${PREFIX}; removing prefix for clean rebuild:" >&2
+        echo "${STALE_SO}" >&2
+        sudo rm -rf "${PREFIX}"
+    fi
+fi
+
 # Skip rebuild if artifact already present AND the installed version
 # matches the requested VERSION. Checking .pc's Version: line prevents
 # silent reuse of a stale install after a version bump or a partial
@@ -104,6 +118,17 @@ esac
 
 make -j"$(nproc)"
 sudo make install
+
+# Post-install guard: enforce the --disable-shared invariant. If any
+# libseccomp.so* snuck through (e.g. a future configure flag change,
+# a packager's autotools override, or a dirty prefix), fail the build
+# rather than let `-lseccomp` silently prefer the shared object.
+LEAKED_SO="$(find "${PREFIX}" -maxdepth 3 -name 'libseccomp.so*' -print 2>/dev/null || true)"
+if [ -n "${LEAKED_SO}" ]; then
+    echo "ERROR: libseccomp.so* present in ${PREFIX} — static-only invariant violated:" >&2
+    echo "${LEAKED_SO}" >&2
+    exit 1
+fi
 
 # Sanity check the install.
 test -f "${PREFIX}/lib/libseccomp.a" || { echo "missing libseccomp.a"; exit 1; }

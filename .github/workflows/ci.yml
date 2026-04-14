@@ -179,6 +179,42 @@ jobs:
         env:
           PKG_CONFIG_LIBDIR: /opt/libseccomp/amd64/lib/pkgconfig
 
+  build-linux-arm64-cgo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y libfuse-dev libfuse3-dev pkg-config gpg gperf gcc-aarch64-linux-gnu
+
+      - name: Build static libseccomp 2.6 (arm64)
+        run: TARGET=arm64 ./scripts/build-libseccomp.sh
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-linux-arm64-cgo-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-linux-arm64-cgo-
+
+      - name: Cross-compile (arm64 CGO)
+        run: go build ./...
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+          CC: aarch64-linux-gnu-gcc
+          PKG_CONFIG_LIBDIR: /opt/libseccomp/arm64/lib/pkgconfig
+
   integration:
     needs: [test-linux]
     runs-on: ubuntu-latest
