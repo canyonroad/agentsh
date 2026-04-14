@@ -9,20 +9,17 @@ import (
 )
 
 // TestInstallFilterWithConfig_WaitKillEnabled is a white-box regression
-// test ensuring Layer 1 of the SIGURG fix is actually applied when the
-// kernel supports it. On pre-2.6 libseccomp headers, the
-// SCMP_FLTATR_CTL_WAITKILL constant resolves to _SCMP_FLTATR_MIN (a no-op
-// sentinel) and SetWaitKill silently does nothing. Combined with the
-// compile-time #error guard in seccomp_version_check.go, this test
-// catches any future regression at runtime.
+// test ensuring Layer 1 of the SIGURG fix is actually compiled in. On
+// pre-2.6 libseccomp headers, SCMP_FLTATR_CTL_WAITKILL resolves to
+// _SCMP_FLTATR_MIN (a no-op sentinel) and SetWaitKill silently does
+// nothing. Combined with the compile-time #error guard in
+// seccomp_version_check.go, this test catches any future regression.
 //
-// Skips on kernels <6.0 where the flag is not available (Layer 1 is
-// expected to be off; Layer 2 signal mask protects).
+// The check is purely in-memory (SetWaitKill/GetWaitKill on a detached
+// filter): it does NOT require kernel >=6.0. Running on every Linux+cgo
+// environment — including older-kernel CI hosts — is the point, because
+// the 2.6-header regression is independent of the kernel.
 func TestInstallFilterWithConfig_WaitKillEnabled(t *testing.T) {
-	if !ProbeWaitKillable() {
-		t.Skip("kernel <6.0: WAIT_KILLABLE_RECV not supported, Layer 1 expected off")
-	}
-
 	// Fresh filter we inspect directly, bypassing the (non-exported)
 	// Filter wrapper so we can call GetWaitKill without plumbing it
 	// through the public API.
@@ -42,8 +39,8 @@ func TestInstallFilterWithConfig_WaitKillEnabled(t *testing.T) {
 		t.Fatalf("GetWaitKill: %v", err)
 	}
 	if !got {
-		t.Fatalf("GetWaitKill returned false after SetWaitKill(true) — "+
-			"Layer 1 is silently disabled, the kernel flag will NOT be applied. "+
+		t.Fatalf("GetWaitKill returned false after SetWaitKill(true) — " +
+			"Layer 1 is silently disabled, the kernel flag will NOT be applied. " +
 			"Check libseccomp version (want >=2.6) and PKG_CONFIG_PATH.")
 	}
 }
