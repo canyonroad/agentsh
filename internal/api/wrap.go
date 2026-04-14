@@ -309,9 +309,11 @@ func (a *App) deriveLandlockAllowPaths(s *session.Session) (execute, read, write
 		return nil, nil, nil
 	}
 	pol := engine.Policy()
-	return landlock.DeriveExecutePathsFromPolicy(pol),
-		landlock.DeriveReadPathsFromPolicy(pol),
-		landlock.DeriveWritePathsFromPolicy(pol)
+	execute = landlock.DeriveExecutePathsFromPolicy(pol)
+	execute = append(execute, landlock.DeriveExecutePathsFromFileRules(pol)...)
+	read = landlock.DeriveReadPathsFromPolicy(pol)
+	write = landlock.DeriveWritePathsFromPolicy(pol)
+	return execute, read, write
 }
 
 // signalFilterEnabled reports whether wrap-init should create a signal

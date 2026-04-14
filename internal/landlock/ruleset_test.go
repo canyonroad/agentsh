@@ -83,6 +83,71 @@ func TestRulesetBuilder_WriteAccessMask_IncludesMakeSock(t *testing.T) {
 	}
 }
 
+func TestStripGlobPrefix(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"/bin/**", "/bin"},
+		{"/usr/bin/*", "/usr/bin"},
+		{"/opt/*/bin/*", "/opt"},
+		{"/usr/bin", "/usr/bin"},             // no glob — unchanged
+		{"/etc/ssl/certs", "/etc/ssl/certs"}, // no glob — unchanged
+		{"/**", "/"},
+		{"/tmp/test[0-9]", "/tmp/test"},
+		{"/a?b", "/a"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := stripGlobPrefix(tt.input); got != tt.want {
+				t.Errorf("stripGlobPrefix(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAddExecutePath_GlobStripped(t *testing.T) {
+	b := NewRulesetBuilder(3)
+	err := b.AddExecutePath("/bin/**")
+	if err != nil {
+		t.Fatalf("AddExecutePath failed: %v", err)
+	}
+	if len(b.executePaths) != 1 {
+		t.Fatalf("expected 1 execute path, got %d", len(b.executePaths))
+	}
+	if b.executePaths[0] != "/bin" {
+		t.Errorf("expected /bin, got %s", b.executePaths[0])
+	}
+}
+
+func TestAddReadPath_GlobStripped(t *testing.T) {
+	b := NewRulesetBuilder(3)
+	err := b.AddReadPath("/usr/lib/**")
+	if err != nil {
+		t.Fatalf("AddReadPath failed: %v", err)
+	}
+	if len(b.readPaths) != 1 {
+		t.Fatalf("expected 1 read path, got %d", len(b.readPaths))
+	}
+	if b.readPaths[0] != "/usr/lib" {
+		t.Errorf("expected /usr/lib, got %s", b.readPaths[0])
+	}
+}
+
+func TestAddWritePath_GlobStripped(t *testing.T) {
+	b := NewRulesetBuilder(3)
+	err := b.AddWritePath("/tmp/**")
+	if err != nil {
+		t.Fatalf("AddWritePath failed: %v", err)
+	}
+	if len(b.writePaths) != 1 {
+		t.Fatalf("expected 1 write path, got %d", len(b.writePaths))
+	}
+	if b.writePaths[0] != "/tmp" {
+		t.Errorf("expected /tmp, got %s", b.writePaths[0])
+	}
+}
+
 func TestRulesetBuilder_IsDenied(t *testing.T) {
 	b := NewRulesetBuilder(3)
 	b.AddDenyPath("/var/run/docker.sock")

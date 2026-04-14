@@ -225,9 +225,11 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 
 			// Derive paths from policy
 			if sessionPolicy != nil {
-				seccompCfg.AllowExecute = landlock.DeriveExecutePathsFromPolicy(sessionPolicy.Policy())
-				seccompCfg.AllowRead = landlock.DeriveReadPathsFromPolicy(sessionPolicy.Policy())
-				seccompCfg.AllowWrite = landlock.DeriveWritePathsFromPolicy(sessionPolicy.Policy())
+				pol := sessionPolicy.Policy()
+				seccompCfg.AllowExecute = landlock.DeriveExecutePathsFromPolicy(pol)
+				seccompCfg.AllowExecute = append(seccompCfg.AllowExecute, landlock.DeriveExecutePathsFromFileRules(pol)...)
+				seccompCfg.AllowRead = landlock.DeriveReadPathsFromPolicy(pol)
+				seccompCfg.AllowWrite = landlock.DeriveWritePathsFromPolicy(pol)
 			}
 
 			// Add explicit config paths

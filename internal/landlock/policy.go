@@ -172,6 +172,82 @@ func extractBaseDir(pathPattern string) string {
 	return filepath.Dir(pathPattern)
 }
 
+// knownBinaryDirs lists standard FHS directories that contain executable binaries.
+var knownBinaryDirs = []string{
+	"/bin", "/sbin",
+	"/usr/bin", "/usr/sbin",
+	"/usr/local/bin", "/usr/local/sbin",
+}
+
+// couldContainBinaries returns true if dir is, or is a parent of, a known
+// FHS binary directory (e.g. /bin, /usr/bin, /usr/local/sbin).
+func couldContainBinaries(dir string) bool {
+	for _, binDir := range knownBinaryDirs {
+		if dir == binDir || strings.HasPrefix(binDir, dir+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// DeriveExecutePathsFromFileRules extracts Landlock execute paths from file
+// rules that grant read access to FHS binary directories. This bridges the gap
+// when policies use bare command names (e.g. "git") with glob file rules
+// (e.g. "/usr/**", "/bin/**") -- without explicit execute paths, Landlock
+// blocks exec with EACCES.
+func DeriveExecutePathsFromFileRules(p *policy.Policy) []string {
+	if p == nil {
+		return nil
+	}
+
+	pathSet := make(map[string]struct{})
+
+	for _, rule := range p.FileRules {
+		// Only process allow rules
+		if strings.ToLower(rule.Decision) != "allow" {
+			continue
+		}
+
+		// Only include rules that allow read or open operations
+		hasReadOrOpen := false
+		for _, op := range rule.Operations {
+			op = strings.ToLower(op)
+			if op == "read" || op == "open" || op == "*" {
+				hasReadOrOpen = true
+				break
+			}
+		}
+		if !hasReadOrOpen && len(rule.Operations) > 0 {
+			continue
+		}
+
+		for _, path := range rule.Paths {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+
+			// Extract base directory (strips globs)
+			dir := extractBaseDir(path)
+			if dir == "" || dir == "." || dir == "/" {
+				continue
+			}
+
+			// Only include directories that are or contain FHS binary dirs
+			if couldContainBinaries(dir) {
+				pathSet[dir] = struct{}{}
+			}
+		}
+	}
+
+	// Convert to slice
+	paths := make([]string, 0, len(pathSet))
+	for p := range pathSet {
+		paths = append(paths, p)
+	}
+	return paths
+}
+
 // BuildFromConfig creates a RulesetBuilder from config and policy.
 func BuildFromConfig(cfg *config.LandlockConfig, pol *policy.Policy, workspace string, abi int) (*RulesetBuilder, error) {
 	b := NewRulesetBuilder(abi)
@@ -184,6 +260,9 @@ func BuildFromConfig(cfg *config.LandlockConfig, pol *policy.Policy, workspace s
 	// Add paths derived from policy
 	if pol != nil {
 		for _, p := range DeriveExecutePathsFromPolicy(pol) {
+			_ = b.AddExecutePath(p)
+		}
+		for _, p := range DeriveExecutePathsFromFileRules(pol) {
 			_ = b.AddExecutePath(p)
 		}
 		for _, p := range DeriveReadPathsFromPolicy(pol) {
