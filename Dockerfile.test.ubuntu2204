@@ -692,21 +692,26 @@ else
   fail "safe command through shim works" "got: $shim_safe"
 fi
 
-# Blocked command through shim should fail.
-# Same AGENTSH_SHIM_FORCE=1 reasoning as above — without it, the
-# bypass would exec the real shell and `shutdown` would fail for
-# unrelated reasons (binary missing or non-root), passing the
-# test vacuously. Force makes the shim enforce policy, which is
-# what this test claims to verify.
+# Blocked command through shim should fail WITH a policy-specific
+# denial message on stderr. Matching only `rc != 0` is insufficient:
+# `shutdown` can exit non-zero for unrelated reasons (binary not
+# installed, non-root in a restricted container), so a vacuous pass
+# would not prove the policy layer actually denied anything.
+# internal/cli/exec.go emits `agentsh: blocked by policy (rule=...)`
+# via fmt.Sprintf when the server refuses the command; assert on
+# that exact substring.
 set +e
-AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'shutdown now' >/dev/null 2>&1
+shim_block_stderr="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'shutdown now' 2>&1 >/dev/null)"
 shim_block_rc=$?
 set -e
-if [ "$shim_block_rc" -ne 0 ]; then
-  pass "blocked command through shim fails (rc=$shim_block_rc)"
-else
-  fail "blocked command through shim fails" "got exit code 0"
-fi
+case "$shim_block_stderr" in
+  *"blocked by policy"*)
+    pass "blocked command through shim fails (rc=$shim_block_rc; policy denial observed)"
+    ;;
+  *)
+    fail "blocked command through shim fails" "rc=$shim_block_rc, no 'blocked by policy' on stderr; got: ${shim_block_stderr}"
+    ;;
+esac
 
 # -------------------------------------------------------------------
 # Summary
