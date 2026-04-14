@@ -130,13 +130,13 @@ for bin in /usr/bin/agentsh /usr/bin/agentsh-shell-shim; do
   fi
 done
 
-# agentsh-unixwrap is only shipped on amd64
-if [ "$(dpkg --print-architecture)" = "amd64" ]; then
-  if [ -x /usr/bin/agentsh-unixwrap ]; then
-    pass "/usr/bin/agentsh-unixwrap exists (amd64)"
-  else
-    fail "/usr/bin/agentsh-unixwrap exists (amd64)" "not found or not executable"
-  fi
+# agentsh-unixwrap is shipped on both amd64 and arm64 (see nfpms.ids
+# in .goreleaser.yml). Check presence on every Linux arch so an arm64
+# image run catches a packaging regression too.
+if [ -x /usr/bin/agentsh-unixwrap ]; then
+  pass "/usr/bin/agentsh-unixwrap exists"
+else
+  fail "/usr/bin/agentsh-unixwrap exists" "not found or not executable"
 fi
 
 # Config
