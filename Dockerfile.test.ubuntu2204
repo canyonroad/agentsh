@@ -369,7 +369,19 @@ fi
 echo ""
 echo "=== Shim tests ==="
 
-sh_out="$(AGENTSH_SESSION_ID="$sid" /bin/sh -c 'echo hello_sh' 2>&1 | tr -d '\r' | tail -n 1)"
+# Shim enforcement vs. docker non-tty stdin:
+# The shim's non-interactive bypass (cmd/agentsh-shell-shim/main.go
+# ~L117) execs the real shell directly when stdin is not a
+# terminal. `docker run` in CI is non-interactive, so without an
+# override every test below would silently skip shim code paths —
+# a "pass" could just mean the real shell ran and returned the
+# expected string, proving nothing about the shim. Setting
+# AGENTSH_SHIM_FORCE=1 overrides the bypass so the shim actually
+# contacts the server and enforces policy. The binary-stdin
+# passthrough test further down deliberately omits this flag: its
+# purpose IS to exercise the bypass path, not the enforcement path.
+
+sh_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo hello_sh' 2>&1 | tr -d '\r' | tail -n 1)"
 if [ "$sh_out" = "hello_sh" ]; then
   pass "echo through /bin/sh shim"
 else
@@ -379,7 +391,7 @@ fi
 # -------------------------------------------------------------------
 # Test: basic echo through /bin/bash shim
 # -------------------------------------------------------------------
-bash_out="$(AGENTSH_SESSION_ID="$sid" /bin/bash -c 'echo hello_bash' 2>&1 | tr -d '\r' | tail -n 1)"
+bash_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/bash -c 'echo hello_bash' 2>&1 | tr -d '\r' | tail -n 1)"
 if [ "$bash_out" = "hello_bash" ]; then
   pass "echo through /bin/bash shim"
 else
@@ -392,6 +404,9 @@ fi
 # When AGENTSH_IN_SESSION is set, the shim should delegate directly to the
 # real shell without contacting the server. We set AGENTSH_BIN to a
 # nonexistent path to prove the shim doesn't try to call it.
+# Do NOT set AGENTSH_SHIM_FORCE here — the shim's AGENTSH_IN_SESSION
+# recursion guard runs BEFORE the non-tty bypass check, so force would
+# be a no-op. This test is about the recursion guard, not enforcement.
 rec_out="$(AGENTSH_BIN=/nonexistent/agentsh AGENTSH_IN_SESSION=1 /bin/sh -c 'echo recursion_ok' 2>&1 | tr -d '\r' | tail -n 1)"
 if [ "$rec_out" = "recursion_ok" ]; then
   pass "AGENTSH_IN_SESSION recursion guard"
@@ -402,7 +417,7 @@ fi
 # -------------------------------------------------------------------
 # Test: multi-word arguments preserved
 # -------------------------------------------------------------------
-multi_out="$(AGENTSH_SESSION_ID="$sid" /bin/sh -c 'echo "hello world"' 2>&1 | tr -d '\r' | tail -n 1)"
+multi_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo "hello world"' 2>&1 | tr -d '\r' | tail -n 1)"
 if [ "$multi_out" = "hello world" ]; then
   pass "multi-word arguments preserved"
 else
@@ -413,7 +428,7 @@ fi
 # Test: exit code propagation
 # -------------------------------------------------------------------
 set +e
-AGENTSH_SESSION_ID="$sid" /bin/sh -c 'exit 42' >/dev/null 2>&1
+AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'exit 42' >/dev/null 2>&1
 exit_rc=$?
 set -e
 if [ "$exit_rc" = "42" ]; then
@@ -427,6 +442,9 @@ fi
 # -------------------------------------------------------------------
 # Simulates: docker exec -i container sh -c "cat > /tmp/file" < binary
 # The shim must pass binary data through intact when stdin is piped.
+# DELIBERATELY omits AGENTSH_SHIM_FORCE — this test verifies the
+# non-interactive bypass path itself, which other tests above
+# override to exercise enforcement.
 dd if=/dev/urandom bs=1024 count=4 of=/tmp/test_binary 2>/dev/null
 pipe_out="$(/bin/sh -c 'cat' < /tmp/test_binary | md5sum | awk '{print $1}')"
 orig_md5="$(md5sum /tmp/test_binary | awk '{print $1}')"
@@ -661,17 +679,27 @@ fi
 echo ""
 echo "=== Shim + policy integration ==="
 
-# Safe command through shim should work
-shim_safe="$(AGENTSH_SESSION_ID="$sid" /bin/sh -c 'echo shim_policy_ok' 2>&1 | tr -d '\r' | tail -n 1)"
+# Safe command through shim should work.
+# AGENTSH_SHIM_FORCE=1 is required here (see the shim-tests block
+# above for the full rationale): without it, docker's non-tty
+# stdin triggers the shim's bypass, which execs the real shell
+# directly and skips the policy path entirely — making this
+# "integration" test prove nothing about shim+policy.
+shim_safe="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo shim_policy_ok' 2>&1 | tr -d '\r' | tail -n 1)"
 if [ "$shim_safe" = "shim_policy_ok" ]; then
   pass "safe command through shim works"
 else
   fail "safe command through shim works" "got: $shim_safe"
 fi
 
-# Blocked command through shim should fail
+# Blocked command through shim should fail.
+# Same AGENTSH_SHIM_FORCE=1 reasoning as above — without it, the
+# bypass would exec the real shell and `shutdown` would fail for
+# unrelated reasons (binary missing or non-root), passing the
+# test vacuously. Force makes the shim enforce policy, which is
+# what this test claims to verify.
 set +e
-AGENTSH_SESSION_ID="$sid" /bin/sh -c 'shutdown now' >/dev/null 2>&1
+AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'shutdown now' >/dev/null 2>&1
 shim_block_rc=$?
 set -e
 if [ "$shim_block_rc" -ne 0 ]; then
