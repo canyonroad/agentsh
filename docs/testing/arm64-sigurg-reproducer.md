@@ -81,12 +81,13 @@ same image.
    Expected: 100 PASS. A hang or high failure rate indicates Layer 1
    is not engaged and Layer 2 alone is insufficient.
 
-6. Confirm Layer 1 actually engaged. The fallback path logs a WARN
-   line; its absence is the success signal. Check the captured server
-   log:
+6. Confirm Layer 1 actually engaged. The fallback paths (both
+   `SetWaitKill` failure and filter-load rejection) log a WARN line
+   containing `WaitKillable`; its absence is the success signal. Check
+   the captured server log:
 
    ```bash
-   if grep -q "WaitKillable unexpectedly unavailable" /tmp/agentsh-server.log; then
+   if grep -q "WaitKillable" /tmp/agentsh-server.log; then
      echo "FAIL: Layer 1 fell back to SIGURG signal mask (Layer 2) only" >&2
      grep "WaitKillable" /tmp/agentsh-server.log >&2
      exit 1

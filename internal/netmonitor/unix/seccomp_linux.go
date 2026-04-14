@@ -391,7 +391,8 @@ func loadWithRetryOnWaitKillFailure(filt *seccomp.ScmpFilter, waitKillSet bool, 
 	if !waitKillSet {
 		return err
 	}
-	slog.Debug("seccomp: Load with WaitKill failed, retrying without", "error", err)
+	slog.Warn("seccomp: WaitKillable rejected at filter load time; falling back to SIGURG signal mask only",
+		"error", err)
 	if clearErr := filt.SetWaitKill(false); clearErr != nil {
 		return err
 	}
