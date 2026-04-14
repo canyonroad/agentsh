@@ -33,11 +33,31 @@ ARG AGENTSH_REPO=canyonroad/agentsh
 ARG AGENTSH_TAG=v0.10.1
 ARG DEB_ARCH=amd64
 
-# Expose the tag to the embedded test script so it can decide
-# whether agentsh-unixwrap is expected to be present (amd64 always,
-# arm64 only for v0.18.0+). ENV persists into the runtime image;
-# ARG alone would be erased after the build RUNs.
-ENV AGENTSH_TAG=${AGENTSH_TAG}
+# Resolve "should agentsh-unixwrap be shipped?" at BUILD TIME and
+# bake the answer into an immutable image file under /etc. amd64
+# has always shipped unixwrap; arm64 only from v0.18.0+ (PR #212 /
+# 6e6890d6). Using a file — not ENV — defeats
+# `docker run -e AGENTSH_TAG=v0.10.1 ...` attempts to silence the
+# completeness check on a modern image. An operator would have to
+# deliberately bind-mount over /etc/agentsh-test-expect-unixwrap,
+# which is a conscious act, not an accidental one.
+#
+# `dpkg --compare-versions` is built into the ubuntu:22.04 base
+# image (dpkg is required for the rootfs itself). Strip any
+# `-rcN`/`-alphaN` pre-release suffix before comparing: Debian
+# version rules treat `0.18.0-rc1` as NEWER than `0.18.0` (a
+# non-empty debian_revision sorts greater than an empty one),
+# which inverts semver's "rc1 < release". After stripping, both
+# orderings agree and rc builds of 0.18.0 get the same expectation.
+RUN set -eu; \
+    tag_base="${AGENTSH_TAG#v}"; \
+    tag_base="${tag_base%%-*}"; \
+    if [ "${DEB_ARCH}" = "amd64" ] || dpkg --compare-versions "${tag_base}" ge "0.18.0"; then \
+        echo yes > /etc/agentsh-test-expect-unixwrap; \
+    else \
+        echo no > /etc/agentsh-test-expect-unixwrap; \
+    fi; \
+    printf '%s\n' "${AGENTSH_TAG}" > /etc/agentsh-test-resolved-tag
 
 # Install dependencies: curl for downloading, bash for shim tests, jq for JSON parsing,
 # libseccomp2 + fuse3 for production sandbox path.
@@ -141,31 +161,22 @@ done
 # earlier arm64 debs intentionally lacked it — those arm64 users
 # got graceful degradation via the non-seccomp path.
 #
-# Derive the expected-present decision from (DEB_ARCH, AGENTSH_TAG)
-# rather than from the installed package manifest, so a modern deb
-# that accidentally drops the binary FAILS here instead of being
-# waved through. AGENTSH_TAG is injected into the image via ENV at
-# build time (see the `ENV AGENTSH_TAG=…` line at the top). Use
-# `dpkg --compare-versions` for proper Debian version ordering.
-#
-# Strip the `v` prefix and any `-rcN`/`-alphaN` pre-release suffix:
-# Debian version rules treat `0.18.0-rc1` as newer than `0.18.0`
-# (the hyphen introduces a debian_revision that sorts non-empty >
-# empty), which inverts semver's "rc1 < release". Comparing on the
-# stripped major.minor.patch means an rc of 0.18.0 gets the same
-# expectation as 0.18.0 itself, which matches intent: rcs are meant
-# to validate the eventual release's contents.
+# The expectation is resolved at BUILD TIME from (DEB_ARCH,
+# AGENTSH_TAG) and pinned into /etc/agentsh-test-expect-unixwrap
+# so a `docker run -e AGENTSH_TAG=…` override can't flip it. The
+# resolved tag is preserved in /etc/agentsh-test-resolved-tag for
+# use in error messages.
+expect_unixwrap="$(cat /etc/agentsh-test-expect-unixwrap)"
+resolved_tag="$(cat /etc/agentsh-test-resolved-tag)"
 arch="$(dpkg --print-architecture)"
-tag_base="${AGENTSH_TAG#v}"
-tag_base="${tag_base%%-*}"
-if [ "$arch" = "amd64" ] || dpkg --compare-versions "$tag_base" ge "0.18.0"; then
+if [ "$expect_unixwrap" = "yes" ]; then
   if [ -x /usr/bin/agentsh-unixwrap ]; then
     pass "/usr/bin/agentsh-unixwrap exists"
   else
-    fail "/usr/bin/agentsh-unixwrap exists" "not found or not executable (packaging regression for $arch $AGENTSH_TAG)"
+    fail "/usr/bin/agentsh-unixwrap exists" "not found or not executable (packaging regression for $arch $resolved_tag)"
   fi
 else
-  echo "  INFO: arm64 tag $AGENTSH_TAG pre-dates v0.18.0 unixwrap re-enable; skipping presence check"
+  echo "  INFO: arm64 tag $resolved_tag pre-dates v0.18.0 unixwrap re-enable; skipping presence check"
 fi
 
 # Config
