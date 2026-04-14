@@ -1,8 +1,20 @@
 # Self-contained integration test for agentsh on Ubuntu 22.04.
 # Exercises the production sandbox on the oldest supported LTS
-# userspace: glibc 2.35 and (pre-installed) libseccomp 2.5.3. Our
-# unixwrap binary must work here because we statically link libseccomp
-# 2.6 into the binary — the system package is irrelevant.
+# userspace: glibc 2.35 and (pre-installed) libseccomp 2.5.3. The
+# installed unixwrap binary must not depend on the distro libseccomp
+# at runtime — if it does, the build regressed to dynamic linking and
+# silently picked up 2.5.3, which lacks
+# SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV. The "no dynamic libseccomp
+# dep" check at the end of this script asserts that property.
+#
+# What this test does NOT verify: that the statically linked
+# libseccomp is actually >= 2.6. That invariant is enforced upstream
+# in the build pipeline (scripts/build-libseccomp.sh pins 2.6.0 +
+# GPG; PKG_CONFIG_LIBDIR replaces the default search path; #error
+# guards in seccomp_version_check.go fail compilation below 2.6).
+# Artifacts predating those guards (e.g. the default
+# AGENTSH_TAG=v0.10.1 example below) are only checked for link type
+# here; version is the operator's responsibility.
 #
 # Build:
 #   docker build -f Dockerfile.test.ubuntu2204 \
