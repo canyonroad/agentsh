@@ -139,8 +139,9 @@ func (h *ExecveHandler) RegisterSession(pid int, sessionID string) {
 	}
 }
 
-// Handle processes an execve notification and returns the decision.
-func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveResult {
+// Handle processes an execve notification and returns the decision plus an
+// optional audit event. The caller is responsible for emitting the event.
+func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) (ExecveResult, *types.Event) {
 	if goCtx == nil {
 		goCtx = context.Background()
 	}
@@ -179,8 +180,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 		}
 		result := ExecveResult{Allow: true, Action: ActionContinue, Rule: "internal_bypass", Decision: "allow"}
 		// Log every execve per design doc, including internal bypass
-		h.emitEvent(ctx, result, "internal_bypass")
-		return result
+		return result, h.buildEvent(ctx, result, "internal_bypass")
 	}
 
 	// Check truncation policy
@@ -194,8 +194,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 				Errno:    int32(unix.EACCES),
 				Decision: "deny",
 			}
-			h.emitEvent(ctx, result, "truncated")
-			return result
+			return result, h.buildEvent(ctx, result, "truncated")
 		case "approval":
 			if h.approver == nil {
 				result := ExecveResult{
@@ -205,8 +204,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 					Errno:    int32(unix.EACCES),
 					Decision: "deny",
 				}
-				h.emitEvent(ctx, result, "truncated_no_approver")
-				return result
+				return result, h.buildEvent(ctx, result, "truncated_no_approver")
 			}
 			timeout := h.cfg.ApprovalTimeout
 			if timeout <= 0 {
@@ -239,8 +237,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 					Errno:    int32(unix.EACCES),
 					Decision: "deny",
 				}
-				h.emitEvent(ctx, result, reason)
-				return result
+				return result, h.buildEvent(ctx, result, reason)
 			}
 			if !approved {
 				result := ExecveResult{
@@ -250,8 +247,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 					Errno:    int32(unix.EACCES),
 					Decision: "deny",
 				}
-				h.emitEvent(ctx, result, "truncated_approval_denied")
-				return result
+				return result, h.buildEvent(ctx, result, "truncated_approval_denied")
 			}
 			// Approved — fall through to policy check
 		// "allow" falls through to policy check
@@ -291,8 +287,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 				Errno:    int32(unix.EACCES),
 				Decision: payloadDecision.Decision,
 			}
-			h.emitEvent(ctx, result, payloadDecision.Rule)
-			return result
+			return result, h.buildEvent(ctx, result, payloadDecision.Rule)
 		}
 		if wrapperEffective == "deny" {
 			result := ExecveResult{
@@ -303,8 +298,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 				Errno:    int32(unix.EACCES),
 				Decision: wrapperDecision.Decision,
 			}
-			h.emitEvent(ctx, result, wrapperDecision.Rule)
-			return result
+			return result, h.buildEvent(ctx, result, wrapperDecision.Rule)
 		}
 
 		// Both allowed — use the more restrictive decision
@@ -325,8 +319,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 		switch effectiveDecision {
 		case "allow":
 			result := ExecveResult{Allow: true, Action: ActionContinue, Rule: chosenDecision.Rule, Decision: chosenDecision.Decision}
-			h.emitEvent(ctx, result, chosenDecision.Rule)
-			return result
+			return result, h.buildEvent(ctx, result, chosenDecision.Rule)
 		case "approve", "redirect":
 			result := ExecveResult{
 				Allow:    false,
@@ -336,8 +329,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 				Decision: chosenDecision.Decision,
 				Redirect: chosenDecision.Redirect,
 			}
-			h.emitEvent(ctx, result, chosenDecision.Rule)
-			return result
+			return result, h.buildEvent(ctx, result, chosenDecision.Rule)
 		default:
 			// Unknown — fall through to normal evaluation
 		}
@@ -351,8 +343,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
 		}
 		// Log every execve per design doc, including when no policy
-		h.emitEvent(ctx, result, "no_policy")
-		return result
+		return result, h.buildEvent(ctx, result, "no_policy")
 	}
 
 	// Check policy
@@ -374,8 +365,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 			h.depthTracker.RecordExecve(ctx.PID, ctx.ParentPID)
 		}
 		result := ExecveResult{Allow: true, Action: ActionContinue, Rule: decision.Rule, Decision: decision.Decision}
-		h.emitEvent(ctx, result, decision.Rule)
-		return result
+		return result, h.buildEvent(ctx, result, decision.Rule)
 
 	case "deny":
 		result := ExecveResult{
@@ -386,8 +376,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 			Errno:    int32(unix.EACCES),
 			Decision: decision.Decision,
 		}
-		h.emitEvent(ctx, result, decision.Rule)
-		return result
+		return result, h.buildEvent(ctx, result, decision.Rule)
 
 	case "approve":
 		// Redirect to agentsh-stub for approval workflow
@@ -399,8 +388,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 			Decision: decision.Decision,
 			Redirect: decision.Redirect,
 		}
-		h.emitEvent(ctx, result, decision.Rule)
-		return result
+		return result, h.buildEvent(ctx, result, decision.Rule)
 
 	case "redirect":
 		// Redirect execve to agentsh-stub
@@ -412,8 +400,7 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 			Decision: decision.Decision,
 			Redirect: decision.Redirect,
 		}
-		h.emitEvent(ctx, result, decision.Rule)
-		return result
+		return result, h.buildEvent(ctx, result, decision.Rule)
 
 	default:
 		// Unknown effective decision - deny (fail-secure)
@@ -424,15 +411,14 @@ func (h *ExecveHandler) Handle(goCtx context.Context, ctx ExecveContext) ExecveR
 			Errno:    int32(unix.EACCES),
 			Decision: decision.Decision,
 		}
-		h.emitEvent(ctx, result, "unknown")
-		return result
+		return result, h.buildEvent(ctx, result, "unknown")
 	}
 }
 
-// emitEvent emits an execve event to the emitter if configured.
-func (h *ExecveHandler) emitEvent(ctx ExecveContext, result ExecveResult, rule string) {
+// buildEvent builds an execve audit event without emitting it.
+func (h *ExecveHandler) buildEvent(ctx ExecveContext, result ExecveResult, rule string) *types.Event {
 	if h.emitter == nil {
-		return
+		return nil
 	}
 
 	action := "allowed"
@@ -456,7 +442,7 @@ func (h *ExecveHandler) emitEvent(ctx ExecveContext, result ExecveResult, rule s
 		effectiveDecision = types.DecisionDeny
 	}
 
-	ev := types.Event{
+	return &types.Event{
 		ID:        fmt.Sprintf("execve-%d-%d", ctx.PID, time.Now().UnixNano()),
 		Timestamp: time.Now().UTC(),
 		Type:      "execve",
@@ -478,9 +464,6 @@ func (h *ExecveHandler) emitEvent(ctx ExecveContext, result ExecveResult, rule s
 		},
 		EffectiveAction: action,
 	}
-
-	_ = h.emitter.AppendEvent(context.Background(), ev)
-	h.emitter.Publish(ev)
 }
 
 // isInternalBypass checks if filename matches internal bypass patterns.

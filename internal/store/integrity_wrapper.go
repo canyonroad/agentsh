@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -51,6 +52,11 @@ type IntegrityStore struct {
 	keyFingerprint string
 	now            func() time.Time
 	fatal          bool // sticky; set on first FatalIntegrityError
+	pendingFlush   bool
+	flushTick      *time.Ticker
+	stopFlush      chan struct{}
+	flushDone      chan struct{}
+	closeOnce      sync.Once
 }
 
 type visibleChainState struct {
@@ -94,6 +100,18 @@ func NewIntegrityStore(inner EventStore, chain *audit.IntegrityChain, opts Integ
 	if err := store.bootstrap(); err != nil {
 		return nil, err
 	}
+
+	// Disable per-write sync on inner store — FlushSync handles it.
+	type syncController interface{ SetSyncOnWrite(bool) }
+	if sc, ok := inner.(syncController); ok {
+		sc.SetSyncOnWrite(false)
+	}
+
+	store.stopFlush = make(chan struct{})
+	store.flushDone = make(chan struct{})
+	store.flushTick = time.NewTicker(100 * time.Millisecond)
+	go store.runFlushLoop()
+
 	return store, nil
 }
 
@@ -161,11 +179,17 @@ func (s *IntegrityStore) validateVisibleChain(files []audit.LogFile) error {
 			}
 
 			entry, err := audit.ParseIntegrityEntry(line)
-			if err != nil {
-				_ = f.Close()
-				return fmt.Errorf("audit log corrupted at %s:%d: %w", file.Path, lineNo, err)
-			}
-			if entry.Integrity == nil {
+			if err != nil || entry.Integrity == nil {
+				// A parse error on the last line of the active file (readErr == io.EOF,
+				// meaning no trailing newline) indicates a truncated write from a prior
+				// crash. Skip it here; recoverFromSidecarGap will truncate the file.
+				if errors.Is(readErr, io.EOF) && !file.IsBackup {
+					break
+				}
+				if err != nil {
+					_ = f.Close()
+					return fmt.Errorf("audit log corrupted at %s:%d: %w", file.Path, lineNo, err)
+				}
 				_ = f.Close()
 				return fmt.Errorf("unsigned line at %s:%d", file.Path, lineNo)
 			}
@@ -273,9 +297,19 @@ func (s *IntegrityStore) resumeFromSidecar(sidecar audit.SidecarState, lastFile 
 
 	entry, err := audit.ParseIntegrityEntry(lastLine)
 	if err != nil || entry.Integrity == nil {
+		// Malformed last entry: could be a truncated partial write from a crash.
+		// Attempt gap recovery, which will truncate the file and recover valid entries.
+		advanced, recoverErr := s.recoverFromSidecarGap(sidecar, lastFile)
+		if recoverErr != nil {
+			return recoverErr
+		}
+		if advanced {
+			return nil
+		}
 		return fmt.Errorf("audit integrity chain mismatch: malformed last entry in %s", lastFile.Path)
 	}
 
+	// Case 1: sidecar exactly matches last entry — normal resume.
 	if sidecar.Sequence == entry.Integrity.Sequence && sidecar.PrevHash == entry.Integrity.EntryHash {
 		ok, err := s.chain.VerifyHash(
 			entry.Integrity.FormatVersion,
@@ -294,8 +328,84 @@ func (s *IntegrityStore) resumeFromSidecar(sidecar audit.SidecarState, lastFile 
 		return nil
 	}
 
-	if sidecar.Sequence+1 == entry.Integrity.Sequence &&
-		entry.Integrity.PrevHash == sidecar.PrevHash {
+	// Case 2: sidecar is behind — crash recovery (seq+N from deferred sync).
+	if sidecar.Sequence < entry.Integrity.Sequence {
+		advanced, err := s.recoverFromSidecarGap(sidecar, lastFile)
+		if err != nil {
+			return err
+		}
+		if advanced {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("audit integrity chain mismatch: sidecar does not match %s", lastFile.Path)
+}
+
+// recoverFromSidecarGap walks the audit log from the sidecar position forward,
+// verifying each entry forms a valid chain continuation. On success, advances
+// the sidecar to the last verified entry. Also handles truncated last lines
+// from crash-during-Write by truncating the file back to the last complete line.
+func (s *IntegrityStore) recoverFromSidecarGap(sidecar audit.SidecarState, lastFile audit.LogFile) (bool, error) {
+	f, err := os.Open(lastFile.Path)
+	if err != nil {
+		return false, fmt.Errorf("open %s for recovery: %w", lastFile.Path, err)
+	}
+	defer f.Close()
+
+	reader := bufio.NewReader(f)
+	var lastVerified *audit.ParsedEntry
+	var lastGoodOffset int64
+	var currentOffset int64
+	expectedSeq := sidecar.Sequence + 1
+	expectedPrev := sidecar.PrevHash
+
+	for {
+		rawLine, readErr := reader.ReadBytes('\n')
+		lineLen := int64(len(rawLine))
+
+		if errors.Is(readErr, io.EOF) && len(rawLine) == 0 {
+			break
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return false, fmt.Errorf("read %s for recovery: %w", lastFile.Path, readErr)
+		}
+
+		line := bytes.TrimSpace(rawLine)
+		if len(line) == 0 {
+			currentOffset += lineLen
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			continue
+		}
+
+		entry, parseErr := audit.ParseIntegrityEntry(line)
+		if parseErr != nil || entry.Integrity == nil {
+			// Truncated last line from crash-during-Write. This is safe to
+			// truncate because validateVisibleChain (which runs before this)
+			// already verified all complete lines; only a trailing partial
+			// line without a newline can reach here.
+			if err := truncateFile(lastFile.Path, lastGoodOffset); err != nil {
+				slog.Warn("failed to truncate partial line during recovery",
+					"path", lastFile.Path, "error", err)
+			}
+			break
+		}
+
+		currentOffset += lineLen
+
+		// Skip entries at or before the sidecar position
+		if entry.Integrity.Sequence <= sidecar.Sequence {
+			lastGoodOffset = currentOffset
+			continue
+		}
+
+		// Verify chain link
+		if entry.Integrity.Sequence != expectedSeq || entry.Integrity.PrevHash != expectedPrev {
+			return false, fmt.Errorf("audit integrity chain mismatch: chain broken during recovery at seq %d", entry.Integrity.Sequence)
+		}
+
 		ok, err := s.chain.VerifyHash(
 			entry.Integrity.FormatVersion,
 			entry.Integrity.Sequence,
@@ -304,20 +414,48 @@ func (s *IntegrityStore) resumeFromSidecar(sidecar audit.SidecarState, lastFile 
 			entry.Integrity.EntryHash,
 		)
 		if err != nil {
-			return fmt.Errorf("audit integrity chain mismatch: verify last entry: %w", err)
+			return false, fmt.Errorf("audit integrity chain mismatch: verify entry seq %d: %w", entry.Integrity.Sequence, err)
 		}
-		if ok {
-			s.chain.Restore(entry.Integrity.Sequence, entry.Integrity.EntryHash)
-			return audit.WriteSidecar(s.sidecarPath, audit.SidecarState{
-				Sequence:       entry.Integrity.Sequence,
-				PrevHash:       entry.Integrity.EntryHash,
-				KeyFingerprint: s.keyFingerprint,
-				UpdatedAt:      s.now().UTC(),
-			})
+		if !ok {
+			return false, fmt.Errorf("audit integrity chain mismatch: invalid HMAC at seq %d", entry.Integrity.Sequence)
+		}
+
+		expectedSeq = entry.Integrity.Sequence + 1
+		expectedPrev = entry.Integrity.EntryHash
+		lastVerified = &entry
+		lastGoodOffset = currentOffset
+
+		if errors.Is(readErr, io.EOF) {
+			break
 		}
 	}
 
-	return fmt.Errorf("audit integrity chain mismatch: sidecar does not match %s", lastFile.Path)
+	if lastVerified == nil {
+		return false, nil
+	}
+
+	s.chain.Restore(lastVerified.Integrity.Sequence, lastVerified.Integrity.EntryHash)
+	slog.Warn("audit integrity: sidecar behind, advancing after crash recovery",
+		"sidecar_seq", sidecar.Sequence,
+		"log_seq", lastVerified.Integrity.Sequence,
+		"events_recovered", lastVerified.Integrity.Sequence-sidecar.Sequence,
+	)
+	return true, audit.WriteSidecar(s.sidecarPath, audit.SidecarState{
+		Sequence:       lastVerified.Integrity.Sequence,
+		PrevHash:       lastVerified.Integrity.EntryHash,
+		KeyFingerprint: s.keyFingerprint,
+		UpdatedAt:      s.now().UTC(),
+	})
+}
+
+// truncateFile truncates a file to the given size (removing a partial trailing line).
+func truncateFile(path string, size int64) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Truncate(size)
 }
 
 func (s *IntegrityStore) bootstrapWithoutSidecar(files []audit.LogFile, lastFile audit.LogFile, lastLine []byte, lastErr error, reasonCode, reason string) error {
@@ -468,17 +606,59 @@ func (s *IntegrityStore) AppendEvent(ctx context.Context, ev types.Event) error 
 		return err
 	}
 
+	s.pendingFlush = true
+	return nil
+}
+
+// FlushSync flushes buffered writes to durable storage and updates the sidecar.
+// Safe to call concurrently with AppendEvent — the chain mutex is held only
+// briefly to snapshot state, then released before slow I/O.
+func (s *IntegrityStore) FlushSync() error {
+	s.mu.Lock()
+	if !s.pendingFlush || s.fatal {
+		s.mu.Unlock()
+		return nil
+	}
 	state := s.chain.State()
+	s.pendingFlush = false
+	s.mu.Unlock()
+
+	if syncer, ok := s.inner.(Syncer); ok {
+		if err := syncer.Sync(); err != nil {
+			s.mu.Lock()
+			s.fatal = true
+			s.mu.Unlock()
+			return &FatalIntegrityError{Op: "sync audit log", Err: err}
+		}
+	}
+
 	if err := audit.WriteSidecar(s.sidecarPath, audit.SidecarState{
 		Sequence:       state.Sequence,
 		PrevHash:       state.PrevHash,
 		KeyFingerprint: s.keyFingerprint,
 		UpdatedAt:      s.now().UTC(),
 	}); err != nil {
+		s.mu.Lock()
 		s.fatal = true
+		s.mu.Unlock()
 		return &FatalIntegrityError{Op: "write audit integrity sidecar", Err: err}
 	}
 	return nil
+}
+
+func (s *IntegrityStore) runFlushLoop() {
+	defer close(s.flushDone)
+	for {
+		select {
+		case <-s.flushTick.C:
+			if err := s.FlushSync(); err != nil {
+				slog.Error("audit flush failed", "error", err)
+			}
+		case <-s.stopFlush:
+			s.flushTick.Stop()
+			return
+		}
+	}
 }
 
 // QueryEvents delegates to the inner store.
@@ -486,9 +666,21 @@ func (s *IntegrityStore) QueryEvents(ctx context.Context, q types.EventQuery) ([
 	return s.inner.QueryEvents(ctx, q)
 }
 
-// Close closes the inner store.
+// Close stops the flush loop, performs a final flush, and closes the inner store.
+// Safe to call multiple times.
 func (s *IntegrityStore) Close() error {
-	return s.inner.Close()
+	var closeErr error
+	s.closeOnce.Do(func() {
+		if s.stopFlush != nil {
+			close(s.stopFlush)
+			<-s.flushDone
+		}
+		if err := s.FlushSync(); err != nil {
+			slog.Error("final audit flush failed", "error", err)
+		}
+		closeErr = s.inner.Close()
+	})
+	return closeErr
 }
 
 // Chain returns the integrity chain for state management.

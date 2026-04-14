@@ -862,6 +862,11 @@ func TestIntegrityStore_AppendEvent_WritesSidecarAfterRawWrite(t *testing.T) {
 		t.Fatalf("AppendEvent() error = %v", err)
 	}
 
+	// Sidecar is written by FlushSync, not AppendEvent — flush explicitly.
+	if err := store.FlushSync(); err != nil {
+		t.Fatalf("FlushSync() error = %v", err)
+	}
+
 	sidecar, err := audit.ReadSidecar(audit.SidecarPath(logPath))
 	if err != nil {
 		t.Fatalf("audit.ReadSidecar() error = %v", err)

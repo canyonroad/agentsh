@@ -43,9 +43,10 @@ type Store struct {
 	maxBytes   int64
 	maxBackups int
 
-	mu       sync.Mutex
-	file     *os.File
-	lockFile *os.File
+	mu          sync.Mutex
+	file        *os.File
+	lockFile    *os.File
+	syncOnWrite bool
 }
 
 func New(path string, maxSizeMB int, maxBackups int) (*Store, error) {
@@ -85,11 +86,12 @@ func NewWithLock(path string, maxSizeMB int, maxBackups int, lockFile *os.File) 
 	}
 
 	return &Store{
-		path:       path,
-		maxBytes:   int64(maxSizeMB) * 1024 * 1024,
-		maxBackups: maxBackups,
-		file:       f,
-		lockFile:   lockFile,
+		path:        path,
+		maxBytes:    int64(maxSizeMB) * 1024 * 1024,
+		maxBackups:  maxBackups,
+		file:        f,
+		lockFile:    lockFile,
+		syncOnWrite: true,
 	}, nil
 }
 
@@ -147,10 +149,30 @@ func (s *Store) WriteRaw(_ context.Context, data []byte) error {
 		}
 		return fmt.Errorf("write jsonl raw: %w", writeErr)
 	}
-	if err := s.file.Sync(); err != nil {
-		return &DurabilityError{Err: fmt.Errorf("sync jsonl raw: %w", err)}
+	if s.syncOnWrite {
+		if err := s.file.Sync(); err != nil {
+			return &DurabilityError{Err: fmt.Errorf("sync jsonl raw: %w", err)}
+		}
 	}
 	return nil
+}
+
+// SetSyncOnWrite controls whether WriteRaw calls file.Sync() after each write.
+// When false, callers are responsible for calling Sync() periodically.
+func (s *Store) SetSyncOnWrite(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.syncOnWrite = v
+}
+
+// Sync flushes buffered writes to durable storage.
+func (s *Store) Sync() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.file == nil {
+		return nil
+	}
+	return s.file.Sync()
 }
 
 func (s *Store) QueryEvents(_ context.Context, _ types.EventQuery) ([]types.Event, error) {

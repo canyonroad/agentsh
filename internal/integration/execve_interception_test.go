@@ -70,7 +70,7 @@ func TestExecveInterception_HandlerLogic(t *testing.T) {
 			Argv:      []string{"curl", "http://example.com"},
 			Truncated: false,
 		}
-		result := h.Handle(context.Background(), ctx)
+		result, _ := h.Handle(context.Background(), ctx)
 		assert.True(t, result.Allow, "direct curl (depth 0) should be allowed")
 	})
 
@@ -84,7 +84,7 @@ func TestExecveInterception_HandlerLogic(t *testing.T) {
 			Argv:      []string{"sh", "-c", "curl http://example.com"},
 			Truncated: false,
 		}
-		shellResult := h.Handle(context.Background(), shellCtx)
+		shellResult, _ := h.Handle(context.Background(), shellCtx)
 		assert.True(t, shellResult.Allow, "shell should be allowed")
 
 		// Now curl from the shell is nested (depth 1)
@@ -95,7 +95,7 @@ func TestExecveInterception_HandlerLogic(t *testing.T) {
 			Argv:      []string{"curl", "http://example.com"},
 			Truncated: false,
 		}
-		curlResult := h.Handle(context.Background(), curlCtx)
+		curlResult, _ := h.Handle(context.Background(), curlCtx)
 		assert.False(t, curlResult.Allow, "nested curl (depth 1) should be blocked")
 	})
 
@@ -108,7 +108,7 @@ func TestExecveInterception_HandlerLogic(t *testing.T) {
 			Argv:      []string{"agentsh", "exec"},
 			Truncated: false,
 		}
-		result := h.Handle(context.Background(), ctx)
+		result, _ := h.Handle(context.Background(), ctx)
 		assert.True(t, result.Allow, "agentsh should bypass")
 		assert.Equal(t, "internal_bypass", result.Rule)
 	})
@@ -122,7 +122,7 @@ func TestExecveInterception_HandlerLogic(t *testing.T) {
 			Argv:      []string{"echo", "hello"},
 			Truncated: true,
 		}
-		result := h.Handle(context.Background(), ctx)
+		result, _ := h.Handle(context.Background(), ctx)
 		assert.False(t, result.Allow, "truncated should be denied")
 		assert.Equal(t, "truncated", result.Reason)
 	})
@@ -176,7 +176,7 @@ func TestExecveInterception_DepthTracking(t *testing.T) {
 			Argv:      []string{"bash"},
 			Truncated: false,
 		}
-		result := h.Handle(context.Background(), ctx)
+		result, _ := h.Handle(context.Background(), ctx)
 		assert.True(t, result.Allow, "depth 0 should be allowed")
 	})
 
@@ -189,7 +189,7 @@ func TestExecveInterception_DepthTracking(t *testing.T) {
 			Argv:      []string{"script.sh"},
 			Truncated: false,
 		}
-		result := h.Handle(context.Background(), ctx)
+		result, _ := h.Handle(context.Background(), ctx)
 		assert.True(t, result.Allow, "depth 1 should be allowed")
 	})
 
@@ -202,7 +202,7 @@ func TestExecveInterception_DepthTracking(t *testing.T) {
 			Argv:      []string{"ls", "-la"},
 			Truncated: false,
 		}
-		result := h.Handle(context.Background(), ctx)
+		result, _ := h.Handle(context.Background(), ctx)
 		assert.True(t, result.Allow, "depth 2 should be allowed")
 	})
 
@@ -215,7 +215,7 @@ func TestExecveInterception_DepthTracking(t *testing.T) {
 			Argv:      []string{"cat", "file.txt"},
 			Truncated: false,
 		}
-		result := h.Handle(context.Background(), ctx)
+		result, _ := h.Handle(context.Background(), ctx)
 		assert.False(t, result.Allow, "depth 3 should be denied")
 	})
 }
@@ -261,7 +261,7 @@ func TestExecveInterception_SessionIsolation(t *testing.T) {
 			Argv:      []string{"echo", "hello"},
 			Truncated: false,
 		}
-		result := h.Handle(context.Background(), ctx)
+		result, _ := h.Handle(context.Background(), ctx)
 		assert.True(t, result.Allow)
 
 		// Verify session ID was set (after allow, PID is recorded)
@@ -280,7 +280,7 @@ func TestExecveInterception_SessionIsolation(t *testing.T) {
 			Argv:      []string{"date"},
 			Truncated: false,
 		}
-		result := h.Handle(context.Background(), ctx)
+		result, _ := h.Handle(context.Background(), ctx)
 		assert.True(t, result.Allow)
 
 		// Verify session ID is different
@@ -332,7 +332,7 @@ func TestExecveInterception_NoPolicy(t *testing.T) {
 		Truncated: false,
 	}
 
-	result := h.Handle(context.Background(), ctx)
+	result, _ := h.Handle(context.Background(), ctx)
 	assert.True(t, result.Allow, "should allow when no policy")
 	assert.Equal(t, "no_policy", result.Rule)
 }
@@ -388,7 +388,7 @@ func TestExecveInterception_TruncationPolicies(t *testing.T) {
 				Truncated: true,
 			}
 
-			result := h.Handle(context.Background(), ctx)
+			result, _ := h.Handle(context.Background(), ctx)
 			assert.Equal(t, tt.expectAllow, result.Allow, "truncation policy %s failed", tt.onTruncated)
 			if tt.expectRule != "" {
 				assert.Equal(t, tt.expectRule, result.Rule)

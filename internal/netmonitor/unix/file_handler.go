@@ -3,7 +3,6 @@
 package unix
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -72,19 +71,20 @@ func (h *FileHandler) EmulateOpen() bool {
 	return h.emulateOpen
 }
 
-// Handle evaluates a file request against policy and returns the enforcement result.
+// Handle evaluates a file request against policy and returns the enforcement result
+// and an optional audit event. The caller is responsible for emitting the event.
 //
 // Routing logic:
 //  1. No policy -> allow with "no_policy" event.
 //  2. Path under FUSE mount -> audit-only (FUSE handles enforcement).
 //  3. Otherwise -> full enforcement based on policy decision and enforce flag.
-func (h *FileHandler) Handle(req FileRequest) FileResult {
+func (h *FileHandler) Handle(req FileRequest) (FileResult, *types.Event) {
 	// 0. Pseudo-paths (pipe:[...], socket:[...], anon_inode:[...]) resolve
 	//    from /proc/<pid>/fd/<N> for non-filesystem fds. They are not
 	//    filesystem objects and cannot match path-based policy rules —
 	//    allow unconditionally to avoid spurious denials.
 	if req.Path != "" && !strings.HasPrefix(req.Path, "/") {
-		return FileResult{Action: ActionContinue}
+		return FileResult{Action: ActionContinue}, nil
 	}
 
 	// 1. No policy configured — allow everything.
@@ -94,8 +94,7 @@ func (h *FileHandler) Handle(req FileRequest) FileResult {
 			EffectiveDecision: "allow",
 			Rule:              "no_policy",
 		}
-		h.emitFileEvent(req, dec, false, false)
-		return FileResult{Action: ActionContinue}
+		return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, false)
 	}
 
 	// Resolve /proc/self/fd/N, /proc/<pid>/fd/N, /dev/fd/N to actual target.
@@ -116,8 +115,7 @@ func (h *FileHandler) Handle(req FileRequest) FileResult {
 	if h.registry != nil && h.registry.IsUnderFUSEMount(req.SessionID, req.Path) {
 		dec := h.policy.CheckFile(req.Path, req.Operation)
 		shadowDeny := dec.EffectiveDecision == "deny"
-		h.emitFileEvent(req, dec, false, shadowDeny)
-		return FileResult{Action: ActionContinue}
+		return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, shadowDeny)
 	}
 
 	// 3. Full enforcement path.
@@ -135,23 +133,20 @@ func (h *FileHandler) Handle(req FileRequest) FileResult {
 	if dec.EffectiveDecision == "deny" {
 		if !h.enforce {
 			// Audit-only mode: log but allow.
-			h.emitFileEvent(req, dec, false, false)
-			return FileResult{Action: ActionContinue}
+			return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, false)
 		}
 		// Enforced deny.
-		h.emitFileEvent(req, dec, true, false)
-		return FileResult{Action: ActionDeny, Errno: int32(sysunix.EACCES)}
+		return FileResult{Action: ActionDeny, Errno: int32(sysunix.EACCES)}, h.buildFileEvent(req, dec, true, false)
 	}
 
 	// Allowed.
-	h.emitFileEvent(req, dec, false, false)
-	return FileResult{Action: ActionContinue}
+	return FileResult{Action: ActionContinue}, h.buildFileEvent(req, dec, false, false)
 }
 
-// emitFileEvent emits a structured event for a file operation.
-func (h *FileHandler) emitFileEvent(req FileRequest, dec FilePolicyDecision, blocked, shadowDeny bool) {
+// buildFileEvent builds a structured event for a file operation without emitting it.
+func (h *FileHandler) buildFileEvent(req FileRequest, dec FilePolicyDecision, blocked, shadowDeny bool) *types.Event {
 	if h.emitter == nil {
-		return
+		return nil
 	}
 
 	action := "allowed"
@@ -169,7 +164,7 @@ func (h *FileHandler) emitFileEvent(req FileRequest, dec FilePolicyDecision, blo
 		fields["path2"] = req.Path2
 	}
 
-	ev := types.Event{
+	ev := &types.Event{
 		ID:        fmt.Sprintf("file-%d-%d", req.PID, time.Now().UnixNano()),
 		Timestamp: time.Now().UTC(),
 		Type:      "file_" + req.Operation,
@@ -188,6 +183,5 @@ func (h *FileHandler) emitFileEvent(req FileRequest, dec FilePolicyDecision, blo
 		Fields:          fields,
 	}
 
-	_ = h.emitter.AppendEvent(context.Background(), ev)
-	h.emitter.Publish(ev)
+	return ev
 }

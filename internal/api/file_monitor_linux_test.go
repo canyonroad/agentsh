@@ -45,7 +45,7 @@ func TestCreateFileHandler_NilPolicy(t *testing.T) {
 	require.NotNil(t, h)
 
 	// With nil policy, Handle should return ActionContinue
-	result := h.Handle(unixmon.FileRequest{
+	result, _ := h.Handle(unixmon.FileRequest{
 		PID:       1,
 		Path:      "/any/path",
 		Operation: "open",
@@ -79,7 +79,7 @@ func TestCreateFileHandler_EnforceWithoutFUSE(t *testing.T) {
 		h := createFileHandler(cfg, engine, nil, false)
 		require.NotNil(t, h)
 
-		result := h.Handle(unixmon.FileRequest{
+		result, _ := h.Handle(unixmon.FileRequest{
 			PID:       1,
 			Path:      "/etc/shadow",
 			Operation: "open",
@@ -96,7 +96,7 @@ func TestCreateFileHandler_EnforceWithoutFUSE(t *testing.T) {
 		h := createFileHandler(cfg, engine, nil, false)
 		require.NotNil(t, h)
 
-		result := h.Handle(unixmon.FileRequest{
+		result, _ := h.Handle(unixmon.FileRequest{
 			PID:       1,
 			Path:      "/etc/shadow",
 			Operation: "open",

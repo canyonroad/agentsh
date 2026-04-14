@@ -44,7 +44,7 @@ func TestExecveHandler_Handle_Allow(t *testing.T) {
 		Truncated: false,
 	}
 
-	result := h.Handle(context.Background(), ctx)
+	result, _ := h.Handle(context.Background(), ctx)
 	assert.True(t, result.Allow)
 	assert.Equal(t, "allow-git", result.Rule)
 }
@@ -68,7 +68,7 @@ func TestExecveHandler_Handle_Deny(t *testing.T) {
 		Truncated: false,
 	}
 
-	result := h.Handle(context.Background(), ctx)
+	result, _ := h.Handle(context.Background(), ctx)
 	assert.False(t, result.Allow)
 }
 
@@ -91,7 +91,7 @@ func TestExecveHandler_Handle_TruncatedDeny(t *testing.T) {
 		Truncated: true,
 	}
 
-	result := h.Handle(context.Background(), ctx)
+	result, _ := h.Handle(context.Background(), ctx)
 	assert.False(t, result.Allow)
 	assert.Equal(t, "truncated", result.Reason)
 }
@@ -113,7 +113,7 @@ func TestExecveHandler_Handle_InternalBypass(t *testing.T) {
 		Truncated: false,
 	}
 
-	result := h.Handle(context.Background(), ctx)
+	result, _ := h.Handle(context.Background(), ctx)
 	assert.True(t, result.Allow)
 	assert.Equal(t, "internal_bypass", result.Rule)
 }
@@ -161,7 +161,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, pol, dt, nil)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/git",
@@ -185,7 +185,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, pol, dt, nil)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/curl",
@@ -210,7 +210,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, pol, dt, nil)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/rm",
@@ -234,7 +234,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, pol, dt, nil)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/rm",
@@ -258,7 +258,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, pol, dt, nil)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/npm",
@@ -277,7 +277,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt := NewDepthTracker()
 		h := NewExecveHandler(cfg, nil, dt, nil)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/local/bin/agentsh",
@@ -295,7 +295,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, nil, dt, nil)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/ls",
@@ -312,7 +312,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt := NewDepthTracker()
 		h := NewExecveHandler(cfg, nil, dt, nil)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/something",
@@ -330,7 +330,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt := NewDepthTracker()
 		h := NewExecveHandler(cfg, nil, dt, nil)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/something",
@@ -354,7 +354,7 @@ func TestExecveHandler_Action(t *testing.T) {
 		dt.RegisterSession(1000, "sess-1")
 		h := NewExecveHandler(cfg, pol, dt, nil)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/mystery",
@@ -397,7 +397,7 @@ func TestExecveHandler_TruncatedApproval_Approved(t *testing.T) {
 	h := NewExecveHandler(cfg, pol, dt, nil)
 	h.SetApprover(approver)
 
-	result := h.Handle(context.Background(), ExecveContext{
+	result, _ := h.Handle(context.Background(), ExecveContext{
 		PID:       1001,
 		ParentPID: 1000,
 		Filename:  "/usr/bin/something",
@@ -423,7 +423,7 @@ func TestExecveHandler_TruncatedApproval_Denied(t *testing.T) {
 	h := NewExecveHandler(cfg, nil, dt, nil)
 	h.SetApprover(approver)
 
-	result := h.Handle(context.Background(), ExecveContext{
+	result, _ := h.Handle(context.Background(), ExecveContext{
 		PID:       1001,
 		ParentPID: 1000,
 		Filename:  "/usr/bin/something",
@@ -449,7 +449,7 @@ func TestExecveHandler_TruncatedApproval_Timeout(t *testing.T) {
 		h := NewExecveHandler(cfg, nil, dt, nil)
 		h.SetApprover(approver)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/something",
@@ -480,7 +480,7 @@ func TestExecveHandler_TruncatedApproval_Timeout(t *testing.T) {
 		h := NewExecveHandler(cfg, pol, dt, nil)
 		h.SetApprover(approver)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/something",
@@ -505,7 +505,7 @@ func TestExecveHandler_TruncatedApproval_Timeout(t *testing.T) {
 		h := NewExecveHandler(cfg, nil, dt, nil)
 		h.SetApprover(approver)
 
-		result := h.Handle(context.Background(), ExecveContext{
+		result, _ := h.Handle(context.Background(), ExecveContext{
 			PID:       1001,
 			ParentPID: 1000,
 			Filename:  "/usr/bin/something",
@@ -537,7 +537,7 @@ func TestExecveContext_RawFilename(t *testing.T) {
 		Argv:        []string{"git", "status"},
 	}
 
-	result := h.Handle(context.Background(), ctx)
+	result, _ := h.Handle(context.Background(), ctx)
 	assert.True(t, result.Allow)
 	// RawFilename should be accessible on the context
 	assert.Equal(t, "/proc/self/root/usr/bin/git", ctx.RawFilename)
@@ -549,7 +549,7 @@ func TestExecveHandler_TruncatedApproval_NoApprover(t *testing.T) {
 	h := NewExecveHandler(cfg, nil, dt, nil)
 	// No approver set — fail-secure
 
-	result := h.Handle(context.Background(), ExecveContext{
+	result, _ := h.Handle(context.Background(), ExecveContext{
 		PID:       1001,
 		ParentPID: 1000,
 		Filename:  "/usr/bin/something",
@@ -599,7 +599,7 @@ func TestExecveHandler_TransparentUnwrap_DenyPayload(t *testing.T) {
 	dt.RegisterSession(1000, "sess-1")
 	h := NewExecveHandler(ExecveHandlerConfig{}, pol, dt, nil)
 
-	result := h.Handle(context.Background(), ExecveContext{
+	result, _ := h.Handle(context.Background(), ExecveContext{
 		PID:       1001,
 		ParentPID: 1000,
 		Filename:  "/usr/bin/env",
@@ -621,7 +621,7 @@ func TestExecveHandler_TransparentUnwrap_AllowPayload(t *testing.T) {
 	dt.RegisterSession(1000, "sess-1")
 	h := NewExecveHandler(ExecveHandlerConfig{}, pol, dt, nil)
 
-	result := h.Handle(context.Background(), ExecveContext{
+	result, _ := h.Handle(context.Background(), ExecveContext{
 		PID:       1001,
 		ParentPID: 1000,
 		Filename:  "/usr/bin/env",
@@ -641,7 +641,7 @@ func TestExecveHandler_TransparentUnwrap_DenyWrapper(t *testing.T) {
 	dt.RegisterSession(1000, "sess-1")
 	h := NewExecveHandler(ExecveHandlerConfig{}, pol, dt, nil)
 
-	result := h.Handle(context.Background(), ExecveContext{
+	result, _ := h.Handle(context.Background(), ExecveContext{
 		PID:       1001,
 		ParentPID: 1000,
 		Filename:  "/usr/bin/sudo",
@@ -661,7 +661,7 @@ func TestExecveHandler_TransparentUnwrap_NonTransparent(t *testing.T) {
 	dt.RegisterSession(1000, "sess-1")
 	h := NewExecveHandler(ExecveHandlerConfig{}, pol, dt, nil)
 
-	result := h.Handle(context.Background(), ExecveContext{
+	result, _ := h.Handle(context.Background(), ExecveContext{
 		PID:       1001,
 		ParentPID: 1000,
 		Filename:  "/usr/bin/git",
@@ -683,15 +683,16 @@ func TestExecveHandler_TransparentUnwrap_AuditFields(t *testing.T) {
 	emitter := &mockEmitter{}
 	h := NewExecveHandler(ExecveHandlerConfig{}, pol, dt, emitter)
 
-	h.Handle(context.Background(), ExecveContext{
+	_, ev := h.Handle(context.Background(), ExecveContext{
 		PID:       1001,
 		ParentPID: 1000,
 		Filename:  "/usr/bin/env",
 		Argv:      []string{"env", "git", "status"},
 	})
 
-	require.Len(t, emitter.events, 1)
-	ev := emitter.events[0]
+	// Handle() no longer emits directly — the caller is responsible.
+	// Verify the returned event carries the unwrap audit fields.
+	require.NotNil(t, ev)
 	assert.Equal(t, "/usr/bin/env", ev.UnwrappedFrom)
 	assert.Equal(t, "git", ev.PayloadCommand)
 }
