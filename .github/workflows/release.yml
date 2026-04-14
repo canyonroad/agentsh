@@ -527,6 +527,9 @@ jobs:
           - name: ubuntu
             dockerfile: Dockerfile.test.ubuntu
             docker_run_flags: "--device /dev/fuse --cap-add SYS_ADMIN"
+          - name: ubuntu2204
+            dockerfile: Dockerfile.test.ubuntu2204
+            docker_run_flags: "--device /dev/fuse --cap-add SYS_ADMIN"
     steps:
       - uses: actions/checkout@v4
 
