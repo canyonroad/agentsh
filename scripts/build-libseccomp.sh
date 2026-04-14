@@ -123,19 +123,31 @@ fi
 # on every Linux distro we target (util-linux on glibc distros,
 # busybox applet on Alpine).
 #
-# Lock file is cross-user shared — the protected resource is
-# /opt/libseccomp/${TARGET}, which is a single system-wide path, so
-# the lock must be too. `exec 9>FILE` truncates the file (requires
-# write access), so we create it mode 0666 on first use via install(1)
-# so any user on the host can subsequently acquire the lock. If the
-# file already exists with tighter perms (upgrade from an older version
-# of this script), operator remediation is `rm -f` of the lock file —
-# locks in /tmp are transient state, not data.
-LOCK_FILE="/tmp/agentsh-build-libseccomp-${TARGET}.lock"
-if [ ! -e "${LOCK_FILE}" ]; then
-    install -m 0666 /dev/null "${LOCK_FILE}" 2>/dev/null || true
+# Lock path is under root-owned /opt/libseccomp/.locks/ rather than
+# /tmp. The protected resource /opt/libseccomp/${TARGET} is system-
+# wide, so the lock must be cross-user — but a shared /tmp lock path
+# is symlink-attackable (any unprivileged user could pre-create the
+# path as a symlink to e.g. /etc/passwd before a trusted user runs
+# the script). Parking the lock under root-owned /opt/libseccomp/
+# means only root can create files there, eliminating that vector.
+#
+# Bootstrap: create .locks/ and the per-arch lock file as mode 0644
+# (root-writable, world-readable) via sudo on first use so non-root
+# builders can still open the file for read — flock(2) operates on
+# any open fd regardless of access mode, so a read fd is sufficient
+# for an exclusive lock. install(1) -d is idempotent, so concurrent
+# bootstrap attempts are safe. sudo is already a hard requirement
+# for the full build path below (make install), so requiring it for
+# the lock setup adds no new permission surface.
+LOCK_DIR="/opt/libseccomp/.locks"
+LOCK_FILE="${LOCK_DIR}/${TARGET}.lock"
+if [ ! -d "${LOCK_DIR}" ]; then
+    sudo install -d -m 0755 "${LOCK_DIR}"
 fi
-exec 9>"${LOCK_FILE}"
+if [ ! -e "${LOCK_FILE}" ]; then
+    sudo install -m 0644 /dev/null "${LOCK_FILE}"
+fi
+exec 9<"${LOCK_FILE}"
 flock -x 9
 
 # Second cache-hit check, after the flock. If we lost the race, the
