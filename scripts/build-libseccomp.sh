@@ -107,6 +107,28 @@ if [ "${TARGET}" = "arm64" ] && ! command -v aarch64-linux-gnu-gcc >/dev/null 2>
     exit 1
 fi
 
+# Host-arch gate (amd64): the amd64 case below runs `./configure`
+# with no --host/CC, so it native-builds for whatever arch the host
+# CPU is. On an arm64 host that silently produces an arm64
+# libseccomp.a labeled as amd64, which the linker would happily pick
+# up and then fail in a confusing way ("file in wrong format") — or
+# worse, produce a broken binary if a multi-arch toolchain is
+# involved. Fail-closed when the host isn't x86_64, symmetric with
+# the arm64 cross-compiler gate above. GoReleaser's per-build
+# hooks.pre set SKIP_IF_UNSUPPORTED=1 so an arm64-only dev host
+# doesn't break filtered runs that never touch linux/amd64. `uname
+# -m` is the portable host-arch probe (x86_64 on Linux, amd64 not
+# used). Reached only when the cache-hit fast path above did not
+# apply, so a rebuild is actually needed.
+if [ "${TARGET}" = "amd64" ] && [ "$(uname -m)" != "x86_64" ]; then
+    if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
+        echo "build-libseccomp: host is $(uname -m); SKIP_IF_UNSUPPORTED=1, skipping amd64 sysroot." >&2
+        exit 0
+    fi
+    echo "ERROR: TARGET=amd64 requires an x86_64 host (got $(uname -m)). The amd64 path uses a native ./configure (no cross-compiler), so a non-x86_64 host would silently build for the wrong arch. Set SKIP_IF_UNSUPPORTED=1 to no-op, or run on an x86_64 host." >&2
+    exit 1
+fi
+
 # Per-arch concurrency lock. GoReleaser runs per-build hooks in
 # parallel with the build itself, and multiple Linux CGO builds share
 # the same sysroot dependency (agentsh-linux-<arch> and
