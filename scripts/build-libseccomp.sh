@@ -38,6 +38,37 @@ GPG_FPR="7100AADFAE6E6E940D2E0AD655E45A5AE8CA7C8A"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY_FILE="${SCRIPT_DIR}/libseccomp-signing-key.asc"
 
+# detect_object_fmt <path-to-elf-object>
+# Echoes a BFD file-format string ("elf64-x86-64",
+# "elf64-littleaarch64", ...) for an ELF object and exits 0. Exits 1
+# (and prints nothing) when no installed probe can identify the file.
+# Works on .o and .so; archives (.a) work with objdump but not readelf,
+# so archive callers extract a member before calling this helper.
+#
+# Shared by:
+#   - check_installed(): fallback path when objdump can't read the
+#     cached .a directly — extracts a member and calls us on it.
+#   - amd64 compile-probe (below): validates that the full $CC command
+#     actually emits x86_64 objects, catching driver flags like -m32
+#     that -dumpmachine misses.
+detect_object_fmt() {
+    local path="$1" fmt=""
+    if command -v objdump >/dev/null 2>&1; then
+        fmt="$(objdump -f "$path" 2>/dev/null | awk '/file format/ {print $NF; exit}')"
+    fi
+    if [ -z "$fmt" ] && command -v readelf >/dev/null 2>&1; then
+        local machine
+        machine="$(readelf -h "$path" 2>/dev/null \
+            | awk -F: '/Machine:/ {sub(/^ +/, "", $2); print $2; exit}')"
+        case "$machine" in
+            "Advanced Micro Devices X86-64") fmt="elf64-x86-64" ;;
+            "AArch64")                        fmt="elf64-littleaarch64" ;;
+        esac
+    fi
+    [ -n "$fmt" ] || return 1
+    printf '%s\n' "$fmt"
+}
+
 # check_installed: returns 0 when PREFIX already holds a clean
 # static-only install of the requested VERSION, non-zero otherwise.
 # Callable more than once — we run it twice: before acquiring the
@@ -82,23 +113,19 @@ check_installed() {
                 | awk '/file format/ {print $NF; exit}')"
             [ -n "$cache_fmt" ] && probe_method="objdump"
         fi
-        # Fallback: extract first member with ar, read e_machine via
-        # readelf. Covers minimal hosts that lack objdump but still
-        # carry ar + readelf (both shipped by binutils).
+        # Fallback: extract first member with ar, then run
+        # detect_object_fmt on it. Covers minimal hosts that lack
+        # objdump but still carry ar + readelf (both shipped by
+        # binutils).
         if [ -z "$cache_fmt" ] && command -v ar >/dev/null 2>&1 && command -v readelf >/dev/null 2>&1; then
-            local probe_dir first_obj machine
+            local probe_dir first_obj
             probe_dir="$(mktemp -d 2>/dev/null || true)"
             if [ -n "$probe_dir" ]; then
                 first_obj="$(ar t "${PREFIX}/lib/libseccomp.a" 2>/dev/null | head -1)"
                 if [ -n "$first_obj" ] \
                     && (cd "$probe_dir" && ar x "${PREFIX}/lib/libseccomp.a" "$first_obj" 2>/dev/null) \
                     && [ -f "$probe_dir/$first_obj" ]; then
-                    machine="$(readelf -h "$probe_dir/$first_obj" 2>/dev/null \
-                        | awk -F: '/Machine:/ {sub(/^ +/, "", $2); print $2; exit}')"
-                    case "$machine" in
-                        "Advanced Micro Devices X86-64") cache_fmt="elf64-x86-64" ;;
-                        "AArch64")                        cache_fmt="elf64-littleaarch64" ;;
-                    esac
+                    cache_fmt="$(detect_object_fmt "$probe_dir/$first_obj" 2>/dev/null || true)"
                     [ -n "$cache_fmt" ] && probe_method="ar+readelf"
                 fi
                 rm -rf "$probe_dir"
@@ -216,6 +243,47 @@ if [ "${TARGET}" = "amd64" ]; then
             exit 1
             ;;
     esac
+    # Output-arch compile-probe: authoritative check that -dumpmachine
+    # alone cannot provide. -dumpmachine reports the compiler's *default*
+    # target and ignores output-changing driver flags, so CC values like
+    # 'gcc -m32' or 'ccache gcc -m32' — or a --target= override on
+    # clang — pass the -dumpmachine gate as x86_64 while still emitting
+    # 32-bit objects, reintroducing the wrong-arch cache this gate
+    # exists to prevent. Test the *actual* output of the full CC command
+    # by compiling a trivial object and verifying its ELF machine.
+    probe_dir="$(mktemp -d)"
+    printf 'int main(void){return 0;}\n' >"$probe_dir/probe.c"
+    # shellcheck disable=SC2086 -- word-splitting is intentional here
+    if ! $amd64_cc -c -o "$probe_dir/probe.o" "$probe_dir/probe.c" 2>"$probe_dir/probe.err"; then
+        probe_err="$(cat "$probe_dir/probe.err" 2>/dev/null || true)"
+        rm -rf "$probe_dir"
+        if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
+            echo "build-libseccomp: compile-probe with '${amd64_cc}' failed; SKIP_IF_UNSUPPORTED=1, skipping amd64 sysroot." >&2
+            [ -n "$probe_err" ] && echo "$probe_err" >&2
+            exit 0
+        fi
+        echo "ERROR: TARGET=amd64: compile-probe with '${amd64_cc}' failed. Unset CC, install a working native x86_64 compiler, or set SKIP_IF_UNSUPPORTED=1 to no-op." >&2
+        [ -n "$probe_err" ] && echo "$probe_err" >&2
+        exit 1
+    fi
+    probe_fmt="$(detect_object_fmt "$probe_dir/probe.o" 2>/dev/null || true)"
+    rm -rf "$probe_dir"
+    if [ -z "$probe_fmt" ]; then
+        if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
+            echo "build-libseccomp: compile-probe output arch could not be verified (neither objdump nor readelf available/parseable); SKIP_IF_UNSUPPORTED=1, skipping amd64 sysroot." >&2
+            exit 0
+        fi
+        echo "ERROR: TARGET=amd64: compile-probe output arch could not be verified. Install binutils (objdump or readelf) or set SKIP_IF_UNSUPPORTED=1 to no-op." >&2
+        exit 1
+    fi
+    if [ "$probe_fmt" != "elf64-x86-64" ]; then
+        if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
+            echo "build-libseccomp: '${amd64_cc}' compile-probe emits '${probe_fmt}', not 'elf64-x86-64'; SKIP_IF_UNSUPPORTED=1, skipping amd64 sysroot." >&2
+            exit 0
+        fi
+        echo "ERROR: TARGET=amd64: '${amd64_cc}' compile-probe emits '${probe_fmt}', not 'elf64-x86-64'. This catches driver flags (e.g. -m32) or target overrides that -dumpmachine misses. Remove ABI-changing flags from CC, or set SKIP_IF_UNSUPPORTED=1 to no-op." >&2
+        exit 1
+    fi
     # Pin the validated compiler into the build environment so the
     # amd64 ./configure below uses exactly what we probed. Autoconf's
     # default compiler search (gcc, then cc, then cl) could otherwise
