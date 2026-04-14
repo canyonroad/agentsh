@@ -14,6 +14,12 @@ builds:
     binary: agentsh
     env:
       - CGO_ENABLED=1
+      # Fail-closed: PKG_CONFIG_LIBDIR REPLACES the default search path
+      # rather than augmenting it. If /opt/libseccomp/amd64/... is missing,
+      # pkg-config errors instead of silently falling back to the distro's
+      # 2.5.x libseccomp. The compile-time #error guard then catches
+      # anything that slips through.
+      - PKG_CONFIG_LIBDIR=/opt/libseccomp/amd64/lib/pkgconfig
     goos:
       - linux
     goarch:
@@ -28,7 +34,10 @@ builds:
     env:
       - CGO_ENABLED=1
       - CC=aarch64-linux-gnu-gcc
-      - PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+      # Fail-closed: see amd64 comment. Replaces the default arm64
+      # pkgconfig path so a missing libseccomp 2.6 install fails the
+      # build instead of picking up the distro 2.5.x.
+      - PKG_CONFIG_LIBDIR=/opt/libseccomp/arm64/lib/pkgconfig
     goos:
       - linux
     goarch:
@@ -98,7 +107,10 @@ builds:
       # Only libseccomp.a is installed (no .so), so the linker picks it
       # statically despite the plain -lseccomp. Leave glibc dynamic —
       # Alpine builds are the fully-static variant.
-      - PKG_CONFIG_PATH=/opt/libseccomp/amd64/lib/pkgconfig
+      # PKG_CONFIG_LIBDIR (not _PATH) replaces the default search path so
+      # a missing install fails the build instead of silently linking the
+      # distro's pre-2.6 libseccomp.
+      - PKG_CONFIG_LIBDIR=/opt/libseccomp/amd64/lib/pkgconfig
     goos:
       - linux
     goarch:
@@ -113,10 +125,10 @@ builds:
     env:
       - CGO_ENABLED=1
       - CC=aarch64-linux-gnu-gcc
-      # Point PKG_CONFIG_PATH at our static libseccomp 2.6 for arm64.
+      # Point PKG_CONFIG_LIBDIR at our static libseccomp 2.6 for arm64.
       # The previous /usr/lib/aarch64-linux-gnu/pkgconfig picked up the
       # 2.5.x from apt, which silently disabled Layer 1 of the SIGURG fix.
-      - PKG_CONFIG_PATH=/opt/libseccomp/arm64/lib/pkgconfig
+      - PKG_CONFIG_LIBDIR=/opt/libseccomp/arm64/lib/pkgconfig
     goos:
       - linux
     goarch:
