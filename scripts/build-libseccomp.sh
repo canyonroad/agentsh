@@ -25,28 +25,34 @@ case "${TARGET}" in
 esac
 
 # Host-OS gate: this script builds a Linux static library via
-# ./configure + make. GoReleaser's before.hooks run on every host,
-# including darwin dev machines building only darwin artifacts, so
-# we exit 0 here rather than fail the whole goreleaser run. Linux
-# CGO builds on non-Linux hosts would fail later with a clearer
-# error anyway (missing PKG_CONFIG_LIBDIR sysroot).
+# ./configure + make, so it cannot run on darwin/windows. The
+# default is fail-closed (exit 1) so direct callers — CI jobs,
+# operators invoking the script manually — see a clear error when
+# the host is wrong. GoReleaser's before.hooks set
+# SKIP_IF_UNSUPPORTED=1 so filtered runs (e.g. darwin-only snapshot
+# from a macOS dev machine) succeed without us, since the sysroot is
+# irrelevant to the selected targets.
 if [ "$(uname -s)" != "Linux" ]; then
-    echo "build-libseccomp: host is $(uname -s), skipping Linux ${TARGET} sysroot." >&2
-    exit 0
+    if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
+        echo "build-libseccomp: host is $(uname -s); SKIP_IF_UNSUPPORTED=1, skipping Linux ${TARGET} sysroot." >&2
+        exit 0
+    fi
+    echo "ERROR: build-libseccomp requires a Linux host (got $(uname -s)). Set SKIP_IF_UNSUPPORTED=1 to no-op on non-Linux." >&2
+    exit 1
 fi
 
-# Cross-compiler gate (arm64 only): skip gracefully when
-# aarch64-linux-gnu-gcc is absent so goreleaser's before.hook does
-# not fail on dev hosts that aren't building Linux/arm64 artifacts.
-# CI install steps (release.yml, ci.yml) apt-install the cross
-# compiler before invoking this script, so CI still takes the
-# strict path. An operator who actually tries to build linux/arm64
-# locally without the cross compiler will get a clearer error from
-# goreleaser's build step than from a missing PKG_CONFIG_LIBDIR
-# sysroot.
+# Cross-compiler gate (arm64 only): fail-closed when
+# aarch64-linux-gnu-gcc is absent, so direct callers see the real
+# problem. GoReleaser's before.hooks set SKIP_IF_UNSUPPORTED=1 so
+# amd64-only dev hosts don't break filtered runs that never touch
+# linux/arm64.
 if [ "${TARGET}" = "arm64" ] && ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
-    echo "build-libseccomp: aarch64-linux-gnu-gcc not found in PATH; skipping arm64 sysroot." >&2
-    exit 0
+    if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
+        echo "build-libseccomp: aarch64-linux-gnu-gcc not found; SKIP_IF_UNSUPPORTED=1, skipping arm64 sysroot." >&2
+        exit 0
+    fi
+    echo "ERROR: TARGET=arm64 requires aarch64-linux-gnu-gcc in PATH. Install gcc-aarch64-linux-gnu or set SKIP_IF_UNSUPPORTED=1 to no-op." >&2
+    exit 1
 fi
 
 PREFIX="/opt/libseccomp/${TARGET}"

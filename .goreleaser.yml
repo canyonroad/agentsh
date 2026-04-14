@@ -7,17 +7,23 @@ before:
     - ./scripts/build-envshim.sh
     - ./scripts/build-ptracer.sh
     # Provision /opt/libseccomp/{amd64,arm64} sysroots for the Linux CGO
-    # builds. Idempotent: build-libseccomp.sh early-exits when the
-    # install is already present at the requested version. This makes
-    # local `goreleaser release --snapshot` / `make package-snapshot` /
-    # `make package-release` work without the operator having to run
-    # the script separately.
+    # builds. SKIP_IF_UNSUPPORTED=1 makes the script no-op gracefully on
+    # non-Linux hosts and when the arm64 cross-compiler is missing, so
+    # filtered runs (darwin/windows-only snapshots, single-target builds
+    # from macOS dev machines) are not blocked by a sysroot that the
+    # selected targets don't need. Without that opt-in, direct callers
+    # of the script (release.yml, ci.yml, manual invocations) still get
+    # strict fail-closed behavior. The script is idempotent, so these
+    # hooks no-op on the second run when a matching install already
+    # exists.
     - cmd: ./scripts/build-libseccomp.sh
       env:
         - TARGET=amd64
+        - SKIP_IF_UNSUPPORTED=1
     - cmd: ./scripts/build-libseccomp.sh
       env:
         - TARGET=arm64
+        - SKIP_IF_UNSUPPORTED=1
 
 builds:
   # Linux amd64: CGO enabled for full seccomp user-notify support
