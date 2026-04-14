@@ -197,9 +197,19 @@ func main() {
 
 	// Block SIGURG on this OS thread to prevent Go's ~10ms async preemption
 	// from interrupting seccomp_do_user_notification during execve.
-	// Since syscall.Exec replaces the process image, this has no lasting effect.
-	runtime.LockOSThread()
-	blockSIGURG()
+	// Only needed when seccomp user-notify is active — without a filter,
+	// there is no notification wait to protect.
+	//
+	// Note: the blocked SIGURG mask is inherited across execve. For most
+	// programs this is harmless (SIGURG is rarely used). For wrapped Go
+	// binaries, async preemption degrades to cooperative preemption — a
+	// minor performance trade-off vs. the 0% success rate caused by the
+	// ERESTARTSYS loop this prevents. On kernel 6.0+ the SetWaitKill flag
+	// (Layer 1) handles this at the kernel level without signal mask changes.
+	if notifFD >= 0 {
+		runtime.LockOSThread()
+		blockSIGURG()
+	}
 
 	// Exec the real command.
 	cmd := os.Args[2]
