@@ -64,29 +64,53 @@ check_installed() {
     # wrong-arch build before it happens, but a cache written by the
     # pre-gate behavior (e.g. an arm64 host that once ran
     # TARGET=amd64 and deposited an arm64 libseccomp.a in the amd64
-    # prefix) must be invalidated, not accepted. objdump reports a
-    # `file format elf64-*` line per archive member; compare the
-    # first to the format we expect for TARGET.
-    #
-    # Fail-open when objdump is missing — the gates + Go CGO link
-    # step catch arch mismatch downstream, and binutils isn't
-    # strictly a build prereq (the native compiler is). Better to
-    # cache-hit with an extra rebuild trigger elsewhere than to
-    # block builds on a host that happens to lack objdump.
-    if command -v objdump >/dev/null 2>&1; then
-        local expected_fmt cache_fmt
-        case "$TARGET" in
-            amd64) expected_fmt="elf64-x86-64" ;;
-            arm64) expected_fmt="elf64-littleaarch64" ;;
-            *)     expected_fmt="" ;;
-        esac
-        if [ -n "$expected_fmt" ]; then
+    # prefix) must be invalidated, not accepted. Try objdump first,
+    # then fall back to ar+readelf on a member. Fail closed if
+    # neither succeeds — the whole point of this probe is to refuse
+    # a potentially-poisoned cache, so accepting it on "no verifier
+    # available" would defeat the purpose.
+    local expected_fmt
+    case "$TARGET" in
+        amd64) expected_fmt="elf64-x86-64" ;;
+        arm64) expected_fmt="elf64-littleaarch64" ;;
+        *)     expected_fmt="" ;;
+    esac
+    if [ -n "$expected_fmt" ]; then
+        local cache_fmt="" probe_method=""
+        if command -v objdump >/dev/null 2>&1; then
             cache_fmt="$(objdump -f "${PREFIX}/lib/libseccomp.a" 2>/dev/null \
                 | awk '/file format/ {print $NF; exit}')"
-            if [ -n "$cache_fmt" ] && [ "$cache_fmt" != "$expected_fmt" ]; then
-                echo "WARN: ${PREFIX}/lib/libseccomp.a has file format '${cache_fmt}', expected '${expected_fmt}' for TARGET=${TARGET} — invalidating cache (likely written by a pre-gate run on the wrong host)." >&2
-                return 1
+            [ -n "$cache_fmt" ] && probe_method="objdump"
+        fi
+        # Fallback: extract first member with ar, read e_machine via
+        # readelf. Covers minimal hosts that lack objdump but still
+        # carry ar + readelf (both shipped by binutils).
+        if [ -z "$cache_fmt" ] && command -v ar >/dev/null 2>&1 && command -v readelf >/dev/null 2>&1; then
+            local probe_dir first_obj machine
+            probe_dir="$(mktemp -d 2>/dev/null || true)"
+            if [ -n "$probe_dir" ]; then
+                first_obj="$(ar t "${PREFIX}/lib/libseccomp.a" 2>/dev/null | head -1)"
+                if [ -n "$first_obj" ] \
+                    && (cd "$probe_dir" && ar x "${PREFIX}/lib/libseccomp.a" "$first_obj" 2>/dev/null) \
+                    && [ -f "$probe_dir/$first_obj" ]; then
+                    machine="$(readelf -h "$probe_dir/$first_obj" 2>/dev/null \
+                        | awk -F: '/Machine:/ {sub(/^ +/, "", $2); print $2; exit}')"
+                    case "$machine" in
+                        "Advanced Micro Devices X86-64") cache_fmt="elf64-x86-64" ;;
+                        "AArch64")                        cache_fmt="elf64-littleaarch64" ;;
+                    esac
+                    [ -n "$cache_fmt" ] && probe_method="ar+readelf"
+                fi
+                rm -rf "$probe_dir"
             fi
+        fi
+        if [ -z "$cache_fmt" ]; then
+            echo "WARN: ${PREFIX}/lib/libseccomp.a arch cannot be verified (neither objdump nor ar+readelf available/parseable) — invalidating cache (fail-closed; install binutils to re-enable the cache-hit path)." >&2
+            return 1
+        fi
+        if [ "$cache_fmt" != "$expected_fmt" ]; then
+            echo "WARN: ${PREFIX}/lib/libseccomp.a has file format '${cache_fmt}' (probe=${probe_method}), expected '${expected_fmt}' for TARGET=${TARGET} — invalidating cache (likely written by a pre-gate run on the wrong host)." >&2
+            return 1
         fi
     fi
     return 0
@@ -165,26 +189,40 @@ fi
 # not apply, so a rebuild is actually needed.
 if [ "${TARGET}" = "amd64" ]; then
     amd64_cc="${CC:-cc}"
-    if ! command -v "$amd64_cc" >/dev/null 2>&1; then
+    # Autoconf/make use CC as a command line (e.g. 'ccache gcc' or
+    # 'clang --target=x86_64-linux-gnu'), so the first whitespace-
+    # separated token is the executable for `command -v`, and the
+    # full CC — unquoted, with word-splitting — is the invocation
+    # for `-dumpmachine`.
+    amd64_cc_exec="${amd64_cc%% *}"
+    if ! command -v "$amd64_cc_exec" >/dev/null 2>&1; then
         if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
-            echo "build-libseccomp: compiler ${amd64_cc} not found; SKIP_IF_UNSUPPORTED=1, skipping amd64 sysroot." >&2
+            echo "build-libseccomp: compiler '${amd64_cc_exec}' not found; SKIP_IF_UNSUPPORTED=1, skipping amd64 sysroot." >&2
             exit 0
         fi
-        echo "ERROR: TARGET=amd64 requires ${amd64_cc} in PATH. Install a native C compiler or set SKIP_IF_UNSUPPORTED=1 to no-op." >&2
+        echo "ERROR: TARGET=amd64 requires '${amd64_cc_exec}' in PATH. Install a native C compiler or set SKIP_IF_UNSUPPORTED=1 to no-op." >&2
         exit 1
     fi
-    amd64_triplet="$("$amd64_cc" -dumpmachine 2>/dev/null || true)"
+    # shellcheck disable=SC2086 -- word-splitting is intentional here
+    amd64_triplet="$($amd64_cc -dumpmachine 2>/dev/null || true)"
     case "$amd64_triplet" in
         x86_64-*) : ;;
         *)
             if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
-                echo "build-libseccomp: ${amd64_cc} -dumpmachine = '${amd64_triplet:-<empty>}'; SKIP_IF_UNSUPPORTED=1, skipping amd64 sysroot." >&2
+                echo "build-libseccomp: '${amd64_cc}' -dumpmachine = '${amd64_triplet:-<empty>}'; SKIP_IF_UNSUPPORTED=1, skipping amd64 sysroot." >&2
                 exit 0
             fi
-            echo "ERROR: TARGET=amd64: ${amd64_cc} -dumpmachine returned '${amd64_triplet:-<empty>}', not x86_64-*. The amd64 path uses a native ./configure and would produce the wrong arch. Unset CC, install a native x86_64 compiler, or set SKIP_IF_UNSUPPORTED=1." >&2
+            echo "ERROR: TARGET=amd64: '${amd64_cc}' -dumpmachine returned '${amd64_triplet:-<empty>}', not x86_64-*. The amd64 path uses a native ./configure and would produce the wrong arch. Unset CC, install a native x86_64 compiler, or set SKIP_IF_UNSUPPORTED=1." >&2
             exit 1
             ;;
     esac
+    # Pin the validated compiler into the build environment so the
+    # amd64 ./configure below uses exactly what we probed. Autoconf's
+    # default compiler search (gcc, then cc, then cl) could otherwise
+    # pick a different binary than we validated, defeating the gate
+    # (e.g. user sets CC=/path/to/clang for the probe but autoconf
+    # runs with CC unset and finds gcc first).
+    export CC="$amd64_cc"
 fi
 
 # Per-arch concurrency lock. GoReleaser runs per-build hooks in
@@ -299,7 +337,12 @@ CONFIGURE_ARGS=(
 
 case "$TARGET" in
     amd64)
-        ./configure "${CONFIGURE_ARGS[@]}"
+        # CC was exported by the amd64 compiler-target gate above
+        # (either the user-provided value or the default `cc`). Pass
+        # it explicitly on the configure line as well so sudo make
+        # install in a reduced env or an autoconf that re-probes
+        # cannot silently pick a different compiler.
+        CC="$CC" ./configure "${CONFIGURE_ARGS[@]}"
         ;;
     arm64)
         CC=aarch64-linux-gnu-gcc \
