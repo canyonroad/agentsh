@@ -70,6 +70,7 @@ func ServeNotify(ctx context.Context, fd *os.File, sessID string, pol *policy.En
 		errno := int32(unix.EACCES)
 		path := ""
 		abstract := false
+		var ev *types.Event
 		if raw, err := ReadSockaddr(ctxReq.PID, ctxReq.AddrPtr, ctxReq.AddrLen); err == nil {
 			if p, abs, perr := ParseSockaddr(raw); perr == nil {
 				path, abstract = p, abs
@@ -78,7 +79,7 @@ func ServeNotify(ctx context.Context, fd *os.File, sessID string, pol *policy.En
 				allow = dec.EffectiveDecision == types.DecisionAllow
 				if !allow {
 					errno = int32(unix.EACCES)
-					emitEvent(emit, sessID, dec, path, abstract, op)
+					ev = buildUnixSocketEvent(emit, sessID, dec, path, abstract, op)
 				}
 			}
 		}
@@ -90,6 +91,12 @@ func ServeNotify(ctx context.Context, fd *os.File, sessID string, pol *policy.En
 			if err := NotifRespondDeny(int(scmpFD), req.ID, errno); err != nil {
 				slog.Error("unix socket: deny response failed", "path", path, "error", err)
 			}
+		}
+		// Emit the audit event after the notify response to avoid blocking
+		// the traced process on audit I/O.
+		if ev != nil {
+			_ = emit.AppendEvent(context.Background(), *ev)
+			emit.Publish(*ev)
 		}
 	}
 }
@@ -137,8 +144,11 @@ func isENOENT(err error) bool {
 	return false
 }
 
-func emitEvent(emit Emitter, session string, dec policy.Decision, path string, abstract bool, op string) {
-	ev := types.Event{
+func buildUnixSocketEvent(emit Emitter, session string, dec policy.Decision, path string, abstract bool, op string) *types.Event {
+	if emit == nil {
+		return nil
+	}
+	return &types.Event{
 		ID:        fmt.Sprintf("evt-%d", time.Now().UnixNano()),
 		Timestamp: time.Now().UTC(),
 		Type:      "unix_socket_op",
@@ -153,8 +163,6 @@ func emitEvent(emit Emitter, session string, dec policy.Decision, path string, a
 		Abstract:  abstract,
 		Operation: op,
 	}
-	_ = emit.AppendEvent(context.Background(), ev)
-	emit.Publish(ev)
 }
 
 // ServeNotifyWithExecve runs the seccomp notify loop with execve interception support.
@@ -244,6 +252,7 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 		errno := int32(unix.EACCES)
 		path := ""
 		abstract := false
+		var ev *types.Event
 		if raw, err := ReadSockaddr(ctxReq.PID, ctxReq.AddrPtr, ctxReq.AddrLen); err == nil {
 			if p, abs, perr := ParseSockaddr(raw); perr == nil {
 				path, abstract = p, abs
@@ -252,7 +261,7 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 				allow = dec.EffectiveDecision == types.DecisionAllow
 				if !allow {
 					errno = int32(unix.EACCES)
-					emitEvent(emit, sessID, dec, path, abstract, op)
+					ev = buildUnixSocketEvent(emit, sessID, dec, path, abstract, op)
 				}
 			}
 		}
@@ -264,6 +273,12 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 			if err := NotifRespondDeny(int(scmpFD), req.ID, errno); err != nil {
 				slog.Error("unix socket: deny response failed", "path", path, "error", err)
 			}
+		}
+		// Emit the audit event after the notify response to avoid blocking
+		// the traced process on audit I/O.
+		if ev != nil {
+			_ = emit.AppendEvent(context.Background(), *ev)
+			emit.Publish(*ev)
 		}
 	}
 }
