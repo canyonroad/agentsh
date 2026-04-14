@@ -68,6 +68,8 @@ jobs:
 
       - name: Smoke
         run: make smoke
+        env:
+          PKG_CONFIG_LIBDIR: /opt/libseccomp/amd64/lib/pkgconfig
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
