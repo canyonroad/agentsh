@@ -78,28 +78,38 @@ same image.
    to catch a Layer 1 regression:
 
    ```bash
+   wrapper_log=$(mktemp /tmp/agentsh-unixwrap-stderr.XXXXXX)
    for i in $(seq 1 100); do
-     agentsh exec "$sid" -- agentsh session list >/dev/null \
+     agentsh exec "$sid" -- agentsh session list >/dev/null 2>>"$wrapper_log" \
        || { echo "FAIL iter $i"; exit 1; }
    done
-   echo "PASS: 100 iterations"
+   echo "PASS: 100 iterations (wrapper stderr captured to ${wrapper_log})"
    ```
 
    Expected: 100 PASS. A hang or high failure rate indicates Layer 1
    is not engaged and Layer 2 alone is insufficient.
 
+   The `2>>"$wrapper_log"` redirect is load-bearing: the
+   `WaitKillable` fallback WARN is emitted by
+   `agentsh-unixwrap` (the wrapper installs the seccomp filter), not
+   by the long-lived `agentsh server`. The server relays that stderr
+   through the exec response to the `agentsh exec` CLI's stderr, where
+   this redirect captures it. The server log alone never sees these
+   warnings, so step 6 below must grep both files.
+
 6. Confirm Layer 1 actually engaged. The fallback paths (both
    `SetWaitKill` failure and filter-load rejection) log a WARN line
    containing `WaitKillable`; its absence is the success signal. Check
-   the captured server log:
+   both the captured server log and the wrapper-stderr log captured
+   in step 5:
 
    ```bash
-   if grep -q "WaitKillable" /tmp/agentsh-server.log; then
+   if grep -q "WaitKillable" /tmp/agentsh-server.log "$wrapper_log" 2>/dev/null; then
      echo "FAIL: Layer 1 fell back to SIGURG signal mask (Layer 2) only" >&2
-     grep "WaitKillable" /tmp/agentsh-server.log >&2
+     grep -H "WaitKillable" /tmp/agentsh-server.log "$wrapper_log" >&2 || true
      exit 1
    fi
-   echo "PASS: no Layer 1 fallback warnings"
+   echo "PASS: no Layer 1 fallback warnings (checked server log + wrapper stderr)"
    ```
 
    Expected: `PASS: no Layer 1 fallback warnings`. If step 5 PASSed but
