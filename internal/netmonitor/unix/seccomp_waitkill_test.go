@@ -97,26 +97,35 @@ func TestInstallFilterWithConfig_WaitKillLoadsCleanly(t *testing.T) {
 	// child to the install path instead of re-spawning.
 	cmd := exec.Command(exe, "-test.run=^TestInstallFilterWithConfig_WaitKillLoadsCleanly$")
 	cmd.Env = append(os.Environ(), waitKillHelperEnv+"=1")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	// Capture stdout AND stderr into the same buffer. The slog.Warn
+	// fallback lines go to stderr (default handler), but the Go
+	// testing harness writes t.Fatalf/t.Skip output to stdout — if we
+	// captured stderr alone, an environmental permission-denied from
+	// the child's t.Fatalf would be invisible to the skip logic below
+	// and cause a spurious failure on hosts that should skip.
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
 	runErr := cmd.Run()
-	out := stderr.String()
+	combined := out.String()
 
 	// Distinguish environmental failures (no permission to install a
 	// seccomp filter, no libseccomp support in this binary) from a
 	// real Layer 1 regression. "seccomp not supported" is the literal
 	// error from DetectSupport on a non-cgo/non-Linux build; the
 	// EPERM/no_new_privs cases surface as "permission denied" /
-	// "operation not permitted" from libseccomp.
+	// "operation not permitted" from libseccomp. These messages arrive
+	// on the child's stdout (via t.Fatalf in the testing harness),
+	// which is why the combined-output capture above matters.
 	if runErr != nil {
-		lower := strings.ToLower(out)
+		lower := strings.ToLower(combined)
 		if strings.Contains(lower, "permission denied") ||
 			strings.Contains(lower, "operation not permitted") ||
 			strings.Contains(lower, "seccomp not supported") ||
 			strings.Contains(lower, "lacks user notify") {
-			t.Skipf("host cannot install seccomp filter in this environment; skipping end-to-end check.\nhelper stderr:\n%s", out)
+			t.Skipf("host cannot install seccomp filter in this environment; skipping end-to-end check.\nhelper output:\n%s", combined)
 		}
-		t.Fatalf("WaitKill helper subprocess failed: %v\nstderr:\n%s", runErr, out)
+		t.Fatalf("WaitKill helper subprocess failed: %v\ncombined output:\n%s", runErr, combined)
 	}
 
 	// The two fallback paths in seccomp_linux.go each emit a
@@ -124,11 +133,11 @@ func TestInstallFilterWithConfig_WaitKillLoadsCleanly(t *testing.T) {
 	// clause. Match on the specific clause so an unrelated future
 	// log line containing "WaitKillable" doesn't silently flip this
 	// test green.
-	if strings.Contains(out, "WaitKillable rejected at filter load time") {
-		t.Fatalf("Layer 1 fell back at Load() time on a kernel ≥6.0 — SIGURG fix degraded.\nstderr:\n%s", out)
+	if strings.Contains(combined, "WaitKillable rejected at filter load time") {
+		t.Fatalf("Layer 1 fell back at Load() time on a kernel ≥6.0 — SIGURG fix degraded.\ncombined output:\n%s", combined)
 	}
-	if strings.Contains(out, "WaitKillable unexpectedly unavailable") {
-		t.Fatalf("SetWaitKill failed despite ProbeWaitKillable=true.\nstderr:\n%s", out)
+	if strings.Contains(combined, "WaitKillable unexpectedly unavailable") {
+		t.Fatalf("SetWaitKill failed despite ProbeWaitKillable=true.\ncombined output:\n%s", combined)
 	}
 }
 
