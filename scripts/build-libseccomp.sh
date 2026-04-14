@@ -24,37 +24,6 @@ case "${TARGET}" in
         ;;
 esac
 
-# Host-OS gate: this script builds a Linux static library via
-# ./configure + make, so it cannot run on darwin/windows. The
-# default is fail-closed (exit 1) so direct callers — CI jobs,
-# operators invoking the script manually — see a clear error when
-# the host is wrong. GoReleaser's before.hooks set
-# SKIP_IF_UNSUPPORTED=1 so filtered runs (e.g. darwin-only snapshot
-# from a macOS dev machine) succeed without us, since the sysroot is
-# irrelevant to the selected targets.
-if [ "$(uname -s)" != "Linux" ]; then
-    if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
-        echo "build-libseccomp: host is $(uname -s); SKIP_IF_UNSUPPORTED=1, skipping Linux ${TARGET} sysroot." >&2
-        exit 0
-    fi
-    echo "ERROR: build-libseccomp requires a Linux host (got $(uname -s)). Set SKIP_IF_UNSUPPORTED=1 to no-op on non-Linux." >&2
-    exit 1
-fi
-
-# Cross-compiler gate (arm64 only): fail-closed when
-# aarch64-linux-gnu-gcc is absent, so direct callers see the real
-# problem. GoReleaser's before.hooks set SKIP_IF_UNSUPPORTED=1 so
-# amd64-only dev hosts don't break filtered runs that never touch
-# linux/arm64.
-if [ "${TARGET}" = "arm64" ] && ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
-    if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
-        echo "build-libseccomp: aarch64-linux-gnu-gcc not found; SKIP_IF_UNSUPPORTED=1, skipping arm64 sysroot." >&2
-        exit 0
-    fi
-    echo "ERROR: TARGET=arm64 requires aarch64-linux-gnu-gcc in PATH. Install gcc-aarch64-linux-gnu or set SKIP_IF_UNSUPPORTED=1 to no-op." >&2
-    exit 1
-fi
-
 PREFIX="/opt/libseccomp/${TARGET}"
 SRC_URL="https://github.com/seccomp/libseccomp/releases/download/v${VERSION}/libseccomp-${VERSION}.tar.gz"
 SIG_URL="${SRC_URL}.asc"
@@ -69,16 +38,66 @@ GPG_FPR="7100AADFAE6E6E940D2E0AD655E45A5AE8CA7C8A"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY_FILE="${SCRIPT_DIR}/libseccomp-signing-key.asc"
 
+# Cache-hit fast path: if the requested version is already installed
+# at PREFIX and the install is static-only (no libseccomp.so* present),
+# exit 0 immediately — with NO side effects, so direct callers don't
+# need any build prerequisite installed for the idempotent "second run
+# no-ops" contract to hold. A stale shared object in the prefix makes
+# us fall through to the full build path, which wipes and rebuilds.
+if [ -f "${PREFIX}/lib/libseccomp.a" ] \
+   && [ -f "${PREFIX}/lib/pkgconfig/libseccomp.pc" ] \
+   && [ -f "${PREFIX}/include/seccomp.h" ] \
+   && grep -qx "Version: ${VERSION}" "${PREFIX}/lib/pkgconfig/libseccomp.pc"; then
+    CACHED_SO="$(find "${PREFIX}" -maxdepth 3 -name 'libseccomp.so*' -print 2>/dev/null || true)"
+    if [ -z "${CACHED_SO}" ]; then
+        echo "Already installed at ${PREFIX} (version ${VERSION}); skipping."
+        exit 0
+    fi
+fi
+
+# Host-OS gate: this script builds a Linux static library via
+# ./configure + make, so it cannot run on darwin/windows. The
+# default is fail-closed (exit 1) so direct callers — CI jobs,
+# operators invoking the script manually — see a clear error when
+# the host is wrong. GoReleaser's before.hooks set
+# SKIP_IF_UNSUPPORTED=1 so filtered runs (e.g. darwin-only snapshot
+# from a macOS dev machine) succeed without us, since the sysroot is
+# irrelevant to the selected targets. Reached only when the cache-hit
+# fast path above did not apply, so a rebuild is actually needed.
+if [ "$(uname -s)" != "Linux" ]; then
+    if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
+        echo "build-libseccomp: host is $(uname -s); SKIP_IF_UNSUPPORTED=1, skipping Linux ${TARGET} sysroot." >&2
+        exit 0
+    fi
+    echo "ERROR: build-libseccomp requires a Linux host (got $(uname -s)). Set SKIP_IF_UNSUPPORTED=1 to no-op on non-Linux." >&2
+    exit 1
+fi
+
+# Cross-compiler gate (arm64 only): fail-closed when
+# aarch64-linux-gnu-gcc is absent, so direct callers see the real
+# problem. GoReleaser's before.hooks set SKIP_IF_UNSUPPORTED=1 so
+# amd64-only dev hosts don't break filtered runs that never touch
+# linux/arm64. Reached only when the cache-hit fast path above did not
+# apply, so a rebuild is actually needed.
+if [ "${TARGET}" = "arm64" ] && ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+    if [ "${SKIP_IF_UNSUPPORTED:-0}" = "1" ]; then
+        echo "build-libseccomp: aarch64-linux-gnu-gcc not found; SKIP_IF_UNSUPPORTED=1, skipping arm64 sysroot." >&2
+        exit 0
+    fi
+    echo "ERROR: TARGET=arm64 requires aarch64-linux-gnu-gcc in PATH. Install gcc-aarch64-linux-gnu or set SKIP_IF_UNSUPPORTED=1 to no-op." >&2
+    exit 1
+fi
+
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 echo "=== libseccomp ${VERSION} static build for ${TARGET} → ${PREFIX} ==="
 
-# Detect any stale libseccomp.so* left by a previous install — if the
-# prefix is not static-only the later `-lseccomp` link could silently
-# prefer the shared object and undo the "static libseccomp 2.6"
-# guarantee. Wipe the prefix so the cache-hit check falls through to a
-# clean rebuild.
+# Stale-.so cleanup: only runs on the rebuild path (the cache-hit fast
+# path above already exited 0 for a clean static-only cache). If a
+# previous install left a libseccomp.so* behind, the later `-lseccomp`
+# link could silently prefer the shared object and undo the "static
+# libseccomp 2.6" guarantee, so wipe the prefix before rebuilding.
 if [ -d "${PREFIX}" ]; then
     STALE_SO="$(find "${PREFIX}" -maxdepth 3 -name 'libseccomp.so*' -print 2>/dev/null || true)"
     if [ -n "${STALE_SO}" ]; then
@@ -86,18 +105,6 @@ if [ -d "${PREFIX}" ]; then
         echo "${STALE_SO}" >&2
         sudo rm -rf "${PREFIX}"
     fi
-fi
-
-# Skip rebuild if artifact already present AND the installed version
-# matches the requested VERSION. Checking .pc's Version: line prevents
-# silent reuse of a stale install after a version bump or a partial
-# previous run.
-if [ -f "${PREFIX}/lib/libseccomp.a" ] \
-   && [ -f "${PREFIX}/lib/pkgconfig/libseccomp.pc" ] \
-   && [ -f "${PREFIX}/include/seccomp.h" ] \
-   && grep -qx "Version: ${VERSION}" "${PREFIX}/lib/pkgconfig/libseccomp.pc"; then
-    echo "Already installed at ${PREFIX} (version ${VERSION}); skipping."
-    exit 0
 fi
 
 cd "$WORKDIR"
