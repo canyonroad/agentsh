@@ -6,6 +6,18 @@ before:
     - go mod download
     - ./scripts/build-envshim.sh
     - ./scripts/build-ptracer.sh
+    # Provision /opt/libseccomp/{amd64,arm64} sysroots for the Linux CGO
+    # builds. Idempotent: build-libseccomp.sh early-exits when the
+    # install is already present at the requested version. This makes
+    # local `goreleaser release --snapshot` / `make package-snapshot` /
+    # `make package-release` work without the operator having to run
+    # the script separately.
+    - cmd: ./scripts/build-libseccomp.sh
+      env:
+        - TARGET=amd64
+    - cmd: ./scripts/build-libseccomp.sh
+      env:
+        - TARGET=arm64
 
 builds:
   # Linux amd64: CGO enabled for full seccomp user-notify support
