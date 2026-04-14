@@ -130,13 +130,25 @@ for bin in /usr/bin/agentsh /usr/bin/agentsh-shell-shim; do
   fi
 done
 
-# agentsh-unixwrap is shipped on both amd64 and arm64 (see nfpms.ids
-# in .goreleaser.yml). Check presence on every Linux arch so an arm64
-# image run catches a packaging regression too.
-if [ -x /usr/bin/agentsh-unixwrap ]; then
-  pass "/usr/bin/agentsh-unixwrap exists"
+# agentsh-unixwrap is packaged on both amd64 and arm64 from the
+# release that re-enabled arm64 cross-compile (PR #212). Older arm64
+# artifacts (notably the default AGENTSH_TAG=v0.10.1 example in the
+# file header) intentionally shipped without it — arm64 users on
+# those releases got graceful degradation via the non-seccomp path.
+#
+# Gate the presence check on what's actually in the deb manifest so
+# the test asserts "packaged implies on disk" without failing the
+# older-release examples. Avoid `grep -q`: the script runs under
+# `set -euo pipefail`, and a quiet grep exiting early on first match
+# can SIGPIPE the dpkg producer, flipping the pipeline exit code.
+if dpkg -L agentsh 2>/dev/null | grep -xF '/usr/bin/agentsh-unixwrap' > /dev/null; then
+  if [ -x /usr/bin/agentsh-unixwrap ]; then
+    pass "/usr/bin/agentsh-unixwrap exists"
+  else
+    fail "/usr/bin/agentsh-unixwrap exists" "listed in deb manifest but missing on disk"
+  fi
 else
-  fail "/usr/bin/agentsh-unixwrap exists" "not found or not executable"
+  echo "  INFO: /usr/bin/agentsh-unixwrap not in deb manifest — graceful degradation (e.g. v0.10.1 arm64)"
 fi
 
 # Config
