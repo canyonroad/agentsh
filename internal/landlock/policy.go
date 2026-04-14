@@ -262,6 +262,9 @@ func BuildFromConfig(cfg *config.LandlockConfig, pol *policy.Policy, workspace s
 		for _, p := range DeriveExecutePathsFromPolicy(pol) {
 			_ = b.AddExecutePath(p)
 		}
+		for _, p := range DeriveExecutePathsFromFileRules(pol) {
+			_ = b.AddExecutePath(p)
+		}
 		for _, p := range DeriveReadPathsFromPolicy(pol) {
 			_ = b.AddReadPath(p)
 		}
