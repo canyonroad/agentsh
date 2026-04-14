@@ -50,12 +50,13 @@ if [ -f "${PREFIX}/lib/libseccomp.a" ] \
    && grep -qx "Version: ${VERSION}" "${PREFIX}/lib/pkgconfig/libseccomp.pc"; then
     # Portable stale-.so probe — bash glob expansion, no `find` so we
     # don't depend on GNU `find -maxdepth` (BSD find on macOS rejects
-    # it). When no file matches, bash leaves the glob literal, so
-    # `[ -e ... ]` on the first element returns false. Any match makes
-    # us fall through to the rebuild path, which re-establishes the
-    # static-only invariant.
+    # it). When no file matches, bash leaves the glob literal, so both
+    # `-e` and `-L` on the first element return false. `-e` follows
+    # symlinks (misses dangling ones), so we also test `-L` to catch
+    # symlinks — live or dangling — as stale artifacts. Any real file
+    # or any symlink falls through to rebuild.
     CACHED_SO=("${PREFIX}"/lib/libseccomp.so*)
-    if [ ! -e "${CACHED_SO[0]}" ]; then
+    if [ ! -e "${CACHED_SO[0]}" ] && [ ! -L "${CACHED_SO[0]}" ]; then
         echo "Already installed at ${PREFIX} (version ${VERSION}); skipping."
         exit 0
     fi
