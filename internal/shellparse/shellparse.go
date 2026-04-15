@@ -111,11 +111,25 @@ func IsOpaqueShellC(command string, args []string) bool {
 // that behavior here closes the mismatch that would otherwise let a
 // Windows-separator path slip past shell detection while still matching
 // shell-targeted allow rules.
+//
+// A trailing ".real" suffix is stripped so shell detection also covers
+// the agentsh shell shim's install layout. `agentsh shim install-shell`
+// renames the original shell to `<name>.real` and places the shim at
+// the original path (`/bin/sh` → shim, `/bin/sh.real` → real shell).
+// When the shim forwards to `agentsh exec`, the server sees the real
+// shell's `.real` path as the outer command. Without this normalization,
+// `sh.real`/`bash.real` would miss isKnownShell, shell-c derivation
+// would be skipped, and the policy would fall through to the outer
+// allow-rule that must exist for the shim's real-shell invocations to
+// run — silently admitting inner commands the policy would otherwise
+// deny.
 func basenameLower(s string) string {
 	if i := strings.LastIndexAny(s, `/\`); i >= 0 {
 		s = s[i+1:]
 	}
-	return strings.ToLower(s)
+	s = strings.ToLower(s)
+	s = strings.TrimSuffix(s, ".real")
+	return s
 }
 
 // isKnownShell reports whether base names a POSIX-compatible shell whose

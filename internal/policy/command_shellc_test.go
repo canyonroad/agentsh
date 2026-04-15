@@ -726,3 +726,63 @@ func TestEngine_CheckCommand_ShellCDerive_DepthCapLoopCompletes(t *testing.T) {
 		t.Errorf("expected allow-shells, got %q", dec.Rule)
 	}
 }
+
+// TestEngine_CheckCommand_ShellCDerive_ShimRealSuffix verifies that the shim
+// install layout — where `/bin/sh` is the shim binary and `/bin/sh.real` is
+// the renamed original shell — is treated as a known shell for derive
+// purposes. Without this, `allow sh.real` (present in default.yaml for shim
+// integration) + `deny shutdown` would fall through to allow, silently
+// re-opening the exact bypass CheckCommand is meant to close when the shim
+// forwards via `agentsh exec -- /bin/sh.real -c "shutdown now"`.
+//
+// This test is the end-to-end assertion that caught the v0.19.0-rc1/rc2
+// release-CI regression: smoke.sh ran `AGENTSH_SHIM_FORCE=1 /bin/sh -c
+// 'shutdown now'`, the shim forwarded to `/bin/sh.real`, and the engine
+// returned DecisionAllow (rule=allow-shim-shells) instead of DecisionDeny.
+func TestEngine_CheckCommand_ShellCDerive_ShimRealSuffix(t *testing.T) {
+	p := &Policy{
+		Version: 1,
+		Name:    "test",
+		CommandRules: []CommandRule{
+			{Name: "deny-shutdown", Commands: []string{"shutdown"}, Decision: "deny"},
+			{Name: "allow-shim-shells", Commands: []string{"sh", "bash", "sh.real", "bash.real"}, Decision: "allow"},
+		},
+	}
+	e, err := NewEngine(p, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		command  string
+		args     []string
+		decision types.Decision
+		rule     string
+	}{
+		// --- primary regression cases ---
+		{"/bin/sh.real -c 'shutdown now' → derived deny (shim flow)", "/bin/sh.real", []string{"-c", "shutdown now"}, types.DecisionDeny, "deny-shutdown"},
+		{"/bin/bash.real -c 'shutdown' → derived deny (shim flow)", "/bin/bash.real", []string{"-c", "shutdown"}, types.DecisionDeny, "deny-shutdown"},
+		{"/usr/bin/sh.real -c 'shutdown' → derived deny (alt install path)", "/usr/bin/sh.real", []string{"-c", "shutdown"}, types.DecisionDeny, "deny-shutdown"},
+		// --- ensure wrapper/opaque handling still applies through .real ---
+		{"/bin/sh.real -c 'nohup shutdown' → wrapper stripped, derived deny", "/bin/sh.real", []string{"-c", "nohup shutdown"}, types.DecisionDeny, "deny-shutdown"},
+		{"/bin/sh.real -c 'shutdown; true' → opaque is deny-on-restrictive-policy", "/bin/sh.real", []string{"-c", "shutdown; true"}, types.DecisionDeny, "shellc-opaque-script"},
+		{"/bin/sh.real -l -c 'shutdown' → login option bypass-deny", "/bin/sh.real", []string{"-l", "-c", "shutdown"}, types.DecisionDeny, "shellc-wrapper-bypass"},
+		// --- allow path when inner has no explicit rule ---
+		{"/bin/sh.real -c 'ls' → no ls rule, fall back to shim-shells allow", "/bin/sh.real", []string{"-c", "ls"}, types.DecisionAllow, "allow-shim-shells"},
+		// --- bare invocation of .real still allowed ---
+		{"bare /bin/sh.real → allow", "/bin/sh.real", nil, types.DecisionAllow, "allow-shim-shells"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dec := e.CheckCommand(tc.command, tc.args)
+			if dec.PolicyDecision != tc.decision {
+				t.Errorf("decision: got %s, want %s (rule=%q)", dec.PolicyDecision, tc.decision, dec.Rule)
+			}
+			if dec.Rule != tc.rule {
+				t.Errorf("rule: got %q, want %q", dec.Rule, tc.rule)
+			}
+		})
+	}
+}
