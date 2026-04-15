@@ -1068,4 +1068,39 @@ func TestWrap_SignalFilterUsesSessionPolicy(t *testing.T) {
 				"no ActNotify rules are installed.")
 		}
 	})
+
+	t.Run("enabled_when_onblock_log_with_only_unknown_names", func(t *testing.T) {
+		// on_block=log with a block-list of only unknown-on-this-arch
+		// names resolves to zero ActNotify rules — the wrapper installs
+		// nothing and produces no notify FD. The server must not flip
+		// the gate, otherwise ptrace sync waits for a READY/GO handshake
+		// the wrapper will never send.
+		//
+		// On non-linux builds, resolvableBlockListCount always returns 0
+		// so this test trivially passes.
+		cfgApp := &App{
+			policy: globalEngine,
+			cfg: &config.Config{
+				Sandbox: config.SandboxConfig{
+					Seccomp: config.SandboxSeccompConfig{
+						Syscalls: config.SandboxSeccompSyscallConfig{
+							Block:   []string{"definitely_not_a_syscall_xyz"},
+							OnBlock: "log",
+						},
+					},
+				},
+			},
+		}
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		s.SetPolicyEngine(sessionEngine)
+
+		if !cfgApp.signalFilterEnabled(s, false) {
+			t.Error("signalFilterEnabled(s, false) = false with " +
+				"on_block=log and only unknown-on-this-arch syscall names; " +
+				"expected true because no ActNotify rules will be installed.")
+		}
+	})
 }

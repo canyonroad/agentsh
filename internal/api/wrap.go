@@ -385,19 +385,18 @@ func (a *App) mainFilterUsesUserNotify(execveEnabled bool) bool {
 }
 
 // blockListUsesNotify reports whether the block-list action installs
-// SECCOMP_RET_USER_NOTIF rules. Only `log` and `log_and_kill` route
-// block-listed syscalls through user-notify; `errno` and `kill` are
-// kernel-side actions. An empty block-list means no rules are attached,
-// regardless of action.
-//
-// Plain-string checks (no import on internal/seccomp) because this helper
-// runs on non-linux builds too — the seccomp package is gated on
-// `linux && cgo`.
+// SECCOMP_RET_USER_NOTIF rules on this arch. Only `log` and
+// `log_and_kill` route block-listed syscalls through user-notify;
+// `errno` and `kill` are kernel-side actions. The block-list also
+// needs at least one syscall name that resolves on the running arch
+// — otherwise the wrapper installs zero ActNotify rules and no FD is
+// produced, so flipping the gate here would cause ptrace sync to wait
+// for an FD/READY that never arrives.
 func blockListUsesNotify(block []string, onBlock string) bool {
-	if len(block) == 0 {
+	if onBlock != "log" && onBlock != "log_and_kill" {
 		return false
 	}
-	return onBlock == "log" || onBlock == "log_and_kill"
+	return resolvableBlockListCount(block) > 0
 }
 
 // acceptNotifyFD listens on the Unix socket for a single connection from the CLI,
