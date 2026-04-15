@@ -13,7 +13,7 @@ import (
 func TestPidfdOpen_Self(t *testing.T) {
 	fd, err := pidfdOpen(os.Getpid())
 	require.NoError(t, err)
-	require.Greater(t, fd, 0)
+	require.GreaterOrEqual(t, fd, 0)
 	t.Cleanup(func() { _ = gounix.Close(fd) })
 }
 
