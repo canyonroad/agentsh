@@ -2038,7 +2038,31 @@ sandbox:
 | init_module, finit_module, delete_module | Kernel module loading |
 | personality | Execution domain changes |
 
-When a process attempts a blocked syscall, seccomp immediately kills it with SIGSYS and emits a `seccomp_blocked` audit event.
+When a process invokes a blocked syscall, the response depends on `sandbox.seccomp.syscalls.on_block`:
+
+- `errno` (default): syscall returns `EPERM`, no event emitted (kernel-side).
+- `kill`: process killed with `SIGSYS` via `SCMP_ACT_KILL_PROCESS`, no event emitted.
+- `log`: syscall returns `EPERM` and a `seccomp_blocked` event is emitted with `outcome: denied`.
+- `log_and_kill`: handler sends `SIGKILL` via `pidfd_send_signal` and emits `seccomp_blocked` with `outcome: killed`.
+
+```json
+{
+  "type": "seccomp_blocked",
+  "timestamp": "2026-04-15T10:30:00Z",
+  "session_id": "sess_abc123",
+  "source": "seccomp",
+  "pid": 12345,
+  "fields": {
+    "syscall": "ptrace",
+    "syscall_nr": 101,
+    "action": "log_and_kill",
+    "outcome": "killed",
+    "arch": "arm64"
+  }
+}
+```
+
+The `pid` field is the TID of the trapping thread (seccomp_notif.pid is a TID, not a TGID). See `docs/seccomp.md` for the full action table and startup-warning behavior.
 
 ### 13.4 Resource Limits (cgroups v2)
 
