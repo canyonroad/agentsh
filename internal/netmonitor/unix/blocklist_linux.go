@@ -23,6 +23,13 @@ type BlockListConfig struct {
 	ActionByNr map[uint32]seccompkg.OnBlockAction
 }
 
+// notifIDValidFn is a test seam wrapping seccomp.NotifIDValid so unit tests
+// can inject "valid" / "invalid" outcomes without a real notify fd. Production
+// callers hit the real syscall; tests swap it like the pidfd seams.
+var notifIDValidFn = func(fd int, id uint64) error {
+	return seccomp.NotifIDValid(seccomp.ScmpFd(fd), id)
+}
+
 // IsBlockListed returns the configured action for the given syscall number.
 // Nil receiver and empty map both return (_, false). The caller can then
 // route to the normal allow/deny path.
@@ -65,7 +72,7 @@ func handleBlockListNotify(
 
 	// 1. TOCTOU check — notif id may have been recycled if the target exited
 	//    between NotifReceive and now. Same convention as file_handler.
-	if err := seccomp.NotifIDValid(seccomp.ScmpFd(fd), req.ID); err != nil {
+	if err := notifIDValidFn(fd, req.ID); err != nil {
 		slog.Debug("seccomp block-list: notif id no longer valid",
 			"session_id", sessID, "pid", req.Pid, "error", err)
 		if derr := NotifRespondDeny(fd, req.ID, int32(unix.EPERM)); derr != nil && !isENOENT(derr) {
@@ -80,9 +87,14 @@ func handleBlockListNotify(
 	pid := int(req.Pid)
 
 	// 2. For log_and_kill, SIGKILL first so the outcome field reflects reality.
+	//    attemptKill revalidates the notif id after opening the pidfd to close
+	//    the PID-reuse race: if the target exited between the check above and
+	//    pidfd_open, the pidfd may point to an unrelated process. The second
+	//    check ensures the kernel hasn't released the trapped task yet — so
+	//    the pidfd is guaranteed to reference the original caller.
 	outcome := "denied"
 	if action == seccompkg.OnBlockLogAndKill {
-		outcome = attemptKill(pid, sessID, syscallName)
+		outcome = attemptKill(fd, req.ID, pid, sessID, syscallName)
 	}
 
 	// 3. Build + emit the audit event. Tests pass nil.
@@ -111,11 +123,21 @@ func handleBlockListNotify(
 }
 
 // attemptKill opens a pidfd for pid and SIGKILLs it. Uses the test seams
-// pidfdOpenFn / pidfdSendSignalFn so unit tests can inject errno branches
-// without spawning real processes. Returns "killed" on success (including
-// ESRCH — the target already exited, which is equivalent for our purposes),
-// and "denied" on any other error.
-func attemptKill(pid int, sessID, syscallName string) string {
+// pidfdOpenFn / pidfdSendSignalFn / notifIDValidFn so unit tests can inject
+// errno branches without spawning real processes.
+//
+// Ordering closes a PID-reuse race. Between the caller's initial
+// NotifIDValid check and pidfd_open, the target task could exit and its PID
+// could be recycled by an unrelated process. The sequence below revalidates
+// the notif id *after* opening the pidfd but *before* signalling: while the
+// notif id stays valid, the kernel guarantees the trapped task hasn't been
+// released, so the pidfd we just opened must reference the original caller.
+//
+// Returns "killed" on successful signal delivery or when the target is
+// already gone (ESRCH on open/signal, or invalid notif id after open —
+// all three mean the original caller cannot observe further syscalls).
+// Returns "denied" on any other error path.
+func attemptKill(notifyFD int, notifID uint64, pid int, sessID, syscallName string) string {
 	pidfd, err := pidfdOpenFn(pid)
 	if err != nil {
 		if errors.Is(err, unix.ESRCH) {
@@ -129,6 +151,16 @@ func attemptKill(pid int, sessID, syscallName string) string {
 		return "denied"
 	}
 	defer unix.Close(pidfd)
+
+	// Revalidate notif id *after* the pidfd is anchored. If the kernel has
+	// released the trapped task (ENOENT-style errors), the pidfd we just
+	// opened may reference a PID-reused unrelated process. Aborting here
+	// prevents SIGKILL from landing on the wrong target.
+	if err := notifIDValidFn(notifyFD, notifID); err != nil {
+		slog.Debug("seccomp block-list: notif id invalid after pidfd_open — skipping signal (possible pid reuse)",
+			"session_id", sessID, "pid", pid, "syscall", syscallName, "error", err)
+		return "killed"
+	}
 
 	if err := pidfdSendSignalFn(pidfd, unix.SIGKILL); err != nil {
 		if errors.Is(err, unix.ESRCH) {

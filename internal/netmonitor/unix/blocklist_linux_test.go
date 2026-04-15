@@ -39,8 +39,10 @@ func TestBuildSeccompBlockedEvent(t *testing.T) {
 	require.NotEmpty(t, arch, "arch should be non-empty")
 }
 
-// swapPidfdSeams replaces the pidfd_open / pidfd_send_signal seams and
-// returns a restore function. Callers defer restore immediately.
+// swapPidfdSeams replaces the pidfd_open / pidfd_send_signal / notif-id-valid
+// seams and returns a restore function. Callers defer restore immediately.
+// The notifIDValidFn seam defaults to "always valid" so existing call sites
+// that don't exercise the race need not touch it explicitly.
 func swapPidfdSeams(
 	t *testing.T,
 	openFn func(pid int) (int, error),
@@ -49,19 +51,44 @@ func swapPidfdSeams(
 	t.Helper()
 	origOpen := pidfdOpenFn
 	origSend := pidfdSendSignalFn
+	origValid := notifIDValidFn
 	pidfdOpenFn = openFn
 	pidfdSendSignalFn = sendFn
+	notifIDValidFn = func(int, uint64) error { return nil }
 	return func() {
 		pidfdOpenFn = origOpen
 		pidfdSendSignalFn = origSend
+		notifIDValidFn = origValid
 	}
 }
 
+// swapNotifIDValidFn installs a NotifIDValid stub without touching the pidfd
+// seams; used by the race-coverage test. Defer the returned restore.
+func swapNotifIDValidFn(t *testing.T, fn func(int, uint64) error) func() {
+	t.Helper()
+	orig := notifIDValidFn
+	notifIDValidFn = fn
+	return func() { notifIDValidFn = orig }
+}
+
+// openDevNullFD returns a scratch fd suitable for attemptKill's deferred
+// unix.Close. Using /dev/null (instead of a fabricated integer like 42)
+// ensures we never accidentally close an unrelated fd the test process is
+// holding, and avoids spurious close-of-unknown-fd warnings from the kernel.
+func openDevNullFD(t *testing.T) int {
+	t.Helper()
+	fd, err := gounix.Open("/dev/null", gounix.O_RDONLY, 0)
+	require.NoError(t, err)
+	return fd
+}
+
 func TestAttemptKill_Success(t *testing.T) {
+	fd := openDevNullFD(t)
+
 	var capturedFD int
 	var capturedSig gounix.Signal
 	restore := swapPidfdSeams(t,
-		func(pid int) (int, error) { return 42, nil },
+		func(pid int) (int, error) { return fd, nil },
 		func(pidfd int, sig gounix.Signal) error {
 			capturedFD = pidfd
 			capturedSig = sig
@@ -70,9 +97,9 @@ func TestAttemptKill_Success(t *testing.T) {
 	)
 	defer restore()
 
-	outcome := attemptKill(5555, "sess-abc", "ptrace")
+	outcome := attemptKill(0, 0, 5555, "sess-abc", "ptrace")
 	require.Equal(t, "killed", outcome)
-	require.Equal(t, 42, capturedFD)
+	require.Equal(t, fd, capturedFD)
 	require.Equal(t, gounix.SIGKILL, capturedSig)
 }
 
@@ -86,7 +113,7 @@ func TestAttemptKill_PidfdOpenESRCH(t *testing.T) {
 	)
 	defer restore()
 
-	outcome := attemptKill(4242, "sess-abc", "ptrace")
+	outcome := attemptKill(0, 0, 4242, "sess-abc", "ptrace")
 	require.Equal(t, "killed", outcome)
 }
 
@@ -100,38 +127,65 @@ func TestAttemptKill_PidfdOpenEPERM(t *testing.T) {
 	)
 	defer restore()
 
-	outcome := attemptKill(4242, "sess-abc", "ptrace")
+	outcome := attemptKill(0, 0, 4242, "sess-abc", "ptrace")
 	require.Equal(t, "denied", outcome)
 }
 
 func TestAttemptKill_PidfdSendSignalESRCH(t *testing.T) {
-	// Use a /dev/null fd so that the deferred unix.Close(pidfd) in attemptKill
-	// has a real kernel fd to close (won't log warnings).
-	f, err := gounix.Open("/dev/null", gounix.O_RDONLY, 0)
-	require.NoError(t, err)
+	fd := openDevNullFD(t)
 
 	restore := swapPidfdSeams(t,
-		func(pid int) (int, error) { return f, nil },
+		func(pid int) (int, error) { return fd, nil },
 		func(pidfd int, sig gounix.Signal) error { return gounix.ESRCH },
 	)
 	defer restore()
 
-	outcome := attemptKill(4242, "sess-abc", "ptrace")
+	outcome := attemptKill(0, 0, 4242, "sess-abc", "ptrace")
 	require.Equal(t, "killed", outcome)
 }
 
 func TestAttemptKill_PidfdSendSignalEINVAL(t *testing.T) {
-	f, err := gounix.Open("/dev/null", gounix.O_RDONLY, 0)
-	require.NoError(t, err)
+	fd := openDevNullFD(t)
 
 	restore := swapPidfdSeams(t,
-		func(pid int) (int, error) { return f, nil },
+		func(pid int) (int, error) { return fd, nil },
 		func(pidfd int, sig gounix.Signal) error { return gounix.EINVAL },
 	)
 	defer restore()
 
-	outcome := attemptKill(4242, "sess-abc", "ptrace")
+	outcome := attemptKill(0, 0, 4242, "sess-abc", "ptrace")
 	require.Equal(t, "denied", outcome)
+}
+
+// TestAttemptKill_NotifIDInvalidAfterOpen covers the TOCTOU race fix: when the
+// target exits between the caller's initial NotifIDValid check and
+// attemptKill's own pidfd_open, the pidfd may now reference a PID-reused
+// unrelated process. Re-checking NotifIDValid *after* pidfd_open closes the
+// race — if it fails, we must NOT send SIGKILL, and outcome is still
+// "killed" because the original trapped caller is, by definition, gone.
+func TestAttemptKill_NotifIDInvalidAfterOpen(t *testing.T) {
+	fd := openDevNullFD(t)
+
+	signalCalled := false
+	restore := swapPidfdSeams(t,
+		func(pid int) (int, error) { return fd, nil },
+		func(pidfd int, sig gounix.Signal) error {
+			signalCalled = true
+			return nil
+		},
+	)
+	defer restore()
+
+	// Override the default "always valid" stub installed by swapPidfdSeams
+	// so NotifIDValid returns ENOENT on the recheck.
+	restoreValid := swapNotifIDValidFn(t, func(int, uint64) error { return gounix.ENOENT })
+	defer restoreValid()
+
+	outcome := attemptKill(0, 0, 4242, "sess-abc", "ptrace")
+	require.Equal(t, "killed", outcome,
+		"notif id invalid after open means the original target is gone")
+	require.False(t, signalCalled,
+		"SIGKILL must NOT be sent when notif id is invalid — pidfd may reference a reused PID")
 }
 
 func TestBlockListConfig_IsBlockListed(t *testing.T) {
