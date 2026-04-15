@@ -37,6 +37,23 @@ sandbox:
 	require.Equal(t, "kill", cfg.Sandbox.Seccomp.Syscalls.OnBlock)
 }
 
+func TestOnBlockExplicitValues(t *testing.T) {
+	for _, v := range []string{"errno", "kill", "log", "log_and_kill"} {
+		t.Run(v, func(t *testing.T) {
+			yamlData := `
+sandbox:
+  seccomp:
+    enabled: true
+    syscalls:
+      on_block: ` + v + `
+`
+			var cfg Config
+			require.NoError(t, yaml.Unmarshal([]byte(yamlData), &cfg))
+			require.Equal(t, v, cfg.Sandbox.Seccomp.Syscalls.OnBlock)
+		})
+	}
+}
+
 func TestFileMonitorAutoEnable_ExplicitFalse(t *testing.T) {
 	// When user explicitly sets file_monitor.enabled: false,
 	// it must NOT be overridden to true by the auto-enable logic.
@@ -102,4 +119,41 @@ sandbox:
 	require.Equal(t, "enforce", cfg.Sandbox.Seccomp.Mode)
 	require.True(t, cfg.Sandbox.Seccomp.UnixSocket.Enabled)
 	require.Greater(t, len(cfg.Sandbox.Seccomp.Syscalls.Block), 0)
+}
+
+func TestOnBlockDefaultsToErrno(t *testing.T) {
+	yamlData := `
+sandbox:
+  seccomp:
+    enabled: true
+`
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal([]byte(yamlData), &cfg))
+	applyDefaults(&cfg)
+	require.Equal(t, "errno", cfg.Sandbox.Seccomp.Syscalls.OnBlock,
+		"default on_block must be errno (matches runtime behavior since b6708353)")
+}
+
+func TestOnBlockRejectsUnknown(t *testing.T) {
+	cfg := &Config{}
+	cfg.Sandbox.FUSE.Audit.Mode = "monitor" // satisfy existing validator
+	cfg.Sandbox.Seccomp.Syscalls.OnBlock = "banana"
+	err := validateConfig(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "on_block")
+	require.Contains(t, err.Error(), "errno")
+	require.Contains(t, err.Error(), "kill")
+	require.Contains(t, err.Error(), "log")
+	require.Contains(t, err.Error(), "log_and_kill")
+}
+
+func TestOnBlockValidatorAcceptsLegalValues(t *testing.T) {
+	for _, v := range []string{"", "errno", "kill", "log", "log_and_kill"} {
+		t.Run("v="+v, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.Sandbox.FUSE.Audit.Mode = "monitor"
+			cfg.Sandbox.Seccomp.Syscalls.OnBlock = v
+			require.NoError(t, validateConfig(cfg))
+		})
+	}
 }

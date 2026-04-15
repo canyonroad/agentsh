@@ -82,3 +82,37 @@ func TestResolveSyscalls(t *testing.T) {
 		require.Contains(t, skipped, "fake_syscall")
 	})
 }
+
+func TestParseOnBlock(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected OnBlockAction
+		ok       bool
+	}{
+		{"", OnBlockErrno, true},
+		{"errno", OnBlockErrno, true},
+		{"kill", OnBlockKill, true},
+		{"log", OnBlockLog, true},
+		{"log_and_kill", OnBlockLogAndKill, true},
+		{"banana", OnBlockErrno, false},
+		{"KILL", OnBlockErrno, false}, // case sensitive
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got, ok := ParseOnBlock(tc.input)
+			require.Equal(t, tc.expected, got)
+			require.Equal(t, tc.ok, ok)
+		})
+	}
+}
+
+func TestFilterConfigFromYAML(t *testing.T) {
+	cfg := FilterConfigFromYAML(true, []string{"ptrace"}, "log_and_kill")
+	require.True(t, cfg.UnixSocketEnabled)
+	require.Equal(t, []string{"ptrace"}, cfg.BlockedSyscalls)
+	require.Equal(t, OnBlockLogAndKill, cfg.OnBlock)
+
+	// Unknown string degrades to errno
+	cfgBad := FilterConfigFromYAML(false, nil, "nope")
+	require.Equal(t, OnBlockErrno, cfgBad.OnBlock)
+}
