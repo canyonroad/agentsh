@@ -7,8 +7,17 @@ on:
       - main
 
 env:
-  # Increment to bust Go module cache when needed
-  GO_CACHE_VERSION: v2
+  # Increment to bust Go module cache when needed.
+  # Bumped to v3 because v2 caches from before the libseccomp 2.6 static
+  # build step contain libseccomp-golang cgo artifacts compiled against
+  # system libseccomp 2.5 headers (with `#if SCMP_VER_MINOR < 6` stubs
+  # baked in) plus bare `-lseccomp` from system pkg-config. Relinking
+  # those against libseccomp 2.6 .a produces duplicate-definition errors
+  # for seccomp_export_bpf_mem / seccomp_transaction_* / seccomp_precompute.
+  # The cache-key below also includes the libseccomp build script so any
+  # future version bump (edit to scripts/build-libseccomp.sh) automatically
+  # invalidates cached cgo artifacts without another manual bump.
+  GO_CACHE_VERSION: v3
 
 jobs:
   test-linux:
@@ -34,9 +43,13 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          # Include scripts/build-libseccomp.sh hash so a libseccomp version
+          # bump automatically invalidates stale cgo artifacts (the in-tree
+          # libseccomp-golang stubs are gated on SCMP_VER at cgo preprocess
+          # time — mixing 2.5 and 2.6 artifacts causes link duplicates).
+          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-
+            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-
 
       - name: Free disk space
         run: |
@@ -152,9 +165,9 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}-
+            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-
 
       - name: Install build deps (linux only)
         if: matrix.goos == 'linux'
@@ -202,9 +215,9 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-linux-arm64-cgo-${{ hashFiles('**/go.sum') }}
+          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-linux-arm64-cgo-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-linux-arm64-cgo-
+            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-linux-arm64-cgo-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-
 
       - name: Cross-compile (arm64 CGO)
         run: go build ./...
@@ -246,9 +259,9 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-integration-${{ hashFiles('**/go.sum') }}
+          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-integration-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-integration-
+            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-integration-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-
 
       - name: Run integration tests (docker)
         env:
