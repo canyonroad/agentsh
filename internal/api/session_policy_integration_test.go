@@ -949,6 +949,15 @@ func TestWrap_SignalFilterUsesSessionPolicy(t *testing.T) {
 		// so stacking the signal filter on top would cause the same
 		// USER_NOTIF delivery failure observed with unix sockets and
 		// file_monitor. See mainFilterUsesUserNotify.
+		//
+		// Skip on builds where block-list arch resolution is a no-op
+		// (non-linux or linux without cgo): the gate deliberately won't
+		// flip because the wrapper would install zero ActNotify rules
+		// anyway. The !linux/!cgo behavior is locked in by the
+		// enabled_when_onblock_log_with_only_unknown_names subtest.
+		if resolvableBlockListCount([]string{"ptrace"}) == 0 {
+			t.Skip("block-list syscall resolution unavailable on this build")
+		}
 		cfgApp := &App{
 			policy: globalEngine,
 			cfg: &config.Config{
@@ -980,6 +989,12 @@ func TestWrap_SignalFilterUsesSessionPolicy(t *testing.T) {
 		// Same stacking hazard as on_block=log: ActNotify rules are
 		// installed on block-listed syscalls, so the signal filter
 		// must not be layered on top.
+		//
+		// Skipped on builds where block-list arch resolution is a no-op
+		// for the same reason as disabled_by_onblock_log above.
+		if resolvableBlockListCount([]string{"mount"}) == 0 {
+			t.Skip("block-list syscall resolution unavailable on this build")
+		}
 		cfgApp := &App{
 			policy: globalEngine,
 			cfg: &config.Config{
