@@ -73,7 +73,7 @@ func TestPTYWebSocket_StartAndExit(t *testing.T) {
 		"type": "start",
 		// Non-interactive command executed under a PTY.
 		"command": "sh",
-		"args":    []string{"-lc", "printf hi"},
+		"args":    []string{"-c", "printf hi"},
 		"rows":    24,
 		"cols":    80,
 	}

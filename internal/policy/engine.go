@@ -10,9 +10,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agentsh/agentsh/internal/shellparse"
 	"github.com/agentsh/agentsh/pkg/types"
 	"github.com/gobwas/glob"
 )
+
+// maxShellCDeriveDepth bounds how many nested `sh -c "…"` forms CheckCommand
+// will peel off while looking for an explicit deny. Each level has to pass
+// the strict shellparse byte-allowlist, so real-world chains terminate in
+// one or two levels; the cap guards against a pathological input. var (not
+// const) so tests can lower it to exercise the cap-exceeded fail-closed path.
+var maxShellCDeriveDepth = 4
 
 // ThreatCheckResult holds the outcome of a threat feed lookup.
 type ThreatCheckResult struct {
@@ -36,6 +44,13 @@ type Engine struct {
 	compiledCommandRules  []compiledCommandRule
 	compiledUnixRules     []compiledUnixRule
 	compiledRegistryRules []compiledRegistryRule
+
+	// hasRestrictiveCommandRule is true iff any compiled command rule has
+	// a decision that restricts or instruments execution (deny, redirect,
+	// soft_delete, approve, audit). Gates the opaque-shell-c deny so that
+	// allow-only policies aren't unexpectedly tightened. See
+	// CheckCommand for the consumer.
+	hasRestrictiveCommandRule bool
 
 	// HTTP service compiled lookup maps
 	httpServices     map[string]*compiledHTTPService // keyed by lowercased name
@@ -238,6 +253,27 @@ func NewEngine(p *Policy, enforceApprovals bool, enforceRedirects bool) (*Engine
 			cr.argsRegexes = append(cr.argsRegexes, re)
 		}
 		e.compiledCommandRules = append(e.compiledCommandRules, cr)
+	}
+
+	// Precompute whether any command rule restricts or instruments execution.
+	// Consumed by CheckCommand's opaque-shell-c defense: a shell script we
+	// can't parse (metachars, subshells, …) is a bypass risk only when the
+	// operator has expressed intent to restrict commands. If every command
+	// rule is a plain allow, the operator accepted broad shell use and
+	// denying opaque scripts would be a behavior change without a security
+	// gain.
+	for _, r := range e.compiledCommandRules {
+		switch types.Decision(strings.ToLower(r.rule.Decision)) {
+		case types.DecisionDeny,
+			types.DecisionRedirect,
+			types.DecisionSoftDelete,
+			types.DecisionApprove,
+			types.DecisionAudit:
+			e.hasRestrictiveCommandRule = true
+		}
+		if e.hasRestrictiveCommandRule {
+			break
+		}
 	}
 
 	for _, r := range p.UnixRules {
@@ -545,6 +581,119 @@ func (e *Engine) CheckNetworkIP(domain string, ip net.IP, port int) Decision {
 }
 
 func (e *Engine) CheckCommand(command string, args []string) Decision {
+	result, _ := e.matchCommandRules(command, args)
+	// For `<shell> -c "<simple-cmd>"` invocations, also evaluate the
+	// underlying binary so a rule like `deny bin=shutdown` fires for
+	// `sh -c "shutdown now"`. An EXPLICITLY matched rule at any derivation
+	// depth whose policy decision is strictly more restrictive than the
+	// current result takes effect (deny > redirect/soft_delete > approve >
+	// audit > allow). A default-deny on an intermediate derivation (e.g.
+	// the shell allows `ls` but no rule targets `ls`) is ignored; otherwise
+	// every indirect invocation would be blocked by default-deny.
+	resultStrictness := decisionStrictness(result.PolicyDecision)
+	cur, curArgs := command, args
+	for depth := 0; depth < maxShellCDeriveDepth; depth++ {
+		derivedCmd, derivedArgs, ok := shellparse.DerivePolicyTarget(cur, curArgs)
+		if !ok {
+			// If the original (or a previously-derived) invocation is a
+			// shell-c form that we recognize as a wrapper-bypass attempt
+			// (`exec -a name target`, `nohup --help target`,
+			// `nice --adjustment=N target`, etc.), fail closed: the
+			// operator's allow-shell rule wasn't written to cover
+			// wrappers we can't collapse, and falling through to that
+			// rule would leak the deny.
+			if shellparse.IsShellCBypassAttempt(cur, curArgs) {
+				denyDec := e.wrapDecision(string(types.DecisionDeny), "shellc-wrapper-bypass", "bypass attempt via unparsable shell-c wrapper", nil)
+				if dec := denyDec; decisionStrictness(dec.PolicyDecision) > resultStrictness {
+					if dec.PolicyDecision == types.DecisionAudit || dec.PolicyDecision == types.DecisionApprove {
+						dec.EnvPolicy = result.EnvPolicy
+					}
+					result = dec
+					resultStrictness = decisionStrictness(dec.PolicyDecision)
+				}
+			} else if e.hasRestrictiveCommandRule && shellparse.IsOpaqueShellC(cur, curArgs) {
+				// Opaque scripts (metachars, pipes, subshells, globs, …) can
+				// execute binaries we can't predict. With any restrictive
+				// command rule in the policy, silently falling through to
+				// the outer `allow sh` admits a bypass (`sh -c "shutdown; :"`).
+				// Policies without restrictive command rules are unaffected.
+				denyDec := e.wrapDecision(string(types.DecisionDeny), "shellc-opaque-script", "opaque shell script cannot be safely parsed for policy pre-check", nil)
+				if dec := denyDec; decisionStrictness(dec.PolicyDecision) > resultStrictness {
+					result = dec
+					resultStrictness = decisionStrictness(dec.PolicyDecision)
+				}
+			}
+			break
+		}
+		cur, curArgs = derivedCmd, derivedArgs
+		dec, matched := e.matchCommandRules(cur, curArgs)
+		if !matched {
+			continue
+		}
+		if s := decisionStrictness(dec.PolicyDecision); s > resultStrictness {
+			// Audit and approve don't rewrite the command — the ORIGINAL
+			// shell invocation is what actually executes (audit just
+			// emits a log event, approve gates on a human who then runs
+			// the unchanged shell command). So the shell rule's
+			// EnvPolicy must follow along; otherwise env_allow /
+			// env_deny / env_max_bytes / BASH_ENV-style injection
+			// attached to the allow-shells rule would silently vanish
+			// as soon as a stricter inner-command rule matched. For
+			// deny (no execution) and redirect (command replaced with
+			// a different target) the derived rule's EnvPolicy is
+			// appropriate as-is.
+			if dec.PolicyDecision == types.DecisionAudit || dec.PolicyDecision == types.DecisionApprove {
+				dec.EnvPolicy = result.EnvPolicy
+			}
+			result = dec
+			resultStrictness = s
+		}
+	}
+	// Depth-cap defense: if the loop terminated with a still-derivable
+	// target, a malicious chain deeper than maxShellCDeriveDepth could
+	// have smuggled a denied command past our inspection. Fail closed
+	// with shellc-depth-exceeded. Checking DerivePolicyTarget on the
+	// current (cur, curArgs) is safe: if we broke via !ok above, this
+	// call also returns !ok (no false positive); if the loop ran to
+	// completion with each level ok, this call tests the (N+1)th level.
+	if _, _, ok := shellparse.DerivePolicyTarget(cur, curArgs); ok {
+		denyDec := e.wrapDecision(string(types.DecisionDeny), "shellc-depth-exceeded", "nested shell-c chain exceeded max derivation depth", nil)
+		if s := decisionStrictness(denyDec.PolicyDecision); s > resultStrictness {
+			result = denyDec
+			resultStrictness = s
+		}
+	}
+	return result
+}
+
+// decisionStrictness ranks PolicyDecision values by how much they restrict or
+// instrument execution. Used by CheckCommand to decide whether an explicit
+// rule matched on a shell-c-derived inner command should override a more
+// permissive rule matched on the outer shell. Ordering is intentionally:
+// deny > redirect/soft_delete > approve > audit > allow — deny blocks
+// execution outright, redirect rewrites what runs, approve gates on a
+// human, audit only adds logging, and allow is the baseline.
+func decisionStrictness(d types.Decision) int {
+	switch d {
+	case types.DecisionDeny:
+		return 4
+	case types.DecisionRedirect, types.DecisionSoftDelete:
+		return 3
+	case types.DecisionApprove:
+		return 2
+	case types.DecisionAudit:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// matchCommandRules runs the rule-matching loop against command/args and
+// returns the resulting decision plus whether an explicit rule matched.
+// When no rule matched, matched=false and the returned Decision is the
+// default-deny fall-through (kept here so callers that don't care about
+// match status continue to see deny-by-default).
+func (e *Engine) matchCommandRules(command string, args []string) (Decision, bool) {
 	cmdLower := strings.ToLower(command)
 	cmdBase := strings.ToLower(filepath.Base(command))
 
@@ -616,12 +765,12 @@ func (e *Engine) CheckCommand(command string, args []string) Decision {
 
 		dec := e.wrapDecision(r.rule.Decision, r.rule.Name, r.rule.Message, r.rule.RedirectTo)
 		dec.EnvPolicy = MergeEnvPolicy(e.policy.EnvPolicy, r.rule)
-		return dec
+		return dec, true
 	}
 	// Default deny (consistent with file_rules, network_rules, and unix_socket_rules).
 	dec := e.wrapDecision(string(types.DecisionDeny), "default-deny-commands", "", nil)
 	dec.EnvPolicy = MergeEnvPolicy(e.policy.EnvPolicy, CommandRule{})
-	return dec
+	return dec, false
 }
 
 // isReadOperation returns true for non-mutating file operations.
