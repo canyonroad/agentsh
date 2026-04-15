@@ -54,6 +54,7 @@ type seccompWrapperConfig struct {
 	ExecveEnabled       bool     `json:"execve_enabled"`
 	FileMonitorEnabled  bool     `json:"file_monitor_enabled"`
 	BlockedSyscalls     []string `json:"blocked_syscalls"`
+	OnBlock             string   `json:"on_block,omitempty"`
 
 	// File monitor sub-options
 	InterceptMetadata bool `json:"intercept_metadata,omitempty"`
@@ -203,6 +204,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	seccompCfg := seccompWrapperConfig{
 		UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
 		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
+		OnBlock:             a.cfg.Sandbox.Seccomp.Syscalls.OnBlock,
 		SignalFilterEnabled: signalFilterActive, // Only true if signal socket succeeded
 		ExecveEnabled:       execveEnabled,
 		FileMonitorEnabled:  config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.Enabled, false),

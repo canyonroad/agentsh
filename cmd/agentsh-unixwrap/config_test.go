@@ -78,3 +78,13 @@ func TestParseConfigJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestParseConfigJSON_OnBlock(t *testing.T) {
+	for _, v := range []string{"errno", "kill", "log", "log_and_kill"} {
+		t.Run(v, func(t *testing.T) {
+			cfg, err := parseConfigJSON(`{"on_block":"` + v + `"}`)
+			require.NoError(t, err)
+			require.Equal(t, v, cfg.OnBlock)
+		})
+	}
+}

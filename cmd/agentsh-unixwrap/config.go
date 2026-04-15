@@ -15,6 +15,7 @@ type WrapperConfig struct {
 	SignalFilterEnabled bool     `json:"signal_filter_enabled"`
 	FileMonitorEnabled  bool     `json:"file_monitor_enabled"`
 	BlockedSyscalls     []string `json:"blocked_syscalls"`
+	OnBlock             string   `json:"on_block,omitempty"`
 
 	InterceptMetadata bool `json:"intercept_metadata,omitempty"`
 	BlockIOUring      bool `json:"block_io_uring,omitempty"`

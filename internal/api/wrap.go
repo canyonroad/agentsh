@@ -152,6 +152,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	seccompCfg := seccompWrapperConfig{
 		UnixSocketEnabled: a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
 		BlockedSyscalls:   a.cfg.Sandbox.Seccomp.Syscalls.Block,
+		OnBlock:           a.cfg.Sandbox.Seccomp.Syscalls.OnBlock,
 		ExecveEnabled:     execveEnabled,
 		ServerPID:         os.Getpid(),
 	}
