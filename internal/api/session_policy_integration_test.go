@@ -943,4 +943,129 @@ func TestWrap_SignalFilterUsesSessionPolicy(t *testing.T) {
 				"filter notify features; expected true (happy path).")
 		}
 	})
+
+	t.Run("disabled_by_onblock_log", func(t *testing.T) {
+		// on_block=log installs ActNotify rules on block-listed syscalls,
+		// so stacking the signal filter on top would cause the same
+		// USER_NOTIF delivery failure observed with unix sockets and
+		// file_monitor. See mainFilterUsesUserNotify.
+		cfgApp := &App{
+			policy: globalEngine,
+			cfg: &config.Config{
+				Sandbox: config.SandboxConfig{
+					Seccomp: config.SandboxSeccompConfig{
+						Syscalls: config.SandboxSeccompSyscallConfig{
+							Block:   []string{"ptrace"},
+							OnBlock: "log",
+						},
+					},
+				},
+			},
+		}
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		s.SetPolicyEngine(sessionEngine)
+
+		if cfgApp.signalFilterEnabled(s, false) {
+			t.Error("signalFilterEnabled(s, false) = true with on_block=log " +
+				"and a non-empty block-list; expected false because the " +
+				"block-list installs ActNotify rules and stacking the " +
+				"signal filter breaks notification delivery.")
+		}
+	})
+
+	t.Run("disabled_by_onblock_log_and_kill", func(t *testing.T) {
+		// Same stacking hazard as on_block=log: ActNotify rules are
+		// installed on block-listed syscalls, so the signal filter
+		// must not be layered on top.
+		cfgApp := &App{
+			policy: globalEngine,
+			cfg: &config.Config{
+				Sandbox: config.SandboxConfig{
+					Seccomp: config.SandboxSeccompConfig{
+						Syscalls: config.SandboxSeccompSyscallConfig{
+							Block:   []string{"mount"},
+							OnBlock: "log_and_kill",
+						},
+					},
+				},
+			},
+		}
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		s.SetPolicyEngine(sessionEngine)
+
+		if cfgApp.signalFilterEnabled(s, false) {
+			t.Error("signalFilterEnabled(s, false) = true with " +
+				"on_block=log_and_kill and a non-empty block-list; " +
+				"expected false because ActNotify rules are installed " +
+				"and stacking USER_NOTIF filters breaks delivery.")
+		}
+	})
+
+	t.Run("enabled_when_onblock_errno_with_block", func(t *testing.T) {
+		// on_block=errno installs SCMP_ACT_ERRNO rules — a kernel-side
+		// return, no USER_NOTIF involvement — so the signal filter is
+		// still safe to install. This locks in that we don't
+		// over-gate.
+		cfgApp := &App{
+			policy: globalEngine,
+			cfg: &config.Config{
+				Sandbox: config.SandboxConfig{
+					Seccomp: config.SandboxSeccompConfig{
+						Syscalls: config.SandboxSeccompSyscallConfig{
+							Block:   []string{"ptrace"},
+							OnBlock: "errno",
+						},
+					},
+				},
+			},
+		}
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		s.SetPolicyEngine(sessionEngine)
+
+		if !cfgApp.signalFilterEnabled(s, false) {
+			t.Error("signalFilterEnabled(s, false) = false with " +
+				"on_block=errno and a block-list; expected true because " +
+				"errno rules do not install USER_NOTIF and the signal " +
+				"filter can coexist.")
+		}
+	})
+
+	t.Run("enabled_when_onblock_log_but_empty_block", func(t *testing.T) {
+		// on_block=log with no block-list installs zero ActNotify rules
+		// (the action is a no-op without syscalls to attach to), so the
+		// signal filter is still safe.
+		cfgApp := &App{
+			policy: globalEngine,
+			cfg: &config.Config{
+				Sandbox: config.SandboxConfig{
+					Seccomp: config.SandboxSeccompConfig{
+						Syscalls: config.SandboxSeccompSyscallConfig{
+							Block:   nil,
+							OnBlock: "log",
+						},
+					},
+				},
+			},
+		}
+		s, err := mgr.Create(t.TempDir(), "default")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		s.SetPolicyEngine(sessionEngine)
+
+		if !cfgApp.signalFilterEnabled(s, false) {
+			t.Error("signalFilterEnabled(s, false) = false with " +
+				"on_block=log but empty block-list; expected true because " +
+				"no ActNotify rules are installed.")
+		}
+	})
 }

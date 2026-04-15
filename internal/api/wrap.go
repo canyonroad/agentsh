@@ -378,7 +378,26 @@ func (a *App) mainFilterUsesUserNotify(execveEnabled bool) bool {
 	if config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata, false) {
 		return true
 	}
+	if blockListUsesNotify(a.cfg.Sandbox.Seccomp.Syscalls.Block, a.cfg.Sandbox.Seccomp.Syscalls.OnBlock) {
+		return true
+	}
 	return false
+}
+
+// blockListUsesNotify reports whether the block-list action installs
+// SECCOMP_RET_USER_NOTIF rules. Only `log` and `log_and_kill` route
+// block-listed syscalls through user-notify; `errno` and `kill` are
+// kernel-side actions. An empty block-list means no rules are attached,
+// regardless of action.
+//
+// Plain-string checks (no import on internal/seccomp) because this helper
+// runs on non-linux builds too — the seccomp package is gated on
+// `linux && cgo`.
+func blockListUsesNotify(block []string, onBlock string) bool {
+	if len(block) == 0 {
+		return false
+	}
+	return onBlock == "log" || onBlock == "log_and_kill"
 }
 
 // acceptNotifyFD listens on the Unix socket for a single connection from the CLI,

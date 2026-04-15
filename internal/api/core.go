@@ -266,7 +266,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	// Only enable ptrace sync handshake when the wrapper will produce a notify FD.
 	// If no seccomp features need USER_NOTIF, the wrapper skips the FD send and
 	// the READY/GO handshake has nothing to synchronize on.
-	hasNotifyFeatures := seccompCfg.UnixSocketEnabled || seccompCfg.ExecveEnabled || seccompCfg.FileMonitorEnabled || seccompCfg.InterceptMetadata
+	hasNotifyFeatures := seccompCfg.UnixSocketEnabled || seccompCfg.ExecveEnabled || seccompCfg.FileMonitorEnabled || seccompCfg.InterceptMetadata || blockListUsesNotify(seccompCfg.BlockedSyscalls, seccompCfg.OnBlock)
 	// AGENTSH_PTRACE_SYNC goes into envInject (not env) so it overrides any
 	// user-supplied value. envInject deduplicates keys before appending.
 	ptraceSyncValue := "0"
