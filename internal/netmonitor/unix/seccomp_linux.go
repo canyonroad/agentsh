@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"unsafe"
 
+	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
 	seccomp "github.com/seccomp/libseccomp-golang"
 	"golang.org/x/sys/unix"
 )
@@ -26,7 +27,8 @@ func DetectSupport() error {
 
 // Filter encapsulates a loaded seccomp user-notify filter and its notify fd.
 type Filter struct {
-	fd seccomp.ScmpFd
+	fd        seccomp.ScmpFd
+	blockList map[uint32]seccompkg.OnBlockAction
 }
 
 func (f *Filter) Close() error {
@@ -34,6 +36,20 @@ func (f *Filter) Close() error {
 		return nil
 	}
 	return unix.Close(int(f.fd))
+}
+
+// BlockListMap returns a copy of the block-list dispatch map (syscall nr → action)
+// for consumers that need to route notifications. Used by the notify handler
+// to distinguish block-listed syscalls from file/unix/signal/metadata ones.
+func (f *Filter) BlockListMap() map[uint32]seccompkg.OnBlockAction {
+	if f == nil || len(f.blockList) == 0 {
+		return nil
+	}
+	out := make(map[uint32]seccompkg.OnBlockAction, len(f.blockList))
+	for k, v := range f.blockList {
+		out[k] = v
+	}
+	return out
 }
 
 // InstallFilter installs a user-notify seccomp filter on the current process
@@ -204,7 +220,8 @@ type FilterConfig struct {
 	FileMonitorEnabled bool
 	InterceptMetadata  bool  // statx, newfstatat, faccessat2, readlinkat
 	BlockIOUring       bool  // io_uring_setup/enter/register → EPERM
-	BlockedSyscalls    []int // syscall numbers to block with KILL
+	BlockedSyscalls    []int // syscall numbers to block; action controlled by OnBlockAction
+	OnBlockAction      seccompkg.OnBlockAction
 }
 
 // DefaultFilterConfig returns config for unix socket monitoring only.
@@ -328,14 +345,36 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 		}
 	}
 
-	// Blocked syscalls — return EPERM instead of killing the process.
-	// The syscall is still denied at the kernel level, but the calling
-	// process can handle the error gracefully instead of being killed.
-	blockedAction := seccomp.ActErrno.SetReturnCode(int16(unix.EPERM))
-	for _, nr := range cfg.BlockedSyscalls {
-		sc := seccomp.ScmpSyscall(nr)
-		if err := filt.AddRule(sc, blockedAction); err != nil {
-			return nil, fmt.Errorf("add blocked rule %v: %w", sc, err)
+	// Blocked syscalls — action controlled by OnBlockAction.
+	// Silent modes (errno, kill) stay on the kernel fast path.
+	// Auditable modes (log, log_and_kill) use ActNotify and the
+	// notify handler routes via BlockListMap().
+	action, ok := seccompkg.ParseOnBlock(string(cfg.OnBlockAction))
+	if !ok {
+		slog.Warn("seccomp: unknown on_block action; degrading to errno",
+			"value", cfg.OnBlockAction)
+	}
+	blockListMap := map[uint32]seccompkg.OnBlockAction{}
+	switch action {
+	case seccompkg.OnBlockErrno:
+		errnoAction := seccomp.ActErrno.SetReturnCode(int16(unix.EPERM))
+		for _, nr := range cfg.BlockedSyscalls {
+			if err := filt.AddRule(seccomp.ScmpSyscall(nr), errnoAction); err != nil {
+				return nil, fmt.Errorf("add blocked errno rule %v: %w", nr, err)
+			}
+		}
+	case seccompkg.OnBlockKill:
+		for _, nr := range cfg.BlockedSyscalls {
+			if err := filt.AddRule(seccomp.ScmpSyscall(nr), seccomp.ActKillProcess); err != nil {
+				return nil, fmt.Errorf("add blocked kill rule %v: %w", nr, err)
+			}
+		}
+	case seccompkg.OnBlockLog, seccompkg.OnBlockLogAndKill:
+		for _, nr := range cfg.BlockedSyscalls {
+			if err := filt.AddRule(seccomp.ScmpSyscall(nr), seccomp.ActNotify); err != nil {
+				return nil, fmt.Errorf("add blocked notify rule %v: %w", nr, err)
+			}
+			blockListMap[uint32(nr)] = action
 		}
 	}
 
@@ -369,11 +408,11 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	if err != nil {
 		// If no notify rules, fd will be -1, which is fine
 		if !cfg.UnixSocketEnabled && !cfg.ExecveEnabled && !cfg.FileMonitorEnabled {
-			return &Filter{fd: -1}, nil
+			return &Filter{fd: -1, blockList: blockListMap}, nil
 		}
 		return nil, err
 	}
-	return &Filter{fd: fd}, nil
+	return &Filter{fd: fd, blockList: blockListMap}, nil
 }
 
 // loadWithRetryOnWaitKillFailure loads a seccomp filter and, if the load
