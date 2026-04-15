@@ -166,13 +166,15 @@ func isKnownShell(base string) bool {
 //     would allow a deny bypass, because the operator named the shell
 //     rule expecting only simple shell use. The caller should fail closed.
 //   - statusOpaque: the script is a multi-command shell program we can't
-//     parse — metachars like `;`, `&`, `|`, globs, quotes, redirects, etc.
-//     The shell will execute arbitrary binaries, so an operator with a
-//     restrictive command rule (deny, redirect, audit, approve, soft_delete)
-//     anywhere in their policy cannot rely on the outer `allow sh` rule to
-//     cover the script. The caller should promote to deny iff any
-//     restrictive command rule exists; otherwise fall back to the outer
-//     rule (operator chose broad shell use, no bypass risk).
+//     parse — unquoted metachars like `;`, `&`, `|`, globs, redirects,
+//     subshells, expansion-bearing double-quotes (`"$VAR"`, `"\`cmd\`"`,
+//     `"\\foo"`), unterminated quotes, etc. The shell will execute
+//     arbitrary binaries, so an operator with a restrictive command rule
+//     (deny, redirect, audit, approve, soft_delete) anywhere in their
+//     policy cannot rely on the outer `allow sh` rule to cover the
+//     script. The caller should promote to deny iff any restrictive
+//     command rule exists; otherwise fall back to the outer rule
+//     (operator chose broad shell use, no bypass risk).
 type parseStatus int
 
 const (
@@ -204,7 +206,12 @@ const (
 //     reference them, so it is safe to ignore the extras — the actual
 //     command that will run is still `tokens[0] tokens[1:]` from the
 //     script string.
-//   - script uses only bytes from [A-Za-z0-9_./-] plus space/tab
+//   - script is tokenized by tokenizeSimpleScript into an argv of
+//     narrow-allowlisted atoms. Unquoted bytes must be from
+//     [A-Za-z0-9_./-]; `'...'` spans accumulate literally; `"..."`
+//     spans accumulate iff they contain no `$`, `` ` ``, or `\`.
+//     Anything else (metachars, globs, expansions, unterminated
+//     quotes) is opaque.
 //   - after stripping transparent wrappers, the first token is NOT a shell
 //     builtin or reserved word
 //
@@ -237,16 +244,17 @@ func parseSimpleShellC(shellArgs []string) (string, []string, parseStatus) {
 		return "", nil, statusFallback
 	}
 	// POSIX allows env-assignment prefixes: `PATH=/tmp cmd` runs `cmd` with
-	// PATH overridden for that exec only. The `=` byte fails the downstream
-	// scriptBytesAllowed check, which without this parse-through would push
-	// assign-prefixed scripts to statusFallback and silently admit a deny
-	// bypass (operator writes `allow sh` + `deny shutdown`, user runs
-	// `sh -c "PATH=/tmp shutdown"`, inner deny never fires). Strip leading
-	// NAME=VALUE tokens and continue deriving with the remainder, so the
-	// inner binary's rule fires normally. A VALUE containing bytes outside
-	// the allowlist (`:` in $PATH, `*` in globs, `$` in substitutions, …)
-	// signals a bypass: the user is smuggling shell-disallowed content
-	// through a pattern our pure-string check can't safely reason about.
+	// PATH overridden for that exec only. The `=` byte is never allowed
+	// unquoted by tokenizeSimpleScript, which without this parse-through
+	// would push assign-prefixed scripts to statusOpaque and silently
+	// admit a deny bypass (operator writes `allow sh` + `deny shutdown`,
+	// user runs `sh -c "PATH=/tmp shutdown"`, inner deny never fires).
+	// Strip leading NAME=VALUE tokens and continue deriving with the
+	// remainder, so the inner binary's rule fires normally. A VALUE
+	// containing bytes outside the narrow allowlist (`:` in $PATH, `*`
+	// in globs, `$` in substitutions, …) signals a bypass: the user is
+	// smuggling shell-disallowed content through a pattern our
+	// pure-string check can't safely reason about.
 	script, dirty := stripLeadingAssignments(script)
 	if dirty {
 		return "", nil, statusBypass
@@ -258,29 +266,33 @@ func parseSimpleShellC(shellArgs []string) (string, []string, parseStatus) {
 		// shell rule.
 		return "", nil, statusFallback
 	}
-	// Detect bypass attempts that evade the byte allowlist: a known wrapper
-	// followed by a long option like `--adjustment=19` uses `=` which the
-	// allowlist rejects. Without this pre-check, such inputs would silently
-	// fall back to the outer shell rule even though they are clear bypass
-	// attempts. We peek at the first whitespace-delimited word and, if it
-	// is a known wrapper, any non-allowlisted bytes in the rest of the
-	// script count as an unparsable wrapper form — fail closed.
-	if headWord := firstWord(script); isTransparentWrapper(headWord) {
-		if !scriptBytesAllowed(script) {
+	tokens, opaque := tokenizeSimpleScript(script)
+	if opaque {
+		// The tokenizer rejected some byte outside a quoted span: an
+		// unquoted metachar (`;`, `|`, `&`, `>`, `<`, `(`, `)`, `*`, `?`,
+		// `[`, etc.), an unterminated quote, or an expansion-triggering
+		// byte inside a double-quoted span (`$`, `` ` ``, `\`). We can't
+		// predict the argv the shell will execute.
+		//
+		// Distinguish two failure modes so the caller can pick the right
+		// response:
+		//   - If the first whitespace-delimited word is a known wrapper
+		//     (nohup, nice, exec, …), the operator's `allow sh` rule was
+		//     not written anticipating wrapper flag shapes — flag
+		//     `--preserve-status=1` fails the tokenizer on `=`, but the
+		//     shell would still exec the inner binary with the wrapper's
+		//     side effects. Tag statusBypass so the engine fails closed
+		//     regardless of policy strictness.
+		//   - Otherwise the script is a multi-command program we can't
+		//     parse; tag statusOpaque so CheckCommand promotes to deny
+		//     only when a restrictive rule exists. An allow-only policy
+		//     (operator already chose broad shell use) won't be broken
+		//     by ordinary pipelines or quoted expansions.
+		if headWord := firstWord(script); isTransparentWrapper(headWord) {
 			return "", nil, statusBypass
 		}
-	}
-	if !scriptBytesAllowed(script) {
-		// Script has bytes outside the narrow allowlist but the head word
-		// isn't a known wrapper — so this is a multi-command shell program
-		// (pipes, subshells, redirects, compound commands, …) whose real
-		// argv we can't predict without running a shell. Tag statusOpaque
-		// so CheckCommand can promote to deny when any restrictive command
-		// rule exists in the policy — `allow sh` + `deny shutdown` mustn't
-		// silently admit `sh -c "shutdown; true"`.
 		return "", nil, statusOpaque
 	}
-	tokens := strings.Fields(script)
 	if len(tokens) == 0 {
 		return "", nil, statusFallback
 	}
@@ -314,7 +326,7 @@ func firstWord(s string) string {
 // like `PATH=/tmp nohup shutdown`: after stripping `PATH=/tmp`, the
 // remainder is `nohup shutdown`, which derives to `shutdown` via the
 // usual wrapper strip. Without parse-through, the `=` byte would fail
-// scriptBytesAllowed and the inner deny rule would be masked by the
+// tokenizeSimpleScript and the inner deny rule would be masked by the
 // outer shell's allow.
 //
 // A token is treated as an assignment iff:
@@ -390,14 +402,14 @@ func isValidAssignName(name string) bool {
 }
 
 // valueBytesAllowed reports whether every byte of value is in the
-// narrow allowlist [A-Za-z0-9_./-]. This is scriptBytesAllowed minus
-// whitespace — VALUEs produced by whitespace-based token splitting
-// cannot themselves contain whitespace, so a stricter set is both safe
-// and correct. Characters outside the set (`:`, `*`, `$`, `=`, …) are
-// either shell metachars, glob metachars, or embedded separators that
-// a downstream scan of the full script would have rejected anyway;
-// returning false here surfaces the bypass attempt at the point where
-// we can still distinguish it from a benign mismatch.
+// narrow allowlist [A-Za-z0-9_./-]. This is isUnquotedAllowedByte
+// applied over a whole string — VALUEs produced by whitespace-based
+// token splitting cannot themselves contain whitespace, so there's no
+// separator byte to admit. Characters outside the set (`:`, `*`, `$`,
+// `=`, …) are either shell metachars, glob metachars, or embedded
+// separators that the tokenizer would have rejected anyway; returning
+// false here surfaces the bypass attempt at the point where we can
+// still distinguish it from a benign mismatch.
 func valueBytesAllowed(value string) bool {
 	for i := 0; i < len(value); i++ {
 		b := value[i]
@@ -413,26 +425,141 @@ func valueBytesAllowed(value string) bool {
 	return true
 }
 
-// scriptBytesAllowed returns true when every byte of script is in the
-// narrow allowlist [A-Za-z0-9_./-] plus space/tab. This is the core
-// safety invariant: disallowing `$`, quotes, metachars, and assignment
-// operators ensures a token-split of the script yields the actual argv
-// the shell would execute (no parameter substitution, no field-splitting
-// surprises from quoting).
-func scriptBytesAllowed(script string) bool {
+// tokenizeSimpleScript splits script into argv-style tokens, honoring the
+// narrow subset of shell quoting semantics we can reason about safely:
+//
+//   - Unquoted bytes must be from the narrow allowlist [A-Za-z0-9_./-] plus
+//     space/tab as delimiters. Any other unquoted byte (`;`, `|`, `&`, `>`,
+//     `<`, `(`, `)`, `*`, `?`, `[`, `=`, `!`, `#`, `~`, newline, non-ASCII,
+//     …) triggers opaque — these are shell metachars, globs, expansions, or
+//     compound-command markers whose effect on the executed argv we can't
+//     predict without running a shell.
+//
+//   - `'...'`: literal single-quoted spans are always safe. Shell does no
+//     interpretation inside — every byte is taken verbatim — so we
+//     accumulate them into the current token as-is. An unterminated single
+//     quote is opaque (the real shell would block awaiting more input or
+//     throw a parse error; either way we shouldn't pretend to know what
+//     runs).
+//
+//   - `"..."`: double-quoted spans are safe ONLY when they contain no
+//     `$`, `` ` ``, or `\` — those bytes invoke parameter expansion,
+//     command substitution, or C-style escapes whose expansions could
+//     resolve to anything. Anything else (spaces, metachars, `=`, `:`,
+//     `!`, etc.) is literal inside `"..."` and accumulates into the
+//     current token. An unterminated double quote is opaque.
+//
+//   - Concatenation of unquoted and quoted spans into one token is
+//     supported implicitly because state transitions (outside→quoted,
+//     quoted→unquoted, etc.) happen without emitting. `foo'bar'` yields
+//     one token `foobar`; `a"b c"d` yields `ab cd`. This matches POSIX
+//     word-splitting behavior for the cases our byte allowlist admits.
+//
+// Returns (tokens, false) on clean parse; (nil, true) — opaque — on any
+// byte or state we can't safely map to an argv. Trailing whitespace after
+// a complete token is fine; a dangling unterminated quote is not.
+//
+// This is intentionally less permissive than a full shell parser: we err
+// on the side of returning opaque so a restrictive policy rule fails
+// closed rather than silently admitting a script we misunderstand.
+func tokenizeSimpleScript(script string) ([]string, bool) {
+	const (
+		stateOutside = iota
+		stateUnquoted
+		stateSingleQuote
+		stateDoubleQuote
+	)
+	var tokens []string
+	var cur []byte
+	state := stateOutside
+	emit := func() {
+		tokens = append(tokens, string(cur))
+		cur = cur[:0]
+	}
 	for i := 0; i < len(script); i++ {
 		b := script[i]
-		switch {
-		case b >= 'A' && b <= 'Z':
-		case b >= 'a' && b <= 'z':
-		case b >= '0' && b <= '9':
-		case b == '_' || b == '.' || b == '/' || b == '-':
-		case b == ' ' || b == '\t':
-		default:
-			return false
+		switch state {
+		case stateOutside:
+			switch {
+			case b == ' ' || b == '\t':
+				// still outside a token
+			case b == '\'':
+				state = stateSingleQuote
+			case b == '"':
+				state = stateDoubleQuote
+			case isUnquotedAllowedByte(b):
+				cur = append(cur, b)
+				state = stateUnquoted
+			default:
+				return nil, true
+			}
+		case stateUnquoted:
+			switch {
+			case b == ' ' || b == '\t':
+				emit()
+				state = stateOutside
+			case b == '\'':
+				state = stateSingleQuote
+			case b == '"':
+				state = stateDoubleQuote
+			case isUnquotedAllowedByte(b):
+				cur = append(cur, b)
+			default:
+				return nil, true
+			}
+		case stateSingleQuote:
+			if b == '\'' {
+				// Close the quote but stay inside the token so
+				// `'foo'bar` concatenates to `foobar`.
+				state = stateUnquoted
+				continue
+			}
+			// Every other byte — including whitespace, metachars,
+			// newlines, non-ASCII — is literal in single quotes.
+			cur = append(cur, b)
+		case stateDoubleQuote:
+			switch b {
+			case '"':
+				state = stateUnquoted
+			case '$', '`', '\\':
+				// Parameter expansion, command substitution, C-style
+				// escapes: the executed argv depends on shell state we
+				// don't have.
+				return nil, true
+			default:
+				cur = append(cur, b)
+			}
 		}
 	}
-	return true
+	switch state {
+	case stateOutside:
+		// nothing to emit
+	case stateUnquoted:
+		emit()
+	default:
+		// dangling open quote — shell would keep reading or parse-error
+		return nil, true
+	}
+	return tokens, false
+}
+
+// isUnquotedAllowedByte reports whether b is in the narrow byte set we
+// consider safe outside quotes: [A-Za-z0-9_./-]. Anything else is a
+// metachar, glob, expansion trigger, or separator that our pure-string
+// tokenizer can't safely reduce to an argv. Whitespace is handled by the
+// tokenizer state machine, not here.
+func isUnquotedAllowedByte(b byte) bool {
+	switch {
+	case b >= 'A' && b <= 'Z':
+		return true
+	case b >= 'a' && b <= 'z':
+		return true
+	case b >= '0' && b <= '9':
+		return true
+	case b == '_' || b == '.' || b == '/' || b == '-':
+		return true
+	}
+	return false
 }
 
 // stripWrappers removes transparent-wrapper prefixes from tokens. Known

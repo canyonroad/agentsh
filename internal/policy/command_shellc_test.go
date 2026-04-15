@@ -91,7 +91,24 @@ func TestEngine_CheckCommand_ShellCDerive(t *testing.T) {
 		{"sh -c 'foo < in' → redirect-in is opaque", "/bin/sh", []string{"-c", "foo < in"}, types.DecisionDeny, "shellc-opaque-script"},
 		{"sh -c '(shutdown)' → subshell is opaque", "/bin/sh", []string{"-c", "(shutdown)"}, types.DecisionDeny, "shellc-opaque-script"},
 		{"sh -c 'ls *.go' → glob is opaque", "/bin/sh", []string{"-c", "ls *.go"}, types.DecisionDeny, "shellc-opaque-script"},
-		{"sh -c 'echo \"hi there\"' → quoted string is opaque", "/bin/sh", []string{"-c", "echo \"hi there\""}, types.DecisionDeny, "shellc-opaque-script"},
+		// Double-quoted simple args parse cleanly now (the tokenizer
+		// reads `"hi there"` as a single literal), so `echo "hi there"`
+		// derives to the echo builtin and falls back to the outer shell
+		// allow rule — same as `echo hi` without quotes.
+		{"sh -c 'echo \"hi there\"' → quoted arg parses, echo is builtin, fall back to shell allow", "/bin/sh", []string{"-c", "echo \"hi there\""}, types.DecisionAllow, "allow-shells"},
+		// Expansion-bearing double quotes stay opaque: `"$VAR"`, ``"`cmd`"``,
+		// and `"\n"` invoke parameter expansion, command substitution, or
+		// C-style escapes whose resolved argv we can't predict.
+		{"sh -c 'echo \"$VAR\"' → double-quote expansion is opaque", "/bin/sh", []string{"-c", "echo \"$VAR\""}, types.DecisionDeny, "shellc-opaque-script"},
+		{"sh -c 'echo \"`date`\"' → double-quote backtick is opaque", "/bin/sh", []string{"-c", "echo \"`date`\""}, types.DecisionDeny, "shellc-opaque-script"},
+		{"sh -c 'echo \"\\n\"' → double-quote backslash is opaque", "/bin/sh", []string{"-c", "echo \"\\n\""}, types.DecisionDeny, "shellc-opaque-script"},
+		{"sh -c 'echo \"unterminated' → unterminated quote is opaque", "/bin/sh", []string{"-c", "echo \"hi"}, types.DecisionDeny, "shellc-opaque-script"},
+		// --- inner command with quoted arg derives past the quotes to
+		// the denied binary, so `deny-shutdown` fires at the derived
+		// level even when the user quotes the args.
+		{"sh -c 'shutdown \"now\"' → quoted arg, derived deny", "/bin/sh", []string{"-c", "shutdown \"now\""}, types.DecisionDeny, "deny-shutdown"},
+		{"sh -c 'shutdown 'now'' → single-quoted arg, derived deny", "/bin/sh", []string{"-c", "shutdown 'now'"}, types.DecisionDeny, "deny-shutdown"},
+		{"sh -c 'shutdown \"\"' → empty quoted arg, derived deny", "/bin/sh", []string{"-c", "shutdown \"\""}, types.DecisionDeny, "deny-shutdown"},
 		{"sh -c 'echo $FOO' → variable expansion is opaque", "/bin/sh", []string{"-c", "echo $FOO"}, types.DecisionDeny, "shellc-opaque-script"},
 		{"sh -c 'echo `date`' → command substitution is opaque", "/bin/sh", []string{"-c", "echo `date`"}, types.DecisionDeny, "shellc-opaque-script"},
 
