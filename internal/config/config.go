@@ -493,7 +493,7 @@ type SandboxSeccompSyscallConfig struct {
 	DefaultAction string   `yaml:"default_action"` // allow, block
 	Block         []string `yaml:"block"`
 	Allow         []string `yaml:"allow"`
-	OnBlock       string   `yaml:"on_block"` // kill, log_and_kill
+	OnBlock       string   `yaml:"on_block"` // errno (default), kill, log, log_and_kill
 }
 
 // SandboxSeccompFileMonitorConfig configures file I/O interception via seccomp.
