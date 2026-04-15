@@ -7,8 +7,17 @@ on:
       - main
 
 env:
-  # Increment to bust Go module cache when needed
-  GO_CACHE_VERSION: v2
+  # Increment to bust Go module cache when needed.
+  # Bumped to v3 because v2 caches from before the libseccomp 2.6 static
+  # build step contain libseccomp-golang cgo artifacts compiled against
+  # system libseccomp 2.5 headers (with `#if SCMP_VER_MINOR < 6` stubs
+  # baked in) plus bare `-lseccomp` from system pkg-config. Relinking
+  # those against libseccomp 2.6 .a produces duplicate-definition errors
+  # for seccomp_export_bpf_mem / seccomp_transaction_* / seccomp_precompute.
+  # The cache-key below also includes the libseccomp build script so any
+  # future version bump (edit to scripts/build-libseccomp.sh) automatically
+  # invalidates cached cgo artifacts without another manual bump.
+  GO_CACHE_VERSION: v3
 
 jobs:
   test-linux:
@@ -18,7 +27,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev libfuse-dev libfuse3-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libfuse-dev libfuse3-dev pkg-config gpg gperf
+
+      - name: Build static libseccomp 2.6 (amd64)
+        run: TARGET=amd64 ./scripts/build-libseccomp.sh
 
       - uses: actions/setup-go@v5
         with:
@@ -31,9 +43,13 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          # Include scripts/build-libseccomp.sh hash so a libseccomp version
+          # bump automatically invalidates stale cgo artifacts (the in-tree
+          # libseccomp-golang stubs are gated on SCMP_VER at cgo preprocess
+          # time — mixing 2.5 and 2.6 artifacts causes link duplicates).
+          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-
+            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-
 
       - name: Free disk space
         run: |
@@ -49,9 +65,12 @@ jobs:
           go test -p 2 ./...
         env:
           GOTMPDIR: ${{ runner.temp }}/go-tmp
+          PKG_CONFIG_LIBDIR: /opt/libseccomp/amd64/lib/pkgconfig
 
       - name: smoke
         run: make smoke
+        env:
+          PKG_CONFIG_LIBDIR: /opt/libseccomp/amd64/lib/pkgconfig
 
   test-macos:
     runs-on: macos-latest
@@ -146,13 +165,17 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}-
+            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-
 
       - name: Install build deps (linux only)
         if: matrix.goos == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y libseccomp-dev libfuse-dev libfuse3-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libfuse-dev libfuse3-dev pkg-config gpg gperf
+
+      - name: Build static libseccomp 2.6 (amd64)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: TARGET=amd64 ./scripts/build-libseccomp.sh
 
       - name: Cross-compile (build only)
         run: |
@@ -166,23 +189,20 @@ jobs:
             export CGO_ENABLED=0
           fi
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=$CGO_ENABLED go build ./...
+        env:
+          PKG_CONFIG_LIBDIR: /opt/libseccomp/amd64/lib/pkgconfig
 
-  integration:
-    needs: [test-linux]
+  build-linux-arm64-cgo:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - name: Install build deps
-        run: |
-          sudo apt-get update && sudo apt-get install -y libseccomp-dev pkg-config fuse3
-          sudo modprobe fuse
-          # Ensure /dev/fuse exists and is accessible
-          if [ ! -e /dev/fuse ]; then
-            sudo mknod /dev/fuse -m 0666 c 10 229
-          fi
-          sudo chmod 666 /dev/fuse
+        run: sudo apt-get update && sudo apt-get install -y libfuse-dev libfuse3-dev pkg-config gpg gperf gcc-aarch64-linux-gnu
+
+      - name: Build static libseccomp 2.6 (arm64)
+        run: TARGET=arm64 ./scripts/build-libseccomp.sh
 
       - uses: actions/setup-go@v5
         with:
@@ -195,18 +215,65 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-integration-${{ hashFiles('**/go.sum') }}
+          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-linux-arm64-cgo-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-integration-
+            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-linux-arm64-cgo-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-
+
+      - name: Cross-compile (arm64 CGO)
+        run: go build ./...
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+          CC: aarch64-linux-gnu-gcc
+          PKG_CONFIG_LIBDIR: /opt/libseccomp/arm64/lib/pkgconfig
+
+  integration:
+    needs: [test-linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update && sudo apt-get install -y pkg-config fuse3 gpg gperf
+          sudo modprobe fuse
+          # Ensure /dev/fuse exists and is accessible
+          if [ ! -e /dev/fuse ]; then
+            sudo mknod /dev/fuse -m 0666 c 10 229
+          fi
+          sudo chmod 666 /dev/fuse
+
+      - name: Build static libseccomp 2.6 (amd64)
+        run: TARGET=amd64 ./scripts/build-libseccomp.sh
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-integration-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ env.GO_CACHE_VERSION }}-${{ runner.os }}-go-integration-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-
 
       - name: Run integration tests (docker)
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
           TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED: true
+          PKG_CONFIG_LIBDIR: /opt/libseccomp/amd64/lib/pkgconfig
         run: go test -v -tags=integration ./internal/integration/...
 
       - name: Run API integration tests
         run: go test -v -tags=integration ./internal/api/... ./internal/proxy/...
+        env:
+          PKG_CONFIG_LIBDIR: /opt/libseccomp/amd64/lib/pkgconfig
 
   fargate-e2e:
     if: >-

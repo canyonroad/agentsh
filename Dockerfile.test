@@ -263,7 +263,7 @@ fi
 echo ""
 echo "=== Shim tests ==="
 
-sh_out="$(AGENTSH_SESSION_ID="$sid" /bin/sh -c 'echo hello_sh' 2>&1 | tr -d '\r' | tail -n 1)"
+sh_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo hello_sh' 2>&1 | tr -d '\r' | tail -n 1)"
 if [ "$sh_out" = "hello_sh" ]; then
   pass "echo through /bin/sh shim"
 else
@@ -273,7 +273,7 @@ fi
 # -------------------------------------------------------------------
 # Test: basic echo through /bin/bash shim
 # -------------------------------------------------------------------
-bash_out="$(AGENTSH_SESSION_ID="$sid" /bin/bash -c 'echo hello_bash' 2>&1 | tr -d '\r' | tail -n 1)"
+bash_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/bash -c 'echo hello_bash' 2>&1 | tr -d '\r' | tail -n 1)"
 if [ "$bash_out" = "hello_bash" ]; then
   pass "echo through /bin/bash shim"
 else
@@ -296,7 +296,7 @@ fi
 # -------------------------------------------------------------------
 # Test: multi-word arguments preserved
 # -------------------------------------------------------------------
-multi_out="$(AGENTSH_SESSION_ID="$sid" /bin/sh -c 'echo "hello world"' 2>&1 | tr -d '\r' | tail -n 1)"
+multi_out="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo "hello world"' 2>&1 | tr -d '\r' | tail -n 1)"
 if [ "$multi_out" = "hello world" ]; then
   pass "multi-word arguments preserved"
 else
@@ -307,7 +307,7 @@ fi
 # Test: exit code propagation
 # -------------------------------------------------------------------
 set +e
-AGENTSH_SESSION_ID="$sid" /bin/sh -c 'exit 42' >/dev/null 2>&1
+AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'exit 42' >/dev/null 2>&1
 exit_rc=$?
 set -e
 if [ "$exit_rc" = "42" ]; then
@@ -510,23 +510,41 @@ echo ""
 echo "=== Shim + policy integration ==="
 
 # Safe command through shim should work
-shim_safe="$(AGENTSH_SESSION_ID="$sid" /bin/sh -c 'echo shim_policy_ok' 2>&1 | tr -d '\r' | tail -n 1)"
+shim_safe="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'echo shim_policy_ok' 2>&1 | tr -d '\r' | tail -n 1)"
 if [ "$shim_safe" = "shim_policy_ok" ]; then
   pass "safe command through shim works"
 else
   fail "safe command through shim works" "got: $shim_safe"
 fi
 
-# Blocked command through shim should fail
+# Blocked command through shim should fail WITH a policy-specific
+# denial message on stderr. Matching only `rc != 0` is insufficient:
+# `shutdown` can exit non-zero for unrelated reasons (binary not
+# installed, non-root in a restricted container), so a vacuous pass
+# would not prove the policy layer actually denied anything.
+# internal/cli/exec.go emits `agentsh: blocked by policy (rule=...)`
+# via fmt.Sprintf when the server refuses the command; assert on
+# that exact substring.
 set +e
-AGENTSH_SESSION_ID="$sid" /bin/sh -c 'shutdown now' >/dev/null 2>&1
+shim_block_stderr="$(AGENTSH_SESSION_ID="$sid" AGENTSH_SHIM_FORCE=1 /bin/sh -c 'shutdown now' 2>&1 >/dev/null)"
 shim_block_rc=$?
 set -e
-if [ "$shim_block_rc" -ne 0 ]; then
-  pass "blocked command through shim fails (rc=$shim_block_rc)"
-else
-  fail "blocked command through shim fails" "got exit code 0"
-fi
+case "$shim_block_stderr" in
+  *"blocked by policy"*)
+    # Denial substring alone is insufficient — a regression where the
+    # shim prints the policy message but then exits 0 would still pass
+    # a substring-only check even though the command effectively
+    # succeeded. Require rc != 0 on top of the substring.
+    if [ "$shim_block_rc" -ne 0 ]; then
+      pass "blocked command through shim fails (rc=$shim_block_rc; policy denial observed)"
+    else
+      fail "blocked command through shim fails" "rc=0 with 'blocked by policy' on stderr — denial printed but command returned success. stderr: ${shim_block_stderr}"
+    fi
+    ;;
+  *)
+    fail "blocked command through shim fails" "rc=$shim_block_rc, no 'blocked by policy' on stderr; got: ${shim_block_stderr}"
+    ;;
+esac
 
 # -------------------------------------------------------------------
 # Summary

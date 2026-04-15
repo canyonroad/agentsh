@@ -25,6 +25,13 @@ At filter installation time in `InstallFilterWithConfig()`, call `filt.SetWaitKi
 
 Requires kernel 6.0+ and libseccomp >= 2.6.0. On older kernels, `Load()` returns an error when the flag is unrecognized. Since the current `InstallFilterWithConfig` creates the filter via libseccomp, we handle this gracefully: try `SetWaitKill(true)`, log at debug level if it fails, continue without it.
 
+> **Follow-up (2026-04-14):** The libseccomp version requirement is now enforced at
+> build time via the `#error` guards in `internal/netmonitor/unix/seccomp_version_check.go`
+> and `cmd/agentsh-unixwrap/seccomp_version_check.go`, and CI builds a static libseccomp
+> 2.6 via `scripts/build-libseccomp.sh`. See
+> `docs/superpowers/specs/2026-04-14-libseccomp-2.6-defense-in-depth-design.md`
+> for the hardening rationale.
+
 ### Layer 2: Block SIGURG before exec
 
 In the wrapper's `main()`, right before `syscall.Exec()`, block SIGURG on the current OS thread via raw `rt_sigprocmask(SIG_BLOCK, {SIGURG})` syscall. This prevents Go's runtime from delivering SIGURG to the thread that will be suspended in `seccomp_do_user_notification`.

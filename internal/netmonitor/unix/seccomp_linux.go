@@ -230,12 +230,18 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 	// Enable SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (kernel 6.0+).
 	// When active, non-fatal signals (including Go's ~10ms SIGURG preemption)
 	// cannot interrupt seccomp_do_user_notification, preventing ERESTARTSYS loops.
-	// Probes kernel version first as an optimization; the Load() fallback below
-	// handles custom kernels that report 6.x but lack the flag.
+	// The compile-time #error in seccomp_version_check.go guarantees the
+	// libseccomp headers are >=2.6 and SetWaitKill is not a silent no-op.
+	// If ProbeWaitKillable reports the kernel supports it but SetWaitKill
+	// still fails, something is unexpected — warn loudly so operators can
+	// investigate. Load() retry at the end of this function handles the
+	// case where SetWaitKill succeeds but the kernel rejects the flag at
+	// load time (custom/vendor kernels).
 	waitKillSet := false
 	if ProbeWaitKillable() {
 		if err := filt.SetWaitKill(true); err != nil {
-			slog.Debug("seccomp: SetWaitKill failed", "error", err)
+			slog.Warn("seccomp: WaitKillable unexpectedly unavailable despite kernel 6.0+; falling back to SIGURG signal mask only",
+				"error", err)
 		} else {
 			waitKillSet = true
 		}
@@ -356,22 +362,8 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 		}
 	}
 
-	if err := filt.Load(); err != nil {
-		// If Load failed and WaitKill was set, the kernel may not support
-		// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV despite reporting version >= 6.0
-		// (custom/vendor kernels). Retry without the flag — the wrapper's SIGURG
-		// block before exec provides equivalent protection.
-		if waitKillSet {
-			slog.Debug("seccomp: Load with WaitKill failed, retrying without", "error", err)
-			if clearErr := filt.SetWaitKill(false); clearErr != nil {
-				return nil, err
-			}
-			if retryErr := filt.Load(); retryErr != nil {
-				return nil, retryErr
-			}
-		} else {
-			return nil, err
-		}
+	if err := loadWithRetryOnWaitKillFailure(filt, waitKillSet, filt.Load); err != nil {
+		return nil, err
 	}
 	fd, err := filt.GetNotifFd()
 	if err != nil {
@@ -382,4 +374,27 @@ func InstallFilterWithConfig(cfg FilterConfig) (*Filter, error) {
 		return nil, err
 	}
 	return &Filter{fd: fd}, nil
+}
+
+// loadWithRetryOnWaitKillFailure loads a seccomp filter and, if the load
+// fails with WaitKill set, clears WaitKill and retries once. This handles
+// custom or vendor kernels that report 6.0+ but reject
+// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV at filter load time.
+//
+// loadFn is injected so tests can simulate Load() failures deterministically.
+// Production call sites pass `filt.Load`.
+func loadWithRetryOnWaitKillFailure(filt *seccomp.ScmpFilter, waitKillSet bool, loadFn func() error) error {
+	err := loadFn()
+	if err == nil {
+		return nil
+	}
+	if !waitKillSet {
+		return err
+	}
+	slog.Warn("seccomp: WaitKillable rejected at filter load time; falling back to SIGURG signal mask only",
+		"error", err)
+	if clearErr := filt.SetWaitKill(false); clearErr != nil {
+		return err
+	}
+	return loadFn()
 }
