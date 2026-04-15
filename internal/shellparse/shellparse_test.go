@@ -23,6 +23,18 @@ func TestDerivePolicyTarget(t *testing.T) {
 		{"backslash-separator windows-style sh path", `C:\bin\sh`, []string{"-c", "shutdown"}, "shutdown", []string{}, true},
 		{"mixed-separator bash path", `/usr/local\bash`, []string{"-c", "ls"}, "ls", []string{}, true},
 		{"uppercase shell basename (case-insensitive FS)", "/BIN/SH", []string{"-c", "ls"}, "ls", []string{}, true},
+		// --- shell-shim install layout: the agentsh shell shim installs
+		// the original shell under a `.real` suffix (/bin/sh.real) and
+		// takes over the original name. When the shim forwards to
+		// `agentsh exec`, the server sees the `.real` path as the outer
+		// command. Without normalization, `sh.real` / `bash.real` miss
+		// the known-shell set and the policy falls through to the
+		// outer allow-rule (which must exist for the shim to function).
+		{"shim .real sh suffix", "/bin/sh.real", []string{"-c", "shutdown now"}, "shutdown", []string{"now"}, true},
+		{"shim .real bash suffix", "/bin/bash.real", []string{"-c", "shutdown now"}, "shutdown", []string{"now"}, true},
+		{"shim .real usr/bin path", "/usr/bin/sh.real", []string{"-c", "rm foo"}, "rm", []string{"foo"}, true},
+		{"shim .real uppercase (case-insensitive FS)", "/BIN/SH.REAL", []string{"-c", "ls"}, "ls", []string{}, true},
+		{"shim .real bare name", "sh.real", []string{"-c", "shutdown"}, "shutdown", []string{}, true},
 		{"bash, simple cmd", "bash", []string{"-c", "rm foo"}, "rm", []string{"foo"}, true},
 		{"dash", "/bin/dash", []string{"-c", "whoami"}, "whoami", []string{}, true},
 		{"ash (busybox shell on alpine)", "/bin/ash", []string{"-c", "id"}, "id", []string{}, true},
