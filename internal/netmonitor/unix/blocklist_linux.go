@@ -153,13 +153,22 @@ func attemptKill(notifyFD int, notifID uint64, pid int, sessID, syscallName stri
 	defer unix.Close(pidfd)
 
 	// Revalidate notif id *after* the pidfd is anchored. If the kernel has
-	// released the trapped task (ENOENT-style errors), the pidfd we just
-	// opened may reference a PID-reused unrelated process. Aborting here
-	// prevents SIGKILL from landing on the wrong target.
+	// released the trapped task (ENOENT — the canonical "notif id gone"
+	// error), the pidfd we just opened may reference a PID-reused unrelated
+	// process. Aborting here prevents SIGKILL from landing on the wrong
+	// target. Any other error (EINVAL on a bad listener fd, transient
+	// ioctl failures) is NOT evidence the target is gone, so we must not
+	// silently downgrade to "killed" — report denied so the audit record
+	// reflects that we could not deliver the signal.
 	if err := notifIDValidFn(notifyFD, notifID); err != nil {
-		slog.Debug("seccomp block-list: notif id invalid after pidfd_open — skipping signal (possible pid reuse)",
+		if isENOENT(err) {
+			slog.Debug("seccomp block-list: notif id invalid after pidfd_open — skipping signal (possible pid reuse)",
+				"session_id", sessID, "pid", pid, "syscall", syscallName, "error", err)
+			return "killed"
+		}
+		slog.Warn("seccomp block-list: notif id revalidation failed with non-ENOENT error; refusing signal",
 			"session_id", sessID, "pid", pid, "syscall", syscallName, "error", err)
-		return "killed"
+		return "denied"
 	}
 
 	if err := pidfdSendSignalFn(pidfd, unix.SIGKILL); err != nil {

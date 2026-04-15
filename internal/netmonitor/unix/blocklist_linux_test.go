@@ -3,6 +3,7 @@
 package unix
 
 import (
+	"os"
 	"testing"
 
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
@@ -72,12 +73,13 @@ func swapNotifIDValidFn(t *testing.T, fn func(int, uint64) error) func() {
 }
 
 // openDevNullFD returns a scratch fd suitable for attemptKill's deferred
-// unix.Close. Using /dev/null (instead of a fabricated integer like 42)
-// ensures we never accidentally close an unrelated fd the test process is
-// holding, and avoids spurious close-of-unknown-fd warnings from the kernel.
+// unix.Close. Using os.DevNull (the Go constant — "/dev/null" on Linux,
+// "NUL" on Windows, etc.) instead of a fabricated integer like 42 ensures
+// we never accidentally close an unrelated fd the test process is holding,
+// and avoids spurious close-of-unknown-fd warnings from the kernel.
 func openDevNullFD(t *testing.T) int {
 	t.Helper()
-	fd, err := gounix.Open("/dev/null", gounix.O_RDONLY, 0)
+	fd, err := gounix.Open(os.DevNull, gounix.O_RDONLY, 0)
 	require.NoError(t, err)
 	return fd
 }
@@ -157,13 +159,13 @@ func TestAttemptKill_PidfdSendSignalEINVAL(t *testing.T) {
 	require.Equal(t, "denied", outcome)
 }
 
-// TestAttemptKill_NotifIDInvalidAfterOpen covers the TOCTOU race fix: when the
-// target exits between the caller's initial NotifIDValid check and
-// attemptKill's own pidfd_open, the pidfd may now reference a PID-reused
-// unrelated process. Re-checking NotifIDValid *after* pidfd_open closes the
-// race — if it fails, we must NOT send SIGKILL, and outcome is still
+// TestAttemptKill_NotifIDInvalidAfterOpen_ENOENT covers the TOCTOU race fix:
+// when the target exits between the caller's initial NotifIDValid check and
+// attemptKill's own pidfd_open, NotifIDValid reports ENOENT on recheck —
+// the canonical "notif id is gone" signal. We must NOT send SIGKILL (the
+// pidfd may reference a PID-reused unrelated process) and outcome is
 // "killed" because the original trapped caller is, by definition, gone.
-func TestAttemptKill_NotifIDInvalidAfterOpen(t *testing.T) {
+func TestAttemptKill_NotifIDInvalidAfterOpen_ENOENT(t *testing.T) {
 	fd := openDevNullFD(t)
 
 	signalCalled := false
@@ -183,9 +185,37 @@ func TestAttemptKill_NotifIDInvalidAfterOpen(t *testing.T) {
 
 	outcome := attemptKill(0, 0, 4242, "sess-abc", "ptrace")
 	require.Equal(t, "killed", outcome,
-		"notif id invalid after open means the original target is gone")
+		"ENOENT on recheck means the original target is gone")
 	require.False(t, signalCalled,
-		"SIGKILL must NOT be sent when notif id is invalid — pidfd may reference a reused PID")
+		"SIGKILL must NOT be sent when notif id is gone — pidfd may reference a reused PID")
+}
+
+// TestAttemptKill_NotifIDInvalidAfterOpen_UnexpectedError covers the second
+// half of the narrowed recheck semantics: non-ENOENT errors (bad listener
+// fd, interrupted ioctl, EINVAL, …) are NOT evidence the target exited, so
+// we must refuse to signal AND report "denied" so the audit record reflects
+// that we could not deliver the kill — never silently downgrade to "killed".
+func TestAttemptKill_NotifIDInvalidAfterOpen_UnexpectedError(t *testing.T) {
+	fd := openDevNullFD(t)
+
+	signalCalled := false
+	restore := swapPidfdSeams(t,
+		func(pid int) (int, error) { return fd, nil },
+		func(pidfd int, sig gounix.Signal) error {
+			signalCalled = true
+			return nil
+		},
+	)
+	defer restore()
+
+	restoreValid := swapNotifIDValidFn(t, func(int, uint64) error { return gounix.EINVAL })
+	defer restoreValid()
+
+	outcome := attemptKill(0, 0, 4242, "sess-abc", "ptrace")
+	require.Equal(t, "denied", outcome,
+		"non-ENOENT revalidation error must not be treated as kill success")
+	require.False(t, signalCalled,
+		"SIGKILL must NOT be sent when revalidation fails for any reason")
 }
 
 func TestBlockListConfig_IsBlockListed(t *testing.T) {
