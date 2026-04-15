@@ -115,6 +115,41 @@ func TestServeNotifyWithExecve_DoesNotHangOnNonSeccompFD(t *testing.T) {
 	}
 }
 
+// TestServeNotifyWithExecve_NilEmitterAllowed is a regression guard against
+// reintroducing the emit==nil short-circuit that roborev flagged HIGH on
+// commit 8f641891. The notify loop MUST keep serving notifications even
+// without an emitter so block-list enforcement (SIGKILL under log_and_kill)
+// still runs; only audit event emission should be conditional. If anyone
+// re-adds `|| emit == nil` to the entry guard, block-list enforcement
+// silently stops working in production.
+func TestServeNotifyWithExecve_NilEmitterAllowed(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		// nil emit must be accepted — NotifReceive will still error on the
+		// pipe fd and exit via the error branch, but the function must not
+		// panic or return before attempting the receive.
+		ServeNotifyWithExecve(ctx, r, "test-nil-emit", nil, nil, nil, nil, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good — exited cleanly (via NotifReceive error on pipe fd).
+	case <-time.After(1 * time.Second):
+		t.Fatal("ServeNotifyWithExecve did not exit with nil emitter")
+	}
+}
+
 func TestServeNotify_DoesNotHangOnCancelledContext(t *testing.T) {
 	// Same as above for the non-execve ServeNotify variant.
 	r, w, err := os.Pipe()

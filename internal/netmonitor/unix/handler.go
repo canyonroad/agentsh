@@ -171,10 +171,21 @@ func buildUnixSocketEvent(emit Emitter, session string, dec policy.Decision, pat
 // to handleBlockListNotify (log / log_and_kill modes). Silent modes (errno, kill)
 // are handled kernel-side and never reach this loop, so blockList is empty for them.
 // It stops when the fd is closed or ctx is done.
+//
+// emit may be nil: the loop must still respond to every notification so trapped
+// syscalls get a deny or continue response. Without an emitter, enforcement
+// still runs — block-list can still SIGKILL under log_and_kill, execve/file
+// handlers manage their own emitters — but audit events for the paths that
+// route through this loop's emit directly (unix sockets, block-list) are
+// dropped. All downstream emit consumers must nil-check before use.
 func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol *policy.Engine, emit Emitter, execveHandler *ExecveHandler, fileHandler *FileHandler, blockList *BlockListConfig) {
-	if fd == nil || emit == nil {
-		slog.Debug("ServeNotifyWithExecve: nil fd or emit", "fd_nil", fd == nil, "emit_nil", emit == nil)
+	if fd == nil {
+		slog.Debug("ServeNotifyWithExecve: nil fd", "fd_nil", true)
 		return
+	}
+	if emit == nil {
+		slog.Warn("ServeNotifyWithExecve: nil emitter — enforcement will run but audit events will be dropped",
+			"session_id", sessID)
 	}
 	scmpFD := seccomp.ScmpFd(fd.Fd())
 	slog.Debug("ServeNotifyWithExecve: starting notify loop", "session_id", sessID, "scmp_fd", scmpFD)
