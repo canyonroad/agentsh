@@ -28,9 +28,17 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: release-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          # Namespace bumped to v2 and salted with the libseccomp build
+          # script hash. Same reasoning as ci.yml: caches from before the
+          # libseccomp 2.6 static build carry libseccomp-golang cgo artifacts
+          # compiled against 2.5 headers (stub bodies for 2.6-only functions
+          # plus bare `-lseccomp` from system pkg-config). Relinking those
+          # against the 2.6 static .a produces duplicate-definition errors.
+          # Including hashFiles('scripts/build-libseccomp.sh') ensures any
+          # future libseccomp version bump invalidates stale artifacts.
+          key: release-v2-${{ runner.os }}-go-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            release-${{ runner.os }}-go-
+            release-v2-${{ runner.os }}-go-seccomp${{ hashFiles('scripts/build-libseccomp.sh') }}-
 
       - name: Free disk space
         run: |
