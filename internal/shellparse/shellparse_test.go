@@ -183,6 +183,35 @@ func TestDerivePolicyTarget(t *testing.T) {
 		{"newline", "sh", []string{"-c", "ls\npwd"}, "", nil, false},
 		{"non-ascii", "sh", []string{"-c", "éls"}, "", nil, false},
 
+		// --- quoted-argument derivation: the tokenizer accepts `'...'`
+		// spans verbatim and `"..."` spans that contain no expansion
+		// triggers (`$`, `` ` ``, `\`). Without this, `shutdown "now"`
+		// was opaque (the `"` bytes failed the byte allowlist), so
+		// `allow sh` + `deny shutdown` would fire the opaque-deny branch
+		// instead of the target rule — same outcome under a restrictive
+		// policy, but wrong outcome under an allow-only policy where a
+		// benign invocation like `/bin/sh -c 'echo "hi there"'` would be
+		// denied as "opaque" instead of falling back to the shell allow.
+		{"double-quoted arg", "sh", []string{"-c", "shutdown \"now\""}, "shutdown", []string{"now"}, true},
+		{"single-quoted arg", "sh", []string{"-c", "shutdown 'now'"}, "shutdown", []string{"now"}, true},
+		{"double-quoted arg with space", "sh", []string{"-c", "grep \"pattern\" file"}, "grep", []string{"pattern", "file"}, true},
+		{"single-quoted arg with space", "sh", []string{"-c", "grep 'pat tern' file"}, "grep", []string{"pat tern", "file"}, true},
+		{"unquoted + quoted concat", "sh", []string{"-c", "shutdown foo\"bar\""}, "shutdown", []string{"foobar"}, true},
+		{"quoted + unquoted concat", "sh", []string{"-c", "shutdown 'foo'bar"}, "shutdown", []string{"foobar"}, true},
+		{"quoted empty arg", "sh", []string{"-c", "shutdown \"\""}, "shutdown", []string{""}, true},
+
+		// --- expansion-bearing double quotes stay opaque: `$`, `` ` ``,
+		// and `\` inside `"..."` invoke parameter expansion, command
+		// substitution, or C-style escapes whose resolved argv could be
+		// anything. Keep these on the fallback path rather than guessing.
+		{"double-quoted dollar", "sh", []string{"-c", "shutdown \"$NOW\""}, "", nil, false},
+		{"double-quoted subcommand", "sh", []string{"-c", "shutdown \"$(date)\""}, "", nil, false},
+		{"double-quoted backtick", "sh", []string{"-c", "shutdown \"`date`\""}, "", nil, false},
+		{"double-quoted backslash", "sh", []string{"-c", "shutdown \"\\now\""}, "", nil, false},
+		// Unterminated quotes — shell would keep reading or parse-error.
+		{"unterminated double quote", "sh", []string{"-c", "echo \"hi"}, "", nil, false},
+		{"unterminated single quote", "sh", []string{"-c", "echo 'hi"}, "", nil, false},
+
 		// --- builtins (first token blocked) ---
 		{"echo (dual builtin)", "sh", []string{"-c", "echo hi"}, "", nil, false},
 		{"printf (dual builtin)", "sh", []string{"-c", "printf hi"}, "", nil, false},
@@ -371,12 +400,25 @@ func TestIsOpaqueShellC(t *testing.T) {
 		{"redirect in", "sh", []string{"-c", "foo < in"}, true},
 		{"subshell", "sh", []string{"-c", "(foo)"}, true},
 		{"glob", "sh", []string{"-c", "ls *.go"}, true},
-		{"double quote", "sh", []string{"-c", "echo \"hi\""}, true},
-		{"single quote", "sh", []string{"-c", "echo 'hi'"}, true},
+		{"double quote with expansion", "sh", []string{"-c", "echo \"$X\""}, true},
+		{"double quote with backtick", "sh", []string{"-c", "echo \"`date`\""}, true},
+		{"double quote with backslash", "sh", []string{"-c", "echo \"\\n\""}, true},
+		{"unterminated double quote", "sh", []string{"-c", "echo \"hi"}, true},
+		{"unterminated single quote", "sh", []string{"-c", "echo 'hi"}, true},
 		{"dollar var", "sh", []string{"-c", "echo $X"}, true},
 		{"backtick substitution", "sh", []string{"-c", "echo `date`"}, true},
 		{"absolute shell path opaque", "/usr/bin/bash", []string{"-c", "foo | bar"}, true},
 		{"zsh opaque", "zsh", []string{"-c", "foo; bar"}, true},
+
+		// --- NOT opaque: simple quoting now parses — the script is not
+		// an unpredictable shell program, it's a clean argv. echo/printf
+		// are builtins so statusFallback kicks in, and falling back to
+		// the outer shell rule is fine (no hidden sub-exec is happening
+		// inside `echo "hi"`).
+		{"double quote no expansion (builtin)", "sh", []string{"-c", "echo \"hi\""}, false},
+		{"single quote (builtin)", "sh", []string{"-c", "echo 'hi'"}, false},
+		{"double-quoted arg (non-builtin derives)", "sh", []string{"-c", "shutdown \"now\""}, false},
+		{"single-quoted arg (non-builtin derives)", "sh", []string{"-c", "shutdown 'now'"}, false},
 
 		// --- NOT opaque: bypass cases return statusBypass, not opaque ---
 		{"exec -a bypass (not opaque)", "sh", []string{"-c", "exec -a foo shutdown"}, false},
