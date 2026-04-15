@@ -298,6 +298,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		ptraceSync:       a.ptraceTracer != nil && hasNotifyFeatures,
 		cmdResolver:      a.cmdResolver,
 		sessionTracker:   a.sessionTracker,
+		blockList:        a.buildBlockListConfigFor(sessionID),
 	}
 
 	// Create execve handler if enabled (Linux-specific, will be nil on other platforms)

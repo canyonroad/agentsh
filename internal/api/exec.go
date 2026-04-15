@@ -35,6 +35,7 @@ type extraProcConfig struct {
 	notifyBroker     eventBroker    // Event broker for notify handler
 	notifyPolicy     *policy.Engine // Policy engine for notify handler
 	execveHandler    any            // Execve handler (*unixmon.ExecveHandler on Linux, nil otherwise)
+	blockList        any            // Seccomp block-list dispatch config (*unixmon.BlockListConfig on Linux, nil otherwise)
 
 	// File monitor config
 	fileMonitorCfg  config.SandboxSeccompFileMonitorConfig
@@ -772,7 +773,7 @@ func startWrapperHandlers(ctx context.Context, extra *extraProcConfig, pid, pgid
 		return
 	}
 	if extra.notifyParentSock != nil {
-		startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker, extra.execveHandler, extra.fileMonitorCfg, extra.landlockEnabled, ptraceReady)
+		startNotifyHandler(ctx, extra.notifyParentSock, extra.notifySessionID, extra.notifyPolicy, extra.notifyStore, extra.notifyBroker, extra.execveHandler, extra.fileMonitorCfg, extra.landlockEnabled, extra.blockList, ptraceReady)
 	}
 	if extra.signalParentSock != nil && extra.signalEngine != nil {
 		if extra.signalRegistry != nil {

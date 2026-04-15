@@ -75,7 +75,7 @@ func TestServeNotifyWithExecve_DoesNotHangOnCancelledContext(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		ServeNotifyWithExecve(ctx, r, "test-cancelled", nil, &handlerTestEmitter{}, nil, nil)
+		ServeNotifyWithExecve(ctx, r, "test-cancelled", nil, &handlerTestEmitter{}, nil, nil, nil)
 		close(done)
 	}()
 
@@ -103,7 +103,7 @@ func TestServeNotifyWithExecve_DoesNotHangOnNonSeccompFD(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		ServeNotifyWithExecve(ctx, r, "test-bad-fd", nil, &handlerTestEmitter{}, nil, nil)
+		ServeNotifyWithExecve(ctx, r, "test-bad-fd", nil, &handlerTestEmitter{}, nil, nil, nil)
 		close(done)
 	}()
 

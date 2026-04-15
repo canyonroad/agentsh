@@ -167,8 +167,11 @@ func buildUnixSocketEvent(emit Emitter, session string, dec policy.Decision, pat
 
 // ServeNotifyWithExecve runs the seccomp notify loop with execve interception support.
 // It routes execve/execveat syscalls to the execveHandler and unix socket syscalls to the policy engine.
+// When blockList is non-nil and populated, syscalls present in its map are routed
+// to handleBlockListNotify (log / log_and_kill modes). Silent modes (errno, kill)
+// are handled kernel-side and never reach this loop, so blockList is empty for them.
 // It stops when the fd is closed or ctx is done.
-func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol *policy.Engine, emit Emitter, execveHandler *ExecveHandler, fileHandler *FileHandler) {
+func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol *policy.Engine, emit Emitter, execveHandler *ExecveHandler, fileHandler *FileHandler, blockList *BlockListConfig) {
 	if fd == nil || emit == nil {
 		slog.Debug("ServeNotifyWithExecve: nil fd or emit", "fd_nil", fd == nil, "emit_nil", emit == nil)
 		return
@@ -211,6 +214,20 @@ func ServeNotifyWithExecve(ctx context.Context, fd *os.File, sessID string, pol 
 
 		syscallNr := int32(req.Data.Syscall)
 		slog.Debug("ServeNotifyWithExecve: received notification", "session_id", sessID, "syscall_nr", syscallNr, "pid", req.Pid, "count", notifCount)
+
+		// Block-list dispatch (log / log_and_kill modes). Silent modes (errno, kill)
+		// never reach here — the kernel executes them without a notify trap.
+		// nil-safe: IsBlockListed returns (_, false) on a nil receiver.
+		// Placed before execve / file-monitor routing so that configuring
+		// on_block=log_and_kill on a syscall that would otherwise be intercepted
+		// (e.g. execve) still enforces the block-list decision rather than
+		// silently falling through to the interceptor.
+		if action, ok := blockList.IsBlockListed(uint32(syscallNr)); ok {
+			slog.Debug("ServeNotifyWithExecve: routing to blocklist handler",
+				"session_id", sessID, "pid", req.Pid, "syscall_nr", syscallNr, "action", action)
+			handleBlockListNotify(ctx, int(scmpFD), req, action, sessID, emit)
+			continue
+		}
 
 		// Route to appropriate handler
 		if IsExecveSyscall(syscallNr) && execveHandler != nil {

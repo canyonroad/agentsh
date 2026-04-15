@@ -179,7 +179,12 @@ func notifyHandlerRecover(sessID string, store eventStore, broker eventBroker) {
 // starts the ServeNotify handler in a goroutine. It returns immediately.
 // The handler runs until ctx is cancelled or the fd is closed.
 // If execveHandler is non-nil, uses ServeNotifyWithExecve for execve interception.
-func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string, pol *policy.Engine, store eventStore, broker eventBroker, execveHandler any, fileMonitorCfg config.SandboxSeccompFileMonitorConfig, landlockEnabled bool, ptraceReady chan<- error) {
+// blockList carries the per-session seccomp block-list dispatch config; passed
+// as `any` to keep extraProcConfig cross-platform (actual type on Linux is
+// *unixmon.BlockListConfig). A nil or zero-ActionByNr value is treated as
+// "no block-list notify routing needed" — safe for errno/kill modes which are
+// kernel-side.
+func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string, pol *policy.Engine, store eventStore, broker eventBroker, execveHandler any, fileMonitorCfg config.SandboxSeccompFileMonitorConfig, landlockEnabled bool, blockList any, ptraceReady chan<- error) {
 	if parentSock == nil {
 		return
 	}
@@ -337,10 +342,18 @@ func startNotifyHandler(ctx context.Context, parentSock *os.File, sessID string,
 		// Start ServeNotifyWithExecve BEFORE reading READY to ensure notifications
 		// can be processed by the time the wrapper exec's after receiving GO.
 		serveDone := make(chan struct{})
+		// Type-assert the cross-platform any back to the concrete Linux type.
+		// Stub/non-Linux callers pass nil; core.go on Linux always passes a
+		// non-nil *BlockListConfig (possibly with empty ActionByNr).
+		bl, _ := blockList.(*unixmon.BlockListConfig)
+		if bl != nil && len(bl.ActionByNr) > 0 && emitter == nil {
+			slog.Warn("seccomp: on_block=log/log_and_kill selected but no event emitter wired; events will be dropped",
+				"session_id", sessID)
+		}
 		go func() {
 			defer close(serveDone)
 			slog.Debug("starting ServeNotifyWithExecve", "session_id", sessID, "has_execve_handler", h != nil, "has_file_handler", fileHandler != nil, "has_policy", pol != nil)
-			unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h, fileHandler)
+			unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessID, pol, emitter, h, fileHandler, bl)
 			slog.Debug("ServeNotifyWithExecve returned", "session_id", sessID)
 		}()
 
