@@ -66,6 +66,16 @@ func runHelper() {
 		// from TGID, exercising the TGID-resolution path in the handler. The
 		// main thread never fires ptrace — this makes the test fail loudly if
 		// production ever regresses to pidfd_open(TID) without TGID lookup.
+		//
+		// Lock the main goroutine to the TGL thread for the duration of this
+		// branch. Without this, the Go scheduler is free to park the main
+		// goroutine on wg.Wait and reuse its M (the TGL thread) for a newly
+		// spawned worker; that worker would then call runtime.LockOSThread
+		// while running on the TGL and fire ptrace from it, masking a
+		// regression to pidfd_open(TID). Locking here reserves the TGL so
+		// it's not available to any worker.
+		runtime.LockOSThread()
+		tgid := syscall.Gettid()
 		const n = 100
 		var wg sync.WaitGroup
 		wg.Add(n)
@@ -73,6 +83,13 @@ func runHelper() {
 			go func() {
 				runtime.LockOSThread()
 				defer wg.Done()
+				// Belt and braces: if a worker somehow ended up on the TGL
+				// (e.g., a future runtime change), abort before firing
+				// ptrace rather than silently mask a regression.
+				if syscall.Gettid() == tgid {
+					fmt.Fprintln(os.Stderr, "ptrace-storm: worker landed on TGL thread; aborting to avoid masking regression")
+					os.Exit(3)
+				}
 				for j := 0; j < 5; j++ {
 					_, _, _ = unix.Syscall6(unix.SYS_PTRACE, uintptr(unix.PTRACE_TRACEME), 0, 0, 0, 0, 0)
 				}
