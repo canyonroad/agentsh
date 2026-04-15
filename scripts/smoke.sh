@@ -180,7 +180,7 @@ exec_rc=0
 max_exec_attempts=3
 for attempt in $(seq 1 $max_exec_attempts); do
   {
-    exec_out="$(./bin/agentsh exec "$sid" -- sh -lc 'echo hi' 2>&1 | tr -d '\r')"
+    exec_out="$(./bin/agentsh exec "$sid" -- sh -c 'echo hi' 2>&1 | tr -d '\r')"
     exec_rc=$?
   } || exec_rc=$?
 
@@ -218,7 +218,7 @@ if ! pty_ok; then
 else
   pty_out="$(
     set +e
-    ./bin/agentsh exec --pty "$sid" -- sh -lc 'printf pty_hi' 2>&1 | tr -d '\r'
+    ./bin/agentsh exec --pty "$sid" -- sh -c 'printf pty_hi' 2>&1 | tr -d '\r'
     exit ${PIPESTATUS[0]}
   )" || {
     echo "smoke: NOTE (agentsh PTY failed; skipping PTY checks): $pty_out" >&2
@@ -242,7 +242,7 @@ ln -sf "$(command -v sh)" "$shim_dir/sh.real"
 # Shim test with retry for transient failures.
 shim_out=""
 for attempt in $(seq 1 $max_exec_attempts); do
-  shim_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$shim_dir/sh" -lc 'echo shim_hi' | tr -d '\r' | tail -n 1)" || true
+  shim_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$shim_dir/sh" -c 'echo shim_hi' | tr -d '\r' | tail -n 1)" || true
   if [[ "$shim_out" == "shim_hi" ]]; then
     break
   fi
@@ -283,7 +283,7 @@ fi
 # Rootfs shim test with retry.
 rootfs_out=""
 for attempt in $(seq 1 $max_exec_attempts); do
-  rootfs_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$rootfs/bin/sh" -lc 'echo rootfs_hi' | tr -d '\r' | tail -n 1)" || true
+  rootfs_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$rootfs/bin/sh" -c 'echo rootfs_hi' | tr -d '\r' | tail -n 1)" || true
   if [[ "$rootfs_out" == "rootfs_hi" ]]; then
     break
   fi
@@ -307,7 +307,7 @@ fi
 # Shim delegation via PATH (no AGENTSH_BIN) with retry.
 shim_out_path=""
 for attempt in $(seq 1 $max_exec_attempts); do
-  shim_out_path="$(PATH="$repo_root/bin:$PATH" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$shim_dir/sh" -lc 'echo shim_path_hi' | tr -d '\r' | tail -n 1)" || true
+  shim_out_path="$(PATH="$repo_root/bin:$PATH" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$shim_dir/sh" -c 'echo shim_path_hi' | tr -d '\r' | tail -n 1)" || true
   if [[ "$shim_out_path" == "shim_path_hi" ]]; then
     break
   fi
@@ -322,7 +322,7 @@ if [[ "$shim_out_path" != "shim_path_hi" ]]; then
 fi
 
 # Shim recursion guard: should not need agentsh when already in-session.
-rec_out="$(AGENTSH_BIN="/nonexistent/agentsh" AGENTSH_IN_SESSION=1 "$shim_dir/sh" -lc 'echo recursion_hi' | tr -d '\r' | tail -n 1)"
+rec_out="$(AGENTSH_BIN="/nonexistent/agentsh" AGENTSH_IN_SESSION=1 "$shim_dir/sh" -c 'echo recursion_hi' | tr -d '\r' | tail -n 1)"
 if [[ "$rec_out" != "recursion_hi" ]]; then
   echo "smoke: shim recursion output mismatch: got=$rec_out" >&2
   exit 1
@@ -346,7 +346,7 @@ env["AGENTSH_SERVER"] = os.environ["SMOKE_SERVER"]
 
 m, s = pty.openpty()
 try:
-    p = subprocess.Popen([shim, "-lc", "printf pty_shim_hi"], stdin=s, stdout=s, stderr=s, env=env)
+    p = subprocess.Popen([shim, "-c", "printf pty_shim_hi"], stdin=s, stdout=s, stderr=s, env=env)
     os.close(s)
     buf = bytearray()
     deadline = time.time() + 5.0
@@ -388,14 +388,14 @@ if command -v bash >/dev/null 2>&1; then
   chmod +x "$shim_dir/bash"
   ln -sf "$(command -v bash)" "$shim_dir/bash.real"
 
-  bash_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$shim_dir/bash" -lc 'echo bash_hi' | tr -d '\r' | tail -n 1)"
+  bash_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" "$shim_dir/bash" -c 'echo bash_hi' | tr -d '\r' | tail -n 1)"
   if [[ "$bash_out" != "bash_hi" ]]; then
     echo "smoke: bash shim output mismatch: got=$bash_out" >&2
     exit 1
   fi
 
   # Login-style argv0 ("-bash") should still select bash semantics.
-  login_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" SMOKE_BASH_SHIM="$shim_dir/bash" bash -lc 'exec -a -bash "$SMOKE_BASH_SHIM" -lc "echo login_hi"' | tr -d '\r' | tail -n 1)"
+  login_out="$(AGENTSH_BIN="$repo_root/bin/agentsh" AGENTSH_SESSION_ID="$sid" AGENTSH_SERVER="$base_url" SMOKE_BASH_SHIM="$shim_dir/bash" bash -lc 'exec -a -bash "$SMOKE_BASH_SHIM" -c "echo login_hi"' | tr -d '\r' | tail -n 1)"
   if [[ "$login_out" != "login_hi" ]]; then
     echo "smoke: bash login shim output mismatch: got=$login_out" >&2
     exit 1
