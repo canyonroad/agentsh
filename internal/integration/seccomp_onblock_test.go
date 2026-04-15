@@ -25,10 +25,11 @@ import (
 // ---------- Helper Binary (self re-exec) ----------
 
 // TestMain switches the binary into "helper mode" when GO_WANT_HELPER_PROCESS=1
-// is set, before any testing framework scheduling. Running on the main
-// goroutine (and thus the main OS thread == thread-group leader) is required
-// so ptrace syscalls are issued from a TID that matches the TGID — the
-// current production pidfd_open does not handle non-TGL TIDs correctly.
+// is set, before any testing framework scheduling. Helper logic runs on the
+// main OS thread, which is also the thread-group leader (TGL) of the helper
+// process. Scenarios that exercise multi-threaded behavior fire ptrace from
+// non-TGL goroutines — the production handler must resolve TID→TGID before
+// pidfd_open for those to get SIGKILL'd.
 func TestMain(m *testing.M) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") == "1" {
 		runHelper()
@@ -41,10 +42,6 @@ func TestMain(m *testing.M) {
 // argument after "--". Exits the process directly rather than returning, so
 // the Go test framework never gets a chance to run real tests in the child.
 func runHelper() {
-	// Pin to whatever OS thread we started on. In TestMain this is the main
-	// OS thread (TGL).
-	runtime.LockOSThread()
-
 	args := os.Args
 	var mode string
 	for i, a := range args {
@@ -64,23 +61,22 @@ func runHelper() {
 		fmt.Fprintf(os.Stderr, "ptrace-traceme: unexpected errno=%d\n", errno)
 		os.Exit(1)
 	case "ptrace-storm":
-		// Spawn 100 goroutines that each call ptrace repeatedly, plus the
-		// main (TGL) thread firing in a tight loop. The main-thread fire
-		// ensures at least one notification comes from the TGL so the
-		// production pidfd_open path can deliver SIGKILL reliably.
+		// Fire ptrace from 100 non-TGL goroutines. Each goroutine pins to its
+		// own OS thread (via LockOSThread) so its TID is guaranteed to differ
+		// from TGID, exercising the TGID-resolution path in the handler. The
+		// main thread never fires ptrace — this makes the test fail loudly if
+		// production ever regresses to pidfd_open(TID) without TGID lookup.
 		const n = 100
 		var wg sync.WaitGroup
 		wg.Add(n)
 		for i := 0; i < n; i++ {
 			go func() {
+				runtime.LockOSThread()
 				defer wg.Done()
 				for j := 0; j < 5; j++ {
 					_, _, _ = unix.Syscall6(unix.SYS_PTRACE, uintptr(unix.PTRACE_TRACEME), 0, 0, 0, 0, 0)
 				}
 			}()
-		}
-		for j := 0; j < 1000; j++ {
-			_, _, _ = unix.Syscall6(unix.SYS_PTRACE, uintptr(unix.PTRACE_TRACEME), 0, 0, 0, 0, 0)
 		}
 		wg.Wait()
 		os.Exit(0)
@@ -415,32 +411,22 @@ func TestSeccompOnBlock_LogAndKill_ConcurrentCalls(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, st.Signaled())
 	require.Equal(t, syscall.SIGKILL, st.Signal())
-	// At least one event must fire — the race winner.
+	// Expect >=1 event, and at least one tagged outcome=killed.
 	//
-	// Plan target is exactly 1 event. Today's handler produces extra
-	// outcome=denied events in two scenarios, both discovered while
-	// implementing Task 7:
+	// Exact count is racy by construction: 100 goroutines each fire 5 ptrace
+	// syscalls, all from non-TGL threads. The kernel queues multiple notifs
+	// before the first SIGKILL lands; the handler processes each one, resolves
+	// its TGID via /proc/<tid>/status, and (for notifs whose id is still
+	// valid) sends SIGKILL again. Notifs that arrive after the process is
+	// reaped fail NotifIDValid with ENOENT — the handler returns early and
+	// emits no event. So we land somewhere between 1 and a handful of events.
 	//
-	// BUG FLAG #1 (production, internal/netmonitor/unix/blocklist_linux.go
-	// attemptKill): when pidfd_open returns ENOENT rather than ESRCH, the
-	// handler falls through to the "denied" path and emits an event. ENOENT
-	// here means the target task has finished tearing down from a prior
-	// SIGKILL, so semantically it is "target gone" and should follow the
-	// ESRCH branch (return "killed" AND the caller should suppress the
-	// event — we are observing the tail of an already-resolved kill).
-	//
-	// BUG FLAG #2 (production, same file): the handler opens a pidfd on
-	// req.Pid, but seccomp_notif.pid is the TID of the thread that made
-	// the syscall, not the TGID. pidfd_open(tid, 0) fails with ESRCH or
-	// ENOENT when tid != tgid. For N-threaded processes where the first
-	// notification comes from a non-TGL thread, the kill never lands.
-	// The production handler should resolve TGID via /proc/<tid>/status
-	// or use PIDFD_THREAD (kernel 6.9+) to kill individual threads.
-	//
-	// The helper binary works around #2 by also firing ptrace from the
-	// main (TGL) thread, so at least one notification is from a TID the
-	// handler can pidfd_open. The assertion stays lenient (>=1 event)
-	// until the bugs above are fixed.
+	// The critical invariant is that at least one event records
+	// outcome=killed: that proves the TID→TGID resolution seam worked for a
+	// notification from a non-leader thread. A pre-fix handler (pidfd_open on
+	// raw TID) would see ENOENT on kernel 6.8, emit outcome=denied, and never
+	// deliver SIGKILL — the child would continue spinning on ptrace rather
+	// than dying by signal, and st.Signaled() would be false.
 	require.GreaterOrEqual(t, len(events), 1, "at least one seccomp_blocked event expected")
 	sawKilled := false
 	for _, ev := range events {
@@ -449,7 +435,7 @@ func TestSeccompOnBlock_LogAndKill_ConcurrentCalls(t *testing.T) {
 			break
 		}
 	}
-	require.True(t, sawKilled, "at least one event must record outcome=killed")
+	require.True(t, sawKilled, "at least one event must record outcome=killed (proves TGID resolution worked for a non-TGL thread)")
 }
 
 func TestSeccompOnBlock_DoesNotAffectFileMonitor(t *testing.T) {

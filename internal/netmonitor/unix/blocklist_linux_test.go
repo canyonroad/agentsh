@@ -4,6 +4,9 @@ package unix
 
 import (
 	"os"
+	"runtime"
+	"sync"
+	"syscall"
 	"testing"
 
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
@@ -249,4 +252,61 @@ func TestBlockListConfig_IsBlockListed(t *testing.T) {
 	// Non-matching nr returns (_, false).
 	_, ok = cfg.IsBlockListed(999)
 	require.False(t, ok)
+}
+
+// TestResolveTGIDFromProc_MainThread verifies that reading /proc/<tid>/status
+// for the test process's own main-thread TID returns its own TGID.
+func TestResolveTGIDFromProc_MainThread(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	mainTID := syscall.Gettid()
+	pid := os.Getpid()
+
+	tgid, err := resolveTGIDFromProc(mainTID)
+	require.NoError(t, err)
+	require.Equal(t, pid, tgid, "main thread TID must map to PID (TGID)")
+}
+
+// TestResolveTGIDFromProc_NonMainThread is the regression test for the bug
+// flagged in Task 7: seccomp_notif.pid is a TID, and for non-leader threads
+// that TID != TGID. If resolveTGIDFromProc mis-reports for a non-leader
+// thread, pidfd_open(resolved_tid, 0) would fail with ESRCH/ENOENT and
+// SIGKILL would not land under log_and_kill. Spawn a goroutine pinned to its
+// own OS thread and verify its TID resolves to the parent TGID.
+func TestResolveTGIDFromProc_NonMainThread(t *testing.T) {
+	pid := os.Getpid()
+	var childTID int
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ready := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer wg.Done()
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		childTID = syscall.Gettid()
+		close(ready)
+		<-done // Keep the thread alive until the test has read /proc.
+	}()
+	<-ready
+	require.NotEqual(t, syscall.Gettid(), childTID, "test goroutine must be on a different OS thread")
+
+	tgid, err := resolveTGIDFromProc(childTID)
+	require.NoError(t, err)
+	require.Equal(t, pid, tgid,
+		"non-leader thread TID %d must resolve to TGID %d (the process PID)", childTID, pid)
+
+	close(done)
+	wg.Wait()
+}
+
+// TestResolveTGIDFromProc_Nonexistent verifies the "target already gone" path
+// surfaces as unix.ESRCH so callers can pattern-match it the same way they do
+// pidfd_open ESRCH.
+func TestResolveTGIDFromProc_Nonexistent(t *testing.T) {
+	// 0x7FFFFFFF is within pid_t range but vastly above any realistic tid —
+	// guaranteed not to exist on any Linux host running this test.
+	_, err := resolveTGIDFromProc(0x7FFFFFFF)
+	require.ErrorIs(t, err, gounix.ESRCH,
+		"non-existent TID must surface as ESRCH (not a generic os.ErrNotExist)")
 }

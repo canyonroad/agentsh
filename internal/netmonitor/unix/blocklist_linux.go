@@ -3,11 +3,15 @@
 package unix
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	seccompkg "github.com/agentsh/agentsh/internal/seccomp"
@@ -28,6 +32,57 @@ type BlockListConfig struct {
 // callers hit the real syscall; tests swap it like the pidfd seams.
 var notifIDValidFn = func(fd int, id uint64) error {
 	return seccomp.NotifIDValid(seccomp.ScmpFd(fd), id)
+}
+
+// resolveTGIDFn is a test seam for mapping a TID to its thread-group leader
+// (TGID). Production reads /proc/<tid>/status. Unit tests swap in a
+// deterministic lookup. Returns unix.ESRCH when /proc/<tid>/ is absent — the
+// canonical "that task is gone" signal. Any other non-nil error is a parse /
+// I/O failure the caller should treat as non-fatal (the field is only used to
+// pick the pidfd target; if we cannot resolve it, we fall back to the raw TID
+// and let attemptKill observe whatever errno the kernel returns).
+var resolveTGIDFn = resolveTGIDFromProc
+
+// resolveTGIDFromProc parses /proc/<tid>/status and returns the Tgid field.
+// seccomp_notif.pid is the TID of the syscalling thread (see man 2 seccomp
+// under "struct seccomp_notif"); for multi-threaded callers whose blocked
+// syscall came from a non-leader thread, pidfd_open(TID, 0) fails because
+// PIDTYPE_TGID is not set on the struct pid. Resolving to TGID lets us open
+// a whole-process pidfd that works regardless of which thread trapped.
+//
+// PIDFD_THREAD (kernel 6.9+) would let us open a thread-scoped pidfd directly
+// and send SIGKILL to just that thread. We target kernel 5.3+ (pidfd_open
+// baseline) and deployment hosts still on 6.8, so /proc is the portable path.
+func resolveTGIDFromProc(tid int) (int, error) {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/status", tid))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Thread/process has exited — same semantic as pidfd_open ESRCH.
+			return 0, unix.ESRCH
+		}
+		return 0, err
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "Tgid:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0, fmt.Errorf("malformed Tgid line in /proc/%d/status: %q", tid, line)
+		}
+		tgid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return 0, fmt.Errorf("parse Tgid in /proc/%d/status: %w", tid, err)
+		}
+		return tgid, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("read /proc/%d/status: %w", tid, err)
+	}
+	return 0, fmt.Errorf("Tgid field absent from /proc/%d/status", tid)
 }
 
 // IsBlockListed returns the configured action for the given syscall number.
@@ -84,7 +139,30 @@ func handleBlockListNotify(
 
 	syscallNr := uint32(req.Data.Syscall)
 	syscallName := resolveSyscallName(syscallNr)
-	pid := int(req.Pid)
+	tid := int(req.Pid)
+
+	// seccomp_notif.pid is the TID of the trapped thread, not the TGID.
+	// pidfd_open on a non-TGL TID fails with EINVAL or ENOENT depending on
+	// kernel version (6.8 on Ubuntu 24.04 returns ENOENT), so for multi-
+	// threaded callers we must resolve TGID before opening the pidfd. We also
+	// keep TID in the event so the audit record identifies which thread
+	// trapped (useful for post-mortem on multi-threaded agents).
+	targetPID := tid
+	if action == seccompkg.OnBlockLogAndKill {
+		if tgid, err := resolveTGIDFn(tid); err == nil {
+			targetPID = tgid
+		} else if errors.Is(err, unix.ESRCH) {
+			// Thread already gone by the time we looked it up — skip the kill
+			// attempt (no viable target) and tag the event as killed, since
+			// the trapped syscall will never resume.
+			slog.Debug("seccomp block-list: TGID resolution ESRCH (target already exited)",
+				"session_id", sessID, "tid", tid, "syscall", syscallName)
+			targetPID = -1 // sentinel: skip attemptKill
+		} else {
+			slog.Warn("seccomp block-list: TGID resolution failed; falling back to TID",
+				"session_id", sessID, "tid", tid, "syscall", syscallName, "error", err)
+		}
+	}
 
 	// 2. For log_and_kill, SIGKILL first so the outcome field reflects reality.
 	//    attemptKill revalidates the notif id after opening the pidfd to close
@@ -94,17 +172,23 @@ func handleBlockListNotify(
 	//    the pidfd is guaranteed to reference the original caller.
 	outcome := "denied"
 	if action == seccompkg.OnBlockLogAndKill {
-		outcome = attemptKill(fd, req.ID, pid, sessID, syscallName)
+		if targetPID == -1 {
+			outcome = "killed" // target already gone; no signal to send
+		} else {
+			outcome = attemptKill(fd, req.ID, targetPID, sessID, syscallName)
+		}
 	}
 
 	// 3. Build + emit the audit event. Tests pass nil.
+	// Event PID is the TID (the thread that trapped), which matches the
+	// notify record; audit consumers can resolve TGID themselves if needed.
 	if emit != nil {
-		ev := buildSeccompBlockedEvent(sessID, pid, syscallName, syscallNr, action, outcome)
+		ev := buildSeccompBlockedEvent(sessID, tid, syscallName, syscallNr, action, outcome)
 		// Use a fresh background context so AppendEvent isn't cancelled by
 		// a notify-loop shutdown mid-handoff — consistent with ServeNotify.
 		if err := emit.AppendEvent(context.Background(), ev); err != nil {
 			slog.Warn("seccomp block-list: AppendEvent failed",
-				"session_id", sessID, "pid", pid, "syscall", syscallName, "error", err)
+				"session_id", sessID, "tid", tid, "syscall", syscallName, "error", err)
 		}
 		emit.Publish(ev)
 	}
@@ -114,11 +198,11 @@ func handleBlockListNotify(
 	if err := NotifRespondDeny(fd, req.ID, int32(unix.EPERM)); err != nil {
 		if isENOENT(err) {
 			slog.Debug("seccomp block-list: deny response hit ENOENT (target already gone)",
-				"session_id", sessID, "pid", pid, "syscall", syscallName)
+				"session_id", sessID, "tid", tid, "syscall", syscallName)
 			return
 		}
 		slog.Warn("seccomp block-list: deny response failed",
-			"session_id", sessID, "pid", pid, "syscall", syscallName, "error", err)
+			"session_id", sessID, "tid", tid, "syscall", syscallName, "error", err)
 	}
 }
 
