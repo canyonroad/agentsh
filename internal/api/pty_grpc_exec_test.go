@@ -69,7 +69,7 @@ func TestGRPC_PTY_ExecBasic(t *testing.T) {
 			Start: &ptygrpc.ExecPTYStart{
 				SessionId: sess.ID,
 				Command:   "sh",
-				Args:      []string{"-lc", "printf hi"},
+				Args:      []string{"-c", "printf hi"},
 				Rows:      24,
 				Cols:      80,
 			},
