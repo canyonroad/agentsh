@@ -287,7 +287,15 @@ func BuildFromConfig(cfg *config.LandlockConfig, pol *policy.Policy, workspace s
 		for _, p := range cfg.DenyPaths {
 			b.AddDenyPath(p)
 		}
-		b.SetNetworkAccess(cfg.Network.AllowConnectTCP, cfg.Network.AllowBindTCP)
+		allowConnect := false
+		if cfg.Network.AllowConnectTCP != nil {
+			allowConnect = *cfg.Network.AllowConnectTCP
+		}
+		allowBind := false
+		if cfg.Network.AllowBindTCP != nil {
+			allowBind = *cfg.Network.AllowBindTCP
+		}
+		b.SetNetworkAccess(allowConnect, allowBind)
 	}
 
 	// Add default deny paths (container escape vectors)

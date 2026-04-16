@@ -707,9 +707,9 @@ type LandlockConfig struct {
 
 // LandlockNetworkConfig controls Landlock network restrictions (kernel 6.7+).
 type LandlockNetworkConfig struct {
-	AllowConnectTCP bool  `yaml:"allow_connect_tcp"` // Allow outbound TCP
-	AllowBindTCP    bool  `yaml:"allow_bind_tcp"`    // Allow listening
-	BindPorts       []int `yaml:"bind_ports"`        // Specific ports if bind allowed
+	AllowConnectTCP *bool `yaml:"allow_connect_tcp"` // default: true (set by applyDefaults)
+	AllowBindTCP    *bool `yaml:"allow_bind_tcp"`    // default: false (set by applyDefaults)
+	BindPorts       []int `yaml:"bind_ports"`        // reserved; not yet enforced
 }
 
 // CapabilitiesConfig controls Linux capability dropping.
