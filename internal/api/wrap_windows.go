@@ -48,7 +48,7 @@ func getConnPeerCreds(conn *net.UnixConn) peerCreds {
 	return peerCreds{}
 }
 
-func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string) {
+func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string, expectedUID int) {
 	listener.Close()
 }
 

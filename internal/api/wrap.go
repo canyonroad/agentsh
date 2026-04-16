@@ -185,7 +185,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			return types.WrapInitResponse{}, http.StatusInternalServerError, err
 		}
 
-		go a.acceptPtracePID(ctx, listener, notifySocketPath, sessionID)
+		go a.acceptPtracePID(ctx, listener, notifySocketPath, sessionID, req.CallerUID)
 
 		ev := types.Event{
 			ID:        uuid.NewString(),
@@ -324,7 +324,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	}
 
 	// Start background goroutine to accept the notify fd connection
-	go a.acceptNotifyFD(ctx, listener, notifySocketPath, sessionID, s, execveEnabled)
+	go a.acceptNotifyFD(ctx, listener, notifySocketPath, sessionID, s, execveEnabled, req.CallerUID)
 
 	// Create signal filter socket if signal filtering is enabled.
 	// This must happen before marshaling the seccomp config so that
@@ -358,7 +358,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 				os.RemoveAll(notifyDir)
 				return types.WrapInitResponse{}, http.StatusInternalServerError, err
 			}
-			go a.acceptSignalFD(ctx, signalListener, signalSocketPath, sessionID, s)
+			go a.acceptSignalFD(ctx, signalListener, signalSocketPath, sessionID, s, req.CallerUID)
 		}
 	}
 	seccompCfg.SignalFilterEnabled = signalFilterEnabled
@@ -513,7 +513,7 @@ func blockListUsesNotify(block []string, onBlock string) bool {
 
 // acceptNotifyFD listens on the Unix socket for a single connection from the CLI,
 // receives the seccomp notify fd, and starts the notify handler.
-func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketPath string, sessionID string, s *session.Session, execveEnabled bool) {
+func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketPath string, sessionID string, s *session.Session, execveEnabled bool, expectedUID int) {
 	defer listener.Close()
 	// Clean up the entire private temp directory containing the socket
 	defer os.RemoveAll(filepath.Dir(socketPath))
@@ -537,12 +537,17 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 		return
 	}
 
-	// Read the notify-socket peer credentials for depth tracking.
+	// Read the notify-socket peer credentials and enforce the expected UID.
 	creds := getConnPeerCreds(unixConn)
 	notifyPeerPID := creds.PID
 	if notifyPeerPID > 0 {
 		slog.Debug("wrap: got notify-socket peer credentials",
 			"peer_pid", notifyPeerPID, "peer_uid", creds.UID, "session_id", sessionID)
+	}
+	if expectedUID > 0 && creds.UID != uint32(expectedUID) {
+		slog.Warn("wrap: rejecting notify connection from unexpected UID",
+			"peer_uid", creds.UID, "expected_uid", expectedUID, "session_id", sessionID)
+		return
 	}
 
 	file, err := unixConn.File()
@@ -571,7 +576,7 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 
 // acceptSignalFD listens on the Unix socket for a single connection from the CLI,
 // receives the signal filter notify fd, and starts the signal handler.
-func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketPath string, sessionID string, s *session.Session) {
+func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketPath string, sessionID string, s *session.Session, expectedUID int) {
 	defer listener.Close()
 	// Note: do NOT remove the parent directory here — acceptNotifyFD owns that cleanup.
 
@@ -588,6 +593,13 @@ func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketP
 
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
+		return
+	}
+
+	creds := getConnPeerCreds(unixConn)
+	if expectedUID > 0 && creds.UID != uint32(expectedUID) {
+		slog.Warn("wrap: rejecting signal connection from unexpected UID",
+			"peer_uid", creds.UID, "expected_uid", expectedUID, "session_id", sessionID)
 		return
 	}
 

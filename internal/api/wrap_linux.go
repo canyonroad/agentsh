@@ -239,7 +239,7 @@ func getConnPeerCreds(conn *net.UnixConn) peerCreds {
 // acceptPtracePID accepts a connection on the notify socket, extracts the peer
 // PID via SO_PEERCRED, and attaches the ptrace tracer. The connection is kept
 // open as a keepalive — when the shell exits, the connection closes.
-func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string) {
+func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string, expectedUID int) {
 	defer listener.Close()
 	defer os.RemoveAll(filepath.Dir(socketPath))
 
@@ -251,6 +251,21 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socket
 	conn, err := listener.Accept()
 	if err != nil {
 		slog.Error("ptrace wrap: accept failed", "error", err, "session_id", sessionID)
+		return
+	}
+
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		conn.Close()
+		slog.Error("ptrace wrap: connection is not a Unix connection", "session_id", sessionID)
+		return
+	}
+
+	creds := getConnPeerCreds(unixConn)
+	if expectedUID > 0 && creds.UID != uint32(expectedUID) {
+		conn.Close()
+		slog.Warn("ptrace wrap: rejecting connection from unexpected UID",
+			"peer_uid", creds.UID, "expected_uid", expectedUID, "session_id", sessionID)
 		return
 	}
 
