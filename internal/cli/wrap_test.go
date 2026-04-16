@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"net/url"
 	"runtime"
 	"syscall"
@@ -252,6 +253,7 @@ func TestSetupWrapInterception_CallsWrapInit(t *testing.T) {
 	assert.True(t, mc.wrapInitCalled, "WrapInit should have been called")
 	assert.Equal(t, "/bin/echo", mc.wrapInitReq.AgentCommand)
 	assert.Equal(t, []string{"hello"}, mc.wrapInitReq.AgentArgs)
+	assert.Equal(t, os.Getuid(), mc.wrapInitReq.CallerUID)
 
 	// Verify the launch config (OS-specific assertions)
 	if runtime.GOOS == "linux" {
