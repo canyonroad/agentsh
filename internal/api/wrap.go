@@ -55,6 +55,10 @@ func secureNotifyDir(dir string, callerUID int) bool {
 		if err := os.Chown(dir, callerUID, -1); err == nil {
 			if err := os.Chmod(dir, 0700); err != nil {
 				slog.Debug("wrap: failed to chmod notify dir", "dir", dir, "mode", "0700", "error", err)
+				if err := os.Chmod(dir, 0711); err != nil {
+					slog.Debug("wrap: failed to chmod notify dir", "dir", dir, "mode", "0711", "error", err)
+				}
+				return false
 			}
 			return true
 		} else {
