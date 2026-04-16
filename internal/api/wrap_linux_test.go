@@ -141,27 +141,26 @@ func TestAcceptNotifyFD_RejectsNegativeUID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		t.Fatal("expected UnixConn")
-	}
-
-	pipeR, pipeW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = pipeR.Close()
-		_ = pipeW.Close()
-	})
-
-	sendFDOverUnixConn(t, unixConn, int(pipeR.Fd()))
-
 	waitForTestDone(t, done)
 	select {
 	case <-called:
 		t.Fatal("expected notify handoff to be rejected")
 	default:
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	buf := make([]byte, 1)
+	n, err := conn.Read(buf)
+	if n != 0 {
+		t.Fatalf("expected closed connection, read %d bytes", n)
+	}
+	if err == nil {
+		t.Fatal("expected connection to be closed")
+	}
+	if !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
+		t.Fatalf("expected closed connection, got %v", err)
 	}
 }
 
