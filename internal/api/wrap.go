@@ -50,17 +50,24 @@ func (a *App) wrapInit(w http.ResponseWriter, r *http.Request) {
 }
 
 func secureNotifyDir(dir string, callerUID int) bool {
+	// callerUID == 0 is the sentinel fallback path.
 	if callerUID > 0 {
 		if err := os.Chown(dir, callerUID, -1); err == nil {
-			_ = os.Chmod(dir, 0700)
+			if err := os.Chmod(dir, 0700); err != nil {
+				slog.Debug("wrap: failed to chmod notify dir", "dir", dir, "mode", "0700", "error", err)
+			}
 			return true
 		} else {
 			slog.Debug("wrap: failed to chown notify dir", "dir", dir, "caller_uid", callerUID, "error", err)
-			_ = os.Chmod(dir, 0711)
+			if err := os.Chmod(dir, 0711); err != nil {
+				slog.Debug("wrap: failed to chmod notify dir", "dir", dir, "mode", "0711", "error", err)
+			}
 			return false
 		}
 	}
-	_ = os.Chmod(dir, 0711)
+	if err := os.Chmod(dir, 0711); err != nil {
+		slog.Debug("wrap: failed to chmod notify dir", "dir", dir, "mode", "0711", "error", err)
+	}
 	return false
 }
 
@@ -72,7 +79,9 @@ func secureSocket(socketPath string, callerUID int, chownOK bool) {
 			slog.Debug("wrap: failed to chown socket", "socket_path", socketPath, "caller_uid", callerUID, "error", err)
 		}
 	}
-	_ = os.Chmod(socketPath, 0666)
+	if err := os.Chmod(socketPath, 0666); err != nil {
+		slog.Debug("wrap: failed to chmod socket", "socket_path", socketPath, "mode", "0666", "error", err)
+	}
 }
 
 // wrapInitCore contains the core logic for wrap initialization.

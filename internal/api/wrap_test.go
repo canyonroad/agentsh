@@ -27,13 +27,22 @@ func newTestAppForWrap(t *testing.T, cfg *config.Config) (*App, *session.Manager
 	return app, mgr
 }
 
+func nonzeroTestUID() int {
+	// UID 0 is the helper's fallback sentinel, so pick any nonzero UID for coverage.
+	uid := os.Getuid()
+	if uid == 0 {
+		return 1
+	}
+	return uid
+}
+
 func TestSecureNotifyDir_ChownSuccess(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("secureNotifyDir is Linux-only")
 	}
 
 	dir := t.TempDir()
-	if got := secureNotifyDir(dir, os.Getuid()); !got {
+	if got := secureNotifyDir(dir, nonzeroTestUID()); !got {
 		t.Fatal("expected chown success path")
 	}
 
@@ -82,7 +91,7 @@ func TestSecureSocket_ChownOK(t *testing.T) {
 		t.Fatalf("chmod socket before helper: %v", err)
 	}
 
-	secureSocket(sockPath, os.Getuid(), true)
+	secureSocket(sockPath, nonzeroTestUID(), true)
 
 	info, err := os.Stat(sockPath)
 	if err != nil {
