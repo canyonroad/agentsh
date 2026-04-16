@@ -54,6 +54,7 @@ type seccompWrapperConfig struct {
 	ExecveEnabled       bool     `json:"execve_enabled"`
 	FileMonitorEnabled  bool     `json:"file_monitor_enabled"`
 	BlockedSyscalls     []string `json:"blocked_syscalls"`
+	OnBlock             string   `json:"on_block,omitempty"`
 
 	// File monitor sub-options
 	InterceptMetadata bool `json:"intercept_metadata,omitempty"`
@@ -203,6 +204,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	seccompCfg := seccompWrapperConfig{
 		UnixSocketEnabled:   a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
 		BlockedSyscalls:     a.cfg.Sandbox.Seccomp.Syscalls.Block,
+		OnBlock:             a.cfg.Sandbox.Seccomp.Syscalls.OnBlock,
 		SignalFilterEnabled: signalFilterActive, // Only true if signal socket succeeded
 		ExecveEnabled:       execveEnabled,
 		FileMonitorEnabled:  config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.Enabled, false),
@@ -264,7 +266,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 	// Only enable ptrace sync handshake when the wrapper will produce a notify FD.
 	// If no seccomp features need USER_NOTIF, the wrapper skips the FD send and
 	// the READY/GO handshake has nothing to synchronize on.
-	hasNotifyFeatures := seccompCfg.UnixSocketEnabled || seccompCfg.ExecveEnabled || seccompCfg.FileMonitorEnabled || seccompCfg.InterceptMetadata
+	hasNotifyFeatures := seccompCfg.UnixSocketEnabled || seccompCfg.ExecveEnabled || seccompCfg.FileMonitorEnabled || seccompCfg.InterceptMetadata || blockListUsesNotify(seccompCfg.BlockedSyscalls, seccompCfg.OnBlock)
 	// AGENTSH_PTRACE_SYNC goes into envInject (not env) so it overrides any
 	// user-supplied value. envInject deduplicates keys before appending.
 	ptraceSyncValue := "0"
@@ -296,6 +298,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 		ptraceSync:       a.ptraceTracer != nil && hasNotifyFeatures,
 		cmdResolver:      a.cmdResolver,
 		sessionTracker:   a.sessionTracker,
+		blockList:        a.buildBlockListConfigFor(sessionID),
 	}
 
 	// Create execve handler if enabled (Linux-specific, will be nil on other platforms)

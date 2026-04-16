@@ -3,8 +3,11 @@
 package unix
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,7 +78,7 @@ func TestServeNotifyWithExecve_DoesNotHangOnCancelledContext(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		ServeNotifyWithExecve(ctx, r, "test-cancelled", nil, &handlerTestEmitter{}, nil, nil)
+		ServeNotifyWithExecve(ctx, r, "test-cancelled", nil, &handlerTestEmitter{}, nil, nil, nil)
 		close(done)
 	}()
 
@@ -103,7 +106,7 @@ func TestServeNotifyWithExecve_DoesNotHangOnNonSeccompFD(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		ServeNotifyWithExecve(ctx, r, "test-bad-fd", nil, &handlerTestEmitter{}, nil, nil)
+		ServeNotifyWithExecve(ctx, r, "test-bad-fd", nil, &handlerTestEmitter{}, nil, nil, nil)
 		close(done)
 	}()
 
@@ -112,6 +115,60 @@ func TestServeNotifyWithExecve_DoesNotHangOnNonSeccompFD(t *testing.T) {
 		// Good — exited on ioctl error.
 	case <-time.After(1 * time.Second):
 		t.Fatal("ServeNotifyWithExecve did not exit with non-seccomp FD")
+	}
+}
+
+// TestServeNotifyWithExecve_NilEmitterAllowed is a regression guard against
+// reintroducing the emit==nil short-circuit that roborev flagged HIGH on
+// commit 8f641891. The notify loop MUST keep serving notifications even
+// without an emitter so block-list enforcement (SIGKILL under log_and_kill)
+// still runs; only audit event emission should be conditional. If anyone
+// re-adds `|| emit == nil` to the entry guard, block-list enforcement
+// silently stops working in production.
+//
+// The test distinguishes the fixed path from the broken path by capturing
+// slog output and asserting that seccomp.NotifReceive was actually invoked
+// (which produces a "NotifReceive error" warning when called on a non-seccomp
+// pipe fd). If the short-circuit is reintroduced, that log is absent because
+// the function returns before reaching the loop, and the test fails.
+func TestServeNotifyWithExecve_NilEmitterAllowed(t *testing.T) {
+	var logBuf bytes.Buffer
+	origLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(origLogger)
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		// nil emit must be accepted — NotifReceive will still error on the
+		// pipe fd and exit via the error branch, but the function must not
+		// panic or return before attempting the receive.
+		ServeNotifyWithExecve(ctx, r, "test-nil-emit", nil, nil, nil, nil, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good — exited cleanly (via NotifReceive error on pipe fd).
+	case <-time.After(1 * time.Second):
+		t.Fatal("ServeNotifyWithExecve did not exit with nil emitter")
+	}
+
+	// Prove NotifReceive was actually called. The fixed path emits this warn;
+	// the broken path (emit==nil short-circuit) returns before the loop and
+	// never logs it. A timing-only check cannot distinguish the two.
+	logs := logBuf.String()
+	if !strings.Contains(logs, "NotifReceive error") {
+		t.Fatalf("expected NotifReceive error log (proves loop was entered despite nil emitter), got logs: %s", logs)
 	}
 }
 

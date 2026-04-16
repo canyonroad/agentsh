@@ -493,7 +493,7 @@ type SandboxSeccompSyscallConfig struct {
 	DefaultAction string   `yaml:"default_action"` // allow, block
 	Block         []string `yaml:"block"`
 	Allow         []string `yaml:"allow"`
-	OnBlock       string   `yaml:"on_block"` // kill, log_and_kill
+	OnBlock       string   `yaml:"on_block"` // errno (default), kill, log, log_and_kill
 }
 
 // SandboxSeccompFileMonitorConfig configures file I/O interception via seccomp.
@@ -1157,7 +1157,7 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		cfg.Sandbox.Seccomp.Syscalls.DefaultAction = "allow"
 	}
 	if cfg.Sandbox.Seccomp.Syscalls.OnBlock == "" {
-		cfg.Sandbox.Seccomp.Syscalls.OnBlock = "kill"
+		cfg.Sandbox.Seccomp.Syscalls.OnBlock = "errno"
 	}
 	// Default blocked syscalls (dangerous operations)
 	if len(cfg.Sandbox.Seccomp.Syscalls.Block) == 0 && seccompActive {
@@ -1499,6 +1499,13 @@ func validateConfig(cfg *Config) error {
 	case "monitor", "soft_block", "soft_delete", "strict":
 	default:
 		return fmt.Errorf("invalid sandbox.fuse.audit.mode %q", cfg.Sandbox.FUSE.Audit.Mode)
+	}
+	switch cfg.Sandbox.Seccomp.Syscalls.OnBlock {
+	case "", "errno", "kill", "log", "log_and_kill":
+		// ok; "" will be filled by applyDefaults
+	default:
+		return fmt.Errorf("invalid sandbox.seccomp.syscalls.on_block %q: must be one of errno, kill, log, log_and_kill",
+			cfg.Sandbox.Seccomp.Syscalls.OnBlock)
 	}
 	if cfg.Sandbox.FUSE.Audit.MaxEventQueue < 0 {
 		return fmt.Errorf("sandbox.fuse.audit.max_event_queue must be >= 0")

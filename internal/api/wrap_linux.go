@@ -154,8 +154,17 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 		if cleanupSymlink != nil {
 			defer cleanupSymlink()
 		}
+		// Build the per-session block-list dispatch config. Empty for
+		// errno/kill (kernel-side) and populated for log/log_and_kill.
+		// The method returns any for cross-platform symmetry; the concrete
+		// type on Linux is *unixmon.BlockListConfig.
+		bl, _ := a.buildBlockListConfigFor(sessionID).(*unixmon.BlockListConfig)
+		if bl != nil && len(bl.ActionByNr) > 0 && emitter == nil {
+			slog.Warn("seccomp: on_block=log/log_and_kill selected but no event emitter wired; events will be dropped",
+				"session_id", sessionID)
+		}
 		slog.Info("wrap: starting notify handler", "session_id", sessionID, "has_execve", execveHandler != nil, "has_file_handler", fileHandler != nil)
-		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessionID, sessionPolicy, emitter, execveHandler, fileHandler)
+		unixmon.ServeNotifyWithExecve(ctx, notifyFD, sessionID, sessionPolicy, emitter, execveHandler, fileHandler, bl)
 		slog.Info("wrap: notify handler returned", "session_id", sessionID)
 	}()
 }

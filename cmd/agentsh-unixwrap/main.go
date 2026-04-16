@@ -67,6 +67,7 @@ func main() {
 	}
 
 	// Build filter config.
+	onBlock, _ := seccompkg.ParseOnBlock(cfg.OnBlock)
 	filterCfg := unixmon.FilterConfig{
 		UnixSocketEnabled:  cfg.UnixSocketEnabled,
 		ExecveEnabled:      cfg.ExecveEnabled,
@@ -74,6 +75,7 @@ func main() {
 		InterceptMetadata:  cfg.InterceptMetadata,
 		BlockIOUring:       cfg.BlockIOUring,
 		BlockedSyscalls:    blockedNrs,
+		OnBlockAction:      onBlock,
 	}
 
 	// Install seccomp filter.

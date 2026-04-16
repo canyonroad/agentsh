@@ -86,6 +86,23 @@ const (
 )
 
 // Seccomp events.
+//
+// EventSeccompBlocked ("seccomp_blocked") is emitted once per user-notify
+// dispatch when `sandbox.seccomp.syscalls.on_block` is `log` or
+// `log_and_kill`. `errno` and `kill` modes are kernel-side and emit
+// nothing. The event's PID field carries the TID of the trapping thread
+// (seccomp_notif.pid is a TID, not the TGID, for multi-threaded callers).
+//
+// Fields payload:
+//
+//	syscall     string   — libseccomp-resolved name, or "unknown(N)"
+//	syscall_nr  uint32   — raw syscall number from seccomp_notif.data.syscall
+//	action      string   — "log" or "log_and_kill" (value of on_block)
+//	outcome     string   — "denied" (log, or log_and_kill when kill failed)
+//	                        or "killed" (log_and_kill when SIGKILL delivered)
+//	arch        string   — Go runtime arch (e.g. "amd64", "arm64")
+//
+// See docs/seccomp.md § "Audit Events" for the JSON wire format.
 const (
 	EventSeccompBlocked      EventType = "seccomp_blocked"
 	EventNotifyHandlerPanic  EventType = "notify_handler_panic"

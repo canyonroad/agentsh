@@ -152,6 +152,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	seccompCfg := seccompWrapperConfig{
 		UnixSocketEnabled: a.cfg.Sandbox.Seccomp.UnixSocket.Enabled,
 		BlockedSyscalls:   a.cfg.Sandbox.Seccomp.Syscalls.Block,
+		OnBlock:           a.cfg.Sandbox.Seccomp.Syscalls.OnBlock,
 		ExecveEnabled:     execveEnabled,
 		ServerPID:         os.Getpid(),
 	}
@@ -377,7 +378,25 @@ func (a *App) mainFilterUsesUserNotify(execveEnabled bool) bool {
 	if config.FileMonitorBoolWithDefault(a.cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata, false) {
 		return true
 	}
+	if blockListUsesNotify(a.cfg.Sandbox.Seccomp.Syscalls.Block, a.cfg.Sandbox.Seccomp.Syscalls.OnBlock) {
+		return true
+	}
 	return false
+}
+
+// blockListUsesNotify reports whether the block-list action installs
+// SECCOMP_RET_USER_NOTIF rules on this arch. Only `log` and
+// `log_and_kill` route block-listed syscalls through user-notify;
+// `errno` and `kill` are kernel-side actions. The block-list also
+// needs at least one syscall name that resolves on the running arch
+// — otherwise the wrapper installs zero ActNotify rules and no FD is
+// produced, so flipping the gate here would cause ptrace sync to wait
+// for an FD/READY that never arrives.
+func blockListUsesNotify(block []string, onBlock string) bool {
+	if onBlock != "log" && onBlock != "log_and_kill" {
+		return false
+	}
+	return resolvableBlockListCount(block) > 0
 }
 
 // acceptNotifyFD listens on the Unix socket for a single connection from the CLI,

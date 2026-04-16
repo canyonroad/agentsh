@@ -8,7 +8,7 @@ When enabled, seccomp filtering provides three types of protection:
 
 1. **Unix Socket Monitoring**: Intercepts socket operations for policy-based access control
 2. **Signal Interception**: Intercepts signal delivery for policy-based allow/deny/redirect
-3. **Syscall Blocking**: Immediately terminates processes that attempt blocked syscalls
+3. **Syscall Blocking**: Denies (and optionally kills) processes that attempt blocked syscalls
 
 ## Configuration
 
@@ -35,7 +35,7 @@ sandbox:
         - mount
         - umount2
         # ... see defaults below
-      on_block: kill  # kill | log_and_kill
+      on_block: errno  # errno | kill | log | log_and_kill (default: errno)
 ```
 
 ## Signal Interception
@@ -196,23 +196,50 @@ When seccomp is enabled, these syscalls are blocked by default:
 | finit_module | Kernel module loading (fd) |
 | delete_module | Kernel module unloading |
 
+## Syscall Block Actions
+
+`sandbox.seccomp.syscalls.on_block` selects what happens when a process invokes a syscall that appears in `block:`. Four values are supported; the default is `errno`.
+
+| Value          | Kernel mechanism                              | Effect on caller         | Event emitted              |
+| -------------- | --------------------------------------------- | ------------------------ | -------------------------- |
+| `errno`        | `SCMP_ACT_ERRNO(EPERM)`                       | syscall returns `EPERM`  | no (kernel-only)           |
+| `kill`         | `SCMP_ACT_KILL_PROCESS`                       | process killed by SIGSYS | no (kernel-only)           |
+| `log`          | `SCMP_ACT_NOTIFY` + handler responds `EPERM`  | syscall returns `EPERM`  | `seccomp_blocked`, outcome `denied` |
+| `log_and_kill` | `SCMP_ACT_NOTIFY` + handler sends `SIGKILL`   | process killed by SIGKILL | `seccomp_blocked`, outcome `killed` |
+
+**Why four modes:** `errno` is the lowest-cost default — well-behaved agents get a predictable `EPERM` and carry on; misbehaving ones are stopped at the kernel. `kill` is the irrevocable stance. `log` / `log_and_kill` take a user-notify round-trip per blocked call, so they are observable but more expensive; reach for them when you want an audit trail of every attempted violation.
+
+**Startup warning:** when `on_block` is `log` or `log_and_kill` but no audit sink is registered, agentsh logs a warning at startup so operators don't wonder where events went.
+
 ## Audit Events
 
-When a process is killed for attempting a blocked syscall, a `seccomp_blocked` event is logged:
+When a block-listed syscall traps under `log` or `log_and_kill`, a `seccomp_blocked` event is emitted. `errno` and `kill` do not emit — enforcement is kernel-side and no user-notify round trip occurs.
 
 ```json
 {
   "type": "seccomp_blocked",
-  "timestamp": "2026-01-04T10:30:00Z",
+  "timestamp": "2026-04-15T10:30:00Z",
   "session_id": "sess_abc123",
+  "source": "seccomp",
   "pid": 12345,
-  "comm": "malicious-tool",
-  "syscall": "ptrace",
-  "syscall_nr": 101,
-  "reason": "blocked_by_policy",
-  "action": "killed"
+  "fields": {
+    "syscall": "ptrace",
+    "syscall_nr": 101,
+    "action": "log_and_kill",
+    "outcome": "killed",
+    "arch": "arm64"
+  }
 }
 ```
+
+| Field        | Meaning                                                                       |
+| ------------ | ----------------------------------------------------------------------------- |
+| `pid`        | TID of the thread that made the syscall (for multi-threaded agents, not always the TGID). |
+| `syscall`    | Human-readable syscall name resolved via libseccomp, or `unknown(N)` if unresolvable. |
+| `syscall_nr` | Raw syscall number from `struct seccomp_notif.data.syscall`.                  |
+| `action`     | Value of `on_block` that matched (`log` or `log_and_kill`).                   |
+| `outcome`    | `denied` under `log`; `killed` under `log_and_kill` when the kill landed; `denied` under `log_and_kill` if the kill could not be delivered. |
+| `arch`       | Go runtime arch (`amd64`, `arm64`) — surfaces the filter's native architecture. |
 
 ## Requirements
 
