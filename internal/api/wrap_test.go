@@ -319,6 +319,10 @@ func TestWrapInit_WrapperNotFound(t *testing.T) {
 }
 
 func TestWrapInit_RejectsNegativeCallerUID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("negative caller uid validation is Linux-only")
+	}
+
 	cfg := &config.Config{}
 	app, mgr := newTestAppForWrap(t, cfg)
 
