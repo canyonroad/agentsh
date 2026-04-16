@@ -248,31 +248,37 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socket
 		ul.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
-	conn, err := listener.Accept()
-	if err != nil {
-		slog.Error("ptrace wrap: accept failed", "error", err, "session_id", sessionID)
-		return
-	}
+	var conn net.Conn
+	for {
+		nextConn, err := listener.Accept()
+		if err != nil {
+			slog.Error("ptrace wrap: accept failed", "error", err, "session_id", sessionID)
+			return
+		}
 
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		conn.Close()
-		slog.Error("ptrace wrap: connection is not a Unix connection", "session_id", sessionID)
-		return
-	}
+		unixConn, ok := nextConn.(*net.UnixConn)
+		if !ok {
+			_ = nextConn.Close()
+			slog.Error("ptrace wrap: connection is not a Unix connection", "session_id", sessionID)
+			continue
+		}
 
-	creds := getConnPeerCreds(unixConn)
-	if expectedUID < 0 {
-		conn.Close()
-		slog.Warn("ptrace wrap: rejecting connection with invalid caller UID",
-			"expected_uid", expectedUID, "session_id", sessionID)
-		return
-	}
-	if expectedUID > 0 && creds.UID != uint32(expectedUID) {
-		conn.Close()
-		slog.Warn("ptrace wrap: rejecting connection from unexpected UID",
-			"peer_uid", creds.UID, "expected_uid", expectedUID, "session_id", sessionID)
-		return
+		creds := getConnPeerCreds(unixConn)
+		if expectedUID < 0 {
+			_ = nextConn.Close()
+			slog.Warn("ptrace wrap: rejecting connection with invalid caller UID",
+				"expected_uid", expectedUID, "session_id", sessionID)
+			return
+		}
+		if expectedUID > 0 && creds.UID != uint32(expectedUID) {
+			_ = nextConn.Close()
+			slog.Warn("ptrace wrap: rejecting connection from unexpected UID",
+				"peer_uid", creds.UID, "expected_uid", expectedUID, "session_id", sessionID)
+			continue
+		}
+
+		conn = nextConn
+		break
 	}
 
 	// Set read deadline for the handshake

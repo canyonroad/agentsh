@@ -117,10 +117,6 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// The handler will be cleaned up when the session ends or the connection closes.
 	ctx := context.Background()
 
-	if req.CallerUID < 0 {
-		return types.WrapInitResponse{}, http.StatusBadRequest, fmt.Errorf("invalid caller uid: %d", req.CallerUID)
-	}
-
 	// Windows uses driver-based interception, not seccomp
 	if runtime.GOOS == "windows" {
 		return a.wrapInitWindows(ctx, s, sessionID, req)
@@ -129,6 +125,10 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// Only supported on Linux (seccomp) otherwise
 	if runtime.GOOS != "linux" {
 		return types.WrapInitResponse{}, http.StatusBadRequest, errWrapNotSupported
+	}
+
+	if req.CallerUID < 0 {
+		return types.WrapInitResponse{}, http.StatusBadRequest, fmt.Errorf("invalid caller uid: %d", req.CallerUID)
 	}
 
 	// Ptrace mode: skip seccomp wrapper entirely. Create a socket for PID handshake.
@@ -528,37 +528,48 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 		dl.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
-	conn, err := listener.Accept()
-	if err != nil {
-		slog.Debug("wrap: failed to accept notify connection", "session_id", sessionID, "error", err)
-		return
+	var conn net.Conn
+	var notifyPeerPID int
+	for {
+		nextConn, err := listener.Accept()
+		if err != nil {
+			slog.Debug("wrap: failed to accept notify connection", "session_id", sessionID, "error", err)
+			return
+		}
+
+		unixConn, ok := nextConn.(*net.UnixConn)
+		if !ok {
+			_ = nextConn.Close()
+			slog.Debug("wrap: connection is not a Unix connection", "session_id", sessionID)
+			continue
+		}
+
+		// Read the notify-socket peer credentials and enforce the expected UID.
+		creds := getConnPeerCreds(unixConn)
+		notifyPeerPID = creds.PID
+		if notifyPeerPID > 0 {
+			slog.Debug("wrap: got notify-socket peer credentials",
+				"peer_pid", notifyPeerPID, "peer_uid", creds.UID, "session_id", sessionID)
+		}
+		if expectedUID < 0 {
+			_ = nextConn.Close()
+			slog.Warn("wrap: rejecting notify connection with invalid caller UID",
+				"expected_uid", expectedUID, "session_id", sessionID)
+			return
+		}
+		if expectedUID > 0 && creds.UID != uint32(expectedUID) {
+			_ = nextConn.Close()
+			slog.Warn("wrap: rejecting notify connection from unexpected UID",
+				"peer_uid", creds.UID, "expected_uid", expectedUID, "session_id", sessionID)
+			continue
+		}
+
+		conn = nextConn
+		break
 	}
 	defer conn.Close()
 
-	// Receive the notify fd from the CLI peer via SCM_RIGHTS.
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		slog.Debug("wrap: connection is not a Unix connection", "session_id", sessionID)
-		return
-	}
-
-	// Read the notify-socket peer credentials and enforce the expected UID.
-	creds := getConnPeerCreds(unixConn)
-	notifyPeerPID := creds.PID
-	if notifyPeerPID > 0 {
-		slog.Debug("wrap: got notify-socket peer credentials",
-			"peer_pid", notifyPeerPID, "peer_uid", creds.UID, "session_id", sessionID)
-	}
-	if expectedUID < 0 {
-		slog.Warn("wrap: rejecting notify connection with invalid caller UID",
-			"expected_uid", expectedUID, "session_id", sessionID)
-		return
-	}
-	if expectedUID > 0 && creds.UID != uint32(expectedUID) {
-		slog.Warn("wrap: rejecting notify connection from unexpected UID",
-			"peer_uid", creds.UID, "expected_uid", expectedUID, "session_id", sessionID)
-		return
-	}
+	unixConn := conn.(*net.UnixConn)
 
 	file, err := unixConn.File()
 	if err != nil {
@@ -594,29 +605,40 @@ func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketP
 		dl.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
-	conn, err := listener.Accept()
-	if err != nil {
-		slog.Debug("wrap: failed to accept signal connection", "session_id", sessionID, "error", err)
-		return
+	var conn net.Conn
+	for {
+		nextConn, err := listener.Accept()
+		if err != nil {
+			slog.Debug("wrap: failed to accept signal connection", "session_id", sessionID, "error", err)
+			return
+		}
+
+		unixConn, ok := nextConn.(*net.UnixConn)
+		if !ok {
+			_ = nextConn.Close()
+			continue
+		}
+
+		creds := getConnPeerCreds(unixConn)
+		if expectedUID < 0 {
+			_ = nextConn.Close()
+			slog.Warn("wrap: rejecting signal connection with invalid caller UID",
+				"expected_uid", expectedUID, "session_id", sessionID)
+			return
+		}
+		if expectedUID > 0 && creds.UID != uint32(expectedUID) {
+			_ = nextConn.Close()
+			slog.Warn("wrap: rejecting signal connection from unexpected UID",
+				"peer_uid", creds.UID, "expected_uid", expectedUID, "session_id", sessionID)
+			continue
+		}
+
+		conn = nextConn
+		break
 	}
 	defer conn.Close()
 
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		return
-	}
-
-	creds := getConnPeerCreds(unixConn)
-	if expectedUID < 0 {
-		slog.Warn("wrap: rejecting signal connection with invalid caller UID",
-			"expected_uid", expectedUID, "session_id", sessionID)
-		return
-	}
-	if expectedUID > 0 && creds.UID != uint32(expectedUID) {
-		slog.Warn("wrap: rejecting signal connection from unexpected UID",
-			"peer_uid", creds.UID, "expected_uid", expectedUID, "session_id", sessionID)
-		return
-	}
+	unixConn := conn.(*net.UnixConn)
 
 	file, err := unixConn.File()
 	if err != nil {
