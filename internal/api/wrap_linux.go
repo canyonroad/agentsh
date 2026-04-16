@@ -208,23 +208,29 @@ func (a *App) wrapInitWindows(_ context.Context, _ *session.Session, _ string, _
 	return types.WrapInitResponse{}, http.StatusBadRequest, errWrapNotSupported
 }
 
-// getConnPeerPID extracts the peer process PID from a Unix connection.
-func getConnPeerPID(conn *net.UnixConn) int {
+type peerCreds struct {
+	PID int
+	UID uint32
+}
+
+// getConnPeerCreds extracts the peer process credentials from a Unix connection.
+func getConnPeerCreds(conn *net.UnixConn) peerCreds {
 	rawConn, err := conn.SyscallConn()
 	if err != nil {
-		slog.Debug("getConnPeerPID: failed to get syscall conn", "error", err)
-		return 0
+		slog.Debug("getConnPeerCreds: failed to get syscall conn", "error", err)
+		return peerCreds{}
 	}
-	var pid int
+	var creds peerCreds
 	rawConn.Control(func(fd uintptr) {
 		ucred, err := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
 		if err != nil {
-			slog.Debug("getConnPeerPID: GetsockoptUcred failed", "error", err)
+			slog.Debug("getConnPeerCreds: GetsockoptUcred failed", "error", err)
 		} else {
-			pid = int(ucred.Pid)
+			creds.PID = int(ucred.Pid)
+			creds.UID = ucred.Uid
 		}
 	})
-	return pid
+	return creds
 }
 
 // acceptPtracePID accepts a connection on the notify socket, extracts the peer

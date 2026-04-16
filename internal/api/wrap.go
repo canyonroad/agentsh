@@ -537,11 +537,12 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 		return
 	}
 
-	// Get wrapper PID from socket credentials for depth tracking
-	wrapperPID := getConnPeerPID(unixConn)
+	// Get wrapper credentials from socket credentials for depth tracking
+	creds := getConnPeerCreds(unixConn)
+	wrapperPID := creds.PID
 	if wrapperPID > 0 {
-		slog.Debug("wrap: got wrapper PID from socket credentials",
-			"wrapper_pid", wrapperPID, "session_id", sessionID)
+		slog.Debug("wrap: got wrapper credentials from socket",
+			"wrapper_pid", wrapperPID, "wrapper_uid", creds.UID, "session_id", sessionID)
 	}
 
 	file, err := unixConn.File()

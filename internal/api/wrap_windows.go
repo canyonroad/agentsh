@@ -31,6 +31,11 @@ var (
 	errWrapperNotFound  = errors.New("agentsh-stub binary not found (agentsh-stub not in PATH)")
 )
 
+type peerCreds struct {
+	PID int
+	UID uint32
+}
+
 func recvFDFromConn(sock *os.File) (*os.File, error) {
 	return nil, fmt.Errorf("SCM_RIGHTS not available on Windows")
 }
@@ -39,8 +44,8 @@ func startNotifyHandlerForWrap(ctx context.Context, notifyFD *os.File, sessionID
 	// Not used on Windows — the driver handles exec interception directly.
 }
 
-func getConnPeerPID(conn *net.UnixConn) int {
-	return 0
+func getConnPeerCreds(conn *net.UnixConn) peerCreds {
+	return peerCreds{}
 }
 
 func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string) {

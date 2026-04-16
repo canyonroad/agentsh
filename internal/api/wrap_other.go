@@ -18,6 +18,11 @@ var (
 	errWrapperNotFound  = errors.New("seccomp wrapper binary not found")
 )
 
+type peerCreds struct {
+	PID int
+	UID uint32
+}
+
 func recvFDFromConn(sock *os.File) (*os.File, error) {
 	return nil, errWrapNotSupported
 }
@@ -36,8 +41,8 @@ func (a *App) wrapInitWindows(ctx context.Context, s *session.Session, sessionID
 	return types.WrapInitResponse{}, http.StatusBadRequest, errWrapNotSupported
 }
 
-func getConnPeerPID(conn *net.UnixConn) int {
-	return 0
+func getConnPeerCreds(conn *net.UnixConn) peerCreds {
+	return peerCreds{}
 }
 
 func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string) {
