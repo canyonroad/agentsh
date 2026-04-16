@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -707,9 +708,9 @@ type LandlockConfig struct {
 
 // LandlockNetworkConfig controls Landlock network restrictions (kernel 6.7+).
 type LandlockNetworkConfig struct {
-	AllowConnectTCP bool  `yaml:"allow_connect_tcp"` // Allow outbound TCP
-	AllowBindTCP    bool  `yaml:"allow_bind_tcp"`    // Allow listening
-	BindPorts       []int `yaml:"bind_ports"`        // Specific ports if bind allowed
+	AllowConnectTCP *bool `yaml:"allow_connect_tcp"` // default: true (set by applyDefaults)
+	AllowBindTCP    *bool `yaml:"allow_bind_tcp"`    // default: false (set by applyDefaults)
+	BindPorts       []int `yaml:"bind_ports"`        // reserved; not yet enforced
 }
 
 // CapabilitiesConfig controls Linux capability dropping.
@@ -1260,6 +1261,23 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 		cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold = &d
 	}
 
+	// Landlock network defaults — fail-open for connect (proxy needs it),
+	// fail-closed for bind (agents rarely need to listen).
+	// Applied unconditionally so diagnostic dumps show explicit values.
+	if cfg.Landlock.Network.AllowConnectTCP == nil {
+		v := true
+		cfg.Landlock.Network.AllowConnectTCP = &v
+	}
+	if cfg.Landlock.Network.AllowBindTCP == nil {
+		v := false
+		cfg.Landlock.Network.AllowBindTCP = &v
+	}
+	if len(cfg.Landlock.Network.BindPorts) > 0 {
+		slog.Warn("landlock.network.bind_ports is set but not yet enforced",
+			"bind_ports", cfg.Landlock.Network.BindPorts,
+			"note", "port-scoped bind rules are a planned follow-up")
+	}
+
 	// macOS XPC defaults
 	if cfg.Sandbox.XPC.Mode == "" {
 		cfg.Sandbox.XPC.Mode = "enforce"
@@ -1719,6 +1737,20 @@ func validateConfig(cfg *Config) error {
 		default:
 			return fmt.Errorf("invalid package_checks.registries[%q].trust %q (must be \"check_full\", \"check_local_only\", or \"trusted\")", name, r.Trust)
 		}
+	}
+	// Landlock network self-lockout check: if the user disables outbound TCP
+	// under Landlock but the sandbox proxy is enabled, agents can never reach
+	// the proxy (which listens on localhost TCP). Fail fast at startup rather
+	// than silently breaking every session with ECONNREFUSED.
+	if cfg.Landlock.Enabled &&
+		cfg.Landlock.Network.AllowConnectTCP != nil &&
+		!*cfg.Landlock.Network.AllowConnectTCP &&
+		cfg.Sandbox.Network.Enabled {
+		return fmt.Errorf(
+			"landlock.network.allow_connect_tcp is false but sandbox.network.enabled " +
+				"is true: agent processes cannot reach the agentsh proxy without " +
+				"outbound TCP. Either set landlock.network.allow_connect_tcp to true, " +
+				"or set sandbox.network.enabled to false")
 	}
 	return nil
 }

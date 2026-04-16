@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/policy"
@@ -448,5 +449,139 @@ func TestWrapInit_NoSignalSocketWithoutPolicy(t *testing.T) {
 	}
 	if sigEnabled != false {
 		t.Errorf("expected signal_filter_enabled=false, got %v", sigEnabled)
+	}
+}
+
+func TestWrapInit_LandlockNetwork_HonorsConfig(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+	if !capabilities.DetectLandlock().Available {
+		t.Skip("Landlock not available on this host")
+	}
+
+	cases := []struct {
+		name     string
+		connect  bool
+		bind     bool
+		wantNet  bool
+		wantBind bool
+	}{
+		{"both_true", true, true, true, true},
+		{"connect_true_bind_false", true, false, true, false},
+		{"connect_true_bind_true", true, true, true, true},
+		{"connect_false_bind_false", false, false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			connect := tc.connect
+			bind := tc.bind
+			enabled := true
+			cfg := &config.Config{}
+			cfg.Sandbox.UnixSockets.Enabled = &enabled
+			cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+			cfg.Sandbox.Seccomp.Execve.Enabled = true
+			cfg.Sandbox.Seccomp.UnixSocket.Enabled = true
+			cfg.Landlock.Enabled = true
+			cfg.Landlock.Network.AllowConnectTCP = &connect
+			cfg.Landlock.Network.AllowBindTCP = &bind
+
+			app, mgr := newTestAppForWrap(t, cfg)
+			s, err := mgr.Create(t.TempDir(), "default")
+			if err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+
+			resp, _, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+				AgentCommand: "/bin/echo",
+			})
+			if err != nil {
+				t.Fatalf("wrapInitCore: %v", err)
+			}
+
+			var parsed map[string]any
+			if err := json.Unmarshal([]byte(resp.SeccompConfig), &parsed); err != nil {
+				t.Fatalf("unmarshal SeccompConfig: %v\n%s", err, resp.SeccompConfig)
+			}
+
+			gotNet, _ := parsed["allow_network"].(bool)
+			gotBind, _ := parsed["allow_bind"].(bool)
+			if gotNet != tc.wantNet {
+				t.Errorf("allow_network = %v; want %v (JSON: %s)", gotNet, tc.wantNet, resp.SeccompConfig)
+			}
+			if gotBind != tc.wantBind {
+				t.Errorf("allow_bind = %v; want %v (JSON: %s)", gotBind, tc.wantBind, resp.SeccompConfig)
+			}
+		})
+	}
+}
+
+func TestWrapInit_LandlockNetwork_BackCompatDefaults(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+	if !capabilities.DetectLandlock().Available {
+		t.Skip("Landlock not available on this host")
+	}
+
+	// Minimal YAML: Landlock enabled, no network block.
+	// Exercises the back-compat promise: omitting landlock.network.* must
+	// yield allow_network=true (proxy-compatible) and allow_bind=false
+	// (new security default, replacing prior accidental permissive behavior).
+	yamlData := []byte(`
+landlock:
+  enabled: true
+sandbox:
+  unix_sockets:
+    enabled: true
+    wrapper_bin: /bin/true
+  seccomp:
+    execve:
+      enabled: true
+    unix_socket:
+      enabled: true
+`)
+	tmpFile := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(tmpFile, yamlData, 0600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	cfg, err := config.Load(tmpFile)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	// Sanity: applyDefaults ran via config.Load.
+	if cfg.Landlock.Network.AllowConnectTCP == nil {
+		t.Fatal("applyDefaults should have filled AllowConnectTCP")
+	}
+	if cfg.Landlock.Network.AllowBindTCP == nil {
+		t.Fatal("applyDefaults should have filled AllowBindTCP")
+	}
+
+	app, mgr := newTestAppForWrap(t, cfg)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, _, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+	})
+	if err != nil {
+		t.Fatalf("wrapInitCore: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(resp.SeccompConfig), &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	gotNet, _ := parsed["allow_network"].(bool)
+	gotBind, _ := parsed["allow_bind"].(bool)
+	if !gotNet {
+		t.Error("back-compat: allow_network should default to true (proxy needs it)")
+	}
+	if gotBind {
+		t.Error("back-compat: allow_bind should default to false (security hardening vs prior accidental permissive)")
 	}
 }

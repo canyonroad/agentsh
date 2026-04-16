@@ -173,9 +173,15 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			seccompCfg.AllowWrite = append(seccompCfg.AllowWrite, a.cfg.Landlock.AllowWrite...)
 			seccompCfg.DenyPaths = append(seccompCfg.DenyPaths, a.cfg.Landlock.DenyPaths...)
 
-			// Allow all network by default — agentsh proxy handles network policy.
-			seccompCfg.AllowNetwork = true
-			seccompCfg.AllowBind = true
+			// Honor landlock.network.* config. Defaults (connect=true, bind=false)
+			// come from applyDefaults; validateConfig already rejects the
+			// allow_connect_tcp=false + sandbox.network.enabled=true combination.
+			if a.cfg.Landlock.Network.AllowConnectTCP != nil {
+				seccompCfg.AllowNetwork = *a.cfg.Landlock.Network.AllowConnectTCP
+			}
+			if a.cfg.Landlock.Network.AllowBindTCP != nil {
+				seccompCfg.AllowBind = *a.cfg.Landlock.Network.AllowBindTCP
+			}
 		}
 	}
 
