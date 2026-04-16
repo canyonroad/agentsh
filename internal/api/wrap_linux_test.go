@@ -86,7 +86,106 @@ func TestAcceptNotifyFD_RejectsWrongUID(t *testing.T) {
 	}
 }
 
-func TestAcceptNotifyFD_AcceptsCorrectUID(t *testing.T) {
+func TestAcceptNotifyFD_RejectsNegativeUID(t *testing.T) {
+	cfg := &config.Config{}
+	app, mgr := newTestAppForWrap(t, cfg)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	socketDir := t.TempDir()
+	socketPath := filepath.Join(socketDir, "notify.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, -1)
+	}()
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		t.Fatal("expected UnixConn")
+	}
+
+	pipeR, pipeW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = pipeR.Close()
+		_ = pipeW.Close()
+	})
+
+	sendFDOverUnixConn(t, unixConn, int(pipeR.Fd()))
+
+	waitForTestDone(t, done)
+}
+
+func TestAcceptNotifyFD_AcceptsMatchingUID(t *testing.T) {
+	currentUID := os.Getuid()
+	if currentUID == 0 {
+		t.Skip("legacy root sentinel keeps UID 0 permissive")
+	}
+
+	cfg := &config.Config{}
+	app, mgr := newTestAppForWrap(t, cfg)
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	socketDir := t.TempDir()
+	socketPath := filepath.Join(socketDir, "notify.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, currentUID)
+	}()
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		t.Fatal("expected UnixConn")
+	}
+
+	pipeR, pipeW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = pipeR.Close()
+		_ = pipeW.Close()
+	})
+
+	sendFDOverUnixConn(t, unixConn, int(pipeR.Fd()))
+
+	waitForTestDone(t, done)
+}
+
+func TestAcceptNotifyFD_AcceptsLegacyZeroUID(t *testing.T) {
 	cfg := &config.Config{}
 	app, mgr := newTestAppForWrap(t, cfg)
 	s, err := mgr.Create(t.TempDir(), "default")

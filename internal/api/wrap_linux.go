@@ -262,6 +262,12 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socket
 	}
 
 	creds := getConnPeerCreds(unixConn)
+	if expectedUID < 0 {
+		conn.Close()
+		slog.Warn("ptrace wrap: rejecting connection with invalid caller UID",
+			"expected_uid", expectedUID, "session_id", sessionID)
+		return
+	}
 	if expectedUID > 0 && creds.UID != uint32(expectedUID) {
 		conn.Close()
 		slog.Warn("ptrace wrap: rejecting connection from unexpected UID",

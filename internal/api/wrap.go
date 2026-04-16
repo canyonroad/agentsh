@@ -544,6 +544,11 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 		slog.Debug("wrap: got notify-socket peer credentials",
 			"peer_pid", notifyPeerPID, "peer_uid", creds.UID, "session_id", sessionID)
 	}
+	if expectedUID < 0 {
+		slog.Warn("wrap: rejecting notify connection with invalid caller UID",
+			"expected_uid", expectedUID, "session_id", sessionID)
+		return
+	}
 	if expectedUID > 0 && creds.UID != uint32(expectedUID) {
 		slog.Warn("wrap: rejecting notify connection from unexpected UID",
 			"peer_uid", creds.UID, "expected_uid", expectedUID, "session_id", sessionID)
@@ -597,6 +602,11 @@ func (a *App) acceptSignalFD(ctx context.Context, listener net.Listener, socketP
 	}
 
 	creds := getConnPeerCreds(unixConn)
+	if expectedUID < 0 {
+		slog.Warn("wrap: rejecting signal connection with invalid caller UID",
+			"expected_uid", expectedUID, "session_id", sessionID)
+		return
+	}
 	if expectedUID > 0 && creds.UID != uint32(expectedUID) {
 		slog.Warn("wrap: rejecting signal connection from unexpected UID",
 			"peer_uid", creds.UID, "expected_uid", expectedUID, "session_id", sessionID)
