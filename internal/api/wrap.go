@@ -116,10 +116,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		if err != nil {
 			return types.WrapInitResponse{}, http.StatusInternalServerError, err
 		}
-		if err := os.Chmod(notifyDir, 0700); err != nil {
-			os.RemoveAll(notifyDir)
-			return types.WrapInitResponse{}, http.StatusInternalServerError, err
-		}
+		chownOK := secureNotifyDir(notifyDir, req.CallerUID)
 		// Apply same path-budget + hash truncation as seccomp wrap path
 		safeID := filepath.Base(sessionID)
 		const socketPathLimit = 104
@@ -146,6 +143,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			os.RemoveAll(notifyDir)
 			return types.WrapInitResponse{}, http.StatusInternalServerError, err
 		}
+		secureSocket(notifySocketPath, req.CallerUID, chownOK)
 
 		go a.acceptPtracePID(ctx, listener, notifySocketPath, sessionID)
 
@@ -238,10 +236,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	if err != nil {
 		return types.WrapInitResponse{}, http.StatusInternalServerError, err
 	}
-	if err := os.Chmod(notifyDir, 0700); err != nil {
-		os.RemoveAll(notifyDir)
-		return types.WrapInitResponse{}, http.StatusInternalServerError, err
-	}
+	chownOK := secureNotifyDir(notifyDir, req.CallerUID)
 	// Unix socket paths are limited to 104 bytes (macOS) or 108 (Linux).
 	// Compute remaining budget for the session ID portion and hash if needed.
 	const socketPathLimit = 104 // use the most restrictive (macOS)
@@ -267,6 +262,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		os.RemoveAll(notifyDir)
 		return types.WrapInitResponse{}, http.StatusInternalServerError, err
 	}
+	secureSocket(notifySocketPath, req.CallerUID, chownOK)
 
 	// Start background goroutine to accept the notify fd connection
 	go a.acceptNotifyFD(ctx, listener, notifySocketPath, sessionID, s, execveEnabled)
@@ -291,6 +287,7 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			signalSocketPath = ""
 			signalFilterEnabled = false
 		} else {
+			secureSocket(signalSocketPath, req.CallerUID, chownOK)
 			go a.acceptSignalFD(ctx, signalListener, signalSocketPath, sessionID, s)
 		}
 	}

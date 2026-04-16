@@ -130,6 +130,93 @@ func TestSecureSocket_Fallback(t *testing.T) {
 	}
 }
 
+func TestWrapInit_NotifyDirPermissions_Fallback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrap(t, cfg)
+	app.ptraceTracer = struct{}{}
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != 200 {
+		t.Fatalf("expected status 200, got %d", code)
+	}
+
+	notifyDir := filepath.Dir(resp.NotifySocket)
+	t.Cleanup(func() { _ = os.RemoveAll(notifyDir) })
+
+	dirInfo, err := os.Stat(notifyDir)
+	if err != nil {
+		t.Fatalf("stat notify dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0711 {
+		t.Fatalf("expected fallback notify dir mode 0711, got %04o", got)
+	}
+
+	socketInfo, err := os.Stat(resp.NotifySocket)
+	if err != nil {
+		t.Fatalf("stat notify socket: %v", err)
+	}
+	if got := socketInfo.Mode().Perm(); got != 0666 {
+		t.Fatalf("expected fallback notify socket mode 0666, got %04o", got)
+	}
+}
+
+func TestWrapInit_NotifyDirPermissions_CallerUID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    nonzeroTestUID(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != 200 {
+		t.Fatalf("expected status 200, got %d", code)
+	}
+
+	notifyDir := filepath.Dir(resp.NotifySocket)
+	t.Cleanup(func() { _ = os.RemoveAll(notifyDir) })
+
+	dirInfo, err := os.Stat(notifyDir)
+	if err != nil {
+		t.Fatalf("stat notify dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0700 {
+		t.Fatalf("expected caller-owned notify dir mode 0700, got %04o", got)
+	}
+}
+
 func TestWrapInit_SessionNotFound(t *testing.T) {
 	cfg := &config.Config{}
 	app, _ := newTestAppForWrap(t, cfg)
