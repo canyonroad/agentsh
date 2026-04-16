@@ -1738,5 +1738,19 @@ func validateConfig(cfg *Config) error {
 			return fmt.Errorf("invalid package_checks.registries[%q].trust %q (must be \"check_full\", \"check_local_only\", or \"trusted\")", name, r.Trust)
 		}
 	}
+	// Landlock network self-lockout check: if the user disables outbound TCP
+	// under Landlock but the sandbox proxy is enabled, agents can never reach
+	// the proxy (which listens on localhost TCP). Fail fast at startup rather
+	// than silently breaking every session with ECONNREFUSED.
+	if cfg.Landlock.Enabled &&
+		cfg.Landlock.Network.AllowConnectTCP != nil &&
+		!*cfg.Landlock.Network.AllowConnectTCP &&
+		cfg.Sandbox.Network.Enabled {
+		return fmt.Errorf(
+			"landlock.network.allow_connect_tcp is false but sandbox.network.enabled " +
+				"is true: agent processes cannot reach the agentsh proxy without " +
+				"outbound TCP. Either set landlock.network.allow_connect_tcp to true, " +
+				"or set sandbox.network.enabled to false")
+	}
 	return nil
 }
