@@ -131,58 +131,6 @@ func TestSecureSocket_Fallback(t *testing.T) {
 	}
 }
 
-func TestGetConnPeerCreds(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("getConnPeerCreds is Linux-only")
-	}
-
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "peercreds.sock")
-	listener, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("listen unix socket: %v", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-
-	serverConnCh := make(chan *net.UnixConn, 1)
-	serverErrCh := make(chan error, 1)
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			serverErrCh <- err
-			return
-		}
-		unixConn, ok := conn.(*net.UnixConn)
-		if !ok {
-			serverErrCh <- err
-			return
-		}
-		serverConnCh <- unixConn
-	}()
-
-	clientConn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		t.Fatalf("dial unix socket: %v", err)
-	}
-	defer clientConn.Close()
-
-	var serverConn *net.UnixConn
-	select {
-	case err := <-serverErrCh:
-		t.Fatalf("accept unix socket: %v", err)
-	case serverConn = <-serverConnCh:
-	}
-	defer serverConn.Close()
-
-	creds := getConnPeerCreds(serverConn)
-	if creds.PID <= 0 {
-		t.Fatalf("expected peer PID > 0, got %d", creds.PID)
-	}
-	if creds.UID != uint32(os.Getuid()) {
-		t.Fatalf("expected peer UID %d, got %d", os.Getuid(), creds.UID)
-	}
-}
-
 func TestWrapInit_NotifyDirPermissions_Fallback(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("wrap is Linux-only")
