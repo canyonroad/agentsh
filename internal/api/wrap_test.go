@@ -141,6 +141,38 @@ func TestWrapInit_Success(t *testing.T) {
 	}
 }
 
+func TestWrapInit_CallerUIDPassedThrough(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    1000,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != 200 {
+		t.Fatalf("expected status 200, got %d", code)
+	}
+	if resp.NotifySocket == "" {
+		t.Fatal("expected notify socket path to be set")
+	}
+}
+
 func TestWrapInit_SeccompConfigContent(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("wrap is Linux-only")

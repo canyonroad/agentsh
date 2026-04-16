@@ -126,6 +126,7 @@ type SessionPatchRequest struct {
 type WrapInitRequest struct {
 	AgentCommand string   `json:"agent_command"`
 	AgentArgs    []string `json:"agent_args,omitempty"`
+	CallerUID    int      `json:"caller_uid,omitempty"`
 }
 
 // WrapInitResponse returns the seccomp wrapper configuration to the CLI.
