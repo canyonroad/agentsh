@@ -4,6 +4,7 @@ package unix
 
 import (
 	"os"
+	"runtime"
 	"testing"
 	"unsafe"
 
@@ -19,6 +20,7 @@ func TestReadStringFromPID(t *testing.T) {
 	strPtr := uintptr(unsafe.Pointer(&strBytes[0]))
 
 	result, err := readString(os.Getpid(), uint64(strPtr), 4096)
+	runtime.KeepAlive(strBytes)
 	require.NoError(t, err)
 	assert.Equal(t, testStr, result)
 }
@@ -29,6 +31,7 @@ func TestReadString_Truncation(t *testing.T) {
 	strPtr := uintptr(unsafe.Pointer(&strBytes[0]))
 
 	result, err := readString(os.Getpid(), uint64(strPtr), 10)
+	runtime.KeepAlive(strBytes)
 	require.NoError(t, err)
 	assert.Equal(t, "this-is-a-", result)
 }
@@ -56,6 +59,8 @@ func TestReadArgv(t *testing.T) {
 	}
 
 	result, truncated, err := ReadArgv(os.Getpid(), uint64(uintptr(unsafe.Pointer(&ptrs[0]))), cfg)
+	runtime.KeepAlive(ptrs)
+	runtime.KeepAlive(argBytes)
 	require.NoError(t, err)
 	assert.False(t, truncated)
 	assert.Equal(t, args, result)
@@ -79,6 +84,8 @@ func TestReadArgv_Truncation_ArgCount(t *testing.T) {
 	}
 
 	result, truncated, err := ReadArgv(os.Getpid(), uint64(uintptr(unsafe.Pointer(&ptrs[0]))), cfg)
+	runtime.KeepAlive(ptrs)
+	runtime.KeepAlive(argBytes)
 	require.NoError(t, err)
 	assert.True(t, truncated)
 	assert.Equal(t, []string{"a", "b", "c"}, result)
@@ -102,6 +109,8 @@ func TestReadArgv_Truncation_ByteLimit(t *testing.T) {
 	}
 
 	result, truncated, err := ReadArgv(os.Getpid(), uint64(uintptr(unsafe.Pointer(&ptrs[0]))), cfg)
+	runtime.KeepAlive(ptrs)
+	runtime.KeepAlive(argBytes)
 	require.NoError(t, err)
 	assert.True(t, truncated)
 	assert.Equal(t, []string{"hello", "world"}, result)
@@ -151,20 +160,20 @@ func TestWriteStringToPID(t *testing.T) {
 
 	// First verify we can read from the buffer
 	result, err := readString(os.Getpid(), uint64(bufPtr), 4096)
+	runtime.KeepAlive(buf)
 	require.NoError(t, err)
 	assert.Equal(t, "/usr/bin/original-binary", result)
 
 	// Overwrite with a shorter string
 	err = writeString(os.Getpid(), uint64(bufPtr), "/tmp/stub")
+	runtime.KeepAlive(buf)
 	require.NoError(t, err)
 
 	// Read back and verify
 	result, err = readString(os.Getpid(), uint64(bufPtr), 4096)
+	runtime.KeepAlive(buf)
 	require.NoError(t, err)
 	assert.Equal(t, "/tmp/stub", result)
-
-	// Ensure buf is not GC'd before this point
-	_ = buf
 }
 
 func TestWriteString_NullPtr(t *testing.T) {
@@ -186,6 +195,7 @@ func TestReadProcMem_String(t *testing.T) {
 
 	buf := make([]byte, 4096)
 	n, err := readProcMem(os.Getpid(), uint64(strPtr), buf)
+	runtime.KeepAlive(strBytes)
 	require.NoError(t, err)
 	require.Greater(t, n, 0)
 
@@ -203,6 +213,7 @@ func TestReadProcMemStrict_Pointer(t *testing.T) {
 
 	out := make([]byte, 8)
 	n, err := readProcMemStrict(os.Getpid(), uint64(ptr), out)
+	runtime.KeepAlive(&val)
 	require.NoError(t, err)
 	assert.Equal(t, 8, n)
 	assert.Equal(t, buf[:], out)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"unsafe"
 
@@ -111,7 +112,7 @@ func TestExtractFileArgs_Openat(t *testing.T) {
 	// openat(dirfd, path, flags, mode)
 	args := SyscallArgs{
 		Nr:   unix.SYS_OPENAT,
-		Arg0: fdcwdUint64(),               // dirfd
+		Arg0: fdcwdUint64(),         // dirfd
 		Arg1: 0x7fff1000,            // path pointer
 		Arg2: uint64(unix.O_RDONLY), // flags
 		Arg3: 0644,                  // mode
@@ -130,10 +131,10 @@ func TestExtractFileArgs_Openat2(t *testing.T) {
 	// Arg2 is a pointer to struct open_how in tracee memory.
 	args := SyscallArgs{
 		Nr:   unix.SYS_OPENAT2,
-		Arg0: fdcwdUint64(),    // dirfd
-		Arg1: 0x7fff2000, // path pointer
-		Arg2: 0x7fff3000, // how struct pointer
-		Arg3: 24,         // size
+		Arg0: fdcwdUint64(), // dirfd
+		Arg1: 0x7fff2000,    // path pointer
+		Arg2: 0x7fff3000,    // how struct pointer
+		Arg3: 24,            // size
 	}
 
 	fa := extractFileArgs(args)
@@ -182,11 +183,11 @@ func TestExtractFileArgs_Renameat2(t *testing.T) {
 	// renameat2(olddirfd, oldpath, newdirfd, newpath, flags)
 	args := SyscallArgs{
 		Nr:   unix.SYS_RENAMEAT2,
-		Arg0: fdcwdUint64(),    // olddirfd
-		Arg1: 0x7fff6000, // oldpath
-		Arg2: 10,         // newdirfd
-		Arg3: 0x7fff7000, // newpath
-		Arg4: 0,          // flags
+		Arg0: fdcwdUint64(), // olddirfd
+		Arg1: 0x7fff6000,    // oldpath
+		Arg2: 10,            // newdirfd
+		Arg3: 0x7fff7000,    // newpath
+		Arg4: 0,             // flags
 	}
 
 	fa := extractFileArgs(args)
@@ -202,11 +203,11 @@ func TestExtractFileArgs_Linkat(t *testing.T) {
 	// linkat(olddirfd, oldpath, newdirfd, newpath, flags)
 	args := SyscallArgs{
 		Nr:   unix.SYS_LINKAT,
-		Arg0: fdcwdUint64(),    // olddirfd
-		Arg1: 0x7fff8000, // oldpath
-		Arg2: 7,          // newdirfd
-		Arg3: 0x7fff9000, // newpath
-		Arg4: 0,          // flags
+		Arg0: fdcwdUint64(), // olddirfd
+		Arg1: 0x7fff8000,    // oldpath
+		Arg2: 7,             // newdirfd
+		Arg3: 0x7fff9000,    // newpath
+		Arg4: 0,             // flags
 	}
 
 	fa := extractFileArgs(args)
@@ -222,9 +223,9 @@ func TestExtractFileArgs_Symlinkat(t *testing.T) {
 	// Primary path is linkpath: Dirfd=Arg1(newdirfd), PathPtr=Arg2(linkpath)
 	args := SyscallArgs{
 		Nr:   unix.SYS_SYMLINKAT,
-		Arg0: 0x7fffA000, // target string pointer
-		Arg1: fdcwdUint64(),    // newdirfd
-		Arg2: 0x7fffB000, // linkpath pointer
+		Arg0: 0x7fffA000,    // target string pointer
+		Arg1: fdcwdUint64(), // newdirfd
+		Arg2: 0x7fffB000,    // linkpath pointer
 	}
 
 	fa := extractFileArgs(args)
@@ -330,7 +331,8 @@ func TestFileSyscallName(t *testing.T) {
 }
 
 // pathToPtr creates a null-terminated byte buffer and returns its address as uint64.
-// The returned byte slice must be kept alive for the duration of the test.
+// Callers must keep the returned byte slice alive with runtime.KeepAlive after
+// the raw-memory read that consumes the pointer.
 func pathToPtr(s string) (uint64, []byte) {
 	buf := append([]byte(s), 0)
 	return uint64(uintptr(unsafe.Pointer(&buf[0]))), buf
@@ -339,9 +341,9 @@ func pathToPtr(s string) (uint64, []byte) {
 func TestResolvePathAt_Absolute(t *testing.T) {
 	pid := os.Getpid()
 	ptr, buf := pathToPtr("/usr/bin/ls")
-	_ = buf // keep alive
 
 	result, err := resolvePathAt(pid, -100, ptr)
+	runtime.KeepAlive(buf)
 	assert.NoError(t, err)
 	assert.Equal(t, "/usr/bin/ls", result)
 }
@@ -349,9 +351,9 @@ func TestResolvePathAt_Absolute(t *testing.T) {
 func TestResolvePathAt_AbsoluteClean(t *testing.T) {
 	pid := os.Getpid()
 	ptr, buf := pathToPtr("/usr/bin/../lib/test")
-	_ = buf
 
 	result, err := resolvePathAt(pid, -100, ptr)
+	runtime.KeepAlive(buf)
 	assert.NoError(t, err)
 	assert.Equal(t, "/usr/lib/test", result)
 }
@@ -359,12 +361,12 @@ func TestResolvePathAt_AbsoluteClean(t *testing.T) {
 func TestResolvePathAt_RelativeATFDCWD(t *testing.T) {
 	pid := os.Getpid()
 	ptr, buf := pathToPtr("somefile.txt")
-	_ = buf
 
 	cwd, err := os.Getwd()
 	assert.NoError(t, err)
 
 	result, err := resolvePathAt(pid, -100, ptr) // AT_FDCWD = -100
+	runtime.KeepAlive(buf)
 	assert.NoError(t, err)
 	assert.Equal(t, filepath.Join(cwd, "somefile.txt"), result)
 }
@@ -378,19 +380,19 @@ func TestResolvePathAt_RelativeToDirfd(t *testing.T) {
 	defer dir.Close()
 
 	ptr, buf := pathToPtr("testfile.txt")
-	_ = buf
 
 	result, err := resolvePathAt(pid, int32(dir.Fd()), ptr)
+	runtime.KeepAlive(buf)
 	assert.NoError(t, err)
 	assert.Equal(t, "/tmp/testfile.txt", result)
 }
 
 func TestResolvePathAt_InvalidPid(t *testing.T) {
 	ptr, buf := pathToPtr("/some/path")
-	_ = buf
 
 	// Use a PID that certainly doesn't exist
 	_, err := resolvePathAt(999999999, -100, ptr)
+	runtime.KeepAlive(buf)
 	assert.Error(t, err)
 }
 
