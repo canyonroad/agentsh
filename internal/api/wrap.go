@@ -49,6 +49,32 @@ func (a *App) wrapInit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, resp)
 }
 
+func secureNotifyDir(dir string, callerUID int) bool {
+	if callerUID > 0 {
+		if err := os.Chown(dir, callerUID, -1); err == nil {
+			_ = os.Chmod(dir, 0700)
+			return true
+		} else {
+			slog.Debug("wrap: failed to chown notify dir", "dir", dir, "caller_uid", callerUID, "error", err)
+			_ = os.Chmod(dir, 0711)
+			return false
+		}
+	}
+	_ = os.Chmod(dir, 0711)
+	return false
+}
+
+func secureSocket(socketPath string, callerUID int, chownOK bool) {
+	if chownOK && callerUID > 0 {
+		if err := os.Chown(socketPath, callerUID, -1); err == nil {
+			return
+		} else {
+			slog.Debug("wrap: failed to chown socket", "socket_path", socketPath, "caller_uid", callerUID, "error", err)
+		}
+	}
+	_ = os.Chmod(socketPath, 0666)
+}
+
 // wrapInitCore contains the core logic for wrap initialization.
 // Uses context.Background() (not the HTTP request context) so that
 // the notify handler stays active after the HTTP response is sent.

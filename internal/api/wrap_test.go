@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,6 +25,100 @@ func newTestAppForWrap(t *testing.T, cfg *config.Config) (*App, *session.Manager
 	broker := events.NewBroker()
 	app := NewApp(cfg, mgr, store, nil, broker, nil, nil, nil, nil, nil, nil)
 	return app, mgr
+}
+
+func TestSecureNotifyDir_ChownSuccess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("secureNotifyDir is Linux-only")
+	}
+
+	dir := t.TempDir()
+	if got := secureNotifyDir(dir, os.Getuid()); !got {
+		t.Fatal("expected chown success path")
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat notify dir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0700 {
+		t.Fatalf("expected 0700 permissions, got %04o", got)
+	}
+}
+
+func TestSecureNotifyDir_CallerUIDZero_Fallback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("secureNotifyDir is Linux-only")
+	}
+
+	dir := t.TempDir()
+	if got := secureNotifyDir(dir, 0); got {
+		t.Fatal("expected fallback path")
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat notify dir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0711 {
+		t.Fatalf("expected 0711 permissions, got %04o", got)
+	}
+}
+
+func TestSecureSocket_ChownOK(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("secureSocket is Linux-only")
+	}
+
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "socket.sock")
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	if err := os.Chmod(sockPath, 0600); err != nil {
+		t.Fatalf("chmod socket before helper: %v", err)
+	}
+
+	secureSocket(sockPath, os.Getuid(), true)
+
+	info, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("expected socket mode to stay 0600, got %04o", got)
+	}
+}
+
+func TestSecureSocket_Fallback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("secureSocket is Linux-only")
+	}
+
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "socket.sock")
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	if err := os.Chmod(sockPath, 0600); err != nil {
+		t.Fatalf("chmod socket before helper: %v", err)
+	}
+
+	secureSocket(sockPath, os.Getuid(), false)
+
+	info, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0666 {
+		t.Fatalf("expected fallback socket mode 0666, got %04o", got)
+	}
 }
 
 func TestWrapInit_SessionNotFound(t *testing.T) {
