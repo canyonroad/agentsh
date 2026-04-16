@@ -25,6 +25,11 @@ import (
 	"github.com/google/uuid"
 )
 
+var (
+	wrapChown = os.Chown
+	wrapChmod = os.Chmod
+)
+
 // wrapInit handles POST /api/v1/sessions/{id}/wrap-init.
 // It returns the seccomp wrapper configuration for the CLI to launch the agent
 // through the wrapper, and starts listening for the notify fd on a Unix socket.
@@ -52,10 +57,10 @@ func (a *App) wrapInit(w http.ResponseWriter, r *http.Request) {
 func secureNotifyDir(dir string, callerUID int) bool {
 	// callerUID == 0 is the sentinel fallback path.
 	if callerUID > 0 {
-		if err := os.Chown(dir, callerUID, -1); err == nil {
-			if err := os.Chmod(dir, 0700); err != nil {
+		if err := wrapChown(dir, callerUID, -1); err == nil {
+			if err := wrapChmod(dir, 0700); err != nil {
 				slog.Debug("wrap: failed to chmod notify dir", "dir", dir, "mode", "0700", "error", err)
-				if err := os.Chmod(dir, 0711); err != nil {
+				if err := wrapChmod(dir, 0711); err != nil {
 					slog.Debug("wrap: failed to chmod notify dir", "dir", dir, "mode", "0711", "error", err)
 				}
 				return false
@@ -63,13 +68,13 @@ func secureNotifyDir(dir string, callerUID int) bool {
 			return true
 		} else {
 			slog.Debug("wrap: failed to chown notify dir", "dir", dir, "caller_uid", callerUID, "error", err)
-			if err := os.Chmod(dir, 0711); err != nil {
+			if err := wrapChmod(dir, 0711); err != nil {
 				slog.Debug("wrap: failed to chmod notify dir", "dir", dir, "mode", "0711", "error", err)
 			}
 			return false
 		}
 	}
-	if err := os.Chmod(dir, 0711); err != nil {
+	if err := wrapChmod(dir, 0711); err != nil {
 		slog.Debug("wrap: failed to chmod notify dir", "dir", dir, "mode", "0711", "error", err)
 	}
 	return false
@@ -77,15 +82,30 @@ func secureNotifyDir(dir string, callerUID int) bool {
 
 func secureSocket(socketPath string, callerUID int, chownOK bool) {
 	if chownOK && callerUID > 0 {
-		if err := os.Chown(socketPath, callerUID, -1); err == nil {
+		if err := wrapChown(socketPath, callerUID, -1); err == nil {
+			if err := wrapChmod(socketPath, 0600); err != nil {
+				slog.Debug("wrap: failed to chmod socket", "socket_path", socketPath, "mode", "0600", "error", err)
+			}
 			return
 		} else {
 			slog.Debug("wrap: failed to chown socket", "socket_path", socketPath, "caller_uid", callerUID, "error", err)
 		}
 	}
-	if err := os.Chmod(socketPath, 0666); err != nil {
+	if err := wrapChmod(socketPath, 0666); err != nil {
 		slog.Debug("wrap: failed to chmod socket", "socket_path", socketPath, "mode", "0666", "error", err)
 	}
+}
+
+func validatePermissionMode(path string, want os.FileMode, kind string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	got := info.Mode().Perm()
+	if got != want {
+		return fmt.Errorf("wrap: %s permissions not established for %s: got %04o want %04o", kind, path, got, want)
+	}
+	return nil
 }
 
 // wrapInitCore contains the core logic for wrap initialization.
@@ -144,6 +164,26 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			return types.WrapInitResponse{}, http.StatusInternalServerError, err
 		}
 		secureSocket(notifySocketPath, req.CallerUID, chownOK)
+		if err := validatePermissionMode(notifyDir, func() os.FileMode {
+			if chownOK {
+				return 0700
+			}
+			return 0711
+		}(), "notify directory"); err != nil {
+			_ = listener.Close()
+			os.RemoveAll(notifyDir)
+			return types.WrapInitResponse{}, http.StatusInternalServerError, err
+		}
+		if err := validatePermissionMode(notifySocketPath, func() os.FileMode {
+			if chownOK {
+				return 0600
+			}
+			return 0666
+		}(), "notify socket"); err != nil {
+			_ = listener.Close()
+			os.RemoveAll(notifyDir)
+			return types.WrapInitResponse{}, http.StatusInternalServerError, err
+		}
 
 		go a.acceptPtracePID(ctx, listener, notifySocketPath, sessionID)
 
@@ -237,6 +277,15 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		return types.WrapInitResponse{}, http.StatusInternalServerError, err
 	}
 	chownOK := secureNotifyDir(notifyDir, req.CallerUID)
+	if err := validatePermissionMode(notifyDir, func() os.FileMode {
+		if chownOK {
+			return 0700
+		}
+		return 0711
+	}(), "notify directory"); err != nil {
+		os.RemoveAll(notifyDir)
+		return types.WrapInitResponse{}, http.StatusInternalServerError, err
+	}
 	// Unix socket paths are limited to 104 bytes (macOS) or 108 (Linux).
 	// Compute remaining budget for the session ID portion and hash if needed.
 	const socketPathLimit = 104 // use the most restrictive (macOS)
@@ -263,6 +312,16 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 		return types.WrapInitResponse{}, http.StatusInternalServerError, err
 	}
 	secureSocket(notifySocketPath, req.CallerUID, chownOK)
+	if err := validatePermissionMode(notifySocketPath, func() os.FileMode {
+		if chownOK {
+			return 0600
+		}
+		return 0666
+	}(), "notify socket"); err != nil {
+		_ = listener.Close()
+		os.RemoveAll(notifyDir)
+		return types.WrapInitResponse{}, http.StatusInternalServerError, err
+	}
 
 	// Start background goroutine to accept the notify fd connection
 	go a.acceptNotifyFD(ctx, listener, notifySocketPath, sessionID, s, execveEnabled)
@@ -288,6 +347,17 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 			signalFilterEnabled = false
 		} else {
 			secureSocket(signalSocketPath, req.CallerUID, chownOK)
+			if err := validatePermissionMode(signalSocketPath, func() os.FileMode {
+				if chownOK {
+					return 0600
+				}
+				return 0666
+			}(), "signal socket"); err != nil {
+				_ = signalListener.Close()
+				_ = listener.Close()
+				os.RemoveAll(notifyDir)
+				return types.WrapInitResponse{}, http.StatusInternalServerError, err
+			}
 			go a.acceptSignalFD(ctx, signalListener, signalSocketPath, sessionID, s)
 		}
 	}

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -214,6 +215,38 @@ func TestWrapInit_NotifyDirPermissions_CallerUID(t *testing.T) {
 	}
 	if got := dirInfo.Mode().Perm(); got != 0700 {
 		t.Fatalf("expected caller-owned notify dir mode 0700, got %04o", got)
+	}
+}
+
+func TestWrapInit_NotifyDirPermissions_ValidationFailure(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	prevChmod := wrapChmod
+	wrapChmod = func(string, os.FileMode) error { return nil }
+	t.Cleanup(func() { wrapChmod = prevChmod })
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    0,
+	})
+	if err == nil {
+		t.Fatal("expected error when notify permissions are not established")
+	}
+	if code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", code)
 	}
 }
 
@@ -620,6 +653,59 @@ func TestWrapInit_SignalSocketSet(t *testing.T) {
 		t.Error("expected AGENTSH_SIGNAL_SOCK_FD in wrapper env")
 	} else if fd != "4" {
 		t.Errorf("expected AGENTSH_SIGNAL_SOCK_FD=4, got %q", fd)
+	}
+}
+
+func TestWrapInit_SignalSocketPermissions_CallerUID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrapWithSignalPolicy(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    nonzeroTestUID(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", code)
+	}
+	if resp.SignalSocket == "" {
+		t.Fatal("expected signal socket to be created")
+	}
+
+	notifyDir := filepath.Dir(resp.NotifySocket)
+	t.Cleanup(func() { _ = os.RemoveAll(notifyDir) })
+
+	notifyInfo, err := os.Stat(resp.NotifySocket)
+	if err != nil {
+		t.Fatalf("stat notify socket: %v", err)
+	}
+	if got := notifyInfo.Mode().Perm(); got != 0600 {
+		t.Fatalf("expected caller-owned notify socket mode 0600, got %04o", got)
+	}
+
+	signalInfo, err := os.Stat(resp.SignalSocket)
+	if err != nil {
+		t.Fatalf("stat signal socket: %v", err)
+	}
+	if got := signalInfo.Mode().Perm(); got != 0600 {
+		t.Fatalf("expected caller-owned signal socket mode 0600, got %04o", got)
+	}
+	if filepath.Dir(resp.SignalSocket) != notifyDir {
+		t.Fatalf("expected signal socket to share notify dir, got %s vs %s", filepath.Dir(resp.SignalSocket), notifyDir)
 	}
 }
 
