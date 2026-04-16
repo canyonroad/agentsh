@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1258,6 +1259,23 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold == nil {
 		d := 0.85
 		cfg.Sandbox.MCP.CrossServer.ShadowTool.SimilarityThreshold = &d
+	}
+
+	// Landlock network defaults — fail-open for connect (proxy needs it),
+	// fail-closed for bind (agents rarely need to listen).
+	// Applied unconditionally so diagnostic dumps show explicit values.
+	if cfg.Landlock.Network.AllowConnectTCP == nil {
+		v := true
+		cfg.Landlock.Network.AllowConnectTCP = &v
+	}
+	if cfg.Landlock.Network.AllowBindTCP == nil {
+		v := false
+		cfg.Landlock.Network.AllowBindTCP = &v
+	}
+	if len(cfg.Landlock.Network.BindPorts) > 0 {
+		slog.Warn("landlock.network.bind_ports is set but not yet enforced",
+			"bind_ports", cfg.Landlock.Network.BindPorts,
+			"note", "port-scoped bind rules are a planned follow-up")
 	}
 
 	// macOS XPC defaults
