@@ -240,10 +240,16 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
 			seccompCfg.AllowWrite = append(seccompCfg.AllowWrite, a.cfg.Landlock.AllowWrite...)
 			seccompCfg.DenyPaths = append(seccompCfg.DenyPaths, a.cfg.Landlock.DenyPaths...)
 
-			// Allow all network by default — agentsh proxy handles network policy.
-			// Without this, Landlock ABI v4+ blocks ALL TCP connections.
-			seccompCfg.AllowNetwork = true
-			seccompCfg.AllowBind = true
+			// Honor landlock.network.* config. validateConfig already rejects
+			// allow_connect_tcp=false while sandbox.network.enabled=true, so reaching
+			// this point with AllowConnectTCP=false implies the operator opted out
+			// of proxy TCP. Defaults (connect=true, bind=false) come from applyDefaults.
+			if a.cfg.Landlock.Network.AllowConnectTCP != nil {
+				seccompCfg.AllowNetwork = *a.cfg.Landlock.Network.AllowConnectTCP
+			}
+			if a.cfg.Landlock.Network.AllowBindTCP != nil {
+				seccompCfg.AllowBind = *a.cfg.Landlock.Network.AllowBindTCP
+			}
 
 			slog.Info("landlock config prepared for wrapper",
 				"abi", llResult.ABI,
