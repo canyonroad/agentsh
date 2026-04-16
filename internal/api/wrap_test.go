@@ -318,6 +318,34 @@ func TestWrapInit_WrapperNotFound(t *testing.T) {
 	}
 }
 
+func TestWrapInit_RejectsNegativeCallerUID(t *testing.T) {
+	cfg := &config.Config{}
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    -1,
+	})
+
+	if err == nil {
+		t.Fatal("expected error for negative caller uid")
+	}
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", code)
+	}
+	if resp.NotifySocket != "" || resp.WrapperBinary != "" || resp.StubBinary != "" {
+		t.Fatalf("expected empty wrap response on invalid caller uid, got %#v", resp)
+	}
+	if !strings.Contains(err.Error(), "invalid caller uid") {
+		t.Fatalf("expected invalid caller uid error, got %v", err)
+	}
+}
+
 func TestWrapInit_Success(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("wrap is Linux-only")

@@ -26,8 +26,9 @@ import (
 )
 
 var (
-	wrapChown = os.Chown
-	wrapChmod = os.Chmod
+	wrapChown                     = os.Chown
+	wrapChmod                     = os.Chmod
+	startNotifyHandlerForWrapHook = startNotifyHandlerForWrap
 )
 
 // wrapInit handles POST /api/v1/sessions/{id}/wrap-init.
@@ -115,6 +116,10 @@ func (a *App) wrapInitCore(s *session.Session, sessionID string, req types.WrapI
 	// Use a background context so the notify handler outlives the HTTP request.
 	// The handler will be cleaned up when the session ends or the connection closes.
 	ctx := context.Background()
+
+	if req.CallerUID < 0 {
+		return types.WrapInitResponse{}, http.StatusBadRequest, fmt.Errorf("invalid caller uid: %d", req.CallerUID)
+	}
 
 	// Windows uses driver-based interception, not seccomp
 	if runtime.GOOS == "windows" {
@@ -576,7 +581,7 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 	slog.Info("wrap: received notify fd", "session_id", sessionID, "fd", notifyFD.Fd())
 
 	// Start the notify handler using existing infrastructure
-	startNotifyHandlerForWrap(ctx, notifyFD, sessionID, a, execveEnabled, notifyPeerPID, s)
+	startNotifyHandlerForWrapHook(ctx, notifyFD, sessionID, a, execveEnabled, notifyPeerPID, s)
 }
 
 // acceptSignalFD listens on the Unix socket for a single connection from the CLI,

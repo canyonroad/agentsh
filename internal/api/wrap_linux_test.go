@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/config"
+	"github.com/agentsh/agentsh/internal/session"
 	"golang.org/x/sys/unix"
 )
 
@@ -40,7 +41,26 @@ func sendFDOverUnixConn(t *testing.T, conn *net.UnixConn, fd int) {
 	}
 }
 
+func withNotifyHandoffHook(t *testing.T) chan struct{} {
+	t.Helper()
+
+	called := make(chan struct{})
+	prev := startNotifyHandlerForWrapHook
+	startNotifyHandlerForWrapHook = func(ctx context.Context, notifyFD *os.File, sessionID string, a *App, execveEnabled bool, wrapperPID int, s *session.Session) {
+		if notifyFD != nil {
+			_ = notifyFD.Close()
+		}
+		close(called)
+	}
+	t.Cleanup(func() {
+		startNotifyHandlerForWrapHook = prev
+	})
+	return called
+}
+
 func TestAcceptNotifyFD_RejectsWrongUID(t *testing.T) {
+	called := withNotifyHandoffHook(t)
+
 	cfg := &config.Config{}
 	app, mgr := newTestAppForWrap(t, cfg)
 	s, err := mgr.Create(t.TempDir(), "default")
@@ -69,6 +89,11 @@ func TestAcceptNotifyFD_RejectsWrongUID(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	waitForTestDone(t, done)
+	select {
+	case <-called:
+		t.Fatal("expected notify handoff to be rejected")
+	default:
+	}
 
 	if err := conn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
 		t.Fatalf("set read deadline: %v", err)
@@ -87,6 +112,8 @@ func TestAcceptNotifyFD_RejectsWrongUID(t *testing.T) {
 }
 
 func TestAcceptNotifyFD_RejectsNegativeUID(t *testing.T) {
+	called := withNotifyHandoffHook(t)
+
 	cfg := &config.Config{}
 	app, mgr := newTestAppForWrap(t, cfg)
 	s, err := mgr.Create(t.TempDir(), "default")
@@ -131,6 +158,11 @@ func TestAcceptNotifyFD_RejectsNegativeUID(t *testing.T) {
 	sendFDOverUnixConn(t, unixConn, int(pipeR.Fd()))
 
 	waitForTestDone(t, done)
+	select {
+	case <-called:
+		t.Fatal("expected notify handoff to be rejected")
+	default:
+	}
 }
 
 func TestAcceptNotifyFD_AcceptsMatchingUID(t *testing.T) {
@@ -138,6 +170,8 @@ func TestAcceptNotifyFD_AcceptsMatchingUID(t *testing.T) {
 	if currentUID == 0 {
 		t.Skip("legacy root sentinel keeps UID 0 permissive")
 	}
+
+	called := withNotifyHandoffHook(t)
 
 	cfg := &config.Config{}
 	app, mgr := newTestAppForWrap(t, cfg)
@@ -183,9 +217,16 @@ func TestAcceptNotifyFD_AcceptsMatchingUID(t *testing.T) {
 	sendFDOverUnixConn(t, unixConn, int(pipeR.Fd()))
 
 	waitForTestDone(t, done)
+	select {
+	case <-called:
+	default:
+		t.Fatal("expected notify handoff to be called")
+	}
 }
 
 func TestAcceptNotifyFD_AcceptsLegacyZeroUID(t *testing.T) {
+	called := withNotifyHandoffHook(t)
+
 	cfg := &config.Config{}
 	app, mgr := newTestAppForWrap(t, cfg)
 	s, err := mgr.Create(t.TempDir(), "default")
@@ -230,4 +271,9 @@ func TestAcceptNotifyFD_AcceptsLegacyZeroUID(t *testing.T) {
 	sendFDOverUnixConn(t, unixConn, int(pipeR.Fd()))
 
 	waitForTestDone(t, done)
+	select {
+	case <-called:
+	default:
+		t.Fatal("expected notify handoff to be called")
+	}
 }
