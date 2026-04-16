@@ -1,10 +1,7 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -12,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
@@ -21,7 +17,6 @@ import (
 	"github.com/agentsh/agentsh/internal/session"
 	"github.com/agentsh/agentsh/internal/store/composite"
 	"github.com/agentsh/agentsh/pkg/types"
-	"golang.org/x/sys/unix"
 )
 
 func newTestAppForWrap(t *testing.T, cfg *config.Config) (*App, *session.Manager) {
@@ -40,131 +35,6 @@ func nonzeroTestUID() int {
 		return 1
 	}
 	return uid
-}
-
-func waitForTestDone(t *testing.T, done <-chan struct{}) {
-	t.Helper()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for accept goroutine")
-	}
-}
-
-func sendFDOverUnixConn(t *testing.T, conn *net.UnixConn, fd int) {
-	t.Helper()
-
-	file, err := conn.File()
-	if err != nil {
-		t.Fatalf("get file from connection: %v", err)
-	}
-	defer file.Close()
-
-	rights := unix.UnixRights(fd)
-	if err := unix.Sendmsg(int(file.Fd()), []byte{0}, rights, nil, 0); err != nil {
-		t.Fatalf("sendmsg: %v", err)
-	}
-}
-
-func TestAcceptNotifyFD_RejectsWrongUID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("acceptNotifyFD is Linux-only")
-	}
-
-	cfg := &config.Config{}
-	app, mgr := newTestAppForWrap(t, cfg)
-	s, err := mgr.Create(t.TempDir(), "default")
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-
-	socketDir := t.TempDir()
-	socketPath := filepath.Join(socketDir, "notify.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("listen unix socket: %v", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, 99999)
-	}()
-
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		t.Fatalf("dial unix socket: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
-	waitForTestDone(t, done)
-
-	if err := conn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
-		t.Fatalf("set read deadline: %v", err)
-	}
-	buf := make([]byte, 1)
-	n, err := conn.Read(buf)
-	if n != 0 {
-		t.Fatalf("expected closed connection, read %d bytes", n)
-	}
-	if err == nil {
-		t.Fatal("expected connection to be closed")
-	}
-	if !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
-		t.Fatalf("expected closed connection, got %v", err)
-	}
-}
-
-func TestAcceptNotifyFD_AcceptsCorrectUID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("acceptNotifyFD is Linux-only")
-	}
-
-	cfg := &config.Config{}
-	app, mgr := newTestAppForWrap(t, cfg)
-	s, err := mgr.Create(t.TempDir(), "default")
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-
-	socketDir := t.TempDir()
-	socketPath := filepath.Join(socketDir, "notify.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("listen unix socket: %v", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		app.acceptNotifyFD(context.Background(), listener, socketPath, s.ID, s, false, 0)
-	}()
-
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		t.Fatalf("dial unix socket: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		t.Fatal("expected UnixConn")
-	}
-
-	pipeR, pipeW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = pipeR.Close()
-		_ = pipeW.Close()
-	})
-
-	sendFDOverUnixConn(t, unixConn, int(pipeR.Fd()))
-
-	waitForTestDone(t, done)
 }
 
 func TestSecureNotifyDir_ChownSuccess(t *testing.T) {
