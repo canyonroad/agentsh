@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agentsh/agentsh/internal/capabilities"
 	"github.com/agentsh/agentsh/internal/config"
 	"github.com/agentsh/agentsh/internal/events"
 	"github.com/agentsh/agentsh/internal/policy"
@@ -448,5 +449,69 @@ func TestWrapInit_NoSignalSocketWithoutPolicy(t *testing.T) {
 	}
 	if sigEnabled != false {
 		t.Errorf("expected signal_filter_enabled=false, got %v", sigEnabled)
+	}
+}
+
+func TestWrapInit_LandlockNetwork_HonorsConfig(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+	if !capabilities.DetectLandlock().Available {
+		t.Skip("Landlock not available on this host")
+	}
+
+	cases := []struct {
+		name     string
+		connect  bool
+		bind     bool
+		wantNet  bool
+		wantBind bool
+	}{
+		{"both_true", true, true, true, true},
+		{"connect_true_bind_false", true, false, true, false},
+		{"connect_true_bind_true", true, true, true, true},
+		{"connect_false_bind_false", false, false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			connect := tc.connect
+			bind := tc.bind
+			enabled := true
+			cfg := &config.Config{}
+			cfg.Sandbox.UnixSockets.Enabled = &enabled
+			cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+			cfg.Sandbox.Seccomp.Execve.Enabled = true
+			cfg.Sandbox.Seccomp.UnixSocket.Enabled = true
+			cfg.Landlock.Enabled = true
+			cfg.Landlock.Network.AllowConnectTCP = &connect
+			cfg.Landlock.Network.AllowBindTCP = &bind
+
+			app, mgr := newTestAppForWrap(t, cfg)
+			s, err := mgr.Create(t.TempDir(), "default")
+			if err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+
+			resp, _, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+				AgentCommand: "/bin/echo",
+			})
+			if err != nil {
+				t.Fatalf("wrapInitCore: %v", err)
+			}
+
+			var parsed map[string]any
+			if err := json.Unmarshal([]byte(resp.SeccompConfig), &parsed); err != nil {
+				t.Fatalf("unmarshal SeccompConfig: %v\n%s", err, resp.SeccompConfig)
+			}
+
+			gotNet, _ := parsed["allow_network"].(bool)
+			gotBind, _ := parsed["allow_bind"].(bool)
+			if gotNet != tc.wantNet {
+				t.Errorf("allow_network = %v; want %v (JSON: %s)", gotNet, tc.wantNet, resp.SeccompConfig)
+			}
+			if gotBind != tc.wantBind {
+				t.Errorf("allow_bind = %v; want %v (JSON: %s)", gotBind, tc.wantBind, resp.SeccompConfig)
+			}
+		})
 	}
 }
