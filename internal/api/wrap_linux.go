@@ -221,7 +221,7 @@ func getConnPeerCreds(conn *net.UnixConn) peerCreds {
 		return peerCreds{}
 	}
 	var creds peerCreds
-	rawConn.Control(func(fd uintptr) {
+	if err := rawConn.Control(func(fd uintptr) {
 		ucred, err := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
 		if err != nil {
 			slog.Debug("getConnPeerCreds: GetsockoptUcred failed", "error", err)
@@ -229,7 +229,10 @@ func getConnPeerCreds(conn *net.UnixConn) peerCreds {
 			creds.PID = int(ucred.Pid)
 			creds.UID = ucred.Uid
 		}
-	})
+	}); err != nil {
+		slog.Debug("getConnPeerCreds: RawConn.Control failed", "error", err)
+		return peerCreds{}
+	}
 	return creds
 }
 

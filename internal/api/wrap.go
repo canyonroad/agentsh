@@ -530,19 +530,19 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 	}
 	defer conn.Close()
 
-	// Receive the notify fd from the CLI via SCM_RIGHTS
+	// Receive the notify fd from the CLI peer via SCM_RIGHTS.
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
 		slog.Debug("wrap: connection is not a Unix connection", "session_id", sessionID)
 		return
 	}
 
-	// Get wrapper credentials from socket credentials for depth tracking
+	// Read the notify-socket peer credentials for depth tracking.
 	creds := getConnPeerCreds(unixConn)
-	wrapperPID := creds.PID
-	if wrapperPID > 0 {
-		slog.Debug("wrap: got wrapper credentials from socket",
-			"wrapper_pid", wrapperPID, "wrapper_uid", creds.UID, "session_id", sessionID)
+	notifyPeerPID := creds.PID
+	if notifyPeerPID > 0 {
+		slog.Debug("wrap: got notify-socket peer credentials",
+			"peer_pid", notifyPeerPID, "peer_uid", creds.UID, "session_id", sessionID)
 	}
 
 	file, err := unixConn.File()
@@ -566,7 +566,7 @@ func (a *App) acceptNotifyFD(ctx context.Context, listener net.Listener, socketP
 	slog.Info("wrap: received notify fd", "session_id", sessionID, "fd", notifyFD.Fd())
 
 	// Start the notify handler using existing infrastructure
-	startNotifyHandlerForWrap(ctx, notifyFD, sessionID, a, execveEnabled, wrapperPID, s)
+	startNotifyHandlerForWrap(ctx, notifyFD, sessionID, a, execveEnabled, notifyPeerPID, s)
 }
 
 // acceptSignalFD listens on the Unix socket for a single connection from the CLI,

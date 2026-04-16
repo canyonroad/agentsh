@@ -3,6 +3,7 @@
 package api
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -28,7 +29,8 @@ func TestGetConnPeerCreds(t *testing.T) {
 		}
 		unixConn, ok := conn.(*net.UnixConn)
 		if !ok {
-			serverErrCh <- err
+			_ = conn.Close()
+			serverErrCh <- fmt.Errorf("expected *net.UnixConn, got %T", conn)
 			return
 		}
 		serverConnCh <- unixConn
