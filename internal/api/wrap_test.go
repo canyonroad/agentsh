@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,6 +26,228 @@ func newTestAppForWrap(t *testing.T, cfg *config.Config) (*App, *session.Manager
 	broker := events.NewBroker()
 	app := NewApp(cfg, mgr, store, nil, broker, nil, nil, nil, nil, nil, nil)
 	return app, mgr
+}
+
+func nonzeroTestUID() int {
+	// UID 0 is the helper's fallback sentinel, so pick any nonzero UID for coverage.
+	uid := os.Getuid()
+	if uid == 0 {
+		return 1
+	}
+	return uid
+}
+
+func TestSecureNotifyDir_ChownSuccess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("secureNotifyDir is Linux-only")
+	}
+
+	dir := t.TempDir()
+	if got := secureNotifyDir(dir, nonzeroTestUID()); !got {
+		t.Fatal("expected chown success path")
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat notify dir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0700 {
+		t.Fatalf("expected 0700 permissions, got %04o", got)
+	}
+}
+
+func TestSecureNotifyDir_CallerUIDZero_Fallback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("secureNotifyDir is Linux-only")
+	}
+
+	dir := t.TempDir()
+	if got := secureNotifyDir(dir, 0); got {
+		t.Fatal("expected fallback path")
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat notify dir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0711 {
+		t.Fatalf("expected 0711 permissions, got %04o", got)
+	}
+}
+
+func TestSecureSocket_ChownOK(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("secureSocket is Linux-only")
+	}
+
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "socket.sock")
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	if err := os.Chmod(sockPath, 0600); err != nil {
+		t.Fatalf("chmod socket before helper: %v", err)
+	}
+
+	secureSocket(sockPath, nonzeroTestUID(), true)
+
+	info, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("expected socket mode to stay 0600, got %04o", got)
+	}
+}
+
+func TestSecureSocket_Fallback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("secureSocket is Linux-only")
+	}
+
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "socket.sock")
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	if err := os.Chmod(sockPath, 0600); err != nil {
+		t.Fatalf("chmod socket before helper: %v", err)
+	}
+
+	secureSocket(sockPath, os.Getuid(), false)
+
+	info, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0666 {
+		t.Fatalf("expected fallback socket mode 0666, got %04o", got)
+	}
+}
+
+func TestWrapInit_NotifyDirPermissions_Fallback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrap(t, cfg)
+	app.ptraceTracer = struct{}{}
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != 200 {
+		t.Fatalf("expected status 200, got %d", code)
+	}
+
+	notifyDir := filepath.Dir(resp.NotifySocket)
+	t.Cleanup(func() { _ = os.RemoveAll(notifyDir) })
+
+	dirInfo, err := os.Stat(notifyDir)
+	if err != nil {
+		t.Fatalf("stat notify dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0711 {
+		t.Fatalf("expected fallback notify dir mode 0711, got %04o", got)
+	}
+
+	socketInfo, err := os.Stat(resp.NotifySocket)
+	if err != nil {
+		t.Fatalf("stat notify socket: %v", err)
+	}
+	if got := socketInfo.Mode().Perm(); got != 0666 {
+		t.Fatalf("expected fallback notify socket mode 0666, got %04o", got)
+	}
+}
+
+func TestWrapInit_NotifyDirPermissions_CallerUID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    nonzeroTestUID(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != 200 {
+		t.Fatalf("expected status 200, got %d", code)
+	}
+
+	notifyDir := filepath.Dir(resp.NotifySocket)
+	t.Cleanup(func() { _ = os.RemoveAll(notifyDir) })
+
+	dirInfo, err := os.Stat(notifyDir)
+	if err != nil {
+		t.Fatalf("stat notify dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0700 {
+		t.Fatalf("expected caller-owned notify dir mode 0700, got %04o", got)
+	}
+}
+
+func TestWrapInit_NotifyDirPermissions_ValidationFailure(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	prevChmod := wrapChmod
+	wrapChmod = func(string, os.FileMode) error { return nil }
+	t.Cleanup(func() { wrapChmod = prevChmod })
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	_, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    0,
+	})
+	if err == nil {
+		t.Fatal("expected error when notify permissions are not established")
+	}
+	if code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", code)
+	}
 }
 
 func TestWrapInit_SessionNotFound(t *testing.T) {
@@ -94,6 +318,38 @@ func TestWrapInit_WrapperNotFound(t *testing.T) {
 	}
 }
 
+func TestWrapInit_RejectsNegativeCallerUID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("negative caller uid validation is Linux-only")
+	}
+
+	cfg := &config.Config{}
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    -1,
+	})
+
+	if err == nil {
+		t.Fatal("expected error for negative caller uid")
+	}
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", code)
+	}
+	if resp.NotifySocket != "" || resp.WrapperBinary != "" || resp.StubBinary != "" {
+		t.Fatalf("expected empty wrap response on invalid caller uid, got %#v", resp)
+	}
+	if !strings.Contains(err.Error(), "invalid caller uid") {
+		t.Fatalf("expected invalid caller uid error, got %v", err)
+	}
+}
+
 func TestWrapInit_Success(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("wrap is Linux-only")
@@ -138,6 +394,38 @@ func TestWrapInit_Success(t *testing.T) {
 	}
 	if _, ok := resp.WrapperEnv["AGENTSH_SECCOMP_CONFIG"]; !ok {
 		t.Error("expected AGENTSH_SECCOMP_CONFIG in wrapper env")
+	}
+}
+
+func TestWrapInit_CallerUIDPassedThrough(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrap(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    1000,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != 200 {
+		t.Fatalf("expected status 200, got %d", code)
+	}
+	if resp.NotifySocket == "" {
+		t.Fatal("expected notify socket path to be set")
 	}
 }
 
@@ -397,6 +685,59 @@ func TestWrapInit_SignalSocketSet(t *testing.T) {
 		t.Error("expected AGENTSH_SIGNAL_SOCK_FD in wrapper env")
 	} else if fd != "4" {
 		t.Errorf("expected AGENTSH_SIGNAL_SOCK_FD=4, got %q", fd)
+	}
+}
+
+func TestWrapInit_SignalSocketPermissions_CallerUID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrap is Linux-only")
+	}
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.Sandbox.UnixSockets.Enabled = &enabled
+	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
+	app, mgr := newTestAppForWrapWithSignalPolicy(t, cfg)
+
+	s, err := mgr.Create(t.TempDir(), "default")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	resp, code, err := app.wrapInitCore(s, s.ID, types.WrapInitRequest{
+		AgentCommand: "/bin/echo",
+		CallerUID:    nonzeroTestUID(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", code)
+	}
+	if resp.SignalSocket == "" {
+		t.Fatal("expected signal socket to be created")
+	}
+
+	notifyDir := filepath.Dir(resp.NotifySocket)
+	t.Cleanup(func() { _ = os.RemoveAll(notifyDir) })
+
+	notifyInfo, err := os.Stat(resp.NotifySocket)
+	if err != nil {
+		t.Fatalf("stat notify socket: %v", err)
+	}
+	if got := notifyInfo.Mode().Perm(); got != 0600 {
+		t.Fatalf("expected caller-owned notify socket mode 0600, got %04o", got)
+	}
+
+	signalInfo, err := os.Stat(resp.SignalSocket)
+	if err != nil {
+		t.Fatalf("stat signal socket: %v", err)
+	}
+	if got := signalInfo.Mode().Perm(); got != 0600 {
+		t.Fatalf("expected caller-owned signal socket mode 0600, got %04o", got)
+	}
+	if filepath.Dir(resp.SignalSocket) != notifyDir {
+		t.Fatalf("expected signal socket to share notify dir, got %s vs %s", filepath.Dir(resp.SignalSocket), notifyDir)
 	}
 }
 

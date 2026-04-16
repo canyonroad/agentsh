@@ -208,29 +208,38 @@ func (a *App) wrapInitWindows(_ context.Context, _ *session.Session, _ string, _
 	return types.WrapInitResponse{}, http.StatusBadRequest, errWrapNotSupported
 }
 
-// getConnPeerPID extracts the peer process PID from a Unix connection.
-func getConnPeerPID(conn *net.UnixConn) int {
+type peerCreds struct {
+	PID int
+	UID uint32
+}
+
+// getConnPeerCreds extracts the peer process credentials from a Unix connection.
+func getConnPeerCreds(conn *net.UnixConn) peerCreds {
 	rawConn, err := conn.SyscallConn()
 	if err != nil {
-		slog.Debug("getConnPeerPID: failed to get syscall conn", "error", err)
-		return 0
+		slog.Debug("getConnPeerCreds: failed to get syscall conn", "error", err)
+		return peerCreds{}
 	}
-	var pid int
-	rawConn.Control(func(fd uintptr) {
+	var creds peerCreds
+	if err := rawConn.Control(func(fd uintptr) {
 		ucred, err := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
 		if err != nil {
-			slog.Debug("getConnPeerPID: GetsockoptUcred failed", "error", err)
+			slog.Debug("getConnPeerCreds: GetsockoptUcred failed", "error", err)
 		} else {
-			pid = int(ucred.Pid)
+			creds.PID = int(ucred.Pid)
+			creds.UID = ucred.Uid
 		}
-	})
-	return pid
+	}); err != nil {
+		slog.Debug("getConnPeerCreds: RawConn.Control failed", "error", err)
+		return peerCreds{}
+	}
+	return creds
 }
 
 // acceptPtracePID accepts a connection on the notify socket, extracts the peer
 // PID via SO_PEERCRED, and attaches the ptrace tracer. The connection is kept
 // open as a keepalive — when the shell exits, the connection closes.
-func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string) {
+func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socketPath string, sessionID string, expectedUID int) {
 	defer listener.Close()
 	defer os.RemoveAll(filepath.Dir(socketPath))
 
@@ -239,10 +248,37 @@ func (a *App) acceptPtracePID(ctx context.Context, listener net.Listener, socket
 		ul.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
-	conn, err := listener.Accept()
-	if err != nil {
-		slog.Error("ptrace wrap: accept failed", "error", err, "session_id", sessionID)
-		return
+	var conn net.Conn
+	for {
+		nextConn, err := listener.Accept()
+		if err != nil {
+			slog.Error("ptrace wrap: accept failed", "error", err, "session_id", sessionID)
+			return
+		}
+
+		unixConn, ok := nextConn.(*net.UnixConn)
+		if !ok {
+			_ = nextConn.Close()
+			slog.Error("ptrace wrap: connection is not a Unix connection", "session_id", sessionID)
+			continue
+		}
+
+		creds := getConnPeerCreds(unixConn)
+		if expectedUID < 0 {
+			_ = nextConn.Close()
+			slog.Warn("ptrace wrap: rejecting connection with invalid caller UID",
+				"expected_uid", expectedUID, "session_id", sessionID)
+			return
+		}
+		if expectedUID > 0 && creds.UID != uint32(expectedUID) {
+			_ = nextConn.Close()
+			slog.Warn("ptrace wrap: rejecting connection from unexpected UID",
+				"peer_uid", creds.UID, "expected_uid", expectedUID, "session_id", sessionID)
+			continue
+		}
+
+		conn = nextConn
+		break
 	}
 
 	// Set read deadline for the handshake

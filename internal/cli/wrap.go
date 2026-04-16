@@ -296,6 +296,7 @@ func setupWrapInterception(ctx context.Context, c client.CLIClient, sessID strin
 	wrapResp, err := c.WrapInit(ctx, sessID, types.WrapInitRequest{
 		AgentCommand: agentPath,
 		AgentArgs:    agentArgs,
+		CallerUID:    os.Getuid(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("wrap-init: %w", err)
