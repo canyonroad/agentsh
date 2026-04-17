@@ -484,7 +484,7 @@ jobs:
   publish-homebrew-cask:
     runs-on: ubuntu-latest
     needs: [build-macos-app]
-    if: "!contains(env.RELEASE_TAG, '-')"
+    if: ${{ !contains(github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name, '-') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
