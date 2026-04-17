@@ -91,7 +91,34 @@ jobs:
           PKG_CONFIG_LIBDIR: /opt/libseccomp/amd64/lib/pkgconfig
 
       - name: Pin GoReleaser tag selection to release ref
-        run: ./scripts/export-goreleaser-tag-env.sh "${{ env.RELEASE_TAG }}"
+        run: |
+          current_tag="${{ env.RELEASE_TAG }}"
+          echo "GORELEASER_CURRENT_TAG=$current_tag" >> "$GITHUB_ENV"
+
+          previous_tag="$(
+            git tag --list 'v*' --sort=-version:refname |
+              awk -v current="$current_tag" '
+                $0 == current { seen = 1; next }
+                !seen { next }
+                { print; exit }
+              '
+          )"
+
+          if [[ "$current_tag" != *-* ]]; then
+            previous_tag="$(
+              git tag --list 'v*' --sort=-version:refname |
+                awk -v current="$current_tag" '
+                  $0 == current { seen = 1; next }
+                  !seen { next }
+                  $0 ~ /-/ { next }
+                  { print; exit }
+                '
+            )"
+          fi
+
+          if [[ -n "$previous_tag" ]]; then
+            echo "GORELEASER_PREVIOUS_TAG=$previous_tag" >> "$GITHUB_ENV"
+          fi
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
