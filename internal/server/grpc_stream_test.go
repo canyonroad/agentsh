@@ -67,7 +67,7 @@ file_rules:
 	}
 	defer s.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.Run(ctx) }()
@@ -203,7 +203,7 @@ file_rules:
 	}
 	defer s.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.Run(ctx) }()
