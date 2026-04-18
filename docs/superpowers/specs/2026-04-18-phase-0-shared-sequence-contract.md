@@ -1,196 +1,319 @@
-# Phase 0: Shared Sequence + Generation Contract
+# Phase 0: Shared Sequence Allocator + Sink-Local Chain Contract
 
 **Date:** 2026-04-18
 **Status:** Draft (contract specification; implementation tracked separately)
-**Scope:** Defines the contract that the composite store and per-sink integrity chains must implement so that multiple sinks can chain over a *shared* sequence/generation while computing *sink-local* hashes.
+**Scope:** Defines the contract that the composite store and per-sink integrity chains must implement so multiple sinks can attest to the *same* logical event using a *shared* `(sequence, generation)` allocated once, with each sink computing its own *sink-local* hash.
 **Related:**
 - `docs/superpowers/specs/2026-04-18-wtp-client-design.md` (consumer of this contract)
 - `docs/superpowers/specs/2026-03-30-wire-hmac-integrity-chain-design.md` (existing single-sink chain)
 - `docs/superpowers/specs/2026-04-11-hmac-chain-tamper-evidence-design.md` (sidecar, recovery)
 - `internal/audit/integrity.go` (current implementation; refactor target)
 - `internal/store/composite/composite.go` (current fanout; refactor target)
+- `pkg/types/events.go` (target of typed `Chain` field)
 
 ## Why
 
-Today, `internal/audit/integrity.IntegrityChain.Wrap()` does two things atomically under one mutex:
+Today, `internal/audit/integrity.IntegrityChain.Wrap()` does three things atomically under one mutex:
 
-1. **Advance** the chain's sequence (`c.sequence + 1`) and update `c.prevHash`.
+1. **Allocate** the next sequence (`c.sequence + 1`).
 2. **Compute** the HMAC over `(format_version, sequence, prev_hash, canonical_payload)`.
+3. **Commit** the result by updating `c.prevHash` to the new entry hash.
 
-This works for a single sink. It does not work when multiple sinks need to attest to the *same* logical event with their *own* HMAC keys, because:
+This is correct for a single sink, but two structural problems block multi-sink chaining:
 
-- Each sink computes its own `entry_hash` (different key → different output).
-- All sinks must agree on `(sequence, generation)` so an auditor can correlate records across sinks.
-- The composite store must therefore advance `(sequence, generation)` *once*, then hand them to every sink for its own hashing.
+1. **Allocation and hashing are conflated.** Multiple sinks need to attest to the same logical event. They must all see the same `(sequence, generation)` but compute *different* `entry_hash` values (different keys → different outputs). Today's API can't separate "who owns the counter" from "who owns the hash."
+2. **Computation and commit are conflated.** If a sink writes the hashed payload to durable storage and the write fails *after* `prev_hash` was already updated, the chain is corrupted: the next event will hash against an entry that was never persisted. The existing `internal/store/integrity_wrapper.go` already handles this for the single-sink case via snapshot/restore + a fatal-latch on ambiguous failures; we need to inherit that discipline for every chained sink.
 
-WTP (the new Watchtower sink) is the immediate consumer of this refactor, but the contract is general: any future sink that chains will use it the same way.
+This contract solves both by introducing two distinct types and a transactional compute/commit protocol.
 
 ## Decisions
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| **Where sequence advances** | In `composite.Store.AppendEvent`, *once*, before fanout. | Single source of truth. Sinks can never disagree on what `(seq, gen)` an event has. |
-| **How sinks learn `(seq, gen)`** | Via well-known `ev.Fields` keys (`_integrity_seq`, `_integrity_generation`). | Doesn't require changing `store.EventStore` interface. Sinks that don't care can ignore the fields. |
-| **Field name prefix** | `_integrity_` | Underscore prefix marks "internal/transport metadata", consistent with how OTel SDKs mark non-user attrs. We document that fields starting with `_` are reserved. |
-| **Field types** | `uint64` for sequence, `uint32` for generation. | Matches WTP wire format. JSON encoders that round-trip via `float64` will lose precision near the top of uint64 — sinks must use the typed accessor (a small helper in `internal/store`) to read these. |
-| **Where the chain key lives** | Composite holds a single shared key resolver; injects per-sink `chain.Key` at sink construction. | Different sinks may use different keys (or the same key); composite is the only place that knows about all of them. |
-| **Refactor of `audit.IntegrityChain`** | Split `Wrap` into `AdvanceSequence` + `ComputeHash`. Existing `Wrap` becomes a convenience wrapper that calls both atomically (preserves all current call sites). | Lets composite call `AdvanceSequence` once and pass `(seq, gen)` to each sink for `ComputeHash`. Existing single-sink callers (the JSONL primary) continue to use `Wrap` unchanged. |
-| **Generation semantics** | Generation increments on key rotation. Sequence resets to 0 on a new generation. `prev_hash = ""` on the first record of a new generation. | Matches WTP spec §6.4 (`generation` field) and the existing rotation expectation in the integrity-tamper-evidence doc. |
-| **TransportLoss on shared sequence** | Each sink that drops records (e.g., WTP WAL overflow) emits its *own* TransportLoss marker locally. The shared sequence is **not** affected by per-sink loss. | Loss is per-sink. The shared sequence reflects what the system *produced*, not what each sink *delivered*. An auditor reconstructing the chain across sinks correlates by `(seq, gen)`; gaps in one sink reveal gaps in delivery, not in production. |
+| **Where sequence advances** | A new `audit.SequenceAllocator` owned by composite. Allocates `(seq, gen)` exactly once per event, before fanout. | Single source of truth. Sinks never disagree on `(seq, gen)`. Allocator has no hash state; it only counts. |
+| **Where prev_hash lives** | A new `audit.SinkChain` owned by each chained sink. Computes per-sink `entry_hash` from externally-supplied `(seq, gen, prev_hash, payload)`. | Lets each sink hash its own canonical payload with its own key. No shared mutable state across sinks. |
+| **How sinks learn `(seq, gen)`** | A typed `Chain *ChainState` field on `pkg/types.Event` (not via `ev.Fields`). | Typed → can't accidentally leak into user-visible payloads. Untyped `_integrity_*` map keys would need a strip helper at every serializer; a typed field that's `json:"-"` cannot leak. |
+| **Compute/commit split** | `SinkChain` exposes `Compute` (pure: returns `entryHash`, no mutation) and `Commit` (mutator: advances `prev_hash`). Caller does Compute → durable write → only-on-success Commit. | Clean failure of the durable write rolls back trivially (no commit, retry safe). Ambiguous failure latches `FatalIntegrityError` and locks the chain. |
+| **Where the chain key lives** | Each sink resolves its own key (via existing `internal/audit/kms`). Composite knows nothing about sink keys. | Different sinks may use different keys. The Phase 0 contract is purely about `(seq, gen)` allocation, not key management. |
+| **Refactor of `audit.IntegrityChain`** | Preserved as a convenience wrapper that internally composes a `SequenceAllocator` + `SinkChain`. The existing `Wrap()` method is unchanged at the source level. | Single-sink callers (today's JSONL primary when not in composite) keep working without code changes. |
+| **Generation semantics** | Allocator owns generation; sequence resets to 0 on `NextGeneration()`. Each `SinkChain` resets its `prev_hash` to `""` when it first sees a new generation (signalled via the typed `Chain` field). | Matches WTP spec §6.4. Generation is a property of the shared allocator, not of any sink. |
+| **Per-sink `TransportLoss` doesn't perturb the shared sequence** | Sinks that drop locally emit their own marker. The allocator does not roll back. | The shared sequence reflects what the system *produced*, not what each sink *delivered*. |
 
-## Field Contract
+## Typed `Chain` Field
 
-The composite store stamps two fields on every `types.Event` *before* fanning out to sinks:
-
-```go
-ev.Fields["_integrity_seq"]        = uint64(seq)   // monotonic, gap-free per generation
-ev.Fields["_integrity_generation"] = uint32(gen)   // increments on key rotation; seq resets to 0
-```
-
-### Reserved field-name prefix
-
-Field names starting with `_integrity_` are reserved for the composite store and must not be set by event producers. Sinks must treat them as transport metadata and not surface them as user-visible event fields. (For example, the WTP `compact.Encoder` strips `_integrity_*` before projecting into the OCSF payload.)
-
-### Reading the fields
-
-Sinks use a typed helper in `internal/store/chainstate` (new package, ~40 lines):
+A typed field on `pkg/types.Event` carries the per-event chain state stamped by the composite store:
 
 ```go
-package chainstate
+// pkg/types/events.go (additive change)
 
-import "github.com/agentsh/agentsh/pkg/types"
+type Event struct {
+    // … existing fields unchanged …
 
-type State struct {
+    // Chain is the shared (sequence, generation) allocated by the composite
+    // store before fanout. It is used by chained sinks to produce sink-local
+    // integrity hashes.
+    //
+    // The field is intentionally json:"-" — it must never appear in any
+    // user-visible serialization (audit log, query result, OTEL export).
+    // Sinks that need it consume it directly; sinks that don't ignore it.
+    //
+    // Nil if composite did not stamp the event (e.g., test fixtures, single-
+    // sink installations where chaining is disabled).
+    Chain *ChainState `json:"-"`
+}
+
+type ChainState struct {
     Sequence   uint64
     Generation uint32
 }
-
-// FromEvent extracts the shared chain state stamped by the composite store.
-// Returns (State, true) if both fields are present and well-typed; (State, false)
-// otherwise. Sinks should treat (State, false) as a programming error and emit
-// a counter rather than guessing.
-func FromEvent(ev types.Event) (State, bool)
-
-// MustFromEvent panics if either field is missing. For tests only.
-func MustFromEvent(ev types.Event) State
 ```
 
-The helper handles JSON-decoded variants (`float64`, `json.Number`) the same way `internal/audit/integrity.go`'s `jsonInt64` does, so a sink that receives an event from JSONL replay (where the field came back as `float64`) and a sink that receives it directly from the in-memory composite both see the same `State`.
+The `json:"-"` tag means the field is invisible to every JSON-based serializer in the codebase: JSONL store, OTEL export, webhook, gRPC stream (which uses protobuf, not JSON, but cannot accidentally include a Go field that's marked unexported-from-JSON for the JSONL fallback). The leak risk that motivates many of these protocols disappears at the type level.
+
+### Backwards compatibility
+
+- Adding a field to `types.Event` is source-compatible with all existing code.
+- The field is `nil` when not set; chained sinks check for nil and either ignore (single-sink mode) or return `ErrMissingChainState` (multi-sink mode).
+- No JSONL or OTEL output changes byte-for-byte for existing installations.
 
 ## API Refactor
 
-### `internal/audit/integrity.go` — split Wrap
-
-Today:
+### `internal/audit` — new types
 
 ```go
-// Wrap adds integrity metadata to an event payload. Advances sequence and
-// computes hash atomically.
-func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error)
+package audit
+
+// SequenceAllocator owns the shared (sequence, generation) tuple. It has no
+// hash state. Composite holds exactly one allocator.
+type SequenceAllocator struct { /* mu, sequence int64, generation uint32 */ }
+
+func NewSequenceAllocator() *SequenceAllocator
+
+// Next returns the next (sequence, generation) and advances. Sequence is
+// monotonic within a generation; generation does not change here.
+// ErrSequenceOverflow if sequence == math.MaxInt64.
+func (a *SequenceAllocator) Next() (sequence int64, generation uint32, err error)
+
+// NextGeneration increments generation and resets sequence to -1, so the
+// next Next() returns (0, new_generation). Used by the composite when the
+// chain key rotates.
+func (a *SequenceAllocator) NextGeneration() (generation uint32)
+
+// State returns the current (sequence, generation) for persistence.
+func (a *SequenceAllocator) State() AllocatorState
+
+// Restore restores allocator state after restart. The next Next() returns
+// (sequence + 1, generation).
+func (a *SequenceAllocator) Restore(state AllocatorState)
+
+type AllocatorState struct {
+    Sequence   int64
+    Generation uint32
+}
 ```
 
-After Phase 0:
-
 ```go
-// AdvanceSequence allocates the next (sequence, generation) under the chain's
-// mutex and returns it. Does not compute or update prev_hash. The caller is
-// responsible for calling ComputeHash with the returned sequence.
-func (c *IntegrityChain) AdvanceSequence() (sequence int64, generation uint32, err error)
+package audit
 
-// ComputeHash computes the HMAC over (format_version, sequence, prev_hash,
-// canonical_payload) and updates the chain's prev_hash. Must be called
-// exactly once per AdvanceSequence call, with the same sequence value.
-// If a caller fails to call ComputeHash after AdvanceSequence, the chain
-// becomes inconsistent — callers should treat this as a fatal condition.
-func (c *IntegrityChain) ComputeHash(formatVersion int, sequence int64, payload []byte) (prevHash, entryHash string, err error)
+// SinkChain owns prev_hash for one sink. Each chained sink holds one.
+// It is keyed: the same (seq, gen, prev_hash, payload) under different keys
+// produces different entry_hash values, which is the entire point.
+type SinkChain struct { /* mu, key, algorithm, generation, prevHash */ }
 
-// Wrap is preserved for backwards compatibility. It internally calls
-// AdvanceSequence + ComputeHash + builds the JSON payload.
-func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error)
+func NewSinkChain(key []byte, algorithm string) (*SinkChain, error)
+
+// Compute computes the HMAC over (formatVersion, sequence, generation,
+// prev_hash, canonical_payload) using the chain's key. It is PURE: it does
+// not mutate prev_hash. The caller must follow with Commit on durable success
+// or discard the result on durable failure.
+//
+// If generation differs from the chain's current generation, Compute treats
+// prev_hash as "" (chain rolls automatically). The transition is committed
+// only when Commit is called.
+func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32, payload []byte) (entryHash string, prevHash string, err error)
+
+// Commit advances prev_hash to entryHash. Must be called exactly once per
+// successful Compute, after the durable write succeeds. On ambiguous failure
+// (write may or may not have landed), the caller MUST call Fatal instead;
+// Commit and Fatal are mutually exclusive per Compute.
+func (c *SinkChain) Commit(generation uint32, entryHash string)
+
+// Fatal latches the chain in an unrecoverable state. All subsequent Compute
+// calls return ErrFatalIntegrity. Used when a durable write returned an
+// ambiguous error (timeout, partial write detection) — we cannot know
+// whether the entry was persisted, so we cannot safely continue chaining.
+func (c *SinkChain) Fatal(reason error)
+
+// State returns (generation, prev_hash) for persistence.
+func (c *SinkChain) State() ChainState
+
+// Restore restores chain state after restart.
+func (c *SinkChain) Restore(generation uint32, prevHash string)
+
+type ChainState struct {
+    Generation uint32
+    PrevHash   string
+}
+
+var (
+    ErrFatalIntegrity   = errors.New("integrity chain latched fatal; sink must be reinitialized")
+    ErrMissingChainState = errors.New("event missing Chain field; composite did not stamp it")
+)
 ```
 
-The mutex is still held across the *pair* of operations when called via `Wrap` (composite path will not use Wrap; it will hold its own mutex around the pair). This is necessary because `prev_hash` depends on the previous `entry_hash`.
+### `audit.IntegrityChain.Wrap()` — preserved
 
-### `internal/store/composite/composite.go` — advance + fanout
+The existing `Wrap()` is preserved verbatim as a convenience for single-sink callers:
 
 ```go
+// IntegrityChain is the legacy single-sink composer of SequenceAllocator +
+// SinkChain. New code should use the two types directly via the composite
+// store's allocator and per-sink chains. Wrap() is preserved unchanged at the
+// source level for existing callers.
+type IntegrityChain struct {
+    alloc *SequenceAllocator
+    chain *SinkChain
+}
+
+func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
+    seq, gen, err := c.alloc.Next()
+    if err != nil { return nil, err }
+    canonical := canonicalize(payload)
+    entry, prev, err := c.chain.Compute(IntegrityFormatVersion, seq, gen, canonical)
+    if err != nil { return nil, err }
+    wrapped := buildJSON(payload, IntegrityMetadata{
+        FormatVersion: IntegrityFormatVersion,
+        Sequence:      seq,
+        PrevHash:      prev,
+        EntryHash:     entry,
+    })
+    c.chain.Commit(gen, entry)
+    return wrapped, nil
+}
+```
+
+For single-sink callers, durable success is implicit (Wrap returns the bytes; the caller writes them; if the write fails the caller never calls Wrap again on the same record). The single-sink case does not need the Compute/Commit split exposed because there is no fanout — but composite-mode callers absolutely do.
+
+### `internal/store/composite/composite.go` — allocate + stamp + fanout
+
+```go
+type Store struct {
+    primary       store.EventStore
+    output        store.OutputStore
+    others        []store.EventStore
+    allocator     *audit.SequenceAllocator   // NEW: shared allocator
+    onAppendError func(error)
+}
+
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
-    // Phase 0: composite owns sequence advancement.
-    seq, gen, err := s.chain.AdvanceSequence()
+    // Phase 0: composite allocates the shared (seq, gen) before fanout.
+    seq, gen, err := s.allocator.Next()
     if err != nil {
-        return err
+        return err  // typically ErrSequenceOverflow; caller treats as fatal
     }
-    ev.Fields = ensureFields(ev.Fields)
-    ev.Fields["_integrity_seq"]        = uint64(seq)
-    ev.Fields["_integrity_generation"] = gen
+    ev.Chain = &types.ChainState{
+        Sequence:   uint64(seq),
+        Generation: gen,
+    }
 
-    // Fan out — each sink computes its own hash from (seq, gen).
-    var firstErr error
+    // Fan out — each sink that chains computes its own hash; the others ignore.
+    var firstErr, hookErr error
     if s.primary != nil {
-        if err := s.primary.AppendEvent(ctx, ev); err != nil && firstErr == nil {
-            firstErr = err
+        if err := s.primary.AppendEvent(ctx, ev); err != nil {
+            firstErr, hookErr = collectErr(firstErr, hookErr, err)
         }
     }
     for _, o := range s.others {
-        if err := o.AppendEvent(ctx, ev); err != nil && firstErr == nil {
-            firstErr = err
+        if err := o.AppendEvent(ctx, ev); err != nil {
+            firstErr, hookErr = collectErr(firstErr, hookErr, err)
         }
+    }
+    if hookErr != nil && s.onAppendError != nil {
+        s.onAppendError(hookErr)
     }
     return firstErr
 }
-```
 
-The error-hook semantics (`onAppendError`, `FatalIntegrityError` detection) of the current composite are preserved verbatim; only the sequence-advance position changes.
-
-### Sink integration
-
-Sinks that chain (JSONL primary, WTP, any future chained sink) read `(seq, gen)` from `ev.Fields` and compute their own hash:
-
-```go
-func (s *MySink) AppendEvent(ctx context.Context, ev types.Event) error {
-    state, ok := chainstate.FromEvent(ev)
-    if !ok {
-        return ErrMissingChainState  // composite did not stamp the event
-    }
-    canonicalPayload := s.encode(ev)
-    prevHash, entryHash, err := s.chain.ComputeHash(formatVersion, int64(state.Sequence), canonicalPayload)
-    if err != nil {
-        return err
-    }
-    return s.write(state, prevHash, entryHash, canonicalPayload)
+// NextGeneration is called by the composite owner (the daemon) when the
+// chain key rotates. All chained sinks observe the new generation on the
+// next event.
+func (s *Store) NextGeneration() uint32 {
+    return s.allocator.NextGeneration()
 }
 ```
 
-Sinks that don't chain (OTel, webhook) ignore the fields entirely.
+The error-hook semantics (`onAppendError`, `FatalIntegrityError` detection) of the current composite are preserved verbatim; only the sequence-allocation step is added.
+
+### Sink integration — the transactional pattern
+
+Sinks that chain (JSONL primary in composite mode, WTP, any future chained sink) follow this exact pattern:
+
+```go
+func (s *MySink) AppendEvent(ctx context.Context, ev types.Event) error {
+    if ev.Chain == nil {
+        return audit.ErrMissingChainState
+    }
+    canonical := s.encode(ev)
+
+    // Step 1: pure compute — no chain mutation yet.
+    entryHash, prevHash, err := s.chain.Compute(
+        formatVersion, int64(ev.Chain.Sequence), ev.Chain.Generation, canonical,
+    )
+    if err != nil {
+        return err  // includes ErrFatalIntegrity if a previous append latched fatal
+    }
+
+    // Step 2: durable write. Failure modes split three ways.
+    werr := s.writeDurable(canonical, entryHash, prevHash)
+    switch {
+    case werr == nil:
+        // Step 3a: clean success → commit.
+        s.chain.Commit(ev.Chain.Generation, entryHash)
+        return nil
+
+    case errors.Is(werr, errCleanFailure):
+        // Step 3b: clean failure → no commit, chain unchanged. Caller may retry.
+        return werr
+
+    default:
+        // Step 3c: ambiguous failure → latch fatal. We cannot know whether
+        // the write landed, so any future chaining would be unsound.
+        s.chain.Fatal(werr)
+        return werr
+    }
+}
+```
+
+The classification of `errCleanFailure` vs ambiguous is sink-specific and must be documented per sink. For example:
+
+- **WAL.Append**: a returned error from `os.Write` *before* the system call has been issued (parameter validation, closed file) is clean. An error from `os.Write` itself, or from `f.Sync()`, is ambiguous — the bytes may have hit the platter. Default: ambiguous.
+- **Network sends** (no chained sink does this synchronously; WTP buffers via WAL first): always ambiguous.
+- **In-memory checks before any I/O**: clean.
+
+Sinks that do not chain (OTel, webhook in non-chained configurations) ignore `ev.Chain` entirely.
 
 ## Generation Roll
 
-When the composite's chain key rotates:
+When the composite owner rotates the chain key:
 
-1. Composite calls `chain.NextGeneration()` (new helper) which:
-   - Acquires the chain mutex.
-   - Increments `c.generation`.
-   - Resets `c.sequence = -1` (so the next `AdvanceSequence` returns 0).
-   - Sets `c.prevHash = ""`.
-   - Releases the mutex.
-2. The next `AdvanceSequence` returns `(0, new_gen)`.
-3. Sinks observe the new generation in `ev.Fields["_integrity_generation"]`. Each sink takes its own action:
-   - JSONL: writes a marker line.
-   - WTP: forces a batch flush, segment roll, and `SessionUpdate`.
+1. Owner calls `composite.NextGeneration()` → returns new generation.
+2. Next `AppendEvent` call allocates `(seq=0, gen=new)`.
+3. Each chained sink observes `ev.Chain.Generation` differs from its `SinkChain.State().Generation`. `SinkChain.Compute` automatically uses `prev_hash = ""` for the new generation and returns the rollover indicator via `prevHash == ""`. `Commit` records the new generation.
+4. Per-sink work (e.g., WTP forces a batch flush + WAL segment roll + `SessionUpdate`) is triggered by the sink observing the generation change in `ev.Chain.Generation`.
 
-Generation is a property of the *shared* chain, not of any sink. All sinks see the same rollover at the same logical event boundary.
+Generation is a property of the *shared allocator*, not of any individual sink. All sinks roll on the same logical event boundary — the first event with the new generation.
 
 ## TransportLoss Semantics
 
 Per-sink loss does not perturb the shared sequence. Example:
 
-- Composite advances seq=100 (gen=7).
+- Composite allocates seq=100 (gen=7).
 - JSONL writes seq=100 successfully.
-- WTP cannot write seq=100 (WAL full): it drops it locally and emits a `TransportLoss{from_seq:100, to_seq:100, generation:7}` marker into its own WAL.
-- Composite advances seq=101 (gen=7).
+- WTP cannot write seq=100 (WAL full): drops it locally, emits a `TransportLoss{from_seq:100, to_seq:100, generation:7}` marker into its own WAL.
+- Composite allocates seq=101 (gen=7).
 - Both sinks write seq=101.
 
-An auditor reconstructing the WTP stream sees: `..., 99, TransportLoss(100), 101, ...` — the gap is explicit. An auditor reconstructing the JSONL stream sees: `..., 99, 100, 101, ...` — no gap, because that sink delivered. Cross-correlating the two streams reveals which sink lost what.
+An auditor reconstructing the WTP stream sees `..., 99, TransportLoss(100), 101, ...` — the gap is explicit. An auditor reconstructing the JSONL stream sees `..., 99, 100, 101, ...` — no gap, because that sink delivered. Cross-correlating reveals which sink lost what.
 
 The shared sequence is therefore a property of *what the system produced*, not of *what each sink delivered*. This is the only consistent interpretation that lets sinks have different durability profiles.
 
@@ -198,22 +321,20 @@ The shared sequence is therefore a property of *what the system produced*, not o
 
 This refactor is **invisible** to single-sink installations:
 
-- `Wrap()` is preserved unchanged. Callers using `Wrap` (today: the integrity wrapper around JSONL when there's only one sink) continue to work.
-- Only when the composite store is configured with `>1` chained sink, or when WTP is enabled, does the new `AdvanceSequence + ComputeHash` path activate.
-- The reserved `_integrity_*` field prefix is new — we add a startup check that rejects user-supplied event fields starting with `_integrity_` (today no such fields exist; this is purely defensive).
+- The legacy `audit.IntegrityChain.Wrap()` API is unchanged at the source level. Existing callers compile and run without modification.
+- The new `Chain` field on `types.Event` is `json:"-"` and additive; existing JSON output is byte-identical.
+- Only when composite is configured with a chained sink besides the primary, *or* when WTP is enabled, does the composite begin allocating and stamping `ev.Chain`. Until that moment, `ev.Chain` is `nil` and chained sinks fall back to either erroring (strict mode) or behaving as ungrounded (lenient mode, dev only).
 
 ## Verification
 
-The refactor is self-verifying via existing tests if we add three new ones:
+Three new tests in `internal/store/composite/sequence_contract_test.go`:
 
-1. **Cross-sink convergence:** With two chained sinks (JSONL + a fake WTP using the same key), every record's `(seq, gen, entry_hash)` matches between the two. Run for 10,000 events.
-2. **Per-sink divergence with different keys:** With two chained sinks using *different* keys, `(seq, gen)` matches but `entry_hash` differs.
-3. **Generation roll consistency:** After a `NextGeneration()` call, both sinks observe the rollover at the same event boundary; sequence resets to 0 in both.
-
-These live in `internal/store/composite/sequence_contract_test.go` (new file) and use a fake `EventStore` that records the `(seq, gen)` it sees per event.
+1. **Cross-sink `(seq, gen)` convergence:** With two chained sinks (JSONL + a fake WTP using identical canonical encoding and the same key), every record's `(seq, gen)` matches between the two. Run for 10,000 events. `entry_hash` is *not* asserted equal in the general case — sinks that hash different canonical bytes will produce different entry hashes by design; the assertion narrows to "if both sinks hash the same canonical bytes with the same key, then `entry_hash` matches."
+2. **Generation roll consistency:** After a `composite.NextGeneration()` call, both sinks observe the rollover at the same event boundary; sequence resets to 0 in both; each sink's `prev_hash` resets to `""` independently.
+3. **Transactional rollback:** A fake sink that fails its durable write with `errCleanFailure` does NOT advance its `SinkChain.prev_hash`. After the failure, a successful write of a NEW event uses the previous (pre-failure) `prev_hash` — proving rollback is correct. A second test injects an ambiguous failure and asserts `SinkChain.Compute` returns `ErrFatalIntegrity` on every subsequent call.
 
 ## Out-of-Scope
 
 - The actual WTP client implementation (separate doc).
-- KMS-backed key rotation automation (existing `internal/audit/kms` is unchanged).
-- Surfacing `_integrity_*` fields in any user-visible API (they are strictly internal transport metadata).
+- KMS-backed key rotation automation (existing `internal/audit/kms` is unchanged; the *trigger* for `composite.NextGeneration()` is operator-driven for now).
+- Surfacing `Chain` in any user-visible API. The field is `json:"-"` and used only by chained sinks internally.
