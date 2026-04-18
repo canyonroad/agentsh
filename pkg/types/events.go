@@ -56,6 +56,14 @@ type Event struct {
 	EffectiveAction string `json:"effective_action,omitempty"`
 
 	Fields map[string]any `json:"fields,omitempty"`
+
+	// Chain is the shared (sequence, generation) allocated by the composite
+	// store before fanout. Used by chained sinks to produce sink-local
+	// integrity hashes.
+	//
+	// json:"-" is load-bearing: this field must never appear in any
+	// user-visible serialization. Tested by TestEvent_ChainFieldNotMarshaled.
+	Chain *ChainState `json:"-"`
 }
 
 type EventQuery struct {
@@ -74,4 +82,12 @@ type EventQuery struct {
 	Limit  int
 	Offset int
 	Asc    bool
+}
+
+// ChainState is the shared (sequence, generation) tuple stamped on each event
+// by the composite store before fanout to chained sinks. See
+// docs/superpowers/specs/2026-04-18-phase-0-shared-sequence-contract.md.
+type ChainState struct {
+	Sequence   uint64
+	Generation uint32
 }
