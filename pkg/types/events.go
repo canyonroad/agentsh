@@ -87,21 +87,20 @@ type EventQuery struct {
 	Asc    bool
 }
 
-// ChainState is the shared (sequence, generation) tuple stamped on each event
-// by the composite store before fanout to chained sinks. See
+// ChainState is the shared (sequence, generation) tuple that the composite
+// store will stamp on each event before fanout to chained sinks. See
 // docs/superpowers/specs/2026-04-18-phase-0-shared-sequence-contract.md.
 //
 // Contract for consumers: ChainState MUST be treated as read-only. Sinks
 // must never mutate the fields of a *ChainState they receive on
-// types.Event.Chain. The composite store is the sole writer; it allocates
-// the (sequence, generation) tuple via audit.SequenceAllocator and stamps
-// the resulting ChainState onto the event in AppendEvent.
+// types.Event.Chain.
 //
-// To make accidental aliasing across sinks impossible, the composite is
-// expected to stamp a separate *ChainState per fanned-out sink (see Task 5
-// of the Phase 0 plan). Until Task 5 lands the typed Chain field is unused
-// at runtime; this type and the field exist now so downstream tasks can
-// build against a stable type.
+// Lifecycle: this type and the Event.Chain field exist now so downstream
+// tasks can build against a stable type, but no caller writes to Chain
+// yet. Task 5 of the Phase 0 plan will land the composite-store wiring
+// that allocates a (sequence, generation) tuple via
+// audit.SequenceAllocator and stamps a separate *ChainState per
+// fanned-out sink (so the pointer is never aliased across sinks).
 type ChainState struct {
 	Sequence   uint64
 	Generation uint32
