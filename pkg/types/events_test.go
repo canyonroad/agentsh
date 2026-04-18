@@ -86,18 +86,3 @@ func TestEvent_ChainFieldIgnoredOnUnmarshal(t *testing.T) {
 		t.Fatalf("Chain should remain nil after unmarshal, got %+v", ev.Chain)
 	}
 }
-
-// TestChainState_PerSinkCopy_Independence documents the contract that the
-// composite store stamps a fresh *ChainState per sink during fanout. Two
-// separately-allocated ChainState values must be independent: mutating one
-// must not affect the other. This is the runtime guarantee underlying the
-// "Chain MUST be treated as read-only" contract documented on the type.
-func TestChainState_PerSinkCopy_Independence(t *testing.T) {
-	a := &ChainState{Sequence: 100, Generation: 5}
-	b := &ChainState{Sequence: 100, Generation: 5}
-
-	a.Sequence = 999
-	if b.Sequence != 100 {
-		t.Fatalf("per-sink copy not independent: b.Sequence got %d, want 100", b.Sequence)
-	}
-}

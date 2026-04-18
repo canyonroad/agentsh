@@ -59,12 +59,13 @@ type Event struct {
 
 	// Chain is the shared (sequence, generation) allocated by the composite
 	// store before fanout. Used by chained sinks to produce sink-local
-	// integrity hashes. See ChainState's contract: composite stamps a
-	// fresh *ChainState per sink during fanout, so the pointer is never
-	// aliased across sinks.
+	// integrity hashes. Nil until composite stamps it.
 	//
 	// json:"-" is load-bearing: this field must never appear in any
 	// user-visible serialization. Tested by TestEvent_ChainFieldNotMarshaled.
+	//
+	// Sinks MUST treat the pointed-to ChainState as read-only — see the
+	// ChainState type comment for the per-sink-copy contract.
 	Chain *ChainState `json:"-"`
 }
 
@@ -90,12 +91,17 @@ type EventQuery struct {
 // by the composite store before fanout to chained sinks. See
 // docs/superpowers/specs/2026-04-18-phase-0-shared-sequence-contract.md.
 //
-// Although the fields are exported for ergonomic field access in chained
-// sinks, ChainState MUST be treated as read-only by every consumer. The
-// composite store stamps a fresh *ChainState per fanned-out sink in
-// AppendEvent (see internal/store/composite/composite.go), so no two sinks
-// alias the same ChainState. This contract is the per-sink-copy guarantee
-// that prevents one sink's mutation from corrupting another's view.
+// Contract for consumers: ChainState MUST be treated as read-only. Sinks
+// must never mutate the fields of a *ChainState they receive on
+// types.Event.Chain. The composite store is the sole writer; it allocates
+// the (sequence, generation) tuple via audit.SequenceAllocator and stamps
+// the resulting ChainState onto the event in AppendEvent.
+//
+// To make accidental aliasing across sinks impossible, the composite is
+// expected to stamp a separate *ChainState per fanned-out sink (see Task 5
+// of the Phase 0 plan). Until Task 5 lands the typed Chain field is unused
+// at runtime; this type and the field exist now so downstream tasks can
+// build against a stable type.
 type ChainState struct {
 	Sequence   uint64
 	Generation uint32

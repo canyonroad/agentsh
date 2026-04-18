@@ -92,22 +92,13 @@ func TestEvent_ChainFieldIgnoredOnUnmarshal(t *testing.T) {
 		t.Fatalf("Chain should remain nil after unmarshal, got %+v", ev.Chain)
 	}
 }
-
-// TestChainState_PerSinkCopy_Independence documents the contract that the
-// composite store stamps a fresh *ChainState per sink during fanout. Two
-// separately-allocated ChainState values must be independent: mutating one
-// must not affect the other. This is the runtime guarantee underlying the
-// "Chain MUST be treated as read-only" contract documented on the type.
-func TestChainState_PerSinkCopy_Independence(t *testing.T) {
-	a := &ChainState{Sequence: 100, Generation: 5}
-	b := &ChainState{Sequence: 100, Generation: 5}
-
-	a.Sequence = 999
-	if b.Sequence != 100 {
-		t.Fatalf("per-sink copy not independent: b.Sequence got %d, want 100", b.Sequence)
-	}
-}
 ```
+
+The per-sink-copy contract (composite stamps a fresh `*ChainState` per
+sink during fanout) is a composite-fanout property that this Task cannot
+verify in isolation — the composite stamping logic does not exist yet.
+Task 6's `TestComposite_StampsChainBeforeFanout` exercises that contract
+end-to-end (pointer-distinct, value-equal, mutation-isolated).
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -127,12 +118,13 @@ Edit `pkg/types/events.go`. Inside the file, find the `Event` struct (currently 
 
 	// Chain is the shared (sequence, generation) allocated by the composite
 	// store before fanout. Used by chained sinks to produce sink-local
-	// integrity hashes. See ChainState's contract: composite stamps a
-	// fresh *ChainState per sink during fanout, so the pointer is never
-	// aliased across sinks.
+	// integrity hashes. Nil until composite stamps it.
 	//
 	// json:"-" is load-bearing: this field must never appear in any
 	// user-visible serialization. Tested by TestEvent_ChainFieldNotMarshaled.
+	//
+	// Sinks MUST treat the pointed-to ChainState as read-only — see the
+	// ChainState type comment for the per-sink-copy contract.
 	Chain *ChainState `json:"-"`
 }
 ```
@@ -144,12 +136,17 @@ Then add the `ChainState` type at the end of the file (after the `EventQuery` st
 // by the composite store before fanout to chained sinks. See
 // docs/superpowers/specs/2026-04-18-phase-0-shared-sequence-contract.md.
 //
-// Although the fields are exported for ergonomic field access in chained
-// sinks, ChainState MUST be treated as read-only by every consumer. The
-// composite store stamps a fresh *ChainState per fanned-out sink in
-// AppendEvent (see internal/store/composite/composite.go), so no two sinks
-// alias the same ChainState. This contract is the per-sink-copy guarantee
-// that prevents one sink's mutation from corrupting another's view.
+// Contract for consumers: ChainState MUST be treated as read-only. Sinks
+// must never mutate the fields of a *ChainState they receive on
+// types.Event.Chain. The composite store is the sole writer; it allocates
+// the (sequence, generation) tuple via audit.SequenceAllocator and stamps
+// the resulting ChainState onto the event in AppendEvent.
+//
+// To make accidental aliasing across sinks impossible, the composite is
+// expected to stamp a separate *ChainState per fanned-out sink (see Task 5
+// of the Phase 0 plan). Until Task 5 lands the typed Chain field is unused
+// at runtime; this type and the field exist now so downstream tasks can
+// build against a stable type.
 type ChainState struct {
 	Sequence   uint64
 	Generation uint32
@@ -188,11 +185,12 @@ git commit -m "$(cat <<'EOF'
 feat(types): add typed Event.Chain field for sink coordination
 
 Adds pkg/types.ChainState (exported Sequence/Generation fields; treated
-as read-only — composite stamps a fresh *ChainState per sink during
-fanout) and an Event.Chain pointer field with json:"-"
-so the composite store can stamp the shared sequence tuple onto events
-without ever leaking it into JSONL, OTEL, gRPC, webhook or any future
-serializer. Tested by TestEvent_ChainFieldNotMarshaled.
+as read-only — Task 5 will land the composite stamping that allocates a
+fresh *ChainState per sink during fanout) and an Event.Chain pointer
+field with json:"-" so the composite store can stamp the shared
+sequence tuple onto events without ever leaking it into JSONL, OTEL,
+gRPC, webhook or any future serializer. Tested by
+TestEvent_ChainFieldNotMarshaled.
 
 Phase 0 of the shared sequence allocator contract — see
 docs/superpowers/specs/2026-04-18-phase-0-shared-sequence-contract.md.
