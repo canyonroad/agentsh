@@ -242,12 +242,17 @@ func startSeccompServerContainer(t *testing.T, ctx context.Context, agentshBin, 
 }
 
 // startContainerWithRetry wraps testcontainers.GenericContainer in a retry loop
-// to absorb transient Docker socket keep-alive drops observed in CI, e.g.
-// "use of closed network connection" / "EOF" surfacing from the testcontainers
-// HTTP client when a pooled connection is reaped by dockerd mid-request.
-// Any non-nil container returned alongside an error is terminated before we
-// return or retry, so privileged containers never leak across attempts or out
-// to the caller (which typically t.Fatal's and would skip cleanup itself).
+// to absorb two transient failure modes observed in CI:
+//   - Docker socket keep-alive drops ("use of closed network connection",
+//     "EOF", "connection reset") when a pooled HTTP connection to
+//     /run/docker.sock is reaped mid-request.
+//   - wait.ForHTTP startup timeouts where the container starts but the
+//     mapped port briefly isn't reachable in time; the next attempt on the
+//     same image typically succeeds in a few seconds.
+// Any non-nil container returned alongside an error is terminated (after a
+// best-effort log capture) before we return or retry, so privileged
+// containers never leak across attempts or out to the caller (which
+// typically t.Fatal's and would skip cleanup itself).
 func startContainerWithRetry(t *testing.T, ctx context.Context, req testcontainers.GenericContainerRequest) (testcontainers.Container, error) {
 	t.Helper()
 	cleanup := func(c testcontainers.Container, logLabel string) {
@@ -277,7 +282,8 @@ func startContainerWithRetry(t *testing.T, ctx context.Context, req testcontaine
 		msg := err.Error()
 		transient := strings.Contains(msg, "use of closed network connection") ||
 			strings.Contains(msg, "EOF") ||
-			strings.Contains(msg, "connection reset")
+			strings.Contains(msg, "connection reset") ||
+			strings.Contains(msg, "wait until ready")
 		if !transient || attempt == 3 {
 			cleanup(ctr, "failed-start")
 			return nil, err
