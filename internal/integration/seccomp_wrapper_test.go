@@ -207,18 +207,11 @@ func startSeccompServerContainer(t *testing.T, ctx context.Context, agentshBin, 
 			WithStatusCodeMatcher(func(code int) bool { return code == http.StatusOK || code == http.StatusNotFound }),
 	}
 
-	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	ctr, err := startContainerWithRetry(t, ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
 		Started:          true,
 	})
 	if err != nil {
-		if ctr != nil {
-			if logs, logErr := ctr.Logs(ctx); logErr == nil {
-				defer logs.Close()
-				b, _ := io.ReadAll(logs)
-				t.Logf("container logs:\n%s", string(b))
-			}
-		}
 		t.Fatalf("start container: %v", err)
 	}
 
@@ -246,6 +239,54 @@ func startSeccompServerContainer(t *testing.T, ctx context.Context, agentshBin, 
 		_ = ctr.Terminate(cleanupCtx)
 	}
 	return endpoint, cleanup
+}
+
+// startContainerWithRetry wraps testcontainers.GenericContainer in a retry loop
+// to absorb transient Docker socket keep-alive drops observed in CI, e.g.
+// "use of closed network connection" / "EOF" surfacing from the testcontainers
+// HTTP client when a pooled connection is reaped by dockerd mid-request.
+// Any non-nil container returned alongside an error is terminated before we
+// return or retry, so privileged containers never leak across attempts or out
+// to the caller (which typically t.Fatal's and would skip cleanup itself).
+func startContainerWithRetry(t *testing.T, ctx context.Context, req testcontainers.GenericContainerRequest) (testcontainers.Container, error) {
+	t.Helper()
+	cleanup := func(c testcontainers.Container, logLabel string) {
+		if c == nil {
+			return
+		}
+		logCtx, cancelLog := context.WithTimeout(context.Background(), 10*time.Second)
+		if logs, lerr := c.Logs(logCtx); lerr == nil {
+			b, _ := io.ReadAll(logs)
+			logs.Close()
+			if len(b) > 0 {
+				t.Logf("%s container logs:\n%s", logLabel, string(b))
+			}
+		}
+		cancelLog()
+		termCtx, cancelTerm := context.WithTimeout(context.Background(), 30*time.Second)
+		_ = c.Terminate(termCtx)
+		cancelTerm()
+	}
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		var ctr testcontainers.Container
+		ctr, err = testcontainers.GenericContainer(ctx, req)
+		if err == nil {
+			return ctr, nil
+		}
+		msg := err.Error()
+		transient := strings.Contains(msg, "use of closed network connection") ||
+			strings.Contains(msg, "EOF") ||
+			strings.Contains(msg, "connection reset")
+		if !transient || attempt == 3 {
+			cleanup(ctr, "failed-start")
+			return nil, err
+		}
+		cleanup(ctr, "retrying")
+		t.Logf("transient docker error on attempt %d/3, retrying: %v", attempt, err)
+		time.Sleep(2 * time.Second)
+	}
+	return nil, err
 }
 
 const seccompTestPolicyYAML = `
