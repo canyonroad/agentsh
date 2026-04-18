@@ -259,7 +259,10 @@ func TestSequenceAllocator_NextGeneration_ResetsSequence(t *testing.T) {
 	}
 	// State now: sequence=1, gen=0; next Next() would return (2, 0).
 
-	newGen := a.NextGeneration()
+	newGen, err := a.NextGeneration()
+	if err != nil {
+		t.Fatalf("NextGeneration: %v", err)
+	}
 	if newGen != 1 {
 		t.Fatalf("NextGeneration() = %d, want 1", newGen)
 	}
@@ -280,7 +283,9 @@ func TestSequenceAllocator_State_Restore_RoundTrip(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	a.NextGeneration()
+	if _, err := a.NextGeneration(); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := a.Next(); err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +297,9 @@ func TestSequenceAllocator_State_Restore_RoundTrip(t *testing.T) {
 	}
 
 	b := NewSequenceAllocator()
-	b.Restore(state)
+	if err := b.Restore(state); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
 	seq, gen, err := b.Next()
 	if err != nil {
 		t.Fatalf("Next after Restore: %v", err)
@@ -304,7 +311,9 @@ func TestSequenceAllocator_State_Restore_RoundTrip(t *testing.T) {
 
 func TestSequenceAllocator_Overflow(t *testing.T) {
 	a := NewSequenceAllocator()
-	a.Restore(AllocatorState{Sequence: math.MaxInt64, Generation: 0})
+	if err := a.Restore(AllocatorState{Sequence: math.MaxInt64, Generation: 0}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
 
 	_, _, err := a.Next()
 	if !errors.Is(err, ErrSequenceOverflow) {
@@ -348,6 +357,70 @@ func TestSequenceAllocator_ConcurrentNext_NoDuplicates(t *testing.T) {
 		t.Fatalf("got %d unique sequences, want %d", len(seen), workers*perWorker)
 	}
 }
+
+func TestSequenceAllocator_NextGeneration_Overflow(t *testing.T) {
+	a := NewSequenceAllocator()
+	if err := a.Restore(AllocatorState{Sequence: -1, Generation: math.MaxUint32}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	_, err := a.NextGeneration()
+	if !errors.Is(err, ErrGenerationOverflow) {
+		t.Fatalf("NextGeneration at MaxUint32: err = %v, want ErrGenerationOverflow", err)
+	}
+
+	// Allocator must not be mutated by a rejected NextGeneration.
+	state := a.State()
+	if state.Generation != math.MaxUint32 {
+		t.Fatalf("Generation mutated after rejected NextGeneration: got %d, want MaxUint32", state.Generation)
+	}
+	if state.Sequence != -1 {
+		t.Fatalf("Sequence mutated after rejected NextGeneration: got %d, want -1", state.Sequence)
+	}
+
+	// Sequences in the current (max) generation must still allocate cleanly.
+	seq, gen, err := a.Next()
+	if err != nil {
+		t.Fatalf("Next after rejected NextGeneration: %v", err)
+	}
+	if seq != 0 || gen != math.MaxUint32 {
+		t.Fatalf("Next at max generation: got (%d, %d), want (0, MaxUint32)", seq, gen)
+	}
+}
+
+func TestSequenceAllocator_Restore_RejectsInvalidSequence(t *testing.T) {
+	a := NewSequenceAllocator()
+	// Allocate one tuple so we have non-default state to verify we don't perturb on reject.
+	if _, _, err := a.Next(); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	pre := a.State()
+
+	for _, bad := range []int64{-2, -100, math.MinInt64} {
+		err := a.Restore(AllocatorState{Sequence: bad, Generation: 5})
+		if !errors.Is(err, ErrInvalidAllocatorState) {
+			t.Fatalf("Restore(Sequence=%d): err = %v, want ErrInvalidAllocatorState", bad, err)
+		}
+	}
+
+	// Allocator must be unchanged after rejected restores.
+	post := a.State()
+	if post != pre {
+		t.Fatalf("allocator mutated by rejected Restore: pre=%+v, post=%+v", pre, post)
+	}
+
+	// Boundary: Sequence == -1 is the valid minimum (means "no Next() yet").
+	if err := a.Restore(AllocatorState{Sequence: -1, Generation: 9}); err != nil {
+		t.Fatalf("Restore(Sequence=-1): %v", err)
+	}
+	seq, gen, err := a.Next()
+	if err != nil {
+		t.Fatalf("Next after Restore(-1, 9): %v", err)
+	}
+	if seq != 0 || gen != 9 {
+		t.Fatalf("after Restore(-1, 9): Next() = (%d, %d), want (0, 9)", seq, gen)
+	}
+}
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -366,9 +439,21 @@ Create `internal/audit/sequence_allocator.go`:
 package audit
 
 import (
+	"errors"
 	"math"
 	"sync"
 )
+
+// ErrGenerationOverflow is returned by NextGeneration when the generation
+// counter would wrap past math.MaxUint32. Reaching this is a fatal
+// integrity event — wrapping would re-use prior (sequence, generation)
+// tuples, defeating the new-generation boundary guarantee.
+var ErrGenerationOverflow = errors.New("integrity generation overflow")
+
+// ErrInvalidAllocatorState is returned by Restore when the supplied state
+// violates allocator invariants (e.g., Sequence < -1). The allocator is
+// not modified on rejected restore.
+var ErrInvalidAllocatorState = errors.New("invalid allocator state")
 
 // SequenceAllocator owns the shared (sequence, generation) tuple. It has no
 // hash state. Composite holds exactly one allocator and stamps every event
@@ -414,12 +499,20 @@ func (a *SequenceAllocator) Next() (sequence int64, generation uint32, err error
 // NextGeneration increments generation and resets sequence so the next Next()
 // returns (0, new_generation). Returns the new generation. Used by the
 // composite owner when the chain key rotates.
-func (a *SequenceAllocator) NextGeneration() uint32 {
+//
+// Returns ErrGenerationOverflow if generation == math.MaxUint32; the
+// allocator is not modified in that case. Reaching this is fatal — there
+// is no clean recovery short of provisioning a new allocator with a fresh
+// chain key namespace.
+func (a *SequenceAllocator) NextGeneration() (uint32, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.generation == math.MaxUint32 {
+		return 0, ErrGenerationOverflow
+	}
 	a.generation++
 	a.sequence = -1
-	return a.generation
+	return a.generation, nil
 }
 
 // State returns the current (sequence, generation) for persistence. After
@@ -430,12 +523,18 @@ func (a *SequenceAllocator) State() AllocatorState {
 	return AllocatorState{Sequence: a.sequence, Generation: a.generation}
 }
 
-// Restore rehydrates allocator state after restart.
-func (a *SequenceAllocator) Restore(state AllocatorState) {
+// Restore rehydrates allocator state after restart. Returns
+// ErrInvalidAllocatorState if state.Sequence < -1 (which would violate the
+// monotonic-from-zero contract); the allocator is not modified in that case.
+func (a *SequenceAllocator) Restore(state AllocatorState) error {
+	if state.Sequence < -1 {
+		return ErrInvalidAllocatorState
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.sequence = state.Sequence
 	a.generation = state.Generation
+	return nil
 }
 ```
 
@@ -1245,7 +1344,10 @@ func TestComposite_NextGeneration_ResetsSequence(t *testing.T) {
 		}
 	}
 
-	newGen := s.NextGeneration()
+	newGen, err := s.NextGeneration()
+	if err != nil {
+		t.Fatalf("NextGeneration: %v", err)
+	}
 	if newGen != 1 {
 		t.Fatalf("NextGeneration() = %d, want 1", newGen)
 	}
@@ -1372,7 +1474,10 @@ Add `NextGeneration` method (place it directly below `AppendEvent`):
 // NextGeneration advances the shared sequence generation. The next
 // AppendEvent stamps ev.Chain with (Sequence:0, Generation:newGen).
 // Used by the composite owner when the chain key rotates.
-func (s *Store) NextGeneration() uint32 {
+//
+// Returns ErrGenerationOverflow on uint32 wrap; the allocator is not
+// modified in that case (see audit.SequenceAllocator.NextGeneration).
+func (s *Store) NextGeneration() (uint32, error) {
 	return s.allocator.NextGeneration()
 }
 ```
@@ -1588,7 +1693,10 @@ func TestPhase0_GenerationRollConsistency(t *testing.T) {
 		}
 	}
 
-	gen := s.NextGeneration()
+	gen, err := s.NextGeneration()
+	if err != nil {
+		t.Fatalf("NextGeneration: %v", err)
+	}
 	if gen != 1 {
 		t.Fatalf("NextGeneration() = %d, want 1", gen)
 	}

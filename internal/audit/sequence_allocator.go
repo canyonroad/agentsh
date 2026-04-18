@@ -1,9 +1,21 @@
 package audit
 
 import (
+	"errors"
 	"math"
 	"sync"
 )
+
+// ErrGenerationOverflow is returned by NextGeneration when the generation
+// counter would wrap past math.MaxUint32. Reaching this is a fatal
+// integrity event — wrapping would re-use prior (sequence, generation)
+// tuples, defeating the new-generation boundary guarantee.
+var ErrGenerationOverflow = errors.New("integrity generation overflow")
+
+// ErrInvalidAllocatorState is returned by Restore when the supplied state
+// violates allocator invariants (e.g., Sequence < -1). The allocator is
+// not modified on rejected restore.
+var ErrInvalidAllocatorState = errors.New("invalid allocator state")
 
 // SequenceAllocator owns the shared (sequence, generation) tuple. It has no
 // hash state. Composite holds exactly one allocator and stamps every event
@@ -49,12 +61,20 @@ func (a *SequenceAllocator) Next() (sequence int64, generation uint32, err error
 // NextGeneration increments generation and resets sequence so the next Next()
 // returns (0, new_generation). Returns the new generation. Used by the
 // composite owner when the chain key rotates.
-func (a *SequenceAllocator) NextGeneration() uint32 {
+//
+// Returns ErrGenerationOverflow if generation == math.MaxUint32; the
+// allocator is not modified in that case. Reaching this is fatal — there
+// is no clean recovery short of provisioning a new allocator with a fresh
+// chain key namespace.
+func (a *SequenceAllocator) NextGeneration() (uint32, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.generation == math.MaxUint32 {
+		return 0, ErrGenerationOverflow
+	}
 	a.generation++
 	a.sequence = -1
-	return a.generation
+	return a.generation, nil
 }
 
 // State returns the current (sequence, generation) for persistence. After
@@ -65,10 +85,16 @@ func (a *SequenceAllocator) State() AllocatorState {
 	return AllocatorState{Sequence: a.sequence, Generation: a.generation}
 }
 
-// Restore rehydrates allocator state after restart.
-func (a *SequenceAllocator) Restore(state AllocatorState) {
+// Restore rehydrates allocator state after restart. Returns
+// ErrInvalidAllocatorState if state.Sequence < -1 (which would violate the
+// monotonic-from-zero contract); the allocator is not modified in that case.
+func (a *SequenceAllocator) Restore(state AllocatorState) error {
+	if state.Sequence < -1 {
+		return ErrInvalidAllocatorState
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.sequence = state.Sequence
 	a.generation = state.Generation
+	return nil
 }
