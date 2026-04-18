@@ -28,7 +28,8 @@ import (
 // seccomp:unconfined), but the server should gracefully handle this with a timeout
 // and still complete the exec.
 func TestSeccompWrapperEnabled(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
 	// Build binaries with CGO for seccomp support
 	agentshBin, unixwrapBin := buildSeccompBinaries(t)
@@ -92,7 +93,8 @@ func TestSeccompWrapperEnabled(t *testing.T) {
 
 // TestSeccompWrapperDisabled verifies that the server starts when unix_sockets is disabled.
 func TestSeccompWrapperDisabled(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
 	// Build binaries - CGO not strictly required when disabled, but use same binaries
 	agentshBin, unixwrapBin := buildSeccompBinaries(t)
@@ -231,15 +233,17 @@ func startSeccompServerContainer(t *testing.T, ctx context.Context, agentshBin, 
 	endpoint := fmt.Sprintf("http://%s:%s", host, mappedPort.Port())
 
 	cleanup := func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cleanupCancel()
 		// Log container output for debugging
-		if logs, err := ctr.Logs(context.Background()); err == nil {
+		if logs, err := ctr.Logs(cleanupCtx); err == nil {
 			defer logs.Close()
 			b, _ := io.ReadAll(logs)
 			if len(b) > 0 {
 				t.Logf("container logs:\n%s", string(b))
 			}
 		}
-		_ = ctr.Terminate(context.Background())
+		_ = ctr.Terminate(cleanupCtx)
 	}
 	return endpoint, cleanup
 }
@@ -310,7 +314,8 @@ trash:
 // NOTE: This test requires seccomp-user-notify to work, which may not function
 // in all Docker/CI environments. The test will skip if commands timeout.
 func TestExecveInterception_DepthEnforcement(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
 	// Build binaries with CGO for seccomp support
 	agentshBin, unixwrapBin := buildSeccompBinaries(t)
