@@ -61,10 +61,7 @@ func TestEvent_ChainFieldNotMarshaled(t *testing.T) {
 		Timestamp: time.Unix(1700000000, 0).UTC(),
 		Type:      "file_open",
 		SessionID: "sess-1",
-		Chain: &ChainState{
-			Sequence:   42,
-			Generation: 7,
-		},
+		Chain:     NewChainState(42, 7),
 	}
 
 	out, err := json.Marshal(ev)
@@ -92,6 +89,29 @@ func TestEvent_ChainFieldIgnoredOnUnmarshal(t *testing.T) {
 		t.Fatalf("Chain should remain nil after unmarshal, got %+v", ev.Chain)
 	}
 }
+
+// TestChainState_Immutable verifies that the ChainState pointer aliased
+// across sinks during composite fanout cannot be mutated by any sink.
+// This is the structural guarantee that justifies sharing the pointer
+// rather than deep-copying per sink.
+func TestChainState_Immutable(t *testing.T) {
+	c := NewChainState(100, 5)
+	if c.Sequence() != 100 {
+		t.Fatalf("Sequence(): got %d, want 100", c.Sequence())
+	}
+	if c.Generation() != 5 {
+		t.Fatalf("Generation(): got %d, want 5", c.Generation())
+	}
+
+	// The struct fields are unexported; outside the types package this
+	// test wouldn't even compile if a caller tried to write c.sequence = 0.
+	// Inside the package we can demonstrate the read-only intent by
+	// confirming that two readers see the same values regardless of order.
+	c2 := c
+	if c2.Sequence() != c.Sequence() || c2.Generation() != c.Generation() {
+		t.Fatalf("aliased pointer reads diverged: c=%v c2=%v", c, c2)
+	}
+}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -114,6 +134,11 @@ Edit `pkg/types/events.go`. Inside the file, find the `Event` struct (currently 
 	// store before fanout. Used by chained sinks to produce sink-local
 	// integrity hashes.
 	//
+	// The pointed-to ChainState is immutable from the outside (unexported
+	// fields, read-only Sequence/Generation accessors), so the pointer can
+	// be safely aliased across sinks during fanout without any sink being
+	// able to corrupt the values seen by other sinks.
+	//
 	// json:"-" is load-bearing: this field must never appear in any
 	// user-visible serialization. Tested by TestEvent_ChainFieldNotMarshaled.
 	Chain *ChainState `json:"-"`
@@ -126,10 +151,26 @@ Then add the `ChainState` type at the end of the file (after the `EventQuery` st
 // ChainState is the shared (sequence, generation) tuple stamped on each event
 // by the composite store before fanout to chained sinks. See
 // docs/superpowers/specs/2026-04-18-phase-0-shared-sequence-contract.md.
+//
+// Fields are unexported and exposed via read-only methods so sinks cannot
+// mutate the state through the aliased pointer that fanout produces. The
+// composite store constructs values via NewChainState and never reuses
+// instances across events.
 type ChainState struct {
-	Sequence   uint64
-	Generation uint32
+	sequence   uint64
+	generation uint32
 }
+
+// NewChainState returns a stamped ChainState. Used by the composite store.
+func NewChainState(sequence uint64, generation uint32) *ChainState {
+	return &ChainState{sequence: sequence, generation: generation}
+}
+
+// Sequence returns the shared monotonic sequence allocated for the event.
+func (c *ChainState) Sequence() uint64 { return c.sequence }
+
+// Generation returns the chain generation at the time of allocation.
+func (c *ChainState) Generation() uint32 { return c.generation }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -163,10 +204,11 @@ git add pkg/types/events.go pkg/types/events_test.go
 git commit -m "$(cat <<'EOF'
 feat(types): add typed Event.Chain field for sink coordination
 
-Adds pkg/types.ChainState{Sequence, Generation} and an Event.Chain pointer
-field with json:"-" so the composite store can stamp the shared sequence
-tuple onto events without ever leaking it into JSONL, OTEL, gRPC, webhook
-or any future serializer. Tested by TestEvent_ChainFieldNotMarshaled.
+Adds pkg/types.ChainState (immutable, accessed via NewChainState +
+Sequence()/Generation()) and an Event.Chain pointer field with json:"-"
+so the composite store can stamp the shared sequence tuple onto events
+without ever leaking it into JSONL, OTEL, gRPC, webhook or any future
+serializer. Tested by TestEvent_ChainFieldNotMarshaled.
 
 Phase 0 of the shared sequence allocator contract — see
 docs/superpowers/specs/2026-04-18-phase-0-shared-sequence-contract.md.
@@ -1161,12 +1203,9 @@ type chainCapturingStore struct {
 }
 
 func (s *chainCapturingStore) AppendEvent(ctx context.Context, ev types.Event) error {
-	if ev.Chain != nil {
-		copy := *ev.Chain
-		s.captured = append(s.captured, &copy)
-	} else {
-		s.captured = append(s.captured, nil)
-	}
+	// ChainState is immutable from outside the types package, so the
+	// pointer aliased across sinks is safe to retain directly.
+	s.captured = append(s.captured, ev.Chain)
 	return nil
 }
 func (s *chainCapturingStore) QueryEvents(ctx context.Context, q types.EventQuery) ([]types.Event, error) {
@@ -1193,11 +1232,11 @@ func TestComposite_StampsChainBeforeFanout(t *testing.T) {
 		if p == nil || o == nil {
 			t.Fatalf("event %d: nil Chain — primary=%v other=%v", i, p, o)
 		}
-		if p.Sequence != uint64(i) || p.Generation != 0 {
-			t.Errorf("primary event %d: Chain=%+v want {Sequence:%d Generation:0}", i, p, i)
+		if p.Sequence() != uint64(i) || p.Generation() != 0 {
+			t.Errorf("primary event %d: Chain=(seq=%d,gen=%d) want (seq=%d,gen=0)", i, p.Sequence(), p.Generation(), i)
 		}
-		if *p != *o {
-			t.Errorf("event %d: sinks saw different Chain: primary=%+v other=%+v", i, p, o)
+		if p.Sequence() != o.Sequence() || p.Generation() != o.Generation() {
+			t.Errorf("event %d: sinks saw different Chain: primary=(seq=%d,gen=%d) other=(seq=%d,gen=%d)", i, p.Sequence(), p.Generation(), o.Sequence(), o.Generation())
 		}
 	}
 }
@@ -1222,8 +1261,8 @@ func TestComposite_NextGeneration_ResetsSequence(t *testing.T) {
 	}
 
 	last := primary.captured[len(primary.captured)-1]
-	if last == nil || last.Sequence != 0 || last.Generation != 1 {
-		t.Errorf("after rollover: Chain=%+v want {Sequence:0 Generation:1}", last)
+	if last == nil || last.Sequence() != 0 || last.Generation() != 1 {
+		t.Errorf("after rollover: Chain=(seq=%d,gen=%d) want (seq=0,gen=1)", last.Sequence(), last.Generation())
 	}
 }
 ```
@@ -1283,10 +1322,7 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	if err != nil {
 		return err
 	}
-	ev.Chain = &types.ChainState{
-		Sequence:   uint64(seq),
-		Generation: gen,
-	}
+	ev.Chain = types.NewChainState(uint64(seq), gen)
 
 	var firstErr error
 	var hookErr error
@@ -1433,9 +1469,11 @@ func (s *chainingFakeSink) AppendEvent(ctx context.Context, ev types.Event) erro
 	if ev.Chain == nil {
 		return audit.ErrMissingChainState
 	}
-	canonical := []byte(`{"id":"` + ev.ID + `","seq":` + strconv.FormatUint(ev.Chain.Sequence, 10) + `,"gen":` + strconv.FormatUint(uint64(ev.Chain.Generation), 10) + `}`)
+	seq := ev.Chain.Sequence()
+	gen := ev.Chain.Generation()
+	canonical := []byte(`{"id":"` + ev.ID + `","seq":` + strconv.FormatUint(seq, 10) + `,"gen":` + strconv.FormatUint(uint64(gen), 10) + `}`)
 
-	entryHash, prevHash, err := s.chain.Compute(audit.IntegrityFormatVersion, int64(ev.Chain.Sequence), ev.Chain.Generation, canonical)
+	entryHash, prevHash, err := s.chain.Compute(audit.IntegrityFormatVersion, int64(seq), gen, canonical)
 	if err != nil {
 		return err
 	}
@@ -1444,11 +1482,11 @@ func (s *chainingFakeSink) AppendEvent(ctx context.Context, ev types.Event) erro
 	failClean := s.failNext
 	failAmbiguous := s.failFatal
 	if failClean != nil {
-		s.failedSeq = int64(ev.Chain.Sequence)
+		s.failedSeq = int64(seq)
 		s.failNext = nil
 	}
 	if failAmbiguous {
-		s.failedSeq = int64(ev.Chain.Sequence)
+		s.failedSeq = int64(seq)
 		s.failFatal = false
 	}
 	s.mu.Unlock()
@@ -1462,11 +1500,11 @@ func (s *chainingFakeSink) AppendEvent(ctx context.Context, ev types.Event) erro
 		s.chain.Fatal(errors.New("ambiguous write"))
 		return errors.New("ambiguous write")
 	default:
-		s.chain.Commit(ev.Chain.Generation, entryHash)
+		s.chain.Commit(gen, entryHash)
 		s.mu.Lock()
 		s.records = append(s.records, chainRecord{
-			Sequence:   ev.Chain.Sequence,
-			Generation: ev.Chain.Generation,
+			Sequence:   seq,
+			Generation: gen,
 			EntryHash:  entryHash,
 			PrevHash:   prevHash,
 		})

@@ -61,6 +61,11 @@ type Event struct {
 	// store before fanout. Used by chained sinks to produce sink-local
 	// integrity hashes.
 	//
+	// The pointed-to ChainState is immutable from the outside (unexported
+	// fields, read-only Sequence/Generation accessors), so the pointer can
+	// be safely aliased across sinks during fanout without any sink being
+	// able to corrupt the values seen by other sinks.
+	//
 	// json:"-" is load-bearing: this field must never appear in any
 	// user-visible serialization. Tested by TestEvent_ChainFieldNotMarshaled.
 	Chain *ChainState `json:"-"`
@@ -87,7 +92,23 @@ type EventQuery struct {
 // ChainState is the shared (sequence, generation) tuple stamped on each event
 // by the composite store before fanout to chained sinks. See
 // docs/superpowers/specs/2026-04-18-phase-0-shared-sequence-contract.md.
+//
+// Fields are unexported and exposed via read-only methods so sinks cannot
+// mutate the state through the aliased pointer that fanout produces. The
+// composite store constructs values via NewChainState and never reuses
+// instances across events.
 type ChainState struct {
-	Sequence   uint64
-	Generation uint32
+	sequence   uint64
+	generation uint32
 }
+
+// NewChainState returns a stamped ChainState. Used by the composite store.
+func NewChainState(sequence uint64, generation uint32) *ChainState {
+	return &ChainState{sequence: sequence, generation: generation}
+}
+
+// Sequence returns the shared monotonic sequence allocated for the event.
+func (c *ChainState) Sequence() uint64 { return c.sequence }
+
+// Generation returns the chain generation at the time of allocation.
+func (c *ChainState) Generation() uint32 { return c.generation }
