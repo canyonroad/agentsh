@@ -61,7 +61,10 @@ func TestEvent_ChainFieldNotMarshaled(t *testing.T) {
 		Timestamp: time.Unix(1700000000, 0).UTC(),
 		Type:      "file_open",
 		SessionID: "sess-1",
-		Chain:     NewChainState(42, 7),
+		Chain: &ChainState{
+			Sequence:   42,
+			Generation: 7,
+		},
 	}
 
 	out, err := json.Marshal(ev)
@@ -90,26 +93,18 @@ func TestEvent_ChainFieldIgnoredOnUnmarshal(t *testing.T) {
 	}
 }
 
-// TestChainState_Immutable verifies that the ChainState pointer aliased
-// across sinks during composite fanout cannot be mutated by any sink.
-// This is the structural guarantee that justifies sharing the pointer
-// rather than deep-copying per sink.
-func TestChainState_Immutable(t *testing.T) {
-	c := NewChainState(100, 5)
-	if c.Sequence() != 100 {
-		t.Fatalf("Sequence(): got %d, want 100", c.Sequence())
-	}
-	if c.Generation() != 5 {
-		t.Fatalf("Generation(): got %d, want 5", c.Generation())
-	}
+// TestChainState_PerSinkCopy_Independence documents the contract that the
+// composite store stamps a fresh *ChainState per sink during fanout. Two
+// separately-allocated ChainState values must be independent: mutating one
+// must not affect the other. This is the runtime guarantee underlying the
+// "Chain MUST be treated as read-only" contract documented on the type.
+func TestChainState_PerSinkCopy_Independence(t *testing.T) {
+	a := &ChainState{Sequence: 100, Generation: 5}
+	b := &ChainState{Sequence: 100, Generation: 5}
 
-	// The struct fields are unexported; outside the types package this
-	// test wouldn't even compile if a caller tried to write c.sequence = 0.
-	// Inside the package we can demonstrate the read-only intent by
-	// confirming that two readers see the same values regardless of order.
-	c2 := c
-	if c2.Sequence() != c.Sequence() || c2.Generation() != c.Generation() {
-		t.Fatalf("aliased pointer reads diverged: c=%v c2=%v", c, c2)
+	a.Sequence = 999
+	if b.Sequence != 100 {
+		t.Fatalf("per-sink copy not independent: b.Sequence got %d, want 100", b.Sequence)
 	}
 }
 ```
@@ -132,12 +127,9 @@ Edit `pkg/types/events.go`. Inside the file, find the `Event` struct (currently 
 
 	// Chain is the shared (sequence, generation) allocated by the composite
 	// store before fanout. Used by chained sinks to produce sink-local
-	// integrity hashes.
-	//
-	// The pointed-to ChainState is immutable from the outside (unexported
-	// fields, read-only Sequence/Generation accessors), so the pointer can
-	// be safely aliased across sinks during fanout without any sink being
-	// able to corrupt the values seen by other sinks.
+	// integrity hashes. See ChainState's contract: composite stamps a
+	// fresh *ChainState per sink during fanout, so the pointer is never
+	// aliased across sinks.
 	//
 	// json:"-" is load-bearing: this field must never appear in any
 	// user-visible serialization. Tested by TestEvent_ChainFieldNotMarshaled.
@@ -152,25 +144,16 @@ Then add the `ChainState` type at the end of the file (after the `EventQuery` st
 // by the composite store before fanout to chained sinks. See
 // docs/superpowers/specs/2026-04-18-phase-0-shared-sequence-contract.md.
 //
-// Fields are unexported and exposed via read-only methods so sinks cannot
-// mutate the state through the aliased pointer that fanout produces. The
-// composite store constructs values via NewChainState and never reuses
-// instances across events.
+// Although the fields are exported for ergonomic field access in chained
+// sinks, ChainState MUST be treated as read-only by every consumer. The
+// composite store stamps a fresh *ChainState per fanned-out sink in
+// AppendEvent (see internal/store/composite/composite.go), so no two sinks
+// alias the same ChainState. This contract is the per-sink-copy guarantee
+// that prevents one sink's mutation from corrupting another's view.
 type ChainState struct {
-	sequence   uint64
-	generation uint32
+	Sequence   uint64
+	Generation uint32
 }
-
-// NewChainState returns a stamped ChainState. Used by the composite store.
-func NewChainState(sequence uint64, generation uint32) *ChainState {
-	return &ChainState{sequence: sequence, generation: generation}
-}
-
-// Sequence returns the shared monotonic sequence allocated for the event.
-func (c *ChainState) Sequence() uint64 { return c.sequence }
-
-// Generation returns the chain generation at the time of allocation.
-func (c *ChainState) Generation() uint32 { return c.generation }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -204,8 +187,9 @@ git add pkg/types/events.go pkg/types/events_test.go
 git commit -m "$(cat <<'EOF'
 feat(types): add typed Event.Chain field for sink coordination
 
-Adds pkg/types.ChainState (immutable, accessed via NewChainState +
-Sequence()/Generation()) and an Event.Chain pointer field with json:"-"
+Adds pkg/types.ChainState (exported Sequence/Generation fields; treated
+as read-only — composite stamps a fresh *ChainState per sink during
+fanout) and an Event.Chain pointer field with json:"-"
 so the composite store can stamp the shared sequence tuple onto events
 without ever leaking it into JSONL, OTEL, gRPC, webhook or any future
 serializer. Tested by TestEvent_ChainFieldNotMarshaled.
@@ -1195,7 +1179,7 @@ EOF
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `internal/store/composite/composite_test.go`. No new imports needed — the test uses only `context`, `testing`, and `types` (all already imported).
+Append to `internal/store/composite/composite_test.go`. The test imports `context`, `reflect`, `testing`, and `types` — add `reflect` if not already imported by the file.
 
 ```go
 type chainCapturingStore struct {
@@ -1203,8 +1187,8 @@ type chainCapturingStore struct {
 }
 
 func (s *chainCapturingStore) AppendEvent(ctx context.Context, ev types.Event) error {
-	// ChainState is immutable from outside the types package, so the
-	// pointer aliased across sinks is safe to retain directly.
+	// Composite stamps a fresh *ChainState per sink, so the captured
+	// pointer is the sink-local copy — distinct from every other sink's.
 	s.captured = append(s.captured, ev.Chain)
 	return nil
 }
@@ -1232,12 +1216,24 @@ func TestComposite_StampsChainBeforeFanout(t *testing.T) {
 		if p == nil || o == nil {
 			t.Fatalf("event %d: nil Chain — primary=%v other=%v", i, p, o)
 		}
-		if p.Sequence() != uint64(i) || p.Generation() != 0 {
-			t.Errorf("primary event %d: Chain=(seq=%d,gen=%d) want (seq=%d,gen=0)", i, p.Sequence(), p.Generation(), i)
+		if p.Sequence != uint64(i) || p.Generation != 0 {
+			t.Errorf("primary event %d: Chain=(seq=%d,gen=%d) want (seq=%d,gen=0)", i, p.Sequence, p.Generation, i)
 		}
-		if p.Sequence() != o.Sequence() || p.Generation() != o.Generation() {
-			t.Errorf("event %d: sinks saw different Chain: primary=(seq=%d,gen=%d) other=(seq=%d,gen=%d)", i, p.Sequence(), p.Generation(), o.Sequence(), o.Generation())
+		// Per-sink-copy contract: pointer-distinct across sinks but
+		// value-equal. Use == on pointers (must differ) and DeepEqual
+		// on dereferenced values (must match).
+		if p == o {
+			t.Errorf("event %d: sinks alias the same *ChainState pointer (%p); composite must stamp fresh per sink", i, p)
 		}
+		if !reflect.DeepEqual(*p, *o) {
+			t.Errorf("event %d: sinks saw different Chain values: primary=%+v other=%+v", i, *p, *o)
+		}
+	}
+
+	// Mutating one sink's captured ChainState must not affect the other's.
+	primary.captured[0].Sequence = 0xDEADBEEF
+	if other.captured[0].Sequence == 0xDEADBEEF {
+		t.Errorf("per-sink-copy invariant violated: mutating primary leaked into other")
 	}
 }
 
@@ -1261,11 +1257,13 @@ func TestComposite_NextGeneration_ResetsSequence(t *testing.T) {
 	}
 
 	last := primary.captured[len(primary.captured)-1]
-	if last == nil || last.Sequence() != 0 || last.Generation() != 1 {
-		t.Errorf("after rollover: Chain=(seq=%d,gen=%d) want (seq=0,gen=1)", last.Sequence(), last.Generation())
+	if last == nil || last.Sequence != 0 || last.Generation != 1 {
+		t.Errorf("after rollover: Chain=(seq=%d,gen=%d) want (seq=0,gen=1)", last.Sequence, last.Generation)
 	}
 }
 ```
+
+Note: this test imports `reflect` for `reflect.DeepEqual`.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1314,20 +1312,29 @@ func New(primary store.EventStore, output store.OutputStore, others ...store.Eve
 }
 ```
 
-Replace `AppendEvent` (currently lines 29-64) — keep all existing error-collection logic, add the allocate+stamp prologue:
+Replace `AppendEvent` (currently lines 29-64) — keep all existing error-collection logic, add the allocate+stamp prologue. Note the per-sink-copy pattern: the allocator is called ONCE per AppendEvent so all sinks see the same `(seq, gen)`, but each sink receives its own freshly-allocated `*ChainState` so no two sinks alias the same pointer. This is the runtime guarantee that backs the "Chain MUST be treated as read-only" contract on `pkg/types.ChainState`.
 
 ```go
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
+	// Phase 0: composite allocates the shared (seq, gen) once before fanout.
 	seq, gen, err := s.allocator.Next()
 	if err != nil {
 		return err
 	}
-	ev.Chain = types.NewChainState(uint64(seq), gen)
+
+	// stampForSink returns ev with a FRESH *ChainState pointer so no two
+	// sinks ever alias the same ChainState. This is the per-sink-copy
+	// guarantee that prevents one sink's mutation from corrupting another.
+	stampForSink := func() types.Event {
+		stamped := ev
+		stamped.Chain = &types.ChainState{Sequence: uint64(seq), Generation: gen}
+		return stamped
+	}
 
 	var firstErr error
 	var hookErr error
 	if s.primary != nil {
-		if err := s.primary.AppendEvent(ctx, ev); err != nil {
+		if err := s.primary.AppendEvent(ctx, stampForSink()); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -1341,7 +1348,7 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 		}
 	}
 	for _, o := range s.others {
-		if err := o.AppendEvent(ctx, ev); err != nil {
+		if err := o.AppendEvent(ctx, stampForSink()); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -1469,8 +1476,8 @@ func (s *chainingFakeSink) AppendEvent(ctx context.Context, ev types.Event) erro
 	if ev.Chain == nil {
 		return audit.ErrMissingChainState
 	}
-	seq := ev.Chain.Sequence()
-	gen := ev.Chain.Generation()
+	seq := ev.Chain.Sequence
+	gen := ev.Chain.Generation
 	canonical := []byte(`{"id":"` + ev.ID + `","seq":` + strconv.FormatUint(seq, 10) + `,"gen":` + strconv.FormatUint(uint64(gen), 10) + `}`)
 
 	entryHash, prevHash, err := s.chain.Compute(audit.IntegrityFormatVersion, int64(seq), gen, canonical)
