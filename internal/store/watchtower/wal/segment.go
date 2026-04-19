@@ -248,9 +248,11 @@ func (s *Segment) Seal() (string, error) {
 // graceful shutdown that may be reopened later. After Close, the .INPROGRESS
 // file remains on disk for the next process to ReopenSegment. Idempotent:
 // repeated calls return nil. Subsequent WriteRecord/Sync/Seal calls return
-// ErrSegmentClosed.
+// ErrSegmentClosed. Also returns nil for a partially-initialized Segment
+// whose file/writer were never set, preserving the prior nil-safe contract.
 func (s *Segment) Close() error {
-	if s.closed {
+	if s.closed || s.file == nil || s.writer == nil {
+		s.closed = true
 		return nil
 	}
 	if err := s.Sync(); err != nil {

@@ -195,3 +195,17 @@ func TestSegment_RoundTripLargeIndex(t *testing.T) {
 		t.Errorf("Index() = %d, want %d", reopened.Index(), largeIndex)
 	}
 }
+
+// TestSegment_CloseOnPartiallyInitializedSegment pins the prior nil-safe
+// contract: Close() on a zero-value Segment must not panic. Round 1's
+// closed-state refactor temporarily regressed this, dereferencing the nil
+// writer via Sync().
+func TestSegment_CloseOnPartiallyInitializedSegment(t *testing.T) {
+	var s Segment
+	if err := s.Close(); err != nil {
+		t.Errorf("Close() on zero-value Segment err = %v, want nil", err)
+	}
+	if !s.closed {
+		t.Errorf("closed = false after Close(), want true")
+	}
+}

@@ -32,11 +32,12 @@ func TestMeta_ReadMissing(t *testing.T) {
 	}
 }
 
-// TestMeta_OverwritePreservesAtomicRename pins the durability contract for
-// the overwrite path: the second WriteMeta must not leak the .tmp file (it
-// was renamed) and ReadMeta must observe the new contents. This regressed
-// when WriteMeta wrote the temp via os.WriteFile without an explicit Sync —
-// rename made the *name* durable but contents could come back truncated.
+// TestMeta_OverwritePreservesAtomicRename is a smoke test for the overwrite
+// path: a second WriteMeta replaces the first, ReadMeta sees the new
+// contents, and no .tmp leaks behind. It cannot distinguish "rename without
+// fsync" from "fsync + rename" — that requires crash injection — but it
+// catches gross regressions in the overwrite path (e.g., partial rename or
+// stale-tmp leaks).
 func TestMeta_OverwritePreservesAtomicRename(t *testing.T) {
 	dir := t.TempDir()
 	if err := WriteMeta(dir, Meta{AckHighWatermarkSeq: 1, SessionID: "first"}); err != nil {
