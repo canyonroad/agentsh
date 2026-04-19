@@ -26,6 +26,11 @@ import (
 //     releases all resources. After Close, Send/Recv/CloseSend MUST
 //     return an error (or be no-ops). Close MUST be idempotent so error
 //     paths can call it without coordinating with a successful close.
+//   - After Close returns, any in-flight blocked Send or Recv MUST
+//     unblock promptly with an error. Implementations of Conn over real
+//     gRPC ClientStreams satisfy this naturally because closing the
+//     underlying ClientConn cancels in-flight RPCs; fakes used in tests
+//     must arrange for the same behavior.
 type Conn interface {
 	Send(msg *wtpv1.ClientMessage) error
 	Recv() (*wtpv1.ServerMessage, error)

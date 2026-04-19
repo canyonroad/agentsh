@@ -5759,18 +5759,22 @@ func TestConnectingState_SendsSessionInitAndAdvancesOnAck(t *testing.T) {
 		return conn, nil
 	})
 
-	tr := transport.New(transport.Options{
+	tr, err := transport.New(transport.Options{
 		Dialer:    dialer,
 		AgentID:   "test-agent",
 		SessionID: "sess-1",
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	doneCh := make(chan transport.State, 1)
 	go func() {
-		doneCh <- tr.RunOnce(ctx, transport.StateConnecting)
+		st, _ := tr.RunOnce(ctx, transport.StateConnecting)
+		doneCh <- st
 	}()
 
 	// Expect SessionInit on the wire.
@@ -5855,13 +5859,37 @@ import (
 )
 
 // Conn is the abstraction over a bidirectional WTP gRPC stream so that
-// transport tests can substitute a fake. It is NOT safe for concurrent
-// use: the transport state machine performs all Send/Recv calls from a
-// single goroutine.
+// transport tests can substitute a fake.
+//
+// Concurrency contract (mirrors gRPC's ClientStream):
+//   - A single sender goroutine and a single receiver goroutine MAY
+//     operate concurrently — i.e. one Send may overlap one Recv.
+//   - Multiple concurrent Senders are NOT safe.
+//   - Multiple concurrent Receivers are NOT safe.
+//   - CloseSend MUST NOT race with a concurrent Send. Callers are
+//     responsible for sequencing Send and CloseSend on the sender
+//     goroutine.
+//
+// Lifecycle contract:
+//   - CloseSend is the half-close primitive: it signals "no more sends"
+//     to the peer. Recv may still return data the peer had queued before
+//     observing the half-close. The underlying stream/connection remains
+//     open until the peer drains and closes its sending half (or until
+//     Close is called).
+//   - Close is the full-teardown primitive: it aborts the stream and
+//     releases all resources. After Close, Send/Recv/CloseSend MUST
+//     return an error (or be no-ops). Close MUST be idempotent so error
+//     paths can call it without coordinating with a successful close.
+//   - After Close returns, any in-flight blocked Send or Recv MUST
+//     unblock promptly with an error. Implementations of Conn over real
+//     gRPC ClientStreams satisfy this naturally because closing the
+//     underlying ClientConn cancels in-flight RPCs; fakes used in tests
+//     must arrange for the same behavior.
 type Conn interface {
 	Send(msg *wtpv1.ClientMessage) error
 	Recv() (*wtpv1.ServerMessage, error)
 	CloseSend() error
+	Close() error
 }
 ```
 
@@ -5947,52 +5975,73 @@ package transport
 import (
 	"context"
 	"fmt"
+
+	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
 // runConnecting establishes a stream and exchanges SessionInit/SessionAck.
 // On success it returns StateReplaying. On dial failure or stream error it
 // returns StateConnecting (the caller's run loop is responsible for backoff).
+// On a server SessionAck rejection (accepted=false) or a programming error
+// (e.g. SessionInit fails local validation) it returns StateShutdown — the
+// session cannot recover from these via reconnect.
+//
+// Every error path calls conn.Close() (full teardown) rather than
+// CloseSend() (half-close) so the underlying stream is fully released and
+// no goroutines/sockets leak while the run loop backs off and retries.
 func (t *Transport) runConnecting(ctx context.Context) (State, error) {
+	init := t.sessionInit()
+	if err := wtpv1.ValidateSessionInit(init.GetSessionInit()); err != nil {
+		return StateShutdown, fmt.Errorf("invalid SessionInit: %w", err)
+	}
+
 	conn, err := t.opts.Dialer.Dial(ctx)
 	if err != nil {
 		return StateConnecting, fmt.Errorf("dial: %w", err)
 	}
 	t.conn = conn
 
-	if err := conn.Send(t.sessionInit()); err != nil {
-		_ = conn.CloseSend()
+	if err := conn.Send(init); err != nil {
+		_ = conn.Close()
 		t.conn = nil
 		return StateConnecting, fmt.Errorf("send SessionInit: %w", err)
 	}
 
 	msg, err := conn.Recv()
 	if err != nil {
-		_ = conn.CloseSend()
+		_ = conn.Close()
 		t.conn = nil
 		return StateConnecting, fmt.Errorf("recv SessionAck: %w", err)
 	}
 
 	ack := msg.GetSessionAck()
 	if ack == nil {
-		_ = conn.CloseSend()
+		_ = conn.Close()
 		t.conn = nil
 		return StateConnecting, fmt.Errorf("expected SessionAck, got %T", msg.Msg)
 	}
 
-	t.ackedSequence = ack.AckHighWatermarkSeq
-	t.ackedGeneration = ack.Generation
+	if !ack.GetAccepted() {
+		t.rejectReason = ack.GetRejectReason()
+		_ = conn.Close()
+		t.conn = nil
+		return StateShutdown, fmt.Errorf("session rejected: %s", ack.GetRejectReason())
+	}
+
+	t.ackedSequence = ack.GetAckHighWatermarkSeq()
+	t.ackedGeneration = ack.GetGeneration()
 	return StateReplaying, nil
 }
 
 // RunOnce runs a single state transition for testing. Production code
-// should use Run, which loops until Shutdown.
-func (t *Transport) RunOnce(ctx context.Context, st State) State {
+// should use Run, which loops until Shutdown. The error mirrors whatever
+// the per-state handler surfaced so tests can assert on failure modes.
+func (t *Transport) RunOnce(ctx context.Context, st State) (State, error) {
 	switch st {
 	case StateConnecting:
-		next, _ := t.runConnecting(ctx)
-		return next
+		return t.runConnecting(ctx)
 	default:
-		return StateShutdown
+		return StateShutdown, nil
 	}
 }
 ```
@@ -7449,9 +7498,12 @@ func TestShutdown_DrainsPendingThenCloses(t *testing.T) {
 		t.Fatalf("open WAL: %v", err)
 	}
 
-	tr := transport.New(transport.Options{
+	tr, err := transport.New(transport.Options{
 		Dialer: dialer, AgentID: "a", SessionID: "s",
 	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	doneCh := make(chan error, 1)
@@ -7833,21 +7885,40 @@ func (s *Server) Dial(ctx context.Context) (Conn, error) {
 	return &grpcConn{stream: stream, cc: cc}, nil
 }
 
-// Conn is the transport.Conn shape produced by Dial.
+// Conn is the transport.Conn shape produced by Dial. CloseSend is the
+// half-close primitive (signals "no more sends"); Close is the full
+// teardown primitive (releases the underlying ClientConn). Test code
+// that just wants to stop sending should call CloseSend; code that
+// wants to fully release resources must call Close.
 type Conn interface {
 	Send(*wtpv1.ClientMessage) error
 	Recv() (*wtpv1.ServerMessage, error)
 	CloseSend() error
+	Close() error
 }
 
 type grpcConn struct {
 	stream wtpv1.Watchtower_StreamClient
 	cc     *grpc.ClientConn
+	closed atomic.Bool
 }
 
-func (g *grpcConn) Send(m *wtpv1.ClientMessage) error  { return g.stream.Send(m) }
+func (g *grpcConn) Send(m *wtpv1.ClientMessage) error   { return g.stream.Send(m) }
 func (g *grpcConn) Recv() (*wtpv1.ServerMessage, error) { return g.stream.Recv() }
-func (g *grpcConn) CloseSend() error                    { _ = g.stream.CloseSend(); return g.cc.Close() }
+
+// CloseSend half-closes the send side of the stream. It does NOT
+// release the underlying ClientConn — call Close for that.
+func (g *grpcConn) CloseSend() error { return g.stream.CloseSend() }
+
+// Close fully tears down the stream by closing the underlying
+// ClientConn, which cancels any in-flight Send/Recv. Idempotent so
+// error paths can call it without coordinating with a graceful close.
+func (g *grpcConn) Close() error {
+	if !g.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	return g.cc.Close()
+}
 
 type srvHandler struct {
 	wtpv1.UnimplementedWatchtowerServer
@@ -8656,11 +8727,14 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		dialer = newGRPCDialer(opts)
 	}
 
-	tr := transport.New(transport.Options{
+	tr, err := transport.New(transport.Options{
 		Dialer:    dialer,
 		AgentID:   opts.AgentID,
 		SessionID: opts.SessionID,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("transport.New: %w", err)
+	}
 
 	// Resolve the WTP metrics façade. opts.Metrics may be nil; the
 	// WTP() accessor is nil-safe and returns a *WTPMetrics whose
@@ -11572,6 +11646,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"sync/atomic"
 
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
@@ -11629,12 +11704,23 @@ func (d *productionDialer) Dial(ctx context.Context) (transport.Conn, error) {
 type grpcStreamConn struct {
 	stream wtpv1.Watchtower_StreamClient
 	cc     *grpc.ClientConn
+	closed atomic.Bool
 }
 
-func (g *grpcStreamConn) Send(m *wtpv1.ClientMessage) error  { return g.stream.Send(m) }
+func (g *grpcStreamConn) Send(m *wtpv1.ClientMessage) error   { return g.stream.Send(m) }
 func (g *grpcStreamConn) Recv() (*wtpv1.ServerMessage, error) { return g.stream.Recv() }
-func (g *grpcStreamConn) CloseSend() error {
-	_ = g.stream.CloseSend()
+
+// CloseSend half-closes the send side of the stream. It does NOT
+// release the underlying ClientConn — call Close for that.
+func (g *grpcStreamConn) CloseSend() error { return g.stream.CloseSend() }
+
+// Close fully tears down the stream by closing the underlying
+// ClientConn, which cancels any in-flight Send/Recv. Idempotent so
+// error paths can call it without coordinating with a graceful close.
+func (g *grpcStreamConn) Close() error {
+	if !g.closed.CompareAndSwap(false, true) {
+		return nil
+	}
 	return g.cc.Close()
 }
 
