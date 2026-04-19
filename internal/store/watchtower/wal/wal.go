@@ -143,9 +143,11 @@ type WAL struct {
 	// distinguish sealed segments that the receiver already has (silent GC)
 	// from sealed segments holding still-unacked data (must emit a
 	// TransportLoss marker on drop). Loaded from meta.json at Open;
-	// updated by MarkAcked (which also persists it). Zero is a valid value
-	// (nothing acked yet).
+	// updated by MarkAcked (which also persists it). Seqs are NOT globally
+	// monotonic across generations — see ackHighGen.
 	ackHighSeq uint64
+	ackHighGen uint32 // ack watermark generation; combined with ackHighSeq forms a (gen, seq) tuple
+	ackPresent bool   // true once an ack has been persisted; zero values are NOT a valid watermark
 }
 
 // segmentEntry pairs a segment filename with its parsed numeric index so
@@ -196,11 +198,17 @@ func Open(opts Options) (*WAL, error) {
 	// can fire on the very first Append after Open) sees a consistent
 	// view: sealed segments fully covered by ack are silently GC'd, while
 	// segments holding unacked records emit a TransportLoss marker on
-	// drop. Missing meta.json is fine — a fresh WAL has nothing acked yet
-	// (zero is the correct default). Any other read error is fatal at
-	// open time.
+	// drop. Missing meta.json is fine — a fresh WAL has nothing acked
+	// yet (ackPresent stays false). Any other read error is fatal at
+	// open time. Only honor the on-disk seq/gen when AckRecorded is true:
+	// the zero value (gen=0, seq=0) is indistinguishable from a real ack
+	// at that watermark, so silent GC must not be allowed to fire on it.
 	if m, err := ReadMeta(opts.Dir); err == nil {
-		w.ackHighSeq = m.AckHighWatermarkSeq
+		if m.AckRecorded {
+			w.ackHighSeq = m.AckHighWatermarkSeq
+			w.ackHighGen = m.AckHighWatermarkGen
+			w.ackPresent = true
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read meta: %w", err)
 	}
@@ -778,9 +786,15 @@ func encodeLossPayload(l LossRecord) []byte {
 	return out
 }
 
-// MarkAcked records the highest-acked sequence in meta.json and GCs sealed
-// segments whose highest sequence is <= seq. The live (.INPROGRESS) segment
+// MarkAcked records the highest-acked watermark (gen, seq) in meta.json and
+// GCs sealed segments fully covered by it. The live (.INPROGRESS) segment
 // is never removed.
+//
+// The watermark is a (generation, sequence) tuple because seqs restart at 0
+// on each generation roll. Monotonicity is across the tuple (lex order):
+// the watermark advances iff (gen, seq) is strictly greater than the current
+// (ackHighGen, ackHighSeq). A caller passing an older tuple is silently
+// ignored (the high-water value already on disk wins).
 //
 // Returns nil even if no segments were eligible for GC. Callers do not need
 // to filter on whether progress was made.
@@ -788,22 +802,26 @@ func encodeLossPayload(l LossRecord) []byte {
 // Filename ordering uses the numeric segment index (parseSegmentIndex), not
 // lexicographic order on filenames — once an index crosses 10^10 the digit
 // count changes and lex order silently picks the wrong "oldest" file. The
-// current per-segment scan via segmentHighSeq is the safety check that
-// prevents us from removing a segment whose tail records are still unacked.
-func (w *WAL) MarkAcked(seq uint64) error {
+// current per-segment scan via segmentHighSeqAndGen is the safety check
+// that prevents us from removing a segment whose tail records are still
+// unacked.
+func (w *WAL) MarkAcked(gen uint32, seq uint64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	// Persist the new ack watermark and mirror it on the in-memory WAL so
 	// the overflow path's silent-GC pass (gcAckedLocked) can consult it
-	// without a meta.json read on every Append. Use the maximum to make
-	// MarkAcked monotonic — if a caller passes an older seq (replay,
-	// out-of-order ack), we hold the high-water value already on disk.
-	if seq > w.ackHighSeq {
+	// without a meta.json read on every Append. Use lex (gen, seq) compare
+	// so MarkAcked is monotonic across generation rolls.
+	advance := !w.ackPresent || gen > w.ackHighGen || (gen == w.ackHighGen && seq > w.ackHighSeq)
+	if advance {
+		w.ackHighGen = gen
 		w.ackHighSeq = seq
+		w.ackPresent = true
 	}
 	if err := WriteMeta(w.opts.Dir, Meta{
 		AckHighWatermarkSeq: w.ackHighSeq,
-		AckHighWatermarkGen: w.highGen,
+		AckHighWatermarkGen: w.ackHighGen,
+		AckRecorded:         true,
 	}); err != nil {
 		return err
 	}
@@ -827,18 +845,19 @@ func (w *WAL) MarkAcked(seq uint64) error {
 	removed := false
 	for _, e := range sealed {
 		path := filepath.Join(w.segDir, e.name)
-		hi, err := segmentHighSeq(path, w.maxRec)
+		hi, hasUser, segGen, err := segmentHighSeqAndGen(path, w.maxRec)
 		if err != nil {
 			continue
 		}
-		if hi <= w.ackHighSeq {
-			st, _ := os.Stat(path)
-			if err := os.Remove(path); err == nil {
-				if st != nil {
-					w.totalBytes -= st.Size()
-				}
-				removed = true
+		if !w.segmentFullyAckedLocked(segGen, hi, hasUser) {
+			continue
+		}
+		st, _ := os.Stat(path)
+		if err := os.Remove(path); err == nil {
+			if st != nil {
+				w.totalBytes -= st.Size()
 			}
+			removed = true
 		}
 	}
 	if removed {
@@ -849,32 +868,35 @@ func (w *WAL) MarkAcked(seq uint64) error {
 	return nil
 }
 
-// segmentHighSeq returns the highest sequence number recorded in the segment
-// at path. A scan is required because the WAL does not maintain a per-segment
-// index. Used by MarkAcked GC and by overflow GC to identify safe-to-drop
-// segments.
+// segmentHighSeqAndGen returns the highest user-record sequence number, a
+// flag indicating whether the segment held any non-loss-marker records, and
+// the segment's generation (read from the segment header). A scan is
+// required because the WAL does not maintain a per-segment index. Used by
+// MarkAcked GC and by overflow GC to identify safe-to-drop segments.
 //
 // Errors during the read loop (truncation, CRC mismatch, corrupt frames)
 // are treated as "stop scanning" so a partially-written segment still
 // reports its highest known-good seq rather than failing outright; the
-// caller decides whether that's safe to act on.
-func segmentHighSeq(path string, maxPayload int) (uint64, error) {
+// caller decides whether that's safe to act on. Errors opening the file
+// or parsing the header are propagated.
+func segmentHighSeqAndGen(path string, maxPayload int) (hiSeq uint64, hasUser bool, gen uint32, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, false, 0, err
 	}
 	defer f.Close()
-	if _, err := ReadSegmentHeader(f); err != nil {
-		return 0, err
+	hdr, err := ReadSegmentHeader(f)
+	if err != nil {
+		return 0, false, 0, err
 	}
-	var hi uint64
+	gen = hdr.Generation
 	for {
-		payload, err := ReadRecord(f, maxPayload)
-		if err == io.EOF {
-			return hi, nil
+		payload, readErr := ReadRecord(f, maxPayload)
+		if readErr == io.EOF {
+			return hiSeq, hasUser, gen, nil
 		}
-		if err != nil {
-			return hi, nil
+		if readErr != nil {
+			return hiSeq, hasUser, gen, nil
 		}
 		// Loss markers are sentinel-framed, not seq/gen-framed; feeding
 		// their bytes to parseSeqGen would synthesize a junk seq from
@@ -885,8 +907,9 @@ func segmentHighSeq(path string, maxPayload int) (uint64, error) {
 			continue
 		}
 		if seq, _, ok := parseSeqGen(payload); ok {
-			if seq > hi {
-				hi = seq
+			hasUser = true
+			if seq > hiSeq {
+				hiSeq = seq
 			}
 		}
 	}
@@ -1000,12 +1023,48 @@ func (w *WAL) dropOldestLocked() (loss LossRecord, dropped bool, hasUserRange bo
 	return LossRecord{FromSequence: fromSeq, ToSequence: toSeq, Generation: hdr.Generation, Reason: "overflow"}, true, hasUserRange, nil
 }
 
-// gcAckedLocked removes every sealed segment whose highest user-record
-// sequence is <= w.ackHighSeq. No TransportLoss marker is emitted for these
-// drops because the receiver already has the data. Stops at the first
-// segment that contains any unacked record (segments are processed in
-// numeric idx order, which equals seq order since seqs are monotonic across
-// generations within a single WAL).
+// segmentFullyAckedLocked reports whether the segment described by
+// (segGen, segHi, hasUser) is fully covered by the in-memory ack watermark.
+// Caller MUST hold w.mu.
+//
+// Without an ack on record (ackPresent=false), nothing is reclaimable —
+// even a segment whose only record is seq=0 must NOT be silently dropped.
+// Loss-marker-only segments (hasUser=false) are reclaimable iff their
+// generation is at-or-below the ack-watermark generation; their on-disk
+// data is purely a re-derived gap notice and the receiver gains nothing
+// from receiving it twice.
+//
+// For real user records, comparison is lex on (gen, seq). Seqs restart at 0
+// on every generation roll, so a per-seq compare alone would silently let
+// a watermark from gen=N reclaim later gen=N+1 records whose local seqs
+// happen to fall in the same range.
+func (w *WAL) segmentFullyAckedLocked(segGen uint32, segHi uint64, hasUser bool) bool {
+	if !w.ackPresent {
+		return false
+	}
+	if !hasUser {
+		return segGen <= w.ackHighGen
+	}
+	if segGen < w.ackHighGen {
+		return true
+	}
+	if segGen == w.ackHighGen && segHi <= w.ackHighSeq {
+		return true
+	}
+	return false
+}
+
+// gcAckedLocked removes every sealed segment fully covered by the (gen, seq)
+// ack watermark. No TransportLoss marker is emitted for these drops because
+// the receiver already has the data. Bails immediately if no ack has been
+// recorded (ackPresent=false): a fresh WAL must NOT silently reclaim its
+// seq=0 segment merely because the zero-value ackHighSeq matches.
+//
+// Stops at the first segment that is not fully acked. Segment indices are
+// numerically monotonic, and within a single index range generations are
+// also monotonic (a generation roll opens a new segment with a higher
+// index). So once a segment is not fully acked under lex (gen, seq) order,
+// no later sealed segment can be either — early break is safe.
 //
 // Returns the number of segments removed. Errors during a single segment's
 // scan or removal are surfaced to the caller; ack-driven GC is best-effort
@@ -1014,6 +1073,9 @@ func (w *WAL) dropOldestLocked() (loss LossRecord, dropped bool, hasUserRange bo
 //
 // Caller MUST hold w.mu.
 func (w *WAL) gcAckedLocked() (int, error) {
+	if !w.ackPresent {
+		return 0, nil
+	}
 	entries, err := os.ReadDir(w.segDir)
 	if err != nil {
 		return 0, err
@@ -1037,17 +1099,14 @@ func (w *WAL) gcAckedLocked() (int, error) {
 	removed := 0
 	for _, e := range sealed {
 		path := filepath.Join(w.segDir, e.name)
-		hi, scanErr := segmentHighSeq(path, w.maxRec)
+		hi, hasUser, segGen, scanErr := segmentHighSeqAndGen(path, w.maxRec)
 		if scanErr != nil {
-			// segmentHighSeq currently swallows scan errors and only
-			// returns errors from open/header read. Treat as fatal:
+			// segmentHighSeqAndGen surfaces only open/header errors;
+			// scan-loop errors are swallowed. Treat as fatal here:
 			// we cannot decide safely whether to drop this file.
 			return removed, scanErr
 		}
-		if hi > w.ackHighSeq {
-			// Numeric idx order matches seq order, so the first
-			// segment with unacked content guarantees no later
-			// segment is fully covered either. Early-break.
+		if !w.segmentFullyAckedLocked(segGen, hi, hasUser) {
 			break
 		}
 		st, _ := os.Stat(path)

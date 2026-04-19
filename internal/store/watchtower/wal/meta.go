@@ -12,8 +12,11 @@ type Meta struct {
 	FormatVersion       int    `json:"format_version"`
 	AckHighWatermarkSeq uint64 `json:"ack_high_watermark_seq"`
 	AckHighWatermarkGen uint32 `json:"ack_high_watermark_gen"`
-	SessionID           string `json:"session_id"`
-	KeyFingerprint      string `json:"key_fingerprint"`
+	// AckRecorded is true iff at least one ack has ever been recorded;
+	// distinguishes the zero-value (gen=0, seq=0) from a real ack at that watermark.
+	AckRecorded    bool   `json:"ack_recorded"`
+	SessionID      string `json:"session_id"`
+	KeyFingerprint string `json:"key_fingerprint"`
 }
 
 const metaFormatVersion = 1

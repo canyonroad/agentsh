@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -88,7 +89,7 @@ func TestWAL_OverflowAfterAck_OnlyDropsAcked(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := w.MarkAcked(4); err != nil {
+	if err := w.MarkAcked(0, 4); err != nil {
 		t.Fatal(err)
 	}
 	// 5 more unacked records. After silent GC reclaims the first sealed
@@ -197,7 +198,7 @@ func TestWAL_MarkAckedReclaimsSegmentsContainingLossMarkers(t *testing.T) {
 		return n
 	}
 	before := countSealed()
-	if err := w.MarkAcked(29); err != nil {
+	if err := w.MarkAcked(0, 29); err != nil {
 		t.Fatal(err)
 	}
 	after := countSealed()
@@ -320,5 +321,188 @@ func TestWAL_DropOldestSegmentAtSeqZeroEmitsLossMarker(t *testing.T) {
 	// Seg 1 (the dropped segment) must be gone.
 	if _, err := os.Stat(filepath.Join(segDir, "0000000001.seg")); !os.IsNotExist(err) {
 		t.Errorf("seg 1 still present after drop: err=%v", err)
+	}
+}
+
+// TestWAL_OverflowOnFreshWALEmitsLossEvenAtSeqZero regresses the round-2
+// finding that ackHighSeq=0 on a fresh WAL was conflated with "ack covers
+// seq=0", causing the silent ack-driven GC to reclaim a segment whose only
+// record was seq=0 without emitting a TransportLoss marker. With ackPresent
+// gating gcAckedLocked, a fresh WAL — meta.json absent — must take the
+// lossy overflow path: drop the oldest segment AND emit a TransportLoss
+// marker covering its (0, hi=0) range.
+func TestWAL_OverflowOnFreshWALEmitsLossEvenAtSeqZero(t *testing.T) {
+	dir := t.TempDir()
+	// Match the sizing of TestWAL_DropOldestSegmentAtSeqZeroEmitsLossMarker
+	// so each user record gets its own segment: SegmentSize=56 admits a
+	// single 21-byte user record (8-byte frame + 12-byte seq/gen + 1-byte
+	// payload) plus the 16-byte segment header; a second record forces a
+	// roll. MaxTotalBytes=120 (~2 segments × 56) trips overflow on the
+	// third Append. NO MarkAcked call: ackPresent stays false for the
+	// duration of the test.
+	w, err := Open(Options{Dir: dir, SegmentSize: 56, MaxTotalBytes: 120, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	for i := uint64(0); i < 5; i++ {
+		if _, err := w.Append(int64(i), 0, []byte{byte(i)}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	// Round-2 bug: silent GC of the seq=0 segment because ackHighSeq=0
+	// matched seq=0. Fix: ackPresent=false bails gcAckedLocked, overflow
+	// falls into the lossy path, TransportLoss marker is written. Scan
+	// every on-disk segment for the LossMarkerSentinel, mirroring how
+	// TestWAL_OverflowEmitsLossMarker detects markers.
+	segDir := filepath.Join(dir, "segments")
+	entries, err := os.ReadDir(segDir)
+	if err != nil {
+		t.Fatalf("read segments dir: %v", err)
+	}
+	sawMarker := false
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(segDir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if bytes.Contains(data, []byte(LossMarkerSentinel)) {
+			sawMarker = true
+			break
+		}
+	}
+	if !sawMarker {
+		t.Errorf("no TransportLoss marker after overflow on fresh WAL: ackPresent=false must block silent GC of the seq=0 segment")
+	}
+}
+
+// segMeta is a minimal sealed-segment descriptor used by the
+// generation-boundary regression test below; mirrors what the test asserts
+// (index for ordering, generation for the lex compare).
+type segMeta struct {
+	idx uint64
+	gen uint32
+}
+
+// listSealedSegmentsForTest returns sealed (non-INPROGRESS) segments in
+// numeric idx order, with the generation read from each segment header.
+func listSealedSegmentsForTest(t *testing.T, dir string) []segMeta {
+	t.Helper()
+	segDir := filepath.Join(dir, "segments")
+	entries, err := os.ReadDir(segDir)
+	if err != nil {
+		t.Fatalf("read segments dir: %v", err)
+	}
+	var out []segMeta
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".seg") || strings.HasSuffix(name, ".INPROGRESS") {
+			continue
+		}
+		idx, ok := parseSegmentIndex(name)
+		if !ok {
+			continue
+		}
+		f, err := os.Open(filepath.Join(segDir, name))
+		if err != nil {
+			t.Fatalf("open %s: %v", name, err)
+		}
+		hdr, err := ReadSegmentHeader(f)
+		f.Close()
+		if err != nil {
+			t.Fatalf("read header %s: %v", name, err)
+		}
+		out = append(out, segMeta{idx: idx, gen: hdr.Generation})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].idx < out[j].idx })
+	return out
+}
+
+// TestWAL_GcAckedRespectsGenerationBoundary regresses the round-2 finding
+// that ack-driven GC compared only seq, ignoring generation. After a
+// generation roll, seqs restart at 0, so an old watermark (gen=7, seq=100)
+// reopened on disk would silently reclaim later gen=8 segments whose local
+// seqs were <=100 even though no gen=8 record was ever acked. Fix: lex
+// (gen, seq) compare in segmentFullyAckedLocked.
+func TestWAL_GcAckedRespectsGenerationBoundary(t *testing.T) {
+	dir := t.TempDir()
+	// Each user record costs 8 (frame) + 12 (seq/gen) + 1 (payload) = 21
+	// bytes; SegmentHeader is 16 bytes; a 56-byte segment fits exactly
+	// one user record after its header. SegmentSize=56 with a 1-byte
+	// payload guarantees every record gets its own sealed segment, which
+	// is what we need to assert per-segment generations crisply.
+	// MaxTotalBytes is generous so overflow GC never fires during setup.
+	w, err := Open(Options{Dir: dir, SegmentSize: 56, MaxTotalBytes: 1 << 20, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	// gen=7: seqs 0..3 → 4 sealed segments under SegmentSize=56.
+	for i := int64(0); i <= 3; i++ {
+		if _, err := w.Append(i, 7, []byte{byte(i)}); err != nil {
+			t.Fatalf("gen7 append %d: %v", i, err)
+		}
+	}
+	// gen=8: seqs 0..2 — first append triggers the generation roll and
+	// opens a fresh segment with header.generation=8.
+	for i := int64(0); i <= 2; i++ {
+		if _, err := w.Append(i, 8, []byte{byte(i)}); err != nil {
+			t.Fatalf("gen8 append %d: %v", i, err)
+		}
+	}
+	// Ack everything in gen=7. Crucially, do NOT advance into gen=8.
+	if err := w.MarkAcked(7, 3); err != nil {
+		t.Fatalf("MarkAcked(7,3): %v", err)
+	}
+	// MarkAcked already runs an ack-driven sweep, so a follow-up
+	// gcAckedLocked is a no-op idempotency check; we still call it
+	// explicitly to model the overflow-path invocation site.
+	beforeSealed := listSealedSegmentsForTest(t, dir)
+	w.mu.Lock()
+	n, err := w.gcAckedLocked()
+	w.mu.Unlock()
+	if err != nil {
+		t.Fatalf("gcAckedLocked: %v", err)
+	}
+	afterSealed := listSealedSegmentsForTest(t, dir)
+	// Any gen<7 sealed segment should be gone (vacuously true here — we
+	// only created gen=7 and gen=8). Any gen=7 sealed segment should be
+	// gone (acked). Any gen=8 sealed segment with hi <= 3 must still be
+	// on disk: the round-2 bug would have silently dropped it.
+	for _, s := range afterSealed {
+		if s.gen < 7 {
+			t.Errorf("sealed segment gen=%d still on disk after acking (gen=7,seq=3) — should have been GCd", s.gen)
+		}
+		if s.gen == 7 {
+			t.Errorf("sealed gen=7 segment idx=%d survived ack of (7,3) — gcAckedLocked should have reclaimed it", s.idx)
+		}
+	}
+	var anyGen8Surviving bool
+	for _, s := range afterSealed {
+		if s.gen == 8 {
+			anyGen8Surviving = true
+			break
+		}
+	}
+	if !anyGen8Surviving {
+		t.Errorf("no gen=8 sealed segment survived gcAckedLocked; expected at least one (we acked only through (gen=7, seq=3))")
+	}
+	// Sanity: at least one gen=7 segment must have been reclaimed across
+	// the MarkAcked sweep + the explicit gcAckedLocked call.
+	gen7BeforeCount := 0
+	for _, s := range beforeSealed {
+		if s.gen == 7 {
+			gen7BeforeCount++
+		}
+	}
+	gen7AfterCount := 0
+	for _, s := range afterSealed {
+		if s.gen == 7 {
+			gen7AfterCount++
+		}
+	}
+	if gen7BeforeCount == gen7AfterCount && gen7BeforeCount > 0 {
+		t.Errorf("ack of (gen=7,seq=3) did not reclaim any gen=7 segment: before=%d after=%d explicit-gc-removed=%d",
+			gen7BeforeCount, gen7AfterCount, n)
 	}
 }
