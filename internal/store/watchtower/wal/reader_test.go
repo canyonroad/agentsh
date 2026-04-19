@@ -231,6 +231,80 @@ func TestReader_SkipsGCdSegmentsContinuingPastLossMarker(t *testing.T) {
 	if len(seenSeqs) == 0 {
 		t.Errorf("reader saw zero records; expected at least the live ones")
 	}
+	// Round-2 strengthening: any seqs that did surface must be monotonic.
+	// A non-monotonic sequence here would indicate the missing-segment skip
+	// path masked a real open error and we accidentally re-yielded an old
+	// segment after advancing past it.
+	for i := 1; i < len(seenSeqs); i++ {
+		if seenSeqs[i] <= seenSeqs[i-1] {
+			t.Errorf("non-monotonic seqs after GC: %v", seenSeqs)
+		}
+	}
+}
+
+// TestReader_FollowsLiveSegmentRenamedBetweenSnapshotAndOpen regresses the
+// round-2 finding that the round-1 ENOENT fast-path conflated GC with the
+// rename-on-seal case. A queued .INPROGRESS that the WAL sealed via size or
+// generation roll between NewReader's directory snapshot and the segment-open
+// call must still be read from its sealed twin — silently dropping it would
+// lose user records that are still on disk (rename is not a loss event, so no
+// TransportLoss marker would compensate).
+func TestReader_FollowsLiveSegmentRenamedBetweenSnapshotAndOpen(t *testing.T) {
+	dir := t.TempDir()
+	// SegmentSize=64 fits two records; the third forces a size roll that
+	// seals (.INPROGRESS → .seg) the existing live segment.
+	w, err := Open(Options{Dir: dir, SegmentSize: 64, MaxTotalBytes: 1 << 20, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := w.Append(0, 0, []byte{'a', 'a'}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Append(1, 0, []byte{'b', 'b'}); err != nil {
+		t.Fatal(err)
+	}
+	// Snapshot the directory into a Reader BEFORE the seal — r.segments now
+	// holds the .INPROGRESS name for segment 0.
+	r, err := w.NewReader(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	// Force a size roll: third record won't fit in segment 0, so seg 0 is
+	// renamed (.INPROGRESS → .seg) and a new live segment opens for seq 2.
+	if _, err := w.Append(2, 0, []byte{'c', 'c'}); err != nil {
+		t.Fatal(err)
+	}
+	// The .INPROGRESS path the Reader has queued no longer exists; only its
+	// sealed twin does. Round-2 bug: Reader treats the missing .INPROGRESS
+	// as GC and skips it, losing seqs 0 and 1.
+	seenSeqs := []uint64{}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rec, err := r.Next()
+		if err == io.EOF {
+			select {
+			case <-r.Notify():
+			case <-time.After(50 * time.Millisecond):
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if rec.Kind != RecordData {
+			continue
+		}
+		seenSeqs = append(seenSeqs, rec.Sequence)
+		if len(seenSeqs) == 3 {
+			break
+		}
+	}
+	want := []uint64{0, 1, 2}
+	if len(seenSeqs) != 3 || seenSeqs[0] != want[0] || seenSeqs[1] != want[1] || seenSeqs[2] != want[2] {
+		t.Errorf("seen seqs = %v, want %v (records from the renamed segment must not be silently dropped)", seenSeqs, want)
+	}
 }
 
 // TestReader_BlocksUntilNotifyAfterEOF asserts the Notify/Next contract: after

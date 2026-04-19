@@ -214,16 +214,44 @@ func (r *Reader) Next() (Record, error) {
 			next := r.segments[0]
 			r.segments = r.segments[1:]
 			path := filepath.Join(r.w.segDir, next.name)
+			// openedLive tracks whether the file we actually opened is a
+			// live .INPROGRESS — defaults to the queued name's suffix but
+			// the sealed-twin probe below can flip it false if we end up
+			// opening a renamed-since-snapshot .seg instead.
+			openedLive := strings.HasSuffix(next.name, inprogressSuffix)
 			f, err := os.Open(path)
 			if err != nil {
 				if errors.Is(err, fs.ErrNotExist) {
-					// GC reclaimed this segment between our directory
-					// snapshot and the open. The associated TransportLoss
-					// marker (if any) was appended to a later segment by
-					// the overflow path and will surface naturally.
-					continue
+					// ENOENT is ambiguous on an .INPROGRESS path: the
+					// segment may have been (a) reclaimed by ack-driven
+					// GC, or (b) sealed via rename to .seg between our
+					// directory snapshot and this open. Case (b) means
+					// the records are still on disk under the sealed
+					// twin; silently skipping would drop them with no
+					// loss marker (rename-on-seal is not a loss event).
+					// So discriminate: probe the sealed twin first when
+					// the queued name was .INPROGRESS, and only fall
+					// through to skip if both files are gone (true GC).
+					// A queued .seg can only disappear via GC.
+					if strings.HasSuffix(next.name, inprogressSuffix) {
+						sealedPath := filepath.Join(r.w.segDir, segmentName(next.idx))
+						sf, sErr := os.Open(sealedPath)
+						if sErr == nil {
+							f = sf
+							// We opened the sealed twin, not the live file.
+							openedLive = false
+							// Fall through to header read below.
+						} else if errors.Is(sErr, fs.ErrNotExist) {
+							continue
+						} else {
+							return Record{}, sErr
+						}
+					} else {
+						continue
+					}
+				} else {
+					return Record{}, err
 				}
-				return Record{}, err
 			}
 			hdr, err := ReadSegmentHeader(f)
 			if err != nil {
@@ -233,7 +261,7 @@ func (r *Reader) Next() (Record, error) {
 			r.current = f
 			r.curHdr = hdr
 			r.curIdx = next.idx
-			r.curLive = strings.HasSuffix(next.name, inprogressSuffix)
+			r.curLive = openedLive
 			// Carry lastGoodSeq across segment boundaries within the same
 			// generation; reset only on a generation change. Seqs restart
 			// at 0 on every generation roll, so a per-seq compare across
