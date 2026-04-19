@@ -920,19 +920,16 @@ These deferrals do not block this design. Each is a localized future PR.
 - When enabled but Phase 0 has not landed, `validate()` fails fast with a clear message: `"watchtower sink requires composite shared-sequence support (Phase 0); enable when available"`.
 - When enabled but the OCSF mapper is not injected, `validate()` ALSO fails fast: `"watchtower sink requires OCSF mapper (Phase 1); enable when available"`. The stub mapper exists strictly for compile-time and unit-test purposes — production deployment requires Phase 1. (This tightens an earlier inconsistency: the stub is no longer a fallback, it's a test fixture.)
 
-**Mapper nil-handling contract.** `Store.New` must reject both untyped `nil` mappers and any typed-nil mapper implementation. Untyped nil is detected with `m == nil`. For typed-nil, detection covers every nilable Go kind that can satisfy the `compact.Mapper` interface — pointer, map, slice, channel, func, and interface — via:
+**Mapper nil-handling contract.** `Store.New` must reject both untyped `nil` mappers and typed-nil pointer-to-Mapper implementations. Untyped nil is detected with `m == nil`. For typed-nil, detection is scoped to pointer form via:
 
 ```go
 rv := reflect.ValueOf(m)
-switch rv.Kind() {
-case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func, reflect.Interface:
-    if rv.IsNil() {
-        return errors.New("mapper is required (typed-nil)")
-    }
+if rv.Kind() == reflect.Ptr && rv.IsNil() {
+    return errors.New("mapper is required (typed-nil pointer)")
 }
 ```
 
-This is broader than `Kind() == Ptr` because `Mapper` is a public interface and alternate implementations (e.g. `MapBackedMapper map[string]MappedEvent`, a named func type, etc.) are not restricted to pointer kinds. The "never panic on nil deref inside `AppendEvent`" guarantee requires covering every nilable interface payload, not just pointers.
+Other nilable kinds (`map`, `slice`, `chan`, `func`) implementing `Mapper` are pathological in practice — production mappers are struct pointers (e.g. `*OcsfMapper`) — so the contract intentionally scopes typed-nil rejection to the `*ConcreteMapper` form. If a future implementation deviates from struct-pointer form, the contract should be revisited at that point.
 
 The stub-rejection branch (`compact.IsStubMapper`) runs after the nil branches and matches both value and pointer forms (`StubMapper{}`, `*StubMapper`); the typed-nil `*StubMapper` case is redundantly covered by both branches but the nil branch wins because it produces the more actionable error.
 - Operators can verify the sink end-to-end without a live Watchtower by pointing `Endpoint` at the testserver binary that ships in `cmd/wtp-testserver/` (a thin wrapper around `internal/store/watchtower/testserver`). This is also how we recommend running it in development.
