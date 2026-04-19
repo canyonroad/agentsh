@@ -12564,11 +12564,21 @@ phasing → Rollout precondition") MUST verify:
      MUST be live in the production monitoring environment, not
      pending. Acceptable redirect targets are documented in spec
      §"Migration guidance: removed `wtp_dropped_missing_chain_total`":
-     a log-based alert/SLO matching the structured ERROR-log fields
-     `{event_id, session_id, event_type, err}` where `err` is the
-     exact sentinel string
+     a log-based alert/SLO whose canonical trigger is the sentinel
+     `err` value
      `"compact.Encode: ev.Chain is nil; composite did not stamp"`
-     (the value of `compact.ErrMissingChain.Error()`) for
+     (the value of `compact.ErrMissingChain.Error()`), expressed
+     using the selector shape required by the host log-aggregation
+     system's Step 1b `field_preservation` classification (per
+     Step 2's log-based-alert option) — `ok` permits a structured
+     `err` predicate with optional source scoping and may
+     additionally bind the auxiliary fields
+     `{event_id, session_id, event_type}` either as alert predicates
+     or as diagnostic-context labels; `err-only` permits a structured
+     `err` predicate with REQUIRED source scoping (auxiliary fields
+     are diagnostic-only and may be absent); `msg-only` permits a
+     rendered-message-body predicate with REQUIRED source scoping
+     (auxiliary fields are diagnostic-only and may be absent), for
      composite-store-regression intent (recommended; the only
      contractually guaranteed emission signal),
      `wtp_reconnects_total{reason="..."}` for composite-store-regression
@@ -12683,7 +12693,13 @@ The preflight check MAY be automated as a one-off CI grep run against
 the monitoring repos (scoped to the inventory declared in Step 1a);
 if it is run by hand, the result MUST be recorded in the same tracking
 issue, including the timestamps at which each migration PR was merged
-and deployed to production monitoring AND log-aggregation environments.
+and deployed to production monitoring, log-aggregation, AND
+third-party hosting environments. For third-party hosting systems
+where deployment is not gated by a PR (e.g. a manual dashboard edit
+in a vendor UI), record an equivalent proof artifact: the
+change-event identifier from the vendor's audit log, OR a screenshot
+or API-fetched export of the live artifact dated after the deploy,
+captured by the SRE/ops engineer who pushed the change.
 
 #### Acceptance criteria
 
