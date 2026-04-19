@@ -80,25 +80,46 @@ type Reader struct {
 	// whether to reset lastGoodSeq.
 	lastGoodGen    uint32
 	lastGoodGenSet bool // true once lastGoodGen reflects a real seen generation.
+	// nextSeq is the lowest user sequence the Reader will surface; records
+	// with Sequence < nextSeq are dropped from RecordData yields. Set by
+	// NewReader from start+1 so callers express an "exclusive" cursor with
+	// the same semantics as ack watermarks. Loss records are NOT filtered
+	// by nextSeq — the transport must propagate every loss notice.
+	nextSeq uint64
+	// lastEmittedSeq is the highest user sequence successfully returned to
+	// a caller so far, monotonic across the Reader's lifetime (does NOT
+	// reset on a generation change, unlike lastGoodSeq). Surfaced via
+	// LastSequence() so the Replayer can detect the catch-up condition
+	// (TryNext returned ok=false AND LastSequence >= tailSeq).
+	lastEmittedSeq uint64
 	closed         bool
 }
 
-// NewReader returns a Reader that will surface records starting at the first
-// record with sequence >= start. Records that predate start in the on-disk
-// stream are still returned; the start parameter is reserved for a future
-// fast-forward optimization (Task 16+) and is currently informational.
+// NewReader returns a Reader that surfaces RecordData entries with sequence
+// >= start (i.e. the first record returned has Sequence == start or later).
+// Pass start=0 to receive every user record from the beginning of the
+// on-disk stream — the same behaviour Task 14 shipped. RecordLoss entries
+// are NOT filtered by start; the transport must propagate every loss notice
+// regardless of the caller's cursor.
+//
+// The on-disk stream is still walked in segment-index order; records that
+// predate start are read off the disk and dropped on the floor by Next /
+// TryNext. This keeps the API simple at the cost of skipping work — fast-
+// forward by segment-index hint is left as a future optimization.
+//
+// Callers replaying after an ack pass start = ackHighSeq + 1 to skip the
+// already-acknowledged tail (Task 16's Replayer enforces this idiom).
 func (w *WAL) NewReader(start uint64) (*Reader, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {
 		return nil, ErrClosed
 	}
-	r := &Reader{w: w, notify: make(chan struct{}, 1)}
+	r := &Reader{w: w, notify: make(chan struct{}, 1), nextSeq: start}
 	if err := r.rescanLocked(); err != nil {
 		return nil, err
 	}
 	w.readers = append(w.readers, r)
-	_ = start // reserved for future fast-forward; see Task 16+.
 	return r, nil
 }
 
@@ -199,16 +220,73 @@ func (r *Reader) Next() (Record, error) {
 	if r.closed {
 		return Record{}, ErrReaderClosed
 	}
+	rec, ok, err := r.nextLocked()
+	if err != nil {
+		return Record{}, err
+	}
+	if !ok {
+		return Record{}, io.EOF
+	}
+	return rec, nil
+}
+
+// TryNext returns the next available record without blocking. ok=false means
+// no record is currently available (the reader is caught up to the WAL tail
+// or to an unsealed live segment) — unlike Next, it does NOT return io.EOF
+// for this case. err is non-nil only on hard read failures (corrupt headers,
+// unparseable seq/gen frames, etc.); ErrCRCMismatch is still surfaced as a
+// RecordLoss with ok=true. Returns ErrReaderClosed if Close has run.
+//
+// Implementation note: TryNext and Next share the loop body via nextLocked.
+// Do NOT duplicate the loop here — that path has accreted enough segment-
+// rollover, GC-skip, rename-on-seal, and CRC-mismatch handling that two
+// copies will drift.
+func (r *Reader) TryNext() (Record, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return Record{}, false, ErrReaderClosed
+	}
+	return r.nextLocked()
+}
+
+// LastSequence returns the highest user sequence the Reader has surfaced via
+// Next or TryNext so far. Monotonic across the Reader's lifetime — does NOT
+// reset on a generation change, unlike the internal lastGoodSeq used for
+// loss-anchor calculations. Zero before the first emission.
+func (r *Reader) LastSequence() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastEmittedSeq
+}
+
+// WALHighWaterSequence returns the highest sequence ever appended to the
+// underlying WAL at call time. Used by Replayer to capture an entry-time
+// tail watermark.
+func (r *Reader) WALHighWaterSequence() uint64 {
+	r.w.mu.Lock()
+	defer r.w.mu.Unlock()
+	return r.w.highSeq
+}
+
+// nextLocked drives the segment-walk loop and returns one of:
+//
+//	(rec, true,  nil)  — a record was decoded
+//	(_,   false, nil)  — caught up to tail (or live-segment EOF); no record
+//	(_,   false, err)  — hard error (bad header, malformed frame, ...)
+//
+// Caller MUST hold r.mu.
+func (r *Reader) nextLocked() (Record, bool, error) {
 	for {
 		if r.current == nil {
 			if len(r.segments) == 0 {
 				// Re-scan for any new segments produced by Append since
 				// the last walk; if still empty, we are caught up.
 				if err := r.rescanLocked(); err != nil {
-					return Record{}, err
+					return Record{}, false, err
 				}
 				if len(r.segments) == 0 {
-					return Record{}, io.EOF
+					return Record{}, false, nil
 				}
 			}
 			next := r.segments[0]
@@ -244,19 +322,19 @@ func (r *Reader) Next() (Record, error) {
 						} else if errors.Is(sErr, fs.ErrNotExist) {
 							continue
 						} else {
-							return Record{}, sErr
+							return Record{}, false, sErr
 						}
 					} else {
 						continue
 					}
 				} else {
-					return Record{}, err
+					return Record{}, false, err
 				}
 			}
 			hdr, err := ReadSegmentHeader(f)
 			if err != nil {
 				_ = f.Close()
-				return Record{}, err
+				return Record{}, false, err
 			}
 			r.current = f
 			r.curHdr = hdr
@@ -277,13 +355,15 @@ func (r *Reader) Next() (Record, error) {
 			if r.curLive {
 				// Live segment may have been sealed by a roll since we
 				// opened it; if so, demote and fall through to drain the
-				// handle. Otherwise return EOF and let the caller wait.
+				// handle. Otherwise return "no record available" and let
+				// the caller (Next: turn into io.EOF; TryNext: ok=false)
+				// decide whether to block.
 				demoted, derr := r.maybeDemoteLiveLocked()
 				if derr != nil {
-					return Record{}, derr
+					return Record{}, false, derr
 				}
 				if !demoted {
-					return Record{}, io.EOF
+					return Record{}, false, nil
 				}
 				continue
 			}
@@ -317,27 +397,39 @@ func (r *Reader) Next() (Record, error) {
 					Generation:   r.curHdr.Generation,
 					Reason:       "crc_corruption",
 				},
-			}, nil
+			}, true, nil
 		}
 		if err != nil {
-			return Record{}, fmt.Errorf("reader next: %w", err)
+			return Record{}, false, fmt.Errorf("reader next: %w", err)
 		}
 		// Synthetic loss marker emitted by AppendLoss/overflow GC?
 		if isLossMarker(payload) {
 			loss, ok := decodeLossPayload(payload)
 			if !ok {
-				return Record{}, fmt.Errorf("reader: malformed loss marker payload (len=%d)", len(payload))
+				return Record{}, false, fmt.Errorf("reader: malformed loss marker payload (len=%d)", len(payload))
 			}
-			return Record{Kind: RecordLoss, Generation: loss.Generation, Loss: loss}, nil
+			// Loss markers are NOT subject to the nextSeq filter — every
+			// loss notice MUST flow to the transport so the receiver can
+			// surface a gap. Filtering by sequence here would silently
+			// suppress notices for ranges that predate the cursor.
+			return Record{Kind: RecordLoss, Generation: loss.Generation, Loss: loss}, true, nil
 		}
 		seq, gen, ok := parseSeqGen(payload)
 		if !ok {
-			return Record{}, fmt.Errorf("reader: malformed seq/gen frame (len=%d)", len(payload))
+			return Record{}, false, fmt.Errorf("reader: malformed seq/gen frame (len=%d)", len(payload))
 		}
+		// Update lastGoodSeq/Gen even for sub-cursor records so the loss
+		// anchor tracks correctly across a future CRC mismatch.
 		r.lastGoodSeq = seq
 		r.lastGoodGen = gen
 		r.lastGoodGenSet = true
-		return Record{Kind: RecordData, Sequence: seq, Generation: gen, Payload: payload[12:]}, nil
+		if seq < r.nextSeq {
+			// Caller asked for a cursor strictly past this seq. Drop on
+			// the floor and continue the loop to the next record.
+			continue
+		}
+		r.lastEmittedSeq = seq
+		return Record{Kind: RecordData, Sequence: seq, Generation: gen, Payload: payload[12:]}, true, nil
 	}
 }
 

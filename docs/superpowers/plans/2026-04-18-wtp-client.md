@@ -6264,30 +6264,52 @@ import (
 )
 
 // TestReplayer_StopsAtTailWatermark verifies the replayer stops when the
-// WAL tail equals the recorded entry watermark, advancing to Live.
+// reader has caught up to the entry-time tail watermark. Three records
+// are appended, seq=2 is acked, and one more record (seq=3) is appended
+// past the ack. After NewReplayer, an additional record (seq=4) is
+// appended — it MUST NOT be surfaced because the tail was sampled before
+// the post-entry append. A Reader started at start = ack+1 = 3 must
+// surface exactly one record (seq=3) and report done.
 func TestReplayer_StopsAtTailWatermark(t *testing.T) {
 	dir := t.TempDir()
-	w, err := wal.Open(wal.Options{Dir: dir, SegmentSize: 64 * 1024})
+	w, err := wal.Open(wal.Options{
+		Dir:           dir,
+		SegmentSize:   64 * 1024,
+		MaxTotalBytes: 1 << 20,
+		SyncMode:      wal.SyncImmediate,
+	})
 	if err != nil {
-		t.Fatalf("open WAL: %v", err)
+		t.Fatalf("wal.Open: %v", err)
 	}
 	defer w.Close()
 
-	// Append three records; ack the second one. Replayer should emit
-	// one record (the third) then stop.
-	for i := 0; i < 3; i++ {
-		if _, err := w.Append([]byte{byte(i)}); err != nil {
-			t.Fatalf("append: %v", err)
+	for i := int64(0); i < 3; i++ {
+		if _, err := w.Append(i, 0, []byte{byte(i)}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
 		}
 	}
-	w.MarkAcked(2)
+	if err := w.MarkAcked(0, 2); err != nil {
+		t.Fatalf("mark acked: %v", err)
+	}
+	if _, err := w.Append(3, 0, []byte{0x33}); err != nil {
+		t.Fatalf("append 3: %v", err)
+	}
 
-	rdr := w.NewReader(2) // start AFTER acked watermark
+	rdr, err := w.NewReader(3) // start = ack+1
+	if err != nil {
+		t.Fatalf("new reader: %v", err)
+	}
+	defer rdr.Close()
 
 	r := transport.NewReplayer(rdr, transport.ReplayerOptions{
 		MaxBatchRecords: 100,
 		MaxBatchBytes:   16 * 1024,
 	})
+
+	// Post-entry append — must NOT be surfaced by the Replayer.
+	if _, err := w.Append(4, 0, []byte{0x44}); err != nil {
+		t.Fatalf("append 4 (post-entry): %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -6312,48 +6334,133 @@ func TestReplayer_StopsAtTailWatermark(t *testing.T) {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/store/watchtower/transport/... -run TestReplayer_StopsAtTailWatermark`
-Expected: FAIL — `transport.NewReplayer`, `transport.ReplayerOptions`, `wal.WAL.MarkAcked`, `wal.WAL.NewReader` undefined.
+Expected: FAIL — `transport.NewReplayer`, `transport.ReplayerOptions`, plus the
+new `wal.Reader.TryNext`, `wal.Reader.LastSequence`, and
+`wal.Reader.WALHighWaterSequence` accessors are undefined.
 
-- [ ] **Step 3: Add `NewReader` to WAL**
+- [ ] **Step 3: Wire `nextSeq` through the WAL Reader**
 
-In `internal/store/watchtower/wal/reader.go`, add the constructor (we created the type in Task 14; now wire it to the WAL):
+The Reader type was created in Task 14 with `Next` (blocking), `Notify`, and
+`Close`. `NewReader(start)` already accepted a start parameter but treated it
+as informational. Task 16 turns it into the real cursor: `start` is the lowest
+sequence the Reader will surface (RecordData entries with `Sequence < start`
+are dropped on the floor). Loss records are NOT filtered.
+
+Update the constructor in `internal/store/watchtower/wal/reader.go`:
 
 ```go
-// NewReader returns a Reader positioned to start at startSeq (exclusive —
-// the next record returned will have sequence > startSeq).
-func (w *WAL) NewReader(startSeq uint64) *Reader {
+// NewReader returns a Reader that surfaces RecordData entries with sequence
+// >= start (i.e. the first record returned has Sequence == start or later).
+// Pass start=0 to receive every user record from the beginning of the
+// on-disk stream — the same behaviour Task 14 shipped. RecordLoss entries
+// are NOT filtered by start; the transport must propagate every loss notice
+// regardless of the caller's cursor.
+//
+// Callers replaying after an ack pass start = ackHighSeq + 1 to skip the
+// already-acknowledged tail (Task 16's Replayer enforces this idiom).
+func (w *WAL) NewReader(start uint64) (*Reader, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	r := &Reader{
-		wal:      w,
-		notifyCh: make(chan struct{}, 1),
-		nextSeq:  startSeq + 1,
+	if w.closed {
+		return nil, ErrClosed
+	}
+	r := &Reader{w: w, notify: make(chan struct{}, 1), nextSeq: start}
+	if err := r.rescanLocked(); err != nil {
+		return nil, err
 	}
 	w.readers = append(w.readers, r)
-	return r
+	return r, nil
 }
 ```
 
-Add a `nextSeq` field to `Reader` (placed alongside `lastSeq` from Task 14):
+Add two new fields to `Reader` (alongside `lastGoodSeq`/`lastGoodGen` from Task 14):
 
 ```go
-type Reader struct {
-	wal      *WAL
-	notifyCh chan struct{}
-	closed   chan struct{}
-	lastSeq  uint64 // highest seq emitted (from Task 14)
-	nextSeq  uint64 // skip records with seq < nextSeq
+// nextSeq is the lowest user sequence the Reader will surface; records
+// with Sequence < nextSeq are dropped from RecordData yields. Loss
+// records are NOT filtered by nextSeq.
+nextSeq uint64
+// lastEmittedSeq is the highest user sequence successfully returned to
+// a caller so far, monotonic across the Reader's lifetime (does NOT
+// reset on a generation change, unlike lastGoodSeq). Surfaced via
+// LastSequence() so the Replayer can detect the catch-up condition.
+lastEmittedSeq uint64
+```
+
+Refactor `Next` so the loop body lives in a private `nextLocked` helper that
+returns `(Record, ok bool, err error)`. `Next` wraps it and converts
+`ok=false` into `io.EOF`; the new `TryNext` wraps it and surfaces `ok=false`
+directly:
+
+```go
+// Next returns the next available record. Returns io.EOF when caught up.
+func (r *Reader) Next() (Record, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return Record{}, ErrReaderClosed
+	}
+	rec, ok, err := r.nextLocked()
+	if err != nil {
+		return Record{}, err
+	}
+	if !ok {
+		return Record{}, io.EOF
+	}
+	return rec, nil
+}
+
+// TryNext returns the next available record without blocking. ok=false
+// means no record is currently available (the reader is caught up to the
+// WAL tail). Reuses the loop body of Next via nextLocked — do NOT
+// duplicate the segment-walk logic.
+func (r *Reader) TryNext() (Record, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return Record{}, false, ErrReaderClosed
+	}
+	return r.nextLocked()
 }
 ```
 
-Update `Next` (and `TryNext`) so that after decoding the seq from a record's payload header, records with `rec.Sequence < r.nextSeq` are dropped on the floor and the loop continues to the next record. Update the body of the existing `Next`:
+Inside `nextLocked`, the data-record branch becomes:
 
 ```go
-		if rec.Sequence < r.nextSeq {
-			continue // skip records before the start position
-		}
-		r.lastSeq = rec.Sequence
-		return rec, nil
+seq, gen, ok := parseSeqGen(payload)
+if !ok {
+	return Record{}, false, fmt.Errorf("reader: malformed seq/gen frame (len=%d)", len(payload))
+}
+r.lastGoodSeq = seq
+r.lastGoodGen = gen
+r.lastGoodGenSet = true
+if seq < r.nextSeq {
+	continue // skip records before the cursor
+}
+r.lastEmittedSeq = seq
+return Record{Kind: RecordData, Sequence: seq, Generation: gen, Payload: payload[12:]}, true, nil
+```
+
+Add the two accessors the Replayer needs:
+
+```go
+// LastSequence returns the highest user sequence the Reader has surfaced
+// via Next or TryNext so far. Monotonic across the Reader's lifetime —
+// does NOT reset on a generation change.
+func (r *Reader) LastSequence() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastEmittedSeq
+}
+
+// WALHighWaterSequence returns the highest sequence ever appended to the
+// underlying WAL at call time. Used by Replayer to capture an entry-time
+// tail watermark.
+func (r *Reader) WALHighWaterSequence() uint64 {
+	r.w.mu.Lock()
+	defer r.w.mu.Unlock()
+	return r.w.highSeq
+}
 ```
 
 - [ ] **Step 4: Write the Replayer**
@@ -6405,56 +6512,35 @@ func (r *Replayer) NextBatch(ctx context.Context) (ReplayBatch, bool, error) {
 	batch := ReplayBatch{}
 	bytes := 0
 	for {
-		if len(batch.Records) >= r.opts.MaxBatchRecords {
+		if err := ctx.Err(); err != nil {
+			return batch, false, err
+		}
+		if r.opts.MaxBatchRecords > 0 && len(batch.Records) >= r.opts.MaxBatchRecords {
 			return batch, false, nil
 		}
-		if bytes >= r.opts.MaxBatchBytes && len(batch.Records) > 0 {
+		if r.opts.MaxBatchBytes > 0 && bytes >= r.opts.MaxBatchBytes && len(batch.Records) > 0 {
 			return batch, false, nil
 		}
-		// Non-blocking peek: if the reader has nothing available and we're
-		// already past the tail, we're done.
 		rec, ok, err := r.rdr.TryNext()
 		if err != nil {
-			return batch, false, fmt.Errorf("reader: %w", err)
+			return batch, false, fmt.Errorf("replayer: reader.TryNext: %w", err)
 		}
 		if !ok {
-			done := r.rdr.LastSequence() >= r.tailSeq
-			return batch, done, nil
+			// Reader caught up. tailSeq was sampled under the WAL lock,
+			// so every record with seq <= tailSeq has been visible by
+			// now — replay is done.
+			return batch, true, nil
 		}
 		batch.Records = append(batch.Records, rec)
-		bytes += len(rec.Payload)
-		if rec.Sequence >= r.tailSeq {
-			return batch, true, nil
+		if rec.Kind == wal.RecordData {
+			bytes += len(rec.Payload)
+			if rec.Sequence >= r.tailSeq {
+				return batch, true, nil
+			}
 		}
 	}
 }
 ```
-
-Note on Reader extensions referenced above: Task 14 produced a Reader with `Next` (blocking), `Notify`, and `Close`. Add these methods to that type now in `reader.go`:
-
-```go
-// TryNext returns the next record without blocking. ok=false means no
-// record is currently available.
-func (r *Reader) TryNext() (wal.Record, bool, error) {
-	// implementation: drain the segment under the wal mutex, no wait
-	// (reuse the loop body of Next but without the <-r.notifyCh blocking
-	//  branch — return ok=false instead of waiting).
-	...
-}
-
-// LastSequence returns the highest sequence the Reader has emitted so
-// far (0 before the first emission).
-func (r *Reader) LastSequence() uint64 { return r.lastSeq }
-
-// WALHighWaterSequence returns the current WAL tail sequence at call time.
-func (r *Reader) WALHighWaterSequence() uint64 {
-	r.wal.mu.Lock()
-	defer r.wal.mu.Unlock()
-	return r.wal.highSeq
-}
-```
-
-Track `lastSeq` inside the Reader by setting it after each successful `Next/TryNext`.
 
 Create `internal/store/watchtower/transport/state_replaying.go`:
 
@@ -6465,11 +6551,14 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
-// runReplaying drains the WAL up to the entry watermark and ships records
-// in EventBatch messages over the stream. Returns StateLive on success.
+// runReplaying drains the WAL via the supplied Replayer and ships records
+// in EventBatch messages over the conn that the Connecting state opened.
+// On success it returns StateLive. On a Send/Replayer error it returns
+// StateConnecting so the caller's run loop reconnects.
 func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error) {
 	for {
 		batch, done, err := r.NextBatch(ctx)
@@ -6491,20 +6580,18 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 	}
 }
 
-// buildEventBatch wraps WAL records into a wtpv1.EventBatch envelope. The
-// records' payloads are the already-serialized CompactEvent bytes; we just
-// re-pack them with their (sequence, generation) and integrity records.
-// Detailed wire-format work happens in Task 17.
-func buildEventBatch(_ []byte) (*wtpv1.ClientMessage, error) {
-	// Stub — Task 17 fills this in.
+// buildEventBatch is a stub — Task 17 fills in the real wire format.
+func buildEventBatch(_ []wal.Record) (*wtpv1.ClientMessage, error) {
 	return &wtpv1.ClientMessage{}, nil
 }
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `go test ./internal/store/watchtower/transport/...`
-Expected: PASS — `TestReplayer_StopsAtTailWatermark` plus any earlier tests.
+Run: `go test ./internal/store/watchtower/transport/... ./internal/store/watchtower/wal/...`
+Expected: PASS — both `TestReplayer_StopsAtTailWatermark` and the existing
+WAL Reader tests (which use `NewReader(0)` and rely on the start cursor
+being inclusive at zero).
 
 - [ ] **Step 6: Cross-compile check**
 
@@ -6514,7 +6601,10 @@ Expected: no errors.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add internal/store/watchtower/transport/replayer.go internal/store/watchtower/transport/state_replaying.go internal/store/watchtower/transport/replayer_test.go internal/store/watchtower/wal/reader.go
+git add internal/store/watchtower/transport/replayer.go \
+        internal/store/watchtower/transport/state_replaying.go \
+        internal/store/watchtower/transport/replayer_test.go \
+        internal/store/watchtower/wal/reader.go
 git commit -m "feat(wtp/transport): add Replayer that drains WAL up to entry tail"
 ```
 
