@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math"
 )
 
 // SegmentHeaderSize is the fixed 16-byte segment header at the start of
@@ -87,6 +88,15 @@ func ReadSegmentHeader(r io.Reader) (SegmentHeader, error) {
 // crcTable is the Castagnoli polynomial table used for record CRCs.
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
+// MaxFramedPayload is the largest payload size the on-disk frame format can
+// represent. The frame's length field is a uint32 and encodes
+// len(payload)+4 (payload bytes plus the 4-byte CRC), so the absolute
+// upper bound on a single record's payload is math.MaxUint32 - 4. This is
+// a protocol-level hard cap that constrains every caller, regardless of
+// how WAL.SegmentSize is configured. The constant is left untyped so 32-bit
+// platforms (where int < uint32) still compile; comparisons widen via uint64.
+const MaxFramedPayload = math.MaxUint32 - 4
+
 // ErrCRCMismatch is returned by ReadRecord when the on-disk CRC does not
 // match the recomputed CRC of the payload bytes.
 var ErrCRCMismatch = errors.New("wal: record CRC mismatch")
@@ -106,11 +116,15 @@ var ErrCRCMismatch = errors.New("wal: record CRC mismatch")
 // single record. The caller — typically the segment writer — derives this
 // from the configured WAL.SegmentSize so deployments with larger segments
 // can still emit larger records without lifting a hard-coded ceiling here.
-// maxPayload must be > 0; values <= 0 are an error so callers cannot
-// accidentally bypass the bound.
+// maxPayload must be in (0, MaxFramedPayload]; values outside that range
+// are rejected so a 64-bit caller bound cannot wrap the on-disk uint32
+// length field.
 func WriteRecord(w io.Writer, payload []byte, maxPayload int) error {
 	if maxPayload <= 0 {
 		return fmt.Errorf("wal: maxPayload must be > 0, got %d", maxPayload)
+	}
+	if uint64(maxPayload) > MaxFramedPayload {
+		return fmt.Errorf("wal: maxPayload %d exceeds protocol cap %d", maxPayload, uint64(MaxFramedPayload))
 	}
 	if len(payload) == 0 {
 		return errors.New("wal: empty payload")
@@ -138,10 +152,13 @@ func WriteRecord(w io.Writer, payload []byte, maxPayload int) error {
 // corrupted on-disk length cannot drive ReadRecord into an unbounded
 // allocation. The caller — typically the segment reader — derives this
 // from the actual segment file size or the configured WAL.SegmentSize.
-// maxPayload must be > 0.
+// maxPayload must be in (0, MaxFramedPayload].
 func ReadRecord(r io.Reader, maxPayload int) ([]byte, error) {
 	if maxPayload <= 0 {
 		return nil, fmt.Errorf("wal: maxPayload must be > 0, got %d", maxPayload)
+	}
+	if uint64(maxPayload) > MaxFramedPayload {
+		return nil, fmt.Errorf("wal: maxPayload %d exceeds protocol cap %d", maxPayload, uint64(MaxFramedPayload))
 	}
 	header := make([]byte, 8)
 	n, err := io.ReadFull(r, header)

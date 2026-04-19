@@ -3,6 +3,7 @@ package wal
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
 	"testing"
 )
 
@@ -196,5 +197,48 @@ func TestRecordFraming_RejectsNonPositiveMaxPayload(t *testing.T) {
 		if _, err := ReadRecord(bytes.NewReader([]byte{0, 0, 0, 5, 0, 0, 0, 0, 'x'}), m); err == nil {
 			t.Errorf("ReadRecord(maxPayload=%d) expected error, got nil", m)
 		}
+	}
+}
+
+// TestRecordFraming_RejectsMaxPayloadAboveProtocolCap guards the on-disk
+// length field. The frame's length is uint32 and encodes len(payload)+4,
+// so the protocol cannot represent payloads above MaxFramedPayload. A
+// caller that supplies maxPayload > MaxFramedPayload is rejected before
+// any cast can wrap the on-disk length and silently corrupt a frame.
+func TestRecordFraming_RejectsMaxPayloadAboveProtocolCap(t *testing.T) {
+	const aboveCap = uint64(MaxFramedPayload) + 1
+	if aboveCap > uint64(math.MaxInt) {
+		// 32-bit platform: int cannot represent values above MaxFramedPayload,
+		// so the constraint is naturally satisfied by the type system. Skip
+		// the boundary test rather than truncate-and-pretend.
+		t.Skip("32-bit platform: int cannot exceed MaxFramedPayload")
+	}
+	above := int(aboveCap)
+	var buf bytes.Buffer
+	if err := WriteRecord(&buf, []byte("x"), above); err == nil {
+		t.Fatalf("WriteRecord(maxPayload=%d) expected error, got nil", above)
+	}
+	if _, err := ReadRecord(bytes.NewReader([]byte{0, 0, 0, 5, 0, 0, 0, 0, 'x'}), above); err == nil {
+		t.Fatalf("ReadRecord(maxPayload=%d) expected error, got nil", above)
+	}
+}
+
+// TestRecordFraming_AcceptsMaxPayloadAtProtocolCap exercises the boundary:
+// a caller that supplies exactly MaxFramedPayload must be accepted. We
+// don't actually allocate that much; we just confirm the bound check
+// passes for a tiny payload under that ceiling.
+func TestRecordFraming_AcceptsMaxPayloadAtProtocolCap(t *testing.T) {
+	if uint64(MaxFramedPayload) > uint64(math.MaxInt) {
+		// 32-bit platform: int cannot represent MaxFramedPayload itself, so
+		// callers there are already constrained below the protocol cap.
+		t.Skip("32-bit platform: int cannot represent MaxFramedPayload")
+	}
+	cap := int(uint64(MaxFramedPayload))
+	var buf bytes.Buffer
+	if err := WriteRecord(&buf, []byte("x"), cap); err != nil {
+		t.Fatalf("WriteRecord(maxPayload=MaxFramedPayload) returned error: %v", err)
+	}
+	if _, err := ReadRecord(&buf, cap); err != nil {
+		t.Fatalf("ReadRecord(maxPayload=MaxFramedPayload) returned error: %v", err)
 	}
 }
