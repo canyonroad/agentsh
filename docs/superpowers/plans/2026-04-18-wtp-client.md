@@ -2379,13 +2379,16 @@ Create `internal/store/watchtower/chain/vectors_test.go`:
 package chain
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -2459,6 +2462,11 @@ func TestVectors(t *testing.T) {
 // for negative cases. Each implementation maps the snake_case keys to
 // its local struct fields here, keeping the published vectors language-
 // neutral.
+//
+// Numeric fields are decoded via decodeUint32 / decodeUint64 helpers
+// that range-check before casting. Silently truncating uint64 → uint32
+// would weaken the cross-implementation conformance story; explicit
+// rejection at the harness boundary is the contract.
 func buildIntegrityRecord(v vectorEntry) (IntegrityRecord, error) {
 	var rec IntegrityRecord
 	if len(v.Input) > 0 {
@@ -2469,47 +2477,47 @@ func buildIntegrityRecord(v vectorEntry) (IntegrityRecord, error) {
 		for key, raw := range fields {
 			switch key {
 			case "format_version":
-				var n uint64
-				if err := json.Unmarshal(raw, &n); err != nil {
-					return rec, fmt.Errorf("decode format_version: %w", err)
+				n, err := decodeUint32(key, raw)
+				if err != nil {
+					return rec, err
 				}
-				rec.FormatVersion = uint32(n)
+				rec.FormatVersion = n
 			case "sequence":
-				var n json.Number
-				if err := json.Unmarshal(raw, &n); err != nil {
-					return rec, fmt.Errorf("decode sequence: %w", err)
-				}
-				u, err := strconv.ParseUint(string(n), 10, 64)
+				n, err := decodeUint64(key, raw)
 				if err != nil {
-					return rec, fmt.Errorf("parse sequence: %w", err)
+					return rec, err
 				}
-				rec.Sequence = u
+				rec.Sequence = n
 			case "generation":
-				var n json.Number
-				if err := json.Unmarshal(raw, &n); err != nil {
-					return rec, fmt.Errorf("decode generation: %w", err)
-				}
-				u, err := strconv.ParseUint(string(n), 10, 64)
+				n, err := decodeUint32(key, raw)
 				if err != nil {
-					return rec, fmt.Errorf("parse generation: %w", err)
+					return rec, err
 				}
-				rec.Generation = u
+				rec.Generation = n
 			case "prev_hash":
-				if err := json.Unmarshal(raw, &rec.PrevHash); err != nil {
-					return rec, fmt.Errorf("decode prev_hash: %w", err)
+				s, err := decodeString(key, raw)
+				if err != nil {
+					return rec, err
 				}
+				rec.PrevHash = s
 			case "event_hash":
-				if err := json.Unmarshal(raw, &rec.EventHash); err != nil {
-					return rec, fmt.Errorf("decode event_hash: %w", err)
+				s, err := decodeString(key, raw)
+				if err != nil {
+					return rec, err
 				}
+				rec.EventHash = s
 			case "context_digest":
-				if err := json.Unmarshal(raw, &rec.ContextDigest); err != nil {
-					return rec, fmt.Errorf("decode context_digest: %w", err)
+				s, err := decodeString(key, raw)
+				if err != nil {
+					return rec, err
 				}
+				rec.ContextDigest = s
 			case "key_fingerprint":
-				if err := json.Unmarshal(raw, &rec.KeyFingerprint); err != nil {
-					return rec, fmt.Errorf("decode key_fingerprint: %w", err)
+				s, err := decodeString(key, raw)
+				if err != nil {
+					return rec, err
 				}
+				rec.KeyFingerprint = s
 			default:
 				return rec, fmt.Errorf("unknown input key %q (expected wire snake_case name for integrity_record)", key)
 			}
@@ -2536,8 +2544,58 @@ func buildIntegrityRecord(v vectorEntry) (IntegrityRecord, error) {
 	return rec, nil
 }
 
+// decodeUint32 parses raw as a JSON number and rejects values outside
+// the uint32 range. Uses json.Number to preserve full uint64 precision
+// before the range check.
+func decodeUint32(name string, raw json.RawMessage) (uint32, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var num json.Number
+	if err := dec.Decode(&num); err != nil {
+		return 0, fmt.Errorf("decode %s: %w", name, err)
+	}
+	u, err := strconv.ParseUint(num.String(), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if u > math.MaxUint32 {
+		return 0, fmt.Errorf("vector field %q value %d exceeds uint32 range", name, u)
+	}
+	return uint32(u), nil
+}
+
+// decodeUint64 parses raw as a JSON number into a real uint64 (no range
+// reduction). Uses json.Number so values up to math.MaxUint64 round-trip
+// without precision loss.
+func decodeUint64(name string, raw json.RawMessage) (uint64, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var num json.Number
+	if err := dec.Decode(&num); err != nil {
+		return 0, fmt.Errorf("decode %s: %w", name, err)
+	}
+	u, err := strconv.ParseUint(num.String(), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	return u, nil
+}
+
+// decodeString parses raw as a JSON string. Provided for API symmetry
+// with decodeUint32 / decodeUint64 so every switch case calls a helper.
+func decodeString(name string, raw json.RawMessage) (string, error) {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", fmt.Errorf("decode %s: %w", name, err)
+	}
+	return s, nil
+}
+
 // buildSessionContext mirrors buildIntegrityRecord for SessionContext.
 // v.Input uses canonical wire snake_case keys, NOT Go field names.
+// Numeric fields use the same decode helpers as buildIntegrityRecord
+// (range-checked uint32, full-precision uint64) so out-of-range values
+// fail explicitly rather than truncating silently.
 func buildSessionContext(v vectorEntry) (SessionContext, error) {
 	var ctx SessionContext
 	if len(v.Input) > 0 {
@@ -2548,35 +2606,47 @@ func buildSessionContext(v vectorEntry) (SessionContext, error) {
 		for key, raw := range fields {
 			switch key {
 			case "session_id":
-				if err := json.Unmarshal(raw, &ctx.SessionID); err != nil {
-					return ctx, fmt.Errorf("decode session_id: %w", err)
+				s, err := decodeString(key, raw)
+				if err != nil {
+					return ctx, err
 				}
+				ctx.SessionID = s
 			case "agent_id":
-				if err := json.Unmarshal(raw, &ctx.AgentID); err != nil {
-					return ctx, fmt.Errorf("decode agent_id: %w", err)
+				s, err := decodeString(key, raw)
+				if err != nil {
+					return ctx, err
 				}
+				ctx.AgentID = s
 			case "agent_version":
-				if err := json.Unmarshal(raw, &ctx.AgentVersion); err != nil {
-					return ctx, fmt.Errorf("decode agent_version: %w", err)
+				s, err := decodeString(key, raw)
+				if err != nil {
+					return ctx, err
 				}
+				ctx.AgentVersion = s
 			case "ocsf_version":
-				if err := json.Unmarshal(raw, &ctx.OCSFVersion); err != nil {
-					return ctx, fmt.Errorf("decode ocsf_version: %w", err)
+				s, err := decodeString(key, raw)
+				if err != nil {
+					return ctx, err
 				}
+				ctx.OCSFVersion = s
 			case "format_version":
-				var n uint64
-				if err := json.Unmarshal(raw, &n); err != nil {
-					return ctx, fmt.Errorf("decode format_version: %w", err)
+				n, err := decodeUint32(key, raw)
+				if err != nil {
+					return ctx, err
 				}
-				ctx.FormatVersion = uint32(n)
+				ctx.FormatVersion = n
 			case "algorithm":
-				if err := json.Unmarshal(raw, &ctx.Algorithm); err != nil {
-					return ctx, fmt.Errorf("decode algorithm: %w", err)
+				s, err := decodeString(key, raw)
+				if err != nil {
+					return ctx, err
 				}
+				ctx.Algorithm = s
 			case "key_fingerprint":
-				if err := json.Unmarshal(raw, &ctx.KeyFingerprint); err != nil {
-					return ctx, fmt.Errorf("decode key_fingerprint: %w", err)
+				s, err := decodeString(key, raw)
+				if err != nil {
+					return ctx, err
 				}
+				ctx.KeyFingerprint = s
 			default:
 				return ctx, fmt.Errorf("unknown input key %q (expected wire snake_case name for context_digest)", key)
 			}
@@ -2713,10 +2783,47 @@ case "context_digest":
 Run: `go test -v -run TestVectors/context_digest_typical ./internal/store/watchtower/chain/`
 Expected: FAIL but the log line prints the actual digest. Copy that hex string into `vectors.json` replacing `PLACEHOLDER_REPLACE_ME`. Remove the temporary `t.Logf`.
 
+The harness's explicit uint32 range checks are exercised by the unit tests in Step 4.5 below; `vectors.json` itself does not need a range-overflow entry since the boundary is the harness, not the canonical encoder.
+
+- [ ] **Step 4.5: Add unit tests for the uint32 range checks**
+
+The new `decodeUint32` helper rejects values strictly greater than `math.MaxUint32` and accepts values up to and including `math.MaxUint32`. Two top-level (non-vector-driven) tests exercise both edges:
+
+```go
+func TestBuildIntegrityRecord_RejectsUint32Overflow(t *testing.T) {
+	raw := json.RawMessage(`{"format_version": 4294967296, "sequence": 0, "generation": 0, "prev_hash": "", "event_hash": "", "context_digest": "", "key_fingerprint": ""}`)
+	v := vectorEntry{Input: raw, Kind: "integrity_record"}
+	_, err := buildIntegrityRecord(v)
+	if err == nil {
+		t.Fatal("expected range error for format_version > MaxUint32, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds uint32 range") {
+		t.Errorf("error must mention range overflow: %v", err)
+	}
+}
+
+func TestBuildIntegrityRecord_AcceptsUint32Max(t *testing.T) {
+	raw := json.RawMessage(`{"format_version": 4294967295, "sequence": 0, "generation": 4294967295, "prev_hash": "", "event_hash": "", "context_digest": "", "key_fingerprint": ""}`)
+	v := vectorEntry{Input: raw, Kind: "integrity_record"}
+	rec, err := buildIntegrityRecord(v)
+	if err != nil {
+		t.Fatalf("uint32 max should be accepted: %v", err)
+	}
+	if rec.FormatVersion != math.MaxUint32 {
+		t.Errorf("FormatVersion: got %d, want %d", rec.FormatVersion, uint32(math.MaxUint32))
+	}
+	if rec.Generation != math.MaxUint32 {
+		t.Errorf("Generation: got %d, want %d", rec.Generation, uint32(math.MaxUint32))
+	}
+}
+```
+
+These are top-level tests, separate from the vector-driven `TestVectors`. Run: `go test ./internal/store/watchtower/chain/ -run TestBuildIntegrityRecord_`. Both pass once the helpers from Step 1 are in place.
+
 - [ ] **Step 5: Run vectors test to verify it passes**
 
 Run: `go test ./internal/store/watchtower/chain/ -run TestVectors`
-Expected: PASS, all 7 sub-tests green (5 positive + 2 negative).
+Expected: PASS, all 7 sub-tests green (5 positive + 2 negative). The two `TestBuildIntegrityRecord_*` tests from Step 4.5 are separate top-level tests and are run by the broader `go test ./internal/store/watchtower/chain/...` invocation; they do not change the TestVectors sub-test count.
 
 - [ ] **Step 6: Cross-compile check**
 
@@ -7346,7 +7453,9 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/eventfilter"
+	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
 )
@@ -7399,6 +7508,19 @@ type Options struct {
 	// Dialer is an optional override; tests use this to inject
 	// testserver.DialerFor().
 	Dialer transport.Dialer
+
+	// Metrics, if non-nil, is the metrics collector wtp_* series are
+	// emitted through. Optional but strongly recommended in production;
+	// tests pass metrics.New() directly. Nil is safe: the WTP() accessor
+	// on a nil Collector returns a *WTPMetrics whose mutators are no-ops.
+	Metrics *metrics.Collector
+
+	// SinkChainOverrideForTests, when non-nil, replaces the default
+	// *chain.SinkChain constructed by New. Permanent test-only seam:
+	// production callers MUST leave this nil. Reviewed and accepted in
+	// round-5 design review as the simplest way to keep the test boundary
+	// explicit; the long name self-documents the intent.
+	SinkChainOverrideForTests chain.SinkChainAPI
 }
 
 // applyDefaults fills zero-valued fields with the spec's defaults.
@@ -7475,6 +7597,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
@@ -7483,10 +7606,11 @@ import (
 
 // Store implements store.EventStore.
 type Store struct {
-	opts Options
-	w    *wal.WAL
-	tr   *transport.Transport
-	sink *chain.SinkChain
+	opts    Options
+	w       *wal.WAL
+	tr      *transport.Transport
+	sink    chain.SinkChainAPI
+	metrics *metrics.WTPMetrics
 
 	mu      sync.Mutex
 	fatalCh chan error
@@ -7509,7 +7633,13 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("open WAL: %w", err)
 	}
 
-	sink := chain.NewSinkChain(opts.HMACKeyID, opts.HMACSecret)
+	// Wire the chain sink. Production callers get a real *chain.SinkChain;
+	// tests can substitute a chain.SinkChainAPI double via
+	// Options.SinkChainOverrideForTests (see Step 3.5 below).
+	var sinkChain chain.SinkChainAPI = chain.NewSinkChain(opts.HMACKeyID, opts.HMACSecret)
+	if opts.SinkChainOverrideForTests != nil {
+		sinkChain = opts.SinkChainOverrideForTests
+	}
 
 	dialer := opts.Dialer
 	if dialer == nil {
@@ -7522,11 +7652,17 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		SessionID: opts.SessionID,
 	})
 
+	// Resolve the WTP metrics façade. opts.Metrics may be nil; the
+	// WTP() accessor is nil-safe and returns a *WTPMetrics whose
+	// mutators no-op when the underlying *Collector is nil.
+	mw := opts.Metrics.WTP()
+
 	s := &Store{
 		opts:    opts,
 		w:       w,
 		tr:      tr,
-		sink:    sink,
+		sink:    sinkChain,
+		metrics: mw,
 		fatalCh: make(chan error, 1),
 	}
 
@@ -7558,7 +7694,13 @@ func newGRPCDialer(opts Options) transport.Dialer {
 
 - [ ] **Step 3.5: Add test-only scaffolding for downstream Task 23 drop tests**
 
-This step lands three pieces of test-only infrastructure that Task 23's drop tests depend on. Test-only files cannot be loaded by production code: the `_test.go` suffix excludes them automatically.
+This step lands three pieces of infrastructure that Task 23's drop tests depend on:
+
+1. A `store_export_test.go` file that exposes test-only inspectors on `*Store` (file lives in package `watchtower`; the `_test.go` suffix excludes it from production builds automatically — no build tag required).
+2. A new `chain.SinkChainAPI` interface that mirrors the full surface `Store` consumes from `*chain.SinkChain`. The interface deliberately covers `Compute`, `Commit`, AND `PeekPrevHash` (every method `Store` and the test inspectors touch) so swapping in a test double via `Options.SinkChainOverrideForTests` does not silently lose functionality. A previous narrower interface (with `Compute` only) was rejected in round-5 review because it broke `Store.PeekPrevHash` and `Store.AppendEvent`'s `Commit` call.
+3. The `Options.SinkChainOverrideForTests` field added in Step 3 above (already in the Options struct).
+
+Note: the failing-sink test double itself lives **inline in `internal/store/watchtower/append_test.go`** (defined in Task 23 Step 3 below), not in a separate package. Putting it in a `_test.go` file is what makes it test-only by construction; no separate doubles package is needed.
 
 (a) Create `internal/store/watchtower/store_export_test.go` (package `watchtower`, NOT `watchtower_test`, so the methods are first-class on `*Store`):
 
@@ -7581,75 +7723,38 @@ func (s *Store) PeekPrevHash() string {
 func (s *Store) WALSegmentCount() int {
 	return s.w.SegmentCount()
 }
+
+// Test-only metrics inspectors. Each returns the current value of the
+// underlying counter; mirror of internal/metrics/wtp.go's accessors but
+// resolved through the Store's own *WTPMetrics handle so cross-package
+// (watchtower_test) callers can read them without poking the unexported
+// metrics field directly.
+func (s *Store) DroppedInvalidUTF8() uint64      { return s.metrics.DroppedInvalidUTF8() }
+func (s *Store) DroppedSequenceOverflow() uint64 { return s.metrics.DroppedSequenceOverflow() }
 ```
 
 Note: this requires `(*chain.SinkChain).PeekPrevHash() string` and `(*wal.WAL).SegmentCount() int` to exist. Both are simple read-only inspectors; if they were not added by Task 6 / Task 11, add them in this step.
 
-(b) Create `internal/store/watchtower/chain/testfakes/utf8_failing_sink.go` (package `testfakes`, kept under `chain/testfakes/` so production code in `chain/` cannot import it):
+(b) Add the new `chain.SinkChainAPI` interface in `internal/store/watchtower/chain/`. Place it in a new file `internal/store/watchtower/chain/sink_chain_api.go` so the addition is easy to spot in the diff:
 
 ```go
-// Package testfakes contains test-only doubles for SinkChain. Production
-// code MUST NOT import this package — its location under chain/ is
-// intentional so that internal-only test infrastructure stays close to
-// the type it doubles.
-package testfakes
+package chain
 
-import (
-	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
-)
-
-// FailingSink is a chain.SinkComputer stand-in whose Compute always
-// returns the configured sentinel error. Used by AppendEvent drop tests.
-type FailingSink struct {
-	Err error
-}
-
-// Compute matches chain.SinkComputer.Compute's signature but always
-// returns f.Err. Other SinkChain methods are not exercised by AppendEvent
-// drop tests; if a future test needs them, add them here.
-func (f *FailingSink) Compute(_ chain.ComputeInput) (*chain.ComputeResult, error) {
-	return nil, f.Err
-}
-```
-
-(c) Add a small `chain.SinkComputer` interface in `internal/store/watchtower/chain/` that production `*chain.SinkChain` already satisfies:
-
-```go
-// SinkComputer is the minimum surface AppendEvent needs from the sink. The
-// production *SinkChain satisfies it; tests substitute their own (see
-// chain/testfakes/utf8_failing_sink.go). Keeping the interface in chain/
-// avoids forcing tests to depend on the concrete struct.
-type SinkComputer interface {
+// SinkChainAPI is the test-substitutable surface of *SinkChain. Production
+// callers always work with *SinkChain directly; the interface exists so
+// that AppendEvent's drop-path tests can substitute a fake. Any method the
+// Store touches MUST appear here — silently downgrading to an interface
+// that's missing methods is what produced round-5 review failures.
+type SinkChainAPI interface {
 	Compute(ComputeInput) (*ComputeResult, error)
+	Commit(*ComputeResult)
+	PeekPrevHash() string
 }
 ```
 
-(d) Add a test-only `SinkChainOverride` field to `Options` in `internal/store/watchtower/options.go`:
+The production `*SinkChain` (added in Task 6) already satisfies `SinkChainAPI` — `Compute`, `Commit`, and `PeekPrevHash` are the public methods exposed by the type. Tests that need to inject failures define an unexported `failingSink` struct in `append_test.go` (see Task 23 Step 3 below).
 
-```go
-type Options struct {
-	// ... existing fields ...
-
-	// SinkChainOverride, when non-nil, replaces the default *chain.SinkChain
-	// constructed by New. Test-only: production callers MUST leave this nil.
-	// Documented here (rather than in a separate _test.go file) so the
-	// override path is visible to anyone reading Options end-to-end.
-	SinkChainOverride chain.SinkComputer
-}
-```
-
-And update `New` in `store.go` to honor the override (just after `sink := chain.NewSinkChain(...)`):
-
-```go
-var sinkComputer chain.SinkComputer = sink
-if opts.SinkChainOverride != nil {
-	sinkComputer = opts.SinkChainOverride
-}
-```
-
-Change `Store.sink`'s type from `*chain.SinkChain` to `chain.SinkComputer`, and assign `sinkComputer` to it. Production behaviour is unchanged because `*chain.SinkChain` satisfies `chain.SinkComputer`. The `(*Store).PeekPrevHash` accessor in (a) still works in production because `*chain.SinkChain.PeekPrevHash` is a method on the concrete sink — when the override is in effect, tests call `PeekPrevHash` on the override only when the override implements it, and the simple `FailingSink` test double does not need to (its drop tests assert prev_hash through the Store's pre-existing `*chain.SinkChain` snapshot taken before the override is engaged in the test setup).
-
-If a downstream test needs `PeekPrevHash` while running with `SinkChainOverride`, add a `PeekPrevHash() string` method on `FailingSink` (or whatever double the test uses) at that time.
+(c) `Options.SinkChainOverrideForTests` is already declared on the Options struct in Step 3 above. The `New` constructor (also in Step 3) wires it: when non-nil, the override replaces the `*chain.SinkChain` produced by `chain.NewSinkChain`. The field type is `chain.SinkChainAPI`, so any `_test.go` double that satisfies the interface works.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -7664,7 +7769,7 @@ Expected: no errors.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add internal/store/watchtower/store.go internal/store/watchtower/options.go internal/store/watchtower/options_test.go internal/store/watchtower/store_export_test.go internal/store/watchtower/chain/testfakes/utf8_failing_sink.go internal/store/watchtower/chain/sink_computer.go
+git add internal/store/watchtower/store.go internal/store/watchtower/options.go internal/store/watchtower/options_test.go internal/store/watchtower/store_export_test.go internal/store/watchtower/chain/sink_chain_api.go
 git commit -m "feat(wtp/store): add Options + New with validate (rejects StubMapper)"
 ```
 
@@ -8019,7 +8124,9 @@ import (
 	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
+	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower"
+	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
 	"github.com/agentsh/agentsh/internal/store/watchtower/testserver"
 	"github.com/agentsh/agentsh/pkg/types"
@@ -8040,6 +8147,7 @@ func mkStore(t *testing.T) *watchtower.Store {
 		BatchMaxRecords: 8, BatchMaxBytes: 8 * 1024, BatchMaxAge: 50 * time.Millisecond,
 		AllowStubMapper: true,
 		Dialer:          srv.DialerFor(),
+		Metrics:         metrics.New(),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -8075,7 +8183,7 @@ func TestAppendEvent_DropsSequenceOverflow(t *testing.T) {
 		t.Fatalf("AppendEvent should drop silently for overflow, got err: %v", err)
 	}
 
-	if got := s.metrics.DroppedSequenceOverflow(); got != 1 {
+	if got := s.DroppedSequenceOverflow(); got != 1 {
 		t.Errorf("expected 1 sequence-overflow drop, got %d", got)
 	}
 	if got := s.WALSegmentCount(); got != walSegmentsBefore {
@@ -8087,10 +8195,10 @@ func TestAppendEvent_DropsSequenceOverflow(t *testing.T) {
 }
 
 func TestAppendEvent_DropsInvalidUTF8(t *testing.T) {
-	// Use a SinkChain test double (see chain/testfakes/utf8_failing_sink.go,
-	// landed in Task 22) that returns chain.ErrInvalidUTF8 on every Compute
-	// call. Verifies the boundary drop semantics: counter increments, WAL
-	// stays empty, chain prev_hash unchanged.
+	// Use a chain.SinkChainAPI test double (failingSink, defined below in
+	// this file) that returns chain.ErrInvalidUTF8 on every Compute call.
+	// Verifies the boundary drop semantics: counter increments, WAL stays
+	// empty, chain prev_hash unchanged.
 	s := mkStoreWithFailingSink(t, chain.ErrInvalidUTF8)
 	prevHashBefore := s.PeekPrevHash()
 	walSegmentsBefore := s.WALSegmentCount()
@@ -8104,7 +8212,7 @@ func TestAppendEvent_DropsInvalidUTF8(t *testing.T) {
 		t.Fatalf("AppendEvent should drop silently for invalid-utf8, got err: %v", err)
 	}
 
-	if got := s.metrics.DroppedInvalidUTF8(); got != 1 {
+	if got := s.DroppedInvalidUTF8(); got != 1 {
 		t.Errorf("expected 1 invalid-utf8 drop, got %d", got)
 	}
 	if got := s.WALSegmentCount(); got != walSegmentsBefore {
@@ -8120,13 +8228,13 @@ func TestAppendEvent_DropsInvalidUTF8(t *testing.T) {
 
 `TestAppendEvent_DropsSequenceOverflow` and `TestAppendEvent_DropsInvalidUTF8` reference three pieces of test infrastructure:
 
-1. **`store_export_test.go`** in `internal/store/watchtower/`, package `watchtower` (NOT `watchtower_test`): exposes `(*Store).PeekPrevHash() string` and `(*Store).WALSegmentCount() int`. Uses Go's standard `_test.go` suffix so the file is automatically excluded from non-test builds — no build tag required.
+1. **`store_export_test.go`** in `internal/store/watchtower/`, package `watchtower` (NOT `watchtower_test`): exposes `(*Store).PeekPrevHash() string`, `(*Store).WALSegmentCount() int`, `(*Store).DroppedInvalidUTF8() uint64`, and `(*Store).DroppedSequenceOverflow() uint64`. Uses Go's standard `_test.go` suffix so the file is automatically excluded from non-test builds — no build tag required. The metrics inspectors forward to `s.metrics.Dropped*()`, letting the cross-package `watchtower_test` callers read counters without poking the unexported `metrics` field directly.
 
-2. **`chain/testfakes/utf8_failing_sink.go`**: a `chain.SinkComputer` double whose `Compute` method always returns the supplied sentinel error. Lives under `internal/store/watchtower/chain/testfakes/` so production code can never import it.
+2. **Inline `failingSink` struct** at the bottom of `internal/store/watchtower/append_test.go` (defined in Step 3 of this task): a `chain.SinkChainAPI` test double whose `Compute` method always returns the supplied sentinel error. Lives in `package watchtower_test` because the `_test.go` suffix prevents production code from importing it by construction — no separate doubles package is needed.
 
-3. **`mkStoreWithFailingSink(t *testing.T, sentinel error) *watchtower.Store`** helper defined in Step 3 of this task: same setup as `mkStore` but injects the failing sink via `watchtower.Options.SinkChainOverride` (test-only Options field).
+3. **`mkStoreWithFailingSink(t *testing.T, sentinel error) *watchtower.Store`** helper defined in Step 3 of this task: same setup as `mkStore` but injects the failing sink via `watchtower.Options.SinkChainOverrideForTests` (test-only Options field, type `chain.SinkChainAPI`).
 
-Tests reference scaffolding added in Task 22 Step 3.5 (`store_export_test.go`, `chain/testfakes/utf8_failing_sink.go`, `Options.SinkChainOverride`, `chain.SinkComputer` interface) and the `mkStoreWithFailingSink` helper defined in Step 3 of this task.
+Tests reference scaffolding added in Task 22 Step 3.5 (`store_export_test.go`, `chain.SinkChainAPI` interface, `Options.SinkChainOverrideForTests`) and the `failingSink` struct + `mkStoreWithFailingSink` helper defined in Step 3 of this task.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -8169,7 +8277,7 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 		return errors.New("watchtower: ev.Chain not stamped (composite must allocate)")
 	}
 	if ev.Chain.Sequence > math.MaxInt64 {
-		s.metrics.IncDroppedSequenceOverflow()
+		s.metrics.IncDroppedSequenceOverflow(1)
 		slog.WarnContext(ctx, "watchtower: dropping event — sequence > math.MaxInt64",
 			"session_id", s.opts.SessionID,
 			"sequence", ev.Chain.Sequence,
@@ -8196,7 +8304,7 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	})
 	if err != nil {
 		if errors.Is(err, chain.ErrInvalidUTF8) {
-			s.metrics.IncDroppedInvalidUTF8()
+			s.metrics.IncDroppedInvalidUTF8(1)
 			slog.WarnContext(ctx, "watchtower: dropping event — invalid UTF-8 in chain field",
 				"session_id", s.opts.SessionID,
 				"sequence", ev.Chain.Sequence,
@@ -8279,12 +8387,30 @@ already done in Task 6). Add to `internal/store/watchtower/chain/chain.go`:
 func (c *ComputeResult) Record() *wtpv1.IntegrityRecord { return c.record }
 ```
 
-Also add the `mkStoreWithFailingSink` helper to `append_test.go`. Same shape as `mkStore`, but injects a `chain.SinkComputer` test double via `Options.SinkChainOverride`:
+Also add the inline `failingSink` test double + the `mkStoreWithFailingSink` helper to `append_test.go`. The double satisfies `chain.SinkChainAPI` and is defined right next to its sole consumer:
 
 ```go
-import (
-	"github.com/agentsh/agentsh/internal/store/watchtower/chain/testfakes"
-)
+// failingSink is a chain.SinkChainAPI test double whose Compute always
+// returns the configured sentinel error. Defined here in a _test.go file
+// so it cannot be imported by production code — the _test.go suffix
+// excludes it from non-test builds by construction.
+type failingSink struct {
+	err error
+}
+
+func (f *failingSink) Compute(_ chain.ComputeInput) (*chain.ComputeResult, error) {
+	return nil, f.err
+}
+
+// Commit is a no-op: the failure path that exercises this fake never
+// reaches Commit. If a future test does, this should panic to surface
+// the violation.
+func (f *failingSink) Commit(_ *chain.ComputeResult) {}
+
+// PeekPrevHash returns the empty string. The drop tests assert that
+// PeekPrevHash is unchanged before and after the dropped append; both
+// snapshots are "" when the failing sink is engaged from the start.
+func (f *failingSink) PeekPrevHash() string { return "" }
 
 func mkStoreWithFailingSink(t *testing.T, sentinel error) *watchtower.Store {
 	t.Helper()
@@ -8293,19 +8419,20 @@ func mkStoreWithFailingSink(t *testing.T, sentinel error) *watchtower.Store {
 
 	allocator := audit.NewSequenceAllocator(0, 0)
 	s, err := watchtower.New(context.Background(), watchtower.Options{
-		WALDir:            t.TempDir(),
-		Mapper:            compact.StubMapper{},
-		Allocator:         allocator,
-		AgentID:           "a",
-		SessionID:         "s",
-		HMACKeyID:         "k1",
-		HMACSecret:        []byte("secret"),
-		BatchMaxRecords:   8,
-		BatchMaxBytes:     8 * 1024,
-		BatchMaxAge:       50 * time.Millisecond,
-		AllowStubMapper:   true,
-		Dialer:            srv.DialerFor(),
-		SinkChainOverride: &testfakes.FailingSink{Err: sentinel},
+		WALDir:                    t.TempDir(),
+		Mapper:                    compact.StubMapper{},
+		Allocator:                 allocator,
+		AgentID:                   "a",
+		SessionID:                 "s",
+		HMACKeyID:                 "k1",
+		HMACSecret:                []byte("secret"),
+		BatchMaxRecords:           8,
+		BatchMaxBytes:             8 * 1024,
+		BatchMaxAge:               50 * time.Millisecond,
+		AllowStubMapper:           true,
+		Dialer:                    srv.DialerFor(),
+		Metrics:                   metrics.New(),
+		SinkChainOverrideForTests: &failingSink{err: sentinel},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

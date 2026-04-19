@@ -314,7 +314,15 @@ The test harness applies the decoded bytes to the named field after parsing the 
 
 Positive-vector `input` objects also use the canonical snake_case wire keys (e.g., `format_version`, `sequence`, `session_id`); each implementation maps these to its local struct fields inside its test harness. The vectors are language-neutral — they reference the wire format, never any implementation's internal naming.
 
-Vector schema versioning. The `input_field` + `input_b64` schema and the snake_case `input` keys are the v1 published conformance vector format. Pre-v1 (Go-shaped) vectors were never published to external consumers; this is a pre-release tightening, not a migration. The v1 schema is the contract from this point forward; future incompatible changes will bump the schema by introducing a new top-level field (e.g., `schema_version: 2`) and continuing to support v1 alongside v2 for at least one minor release.
+**Vector schema versioning.** The `input_field` + `input_b64` schema and the snake_case `input` keys are the **v1** published conformance vector format. Pre-v1 (Go-shaped) vectors were never published to external consumers; this is a pre-release tightening, not a migration. The v1 schema is the contract from this point forward.
+
+**v1 (current) file shape:** the file is a bare JSON array of vector objects.
+
+**v2+ (future) file shape:** the file is an object: `{"schema_version": 2, "vectors": [ ... ]}`. Future versions follow the same envelope; only `schema_version` changes.
+
+**Detection rule:** if the top-level JSON value is an array, the harness MUST treat it as v1 (no `schema_version` field is present or expected). If the top-level value is an object, the harness MUST read `schema_version`. Any value the harness does not recognize MUST be rejected — the harness MUST refuse to load the file with a clear error (fail-closed). This prevents a future incompatible vector set from being silently treated as conformant.
+
+**Compatibility:** when v2 ships, v1 must keep working alongside it for at least one minor release. New harness implementations supporting only v2 are not WTP-conformant until they also accept v1.
 
 #### Canonical-format versioning
 
@@ -769,6 +777,10 @@ The host (the agentsh daemon) is responsible for building the `Store` with the r
 ### Wiring into existing composite
 
 `internal/store/composite/composite.go` already has a `New(primary, output, others...)` constructor. The WTP store is added as another `EventStore` in `others`. The Phase 0 refactor adds a `audit.SequenceAllocator` to composite and stamps `ev.Chain` before fanout (separate doc); this client consumes `ev.Chain` directly.
+
+### Test-only seam: `Options.SinkChainOverrideForTests`
+
+The `watchtower` package exposes `SinkChainOverrideForTests` on its `Options` struct so AppendEvent's drop-path tests can substitute a `chain.SinkChainAPI` double that returns `chain.ErrInvalidUTF8` on every Compute. This is a **permanent** test seam, not transient scaffolding: removing it would either eliminate the failing-sink test (a regression in test coverage) or force the test to construct a parallel `*chain.SinkChain` with a hidden hook (more brittle, more code to maintain). The field is named explicitly to discourage production use; the doc comment, the `_test.go`-only `failingSink` double, and a `validate()` lint (left to a follow-up) are the discouragement layers.
 
 ### Prerequisite plumbing (in-scope for this work)
 
