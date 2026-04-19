@@ -1878,7 +1878,7 @@ func main() {
 		SessionId:           "01HXAVD2N5VX3CZQK7Q7QWNYKE",
 		OcsfVersion:         "1.8.0",
 		FormatVersion:       2,
-		Algorithm:           "hmac-sha256",
+		Algorithm:           wtpv1.HashAlgorithm_HASH_ALGORITHM_HMAC_SHA256,
 		KeyFingerprint:      "sha256:aabbccdd",
 		ContextDigest:       "0123456789abcdef",
 		WalHighWatermarkSeq: 0,
