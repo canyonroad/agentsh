@@ -2015,8 +2015,10 @@ func TestEncodeCanonical_NoScientificNotation(t *testing.T) {
 	if !strings.Contains(string(got), `"sequence":1000000000000000`) {
 		t.Errorf("number not decimal: %s", got)
 	}
-	if strings.Contains(string(got), "e") || strings.Contains(string(got), "E") {
-		t.Errorf("number used scientific notation: %s", got)
+	for _, marker := range []string{"e+", "e-", "E+", "E-"} {
+		if strings.Contains(string(got), marker) {
+			t.Errorf("number used scientific notation (marker %q): %s", marker, got)
+		}
 	}
 }
 
