@@ -27,7 +27,7 @@
 
 **Modify:**
 - `pkg/types/events.go` — add `ChainState` type and `Event.Chain *ChainState` field with `json:"-"`
-- `internal/audit/integrity.go` — refactor `IntegrityChain` internals to compose `SequenceAllocator` + `SinkChain`; preserve all public method signatures (`NewIntegrityChain`, `NewIntegrityChainWithAlgorithm`, `Wrap`, `State`, `Restore`, `KeyFingerprint`, `VerifyHash`, `VerifyWrapped`)
+- `internal/audit/integrity.go` — refactor `IntegrityChain` internals to compose `SequenceAllocator` + `SinkChain`; preserve `NewIntegrityChain`, `NewIntegrityChainWithAlgorithm`, `Wrap`, `State`, `KeyFingerprint`, `VerifyHash`, `VerifyWrapped` verbatim. `Restore` gains an `error` return (mirrors the SequenceAllocator.Restore and SinkChain.Restore validation; existing callers in `internal/store/` must check the error)
 - `internal/store/composite/composite.go` — add `allocator *audit.SequenceAllocator` field, stamp `ev.Chain` in `AppendEvent` before fanout, add `NextGeneration()` method
 
 ---
@@ -763,7 +763,9 @@ func TestSinkChain_State_Restore_RoundTrip(t *testing.T) {
 	}
 
 	d, _ := newTestSinkChain(t)
-	d.Restore(state.Generation, state.PrevHash)
+	if err := d.Restore(state.Generation, state.PrevHash, state.Fatal); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
 
 	// Continue the chain from d — same key, so same entry hash as if c
 	// had continued.
@@ -801,12 +803,14 @@ func TestNewSinkChain_RejectsUnsupportedAlgorithm(t *testing.T) {
 	}
 }
 
-func TestSinkChain_Concurrent_ComputeCommit_NoChainBreakage(t *testing.T) {
+func TestSinkChain_SerialComputeCommit_NoChainBreakage(t *testing.T) {
 	c, key := newTestSinkChain(t)
 
-	// Single owner serializes Compute+Commit pairs; this test asserts that
-	// repeated Compute under contention with Commit does not produce a
-	// chain that fails verification when replayed in committed order.
+	// Single-goroutine serialization verifies chain continuity; concurrent
+	// ComputeCommit pairs across goroutines is NOT a supported pattern (Commit
+	// cannot identify which Compute it finalizes). This test asserts that
+	// repeated Compute+Commit in serial order produces a chain that verifies
+	// when replayed in committed order.
 	const N = 200
 	type record struct {
 		seq       int64
@@ -852,6 +856,156 @@ func TestSinkChain_Concurrent_ComputeCommit_NoChainBreakage(t *testing.T) {
 		expectedPrev = r.entryHash
 	}
 }
+
+func TestSinkChain_Compute_IsPureUnderConcurrentCallers(t *testing.T) {
+	c, _ := newTestSinkChain(t)
+	payload := []byte(`{"k":"v"}`)
+
+	const N = 32
+	type result struct {
+		entry string
+		prev  string
+	}
+	results := make([]result, 0, N)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			entry, prev, err := c.Compute(IntegrityFormatVersion, 0, 0, payload)
+			if err != nil {
+				t.Errorf("Compute: %v", err)
+				return
+			}
+			mu.Lock()
+			results = append(results, result{entry: entry, prev: prev})
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	if len(results) != N {
+		t.Fatalf("got %d results, want %d", len(results), N)
+	}
+	wantEntry := results[0].entry
+	wantPrev := results[0].prev
+	for i, r := range results {
+		if r.entry != wantEntry {
+			t.Errorf("result %d: entry=%q, want %q (Compute is not pure under contention)", i, r.entry, wantEntry)
+		}
+		if r.prev != wantPrev {
+			t.Errorf("result %d: prev=%q, want %q (Compute is not pure under contention)", i, r.prev, wantPrev)
+		}
+	}
+}
+
+func TestSinkChain_State_PersistsFatal(t *testing.T) {
+	c, _ := newTestSinkChain(t)
+
+	if _, _, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"a":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	c.Fatal(errors.New("ambiguous WAL write"))
+
+	state := c.State()
+	if !state.Fatal {
+		t.Fatalf("State.Fatal = false after Fatal(); want true")
+	}
+
+	// Round-trip into a fresh chain via Restore. The latch must survive.
+	d, _ := newTestSinkChain(t)
+	if err := d.Restore(state.Generation, state.PrevHash, state.Fatal); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if _, _, err := d.Compute(IntegrityFormatVersion, 1, 0, []byte(`{"b":2}`)); !errors.Is(err, ErrFatalIntegrity) {
+		t.Fatalf("Compute after Restore-with-Fatal: err = %v, want ErrFatalIntegrity", err)
+	}
+}
+
+func TestSinkChain_Restore_ValidatesPrevHash(t *testing.T) {
+	validSha256 := strings.Repeat("a", 64)  // 32 bytes hex-encoded
+	validSha512 := strings.Repeat("b", 128) // 64 bytes hex-encoded
+
+	cases := []struct {
+		name      string
+		algorithm string
+		prevHash  string
+		wantErr   bool
+	}{
+		{name: "empty is genesis", algorithm: "hmac-sha256", prevHash: "", wantErr: false},
+		{name: "valid sha256 hex", algorithm: "hmac-sha256", prevHash: validSha256, wantErr: false},
+		{name: "wrong length hex (sha512 under sha256)", algorithm: "hmac-sha256", prevHash: validSha512, wantErr: true},
+		{name: "non-hex characters", algorithm: "hmac-sha256", prevHash: strings.Repeat("z", 64), wantErr: true},
+		{name: "odd-length hex", algorithm: "hmac-sha256", prevHash: strings.Repeat("a", 63), wantErr: true},
+		{name: "valid sha512 hex under sha512", algorithm: "hmac-sha512", prevHash: validSha512, wantErr: false},
+		{name: "sha256 length under sha512", algorithm: "hmac-sha512", prevHash: validSha256, wantErr: true},
+		{name: "empty under sha512 is genesis", algorithm: "hmac-sha512", prevHash: "", wantErr: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key := make([]byte, MinKeyLength)
+			c, err := NewSinkChain(key, tc.algorithm)
+			if err != nil {
+				t.Fatalf("NewSinkChain: %v", err)
+			}
+
+			// Capture pre-state to assert non-mutation on rejected restore.
+			before := c.State()
+
+			err = c.Restore(7, tc.prevHash, false)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Restore(%q): err = nil, want error", tc.prevHash)
+				}
+				if !errors.Is(err, ErrInvalidChainState) {
+					t.Errorf("Restore(%q): err = %v, want errors.Is ErrInvalidChainState", tc.prevHash, err)
+				}
+				after := c.State()
+				if after != before {
+					t.Errorf("rejected Restore mutated state: before=%+v after=%+v", before, after)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Restore(%q): unexpected err = %v", tc.prevHash, err)
+			}
+			after := c.State()
+			if after.Generation != 7 || after.PrevHash != tc.prevHash || after.Fatal {
+				t.Errorf("after Restore: state = %+v, want {Generation:7 PrevHash:%q Fatal:false}", after, tc.prevHash)
+			}
+		})
+	}
+}
+
+func TestSinkChain_Commit_BackwardsGenerationIsIgnored(t *testing.T) {
+	c, _ := newTestSinkChain(t)
+
+	// Establish gen=2 with one committed entry.
+	if _, _, err := c.Compute(IntegrityFormatVersion, 0, 2, []byte(`{"a":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	h2, _, err := c.Compute(IntegrityFormatVersion, 0, 2, []byte(`{"a":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Commit(2, h2)
+
+	before := c.State()
+	if before.Generation != 2 || before.PrevHash != h2 {
+		t.Fatalf("setup: state = %+v, want {Generation:2 PrevHash:%q}", before, h2)
+	}
+
+	// Commit with an older generation must be a no-op.
+	c.Commit(1, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+
+	after := c.State()
+	if after.Generation != before.Generation || after.PrevHash != before.PrevHash {
+		t.Errorf("backwards-generation Commit mutated state: before=%+v after=%+v", before, after)
+	}
+}
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -871,6 +1025,7 @@ Create `internal/audit/sink_chain.go`:
 package audit
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -884,10 +1039,15 @@ import (
 // keys produces different entryHash values — that is the entire point of
 // per-sink chaining.
 //
-// Concurrency-safe. Compute+Commit pairs must be issued by a single
-// goroutine in order; concurrent Compute calls with interleaved Commits
-// is supported but each Commit applies to the most recent Compute that
-// observed the same prev_hash.
+// Concurrency model: single-owner serialized use. SinkChain is mutex-safe,
+// and concurrent Compute calls (with no intervening Commit) are pure and
+// return identical results — they do not corrupt state. However, callers
+// MUST NOT interleave Compute/Commit pairs across goroutines: Commit
+// carries no token identifying which Compute it finalizes, so a stale or
+// reordered Commit can overwrite prev_hash with a hash that does not
+// correspond to the most recent Compute. The expected pattern is a single
+// owner that issues Compute → durable write → Commit (or Fatal) in
+// sequence per event.
 type SinkChain struct {
 	mu         sync.Mutex
 	key        []byte
@@ -900,9 +1060,14 @@ type SinkChain struct {
 // SinkChainState is the persistent state of a SinkChain. The spec calls
 // this ChainState; renamed here to avoid colliding with the existing
 // audit.ChainState used by IntegrityChain.State().
+//
+// Fatal is included so persistence round-trips preserve the latch — a
+// chain that latched Fatal before a restart must come back latched after
+// Restore, otherwise the safety model is defeated.
 type SinkChainState struct {
 	Generation uint32
 	PrevHash   string
+	Fatal      bool
 }
 
 // ErrFatalIntegrity is returned by Compute after Fatal has been called.
@@ -915,6 +1080,12 @@ var ErrFatalIntegrity = errors.New("integrity chain latched fatal; sink must be 
 // configurations with chained sinks must always run inside a composite
 // with a SequenceAllocator.
 var ErrMissingChainState = errors.New("event missing Chain field; composite did not stamp it")
+
+// ErrInvalidChainState is returned by Restore when the supplied state
+// violates SinkChain invariants (e.g., prevHash is neither empty nor a
+// hex string of the algorithm's expected length). The chain is not
+// modified on rejected restore.
+var ErrInvalidChainState = errors.New("invalid sink chain state")
 
 // NewSinkChain creates a new chain keyed by `key` (must be >= MinKeyLength).
 // Supported algorithms: "hmac-sha256" (default), "hmac-sha512".
@@ -966,10 +1137,19 @@ func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32
 // succeeds. On ambiguous failure (write may or may not have landed), the
 // caller MUST call Fatal instead; Commit and Fatal are mutually exclusive
 // per Compute.
+//
+// Commit silently no-ops in two cases: (1) the chain has been latched Fatal,
+// and (2) `generation` is older than the chain's current generation —
+// rolling backwards across a generation boundary would re-use prior
+// (sequence, generation) tuples and corrupt the chain. The latter is a
+// caller programming error and is treated as ignorable rather than fatal.
 func (c *SinkChain) Commit(generation uint32, entryHash string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.fatal {
+		return
+	}
+	if generation < c.generation {
 		return
 	}
 	c.generation = generation
@@ -987,19 +1167,55 @@ func (c *SinkChain) Fatal(reason error) {
 	_ = reason // reserved for future telemetry; intentionally unused
 }
 
-// State returns the (generation, prev_hash) for persistence.
+// State returns the (generation, prev_hash, fatal) for persistence.
 func (c *SinkChain) State() SinkChainState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return SinkChainState{Generation: c.generation, PrevHash: c.prevHash}
+	return SinkChainState{Generation: c.generation, PrevHash: c.prevHash, Fatal: c.fatal}
 }
 
-// Restore rehydrates chain state after restart.
-func (c *SinkChain) Restore(generation uint32, prevHash string) {
+// Restore rehydrates chain state after restart. Returns ErrInvalidChainState
+// if `prevHash` is neither empty (genesis) nor a hex string whose decoded
+// length matches the chain's algorithm output (32 bytes for hmac-sha256,
+// 64 bytes for hmac-sha512). The chain is not modified on rejected restore.
+//
+// If `fatal` is true, the chain comes back latched: subsequent Compute calls
+// return ErrFatalIntegrity. This is required so persistence round-trips
+// preserve the safety latch across restarts.
+func (c *SinkChain) Restore(generation uint32, prevHash string, fatal bool) error {
+	if err := validatePrevHash(c.algorithm, prevHash); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.generation = generation
 	c.prevHash = prevHash
+	c.fatal = fatal
+	return nil
+}
+
+// validatePrevHash returns nil if prevHash is empty (genesis) or a valid
+// hex string of the algorithm's expected output length. Otherwise it
+// returns an error wrapping ErrInvalidChainState.
+func validatePrevHash(algorithm, prevHash string) error {
+	if prevHash == "" {
+		return nil
+	}
+	var wantBytes int
+	switch algorithm {
+	case "hmac-sha512":
+		wantBytes = 64
+	default: // hmac-sha256 (also default when algorithm == "")
+		wantBytes = 32
+	}
+	wantHex := wantBytes * 2
+	if len(prevHash) != wantHex {
+		return fmt.Errorf("%w: prevHash length %d, want %d hex chars for %s", ErrInvalidChainState, len(prevHash), wantHex, algorithm)
+	}
+	if _, err := hex.DecodeString(prevHash); err != nil {
+		return fmt.Errorf("%w: prevHash is not valid hex: %v", ErrInvalidChainState, err)
+	}
+	return nil
 }
 ```
 
@@ -1009,7 +1225,7 @@ func (c *SinkChain) Restore(generation uint32, prevHash string) {
 go test ./internal/audit/ -run "TestSinkChain|TestNewSinkChain" -v
 ```
 
-Expected: all 9 tests PASS.
+Expected: all 12 tests PASS.
 
 - [ ] **Step 5: Run the full audit test suite**
 
@@ -1163,13 +1379,24 @@ Replace the body of `Restore()` (currently lines 264-271) with:
 ```go
 // Restore restores the chain state after a restart.
 // The sequence must be the last written entry so the next Wrap continues at sequence+1.
-func (c *IntegrityChain) Restore(sequence int64, prevHash string) {
-	c.alloc.Restore(AllocatorState{Sequence: sequence, Generation: 0})
-	c.chain.Restore(0, prevHash)
+//
+// Aggregates errors from the underlying allocator and sink chain restores —
+// SequenceAllocator.Restore rejects sequence < -1, and SinkChain.Restore
+// rejects malformed prev_hash (non-hex or wrong length for the algorithm).
+func (c *IntegrityChain) Restore(sequence int64, prevHash string) error {
+	if err := c.alloc.Restore(AllocatorState{Sequence: sequence, Generation: 0}); err != nil {
+		return fmt.Errorf("restore allocator: %w", err)
+	}
+	if err := c.chain.Restore(0, prevHash, false); err != nil {
+		return fmt.Errorf("restore chain: %w", err)
+	}
+	return nil
 }
 ```
 
-Note: legacy `IntegrityChain` does not expose generation (its callers were single-sink with no rotation concept beyond key change, which today is handled via key-fingerprint mismatch detection in `internal/store/integrity_wrapper.go`). We pin generation=0 to keep behavior identical.
+Note: legacy `IntegrityChain` does not expose generation (its callers were single-sink with no rotation concept beyond key change, which today is handled via key-fingerprint mismatch detection in `internal/store/integrity_wrapper.go`). We pin generation=0 to keep behavior identical. Fatal is also pinned to false — the legacy single-sink Wrap path has no Fatal latch concept; ambiguous-write recovery is the new `SinkChain.Fatal`/`Compute`/`Commit` API.
+
+The new error return is a behavior change for existing callers (`internal/store/integrity_wrapper.go` etc.) — those callers must be updated to check the error. The change mirrors what we already did for `SequenceAllocator.Restore` in Task 2.
 
 - [ ] **Step 6: Update `KeyFingerprint()`, `VerifyHash()`, `VerifyWrapped()`, `computeHash()`**
 
@@ -1229,10 +1456,10 @@ go build ./...
 go test ./internal/audit/ -v
 ```
 
-Expected: clean build; all existing audit tests PASS without modification. Tests that exercise `chain.Restore(...)`, `chain.State()`, `chain.Wrap(...)` round-trips, sequence overflow at MaxInt64 — all of these continue to behave identically.
+Expected: clean build; existing audit tests for `chain.State()`, `chain.Wrap(...)` round-trips and sequence overflow at MaxInt64 continue to behave identically. Tests that call `chain.Restore(...)` will need a small update to handle the new `error` return — wrap each call with a nil-error check (`if err := chain.Restore(...); err != nil { t.Fatal(err) }`).
 
 If any test fails, the most likely culprits are:
-- `Restore` not pinning generation correctly (chain.Restore(0, prevHash) is required)
+- `Restore` not pinning generation correctly (chain.Restore(0, prevHash, false) is required)
 - `State()` returning wrong sequence after Wrap (allocator's `State()` is the last-returned sequence, which matches what the old code stored in `c.sequence`)
 - Overflow test expecting `c.sequence == math.MaxInt64` — the new code triggers overflow inside `c.alloc.Next()` and returns `ErrSequenceOverflow` from there, identical to the old behavior
 
