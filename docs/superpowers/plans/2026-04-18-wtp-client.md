@@ -7076,7 +7076,7 @@ The Live state (and any other receive site introduced in Phase 8) MUST honor the
 (c) Invalid-frame logging MUST follow the spec's sanitization rule: log only `session_id` (local UUID, internal-only), `reason` (the canonical `string(ve.Reason)`), and `hex_prefix` (a hex-encoded prefix of the offending frame's serialized representation, capped at 16 input bytes — 32 hex chars output). The receiver MUST NOT log `ve.Inner` or `err.Error()` — both embed peer-supplied byte counts and oneof discriminators per the validator's `fmt.Errorf` construction.
 (d) The streaming decompression path (downstream of `ValidateEventBatch` — added when WTP gains a real decompression code path post-MVP) MUST classify zstd/gzip framing errors and `MaxDecompressedBatchBytes` overruns as `WTPInvalidFrameReasonDecompressError` (metrics-side label `decompress_error`) and route them through the same counter + tear-down path. There is NO `wtpv1.ReasonDecompressError` constant — `decompress_error` is metrics-only because it is emitted downstream of the validator (decompression runs after `ValidateEventBatch` accepts the frame envelope). Until a real decompression path lands, the metrics-side `decompress_error` reason exists in the metrics enum so the metric series is registered at zero (always-emit contract) — no live increment yet.
 
-Add a transport-level unit test that injects each enumerated frame-validation reason via the fakeConn `recvCh` (mirror the pattern used by the existing `wtp_session_failures_total{reason}` tests in `internal/metrics/wtp_test.go`). For each reason the test MUST assert: (1) the corresponding `wtp_dropped_invalid_frame_total{reason="<value>"}` series increments by exactly one, AND (2) the live loop returns `StateConnecting` (i.e., the reconnect path was taken). The test SHOULD use a table-driven structure keyed by the `wtpv1.Reason*` constants so adding a new reason is a one-line change. The test MUST consume reasons via `errors.As` against `*wtpv1.ValidationError` rather than parsing the error string.
+Add a transport-level unit test that injects each enumerated frame-validation reason via the fakeConn `recvCh` (mirror the table-driven pattern used by the existing `wtp_reconnects_total{reason}` tests in `internal/metrics/wtp_test.go` — that family already exercises the reason-enumeration always-emit + per-reason inject-and-assert pattern this task adopts). For each reason the test MUST assert: (1) the corresponding `wtp_dropped_invalid_frame_total{reason="<value>"}` series increments by exactly one, AND (2) the live loop returns `StateConnecting` (i.e., the reconnect path was taken). The test SHOULD use a table-driven structure keyed by the `wtpv1.Reason*` constants so adding a new reason is a one-line change. The test MUST consume reasons via `errors.As` against `*wtpv1.ValidationError` rather than parsing the error string.
 
 **Test acceptance — split by live-path availability:**
 
@@ -9840,15 +9840,16 @@ This task is a coordination point that spans the proto package (Task 17 Step 4) 
 
 **Prerequisites:**
 - Task 17 Step 4 — defines `wtpv1.AllValidationReasons()` (proto-side getter). The parity test consumes this getter.
+- Task 17 Step 4a — defines the receiver-side defense-in-depth WARN path AND creates the test `TestReceiver_NonTypedErrorClassifiedAsClassifierBypass` (in `internal/store/watchtower/transport/`, package determined by Task 17 Step 4a's implementer — current scaffolding suggests `package transport_test` to mirror the other transport tests). Task 22b Step 4a EXTENDS that existing test (or adds a sibling test in the same file) rather than creating a new test file with a placeholder receiver-classifier seam.
 - Task 22a Step 4 — defines `metrics.ValidationReasons()`, `metrics.MetricsOnlyReasons()`, `metrics.ValidWTPInvalidFrameReasons()` (metrics-side getters). The parity test consumes these getters.
-- Both prerequisite steps MUST be complete before Task 22b executes; the parity test will not compile (missing exports) without both, and `TestClassifierBypassWARN_RateLimited` cannot exercise both code paths without both wirings landing.
+- All three prerequisite steps MUST be complete before Task 22b executes; the parity test will not compile (missing exports) without Task 17 Step 4 + Task 22a Step 4, `TestClassifierBypassWARN_RateLimited` cannot exercise both code paths without both wirings landing, and Step 4a's receiver-side rate-limit assertion modifies the test that Task 17 Step 4a creates.
 
 **Files:**
 - Create: `internal/metrics/wtp_parity_test.go` (`package metrics_test` — external test package)
 - Create: `internal/metrics/wtp_ratelimit.go` (the shared rate-limiter helper consumed by both `IncDroppedInvalidFrame`'s metrics-side WARN path and Task 17 Step 4a's receiver-side WARN path; also exports the test-only reset hook `ResetClassifierBypassLimiterForTest`)
-- Create: `internal/store/watchtower/transport/receiver_warn_test.go` (`package transport_test` — external test package; hosts `TestReceiverWARN_InvokesClassifierBypassLimiter` per Step 4a)
 - Modify: `internal/metrics/wtp.go` (`IncDroppedInvalidFrame` invokes the shared rate-limiter before emitting the metrics-side WARN)
 - Modify: any new receiver-wiring file under `internal/store/watchtower/transport/` that emits the receiver-side `non-typed frame validation error` WARN (it MUST consume the same shared rate-limiter from `internal/metrics`)
+- Modify (NOT create): the file Task 17 Step 4a places `TestReceiver_NonTypedErrorClassifiedAsClassifierBypass` in (under `internal/store/watchtower/transport/`; exact filename and package are determined by Task 17 Step 4a's implementer — current scaffolding suggests `package transport_test` to mirror the other transport tests). Step 4a below extends that existing test (or adds a sibling test in the same file) with the receiver-side rate-limit assertions; no new test seam or placeholder helper is introduced.
 
 - [ ] **Step 1: Define the shared rate-limiter helper**
 
@@ -10169,93 +10170,52 @@ func TestClassifierBypassWARN_RateLimited(t *testing.T) {
 }
 ```
 
-The test file imports: `bytes`, `log/slog`, `strings`, `testing`, plus `metrics` (the package under test). The metrics-side WARN path is exercised through `IncDroppedInvalidFrame`. The receiver-side WARN path is owned by Task 22b and is exercised by Step 4a below — `TestReceiverWARN_InvokesClassifierBypassLimiter` lives in `internal/store/watchtower/transport/` and asserts the receiver-side defense-in-depth guard consumes the same shared limiter.
+The test file imports: `bytes`, `log/slog`, `strings`, `testing`, plus `metrics` (the package under test). The metrics-side WARN path is exercised through `IncDroppedInvalidFrame`. The receiver-side WARN path is owned by Task 22b and is exercised by Step 4a below — Step 4a EXTENDS the existing `TestReceiver_NonTypedErrorClassifiedAsClassifierBypass` test created by Task 17 Step 4a (in `internal/store/watchtower/transport/`) to also assert that the receiver-side defense-in-depth guard consumes the same shared limiter.
 
-- [ ] **Step 4a: Add `TestReceiverWARN_InvokesClassifierBypassLimiter` receiver-side rate-limit test**
+- [ ] **Step 4a: Extend Task 17 Step 4a's receiver-side test to assert the rate-limit contract**
 
-Task 22b OWNS the receiver-side inject-and-assert test that locks the cross-package contract: a non-`*wtpv1.ValidationError` error coming back from `wtpv1.ValidateEventBatch` MUST cause `metrics.AllowClassifierBypassWARN()` to be consulted exactly once before the WARN log emission. Without this test, only the metrics-side WARN path is covered by Task 22b — the receiver-side path could silently regress (e.g. someone forgets the `AllowClassifierBypassWARN` gate and the WARN fires on every frame) and the parity / rate-limit guarantees would only hold for one of the two paths.
+**Prerequisite**: Task 17 Step 4a (plan §"Task 17 Step 4a: Inbound frame validation acceptance") MUST be complete. That step creates `TestReceiver_NonTypedErrorClassifiedAsClassifierBypass` in `internal/store/watchtower/transport/` (filename and package determined by Task 17 Step 4a's implementer; current scaffolding suggests `package transport_test` to mirror the other transport tests at plan line ~7124). Task 22b modifies that test in place rather than creating a new file — this avoids inventing a new exported test seam and keeps the receiver-side coverage colocated with the Step-4a test it extends.
 
-Add the test to `internal/store/watchtower/transport/receiver_warn_test.go` (create the file if Task 17 Step 4a did not already create a receiver test file; otherwise extend the existing receiver test file). Declare it in `package transport_test` so it can use the `metrics.` qualifier:
+Modify (do NOT create a new file): the file Task 17 Step 4a places `TestReceiver_NonTypedErrorClassifiedAsClassifierBypass` in. Either:
+
+- **(Preferred) Extend the existing test** to inject the bare-error TWICE in sequence (no time advance) before any assertion, then assert: (1) the WARN log emitted EXACTLY ONCE (the second injection's WARN was throttled by the shared limiter), and (2) `wtp_dropped_invalid_frame_total{reason="classifier_bypass"}` incremented EXACTLY TWICE (the counter is unconditional). The first assertion exercises the rate-limit; the second confirms the metric still tracks true volume regardless of WARN throttling.
+- **(Alternative) Add a sibling test** in the same file (e.g., `TestReceiver_NonTypedError_RateLimited`) that does the same double-injection + dual assertion. Use this if the preferred path would make the existing test too long to read.
+
+The test MUST call `metrics.ResetClassifierBypassLimiterForTest()` at the start (and in `t.Cleanup`) so the burst is order-independent, mirroring the metrics-side `TestClassifierBypassWARN_RateLimited` pattern.
+
+Sketch (extend OR sibling — pick one):
 
 ```go
-// File: internal/store/watchtower/transport/receiver_warn_test.go
-// Package: transport_test (external test package — needs metrics.* qualifier)
-package transport_test
+metrics.ResetClassifierBypassLimiterForTest()
+t.Cleanup(metrics.ResetClassifierBypassLimiterForTest)
 
-import (
-	"bytes"
-	"errors"
-	"log/slog"
-	"strings"
-	"testing"
+// ... existing TestReceiver_NonTypedErrorClassifiedAsClassifierBypass setup
+// (inject bare fmt.Errorf("%w: synthetic", wtpv1.ErrInvalidFrame) via fakeConn recvCh) ...
 
-	"github.com/agentsh/agentsh/internal/metrics"
-	// + receiver wiring imports per Task 17 Step 4a
-)
+// NEW: inject the same bare error a SECOND time before asserting.
+injectBareErr() // whatever helper Task 17 Step 4a's test uses
+injectBareErr()
 
-// TestReceiverWARN_InvokesClassifierBypassLimiter asserts the receiver-side
-// defense-in-depth WARN path consumes the same shared limiter as the
-// metrics-side path. Drives a non-*wtpv1.ValidationError back through the
-// receiver classifier, then verifies that:
-//   - exactly one classifier_bypass WARN landed (the limiter starts full),
-//   - the metric counter incremented exactly once per error (always-on),
-//   - a SECOND identical error within the rate-limit window does NOT
-//     produce a second WARN (rate-limited) but DOES produce a second
-//     counter increment (counter is unconditional).
-//
-// This locks in the cross-package contract that BOTH WARN paths share one
-// limiter and that the counter ALWAYS tracks true volume regardless of
-// WARN throttling. NOTE: the receiver-helper signature `receiverClassify`
-// below is a placeholder — Task 17 Step 4a defines the actual entry point.
-// The implementer adapts the helper call to whatever exported test surface
-// Task 17 Step 4a provides; the assertion contract (counter=2, WARN=1,
-// message text) is the load-bearing part.
-func TestReceiverWARN_InvokesClassifierBypassLimiter(t *testing.T) {
-	// Reset the shared limiter so this test does not depend on prior
-	// test state (the limiter is a process-wide singleton shared with
-	// the metrics-side WARN path; without this reset, a prior test that
-	// drained the bucket would make this assertion order-dependent).
-	metrics.ResetClassifierBypassLimiterForTest()
-	t.Cleanup(metrics.ResetClassifierBypassLimiterForTest)
+// Existing assertions (unchanged): errors.As returns false on each, live loop
+// returns StateConnecting on each.
 
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
-	c := metrics.New()
-	// Drive a synthetic non-*ValidationError through the receiver classifier
-	// (call into the receiver helper that Task 17 Step 4a defines — exact
-	// signature TBD by Task 17 implementer; the assertion is what matters).
-	syntheticErr := errors.New("not-a-validation-error")
-	receiverClassify(c.WTP(), syntheticErr) // implementation-defined helper
-	receiverClassify(c.WTP(), syntheticErr) // second call within rate-limit window
-
-	// Counter increments BOTH times (always-on, regardless of WARN throttling).
-	if got := c.WTP().DroppedInvalidFrame(metrics.WTPInvalidFrameReasonClassifierBypass); got != 2 {
-		t.Errorf("DroppedInvalidFrame(classifier_bypass) = %d, want 2 (counter MUST track true volume regardless of WARN throttling)", got)
-	}
-
-	// WARN log emitted EXACTLY ONCE (limiter throttled the second).
-	logged := strings.Count(strings.TrimRight(buf.String(), "\n"), "\n") + 1
-	if buf.Len() == 0 {
-		logged = 0
-	}
-	if logged != 1 {
-		t.Errorf("WARN log emitted %d entries for 2 errors — expected exactly 1 (first allowed by full bucket, second throttled)", logged)
-	}
-	if !strings.Contains(buf.String(), "non-typed frame validation error") {
-		t.Errorf("WARN log MUST mention 'non-typed frame validation error' for receiver-side path; got: %s", buf.String())
-	}
+// NEW (rate-limit contract): exactly 1 WARN, exactly 2 counter increments.
+if logged := countWARNLines(buf); logged != 1 {
+    t.Errorf("WARN log emitted %d entries for 2 errors — expected 1 (first allowed by full bucket, second throttled)", logged)
+}
+if got := c.WTP().DroppedInvalidFrame(metrics.WTPInvalidFrameReasonClassifierBypass); got != 2 {
+    t.Errorf("DroppedInvalidFrame(classifier_bypass) = %d, want 2 (counter MUST track true volume regardless of WARN throttling)", got)
 }
 ```
 
-Acceptance criterion: this test MUST be implemented as part of Task 22b (NOT deferred to a separate task). The test enforces that BOTH WARN paths share one rate-limiter and that the receiver-side counter increments unconditionally, mirroring the metrics-side guarantees verified by Step 4. Without this test, the cross-package WARN-rate-limit contract from spec §"WARN rate-limit (both `classifier_bypass` paths)" is only half-covered.
+The exact function signatures (`injectBareErr`, `countWARNLines`, etc.) are determined by Task 17 Step 4a's test implementation; Task 22b's modification just calls the existing injection mechanism a second time and adds two assertions. No new test seam is invented.
+
+Acceptance criterion: this rate-limit assertion MUST be implemented as part of Task 22b (NOT deferred to a separate task). The assertion enforces that BOTH WARN paths share one rate-limiter and that the receiver-side counter increments unconditionally, mirroring the metrics-side guarantees verified by Step 4. Without this assertion, the cross-package WARN-rate-limit contract from spec §"WARN rate-limit (both `classifier_bypass` paths)" is only half-covered.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `go test ./internal/metrics/... ./proto/canyonroad/wtp/v1/... ./internal/store/watchtower/transport/...`
-Expected: PASS — the parity test `TestWTPInvalidFrameReason_ParityWithValidator` succeeds (proto-side `wtpv1.AllValidationReasons()` and metrics-side getters agree on the shared/disjoint/coverage invariants), the rate-limit test `TestClassifierBypassWARN_RateLimited` succeeds (counter at 100, WARN logs ≤ 11), and the receiver-side rate-limit test `TestReceiverWARN_InvokesClassifierBypassLimiter` succeeds (counter at 2, WARN log = 1, message contains "non-typed frame validation error"). All previously-passing tests continue to pass.
+Expected: PASS — the parity test `TestWTPInvalidFrameReason_ParityWithValidator` succeeds (proto-side `wtpv1.AllValidationReasons()` and metrics-side getters agree on the shared/disjoint/coverage invariants), the rate-limit test `TestClassifierBypassWARN_RateLimited` succeeds (counter at 100, WARN logs ≤ 11), and the modified `TestReceiver_NonTypedErrorClassifiedAsClassifierBypass` test (extended in Step 4a, or its sibling test in the same file added by Step 4a) succeeds with its rate-limit assertions (counter at 2, WARN log = 1) in addition to the original Task 17 Step 4a assertions (errors.As false, live loop returns StateConnecting). All previously-passing tests continue to pass.
 
 - [ ] **Step 6: Cross-compile check**
 
@@ -10265,8 +10225,13 @@ Expected: no errors.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add internal/metrics/wtp_parity_test.go internal/metrics/wtp_ratelimit.go internal/metrics/wtp.go internal/store/watchtower/transport/receiver_warn_test.go
-git commit -m "feat(metrics): cross-task parity test + shared classifier_bypass WARN rate-limiter (incl. receiver-side inject test)"
+git add internal/metrics/wtp_parity_test.go internal/metrics/wtp_ratelimit.go internal/metrics/wtp.go
+# Also stage the file Task 17 Step 4a placed `TestReceiver_NonTypedErrorClassifiedAsClassifierBypass`
+# in (under internal/store/watchtower/transport/) — Step 4a above modified it (extended the existing
+# test or added a sibling test in the same file). Exact filename is determined by Task 17 Step 4a's
+# implementer; substitute it here.
+git add internal/store/watchtower/transport/<file-from-task-17-step-4a>
+git commit -m "feat(metrics): cross-task parity test + shared classifier_bypass WARN rate-limiter (extends Task 17 Step 4a receiver test)"
 ```
 
 (If Task 17 Step 4a's receiver wiring is being committed in this same task, also add the corresponding `internal/store/watchtower/transport/state_live.go` change.)
@@ -11972,14 +11937,18 @@ operator-facing breaking changes that earlier rounds missed:
    `wtp_dropped_invalid_frame_total{reason="missing_chain"}` —
    inventing such a label would mis-document the new contract.
    Operator-side, the symptom now surfaces through one of:
-   `wtp_session_failures_total{reason="..."}` or
-   `wtp_reconnects_total{reason="..."}` (depending on how the upstream
-   caller surfaces the propagated error), and operators with
-   alerts/dashboards on `wtp_dropped_missing_chain_total` MUST either
-   delete the rule or redirect it to one of the replacement families
-   per Step 2 below. See spec §"Migration guidance: removed
-   `wtp_dropped_missing_chain_total`" for the canonical redirection
-   map.
+   `wtp_reconnects_total{reason="..."}` (the existing reconnect
+   family — receive-side reaction when the upstream caller closes the
+   stream in response to the propagated error),
+   `wtp_session_init_failures_total{reason="..."}`, or
+   `wtp_session_rotation_failures_total{reason="..."}` (the latter two
+   planned in Task 22a, Phase 8 — surfaced when the caller propagates
+   the error during the SessionInit/SessionUpdate handshake), and
+   operators with alerts/dashboards on `wtp_dropped_missing_chain_total`
+   MUST either delete the rule or redirect it to one of the
+   replacement families per Step 2 below. See spec §"Migration
+   guidance: removed `wtp_dropped_missing_chain_total`" for the
+   canonical redirection map.
 2. `wtp_dropped_invalid_frame_total{reason="unknown"}` was
    NARROWED. Pre-split, `unknown` was a catch-all that covered BOTH
    validator-emitted schema-drift cases AND defense-in-depth bypass
@@ -12073,17 +12042,23 @@ error per spec §"Migration guidance: removed
     elsewhere, see the next two options). Mark the row
     `migration_decision: delete` and capture the PR / change request
     link that removes the rule.
-  - **Redirect to session-failure / reconnect family**: the alert's
+  - **Redirect to reconnect / session-failure family**: the alert's
     intent was to detect composite-store regressions. The new symptom
-    surfaces through `wtp_session_failures_total{reason="..."}` or
-    `wtp_reconnects_total{reason="..."}` depending on how the upstream
-    caller surfaces the propagated `compact.ErrMissingChain` (if the
-    caller tears the WTP stream down, the symptom is a session
-    failure; if the caller force-cycles the stream, the symptom is a
-    reconnect). Mark the row
+    surfaces through one of three families depending on how the
+    upstream caller propagates `compact.ErrMissingChain`:
+    `wtp_reconnects_total{reason="..."}` (already exists in
+    `internal/metrics/wtp.go` — use this if the caller force-cycles
+    the stream and the receive loop reacts to the closed/erroring
+    stream),
+    `wtp_session_init_failures_total{reason="..."}`, or
+    `wtp_session_rotation_failures_total{reason="..."}` (the latter
+    two are planned in Task 22a, Phase 8 — use these if the caller
+    surfaces the error during the SessionInit/SessionUpdate
+    handshake). Mark the row
     `migration_decision: redirect-session-failure` and capture the
-    new selector (with the specific reason label the caller emits) in
-    the tracking artifact alongside the PR / change request link.
+    new selector (with the specific reason label the caller emits and
+    which family was chosen) in the tracking artifact alongside the
+    PR / change request link.
   - **Redirect to invalid-frame family**: the alert's intent was
     protocol-layer drops broadly. Use
     `wtp_dropped_invalid_frame_total{reason=~"..."}` with the
