@@ -763,7 +763,7 @@ type Config struct {
 - `WAL.SegmentSize <= WAL.MaxTotalBytes / 2` (need room for at least 2 segments).
 - `len(HMACSecret) >= audit.MinKeyLength` (currently 32 bytes for HMAC-SHA256). Mirrors the audit package's precondition so a short key is rejected at watchtower-load time with a watchtower-shaped error rather than surfacing as a generic `audit.NewSinkChain` error mid-construction.
 
-**Watchtower validation vs audit as source of truth.** Watchtower's `Options.validate()` mirrors the audit package's preconditions (currently just `MinKeyLength`) so that misconfiguration is caught at watchtower-load time with watchtower-shaped errors, rather than surfacing as a generic audit error mid-construction. If audit's preconditions tighten in the future, watchtower's `validate()` must be updated to match — `audit` remains the canonical source of truth for chain invariants.
+**Watchtower validation vs audit as source of truth.** Watchtower's `Options.validate()` mirrors the audit package's preconditions (currently `MinKeyLength` and the HMAC algorithm whitelist `hmac-sha256` / `hmac-sha512`) so that misconfiguration is caught at watchtower-load time with watchtower-shaped errors, rather than surfacing as a generic audit error mid-construction. If audit's preconditions tighten in the future, watchtower's `validate()` must be updated to match — `audit` remains the canonical source of truth for chain invariants.
 
 ### Constructor
 
