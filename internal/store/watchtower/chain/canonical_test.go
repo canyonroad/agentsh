@@ -2,6 +2,7 @@ package chain
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -99,5 +100,31 @@ func TestEncodeCanonical_SurrogatePair(t *testing.T) {
 	}
 	if !strings.Contains(string(got), `"prev_hash":"\ud83d\ude00"`) {
 		t.Errorf("surrogate pair wrong: %s", got)
+	}
+}
+
+func TestEncodeCanonical_InvalidUTF8Rejected(t *testing.T) {
+	// 0x80 is a continuation byte with no leading byte — invalid UTF-8.
+	rec := IntegrityRecord{PrevHash: "valid-prefix\x80invalid"}
+	_, err := EncodeCanonical(rec)
+	if err == nil {
+		t.Fatal("expected ErrInvalidUTF8 for invalid UTF-8 in PrevHash; got nil")
+	}
+	if !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("expected ErrInvalidUTF8, got %v", err)
+	}
+	// Ensure all four string fields are validated, not just the first.
+	rec2 := IntegrityRecord{ContextDigest: "good", EventHash: "good", KeyFingerprint: "k\x80", PrevHash: "good"}
+	_, err = EncodeCanonical(rec2)
+	if !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("expected ErrInvalidUTF8 for KeyFingerprint, got %v", err)
+	}
+}
+
+func TestComputeContextDigest_InvalidUTF8Rejected(t *testing.T) {
+	ctx := SessionContext{AgentID: "ok", SessionID: "s\x80bad"}
+	_, err := ComputeContextDigest(ctx)
+	if !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("expected ErrInvalidUTF8, got %v", err)
 	}
 }

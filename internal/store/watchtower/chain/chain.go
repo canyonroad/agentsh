@@ -14,6 +14,18 @@ import (
 // IntegrityRecord is the WTP integrity_record structure that gets canonical-
 // encoded and passed as the payload to audit.SinkChain.Compute. Field names
 // match the on-the-wire JSON object in CompactEvent.integrity (spec §6.3).
+//
+// Sequence-width contract (layered):
+//   - WTP wire format (this struct, the .proto definition) reserves the full
+//     uint64 sequence space.
+//   - audit.SinkChain.Compute consumes int64; values above math.MaxInt64
+//     overflow at that boundary.
+//   - The bounds check (0..math.MaxInt64) lives at the store-integration
+//     boundary in watchtower.Store.AppendEvent (Task 22), where ev.Chain.Sequence
+//     is converted before being passed to the chain.
+//   - The encoder in this package handles the full uint64 range so wire-level
+//     conformance vectors can exercise it; constraint enforcement is the
+//     boundary's job, not the encoder's.
 type IntegrityRecord struct {
 	FormatVersion  uint32
 	Sequence       uint64
@@ -41,10 +53,16 @@ type SessionContext struct {
 //
 // The digest changes on session establishment and on chain rotation; tests can
 // assert byte-equality against this output as part of the conformance suite.
-func ComputeContextDigest(ctx SessionContext) string {
-	canon := encodeContextCanonical(ctx)
+//
+// Returns ErrInvalidUTF8 if any SessionContext string field contains invalid
+// UTF-8. See EncodeCanonical for the cross-implementation rationale.
+func ComputeContextDigest(ctx SessionContext) (string, error) {
+	canon, err := encodeContextCanonical(ctx)
+	if err != nil {
+		return "", err
+	}
 	sum := sha256.Sum256(canon)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // ComputeEventHash returns the lowercase-hex SHA-256 of the canonical CompactEvent

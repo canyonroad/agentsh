@@ -2,11 +2,20 @@ package chain
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strconv"
 	"unicode/utf16"
 	"unicode/utf8"
 )
+
+// ErrInvalidUTF8 is returned by EncodeCanonical and ComputeContextDigest when a
+// string field contains invalid UTF-8. We reject (rather than substitute U+FFFD)
+// to keep canonical bytes — and therefore SHA-256 hashes — stable across
+// implementations. A Go encoder substituting U+FFFD while a Rust encoder
+// rejected would yield different hashes for the same input, breaking
+// cross-implementation chain verification.
+var ErrInvalidUTF8 = errors.New("chain: invalid utf-8 in string field")
 
 // EncodeCanonical produces the byte-exact canonical JSON encoding of an
 // IntegrityRecord per spec §6.4: keys sorted lexicographically, no insignificant
@@ -14,9 +23,27 @@ import (
 // scientific notation), strict JSON string escapes.
 //
 // This is the cross-implementation contract surface — a single byte difference
-// breaks every other implementation. Vectors live in chain/testdata/vectors.json
-// and are also published as the conformance suite at docs/spec/wtp/conformance/.
+// breaks every other implementation. Conformance vectors are added in Task 7
+// and will live at chain/testdata/vectors.json (also published at
+// docs/spec/wtp/conformance/) once that task lands.
+//
+// Returns ErrInvalidUTF8 if any string field contains invalid UTF-8. We reject
+// rather than silently substitute U+FFFD so canonical bytes stay identical
+// across Go, Rust, and TypeScript implementations.
 func EncodeCanonical(rec IntegrityRecord) ([]byte, error) {
+	for _, f := range []struct {
+		name string
+		v    string
+	}{
+		{"context_digest", rec.ContextDigest},
+		{"event_hash", rec.EventHash},
+		{"key_fingerprint", rec.KeyFingerprint},
+		{"prev_hash", rec.PrevHash},
+	} {
+		if !utf8.ValidString(f.v) {
+			return nil, fmt.Errorf("%w: field %q", ErrInvalidUTF8, f.name)
+		}
+	}
 	var buf bytes.Buffer
 	buf.WriteByte('{')
 	// Keys sorted lexicographically: context_digest, event_hash, format_version,
@@ -49,7 +76,25 @@ func EncodeCanonical(rec IntegrityRecord) ([]byte, error) {
 // encodeContextCanonical does the same for SessionContext. Internal: only used
 // by ComputeContextDigest. Keys sorted: agent_id, agent_version, algorithm,
 // format_version, key_fingerprint, ocsf_version, session_id.
-func encodeContextCanonical(ctx SessionContext) []byte {
+//
+// Returns ErrInvalidUTF8 if any string field contains invalid UTF-8 — same
+// rationale as EncodeCanonical (cross-implementation hash stability).
+func encodeContextCanonical(ctx SessionContext) ([]byte, error) {
+	for _, f := range []struct {
+		name string
+		v    string
+	}{
+		{"agent_id", ctx.AgentID},
+		{"agent_version", ctx.AgentVersion},
+		{"algorithm", ctx.Algorithm},
+		{"key_fingerprint", ctx.KeyFingerprint},
+		{"ocsf_version", ctx.OCSFVersion},
+		{"session_id", ctx.SessionID},
+	} {
+		if !utf8.ValidString(f.v) {
+			return nil, fmt.Errorf("%w: field %q", ErrInvalidUTF8, f.name)
+		}
+	}
 	var buf bytes.Buffer
 	buf.WriteByte('{')
 	writeKey(&buf, "agent_id", true)
@@ -67,7 +112,7 @@ func encodeContextCanonical(ctx SessionContext) []byte {
 	writeKey(&buf, "session_id", false)
 	writeStringValue(&buf, ctx.SessionID)
 	buf.WriteByte('}')
-	return buf.Bytes()
+	return buf.Bytes(), nil
 }
 
 func writeKey(buf *bytes.Buffer, k string, first bool) {
@@ -95,12 +140,10 @@ func writeUint(buf *bytes.Buffer, n uint64) {
 // every non-ASCII rune (lowercase hex). Surrogate pairs encode as two \uXXXX
 // escapes per RFC 8259 §7.
 func writeStringEscapedBody(buf *bytes.Buffer, s string) {
+	// Invalid UTF-8 has been rejected by the caller; no replacement here.
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
 		switch {
-		case r == utf8.RuneError && size == 1:
-			// Invalid UTF-8 — emit the replacement character escape.
-			fmt.Fprintf(buf, `\u%04x`, 0xFFFD)
 		case r == '"':
 			buf.WriteString(`\"`)
 		case r == '\\':
