@@ -6320,7 +6320,7 @@ six invariants:
 - Create: `internal/store/watchtower/transport/batcher.go`
 - Create: `internal/store/watchtower/transport/state_live.go`
 - Test: `internal/store/watchtower/transport/batcher_test.go`
-- Modify: `proto/canyonroad/wtp/v1/validate.go` (Step 4 — add `ValidationReason` enum, `AllValidationReasons` exported slice (consumed by Task 22a Step 4 parity test), and `ValidationError` typed classifier so receivers consume `errors.As(err, &ve)` instead of grepping the validator's formatted message; `ValidationError.Error()` returns ONLY the Reason string per spec §"Invalid-frame log sanitization" defense-in-depth rule)
+- Modify: `proto/canyonroad/wtp/v1/validate.go` (Step 4 — add `ValidationReason` enum (including `ReasonUnknown` for the forward-compat unknown-oneof case), `AllValidationReasons() []ValidationReason` copy-returning getter (consumed by Task 22a Step 4 parity test; getter form, not a mutable exported slice), and `ValidationError` typed classifier so receivers consume `errors.As(err, &ve)` instead of grepping the validator's formatted message; `ValidationError.Error()` returns ONLY the Reason string per spec §"Invalid-frame log sanitization" defense-in-depth rule; ValidateEventBatch and ValidateSessionInit MUST return `*ValidationError` for every failure path including the forward-compat unknown-oneof case)
 - Test: `proto/canyonroad/wtp/v1/validate_reason_test.go` (table-driven coverage that each input maps to its enum constant; `errors.As` and `errors.Is(err, ErrInvalidFrame)` both work)
 
 - [ ] **Step 1: Write the failing tests for each invariant**
@@ -6662,7 +6662,7 @@ func encodeBatchMessage(_ []wal.Record) (*wtpv1.ClientMessage, error) {
 Step 4a relies on the receiver classifying validator failures into a fixed `wtp_dropped_invalid_frame_total{reason}` enum. Today `proto/canyonroad/wtp/v1/validate.go` exposes only generic sentinels (`ErrInvalidFrame`, `ErrPayloadTooLarge`) constructed via `fmt.Errorf("%w: <peer-supplied details>", ErrXxx, ...)` — receivers would have to grep the formatted message to recover the reason, which both leaks peer-supplied bytes (the wrapped detail string embeds byte counts and oneof discriminators) into metric cardinality and is fragile. This step adds a typed classifier so receivers consume the reason via `errors.As(err, &ve)` and never touch the formatted message in the hot path.
 
 Files to modify (Go-code change — small but real):
-- Modify: `proto/canyonroad/wtp/v1/validate.go` — add `ValidationReason` enum, `ValidationError` typed struct (with `Error() string` returning ONLY the canonical Reason value, never peer-derived Inner detail — see spec §"Invalid-frame log sanitization" defense-in-depth rule), `AllValidationReasons` slice (exported so the metrics-side parity test in Task 22a Step 4 can range over it), refactor `ValidateEventBatch` and `ValidateSessionInit` to return `&ValidationError{Reason: ..., Inner: fmt.Errorf(...)}`.
+- Modify: `proto/canyonroad/wtp/v1/validate.go` — add `ValidationReason` enum (including `ReasonUnknown` for the forward-compat unknown-oneof case), `ValidationError` typed struct (with `Error() string` returning ONLY the canonical Reason value, never peer-derived Inner detail — see spec §"Invalid-frame log sanitization" defense-in-depth rule), `AllValidationReasons() []ValidationReason` copy-returning getter (exported so the metrics-side parity test in Task 22a Step 4 can range over it; the getter returns a fresh copy on each call so callers cannot mutate the underlying enumeration — STABLE PRODUCTION API per spec §"Stable production API"), refactor `ValidateEventBatch` and `ValidateSessionInit` to return `&ValidationError{Reason: ..., Inner: fmt.Errorf(...)}` for EVERY failure path (the forward-compat unknown-oneof default branch returns `&ValidationError{Reason: ReasonUnknown, Inner: fmt.Errorf("unknown body oneof case")}` — bare `fmt.Errorf("%w: ...", ErrInvalidFrame, ...)` returns from the validator are a CONTRACT VIOLATION per spec).
 - Create: `proto/canyonroad/wtp/v1/validate_reason_test.go` — TDD-first table-driven tests asserting each enum constant maps to the correct input, `errors.As(err, &ve)` works, `errors.Is(err, ErrInvalidFrame)` / `errors.Is(err, ErrPayloadTooLarge)` still work for legacy callers, AND `ValidationError.Error()` returns ONLY the Reason string (no peer-derived Inner content) so naive `slog.Error("...", "err", ve)` call sites cannot leak peer bytes.
 
 TDD order:
@@ -6796,7 +6796,10 @@ func TestValidateSessionInit_ReasonClassification(t *testing.T) {
 // enumerated reasons in spec §Metrics; adding a new validator branch
 // requires adding a new ValidationReason constant AND adding the
 // matching label to internal/metrics' WTPInvalidFrameReason enum (Task
-// 22a).
+// 22a). Note: `decompress_error` is NOT a ValidationReason — it is a
+// metrics-only reason emitted by the streaming-decompression code
+// downstream of the validator, with no proto-side counterpart (see spec
+// §"Frame validation and forward compatibility").
 type ValidationReason string
 
 const (
@@ -6807,6 +6810,16 @@ const (
 	ReasonPayloadTooLarge       ValidationReason = "payload_too_large"
 	ReasonNilSessionInit        ValidationReason = "session_init_algorithm_unspecified" // nil *SessionInit — folded under algorithm_unspecified for the metric (no separate "nil" label by design)
 	ReasonAlgorithmUnspecified  ValidationReason = "session_init_algorithm_unspecified"
+	// ReasonUnknown is the forward-compat reason returned by the
+	// validator when a new oneof discriminator is added to the proto
+	// schema before the validator switch is updated to classify it. The
+	// validator returns &ValidationError{Reason: ReasonUnknown, ...} —
+	// it MUST NOT fall back to a bare fmt.Errorf return. A non-zero
+	// metrics-side wtp_dropped_invalid_frame_total{reason="unknown"}
+	// series is the operator-visible signal that a new validator failure
+	// class has shipped and the next maintenance cycle MUST extend the
+	// enum to classify it under a dedicated reason.
+	ReasonUnknown               ValidationReason = "unknown"
 )
 
 // ValidationError carries both a structured Reason (safe for metric labels
@@ -6835,13 +6848,11 @@ func (e *ValidationError) Unwrap() error  { return e.Inner }
 // the appropriate sentinel.
 func (e *ValidationError) Is(target error) bool { return errors.Is(e.Inner, target) }
 
-// AllValidationReasons enumerates every constant of type
-// ValidationReason in stable insertion order. Consumers (notably the
-// metrics package's TestWTPInvalidFrameReason_ParityWithValidator
-// test) range over this slice to assert the proto-side and metrics-
-// side enums stay in sync. Adding a new ValidationReason constant
-// MUST also append it here.
-var AllValidationReasons = []ValidationReason{
+// allValidationReasons enumerates every ValidationReason constant in
+// stable insertion order (matching enum declaration order). Package-
+// private to prevent external mutation; consumers use the
+// AllValidationReasons() getter below which returns a fresh copy.
+var allValidationReasons = []ValidationReason{
 	ReasonNilBatch,
 	ReasonCompressionUnspecified,
 	ReasonBodyUnset,
@@ -6849,6 +6860,26 @@ var AllValidationReasons = []ValidationReason{
 	ReasonPayloadTooLarge,
 	ReasonNilSessionInit,
 	ReasonAlgorithmUnspecified,
+	ReasonUnknown,
+}
+
+// AllValidationReasons returns a fresh copy of every ValidationReason
+// constant in stable insertion order (matching enum declaration order
+// in this file). Consumers (notably the metrics package's
+// TestWTPInvalidFrameReason_ParityWithValidator test, plus any external
+// dashboard generator) range over this slice to assert the proto-side
+// and metrics-side enums stay in sync. Adding a new ValidationReason
+// constant MUST also append it to allValidationReasons above.
+//
+// STABLE PRODUCTION API (not test-only): see spec §"Stable production
+// API". Returns a fresh copy on each call so callers cannot mutate the
+// package-private enumeration. Insertion order is documented stable
+// (matching enum declaration order); removals/renames are breaking
+// changes that require bumping the proto package version.
+func AllValidationReasons() []ValidationReason {
+	out := make([]ValidationReason, len(allValidationReasons))
+	copy(out, allValidationReasons)
+	return out
 }
 
 // ValidateEventBatch returns a *ValidationError on failure; the typed
@@ -6876,12 +6907,16 @@ func ValidateEventBatch(b *EventBatch) error {
 			return &ValidationError{Reason: ReasonPayloadTooLarge, Inner: fmt.Errorf("%w: compressed_payload is %d bytes (cap %d)", ErrPayloadTooLarge, len(body.CompressedPayload), MaxCompressedPayloadBytes)}
 		}
 	default:
-		// Default branch keeps the bare ErrInvalidFrame return path so a
-		// future protobuf revision that adds a new oneof arm without
-		// updating this switch surfaces as wtp_dropped_invalid_frame_total
-		// {reason="unknown"} downstream — that's the intentional forward-
-		// compat catch-all per spec §Metrics.
-		return fmt.Errorf("%w: unknown body oneof case", ErrInvalidFrame)
+		// Forward-compat: a future protobuf revision that adds a new
+		// oneof arm without updating this switch surfaces as
+		// wtp_dropped_invalid_frame_total{reason="unknown"} downstream.
+		// We return *ValidationError (NOT a bare fmt.Errorf) so the
+		// receiver-side errors.As classifier always succeeds — the
+		// validator MUST return *ValidationError for every failure
+		// path, no exceptions (see spec §"Reason classification
+		// (validator contract)" — bare fmt.Errorf returns are a
+		// CONTRACT VIOLATION).
+		return &ValidationError{Reason: ReasonUnknown, Inner: fmt.Errorf("%w: unknown body oneof case", ErrInvalidFrame)}
 	}
 	return nil
 }
@@ -6909,26 +6944,45 @@ The Live state (and any other receive site introduced in Phase 8) MUST honor the
 
 (a) When the receiver detects a frame-validation failure, it MUST classify the failure into a fixed `wtp_dropped_invalid_frame_total{reason}` label using the following two-step rule (NO fallback that parses `err.Error()` — the typed boundary is the contract):
 
-   1. Attempt `errors.As(err, &ve)` against `*wtpv1.ValidationError`. If it returns true, use `WTPInvalidFrameReason(ve.Reason)` as the label value (the proto-side string is byte-equal to the metrics-side constant per Task 17 Step 4 / Task 22a parity check).
-   2. If `errors.As` returns false (i.e., the validator returned a plain `fmt.Errorf("%w: ...", wtpv1.ErrInvalidFrame, ...)` not wrapped in `*ValidationError` — for example, the unknown-oneof default branch in `ValidateEventBatch` that intentionally stays a bare `fmt.Errorf` so a future protobuf revision adding a new oneof arm without updating the switch surfaces here), the receiver MUST classify the failure as `WTPInvalidFrameReasonUnknown` (label string `"unknown"`). This is the operator-visible signal that the enum needs extending — see spec §"Reason classification (fallback rule)" for rationale.
+   1. Attempt `errors.As(err, &ve)` against `*wtpv1.ValidationError`. If it returns true, use `WTPInvalidFrameReason(ve.Reason)` as the label value (the proto-side string is byte-equal to the metrics-side constant per Task 17 Step 4 / Task 22a parity check). For validator-returned errors this branch SHOULD always be taken — the validator MUST return `*ValidationError` for every failure path, including the forward-compat unknown-oneof case (which returns `&ValidationError{Reason: ReasonUnknown, ...}`).
+   2. **Defense-in-depth fallback**: if `errors.As` returns false, the receiver MUST classify the failure as `WTPInvalidFrameReasonUnknown` (label string `"unknown"`) AND emit a WARN-level diagnostic. This branch SHOULD NEVER trigger in production because validator-returned errors always satisfy `errors.As(err, &ve)` per the contract above; if it does trigger, a non-validator caller passed a bare error into the receiver-side classifier (e.g., a unit-test mock or a future code path that bypasses `ValidateEventBatch`) and the WARN log makes that drift visible to operators. See spec §"Receiver-side defense in depth (should never trigger in production)" for rationale.
 
-   After classification, increment `wtp_dropped_invalid_frame_total{reason=<classified>}` exactly once per offending frame. The `reason` value MUST come from the canonical `wtpv1.ValidationReason` constants defined in Step 4 above (currently: `event_batch_body_unset`, `event_batch_compression_unspecified`, `event_batch_compression_mismatch`, `session_init_algorithm_unspecified`, `payload_too_large`, `decompress_error` (emitted by streaming decompression downstream of the validator — see (d) below), plus `unknown` as the fallback for any error that does NOT match `*ValidationError` via `errors.As`). New reasons added in future tasks MUST be added to the `ValidationReason` enum first; receivers reference `wtpv1.Reason*` constants, never literals.
+   The canonical defense-in-depth implementation pattern (use this verbatim in any new receiver wiring):
+
+   ```go
+   var ve *wtpv1.ValidationError
+   if !errors.As(err, &ve) {
+       // Defense-in-depth: should never happen for validator-returned errors,
+       // but a non-validator caller might pass a bare error (e.g., a unit test
+       // mock or future code path that bypasses ValidateEventBatch).
+       // Classify as unknown and log a WARN-level diagnostic so operators
+       // can investigate any such regression.
+       slogger.Warn("non-typed frame validation error",
+           slog.String("err_type", fmt.Sprintf("%T", err)),
+           slog.String("reason", "unknown"))
+       metrics.IncDroppedInvalidFrame(metrics.WTPInvalidFrameReasonUnknown)
+       return // close stream, etc.
+   }
+   metrics.IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason(ve.Reason))
+   ```
+
+   After classification, increment `wtp_dropped_invalid_frame_total{reason=<classified>}` exactly once per offending frame. The `reason` value MUST come from the canonical `wtpv1.ValidationReason` constants defined in Step 4 above (currently: `event_batch_body_unset`, `event_batch_compression_unspecified`, `event_batch_compression_mismatch`, `session_init_algorithm_unspecified`, `payload_too_large`, `unknown`) plus the metrics-only `decompress_error` (emitted by streaming decompression downstream of the validator — see (d) below; no `wtpv1.ValidationReason` counterpart). New validator-emitted reasons added in future tasks MUST be added to the `ValidationReason` enum first; receivers reference `wtpv1.Reason*` constants, never literals.
 (b) After incrementing the counter, the receiver MUST tear down the stream rather than silently consuming the malformed frame: server-side validation failures (this task) take the `stream_recv_error` reconnect path documented in spec §"Frame validation and forward compatibility" — close the current stream, return `StateConnecting` from the live loop, and let the Run loop's backoff handle the reconnect. The newly-added Goaway path is reserved for the testserver / server-side validators in Phase 9 (where the client's outbound frame is rejected) — Phase 8 receivers do not emit Goaway because they are reading, not writing.
 (c) Invalid-frame logging MUST follow the spec's sanitization rule: log only `session_id` (local UUID, internal-only), `reason` (the canonical `string(ve.Reason)`), and `hex_prefix` (a hex-encoded prefix of the offending frame's serialized representation, capped at 16 input bytes — 32 hex chars output). The receiver MUST NOT log `ve.Inner` or `err.Error()` — both embed peer-supplied byte counts and oneof discriminators per the validator's `fmt.Errorf` construction.
-(d) The streaming decompression path (downstream of `ValidateEventBatch` — added when WTP gains a real decompression code path post-MVP) MUST classify zstd/gzip framing errors and `MaxDecompressedBatchBytes` overruns as `wtpv1.ReasonDecompressError` (label string `decompress_error`) and route them through the same counter + tear-down path. Until a real decompression path lands, the `decompress_error` reason exists in the enum so the metric series is registered at zero (always-emit contract) — no live increment yet.
+(d) The streaming decompression path (downstream of `ValidateEventBatch` — added when WTP gains a real decompression code path post-MVP) MUST classify zstd/gzip framing errors and `MaxDecompressedBatchBytes` overruns as `WTPInvalidFrameReasonDecompressError` (metrics-side label `decompress_error`) and route them through the same counter + tear-down path. There is NO `wtpv1.ReasonDecompressError` constant — `decompress_error` is metrics-only because it is emitted downstream of the validator (decompression runs after `ValidateEventBatch` accepts the frame envelope). Until a real decompression path lands, the metrics-side `decompress_error` reason exists in the metrics enum so the metric series is registered at zero (always-emit contract) — no live increment yet.
 
 Add a transport-level unit test that injects each enumerated frame-validation reason via the fakeConn `recvCh` (mirror the pattern used by the existing `wtp_session_failures_total{reason}` tests in `internal/metrics/wtp_test.go`). For each reason the test MUST assert: (1) the corresponding `wtp_dropped_invalid_frame_total{reason="<value>"}` series increments by exactly one, AND (2) the live loop returns `StateConnecting` (i.e., the reconnect path was taken). The test SHOULD use a table-driven structure keyed by the `wtpv1.Reason*` constants so adding a new reason is a one-line change. The test MUST consume reasons via `errors.As` against `*wtpv1.ValidationError` rather than parsing the error string.
 
 **Test acceptance — split by live-path availability:**
 
-- **Reasons with a live validator path NOW** (each MUST have an inject-and-assert test row in the table): `event_batch_body_unset`, `event_batch_compression_unspecified`, `event_batch_compression_mismatch`, `session_init_algorithm_unspecified`, `payload_too_large`. For each, the test injects a synthetic `*wtpv1.ValidationError` with the matching `Reason` (or constructs the offending frame and lets the validator return it), asserts the counter increments by exactly one with `reason="<value>"`, and asserts the live loop returns `StateConnecting`.
-- **`unknown` (fallback path)**: include in Step 5 — inject a plain `fmt.Errorf("%w: synthetic", wtpv1.ErrInvalidFrame)` (NO `*ValidationError` wrapper — this mirrors the unknown-oneof default branch in `ValidateEventBatch`). Assert the receiver's `errors.As(err, &ve)` returns false, the counter increments by exactly one with `reason="unknown"`, and the live loop returns `StateConnecting`. This validates the fallback rule from spec §"Reason classification (fallback rule)".
-- **`decompress_error` (deferred)**: explicitly EXCLUDED from the inject-and-assert table for this task. The metric series is registered NOW via the `WTPInvalidFrameReason` valid map and `wtpInvalidFrameReasonsEmitOrder` slice (zero-emission test in `TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons` covers it), but the live-path inject-and-assert test is added in the future Phase that introduces streaming decompression. Reason: there is no decompression code path in this task — adding a synthetic injection here would test fakeConn machinery, not the real classifier.
+- **Reasons with a live validator path NOW** (each MUST have an inject-and-assert test row in the table): `event_batch_body_unset`, `event_batch_compression_unspecified`, `event_batch_compression_mismatch`, `session_init_algorithm_unspecified`, `payload_too_large`, and `unknown`. For each, the test injects a synthetic `*wtpv1.ValidationError` with the matching `Reason` (or constructs the offending frame and lets the validator return it; the `unknown` row uses `&wtpv1.ValidationError{Reason: wtpv1.ReasonUnknown, Inner: fmt.Errorf("synthetic")}` since the unknown-oneof code path is hard to trigger from a test without rebuilding the proto), asserts the counter increments by exactly one with `reason="<value>"`, and asserts the live loop returns `StateConnecting`.
+- **`TestReceiver_NonTypedErrorClassifiedAsUnknown` (defense-in-depth guard)**: a separate dedicated test that verifies the receiver-side `errors.As`-false fallback. The test injects a bare `fmt.Errorf("%w: synthetic", wtpv1.ErrInvalidFrame)` (NOT wrapped in `*ValidationError` — this simulates a non-validator caller passing a bare error into the receiver, which SHOULD never happen for validator-returned errors per the contract). Assert: (1) the receiver's `errors.As(err, &ve)` returns false, (2) a WARN-level log entry is emitted with `err_type` and `reason="unknown"` fields, (3) the counter increments by exactly one with `reason="unknown"`, and (4) the live loop returns `StateConnecting`. This validates the defense-in-depth guard from spec §"Receiver-side defense in depth (should never trigger in production)".
+- **`decompress_error` (deferred)**: explicitly EXCLUDED from the inject-and-assert table for this task. The metric series is registered NOW via the `WTPInvalidFrameReason` valid map and `wtpInvalidFrameReasonsEmitOrder` slice (zero-emission test in `TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons` covers it), but the live-path inject-and-assert test is added in the future Phase that introduces streaming decompression. Reason: there is no decompression code path in this task — adding a synthetic injection here would test fakeConn machinery, not the real classifier. There is also no `wtpv1.ReasonDecompressError` to range over from the proto side — `decompress_error` is metrics-only.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `go test ./internal/store/watchtower/transport/... -run "TestBatcher|TestLive_FrameValidation"`
-Expected: PASS — all 5 batcher invariant tests plus the table-driven frame-validation tests added in Step 4a (one entry per enumerated `wtp_dropped_invalid_frame_total{reason}` value with a live validator path, plus the `unknown` fallback row; `decompress_error` is excluded per the split-acceptance rule above).
+Run: `go test ./internal/store/watchtower/transport/... -run "TestBatcher|TestLive_FrameValidation|TestReceiver_NonTypedErrorClassifiedAsUnknown"`
+Expected: PASS — all 5 batcher invariant tests plus the table-driven frame-validation tests added in Step 4a (one entry per validator-emitted `wtp_dropped_invalid_frame_total{reason}` value, including `unknown` since the validator now returns `*ValidationError{Reason: ReasonUnknown}` for the forward-compat unknown-oneof case), plus the dedicated `TestReceiver_NonTypedErrorClassifiedAsUnknown` defense-in-depth test that injects a bare `fmt.Errorf` into the receiver-side classifier. The `decompress_error` reason is excluded per the split-acceptance rule above (metrics-only — no proto-side counterpart).
 
 - [ ] **Step 6: Cross-compile check**
 
@@ -8826,7 +8880,11 @@ The spec lists five sink-failure counters that Task 23 (`AppendEvent`) and Phase
 
 - `wtp_dropped_invalid_utf8_total` (counter): a record was dropped because the canonical encoder reported `chain.ErrInvalidUTF8`. Wired by `AppendEvent` (Task 23).
 - `wtp_dropped_sequence_overflow_total` (counter): a record was dropped because `ev.Chain.Sequence > math.MaxInt64`. Wired by `AppendEvent` (Task 23).
-- `wtp_dropped_invalid_frame_total{reason}` (counter, labeled): a peer frame was dropped at the protocol-validation boundary; reasons are a fixed enum (`event_batch_body_unset`, `event_batch_compression_unspecified`, `event_batch_compression_mismatch`, `session_init_algorithm_unspecified`, `payload_too_large`, `decompress_error`, plus `unknown` as the catch-all). The Go-side label values come from `wtpv1.ValidationReason` constants (added in Task 17 Step 4) — `internal/metrics`' `WTPInvalidFrameReason` constants MUST equal `string(wtpv1.Reason*)` to keep the two enums in lockstep; a future receiver consumes `errors.As(err, &ve)` and increments using `WTPInvalidFrameReason(ve.Reason)`. Wired by transport / receivers in Phase 8 — specifically Task 17 Step 4a, where the Live state's inbound `ServerMessage` handling increments this counter and triggers the `stream_recv_error` reconnect path. Phase 9 (testserver) covers the symmetric server-side validation of inbound `ClientMessage` frames.
+- `wtp_dropped_invalid_frame_total{reason}` (counter, labeled): a peer frame was dropped at the protocol-validation boundary. The reason set splits into two disjoint categories:
+  - **Validator-emitted reasons** (proto-side `wtpv1.ValidationReason` constants returned by `ValidateEventBatch`/`ValidateSessionInit` as `*ValidationError`): `event_batch_body_unset`, `event_batch_compression_unspecified`, `event_batch_compression_mismatch`, `session_init_algorithm_unspecified`, `payload_too_large`, and `unknown` (forward-compat catch-all for new oneof discriminators added to the proto schema before the validator switch is updated; the validator returns `&ValidationError{Reason: ReasonUnknown}` rather than a bare `fmt.Errorf` — see Task 17 Step 4). These reasons MUST appear in BOTH `wtpv1.ValidationReason` and `WTPInvalidFrameReason` with byte-equal string values; the parity test (Step 4 below) enforces exact set equality.
+  - **Metrics-only reasons** (no proto-side counterpart): `decompress_error` — emitted by the streaming-decompression code downstream of `ValidateEventBatch` when zstd/gzip framing fails or `MaxDecompressedBatchBytes` is exceeded.
+
+  The Go-side label values come from `wtpv1.ValidationReason` constants for the validator-emitted reasons (added in Task 17 Step 4); a future receiver consumes `errors.As(err, &ve)` and increments using `WTPInvalidFrameReason(ve.Reason)`. Wired by transport / receivers in Phase 8 — specifically Task 17 Step 4a, where the Live state's inbound `ServerMessage` handling increments this counter and triggers the `stream_recv_error` reconnect path. Phase 9 (testserver) covers the symmetric server-side validation of inbound `ClientMessage` frames.
 - `wtp_session_init_failures_total{reason}` (counter, labeled): an in-band session-init step failed; reason `invalid_utf8` is the only enumerated value today, with `unknown` as the catch-all. Wired by transport in Phase 8.
 - `wtp_session_rotation_failures_total{reason}` (counter, labeled): same shape as init, but for rotation/SessionUpdate. Wired by transport in Phase 8.
 
@@ -9167,16 +9225,36 @@ var wtpSessionFailureReasonsEmitOrder = []WTPSessionFailureReason{
 
 // WTPInvalidFrameReason is a fixed, low-cardinality classification of why
 // a peer frame was dropped at the protocol-validation boundary. The
-// string values MUST equal string(wtpv1.Reason*) — receivers consume the
-// reason via errors.As against *wtpv1.ValidationError and forward
-// ve.Reason directly into IncDroppedInvalidFrame. Adding new reasons
-// requires updating: (a) wtpv1.ValidationReason in
-// proto/canyonroad/wtp/v1/validate.go, (b) the constants below, (c) the
-// wtpInvalidFrameReasonsValid table, (d) the wtpInvalidFrameReasonsEmitOrder
-// slice, and (e) the spec §Metrics enum list. The two enums are kept
+// reason set splits into two disjoint categories:
+//
+//   - Validator-emitted (proto-side wtpv1.ValidationReason has byte-equal
+//     constants): WTPInvalidFrameReasonEventBatchBodyUnset,
+//     WTPInvalidFrameReasonEventBatchCompressionUnspec,
+//     WTPInvalidFrameReasonEventBatchCompressionMismatch,
+//     WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
+//     WTPInvalidFrameReasonPayloadTooLarge,
+//     WTPInvalidFrameReasonUnknown. Receivers consume the reason via
+//     errors.As against *wtpv1.ValidationError and forward ve.Reason
+//     directly into IncDroppedInvalidFrame. The parity test
+//     (TestWTPInvalidFrameReason_ParityWithValidator, Step 4) enforces
+//     exact set equality between this category and AllValidationReasons().
+//
+//   - Metrics-only (no proto-side counterpart):
+//     WTPInvalidFrameReasonDecompressError. Emitted by the streaming-
+//     decompression code downstream of ValidateEventBatch — has no
+//     wtpv1.ValidationReason because decompression runs after the
+//     validator accepts the frame envelope.
+//
+// Adding a new validator-emitted reason requires updating: (a)
+// wtpv1.ValidationReason in proto/canyonroad/wtp/v1/validate.go and
+// allValidationReasons backing AllValidationReasons(), (b) the
+// constants below, (c) the wtpInvalidFrameReasonsValid table, (d) the
+// wtpInvalidFrameReasonsEmitOrder slice, and (e) the spec §Metrics enum
+// list. Adding a new metrics-only reason skips (a) but adds the
+// constant to MetricsOnlyReasons() (Step 3). The two enums are kept
 // deliberately separate (proto vs. metrics package) so the metrics
-// package does not import the proto package — but the string values
-// must stay byte-equal.
+// package does not import the proto package — but the validator-
+// emitted string values must stay byte-equal.
 type WTPInvalidFrameReason string
 
 const (
@@ -9441,12 +9519,16 @@ If a callsite outside `internal/metrics` invokes `IncDroppedMissingChain`, the b
 
 - [ ] **Step 4: Enum parity check (validator vs metrics)**
 
-The proto-side `wtpv1.ValidationReason` enum (Task 17 Step 4) and the metrics-side `WTPInvalidFrameReason` enum (defined above in this task) are intentionally duplicated string sets — the metrics package does NOT import the proto package, but the string values MUST stay byte-equal so that `WTPInvalidFrameReason(ve.Reason)` always lands in `wtpInvalidFrameReasonsValid`. Without an enforcement mechanism the two enums will drift silently the first time someone adds a reason to one side and forgets the other.
+The proto-side `wtpv1.ValidationReason` enum (Task 17 Step 4) and the metrics-side `WTPInvalidFrameReason` enum (defined above in this task) are intentionally duplicated string sets — the metrics package does NOT import the proto package, but the string values for validator-emitted reasons MUST stay byte-equal so that `WTPInvalidFrameReason(ve.Reason)` always lands in `wtpInvalidFrameReasonsValid`. Without an enforcement mechanism the two enums will drift silently the first time someone adds a reason to one side and forgets the other. The metrics-only `decompress_error` reason is intentionally NOT mirrored on the proto side (it is emitted downstream of the validator, by streaming decompression).
 
-Add a Go test `TestWTPInvalidFrameReason_ParityWithValidator` to `internal/metrics/wtp_test.go` (the metrics package's existing test file) that ranges over `wtpv1.AllValidationReasons` (exported as part of Task 17 Step 4) and `metrics.ValidWTPInvalidFrameReasons` (a new exported helper that returns a `map[WTPInvalidFrameReason]struct{}` view of the package-private `wtpInvalidFrameReasonsValid` table — keeps the underlying map unexported but lets parity tests range over the keys without poking at unexported state via reflection). The test asserts both directions:
+Add a Go test `TestWTPInvalidFrameReason_ParityWithValidator` to `internal/metrics/wtp_test.go` that asserts FOUR invariants in one test function:
 
-- **Forward direction** (every validator reason has a metrics constant): for every `r` in `wtpv1.AllValidationReasons`, assert `WTPInvalidFrameReason(string(r))` is a key in `metrics.ValidWTPInvalidFrameReasons()`. Failure message: `metrics package is missing WTPInvalidFrameReason constant for validator reason %q (string=%q); add the constant to internal/metrics/wtp.go and append it to wtpInvalidFrameReasonsValid + wtpInvalidFrameReasonsEmitOrder`.
-- **Reverse direction** (every metrics reason — except `decompress_error` and `unknown` — has a validator constant): for every `r` in `metrics.ValidWTPInvalidFrameReasons()` other than `WTPInvalidFrameReasonDecompressError` (metrics-only — emitted by streaming decompression downstream of the validator) and `WTPInvalidFrameReasonUnknown` (fallback for non-`*ValidationError` returns from the validator — see Task 17 Step 4a fallback rule), assert `wtpv1.ValidationReason(string(r))` appears in `wtpv1.AllValidationReasons`. Failure message: `validator package is missing ValidationReason constant for metrics reason %q (string=%q); add the constant to proto/canyonroad/wtp/v1/validate.go and append it to AllValidationReasons`.
+1. **Forward parity (exact set equality)**: every value in `wtpv1.AllValidationReasons()` MUST appear in `metrics.ValidationReasons()` (which returns a copy of just the validator-emitted SHARED set, NOT including metrics-only reasons), and vice versa. Use sorted comparison for a clear failure message that names the offending constant.
+2. **Reverse parity (exact set equality)**: every value in `metrics.ValidationReasons()` MUST appear in `wtpv1.AllValidationReasons()`. (Same assertion as forward direction, but framed from the metrics side; both directions must hold for set equality.)
+3. **Disjoint check**: `metrics.MetricsOnlyReasons()` (which returns just `[WTPInvalidFrameReasonDecompressError]`) MUST be disjoint from `wtpv1.AllValidationReasons()`. This catches the regression where someone accidentally adds `decompress_error` to the proto enum (which would violate the design contract that `decompress_error` is metrics-only).
+4. **Coverage check**: `metrics.ValidationReasons() ∪ metrics.MetricsOnlyReasons()` MUST equal `metrics.ValidWTPInvalidFrameReasons()` (the always-emit set used by zero-emission). This catches the regression where someone adds a new constant to the metrics package but forgets to put it into either the validator-shared set or the metrics-only set.
+
+All four assertions live in one test function with clear failure messages naming the offending constant and the file it lives in.
 
 Test snippet:
 
@@ -9454,46 +9536,73 @@ Test snippet:
 // TestWTPInvalidFrameReason_ParityWithValidator locks the metrics-side
 // WTPInvalidFrameReason constants to the proto-side wtpv1.ValidationReason
 // constants. The two enums are intentionally duplicated (metrics MUST NOT
-// import the proto package) but the string values MUST stay byte-equal so
-// receivers can do `metrics.WTPInvalidFrameReason(ve.Reason)` safely.
+// import the proto package) but the string values for validator-emitted
+// reasons MUST stay byte-equal so receivers can do
+// `metrics.WTPInvalidFrameReason(ve.Reason)` safely. The metrics-only
+// `decompress_error` reason is intentionally NOT mirrored on the proto
+// side (it is emitted post-validator by streaming decompression).
 //
 // Adding a new reason in either package without the other will fail this
 // test with a precise actionable message.
 func TestWTPInvalidFrameReason_ParityWithValidator(t *testing.T) {
-	validMetrics := metrics.ValidWTPInvalidFrameReasons()
+	// 1. Forward parity (exact set equality on the validator-emitted shared set).
+	validatorAll := make(map[wtpv1.ValidationReason]struct{})
+	for _, r := range wtpv1.AllValidationReasons() {
+		validatorAll[r] = struct{}{}
+	}
+	metricsShared := make(map[metrics.WTPInvalidFrameReason]struct{})
+	for _, r := range metrics.ValidationReasons() {
+		metricsShared[r] = struct{}{}
+	}
 
-	// Forward: every validator reason must have a metrics constant.
-	for _, r := range wtpv1.AllValidationReasons {
-		key := metrics.WTPInvalidFrameReason(string(r))
-		if _, ok := validMetrics[key]; !ok {
-			t.Errorf("metrics package is missing WTPInvalidFrameReason constant for validator reason %q (string=%q); add the constant to internal/metrics/wtp.go and append it to wtpInvalidFrameReasonsValid + wtpInvalidFrameReasonsEmitOrder",
+	// Forward: every validator reason must have a metrics constant in the SHARED set.
+	for r := range validatorAll {
+		if _, ok := metricsShared[metrics.WTPInvalidFrameReason(string(r))]; !ok {
+			t.Errorf("metrics package is missing WTPInvalidFrameReason constant for validator reason %q (string=%q); add the constant to internal/metrics/wtp.go and append it to wtpInvalidFrameReasonsValid + wtpInvalidFrameReasonsEmitOrder + the validator-shared set returned by ValidationReasons()",
 				r, string(r))
 		}
 	}
 
-	// Reverse: every metrics reason (except metrics-only / fallback ones)
-	// must have a validator constant.
-	metricsOnly := map[metrics.WTPInvalidFrameReason]struct{}{
-		metrics.WTPInvalidFrameReasonDecompressError: {}, // emitted post-validator by streaming decompression
-		metrics.WTPInvalidFrameReasonUnknown:         {}, // fallback for non-*ValidationError validator returns
-	}
-	validatorAll := make(map[wtpv1.ValidationReason]struct{}, len(wtpv1.AllValidationReasons))
-	for _, r := range wtpv1.AllValidationReasons {
-		validatorAll[r] = struct{}{}
-	}
-	for r := range validMetrics {
-		if _, skip := metricsOnly[r]; skip {
-			continue
-		}
+	// 2. Reverse: every metrics SHARED reason must have a validator constant.
+	for r := range metricsShared {
 		if _, ok := validatorAll[wtpv1.ValidationReason(string(r))]; !ok {
-			t.Errorf("validator package is missing ValidationReason constant for metrics reason %q (string=%q); add the constant to proto/canyonroad/wtp/v1/validate.go and append it to AllValidationReasons",
+			t.Errorf("validator package is missing ValidationReason constant for metrics reason %q (string=%q); add the constant to proto/canyonroad/wtp/v1/validate.go and append it to allValidationReasons (returned by AllValidationReasons())",
+				r, string(r))
+		}
+	}
+
+	// 3. Disjoint: metrics-only reasons MUST NOT appear on the validator side.
+	for _, r := range metrics.MetricsOnlyReasons() {
+		if _, ok := validatorAll[wtpv1.ValidationReason(string(r))]; ok {
+			t.Errorf("metrics-only reason %q (string=%q) accidentally appears in wtpv1.AllValidationReasons() — the design contract is that metrics-only reasons (like decompress_error) have NO proto-side counterpart; remove it from proto/canyonroad/wtp/v1/validate.go's allValidationReasons or remove it from internal/metrics/wtp.go's MetricsOnlyReasons() (whichever was added in error)",
+				r, string(r))
+		}
+	}
+
+	// 4. Coverage: shared ∪ metrics-only MUST equal the full valid set.
+	covered := make(map[metrics.WTPInvalidFrameReason]struct{})
+	for r := range metricsShared {
+		covered[r] = struct{}{}
+	}
+	for _, r := range metrics.MetricsOnlyReasons() {
+		covered[r] = struct{}{}
+	}
+	for r := range metrics.ValidWTPInvalidFrameReasons() {
+		if _, ok := covered[r]; !ok {
+			t.Errorf("metrics constant %q (string=%q) is in ValidWTPInvalidFrameReasons() but is in NEITHER ValidationReasons() (the validator-shared set) NOR MetricsOnlyReasons() (the metrics-only set); add it to one of those getters in internal/metrics/wtp.go so the parity test can classify it",
+				r, string(r))
+		}
+	}
+	for r := range covered {
+		if _, ok := metrics.ValidWTPInvalidFrameReasons()[r]; !ok {
+			t.Errorf("metrics constant %q (string=%q) appears in ValidationReasons() or MetricsOnlyReasons() but is NOT in ValidWTPInvalidFrameReasons() (the always-emit set); add it to wtpInvalidFrameReasonsValid in internal/metrics/wtp.go so it is registered for emit",
 				r, string(r))
 		}
 	}
 }
 ```
 
-Add the `metrics.ValidWTPInvalidFrameReasons` helper to `internal/metrics/wtp.go`:
+Add the `metrics.ValidWTPInvalidFrameReasons`, `metrics.ValidationReasons`, and `metrics.MetricsOnlyReasons` helpers to `internal/metrics/wtp.go`. All return fresh copies on each call so callers cannot mutate the package-private state:
 
 ```go
 // ValidWTPInvalidFrameReasons returns a copy of the set of metrics-side
@@ -9509,9 +9618,56 @@ func ValidWTPInvalidFrameReasons() map[WTPInvalidFrameReason]struct{} {
 	}
 	return out
 }
+
+// validationReasonsShared backs the ValidationReasons() getter. It is
+// the SUBSET of WTPInvalidFrameReason values that are also returned by
+// wtpv1.AllValidationReasons() — i.e., the validator-emitted reasons
+// shared across the proto and metrics packages. Adding a new validator-
+// shared reason MUST also append it here AND to allValidationReasons
+// in proto/canyonroad/wtp/v1/validate.go.
+var validationReasonsShared = []WTPInvalidFrameReason{
+	WTPInvalidFrameReasonEventBatchBodyUnset,
+	WTPInvalidFrameReasonEventBatchCompressionUnspec,
+	WTPInvalidFrameReasonEventBatchCompressionMismatch,
+	WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
+	WTPInvalidFrameReasonPayloadTooLarge,
+	WTPInvalidFrameReasonUnknown,
+}
+
+// ValidationReasons returns a fresh copy of the validator-emitted
+// (SHARED with wtpv1.AllValidationReasons()) frame-validation reasons.
+// Consumers (notably the parity test) range over this slice to assert
+// the proto-side and metrics-side enums stay in sync. Returns a fresh
+// copy on each call so callers cannot mutate the underlying enumeration.
+// STABLE PRODUCTION API.
+func ValidationReasons() []WTPInvalidFrameReason {
+	out := make([]WTPInvalidFrameReason, len(validationReasonsShared))
+	copy(out, validationReasonsShared)
+	return out
+}
+
+// metricsOnlyReasons backs the MetricsOnlyReasons() getter. It is the
+// SUBSET of WTPInvalidFrameReason values that have NO proto-side
+// counterpart — emitted by code paths downstream of the validator (e.g.,
+// streaming decompression). Adding a new metrics-only reason MUST
+// append it here, NOT to validationReasonsShared.
+var metricsOnlyReasons = []WTPInvalidFrameReason{
+	WTPInvalidFrameReasonDecompressError,
+}
+
+// MetricsOnlyReasons returns a fresh copy of the metrics-only frame-
+// validation reasons (those without a proto-side wtpv1.ValidationReason
+// counterpart). Today: just decompress_error. Returns a fresh copy on
+// each call so callers cannot mutate the underlying enumeration.
+// STABLE PRODUCTION API.
+func MetricsOnlyReasons() []WTPInvalidFrameReason {
+	out := make([]WTPInvalidFrameReason, len(metricsOnlyReasons))
+	copy(out, metricsOnlyReasons)
+	return out
+}
 ```
 
-This step is doc-only spec for Task 22a — the actual Go-code parity test lands when the task executes (alongside `wtpv1.AllValidationReasons` from Task 17). Listing it here ensures that whichever task lands second writes the parity test rather than leaving the enums to drift.
+This step is doc-only spec for Task 22a — the actual Go-code parity test lands when the task executes (alongside `wtpv1.AllValidationReasons()` from Task 17). Listing it here ensures that whichever task lands second writes the parity test rather than leaving the enums to drift.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
