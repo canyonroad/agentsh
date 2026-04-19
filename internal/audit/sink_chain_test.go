@@ -49,12 +49,12 @@ func TestSinkChain_Compute_FirstEntryUsesEmptyPrev(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}
-	if result.PrevHash != "" {
-		t.Errorf("first Compute: prevHash = %q, want empty", result.PrevHash)
+	if result.PrevHash() != "" {
+		t.Errorf("first Compute: prevHash = %q, want empty", result.PrevHash())
 	}
 	want := computeExpectedHash(t, key, IntegrityFormatVersion, 0, "", payload)
-	if result.EntryHash != want {
-		t.Errorf("entryHash = %q, want %q", result.EntryHash, want)
+	if result.EntryHash() != want {
+		t.Errorf("entryHash = %q, want %q", result.EntryHash(), want)
 	}
 }
 
@@ -73,8 +73,8 @@ func TestSinkChain_Compute_IsPure_NoMutationWithoutCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.EntryHash != second.EntryHash {
-		t.Errorf("Compute mutated chain state: first=%q second=%q", first.EntryHash, second.EntryHash)
+	if first.EntryHash() != second.EntryHash() {
+		t.Errorf("Compute mutated chain state: first=%q second=%q", first.EntryHash(), second.EntryHash())
 	}
 }
 
@@ -93,12 +93,12 @@ func TestSinkChain_Commit_AdvancesPrevHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.PrevHash != first.EntryHash {
-		t.Errorf("after Commit: prev_hash = %q, want %q", second.PrevHash, first.EntryHash)
+	if second.PrevHash() != first.EntryHash() {
+		t.Errorf("after Commit: prev_hash = %q, want %q", second.PrevHash(), first.EntryHash())
 	}
-	want := computeExpectedHash(t, key, IntegrityFormatVersion, 1, first.EntryHash, []byte(`{"b":2}`))
-	if second.EntryHash != want {
-		t.Errorf("second entryHash = %q, want %q", second.EntryHash, want)
+	want := computeExpectedHash(t, key, IntegrityFormatVersion, 1, first.EntryHash(), []byte(`{"b":2}`))
+	if second.EntryHash() != want {
+		t.Errorf("second entryHash = %q, want %q", second.EntryHash(), want)
 	}
 }
 
@@ -119,12 +119,12 @@ func TestSinkChain_Compute_GenerationRollover_ResetsPrevToEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r1.PrevHash != "" {
-		t.Errorf("after gen rollover: prev_hash = %q, want empty", r1.PrevHash)
+	if r1.PrevHash() != "" {
+		t.Errorf("after gen rollover: prev_hash = %q, want empty", r1.PrevHash())
 	}
 	want := computeExpectedHash(t, key, IntegrityFormatVersion, 0, "", []byte(`{"y":2}`))
-	if r1.EntryHash != want {
-		t.Errorf("rolled entryHash = %q, want %q", r1.EntryHash, want)
+	if r1.EntryHash() != want {
+		t.Errorf("rolled entryHash = %q, want %q", r1.EntryHash(), want)
 	}
 
 	// Until Commit(r1), the chain's recorded generation is still 0.
@@ -140,8 +140,8 @@ func TestSinkChain_Compute_GenerationRollover_ResetsPrevToEmpty(t *testing.T) {
 	if state.Generation != 1 {
 		t.Errorf("State.Generation after Commit = %d, want 1", state.Generation)
 	}
-	if state.PrevHash != r1.EntryHash {
-		t.Errorf("State.PrevHash = %q, want %q", state.PrevHash, r1.EntryHash)
+	if state.PrevHash != r1.EntryHash() {
+		t.Errorf("State.PrevHash = %q, want %q", state.PrevHash, r1.EntryHash())
 	}
 }
 
@@ -179,8 +179,8 @@ func TestSinkChain_State_Restore_RoundTrip(t *testing.T) {
 	}
 
 	state := c.State()
-	if state.Generation != 0 || state.PrevHash != r1.EntryHash {
-		t.Fatalf("State() = %+v, want {Generation:0 PrevHash:%q}", state, r1.EntryHash)
+	if state.Generation != 0 || state.PrevHash != r1.EntryHash() {
+		t.Fatalf("State() = %+v, want {Generation:0 PrevHash:%q}", state, r1.EntryHash())
 	}
 
 	d, _ := newTestSinkChain(t)
@@ -198,8 +198,8 @@ func TestSinkChain_State_Restore_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cNext.EntryHash != dNext.EntryHash {
-		t.Errorf("after Restore: entryHash mismatch %q vs %q", cNext.EntryHash, dNext.EntryHash)
+	if cNext.EntryHash() != dNext.EntryHash() {
+		t.Errorf("after Restore: entryHash mismatch %q vs %q", cNext.EntryHash(), dNext.EntryHash())
 	}
 }
 
@@ -258,7 +258,7 @@ func TestSinkChain_SerialComputeCommit_NoChainBreakage(t *testing.T) {
 				return
 			}
 			mu.Lock()
-			records = append(records, record{seq: i, payload: payload, entryHash: result.EntryHash, prevHash: result.PrevHash})
+			records = append(records, record{seq: i, payload: payload, entryHash: result.EntryHash(), prevHash: result.PrevHash()})
 			mu.Unlock()
 		}
 	}()
@@ -308,14 +308,14 @@ func TestSinkChain_Compute_IsPureUnderConcurrentCallers(t *testing.T) {
 	if len(results) != N {
 		t.Fatalf("got %d results, want %d", len(results), N)
 	}
-	wantEntry := results[0].EntryHash
-	wantPrev := results[0].PrevHash
+	wantEntry := results[0].EntryHash()
+	wantPrev := results[0].PrevHash()
 	for i, r := range results {
-		if r.EntryHash != wantEntry {
-			t.Errorf("result %d: entry=%q, want %q (Compute is not pure under contention)", i, r.EntryHash, wantEntry)
+		if r.EntryHash() != wantEntry {
+			t.Errorf("result %d: entry=%q, want %q (Compute is not pure under contention)", i, r.EntryHash(), wantEntry)
 		}
-		if r.PrevHash != wantPrev {
-			t.Errorf("result %d: prev=%q, want %q (Compute is not pure under contention)", i, r.PrevHash, wantPrev)
+		if r.PrevHash() != wantPrev {
+			t.Errorf("result %d: prev=%q, want %q (Compute is not pure under contention)", i, r.PrevHash(), wantPrev)
 		}
 	}
 }
@@ -435,7 +435,7 @@ func TestSinkChain_Commit_BackwardsGenerationLatchesFatal(t *testing.T) {
 	if older.generation != 1 {
 		t.Fatalf("older.generation = %d, want 1", older.generation)
 	}
-	if err := c.Restore(2, r2.EntryHash, false); err != nil {
+	if err := c.Restore(2, r2.EntryHash(), false); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 
@@ -509,11 +509,14 @@ func TestSinkChain_Commit_RolloverWithNonEmptyPrev_LatchesFatal(t *testing.T) {
 	// Forge a result whose generation > c.generation (rollover) but with a
 	// non-empty PrevHash. Normal callers cannot construct this via Compute;
 	// this is defense-in-depth against future API changes or in-package bugs.
+	// chain: c is required so the cross-chain check passes and we exercise
+	// the rollover branch specifically.
 	forged := &ComputeResult{
-		EntryHash:  "deadbeef",
-		PrevHash:   "shouldbeempty",
+		entryHash:  "deadbeef",
+		prevHash:   "shouldbeempty",
 		sequence:   0,
 		generation: 1,
+		chain:      c,
 	}
 	err := c.Commit(forged)
 	if !errors.Is(err, ErrStaleResult) {
@@ -561,5 +564,53 @@ func TestSinkChain_Commit_AfterFatalReturnsError(t *testing.T) {
 
 	if !c.State().Fatal {
 		t.Errorf("State.Fatal = false after Commit-on-fatal-chain; want true (latch must persist)")
+	}
+}
+
+// TestSinkChain_Commit_CrossChainResultLatchesFatal verifies that committing a
+// ComputeResult produced by SinkChain A on SinkChain B is rejected with
+// ErrCrossChainResult AND latches B fatal. A is unaffected — only the chain
+// that received the cross-chain commit latches. The check runs BEFORE
+// generation/prev_hash validation so cross-chain wins over backwards-gen, etc.
+func TestSinkChain_Commit_CrossChainResultLatchesFatal(t *testing.T) {
+	a, _ := newTestSinkChain(t)
+	b, _ := newTestSinkChain(t)
+
+	// Compute on a, attempt to Commit on b.
+	r, err := a.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"x":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = b.Commit(r)
+	if !errors.Is(err, ErrCrossChainResult) {
+		t.Fatalf("Commit(cross-chain): err = %v, want ErrCrossChainResult", err)
+	}
+	if !b.State().Fatal {
+		t.Fatalf("cross-chain Commit did not latch fatal on b")
+	}
+	// a is unaffected — only b should have latched.
+	if a.State().Fatal {
+		t.Fatalf("cross-chain Commit incorrectly latched a")
+	}
+}
+
+// TestComputeResult_FieldsAreUnexported documents the compile-time guarantee
+// that ComputeResult has no exported data fields — only accessor methods.
+// External packages cannot mutate or fabricate a ComputeResult; the build
+// itself rejects such attempts. This test exists to catch accidental
+// re-exports of the fields and to exercise the EntryHash()/PrevHash()
+// accessors at runtime.
+func TestComputeResult_FieldsAreUnexported(t *testing.T) {
+	c, _ := newTestSinkChain(t)
+	r, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"k":"v"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.EntryHash() == "" {
+		t.Fatal("EntryHash() returned empty")
+	}
+	if r.PrevHash() != "" {
+		t.Fatal("PrevHash() should be empty for genesis entry")
 	}
 }

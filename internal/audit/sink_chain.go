@@ -26,36 +26,27 @@ import (
 // Compute → durable write → Commit (or Fatal) in sequence per event.
 //
 // Compute/Commit token contract: Compute returns a *ComputeResult that
-// callers MUST pass to Commit unchanged. The unexported fields on
-// ComputeResult let Commit verify the result really came from Compute on
-// this chain. Callers cannot construct a ComputeResult literal because
-// the unexported fields make that impossible from outside the audit
-// package; this prevents Commit from accepting a fabricated EntryHash
-// that Compute would never have produced.
+// callers MUST pass to Commit unchanged. ComputeResult is opaque
+// (unexported fields, accessor methods) and chain-bound — only the
+// SinkChain instance that produced the result can commit it. The
+// unexported fields make literal construction or post-Compute mutation
+// impossible from outside the audit package.
 //
-// Contract — what SinkChain enforces:
+// Enforced invariants on Commit:
+//   - nil ComputeResult → error (no latch).
+//   - Post-Fatal Commit → ErrFatalIntegrity (no further latch).
+//   - Cross-chain ComputeResult (one produced by a different SinkChain
+//     instance) → ErrCrossChainResult, latches fatal on this chain.
+//   - Backwards generation → ErrBackwardsGeneration, latches fatal.
+//   - Stale prev_hash within the current generation, or non-empty prev_hash
+//     on a rollover commit → ErrStaleResult, latches fatal.
+//   - Otherwise, generation and prev_hash advance.
 //
-//   - Commit(nil) returns an error and does NOT latch fatal (the chain is
-//     unmodified; this is a caller bug, not an integrity divergence).
-//   - Commit on a chain that was previously latched Fatal (via Fatal or via
-//     a prior backwards/stale Commit) returns ErrFatalIntegrity. The chain
-//     stays latched.
-//   - Commit with a result whose generation < c.generation latches fatal
-//     and returns an error wrapping ErrBackwardsGeneration. This indicates
-//     the durable write succeeded for an entry whose generation is no
-//     longer current; accepting it would silently corrupt subsequent
-//     Compute results.
-//   - Commit with a result whose generation == c.generation but whose
-//     PrevHash != c.prevHash latches fatal and returns an error wrapping
-//     ErrStaleResult. The result was computed against a chain head that has
-//     since been advanced by a successful prior Commit; accepting it would
-//     silently fork the chain.
-//   - Commit with a result whose generation > c.generation (rollover)
-//     requires PrevHash == "" (because Compute always uses prev="" when
-//     rolling). A non-empty PrevHash on a rollover result latches fatal
-//     and returns an error wrapping ErrStaleResult. This branch is
-//     defense-in-depth: normal callers cannot construct such a result via
-//     the public Compute API.
+// ComputeResult is opaque (unexported fields, accessor methods) and
+// chain-bound (cannot be committed on a different SinkChain). Callers that
+// need to serialize a result use EntryHash() and PrevHash(). The
+// unexported (sequence, generation, chain) fields make it impossible to
+// fabricate or cross-mix tokens outside the audit package.
 //
 // Contract — what remains the caller's responsibility:
 //
@@ -108,34 +99,27 @@ type SinkChainState struct {
 	Fatal      bool
 }
 
-// ComputeResult is the typed output of SinkChain.Compute. It is the only
-// value Commit will accept. The exported fields are inspectable; the
-// unexported fields let Commit verify it really came out of Compute and
-// that no impossible state transition is being requested.
+// ComputeResult is the opaque, chain-bound output of SinkChain.Compute. It is
+// the only value Commit will accept, and only the SinkChain instance that
+// produced it can commit it. Fields are unexported so callers cannot mutate
+// or fabricate one outside the audit package.
 //
-// Callers MUST NOT construct ComputeResult literals — only Compute returns
-// valid ones. The unexported fields make literal construction impossible
-// outside the audit package; that is load-bearing for the chain-state
-// invariants Commit enforces.
+// Use EntryHash() and PrevHash() to inspect the values for serialization.
 type ComputeResult struct {
-	// EntryHash is the HMAC of (formatVersion | sequence | prevHash |
-	// payload) under the chain's key. Inspectable — callers serialize this
-	// into the entry's integrity metadata.
-	EntryHash string
-
-	// PrevHash is the prev_hash that was hashed into EntryHash. For the
-	// first entry of a chain (or the first entry after a generation
-	// rollover) this is the empty string. Inspectable — callers serialize
-	// this into the entry's integrity metadata.
-	PrevHash string
-
-	// sequence and generation are unexported so external packages cannot
-	// fabricate a ComputeResult with arbitrary state. Commit reads these
-	// to enforce chain-state invariants (e.g., backwards-generation Commit
-	// is a caller bug and latches fatal).
+	entryHash  string
+	prevHash   string
 	sequence   int64
 	generation uint32
+	chain      *SinkChain // identity-bound; Commit verifies result.chain == c
 }
+
+// EntryHash returns the HMAC entry hash that should be persisted alongside
+// the payload for later integrity verification.
+func (r *ComputeResult) EntryHash() string { return r.entryHash }
+
+// PrevHash returns the prev_hash the entry was chained against. For the
+// genesis entry of a chain or generation, this is "".
+func (r *ComputeResult) PrevHash() string { return r.prevHash }
 
 // ErrFatalIntegrity is returned by Compute after Fatal has been called,
 // and by Commit when called on a chain that was latched Fatal (either by
@@ -175,6 +159,13 @@ var ErrBackwardsGeneration = errors.New("backwards-generation Commit: chain latc
 // result would fork the chain.
 var ErrStaleResult = errors.New("stale ComputeResult: caller committed against an obsolete chain head; chain latched fatal")
 
+// ErrCrossChainResult is wrapped by Commit when the supplied ComputeResult
+// was produced by a different SinkChain instance. The misuse latches fatal
+// on the receiving chain so the programming error becomes loud rather than
+// silently corrupting state. The chain that produced the result is
+// unaffected.
+var ErrCrossChainResult = errors.New("ComputeResult bound to a different SinkChain")
+
 // NewSinkChain creates a new chain keyed by `key` (must be >= MinKeyLength).
 // Supported algorithms: "hmac-sha256" (default), "hmac-sha512".
 func NewSinkChain(key []byte, algorithm string) (*SinkChain, error) {
@@ -199,6 +190,10 @@ func NewSinkChain(key []byte, algorithm string) (*SinkChain, error) {
 // (passing the returned *ComputeResult) on durable-write success or
 // discard the result on durable-write failure.
 //
+// The returned *ComputeResult is bound to this SinkChain instance — only
+// Commit on this same chain will accept it. Cross-chain commits fail with
+// ErrCrossChainResult and latch the receiving chain fatal.
+//
 // If `generation` differs from the chain's current generation, prev_hash
 // is treated as "" for this Compute (chain rolls automatically). The
 // transition is committed only when Commit is called with a result whose
@@ -220,10 +215,11 @@ func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32
 		return nil, err
 	}
 	return &ComputeResult{
-		EntryHash:  hash,
-		PrevHash:   prev,
+		entryHash:  hash,
+		prevHash:   prev,
 		sequence:   sequence,
 		generation: generation,
+		chain:      c,
 	}, nil
 }
 
@@ -237,7 +233,15 @@ func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32
 //
 // Returns ErrFatalIntegrity if the chain was previously latched Fatal —
 // either by an explicit Fatal call, by a prior backwards-generation
-// Commit, or by a prior stale-result Commit. The chain stays latched.
+// Commit, by a prior stale-result Commit, or by a prior cross-chain
+// Commit. The chain stays latched.
+//
+// Returns an error wrapping ErrCrossChainResult AND latches the chain
+// Fatal if the supplied ComputeResult was produced by a different
+// SinkChain instance. The cross-chain check runs BEFORE
+// generation/prev_hash validation so that mixing tokens between chains is
+// always reported as a cross-chain error rather than as a downstream
+// invariant violation.
 //
 // Returns an error wrapping ErrBackwardsGeneration AND latches the chain
 // Fatal if the result's generation is older than the chain's current
@@ -265,6 +269,13 @@ func (c *SinkChain) Commit(result *ComputeResult) error {
 	if c.fatal {
 		return ErrFatalIntegrity
 	}
+	// Cross-chain check runs first so that mixing tokens between chains
+	// always surfaces as ErrCrossChainResult, not as a downstream
+	// generation/prev_hash invariant violation.
+	if result.chain != c {
+		c.fatal = true
+		return fmt.Errorf("%w", ErrCrossChainResult)
+	}
 	if result.generation < c.generation {
 		c.fatal = true
 		return fmt.Errorf("%w: result.generation=%d < c.generation=%d",
@@ -272,28 +283,28 @@ func (c *SinkChain) Commit(result *ComputeResult) error {
 	}
 	// Stale-token detection — fatal latch.
 	// Two cases:
-	//   * result.generation == c.generation: result.PrevHash MUST equal
+	//   * result.generation == c.generation: result.prevHash MUST equal
 	//     c.prevHash. Mismatch means the caller computed against an older
 	//     chain head and is replaying a stale token.
 	//   * result.generation > c.generation: this is a rollover commit. The
-	//     result MUST have PrevHash == "" because Compute used "" for the
+	//     result MUST have prevHash == "" because Compute used "" for the
 	//     rolled gen. Anything else means the result was forged or computed
 	//     against mismatched state.
 	if result.generation == c.generation {
-		if result.PrevHash != c.prevHash {
+		if result.prevHash != c.prevHash {
 			c.fatal = true
 			return fmt.Errorf("%w: result.prev_hash=%q, current prev_hash=%q",
-				ErrStaleResult, result.PrevHash, c.prevHash)
+				ErrStaleResult, result.prevHash, c.prevHash)
 		}
 	} else { // result.generation > c.generation (rollover)
-		if result.PrevHash != "" {
+		if result.prevHash != "" {
 			c.fatal = true
 			return fmt.Errorf("%w: rollover commit must have empty prev_hash; got %q",
-				ErrStaleResult, result.PrevHash)
+				ErrStaleResult, result.prevHash)
 		}
 	}
 	c.generation = result.generation
-	c.prevHash = result.EntryHash
+	c.prevHash = result.entryHash
 	return nil
 }
 
