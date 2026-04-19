@@ -288,7 +288,9 @@ The sequence value participates in three different width contracts as it flows t
 
 The constraint surfaces at one place: `watchtower.Store.AppendEvent` (Task 23, Phase 10) bounds-checks `ev.Chain.Sequence <= math.MaxInt64` before converting to int64 and calling into the chain. Sequences exceeding the cap are dropped (counter `wtp_dropped_sequence_overflow_total`, structured log) **before WAL admission** — no segment write, no WAL accounting impact, no replay considerations. Drops do NOT crash or panic. The encoder in `chain/canonical.go` accepts the full uint64 range so wire-format conformance vectors can exercise it; constraint enforcement is the boundary's job.
 
-The same boundary handles `chain.ErrInvalidUTF8` from `EncodeCanonical` / `ComputeContextDigest`: counter `wtp_dropped_invalid_utf8_total`, structured log, no WAL admission, no chain advance (the SinkChain Compute call returns the error before mutating prev_hash). Both drop paths leave a sequence gap visible to the server, since other sinks (JSONL, OTEL) have already committed the allocated sequence — whether to surface that gap as a `TransportLoss` marker (and with what reason code) is deferred to Phase 8 when the per-sink batching layer lands.
+The same boundary handles `chain.ErrInvalidUTF8` for **per-record encodes only** — i.e., the SinkChain.Compute call inside AppendEvent that wraps EncodeCanonical for the current event's IntegrityRecord. Drop semantics: counter `wtp_dropped_invalid_utf8_total`, structured log, no WAL admission, no chain advance (the SinkChain Compute call returns the error before mutating prev_hash). The drop leaves a sequence gap visible to the server, since other sinks (JSONL, OTEL) have already committed the allocated sequence — whether to surface that gap as a `TransportLoss` marker (and with what reason code) is deferred to Phase 8 when the per-sink batching layer lands.
+
+Session-lifecycle ErrInvalidUTF8 (`ComputeContextDigest` failing at SessionInit, SessionUpdate, or chain rotation) follows a different contract — see "Context digest" below — because no shared sequence has been allocated yet, so there is no gap to manage.
 
 ### Canonical encoding — non-negotiable byte parity
 
@@ -304,11 +306,11 @@ func EncodeCanonical(rec IntegrityRecord) ([]byte, error)
 
 The encoder is exhaustively tested against `chain/testdata/vectors.json`, which is also published as the cross-implementation conformance suite for the spec. Vectors include UTF-8 edge cases (escaped non-ASCII, surrogate pairs), large numbers near uint64 max, and empty strings.
 
-**Negative vectors.** Invalid UTF-8 cannot be expressed as a JSON string, so negative cases use a different schema: `{"name", "kind", "input": {<other fields>}, "input_b64": "<base64-encoded raw bytes>", "input_field": "<field name>", "expected_error": "ErrInvalidUTF8"}`. The test harness applies the decoded bytes to the named field after parsing the rest of `input` normally. Cross-language implementations either:
-1. Implement the same `input_b64` schema (preferred — keeps the conformance suite a single file), or
-2. Skip negative entries and verify rejection via per-language unit tests (acceptable — invalid-UTF-8 detection is rarely a hot path and language-native tests catch the same regressions).
+**Negative vectors.** Invalid UTF-8 cannot be expressed as a JSON string, so negative cases use a different schema: `{"name", "kind", "input": {<other fields>}, "input_b64": "<base64-encoded raw bytes>", "input_field": "<canonical wire field name>", "expected_error": "ErrInvalidUTF8"}`.
 
-Choice (1) is recommended; choice (2) is documented to avoid blocking implementations whose JSON loaders reject `input_b64` schemas.
+The `input_field` value is the **canonical wire/JSON field name** (snake_case), NOT the language-specific struct field name. Valid values for `kind: "integrity_record"` are `prev_hash`, `event_hash`, `context_digest`, `key_fingerprint`. Valid values for `kind: "context_digest"` are `session_id`, `agent_id`, `agent_version`, `ocsf_version`, `algorithm`, `key_fingerprint`. Each implementation maps these to its local struct field names inside its test harness; the published vectors stay language-neutral.
+
+The test harness applies the decoded bytes to the named field after parsing the rest of `input` normally. Cross-language implementations MUST implement the `input_b64` schema to claim WTP-spec-conformance — the negative cases are part of the contract surface, not optional. As a temporary fallback during initial bring-up, an implementation MAY skip negative entries and substitute per-language unit tests; once the implementation reaches "WTP-conformant" status, the negative vectors must be honored end-to-end.
 
 #### Canonical-format versioning
 
@@ -328,7 +330,12 @@ func ComputeContextDigest(ctx SessionContext) (string, error)
 
 Computed once on `SessionInit`, again on `SessionUpdate`, and again on chain rotation. Bound into every event hash in that segment. Implemented as SHA-256 of the canonical encoding of the SessionContext fields the spec lists.
 
-Callers MUST handle the error path: an `ErrInvalidUTF8` return at SessionInit means the session cannot proceed (the agent supplied an unrepresentable identifier); the connect attempt fails fast and the operator gets a structured log line. Mid-session calls (rotation, SessionUpdate) treat `ErrInvalidUTF8` the same way — the rotation aborts and the existing chain stays bound to the prior context.
+Callers MUST handle the error path. Unlike per-record `EncodeCanonical` failures (which drop one event and continue — see "Sequence-width layered contract" above), `ComputeContextDigest` failures abort the lifecycle operation that triggered them:
+
+- **SessionInit**: connect attempt fails fast, no session is established, the agent surfaces a fatal config error (counter `wtp_session_init_failures_total{reason="invalid_utf8"}`, structured log with the offending field name from the wrapped error). The transport does NOT auto-retry — invalid identifiers come from agent config and won't fix themselves.
+- **SessionUpdate / chain rotation**: rotation aborts, the existing chain stays bound to the prior context, and the operator gets a structured warn log (counter `wtp_session_rotation_failures_total{reason="invalid_utf8"}`). The session continues with the old context until the operator either fixes the identifier or restarts the agent.
+
+Both cases use the wrapped error text from `ErrInvalidUTF8` (which contains the offending field name in its message) for diagnostics — see Metrics section for the exact log shape.
 
 ### What this package does NOT do
 
@@ -644,7 +651,9 @@ All exposed via slog at debug + as structured counters consumable by the existin
 - `wtp_wal_bytes` (gauge)
 - `wtp_ack_high_watermark` (gauge)
 - `wtp_dropped_missing_chain_total` (counter; increments when `ev.Chain == nil`)
-- `wtp_dropped_invalid_utf8_total` (counter; increments when `chain.ErrInvalidUTF8` surfaces from the canonical encoder for any record-level encode — record is dropped, structured log emitted with fields {session_id, sequence, generation, field})
+- `wtp_dropped_invalid_utf8_total` (counter; increments when `chain.ErrInvalidUTF8` surfaces from the canonical encoder for any record-level encode — record is dropped, structured log emitted with fields {session_id, sequence, generation, err}; the offending field name appears as text inside the wrapped error message — `chain: invalid utf-8 in string field: field "<name>"` — operators grep `err` for diagnostics rather than relying on a separate structured attribute)
+- `wtp_session_init_failures_total{reason}` (counter labeled by reason; reason `invalid_utf8` increments when ComputeContextDigest at SessionInit returns ErrInvalidUTF8; structured log with same `err`-string convention)
+- `wtp_session_rotation_failures_total{reason}` (counter labeled by reason; reason `invalid_utf8` increments when ComputeContextDigest during SessionUpdate or chain rotation returns ErrInvalidUTF8; structured log with same `err`-string convention)
 - `wtp_dropped_sequence_overflow_total` (counter; increments when `ev.Chain.Sequence > math.MaxInt64` at the store-integration boundary — record is dropped before WAL admission, structured log emitted with fields {session_id, sequence, generation})
 - `wtp_wal_corruption_total` (counter; CRC corruption events during WAL replay)
 - `wtp_send_latency_seconds` (histogram, per batch)

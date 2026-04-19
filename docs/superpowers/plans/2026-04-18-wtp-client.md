@@ -2391,7 +2391,7 @@ type vectorEntry struct {
 	Kind          string          `json:"kind"`           // "integrity_record" | "context_digest"
 	Input         json.RawMessage `json:"input,omitempty"` // for valid inputs, decoded as IntegrityRecord or SessionContext
 	InputB64      string          `json:"input_b64,omitempty"` // base64-encoded raw struct field bytes for negative cases (non-UTF-8)
-	InputField    string          `json:"input_field,omitempty"` // which field receives InputB64 (e.g., "PrevHash", "SessionID")
+	InputField    string          `json:"input_field,omitempty"` // canonical wire field name receiving InputB64 (e.g., "prev_hash", "session_id")
 	Expected      string          `json:"expected,omitempty"` // for valid: canonical bytes (integrity_record) or hex digest (context_digest)
 	ExpectedError string          `json:"expected_error,omitempty"` // for negative: sentinel name (e.g., "ErrInvalidUTF8")
 }
@@ -2465,16 +2465,16 @@ func buildIntegrityRecord(v vectorEntry) (IntegrityRecord, error) {
 			return rec, fmt.Errorf("decode input_b64: %w", err)
 		}
 		switch v.InputField {
-		case "PrevHash":
+		case "prev_hash":
 			rec.PrevHash = string(raw)
-		case "EventHash":
+		case "event_hash":
 			rec.EventHash = string(raw)
-		case "ContextDigest":
+		case "context_digest":
 			rec.ContextDigest = string(raw)
-		case "KeyFingerprint":
+		case "key_fingerprint":
 			rec.KeyFingerprint = string(raw)
 		default:
-			return rec, fmt.Errorf("unknown input_field %q", v.InputField)
+			return rec, fmt.Errorf("unknown input_field %q (expected wire snake_case name)", v.InputField)
 		}
 	}
 	return rec, nil
@@ -2494,20 +2494,20 @@ func buildSessionContext(v vectorEntry) (SessionContext, error) {
 			return ctx, fmt.Errorf("decode input_b64: %w", err)
 		}
 		switch v.InputField {
-		case "SessionID":
+		case "session_id":
 			ctx.SessionID = string(raw)
-		case "AgentID":
+		case "agent_id":
 			ctx.AgentID = string(raw)
-		case "AgentVersion":
+		case "agent_version":
 			ctx.AgentVersion = string(raw)
-		case "OCSFVersion":
+		case "ocsf_version":
 			ctx.OCSFVersion = string(raw)
-		case "Algorithm":
+		case "algorithm":
 			ctx.Algorithm = string(raw)
-		case "KeyFingerprint":
+		case "key_fingerprint":
 			ctx.KeyFingerprint = string(raw)
 		default:
-			return ctx, fmt.Errorf("unknown input_field %q", v.InputField)
+			return ctx, fmt.Errorf("unknown input_field %q (expected wire snake_case name)", v.InputField)
 		}
 	}
 	return ctx, nil
@@ -2576,7 +2576,7 @@ Create `internal/store/watchtower/chain/testdata/vectors.json`:
     "kind": "integrity_record",
     "input": {"FormatVersion":2,"Sequence":1,"Generation":0},
     "input_b64": "dmFsaWQtcHJlZml4gGludmFsaWQ=",
-    "input_field": "PrevHash",
+    "input_field": "prev_hash",
     "expected_error": "ErrInvalidUTF8"
   },
   {
@@ -2584,7 +2584,7 @@ Create `internal/store/watchtower/chain/testdata/vectors.json`:
     "kind": "context_digest",
     "input": {"FormatVersion":2,"AgentID":"agentsh","AgentVersion":"1.0.0","OCSFVersion":"1.8.0","Algorithm":"hmac-sha256","KeyFingerprint":"sha256:test"},
     "input_b64": "c4BiYWQ=",
-    "input_field": "SessionID",
+    "input_field": "session_id",
     "expected_error": "ErrInvalidUTF8"
   }
 ]
@@ -7557,6 +7557,9 @@ func TestAppendEvent_StampsChainBeforeWAL(t *testing.T) {
 
 func TestAppendEvent_DropsSequenceOverflow(t *testing.T) {
 	s := mkStore(t)
+	prevHashBefore := s.PeekPrevHash() // test-only accessor; see store_test_export.go
+	walSegmentsBefore := s.WALSegmentCount()
+
 	ev := types.Event{
 		Type:      "exec",
 		SessionID: "s",
@@ -7565,20 +7568,59 @@ func TestAppendEvent_DropsSequenceOverflow(t *testing.T) {
 	if err := s.AppendEvent(context.Background(), ev); err != nil {
 		t.Fatalf("AppendEvent should drop silently for overflow, got err: %v", err)
 	}
-	// Verify counter incremented and WAL has no record (no segment created).
+
 	if got := s.metrics.DroppedSequenceOverflow(); got != 1 {
 		t.Errorf("expected 1 sequence-overflow drop, got %d", got)
+	}
+	if got := s.WALSegmentCount(); got != walSegmentsBefore {
+		t.Errorf("WAL must remain untouched on overflow drop; segments before=%d after=%d", walSegmentsBefore, got)
+	}
+	if got := s.PeekPrevHash(); got != prevHashBefore {
+		t.Errorf("chain prev_hash must not advance on overflow drop; before=%q after=%q", prevHashBefore, got)
 	}
 }
 
 func TestAppendEvent_DropsInvalidUTF8(t *testing.T) {
-	// Construct a store whose SessionContext or other chain input contains
-	// invalid UTF-8 — surfaces ErrInvalidUTF8 from chain.Compute.
-	// Specific construction depends on Phase 10 wiring; see chain.ErrInvalidUTF8
-	// for the contract surface.
-	t.Skip("skeleton — concrete construction added when chain wrapper lands in Task 22")
+	// Use a SinkChain test double (see chain/testfakes/utf8_failing_sink.go,
+	// landed in Task 22) that returns chain.ErrInvalidUTF8 on every Compute
+	// call. Verifies the boundary drop semantics: counter increments, WAL
+	// stays empty, chain prev_hash unchanged.
+	s := mkStoreWithFailingSink(t, chain.ErrInvalidUTF8)
+	prevHashBefore := s.PeekPrevHash()
+	walSegmentsBefore := s.WALSegmentCount()
+
+	ev := types.Event{
+		Type:      "exec",
+		SessionID: "s",
+		Chain:     &types.ChainState{Sequence: 1, Generation: 1},
+	}
+	if err := s.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatalf("AppendEvent should drop silently for invalid-utf8, got err: %v", err)
+	}
+
+	if got := s.metrics.DroppedInvalidUTF8(); got != 1 {
+		t.Errorf("expected 1 invalid-utf8 drop, got %d", got)
+	}
+	if got := s.WALSegmentCount(); got != walSegmentsBefore {
+		t.Errorf("WAL must remain untouched on invalid-utf8 drop; segments before=%d after=%d", walSegmentsBefore, got)
+	}
+	if got := s.PeekPrevHash(); got != prevHashBefore {
+		t.Errorf("chain prev_hash must not advance on invalid-utf8 drop; before=%q after=%q", prevHashBefore, got)
+	}
 }
 ```
+
+- [ ] **Step 1.5: Add test scaffolding required by the new drop tests**
+
+`TestAppendEvent_DropsSequenceOverflow` and `TestAppendEvent_DropsInvalidUTF8` reference three pieces of test infrastructure that need to land alongside this task:
+
+1. **`store_test_export.go`** (in `internal/store/watchtower/` next to `store.go`, build-tagged for tests): exposes `(*Store).PeekPrevHash() string` and `(*Store).WALSegmentCount() int`. Both are read-only inspectors used only by tests in the same package.
+
+2. **`chain/testfakes/utf8_failing_sink.go`**: a SinkChain double whose `Compute` method always returns the supplied sentinel error. Lives under `internal/store/watchtower/chain/testfakes/` so production code can never import it.
+
+3. **`mkStoreWithFailingSink(t *testing.T, sentinel error) *watchtower.Store`** helper in `append_test.go`: same setup as `mkStore` but injects the failing sink via `watchtower.Options.SinkChainOverride` (a test-only Options field, also added in Task 22).
+
+The exact code lives in Task 22's plan; this step is a forward-pointer so the reviewer of Task 23 doesn't see "magic" calls without provenance.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -7613,7 +7655,7 @@ var errFatalLatch = errors.New("watchtower: store fatal — refusing append")
 // AppendEvent encodes ev, computes its integrity record, writes the WAL
 // frame, and only then commits the chain advance. Returns errFatalLatch
 // if a prior call has latched an ambiguous failure.
-func (s *Store) AppendEvent(_ context.Context, ev types.Event) error {
+func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	if s.isFatal() {
 		return errFatalLatch
 	}
