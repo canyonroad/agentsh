@@ -21,6 +21,55 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type HashAlgorithm int32
+
+const (
+	HashAlgorithm_HASH_ALGORITHM_UNSPECIFIED HashAlgorithm = 0 // wire-incompatible — receivers MUST reject.
+	HashAlgorithm_HASH_ALGORITHM_HMAC_SHA256 HashAlgorithm = 1
+	HashAlgorithm_HASH_ALGORITHM_HMAC_SHA512 HashAlgorithm = 2
+)
+
+// Enum value maps for HashAlgorithm.
+var (
+	HashAlgorithm_name = map[int32]string{
+		0: "HASH_ALGORITHM_UNSPECIFIED",
+		1: "HASH_ALGORITHM_HMAC_SHA256",
+		2: "HASH_ALGORITHM_HMAC_SHA512",
+	}
+	HashAlgorithm_value = map[string]int32{
+		"HASH_ALGORITHM_UNSPECIFIED": 0,
+		"HASH_ALGORITHM_HMAC_SHA256": 1,
+		"HASH_ALGORITHM_HMAC_SHA512": 2,
+	}
+)
+
+func (x HashAlgorithm) Enum() *HashAlgorithm {
+	p := new(HashAlgorithm)
+	*p = x
+	return p
+}
+
+func (x HashAlgorithm) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (HashAlgorithm) Descriptor() protoreflect.EnumDescriptor {
+	return file_canyonroad_wtp_v1_wtp_proto_enumTypes[0].Descriptor()
+}
+
+func (HashAlgorithm) Type() protoreflect.EnumType {
+	return &file_canyonroad_wtp_v1_wtp_proto_enumTypes[0]
+}
+
+func (x HashAlgorithm) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use HashAlgorithm.Descriptor instead.
+func (HashAlgorithm) EnumDescriptor() ([]byte, []int) {
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{0}
+}
+
 type Compression int32
 
 const (
@@ -57,11 +106,11 @@ func (x Compression) String() string {
 }
 
 func (Compression) Descriptor() protoreflect.EnumDescriptor {
-	return file_canyonroad_wtp_v1_wtp_proto_enumTypes[0].Descriptor()
+	return file_canyonroad_wtp_v1_wtp_proto_enumTypes[1].Descriptor()
 }
 
 func (Compression) Type() protoreflect.EnumType {
-	return &file_canyonroad_wtp_v1_wtp_proto_enumTypes[0]
+	return &file_canyonroad_wtp_v1_wtp_proto_enumTypes[1]
 }
 
 func (x Compression) Number() protoreflect.EnumNumber {
@@ -70,7 +119,163 @@ func (x Compression) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Compression.Descriptor instead.
 func (Compression) EnumDescriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{0}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{1}
+}
+
+type TransportLossReason int32
+
+const (
+	TransportLossReason_TRANSPORT_LOSS_REASON_UNSPECIFIED    TransportLossReason = 0 // wire-incompatible — receivers MUST reject.
+	TransportLossReason_TRANSPORT_LOSS_REASON_OVERFLOW       TransportLossReason = 1 // WAL hit max_total_bytes; oldest segments dropped.
+	TransportLossReason_TRANSPORT_LOSS_REASON_CRC_CORRUPTION TransportLossReason = 2 // CRC mismatch encountered during WAL replay.
+)
+
+// Enum value maps for TransportLossReason.
+var (
+	TransportLossReason_name = map[int32]string{
+		0: "TRANSPORT_LOSS_REASON_UNSPECIFIED",
+		1: "TRANSPORT_LOSS_REASON_OVERFLOW",
+		2: "TRANSPORT_LOSS_REASON_CRC_CORRUPTION",
+	}
+	TransportLossReason_value = map[string]int32{
+		"TRANSPORT_LOSS_REASON_UNSPECIFIED":    0,
+		"TRANSPORT_LOSS_REASON_OVERFLOW":       1,
+		"TRANSPORT_LOSS_REASON_CRC_CORRUPTION": 2,
+	}
+)
+
+func (x TransportLossReason) Enum() *TransportLossReason {
+	p := new(TransportLossReason)
+	*p = x
+	return p
+}
+
+func (x TransportLossReason) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (TransportLossReason) Descriptor() protoreflect.EnumDescriptor {
+	return file_canyonroad_wtp_v1_wtp_proto_enumTypes[2].Descriptor()
+}
+
+func (TransportLossReason) Type() protoreflect.EnumType {
+	return &file_canyonroad_wtp_v1_wtp_proto_enumTypes[2]
+}
+
+func (x TransportLossReason) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use TransportLossReason.Descriptor instead.
+func (TransportLossReason) EnumDescriptor() ([]byte, []int) {
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{2}
+}
+
+type GoawayCode int32
+
+const (
+	GoawayCode_GOAWAY_CODE_UNSPECIFIED GoawayCode = 0 // unknown; clients MUST treat as transient and reconnect.
+	GoawayCode_GOAWAY_CODE_DRAINING    GoawayCode = 1 // graceful shutdown; reconnect to a different instance.
+	GoawayCode_GOAWAY_CODE_OVERLOAD    GoawayCode = 2 // server overloaded; reconnect with backoff.
+	GoawayCode_GOAWAY_CODE_UPGRADE     GoawayCode = 3 // server upgrade in progress; reconnect after delay.
+	GoawayCode_GOAWAY_CODE_AUTH        GoawayCode = 4 // authentication/authorization failed; do not auto-retry.
+)
+
+// Enum value maps for GoawayCode.
+var (
+	GoawayCode_name = map[int32]string{
+		0: "GOAWAY_CODE_UNSPECIFIED",
+		1: "GOAWAY_CODE_DRAINING",
+		2: "GOAWAY_CODE_OVERLOAD",
+		3: "GOAWAY_CODE_UPGRADE",
+		4: "GOAWAY_CODE_AUTH",
+	}
+	GoawayCode_value = map[string]int32{
+		"GOAWAY_CODE_UNSPECIFIED": 0,
+		"GOAWAY_CODE_DRAINING":    1,
+		"GOAWAY_CODE_OVERLOAD":    2,
+		"GOAWAY_CODE_UPGRADE":     3,
+		"GOAWAY_CODE_AUTH":        4,
+	}
+)
+
+func (x GoawayCode) Enum() *GoawayCode {
+	p := new(GoawayCode)
+	*p = x
+	return p
+}
+
+func (x GoawayCode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (GoawayCode) Descriptor() protoreflect.EnumDescriptor {
+	return file_canyonroad_wtp_v1_wtp_proto_enumTypes[3].Descriptor()
+}
+
+func (GoawayCode) Type() protoreflect.EnumType {
+	return &file_canyonroad_wtp_v1_wtp_proto_enumTypes[3]
+}
+
+func (x GoawayCode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use GoawayCode.Descriptor instead.
+func (GoawayCode) EnumDescriptor() ([]byte, []int) {
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{3}
+}
+
+type ClientShutdownReason int32
+
+const (
+	ClientShutdownReason_CLIENT_SHUTDOWN_REASON_UNSPECIFIED ClientShutdownReason = 0
+	ClientShutdownReason_CLIENT_SHUTDOWN_REASON_NORMAL      ClientShutdownReason = 1 // clean shutdown of the agent.
+	ClientShutdownReason_CLIENT_SHUTDOWN_REASON_RECONFIGURE ClientShutdownReason = 2 // operator-driven reconfig; expect quick reconnect.
+	ClientShutdownReason_CLIENT_SHUTDOWN_REASON_FATAL       ClientShutdownReason = 3 // unrecoverable error; do not expect reconnect.
+)
+
+// Enum value maps for ClientShutdownReason.
+var (
+	ClientShutdownReason_name = map[int32]string{
+		0: "CLIENT_SHUTDOWN_REASON_UNSPECIFIED",
+		1: "CLIENT_SHUTDOWN_REASON_NORMAL",
+		2: "CLIENT_SHUTDOWN_REASON_RECONFIGURE",
+		3: "CLIENT_SHUTDOWN_REASON_FATAL",
+	}
+	ClientShutdownReason_value = map[string]int32{
+		"CLIENT_SHUTDOWN_REASON_UNSPECIFIED": 0,
+		"CLIENT_SHUTDOWN_REASON_NORMAL":      1,
+		"CLIENT_SHUTDOWN_REASON_RECONFIGURE": 2,
+		"CLIENT_SHUTDOWN_REASON_FATAL":       3,
+	}
+)
+
+func (x ClientShutdownReason) Enum() *ClientShutdownReason {
+	p := new(ClientShutdownReason)
+	*p = x
+	return p
+}
+
+func (x ClientShutdownReason) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ClientShutdownReason) Descriptor() protoreflect.EnumDescriptor {
+	return file_canyonroad_wtp_v1_wtp_proto_enumTypes[4].Descriptor()
+}
+
+func (ClientShutdownReason) Type() protoreflect.EnumType {
+	return &file_canyonroad_wtp_v1_wtp_proto_enumTypes[4]
+}
+
+func (x ClientShutdownReason) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ClientShutdownReason.Descriptor instead.
+func (ClientShutdownReason) EnumDescriptor() ([]byte, []int) {
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{4}
 }
 
 type ClientMessage struct {
@@ -219,6 +424,17 @@ func (*ClientMessage_TransportLoss) isClientMessage_Msg() {}
 
 func (*ClientMessage_Shutdown) isClientMessage_Msg() {}
 
+// ServerMessage frames sent from server to client. Semantics:
+//   - SessionAck       — sent exactly once after SessionInit; accepted=false
+//     terminates the session (client must disconnect).
+//   - BatchAck         — sent per-batch progress ack; advances the client's
+//     ack high-watermark and unblocks WAL GC.
+//   - ServerHeartbeat  — periodic; carries the server's current
+//     ack_high_watermark_seq so an idle client still
+//     learns about catch-up after replay completes.
+//   - Goaway           — server requesting reconnect; carries an enum code.
+//   - server_update    — server-issued SessionUpdate (key/generation
+//     rotation initiated by the server).
 type ServerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
@@ -355,7 +571,7 @@ type SessionInit struct {
 	SessionId           string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	OcsfVersion         string                 `protobuf:"bytes,2,opt,name=ocsf_version,json=ocsfVersion,proto3" json:"ocsf_version,omitempty"`
 	FormatVersion       uint32                 `protobuf:"varint,3,opt,name=format_version,json=formatVersion,proto3" json:"format_version,omitempty"`
-	Algorithm           string                 `protobuf:"bytes,4,opt,name=algorithm,proto3" json:"algorithm,omitempty"` // hmac-sha256 | hmac-sha512
+	Algorithm           HashAlgorithm          `protobuf:"varint,4,opt,name=algorithm,proto3,enum=canyonroad.wtp.v1.HashAlgorithm" json:"algorithm,omitempty"`
 	KeyFingerprint      string                 `protobuf:"bytes,5,opt,name=key_fingerprint,json=keyFingerprint,proto3" json:"key_fingerprint,omitempty"`
 	ContextDigest       string                 `protobuf:"bytes,6,opt,name=context_digest,json=contextDigest,proto3" json:"context_digest,omitempty"` // hex-encoded SHA-256
 	WalHighWatermarkSeq uint64                 `protobuf:"varint,7,opt,name=wal_high_watermark_seq,json=walHighWatermarkSeq,proto3" json:"wal_high_watermark_seq,omitempty"`
@@ -418,11 +634,11 @@ func (x *SessionInit) GetFormatVersion() uint32 {
 	return 0
 }
 
-func (x *SessionInit) GetAlgorithm() string {
+func (x *SessionInit) GetAlgorithm() HashAlgorithm {
 	if x != nil {
 		return x.Algorithm
 	}
-	return ""
+	return HashAlgorithm_HASH_ALGORITHM_UNSPECIFIED
 }
 
 func (x *SessionInit) GetKeyFingerprint() string {
@@ -611,17 +827,27 @@ func (x *SessionUpdate) GetBoundarySequence() uint64 {
 	return 0
 }
 
-// EventBatch (§7.3)
+// EventBatch (§7.3) — the unit of in-flight work between client and server.
+//
+// The batch body is mutually exclusive: a sender MUST populate exactly one
+// of `uncompressed` (when compression == COMPRESSION_NONE) or
+// `compressed_payload` (when compression is COMPRESSION_ZSTD or
+// COMPRESSION_GZIP). Receivers MUST reject batches where the oneof case
+// disagrees with the compression field, where compression is
+// COMPRESSION_UNSPECIFIED, or where the body oneof is unset.
 type EventBatch struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	FromSequence      uint64                 `protobuf:"varint,1,opt,name=from_sequence,json=fromSequence,proto3" json:"from_sequence,omitempty"`
-	ToSequence        uint64                 `protobuf:"varint,2,opt,name=to_sequence,json=toSequence,proto3" json:"to_sequence,omitempty"`
-	Generation        uint32                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
-	Events            []*CompactEvent        `protobuf:"bytes,4,rep,name=events,proto3" json:"events,omitempty"`
-	Compression       Compression            `protobuf:"varint,5,opt,name=compression,proto3,enum=canyonroad.wtp.v1.Compression" json:"compression,omitempty"`
-	CompressedPayload []byte                 `protobuf:"bytes,6,opt,name=compressed_payload,json=compressedPayload,proto3" json:"compressed_payload,omitempty"` // when compression != NONE; events repeated empty
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	FromSequence uint64                 `protobuf:"varint,1,opt,name=from_sequence,json=fromSequence,proto3" json:"from_sequence,omitempty"`
+	ToSequence   uint64                 `protobuf:"varint,2,opt,name=to_sequence,json=toSequence,proto3" json:"to_sequence,omitempty"`
+	Generation   uint32                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
+	Compression  Compression            `protobuf:"varint,4,opt,name=compression,proto3,enum=canyonroad.wtp.v1.Compression" json:"compression,omitempty"`
+	// Types that are valid to be assigned to Body:
+	//
+	//	*EventBatch_Uncompressed
+	//	*EventBatch_CompressedPayload
+	Body          isEventBatch_Body `protobuf_oneof:"body"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EventBatch) Reset() {
@@ -675,13 +901,6 @@ func (x *EventBatch) GetGeneration() uint32 {
 	return 0
 }
 
-func (x *EventBatch) GetEvents() []*CompactEvent {
-	if x != nil {
-		return x.Events
-	}
-	return nil
-}
-
 func (x *EventBatch) GetCompression() Compression {
 	if x != nil {
 		return x.Compression
@@ -689,9 +908,89 @@ func (x *EventBatch) GetCompression() Compression {
 	return Compression_COMPRESSION_UNSPECIFIED
 }
 
+func (x *EventBatch) GetBody() isEventBatch_Body {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *EventBatch) GetUncompressed() *UncompressedEvents {
+	if x != nil {
+		if x, ok := x.Body.(*EventBatch_Uncompressed); ok {
+			return x.Uncompressed
+		}
+	}
+	return nil
+}
+
 func (x *EventBatch) GetCompressedPayload() []byte {
 	if x != nil {
-		return x.CompressedPayload
+		if x, ok := x.Body.(*EventBatch_CompressedPayload); ok {
+			return x.CompressedPayload
+		}
+	}
+	return nil
+}
+
+type isEventBatch_Body interface {
+	isEventBatch_Body()
+}
+
+type EventBatch_Uncompressed struct {
+	Uncompressed *UncompressedEvents `protobuf:"bytes,5,opt,name=uncompressed,proto3,oneof"`
+}
+
+type EventBatch_CompressedPayload struct {
+	CompressedPayload []byte `protobuf:"bytes,6,opt,name=compressed_payload,json=compressedPayload,proto3,oneof"`
+}
+
+func (*EventBatch_Uncompressed) isEventBatch_Body() {}
+
+func (*EventBatch_CompressedPayload) isEventBatch_Body() {}
+
+// UncompressedEvents wraps the repeated CompactEvent so it can sit inside
+// the EventBatch.body oneof (proto3 forbids `repeated` directly in oneofs).
+type UncompressedEvents struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Events        []*CompactEvent        `protobuf:"bytes,1,rep,name=events,proto3" json:"events,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UncompressedEvents) Reset() {
+	*x = UncompressedEvents{}
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UncompressedEvents) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UncompressedEvents) ProtoMessage() {}
+
+func (x *UncompressedEvents) ProtoReflect() protoreflect.Message {
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UncompressedEvents.ProtoReflect.Descriptor instead.
+func (*UncompressedEvents) Descriptor() ([]byte, []int) {
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *UncompressedEvents) GetEvents() []*CompactEvent {
+	if x != nil {
+		return x.Events
 	}
 	return nil
 }
@@ -712,7 +1011,7 @@ type CompactEvent struct {
 
 func (x *CompactEvent) Reset() {
 	*x = CompactEvent{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[6]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -724,7 +1023,7 @@ func (x *CompactEvent) String() string {
 func (*CompactEvent) ProtoMessage() {}
 
 func (x *CompactEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[6]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -737,7 +1036,7 @@ func (x *CompactEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompactEvent.ProtoReflect.Descriptor instead.
 func (*CompactEvent) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{6}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *CompactEvent) GetSequence() uint64 {
@@ -804,7 +1103,7 @@ type IntegrityRecord struct {
 
 func (x *IntegrityRecord) Reset() {
 	*x = IntegrityRecord{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[7]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -816,7 +1115,7 @@ func (x *IntegrityRecord) String() string {
 func (*IntegrityRecord) ProtoMessage() {}
 
 func (x *IntegrityRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[7]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -829,7 +1128,7 @@ func (x *IntegrityRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IntegrityRecord.ProtoReflect.Descriptor instead.
 func (*IntegrityRecord) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{7}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *IntegrityRecord) GetFormatVersion() uint32 {
@@ -891,7 +1190,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[8]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -903,7 +1202,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[8]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -916,7 +1215,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{8}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Heartbeat) GetWalHighWatermarkSeq() uint64 {
@@ -942,7 +1241,7 @@ type ServerHeartbeat struct {
 
 func (x *ServerHeartbeat) Reset() {
 	*x = ServerHeartbeat{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[9]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -954,7 +1253,7 @@ func (x *ServerHeartbeat) String() string {
 func (*ServerHeartbeat) ProtoMessage() {}
 
 func (x *ServerHeartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[9]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -967,7 +1266,7 @@ func (x *ServerHeartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerHeartbeat.ProtoReflect.Descriptor instead.
 func (*ServerHeartbeat) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{9}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ServerHeartbeat) GetAckHighWatermarkSeq() uint64 {
@@ -987,7 +1286,7 @@ type BatchAck struct {
 
 func (x *BatchAck) Reset() {
 	*x = BatchAck{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[10]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -999,7 +1298,7 @@ func (x *BatchAck) String() string {
 func (*BatchAck) ProtoMessage() {}
 
 func (x *BatchAck) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[10]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1012,7 +1311,7 @@ func (x *BatchAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchAck.ProtoReflect.Descriptor instead.
 func (*BatchAck) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{10}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *BatchAck) GetAckHighWatermarkSeq() uint64 {
@@ -1035,14 +1334,14 @@ type TransportLoss struct {
 	FromSequence  uint64                 `protobuf:"varint,1,opt,name=from_sequence,json=fromSequence,proto3" json:"from_sequence,omitempty"`
 	ToSequence    uint64                 `protobuf:"varint,2,opt,name=to_sequence,json=toSequence,proto3" json:"to_sequence,omitempty"`
 	Generation    uint32                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
-	Reason        string                 `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"` // "overflow" | "crc_corruption"
+	Reason        TransportLossReason    `protobuf:"varint,4,opt,name=reason,proto3,enum=canyonroad.wtp.v1.TransportLossReason" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TransportLoss) Reset() {
 	*x = TransportLoss{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[11]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1054,7 +1353,7 @@ func (x *TransportLoss) String() string {
 func (*TransportLoss) ProtoMessage() {}
 
 func (x *TransportLoss) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[11]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1067,7 +1366,7 @@ func (x *TransportLoss) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransportLoss.ProtoReflect.Descriptor instead.
 func (*TransportLoss) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{11}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *TransportLoss) GetFromSequence() uint64 {
@@ -1091,16 +1390,16 @@ func (x *TransportLoss) GetGeneration() uint32 {
 	return 0
 }
 
-func (x *TransportLoss) GetReason() string {
+func (x *TransportLoss) GetReason() TransportLossReason {
 	if x != nil {
 		return x.Reason
 	}
-	return ""
+	return TransportLossReason_TRANSPORT_LOSS_REASON_UNSPECIFIED
 }
 
 type Goaway struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
-	Code             string                 `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"` // "DRAINING" | "OVERLOAD" | etc.
+	Code             GoawayCode             `protobuf:"varint,1,opt,name=code,proto3,enum=canyonroad.wtp.v1.GoawayCode" json:"code,omitempty"`
 	Message          string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
 	RetryImmediately bool                   `protobuf:"varint,3,opt,name=retry_immediately,json=retryImmediately,proto3" json:"retry_immediately,omitempty"`
 	unknownFields    protoimpl.UnknownFields
@@ -1109,7 +1408,7 @@ type Goaway struct {
 
 func (x *Goaway) Reset() {
 	*x = Goaway{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[12]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1121,7 +1420,7 @@ func (x *Goaway) String() string {
 func (*Goaway) ProtoMessage() {}
 
 func (x *Goaway) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[12]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1134,14 +1433,14 @@ func (x *Goaway) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Goaway.ProtoReflect.Descriptor instead.
 func (*Goaway) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{12}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{13}
 }
 
-func (x *Goaway) GetCode() string {
+func (x *Goaway) GetCode() GoawayCode {
 	if x != nil {
 		return x.Code
 	}
-	return ""
+	return GoawayCode_GOAWAY_CODE_UNSPECIFIED
 }
 
 func (x *Goaway) GetMessage() string {
@@ -1160,14 +1459,14 @@ func (x *Goaway) GetRetryImmediately() bool {
 
 type ClientShutdown struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Reason        string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	Reason        ClientShutdownReason   `protobuf:"varint,1,opt,name=reason,proto3,enum=canyonroad.wtp.v1.ClientShutdownReason" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ClientShutdown) Reset() {
 	*x = ClientShutdown{}
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[13]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1179,7 +1478,7 @@ func (x *ClientShutdown) String() string {
 func (*ClientShutdown) ProtoMessage() {}
 
 func (x *ClientShutdown) ProtoReflect() protoreflect.Message {
-	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[13]
+	mi := &file_canyonroad_wtp_v1_wtp_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1192,14 +1491,14 @@ func (x *ClientShutdown) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientShutdown.ProtoReflect.Descriptor instead.
 func (*ClientShutdown) Descriptor() ([]byte, []int) {
-	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{13}
+	return file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP(), []int{14}
 }
 
-func (x *ClientShutdown) GetReason() string {
+func (x *ClientShutdown) GetReason() ClientShutdownReason {
 	if x != nil {
 		return x.Reason
 	}
-	return ""
+	return ClientShutdownReason_CLIENT_SHUTDOWN_REASON_UNSPECIFIED
 }
 
 var File_canyonroad_wtp_v1_wtp_proto protoreflect.FileDescriptor
@@ -1223,13 +1522,13 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"\x10server_heartbeat\x18\x03 \x01(\v2\".canyonroad.wtp.v1.ServerHeartbeatH\x00R\x0fserverHeartbeat\x123\n" +
 	"\x06goaway\x18\x04 \x01(\v2\x19.canyonroad.wtp.v1.GoawayH\x00R\x06goaway\x12G\n" +
 	"\rserver_update\x18\x05 \x01(\v2 .canyonroad.wtp.v1.SessionUpdateH\x00R\fserverUpdateB\x05\n" +
-	"\x03msg\"\x9e\x03\n" +
+	"\x03msg\"\xc0\x03\n" +
 	"\vSessionInit\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12!\n" +
 	"\focsf_version\x18\x02 \x01(\tR\vocsfVersion\x12%\n" +
-	"\x0eformat_version\x18\x03 \x01(\rR\rformatVersion\x12\x1c\n" +
-	"\talgorithm\x18\x04 \x01(\tR\talgorithm\x12'\n" +
+	"\x0eformat_version\x18\x03 \x01(\rR\rformatVersion\x12>\n" +
+	"\talgorithm\x18\x04 \x01(\x0e2 .canyonroad.wtp.v1.HashAlgorithmR\talgorithm\x12'\n" +
 	"\x0fkey_fingerprint\x18\x05 \x01(\tR\x0ekeyFingerprint\x12%\n" +
 	"\x0econtext_digest\x18\x06 \x01(\tR\rcontextDigest\x123\n" +
 	"\x16wal_high_watermark_seq\x18\a \x01(\x04R\x13walHighWatermarkSeq\x12\x1e\n" +
@@ -1252,7 +1551,7 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"\x0enew_generation\x18\x01 \x01(\rR\rnewGeneration\x12.\n" +
 	"\x13new_key_fingerprint\x18\x02 \x01(\tR\x11newKeyFingerprint\x12,\n" +
 	"\x12new_context_digest\x18\x03 \x01(\tR\x10newContextDigest\x12+\n" +
-	"\x11boundary_sequence\x18\x04 \x01(\x04R\x10boundarySequence\"\x9c\x02\n" +
+	"\x11boundary_sequence\x18\x04 \x01(\x04R\x10boundarySequence\"\xba\x02\n" +
 	"\n" +
 	"EventBatch\x12#\n" +
 	"\rfrom_sequence\x18\x01 \x01(\x04R\ffromSequence\x12\x1f\n" +
@@ -1260,10 +1559,13 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"toSequence\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x03 \x01(\rR\n" +
-	"generation\x127\n" +
-	"\x06events\x18\x04 \x03(\v2\x1f.canyonroad.wtp.v1.CompactEventR\x06events\x12@\n" +
-	"\vcompression\x18\x05 \x01(\x0e2\x1e.canyonroad.wtp.v1.CompressionR\vcompression\x12-\n" +
-	"\x12compressed_payload\x18\x06 \x01(\fR\x11compressedPayload\"\xa8\x02\n" +
+	"generation\x12@\n" +
+	"\vcompression\x18\x04 \x01(\x0e2\x1e.canyonroad.wtp.v1.CompressionR\vcompression\x12K\n" +
+	"\funcompressed\x18\x05 \x01(\v2%.canyonroad.wtp.v1.UncompressedEventsH\x00R\funcompressed\x12/\n" +
+	"\x12compressed_payload\x18\x06 \x01(\fH\x00R\x11compressedPayloadB\x06\n" +
+	"\x04body\"M\n" +
+	"\x12UncompressedEvents\x127\n" +
+	"\x06events\x18\x01 \x03(\v2\x1f.canyonroad.wtp.v1.CompactEventR\x06events\"\xa8\x02\n" +
 	"\fCompactEvent\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12\x1e\n" +
 	"\n" +
@@ -1296,26 +1598,46 @@ const file_canyonroad_wtp_v1_wtp_proto_rawDesc = "" +
 	"\x16ack_high_watermark_seq\x18\x01 \x01(\x04R\x13ackHighWatermarkSeq\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x02 \x01(\rR\n" +
-	"generation\"\x8d\x01\n" +
+	"generation\"\xb5\x01\n" +
 	"\rTransportLoss\x12#\n" +
 	"\rfrom_sequence\x18\x01 \x01(\x04R\ffromSequence\x12\x1f\n" +
 	"\vto_sequence\x18\x02 \x01(\x04R\n" +
 	"toSequence\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x03 \x01(\rR\n" +
-	"generation\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\"c\n" +
-	"\x06Goaway\x12\x12\n" +
-	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
+	"generation\x12>\n" +
+	"\x06reason\x18\x04 \x01(\x0e2&.canyonroad.wtp.v1.TransportLossReasonR\x06reason\"\x82\x01\n" +
+	"\x06Goaway\x121\n" +
+	"\x04code\x18\x01 \x01(\x0e2\x1d.canyonroad.wtp.v1.GoawayCodeR\x04code\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12+\n" +
-	"\x11retry_immediately\x18\x03 \x01(\bR\x10retryImmediately\"(\n" +
-	"\x0eClientShutdown\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\tR\x06reason*l\n" +
+	"\x11retry_immediately\x18\x03 \x01(\bR\x10retryImmediately\"Q\n" +
+	"\x0eClientShutdown\x12?\n" +
+	"\x06reason\x18\x01 \x01(\x0e2'.canyonroad.wtp.v1.ClientShutdownReasonR\x06reason*o\n" +
+	"\rHashAlgorithm\x12\x1e\n" +
+	"\x1aHASH_ALGORITHM_UNSPECIFIED\x10\x00\x12\x1e\n" +
+	"\x1aHASH_ALGORITHM_HMAC_SHA256\x10\x01\x12\x1e\n" +
+	"\x1aHASH_ALGORITHM_HMAC_SHA512\x10\x02*l\n" +
 	"\vCompression\x12\x1b\n" +
 	"\x17COMPRESSION_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10COMPRESSION_NONE\x10\x01\x12\x14\n" +
 	"\x10COMPRESSION_ZSTD\x10\x02\x12\x14\n" +
-	"\x10COMPRESSION_GZIP\x10\x032^\n" +
+	"\x10COMPRESSION_GZIP\x10\x03*\x8a\x01\n" +
+	"\x13TransportLossReason\x12%\n" +
+	"!TRANSPORT_LOSS_REASON_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1eTRANSPORT_LOSS_REASON_OVERFLOW\x10\x01\x12(\n" +
+	"$TRANSPORT_LOSS_REASON_CRC_CORRUPTION\x10\x02*\x8c\x01\n" +
+	"\n" +
+	"GoawayCode\x12\x1b\n" +
+	"\x17GOAWAY_CODE_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14GOAWAY_CODE_DRAINING\x10\x01\x12\x18\n" +
+	"\x14GOAWAY_CODE_OVERLOAD\x10\x02\x12\x17\n" +
+	"\x13GOAWAY_CODE_UPGRADE\x10\x03\x12\x14\n" +
+	"\x10GOAWAY_CODE_AUTH\x10\x04*\xab\x01\n" +
+	"\x14ClientShutdownReason\x12&\n" +
+	"\"CLIENT_SHUTDOWN_REASON_UNSPECIFIED\x10\x00\x12!\n" +
+	"\x1dCLIENT_SHUTDOWN_REASON_NORMAL\x10\x01\x12&\n" +
+	"\"CLIENT_SHUTDOWN_REASON_RECONFIGURE\x10\x02\x12 \n" +
+	"\x1cCLIENT_SHUTDOWN_REASON_FATAL\x10\x032^\n" +
 	"\n" +
 	"Watchtower\x12P\n" +
 	"\x06Stream\x12 .canyonroad.wtp.v1.ClientMessage\x1a .canyonroad.wtp.v1.ServerMessage(\x010\x01B:Z8github.com/agentsh/agentsh/proto/canyonroad/wtp/v1;wtpv1b\x06proto3"
@@ -1332,47 +1654,57 @@ func file_canyonroad_wtp_v1_wtp_proto_rawDescGZIP() []byte {
 	return file_canyonroad_wtp_v1_wtp_proto_rawDescData
 }
 
-var file_canyonroad_wtp_v1_wtp_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_canyonroad_wtp_v1_wtp_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_canyonroad_wtp_v1_wtp_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_canyonroad_wtp_v1_wtp_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_canyonroad_wtp_v1_wtp_proto_goTypes = []any{
-	(Compression)(0),        // 0: canyonroad.wtp.v1.Compression
-	(*ClientMessage)(nil),   // 1: canyonroad.wtp.v1.ClientMessage
-	(*ServerMessage)(nil),   // 2: canyonroad.wtp.v1.ServerMessage
-	(*SessionInit)(nil),     // 3: canyonroad.wtp.v1.SessionInit
-	(*SessionAck)(nil),      // 4: canyonroad.wtp.v1.SessionAck
-	(*SessionUpdate)(nil),   // 5: canyonroad.wtp.v1.SessionUpdate
-	(*EventBatch)(nil),      // 6: canyonroad.wtp.v1.EventBatch
-	(*CompactEvent)(nil),    // 7: canyonroad.wtp.v1.CompactEvent
-	(*IntegrityRecord)(nil), // 8: canyonroad.wtp.v1.IntegrityRecord
-	(*Heartbeat)(nil),       // 9: canyonroad.wtp.v1.Heartbeat
-	(*ServerHeartbeat)(nil), // 10: canyonroad.wtp.v1.ServerHeartbeat
-	(*BatchAck)(nil),        // 11: canyonroad.wtp.v1.BatchAck
-	(*TransportLoss)(nil),   // 12: canyonroad.wtp.v1.TransportLoss
-	(*Goaway)(nil),          // 13: canyonroad.wtp.v1.Goaway
-	(*ClientShutdown)(nil),  // 14: canyonroad.wtp.v1.ClientShutdown
+	(HashAlgorithm)(0),         // 0: canyonroad.wtp.v1.HashAlgorithm
+	(Compression)(0),           // 1: canyonroad.wtp.v1.Compression
+	(TransportLossReason)(0),   // 2: canyonroad.wtp.v1.TransportLossReason
+	(GoawayCode)(0),            // 3: canyonroad.wtp.v1.GoawayCode
+	(ClientShutdownReason)(0),  // 4: canyonroad.wtp.v1.ClientShutdownReason
+	(*ClientMessage)(nil),      // 5: canyonroad.wtp.v1.ClientMessage
+	(*ServerMessage)(nil),      // 6: canyonroad.wtp.v1.ServerMessage
+	(*SessionInit)(nil),        // 7: canyonroad.wtp.v1.SessionInit
+	(*SessionAck)(nil),         // 8: canyonroad.wtp.v1.SessionAck
+	(*SessionUpdate)(nil),      // 9: canyonroad.wtp.v1.SessionUpdate
+	(*EventBatch)(nil),         // 10: canyonroad.wtp.v1.EventBatch
+	(*UncompressedEvents)(nil), // 11: canyonroad.wtp.v1.UncompressedEvents
+	(*CompactEvent)(nil),       // 12: canyonroad.wtp.v1.CompactEvent
+	(*IntegrityRecord)(nil),    // 13: canyonroad.wtp.v1.IntegrityRecord
+	(*Heartbeat)(nil),          // 14: canyonroad.wtp.v1.Heartbeat
+	(*ServerHeartbeat)(nil),    // 15: canyonroad.wtp.v1.ServerHeartbeat
+	(*BatchAck)(nil),           // 16: canyonroad.wtp.v1.BatchAck
+	(*TransportLoss)(nil),      // 17: canyonroad.wtp.v1.TransportLoss
+	(*Goaway)(nil),             // 18: canyonroad.wtp.v1.Goaway
+	(*ClientShutdown)(nil),     // 19: canyonroad.wtp.v1.ClientShutdown
 }
 var file_canyonroad_wtp_v1_wtp_proto_depIdxs = []int32{
-	3,  // 0: canyonroad.wtp.v1.ClientMessage.session_init:type_name -> canyonroad.wtp.v1.SessionInit
-	5,  // 1: canyonroad.wtp.v1.ClientMessage.session_update:type_name -> canyonroad.wtp.v1.SessionUpdate
-	6,  // 2: canyonroad.wtp.v1.ClientMessage.event_batch:type_name -> canyonroad.wtp.v1.EventBatch
-	9,  // 3: canyonroad.wtp.v1.ClientMessage.heartbeat:type_name -> canyonroad.wtp.v1.Heartbeat
-	12, // 4: canyonroad.wtp.v1.ClientMessage.transport_loss:type_name -> canyonroad.wtp.v1.TransportLoss
-	14, // 5: canyonroad.wtp.v1.ClientMessage.shutdown:type_name -> canyonroad.wtp.v1.ClientShutdown
-	4,  // 6: canyonroad.wtp.v1.ServerMessage.session_ack:type_name -> canyonroad.wtp.v1.SessionAck
-	11, // 7: canyonroad.wtp.v1.ServerMessage.batch_ack:type_name -> canyonroad.wtp.v1.BatchAck
-	10, // 8: canyonroad.wtp.v1.ServerMessage.server_heartbeat:type_name -> canyonroad.wtp.v1.ServerHeartbeat
-	13, // 9: canyonroad.wtp.v1.ServerMessage.goaway:type_name -> canyonroad.wtp.v1.Goaway
-	5,  // 10: canyonroad.wtp.v1.ServerMessage.server_update:type_name -> canyonroad.wtp.v1.SessionUpdate
-	7,  // 11: canyonroad.wtp.v1.EventBatch.events:type_name -> canyonroad.wtp.v1.CompactEvent
-	0,  // 12: canyonroad.wtp.v1.EventBatch.compression:type_name -> canyonroad.wtp.v1.Compression
-	8,  // 13: canyonroad.wtp.v1.CompactEvent.integrity:type_name -> canyonroad.wtp.v1.IntegrityRecord
-	1,  // 14: canyonroad.wtp.v1.Watchtower.Stream:input_type -> canyonroad.wtp.v1.ClientMessage
-	2,  // 15: canyonroad.wtp.v1.Watchtower.Stream:output_type -> canyonroad.wtp.v1.ServerMessage
-	15, // [15:16] is the sub-list for method output_type
-	14, // [14:15] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	7,  // 0: canyonroad.wtp.v1.ClientMessage.session_init:type_name -> canyonroad.wtp.v1.SessionInit
+	9,  // 1: canyonroad.wtp.v1.ClientMessage.session_update:type_name -> canyonroad.wtp.v1.SessionUpdate
+	10, // 2: canyonroad.wtp.v1.ClientMessage.event_batch:type_name -> canyonroad.wtp.v1.EventBatch
+	14, // 3: canyonroad.wtp.v1.ClientMessage.heartbeat:type_name -> canyonroad.wtp.v1.Heartbeat
+	17, // 4: canyonroad.wtp.v1.ClientMessage.transport_loss:type_name -> canyonroad.wtp.v1.TransportLoss
+	19, // 5: canyonroad.wtp.v1.ClientMessage.shutdown:type_name -> canyonroad.wtp.v1.ClientShutdown
+	8,  // 6: canyonroad.wtp.v1.ServerMessage.session_ack:type_name -> canyonroad.wtp.v1.SessionAck
+	16, // 7: canyonroad.wtp.v1.ServerMessage.batch_ack:type_name -> canyonroad.wtp.v1.BatchAck
+	15, // 8: canyonroad.wtp.v1.ServerMessage.server_heartbeat:type_name -> canyonroad.wtp.v1.ServerHeartbeat
+	18, // 9: canyonroad.wtp.v1.ServerMessage.goaway:type_name -> canyonroad.wtp.v1.Goaway
+	9,  // 10: canyonroad.wtp.v1.ServerMessage.server_update:type_name -> canyonroad.wtp.v1.SessionUpdate
+	0,  // 11: canyonroad.wtp.v1.SessionInit.algorithm:type_name -> canyonroad.wtp.v1.HashAlgorithm
+	1,  // 12: canyonroad.wtp.v1.EventBatch.compression:type_name -> canyonroad.wtp.v1.Compression
+	11, // 13: canyonroad.wtp.v1.EventBatch.uncompressed:type_name -> canyonroad.wtp.v1.UncompressedEvents
+	12, // 14: canyonroad.wtp.v1.UncompressedEvents.events:type_name -> canyonroad.wtp.v1.CompactEvent
+	13, // 15: canyonroad.wtp.v1.CompactEvent.integrity:type_name -> canyonroad.wtp.v1.IntegrityRecord
+	2,  // 16: canyonroad.wtp.v1.TransportLoss.reason:type_name -> canyonroad.wtp.v1.TransportLossReason
+	3,  // 17: canyonroad.wtp.v1.Goaway.code:type_name -> canyonroad.wtp.v1.GoawayCode
+	4,  // 18: canyonroad.wtp.v1.ClientShutdown.reason:type_name -> canyonroad.wtp.v1.ClientShutdownReason
+	5,  // 19: canyonroad.wtp.v1.Watchtower.Stream:input_type -> canyonroad.wtp.v1.ClientMessage
+	6,  // 20: canyonroad.wtp.v1.Watchtower.Stream:output_type -> canyonroad.wtp.v1.ServerMessage
+	20, // [20:21] is the sub-list for method output_type
+	19, // [19:20] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_canyonroad_wtp_v1_wtp_proto_init() }
@@ -1395,13 +1727,17 @@ func file_canyonroad_wtp_v1_wtp_proto_init() {
 		(*ServerMessage_Goaway)(nil),
 		(*ServerMessage_ServerUpdate)(nil),
 	}
+	file_canyonroad_wtp_v1_wtp_proto_msgTypes[5].OneofWrappers = []any{
+		(*EventBatch_Uncompressed)(nil),
+		(*EventBatch_CompressedPayload)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_canyonroad_wtp_v1_wtp_proto_rawDesc), len(file_canyonroad_wtp_v1_wtp_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   14,
+			NumEnums:      5,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

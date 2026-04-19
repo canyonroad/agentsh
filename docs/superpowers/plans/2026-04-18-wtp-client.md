@@ -1216,7 +1216,7 @@ Run `/roborev-design-review` and address findings.
 
 ---
 
-## Phase 4: Proto + wire goldens
+## Phase 4a: Proto scaffolding
 
 ### Task 4: Define `proto/canyonroad/wtp/v1/wtp.proto` and generate Go bindings
 
@@ -1224,7 +1224,6 @@ Run `/roborev-design-review` and address findings.
 - Create: `proto/canyonroad/wtp/v1/wtp.proto`
 - Create: `proto/canyonroad/wtp/v1/wtp.pb.go` (generated)
 - Create: `proto/canyonroad/wtp/v1/wtp_grpc.pb.go` (generated)
-- Create: `proto/canyonroad/wtp/v1/buf.gen.yaml` (generator config)
 
 **Why:** Spec §7 mandates the wire format. Define the `.proto` first so `chain`, `wal`, `transport`, and `testserver` can all import it.
 
@@ -1255,6 +1254,17 @@ message ClientMessage {
   }
 }
 
+// ServerMessage frames sent from server to client. Semantics:
+//   * SessionAck       — sent exactly once after SessionInit; accepted=false
+//                        terminates the session (client must disconnect).
+//   * BatchAck         — sent per-batch progress ack; advances the client's
+//                        ack high-watermark and unblocks WAL GC.
+//   * ServerHeartbeat  — periodic; carries the server's current
+//                        ack_high_watermark_seq so an idle client still
+//                        learns about catch-up after replay completes.
+//   * Goaway           — server requesting reconnect; carries an enum code.
+//   * server_update    — server-issued SessionUpdate (key/generation
+//                        rotation initiated by the server).
 message ServerMessage {
   oneof msg {
     SessionAck       session_ack        = 1;
@@ -1267,17 +1277,23 @@ message ServerMessage {
 
 // SessionInit (§7.1)
 message SessionInit {
-  string  session_id              = 1;
-  string  ocsf_version            = 2;
-  uint32  format_version          = 3;
-  string  algorithm               = 4;   // hmac-sha256 | hmac-sha512
-  string  key_fingerprint         = 5;
-  string  context_digest          = 6;   // hex-encoded SHA-256
-  uint64  wal_high_watermark_seq  = 7;
-  uint32  generation              = 8;
-  string  agent_id                = 9;
-  string  agent_version           = 10;
-  uint64  total_chained           = 11;  // count of records sink has chained
+  string         session_id              = 1;
+  string         ocsf_version            = 2;
+  uint32         format_version          = 3;
+  HashAlgorithm  algorithm               = 4;
+  string         key_fingerprint         = 5;
+  string         context_digest          = 6;   // hex-encoded SHA-256
+  uint64         wal_high_watermark_seq  = 7;
+  uint32         generation              = 8;
+  string         agent_id                = 9;
+  string         agent_version           = 10;
+  uint64         total_chained           = 11;  // count of records sink has chained
+}
+
+enum HashAlgorithm {
+  HASH_ALGORITHM_UNSPECIFIED = 0;   // wire-incompatible — receivers MUST reject.
+  HASH_ALGORITHM_HMAC_SHA256 = 1;
+  HASH_ALGORITHM_HMAC_SHA512 = 2;
 }
 
 message SessionAck {
@@ -1295,14 +1311,29 @@ message SessionUpdate {
   uint64 boundary_sequence      = 4;     // last seq of prior generation
 }
 
-// EventBatch (§7.3)
+// EventBatch (§7.3) — the unit of in-flight work between client and server.
+//
+// The batch body is mutually exclusive: a sender MUST populate exactly one
+// of `uncompressed` (when compression == COMPRESSION_NONE) or
+// `compressed_payload` (when compression is COMPRESSION_ZSTD or
+// COMPRESSION_GZIP). Receivers MUST reject batches where the oneof case
+// disagrees with the compression field, where compression is
+// COMPRESSION_UNSPECIFIED, or where the body oneof is unset.
 message EventBatch {
-  uint64 from_sequence          = 1;
-  uint64 to_sequence            = 2;
-  uint32 generation             = 3;
-  repeated CompactEvent events  = 4;
-  Compression compression       = 5;
-  bytes  compressed_payload     = 6;     // when compression != NONE; events repeated empty
+  uint64 from_sequence = 1;
+  uint64 to_sequence   = 2;
+  uint32 generation    = 3;
+  Compression compression = 4;
+  oneof body {
+    UncompressedEvents uncompressed       = 5;
+    bytes              compressed_payload = 6;
+  }
+}
+
+// UncompressedEvents wraps the repeated CompactEvent so it can sit inside
+// the EventBatch.body oneof (proto3 forbids `repeated` directly in oneofs).
+message UncompressedEvents {
+  repeated CompactEvent events = 1;
 }
 
 enum Compression {
@@ -1349,20 +1380,41 @@ message BatchAck {
 
 // TransportLoss (§7.5) — emitted on WAL overflow or CRC corruption.
 message TransportLoss {
-  uint64 from_sequence  = 1;
-  uint64 to_sequence    = 2;
-  uint32 generation     = 3;
-  string reason         = 4;     // "overflow" | "crc_corruption"
+  uint64               from_sequence = 1;
+  uint64               to_sequence   = 2;
+  uint32               generation    = 3;
+  TransportLossReason  reason        = 4;
+}
+
+enum TransportLossReason {
+  TRANSPORT_LOSS_REASON_UNSPECIFIED   = 0;   // wire-incompatible — receivers MUST reject.
+  TRANSPORT_LOSS_REASON_OVERFLOW      = 1;   // WAL hit max_total_bytes; oldest segments dropped.
+  TRANSPORT_LOSS_REASON_CRC_CORRUPTION = 2;  // CRC mismatch encountered during WAL replay.
 }
 
 message Goaway {
-  string code             = 1;   // "DRAINING" | "OVERLOAD" | etc.
-  string message          = 2;
-  bool   retry_immediately = 3;
+  GoawayCode code             = 1;
+  string     message          = 2;
+  bool       retry_immediately = 3;
+}
+
+enum GoawayCode {
+  GOAWAY_CODE_UNSPECIFIED = 0;   // unknown; clients MUST treat as transient and reconnect.
+  GOAWAY_CODE_DRAINING    = 1;   // graceful shutdown; reconnect to a different instance.
+  GOAWAY_CODE_OVERLOAD    = 2;   // server overloaded; reconnect with backoff.
+  GOAWAY_CODE_UPGRADE     = 3;   // server upgrade in progress; reconnect after delay.
+  GOAWAY_CODE_AUTH        = 4;   // authentication/authorization failed; do not auto-retry.
 }
 
 message ClientShutdown {
-  string reason = 1;
+  ClientShutdownReason reason = 1;
+}
+
+enum ClientShutdownReason {
+  CLIENT_SHUTDOWN_REASON_UNSPECIFIED = 0;
+  CLIENT_SHUTDOWN_REASON_NORMAL      = 1;   // clean shutdown of the agent.
+  CLIENT_SHUTDOWN_REASON_RECONFIGURE = 2;   // operator-driven reconfig; expect quick reconnect.
+  CLIENT_SHUTDOWN_REASON_FATAL       = 3;   // unrecoverable error; do not expect reconnect.
 }
 ```
 
@@ -1474,6 +1526,8 @@ git commit -m "feat(proto): add WTP v1 service and message definitions"
 Run `/roborev-design-review` and address findings.
 
 ---
+
+## Phase 4b: Wire goldens
 
 ### Task 5: Wire-format goldens via in-tree `cmd/gen-wire-goldens`
 
@@ -1604,8 +1658,12 @@ func main() {
 		FromSequence: 40,
 		ToSequence:   42,
 		Generation:   7,
-		Events:       []*wtpv1.CompactEvent{ce},
 		Compression:  wtpv1.Compression_COMPRESSION_NONE,
+		Body: &wtpv1.EventBatch_Uncompressed{
+			Uncompressed: &wtpv1.UncompressedEvents{
+				Events: []*wtpv1.CompactEvent{ce},
+			},
+		},
 	}
 	write("event_batch.bin", eb)
 
@@ -4749,8 +4807,8 @@ func TestConnectingState_SendsSessionInitAndAdvancesOnAck(t *testing.T) {
 	conn.recvCh <- &wtpv1.ServerMessage{
 		Msg: &wtpv1.ServerMessage_SessionAck{
 			SessionAck: &wtpv1.SessionAck{
-				LastAckedSequence: 0,
-				LastAckedGeneration: 0,
+				AckHighWatermarkSeq: 0,
+				Generation: 0,
 			},
 		},
 	}
@@ -4887,11 +4945,11 @@ func (t *Transport) sessionInit() *wtpv1.ClientMessage {
 	return &wtpv1.ClientMessage{
 		Msg: &wtpv1.ClientMessage_SessionInit{
 			SessionInit: &wtpv1.SessionInit{
-				AgentId:         t.opts.AgentID,
-				SessionId:       t.opts.SessionID,
-				FormatVersion:   t.opts.FormatVersion,
-				LastAckedSequence:   t.ackedSequence,
-				LastAckedGeneration: t.ackedGeneration,
+				AgentId:             t.opts.AgentID,
+				SessionId:           t.opts.SessionID,
+				FormatVersion:       t.opts.FormatVersion,
+				WalHighWatermarkSeq: t.ackedSequence,
+				Generation:          t.ackedGeneration,
 			},
 		},
 	}
@@ -4938,8 +4996,8 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 		return StateConnecting, fmt.Errorf("expected SessionAck, got %T", msg.Msg)
 	}
 
-	t.ackedSequence = ack.LastAckedSequence
-	t.ackedGeneration = ack.LastAckedGeneration
+	t.ackedSequence = ack.AckHighWatermarkSeq
+	t.ackedGeneration = ack.Generation
 	return StateReplaying, nil
 }
 
@@ -6397,8 +6455,8 @@ func (h *srvHandler) Stream(stream wtpv1.Watchtower_StreamServer) error {
 			ack := &wtpv1.ServerMessage{
 				Msg: &wtpv1.ServerMessage_SessionAck{
 					SessionAck: &wtpv1.SessionAck{
-						LastAckedSequence:   h.s.opts.StaleWatermark,
-						LastAckedGeneration: 0,
+						AckHighWatermarkSeq:   h.s.opts.StaleWatermark,
+						Generation: 0,
 					},
 				},
 			}
@@ -6424,19 +6482,19 @@ func (h *srvHandler) Stream(stream wtpv1.Watchtower_StreamServer) error {
 				})
 				return nil
 			}
-			// Normal ack via SessionUpdate (every batch).
+			// Normal ack via BatchAck (every batch).
 			lastSeq := uint64(0)
 			lastGen := uint32(0)
-			if len(x.EventBatch.Records) > 0 {
-				last := x.EventBatch.Records[len(x.EventBatch.Records)-1]
+			if events := x.EventBatch.GetUncompressed().GetEvents(); len(events) > 0 {
+				last := events[len(events)-1]
 				lastSeq = last.Sequence
 				lastGen = last.Generation
 			}
 			_ = stream.Send(&wtpv1.ServerMessage{
-				Msg: &wtpv1.ServerMessage_SessionUpdate{
-					SessionUpdate: &wtpv1.SessionUpdate{
-						LastAckedSequence:   lastSeq,
-						LastAckedGeneration: lastGen,
+				Msg: &wtpv1.ServerMessage_BatchAck{
+					BatchAck: &wtpv1.BatchAck{
+						AckHighWatermarkSeq: lastSeq,
+						Generation:          lastGen,
 					},
 				},
 			})
@@ -6542,7 +6600,12 @@ func TestWaitForBatch_ReturnsBatchOrTimesOut(t *testing.T) {
 	_ = conn.Send(&wtpv1.ClientMessage{
 		Msg: &wtpv1.ClientMessage_EventBatch{
 			EventBatch: &wtpv1.EventBatch{
-				Records: []*wtpv1.IntegrityRecord{{Sequence: 1, Generation: 1}},
+				Compression: wtpv1.Compression_COMPRESSION_NONE,
+				Body: &wtpv1.EventBatch_Uncompressed{
+					Uncompressed: &wtpv1.UncompressedEvents{
+						Events: []*wtpv1.CompactEvent{{Sequence: 1, Generation: 1}},
+					},
+				},
 			},
 		},
 	})
@@ -6551,8 +6614,8 @@ func TestWaitForBatch_ReturnsBatchOrTimesOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WaitForBatch: %v", err)
 	}
-	if len(got.Records) != 1 {
-		t.Fatalf("records: got %d, want 1", len(got.Records))
+	if len(got.GetUncompressed().GetEvents()) != 1 {
+		t.Fatalf("records: got %d, want 1", len(got.GetUncompressed().GetEvents()))
 	}
 
 	if err := srv.AssertSequenceRange(1, 1); err != nil {
@@ -6571,7 +6634,7 @@ func TestAssertReplayObserved_DetectsReplayBoundary(t *testing.T) {
 		Msg: &wtpv1.ClientMessage_SessionInit{
 			SessionInit: &wtpv1.SessionInit{
 				AgentId: "a", SessionId: "s",
-				LastAckedSequence: 20,
+				WalHighWatermarkSeq: 20,
 			},
 		},
 	})
@@ -6581,9 +6644,14 @@ func TestAssertReplayObserved_DetectsReplayBoundary(t *testing.T) {
 	_ = conn.Send(&wtpv1.ClientMessage{
 		Msg: &wtpv1.ClientMessage_EventBatch{
 			EventBatch: &wtpv1.EventBatch{
-				Records: []*wtpv1.IntegrityRecord{
-					{Sequence: 11, Generation: 1},
-					{Sequence: 12, Generation: 1},
+				Compression: wtpv1.Compression_COMPRESSION_NONE,
+				Body: &wtpv1.EventBatch_Uncompressed{
+					Uncompressed: &wtpv1.UncompressedEvents{
+						Events: []*wtpv1.CompactEvent{
+							{Sequence: 11, Generation: 1},
+							{Sequence: 12, Generation: 1},
+						},
+					},
 				},
 			},
 		},
@@ -8120,18 +8188,19 @@ func (h *handler) Stream(stream wtpv1.Watchtower_StreamServer) error {
 				},
 			})
 		case *wtpv1.ClientMessage_EventBatch:
-			fmt.Fprintf(os.Stderr, "batch: %d records\n", len(m.EventBatch.Records))
+			events := m.EventBatch.GetUncompressed().GetEvents()
+			fmt.Fprintf(os.Stderr, "batch: %d records\n", len(events))
 			lastSeq := uint64(0)
 			lastGen := uint32(0)
-			if n := len(m.EventBatch.Records); n > 0 {
-				lastSeq = m.EventBatch.Records[n-1].Sequence
-				lastGen = m.EventBatch.Records[n-1].Generation
+			if n := len(events); n > 0 {
+				lastSeq = events[n-1].Sequence
+				lastGen = events[n-1].Generation
 			}
 			_ = stream.Send(&wtpv1.ServerMessage{
-				Msg: &wtpv1.ServerMessage_SessionUpdate{
-					SessionUpdate: &wtpv1.SessionUpdate{
-						LastAckedSequence:   lastSeq,
-						LastAckedGeneration: lastGen,
+				Msg: &wtpv1.ServerMessage_BatchAck{
+					BatchAck: &wtpv1.BatchAck{
+						AckHighWatermarkSeq: lastSeq,
+						Generation:          lastGen,
 					},
 				},
 			})
