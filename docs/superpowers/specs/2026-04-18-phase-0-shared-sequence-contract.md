@@ -231,14 +231,22 @@ The existing `Wrap()` is preserved verbatim as a convenience for single-sink cal
 ```go
 // IntegrityChain is the legacy single-sink composer of SequenceAllocator +
 // SinkChain. New code should use the two types directly via the composite
-// store's allocator and per-sink chains. Wrap() is preserved unchanged at the
-// source level for existing callers.
+// store's allocator and per-sink chains. Wrap/State/Restore are preserved
+// at the source level for existing callers.
+//
+// Concurrency: Wrap, State, and Restore are serialized by an internal
+// mutex so the wrapper preserves the legacy single-mutex atomicity
+// contract. KeyFingerprint, VerifyHash, and VerifyWrapped do NOT take the
+// wrapper mutex (they read immutable fields via the chain's own mutex).
 type IntegrityChain struct {
+    mu    sync.Mutex
     alloc *SequenceAllocator
     chain *SinkChain
 }
 
 func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
     seq, gen, err := c.alloc.Next()
     if err != nil { return nil, err }
     canonical := canonicalize(payload)
@@ -255,9 +263,44 @@ func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
     }
     return wrapped, nil
 }
+
+func (c *IntegrityChain) State() ChainState {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    a := c.alloc.State()
+    s := c.chain.State()
+    return ChainState{Sequence: a.Sequence, PrevHash: s.PrevHash}
+}
+
+func (c *IntegrityChain) Restore(sequence int64, prevHash string) error {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    // All-or-nothing: snapshot allocator, advance it, then attempt chain
+    // restore. If chain restore rejects the prevHash, roll the allocator
+    // back to its pre-call snapshot. Both component Restores validate
+    // their input before mutating, so rolling back to a State() snapshot
+    // cannot itself fail.
+    prevAlloc := c.alloc.State()
+    if err := c.alloc.Restore(AllocatorState{Sequence: sequence, Generation: 0}); err != nil {
+        return fmt.Errorf("restore allocator: %w", err)
+    }
+    if err := c.chain.Restore(0, prevHash, false); err != nil {
+        _ = c.alloc.Restore(prevAlloc) // rollback; cannot fail
+        return fmt.Errorf("restore chain: %w", err)
+    }
+    return nil
+}
 ```
 
 For single-sink callers, durable success is implicit (Wrap returns the bytes; the caller writes them; if the write fails the caller never calls Wrap again on the same record). The single-sink case does not need the Compute/Commit split exposed because there is no fanout — but composite-mode callers absolutely do.
+
+**Wrapper-level atomicity contract.** `IntegrityChain` holds a single `sync.Mutex` around `Wrap`, `State`, and `Restore`. This preserves the legacy single-mutex contract verbatim, even though the internals now compose two independently-locked components:
+
+- **Concurrent `Wrap` calls serialize.** Two callers cannot interleave `alloc.Next()` from one with `chain.Compute()` / `chain.Commit()` from another, so chained sequences cannot end up linked to the wrong predecessor and the wrapper cannot latch fatal via `ErrStaleResult` from a benign concurrent caller.
+- **`State` returns a consistent snapshot.** `(sequence, prev_hash)` is always observed at the same point in the chain — never a torn read where one value is from a Wrap that has not finished committing.
+- **`Restore` is all-or-nothing.** If either the allocator or the chain rejects its input, the wrapper is left in its pre-call state. Implementation snapshots the allocator before mutating and rolls it back on chain-restore failure; the rollback restores a value that came from `State()` and therefore satisfies the allocator's `Sequence >= -1` invariant by construction.
+
+`KeyFingerprint`, `VerifyHash`, and `VerifyWrapped` do NOT take the wrapper mutex. They read immutable key/algorithm material via the underlying `SinkChain`'s own mutex (`keyAndAlgorithm()`) and have no need for wrapper-level serialization. Adding the wrapper mutex there would be a lock-ordering risk and serves no purpose.
 
 ### `internal/store/composite/composite.go` — allocate + stamp + fanout
 

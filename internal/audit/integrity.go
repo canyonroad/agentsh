@@ -17,6 +17,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/agentsh/agentsh/internal/audit/kms"
 	"github.com/agentsh/agentsh/internal/config"
@@ -34,7 +35,18 @@ type IntegrityMetadata struct {
 // SinkChain. New code should use those two types directly via the composite
 // store's allocator and per-sink chains. Wrap/State/Restore are preserved
 // at the source level for existing callers.
+//
+// Concurrency: Wrap, State, and Restore are serialized by an internal
+// mutex so the wrapper preserves the legacy single-mutex atomicity contract:
+// concurrent Wrap calls do not race against each other, State returns a
+// consistent (sequence, prev_hash) snapshot, and Restore is all-or-nothing
+// (a failed Restore leaves the wrapper in its pre-call state).
+//
+// KeyFingerprint, VerifyHash, and VerifyWrapped do NOT take the wrapper
+// mutex — they read immutable key/algorithm via the underlying SinkChain's
+// own mutex and have no need for wrapper-level serialization.
 type IntegrityChain struct {
+	mu    sync.Mutex
 	alloc *SequenceAllocator
 	chain *SinkChain
 }
@@ -187,6 +199,9 @@ func NewIntegrityChainFromConfig(ctx context.Context, cfg config.AuditIntegrityC
 // Wrap adds integrity metadata to an event payload.
 // The payload must be valid JSON. Returns a new JSON payload with an "integrity" field.
 func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	data, err := parseIntegrityPayloadUseNumber(payload)
 	if err != nil {
 		return nil, err
@@ -226,6 +241,8 @@ func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
 
 // State returns the last written chain state for persistence.
 func (c *IntegrityChain) State() ChainState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	allocState := c.alloc.State()
 	chainState := c.chain.State()
 	return ChainState{
@@ -240,11 +257,31 @@ func (c *IntegrityChain) State() ChainState {
 // Aggregates errors from the underlying allocator and sink chain restores —
 // SequenceAllocator.Restore rejects sequence < -1, and SinkChain.Restore
 // rejects malformed prev_hash (non-hex or wrong length for the algorithm).
+//
+// Restore is all-or-nothing: if either component rejects its input, the
+// IntegrityChain is left in its pre-call state. The implementation
+// snapshots the allocator before mutating and rolls it back if the chain
+// restore is rejected. The wrapper mutex serializes Restore against
+// concurrent Wrap and State calls.
 func (c *IntegrityChain) Restore(sequence int64, prevHash string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Snapshot allocator state for rollback so Restore is all-or-nothing:
+	// if chain restoration fails, the allocator must not be observed as
+	// partially restored. SequenceAllocator.Restore validates Sequence >= -1
+	// before mutating; SinkChain.Restore validates prevHash format before
+	// mutating. We attempt allocator first; if chain restore rejects the
+	// prevHash, we restore the allocator to the pre-call snapshot.
+	prevAlloc := c.alloc.State()
+
 	if err := c.alloc.Restore(AllocatorState{Sequence: sequence, Generation: 0}); err != nil {
 		return fmt.Errorf("restore allocator: %w", err)
 	}
 	if err := c.chain.Restore(0, prevHash, false); err != nil {
+		// Roll back allocator. prevAlloc came from State() so it satisfies
+		// the Sequence >= -1 invariant; this rollback cannot fail.
+		_ = c.alloc.Restore(prevAlloc)
 		return fmt.Errorf("restore chain: %w", err)
 	}
 	return nil

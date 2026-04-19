@@ -1574,11 +1574,24 @@ In `internal/audit/integrity.go`, replace the existing `IntegrityChain` struct (
 // SinkChain. New code should use those two types directly via the composite
 // store's allocator and per-sink chains. Wrap/State/Restore are preserved
 // at the source level for existing callers.
+//
+// Concurrency: Wrap, State, and Restore are serialized by an internal
+// mutex so the wrapper preserves the legacy single-mutex atomicity contract:
+// concurrent Wrap calls do not race against each other, State returns a
+// consistent (sequence, prev_hash) snapshot, and Restore is all-or-nothing
+// (a failed Restore leaves the wrapper in its pre-call state).
+//
+// KeyFingerprint, VerifyHash, and VerifyWrapped do NOT take the wrapper
+// mutex — they read immutable key/algorithm via the underlying SinkChain's
+// own mutex and have no need for wrapper-level serialization.
 type IntegrityChain struct {
+	mu    sync.Mutex
 	alloc *SequenceAllocator
 	chain *SinkChain
 }
 ```
+
+Add `"sync"` to the import block alongside the existing standard-library imports.
 
 Replace the body of `NewIntegrityChainWithAlgorithm` (currently lines 72-91) with:
 
@@ -1605,6 +1618,9 @@ Replace the body of `Wrap()` (currently lines 201-252) with:
 // Wrap adds integrity metadata to an event payload.
 // The payload must be valid JSON. Returns a new JSON payload with an "integrity" field.
 func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	data, err := parseIntegrityPayloadUseNumber(payload)
 	if err != nil {
 		return nil, err
@@ -1645,6 +1661,8 @@ func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
 
 Single-sink callers don't expose Compute/Commit because there's no fanout; the legacy contract is "Wrap returns the bytes; if the caller's write fails, the caller never calls Wrap again on the same record." That contract is preserved — Commit happens inside Wrap.
 
+The `c.mu.Lock()`/`defer c.mu.Unlock()` preserves the legacy single-mutex atomicity contract: concurrent Wrap calls cannot interleave `alloc.Next()` from one goroutine with `chain.Compute()`/`chain.Commit()` from another, which would produce ErrStaleResult and latch the chain fatal. The wrapper mutex always wraps calls into `c.alloc` / `c.chain`; there is no path where component code calls back into the wrapper, so no lock-ordering hazard exists.
+
 - [ ] **Step 4: Replace `State()` to delegate**
 
 Replace the body of `State()` (currently lines 254-262) with:
@@ -1652,6 +1670,8 @@ Replace the body of `State()` (currently lines 254-262) with:
 ```go
 // State returns the last written chain state for persistence.
 func (c *IntegrityChain) State() ChainState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	allocState := c.alloc.State()
 	chainState := c.chain.State()
 	return ChainState{
@@ -1660,6 +1680,8 @@ func (c *IntegrityChain) State() ChainState {
 	}
 }
 ```
+
+The wrapper mutex makes the `(sequence, prev_hash)` snapshot consistent: callers cannot observe a torn read where the allocator has advanced past N but the chain still reports `prev_hash` for N-1 (or vice versa). Without the wrapper mutex, the two component `State()` calls would interleave with concurrent `Wrap()` calls.
 
 - [ ] **Step 5: Replace `Restore()` to delegate**
 
@@ -1672,11 +1694,31 @@ Replace the body of `Restore()` (currently lines 264-271) with:
 // Aggregates errors from the underlying allocator and sink chain restores —
 // SequenceAllocator.Restore rejects sequence < -1, and SinkChain.Restore
 // rejects malformed prev_hash (non-hex or wrong length for the algorithm).
+//
+// Restore is all-or-nothing: if either component rejects its input, the
+// IntegrityChain is left in its pre-call state. The implementation
+// snapshots the allocator before mutating and rolls it back if the chain
+// restore is rejected. The wrapper mutex serializes Restore against
+// concurrent Wrap and State calls.
 func (c *IntegrityChain) Restore(sequence int64, prevHash string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Snapshot allocator state for rollback so Restore is all-or-nothing:
+	// if chain restoration fails, the allocator must not be observed as
+	// partially restored. SequenceAllocator.Restore validates Sequence >= -1
+	// before mutating; SinkChain.Restore validates prevHash format before
+	// mutating. We attempt allocator first; if chain restore rejects the
+	// prevHash, we restore the allocator to the pre-call snapshot.
+	prevAlloc := c.alloc.State()
+
 	if err := c.alloc.Restore(AllocatorState{Sequence: sequence, Generation: 0}); err != nil {
 		return fmt.Errorf("restore allocator: %w", err)
 	}
 	if err := c.chain.Restore(0, prevHash, false); err != nil {
+		// Roll back allocator. prevAlloc came from State() so it satisfies
+		// the Sequence >= -1 invariant; this rollback cannot fail.
+		_ = c.alloc.Restore(prevAlloc)
 		return fmt.Errorf("restore chain: %w", err)
 	}
 	return nil
@@ -1684,6 +1726,8 @@ func (c *IntegrityChain) Restore(sequence int64, prevHash string) error {
 ```
 
 Note: legacy `IntegrityChain` does not expose generation (its callers were single-sink with no rotation concept beyond key change, which today is handled via key-fingerprint mismatch detection in `internal/store/integrity_wrapper.go`). We pin generation=0 to keep behavior identical. Fatal is also pinned to false — the legacy single-sink Wrap path has no Fatal latch concept; ambiguous-write recovery is the new `SinkChain.Fatal`/`Compute`/`Commit` API.
+
+The all-or-nothing semantics matter because callers (`internal/store/integrity_wrapper.go`) use Restore both during startup recovery and after a clean-failure write to roll the chain back to its pre-write state. A half-restored wrapper (allocator advanced, chain unchanged) would silently corrupt subsequent Wrap output. Both component `Restore`s validate their input before mutating, so the rollback `c.alloc.Restore(prevAlloc)` cannot itself fail (we are restoring a value we just read from `State()`).
 
 The new error return is a behavior change for existing callers (`internal/store/integrity_wrapper.go` etc.) — those callers must be updated to check the error. The change mirrors what we already did for `SequenceAllocator.Restore` in Task 2.
 
@@ -1751,6 +1795,20 @@ If any test fails, the most likely culprits are:
 - `Restore` not pinning generation correctly (chain.Restore(0, prevHash, false) is required)
 - `State()` returning wrong sequence after Wrap (allocator's `State()` is the last-returned sequence, which matches what the old code stored in `c.sequence`)
 - Overflow test expecting `c.sequence == math.MaxInt64` — the new code triggers overflow inside `c.alloc.Next()` and returns `ErrSequenceOverflow` from there, identical to the old behavior
+
+- [ ] **Step 7b: Add regression tests for the wrapper-mutex contract**
+
+Add three regression tests in `internal/audit/integrity_test.go` covering the new failure modes the composition boundary would otherwise introduce:
+
+1. **`TestIntegrityChain_Wrap_ConcurrentSafety`** — fire 50 goroutines × 20 `Wrap()` calls (1000 entries total) with distinct payloads. After all complete, parse each wrapped entry, build `map[seq]entry_hash` and `map[seq]prev_hash`, assert sequences are exactly `{0..999}`, assert `prev_hash[seq] == entry_hash[seq-1]` for `seq > 0` and `prev_hash[0] == ""`, and verify each entry with `chain.VerifyWrapped`. Without the wrapper mutex, concurrent `Wrap` produces ErrStaleResult or breaks chain integrity.
+2. **`TestIntegrityChain_State_SnapshotConsistency`** — start a goroutine that calls `Wrap` in a loop (200 iterations) and records `(sequence, entry_hash)` in a `sync.Map`. In parallel, sample `chain.State()` repeatedly (200 times). For each sampled state, assert `entry_hash(state.Sequence) == state.PrevHash` (with `state.Sequence == -1` and empty `PrevHash` as the legitimate pre-Wrap genesis snapshot). Without the wrapper mutex, `State()` returns torn `(sequence, prev_hash)` reads.
+3. **`TestIntegrityChain_Restore_PartialFailure_LeavesStateIntact`** — Wrap a few entries, snapshot `S0 = chain.State()`. Call `chain.Restore(99, "not-valid-hex")`; assert the call returns an error wrapping `ErrInvalidChainState`. Then assert `chain.State()` equals `S0` byte-for-byte and that a subsequent `chain.Wrap(...)` produces an entry whose `Sequence == S0.Sequence + 1` and `PrevHash == S0.PrevHash` (proving allocator was not advanced by the rejected Restore).
+
+```bash
+go test ./internal/audit/... -count=1 -race -run 'IntegrityChain_Wrap_ConcurrentSafety|IntegrityChain_State_SnapshotConsistency|IntegrityChain_Restore_PartialFailure_LeavesStateIntact'
+```
+
+Expected: PASS under `-race`. The `-race` flag is essential because the concurrency tests assert behavior that the data-race detector alone won't surface (the races here are logical, not memory-level).
 
 - [ ] **Step 8: Run the full test suite**
 
