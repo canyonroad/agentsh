@@ -932,6 +932,18 @@ if rv.Kind() == reflect.Ptr && rv.IsNil() {
 Other nilable kinds (`map`, `slice`, `chan`, `func`) implementing `Mapper` are pathological in practice — production mappers are struct pointers (e.g. `*OcsfMapper`) — so the contract intentionally scopes typed-nil rejection to the `*ConcreteMapper` form. If a future implementation deviates from struct-pointer form, the contract should be revisited at that point.
 
 The stub-rejection branch (`compact.IsStubMapper`) runs after the nil branches and matches both value and pointer forms (`StubMapper{}`, `*StubMapper`); the typed-nil `*StubMapper` case is redundantly covered by both branches but the nil branch wins because it produces the more actionable error.
+
+**`compact.Encode` — canonical CompactEvent construction.** All WTP sink-side construction of `wtpv1.CompactEvent` MUST go through `compact.Encode`. Direct struct literal construction outside this helper is forbidden. Reason: the chain step (`chain.Compute`) hashes a fixed canonical projection of the event, so a diverging construction path silently breaks integrity verification.
+
+`Encode` owns these invariants:
+- **Chain stamping is mandatory.** `ev.Chain` must be non-nil; the composite store stamps it before fanning out. Returns `ErrMissingChain` otherwise.
+- **Timestamp must be valid.** `ev.Timestamp` must be non-zero and ≥ Unix epoch. Pre-epoch instants silently wrap when cast to `uint64`, masking caller bugs. Returns `ErrInvalidTimestamp`.
+- **Integrity is left nil.** The chain step populates `Integrity` after computing the entry hash.
+
+`Encode` does NOT re-validate the Mapper — `Store.New` is the single point that rejects untyped-nil and typed-nil-pointer mappers (see "Mapper nil-handling contract"). Re-checking in every helper would duplicate that guarantee.
+
+Error sentinels are exported so callers can classify with `errors.Is`: `ErrMissingChain`, `ErrInvalidTimestamp`. Mapper failures are wrapped with `fmt.Errorf("compact mapper: %w", err)` so `errors.Unwrap` returns the underlying mapper error.
+
 - Operators can verify the sink end-to-end without a live Watchtower by pointing `Endpoint` at the testserver binary that ships in `cmd/wtp-testserver/` (a thin wrapper around `internal/store/watchtower/testserver`). This is also how we recommend running it in development.
 
 ## Implementation Phases

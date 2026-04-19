@@ -1,6 +1,7 @@
 package compact
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -45,6 +46,9 @@ func TestEncode_RejectsMissingChain(t *testing.T) {
 	if err == nil {
 		t.Fatal("Encode must reject ev with nil Chain")
 	}
+	if !errors.Is(err, ErrMissingChain) {
+		t.Errorf("err = %v, want errors.Is(err, ErrMissingChain)", err)
+	}
 }
 
 func TestEncode_PropagatesMapperError(t *testing.T) {
@@ -53,6 +57,54 @@ func TestEncode_PropagatesMapperError(t *testing.T) {
 	_, err := Encode(failing, ev)
 	if err == nil {
 		t.Fatal("Encode must propagate mapper error")
+	}
+	if !errors.Is(err, errBoom) {
+		t.Errorf("err = %v, want wrapped errBoom", err)
+	}
+}
+
+func TestEncode_RejectsZeroTimestamp(t *testing.T) {
+	ev := types.Event{
+		Type:  "x",
+		Chain: &types.ChainState{Sequence: 1, Generation: 1},
+		// Timestamp deliberately left as the zero value.
+	}
+	_, err := Encode(StubMapper{}, ev)
+	if err == nil {
+		t.Fatal("Encode must reject zero timestamp")
+	}
+	if !errors.Is(err, ErrInvalidTimestamp) {
+		t.Errorf("err = %v, want errors.Is(err, ErrInvalidTimestamp)", err)
+	}
+}
+
+func TestEncode_RejectsPreEpochTimestamp(t *testing.T) {
+	ev := types.Event{
+		Type:      "x",
+		Timestamp: time.Date(1969, time.December, 31, 23, 59, 59, 0, time.UTC),
+		Chain:     &types.ChainState{Sequence: 1, Generation: 1},
+	}
+	_, err := Encode(StubMapper{}, ev)
+	if err == nil {
+		t.Fatal("Encode must reject pre-epoch timestamp")
+	}
+	if !errors.Is(err, ErrInvalidTimestamp) {
+		t.Errorf("err = %v, want errors.Is(err, ErrInvalidTimestamp)", err)
+	}
+}
+
+func TestEncode_AcceptsUnixEpoch(t *testing.T) {
+	ev := types.Event{
+		Type:      "x",
+		Timestamp: time.Unix(0, 0),
+		Chain:     &types.ChainState{Sequence: 1, Generation: 1},
+	}
+	got, err := Encode(StubMapper{}, ev)
+	if err != nil {
+		t.Fatalf("Encode must accept Unix epoch boundary: %v", err)
+	}
+	if got.TimestampUnixNanos != 0 {
+		t.Errorf("TimestampUnixNanos = %d, want 0", got.TimestampUnixNanos)
 	}
 }
 
