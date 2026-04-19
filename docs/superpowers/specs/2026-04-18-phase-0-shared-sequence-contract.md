@@ -133,6 +133,17 @@ func NewSinkChain(key []byte, algorithm string) (*SinkChain, error)
 // generation prev_hash mismatch OR rollover-with-nonempty-prev) — with all
 // integrity-affecting violations latching fatal rather than silently
 // corrupting the chain.
+//
+// Lifecycle / serialization boundary: a ComputeResult is bound to the
+// in-memory SinkChain instance that produced it. It is NOT a durable
+// token — a SinkChain reconstructed via NewSinkChain + Restore is a new
+// instance and will reject prior tokens with ErrCrossChainResult. Compute
+// and Commit are designed to be co-located in a single process, with the
+// durable write of the integrity metadata happening between them.
+// EntryHash() and PrevHash() exist so that callers can persist the
+// integrity metadata alongside the payload for later VerifyHash; they are
+// NOT the input shape for reconstructing a Commit token across process
+// boundaries.
 type ComputeResult struct {
     // unexported: entryHash, prevHash, sequence, generation, chain
 }

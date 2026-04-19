@@ -1135,7 +1135,9 @@ import (
 // (unexported fields, accessor methods) and chain-bound — only the
 // SinkChain instance that produced the result can commit it. The
 // unexported fields make literal construction or post-Compute mutation
-// impossible from outside the audit package.
+// impossible from outside the audit package. Callers that need to persist
+// the integrity metadata alongside the payload use EntryHash() and
+// PrevHash(); see the lifecycle note below.
 //
 // Enforced invariants on Commit:
 //   - nil ComputeResult → error (no latch).
@@ -1146,12 +1148,6 @@ import (
 //   - Stale prev_hash within the current generation, or non-empty prev_hash
 //     on a rollover commit → ErrStaleResult, latches fatal.
 //   - Otherwise, generation and prev_hash advance.
-//
-// ComputeResult is opaque (unexported fields, accessor methods) and
-// chain-bound (cannot be committed on a different SinkChain). Callers that
-// need to serialize a result use EntryHash() and PrevHash(). The
-// unexported (sequence, generation, chain) fields make it impossible to
-// fabricate or cross-mix tokens outside the audit package.
 //
 // Contract — what remains the caller's responsibility:
 //
@@ -1169,6 +1165,23 @@ import (
 //     succeeded. SinkChain has no knowledge of durable state; Commit on a
 //     result whose write failed silently advances the in-memory chain
 //     past an entry that does not exist in storage.
+//
+// Lifecycle / serialization boundary:
+//
+// A ComputeResult is bound to the in-memory SinkChain instance that
+// produced it (chain-bound by pointer identity). It cannot be durably
+// stored and committed later: a SinkChain reconstructed via NewSinkChain
+// + Restore is a new instance and will reject prior tokens with
+// ErrCrossChainResult. This is intentional — Compute and Commit are
+// designed to be co-located in a single process, with the durable write
+// of the integrity metadata happening between them.
+//
+// EntryHash() and PrevHash() exist so that callers can persist the
+// integrity metadata alongside the payload for later VerifyHash. They are
+// NOT the input shape for reconstructing a Commit token across process
+// boundaries — there is no such API and no such need; the chain itself
+// remembers what it has committed via prev_hash, and VerifyHash
+// re-derives entry hashes from the persisted metadata.
 //
 // Recovery — a fatal latch makes the SinkChain instance unusable:
 //
@@ -1210,6 +1223,23 @@ type SinkChainState struct {
 // or fabricate one outside the audit package.
 //
 // Use EntryHash() and PrevHash() to inspect the values for serialization.
+//
+// Lifecycle / serialization boundary:
+//
+// A ComputeResult is bound to the in-memory SinkChain instance that
+// produced it (chain-bound by pointer identity). It cannot be durably
+// stored and committed later: a SinkChain reconstructed via NewSinkChain
+// + Restore is a new instance and will reject prior tokens with
+// ErrCrossChainResult. This is intentional — Compute and Commit are
+// designed to be co-located in a single process, with the durable write
+// of the integrity metadata happening between them.
+//
+// EntryHash() and PrevHash() exist so that callers can persist the
+// integrity metadata alongside the payload for later VerifyHash. They are
+// NOT the input shape for reconstructing a Commit token across process
+// boundaries — there is no such API and no such need; the chain itself
+// remembers what it has committed via prev_hash, and VerifyHash
+// re-derives entry hashes from the persisted metadata.
 type ComputeResult struct {
 	entryHash  string
 	prevHash   string
