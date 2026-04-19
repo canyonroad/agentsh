@@ -12040,17 +12040,108 @@ narrowed metric series. Three targets:
      was already triggering on missing-chain conditions (if the team
      had a log-side rule predating this migration). These need to be
      reconciled against the new structured-log field set
-     `{event_id, session_id, event_type, err=compact.ErrMissingChain}`
+     `{event_id, session_id, event_type, err}` where `err` is the
+     exact sentinel string `"compact.Encode: ev.Chain is nil; composite did not stamp"`
+     (the value of `compact.ErrMissingChain.Error()`)
      emitted by `AppendEvent`'s ERROR-severity log per spec
      §"Caller contract for propagated `compact.ErrMissingChain`"
      clause (a) — both to confirm existing log alerts still match
      and to avoid duplicate coverage when migrated metric alerts
-     pick the `log-based-alert` option in Step 2.
+     pick the `log-based-alert` option in Step 2. Disposition for
+     each row is decided in Step 3a below.
 
-Record each hit (file path + line + current intent) in
-`docs/superpowers/operator/wtp-monitoring-migration.md`. Use the
-following columns: `artifact_path`, `line`, `selector`, `intent`,
-`migration_decision` (filled in Steps 2/3), `owner`.
+Record each hit in
+`docs/superpowers/operator/wtp-monitoring-migration.md` using the
+following column schema (extended from the earlier metrics-only
+design so the artifact is reviewable end-to-end):
+
+  - `artifact_path` — file or system path to the alert/dashboard.
+  - `line` — line within that file (or panel ID, alert UID, saved
+    search ID for non-text artifacts).
+  - `artifact_type` — one of `prometheus_alert`,
+    `prometheus_recording_rule`, `grafana_panel`, `runbook_url`,
+    `log_alert`, `log_slo`, `log_saved_search`,
+    `third_party_dashboard`. Determines which step decides its
+    disposition (Step 2 / Step 3 / Step 3a).
+  - `selector` — current Prometheus selector / log query / panel
+    expression.
+  - `intent` — short description of what the alert/dashboard
+    surfaces today.
+  - `migration_decision` — filled in by Step 2 (missing-chain
+    metric refs), Step 3 (`reason="unknown"` refs), or Step 3a
+    (log-side artifacts). Allowed values are listed in those
+    steps.
+  - `replacement_selector_or_query` — the new selector / log
+    query / panel expression after migration. Required for any
+    decision other than `delete`.
+  - `verification_reference` — required for
+    `migration_decision: redirect-reconnect` (file path + line +
+    commit SHA + chosen reason label confirming caller teardown).
+    Required for `migration_decision: keep-log-alert` and
+    `migration_decision: update-log-alert` only when the
+    Step 1b field-preservation verification flagged the artifact's
+    log pipeline as needing attention. Empty cells are not
+    permitted on rows that require this column — Step 5 preflight
+    rejects them.
+  - `change_request_link` — PR / change request URL for the
+    monitoring update.
+  - `runbook_url_updated` — `yes` / `no` (filled in Step 4).
+  - `owner` — SRE/ops engineer responsible for this row.
+
+- [ ] **Step 1b: Verify log-pipeline field preservation**
+
+The `log-based-alert` option in Step 2 and the `keep-log-alert` /
+`update-log-alert` options in Step 3a both assume the production log
+pipeline preserves the structured-log field set
+`{event_id, session_id, event_type, err}` end-to-end from the WTP
+sink's `slog` emission to the log-aggregation system where the alert
+or saved search runs. If the pipeline collapses structured fields into
+a single `msg` blob, drops fields above a length threshold, or
+rewrites the `err` value (e.g. via a string-stripping pipeline stage
+that normalises punctuation), then a query that relies on field-level
+matching of the exact sentinel string
+`"compact.Encode: ev.Chain is nil; composite did not stamp"` will
+silently never match and the recommended migration path will be
+non-functional.
+
+For every log-aggregation system listed in the Step 1a inventory
+scope, the SRE/ops team MUST verify and record:
+
+  - **Field preservation check**: confirm that a representative
+    ERROR-severity log record produced by the WTP sink reaches the
+    log-aggregation system with all four fields (`event_id`,
+    `session_id`, `event_type`, `err`) preserved as separately
+    queryable structured fields, AND that the `err` field's value
+    contains the exact sentinel string
+    `"compact.Encode: ev.Chain is nil; composite did not stamp"`
+    byte-for-byte (no truncation, no string normalisation, no
+    punctuation rewrite). The check MAY be performed using a
+    synthetic injected record from a staging environment, OR by
+    inspecting an existing real record if one is present in the
+    sample window. Record the inspection method, the timestamp, and
+    the rendered field values in
+    `docs/superpowers/operator/wtp-monitoring-migration.md` under a
+    "Field-preservation verification" section per log-aggregation
+    system.
+  - **Fallback selector**: if the `err` field is NOT preserved as a
+    separate structured field but the rendered string IS present in
+    `msg`, record the fallback selector pattern (e.g. an `|=` or
+    `contains` match against `msg`) that any log-based alert MUST use
+    instead of `err = "..."`. Mark the affected log-aggregation
+    system `field_preservation: msg-only`.
+  - **Pipeline gap**: if neither the structured `err` field NOR the
+    rendered string survives end-to-end (e.g. the pipeline strips the
+    payload entirely or replaces it with a placeholder), mark the
+    affected log-aggregation system `field_preservation: broken`.
+    Rows in Step 2 that propose `migration_decision: log-based-alert`
+    against a `field_preservation: broken` system MUST be re-routed to
+    `redirect-reconnect` (with the verification recipe in Step 2) or
+    `delete`; selecting `log-based-alert` against a broken pipeline
+    is INVALID and Step 5 preflight rejects it.
+
+This verification MUST be completed AND recorded BEFORE Step 2's
+log-based-alert decisions are finalised. Without it, the recommended
+migration path may silently never fire.
 
 - [ ] **Step 2: Decide redirect-or-delete for every `wtp_dropped_missing_chain_total` reference**
 
@@ -12069,9 +12160,20 @@ error per spec §"Migration guidance: removed
     ERROR-severity structured log entry emitted by `AppendEvent`
     (clause (a) of the caller contract). Replace the metric-based
     alert with a log-based alert/SLO that matches the structured log
-    fields `{event_id, session_id, event_type, err=compact.ErrMissingChain}`
-    in the operator's log-aggregation stack (Loki / Splunk / Elastic /
-    Datadog Logs / etc.). Mark the row
+    fields `{event_id, session_id, event_type, err}` where `err` is
+    the exact sentinel string
+    `"compact.Encode: ev.Chain is nil; composite did not stamp"`
+    (the value of `compact.ErrMissingChain.Error()`) in the operator's
+    log-aggregation stack (Loki / Splunk / Elastic / Datadog Logs /
+    etc.). The Go identifier `compact.ErrMissingChain` is NOT a valid
+    log query predicate — log-aggregation systems match the rendered
+    string value, not the source-code symbol. The row's
+    `replacement_selector_or_query` cell MUST contain a query that
+    selects on this exact string (typically as an
+    equality / contains / `=~` regex match against the `err` field, or
+    against `msg` if the operator's log pipeline does not preserve
+    structured fields — see Step 1b for the field-preservation
+    verification recipe). Mark the row
     `migration_decision: log-based-alert` and capture the new alert
     selector (or query) in the tracking artifact alongside the PR /
     change request link that adds the log-based alert.
@@ -12179,6 +12281,65 @@ before Step 5. A queued-but-not-merged PR is INSUFFICIENT — the
 production monitoring environment must reflect the migration before
 the implementation team can flip the rollout flag.
 
+- [ ] **Step 3a: Decide disposition for every existing log-side artifact**
+
+For each row from Step 1 with `artifact_type` in
+`{log_alert, log_slo, log_saved_search}` (the third inventory target
+in Step 1), choose ONE of the four options below. The goal is to
+reconcile any pre-existing log-side coverage with the new
+`AppendEvent` structured-log contract from spec §"Caller contract for
+propagated `compact.ErrMissingChain`" so that operators do not end up
+with stale rules, duplicate coverage, or alert gaps after Step 2's
+log-based-alert decisions are merged.
+
+  - **Keep (no change required)**: the pre-existing log artifact
+    already matches the new structured-log fields
+    `{event_id, session_id, event_type, err}` with `err` containing
+    the exact sentinel string
+    `"compact.Encode: ev.Chain is nil; composite did not stamp"`
+    AND the Step 1b field-preservation verification confirmed the
+    artifact's log-aggregation system preserves the relevant fields.
+    Mark the row `migration_decision: keep-log-alert` and record the
+    Step 1b verification reference if the system was flagged
+    `field_preservation: msg-only` (so the kept selector pattern is
+    documented).
+  - **Update**: the pre-existing log artifact targets the right
+    semantics (composite-store regression / missing-chain) but its
+    selector predates the new structured-log fields and needs a
+    rewrite — typically because the older selector matched a free-text
+    log line that the new sink no longer emits, or because the field
+    set has changed. Rewrite the selector to match the new fields
+    (using the fallback selector pattern from Step 1b if the system
+    is flagged `field_preservation: msg-only`). Mark the row
+    `migration_decision: update-log-alert`, capture the new selector
+    in `replacement_selector_or_query`, and capture the
+    PR / change-request link.
+  - **Delete**: the pre-existing log artifact is now redundant —
+    e.g. its intent is fully covered by a Step 2
+    `log-based-alert` row that adds the canonical alert against the
+    new fields, OR the artifact was a coarse catch-all whose intent
+    no longer applies. Mark the row `migration_decision: delete-log-alert`
+    and capture the PR / change-request link that removes the rule.
+  - **Dedupe-with-Step 2 decision**: the pre-existing log artifact
+    overlaps with a Step 2 `log-based-alert` row but the SRE/ops team
+    wants a single canonical owner per intent. Pick whichever of the
+    two artifacts will be retained (the pre-existing log artifact OR
+    the Step-2-added log alert) and record the chosen winner in the
+    row's `replacement_selector_or_query` cell along with the
+    losing row's artifact path so the dedupe choice is auditable. Mark
+    the row `migration_decision: dedupe-log-alert` and capture the
+    PR / change-request link.
+
+A log-side row that proposes `keep-log-alert` or `update-log-alert`
+against a log-aggregation system flagged `field_preservation: broken`
+in Step 1b is INVALID and Step 5 preflight rejects it; re-route to
+`delete-log-alert` (or upgrade the log pipeline before retrying).
+
+All decisions MUST be made AND the migration PR / change request MUST
+be MERGED AND APPLIED to the production log-aggregation environment
+(log-alert/SLO/saved-search definitions reloaded so the new state is
+live) before Step 5. A queued-but-not-merged PR is INSUFFICIENT.
+
 - [ ] **Step 4: Update runbook URLs in alert annotations**
 
 Every alert touched in Steps 2 and 3 MUST have its `runbook_url`
@@ -12191,10 +12352,12 @@ in the spec — the SRE/ops team picks them up here. Mark each row
 
 - [ ] **Step 5: Verify with implementation team and sign off**
 
-Once Steps 1a, 1, 2, 3, and 4 are complete (every row in the migration
-tracking artifact has a `migration_decision`, a MERGED PR / change
-request that has been APPLIED to the production monitoring environment,
-and an updated runbook URL), open a tracking issue tagged
+Once Steps 1a, 1, 1b, 2, 3, 3a, and 4 are complete (every row in the
+migration tracking artifact has a `migration_decision`, every
+log-aggregation system has a recorded field-preservation verification
+result, every PR / change request is MERGED AND APPLIED to the
+production monitoring AND log-aggregation environments, and every
+runbook URL is updated), open a tracking issue tagged
 `wtp-monitoring-migration: ready` and request sign-off from the
 implementation team's preflight check.
 
@@ -12207,8 +12370,11 @@ phasing → Rollout precondition") MUST verify:
      pending. Acceptable redirect targets are documented in spec
      §"Migration guidance: removed `wtp_dropped_missing_chain_total`":
      a log-based alert/SLO matching the structured ERROR-log fields
-     `{event_id, session_id, event_type, err=compact.ErrMissingChain}`
-     for composite-store-regression intent (recommended; the only
+     `{event_id, session_id, event_type, err}` where `err` is the
+     exact sentinel string
+     `"compact.Encode: ev.Chain is nil; composite did not stamp"`
+     (the value of `compact.ErrMissingChain.Error()`) for
+     composite-store-regression intent (recommended; the only
      contractually guaranteed emission signal),
      `wtp_reconnects_total{reason="..."}` for composite-store-regression
      intent ONLY when the `redirect-reconnect` row in the tracking
@@ -12229,7 +12395,31 @@ phasing → Rollout precondition") MUST verify:
   2. Every `reason="unknown"` reference has an explicit decision AND
      the migration PR is MERGED AND DEPLOYED; the narrowed semantics
      are reflected in the live production alert/dashboard definitions.
-  3. Every touched alert annotation points at a stable runbook anchor
+  3. Every log-side row from Step 3a (`artifact_type` in
+     `{log_alert, log_slo, log_saved_search}`) has a recorded
+     `migration_decision` from
+     `{keep-log-alert, update-log-alert, delete-log-alert, dedupe-log-alert}`
+     AND its PR / change request is MERGED AND APPLIED to the
+     production log-aggregation environment (alert/SLO/saved-search
+     definitions reloaded). Any log-side row whose
+     `migration_decision` is `keep-log-alert` or `update-log-alert`
+     against a log-aggregation system flagged
+     `field_preservation: broken` in Step 1b MUST be rejected and
+     re-routed to `delete-log-alert` (or, if the log pipeline has
+     since been upgraded, the Step 1b verification MUST be re-run and
+     the new result recorded before sign-off).
+  4. The Step 1b field-preservation verification has been recorded
+     for EVERY log-aggregation system listed in the Step 1a inventory
+     scope. Every row in Step 2 with `migration_decision: log-based-alert`
+     and every row in Step 3a with `migration_decision: keep-log-alert`
+     or `migration_decision: update-log-alert` MUST point (via its
+     `replacement_selector_or_query` cell, or via an explicit
+     reference column) at a verification recorded against a
+     log-aggregation system whose flag is `field_preservation: ok` OR
+     `field_preservation: msg-only` (with a documented fallback
+     selector pattern). Rows that point at a `field_preservation: broken`
+     system, or that point at no system, MUST be rejected.
+  5. Every touched alert annotation points at a stable runbook anchor
      that exists in the spec, AND the change is live in production
      monitoring (runbook URLs in deployed alert annotations resolve to
      the intended spec anchors).
@@ -12238,26 +12428,31 @@ The preflight check MAY be automated as a one-off CI grep run against
 the monitoring repos (scoped to the inventory declared in Step 1a);
 if it is run by hand, the result MUST be recorded in the same tracking
 issue, including the timestamps at which each migration PR was merged
-and deployed to production monitoring.
+and deployed to production monitoring AND log-aggregation environments.
 
 #### Acceptance criteria
 
 - The migration tracking artifact at
   `docs/superpowers/operator/wtp-monitoring-migration.md` lists every
-  affected alert / panel / runbook URL with a recorded
-  `migration_decision`, and has an "Inventory scope" section at the
-  top signed off by an SRE/ops lead (per Step 1a).
+  affected alert / panel / runbook URL / log-side artifact with a
+  recorded `migration_decision`, has an "Inventory scope" section at
+  the top signed off by an SRE/ops lead (per Step 1a), AND has a
+  "Field-preservation verification" section recording the Step 1b
+  result for every log-aggregation system in the inventory scope.
 - Every migration PR / change request is **MERGED AND APPLIED to the
-  production monitoring environment** (Prometheus rule files reloaded,
-  Grafana panels updated and refreshed). A queued-but-unmerged PR,
-  or a merged-but-undeployed change, is INSUFFICIENT.
+  production monitoring AND log-aggregation environments** (Prometheus
+  rule files reloaded, Grafana panels updated and refreshed,
+  log-alert/SLO/saved-search definitions reloaded). A
+  queued-but-unmerged PR, or a merged-but-undeployed change, is
+  INSUFFICIENT.
 - The implementation team SHALL NOT begin production code rollout
   (i.e. flipping `audit.watchtower.enabled: true` on a production
-  fleet) until SRE/ops confirms Steps 1a, 1, 2, 3, and 4 are complete
-  AND the migration is LIVE in the production monitoring environment
-  (Prometheus rule files reloaded, Grafana panels updated and
-  refreshed), AND the preflight check has signed off in the tracking
-  issue.
+  fleet) until SRE/ops confirms Steps 1a, 1, 1b, 2, 3, 3a, and 4 are
+  complete AND the migration is LIVE in the production monitoring AND
+  log-aggregation environments (Prometheus rule files reloaded,
+  Grafana panels updated and refreshed, log-alert/SLO/saved-search
+  definitions reloaded), AND the preflight check has signed off in the
+  tracking issue.
 - This task does NOT block earlier code tasks (Task 1 through
   Task 27 land independently). It blocks ONLY the production
   rollout flag flip.
