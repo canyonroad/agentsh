@@ -1958,6 +1958,7 @@ package chain
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -2057,6 +2058,30 @@ func TestEncodeCanonical_SurrogatePair(t *testing.T) {
 		t.Errorf("surrogate pair wrong: %s", got)
 	}
 }
+
+func TestEncodeCanonical_InvalidUTF8Rejected(t *testing.T) {
+	rec := IntegrityRecord{PrevHash: "valid-prefix\x80invalid"}
+	_, err := EncodeCanonical(rec)
+	if err == nil {
+		t.Fatal("expected ErrInvalidUTF8 for invalid UTF-8 in PrevHash; got nil")
+	}
+	if !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("expected ErrInvalidUTF8, got %v", err)
+	}
+	rec2 := IntegrityRecord{ContextDigest: "good", EventHash: "good", KeyFingerprint: "k\x80", PrevHash: "good"}
+	_, err = EncodeCanonical(rec2)
+	if !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("expected ErrInvalidUTF8 for KeyFingerprint, got %v", err)
+	}
+}
+
+func TestComputeContextDigest_InvalidUTF8Rejected(t *testing.T) {
+	ctx := SessionContext{AgentID: "ok", SessionID: "s\x80bad"}
+	_, err := ComputeContextDigest(ctx)
+	if !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("expected ErrInvalidUTF8, got %v", err)
+	}
+}
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -2085,6 +2110,18 @@ import (
 // IntegrityRecord is the WTP integrity_record structure that gets canonical-
 // encoded and passed as the payload to audit.SinkChain.Compute. Field names
 // match the on-the-wire JSON object in CompactEvent.integrity (spec §6.3).
+//
+// Sequence-width contract (layered):
+//   - WTP wire format (this struct, the .proto definition) reserves the full
+//     uint64 sequence space.
+//   - audit.SinkChain.Compute consumes int64; values above math.MaxInt64
+//     overflow at that boundary.
+//   - The bounds check (0..math.MaxInt64) lives at the store-integration
+//     boundary in watchtower.Store.AppendEvent (Task 23), where ev.Chain.Sequence
+//     is converted before being passed to the chain.
+//   - The encoder in this package handles the full uint64 range so wire-level
+//     conformance vectors can exercise it; constraint enforcement is the
+//     boundary's job, not the encoder's.
 type IntegrityRecord struct {
 	FormatVersion  uint32
 	Sequence       uint64
@@ -2112,10 +2149,16 @@ type SessionContext struct {
 //
 // The digest changes on session establishment and on chain rotation; tests can
 // assert byte-equality against this output as part of the conformance suite.
-func ComputeContextDigest(ctx SessionContext) string {
-	canon := encodeContextCanonical(ctx)
+//
+// Returns ErrInvalidUTF8 if any SessionContext string field contains invalid
+// UTF-8. See EncodeCanonical for the cross-implementation rationale.
+func ComputeContextDigest(ctx SessionContext) (string, error) {
+	canon, err := encodeContextCanonical(ctx)
+	if err != nil {
+		return "", err
+	}
 	sum := sha256.Sum256(canon)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // ComputeEventHash returns the lowercase-hex SHA-256 of the canonical CompactEvent
@@ -2136,11 +2179,20 @@ package chain
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strconv"
 	"unicode/utf16"
 	"unicode/utf8"
 )
+
+// ErrInvalidUTF8 is returned by EncodeCanonical and ComputeContextDigest when a
+// string field contains invalid UTF-8. We reject (rather than substitute U+FFFD)
+// to keep canonical bytes — and therefore SHA-256 hashes — stable across
+// implementations. A Go encoder substituting U+FFFD while a Rust encoder
+// rejected would yield different hashes for the same input, breaking
+// cross-implementation chain verification.
+var ErrInvalidUTF8 = errors.New("chain: invalid utf-8 in string field")
 
 // EncodeCanonical produces the byte-exact canonical JSON encoding of an
 // IntegrityRecord per spec §6.4: keys sorted lexicographically, no insignificant
@@ -2148,34 +2200,43 @@ import (
 // scientific notation), strict JSON string escapes.
 //
 // This is the cross-implementation contract surface — a single byte difference
-// breaks every other implementation. Vectors live in chain/testdata/vectors.json
-// and are also published as the conformance suite at docs/spec/wtp/conformance/.
+// breaks every other implementation. Conformance vectors are added in Task 7
+// and will live at chain/testdata/vectors.json (also published at
+// docs/spec/wtp/conformance/) once that task lands.
+//
+// Returns ErrInvalidUTF8 if any string field contains invalid UTF-8. We reject
+// rather than silently substitute U+FFFD so canonical bytes stay identical
+// across Go, Rust, and TypeScript implementations.
 func EncodeCanonical(rec IntegrityRecord) ([]byte, error) {
+	for _, f := range []struct {
+		name string
+		v    string
+	}{
+		{"context_digest", rec.ContextDigest},
+		{"event_hash", rec.EventHash},
+		{"key_fingerprint", rec.KeyFingerprint},
+		{"prev_hash", rec.PrevHash},
+	} {
+		if !utf8.ValidString(f.v) {
+			return nil, fmt.Errorf("%w: field %q", ErrInvalidUTF8, f.name)
+		}
+	}
 	var buf bytes.Buffer
 	buf.WriteByte('{')
-	// Keys sorted lexicographically: context_digest, event_hash, format_version,
-	// generation, key_fingerprint, prev_hash, sequence.
 	writeKey(&buf, "context_digest", true)
 	writeStringValue(&buf, rec.ContextDigest)
-
 	writeKey(&buf, "event_hash", false)
 	writeStringValue(&buf, rec.EventHash)
-
 	writeKey(&buf, "format_version", false)
 	writeUint(&buf, uint64(rec.FormatVersion))
-
 	writeKey(&buf, "generation", false)
 	writeUint(&buf, uint64(rec.Generation))
-
 	writeKey(&buf, "key_fingerprint", false)
 	writeStringValue(&buf, rec.KeyFingerprint)
-
 	writeKey(&buf, "prev_hash", false)
 	writeStringValue(&buf, rec.PrevHash)
-
 	writeKey(&buf, "sequence", false)
 	writeUint(&buf, rec.Sequence)
-
 	buf.WriteByte('}')
 	return buf.Bytes(), nil
 }
@@ -2183,7 +2244,22 @@ func EncodeCanonical(rec IntegrityRecord) ([]byte, error) {
 // encodeContextCanonical does the same for SessionContext. Internal: only used
 // by ComputeContextDigest. Keys sorted: agent_id, agent_version, algorithm,
 // format_version, key_fingerprint, ocsf_version, session_id.
-func encodeContextCanonical(ctx SessionContext) []byte {
+func encodeContextCanonical(ctx SessionContext) ([]byte, error) {
+	for _, f := range []struct {
+		name string
+		v    string
+	}{
+		{"agent_id", ctx.AgentID},
+		{"agent_version", ctx.AgentVersion},
+		{"algorithm", ctx.Algorithm},
+		{"key_fingerprint", ctx.KeyFingerprint},
+		{"ocsf_version", ctx.OCSFVersion},
+		{"session_id", ctx.SessionID},
+	} {
+		if !utf8.ValidString(f.v) {
+			return nil, fmt.Errorf("%w: field %q", ErrInvalidUTF8, f.name)
+		}
+	}
 	var buf bytes.Buffer
 	buf.WriteByte('{')
 	writeKey(&buf, "agent_id", true)
@@ -2201,7 +2277,7 @@ func encodeContextCanonical(ctx SessionContext) []byte {
 	writeKey(&buf, "session_id", false)
 	writeStringValue(&buf, ctx.SessionID)
 	buf.WriteByte('}')
-	return buf.Bytes()
+	return buf.Bytes(), nil
 }
 
 func writeKey(buf *bytes.Buffer, k string, first bool) {
@@ -2227,14 +2303,12 @@ func writeUint(buf *bytes.Buffer, n uint64) {
 // writeStringEscapedBody writes s into buf with the canonical-JSON escape
 // rules: \", \\, \b/\f/\n/\r/\t, \uXXXX for everything below 0x20 and for
 // every non-ASCII rune (lowercase hex). Surrogate pairs encode as two \uXXXX
-// escapes per RFC 8259 §7.
+// escapes per RFC 8259 §7. Invalid UTF-8 has been rejected by the caller; no
+// replacement here.
 func writeStringEscapedBody(buf *bytes.Buffer, s string) {
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
 		switch {
-		case r == utf8.RuneError && size == 1:
-			// Invalid UTF-8 — emit the replacement character escape.
-			fmt.Fprintf(buf, `\u%04x`, 0xFFFD)
 		case r == '"':
 			buf.WriteString(`\"`)
 		case r == '\\':
@@ -2256,7 +2330,6 @@ func writeStringEscapedBody(buf *bytes.Buffer, s string) {
 		case r <= 0xFFFF:
 			fmt.Fprintf(buf, `\u%04x`, r)
 		default:
-			// Outside BMP — surrogate pair, lowercase hex.
 			hi, lo := utf16.EncodeRune(r)
 			fmt.Fprintf(buf, `\u%04x\u%04x`, hi, lo)
 		}
@@ -2268,7 +2341,7 @@ func writeStringEscapedBody(buf *bytes.Buffer, s string) {
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `go test ./internal/store/watchtower/chain/...`
-Expected: PASS, all 7 tests green.
+Expected: PASS, all 9 tests green (7 original + 2 UTF-8 rejection tests).
 
 - [ ] **Step 6: Cross-compile check**
 
@@ -2304,17 +2377,23 @@ Create `internal/store/watchtower/chain/vectors_test.go`:
 package chain
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
 type vectorEntry struct {
-	Name     string  `json:"name"`
-	Kind     string  `json:"kind"` // "integrity_record" | "context_digest"
-	Input    json.RawMessage `json:"input"`
-	Expected string  `json:"expected"` // canonical bytes for "integrity_record"; hex digest for "context_digest"
+	Name          string          `json:"name"`
+	Kind          string          `json:"kind"`           // "integrity_record" | "context_digest"
+	Input         json.RawMessage `json:"input,omitempty"` // for valid inputs, decoded as IntegrityRecord or SessionContext
+	InputB64      string          `json:"input_b64,omitempty"` // base64-encoded raw struct field bytes for negative cases (non-UTF-8)
+	InputField    string          `json:"input_field,omitempty"` // which field receives InputB64 (e.g., "PrevHash", "SessionID")
+	Expected      string          `json:"expected,omitempty"` // for valid: canonical bytes (integrity_record) or hex digest (context_digest)
+	ExpectedError string          `json:"expected_error,omitempty"` // for negative: sentinel name (e.g., "ErrInvalidUTF8")
 }
 
 func TestVectors(t *testing.T) {
@@ -2333,11 +2412,15 @@ func TestVectors(t *testing.T) {
 		t.Run(v.Name, func(t *testing.T) {
 			switch v.Kind {
 			case "integrity_record":
-				var rec IntegrityRecord
-				if err := json.Unmarshal(v.Input, &rec); err != nil {
-					t.Fatalf("decode input: %v", err)
+				rec, err := buildIntegrityRecord(v)
+				if err != nil {
+					t.Fatalf("build input: %v", err)
 				}
 				got, err := EncodeCanonical(rec)
+				if v.ExpectedError != "" {
+					assertExpectedError(t, err, v.ExpectedError)
+					return
+				}
 				if err != nil {
 					t.Fatalf("EncodeCanonical: %v", err)
 				}
@@ -2345,11 +2428,18 @@ func TestVectors(t *testing.T) {
 					t.Errorf("canonical mismatch\ngot:  %s\nwant: %s", got, v.Expected)
 				}
 			case "context_digest":
-				var ctx SessionContext
-				if err := json.Unmarshal(v.Input, &ctx); err != nil {
-					t.Fatalf("decode input: %v", err)
+				ctx, err := buildSessionContext(v)
+				if err != nil {
+					t.Fatalf("build input: %v", err)
 				}
-				got := ComputeContextDigest(ctx)
+				got, err := ComputeContextDigest(ctx)
+				if v.ExpectedError != "" {
+					assertExpectedError(t, err, v.ExpectedError)
+					return
+				}
+				if err != nil {
+					t.Fatalf("ComputeContextDigest: %v", err)
+				}
 				if got != v.Expected {
 					t.Errorf("digest mismatch\ngot:  %s\nwant: %s", got, v.Expected)
 				}
@@ -2357,6 +2447,85 @@ func TestVectors(t *testing.T) {
 				t.Fatalf("unknown vector kind %q", v.Kind)
 			}
 		})
+	}
+}
+
+// buildIntegrityRecord decodes either v.Input as a normal IntegrityRecord JSON,
+// or applies v.InputB64 (raw bytes including invalid UTF-8) to v.InputField.
+func buildIntegrityRecord(v vectorEntry) (IntegrityRecord, error) {
+	var rec IntegrityRecord
+	if len(v.Input) > 0 {
+		if err := json.Unmarshal(v.Input, &rec); err != nil {
+			return rec, fmt.Errorf("decode input: %w", err)
+		}
+	}
+	if v.InputB64 != "" {
+		raw, err := base64.StdEncoding.DecodeString(v.InputB64)
+		if err != nil {
+			return rec, fmt.Errorf("decode input_b64: %w", err)
+		}
+		switch v.InputField {
+		case "PrevHash":
+			rec.PrevHash = string(raw)
+		case "EventHash":
+			rec.EventHash = string(raw)
+		case "ContextDigest":
+			rec.ContextDigest = string(raw)
+		case "KeyFingerprint":
+			rec.KeyFingerprint = string(raw)
+		default:
+			return rec, fmt.Errorf("unknown input_field %q", v.InputField)
+		}
+	}
+	return rec, nil
+}
+
+// buildSessionContext mirrors buildIntegrityRecord for SessionContext.
+func buildSessionContext(v vectorEntry) (SessionContext, error) {
+	var ctx SessionContext
+	if len(v.Input) > 0 {
+		if err := json.Unmarshal(v.Input, &ctx); err != nil {
+			return ctx, fmt.Errorf("decode input: %w", err)
+		}
+	}
+	if v.InputB64 != "" {
+		raw, err := base64.StdEncoding.DecodeString(v.InputB64)
+		if err != nil {
+			return ctx, fmt.Errorf("decode input_b64: %w", err)
+		}
+		switch v.InputField {
+		case "SessionID":
+			ctx.SessionID = string(raw)
+		case "AgentID":
+			ctx.AgentID = string(raw)
+		case "AgentVersion":
+			ctx.AgentVersion = string(raw)
+		case "OCSFVersion":
+			ctx.OCSFVersion = string(raw)
+		case "Algorithm":
+			ctx.Algorithm = string(raw)
+		case "KeyFingerprint":
+			ctx.KeyFingerprint = string(raw)
+		default:
+			return ctx, fmt.Errorf("unknown input_field %q", v.InputField)
+		}
+	}
+	return ctx, nil
+}
+
+// assertExpectedError checks that err matches the named sentinel.
+func assertExpectedError(t *testing.T, err error, sentinelName string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected %s, got nil", sentinelName)
+	}
+	switch sentinelName {
+	case "ErrInvalidUTF8":
+		if !errors.Is(err, ErrInvalidUTF8) {
+			t.Fatalf("expected ErrInvalidUTF8, got %v", err)
+		}
+	default:
+		t.Fatalf("vectors.json names unknown sentinel %q", sentinelName)
 	}
 }
 ```
@@ -2401,6 +2570,22 @@ Create `internal/store/watchtower/chain/testdata/vectors.json`:
     "kind": "context_digest",
     "input": {"SessionID":"01HXAVD2N5VX3CZQK7Q7QWNYKE","AgentID":"agentsh","AgentVersion":"1.0.0","OCSFVersion":"1.8.0","FormatVersion":2,"Algorithm":"hmac-sha256","KeyFingerprint":"sha256:aabbccdd"},
     "expected": "PLACEHOLDER_REPLACE_ME"
+  },
+  {
+    "name": "negative_invalid_utf8_in_prev_hash",
+    "kind": "integrity_record",
+    "input": {"FormatVersion":2,"Sequence":1,"Generation":0},
+    "input_b64": "dmFsaWQtcHJlZml4gGludmFsaWQ=",
+    "input_field": "PrevHash",
+    "expected_error": "ErrInvalidUTF8"
+  },
+  {
+    "name": "negative_invalid_utf8_in_session_id",
+    "kind": "context_digest",
+    "input": {"FormatVersion":2,"AgentID":"agentsh","AgentVersion":"1.0.0","OCSFVersion":"1.8.0","Algorithm":"hmac-sha256","KeyFingerprint":"sha256:test"},
+    "input_b64": "c4BiYWQ=",
+    "input_field": "SessionID",
+    "expected_error": "ErrInvalidUTF8"
   }
 ]
 ```
@@ -2421,7 +2606,10 @@ case "context_digest":
     if err := json.Unmarshal(v.Input, &ctx); err != nil {
         t.Fatalf("decode input: %v", err)
     }
-    got := ComputeContextDigest(ctx)
+    got, err := ComputeContextDigest(ctx)
+    if err != nil {
+        t.Fatalf("ComputeContextDigest: %v", err)
+    }
     t.Logf("digest for %s: %s", v.Name, got)
     if got != v.Expected {
         t.Errorf("digest mismatch\ngot:  %s\nwant: %s", got, v.Expected)
@@ -2434,7 +2622,7 @@ Expected: FAIL but the log line prints the actual digest. Copy that hex string i
 - [ ] **Step 5: Run vectors test to verify it passes**
 
 Run: `go test ./internal/store/watchtower/chain/ -run TestVectors`
-Expected: PASS, all 5 sub-tests green.
+Expected: PASS, all 7 sub-tests green (5 positive + 2 negative).
 
 - [ ] **Step 6: Cross-compile check**
 
@@ -7320,6 +7508,7 @@ package watchtower_test
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -7365,6 +7554,30 @@ func TestAppendEvent_StampsChainBeforeWAL(t *testing.T) {
 		t.Fatalf("AppendEvent: %v", err)
 	}
 }
+
+func TestAppendEvent_DropsSequenceOverflow(t *testing.T) {
+	s := mkStore(t)
+	ev := types.Event{
+		Type:      "exec",
+		SessionID: "s",
+		Chain:     &types.ChainState{Sequence: math.MaxUint64, Generation: 1},
+	}
+	if err := s.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatalf("AppendEvent should drop silently for overflow, got err: %v", err)
+	}
+	// Verify counter incremented and WAL has no record (no segment created).
+	if got := s.metrics.DroppedSequenceOverflow(); got != 1 {
+		t.Errorf("expected 1 sequence-overflow drop, got %d", got)
+	}
+}
+
+func TestAppendEvent_DropsInvalidUTF8(t *testing.T) {
+	// Construct a store whose SessionContext or other chain input contains
+	// invalid UTF-8 — surfaces ErrInvalidUTF8 from chain.Compute.
+	// Specific construction depends on Phase 10 wiring; see chain.ErrInvalidUTF8
+	// for the contract surface.
+	t.Skip("skeleton — concrete construction added when chain wrapper lands in Task 22")
+}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -7383,6 +7596,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
@@ -7405,6 +7620,15 @@ func (s *Store) AppendEvent(_ context.Context, ev types.Event) error {
 	if ev.Chain == nil {
 		return errors.New("watchtower: ev.Chain not stamped (composite must allocate)")
 	}
+	if ev.Chain.Sequence > math.MaxInt64 {
+		s.metrics.IncDroppedSequenceOverflow()
+		slog.WarnContext(ctx, "watchtower: dropping event — sequence > math.MaxInt64",
+			"session_id", s.opts.SessionID,
+			"sequence", ev.Chain.Sequence,
+			"generation", ev.Chain.Generation,
+		)
+		return nil
+	}
 
 	// 1. Encode payload (no chain yet — leaves Integrity nil).
 	ce, err := compact.Encode(s.opts.Mapper, ev)
@@ -7423,6 +7647,16 @@ func (s *Store) AppendEvent(_ context.Context, ev types.Event) error {
 		Payload:    payload,
 	})
 	if err != nil {
+		if errors.Is(err, chain.ErrInvalidUTF8) {
+			s.metrics.IncDroppedInvalidUTF8()
+			slog.WarnContext(ctx, "watchtower: dropping event — invalid UTF-8 in chain field",
+				"session_id", s.opts.SessionID,
+				"sequence", ev.Chain.Sequence,
+				"generation", ev.Chain.Generation,
+				"err", err,
+			)
+			return nil
+		}
 		return fmt.Errorf("chain compute: %w", err)
 	}
 

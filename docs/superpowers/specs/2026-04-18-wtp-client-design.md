@@ -264,8 +264,9 @@ func EncodeCanonical(rec IntegrityRecord) ([]byte, error)
 
 // ComputeContextDigest returns the SHA-256 of the canonical encoding of the
 // SessionContext fields the spec lists. Bound into every event hash in the
-// session/segment.
-func ComputeContextDigest(ctx SessionContext) string
+// session/segment. Returns ErrInvalidUTF8 if any string field contains
+// invalid UTF-8 (see "Canonical encoding" subsection for rationale).
+func ComputeContextDigest(ctx SessionContext) (string, error)
 
 // ComputeEventHash returns sha256(canonical_compact_event_bytes). Used to
 // populate IntegrityRecord.EventHash before passing the canonical-encoded
@@ -285,7 +286,9 @@ The sequence value participates in three different width contracts as it flows t
 | Phase 0 audit chain (`audit.SinkChain.Compute(formatVersion int, sequence int64, ...)`) | `int64` | 0..math.MaxInt64 |
 | Composite-store source (`ev.Chain.Sequence`, `pkg/types.ChainState`) | `uint64` | 0..math.MaxInt64 (constrained by Phase 0 spec) |
 
-The constraint surfaces at one place: `watchtower.Store.AppendEvent` (Task 22) bounds-checks `ev.Chain.Sequence <= math.MaxInt64` before converting to int64 and calling into the chain. Sequences exceeding the cap are dropped with a counter increment and a structured log line; they do NOT crash or panic. The encoder in `chain/canonical.go` accepts the full uint64 range so wire-format conformance vectors can exercise it — encoder correctness is independent of the operational constraint.
+The constraint surfaces at one place: `watchtower.Store.AppendEvent` (Task 23, Phase 10) bounds-checks `ev.Chain.Sequence <= math.MaxInt64` before converting to int64 and calling into the chain. Sequences exceeding the cap are dropped (counter `wtp_dropped_sequence_overflow_total`, structured log) **before WAL admission** — no segment write, no WAL accounting impact, no replay considerations. Drops do NOT crash or panic. The encoder in `chain/canonical.go` accepts the full uint64 range so wire-format conformance vectors can exercise it; constraint enforcement is the boundary's job.
+
+The same boundary handles `chain.ErrInvalidUTF8` from `EncodeCanonical` / `ComputeContextDigest`: counter `wtp_dropped_invalid_utf8_total`, structured log, no WAL admission, no chain advance (the SinkChain Compute call returns the error before mutating prev_hash). Both drop paths leave a sequence gap visible to the server, since other sinks (JSONL, OTEL) have already committed the allocated sequence — whether to surface that gap as a `TransportLoss` marker (and with what reason code) is deferred to Phase 8 when the per-sink batching layer lands.
 
 ### Canonical encoding — non-negotiable byte parity
 
@@ -301,6 +304,12 @@ func EncodeCanonical(rec IntegrityRecord) ([]byte, error)
 
 The encoder is exhaustively tested against `chain/testdata/vectors.json`, which is also published as the cross-implementation conformance suite for the spec. Vectors include UTF-8 edge cases (escaped non-ASCII, surrogate pairs), large numbers near uint64 max, and empty strings.
 
+**Negative vectors.** Invalid UTF-8 cannot be expressed as a JSON string, so negative cases use a different schema: `{"name", "kind", "input": {<other fields>}, "input_b64": "<base64-encoded raw bytes>", "input_field": "<field name>", "expected_error": "ErrInvalidUTF8"}`. The test harness applies the decoded bytes to the named field after parsing the rest of `input` normally. Cross-language implementations either:
+1. Implement the same `input_b64` schema (preferred — keeps the conformance suite a single file), or
+2. Skip negative entries and verify rejection via per-language unit tests (acceptable — invalid-UTF-8 detection is rarely a hot path and language-native tests catch the same regressions).
+
+Choice (1) is recommended; choice (2) is documented to avoid blocking implementations whose JSON loaders reject `input_b64` schemas.
+
 #### Canonical-format versioning
 
 `IntegrityRecord.FormatVersion` is the canonical-encoding version. Any of the following changes MUST bump it in the same commit:
@@ -314,10 +323,12 @@ The version is consumed by verifiers to pick the right canonical-encoder and rej
 ### Context digest (§6.4.6)
 
 ```go
-func ComputeContextDigest(ctx SessionContext) string
+func ComputeContextDigest(ctx SessionContext) (string, error)
 ```
 
 Computed once on `SessionInit`, again on `SessionUpdate`, and again on chain rotation. Bound into every event hash in that segment. Implemented as SHA-256 of the canonical encoding of the SessionContext fields the spec lists.
+
+Callers MUST handle the error path: an `ErrInvalidUTF8` return at SessionInit means the session cannot proceed (the agent supplied an unrepresentable identifier); the connect attempt fails fast and the operator gets a structured log line. Mid-session calls (rotation, SessionUpdate) treat `ErrInvalidUTF8` the same way — the rotation aborts and the existing chain stays bound to the prior context.
 
 ### What this package does NOT do
 
@@ -633,6 +644,8 @@ All exposed via slog at debug + as structured counters consumable by the existin
 - `wtp_wal_bytes` (gauge)
 - `wtp_ack_high_watermark` (gauge)
 - `wtp_dropped_missing_chain_total` (counter; increments when `ev.Chain == nil`)
+- `wtp_dropped_invalid_utf8_total` (counter; increments when `chain.ErrInvalidUTF8` surfaces from the canonical encoder for any record-level encode — record is dropped, structured log emitted with fields {session_id, sequence, generation, field})
+- `wtp_dropped_sequence_overflow_total` (counter; increments when `ev.Chain.Sequence > math.MaxInt64` at the store-integration boundary — record is dropped before WAL admission, structured log emitted with fields {session_id, sequence, generation})
 - `wtp_wal_corruption_total` (counter; CRC corruption events during WAL replay)
 - `wtp_send_latency_seconds` (histogram, per batch)
 
