@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -595,22 +596,19 @@ func TestSinkChain_Commit_CrossChainResultLatchesFatal(t *testing.T) {
 	}
 }
 
-// TestComputeResult_FieldsAreUnexported documents the compile-time guarantee
-// that ComputeResult has no exported data fields — only accessor methods.
-// External packages cannot mutate or fabricate a ComputeResult; the build
-// itself rejects such attempts. This test exists to catch accidental
-// re-exports of the fields and to exercise the EntryHash()/PrevHash()
-// accessors at runtime.
-func TestComputeResult_FieldsAreUnexported(t *testing.T) {
-	c, _ := newTestSinkChain(t)
-	r, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"k":"v"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.EntryHash() == "" {
-		t.Fatal("EntryHash() returned empty")
-	}
-	if r.PrevHash() != "" {
-		t.Fatal("PrevHash() should be empty for genesis entry")
+// TestComputeResult_HasNoExportedDataFields enforces the structural invariant
+// that ComputeResult has zero exported data fields via reflection. Accessor
+// methods (EntryHash, PrevHash) are intentionally the only public surface; if
+// anyone re-introduces an exported data field (e.g., renames `entryHash` to
+// `EntryHash`), this test fails. The opacity of the token — the property that
+// callers cannot mutate or fabricate one outside the audit package — depends
+// directly on this invariant.
+func TestComputeResult_HasNoExportedDataFields(t *testing.T) {
+	typ := reflect.TypeOf(ComputeResult{})
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if f.IsExported() {
+			t.Errorf("ComputeResult has exported data field %q (type %s) — must remain unexported to preserve token opacity", f.Name, f.Type)
+		}
 	}
 }
