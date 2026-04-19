@@ -7659,7 +7659,7 @@ func TestNew_RejectsStubMapperInProduction(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected New to reject StubMapper")
 	}
-	if !strings.Contains(err.Error(), "stub mapper") {
+	if !strings.Contains(err.Error(), "StubMapper") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -7705,6 +7705,52 @@ func TestNew_RejectsShortHMACSecret(t *testing.T) {
 		t.Errorf("error must mention key length: %v", err)
 	}
 }
+
+// TestNew_RejectsUntypedNilMapper verifies validate() rejects an unset
+// Mapper field with a clear "mapper is required" error, before any other
+// validation can produce a confusing message. This is the first branch of
+// the three-branch mapper check (see options.go validate()).
+func TestNew_RejectsUntypedNilMapper(t *testing.T) {
+	dir := t.TempDir()
+	allocator := audit.NewSequenceAllocator(0, 0)
+	_, err := watchtower.New(context.Background(), watchtower.Options{
+		WALDir:          dir,
+		Mapper:          nil, // explicit untyped nil
+		Allocator:       allocator,
+		AgentID:         "a", SessionID: "s",
+		HMACKeyID:       "k1",
+		HMACSecret:      testHMACKey(),
+		BatchMaxRecords: 1, BatchMaxBytes: 4096, BatchMaxAge: time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "mapper is required") {
+		t.Fatalf("expected 'mapper is required' error, got: %v", err)
+	}
+}
+
+// TestNew_RejectsTypedNilMapper verifies validate() rejects a typed-nil
+// pointer wrapped in the compact.Mapper interface — e.g. a caller writing
+// `var m *compact.StubMapper; opts.Mapper = m`. The interface value's
+// dynamic type is non-nil so `o.Mapper == nil` returns false; the reflect
+// check catches it. Without this branch a typed-nil non-stub pointer would
+// slip past validate() and panic on the first AppendEvent call.
+func TestNew_RejectsTypedNilMapper(t *testing.T) {
+	dir := t.TempDir()
+	allocator := audit.NewSequenceAllocator(0, 0)
+	var typedNil *compact.StubMapper
+	_, err := watchtower.New(context.Background(), watchtower.Options{
+		WALDir:          dir,
+		Mapper:          typedNil, // typed nil — dynamic type is *StubMapper, value is nil
+		Allocator:       allocator,
+		AgentID:         "a", SessionID: "s",
+		HMACKeyID:       "k1",
+		HMACSecret:      testHMACKey(),
+		BatchMaxRecords: 1, BatchMaxBytes: 4096, BatchMaxAge: time.Second,
+		AllowStubMapper: true, // even with this on, typed-nil should still fail
+	})
+	if err == nil || !strings.Contains(err.Error(), "mapper is required") {
+		t.Fatalf("expected 'mapper is required' (typed-nil) error, got: %v", err)
+	}
+}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -7722,6 +7768,7 @@ package watchtower
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
@@ -7832,11 +7879,30 @@ func (o *Options) validate() error {
 	if o.WALDir == "" {
 		return errors.New("watchtower: WALDir is required")
 	}
+	// Mapper rejection has three branches that MUST run in this order:
+	//   (1) untyped nil — `o.Mapper == nil` catches the zero interface value.
+	//   (2) typed-nil pointer — a caller writing
+	//       `var m *compact.StubMapper; opts.Mapper = m` produces an interface
+	//       value with non-nil type and nil dynamic value. `o.Mapper == nil`
+	//       returns false, so we use reflect to detect it. This must run
+	//       BEFORE IsStubMapper so the error message points the caller at the
+	//       real bug (a nil mapper) rather than the secondary issue (the stub
+	//       type). Without this branch the stub-rejection in (3) would still
+	//       fire for *StubMapper(nil), but a non-stub typed-nil pointer
+	//       (e.g. (*FakeMapper)(nil) in a test) would slip through and panic
+	//       on the first AppendEvent.
+	//   (3) test-only StubMapper — compact.IsStubMapper matches both value
+	//       and pointer forms (StubMapper{}, *StubMapper, and the typed-nil
+	//       *StubMapper case redundantly covered by (2)). Gated by
+	//       AllowStubMapper so unit tests can opt in.
 	if o.Mapper == nil {
-		return errors.New("watchtower: Mapper is required")
+		return errors.New("watchtower: mapper is required")
+	}
+	if rv := reflect.ValueOf(o.Mapper); rv.Kind() == reflect.Ptr && rv.IsNil() {
+		return errors.New("watchtower: mapper is required (got typed-nil pointer)")
 	}
 	if !o.AllowStubMapper && compact.IsStubMapper(o.Mapper) {
-		return errors.New("watchtower: stub mapper not allowed in production (set AllowStubMapper for tests)")
+		return errors.New("watchtower: test-only StubMapper not permitted in production (set AllowStubMapper for tests)")
 	}
 	if o.Allocator == nil {
 		return errors.New("watchtower: Allocator is required")

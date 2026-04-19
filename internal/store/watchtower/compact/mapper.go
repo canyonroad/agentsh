@@ -36,7 +36,16 @@ type Mapper interface {
 
 // StubMapper is a placeholder Mapper that emits class=0/activity=0 with the
 // raw events.Event JSON as payload. It exists to keep the WTP package's own
-// unit tests independent of Phase 1; production wiring rejects it.
+// unit tests independent of Phase 1; production wiring rejects it via
+// IsStubMapper inside Store.validate().
+//
+// IMPORTANT — the stub's Payload is intentionally JSON-encoded events.Event,
+// NOT a protobuf-encoded OCSF class payload. This makes the stub suitable
+// only for tests that assert control flow, sequencing, chain integrity, or
+// downstream WAL/transport behavior — i.e. tests where the payload bytes are
+// opaque. Tests that assert wire-format compatibility, OCSF class semantics,
+// or protobuf decode behavior MUST inject a real or per-test fake Mapper that
+// returns class-correct protobuf bytes.
 type StubMapper struct{}
 
 func (StubMapper) Map(ev types.Event) (MappedEvent, error) {
@@ -47,9 +56,24 @@ func (StubMapper) Map(ev types.Event) (MappedEvent, error) {
 	return MappedEvent{OCSFClassUID: 0, OCSFActivityID: 0, Payload: b}, nil
 }
 
-// IsStubMapper reports whether m is the StubMapper. Used by Store.validate()
-// to reject test-only mappers in production.
+// IsStubMapper reports whether m is the test-only StubMapper, in either value
+// or pointer form. Used by Store.validate() to reject the stub in production.
+//
+// Accepts: compact.StubMapper{}, &compact.StubMapper{}, and a typed-nil
+//          (*StubMapper)(nil) wrapped in a Mapper interface.
+// Rejects: untyped nil (handled separately by validate()).
+//
+// The typed-nil case matters because a caller writing
+// `var m *compact.StubMapper; New(..., m, ...)` produces an interface value
+// whose dynamic type is *StubMapper but whose dynamic value is nil. A
+// value-only assertion (`_, ok := m.(StubMapper)`) would miss it; the type
+// switch below matches the dynamic type without dereferencing, so the stub
+// is rejected even before a nil deref can occur inside Map().
 func IsStubMapper(m Mapper) bool {
-	_, ok := m.(StubMapper)
-	return ok
+	switch m.(type) {
+	case StubMapper, *StubMapper:
+		return true
+	default:
+		return false
+	}
 }
