@@ -845,7 +845,7 @@ type AuditWatchtowerConfig struct {
 	Enabled       bool   `yaml:"enabled"`
 	Endpoint      string `yaml:"endpoint"`        // host:port
 	SessionID     string `yaml:"session_id"`      // optional; auto-generated ULID if empty
-	StateDir      string `yaml:"state_dir"`       // default GetUserStateDir() + "/wtp" ($XDG_STATE_HOME/agentsh/wtp on Linux)
+	StateDir      string `yaml:"state_dir"`       // default GetUserStateDir() + "/wtp"; per-OS path differs (XDG_STATE_HOME on Linux, LOCALAPPDATA on Windows). See defaultWatchtowerStateDir.
 	EphemeralMode bool   `yaml:"ephemeral_mode"`
 
 	TLS       WatchtowerTLSConfig       `yaml:"tls"`
@@ -1013,10 +1013,10 @@ func (w *AuditWatchtowerConfig) applyDefaults() {
 }
 
 // defaultWatchtowerStateDir returns the default state directory for WTP.
-// Uses GetUserStateDir() (XDG-aware on Linux, equivalent to UserDataDir on
-// macOS/Windows where there is no canonical state directory) joined with
-// "wtp", and falls back to the OS temp dir if a user state directory cannot
-// be determined.
+// Uses GetUserStateDir() and falls back to the OS temp dir if a user state
+// directory cannot be determined. See GetUserStateDir() for the per-OS
+// contract — on Windows the state directory is intentionally non-roaming
+// (LOCALAPPDATA), distinct from GetUserDataDir which roams via APPDATA.
 // Cross-platform: uses filepath.Join.
 func defaultWatchtowerStateDir() string {
 	base := GetUserStateDir()

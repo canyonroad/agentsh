@@ -455,7 +455,7 @@ type AuditWatchtowerConfig struct {
 	Enabled       bool   `yaml:"enabled"`
 	Endpoint      string `yaml:"endpoint"`        // host:port
 	SessionID     string `yaml:"session_id"`      // optional; auto-generated ULID if empty
-	StateDir      string `yaml:"state_dir"`       // default $XDG_STATE_HOME/agentsh/wtp
+	StateDir      string `yaml:"state_dir"`       // default per-OS state dir + "/wtp" (Linux: $XDG_STATE_HOME/agentsh/wtp; macOS: ~/Library/Application Support/agentsh/wtp; Windows: %LOCALAPPDATA%\agentsh\wtp — non-roaming)
 	EphemeralMode bool   `yaml:"ephemeral_mode"`
 
 	TLS       WatchtowerTLSConfig       `yaml:"tls"`

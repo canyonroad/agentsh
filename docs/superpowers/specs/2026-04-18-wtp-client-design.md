@@ -561,7 +561,7 @@ type Config struct {
 
     Endpoint   string            // host:port
     SessionID  string            // optional; auto-generated ULID if empty
-    StateDir   string            // default: $XDG_STATE_HOME/agentsh/wtp
+    StateDir   string            // default: per-OS state dir + "/wtp" (Linux: $XDG_STATE_HOME/agentsh/wtp; macOS: ~/Library/Application Support/agentsh/wtp; Windows: %LOCALAPPDATA%\agentsh\wtp — non-roaming, distinct from APPDATA)
     EphemeralMode bool
 
     TLS struct {
