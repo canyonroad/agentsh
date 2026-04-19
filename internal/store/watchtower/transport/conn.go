@@ -5,9 +5,16 @@ import (
 )
 
 // Conn is the abstraction over a bidirectional WTP gRPC stream so that
-// transport tests can substitute a fake. It is NOT safe for concurrent
-// use: the transport state machine performs all Send/Recv calls from a
-// single goroutine.
+// transport tests can substitute a fake.
+//
+// Concurrency contract (mirrors gRPC's ClientStream):
+//   - A single sender goroutine and a single receiver goroutine MAY
+//     operate concurrently — i.e. one Send may overlap one Recv.
+//   - Multiple concurrent Senders are NOT safe.
+//   - Multiple concurrent Receivers are NOT safe.
+//   - CloseSend MUST NOT race with a concurrent Send. Callers are
+//     responsible for sequencing Send and CloseSend on the sender
+//     goroutine.
 type Conn interface {
 	Send(msg *wtpv1.ClientMessage) error
 	Recv() (*wtpv1.ServerMessage, error)
