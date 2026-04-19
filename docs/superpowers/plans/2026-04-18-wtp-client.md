@@ -6320,10 +6320,12 @@ six invariants:
 - Create: `internal/store/watchtower/transport/batcher.go`
 - Create: `internal/store/watchtower/transport/state_live.go`
 - Test: `internal/store/watchtower/transport/batcher_test.go`
-- Modify: `proto/canyonroad/wtp/v1/validate.go` (Step 4 — add `ValidationReason` enum (including `ReasonUnknown` for the forward-compat unknown-oneof case), `AllValidationReasons() []ValidationReason` copy-returning getter (consumed by Task 22a Step 4 parity test; getter form, not a mutable exported slice), and `ValidationError` typed classifier so receivers consume `errors.As(err, &ve)` instead of grepping the validator's formatted message; `ValidationError.Error()` returns ONLY the Reason string per spec §"Invalid-frame log sanitization" defense-in-depth rule; ValidateEventBatch and ValidateSessionInit MUST return `*ValidationError` for every failure path including the forward-compat unknown-oneof case)
+- Modify: `proto/canyonroad/wtp/v1/validate.go` (Step 4 — add `ValidationReason` enum (including `ReasonUnknown` for the forward-compat unknown-oneof case), `AllValidationReasons() []ValidationReason` copy-returning getter (consumed by Task 22b's cross-task parity test; getter form, not a mutable exported slice), and `ValidationError` typed classifier so receivers consume `errors.As(err, &ve)` instead of grepping the validator's formatted message; `ValidationError.Error()` returns ONLY the Reason string per spec §"Invalid-frame log sanitization" defense-in-depth rule; ValidateEventBatch and ValidateSessionInit MUST return `*ValidationError` for every failure path including the forward-compat unknown-oneof case)
 - Test: `proto/canyonroad/wtp/v1/validate_reason_test.go` (table-driven coverage that each input maps to its enum constant; `errors.As` and `errors.Is(err, ErrInvalidFrame)` both work)
 
-**Prerequisites:** Task 22a Step 4 (the metrics-side `WTPInvalidFrameReason` enum + the `MetricsOnlyReasons()` getter, defined in `internal/metrics/wtp.go`) MUST be completed before Task 17 Step 4a executes — Step 4a's receiver wiring snippet uses `metrics.WTPInvalidFrameReasonClassifierBypass` and `metrics.WTPInvalidFrameReason(...)` cast, both of which depend on those constants existing in the `metrics` package. If executing the plan strictly in numeric order, jump to Task 22a Step 4 (define the `WTPInvalidFrameReason` enum + the validator-shared and metrics-only getter helpers), commit, then return to Task 17 Step 4a. The dependency is one-way: Task 17 Step 4 (the proto-side `ValidationReason` enum + `AllValidationReasons()` getter) is the input to Task 22a's parity test, but Task 17 Step 4a is the consumer of Task 22a's enum, so Step 4a is the step that blocks on Task 22a — Steps 1–4 of Task 17 do not.
+**Prerequisites:** Task 22a Step 4 (the metrics-side `WTPInvalidFrameReason` enum + the `MetricsOnlyReasons()` getter, defined in `internal/metrics/wtp.go`) MUST be completed before Task 17 Step 4a executes — Step 4a's receiver wiring snippet uses `metrics.WTPInvalidFrameReasonClassifierBypass` and `metrics.WTPInvalidFrameReason(...)` cast, both of which depend on those constants existing in the `metrics` package. If executing the plan strictly in numeric order, jump to Task 22a Step 4 (define the `WTPInvalidFrameReason` enum + the validator-shared and metrics-only getter helpers), commit, then return to Task 17 Step 4a. The dependency is one-way: Task 17 Step 4 (the proto-side `ValidationReason` enum + `AllValidationReasons()` getter) is the input to Task 22b's cross-task parity test, but Task 17 Step 4a is the consumer of Task 22a's enum, so Step 4a is the step that blocks on Task 22a — Steps 1–4 of Task 17 do not.
+
+**Downstream consumer:** Task 22b ("Cross-task parity integration") consumes `wtpv1.AllValidationReasons()` defined in this task's Step 4 to assert metrics/proto enum parity. Any change to the proto-side `ValidationReason` enum (adding/removing a constant, renaming a string value) MUST trigger a re-run of Task 22b's `TestWTPInvalidFrameReason_ParityWithValidator` to surface drift between the proto and metrics packages. Task 22b's test is the canonical enforcement mechanism for the duplicated-but-byte-equal contract documented in spec §"Frame validation and forward compatibility".
 
 - [ ] **Step 1: Write the failing tests for each invariant**
 
@@ -6664,7 +6666,7 @@ func encodeBatchMessage(_ []wal.Record) (*wtpv1.ClientMessage, error) {
 Step 4a relies on the receiver classifying validator failures into a fixed `wtp_dropped_invalid_frame_total{reason}` enum. Today `proto/canyonroad/wtp/v1/validate.go` exposes only generic sentinels (`ErrInvalidFrame`, `ErrPayloadTooLarge`) constructed via `fmt.Errorf("%w: <peer-supplied details>", ErrXxx, ...)` — receivers would have to grep the formatted message to recover the reason, which both leaks peer-supplied bytes (the wrapped detail string embeds byte counts and oneof discriminators) into metric cardinality and is fragile. This step adds a typed classifier so receivers consume the reason via `errors.As(err, &ve)` and never touch the formatted message in the hot path.
 
 Files to modify (Go-code change — small but real):
-- Modify: `proto/canyonroad/wtp/v1/validate.go` — add `ValidationReason` enum (including `ReasonUnknown` for the forward-compat unknown-oneof case), `ValidationError` typed struct (with `Error() string` returning ONLY the canonical Reason value, never peer-derived Inner detail — see spec §"Invalid-frame log sanitization" defense-in-depth rule), `AllValidationReasons() []ValidationReason` copy-returning getter (exported so the metrics-side parity test in Task 22a Step 4 can range over it; the getter returns a fresh copy on each call so callers cannot mutate the underlying enumeration — STABLE PRODUCTION API per spec §"Stable production API"), refactor `ValidateEventBatch` and `ValidateSessionInit` to return `&ValidationError{Reason: ..., Inner: fmt.Errorf(...)}` for EVERY failure path (the forward-compat unknown-oneof default branch returns `&ValidationError{Reason: ReasonUnknown, Inner: fmt.Errorf("unknown body oneof case")}` — bare `fmt.Errorf("%w: ...", ErrInvalidFrame, ...)` returns from the validator are a CONTRACT VIOLATION per spec). Constants are EXACTLY six canonical names — `ReasonEventBatchBodyUnset`, `ReasonEventBatchCompressionUnspecified`, `ReasonEventBatchCompressionMismatch`, `ReasonSessionInitAlgorithmUnspecified`, `ReasonPayloadTooLarge`, `ReasonUnknown` — NO aliases (see the "ALIASES ARE FORBIDDEN" comment in the constant block below).
+- Modify: `proto/canyonroad/wtp/v1/validate.go` — add `ValidationReason` enum (including `ReasonUnknown` for the forward-compat unknown-oneof case), `ValidationError` typed struct (with `Error() string` returning ONLY the canonical Reason value, never peer-derived Inner detail — see spec §"Invalid-frame log sanitization" defense-in-depth rule), `AllValidationReasons() []ValidationReason` copy-returning getter (exported so the metrics-side parity test in Task 22b can range over it; the getter returns a fresh copy on each call so callers cannot mutate the underlying enumeration — STABLE PRODUCTION API per spec §"Stable production API"), refactor `ValidateEventBatch` and `ValidateSessionInit` to return `&ValidationError{Reason: ..., Inner: fmt.Errorf(...)}` for EVERY failure path (the forward-compat unknown-oneof default branch returns `&ValidationError{Reason: ReasonUnknown, Inner: fmt.Errorf("unknown body oneof case")}` — bare `fmt.Errorf("%w: ...", ErrInvalidFrame, ...)` returns from the validator are a CONTRACT VIOLATION per spec). Constants are EXACTLY six canonical names — `ReasonEventBatchBodyUnset`, `ReasonEventBatchCompressionUnspecified`, `ReasonEventBatchCompressionMismatch`, `ReasonSessionInitAlgorithmUnspecified`, `ReasonPayloadTooLarge`, `ReasonUnknown` — NO aliases (see the "ALIASES ARE FORBIDDEN" comment in the constant block below).
 - Create: `proto/canyonroad/wtp/v1/validate_reason_test.go` — TDD-first table-driven tests asserting each enum constant maps to the correct input, `errors.As(err, &ve)` works, `errors.Is(err, ErrInvalidFrame)` / `errors.Is(err, ErrPayloadTooLarge)` still work for legacy callers, AND `ValidationError.Error()` returns ONLY the Reason string (no peer-derived Inner content) so naive `slog.Error("...", "err", ve)` call sites cannot leak peer bytes.
 - Create: `proto/canyonroad/wtp/v1/validate_unknown_test.go` — declared `package wtpv1` (same package, NOT `_test`) so it can implement the sealed `isEventBatch_Body()` oneof interface marker, which is unexported per the protobuf-generated code in `wtp.pb.go`. Defines an unexported synthetic `unknownBodyForTest` type and exercises the `default:` branch of the body-switch in `ValidateEventBatch`. See the "Validator unknown-oneof test seam" subsection in TDD step 1 below for the exact code. This is the only way to test the unknown-oneof code path without rebuilding the proto with a fresh oneof arm.
 
@@ -6904,7 +6906,7 @@ const (
 // these are EXPLICITLY DISALLOWED because:
 //   (a) AllValidationReasons() (below) is the canonical enumeration of
 //       reason values and aliases inflate its length without adding
-//       semantic content (the parity test in Task 22a Step 4 silently
+//       semantic content (the parity test in Task 22b silently
 //       deduped via map and masked the duplication),
 //   (b) validator code MUST reference the canonical name (e.g.,
 //       ReasonEventBatchBodyUnset, NOT ReasonNilBatch) so reading the
@@ -6948,7 +6950,7 @@ func (e *ValidationError) Is(target error) bool { return errors.Is(e.Inner, targ
 //
 // Exactly one entry per canonical reason — no aliases (see the
 // "ALIASES ARE FORBIDDEN" comment above the const block). The parity
-// test in Task 22a Step 4 asserts exact slice-length equality between
+// test in Task 22b asserts exact slice-length equality between
 // this slice and the metrics-side validator-shared set, so any future
 // drift toward aliases will fail the test.
 var allValidationReasons = []ValidationReason{
@@ -9729,16 +9731,238 @@ Edits:
 
 If a callsite outside `internal/metrics` invokes `IncDroppedMissingChain`, the build will fail with `IncDroppedMissingChain undefined` — verify with `rg -n "IncDroppedMissingChain|wtp_dropped_missing_chain_total" internal/ pkg/ cmd/` after the deletion. The expected result is no matches in code; references in `docs/superpowers/plans/` are historical and explicitly superseded (see the admonitions above the Task 3 snippets) and in `docs/superpowers/specs/2026-04-18-wtp-client-design.md` appear only in the migration-guidance paragraph — do not touch the docs from this step.
 
-- [ ] **Step 4: Enum parity check (validator vs metrics)**
+- [ ] **Step 4: Define metrics-side enum + getter helpers (parity test deferred to Task 22b)**
 
-**Cross-task scheduling note (back-reference to Task 17 Step 4a):** This step's enum and getter helpers (`WTPInvalidFrameReason`, `WTPInvalidFrameReasonClassifierBypass`, `MetricsOnlyReasons()`, `ValidationReasons()`) are consumed by Task 17 Step 4a (the receiver-side defense-in-depth wiring snippet). Schedule Task 22a Step 4 BEFORE Task 17 Step 4a executes; the dependency is one-way (Task 22a's parity test consumes `wtpv1.AllValidationReasons()` from Task 17 Step 4, but that does NOT block Task 22a Step 4's own definition of the metrics-side enum — the parity test just won't pass until both Step 4s have landed). Task 17's Prerequisites section calls out this ordering for implementers following the plan strictly in order.
+**Cross-task scheduling note (back-reference to Task 17 Step 4a):** This step's enum and getter helpers (`WTPInvalidFrameReason`, `WTPInvalidFrameReasonClassifierBypass`, `MetricsOnlyReasons()`, `ValidationReasons()`) are consumed by Task 17 Step 4a (the receiver-side defense-in-depth wiring snippet). Schedule Task 22a Step 4 BEFORE Task 17 Step 4a executes; the dependency is one-way (Task 22b's parity test consumes `wtpv1.AllValidationReasons()` from Task 17 Step 4 AND `metrics.ValidationReasons()` / `metrics.MetricsOnlyReasons()` from THIS step, but that does NOT block Task 22a Step 4's own definition of the metrics-side enum — Task 22a Step 4 has NO cross-package dependency and ships independently). Task 17's Prerequisites section calls out this ordering for implementers following the plan strictly in order.
 
-The proto-side `wtpv1.ValidationReason` enum (Task 17 Step 4) and the metrics-side `WTPInvalidFrameReason` enum (defined above in this task) are intentionally duplicated string sets — the metrics package does NOT import the proto package, but the string values for validator-emitted reasons MUST stay byte-equal so that `WTPInvalidFrameReason(ve.Reason)` always lands in `wtpInvalidFrameReasonsValid`. Without an enforcement mechanism the two enums will drift silently the first time someone adds a reason to one side and forgets the other. The metrics-only `decompress_error` and `classifier_bypass` reasons are intentionally NOT mirrored on the proto side (the former is emitted downstream of the validator by streaming decompression; the latter is emitted only by the receiver-side defense-in-depth fallback and by definition has no validator counterpart).
+**Parity test deferred to Task 22b.** The cross-package parity test (`TestWTPInvalidFrameReason_ParityWithValidator`) lives in Task 22b ("Cross-task parity integration"), NOT in this step. Task 22a Step 4 ships ONLY the metrics-internal enum, getter helpers, and an internal-only test that asserts the getter contracts on the metrics side (no proto dependency). The four-invariant parity test (forward, reverse, disjoint, coverage) MUST wait until BOTH Task 17 Step 4 AND Task 22a Step 4 have landed — splitting it into Task 22b makes the cross-task dependency explicit and avoids declaring this task "complete" while one of its tests cannot yet pass.
 
-Add a Go test `TestWTPInvalidFrameReason_ParityWithValidator` to a NEW file `internal/metrics/wtp_parity_test.go` (NOT to the existing `internal/metrics/wtp_test.go`) declared as **`package metrics_test`** (external test package), asserting FOUR invariants in one test function. The file MUST be a NEW file and MUST be an external test package — do NOT merge into `wtp_test.go` — because:
+The proto-side `wtpv1.ValidationReason` enum (Task 17 Step 4) and the metrics-side `WTPInvalidFrameReason` enum (defined in THIS step) are intentionally duplicated string sets — the metrics package does NOT import the proto package, but the string values for validator-emitted reasons MUST stay byte-equal so that `WTPInvalidFrameReason(ve.Reason)` always lands in `wtpInvalidFrameReasonsValid`. Task 22b is the canonical enforcement mechanism for that contract — see its task-level description for the four-invariant parity test, which catches drift the moment someone adds a reason to one side and forgets the other. The metrics-only `decompress_error` and `classifier_bypass` reasons are intentionally NOT mirrored on the proto side (the former is emitted downstream of the validator by streaming decompression; the latter is emitted only by the receiver-side defense-in-depth fallback and by definition has no validator counterpart).
+
+This step's acceptance is INTERNAL to the metrics package: define the `WTPInvalidFrameReason` constants, the `wtpInvalidFrameReasonsValid` map, the `wtpInvalidFrameReasonsEmitOrder` slice, and the three exported getters (`ValidWTPInvalidFrameReasons`, `ValidationReasons`, `MetricsOnlyReasons`). Add `internal/metrics/wtp_test.go` (`package metrics`) tests asserting (a) every constant in `validationReasonsShared` appears in `wtpInvalidFrameReasonsValid`; (b) every constant in `metricsOnlyReasons` appears in `wtpInvalidFrameReasonsValid`; (c) `validationReasonsShared` and `metricsOnlyReasons` are disjoint (set-intersection is empty); (d) `validationReasonsShared ∪ metricsOnlyReasons == wtpInvalidFrameReasonsValid` (coverage). These four assertions are SEPARATE from the cross-task parity test in Task 22b — they exercise the metrics-side internal contract using package-private state, and they pass with NO proto dependency. The cross-task parity test in Task 22b uses the EXPORTED getters defined here and additionally asserts byte-equality with the proto-side `wtpv1.AllValidationReasons()`.
+
+Add the `metrics.ValidWTPInvalidFrameReasons`, `metrics.ValidationReasons`, and `metrics.MetricsOnlyReasons` helpers to `internal/metrics/wtp.go`. All return fresh copies on each call so callers cannot mutate the package-private state:
+
+```go
+// ValidWTPInvalidFrameReasons returns a copy of the set of metrics-side
+// frame-validation reasons that are recognized by IncDroppedInvalidFrame.
+// Returned as a map[WTPInvalidFrameReason]struct{} so parity tests (and
+// any future consumer) can range over keys without touching the
+// unexported wtpInvalidFrameReasonsValid table directly. The returned
+// map is a fresh copy — mutating it does NOT affect the package state.
+func ValidWTPInvalidFrameReasons() map[WTPInvalidFrameReason]struct{} {
+	out := make(map[WTPInvalidFrameReason]struct{}, len(wtpInvalidFrameReasonsValid))
+	for k := range wtpInvalidFrameReasonsValid {
+		out[k] = struct{}{}
+	}
+	return out
+}
+
+// validationReasonsShared backs the ValidationReasons() getter. It is
+// the SUBSET of WTPInvalidFrameReason values that are also returned by
+// wtpv1.AllValidationReasons() — i.e., the validator-emitted reasons
+// shared across the proto and metrics packages. Adding a new validator-
+// shared reason MUST also append it here AND to allValidationReasons
+// in proto/canyonroad/wtp/v1/validate.go.
+var validationReasonsShared = []WTPInvalidFrameReason{
+	WTPInvalidFrameReasonEventBatchBodyUnset,
+	WTPInvalidFrameReasonEventBatchCompressionUnspec,
+	WTPInvalidFrameReasonEventBatchCompressionMismatch,
+	WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
+	WTPInvalidFrameReasonPayloadTooLarge,
+	WTPInvalidFrameReasonUnknown,
+}
+
+// ValidationReasons returns a fresh copy of the validator-emitted
+// (SHARED with wtpv1.AllValidationReasons()) frame-validation reasons.
+// Consumers (notably the parity test) range over this slice to assert
+// the proto-side and metrics-side enums stay in sync. Returns a fresh
+// copy on each call so callers cannot mutate the underlying enumeration.
+// STABLE PRODUCTION API.
+func ValidationReasons() []WTPInvalidFrameReason {
+	out := make([]WTPInvalidFrameReason, len(validationReasonsShared))
+	copy(out, validationReasonsShared)
+	return out
+}
+
+// metricsOnlyReasons backs the MetricsOnlyReasons() getter. It is the
+// SUBSET of WTPInvalidFrameReason values that have NO proto-side
+// counterpart — emitted by code paths downstream of the validator
+// (decompress_error, by streaming decompression) OR by the receiver-
+// side defense-in-depth guard (classifier_bypass, when errors.As
+// against *wtpv1.ValidationError returns false). Adding a new metrics-
+// only reason MUST append it here, NOT to validationReasonsShared.
+var metricsOnlyReasons = []WTPInvalidFrameReason{
+	WTPInvalidFrameReasonClassifierBypass,
+	WTPInvalidFrameReasonDecompressError,
+}
+
+// MetricsOnlyReasons returns a fresh copy of the metrics-only frame-
+// validation reasons (those without a proto-side wtpv1.ValidationReason
+// counterpart). Today: classifier_bypass and decompress_error. Returns
+// a fresh copy on each call so callers cannot mutate the underlying
+// enumeration. STABLE PRODUCTION API.
+func MetricsOnlyReasons() []WTPInvalidFrameReason {
+	out := make([]WTPInvalidFrameReason, len(metricsOnlyReasons))
+	copy(out, metricsOnlyReasons)
+	return out
+}
+```
+
+This step ships the metrics-internal enum + getters + four metrics-internal assertion tests (forward-shared, reverse-shared, disjoint, coverage — all using `package metrics` and exercising the unexported `wtpInvalidFrameReasonsValid` map directly). The cross-task four-invariant parity test `TestWTPInvalidFrameReason_ParityWithValidator` (which additionally asserts byte-equality with `wtpv1.AllValidationReasons()`) is deferred to Task 22b — that test cannot pass until BOTH this step AND Task 17 Step 4 have landed, so making it part of Task 22b avoids declaring this task complete while a documented test is still red.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `go test ./internal/metrics/...`
+Expected: PASS — all existing tests + the ten new tests added in Step 1 (`TestWTPMetrics_DroppedInvalidUTF8`, `TestWTPMetrics_DroppedSequenceOverflow`, `TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons`, `TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons`, `TestWTPMetrics_SessionFailureReasonValidationAndEscape`, `TestWTPMetrics_DroppedInvalidMapper`, `TestWTPMetrics_DroppedInvalidTimestamp`, `TestWTPMetrics_DroppedMapperFailure`, `TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons`, `TestIncDroppedInvalidFrame_InvalidLabelLogsAndCollapses`) plus the four metrics-internal assertion tests added in Step 4 (forward-shared, reverse-shared, disjoint, coverage — all asserting against `wtpInvalidFrameReasonsValid` and `validationReasonsShared`/`metricsOnlyReasons` from inside `package metrics`). The legacy `TestWTPMetrics_AppendAndExpose` test from Task 3 has its `wtp_dropped_missing_chain_total` reference removed per Step 3.5. **Parity test deferred to Task 22b** — `TestWTPInvalidFrameReason_ParityWithValidator` (the four-invariant test that compares the metrics-side getters against the proto-side `wtpv1.AllValidationReasons()`) ships as part of Task 22b, NOT here, because it depends on Task 17 Step 4 (the proto-side enum + getter); this task verifies ONLY metrics-internal tests.
+
+- [ ] **Step 6: Cross-compile check**
+
+Run: `GOOS=windows go build ./...`
+Expected: no errors.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add internal/metrics/wtp.go internal/metrics/wtp_test.go internal/metrics/metrics.go
+git commit -m "feat(metrics): add sink-failure counters for WTP lifecycle and per-record drops"
+```
+
+- [ ] **Step 8: Roborev**
+
+Run `/roborev-design-review` and address findings.
+
+---
+
+### Task 22b: Cross-task parity integration
+
+This task is a coordination point that spans the proto package (Task 17 Step 4) and the metrics package (Task 22a Step 4). Its purpose is to host the four-invariant parity test that asserts byte-equality between `wtpv1.AllValidationReasons()` (proto-side) and `metrics.ValidationReasons()` (metrics-side) PLUS the disjointness/coverage contract for `metrics.MetricsOnlyReasons()`. It also hosts the cross-package `TestClassifierBypassWARN_RateLimited` test that exercises the shared rate-limiter wired between Task 17 Step 4a's receiver-side WARN path and Task 22a's metrics-side WARN path.
+
+**Prerequisites:**
+- Task 17 Step 4 — defines `wtpv1.AllValidationReasons()` (proto-side getter). The parity test consumes this getter.
+- Task 22a Step 4 — defines `metrics.ValidationReasons()`, `metrics.MetricsOnlyReasons()`, `metrics.ValidWTPInvalidFrameReasons()` (metrics-side getters). The parity test consumes these getters.
+- Both prerequisite steps MUST be complete before Task 22b executes; the parity test will not compile (missing exports) without both, and `TestClassifierBypassWARN_RateLimited` cannot exercise both code paths without both wirings landing.
+
+**Files:**
+- Create: `internal/metrics/wtp_parity_test.go` (`package metrics_test` — external test package)
+- Create: `internal/metrics/wtp_ratelimit.go` (the shared rate-limiter helper consumed by both `IncDroppedInvalidFrame`'s metrics-side WARN path and Task 17 Step 4a's receiver-side WARN path)
+- Modify: `internal/metrics/wtp.go` (`IncDroppedInvalidFrame` invokes the shared rate-limiter before emitting the metrics-side WARN)
+- Modify: any new receiver-wiring file under `internal/store/watchtower/transport/` that emits the receiver-side `non-typed frame validation error` WARN (it MUST consume the same shared rate-limiter from `internal/metrics`)
+
+- [ ] **Step 1: Define the shared rate-limiter helper**
+
+Add `internal/metrics/wtp_ratelimit.go`:
+
+```go
+// File: internal/metrics/wtp_ratelimit.go
+// Package: metrics
+//
+// classifierBypassLimiter is the SHARED package-level token bucket used by
+// BOTH classifier_bypass WARN paths:
+//  - the metrics-side `invalid invalid-frame reason label` WARN emitted
+//    by IncDroppedInvalidFrame when a caller passes an invalid label;
+//  - the receiver-side `non-typed frame validation error` WARN emitted by
+//    Task 17 Step 4a's defense-in-depth guard.
+//
+// Sharing a single bucket between both paths bounds total log volume to
+// AT MOST 10 emissions per minute per process — a single bursty caller
+// in either path cannot starve the other path's diagnostic. Rate
+// `rate.Every(6*time.Second)` with burst 1 yields ~10/min on average;
+// the limiter starts full so the first emission per process burst is
+// always allowed (providing a useful diagnostic for genuinely rare
+// misuses while preventing a hot-path bug from flooding logs).
+//
+// The COUNTER (`wtp_dropped_invalid_frame_total{reason="classifier_bypass"}`)
+// tracks the true volume regardless of throttling — operators read the
+// metric for the rate signal and the (sampled) WARN log for the
+// diagnostic discriminator (`err_type` for receiver path, `raw_reason`
+// for metrics path). When the limiter throttles a WARN, the suppressed
+// event is NOT counted by any auxiliary "logs dropped" metric per spec
+// §"WARN rate-limit (both `classifier_bypass` paths)".
+//
+// This rate-limiter applies ONLY to classifier_bypass WARN paths. Other
+// validator-emitted-reason WARN logs follow the existing per-frame
+// logging contract (those are gated by reconnect/Goaway, so log volume
+// is bounded by the peer disconnecting).
+package metrics
+
+import (
+	"time"
+
+	"golang.org/x/time/rate"
+)
+
+// classifierBypassLimiter is package-level so both code paths
+// (IncDroppedInvalidFrame and the receiver-side WARN) share one bucket.
+// Initialized to a 6-second period (= ~10/min on average) with burst 1
+// (= the first emission per process is always allowed; subsequent
+// emissions wait for a token). NewLimiter returns a limiter that starts
+// full per golang.org/x/time/rate semantics.
+var classifierBypassLimiter = rate.NewLimiter(rate.Every(6*time.Second), 1)
+
+// AllowClassifierBypassWARN returns true if a classifier_bypass WARN log
+// MAY be emitted now (the limiter has a token), false if the caller
+// should suppress this WARN. The caller MUST still increment the
+// `wtp_dropped_invalid_frame_total{reason="classifier_bypass"}` counter
+// regardless of the return value — the metric is the canonical volume
+// signal; the WARN is sampled diagnostic.
+func AllowClassifierBypassWARN() bool {
+	return classifierBypassLimiter.Allow()
+}
+```
+
+The `golang.org/x/time/rate` dependency is already in `go.mod` (used by `internal/store/watchtower/transport` for backoff in Task 18); no new module additions required.
+
+- [ ] **Step 2: Wire the rate-limiter into both WARN code paths**
+
+In `internal/metrics/wtp.go`, modify `IncDroppedInvalidFrame` so the WARN emission is gated by `AllowClassifierBypassWARN()`:
+
+```go
+func (w *WTPMetrics) IncDroppedInvalidFrame(reason WTPInvalidFrameReason) {
+	if w == nil || w.c == nil {
+		return
+	}
+	if _, ok := wtpInvalidFrameReasonsValid[reason]; !ok {
+		// Emit the WARN only if the rate-limiter allows; the metric
+		// counter ALWAYS increments regardless so the true volume is
+		// visible in /metrics even when the WARN is sampled.
+		if AllowClassifierBypassWARN() {
+			slog.Warn("invalid invalid-frame reason label",
+				slog.String("raw_reason", string(reason)),
+				slog.String("reason", string(WTPInvalidFrameReasonClassifierBypass)),
+			)
+		}
+		reason = WTPInvalidFrameReasonClassifierBypass
+	}
+	ptr, _ := w.c.wtpDroppedInvalidFrameByReason.LoadOrStore(string(reason), &atomic.Uint64{})
+	ptr.(*atomic.Uint64).Add(1)
+}
+```
+
+In the receiver wiring added by Task 17 Step 4a, gate the receiver-side WARN identically:
+
+```go
+var ve *wtpv1.ValidationError
+if !errors.As(err, &ve) {
+	if metrics.AllowClassifierBypassWARN() {
+		slogger.Warn("non-typed frame validation error",
+			slog.String("err_type", fmt.Sprintf("%T", err)),
+			slog.String("reason", "classifier_bypass"))
+	}
+	metrics.IncDroppedInvalidFrame(metrics.WTPInvalidFrameReasonClassifierBypass)
+	return // close stream, etc.
+}
+metrics.IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason(ve.Reason))
+```
+
+The metric counter increment happens unconditionally; the WARN is rate-limited.
+
+- [ ] **Step 3: Write the cross-task parity test**
+
+Create `internal/metrics/wtp_parity_test.go` (NOT in `internal/metrics/wtp_test.go` — see "external test package" rationale below) declared as **`package metrics_test`** (external test package), asserting the FOUR cross-task invariants in one test function. The file MUST be a NEW file and MUST be an external test package because:
 - The existing `internal/metrics/wtp_test.go` is `package metrics` (internal test) — it tests the package's unexported state. Code in `package metrics` cannot use `metrics.` qualifiers (those are only valid for external consumers), so a parity test written with `metrics.ValidationReasons()` / `metrics.WTPInvalidFrameReason` qualifiers WILL NOT COMPILE inside `wtp_test.go`.
 - Parity is inherently a cross-package concern (it validates that two packages — `wtpv1` and `metrics` — stay aligned). An external test package can use BOTH `metrics.` and `wtpv1.` qualifiers naturally without import cycles.
-- Other tests in `internal/metrics/wtp_test.go` (which exercise unexported emit-order slices, valid maps, and atomic counter wiring) stay in `package metrics` and continue to work.
+- The four metrics-INTERNAL assertion tests added in Task 22a Step 4 (forward-shared / reverse-shared / disjoint / coverage against the unexported `wtpInvalidFrameReasonsValid` table) stay in `package metrics` and continue to work — Task 22b adds the FOUR cross-package invariants on top.
 
 Required file scaffolding for `internal/metrics/wtp_parity_test.go`:
 
@@ -9762,7 +9986,7 @@ import (
 // names throughout)
 ```
 
-The four assertions:
+The four cross-task assertions:
 
 1. **Forward parity (exact set equality)**: every value in `wtpv1.AllValidationReasons()` MUST appear in `metrics.ValidationReasons()` (which returns a copy of just the validator-emitted SHARED set, NOT including metrics-only reasons), and vice versa. Use sorted comparison for a clear failure message that names the offending constant. ALSO assert `len(wtpv1.AllValidationReasons()) == len(metrics.ValidationReasons())` so any future drift toward aliases (multiple constants pointing at the same string value) fails fast — without the slice-length check, a map-based dedupe silently masks alias duplication.
 2. **Reverse parity (exact set equality)**: every value in `metrics.ValidationReasons()` MUST appear in `wtpv1.AllValidationReasons()`. (Same assertion as forward direction, but framed from the metrics side; both directions must hold for set equality.)
@@ -9846,80 +10070,64 @@ func TestWTPInvalidFrameReason_ParityWithValidator(t *testing.T) {
 }
 ```
 
-Add the `metrics.ValidWTPInvalidFrameReasons`, `metrics.ValidationReasons`, and `metrics.MetricsOnlyReasons` helpers to `internal/metrics/wtp.go`. All return fresh copies on each call so callers cannot mutate the package-private state:
+- [ ] **Step 4: Add `TestClassifierBypassWARN_RateLimited` cross-package burst test**
+
+Add to `internal/metrics/wtp_parity_test.go` (same external test package — the test exercises the cross-package contract that BOTH WARN paths share one limiter):
 
 ```go
-// ValidWTPInvalidFrameReasons returns a copy of the set of metrics-side
-// frame-validation reasons that are recognized by IncDroppedInvalidFrame.
-// Returned as a map[WTPInvalidFrameReason]struct{} so parity tests (and
-// any future consumer) can range over keys without touching the
-// unexported wtpInvalidFrameReasonsValid table directly. The returned
-// map is a fresh copy — mutating it does NOT affect the package state.
-func ValidWTPInvalidFrameReasons() map[WTPInvalidFrameReason]struct{} {
-	out := make(map[WTPInvalidFrameReason]struct{}, len(wtpInvalidFrameReasonsValid))
-	for k := range wtpInvalidFrameReasonsValid {
-		out[k] = struct{}{}
+// TestClassifierBypassWARN_RateLimited verifies that the shared
+// classifierBypassLimiter caps WARN log emissions at ~10/min while the
+// counter still tracks true volume. Pumps 100 invalid-label calls in a
+// tight loop and asserts:
+//   - the counter increments exactly 100 times (always-on),
+//   - the WARN log captures AT MOST 11 entries (10 from the steady-state
+//     bucket plus 1 from the initial-burst token),
+//   - the test does NOT depend on wall-clock waits — token bucket
+//     starts full, so the first emission lands immediately and
+//     subsequent emissions are throttled until the next token arrives.
+//
+// This test asserts the contract documented in spec §"WARN rate-limit
+// (both `classifier_bypass` paths)" — that both code paths share ONE
+// bucket so a hot-path bug in either path cannot drown the other path's
+// diagnostic.
+func TestClassifierBypassWARN_RateLimited(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	c := metrics.New()
+	const burst = 100
+	for i := 0; i < burst; i++ {
+		c.WTP().IncDroppedInvalidFrame(metrics.WTPInvalidFrameReason("not-a-canonical-reason"))
 	}
-	return out
-}
 
-// validationReasonsShared backs the ValidationReasons() getter. It is
-// the SUBSET of WTPInvalidFrameReason values that are also returned by
-// wtpv1.AllValidationReasons() — i.e., the validator-emitted reasons
-// shared across the proto and metrics packages. Adding a new validator-
-// shared reason MUST also append it here AND to allValidationReasons
-// in proto/canyonroad/wtp/v1/validate.go.
-var validationReasonsShared = []WTPInvalidFrameReason{
-	WTPInvalidFrameReasonEventBatchBodyUnset,
-	WTPInvalidFrameReasonEventBatchCompressionUnspec,
-	WTPInvalidFrameReasonEventBatchCompressionMismatch,
-	WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
-	WTPInvalidFrameReasonPayloadTooLarge,
-	WTPInvalidFrameReasonUnknown,
-}
+	// (1) Counter ALWAYS increments — sampling does not affect the metric.
+	if got := c.WTP().DroppedInvalidFrame(metrics.WTPInvalidFrameReasonClassifierBypass); got != burst {
+		t.Errorf("DroppedInvalidFrame(classifier_bypass) = %d, want %d (counter MUST track true volume regardless of WARN throttling)", got, burst)
+	}
 
-// ValidationReasons returns a fresh copy of the validator-emitted
-// (SHARED with wtpv1.AllValidationReasons()) frame-validation reasons.
-// Consumers (notably the parity test) range over this slice to assert
-// the proto-side and metrics-side enums stay in sync. Returns a fresh
-// copy on each call so callers cannot mutate the underlying enumeration.
-// STABLE PRODUCTION API.
-func ValidationReasons() []WTPInvalidFrameReason {
-	out := make([]WTPInvalidFrameReason, len(validationReasonsShared))
-	copy(out, validationReasonsShared)
-	return out
-}
-
-// metricsOnlyReasons backs the MetricsOnlyReasons() getter. It is the
-// SUBSET of WTPInvalidFrameReason values that have NO proto-side
-// counterpart — emitted by code paths downstream of the validator
-// (decompress_error, by streaming decompression) OR by the receiver-
-// side defense-in-depth guard (classifier_bypass, when errors.As
-// against *wtpv1.ValidationError returns false). Adding a new metrics-
-// only reason MUST append it here, NOT to validationReasonsShared.
-var metricsOnlyReasons = []WTPInvalidFrameReason{
-	WTPInvalidFrameReasonClassifierBypass,
-	WTPInvalidFrameReasonDecompressError,
-}
-
-// MetricsOnlyReasons returns a fresh copy of the metrics-only frame-
-// validation reasons (those without a proto-side wtpv1.ValidationReason
-// counterpart). Today: classifier_bypass and decompress_error. Returns
-// a fresh copy on each call so callers cannot mutate the underlying
-// enumeration. STABLE PRODUCTION API.
-func MetricsOnlyReasons() []WTPInvalidFrameReason {
-	out := make([]WTPInvalidFrameReason, len(metricsOnlyReasons))
-	copy(out, metricsOnlyReasons)
-	return out
+	// (2) WARN log capped at ~11 entries (10 steady-state + 1 burst).
+	// Count newlines (one JSON object per log call).
+	logged := strings.Count(strings.TrimRight(buf.String(), "\n"), "\n") + 1
+	if buf.Len() == 0 {
+		logged = 0
+	}
+	if logged > 11 {
+		t.Errorf("WARN log emitted %d entries for %d invalid-label calls — rate-limiter failed to throttle (expected ≤11)", logged, burst)
+	}
+	if logged < 1 {
+		t.Errorf("WARN log emitted %d entries — first emission per burst MUST be allowed (token bucket starts full)", logged)
+	}
 }
 ```
 
-This step is doc-only spec for Task 22a — the actual Go-code parity test lands when the task executes (alongside `wtpv1.AllValidationReasons()` from Task 17). Listing it here ensures that whichever task lands second writes the parity test rather than leaving the enums to drift.
+The test file imports: `bytes`, `log/slog`, `strings`, `testing`, plus `metrics` (the package under test). The receiver-side WARN path is exercised through `IncDroppedInvalidFrame` because both paths share the same limiter and the test only needs to demonstrate the rate-limit contract holds; a separate inject-and-assert test in `internal/store/watchtower/transport/` (Task 17 Step 4a) verifies the receiver-side WARN actually invokes `AllowClassifierBypassWARN` before logging.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `go test ./internal/metrics/...`
-Expected: PASS — all existing tests + the ten new tests added in Step 1 (`TestWTPMetrics_DroppedInvalidUTF8`, `TestWTPMetrics_DroppedSequenceOverflow`, `TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons`, `TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons`, `TestWTPMetrics_SessionFailureReasonValidationAndEscape`, `TestWTPMetrics_DroppedInvalidMapper`, `TestWTPMetrics_DroppedInvalidTimestamp`, `TestWTPMetrics_DroppedMapperFailure`, `TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons`, `TestIncDroppedInvalidFrame_InvalidLabelLogsAndCollapses`) plus the parity test `TestWTPInvalidFrameReason_ParityWithValidator` added in Step 4. The legacy `TestWTPMetrics_AppendAndExpose` test from Task 3 has its `wtp_dropped_missing_chain_total` reference removed per Step 3.5.
+Run: `go test ./internal/metrics/... ./proto/canyonroad/wtp/v1/...`
+Expected: PASS — the parity test `TestWTPInvalidFrameReason_ParityWithValidator` succeeds (proto-side `wtpv1.AllValidationReasons()` and metrics-side getters agree on the shared/disjoint/coverage invariants), and the rate-limit test `TestClassifierBypassWARN_RateLimited` succeeds (counter at 100, WARN logs ≤ 11). All previously-passing tests continue to pass.
 
 - [ ] **Step 6: Cross-compile check**
 
@@ -9929,9 +10137,11 @@ Expected: no errors.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add internal/metrics/wtp.go internal/metrics/wtp_test.go internal/metrics/wtp_parity_test.go internal/metrics/metrics.go
-git commit -m "feat(metrics): add sink-failure counters for WTP lifecycle and per-record drops"
+git add internal/metrics/wtp_parity_test.go internal/metrics/wtp_ratelimit.go internal/metrics/wtp.go
+git commit -m "feat(metrics): cross-task parity test + shared classifier_bypass WARN rate-limiter"
 ```
+
+(If Task 17 Step 4a's receiver wiring is being committed in this same task, also add the corresponding `internal/store/watchtower/transport/state_live.go` change.)
 
 - [ ] **Step 8: Roborev**
 
@@ -9939,7 +10149,7 @@ Run `/roborev-design-review` and address findings.
 
 ---
 
-### Task 23: Store — AppendEvent transactional pattern
+
 
 `AppendEvent` follows the Compute → Append → Commit / Fatal pattern.
 Compute is pure (it reads `ev.Chain` and consults the SinkChain to produce
@@ -11609,12 +11819,175 @@ Run `/roborev-design-review` and address findings.
 
 ---
 
+### Task 27a: Operator monitoring migration (coordination task)
+
+**Owner**: SRE/ops team coordination (NOT the implementation team).
+The implementation team OWNS the preflight check that this task is done
+before flipping the production rollout flag, but does NOT own the
+artifact updates themselves.
+
+**Type**: Operator coordination (not a code task). No Go files are
+modified. Tracking artifact: `docs/superpowers/operator/wtp-monitoring-migration.md`
+(create if missing). This task does NOT block earlier code tasks
+(1–27 land independently); it BLOCKS ONLY the production rollout flag
+flip — i.e. enabling `audit.watchtower.enabled: true` on production
+fleets.
+
+**Why this exists**: The Round 11 spec change introduced two
+operator-facing breaking changes that earlier rounds missed:
+
+1. `wtp_dropped_missing_chain_total` was REMOVED — the
+   missing-chain failure mode is now folded into
+   `wtp_dropped_invalid_frame_total{reason="missing_chain"}`.
+   Any alerting rule or dashboard panel that names the old
+   counter will silently start reading zero post-rollout.
+2. `wtp_dropped_invalid_frame_total{reason="unknown"}` was
+   NARROWED. It used to be a catch-all for any unrecognised
+   reason; now it is reserved for the metrics-side
+   invalid-label fallback only. Any alert that fires on
+   `reason="unknown"` will see its rate drop and may go silent
+   even when receiver-side validator failures are happening
+   under one of the new explicit reasons.
+
+See spec §"Rollout phasing" for the full per-reason rollout policy and
+the corresponding spec §"Migration" subsection.
+
+#### Files
+
+- `docs/superpowers/operator/wtp-monitoring-migration.md`  # NEW (Task 27a): operator migration tracking artifact
+
+No code files are modified.
+
+#### Steps
+
+- [ ] **Step 1: Inventory existing alerting and dashboards**
+
+Search the operator monitoring repos / dashboards for any references
+to the removed or narrowed metric series. Two targets:
+
+  1. Every Prometheus alerting rule, recording rule, and alert
+     annotation that names `wtp_dropped_missing_chain_total` (any label
+     selector). The metric is being removed in this rollout — these
+     rules will silently start matching zero series.
+  2. Every Prometheus alerting rule, recording rule, alert annotation,
+     Grafana panel query, and runbook URL that selects on
+     `wtp_dropped_invalid_frame_total{reason="unknown"}`. The
+     `unknown` reason is being narrowed — these queries will see their
+     rate fall and may go silent under real failure conditions.
+
+Record each hit (file path + line + current intent) in
+`docs/superpowers/operator/wtp-monitoring-migration.md`. Use the
+following columns: `artifact_path`, `line`, `selector`, `intent`,
+`migration_decision` (filled in Steps 2/3), `owner`.
+
+- [ ] **Step 2: Decide delete-or-migrate for every `wtp_dropped_missing_chain_total` reference**
+
+For each row from Step 1 that names `wtp_dropped_missing_chain_total`,
+choose ONE of:
+
+  - **Delete**: the alert was a coarse catch-all that is now
+    subsumed by the per-reason alerts on
+    `wtp_dropped_invalid_frame_total{reason=~"missing_chain|..."}`.
+    Mark the row `migration_decision: delete` and capture the PR /
+    change request that removes the rule.
+  - **Migrate**: the alert is genuinely about missing chains.
+    Rewrite the selector to
+    `wtp_dropped_invalid_frame_total{reason="missing_chain"}`,
+    keep the threshold semantics, and update the alert annotations
+    (summary, description, runbook_url) to point at the
+    per-reason runbook section. Mark the row
+    `migration_decision: migrate` and capture the PR.
+
+Both decisions MUST be made and the PR / change request MUST be
+queued (not necessarily merged) before Step 5.
+
+- [ ] **Step 3: Decide keep / broaden / split for every `reason="unknown"` reference**
+
+For each row from Step 1 that selects `reason="unknown"`, choose
+ONE of:
+
+  - **Keep (narrowed semantics)**: the alert is acceptable now
+    that `unknown` only fires from the metrics-side invalid-label
+    collapse — i.e. the alert wants to know about
+    "metrics-pipeline misclassification" specifically. Mark the
+    row `migration_decision: keep` and confirm the alert summary
+    text reflects the narrowed meaning (avoid the word
+    "validation"; use "label collapse" or "classifier bypass").
+  - **Broaden**: the alert really wanted "any non-zero invalid
+    frame counter". Rewrite the selector to
+    `sum by (reason) (rate(wtp_dropped_invalid_frame_total[5m])) > 0`
+    or to an explicit reason-list union. Mark the row
+    `migration_decision: broaden`.
+  - **Split**: the alert was conflating multiple failure modes.
+    Replace it with N per-reason alerts following the per-reason
+    alerting policy in spec §"Per-reason alerting policy". Mark
+    the row `migration_decision: split` and link each new alert.
+
+Both decisions MUST be made and the PR / change request MUST be
+queued (not necessarily merged) before Step 5.
+
+- [ ] **Step 4: Update runbook URLs in alert annotations**
+
+Every alert touched in Steps 2 and 3 MUST have its `runbook_url`
+annotation point to the section of `docs/superpowers/specs/2026-04-18-wtp-client-design.md`
+that corresponds to its reason (or to the per-reason alerting
+policy section if the alert is reason-agnostic). The implementation
+team will provide stable anchor IDs for each per-reason subsection
+in the spec — the SRE/ops team picks them up here. Mark each row
+`runbook_url_updated: yes`.
+
+- [ ] **Step 5: Verify with implementation team and sign off**
+
+Once Steps 1–4 are complete (every row in the migration tracking
+artifact has a `migration_decision`, a queued PR / change request,
+and an updated runbook URL), open a tracking issue tagged
+`wtp-monitoring-migration: ready` and request sign-off from the
+implementation team's preflight check.
+
+The implementation team's preflight (called out in spec §"Rollout
+phasing → Rollout precondition") MUST verify:
+
+  1. Every removed-metric reference is either deleted or migrated
+     (no live alert / dashboard names `wtp_dropped_missing_chain_total`
+     after the rollout flag flip).
+  2. Every `reason="unknown"` reference has an explicit decision
+     and the queued change is consistent with the new narrowed
+     semantics.
+  3. Every touched alert annotation points at a stable runbook
+     anchor that exists in the spec.
+
+The preflight check MAY be automated as a one-off CI grep run
+against the monitoring repos; if it is run by hand, the result
+MUST be recorded in the same tracking issue.
+
+#### Acceptance criteria
+
+- The migration tracking artifact at
+  `docs/superpowers/operator/wtp-monitoring-migration.md` lists every
+  affected alert / panel / runbook URL with a recorded
+  `migration_decision`.
+- Every queued migration PR / change request is linked from the
+  tracking artifact.
+- The implementation team SHALL NOT begin production code rollout
+  (i.e. flipping `audit.watchtower.enabled: true` on a production
+  fleet) until SRE/ops confirms Steps 1–4 are complete and the
+  preflight check has signed off in the tracking issue.
+- This task does NOT block earlier code tasks (Task 1 through
+  Task 27 land independently). It blocks ONLY the production
+  rollout flag flip.
+
+---
+
 ## Done
 
-All 27 tasks complete. The watchtower store is wired into the daemon
-behind `audit.watchtower.enabled: true`, the standalone `wtp-testserver`
-binary is available for manual integration testing, and the full test
-suite (unit, integrity-gating, component, integration) is green.
+All 27 implementation tasks (1, 2, 3, 4, 4a-ii, 5, 6, 7, 8, 9, 10, 11,
+12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 22a, 22b, 24, 25, 26, 27)
+plus Task 27a (operator monitoring migration coordination — owned by
+SRE/ops, gates production rollout only) complete. The watchtower store
+is wired into the daemon behind `audit.watchtower.enabled: true`, the
+standalone `wtp-testserver` binary is available for manual integration
+testing, and the full test suite (unit, integrity-gating, component,
+integration) is green.
 
 Before merge, run:
 
