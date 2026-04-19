@@ -4,6 +4,7 @@
 package wal
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -177,10 +178,19 @@ func ReadRecord(r io.Reader, maxPayload int) ([]byte, error) {
 	if uint64(payloadLen) > uint64(maxPayload) {
 		return nil, fmt.Errorf("wal: record payload size %d exceeds maxPayload %d", payloadLen, maxPayload)
 	}
-	payload := make([]byte, payloadLen)
-	if _, err := io.ReadFull(r, payload); err != nil {
-		return nil, fmt.Errorf("read record payload: %w", err)
+	// Stream the payload into a growable buffer rather than pre-allocating
+	// `payloadLen` bytes up front. A corrupted on-disk length can claim up
+	// to MaxFramedPayload (~4 GiB) and pass the bound check above when a
+	// caller permits the protocol cap, so a make([]byte, payloadLen) here
+	// would let one bad header OOM the replay process. io.CopyN+bytes.Buffer
+	// grows allocation in step with bytes the underlying reader actually
+	// produces, so a header that overstates a record's true length fails
+	// with a read error long before allocation reaches the claimed size.
+	var payloadBuf bytes.Buffer
+	if got, err := io.CopyN(&payloadBuf, r, int64(payloadLen)); err != nil {
+		return nil, fmt.Errorf("read record payload (got %d of %d bytes): %w", got, payloadLen, err)
 	}
+	payload := payloadBuf.Bytes()
 	if crc32.Checksum(payload, crcTable) != expectedCRC {
 		return nil, ErrCRCMismatch
 	}

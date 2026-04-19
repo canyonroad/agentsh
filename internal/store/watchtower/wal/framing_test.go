@@ -206,11 +206,11 @@ func TestRecordFraming_RejectsNonPositiveMaxPayload(t *testing.T) {
 // caller that supplies maxPayload > MaxFramedPayload is rejected before
 // any cast can wrap the on-disk length and silently corrupt a frame.
 func TestRecordFraming_RejectsMaxPayloadAboveProtocolCap(t *testing.T) {
-	const aboveCap = uint64(MaxFramedPayload) + 1
+	// Use a runtime variable (not a const) so the int() conversion below
+	// is evaluated at runtime; a const would overflow at compile time on
+	// 32-bit platforms before the t.Skip branch could run.
+	aboveCap := uint64(MaxFramedPayload) + 1
 	if aboveCap > uint64(math.MaxInt) {
-		// 32-bit platform: int cannot represent values above MaxFramedPayload,
-		// so the constraint is naturally satisfied by the type system. Skip
-		// the boundary test rather than truncate-and-pretend.
 		t.Skip("32-bit platform: int cannot exceed MaxFramedPayload")
 	}
 	above := int(aboveCap)
@@ -228,17 +228,43 @@ func TestRecordFraming_RejectsMaxPayloadAboveProtocolCap(t *testing.T) {
 // don't actually allocate that much; we just confirm the bound check
 // passes for a tiny payload under that ceiling.
 func TestRecordFraming_AcceptsMaxPayloadAtProtocolCap(t *testing.T) {
-	if uint64(MaxFramedPayload) > uint64(math.MaxInt) {
-		// 32-bit platform: int cannot represent MaxFramedPayload itself, so
-		// callers there are already constrained below the protocol cap.
+	// Runtime variable, not const, so int() is evaluated at runtime; see
+	// the sibling test for the 32-bit reasoning.
+	capValue := uint64(MaxFramedPayload)
+	if capValue > uint64(math.MaxInt) {
 		t.Skip("32-bit platform: int cannot represent MaxFramedPayload")
 	}
-	cap := int(uint64(MaxFramedPayload))
+	cap := int(capValue)
 	var buf bytes.Buffer
 	if err := WriteRecord(&buf, []byte("x"), cap); err != nil {
 		t.Fatalf("WriteRecord(maxPayload=MaxFramedPayload) returned error: %v", err)
 	}
 	if _, err := ReadRecord(&buf, cap); err != nil {
 		t.Fatalf("ReadRecord(maxPayload=MaxFramedPayload) returned error: %v", err)
+	}
+}
+
+// TestRecordFraming_BoundsAllocationOnCorruptedLength is a regression test
+// for the OOM-on-corruption path: even when the caller permits payloads
+// up to MaxFramedPayload, a header that overstates a record's true length
+// (e.g. claims math.MaxUint32 when only a handful of bytes follow) must
+// fail with a read error long before allocation tracks the claimed size.
+// ReadRecord streams the payload via io.CopyN, so memory use is bounded
+// by what the underlying reader actually produces — not by the on-disk
+// length field.
+func TestRecordFraming_BoundsAllocationOnCorruptedLength(t *testing.T) {
+	capValue := uint64(MaxFramedPayload)
+	if capValue > uint64(math.MaxInt) {
+		t.Skip("32-bit platform: int cannot represent MaxFramedPayload")
+	}
+	cap := int(capValue)
+	header := make([]byte, 8)
+	binary.BigEndian.PutUint32(header[0:4], math.MaxUint32) // claims payloadLen == MaxFramedPayload
+	binary.BigEndian.PutUint32(header[4:8], 0)              // CRC: doesn't matter, we should fail before checking
+	body := []byte{'a', 'b', 'c'}                           // far short of the claimed ~4 GiB
+	frame := append(header, body...)
+	_, err := ReadRecord(bytes.NewReader(frame), cap)
+	if err == nil {
+		t.Fatal("expected read failure when claimed length far exceeds available bytes")
 	}
 }
