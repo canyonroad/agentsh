@@ -506,3 +506,38 @@ func TestWAL_GcAckedRespectsGenerationBoundary(t *testing.T) {
 			gen7BeforeCount, gen7AfterCount, n)
 	}
 }
+
+// TestWAL_OpenWithLegacyV1MetaHonorsAckWatermark regresses the round-3
+// finding end-to-end: an upgraded node opening a WAL that was last written
+// by a pre-v2 binary must still treat the persisted (gen, seq) as a real
+// ack watermark (not "no ack ever recorded") so subsequent overflow takes
+// the silent GC path instead of emitting a bogus TransportLoss marker for
+// data the receiver already has.
+func TestWAL_OpenWithLegacyV1MetaHonorsAckWatermark(t *testing.T) {
+	dir := t.TempDir()
+	// Step 1: write a legacy v1 meta.json by hand with a watermark at
+	// (gen=0, seq=4). Real pre-v2 deployments would have produced exactly
+	// this shape via MarkAcked.
+	raw := []byte(`{"format_version":1,"ack_high_watermark_seq":4,"ack_high_watermark_gen":0,"session_id":"","key_fingerprint":""}`)
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Step 2: open WAL. Per round-3 fix, ackPresent must come back true and
+	// the watermark must be (gen=0, seq=4).
+	w, err := Open(Options{Dir: dir, SegmentSize: 40, MaxTotalBytes: 100, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	w.mu.Lock()
+	gotPresent := w.ackPresent
+	gotSeq := w.ackHighSeq
+	gotGen := w.ackHighGen
+	w.mu.Unlock()
+	if !gotPresent {
+		t.Errorf("ackPresent after legacy v1 reopen = false; want true (legacy file's existence implied a persisted ack)")
+	}
+	if gotSeq != 4 || gotGen != 0 {
+		t.Errorf("ack watermark after legacy v1 reopen = (gen=%d, seq=%d); want (0, 4)", gotGen, gotSeq)
+	}
+}

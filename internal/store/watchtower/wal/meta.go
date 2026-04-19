@@ -14,12 +14,17 @@ type Meta struct {
 	AckHighWatermarkGen uint32 `json:"ack_high_watermark_gen"`
 	// AckRecorded is true iff at least one ack has ever been recorded;
 	// distinguishes the zero-value (gen=0, seq=0) from a real ack at that watermark.
+	// Pre-v2 meta.json files lack this field; ReadMeta infers it to true on read.
 	AckRecorded    bool   `json:"ack_recorded"`
 	SessionID      string `json:"session_id"`
 	KeyFingerprint string `json:"key_fingerprint"`
 }
 
-const metaFormatVersion = 1
+// metaFormatVersion 2 added the ack_recorded field. v1 files are accepted on
+// read (and inferred to have AckRecorded=true, because pre-v2 only MarkAcked
+// wrote meta.json — its existence implies an ack was persisted). All writes
+// produce v2.
+const metaFormatVersion = 2
 const metaFileName = "meta.json"
 
 // ReadMeta loads meta.json from dir. Returns os.ErrNotExist if absent.
@@ -33,8 +38,16 @@ func ReadMeta(dir string) (Meta, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return Meta{}, fmt.Errorf("parse meta.json: %w", err)
 	}
-	if m.FormatVersion != metaFormatVersion {
-		return Meta{}, fmt.Errorf("meta.json format_version %d unsupported (want %d)", m.FormatVersion, metaFormatVersion)
+	switch m.FormatVersion {
+	case 1:
+		// Legacy file: pre-v2 only MarkAcked ever wrote meta.json, so its
+		// existence implies an ack was persisted. Force AckRecorded=true so
+		// the (gen, seq) watermark drives ack-aware GC after upgrade.
+		m.AckRecorded = true
+	case metaFormatVersion:
+		// v2: trust the field as-is.
+	default:
+		return Meta{}, fmt.Errorf("meta.json format_version %d unsupported (want 1 or %d)", m.FormatVersion, metaFormatVersion)
 	}
 	return m, nil
 }
