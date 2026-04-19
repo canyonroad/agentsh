@@ -6263,13 +6263,24 @@ import (
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
 )
 
-// TestReplayer_StopsAtTailWatermark verifies the replayer stops when the
-// reader has caught up to the entry-time tail watermark. Three records
-// are appended, seq=2 is acked, and one more record (seq=3) is appended
-// past the ack. After NewReplayer, an additional record (seq=4) is
-// appended — it MUST NOT be surfaced because the tail was sampled before
-// the post-entry append. A Reader started at start = ack+1 = 3 must
-// surface exactly one record (seq=3) and report done.
+// TestReplayer_StopsAtTailWatermark verifies the replayer surfaces every
+// record covered by the entry-time tail watermark and reports done. Three
+// records are appended, seq=2 is acked, and one more record (seq=3) is
+// appended past the ack. A Reader started at start = ack+1 = 3 must surface
+// at least seq=3 and report done.
+//
+// Round-1 review note: an earlier draft of the Replayer early-exited when
+// rec.Sequence reached tailSeq, which would have stranded any trailing
+// loss marker that overflow GC appended at the WAL tail mid-replay. The
+// fix removes that early-exit; the SOLE done signal is now TryNext
+// returning ok=false. As a consequence, records appended AFTER NewReplayer
+// captures tailSeq may also surface in the final batch — they are
+// "Live-era" records, but the server treats EventBatch records identically
+// regardless of state, so this is harmless. tailSeq is preserved as a
+// minimum-replay bound, not a hard stop. This test asserts the minimum-
+// bound contract: at least seq=3 is emitted, and TailSequence() reflects
+// the value sampled at NewReplayer time (NOT advanced by the post-entry
+// append).
 func TestReplayer_StopsAtTailWatermark(t *testing.T) {
 	dir := t.TempDir()
 	w, err := wal.Open(wal.Options{
@@ -6295,7 +6306,7 @@ func TestReplayer_StopsAtTailWatermark(t *testing.T) {
 		t.Fatalf("append 3: %v", err)
 	}
 
-	rdr, err := w.NewReader(3) // start = ack+1
+	rdr, err := w.NewReader(3) // start = ack+1; first emit must be seq>=3
 	if err != nil {
 		t.Fatalf("new reader: %v", err)
 	}
@@ -6306,7 +6317,10 @@ func TestReplayer_StopsAtTailWatermark(t *testing.T) {
 		MaxBatchBytes:   16 * 1024,
 	})
 
-	// Post-entry append — must NOT be surfaced by the Replayer.
+	// Inject a post-entry record. tailSeq was captured at NewReplayer time
+	// (highSeq=3) so TailSequence() must remain 3, but per the round-1
+	// fix the new contract permits this seq=4 record to surface in the
+	// final batch.
 	if _, err := w.Append(4, 0, []byte{0x44}); err != nil {
 		t.Fatalf("append 4 (post-entry): %v", err)
 	}
@@ -6315,18 +6329,29 @@ func TestReplayer_StopsAtTailWatermark(t *testing.T) {
 	defer cancel()
 
 	emitted := 0
+	seenSeqs := []uint64{}
 	for {
 		batch, done, err := r.NextBatch(ctx)
 		if err != nil {
 			t.Fatalf("NextBatch: %v", err)
 		}
-		emitted += len(batch.Records)
+		for _, rec := range batch.Records {
+			emitted++
+			seenSeqs = append(seenSeqs, rec.Sequence)
+		}
 		if done {
 			break
 		}
 	}
-	if emitted != 1 {
-		t.Fatalf("emitted: got %d, want 1", emitted)
+	// Minimum-bound contract: seq=3 (tailSeq) MUST be emitted.
+	if emitted < 1 {
+		t.Fatalf("emitted: got %d (seqs=%v), want at least 1", emitted, seenSeqs)
+	}
+	if seenSeqs[0] != 3 {
+		t.Fatalf("first emitted seq: got %d, want 3", seenSeqs[0])
+	}
+	if got, want := r.TailSequence(), uint64(3); got != want {
+		t.Fatalf("tail seq: got %d, want %d", got, want)
 	}
 }
 ```
@@ -6377,13 +6402,20 @@ Add two new fields to `Reader` (alongside `lastGoodSeq`/`lastGoodGen` from Task 
 
 ```go
 // nextSeq is the lowest user sequence the Reader will surface; records
-// with Sequence < nextSeq are dropped from RecordData yields. Loss
-// records are NOT filtered by nextSeq.
+// with Sequence < nextSeq are dropped from RecordData yields. Set by
+// NewReader from the inclusive `start` argument: the first RecordData
+// returned has Sequence == start (or later, if start was acked-past).
+// Pass start=0 to receive every user record from the beginning of the
+// on-disk stream. Loss records are NOT filtered by nextSeq — the
+// transport must propagate every loss notice regardless of cursor.
 nextSeq uint64
 // lastEmittedSeq is the highest user sequence successfully returned to
 // a caller so far, monotonic across the Reader's lifetime (does NOT
 // reset on a generation change, unlike lastGoodSeq). Surfaced via
-// LastSequence() so the Replayer can detect the catch-up condition.
+// LastSequence() purely as a diagnostic for callers that want to track
+// replay progress; the Replayer does NOT use it for termination
+// (catch-up is detected via TryNext returning ok=false alone — see
+// transport.Replayer.NextBatch for the rationale).
 lastEmittedSeq uint64
 ```
 
@@ -6446,7 +6478,14 @@ Add the two accessors the Replayer needs:
 ```go
 // LastSequence returns the highest user sequence the Reader has surfaced
 // via Next or TryNext so far. Monotonic across the Reader's lifetime —
-// does NOT reset on a generation change.
+// does NOT reset on a generation change, unlike the internal lastGoodSeq
+// used for loss-anchor calculations. Zero before the first emission.
+//
+// Diagnostic accessor: the Replayer does NOT consult LastSequence to
+// detect catch-up (termination is driven solely by TryNext returning
+// ok=false). Callers that want to track replay progress (logging,
+// metrics, debug dumps) can read it; production transport code should
+// not branch on it.
 func (r *Reader) LastSequence() uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -6490,14 +6529,21 @@ type ReplayBatch struct {
 
 // Replayer pulls WAL records from a Reader up to the entry-time tail
 // watermark and emits them in size-bounded batches.
+//
+// tailSeq is a MINIMUM bound on what replay surfaces, not a hard stop.
+// It is the WAL high-water sequence captured under the WAL lock at
+// NewReplayer time, so every record with seq <= tailSeq was already on
+// disk by then and will be visible to the underlying Reader. Records
+// appended after construction may also surface in the final batch
+// (harmless: server treats EventBatch records identically regardless of
+// state-machine state).
 type Replayer struct {
 	rdr     *wal.Reader
 	opts    ReplayerOptions
 	tailSeq uint64
 }
 
-// NewReplayer captures the current WAL tail as the replay target. Records
-// appended after this point are NOT replayed; they belong to the Live state.
+// NewReplayer captures the current WAL tail as a minimum-replay watermark.
 func NewReplayer(rdr *wal.Reader, opts ReplayerOptions) *Replayer {
 	return &Replayer{
 		rdr:     rdr,
@@ -6506,8 +6552,17 @@ func NewReplayer(rdr *wal.Reader, opts ReplayerOptions) *Replayer {
 	}
 }
 
-// NextBatch returns the next batch of records and a done flag set when the
-// reader has reached the tail watermark.
+// NextBatch returns the next batch and a done flag. done=true is set
+// SOLELY when the underlying Reader returns ok=false from TryNext (the
+// "caught up to live tail" signal). There is NO early-exit on
+// `rec.Sequence >= tailSeq`: an earlier draft had one, but it raced
+// with overflow GC — while the replayer drains, GC can drop a segment
+// containing replay-era seqs and append a compensating loss marker AT
+// THE WAL TAIL whose Loss.ToSequence is <= tailSeq but whose WAL
+// position is beyond tailSeq. With an early-exit on RecordData reaching
+// tailSeq, that trailing loss marker would never surface and the
+// receiver would silently miss the gap notice. Termination MUST be
+// driven by the Reader's caught-up signal alone.
 func (r *Replayer) NextBatch(ctx context.Context) (ReplayBatch, bool, error) {
 	batch := ReplayBatch{}
 	bytes := 0
@@ -6526,17 +6581,16 @@ func (r *Replayer) NextBatch(ctx context.Context) (ReplayBatch, bool, error) {
 			return batch, false, fmt.Errorf("replayer: reader.TryNext: %w", err)
 		}
 		if !ok {
-			// Reader caught up. tailSeq was sampled under the WAL lock,
-			// so every record with seq <= tailSeq has been visible by
-			// now — replay is done.
+			// Reader caught up. tailSeq was sampled under the WAL lock
+			// at construction, so every record with seq <= tailSeq has
+			// been visible by now — including any trailing loss markers
+			// overflow GC may have appended after entry, since they
+			// were durably written before this TryNext returned ok=false.
 			return batch, true, nil
 		}
 		batch.Records = append(batch.Records, rec)
 		if rec.Kind == wal.RecordData {
 			bytes += len(rec.Payload)
-			if rec.Sequence >= r.tailSeq {
-				return batch, true, nil
-			}
 		}
 	}
 }
@@ -6557,20 +6611,34 @@ import (
 
 // runReplaying drains the WAL via the supplied Replayer and ships records
 // in EventBatch messages over the conn that the Connecting state opened.
-// On success it returns StateLive. On a Send/Replayer error it returns
-// StateConnecting so the caller's run loop reconnects.
+// On success it returns StateLive (and t.conn is RETAINED — the Live state
+// handler picks up the same conn). On any error path (Replayer error,
+// build error, send error, ctx cancellation) it Close()s t.conn and
+// clears it before returning StateConnecting so the run loop reconnects
+// on the next iteration with a fresh dial.
+//
+// Lifecycle invariant matches runConnecting: every error path on a held
+// Conn calls Close() exactly once (the full-teardown primitive — never
+// CloseSend(), which is the half-close that would leave the underlying
+// stream open and leak resources during reconnect backoff).
 func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error) {
 	for {
 		batch, done, err := r.NextBatch(ctx)
 		if err != nil {
+			_ = t.conn.Close()
+			t.conn = nil
 			return StateConnecting, fmt.Errorf("replay batch: %w", err)
 		}
 		if len(batch.Records) > 0 {
-			msg, err := buildEventBatch(batch.Records)
+			msg, err := buildEventBatchFn(batch.Records)
 			if err != nil {
+				_ = t.conn.Close()
+				t.conn = nil
 				return StateConnecting, fmt.Errorf("build EventBatch: %w", err)
 			}
 			if err := t.conn.Send(msg); err != nil {
+				_ = t.conn.Close()
+				t.conn = nil
 				return StateConnecting, fmt.Errorf("send EventBatch: %w", err)
 			}
 		}
@@ -6580,11 +6648,67 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 	}
 }
 
-// buildEventBatch is a stub — Task 17 fills in the real wire format.
-func buildEventBatch(_ []wal.Record) (*wtpv1.ClientMessage, error) {
+// RunReplaying is the public test seam — production code wires
+// runReplaying through the RunOnce dispatch in Task 22 (Store integration).
+func (t *Transport) RunReplaying(ctx context.Context, r *Replayer) (State, error) {
+	return t.runReplaying(ctx, r)
+}
+
+// buildEventBatchFn is the function variable runReplaying calls to wrap
+// WAL records into a wtpv1.EventBatch envelope. Defaults to the empty-
+// message stub so the Replaying state machine can be exercised in tests.
+// Task 17 (Live-state Batcher) and Task 22 (Store integration) replace
+// this with the real builder before runReplaying is wired into the
+// production run loop.
+var buildEventBatchFn = buildEventBatchStub
+
+// buildEventBatchStub is a no-op wire-format placeholder — Task 17 fills
+// in the real format. Production code MUST overwrite buildEventBatchFn
+// before invoking runReplaying.
+func buildEventBatchStub(_ []wal.Record) (*wtpv1.ClientMessage, error) {
 	return &wtpv1.ClientMessage{}, nil
 }
 ```
+
+Also create `internal/store/watchtower/transport/state_replaying_internal_test.go`
+holding the test seams (`SetConnForTest`, `HasConnForTest`,
+`SetBuildEventBatchFnForTest`) so external `transport_test` callers can
+drive `RunReplaying` in isolation from the `runConnecting` path. Lives in
+`*_test.go` so the helpers are compiled out of the production binary.
+
+In addition to `TestReplayer_StopsAtTailWatermark`, the round-1 review
+mandates four `RunReplaying` tests in
+`internal/store/watchtower/transport/state_replaying_test.go`:
+
+- `TestRunReplaying_HappyPathReturnsLiveAndRetainsConn` — the conn is
+  RETAINED across a successful transition so the Live handler can reuse it
+  (this is the inverse of the runConnecting contract, where every state
+  exit Close()s the dialed conn).
+- `TestRunReplaying_SendFailureClosesConn` — Send returning
+  `write: broken pipe` mid-replay must Close exactly once, leave
+  `t.conn==nil`, and return `StateConnecting`.
+- `TestRunReplaying_ReplayerErrorClosesConn` — a hard Replayer error
+  (driven by closing the Reader before invocation) must Close + nil
+  `t.conn` and return `StateConnecting`.
+- `TestRunReplaying_CtxCancelClosesConn` — ctx cancellation mid-replay
+  must Close + nil `t.conn` and return `StateConnecting` with
+  `errors.Is(err, context.Canceled)`.
+
+And three loss-marker tests in
+`internal/store/watchtower/transport/replayer_test.go`:
+
+- `TestReplayer_DeliversLossMarkerBeforeStart` — overflow GC creates a
+  TransportLoss marker; opening `NewReader(start=N)` past every covered
+  seq still yields the marker (loss records are NOT subject to the
+  nextSeq filter).
+- `TestReplayer_DeliversTrailingLossMarker` — append records, capture
+  tailSeq via NewReplayer, then `AppendLoss` so the marker sits at a
+  WAL position past tailSeq. The marker MUST surface before done. This
+  is the round-1 regression test for the removed `rec.Sequence >= tailSeq`
+  early-exit; bug-injection check confirms zero loss records observed if
+  the early-exit is reintroduced.
+- `TestReplayer_LossOnlyScenario` — WAL with only loss markers (no user
+  data) drains every marker.
 
 - [ ] **Step 5: Run tests to verify they pass**
 

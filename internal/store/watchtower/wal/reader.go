@@ -82,15 +82,19 @@ type Reader struct {
 	lastGoodGenSet bool // true once lastGoodGen reflects a real seen generation.
 	// nextSeq is the lowest user sequence the Reader will surface; records
 	// with Sequence < nextSeq are dropped from RecordData yields. Set by
-	// NewReader from start+1 so callers express an "exclusive" cursor with
-	// the same semantics as ack watermarks. Loss records are NOT filtered
-	// by nextSeq — the transport must propagate every loss notice.
+	// NewReader from the inclusive `start` argument: the first RecordData
+	// returned has Sequence == start (or later, if start was acked-past).
+	// Pass start=0 to receive every user record from the beginning of the
+	// on-disk stream. Loss records are NOT filtered by nextSeq — the
+	// transport must propagate every loss notice regardless of cursor.
 	nextSeq uint64
 	// lastEmittedSeq is the highest user sequence successfully returned to
 	// a caller so far, monotonic across the Reader's lifetime (does NOT
 	// reset on a generation change, unlike lastGoodSeq). Surfaced via
-	// LastSequence() so the Replayer can detect the catch-up condition
-	// (TryNext returned ok=false AND LastSequence >= tailSeq).
+	// LastSequence() purely as a diagnostic for callers that want to track
+	// replay progress; the Replayer does NOT use it for termination
+	// (catch-up is detected via TryNext returning ok=false alone — see
+	// transport.Replayer.NextBatch for the rationale).
 	lastEmittedSeq uint64
 	closed         bool
 }
@@ -254,6 +258,12 @@ func (r *Reader) TryNext() (Record, bool, error) {
 // Next or TryNext so far. Monotonic across the Reader's lifetime — does NOT
 // reset on a generation change, unlike the internal lastGoodSeq used for
 // loss-anchor calculations. Zero before the first emission.
+//
+// Diagnostic accessor: the Replayer does NOT consult LastSequence to detect
+// catch-up (termination is driven solely by TryNext returning ok=false —
+// see transport.Replayer.NextBatch). Callers that want to track replay
+// progress (logging, metrics, debug dumps) can read it; production
+// transport code should not branch on it.
 func (r *Reader) LastSequence() uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
