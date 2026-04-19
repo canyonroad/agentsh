@@ -1,36 +1,68 @@
 package transport
 
 import (
+	"errors"
+
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
 // Options configures a Transport.
+//
+// SessionInit field provenance: the Transport itself is a thin wire-format
+// adapter — it does not look up identity, key material, or sink state. The
+// fields below document who is expected to populate each value when the
+// sink-integration task (Task 27) wires this Transport into the real
+// pipeline. Until then, callers (and tests) supply the values directly via
+// Options.
 type Options struct {
-	Dialer    Dialer
-	AgentID   string
+	// Dialer establishes the underlying gRPC stream. Required.
+	Dialer Dialer
+	// AgentID identifies the agent process. Required. Supplied by the
+	// agent's identity layer (build/runtime config); echoed in
+	// SessionInit so the server can scope the session.
+	AgentID string
+	// SessionID identifies the session. Required. Supplied by the
+	// session-management layer.
 	SessionID string
 	// FormatVersion is sent in SessionInit; defaults to 2.
 	FormatVersion uint32
 	// Algorithm is the chain HMAC algorithm advertised in SessionInit.
-	// Defaults to HASH_ALGORITHM_HMAC_SHA256 in New() so that the proto
-	// validator (wtpv1.ValidateSessionInit) accepts the frame; later
-	// tasks may surface a config knob to override this.
+	// Supplied by chain config; defaults to HASH_ALGORITHM_HMAC_SHA256
+	// in New() so the proto validator (wtpv1.ValidateSessionInit)
+	// accepts the frame.
 	Algorithm wtpv1.HashAlgorithm
-	// AgentVersion identifies the running agent build. Empty by default;
-	// the sink wiring task will populate it.
+	// AgentVersion identifies the running agent build. An agent build
+	// constant — populated by the build/wiring layer.
 	AgentVersion string
-	// OcsfVersion is the OCSF schema version the sink emits. Empty by
-	// default; the sink wiring task will populate it.
+	// OcsfVersion is the OCSF schema version the sink emits. An agent
+	// build constant — populated by the build/wiring layer.
 	OcsfVersion string
 	// KeyFingerprint identifies the active signing key (hex-encoded).
-	// Empty by default; the key-rotation task will populate it.
+	// Supplied by chain config (KMS/key provider); empty until sink
+	// wiring (Task 27).
 	KeyFingerprint string
 	// ContextDigest is the hex-encoded SHA-256 of the session context.
-	// Empty by default; the sink wiring task will populate it.
+	// Computed at sink integration (Task 27) over the agent's
+	// session-context inputs (see chain.SessionContext).
 	ContextDigest string
 	// TotalChained is the count of records the sink has chained so far.
-	// Zero by default; the sink wiring task will populate it.
+	// Running count from chain.SinkChain; supplied by sink integration.
 	TotalChained uint64
+}
+
+// validate enforces the construction-time invariants documented on
+// Options. It is called by New before any defaults are applied.
+func validate(opts Options) error {
+	if opts.Dialer == nil {
+		return errors.New("transport: nil Dialer")
+	}
+	if opts.AgentID == "" {
+		return errors.New("transport: AgentID required")
+	}
+	if opts.SessionID == "" {
+		return errors.New("transport: SessionID required")
+	}
+	return nil
 }
 
 // Transport runs the four-state WTP client state machine. It is owned by
@@ -50,14 +82,20 @@ type Transport struct {
 }
 
 // New constructs a Transport. It does not dial; call Run to start.
-func New(opts Options) *Transport {
+// New validates the required Options fields and returns an error if any
+// are missing so misconfiguration fails at construction rather than
+// inside the run loop.
+func New(opts Options) (*Transport, error) {
+	if err := validate(opts); err != nil {
+		return nil, err
+	}
 	if opts.FormatVersion == 0 {
 		opts.FormatVersion = 2
 	}
 	if opts.Algorithm == wtpv1.HashAlgorithm_HASH_ALGORITHM_UNSPECIFIED {
 		opts.Algorithm = wtpv1.HashAlgorithm_HASH_ALGORITHM_HMAC_SHA256
 	}
-	return &Transport{opts: opts}
+	return &Transport{opts: opts}, nil
 }
 
 // RejectReason returns the reject_reason surfaced by the most recent

@@ -13,6 +13,10 @@ import (
 // On a server SessionAck rejection (accepted=false) or a programming error
 // (e.g. SessionInit fails local validation) it returns StateShutdown — the
 // session cannot recover from these via reconnect.
+//
+// Every error path calls conn.Close() (full teardown) rather than
+// CloseSend() (half-close) so the underlying stream is fully released and
+// no goroutines/sockets leak while the run loop backs off and retries.
 func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 	init := t.sessionInit()
 	if err := wtpv1.ValidateSessionInit(init.GetSessionInit()); err != nil {
@@ -26,28 +30,28 @@ func (t *Transport) runConnecting(ctx context.Context) (State, error) {
 	t.conn = conn
 
 	if err := conn.Send(init); err != nil {
-		_ = conn.CloseSend()
+		_ = conn.Close()
 		t.conn = nil
 		return StateConnecting, fmt.Errorf("send SessionInit: %w", err)
 	}
 
 	msg, err := conn.Recv()
 	if err != nil {
-		_ = conn.CloseSend()
+		_ = conn.Close()
 		t.conn = nil
 		return StateConnecting, fmt.Errorf("recv SessionAck: %w", err)
 	}
 
 	ack := msg.GetSessionAck()
 	if ack == nil {
-		_ = conn.CloseSend()
+		_ = conn.Close()
 		t.conn = nil
 		return StateConnecting, fmt.Errorf("expected SessionAck, got %T", msg.Msg)
 	}
 
 	if !ack.GetAccepted() {
 		t.rejectReason = ack.GetRejectReason()
-		_ = conn.CloseSend()
+		_ = conn.Close()
 		t.conn = nil
 		return StateShutdown, fmt.Errorf("session rejected: %s", ack.GetRejectReason())
 	}
