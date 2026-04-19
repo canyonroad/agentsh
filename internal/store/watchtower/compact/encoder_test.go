@@ -51,6 +51,37 @@ func TestEncode_RejectsMissingChain(t *testing.T) {
 	}
 }
 
+func TestEncode_RejectsNilMapper(t *testing.T) {
+	ev := types.Event{
+		Type:      "x",
+		Timestamp: time.Unix(1_700_000_000, 0),
+		Chain:     &types.ChainState{Sequence: 1, Generation: 1},
+	}
+	_, err := Encode(nil, ev)
+	if err == nil {
+		t.Fatal("Encode must reject untyped-nil mapper")
+	}
+	if !errors.Is(err, ErrInvalidMapper) {
+		t.Errorf("err = %v, want errors.Is(err, ErrInvalidMapper)", err)
+	}
+}
+
+func TestEncode_RejectsTypedNilPointerMapper(t *testing.T) {
+	var m *StubMapper // typed-nil pointer; non-nil interface, nil dynamic value
+	ev := types.Event{
+		Type:      "x",
+		Timestamp: time.Unix(1_700_000_000, 0),
+		Chain:     &types.ChainState{Sequence: 1, Generation: 1},
+	}
+	_, err := Encode(m, ev)
+	if err == nil {
+		t.Fatal("Encode must reject typed-nil pointer mapper")
+	}
+	if !errors.Is(err, ErrInvalidMapper) {
+		t.Errorf("err = %v, want errors.Is(err, ErrInvalidMapper)", err)
+	}
+}
+
 func TestEncode_PropagatesMapperError(t *testing.T) {
 	failing := failingMapper{}
 	ev := types.Event{Type: "x", Timestamp: time.Now(), Chain: &types.ChainState{}}

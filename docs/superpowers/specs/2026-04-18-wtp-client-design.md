@@ -933,16 +933,19 @@ Other nilable kinds (`map`, `slice`, `chan`, `func`) implementing `Mapper` are p
 
 The stub-rejection branch (`compact.IsStubMapper`) runs after the nil branches and matches both value and pointer forms (`StubMapper{}`, `*StubMapper`); the typed-nil `*StubMapper` case is redundantly covered by both branches but the nil branch wins because it produces the more actionable error.
 
-**`compact.Encode` — canonical CompactEvent construction.** All WTP sink-side construction of `wtpv1.CompactEvent` MUST go through `compact.Encode`. Direct struct literal construction outside this helper is forbidden. Reason: the chain step (`chain.Compute`) hashes a fixed canonical projection of the event, so a diverging construction path silently breaks integrity verification.
+**`compact.Encode` — canonical CompactEvent construction.** All **production sink runtime** construction of `wtpv1.CompactEvent` MUST go through `compact.Encode`. Build-time tooling — golden fixture generators (`internal/store/watchtower/cmd/gen-wire-goldens/fixtures/`), test helpers, intentionally-malformed event generators — MAY construct `CompactEvent` directly when divergence from the canonical encoder is the explicit purpose. The rule exists because the chain step (`chain.Compute`) hashes a fixed canonical projection of the event, so a diverging construction path on the sink runtime path silently breaks integrity verification; tooling that intentionally produces non-canonical messages is exempt.
 
 `Encode` owns these invariants:
+- **Mapper must be valid.** `m` must be non-nil and not a typed-nil pointer. Returns `ErrInvalidMapper` otherwise.
 - **Chain stamping is mandatory.** `ev.Chain` must be non-nil; the composite store stamps it before fanning out. Returns `ErrMissingChain` otherwise.
 - **Timestamp must be valid.** `ev.Timestamp` must be non-zero and ≥ Unix epoch. Pre-epoch instants silently wrap when cast to `uint64`, masking caller bugs. Returns `ErrInvalidTimestamp`.
 - **Integrity is left nil.** The chain step populates `Integrity` after computing the entry hash.
 
-`Encode` does NOT re-validate the Mapper — `Store.New` is the single point that rejects untyped-nil and typed-nil-pointer mappers (see "Mapper nil-handling contract"). Re-checking in every helper would duplicate that guarantee.
+`Encode` rejects untyped-nil and typed-nil-pointer mappers via `ErrInvalidMapper`. `Store.New` (Phase 10) performs the same rejection at construction time. This is defense in depth, not redundancy: the runtime nil check is a cheap branch on the hot path, and it makes `Encode` independently safe to call regardless of whether the caller routes through `Store.New`.
 
-Error sentinels are exported so callers can classify with `errors.Is`: `ErrMissingChain`, `ErrInvalidTimestamp`. Mapper failures are wrapped with `fmt.Errorf("compact mapper: %w", err)` so `errors.Unwrap` returns the underlying mapper error.
+Error sentinels are exported so callers can classify with `errors.Is`: `ErrInvalidMapper`, `ErrMissingChain`, `ErrInvalidTimestamp`. Mapper failures are wrapped with `fmt.Errorf("compact mapper: %w", err)` so `errors.Unwrap` returns the underlying mapper error.
+
+Encode failures in the WTP sink's `AppendEvent` path are classified via `errors.Is` and dropped (chain does NOT advance). Each error class has a distinct counter (`wtp_dropped_invalid_mapper_total`, `wtp_dropped_invalid_timestamp_total`, `wtp_dropped_missing_chain_total`). The drops are sink-internal; they do NOT propagate as session-fatal errors. See Task 22a for the metric definitions and Task 23 for the sink-side `errors.Is` wiring.
 
 - Operators can verify the sink end-to-end without a live Watchtower by pointing `Endpoint` at the testserver binary that ships in `cmd/wtp-testserver/` (a thin wrapper around `internal/store/watchtower/testserver`). This is also how we recommend running it in development.
 
