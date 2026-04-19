@@ -312,6 +312,10 @@ The `input_field` value is the **canonical wire/JSON field name** (snake_case), 
 
 The test harness applies the decoded bytes to the named field after parsing the rest of `input` normally. Cross-language implementations MUST implement the `input_b64` schema to claim WTP-spec-conformance — the negative cases are part of the contract surface, not optional. As a temporary fallback during initial bring-up, an implementation MAY skip negative entries and substitute per-language unit tests; once the implementation reaches "WTP-conformant" status, the negative vectors must be honored end-to-end.
 
+Positive-vector `input` objects also use the canonical snake_case wire keys (e.g., `format_version`, `sequence`, `session_id`); each implementation maps these to its local struct fields inside its test harness. The vectors are language-neutral — they reference the wire format, never any implementation's internal naming.
+
+Vector schema versioning. The `input_field` + `input_b64` schema and the snake_case `input` keys are the v1 published conformance vector format. Pre-v1 (Go-shaped) vectors were never published to external consumers; this is a pre-release tightening, not a migration. The v1 schema is the contract from this point forward; future incompatible changes will bump the schema by introducing a new top-level field (e.g., `schema_version: 2`) and continuing to support v1 alongside v2 for at least one minor release.
+
 #### Canonical-format versioning
 
 `IntegrityRecord.FormatVersion` is the canonical-encoding version. Any of the following changes MUST bump it in the same commit:
@@ -657,6 +661,8 @@ All exposed via slog at debug + as structured counters consumable by the existin
 - `wtp_dropped_sequence_overflow_total` (counter; increments when `ev.Chain.Sequence > math.MaxInt64` at the store-integration boundary — record is dropped before WAL admission, structured log emitted with fields {session_id, sequence, generation})
 - `wtp_wal_corruption_total` (counter; CRC corruption events during WAL replay)
 - `wtp_send_latency_seconds` (histogram, per batch)
+
+Dashboard/alerting impact. The four new counters (`wtp_dropped_invalid_utf8_total`, `wtp_dropped_sequence_overflow_total`, `wtp_session_init_failures_total{reason}`, `wtp_session_rotation_failures_total{reason}`) all follow the always-emit contract: the families appear at zero on every scrape regardless of activity, so adding them does not change cardinality at quiescence and does not require a phased rollout. Existing dashboards keep working unchanged; new alerting rules can be added at operator discretion (suggested: page on `rate(wtp_session_init_failures_total[5m]) > 0` because that signals an unrecoverable misconfiguration, and alert-not-page on `rate(wtp_dropped_invalid_utf8_total[5m]) > 0.01` because that signals event source corruption).
 
 Histogram exposition snapshots bucket counts under the latency mutex and writes them unlocked, so a slow scrape never blocks `ObserveSendLatency` callers on the hot send path.
 

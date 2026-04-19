@@ -1214,6 +1214,8 @@ git commit -m "feat(metrics): add wtp_* counters, gauges, and send-latency histo
 
 Run `/roborev-design-review` and address findings.
 
+Note: Subsequent reviews of the spec added four more sink-failure counters (`wtp_dropped_invalid_utf8_total`, `wtp_dropped_sequence_overflow_total`, `wtp_session_init_failures_total{reason}`, `wtp_session_rotation_failures_total{reason}`). These are added in Task 22a, just before the AppendEvent integration that needs them. Task 3 itself is unchanged.
+
 ---
 
 ## Phase 4a: Proto scaffolding
@@ -2383,13 +2385,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
 type vectorEntry struct {
 	Name          string          `json:"name"`
 	Kind          string          `json:"kind"`           // "integrity_record" | "context_digest"
-	Input         json.RawMessage `json:"input,omitempty"` // for valid inputs, decoded as IntegrityRecord or SessionContext
+	Input         json.RawMessage `json:"input,omitempty"` // for valid inputs, an object with canonical wire snake_case keys (e.g. format_version, sequence, session_id) — NOT Go field names. Each implementation maps the keys to its local struct fields inside its harness.
 	InputB64      string          `json:"input_b64,omitempty"` // base64-encoded raw struct field bytes for negative cases (non-UTF-8)
 	InputField    string          `json:"input_field,omitempty"` // canonical wire field name receiving InputB64 (e.g., "prev_hash", "session_id")
 	Expected      string          `json:"expected,omitempty"` // for valid: canonical bytes (integrity_record) or hex digest (context_digest)
@@ -2450,13 +2453,66 @@ func TestVectors(t *testing.T) {
 	}
 }
 
-// buildIntegrityRecord decodes either v.Input as a normal IntegrityRecord JSON,
-// or applies v.InputB64 (raw bytes including invalid UTF-8) to v.InputField.
+// buildIntegrityRecord decodes v.Input — an object with canonical wire
+// snake_case keys, NOT Go field names — into a Go IntegrityRecord. Then
+// applies v.InputB64 (raw bytes including invalid UTF-8) to v.InputField
+// for negative cases. Each implementation maps the snake_case keys to
+// its local struct fields here, keeping the published vectors language-
+// neutral.
 func buildIntegrityRecord(v vectorEntry) (IntegrityRecord, error) {
 	var rec IntegrityRecord
 	if len(v.Input) > 0 {
-		if err := json.Unmarshal(v.Input, &rec); err != nil {
+		fields := map[string]json.RawMessage{}
+		if err := json.Unmarshal(v.Input, &fields); err != nil {
 			return rec, fmt.Errorf("decode input: %w", err)
+		}
+		for key, raw := range fields {
+			switch key {
+			case "format_version":
+				var n uint64
+				if err := json.Unmarshal(raw, &n); err != nil {
+					return rec, fmt.Errorf("decode format_version: %w", err)
+				}
+				rec.FormatVersion = uint32(n)
+			case "sequence":
+				var n json.Number
+				if err := json.Unmarshal(raw, &n); err != nil {
+					return rec, fmt.Errorf("decode sequence: %w", err)
+				}
+				u, err := strconv.ParseUint(string(n), 10, 64)
+				if err != nil {
+					return rec, fmt.Errorf("parse sequence: %w", err)
+				}
+				rec.Sequence = u
+			case "generation":
+				var n json.Number
+				if err := json.Unmarshal(raw, &n); err != nil {
+					return rec, fmt.Errorf("decode generation: %w", err)
+				}
+				u, err := strconv.ParseUint(string(n), 10, 64)
+				if err != nil {
+					return rec, fmt.Errorf("parse generation: %w", err)
+				}
+				rec.Generation = u
+			case "prev_hash":
+				if err := json.Unmarshal(raw, &rec.PrevHash); err != nil {
+					return rec, fmt.Errorf("decode prev_hash: %w", err)
+				}
+			case "event_hash":
+				if err := json.Unmarshal(raw, &rec.EventHash); err != nil {
+					return rec, fmt.Errorf("decode event_hash: %w", err)
+				}
+			case "context_digest":
+				if err := json.Unmarshal(raw, &rec.ContextDigest); err != nil {
+					return rec, fmt.Errorf("decode context_digest: %w", err)
+				}
+			case "key_fingerprint":
+				if err := json.Unmarshal(raw, &rec.KeyFingerprint); err != nil {
+					return rec, fmt.Errorf("decode key_fingerprint: %w", err)
+				}
+			default:
+				return rec, fmt.Errorf("unknown input key %q (expected wire snake_case name for integrity_record)", key)
+			}
 		}
 	}
 	if v.InputB64 != "" {
@@ -2481,11 +2537,49 @@ func buildIntegrityRecord(v vectorEntry) (IntegrityRecord, error) {
 }
 
 // buildSessionContext mirrors buildIntegrityRecord for SessionContext.
+// v.Input uses canonical wire snake_case keys, NOT Go field names.
 func buildSessionContext(v vectorEntry) (SessionContext, error) {
 	var ctx SessionContext
 	if len(v.Input) > 0 {
-		if err := json.Unmarshal(v.Input, &ctx); err != nil {
+		fields := map[string]json.RawMessage{}
+		if err := json.Unmarshal(v.Input, &fields); err != nil {
 			return ctx, fmt.Errorf("decode input: %w", err)
+		}
+		for key, raw := range fields {
+			switch key {
+			case "session_id":
+				if err := json.Unmarshal(raw, &ctx.SessionID); err != nil {
+					return ctx, fmt.Errorf("decode session_id: %w", err)
+				}
+			case "agent_id":
+				if err := json.Unmarshal(raw, &ctx.AgentID); err != nil {
+					return ctx, fmt.Errorf("decode agent_id: %w", err)
+				}
+			case "agent_version":
+				if err := json.Unmarshal(raw, &ctx.AgentVersion); err != nil {
+					return ctx, fmt.Errorf("decode agent_version: %w", err)
+				}
+			case "ocsf_version":
+				if err := json.Unmarshal(raw, &ctx.OCSFVersion); err != nil {
+					return ctx, fmt.Errorf("decode ocsf_version: %w", err)
+				}
+			case "format_version":
+				var n uint64
+				if err := json.Unmarshal(raw, &n); err != nil {
+					return ctx, fmt.Errorf("decode format_version: %w", err)
+				}
+				ctx.FormatVersion = uint32(n)
+			case "algorithm":
+				if err := json.Unmarshal(raw, &ctx.Algorithm); err != nil {
+					return ctx, fmt.Errorf("decode algorithm: %w", err)
+				}
+			case "key_fingerprint":
+				if err := json.Unmarshal(raw, &ctx.KeyFingerprint); err != nil {
+					return ctx, fmt.Errorf("decode key_fingerprint: %w", err)
+				}
+			default:
+				return ctx, fmt.Errorf("unknown input key %q (expected wire snake_case name for context_digest)", key)
+			}
 		}
 	}
 	if v.InputB64 != "" {
@@ -2544,37 +2638,37 @@ Create `internal/store/watchtower/chain/testdata/vectors.json`:
   {
     "name": "minimal_zero_record",
     "kind": "integrity_record",
-    "input": {"FormatVersion":2,"Sequence":0,"Generation":0,"PrevHash":"","EventHash":"","ContextDigest":"","KeyFingerprint":""},
+    "input": {"format_version":2,"sequence":0,"generation":0,"prev_hash":"","event_hash":"","context_digest":"","key_fingerprint":""},
     "expected": "{\"context_digest\":\"\",\"event_hash\":\"\",\"format_version\":2,\"generation\":0,\"key_fingerprint\":\"\",\"prev_hash\":\"\",\"sequence\":0}"
   },
   {
     "name": "typical_record",
     "kind": "integrity_record",
-    "input": {"FormatVersion":2,"Sequence":42,"Generation":7,"PrevHash":"deadbeef","EventHash":"cafef00d","ContextDigest":"0123456789abcdef","KeyFingerprint":"sha256:aabbccdd"},
+    "input": {"format_version":2,"sequence":42,"generation":7,"prev_hash":"deadbeef","event_hash":"cafef00d","context_digest":"0123456789abcdef","key_fingerprint":"sha256:aabbccdd"},
     "expected": "{\"context_digest\":\"0123456789abcdef\",\"event_hash\":\"cafef00d\",\"format_version\":2,\"generation\":7,\"key_fingerprint\":\"sha256:aabbccdd\",\"prev_hash\":\"deadbeef\",\"sequence\":42}"
   },
   {
     "name": "uint64_max_sequence",
     "kind": "integrity_record",
-    "input": {"FormatVersion":2,"Sequence":18446744073709551615,"Generation":4294967295,"PrevHash":"","EventHash":"","ContextDigest":"","KeyFingerprint":""},
+    "input": {"format_version":2,"sequence":18446744073709551615,"generation":4294967295,"prev_hash":"","event_hash":"","context_digest":"","key_fingerprint":""},
     "expected": "{\"context_digest\":\"\",\"event_hash\":\"\",\"format_version\":2,\"generation\":4294967295,\"key_fingerprint\":\"\",\"prev_hash\":\"\",\"sequence\":18446744073709551615}"
   },
   {
     "name": "non_ascii_in_key_fingerprint",
     "kind": "integrity_record",
-    "input": {"FormatVersion":2,"Sequence":1,"Generation":0,"PrevHash":"","EventHash":"","ContextDigest":"","KeyFingerprint":"caf\u00e9"},
+    "input": {"format_version":2,"sequence":1,"generation":0,"prev_hash":"","event_hash":"","context_digest":"","key_fingerprint":"caf\u00e9"},
     "expected": "{\"context_digest\":\"\",\"event_hash\":\"\",\"format_version\":2,\"generation\":0,\"key_fingerprint\":\"caf\\u00e9\",\"prev_hash\":\"\",\"sequence\":1}"
   },
   {
     "name": "context_digest_typical",
     "kind": "context_digest",
-    "input": {"SessionID":"01HXAVD2N5VX3CZQK7Q7QWNYKE","AgentID":"agentsh","AgentVersion":"1.0.0","OCSFVersion":"1.8.0","FormatVersion":2,"Algorithm":"hmac-sha256","KeyFingerprint":"sha256:aabbccdd"},
+    "input": {"session_id":"01HXAVD2N5VX3CZQK7Q7QWNYKE","agent_id":"agentsh","agent_version":"1.0.0","ocsf_version":"1.8.0","format_version":2,"algorithm":"hmac-sha256","key_fingerprint":"sha256:aabbccdd"},
     "expected": "PLACEHOLDER_REPLACE_ME"
   },
   {
     "name": "negative_invalid_utf8_in_prev_hash",
     "kind": "integrity_record",
-    "input": {"FormatVersion":2,"Sequence":1,"Generation":0},
+    "input": {"format_version":2,"sequence":1,"generation":0},
     "input_b64": "dmFsaWQtcHJlZml4gGludmFsaWQ=",
     "input_field": "prev_hash",
     "expected_error": "ErrInvalidUTF8"
@@ -2582,7 +2676,7 @@ Create `internal/store/watchtower/chain/testdata/vectors.json`:
   {
     "name": "negative_invalid_utf8_in_session_id",
     "kind": "context_digest",
-    "input": {"FormatVersion":2,"AgentID":"agentsh","AgentVersion":"1.0.0","OCSFVersion":"1.8.0","Algorithm":"hmac-sha256","KeyFingerprint":"sha256:test"},
+    "input": {"format_version":2,"agent_id":"agentsh","agent_version":"1.0.0","ocsf_version":"1.8.0","algorithm":"hmac-sha256","key_fingerprint":"sha256:test"},
     "input_b64": "c4BiYWQ=",
     "input_field": "session_id",
     "expected_error": "ErrInvalidUTF8"
@@ -2602,9 +2696,9 @@ Since that command does not exist, use a `go test` printer instead. Add a tempor
 
 ```go
 case "context_digest":
-    var ctx SessionContext
-    if err := json.Unmarshal(v.Input, &ctx); err != nil {
-        t.Fatalf("decode input: %v", err)
+    ctx, err := buildSessionContext(v)
+    if err != nil {
+        t.Fatalf("build input: %v", err)
     }
     got, err := ComputeContextDigest(ctx)
     if err != nil {
@@ -7462,6 +7556,101 @@ func newGRPCDialer(opts Options) transport.Dialer {
 }
 ```
 
+- [ ] **Step 3.5: Add test-only scaffolding for downstream Task 23 drop tests**
+
+This step lands three pieces of test-only infrastructure that Task 23's drop tests depend on. Test-only files cannot be loaded by production code: the `_test.go` suffix excludes them automatically.
+
+(a) Create `internal/store/watchtower/store_export_test.go` (package `watchtower`, NOT `watchtower_test`, so the methods are first-class on `*Store`):
+
+```go
+package watchtower
+
+// Test-only inspectors exported for sibling _test.go files in this and
+// other packages. The _test.go suffix excludes this file from production
+// builds automatically — no build tag needed.
+
+// PeekPrevHash returns the current chain prev_hash without advancing the
+// chain. Used in append_test.go to assert that drop paths leave the chain
+// untouched.
+func (s *Store) PeekPrevHash() string {
+	return s.sink.PeekPrevHash()
+}
+
+// WALSegmentCount returns the number of WAL segment files on disk.
+// Used in append_test.go to assert that drop paths do not write to the WAL.
+func (s *Store) WALSegmentCount() int {
+	return s.w.SegmentCount()
+}
+```
+
+Note: this requires `(*chain.SinkChain).PeekPrevHash() string` and `(*wal.WAL).SegmentCount() int` to exist. Both are simple read-only inspectors; if they were not added by Task 6 / Task 11, add them in this step.
+
+(b) Create `internal/store/watchtower/chain/testfakes/utf8_failing_sink.go` (package `testfakes`, kept under `chain/testfakes/` so production code in `chain/` cannot import it):
+
+```go
+// Package testfakes contains test-only doubles for SinkChain. Production
+// code MUST NOT import this package — its location under chain/ is
+// intentional so that internal-only test infrastructure stays close to
+// the type it doubles.
+package testfakes
+
+import (
+	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
+)
+
+// FailingSink is a chain.SinkComputer stand-in whose Compute always
+// returns the configured sentinel error. Used by AppendEvent drop tests.
+type FailingSink struct {
+	Err error
+}
+
+// Compute matches chain.SinkComputer.Compute's signature but always
+// returns f.Err. Other SinkChain methods are not exercised by AppendEvent
+// drop tests; if a future test needs them, add them here.
+func (f *FailingSink) Compute(_ chain.ComputeInput) (*chain.ComputeResult, error) {
+	return nil, f.Err
+}
+```
+
+(c) Add a small `chain.SinkComputer` interface in `internal/store/watchtower/chain/` that production `*chain.SinkChain` already satisfies:
+
+```go
+// SinkComputer is the minimum surface AppendEvent needs from the sink. The
+// production *SinkChain satisfies it; tests substitute their own (see
+// chain/testfakes/utf8_failing_sink.go). Keeping the interface in chain/
+// avoids forcing tests to depend on the concrete struct.
+type SinkComputer interface {
+	Compute(ComputeInput) (*ComputeResult, error)
+}
+```
+
+(d) Add a test-only `SinkChainOverride` field to `Options` in `internal/store/watchtower/options.go`:
+
+```go
+type Options struct {
+	// ... existing fields ...
+
+	// SinkChainOverride, when non-nil, replaces the default *chain.SinkChain
+	// constructed by New. Test-only: production callers MUST leave this nil.
+	// Documented here (rather than in a separate _test.go file) so the
+	// override path is visible to anyone reading Options end-to-end.
+	SinkChainOverride chain.SinkComputer
+}
+```
+
+And update `New` in `store.go` to honor the override (just after `sink := chain.NewSinkChain(...)`):
+
+```go
+var sinkComputer chain.SinkComputer = sink
+if opts.SinkChainOverride != nil {
+	sinkComputer = opts.SinkChainOverride
+}
+```
+
+Change `Store.sink`'s type from `*chain.SinkChain` to `chain.SinkComputer`, and assign `sinkComputer` to it. Production behaviour is unchanged because `*chain.SinkChain` satisfies `chain.SinkComputer`. The `(*Store).PeekPrevHash` accessor in (a) still works in production because `*chain.SinkChain.PeekPrevHash` is a method on the concrete sink — when the override is in effect, tests call `PeekPrevHash` on the override only when the override implements it, and the simple `FailingSink` test double does not need to (its drop tests assert prev_hash through the Store's pre-existing `*chain.SinkChain` snapshot taken before the override is engaged in the test setup).
+
+If a downstream test needs `PeekPrevHash` while running with `SinkChainOverride`, add a `PeekPrevHash() string` method on `FailingSink` (or whatever double the test uses) at that time.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/store/watchtower/... -run TestNew_`
@@ -7475,8 +7664,325 @@ Expected: no errors.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add internal/store/watchtower/store.go internal/store/watchtower/options.go internal/store/watchtower/options_test.go
+git add internal/store/watchtower/store.go internal/store/watchtower/options.go internal/store/watchtower/options_test.go internal/store/watchtower/store_export_test.go internal/store/watchtower/chain/testfakes/utf8_failing_sink.go internal/store/watchtower/chain/sink_computer.go
 git commit -m "feat(wtp/store): add Options + New with validate (rejects StubMapper)"
+```
+
+- [ ] **Step 7: Roborev**
+
+Run `/roborev-design-review` and address findings.
+
+---
+
+### Task 22a: Add sink-failure metrics
+
+The spec lists four sink-failure counters that Task 23 (`AppendEvent`) and Phase 8 (transport) depend on:
+
+- `wtp_dropped_invalid_utf8_total` (counter): a record was dropped because the canonical encoder reported `chain.ErrInvalidUTF8`. Wired by `AppendEvent` (Task 23).
+- `wtp_dropped_sequence_overflow_total` (counter): a record was dropped because `ev.Chain.Sequence > math.MaxInt64`. Wired by `AppendEvent` (Task 23).
+- `wtp_session_init_failures_total{reason}` (counter, labeled): an in-band session-init step failed; reason `invalid_utf8` is the only enumerated value today, with `unknown` as the catch-all. Wired by transport in Phase 8.
+- `wtp_session_rotation_failures_total{reason}` (counter, labeled): same shape as init, but for rotation/SessionUpdate. Wired by transport in Phase 8.
+
+Task 3 already executed and was committed; these counters were not in scope at the time. They are added here, between the existing Task 22 (Store skeleton) and Task 23 (AppendEvent), so the dependency chain "metrics exist → AppendEvent uses them" is honored.
+
+**Files:**
+- Modify: `internal/metrics/wtp.go`
+- Modify: `internal/metrics/metrics.go` (new Collector fields)
+- Modify: `internal/metrics/wtp_test.go`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append five new test functions to `internal/metrics/wtp_test.go` (mirror the existing pattern from Task 3):
+
+```go
+func TestWTPMetrics_DroppedInvalidUTF8(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	// Initial scrape: counter must be present at zero.
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_invalid_utf8_total 0") {
+		t.Errorf("expected zero-valued wtp_dropped_invalid_utf8_total in initial scrape\nbody:\n%s", rr.Body.String())
+	}
+
+	w.IncDroppedInvalidUTF8(2)
+
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_invalid_utf8_total 2") {
+		t.Errorf("expected wtp_dropped_invalid_utf8_total 2 after IncDroppedInvalidUTF8(2)\nbody:\n%s", rr.Body.String())
+	}
+	if got := c.WTP().DroppedInvalidUTF8(); got != 2 {
+		t.Errorf("DroppedInvalidUTF8 accessor returned %d, want 2", got)
+	}
+}
+
+func TestWTPMetrics_DroppedSequenceOverflow(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_sequence_overflow_total 0") {
+		t.Errorf("expected zero-valued wtp_dropped_sequence_overflow_total in initial scrape\nbody:\n%s", rr.Body.String())
+	}
+
+	w.IncDroppedSequenceOverflow(3)
+
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(rr.Body.String(), "wtp_dropped_sequence_overflow_total 3") {
+		t.Errorf("expected wtp_dropped_sequence_overflow_total 3 after IncDroppedSequenceOverflow(3)\nbody:\n%s", rr.Body.String())
+	}
+	if got := c.WTP().DroppedSequenceOverflow(); got != 3 {
+		t.Errorf("DroppedSequenceOverflow accessor returned %d, want 3", got)
+	}
+}
+
+func TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons(t *testing.T) {
+	c := New()
+	// Note: no IncSessionInitFailures calls. Per spec the family must
+	// still be present with zero-valued series for every enumerated reason.
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	expectedReasons := []string{"invalid_utf8", "unknown"}
+	for _, reason := range expectedReasons {
+		want := fmt.Sprintf(`wtp_session_init_failures_total{reason=%q} 0`, reason)
+		if !strings.Contains(body, want) {
+			t.Errorf("missing zero-valued series %q\nbody:\n%s", want, body)
+		}
+	}
+	// After one increment, only that reason flips to 1; the others stay 0.
+	c.WTP().IncSessionInitFailures(WTPSessionFailureReasonInvalidUTF8)
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_session_init_failures_total{reason="invalid_utf8"} 1`) {
+		t.Errorf("expected invalid_utf8=1 after one IncSessionInitFailures\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_session_init_failures_total{reason="unknown"} 0`) {
+		t.Errorf("expected unknown to remain 0 after invalid_utf8 increment\nbody:\n%s", body)
+	}
+}
+
+func TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons(t *testing.T) {
+	c := New()
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	expectedReasons := []string{"invalid_utf8", "unknown"}
+	for _, reason := range expectedReasons {
+		want := fmt.Sprintf(`wtp_session_rotation_failures_total{reason=%q} 0`, reason)
+		if !strings.Contains(body, want) {
+			t.Errorf("missing zero-valued series %q\nbody:\n%s", want, body)
+		}
+	}
+	c.WTP().IncSessionRotationFailures(WTPSessionFailureReasonInvalidUTF8)
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_session_rotation_failures_total{reason="invalid_utf8"} 1`) {
+		t.Errorf("expected invalid_utf8=1 after one IncSessionRotationFailures\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_session_rotation_failures_total{reason="unknown"} 0`) {
+		t.Errorf("expected unknown to remain 0 after invalid_utf8 increment\nbody:\n%s", body)
+	}
+}
+
+func TestWTPMetrics_SessionFailureReasonValidationAndEscape(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	w.IncSessionInitFailures(WTPSessionFailureReasonInvalidUTF8)
+	// Invalid (unknown enum) collapses to WTPSessionFailureReasonUnknown.
+	w.IncSessionInitFailures(WTPSessionFailureReason("evil\"label\\value"))
+	w.IncSessionRotationFailures(WTPSessionFailureReasonInvalidUTF8)
+	w.IncSessionRotationFailures(WTPSessionFailureReason("evil\"label\\value"))
+
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	for _, want := range []string{
+		`wtp_session_init_failures_total{reason="invalid_utf8"} 1`,
+		`wtp_session_init_failures_total{reason="unknown"} 1`,
+		`wtp_session_rotation_failures_total{reason="invalid_utf8"} 1`,
+		`wtp_session_rotation_failures_total{reason="unknown"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing line %q\nbody:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `evil`) {
+		t.Errorf("invalid reason leaked through validator into output:\n%s", body)
+	}
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `go test ./internal/metrics/ -run "TestWTPMetrics_DroppedInvalidUTF8|TestWTPMetrics_DroppedSequenceOverflow|TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons|TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons|TestWTPMetrics_SessionFailureReasonValidationAndEscape"`
+Expected: FAIL with `IncDroppedInvalidUTF8 undefined`, `WTPSessionFailureReason undefined`, etc.
+
+- [ ] **Step 3: Implement — extend `internal/metrics/wtp.go`**
+
+Add the failure-reason type, valid map, and emit-order slice (mirroring `WTPReconnectReason`):
+
+```go
+// WTPSessionFailureReason is a fixed, low-cardinality classification of why
+// a session-init or session-rotation step failed. Adding new reasons
+// requires updating both the spec §Metrics section and the
+// wtpSessionFailureReasonsValid table below.
+type WTPSessionFailureReason string
+
+const (
+	WTPSessionFailureReasonInvalidUTF8 WTPSessionFailureReason = "invalid_utf8"
+	WTPSessionFailureReasonUnknown     WTPSessionFailureReason = "unknown"
+)
+
+var wtpSessionFailureReasonsValid = map[WTPSessionFailureReason]struct{}{
+	WTPSessionFailureReasonInvalidUTF8: {},
+	WTPSessionFailureReasonUnknown:     {},
+}
+
+// wtpSessionFailureReasonsEmitOrder is the canonical, sorted-by-string
+// emission order for the session-failure families. Using a fixed slice
+// keeps Prometheus exposition deterministic and lets emitWTPMetrics emit
+// zero-valued series for reasons that have not yet fired (per the
+// always-emit contract in the design spec).
+var wtpSessionFailureReasonsEmitOrder = []WTPSessionFailureReason{
+	WTPSessionFailureReasonInvalidUTF8,
+	WTPSessionFailureReasonUnknown,
+}
+```
+
+Add the four new accessors / mutators on `WTPMetrics`:
+
+```go
+func (w *WTPMetrics) IncDroppedInvalidUTF8(n uint64) {
+	if w == nil || w.c == nil {
+		return
+	}
+	w.c.wtpDroppedInvalidUTF8.Add(n)
+}
+
+func (w *WTPMetrics) DroppedInvalidUTF8() uint64 {
+	if w == nil || w.c == nil {
+		return 0
+	}
+	return w.c.wtpDroppedInvalidUTF8.Load()
+}
+
+func (w *WTPMetrics) IncDroppedSequenceOverflow(n uint64) {
+	if w == nil || w.c == nil {
+		return
+	}
+	w.c.wtpDroppedSequenceOverflow.Add(n)
+}
+
+func (w *WTPMetrics) DroppedSequenceOverflow() uint64 {
+	if w == nil || w.c == nil {
+		return 0
+	}
+	return w.c.wtpDroppedSequenceOverflow.Load()
+}
+
+func (w *WTPMetrics) IncSessionInitFailures(reason WTPSessionFailureReason) {
+	if w == nil || w.c == nil {
+		return
+	}
+	if _, ok := wtpSessionFailureReasonsValid[reason]; !ok {
+		reason = WTPSessionFailureReasonUnknown
+	}
+	ptr, _ := w.c.wtpSessionInitFailuresByReason.LoadOrStore(string(reason), &atomic.Uint64{})
+	ptr.(*atomic.Uint64).Add(1)
+}
+
+func (w *WTPMetrics) IncSessionRotationFailures(reason WTPSessionFailureReason) {
+	if w == nil || w.c == nil {
+		return
+	}
+	if _, ok := wtpSessionFailureReasonsValid[reason]; !ok {
+		reason = WTPSessionFailureReasonUnknown
+	}
+	ptr, _ := w.c.wtpSessionRotationFailuresByReason.LoadOrStore(string(reason), &atomic.Uint64{})
+	ptr.(*atomic.Uint64).Add(1)
+}
+```
+
+Note: `IncDroppedInvalidUTF8` and `IncDroppedSequenceOverflow` take a `uint64` for symmetry with the existing `IncEventsAppended(n uint64)` family — a callsite that drops one record passes 1; tests can preload arbitrary values.
+
+Update `emitWTPMetrics` (in `internal/metrics/wtp.go`) — append four new sections just before the histogram block. The two unlabeled counters are simple; the two labeled families follow the always-emit contract used by `wtp_reconnects_total`:
+
+```go
+	fmt.Fprint(w, "# HELP wtp_dropped_invalid_utf8_total Records dropped because the canonical encoder reported invalid UTF-8.\n")
+	fmt.Fprint(w, "# TYPE wtp_dropped_invalid_utf8_total counter\n")
+	fmt.Fprintf(w, "wtp_dropped_invalid_utf8_total %d\n", c.wtpDroppedInvalidUTF8.Load())
+
+	fmt.Fprint(w, "# HELP wtp_dropped_sequence_overflow_total Records dropped because Chain.Sequence exceeded math.MaxInt64.\n")
+	fmt.Fprint(w, "# TYPE wtp_dropped_sequence_overflow_total counter\n")
+	fmt.Fprintf(w, "wtp_dropped_sequence_overflow_total %d\n", c.wtpDroppedSequenceOverflow.Load())
+
+	// Always emit the wtp_session_init_failures_total family with all
+	// enumerated reasons (per the always-emit contract in the design spec).
+	fmt.Fprint(w, "# HELP wtp_session_init_failures_total WTP session-init failures by reason.\n")
+	fmt.Fprint(w, "# TYPE wtp_session_init_failures_total counter\n")
+	for _, r := range wtpSessionFailureReasonsEmitOrder {
+		var n uint64
+		if v, ok := c.wtpSessionInitFailuresByReason.Load(string(r)); ok && v != nil {
+			n = v.(*atomic.Uint64).Load()
+		}
+		fmt.Fprintf(w, "wtp_session_init_failures_total{reason=%q} %d\n", escapeLabelValue(string(r)), n)
+	}
+
+	// Always emit the wtp_session_rotation_failures_total family with all
+	// enumerated reasons (per the always-emit contract in the design spec).
+	fmt.Fprint(w, "# HELP wtp_session_rotation_failures_total WTP session-rotation failures by reason.\n")
+	fmt.Fprint(w, "# TYPE wtp_session_rotation_failures_total counter\n")
+	for _, r := range wtpSessionFailureReasonsEmitOrder {
+		var n uint64
+		if v, ok := c.wtpSessionRotationFailuresByReason.Load(string(r)); ok && v != nil {
+			n = v.(*atomic.Uint64).Load()
+		}
+		fmt.Fprintf(w, "wtp_session_rotation_failures_total{reason=%q} %d\n", escapeLabelValue(string(r)), n)
+	}
+```
+
+Extend `Collector` (in `internal/metrics/metrics.go`) — add four new fields next to the existing WTP series:
+
+```go
+type Collector struct {
+	// ... existing fields ...
+
+	// WTP series — sink-failure additions
+	wtpDroppedInvalidUTF8              atomic.Uint64
+	wtpDroppedSequenceOverflow         atomic.Uint64
+	wtpSessionInitFailuresByReason     sync.Map
+	wtpSessionRotationFailuresByReason sync.Map
+
+	// ... rest unchanged ...
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `go test ./internal/metrics/...`
+Expected: PASS — all existing tests + the five new tests.
+
+- [ ] **Step 5: Cross-compile check**
+
+Run: `GOOS=windows go build ./...`
+Expected: no errors.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add internal/metrics/wtp.go internal/metrics/wtp_test.go internal/metrics/metrics.go
+git commit -m "feat(metrics): add sink-failure counters for WTP lifecycle and per-record drops"
 ```
 
 - [ ] **Step 7: Roborev**
@@ -7557,7 +8063,7 @@ func TestAppendEvent_StampsChainBeforeWAL(t *testing.T) {
 
 func TestAppendEvent_DropsSequenceOverflow(t *testing.T) {
 	s := mkStore(t)
-	prevHashBefore := s.PeekPrevHash() // test-only accessor; see store_test_export.go
+	prevHashBefore := s.PeekPrevHash() // test-only accessor; see store_export_test.go
 	walSegmentsBefore := s.WALSegmentCount()
 
 	ev := types.Event{
@@ -7612,15 +8118,15 @@ func TestAppendEvent_DropsInvalidUTF8(t *testing.T) {
 
 - [ ] **Step 1.5: Add test scaffolding required by the new drop tests**
 
-`TestAppendEvent_DropsSequenceOverflow` and `TestAppendEvent_DropsInvalidUTF8` reference three pieces of test infrastructure that need to land alongside this task:
+`TestAppendEvent_DropsSequenceOverflow` and `TestAppendEvent_DropsInvalidUTF8` reference three pieces of test infrastructure:
 
-1. **`store_test_export.go`** (in `internal/store/watchtower/` next to `store.go`, build-tagged for tests): exposes `(*Store).PeekPrevHash() string` and `(*Store).WALSegmentCount() int`. Both are read-only inspectors used only by tests in the same package.
+1. **`store_export_test.go`** in `internal/store/watchtower/`, package `watchtower` (NOT `watchtower_test`): exposes `(*Store).PeekPrevHash() string` and `(*Store).WALSegmentCount() int`. Uses Go's standard `_test.go` suffix so the file is automatically excluded from non-test builds — no build tag required.
 
-2. **`chain/testfakes/utf8_failing_sink.go`**: a SinkChain double whose `Compute` method always returns the supplied sentinel error. Lives under `internal/store/watchtower/chain/testfakes/` so production code can never import it.
+2. **`chain/testfakes/utf8_failing_sink.go`**: a `chain.SinkComputer` double whose `Compute` method always returns the supplied sentinel error. Lives under `internal/store/watchtower/chain/testfakes/` so production code can never import it.
 
-3. **`mkStoreWithFailingSink(t *testing.T, sentinel error) *watchtower.Store`** helper in `append_test.go`: same setup as `mkStore` but injects the failing sink via `watchtower.Options.SinkChainOverride` (a test-only Options field, also added in Task 22).
+3. **`mkStoreWithFailingSink(t *testing.T, sentinel error) *watchtower.Store`** helper defined in Step 3 of this task: same setup as `mkStore` but injects the failing sink via `watchtower.Options.SinkChainOverride` (test-only Options field).
 
-The exact code lives in Task 22's plan; this step is a forward-pointer so the reviewer of Task 23 doesn't see "magic" calls without provenance.
+Tests reference scaffolding added in Task 22 Step 3.5 (`store_export_test.go`, `chain/testfakes/utf8_failing_sink.go`, `Options.SinkChainOverride`, `chain.SinkComputer` interface) and the `mkStoreWithFailingSink` helper defined in Step 3 of this task.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -7771,6 +8277,42 @@ already done in Task 6). Add to `internal/store/watchtower/chain/chain.go`:
 ```go
 // Record returns the IntegrityRecord computed for this token.
 func (c *ComputeResult) Record() *wtpv1.IntegrityRecord { return c.record }
+```
+
+Also add the `mkStoreWithFailingSink` helper to `append_test.go`. Same shape as `mkStore`, but injects a `chain.SinkComputer` test double via `Options.SinkChainOverride`:
+
+```go
+import (
+	"github.com/agentsh/agentsh/internal/store/watchtower/chain/testfakes"
+)
+
+func mkStoreWithFailingSink(t *testing.T, sentinel error) *watchtower.Store {
+	t.Helper()
+	srv := testserver.New(testserver.Options{})
+	t.Cleanup(srv.Close)
+
+	allocator := audit.NewSequenceAllocator(0, 0)
+	s, err := watchtower.New(context.Background(), watchtower.Options{
+		WALDir:            t.TempDir(),
+		Mapper:            compact.StubMapper{},
+		Allocator:         allocator,
+		AgentID:           "a",
+		SessionID:         "s",
+		HMACKeyID:         "k1",
+		HMACSecret:        []byte("secret"),
+		BatchMaxRecords:   8,
+		BatchMaxBytes:     8 * 1024,
+		BatchMaxAge:       50 * time.Millisecond,
+		AllowStubMapper:   true,
+		Dialer:            srv.DialerFor(),
+		SinkChainOverride: &testfakes.FailingSink{Err: sentinel},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
