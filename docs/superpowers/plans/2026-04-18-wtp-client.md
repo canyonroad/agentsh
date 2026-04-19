@@ -5712,22 +5712,33 @@ import (
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
 )
 
-// fakeConn implements transport.Conn for tests.
+// fakeConn implements transport.Conn for tests. CloseSend (half-close)
+// and Close (full teardown) are tracked separately so tests can pin
+// which lifecycle hook the production code actually invoked.
 type fakeConn struct {
-	sendCh chan *wtpv1.ClientMessage
-	recvCh chan *wtpv1.ServerMessage
-	closed chan struct{}
+	sendCh          chan *wtpv1.ClientMessage
+	recvCh          chan *wtpv1.ServerMessage
+	closeSendCalled chan struct{}
+	closed          chan struct{}
+	closeSendCalls  int
+	closeCalls      int
+	sendErr         error
+	recvErr         error
 }
 
 func newFakeConn() *fakeConn {
 	return &fakeConn{
-		sendCh: make(chan *wtpv1.ClientMessage, 64),
-		recvCh: make(chan *wtpv1.ServerMessage, 64),
-		closed: make(chan struct{}),
+		sendCh:          make(chan *wtpv1.ClientMessage, 64),
+		recvCh:          make(chan *wtpv1.ServerMessage, 64),
+		closeSendCalled: make(chan struct{}),
+		closed:          make(chan struct{}),
 	}
 }
 
 func (f *fakeConn) Send(msg *wtpv1.ClientMessage) error {
+	if f.sendErr != nil {
+		return f.sendErr
+	}
 	select {
 	case f.sendCh <- msg:
 		return nil
@@ -5737,6 +5748,9 @@ func (f *fakeConn) Send(msg *wtpv1.ClientMessage) error {
 }
 
 func (f *fakeConn) Recv() (*wtpv1.ServerMessage, error) {
+	if f.recvErr != nil {
+		return nil, f.recvErr
+	}
 	select {
 	case msg := <-f.recvCh:
 		return msg, nil
@@ -5746,7 +5760,24 @@ func (f *fakeConn) Recv() (*wtpv1.ServerMessage, error) {
 }
 
 func (f *fakeConn) CloseSend() error {
-	close(f.closed)
+	f.closeSendCalls++
+	select {
+	case <-f.closeSendCalled:
+		// already half-closed; remain idempotent
+	default:
+		close(f.closeSendCalled)
+	}
+	return nil
+}
+
+func (f *fakeConn) Close() error {
+	f.closeCalls++
+	select {
+	case <-f.closed:
+		// already closed; remain idempotent
+	default:
+		close(f.closed)
+	}
 	return nil
 }
 
