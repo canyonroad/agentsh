@@ -634,16 +634,16 @@ func TestSinkChain_Compute_FirstEntryUsesEmptyPrev(t *testing.T) {
 	c, key := newTestSinkChain(t)
 	payload := []byte(`{"k":"v"}`)
 
-	entryHash, prevHash, err := c.Compute(IntegrityFormatVersion, 0, 0, payload)
+	result, err := c.Compute(IntegrityFormatVersion, 0, 0, payload)
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}
-	if prevHash != "" {
-		t.Errorf("first Compute: prevHash = %q, want empty", prevHash)
+	if result.PrevHash != "" {
+		t.Errorf("first Compute: prevHash = %q, want empty", result.PrevHash)
 	}
 	want := computeExpectedHash(t, key, IntegrityFormatVersion, 0, "", payload)
-	if entryHash != want {
-		t.Errorf("entryHash = %q, want %q", entryHash, want)
+	if result.EntryHash != want {
+		t.Errorf("entryHash = %q, want %q", result.EntryHash, want)
 	}
 }
 
@@ -651,41 +651,43 @@ func TestSinkChain_Compute_IsPure_NoMutationWithoutCommit(t *testing.T) {
 	c, _ := newTestSinkChain(t)
 	payload := []byte(`{"k":"v"}`)
 
-	first, _, err := c.Compute(IntegrityFormatVersion, 0, 0, payload)
+	first, err := c.Compute(IntegrityFormatVersion, 0, 0, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Compute again without Commit — must produce the SAME entryHash, since
 	// prev_hash hasn't moved.
-	second, _, err := c.Compute(IntegrityFormatVersion, 0, 0, payload)
+	second, err := c.Compute(IntegrityFormatVersion, 0, 0, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second {
-		t.Errorf("Compute mutated chain state: first=%q second=%q", first, second)
+	if first.EntryHash != second.EntryHash {
+		t.Errorf("Compute mutated chain state: first=%q second=%q", first.EntryHash, second.EntryHash)
 	}
 }
 
 func TestSinkChain_Commit_AdvancesPrevHash(t *testing.T) {
 	c, key := newTestSinkChain(t)
 
-	first, _, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"a":1}`))
+	first, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"a":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Commit(0, first)
+	if err := c.Commit(first); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
 
-	second, prev, err := c.Compute(IntegrityFormatVersion, 1, 0, []byte(`{"b":2}`))
+	second, err := c.Compute(IntegrityFormatVersion, 1, 0, []byte(`{"b":2}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prev != first {
-		t.Errorf("after Commit: prev_hash = %q, want %q", prev, first)
+	if second.PrevHash != first.EntryHash {
+		t.Errorf("after Commit: prev_hash = %q, want %q", second.PrevHash, first.EntryHash)
 	}
-	want := computeExpectedHash(t, key, IntegrityFormatVersion, 1, first, []byte(`{"b":2}`))
-	if second != want {
-		t.Errorf("second entryHash = %q, want %q", second, want)
+	want := computeExpectedHash(t, key, IntegrityFormatVersion, 1, first.EntryHash, []byte(`{"b":2}`))
+	if second.EntryHash != want {
+		t.Errorf("second entryHash = %q, want %q", second.EntryHash, want)
 	}
 }
 
@@ -693,51 +695,55 @@ func TestSinkChain_Compute_GenerationRollover_ResetsPrevToEmpty(t *testing.T) {
 	c, key := newTestSinkChain(t)
 
 	// Establish gen=0 chain with one committed entry.
-	h0, _, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"x":1}`))
+	r0, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"x":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Commit(0, h0)
+	if err := c.Commit(r0); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
 
 	// Compute at gen=1 — prev_hash should be "" automatically.
-	h1, prev, err := c.Compute(IntegrityFormatVersion, 0, 1, []byte(`{"y":2}`))
+	r1, err := c.Compute(IntegrityFormatVersion, 0, 1, []byte(`{"y":2}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prev != "" {
-		t.Errorf("after gen rollover: prev_hash = %q, want empty", prev)
+	if r1.PrevHash != "" {
+		t.Errorf("after gen rollover: prev_hash = %q, want empty", r1.PrevHash)
 	}
 	want := computeExpectedHash(t, key, IntegrityFormatVersion, 0, "", []byte(`{"y":2}`))
-	if h1 != want {
-		t.Errorf("rolled entryHash = %q, want %q", h1, want)
+	if r1.EntryHash != want {
+		t.Errorf("rolled entryHash = %q, want %q", r1.EntryHash, want)
 	}
 
-	// Until Commit(1, h1), the chain's recorded generation is still 0.
+	// Until Commit(r1), the chain's recorded generation is still 0.
 	state := c.State()
 	if state.Generation != 0 {
 		t.Errorf("State.Generation before Commit = %d, want 0", state.Generation)
 	}
 
-	c.Commit(1, h1)
+	if err := c.Commit(r1); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
 	state = c.State()
 	if state.Generation != 1 {
 		t.Errorf("State.Generation after Commit = %d, want 1", state.Generation)
 	}
-	if state.PrevHash != h1 {
-		t.Errorf("State.PrevHash = %q, want %q", state.PrevHash, h1)
+	if state.PrevHash != r1.EntryHash {
+		t.Errorf("State.PrevHash = %q, want %q", state.PrevHash, r1.EntryHash)
 	}
 }
 
 func TestSinkChain_Fatal_LatchesAndBlocksFurtherCompute(t *testing.T) {
 	c, _ := newTestSinkChain(t)
 
-	if _, _, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"a":1}`)); err != nil {
+	if _, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"a":1}`)); err != nil {
 		t.Fatal(err)
 	}
 
 	c.Fatal(errors.New("ambiguous WAL write"))
 
-	_, _, err := c.Compute(IntegrityFormatVersion, 1, 0, []byte(`{"b":2}`))
+	_, err := c.Compute(IntegrityFormatVersion, 1, 0, []byte(`{"b":2}`))
 	if !errors.Is(err, ErrFatalIntegrity) {
 		t.Fatalf("Compute after Fatal: err = %v, want ErrFatalIntegrity", err)
 	}
@@ -746,20 +752,24 @@ func TestSinkChain_Fatal_LatchesAndBlocksFurtherCompute(t *testing.T) {
 func TestSinkChain_State_Restore_RoundTrip(t *testing.T) {
 	c, _ := newTestSinkChain(t)
 
-	h0, _, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"a":1}`))
+	r0, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"a":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Commit(0, h0)
-	h1, _, err := c.Compute(IntegrityFormatVersion, 1, 0, []byte(`{"b":2}`))
+	if err := c.Commit(r0); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	r1, err := c.Compute(IntegrityFormatVersion, 1, 0, []byte(`{"b":2}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Commit(0, h1)
+	if err := c.Commit(r1); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
 
 	state := c.State()
-	if state.Generation != 0 || state.PrevHash != h1 {
-		t.Fatalf("State() = %+v, want {Generation:0 PrevHash:%q}", state, h1)
+	if state.Generation != 0 || state.PrevHash != r1.EntryHash {
+		t.Fatalf("State() = %+v, want {Generation:0 PrevHash:%q}", state, r1.EntryHash)
 	}
 
 	d, _ := newTestSinkChain(t)
@@ -769,16 +779,16 @@ func TestSinkChain_State_Restore_RoundTrip(t *testing.T) {
 
 	// Continue the chain from d — same key, so same entry hash as if c
 	// had continued.
-	cNext, _, err := c.Compute(IntegrityFormatVersion, 2, 0, []byte(`{"c":3}`))
+	cNext, err := c.Compute(IntegrityFormatVersion, 2, 0, []byte(`{"c":3}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dNext, _, err := d.Compute(IntegrityFormatVersion, 2, 0, []byte(`{"c":3}`))
+	dNext, err := d.Compute(IntegrityFormatVersion, 2, 0, []byte(`{"c":3}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cNext != dNext {
-		t.Errorf("after Restore: entryHash mismatch %q vs %q", cNext, dNext)
+	if cNext.EntryHash != dNext.EntryHash {
+		t.Errorf("after Restore: entryHash mismatch %q vs %q", cNext.EntryHash, dNext.EntryHash)
 	}
 }
 
@@ -827,14 +837,17 @@ func TestSinkChain_SerialComputeCommit_NoChainBreakage(t *testing.T) {
 		defer wg.Done()
 		for i := int64(0); i < N; i++ {
 			payload := []byte(`{"i":` + strconv.FormatInt(i, 10) + `}`)
-			entry, prev, err := c.Compute(IntegrityFormatVersion, i, 0, payload)
+			result, err := c.Compute(IntegrityFormatVersion, i, 0, payload)
 			if err != nil {
 				t.Errorf("Compute %d: %v", i, err)
 				return
 			}
-			c.Commit(0, entry)
+			if err := c.Commit(result); err != nil {
+				t.Errorf("Commit %d: %v", i, err)
+				return
+			}
 			mu.Lock()
-			records = append(records, record{seq: i, payload: payload, entryHash: entry, prevHash: prev})
+			records = append(records, record{seq: i, payload: payload, entryHash: result.EntryHash, prevHash: result.PrevHash})
 			mu.Unlock()
 		}
 	}()
@@ -862,24 +875,20 @@ func TestSinkChain_Compute_IsPureUnderConcurrentCallers(t *testing.T) {
 	payload := []byte(`{"k":"v"}`)
 
 	const N = 32
-	type result struct {
-		entry string
-		prev  string
-	}
-	results := make([]result, 0, N)
+	results := make([]*ComputeResult, 0, N)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	wg.Add(N)
 	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
-			entry, prev, err := c.Compute(IntegrityFormatVersion, 0, 0, payload)
+			result, err := c.Compute(IntegrityFormatVersion, 0, 0, payload)
 			if err != nil {
 				t.Errorf("Compute: %v", err)
 				return
 			}
 			mu.Lock()
-			results = append(results, result{entry: entry, prev: prev})
+			results = append(results, result)
 			mu.Unlock()
 		}()
 	}
@@ -888,14 +897,14 @@ func TestSinkChain_Compute_IsPureUnderConcurrentCallers(t *testing.T) {
 	if len(results) != N {
 		t.Fatalf("got %d results, want %d", len(results), N)
 	}
-	wantEntry := results[0].entry
-	wantPrev := results[0].prev
+	wantEntry := results[0].EntryHash
+	wantPrev := results[0].PrevHash
 	for i, r := range results {
-		if r.entry != wantEntry {
-			t.Errorf("result %d: entry=%q, want %q (Compute is not pure under contention)", i, r.entry, wantEntry)
+		if r.EntryHash != wantEntry {
+			t.Errorf("result %d: entry=%q, want %q (Compute is not pure under contention)", i, r.EntryHash, wantEntry)
 		}
-		if r.prev != wantPrev {
-			t.Errorf("result %d: prev=%q, want %q (Compute is not pure under contention)", i, r.prev, wantPrev)
+		if r.PrevHash != wantPrev {
+			t.Errorf("result %d: prev=%q, want %q (Compute is not pure under contention)", i, r.PrevHash, wantPrev)
 		}
 	}
 }
@@ -903,7 +912,7 @@ func TestSinkChain_Compute_IsPureUnderConcurrentCallers(t *testing.T) {
 func TestSinkChain_State_PersistsFatal(t *testing.T) {
 	c, _ := newTestSinkChain(t)
 
-	if _, _, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"a":1}`)); err != nil {
+	if _, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"a":1}`)); err != nil {
 		t.Fatal(err)
 	}
 	c.Fatal(errors.New("ambiguous WAL write"))
@@ -918,7 +927,7 @@ func TestSinkChain_State_PersistsFatal(t *testing.T) {
 	if err := d.Restore(state.Generation, state.PrevHash, state.Fatal); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
-	if _, _, err := d.Compute(IntegrityFormatVersion, 1, 0, []byte(`{"b":2}`)); !errors.Is(err, ErrFatalIntegrity) {
+	if _, err := d.Compute(IntegrityFormatVersion, 1, 0, []byte(`{"b":2}`)); !errors.Is(err, ErrFatalIntegrity) {
 		t.Fatalf("Compute after Restore-with-Fatal: err = %v, want ErrFatalIntegrity", err)
 	}
 }
@@ -980,30 +989,102 @@ func TestSinkChain_Restore_ValidatesPrevHash(t *testing.T) {
 	}
 }
 
-func TestSinkChain_Commit_BackwardsGenerationIsIgnored(t *testing.T) {
+// TestSinkChain_Commit_BackwardsGenerationLatchesFatal verifies that a Commit
+// whose ComputeResult was produced before a generation rollover (i.e. its
+// generation is older than the chain's current generation) latches the chain
+// fatal and returns an error. Silently no-op'ing this would hide an integrity
+// divergence: the durable write would have succeeded but the in-memory
+// prev_hash would lag, breaking subsequent Compute calls without signal.
+func TestSinkChain_Commit_BackwardsGenerationLatchesFatal(t *testing.T) {
 	c, _ := newTestSinkChain(t)
 
-	// Establish gen=2 with one committed entry.
-	if _, _, err := c.Compute(IntegrityFormatVersion, 0, 2, []byte(`{"a":1}`)); err != nil {
-		t.Fatal(err)
-	}
-	h2, _, err := c.Compute(IntegrityFormatVersion, 0, 2, []byte(`{"a":1}`))
+	// Establish chain at gen=2 by Compute+Commit.
+	r2, err := c.Compute(IntegrityFormatVersion, 0, 2, []byte(`{"a":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Commit(2, h2)
-
-	before := c.State()
-	if before.Generation != 2 || before.PrevHash != h2 {
-		t.Fatalf("setup: state = %+v, want {Generation:2 PrevHash:%q}", before, h2)
+	if err := c.Commit(r2); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	state := c.State()
+	if state.Generation != 2 {
+		t.Fatalf("setup: chain generation = %d, want 2", state.Generation)
 	}
 
-	// Commit with an older generation must be a no-op.
-	c.Commit(1, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+	// Construct a backwards-generation result. Restore the chain to gen=1
+	// briefly, Compute under gen=1, then restore back to gen=2 — the result
+	// carries result.generation=1 even though the chain is now at gen=2.
+	if err := c.Restore(1, "", false); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	older, err := c.Compute(IntegrityFormatVersion, 0, 1, []byte(`{"old":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if older.generation != 1 {
+		t.Fatalf("older.generation = %d, want 1", older.generation)
+	}
+	if err := c.Restore(2, r2.EntryHash, false); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
 
-	after := c.State()
-	if after.Generation != before.Generation || after.PrevHash != before.PrevHash {
-		t.Errorf("backwards-generation Commit mutated state: before=%+v after=%+v", before, after)
+	// Commit the backwards result must return an error mentioning
+	// "backwards generation" and latch the chain fatal.
+	err = c.Commit(older)
+	if err == nil {
+		t.Fatal("Commit(backwards result): err = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "backwards generation") {
+		t.Errorf("Commit error = %q, want substring 'backwards generation'", err)
+	}
+
+	if !c.State().Fatal {
+		t.Errorf("State.Fatal = false after backwards-gen Commit; want true")
+	}
+
+	// Subsequent Compute must surface the fatal latch.
+	if _, err := c.Compute(IntegrityFormatVersion, 1, 2, []byte(`{"x":1}`)); !errors.Is(err, ErrFatalIntegrity) {
+		t.Errorf("Compute after backwards-gen Commit: err = %v, want ErrFatalIntegrity", err)
+	}
+}
+
+// TestSinkChain_Commit_NilResultErrors verifies that Commit rejects a nil
+// ComputeResult with an error rather than panicking.
+func TestSinkChain_Commit_NilResultErrors(t *testing.T) {
+	c, _ := newTestSinkChain(t)
+
+	err := c.Commit(nil)
+	if err == nil {
+		t.Fatal("Commit(nil): err = nil, want error")
+	}
+
+	// nil-result error is a caller bug, not a fatal integrity event — the
+	// chain should NOT latch fatal in this case.
+	if c.State().Fatal {
+		t.Errorf("Commit(nil) latched fatal; want chain unchanged")
+	}
+}
+
+// TestSinkChain_Commit_AfterFatalReturnsError verifies that Commit on a chain
+// that was previously latched Fatal returns ErrFatalIntegrity (replacing the
+// earlier silent-no-op behavior). The chain stays latched.
+func TestSinkChain_Commit_AfterFatalReturnsError(t *testing.T) {
+	c, _ := newTestSinkChain(t)
+
+	result, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"a":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.Fatal(errors.New("ambiguous WAL write"))
+
+	err = c.Commit(result)
+	if !errors.Is(err, ErrFatalIntegrity) {
+		t.Errorf("Commit after Fatal: err = %v, want ErrFatalIntegrity", err)
+	}
+
+	if !c.State().Fatal {
+		t.Errorf("State.Fatal = false after Commit-on-fatal-chain; want true (latch must persist)")
 	}
 }
 ```
@@ -1043,11 +1124,19 @@ import (
 // and concurrent Compute calls (with no intervening Commit) are pure and
 // return identical results — they do not corrupt state. However, callers
 // MUST NOT interleave Compute/Commit pairs across goroutines: Commit
-// carries no token identifying which Compute it finalizes, so a stale or
-// reordered Commit can overwrite prev_hash with a hash that does not
-// correspond to the most recent Compute. The expected pattern is a single
-// owner that issues Compute → durable write → Commit (or Fatal) in
-// sequence per event.
+// consumes a typed *ComputeResult and validates the result's generation
+// against the chain's current generation, but the (sequence, generation)
+// tuple alone does not identify which Compute call produced it within the
+// same generation. The expected pattern is a single owner that issues
+// Compute → durable write → Commit (or Fatal) in sequence per event.
+//
+// Compute/Commit token contract: Compute returns a *ComputeResult that
+// callers MUST pass to Commit unchanged. The unexported fields on
+// ComputeResult let Commit verify the result really came from Compute on
+// this chain. Callers cannot construct a ComputeResult literal because
+// the unexported fields make that impossible from outside the audit
+// package; this prevents Commit from accepting a fabricated EntryHash
+// that Compute would never have produced.
 type SinkChain struct {
 	mu         sync.Mutex
 	key        []byte
@@ -1070,9 +1159,39 @@ type SinkChainState struct {
 	Fatal      bool
 }
 
-// ErrFatalIntegrity is returned by Compute after Fatal has been called.
-// The chain cannot be reused; the sink must be reinitialized (e.g., via
-// generation rotation).
+// ComputeResult is the typed output of SinkChain.Compute. It is the only
+// value Commit will accept. The exported fields are inspectable; the
+// unexported fields let Commit verify it really came out of Compute and
+// that no impossible state transition is being requested.
+//
+// Callers MUST NOT construct ComputeResult literals — only Compute returns
+// valid ones. The unexported fields make literal construction impossible
+// outside the audit package; that is load-bearing for the chain-state
+// invariants Commit enforces.
+type ComputeResult struct {
+	// EntryHash is the HMAC of (formatVersion | sequence | prevHash |
+	// payload) under the chain's key. Inspectable — callers serialize this
+	// into the entry's integrity metadata.
+	EntryHash string
+
+	// PrevHash is the prev_hash that was hashed into EntryHash. For the
+	// first entry of a chain (or the first entry after a generation
+	// rollover) this is the empty string. Inspectable — callers serialize
+	// this into the entry's integrity metadata.
+	PrevHash string
+
+	// sequence and generation are unexported so external packages cannot
+	// fabricate a ComputeResult with arbitrary state. Commit reads these
+	// to enforce chain-state invariants (e.g., backwards-generation Commit
+	// is a caller bug and latches fatal).
+	sequence   int64
+	generation uint32
+}
+
+// ErrFatalIntegrity is returned by Compute after Fatal has been called,
+// and by Commit when called on a chain that was latched Fatal (either by
+// Fatal itself or by a backwards-generation Commit). The chain cannot be
+// reused; the sink must be reinitialized (e.g., via generation rotation).
 var ErrFatalIntegrity = errors.New("integrity chain latched fatal; sink must be reinitialized")
 
 // ErrMissingChainState is returned by chained sinks when an event arrives
@@ -1106,20 +1225,22 @@ func NewSinkChain(key []byte, algorithm string) (*SinkChain, error) {
 }
 
 // Compute computes the HMAC of (formatVersion, sequence, prev_hash, payload)
-// using the chain's key. Compute is PURE: it does not mutate prev_hash. The
-// caller must follow with Commit on durable-write success or discard the
-// result on durable-write failure.
+// using the chain's key and returns it as a *ComputeResult. Compute is
+// PURE: it does not mutate prev_hash. The caller must follow with Commit
+// (passing the returned *ComputeResult) on durable-write success or
+// discard the result on durable-write failure.
 //
 // If `generation` differs from the chain's current generation, prev_hash
 // is treated as "" for this Compute (chain rolls automatically). The
-// transition is committed only when Commit is called with the new generation.
+// transition is committed only when Commit is called with a result whose
+// generation is the new generation.
 //
 // Returns ErrFatalIntegrity if Fatal was previously called.
-func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32, payload []byte) (entryHash string, prevHash string, err error) {
+func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32, payload []byte) (*ComputeResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.fatal {
-		return "", "", ErrFatalIntegrity
+		return nil, ErrFatalIntegrity
 	}
 	prev := c.prevHash
 	if generation != c.generation {
@@ -1127,33 +1248,52 @@ func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32
 	}
 	hash, err := computeIntegrityHash(c.key, c.algorithm, formatVersion, sequence, prev, payload)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
-	return hash, prev, nil
+	return &ComputeResult{
+		EntryHash:  hash,
+		PrevHash:   prev,
+		sequence:   sequence,
+		generation: generation,
+	}, nil
 }
 
-// Commit advances prev_hash to entryHash and records the generation. Must be
-// called exactly once per successful Compute, after the durable write
-// succeeds. On ambiguous failure (write may or may not have landed), the
-// caller MUST call Fatal instead; Commit and Fatal are mutually exclusive
-// per Compute.
+// Commit advances prev_hash using the result of a previous Compute on this
+// chain. Must be called exactly once per successful Compute, after the
+// durable write succeeds. On ambiguous failure (write may or may not have
+// landed), the caller MUST call Fatal instead; Commit and Fatal are
+// mutually exclusive per Compute.
 //
-// Commit silently no-ops in two cases: (1) the chain has been latched Fatal,
-// and (2) `generation` is older than the chain's current generation —
-// rolling backwards across a generation boundary would re-use prior
-// (sequence, generation) tuples and corrupt the chain. The latter is a
-// caller programming error and is treated as ignorable rather than fatal.
-func (c *SinkChain) Commit(generation uint32, entryHash string) {
+// Returns an error if `result` is nil (caller bug; chain is not modified).
+//
+// Returns ErrFatalIntegrity if the chain was previously latched Fatal —
+// either by an explicit Fatal call or by a prior backwards-generation
+// Commit. The chain stays latched.
+//
+// Returns a non-nil error AND latches the chain Fatal if the result's
+// generation is older than the chain's current generation. This indicates
+// a caller bug: the durable write succeeded for an entry whose generation
+// is no longer current, so accepting the Commit would leave in-memory
+// prev_hash lagging the durable state and silently corrupt subsequent
+// Compute results. Latching fatal makes the divergence visible
+// immediately rather than later as a chain-break.
+func (c *SinkChain) Commit(result *ComputeResult) error {
+	if result == nil {
+		return errors.New("nil ComputeResult")
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.fatal {
-		return
+		return ErrFatalIntegrity
 	}
-	if generation < c.generation {
-		return
+	if result.generation < c.generation {
+		c.fatal = true
+		return fmt.Errorf("backwards generation Commit: result.generation=%d < c.generation=%d (caller bug, chain latched fatal)",
+			result.generation, c.generation)
 	}
-	c.generation = generation
-	c.prevHash = entryHash
+	c.generation = result.generation
+	c.prevHash = result.EntryHash
+	return nil
 }
 
 // Fatal latches the chain in an unrecoverable state. All subsequent Compute
@@ -1225,7 +1365,7 @@ func validatePrevHash(algorithm, prevHash string) error {
 go test ./internal/audit/ -run "TestSinkChain|TestNewSinkChain" -v
 ```
 
-Expected: all 12 tests PASS.
+Expected: all 15 tests PASS.
 
 - [ ] **Step 5: Run the full audit test suite**
 
@@ -1332,7 +1472,7 @@ func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	entryHash, prevHash, err := c.chain.Compute(IntegrityFormatVersion, seq, gen, canonicalPayload)
+	result, err := c.chain.Compute(IntegrityFormatVersion, seq, gen, canonicalPayload)
 	if err != nil {
 		return nil, err
 	}
@@ -1340,17 +1480,19 @@ func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
 	data["integrity"] = IntegrityMetadata{
 		FormatVersion: IntegrityFormatVersion,
 		Sequence:      seq,
-		PrevHash:      prevHash,
-		EntryHash:     entryHash,
+		PrevHash:      result.PrevHash,
+		EntryHash:     result.EntryHash,
 	}
 
-	result, err := json.Marshal(data)
+	wrapped, err := json.Marshal(data)
 	if err != nil {
 		return nil, fmt.Errorf("marshal wrapped payload: %w", err)
 	}
 
-	c.chain.Commit(gen, entryHash)
-	return result, nil
+	if err := c.chain.Commit(result); err != nil {
+		return nil, err
+	}
+	return wrapped, nil
 }
 ```
 
@@ -1810,7 +1952,7 @@ func (s *chainingFakeSink) AppendEvent(ctx context.Context, ev types.Event) erro
 	gen := ev.Chain.Generation
 	canonical := []byte(`{"id":"` + ev.ID + `","seq":` + strconv.FormatUint(seq, 10) + `,"gen":` + strconv.FormatUint(uint64(gen), 10) + `}`)
 
-	entryHash, prevHash, err := s.chain.Compute(audit.IntegrityFormatVersion, int64(seq), gen, canonical)
+	result, err := s.chain.Compute(audit.IntegrityFormatVersion, int64(seq), gen, canonical)
 	if err != nil {
 		return err
 	}
@@ -1837,13 +1979,18 @@ func (s *chainingFakeSink) AppendEvent(ctx context.Context, ev types.Event) erro
 		s.chain.Fatal(errors.New("ambiguous write"))
 		return errors.New("ambiguous write")
 	default:
-		s.chain.Commit(gen, entryHash)
+		// Successful durable write — commit. A non-nil error here means the
+		// chain has latched fatal (e.g., backwards-generation Commit), which
+		// is itself a write divergence and must be surfaced to the caller.
+		if err := s.chain.Commit(result); err != nil {
+			return err
+		}
 		s.mu.Lock()
 		s.records = append(s.records, chainRecord{
 			Sequence:   seq,
 			Generation: gen,
-			EntryHash:  entryHash,
-			PrevHash:   prevHash,
+			EntryHash:  result.EntryHash,
+			PrevHash:   result.PrevHash,
 		})
 		s.mu.Unlock()
 		return nil
