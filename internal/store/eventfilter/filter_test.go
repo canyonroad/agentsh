@@ -1,8 +1,6 @@
-package otel
+package eventfilter
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestFilter_NilPassesAll(t *testing.T) {
 	var f *Filter
