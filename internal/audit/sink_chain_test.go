@@ -439,14 +439,11 @@ func TestSinkChain_Commit_BackwardsGenerationLatchesFatal(t *testing.T) {
 		t.Fatalf("Restore: %v", err)
 	}
 
-	// Commit the backwards result must return an error mentioning
-	// "backwards generation" and latch the chain fatal.
+	// Commit the backwards result must return an error wrapping
+	// ErrBackwardsGeneration and latch the chain fatal.
 	err = c.Commit(older)
-	if err == nil {
-		t.Fatal("Commit(backwards result): err = nil, want error")
-	}
-	if !strings.Contains(err.Error(), "backwards generation") {
-		t.Errorf("Commit error = %q, want substring 'backwards generation'", err)
+	if !errors.Is(err, ErrBackwardsGeneration) {
+		t.Fatalf("Commit(backwards result): err = %v, want errors.Is ErrBackwardsGeneration", err)
 	}
 
 	if !c.State().Fatal {
@@ -456,6 +453,74 @@ func TestSinkChain_Commit_BackwardsGenerationLatchesFatal(t *testing.T) {
 	// Subsequent Compute must surface the fatal latch.
 	if _, err := c.Compute(IntegrityFormatVersion, 1, 2, []byte(`{"x":1}`)); !errors.Is(err, ErrFatalIntegrity) {
 		t.Errorf("Compute after backwards-gen Commit: err = %v, want ErrFatalIntegrity", err)
+	}
+}
+
+// TestSinkChain_Commit_StaleResultLatchesFatal verifies that a Commit whose
+// ComputeResult was produced before an earlier Commit advanced prev_hash
+// (i.e., a stale token whose result.PrevHash no longer matches the chain's
+// current prev_hash within the same generation) latches the chain fatal and
+// returns an error wrapping ErrStaleResult. Silently committing the stale
+// result would silently fork the chain.
+func TestSinkChain_Commit_StaleResultLatchesFatal(t *testing.T) {
+	c, _ := newTestSinkChain(t)
+
+	// Two Computes in a row at gen=0 with NO Commit between them.
+	// Both observe the empty prev_hash and produce results with PrevHash="".
+	r1, err := c.Compute(IntegrityFormatVersion, 0, 0, []byte(`{"a":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := c.Compute(IntegrityFormatVersion, 1, 0, []byte(`{"b":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Commit r1 — advances prev_hash to r1.EntryHash.
+	if err := c.Commit(r1); err != nil {
+		t.Fatalf("Commit(r1): %v", err)
+	}
+
+	// Now commit r2. r2.PrevHash is "" (from when c.prevHash was empty), but
+	// c.prevHash is now r1.EntryHash. The mismatch must be detected and
+	// latched fatal.
+	err = c.Commit(r2)
+	if !errors.Is(err, ErrStaleResult) {
+		t.Fatalf("Commit(stale r2): err = %v, want ErrStaleResult", err)
+	}
+	if !c.State().Fatal {
+		t.Fatalf("Commit(stale r2) did not latch fatal")
+	}
+
+	// Subsequent Compute must fail.
+	if _, err := c.Compute(IntegrityFormatVersion, 2, 0, []byte(`{"c":3}`)); !errors.Is(err, ErrFatalIntegrity) {
+		t.Fatalf("Compute after stale-result fatal: err = %v, want ErrFatalIntegrity", err)
+	}
+}
+
+// TestSinkChain_Commit_RolloverWithNonEmptyPrev_LatchesFatal exercises the
+// defense-in-depth branch of the stale-token validation: a result whose
+// generation > c.generation (rollover) but with PrevHash != "". Normal
+// callers cannot construct this via Compute (Compute always sets prev=""
+// on rollover); this test forges the result directly via the unexported
+// fields, which is only possible from within the audit package.
+func TestSinkChain_Commit_RolloverWithNonEmptyPrev_LatchesFatal(t *testing.T) {
+	c, _ := newTestSinkChain(t)
+	// Forge a result whose generation > c.generation (rollover) but with a
+	// non-empty PrevHash. Normal callers cannot construct this via Compute;
+	// this is defense-in-depth against future API changes or in-package bugs.
+	forged := &ComputeResult{
+		EntryHash:  "deadbeef",
+		PrevHash:   "shouldbeempty",
+		sequence:   0,
+		generation: 1,
+	}
+	err := c.Commit(forged)
+	if !errors.Is(err, ErrStaleResult) {
+		t.Fatalf("Commit(forged rollover): err = %v, want ErrStaleResult", err)
+	}
+	if !c.State().Fatal {
+		t.Fatalf("forged rollover did not latch fatal")
 	}
 }
 
