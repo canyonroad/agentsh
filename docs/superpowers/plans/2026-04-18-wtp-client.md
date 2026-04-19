@@ -11935,19 +11935,26 @@ operator-facing breaking changes that earlier rounds missed:
    wrapped `compact.ErrMissingChain` error rather than silently
    dropped. There is NO replacement label like
    `wtp_dropped_invalid_frame_total{reason="missing_chain"}` —
-   inventing such a label would mis-document the new contract.
-   Operator-side, the symptom now surfaces through
-   `wtp_reconnects_total{reason="..."}` (the existing reconnect
-   family — receive-side reaction when the upstream caller closes the
-   stream in response to the propagated error), and operators with
-   alerts/dashboards on `wtp_dropped_missing_chain_total` MUST either
-   delete the rule or redirect it to the reconnect family (or to
+   inventing such a label would mis-document the new contract. The
+   only contractually guaranteed emission signal for the propagated
+   error is the ERROR-severity structured log emitted by
+   `AppendEvent` (per spec §"Caller contract for propagated
+   `compact.ErrMissingChain`" clause (a)) — operators with
+   alerts/dashboards on `wtp_dropped_missing_chain_total` MUST
+   replace each rule with a log-based alert/SLO matching that log's
+   field set, delete the rule, redirect to
+   `wtp_reconnects_total{reason="..."}` ONLY at sites where caller
+   wiring tearing down the stream on `compact.ErrMissingChain` has
+   been explicitly verified (the reconnect family has no contractually
+   guaranteed emission path from this error — clauses (b)/(c) of the
+   caller contract permit log-and-continue), or redirect to
    `wtp_dropped_invalid_frame_total{reason=~"..."}` for broader
-   protocol-layer drop intent) per Step 2 below. The handshake-time
+   protocol-layer drop intent — per Step 2 below. The handshake-time
    `wtp_session_init_failures_total{reason}` /
    `wtp_session_rotation_failures_total{reason}` families (planned in
-   Task 22a, Phase 8) are NOT valid redirect targets — those families
-   fire only on context-digest UTF-8 failures during the
+   Task 22a, Phase 8) are NEVER valid redirect targets — those
+   families fire only on context-digest handshake failures
+   (`invalid_utf8` plus the `unknown` catch-all) during the
    SessionInit/SessionUpdate handshake and have no defined emission
    path from a propagated `compact.ErrMissingChain`. See spec
    §"Migration guidance: removed `wtp_dropped_missing_chain_total`"
@@ -11996,6 +12003,13 @@ broken. The declaration MUST list:
     dashboards-as-code repositories, in-app dashboard exports).
   - All runbook source-of-truth locations referenced by `runbook_url`
     annotations in production alerts.
+  - All log-aggregation systems used for production alerting (Loki,
+    Splunk, Elastic, Datadog Logs, etc.) — both the alert/SLO
+    definitions AND any saved searches that surface composite-store
+    regressions. The migration explicitly endorses log-based
+    alerting as the recommended replacement for
+    `wtp_dropped_missing_chain_total`, so log-side artifacts MUST be
+    in scope or the recommended migration path is not executable.
   - Any third-party systems that scrape `wtp_*` metrics or display
     them (e.g. internal SaaS uptime dashboards, vendor SRE consoles,
     incident-response tooling that pulls metric snapshots).
@@ -12009,9 +12023,9 @@ swept.
 
 - [ ] **Step 1: Inventory existing alerting and dashboards**
 
-Search the operator monitoring repos / dashboards declared in Step 1a
-for any references to the removed or narrowed metric series. Two
-targets:
+Search the operator monitoring repos / dashboards / log-aggregation
+systems declared in Step 1a for any references to the removed or
+narrowed metric series. Three targets:
 
   1. Every Prometheus alerting rule, recording rule, and alert
      annotation that names `wtp_dropped_missing_chain_total` (any label
@@ -12022,6 +12036,16 @@ targets:
      `wtp_dropped_invalid_frame_total{reason="unknown"}`. The
      `unknown` reason is being narrowed — these queries will see their
      rate fall and may go silent under real failure conditions.
+  3. Every existing log-aggregation alert / SLO / saved search that
+     was already triggering on missing-chain conditions (if the team
+     had a log-side rule predating this migration). These need to be
+     reconciled against the new structured-log field set
+     `{event_id, session_id, event_type, err=compact.ErrMissingChain}`
+     emitted by `AppendEvent`'s ERROR-severity log per spec
+     §"Caller contract for propagated `compact.ErrMissingChain`"
+     clause (a) — both to confirm existing log alerts still match
+     and to avoid duplicate coverage when migrated metric alerts
+     pick the `log-based-alert` option in Step 2.
 
 Record each hit (file path + line + current intent) in
 `docs/superpowers/operator/wtp-monitoring-migration.md`. Use the
@@ -12031,7 +12055,7 @@ following columns: `artifact_path`, `line`, `selector`, `intent`,
 - [ ] **Step 2: Decide redirect-or-delete for every `wtp_dropped_missing_chain_total` reference**
 
 For each row from Step 1 that names `wtp_dropped_missing_chain_total`,
-choose ONE of the three options below. Note: there is NO option to
+choose ONE of the four options below. Note: there is NO option to
 rewrite the selector to
 `wtp_dropped_invalid_frame_total{reason="missing_chain"}` — that label
 value DOES NOT EXIST post-rollout (missing-chain is no longer an
@@ -12039,27 +12063,57 @@ invalid-frame drop at all; it is a propagated `compact.ErrMissingChain`
 error per spec §"Migration guidance: removed
 `wtp_dropped_missing_chain_total`").
 
+  - **Replace with log-based alert (RECOMMENDED)**: per the migration
+    guidance in the spec, the ONLY contractually guaranteed emission
+    signal for propagated `compact.ErrMissingChain` is the
+    ERROR-severity structured log entry emitted by `AppendEvent`
+    (clause (a) of the caller contract). Replace the metric-based
+    alert with a log-based alert/SLO that matches the structured log
+    fields `{event_id, session_id, event_type, err=compact.ErrMissingChain}`
+    in the operator's log-aggregation stack (Loki / Splunk / Elastic /
+    Datadog Logs / etc.). Mark the row
+    `migration_decision: log-based-alert` and capture the new alert
+    selector (or query) in the tracking artifact alongside the PR /
+    change request link that adds the log-based alert.
   - **Delete**: the alert was a coarse catch-all and is no longer
     needed (the missing-chain class has moved out of the metrics
     silent-drop family entirely; the propagated error surfaces
-    elsewhere, see the next two options). Mark the row
-    `migration_decision: delete` and capture the PR / change request
-    link that removes the rule.
-  - **Redirect to reconnect family**: the alert's intent was to
-    detect composite-store regressions. The new symptom surfaces
-    through `wtp_reconnects_total{reason="..."}` (already exists in
-    `internal/metrics/wtp.go`) when the upstream caller closes the
-    stream in response to the propagated `compact.ErrMissingChain`
-    and the receive loop reacts to the closed/erroring stream. Mark
-    the row `migration_decision: redirect-reconnect` and capture the
-    new selector (with the specific reason label the caller emits)
-    in the tracking artifact alongside the PR / change request link.
-    NOTE: do NOT redirect to
+    through the audit pipeline and the ERROR log, see the previous
+    option). Mark the row `migration_decision: delete` and capture
+    the PR / change request link that removes the rule.
+  - **Redirect to reconnect family (CONDITIONAL — verification
+    required)**: the alert's intent was to detect composite-store
+    regressions AND the caller wiring in this build IS already known
+    to tear down the WTP stream on propagated `compact.ErrMissingChain`.
+    The spec contract permits but does NOT require this caller-side
+    behavior, so this redirect option is valid ONLY when an explicit
+    code-side verification confirms the teardown. Verification steps
+    (all REQUIRED before this option may be selected):
+      1. Locate the audit-pipeline integration that consumes
+         `AppendEvent`'s returned error in this build.
+      2. Confirm it calls a stream-tearing API (e.g., closes the
+         gRPC stream, cancels the WTP context, or otherwise causes
+         the receive loop to react with a reconnect) when
+         `errors.Is(err, compact.ErrMissingChain)` is true.
+      3. Identify the specific `wtp_reconnects_total{reason="..."}`
+         label value that surfaces from the resulting stream
+         teardown (Phase 8 receiver wiring in Task 17 Step 4a is
+         the source of truth for the reason label set).
+      4. Record all three of (file path + line of the integration
+         code, the verification commit SHA, the chosen reason label)
+         in the tracking artifact.
+    Mark the row `migration_decision: redirect-reconnect` and capture
+    the new selector (with the verified reason label), the
+    verification reference, AND the PR / change request link in the
+    tracking artifact. WITHOUT THE VERIFICATION, this option MUST NOT
+    be selected — the alert may quietly never fire because the
+    contract does not require teardown. NOTE: do NOT redirect to
     `wtp_session_init_failures_total{reason}` or
-    `wtp_session_rotation_failures_total{reason}` — those
-    handshake-time families have no defined emission path from
-    propagated `compact.ErrMissingChain` (they fire only on
-    context-digest UTF-8 failures during the
+    `wtp_session_rotation_failures_total{reason}` under any
+    circumstances — those handshake-time families have no defined
+    emission path from propagated `compact.ErrMissingChain` (they
+    fire only on context-digest handshake failures — `invalid_utf8`
+    plus the `unknown` catch-all — during the
     SessionInit/SessionUpdate handshake per spec §"Frame validation
     and forward compatibility").
   - **Redirect to invalid-frame family**: the alert's intent was
@@ -12070,7 +12124,12 @@ error per spec §"Migration guidance: removed
     `reason="missing_chain"` — that label value DOES NOT EXIST
     post-rollout. Pick from the actual canonical reason set (e.g.
     `decompress_error`, `payload_too_large`, validator-emitted reasons
-    like `event_batch_body_unset`, etc.). Mark the row
+    like `event_batch_body_unset`, etc.). NOTE: this family is
+    UNRELATED to `compact.ErrMissingChain` — it tracks peer-side
+    protocol frames, not sink-internal composite-store regressions.
+    Pick this option only if the original alert was genuinely
+    monitoring protocol-layer drops; otherwise prefer the log-based
+    alert option above. Mark the row
     `migration_decision: redirect-invalid-frame` and capture both the
     new selector AND the rationale for the chosen reason set in the
     tracking artifact alongside the PR / change request link.
@@ -12147,16 +12206,26 @@ phasing → Rollout precondition") MUST verify:
      MUST be live in the production monitoring environment, not
      pending. Acceptable redirect targets are documented in spec
      §"Migration guidance: removed `wtp_dropped_missing_chain_total`":
+     a log-based alert/SLO matching the structured ERROR-log fields
+     `{event_id, session_id, event_type, err=compact.ErrMissingChain}`
+     for composite-store-regression intent (recommended; the only
+     contractually guaranteed emission signal),
      `wtp_reconnects_total{reason="..."}` for composite-store-regression
-     intent (the upstream caller closes the stream in response to the
-     propagated `compact.ErrMissingChain`), or
+     intent ONLY when the `redirect-reconnect` row in the tracking
+     artifact carries a populated verification reference (file path +
+     line + commit SHA + chosen reason label) confirming the caller
+     wiring tears down the WTP stream on `errors.Is(err,
+     compact.ErrMissingChain)`, or
      `wtp_dropped_invalid_frame_total{reason=~"..."}` for broader
      protocol-layer drop intent. The handshake-time
      `wtp_session_init_failures_total{reason}` /
      `wtp_session_rotation_failures_total{reason}` families are NOT
      valid redirect targets — see the spec for rationale. No live
      alert or dashboard names `wtp_dropped_missing_chain_total` after
-     the preflight completes.
+     the preflight completes. Any row marked
+     `migration_decision: redirect-reconnect` whose verification
+     reference cell is empty MUST be rejected and re-routed to one
+     of the other three options before sign-off.
   2. Every `reason="unknown"` reference has an explicit decision AND
      the migration PR is MERGED AND DEPLOYED; the narrowed semantics
      are reflected in the live production alert/dashboard definitions.
