@@ -177,7 +177,12 @@ The `wal.Append` function is the only place that classifies WAL failures into cl
                 ┌─────────────────────────────┐
                 │  state = stateConnecting    │
                 └──────────────┬──────────────┘
-                               │ Dial + SessionInit (wal_high_watermark_seq from disk)
+                               │ Dial + SessionInit (wal_high_watermark_seq +
+                               │   generation seeded from `wal.Meta`
+                               │   AckHighWatermarkSeq + AckHighWatermarkGen,
+                               │   carrying AckRecorded → Present so the
+                               │   first-apply branch of the clamp doesn't
+                               │   trip on a legitimate zero seed)
                                │ server returns ack_high_watermark_seq
                                ▼
                 ┌─────────────────────────────┐
@@ -598,7 +603,7 @@ sendFinalBatchIfAny()
 state = stateLive
 ```
 
-Replay batches obey the same invariants as live batches; the only difference is the source of records. The server may legitimately return a stale (lower) ack watermark during gradual rollout or partition recovery; the replayer trusts the lower of `(server_returned_hw, local_ack_hw)` so we re-send unacked records rather than dropping the gap. A higher-than-local server watermark is anomalous and is logged + ignored — we replay from `local_ack_hw + 1`.
+Replay batches obey the same invariants as live batches; the only difference is the source of records. The server may legitimately return a stale (lower) ack watermark during gradual rollout or partition recovery; the replayer treats the ack watermark as a `(generation, sequence)` TUPLE and applies the lex-`(gen, seq)` clamp described under §"Acknowledgement model" below. The clamp is type-enforced — the two fields move together or neither does — because the WAL's segment GC sorts by lex `(gen, seq)` and mixing local-seq with server-gen would create an impossible state.
 
 ### Heartbeat
 
@@ -615,6 +620,19 @@ WTP uses three distinct server→client acknowledgement messages with disjoint s
 | `ServerHeartbeat` | Periodic, even when the client is idle. Carries the server's current `ack_high_watermark_seq`. | Same as `BatchAck` for ack high-watermark, but never carries new acks beyond what `BatchAck` already delivered. Used to confirm liveness and catch up the client after long idle periods. |
 
 `SessionUpdate` is NOT an acknowledgement — it is a control frame for key or generation rotation, sent by either side. The `ack_timeout` reconnect reason fires when no `BatchAck` (NOT `SessionUpdate`, NOT `ServerHeartbeat`) arrives within the configured window for in-flight batches.
+
+#### Effective-ack tuple and clamp
+
+The effective ack watermark is a `(generation, sequence)` TUPLE held on the client (the `Transport`'s `(ackedGeneration, ackedSequence)` fields) and seeded on cold start from the WAL's persisted `meta.json` (`AckHighWatermarkGen`, `AckHighWatermarkSeq`, with `AckRecorded` mapping to a "Present" flag so the first-apply branch of the clamp doesn't trip on a legitimate zero seed). Every server-supplied watermark — `SessionAck`, `BatchAck`, and `ServerHeartbeat` — is applied through the same clamp (the implementation calls it `applyServerAckTuple`):
+
+- **First apply (no prior tuple recorded)**: ADOPT the server tuple wholesale. No anomaly log, no WARN — first contact between client and server cannot be classified as anomalous because there is no local baseline to compare against.
+- **`(server_gen, server_seq) < (local_gen, local_seq)` lex**: ADOPT the server tuple wholesale (BOTH fields). This is the legitimate stale-watermark recovery path during gradual rollout or partition recovery; the client re-sends unacked records rather than dropping the gap.
+- **`(server_gen, server_seq) > (local_gen, local_seq)` lex**: KEEP the local tuple wholesale (BOTH fields). This is anomalous (the client is replaying / live-shipping from a position the server claims to have already acked beyond), and the client emits a rate-limited WARN log carrying the FULL tuple context — `server_gen`, `server_seq`, `local_gen`, `local_seq` — so operators can correlate which side is ahead. The client does not advance its tuple in this case; the next genuine ack will reconcile.
+- **Equal**: no-op.
+
+The two fields move TOGETHER or neither does. Mixing local-seq with server-gen (or vice versa) creates an impossible state under the WAL's lex-`(gen, seq)` GC semantics — segments are sorted and reclaimed by lex tuple, so a half-applied server watermark would either silently retain unacked segments (data wedge) or silently drop in-flight segments (data loss). The clamp is type-enforced via the `applyServerAckTuple` helper; no other code path advances `(ackedGeneration, ackedSequence)`. `SessionUpdate` is NOT an acknowledgement — it is a control frame for key/generation rotation per §"Acknowledgement model" above; it never advances the effective-ack tuple.
+
+The state-handler cases (`Replaying`, `Live`) READ the tuple for their reader-start calculations — both open their WAL `Reader` at `ackedSequence + 1` (with `Live` taking the `max` of that and one past the replayer's last-replayed sequence) — but they do NOT advance it and they do NOT re-clamp. The clamp lives in the SessionAck / BatchAck / ServerHeartbeat handlers, not the state-handler cases.
 
 ### Frame validation and forward compatibility
 

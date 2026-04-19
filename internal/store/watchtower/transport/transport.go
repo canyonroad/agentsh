@@ -79,13 +79,30 @@ type Transport struct {
 	opts Options
 	conn Conn
 
-	// ackedSequence/ackedGeneration hold the EFFECTIVE ack watermark — the
-	// clamped value per spec §"Acknowledgement model" (design.md:601):
-	// `min(server_returned_hw, local_ack_hw)`, with anomalous `server > local`
-	// watermarks LOGGED + IGNORED. Seeded from SessionAck (state_connecting.go)
-	// and ADVANCED by BatchAck/ServerHeartbeat handlers in the recv multiplexer
-	// (Tasks 17/18). Read by Replaying/Live state handlers for their reader-
-	// start calculations; state handlers do NOT advance these fields.
+	// ackedSequence/ackedGeneration TOGETHER hold the EFFECTIVE ack watermark
+	// — the clamped (gen, seq) tuple per spec §"Acknowledgement model"
+	// (design.md:601). The two fields MOVE TOGETHER; mixing local-seq with
+	// server-gen (or vice versa) creates an impossible state under the WAL's
+	// lex-(gen, seq) GC semantics (see wal/wal.go MarkAcked / segmentFullyAckedLocked).
+	//
+	// Clamp rule on every server-supplied watermark (SessionAck, BatchAck,
+	// ServerHeartbeat):
+	//   - if (server_gen, server_seq) < (local_gen, local_seq) lex: ADOPT the
+	//     server tuple wholesale (both fields). This is the legitimate
+	//     stale-watermark recovery path during gradual rollout / partition
+	//     recovery.
+	//   - if (server_gen, server_seq) > (local_gen, local_seq) lex: KEEP the
+	//     local tuple wholesale (both fields). Log a WARN with FULL tuple
+	//     context (server_gen, server_seq, local_gen, local_seq) per the
+	//     anomaly-log contract in spec §"Acknowledgement model".
+	//   - if equal: no-op.
+	//
+	// Seeded on cold start from wal.Meta (see Task 15.1 startup-seed step) and
+	// then advanced by SessionAck (state_connecting.go) and by BatchAck/
+	// ServerHeartbeat handlers in the recv multiplexer (Tasks 17/18) — all of
+	// them via the same clamp helper. Read by Replaying/Live state handlers
+	// for their reader-start calculations; state handlers do NOT advance these
+	// fields.
 	//
 	// SessionUpdate is NOT an acknowledgement — it is a control frame for
 	// key/generation rotation per spec §"Acknowledgement model" (design.md:617);
