@@ -9845,7 +9845,8 @@ This task is a coordination point that spans the proto package (Task 17 Step 4) 
 
 **Files:**
 - Create: `internal/metrics/wtp_parity_test.go` (`package metrics_test` — external test package)
-- Create: `internal/metrics/wtp_ratelimit.go` (the shared rate-limiter helper consumed by both `IncDroppedInvalidFrame`'s metrics-side WARN path and Task 17 Step 4a's receiver-side WARN path)
+- Create: `internal/metrics/wtp_ratelimit.go` (the shared rate-limiter helper consumed by both `IncDroppedInvalidFrame`'s metrics-side WARN path and Task 17 Step 4a's receiver-side WARN path; also exports the test-only reset hook `ResetClassifierBypassLimiterForTest`)
+- Create: `internal/store/watchtower/transport/receiver_warn_test.go` (`package transport_test` — external test package; hosts `TestReceiverWARN_InvokesClassifierBypassLimiter` per Step 4a)
 - Modify: `internal/metrics/wtp.go` (`IncDroppedInvalidFrame` invokes the shared rate-limiter before emitting the metrics-side WARN)
 - Modify: any new receiver-wiring file under `internal/store/watchtower/transport/` that emits the receiver-side `non-typed frame validation error` WARN (it MUST consume the same shared rate-limiter from `internal/metrics`)
 
@@ -9909,9 +9910,44 @@ var classifierBypassLimiter = rate.NewLimiter(rate.Every(6*time.Second), 1)
 func AllowClassifierBypassWARN() bool {
 	return classifierBypassLimiter.Allow()
 }
+
+// ResetClassifierBypassLimiterForTest resets the shared classifier-bypass
+// rate-limiter to a fresh full-bucket state. Test-only — the "ForTest"
+// suffix is the canonical Go convention signalling test-only intent.
+// NEVER invoke from production code paths; the function lives in the
+// production file (rather than a separate _test_export.go) because Go's
+// `go test` does NOT enable any custom build tag by default, so a
+// build-tagged file would not be reachable from `go test ./...` without
+// extra ceremony. The function has no side effects on production paths
+// (it just reassigns the package var, which production never calls).
+//
+// Rationale: the limiter is a package-level singleton (so both WARN
+// paths share one bucket per the WARN rate-limit contract). Tests that
+// assert rate-limit behavior MUST start from a known-fresh bucket;
+// without this hook, a prior test that drained the bucket would make
+// TestClassifierBypassWARN_RateLimited (and the receiver-side
+// inject-and-assert test in internal/store/watchtower/transport)
+// order-dependent. Callers MUST invoke this at test start AND register
+// it via t.Cleanup so subsequent tests inherit a fresh bucket.
+func ResetClassifierBypassLimiterForTest() {
+	classifierBypassLimiter = rate.NewLimiter(rate.Every(6*time.Second), 1)
+}
 ```
 
 The `golang.org/x/time/rate` dependency is already in `go.mod` (used by `internal/store/watchtower/transport` for backoff in Task 18); no new module additions required.
+
+The `ResetClassifierBypassLimiterForTest` hook intentionally lives in the
+production file (no separate `_test_export.go` and no build-tag gate).
+Two reasons:
+
+  - Go's `go test` does not enable any custom build tag by default; a
+    `//go:build test` file would be unreachable from `go test ./...`
+    without surgery to the test invocation.
+  - The function is small, has no side effects on production paths
+    (production never calls it; it only reassigns the package var), and
+    the `ForTest` suffix is the canonical Go signal that callers in
+    production code are misuse. Lint can flag production callers if
+    needed.
 
 - [ ] **Step 2: Wire the rate-limiter into both WARN code paths**
 
@@ -10096,6 +10132,17 @@ func TestClassifierBypassWARN_RateLimited(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
+	// Reset the shared limiter so this test does not depend on prior
+	// test state. The limiter is a package-level singleton shared
+	// between BOTH classifier_bypass WARN paths (metrics-side and
+	// receiver-side); without an explicit reset, a prior test that
+	// drained the bucket would make this assertion order-dependent.
+	// The t.Cleanup call is defensive: it ensures any subsequent test
+	// that depends on a fresh bucket inherits one regardless of test
+	// ordering.
+	metrics.ResetClassifierBypassLimiterForTest()
+	t.Cleanup(metrics.ResetClassifierBypassLimiterForTest)
+
 	c := metrics.New()
 	const burst = 100
 	for i := 0; i < burst; i++ {
@@ -10122,12 +10169,93 @@ func TestClassifierBypassWARN_RateLimited(t *testing.T) {
 }
 ```
 
-The test file imports: `bytes`, `log/slog`, `strings`, `testing`, plus `metrics` (the package under test). The receiver-side WARN path is exercised through `IncDroppedInvalidFrame` because both paths share the same limiter and the test only needs to demonstrate the rate-limit contract holds; a separate inject-and-assert test in `internal/store/watchtower/transport/` (Task 17 Step 4a) verifies the receiver-side WARN actually invokes `AllowClassifierBypassWARN` before logging.
+The test file imports: `bytes`, `log/slog`, `strings`, `testing`, plus `metrics` (the package under test). The metrics-side WARN path is exercised through `IncDroppedInvalidFrame`. The receiver-side WARN path is owned by Task 22b and is exercised by Step 4a below — `TestReceiverWARN_InvokesClassifierBypassLimiter` lives in `internal/store/watchtower/transport/` and asserts the receiver-side defense-in-depth guard consumes the same shared limiter.
+
+- [ ] **Step 4a: Add `TestReceiverWARN_InvokesClassifierBypassLimiter` receiver-side rate-limit test**
+
+Task 22b OWNS the receiver-side inject-and-assert test that locks the cross-package contract: a non-`*wtpv1.ValidationError` error coming back from `wtpv1.ValidateEventBatch` MUST cause `metrics.AllowClassifierBypassWARN()` to be consulted exactly once before the WARN log emission. Without this test, only the metrics-side WARN path is covered by Task 22b — the receiver-side path could silently regress (e.g. someone forgets the `AllowClassifierBypassWARN` gate and the WARN fires on every frame) and the parity / rate-limit guarantees would only hold for one of the two paths.
+
+Add the test to `internal/store/watchtower/transport/receiver_warn_test.go` (create the file if Task 17 Step 4a did not already create a receiver test file; otherwise extend the existing receiver test file). Declare it in `package transport_test` so it can use the `metrics.` qualifier:
+
+```go
+// File: internal/store/watchtower/transport/receiver_warn_test.go
+// Package: transport_test (external test package — needs metrics.* qualifier)
+package transport_test
+
+import (
+	"bytes"
+	"errors"
+	"log/slog"
+	"strings"
+	"testing"
+
+	"github.com/agentsh/agentsh/internal/metrics"
+	// + receiver wiring imports per Task 17 Step 4a
+)
+
+// TestReceiverWARN_InvokesClassifierBypassLimiter asserts the receiver-side
+// defense-in-depth WARN path consumes the same shared limiter as the
+// metrics-side path. Drives a non-*wtpv1.ValidationError back through the
+// receiver classifier, then verifies that:
+//   - exactly one classifier_bypass WARN landed (the limiter starts full),
+//   - the metric counter incremented exactly once per error (always-on),
+//   - a SECOND identical error within the rate-limit window does NOT
+//     produce a second WARN (rate-limited) but DOES produce a second
+//     counter increment (counter is unconditional).
+//
+// This locks in the cross-package contract that BOTH WARN paths share one
+// limiter and that the counter ALWAYS tracks true volume regardless of
+// WARN throttling. NOTE: the receiver-helper signature `receiverClassify`
+// below is a placeholder — Task 17 Step 4a defines the actual entry point.
+// The implementer adapts the helper call to whatever exported test surface
+// Task 17 Step 4a provides; the assertion contract (counter=2, WARN=1,
+// message text) is the load-bearing part.
+func TestReceiverWARN_InvokesClassifierBypassLimiter(t *testing.T) {
+	// Reset the shared limiter so this test does not depend on prior
+	// test state (the limiter is a process-wide singleton shared with
+	// the metrics-side WARN path; without this reset, a prior test that
+	// drained the bucket would make this assertion order-dependent).
+	metrics.ResetClassifierBypassLimiterForTest()
+	t.Cleanup(metrics.ResetClassifierBypassLimiterForTest)
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	c := metrics.New()
+	// Drive a synthetic non-*ValidationError through the receiver classifier
+	// (call into the receiver helper that Task 17 Step 4a defines — exact
+	// signature TBD by Task 17 implementer; the assertion is what matters).
+	syntheticErr := errors.New("not-a-validation-error")
+	receiverClassify(c.WTP(), syntheticErr) // implementation-defined helper
+	receiverClassify(c.WTP(), syntheticErr) // second call within rate-limit window
+
+	// Counter increments BOTH times (always-on, regardless of WARN throttling).
+	if got := c.WTP().DroppedInvalidFrame(metrics.WTPInvalidFrameReasonClassifierBypass); got != 2 {
+		t.Errorf("DroppedInvalidFrame(classifier_bypass) = %d, want 2 (counter MUST track true volume regardless of WARN throttling)", got)
+	}
+
+	// WARN log emitted EXACTLY ONCE (limiter throttled the second).
+	logged := strings.Count(strings.TrimRight(buf.String(), "\n"), "\n") + 1
+	if buf.Len() == 0 {
+		logged = 0
+	}
+	if logged != 1 {
+		t.Errorf("WARN log emitted %d entries for 2 errors — expected exactly 1 (first allowed by full bucket, second throttled)", logged)
+	}
+	if !strings.Contains(buf.String(), "non-typed frame validation error") {
+		t.Errorf("WARN log MUST mention 'non-typed frame validation error' for receiver-side path; got: %s", buf.String())
+	}
+}
+```
+
+Acceptance criterion: this test MUST be implemented as part of Task 22b (NOT deferred to a separate task). The test enforces that BOTH WARN paths share one rate-limiter and that the receiver-side counter increments unconditionally, mirroring the metrics-side guarantees verified by Step 4. Without this test, the cross-package WARN-rate-limit contract from spec §"WARN rate-limit (both `classifier_bypass` paths)" is only half-covered.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `go test ./internal/metrics/... ./proto/canyonroad/wtp/v1/...`
-Expected: PASS — the parity test `TestWTPInvalidFrameReason_ParityWithValidator` succeeds (proto-side `wtpv1.AllValidationReasons()` and metrics-side getters agree on the shared/disjoint/coverage invariants), and the rate-limit test `TestClassifierBypassWARN_RateLimited` succeeds (counter at 100, WARN logs ≤ 11). All previously-passing tests continue to pass.
+Run: `go test ./internal/metrics/... ./proto/canyonroad/wtp/v1/... ./internal/store/watchtower/transport/...`
+Expected: PASS — the parity test `TestWTPInvalidFrameReason_ParityWithValidator` succeeds (proto-side `wtpv1.AllValidationReasons()` and metrics-side getters agree on the shared/disjoint/coverage invariants), the rate-limit test `TestClassifierBypassWARN_RateLimited` succeeds (counter at 100, WARN logs ≤ 11), and the receiver-side rate-limit test `TestReceiverWARN_InvokesClassifierBypassLimiter` succeeds (counter at 2, WARN log = 1, message contains "non-typed frame validation error"). All previously-passing tests continue to pass.
 
 - [ ] **Step 6: Cross-compile check**
 
@@ -10137,8 +10265,8 @@ Expected: no errors.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add internal/metrics/wtp_parity_test.go internal/metrics/wtp_ratelimit.go internal/metrics/wtp.go
-git commit -m "feat(metrics): cross-task parity test + shared classifier_bypass WARN rate-limiter"
+git add internal/metrics/wtp_parity_test.go internal/metrics/wtp_ratelimit.go internal/metrics/wtp.go internal/store/watchtower/transport/receiver_warn_test.go
+git commit -m "feat(metrics): cross-task parity test + shared classifier_bypass WARN rate-limiter (incl. receiver-side inject test)"
 ```
 
 (If Task 17 Step 4a's receiver wiring is being committed in this same task, also add the corresponding `internal/store/watchtower/transport/state_live.go` change.)
@@ -11836,18 +11964,39 @@ fleets.
 **Why this exists**: The Round 11 spec change introduced two
 operator-facing breaking changes that earlier rounds missed:
 
-1. `wtp_dropped_missing_chain_total` was REMOVED — the
-   missing-chain failure mode is now folded into
-   `wtp_dropped_invalid_frame_total{reason="missing_chain"}`.
-   Any alerting rule or dashboard panel that names the old
-   counter will silently start reading zero post-rollout.
+1. `wtp_dropped_missing_chain_total` was REMOVED — and missing-chain
+   is no longer an invalid-frame drop AT ALL. The semantics changed in
+   Round 4: missing-chain is now PROPAGATED from `AppendEvent` as a
+   wrapped `compact.ErrMissingChain` error rather than silently
+   dropped. There is NO replacement label like
+   `wtp_dropped_invalid_frame_total{reason="missing_chain"}` —
+   inventing such a label would mis-document the new contract.
+   Operator-side, the symptom now surfaces through one of:
+   `wtp_session_failures_total{reason="..."}` or
+   `wtp_reconnects_total{reason="..."}` (depending on how the upstream
+   caller surfaces the propagated error), and operators with
+   alerts/dashboards on `wtp_dropped_missing_chain_total` MUST either
+   delete the rule or redirect it to one of the replacement families
+   per Step 2 below. See spec §"Migration guidance: removed
+   `wtp_dropped_missing_chain_total`" for the canonical redirection
+   map.
 2. `wtp_dropped_invalid_frame_total{reason="unknown"}` was
-   NARROWED. It used to be a catch-all for any unrecognised
-   reason; now it is reserved for the metrics-side
-   invalid-label fallback only. Any alert that fires on
-   `reason="unknown"` will see its rate drop and may go silent
-   even when receiver-side validator failures are happening
-   under one of the new explicit reasons.
+   NARROWED. Pre-split, `unknown` was a catch-all that covered BOTH
+   validator-emitted schema-drift cases AND defense-in-depth bypass
+   cases. Post-split, `unknown` means VALIDATOR-EMITTED schema drift
+   ONLY — a peer rolled out a newer protobuf schema than this binary
+   supports (its `body` oneof discriminator is recognised by the wire
+   format but not yet handled by the local switch). The bypass cases
+   (receiver-side `errors.As`-false guard, metrics-side
+   `IncDroppedInvalidFrame` invalid-label collapse) now go to a NEW
+   reason value `classifier_bypass`. Operators with alerts on
+   `unknown` will see their rate change because the bypass cases are
+   no longer in that bucket — and an alert that fires on `unknown`
+   may go silent under bypass-class regressions even when the
+   underlying bug is happening, because those increments now land
+   under `classifier_bypass`. See spec §"Migration from pre-split
+   `unknown`" and the `unknown` / `classifier_bypass` runbook entries
+   above for the canonical post-split semantics.
 
 See spec §"Rollout phasing" for the full per-reason rollout policy and
 the corresponding spec §"Migration" subsection.
@@ -11860,10 +12009,37 @@ No code files are modified.
 
 #### Steps
 
+- [ ] **Step 1a: Declare inventory scope (authoritative monitoring inventory source)**
+
+Before running the Step 1 grep, the SRE/ops team MUST declare the
+authoritative inventory source — a definitive list of all monitoring
+repos / systems in scope. Without this declared scope, the inventory
+may miss alerts that fire outside the obvious repo set, leaving the
+rollout preflight incomplete and the production migration silently
+broken. The declaration MUST list:
+
+  - All Prometheus rule repositories that ship to the production
+    monitoring environment (alerting rules + recording rules).
+  - All Grafana dashboard sources (JSON repos, ConfigMap manifests,
+    dashboards-as-code repositories, in-app dashboard exports).
+  - All runbook source-of-truth locations referenced by `runbook_url`
+    annotations in production alerts.
+  - Any third-party systems that scrape `wtp_*` metrics or display
+    them (e.g. internal SaaS uptime dashboards, vendor SRE consoles,
+    incident-response tooling that pulls metric snapshots).
+
+The list MUST be checked into the migration tracking artifact at
+`docs/superpowers/operator/wtp-monitoring-migration.md` (in a clearly
+labelled "Inventory scope" section at the top) AND signed off by an
+SRE/ops lead BEFORE Step 1's grep work begins. Step 1 cannot be
+considered complete until every entry in the inventory scope has been
+swept.
+
 - [ ] **Step 1: Inventory existing alerting and dashboards**
 
-Search the operator monitoring repos / dashboards for any references
-to the removed or narrowed metric series. Two targets:
+Search the operator monitoring repos / dashboards declared in Step 1a
+for any references to the removed or narrowed metric series. Two
+targets:
 
   1. Every Prometheus alerting rule, recording rule, and alert
      annotation that names `wtp_dropped_missing_chain_total` (any label
@@ -11880,26 +12056,53 @@ Record each hit (file path + line + current intent) in
 following columns: `artifact_path`, `line`, `selector`, `intent`,
 `migration_decision` (filled in Steps 2/3), `owner`.
 
-- [ ] **Step 2: Decide delete-or-migrate for every `wtp_dropped_missing_chain_total` reference**
+- [ ] **Step 2: Decide redirect-or-delete for every `wtp_dropped_missing_chain_total` reference**
 
 For each row from Step 1 that names `wtp_dropped_missing_chain_total`,
-choose ONE of:
+choose ONE of the three options below. Note: there is NO option to
+rewrite the selector to
+`wtp_dropped_invalid_frame_total{reason="missing_chain"}` — that label
+value DOES NOT EXIST post-rollout (missing-chain is no longer an
+invalid-frame drop at all; it is a propagated `compact.ErrMissingChain`
+error per spec §"Migration guidance: removed
+`wtp_dropped_missing_chain_total`").
 
-  - **Delete**: the alert was a coarse catch-all that is now
-    subsumed by the per-reason alerts on
-    `wtp_dropped_invalid_frame_total{reason=~"missing_chain|..."}`.
-    Mark the row `migration_decision: delete` and capture the PR /
-    change request that removes the rule.
-  - **Migrate**: the alert is genuinely about missing chains.
-    Rewrite the selector to
-    `wtp_dropped_invalid_frame_total{reason="missing_chain"}`,
-    keep the threshold semantics, and update the alert annotations
-    (summary, description, runbook_url) to point at the
-    per-reason runbook section. Mark the row
-    `migration_decision: migrate` and capture the PR.
+  - **Delete**: the alert was a coarse catch-all and is no longer
+    needed (the missing-chain class has moved out of the metrics
+    silent-drop family entirely; the propagated error surfaces
+    elsewhere, see the next two options). Mark the row
+    `migration_decision: delete` and capture the PR / change request
+    link that removes the rule.
+  - **Redirect to session-failure / reconnect family**: the alert's
+    intent was to detect composite-store regressions. The new symptom
+    surfaces through `wtp_session_failures_total{reason="..."}` or
+    `wtp_reconnects_total{reason="..."}` depending on how the upstream
+    caller surfaces the propagated `compact.ErrMissingChain` (if the
+    caller tears the WTP stream down, the symptom is a session
+    failure; if the caller force-cycles the stream, the symptom is a
+    reconnect). Mark the row
+    `migration_decision: redirect-session-failure` and capture the
+    new selector (with the specific reason label the caller emits) in
+    the tracking artifact alongside the PR / change request link.
+  - **Redirect to invalid-frame family**: the alert's intent was
+    protocol-layer drops broadly. Use
+    `wtp_dropped_invalid_frame_total{reason=~"..."}` with the
+    appropriate reason set selected from the canonical reasons
+    enumerated in spec §"Per-reason alerting policy". DO NOT use
+    `reason="missing_chain"` — that label value DOES NOT EXIST
+    post-rollout. Pick from the actual canonical reason set (e.g.
+    `decompress_error`, `payload_too_large`, validator-emitted reasons
+    like `event_batch_body_unset`, etc.). Mark the row
+    `migration_decision: redirect-invalid-frame` and capture both the
+    new selector AND the rationale for the chosen reason set in the
+    tracking artifact alongside the PR / change request link.
 
-Both decisions MUST be made and the PR / change request MUST be
-queued (not necessarily merged) before Step 5.
+All three decisions MUST be made AND the migration PR / change request
+MUST be MERGED AND APPLIED to the production monitoring environment
+(Prometheus rule files reloaded, Grafana panels updated and refreshed)
+before Step 5. A queued-but-not-merged PR is INSUFFICIENT — the
+production monitoring environment must reflect the migration before
+the implementation team can flip the rollout flag.
 
 - [ ] **Step 3: Decide keep / broaden / split for every `reason="unknown"` reference**
 
@@ -11907,12 +12110,15 @@ For each row from Step 1 that selects `reason="unknown"`, choose
 ONE of:
 
   - **Keep (narrowed semantics)**: the alert is acceptable now
-    that `unknown` only fires from the metrics-side invalid-label
-    collapse — i.e. the alert wants to know about
-    "metrics-pipeline misclassification" specifically. Mark the
-    row `migration_decision: keep` and confirm the alert summary
-    text reflects the narrowed meaning (avoid the word
-    "validation"; use "label collapse" or "classifier bypass").
+    that `unknown` only fires from VALIDATOR-EMITTED schema drift —
+    i.e. the alert wants to know "the peer rolled out a newer
+    protobuf schema than this binary supports" (a recognised wire
+    `body` oneof discriminator that the local validator's switch does
+    not yet handle). Mark the row `migration_decision: keep` and
+    confirm the alert summary text reflects schema-drift semantics
+    (avoid the words "label collapse" or "classifier bypass" — those
+    cases now live under `classifier_bypass`; use phrasing like
+    "schema drift" or "unknown frame oneof" instead).
   - **Broaden**: the alert really wanted "any non-zero invalid
     frame counter". Rewrite the selector to
     `sum by (reason) (rate(wtp_dropped_invalid_frame_total[5m])) > 0`
@@ -11920,11 +12126,21 @@ ONE of:
     `migration_decision: broaden`.
   - **Split**: the alert was conflating multiple failure modes.
     Replace it with N per-reason alerts following the per-reason
-    alerting policy in spec §"Per-reason alerting policy". Mark
-    the row `migration_decision: split` and link each new alert.
+    alerting policy in spec §"Per-reason alerting policy". For the
+    bypass-detection portion of the original alert, USE
+    `reason="classifier_bypass"` with **page** severity — the
+    per-reason alerting policy says any non-zero increment of
+    `classifier_bypass` is a bug and pages immediately (the counter
+    should be permanently zero in healthy production). Mark the row
+    `migration_decision: split` and link each new alert in the
+    tracking artifact.
 
-Both decisions MUST be made and the PR / change request MUST be
-queued (not necessarily merged) before Step 5.
+All decisions MUST be made AND the migration PR / change request MUST
+be MERGED AND APPLIED to the production monitoring environment
+(Prometheus rule files reloaded, Grafana panels updated and refreshed)
+before Step 5. A queued-but-not-merged PR is INSUFFICIENT — the
+production monitoring environment must reflect the migration before
+the implementation team can flip the rollout flag.
 
 - [ ] **Step 4: Update runbook URLs in alert annotations**
 
@@ -11938,8 +12154,9 @@ in the spec — the SRE/ops team picks them up here. Mark each row
 
 - [ ] **Step 5: Verify with implementation team and sign off**
 
-Once Steps 1–4 are complete (every row in the migration tracking
-artifact has a `migration_decision`, a queued PR / change request,
+Once Steps 1a, 1, 2, 3, and 4 are complete (every row in the migration
+tracking artifact has a `migration_decision`, a MERGED PR / change
+request that has been APPLIED to the production monitoring environment,
 and an updated runbook URL), open a tracking issue tagged
 `wtp-monitoring-migration: ready` and request sign-off from the
 implementation team's preflight check.
@@ -11947,31 +12164,43 @@ implementation team's preflight check.
 The implementation team's preflight (called out in spec §"Rollout
 phasing → Rollout precondition") MUST verify:
 
-  1. Every removed-metric reference is either deleted or migrated
-     (no live alert / dashboard names `wtp_dropped_missing_chain_total`
-     after the rollout flag flip).
-  2. Every `reason="unknown"` reference has an explicit decision
-     and the queued change is consistent with the new narrowed
-     semantics.
-  3. Every touched alert annotation points at a stable runbook
-     anchor that exists in the spec.
+  1. Every removed-metric reference is either deleted (PR merged AND
+     deployed) or redirected (PR merged AND deployed); the migration
+     MUST be live in the production monitoring environment, not
+     pending. No live alert or dashboard names
+     `wtp_dropped_missing_chain_total` after the preflight completes.
+  2. Every `reason="unknown"` reference has an explicit decision AND
+     the migration PR is MERGED AND DEPLOYED; the narrowed semantics
+     are reflected in the live production alert/dashboard definitions.
+  3. Every touched alert annotation points at a stable runbook anchor
+     that exists in the spec, AND the change is live in production
+     monitoring (runbook URLs in deployed alert annotations resolve to
+     the intended spec anchors).
 
-The preflight check MAY be automated as a one-off CI grep run
-against the monitoring repos; if it is run by hand, the result
-MUST be recorded in the same tracking issue.
+The preflight check MAY be automated as a one-off CI grep run against
+the monitoring repos (scoped to the inventory declared in Step 1a);
+if it is run by hand, the result MUST be recorded in the same tracking
+issue, including the timestamps at which each migration PR was merged
+and deployed to production monitoring.
 
 #### Acceptance criteria
 
 - The migration tracking artifact at
   `docs/superpowers/operator/wtp-monitoring-migration.md` lists every
   affected alert / panel / runbook URL with a recorded
-  `migration_decision`.
-- Every queued migration PR / change request is linked from the
-  tracking artifact.
+  `migration_decision`, and has an "Inventory scope" section at the
+  top signed off by an SRE/ops lead (per Step 1a).
+- Every migration PR / change request is **MERGED AND APPLIED to the
+  production monitoring environment** (Prometheus rule files reloaded,
+  Grafana panels updated and refreshed). A queued-but-unmerged PR,
+  or a merged-but-undeployed change, is INSUFFICIENT.
 - The implementation team SHALL NOT begin production code rollout
   (i.e. flipping `audit.watchtower.enabled: true` on a production
-  fleet) until SRE/ops confirms Steps 1–4 are complete and the
-  preflight check has signed off in the tracking issue.
+  fleet) until SRE/ops confirms Steps 1a, 1, 2, 3, and 4 are complete
+  AND the migration is LIVE in the production monitoring environment
+  (Prometheus rule files reloaded, Grafana panels updated and
+  refreshed), AND the preflight check has signed off in the tracking
+  issue.
 - This task does NOT block earlier code tasks (Task 1 through
   Task 27 land independently). It blocks ONLY the production
   rollout flag flip.
