@@ -51,8 +51,13 @@ func ValidateEventBatch(b *EventBatch) error {
 	return nil
 }
 
-// ValidateSessionInit rejects SessionInit frames with UNSPECIFIED enums or
-// missing required fields, per spec §"Frame validation and forward compatibility".
+// ValidateSessionInit rejects SessionInit frames whose `algorithm` is
+// HASH_ALGORITHM_UNSPECIFIED, per spec §"Frame validation and forward
+// compatibility". Required-field semantics for the other SessionInit
+// fields (session_id, ocsf_version, key_fingerprint, context_digest,
+// agent_id, agent_version) are not enforced here — they are validated
+// by the server during SessionInit handling, which is out of scope for
+// the MVP client.
 func ValidateSessionInit(s *SessionInit) error {
 	if s == nil {
 		return fmt.Errorf("%w: session_init is nil", ErrInvalidFrame)

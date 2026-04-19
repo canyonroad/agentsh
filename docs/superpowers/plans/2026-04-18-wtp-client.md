@@ -1523,7 +1523,7 @@ git commit -m "feat(proto): add WTP v1 service and message definitions"
 
 ---
 
-### Task 4b: Schema stability docs and receiver-side validators
+### Task 4a-ii: Schema stability docs and receiver-side validators
 
 **Files:**
 - Create: `proto/canyonroad/wtp/v1/validate.go`

@@ -548,6 +548,8 @@ Schema-valid but semantically invalid frames (e.g., `EventBatch.body` unset, `co
 2. Increment the appropriate counter (`wtp_dropped_missing_chain_total` for missing chain context; per-error counters added by future tasks for other classes).
 3. For client-side frames, send `Goaway{code: GOAWAY_CODE_UNSPECIFIED, message: "frame validation failed: <detail>"}` and close the session. For server-side frames, the client triggers a reconnect with reason `stream_recv_error`.
 
+**Validator coverage by phase.** Phase 4a-ii ships validators for the two frames the client already constructs and the server-side test fixtures already accept: `EventBatch` (body presence, body/compression agreement, payload cap) and `SessionInit` (algorithm enum). The remaining frame validators — `TransportLoss`, `Goaway`, `Heartbeat`, `ServerHeartbeat`, `BatchAck`, `SessionAck`, `SessionUpdate`, `ClientShutdown` — land alongside the receivers that consume them in **Phase 8** (transport state machine, where the client interprets every inbound `ServerMessage`) and **Phase 9** (in-tree testserver, where the server side validates inbound `ClientMessage`). Until those phases land, schema-valid frames of those types are accepted as-is.
+
 #### Schema stability
 
 The `canyonroad.wtp.v1` package is **unstable until the first tagged 1.0 release of the WTP protocol** (separate from the agentsh release version). Pre-1.0:
@@ -569,6 +571,8 @@ Forward compatibility (post-1.0):
 - New fields with new tags are forward-compatible only if they default to a meaningful zero value. Adding required-meaning fields is a wire break.
 
 ### Compression safety
+
+**MVP scope.** The Phase 4a-ii client always emits `Compression_COMPRESSION_NONE`; no compression encode or decode path ships in this implementation cycle. The caps below are documentation contracts that any future decompression code MUST honor. Wire goldens (Phase 4b) cover only the uncompressed body shape.
 
 When `EventBatch.compression` is `COMPRESSION_ZSTD` or `COMPRESSION_GZIP`, receivers MUST enforce two independent caps before decompression:
 
@@ -865,6 +869,7 @@ Phases 5/6/7/8 can be parallelized across contributors after Phase 4b (the proto
 ## Out-of-Scope (Explicit)
 
 - Server implementation (Watchtower).
+- Compressed-batch encoding/decoding. The MVP client always emits `Compression_COMPRESSION_NONE`; the proto enum reserves space for `ZSTD`/`GZIP` and the spec records the size caps, but no compression code path is implemented in this cycle.
 - Phase 0 composite refactor (separate doc).
 - Phase 1 OCSF mapper (separate work).
 - Live key rotation automation.
