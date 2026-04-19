@@ -541,13 +541,18 @@ All exposed via slog at debug + as structured counters consumable by the existin
 - `wtp_batches_sent_total` (counter)
 - `wtp_bytes_sent_total` (counter, post-compression)
 - `wtp_transport_loss_total` (counter)
-- `wtp_reconnects_total` (counter, labeled by reason)
+- `wtp_reconnects_total` (counter, labeled by reason; reason is one of: `dial_failed`, `stream_recv_error`, `send_error`, `ack_timeout`, `heartbeat_timeout`, `server_goaway`, `unknown`)
 - `wtp_session_state` (gauge: 0=connecting, 1=replaying, 2=live, 3=shutdown)
 - `wtp_wal_segments` (gauge)
 - `wtp_wal_bytes` (gauge)
 - `wtp_ack_high_watermark` (gauge)
 - `wtp_dropped_missing_chain_total` (counter; increments when `ev.Chain == nil`)
+- `wtp_wal_corruption_total` (counter; CRC corruption events during WAL replay)
 - `wtp_send_latency_seconds` (histogram, per batch)
+
+Histogram exposition snapshots bucket counts under the latency mutex and writes them unlocked, so a slow scrape never blocks `ObserveSendLatency` callers on the hot send path.
+
+WTP metric series are always emitted, even when the sink is disabled. Zero-valued counters and gauges keep dashboards stable across config changes; presence of the family is not a signal that WTP is enabled (use `wtp_session_state` to detect a live session).
 
 ## Configuration & Wiring
 

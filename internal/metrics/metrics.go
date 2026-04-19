@@ -33,6 +33,7 @@ type Collector struct {
 	wtpWALBytes            atomic.Int64
 	wtpAckHighWatermark    atomic.Int64
 	wtpDroppedMissingChain atomic.Uint64
+	wtpWALCorruption       atomic.Uint64
 
 	wtpLatencyMu      sync.Mutex
 	wtpLatencyBuckets [14]uint64 // 13 buckets + +Inf; index aligned with wtpLatencyBucketsSeconds

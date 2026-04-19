@@ -19,6 +19,32 @@ const (
 	WTPStateShutdown   WTPSessionState = 3
 )
 
+// WTPReconnectReason is a fixed, low-cardinality classification of why
+// the WTP transport reconnected. Adding new reasons requires updating
+// both the spec §Metrics section and the wtpReconnectReasonsValid table
+// below.
+type WTPReconnectReason string
+
+const (
+	WTPReconnectReasonDialFailed       WTPReconnectReason = "dial_failed"
+	WTPReconnectReasonStreamRecvError  WTPReconnectReason = "stream_recv_error"
+	WTPReconnectReasonSendError        WTPReconnectReason = "send_error"
+	WTPReconnectReasonAckTimeout       WTPReconnectReason = "ack_timeout"
+	WTPReconnectReasonHeartbeatTimeout WTPReconnectReason = "heartbeat_timeout"
+	WTPReconnectReasonServerGoaway     WTPReconnectReason = "server_goaway"
+	WTPReconnectReasonUnknown          WTPReconnectReason = "unknown"
+)
+
+var wtpReconnectReasonsValid = map[WTPReconnectReason]struct{}{
+	WTPReconnectReasonDialFailed:       {},
+	WTPReconnectReasonStreamRecvError:  {},
+	WTPReconnectReasonSendError:        {},
+	WTPReconnectReasonAckTimeout:       {},
+	WTPReconnectReasonHeartbeatTimeout: {},
+	WTPReconnectReasonServerGoaway:     {},
+	WTPReconnectReasonUnknown:          {},
+}
+
 // WTPMetrics is the per-Collector facade for wtp_* series. Returned by
 // (*Collector).WTP(). Methods are nil-safe so test code and disabled-sink
 // paths don't need to special-case it.
@@ -63,14 +89,14 @@ func (w *WTPMetrics) IncTransportLoss(n uint64) {
 	w.c.wtpTransportLoss.Add(n)
 }
 
-func (w *WTPMetrics) IncReconnects(reason string) {
+func (w *WTPMetrics) IncReconnects(reason WTPReconnectReason) {
 	if w == nil || w.c == nil {
 		return
 	}
-	if reason == "" {
-		reason = "unknown"
+	if _, ok := wtpReconnectReasonsValid[reason]; !ok {
+		reason = WTPReconnectReasonUnknown
 	}
-	ptr, _ := w.c.wtpReconnectsByReason.LoadOrStore(reason, &atomic.Uint64{})
+	ptr, _ := w.c.wtpReconnectsByReason.LoadOrStore(string(reason), &atomic.Uint64{})
 	ptr.(*atomic.Uint64).Add(1)
 }
 
@@ -107,6 +133,13 @@ func (w *WTPMetrics) IncDroppedMissingChain(n uint64) {
 		return
 	}
 	w.c.wtpDroppedMissingChain.Add(n)
+}
+
+func (w *WTPMetrics) IncWALCorruption(n uint64) {
+	if w == nil || w.c == nil {
+		return
+	}
+	w.c.wtpWALCorruption.Add(n)
 }
 
 // Latency histogram buckets, in seconds. Chosen to cover sub-millisecond
@@ -190,16 +223,26 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 	fmt.Fprint(w, "# TYPE wtp_dropped_missing_chain_total counter\n")
 	fmt.Fprintf(w, "wtp_dropped_missing_chain_total %d\n", c.wtpDroppedMissingChain.Load())
 
+	fmt.Fprint(w, "# HELP wtp_wal_corruption_total CRC corruption events encountered during WAL replay.\n")
+	fmt.Fprint(w, "# TYPE wtp_wal_corruption_total counter\n")
+	fmt.Fprintf(w, "wtp_wal_corruption_total %d\n", c.wtpWALCorruption.Load())
+
+	// Snapshot under lock to avoid blocking ObserveSendLatency callers
+	// during a slow scrape.
 	c.wtpLatencyMu.Lock()
-	defer c.wtpLatencyMu.Unlock()
+	bucketsSnapshot := c.wtpLatencyBuckets
+	sumSnapshot := c.wtpLatencySum
+	countSnapshot := c.wtpLatencyCount
+	c.wtpLatencyMu.Unlock()
+
 	fmt.Fprint(w, "# HELP wtp_send_latency_seconds Latency of WTP batch sends.\n")
 	fmt.Fprint(w, "# TYPE wtp_send_latency_seconds histogram\n")
 	for i, ub := range wtpLatencyBucketsSeconds {
-		fmt.Fprintf(w, "wtp_send_latency_seconds_bucket{le=\"%g\"} %d\n", ub, c.wtpLatencyBuckets[i])
+		fmt.Fprintf(w, "wtp_send_latency_seconds_bucket{le=\"%g\"} %d\n", ub, bucketsSnapshot[i])
 	}
-	fmt.Fprintf(w, "wtp_send_latency_seconds_bucket{le=\"+Inf\"} %d\n", c.wtpLatencyBuckets[len(wtpLatencyBucketsSeconds)])
-	fmt.Fprintf(w, "wtp_send_latency_seconds_sum %g\n", c.wtpLatencySum)
-	fmt.Fprintf(w, "wtp_send_latency_seconds_count %d\n", c.wtpLatencyCount)
+	fmt.Fprintf(w, "wtp_send_latency_seconds_bucket{le=\"+Inf\"} %d\n", bucketsSnapshot[len(wtpLatencyBucketsSeconds)])
+	fmt.Fprintf(w, "wtp_send_latency_seconds_sum %g\n", sumSnapshot)
+	fmt.Fprintf(w, "wtp_send_latency_seconds_count %d\n", countSnapshot)
 }
 
 // reuse-prevention: ensure sort.Strings stays imported even if the only

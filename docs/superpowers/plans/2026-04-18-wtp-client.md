@@ -686,7 +686,7 @@ Run `/roborev-design-review` and address findings.
 - Create: `internal/metrics/wtp_test.go`
 - Modify: `internal/metrics/metrics.go` (registry hook)
 
-**Why:** The spec lists 11 `wtp_*` series. Putting them on the existing `Collector` keeps Prometheus exposition in one place. Separating WTP-specific code into its own file keeps `metrics.go` focused.
+**Why:** The spec lists 13 `wtp_*` series (eleven counters/gauges, one CRC-corruption counter, one send-latency histogram). Putting them on the existing `Collector` keeps Prometheus exposition in one place. Separating WTP-specific code into its own file keeps `metrics.go` focused.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -697,6 +697,7 @@ package metrics
 
 import (
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -711,7 +712,7 @@ func TestWTPMetrics_AppendAndExpose(t *testing.T) {
 	w.IncBatchesSent(1)
 	w.AddBytesSent(2048)
 	w.IncTransportLoss(2)
-	w.IncReconnects("dial_failed")
+	w.IncReconnects(WTPReconnectReasonDialFailed)
 	w.SetSessionState(WTPStateLive)
 	w.SetWALSegments(7)
 	w.SetWALBytes(16 * 1024 * 1024)
@@ -751,6 +752,76 @@ func TestWTPMetrics_NilSafe(t *testing.T) {
 	w.SetSessionState(WTPStateConnecting)
 	w.AddBytesSent(99)
 }
+
+func TestWTPMetrics_HistogramBucketBoundaries(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	// 5ms — boundary of the 0.005 bucket (and all higher buckets)
+	w.ObserveSendLatency(5 * time.Millisecond)
+	// 30ms — boundary of the 0.05 bucket (skips 0.001, 0.005, 0.01, 0.025)
+	w.ObserveSendLatency(30 * time.Millisecond)
+	// 60s — exceeds final 30 bucket; only +Inf catches it
+	w.ObserveSendLatency(60 * time.Second)
+
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	expectations := map[string]int{
+		`wtp_send_latency_seconds_bucket{le="0.001"}`: 0,
+		`wtp_send_latency_seconds_bucket{le="0.005"}`: 1,
+		`wtp_send_latency_seconds_bucket{le="0.01"}`:  1,
+		`wtp_send_latency_seconds_bucket{le="0.025"}`: 1,
+		`wtp_send_latency_seconds_bucket{le="0.05"}`:  2,
+		`wtp_send_latency_seconds_bucket{le="0.1"}`:   2,
+		`wtp_send_latency_seconds_bucket{le="0.25"}`:  2,
+		`wtp_send_latency_seconds_bucket{le="0.5"}`:   2,
+		`wtp_send_latency_seconds_bucket{le="1"}`:     2,
+		`wtp_send_latency_seconds_bucket{le="2.5"}`:   2,
+		`wtp_send_latency_seconds_bucket{le="5"}`:     2,
+		`wtp_send_latency_seconds_bucket{le="10"}`:    2,
+		`wtp_send_latency_seconds_bucket{le="30"}`:    2,
+		`wtp_send_latency_seconds_bucket{le="+Inf"}`:  3,
+	}
+	for prefix, want := range expectations {
+		line := prefix + " " + strconv.Itoa(want)
+		if !strings.Contains(body, line) {
+			t.Errorf("missing or wrong-count bucket line %q\nbody:\n%s", line, body)
+		}
+	}
+	if !strings.Contains(body, "wtp_send_latency_seconds_count 3") {
+		t.Errorf("expected wtp_send_latency_seconds_count 3\nbody:\n%s", body)
+	}
+}
+
+func TestWTPMetrics_ReconnectReasonValidationAndEscape(t *testing.T) {
+	c := New()
+	w := c.WTP()
+
+	w.IncReconnects(WTPReconnectReasonDialFailed)
+	w.IncReconnects(WTPReconnectReasonStreamRecvError)
+	w.IncReconnects(WTPReconnectReasonStreamRecvError)
+	// Invalid (unknown enum) collapses to WTPReconnectReasonUnknown.
+	w.IncReconnects(WTPReconnectReason("evil\"label\\value"))
+
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	for _, want := range []string{
+		`wtp_reconnects_total{reason="dial_failed"} 1`,
+		`wtp_reconnects_total{reason="stream_recv_error"} 2`,
+		`wtp_reconnects_total{reason="unknown"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing line %q\nbody:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `evil`) {
+		t.Errorf("invalid reason leaked through validator into output:\n%s", body)
+	}
+}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -781,6 +852,32 @@ const (
 	WTPStateLive       WTPSessionState = 2
 	WTPStateShutdown   WTPSessionState = 3
 )
+
+// WTPReconnectReason is a fixed, low-cardinality classification of why
+// the WTP transport reconnected. Adding new reasons requires updating
+// both the spec §Metrics section and the wtpReconnectReasonsValid table
+// below.
+type WTPReconnectReason string
+
+const (
+	WTPReconnectReasonDialFailed       WTPReconnectReason = "dial_failed"
+	WTPReconnectReasonStreamRecvError  WTPReconnectReason = "stream_recv_error"
+	WTPReconnectReasonSendError        WTPReconnectReason = "send_error"
+	WTPReconnectReasonAckTimeout       WTPReconnectReason = "ack_timeout"
+	WTPReconnectReasonHeartbeatTimeout WTPReconnectReason = "heartbeat_timeout"
+	WTPReconnectReasonServerGoaway     WTPReconnectReason = "server_goaway"
+	WTPReconnectReasonUnknown          WTPReconnectReason = "unknown"
+)
+
+var wtpReconnectReasonsValid = map[WTPReconnectReason]struct{}{
+	WTPReconnectReasonDialFailed:       {},
+	WTPReconnectReasonStreamRecvError:  {},
+	WTPReconnectReasonSendError:        {},
+	WTPReconnectReasonAckTimeout:       {},
+	WTPReconnectReasonHeartbeatTimeout: {},
+	WTPReconnectReasonServerGoaway:     {},
+	WTPReconnectReasonUnknown:          {},
+}
 
 // WTPMetrics is the per-Collector facade for wtp_* series. Returned by
 // (*Collector).WTP(). Methods are nil-safe so test code and disabled-sink
@@ -826,14 +923,14 @@ func (w *WTPMetrics) IncTransportLoss(n uint64) {
 	w.c.wtpTransportLoss.Add(n)
 }
 
-func (w *WTPMetrics) IncReconnects(reason string) {
+func (w *WTPMetrics) IncReconnects(reason WTPReconnectReason) {
 	if w == nil || w.c == nil {
 		return
 	}
-	if reason == "" {
-		reason = "unknown"
+	if _, ok := wtpReconnectReasonsValid[reason]; !ok {
+		reason = WTPReconnectReasonUnknown
 	}
-	ptr, _ := w.c.wtpReconnectsByReason.LoadOrStore(reason, &atomic.Uint64{})
+	ptr, _ := w.c.wtpReconnectsByReason.LoadOrStore(string(reason), &atomic.Uint64{})
 	ptr.(*atomic.Uint64).Add(1)
 }
 
@@ -870,6 +967,13 @@ func (w *WTPMetrics) IncDroppedMissingChain(n uint64) {
 		return
 	}
 	w.c.wtpDroppedMissingChain.Add(n)
+}
+
+func (w *WTPMetrics) IncWALCorruption(n uint64) {
+	if w == nil || w.c == nil {
+		return
+	}
+	w.c.wtpWALCorruption.Add(n)
 }
 
 // Latency histogram buckets, in seconds. Chosen to cover sub-millisecond
@@ -953,21 +1057,34 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 	fmt.Fprint(w, "# TYPE wtp_dropped_missing_chain_total counter\n")
 	fmt.Fprintf(w, "wtp_dropped_missing_chain_total %d\n", c.wtpDroppedMissingChain.Load())
 
+	fmt.Fprint(w, "# HELP wtp_wal_corruption_total CRC corruption events encountered during WAL replay.\n")
+	fmt.Fprint(w, "# TYPE wtp_wal_corruption_total counter\n")
+	fmt.Fprintf(w, "wtp_wal_corruption_total %d\n", c.wtpWALCorruption.Load())
+
+	// Snapshot under lock to avoid blocking ObserveSendLatency callers
+	// during a slow scrape.
 	c.wtpLatencyMu.Lock()
-	defer c.wtpLatencyMu.Unlock()
+	bucketsSnapshot := c.wtpLatencyBuckets
+	sumSnapshot := c.wtpLatencySum
+	countSnapshot := c.wtpLatencyCount
+	c.wtpLatencyMu.Unlock()
+
 	fmt.Fprint(w, "# HELP wtp_send_latency_seconds Latency of WTP batch sends.\n")
 	fmt.Fprint(w, "# TYPE wtp_send_latency_seconds histogram\n")
 	for i, ub := range wtpLatencyBucketsSeconds {
-		fmt.Fprintf(w, "wtp_send_latency_seconds_bucket{le=\"%g\"} %d\n", ub, c.wtpLatencyBuckets[i])
+		fmt.Fprintf(w, "wtp_send_latency_seconds_bucket{le=\"%g\"} %d\n", ub, bucketsSnapshot[i])
 	}
-	fmt.Fprintf(w, "wtp_send_latency_seconds_bucket{le=\"+Inf\"} %d\n", c.wtpLatencyBuckets[len(wtpLatencyBucketsSeconds)])
-	fmt.Fprintf(w, "wtp_send_latency_seconds_sum %g\n", c.wtpLatencySum)
-	fmt.Fprintf(w, "wtp_send_latency_seconds_count %d\n", c.wtpLatencyCount)
+	fmt.Fprintf(w, "wtp_send_latency_seconds_bucket{le=\"+Inf\"} %d\n", bucketsSnapshot[len(wtpLatencyBucketsSeconds)])
+	fmt.Fprintf(w, "wtp_send_latency_seconds_sum %g\n", sumSnapshot)
+	fmt.Fprintf(w, "wtp_send_latency_seconds_count %d\n", countSnapshot)
 }
 
 // reuse-prevention: ensure sort.Strings stays imported even if the only
 // caller above is removed during refactors.
 var _ = sort.Strings
+
+// sync import retention (used via sync.Map field on Collector and sync.Mutex).
+var _ sync.Locker = (*sync.Mutex)(nil)
 ```
 
 - [ ] **Step 4: Add WTP fields to the Collector and wire emitter**
@@ -997,6 +1114,7 @@ type Collector struct {
 	wtpWALBytes            atomic.Int64
 	wtpAckHighWatermark    atomic.Int64
 	wtpDroppedMissingChain atomic.Uint64
+	wtpWALCorruption       atomic.Uint64
 
 	wtpLatencyMu      sync.Mutex
 	wtpLatencyBuckets [14]uint64 // 13 buckets + +Inf; index aligned with wtpLatencyBucketsSeconds
