@@ -503,15 +503,36 @@ This is best-effort. A v2 enhancement (per-record sequence in the frame header, 
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "ack_high_watermark_seq": 12345,
   "ack_high_watermark_gen": 7,
+  "ack_recorded": true,
   "session_id": "01J...ulid",
   "key_fingerprint": "sha256:abcd…"
 }
 ```
 
-Atomically written via `os.WriteFile` on a temp + `os.Rename` + `fsync(parent)` using the existing `internal/audit/fsync_dir_unix.go` and `fsync_dir_windows.go` helpers. The session ID is included so a stale meta.json from a previous installation cannot be silently consumed.
+Fields:
+
+- `format_version` — schema version. Current writers MUST emit `2`. v1 readers (which only ever stored `(seq, gen)` because pre-v2 only `MarkAcked` wrote meta.json) are accepted on read; see "Migration / backcompat" below.
+- `ack_high_watermark_seq` / `ack_high_watermark_gen` — the last `(generation, sequence)` tuple persisted via `MarkAcked`. Meaningless in isolation: the `ack_recorded` flag below is what makes this tuple "Present" for the §Effective-ack tuple and clamp's first-apply branch.
+- `ack_recorded` — boolean mirror of `wal.Meta.AckRecorded`. **Required in v2.** False means "no ack has ever been recorded for this WAL directory; the ack-tuple fields above are zero-valued and meaningless." Maps directly to the AckTuple `Present` flag the cold-start seed passes into the transport (see §Effective-ack tuple and clamp): `Present == ack_recorded`. The first-apply branch of `applyServerAckTuple` is taken iff `ack_recorded == false` so the clamp does not trip on a legitimate zero seed.
+- `session_id` / `key_fingerprint` — identity fields used by the cold-start seed safety check below. A stale meta.json from a previous installation cannot be silently consumed.
+
+Atomically written via `os.WriteFile` on a temp + `os.Rename` + `fsync(parent)` using the existing `internal/audit/fsync_dir_unix.go` and `fsync_dir_windows.go` helpers.
+
+**Migration / backcompat.** A v1 meta.json (no `ack_recorded` field) MUST be treated as `ack_recorded: true` on read regardless of the persisted ack-tuple values, because in pre-v2 only `MarkAcked` wrote meta.json — the file's existence implied an ack was persisted. (The implementation lives in `wal.ReadMeta`: see `internal/store/watchtower/wal/meta.go`.) After the next successful WAL flush, the meta.json is rewritten as v2 with the correct `ack_recorded` value (always true on the rewrite path because the rewrite happens through `MarkAcked`). v0 (no meta.json on disk) is the cold-cold-start case: callers receive `os.ErrNotExist` from `ReadMeta` and pass `Options.InitialAckTuple = nil`, which the §Effective-ack tuple and clamp's first-apply branch handles wholesale.
+
+#### Cold-start seed safety / stale meta detection
+
+Before constructing `Options.InitialAckTuple`, the caller (Store-wiring layer) MUST compare `wal.Meta.SessionID` and `wal.Meta.KeyFingerprint` against the values configured for the current process. The fields exist explicitly to defend against silently consuming meta from a different installation or a rotated key.
+
+Match/reset rules:
+
+- **`session_id` mismatch** (e.g., reused WAL dir from a different installation, or the server-issued session was rotated and the new daemon configured the new value): do **NOT** seed the ack tuple. Pass `Options.InitialAckTuple = nil` so the transport treats this as a first-time connect and adopts the server's tuple wholesale on the first SessionAck (the first-apply branch in §Effective-ack tuple and clamp).
+- **`key_fingerprint` mismatch** (the signing key was rotated outside of this process's lifetime, so the persisted ack history may not be cryptographically attributable to the current key): same rule — do not seed.
+- In both mismatch cases, log a one-time WARN naming the field that mismatched, the persisted vs. expected values, and the action taken ("ignoring persisted ack").
+- **Match** (both fields equal AND `ack_recorded == true`) is the ONLY case that seeds the ack tuple from `wal.Meta`. `ack_recorded == false` with matching identity fields also yields `Options.InitialAckTuple = nil` (see above).
 
 ### Reader API
 
@@ -615,7 +636,7 @@ WTP uses three distinct server→client acknowledgement messages with disjoint s
 
 | Message | When sent | What it advances |
 |---|---|---|
-| `SessionAck` | Once, immediately after the server validates `SessionInit`. | Session lifecycle only. `accepted=false` terminates the session — the client MUST disconnect and surface `reject_reason`. |
+| `SessionAck` | Once, immediately after the server validates `SessionInit`. | Both the session lifecycle (the client moves out of Connecting) AND the effective ack tuple. `accepted=false` terminates the session — the client MUST disconnect and surface `reject_reason`. On `accepted=true`, the carried `(generation, ack_high_watermark_seq)` is fed through the SAME clamp as `BatchAck` and `ServerHeartbeat` (see §"Effective-ack tuple and clamp" below). Session lifecycle and ack-tuple advancement happen in the same handler. |
 | `BatchAck` | Per batch the server has durably accepted (or batched into a single ack covering several client batches). Carries `ack_high_watermark_seq` and `generation`. | Client's ack high-watermark, which gates WAL segment GC and `wtp_ack_high_watermark`. |
 | `ServerHeartbeat` | Periodic, even when the client is idle. Carries the server's current `ack_high_watermark_seq`. | Same as `BatchAck` for ack high-watermark, but never carries new acks beyond what `BatchAck` already delivered. Used to confirm liveness and catch up the client after long idle periods. |
 
@@ -623,7 +644,7 @@ WTP uses three distinct server→client acknowledgement messages with disjoint s
 
 #### Effective-ack tuple and clamp
 
-The effective ack watermark is a `(generation, sequence)` TUPLE held on the client (the `Transport`'s `(ackedGeneration, ackedSequence)` fields) and seeded on cold start from the WAL's persisted `meta.json` (`AckHighWatermarkGen`, `AckHighWatermarkSeq`, with `AckRecorded` mapping to a "Present" flag so the first-apply branch of the clamp doesn't trip on a legitimate zero seed). Every server-supplied watermark — `SessionAck`, `BatchAck`, and `ServerHeartbeat` — is applied through the same clamp (the implementation calls it `applyServerAckTuple`):
+The effective ack watermark is a `(generation, sequence)` TUPLE held on the client (the `Transport`'s `(ackedGeneration, ackedSequence)` fields) and seeded on cold start from the WAL's persisted `meta.json` (`AckHighWatermarkGen`, `AckHighWatermarkSeq`, with `meta.json` field `ack_recorded` mapping directly to a "Present" flag — see §"meta.json schema" — so the first-apply branch of the clamp doesn't trip on a legitimate zero seed). The cold-start seed itself is gated by the identity checks in §"Cold-start seed safety / stale meta detection": a `session_id` or `key_fingerprint` mismatch yields `Options.InitialAckTuple = nil`, which routes through the first-apply branch on the next SessionAck. Every server-supplied watermark — `SessionAck`, `BatchAck`, and `ServerHeartbeat` — is applied through the same clamp (the implementation calls it `applyServerAckTuple`):
 
 - **First apply (no prior tuple recorded)**: ADOPT the server tuple wholesale. No anomaly log, no WARN — first contact between client and server cannot be classified as anomalous because there is no local baseline to compare against.
 - **`(server_gen, server_seq) < (local_gen, local_seq)` lex**: ADOPT the server tuple wholesale (BOTH fields). This is the legitimate stale-watermark recovery path during gradual rollout or partition recovery; the client re-sends unacked records rather than dropping the gap.

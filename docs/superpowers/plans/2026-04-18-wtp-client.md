@@ -6289,9 +6289,16 @@ t.ackedGeneration = ack.GetGeneration()
 ```go
 // applyServerAckTuple clamps a server-supplied (gen, seq) onto the
 // Transport's effective ack watermark per spec §"Acknowledgement model"
-// (design.md:601). Returns true iff the local tuple changed; the caller
-// uses the boolean to decide whether to re-MarkAcked the WAL and emit
-// the anomaly WARN (only on the anomalous-keep branch).
+// (design.md:601). Returns (changed, anomaly):
+//   - changed=true means the local tuple was advanced (or first-applied);
+//     the caller MUST then run the side-effect contract documented in
+//     Step 1b.5 below — persist to wal.MarkAcked, emit
+//     wtp_ack_high_watermark, and ONLY THEN consider the advance
+//     committed. (Round-7 Finding 4: this helper's in-memory write must
+//     not be the only proof an ack advanced.)
+//   - anomaly=true means the server tuple was lex-higher than the local
+//     tuple; the local tuple is unchanged and the caller emits the
+//     rate-limited WARN.
 func (t *Transport) applyServerAckTuple(serverGen uint32, serverSeq uint64) (changed bool, anomaly bool) {
     // First-apply (no prior ack): adopt server tuple wholesale, regardless
     // of value. ackedPresent flips true so subsequent calls take the lex
@@ -6326,12 +6333,18 @@ func (t *Transport) applyServerAckTuple(serverGen uint32, serverSeq uint64) (cha
 
 The `applyServerAckTuple` helper is the SINGLE source of truth for the clamp logic; the SessionAck handler in `state_connecting.go` (this task), and the BatchAck / ServerHeartbeat handlers in the recv multiplexer (Task 17 sub-step 17.X), all dispatch through it.
 
-**Step 1b: Wire the SessionAck handler into the helper.** Replace the bare `state_connecting.go:59` block with:
+**Step 1b: Wire the SessionAck handler into the helper.** Replace the bare `state_connecting.go:59` block with the call sequence below. The structure mirrors the contract laid out in Step 1b.5 (snapshot → clamp → WARN-on-anomaly → persist-on-change → rollback-on-failure → metric-on-success); BatchAck and ServerHeartbeat (Task 17 sub-step 17.X) run the SAME sequence:
 
 ```go
 serverGen := ack.GetGeneration()
 serverSeq := ack.GetAckHighWatermarkSeq()
-_, anomaly := t.applyServerAckTuple(serverGen, serverSeq)
+
+// Snapshot before the helper mutates — required for rollback per Step 1b.5.
+priorSeq := t.ackedSequence
+priorGen := t.ackedGeneration
+priorPresent := t.ackedPresent
+
+changed, anomaly := t.applyServerAckTuple(serverGen, serverSeq)
 if anomaly && t.ackAnomalyLimiter.Allow() {
     // Per spec §"Acknowledgement model": log the FULL tuple context
     // (server_gen, server_seq, local_gen, local_seq) so operators can
@@ -6343,9 +6356,75 @@ if anomaly && t.ackAnomalyLimiter.Allow() {
         slog.Uint64("local_gen", uint64(t.ackedGeneration)),
         slog.String("session_id", t.opts.SessionID))
 }
+
+if changed {
+    if err := t.wal.MarkAcked(t.ackedGeneration, t.ackedSequence); err != nil {
+        t.opts.Logger.Warn("session_ack: wal.MarkAcked failed; rolling back in-memory ack tuple",
+            slog.Uint64("attempted_seq", t.ackedSequence),
+            slog.Uint64("attempted_gen", uint64(t.ackedGeneration)),
+            slog.String("err", err.Error()))
+        t.ackedSequence = priorSeq
+        t.ackedGeneration = priorGen
+        t.ackedPresent = priorPresent
+        // Server will re-deliver this watermark on the next BatchAck or
+        // ServerHeartbeat. No metric emission on the failure path.
+    } else {
+        t.metrics.SetWTPAckHighWatermark(t.ackedSequence, t.ackedGeneration)
+    }
+}
 ```
 
 `t.ackAnomalyLimiter` is a `*rate.Limiter` Transport field added in this step (defaulted in `New` to `rate.NewLimiter(rate.Every(time.Minute), 1)` so production emits at most one anomaly WARN per minute per Transport instance). Unit tests inject a permissive limiter (`rate.NewLimiter(rate.Inf, 1)` or a mock) so the inject-and-assert pattern below sees exactly one log per anomalous SessionAck. `t.opts.Logger` is the injected logger (see Step 1d below) — this is the only handle the Transport reaches for log output, so tests can substitute `slog.New(slog.NewJSONHandler(buf, ...))` to capture WARN lines without racing against parallel tests.
+
+**Step 1b.5: Side-effect contract for `applyServerAckTuple` returning `changed=true` (round-7 Finding 4).** Round-7 reviewer flagged that the existing helper comment said "the caller uses the boolean to decide whether to re-MarkAcked the WAL," but no plan step concretely scheduled what happens after `changed=true` — the recv sketch in Task 17 left "metrics / segment GC trigger" as a placeholder. This sub-step makes the contract explicit so SessionAck (here), BatchAck, and ServerHeartbeat (Task 17 sub-step 17.X) all run the same side-effect sequence in lock-step.
+
+**WAL is the source of truth — invariant.** The in-memory tuple `(t.ackedSequence, t.ackedGeneration, t.ackedPresent)` advances ONLY after `wal.MarkAcked` returns success. Two reasons:
+
+1. The WAL's segment GC keys off the persisted `meta.json` `(AckHighWatermarkGen, AckHighWatermarkSeq)`. If we advance the in-memory tuple but `MarkAcked` fails (disk full, fsync error, EIO), then on the next `state_connecting.go` cycle we would advertise the inflated in-memory watermark in `SessionInit.wal_high_watermark_seq` while the WAL on disk still has segments NOT GC'd at that watermark. The server then thinks records are durably acked that the client cannot prove are persisted past a crash.
+2. The cold-start seed read from `wal.ReadMeta` at restart MUST be the same value the previous run advertised on the wire. If the in-memory tuple ever diverges from the on-disk meta.json (even briefly), a crash window between the in-memory write and the failed `MarkAcked` would persist the wrong post-restart state.
+
+Given the helper as written (which advances `t.ackedSequence/Generation/Present` IN-LINE before returning), the call sequence in BOTH `state_connecting.go` (SessionAck) AND the recv-arm dispatchers (BatchAck/ServerHeartbeat) MUST therefore look like this:
+
+```go
+// Snapshot the prior tuple BEFORE the helper mutates it, so we can
+// roll back on MarkAcked failure.
+priorSeq := t.ackedSequence
+priorGen := t.ackedGeneration
+priorPresent := t.ackedPresent
+
+changed, anomaly := t.applyServerAckTuple(serverGen, serverSeq)
+
+if anomaly && t.ackAnomalyLimiter.Allow() {
+    t.opts.Logger.Warn(...) // FULL tuple context, per Step 1b.
+}
+
+if changed {
+    // Persist BEFORE we count the in-memory advance as committed.
+    if err := t.wal.MarkAcked(t.ackedGeneration, t.ackedSequence); err != nil {
+        // Persistence failed: roll back the in-memory tuple so it stays
+        // in lock-step with the on-disk meta.json. Log at WARN with the
+        // tuple we tried to persist, then treat the ack frame as
+        // effectively dropped — the server will re-deliver on the next
+        // BatchAck or ServerHeartbeat. NO metric emission on the
+        // failure path.
+        t.opts.Logger.Warn("ack: wal.MarkAcked failed; in-memory tuple rolled back",
+            slog.Uint64("attempted_seq", t.ackedSequence),
+            slog.Uint64("attempted_gen", uint64(t.ackedGeneration)),
+            slog.String("err", err.Error()))
+        t.ackedSequence = priorSeq
+        t.ackedGeneration = priorGen
+        t.ackedPresent = priorPresent
+        return // do NOT emit wtp_ack_high_watermark on failure.
+    }
+    // Persistence succeeded: now the in-memory advance is committed.
+    // Emit the gauge metric so operators see the new watermark.
+    t.metrics.SetWTPAckHighWatermark(t.ackedSequence, t.ackedGeneration)
+}
+```
+
+`t.wal` is the `*wal.WAL` reference Task 22 wires through `Options.WAL` (the existing `Options.WAL *wal.WAL` field that the StateLive case already uses for `NewReader`); `t.metrics` is the `*metrics.WTPMetrics` façade (`opts.Metrics.WTP()` per the Task 22 store-wiring snippet). The `wtp_ack_high_watermark` gauge MUST carry both `gen` and `seq` labels — see `internal/metrics/wtp.go`.
+
+**Why snapshot-and-rollback rather than persist-first.** An alternative shape is "persist `(serverGen, serverSeq)` first, then mutate `t.ackedSequence/Generation` only on success." That shape is cleaner in isolation, but the helper as written today is the canonical clamp logic — it knows about first-apply, lex-compare, and stale-server adoption. Refactoring it into a "decide which value to persist" pure function plus a "commit or noop" mutator doubles the surface area and forces every caller (SessionAck inline, BatchAck recv-arm, ServerHeartbeat recv-arm) to recompute the lex compare to know what value to persist. The snapshot-and-rollback shape keeps the helper as the single source of truth and adds three lines of bookkeeping to each caller, which the test in Step 4 below (`TestApplyServerAckTuple_DoesNotAdvanceOnMarkAckedFailure`) locks in.
 
 **Step 1c: Seed Transport ack tuple from `wal.Meta` on construction.** The spec (design.md:180) says SessionInit's `wal_high_watermark_seq` comes "from disk." Today's `transport.New` defaults the tuple to `(0, 0)`. After a restart, the very first SessionInit lies about the local watermark — `t.ackedSequence == 0` — and the round-5 clamp's `local == 0` escape hatch was compensating for this gap rather than fixing it. Round-6: model "ack present" explicitly via a `Present` flag on the seed and a matching `t.ackedPresent` field on Transport, and let `applyServerAckTuple` handle first-apply by adopting the server tuple wholesale (no anomaly, no WARN).
 
@@ -6445,12 +6524,18 @@ Assert: `t.ackedSequence == 100`, `t.ackedGeneration == 8` (server tuple adopted
 
 **Test #7 (rate-limit guard `TestSessionAck_AnomalyWarnRateLimited`)** — OPTIONAL but RECOMMENDED to lock in the rate-limiter contract: inject a strict `rate.NewLimiter(rate.Every(time.Hour), 1)` and drive five back-to-back anomalous SessionAck handlers (each carrying `server_gen=8, server_seq=100` against `local_gen=7, local_seq=100`). Assert exactly one WARN entry (the limiter absorbed four).
 
+**Test #8 (`TestApplyServerAckTuple_PersistsToWALMetaOnAdvance`)** — round-7 Finding 4: side-effect contract on `changed=true`. Setup: open a `*wal.WAL` on a `t.TempDir()`, append seqs 1..50, drive `MarkAcked(gen=2, seq=10)` so meta.json starts at `(gen=2, seq=10, AckRecorded=true)`. Construct the Transport with `Options.WAL = w`, `InitialAckTuple = &AckTuple{Generation: 2, Sequence: 10, Present: true}`. Inject a fake metrics façade (`*metrics.WTPMetrics` is the type used in production; tests substitute a counting fake or a recording fake) and a permissive limiter. Drive a SessionAck handler with `(serverGen=2, serverSeq=20)` (lex-higher within the same gen — anomaly path? NO — this is the case where `applyServerAckTuple` sees `serverHigher=true` and returns `(changed=false, anomaly=true)`). Adjust the test to use the LOWER server tuple: `(serverGen=2, serverSeq=5)` triggers `serverLower=true` → helper returns `(changed=true, anomaly=false)` — the in-memory tuple advances to `(2, 5)`. Assert: (a) `wal.MarkAcked(2, 5)` was called exactly once (verifiable via re-reading meta.json: `wal.ReadMeta` returns `AckHighWatermarkSeq=5, AckHighWatermarkGen=2, AckRecorded=true`); (b) `t.ackedSequence == 5, t.ackedGeneration == 2`; (c) the metrics fake recorded exactly one `SetWTPAckHighWatermark(seq=5, gen=2)` call. Additional sub-case: drive a first-apply (start with `Options.InitialAckTuple = nil`, then SessionAck `(gen=3, seq=42)`) — assert helper returned `(changed=true, anomaly=false)`, `MarkAcked(3, 42)` was called, meta.json now has `(3, 42, true)`, and the metric was emitted with `(seq=42, gen=3)`.
+
+**Test #9 (`TestApplyServerAckTuple_DoesNotAdvanceOnMarkAckedFailure`)** — round-7 Finding 4: snapshot-and-rollback path. Setup: same as Test #8 but inject a `*wal.WAL` whose `MarkAcked` is configured to return a non-nil error on the next call (the simplest seam is a `walMarkAckedFn func(gen uint32, seq uint64) error` indirection on Transport that defaults to `t.wal.MarkAcked` and is overridden in tests via a `_test.go`-only export — matching the existing `RunReplayingForTest` pattern; alternatively, use a fake `*wal.WAL` from a doubles file). Pre-state: `t.ackedSequence=10, t.ackedGeneration=2, t.ackedPresent=true`. Drive SessionAck `(serverGen=2, serverSeq=5)` (lex-lower → helper returns `(changed=true, anomaly=false)` and mutates the tuple in-line). Inject a `slog.Logger` capture buffer. Assert: (a) `MarkAcked` was called with `(gen=2, seq=5)` exactly once and returned the injected error; (b) `t.ackedSequence == 10, t.ackedGeneration == 2, t.ackedPresent == true` (rolled back to the pre-helper snapshot — the in-memory advance is undone); (c) the metrics fake recorded ZERO calls to `SetWTPAckHighWatermark` (failure path does not emit); (d) the WARN buffer contains exactly one entry naming the failure with `attempted_seq=5, attempted_gen=2`, the `err` field, and the action ("rolled back"); (e) the rate-limited ack-anomaly WARN buffer is empty (failure is not an anomaly — it's a persistence failure that the server will recover from on the next ack-bearing frame).
+
+**Test #10 (`TestApplyServerAckTuple_EmitsMetricOnAdvance`)** — round-7 Finding 4: gauge emission contract. Setup: same as Test #8. Drive three sequential SessionAck handlers with lex-lower tuples: `(2, 8)`, `(2, 6)`, `(1, 999999)`. After each handler, assert: (a) `MarkAcked` was called with the post-clamp tuple; (b) the metrics fake recorded `SetWTPAckHighWatermark(...)` with the matching post-clamp `(seq, gen)` (assert the gauge holds the latest value, not the cumulative max — gauges overwrite); (c) the metric labels carry both `gen` and `seq` (assert the fake observed both, not just one). After the three calls, the metrics fake's last-recorded call MUST be `(seq=999999, gen=1)` because `(1, 999999)` is the lex-lowest of the three (each call wins the lex-lower clamp against the prior in-memory tuple). Negative sub-case: a fourth SessionAck with the equal-tuple `(1, 999999)` triggers helper return `(changed=false, anomaly=false)` — assert NO additional `MarkAcked` call, NO additional metric emission (the gauge does not re-emit on a no-op clamp).
+
 **Step ordering for Task 15.1:**
 
-- [ ] **Step 1:** Write the failing tests (`TestApplyServerAckTuple_LowerSeqSameGen`, `TestApplyServerAckTuple_HigherSeqSameGen`, `TestApplyServerAckTuple_LowerGenAnyLocalSeq`, `TestApplyServerAckTuple_HigherGenAnyLocalSeq`, `TestApplyServerAckTuple_EqualTuple`, `TestApplyServerAckTuple_FirstApplyAdoptsServer`, optional `TestSessionAck_AnomalyWarnRateLimited`).
-- [ ] **Step 2:** Run tests to verify they fail with the expected symbols (`Transport.applyServerAckTuple` undefined, `Transport.ackedPresent` undefined, `Options.InitialAckTuple` / `Options.Logger` / `transport.AckTuple` undefined, current SessionAck handler does not honor the clamp).
-- [ ] **Step 3a:** Add the `AckTuple` struct, `Options.InitialAckTuple`, `Options.Logger`, `t.ackedPresent`, `t.ackAnomalyLimiter` fields, default `Logger` to `slog.Default()` and `ackAnomalyLimiter` to `rate.NewLimiter(rate.Every(time.Minute), 1)` in `New`, apply the seed in `New` if `InitialAckTuple != nil`.
-- [ ] **Step 3b:** Add the `applyServerAckTuple` helper to `transport.go`. Refactor the `state_connecting.go:59` SessionAck handler to call into the helper and emit the anomaly WARN (with FULL tuple context) through `t.opts.Logger.Warn(...)`.
+- [ ] **Step 1:** Write the failing tests (`TestApplyServerAckTuple_LowerSeqSameGen`, `TestApplyServerAckTuple_HigherSeqSameGen`, `TestApplyServerAckTuple_LowerGenAnyLocalSeq`, `TestApplyServerAckTuple_HigherGenAnyLocalSeq`, `TestApplyServerAckTuple_EqualTuple`, `TestApplyServerAckTuple_FirstApplyAdoptsServer`, optional `TestSessionAck_AnomalyWarnRateLimited`, AND the round-7 Finding 4 trio: `TestApplyServerAckTuple_PersistsToWALMetaOnAdvance`, `TestApplyServerAckTuple_DoesNotAdvanceOnMarkAckedFailure`, `TestApplyServerAckTuple_EmitsMetricOnAdvance`).
+- [ ] **Step 2:** Run tests to verify they fail with the expected symbols (`Transport.applyServerAckTuple` undefined, `Transport.ackedPresent` undefined, `Options.InitialAckTuple` / `Options.Logger` / `Options.WAL` / `Options.Metrics` / `transport.AckTuple` undefined, current SessionAck handler does not honor the clamp OR the side-effect contract).
+- [ ] **Step 3a:** Add the `AckTuple` struct, `Options.InitialAckTuple`, `Options.Logger`, `Options.WAL`, `Options.Metrics` (façade), `t.ackedPresent`, `t.ackAnomalyLimiter` fields, default `Logger` to `slog.Default()` and `ackAnomalyLimiter` to `rate.NewLimiter(rate.Every(time.Minute), 1)` in `New`, apply the seed in `New` if `InitialAckTuple != nil`.
+- [ ] **Step 3b:** Add the `applyServerAckTuple` helper to `transport.go`. Refactor the `state_connecting.go:59` SessionAck handler to call into the helper AND run the side-effect contract from Step 1b.5 (snapshot → clamp → WARN-on-anomaly → persist-on-change → rollback-on-failure → metric-on-success); emit the anomaly WARN (with FULL tuple context) through `t.opts.Logger.Warn(...)`.
 - [ ] **Step 4:** Run the tests to verify they pass; run the full transport package test suite to verify no regression.
 - [ ] **Step 5:** Cross-compile (`GOOS=windows go build ./...`) — `golang.org/x/time/rate` is in the module already; if not, `go mod tidy`.
 - [ ] **Step 6:** Commit with message `fix(wtp/transport): tuple-aware ack clamp + WAL meta seed + injected logger`.
@@ -7688,7 +7773,7 @@ Offending sites (will be added by this task — there is no production code to g
 - The `case *wtpv1.ServerMessage_BatchAck:` arm of the recv goroutine's typed dispatch (introduced in this task).
 - The `case *wtpv1.ServerMessage_ServerHeartbeat:` arm of the same dispatch.
 
-Reuse the canonical `applyServerAckTuple` helper Task 15.1 lands on Transport (operates on the `(gen, seq)` TUPLE under lex compare). The recv-side handlers wrap it with the same anomaly-WARN emission used by SessionAck (rate-limited via `t.ackAnomalyLimiter`, logger via `t.opts.Logger`):
+Reuse the canonical `applyServerAckTuple` helper Task 15.1 lands on Transport (operates on the `(gen, seq)` TUPLE under lex compare). The recv-side handlers wrap it with the same anomaly-WARN emission used by SessionAck (rate-limited via `t.ackAnomalyLimiter`, logger via `t.opts.Logger`) AND the same side-effect contract from Task 15.1 Step 1b.5 (snapshot-and-rollback around `wal.MarkAcked` + metric emission on success — round-7 Finding 4):
 
 ```go
 // applyAckFromRecv is the recv-side wrapper around applyServerAckTuple.
@@ -7700,9 +7785,16 @@ Reuse the canonical `applyServerAckTuple` helper Task 15.1 lands on Transport (o
 // `frame` is the proto frame name ("batch_ack" / "server_heartbeat")
 // used in the anomaly WARN's structured log so operators can tell which
 // frame type drove the anomaly. SessionAck logs through the SessionAck
-// site directly (with frame="session_ack").
+// site directly (with frame="session_ack") — same side-effect contract,
+// inlined there for the anomaly-WARN/rejectReason interleave.
 func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq uint64) {
-    _, anomaly := t.applyServerAckTuple(serverGen, serverSeq)
+    // Snapshot before the helper mutates — required for rollback per
+    // Task 15.1 Step 1b.5.
+    priorSeq := t.ackedSequence
+    priorGen := t.ackedGeneration
+    priorPresent := t.ackedPresent
+
+    changed, anomaly := t.applyServerAckTuple(serverGen, serverSeq)
     if anomaly && t.ackAnomalyLimiter.Allow() {
         // Per spec §"Acknowledgement model": log the FULL tuple context
         // (server_gen, server_seq, local_gen, local_seq) so operators
@@ -7715,6 +7807,24 @@ func (t *Transport) applyAckFromRecv(frame string, serverGen uint32, serverSeq u
             slog.Uint64("local_gen", uint64(t.ackedGeneration)),
             slog.String("session_id", t.opts.SessionID))
     }
+
+    if changed {
+        if err := t.wal.MarkAcked(t.ackedGeneration, t.ackedSequence); err != nil {
+            // Persistence failed: roll back the in-memory tuple so it
+            // stays in lock-step with on-disk meta.json. Server will
+            // re-deliver on the next ack-bearing frame; no metric.
+            t.opts.Logger.Warn("ack: wal.MarkAcked failed; rolling back in-memory ack tuple",
+                slog.String("frame", frame),
+                slog.Uint64("attempted_seq", t.ackedSequence),
+                slog.Uint64("attempted_gen", uint64(t.ackedGeneration)),
+                slog.String("err", err.Error()))
+            t.ackedSequence = priorSeq
+            t.ackedGeneration = priorGen
+            t.ackedPresent = priorPresent
+            return
+        }
+        t.metrics.SetWTPAckHighWatermark(t.ackedSequence, t.ackedGeneration)
+    }
 }
 ```
 
@@ -7722,11 +7832,19 @@ The two recv-arm dispatches then become trivial:
 
 ```go
 case recvBatchAck:
+    // applyAckFromRecv runs the full Step 1b.5 contract: clamp + WARN-on-
+    // anomaly + wal.MarkAcked + rollback-on-failure + metric-on-success.
+    // The "downstream metrics / segment GC trigger" placeholder that
+    // sat here in earlier rounds is GONE — segment GC is driven by
+    // wal.MarkAcked itself (see wal/wal.go segmentFullyAckedLocked),
+    // and the metric is emitted inside applyAckFromRecv. There is no
+    // additional downstream side-effect for the recv arm to perform.
     t.applyAckFromRecv("batch_ack", e.gen, e.seq)
-    // ... downstream metrics / segment GC trigger ...
 case recvServerHeartbeat:
     t.applyAckFromRecv("server_heartbeat", e.gen, e.seq)
-    // ... liveness bookkeeping (reset stalled-stream timer) ...
+    // Liveness bookkeeping (reset stalled-stream timer) lives here —
+    // it is independent of the ack-watermark side-effects which
+    // applyAckFromRecv has already handled.
 ```
 
 Refactor Task 15.1's SessionAck handler to call into the same `applyServerAckTuple` (it already does per Task 15.1 Step 1b) so the three sites stay in lock-step: SessionAck wraps `applyServerAckTuple` inline (because it needs to set `t.rejectReason` etc.), BatchAck and ServerHeartbeat wrap it via `applyAckFromRecv`. All three call sites share `t.ackAnomalyLimiter` so a flapping peer cannot multiply the WARN volume by trying alternate ack-bearing frame types.
@@ -7797,10 +7915,176 @@ case <-heartbeatSignalCh:
     }
 ```
 
-Acceptance tests for the policy:
+Deterministic test seam for the policy (round-7 fix). Earlier rounds described the acceptance tests as "stall the main goroutine, then probe the recv goroutine via `runtime.Stack` or a wallclock timeout." Both probes are non-deterministic — `runtime.Stack` parsing races with the scheduler, and a timeout-based assertion either flakes (deadline too short) or wastes wallclock budget (deadline too long) and never proves the send actually blocked vs. simply not having reached the channel yet. Round-7 replaces this with a SYNCHRONOUS test-only hook on `Transport`, exported from a `*_test.go` file using the same pattern as the existing `RunReplayingForTest` / `SetConnForTest` / `SetBuildEventBatchFnForTest` seams (`internal/store/watchtower/transport/state_replaying_internal_test.go`). The hook fires inside the recv goroutine at deterministic phase boundaries, so tests observe ordering without timing.
 
-- `TestRecvLoop_HeartbeatCoalescesUnderBackpressure`: simulate a stalled main goroutine (e.g. block in a fixture before reading from `heartbeatSignalCh`). The recv goroutine pushes 1000 heartbeats by feeding 1000 `*wtpv1.ServerMessage_ServerHeartbeat` frames into the recv-side. Assert: (a) no recv-goroutine call ever blocked (probe via a goroutine-state inspector or by asserting the recv goroutine consumed all 1000 frames in bounded wallclock time); (b) `latestHeartbeat.Load()` returns the 1000th heartbeat (last write wins); (c) the recv goroutine's progress (frames consumed from the gRPC stream) is unimpeded — no stall observed.
-- `TestRecvLoop_BatchAckBlocksOnFullChannel`: simulate a stalled main goroutine. Push one `*wtpv1.ServerMessage_BatchAck` into the recv-side. Assert the recv goroutine BLOCKS waiting on the channel send (probe via a goroutine-state inspector reading `runtime.Stack` for the recv goroutine ID, OR via a timeout — the recv goroutine MUST NOT make any further progress for at least N milliseconds). Then unblock the main goroutine; assert the BatchAck is delivered to `applyAckFromRecv` and `t.ackedSequence` advances accordingly.
+The seam (lives in `transport.go` as an unexported field and in `*_internal_test.go` as the exported setter):
+
+```go
+// transport.go — production:
+
+// recvHookForTest, when non-nil, is invoked synchronously by the recv
+// goroutine at the deterministic phase boundaries documented on each
+// recvPhase constant. Production code MUST NOT set this field; it is
+// nil in production and a no-op when nil. The Transport mutex is NOT
+// held when the hook fires — hooks must not reach back into Transport
+// state without their own synchronisation.
+recvHookForTest func(phase recvPhase, ev recvHookEvent)
+
+// recvPhase enumerates the deterministic phase boundaries the recv
+// goroutine notifies via recvHookForTest. Order matters: each phase
+// either always precedes (PreSend) or always follows (PostStore /
+// PostSignalAttempt) the corresponding mutation, so a test can install
+// a hook and assert observable ordering without timing.
+type recvPhase int
+
+const (
+    // recvPhasePreBatchAckSend fires SYNCHRONOUSLY before the recv
+    // goroutine attempts the blocking send to recvBatchAckCh. Because
+    // the channel is 1-deep and the send is blocking, a test that
+    // pre-fills the channel from the test side then triggers a
+    // BatchAck delivery sees this hook fire AND THEN observes the
+    // recv goroutine wedged on the send — the hook proves the send
+    // was attempted; the wedged goroutine proves it blocked.
+    recvPhasePreBatchAckSend recvPhase = iota
+    // recvPhasePostHeartbeatStore fires SYNCHRONOUSLY after the recv
+    // goroutine completes `latestHeartbeat.Store(...)` on a
+    // ServerHeartbeat frame. A test that injects N heartbeats
+    // back-to-back and counts hook invocations sees exactly N — and
+    // a single `latestHeartbeat.Load()` on the consumer side returns
+    // the LAST stored event. Coalescing is observable without timing.
+    recvPhasePostHeartbeatStore
+    // recvPhasePostHeartbeatSignalAttempt fires SYNCHRONOUSLY after
+    // the recv goroutine's non-blocking `select` on heartbeatSignalCh
+    // returns (whether the send took the channel slot OR fell into
+    // the `default:` arm). The hook event carries `signalSent bool`
+    // so the test can assert exactly which arm was taken on each
+    // heartbeat — proving the coalesce policy without timing.
+    recvPhasePostHeartbeatSignalAttempt
+)
+
+// recvHookEvent carries the event details so tests can assert on the
+// exact frame that triggered the hook firing.
+type recvHookEvent struct {
+    gen        uint32
+    seq        uint64
+    signalSent bool // only meaningful for recvPhasePostHeartbeatSignalAttempt
+}
+```
+
+```go
+// state_recv_internal_test.go — test-only export (NEW *_test.go file
+// in the transport package, mirrors the pattern in
+// state_replaying_internal_test.go):
+
+// SetRecvHookForTest installs a recv-phase hook on the Transport for
+// the duration of a test. The returned restore func MUST be deferred
+// so a leaked hook from one test does not corrupt another. Hooks fire
+// synchronously inside the recv goroutine; do NOT reach back into
+// Transport state without your own synchronisation.
+func SetRecvHookForTest(t *Transport, fn func(phase recvPhase, ev recvHookEvent)) func() {
+    prev := t.recvHookForTest
+    t.recvHookForTest = fn
+    return func() { t.recvHookForTest = prev }
+}
+
+// RecvPhasePreBatchAckSend / RecvPhasePostHeartbeatStore /
+// RecvPhasePostHeartbeatSignalAttempt are the test-visible aliases for
+// the unexported recvPhase constants. External tests use these to
+// switch on the phase argument without depending on the integer
+// representation.
+const (
+    RecvPhasePreBatchAckSend             = recvPhasePreBatchAckSend
+    RecvPhasePostHeartbeatStore          = recvPhasePostHeartbeatStore
+    RecvPhasePostHeartbeatSignalAttempt  = recvPhasePostHeartbeatSignalAttempt
+)
+```
+
+The recv-goroutine implementation calls the hook at each phase boundary if non-nil:
+
+```go
+// recv goroutine — BatchAck path:
+if t.recvHookForTest != nil {
+    t.recvHookForTest(recvPhasePreBatchAckSend, recvHookEvent{
+        gen: a.GetGeneration(),
+        seq: a.GetAckHighWatermarkSeq(),
+    })
+}
+recvBatchAckCh <- recvBatchAck{gen: a.GetGeneration(), seq: a.GetAckHighWatermarkSeq()}
+
+// recv goroutine — ServerHeartbeat path:
+ev := &recvServerHeartbeat{gen: h.GetGeneration(), seq: h.GetAckHighWatermarkSeq(), at: time.Now()}
+latestHeartbeat.Store(ev)
+if t.recvHookForTest != nil {
+    t.recvHookForTest(recvPhasePostHeartbeatStore, recvHookEvent{
+        gen: ev.gen,
+        seq: ev.seq,
+    })
+}
+signalSent := false
+select {
+case heartbeatSignalCh <- struct{}{}:
+    signalSent = true
+default:
+    // Main hasn't drained the previous signal yet; the latest pointer
+    // already reflects the new heartbeat. No-op.
+}
+if t.recvHookForTest != nil {
+    t.recvHookForTest(recvPhasePostHeartbeatSignalAttempt, recvHookEvent{
+        gen: ev.gen,
+        seq: ev.seq,
+        signalSent: signalSent,
+    })
+}
+```
+
+The hook is unconditionally `nil` in production — no mutex, no atomic, no scheduling cost beyond a single nil-check on the recv-goroutine hot path. It is set ONLY by `SetRecvHookForTest` in `*_test.go` files; the production binary never compiles a code path that writes to `recvHookForTest`.
+
+Acceptance tests for the policy (rewritten to use the hook — no `runtime.Stack` parsing, no wallclock deadlines, no goroutine-state inspectors):
+
+- `TestRecvLoop_HeartbeatCoalescesUnderBackpressure`: install a `SetRecvHookForTest` hook that records every `(phase, event)` invocation into a thread-safe slice. Pre-empt the main goroutine's heartbeat-signal drain by NOT starting the main loop's select (the test drives the recv goroutine directly via the recv-channel injection seam from earlier in Task 17). Inject 1000 `*wtpv1.ServerMessage_ServerHeartbeat` frames with monotonically increasing `(gen, seq)` into the recv side. Assertions (all deterministic, no timing): (a) the recorded hook slice contains EXACTLY 1000 `recvPhasePostHeartbeatStore` entries in injected order; (b) the recorded hook slice contains EXACTLY 1000 `recvPhasePostHeartbeatSignalAttempt` entries; (c) AT MOST ONE of those 1000 `recvPhasePostHeartbeatSignalAttempt` events has `signalSent=true` (the first one — every subsequent send falls into the non-blocking `default:` arm because main never drained); (d) `latestHeartbeat.Load()` returns the 1000th heartbeat's `(gen, seq)` exactly — last write wins; (e) the recv goroutine returned from `runRecv` cleanly when the test closed the input — proving no send blocked.
+
+- `TestRecvLoop_BatchAckBlocksOnFullChannel`: pre-fill `recvBatchAckCh` from the test side with one stub `recvBatchAck{}` (the channel is 1-deep, so it is now full). Install a `SetRecvHookForTest` hook that signals a test-controlled `chan struct{}` when `recvPhasePreBatchAckSend` fires. Inject one `*wtpv1.ServerMessage_BatchAck` with `(gen=7, seq=42)` into the recv side. Assertions (all deterministic, no timing): (a) the hook channel fires EXACTLY ONCE — proving the recv goroutine reached the send call site; (b) attempt a non-blocking receive on a `recvCompletedCh` (a test-side channel the test sends to AFTER the BatchAck `<-` returns — see the `runRecvForTest` wrapper described below); the receive returns `select { default: ... }` proving the send blocked because the channel was full; (c) drain the pre-filled stub from `recvBatchAckCh` from the test side — the recv goroutine's send now succeeds and `recvCompletedCh` becomes readable; (d) drain `recvBatchAckCh` again to read the injected `(7, 42)` ack and assert it matches.
+
+The deterministic seam for "did the recv-side send unblock" in `TestRecvLoop_BatchAckBlocksOnFullChannel` is a thin test-only wrapper around the recv loop:
+
+```go
+// state_recv_internal_test.go — test-only wrapper:
+//
+// RunRecvForTest drives the recv goroutine for one inbound frame and
+// returns AFTER the recv goroutine's per-frame work (typed-decode,
+// hook fires, channel send) completes. Tests use this to assert "the
+// send did not return" without timing — the test calls RunRecvForTest
+// in a goroutine, then probes a result channel for completion via a
+// non-blocking select.
+func RunRecvForTest(t *Transport, frame *wtpv1.ServerMessage) {
+    t.handleRecvFrame(frame) // unexported helper that runs the per-frame logic
+}
+```
+
+The test then does:
+
+```go
+recvCompletedCh := make(chan struct{}, 1)
+go func() {
+    transport.RunRecvForTest(tr, batchAckFrame)
+    recvCompletedCh <- struct{}{}
+}()
+// Wait for the hook to confirm the recv goroutine reached the send.
+<-hookFiredCh
+// Non-blocking probe: the send is wedged because the channel is full.
+select {
+case <-recvCompletedCh:
+    t.Fatal("recv goroutine completed; expected blocked send")
+default:
+    // Expected: the send blocked.
+}
+// Drain the pre-filled stub; the recv goroutine's send now succeeds.
+<-tr.RecvBatchAckChForTest()
+// Now the recv goroutine completes — receive on recvCompletedCh proves it.
+<-recvCompletedCh
+```
+
+`RecvBatchAckChForTest` is another test-only export (returns `<-chan recvBatchAck` — same pattern). With these three seams (`SetRecvHookForTest`, `RunRecvForTest`, `RecvBatchAckChForTest`), both backpressure acceptance tests run with zero timeouts and zero `runtime.Stack` parsing — every assertion is on a hook invocation that fires synchronously or on a channel state visible from the test goroutine via non-blocking select.
 
 **Hard requirement for Tasks 17/18 implementers:** do NOT introduce a mutex on `t.ackedSequence`/`t.ackedGeneration`/`t.ackedPresent`. The recv goroutine MUST send typed events; the main state-machine goroutine MUST be the only writer. Any patch that adds `sync.Mutex` to Transport for the ack-watermark fields is a regression against this contract.
 
@@ -8927,6 +9211,64 @@ Reader-lifecycle invariants:
   AND first SessionAck does not trip the anomaly WARN even if the
   server returns a non-zero tuple (first-apply branch in
   `applyServerAckTuple` adopts wholesale without anomaly).
+- `TestRun_RestartIgnoresAckOnSessionIDMismatch` (round-7 Finding 1,
+  gated on Task 15.1 + Task 27 store-wiring identity gate landing) —
+  verifies the cold-start identity check refuses to seed when the
+  persisted meta.json was written by a different installation. Setup:
+  open a WAL on a fresh `t.TempDir()`, Append seqs 1..50, drive
+  `MarkAcked(gen=3, seq=30)` so meta.json persists with
+  `(SessionID="installation-A", AckHighWatermarkGen=3,
+  AckHighWatermarkSeq=30, AckRecorded=true)` plus fsync. Tear down,
+  re-open the WAL from the same directory. Build the Store via
+  `New(ctx, Options{..., SessionID: "installation-B", ...})` (the
+  daemon was reconfigured to a new session ID; the WAL dir was reused
+  by accident or by a copy-and-paste deploy). Use a `fakeConn` whose
+  Recv returns a SessionAck with `(generation=99,
+  ack_high_watermark_seq=999, accepted=true)` — values deliberately
+  unrelated to the persisted (3, 30). Capture the slog logger output
+  to a `*bytes.Buffer`. Assert: (a) `Options.InitialAckTuple` passed
+  into `transport.New` was nil (verifiable via a test-only export on
+  Store, OR by asserting the FIRST SessionInit on the wire carries
+  `wal_high_watermark_seq=0, generation=0` even though meta.json on
+  disk says (3, 30)); (b) after the SessionAck is processed, the
+  first-apply branch adopts the server tuple wholesale —
+  `t.ackedSequence == 999` and `t.ackedGeneration == 99` — with NO
+  anomaly WARN (the rate-limited warn buffer for ack anomalies is
+  empty); (c) the buffer DOES contain exactly one WARN naming the
+  identity mismatch with `persisted_session_id="installation-A"`,
+  `expected_session_id="installation-B"`, and the action taken.
+- `TestRun_RestartIgnoresAckOnKeyFingerprintMismatch` (round-7
+  Finding 1, same gating) — same shape as the SessionID mismatch
+  test, but with matching `SessionID` and mismatched
+  `KeyFingerprint`. Setup: persist meta with
+  `(SessionID="s1", KeyFingerprint="sha256:old", AckHighWatermarkGen=3,
+  AckHighWatermarkSeq=30, AckRecorded=true)`. Open Store with
+  `SessionID="s1", KeyFingerprint="sha256:new"`. Same fakeConn
+  SessionAck `(99, 999, accepted=true)`. Assert: (a) seed is nil →
+  SessionInit on the wire carries `(0, 0)`; (b) first-apply adopts
+  server tuple wholesale, no ack-anomaly WARN; (c) exactly one WARN
+  naming the key_fingerprint mismatch with the persisted vs.
+  expected fingerprints and the action taken.
+- `TestRun_RestartLogsMismatchOnce` (round-7 Finding 1, same gating)
+  — verifies that the identity-mismatch WARN is emitted EXACTLY
+  once per mismatched field, not on every reconnect cycle within
+  the same Store lifetime. Setup: same as the SessionID-mismatch
+  test, but drive five reconnect cycles via injected stream errors
+  on the fakeConn after each Live entry. Assert: the captured slog
+  buffer contains exactly ONE WARN line carrying
+  `persisted_session_id` (i.e. the identity-mismatch WARN is not
+  re-emitted on each reconnect; the seed decision is made once at
+  Store construction and not re-evaluated per reconnect). The
+  ack-anomaly WARN buffer remains empty across all five cycles
+  (each reconnect's first SessionAck takes the first-apply branch
+  because the previous cycle's `(t.ackedSequence,
+  t.ackedGeneration)` was not preserved across the Transport
+  reconstruction OR — if the Transport instance is reused — the
+  server returns the same `(99, 999)` tuple it returned last time,
+  which is now the equal-no-op case of the clamp). Variant: the
+  same test with `KeyFingerprint` mismatch instead of SessionID
+  mismatch — exactly one WARN with `persisted_key_fingerprint`,
+  zero ack-anomaly WARNs.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -10221,29 +10563,80 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("open WAL: %w", err)
 	}
 
-	// Round-6 (Finding 2): seed the Transport's effective-ack tuple from
-	// the persisted WAL meta.json so the FIRST SessionInit after restart
-	// carries the actual local watermark — not a lying (0, 0). The
-	// AckTuple.Present flag mirrors wal.Meta.AckRecorded so first-apply
-	// semantics in applyServerAckTuple work even when the persisted tuple
-	// is the zero value. ReadMeta returning os.ErrNotExist is a benign
-	// pre-ack cold start: leave InitialAckTuple nil so the Transport
-	// behaves exactly as it does today (zero seed, no anomaly on first
-	// SessionAck).
+	// Round-6 (Finding 2) + round-7 (Finding 1): seed the Transport's
+	// effective-ack tuple from the persisted WAL meta.json so the FIRST
+	// SessionInit after restart carries the actual local watermark — not a
+	// lying (0, 0). The AckTuple.Present flag mirrors wal.Meta.AckRecorded so
+	// first-apply semantics in applyServerAckTuple work even when the
+	// persisted tuple is the zero value.
+	//
+	// IDENTITY GATE (round-7 Finding 1, design.md §"Cold-start seed safety
+	// / stale meta detection"). Before seeding, we MUST compare the
+	// persisted meta's session_id and key_fingerprint against the values
+	// configured for the current process. The fields exist precisely to
+	// defend against silently consuming meta from a previous installation
+	// or a rotated key — without this check, a reused WAL dir or a key
+	// rotation could advertise the wrong watermark on the first SessionInit
+	// after restart, causing the server to either re-deliver already-acked
+	// records (a dup-emit storm) or (worse) trust the inflated watermark
+	// and silently drop records the new installation never received.
+	//
+	// Match/reset rules (mirror the spec table):
+	//   - meta.SessionID != cfg.SessionID  → seed = nil + WARN once
+	//   - meta.KeyFingerprint != cfg.KeyFingerprint → seed = nil + WARN once
+	//   - meta.AckRecorded == false → seed = nil (no anomaly; legitimate
+	//     pre-ack cold start whose meta.json was written by a prior failed
+	//     append, before any MarkAcked call).
+	//   - all three match → seed from wal.Meta (the only seeding case).
+	//
+	// In both mismatch cases the WARN names the field that mismatched, the
+	// persisted vs. expected values, and the action taken; the transport's
+	// applyServerAckTuple first-apply branch then adopts the server tuple
+	// wholesale on the first SessionAck (no anomaly log).
+	//
+	// ReadMeta returning os.ErrNotExist is the cold-cold-start case (no
+	// meta.json on disk at all): leave initialAck nil so the Transport
+	// behaves exactly as it does on a fresh install (zero seed, no anomaly
+	// on first SessionAck — first-apply branch adopts wholesale).
 	var initialAck *transport.AckTuple
 	meta, err := wal.ReadMeta(opts.WALDir)
 	switch {
-	case err == nil:
+	case err != nil && errors.Is(err, os.ErrNotExist):
+		// Pre-ack cold start: no meta.json on disk. Leave initialAck nil.
+	case err != nil:
+		_ = w.Close()
+		return nil, fmt.Errorf("read WAL meta: %w", err)
+	case meta.SessionID != opts.SessionID:
+		// Stale meta from a different installation (or the server-issued
+		// session was rotated and the daemon was reconfigured). Do NOT
+		// seed — first SessionAck adopts the server tuple wholesale.
+		opts.Logger.Warn("wtp: meta session_id mismatch; ignoring persisted ack",
+			"persisted_session_id", meta.SessionID,
+			"expected_session_id", opts.SessionID,
+			"action", "ignoring persisted ack tuple; first SessionAck will adopt server tuple wholesale")
+		// initialAck stays nil.
+	case meta.KeyFingerprint != opts.KeyFingerprint:
+		// Signing key rotated outside this process's lifetime. The
+		// persisted ack history may not be cryptographically attributable
+		// to the current key; do NOT seed.
+		opts.Logger.Warn("wtp: meta key_fingerprint mismatch; ignoring persisted ack",
+			"persisted_key_fingerprint", meta.KeyFingerprint,
+			"expected_key_fingerprint", opts.KeyFingerprint,
+			"action", "ignoring persisted ack tuple; first SessionAck will adopt server tuple wholesale")
+		// initialAck stays nil.
+	case !meta.AckRecorded:
+		// Identity matches but no ack has ever been recorded for this WAL
+		// directory; the persisted tuple fields are zero-valued and
+		// meaningless. No anomaly — leave initialAck nil so first-apply
+		// adopts the server tuple wholesale.
+	default:
+		// All three checks passed: identity matches AND ack_recorded is
+		// true. Seed the Transport from disk.
 		initialAck = &transport.AckTuple{
 			Generation: meta.AckHighWatermarkGen,
 			Sequence:   meta.AckHighWatermarkSeq,
-			Present:    meta.AckRecorded,
+			Present:    true, // == meta.AckRecorded by case discriminator
 		}
-	case errors.Is(err, os.ErrNotExist):
-		// Pre-ack cold start: no seed. Leave initialAck nil.
-	default:
-		_ = w.Close()
-		return nil, fmt.Errorf("read WAL meta: %w", err)
 	}
 
 	dialer := opts.Dialer

@@ -85,6 +85,18 @@ type Transport struct {
 	// server-gen (or vice versa) creates an impossible state under the WAL's
 	// lex-(gen, seq) GC semantics (see wal/wal.go MarkAcked / segmentFullyAckedLocked).
 	//
+	// CURRENT IMPLEMENTATION: the fields are zero-initialized on construction
+	// (see New below) and overwritten by the bare-assignment SessionAck handler
+	// in state_connecting.go (`t.ackedSequence = ack.GetAckHighWatermarkSeq()`).
+	// The seeded-from-disk and shared-clamp model described below is the
+	// TARGET CONTRACT scheduled by Task 15.1 (see
+	// docs/superpowers/plans/2026-04-18-wtp-client.md). Until 15.1 lands, do
+	// NOT assume the fields hold a clamped or disk-seeded value — a malicious
+	// or buggy server can still rewind these fields below the local watermark,
+	// and a fresh restart still ships a SessionInit carrying (0, 0).
+	//
+	// TARGET CONTRACT (Task 15.1 will make this true):
+	//
 	// Clamp rule on every server-supplied watermark (SessionAck, BatchAck,
 	// ServerHeartbeat):
 	//   - if (server_gen, server_seq) < (local_gen, local_seq) lex: ADOPT the
