@@ -111,6 +111,105 @@ func TestWAL_CRCFailureEmitsCoarseLossRange(t *testing.T) {
 	}
 }
 
+// TestReader_CRCInLaterSegmentReportsContinuingSequence regresses the round-1
+// finding that lastGoodSeq reset to 0 on every new segment opened, so a CRC
+// fault in the first record of a non-initial segment surfaced FromSequence=1
+// instead of the real next-expected sequence. Within a generation the WAL
+// writes monotonically-increasing seqs across segment boundaries; the reader
+// must carry lastGoodSeq across the boundary.
+func TestReader_CRCInLaterSegmentReportsContinuingSequence(t *testing.T) {
+	// SegmentSize=64 → 2 records per segment (16 header + 2 * 22 = 60 bytes
+	// used; a third 22-byte record would push past 64 → seal).
+	// Append seqs 0..5 → segments [0,1] (idx=1), [2,3] (idx=2),
+	// [4,5] (idx=3 INPROGRESS). Corrupt segment idx=2's first record
+	// (seq=2 on disk) so the CRC fault lands in a NON-INITIAL segment
+	// within the same generation.
+	dir := t.TempDir()
+	w, err := Open(Options{Dir: dir, SegmentSize: 64, MaxTotalBytes: 1 << 20, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := int64(0); i < 6; i++ {
+		if _, err := w.Append(i, 0, []byte{byte(i), 'X'}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Locate the second sealed segment (numeric index 2). Its first record
+	// on disk is seq=2.
+	entries, _ := os.ReadDir(filepath.Join(dir, "segments"))
+	var path string
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".seg") || strings.HasSuffix(name, ".INPROGRESS") {
+			continue
+		}
+		idx, ok := parseSegmentIndex(name)
+		if !ok {
+			continue
+		}
+		if idx == 2 {
+			path = filepath.Join(dir, "segments", name)
+			break
+		}
+	}
+	if path == "" {
+		t.Fatalf("no segment idx=2 to corrupt; entries=%v", entries)
+	}
+	data, _ := os.ReadFile(path)
+	// Flip a payload byte well inside the first record of this segment.
+	const corruptOff = SegmentHeaderSize + 18
+	if len(data) <= corruptOff {
+		t.Fatalf("segment too short (%d bytes) to corrupt at off=%d", len(data), corruptOff)
+	}
+	data[corruptOff] ^= 0xFF
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w2, err := Open(Options{Dir: dir, SegmentSize: 64, MaxTotalBytes: 1 << 20, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+	r, err := w2.NewReader(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	var loss *LossRecord
+	for i := 0; i < 10; i++ {
+		rec, err := r.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if rec.Kind == RecordLoss {
+			l := rec.Loss
+			loss = &l
+			break
+		}
+	}
+	if loss == nil {
+		t.Fatal("expected RecordLoss after CRC corruption in segment idx=2")
+	}
+	if loss.Reason != "crc_corruption" {
+		t.Errorf("loss reason = %q, want crc_corruption", loss.Reason)
+	}
+	// Round-1 bug: FromSequence would be 1 (lastGoodSeq=0 at start of new
+	// segment + 1). With fix: lastGoodSeq carries across the segment
+	// boundary, so after seq=1 was read from segment idx=1, FromSequence=2.
+	if loss.FromSequence != 2 {
+		t.Errorf("loss.FromSequence = %d, want 2 (continuing from segment idx=1)", loss.FromSequence)
+	}
+}
+
 // TestReader_SurfacesAppendedLossMarker exercises the round-1/round-2 Task 13
 // behavior end-to-end via the Reader: a synthetic TransportLoss record written
 // by AppendLoss must surface as Kind=RecordLoss with the original LossRecord

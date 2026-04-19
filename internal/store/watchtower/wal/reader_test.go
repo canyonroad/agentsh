@@ -66,6 +66,173 @@ func TestReader_StreamsSequentially(t *testing.T) {
 	}
 }
 
+// TestReader_AdvancesPastLiveSegmentAfterSizeRoll regresses the round-1 finding
+// that curLive was latched at open and never re-evaluated. After a live
+// segment seals via size roll, a reader tailing on EOF would block forever
+// instead of advancing to the next segment.
+func TestReader_AdvancesPastLiveSegmentAfterSizeRoll(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(Options{Dir: dir, SegmentSize: 64, MaxTotalBytes: 1 << 20, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := w.Append(0, 0, []byte{'a', 'b', 'c', 'd'}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := w.NewReader(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	rec0, err := r.Next()
+	if err != nil {
+		t.Fatalf("Next 0: %v", err)
+	}
+	if rec0.Sequence != 0 {
+		t.Fatalf("seq 0: got %d", rec0.Sequence)
+	}
+	// Reader is now at EOF on the live segment. Force a size roll by
+	// appending records that don't fit, sealing segment 0.
+	if _, err := w.Append(1, 0, []byte{'e', 'f', 'g', 'h'}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Append(2, 0, []byte{'i', 'j', 'k', 'l'}); err != nil {
+		t.Fatal(err)
+	}
+	// Reader must advance past the now-sealed segment 0 and surface seq=1, 2.
+	seenSeqs := []uint64{}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rec, err := r.Next()
+		if err == io.EOF {
+			select {
+			case <-r.Notify():
+			case <-time.After(50 * time.Millisecond):
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if rec.Kind != RecordData {
+			continue
+		}
+		seenSeqs = append(seenSeqs, rec.Sequence)
+		if len(seenSeqs) == 2 {
+			break
+		}
+	}
+	if len(seenSeqs) != 2 || seenSeqs[0] != 1 || seenSeqs[1] != 2 {
+		t.Errorf("post-roll seen sequences = %v, want [1 2]", seenSeqs)
+	}
+}
+
+// TestReader_AdvancesPastLiveSegmentAfterGenerationRoll exercises the same
+// rollover handling for a generation roll (Append with a higher gen forces a
+// new segment with FlagGenInit).
+func TestReader_AdvancesPastLiveSegmentAfterGenerationRoll(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(Options{Dir: dir, SegmentSize: 4 * 1024, MaxTotalBytes: 64 * 1024, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := w.Append(0, 7, []byte("g7-r0")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := w.NewReader(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	rec, err := r.Next()
+	if err != nil {
+		t.Fatalf("Next 0: %v", err)
+	}
+	if rec.Generation != 7 || rec.Sequence != 0 {
+		t.Fatalf("got %+v", rec)
+	}
+	// Roll generation. WAL seals segment 0 and opens a new one for gen=8.
+	if _, err := w.Append(0, 8, []byte("g8-r0")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rec, err := r.Next()
+		if err == io.EOF {
+			select {
+			case <-r.Notify():
+			case <-time.After(50 * time.Millisecond):
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if rec.Kind == RecordData && rec.Generation == 8 && rec.Sequence == 0 {
+			return
+		}
+	}
+	t.Errorf("Reader stalled across generation roll; never saw gen=8 seq=0")
+}
+
+// TestReader_SkipsGCdSegmentsContinuingPastLossMarker regresses the round-1
+// finding that os.Open on a GC'd queued segment errored out instead of
+// skipping. After ack-driven silent GC reclaims a sealed segment a lagging
+// reader had snapshotted, the reader must skip the missing segment and
+// continue from the next available one without aborting.
+func TestReader_SkipsGCdSegmentsContinuingPastLossMarker(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(Options{Dir: dir, SegmentSize: 64, MaxTotalBytes: 1 << 20, SyncMode: SyncImmediate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	// Append seqs 0..5; small SegmentSize → 3 sealed segments [0,1], [2,3], [4,5].
+	for i := int64(0); i < 6; i++ {
+		if _, err := w.Append(i, 0, []byte{byte(i), 'Z'}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Snapshot the directory in a Reader BEFORE acking.
+	r, err := w.NewReader(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	// Ack everything so gcAckedLocked silently reclaims sealed segments on
+	// the next Append.
+	if err := w.MarkAcked(0, 5); err != nil {
+		t.Fatal(err)
+	}
+	// Trigger an Append that exercises the overflow/GC path. Appending in
+	// a fresh generation forces a seal+open, which gives gcAckedLocked a
+	// reason to walk the sealed set.
+	if _, err := w.Append(6, 1, []byte("post")); err != nil {
+		t.Fatal(err)
+	}
+	// Drain the reader. Pre-fix this would have errored on os.Open of a
+	// reclaimed sealed segment; the bar here is "Next never returns an
+	// error and surfaces at least the still-present records".
+	seenSeqs := []uint64{}
+	for i := 0; i < 30; i++ {
+		rec, err := r.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next iter=%d: %v", i, err)
+		}
+		if rec.Kind == RecordData {
+			seenSeqs = append(seenSeqs, rec.Sequence)
+		}
+	}
+	if len(seenSeqs) == 0 {
+		t.Errorf("reader saw zero records; expected at least the live ones")
+	}
+}
+
 // TestReader_BlocksUntilNotifyAfterEOF asserts the Notify/Next contract: after
 // Next returns io.EOF, the reader must wait on Notify before re-trying. A new
 // Append must wake the channel within a short timeout, and the next Next call

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,20 +59,28 @@ type Reader struct {
 	segments []segmentEntry // remaining segments in numeric-index order
 	current  *os.File
 	curHdr   SegmentHeader
-	curLive  bool // true if `current` is an .INPROGRESS file (re-tail on EOF)
+	curIdx   uint64 // numeric segment index of `current`; used to detect rollover from .INPROGRESS to .seg.
+	curLive  bool   // true if `current` is an .INPROGRESS file (re-tail on EOF)
 	// nextScanIdx is the smallest segment index NOT yet enqueued in
 	// `segments` from a previous scan. When `segments` empties and `current`
 	// is nil, Next re-reads the directory and adds segments with idx >=
 	// nextScanIdx, so appends made after NewReader are picked up without a
 	// reopen.
 	nextScanIdx uint64
-	// lastGoodSeq is the highest user sequence successfully decoded from the
-	// CURRENT segment so far. Used to anchor the FromSequence of a loss
-	// record synthesized from ErrCRCMismatch; a value of zero before the
-	// first successful read in a segment means the loss range starts at
-	// seq=1, deferring tighter refinement to the transport layer (Task 18+).
+	// lastGoodSeq is the highest user sequence successfully decoded so far
+	// within the CURRENT generation. It is carried across segment boundaries
+	// within a generation (seqs continue monotonically across segments
+	// inside one generation) and reset to zero only on a generation change.
+	// Used to anchor the FromSequence of a loss record synthesized from
+	// ErrCRCMismatch.
 	lastGoodSeq uint64
-	closed      bool
+	// lastGoodGen is the generation of the last successfully decoded user
+	// record (or, before any decode, of the most recently opened segment
+	// header). Compared to a freshly opened segment's header to decide
+	// whether to reset lastGoodSeq.
+	lastGoodGen    uint32
+	lastGoodGenSet bool // true once lastGoodGen reflects a real seen generation.
+	closed         bool
 }
 
 // NewReader returns a Reader that will surface records starting at the first
@@ -141,6 +150,46 @@ func (r *Reader) rescanLocked() error {
 // and the caller MUST drain Next() to io.EOF before waiting on Notify again.
 func (r *Reader) Notify() <-chan struct{} { return r.notify }
 
+// maybeDemoteLiveLocked checks whether a segment opened as live (curLive=true)
+// has since been sealed via a size or generation roll. Returns true if the
+// segment was demoted (caller should fall through and re-attempt the read on
+// the same handle to drain remaining bytes; the next EOF will be treated as a
+// sealed-segment EOF). Caller MUST hold r.mu.
+func (r *Reader) maybeDemoteLiveLocked() (bool, error) {
+	if !r.curLive {
+		return false, nil
+	}
+	entries, err := os.ReadDir(r.w.segDir)
+	if err != nil {
+		return false, err
+	}
+	var sealedSamePath, hasNewer bool
+	for _, e := range entries {
+		name := e.Name()
+		idx, ok := parseSegmentIndex(name)
+		if !ok {
+			continue
+		}
+		if idx > r.curIdx {
+			hasNewer = true
+		}
+		if idx == r.curIdx && strings.HasSuffix(name, sealedSuffix) && !strings.HasSuffix(name, inprogressSuffix) {
+			sealedSamePath = true
+		}
+	}
+	if !sealedSamePath && !hasNewer {
+		return false, nil
+	}
+	// Segment is no longer live — flip the latch so the sealed-EOF path
+	// drains the handle to real EOF and advances. Rescan so any newer
+	// segments produced by the roll are queued.
+	r.curLive = false
+	if err := r.rescanLocked(); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
 // Next returns the next available record. Returns io.EOF when the reader is
 // caught up; the caller should wait on Notify and call Next again. Returns
 // ErrReaderClosed if Close (or WAL.Close) has run.
@@ -167,6 +216,13 @@ func (r *Reader) Next() (Record, error) {
 			path := filepath.Join(r.w.segDir, next.name)
 			f, err := os.Open(path)
 			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					// GC reclaimed this segment between our directory
+					// snapshot and the open. The associated TransportLoss
+					// marker (if any) was appended to a later segment by
+					// the overflow path and will surface naturally.
+					continue
+				}
 				return Record{}, err
 			}
 			hdr, err := ReadSegmentHeader(f)
@@ -176,20 +232,32 @@ func (r *Reader) Next() (Record, error) {
 			}
 			r.current = f
 			r.curHdr = hdr
+			r.curIdx = next.idx
 			r.curLive = strings.HasSuffix(next.name, inprogressSuffix)
-			// New segment — reset the in-segment last-good cursor; the
-			// loss-range for a fresh segment with no successful reads
-			// starts from 0 (transport-side refinement is Task 18+).
-			r.lastGoodSeq = 0
+			// Carry lastGoodSeq across segment boundaries within the same
+			// generation; reset only on a generation change. Seqs restart
+			// at 0 on every generation roll, so a per-seq compare across
+			// generations would be meaningless.
+			if !r.lastGoodGenSet || hdr.Generation != r.lastGoodGen {
+				r.lastGoodSeq = 0
+				r.lastGoodGen = hdr.Generation
+				r.lastGoodGenSet = true
+			}
 		}
 		payload, err := ReadRecord(r.current, r.w.maxRec)
 		if errors.Is(err, io.EOF) {
 			if r.curLive {
-				// Live segment: more bytes may arrive on a future
-				// Append. Keep the handle open and surface EOF so the
-				// caller can wait on Notify; the next Next call retries
-				// ReadRecord against the same handle.
-				return Record{}, io.EOF
+				// Live segment may have been sealed by a roll since we
+				// opened it; if so, demote and fall through to drain the
+				// handle. Otherwise return EOF and let the caller wait.
+				demoted, derr := r.maybeDemoteLiveLocked()
+				if derr != nil {
+					return Record{}, derr
+				}
+				if !demoted {
+					return Record{}, io.EOF
+				}
+				continue
 			}
 			// Sealed segment: end-of-data is final. Close and advance.
 			_ = r.current.Close()
@@ -204,7 +272,10 @@ func (r *Reader) Next() (Record, error) {
 			// the next expected sequence and let the transport coarsen
 			// on receive (TODO: Task 18 — refine via avg-record-size or
 			// segment-end seek). The bad segment is closed and the
-			// reader advances to the next on the next Next call.
+			// reader advances to the next on the next Next call. Note:
+			// when no records have ever been read in this generation,
+			// lastGoodSeq=0 yields FromSequence=1 — a known coarse
+			// undercount that the transport refines on receive.
 			from := r.lastGoodSeq + 1
 			to := from
 			_ = r.current.Close()
@@ -236,6 +307,8 @@ func (r *Reader) Next() (Record, error) {
 			return Record{}, fmt.Errorf("reader: malformed seq/gen frame (len=%d)", len(payload))
 		}
 		r.lastGoodSeq = seq
+		r.lastGoodGen = gen
+		r.lastGoodGenSet = true
 		return Record{Kind: RecordData, Sequence: seq, Generation: gen, Payload: payload[12:]}, nil
 	}
 }
