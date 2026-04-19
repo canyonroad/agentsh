@@ -12063,6 +12063,17 @@ design so the artifact is reviewable end-to-end):
     `log_alert`, `log_slo`, `log_saved_search`,
     `third_party_dashboard`. Determines which step decides its
     disposition (Step 2 / Step 3 / Step 3a).
+  - `log_system` — REQUIRED on every row whose
+    `artifact_type` is `log_alert`, `log_slo`, or `log_saved_search`,
+    AND on every row whose `migration_decision` is
+    `log-based-alert` (Step 2). The cell MUST contain the stable
+    identifier of the log-aggregation system that hosts this
+    artifact (matching one of the systems enumerated in the Step 1a
+    inventory scope). For `prometheus_*`, `grafana_panel`,
+    `runbook_url`, and `third_party_dashboard` rows whose
+    `migration_decision` is NOT `log-based-alert`, the cell MAY be
+    empty. Step 5 preflight rejects log-side or log-based-alert rows
+    with empty `log_system`.
   - `selector` — current Prometheus selector / log query / panel
     expression.
   - `intent` — short description of what the alert/dashboard
@@ -12073,19 +12084,33 @@ design so the artifact is reviewable end-to-end):
     steps.
   - `replacement_selector_or_query` — the new selector / log
     query / panel expression after migration. Required for any
-    decision other than `delete`.
+    decision other than `delete` / `delete-log-alert`.
   - `verification_reference` — required for
     `migration_decision: redirect-reconnect` (file path + line +
     commit SHA + chosen reason label confirming caller teardown).
-    Required for `migration_decision: keep-log-alert` and
-    `migration_decision: update-log-alert` only when the
-    Step 1b field-preservation verification flagged the artifact's
-    log pipeline as needing attention. Empty cells are not
-    permitted on rows that require this column — Step 5 preflight
-    rejects them.
+    Empty cells are not permitted on `redirect-reconnect` rows —
+    Step 5 preflight rejects them.
+  - `field_preservation_ref` — REQUIRED on every row whose
+    `migration_decision` is `log-based-alert` (Step 2),
+    `keep-log-alert`, `update-log-alert`, or `dedupe-log-alert`
+    (Step 3a). The cell MUST contain the stable identifier of a
+    Step 1b field-preservation verification entry (e.g.
+    `field-preservation/<log-system-id>/<YYYY-MM-DD>`) that targets
+    the same log-aggregation system named in this row's
+    `log_system` cell. The referenced verification MUST classify
+    that system as `field_preservation: ok` OR
+    `field_preservation: msg-only` (NEVER `broken`). Empty cells, or
+    cells that point at a `broken` verification, are rejected by
+    Step 5 preflight. Rows with `migration_decision: delete-log-alert`
+    MAY leave this column empty.
   - `change_request_link` — PR / change request URL for the
     monitoring update.
   - `runbook_url_updated` — `yes` / `no` (filled in Step 4).
+    Required for every row whose `migration_decision` is NOT a
+    `delete*` value, including all log-side dispositions
+    (`keep-log-alert` / `update-log-alert` / `dedupe-log-alert`)
+    AND all Step 2 `log-based-alert` rows. See Step 4 for the
+    per-stack runbook-pin mapping.
   - `owner` — SRE/ops engineer responsible for this row.
 
 - [ ] **Step 1b: Verify log-pipeline field preservation**
@@ -12122,19 +12147,49 @@ scope, the SRE/ops team MUST verify and record:
     the rendered field values in
     `docs/superpowers/operator/wtp-monitoring-migration.md` under a
     "Field-preservation verification" section per log-aggregation
-    system.
-  - **Fallback selector**: if the `err` field is NOT preserved as a
-    separate structured field but the rendered string IS present in
-    `msg`, record the fallback selector pattern (e.g. an `|=` or
-    `contains` match against `msg`) that any log-based alert MUST use
-    instead of `err = "..."`. Mark the affected log-aggregation
-    system `field_preservation: msg-only`.
+    system. Each verification MUST be assigned a stable identifier
+    (e.g. `field-preservation/<log-system-id>/<YYYY-MM-DD>`) so it
+    can be referenced from individual artifact rows in the
+    `field_preservation_ref` column. Mark the system
+    `field_preservation: ok` when this check passes.
+  - **Partial-field fallback**: if the `err` field IS preserved as
+    a separate structured field byte-for-byte BUT one or more of
+    `event_id` / `session_id` / `event_type` is renamed, dropped,
+    or moved into the rendered message body, the system is NOT
+    `field_preservation: ok`. Reclassify it according to whether the
+    rendered sentinel survives end-to-end (next bullet); if it does,
+    treat the system as `field_preservation: msg-only` and use the
+    fallback selector recipe below; otherwise `field_preservation:
+    broken`. Record the specific field(s) lost or renamed in the
+    verification entry so the fallback selector can be designed
+    accordingly.
+  - **Fallback selector (msg-only)**: if the `err` field is NOT
+    preserved as a separate structured field but the rendered
+    sentinel string IS present in the message body (`msg`), the
+    system is `field_preservation: msg-only`. Record the fallback
+    selector pattern (e.g. an `|=` or `contains` match against
+    `msg`) that any log-based alert MUST use instead of
+    `err = "..."`. **Source scoping is REQUIRED.** The fallback
+    selector MUST also constrain the component source — at minimum
+    a service/logger/source-name match for this binary (e.g. the
+    slog logger name for the WTP sink, the OTEL service name, the
+    container/pod label, or the per-stack equivalent identifier
+    that uniquely names this binary in the operator's log-aggregation
+    backend). Record both the rendered-string predicate AND the
+    source-scoping predicate together as a single composite
+    selector; the verification entry MUST capture the chosen source
+    identifier and the rationale for why it uniquely identifies
+    this binary. Without source scoping, an unrelated component that
+    logs the same sentinel substring will trigger false positives,
+    and Step 5 preflight rejects msg-only selectors that lack the
+    source-scoping clause.
   - **Pipeline gap**: if neither the structured `err` field NOR the
-    rendered string survives end-to-end (e.g. the pipeline strips the
-    payload entirely or replaces it with a placeholder), mark the
-    affected log-aggregation system `field_preservation: broken`.
-    Rows in Step 2 that propose `migration_decision: log-based-alert`
-    against a `field_preservation: broken` system MUST be re-routed to
+    rendered sentinel string survives end-to-end (e.g. the pipeline
+    strips the payload entirely or replaces it with a placeholder),
+    mark the affected log-aggregation system `field_preservation:
+    broken`. Rows in Step 2 that propose
+    `migration_decision: log-based-alert` against a
+    `field_preservation: broken` system MUST be re-routed to
     `redirect-reconnect` (with the verification recipe in Step 2) or
     `delete`; selecting `log-based-alert` against a broken pipeline
     is INVALID and Step 5 preflight rejects it.
@@ -12170,13 +12225,22 @@ error per spec §"Migration guidance: removed
     string value, not the source-code symbol. The row's
     `replacement_selector_or_query` cell MUST contain a query that
     selects on this exact string (typically as an
-    equality / contains / `=~` regex match against the `err` field, or
-    against `msg` if the operator's log pipeline does not preserve
-    structured fields — see Step 1b for the field-preservation
-    verification recipe). Mark the row
-    `migration_decision: log-based-alert` and capture the new alert
-    selector (or query) in the tracking artifact alongside the PR /
-    change request link that adds the log-based alert.
+    equality / contains / `=~` regex match against the `err` field
+    when the host system is `field_preservation: ok`, or against the
+    rendered message body **WITH a required source-scoping clause**
+    when the host system is `field_preservation: msg-only` — see
+    Step 1b for the field-preservation verification recipe and the
+    source-scoping requirement). Mark the row
+    `migration_decision: log-based-alert`, populate BOTH the
+    `log_system` cell (the host log-aggregation system from the
+    Step 1a inventory) AND the `field_preservation_ref` cell (the
+    Step 1b verification ID for that system, classification MUST be
+    `ok` or `msg-only`), capture the new alert selector (or query) in
+    the tracking artifact alongside the PR / change request link
+    that adds the log-based alert. Rows that point at a
+    `field_preservation: broken` system, or that omit `log_system` /
+    `field_preservation_ref`, MUST be re-routed to the **Delete** or
+    **Redirect to reconnect family** option below before sign-off.
   - **Delete**: the alert was a coarse catch-all and is no longer
     needed (the missing-chain class has moved out of the metrics
     silent-drop family entirely; the propagated error surfaces
@@ -12299,20 +12363,26 @@ log-based-alert decisions are merged.
     `"compact.Encode: ev.Chain is nil; composite did not stamp"`
     AND the Step 1b field-preservation verification confirmed the
     artifact's log-aggregation system preserves the relevant fields.
-    Mark the row `migration_decision: keep-log-alert` and record the
-    Step 1b verification reference if the system was flagged
-    `field_preservation: msg-only` (so the kept selector pattern is
-    documented).
+    Mark the row `migration_decision: keep-log-alert` AND populate
+    BOTH the `log_system` cell (the host log-aggregation system) AND
+    the `field_preservation_ref` cell (the Step 1b verification ID).
+    If the referenced verification is `field_preservation: msg-only`,
+    the existing selector MUST already include the source-scoping
+    clause documented in Step 1b — if it does not, choose
+    `update-log-alert` instead.
   - **Update**: the pre-existing log artifact targets the right
     semantics (composite-store regression / missing-chain) but its
     selector predates the new structured-log fields and needs a
     rewrite — typically because the older selector matched a free-text
-    log line that the new sink no longer emits, or because the field
-    set has changed. Rewrite the selector to match the new fields
-    (using the fallback selector pattern from Step 1b if the system
-    is flagged `field_preservation: msg-only`). Mark the row
-    `migration_decision: update-log-alert`, capture the new selector
-    in `replacement_selector_or_query`, and capture the
+    log line that the new sink no longer emits, the field set has
+    changed, OR the existing msg-only selector lacks the
+    source-scoping clause now required by Step 1b. Rewrite the
+    selector to match the new fields (using the fallback selector
+    pattern from Step 1b — INCLUDING the required source-scoping
+    clause — if the system is flagged `field_preservation: msg-only`).
+    Mark the row `migration_decision: update-log-alert`, capture the
+    new selector in `replacement_selector_or_query`, populate BOTH
+    `log_system` AND `field_preservation_ref`, and capture the
     PR / change-request link.
   - **Delete**: the pre-existing log artifact is now redundant —
     e.g. its intent is fully covered by a Step 2
@@ -12320,6 +12390,8 @@ log-based-alert decisions are merged.
     new fields, OR the artifact was a coarse catch-all whose intent
     no longer applies. Mark the row `migration_decision: delete-log-alert`
     and capture the PR / change-request link that removes the rule.
+    `log_system` SHOULD still be populated for audit traceability;
+    `field_preservation_ref` MAY be empty.
   - **Dedupe-with-Step 2 decision**: the pre-existing log artifact
     overlaps with a Step 2 `log-based-alert` row but the SRE/ops team
     wants a single canonical owner per intent. Pick whichever of the
@@ -12327,8 +12399,9 @@ log-based-alert decisions are merged.
     the Step-2-added log alert) and record the chosen winner in the
     row's `replacement_selector_or_query` cell along with the
     losing row's artifact path so the dedupe choice is auditable. Mark
-    the row `migration_decision: dedupe-log-alert` and capture the
-    PR / change-request link.
+    the row `migration_decision: dedupe-log-alert`, populate BOTH
+    `log_system` AND `field_preservation_ref` for the retained
+    artifact, and capture the PR / change-request link.
 
 A log-side row that proposes `keep-log-alert` or `update-log-alert`
 against a log-aggregation system flagged `field_preservation: broken`
@@ -12340,15 +12413,57 @@ be MERGED AND APPLIED to the production log-aggregation environment
 (log-alert/SLO/saved-search definitions reloaded so the new state is
 live) before Step 5. A queued-but-not-merged PR is INSUFFICIENT.
 
-- [ ] **Step 4: Update runbook URLs in alert annotations**
+- [ ] **Step 4: Update runbook URLs (Prometheus alert annotations AND log-side artifact equivalents)**
 
-Every alert touched in Steps 2 and 3 MUST have its `runbook_url`
-annotation point to the section of `docs/superpowers/specs/2026-04-18-wtp-client-design.md`
-that corresponds to its reason (or to the per-reason alerting
-policy section if the alert is reason-agnostic). The implementation
-team will provide stable anchor IDs for each per-reason subsection
-in the spec — the SRE/ops team picks them up here. Mark each row
+Every artifact touched in Steps 2, 3, and 3a MUST be pinned to a
+runbook section in `docs/superpowers/specs/2026-04-18-wtp-client-design.md`
+that corresponds to its reason (or to the per-reason alerting policy
+section if the alert is reason-agnostic). The implementation team will
+provide stable anchor IDs for each per-reason subsection in the spec —
+the SRE/ops team picks them up here. Mark each touched row
 `runbook_url_updated: yes`.
+
+The mechanism varies by `artifact_type`:
+
+  - **`prometheus_alert` / `prometheus_recording_rule`** —
+    `annotations.runbook_url` (the canonical Prometheus convention).
+  - **`grafana_panel`** — the panel's `links` array (or the
+    dashboard-level `links` block if the panel inherits) pointing
+    at the spec anchor.
+  - **`runbook_url`** — direct rewrite of the artifact value.
+  - **`log_alert` / `log_slo` / `log_saved_search`** — the
+    per-stack equivalent of the `runbook_url` annotation:
+      - **Loki / Grafana Mimir Alertmanager rules**: `annotations.runbook_url`.
+      - **Splunk Enterprise Security / Splunk Observability**:
+        the saved-search / detector `description` field with a
+        `runbook:` prefix, OR the dedicated `runbook` custom field
+        if the deployment defines one.
+      - **Elastic / Kibana**: the rule's `actions[].params.body`
+        runbook reference, OR the rule-level `tags` that link to a
+        Kibana dashboard markdown panel containing the runbook URL.
+      - **Datadog Logs Monitors / SLOs**: the monitor's `message`
+        field's `[Runbook](<url>)` link, OR the SLO's `description`
+        runbook reference.
+      - **Other backends**: pick the field the operator's existing
+        Prometheus runbook-pin convention maps to and document the
+        mapping in the migration tracking artifact's "Runbook
+        mapping" section so Step 5 preflight can verify it.
+    The migration tracking artifact MUST include a "Runbook mapping"
+    section that records, for each log-aggregation system in the
+    Step 1a inventory scope, which field is used for the runbook
+    pin. Without this mapping, Step 5 preflight cannot verify that
+    log-side runbook URLs are actually present in the deployed
+    artifacts.
+  - **`third_party_dashboard`** — the equivalent annotation/link
+    field in the third-party system; document the mapping in the
+    migration tracking artifact's "Runbook mapping" section as
+    above.
+
+Rows with `migration_decision` in
+`{delete, delete-log-alert}` are exempt from this step (the
+artifact is being removed). All other rows MUST be marked
+`runbook_url_updated: yes` with the resolved spec anchor recorded
+alongside.
 
 - [ ] **Step 5: Verify with implementation team and sign off**
 
@@ -12410,19 +12525,56 @@ phasing → Rollout precondition") MUST verify:
      the new result recorded before sign-off).
   4. The Step 1b field-preservation verification has been recorded
      for EVERY log-aggregation system listed in the Step 1a inventory
-     scope. Every row in Step 2 with `migration_decision: log-based-alert`
-     and every row in Step 3a with `migration_decision: keep-log-alert`
-     or `migration_decision: update-log-alert` MUST point (via its
-     `replacement_selector_or_query` cell, or via an explicit
-     reference column) at a verification recorded against a
-     log-aggregation system whose flag is `field_preservation: ok` OR
-     `field_preservation: msg-only` (with a documented fallback
-     selector pattern). Rows that point at a `field_preservation: broken`
-     system, or that point at no system, MUST be rejected.
-  5. Every touched alert annotation points at a stable runbook anchor
-     that exists in the spec, AND the change is live in production
-     monitoring (runbook URLs in deployed alert annotations resolve to
-     the intended spec anchors).
+     scope, AND the recorded classification is one of
+     `field_preservation: ok` / `field_preservation: msg-only` /
+     `field_preservation: broken`. Every row in Step 2 with
+     `migration_decision: log-based-alert` and every row in Step 3a
+     with `migration_decision: keep-log-alert`,
+     `migration_decision: update-log-alert`, or
+     `migration_decision: dedupe-log-alert` MUST have:
+       - a populated `log_system` cell naming a system from the
+         Step 1a inventory scope, AND
+       - a populated `field_preservation_ref` cell whose stable
+         identifier resolves to a verification entry against that
+         same `log_system` whose classification is
+         `field_preservation: ok` OR `field_preservation: msg-only`
+         (NEVER `broken`), AND
+       - if the referenced verification is `field_preservation:
+         msg-only`, the row's `replacement_selector_or_query` cell
+         MUST contain BOTH the rendered-string predicate AND the
+         source-scoping clause documented in the Step 1b verification
+         entry (component / service / logger / source-name match for
+         this binary). Rows whose msg-only selector lacks the
+         source-scoping clause MUST be rejected and re-routed
+         (typically to `update-log-alert` with the scoping clause
+         added, or to `delete-log-alert`).
+     Rows with empty `log_system`, empty `field_preservation_ref`,
+     pointers at a `broken` verification, or msg-only selectors
+     missing the source-scoping clause MUST be rejected.
+  5. Every touched alert / log-side artifact has its runbook pin
+     updated AND live in production:
+       - Prometheus alerts and recording rules (Step 2 metric-side
+         and Step 3 outputs) point their `annotations.runbook_url`
+         at a stable runbook anchor that exists in the spec.
+       - Grafana panels and dashboards point their `links` array at
+         the same.
+       - Log-side artifacts from Step 3a AND Step 2's
+         `log-based-alert` rows have their per-stack runbook-pin
+         field populated per the Step 4 mapping (e.g.
+         `annotations.runbook_url` for Loki Alertmanager rules,
+         `description` runbook-prefixed line for Splunk saved
+         searches, monitor `message` `[Runbook](<url>)` link for
+         Datadog Logs Monitors). Every row whose
+         `migration_decision` is NOT a `delete*` value MUST have
+         `runbook_url_updated: yes` AND the resolved spec anchor
+         recorded.
+       - The migration tracking artifact has a "Runbook mapping"
+         section that records, for every log-aggregation system in
+         the Step 1a inventory scope, which field is used as the
+         per-stack runbook-pin equivalent. Rows that point at a
+         system without a recorded mapping MUST be rejected.
+       - All of the above MUST be live in the corresponding
+         production environment (monitoring or log-aggregation).
 
 The preflight check MAY be automated as a one-off CI grep run against
 the monitoring repos (scoped to the inventory declared in Step 1a);
@@ -12436,9 +12588,14 @@ and deployed to production monitoring AND log-aggregation environments.
   `docs/superpowers/operator/wtp-monitoring-migration.md` lists every
   affected alert / panel / runbook URL / log-side artifact with a
   recorded `migration_decision`, has an "Inventory scope" section at
-  the top signed off by an SRE/ops lead (per Step 1a), AND has a
+  the top signed off by an SRE/ops lead (per Step 1a), has a
   "Field-preservation verification" section recording the Step 1b
-  result for every log-aggregation system in the inventory scope.
+  result (one of `field_preservation: ok` /
+  `field_preservation: msg-only` / `field_preservation: broken`) for
+  every log-aggregation system in the inventory scope, AND has a
+  "Runbook mapping" section recording, for each log-aggregation system
+  in the inventory scope, which field is the per-stack runbook-pin
+  equivalent of `annotations.runbook_url` (per Step 4).
 - Every migration PR / change request is **MERGED AND APPLIED to the
   production monitoring AND log-aggregation environments** (Prometheus
   rule files reloaded, Grafana panels updated and refreshed,
