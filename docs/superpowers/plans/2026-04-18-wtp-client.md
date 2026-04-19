@@ -692,6 +692,8 @@ Run `/roborev-design-review` and address findings.
 
 Create `internal/metrics/wtp_test.go`:
 
+> **Superseded by Task 22a Step 3.5**: the snippet below shows the historical Task 3 test which calls `w.IncDroppedMissingChain(1)` and asserts `"wtp_dropped_missing_chain_total 1"`. That counter (`wtp_dropped_missing_chain_total` / `IncDroppedMissingChain`) is REMOVED in Task 22a Step 3.5. Missing-chain is now a propagated `compact.ErrMissingChain` error, not a silent drop. Implementers reviewing this plan retroactively must NOT reintroduce the counter — see Task 22a for the current metric inventory and Step 3.5 for the deletion.
+
 ```go
 package metrics
 
@@ -889,6 +891,8 @@ Run: `go test ./internal/metrics/ -run TestWTPMetrics`
 Expected: FAIL with `c.WTP undefined` or similar.
 
 - [ ] **Step 3: Implement `internal/metrics/wtp.go`**
+
+> **Superseded by Task 22a Step 3.5**: the `wtp.go` snippet below contains the historical `IncDroppedMissingChain` method and references `wtpDroppedMissingChain`. That counter (`wtp_dropped_missing_chain_total` / `IncDroppedMissingChain`) is REMOVED in Task 22a Step 3.5. Missing-chain is now a propagated `compact.ErrMissingChain` error, not a silent drop. Implementers reviewing this plan retroactively must NOT reintroduce the counter — see Task 22a for the current metric inventory and Step 3.5 for the deletion.
 
 ```go
 package metrics
@@ -1156,6 +1160,8 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 - [ ] **Step 4: Add WTP fields to the Collector and wire emitter**
 
 In `internal/metrics/metrics.go`, extend the `Collector` struct:
+
+> **Superseded by Task 22a Step 3.5**: the `Collector` snippet below contains a `wtpDroppedMissingChain atomic.Uint64` field. That field (along with the matching `wtp_dropped_missing_chain_total` counter and `IncDroppedMissingChain` method) is REMOVED in Task 22a Step 3.5. Missing-chain is now a propagated `compact.ErrMissingChain` error, not a silent drop. Implementers reviewing this plan retroactively must NOT reintroduce the field — see Task 22a for the current metric inventory and Step 3.5 for the deletion.
 
 ```go
 type Collector struct {
@@ -6649,10 +6655,20 @@ func encodeBatchMessage(_ []wal.Record) (*wtpv1.ClientMessage, error) {
 }
 ```
 
+- [ ] **Step 4a: Inbound frame validation acceptance**
+
+The Live state (and any other receive site introduced in Phase 8) MUST honor the spec's "Frame validation and forward compatibility" contract for every inbound `ServerMessage`. Acceptance criteria:
+
+(a) When the receiver detects a frame-validation failure, it MUST increment `wtp_dropped_invalid_frame_total{reason="<value>"}` exactly once per offending frame. The `reason` value MUST come from the canonical enum defined by Task 22a (currently: `event_batch_body_unset`, `event_batch_compression_unspecified`, `session_init_algorithm_unspecified`, plus `unknown` as the catch-all). New reasons added in future tasks MUST be added to that enum first; receivers reference the enum, never literals.
+(b) After incrementing the counter, the receiver MUST tear down the stream rather than silently consuming the malformed frame: server-side validation failures (this task) take the `stream_recv_error` reconnect path documented in spec §"Frame validation and forward compatibility" — close the current stream, return `StateConnecting` from the live loop, and let the Run loop's backoff handle the reconnect. The newly-added Goaway path is reserved for the testserver / server-side validators in Phase 9 (where the client's outbound frame is rejected) — Phase 8 receivers do not emit Goaway because they are reading, not writing.
+(c) Invalid-frame logging MUST follow the spec's sanitization rule (reason + ≤16-byte hex prefix only; no raw protobuf payloads, no peer-supplied unbounded strings).
+
+Add a transport-level unit test that injects each enumerated frame-validation reason via the fakeConn `recvCh` (mirror the pattern used by the existing `wtp_session_failures_total{reason}` tests in `internal/metrics/wtp_test.go`). For each reason the test MUST assert: (1) the corresponding `wtp_dropped_invalid_frame_total{reason="<value>"}` series increments by exactly one, AND (2) the live loop returns `StateConnecting` (i.e., the reconnect path was taken). The test SHOULD use a table-driven structure keyed by the canonical enum so adding a new reason is a one-line change. The test MUST NOT redefine the enum locally — it imports the canonical values from the proto/validate package referenced by Task 22a.
+
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `go test ./internal/store/watchtower/transport/... -run TestBatcher`
-Expected: PASS — all 5 batcher invariant tests.
+Run: `go test ./internal/store/watchtower/transport/... -run "TestBatcher|TestLive_FrameValidation"`
+Expected: PASS — all 5 batcher invariant tests plus the table-driven frame-validation tests added in Step 4a (one entry per enumerated `wtp_dropped_invalid_frame_total{reason}` value).
 
 - [ ] **Step 6: Cross-compile check**
 
@@ -8550,7 +8566,7 @@ The spec lists five sink-failure counters that Task 23 (`AppendEvent`) and Phase
 
 - `wtp_dropped_invalid_utf8_total` (counter): a record was dropped because the canonical encoder reported `chain.ErrInvalidUTF8`. Wired by `AppendEvent` (Task 23).
 - `wtp_dropped_sequence_overflow_total` (counter): a record was dropped because `ev.Chain.Sequence > math.MaxInt64`. Wired by `AppendEvent` (Task 23).
-- `wtp_dropped_invalid_frame_total{reason}` (counter, labeled): a peer frame was dropped at the protocol-validation boundary; reasons are a fixed enum (`event_batch_body_unset`, `event_batch_compression_unspecified`, `session_init_algorithm_unspecified`, plus `unknown` as the catch-all). Wired by transport / receivers in Phase 8.
+- `wtp_dropped_invalid_frame_total{reason}` (counter, labeled): a peer frame was dropped at the protocol-validation boundary; reasons are a fixed enum (`event_batch_body_unset`, `event_batch_compression_unspecified`, `session_init_algorithm_unspecified`, plus `unknown` as the catch-all). Wired by transport / receivers in Phase 8 — specifically Task 17 Step 4a, where the Live state's inbound `ServerMessage` handling increments this counter and triggers the `stream_recv_error` reconnect path. Phase 9 (testserver) covers the symmetric server-side validation of inbound `ClientMessage` frames.
 - `wtp_session_init_failures_total{reason}` (counter, labeled): an in-band session-init step failed; reason `invalid_utf8` is the only enumerated value today, with `unknown` as the catch-all. Wired by transport in Phase 8.
 - `wtp_session_rotation_failures_total{reason}` (counter, labeled): same shape as init, but for rotation/SessionUpdate. Wired by transport in Phase 8.
 
@@ -9126,7 +9142,7 @@ Edits:
 2. In `internal/metrics/wtp.go`, delete the `IncDroppedMissingChain` method, the matching `DroppedMissingChain` accessor (if present), and the three `emitWTPMetrics` lines for `wtp_dropped_missing_chain_total`.
 3. In `internal/metrics/wtp_test.go`, delete the `w.IncDroppedMissingChain(1)` call from `TestWTPMetrics_AppendAndExpose` and the `"wtp_dropped_missing_chain_total 1"` assertion from the same test's expected-substring slice.
 
-If a callsite outside `internal/metrics` invokes `IncDroppedMissingChain`, the build will fail with `IncDroppedMissingChain undefined` — verify with `grep -rn IncDroppedMissingChain ./...` after the deletion. The expected result is no remaining references.
+If a callsite outside `internal/metrics` invokes `IncDroppedMissingChain`, the build will fail with `IncDroppedMissingChain undefined` — verify with `rg -n "IncDroppedMissingChain|wtp_dropped_missing_chain_total" internal/ pkg/ cmd/` after the deletion. The expected result is no matches in code; references in `docs/superpowers/plans/` are historical and explicitly superseded (see the admonitions above the Task 3 snippets) and in `docs/superpowers/specs/2026-04-18-wtp-client-design.md` appear only in the migration-guidance paragraph — do not touch the docs from this step.
 
 - [ ] **Step 4: Run tests to verify they pass**
 

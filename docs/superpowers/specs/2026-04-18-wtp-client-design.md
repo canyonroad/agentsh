@@ -122,9 +122,19 @@ caller (composite store)
   ▼
 watchtower.Store.AppendEvent(ctx, ev)
   │
-  │ 1. validate: ev.Chain != nil, else propagate ErrMissingChainState
+  │ 1. validate: ev.Chain != nil, else propagate compact.ErrMissingChain
   │      (wrapped as `watchtower: %w` from compact.Encode; loud failure
-  │      because composite-store regressions must surface to the caller)
+  │      because composite-store regressions must surface to the caller).
+  │      Note: although the upstream Phase 0 contract documents the
+  │      composite-store side as `audit.ErrMissingChainState`, the WTP
+  │      sink boundary surfaces `compact.ErrMissingChain` because the
+  │      check is performed inside `compact.Encode` against the typed
+  │      `ev.Chain == nil` predicate (composite stamps `ev.Chain` rather
+  │      than returning an error). `compact.Encode` performs `errors.Is`
+  │      against `compact.ErrMissingChain` only — it does not consult
+  │      `audit.ErrMissingChainState`. The two sentinels intentionally
+  │      live in separate packages: audit owns the composite-store
+  │      contract; compact owns the per-sink encode boundary.
   │
   │ 2. compact.Encode(ev) → wtpv1.CompactEvent
   │
@@ -611,8 +621,10 @@ WTP uses three distinct server→client acknowledgement messages with disjoint s
 Schema-valid but semantically invalid frames (e.g., `EventBatch.body` unset, `compression == COMPRESSION_UNSPECIFIED`, `algorithm == HASH_ALGORITHM_UNSPECIFIED`) are protocol-level errors. Receivers MUST:
 
 1. Drop the offending frame.
-2. Increment `wtp_dropped_invalid_frame_total{class}` with the appropriate frame class (e.g., `event_batch_body_unset`, `event_batch_compression_unspecified`, `session_init_algorithm_unspecified`, or `unknown` for any frame validation failure not covered by the enumerated classes).
+2. Increment `wtp_dropped_invalid_frame_total{reason}` with the appropriate frame-validation reason (e.g., `event_batch_body_unset`, `event_batch_compression_unspecified`, `session_init_algorithm_unspecified`, or `unknown` for any frame validation failure not covered by the enumerated reasons). The label key is `reason` to match the existing `wtp_session_failures_total{reason}` / `wtp_reconnects_total{reason}` convention.
 3. For client-side frames, send `Goaway{code: GOAWAY_CODE_UNSPECIFIED, message: "frame validation failed: <detail>"}` and close the session. For server-side frames, the client triggers a reconnect with reason `stream_recv_error`.
+
+**Invalid-frame log sanitization.** Frame contents come from untrusted peers, so receivers MUST log only (a) the `reason` enum value and (b) a fixed-length hex prefix (≤16 bytes) of the offending frame's serialized representation. Receivers MUST NOT log the raw protobuf payload, claimed-but-unverified field values from the offending frame, or unbounded peer-supplied strings (e.g., a peer-controlled `message` field, a peer-controlled session ID echoed back, or any other byte slice that the validator has by definition not yet trusted). The same rationale that bans payload bytes from mapper-error strings (see "Mapper error sanitization" below) applies here: the structured log is emitted verbatim and may be ingested into operator-facing pipelines, so the validator must not become a data-exfiltration vector for the peer.
 
 **Validator coverage by phase.** Phase 4a-ii ships validators for the two frames the client already constructs and the server-side test fixtures already accept: `EventBatch` (body presence, body/compression agreement, payload cap) and `SessionInit` (algorithm enum). The remaining frame validators — `TransportLoss`, `Goaway`, `Heartbeat`, `ServerHeartbeat`, `BatchAck`, `SessionAck`, `SessionUpdate`, `ClientShutdown` — land alongside the receivers that consume them in **Phase 8** (transport state machine, where the client interprets every inbound `ServerMessage`) and **Phase 9** (in-tree testserver, where the server side validates inbound `ClientMessage`). Until those phases land, schema-valid frames of those types are accepted as-is.
 
@@ -685,13 +697,23 @@ All exposed via slog at debug + as structured counters consumable by the existin
 - `wtp_wal_corruption_total` (counter; CRC corruption events during WAL replay)
 - `wtp_send_latency_seconds` (histogram, per batch)
 
-Dashboard/alerting impact. The new sink-failure metrics — five unlabeled counters (`wtp_dropped_invalid_mapper_total`, `wtp_dropped_invalid_timestamp_total`, `wtp_dropped_mapper_failure_total`, `wtp_dropped_invalid_utf8_total`, `wtp_dropped_sequence_overflow_total`) plus three labeled families (`wtp_dropped_invalid_frame_total{reason}`, `wtp_session_init_failures_total{reason}`, `wtp_session_rotation_failures_total{reason}`) — all follow the always-emit contract: the families appear at zero on every scrape regardless of activity, so adding them does not change cardinality at quiescence and does not require a phased rollout. Existing dashboards keep working unchanged; new alerting rules can be added at operator discretion. Suggested alerting:
+Dashboard/alerting impact. The new sink-failure metrics — five unlabeled counters (`wtp_dropped_invalid_mapper_total`, `wtp_dropped_invalid_timestamp_total`, `wtp_dropped_mapper_failure_total`, `wtp_dropped_invalid_utf8_total`, `wtp_dropped_sequence_overflow_total`) plus three labeled families (`wtp_dropped_invalid_frame_total{reason}`, `wtp_session_init_failures_total{reason}`, `wtp_session_rotation_failures_total{reason}`) — all follow the always-emit contract: the families appear at zero on every scrape regardless of activity, so adding them does not change cardinality at quiescence and does not require a phased rollout. New alerting rules can be added at operator discretion. Suggested alerting:
 - Page on `rate(wtp_session_init_failures_total[5m]) > 0` — unrecoverable misconfiguration.
 - Alert-not-page on `rate(wtp_dropped_invalid_utf8_total[5m]) > 0.01` — event source corruption.
 - Alert-not-page on `rate(wtp_dropped_invalid_mapper_total[5m]) > 0` — defense-in-depth tripwire; non-zero means a code-path bug bypassed `Store.New` validation.
 - Alert-not-page on `rate(wtp_dropped_invalid_timestamp_total[5m]) > 0` — producers emitting zero or pre-epoch timestamps; usually benign but indicates upstream stamping is missing.
 - Alert-not-page on `rate(wtp_dropped_invalid_frame_total[5m]) > 0` — peer is sending semantically invalid protocol frames; investigate the `reason` label to identify the offending frame class.
 - Alert-not-page on `rate(wtp_dropped_mapper_failure_total[5m]) > 0.01` — mapper implementation returning errors; investigate the wrapped `err` in the structured log.
+
+Migration guidance: removed `wtp_dropped_missing_chain_total`. The earlier Task 3 metric inventory shipped a `wtp_dropped_missing_chain_total` counter that tracked missing-chain as a silent drop. The semantics changed in Round 4: missing-chain is now propagated from `AppendEvent` as a wrapped `compact.ErrMissingChain` error rather than silently dropped, so the underlying event class the counter tracked no longer exists and the counter is removed (Task 22a Step 3.5 in the implementation plan). Operators should plan accordingly:
+
+- Operators currently scraping `wtp_dropped_missing_chain_total` will see the series disappear from `/metrics` after the rollout. There is no zero-emit deprecation window — the field, accessor, and emit lines are all deleted in the same change.
+- The closest replacements depend on what operators were using the old counter for:
+  - If the dashboard/alert was watching for composite-store regressions, the new contract is that `AppendEvent` returns the wrapped `compact.ErrMissingChain` to the caller. If the upstream caller's reaction is to tear the WTP stream down, the symptom surfaces as a `wtp_session_failures_total{reason="..."}` increment (or a `wtp_reconnects_total{reason="..."}` increment if the caller force-cycles the stream). The exact reason label depends on how the caller surfaces the propagated error.
+  - If the dashboard/alert was watching for protocol-layer drops more broadly, `wtp_dropped_invalid_frame_total{reason="..."}` is the correct replacement family (peer-side semantically-invalid frames).
+- Recommended operator action as part of the rollout: delete or update any dashboard panel or alerting rule that references `wtp_dropped_missing_chain_total`. The all-zero series can no longer fire by definition; leaving the panel in place produces a misleading "healthy" indicator for a class of failure that is now reported through a different channel.
+
+The rest of the always-emit / zero-init contract for the eight new counters (above) is unchanged — they appear at zero on every scrape from the moment metrics is initialized, regardless of WTP enable state.
 
 Composite-store regression note. The `compact.Encode` `ErrMissingChain` branch is intentionally NOT a counter. Missing-chain is a programming error — the composite store MUST stamp `ev.Chain` before fanning out to any sink, and a sink reaching `Encode` with a nil chain indicates a composite-store regression that operators should surface loudly. `AppendEvent` therefore propagates `ErrMissingChain` to the caller as a wrapped error (`watchtower: %w`) rather than dropping silently. See the Encode boundary semantics paragraph below for the contrast with the silent-drop classes.
 
@@ -975,6 +997,15 @@ The three drop classes (`ErrInvalidMapper`, `ErrInvalidTimestamp`, mapper-failur
 The `default` branch of the `errors.Is` switch — i.e., `Encode` returned an error that is not one of the four sentinels — corresponds to a mapper-side failure wrapped by `Encode` as `compact mapper: %w`. That branch increments `wtp_dropped_mapper_failure_total`. There is no fifth sentinel for this case because the underlying error originates inside the mapper implementation; operators classify it from the wrapped `err` text in the structured log.
 
 The `ErrMissingChain` branch is NOT a drop. `AppendEvent` returns `fmt.Errorf("watchtower: %w", err)` and emits no structured log (because `ev.Chain` is unstamped and dereferencing would panic; the wrapped error string already identifies the failure). The composite store MUST stamp `ev.Chain` before fanout — failing to do so is a programming error, and propagating it lets the caller surface the regression at the call site rather than burying it in a per-sink counter.
+
+**Caller contract for propagated `compact.ErrMissingChain`.** This error is a developer-facing diagnostic, not an operator-facing throughput failure — composite did not stamp `ev.Chain`, which is a programming/integration bug, not a runtime/transport problem. The watchtower sink and its callers MUST therefore treat the propagated error as follows:
+
+(a) The watchtower sink MUST log the error at ERROR severity once per occurrence (no rate-limit or de-duplication suppression for the first N — every instance is a separate composite-store invariant violation worth surfacing). The log includes `err` only; sequence/generation are not available because `ev.Chain` is nil.
+(b) The sink MUST NOT auto-disable, self-shutdown, or latch fatal on this error. Disabling the sink is an operator decision, not a per-event response. The sink continues to accept subsequent `AppendEvent` calls; if the composite stamps `ev.Chain` correctly on the next event, processing resumes normally.
+(c) The sink MAY return the error up the audit pipeline so the composite store has the option to crash-fail in dev/test builds (where invariant violations should be loud) while production builds log and continue. The decision is the composite's, not the WTP sink's.
+(d) The error is NOT retryable. Re-encoding the same event with the same `ev.Chain == nil` will produce the same `compact.ErrMissingChain`. Callers MUST NOT loop, back off, or schedule the event for re-delivery — the only remediation is fixing the composite's stamping logic and re-running with a corrected event.
+
+The contrast with the silent-drop classes is intentional: `ErrInvalidMapper`, `ErrInvalidTimestamp`, and the mapper-failure default branch are operator-visible runtime conditions (event source corruption, mapper bugs) where the sink absorbs the failure and counts it; `ErrMissingChain` is a developer-visible integration condition where the sink refuses to absorb the failure because doing so would mask the upstream bug.
 
 **Mapper error sanitization.** Mapper implementations MUST NOT include event payload bytes, raw payload values, or secret material in error strings. The full error string is emitted in structured WARN logs verbatim and (for `ErrMissingChain`) returned through `AppendEvent`'s wrapped error to the caller. Mappers should return descriptive but non-sensitive errors (e.g., `unsupported event type: <type>` rather than `failed to map: <full payload>`). The default `StubMapper` does not return errors. Production mappers must follow this contract; callers cannot sanitize after the fact. Mapper authors should add an explicit code-review checklist item for error-string content.
 
