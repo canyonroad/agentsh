@@ -2,7 +2,8 @@
 //
 // CI does NOT run this tool — it only verifies the existing goldens
 // round-trip cleanly (TestWireGoldens_RoundTrip in
-// proto/canyonroad/wtp/v1/wire_roundtrip_test.go).
+// proto/canyonroad/wtp/v1/wire_roundtrip_test.go) and that the generator
+// still produces them byte-for-byte (TestWireGoldens_GeneratorReproducible).
 //
 // Run manually after intentional schema changes:
 //
@@ -14,7 +15,7 @@ import (
 	"os"
 	"path/filepath"
 
-	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
+	"github.com/agentsh/agentsh/internal/store/watchtower/cmd/gen-wire-goldens/fixtures"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -24,67 +25,18 @@ func main() {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		fail(err)
 	}
-
-	ce := &wtpv1.CompactEvent{
-		Sequence:           42,
-		Generation:         7,
-		TimestampUnixNanos: 1_700_000_000_000_000_000,
-		OcsfClassUid:       3001,
-		OcsfActivityId:     1,
-		Payload:            []byte{0xde, 0xad, 0xbe, 0xef},
-		Integrity: &wtpv1.IntegrityRecord{
-			FormatVersion:  2,
-			Sequence:       42,
-			Generation:     7,
-			PrevHash:       "deadbeef",
-			EventHash:      "cafef00d",
-			ContextDigest:  "0123456789abcdef",
-			KeyFingerprint: "sha256:aabbccdd",
-		},
+	for _, f := range fixtures.All() {
+		b, err := proto.Marshal(f.Message)
+		if err != nil {
+			fail(err)
+		}
+		p := filepath.Join(outDir, f.Name)
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			fail(err)
+		}
+		fmt.Println("wrote", p, len(b), "bytes")
 	}
-	write("compact_event.bin", ce)
-
-	eb := &wtpv1.EventBatch{
-		FromSequence: 40,
-		ToSequence:   42,
-		Generation:   7,
-		Compression:  wtpv1.Compression_COMPRESSION_NONE,
-		Body: &wtpv1.EventBatch_Uncompressed{
-			Uncompressed: &wtpv1.UncompressedEvents{
-				Events: []*wtpv1.CompactEvent{ce},
-			},
-		},
-	}
-	write("event_batch.bin", eb)
-
-	si := &wtpv1.SessionInit{
-		SessionId:           "01HXAVD2N5VX3CZQK7Q7QWNYKE",
-		OcsfVersion:         "1.8.0",
-		FormatVersion:       2,
-		Algorithm:           wtpv1.HashAlgorithm_HASH_ALGORITHM_HMAC_SHA256,
-		KeyFingerprint:      "sha256:aabbccdd",
-		ContextDigest:       "0123456789abcdef",
-		WalHighWatermarkSeq: 0,
-		Generation:          0,
-		AgentId:             "agentsh",
-		AgentVersion:        "0.0.0-test",
-		TotalChained:        0,
-	}
-	write("session_init.bin", si)
-
 	fmt.Println("regenerated goldens in", outDir)
-}
-
-func write(name string, m proto.Message) {
-	b, err := proto.Marshal(m)
-	if err != nil {
-		fail(err)
-	}
-	p := filepath.Join(outDir, name)
-	if err := os.WriteFile(p, b, 0o644); err != nil {
-		fail(err)
-	}
-	fmt.Println("wrote", p, len(b), "bytes")
 }
 
 func fail(err error) {
