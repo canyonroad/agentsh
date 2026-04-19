@@ -6,6 +6,11 @@ import (
 	"testing"
 )
 
+// testMaxPayload is the bound passed to ReadRecord/WriteRecord in tests
+// that don't care about the configured WAL.SegmentSize. Sized to match the
+// spec default WAL.SegmentSize so it covers realistic record shapes.
+const testMaxPayload = 16 * 1024 * 1024
+
 func TestSegmentHeader_RoundTrip(t *testing.T) {
 	hdr := SegmentHeader{Version: 1, Flags: FlagGenInit, Generation: 7}
 	var buf bytes.Buffer
@@ -86,10 +91,10 @@ func TestSegmentHeader_RejectsReservedFlagBitsOnWrite(t *testing.T) {
 func TestRecordFraming_RoundTrip(t *testing.T) {
 	payload := []byte("hello WTP record framing")
 	var buf bytes.Buffer
-	if err := WriteRecord(&buf, payload); err != nil {
+	if err := WriteRecord(&buf, payload, testMaxPayload); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ReadRecord(&buf)
+	got, err := ReadRecord(&buf, testMaxPayload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,20 +106,20 @@ func TestRecordFraming_RoundTrip(t *testing.T) {
 func TestRecordFraming_DetectsCorruption(t *testing.T) {
 	payload := []byte("corrupt me")
 	var buf bytes.Buffer
-	if err := WriteRecord(&buf, payload); err != nil {
+	if err := WriteRecord(&buf, payload, testMaxPayload); err != nil {
 		t.Fatal(err)
 	}
 	frame := buf.Bytes()
 	// Flip a payload byte (first byte after length+crc).
 	frame[8] ^= 0xFF
-	_, err := ReadRecord(bytes.NewReader(frame))
+	_, err := ReadRecord(bytes.NewReader(frame), testMaxPayload)
 	if err != ErrCRCMismatch {
 		t.Errorf("err = %v, want ErrCRCMismatch", err)
 	}
 }
 
 func TestRecordFraming_RejectsTruncatedHeader(t *testing.T) {
-	_, err := ReadRecord(bytes.NewReader([]byte{0, 1, 2}))
+	_, err := ReadRecord(bytes.NewReader([]byte{0, 1, 2}), testMaxPayload)
 	if err == nil {
 		t.Fatal("expected truncated-header error")
 	}
@@ -123,35 +128,73 @@ func TestRecordFraming_RejectsTruncatedHeader(t *testing.T) {
 func TestRecordFraming_RejectsTruncatedPayload(t *testing.T) {
 	payload := []byte("abc")
 	var buf bytes.Buffer
-	if err := WriteRecord(&buf, payload); err != nil {
+	if err := WriteRecord(&buf, payload, testMaxPayload); err != nil {
 		t.Fatal(err)
 	}
 	frame := buf.Bytes()
 	// Truncate the payload.
 	frame = frame[:len(frame)-1]
-	_, err := ReadRecord(bytes.NewReader(frame))
+	_, err := ReadRecord(bytes.NewReader(frame), testMaxPayload)
 	if err == nil {
 		t.Fatal("expected truncated-payload error")
 	}
 }
 
 func TestRecordFraming_ReadRejectsOversizedLength(t *testing.T) {
-	// Synthesize a header that claims a payload larger than MaxRecordSize.
-	// Use a sentinel CRC; ReadRecord must reject before allocating or
-	// reading the (nonexistent) payload bytes.
+	// Synthesize a header that claims a payload larger than the caller's
+	// declared maxPayload. Use a sentinel CRC; ReadRecord must reject
+	// before allocating or reading the (nonexistent) payload bytes.
+	const callerMax = 1024
 	header := make([]byte, 8)
-	binary.BigEndian.PutUint32(header[0:4], MaxRecordSize+5) // payloadLen = MaxRecordSize+1
+	binary.BigEndian.PutUint32(header[0:4], callerMax+5) // payloadLen = callerMax+1
 	binary.BigEndian.PutUint32(header[4:8], 0)
-	_, err := ReadRecord(bytes.NewReader(header))
+	_, err := ReadRecord(bytes.NewReader(header), callerMax)
 	if err == nil {
 		t.Fatal("expected oversized-length rejection")
 	}
 }
 
 func TestRecordFraming_WriteRejectsOversizedPayload(t *testing.T) {
-	payload := make([]byte, MaxRecordSize+1)
+	const callerMax = 1024
+	payload := make([]byte, callerMax+1)
 	var buf bytes.Buffer
-	if err := WriteRecord(&buf, payload); err == nil {
+	if err := WriteRecord(&buf, payload, callerMax); err == nil {
 		t.Fatal("expected oversized-payload rejection")
+	}
+}
+
+// TestRecordFraming_HonorsLargeConfiguredMax demonstrates that the framing
+// layer does not impose a hidden 16 MiB ceiling: a deployment that
+// configures WAL.SegmentSize > 16 MiB can pass a larger maxPayload and
+// successfully round-trip a record that would have been rejected by a
+// hard-coded constant.
+func TestRecordFraming_HonorsLargeConfiguredMax(t *testing.T) {
+	const largeMax = 64 * 1024 * 1024 // 64 MiB; well above default 16 MiB
+	const payloadSize = 17 * 1024 * 1024
+	payload := bytes.Repeat([]byte{0xA5}, payloadSize)
+
+	var buf bytes.Buffer
+	if err := WriteRecord(&buf, payload, largeMax); err != nil {
+		t.Fatalf("WriteRecord with maxPayload=64MiB rejected a %d-byte payload: %v", payloadSize, err)
+	}
+	got, err := ReadRecord(&buf, largeMax)
+	if err != nil {
+		t.Fatalf("ReadRecord with maxPayload=64MiB failed on a %d-byte payload: %v", payloadSize, err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("round-trip mismatch on large payload: len(got)=%d len(want)=%d", len(got), len(payload))
+	}
+}
+
+func TestRecordFraming_RejectsNonPositiveMaxPayload(t *testing.T) {
+	cases := []int{0, -1, -1024}
+	for _, m := range cases {
+		var buf bytes.Buffer
+		if err := WriteRecord(&buf, []byte("x"), m); err == nil {
+			t.Errorf("WriteRecord(maxPayload=%d) expected error, got nil", m)
+		}
+		if _, err := ReadRecord(bytes.NewReader([]byte{0, 0, 0, 5, 0, 0, 0, 0, 'x'}), m); err == nil {
+			t.Errorf("ReadRecord(maxPayload=%d) expected error, got nil", m)
+		}
 	}
 }

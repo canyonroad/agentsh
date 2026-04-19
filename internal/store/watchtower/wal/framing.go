@@ -87,14 +87,6 @@ func ReadSegmentHeader(r io.Reader) (SegmentHeader, error) {
 // crcTable is the Castagnoli polynomial table used for record CRCs.
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
-// MaxRecordSize bounds the payload bytes a single record may declare. It
-// matches the spec default WAL.SegmentSize (16 MiB) so a single record can
-// never legitimately exceed one segment, and a corrupted on-disk length
-// field cannot drive ReadRecord into a multi-GB allocation before the CRC
-// is even checked. The constant lives at the framing layer because
-// allocation happens here; segment-level enforcement runs above it.
-const MaxRecordSize = 16 * 1024 * 1024
-
 // ErrCRCMismatch is returned by ReadRecord when the on-disk CRC does not
 // match the recomputed CRC of the payload bytes.
 var ErrCRCMismatch = errors.New("wal: record CRC mismatch")
@@ -109,12 +101,22 @@ var ErrCRCMismatch = errors.New("wal: record CRC mismatch")
 //
 // Note: the length field encodes len(payload)+4 (the payload bytes plus the
 // 4-byte CRC). This matches spec §"Record framing".
-func WriteRecord(w io.Writer, payload []byte) error {
+//
+// maxPayload is the largest payload (in bytes) the caller will allow in a
+// single record. The caller — typically the segment writer — derives this
+// from the configured WAL.SegmentSize so deployments with larger segments
+// can still emit larger records without lifting a hard-coded ceiling here.
+// maxPayload must be > 0; values <= 0 are an error so callers cannot
+// accidentally bypass the bound.
+func WriteRecord(w io.Writer, payload []byte, maxPayload int) error {
+	if maxPayload <= 0 {
+		return fmt.Errorf("wal: maxPayload must be > 0, got %d", maxPayload)
+	}
 	if len(payload) == 0 {
 		return errors.New("wal: empty payload")
 	}
-	if len(payload) > MaxRecordSize {
-		return fmt.Errorf("wal: payload size %d exceeds MaxRecordSize %d", len(payload), MaxRecordSize)
+	if len(payload) > maxPayload {
+		return fmt.Errorf("wal: payload size %d exceeds maxPayload %d", len(payload), maxPayload)
 	}
 	header := make([]byte, 8)
 	binary.BigEndian.PutUint32(header[0:4], uint32(len(payload)+4))
@@ -130,9 +132,17 @@ func WriteRecord(w io.Writer, payload []byte) error {
 
 // ReadRecord reads one length-prefixed CRC32C record from r and returns the
 // payload. Returns ErrCRCMismatch on bad CRC, io.ErrUnexpectedEOF on
-// truncation, io.EOF when r is at the end of its data. Returns an error
-// (without allocating) if the declared payload size exceeds MaxRecordSize.
-func ReadRecord(r io.Reader) ([]byte, error) {
+// truncation, io.EOF when r is at the end of its data.
+//
+// maxPayload bounds the declared payload size before any allocation, so a
+// corrupted on-disk length cannot drive ReadRecord into an unbounded
+// allocation. The caller — typically the segment reader — derives this
+// from the actual segment file size or the configured WAL.SegmentSize.
+// maxPayload must be > 0.
+func ReadRecord(r io.Reader, maxPayload int) ([]byte, error) {
+	if maxPayload <= 0 {
+		return nil, fmt.Errorf("wal: maxPayload must be > 0, got %d", maxPayload)
+	}
 	header := make([]byte, 8)
 	n, err := io.ReadFull(r, header)
 	if err != nil {
@@ -147,8 +157,8 @@ func ReadRecord(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("invalid record length %d", length)
 	}
 	payloadLen := length - 4
-	if payloadLen > MaxRecordSize {
-		return nil, fmt.Errorf("wal: record payload size %d exceeds MaxRecordSize %d", payloadLen, MaxRecordSize)
+	if uint64(payloadLen) > uint64(maxPayload) {
+		return nil, fmt.Errorf("wal: record payload size %d exceeds maxPayload %d", payloadLen, maxPayload)
 	}
 	payload := make([]byte, payloadLen)
 	if _, err := io.ReadFull(r, payload); err != nil {
