@@ -1521,9 +1521,216 @@ git add proto/canyonroad/wtp/v1/
 git commit -m "feat(proto): add WTP v1 service and message definitions"
 ```
 
+---
+
+### Task 4b: Schema stability docs and receiver-side validators
+
+**Files:**
+- Create: `proto/canyonroad/wtp/v1/validate.go`
+- Create: `proto/canyonroad/wtp/v1/validate_test.go`
+- Modify: `docs/superpowers/specs/2026-04-18-wtp-client-design.md` (already updated in this commit; included for traceability)
+
+**Why:** The forward-compatibility policy in spec §"Frame validation and forward compatibility" makes claims (UNSPECIFIED rejection, body/compression mismatch rejection, compressed-payload cap) that the proto definitions alone cannot enforce. Add a small, focused validator package alongside the generated bindings and prove the contract with negative tests. Also lock in the pre-1.0 schema-stability policy so future contributors know tag reuse is permitted now and forbidden after the 1.0 cut.
+
+- [ ] **Step 1: Write failing validator tests**
+
+Create `proto/canyonroad/wtp/v1/validate_test.go`:
+
+```go
+package wtpv1
+
+import (
+	"errors"
+	"strings"
+	"testing"
+)
+
+func TestValidateEventBatch_UnsetBodyRejected(t *testing.T) {
+	eb := &EventBatch{FromSequence: 1, ToSequence: 2, Generation: 1, Compression: Compression_COMPRESSION_NONE}
+	err := ValidateEventBatch(eb)
+	if !errors.Is(err, ErrInvalidFrame) {
+		t.Fatalf("expected ErrInvalidFrame; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "body unset") {
+		t.Errorf("error should mention body unset; got %q", err)
+	}
+}
+
+func TestValidateEventBatch_CompressionUnspecifiedRejected(t *testing.T) {
+	eb := &EventBatch{
+		FromSequence: 1, ToSequence: 2, Generation: 1,
+		Compression: Compression_COMPRESSION_UNSPECIFIED,
+		Body:        &EventBatch_Uncompressed{Uncompressed: &UncompressedEvents{}},
+	}
+	if err := ValidateEventBatch(eb); !errors.Is(err, ErrInvalidFrame) {
+		t.Fatalf("expected ErrInvalidFrame; got %v", err)
+	}
+}
+
+func TestValidateEventBatch_NoneWithCompressedPayloadRejected(t *testing.T) {
+	eb := &EventBatch{
+		FromSequence: 1, ToSequence: 2, Generation: 1,
+		Compression: Compression_COMPRESSION_NONE,
+		Body:        &EventBatch_CompressedPayload{CompressedPayload: []byte("x")},
+	}
+	if err := ValidateEventBatch(eb); !errors.Is(err, ErrInvalidFrame) {
+		t.Fatalf("expected ErrInvalidFrame; got %v", err)
+	}
+}
+
+func TestValidateEventBatch_ZstdWithUncompressedRejected(t *testing.T) {
+	eb := &EventBatch{
+		FromSequence: 1, ToSequence: 2, Generation: 1,
+		Compression: Compression_COMPRESSION_ZSTD,
+		Body:        &EventBatch_Uncompressed{Uncompressed: &UncompressedEvents{}},
+	}
+	if err := ValidateEventBatch(eb); !errors.Is(err, ErrInvalidFrame) {
+		t.Fatalf("expected ErrInvalidFrame; got %v", err)
+	}
+}
+
+func TestValidateEventBatch_OverCapCompressedRejected(t *testing.T) {
+	huge := make([]byte, MaxCompressedPayloadBytes+1)
+	eb := &EventBatch{
+		FromSequence: 1, ToSequence: 2, Generation: 1,
+		Compression: Compression_COMPRESSION_ZSTD,
+		Body:        &EventBatch_CompressedPayload{CompressedPayload: huge},
+	}
+	if err := ValidateEventBatch(eb); !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("expected ErrPayloadTooLarge; got %v", err)
+	}
+}
+
+func TestValidateEventBatch_HappyPaths(t *testing.T) {
+	uncompressed := &EventBatch{
+		FromSequence: 1, ToSequence: 2, Generation: 1,
+		Compression: Compression_COMPRESSION_NONE,
+		Body:        &EventBatch_Uncompressed{Uncompressed: &UncompressedEvents{Events: []*CompactEvent{{Sequence: 1}, {Sequence: 2}}}},
+	}
+	if err := ValidateEventBatch(uncompressed); err != nil {
+		t.Errorf("uncompressed batch should validate; got %v", err)
+	}
+	compressed := &EventBatch{
+		FromSequence: 1, ToSequence: 2, Generation: 1,
+		Compression: Compression_COMPRESSION_GZIP,
+		Body:        &EventBatch_CompressedPayload{CompressedPayload: []byte("blob")},
+	}
+	if err := ValidateEventBatch(compressed); err != nil {
+		t.Errorf("compressed batch should validate; got %v", err)
+	}
+}
+
+func TestValidateSessionInit_AlgorithmUnspecifiedRejected(t *testing.T) {
+	si := &SessionInit{SessionId: "s", Algorithm: HashAlgorithm_HASH_ALGORITHM_UNSPECIFIED}
+	if err := ValidateSessionInit(si); !errors.Is(err, ErrInvalidFrame) {
+		t.Fatalf("expected ErrInvalidFrame; got %v", err)
+	}
+}
+
+func TestValidateSessionInit_HappyPath(t *testing.T) {
+	si := &SessionInit{SessionId: "s", Algorithm: HashAlgorithm_HASH_ALGORITHM_HMAC_SHA256}
+	if err := ValidateSessionInit(si); err != nil {
+		t.Errorf("happy path should validate; got %v", err)
+	}
+}
+```
+
+- [ ] **Step 2: Run tests to confirm they fail**
+
+Run: `go test ./proto/canyonroad/wtp/v1/... -run TestValidate -v`
+Expected: FAIL — `undefined: ValidateEventBatch`, etc.
+
+- [ ] **Step 3: Write the validator**
+
+Create `proto/canyonroad/wtp/v1/validate.go`:
+
+```go
+package wtpv1
+
+import (
+	"errors"
+	"fmt"
+)
+
+// MaxCompressedPayloadBytes is the receiver-enforced cap on EventBatch
+// compressed_payload size. See spec §"Compression safety".
+const MaxCompressedPayloadBytes = 8 * 1024 * 1024
+
+// MaxDecompressedBatchBytes is the receiver-enforced cap applied to the
+// streaming decoder once decompression begins. Validators here cap the
+// compressed bytes; downstream decompression code is responsible for
+// enforcing this second cap during the streaming decode.
+const MaxDecompressedBatchBytes = 64 * 1024 * 1024
+
+// ErrInvalidFrame is returned for schema-valid but semantically invalid frames.
+var ErrInvalidFrame = errors.New("wtp: invalid frame")
+
+// ErrPayloadTooLarge is returned when EventBatch.compressed_payload exceeds MaxCompressedPayloadBytes.
+var ErrPayloadTooLarge = errors.New("wtp: payload too large")
+
+// ValidateEventBatch enforces the rules in spec §"Frame validation and
+// forward compatibility" + §"Compression safety". Receivers MUST call this
+// before accepting an EventBatch.
+func ValidateEventBatch(b *EventBatch) error {
+	if b == nil {
+		return fmt.Errorf("%w: batch is nil", ErrInvalidFrame)
+	}
+	if b.Compression == Compression_COMPRESSION_UNSPECIFIED {
+		return fmt.Errorf("%w: compression unspecified", ErrInvalidFrame)
+	}
+	switch body := b.Body.(type) {
+	case nil:
+		return fmt.Errorf("%w: body unset", ErrInvalidFrame)
+	case *EventBatch_Uncompressed:
+		if b.Compression != Compression_COMPRESSION_NONE {
+			return fmt.Errorf("%w: uncompressed body requires compression=NONE (got %s)", ErrInvalidFrame, b.Compression)
+		}
+	case *EventBatch_CompressedPayload:
+		if b.Compression == Compression_COMPRESSION_NONE {
+			return fmt.Errorf("%w: compressed_payload requires compression != NONE", ErrInvalidFrame)
+		}
+		if len(body.CompressedPayload) > MaxCompressedPayloadBytes {
+			return fmt.Errorf("%w: compressed_payload is %d bytes (cap %d)", ErrPayloadTooLarge, len(body.CompressedPayload), MaxCompressedPayloadBytes)
+		}
+	default:
+		return fmt.Errorf("%w: unknown body oneof case", ErrInvalidFrame)
+	}
+	return nil
+}
+
+// ValidateSessionInit rejects SessionInit frames with UNSPECIFIED enums or
+// missing required fields, per spec §"Frame validation and forward compatibility".
+func ValidateSessionInit(s *SessionInit) error {
+	if s == nil {
+		return fmt.Errorf("%w: session_init is nil", ErrInvalidFrame)
+	}
+	if s.Algorithm == HashAlgorithm_HASH_ALGORITHM_UNSPECIFIED {
+		return fmt.Errorf("%w: algorithm unspecified", ErrInvalidFrame)
+	}
+	return nil
+}
+```
+
+- [ ] **Step 4: Run tests to confirm pass**
+
+Run: `go test ./proto/canyonroad/wtp/v1/... -v`
+Expected: PASS — all original tests plus the 8 new validator tests.
+
+- [ ] **Step 5: Cross-compile**
+
+Run: `GOOS=windows go build ./...`
+Expected: clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add proto/canyonroad/wtp/v1/validate.go proto/canyonroad/wtp/v1/validate_test.go docs/superpowers/specs/2026-04-18-wtp-client-design.md docs/superpowers/plans/2026-04-18-wtp-client.md
+git commit -m "fix(proto): address Task 4 round 2 — schema stability, validators, compression caps"
+```
+
 - [ ] **Step 7: Roborev**
 
-Run `/roborev-design-review` and address findings.
+Controller will run roborev — do not run it in this task.
 
 ---
 

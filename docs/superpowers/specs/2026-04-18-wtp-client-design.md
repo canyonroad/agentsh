@@ -548,11 +548,36 @@ Schema-valid but semantically invalid frames (e.g., `EventBatch.body` unset, `co
 2. Increment the appropriate counter (`wtp_dropped_missing_chain_total` for missing chain context; per-error counters added by future tasks for other classes).
 3. For client-side frames, send `Goaway{code: GOAWAY_CODE_UNSPECIFIED, message: "frame validation failed: <detail>"}` and close the session. For server-side frames, the client triggers a reconnect with reason `stream_recv_error`.
 
-Forward compatibility:
+#### Schema stability
+
+The `canyonroad.wtp.v1` package is **unstable until the first tagged 1.0 release of the WTP protocol** (separate from the agentsh release version). Pre-1.0:
+
+- Tag numbers, field types, and enum values may change between commits with no migration burden. There are no live deployments to break.
+- Generated `.pb.go` is regenerated on every change. Goldens (Phase 4b) are regenerated to match.
+- Mixed client/server versions are NOT supported; both sides must be built from the same commit.
+
+Post-1.0, the forward-compatibility rules below take effect:
+
+- Existing tag numbers MUST be preserved. Removed fields are marked `reserved`.
+- Wire-incompatible changes (type change, tag reassignment, enum-value reuse) require a fresh package version (`canyonroad.wtp.v2`) and a per-side migration plan.
+- The 1.0 cut is gated on (a) at least one external implementation having validated the conformance vectors and (b) the decision being recorded in this spec under `#### Stability cut`.
+
+Forward compatibility (post-1.0):
 
 - Unknown enum values MUST be treated as `*_UNSPECIFIED` and produce the same drop-and-error path. Adding a new enum value is therefore a wire break for older clients/servers; bump `format_version` in the same change.
 - New oneof arms in `ClientMessage`/`ServerMessage` are forward-compatible only if the receiver tolerates the unset case as a no-op rather than a protocol error. We declare new arms NON-forward-compatible until per-arm rollout policy is added in a future spec revision.
 - New fields with new tags are forward-compatible only if they default to a meaningful zero value. Adding required-meaning fields is a wire break.
+
+### Compression safety
+
+When `EventBatch.compression` is `COMPRESSION_ZSTD` or `COMPRESSION_GZIP`, receivers MUST enforce two independent caps before decompression:
+
+1. **Compressed-payload cap**: `len(compressed_payload) <= 8 MiB`. Larger payloads are rejected with `Goaway{code: GOAWAY_CODE_UNSPECIFIED, message: "compressed payload exceeds cap"}` and the session closed.
+2. **Decompressed-size cap**: streaming decoder configured with a hard limit of `64 MiB` per batch. Exceeding the cap aborts decompression and triggers the same Goaway path. Decoders MUST stream-and-cap, not allocate up-front from a header.
+
+Malformed compressed payloads (zstd/gzip framing errors) are protocol-level errors handled identically to schema-valid-but-semantically-invalid frames per "Frame validation" above. Receivers MUST NOT log or surface decompressed payload bytes when rejecting; only the framing error category is recorded.
+
+The 8 MiB / 64 MiB caps are conservative defaults sized so that a single batch fits in CPU L3 plus some slack on commodity hardware; future revisions may raise them but receivers MUST always apply some cap (no `0 = unlimited` semantic).
 
 ### Backoff
 
@@ -812,7 +837,8 @@ This section enumerates ordered milestones with one-line entry/exit criteria, sc
 | 1 | **Phase 0 contract land** | Phase 0 contract doc approved. | `audit.SequenceAllocator` and `audit.SinkChain` exist with full unit tests. `audit.IntegrityChain.Wrap` preserved (existing tests green). `pkg/types.Event.Chain *ChainState` added with `json:"-"` tag. `TestEvent_ChainFieldNotMarshaled` passes. |
 | 2 | **Composite refactor** | Phase 1 done. | `composite.Store` constructs a `SequenceAllocator`, stamps `ev.Chain` before fanout, exposes `NextGeneration()`. Cross-sink `(seq, gen)` convergence test passes. Single-sink installations behave identically (no observable change). |
 | 3 | **Filter + config + metrics plumbing** | Phase 2 done. | `internal/store/eventfilter/` package generalized from OTEL's private filter (OTEL still passes its own tests). `WatchtowerConfig` schema added to `internal/config/config.go` with default-expansion and validation tests. `wtp_*` metrics registered with `internal/metrics.Collector`. |
-| 4a | **Proto scaffolding** | Phase 3 done. | `proto/canyonroad/wtp/v1/wtp.proto` defined matching spec §7. Generated `wtp.pb.go` and `wtp_grpc.pb.go` committed. Smoke round-trip test passes. |
+| 4a-i | **Proto scaffolding** | Phase 3 done. | `proto/canyonroad/wtp/v1/wtp.proto` defined matching spec §7. Generated `wtp.pb.go` and `wtp_grpc.pb.go` committed. Smoke round-trip test passes. |
+| 4a-ii | **Schema stability + validators** | Phase 4a-i done. | Schema-stability policy recorded in spec (pre-1.0 unstable). Receiver-side validators in `proto/canyonroad/wtp/v1/validate.go` reject unset `EventBatch.body`, body/compression mismatch, COMPRESSION_UNSPECIFIED, HASH_ALGORITHM_UNSPECIFIED, and over-cap compressed payloads. Negative tests cover every rejection path. |
 | 4b | **Wire goldens** | Phase 4a done. | `proto/canyonroad/wtp/v1/testdata/*.bin` goldens generated by in-tree `cmd/gen-wire-goldens` and verified to round-trip in CI (`TestWireGoldens_RoundTrip`). |
 | 5 | **Chain helpers** | Phase 4 done. | `internal/store/watchtower/chain/` package: `EncodeCanonical`, `ComputeContextDigest`, `ComputeEventHash`. `chain/testdata/vectors.json` goldens published (cross-implementation conformance suite). All pure unit tests green. |
 | 6 | **Compact encoder + mapper interface** | Phase 5 done. | `compact.Mapper` interface defined. Stub mapper for unit tests only. Per-OCSF-class projection helpers tested against `compact/payload/testdata/*.json`. |
@@ -823,7 +849,7 @@ This section enumerates ordered milestones with one-line entry/exit criteria, sc
 | 11 | **Component + integration tests** | Phase 10 done. | The five-layer pyramid's component and integration rows pass: `TestStore_DropsMidBatchTriggersReplay`, `TestStore_ServerRestart_AcksCatchUp`, plus the testserver-driven scenario suite. |
 | 12 | **Daemon wiring** | Phase 11 done. | `cmd/agentsh` constructs a WTP `Store` when `audit.watchtower.enabled: true`, passes `WithMapper`, `WithMetrics`, `WithLogger`, `WithChainKey`. Manual end-to-end smoke test against `cmd/wtp-testserver` documented. |
 
-Phases 5/6/7/8 can be parallelized across contributors after Phase 4 (the proto definitions are the only shared dependency). Phases 1/2/3 are strict sequential prerequisites.
+Phases 5/6/7/8 can be parallelized across contributors after Phase 4b (the proto definitions are the only shared dependency). Phases 1/2/3 are strict sequential prerequisites.
 
 ## Risks
 
