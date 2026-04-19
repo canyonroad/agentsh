@@ -11936,19 +11936,22 @@ operator-facing breaking changes that earlier rounds missed:
    dropped. There is NO replacement label like
    `wtp_dropped_invalid_frame_total{reason="missing_chain"}` —
    inventing such a label would mis-document the new contract.
-   Operator-side, the symptom now surfaces through one of:
+   Operator-side, the symptom now surfaces through
    `wtp_reconnects_total{reason="..."}` (the existing reconnect
    family — receive-side reaction when the upstream caller closes the
-   stream in response to the propagated error),
-   `wtp_session_init_failures_total{reason="..."}`, or
-   `wtp_session_rotation_failures_total{reason="..."}` (the latter two
-   planned in Task 22a, Phase 8 — surfaced when the caller propagates
-   the error during the SessionInit/SessionUpdate handshake), and
-   operators with alerts/dashboards on `wtp_dropped_missing_chain_total`
-   MUST either delete the rule or redirect it to one of the
-   replacement families per Step 2 below. See spec §"Migration
-   guidance: removed `wtp_dropped_missing_chain_total`" for the
-   canonical redirection map.
+   stream in response to the propagated error), and operators with
+   alerts/dashboards on `wtp_dropped_missing_chain_total` MUST either
+   delete the rule or redirect it to the reconnect family (or to
+   `wtp_dropped_invalid_frame_total{reason=~"..."}` for broader
+   protocol-layer drop intent) per Step 2 below. The handshake-time
+   `wtp_session_init_failures_total{reason}` /
+   `wtp_session_rotation_failures_total{reason}` families (planned in
+   Task 22a, Phase 8) are NOT valid redirect targets — those families
+   fire only on context-digest UTF-8 failures during the
+   SessionInit/SessionUpdate handshake and have no defined emission
+   path from a propagated `compact.ErrMissingChain`. See spec
+   §"Migration guidance: removed `wtp_dropped_missing_chain_total`"
+   for the canonical redirection map.
 2. `wtp_dropped_invalid_frame_total{reason="unknown"}` was
    NARROWED. Pre-split, `unknown` was a catch-all that covered BOTH
    validator-emitted schema-drift cases AND defense-in-depth bypass
@@ -12042,23 +12045,23 @@ error per spec §"Migration guidance: removed
     elsewhere, see the next two options). Mark the row
     `migration_decision: delete` and capture the PR / change request
     link that removes the rule.
-  - **Redirect to reconnect / session-failure family**: the alert's
-    intent was to detect composite-store regressions. The new symptom
-    surfaces through one of three families depending on how the
-    upstream caller propagates `compact.ErrMissingChain`:
-    `wtp_reconnects_total{reason="..."}` (already exists in
-    `internal/metrics/wtp.go` — use this if the caller force-cycles
-    the stream and the receive loop reacts to the closed/erroring
-    stream),
-    `wtp_session_init_failures_total{reason="..."}`, or
-    `wtp_session_rotation_failures_total{reason="..."}` (the latter
-    two are planned in Task 22a, Phase 8 — use these if the caller
-    surfaces the error during the SessionInit/SessionUpdate
-    handshake). Mark the row
-    `migration_decision: redirect-session-failure` and capture the
-    new selector (with the specific reason label the caller emits and
-    which family was chosen) in the tracking artifact alongside the
-    PR / change request link.
+  - **Redirect to reconnect family**: the alert's intent was to
+    detect composite-store regressions. The new symptom surfaces
+    through `wtp_reconnects_total{reason="..."}` (already exists in
+    `internal/metrics/wtp.go`) when the upstream caller closes the
+    stream in response to the propagated `compact.ErrMissingChain`
+    and the receive loop reacts to the closed/erroring stream. Mark
+    the row `migration_decision: redirect-reconnect` and capture the
+    new selector (with the specific reason label the caller emits)
+    in the tracking artifact alongside the PR / change request link.
+    NOTE: do NOT redirect to
+    `wtp_session_init_failures_total{reason}` or
+    `wtp_session_rotation_failures_total{reason}` — those
+    handshake-time families have no defined emission path from
+    propagated `compact.ErrMissingChain` (they fire only on
+    context-digest UTF-8 failures during the
+    SessionInit/SessionUpdate handshake per spec §"Frame validation
+    and forward compatibility").
   - **Redirect to invalid-frame family**: the alert's intent was
     protocol-layer drops broadly. Use
     `wtp_dropped_invalid_frame_total{reason=~"..."}` with the
@@ -12142,8 +12145,18 @@ phasing → Rollout precondition") MUST verify:
   1. Every removed-metric reference is either deleted (PR merged AND
      deployed) or redirected (PR merged AND deployed); the migration
      MUST be live in the production monitoring environment, not
-     pending. No live alert or dashboard names
-     `wtp_dropped_missing_chain_total` after the preflight completes.
+     pending. Acceptable redirect targets are documented in spec
+     §"Migration guidance: removed `wtp_dropped_missing_chain_total`":
+     `wtp_reconnects_total{reason="..."}` for composite-store-regression
+     intent (the upstream caller closes the stream in response to the
+     propagated `compact.ErrMissingChain`), or
+     `wtp_dropped_invalid_frame_total{reason=~"..."}` for broader
+     protocol-layer drop intent. The handshake-time
+     `wtp_session_init_failures_total{reason}` /
+     `wtp_session_rotation_failures_total{reason}` families are NOT
+     valid redirect targets — see the spec for rationale. No live
+     alert or dashboard names `wtp_dropped_missing_chain_total` after
+     the preflight completes.
   2. Every `reason="unknown"` reference has an explicit decision AND
      the migration PR is MERGED AND DEPLOYED; the narrowed semantics
      are reflected in the live production alert/dashboard definitions.
