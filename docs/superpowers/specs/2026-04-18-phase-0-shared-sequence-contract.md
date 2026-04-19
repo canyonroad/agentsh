@@ -38,6 +38,9 @@ This contract solves both by introducing two distinct types and a transactional 
 | **Refactor of `audit.IntegrityChain`** | Preserved as a convenience wrapper that internally composes a `SequenceAllocator` + `SinkChain`. The existing `Wrap()` method is unchanged at the source level. | Single-sink callers (today's JSONL primary when not in composite) keep working without code changes. |
 | **Generation semantics** | Allocator owns generation; sequence resets to 0 on `NextGeneration()`. Each `SinkChain` resets its `prev_hash` to `""` when it first sees a new generation (signalled via the typed `Chain` field). | Matches WTP spec §6.4. Generation is a property of the shared allocator, not of any sink. |
 | **Per-sink `TransportLoss` doesn't perturb the shared sequence** | Sinks that drop locally emit their own marker. The allocator does not roll back. | The shared sequence reflects what the system *produced*, not what each sink *delivered*. |
+| **Allocator-error reporting** | A failure from `allocator.Next()` (in practice only `ErrSequenceOverflow`) is wrapped as `*store.FatalIntegrityError` with `Op == "audit sequence allocate"` and routed through `composite.SetAppendErrorHook`. The event is rejected before any sink runs. | Matches the convention used elsewhere in `internal/store/integrity_wrapper.go` (`Op: "write audit log"`, `Op: "sync audit log"`, `Op: "write audit integrity sidecar"`). The daemon's fatal-audit watcher (`internal/server/server.go`) only listens to hook-delivered `FatalIntegrityError`s; using the same routing means allocator overflow surfaces through the same operator path as every other fatal integrity event. |
+| **Composite rollover atomicity** | `composite.Store` holds a `sync.RWMutex`. `AppendEvent` takes the read lock for the duration of `allocator.Next()` AND the entire fanout. `NextGeneration` takes the write lock so it cannot return until every in-flight `AppendEvent` has completed AND no new `AppendEvent` may begin until the rotation finishes. `State`/`Restore` also take the write lock so the snapshot is consistent. | Without this, an in-flight `AppendEvent` could stamp `ev.Chain` with the OLD generation while a sink that has already rekeyed observes the NEW generation — exactly the backwards-generation race `SinkChain.Commit` is designed to reject. With the wrapper RWMutex, "all chained sinks roll on the same logical event boundary" is enforceable rather than aspirational. |
+| **Pre-write sequence semantics** | The shared sequence advances eagerly on every successful `allocator.Next()` call, regardless of whether any sink accepts the event. Allocator failures (overflow) consume no sequence and surface via the hook. | Matches `TransportLoss` semantics: the shared sequence reflects what the system PRODUCED, not what each sink DELIVERED. Per-sink drops do not perturb the allocator; pre-write allocator failures bypass fanout entirely so no per-sink loss marker is needed. |
 
 ## Typed `Chain` Field
 
@@ -118,25 +121,80 @@ package audit
 // SinkChain owns prev_hash for one sink. Each chained sink holds one.
 // It is keyed: the same (seq, gen, prev_hash, payload) under different keys
 // produces different entry_hash values, which is the entire point.
-type SinkChain struct { /* mu, key, algorithm, generation, prevHash */ }
+type SinkChain struct { /* mu, key, algorithm, generation, prevHash, fatal */ }
 
 func NewSinkChain(key []byte, algorithm string) (*SinkChain, error)
 
-// Compute computes the HMAC over (formatVersion, sequence, generation,
-// prev_hash, canonical_payload) using the chain's key. It is PURE: it does
-// not mutate prev_hash. The caller must follow with Commit on durable success
-// or discard the result on durable failure.
+// ComputeResult is the opaque, chain-bound token returned by
+// SinkChain.Compute and consumed by SinkChain.Commit. All fields are
+// unexported so callers cannot mutate or fabricate one outside the audit
+// package; EntryHash() and PrevHash() expose the values for serialization.
+// The result is identity-bound to the SinkChain instance that produced it
+// (chain pointer pinned at Compute time); only that same chain's Commit
+// will accept it. Commit enforces five invariants — nil result, post-fatal
+// commit, cross-chain misuse, backwards-generation, and stale-token (same-
+// generation prev_hash mismatch OR rollover-with-nonempty-prev) — with all
+// integrity-affecting violations latching fatal rather than silently
+// corrupting the chain.
 //
-// If generation differs from the chain's current generation, Compute treats
-// prev_hash as "" (chain rolls automatically). The transition is committed
-// only when Commit is called.
-func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32, payload []byte) (entryHash string, prevHash string, err error)
+// Lifecycle / serialization boundary: a ComputeResult is bound to the
+// in-memory SinkChain instance that produced it. It is NOT a durable
+// token — a SinkChain reconstructed via NewSinkChain + Restore is a new
+// instance and will reject prior tokens with ErrCrossChainResult. Compute
+// and Commit are designed to be co-located in a single process, with the
+// durable write of the integrity metadata happening between them.
+// EntryHash() and PrevHash() exist so that callers can persist the
+// integrity metadata alongside the payload for later VerifyHash; they are
+// NOT the input shape for reconstructing a Commit token across process
+// boundaries.
+type ComputeResult struct {
+    // unexported: entryHash, prevHash, sequence, generation, chain
+}
 
-// Commit advances prev_hash to entryHash. Must be called exactly once per
-// successful Compute, after the durable write succeeds. On ambiguous failure
-// (write may or may not have landed), the caller MUST call Fatal instead;
-// Commit and Fatal are mutually exclusive per Compute.
-func (c *SinkChain) Commit(generation uint32, entryHash string)
+// EntryHash returns the HMAC entry hash that should be persisted alongside
+// the payload for later integrity verification.
+func (r *ComputeResult) EntryHash() string
+
+// PrevHash returns the prev_hash the entry was chained against. For the
+// genesis entry of a chain or generation, this is "".
+func (r *ComputeResult) PrevHash() string
+
+// Compute computes the HMAC over (formatVersion, sequence, prev_hash,
+// canonical_payload) using the chain's key and returns it as an opaque,
+// chain-bound *ComputeResult. PURE: it does not mutate prev_hash. The
+// returned result is bound to this SinkChain instance — only Commit on
+// this same chain will accept it; cross-chain commits fail with
+// ErrCrossChainResult and latch the receiving chain fatal. The caller
+// must follow with Commit on durable success or discard the result on
+// durable failure.
+//
+// If generation differs from the chain's current generation, Compute
+// treats prev_hash as "" (chain rolls automatically). The transition is
+// committed only when Commit is called with the rollover result.
+func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32, payload []byte) (*ComputeResult, error)
+
+// Commit advances prev_hash using the result of a previous Compute on
+// this chain. Must be called exactly once per successful Compute, after
+// the durable write succeeds. On ambiguous failure, the caller MUST call
+// Fatal instead; Commit and Fatal are mutually exclusive per Compute.
+//
+// Four failure modes latch the chain Fatal and return a typed error
+// (callers use errors.Is to detect):
+//   - result.chain != c (ComputeResult was produced by a different
+//     SinkChain instance) → wraps ErrCrossChainResult. Checked FIRST so
+//     mixing tokens between chains always surfaces as cross-chain misuse,
+//     not as a downstream invariant violation. Latches the receiving
+//     chain only; the producing chain is unaffected.
+//   - result.generation < c.generation → wraps ErrBackwardsGeneration.
+//   - result.generation == c.generation but result.PrevHash() != c.prevHash
+//     (stale token: a prior Commit advanced prev_hash) → wraps ErrStaleResult.
+//   - result.generation > c.generation but result.PrevHash() != "" (rollover
+//     results MUST have empty prev_hash) → wraps ErrStaleResult.
+//
+// nil result returns an error WITHOUT latching fatal (caller bug, not an
+// integrity event). Calling Commit on an already-fatal chain returns
+// ErrFatalIntegrity.
+func (c *SinkChain) Commit(result *ComputeResult) error
 
 // Fatal latches the chain in an unrecoverable state. All subsequent Compute
 // calls return ErrFatalIntegrity. Used when a durable write returned an
@@ -144,20 +202,29 @@ func (c *SinkChain) Commit(generation uint32, entryHash string)
 // whether the entry was persisted, so we cannot safely continue chaining.
 func (c *SinkChain) Fatal(reason error)
 
-// State returns (generation, prev_hash) for persistence.
-func (c *SinkChain) State() ChainState
+// State returns (generation, prev_hash, fatal) for persistence. Fatal is
+// included so a chain that latched before a restart comes back latched.
+func (c *SinkChain) State() SinkChainState
 
-// Restore restores chain state after restart.
-func (c *SinkChain) Restore(generation uint32, prevHash string)
+// Restore restores chain state after restart. Validates prev_hash against
+// the algorithm's expected hex length; rejects malformed input without
+// mutating the chain.
+func (c *SinkChain) Restore(generation uint32, prevHash string, fatal bool) error
 
-type ChainState struct {
+type SinkChainState struct {
     Generation uint32
     PrevHash   string
+    Fatal      bool
 }
 
 var (
-    ErrFatalIntegrity   = errors.New("integrity chain latched fatal; sink must be reinitialized")
-    ErrMissingChainState = errors.New("event missing Chain field; composite did not stamp it")
+    ErrFatalIntegrity      = errors.New("integrity chain latched fatal; sink must be reinitialized")
+    ErrMissingChainState   = errors.New("event missing Chain field; composite did not stamp it")
+    ErrInvalidChainState   = errors.New("invalid sink chain state")
+    ErrBackwardsGeneration = errors.New("backwards-generation Commit: chain latched fatal")
+    ErrStaleResult         = errors.New("stale ComputeResult: caller committed against an obsolete chain head; chain latched fatal")
+    ErrCrossChainResult    = errors.New("ComputeResult bound to a different SinkChain")
+)
 )
 ```
 
@@ -168,63 +235,122 @@ The existing `Wrap()` is preserved verbatim as a convenience for single-sink cal
 ```go
 // IntegrityChain is the legacy single-sink composer of SequenceAllocator +
 // SinkChain. New code should use the two types directly via the composite
-// store's allocator and per-sink chains. Wrap() is preserved unchanged at the
-// source level for existing callers.
+// store's allocator and per-sink chains. Wrap/State/Restore are preserved
+// at the source level for existing callers.
+//
+// Concurrency: Wrap, State, and Restore are serialized by an internal
+// mutex so the wrapper preserves the legacy single-mutex atomicity
+// contract. KeyFingerprint, VerifyHash, and VerifyWrapped do NOT take the
+// wrapper mutex (they read immutable fields via the chain's own mutex).
 type IntegrityChain struct {
+    mu    sync.Mutex
     alloc *SequenceAllocator
     chain *SinkChain
 }
 
 func (c *IntegrityChain) Wrap(payload []byte) ([]byte, error) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
     seq, gen, err := c.alloc.Next()
     if err != nil { return nil, err }
     canonical := canonicalize(payload)
-    entry, prev, err := c.chain.Compute(IntegrityFormatVersion, seq, gen, canonical)
+    result, err := c.chain.Compute(IntegrityFormatVersion, seq, gen, canonical)
     if err != nil { return nil, err }
     wrapped := buildJSON(payload, IntegrityMetadata{
         FormatVersion: IntegrityFormatVersion,
         Sequence:      seq,
-        PrevHash:      prev,
-        EntryHash:     entry,
+        PrevHash:      result.PrevHash(),
+        EntryHash:     result.EntryHash(),
     })
-    c.chain.Commit(gen, entry)
+    if err := c.chain.Commit(result); err != nil {
+        return nil, err
+    }
     return wrapped, nil
+}
+
+func (c *IntegrityChain) State() ChainState {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    a := c.alloc.State()
+    s := c.chain.State()
+    return ChainState{Sequence: a.Sequence, PrevHash: s.PrevHash}
+}
+
+func (c *IntegrityChain) Restore(sequence int64, prevHash string) error {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    // All-or-nothing: snapshot allocator, advance it, then attempt chain
+    // restore. If chain restore rejects the prevHash, roll the allocator
+    // back to its pre-call snapshot. Both component Restores validate
+    // their input before mutating, so rolling back to a State() snapshot
+    // cannot itself fail.
+    prevAlloc := c.alloc.State()
+    if err := c.alloc.Restore(AllocatorState{Sequence: sequence, Generation: 0}); err != nil {
+        return fmt.Errorf("restore allocator: %w", err)
+    }
+    if err := c.chain.Restore(0, prevHash, false); err != nil {
+        _ = c.alloc.Restore(prevAlloc) // rollback; cannot fail
+        return fmt.Errorf("restore chain: %w", err)
+    }
+    return nil
 }
 ```
 
 For single-sink callers, durable success is implicit (Wrap returns the bytes; the caller writes them; if the write fails the caller never calls Wrap again on the same record). The single-sink case does not need the Compute/Commit split exposed because there is no fanout — but composite-mode callers absolutely do.
 
+**Wrapper-level atomicity contract.** `IntegrityChain` holds a single `sync.Mutex` around `Wrap`, `State`, and `Restore`. This preserves the legacy single-mutex contract verbatim, even though the internals now compose two independently-locked components:
+
+- **Concurrent `Wrap` calls serialize.** Two callers cannot interleave `alloc.Next()` from one with `chain.Compute()` / `chain.Commit()` from another, so chained sequences cannot end up linked to the wrong predecessor and the wrapper cannot latch fatal via `ErrStaleResult` from a benign concurrent caller.
+- **`State` returns a consistent snapshot.** `(sequence, prev_hash)` is always observed at the same point in the chain — never a torn read where one value is from a Wrap that has not finished committing.
+- **`Restore` is all-or-nothing.** If either the allocator or the chain rejects its input, the wrapper is left in its pre-call state. Implementation snapshots the allocator before mutating and rolls it back on chain-restore failure; the rollback restores a value that came from `State()` and therefore satisfies the allocator's `Sequence >= -1` invariant by construction.
+
+`KeyFingerprint`, `VerifyHash`, and `VerifyWrapped` do NOT take the wrapper mutex. They read immutable key/algorithm material via the underlying `SinkChain`'s own mutex (`keyAndAlgorithm()`) and have no need for wrapper-level serialization. Adding the wrapper mutex there would be a lock-ordering risk and serves no purpose.
+
+
 ### `internal/store/composite/composite.go` — allocate + stamp + fanout
 
 ```go
 type Store struct {
+    mu            sync.RWMutex                 // wrapper-level rotation lock
     primary       store.EventStore
     output        store.OutputStore
     others        []store.EventStore
-    allocator     *audit.SequenceAllocator   // NEW: shared allocator
+    allocator     *audit.SequenceAllocator     // shared allocator
     onAppendError func(error)
 }
 
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
+    s.mu.RLock()
+    defer s.mu.RUnlock()
+
     // Phase 0: composite allocates the shared (seq, gen) before fanout.
     seq, gen, err := s.allocator.Next()
     if err != nil {
-        return err  // typically ErrSequenceOverflow; caller treats as fatal
+        // Allocator failures (overflow) bypass fanout entirely. Wrap as
+        // FatalIntegrityError + route through the hook so the daemon's
+        // fatal-audit watcher observes them, matching the convention in
+        // internal/store/integrity_wrapper.go.
+        fatalErr := &store.FatalIntegrityError{Op: "audit sequence allocate", Err: err}
+        if s.onAppendError != nil {
+            s.onAppendError(fatalErr)
+        }
+        return fatalErr
     }
-    ev.Chain = &types.ChainState{
-        Sequence:   uint64(seq),
-        Generation: gen,
+    stampForSink := func() types.Event {
+        stamped := ev
+        stamped.Chain = &types.ChainState{Sequence: uint64(seq), Generation: gen}
+        return stamped
     }
 
     // Fan out — each sink that chains computes its own hash; the others ignore.
     var firstErr, hookErr error
     if s.primary != nil {
-        if err := s.primary.AppendEvent(ctx, ev); err != nil {
+        if err := s.primary.AppendEvent(ctx, stampForSink()); err != nil {
             firstErr, hookErr = collectErr(firstErr, hookErr, err)
         }
     }
     for _, o := range s.others {
-        if err := o.AppendEvent(ctx, ev); err != nil {
+        if err := o.AppendEvent(ctx, stampForSink()); err != nil {
             firstErr, hookErr = collectErr(firstErr, hookErr, err)
         }
     }
@@ -236,13 +362,47 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 
 // NextGeneration is called by the composite owner (the daemon) when the
 // chain key rotates. All chained sinks observe the new generation on the
-// next event.
-func (s *Store) NextGeneration() uint32 {
+// next event. Acquires the wrapper write lock so the rotation cannot
+// interleave with any in-flight AppendEvent fanout.
+func (s *Store) NextGeneration() (uint32, error) {
+    s.mu.Lock()
+    defer s.mu.Unlock()
     return s.allocator.NextGeneration()
+}
+
+// State returns the allocator's (sequence, generation) for persistence.
+// Acquires the wrapper write lock so the snapshot reflects a state that
+// no AppendEvent fanout is partway through and no NextGeneration is
+// partway through.
+func (s *Store) State() audit.AllocatorState {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    return s.allocator.State()
+}
+
+// Restore rehydrates the allocator state after restart. Returns
+// audit.ErrInvalidAllocatorState on rejected input; the wrapper is not
+// modified in that case (delegated guarantee from
+// SequenceAllocator.Restore).
+func (s *Store) Restore(state audit.AllocatorState) error {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    return s.allocator.Restore(state)
 }
 ```
 
-The error-hook semantics (`onAppendError`, `FatalIntegrityError` detection) of the current composite are preserved verbatim; only the sequence-allocation step is added.
+The error-hook semantics (`onAppendError`, `FatalIntegrityError` detection) of the current composite are preserved verbatim; the only additions are the allocator integration, the wrapper RWMutex, and the State/Restore handles for future restart wiring.
+
+### Composite Concurrency Model
+
+`composite.Store` holds a single `sync.RWMutex` that is the outermost lock in the package. The lock has four discipline points:
+
+- **`AppendEvent` takes `mu.RLock()` for the entire stamp + fanout duration.** Concurrent `AppendEvent` calls do NOT serialize against each other — the read lock is shared — so the high-throughput hot path retains its concurrency. They DO serialize against `NextGeneration`, `State`, and `Restore`.
+- **`NextGeneration` takes `mu.Lock()`.** It cannot return until every in-flight `AppendEvent` (each holding `mu.RLock()`) has completed its fanout, AND no new `AppendEvent` may begin until the rotation finishes. After return, every subsequent `AppendEvent` stamps the new generation; there is no window where a stamped `(seq, oldGen)` event can race against sink rekeying.
+- **`State` and `Restore` take `mu.Lock()`** so a snapshot is consistent (no partial fanout, no partial rotation) and a restore lands cleanly.
+- **The shared sequence advances eagerly: a successful `allocator.Next()` consumes a sequence even if every sink rejects the event.** This matches `TransportLoss` semantics — the shared sequence reflects what the system PRODUCED, not what each sink DELIVERED. A pre-write allocator overflow is the one exception: it consumes no sequence, surfaces as `*store.FatalIntegrityError{Op: "audit sequence allocate"}`, and is routed through `onAppendError` so the daemon's fatal-audit watcher observes it (matching the convention in `internal/store/integrity_wrapper.go`).
+
+Lock order is always `composite.mu` (outer) → `allocator.mu` (inner). The allocator never calls back into the composite, so there is no deadlock potential. This matches the wrapper-level mutex discipline established for `audit.IntegrityChain` in commit 915251c7.
 
 ### Sink integration — the transactional pattern
 
@@ -255,8 +415,9 @@ func (s *MySink) AppendEvent(ctx context.Context, ev types.Event) error {
     }
     canonical := s.encode(ev)
 
-    // Step 1: pure compute — no chain mutation yet.
-    entryHash, prevHash, err := s.chain.Compute(
+    // Step 1: pure compute — no chain mutation yet. Returns a typed
+    // *ComputeResult that Commit will validate.
+    result, err := s.chain.Compute(
         formatVersion, int64(ev.Chain.Sequence), ev.Chain.Generation, canonical,
     )
     if err != nil {
@@ -264,11 +425,15 @@ func (s *MySink) AppendEvent(ctx context.Context, ev types.Event) error {
     }
 
     // Step 2: durable write. Failure modes split three ways.
-    werr := s.writeDurable(canonical, entryHash, prevHash)
+    werr := s.writeDurable(canonical, result.EntryHash(), result.PrevHash())
     switch {
     case werr == nil:
-        // Step 3a: clean success → commit.
-        s.chain.Commit(ev.Chain.Generation, entryHash)
+        // Step 3a: clean success → commit. A non-nil error from Commit means
+        // the chain just latched fatal (backwards generation, stale token, or
+        // rollover-with-nonempty-prev) and must be surfaced to the caller.
+        if err := s.chain.Commit(result); err != nil {
+            return err
+        }
         return nil
 
     case errors.Is(werr, errCleanFailure):
@@ -298,10 +463,13 @@ When the composite owner rotates the chain key:
 
 1. Owner calls `composite.NextGeneration()` → returns new generation.
 2. Next `AppendEvent` call allocates `(seq=0, gen=new)`.
-3. Each chained sink observes `ev.Chain.Generation` differs from its `SinkChain.State().Generation`. `SinkChain.Compute` automatically uses `prev_hash = ""` for the new generation and returns the rollover indicator via `prevHash == ""`. `Commit` records the new generation.
+3. Each chained sink observes `ev.Chain.Generation` differs from its `SinkChain.State().Generation`. `SinkChain.Compute` automatically uses `prev_hash = ""` for the new generation and returns a `*ComputeResult` whose `PrevHash()` is `""` — the rollover signal. `Commit(result)` records the new generation.
 4. Per-sink work (e.g., WTP forces a batch flush + WAL segment roll + `SessionUpdate`) is triggered by the sink observing the generation change in `ev.Chain.Generation`.
 
 Generation is a property of the *shared allocator*, not of any individual sink. All sinks roll on the same logical event boundary — the first event with the new generation.
+
+**Enforcement.** The "same logical event boundary" guarantee is enforceable, not aspirational, because of the wrapper RWMutex on `composite.Store` (see *Composite Concurrency Model* above): `NextGeneration` takes the write lock and waits for every in-flight `AppendEvent` (each holding the read lock) to complete its fanout before advancing the allocator. After `NextGeneration` returns, every subsequent `AppendEvent` stamps the new generation. Without this lock, a stamped `(seq, oldGen)` event could race against sink rekeying and a sink that had already rotated would observe a backwards-generation event — exactly the failure mode `SinkChain.Commit` is designed to reject.
+
 
 ## TransportLoss Semantics
 

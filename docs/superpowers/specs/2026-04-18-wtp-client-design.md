@@ -129,14 +129,20 @@ watchtower.Store.AppendEvent(ctx, ev)
   │ 3. canonicalize → bytes for hashing
   │
   │ 4. SinkChain.Compute(formatVersion, seq, gen, payload)
-  │      → (entryHash, prevHash) — PURE, no chain mutation
+  │      → *ComputeResult (opaque, chain-bound; EntryHash() and
+  │        PrevHash() accessors expose values for serialization;
+  │        sequence, generation, chain pointer tracked internally for
+  │        Commit-time validation)
+  │        PURE, no chain mutation
   │
   │ 5. wal.Append(seq, gen, record_bytes)
   │      → (a) clean failure: return err, no Commit, chain unchanged
   │      → (b) ambiguous failure: SinkChain.Fatal(err); return ErrFatalIntegrity
   │      → (c) success: continue
   │
-  │ 6. SinkChain.Commit(gen, entryHash) — chain advances
+  │ 6. SinkChain.Commit(result) — chain advances; non-nil error means the
+  │      chain just latched fatal (backwards generation, stale token, or
+  │      rollover-with-nonempty-prev) and must be surfaced
   │
   │ 7. transport.Notify() → wake transport goroutine (non-blocking)
   │
