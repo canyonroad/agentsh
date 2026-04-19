@@ -6323,6 +6323,8 @@ six invariants:
 - Modify: `proto/canyonroad/wtp/v1/validate.go` (Step 4 — add `ValidationReason` enum (including `ReasonUnknown` for the forward-compat unknown-oneof case), `AllValidationReasons() []ValidationReason` copy-returning getter (consumed by Task 22a Step 4 parity test; getter form, not a mutable exported slice), and `ValidationError` typed classifier so receivers consume `errors.As(err, &ve)` instead of grepping the validator's formatted message; `ValidationError.Error()` returns ONLY the Reason string per spec §"Invalid-frame log sanitization" defense-in-depth rule; ValidateEventBatch and ValidateSessionInit MUST return `*ValidationError` for every failure path including the forward-compat unknown-oneof case)
 - Test: `proto/canyonroad/wtp/v1/validate_reason_test.go` (table-driven coverage that each input maps to its enum constant; `errors.As` and `errors.Is(err, ErrInvalidFrame)` both work)
 
+**Prerequisites:** Task 22a Step 4 (the metrics-side `WTPInvalidFrameReason` enum + the `MetricsOnlyReasons()` getter, defined in `internal/metrics/wtp.go`) MUST be completed before Task 17 Step 4a executes — Step 4a's receiver wiring snippet uses `metrics.WTPInvalidFrameReasonClassifierBypass` and `metrics.WTPInvalidFrameReason(...)` cast, both of which depend on those constants existing in the `metrics` package. If executing the plan strictly in numeric order, jump to Task 22a Step 4 (define the `WTPInvalidFrameReason` enum + the validator-shared and metrics-only getter helpers), commit, then return to Task 17 Step 4a. The dependency is one-way: Task 17 Step 4 (the proto-side `ValidationReason` enum + `AllValidationReasons()` getter) is the input to Task 22a's parity test, but Task 17 Step 4a is the consumer of Task 22a's enum, so Step 4a is the step that blocks on Task 22a — Steps 1–4 of Task 17 do not.
+
 - [ ] **Step 1: Write the failing tests for each invariant**
 
 Create `internal/store/watchtower/transport/batcher_test.go`:
@@ -6849,10 +6851,14 @@ This test is a REQUIRED acceptance step for Task 17 Step 4 — the unknown-oneof
 // enumerated reasons in spec §Metrics; adding a new validator branch
 // requires adding a new ValidationReason constant AND adding the
 // matching label to internal/metrics' WTPInvalidFrameReason enum (Task
-// 22a). Note: `decompress_error` is NOT a ValidationReason — it is a
-// metrics-only reason emitted by the streaming-decompression code
-// downstream of the validator, with no proto-side counterpart (see spec
-// §"Frame validation and forward compatibility").
+// 22a). Note: `decompress_error` and `classifier_bypass` are NOT
+// ValidationReasons — both are metrics-only reasons (see Task 22a
+// overview): `decompress_error` is emitted by the streaming-decompression
+// code downstream of the validator, and `classifier_bypass` is emitted by
+// the receiver-side defense-in-depth `errors.As`-false guard and by the
+// metrics-side invalid-label collapse. Neither has a proto-side
+// counterpart by definition (see spec §"Frame validation and forward
+// compatibility").
 type ValidationReason string
 
 const (
@@ -7033,6 +7039,8 @@ func ValidateSessionInit(s *SessionInit) error {
 This step is a small but real Go-code change — doc-only rounds (such as round 6) MUST NOT touch `validate.go`; the actual edit happens during Task 17 execution.
 
 - [ ] **Step 4a: Inbound frame validation acceptance**
+
+**Prerequisite (mirrors the task-level Prerequisites note above):** Task 22a Step 4 MUST be completed before this step executes. The receiver wiring snippet below references `metrics.WTPInvalidFrameReasonClassifierBypass` and `metrics.WTPInvalidFrameReason(...)` — both are defined in Task 22a Step 4 (`internal/metrics/wtp.go`). If Task 22a has not landed yet, jump to it now, complete Step 4 (define the `WTPInvalidFrameReason` enum + the `MetricsOnlyReasons()`/`ValidationReasons()` getters), commit, and return here. The compiler will surface the dependency as `undefined: metrics.WTPInvalidFrameReasonClassifierBypass` if Step 4a is attempted first.
 
 The Live state (and any other receive site introduced in Phase 8) MUST honor the spec's "Frame validation and forward compatibility" contract for every inbound `ServerMessage`. Acceptance criteria:
 
@@ -8977,7 +8985,7 @@ The spec lists five sink-failure counters that Task 23 (`AppendEvent`) and Phase
 - `wtp_dropped_sequence_overflow_total` (counter): a record was dropped because `ev.Chain.Sequence > math.MaxInt64`. Wired by `AppendEvent` (Task 23).
 - `wtp_dropped_invalid_frame_total{reason}` (counter, labeled): a peer frame was dropped at the protocol-validation boundary. The reason set splits into two disjoint categories:
   - **Validator-emitted reasons** (proto-side `wtpv1.ValidationReason` constants returned by `ValidateEventBatch`/`ValidateSessionInit` as `*ValidationError`): `event_batch_body_unset`, `event_batch_compression_unspecified`, `event_batch_compression_mismatch`, `session_init_algorithm_unspecified`, `payload_too_large`, and `unknown` (forward-compat catch-all for new oneof discriminators added to the proto schema before the validator switch is updated; the validator returns `&ValidationError{Reason: ReasonUnknown}` rather than a bare `fmt.Errorf` — see Task 17 Step 4). These reasons MUST appear in BOTH `wtpv1.ValidationReason` and `WTPInvalidFrameReason` with byte-equal string values; the parity test (Step 4 below) enforces exact set equality.
-  - **Metrics-only reasons** (no proto-side counterpart): `decompress_error` — emitted by the streaming-decompression code downstream of `ValidateEventBatch` when zstd/gzip framing fails or `MaxDecompressedBatchBytes` is exceeded.
+  - **Metrics-only reasons** (NOT validator-emitted; no proto-side counterpart): `decompress_error` (incremented by streaming-decompression code downstream of `ValidateEventBatch` when zstd/gzip framing fails or `MaxDecompressedBatchBytes` is exceeded) and `classifier_bypass` (incremented by the defense-in-depth path when a non-`*ValidationError` is encountered by the receiver-side `errors.As`-false guard, OR when an invalid label string is passed to `IncDroppedInvalidFrame` and collapsed by the metrics-side invalid-label guard — see Step 4 below for both code paths and the WARN log emitted on the metrics-side collapse).
 
   The Go-side label values come from `wtpv1.ValidationReason` constants for the validator-emitted reasons (added in Task 17 Step 4); a future receiver consumes `errors.As(err, &ve)` and increments using `WTPInvalidFrameReason(ve.Reason)`. Wired by transport / receivers in Phase 8 — specifically Task 17 Step 4a, where the Live state's inbound `ServerMessage` handling increments this counter and triggers the `stream_recv_error` reconnect path. Phase 9 (testserver) covers the symmetric server-side validation of inbound `ClientMessage` frames.
 - `wtp_session_init_failures_total{reason}` (counter, labeled): an in-band session-init step failed; reason `invalid_utf8` is the only enumerated value today, with `unknown` as the catch-all. Wired by transport in Phase 8.
@@ -9036,7 +9044,7 @@ Task 3 already executed and was committed; these counters were not in scope at t
 
 - [ ] **Step 1: Write the failing tests**
 
-Append five new test functions to `internal/metrics/wtp_test.go` (mirror the existing pattern from Task 3):
+Append the new test functions below to `internal/metrics/wtp_test.go` (mirror the existing pattern from Task 3). The full list (ten functions) covers the five sink-failure counters added in this task PLUS the `wtp_dropped_invalid_frame_total{reason}` always-emit zero-init, the validator-emitted-vs-metrics-only label coverage, and the `IncDroppedInvalidFrame` invalid-label collapse + WARN log path. The new test `TestIncDroppedInvalidFrame_InvalidLabelLogsAndCollapses` requires `bytes` and `log/slog` imports (the existing test file does not yet pull them in — add them at the top of the file alongside the existing `httptest`/`strings`/`testing` imports):
 
 ```go
 func TestWTPMetrics_DroppedInvalidUTF8(t *testing.T) {
@@ -9288,11 +9296,60 @@ func TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons(t *testing.T) {
 		t.Errorf("invalid reason leaked through validator into output:\n%s", body)
 	}
 }
+
+// TestIncDroppedInvalidFrame_InvalidLabelLogsAndCollapses asserts that
+// IncDroppedInvalidFrame emits a single WARN-level structured log on the
+// invalid-label collapse path AND increments the metric under
+// classifier_bypass. The log line MUST include `raw_reason` (the offending
+// caller-supplied string) so operators paged on classifier_bypass can grep
+// recent WARN logs to identify the offending callsite. Pairs with the
+// receiver-side `non-typed frame validation error` WARN log emitted by
+// Task 17 Step 4a's defense-in-depth guard — together they cover both
+// classifier_bypass code paths per spec §"Operator runbook".
+func TestIncDroppedInvalidFrame_InvalidLabelLogsAndCollapses(t *testing.T) {
+	// Capture slog output via a buffer-backed handler so we can assert
+	// exactly one WARN entry was emitted. Restore the previous default
+	// logger on cleanup so other tests are not affected.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	c := New()
+	const badRaw = "not-a-canonical-reason"
+	c.WTP().IncDroppedInvalidFrame(WTPInvalidFrameReason(badRaw))
+
+	// (1) Metric incremented under classifier_bypass (NOT under "unknown" or
+	// the bad raw value).
+	if got := c.WTP().DroppedInvalidFrame(WTPInvalidFrameReasonClassifierBypass); got != 1 {
+		t.Errorf("DroppedInvalidFrame(classifier_bypass) = %d, want 1", got)
+	}
+	if got := c.WTP().DroppedInvalidFrame(WTPInvalidFrameReasonUnknown); got != 0 {
+		t.Errorf("DroppedInvalidFrame(unknown) = %d, want 0 (must NOT collapse to unknown)", got)
+	}
+
+	// (2) Exactly one WARN entry was emitted with the expected message and
+	// raw_reason field. The handler emits one JSON object per log call, so
+	// counting newlines tells us exactly one entry was captured.
+	logOutput := buf.String()
+	if want := "invalid invalid-frame reason label"; !strings.Contains(logOutput, want) {
+		t.Errorf("expected WARN log message %q in captured log output\nlog:\n%s", want, logOutput)
+	}
+	if want := `"raw_reason":"` + badRaw + `"`; !strings.Contains(logOutput, want) {
+		t.Errorf("expected raw_reason field %q in captured log output\nlog:\n%s", want, logOutput)
+	}
+	if want := `"reason":"classifier_bypass"`; !strings.Contains(logOutput, want) {
+		t.Errorf("expected reason=classifier_bypass field in captured log output\nlog:\n%s", want, logOutput)
+	}
+	if got := strings.Count(strings.TrimRight(logOutput, "\n"), "\n") + 1; got != 1 {
+		t.Errorf("expected exactly one WARN log entry, got %d\nlog:\n%s", got, logOutput)
+	}
+}
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `go test ./internal/metrics/ -run "TestWTPMetrics_DroppedInvalidUTF8|TestWTPMetrics_DroppedSequenceOverflow|TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons|TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons|TestWTPMetrics_SessionFailureReasonValidationAndEscape|TestWTPMetrics_DroppedInvalidMapper|TestWTPMetrics_DroppedInvalidTimestamp|TestWTPMetrics_DroppedMapperFailure|TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons"`
+Run: `go test ./internal/metrics/ -run "TestWTPMetrics_DroppedInvalidUTF8|TestWTPMetrics_DroppedSequenceOverflow|TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons|TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons|TestWTPMetrics_SessionFailureReasonValidationAndEscape|TestWTPMetrics_DroppedInvalidMapper|TestWTPMetrics_DroppedInvalidTimestamp|TestWTPMetrics_DroppedMapperFailure|TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons|TestIncDroppedInvalidFrame_InvalidLabelLogsAndCollapses"`
 Expected: FAIL with `IncDroppedInvalidUTF8 undefined`, `WTPSessionFailureReason undefined`, `IncDroppedInvalidMapper undefined`, `IncDroppedMapperFailure undefined`, `WTPInvalidFrameReason undefined`, etc.
 
 - [ ] **Step 3: Implement — extend `internal/metrics/wtp.go`**
@@ -9524,11 +9581,35 @@ func (w *WTPMetrics) DroppedMapperFailure() uint64 {
 // spec §"Operator runbook"; an invalid label value passed by a caller is
 // a metrics-side defect indicator, NOT validator-side schema drift) so
 // the labeled family stays at a fixed cardinality.
+//
+// On the invalid-label collapse path the function ALSO emits a WARN-
+// level structured log (`slog.Default()`) with the offending raw_reason
+// string so operators paged on `classifier_bypass` can identify which
+// callsite passed the bad label. The raw_reason is internal — caller-
+// controlled, NEVER peer-derived — so it is safe to log verbatim per
+// spec §"Operator runbook" and the invalid-frame log sanitization rule.
+// This complements the receiver-side WARN log (`non-typed frame
+// validation error`) emitted by Task 17 Step 4a's defense-in-depth
+// guard; together the two messages let operators grep for either
+// `err_type` (receiver path) or `raw_reason` (metrics path) when
+// triaging a `classifier_bypass` increment.
 func (w *WTPMetrics) IncDroppedInvalidFrame(reason WTPInvalidFrameReason) {
 	if w == nil || w.c == nil {
 		return
 	}
 	if _, ok := wtpInvalidFrameReasonsValid[reason]; !ok {
+		// Defense-in-depth: caller passed a label string that is not in
+		// the canonical WTPInvalidFrameReason enum. Collapse to
+		// classifier_bypass and emit a WARN log so operators paged on
+		// classifier_bypass can identify the offending callsite via the
+		// `raw_reason` field. slog.Default() is used (not a per-collector
+		// logger) because WTPMetrics has no plumbed logger today and this
+		// path SHOULD never trigger in production — adding a logger field
+		// would be over-engineered for a permanently-zero counter.
+		slog.Warn("invalid invalid-frame reason label",
+			slog.String("raw_reason", string(reason)),
+			slog.String("reason", string(WTPInvalidFrameReasonClassifierBypass)),
+		)
 		reason = WTPInvalidFrameReasonClassifierBypass
 	}
 	ptr, _ := w.c.wtpDroppedInvalidFrameByReason.LoadOrStore(string(reason), &atomic.Uint64{})
@@ -9553,6 +9634,8 @@ func (w *WTPMetrics) DroppedInvalidFrame(reason WTPInvalidFrameReason) uint64 {
 ```
 
 Note: `IncDroppedInvalidUTF8`, `IncDroppedSequenceOverflow`, `IncDroppedInvalidMapper`, `IncDroppedInvalidTimestamp`, and `IncDroppedMapperFailure` take a `uint64` for symmetry with the existing `IncEventsAppended(n uint64)` family — a callsite that drops one record passes 1; tests can preload arbitrary values. `IncDroppedInvalidFrame`, `IncSessionInitFailures`, and `IncSessionRotationFailures` take a typed reason instead and always increment by 1, matching `wtp_reconnects_total` — labeled families never need callsite-batched increments.
+
+Imports note: the WARN log emission in `IncDroppedInvalidFrame` requires the `log/slog` import in `internal/metrics/wtp.go` (the file does not currently import it). Add `"log/slog"` to the import block alongside the existing `fmt`, `io`, `sync/atomic`, and `time` entries when implementing this step. The WARN log uses `slog.Default()` rather than a per-collector logger because (a) `WTPMetrics` has no plumbed logger today, (b) this code path SHOULD never trigger in production (the counter is permanently zero in healthy code), and (c) introducing a logger field for a single never-fires path would be over-engineered. The test harness in Step 1's `TestIncDroppedInvalidFrame_InvalidLabelLogsAndCollapses` swaps `slog.Default()` to a buffer-backed JSON handler and restores it on cleanup so other tests are unaffected.
 
 Update `emitWTPMetrics` (in `internal/metrics/wtp.go`) — append eight new sections just before the histogram block, and (per Step 3.5 below) DELETE the existing Task 3 emit block for `wtp_dropped_missing_chain_total`. The five unlabeled counters are simple; the three labeled families follow the always-emit contract used by `wtp_reconnects_total`:
 
@@ -9648,6 +9731,8 @@ If a callsite outside `internal/metrics` invokes `IncDroppedMissingChain`, the b
 
 - [ ] **Step 4: Enum parity check (validator vs metrics)**
 
+**Cross-task scheduling note (back-reference to Task 17 Step 4a):** This step's enum and getter helpers (`WTPInvalidFrameReason`, `WTPInvalidFrameReasonClassifierBypass`, `MetricsOnlyReasons()`, `ValidationReasons()`) are consumed by Task 17 Step 4a (the receiver-side defense-in-depth wiring snippet). Schedule Task 22a Step 4 BEFORE Task 17 Step 4a executes; the dependency is one-way (Task 22a's parity test consumes `wtpv1.AllValidationReasons()` from Task 17 Step 4, but that does NOT block Task 22a Step 4's own definition of the metrics-side enum — the parity test just won't pass until both Step 4s have landed). Task 17's Prerequisites section calls out this ordering for implementers following the plan strictly in order.
+
 The proto-side `wtpv1.ValidationReason` enum (Task 17 Step 4) and the metrics-side `WTPInvalidFrameReason` enum (defined above in this task) are intentionally duplicated string sets — the metrics package does NOT import the proto package, but the string values for validator-emitted reasons MUST stay byte-equal so that `WTPInvalidFrameReason(ve.Reason)` always lands in `wtpInvalidFrameReasonsValid`. Without an enforcement mechanism the two enums will drift silently the first time someone adds a reason to one side and forgets the other. The metrics-only `decompress_error` and `classifier_bypass` reasons are intentionally NOT mirrored on the proto side (the former is emitted downstream of the validator by streaming decompression; the latter is emitted only by the receiver-side defense-in-depth fallback and by definition has no validator counterpart).
 
 Add a Go test `TestWTPInvalidFrameReason_ParityWithValidator` to a NEW file `internal/metrics/wtp_parity_test.go` (NOT to the existing `internal/metrics/wtp_test.go`) declared as **`package metrics_test`** (external test package), asserting FOUR invariants in one test function. The file MUST be a NEW file and MUST be an external test package — do NOT merge into `wtp_test.go` — because:
@@ -9695,8 +9780,11 @@ Test snippet:
 // import the proto package) but the string values for validator-emitted
 // reasons MUST stay byte-equal so receivers can do
 // `metrics.WTPInvalidFrameReason(ve.Reason)` safely. The metrics-only
-// `decompress_error` reason is intentionally NOT mirrored on the proto
-// side (it is emitted post-validator by streaming decompression).
+// `decompress_error` and `classifier_bypass` reasons are intentionally NOT
+// mirrored on the proto side (the former is emitted post-validator by
+// streaming decompression; the latter is emitted only by the receiver-
+// side defense-in-depth fallback and by the metrics-side invalid-label
+// collapse, neither of which has a validator counterpart by definition).
 //
 // Adding a new reason in either package without the other will fail this
 // test with a precise actionable message.
@@ -9831,7 +9919,7 @@ This step is doc-only spec for Task 22a — the actual Go-code parity test lands
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `go test ./internal/metrics/...`
-Expected: PASS — all existing tests + the nine new tests added in Step 1 (`TestWTPMetrics_DroppedInvalidUTF8`, `TestWTPMetrics_DroppedSequenceOverflow`, `TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons`, `TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons`, `TestWTPMetrics_SessionFailureReasonValidationAndEscape`, `TestWTPMetrics_DroppedInvalidMapper`, `TestWTPMetrics_DroppedInvalidTimestamp`, `TestWTPMetrics_DroppedMapperFailure`, `TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons`) plus the parity test `TestWTPInvalidFrameReason_ParityWithValidator` added in Step 4. The legacy `TestWTPMetrics_AppendAndExpose` test from Task 3 has its `wtp_dropped_missing_chain_total` reference removed per Step 3.5.
+Expected: PASS — all existing tests + the ten new tests added in Step 1 (`TestWTPMetrics_DroppedInvalidUTF8`, `TestWTPMetrics_DroppedSequenceOverflow`, `TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons`, `TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons`, `TestWTPMetrics_SessionFailureReasonValidationAndEscape`, `TestWTPMetrics_DroppedInvalidMapper`, `TestWTPMetrics_DroppedInvalidTimestamp`, `TestWTPMetrics_DroppedMapperFailure`, `TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons`, `TestIncDroppedInvalidFrame_InvalidLabelLogsAndCollapses`) plus the parity test `TestWTPInvalidFrameReason_ParityWithValidator` added in Step 4. The legacy `TestWTPMetrics_AppendAndExpose` test from Task 3 has its `wtp_dropped_missing_chain_total` reference removed per Step 3.5.
 
 - [ ] **Step 6: Cross-compile check**
 
