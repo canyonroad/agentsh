@@ -324,6 +324,10 @@ Positive-vector `input` objects also use the canonical snake_case wire keys (e.g
 
 **Compatibility:** when v2 ships, v1 must keep working alongside it for at least one minor release. New harness implementations supporting only v2 are not WTP-conformant until they also accept v1.
 
+**Unknown-field policy.** Both the v1 (bare-array) and v2+ (envelope) loader paths reject unknown fields — at the envelope level (`schema_version`, `vectors` are the only accepted keys) and at the per-entry level (every key on a `vectorEntry` must be one the harness recognizes). Implementations MUST configure their JSON decoder to fail on unknown fields (e.g., `dec.DisallowUnknownFields()` in Go) on every decode in the loader so that typos and forward-incompatible vectors fail loudly rather than being silently dropped. This complements the strict envelope `schema_version` check above with the same fail-closed posture at the entry level.
+
+**Trailing content.** The loader MUST treat any non-whitespace content after the top-level JSON value (array or envelope) as a parse error. Both paths enforce this — `json.Unmarshal` natively rejects trailing data, and the envelope path additionally checks `dec.Decode(&struct{}{})` returns `io.EOF` after the envelope. This catches accidental concatenation and forward-incompatible streaming formats.
+
 #### Canonical-format versioning
 
 `IntegrityRecord.FormatVersion` is the canonical-encoding version. Any of the following changes MUST bump it in the same commit:
@@ -757,6 +761,9 @@ type Config struct {
 - `StateDir` is writeable.
 - `Batch.MaxBytes >= 4 KiB` (avoid pathological tiny batches).
 - `WAL.SegmentSize <= WAL.MaxTotalBytes / 2` (need room for at least 2 segments).
+- `len(HMACSecret) >= audit.MinKeyLength` (currently 32 bytes for HMAC-SHA256). Mirrors the audit package's precondition so a short key is rejected at watchtower-load time with a watchtower-shaped error rather than surfacing as a generic `audit.NewSinkChain` error mid-construction.
+
+**Watchtower validation vs audit as source of truth.** Watchtower's `Options.validate()` mirrors the audit package's preconditions (currently just `MinKeyLength`) so that misconfiguration is caught at watchtower-load time with watchtower-shaped errors, rather than surfacing as a generic audit error mid-construction. If audit's preconditions tighten in the future, watchtower's `validate()` must be updated to match — `audit` remains the canonical source of truth for chain invariants.
 
 ### Constructor
 
@@ -773,6 +780,8 @@ func WithChainKey(key []byte, fp string) Option // injected by composite (Phase 
 ```
 
 The host (the agentsh daemon) is responsible for building the `Store` with the right options. In tests we pass `WithDialer(testserver.NewDialer(...))` and skip TLS entirely.
+
+**Constructor lifecycle — chain init is a precheck.** `New` constructs the `audit.SinkChain` (via `audit.NewSinkChain`) **before** opening the WAL. Chain construction is pure (no IO side effects), so a failure here returns immediately without leaving a WAL file open or a lock file held. This ordering is mandatory: opening the WAL first and then failing chain construction would leak WAL state on the way out. If a future change reorders so the WAL opens first, that branch MUST `Close()` the WAL on chain-init failure before returning the error.
 
 ### Wiring into existing composite
 

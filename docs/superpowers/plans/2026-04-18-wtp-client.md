@@ -2384,6 +2384,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -2710,6 +2711,11 @@ var supportedVectorSchemaVersions = map[int]struct{}{
 // MUST carry a recognized schema_version or the load fails. Anything else
 // is an error. This is fail-closed: an unknown envelope value is never
 // accepted as a "best-effort" v1 fallback.
+//
+// Both paths reject unknown fields (DisallowUnknownFields) and trailing
+// content after the top-level value, per spec §"Unknown-field policy"
+// and §"Trailing content". Typos and accidentally-concatenated payloads
+// fail loudly rather than being silently dropped.
 func loadVectors(data []byte) ([]vectorEntry, error) {
 	first, err := firstNonWhitespaceByte(data)
 	if err != nil {
@@ -2717,9 +2723,17 @@ func loadVectors(data []byte) ([]vectorEntry, error) {
 	}
 	switch first {
 	case '[':
+		// v1 path: a bare array. json.Decoder + DisallowUnknownFields gives
+		// us per-entry strict decoding plus a follow-up EOF check that
+		// rejects trailing junk after the closing ']'.
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
 		var entries []vectorEntry
-		if err := json.Unmarshal(data, &entries); err != nil {
+		if err := dec.Decode(&entries); err != nil {
 			return nil, fmt.Errorf("decode v1 vectors array: %w", err)
+		}
+		if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("decode v1 vectors array: trailing content after array: %v", err)
 		}
 		return entries, nil
 	case '{':
@@ -2733,6 +2747,9 @@ func loadVectors(data []byte) ([]vectorEntry, error) {
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&env); err != nil {
 			return nil, fmt.Errorf("decode vectors envelope: %w", err)
+		}
+		if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("decode vectors envelope: trailing content after envelope: %v", err)
 		}
 		if env.SchemaVersion == nil {
 			return nil, errors.New("vectors envelope missing required field schema_version")
@@ -2991,9 +3008,51 @@ func TestLoadVectors_RejectsBareScalar(t *testing.T) {
 		t.Fatal("expected error for non-array/non-object top-level value, got nil")
 	}
 }
+
+func TestLoadVectors_RejectsTrailingContent(t *testing.T) {
+	// Both v1 (bare-array) and v2 (envelope) paths must reject anything
+	// after the top-level JSON value. Catches accidental concatenation and
+	// forward-incompatible streaming formats. Spec §"Trailing content".
+	v1WithJunk := []byte(`[{"name":"x","kind":"integrity_record","input":{"format_version":2,"sequence":0,"generation":0,"prev_hash":"","event_hash":"","context_digest":"","key_fingerprint":""},"expected":"{}"}]  garbage`)
+	if _, err := loadVectors(v1WithJunk); err == nil {
+		t.Fatal("expected v1 trailing-content rejection, got nil")
+	} else if !strings.Contains(err.Error(), "trailing content") {
+		t.Errorf("v1 error must mention trailing content: %v", err)
+	}
+	v2WithJunk := []byte(`{"schema_version":2,"vectors":[]}  {"another":"object"}`)
+	if _, err := loadVectors(v2WithJunk); err == nil {
+		t.Fatal("expected v2 trailing-content rejection, got nil")
+	} else if !strings.Contains(err.Error(), "trailing content") {
+		t.Errorf("v2 error must mention trailing content: %v", err)
+	}
+}
+
+func TestLoadVectors_RejectsUnknownFields(t *testing.T) {
+	// Both v1 and v2 paths must reject unknown fields per spec
+	// §"Unknown-field policy". Typos and forward-incompatible vectors
+	// fail loudly rather than silently being dropped.
+	v1WithUnknown := []byte(`[{"name":"x","kind":"integrity_record","input":{},"expected":"","UNKNOWN_FIELD":1}]`)
+	if _, err := loadVectors(v1WithUnknown); err == nil {
+		t.Fatal("expected v1 unknown-field rejection, got nil")
+	} else if !strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("v1 error must mention unknown field: %v", err)
+	}
+	v2WithUnknown := []byte(`{"schema_version":2,"vectors":[],"UNKNOWN_ENVELOPE_FIELD":true}`)
+	if _, err := loadVectors(v2WithUnknown); err == nil {
+		t.Fatal("expected v2 unknown-field rejection at envelope level, got nil")
+	} else if !strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("v2 envelope error must mention unknown field: %v", err)
+	}
+	v2EntryUnknown := []byte(`{"schema_version":2,"vectors":[{"name":"y","kind":"context_digest","UNKNOWN_ENTRY_FIELD":"x"}]}`)
+	if _, err := loadVectors(v2EntryUnknown); err == nil {
+		t.Fatal("expected v2 unknown-field rejection at entry level, got nil")
+	} else if !strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("v2 entry error must mention unknown field: %v", err)
+	}
+}
 ```
 
-Run: `go test ./internal/store/watchtower/chain/ -run TestLoadVectors_`. All seven pass once Step 1's `loadVectors` helper exists. The published `vectors.json` itself remains in v1 (bare-array) shape for now; v2 is exercised purely through these in-memory tests until the v2 envelope is published.
+Run: `go test ./internal/store/watchtower/chain/ -run TestLoadVectors_`. All ten pass once Step 1's `loadVectors` helper exists. The published `vectors.json` itself remains in v1 (bare-array) shape for now; v2 is exercised purely through these in-memory tests until the v2 envelope is published.
 
 - [ ] **Step 5: Run vectors test to verify it passes**
 
@@ -7560,6 +7619,7 @@ Create `internal/store/watchtower/options_test.go`:
 package watchtower_test
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -7569,6 +7629,13 @@ import (
 	"github.com/agentsh/agentsh/internal/store/watchtower"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
 )
+
+// testHMACKey is a fixed 32-byte HMAC key used across watchtower tests.
+// audit.NewSinkChain rejects keys shorter than audit.MinKeyLength (32),
+// so test fixtures must hit at least that length. Bytes.Repeat keeps the
+// pattern grep-friendly across files; zero-bytes would also satisfy the
+// length check but a recognizable filler eases debugging.
+func testHMACKey() []byte { return bytes.Repeat([]byte("a"), 32) }
 
 // TestNew_RejectsStubMapperInProduction verifies validate() rejects a
 // StubMapper unless AllowStubMapper is true. This guards against a
@@ -7583,7 +7650,7 @@ func TestNew_RejectsStubMapperInProduction(t *testing.T) {
 		AgentID:      "a",
 		SessionID:    "s",
 		HMACKeyID:    "k1",
-		HMACSecret:   []byte("secret"),
+		HMACSecret:   testHMACKey(),
 		BatchMaxRecords: 256,
 		BatchMaxBytes:   256 * 1024,
 		BatchMaxAge:     50 * time.Millisecond,
@@ -7611,6 +7678,31 @@ func TestNew_RequiresHMACSecret(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "HMAC secret") {
 		t.Fatalf("expected HMAC secret error, got: %v", err)
+	}
+}
+
+// TestNew_RejectsShortHMACSecret verifies validate() mirrors
+// audit.MinKeyLength: a non-empty but too-short key is rejected at
+// watchtower-load time with a watchtower-shaped error rather than
+// surfacing as a generic audit error mid-construction.
+func TestNew_RejectsShortHMACSecret(t *testing.T) {
+	dir := t.TempDir()
+	allocator := audit.NewSequenceAllocator(0, 0)
+	_, err := watchtower.New(context.Background(), watchtower.Options{
+		WALDir:          dir,
+		Mapper:          compact.StubMapper{},
+		Allocator:       allocator,
+		AgentID:         "a", SessionID: "s",
+		HMACKeyID:       "k1",
+		HMACSecret:      bytes.Repeat([]byte("a"), 16), // 16 bytes; below audit.MinKeyLength
+		BatchMaxRecords: 1, BatchMaxBytes: 4096, BatchMaxAge: time.Second,
+		AllowStubMapper: true,
+	})
+	if err == nil {
+		t.Fatal("expected validate() to reject a 16-byte HMAC secret")
+	}
+	if !strings.Contains(err.Error(), "too short") {
+		t.Errorf("error must mention key length: %v", err)
 	}
 }
 ```
@@ -7761,6 +7853,13 @@ func (o *Options) validate() error {
 	if len(o.HMACSecret) == 0 {
 		return errors.New("watchtower: HMAC secret is required")
 	}
+	// Mirror audit.NewSinkChain's precondition so a short key is rejected at
+	// watchtower-load time with a watchtower-shaped error rather than as a
+	// generic audit error mid-construction. audit remains the canonical
+	// source of truth — if it tightens, this branch must be updated to match.
+	if len(o.HMACSecret) < audit.MinKeyLength {
+		return fmt.Errorf("watchtower: HMAC secret too short: got %d bytes, need at least %d (mirrors audit.MinKeyLength)", len(o.HMACSecret), audit.MinKeyLength)
+	}
 	switch o.HMACAlgorithm {
 	case "", "hmac-sha256", "hmac-sha512":
 		// "" defaults inside audit.NewSinkChain to hmac-sha256.
@@ -7823,19 +7922,13 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		return nil, err
 	}
 
-	w, err := wal.Open(wal.Options{
-		Dir:          opts.WALDir,
-		SegmentSize:  opts.WALSegmentSize,
-		MaxTotalSize: opts.WALMaxTotalSize,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("open WAL: %w", err)
-	}
-
-	// Wire the chain sink. Production callers get a real *audit.SinkChain
-	// wrapped in the watchtower-local *chain.WatchtowerSink adapter (the
-	// adapter satisfies chain.SinkChainAPI and is what tests substitute).
-	// The audit phase-0 contract stays untouched; the adapter only adds
+	// Wire the chain sink BEFORE opening the WAL. Chain construction is
+	// pure (no IO side effects) — doing it first means a failure here
+	// returns immediately without leaking an open WAL or held lock file.
+	// Production callers get a real *audit.SinkChain wrapped in the
+	// watchtower-local *chain.WatchtowerSink adapter (the adapter
+	// satisfies chain.SinkChainAPI and is what tests substitute). The
+	// audit phase-0 contract stays untouched; the adapter only adds
 	// PeekPrevHash on top of the existing Compute/Commit/State surface.
 	// Tests can replace the adapter via Options.SinkChainOverrideForTests
 	// (gated behind AllowSinkChainOverrideForTests; see validate()).
@@ -7846,6 +7939,15 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	var sinkChain chain.SinkChainAPI = chain.NewWatchtowerSink(innerChain)
 	if opts.SinkChainOverrideForTests != nil {
 		sinkChain = opts.SinkChainOverrideForTests
+	}
+
+	w, err := wal.Open(wal.Options{
+		Dir:          opts.WALDir,
+		SegmentSize:  opts.WALSegmentSize,
+		MaxTotalSize: opts.WALMaxTotalSize,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open WAL: %w", err)
 	}
 
 	dialer := opts.Dialer
@@ -8515,6 +8617,7 @@ Create `internal/store/watchtower/append_test.go`:
 package watchtower_test
 
 import (
+	"bytes"
 	"context"
 	"math"
 	"testing"
@@ -8540,7 +8643,7 @@ func mkStore(t *testing.T) *watchtower.Store {
 		Mapper:          compact.StubMapper{},
 		Allocator:       allocator,
 		AgentID:         "a", SessionID: "s",
-		HMACKeyID:       "k1", HMACSecret: []byte("secret"),
+		HMACKeyID:       "k1", HMACSecret: bytes.Repeat([]byte("a"), 32),
 		BatchMaxRecords: 8, BatchMaxBytes: 8 * 1024, BatchMaxAge: 50 * time.Millisecond,
 		AllowStubMapper: true,
 		Dialer:          srv.DialerFor(),
@@ -8915,6 +9018,7 @@ Create `internal/store/watchtower/integrity_test.go`:
 package watchtower_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -8944,7 +9048,7 @@ func TestStore_WALCleanFailure_NoChainAdvance(t *testing.T) {
 		Mapper:          compact.StubMapper{},
 		Allocator:       allocator,
 		AgentID:         "a", SessionID: "s",
-		HMACKeyID:       "k1", HMACSecret: []byte("secret"),
+		HMACKeyID:       "k1", HMACSecret: bytes.Repeat([]byte("a"), 32),
 		BatchMaxRecords: 8, BatchMaxBytes: 8 * 1024, BatchMaxAge: 50 * time.Millisecond,
 		AllowStubMapper: true,
 		Dialer:          srv.DialerFor(),
@@ -8987,7 +9091,7 @@ func TestStore_WALAmbiguousFailure_LatchesFatal(t *testing.T) {
 		Mapper:          compact.StubMapper{},
 		Allocator:       allocator,
 		AgentID:         "a", SessionID: "s",
-		HMACKeyID:       "k1", HMACSecret: []byte("secret"),
+		HMACKeyID:       "k1", HMACSecret: bytes.Repeat([]byte("a"), 32),
 		BatchMaxRecords: 8, BatchMaxBytes: 8 * 1024, BatchMaxAge: 50 * time.Millisecond,
 		AllowStubMapper: true,
 		Dialer:          srv.DialerFor(),
@@ -9216,6 +9320,7 @@ Create `internal/store/watchtower/component_drop_test.go`:
 package watchtower_test
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -9242,7 +9347,7 @@ func TestStore_DropsMidBatchTriggersReplay(t *testing.T) {
 		Mapper:          compact.StubMapper{},
 		Allocator:       allocator,
 		AgentID:         "a", SessionID: "s",
-		HMACKeyID:       "k1", HMACSecret: []byte("secret"),
+		HMACKeyID:       "k1", HMACSecret: bytes.Repeat([]byte("a"), 32),
 		BatchMaxRecords: 10, BatchMaxBytes: 8 * 1024, BatchMaxAge: 50 * time.Millisecond,
 		AllowStubMapper: true,
 		Dialer:          srv.DialerFor(),
@@ -9310,6 +9415,7 @@ Create `internal/store/watchtower/component_restart_test.go`:
 package watchtower_test
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -9335,7 +9441,7 @@ func TestStore_ServerRestart_AcksCatchUp(t *testing.T) {
 		Mapper:          compact.StubMapper{},
 		Allocator:       allocator,
 		AgentID:         "a", SessionID: "s",
-		HMACKeyID:       "k1", HMACSecret: []byte("secret"),
+		HMACKeyID:       "k1", HMACSecret: bytes.Repeat([]byte("a"), 32),
 		BatchMaxRecords: 5, BatchMaxBytes: 4 * 1024, BatchMaxAge: 30 * time.Millisecond,
 		AllowStubMapper: true,
 		Dialer:          srv1.DialerFor(),
