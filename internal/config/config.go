@@ -871,10 +871,32 @@ type WatchtowerAuthConfig struct {
 	ClientCertAuth bool   `yaml:"client_cert_auth"`
 }
 
+// WatchtowerChainConfig configures the WTP per-sink hash chain HMAC key.
+// Mirrors the key-source shape from AuditIntegrityConfig so the daemon (Task 27)
+// can reuse the existing kms package plumbing in internal/audit/kms/provider.go.
 type WatchtowerChainConfig struct {
 	Algorithm string `yaml:"algorithm"` // hmac-sha256 (default) | hmac-sha512
-	KeyFile   string `yaml:"key_file"`
-	KeyEnv    string `yaml:"key_env"`
+
+	// KeySource selects exactly one of: file, env, aws_kms, azure_keyvault,
+	// hashicorp_vault, gcp_kms. When empty, the source is inferred from
+	// whichever single sub-config below is populated.
+	KeySource string `yaml:"key_source"`
+
+	// File/Env source (legacy, still supported).
+	KeyFile string `yaml:"key_file"`
+	KeyEnv  string `yaml:"key_env"`
+
+	// AWS KMS configuration.
+	AWSKMS AWSKMSConfig `yaml:"aws_kms"`
+
+	// Azure Key Vault configuration.
+	AzureKeyVault AzureKeyVaultConfig `yaml:"azure_keyvault"`
+
+	// HashiCorp Vault configuration.
+	HashiCorpVault HashiCorpVaultConfig `yaml:"hashicorp_vault"`
+
+	// GCP Cloud KMS configuration.
+	GCPKMS GCPKMSConfig `yaml:"gcp_kms"`
 }
 
 type WatchtowerBatchConfig struct {
@@ -958,6 +980,9 @@ func (w *AuditWatchtowerConfig) applyDefaults() {
 		if w.Chain.Algorithm == "" {
 			w.Chain.Algorithm = "hmac-sha256"
 		}
+		if w.StateDir == "" {
+			w.StateDir = defaultWatchtowerStateDir()
+		}
 	}
 	if w.EphemeralMode {
 		// Apply ephemeral overrides ONLY for zero fields. Operator-set
@@ -987,6 +1012,17 @@ func (w *AuditWatchtowerConfig) applyDefaults() {
 	standard()
 }
 
+// defaultWatchtowerStateDir returns the default state directory for WTP, using
+// the user's config dir when available and falling back to the OS temp dir.
+// Cross-platform: uses filepath.Join.
+func defaultWatchtowerStateDir() string {
+	base, err := os.UserConfigDir()
+	if err != nil || base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "agentsh", "wtp")
+}
+
 func (w *AuditWatchtowerConfig) validate() error {
 	if !w.Enabled {
 		return nil
@@ -997,6 +1033,8 @@ func (w *AuditWatchtowerConfig) validate() error {
 	if _, _, err := net.SplitHostPort(w.Endpoint); err != nil {
 		return fmt.Errorf("audit.watchtower.endpoint %q: %w", w.Endpoint, err)
 	}
+
+	// Auth: exactly one source.
 	authSources := 0
 	if w.Auth.TokenFile != "" {
 		authSources++
@@ -1010,9 +1048,67 @@ func (w *AuditWatchtowerConfig) validate() error {
 	if authSources != 1 {
 		return fmt.Errorf("audit.watchtower.auth: exactly one of token_file, token_env, client_cert_auth must be set (got %d)", authSources)
 	}
-	if w.Chain.KeyFile == "" && w.Chain.KeyEnv == "" {
-		return fmt.Errorf("audit.watchtower.chain: one of key_file or key_env must be set")
+
+	// mTLS pairing: when client_cert_auth is true, both cert + key are required.
+	if w.Auth.ClientCertAuth {
+		if w.TLS.ClientCertFile == "" || w.TLS.ClientKeyFile == "" {
+			return fmt.Errorf("audit.watchtower.auth.client_cert_auth requires both tls.client_cert_file and tls.client_key_file")
+		}
 	}
+	// Partial TLS client-auth pair is invalid even without client_cert_auth.
+	if (w.TLS.ClientCertFile != "") != (w.TLS.ClientKeyFile != "") {
+		return fmt.Errorf("audit.watchtower.tls: client_cert_file and client_key_file must be set together")
+	}
+
+	// TLS file existence/readability.
+	for _, f := range []struct {
+		field string
+		path  string
+	}{
+		{"tls.ca_cert_file", w.TLS.CACertFile},
+		{"tls.client_cert_file", w.TLS.ClientCertFile},
+		{"tls.client_key_file", w.TLS.ClientKeyFile},
+	} {
+		if f.path == "" {
+			continue
+		}
+		if _, err := os.Stat(f.path); err != nil {
+			return fmt.Errorf("audit.watchtower.%s %q: %w", f.field, f.path, err)
+		}
+	}
+
+	// Chain: exactly one key source.
+	chainSources := 0
+	if w.Chain.KeyFile != "" {
+		chainSources++
+	}
+	if w.Chain.KeyEnv != "" {
+		chainSources++
+	}
+	if w.Chain.AWSKMS.KeyID != "" {
+		chainSources++
+	}
+	if w.Chain.AzureKeyVault.KeyName != "" {
+		chainSources++
+	}
+	if w.Chain.HashiCorpVault.SecretPath != "" {
+		chainSources++
+	}
+	if w.Chain.GCPKMS.KeyName != "" {
+		chainSources++
+	}
+	if chainSources != 1 {
+		return fmt.Errorf("audit.watchtower.chain: exactly one key source must be set "+
+			"(key_file, key_env, aws_kms, azure_keyvault, hashicorp_vault, gcp_kms) (got %d)", chainSources)
+	}
+	if w.Chain.KeySource != "" {
+		switch w.Chain.KeySource {
+		case "file", "env", "aws_kms", "azure_keyvault", "hashicorp_vault", "gcp_kms":
+		default:
+			return fmt.Errorf("audit.watchtower.chain.key_source %q: must be one of file, env, aws_kms, azure_keyvault, hashicorp_vault, gcp_kms", w.Chain.KeySource)
+		}
+	}
+
 	switch w.Chain.Algorithm {
 	case "hmac-sha256", "hmac-sha512":
 	default:
@@ -1034,7 +1130,34 @@ func (w *AuditWatchtowerConfig) validate() error {
 	default:
 		return fmt.Errorf("audit.watchtower.wal.sync_mode %q: must be immediate or deferred", w.WAL.SyncMode)
 	}
-	return nil
+
+	// Filter: min_risk_level enum (matches OTEL filter).
+	switch w.Filter.MinRiskLevel {
+	case "", "low", "medium", "high", "critical":
+	default:
+		return fmt.Errorf("audit.watchtower.filter.min_risk_level %q: must be one of low, medium, high, critical (or empty)", w.Filter.MinRiskLevel)
+	}
+
+	// state_dir: ensure parent is creatable and writable.
+	if w.StateDir != "" {
+		if err := os.MkdirAll(w.StateDir, 0o700); err != nil {
+			return fmt.Errorf("audit.watchtower.state_dir %q: not writable: %w", w.StateDir, err)
+		}
+		probe, err := os.CreateTemp(w.StateDir, ".wtp-probe-*")
+		if err != nil {
+			return fmt.Errorf("audit.watchtower.state_dir %q: not writable: %w", w.StateDir, err)
+		}
+		probePath := probe.Name()
+		_ = probe.Close()
+		_ = os.Remove(probePath)
+	}
+
+	// Dependency-ordering gate: the WTP sink wiring lands in plan Task 27.
+	// Until then, a config that turns the feature on must be rejected so
+	// operators don't think setting `enabled: true` actually does anything.
+	// MUST be the last check so all schema errors above propagate first.
+	// TODO(task-27): remove this gate once the daemon wires the WTP sink.
+	return fmt.Errorf("audit.watchtower.enabled: WTP sink is not yet wired into the daemon (will be enabled in a later task)")
 }
 
 func Load(path string) (*Config, error) {

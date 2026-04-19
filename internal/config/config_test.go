@@ -1615,10 +1615,14 @@ audit:
 }
 
 func TestAuditWatchtowerConfig_DefaultsExpand(t *testing.T) {
+	// NOTE: the WTP sink is gated by validate() until plan Task 27 wires it
+	// into the daemon. The gate only fires when enabled=true, so we set
+	// enabled=false here. applyDefaults runs unconditionally during Load,
+	// so all default expansion is still exercised.
 	yaml := `
 audit:
   watchtower:
-    enabled: true
+    enabled: false
     endpoint: "wtp.example.com:9443"
     auth:
       token_file: "/etc/agentsh/wtp.token"
@@ -1645,13 +1649,18 @@ audit:
 	if wtp.Backoff.Base != 500*time.Millisecond {
 		t.Errorf("Backoff.Base = %v, want 500ms", wtp.Backoff.Base)
 	}
+	if wtp.StateDir == "" {
+		t.Error("StateDir default should be non-empty")
+	}
 }
 
 func TestAuditWatchtowerConfig_EphemeralOverridesDefaults(t *testing.T) {
+	// See note in TestAuditWatchtowerConfig_DefaultsExpand: enabled=false
+	// avoids the WTP-not-wired gate while still exercising applyDefaults.
 	yaml := `
 audit:
   watchtower:
-    enabled: true
+    enabled: false
     ephemeral_mode: true
     endpoint: "wtp.example.com:9443"
     auth:
@@ -1710,5 +1719,289 @@ audit:
 				t.Errorf("err = %v, want contains %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// writeTempFile creates a temporary file in t.TempDir() and returns its path.
+// Used by WTP tests to materialise TLS cert/key/chain key files referenced
+// from YAML fixtures.
+func writeTempFile(t *testing.T, name string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, []byte("placeholder"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", p, err)
+	}
+	return p
+}
+
+// validWatchtowerYAML returns a YAML fragment with all required WTP fields
+// populated using files that actually exist on disk. The state_dir points at
+// a writable temp directory. Callers may override individual fields with
+// extra YAML appended after the returned base via the overrides parameter.
+func validWatchtowerYAML(t *testing.T, enabled bool, overrides string) string {
+	t.Helper()
+	chainKey := writeTempFile(t, "wtp.key")
+	stateDir := filepath.Join(t.TempDir(), "wtp-state")
+	return "audit:\n  watchtower:\n    enabled: " +
+		map[bool]string{true: "true", false: "false"}[enabled] + "\n" +
+		"    endpoint: \"wtp.example.com:9443\"\n" +
+		"    state_dir: \"" + stateDir + "\"\n" +
+		"    auth:\n" +
+		"      token_file: \"/t\"\n" +
+		"    chain:\n" +
+		"      key_file: \"" + chainKey + "\"\n" +
+		overrides
+}
+
+func TestAuditWatchtowerConfig_StateDirDefault(t *testing.T) {
+	// With state_dir omitted entirely, applyDefaults must compute a default
+	// path. We use enabled:false so the writability check in validate()
+	// doesn't fire (default may live under a path the test process can't
+	// create on every OS).
+	yaml := `
+audit:
+  watchtower:
+    enabled: false
+    endpoint: "wtp.example.com:9443"
+    auth:
+      token_file: "/t"
+    chain:
+      key_file: "/k"
+`
+	cfg, err := loadFromString(t, yaml)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Audit.Watchtower.StateDir == "" {
+		t.Fatal("StateDir default should be non-empty when YAML omits it")
+	}
+	if !filepath.IsAbs(cfg.Audit.Watchtower.StateDir) {
+		t.Errorf("StateDir default %q should be absolute", cfg.Audit.Watchtower.StateDir)
+	}
+}
+
+func TestAuditWatchtowerConfig_StateDirNotWritable(t *testing.T) {
+	// Place state_dir under a parent directory whose mode forbids creation.
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatalf("chmod %s: %v", parent, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	// On platforms where the test runs as a user that can still write under
+	// 0o500 dirs (e.g., root), skip — the negative case can't be exercised.
+	probe, err := os.CreateTemp(parent, "writable-probe-*")
+	if err == nil {
+		_ = probe.Close()
+		_ = os.Remove(probe.Name())
+		t.Skip("running as a user that bypasses 0o500 perms; cannot exercise negative writability")
+	}
+
+	chainKey := writeTempFile(t, "wtp.key")
+	stateDir := filepath.Join(parent, "wtp-state")
+	yaml := "audit:\n  watchtower:\n    enabled: true\n" +
+		"    endpoint: \"wtp.example.com:9443\"\n" +
+		"    state_dir: \"" + stateDir + "\"\n" +
+		"    auth:\n      token_file: \"/t\"\n" +
+		"    chain:\n      key_file: \"" + chainKey + "\"\n"
+
+	_, err = loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for non-writable state_dir, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "state_dir") || !strings.Contains(msg, "writable") {
+		t.Errorf("err = %v, want mention of state_dir and writable", err)
+	}
+}
+
+func TestAuditWatchtowerConfig_TLSFileMissing(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist.pem")
+	yaml := validWatchtowerYAML(t, true, "    tls:\n      ca_cert_file: \""+missing+"\"\n")
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for missing TLS file, got nil")
+	}
+	if !strings.Contains(err.Error(), "ca_cert_file") {
+		t.Errorf("err = %v, want mention of ca_cert_file", err)
+	}
+}
+
+func TestAuditWatchtowerConfig_ClientCertAuthRequiresCertAndKey(t *testing.T) {
+	// client_cert_auth: true with no cert/key under tls.* must fail.
+	chainKey := writeTempFile(t, "wtp.key")
+	stateDir := filepath.Join(t.TempDir(), "wtp-state")
+	yaml := "audit:\n  watchtower:\n    enabled: true\n" +
+		"    endpoint: \"wtp.example.com:9443\"\n" +
+		"    state_dir: \"" + stateDir + "\"\n" +
+		"    auth:\n      client_cert_auth: true\n" +
+		"    chain:\n      key_file: \"" + chainKey + "\"\n"
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for client_cert_auth without cert/key, got nil")
+	}
+	if !strings.Contains(err.Error(), "client_cert_auth") {
+		t.Errorf("err = %v, want mention of client_cert_auth", err)
+	}
+}
+
+func TestAuditWatchtowerConfig_PartialTLSClientAuthRejected(t *testing.T) {
+	// tls.client_cert_file set without tls.client_key_file (and vice versa)
+	// must fail even when client_cert_auth is false.
+	cert := writeTempFile(t, "client.crt")
+	yaml := validWatchtowerYAML(t, true, "    tls:\n      client_cert_file: \""+cert+"\"\n")
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for partial TLS client-auth pair, got nil")
+	}
+	if !strings.Contains(err.Error(), "client_cert_file") && !strings.Contains(err.Error(), "client_key_file") {
+		t.Errorf("err = %v, want mention of client_cert_file/client_key_file", err)
+	}
+
+	// reverse: only client_key_file set
+	key := writeTempFile(t, "client.key")
+	yaml2 := validWatchtowerYAML(t, true, "    tls:\n      client_key_file: \""+key+"\"\n")
+	_, err = loadFromString(t, yaml2)
+	if err == nil {
+		t.Fatal("expected error for partial TLS client-auth pair (key only), got nil")
+	}
+	if !strings.Contains(err.Error(), "client_cert_file") && !strings.Contains(err.Error(), "client_key_file") {
+		t.Errorf("err = %v, want mention of client_cert_file/client_key_file", err)
+	}
+}
+
+func TestAuditWatchtowerConfig_FilterMinRiskLevelEnum(t *testing.T) {
+	// Invalid value must fail. With enabled:false, validate() short-circuits
+	// before reaching the filter check, so we set enabled:true and supply
+	// the rest of a valid config via validWatchtowerYAML.
+	t.Run("invalid", func(t *testing.T) {
+		yaml := validWatchtowerYAML(t, true, "    filter:\n      min_risk_level: \"super-bad\"\n")
+		_, err := loadFromString(t, yaml)
+		if err == nil {
+			t.Fatal("expected error for invalid min_risk_level, got nil")
+		}
+		if !strings.Contains(err.Error(), "min_risk_level") {
+			t.Errorf("err = %v, want mention of min_risk_level", err)
+		}
+	})
+	for _, v := range []string{"low", "medium", "high", "critical"} {
+		v := v
+		t.Run("valid_"+v, func(t *testing.T) {
+			yaml := validWatchtowerYAML(t, true, "    filter:\n      min_risk_level: \""+v+"\"\n")
+			_, err := loadFromString(t, yaml)
+			// The schema-level filter check passes; the WTP-not-wired gate
+			// fires last. So we expect that exact gate error and nothing else.
+			if err == nil {
+				t.Fatalf("expected gating error for valid min_risk_level %q, got nil", v)
+			}
+			if !strings.Contains(err.Error(), "not yet wired") {
+				t.Errorf("err = %v, want WTP-not-wired gating error (filter accepted %q)", err, v)
+			}
+			if strings.Contains(err.Error(), "min_risk_level") {
+				t.Errorf("min_risk_level %q should be accepted but err mentions it: %v", v, err)
+			}
+		})
+	}
+}
+
+func TestAuditWatchtowerConfig_KMSSourcesMutualExclusion(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "wtp-state")
+	chainKey := writeTempFile(t, "wtp.key")
+
+	t.Run("none", func(t *testing.T) {
+		yaml := "audit:\n  watchtower:\n    enabled: true\n" +
+			"    endpoint: \"wtp.example.com:9443\"\n" +
+			"    state_dir: \"" + stateDir + "\"\n" +
+			"    auth:\n      token_file: \"/t\"\n" +
+			"    chain: {}\n"
+		_, err := loadFromString(t, yaml)
+		if err == nil {
+			t.Fatal("expected error when no chain key source is set, got nil")
+		}
+		if !strings.Contains(err.Error(), "chain") {
+			t.Errorf("err = %v, want mention of chain", err)
+		}
+	})
+
+	t.Run("multiple_file_and_env", func(t *testing.T) {
+		yaml := "audit:\n  watchtower:\n    enabled: true\n" +
+			"    endpoint: \"wtp.example.com:9443\"\n" +
+			"    state_dir: \"" + stateDir + "\"\n" +
+			"    auth:\n      token_file: \"/t\"\n" +
+			"    chain:\n      key_file: \"" + chainKey + "\"\n      key_env: \"WTP_KEY\"\n"
+		_, err := loadFromString(t, yaml)
+		if err == nil {
+			t.Fatal("expected error for multiple chain key sources, got nil")
+		}
+		if !strings.Contains(err.Error(), "exactly one") {
+			t.Errorf("err = %v, want mention of 'exactly one'", err)
+		}
+	})
+
+	t.Run("multiple_aws_and_gcp", func(t *testing.T) {
+		yaml := "audit:\n  watchtower:\n    enabled: true\n" +
+			"    endpoint: \"wtp.example.com:9443\"\n" +
+			"    state_dir: \"" + stateDir + "\"\n" +
+			"    auth:\n      token_file: \"/t\"\n" +
+			"    chain:\n      aws_kms:\n        key_id: \"alias/aws-key\"\n" +
+			"      gcp_kms:\n        key_name: \"projects/p/locations/l/keyRings/r/cryptoKeys/k\"\n"
+		_, err := loadFromString(t, yaml)
+		if err == nil {
+			t.Fatal("expected error for AWS+GCP chain key sources, got nil")
+		}
+		if !strings.Contains(err.Error(), "exactly one") {
+			t.Errorf("err = %v, want mention of 'exactly one'", err)
+		}
+	})
+
+	// One of each KMS source individually must pass schema validation
+	// (and only fail on the WTP-not-wired gate).
+	for _, c := range []struct {
+		name  string
+		chain string
+	}{
+		{"file", "      key_file: \"" + chainKey + "\"\n"},
+		{"env", "      key_env: \"WTP_KEY\"\n"},
+		{"aws_kms", "      aws_kms:\n        key_id: \"alias/aws-key\"\n"},
+		{"azure_keyvault", "      azure_keyvault:\n        vault_url: \"https://v.vault.azure.net\"\n        key_name: \"k\"\n"},
+		{"hashicorp_vault", "      hashicorp_vault:\n        secret_path: \"secret/data/agentsh/wtp\"\n"},
+		{"gcp_kms", "      gcp_kms:\n        key_name: \"projects/p/locations/l/keyRings/r/cryptoKeys/k\"\n"},
+	} {
+		c := c
+		t.Run("only_"+c.name, func(t *testing.T) {
+			yaml := "audit:\n  watchtower:\n    enabled: true\n" +
+				"    endpoint: \"wtp.example.com:9443\"\n" +
+				"    state_dir: \"" + filepath.Join(t.TempDir(), "wtp-state") + "\"\n" +
+				"    auth:\n      token_file: \"/t\"\n" +
+				"    chain:\n" + c.chain
+			_, err := loadFromString(t, yaml)
+			if err == nil {
+				t.Fatalf("expected WTP-not-wired gating error for source %q, got nil", c.name)
+			}
+			if strings.Contains(err.Error(), "exactly one") || strings.Contains(err.Error(), "key_source") {
+				t.Errorf("err = %v, single-source %q should pass schema validation", err, c.name)
+			}
+			if !strings.Contains(err.Error(), "not yet wired") {
+				t.Errorf("err = %v, want WTP-not-wired gating error for single source %q", err, c.name)
+			}
+		})
+	}
+}
+
+func TestAuditWatchtowerConfig_EnabledRejectedUntilWired(t *testing.T) {
+	// A fully-valid config with enabled:true must still be rejected by the
+	// dependency-ordering gate until plan Task 27 wires the WTP sink in.
+	yaml := validWatchtowerYAML(t, true, "")
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected WTP-not-wired gating error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not yet wired") {
+		t.Errorf("err = %v, want WTP-not-wired gating error", err)
+	}
+
+	// And with enabled:false the same config must load cleanly.
+	yamlOff := validWatchtowerYAML(t, false, "")
+	if _, err := loadFromString(t, yamlOff); err != nil {
+		t.Fatalf("load with enabled:false: %v", err)
 	}
 }
