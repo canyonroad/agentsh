@@ -20,6 +20,24 @@ type Collector struct {
 	ebpfDropped     atomic.Uint64
 	ebpfAttachFail  atomic.Uint64
 	ebpfUnavailable atomic.Uint64
+
+	// WTP series
+	wtpEventsAppended      atomic.Uint64
+	wtpEventsAcked         atomic.Uint64
+	wtpBatchesSent         atomic.Uint64
+	wtpBytesSent           atomic.Uint64
+	wtpTransportLoss       atomic.Uint64
+	wtpReconnectsByReason  sync.Map
+	wtpSessionState        atomic.Int64
+	wtpWALSegments         atomic.Int64
+	wtpWALBytes            atomic.Int64
+	wtpAckHighWatermark    atomic.Int64
+	wtpDroppedMissingChain atomic.Uint64
+
+	wtpLatencyMu      sync.Mutex
+	wtpLatencyBuckets [14]uint64 // 13 buckets + +Inf; index aligned with wtpLatencyBucketsSeconds
+	wtpLatencyCount   uint64
+	wtpLatencySum     float64
 }
 
 func New() *Collector {
@@ -99,6 +117,8 @@ func (c *Collector) Handler(opts HandlerOptions) http.Handler {
 				fmt.Fprintf(w, "agentsh_events_by_type_total{type=%q} %d\n", escapeLabelValue(t), n)
 			}
 		}
+
+		c.emitWTPMetrics(w)
 
 		if opts.SessionCount != nil {
 			fmt.Fprint(w, "# HELP agentsh_sessions_active Active sessions.\n")
