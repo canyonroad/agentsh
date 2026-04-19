@@ -5,10 +5,21 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"gopkg.in/yaml.v3"
 )
+
+func loadFromString(t *testing.T, yaml string) (*Config, error) {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return Load(p)
+}
 
 func TestLoad_ParsesServerTransportFields(t *testing.T) {
 	dir := t.TempDir()
@@ -1600,5 +1611,104 @@ audit:
 	}
 	if *cfg.Audit.Storage.Enabled {
 		t.Error("Audit.Storage.Enabled should be false when explicitly set")
+	}
+}
+
+func TestAuditWatchtowerConfig_DefaultsExpand(t *testing.T) {
+	yaml := `
+audit:
+  watchtower:
+    enabled: true
+    endpoint: "wtp.example.com:9443"
+    auth:
+      token_file: "/etc/agentsh/wtp.token"
+    chain:
+      key_file: "/etc/agentsh/wtp.key"
+`
+	cfg, err := loadFromString(t, yaml)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	wtp := cfg.Audit.Watchtower
+	if wtp.Batch.MaxEvents != 256 {
+		t.Errorf("MaxEvents = %d, want 256", wtp.Batch.MaxEvents)
+	}
+	if wtp.Batch.MaxBytes != 256*1024 {
+		t.Errorf("MaxBytes = %d, want 256 KiB", wtp.Batch.MaxBytes)
+	}
+	if wtp.WAL.SegmentSize != 16*1024*1024 {
+		t.Errorf("SegmentSize = %d, want 16 MiB", wtp.WAL.SegmentSize)
+	}
+	if wtp.Heartbeat.Interval != 30*time.Second {
+		t.Errorf("Heartbeat.Interval = %v, want 30s", wtp.Heartbeat.Interval)
+	}
+	if wtp.Backoff.Base != 500*time.Millisecond {
+		t.Errorf("Backoff.Base = %v, want 500ms", wtp.Backoff.Base)
+	}
+}
+
+func TestAuditWatchtowerConfig_EphemeralOverridesDefaults(t *testing.T) {
+	yaml := `
+audit:
+  watchtower:
+    enabled: true
+    ephemeral_mode: true
+    endpoint: "wtp.example.com:9443"
+    auth:
+      token_file: "/etc/agentsh/wtp.token"
+    chain:
+      key_file: "/etc/agentsh/wtp.key"
+`
+	cfg, err := loadFromString(t, yaml)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	wtp := cfg.Audit.Watchtower
+	if wtp.Batch.MaxEvents != 64 {
+		t.Errorf("ephemeral MaxEvents = %d, want 64", wtp.Batch.MaxEvents)
+	}
+	if wtp.Heartbeat.Interval != 10*time.Second {
+		t.Errorf("ephemeral Heartbeat.Interval = %v, want 10s", wtp.Heartbeat.Interval)
+	}
+	if wtp.Batch.FlushInterval != 200*time.Millisecond {
+		t.Errorf("ephemeral FlushInterval = %v, want 200ms", wtp.Batch.FlushInterval)
+	}
+}
+
+func TestAuditWatchtowerConfig_AuthMutualExclusion(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "token_file_and_token_env",
+			yaml: `
+audit:
+  watchtower:
+    enabled: true
+    endpoint: "x:1"
+    chain: {key_file: "/k"}
+    auth: {token_file: "/t", token_env: "T"}`,
+			wantErr: "exactly one of",
+		},
+		{
+			name: "no_auth_source",
+			yaml: `
+audit:
+  watchtower:
+    enabled: true
+    endpoint: "x:1"
+    chain: {key_file: "/k"}`,
+			wantErr: "exactly one of",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadFromString(t, tc.yaml)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v, want contains %q", err, tc.wantErr)
+			}
+		})
 	}
 }

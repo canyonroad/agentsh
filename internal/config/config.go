@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -155,6 +156,9 @@ type AuditConfig struct {
 
 	// OTEL configures OpenTelemetry event export.
 	OTEL AuditOTELConfig `yaml:"otel"`
+
+	// Watchtower configures the WTP (Watchtower Transport Protocol) sink.
+	Watchtower AuditWatchtowerConfig `yaml:"watchtower"`
 }
 
 type AuditStorageConfig struct {
@@ -835,6 +839,204 @@ type DevelopmentPProfConfig struct {
 	Addr    string `yaml:"addr"`
 }
 
+// AuditWatchtowerConfig configures the WTP (Watchtower Transport Protocol) sink.
+// Spec: docs/superpowers/specs/2026-04-18-wtp-client-design.md §"Configuration & Wiring".
+type AuditWatchtowerConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	Endpoint      string `yaml:"endpoint"`        // host:port
+	SessionID     string `yaml:"session_id"`      // optional; auto-generated ULID if empty
+	StateDir      string `yaml:"state_dir"`       // default $XDG_STATE_HOME/agentsh/wtp
+	EphemeralMode bool   `yaml:"ephemeral_mode"`
+
+	TLS       WatchtowerTLSConfig       `yaml:"tls"`
+	Auth      WatchtowerAuthConfig      `yaml:"auth"`
+	Chain     WatchtowerChainConfig     `yaml:"chain"`
+	Batch     WatchtowerBatchConfig     `yaml:"batch"`
+	WAL       WatchtowerWALConfig       `yaml:"wal"`
+	Heartbeat WatchtowerHeartbeatConfig `yaml:"heartbeat"`
+	Backoff   WatchtowerBackoffConfig   `yaml:"backoff"`
+	Filter    WatchtowerFilterConfig    `yaml:"filter"`
+}
+
+type WatchtowerTLSConfig struct {
+	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
+	CACertFile         string `yaml:"ca_cert_file"`
+	ClientCertFile     string `yaml:"client_cert_file"`
+	ClientKeyFile      string `yaml:"client_key_file"`
+}
+
+type WatchtowerAuthConfig struct {
+	TokenFile      string `yaml:"token_file"`
+	TokenEnv       string `yaml:"token_env"`
+	ClientCertAuth bool   `yaml:"client_cert_auth"`
+}
+
+type WatchtowerChainConfig struct {
+	Algorithm string `yaml:"algorithm"` // hmac-sha256 (default) | hmac-sha512
+	KeyFile   string `yaml:"key_file"`
+	KeyEnv    string `yaml:"key_env"`
+}
+
+type WatchtowerBatchConfig struct {
+	MaxEvents     int           `yaml:"max_events"`
+	MaxBytes      int           `yaml:"max_bytes"`
+	MaxTimespan   time.Duration `yaml:"max_timespan"`
+	FlushInterval time.Duration `yaml:"flush_interval"`
+	Compression   string        `yaml:"compression"` // zstd (default) | gzip | none
+	ZstdLevel     int           `yaml:"zstd_level"`
+}
+
+type WatchtowerWALConfig struct {
+	SegmentSize   int64         `yaml:"segment_size"`
+	MaxTotalBytes int64         `yaml:"max_total_bytes"`
+	SyncMode      string        `yaml:"sync_mode"` // immediate (default) | deferred
+	SyncInterval  time.Duration `yaml:"sync_interval"`
+}
+
+type WatchtowerHeartbeatConfig struct {
+	Interval             time.Duration `yaml:"interval"`
+	ReconnectAfterMisses int           `yaml:"reconnect_after_misses"`
+}
+
+type WatchtowerBackoffConfig struct {
+	Base time.Duration `yaml:"base"`
+	Max  time.Duration `yaml:"max"`
+}
+
+type WatchtowerFilterConfig struct {
+	IncludeTypes      []string `yaml:"include_types"`
+	ExcludeTypes      []string `yaml:"exclude_types"`
+	IncludeCategories []string `yaml:"include_categories"`
+	ExcludeCategories []string `yaml:"exclude_categories"`
+	MinRiskLevel      string   `yaml:"min_risk_level"`
+}
+
+func (w *AuditWatchtowerConfig) applyDefaults() {
+	standard := func() {
+		if w.Batch.MaxEvents == 0 {
+			w.Batch.MaxEvents = 256
+		}
+		if w.Batch.MaxBytes == 0 {
+			w.Batch.MaxBytes = 256 * 1024
+		}
+		if w.Batch.MaxTimespan == 0 {
+			w.Batch.MaxTimespan = 5 * time.Second
+		}
+		if w.Batch.FlushInterval == 0 {
+			w.Batch.FlushInterval = 1 * time.Second
+		}
+		if w.Batch.Compression == "" {
+			w.Batch.Compression = "zstd"
+		}
+		if w.Batch.ZstdLevel == 0 {
+			w.Batch.ZstdLevel = 3
+		}
+		if w.WAL.SegmentSize == 0 {
+			w.WAL.SegmentSize = 16 * 1024 * 1024
+		}
+		if w.WAL.MaxTotalBytes == 0 {
+			w.WAL.MaxTotalBytes = 1024 * 1024 * 1024
+		}
+		if w.WAL.SyncMode == "" {
+			w.WAL.SyncMode = "immediate"
+		}
+		if w.WAL.SyncInterval == 0 {
+			w.WAL.SyncInterval = 100 * time.Millisecond
+		}
+		if w.Heartbeat.Interval == 0 {
+			w.Heartbeat.Interval = 30 * time.Second
+		}
+		if w.Heartbeat.ReconnectAfterMisses == 0 {
+			w.Heartbeat.ReconnectAfterMisses = 2
+		}
+		if w.Backoff.Base == 0 {
+			w.Backoff.Base = 500 * time.Millisecond
+		}
+		if w.Backoff.Max == 0 {
+			w.Backoff.Max = 30 * time.Second
+		}
+		if w.Chain.Algorithm == "" {
+			w.Chain.Algorithm = "hmac-sha256"
+		}
+	}
+	if w.EphemeralMode {
+		// Apply ephemeral overrides ONLY for zero fields. Operator-set
+		// values still win.
+		if w.Batch.MaxEvents == 0 {
+			w.Batch.MaxEvents = 64
+		}
+		if w.Batch.MaxBytes == 0 {
+			w.Batch.MaxBytes = 64 * 1024
+		}
+		if w.Batch.MaxTimespan == 0 {
+			w.Batch.MaxTimespan = 1 * time.Second
+		}
+		if w.Batch.FlushInterval == 0 {
+			w.Batch.FlushInterval = 200 * time.Millisecond
+		}
+		if w.WAL.SegmentSize == 0 {
+			w.WAL.SegmentSize = 4 * 1024 * 1024
+		}
+		if w.WAL.MaxTotalBytes == 0 {
+			w.WAL.MaxTotalBytes = 64 * 1024 * 1024
+		}
+		if w.Heartbeat.Interval == 0 {
+			w.Heartbeat.Interval = 10 * time.Second
+		}
+	}
+	standard()
+}
+
+func (w *AuditWatchtowerConfig) validate() error {
+	if !w.Enabled {
+		return nil
+	}
+	if w.Endpoint == "" {
+		return fmt.Errorf("audit.watchtower.endpoint is required when enabled")
+	}
+	if _, _, err := net.SplitHostPort(w.Endpoint); err != nil {
+		return fmt.Errorf("audit.watchtower.endpoint %q: %w", w.Endpoint, err)
+	}
+	authSources := 0
+	if w.Auth.TokenFile != "" {
+		authSources++
+	}
+	if w.Auth.TokenEnv != "" {
+		authSources++
+	}
+	if w.Auth.ClientCertAuth {
+		authSources++
+	}
+	if authSources != 1 {
+		return fmt.Errorf("audit.watchtower.auth: exactly one of token_file, token_env, client_cert_auth must be set (got %d)", authSources)
+	}
+	if w.Chain.KeyFile == "" && w.Chain.KeyEnv == "" {
+		return fmt.Errorf("audit.watchtower.chain: one of key_file or key_env must be set")
+	}
+	switch w.Chain.Algorithm {
+	case "hmac-sha256", "hmac-sha512":
+	default:
+		return fmt.Errorf("audit.watchtower.chain.algorithm %q: must be hmac-sha256 or hmac-sha512", w.Chain.Algorithm)
+	}
+	if w.Batch.MaxBytes < 4*1024 {
+		return fmt.Errorf("audit.watchtower.batch.max_bytes %d: must be >= 4096", w.Batch.MaxBytes)
+	}
+	if w.WAL.SegmentSize > w.WAL.MaxTotalBytes/2 {
+		return fmt.Errorf("audit.watchtower.wal.segment_size %d > max_total_bytes/2 (%d)", w.WAL.SegmentSize, w.WAL.MaxTotalBytes/2)
+	}
+	switch w.Batch.Compression {
+	case "zstd", "gzip", "none":
+	default:
+		return fmt.Errorf("audit.watchtower.batch.compression %q: must be zstd, gzip, or none", w.Batch.Compression)
+	}
+	switch w.WAL.SyncMode {
+	case "immediate", "deferred":
+	default:
+		return fmt.Errorf("audit.watchtower.wal.sync_mode %q: must be immediate or deferred", w.WAL.SyncMode)
+	}
+	return nil
+}
+
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -1455,6 +1657,9 @@ func applyDefaultsWithSource(cfg *Config, source ConfigSource, configPath string
 	if cfg.PolicySocket.TeamID == "" {
 		cfg.PolicySocket.TeamID = "WCKWMMKJ35"
 	}
+
+	// WTP (Watchtower Transport Protocol) defaults
+	cfg.Audit.Watchtower.applyDefaults()
 }
 
 // applyDefaults wraps applyDefaultsWithSource for backward compatibility.
@@ -1751,6 +1956,10 @@ func validateConfig(cfg *Config) error {
 				"is true: agent processes cannot reach the agentsh proxy without " +
 				"outbound TCP. Either set landlock.network.allow_connect_tcp to true, " +
 				"or set sandbox.network.enabled to false")
+	}
+	// Validate WTP (Watchtower Transport Protocol) config
+	if err := cfg.Audit.Watchtower.validate(); err != nil {
+		return err
 	}
 	return nil
 }
