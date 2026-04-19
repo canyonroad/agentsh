@@ -3,6 +3,8 @@ package wal
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"io"
 	"math"
 	"testing"
 )
@@ -138,6 +140,13 @@ func TestRecordFraming_RejectsTruncatedPayload(t *testing.T) {
 	_, err := ReadRecord(bytes.NewReader(frame), testMaxPayload)
 	if err == nil {
 		t.Fatal("expected truncated-payload error")
+	}
+	// The contract documented on ReadRecord is io.ErrUnexpectedEOF for
+	// truncation (so callers can distinguish a clean stream end from a
+	// corrupted/short record). Assert via errors.Is to guard against
+	// regressions in the read path.
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err = %v, want errors.Is io.ErrUnexpectedEOF", err)
 	}
 }
 

@@ -188,6 +188,12 @@ func ReadRecord(r io.Reader, maxPayload int) ([]byte, error) {
 	// with a read error long before allocation reaches the claimed size.
 	var payloadBuf bytes.Buffer
 	if got, err := io.CopyN(&payloadBuf, r, int64(payloadLen)); err != nil {
+		// io.CopyN returns io.EOF on a short read; translate to
+		// io.ErrUnexpectedEOF to preserve the truncated-payload contract
+		// callers used to get from io.ReadFull (errors.Is-detectable).
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
 		return nil, fmt.Errorf("read record payload (got %d of %d bytes): %w", got, payloadLen, err)
 	}
 	payload := payloadBuf.Bytes()
