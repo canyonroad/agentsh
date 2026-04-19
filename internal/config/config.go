@@ -845,7 +845,7 @@ type AuditWatchtowerConfig struct {
 	Enabled       bool   `yaml:"enabled"`
 	Endpoint      string `yaml:"endpoint"`        // host:port
 	SessionID     string `yaml:"session_id"`      // optional; auto-generated ULID if empty
-	StateDir      string `yaml:"state_dir"`       // default $XDG_STATE_HOME/agentsh/wtp
+	StateDir      string `yaml:"state_dir"`       // default GetUserStateDir() + "/wtp" ($XDG_STATE_HOME/agentsh/wtp on Linux)
 	EphemeralMode bool   `yaml:"ephemeral_mode"`
 
 	TLS       WatchtowerTLSConfig       `yaml:"tls"`
@@ -1012,15 +1012,18 @@ func (w *AuditWatchtowerConfig) applyDefaults() {
 	standard()
 }
 
-// defaultWatchtowerStateDir returns the default state directory for WTP, using
-// the user's config dir when available and falling back to the OS temp dir.
+// defaultWatchtowerStateDir returns the default state directory for WTP.
+// Uses GetUserStateDir() (XDG-aware on Linux, equivalent to UserDataDir on
+// macOS/Windows where there is no canonical state directory) joined with
+// "wtp", and falls back to the OS temp dir if a user state directory cannot
+// be determined.
 // Cross-platform: uses filepath.Join.
 func defaultWatchtowerStateDir() string {
-	base, err := os.UserConfigDir()
-	if err != nil || base == "" {
-		base = os.TempDir()
+	base := GetUserStateDir()
+	if base == "" {
+		base = filepath.Join(os.TempDir(), "agentsh")
 	}
-	return filepath.Join(base, "agentsh", "wtp")
+	return filepath.Join(base, "wtp")
 }
 
 func (w *AuditWatchtowerConfig) validate() error {
@@ -1060,7 +1063,8 @@ func (w *AuditWatchtowerConfig) validate() error {
 		return fmt.Errorf("audit.watchtower.tls: client_cert_file and client_key_file must be set together")
 	}
 
-	// TLS file existence/readability.
+	// TLS file existence AND readability. We open + close instead of just
+	// stat-ing so unreadable files (perm-denied) are caught at load time.
 	for _, f := range []struct {
 		field string
 		path  string
@@ -1072,40 +1076,76 @@ func (w *AuditWatchtowerConfig) validate() error {
 		if f.path == "" {
 			continue
 		}
-		if _, err := os.Stat(f.path); err != nil {
+		fh, err := os.Open(f.path)
+		if err != nil {
 			return fmt.Errorf("audit.watchtower.%s %q: %w", f.field, f.path, err)
 		}
+		_ = fh.Close()
 	}
 
-	// Chain: exactly one key source.
-	chainSources := 0
-	if w.Chain.KeyFile != "" {
-		chainSources++
+	// Chain: validate exactly one key source AND that key_source (if set)
+	// matches the populated source block. This must mirror the field
+	// semantics in internal/audit/integrity.go:NewKMSProvider so the daemon
+	// (Task 27) doesn't silently build the wrong provider.
+	chainSources := []struct {
+		name      string
+		populated bool
+	}{
+		{"file", w.Chain.KeyFile != ""},
+		{"env", w.Chain.KeyEnv != ""},
+		{"aws_kms", w.Chain.AWSKMS.KeyID != ""},
+		{"azure_keyvault", w.Chain.AzureKeyVault.VaultURL != ""},
+		{"hashicorp_vault", w.Chain.HashiCorpVault.Address != ""},
+		{"gcp_kms", w.Chain.GCPKMS.KeyName != ""},
 	}
-	if w.Chain.KeyEnv != "" {
-		chainSources++
+	populated := []string{}
+	for _, s := range chainSources {
+		if s.populated {
+			populated = append(populated, s.name)
+		}
 	}
-	if w.Chain.AWSKMS.KeyID != "" {
-		chainSources++
-	}
-	if w.Chain.AzureKeyVault.KeyName != "" {
-		chainSources++
-	}
-	if w.Chain.HashiCorpVault.SecretPath != "" {
-		chainSources++
-	}
-	if w.Chain.GCPKMS.KeyName != "" {
-		chainSources++
-	}
-	if chainSources != 1 {
+	if len(populated) != 1 {
 		return fmt.Errorf("audit.watchtower.chain: exactly one key source must be set "+
-			"(key_file, key_env, aws_kms, azure_keyvault, hashicorp_vault, gcp_kms) (got %d)", chainSources)
+			"(key_file, key_env, aws_kms, azure_keyvault, hashicorp_vault, gcp_kms) (got %d)", len(populated))
 	}
-	if w.Chain.KeySource != "" {
-		switch w.Chain.KeySource {
-		case "file", "env", "aws_kms", "azure_keyvault", "hashicorp_vault", "gcp_kms":
-		default:
-			return fmt.Errorf("audit.watchtower.chain.key_source %q: must be one of file, env, aws_kms, azure_keyvault, hashicorp_vault, gcp_kms", w.Chain.KeySource)
+	inferred := populated[0]
+	switch w.Chain.KeySource {
+	case "":
+		// fine; inferred from populated block
+	case "file", "env", "aws_kms", "azure_keyvault", "hashicorp_vault", "gcp_kms":
+		if w.Chain.KeySource != inferred {
+			return fmt.Errorf("audit.watchtower.chain.key_source %q does not match populated source %q", w.Chain.KeySource, inferred)
+		}
+	default:
+		return fmt.Errorf("audit.watchtower.chain.key_source %q: must be one of file, env, aws_kms, azure_keyvault, hashicorp_vault, gcp_kms", w.Chain.KeySource)
+	}
+
+	// Per-provider minimum required fields. Mirror the kms package
+	// constructors in internal/audit/kms/{aws,azure,vault,gcp}.go so a config
+	// that passes load-time validation cannot fail later at provider
+	// construction.
+	switch inferred {
+	case "aws_kms":
+		if w.Chain.AWSKMS.KeyID == "" {
+			return fmt.Errorf("audit.watchtower.chain.aws_kms.key_id is required")
+		}
+	case "azure_keyvault":
+		if w.Chain.AzureKeyVault.VaultURL == "" {
+			return fmt.Errorf("audit.watchtower.chain.azure_keyvault.vault_url is required")
+		}
+		if w.Chain.AzureKeyVault.KeyName == "" {
+			return fmt.Errorf("audit.watchtower.chain.azure_keyvault.key_name is required")
+		}
+	case "hashicorp_vault":
+		if w.Chain.HashiCorpVault.Address == "" {
+			return fmt.Errorf("audit.watchtower.chain.hashicorp_vault.address is required")
+		}
+		if w.Chain.HashiCorpVault.SecretPath == "" {
+			return fmt.Errorf("audit.watchtower.chain.hashicorp_vault.secret_path is required")
+		}
+	case "gcp_kms":
+		if w.Chain.GCPKMS.KeyName == "" {
+			return fmt.Errorf("audit.watchtower.chain.gcp_kms.key_name is required")
 		}
 	}
 
@@ -1138,13 +1178,23 @@ func (w *AuditWatchtowerConfig) validate() error {
 		return fmt.Errorf("audit.watchtower.filter.min_risk_level %q: must be one of low, medium, high, critical (or empty)", w.Filter.MinRiskLevel)
 	}
 
-	// state_dir: ensure parent is creatable and writable.
+	// state_dir: ensure parent is creatable and writable. We track whether
+	// the directory pre-existed so we can clean up if the dependency-ordering
+	// gate below rejects the config (validation should be side-effect free
+	// against rejected configs).
+	stateDirExisted := false
 	if w.StateDir != "" {
+		if info, err := os.Stat(w.StateDir); err == nil && info.IsDir() {
+			stateDirExisted = true
+		}
 		if err := os.MkdirAll(w.StateDir, 0o700); err != nil {
 			return fmt.Errorf("audit.watchtower.state_dir %q: not writable: %w", w.StateDir, err)
 		}
 		probe, err := os.CreateTemp(w.StateDir, ".wtp-probe-*")
 		if err != nil {
+			if !stateDirExisted {
+				_ = os.RemoveAll(w.StateDir)
+			}
 			return fmt.Errorf("audit.watchtower.state_dir %q: not writable: %w", w.StateDir, err)
 		}
 		probePath := probe.Name()
@@ -1157,6 +1207,11 @@ func (w *AuditWatchtowerConfig) validate() error {
 	// operators don't think setting `enabled: true` actually does anything.
 	// MUST be the last check so all schema errors above propagate first.
 	// TODO(task-27): remove this gate once the daemon wires the WTP sink.
+	if w.StateDir != "" && !stateDirExisted {
+		// Roll back the directory we created above so a rejected config
+		// leaves no filesystem artifacts behind.
+		_ = os.RemoveAll(w.StateDir)
+	}
 	return fmt.Errorf("audit.watchtower.enabled: WTP sink is not yet wired into the daemon (will be enabled in a later task)")
 }
 

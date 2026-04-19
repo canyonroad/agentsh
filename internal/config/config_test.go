@@ -1963,7 +1963,7 @@ func TestAuditWatchtowerConfig_KMSSourcesMutualExclusion(t *testing.T) {
 		{"env", "      key_env: \"WTP_KEY\"\n"},
 		{"aws_kms", "      aws_kms:\n        key_id: \"alias/aws-key\"\n"},
 		{"azure_keyvault", "      azure_keyvault:\n        vault_url: \"https://v.vault.azure.net\"\n        key_name: \"k\"\n"},
-		{"hashicorp_vault", "      hashicorp_vault:\n        secret_path: \"secret/data/agentsh/wtp\"\n"},
+		{"hashicorp_vault", "      hashicorp_vault:\n        address: \"https://vault.example.com\"\n        secret_path: \"secret/data/agentsh/wtp\"\n"},
 		{"gcp_kms", "      gcp_kms:\n        key_name: \"projects/p/locations/l/keyRings/r/cryptoKeys/k\"\n"},
 	} {
 		c := c
@@ -2003,5 +2003,131 @@ func TestAuditWatchtowerConfig_EnabledRejectedUntilWired(t *testing.T) {
 	yamlOff := validWatchtowerYAML(t, false, "")
 	if _, err := loadFromString(t, yamlOff); err != nil {
 		t.Fatalf("load with enabled:false: %v", err)
+	}
+}
+
+func TestAuditWatchtowerConfig_KeySourceSelectorMismatch(t *testing.T) {
+	// chain.key_source = "env" with aws_kms.key_id populated must fail —
+	// otherwise the daemon (Task 27) would honor key_source and build a
+	// provider that ignores the populated block, silently sending events
+	// elsewhere.
+	stateDir := filepath.Join(t.TempDir(), "wtp-state")
+	yaml := "audit:\n  watchtower:\n    enabled: true\n" +
+		"    endpoint: \"wtp.example.com:9443\"\n" +
+		"    state_dir: \"" + stateDir + "\"\n" +
+		"    auth:\n      token_file: \"/t\"\n" +
+		"    chain:\n      key_source: \"env\"\n      aws_kms:\n        key_id: \"alias/k\"\n"
+	_, err := loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for key_source/source-block mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "key_source") {
+		t.Errorf("err = %v, want mention of key_source", err)
+	}
+
+	// Matching key_source must pass schema validation (and only fail on the
+	// not-yet-wired gate).
+	yamlMatch := "audit:\n  watchtower:\n    enabled: true\n" +
+		"    endpoint: \"wtp.example.com:9443\"\n" +
+		"    state_dir: \"" + filepath.Join(t.TempDir(), "wtp-state") + "\"\n" +
+		"    auth:\n      token_file: \"/t\"\n" +
+		"    chain:\n      key_source: \"aws_kms\"\n      aws_kms:\n        key_id: \"alias/k\"\n"
+	_, err = loadFromString(t, yamlMatch)
+	if err == nil {
+		t.Fatal("expected WTP-not-wired gating error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not yet wired") {
+		t.Errorf("err = %v, want WTP-not-wired gating error", err)
+	}
+}
+
+func TestAuditWatchtowerConfig_ProviderRequiredFields(t *testing.T) {
+	// For each KMS provider that has more than one required field, verify
+	// that a partial config (selector populated, mandatory peer field
+	// missing) is rejected at load time. Mirrors the per-provider
+	// constructors in internal/audit/kms/{azure,vault}.go.
+	cases := []struct {
+		name    string
+		chain   string
+		wantErr string
+	}{
+		{
+			name:    "azure_keyvault_missing_key_name",
+			chain:   "      azure_keyvault:\n        vault_url: \"https://v.vault.azure.net\"\n",
+			wantErr: "azure_keyvault.key_name",
+		},
+		{
+			name:    "hashicorp_vault_missing_secret_path",
+			chain:   "      hashicorp_vault:\n        address: \"https://vault.example.com\"\n",
+			wantErr: "hashicorp_vault.secret_path",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := "audit:\n  watchtower:\n    enabled: true\n" +
+				"    endpoint: \"wtp.example.com:9443\"\n" +
+				"    state_dir: \"" + filepath.Join(t.TempDir(), "wtp-state") + "\"\n" +
+				"    auth:\n      token_file: \"/t\"\n" +
+				"    chain:\n" + tc.chain
+			_, err := loadFromString(t, yaml)
+			if err == nil {
+				t.Fatalf("expected error mentioning %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v, want mention of %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestAuditWatchtowerConfig_TLSFileUnreadable(t *testing.T) {
+	// Permission-denied is a stronger contract than mere existence —
+	// validate() now opens the file. Skip on platforms (or test runs as a
+	// user) where chmod 0o000 cannot be enforced.
+	cert := writeTempFile(t, "ca.pem")
+	if err := os.Chmod(cert, 0o000); err != nil {
+		t.Skipf("chmod 0o000 not supported here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cert, 0o600) })
+
+	probe, err := os.Open(cert)
+	if err == nil {
+		_ = probe.Close()
+		t.Skip("running as a user that bypasses 0o000 perms; cannot exercise unreadable case")
+	}
+
+	yaml := validWatchtowerYAML(t, true, "    tls:\n      ca_cert_file: \""+cert+"\"\n")
+	_, err = loadFromString(t, yaml)
+	if err == nil {
+		t.Fatal("expected error for unreadable TLS file, got nil")
+	}
+	if !strings.Contains(err.Error(), "ca_cert_file") {
+		t.Errorf("err = %v, want mention of ca_cert_file", err)
+	}
+}
+
+func TestAuditWatchtowerConfig_NoFilesystemArtifactsOnGateRejection(t *testing.T) {
+	// validate()'s WTP-not-wired gate fires after state_dir is created. The
+	// gated rejection should not leave a fresh state_dir on disk; otherwise
+	// every dry-run config check pollutes the user's filesystem. (If the
+	// state_dir already existed before validation, we leave it alone.)
+	stateRoot := t.TempDir()
+	stateDir := filepath.Join(stateRoot, "fresh-wtp-state")
+	chainKey := writeTempFile(t, "wtp.key")
+
+	yaml := "audit:\n  watchtower:\n    enabled: true\n" +
+		"    endpoint: \"wtp.example.com:9443\"\n" +
+		"    state_dir: \"" + stateDir + "\"\n" +
+		"    auth:\n      token_file: \"/t\"\n" +
+		"    chain:\n      key_file: \"" + chainKey + "\"\n"
+	_, err := loadFromString(t, yaml)
+	if err == nil || !strings.Contains(err.Error(), "not yet wired") {
+		t.Fatalf("expected WTP-not-wired gating error, got %v", err)
+	}
+	if _, err := os.Stat(stateDir); err == nil {
+		t.Errorf("state_dir %q should not exist after gated rejection", stateDir)
+	} else if !os.IsNotExist(err) {
+		t.Errorf("unexpected stat error: %v", err)
 	}
 }
