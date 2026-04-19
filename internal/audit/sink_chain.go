@@ -19,11 +19,19 @@ import (
 // and concurrent Compute calls (with no intervening Commit) are pure and
 // return identical results — they do not corrupt state. However, callers
 // MUST NOT interleave Compute/Commit pairs across goroutines: Commit
-// carries no token identifying which Compute it finalizes, so a stale or
-// reordered Commit can overwrite prev_hash with a hash that does not
-// correspond to the most recent Compute. The expected pattern is a single
-// owner that issues Compute → durable write → Commit (or Fatal) in
-// sequence per event.
+// consumes a typed *ComputeResult and validates the result's generation
+// against the chain's current generation, but the (sequence, generation)
+// tuple alone does not identify which Compute call produced it within the
+// same generation. The expected pattern is a single owner that issues
+// Compute → durable write → Commit (or Fatal) in sequence per event.
+//
+// Compute/Commit token contract: Compute returns a *ComputeResult that
+// callers MUST pass to Commit unchanged. The unexported fields on
+// ComputeResult let Commit verify the result really came from Compute on
+// this chain. Callers cannot construct a ComputeResult literal because
+// the unexported fields make that impossible from outside the audit
+// package; this prevents Commit from accepting a fabricated EntryHash
+// that Compute would never have produced.
 type SinkChain struct {
 	mu         sync.Mutex
 	key        []byte
@@ -46,9 +54,39 @@ type SinkChainState struct {
 	Fatal      bool
 }
 
-// ErrFatalIntegrity is returned by Compute after Fatal has been called.
-// The chain cannot be reused; the sink must be reinitialized (e.g., via
-// generation rotation).
+// ComputeResult is the typed output of SinkChain.Compute. It is the only
+// value Commit will accept. The exported fields are inspectable; the
+// unexported fields let Commit verify it really came out of Compute and
+// that no impossible state transition is being requested.
+//
+// Callers MUST NOT construct ComputeResult literals — only Compute returns
+// valid ones. The unexported fields make literal construction impossible
+// outside the audit package; that is load-bearing for the chain-state
+// invariants Commit enforces.
+type ComputeResult struct {
+	// EntryHash is the HMAC of (formatVersion | sequence | prevHash |
+	// payload) under the chain's key. Inspectable — callers serialize this
+	// into the entry's integrity metadata.
+	EntryHash string
+
+	// PrevHash is the prev_hash that was hashed into EntryHash. For the
+	// first entry of a chain (or the first entry after a generation
+	// rollover) this is the empty string. Inspectable — callers serialize
+	// this into the entry's integrity metadata.
+	PrevHash string
+
+	// sequence and generation are unexported so external packages cannot
+	// fabricate a ComputeResult with arbitrary state. Commit reads these
+	// to enforce chain-state invariants (e.g., backwards-generation Commit
+	// is a caller bug and latches fatal).
+	sequence   int64
+	generation uint32
+}
+
+// ErrFatalIntegrity is returned by Compute after Fatal has been called,
+// and by Commit when called on a chain that was latched Fatal (either by
+// Fatal itself or by a backwards-generation Commit). The chain cannot be
+// reused; the sink must be reinitialized (e.g., via generation rotation).
 var ErrFatalIntegrity = errors.New("integrity chain latched fatal; sink must be reinitialized")
 
 // ErrMissingChainState is returned by chained sinks when an event arrives
@@ -82,20 +120,22 @@ func NewSinkChain(key []byte, algorithm string) (*SinkChain, error) {
 }
 
 // Compute computes the HMAC of (formatVersion, sequence, prev_hash, payload)
-// using the chain's key. Compute is PURE: it does not mutate prev_hash. The
-// caller must follow with Commit on durable-write success or discard the
-// result on durable-write failure.
+// using the chain's key and returns it as a *ComputeResult. Compute is
+// PURE: it does not mutate prev_hash. The caller must follow with Commit
+// (passing the returned *ComputeResult) on durable-write success or
+// discard the result on durable-write failure.
 //
 // If `generation` differs from the chain's current generation, prev_hash
 // is treated as "" for this Compute (chain rolls automatically). The
-// transition is committed only when Commit is called with the new generation.
+// transition is committed only when Commit is called with a result whose
+// generation is the new generation.
 //
 // Returns ErrFatalIntegrity if Fatal was previously called.
-func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32, payload []byte) (entryHash string, prevHash string, err error) {
+func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32, payload []byte) (*ComputeResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.fatal {
-		return "", "", ErrFatalIntegrity
+		return nil, ErrFatalIntegrity
 	}
 	prev := c.prevHash
 	if generation != c.generation {
@@ -103,33 +143,52 @@ func (c *SinkChain) Compute(formatVersion int, sequence int64, generation uint32
 	}
 	hash, err := computeIntegrityHash(c.key, c.algorithm, formatVersion, sequence, prev, payload)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
-	return hash, prev, nil
+	return &ComputeResult{
+		EntryHash:  hash,
+		PrevHash:   prev,
+		sequence:   sequence,
+		generation: generation,
+	}, nil
 }
 
-// Commit advances prev_hash to entryHash and records the generation. Must be
-// called exactly once per successful Compute, after the durable write
-// succeeds. On ambiguous failure (write may or may not have landed), the
-// caller MUST call Fatal instead; Commit and Fatal are mutually exclusive
-// per Compute.
+// Commit advances prev_hash using the result of a previous Compute on this
+// chain. Must be called exactly once per successful Compute, after the
+// durable write succeeds. On ambiguous failure (write may or may not have
+// landed), the caller MUST call Fatal instead; Commit and Fatal are
+// mutually exclusive per Compute.
 //
-// Commit silently no-ops in two cases: (1) the chain has been latched Fatal,
-// and (2) `generation` is older than the chain's current generation —
-// rolling backwards across a generation boundary would re-use prior
-// (sequence, generation) tuples and corrupt the chain. The latter is a
-// caller programming error and is treated as ignorable rather than fatal.
-func (c *SinkChain) Commit(generation uint32, entryHash string) {
+// Returns an error if `result` is nil (caller bug; chain is not modified).
+//
+// Returns ErrFatalIntegrity if the chain was previously latched Fatal —
+// either by an explicit Fatal call or by a prior backwards-generation
+// Commit. The chain stays latched.
+//
+// Returns a non-nil error AND latches the chain Fatal if the result's
+// generation is older than the chain's current generation. This indicates
+// a caller bug: the durable write succeeded for an entry whose generation
+// is no longer current, so accepting the Commit would leave in-memory
+// prev_hash lagging the durable state and silently corrupt subsequent
+// Compute results. Latching fatal makes the divergence visible
+// immediately rather than later as a chain-break.
+func (c *SinkChain) Commit(result *ComputeResult) error {
+	if result == nil {
+		return errors.New("nil ComputeResult")
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.fatal {
-		return
+		return ErrFatalIntegrity
 	}
-	if generation < c.generation {
-		return
+	if result.generation < c.generation {
+		c.fatal = true
+		return fmt.Errorf("backwards generation Commit: result.generation=%d < c.generation=%d (caller bug, chain latched fatal)",
+			result.generation, c.generation)
 	}
-	c.generation = generation
-	c.prevHash = entryHash
+	c.generation = result.generation
+	c.prevHash = result.EntryHash
+	return nil
 }
 
 // Fatal latches the chain in an unrecoverable state. All subsequent Compute
