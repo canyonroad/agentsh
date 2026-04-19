@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/agentsh/agentsh/internal/store/watchtower/cmd/gen-wire-goldens/fixtures"
@@ -26,5 +27,42 @@ func TestWireGoldens_GeneratorReproducible(t *testing.T) {
 					f.Name, len(got), len(want))
 			}
 		})
+	}
+}
+
+// TestWireGoldens_NoOrphanGoldens guards against fixture set drift in the
+// other direction: a stale .bin file lingering in testdata/ after the
+// fixture that produced it was renamed or removed. Together with
+// TestWireGoldens_GeneratorReproducible (byte-equality for known fixtures)
+// it makes the fixture set authoritatively defined by fixtures.All().
+func TestWireGoldens_NoOrphanGoldens(t *testing.T) {
+	entries, err := os.ReadDir("testdata")
+	if err != nil {
+		t.Fatalf("read testdata dir: %v", err)
+	}
+
+	wantNames := map[string]bool{}
+	for _, f := range fixtures.All() {
+		wantNames[f.Name] = true
+	}
+
+	gotNames := map[string]bool{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if !strings.HasSuffix(e.Name(), ".bin") {
+			continue
+		}
+		gotNames[e.Name()] = true
+		if !wantNames[e.Name()] {
+			t.Errorf("orphan golden %q in testdata/ has no fixture in fixtures.All() — remove it or add a fixture", e.Name())
+		}
+	}
+
+	for name := range wantNames {
+		if !gotNames[name] {
+			t.Errorf("fixture %q has no checked-in golden — run: go run ./internal/store/watchtower/cmd/gen-wire-goldens", name)
+		}
 	}
 }

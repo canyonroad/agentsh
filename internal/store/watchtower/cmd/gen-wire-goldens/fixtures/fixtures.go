@@ -1,8 +1,16 @@
 // Package fixtures owns the canonical construction of the WTP wire-format
-// goldens. Both the gen-wire-goldens command and the wire-roundtrip test
+// goldens. Both the gen-wire-goldens command and the wire-roundtrip tests
 // import this package so the generator's output stays in lock-step with
 // the checked-in .bin files. Drift is detected by
-// TestWireGoldens_GeneratorReproducible.
+// TestWireGoldens_GeneratorReproducible (per-fixture byte equality) and
+// TestWireGoldens_NoOrphanGoldens (testdata/ membership equals the All()
+// set in both directions).
+//
+// Determinism note: the current fixture messages have no map fields, so
+// proto.Marshal is byte-deterministic without proto.MarshalOptions.
+// Adding map-bearing messages in the future will require switching to
+// proto.MarshalOptions{Deterministic: true} in both this package and
+// the test, otherwise the byte-comparison tests will become flaky.
 package fixtures
 
 import (
