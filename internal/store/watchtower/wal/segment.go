@@ -2,11 +2,20 @@ package wal
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
+
+// ErrSegmentClosed is returned by WriteRecord, Sync, and Seal when called
+// after Close or Seal. Closing or sealing a segment is a one-way transition;
+// further writes/syncs are a programming error but are reported as a sentinel
+// rather than a panic so callers can recover gracefully.
+var ErrSegmentClosed = errors.New("wal: segment closed")
 
 // Segment represents one WAL segment file. The on-disk lifecycle is:
 //
@@ -24,6 +33,7 @@ type Segment struct {
 	writer         *bufio.Writer
 	bytes          int64
 	maxRecordBytes int
+	closed         bool
 }
 
 const segmentExt = ".seg"
@@ -133,9 +143,17 @@ func ReopenSegment(path string, maxRecordBytes int) (*Segment, error) {
 	}
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
-	// strip .seg.INPROGRESS to get the numeric index
-	var index uint64
-	if _, err := fmt.Sscanf(base, "%010d.seg.INPROGRESS", &index); err != nil {
+	// Strip the .seg.INPROGRESS suffix and parse the remaining numeric prefix
+	// as a uint64. fmt.Sscanf("%010d", ...) only accepts up to 10 digits and
+	// would fail to recover segments past index 9_999_999_999.
+	const suffix = segmentExt + inProgressSuffix
+	if !strings.HasSuffix(base, suffix) {
+		_ = f.Close()
+		return nil, fmt.Errorf("not an INPROGRESS segment file: %q", base)
+	}
+	prefix := strings.TrimSuffix(base, suffix)
+	index, err := strconv.ParseUint(prefix, 10, 64)
+	if err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("parse segment name %q: %w", base, err)
 	}
@@ -166,7 +184,11 @@ func (s *Segment) Bytes() int64 { return s.bytes }
 
 // WriteRecord appends one length+CRC32C-framed record. Buffered; caller must
 // call Sync() (or Seal(), which syncs as part of its work) for durability.
+// Returns ErrSegmentClosed if called after Close or Seal.
 func (s *Segment) WriteRecord(payload []byte) error {
+	if s.closed {
+		return ErrSegmentClosed
+	}
 	startBytes := s.bytes
 	if err := WriteRecord(s.writer, payload, s.maxRecordBytes); err != nil {
 		return err
@@ -175,8 +197,12 @@ func (s *Segment) WriteRecord(payload []byte) error {
 	return nil
 }
 
-// Sync flushes the writer and fsyncs the segment file.
+// Sync flushes the writer and fsyncs the segment file. Returns
+// ErrSegmentClosed if called after Close or Seal.
 func (s *Segment) Sync() error {
+	if s.closed {
+		return ErrSegmentClosed
+	}
 	if err := s.writer.Flush(); err != nil {
 		return fmt.Errorf("flush writer: %w", err)
 	}
@@ -186,9 +212,12 @@ func (s *Segment) Sync() error {
 // Seal flushes, fsyncs, truncates to actual length, renames .INPROGRESS to
 // .seg, and fsyncs the parent directory. Returns the sealed path.
 //
-// After Seal, the Segment is no longer writable; further WriteRecord calls
-// return an error.
+// After Seal, the Segment is no longer writable; further WriteRecord, Sync,
+// or Seal calls return ErrSegmentClosed.
 func (s *Segment) Seal() (string, error) {
+	if s.closed {
+		return "", ErrSegmentClosed
+	}
 	if err := s.Sync(); err != nil {
 		return "", err
 	}
@@ -211,14 +240,17 @@ func (s *Segment) Seal() (string, error) {
 	s.path = sealed
 	s.file = nil
 	s.writer = nil
+	s.closed = true
 	return sealed, nil
 }
 
 // Close flushes and closes the underlying file WITHOUT renaming. Used on a
 // graceful shutdown that may be reopened later. After Close, the .INPROGRESS
-// file remains on disk for the next process to ReopenSegment.
+// file remains on disk for the next process to ReopenSegment. Idempotent:
+// repeated calls return nil. Subsequent WriteRecord/Sync/Seal calls return
+// ErrSegmentClosed.
 func (s *Segment) Close() error {
-	if s.file == nil {
+	if s.closed {
 		return nil
 	}
 	if err := s.Sync(); err != nil {
@@ -227,5 +259,6 @@ func (s *Segment) Close() error {
 	err := s.file.Close()
 	s.file = nil
 	s.writer = nil
+	s.closed = true
 	return err
 }

@@ -36,7 +36,10 @@ func ReadMeta(dir string) (Meta, error) {
 	return m, nil
 }
 
-// WriteMeta atomically writes meta.json: temp file + rename + fsync(parent).
+// WriteMeta atomically writes meta.json: temp file + fsync(temp) + rename +
+// fsync(parent). The temp-file fsync is required: rename only makes the *name*
+// durable, not the contents — without an explicit Sync the post-crash file can
+// come back truncated even though WriteMeta returned success.
 func WriteMeta(dir string, m Meta) error {
 	m.FormatVersion = metaFormatVersion
 	data, err := json.Marshal(m)
@@ -44,8 +47,23 @@ func WriteMeta(dir string, m Meta) error {
 		return fmt.Errorf("marshal meta: %w", err)
 	}
 	tmp := filepath.Join(dir, metaFileName+".tmp")
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open meta tmp: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write meta tmp: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("fsync meta tmp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close meta tmp: %w", err)
 	}
 	if err := atomicRename(tmp, filepath.Join(dir, metaFileName)); err != nil {
 		_ = os.Remove(tmp)
