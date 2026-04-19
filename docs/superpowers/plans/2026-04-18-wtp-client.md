@@ -5783,39 +5783,97 @@ func (f *fakeConn) Close() error {
 
 // TestConnectingState_SendsSessionInitAndAdvancesOnAck verifies that the
 // Connecting state sends a SessionInit on entry and advances to Replaying
-// once it observes a SessionAck.
+// once it observes a SessionAck with accepted=true.
+//
+// The SessionInit assertions cover every field on the wire so that any
+// future change to provenance (or default population) trips a test
+// rather than silently shipping a wrong field.
 func TestConnectingState_SendsSessionInitAndAdvancesOnAck(t *testing.T) {
 	conn := newFakeConn()
 	dialer := transport.DialerFunc(func(_ context.Context) (transport.Conn, error) {
 		return conn, nil
 	})
 
+	const (
+		wantAgentID        = "test-agent"
+		wantSessionID      = "sess-1"
+		wantAgentVersion   = "v1.2.3"
+		wantOcsfVersion    = "1.4.0"
+		wantKeyFingerprint = "deadbeef"
+		wantContextDigest  = "cafef00d"
+		wantTotalChained   = uint64(42)
+		wantFormatVersion  = uint32(2)
+	)
+
 	tr, err := transport.New(transport.Options{
-		Dialer:    dialer,
-		AgentID:   "test-agent",
-		SessionID: "sess-1",
+		Dialer:         dialer,
+		AgentID:        wantAgentID,
+		SessionID:      wantSessionID,
+		AgentVersion:   wantAgentVersion,
+		OcsfVersion:    wantOcsfVersion,
+		KeyFingerprint: wantKeyFingerprint,
+		ContextDigest:  wantContextDigest,
+		TotalChained:   wantTotalChained,
+		// FormatVersion + Algorithm omitted so we exercise defaults.
 	})
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("New: unexpected error: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	doneCh := make(chan transport.State, 1)
+	type result struct {
+		st  transport.State
+		err error
+	}
+	doneCh := make(chan result, 1)
 	go func() {
-		st, _ := tr.RunOnce(ctx, transport.StateConnecting)
-		doneCh <- st
+		st, err := tr.RunOnce(ctx, transport.StateConnecting)
+		doneCh <- result{st, err}
 	}()
 
-	// Expect SessionInit on the wire.
+	// Expect SessionInit on the wire. Assert every field — the defaulted
+	// Algorithm and FormatVersion as well as everything supplied via
+	// Options. ackedSequence/ackedGeneration are zero on first connect.
 	select {
 	case msg := <-conn.sendCh:
-		if msg.GetSessionInit() == nil {
+		init := msg.GetSessionInit()
+		if init == nil {
 			t.Fatalf("expected SessionInit, got %T", msg.Msg)
 		}
-		if got, want := msg.GetSessionInit().AgentId, "test-agent"; got != want {
+		if got, want := init.AgentId, wantAgentID; got != want {
 			t.Fatalf("agent_id: got %q, want %q", got, want)
+		}
+		if got, want := init.SessionId, wantSessionID; got != want {
+			t.Fatalf("session_id: got %q, want %q", got, want)
+		}
+		if got, want := init.AgentVersion, wantAgentVersion; got != want {
+			t.Fatalf("agent_version: got %q, want %q", got, want)
+		}
+		if got, want := init.OcsfVersion, wantOcsfVersion; got != want {
+			t.Fatalf("ocsf_version: got %q, want %q", got, want)
+		}
+		if got, want := init.KeyFingerprint, wantKeyFingerprint; got != want {
+			t.Fatalf("key_fingerprint: got %q, want %q", got, want)
+		}
+		if got, want := init.ContextDigest, wantContextDigest; got != want {
+			t.Fatalf("context_digest: got %q, want %q", got, want)
+		}
+		if got, want := init.TotalChained, wantTotalChained; got != want {
+			t.Fatalf("total_chained: got %d, want %d", got, want)
+		}
+		if got, want := init.FormatVersion, wantFormatVersion; got != want {
+			t.Fatalf("format_version default: got %d, want %d", got, want)
+		}
+		if got, want := init.Algorithm, wtpv1.HashAlgorithm_HASH_ALGORITHM_HMAC_SHA256; got != want {
+			t.Fatalf("algorithm default: got %s, want %s", got, want)
+		}
+		if got, want := init.WalHighWatermarkSeq, uint64(0); got != want {
+			t.Fatalf("wal_high_watermark_seq: got %d, want %d", got, want)
+		}
+		if got, want := init.Generation, uint32(0); got != want {
+			t.Fatalf("generation: got %d, want %d", got, want)
 		}
 	case <-ctx.Done():
 		t.Fatal("did not receive SessionInit")
@@ -5826,15 +5884,19 @@ func TestConnectingState_SendsSessionInitAndAdvancesOnAck(t *testing.T) {
 		Msg: &wtpv1.ServerMessage_SessionAck{
 			SessionAck: &wtpv1.SessionAck{
 				AckHighWatermarkSeq: 0,
-				Generation: 0,
+				Generation:          0,
+				Accepted:            true,
 			},
 		},
 	}
 
 	select {
-	case st := <-doneCh:
-		if st != transport.StateReplaying {
-			t.Fatalf("next state: got %s, want StateReplaying", st)
+	case res := <-doneCh:
+		if res.err != nil {
+			t.Fatalf("happy-path RunOnce: unexpected error: %v", res.err)
+		}
+		if res.st != transport.StateReplaying {
+			t.Fatalf("next state: got %s, want StateReplaying", res.st)
 		}
 	case <-ctx.Done():
 		t.Fatal("Connecting state did not return")
@@ -5950,16 +6012,68 @@ Create `internal/store/watchtower/transport/transport.go`:
 package transport
 
 import (
+	"errors"
+
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 
 // Options configures a Transport.
+//
+// SessionInit field provenance: the Transport itself is a thin wire-format
+// adapter — it does not look up identity, key material, or sink state. The
+// fields below document who is expected to populate each value when the
+// sink-integration task (Task 27) wires this Transport into the real
+// pipeline. Until then, callers (and tests) supply the values directly via
+// Options.
 type Options struct {
-	Dialer    Dialer
-	AgentID   string
+	// Dialer establishes the underlying gRPC stream. Required.
+	Dialer Dialer
+	// AgentID identifies the agent process. Required. Supplied by the
+	// agent's identity layer (build/runtime config); echoed in
+	// SessionInit so the server can scope the session.
+	AgentID string
+	// SessionID identifies the session. Required. Supplied by the
+	// session-management layer.
 	SessionID string
 	// FormatVersion is sent in SessionInit; defaults to 2.
 	FormatVersion uint32
+	// Algorithm is the chain HMAC algorithm advertised in SessionInit.
+	// Supplied by chain config; defaults to HASH_ALGORITHM_HMAC_SHA256
+	// in New() so the proto validator (wtpv1.ValidateSessionInit)
+	// accepts the frame.
+	Algorithm wtpv1.HashAlgorithm
+	// AgentVersion identifies the running agent build. An agent build
+	// constant — populated by the build/wiring layer.
+	AgentVersion string
+	// OcsfVersion is the OCSF schema version the sink emits. An agent
+	// build constant — populated by the build/wiring layer.
+	OcsfVersion string
+	// KeyFingerprint identifies the active signing key (hex-encoded).
+	// Supplied by chain config (KMS/key provider); empty until sink
+	// wiring (Task 27).
+	KeyFingerprint string
+	// ContextDigest is the hex-encoded SHA-256 of the session context.
+	// Computed at sink integration (Task 27) over the agent's
+	// session-context inputs (see chain.SessionContext).
+	ContextDigest string
+	// TotalChained is the count of records the sink has chained so far.
+	// Running count from chain.SinkChain; supplied by sink integration.
+	TotalChained uint64
+}
+
+// validate enforces the construction-time invariants documented on
+// Options. It is called by New before any defaults are applied.
+func validate(opts Options) error {
+	if opts.Dialer == nil {
+		return errors.New("transport: nil Dialer")
+	}
+	if opts.AgentID == "" {
+		return errors.New("transport: AgentID required")
+	}
+	if opts.SessionID == "" {
+		return errors.New("transport: SessionID required")
+	}
+	return nil
 }
 
 // Transport runs the four-state WTP client state machine. It is owned by
@@ -5972,14 +6086,34 @@ type Transport struct {
 	// is observed.
 	ackedSequence   uint64
 	ackedGeneration uint32
+
+	// rejectReason is populated when the server rejects the session
+	// (SessionAck.accepted=false). Surfaced via RejectReason().
+	rejectReason string
 }
 
 // New constructs a Transport. It does not dial; call Run to start.
-func New(opts Options) *Transport {
+// New validates the required Options fields and returns an error if any
+// are missing so misconfiguration fails at construction rather than
+// inside the run loop.
+func New(opts Options) (*Transport, error) {
+	if err := validate(opts); err != nil {
+		return nil, err
+	}
 	if opts.FormatVersion == 0 {
 		opts.FormatVersion = 2
 	}
-	return &Transport{opts: opts}
+	if opts.Algorithm == wtpv1.HashAlgorithm_HASH_ALGORITHM_UNSPECIFIED {
+		opts.Algorithm = wtpv1.HashAlgorithm_HASH_ALGORITHM_HMAC_SHA256
+	}
+	return &Transport{opts: opts}, nil
+}
+
+// RejectReason returns the reject_reason surfaced by the most recent
+// SessionAck with accepted=false. It is empty until the server rejects
+// the session.
+func (t *Transport) RejectReason() string {
+	return t.rejectReason
 }
 
 // sessionInit returns the SessionInit message for the current connection.
@@ -5987,11 +6121,17 @@ func (t *Transport) sessionInit() *wtpv1.ClientMessage {
 	return &wtpv1.ClientMessage{
 		Msg: &wtpv1.ClientMessage_SessionInit{
 			SessionInit: &wtpv1.SessionInit{
-				AgentId:             t.opts.AgentID,
 				SessionId:           t.opts.SessionID,
+				OcsfVersion:         t.opts.OcsfVersion,
 				FormatVersion:       t.opts.FormatVersion,
+				Algorithm:           t.opts.Algorithm,
+				KeyFingerprint:      t.opts.KeyFingerprint,
+				ContextDigest:       t.opts.ContextDigest,
 				WalHighWatermarkSeq: t.ackedSequence,
 				Generation:          t.ackedGeneration,
+				AgentId:             t.opts.AgentID,
+				AgentVersion:        t.opts.AgentVersion,
+				TotalChained:        t.opts.TotalChained,
 			},
 		},
 	}
