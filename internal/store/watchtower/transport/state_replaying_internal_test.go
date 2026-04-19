@@ -14,12 +14,17 @@ import (
 // would let production callers outside the transport package wire it
 // into a run loop without realising it would silently drop inbound
 // BatchAck/ServerHeartbeat/SessionUpdate/Goaway frames during long
-// replays. Task 17 (Live state Batcher) and Task 18 (heartbeat) add
-// the shared recv goroutine; Task 22 (Store integration) wires
-// runReplaying through a RunOnce dispatch table that gates on those
-// landing first. Until then, only tests reach runReplaying — via this
-// helper, which lives in *_test.go and is compiled out of the
-// production binary.
+// replays.
+//
+// The unexport is an EXTERNAL-CALL-SITE GUARD, not a compile-time
+// guarantee: callers inside the transport package can still call
+// runReplaying directly. Production wiring inside the package (Task 22's
+// Run loop) MUST gate the call behind the recv-multiplexer plumbing
+// Tasks 17/18 introduce. See the Task 22 Run-loop snippet in
+// docs/superpowers/plans/2026-04-18-wtp-client.md "Task 16 — Deferred
+// to Task 17/18" for the structural dependency. Until then, only tests
+// reach runReplaying — via this helper, which lives in *_test.go and is
+// compiled out of the production binary.
 //
 // Tests using this seam MUST also override buildEventBatchFn via
 // SetBuildEventBatchFnForTest (the default stub returns an empty

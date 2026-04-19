@@ -35,13 +35,28 @@ import (
 // stall the receive side). Task 17 (Live state Batcher) and Task 18
 // (heartbeat) introduce the shared recv goroutine + multiplexer that
 // runReplaying will plug into. Until then, runReplaying MUST NOT be
-// wired into the production run loop. The unexport of RunReplaying
-// (state_replaying_internal_test.go provides the test-only seam
-// RunReplayingForTest) enforces this at compile time: production code
-// outside the transport package's _test.go files cannot reach
-// runReplaying without going through a future RunOnce dispatch table
-// that Task 22 will add (and which will gate Replaying behind the recv
-// loop landing in Task 17/18).
+// wired into the production run loop.
+//
+// The unexport of runReplaying is an EXTERNAL-CALL-SITE GUARD, not a
+// compile-time guarantee:
+//   - Callers OUTSIDE the internal/store/watchtower/transport package
+//     CANNOT reach runReplaying without going through a future RunOnce
+//     dispatch table that Task 22 will add (and which will gate
+//     Replaying behind the recv loop landing in Task 17/18).
+//   - Callers INSIDE the transport package CAN still call runReplaying
+//     directly — Go's package-level visibility does not prevent this.
+//     Production wiring inside the transport package (Task 22's Run
+//     loop) MUST gate the call behind the recv-multiplexer plumbing
+//     that Tasks 17/18 introduce. See the updated Task 22 Run-loop
+//     snippet in docs/superpowers/plans/2026-04-18-wtp-client.md
+//     "Task 16 — Deferred to Task 17/18", which makes that dependency
+//     structural (the snippet visibly cannot work without Task 17/18
+//     landing first).
+//
+// The exported test seam RunReplayingForTest lives in
+// state_replaying_internal_test.go (compiled out of the production
+// binary) so external transport_test callers can still drive the
+// per-state handler in isolation.
 func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error) {
 	for {
 		batch, done, err := r.NextBatch(ctx)

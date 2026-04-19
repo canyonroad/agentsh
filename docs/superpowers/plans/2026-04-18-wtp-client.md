@@ -6777,13 +6777,19 @@ shared recv-multiplexer goroutine; Task 22 (Store integration) wires
 `runReplaying` through a `RunOnce` dispatch table that gates Replaying
 behind those landing.
 
-To enforce the deferral at compile time, `runReplaying` is unexported
-(lowercase) — production code outside the transport package's `_test.go`
-files cannot reach it. The exported test seam `RunReplayingForTest`
-lives in `state_replaying_internal_test.go` (the `_test.go` suffix
-excludes it from production binaries) so external `transport_test`
-callers can drive the per-state handler without going through the
-unfinished production dispatch.
+To enforce the deferral, `runReplaying` is unexported (lowercase) — this
+is an EXTERNAL-CALL-SITE GUARD, not a compile-time guarantee. Production
+code OUTSIDE the `internal/store/watchtower/transport` package cannot
+reach it. Callers INSIDE the transport package CAN still call it
+directly — Go's package-level visibility does not prevent this — so
+production wiring inside the transport package (Task 22's Run loop) MUST
+gate the call behind the recv-multiplexer plumbing Tasks 17/18
+introduce. See the Task 22 Run-loop snippet (Step 4) for the structural
+dependency. The exported test seam `RunReplayingForTest` lives in
+`state_replaying_internal_test.go` (the `_test.go` suffix excludes it
+from production binaries) so external `transport_test` callers can drive
+the per-state handler without going through the unfinished production
+dispatch.
 
 ```go
 package transport
@@ -6823,13 +6829,28 @@ import (
 // stall the receive side). Task 17 (Live state Batcher) and Task 18
 // (heartbeat) introduce the shared recv goroutine + multiplexer that
 // runReplaying will plug into. Until then, runReplaying MUST NOT be
-// wired into the production run loop. The unexport of RunReplaying
-// (state_replaying_internal_test.go provides the test-only seam
-// RunReplayingForTest) enforces this at compile time: production code
-// outside the transport package's _test.go files cannot reach
-// runReplaying without going through a future RunOnce dispatch table
-// that Task 22 will add (and which will gate Replaying behind the recv
-// loop landing in Task 17/18).
+// wired into the production run loop.
+//
+// The unexport of runReplaying is an EXTERNAL-CALL-SITE GUARD, not a
+// compile-time guarantee:
+//   - Callers OUTSIDE the internal/store/watchtower/transport package
+//     CANNOT reach runReplaying without going through a future RunOnce
+//     dispatch table that Task 22 will add (and which will gate
+//     Replaying behind the recv loop landing in Task 17/18).
+//   - Callers INSIDE the transport package CAN still call runReplaying
+//     directly — Go's package-level visibility does not prevent this.
+//     Production wiring inside the transport package (Task 22's Run
+//     loop) MUST gate the call behind the recv-multiplexer plumbing
+//     that Tasks 17/18 introduce. See the updated Task 22 Run-loop
+//     snippet in docs/superpowers/plans/2026-04-18-wtp-client.md
+//     "Task 16 — Deferred to Task 17/18", which makes that dependency
+//     structural (the snippet visibly cannot work without Task 17/18
+//     landing first).
+//
+// The exported test seam RunReplayingForTest lives in
+// state_replaying_internal_test.go (compiled out of the production
+// binary) so external transport_test callers can still drive the
+// per-state handler in isolation.
 func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error) {
 	for {
 		batch, done, err := r.NextBatch(ctx)
@@ -6904,12 +6925,17 @@ compiled out of the production binary.
 // would let production callers outside the transport package wire it
 // into a run loop without realising it would silently drop inbound
 // BatchAck/ServerHeartbeat/SessionUpdate/Goaway frames during long
-// replays. Task 17 (Live state Batcher) and Task 18 (heartbeat) add
-// the shared recv goroutine; Task 22 (Store integration) wires
-// runReplaying through a RunOnce dispatch table that gates on those
-// landing first. Until then, only tests reach runReplaying — via this
-// helper, which lives in *_test.go and is compiled out of the
-// production binary.
+// replays.
+//
+// The unexport is an EXTERNAL-CALL-SITE GUARD, not a compile-time
+// guarantee: callers inside the transport package can still call
+// runReplaying directly. Production wiring inside the package (Task 22's
+// Run loop) MUST gate the call behind the recv-multiplexer plumbing
+// Tasks 17/18 introduce. See the Task 22 Run-loop snippet in
+// docs/superpowers/plans/2026-04-18-wtp-client.md "Task 16 — Deferred
+// to Task 17/18" for the structural dependency. Until then, only tests
+// reach runReplaying — via this helper, which lives in *_test.go and is
+// compiled out of the production binary.
 //
 // Tests using this seam MUST also override buildEventBatchFn via
 // SetBuildEventBatchFnForTest (the default stub returns an empty
@@ -7002,18 +7028,39 @@ state-machine section near line 565) requires Replaying to process
 `BatchAck`, `ServerHeartbeat`, `SessionUpdate`, and `Goaway` alongside
 replay completion. Round-2 review flagged this as a High finding.
 
-The deferral is enforced at compile time:
-- `runReplaying` is unexported (Task 16 round-2 fix). Production code
-  outside the test build cannot call it.
-- The exported test seam `RunReplayingForTest` is in
-  `state_replaying_internal_test.go`, which is excluded from production
-  binaries.
+The deferral is enforced as an **external-call-site guard**, not a
+compile-time guarantee:
+
+- Callers OUTSIDE the `internal/store/watchtower/transport` package
+  CANNOT reach `runReplaying` without going through a future RunOnce
+  dispatch table that Task 22 will add. `runReplaying` is unexported
+  (Task 16 round-2 fix), so external production code is structurally
+  blocked from invoking it.
+- Callers INSIDE the transport package CAN still call `runReplaying`
+  directly — Go's package-level visibility does not prevent this.
+  Production wiring inside the transport package (Task 22's `Run`
+  loop) MUST gate the call behind the recv-multiplexer plumbing that
+  Tasks 17/18 introduce. See the updated Task 22 Run-loop snippet
+  (Step 4 below), which makes that dependency structural: the snippet's
+  Live-state handoff (`max(rep.LastReplayedSequence()+1, ackHW+1)`) and
+  recv-multiplexer dependency MUST be in place before Task 22 commits
+  its Run loop. Until then, replay is reachable only via
+  `RunReplayingForTest`.
+- The exported test seam `RunReplayingForTest` lives in
+  `state_replaying_internal_test.go` (the `_test.go` suffix excludes
+  it from production binaries), so external `transport_test` callers
+  can still drive the per-state handler in isolation.
 
 Task 17 (Live state Batcher) introduces the shared recv-multiplexer
 goroutine architecture. Task 18 (heartbeat) extends it. Once the recv
 loop lands, Task 22 (Store integration) wires the production run loop
-to invoke replay through the recv-aware path. Until then, replay is
-test-only.
+to invoke replay through the recv-aware path. The Task 22 Run-loop
+snippet (Step 4) wires `runReplaying`. The wiring is gated by the
+recv-multiplexer plumbing Tasks 17/18 introduce — the snippet's
+Live-state handoff (`max(rep.LastReplayedSequence()+1, ackHW+1)`) and
+recv-multiplexer dependency MUST be in place before Task 22 commits
+its Run loop. Until then, replay is reachable only via
+`RunReplayingForTest`.
 
 ---
 
@@ -8028,13 +8075,36 @@ Add to `internal/store/watchtower/transport/transport.go`:
 ```go
 // Run loops the four-state state machine until ctx is cancelled.
 // It applies backoff between StateConnecting attempts.
-func (t *Transport) Run(ctx context.Context, rdrFactory func() (*wal.Reader, error), liveOpts LiveOptions) error {
+//
+// rdrFactory takes the WAL start sequence so the caller can position
+// the Reader explicitly per state entry. Replaying opens at 0 (the
+// Reader's nextSeq filter is harmless because Replayer hard-stops at
+// the entry-time tail watermark — over-tail records are surfaced once,
+// as the boundary record). Live opens at
+// max(rep.LastReplayedSequence()+1, ackHW+1) so it picks up exactly
+// past the boundary record without re-emitting it AND without missing
+// any trailing TransportLoss marker overflow GC may have appended at
+// the WAL tail mid-replay (loss markers bypass the Reader's nextSeq
+// filter — see wal/reader.go nextLocked near the isLossMarker branch).
+//
+// rep is hoisted to the outer Run scope and threaded across the
+// Replaying → Live boundary so Live can compute its start cursor from
+// rep.LastReplayedSequence(). On any state regress to StateConnecting
+// (e.g. on Replaying or Live error) we MUST reset rep = nil so a stale
+// handoff doesn't leak into a subsequent Live entry on the next
+// connect cycle.
+func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal.Reader, error), liveOpts LiveOptions) error {
 	bo := NewBackoff(BackoffOptions{
 		Initial: 200 * time.Millisecond,
 		Max:     30 * time.Second,
 		Factor:  2.0,
 	})
 	st := StateConnecting
+	// rep carries Replayer state across the Replaying → Live boundary.
+	// nil before Replaying runs; set in StateReplaying; consumed (and
+	// then cleared) in StateLive. Reset to nil whenever we regress to
+	// StateConnecting so the next Live entry gets a fresh handoff.
+	var rep *Replayer
 	for {
 		select {
 		case <-ctx.Done():
@@ -8053,28 +8123,80 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func() (*wal.Reader, err
 				continue
 			}
 			bo.Reset()
+			rep = nil // fresh connect cycle — no stale handoff
 			st = next
 		case StateReplaying:
-			rdr, err := rdrFactory()
+			rdr, err := rdrFactory(0)
 			if err != nil {
+				rep = nil
 				st = StateConnecting
 				continue
 			}
-			r := NewReplayer(rdr, ReplayerOptions{
+			rep = NewReplayer(rdr, ReplayerOptions{
 				MaxBatchRecords: liveOpts.Batcher.MaxRecords,
 				MaxBatchBytes:   liveOpts.Batcher.MaxBytes,
 			})
-			next, err := t.runReplaying(ctx, r)
-			_ = err
+			next, err := t.runReplaying(ctx, rep)
+			if err != nil {
+				// runReplaying tore down t.conn on its way out per its
+				// lifecycle rule; back off and reconnect. Reset rep so
+				// no stale handoff leaks into the next Live entry.
+				rep = nil
+				st = StateConnecting
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(bo.Next()):
+				}
+				continue
+			}
 			st = next
 		case StateLive:
-			rdr, err := rdrFactory()
+			// Live opens its Reader at max(rep.LastReplayedSequence()+1,
+			// ackHW+1). The max() avoids two failure modes:
+			//   1. Re-emitting the boundary record (Replayer hard-stops
+			//      one past tailSeq; rep.LastReplayedSequence() captures
+			//      that over-tail record, so Live's start MUST be
+			//      strictly greater).
+			//   2. Missing trailing loss markers overflow GC may have
+			//      appended at the WAL tail mid-replay. Loss markers
+			//      bypass Reader.nextSeq (see wal/reader.go isLossMarker
+			//      branch), so Live's Reader will surface them even
+			//      though its start cursor is past their covered range.
+			//
+			// TODO(Task 22): replace t.conn.AcknowledgedHighWaterSequence
+			// with the actual SessionAck-derived ack_hw source once the
+			// Conn handshake surfaces it. The placeholder here documents
+			// the dependency; substitute the real accessor before this
+			// snippet ships.
+			ackHW := t.conn.AcknowledgedHighWaterSequence()
+			start := ackHW + 1
+			if rep != nil {
+				if cand := rep.LastReplayedSequence() + 1; cand > start {
+					start = cand
+				}
+			}
+			// One-shot handoff — clear rep so a subsequent Live entry
+			// after a reconnect cycle picks up the fresh value (or nil
+			// if no replay ran).
+			rep = nil
+			rdr, err := rdrFactory(start)
 			if err != nil {
 				st = StateConnecting
 				continue
 			}
 			next, err := t.runLive(ctx, rdr, liveOpts)
-			_ = err
+			if err != nil {
+				// Same teardown contract as runReplaying: t.conn already
+				// closed on the error path. Back off and reconnect.
+				st = StateConnecting
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(bo.Next()):
+				}
+				continue
+			}
 			st = next
 		case StateShutdown:
 			return nil
@@ -8094,6 +8216,44 @@ import (
 	wtpv1 "github.com/agentsh/agentsh/proto/canyonroad/wtp/v1"
 )
 ```
+
+The snippet above structurally depends on Tasks 17/18:
+
+- The `runLive` method called from `StateLive` is introduced by Task 17
+  (Live state Batcher) and gains its recv-multiplexer plumbing from
+  Task 18 (heartbeat). The snippet visibly cannot compile without
+  Task 17 landing first — that is the structural enforcement promised
+  in the "Task 16 — Deferred to Task 17/18" subsection.
+- The `t.conn.AcknowledgedHighWaterSequence()` accessor is a placeholder
+  for whatever Task 22 wires from the SessionAck source. If Task 22 is
+  the first to need it, define the accessor on `Conn` (or read the
+  watermark off a `Transport` field that the SessionAck handler in
+  Tasks 17/18 populates) — the choice belongs to Task 22.
+
+Two acceptance tests in `internal/store/watchtower/transport/transport_run_test.go`
+exercise the Replaying → Live handoff:
+
+- `TestRun_LiveResumesPastReplayBoundary` — verifies Live does not
+  re-emit the boundary record. Setup: WAL with records seq 1..10,
+  `NewReplayer` captures `tailSeq=10`, then append seq=11 post-entry,
+  then complete replay (the boundary record seq=11 surfaces in the
+  final replay batch). Assert: Live's Reader is opened at
+  `max(11+1, 0+1) = 12`, and no record with `seq <= 11` surfaces in any
+  Live `EventBatch` (no duplicate boundary record on the wire).
+- `TestRun_LiveSurfacesTrailingLossMarker` — verifies the trailing-
+  loss-marker race is closed by the Live handoff. Setup: drive overflow
+  GC to append a `TransportLoss` marker covering seqs within the
+  `(ack_hw, tail_seq]` window AT THE WAL TAIL, AFTER `NewReplayer` has
+  captured `tailSeq`. Per the Replayer hard-stop rule, the marker is
+  NOT surfaced during replay if it sits past an over-tail `RecordData`
+  (NextBatch returns done=true on the boundary record before reaching
+  the trailing marker). Assert: after replay returns done=true with
+  the boundary record, Live's Reader (opened at
+  `max(rep.LastReplayedSequence()+1, ackHW+1)`) surfaces the trailing
+  `TransportLoss` marker via `EventBatch`. This works because loss
+  markers bypass `Reader.nextSeq` (see `wal/reader.go` near
+  `isLossMarker`), so the marker surfaces even though Live's start
+  cursor is past the marker's covered seq range.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -8171,8 +8331,8 @@ func TestShutdown_DrainsPendingThenCloses(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	doneCh := make(chan error, 1)
-	rdrFactory := func() (*wal.Reader, error) {
-		return w.NewReader(0), nil
+	rdrFactory := func(start uint64) (*wal.Reader, error) {
+		return w.NewReader(start), nil
 	}
 	go func() {
 		doneCh <- tr.Run(ctx, rdrFactory, transport.LiveOptions{
@@ -9415,8 +9575,8 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 	}
 
 	go func() {
-		_ = tr.Run(ctx, func() (*wal.Reader, error) {
-			return w.NewReader(0), nil
+		_ = tr.Run(ctx, func(start uint64) (*wal.Reader, error) {
+			return w.NewReader(start), nil
 		}, transport.LiveOptions{
 			Batcher: transport.BatcherOptions{
 				MaxRecords: opts.BatchMaxRecords,
