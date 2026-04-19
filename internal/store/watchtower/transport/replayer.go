@@ -39,31 +39,40 @@ type ReplayBatch struct {
 // The Replayer is not safe for concurrent NextBatch calls — callers MUST
 // drive it from a single goroutine (typically the transport's run loop).
 type Replayer struct {
-	rdr *wal.Reader
+	rdr  *wal.Reader
 	opts ReplayerOptions
-	// tailSeq is a MINIMUM bound on what replay surfaces, not a hard stop.
+	// tailSeq is a HARD upper bound on RecordData surfaced during replay.
 	// It is the WAL high-water sequence captured under the WAL lock at
-	// NewReplayer time, so every record with seq <= tailSeq was already on
-	// disk by then and will be visible to the underlying Reader. After
-	// replay completes (TryNext returns ok=false), the Reader has surfaced
-	// every record with seq <= tailSeq, plus any records appended after
-	// construction that happened to be visible at the moment of catch-up.
-	// Those extra Live-era records are appended to the final batch — that
-	// is harmless because the server treats EventBatch records identically
-	// regardless of which state-machine state delivered them. In steady-
-	// state high throughput the batch caps (MaxBatchRecords/MaxBatchBytes)
-	// bound the loop so the Replayer cannot starve the run loop just
-	// because new records keep arriving.
+	// NewReplayer time, so every record with seq <= tailSeq was already
+	// on disk by then and will be visible to the underlying Reader. The
+	// spec at docs/superpowers/specs/2026-04-18-wtp-client-design.md:586
+	// defines replay as the finite (ack_hw, wal_hw_at_entry] window
+	// before advancing to live; without a hard stop, sustained appends
+	// would prevent TryNext from ever returning ok=false and replay
+	// would never terminate.
+	//
+	// Loss markers (RecordLoss) are NOT subject to this hard stop — they
+	// always surface so the receiver can record the gap. See NextBatch
+	// for the trailing-loss-marker race that this carve-out addresses.
 	tailSeq uint64
+	// lastReplayedSeq tracks the highest RecordData.Sequence surfaced by
+	// NextBatch so far. Initialized to zero; updated whenever a RecordData
+	// is appended to a batch. Task 22 (Store integration) consumes this
+	// value via LastReplayedSequence() to position the Live-state Reader
+	// at max(lastReplayedSeq+1, ackHW+1) — see LastReplayedSequence for
+	// the rationale.
+	lastReplayedSeq uint64
 }
 
-// NewReplayer captures the current WAL high-water sequence as a minimum-
-// replay watermark. Every record with seq <= tailSeq is guaranteed to be
-// surfaced before NextBatch returns done=true (the Reader will always reach
-// it because tailSeq was sampled under the WAL lock). Records appended
-// after this point may also surface in the final batch; the Live state
-// handler picks up where Replayer leaves off without overlap because the
-// underlying Reader is shared.
+// NewReplayer captures the current WAL high-water sequence as a hard upper
+// bound on RecordData surfaced during replay. Every RecordData with
+// seq <= tailSeq is guaranteed to be surfaced before NextBatch returns
+// done=true (the Reader will always reach it because tailSeq was sampled
+// under the WAL lock). Records appended after this point belong to the Live
+// state and MUST NOT extend replay; the boundary record (the first
+// RecordData with seq > tailSeq) is included in the final batch as a side
+// effect of having been read from the Reader (we cannot push it back), but
+// no further over-tail records are pulled.
 func NewReplayer(rdr *wal.Reader, opts ReplayerOptions) *Replayer {
 	return &Replayer{
 		rdr:     rdr,
@@ -77,40 +86,69 @@ func NewReplayer(rdr *wal.Reader, opts ReplayerOptions) *Replayer {
 // uses it implicitly via the done flag from NextBatch.
 func (r *Replayer) TailSequence() uint64 { return r.tailSeq }
 
+// LastReplayedSequence returns the highest RecordData.Sequence surfaced by
+// NextBatch so far. Zero before the first RecordData is emitted.
+//
+// Task 22 (Store integration) consumes this value to position the Live
+// Reader at max(lastReplayedSeq+1, ackHW+1). The max() is required for
+// two reasons:
+//
+//  1. Avoid duplicate RecordData sends: replay may have over-shot tailSeq
+//     by ONE record (the boundary record per NextBatch's hard-stop rule),
+//     so Live MUST start at lastReplayedSeq+1, not ackHW+1.
+//  2. Still pass over the trailing-loss-marker WAL position: loss markers
+//     bypass the Reader's nextSeq filter (see wal/reader.go nextLocked
+//     near the isLossMarker branch), so Live's Reader will encounter and
+//     surface any trailing loss marker that overflow GC appended at the
+//     WAL tail mid-replay even though Live's start cursor is past the
+//     marker's covered seq range.
+//
+// Without this contract, the trailing-loss-marker race that motivated
+// the round-1 drain-until-ok=false fix would re-emerge as silent gap
+// loss in the Live state.
+func (r *Replayer) LastReplayedSequence() uint64 { return r.lastReplayedSeq }
+
 // NextBatch pulls records from the underlying Reader without blocking and
-// returns the next batch alongside a done flag. done=true means the Reader
-// is currently caught up and the caller should advance to the Live state.
-// ctx is honoured between record reads — if it is cancelled, NextBatch
-// returns its error.
+// returns the next batch alongside a done flag. done=true means replay is
+// complete and the caller should advance to the Live state. ctx is honoured
+// between record reads — if it is cancelled, NextBatch returns its error.
 //
 // Termination rules (in order):
 //
 //  1. ctx cancelled → return (current-partial-batch, false, ctx.Err()).
-//  2. Reader is currently caught up (TryNext ok=false) → return done=true.
-//     This is the SOLE done signal. tailSeq was captured under the WAL
-//     lock at NewReplayer time, so every record with seq <= tailSeq was
-//     on disk by then and the Reader will have surfaced it (either as a
-//     RecordData yield or, for filtered-by-start records, dropped on the
-//     floor inside Reader.nextLocked) by the time TryNext returns
-//     ok=false. Live records appended after construction that happen to
-//     be visible at the moment of catch-up are appended to this final
-//     batch — harmless because the server treats EventBatch records
+//  2. RecordData with seq > tailSeq read → append the boundary record and
+//     return done=true. tailSeq is a HARD upper bound: per spec
+//     2026-04-18-wtp-client-design.md:586, replay is the finite
+//     (ack_hw, wal_hw_at_entry] window before advancing to live. Without
+//     this hard stop, sustained appends would prevent TryNext from ever
+//     returning ok=false and replay would never terminate. The boundary
+//     record is included because we have already read it from the Reader
+//     and cannot push it back; the server treats EventBatch records
 //     identically regardless of which state-machine state delivered them.
-//  3. Batch caps hit (records or bytes) → return done=false, partial batch.
+//  3. Reader is currently caught up (TryNext ok=false) → return done=true.
+//  4. Batch caps hit (records or bytes) → return done=false, partial batch.
 //
-// IMPORTANT: there is NO early-exit on `rec.Sequence >= tailSeq`. An
-// earlier draft had one, but it raced with overflow GC: while the
-// replayer drains, GC can drop a segment containing replay-era seqs and
-// append a compensating loss marker AT THE WAL TAIL whose Loss.ToSequence
-// is <= tailSeq but whose WAL position is beyond tailSeq. With an
-// early-exit on RecordData reaching tailSeq, that trailing loss marker
-// would never surface and the receiver would silently miss the gap
-// notice. Termination MUST be driven by the Reader's caught-up signal
-// alone.
+// Trailing-loss-marker race (documented for Task 17/22 Live state). While
+// replay drains, overflow GC can drop a segment containing replay-era seqs
+// and append a compensating loss marker AT THE WAL TAIL, with
+// Loss.ToSequence <= tailSeq but a WAL position strictly beyond tailSeq.
+// Two outcomes are possible:
+//
+//   - The Reader surfaces the loss marker BEFORE any over-tail RecordData.
+//     NextBatch appends it to the batch (loss markers always surface and
+//     do not contribute to the seq-vs-tailSeq check) and replay continues
+//     normally.
+//   - The Reader surfaces an over-tail RecordData first, NextBatch returns
+//     done=true with the boundary record included, and the trailing loss
+//     marker has not yet been seen. The Live state handler is responsible
+//     for surfacing it: Live MUST open its Reader at
+//     max(lastReplayedSeq+1, ackHW+1) — loss markers bypass the Reader's
+//     nextSeq filter (see wal/reader.go nextLocked near the isLossMarker
+//     branch), so the trailing marker WILL surface through Live's Reader
+//     even though its covered seq range is past Live's start cursor.
 //
 // Loss records (RecordLoss) are appended verbatim and contribute neither
-// to the byte cap accounting nor to a "this record is past tailSeq"
-// check (there is none — see above).
+// to the byte cap accounting nor to the seq-vs-tailSeq check above.
 func (r *Replayer) NextBatch(ctx context.Context) (ReplayBatch, bool, error) {
 	batch := ReplayBatch{}
 	bytes := 0
@@ -129,20 +167,22 @@ func (r *Replayer) NextBatch(ctx context.Context) (ReplayBatch, bool, error) {
 			return batch, false, fmt.Errorf("replayer: reader.TryNext: %w", err)
 		}
 		if !ok {
-			// Reader is caught up to the live tail. Since tailSeq was
-			// snapshotted under the WAL lock at construction time, every
-			// record with seq <= tailSeq has been visible to the reader by
-			// now (whether emitted, filtered by start, or surfaced as a
-			// loss marker). Replay is done — even trailing loss markers
-			// that overflow GC may have appended after entry are surfaced
-			// on this same iteration before we observe ok=false, because
-			// they were durably written before the TryNext that returned
-			// ok=false.
+			// Reader is caught up to the live tail — replay is done.
+			// tailSeq was snapshotted under the WAL lock at construction,
+			// so every record with seq <= tailSeq has been visible to the
+			// reader by now (whether emitted, filtered by start, or
+			// surfaced as a loss marker).
+			return batch, true, nil
+		}
+		if rec.Kind == wal.RecordData && rec.Sequence > r.tailSeq {
+			batch.Records = append(batch.Records, rec)
+			r.lastReplayedSeq = rec.Sequence
 			return batch, true, nil
 		}
 		batch.Records = append(batch.Records, rec)
 		if rec.Kind == wal.RecordData {
 			bytes += len(rec.Payload)
+			r.lastReplayedSeq = rec.Sequence
 		}
 	}
 }

@@ -24,6 +24,24 @@ import (
 // ctx cancellation is surfaced as the wrapped Replayer error and treated
 // the same as any other replay failure: conn is torn down, state regresses
 // to Connecting, and the run loop owns whether to retry or shut down.
+//
+// PRODUCTION-BLOCKED — recv multiplexer not yet wired. The spec at
+// docs/superpowers/specs/2026-04-18-wtp-client-design.md:565 requires
+// stateReplaying to process inbound BatchAck, ServerHeartbeat,
+// SessionUpdate, and Goaway concurrently with replay completion. This
+// implementation only loops over NextBatch and Send — it has NO recv
+// branch, so any inbound control frame that arrives during a long replay
+// would be dropped (or, depending on the gRPC stream's buffer, would
+// stall the receive side). Task 17 (Live state Batcher) and Task 18
+// (heartbeat) introduce the shared recv goroutine + multiplexer that
+// runReplaying will plug into. Until then, runReplaying MUST NOT be
+// wired into the production run loop. The unexport of RunReplaying
+// (state_replaying_internal_test.go provides the test-only seam
+// RunReplayingForTest) enforces this at compile time: production code
+// outside the transport package's _test.go files cannot reach
+// runReplaying without going through a future RunOnce dispatch table
+// that Task 22 will add (and which will gate Replaying behind the recv
+// loop landing in Task 17/18).
 func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error) {
 	for {
 		batch, done, err := r.NextBatch(ctx)
@@ -51,30 +69,16 @@ func (t *Transport) runReplaying(ctx context.Context, r *Replayer) (State, error
 	}
 }
 
-// RunReplaying is the public test seam for runReplaying. The full state-
-// machine dispatch (calling runReplaying from RunOnce/Run alongside
-// Connecting and Live handlers) is wired by Task 22 (Store integration);
-// Task 16's scope is the per-state handler + Replayer mechanics, so this
-// method exists to let transport tests drive runReplaying directly without
-// running the full RunOnce dispatch table.
-//
-// IMPORTANT: production callers MUST replace buildEventBatchFn with a
-// real builder before invoking RunReplaying — the default stub
-// (buildEventBatchStub) returns an empty ClientMessage that would put
-// invalid frames on the wire. Task 17 fills in the real wire format and
-// Task 22 wires it up; until then, only tests should call RunReplaying
-// directly, and they should either tolerate the stub's empty message or
-// override buildEventBatchFn via setBuildEventBatchFnForTest.
-func (t *Transport) RunReplaying(ctx context.Context, r *Replayer) (State, error) {
-	return t.runReplaying(ctx, r)
-}
-
 // buildEventBatchFn is the function variable runReplaying calls to wrap
 // WAL records into a wtpv1.EventBatch envelope. Defaults to the empty-
 // message stub so the Replaying state machine can be exercised in tests.
 // Task 17 (Live-state Batcher) and Task 22 (Store integration) replace
 // this with the real builder before runReplaying is wired into the
-// production run loop.
+// production run loop. Until then, in addition to the stub-builder
+// hazard, runReplaying is missing the recv multiplexer required by the
+// spec (see runReplaying header) — both gaps are addressed by Task
+// 17/18, and runReplaying remains unexported so production callers
+// outside the transport package cannot reach it.
 //
 // Tests that need to assert against a non-empty wire format can override
 // via setBuildEventBatchFnForTest (see state_replaying_internal_test.go);

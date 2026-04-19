@@ -14,6 +14,14 @@ import (
 // sink-integration task (Task 27) wires this Transport into the real
 // pipeline. Until then, callers (and tests) supply the values directly via
 // Options.
+//
+// TODO(Task 17/18): runReplaying needs a recv multiplexer before
+// production use; see state_replaying.go runReplaying header. The
+// Replaying-state handler is currently unexported and reachable only via
+// the RunReplayingForTest seam in state_replaying_internal_test.go;
+// production wiring (a RunOnce dispatch table that selects per-state
+// handlers) lands in Task 22 after Task 17 (Live Batcher) and Task 18
+// (heartbeat) introduce the shared recv goroutine.
 type Options struct {
 	// Dialer establishes the underlying gRPC stream. Required.
 	Dialer Dialer

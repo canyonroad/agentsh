@@ -30,24 +30,27 @@ func openTestWAL(t *testing.T) *wal.WAL {
 	return w
 }
 
-// TestReplayer_StopsAtTailWatermark verifies the replayer surfaces every
-// record covered by the entry-time tail watermark and reports done. Three
-// records are appended, seq=2 is acked, and one more record (seq=3) is
-// appended past the ack. A Reader started at start = ack+1 = 3 must surface
-// at least seq=3 and report done.
+// TestReplayer_StopsAtTailWatermark verifies the hard-stop contract:
+// RecordData with seq > tailSeq terminates replay immediately. Three
+// records are appended, seq=2 is acked, one more (seq=3) is appended past
+// the ack, NewReplayer captures tailSeq=3, then a post-entry seq=4 is
+// appended. The Replayer MUST surface seq=3 (a within-window record), MAY
+// surface seq=4 as the boundary record (if the Reader catches it before
+// done), and MUST NOT surface any seq>4 even if appends keep arriving. The
+// boundary record (seq=4), if surfaced, MUST be the LAST RecordData in the
+// final batch.
 //
-// Round-1 review note: an earlier draft of the Replayer early-exited when
-// rec.Sequence reached tailSeq, which would have stranded any trailing
-// loss marker that overflow GC appended at the WAL tail mid-replay. The
-// fix removes that early-exit; the SOLE done signal is now TryNext
-// returning ok=false. As a consequence, records appended AFTER NewReplayer
-// captures tailSeq may also surface in the final batch — they are
-// "Live-era" records, but the server treats EventBatch records identically
-// regardless of state, so this is harmless. tailSeq is preserved as a
-// minimum-replay bound, not a hard stop. This test asserts the minimum-
-// bound contract: at least seq=3 is emitted, and TailSequence() reflects
-// the value sampled at NewReplayer time (NOT advanced by the post-entry
-// append).
+// Round-2 review note: the round-1 fix removed the early-exit on
+// rec.Sequence >= tailSeq entirely so the Replayer drained until
+// TryNext returned ok=false. Under sustained appends that signal may
+// never arrive, so replay would never terminate (spec at design.md:586
+// requires the finite (ack_hw, wal_hw_at_entry] window). The round-2
+// fix restores a HARD stop on RecordData seq > tailSeq while leaving
+// loss-marker handling untouched: loss markers always surface, and a
+// trailing loss marker that lands at the WAL tail AFTER an over-tail
+// RecordData is the responsibility of the Live state's Reader (see
+// LastReplayedSequence docstring + design.md:586). The hard stop also
+// guarantees TestReplayer_TerminatesUnderConcurrentAppends terminates.
 func TestReplayer_StopsAtTailWatermark(t *testing.T) {
 	w := openTestWAL(t)
 
@@ -75,14 +78,19 @@ func TestReplayer_StopsAtTailWatermark(t *testing.T) {
 		MaxBatchRecords: 100,
 		MaxBatchBytes:   16 * 1024,
 	})
+	if got, want := r.TailSequence(), uint64(3); got != want {
+		t.Fatalf("tail seq: got %d, want %d", got, want)
+	}
 
-	// Inject a post-entry record. tailSeq was captured at NewReplayer time
-	// (highSeq=3) so TailSequence() must remain 3, but per the round-1
-	// fix the new contract permits this seq=4 record to surface in the
-	// final batch (the underlying Reader sees it via TryNext before
-	// observing ok=false).
+	// Inject post-entry records. tailSeq was captured at NewReplayer time
+	// (highSeq=3) so TailSequence() must remain 3. Per the round-2 hard-
+	// stop contract, AT MOST ONE over-tail RecordData (seq=4) may surface
+	// as the boundary record, and seq=5 must NEVER surface.
 	if _, err := w.Append(4, 0, []byte{0x44}); err != nil {
 		t.Fatalf("append 4 (post-entry): %v", err)
+	}
+	if _, err := w.Append(5, 0, []byte{0x55}); err != nil {
+		t.Fatalf("append 5 (post-entry): %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -90,6 +98,7 @@ func TestReplayer_StopsAtTailWatermark(t *testing.T) {
 
 	emitted := 0
 	seenSeqs := []uint64{}
+	var lastBatch transport.ReplayBatch
 	for {
 		batch, done, err := r.NextBatch(ctx)
 		if err != nil {
@@ -100,22 +109,177 @@ func TestReplayer_StopsAtTailWatermark(t *testing.T) {
 			seenSeqs = append(seenSeqs, rec.Sequence)
 		}
 		if done {
+			lastBatch = batch
 			break
 		}
 	}
-	// Minimum-bound contract: seq=3 (tailSeq) MUST be emitted. Seq=4 may
-	// or may not surface depending on the Reader catching it before
-	// TryNext returns ok=false — both outcomes are valid.
+
+	// Hard-stop contract: seq=3 (within-window) MUST be emitted.
 	if emitted < 1 {
 		t.Fatalf("emitted: got %d (seqs=%v), want at least 1 (seq=3 must surface)", emitted, seenSeqs)
 	}
 	if seenSeqs[0] != 3 {
 		t.Fatalf("first emitted seq: got %d, want 3", seenSeqs[0])
 	}
+
+	// Validate the over-tail boundary rule: AT MOST one over-tail seq may
+	// appear (seq=4); seq=5 MUST NOT surface; if seq=4 surfaces, it MUST
+	// be the LAST RecordData in the final batch.
+	overTailCount := 0
+	var lastDataSeq uint64
+	haveData := false
+	for _, s := range seenSeqs {
+		if s > 3 {
+			overTailCount++
+			if s != 4 {
+				t.Fatalf("over-tail seq: got %d, want at most 4 (seq>4 must not surface under hard-stop contract); seqs=%v", s, seenSeqs)
+			}
+		}
+	}
+	if overTailCount > 1 {
+		t.Fatalf("over-tail count: got %d, want <=1 (boundary record only); seqs=%v", overTailCount, seenSeqs)
+	}
+	for _, rec := range lastBatch.Records {
+		if rec.Kind == wal.RecordData {
+			lastDataSeq = rec.Sequence
+			haveData = true
+		}
+	}
+	if overTailCount == 1 {
+		if !haveData || lastDataSeq != 4 {
+			t.Fatalf("boundary record placement: last RecordData in final batch was seq=%d (haveData=%v), want seq=4 (the boundary record must be the LAST RecordData in the final batch)", lastDataSeq, haveData)
+		}
+		if got := r.LastReplayedSequence(); got != 4 {
+			t.Fatalf("LastReplayedSequence: got %d, want 4 (boundary record was seq=4)", got)
+		}
+	} else {
+		// No boundary record surfaced — Reader observed ok=false before
+		// reading seq=4. LastReplayedSequence must reflect the last
+		// within-window emission (seq=3).
+		if got := r.LastReplayedSequence(); got != 3 {
+			t.Fatalf("LastReplayedSequence: got %d, want 3 (no boundary record surfaced)", got)
+		}
+	}
+
 	// TailSequence is sampled once at NewReplayer time and MUST NOT
 	// advance with post-entry appends.
 	if got, want := r.TailSequence(), uint64(3); got != want {
 		t.Fatalf("tail seq: got %d, want %d (the post-entry append must NOT advance tailSeq)", got, want)
+	}
+}
+
+// TestReplayer_TerminatesUnderConcurrentAppends is the round-2 liveness
+// regression: it proves the hard-stop on RecordData seq > tailSeq lets
+// replay terminate even while appends keep arriving. Without the hard
+// stop (the round-1 drain-until-ok=false behaviour) the test would time
+// out because TryNext keeps yielding fresh records faster than replay
+// can drain them.
+//
+// Bug-injection plan: temporarily remove the
+// `if rec.Kind == wal.RecordData && rec.Sequence > r.tailSeq` branch in
+// replayer.go's NextBatch loop; this test should TIMEOUT or FAIL.
+// Restore the branch; it should PASS.
+func TestReplayer_TerminatesUnderConcurrentAppends(t *testing.T) {
+	t.Parallel()
+	w := openTestWAL(t)
+
+	// Pre-seed some records so tailSeq > 0.
+	for i := int64(1); i <= 10; i++ {
+		if _, err := w.Append(i, 1, []byte("seed-payload")); err != nil {
+			t.Fatalf("seed append %d: %v", i, err)
+		}
+	}
+
+	rdr, err := w.NewReader(0)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer rdr.Close()
+
+	// tailSeq snapshotted at 10 (the highest seq pre-seeded). Use no
+	// batch caps so the inner NextBatch loop drains until EITHER the
+	// hard stop triggers (RecordData seq > tailSeq) OR TryNext returns
+	// ok=false. With the bug injected (hard stop removed), the inner
+	// loop will never exit because the appender keeps the WAL tail
+	// moving ahead of TryNext, so NextBatch never returns and the test
+	// times out.
+	rep := transport.NewReplayer(rdr, transport.ReplayerOptions{
+		MaxBatchRecords: 0,
+		MaxBatchBytes:   0,
+	})
+	if got := rep.TailSequence(); got != 10 {
+		t.Fatalf("TailSequence: got %d, want 10", got)
+	}
+
+	// Spin up an appender that keeps writing past tailSeq for the
+	// duration of the test. The appender writes as fast as Append
+	// returns — no per-iteration sleep — so the WAL tail moves under
+	// the replayer continuously. Without the hard stop the replayer
+	// would chase these forever (TryNext would never return ok=false
+	// because the appender keeps replenishing the live segment).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	appendDone := make(chan struct{})
+	go func() {
+		defer close(appendDone)
+		seq := int64(11)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			_, err := w.Append(seq, 1, []byte("live-payload"))
+			if err != nil {
+				return
+			}
+			seq++
+		}
+	}()
+
+	// Replay must terminate within a generous deadline even with
+	// appends ongoing.
+	deadline := time.Now().Add(5 * time.Second)
+	seenData := 0
+	maxSeqSeen := uint64(0)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("replay did not terminate within 5s under concurrent appends; saw %d data records", seenData)
+		}
+		batch, done, err := rep.NextBatch(context.Background())
+		if err != nil {
+			t.Fatalf("NextBatch: %v", err)
+		}
+		for _, rec := range batch.Records {
+			if rec.Kind == wal.RecordData {
+				seenData++
+				if rec.Sequence > maxSeqSeen {
+					maxSeqSeen = rec.Sequence
+				}
+			}
+		}
+		if done {
+			break
+		}
+	}
+	cancel()
+	<-appendDone
+
+	// Replay must have surfaced at least the seed records (1..10).
+	if seenData < 10 {
+		t.Fatalf("expected >= 10 RecordData (seed), got %d", seenData)
+	}
+	// Hard-stop contract: at most ONE record with seq > tailSeq may
+	// surface (the boundary record we read before exiting). Without
+	// the hard stop the replayer would chase appends and surface
+	// many over-tail records — this assertion is the regression
+	// guard. Goroutine scheduling could mean the hard stop never
+	// actually fires (replayer drains seed and exits via ok=false
+	// before appender writes anything), so we tolerate maxSeqSeen
+	// up to tailSeq+1 but reject anything further.
+	tailSeq := rep.TailSequence()
+	if maxSeqSeen > tailSeq+1 {
+		t.Fatalf("hard-stop violated: maxSeqSeen=%d, tailSeq=%d (must be <= tailSeq+1)", maxSeqSeen, tailSeq)
 	}
 }
 
@@ -267,31 +431,41 @@ func TestReplayer_DeliversLossMarkerBeforeStart(t *testing.T) {
 	}
 }
 
-// TestReplayer_DeliversTrailingLossMarker is the regression for the
-// round-1 finding that motivated removing the `rec.Sequence >= tailSeq`
-// early-exit. The race the early-exit lost: while replay drains, overflow
-// GC can drop a segment containing replay-era seqs and append a
-// compensating loss marker AT THE WAL TAIL. The marker's WAL position is
-// strictly beyond tailSeq even though its Loss.ToSequence is within the
-// replay window. With the early-exit, the Replayer would return done=true
-// the moment it observed a RecordData with seq>=tailSeq and never reach
-// the trailing marker — silently dropping the gap notice.
+// TestReplayer_DeliversWithinWindowLossMarker validates that loss markers
+// covering sequences within the (ack_hw, wal_hw_at_entry] replay window
+// surface during replay. We seed the WAL with a synthetic loss marker
+// (covering seqs 1..2) plus three RecordData entries and assert the
+// drained stream includes the loss marker.
 //
-// We synthesize the race deterministically by directly calling
-// AppendLoss after NewReplayer captures tailSeq: the loss marker is
-// then a real WAL record sitting past tailSeq's WAL position, and the
-// underlying Reader will surface it before TryNext returns ok=false
-// (the SOLE done signal under the new contract).
+// Round-2 note: the round-1 test (TestReplayer_DeliversTrailingLossMarker)
+// asserted that a loss marker appended AFTER NewReplayer captures
+// tailSeq surfaces during replay. With the round-2 hard-stop contract
+// restored, that "trailing loss marker after over-tail data" race is
+// no longer Replayer's responsibility — it falls to the Live state's
+// Reader (loss markers bypass the Reader's nextSeq filter, so Live's
+// reader will encounter and surface the marker even though Live opens
+// at max(lastReplayedSeq+1, ackHW+1) past the marker's seq range).
+// See LastReplayedSequence's docstring + the trailing-loss-marker race
+// commentary in NextBatch.
 //
-// Bug-injection plan (round-1 process step): temporarily reintroduce
-// the `if rec.Sequence >= r.tailSeq` early-exit in replayer.go's
-// NextBatch loop and confirm THIS TEST FAILS (zero loss records
-// emitted). Then remove and confirm PASS.
-func TestReplayer_DeliversTrailingLossMarker(t *testing.T) {
+// TODO(Task 17): add a Live-state regression test that drives an
+// append-loss-marker-AFTER-over-tail-data sequence and asserts the
+// marker surfaces through Live's Reader.
+func TestReplayer_DeliversWithinWindowLossMarker(t *testing.T) {
 	w := openTestWAL(t)
 
-	// 3 records on disk before NewReplayer captures tailSeq=3 (the
-	// highSeq under the WAL lock at construction time).
+	// Append a loss marker covering seqs 1..2 BEFORE the data records,
+	// so it sits at a WAL position before tailSeq and is unambiguously
+	// within the replay window.
+	loss := wal.LossRecord{
+		FromSequence: 1,
+		ToSequence:   2,
+		Generation:   0,
+		Reason:       "overflow",
+	}
+	if err := w.AppendLoss(loss); err != nil {
+		t.Fatalf("AppendLoss: %v", err)
+	}
 	for i := int64(0); i < 3; i++ {
 		if _, err := w.Append(i, 0, []byte{byte(i)}); err != nil {
 			t.Fatalf("append %d: %v", i, err)
@@ -309,28 +483,6 @@ func TestReplayer_DeliversTrailingLossMarker(t *testing.T) {
 		MaxBatchBytes:   16 * 1024,
 	})
 
-	// Sample tailSeq AFTER construction so the assertion below can
-	// confirm the post-entry append is genuinely past it (a
-	// confidence-check on the test setup, not on the production code).
-	tail := r.TailSequence()
-	if tail == 0 {
-		t.Fatalf("tail watermark should be non-zero; got %d", tail)
-	}
-
-	// Append the trailing loss marker AFTER NewReplayer captures
-	// tailSeq. AppendLoss writes the marker as a real WAL record at a
-	// position strictly past tailSeq's WAL position — exactly the race
-	// shape the round-1 fix addresses.
-	loss := wal.LossRecord{
-		FromSequence: 1,
-		ToSequence:   2,
-		Generation:   0,
-		Reason:       "overflow",
-	}
-	if err := w.AppendLoss(loss); err != nil {
-		t.Fatalf("AppendLoss: %v", err)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	got := drainReplayer(t, r, ctx)
@@ -342,7 +494,7 @@ func TestReplayer_DeliversTrailingLossMarker(t *testing.T) {
 		}
 	}
 	if losses == 0 {
-		t.Fatalf("expected the trailing TransportLoss marker to surface before done=true; got 0 (records=%d). Round-1 regression: the `rec.Sequence >= tailSeq` early-exit returned done before the Reader could surface this marker.", len(got))
+		t.Fatalf("expected the within-window TransportLoss marker to surface; got 0 (records=%d)", len(got))
 	}
 }
 

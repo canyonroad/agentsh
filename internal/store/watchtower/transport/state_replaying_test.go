@@ -13,8 +13,8 @@ import (
 )
 
 // newReplayingTransport constructs a Transport with the supplied Conn
-// already attached so RunReplaying can be exercised in isolation from
-// the Connecting state. Mirrors the field assignment runConnecting
+// already attached so RunReplayingForTest can be exercised in isolation
+// from the Connecting state. Mirrors the field assignment runConnecting
 // performs after a successful dial.
 func newReplayingTransport(t *testing.T, conn transport.Conn) *transport.Transport {
 	t.Helper()
@@ -52,7 +52,8 @@ func nonEmptyMsg(_ []wal.Record) (*wtpv1.ClientMessage, error) {
 // TestRunReplaying_HappyPathReturnsLiveAndRetainsConn verifies the success
 // transition: the Replayer drains 3 records, the Conn observes at least
 // one EventBatch send, and runReplaying returns StateLive without
-// closing t.conn (the Live state will reuse it).
+// closing t.conn (the Live state will reuse it). Drives the unexported
+// runReplaying via the RunReplayingForTest seam.
 func TestRunReplaying_HappyPathReturnsLiveAndRetainsConn(t *testing.T) {
 	dir := t.TempDir()
 	w, err := wal.Open(wal.Options{
@@ -92,7 +93,7 @@ func TestRunReplaying_HappyPathReturnsLiveAndRetainsConn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	st, err := tr.RunReplaying(ctx, r)
+	st, err := tr.RunReplayingForTest(ctx, r)
 	if err != nil {
 		t.Fatalf("RunReplaying: unexpected error: %v", err)
 	}
@@ -167,7 +168,7 @@ func TestRunReplaying_SendFailureClosesConn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	st, err := tr.RunReplaying(ctx, r)
+	st, err := tr.RunReplayingForTest(ctx, r)
 	if err == nil {
 		t.Fatal("expected error from RunReplaying when Send fails")
 	}
@@ -239,7 +240,7 @@ func TestRunReplaying_ReplayerErrorClosesConn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	st, err := tr.RunReplaying(ctx, r)
+	st, err := tr.RunReplayingForTest(ctx, r)
 	if err == nil {
 		t.Fatal("expected error when Reader returns a hard failure")
 	}
@@ -326,7 +327,7 @@ func TestRunReplaying_CtxCancelClosesConn(t *testing.T) {
 	}
 	resCh := make(chan result, 1)
 	go func() {
-		st, err := tr.RunReplaying(ctx, r)
+		st, err := tr.RunReplayingForTest(ctx, r)
 		resCh <- result{st, err}
 	}()
 
