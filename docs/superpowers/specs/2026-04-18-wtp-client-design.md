@@ -780,7 +780,17 @@ The host (the agentsh daemon) is responsible for building the `Store` with the r
 
 ### Test-only seam: `Options.SinkChainOverrideForTests`
 
-The `watchtower` package exposes `SinkChainOverrideForTests` on its `Options` struct so AppendEvent's drop-path tests can substitute a `chain.SinkChainAPI` double that returns `chain.ErrInvalidUTF8` on every Compute. This is a **permanent** test seam, not transient scaffolding: removing it would either eliminate the failing-sink test (a regression in test coverage) or force the test to construct a parallel `*chain.SinkChain` with a hidden hook (more brittle, more code to maintain). The field is named explicitly to discourage production use; the doc comment, the `_test.go`-only `failingSink` double, and a `validate()` lint (left to a follow-up) are the discouragement layers.
+The `watchtower` package exposes `SinkChainOverrideForTests` on its `Options` struct so AppendEvent's drop-path tests can substitute a `chain.SinkChainAPI` double that returns `chain.ErrInvalidUTF8` on every Compute. This is a **permanent** test seam, not transient scaffolding: removing it would either eliminate the failing-sink test (a regression in test coverage) or force the test to construct a parallel `*audit.SinkChain` with a hidden hook (more brittle, more code to maintain). The field type is the watchtower-local `chain.SinkChainAPI` interface — production code wires `audit.NewSinkChain(...)` and wraps the result with `chain.NewWatchtowerSink(...)` (the local adapter described below), and tests substitute any value that satisfies the interface.
+
+**Production-validation enforcement.** `Options.validate()` rejects a non-nil `SinkChainOverrideForTests` outside test mode (gated by an `AllowSinkChainOverrideForTests bool` companion flag, mirroring the existing `AllowStubMapper` pattern). A test that wants the override sets both fields; production callers leave both at the zero value. This makes accidental misuse a startup-time error, not a silent behavior change. See Task 22's `validate()` for the exact rejection.
+
+**API stability.** `Options.SinkChainOverrideForTests` (and its `AllowSinkChainOverrideForTests` companion) are explicitly **exempt** from normal API-stability expectations: they are test-only seams that may be renamed, refactored, or replaced without notice. The `validate()` rejection above prevents production callers from depending on them in the first place.
+
+### Watchtower-local adapter: `chain.WatchtowerSink`
+
+The `internal/store/watchtower/chain` package adds a thin adapter, `chain.WatchtowerSink`, that wraps `*audit.SinkChain` and satisfies `chain.SinkChainAPI`. The constructor is `chain.NewWatchtowerSink(inner *audit.SinkChain) *WatchtowerSink`. The adapter delegates `Compute` and `Commit` directly to the inner chain (the audit phase-0 contract is untouched) and adds one new accessor:
+
+- `PeekPrevHash() string` — implemented as `state := inner.State(); return state.PrevHash` over `audit.SinkChainState`. This is a read-only test seam used in `append_test.go` to assert "chain prev_hash did not advance" after a drop. It does **not** belong on `audit.SinkChain` itself: the audit package's `State()` already returns the full `SinkChainState{Generation, PrevHash, Fatal}` triple, which is sufficient for production callers (composite, snapshot/restore). `PeekPrevHash` is a watchtower test-ergonomics convenience — narrowing `State()` down to the single field the drop tests need — implemented in the adapter. **This is the only added surface area** the watchtower introduces over `audit.SinkChain`; the `Compute`/`Commit` methods are pure pass-through.
 
 ### Prerequisite plumbing (in-scope for this work)
 

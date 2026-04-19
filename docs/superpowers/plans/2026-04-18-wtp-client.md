@@ -2407,8 +2407,8 @@ func TestVectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var entries []vectorEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
+	entries, err := loadVectors(data)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if len(entries) == 0 {
@@ -2692,6 +2692,79 @@ func assertExpectedError(t *testing.T, err error, sentinelName string) {
 		t.Fatalf("vectors.json names unknown sentinel %q", sentinelName)
 	}
 }
+
+// supportedVectorSchemaVersions is the set of envelope schema_version values
+// the harness will accept. Bump when shipping a new envelope shape; the
+// loader fails closed on any value not listed here so a future incompatible
+// vector set cannot be silently treated as conformant. v1 (bare array) is
+// detected by the leading '[' byte, not by this set.
+var supportedVectorSchemaVersions = map[int]struct{}{
+	2: {}, // current published envelope; see spec §"Vector schema versioning"
+}
+
+// loadVectors decodes a conformance-vector file in either v1 (bare JSON
+// array) or v2+ (envelope `{"schema_version": N, "vectors": [...]}`) form.
+//
+// Detection rule (per spec §"Vector schema versioning"): peek the first
+// non-whitespace byte. '[' → v1 array. '{' → v2+ envelope; the envelope
+// MUST carry a recognized schema_version or the load fails. Anything else
+// is an error. This is fail-closed: an unknown envelope value is never
+// accepted as a "best-effort" v1 fallback.
+func loadVectors(data []byte) ([]vectorEntry, error) {
+	first, err := firstNonWhitespaceByte(data)
+	if err != nil {
+		return nil, err
+	}
+	switch first {
+	case '[':
+		var entries []vectorEntry
+		if err := json.Unmarshal(data, &entries); err != nil {
+			return nil, fmt.Errorf("decode v1 vectors array: %w", err)
+		}
+		return entries, nil
+	case '{':
+		// Decode the envelope into a struct that uses *int for schema_version
+		// so we can tell "field absent" from "field present and zero".
+		var env struct {
+			SchemaVersion *int            `json:"schema_version"`
+			Vectors       []vectorEntry   `json:"vectors"`
+		}
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&env); err != nil {
+			return nil, fmt.Errorf("decode vectors envelope: %w", err)
+		}
+		if env.SchemaVersion == nil {
+			return nil, errors.New("vectors envelope missing required field schema_version")
+		}
+		if _, ok := supportedVectorSchemaVersions[*env.SchemaVersion]; !ok {
+			return nil, fmt.Errorf("unsupported vectors schema_version %d (harness accepts %v)", *env.SchemaVersion, supportedSchemaVersionList())
+		}
+		return env.Vectors, nil
+	default:
+		return nil, fmt.Errorf("vectors file must start with '[' (v1) or '{' (v2+ envelope); got %q", first)
+	}
+}
+
+func firstNonWhitespaceByte(data []byte) (byte, error) {
+	for _, b := range data {
+		switch b {
+		case ' ', '\t', '\n', '\r':
+			continue
+		default:
+			return b, nil
+		}
+	}
+	return 0, errors.New("vectors file is empty or whitespace-only")
+}
+
+func supportedSchemaVersionList() []int {
+	out := make([]int, 0, len(supportedVectorSchemaVersions))
+	for v := range supportedVectorSchemaVersions {
+		out = append(out, v)
+	}
+	return out
+}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2819,6 +2892,108 @@ func TestBuildIntegrityRecord_AcceptsUint32Max(t *testing.T) {
 ```
 
 These are top-level tests, separate from the vector-driven `TestVectors`. Run: `go test ./internal/store/watchtower/chain/ -run TestBuildIntegrityRecord_`. Both pass once the helpers from Step 1 are in place.
+
+`buildSessionContext` consumes the same `decodeUint32` helper for `format_version`, so the range contract is shared between both call sites. Rather than duplicate `TestBuildSessionContext_*` symmetrically (the contract is the helper, not the call site), exercise the helper directly:
+
+```go
+func TestDecodeUint32_RejectsOverflow(t *testing.T) {
+	// Shared contract for buildIntegrityRecord AND buildSessionContext —
+	// both consume decodeUint32 for format_version (and integrity records
+	// also for generation). Exercising the helper covers both call sites.
+	_, err := decodeUint32("format_version", json.RawMessage(`4294967296`))
+	if err == nil {
+		t.Fatal("expected range error for value > MaxUint32, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds uint32 range") {
+		t.Errorf("error must mention range overflow: %v", err)
+	}
+}
+
+func TestDecodeUint32_AcceptsMax(t *testing.T) {
+	got, err := decodeUint32("format_version", json.RawMessage(`4294967295`))
+	if err != nil {
+		t.Fatalf("uint32 max should be accepted: %v", err)
+	}
+	if got != math.MaxUint32 {
+		t.Errorf("decodeUint32 returned %d, want %d", got, uint32(math.MaxUint32))
+	}
+}
+```
+
+Run: `go test ./internal/store/watchtower/chain/ -run TestDecodeUint32_`. Both pass with the helper from Step 1.
+
+- [ ] **Step 4.6: Add unit tests for the v1/v2 vector loader**
+
+`loadVectors` (defined in Step 1) is the single entry point for parsing the conformance file. It auto-detects v1 (bare array) vs v2+ (envelope) by peeking the first non-whitespace byte and fails closed on missing or unknown `schema_version`. These tests exercise every accept/reject branch directly so a future envelope change cannot silently regress detection.
+
+Run before adding the implementation, then again after — they fail with "loadVectors undefined" until Step 1 lands.
+
+```go
+func TestLoadVectors_V1Array(t *testing.T) {
+	data := []byte(`[{"name":"x","kind":"integrity_record","input":{"format_version":2,"sequence":0,"generation":0,"prev_hash":"","event_hash":"","context_digest":"","key_fingerprint":""},"expected":"{\"context_digest\":\"\",\"event_hash\":\"\",\"format_version\":2,\"generation\":0,\"key_fingerprint\":\"\",\"prev_hash\":\"\",\"sequence\":0}"}]`)
+	entries, err := loadVectors(data)
+	if err != nil {
+		t.Fatalf("loadVectors(v1): %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "x" {
+		t.Fatalf("unexpected entries: %+v", entries)
+	}
+}
+
+func TestLoadVectors_V2Envelope(t *testing.T) {
+	data := []byte(`{"schema_version":2,"vectors":[{"name":"y","kind":"context_digest"}]}`)
+	entries, err := loadVectors(data)
+	if err != nil {
+		t.Fatalf("loadVectors(v2): %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "y" {
+		t.Fatalf("unexpected entries: %+v", entries)
+	}
+}
+
+func TestLoadVectors_RejectsEnvelopeMissingSchemaVersion(t *testing.T) {
+	data := []byte(`{"vectors":[]}`)
+	_, err := loadVectors(data)
+	if err == nil {
+		t.Fatal("expected error for envelope without schema_version, got nil")
+	}
+	if !strings.Contains(err.Error(), "schema_version") {
+		t.Errorf("error must mention schema_version: %v", err)
+	}
+}
+
+func TestLoadVectors_RejectsUnknownSchemaVersion(t *testing.T) {
+	data := []byte(`{"schema_version":99,"vectors":[]}`)
+	_, err := loadVectors(data)
+	if err == nil {
+		t.Fatal("expected error for unknown schema_version, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported") {
+		t.Errorf("error must mention unsupported: %v", err)
+	}
+}
+
+func TestLoadVectors_RejectsMalformedJSON(t *testing.T) {
+	data := []byte(`{not valid json`)
+	if _, err := loadVectors(data); err == nil {
+		t.Fatal("expected decode error, got nil")
+	}
+}
+
+func TestLoadVectors_RejectsEmpty(t *testing.T) {
+	if _, err := loadVectors([]byte("   \n\t")); err == nil {
+		t.Fatal("expected error for whitespace-only input, got nil")
+	}
+}
+
+func TestLoadVectors_RejectsBareScalar(t *testing.T) {
+	if _, err := loadVectors([]byte(`42`)); err == nil {
+		t.Fatal("expected error for non-array/non-object top-level value, got nil")
+	}
+}
+```
+
+Run: `go test ./internal/store/watchtower/chain/ -run TestLoadVectors_`. All seven pass once Step 1's `loadVectors` helper exists. The published `vectors.json` itself remains in v1 (bare-array) shape for now; v2 is exercised purely through these in-memory tests until the v2 envelope is published.
 
 - [ ] **Step 5: Run vectors test to verify it passes**
 
@@ -7371,6 +7546,10 @@ the public surface area: callers see `AppendEvent`, the rest is hidden.
 **Files:**
 - Create: `internal/store/watchtower/store.go`
 - Create: `internal/store/watchtower/options.go`
+- Create: `internal/store/watchtower/store_export_test.go` (test-only inspectors)
+- Create: `internal/store/watchtower/chain/sink_chain_api.go` (test-substitutable interface)
+- Create: `internal/store/watchtower/chain/sink_adapter.go` (`*audit.SinkChain` adapter)
+- Create: `internal/store/watchtower/chain/sink_adapter_test.go`
 - Test: `internal/store/watchtower/options_test.go`
 
 - [ ] **Step 1: Write the failing test**
@@ -7450,6 +7629,7 @@ package watchtower
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
@@ -7479,8 +7659,9 @@ type Options struct {
 	SessionID string
 
 	// HMAC integrity chain config.
-	HMACKeyID  string
-	HMACSecret []byte
+	HMACKeyID     string
+	HMACSecret    []byte
+	HMACAlgorithm string // "hmac-sha256" (default) or "hmac-sha512"
 
 	// Batch flush thresholds.
 	BatchMaxRecords int
@@ -7516,11 +7697,19 @@ type Options struct {
 	Metrics *metrics.Collector
 
 	// SinkChainOverrideForTests, when non-nil, replaces the default
-	// *chain.SinkChain constructed by New. Permanent test-only seam:
-	// production callers MUST leave this nil. Reviewed and accepted in
-	// round-5 design review as the simplest way to keep the test boundary
-	// explicit; the long name self-documents the intent.
-	SinkChainOverrideForTests chain.SinkChainAPI
+	// chain.WatchtowerSink (wrapping *audit.SinkChain) constructed by
+	// New. Permanent test-only seam — production callers MUST leave this
+	// nil. validate() rejects a non-nil value unless
+	// AllowSinkChainOverrideForTests is also true (mirroring the
+	// AllowStubMapper pattern). The companion flag forces tests to opt
+	// in explicitly and makes accidental production wiring a startup
+	// error rather than a silent behavior change.
+	//
+	// API stability: this field and AllowSinkChainOverrideForTests are
+	// exempt from normal API-stability expectations. They are test-only
+	// seams that may be renamed, refactored, or replaced without notice.
+	SinkChainOverrideForTests     chain.SinkChainAPI
+	AllowSinkChainOverrideForTests bool
 }
 
 // applyDefaults fills zero-valued fields with the spec's defaults.
@@ -7572,6 +7761,12 @@ func (o *Options) validate() error {
 	if len(o.HMACSecret) == 0 {
 		return errors.New("watchtower: HMAC secret is required")
 	}
+	switch o.HMACAlgorithm {
+	case "", "hmac-sha256", "hmac-sha512":
+		// "" defaults inside audit.NewSinkChain to hmac-sha256.
+	default:
+		return fmt.Errorf("watchtower: unsupported HMACAlgorithm %q (use hmac-sha256 or hmac-sha512)", o.HMACAlgorithm)
+	}
 	if o.BatchMaxBytes < 4096 {
 		return errors.New("watchtower: BatchMaxBytes must be >= 4 KiB")
 	}
@@ -7580,6 +7775,9 @@ func (o *Options) validate() error {
 	}
 	if o.TLSCertFile != "" && o.AuthBearer != "" {
 		return errors.New("watchtower: TLS client cert and bearer auth are mutually exclusive")
+	}
+	if o.SinkChainOverrideForTests != nil && !o.AllowSinkChainOverrideForTests {
+		return errors.New("watchtower: SinkChainOverrideForTests must be nil in production (set AllowSinkChainOverrideForTests in tests that need the seam)")
 	}
 	return nil
 }
@@ -7597,6 +7795,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/internal/metrics"
 	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/transport"
@@ -7633,10 +7832,18 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("open WAL: %w", err)
 	}
 
-	// Wire the chain sink. Production callers get a real *chain.SinkChain;
-	// tests can substitute a chain.SinkChainAPI double via
-	// Options.SinkChainOverrideForTests (see Step 3.5 below).
-	var sinkChain chain.SinkChainAPI = chain.NewSinkChain(opts.HMACKeyID, opts.HMACSecret)
+	// Wire the chain sink. Production callers get a real *audit.SinkChain
+	// wrapped in the watchtower-local *chain.WatchtowerSink adapter (the
+	// adapter satisfies chain.SinkChainAPI and is what tests substitute).
+	// The audit phase-0 contract stays untouched; the adapter only adds
+	// PeekPrevHash on top of the existing Compute/Commit/State surface.
+	// Tests can replace the adapter via Options.SinkChainOverrideForTests
+	// (gated behind AllowSinkChainOverrideForTests; see validate()).
+	innerChain, err := audit.NewSinkChain(opts.HMACSecret, opts.HMACAlgorithm)
+	if err != nil {
+		return nil, fmt.Errorf("audit.NewSinkChain: %w", err)
+	}
+	var sinkChain chain.SinkChainAPI = chain.NewWatchtowerSink(innerChain)
 	if opts.SinkChainOverrideForTests != nil {
 		sinkChain = opts.SinkChainOverrideForTests
 	}
@@ -7692,17 +7899,157 @@ func newGRPCDialer(opts Options) transport.Dialer {
 }
 ```
 
-- [ ] **Step 3.5: Add test-only scaffolding for downstream Task 23 drop tests**
+- [ ] **Step 3.5: Add the watchtower sink adapter + scaffolding for downstream Task 23 drop tests**
 
-This step lands three pieces of infrastructure that Task 23's drop tests depend on:
+This step lands four pieces of infrastructure that Task 23's drop tests depend on:
 
-1. A `store_export_test.go` file that exposes test-only inspectors on `*Store` (file lives in package `watchtower`; the `_test.go` suffix excludes it from production builds automatically — no build tag required).
-2. A new `chain.SinkChainAPI` interface that mirrors the full surface `Store` consumes from `*chain.SinkChain`. The interface deliberately covers `Compute`, `Commit`, AND `PeekPrevHash` (every method `Store` and the test inspectors touch) so swapping in a test double via `Options.SinkChainOverrideForTests` does not silently lose functionality. A previous narrower interface (with `Compute` only) was rejected in round-5 review because it broke `Store.PeekPrevHash` and `Store.AppendEvent`'s `Commit` call.
-3. The `Options.SinkChainOverrideForTests` field added in Step 3 above (already in the Options struct).
+1. A `chain.WatchtowerSink` adapter that wraps `*audit.SinkChain` and exposes the watchtower-local `chain.SinkChainAPI` (Compute / Commit / PeekPrevHash). The adapter is the only added surface area on top of `audit.SinkChain` — see spec §"Watchtower-local adapter: `chain.WatchtowerSink`".
+2. A new `chain.SinkChainAPI` interface whose method set EXACTLY mirrors what `Store` consumes from the adapter. Method signatures match the real `audit.SinkChain` contract (positional `Compute` arguments, `Commit` returning `error`); a previous narrower or signature-mismatched interface was rejected in earlier review rounds for breaking the integrity guarantees.
+3. A `store_export_test.go` file that exposes test-only inspectors on `*Store` (file lives in package `watchtower`; the `_test.go` suffix excludes it from production builds automatically — no build tag required).
+4. The `Options.SinkChainOverrideForTests` + `Options.AllowSinkChainOverrideForTests` fields added in Step 3 above (already in the Options struct; wiring + validate-time rejection covered there).
 
 Note: the failing-sink test double itself lives **inline in `internal/store/watchtower/append_test.go`** (defined in Task 23 Step 3 below), not in a separate package. Putting it in a `_test.go` file is what makes it test-only by construction; no separate doubles package is needed.
 
-(a) Create `internal/store/watchtower/store_export_test.go` (package `watchtower`, NOT `watchtower_test`, so the methods are first-class on `*Store`):
+(a) Create `internal/store/watchtower/chain/sink_chain_api.go` for the interface, and `internal/store/watchtower/chain/sink_adapter.go` for the `*audit.SinkChain` adapter. Splitting the two files keeps the test seam (interface) visually separate from the production wrapper (adapter), which makes a future audit-package signature change easy to localize.
+
+`internal/store/watchtower/chain/sink_chain_api.go`:
+
+```go
+package chain
+
+import "github.com/agentsh/agentsh/internal/audit"
+
+// SinkChainAPI is the test-substitutable surface that watchtower.Store
+// consumes. Production callers wire *WatchtowerSink (which wraps
+// *audit.SinkChain); tests substitute via Options.SinkChainOverrideForTests.
+//
+// Method signatures align with the real audit.SinkChain contract:
+//   - Compute takes positional args matching audit.SinkChain.Compute.
+//   - Commit returns error; AppendEvent treats audit.ErrFatalIntegrity,
+//     audit.ErrStaleResult, and audit.ErrCrossChainResult as terminal
+//     (chain has latched fatal — no further appends).
+//   - PeekPrevHash is the watchtower-only convenience accessor that
+//     reads the prev_hash component of audit.SinkChainState. It is
+//     implemented in the adapter, NOT on audit.SinkChain itself, because
+//     the audit package's State() already returns the full
+//     SinkChainState{Generation, PrevHash, Fatal} triple — sufficient for
+//     production callers. PeekPrevHash narrows that down to the single
+//     field the watchtower drop tests need.
+//
+// Any method the Store touches MUST appear here — silently downgrading
+// the interface (e.g., dropping Commit's error return) is what produced
+// the round-6 review failure.
+type SinkChainAPI interface {
+	Compute(formatVersion int, sequence int64, generation uint32, payload []byte) (*audit.ComputeResult, error)
+	Commit(result *audit.ComputeResult) error
+	Fatal(reason error)
+	PeekPrevHash() string
+}
+```
+
+`internal/store/watchtower/chain/sink_adapter.go`:
+
+```go
+package chain
+
+import "github.com/agentsh/agentsh/internal/audit"
+
+// WatchtowerSink adapts *audit.SinkChain to the watchtower-local
+// SinkChainAPI. The adapter is a pure pass-through for Compute and
+// Commit (the audit phase-0 contract is untouched) and adds a single
+// new accessor: PeekPrevHash, a read-only test seam that returns the
+// prev_hash component of audit.SinkChain.State().
+//
+// This is the only added surface area on top of audit.SinkChain — see
+// spec §"Watchtower-local adapter: `chain.WatchtowerSink`" for why it
+// lives in the watchtower package rather than the audit package.
+type WatchtowerSink struct {
+	inner *audit.SinkChain
+}
+
+// NewWatchtowerSink wraps inner so it satisfies SinkChainAPI. Callers
+// keep ownership of inner; the adapter does not copy or mutate it
+// outside Compute/Commit (which are forwarded verbatim).
+func NewWatchtowerSink(inner *audit.SinkChain) *WatchtowerSink {
+	return &WatchtowerSink{inner: inner}
+}
+
+// Compute delegates to audit.SinkChain.Compute. Pure — no chain mutation.
+func (s *WatchtowerSink) Compute(formatVersion int, sequence int64, generation uint32, payload []byte) (*audit.ComputeResult, error) {
+	return s.inner.Compute(formatVersion, sequence, generation, payload)
+}
+
+// Commit delegates to audit.SinkChain.Commit. The error return covers
+// the latched-fatal cases (audit.ErrFatalIntegrity), stale tokens
+// (audit.ErrStaleResult), cross-chain misuse (audit.ErrCrossChainResult),
+// and backwards-generation commits — AppendEvent treats all of them as
+// terminal.
+func (s *WatchtowerSink) Commit(result *audit.ComputeResult) error {
+	return s.inner.Commit(result)
+}
+
+// Fatal delegates to audit.SinkChain.Fatal. AppendEvent invokes this on
+// ambiguous WAL failures: subsequent Compute calls return
+// audit.ErrFatalIntegrity, stopping further appends safely.
+func (s *WatchtowerSink) Fatal(reason error) {
+	s.inner.Fatal(reason)
+}
+
+// PeekPrevHash returns the current chain prev_hash without advancing
+// the chain. Implemented as a narrow read of audit.SinkChain.State().
+// Used by Store.PeekPrevHash (test-only accessor) so drop-path tests
+// can assert "chain did not advance" after a dropped append.
+func (s *WatchtowerSink) PeekPrevHash() string {
+	return s.inner.State().PrevHash
+}
+```
+
+Add a sibling test `internal/store/watchtower/chain/sink_adapter_test.go` covering Compute/Commit pass-through and PeekPrevHash:
+
+```go
+package chain_test
+
+import (
+	"testing"
+
+	"github.com/agentsh/agentsh/internal/audit"
+	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
+)
+
+func TestWatchtowerSink_PeekPrevHashEmptyAtGenesis(t *testing.T) {
+	inner, err := audit.NewSinkChain([]byte("0123456789abcdef0123456789abcdef"), "hmac-sha256")
+	if err != nil {
+		t.Fatalf("audit.NewSinkChain: %v", err)
+	}
+	s := chain.NewWatchtowerSink(inner)
+	if got := s.PeekPrevHash(); got != "" {
+		t.Errorf("genesis PeekPrevHash should be empty, got %q", got)
+	}
+}
+
+func TestWatchtowerSink_ComputeCommitAdvancesPrevHash(t *testing.T) {
+	inner, err := audit.NewSinkChain([]byte("0123456789abcdef0123456789abcdef"), "hmac-sha256")
+	if err != nil {
+		t.Fatalf("audit.NewSinkChain: %v", err)
+	}
+	s := chain.NewWatchtowerSink(inner)
+	res, err := s.Compute(2, 1, 1, []byte(`{"sequence":1}`))
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	if err := s.Commit(res); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if got := s.PeekPrevHash(); got == "" {
+		t.Error("PeekPrevHash should be non-empty after a successful Commit")
+	}
+	if got := s.PeekPrevHash(); got != res.EntryHash() {
+		t.Errorf("PeekPrevHash should equal the committed EntryHash; got %q want %q", got, res.EntryHash())
+	}
+}
+```
+
+(b) Create `internal/store/watchtower/store_export_test.go` (package `watchtower`, NOT `watchtower_test`, so the methods are first-class on `*Store`):
 
 ```go
 package watchtower
@@ -7713,7 +8060,8 @@ package watchtower
 
 // PeekPrevHash returns the current chain prev_hash without advancing the
 // chain. Used in append_test.go to assert that drop paths leave the chain
-// untouched.
+// untouched. Forwards to chain.SinkChainAPI.PeekPrevHash on s.sink, which
+// in production is the *chain.WatchtowerSink adapter.
 func (s *Store) PeekPrevHash() string {
 	return s.sink.PeekPrevHash()
 }
@@ -7733,28 +8081,77 @@ func (s *Store) DroppedInvalidUTF8() uint64      { return s.metrics.DroppedInval
 func (s *Store) DroppedSequenceOverflow() uint64 { return s.metrics.DroppedSequenceOverflow() }
 ```
 
-Note: this requires `(*chain.SinkChain).PeekPrevHash() string` and `(*wal.WAL).SegmentCount() int` to exist. Both are simple read-only inspectors; if they were not added by Task 6 / Task 11, add them in this step.
+`(*chain.WatchtowerSink).PeekPrevHash()` is added in (a) above. `(*wal.WAL).SegmentCount() int` is a simple read-only inspector; if it was not added by Task 11, add it in this step.
 
-(b) Add the new `chain.SinkChainAPI` interface in `internal/store/watchtower/chain/`. Place it in a new file `internal/store/watchtower/chain/sink_chain_api.go` so the addition is easy to spot in the diff:
+(c) Add `TestNew_RejectsSinkChainOverrideInProduction` and `TestNew_AcceptsSinkChainOverrideWhenAllowed` to `options_test.go`, exercising the new validate-time gate added in Step 3:
 
 ```go
-package chain
+// failingSink defined inline in append_test.go (Task 23 Step 3); for the
+// validate-time test we only need a value that satisfies chain.SinkChainAPI.
+// A nil-method-pointer struct works because validate() rejects on the field
+// being non-nil before any method is called. Using a real *chain.WatchtowerSink
+// (built from a real audit.SinkChain) keeps the value behaviorally honest
+// in case validate() is ever extended to call methods.
 
-// SinkChainAPI is the test-substitutable surface of *SinkChain. Production
-// callers always work with *SinkChain directly; the interface exists so
-// that AppendEvent's drop-path tests can substitute a fake. Any method the
-// Store touches MUST appear here — silently downgrading to an interface
-// that's missing methods is what produced round-5 review failures.
-type SinkChainAPI interface {
-	Compute(ComputeInput) (*ComputeResult, error)
-	Commit(*ComputeResult)
-	PeekPrevHash() string
+func TestNew_RejectsSinkChainOverrideInProduction(t *testing.T) {
+	dir := t.TempDir()
+	allocator := audit.NewSequenceAllocator(0, 0)
+	innerChain, err := audit.NewSinkChain([]byte("0123456789abcdef0123456789abcdef"), "hmac-sha256")
+	if err != nil {
+		t.Fatalf("audit.NewSinkChain: %v", err)
+	}
+	override := chain.NewWatchtowerSink(innerChain)
+	_, err = watchtower.New(context.Background(), watchtower.Options{
+		WALDir:                    dir,
+		Mapper:                    compact.StubMapper{},
+		Allocator:                 allocator,
+		AgentID:                   "a",
+		SessionID:                 "s",
+		HMACKeyID:                 "k1",
+		HMACSecret:                []byte("0123456789abcdef0123456789abcdef"),
+		BatchMaxRecords:           1,
+		BatchMaxBytes:             4096,
+		BatchMaxAge:               time.Second,
+		AllowStubMapper:           true,
+		SinkChainOverrideForTests: override,
+		// AllowSinkChainOverrideForTests deliberately omitted.
+	})
+	if err == nil {
+		t.Fatal("expected New to reject SinkChainOverrideForTests without AllowSinkChainOverrideForTests")
+	}
+	if !strings.Contains(err.Error(), "SinkChainOverrideForTests") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNew_AcceptsSinkChainOverrideWhenAllowed(t *testing.T) {
+	dir := t.TempDir()
+	allocator := audit.NewSequenceAllocator(0, 0)
+	innerChain, err := audit.NewSinkChain([]byte("0123456789abcdef0123456789abcdef"), "hmac-sha256")
+	if err != nil {
+		t.Fatalf("audit.NewSinkChain: %v", err)
+	}
+	override := chain.NewWatchtowerSink(innerChain)
+	_, err = watchtower.New(context.Background(), watchtower.Options{
+		WALDir:                         dir,
+		Mapper:                         compact.StubMapper{},
+		Allocator:                      allocator,
+		AgentID:                        "a",
+		SessionID:                      "s",
+		HMACKeyID:                      "k1",
+		HMACSecret:                     []byte("0123456789abcdef0123456789abcdef"),
+		BatchMaxRecords:                1,
+		BatchMaxBytes:                  4096,
+		BatchMaxAge:                    time.Second,
+		AllowStubMapper:                true,
+		SinkChainOverrideForTests:      override,
+		AllowSinkChainOverrideForTests: true,
+	})
+	if err != nil {
+		t.Fatalf("expected New to accept SinkChainOverrideForTests when AllowSinkChainOverrideForTests is true, got %v", err)
+	}
 }
 ```
-
-The production `*SinkChain` (added in Task 6) already satisfies `SinkChainAPI` — `Compute`, `Commit`, and `PeekPrevHash` are the public methods exposed by the type. Tests that need to inject failures define an unexported `failingSink` struct in `append_test.go` (see Task 23 Step 3 below).
-
-(c) `Options.SinkChainOverrideForTests` is already declared on the Options struct in Step 3 above. The `New` constructor (also in Step 3) wires it: when non-nil, the override replaces the `*chain.SinkChain` produced by `chain.NewSinkChain`. The field type is `chain.SinkChainAPI`, so any `_test.go` double that satisfies the interface works.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -7769,8 +8166,8 @@ Expected: no errors.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add internal/store/watchtower/store.go internal/store/watchtower/options.go internal/store/watchtower/options_test.go internal/store/watchtower/store_export_test.go internal/store/watchtower/chain/sink_chain_api.go
-git commit -m "feat(wtp/store): add Options + New with validate (rejects StubMapper)"
+git add internal/store/watchtower/store.go internal/store/watchtower/options.go internal/store/watchtower/options_test.go internal/store/watchtower/store_export_test.go internal/store/watchtower/chain/sink_chain_api.go internal/store/watchtower/chain/sink_adapter.go internal/store/watchtower/chain/sink_adapter_test.go
+git commit -m "feat(wtp/store): add Options + New with watchtower sink adapter"
 ```
 
 - [ ] **Step 7: Roborev**
@@ -8255,6 +8652,7 @@ import (
 	"log/slog"
 	"math"
 
+	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/internal/store/watchtower/chain"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
 	"github.com/agentsh/agentsh/internal/store/watchtower/wal"
@@ -8296,12 +8694,14 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 
-	// 2. Compute integrity record (pure; updates no shared state yet).
-	cr, err := s.sink.Compute(chain.ComputeInput{
-		Sequence:   ev.Chain.Sequence,
-		PrevHash:   nil, // SinkChain remembers prev internally
-		Payload:    payload,
-	})
+	// 2. Compute integrity record (pure; no chain mutation yet).
+	// Signature matches audit.SinkChain.Compute via the WatchtowerSink
+	// adapter (positional args). audit.IntegrityFormatVersion is the
+	// canonical wire constant — using it here avoids defining a watchtower-
+	// local alias that would have to be kept in lockstep with the audit
+	// constant. The sequence cast is safe because the math.MaxInt64
+	// bounds check above already rejected overflow.
+	cr, err := s.sink.Compute(audit.IntegrityFormatVersion, int64(ev.Chain.Sequence), ev.Chain.Generation, payload)
 	if err != nil {
 		if errors.Is(err, chain.ErrInvalidUTF8) {
 			s.metrics.IncDroppedInvalidUTF8(1)
@@ -8317,8 +8717,10 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	}
 
 	// Attach integrity record to the CompactEvent and re-marshal so that
-	// the WAL stores the wire-final bytes.
-	ce.Integrity = cr.Record()
+	// the WAL stores the wire-final bytes. The IntegrityRecord is built
+	// from cr.EntryHash() / cr.PrevHash() plus the WTP-side context
+	// digest + key fingerprint owned by the Store.
+	ce.Integrity = s.buildIntegrityRecord(cr, ev.Chain)
 	final, err := proto.Marshal(ce)
 	if err != nil {
 		return fmt.Errorf("marshal final: %w", err)
@@ -8329,14 +8731,21 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	if err != nil {
 		var ae wal.AppendError
 		if errors.As(err, &ae) && ae.IsAmbiguous() {
+			s.sink.Fatal(err) // latch the underlying audit chain
 			s.latchFatal(err)
 		}
 		// Clean failure: no chain commit, prev_hash unchanged.
 		return fmt.Errorf("wal append: %w", err)
 	}
 
-	// 4. Commit chain advance.
-	s.sink.Commit(cr)
+	// 4. Commit chain advance. audit.SinkChain.Commit returns the latched-
+	// fatal sentinels (audit.ErrFatalIntegrity / ErrStaleResult /
+	// ErrCrossChainResult / ErrBackwardsGeneration). All four are terminal
+	// — the chain is corrupt and no further appends are safe.
+	if err := s.sink.Commit(cr); err != nil {
+		s.latchFatal(err)
+		return fmt.Errorf("chain commit: %w", err)
+	}
 	_ = res
 	return nil
 }
@@ -8379,38 +8788,60 @@ func (s *Store) Close() error {
 }
 ```
 
-You may need to extend `chain.ComputeResult` to expose `Record()` (if not
-already done in Task 6). Add to `internal/store/watchtower/chain/chain.go`:
+`audit.SinkChain.Compute` returns a `*audit.ComputeResult` whose `EntryHash()` and `PrevHash()` accessors give the values needed to populate the WTP `IntegrityRecord`. `Store.buildIntegrityRecord(cr, chainState)` (defined alongside `AppendEvent` in `append.go`) assembles the record from those plus the WTP-side context digest and key fingerprint owned by the Store. No additional accessor on `*audit.ComputeResult` is needed; the audit phase-0 contract stays untouched.
 
-```go
-// Record returns the IntegrityRecord computed for this token.
-func (c *ComputeResult) Record() *wtpv1.IntegrityRecord { return c.record }
-```
+No new constants are needed in `internal/store/watchtower/chain` for
+this task: `AppendEvent` references `audit.IntegrityFormatVersion`
+directly so the wire-format version is sourced from a single canonical
+location.
 
-Also add the inline `failingSink` test double + the `mkStoreWithFailingSink` helper to `append_test.go`. The double satisfies `chain.SinkChainAPI` and is defined right next to its sole consumer:
+Also add the inline `failingSink` test double + the `mkStoreWithFailingSink` helper to `append_test.go`. The double EMBEDS `*chain.WatchtowerSink` (built from a real `*audit.SinkChain`) so PeekPrevHash returns the actual chain state — the assertion "prev_hash unchanged" then proves the chain didn't advance, not just that a stub returned the same constant. Only `Compute` is overridden:
 
 ```go
 // failingSink is a chain.SinkChainAPI test double whose Compute always
-// returns the configured sentinel error. Defined here in a _test.go file
-// so it cannot be imported by production code — the _test.go suffix
-// excludes it from non-test builds by construction.
+// returns the configured sentinel error. It embeds *chain.WatchtowerSink
+// (over a real *audit.SinkChain) so PeekPrevHash returns the actual
+// genesis prev_hash; the drop-path assertion "prev_hash unchanged"
+// proves the chain did not advance, not merely that a stub returned a
+// constant. Commit panics if invoked — the drop path under test must
+// short-circuit before reaching Commit, and a silent no-op would mask
+// a control-flow regression.
+//
+// Defined here in a _test.go file so it cannot be imported by production
+// code — the _test.go suffix excludes it from non-test builds.
 type failingSink struct {
+	*chain.WatchtowerSink
 	err error
 }
 
-func (f *failingSink) Compute(_ chain.ComputeInput) (*chain.ComputeResult, error) {
+func newFailingSink(t *testing.T, err error) *failingSink {
+	t.Helper()
+	inner, innerErr := audit.NewSinkChain([]byte("0123456789abcdef0123456789abcdef"), "hmac-sha256")
+	if innerErr != nil {
+		t.Fatalf("audit.NewSinkChain: %v", innerErr)
+	}
+	return &failingSink{WatchtowerSink: chain.NewWatchtowerSink(inner), err: err}
+}
+
+func (f *failingSink) Compute(_ int, _ int64, _ uint32, _ []byte) (*audit.ComputeResult, error) {
 	return nil, f.err
 }
 
-// Commit is a no-op: the failure path that exercises this fake never
-// reaches Commit. If a future test does, this should panic to surface
-// the violation.
-func (f *failingSink) Commit(_ *chain.ComputeResult) {}
+// Commit panics on invocation: the failure path under test must drop the
+// record before Commit is ever called. A silent no-op here would mask a
+// regression where a dropped record reaches commit anyway. Inheriting
+// the embedded WatchtowerSink's Commit would be worse — it would advance
+// the real audit chain on a record the harness expects to have been
+// dropped.
+func (f *failingSink) Commit(_ *audit.ComputeResult) error {
+	panic("failingSink.Commit invoked — record should have been dropped before reaching the sink")
+}
 
-// PeekPrevHash returns the empty string. The drop tests assert that
-// PeekPrevHash is unchanged before and after the dropped append; both
-// snapshots are "" when the failing sink is engaged from the start.
-func (f *failingSink) PeekPrevHash() string { return "" }
+// PeekPrevHash is INHERITED from the embedded *chain.WatchtowerSink — it
+// returns the actual chain prev_hash (genesis empty until a real Commit
+// advances the inner audit.SinkChain). The drop-path tests assert this
+// value is unchanged across the dropped append, which proves the chain
+// did not advance, not merely that a stub returned a constant.
 
 func mkStoreWithFailingSink(t *testing.T, sentinel error) *watchtower.Store {
 	t.Helper()
@@ -8419,20 +8850,21 @@ func mkStoreWithFailingSink(t *testing.T, sentinel error) *watchtower.Store {
 
 	allocator := audit.NewSequenceAllocator(0, 0)
 	s, err := watchtower.New(context.Background(), watchtower.Options{
-		WALDir:                    t.TempDir(),
-		Mapper:                    compact.StubMapper{},
-		Allocator:                 allocator,
-		AgentID:                   "a",
-		SessionID:                 "s",
-		HMACKeyID:                 "k1",
-		HMACSecret:                []byte("secret"),
-		BatchMaxRecords:           8,
-		BatchMaxBytes:             8 * 1024,
-		BatchMaxAge:               50 * time.Millisecond,
-		AllowStubMapper:           true,
-		Dialer:                    srv.DialerFor(),
-		Metrics:                   metrics.New(),
-		SinkChainOverrideForTests: &failingSink{err: sentinel},
+		WALDir:                         t.TempDir(),
+		Mapper:                         compact.StubMapper{},
+		Allocator:                      allocator,
+		AgentID:                        "a",
+		SessionID:                      "s",
+		HMACKeyID:                      "k1",
+		HMACSecret:                     []byte("0123456789abcdef0123456789abcdef"),
+		BatchMaxRecords:                8,
+		BatchMaxBytes:                  8 * 1024,
+		BatchMaxAge:                    50 * time.Millisecond,
+		AllowStubMapper:                true,
+		Dialer:                         srv.DialerFor(),
+		Metrics:                        metrics.New(),
+		SinkChainOverrideForTests:      newFailingSink(t, sentinel),
+		AllowSinkChainOverrideForTests: true, // gated test seam; see Options doc
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -8455,7 +8887,7 @@ Expected: no errors.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add internal/store/watchtower/append.go internal/store/watchtower/store.go internal/store/watchtower/append_test.go internal/store/watchtower/chain/chain.go
+git add internal/store/watchtower/append.go internal/store/watchtower/store.go internal/store/watchtower/append_test.go
 git commit -m "feat(wtp/store): add AppendEvent transactional pattern + fatal latch"
 ```
 
@@ -8532,13 +8964,13 @@ func TestStore_WALCleanFailure_NoChainAdvance(t *testing.T) {
 		Type: "exec", SessionID: "s",
 		Chain: &types.ChainState{Sequence: 1, Generation: 1},
 	}
-	prev := s.SinkChainState()
+	prev := s.PeekPrevHash() // test-only accessor from store_export_test.go
 	if err := s.AppendEvent(context.Background(), ev); err == nil {
 		t.Fatal("expected clean failure")
 	}
-	got := s.SinkChainState()
-	if !chain.SinkStateEqual(prev, got) {
-		t.Fatalf("clean failure advanced chain state: prev=%v got=%v", prev, got)
+	got := s.PeekPrevHash()
+	if got != prev {
+		t.Fatalf("clean failure advanced chain state: prev=%q got=%q", prev, got)
 	}
 }
 
@@ -8731,37 +9163,13 @@ func (a AppendError) IsClean() bool     { return a.Class == AppendClassClean }
 func (a AppendError) IsAmbiguous() bool { return a.Class == AppendClassAmbiguous }
 ```
 
-Add a chain accessor to `Store`:
-
-```go
-// SinkChainState returns the current SinkChain state (test-only).
-func (s *Store) SinkChainState() chain.SinkState {
-	return s.sink.State()
-}
-```
-
-And add to `internal/store/watchtower/chain/chain.go`:
-
-```go
-// SinkState is an opaque snapshot of SinkChain state for tests.
-type SinkState struct {
-	prev []byte
-}
-
-// State returns the current SinkChain state.
-func (s *SinkChain) State() SinkState {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cp := make([]byte, len(s.prev))
-	copy(cp, s.prev)
-	return SinkState{prev: cp}
-}
-
-// SinkStateEqual reports whether two SinkState snapshots are equal.
-func SinkStateEqual(a, b SinkState) bool {
-	return string(a.prev) == string(b.prev)
-}
-```
+No new chain accessor is needed: Task 22 already exposes
+`(s *Store) PeekPrevHash() string` via `store_export_test.go` (test-only,
+guarded by the `_test.go` build tag). It delegates to
+`chain.WatchtowerSink.PeekPrevHash`, which reads
+`audit.SinkChain.State().PrevHash`. The clean-failure assertion above
+uses string equality on that hex hash; no `SinkState` opaque type or
+`SinkStateEqual` helper is required.
 
 - [ ] **Step 3: Run all four tests to verify they pass**
 
@@ -8780,7 +9188,7 @@ Expected: no errors.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add internal/store/watchtower/integrity_test.go internal/store/watchtower/wal/generation_boundary_test.go internal/store/watchtower/wal/wal.go internal/store/watchtower/store.go internal/store/watchtower/chain/chain.go pkg/types/events_marshal_test.go
+git add internal/store/watchtower/integrity_test.go internal/store/watchtower/wal/generation_boundary_test.go internal/store/watchtower/wal/wal.go pkg/types/events_marshal_test.go
 git commit -m "test(wtp): add 4 high-risk integrity tests gating component layer"
 ```
 
