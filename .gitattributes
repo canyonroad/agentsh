@@ -1,0 +1,5 @@
+# Wire-format goldens for the WTP protocol. Treating these as binary keeps
+# `git diff` from emitting raw protobuf bytes, which breaks tools (and reviewers)
+# that expect UTF-8 patches. The .bin files are still version-controlled and
+# any change still surfaces as "Binary files differ" in code review.
+proto/canyonroad/wtp/v1/testdata/*.bin binary
