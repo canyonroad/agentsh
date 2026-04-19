@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
@@ -12,7 +13,35 @@ import (
 	"github.com/agentsh/agentsh/pkg/types"
 )
 
+// Store fans an event out to a primary EventStore plus zero-or-more chained
+// sinks while owning the shared sequence allocator that stamps ev.Chain.
+//
+// Concurrency model:
+//
+//   - mu is a sync.RWMutex held outermost in this package. AppendEvent takes
+//     mu.RLock() for the duration of allocator.Next() AND the entire fanout
+//     so concurrent appends do not serialize against each other but DO
+//     serialize against the rotation paths.
+//   - NextGeneration takes mu.Lock(): it cannot return until every in-flight
+//     AppendEvent has completed its fanout, AND no new AppendEvent may begin
+//     until the rotation finishes. This is what makes the spec's "all chained
+//     sinks roll on the same logical event boundary" guarantee enforceable
+//     rather than aspirational — without it, an in-flight AppendEvent could
+//     stamp ev.Chain with the OLD generation while a sink that has already
+//     rekeyed observes the NEW generation, exactly the backwards-generation
+//     race SinkChain.Commit is designed to reject.
+//   - State and Restore take mu.Lock() so the snapshot reflects a state that
+//     no AppendEvent fanout is partway through and no NextGeneration is
+//     partway through.
+//
+// The allocator carries its own internal mutex — that is fine because the
+// allocator never calls back into the wrapper; lock order is always
+// composite.mu (outer) → allocator.mu (inner).
+//
+// This matches the wrapper-level mutex discipline established for
+// audit.IntegrityChain in commit 915251c7.
 type Store struct {
+	mu            sync.RWMutex
 	primary       store.EventStore
 	output        store.OutputStore
 	others        []store.EventStore
@@ -33,11 +62,40 @@ func (s *Store) SetAppendErrorHook(fn func(error)) {
 	s.onAppendError = fn
 }
 
+// AppendEvent allocates the shared (sequence, generation), stamps a
+// per-sink-fresh ev.Chain, and fans out to every configured sink.
+//
+// Pre-fanout sequence semantics: the shared sequence advances eagerly on
+// every successful allocator.Next() call, regardless of whether any sink
+// accepts the event. This matches the spec's TransportLoss semantics —
+// the shared sequence reflects what the system PRODUCED, not what each
+// sink DELIVERED. A sink that drops an event still observes a gap and
+// must emit its own loss marker.
+//
+// If allocator.Next() itself fails (overflow), no sequence is consumed
+// and the event is rejected before any sink sees it. The error is wrapped
+// as *store.FatalIntegrityError with Op == "audit sequence allocate" and
+// delivered through the onAppendError hook so the daemon's fatal-audit
+// watcher observes it (matching the convention used elsewhere in this
+// package; see internal/store/integrity_wrapper.go).
+//
+// Holds mu.RLock() for the entire stamp+fanout duration so NextGeneration
+// (which takes mu.Lock()) cannot interleave: any rotation that begins
+// after this AppendEvent started will block until this fanout completes,
+// guaranteeing the stamped ev.Chain.Generation is the generation in
+// effect at allocation time and that the same generation is observed by
+// every sink in this fanout.
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
-	// Phase 0: composite allocates the shared (seq, gen) once before fanout.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	seq, gen, err := s.allocator.Next()
 	if err != nil {
-		return err
+		fatalErr := &store.FatalIntegrityError{Op: "audit sequence allocate", Err: err}
+		if s.onAppendError != nil {
+			s.onAppendError(fatalErr)
+		}
+		return fatalErr
 	}
 
 	// stampForSink returns ev with a FRESH *ChainState pointer so no two
@@ -89,10 +147,43 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 // AppendEvent stamps ev.Chain with (Sequence:0, Generation:newGen).
 // Used by the composite owner when the chain key rotates.
 //
+// Acquires mu.Lock() so the rotation cannot interleave with any in-flight
+// AppendEvent fanout: this method blocks until every concurrent
+// AppendEvent (which holds mu.RLock()) has completed, AND no new
+// AppendEvent may begin until this method returns. After return, every
+// subsequent AppendEvent stamps the new generation; there is no window
+// where a stamped (seq, oldGen) event can race against sink rekeying.
+//
 // Returns ErrGenerationOverflow on uint32 wrap; the allocator is not
 // modified in that case (see audit.SequenceAllocator.NextGeneration).
 func (s *Store) NextGeneration() (uint32, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.allocator.NextGeneration()
+}
+
+// State returns the allocator's current (sequence, generation) for
+// persistence. Acquires mu.Lock() so the snapshot is taken while no
+// AppendEvent is mid-fanout and no NextGeneration is in progress —
+// the returned state is a consistent view of where the chain is.
+func (s *Store) State() audit.AllocatorState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.allocator.State()
+}
+
+// Restore rehydrates the allocator state after restart. Returns an error
+// wrapping audit.ErrInvalidAllocatorState on rejected input; the wrapper
+// is not modified in that case (delegated guarantee from
+// SequenceAllocator.Restore).
+//
+// Acquires mu.Lock() so Restore is serialized with both AppendEvent
+// fanout and NextGeneration. Phase 0 only adds the API; daemon wiring
+// for persist+restore across process restarts is out of scope.
+func (s *Store) Restore(state audit.AllocatorState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.allocator.Restore(state)
 }
 
 func (s *Store) QueryEvents(ctx context.Context, q types.EventQuery) ([]types.Event, error) {

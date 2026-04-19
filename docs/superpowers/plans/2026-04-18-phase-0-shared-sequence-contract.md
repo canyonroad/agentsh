@@ -1949,13 +1949,14 @@ Expected: build failure (`s.NextGeneration` undefined) OR test failure (`Chain` 
 
 - [ ] **Step 3: Add allocator field and stamp logic**
 
-Edit `internal/store/composite/composite.go`. Add the audit import:
+Edit `internal/store/composite/composite.go`. Add the audit + sync imports:
 
 ```go
 import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/agentsh/agentsh/internal/audit"
@@ -1965,10 +1966,11 @@ import (
 )
 ```
 
-Replace the `Store` struct and `New` constructor (currently lines 14-23):
+Replace the `Store` struct and `New` constructor. The struct gains a `sync.RWMutex` (the wrapper-level rotation lock — see `## Composite Concurrency Model` in the spec for the discipline points):
 
 ```go
 type Store struct {
+	mu            sync.RWMutex
 	primary       store.EventStore
 	output        store.OutputStore
 	others        []store.EventStore
@@ -1986,14 +1988,27 @@ func New(primary store.EventStore, output store.OutputStore, others ...store.Eve
 }
 ```
 
-Replace `AppendEvent` (currently lines 29-64) — keep all existing error-collection logic, add the allocate+stamp prologue. Note the per-sink-copy pattern: the allocator is called ONCE per AppendEvent so all sinks see the same `(seq, gen)`, but each sink receives its own freshly-allocated `*ChainState` so no two sinks alias the same pointer. This is the runtime guarantee that backs the "Chain MUST be treated as read-only" contract on `pkg/types.ChainState`.
+Replace `AppendEvent` (currently lines 29-64) — keep all existing error-collection logic, add the allocate+stamp prologue and wrap the body in `mu.RLock()`. Note the per-sink-copy pattern: the allocator is called ONCE per AppendEvent so all sinks see the same `(seq, gen)`, but each sink receives its own freshly-allocated `*ChainState` so no two sinks alias the same pointer. This is the runtime guarantee that backs the "Chain MUST be treated as read-only" contract on `pkg/types.ChainState`.
+
+The RLock is the outer half of the wrapper-level rotation lock: `NextGeneration` (and `State`/`Restore`) take `mu.Lock()` so they block until every concurrent AppendEvent has completed its fanout. Without this lock, a stamped (seq, oldGen) event could race against sink rekeying and a sink that had already rotated would observe a backwards-generation event — exactly the failure mode `SinkChain.Commit` is designed to reject.
+
+Allocator failures (overflow) are wrapped as `*store.FatalIntegrityError{Op: "audit sequence allocate"}` and routed through the existing `onAppendError` hook so the daemon's fatal-audit watcher observes them, matching the convention in `internal/store/integrity_wrapper.go` (`Op: "write audit log"`, `Op: "sync audit log"`, `Op: "write audit integrity sidecar"`).
 
 ```go
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	// Phase 0: composite allocates the shared (seq, gen) once before fanout.
 	seq, gen, err := s.allocator.Next()
 	if err != nil {
-		return err
+		// Allocator failures bypass fanout. Wrap + route through hook so the
+		// daemon's fatal-audit watcher observes the overflow.
+		fatalErr := &store.FatalIntegrityError{Op: "audit sequence allocate", Err: err}
+		if s.onAppendError != nil {
+			s.onAppendError(fatalErr)
+		}
+		return fatalErr
 	}
 
 	// stampForSink returns ev with a FRESH *ChainState pointer so no two
@@ -2042,29 +2057,69 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 }
 ```
 
-Add `NextGeneration` method (place it directly below `AppendEvent`):
+Add `NextGeneration` method (place it directly below `AppendEvent`). It takes `mu.Lock()` so it cannot return until every in-flight AppendEvent (each holding `mu.RLock()`) has completed its fanout, AND no new AppendEvent may begin until rotation finishes:
 
 ```go
 // NextGeneration advances the shared sequence generation. The next
 // AppendEvent stamps ev.Chain with (Sequence:0, Generation:newGen).
 // Used by the composite owner when the chain key rotates.
 //
+// Acquires mu.Lock() so the rotation cannot interleave with any in-flight
+// AppendEvent fanout. After return, every subsequent AppendEvent stamps
+// the new generation; there is no window where a stamped (seq, oldGen)
+// event can race against sink rekeying.
+//
 // Returns ErrGenerationOverflow on uint32 wrap; the allocator is not
 // modified in that case (see audit.SequenceAllocator.NextGeneration).
 func (s *Store) NextGeneration() (uint32, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.allocator.NextGeneration()
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+Add `State` and `Restore` methods so the daemon can persist + rehydrate the shared allocator across restarts. Phase 0 only adds the API; daemon wiring is out of scope.
 
-```bash
-go test ./internal/store/composite/ -v
+```go
+// State returns the allocator's (sequence, generation) for persistence.
+// Acquires mu.Lock() so the snapshot is taken while no AppendEvent is
+// mid-fanout and no NextGeneration is in progress.
+func (s *Store) State() audit.AllocatorState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.allocator.State()
+}
+
+// Restore rehydrates the allocator state after restart. Returns
+// audit.ErrInvalidAllocatorState on rejected input; the wrapper is not
+// modified in that case (delegated guarantee from
+// SequenceAllocator.Restore).
+func (s *Store) Restore(state audit.AllocatorState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.allocator.Restore(state)
+}
 ```
 
-Expected: all composite tests PASS, including the two new ones.
+- [ ] **Step 4: Add the rollover-atomicity + alloc-error + State/Restore regression tests**
 
-- [ ] **Step 5: Run the full test suite**
+These five tests guard the wrapper-level RWMutex contract, the allocator-error → hook routing, and the State/Restore roundtrip. Append them to `internal/store/composite/composite_test.go` and add `math`, `sync`, `sync/atomic`, `time`, and `audit` to the test imports.
+
+- `TestComposite_NextGeneration_BlocksUntilInflightFanoutCompletes` — uses a `blockingEventStore` (a small helper with a `chan struct{}` release signal) to pin a goroutine inside the composite's per-event fanout, then verifies that a concurrent `NextGeneration` does NOT return while the AppendEvent is still in fanout. Without `mu.RWMutex` this test fails: NextGeneration would advance the allocator and a subsequent AppendEvent on the SAME composite would stamp the new generation while the original AppendEvent's fanout is still mid-flight.
+- `TestComposite_NextGeneration_NoStaleStamping` — spawns 100 AppendEvent goroutines and concurrently calls NextGeneration five times. Asserts no captured (seq, gen) tuple is duplicated, no captured tuple has gen < the maximum generation seen earlier in the captured stream, and the per-generation sequence range is contiguous from 0. Run with `-race`.
+- `TestComposite_AppendEvent_AllocatorErrorRoutedToHook` — drives the allocator to `MaxInt64` via `s.Restore(audit.AllocatorState{Sequence: math.MaxInt64})`, sets the error hook, calls AppendEvent. Asserts the returned error wraps `audit.ErrSequenceOverflow` AND is a `*store.FatalIntegrityError` with `Op == "audit sequence allocate"`, the hook received the SAME error instance, and no sink was called.
+- `TestComposite_State_Restore_Roundtrip` — appends a few events, snapshots `State()`, constructs a new composite, calls `Restore(snapshot)`, and verifies the next AppendEvent stamps `Sequence: snapshot.Sequence + 1`.
+- `TestComposite_Restore_RejectsInvalidInput_LeavesStateIntact` — appends a few events, snapshots `State()` as `S0`, calls `Restore(audit.AllocatorState{Sequence: -2})`, asserts the returned error wraps `audit.ErrInvalidAllocatorState`, asserts `State()` still equals `S0`, and asserts the next AppendEvent stamps `Sequence: S0.Sequence + 1`.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+```bash
+go test ./internal/store/composite/ -v -count=1 -race
+```
+
+Expected: all composite tests PASS, including the seven new ones (two from Step 1, five from Step 4).
+
+- [ ] **Step 6: Run the full test suite**
 
 ```bash
 go test ./...
@@ -2072,7 +2127,7 @@ go test ./...
 
 Expected: all tests PASS. The existing composite tests (`TestAppendEventCollectsFirstError`, `TestAppendEventErrorHookReceivesFirstError`, etc.) work because they use `fakeEventStore` which ignores `ev.Chain`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add internal/store/composite/composite.go internal/store/composite/composite_test.go
@@ -2085,6 +2140,13 @@ sinks that don't ignore it.
 
 Adds NextGeneration() so the composite owner (the daemon) can trigger a
 generation rollover; the next AppendEvent stamps (Sequence:0, Generation:N+1).
+
+Holds a wrapper-level sync.RWMutex so AppendEvent fanout is atomic with
+respect to NextGeneration: the rotation cannot interleave with any
+in-flight fanout. Allocator-overflow errors are wrapped as
+*store.FatalIntegrityError and routed through the existing onAppendError
+hook so the daemon's fatal-audit watcher observes them. State()/Restore()
+expose the allocator at the composite level for future restart wiring.
 
 Phase 0 — see docs/superpowers/specs/2026-04-18-phase-0-shared-sequence-contract.md.
 

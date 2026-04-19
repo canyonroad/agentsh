@@ -38,6 +38,9 @@ This contract solves both by introducing two distinct types and a transactional 
 | **Refactor of `audit.IntegrityChain`** | Preserved as a convenience wrapper that internally composes a `SequenceAllocator` + `SinkChain`. The existing `Wrap()` method is unchanged at the source level. | Single-sink callers (today's JSONL primary when not in composite) keep working without code changes. |
 | **Generation semantics** | Allocator owns generation; sequence resets to 0 on `NextGeneration()`. Each `SinkChain` resets its `prev_hash` to `""` when it first sees a new generation (signalled via the typed `Chain` field). | Matches WTP spec §6.4. Generation is a property of the shared allocator, not of any sink. |
 | **Per-sink `TransportLoss` doesn't perturb the shared sequence** | Sinks that drop locally emit their own marker. The allocator does not roll back. | The shared sequence reflects what the system *produced*, not what each sink *delivered*. |
+| **Allocator-error reporting** | A failure from `allocator.Next()` (in practice only `ErrSequenceOverflow`) is wrapped as `*store.FatalIntegrityError` with `Op == "audit sequence allocate"` and routed through `composite.SetAppendErrorHook`. The event is rejected before any sink runs. | Matches the convention used elsewhere in `internal/store/integrity_wrapper.go` (`Op: "write audit log"`, `Op: "sync audit log"`, `Op: "write audit integrity sidecar"`). The daemon's fatal-audit watcher (`internal/server/server.go`) only listens to hook-delivered `FatalIntegrityError`s; using the same routing means allocator overflow surfaces through the same operator path as every other fatal integrity event. |
+| **Composite rollover atomicity** | `composite.Store` holds a `sync.RWMutex`. `AppendEvent` takes the read lock for the duration of `allocator.Next()` AND the entire fanout. `NextGeneration` takes the write lock so it cannot return until every in-flight `AppendEvent` has completed AND no new `AppendEvent` may begin until the rotation finishes. `State`/`Restore` also take the write lock so the snapshot is consistent. | Without this, an in-flight `AppendEvent` could stamp `ev.Chain` with the OLD generation while a sink that has already rekeyed observes the NEW generation — exactly the backwards-generation race `SinkChain.Commit` is designed to reject. With the wrapper RWMutex, "all chained sinks roll on the same logical event boundary" is enforceable rather than aspirational. |
+| **Pre-write sequence semantics** | The shared sequence advances eagerly on every successful `allocator.Next()` call, regardless of whether any sink accepts the event. Allocator failures (overflow) consume no sequence and surface via the hook. | Matches `TransportLoss` semantics: the shared sequence reflects what the system PRODUCED, not what each sink DELIVERED. Per-sink drops do not perturb the allocator; pre-write allocator failures bypass fanout entirely so no per-sink loss marker is needed. |
 
 ## Typed `Chain` Field
 
@@ -306,33 +309,46 @@ For single-sink callers, durable success is implicit (Wrap returns the bytes; th
 
 ```go
 type Store struct {
+    mu            sync.RWMutex                 // wrapper-level rotation lock
     primary       store.EventStore
     output        store.OutputStore
     others        []store.EventStore
-    allocator     *audit.SequenceAllocator   // NEW: shared allocator
+    allocator     *audit.SequenceAllocator     // shared allocator
     onAppendError func(error)
 }
 
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
+    s.mu.RLock()
+    defer s.mu.RUnlock()
+
     // Phase 0: composite allocates the shared (seq, gen) before fanout.
     seq, gen, err := s.allocator.Next()
     if err != nil {
-        return err  // typically ErrSequenceOverflow; caller treats as fatal
+        // Allocator failures (overflow) bypass fanout entirely. Wrap as
+        // FatalIntegrityError + route through the hook so the daemon's
+        // fatal-audit watcher observes them, matching the convention in
+        // internal/store/integrity_wrapper.go.
+        fatalErr := &store.FatalIntegrityError{Op: "audit sequence allocate", Err: err}
+        if s.onAppendError != nil {
+            s.onAppendError(fatalErr)
+        }
+        return fatalErr
     }
-    ev.Chain = &types.ChainState{
-        Sequence:   uint64(seq),
-        Generation: gen,
+    stampForSink := func() types.Event {
+        stamped := ev
+        stamped.Chain = &types.ChainState{Sequence: uint64(seq), Generation: gen}
+        return stamped
     }
 
     // Fan out — each sink that chains computes its own hash; the others ignore.
     var firstErr, hookErr error
     if s.primary != nil {
-        if err := s.primary.AppendEvent(ctx, ev); err != nil {
+        if err := s.primary.AppendEvent(ctx, stampForSink()); err != nil {
             firstErr, hookErr = collectErr(firstErr, hookErr, err)
         }
     }
     for _, o := range s.others {
-        if err := o.AppendEvent(ctx, ev); err != nil {
+        if err := o.AppendEvent(ctx, stampForSink()); err != nil {
             firstErr, hookErr = collectErr(firstErr, hookErr, err)
         }
     }
@@ -344,13 +360,47 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 
 // NextGeneration is called by the composite owner (the daemon) when the
 // chain key rotates. All chained sinks observe the new generation on the
-// next event.
-func (s *Store) NextGeneration() uint32 {
+// next event. Acquires the wrapper write lock so the rotation cannot
+// interleave with any in-flight AppendEvent fanout.
+func (s *Store) NextGeneration() (uint32, error) {
+    s.mu.Lock()
+    defer s.mu.Unlock()
     return s.allocator.NextGeneration()
+}
+
+// State returns the allocator's (sequence, generation) for persistence.
+// Acquires the wrapper write lock so the snapshot reflects a state that
+// no AppendEvent fanout is partway through and no NextGeneration is
+// partway through.
+func (s *Store) State() audit.AllocatorState {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    return s.allocator.State()
+}
+
+// Restore rehydrates the allocator state after restart. Returns
+// audit.ErrInvalidAllocatorState on rejected input; the wrapper is not
+// modified in that case (delegated guarantee from
+// SequenceAllocator.Restore).
+func (s *Store) Restore(state audit.AllocatorState) error {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    return s.allocator.Restore(state)
 }
 ```
 
-The error-hook semantics (`onAppendError`, `FatalIntegrityError` detection) of the current composite are preserved verbatim; only the sequence-allocation step is added.
+The error-hook semantics (`onAppendError`, `FatalIntegrityError` detection) of the current composite are preserved verbatim; the only additions are the allocator integration, the wrapper RWMutex, and the State/Restore handles for future restart wiring.
+
+### Composite Concurrency Model
+
+`composite.Store` holds a single `sync.RWMutex` that is the outermost lock in the package. The lock has four discipline points:
+
+- **`AppendEvent` takes `mu.RLock()` for the entire stamp + fanout duration.** Concurrent `AppendEvent` calls do NOT serialize against each other — the read lock is shared — so the high-throughput hot path retains its concurrency. They DO serialize against `NextGeneration`, `State`, and `Restore`.
+- **`NextGeneration` takes `mu.Lock()`.** It cannot return until every in-flight `AppendEvent` (each holding `mu.RLock()`) has completed its fanout, AND no new `AppendEvent` may begin until the rotation finishes. After return, every subsequent `AppendEvent` stamps the new generation; there is no window where a stamped `(seq, oldGen)` event can race against sink rekeying.
+- **`State` and `Restore` take `mu.Lock()`** so a snapshot is consistent (no partial fanout, no partial rotation) and a restore lands cleanly.
+- **The shared sequence advances eagerly: a successful `allocator.Next()` consumes a sequence even if every sink rejects the event.** This matches `TransportLoss` semantics — the shared sequence reflects what the system PRODUCED, not what each sink DELIVERED. A pre-write allocator overflow is the one exception: it consumes no sequence, surfaces as `*store.FatalIntegrityError{Op: "audit sequence allocate"}`, and is routed through `onAppendError` so the daemon's fatal-audit watcher observes it (matching the convention in `internal/store/integrity_wrapper.go`).
+
+Lock order is always `composite.mu` (outer) → `allocator.mu` (inner). The allocator never calls back into the composite, so there is no deadlock potential. This matches the wrapper-level mutex discipline established for `audit.IntegrityChain` in commit 915251c7.
 
 ### Sink integration — the transactional pattern
 
@@ -415,6 +465,8 @@ When the composite owner rotates the chain key:
 4. Per-sink work (e.g., WTP forces a batch flush + WAL segment roll + `SessionUpdate`) is triggered by the sink observing the generation change in `ev.Chain.Generation`.
 
 Generation is a property of the *shared allocator*, not of any individual sink. All sinks roll on the same logical event boundary — the first event with the new generation.
+
+**Enforcement.** The "same logical event boundary" guarantee is enforceable, not aspirational, because of the wrapper RWMutex on `composite.Store` (see *Composite Concurrency Model* above): `NextGeneration` takes the write lock and waits for every in-flight `AppendEvent` (each holding the read lock) to complete its fanout before advancing the allocator. After `NextGeneration` returns, every subsequent `AppendEvent` stamps the new generation. Without this lock, a stamped `(seq, oldGen)` event could race against sink rekeying and a sink that had already rotated would observe a backwards-generation event — exactly the failure mode `SinkChain.Commit` is designed to reject.
 
 ## TransportLoss Semantics
 
