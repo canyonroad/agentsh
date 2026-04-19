@@ -8077,15 +8077,32 @@ Add to `internal/store/watchtower/transport/transport.go`:
 // It applies backoff between StateConnecting attempts.
 //
 // rdrFactory takes the WAL start sequence so the caller can position
-// the Reader explicitly per state entry. Replaying opens at 0 (the
-// Reader's nextSeq filter is harmless because Replayer hard-stops at
-// the entry-time tail watermark — over-tail records are surfaced once,
-// as the boundary record). Live opens at
-// max(rep.LastReplayedSequence()+1, ackHW+1) so it picks up exactly
-// past the boundary record without re-emitting it AND without missing
-// any trailing TransportLoss marker overflow GC may have appended at
-// the WAL tail mid-replay (loss markers bypass the Reader's nextSeq
-// filter — see wal/reader.go nextLocked near the isLossMarker branch).
+// the Reader explicitly per state entry. `start` is the inclusive
+// lowest seq the returned Reader will surface for RecordData
+// (RecordLoss markers always surface — see wal/reader.go NewReader
+// docstring). Replaying opens at `t.ackedSequence + 1`, mirroring the
+// `wal.Reader.NewReader` "replay-after-ack callers pass ackHighSeq + 1"
+// idiom (reader.go:114) and the spec's `(ack_hw, wal_hw_at_entry]`
+// replay window (spec line 601). Without that +1, any reconnect with
+// `t.ackedSequence > 0` would re-read and re-send already-acknowledged
+// history. Replayer's entry-time tail watermark hard-stops drain at
+// the upper bound (over-tail records are surfaced once as the boundary
+// record). Live opens at max(rep.LastReplayedSequence()+1,
+// t.ackedSequence+1) so it picks up exactly past the boundary record
+// without re-emitting it AND without missing any trailing TransportLoss
+// marker overflow GC may have appended at the WAL tail mid-replay
+// (loss markers bypass the Reader's nextSeq filter — see
+// wal/reader.go nextLocked near the isLossMarker branch).
+//
+// `t.ackedSequence` is the Transport-level ack watermark; it is owned
+// by Transport (not by Conn) and is seeded by the SessionAck handler
+// in `state_connecting.go:59`. Once Tasks 17/18 land the recv
+// multiplexer it is also ADVANCED by `BatchAck` / `ServerHeartbeat`
+// handlers during Replaying and Live. The state handlers READ
+// `t.ackedSequence` for their reader-start calculations; they DO NOT
+// advance it. The spec's clamp rule
+// `min(server_returned_hw, local_ack_hw)` (spec line 601) is the
+// SessionAck/BatchAck handler's responsibility, not the state-handler's.
 //
 // rep is hoisted to the outer Run scope and threaded across the
 // Replaying → Live boundary so Live can compute its start cursor from
@@ -8093,6 +8110,13 @@ Add to `internal/store/watchtower/transport/transport.go`:
 // (e.g. on Replaying or Live error) we MUST reset rep = nil so a stale
 // handoff doesn't leak into a subsequent Live entry on the next
 // connect cycle.
+//
+// Reader lifecycle. Each state-handler case OWNS the reader it opens.
+// The replay reader created in StateReplaying is closed by that case
+// on EVERY exit path (success and error) so it unregisters from the
+// WAL (see `wal/reader.go` Reader.Close near line 446); the Live case
+// then opens its own fresh reader at the recomputed start cursor. The
+// two readers never overlap.
 func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal.Reader, error), liveOpts LiveOptions) error {
 	bo := NewBackoff(BackoffOptions{
 		Initial: 200 * time.Millisecond,
@@ -8126,7 +8150,21 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 			rep = nil // fresh connect cycle — no stale handoff
 			st = next
 		case StateReplaying:
-			rdr, err := rdrFactory(0)
+			// The replay reader is OWNED by this case: it is opened
+			// here, threaded into the Replayer, and explicitly Closed
+			// on every exit path (success and error) so it
+			// unregisters from the WAL (see wal/reader.go Reader.Close
+			// near line 446). The StateLive case opens its own fresh
+			// reader at a recomputed start cursor — the two readers
+			// never overlap.
+			//
+			// Open at t.ackedSequence+1 to mirror the wal.Reader
+			// "replay-after-ack callers pass ackHighSeq + 1" idiom
+			// (reader.go:114) and the spec's (ack_hw, wal_hw_at_entry]
+			// replay window (spec line 601). Without that +1, a
+			// reconnect with t.ackedSequence > 0 would re-read and
+			// re-send already-acknowledged history.
+			rdr, err := rdrFactory(t.ackedSequence + 1)
 			if err != nil {
 				rep = nil
 				st = StateConnecting
@@ -8137,6 +8175,11 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 				MaxBatchBytes:   liveOpts.Batcher.MaxBytes,
 			})
 			next, err := t.runReplaying(ctx, rep)
+			// Replay reader lifecycle: close on every exit path so it
+			// unregisters from the WAL. Done before any state
+			// regression / continue so we never leak a registered
+			// reader across a reconnect cycle.
+			_ = rdr.Close()
 			if err != nil {
 				// runReplaying tore down t.conn on its way out per its
 				// lifecycle rule; back off and reconnect. Reset rep so
@@ -8153,7 +8196,7 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 			st = next
 		case StateLive:
 			// Live opens its Reader at max(rep.LastReplayedSequence()+1,
-			// ackHW+1). The max() avoids two failure modes:
+			// t.ackedSequence+1). The max() avoids two failure modes:
 			//   1. Re-emitting the boundary record (Replayer hard-stops
 			//      one past tailSeq; rep.LastReplayedSequence() captures
 			//      that over-tail record, so Live's start MUST be
@@ -8164,13 +8207,19 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 			//      branch), so Live's Reader will surface them even
 			//      though its start cursor is past their covered range.
 			//
-			// TODO(Task 22): replace t.conn.AcknowledgedHighWaterSequence
-			// with the actual SessionAck-derived ack_hw source once the
-			// Conn handshake surfaces it. The placeholder here documents
-			// the dependency; substitute the real accessor before this
-			// snippet ships.
-			ackHW := t.conn.AcknowledgedHighWaterSequence()
-			start := ackHW + 1
+			// `t.ackedSequence` is the Transport-level ack watermark.
+			// It is seeded from SessionAck by the connecting handler
+			// (state_connecting.go:59 — t.ackedSequence =
+			// ack.GetAckHighWatermarkSeq()) and ADVANCED during
+			// Replaying / Live by the BatchAck / ServerHeartbeat
+			// handlers in the recv multiplexer that Tasks 17/18
+			// introduce. The Replaying and Live cases READ
+			// t.ackedSequence for their reader-start calculations; they
+			// DO NOT advance it. The clamp rule from spec line 601
+			// (`min(server_returned_hw, local_ack_hw)`) is the
+			// SessionAck/BatchAck handler's responsibility, not the
+			// state-handler's.
+			start := t.ackedSequence + 1
 			if rep != nil {
 				if cand := rep.LastReplayedSequence() + 1; cand > start {
 					start = cand
@@ -8224,13 +8273,18 @@ The snippet above structurally depends on Tasks 17/18:
   Task 18 (heartbeat). The snippet visibly cannot compile without
   Task 17 landing first — that is the structural enforcement promised
   in the "Task 16 — Deferred to Task 17/18" subsection.
-- The `t.conn.AcknowledgedHighWaterSequence()` accessor is a placeholder
-  for whatever Task 22 wires from the SessionAck source. If Task 22 is
-  the first to need it, define the accessor on `Conn` (or read the
-  watermark off a `Transport` field that the SessionAck handler in
-  Tasks 17/18 populates) — the choice belongs to Task 22.
+- The ack watermark consumed by both state cases is `t.ackedSequence`
+  on the `Transport` struct (`internal/store/watchtower/transport/
+  transport.go:84`), which is ALREADY seeded by the Connecting handler
+  from `SessionAck` (`state_connecting.go:59`). Tasks 17/18 ADVANCE
+  this field from the recv multiplexer (BatchAck / ServerHeartbeat
+  handlers); the state-handler cases here READ but do not write it.
+  The spec's `min(server_returned_hw, local_ack_hw)` clamp (spec line
+  601) belongs to the SessionAck / BatchAck handlers, not to the
+  state-handler cases. No accessor on `Conn` is required — `Conn`'s
+  surface stays Send/Recv/CloseSend/Close (`conn.go:34`).
 
-Two acceptance tests in `internal/store/watchtower/transport/transport_run_test.go`
+Four acceptance tests in `internal/store/watchtower/transport/transport_run_test.go`
 exercise the Replaying → Live handoff:
 
 - `TestRun_LiveResumesPastReplayBoundary` — verifies Live does not
@@ -8239,7 +8293,8 @@ exercise the Replaying → Live handoff:
   then complete replay (the boundary record seq=11 surfaces in the
   final replay batch). Assert: Live's Reader is opened at
   `max(11+1, 0+1) = 12`, and no record with `seq <= 11` surfaces in any
-  Live `EventBatch` (no duplicate boundary record on the wire).
+  Live `EventBatch` (no duplicate boundary record on the wire). This
+  is the zero-ack happy path (`t.ackedSequence == 0`).
 - `TestRun_LiveSurfacesTrailingLossMarker` — verifies the trailing-
   loss-marker race is closed by the Live handoff. Setup: drive overflow
   GC to append a `TransportLoss` marker covering seqs within the
@@ -8249,11 +8304,44 @@ exercise the Replaying → Live handoff:
   (NextBatch returns done=true on the boundary record before reaching
   the trailing marker). Assert: after replay returns done=true with
   the boundary record, Live's Reader (opened at
-  `max(rep.LastReplayedSequence()+1, ackHW+1)`) surfaces the trailing
-  `TransportLoss` marker via `EventBatch`. This works because loss
-  markers bypass `Reader.nextSeq` (see `wal/reader.go` near
+  `max(rep.LastReplayedSequence()+1, t.ackedSequence+1)`) surfaces the
+  trailing `TransportLoss` marker via `EventBatch`. This works because
+  loss markers bypass `Reader.nextSeq` (see `wal/reader.go` near
   `isLossMarker`), so the marker surfaces even though Live's start
   cursor is past the marker's covered seq range.
+- `TestRun_NonZeroAckSkipsAlreadyAckedHistory` — regression test for
+  the spec line 601 `(ack_hw, wal_hw_at_entry]` window. Setup: WAL with
+  records seqs 1..20. Pre-seed `t.ackedSequence = 10` (simulate a
+  SessionAck that came back with `ack_high_watermark_seq = 10`).
+  `NewReplayer` captures `tailSeq=20`. Assert: the replay reader is
+  opened at `start=11` (i.e. `t.ackedSequence + 1`); no `EventBatch`
+  surfaces a `RecordData` with `seq <= 10`; the Replayer surfaces
+  records with seqs 11..20 inclusive (the within-window range) and
+  terminates. Live then opens at
+  `max(LastReplayedSequence()+1, t.ackedSequence+1) =
+  max(21, 11) = 21` and waits for the next append. Without this test
+  the round-3 `rdrFactory(0)` regression would slip through unnoticed
+  because `TestRun_LiveResumesPastReplayBoundary` only exercises
+  `t.ackedSequence == 0`.
+- `TestRun_LiveStartsFromAdvancedAckHWIfReplayLagged` — REQUIRES
+  Tasks 17/18 recv multiplexer to land. Until then this test is a
+  PLACEHOLDER and SHOULD be `t.Skip`-gated with a message pointing at
+  Tasks 17/18 (e.g. `t.Skip("requires Task 17/18 recv multiplexer to
+  land — gates ack advancement during replay")`). Setup: WAL with
+  records 1..50. Pre-seed `t.ackedSequence = 5`. `NewReplayer`
+  captures `tailSeq=50`. During replay, simulate a `BatchAck` arriving
+  on the recv channel that advances `t.ackedSequence` to 30 (this is
+  why the test is gated on the recv multiplexer landing). Assert:
+  Live opens at `max(rep.LastReplayedSequence()+1, t.ackedSequence+1)`.
+  If `LastReplayedSequence()` is 50, Live starts at 51. If for any
+  reason `LastReplayedSequence() < t.ackedSequence` (e.g. early
+  termination plus an aggressive ack), the `t.ackedSequence+1 = 31`
+  branch wins so we do not re-replay records 6..30. This is the
+  regression test for the spec's clamp rule applied across the
+  state-handler boundary. It is the ONLY test that exercises ack
+  advancement DURING replay; without it, a future refactor that reads
+  `ackHW` only at Replaying entry (not at Live entry) would silently
+  re-send replay-era records on long replays.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
