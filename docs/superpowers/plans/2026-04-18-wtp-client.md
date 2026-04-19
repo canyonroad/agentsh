@@ -1124,9 +1124,11 @@ func (c *Collector) emitWTPMetrics(w io.Writer) {
 	fmt.Fprint(w, "# TYPE wtp_ack_high_watermark gauge\n")
 	fmt.Fprintf(w, "wtp_ack_high_watermark %d\n", c.wtpAckHighWatermark.Load())
 
-	fmt.Fprint(w, "# HELP wtp_dropped_missing_chain_total Events dropped because ev.Chain was nil.\n")
-	fmt.Fprint(w, "# TYPE wtp_dropped_missing_chain_total counter\n")
-	fmt.Fprintf(w, "wtp_dropped_missing_chain_total %d\n", c.wtpDroppedMissingChain.Load())
+	// (Sink-failure metric emits — including the per-class drop counters
+	// and the labeled session-failure / invalid-frame families — land in
+	// Task 22a. This Task 3 emit covers only the always-emit baseline
+	// counters added in Phase 3; Task 22a supersedes it with the full
+	// sink-failure inventory.)
 
 	fmt.Fprint(w, "# HELP wtp_wal_corruption_total CRC corruption events encountered during WAL replay.\n")
 	fmt.Fprint(w, "# TYPE wtp_wal_corruption_total counter\n")
@@ -8544,18 +8546,18 @@ Run `/roborev-design-review` and address findings.
 
 ### Task 22a: Add sink-failure metrics
 
-The spec lists four sink-failure counters that Task 23 (`AppendEvent`) and Phase 8 (transport) depend on:
+The spec lists five sink-failure counters that Task 23 (`AppendEvent`) and Phase 8 (transport) depend on:
 
 - `wtp_dropped_invalid_utf8_total` (counter): a record was dropped because the canonical encoder reported `chain.ErrInvalidUTF8`. Wired by `AppendEvent` (Task 23).
 - `wtp_dropped_sequence_overflow_total` (counter): a record was dropped because `ev.Chain.Sequence > math.MaxInt64`. Wired by `AppendEvent` (Task 23).
+- `wtp_dropped_invalid_frame_total{reason}` (counter, labeled): a peer frame was dropped at the protocol-validation boundary; reasons are a fixed enum (`event_batch_body_unset`, `event_batch_compression_unspecified`, `session_init_algorithm_unspecified`, plus `unknown` as the catch-all). Wired by transport / receivers in Phase 8.
 - `wtp_session_init_failures_total{reason}` (counter, labeled): an in-band session-init step failed; reason `invalid_utf8` is the only enumerated value today, with `unknown` as the catch-all. Wired by transport in Phase 8.
 - `wtp_session_rotation_failures_total{reason}` (counter, labeled): same shape as init, but for rotation/SessionUpdate. Wired by transport in Phase 8.
 
-**Encode-error classification counters.** Task 9 added defense-in-depth validation to `compact.Encode`. `AppendEvent` (Task 23) classifies Encode failures via `errors.Is` and increments the matching counter, then drops the event without advancing the chain (sink-internal drop, not session-fatal):
+**Encode-error classification counters.** Task 9 added defense-in-depth validation to `compact.Encode`. `AppendEvent` (Task 23) classifies Encode failures via `errors.Is`. Three classes are dropped silently and counted; the fourth (`ErrMissingChain`) is propagated to the caller as a wrapped error and has no counter (a missing chain indicates a composite-store regression that operators must surface loudly):
 
 - `wtp_dropped_invalid_mapper_total` (counter): a record was dropped because `compact.Encode` returned `ErrInvalidMapper`. This is defense in depth — `Store.New` rejects the same condition at construction time, so this counter SHOULD always be 0 in practice. A non-zero value indicates a code path constructed `Store` with an invalid mapper or mutated it post-construction.
 - `wtp_dropped_invalid_timestamp_total` (counter): a record was dropped because `compact.Encode` returned `ErrInvalidTimestamp` (zero or pre-epoch).
-- `wtp_dropped_missing_chain_total` (counter): a record was dropped because `compact.Encode` returned `ErrMissingChain` (composite did not stamp `ev.Chain`).
 - `wtp_dropped_mapper_failure_total` (counter): a record was dropped because `compact.Encode` returned a wrapped mapper-side error — i.e., `mapper.Map()` returned a non-sentinel error. This is the catch-all for mapper-internal failures and matches the `default` branch of the `errors.Is` classification switch in `AppendEvent`. The wrapped error is preserved through `errors.Unwrap` so operators can inspect the underlying mapper failure in the structured log.
 
 Wiring sketch in `AppendEvent`:
@@ -8564,12 +8566,15 @@ Wiring sketch in `AppendEvent`:
 ce, err := compact.Encode(s.opts.Mapper, ev)
 if err != nil {
     switch {
+    case errors.Is(err, compact.ErrMissingChain):
+        // Loud failure — composite-store regression. No counter, no log
+        // (no chain to log fields from); the wrapped error string already
+        // identifies the failure to the caller.
+        return fmt.Errorf("watchtower: %w", err)
     case errors.Is(err, compact.ErrInvalidMapper):
         s.opts.Metrics.WTP().IncDroppedInvalidMapper(1)
     case errors.Is(err, compact.ErrInvalidTimestamp):
         s.opts.Metrics.WTP().IncDroppedInvalidTimestamp(1)
-    case errors.Is(err, compact.ErrMissingChain):
-        s.opts.Metrics.WTP().IncDroppedMissingChain(1)
     default:
         // Mapper-internal error wrapped by Encode as `compact mapper: %w`.
         s.opts.Metrics.WTP().IncDroppedMapperFailure(1)
@@ -8578,7 +8583,7 @@ if err != nil {
 }
 ```
 
-Task 3 already executed and was committed; these counters were not in scope at the time. They are added here, between the existing Task 22 (Store skeleton) and Task 23 (AppendEvent), so the dependency chain "metrics exist → AppendEvent uses them" is honored.
+Task 3 already executed and was committed; these counters were not in scope at the time. Task 3 also shipped a `wtp_dropped_missing_chain_total` counter that is no longer used: the missing-chain class is now propagated as a wrapped error from `AppendEvent` (composite-store regressions must surface loudly). The orphaned counter is removed in Step 3.5 below to avoid leaving dead metric series in scrapes. The remaining sink-failure counters are added here, between the existing Task 22 (Store skeleton) and Task 23 (AppendEvent), so the dependency chain "metrics exist → AppendEvent uses them" is honored.
 
 **Files:**
 - Modify: `internal/metrics/wtp.go`
@@ -8761,28 +8766,6 @@ func TestWTPMetrics_DroppedInvalidTimestamp(t *testing.T) {
 	}
 }
 
-func TestWTPMetrics_DroppedMissingChain(t *testing.T) {
-	c := New()
-	w := c.WTP()
-
-	rr := httptest.NewRecorder()
-	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
-	if !strings.Contains(rr.Body.String(), "wtp_dropped_missing_chain_total 0") {
-		t.Errorf("expected zero-valued wtp_dropped_missing_chain_total in initial scrape\nbody:\n%s", rr.Body.String())
-	}
-
-	w.IncDroppedMissingChain(3)
-
-	rr = httptest.NewRecorder()
-	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
-	if !strings.Contains(rr.Body.String(), "wtp_dropped_missing_chain_total 3") {
-		t.Errorf("expected wtp_dropped_missing_chain_total 3 after IncDroppedMissingChain(3)\nbody:\n%s", rr.Body.String())
-	}
-	if got := c.WTP().DroppedMissingChain(); got != 3 {
-		t.Errorf("DroppedMissingChain accessor returned %d, want 3", got)
-	}
-}
-
 func TestWTPMetrics_DroppedMapperFailure(t *testing.T) {
 	c := New()
 	w := c.WTP()
@@ -8804,12 +8787,58 @@ func TestWTPMetrics_DroppedMapperFailure(t *testing.T) {
 		t.Errorf("DroppedMapperFailure accessor returned %d, want 4", got)
 	}
 }
+
+func TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons(t *testing.T) {
+	c := New()
+	// Note: no IncDroppedInvalidFrame calls. Per spec the family must
+	// still be present with zero-valued series for every enumerated reason.
+	rr := httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body := rr.Body.String()
+
+	expectedReasons := []string{
+		"event_batch_body_unset",
+		"event_batch_compression_unspecified",
+		"session_init_algorithm_unspecified",
+		"unknown",
+	}
+	for _, reason := range expectedReasons {
+		want := fmt.Sprintf(`wtp_dropped_invalid_frame_total{reason=%q} 0`, reason)
+		if !strings.Contains(body, want) {
+			t.Errorf("missing zero-valued series %q\nbody:\n%s", want, body)
+		}
+	}
+
+	// After one increment, only that reason flips to 1; the others stay 0.
+	c.WTP().IncDroppedInvalidFrame(WTPInvalidFrameReasonEventBatchBodyUnset)
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_dropped_invalid_frame_total{reason="event_batch_body_unset"} 1`) {
+		t.Errorf("expected event_batch_body_unset=1 after one IncDroppedInvalidFrame\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, `wtp_dropped_invalid_frame_total{reason="unknown"} 0`) {
+		t.Errorf("expected unknown to remain 0 after event_batch_body_unset increment\nbody:\n%s", body)
+	}
+
+	// Invalid (unknown enum) collapses to WTPInvalidFrameReasonUnknown.
+	c.WTP().IncDroppedInvalidFrame(WTPInvalidFrameReason("evil\"label\\value"))
+	rr = httptest.NewRecorder()
+	c.Handler(HandlerOptions{}).ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	body = rr.Body.String()
+	if !strings.Contains(body, `wtp_dropped_invalid_frame_total{reason="unknown"} 1`) {
+		t.Errorf("expected unknown=1 after invalid-reason fallback\nbody:\n%s", body)
+	}
+	if strings.Contains(body, `evil`) {
+		t.Errorf("invalid reason leaked through validator into output:\n%s", body)
+	}
+}
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `go test ./internal/metrics/ -run "TestWTPMetrics_DroppedInvalidUTF8|TestWTPMetrics_DroppedSequenceOverflow|TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons|TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons|TestWTPMetrics_SessionFailureReasonValidationAndEscape|TestWTPMetrics_DroppedInvalidMapper|TestWTPMetrics_DroppedInvalidTimestamp|TestWTPMetrics_DroppedMissingChain|TestWTPMetrics_DroppedMapperFailure"`
-Expected: FAIL with `IncDroppedInvalidUTF8 undefined`, `WTPSessionFailureReason undefined`, `IncDroppedInvalidMapper undefined`, `IncDroppedMapperFailure undefined`, etc.
+Run: `go test ./internal/metrics/ -run "TestWTPMetrics_DroppedInvalidUTF8|TestWTPMetrics_DroppedSequenceOverflow|TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons|TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons|TestWTPMetrics_SessionFailureReasonValidationAndEscape|TestWTPMetrics_DroppedInvalidMapper|TestWTPMetrics_DroppedInvalidTimestamp|TestWTPMetrics_DroppedMapperFailure|TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons"`
+Expected: FAIL with `IncDroppedInvalidUTF8 undefined`, `WTPSessionFailureReason undefined`, `IncDroppedInvalidMapper undefined`, `IncDroppedMapperFailure undefined`, `WTPInvalidFrameReason undefined`, etc.
 
 - [ ] **Step 3: Implement — extend `internal/metrics/wtp.go`**
 
@@ -8840,6 +8869,37 @@ var wtpSessionFailureReasonsValid = map[WTPSessionFailureReason]struct{}{
 var wtpSessionFailureReasonsEmitOrder = []WTPSessionFailureReason{
 	WTPSessionFailureReasonInvalidUTF8,
 	WTPSessionFailureReasonUnknown,
+}
+
+// WTPInvalidFrameReason is a fixed, low-cardinality classification of why
+// a peer frame was dropped at the protocol-validation boundary. Adding new
+// reasons requires updating both the spec §Metrics section and the
+// wtpInvalidFrameReasonsValid table below.
+type WTPInvalidFrameReason string
+
+const (
+	WTPInvalidFrameReasonEventBatchBodyUnset            WTPInvalidFrameReason = "event_batch_body_unset"
+	WTPInvalidFrameReasonEventBatchCompressionUnspec    WTPInvalidFrameReason = "event_batch_compression_unspecified"
+	WTPInvalidFrameReasonSessionInitAlgorithmUnspec     WTPInvalidFrameReason = "session_init_algorithm_unspecified"
+	WTPInvalidFrameReasonUnknown                        WTPInvalidFrameReason = "unknown"
+)
+
+var wtpInvalidFrameReasonsValid = map[WTPInvalidFrameReason]struct{}{
+	WTPInvalidFrameReasonEventBatchBodyUnset:         {},
+	WTPInvalidFrameReasonEventBatchCompressionUnspec: {},
+	WTPInvalidFrameReasonSessionInitAlgorithmUnspec:  {},
+	WTPInvalidFrameReasonUnknown:                     {},
+}
+
+// wtpInvalidFrameReasonsEmitOrder mirrors the wtpSessionFailureReasonsEmitOrder
+// pattern: a fixed slice keeps Prometheus exposition deterministic and lets
+// emitWTPMetrics emit zero-valued series for every enumerated reason on
+// every scrape.
+var wtpInvalidFrameReasonsEmitOrder = []WTPInvalidFrameReason{
+	WTPInvalidFrameReasonEventBatchBodyUnset,
+	WTPInvalidFrameReasonEventBatchCompressionUnspec,
+	WTPInvalidFrameReasonSessionInitAlgorithmUnspec,
+	WTPInvalidFrameReasonUnknown,
 }
 ```
 
@@ -8928,20 +8988,6 @@ func (w *WTPMetrics) DroppedInvalidTimestamp() uint64 {
 	return w.c.wtpDroppedInvalidTimestamp.Load()
 }
 
-func (w *WTPMetrics) IncDroppedMissingChain(n uint64) {
-	if w == nil || w.c == nil {
-		return
-	}
-	w.c.wtpDroppedMissingChain.Add(n)
-}
-
-func (w *WTPMetrics) DroppedMissingChain() uint64 {
-	if w == nil || w.c == nil {
-		return 0
-	}
-	return w.c.wtpDroppedMissingChain.Load()
-}
-
 func (w *WTPMetrics) IncDroppedMapperFailure(n uint64) {
 	if w == nil || w.c == nil {
 		return
@@ -8955,11 +9001,42 @@ func (w *WTPMetrics) DroppedMapperFailure() uint64 {
 	}
 	return w.c.wtpDroppedMapperFailure.Load()
 }
+
+// IncDroppedInvalidFrame increments the wtp_dropped_invalid_frame_total
+// counter for the supplied frame-validation reason. Unknown reason values
+// collapse to WTPInvalidFrameReasonUnknown so the labeled family stays at
+// a fixed cardinality.
+func (w *WTPMetrics) IncDroppedInvalidFrame(reason WTPInvalidFrameReason) {
+	if w == nil || w.c == nil {
+		return
+	}
+	if _, ok := wtpInvalidFrameReasonsValid[reason]; !ok {
+		reason = WTPInvalidFrameReasonUnknown
+	}
+	ptr, _ := w.c.wtpDroppedInvalidFrameByReason.LoadOrStore(string(reason), &atomic.Uint64{})
+	ptr.(*atomic.Uint64).Add(1)
+}
+
+// DroppedInvalidFrame returns the current count for one frame-validation
+// reason. Unknown reason values return 0.
+func (w *WTPMetrics) DroppedInvalidFrame(reason WTPInvalidFrameReason) uint64 {
+	if w == nil || w.c == nil {
+		return 0
+	}
+	if _, ok := wtpInvalidFrameReasonsValid[reason]; !ok {
+		return 0
+	}
+	v, ok := w.c.wtpDroppedInvalidFrameByReason.Load(string(reason))
+	if !ok || v == nil {
+		return 0
+	}
+	return v.(*atomic.Uint64).Load()
+}
 ```
 
-Note: `IncDroppedInvalidUTF8`, `IncDroppedSequenceOverflow`, `IncDroppedInvalidMapper`, `IncDroppedInvalidTimestamp`, `IncDroppedMissingChain`, and `IncDroppedMapperFailure` take a `uint64` for symmetry with the existing `IncEventsAppended(n uint64)` family — a callsite that drops one record passes 1; tests can preload arbitrary values.
+Note: `IncDroppedInvalidUTF8`, `IncDroppedSequenceOverflow`, `IncDroppedInvalidMapper`, `IncDroppedInvalidTimestamp`, and `IncDroppedMapperFailure` take a `uint64` for symmetry with the existing `IncEventsAppended(n uint64)` family — a callsite that drops one record passes 1; tests can preload arbitrary values. `IncDroppedInvalidFrame`, `IncSessionInitFailures`, and `IncSessionRotationFailures` take a typed reason instead and always increment by 1, matching `wtp_reconnects_total` — labeled families never need callsite-batched increments.
 
-Update `emitWTPMetrics` (in `internal/metrics/wtp.go`) — append eight new sections just before the histogram block. The six unlabeled counters are simple; the two labeled families follow the always-emit contract used by `wtp_reconnects_total`:
+Update `emitWTPMetrics` (in `internal/metrics/wtp.go`) — append eight new sections just before the histogram block, and (per Step 3.5 below) DELETE the existing Task 3 emit block for `wtp_dropped_missing_chain_total`. The five unlabeled counters are simple; the three labeled families follow the always-emit contract used by `wtp_reconnects_total`:
 
 ```go
 	fmt.Fprint(w, "# HELP wtp_dropped_invalid_utf8_total Records dropped because the canonical encoder reported invalid UTF-8.\n")
@@ -8978,13 +9055,21 @@ Update `emitWTPMetrics` (in `internal/metrics/wtp.go`) — append eight new sect
 	fmt.Fprint(w, "# TYPE wtp_dropped_invalid_timestamp_total counter\n")
 	fmt.Fprintf(w, "wtp_dropped_invalid_timestamp_total %d\n", c.wtpDroppedInvalidTimestamp.Load())
 
-	fmt.Fprint(w, "# HELP wtp_dropped_missing_chain_total Records dropped because compact.Encode rejected ev.Chain (composite did not stamp).\n")
-	fmt.Fprint(w, "# TYPE wtp_dropped_missing_chain_total counter\n")
-	fmt.Fprintf(w, "wtp_dropped_missing_chain_total %d\n", c.wtpDroppedMissingChain.Load())
-
 	fmt.Fprint(w, "# HELP wtp_dropped_mapper_failure_total Records dropped because compact.Encode wrapped a mapper-side error (default branch of the AppendEvent classification switch).\n")
 	fmt.Fprint(w, "# TYPE wtp_dropped_mapper_failure_total counter\n")
 	fmt.Fprintf(w, "wtp_dropped_mapper_failure_total %d\n", c.wtpDroppedMapperFailure.Load())
+
+	// Always emit the wtp_dropped_invalid_frame_total family with all
+	// enumerated reasons (per the always-emit contract in the design spec).
+	fmt.Fprint(w, "# HELP wtp_dropped_invalid_frame_total WTP peer frames dropped at the protocol-validation boundary, by reason.\n")
+	fmt.Fprint(w, "# TYPE wtp_dropped_invalid_frame_total counter\n")
+	for _, r := range wtpInvalidFrameReasonsEmitOrder {
+		var n uint64
+		if v, ok := c.wtpDroppedInvalidFrameByReason.Load(string(r)); ok && v != nil {
+			n = v.(*atomic.Uint64).Load()
+		}
+		fmt.Fprintf(w, "wtp_dropped_invalid_frame_total{reason=%q} %d\n", escapeLabelValue(string(r)), n)
+	}
 
 	// Always emit the wtp_session_init_failures_total family with all
 	// enumerated reasons (per the always-emit contract in the design spec).
@@ -9011,7 +9096,7 @@ Update `emitWTPMetrics` (in `internal/metrics/wtp.go`) — append eight new sect
 	}
 ```
 
-Extend `Collector` (in `internal/metrics/metrics.go`) — add eight new fields next to the existing WTP series:
+Extend `Collector` (in `internal/metrics/metrics.go`) — add eight new fields next to the existing WTP series. Note that `wtpDroppedMissingChain` already exists from Task 3 and is REMOVED in Step 3.5 below; it is intentionally absent from this list:
 
 ```go
 type Collector struct {
@@ -9022,8 +9107,8 @@ type Collector struct {
 	wtpDroppedSequenceOverflow         atomic.Uint64
 	wtpDroppedInvalidMapper            atomic.Uint64
 	wtpDroppedInvalidTimestamp         atomic.Uint64
-	wtpDroppedMissingChain             atomic.Uint64
 	wtpDroppedMapperFailure            atomic.Uint64
+	wtpDroppedInvalidFrameByReason     sync.Map
 	wtpSessionInitFailuresByReason     sync.Map
 	wtpSessionRotationFailuresByReason sync.Map
 
@@ -9031,10 +9116,22 @@ type Collector struct {
 }
 ```
 
+- [ ] **Step 3.5: Remove the orphaned `wtp_dropped_missing_chain_total` counter shipped in Task 3**
+
+Task 3 shipped a `wtp_dropped_missing_chain_total` counter and an `IncDroppedMissingChain` accessor. The current design propagates `compact.ErrMissingChain` from `AppendEvent` as a wrapped error rather than dropping silently, so that counter has no remaining call site in the WTP sink. Leaving it in place would emit a permanently-zero series on every scrape and risk operators wiring alerts on a metric that can never fire.
+
+Edits:
+
+1. In `internal/metrics/metrics.go`, delete the `wtpDroppedMissingChain atomic.Uint64` field.
+2. In `internal/metrics/wtp.go`, delete the `IncDroppedMissingChain` method, the matching `DroppedMissingChain` accessor (if present), and the three `emitWTPMetrics` lines for `wtp_dropped_missing_chain_total`.
+3. In `internal/metrics/wtp_test.go`, delete the `w.IncDroppedMissingChain(1)` call from `TestWTPMetrics_AppendAndExpose` and the `"wtp_dropped_missing_chain_total 1"` assertion from the same test's expected-substring slice.
+
+If a callsite outside `internal/metrics` invokes `IncDroppedMissingChain`, the build will fail with `IncDroppedMissingChain undefined` — verify with `grep -rn IncDroppedMissingChain ./...` after the deletion. The expected result is no remaining references.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/metrics/...`
-Expected: PASS — all existing tests + the nine new tests.
+Expected: PASS — all existing tests + the nine new tests added in Step 1: `TestWTPMetrics_DroppedInvalidUTF8`, `TestWTPMetrics_DroppedSequenceOverflow`, `TestWTPMetrics_SessionInitFailuresAlwaysEmittedAllReasons`, `TestWTPMetrics_SessionRotationFailuresAlwaysEmittedAllReasons`, `TestWTPMetrics_SessionFailureReasonValidationAndEscape`, `TestWTPMetrics_DroppedInvalidMapper`, `TestWTPMetrics_DroppedInvalidTimestamp`, `TestWTPMetrics_DroppedMapperFailure`, and `TestWTPMetrics_DroppedInvalidFrameAlwaysEmittedAllReasons`. The legacy `TestWTPMetrics_AppendAndExpose` test from Task 3 has its `wtp_dropped_missing_chain_total` reference removed per Step 3.5.
 
 - [ ] **Step 5: Cross-compile check**
 
@@ -9079,7 +9176,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -9190,10 +9289,13 @@ func TestAppendEvent_DropsInvalidUTF8(t *testing.T) {
 	}
 }
 
-// TestAppendEvent_DropsMissingChain verifies that compact.Encode's
-// ErrMissingChain branch fires when ev.Chain is nil — the upfront
-// `if ev.Chain == nil` early return has been removed in favor of routing
-// through Encode for uniform classification.
+// TestAppendEvent_PropagatesMissingChain verifies that compact.Encode's
+// ErrMissingChain branch fires when ev.Chain is nil and AppendEvent
+// PROPAGATES the error to the caller (wrapped as `watchtower: %w`)
+// rather than dropping silently. Composite-store regressions must be
+// loud — there is no `wtp_dropped_missing_chain_total` counter and no
+// structured log (ev.Chain is unstamped, so we cannot include
+// sequence/generation fields).
 //
 // Note: ErrInvalidMapper has no end-to-end test here. Store.New rejects
 // invalid mappers at construction time, so reaching Encode with an invalid
@@ -9201,7 +9303,7 @@ func TestAppendEvent_DropsInvalidUTF8(t *testing.T) {
 // comes from Task 9 (Encode-direct unit tests) and Task 22 (Store.New
 // rejection tests). The wtp_dropped_invalid_mapper_total counter remains
 // defense in depth — non-zero signals a code-path bug bypassing Store.New.
-func TestAppendEvent_DropsMissingChain(t *testing.T) {
+func TestAppendEvent_PropagatesMissingChain(t *testing.T) {
 	s := mkStore(t)
 	prevHashBefore := s.PeekPrevHash()
 	walSegmentsBefore := s.WALSegmentCount()
@@ -9212,18 +9314,24 @@ func TestAppendEvent_DropsMissingChain(t *testing.T) {
 		Timestamp: time.Now(),
 		// Chain intentionally nil — Encode must reject with ErrMissingChain.
 	}
-	if err := s.AppendEvent(context.Background(), ev); err != nil {
-		t.Fatalf("AppendEvent should drop silently for missing-chain, got err: %v", err)
+	err := s.AppendEvent(context.Background(), ev)
+	if err == nil {
+		t.Fatal("AppendEvent must propagate missing-chain as a wrapped error, got nil")
+	}
+	if !errors.Is(err, compact.ErrMissingChain) {
+		t.Errorf("expected wrapped compact.ErrMissingChain, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "watchtower:") {
+		t.Errorf("expected error wrapped with `watchtower:` prefix, got %q", err.Error())
 	}
 
-	if got := s.DroppedMissingChain(); got != 1 {
-		t.Errorf("expected 1 missing-chain drop, got %d", got)
-	}
+	// Ensure the loud-failure path did NOT touch any of the per-class drop
+	// counters or sink-internal state.
 	if got := s.WALSegmentCount(); got != walSegmentsBefore {
-		t.Errorf("WAL must remain untouched on missing-chain drop; segments before=%d after=%d", walSegmentsBefore, got)
+		t.Errorf("WAL must remain untouched on missing-chain propagation; segments before=%d after=%d", walSegmentsBefore, got)
 	}
 	if got := s.PeekPrevHash(); got != prevHashBefore {
-		t.Errorf("chain prev_hash must not advance on missing-chain drop; before=%q after=%q", prevHashBefore, got)
+		t.Errorf("chain prev_hash must not advance on missing-chain propagation; before=%q after=%q", prevHashBefore, got)
 	}
 }
 
@@ -9313,9 +9421,9 @@ func TestAppendEvent_DropsMapperFailure(t *testing.T) {
 
 - [ ] **Step 1.5: Add test scaffolding required by the new drop tests**
 
-The drop tests (`TestAppendEvent_DropsSequenceOverflow`, `TestAppendEvent_DropsInvalidUTF8`, `TestAppendEvent_DropsMissingChain`, `TestAppendEvent_DropsInvalidTimestamp`, `TestAppendEvent_DropsMapperFailure`) reference three pieces of test infrastructure:
+The drop tests (`TestAppendEvent_DropsSequenceOverflow`, `TestAppendEvent_DropsInvalidUTF8`, `TestAppendEvent_PropagatesMissingChain`, `TestAppendEvent_DropsInvalidTimestamp`, `TestAppendEvent_DropsMapperFailure`) and the structured-log tests (`TestAppendEvent_LogsInvalidTimestamp`, `TestAppendEvent_LogsMapperFailure`, `TestAppendEvent_LogsInvalidUTF8`) reference five pieces of test infrastructure:
 
-1. **`store_export_test.go`** in `internal/store/watchtower/`, package `watchtower` (NOT `watchtower_test`): exposes `(*Store).PeekPrevHash() string`, `(*Store).WALSegmentCount() int`, plus per-class drop accessors `(*Store).DroppedInvalidUTF8() uint64`, `(*Store).DroppedSequenceOverflow() uint64`, `(*Store).DroppedMissingChain() uint64`, `(*Store).DroppedInvalidMapper() uint64`, `(*Store).DroppedInvalidTimestamp() uint64`, and `(*Store).DroppedMapperFailure() uint64`. Uses Go's standard `_test.go` suffix so the file is automatically excluded from non-test builds — no build tag required. The metrics inspectors forward to `s.metrics.Dropped*()`, letting the cross-package `watchtower_test` callers read counters without poking the unexported `metrics` field directly. (The `DroppedInvalidMapper` accessor is included for symmetry; no test in this task exercises it because `Store.New` rejects invalid mappers at construction time — see the `TestAppendEvent_DropsMissingChain` doc comment for the rationale.)
+1. **`store_export_test.go`** in `internal/store/watchtower/`, package `watchtower` (NOT `watchtower_test`): exposes `(*Store).PeekPrevHash() string`, `(*Store).WALSegmentCount() int`, plus per-class drop accessors `(*Store).DroppedInvalidUTF8() uint64`, `(*Store).DroppedSequenceOverflow() uint64`, `(*Store).DroppedInvalidMapper() uint64`, `(*Store).DroppedInvalidTimestamp() uint64`, and `(*Store).DroppedMapperFailure() uint64`. (NO `DroppedMissingChain` accessor — that counter was removed in Task 22a Step 3.5; the `TestAppendEvent_PropagatesMissingChain` test asserts the wrapped error instead.) Uses Go's standard `_test.go` suffix so the file is automatically excluded from non-test builds — no build tag required. The metrics inspectors forward to `s.metrics.Dropped*()`, letting the cross-package `watchtower_test` callers read counters without poking the unexported `metrics` field directly. (The `DroppedInvalidMapper` accessor is included for symmetry; no test in this task exercises it because `Store.New` rejects invalid mappers at construction time — see the `TestAppendEvent_PropagatesMissingChain` doc comment for the rationale.)
 
 2. **Inline `failingSink` struct** at the bottom of `internal/store/watchtower/append_test.go` (defined in Step 3 of this task): a `chain.SinkChainAPI` test double whose `Compute` method always returns the supplied sentinel error. Lives in `package watchtower_test` because the `_test.go` suffix prevents production code from importing it by construction — no separate doubles package is needed.
 
@@ -9323,7 +9431,95 @@ The drop tests (`TestAppendEvent_DropsSequenceOverflow`, `TestAppendEvent_DropsI
 
 4. **Inline `failingMapper` struct** in `append_test.go` (defined alongside `TestAppendEvent_DropsMapperFailure`): a `compact.Mapper` test double whose `Map` returns a non-sentinel `errors.New("boom")`. Used to exercise the default branch of `AppendEvent`'s classification switch (which increments `wtp_dropped_mapper_failure_total`). Wired through `Mapper:` in `watchtower.Options` — no test seam needed because `Store.New` accepts any non-nil, non-stub `Mapper` value.
 
-Tests reference scaffolding added in Task 22 Step 3.5 (`store_export_test.go`, `chain.SinkChainAPI` interface, `Options.SinkChainOverrideForTests`) and the `failingSink` / `failingMapper` structs + `mkStoreWithFailingSink` helper defined in Step 3 of this task.
+5. **`captureLogs(t *testing.T) *bytes.Buffer`** helper at the bottom of `append_test.go`: installs a `slog.NewJSONHandler` over a `bytes.Buffer` via `slog.SetDefault`, registers a `t.Cleanup` to restore the previous default logger, and returns the buffer for the caller to read after the action under test runs. Used by the log-capture tests in Step 1.6 below. JSON handler keeps assertions straightforward: each emitted record is a single JSON line where `key=value` matches reduce to substring or `json.Unmarshal` checks. Defined inline in `append_test.go` (no separate package) because slog redirection is an in-process global — keeping the helper in the same file as the tests it serves prevents accidental cross-test interference.
+
+```go
+// captureLogs installs a slog.JSONHandler over a bytes.Buffer as the
+// default logger for the duration of the test. Returns the buffer the
+// caller reads after triggering the code path under test. The previous
+// default logger is restored by a t.Cleanup hook.
+//
+// Each captured record is one JSON line; assertions use strings.Contains
+// (substring match on the encoded key/value) or json.Unmarshal for
+// stronger structural checks. The handler is at LevelDebug so WARN-level
+// drop logs always reach the buffer.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+```
+
+Tests reference scaffolding added in Task 22 Step 3.5 (`store_export_test.go`, `chain.SinkChainAPI` interface, `Options.SinkChainOverrideForTests`) and the `failingSink` / `failingMapper` structs + `mkStoreWithFailingSink` + `captureLogs` helpers defined in Step 3 of this task.
+
+- [ ] **Step 1.6: Add structured-log assertions for each drop class**
+
+For every drop class that emits a structured WARN log, add (or extend) a test that captures the slog output and asserts the expected fields. Compact tests pattern:
+
+```go
+func TestAppendEvent_LogsInvalidTimestamp(t *testing.T) {
+	logs := captureLogs(t)
+	s := mkStore(t)
+
+	ev := types.Event{
+		Type:      "exec",
+		SessionID: "s",
+		Timestamp: time.Time{}, // zero — Encode rejects with ErrInvalidTimestamp.
+		Chain:     &types.ChainState{Sequence: 7, Generation: 2},
+	}
+	if err := s.AppendEvent(context.Background(), ev); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	body := logs.String()
+	for _, want := range []string{
+		`"msg":"watchtower: dropping event — invalid timestamp"`,
+		`"session_id":"s"`,
+		`"sequence":7`,
+		`"generation":2`,
+		`"err":"compact: invalid timestamp"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected log substring %q\nlogs:\n%s", want, body)
+		}
+	}
+}
+
+func TestAppendEvent_LogsMapperFailure(t *testing.T) {
+	logs := captureLogs(t)
+	// Same setup as TestAppendEvent_DropsMapperFailure but with logs
+	// capture; assert msg/session_id/sequence/generation/err in the
+	// JSON body.
+	// ... (constructs a Store with failingMapper{}, calls AppendEvent,
+	// then asserts the same five substrings as above with msg
+	// `"watchtower: dropping event — mapper failure"`).
+}
+
+func TestAppendEvent_LogsInvalidUTF8(t *testing.T) {
+	logs := captureLogs(t)
+	// Same setup as TestAppendEvent_DropsInvalidUTF8 but with logs
+	// capture; assert msg/session_id/sequence/generation/err in the
+	// JSON body with msg `"watchtower: dropping event — invalid UTF-8 in chain field"`.
+}
+
+// TestAppendEvent_DropsSequenceOverflow already exists from Step 1; extend
+// it to also assert the structured-log fields. Add a captureLogs(t) call
+// at the top, then after the existing counter / WAL / prev_hash assertions
+// add a substring loop matching:
+//   "msg":"watchtower: dropping event — sequence > math.MaxInt64"
+//   "session_id":"s"
+//   "sequence":18446744073709551615   (math.MaxUint64; JSON encodes uint64 directly)
+//   "generation":1
+// (No `err` field — sequence-overflow has no wrapped Encode error;
+// AppendEvent emits the log without an error attribute.)
+```
+
+Note: `TestAppendEvent_PropagatesMissingChain` does NOT assert any log content — the `ErrMissingChain` branch in `AppendEvent` emits no structured log (ev.Chain is unstamped). The wrapped error returned to the caller is the only diagnostic.
+
+`TestAppendEvent_LogsInvalidMapper` is intentionally omitted: end-to-end coverage requires constructing a `Store` with an invalid mapper, which `Store.New` rejects at construction time (Task 22). The branch is exercised by Encode-direct unit tests in Task 9.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -9362,12 +9558,17 @@ var errFatalLatch = errors.New("watchtower: store fatal — refusing append")
 //
 // Per-record drop classes (sink-internal — return nil, do NOT propagate
 // to caller; chain does NOT advance; WAL is not touched):
-//   - compact.ErrMissingChain → wtp_dropped_missing_chain_total
 //   - compact.ErrInvalidMapper → wtp_dropped_invalid_mapper_total
 //   - compact.ErrInvalidTimestamp → wtp_dropped_invalid_timestamp_total
 //   - mapper-wrapped error (default) → wtp_dropped_mapper_failure_total
 //   - sequence > math.MaxInt64 → wtp_dropped_sequence_overflow_total
 //   - chain.ErrInvalidUTF8 (per-record) → wtp_dropped_invalid_utf8_total
+//
+// Loud-failure class (NOT a drop — propagated to caller as wrapped error):
+//   - compact.ErrMissingChain → returned as fmt.Errorf("watchtower: %w", err).
+//     This is a composite-store regression (the composite MUST stamp
+//     ev.Chain before fanning out); operators surface it at the call site
+//     rather than via a per-sink counter.
 func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	if s.isFatal() {
 		return errFatalLatch
@@ -9376,20 +9577,21 @@ func (s *Store) AppendEvent(ctx context.Context, ev types.Event) error {
 	// 1. Encode payload (no chain yet — leaves Integrity nil).
 	//    Encode is the FIRST step so that ErrMissingChain / ErrInvalidMapper /
 	//    ErrInvalidTimestamp surface here, classified into per-class drop
-	//    counters. The sequence-overflow bounds-check below requires
-	//    ev.Chain != nil, which Encode guarantees by rejecting nil chains
-	//    with ErrMissingChain.
+	//    counters (or, for ErrMissingChain, propagated as a wrapped error).
+	//    The sequence-overflow bounds-check below requires ev.Chain != nil,
+	//    which Encode guarantees by rejecting nil chains with ErrMissingChain
+	//    BEFORE this method ever reaches the bounds-check.
 	ce, err := compact.Encode(s.opts.Mapper, ev)
 	if err != nil {
 		switch {
 		case errors.Is(err, compact.ErrMissingChain):
-			// ev.Chain is unstamped — do NOT dereference it for log fields.
-			s.metrics.IncDroppedMissingChain(1)
-			slog.WarnContext(ctx, "watchtower: dropping event — ev.Chain not stamped",
-				"session_id", s.opts.SessionID,
-				"err", err,
-			)
-			return nil
+			// Loud failure — composite-store regression. Propagate as a
+			// wrapped error rather than dropping silently. No structured
+			// log here: ev.Chain is unstamped (we cannot include
+			// sequence/generation fields), and the wrapped error string
+			// already identifies the failure to the caller. No counter,
+			// either: missing-chain is not a per-record drop class.
+			return fmt.Errorf("watchtower: %w", err)
 		case errors.Is(err, compact.ErrInvalidMapper):
 			s.metrics.IncDroppedInvalidMapper(1)
 			slog.WarnContext(ctx, "watchtower: dropping event — invalid mapper",
