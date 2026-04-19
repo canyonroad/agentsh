@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -386,6 +387,19 @@ func TestPhase0_MixedSinkOutcome_PrimaryCommitsSecondaryFailsClean(t *testing.T)
 	b := newChainingFakeSink(t, key)
 	s := New(a, nil, b)
 
+	// Capture onAppendError invocations so we can verify both the
+	// caller-visible error path AND the daemon-visible audit hook path
+	// (composite.Store calls the hook at most once per AppendEvent, with
+	// the first encountered error — or the first FatalIntegrityError if
+	// any was extracted via errors.As).
+	var hookMu sync.Mutex
+	var hookCalls []error
+	s.SetAppendErrorHook(func(err error) {
+		hookMu.Lock()
+		defer hookMu.Unlock()
+		hookCalls = append(hookCalls, err)
+	})
+
 	// Two successful events through both sinks.
 	for i := 0; i < 2; i++ {
 		if err := s.AppendEvent(context.Background(), types.Event{ID: strconv.Itoa(i)}); err != nil {
@@ -403,6 +417,13 @@ func TestPhase0_MixedSinkOutcome_PrimaryCommitsSecondaryFailsClean(t *testing.T)
 		t.Fatalf("bPreFailEntryHash is empty; cannot verify rollback against it")
 	}
 
+	// No failures yet → hook must not have been called.
+	hookMu.Lock()
+	if got := len(hookCalls); got != 0 {
+		t.Fatalf("hook calls before failure injection = %d, want 0", got)
+	}
+	hookMu.Unlock()
+
 	seqBeforeFailure := s.State().Sequence
 
 	// Inject a clean failure on the secondary's next append.
@@ -415,6 +436,19 @@ func TestPhase0_MixedSinkOutcome_PrimaryCommitsSecondaryFailsClean(t *testing.T)
 	if !errors.Is(err, cleanErr) {
 		t.Fatalf("AppendEvent: err = %v, want errors.Is(err, cleanErr)", err)
 	}
+
+	// Hook fired exactly once with the secondary's clean error — verifies
+	// daemon-visible surfacing, not just caller-visible return.
+	hookMu.Lock()
+	if got := len(hookCalls); got != 1 {
+		hookMu.Unlock()
+		t.Fatalf("hook calls after mixed-fail = %d, want 1", got)
+	}
+	if !errors.Is(hookCalls[0], cleanErr) {
+		hookMu.Unlock()
+		t.Fatalf("hookCalls[0] = %v, want errors.Is(_, cleanErr)", hookCalls[0])
+	}
+	hookMu.Unlock()
 
 	// Primary committed; secondary did NOT.
 	if len(a.records) != 3 {
@@ -440,6 +474,14 @@ func TestPhase0_MixedSinkOutcome_PrimaryCommitsSecondaryFailsClean(t *testing.T)
 	if len(b.records) != 3 {
 		t.Fatalf("len(b.records) after recovery = %d, want 3", len(b.records))
 	}
+
+	// Successful recovery append must NOT fire the hook again.
+	hookMu.Lock()
+	if got := len(hookCalls); got != 1 {
+		hookMu.Unlock()
+		t.Fatalf("hook calls after recovery = %d, want 1 (no new call on success)", got)
+	}
+	hookMu.Unlock()
 
 	// Both sinks observe the SAME post-failure sequence on the recovery event.
 	if a.records[3].Sequence != 3 {
@@ -481,6 +523,16 @@ func TestPhase0_MixedSinkOutcome_PrimaryCommitsSecondaryLatchesFatal(t *testing.
 	b := newChainingFakeSink(t, key)
 	s := New(a, nil, b)
 
+	// Capture onAppendError invocations to verify daemon-visible
+	// audit hook surfacing in addition to caller-visible errors.
+	var hookMu sync.Mutex
+	var hookCalls []error
+	s.SetAppendErrorHook(func(err error) {
+		hookMu.Lock()
+		defer hookMu.Unlock()
+		hookCalls = append(hookCalls, err)
+	})
+
 	// One successful event through both sinks.
 	if err := s.AppendEvent(context.Background(), types.Event{ID: "0"}); err != nil {
 		t.Fatalf("AppendEvent #0: %v", err)
@@ -488,6 +540,14 @@ func TestPhase0_MixedSinkOutcome_PrimaryCommitsSecondaryLatchesFatal(t *testing.
 	if len(a.records) != 1 || len(b.records) != 1 {
 		t.Fatalf("initial counts: a=%d b=%d, want 1/1", len(a.records), len(b.records))
 	}
+
+	// Warm-up succeeded → hook must not have been called yet.
+	hookMu.Lock()
+	if got := len(hookCalls); got != 0 {
+		t.Fatalf("hook calls before failure injection = %d, want 0", got)
+	}
+	hookMu.Unlock()
+
 	seqBeforeAmbig := s.State().Sequence
 
 	// Inject ambiguous failure on the secondary.
@@ -499,6 +559,24 @@ func TestPhase0_MixedSinkOutcome_PrimaryCommitsSecondaryLatchesFatal(t *testing.
 	if err == nil {
 		t.Fatal("expected ambiguous error from mixed append, got nil")
 	}
+
+	// Hook fires once with the ambiguous error string from chainingFakeSink.
+	// The fake sink emits an ad-hoc errors.New("ambiguous write") that is
+	// not exposed for errors.Is comparison, so match by message.
+	hookMu.Lock()
+	if got := len(hookCalls); got != 1 {
+		hookMu.Unlock()
+		t.Fatalf("hook calls after mixed-ambig = %d, want 1", got)
+	}
+	if hookCalls[0] == nil {
+		hookMu.Unlock()
+		t.Fatal("hookCalls[0] is nil; want ambiguous error")
+	}
+	if !strings.Contains(hookCalls[0].Error(), "ambiguous") {
+		hookMu.Unlock()
+		t.Fatalf("hookCalls[0].Error() = %q, want to contain \"ambiguous\"", hookCalls[0].Error())
+	}
+	hookMu.Unlock()
 
 	// Primary committed; secondary did NOT.
 	if len(a.records) != 2 {
@@ -527,6 +605,21 @@ func TestPhase0_MixedSinkOutcome_PrimaryCommitsSecondaryLatchesFatal(t *testing.
 	if len(b.records) != 1 {
 		t.Fatalf("len(b.records) after follow-up = %d, want 1 (secondary remains latched)", len(b.records))
 	}
+
+	// KEY ASSERTION (roborev finding): the audit hook MUST also surface
+	// ErrFatalIntegrity on the follow-up append, not just the caller. This
+	// is the daemon-visible path the prior review specifically flagged as
+	// untested.
+	hookMu.Lock()
+	if got := len(hookCalls); got != 2 {
+		hookMu.Unlock()
+		t.Fatalf("hook calls after follow-up = %d, want 2", got)
+	}
+	if !errors.Is(hookCalls[1], audit.ErrFatalIntegrity) {
+		hookMu.Unlock()
+		t.Fatalf("hookCalls[1] = %v, want errors.Is(_, ErrFatalIntegrity)", hookCalls[1])
+	}
+	hookMu.Unlock()
 
 	// Primary's chain unaffected by secondary's Fatal.
 	if got, want := a.records[2].PrevHash, a.records[1].EntryHash; got != want {
