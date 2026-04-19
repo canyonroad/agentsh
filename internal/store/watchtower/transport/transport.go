@@ -79,8 +79,17 @@ type Transport struct {
 	opts Options
 	conn Conn
 
-	// last acknowledged watermark, updated when SessionAck/SessionUpdate
-	// is observed.
+	// ackedSequence/ackedGeneration hold the EFFECTIVE ack watermark — the
+	// clamped value per spec §"Acknowledgement model" (design.md:601):
+	// `min(server_returned_hw, local_ack_hw)`, with anomalous `server > local`
+	// watermarks LOGGED + IGNORED. Seeded from SessionAck (state_connecting.go)
+	// and ADVANCED by BatchAck/ServerHeartbeat handlers in the recv multiplexer
+	// (Tasks 17/18). Read by Replaying/Live state handlers for their reader-
+	// start calculations; state handlers do NOT advance these fields.
+	//
+	// SessionUpdate is NOT an acknowledgement — it is a control frame for
+	// key/generation rotation per spec §"Acknowledgement model" (design.md:617);
+	// it never advances ackedSequence/ackedGeneration.
 	ackedSequence   uint64
 	ackedGeneration uint32
 

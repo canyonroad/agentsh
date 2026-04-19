@@ -6082,8 +6082,17 @@ type Transport struct {
 	opts Options
 	conn Conn
 
-	// last acknowledged watermark, updated when SessionAck/SessionUpdate
-	// is observed.
+	// ackedSequence/ackedGeneration hold the EFFECTIVE ack watermark — the
+	// clamped value per spec §"Acknowledgement model" (design.md:601):
+	// `min(server_returned_hw, local_ack_hw)`, with anomalous `server > local`
+	// watermarks LOGGED + IGNORED. Seeded from SessionAck (state_connecting.go)
+	// and ADVANCED by BatchAck/ServerHeartbeat handlers in the recv multiplexer
+	// (Tasks 17/18). Read by Replaying/Live state handlers for their reader-
+	// start calculations; state handlers do NOT advance these fields.
+	//
+	// SessionUpdate is NOT an acknowledgement — it is a control frame for
+	// key/generation rotation per spec §"Acknowledgement model" (design.md:617);
+	// it never advances ackedSequence/ackedGeneration.
 	ackedSequence   uint64
 	ackedGeneration uint32
 
@@ -6237,6 +6246,88 @@ git commit -m "feat(wtp/transport): add Conn/Dialer + Connecting state"
 - [ ] **Step 8: Roborev**
 
 Run `/roborev-design-review` and address findings.
+
+---
+
+### Task 15.1 — Clamp ackedSequence in SessionAck handler (round-5 fix prerequisite)
+
+**Status:** New step, added in round-5 to schedule the spec-mandated clamp BEFORE Task 22 wires the Run loop to consume `t.ackedSequence`. Task 15 was already complete when this step was added; it does NOT renumber any existing task. Task 22's StateReplaying / StateLive cases READ `t.ackedSequence` for their reader-start calculations and assume the field stores the EFFECTIVE (clamped) value per spec line 601 — without this step, `state_connecting.go:59` copies the raw `ack.GetAckHighWatermarkSeq()` and a malicious or buggy server could rewind the client past locally-acked work or trick it into skipping records it has not yet acknowledged.
+
+**Files:**
+- Modify: `internal/store/watchtower/transport/state_connecting.go` (replace the bare `t.ackedSequence = ack.GetAckHighWatermarkSeq()` assignment with the clamp + log-and-ignore handler)
+- Test: `internal/store/watchtower/transport/state_connecting_test.go` (or extend the existing transport_test.go) — two new table-driven unit tests
+
+**Spec rule (design.md:601):** "the replayer trusts the lower of `(server_returned_hw, local_ack_hw)` so we re-send unacked records rather than dropping the gap. A higher-than-local server watermark is anomalous and is logged + ignored — we replay from `local_ack_hw + 1`."
+
+**Offending site to replace** (`internal/store/watchtower/transport/state_connecting.go:59-60`):
+
+```go
+t.ackedSequence = ack.GetAckHighWatermarkSeq()
+t.ackedGeneration = ack.GetGeneration()
+```
+
+**Corrected handler block** (the rate limiter is a constructor-injected `*rate.Limiter` test seam so unit tests can pin observed log emissions to exactly one without flake; injection mirrors the limiter pattern already used by `internal/metrics/wtp.go`):
+
+```go
+serverHW := ack.GetAckHighWatermarkSeq()
+local := t.ackedSequence
+switch {
+case local == 0:
+    // First connect for this Transport (or post-construction zero state):
+    // accept the server value verbatim. There is no local watermark to
+    // clamp against, and the spec's clamp rule is symmetric only when
+    // both sides have observed at least one ack.
+    t.ackedSequence = serverHW
+case serverHW > local:
+    // Anomalous: server claims to have acked beyond what we have observed
+    // locally. Per spec design.md:601, we LOG + IGNORE the anomalous
+    // server value and keep the local watermark — replay starts from
+    // `local + 1` so we do not silently skip records the server has not
+    // actually acked. The rate-limited WARN makes the anomaly visible to
+    // operators without spamming logs on a misbehaving peer.
+    if t.ackAnomalyLimiter.Allow() {
+        slog.Warn("session_ack: anomalous server ack_high_watermark_seq exceeds local; using local",
+            slog.Uint64("server_hw", serverHW),
+            slog.Uint64("local_hw", local),
+            slog.String("session_id", t.opts.SessionID))
+    }
+    // intentionally no assignment — local wins.
+default:
+    // serverHW <= local: trust the lower value per spec line 601 (gradual
+    // rollout / partition recovery — re-send the unacked tail rather than
+    // dropping the gap).
+    t.ackedSequence = serverHW
+}
+t.ackedGeneration = ack.GetGeneration()
+```
+
+The `t.ackAnomalyLimiter` field is added to the Transport struct in this step (a `*rate.Limiter`, defaulted in `New` to `rate.NewLimiter(rate.Every(time.Minute), 1)` so production emits at most one anomaly WARN per minute per Transport instance). Unit tests inject a permissive limiter (`rate.NewLimiter(rate.Inf, 1)` or a mock) so the inject-and-assert pattern below sees exactly one log per anomalous SessionAck. The `slog.Warn` logger is the package-level default logger in production; tests substitute a `slog.New(slog.NewTextHandler(buf, ...))` capture so the WARN content can be asserted byte-for-byte.
+
+**Test #1 (`TestSessionAck_ClampsServerHWBelowLocal`):**
+
+Setup: construct the Transport with `t.ackedSequence = 10` (simulate a prior session's acked state preserved across reconnect). Drive `runConnecting` with a SessionAck carrying `ack_high_watermark_seq = 5, accepted = true`. Inject a permissive `*rate.Limiter` and a `slog.Logger` capture buffer.
+
+Assert: `t.ackedSequence == 5` (server value wins because it is lower — the gradual-rollout / partition-recovery case from spec line 601), `t.ackedGeneration` matches the SessionAck generation, and the WARN log buffer is EMPTY (no anomaly was observed, so no WARN emitted).
+
+**Test #2 (`TestSessionAck_IgnoresAnomalousHigherServerHW`):**
+
+Setup: same as Test #1 but with `t.ackedSequence = 10` and SessionAck `ack_high_watermark_seq = 20`.
+
+Assert: `t.ackedSequence == 10` (LOCAL value wins because the server claim is anomalous — spec rule), exactly one WARN log entry is emitted with `server_hw=20` and `local_hw=10` fields, and `t.ackedGeneration` still matches the SessionAck generation (the generation field is never clamped — only the ack high-watermark sequence is).
+
+**Test #3 (rate-limit guard `TestSessionAck_AnomalyWarnRateLimited`)** — OPTIONAL but RECOMMENDED to lock in the rate-limiter contract: inject a strict `rate.NewLimiter(rate.Every(time.Hour), 1)` and drive five back-to-back anomalous SessionAck handlers. Assert exactly one WARN entry (the limiter absorbed four).
+
+**Step ordering for Task 15.1:**
+
+- [ ] **Step 1:** Write the failing tests (`TestSessionAck_ClampsServerHWBelowLocal`, `TestSessionAck_IgnoresAnomalousHigherServerHW`, optional `TestSessionAck_AnomalyWarnRateLimited`).
+- [ ] **Step 2:** Run tests to verify they fail with the expected symbols (`Transport.ackAnomalyLimiter` undefined, current SessionAck handler does not honor the clamp).
+- [ ] **Step 3:** Add the `ackAnomalyLimiter *rate.Limiter` field to `Transport`, default it in `New`, accept a `WithAckAnomalyLimiter(l *rate.Limiter)` option (or `Options.AckAnomalyLimiter`) for test injection, and replace the `state_connecting.go:59` block with the clamp handler shown above.
+- [ ] **Step 4:** Run the tests to verify they pass; run the full transport package test suite to verify no regression.
+- [ ] **Step 5:** Cross-compile (`GOOS=windows go build ./...`) — `golang.org/x/time/rate` is in the module already; if not, `go mod tidy`.
+- [ ] **Step 6:** Commit with message `fix(wtp/transport): clamp SessionAck ack_high_watermark_seq + log anomalous server values`.
+- [ ] **Step 7:** Run `/roborev-design-review` and address findings.
+
+**Hard dependency:** Task 22's StateReplaying / StateLive cases consume `t.ackedSequence` and assume it is the clamped value. Task 22 MUST NOT commit its Run loop until Task 15.1 has landed (and the matching Task 17 sub-step for BatchAck/ServerHeartbeat has landed — see Task 17 sub-step "Clamp ackedSequence in BatchAck/ServerHeartbeat handlers" below). Until both clamp paths are wired, an unclamped raw server value would silently propagate into the reader-start calculation.
 
 ---
 
@@ -7350,7 +7441,17 @@ type LiveOptions struct {
 // runLive consumes Reader notifications, batches records, and sends
 // EventBatch messages while honoring the inflight window. Returns
 // StateConnecting on stream error, StateShutdown on ctx cancellation.
+//
+// Reader lifecycle: like the StateReplaying case, the Live case OWNS its
+// Reader. `defer rdr.Close()` ensures the Reader is unregistered from the
+// WAL on EVERY exit path (stream error → StateConnecting, ctx cancellation
+// → StateShutdown). Per `wal/reader.go` Reader.Close (near line 446),
+// Close is what removes the Reader from `WAL.readers` so notifyReaders
+// stops waking it; without it, every reconnect cycle would leak a
+// registered Reader. The StateLive case in the Run loop creates a fresh
+// Reader on each entry — readers are NOT reused across reconnect cycles.
 func (t *Transport) runLive(ctx context.Context, rdr *wal.Reader, opts LiveOptions) (State, error) {
+	defer rdr.Close()
 	b := NewBatcher(opts.Batcher)
 	tick := time.NewTicker(opts.Batcher.MaxAge / 2)
 	defer tick.Stop()
@@ -7420,6 +7521,90 @@ func encodeBatchMessage(_ []wal.Record) (*wtpv1.ClientMessage, error) {
 	return &wtpv1.ClientMessage{}, nil
 }
 ```
+
+**Sub-step 17.X: Clamp ackedSequence in BatchAck/ServerHeartbeat handlers (round-5 prerequisite for Task 22 ack consumption)**
+
+Per spec §"Acknowledgement model" (design.md:611-617), the recv multiplexer's `BatchAck` and `ServerHeartbeat` handlers BOTH carry an `ack_high_watermark_seq` that ADVANCES the Transport-level `t.ackedSequence`. Both paths MUST apply the same clamp rule that Task 15.1 wires into the SessionAck handler — `min(server_returned_hw, local_ack_hw)` with anomalous `server > local` LOGGED + IGNORED. Without this sub-step, a misbehaving server could rewind the client's effective ack via a stale `BatchAck` (potentially re-sending acked work) OR — worse — trick it into advancing past records the server has not actually acked via a forged-high `BatchAck` (silently dropping records from the WAL GC's protected window).
+
+Offending sites (will be added by this task — there is no production code to grep yet because the recv multiplexer does not exist; the sub-step's scope is to write the multiplexer with the clamp baked in from day one rather than retrofitting it later):
+
+- The `case *wtpv1.ServerMessage_BatchAck:` arm of the recv goroutine's typed dispatch (introduced in this task).
+- The `case *wtpv1.ServerMessage_ServerHeartbeat:` arm of the same dispatch.
+
+Corrected handler block (factor the clamp into a private `clampAndApplyAck(serverHW, gen uint32_)` method on Transport so both arms call into a single implementation; this also keeps the rate-limiter accounting consistent across all three call sites — SessionAck, BatchAck, ServerHeartbeat — so a flapping peer can't multiply the WARN volume by trying alternate ack-bearing frame types):
+
+```go
+// clampAndApplyAck applies the spec-mandated ack-watermark clamp and
+// updates t.ackedSequence/t.ackedGeneration. Called by the recv
+// multiplexer's BatchAck and ServerHeartbeat handlers AND by the
+// SessionAck handler in state_connecting.go (Task 15.1). Anomalous
+// `serverHW > local` cases are LOGGED via t.ackAnomalyLimiter and the
+// local watermark is preserved (spec design.md:601).
+func (t *Transport) clampAndApplyAck(serverHW uint64, gen uint32) {
+    local := t.ackedSequence
+    switch {
+    case local == 0:
+        t.ackedSequence = serverHW
+    case serverHW > local:
+        if t.ackAnomalyLimiter.Allow() {
+            slog.Warn("ack: anomalous server ack_high_watermark_seq exceeds local; using local",
+                slog.Uint64("server_hw", serverHW),
+                slog.Uint64("local_hw", local),
+                slog.String("session_id", t.opts.SessionID))
+        }
+    default:
+        t.ackedSequence = serverHW
+    }
+    t.ackedGeneration = gen
+}
+```
+
+The two recv-arm dispatches then become trivial:
+
+```go
+case *wtpv1.ServerMessage_BatchAck:
+    a := msg.GetBatchAck()
+    t.clampAndApplyAck(a.GetAckHighWatermarkSeq(), a.GetGeneration())
+    // ... downstream metrics / segment GC trigger ...
+case *wtpv1.ServerMessage_ServerHeartbeat:
+    h := msg.GetServerHeartbeat()
+    t.clampAndApplyAck(h.GetAckHighWatermarkSeq(), h.GetGeneration())
+    // ... liveness bookkeeping (reset stalled-stream timer) ...
+```
+
+Refactor Task 15.1's SessionAck handler to call into the same `clampAndApplyAck` so the three sites stay in lock-step.
+
+Unit tests (mirror Task 15.1's pair, this time exercising the recv-side handlers via the recv-channel injection seam introduced earlier in Task 17):
+
+- `TestRecvMultiplexer_BatchAckClampsServerHWBelowLocal`: pre-seed `t.ackedSequence = 10`, inject a `*wtpv1.ServerMessage_BatchAck` with `ack_high_watermark_seq = 5`. Assert `t.ackedSequence == 5` post-handler, no WARN log.
+- `TestRecvMultiplexer_BatchAckIgnoresAnomalousHigherServerHW`: pre-seed `t.ackedSequence = 10`, inject BatchAck with `ack_high_watermark_seq = 20`. Assert `t.ackedSequence == 10`, exactly one WARN log emitted (with `server_hw=20`, `local_hw=10`).
+- `TestRecvMultiplexer_ServerHeartbeatClampsServerHWBelowLocal`: same as above for ServerHeartbeat.
+- `TestRecvMultiplexer_ServerHeartbeatIgnoresAnomalousHigherServerHW`: same as above for ServerHeartbeat.
+
+Step ordering for sub-step 17.X (mirrors the Task 15.1 step shape):
+
+- [ ] **Sub-step 17.X.1:** Write the four failing tests above against the recv-channel injection seam.
+- [ ] **Sub-step 17.X.2:** Run tests to confirm they fail with the expected symbols (`Transport.clampAndApplyAck` undefined; recv handlers do not call into a clamp).
+- [ ] **Sub-step 17.X.3:** Add `clampAndApplyAck` to `transport.go`, refactor Task 15.1's SessionAck handler to call into it, wire the BatchAck/ServerHeartbeat recv arms.
+- [ ] **Sub-step 17.X.4:** Run tests + cross-compile.
+- [ ] **Sub-step 17.X.5:** Commit with message `fix(wtp/transport): clamp BatchAck/ServerHeartbeat ack watermarks via shared handler`.
+- [ ] **Sub-step 17.X.6:** Run `/roborev-design-review` and address findings.
+
+**Concurrency boundary for ack-watermark updates (single-owner invariant).** Transport is documented as single-goroutine-owned (`transport.go:76-77`). Once the recv multiplexer lands, the recv goroutine and the main state-machine goroutine BOTH reach for `t.ackedSequence` — the recv goroutine to update it on BatchAck/ServerHeartbeat/SessionAck, the state-machine goroutine to read it for replay/Live reader-start calculations. There are two ways to keep them safe:
+
+1. **Mutex around `t.ackedSequence`/`t.ackedGeneration`.** Simple but breaks the documented single-owner invariant — every state-handler read of `t.ackedSequence` (Replaying entry, Live entry) becomes a locked critical section, and any future state-machine goroutine code that does multi-field reads of Transport state has to remember to acquire the same mutex. The invariant becomes "single-owner except for these two fields, which require a mutex." That's the kind of subtle rule that breaks the next time someone adds a new ack-bearing field.
+2. **Typed events on a channel.** The recv goroutine sends typed events (e.g., `recvAck{seq uint64, gen uint32}`, `recvHeartbeat{seq uint64, gen uint32}`) over a buffered channel that the main state-machine goroutine selects on alongside its other inputs (ctx.Done, rdr.Notify, ticker, t.stopCh). The state-machine goroutine's event handler invokes `clampAndApplyAck` — which means the clamp logic runs on the main goroutine, the recv goroutine never touches `t.ackedSequence` directly, and the single-owner invariant is preserved without locks.
+
+**This task picks option 2 (typed events on a channel).** Rationale:
+
+- Preserves the single-owner invariant documented in `transport.go:76-77`.
+- The recv goroutine becomes a thin demuxer: typed-decode the inbound `*wtpv1.ServerMessage`, push a typed event onto the channel, return to recv. No business logic on the recv goroutine.
+- The clamp / WARN-rate-limit / metric-update logic lives on the main goroutine alongside the rest of the state-machine code, making it trivial to unit-test by injecting events directly onto the channel (no need for a recv-goroutine fixture).
+- The buffered-channel size becomes a tunable backpressure knob — recv backs off if the main goroutine is too slow, which is the desired behavior (we'd rather drop a heartbeat than block the recv goroutine).
+
+**Hard requirement for Tasks 17/18 implementers:** do NOT introduce a mutex on `t.ackedSequence`/`t.ackedGeneration`. The recv goroutine MUST send typed events; the main state-machine goroutine MUST be the only writer. Any patch that adds `sync.Mutex` to Transport for the ack-watermark fields is a regression against this contract.
+
+A new acceptance test `TestRun_ReadersUnregisterAcrossReconnect` is the leak regression guard for runLive's Reader lifecycle (see Task 22 acceptance-tests block below). It drives multiple reconnect cycles and asserts the WAL's registered-reader count never grows unboundedly — closing both `defer rdr.Close()` paths (success and error) and the StateReplaying explicit-Close path.
 
 - [ ] **Step 4 (validator-classifier prerequisite for Step 4a): Extend validator boundary with typed reason classifier**
 
@@ -8095,14 +8280,27 @@ Add to `internal/store/watchtower/transport/transport.go`:
 // wal/reader.go nextLocked near the isLossMarker branch).
 //
 // `t.ackedSequence` is the Transport-level ack watermark; it is owned
-// by Transport (not by Conn) and is seeded by the SessionAck handler
-// in `state_connecting.go:59`. Once Tasks 17/18 land the recv
-// multiplexer it is also ADVANCED by `BatchAck` / `ServerHeartbeat`
-// handlers during Replaying and Live. The state handlers READ
-// `t.ackedSequence` for their reader-start calculations; they DO NOT
-// advance it. The spec's clamp rule
-// `min(server_returned_hw, local_ack_hw)` (spec line 601) is the
-// SessionAck/BatchAck handler's responsibility, not the state-handler's.
+// by Transport (not by Conn) and stores the EFFECTIVE (clamped) value
+// per spec §"Acknowledgement model" (design.md:601):
+// `min(server_returned_hw, local_ack_hw)`, with anomalous
+// `server > local` watermarks LOGGED + IGNORED. It is SEEDED from
+// SessionAck by the connecting handler (Task 15.1 wires the clamp into
+// `state_connecting.go`) and ADVANCED by `BatchAck` / `ServerHeartbeat`
+// handlers in the recv multiplexer that Tasks 17/18 introduce (Task 17
+// sub-step 17.X wires the same clamp into those handlers via the shared
+// `clampAndApplyAck` method). The state handlers READ `t.ackedSequence`
+// for their reader-start calculations; they DO NOT advance it and they
+// DO NOT re-clamp it — the clamp is the SessionAck/BatchAck/
+// ServerHeartbeat handler's responsibility, not the state-handler's.
+// SessionUpdate is NOT an acknowledgement (spec design.md:617) and
+// never advances `t.ackedSequence`.
+//
+// HARD DEPENDENCY: Task 22's StateReplaying / StateLive cases assume
+// `t.ackedSequence` stores the clamped value. Task 22 MUST NOT commit
+// its Run loop until BOTH Task 15.1 (SessionAck clamp) and Task 17
+// sub-step 17.X (BatchAck/ServerHeartbeat clamp) have landed. Without
+// the clamp wired upstream, an unclamped raw server value would silently
+// propagate into the reader-start calculation here.
 //
 // rep is hoisted to the outer Run scope and threaded across the
 // Replaying → Live boundary so Live can compute its start cursor from
@@ -8207,18 +8405,22 @@ func (t *Transport) Run(ctx context.Context, rdrFactory func(start uint64) (*wal
 			//      branch), so Live's Reader will surface them even
 			//      though its start cursor is past their covered range.
 			//
-			// `t.ackedSequence` is the Transport-level ack watermark.
-			// It is seeded from SessionAck by the connecting handler
-			// (state_connecting.go:59 — t.ackedSequence =
-			// ack.GetAckHighWatermarkSeq()) and ADVANCED during
-			// Replaying / Live by the BatchAck / ServerHeartbeat
-			// handlers in the recv multiplexer that Tasks 17/18
-			// introduce. The Replaying and Live cases READ
-			// t.ackedSequence for their reader-start calculations; they
-			// DO NOT advance it. The clamp rule from spec line 601
-			// (`min(server_returned_hw, local_ack_hw)`) is the
-			// SessionAck/BatchAck handler's responsibility, not the
-			// state-handler's.
+			// `t.ackedSequence` is the Transport-level ack watermark and
+			// stores the EFFECTIVE (clamped) value per spec design.md:601
+			// (`min(server_returned_hw, local_ack_hw)`, with anomalous
+			// `server > local` LOGGED + IGNORED). It is SEEDED from
+			// SessionAck by the connecting handler (Task 15.1 wires the
+			// clamp into `state_connecting.go`) and ADVANCED during
+			// Replaying / Live by the BatchAck / ServerHeartbeat handlers
+			// in the recv multiplexer that Tasks 17/18 introduce (Task 17
+			// sub-step 17.X wires the same clamp via the shared
+			// `clampAndApplyAck` method). The Replaying and Live cases
+			// READ t.ackedSequence for their reader-start calculations;
+			// they DO NOT advance it and they DO NOT re-clamp it — the
+			// clamp is the SessionAck/BatchAck/ServerHeartbeat handler's
+			// responsibility, not the state-handler's. SessionUpdate is
+			// NOT an acknowledgement (spec design.md:617) and never
+			// advances t.ackedSequence.
 			start := t.ackedSequence + 1
 			if rep != nil {
 				if cand := rep.LastReplayedSequence() + 1; cand > start {
@@ -8275,17 +8477,29 @@ The snippet above structurally depends on Tasks 17/18:
   in the "Task 16 — Deferred to Task 17/18" subsection.
 - The ack watermark consumed by both state cases is `t.ackedSequence`
   on the `Transport` struct (`internal/store/watchtower/transport/
-  transport.go:84`), which is ALREADY seeded by the Connecting handler
-  from `SessionAck` (`state_connecting.go:59`). Tasks 17/18 ADVANCE
-  this field from the recv multiplexer (BatchAck / ServerHeartbeat
-  handlers); the state-handler cases here READ but do not write it.
-  The spec's `min(server_returned_hw, local_ack_hw)` clamp (spec line
-  601) belongs to the SessionAck / BatchAck handlers, not to the
-  state-handler cases. No accessor on `Conn` is required — `Conn`'s
-  surface stays Send/Recv/CloseSend/Close (`conn.go:34`).
+  transport.go:84`), which stores the EFFECTIVE (clamped) value per
+  spec design.md:601 (`min(server_returned_hw, local_ack_hw)`, with
+  anomalous `server > local` LOGGED + IGNORED). It is SEEDED by the
+  Connecting handler from `SessionAck` (Task 15.1 wires the clamp
+  there) and ADVANCED by Tasks 17/18 from the recv multiplexer
+  (BatchAck / ServerHeartbeat handlers — Task 17 sub-step 17.X wires
+  the same clamp via the shared `clampAndApplyAck` method). The
+  state-handler cases here READ but do not write it, and they do NOT
+  re-clamp — the clamp lives in the SessionAck / BatchAck /
+  ServerHeartbeat handlers, not the state-handler cases. SessionUpdate
+  is NOT an acknowledgement (spec design.md:617) and never advances
+  the field. No accessor on `Conn` is required — `Conn`'s surface
+  stays Send/Recv/CloseSend/Close (`conn.go:34`).
 
-Four acceptance tests in `internal/store/watchtower/transport/transport_run_test.go`
-exercise the Replaying → Live handoff:
+  HARD DEPENDENCY: Task 22 MUST NOT commit its Run loop until BOTH
+  Task 15.1 (SessionAck clamp) and Task 17 sub-step 17.X (BatchAck/
+  ServerHeartbeat clamp) have landed. Without the clamp wired
+  upstream, an unclamped raw server value would silently propagate
+  into the reader-start calculation here.
+
+Acceptance tests in `internal/store/watchtower/transport/transport_run_test.go`
+exercise the Replaying → Live handoff and the round-5 clamp / Reader-
+lifecycle invariants:
 
 - `TestRun_LiveResumesPastReplayBoundary` — verifies Live does not
   re-emit the boundary record. Setup: WAL with records seq 1..10,
@@ -8342,6 +8556,71 @@ exercise the Replaying → Live handoff:
   advancement DURING replay; without it, a future refactor that reads
   `ackHW` only at Replaying entry (not at Live entry) would silently
   re-send replay-era records on long replays.
+- `TestRun_NonZeroAckPopulatedViaSessionAckSkipsAlreadyAckedHistory` —
+  the round-5 sibling of `TestRun_NonZeroAckSkipsAlreadyAckedHistory`
+  that closes the "test bypasses real handler path" gap. Setup:
+  REQUIRES Task 21 testserver fixture (or equivalent fakeConn dialer
+  that can be programmed to respond to SessionInit with a typed
+  SessionAck); if the fixture has not landed yet, gate the test with
+  `t.Skip("requires Task 21 testserver fixture for SessionAck
+  programming")`. WAL has records seqs 1..20 already on disk before
+  `Run` is called. Drive the dialer to respond to SessionInit with a
+  SessionAck carrying `ack_high_watermark_seq = 10, accepted = true`.
+  DO NOT pre-seed `t.ackedSequence` — the test exercises the SessionAck
+  HANDLER's clamp + assignment, not its CONSUMPTION. Assert: after Run
+  progresses through Connecting → Replaying, `t.ackedSequence == 10`
+  (set by the handler), the replay reader was opened at `start=11`
+  (i.e. `t.ackedSequence + 1`), and no record with `seq <= 10`
+  surfaces in any `EventBatch`. This test catches a regression where
+  a future SessionAck handler change drops the watermark on the floor
+  or fails to clamp properly — the existing
+  `TestRun_NonZeroAckSkipsAlreadyAckedHistory` would still pass in
+  that case because it pre-seeds the field directly.
+- `TestRun_StaleLowerServerHWWinsOverLocal` (gated on Task 15.1
+  landing) — verifies the gradual-rollout / partition-recovery branch
+  of spec design.md:601: when the server returns a LOWER ack
+  high-watermark than the client's local value, the lower (server)
+  value wins so the client re-sends unacked records rather than
+  dropping the gap. Setup: pre-seed `t.ackedSequence = 10` (simulate
+  a prior session's acked state preserved across reconnect — the
+  Transport struct is reused across reconnect cycles). Drive the
+  dialer to respond to SessionInit with a SessionAck carrying
+  `ack_high_watermark_seq = 5`. Assert: post-handler,
+  `t.ackedSequence == 5` (server wins because it is lower); replay
+  reader opens at `start=6`. The cross-reference for "WHY local-loses
+  here" is spec design.md:601 — gradual rollout / partition recovery.
+- `TestRun_AnomalousHigherServerHWLogsAndKeepsLocal` (gated on Task
+  15.1 landing) — verifies the anomalous-server branch of spec
+  design.md:601: when the server returns a HIGHER ack high-watermark
+  than the client's local value, the LOCAL value wins (the server
+  claim is anomalous and is logged + ignored). Setup: pre-seed
+  `t.ackedSequence = 10`, drive SessionAck with
+  `ack_high_watermark_seq = 20`, inject a permissive
+  `*rate.Limiter` and a `slog.Logger` capture buffer. Assert:
+  post-handler, `t.ackedSequence == 10` (LOCAL wins per spec
+  design.md:601 — "A higher-than-local server watermark is anomalous
+  and is logged + ignored — we replay from `local_ack_hw + 1`");
+  exactly one WARN log is emitted via the rate-limited path with
+  `server_hw=20` and `local_hw=10` fields; replay reader opens at
+  `start=11` (i.e. `t.ackedSequence + 1` using the LOCAL value). The
+  cross-reference for "WHY local-wins here" is spec design.md:601 —
+  anomalous server claim, log + ignore.
+- `TestRun_ReadersUnregisterAcrossReconnect` — leak regression guard
+  for runLive's Reader lifecycle (Finding 4). Drive multiple reconnect
+  cycles (Connecting → Replaying → Live → stream error → Connecting
+  → Replaying → Live → ...) by injecting send errors on the fakeConn
+  after each Live entry. After N cycles (N=3 is sufficient), assert
+  that the WAL's count of registered Readers is 0 between cycles AND
+  never grows unboundedly across cycles. The test depends on a
+  `len(w.readers)` accessor on `*wal.WAL` for inspection — if the
+  accessor does not exist, this test step requires adding a small
+  `func (w *WAL) NumRegisteredReaders() int { w.mu.Lock(); defer
+  w.mu.Unlock(); return len(w.readers) }` accessor (or a `_test`
+  build-tagged variant). The expected count is 0 between cycles
+  because (a) StateReplaying explicitly Closes its replay reader on
+  every exit path, and (b) StateLive's `runLive` `defer rdr.Close()`
+  unregisters its Live reader on every exit path. A non-zero count
+  between cycles is the leak Finding 4 names.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
