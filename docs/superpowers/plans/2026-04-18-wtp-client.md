@@ -7628,6 +7628,7 @@ import (
 	"github.com/agentsh/agentsh/internal/audit"
 	"github.com/agentsh/agentsh/internal/store/watchtower"
 	"github.com/agentsh/agentsh/internal/store/watchtower/compact"
+	"github.com/agentsh/agentsh/pkg/types"
 )
 
 // testHMACKey is a fixed 32-byte HMAC key used across watchtower tests.
@@ -7732,7 +7733,10 @@ func TestNew_RejectsUntypedNilMapper(t *testing.T) {
 // `var m *compact.StubMapper; opts.Mapper = m`. The interface value's
 // dynamic type is non-nil so `o.Mapper == nil` returns false; the reflect
 // check catches it. Without this branch a typed-nil non-stub pointer would
-// slip past validate() and panic on the first AppendEvent call.
+// slip past validate() and panic on the first AppendEvent call. This test
+// is the regression guard against narrowing the rejection to IsStubMapper
+// only — see also TestNew_RejectsTypedNilNonStubMapper which proves the
+// broader invariant that any typed-nil mapper is rejected.
 func TestNew_RejectsTypedNilMapper(t *testing.T) {
 	dir := t.TempDir()
 	allocator := audit.NewSequenceAllocator(0, 0)
@@ -7749,6 +7753,46 @@ func TestNew_RejectsTypedNilMapper(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "mapper is required") {
 		t.Fatalf("expected 'mapper is required' (typed-nil) error, got: %v", err)
+	}
+}
+
+// fakeMapper is a non-stub Mapper used only to prove the typed-nil
+// rejection branch fires for arbitrary Mapper implementations, not just
+// the stub. The pointer is intentionally left nil — Map() would panic
+// if it were ever called.
+type fakeMapper struct{}
+
+func (*fakeMapper) Map(types.Event) (compact.MappedEvent, error) {
+	panic("must not be called — validate() should reject the typed-nil before any Map invocation")
+}
+
+// TestNew_RejectsTypedNilNonStubMapper locks in the generic invariant
+// behind the reflect typed-nil branch: any typed-nil mapper is rejected,
+// not just the stub. The companion TestNew_RejectsTypedNilMapper proves
+// the branch fires for the stub-typed-nil case (a regression guard if
+// someone narrows the rejection to IsStubMapper only); this test proves
+// it fires for an arbitrary non-stub Mapper implementation. Both tests
+// are needed — the stub-only test alone would not catch a regression
+// that re-narrowed the reflect kind switch back to Ptr-only or removed
+// it entirely while leaving IsStubMapper in place.
+func TestNew_RejectsTypedNilNonStubMapper(t *testing.T) {
+	dir := t.TempDir()
+	allocator := audit.NewSequenceAllocator(0, 0)
+	var m *fakeMapper // nil pointer, but typed
+	_, err := watchtower.New(context.Background(), watchtower.Options{
+		WALDir:          dir,
+		Mapper:          m, // wrap typed-nil into the Mapper interface
+		Allocator:       allocator,
+		AgentID:         "a", SessionID: "s",
+		HMACKeyID:       "k1",
+		HMACSecret:      testHMACKey(),
+		BatchMaxRecords: 1, BatchMaxBytes: 4096, BatchMaxAge: time.Second,
+	})
+	if err == nil {
+		t.Fatal("expected typed-nil rejection, got nil error")
+	}
+	if !strings.Contains(err.Error(), "mapper") {
+		t.Errorf("error must mention mapper: %v", err)
 	}
 }
 ```
@@ -7881,16 +7925,21 @@ func (o *Options) validate() error {
 	}
 	// Mapper rejection has three branches that MUST run in this order:
 	//   (1) untyped nil — `o.Mapper == nil` catches the zero interface value.
-	//   (2) typed-nil pointer — a caller writing
+	//   (2) typed-nil — a caller writing
 	//       `var m *compact.StubMapper; opts.Mapper = m` produces an interface
 	//       value with non-nil type and nil dynamic value. `o.Mapper == nil`
-	//       returns false, so we use reflect to detect it. This must run
-	//       BEFORE IsStubMapper so the error message points the caller at the
-	//       real bug (a nil mapper) rather than the secondary issue (the stub
-	//       type). Without this branch the stub-rejection in (3) would still
-	//       fire for *StubMapper(nil), but a non-stub typed-nil pointer
-	//       (e.g. (*FakeMapper)(nil) in a test) would slip through and panic
-	//       on the first AppendEvent.
+	//       returns false, so we use reflect to detect it. The switch covers
+	//       every nilable Go kind that can satisfy the compact.Mapper
+	//       interface — pointer, map, slice, channel, func, and interface —
+	//       because Mapper is a public interface and alternate
+	//       implementations are not restricted to pointer kinds (e.g.
+	//       MapBackedMapper map[string]MappedEvent, a named func type, etc.).
+	//       This branch must run BEFORE IsStubMapper so the error message
+	//       points the caller at the real bug (a nil mapper) rather than
+	//       the secondary issue (the stub type). Without this branch the
+	//       stub-rejection in (3) would still fire for *StubMapper(nil), but
+	//       a non-stub typed-nil mapper (e.g. (*FakeMapper)(nil) in a test)
+	//       would slip through and panic on the first AppendEvent.
 	//   (3) test-only StubMapper — compact.IsStubMapper matches both value
 	//       and pointer forms (StubMapper{}, *StubMapper, and the typed-nil
 	//       *StubMapper case redundantly covered by (2)). Gated by
@@ -7898,8 +7947,12 @@ func (o *Options) validate() error {
 	if o.Mapper == nil {
 		return errors.New("watchtower: mapper is required")
 	}
-	if rv := reflect.ValueOf(o.Mapper); rv.Kind() == reflect.Ptr && rv.IsNil() {
-		return errors.New("watchtower: mapper is required (got typed-nil pointer)")
+	rv := reflect.ValueOf(o.Mapper)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func, reflect.Interface:
+		if rv.IsNil() {
+			return errors.New("watchtower: mapper is required (got typed-nil)")
+		}
 	}
 	if !o.AllowStubMapper && compact.IsStubMapper(o.Mapper) {
 		return errors.New("watchtower: test-only StubMapper not permitted in production (set AllowStubMapper for tests)")
