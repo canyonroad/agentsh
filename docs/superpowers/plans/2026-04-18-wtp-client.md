@@ -12248,15 +12248,21 @@ error per spec §"Migration guidance: removed
     signal for propagated `compact.ErrMissingChain` is the
     ERROR-severity structured log entry emitted by `AppendEvent`
     (clause (a) of the caller contract). Replace the metric-based
-    alert with a log-based alert/SLO that matches the structured log
-    fields `{event_id, session_id, event_type, err}` where `err` is
-    the exact sentinel string
+    alert with a log-based alert/SLO whose canonical trigger is the
+    sentinel `err` value
     `"compact.Encode: ev.Chain is nil; composite did not stamp"`
-    (the value of `compact.ErrMissingChain.Error()`) in the operator's
-    log-aggregation stack (Loki / Splunk / Elastic / Datadog Logs /
-    etc.). The Go identifier `compact.ErrMissingChain` is NOT a valid
-    log query predicate — log-aggregation systems match the rendered
-    string value, not the source-code symbol. The row's
+    (the value of `compact.ErrMissingChain.Error()`), expressed
+    using the selector shape required by the host log-aggregation
+    system's Step 1b `field_preservation` classification (see the
+    classification matrix below). The `AppendEvent` log line carries
+    the field set `{event_id, session_id, event_type, err}` per
+    clause (a), but the auxiliary fields (`event_id`, `session_id`,
+    `event_type`) play a DIAGNOSTIC role — they give the on-call
+    engineer per-event context after the alert fires; they are NOT
+    required components of the alert-trigger predicate. The Go
+    identifier `compact.ErrMissingChain` is NOT a valid log query
+    predicate — log-aggregation systems match the rendered string
+    value, not the source-code symbol. The row's
     `replacement_selector_or_query` cell MUST contain a query that
     selects on this exact string. The exact selector shape depends on
     the host system's Step 1b `field_preservation` classification:
@@ -12405,12 +12411,20 @@ with stale rules, duplicate coverage, or alert gaps after Step 2's
 log-based-alert decisions are merged.
 
   - **Keep (no change required)**: the pre-existing log artifact
-    already matches the new structured-log fields
-    `{event_id, session_id, event_type, err}` with `err` containing
-    the exact sentinel string
-    `"compact.Encode: ev.Chain is nil; composite did not stamp"`
-    AND the Step 1b field-preservation verification confirmed the
-    artifact's log-aggregation system preserves the relevant fields.
+    already targets the missing-chain signal — the canonical trigger
+    is the sentinel `err` value
+    `"compact.Encode: ev.Chain is nil; composite did not stamp"`,
+    expressed using the selector shape required by the host
+    log-aggregation system's Step 1b `field_preservation`
+    classification (per Step 2's log-based-alert option). The
+    `AppendEvent` log line carries the field set
+    `{event_id, session_id, event_type, err}` per clause (a), but the
+    auxiliary fields play a DIAGNOSTIC role — they are NOT required
+    components of the alert-trigger predicate. The pre-existing
+    artifact may bind those fields as additional predicates or as
+    diagnostic-context labels under `field_preservation: ok`, but
+    under `err-only` or `msg-only` the auxiliary fields are not
+    required-or-even-present alert predicates.
     Mark the row `migration_decision: keep-log-alert` AND populate
     BOTH the `host_system` cell (the host log-aggregation system) AND
     the `field_preservation_ref` cell (the Step 1b verification ID).
@@ -12537,9 +12551,9 @@ Once Steps 1a, 1, 1b, 2, 3, 3a, and 4 are complete (every row in the
 migration tracking artifact has a `migration_decision`, every
 log-aggregation system has a recorded field-preservation verification
 result, every PR / change request is MERGED AND APPLIED to the
-production monitoring AND log-aggregation environments, and every
-runbook URL is updated), open a tracking issue tagged
-`wtp-monitoring-migration: ready` and request sign-off from the
+production monitoring, log-aggregation, AND third-party hosting
+environments, and every runbook URL is updated), open a tracking issue
+tagged `wtp-monitoring-migration: ready` and request sign-off from the
 implementation team's preflight check.
 
 The implementation team's preflight (called out in spec §"Rollout
@@ -12660,7 +12674,10 @@ phasing → Rollout precondition") MUST verify:
          rejected.
        - All of the above MUST be live in the corresponding
          production environment (monitoring, log-aggregation, OR
-         third-party hosting).
+         third-party hosting). Third-party dashboard / hosting-system
+         updates are subject to the same merged-AND-deployed
+         standard as monitoring and log-aggregation: a merged-but-
+         undeployed change is INSUFFICIENT.
 
 The preflight check MAY be automated as a one-off CI grep run against
 the monitoring repos (scoped to the inventory declared in Step 1a);
@@ -12685,19 +12702,22 @@ and deployed to production monitoring AND log-aggregation environments.
   field is the per-stack runbook-pin equivalent of
   `annotations.runbook_url` (per Step 4).
 - Every migration PR / change request is **MERGED AND APPLIED to the
-  production monitoring AND log-aggregation environments** (Prometheus
-  rule files reloaded, Grafana panels updated and refreshed,
-  log-alert/SLO/saved-search definitions reloaded). A
-  queued-but-unmerged PR, or a merged-but-undeployed change, is
-  INSUFFICIENT.
+  production monitoring AND log-aggregation AND third-party hosting
+  environments** (Prometheus rule files reloaded, Grafana panels
+  updated and refreshed, log-alert/SLO/saved-search definitions
+  reloaded, AND third-party dashboard / hosting-system updates pushed
+  live so the new state is visible in the third-party UI). A
+  queued-but-unmerged PR, or a merged-but-undeployed change in any of
+  these environments, is INSUFFICIENT.
 - The implementation team SHALL NOT begin production code rollout
   (i.e. flipping `audit.watchtower.enabled: true` on a production
   fleet) until SRE/ops confirms Steps 1a, 1, 1b, 2, 3, 3a, and 4 are
-  complete AND the migration is LIVE in the production monitoring AND
-  log-aggregation environments (Prometheus rule files reloaded,
-  Grafana panels updated and refreshed, log-alert/SLO/saved-search
-  definitions reloaded), AND the preflight check has signed off in the
-  tracking issue.
+  complete AND the migration is LIVE in the production monitoring,
+  log-aggregation, AND third-party hosting environments (Prometheus
+  rule files reloaded, Grafana panels updated and refreshed,
+  log-alert/SLO/saved-search definitions reloaded, third-party
+  dashboard / hosting-system updates pushed live), AND the preflight
+  check has signed off in the tracking issue.
 - This task does NOT block earlier code tasks (Task 1 through
   Task 27 land independently). It blocks ONLY the production
   rollout flag flip.
